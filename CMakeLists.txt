@@ -64,6 +64,9 @@ add_subdirectory(src/audio)
 add_subdirectory(src/render)
 add_subdirectory(src/game)
 
+enable_testing()
+add_subdirectory(tests)
+
 if(Q2PSX_BUILD_TOOLS)
     add_subdirectory(tools/q2psx-inspect)
 endif()
