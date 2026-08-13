@@ -1,5 +1,6 @@
 #include "sim.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "trig.h"
@@ -31,6 +32,92 @@ void q2_sim_init(q2_sim *sim, const q2_world_zone *zone, int tick_rate_hz)
     sim->player.view_height = Q2_VIEW_STAND;
 }
 
+void q2_sim_free(q2_sim *sim)
+{
+    if (!sim)
+        return;
+    q2_event_rt_free(&sim->event_rt);
+    free(sim->trigger_inside);
+    memset(sim, 0, sizeof(*sim));
+}
+
+q2_result q2_sim_attach_gameplay(q2_sim *sim, const q2_common_file *common)
+{
+    if (!sim || !common)
+        return Q2_ERR_INVALID_ARG;
+
+    if (q2_triggers_parse(&sim->triggers, common) == Q2_OK) {
+        sim->triggers_ready = true;
+
+        free(sim->trigger_inside);
+        sim->trigger_capacity = sim->triggers.count;
+        sim->trigger_inside   = (u8 *)calloc(sim->trigger_capacity ? sim->trigger_capacity : 1, 1);
+        if (!sim->trigger_inside) {
+            sim->triggers_ready = false;
+            return Q2_ERR_NO_MEMORY;
+        }
+    }
+
+    if (q2_events_parse_common(&sim->events, common) == Q2_OK) {
+        if (q2_event_rt_init(&sim->event_rt, &sim->events) == Q2_OK)
+            sim->events_ready = true;
+    }
+
+    return Q2_OK;
+}
+
+bool q2_sim_take_zone_change(q2_sim *sim, u32 *out_zone)
+{
+    if (!sim || !sim->zone_change_pending)
+        return false;
+
+    if (out_zone)
+        *out_zone = sim->zone_change_target;
+
+    sim->zone_change_pending = false;
+    return true;
+}
+
+/*
+ * Fire any trigger the player has just ENTERED.
+ *
+ * Edge-triggered, not level-triggered: standing inside a volume must not run
+ * its script 25 times a second. The previous-inside bitmap is what makes that
+ * distinction, and it is why the trigger state has to persist across ticks.
+ */
+static void update_triggers(q2_sim *sim)
+{
+    u32 i;
+
+    if (!sim->triggers_ready || !sim->events_ready)
+        return;
+
+    for (i = 0; i < sim->triggers.count && i < sim->trigger_capacity; i++) {
+        bool inside = q2_trigger_contains(&sim->triggers, i, sim->player.pos);
+        bool was    = sim->trigger_inside[i] != 0;
+
+        sim->trigger_inside[i] = inside ? 1u : 0u;
+
+        if (!inside || was)
+            continue;
+
+        {
+            q2_trigger trig;
+            if (!q2_trigger_get(&sim->triggers, i, &trig))
+                continue;
+            if (trig.event_offset == Q2_TRIGGER_NO_EVENT)
+                continue;
+            q2_event_rt_trigger(&sim->event_rt, trig.event_offset);
+        }
+    }
+
+    if (q2_event_rt_update(&sim->event_rt) == Q2_EVENT_ZONE_CHANGE) {
+        sim->zone_change_pending = true;
+        sim->zone_change_target  = sim->event_rt.pending_zone;
+        sim->event_rt.has_zone_change = false;
+    }
+}
+
 void q2_sim_spawn(q2_sim *sim, const s32 pos[3], s32 yaw)
 {
     if (!sim || !pos)
@@ -53,6 +140,11 @@ void q2_sim_spawn(q2_sim *sim, const s32 pos[3], s32 yaw)
      * hull leaves current_node at -1, and the trace then lets the player move
      * freely rather than wedging them at the origin. */
     sim->current_node = find_node(sim, sim->player.pos, -1);
+
+    /* Clear the entered-set so a spawn inside a volume fires it, rather than
+     * being treated as "already inside". */
+    if (sim->trigger_inside && sim->trigger_capacity)
+        memset(sim->trigger_inside, 0, sim->trigger_capacity);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -315,6 +407,9 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
         if (p->view_height < target_view)
             p->view_height = target_view;
     }
+
+    /* After movement, so a trigger sees where the player actually ended up. */
+    update_triggers(sim);
 
     sim->tick_count++;
 }

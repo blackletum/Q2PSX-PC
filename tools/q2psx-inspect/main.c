@@ -1257,7 +1257,7 @@ static int cmd_walk(disc *d, const char *map, int zone_index, int ticks)
     char path[256];
     s32 feet[3] = { 0, 0, 0 };
     s32 start_y;
-    int i, grounded_at = -1, escaped = 0;
+    int i, grounded_at = -1, escaped = 0, zone_gates = 0;
     bool have_spawn = false;
 
     r = q2_world_load_zone(&zone, d, map, zone_index);
@@ -1289,6 +1289,29 @@ static int cmd_walk(disc *d, const char *map, int zone_index, int ticks)
     }
 
     q2_sim_init(&sim, &zone, 50);
+
+    /* Attach the map's triggers and script so the walk exercises gameplay, not
+     * just physics. */
+    {
+        q2_buf cbuf;
+        if (disc_read_file(d, path, &cbuf) == Q2_OK) {
+            q2_common_file cf2;
+            if (q2_common_open(&cf2, &cbuf) == Q2_OK) {
+                q2_sim_attach_gameplay(&sim, &cf2);
+                printf("  triggers      : %s, %u volumes\n",
+                       sim.triggers_ready ? "loaded" : "none",
+                       sim.triggers_ready ? sim.triggers.count : 0);
+                printf("  script        : %s, %u records\n",
+                       sim.events_ready ? "loaded" : "none",
+                       sim.events_ready ? sim.event_rt.record_count : 0);
+                /* The sim borrows these, so they must outlive it; leaked
+                 * deliberately for the duration of this one-shot command. */
+            } else {
+                q2_buf_free(&cbuf);
+            }
+        }
+    }
+
     q2_sim_spawn(&sim, feet, 0);
 
     printf("%s\n", zone.name);
@@ -1312,6 +1335,13 @@ static int cmd_walk(disc *d, const char *map, int zone_index, int ticks)
             grounded_at = i;
         if (sim.coll_ready && sim.current_node < 0)
             escaped++;
+        {
+            u32 zt;
+            if (q2_sim_take_zone_change(&sim, &zt)) {
+                printf("    tick %d: ZONE GATE fired -> zone %u\n", i, zt);
+                zone_gates++;
+            }
+        }
     }
 
     printf("  after %d ticks:\n", ticks);
@@ -1322,6 +1352,8 @@ static int cmd_walk(disc *d, const char *map, int zone_index, int ticks)
     printf("    fell        : %d world units\n", sim.player.pos[1] - start_y);
     printf("    final cell  : %d\n", sim.current_node);
     printf("    ticks outside any hull: %d\n", escaped);
+    printf("    events run  : %u\n", sim.events_ready ? sim.event_rt.ran_count : 0);
+    printf("    zone gates  : %d\n", zone_gates);
 
     q2_world_free_zone(&zone);
 

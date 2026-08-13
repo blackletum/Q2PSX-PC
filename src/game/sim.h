@@ -54,6 +54,8 @@
 #define Q2PSX_SIM_H
 
 #include "collision.h"
+#include "events_rt.h"
+#include "trigger.h"
 #include "q2psx.h"
 #include "worldscale.h"
 #include "world.h"
@@ -95,12 +97,42 @@ typedef struct q2_sim {
     bool         coll_ready;
     s32          current_node;  /* which cell the player is in, -1 if unknown */
 
+    /* Trigger volumes and the script they fire. Both are optional: a zone with
+     * neither still simulates, it just has no gameplay. */
+    q2_triggers  triggers;
+    bool         triggers_ready;
+    q2_events    events;
+    q2_event_rt  event_rt;
+    bool         events_ready;
+
+    /* Which triggers the player was inside last tick, so a volume fires on
+     * ENTRY rather than every tick while standing in it. One bit per trigger. */
+    u8          *trigger_inside;
+    u32          trigger_capacity;
+
+    /* Set when a zone gate fires; the caller performs the load. */
+    bool         zone_change_pending;
+    u32          zone_change_target;
+
     s32  dt_accum;      /* leftover dt units not yet consumed by a tick       */
     u32  tick_count;
     s32  dt_per_field;  /* 6 on PAL, 5 on NTSC — the build's field rate       */
 } q2_sim;
 
 void q2_sim_init(q2_sim *sim, const q2_world_zone *zone, int tick_rate_hz);
+void q2_sim_free(q2_sim *sim);
+
+/*
+ * Attach the map's trigger volumes and event script.
+ *
+ * Separate from init because these live in COMMON.DAT, which is per MAP, while
+ * the zone geometry is per ZONE. Optional: a sim without them still runs, it
+ * just has no gameplay.
+ */
+q2_result q2_sim_attach_gameplay(q2_sim *sim, const q2_common_file *common);
+
+/* Consume a pending zone change, if any. Returns false when none is queued. */
+bool q2_sim_take_zone_change(q2_sim *sim, u32 *out_zone);
 
 /* Place the player, e.g. at a StartPos. */
 void q2_sim_spawn(q2_sim *sim, const s32 pos[3], s32 yaw);
