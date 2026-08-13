@@ -4,13 +4,23 @@
 
 #include "trig.h"
 
+/* Defined below, but needed by init and spawn. */
+static s32 find_node(const q2_sim *sim, const s32 point[3], s32 hint);
+
 void q2_sim_init(q2_sim *sim, const q2_world_zone *zone, int tick_rate_hz)
 {
     if (!sim)
         return;
 
     memset(sim, 0, sizeof(*sim));
-    sim->zone = zone;
+    sim->zone         = zone;
+    sim->current_node = -1;
+
+    /* The primary hull is the one the player moves in. SecondaryCol is NOT
+     * reliably a finer version of it (it has fewer nodes on 9 of 115 zones), so
+     * it is deliberately not used as a fallback. */
+    if (zone && q2_collision_parse(&sim->coll, &zone->zone, Q2_COLL_PRIMARY) == Q2_OK)
+        sim->coll_ready = true;
 
     /* dt advances by 300/field_rate per field. PAL fields run at 50 Hz giving
      * 6, NTSC at 60 giving 5. The engine's own PAL value is 6 (0x80018DB8). */
@@ -38,37 +48,124 @@ void q2_sim_spawn(q2_sim *sim, const s32 pos[3], s32 yaw)
     sim->player.crouching   = false;
     sim->player.view_height = Q2_VIEW_STAND;
     sim->player.ground_y    = pos[1];
+
+    /* Locate the cell we spawned into. A spawn point that lands outside every
+     * hull leaves current_node at -1, and the trace then lets the player move
+     * freely rather than wedging them at the origin. */
+    sim->current_node = find_node(sim, sim->player.pos, -1);
 }
 
 /* ------------------------------------------------------------------------- */
 /* Collision seam                                                             */
 /* ------------------------------------------------------------------------- */
+/* Which convex cell contains `point`, or -1. Searches from `hint` outward,
+ * because the player is nearly always still in the cell they were in. */
+static s32 find_node(const q2_sim *sim, const s32 point[3], s32 hint)
+{
+    u32 i;
+
+    if (!sim->coll_ready)
+        return -1;
+
+    if (hint >= 0 && (u32)hint < sim->coll.node_count &&
+        q2_collision_point_in_node(&sim->coll, (u32)hint, point))
+        return hint;
+
+    for (i = 0; i < sim->coll.node_count; i++) {
+        if (q2_collision_point_in_node(&sim->coll, i, point))
+            return (s32)i;
+    }
+    return -1;
+}
+
 void q2_sim_trace(const q2_sim *sim, const s32 start[3], const s32 end[3],
                   q2_trace *out)
 {
+    q2_coll_node here, next;
+    s32 node;
+    s32 best_frac = Q2_ONE_12;
+    s32 best_plane = -1;
+    u32 k;
+
     if (!out)
         return;
 
     memset(out, 0, sizeof(*out));
     out->fraction = Q2_ONE_12;
 
-    if (!start || !end)
+    if (!sim || !start || !end)
         return;
 
     out->end[0] = end[0];
     out->end[1] = end[1];
     out->end[2] = end[2];
 
+    node = sim->current_node;
+    if (node < 0 || !sim->coll_ready)
+        return;             /* no cell known — move freely rather than wedge */
+
+    if (!q2_collision_get_node(&sim->coll, (u32)node, &here) ||
+        !q2_collision_get_node(&sim->coll, (u32)node + 1, &next))
+        return;
+
     /*
-     * PLACEHOLDER. Real hull tracing waits on the collision plane point
-     * encoding, which is only 95.6% confirmed — building player movement on a
-     * reading we cannot vouch for would produce a game that mostly works and
-     * occasionally walks through walls, which is worse than one that obviously
-     * does not collide yet.
-     *
-     * Everything above this line is the real interface; only the body changes.
+     * The cell is empty space bounded by outward-facing planes, so the move is
+     * clipped where it would cross one from inside to outside. Distances come
+     * back scaled by 4096 (the normals are 1.3.12), and the ratio is taken in
+     * that same scale so no divide is needed until the very end.
      */
-    (void)sim;
+    for (k = here.first_plane; k < next.first_plane; k++) {
+        s32 d0 = q2_coll_plane_distance(&sim->coll, (u32)node, k, start);
+        s32 d1 = q2_coll_plane_distance(&sim->coll, (u32)node, k, end);
+        s32 frac;
+
+        if (d0 >= 0)
+            continue;       /* already outside this plane — see the note below */
+        if (d1 <= 0)
+            continue;       /* stays inside, nothing to clip */
+
+        /* Crosses from inside to outside: the fraction where it hits zero. */
+        {
+            s64 denom = (s64)d0 - (s64)d1;
+            if (denom == 0)
+                continue;
+            frac = (s32)(((s64)d0 * Q2_ONE_12) / denom);
+        }
+
+        if (frac < 0)
+            frac = 0;
+        if (frac < best_frac) {
+            best_frac  = frac;
+            best_plane = (s32)k;
+        }
+    }
+
+    /*
+     * Starting outside a plane is not treated as a collision. With 0.15% of
+     * planes geometrically inconsistent, and the player able to stand exactly
+     * on a boundary, refusing to move whenever d0 >= 0 would wedge them
+     * permanently. Ignoring those planes lets the move proceed and the next
+     * tick re-resolve, which degrades gracefully instead of locking up.
+     */
+
+    if (best_plane < 0)
+        return;
+
+    out->fraction = best_frac;
+    out->hit      = true;
+
+    out->end[0] = start[0] + (s32)(((s64)(end[0] - start[0]) * best_frac) >> Q2_FRAC_12);
+    out->end[1] = start[1] + (s32)(((s64)(end[1] - start[1]) * best_frac) >> Q2_FRAC_12);
+    out->end[2] = start[2] + (s32)(((s64)(end[2] - start[2]) * best_frac) >> Q2_FRAC_12);
+
+    {
+        q2_coll_plane pl;
+        if (q2_collision_get_plane(&sim->coll, (u32)best_plane, &pl)) {
+            out->normal[0] = pl.nx;
+            out->normal[1] = pl.ny;
+            out->normal[2] = pl.nz;
+        }
+    }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -126,24 +223,77 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
         p->vel[2] -= p->vel[2] / 4;
     }
 
-    /* --- integrate ------------------------------------------------------- */
+    /* --- integrate and collide ------------------------------------------- */
     {
         s32 want[3];
         q2_trace tr;
+        int attempt;
 
         want[0] = p->pos[0] + (s32)(((s64)p->vel[0] * dt) / Q2_VEL_DIV);
         want[1] = p->pos[1] + (s32)(((s64)p->vel[1] * dt) / Q2_VEL_DIV);
         want[2] = p->pos[2] + (s32)(((s64)p->vel[2] * dt) / Q2_VEL_DIV);
 
-        q2_sim_trace(sim, p->pos, want, &tr);
+        p->on_ground = false;
 
-        p->pos[0] = tr.end[0];
-        p->pos[1] = tr.end[1];
-        p->pos[2] = tr.end[2];
+        /*
+         * Clip, slide along whatever was hit, and try again. Three attempts is
+         * enough to resolve a corner (two walls plus the floor) and bounds the
+         * work when the player is jammed into a crevice.
+         */
+        for (attempt = 0; attempt < 3; attempt++) {
+            q2_sim_trace(sim, p->pos, want, &tr);
 
-        /* Ground test against the placeholder plane. World Y increases
-         * downward on this disc, so "below the ground" is a larger Y. */
-        if (p->pos[1] >= p->ground_y) {
+            p->pos[0] = tr.end[0];
+            p->pos[1] = tr.end[1];
+            p->pos[2] = tr.end[2];
+
+            if (!tr.hit)
+                break;
+
+            /*
+             * Ground detection.
+             *
+             * Cell planes face OUTWARD, so the interior is on their negative
+             * side. Gravity increases Y, so the surface a falling player lands
+             * on bounds the cell in the +Y direction — and its outward normal
+             * therefore points +Y, not -Y.
+             *
+             * This was inverted at first, which made collision look completely
+             * broken (the player was correctly stopped by the floor every tick
+             * but never registered as grounded, so gravity kept accumulating).
+             * Verified against BASE1 node 161, an axis-aligned box whose six
+             * planes are exactly +/-4096 on each axis.
+             */
+            if (tr.normal[1] > Q2_ONE_12 / 2) {
+                p->on_ground = true;
+                p->vel[1]    = 0;
+            }
+
+            /* Slide: remove the velocity component running into the plane, and
+             * do the same to the remaining move so the next attempt continues
+             * along the surface instead of re-hitting it. */
+            {
+                s64 vd = ((s64)p->vel[0] * tr.normal[0]
+                        + (s64)p->vel[1] * tr.normal[1]
+                        + (s64)p->vel[2] * tr.normal[2]) >> Q2_FRAC_12;
+                s64 md = ((s64)(want[0] - p->pos[0]) * tr.normal[0]
+                        + (s64)(want[1] - p->pos[1]) * tr.normal[1]
+                        + (s64)(want[2] - p->pos[2]) * tr.normal[2]) >> Q2_FRAC_12;
+                int j;
+
+                for (j = 0; j < 3; j++) {
+                    p->vel[j] -= (s32)((vd * tr.normal[j]) >> Q2_FRAC_12);
+                    want[j]   -= (s32)((md * tr.normal[j]) >> Q2_FRAC_12);
+                }
+            }
+        }
+
+        /* Moving between cells is normal; re-locate rather than assuming. */
+        sim->current_node = find_node(sim, p->pos, sim->current_node);
+
+        /* Without collision data, fall back to the seeded ground plane so the
+         * player does not drop forever in a zone whose hull failed to parse. */
+        if (!sim->coll_ready && p->pos[1] >= p->ground_y) {
             p->pos[1]    = p->ground_y;
             p->vel[1]    = 0;
             p->on_ground = true;

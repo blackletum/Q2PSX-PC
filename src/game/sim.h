@@ -32,21 +32,28 @@
  * anywhere: the original had no FPU, and its rounding is part of how it feels.
  *
  * ---------------------------------------------------------------------------
+ * Collision
+ * ---------------------------------------------------------------------------
+ * Movement is resolved against the zone's real convex hulls. The plane encoding
+ * is confirmed at 99.84% by the convexity test described in collision.h, which
+ * is good enough to move a player with — and the 0.15% of inconsistent planes
+ * are handled defensively rather than treated as a reason to distrust the data.
+ *
+ * The hulls are EMPTY convex cells, not solid blockers: the player is inside a
+ * node and a move that would leave it is clipped. That is the sector model the
+ * portal graph in AreaConx implies, and it is why the trace looks for the node
+ * containing the player rather than sweeping against everything.
+ *
+ * ---------------------------------------------------------------------------
  * What this does NOT do yet
  * ---------------------------------------------------------------------------
- * Collision response is deliberately minimal. The collision plane POINT encoding
- * is only 95.6% confirmed (see collision.h), so resolving movement against real
- * hulls would build player physics on a reading we cannot vouch for. Until that
- * reaches 100%, the simulation integrates and applies a ground plane, and
- * `q2_sim_trace` is the single seam where real collision drops in.
- *
- * Monsters, weapons, damage and pickups are not here either. The Events opcode
- * payloads are still undecoded, so triggers cannot fire, and CastList animation
- * data is not read yet.
+ * Monsters, weapons, damage and pickups. The Events opcode payloads are still
+ * undecoded so triggers cannot fire, and CastList animation data is unread.
  */
 #ifndef Q2PSX_SIM_H
 #define Q2PSX_SIM_H
 
+#include "collision.h"
 #include "q2psx.h"
 #include "worldscale.h"
 #include "world.h"
@@ -84,6 +91,10 @@ typedef struct q2_sim {
     const q2_world_zone *zone;
     q2_player            player;
 
+    q2_collision coll;          /* the zone's primary hull                   */
+    bool         coll_ready;
+    s32          current_node;  /* which cell the player is in, -1 if unknown */
+
     s32  dt_accum;      /* leftover dt units not yet consumed by a tick       */
     u32  tick_count;
     s32  dt_per_field;  /* 6 on PAL, 5 on NTSC — the build's field rate       */
@@ -110,14 +121,11 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt);
 void q2_sim_eye(const q2_sim *sim, s32 out_pos[3]);
 
 /* ------------------------------------------------------------------------- */
-/* Collision seam                                                             */
+/* Collision                                                                  */
 /*                                                                            */
-/* The single place real hull collision will attach. Returns the fraction of   */
-/* the move that was possible, in 1.0.12 fixed point (4096 == unobstructed),  */
-/* and writes the surface normal when something was hit.                      */
-/*                                                                            */
-/* The current implementation is a flat ground plane. It is honest about being */
-/* a placeholder rather than pretending to trace geometry.                     */
+/* Clips a move against the convex cell the player occupies. `fraction` is     */
+/* 1.0.12 — 4096 means the whole move succeeded — and `normal` is the plane    */
+/* that stopped it, valid only when something was hit.                        */
 /* ------------------------------------------------------------------------- */
 typedef struct q2_trace {
     s32  fraction;      /* 1.0.12: 4096 means the whole move succeeded */

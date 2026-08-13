@@ -16,6 +16,7 @@
 #include "points.h"
 #include "raster.h"
 #include "scene.h"
+#include "sim.h"
 #include "vram.h"
 #include "world.h"
 #include "trig.h"
@@ -48,6 +49,7 @@ static void usage(void)
     puts("  dats    <disc>              census every .DAT chunk schema on the disc");
     puts("  verify  <disc>              check every level file against the typed schema");
     puts("  audio   <disc>              decode every sound bank and validate it");
+    puts("  walk    <disc> <map> [z] [ticks]  drop a player in and simulate");
     puts("  textures <disc>             decode every compressed VRAM image");
     puts("  music   <disc>              demultiplex and decode the XA music streams");
     puts("  render  <disc> <map> [z] [out.ppm] [yaw] [pitch]  render a zone (4096 = full turn)");
@@ -1205,6 +1207,100 @@ static int cmd_textures(disc *d)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * Drop a player into a real zone and simulate.
+ *
+ * The unit tests drive the simulation with no zone attached, so they never
+ * touch collision. This is the check that it works on actual geometry: does the
+ * spawn point land inside a convex cell, does the player come to rest instead of
+ * falling forever, and do they stay inside the hull while walking.
+ */
+static int cmd_walk(disc *d, const char *map, int zone_index, int ticks)
+{
+    q2_world_zone zone;
+    q2_sim sim;
+    q2_input in;
+    q2_result r;
+    q2_start_pos_list spawns;
+    q2_common_file common;
+    q2_buf buf;
+    char path[256];
+    s32 feet[3] = { 0, 0, 0 };
+    s32 start_y;
+    int i, grounded_at = -1, escaped = 0;
+    bool have_spawn = false;
+
+    r = q2_world_load_zone(&zone, d, map, zone_index);
+    if (r != Q2_OK) {
+        fprintf(stderr, "cannot load %s zone %d: %s\n", map, zone_index, q2_result_str(r));
+        return 1;
+    }
+
+    snprintf(path, sizeof(path), "Q2DATA/LEVELS/%s/COMMON.DAT", map);
+    if (disc_read_file(d, path, &buf) == Q2_OK) {
+        if (q2_common_open(&common, &buf) == Q2_OK) {
+            if (q2_start_pos_parse(&spawns, &common) == Q2_OK) {
+                u32 k;
+                for (k = 0; k < spawns.count; k++) {
+                    q2_start_pos sp;
+                    if (!q2_start_pos_get(&spawns, k, &sp) || sp.zone != zone_index)
+                        continue;
+                    feet[0] = sp.x; feet[1] = sp.y; feet[2] = sp.z;
+                    have_spawn = true;
+                    printf("  spawn         : '%s' at [%d %d %d]\n",
+                           sp.name, sp.x, sp.y, sp.z);
+                    break;
+                }
+            }
+            q2_common_close(&common);
+        } else {
+            q2_buf_free(&buf);
+        }
+    }
+
+    q2_sim_init(&sim, &zone, 50);
+    q2_sim_spawn(&sim, feet, 0);
+
+    printf("%s\n", zone.name);
+    printf("  spawn found   : %s\n", have_spawn ? "yes" : "no (using origin)");
+    printf("  collision     : %s, %u nodes\n",
+           sim.coll_ready ? "loaded" : "UNAVAILABLE",
+           sim.coll_ready ? sim.coll.node_count : 0);
+    printf("  spawn cell    : %d%s\n", sim.current_node,
+           sim.current_node < 0 ? "  (outside every hull)" : "");
+
+    start_y = sim.player.pos[1];
+
+    memset(&in, 0, sizeof(in));
+    for (i = 0; i < ticks; i++) {
+        /* Walk forward for the second half so both falling and walking are
+         * exercised. */
+        in.forward = (i > ticks / 2) ? 1024 : 0;
+        q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
+
+        if (sim.player.on_ground && grounded_at < 0)
+            grounded_at = i;
+        if (sim.coll_ready && sim.current_node < 0)
+            escaped++;
+    }
+
+    printf("  after %d ticks:\n", ticks);
+    printf("    grounded    : %s\n",
+           grounded_at >= 0 ? "yes" : "NO - fell the whole time");
+    if (grounded_at >= 0)
+        printf("    landed on tick %d\n", grounded_at);
+    printf("    fell        : %d world units\n", sim.player.pos[1] - start_y);
+    printf("    final cell  : %d\n", sim.current_node);
+    printf("    ticks outside any hull: %d\n", escaped);
+
+    q2_world_free_zone(&zone);
+
+    /* A spawn that is not inside a cell means either the hull or the spawn is
+     * misread, and is worth failing on. */
+    return (sim.coll_ready && sim.current_node < 0) ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------------- */
 static int cmd_hexdump(disc *d, const char *path, size_t count)
 {
     q2_buf buf;
@@ -1342,6 +1438,15 @@ int main(int argc, char **argv)
         rc = cmd_verify(d);
     } else if (strcmp(cmd, "audio") == 0) {
         rc = cmd_audio(d);
+    } else if (strcmp(cmd, "walk") == 0) {
+        if (argc < 4) {
+            fprintf(stderr, "walk needs a map name\n");
+            rc = 1;
+        } else {
+            int zi = (argc >= 5) ? atoi(argv[4]) : 0;
+            int tk = (argc >= 6) ? atoi(argv[5]) : 200;
+            rc = cmd_walk(d, argv[3], zi, tk);
+        }
     } else if (strcmp(cmd, "textures") == 0) {
         rc = cmd_textures(d);
     } else if (strcmp(cmd, "music") == 0) {
