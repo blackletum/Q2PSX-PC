@@ -67,15 +67,35 @@
  * 256 rows in VRAM, not 128 by 256.
  *
  * ---------------------------------------------------------------------------
+ * The region between the record table and the first payload
+ * ---------------------------------------------------------------------------
+ * Partly identified. It holds, in order: the 512-byte run of u16 0x8000, then
+ * palette data, then the packed image-name list immediately before the first
+ * payload.
+ *
+ * The names are CONFIRMED and are a useful cross-check: they are NUL-terminated
+ * ASCII, `texpage_count` of them named tp0.opt, tp1.opt, ... followed by
+ * `image_count` .lbm names. Counting them reproduces the two header bytes on
+ * every map.
+ *
+ * The palette data is CONFIRMED as palette data by inspection — entries are
+ * RGB555, 0x8000 (transparent black) and 0x03E0 (pure green) both appear in
+ * long runs — but its INDEXING IS NOT ESTABLISHED. The region's size is not a
+ * clean multiple of either a 256-entry (512-byte) or a 16-entry (32-byte) CLUT,
+ * and the residue is not consistent across maps. Until that resolves, this
+ * module does not expose palettes, because guessing a CLUT stride would put
+ * plausible-looking but wrong colours on every surface.
+ *
+ * ---------------------------------------------------------------------------
  * What is NOT yet established
  * ---------------------------------------------------------------------------
- * Where each decoded image is uploaded, and which palette goes with it. The
- * MapMod polygons carry tpage and clut ids that index whatever the executable's
- * uploader arranges, and that mapping is still unread.
+ * Where each decoded image is uploaded into VRAM, and which palette pairs with
+ * it. The MapMod polygons carry tpage and clut ids that index whatever the
+ * executable's uploader arranges, and that mapping is still unread.
  *
- * So this module decodes images but cannot yet place them, and the renderer
- * still draws untextured. The codec was the hard part; the placement is
- * bookkeeping that one function in the EXE will settle.
+ * So this module decodes images but cannot yet place or colour them, and the
+ * renderer still draws untextured. The codec was the hard part; the placement
+ * is bookkeeping that the EXE's uploader will settle.
  */
 #ifndef Q2PSX_VRAM_H
 #define Q2PSX_VRAM_H
