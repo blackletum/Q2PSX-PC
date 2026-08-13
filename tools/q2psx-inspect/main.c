@@ -11,6 +11,7 @@
 #include "dat.h"
 #include "disc.h"
 #include "entity.h"
+#include "events_rt.h"
 #include "ident.h"
 #include "level.h"
 #include "points.h"
@@ -49,6 +50,7 @@ static void usage(void)
     puts("  dats    <disc>              census every .DAT chunk schema on the disc");
     puts("  verify  <disc>              check every level file against the typed schema");
     puts("  audio   <disc>              decode every sound bank and validate it");
+    puts("  events  <disc>              run every event script and census the opcodes");
     puts("  walk    <disc> <map> [z] [ticks]  drop a player in and simulate");
     puts("  textures <disc>             decode every compressed VRAM image");
     puts("  music   <disc>              demultiplex and decode the XA music streams");
@@ -1329,6 +1331,130 @@ static int cmd_walk(disc *d, const char *map, int zone_index, int ticks)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * Run every event script on the disc.
+ *
+ * Fires each named entry point and lets the trigger graph propagate, which
+ * exercises the parser and the runtime together. The useful output is the
+ * opcode census and how much of it actually executes: a script that parses but
+ * never runs anything would look fine to `verify` and be useless in a game.
+ */
+static int cmd_events(disc *d)
+{
+    int i, n = disc_file_count(d);
+    u32 files = 0, records = 0, items = 0, named = 0;
+    u32 ran = 0, movers = 0, zone_changes = 0;
+    u32 op_hist[64];
+
+    memset(op_hist, 0, sizeof(op_hist));
+    printf("Running every event script on the disc...\n\n");
+
+    for (i = 0; i < n; i++) {
+        const disc_file *f = disc_file_at(d, i);
+        const char *base = strrchr(f->path, '/');
+        q2_buf buf;
+        q2_events ev;
+        q2_event_rt rt;
+        bool is_zone;
+
+        base = base ? base + 1 : f->path;
+        is_zone = (strncmp(base, "ZONE", 4) == 0);
+        if (!is_zone && strncmp(base, "COMMON", 6) != 0)
+            continue;
+
+        if (disc_read_file(d, f->path, &buf) != Q2_OK)
+            continue;
+
+        if (is_zone) {
+            q2_zone_file zf;
+            if (q2_zone_open(&zf, &buf) != Q2_OK) { q2_buf_free(&buf); continue; }
+            if (q2_events_parse_zone(&ev, &zf) != Q2_OK) { q2_zone_close(&zf); continue; }
+
+            files++;
+            records += ev.record_count;
+
+            if (q2_event_rt_init(&rt, &ev) == Q2_OK) {
+                q2_event_record rec;
+                u32 k;
+
+                /* Census every item before running anything. */
+                if (q2_events_first_record(&ev, &rec)) {
+                    do {
+                        for (k = 0; k < rec.n_items; k++) {
+                            q2_event_item it;
+                            if (!q2_events_get_item(&ev, &rec, k, &it))
+                                break;
+                            op_hist[it.opcode & 0x3F]++;
+                            items++;
+                        }
+                    } while (q2_events_next_record(&ev, &rec, &rec));
+                }
+
+                for (k = 0; k < ev.dir_count; k++) {
+                    q2_event_dir_entry e;
+                    if (!q2_events_get_dir_entry(&ev, k, &e))
+                        continue;
+                    named++;
+                    q2_event_rt_trigger(&rt, e.offset);
+                }
+
+                if (q2_event_rt_update(&rt) == Q2_EVENT_ZONE_CHANGE)
+                    zone_changes++;
+
+                ran    += rt.ran_count;
+                movers += rt.skipped_movers;
+                q2_event_rt_free(&rt);
+            }
+            q2_zone_close(&zf);
+        } else {
+            q2_common_file cf;
+            if (q2_common_open(&cf, &buf) != Q2_OK) { q2_buf_free(&buf); continue; }
+            if (q2_events_parse_common(&ev, &cf) == Q2_OK) {
+                files++;
+                records += ev.record_count;
+            }
+            q2_common_close(&cf);
+        }
+    }
+
+    printf("  files with events : %u\n", files);
+    printf("  records           : %u\n", records);
+    printf("  items             : %u\n", items);
+    printf("  named entries     : %u\n", named);
+    printf("  records executed  : %u\n", ran);
+    printf("  movers skipped    : %u  (link not decoded)\n", movers);
+    printf("  zone gates fired  : %u\n", zone_changes);
+
+    printf("\n  opcode census\n");
+    {
+        static const struct { u8 op; const char *name; } names[] = {
+            { 0x02, "TRIGGER"  }, { 0x03, "MOVER_A" }, { 0x04, "MOVER_B" },
+            { 0x05, "MOVER_C"  }, { 0x08, "FXGROUP" }, { 0x09, "WAIT"    },
+            { 0x0F, "ZONEGATE" }, { 0x13, "FX"      }, { 0x14, "ENABLE"  },
+            { 0x15, "DISABLE"  }, { 0x16, "CALL"    },
+        };
+        u32 k;
+        for (k = 0; k < Q2PSX_ARRAY_COUNT(names); k++) {
+            if (op_hist[names[k].op])
+                printf("    0x%02X %-9s %u\n",
+                       names[k].op, names[k].name, op_hist[names[k].op]);
+        }
+        for (k = 0; k < 64; k++) {
+            u32 j, known = 0;
+            for (j = 0; j < Q2PSX_ARRAY_COUNT(names); j++)
+                if (names[j].op == k) known = 1;
+            if (!known && op_hist[k])
+                printf("    0x%02X %-9s %u\n", k, "(unknown)", op_hist[k]);
+        }
+    }
+
+    printf("\n%s\n", ran > 0
+           ? "PASS - the trigger graph parses and executes."
+           : "FAIL - nothing executed.");
+    return ran > 0 ? 0 : 1;
+}
+
+/* ------------------------------------------------------------------------- */
 static int cmd_hexdump(disc *d, const char *path, size_t count)
 {
     q2_buf buf;
@@ -1466,6 +1592,8 @@ int main(int argc, char **argv)
         rc = cmd_verify(d);
     } else if (strcmp(cmd, "audio") == 0) {
         rc = cmd_audio(d);
+    } else if (strcmp(cmd, "events") == 0) {
+        rc = cmd_events(d);
     } else if (strcmp(cmd, "walk") == 0) {
         if (argc < 4) {
             fprintf(stderr, "walk needs a map name\n");
