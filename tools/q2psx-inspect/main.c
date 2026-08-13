@@ -16,6 +16,7 @@
 #include "points.h"
 #include "raster.h"
 #include "scene.h"
+#include "vram.h"
 #include "world.h"
 #include "trig.h"
 #include "vag.h"
@@ -47,6 +48,7 @@ static void usage(void)
     puts("  dats    <disc>              census every .DAT chunk schema on the disc");
     puts("  verify  <disc>              check every level file against the typed schema");
     puts("  audio   <disc>              decode every sound bank and validate it");
+    puts("  textures <disc>             decode every compressed VRAM image");
     puts("  music   <disc>              demultiplex and decode the XA music streams");
     puts("  render  <disc> <map> [z] [out.ppm] [yaw] [pitch]  render a zone (4096 = full turn)");
     puts("  hexdump <disc> <path> [n]   hex dump the first n bytes of a file");
@@ -1048,6 +1050,111 @@ static int cmd_music(disc *d)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * Decode every compressed VRAM image on the disc.
+ *
+ * The acceptance bar is strict on purpose: a correct codec decodes every
+ * payload to exactly width*height bytes with no overshoot and no starvation.
+ * Anything less means it is wrong, or there is more than one codec.
+ */
+static int cmd_textures(disc *d)
+{
+    int i, n = disc_file_count(d);
+    u32 maps = 0, images = 0, failed = 0;
+    u64 packed_total = 0, decoded_total = 0;
+    u32 pad_hist[5];
+    u8 *scratch;
+    size_t scratch_cap = 1024 * 1024;
+
+    memset(pad_hist, 0, sizeof(pad_hist));
+
+    scratch = (u8 *)malloc(scratch_cap);
+    if (!scratch) {
+        fprintf(stderr, "out of memory\n");
+        return 1;
+    }
+
+    printf("Decoding every compressed VRAM image...\n\n");
+
+    for (i = 0; i < n; i++) {
+        const disc_file *f = disc_file_at(d, i);
+        const char *p = f->path;
+        const char *rest, *slash;
+        char map[64];
+        size_t len;
+        q2_vram_section vs;
+        u32 k;
+
+        if (*p == '/')
+            p++;
+        if (strncmp(p, "Q2DATA/LEVELS/", 14) != 0)
+            continue;
+        if (!strstr(p, "SNDVRAM.DAT"))
+            continue;
+
+        rest  = p + 14;
+        slash = strchr(rest, '/');
+        if (!slash)
+            continue;
+        len = (size_t)(slash - rest);
+        if (len >= sizeof(map))
+            len = sizeof(map) - 1;
+        memcpy(map, rest, len);
+        map[len] = '\0';
+
+        if (q2_vram_load(&vs, d, map) != Q2_OK) {
+            printf("  LOAD FAILED  %s\n", map);
+            failed++;
+            continue;
+        }
+
+        maps++;
+
+        for (k = 0; k < vs.image_count; k++) {
+            size_t want = (size_t)vs.images[k].width * vs.images[k].height;
+            size_t got = 0;
+
+            if (want > scratch_cap) {
+                u8 *bigger = (u8 *)realloc(scratch, want);
+                if (!bigger) { failed++; continue; }
+                scratch = bigger;
+                scratch_cap = want;
+            }
+
+            if (q2_vram_decode(&vs, k, scratch, scratch_cap, &got) != Q2_OK) {
+                printf("  DECODE FAILED  %s image %u (%ux%u)\n",
+                       map, k, vs.images[k].width, vs.images[k].height);
+                failed++;
+                continue;
+            }
+
+            images++;
+            packed_total  += vs.images[k].packed_size;
+            decoded_total += got;
+        }
+
+        q2_vram_free(&vs);
+    }
+
+    free(scratch);
+
+    printf("  maps            : %u\n", maps);
+    printf("  images decoded  : %u\n", images);
+    printf("  failures        : %u\n", failed);
+    printf("  packed bytes    : %llu\n", (unsigned long long)packed_total);
+    printf("  decoded bytes   : %llu\n", (unsigned long long)decoded_total);
+    if (packed_total)
+        printf("  compression     : %.2fx\n",
+               (double)decoded_total / (double)packed_total);
+
+    printf("\n%s\n", failed == 0
+           ? "PASS - every payload decoded to exactly width*height bytes."
+           : "FAIL - see above.");
+
+    return failed ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------------- */
 static int cmd_hexdump(disc *d, const char *path, size_t count)
 {
     q2_buf buf;
@@ -1185,6 +1292,8 @@ int main(int argc, char **argv)
         rc = cmd_verify(d);
     } else if (strcmp(cmd, "audio") == 0) {
         rc = cmd_audio(d);
+    } else if (strcmp(cmd, "textures") == 0) {
+        rc = cmd_textures(d);
     } else if (strcmp(cmd, "music") == 0) {
         rc = cmd_music(d);
     } else if (strcmp(cmd, "render") == 0) {
