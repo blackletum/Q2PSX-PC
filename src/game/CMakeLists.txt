@@ -1,4 +1,6 @@
 add_library(q2psx_game STATIC
+    ai.c
+    ai.h
     events_rt.c
     events_rt.h
     aimodule.c

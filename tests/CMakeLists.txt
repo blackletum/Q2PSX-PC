@@ -51,3 +51,12 @@ target_link_libraries(test_save PRIVATE
 )
 
 add_test(NAME save COMMAND test_save)
+
+add_executable(test_ai test_ai.c)
+
+target_link_libraries(test_ai PRIVATE
+    q2psx_common
+    q2psx_game
+)
+
+add_test(NAME ai COMMAND test_ai)
