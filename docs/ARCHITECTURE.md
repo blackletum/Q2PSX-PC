@@ -117,23 +117,36 @@ statement the build system can evaluate rather than an assertion in a document.
 
 | Layer | State |
 |---|---|
-| `common` | working |
+| `common` | working — types, fixed point, fixed-point trig, SHA-256 |
 | `disc` | working — cue/bin, iso, ISO9660, Form 1/2, SYSTEM.CNF |
 | `build` | working — PAL build fingerprinted and catalogued |
-| `formats` | container, level schema and vertex pool working; other chunk contents in progress |
-| `psx` | GTE and OT implemented; needs conformance tests |
-| `render` | not started |
-| `audio` | not started |
-| `game` | not started |
+| `formats` | container, level schema, vertex pool, scene/geometry, collision, spawns, lights |
+| `psx` | GTE and ordering table implemented; needs conformance tests |
+| `render` | software rasteriser working; untextured until the codec falls |
+| `audio` | sound bank and SPU-ADPCM working; XA music and CD-DA not started |
+| `game` | zone loading and OT construction; no simulation yet |
+| `client` | SDL3 client flies through a zone at the console's own resolution |
 
-Validated against the PAL disc (`q2psx-inspect verify`):
+Validated against the PAL disc (`q2psx-inspect verify` and `audio`):
 
 ```
 COMMON.DAT : 49 resolved
 ZONE*.DAT  : 115 resolved
 vertices   : 461852 across all zones
+quads      : 274936
+coll planes: 139240, of which 139057 are unit normals (99.87%)
+spawns     : 240
+lights     : 7814, 0 failing the radius invariant
 failed     : 0
+
+banks      : 49
+sounds     : 2475 (118 looping)
+invalid ADPCM blocks : 0
+largest bank : FRAGTOWE, 522000 bytes against 522240 usable
 ```
+
+Geometry renders end to end. Across 19 maps spanning a 2-quad stub to a
+5,875-quad level, every quad transforms and emits with none rejected.
 
 ## What is genuinely known versus assumed
 
@@ -150,14 +163,28 @@ worse than one built on an acknowledged gap.
   agreement on all 115 zones and coherent level-shaped bounding boxes.
 - The disc's identity: serial, executable hash, volume timestamp.
 
+- `Scene` nodes and `MapMod` quads: 17,035 nodes and 274,936 quads with zero
+  violations of the size identities, re-derived independently before being
+  committed to.
+- The collision hull layout, including its size equation and sentinel.
+- Collision plane normals as 1.3.12 unit vectors.
+- The sound bank, the VAG headers' big-endianness, and SPU-ADPCM.
+- Spawn points and lights, the latter confirmed by an arithmetic invariant
+  between two of their own fields.
+
 **Not yet established:**
 
-- What the three trailing `s16` values on each point mean. They behave like
-  adjacency links with -1 as a terminator, but that is inference.
-- The internal layout of every other chunk — `MapMod`, `Scene`, `SortData`,
-  `PrimaryColl`, `CastList` and the rest.
-- The coordinate scale relative to PC Quake II. The extents are consistent with
-  a factor of 8, and nothing in the loader depends on it.
+- The texture codec. Every texture on the disc is behind it, so nothing can be
+  drawn textured. This is the single biggest gap.
+- The `CastList` face vertex-index base, so no models.
+- The world coordinate scale relative to PC Quake II, so no correct physics.
+- The `Events` operand encoding, so no doors, lifts or level progression.
+- The three trailing bytes on each point. They read as a reverse index into
+  `MapMod` corners and hold for 99.971% of entries, which is close enough to be
+  suggestive and far enough from 100% that they should be rebuilt at load time
+  rather than trusted.
+- Collision plane *points* are only 95.6% confirmed. Player movement must not be
+  built on them until that reaches 100%.
 
 The reverse-engineering findings, with per-field confidence markers, live in
 [`FORMATS.md`](FORMATS.md); the prioritised gaps are in

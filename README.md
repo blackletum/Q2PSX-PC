@@ -61,6 +61,25 @@ See [`docs/FIDELITY.md`](docs/FIDELITY.md) for the full rendering conformance sp
 Regions and revisions are detected per *build*, not per region, because localised
 releases move the executable's data tables. See [`docs/FORMATS.md`](docs/FORMATS.md).
 
+## Status
+
+Geometry loads and renders natively from a real disc. There is no simulation yet,
+and nothing is textured — the texture compression is the one format still unsolved,
+and it gates all visual detail.
+
+| Area | State |
+|---|---|
+| Disc access | cue/bin, iso, bare images; ISO9660; CD-XA Form 1 and 2 |
+| Build identification | by executable hash, not by region |
+| Level data | container, scene graph, geometry, collision, spawns, lights |
+| Rendering | software rasteriser with the PSX's rules; untextured |
+| Audio | sound bank and SPU-ADPCM decode; music not yet wired |
+| Simulation | not started |
+
+Checked against the PAL disc: 164 level files, 461,852 vertices, 274,936 quads,
+139,240 collision planes, 2,475 sounds, zero failures. The remaining gaps are
+tracked in [`docs/openquestions.md`](docs/openquestions.md).
+
 ## Building
 
 Requires CMake 3.20+ and a C11 compiler.
@@ -77,12 +96,20 @@ with it you get the playable client.
 
 `q2psx-inspect` is the reverse-engineering harness — it opens a disc image and dumps
 the filesystem, build fingerprint, and asset structure without needing a game window.
+Every format claim in [`docs/FORMATS.md`](docs/FORMATS.md) has a corresponding check
+here, so "we understand this format" is something the build can evaluate rather than
+an assertion in a document.
 
 ```bash
-build/tools/q2psx-inspect disc  "Quake II (Europe).cue"
-build/tools/q2psx-inspect ident "Quake II (Europe).cue"
-build/tools/q2psx-inspect dat   Q2DATA/LEVELS/BASE0/COMMON.DAT
+build/bin/q2psx-inspect ident  "Quake II (Europe).cue"
+build/bin/q2psx-inspect verify "Quake II (Europe).cue"
+build/bin/q2psx-inspect audio  "Quake II (Europe).cue"
+build/bin/q2psx-inspect render "Quake II (Europe).cue" BASE0 0 out.ppm 0 1024
 ```
+
+`render` needs no window — it writes a PPM. That is how the geometry pipeline was
+brought up before the client existed, and it remains the quickest way to check a
+change end to end.
 
 ## Legal
 
