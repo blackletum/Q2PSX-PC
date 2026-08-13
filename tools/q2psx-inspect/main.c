@@ -92,6 +92,7 @@ static void usage(void)
     puts("  anims   <disc>              decode every CastList animation clip");
     puts("  fps     <disc> <map> [zone] [weapon] [out.ppm] [yaw]  eye view + HUD");
     puts("  classes <disc>              the entity class table, checked against every spawn");
+    puts("  mob     <disc> <map> [zone] [n] [out.ppm]  stand in front of a creature");
     puts("  models  <disc> <map>        list a map's model bank");
     puts("  model   <disc> <map> <name|idx> [clip] [frame] [out.ppm] [yaw]  render one model");
     puts("  music   <disc>              demultiplex and decode the XA music streams");
@@ -2520,6 +2521,69 @@ static bool class_has_model(disc *d, const q2_model_bank *common_bank,
     return false;
 }
 
+/* Position, facing and class name of the map's Nth creature spawn. */
+static bool creature_at(disc *d, const char *map, int want, s32 pos[3],
+                        s32 *facing, char *name_out, size_t name_cap)
+{
+    char cpath[160];
+    q2_buf cbuf;
+    q2_common_file cf;
+    q2_build_id id;
+    q2_class_table tbl;
+    q2_population pop;
+    u32 g;
+    int seen = 0;
+    bool found = false;
+
+    if (q2_identify(d, &id) != Q2_OK)
+        return false;
+    if (q2_class_table_load(&tbl, d, &id) != Q2_OK)
+        return false;
+
+    snprintf(cpath, sizeof(cpath), "Q2DATA/LEVELS/%s/COMMON.DAT", map);
+    if (disc_read_file(d, cpath, &cbuf) != Q2_OK) {
+        q2_class_table_free(&tbl);
+        return false;
+    }
+    if (q2_common_open(&cf, &cbuf) != Q2_OK) {
+        q2_buf_free(&cbuf);
+        q2_class_table_free(&tbl);
+        return false;
+    }
+
+    if (q2_population_parse(&pop, &cf) == Q2_OK) {
+        for (g = 0; g < pop.group_count && !found; g++) {
+            q2_pop_group grp;
+            q2_pop_spawn sp;
+            u32 k;
+
+            if (!q2_pop_get_group(&pop, g, &grp) || q2_pop_group_is_path(&grp))
+                continue;
+
+            for (k = 0; q2_pop_get_spawn(&pop, &grp, k, &sp); k++) {
+                const q2_class_entry *e = q2_class_find(&tbl, sp.class_id);
+
+                if (!e || !e->name[0] || e->is_player)
+                    continue;
+                if (seen++ != want)
+                    continue;
+
+                pos[0] = sp.x;
+                pos[1] = sp.y;
+                pos[2] = sp.z;
+                *facing = sp.angle;
+                snprintf(name_out, name_cap, "%s", e->name);
+                found = true;
+                break;
+            }
+        }
+    }
+
+    q2_common_close(&cf);
+    q2_class_table_free(&tbl);
+    return found;
+}
+
 /* ------------------------------------------------------------------------- */
 /*
  * The entity class table, and whether the disc's spawns resolve through it.
@@ -2633,6 +2697,245 @@ static int cmd_classes(disc *d)
            : "PARTIAL - see the unresolved ids above.");
 
     q2_class_table_free(&tbl);
+    return 0;
+}
+
+/*
+ * Draw the creatures a map actually places, at the positions Population gives
+ * them, with the models their classes name.
+ *
+ * This is the first time the three halves of the level meet: Population says
+ * where and which class, the class table says which model and how much health,
+ * and CastList supplies the geometry and the pose. Anything wrong in any of
+ * them shows up here as a monster in a wall, a monster of the wrong kind, or no
+ * monster at all.
+ */
+static u32 draw_map_creatures(disc *d, const char *map, const q2_camera *cam,
+                              psx_ot *ot, gte_state *gte, u32 clut4_count_a,
+                              u32 *out_drawn)
+{
+    char cpath[160], zpath[200];
+    q2_buf cbuf;
+    q2_common_file cf;
+    q2_build_id id;
+    q2_class_table tbl;
+    q2_population pop;
+    q2_model_bank common_bank;
+    bool have_common_bank;
+    u32 g, drawn = 0, faces = 0;
+    int z;
+
+    /* Zone banks are opened lazily and kept for the whole pass: a creature's
+     * model is as likely to live in a zone's CastList as in COMMON's. */
+    q2_buf zbuf[8];
+    q2_zone_file zf[8];
+    q2_model_bank zbank[8];
+    bool zopen[8];
+
+    memset(zopen, 0, sizeof(zopen));
+
+    if (q2_identify(d, &id) != Q2_OK)
+        return 0;
+    if (q2_class_table_load(&tbl, d, &id) != Q2_OK)
+        return 0;
+
+    snprintf(cpath, sizeof(cpath), "Q2DATA/LEVELS/%s/COMMON.DAT", map);
+    if (disc_read_file(d, cpath, &cbuf) != Q2_OK) {
+        q2_class_table_free(&tbl);
+        return 0;
+    }
+    if (q2_common_open(&cf, &cbuf) != Q2_OK) {
+        q2_buf_free(&cbuf);
+        q2_class_table_free(&tbl);
+        return 0;
+    }
+
+    have_common_bank = (q2_model_bank_from_common(&common_bank, &cf) == Q2_OK);
+
+    for (z = 0; z < 8; z++) {
+        snprintf(zpath, sizeof(zpath), "Q2DATA/LEVELS/%s/ZONE%d.DAT", map, z);
+        if (disc_read_file(d, zpath, &zbuf[z]) != Q2_OK)
+            continue;
+        if (q2_zone_open(&zf[z], &zbuf[z]) != Q2_OK) {
+            q2_buf_free(&zbuf[z]);
+            continue;
+        }
+        zopen[z] = (q2_model_bank_from_zone(&zbank[z], &zf[z]) == Q2_OK);
+        if (!zopen[z])
+            q2_zone_close(&zf[z]);
+    }
+
+    if (q2_population_parse(&pop, &cf) == Q2_OK) {
+        for (g = 0; g < pop.group_count; g++) {
+            q2_pop_group grp;
+            q2_pop_spawn sp;
+            u32 k;
+
+            if (!q2_pop_get_group(&pop, g, &grp) || q2_pop_group_is_path(&grp))
+                continue;
+
+            for (k = 0; q2_pop_get_spawn(&pop, &grp, k, &sp); k++) {
+                const q2_class_entry *e = q2_class_find(&tbl, sp.class_id);
+                q2_model mdl;
+                bool found = false;
+                u32 m;
+
+                if (!e || !e->name[0] || e->is_player)
+                    continue;
+
+                if (have_common_bank) {
+                    for (m = 0; m < common_bank.count && !found; m++) {
+                        if (q2_model_get(&common_bank, m, &mdl) != Q2_OK)
+                            continue;
+                        found = (name_casecmp_local(mdl.hdr.name, e->name) == 0);
+                    }
+                }
+                for (z = 0; z < 8 && !found; z++) {
+                    if (!zopen[z])
+                        continue;
+                    for (m = 0; m < zbank[z].count && !found; m++) {
+                        if (q2_model_get(&zbank[z], m, &mdl) != Q2_OK)
+                            continue;
+                        found = (name_casecmp_local(mdl.hdr.name, e->name) == 0);
+                    }
+                }
+                if (!found)
+                    continue;
+
+                {
+                    q2_model_instance inst;
+                    q2_model_draw_stats st;
+                    q2_model_pose pose[256];
+                    q2_model_anim clip;
+                    bool posed = false;
+
+                    /* Stand it on its first animation frame rather than the
+                     * unposed rest, which for an articulated model is every
+                     * part at the origin. */
+                    if (mdl.hdr.num_parts <= Q2PSX_ARRAY_COUNT(pose) &&
+                        q2_model_anim_get(&mdl, 0, &clip) &&
+                        q2_model_pose_at(&mdl, &clip, 0, pose) == Q2_OK)
+                        posed = true;
+
+                    memset(&inst, 0, sizeof(inst));
+                    inst.model         = &mdl;
+                    inst.pose          = posed ? pose : NULL;
+                    inst.origin[0]     = sp.x;
+                    inst.origin[1]     = sp.y;
+                    inst.origin[2]     = sp.z;
+                    inst.yaw           = sp.angle;
+                    inst.clut4_count_a = clut4_count_a;
+
+                    faces += q2_model_build_ot(&inst, cam, ot, gte, &st);
+                    if (st.faces_emitted)
+                        drawn++;
+                }
+            }
+        }
+    }
+
+    for (z = 0; z < 8; z++)
+        if (zopen[z])
+            q2_zone_close(&zf[z]);
+
+    q2_common_close(&cf);
+    q2_class_table_free(&tbl);
+
+    if (out_drawn)
+        *out_drawn = drawn;
+    return faces;
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * Stand in front of one of a map's creatures and look at it.
+ *
+ * `fps` proves the pieces fit together; this proves they fit together in the
+ * right PLACE. The camera is put a few hundred units from the chosen spawn,
+ * facing it, and the whole level is drawn around it — so a monster standing in
+ * a wall, or floating, or facing the wrong way, is immediately visible.
+ */
+static int cmd_mob(disc *d, const char *map, int zone_index, int which,
+                   const char *out_path)
+{
+    const int W = 512, H = 480;
+    q2_world_zone zone;
+    q2_camera cam;
+    psx_ot ot;
+    gte_state gte;
+    psx_framebuffer fb;
+    psx_raster_opts opts;
+    psx_vram *vram;
+    q2_world_stats wstats;
+    q2_vram_section vs;
+    u32 clut4_count_a = 0;
+    s32 pos[3] = { 0, 0, 0 };
+    s32 facing = 0;
+    char cname[16] = "";
+    u32 drawn = 0, cfaces;
+
+    if (!creature_at(d, map, which, pos, &facing, cname, sizeof(cname))) {
+        fprintf(stderr, "%s has no creature %d\n", map, which);
+        return 1;
+    }
+    printf("%s creature %d: %-12s at [%d %d %d]\n", map, which, cname,
+           pos[0], pos[1], pos[2]);
+
+    if (q2_world_load_zone(&zone, d, map, zone_index) != Q2_OK) {
+        fprintf(stderr, "cannot load %s zone %d\n", map, zone_index);
+        return 1;
+    }
+
+    /* Back off along the creature's own facing, so it is seen from the front,
+     * and raise the eye to roughly head height. */
+    q2_camera_default(&cam, W, H);
+    cam.yaw   = facing + 2048;
+    cam.pitch = 0;
+    cam.pos[0] = pos[0] + ((q2_sin12(facing) * 700) >> 12);
+    cam.pos[1] = pos[1] - 250;
+    cam.pos[2] = pos[2] + ((q2_cos12(facing) * 700) >> 12);
+
+    if (psx_ot_init(&ot, 4096, 300000) != Q2_OK ||
+        psx_fb_init(&fb, W, H) != Q2_OK) {
+        q2_world_free_zone(&zone);
+        return 1;
+    }
+    vram = (psx_vram *)calloc(1, sizeof(psx_vram));
+    if (!vram) {
+        q2_world_free_zone(&zone);
+        return 1;
+    }
+
+    psx_raster_opts_default(&opts);
+    if (q2_vram_load(&vs, d, map) == Q2_OK) {
+        clut4_count_a = vs.clut4_count_a;
+        opts.textures = (q2_vram_upload(&vs, vram) == Q2_OK);
+        q2_vram_free(&vs);
+    } else {
+        opts.textures = false;
+    }
+
+    q2_world_build_ot(&zone, &cam, W, H, &ot, &gte, &wstats);
+    cfaces = draw_map_creatures(d, map, &cam, &ot, &gte, clut4_count_a, &drawn);
+    printf("  world %u quads, creatures %u visible / %u faces\n",
+           wstats.quads_emitted, drawn, cfaces);
+
+    psx_fb_clear(&fb, psx_rgb555(2, 2, 5));
+    psx_raster_ot(&fb, &ot, vram, &opts);
+
+    {
+        u16 label = psx_rgb555(20, 20, 22);
+        psx_fb_text(&fb, 12, 12, map, label, 2);
+        psx_fb_text(&fb, 12, 30, cname, label, 2);
+    }
+
+    if (psx_fb_write_ppm(&fb, out_path) == Q2_OK)
+        printf("  wrote %s\n", out_path);
+
+    psx_fb_free(&fb);
+    psx_ot_free(&ot);
+    free(vram);
+    q2_world_free_zone(&zone);
     return 0;
 }
 
@@ -2755,6 +3058,14 @@ static int cmd_fps(disc *d, const char *map, int zone_index, const char *weapon,
     q2_world_build_ot(&zone, &cam, W, H, &ot, &gte, &wstats);
     printf("  world         : %u of %u quads\n", wstats.quads_emitted,
            wstats.quads_total);
+
+    /* The creatures this map places, into the same table. */
+    {
+        u32 drawn = 0;
+        u32 cfaces = draw_map_creatures(d, map, &cam, &ot, &gte,
+                                        clut4_count_a, &drawn);
+        printf("  creatures     : %u visible, %u faces\n", drawn, cfaces);
+    }
 
     /* The weapon, into the same ordering table. */
     snprintf(cpath, sizeof(cpath), "Q2DATA/LEVELS/%s/COMMON.DAT", map);
@@ -4035,6 +4346,16 @@ int main(int argc, char **argv)
         rc = cmd_cluts(d);
     } else if (strcmp(cmd, "anims") == 0) {
         rc = cmd_anims(d);
+    } else if (strcmp(cmd, "mob") == 0) {
+        if (argc < 4) {
+            fprintf(stderr, "mob needs a map name\n");
+            rc = 1;
+        } else {
+            int zi = (argc >= 5) ? atoi(argv[4]) : 0;
+            int wh = (argc >= 6) ? atoi(argv[5]) : 0;
+            const char *outp = (argc >= 7) ? argv[6] : "mob.ppm";
+            rc = cmd_mob(d, argv[3], zi, wh, outp);
+        }
     } else if (strcmp(cmd, "classes") == 0) {
         rc = cmd_classes(d);
     } else if (strcmp(cmd, "models") == 0) {

@@ -77,6 +77,7 @@ not been read out of the executable yet.
 | Models | vertices, faces, texturing and animation — all 4,535 clips decode |
 | Audio | sound bank and SPU-ADPCM decode; music not yet wired |
 | Simulation | movement, inventory, combat, creature AI, save games |
+| Creatures | every spawn resolves to its class, model and health — 651 of 651 |
 
 Checked against the PAL disc: 164 level files, 461,852 vertices, 274,936 quads,
 139,240 collision planes, 1,723 models, 2,036,080 animation keys, 2,475 sounds,
