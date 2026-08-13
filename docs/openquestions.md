@@ -101,10 +101,15 @@ The residues of the four resolved blockers keep their parents' numbers.
       against 9.1 % for multi-part static parts.
       *Attack:* **not** block C — a direct search of all 8 byte lanes and all 7 halfword lanes of its
       per-part body finds the base sequence on 0 of 399 articulated models, and its supposed
-      `12 + 8*numParts*frames` size law fails on 458 of 1,723 models. Start from **block B** (16 zero bytes
-      on 821/965, larger on 144 articulated models) or block A's 8-entry directory, or locate the `CastList`
-      consumer in the EXE — a full-image scan found none (0 of 60 8-byte-stride pointer walks read `lbu` at
-      `+2` *and* `+3`), consistent with the loader relocating the structure before use.
+      `12 + 8*numParts*frames` size law fails on 458 of 1,723 models.
+      **The consumer is now located** and the earlier "not located" result explained: the loader at
+      `0x8006D124` relocates the model in place and walks the bank as a linked list, so nothing reads the
+      on-disc offsets. From it, block **B**'s structure is known (§2.2) — 8 `u16` chain heads, nodes of
+      `{count, next, entry[]}`, every entry a pair of `u16` multiplied by **10** at load. Ten is the world's
+      lattice step, block B is per-instance, and it is populated only on articulated models: that is a
+      per-part translation stream in all but name. What is still missing is which chain belongs to which part
+      and whether the pairs are two axes of a translation or something else. Next step is the reader of
+      `model + [+0x30]`, the one header offset the loader deliberately leaves relative.
   - [~] 2b. Cross-part index resolution for 21,217 faces (15.3 %), all inside the articulated models.
         Last-writer-wins and a rival arithmetic rule both resolve 100 % of indices in range and differ on
         18,283 articulated faces; geometry cannot separate them. Last-writer-wins wins on coverage
@@ -204,10 +209,18 @@ The residues of the four resolved blockers keep their parents' numbers.
 
 ## Tier 4 — Low-impact unknowns
 
-- [ ] 21. `CastList` blocks A (8-entry directory confirmed, payloads undecoded), B (per-instance,
-      articulated models only, 12 distinct sizes — now the prime suspect for the per-part transform
-      matrices, #2a), C and D; the animated-model frame layout; and the header's 24-bit field at `+0x01`
-      (range 261…333367). **Block C is no longer a vertex-base candidate** (#2a).
+- [~] 21. `CastList` blocks A, B, C and D — **structure now known, semantics not.** The load-time rescale at
+      `0x8006C214` reveals all three of B, C and D:
+      **B** (`+0x30`, never relocated) is 8 `u16` chain heads — which is what "exactly 16 zero bytes on
+      821/965 models" always was, eight empty chains — with nodes `{u16 countAndFlags; u16 next; entry[count
+      & 0x7F]}` and entries of two `u16`, both multiplied by **10** at load.
+      **C** is a chain of records whose `s16` at `+0` is multiplied by **10** and whose word at `+4` is the
+      byte delta to the next.
+      **D** is 20-byte records ending at a zero word, with three `u16` at `+12`, `+14`, `+16` multiplied by
+      **5**.
+      The vertex array is NOT rescaled, so model vertices are already at world scale. Still open: what the
+      values mean, block A's payloads, the animated-model frame layout, and the header's 24-bit field at
+      `+0x01` (261…333367). **Block C is not a vertex-base candidate** (#2a).
 - [ ] 22. `PrimaryRemap` value space. Definitively **not** a scene-node index — the max exceeds the scene
       node count in 100 of 115 files. Probably a polygon or surface id in a shared table.
 - [ ] 23. `CollNode` fields `c` (0…65,077,433, non-monotonic — 609 of 23,003 steps decrease) and `d` (0…75).
@@ -222,11 +235,14 @@ The residues of the four resolved blockers keep their parents' numbers.
       8-byte field whose low half is the runtime pointer at `+0x18`); the writers of the per-level
       `runtime[8]` state; and the `music_playlist` field's real meaning, given that **no instruction anywhere
       in the image loads offset `0x22` from a level record**.
-- [~] 29. **~~`SNDVRAM` section A header bytes `0x0E` and `0x0F`~~ — RESOLVED as 4bpp CLUT counts** by
-      the fix-up loop at `0x800762B4`, which loads both, adds them, shifts left by 4 and iterates exactly
-      that many halfwords setting the STP bit. Still open: only the **split**. The engine uses nothing but
-      the sum, yet the build tool stores them separately, and the split is systematic — `0x0E` is 17 for
-      every front-end and cutscene map, `0x0F` ranges 1…181.
+- [x] 29. **~~`SNDVRAM` section A header bytes `0x0E` and `0x0F`, and the split.~~ — FULLY RESOLVED.**
+      They are 4bpp CLUT counts (the fix-up loop at `0x800762B4` adds them, shifts left by 4 and sets the STP
+      bit over exactly that many halfwords), and the **split is world versus models**: the world renderer
+      indexes the CLUT array from zero, while the model emitter at `0x8006A3FC` adds `count_a` first, so a
+      `CastList` face's `texture` byte addresses section B. Checked disc-wide — no world polygon indexes past
+      its map's `count_a`, and none of the 138,290 model faces has `texture >= count_b` (max 180 against a
+      largest `count_b` of 181). The engine using only the sum to size the upload is why the split looked
+      vestigial from the data side.
 
 ---
 

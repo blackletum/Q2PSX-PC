@@ -50,8 +50,17 @@
  * CLUTs. The load-time fix-up loop at 0x800762B4 loads both, ADDS them, shifts
  * left by 4, and iterates exactly that many u16 over the CLUT array pointer
  * written at 0x80068AC0, setting the transparency bit on every non-zero entry.
- * (a+b)*16 halfwords is (a+b) sixteen-entry CLUTs. The engine only ever uses
- * their sum; why the build tool splits them is still an open question.
+ * (a+b)*16 halfwords is (a+b) sixteen-entry CLUTs.
+ *
+ * The split is not arbitrary and is not vestigial: SECTION A IS THE WORLD'S
+ * PALETTES AND SECTION B IS THE MODELS'. The world renderer indexes the CLUT
+ * array from zero (`MapMod.clut >> 8`, observed 16..85 against counts of
+ * 17..86), while the model emitter at 0x8006A3FC adds clut4_count_a first, so a
+ * CastList face's `texture` byte addresses the second section. Both hold
+ * disc-wide: no world polygon indexes past its map's count_a, and none of the
+ * 138,290 model faces has `texture >= count_b`. The engine only ever uses the
+ * SUM to size the upload, which is why the split looked meaningless from the
+ * data side alone.
  *
  * CORRECTION — the 512-byte run of 0x8000 that an earlier pass called "an
  * unused 256-entry CLUT slot" is nothing of the kind. It is the first SIXTEEN

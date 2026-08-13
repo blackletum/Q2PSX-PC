@@ -17,6 +17,7 @@
 #include "ident.h"
 #include "level.h"
 #include "leveltable.h"
+#include "model.h"
 #include "mover.h"
 #include "points.h"
 #include "pickup.h"
@@ -1128,6 +1129,9 @@ static int cmd_polyflags(disc *d)
 typedef struct clut_map_stat {
     char               name[64];
     u32                clut4_count;
+    u32                clut4_count_a;
+    u32                clut4_count_b;
+    u32                texpage_count;
     unsigned long long polys;
     u32                max_index;
     u32                zones;
@@ -1172,6 +1176,38 @@ static const char *clut_map_of(const char *path, char *buf, size_t cap)
     return buf;
 }
 
+static void model_faces_check(const q2_model_bank *bank, u32 index,
+                              const clut_map_stat *m,
+                              unsigned long long *total,
+                              unsigned long long *clut_bad,
+                              unsigned long long *blend_set,
+                              unsigned long long *page_bad,
+                              u32 *max_texture)
+{
+    q2_model mdl;
+    u32 face;
+
+    if (q2_model_get(bank, index, &mdl) != Q2_OK)
+        return;
+
+    for (face = 0; face < mdl.hdr.num_faces; face++) {
+        q2_model_face fc;
+
+        if (!q2_model_get_face(&mdl, face, &fc))
+            continue;
+
+        (*total)++;
+        if (fc.texture > *max_texture)
+            *max_texture = fc.texture;
+        if (fc.texture >= m->clut4_count_b)
+            (*clut_bad)++;
+        if ((fc.flags >> 5) != 0)
+            (*blend_set)++;
+        if ((fc.flags & 0x1F) >= m->texpage_count)
+            (*page_bad)++;
+    }
+}
+
 static double hypot2(int dx, int dy)
 {
     return sqrt((double)dx * dx + (double)dy * dy);
@@ -1191,6 +1227,9 @@ static int cmd_cluts(disc *d)
     unsigned long long high_bits_set = 0, uv_out_of_range = 0;
     unsigned long long agree[3] = {0,0,0}, agree_pairs = 0;
     unsigned long long rot_agree[3] = {0,0,0}, rot_pairs = 0;
+    unsigned long long face_total = 0, face_clut_bad = 0, face_blend_set = 0;
+    unsigned long long face_page_bad = 0;
+    u32 max_face_texture = 0;
     unsigned long long iso_good[3] = {0,0,0}, iso_total = 0;
     unsigned long long iso_rot_good[3] = {0,0,0}, iso_rot_total = 0;
     double iso_sum[3] = {0.0,0.0,0.0}, iso_rot_sum[3] = {0.0,0.0,0.0};
@@ -1224,8 +1263,11 @@ static int cmd_cluts(disc *d)
             continue;
         if (q2_vram_load(&vs, d, mapbuf) != Q2_OK)
             continue;
-        m->clut4_count = vs.clut4_count;
-        m->have_vram   = true;
+        m->clut4_count   = vs.clut4_count;
+        m->clut4_count_a = vs.clut4_count_a;
+        m->clut4_count_b = vs.clut4_count_b;
+        m->texpage_count = vs.texpage_count;
+        m->have_vram     = true;
         q2_vram_free(&vs);
     }
 
@@ -1507,6 +1549,77 @@ static int cmd_cluts(disc *d)
         printf("    %-28s %12llu %12llu  %8.4f\n", agree_name[i],
                iso_rot_good[i], iso_rot_total,
                iso_rot_total ? iso_rot_sum[i] / (double)iso_rot_total : 0.0);
+
+    /*
+     * The model side of the same question. A model face carries a texture-page
+     * index and a CLUT index in two bytes, and the model emitter at 0x8006A3FC
+     * reads the CLUT one as clut4_count_a + face.texture — so model palettes
+     * live in the SECOND section of the clut4 array while the world uses the
+     * first. That is what the a/b split has always been, and it predicts two
+     * things the disc can check: face.texture < clut4_count_b everywhere, and
+     * face.flags never using its blend bits.
+     */
+    for (i = 0; i < n; i++) {
+        const disc_file *f = disc_file_at(d, i);
+        const char *base = strrchr(f->path, '/');
+        clut_map_stat *m;
+        q2_buf buf;
+        q2_model_bank bank;
+        bool is_common;
+        u32 k;
+
+        base = base ? base + 1 : f->path;
+        is_common = (strcmp(base, "COMMON.DAT") == 0);
+        if (!is_common && strncmp(base, "ZONE", 4) != 0)
+            continue;
+        if (!clut_map_of(f->path, mapbuf, sizeof(mapbuf)))
+            continue;
+        m = clut_find_map(maps, &map_count, mapbuf);
+        if (!m || !m->have_vram)
+            continue;
+
+        if (disc_read_file(d, f->path, &buf) != Q2_OK)
+            continue;
+
+        if (is_common) {
+            q2_common_file cf;
+            if (q2_common_open(&cf, &buf) != Q2_OK) {
+                q2_buf_free(&buf);
+                continue;
+            }
+            if (q2_model_bank_from_common(&bank, &cf) != Q2_OK) {
+                q2_common_close(&cf);
+                continue;
+            }
+            for (k = 0; k < bank.count; k++)
+                model_faces_check(&bank, k, m, &face_total, &face_clut_bad,
+                                  &face_blend_set, &face_page_bad,
+                                  &max_face_texture);
+            q2_common_close(&cf);
+        } else {
+            q2_zone_file zf;
+            if (q2_zone_open(&zf, &buf) != Q2_OK) {
+                q2_buf_free(&buf);
+                continue;
+            }
+            if (q2_model_bank_from_zone(&bank, &zf) != Q2_OK) {
+                q2_zone_close(&zf);
+                continue;
+            }
+            for (k = 0; k < bank.count; k++)
+                model_faces_check(&bank, k, m, &face_total, &face_clut_bad,
+                                  &face_blend_set, &face_page_bad,
+                                  &max_face_texture);
+            q2_zone_close(&zf);
+        }
+    }
+
+    printf("\n  CastList faces (clut index = clut4_count_a + face.texture):\n");
+    printf("    faces                              : %llu\n", face_total);
+    printf("    face.texture past clut4_count_b    : %llu\n", face_clut_bad);
+    printf("    face.flags with blend bits set     : %llu\n", face_blend_set);
+    printf("    face.flags page past texpage_count : %llu\n", face_page_bad);
+    printf("    highest face.texture seen          : %u\n", max_face_texture);
 
     printf("\n%s\n", (maps_out_of_range == 0 && uv_out_of_range == 0)
            ? "PASS - every CLUT index addresses a CLUT the map uploads, and "

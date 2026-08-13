@@ -144,6 +144,36 @@
  * touches CastList data. What it does show is the shape of the machinery: index
  * times eight into a scratch array, and a 96-entry transform buffer. 96 is
  * comfortably above the largest window any model on the disc needs, which is 91.
+ *
+ * ---------------------------------------------------------------------------
+ * What the loader does to a model before anything reads it
+ * ---------------------------------------------------------------------------
+ * The relocation pass at 0x8006D124 walks the bank as a LINKED LIST — ofsEnd is
+ * turned into an absolute next-pointer — and rewrites the header in place:
+ *
+ *   +0x04  ofsFaces..ofsBlockA, ofsBlockC, ofsBlockD and ofsEnd all become
+ *          absolute pointers. ofsBlockB (+0x30) is deliberately NOT relocated
+ *          and stays an offset, so its consumers compute model + [+0x30].
+ *   +0x04  the field documented as `always3` is OVERWRITTEN with a pointer to a
+ *          shared object at gp+0x588. It is a runtime slot, not model data.
+ *
+ * Then 0x8006C214 rescales three of the undecoded blocks. The vertex array is
+ * NOT touched — model vertices are already at world scale — but:
+ *
+ *   block B  is an 8-entry table of u16 chain heads (which is why 821 of 965
+ *            models have "16 zero bytes" there: eight empty chains). Each chain
+ *            node is {u16 countAndFlags; u16 nextOffset; entry[count & 0x7F]},
+ *            with each entry two u16 — and BOTH are multiplied by 10 at load.
+ *   block C  is a chain of records whose s16 at +0 is multiplied by 10 and
+ *            whose word at +4 is the byte delta to the next record.
+ *   block D  is a run of 20-byte records ending at a zero word, with three u16
+ *            at +12, +14 and +16 each multiplied by 5.
+ *
+ * The scale factors are the interesting part. Ten is the world's own lattice
+ * step, so block B and block C hold spatial quantities stored at a tenth of
+ * runtime scale — which is what a per-part translation would look like, and
+ * block B is per-instance and present only on articulated models. That is now
+ * the best lead for the missing transforms; it is not yet a decode.
  */
 #ifndef Q2PSX_MODEL_H
 #define Q2PSX_MODEL_H
@@ -190,9 +220,46 @@ typedef struct q2_model_part {
 typedef struct q2_model_face {
     u8 v[4];             /* indices into the SCRATCH window, not the vertex array */
     u8 uv[4][2];
-    u8 flags;            /* 12 distinct values 0..11; meaning unknown           */
-    u8 texture;
+    u8 flags;            /* bits 0-4 texture page, bits 5-7 blend selector      */
+    u8 texture;          /* CLUT index within the map's SECOND palette section  */
 } q2_model_face;
+
+/*
+ * What `flags` and `texture` mean, from the model emitter at 0x8006A2C4 — the
+ * same shape as the world renderer's, with one difference that matters.
+ *
+ *   POLY.tpage = tpageTable[flags & 0x1F] | blendTable[flags >> 5]
+ *   POLY.code  = codeTable[flags >> 5] | 0x3C
+ *   POLY.clut  = clutIdTable[clut4_count_a + texture]      <-- the difference
+ *
+ * The world indexes the CLUT array from zero; a model face is offset by the
+ * map's `clut4_count_a`. That is what the previously unexplained split of the
+ * CLUT count into two bytes has always been: **section A is the world's
+ * palettes, section B is the models'**. The engine only ever uses their sum to
+ * size the upload, which is why the split looked vestigial from the data side.
+ *
+ * Checked disc-wide by `q2psx-inspect cluts` over all 138,290 faces: not one
+ * has `texture >= clut4_count_b`, not one sets a blend bit — every model face
+ * on this disc is opaque — and not one names a texture page the map does not
+ * upload. The highest `texture` seen is 180 against a largest `clut4_count_b`
+ * of 181, so the fit is tight rather than permissive.
+ */
+Q2PSX_INLINE u32 q2_model_face_page(const q2_model_face *f)
+{
+    return (u32)(f->flags & 0x1F);
+}
+
+Q2PSX_INLINE u32 q2_model_face_blend(const q2_model_face *f)
+{
+    return (u32)(f->flags >> 5);
+}
+
+/* `clut4_count_a` comes from the map's VRAM section; see vram.h. */
+Q2PSX_INLINE u32 q2_model_face_clut_index(const q2_model_face *f,
+                                          u32 clut4_count_a)
+{
+    return clut4_count_a + (u32)f->texture;
+}
 
 /* One model located inside a chunk. Borrows the chunk's buffer. */
 typedef struct q2_model {

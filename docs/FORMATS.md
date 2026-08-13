@@ -383,9 +383,13 @@ typedef struct {            /* 16 bytes == a PSX GPU POLY_GT4/FT4 payload */
     uint8_t  v[4];          /* CONFIRMED: index into the shared SCRATCH window,
                              * not into the model's vertex array. Max 90 disc-wide. */
     uint8_t  uv[4][2];      /* CONFIRMED: per-corner texture coords, full 0..255    */
-    uint8_t  flags;         /* UNKNOWN: 12 distinct values 0..11, multi-bit field   */
-    uint8_t  texture;       /* INFERRED: 0..175, 172 distinct. Target texture set is
-                             * NOT in COMMON.DAT.                                   */
+    uint8_t  flags;         /* CONFIRMED: bits 0-4 texture-page index, bits 5-7 the
+                             * blend selector — never set on this disc, so every
+                             * model face is opaque. The "12 distinct values 0..11"
+                             * are simply the twelve texture pages.                 */
+    uint8_t  texture;       /* CONFIRMED: CLUT index into the map's SECOND palette
+                             * section: clutIdTable[clut4_count_a + texture].
+                             * 0..180 against a largest clut4_count_b of 181.       */
     uint16_t zero;          /* CONFIRMED: 0 in all 138,290 faces on the disc — the
                              * earlier figure of 76,320 covered COMMON.DAT only.    */
 } q2p_face;
@@ -482,11 +486,35 @@ against +0.2450 / 65.51 % for whole-model absolute.
 > *is* confirmed: `(size − 12) % 4 == 0` on 1,723/1,723, and `u16@0 == 1` in exactly the 1,265 single-frame
 > models, where `u16@2` is 0 and `u16@10` is 4.
 
-> **NOT LOCATED — the `CastList` consumer in the EXE.** The field name `vertBase` rests on statistical fit,
-> not on code. Over all 174,592 instructions in `[0x80018000, 0x800B2800)`, **zero** of the 60
-> `addiu rX,rX,8` sites read `lbu` at `+2` *and* `+3` off that register, so nothing walks the 8-byte part
-> record; only 1 of 200 `addiu rX,rX,16` sites has ≥ 3 `lbu` off the same register. Consistent with the
-> loader relocating the structure before use.
+> **THE `CastList` CONSUMER — LOCATED.** The earlier "not located" finding was right about the *part*
+> record and wrong about the chunk: the loader relocates the structure before anything reads it, so the code
+> that matters addresses pointers, not on-disc offsets.
+>
+> * `0x8006D124` — relocation. Walks the bank as a **linked list**, turning `ofsEnd` into an absolute
+>   next-pointer, and rewrites `ofsFaces`, `ofsVerts`, `ofsParts`, `ofsBlockA`, `ofsBlockC` and `ofsBlockD`
+>   into absolute pointers. **`ofsBlockB` is deliberately left relative.** It also overwrites the field
+>   documented as `always3` at `+0x04` with a pointer to a shared object at `gp+0x588`, so that field is a
+>   runtime slot rather than model data — a port must not treat the 3 as meaningful.
+> * `0x8006C214` — the load-time rescale, described below.
+> * `0x8006A2C4` — the model's `POLY_GT4` emitter, 16-byte face stride, 52-byte packet stride. This is what
+>   settled `face.flags` and `face.texture`.
+>
+> The `vertBase` name still rests on statistical fit: none of these three reads the 8-byte part record, which
+> remains consistent with the parts being consumed through a path not yet followed.
+>
+> **What `0x8006C214` does to blocks B, C and D.** The vertex array is untouched — model vertices are already
+> at world scale — but three blocks are rescaled in place:
+>
+> | block | structure | scaling |
+> | --- | --- | --- |
+> | B (`+0x30`) | 8 `u16` chain heads; node `{u16 countAndFlags; u16 next; entry[count & 0x7F]}`, entry = two `u16` | both `u16` of every entry **×10** |
+> | C (`+0x34`) | chain of records; `s16` at `+0`, word at `+4` is the byte delta to the next | the `s16` **×10** |
+> | D (`+0x38`) | 20-byte records, terminated by a zero word at `+0` | three `u16` at `+12`, `+14`, `+16` **×5** |
+>
+> Block B being an 8-entry head table is what the earlier measurement saw as "exactly 16 zero bytes in
+> 821/965 models": eight empty chains. The ×10 is the world's own lattice step, so blocks B and C hold
+> spatial quantities stored at a tenth of runtime scale — which is what a per-part translation looks like,
+> and block B is per-instance and populated only on articulated models. Best current lead for §2a.
 >
 > The fixed-size effect renderer at `0x80064780` is a useful *analogy* but is **not** corroboration: its loop
 > bound is `slti $v0,$s3,79` at `0x80064BC4` (79 faces, not 54), its face stride is `addiu $s2,$s2,4` at
