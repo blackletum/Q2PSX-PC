@@ -15,6 +15,8 @@
 #include "ident.h"
 #include "level.h"
 #include "points.h"
+#include "population.h"
+#include "trigger.h"
 #include "raster.h"
 #include "scene.h"
 #include "sim.h"
@@ -528,6 +530,12 @@ static int cmd_verify(disc *d)
     unsigned long long names_total = 0;
     unsigned long long convex_ok = 0;
     unsigned long long convex_bad = 0;
+    unsigned long long pop_groups = 0;
+    unsigned long long pop_spawns = 0;
+    unsigned long long pop_places = 0;
+    unsigned long long pop_paths = 0;
+    unsigned long long trig_total = 0;
+    unsigned long long trig_planes = 0;
 
     printf("Verifying every level file against the typed schema...\n\n");
 
@@ -562,6 +570,50 @@ static int cmd_verify(disc *d)
                 } else {
                     printf("  startpos: bad  %s\n", f->path);
                     failed++;
+                }
+
+                /* Population: actor and pickup placement, plus patrol graphs. */
+                {
+                    q2_population pop;
+                    if (q2_population_parse(&pop, &cf) == Q2_OK) {
+                        u32 gi;
+                        pop_groups += pop.group_count;
+                        for (gi = 0; gi < pop.group_count; gi++) {
+                            q2_pop_group g;
+                            u32 slot;
+
+                            if (!q2_pop_get_group(&pop, gi, &g))
+                                continue;
+
+                            if (q2_pop_group_is_path(&g)) {
+                                q2_pop_path pn;
+                                for (slot = 0; q2_pop_get_path(&pop, &g, slot, &pn); slot++)
+                                    pop_paths++;
+                            } else {
+                                q2_pop_spawn sp2;
+                                for (slot = 0; q2_pop_get_spawn(&pop, &g, slot, &sp2); slot++)
+                                    pop_spawns++;
+                            }
+
+                            {
+                                q2_pop_place pl2;
+                                for (slot = 0; q2_pop_get_place(&pop, &g, slot, &pl2); slot++)
+                                    pop_places++;
+                            }
+                        }
+                    }
+                }
+
+                /* Trigger volumes. */
+                {
+                    q2_triggers tg;
+                    if (q2_triggers_parse(&tg, &cf) == Q2_OK) {
+                        trig_total += tg.count;
+                        trig_planes += tg.plane_count;
+                    } else {
+                        printf("  trigbounds: bad  %s\n", f->path);
+                        failed++;
+                    }
                 }
 
                 if (q2_lights_parse(&lights, &cf) == Q2_OK) {
@@ -756,6 +808,9 @@ static int cmd_verify(disc *d)
                ? 100.0 * (double)convex_ok / (double)(convex_ok + convex_bad) : 0.0,
            convex_bad);
     printf("  spawns     : %llu\n", spawns_total);
+    printf("  triggers   : %llu volumes, %llu planes\n", trig_total, trig_planes);
+    printf("  population : %llu groups, %llu actors, %llu placements, %llu path nodes\n",
+           pop_groups, pop_spawns, pop_places, pop_paths);
     printf("  lights     : %llu, %llu failing the radius invariant\n",
            lights_total, lights_bad);
     printf("  failed     : %d\n", failed);

@@ -13,6 +13,8 @@ add_library(q2psx_formats STATIC
     level.h
     model.c
     model.h
+    population.c
+    population.h
     points.c
     points.h
     trigger.c
