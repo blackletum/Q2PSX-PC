@@ -418,6 +418,17 @@ int cmd_xrefs(const disc *d, const char *addr_s)
                     printf("  const %08X  %s\n", a, in.text);
                     n_const++;
                 }
+                /*
+                 * The register now holds the FORMED address, not the high half.
+                 * Keeping the high half here is what made this command miss
+                 * every access written as `lw rX, 4(base)` — which is how this
+                 * compiler reaches the second and third fields of a global
+                 * struct, so the misses were systematic rather than rare.
+                 */
+                if (in.rt < 32 && in.rt != 0) {
+                    pending[in.rt]     = true;
+                    pending_val[in.rt] = v;
+                }
             }
 
             if ((in.kind == Q2_MIPS_LOAD || in.kind == Q2_MIPS_STORE)) {

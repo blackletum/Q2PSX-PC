@@ -19,8 +19,14 @@ Animation followed, and is now complete. There are no per-part matrices to find 
 a keyframed translation and quaternion in `CastList` block C. All 399 articulated models pose, and all 4,535
 clips play, including the 3,241 variable-rate ones (#2c) — 2,036,080 keys decoded with none out of range.
 
-What remains blocking is simulation, not appearance: the `Events` per-frame integrators (#4a), which are
-what make doors and lifts move.
+Doors and lifts followed (#4a). The per-frame integrator turned out to be a seven-state machine that never
+touches geometry — it accumulates a displacement in its runtime object and the zone draw adds it — which is
+why an earlier pass, having proved every node in a zone shares one origin, wrongly concluded movers could not
+displace anything.
+
+Nothing in Tier 1 is blocking any more. What is left is correctness and completeness: collision planes are
+only 95.6 % confirmed (#5), draw order is unimplemented (#7), and spawn classes cannot be mapped to models
+(#10), so the world is not yet populated.
 
 Full structural detail, evidence and confidence markers live in [`FORMATS.md`](./FORMATS.md).
 
@@ -195,7 +201,15 @@ The residues of the resolved blockers keep their parents' numbers.
       partition (0.68…7.12 entries per scene node). Blocks correct dynamic/ambient lighting.
 - [ ] **10. `Population` `spawn.classId` target table.** 25 distinct values 0…37; 15 of 673 records exceed
       the map's `ModelNames` count and name resolution yields semantically wrong results. Monsters and items
-      cannot be mapped to classes until it is found.
+      cannot be mapped to classes until it is found — which is now the main thing standing between the port
+      and a *populated* world, since every model can be drawn and posed.
+      *Where to resume.* `Population` is installed by `0x800575D8`, which walks the 24-byte group table,
+      relocates each group's spawn and place offsets, and hands the last group's name and both list pointers
+      to `0x8006D2EC`, which parks them at `0x800DD950`, `0x800DD954` and `0x800DD958`. A second setter at
+      `0x8006D430` writes the same slots. No *reader* of those globals has been found yet, and that is the
+      next thing to look for: whatever reads them is what interprets `classId`.
+      The place records' `id` (0…56) is a separate but related target — `src/game/pickup.h` is deliberately
+      built to take a caller-supplied id table so the decoded one drops in without touching the module.
 - [x] **11. `MapMod` `Poly.uvIdxFlags` bits 6–7. — RESOLVED as a UV rotation; kept in Tier 0 above.**
 - [ ] **12. `Scene` node fields `flags08`, `unk0C`, `unk0D`, `unk0E`.** `unk0E` (0…197, 119 distinct values,
       non-zero on all but 3 of 17,035 nodes) is the highest-value single byte in the zone format.
