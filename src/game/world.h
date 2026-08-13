@@ -28,6 +28,16 @@ typedef struct q2_world_zone {
     q2_scene     scene;
     q2_points    points;
     char         name[64];
+
+    /*
+     * Optional diagnostic: when non-NULL, only nodes whose byte is non-zero are
+     * drawn. It exists so a single piece of geometry — one door, one lift — can
+     * be isolated from the 17,000 nodes around it, which is the only practical
+     * way to tell a fault in one entity apart from a fault in the renderer.
+     * Owned by the caller; NULL means draw everything.
+     */
+    const u8    *node_filter;
+    u32          node_filter_count;
 } q2_world_zone;
 
 /* Load "<map>/ZONE<index>.DAT" from the disc. */
@@ -54,6 +64,7 @@ typedef struct q2_world_stats {
     u32 quads_emitted;
     u32 quads_rejected_near;   /* GTE reported a divide overflow  */
     u32 quads_rejected_bad;    /* malformed record or bad indices */
+    u32 quads_no_uv;           /* UV lookup failed; drawn untextured */
     u32 ot_overflow;           /* primitive pool was full         */
 } q2_world_stats;
 

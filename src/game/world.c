@@ -1,6 +1,7 @@
 #include "world.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "trig.h"
@@ -100,6 +101,13 @@ void q2_world_bounds(const q2_world_zone *z, s32 min_out[3], s32 max_out[3])
         if (!q2_scene_get_node(&z->scene, n, &node))
             continue;
 
+        /* Scene node count and Points group count come from different headers
+         * with nothing in the format tying them together. They agree on every
+         * zone of the disc (17,035/17,035), but agreeing is not being
+         * guaranteed, and this indexes one by the other. */
+        if (n >= z->points.group_count)
+            continue;
+
         grp = &z->points.groups[n];
 
         for (k = 0; k < grp->count; k++) {
@@ -173,10 +181,20 @@ u32 q2_world_build_ot(const q2_world_zone *z,
         u32 p;
         s32 translation[3];
 
+        if (z->node_filter && n < z->node_filter_count && !z->node_filter[n])
+            continue;
+
         if (!q2_scene_get_node(&z->scene, n, &node))
             continue;
         if (!q2_scene_get_mapmod(&z->scene, n, &rec)) {
             if (stats) stats->quads_rejected_bad++;
+            continue;
+        }
+
+        /* See the matching check in q2_world_bounds: these two counts come from
+         * separate headers and nothing in the format ties them together. */
+        if (n >= z->points.group_count) {
+            if (stats) stats->quads_rejected_bad += rec.num_polys;
             continue;
         }
 
@@ -307,12 +325,31 @@ u32 q2_world_build_ot(const q2_world_zone *z,
                     }
                 }
 
+                /*
+                 * UV corners map straight through: uv[i] belongs to vertex i.
+                 *
+                 * The tempting alternative is that the UV table is in libgpu's
+                 * Z order while the vertices run around the perimeter, which
+                 * would mean swapping corners 2 and 3. It was tested by
+                 * rendering both ways: the swap visibly corrupts flat surfaces
+                 * (panel edges fragment, light fixtures garble), so the table
+                 * uses the same perimeter winding as vtx[].
+                 *
+                 * The else is not dead code even though the lookup currently
+                 * succeeds for all 274,936 polygons on the disc: prim comes from
+                 * a zeroed pool, so a silent failure would collapse the quad
+                 * onto texel (0,0) and read as a flat blob rather than as a
+                 * fault. Mirror what the RGB path above does and be explicit.
+                 */
                 if (rec.uv && poly.uv_idx < rec.uv_count) {
                     const u8 *uv = rec.uv + (size_t)poly.uv_idx * 8;
                     for (i = 0; i < 4; i++) {
                         prim->uv[i].u = uv[i * 2 + 0];
                         prim->uv[i].v = uv[i * 2 + 1];
                     }
+                } else {
+                    prim->kind = PSX_PRIM_G4;   /* Gouraud, untextured. */
+                    if (stats) stats->quads_no_uv++;
                 }
 
                 /*

@@ -993,7 +993,11 @@ typedef struct {                /* record header */
 
 typedef struct {                /* 12 bytes; maps onto a PSX POLY_GT4 */
     uint8_t  vtx[4];            /* CONFIRMED: indices into this node's Points group,
-                                 * PSX quad (Z) order. 0 out-of-range in 274,936      */
+                                 * 0 out-of-range in 274,936. Corners run around the
+                                 * PERIMETER, not libgpu's Z order -- assuming Z makes
+                                 * every quad a bowtie. The UV table below uses the
+                                 * same perimeter winding: rendering it both ways
+                                 * shows the 2<->3 swap corrupting flat surfaces.     */
     uint8_t  col[4];            /* CONFIRMED: per-corner index into the record's RGB
                                  * table (Gouraud). Proven by the colour-table size
                                  * identity holding in 17035/17035.                  */
@@ -2242,6 +2246,9 @@ numbers so that nothing downstream needs renumbering.
     is found, monsters and items cannot be mapped to their classes.
 11. **`MapMod` `Poly.uvIdxFlags` bits 6–7.** Render flags on 11.7 % of all polygons. Almost certainly
     semi-transparency / double-sided / no-texture; guessing will look wrong on a tenth of the world.
+    Ruled out as a brush-model concern: mover-driven nodes set these bits on 6.24 % of their polygons
+    against 11.84 % for static world nodes, so bmodels are *depleted* (0.53×), not enriched. Whatever
+    these bits do, they do it mostly to the static world. Measured by `q2psx-inspect polyflags`.
 12. **`Scene` node fields `flags08`, `unk0C`, `unk0D`, `unk0E`.** `unk0E` (range 0…197, 119 distinct values,
     non-zero on all but 3 of 17,035 nodes) is the highest-value single byte in the zone format. Find the
     52-byte-stride `Scene` reader in the EXE and see what it does with byte 14.

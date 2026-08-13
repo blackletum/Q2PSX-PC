@@ -86,8 +86,21 @@
 typedef struct q2_scene_node {
     u32 mapmod_offset;
     u16 flags;
-    s32 bbox_min[3];
+    s32 bbox_min[3];   /* world space — differs per node */
     s32 bbox_max[3];
+
+    /*
+     * MEASURED: this is NOT a per-node origin despite sitting where one would.
+     * It holds the same value for every node of a zone — 17,035 of 17,035
+     * across all 115 zones — so it is a zone-level offset, and the geometry's
+     * actual position comes from the node's Points group.
+     *
+     * The renderer folds it into the GTE translation, which is correct
+     * precisely because it is uniform. Two things follow, and both matter:
+     * nothing here can be animated to move a brush model (a door has no origin
+     * of its own to slide), and any per-node placement must come from
+     * elsewhere. Verified with `q2psx-inspect polyflags`.
+     */
     s32 origin[3];
 } q2_scene_node;
 

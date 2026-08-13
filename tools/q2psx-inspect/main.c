@@ -905,6 +905,345 @@ static int cmd_verify(disc *d)
 
 /* ------------------------------------------------------------------------- */
 /*
+ * Poly render-flag census, split by whether the owning Scene node is driven by
+ * a mover.
+ *
+ * MapMod Poly.uvIdxFlags bits 6-7 are render flags of unknown meaning, set on
+ * 11.7% of polygons world-wide, and the renderer ignores them. The question
+ * this answers is whether that 11.7% is spread evenly or concentrates on
+ * mover-driven geometry (doors, lifts, plats — the brush-model entities). An
+ * even split rules the flags out as the cause of a bmodel-specific fault;
+ * enrichment on mover nodes makes them the prime suspect.
+ */
+static int cmd_polyflags(disc *d)
+{
+    int i, n = disc_file_count(d);
+    unsigned long long mv[4] = {0,0,0,0}, wd[4] = {0,0,0,0};
+    unsigned long long mv_nodes = 0, wd_nodes = 0, mv_total = 0, wd_total = 0;
+    unsigned long long zones = 0, mover_nodes_seen = 0;
+    unsigned long long mv_uvfail = 0, wd_uvfail = 0;
+    unsigned long long overrun_zones = 0, overrun_nodes = 0, mismatch_zones = 0;
+    unsigned long long origin_const_zones = 0, origin_nodes = 0, origin_same = 0;
+
+    printf("Poly render-flag census (uvIdxFlags bits 6-7), by node kind\n\n");
+
+    for (i = 0; i < n; i++) {
+        const disc_file *f = disc_file_at(d, i);
+        const char *base = strrchr(f->path, '/');
+        q2_buf buf;
+        q2_zone_file zf;
+        q2_scene scene;
+        q2_events ev;
+        q2_mover_set movers;
+        q2_points pts;
+        bool have_pts;
+        u8 *is_mover;
+        u32 node;
+
+        base = base ? base + 1 : f->path;
+        if (strncmp(base, "ZONE", 4) != 0)
+            continue;
+
+        if (disc_read_file(d, f->path, &buf) != Q2_OK)
+            continue;
+        if (q2_zone_open(&zf, &buf) != Q2_OK) {
+            q2_buf_free(&buf);
+            continue;
+        }
+        if (q2_scene_parse(&scene, &zf) != Q2_OK) {
+            q2_zone_close(&zf);
+            continue;
+        }
+
+        zones++;
+
+        /* The renderer indexes points.groups[] by SCENE NODE index without
+         * bounding it. Nothing in the format ties the two counts together, so
+         * measure whether they ever disagree. */
+        have_pts = (q2_points_parse(&pts, &zf) == Q2_OK);
+        if (have_pts) {
+            if (scene.node_count > pts.group_count) {
+                printf("  OVERRUN  %-28s nodes %u > point groups %u\n",
+                       f->path, scene.node_count, pts.group_count);
+                overrun_zones++;
+                overrun_nodes += scene.node_count - pts.group_count;
+            }
+            if (scene.node_count != pts.group_count)
+                mismatch_zones++;
+        }
+
+        is_mover = (u8 *)calloc(scene.node_count ? scene.node_count : 1, 1);
+        if (!is_mover) {
+            q2_zone_close(&zf);
+            continue;
+        }
+
+        if (q2_events_parse_zone(&ev, &zf) == Q2_OK &&
+            q2_movers_build(&movers, &ev) == Q2_OK) {
+            u32 m, k;
+            for (m = 0; m < movers.count; m++) {
+                for (k = 0; k < movers.movers[m].part_count; k++) {
+                    s16 nd = movers.movers[m].node[k];
+                    if (nd >= 0 && (u32)nd < scene.node_count) {
+                        if (!is_mover[nd])
+                            mover_nodes_seen++;
+                        is_mover[nd] = 1;
+                    }
+                }
+            }
+            q2_movers_free(&movers);
+        }
+
+        /* The renderer uses node.origin as the per-node translation. If it is
+         * constant zone-wide it is not a per-node origin at all, and whatever
+         * positions geometry (and whatever a mover would animate) is elsewhere. */
+        {
+            q2_scene_node n0;
+            u32 t, same = 0, total = 0;
+            if (q2_scene_get_node(&scene, 0, &n0)) {
+                for (t = 0; t < scene.node_count; t++) {
+                    q2_scene_node nt;
+                    if (!q2_scene_get_node(&scene, t, &nt))
+                        continue;
+                    total++;
+                    if (nt.origin[0] == n0.origin[0] &&
+                        nt.origin[1] == n0.origin[1] &&
+                        nt.origin[2] == n0.origin[2])
+                        same++;
+                }
+                if (total && same == total)
+                    origin_const_zones++;
+                origin_nodes += total;
+                origin_same  += same;
+            }
+        }
+
+        for (node = 0; node < scene.node_count; node++) {
+            q2_mapmod_rec rec;
+            u32 p;
+            int is_mv = is_mover[node];
+
+            if (!q2_scene_get_mapmod(&scene, node, &rec))
+                continue;
+
+            if (is_mv) mv_nodes++; else wd_nodes++;
+
+            for (p = 0; p < rec.num_polys; p++) {
+                q2_mapmod_poly poly;
+                if (!q2_mapmod_get_poly(&rec, p, &poly))
+                    continue;
+                if (is_mv) { mv[poly.flags & 3]++; mv_total++; }
+                else       { wd[poly.flags & 3]++; wd_total++; }
+
+                /* The renderer silently keeps zeroed UVs when this lookup
+                 * fails, collapsing the quad onto one texel. Count it. */
+                if (!rec.uv || poly.uv_idx >= rec.uv_count) {
+                    if (is_mv) mv_uvfail++; else wd_uvfail++;
+                }
+            }
+        }
+
+        free(is_mover);
+        if (have_pts)
+            q2_points_free(&pts);
+        q2_zone_close(&zf);
+    }
+
+    printf("  zones scanned        : %llu\n", zones);
+    printf("  mover-driven nodes   : %llu (%llu carry geometry)\n",
+           mover_nodes_seen, mv_nodes);
+    printf("  static world nodes   : %llu\n", wd_nodes);
+    printf("  polys  bmodel/world  : %llu / %llu\n\n", mv_total, wd_total);
+
+    printf("  flag    bmodel %%     world %%     bmodel n\n");
+    for (i = 0; i < 4; i++) {
+        printf("    %d    %9.3f   %9.3f   %10llu\n", i,
+               mv_total ? 100.0 * (double)mv[i] / (double)mv_total : 0.0,
+               wd_total ? 100.0 * (double)wd[i] / (double)wd_total : 0.0,
+               mv[i]);
+    }
+
+    {
+        double mv_set = mv_total
+            ? 100.0 * (double)(mv_total - mv[0]) / (double)mv_total : 0.0;
+        double wd_set = wd_total
+            ? 100.0 * (double)(wd_total - wd[0]) / (double)wd_total : 0.0;
+        printf("\n  any flag set: bmodel %.2f%%  world %.2f%%", mv_set, wd_set);
+        if (wd_set > 0.0)
+            printf("   (enrichment %.2fx)", mv_set / wd_set);
+        printf("\n");
+    }
+
+    printf("\n  UV lookup failures (quad collapses to one texel):\n");
+    printf("    bmodel %llu / %llu    world %llu / %llu\n",
+           mv_uvfail, mv_total, wd_uvfail, wd_total);
+
+    printf("\n  Scene node.origin (the renderer's per-node translation):\n");
+    printf("    zones where it is CONSTANT     : %llu / %llu\n",
+           origin_const_zones, zones);
+    printf("    nodes sharing node 0's origin  : %llu / %llu\n",
+           origin_same, origin_nodes);
+
+    printf("\n  Scene nodes vs Points groups:\n");
+    printf("    zones where the counts differ : %llu / %llu\n",
+           mismatch_zones, zones);
+    printf("    zones the renderer overruns   : %llu (%llu nodes past the end)\n",
+           overrun_zones, overrun_nodes);
+
+    return 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * Render one brush-model entity (a mover group: door, lift, plat) on its own,
+ * framed to fill the view.
+ *
+ * Drawing a door surrounded by 17,000 other nodes makes it very hard to tell a
+ * fault in that door apart from a fault in the renderer. Isolating it, and
+ * framing on its own bounds, makes the geometry and its texturing legible.
+ */
+static int cmd_bmodel(disc *d, const char *map, int zone_index, int which,
+                      const char *out_path)
+{
+    q2_world_zone zone;
+    q2_camera cam;
+    psx_ot ot;
+    gte_state gte;
+    psx_framebuffer fb;
+    psx_raster_opts opts;
+    psx_vram *vram = NULL;
+    q2_world_stats stats;
+    q2_events ev;
+    q2_mover_set movers;
+    u8 *mask = NULL;
+    s32 bmin[3], bmax[3];
+    bool any = false;
+    u32 m, k;
+    const int W = 512, H = 480;
+
+    if (q2_world_load_zone(&zone, d, map, zone_index) != Q2_OK) {
+        fprintf(stderr, "cannot load %s zone %d\n", map, zone_index);
+        return 1;
+    }
+
+    if (q2_events_parse_zone(&ev, &zone.zone) != Q2_OK ||
+        q2_movers_build(&movers, &ev) != Q2_OK) {
+        fprintf(stderr, "no movers in %s zone %d\n", map, zone_index);
+        q2_world_free_zone(&zone);
+        return 1;
+    }
+
+    printf("%s zone %d: %u mover groups\n", map, zone_index, movers.count);
+
+    mask = (u8 *)calloc(zone.scene.node_count ? zone.scene.node_count : 1, 1);
+    if (!mask) {
+        q2_movers_free(&movers);
+        q2_world_free_zone(&zone);
+        return 1;
+    }
+
+    bmin[0] = bmin[1] = bmin[2] =  0x7FFFFFFF;
+    bmax[0] = bmax[1] = bmax[2] = -0x7FFFFFFF;
+
+    for (m = 0; m < movers.count; m++) {
+        if (which >= 0 && (u32)which != m)
+            continue;
+        for (k = 0; k < movers.movers[m].part_count; k++) {
+            s16 nd = movers.movers[m].node[k];
+            q2_scene_node node;
+            s32 nmin[3], nmax[3];
+            int a;
+
+            if (nd < 0 || (u32)nd >= zone.scene.node_count)
+                continue;
+            if (!q2_scene_get_node(&zone.scene, (u32)nd, &node))
+                continue;
+
+            mask[nd] = 1;
+            q2_scene_node_bounds(&node, nmin, nmax);
+            for (a = 0; a < 3; a++) {
+                if (nmin[a] < bmin[a]) bmin[a] = nmin[a];
+                if (nmax[a] > bmax[a]) bmax[a] = nmax[a];
+            }
+            any = true;
+            printf("  group %u part %u -> node %d  origin [%d %d %d]\n",
+                   m, k, nd, node.origin[0], node.origin[1], node.origin[2]);
+        }
+    }
+
+    q2_movers_free(&movers);
+
+    if (!any) {
+        fprintf(stderr, "no geometry-bearing mover nodes selected\n");
+        free(mask);
+        q2_world_free_zone(&zone);
+        return 1;
+    }
+
+    zone.node_filter       = mask;
+    zone.node_filter_count = zone.scene.node_count;
+
+    printf("  bmodel bounds : [%d %d %d] .. [%d %d %d]\n",
+           bmin[0], bmin[1], bmin[2], bmax[0], bmax[1], bmax[2]);
+
+    /* Frame it: stand back along -Z by its largest extent. */
+    q2_camera_default(&cam, W, H);
+    {
+        s32 ex = bmax[0] - bmin[0];
+        s32 ey = bmax[1] - bmin[1];
+        s32 ez = bmax[2] - bmin[2];
+        s32 extent = ex > ey ? ex : ey;
+        if (ez > extent) extent = ez;
+        if (extent < 64) extent = 64;
+
+        cam.pos[0] = (bmin[0] + bmax[0]) / 2;
+        cam.pos[1] = (bmin[1] + bmax[1]) / 2;
+        cam.pos[2] = (bmin[2] + bmax[2]) / 2 - extent;
+        cam.yaw = 0;
+        cam.pitch = 0;
+    }
+
+    if (psx_ot_init(&ot, 4096, 300000) != Q2_OK ||
+        psx_fb_init(&fb, W, H) != Q2_OK) {
+        free(mask);
+        q2_world_free_zone(&zone);
+        return 1;
+    }
+    vram = (psx_vram *)calloc(1, sizeof(psx_vram));
+    if (!vram) { free(mask); q2_world_free_zone(&zone); return 1; }
+
+    q2_world_build_ot(&zone, &cam, W, H, &ot, &gte, &stats);
+    printf("  quads emitted : %u of %u\n", stats.quads_emitted, stats.quads_total);
+
+    psx_raster_opts_default(&opts);
+    {
+        q2_vram_section vs;
+        if (q2_vram_load(&vs, d, map) == Q2_OK) {
+            if (q2_vram_upload(&vs, vram) != Q2_OK)
+                opts.textures = false;
+            q2_vram_free(&vs);
+        } else {
+            opts.textures = false;
+        }
+    }
+
+    psx_fb_clear(&fb, psx_rgb555(4, 4, 10));
+    psx_raster_ot(&fb, &ot, vram, &opts);
+
+    if (psx_fb_write_ppm(&fb, out_path) == Q2_OK)
+        printf("  wrote %s\n", out_path);
+
+    psx_fb_free(&fb);
+    psx_ot_free(&ot);
+    free(vram);
+    free(mask);
+    zone.node_filter = NULL;
+    q2_world_free_zone(&zone);
+    return 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/*
  * Render a zone to a PPM. This is the end-to-end test of the geometry path:
  * disc -> zone chunks -> GTE -> ordering table -> rasteriser -> pixels, with no
  * window and no GPU involved. If this produces a coherent image, every layer
@@ -2044,6 +2383,18 @@ int main(int argc, char **argv)
         rc = cmd_dats(d);
     } else if (strcmp(cmd, "verify") == 0) {
         rc = cmd_verify(d);
+    } else if (strcmp(cmd, "polyflags") == 0) {
+        rc = cmd_polyflags(d);
+    } else if (strcmp(cmd, "bmodel") == 0) {
+        if (argc < 4) {
+            fprintf(stderr, "bmodel needs a map name\n");
+            rc = 1;
+        } else {
+            int zi = (argc >= 5) ? atoi(argv[4]) : 0;
+            int wh = (argc >= 6) ? atoi(argv[5]) : -1;
+            const char *outp = (argc >= 7) ? argv[6] : "bmodel.ppm";
+            rc = cmd_bmodel(d, argv[3], zi, wh, outp);
+        }
     } else if (strcmp(cmd, "audio") == 0) {
         rc = cmd_audio(d);
     } else if (strcmp(cmd, "leveltable") == 0) {
