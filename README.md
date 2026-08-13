@@ -111,6 +111,19 @@ build/bin/q2psx-inspect render "Quake II (Europe).cue" BASE0 0 out.ppm 0 1024
 brought up before the client existed, and it remains the quickest way to check a
 change end to end.
 
+It also reads the *code*. The remaining unknowns are questions about the original
+executable, so the tool carries a PS-X EXE loader and an R3000A disassembler and
+answers them from the disc, with no external disassembler in the loop:
+
+```bash
+build/bin/q2psx-inspect exe    "Quake II (Europe).cue"              # map + landmarks
+build/bin/q2psx-inspect disasm "Quake II (Europe).cue" 0x80076378   # to the return
+build/bin/q2psx-inspect xrefs  "Quake II (Europe).cue" 0x80068A58   # calls, constants, tables
+```
+
+`exe` re-checks nine addresses that `docs/FORMATS.md` makes claims about, so a
+documentation drift against the real executable fails the command.
+
 ## Legal
 
 This repository contains **no game assets and no id Software or Hammerhead code**. It is

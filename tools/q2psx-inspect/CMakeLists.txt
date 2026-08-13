@@ -1,4 +1,4 @@
-add_executable(q2psx-inspect main.c)
+add_executable(q2psx-inspect main.c cmd_exe.c)
 
 target_link_libraries(q2psx-inspect PRIVATE
     q2psx_common

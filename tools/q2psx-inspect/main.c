@@ -8,6 +8,7 @@
  */
 #include "aimodule.h"
 #include "area.h"
+#include "cmd_exe.h"
 #include "collision.h"
 #include "dat.h"
 #include "disc.h"
@@ -69,6 +70,12 @@ static void usage(void)
     puts("  render  <disc> <map> [z] [out.ppm] [yaw] [pitch]  render a zone (4096 = full turn)");
     puts("  hexdump <disc> <path> [n]   hex dump the first n bytes of a file");
     puts("  extract <disc> <outdir>     extract the whole filesystem");
+    puts("");
+    puts("executable:");
+    puts("  exe     <disc>              header, memory map and documented landmarks");
+    puts("  disasm  <disc> <addr> [n]   disassemble n instructions (0 = to the return)");
+    puts("  xrefs   <disc> <addr>       every reference to an address, code and data");
+    puts("  funcs   <disc> [addr]       call targets found by sweeping the image");
     puts("");
     puts("<disc> may be a .cue, .bin, .img or .iso.");
 }
@@ -2444,6 +2451,25 @@ int main(int argc, char **argv)
                 count = (size_t)strtoul(argv[4], NULL, 0);
             rc = cmd_hexdump(d, argv[3], count);
         }
+    } else if (strcmp(cmd, "exe") == 0) {
+        rc = cmd_exe(d);
+    } else if (strcmp(cmd, "disasm") == 0) {
+        if (argc < 4) {
+            fprintf(stderr, "disasm needs an address\n");
+            rc = 1;
+        } else {
+            int n = (argc >= 5) ? atoi(argv[4]) : 0;
+            rc = cmd_disasm(d, argv[3], n);
+        }
+    } else if (strcmp(cmd, "xrefs") == 0) {
+        if (argc < 4) {
+            fprintf(stderr, "xrefs needs an address\n");
+            rc = 1;
+        } else {
+            rc = cmd_xrefs(d, argv[3]);
+        }
+    } else if (strcmp(cmd, "funcs") == 0) {
+        rc = cmd_funcs(d, (argc >= 4) ? argv[3] : NULL);
     } else if (strcmp(cmd, "extract") == 0) {
         if (argc < 4) {
             fprintf(stderr, "extract needs an output directory\n");

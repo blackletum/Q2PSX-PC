@@ -25,10 +25,12 @@ SLPM_*
 SCES_*
 SYSTEM.CNF
 
-# Build output. The pattern is deliberately broad: -DQ2PSX_FETCH_SDL3=ON checks
-# a whole third-party git repository out under the build tree, and a narrow
-# "build/" rule would let that get staged.
-build*/
+# Build output. The pattern must stay ANCHORED: an unanchored "build*/" also
+# matches src/build/, the release-identification layer, and silently kept every
+# file in it out of the repository. It still covers the third-party checkout
+# that -DQ2PSX_FETCH_SDL3=ON drops under the build tree, because that tree is
+# itself a top-level build directory.
+/build*/
 out/
 cmake-build-*/
 _deps/
