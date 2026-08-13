@@ -45,6 +45,23 @@
  * That is the next piece of work; this scanner exists so the animation data can
  * be examined in the meantime, and so the eventual deterministic reader has
  * something to be checked against.
+ *
+ * ---------------------------------------------------------------------------
+ * One explanation ruled out, so nobody spends a day on it
+ * ---------------------------------------------------------------------------
+ * A creature's spawn routine resolves its animations BY NAME at load and writes
+ * the results into module BSS, which suggests the obvious theory that the
+ * first/last frame fields are empty on disc and my scanner was validating
+ * placeholder zeros.
+ *
+ * That is wrong. Measured across the 13 COMMON.DAT modules: of the records with
+ * a valid frames pointer, 252 carry a non-zero frame range and exactly 0 carry
+ * a zero one. The ranges are genuinely present in the file.
+ *
+ * So the over-matching is ordinary false positives from a permissive filter,
+ * not a misunderstanding of where the data lives. The name resolution at spawn
+ * must be doing something else — most likely binding animation NAMES to those
+ * already-populated records rather than filling them in.
  */
 #ifndef Q2PSX_AIMODULE_H
 #define Q2PSX_AIMODULE_H
