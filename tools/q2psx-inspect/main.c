@@ -522,6 +522,8 @@ static int cmd_verify(disc *d)
     unsigned long long links_total = 0;
     unsigned long long links_bad = 0;
     unsigned long long names_total = 0;
+    unsigned long long convex_ok = 0;
+    unsigned long long convex_bad = 0;
 
     printf("Verifying every level file against the typed schema...\n\n");
 
@@ -662,6 +664,47 @@ static int cmd_verify(disc *d)
                                 sub_ok = 0;
                                 continue;
                             }
+                            /* Geometric convexity: an interior point must be on
+                             * the negative side of every plane of its node.
+                             * This is the test that actually validates the
+                             * plane-point encoding; bbox containment does not. */
+                            {
+                                u32 ni2;
+                                for (ni2 = 0; ni2 < coll.node_count; ni2++) {
+                                    q2_coll_node hn, nx2;
+                                    s32 centroid[3] = { 0, 0, 0 };
+                                    u32 k, n_used = 0;
+
+                                    if (!q2_collision_get_node(&coll, ni2, &hn) ||
+                                        !q2_collision_get_node(&coll, ni2 + 1, &nx2))
+                                        continue;
+                                    if (nx2.first_plane <= hn.first_plane)
+                                        continue;
+
+                                    for (k = hn.first_plane; k < nx2.first_plane; k++) {
+                                        s32 pt[3];
+                                        if (!q2_coll_plane_point(&coll, ni2, k, pt))
+                                            continue;
+                                        centroid[0] += pt[0];
+                                        centroid[1] += pt[1];
+                                        centroid[2] += pt[2];
+                                        n_used++;
+                                    }
+                                    if (!n_used)
+                                        continue;
+                                    centroid[0] /= (s32)n_used;
+                                    centroid[1] /= (s32)n_used;
+                                    centroid[2] /= (s32)n_used;
+
+                                    for (k = hn.first_plane; k < nx2.first_plane; k++) {
+                                        if (q2_coll_plane_distance(&coll, ni2, k, centroid) > 0)
+                                            convex_bad++;
+                                        else
+                                            convex_ok++;
+                                    }
+                                }
+                            }
+
                             for (pi = 0; pi < coll.plane_count; pi++) {
                                 q2_coll_plane pl;
                                 s32 len_sq;
@@ -703,6 +746,11 @@ static int cmd_verify(disc *d)
     printf("  areas      : %llu with %llu links (%llu unreadable)\n",
            areas_total, links_total, links_bad);
     printf("  map names  : %llu\n", names_total);
+    printf("  convexity  : %llu/%llu planes consistent (%.3f%%), %llu violations\n",
+           convex_ok, convex_ok + convex_bad,
+           (convex_ok + convex_bad)
+               ? 100.0 * (double)convex_ok / (double)(convex_ok + convex_bad) : 0.0,
+           convex_bad);
     printf("  spawns     : %llu\n", spawns_total);
     printf("  lights     : %llu, %llu failing the radius invariant\n",
            lights_total, lights_bad);

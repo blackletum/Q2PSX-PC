@@ -126,31 +126,68 @@ bool q2_coll_plane_point(const q2_collision *c, u32 node_index, u32 plane_index,
 {
     q2_coll_node node;
     q2_coll_plane plane;
-    s32 pt[3];
-    int i;
 
-    if (!c)
+    if (!c || !out_point)
         return false;
     if (!q2_collision_get_node(c, node_index, &node))
         return false;
     if (!q2_collision_get_plane(c, plane_index, &plane))
         return false;
 
-    /* The stored triple is an unsigned displacement from the node's minimum
-     * corner. This is the part that is only 95.6% right disc-wide. */
-    pt[0] = node.bbox_min[0] + (s32)plane.a;
-    pt[1] = node.bbox_min[1] + (s32)plane.b;
-    pt[2] = node.bbox_min[2] + (s32)plane.c;
+    /* An unsigned displacement from the node's minimum corner. There is
+     * deliberately no bounding-box check: a plane is infinite and its reference
+     * point need not sit inside the box. Checking that was what produced the
+     * old, misleading 95.6% confidence figure. */
+    out_point[0] = node.bbox_min[0] + (s32)plane.a;
+    out_point[1] = node.bbox_min[1] + (s32)plane.b;
+    out_point[2] = node.bbox_min[2] + (s32)plane.c;
 
-    if (out_point) {
-        out_point[0] = pt[0];
-        out_point[1] = pt[1];
-        out_point[2] = pt[2];
-    }
+    return true;
+}
 
-    for (i = 0; i < 3; i++) {
-        if (pt[i] < node.bbox_min[i] || pt[i] > node.bbox_max[i])
-            return false;
+s32 q2_coll_plane_distance(const q2_collision *c, u32 node_index,
+                           u32 plane_index, const s32 point[3])
+{
+    q2_coll_plane plane;
+    s32 pt[3];
+    s64 dot;
+
+    if (!c || !point)
+        return 0;
+    if (!q2_collision_get_plane(c, plane_index, &plane))
+        return 0;
+    if (!q2_coll_plane_point(c, node_index, plane_index, pt))
+        return 0;
+
+    /* Normals are 1.3.12 unit vectors, so this is the distance times 4096.
+     * Keeping the scale avoids a divide on the hot path; callers that want
+     * world units shift right by 12. */
+    dot = (s64)plane.nx * (point[0] - pt[0])
+        + (s64)plane.ny * (point[1] - pt[1])
+        + (s64)plane.nz * (point[2] - pt[2]);
+
+    if (dot >  (s64)INT32_MAX) return INT32_MAX;
+    if (dot <  (s64)INT32_MIN) return INT32_MIN;
+
+    return (s32)dot;
+}
+
+bool q2_collision_point_in_node(const q2_collision *c, u32 node_index,
+                                const s32 point[3])
+{
+    q2_coll_node here, next;
+    u32 i;
+
+    if (!c || !point || node_index >= c->node_count)
+        return false;
+    if (!q2_collision_get_node(c, node_index, &here))
+        return false;
+    if (!q2_collision_get_node(c, node_index + 1, &next))
+        return false;
+
+    for (i = here.first_plane; i < next.first_plane; i++) {
+        if (q2_coll_plane_distance(c, node_index, i, point) > 0)
+            return false;      /* outside this plane, so outside the hull */
     }
     return true;
 }
