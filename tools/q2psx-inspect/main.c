@@ -20,6 +20,7 @@
 #include "population.h"
 #include "trigger.h"
 #include "raster.h"
+#include "reloc.h"
 #include "scene.h"
 #include "sim.h"
 #include "vram.h"
@@ -55,6 +56,7 @@ static void usage(void)
     puts("  dats    <disc>              census every .DAT chunk schema on the disc");
     puts("  verify  <disc>              check every level file against the typed schema");
     puts("  audio   <disc>              decode every sound bank and validate it");
+    puts("  reloc   <disc>              relocate every AI module and census the fixups");
     puts("  events  <disc>              run every event script and census the opcodes");
     puts("  walk    <disc> <map> [z] [ticks]  drop a player in and simulate");
     puts("  textures <disc>             decode every compressed VRAM image");
@@ -1653,6 +1655,110 @@ static int cmd_events(disc *d)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * Relocate every AI and level module on the disc.
+ *
+ * The bar is structural: every fixup offset must land inside its image, every
+ * stream must terminate, and the HI16 addend words must keep the walk in step.
+ * A parse that drifts one word out of phase still consumes most streams
+ * plausibly, so "it did not crash" proves nothing — the type census is the
+ * thing to read, because the residue counts have to decompose exactly.
+ */
+static int cmd_reloc(disc *d)
+{
+    int i, n = disc_file_count(d);
+    u32 modules = 0, empty = 0, failed = 0;
+    unsigned long long fixups = 0, addends = 0, oob = 0;
+    unsigned long long by_type[4] = { 0, 0, 0, 0 };
+
+    printf("Relocating every AI module on the disc...\n\n");
+
+    for (i = 0; i < n; i++) {
+        const disc_file *f = disc_file_at(d, i);
+        const char *base = strrchr(f->path, '/');
+        q2_buf buf;
+        q2_common_file cf;
+
+        base = base ? base + 1 : f->path;
+        if (strncmp(base, "COMMON", 6) != 0)
+            continue;
+
+        if (disc_read_file(d, f->path, &buf) != Q2_OK)
+            continue;
+        if (q2_common_open(&cf, &buf) != Q2_OK) {
+            q2_buf_free(&buf);
+            continue;
+        }
+
+        {
+            const dat_chunk *bin = cf.chunk[Q2_COMMON_CRE_AI_BIN];
+            const dat_chunk *rel = cf.chunk[Q2_COMMON_CRE_AI_REL];
+
+            if (bin && rel && bin->size > Q2_RELOC_CREAI_PREAMBLE &&
+                rel->size > Q2_RELOC_CREAI_PREAMBLE) {
+                q2_reloc_stats st;
+                q2_result r = q2_reloc_scan(rel->data + Q2_RELOC_CREAI_PREAMBLE,
+                                            rel->size - Q2_RELOC_CREAI_PREAMBLE,
+                                            bin->size - Q2_RELOC_CREAI_PREAMBLE,
+                                            &st);
+                if (r == Q2_OK) {
+                    modules++;
+                    fixups  += st.fixups;
+                    addends += st.addend_words;
+                    oob     += st.out_of_range;
+                    by_type[0] += st.by_type[0];
+                    by_type[1] += st.by_type[1];
+                    by_type[2] += st.by_type[2];
+                    by_type[3] += st.by_type[3];
+
+                    /* Now actually relocate it, so the write path is exercised
+                     * and not merely the scan. */
+                    {
+                        q2_ai_module m;
+                        if (q2_ai_module_load(&m, &cf, 0x80100000u) == Q2_OK) {
+                            q2_ai_module_free(&m);
+                        } else {
+                            printf("  RELOCATE FAILED  %s\n", f->path);
+                            failed++;
+                        }
+                    }
+                } else {
+                    printf("  SCAN FAILED  %s: %s\n", f->path, q2_result_str(r));
+                    failed++;
+                }
+            } else {
+                empty++;
+            }
+        }
+
+        q2_common_close(&cf);
+    }
+
+    printf("  modules relocated : %u\n", modules);
+    printf("  maps with none    : %u\n", empty);
+    printf("  failures          : %u\n", failed);
+    printf("  fixups            : %llu\n", fixups);
+    printf("  HI16 addend words : %llu\n", addends);
+    printf("  offsets out of range : %llu\n", oob);
+    printf("\n  type census\n");
+    printf("    WORD32   %llu\n", by_type[0]);
+    printf("    HI16     %llu\n", by_type[1]);
+    printf("    LO16     %llu\n", by_type[2]);
+    printf("    TARGET26 %llu\n", by_type[3]);
+
+    /* The addend count must equal the HI16 count exactly: one raw word each.
+     * If a stream ever drifted, these would diverge. */
+    printf("\n  addends == HI16 count : %s\n",
+           (addends == by_type[1]) ? "yes" : "NO - the walk drifted");
+
+    printf("\n%s\n", (failed == 0 && oob == 0 && addends == by_type[1])
+           ? "PASS - every stream terminates, every target is in range."
+           : "FAIL - see above.");
+
+    return (failed || oob || addends != by_type[1]) ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------------- */
 static int cmd_hexdump(disc *d, const char *path, size_t count)
 {
     q2_buf buf;
@@ -1790,6 +1896,8 @@ int main(int argc, char **argv)
         rc = cmd_verify(d);
     } else if (strcmp(cmd, "audio") == 0) {
         rc = cmd_audio(d);
+    } else if (strcmp(cmd, "reloc") == 0) {
+        rc = cmd_reloc(d);
     } else if (strcmp(cmd, "events") == 0) {
         rc = cmd_events(d);
     } else if (strcmp(cmd, "walk") == 0) {
