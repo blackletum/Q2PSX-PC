@@ -15,7 +15,9 @@
  *     0x00  char[12]  name
  *     0x0C  u32       spawn_offset   chunk-relative; 0 means the group has none
  *     0x10  u32       place_offset   chunk-relative; 0 means none
- *     0x14  u32       zero
+ *     0x14  u32       flags     zero ON DISC; the runtime sets bit 0 when a
+ *                                 script selects the group (0x80056C60) and
+ *                                 tests bit 1 to stop it running twice
  *
  * 76 distinct group names exist game-wide: zone names, script batch names, item
  * categories, and one special path group. An empty Population chunk is 8 bytes.

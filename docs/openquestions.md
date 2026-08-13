@@ -184,7 +184,11 @@ The residues of the resolved blockers keep their parents' numbers.
       plane class?
 - [ ] **6. `LevelBin` / `CreAIBin` module ABI and the `Rel` fixup encoding.**
       Confirmed MIPS R3000; every fixup is a valid in-`Bin` offset, but only 31 % are 4-aligned, so it is not
-      a plain word-address list. Level scripting and monster AI both sit behind this.
+      a plain word-address list. Level scripting and monster AI both sit behind this — and, on the evidence
+      under #10, so does the interpretation of spawn classes, because the executable contains no reader for
+      the Population group the script selects. **This has risen in priority accordingly.** The harness can
+      already relocate every module; what it cannot yet do is disassemble one, which is the same code path
+      as `disasm` pointed at a different buffer.
 
 ---
 
@@ -203,11 +207,22 @@ The residues of the resolved blockers keep their parents' numbers.
       the map's `ModelNames` count and name resolution yields semantically wrong results. Monsters and items
       cannot be mapped to classes until it is found — which is now the main thing standing between the port
       and a *populated* world, since every model can be drawn and posed.
-      *Where to resume.* `Population` is installed by `0x800575D8`, which walks the 24-byte group table,
-      relocates each group's spawn and place offsets, and hands the last group's name and both list pointers
-      to `0x8006D2EC`, which parks them at `0x800DD950`, `0x800DD954` and `0x800DD958`. A second setter at
-      `0x8006D430` writes the same slots. No *reader* of those globals has been found yet, and that is the
-      next thing to look for: whatever reads them is what interprets `classId`.
+      *Where the trail leads, and why it stops.* `Population` is installed by `0x800575D8`, which walks the
+      24-byte group table, relocates each group's spawn and place offsets, and stores the chunk pointer at
+      `gp+0x494`. A script can then select a group by name through `0x80056C60`, which searches that table
+      and hands the group's name and both list pointers to `0x8006D2EC` — parking them at `0x800DD950`,
+      `0x800DD954` and `0x800DD958`. Selecting a group also sets bit 0 of the group record's last word,
+      which the format notes call "always zero": it is zero **on disc** and a runtime flag afterwards.
+      Then the trail stops, and where it stops is the finding: **those three globals have no reader anywhere
+      in the executable.** The sweep that says so is exhaustive over materialised bases as well as
+      `$gp`-relative accesses, and it was re-run after the `xrefs` base-tracking fix that had previously made
+      such misses systematic. Nothing in the 632 KB image consumes the selected group.
+      The natural conclusion is that the consumer is **not in the executable** — it is in the relocatable
+      `LevelBin` / `CreAIBin` modules (#6), which are MIPS code the loader relocates into RAM. That would
+      also explain why `classId` resolves to nothing sensible against any table *in* the EXE.
+      *Next step, and it is a tooling one:* point the disassembler at a relocated module rather than at the
+      executable. The relocation itself already works (`q2psx-inspect reloc`), so this is a matter of
+      disassembling the relocated buffer — which would unblock #6 and #10 together.
       The place records' `id` (0…56) is a separate but related target — `src/game/pickup.h` is deliberately
       built to take a caller-supplied id table so the decoded one drops in without touching the module.
 - [x] **11. `MapMod` `Poly.uvIdxFlags` bits 6–7. — RESOLVED as a UV rotation; kept in Tier 0 above.**
