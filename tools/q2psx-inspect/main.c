@@ -9,6 +9,8 @@
 #include "aimodule.h"
 #include "area.h"
 #include "cmd_exe.h"
+#include "cmd_export.h"
+#include "classtable.h"
 #include "collision.h"
 #include "dat.h"
 #include "disc.h"
@@ -89,12 +91,16 @@ static void usage(void)
     puts("  cluts   <disc>              check CLUT binding and UV rotation on every poly");
     puts("  anims   <disc>              decode every CastList animation clip");
     puts("  fps     <disc> <map> [zone] [weapon] [out.ppm] [yaw]  eye view + HUD");
+    puts("  classes <disc>              the entity class table, checked against every spawn");
     puts("  models  <disc> <map>        list a map's model bank");
     puts("  model   <disc> <map> <name|idx> [clip] [frame] [out.ppm] [yaw]  render one model");
     puts("  music   <disc>              demultiplex and decode the XA music streams");
     puts("  render  <disc> <map> [z] [out.ppm] [yaw] [pitch]  render a zone (4096 = full turn)");
     puts("  hexdump <disc> <path> [n]   hex dump the first n bytes of a file");
     puts("  extract <disc> <outdir>     extract the whole filesystem");
+    puts("  export  <disc> <outdir> [what] [map]  decode assets: OBJ, PCX/PNG, WAV");
+    puts("                              what = all, or a comma-separated subset of");
+    puts("                              maps,models,textures,sounds,music,cdda");
     puts("");
     puts("executable:");
     puts("  exe     <disc> [out.bin]    header, map, landmarks; optionally dump the segment");
@@ -2456,6 +2462,180 @@ static int cmd_model(disc *d, const char *map, const char *want, int clip_index,
     return 0;
 }
 
+/* Does `name` name a model in this map's COMMON bank or in any of its zones? */
+static bool class_has_model(disc *d, const q2_model_bank *common_bank,
+                            const char *common_path, const char *name)
+{
+    char dir[160];
+    const char *slash;
+    u32 m;
+    int z;
+
+    for (m = 0; m < common_bank->count; m++) {
+        q2_model probe;
+        if (q2_model_get(common_bank, m, &probe) != Q2_OK)
+            continue;
+        if (name_casecmp_local(probe.hdr.name, name) == 0)
+            return true;
+    }
+
+    slash = strrchr(common_path, '/');
+    if (!slash)
+        return false;
+    if ((size_t)(slash - common_path) >= sizeof(dir))
+        return false;
+    memcpy(dir, common_path, (size_t)(slash - common_path));
+    dir[slash - common_path] = '\0';
+
+    for (z = 0; z < 8; z++) {
+        char zpath[200];
+        q2_buf zbuf;
+        q2_zone_file zf;
+        q2_model_bank zbank;
+        bool hit = false;
+
+        snprintf(zpath, sizeof(zpath), "%s/ZONE%d.DAT", dir, z);
+        if (disc_read_file(d, zpath, &zbuf) != Q2_OK)
+            continue;
+        if (q2_zone_open(&zf, &zbuf) != Q2_OK) {
+            q2_buf_free(&zbuf);
+            continue;
+        }
+        if (q2_model_bank_from_zone(&zbank, &zf) == Q2_OK) {
+            for (m = 0; m < zbank.count; m++) {
+                q2_model probe;
+                if (q2_model_get(&zbank, m, &probe) != Q2_OK)
+                    continue;
+                if (name_casecmp_local(probe.hdr.name, name) == 0) {
+                    hit = true;
+                    break;
+                }
+            }
+        }
+        q2_zone_close(&zf);
+        if (hit)
+            return true;
+    }
+
+    return false;
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * The entity class table, and whether the disc's spawns resolve through it.
+ *
+ * This is the check the claim needs. Every Population spawn carries a class id;
+ * if this is the right table then every id on the disc names a class, and that
+ * class's name is a model the same map ships.
+ */
+static int cmd_classes(disc *d)
+{
+    q2_build_id id;
+    q2_class_table tbl;
+    u32 i;
+    int f, n = disc_file_count(d);
+    unsigned long long spawns = 0, resolved = 0, with_model = 0;
+    u32 unresolved_ids[64];
+    int unresolved_count = 0;
+
+    if (q2_identify(d, &id) != Q2_OK) {
+        fprintf(stderr, "cannot identify this disc\n");
+        return 1;
+    }
+    if (q2_class_table_load(&tbl, d, &id) != Q2_OK) {
+        fprintf(stderr, "no class table for build %s\n", id.serial);
+        return 1;
+    }
+
+    printf("Entity class table: %u records\n\n", tbl.count);
+    printf("  %-4s %-14s %8s %8s  %s\n", "id", "name", "health", "offset",
+           "kind");
+    for (i = 0; i < tbl.count; i++) {
+        const q2_class_entry *e = &tbl.entries[i];
+        if (!e->name[0])
+            continue;
+        printf("  %-4u %-14s %8d %8d  %s\n", e->id, e->name, e->health,
+               e->offset, e->is_player ? "player skin" : "creature");
+    }
+
+    for (f = 0; f < n; f++) {
+        const disc_file *file = disc_file_at(d, f);
+        const char *base = strrchr(file->path, '/');
+        q2_buf buf;
+        q2_common_file cf;
+        q2_population pop;
+        q2_model_bank bank;
+        bool have_bank;
+        u32 g;
+
+        base = base ? base + 1 : file->path;
+        if (strcmp(base, "COMMON.DAT") != 0)
+            continue;
+        if (disc_read_file(d, file->path, &buf) != Q2_OK)
+            continue;
+        if (q2_common_open(&cf, &buf) != Q2_OK) {
+            q2_buf_free(&buf);
+            continue;
+        }
+        have_bank = (q2_model_bank_from_common(&bank, &cf) == Q2_OK);
+
+        if (q2_population_parse(&pop, &cf) == Q2_OK) {
+            for (g = 0; g < pop.group_count; g++) {
+                q2_pop_group grp;
+                q2_pop_spawn sp;
+                u32 k;
+
+                if (!q2_pop_get_group(&pop, g, &grp))
+                    continue;
+                if (q2_pop_group_is_path(&grp))
+                    continue;
+
+                for (k = 0; q2_pop_get_spawn(&pop, &grp, k, &sp); k++) {
+                    const q2_class_entry *e = q2_class_find(&tbl, sp.class_id);
+
+                    spawns++;
+                    if (!e) {
+                        int seen = 0, u;
+                        for (u = 0; u < unresolved_count; u++)
+                            if (unresolved_ids[u] == sp.class_id)
+                                seen = 1;
+                        if (!seen && unresolved_count < 64)
+                            unresolved_ids[unresolved_count++] = sp.class_id;
+                        continue;
+                    }
+                    resolved++;
+
+                    /* A creature's model may be in the map's COMMON bank or
+                     * in any of its zones' banks, so check both before saying
+                     * the name does not resolve to geometry. */
+                    if (have_bank && class_has_model(d, &bank, file->path,
+                                                     e->name))
+                        with_model++;
+                }
+            }
+        }
+        q2_common_close(&cf);
+    }
+
+    printf("\n  spawn records                            : %llu\n", spawns);
+    printf("  resolving to a class                     : %llu\n", resolved);
+    printf("  whose class names a model in the same map: %llu\n", with_model);
+    if (unresolved_count) {
+        int u;
+        printf("  unresolved class ids                     :");
+        for (u = 0; u < unresolved_count; u++)
+            printf(" %u", unresolved_ids[u]);
+        printf("\n");
+    }
+
+    printf("\n%s\n", (spawns && resolved == spawns)
+           ? "PASS - every spawn on the disc names a class in the table."
+           : "PARTIAL - see the unresolved ids above.");
+
+    q2_class_table_free(&tbl);
+    return 0;
+}
+
 /* ------------------------------------------------------------------------- */
 /*
  * A first-person frame: the world from the player's eye, the weapon in hand,
@@ -3855,6 +4035,8 @@ int main(int argc, char **argv)
         rc = cmd_cluts(d);
     } else if (strcmp(cmd, "anims") == 0) {
         rc = cmd_anims(d);
+    } else if (strcmp(cmd, "classes") == 0) {
+        rc = cmd_classes(d);
     } else if (strcmp(cmd, "models") == 0) {
         if (argc < 4) {
             fprintf(stderr, "models needs a map name\n");
@@ -4001,6 +4183,14 @@ int main(int argc, char **argv)
             rc = 1;
         } else {
             rc = cmd_extract(d, argv[3]);
+        }
+    } else if (strcmp(cmd, "export") == 0) {
+        if (argc < 4) {
+            fprintf(stderr, "export needs an output directory\n");
+            rc = 1;
+        } else {
+            rc = cmd_export(d, argv[3], (argc >= 5) ? argv[4] : NULL,
+                            (argc >= 6) ? argv[5] : NULL);
         }
     } else {
         fprintf(stderr, "unknown command '%s'\n\n", cmd);

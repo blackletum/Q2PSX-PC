@@ -1,4 +1,6 @@
 add_library(q2psx_build STATIC
+    classtable.c
+    classtable.h
     exe.c
     exe.h
     mips.c

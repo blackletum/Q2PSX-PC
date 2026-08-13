@@ -215,6 +215,38 @@ The residues of the resolved blockers keep their parents' numbers.
       candidate. Blocks portal-based visibility.
 - [ ] **9. `SpaceLights` per-node partition.** Flat `uint16_t` index array, no length prefix, no discoverable
       partition (0.68…7.12 entries per scene node). Blocks correct dynamic/ambient lighting.
+- [x] **10. `Population` `spawn.classId` target table. — SOLVED.**
+      It is not an index into anything on the disc. The id is stored beside a **name** in a 48-byte-stride
+      table at `0x800A3368`, and the engine reaches it from the other side: a `CreAI` module's 16-byte
+      preamble starts with a 12-byte name, and the loader at `0x8007D990` looks that name up through
+      `0x80057A18`. Each record also carries the class's `health` and a size-scaled offset.
+      The health column is what proves it: the values are PC Quake II's own, creature for creature — three
+      `Soldier` records at 30, 20 and 40 (shotgun, light and machinegun guards), `Infantry` 100, `Flyer` 50,
+      `Gladiator` 400, `Jorg` 3000 — and nothing in the decode was tuned to produce them.
+      `q2psx-inspect classes` checks it disc-wide: **651 of 651** spawn records resolve to a class, and
+      **651 of 651** of those classes name a model the same map ships. Implemented in
+      `src/build/classtable.[ch]`. Full table in FORMATS.md §9.8.
+- [ ] **10b. One model part textures wrong, and it is the same part everywhere.** BASE1's `Soldier` renders
+      correctly except for part 2 — 30 faces covering the head and one shoulder — which comes out as
+      saturated purple noise. The evidence narrows it a long way without settling it:
+      the same model renders identically in BASE1, BASE2 and WASTE1, so it is **not** a per-map palette
+      problem; part 2 is the **only** part of the model that uses texture page 6 and CLUT index 46, and no
+      other part shares either; every other part of the same model, and every weapon and item model tested,
+      textures correctly under the same rule; and the map does upload seven pages, so page 6 exists.
+      Saturated purple on an otherwise green-and-grey model is the classic signature of a palette that is
+      right in form and wrong in identity. *Attack:* dump page 6 of a map's VRAM against several candidate
+      palettes and see which yields colours consistent with the rest of the model — the diagnostic in
+      `q2psx-inspect model` already reports the per-part page and texture ranges that localise it.
+
+- [ ] **7. `SortData` encoding.** Bit-packed, no offset table, no fixed per-node record (4.0…88.6 bytes per
+      scene node — a 22× spread). Almost certainly draw-order data; transparency and overdraw will be wrong
+      without it. Requires the EXE's bit reader.
+- [ ] **8. `AreaConx` 9-byte link payload.** No fixed offset yields a 1.3.12 unit normal in more than 39 % of
+      3,494 links. Histograms suggest **unaligned** `int16_t` values that no single struct layout can express
+      (links start at `record + 1 + 9*L`, so parity alternates). Byte `+3` is the best neighbour-index
+      candidate. Blocks portal-based visibility.
+- [ ] **9. `SpaceLights` per-node partition.** Flat `uint16_t` index array, no length prefix, no discoverable
+      partition (0.68…7.12 entries per scene node). Blocks correct dynamic/ambient lighting.
 - [ ] **10. `Population` `spawn.classId` target table.** 25 distinct values 0…37; 15 of 673 records exceed
       the map's `ModelNames` count and name resolution yields semantically wrong results. Monsters and items
       cannot be mapped to classes until it is found — which is now the main thing standing between the port

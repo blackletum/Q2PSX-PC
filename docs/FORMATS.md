@@ -2628,3 +2628,54 @@ corrections, and they were not evenly distributed: **every substantive error tra
 file, four sectors, three chunks, one code site). The `AreaConx` offset error alone would have silently
 corrupted 100 of 115 zone files. Future contributors should treat "verified on one map" as equivalent to
 unverified.
+
+### 9.8 The entity class table — what a spawn's `class_id` is
+
+> **§10's answer.** `Population.spawn.class_id` is not an index into anything on the disc. It is the id
+> stored beside a name in a 48-byte-stride table at `0x800A3368`, and the engine reaches that table from the
+> other direction: a `CreAI` module's 16-byte preamble begins with a 12-byte **name**, and the module loader
+> at `0x8007D990` looks that name up through `0x80057A18`. The lookup is name-keyed; the id is what the
+> engine writes down afterwards.
+
+```c
+typedef struct {            /* 48 bytes, 36 records at 0x800A3368 */
+    uint32_t classId;
+    char     name[12];      /* also a CastList model name          */
+    uint32_t fnA;           /* non-zero only on the player classes */
+    uint32_t pad[3];
+    uint32_t fnB;
+    int16_t  offset;        /* negative; scales with the creature  */
+    int16_t  health;
+    uint32_t zero;
+} q2p_class;
+```
+
+**The health column is the check, and it is not a guess.** The values are PC Quake II's own, creature for
+creature — three `Soldier` records at **30, 20 and 40**, which are the shotgun, light and machinegun guards;
+`Infantry` 100; `Flyer` 50; `Gladiator` 400; `Jorg` 3000. Nothing in the decode was tuned to produce that.
+The three Soldiers also share one `offset` of −30 while differing in health, which is what a skin family looks
+like and what a mis-parse does not. `Rider2`, `Rider3` and `RiderStand` carry 9999, the usual "cannot be
+killed" sentinel for scripted actors.
+
+Class ids run 1…37 for creatures and 39…44 for the deathmatch player skins, covering Population's observed
+range exactly. Checked by `q2psx-inspect classes` over the whole disc: **651 of 651** spawn records resolve
+to a class, and **651 of 651** of those classes name a model the same map actually ships — in its
+`COMMON.DAT` bank or in one of its zones'.
+
+| id | class | health | | id | class | health |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | Berserk | 240 | | 17 | Parasite | 120 |
+| 2 | Boss2 | 2000 | | 18/19/20 | Soldier ×3 | 30 / 20 / 40 |
+| 5 | Ironmaiden | 120 | | 24 | Boss1 | 1500 |
+| 6 | Flipper | 50 | | 25 | Tankcomm | 750 |
+| 8 | Flyer | 50 | | 27 | DeadComm | 400 |
+| 9 | Gladiator | 400 | | 28 | Arachner | 1000 |
+| 10 | Gunner | 149 | | 29 | Blitz | 275 |
+| 11 | Hover | 240 | | 31 | Flamer | 175 |
+| 12 | Infantry | 100 | | 32 | Strider | 2500 |
+| 13 | Jorg | 3000 | | 34 | Insane | 0 |
+| 14 | Rider | 3000 | | 35/36/37 | Rider2/3/Stand | 9999 |
+| 15 | Medic | 310 | | 39…44 | player skins | 100 |
+
+Implemented in `src/build/classtable.[ch]`, keyed on the build like the level table, because a localised
+release moves it.
