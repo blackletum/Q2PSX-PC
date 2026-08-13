@@ -10,7 +10,9 @@
 #include "cmd_exe.h"
 
 #include "exe.h"
+#include "level.h"
 #include "mips.h"
+#include "reloc.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -567,6 +569,120 @@ int cmd_find(const disc *d, const char *pattern)
 
     printf("%d occurrence%s\n", hits, hits == 1 ? "" : "s");
     q2_exe_free(&exe);
+    return 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* moddisasm — the same disassembler, pointed at a relocated module           */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * CreAIBin and LevelBin are MIPS modules the loader relocates into RAM, and
+ * they are where the engine's per-class behaviour lives. The evidence that this
+ * matters is negative and strong: the Population group a script selects is
+ * parked in three globals that NOTHING in the executable reads, so whatever
+ * interprets a spawn's class must be here.
+ *
+ * The base address is arbitrary but must be stable, because every printed
+ * address is relative to it. 0x80100000 is above the executable's own segment,
+ * so a module address can never be confused with an EXE address at a glance.
+ */
+#define Q2_MOD_BASE 0x80100000u
+
+int cmd_moddisasm(const disc *d, const char *map, const char *addr_s, int count)
+{
+    char path[160];
+    q2_buf file;
+    q2_common_file cf;
+    q2_ai_module mod;
+    reg_state st;
+    u32 addr, i;
+    bool to_end = (count <= 0);
+
+    snprintf(path, sizeof(path), "Q2DATA/LEVELS/%s/COMMON.DAT", map);
+    if (disc_read_file(d, path, &file) != Q2_OK) {
+        fprintf(stderr, "cannot read %s\n", path);
+        return 1;
+    }
+    if (q2_common_open(&cf, &file) != Q2_OK) {
+        fprintf(stderr, "%s is not a COMMON.DAT\n", path);
+        q2_buf_free(&file);
+        return 1;
+    }
+    if (q2_ai_module_load(&mod, &cf, Q2_MOD_BASE) != Q2_OK) {
+        fprintf(stderr, "%s has no relocatable CreAIBin\n", map);
+        q2_common_close(&cf);
+        return 1;
+    }
+    if (mod.empty) {
+        printf("%s has an empty CreAIBin (no creatures)\n", map);
+        q2_ai_module_free(&mod);
+        q2_common_close(&cf);
+        return 0;
+    }
+
+    printf("%s CreAIBin: %zu bytes relocated at 0x%08X\n", map, mod.image.size,
+           mod.base);
+    for (i = 0; i < 4; i++) {
+        u32 e = q2_ai_module_export(&mod, i);
+        printf("  export %u : 0x%08X%s\n", i, e,
+               e ? "" : "   (absent)");
+    }
+    printf("  code     : 0x%08X\n", mod.base + Q2_AI_HDR_CODE_START);
+
+    addr = addr_s ? parse_addr(addr_s) : (mod.base + Q2_AI_HDR_CODE_START);
+    if (addr < mod.base)
+        addr += mod.base;            /* accept a module-relative offset */
+
+    if (to_end)
+        count = 4096;
+
+    /* $gp means nothing inside a module: it is the engine's, and the module
+     * reaches the engine through its import table instead. */
+    reg_reset(&st, 0);
+
+    printf("\n");
+    for (i = 0; i < (u32)count; i++) {
+        u32 a = addr + i * 4, off = a - mod.base, word, resolved = 0;
+        q2_mips_insn in;
+
+        if (off + 4 > mod.image.size)
+            break;
+
+        word = q2_rd_u32(mod.image.data + off);
+        q2_mips_decode(word, a, &in);
+        reg_step(&st, &in, &resolved);
+
+        printf("%08X  %08X  %s", a, word, in.text);
+
+        if (resolved) {
+            printf("   ; 0x%08X", resolved);
+            /* An import slot is the module's only way to call the engine, so
+             * naming one turns an opaque indirect call into a known callee. */
+            if (resolved >= mod.base + Q2_AI_HDR_IMPORTS &&
+                resolved <  mod.base + Q2_AI_HDR_CODE_START)
+                printf(" (import %u)",
+                       (resolved - mod.base - Q2_AI_HDR_IMPORTS) / 4);
+            else if (resolved >= mod.base &&
+                     resolved < mod.base + mod.image.size)
+                printf(" (module+0x%X)", resolved - mod.base);
+        }
+        printf("\n");
+
+        if (to_end && in.kind == Q2_MIPS_RETURN) {
+            u32 slot_off = off + 4;
+            if (slot_off + 4 <= mod.image.size) {
+                q2_mips_insn ds;
+                u32 sw = q2_rd_u32(mod.image.data + slot_off);
+                q2_mips_decode(sw, a + 4, &ds);
+                printf("%08X  %08X  %s\n", a + 4, sw, ds.text);
+            }
+            break;
+        }
+    }
+
+    q2_ai_module_free(&mod);
+    q2_common_close(&cf);
     return 0;
 }
 

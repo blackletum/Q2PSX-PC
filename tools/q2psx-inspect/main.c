@@ -98,6 +98,7 @@ static void usage(void)
     puts("  disasm  <disc> <addr> [n]   disassemble n instructions (0 = to the return)");
     puts("  xrefs   <disc> <addr>       every reference to an address, code and data");
     puts("  funcs   <disc> [addr]       call targets found by sweeping the image");
+    puts("  moddisasm <disc> <map> [addr] [n]  disassemble a relocated CreAIBin module");
     puts("  bytes   <disc> <addr> [n]   hex dump executable memory by address");
     puts("  find    <disc> <str|0xhex>  locate a string or byte pattern in the image");
     puts("  access  <disc> <off> [insn] every instruction touching a record offset");
@@ -3558,6 +3559,15 @@ int main(int argc, char **argv)
             rc = 1;
         } else {
             rc = cmd_xrefs(d, argv[3]);
+        }
+    } else if (strcmp(cmd, "moddisasm") == 0) {
+        if (argc < 4) {
+            fprintf(stderr, "moddisasm needs a map name\n");
+            rc = 1;
+        } else {
+            const char *at = (argc >= 5) ? argv[4] : NULL;
+            int n = (argc >= 6) ? atoi(argv[5]) : 0;
+            rc = cmd_moddisasm(d, argv[3], at, n);
         }
     } else if (strcmp(cmd, "funcs") == 0) {
         rc = cmd_funcs(d, (argc >= 4) ? argv[3] : NULL);
