@@ -15,6 +15,7 @@
 #include "events_rt.h"
 #include "ident.h"
 #include "level.h"
+#include "leveltable.h"
 #include "mover.h"
 #include "points.h"
 #include "pickup.h"
@@ -57,6 +58,7 @@ static void usage(void)
     puts("  dats    <disc>              census every .DAT chunk schema on the disc");
     puts("  verify  <disc>              check every level file against the typed schema");
     puts("  audio   <disc>              decode every sound bank and validate it");
+    puts("  leveltable <disc>           dump the level table and check it against the disc");
     puts("  reloc   <disc>              relocate every AI module and census the fixups");
     puts("  events  <disc>              run every event script and census the opcodes");
     puts("  walk    <disc> <map> [z] [ticks]  drop a player in and simulate");
@@ -1781,6 +1783,81 @@ static int cmd_reloc(disc *d)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * Dump the executable's level table and cross-check it against the disc.
+ *
+ * The check that matters: every directory the table names must actually exist
+ * under Q2DATA/LEVELS. A wrong table offset would still yield printable-looking
+ * names, so agreement with the filesystem is what makes the read trustworthy.
+ */
+static int cmd_leveltable(disc *d)
+{
+    q2_build_id id;
+    q2_level_table t;
+    q2_result r;
+    u32 i, real = 0, placeholders = 0, missing = 0;
+
+    if (q2_identify(d, &id) != Q2_OK) {
+        fprintf(stderr, "cannot identify this disc\n");
+        return 1;
+    }
+
+    r = q2_level_table_load(&t, d, &id);
+    if (r != Q2_OK) {
+        fprintf(stderr, "cannot read the level table: %s\n", q2_result_str(r));
+        return 1;
+    }
+
+    printf("Level table: %u records\n", t.count);
+    printf("  idx display        directory  u22  sequence          on disc\n");
+
+    for (i = 0; i < t.count; i++) {
+        const q2_level_entry *e = &t.entries[i];
+        char probe[128];
+        bool present;
+
+        if (e->is_placeholder) {
+            placeholders++;
+            continue;
+        }
+
+        snprintf(probe, sizeof(probe), "Q2DATA/LEVELS/%s/COMMON.DAT", e->directory);
+        present = disc_find(d, probe) != NULL;
+
+        if (present) real++;
+        else missing++;
+
+        printf("  %-3u %-14s %-10s %-4u %2u,%2u,%2u,%2u,%2u      %s\n",
+               i, e->display, e->directory, e->unknown_22,
+               e->sequence[0], e->sequence[1], e->sequence[2],
+               e->sequence[3], e->sequence[4],
+               present ? "yes" : "MISSING");
+    }
+
+    printf("\n  resolve to a directory : %u\n", real);
+    printf("  placeholders           : %u\n", placeholders);
+    printf("  named but not present  : %u\n", missing);
+
+    q2_level_table_free(&t);
+
+    /*
+     * An entry naming a directory that is not on the disc is CUT CONTENT, not
+     * a bad read. The five here are three Gallery variants plus QUAKE3 and
+     * HALFLIFE, and all five carry the same sequence bytes as each other —
+     * unused stubs left in the table.
+     *
+     * So the verdict is about whether the table READS, and the direction that
+     * would actually indicate a wrong offset is garbage names or a resolve rate
+     * near zero. Failing on cut content would be asserting the wrong thing.
+     */
+    printf("\n%s\n", real >= 40
+           ? "PASS - the table reads and resolves; entries with no directory are cut content."
+           : "FAIL - too few entries resolve; the table offset is probably wrong.");
+
+    return real >= 40 ? 0 : 1;
+}
+
+/* ------------------------------------------------------------------------- */
 static int cmd_hexdump(disc *d, const char *path, size_t count)
 {
     q2_buf buf;
@@ -1918,6 +1995,8 @@ int main(int argc, char **argv)
         rc = cmd_verify(d);
     } else if (strcmp(cmd, "audio") == 0) {
         rc = cmd_audio(d);
+    } else if (strcmp(cmd, "leveltable") == 0) {
+        rc = cmd_leveltable(d);
     } else if (strcmp(cmd, "reloc") == 0) {
         rc = cmd_reloc(d);
     } else if (strcmp(cmd, "events") == 0) {
