@@ -42,6 +42,7 @@ typedef struct client {
     disc            *disc;
     q2_build_id      build;
     q2_world_zone    zone;
+    q2_common_file   common;
     char             map[64];
     int              zone_index;
 
@@ -123,7 +124,11 @@ static bool client_load_zone(client *c, const char *map, int index)
                         break;
                     }
                 }
-                q2_common_close(&common);
+                /* The sim borrows the triggers and script out of this file, so
+                 * it has to outlive the zone. Release the previous map's copy
+                 * and take ownership of this one. */
+                q2_common_close(&c->common);
+                c->common = common;
             } else {
                 q2_buf_free(&buf);
             }
@@ -139,9 +144,6 @@ static bool client_load_zone(client *c, const char *map, int index)
         c->cam.pos[2] = (wmin[2] + wmax[2]) / 2;
     }
 
-    /* Hand the chosen position to the simulation. The ground plane is seeded
-     * from the spawn height because real hull tracing is not wired yet -- see
-     * q2_sim_trace. */
     /* Upload this map's texture pages and palettes. Each map has its own bank,
      * so this must happen per zone load, not once at startup. */
     if (c->vram) {
@@ -157,12 +159,17 @@ static bool client_load_zone(client *c, const char *map, int index)
         }
     }
 
+    /* q2_sim_init memsets the struct, so the previous zone's trigger bitmap and
+     * event runtime have to be released first or they leak on every zone
+     * change -- and zone changes are exactly what the gates now cause. */
+    q2_sim_free(&c->sim);
     q2_sim_init(&c->sim, &c->zone, q2_build_tick_rate(&c->build));
     {
         s32 feet[3];
         feet[0] = c->cam.pos[0];
         feet[1] = c->cam.pos[1];
         feet[2] = c->cam.pos[2];
+        q2_sim_attach_gameplay(&c->sim, &c->common);
         q2_sim_spawn(&c->sim, feet, c->cam.yaw);
         c->sim.player.ground_y = feet[1];
     }
@@ -496,11 +503,24 @@ int main(int argc, char **argv)
             client_input_simulated(&c, dt);
         else
             client_input(&c, dt);
+
+        /* A zone gate fired somewhere in the script. Load the target zone of
+         * the same map -- cross-map progression needs the level table, which
+         * lives in the executable and is not read yet. */
+        {
+            u32 target;
+            if (q2_sim_take_zone_change(&c.sim, &target)) {
+                Q2_INFO("zone gate -> zone %u", target);
+                client_load_zone(&c, c.map, (int)target);
+            }
+        }
         client_music_pump(&c);
         client_frame(&c);
     }
 
 done:
+    q2_sim_free(&c.sim);
+    q2_common_close(&c.common);
     q2_world_free_zone(&c.zone);
     free(c.vram);
     psx_fb_free(&c.fb);
