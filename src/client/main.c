@@ -26,6 +26,7 @@
 #include <string.h>
 
 #include "disc.h"
+#include "entity.h"
 #include "ident.h"
 #include "q2psx.h"
 #include "raster.h"
@@ -58,6 +59,7 @@ static bool client_load_zone(client *c, const char *map, int index)
 {
     q2_world_zone loaded;
     s32 wmin[3], wmax[3];
+    bool placed = false;
 
     if (q2_world_load_zone(&loaded, c->disc, map, index) != Q2_OK) {
         Q2_WARN("no zone %d in %s", index, map);
@@ -69,12 +71,57 @@ static bool client_load_zone(client *c, const char *map, int index)
     c->zone_index = index;
     snprintf(c->map, sizeof(c->map), "%s", map);
 
-    /* Drop the camera in the middle of the zone so there is always something on
-     * screen when a level loads. */
-    q2_world_bounds(&c->zone, wmin, wmax);
-    c->cam.pos[0] = (wmin[0] + wmax[0]) / 2;
-    c->cam.pos[1] = (wmin[1] + wmax[1]) / 2;
-    c->cam.pos[2] = (wmin[2] + wmax[2]) / 2;
+    /*
+     * Prefer a real spawn point in this zone. StartPos records carry the zone
+     * they belong to, so a map's spawns are not all valid here — filtering by
+     * zone is the difference between starting in the level and starting inside
+     * a wall somewhere else.
+     */
+    {
+        char path[256];
+        q2_buf buf;
+
+        snprintf(path, sizeof(path), "Q2DATA/LEVELS/%s/COMMON.DAT", map);
+
+        if (disc_read_file(c->disc, path, &buf) == Q2_OK) {
+            q2_common_file common;
+
+            if (q2_common_open(&common, &buf) == Q2_OK) {
+                q2_start_pos_list spawns;
+
+                if (q2_start_pos_parse(&spawns, &common) == Q2_OK) {
+                    u32 i;
+                    for (i = 0; i < spawns.count; i++) {
+                        q2_start_pos sp;
+                        if (!q2_start_pos_get(&spawns, i, &sp))
+                            continue;
+                        if (sp.zone != index)
+                            continue;
+
+                        c->cam.pos[0] = sp.x;
+                        c->cam.pos[1] = sp.y;
+                        c->cam.pos[2] = sp.z;
+                        c->cam.yaw    = sp.angle;
+                        placed = true;
+                        Q2_INFO("spawned at '%s'", sp.name);
+                        break;
+                    }
+                }
+                q2_common_close(&common);
+            } else {
+                q2_buf_free(&buf);
+            }
+        }
+    }
+
+    if (!placed) {
+        /* No spawn for this zone — fall back to its centre so there is still
+         * something on screen. */
+        q2_world_bounds(&c->zone, wmin, wmax);
+        c->cam.pos[0] = (wmin[0] + wmax[0]) / 2;
+        c->cam.pos[1] = (wmin[1] + wmax[1]) / 2;
+        c->cam.pos[2] = (wmin[2] + wmax[2]) / 2;
+    }
 
     Q2_INFO("%s: %u nodes, %u vertices",
             c->zone.name, c->zone.scene.node_count, c->zone.points.count);
