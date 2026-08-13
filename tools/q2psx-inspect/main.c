@@ -13,6 +13,7 @@
 #include "dat.h"
 #include "disc.h"
 #include "entity.h"
+#include "font.h"
 #include "exe.h"
 #include "events_rt.h"
 #include "ident.h"
@@ -87,7 +88,9 @@ static void usage(void)
     puts("  textures <disc>             decode every compressed VRAM image");
     puts("  cluts   <disc>              check CLUT binding and UV rotation on every poly");
     puts("  anims   <disc>              decode every CastList animation clip");
-    puts("  model   <disc> <map> <name|idx> [clip] [frame] [out.ppm]  render one model");
+    puts("  fps     <disc> <map> [zone] [weapon] [out.ppm] [yaw]  eye view + HUD");
+    puts("  models  <disc> <map>        list a map's model bank");
+    puts("  model   <disc> <map> <name|idx> [clip] [frame] [out.ppm] [yaw]  render one model");
     puts("  music   <disc>              demultiplex and decode the XA music streams");
     puts("  render  <disc> <map> [z] [out.ppm] [yaw] [pitch]  render a zone (4096 = full turn)");
     puts("  hexdump <disc> <path> [n]   hex dump the first n bytes of a file");
@@ -2150,8 +2153,49 @@ static int cmd_bmodel(disc *d, const char *map, int zone_index, int which,
  * the second-section CLUT binding are all right at once, which no single
  * numeric check establishes.
  */
+/* List a map's model bank. Cheap, and the natural companion to `model`: model
+ * names are not unique, so an index is often the only way to name one. */
+static int cmd_models(disc *d, const char *map)
+{
+    q2_buf buf;
+    q2_common_file cf;
+    q2_model_bank bank;
+    char path[160];
+    u32 i;
+
+    snprintf(path, sizeof(path), "Q2DATA/LEVELS/%s/COMMON.DAT", map);
+    if (disc_read_file(d, path, &buf) != Q2_OK) {
+        fprintf(stderr, "cannot read %s\n", path);
+        return 1;
+    }
+    if (q2_common_open(&cf, &buf) != Q2_OK) {
+        q2_buf_free(&buf);
+        return 1;
+    }
+    if (q2_model_bank_from_common(&bank, &cf) != Q2_OK) {
+        q2_common_close(&cf);
+        return 1;
+    }
+
+    printf("%-4s %-13s %6s %6s %6s %6s  %s\n",
+           "idx", "name", "parts", "verts", "faces", "clips", "kind");
+    for (i = 0; i < bank.count; i++) {
+        q2_model m;
+        if (q2_model_get(&bank, i, &m) != Q2_OK)
+            continue;
+        printf("%-4u %-13s %6u %6u %6u %6u  %s\n", i, m.hdr.name,
+               m.hdr.num_parts, m.hdr.num_verts, m.hdr.num_faces,
+               q2_model_anim_count(&m),
+               q2_model_is_static(&m) ? "static" : "articulated");
+    }
+
+    printf("\n%u models\n", bank.count);
+    q2_common_close(&cf);
+    return 0;
+}
+
 static int cmd_model(disc *d, const char *map, const char *want, int clip_index,
-                     int frame, const char *out_path)
+                     int frame, const char *out_path, s32 view_yaw)
 {
     const int W = 512, H = 480;
     q2_buf buf;
@@ -2172,7 +2216,9 @@ static int cmd_model(disc *d, const char *map, const char *want, int clip_index,
     char path[128];
     u32 i, found = (u32)-1, clip_count;
     bool have_pose = false;
-    s32 lo = 1 << 30, hi = -(1 << 30), extent;
+    s32 extent;
+    s32 bmin[3] = { 1 << 30, 1 << 30, 1 << 30 };
+    s32 bmax[3] = { -(1 << 30), -(1 << 30), -(1 << 30) };
 
     snprintf(path, sizeof(path), "Q2DATA/LEVELS/%s/COMMON.DAT", map);
     if (disc_read_file(d, path, &buf) != Q2_OK) {
@@ -2250,39 +2296,73 @@ static int cmd_model(disc *d, const char *map, const char *want, int clip_index,
 
             for (v = 0; v < p.num_verts; v++) {
                 q2_model_vertex mv;
-                s32 y;
+                s32 pos[3];
+                int ax;
 
                 if (!q2_model_get_vertex(&mdl, cursor + v, &mv))
                     break;
-                if (have_pose)
-                    y = (((s32)rot[1][0] * mv.x + (s32)rot[1][1] * mv.y +
-                          (s32)rot[1][2] * mv.z) >> 12) + pose[part].t[1];
-                else
-                    y = mv.y;
-                if (y < lo) lo = y;
-                if (y > hi) hi = y;
+
+                if (have_pose) {
+                    for (ax = 0; ax < 3; ax++)
+                        pos[ax] = (((s32)rot[ax][0] * mv.x +
+                                    (s32)rot[ax][1] * mv.y +
+                                    (s32)rot[ax][2] * mv.z) >> 12) +
+                                  pose[part].t[ax];
+                } else {
+                    pos[0] = mv.x; pos[1] = mv.y; pos[2] = mv.z;
+                }
+
+                for (ax = 0; ax < 3; ax++) {
+                    if (pos[ax] < bmin[ax]) bmin[ax] = pos[ax];
+                    if (pos[ax] > bmax[ax]) bmax[ax] = pos[ax];
+                }
             }
             cursor += p.num_verts;
         }
     }
-    if (lo > hi) { lo = 0; hi = 256; }
-    extent = hi - lo;
-    if (extent < 64)
+    if (bmin[1] > bmax[1]) {
+        int ax;
+        for (ax = 0; ax < 3; ax++) { bmin[ax] = -128; bmax[ax] = 128; }
+    }
+
+    /*
+     * Frame on all three axes, not just height. A weapon is long and thin, and
+     * a camera placed from its Y extent alone puts it half out of frame — which
+     * is exactly what the first version of this did.
+     */
+    {
+        int ax;
         extent = 64;
-    printf("  posed Y range : %d .. %d   (header ext2 %d, ext3 %d)\n",
-           lo, hi, mdl.hdr.ext2, mdl.hdr.ext3);
+        for (ax = 0; ax < 3; ax++)
+            if (bmax[ax] - bmin[ax] > extent)
+                extent = bmax[ax] - bmin[ax];
+    }
+
+    printf("  posed bounds  : [%d %d %d] .. [%d %d %d]  (ext2 %d, ext3 %d)\n",
+           bmin[0], bmin[1], bmin[2], bmax[0], bmax[1], bmax[2],
+           mdl.hdr.ext2, mdl.hdr.ext3);
 
     memset(&inst, 0, sizeof(inst));
     inst.model  = &mdl;
     inst.pose   = have_pose ? pose : NULL;
-    inst.yaw    = 0;
+    inst.yaw    = view_yaw;
 
+    /* Orbit the model rather than turning it, so its own facing is preserved
+     * and the pose is not silently rotated out from under the eye. */
     q2_camera_default(&cam, W, H);
-    cam.pos[0] = 0;
-    cam.pos[1] = (lo + hi) / 2;
-    cam.pos[2] = -extent * 2;
-    cam.yaw    = 0;
-    cam.pitch  = 0;
+    {
+        s32 cx = (bmin[0] + bmax[0]) / 2;
+        s32 cy = (bmin[1] + bmax[1]) / 2;
+        s32 cz = (bmin[2] + bmax[2]) / 2;
+        s32 dist = extent * 5 / 2;   /* clear of the near plane at this FOV */
+
+        cam.yaw   = view_yaw;
+        cam.pitch = 0;
+        cam.pos[0] = cx - ((q2_sin12(view_yaw) * dist) >> 12);
+        cam.pos[1] = cy;
+        cam.pos[2] = cz - ((q2_cos12(view_yaw) * dist) >> 12);
+    }
+    inst.yaw = 0;
 
     if (psx_ot_init(&ot, 4096, 300000) != Q2_OK ||
         psx_fb_init(&fb, W, H) != Q2_OK) {
@@ -2323,6 +2403,258 @@ static int cmd_model(disc *d, const char *map, const char *want, int clip_index,
     psx_ot_free(&ot);
     free(vram);
     q2_common_close(&cf);
+    return 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * A first-person frame: the world from the player's eye, the weapon in hand,
+ * and the HUD.
+ *
+ * This is the first view that shows the whole port at once rather than one
+ * layer of it. The world comes from the Scene/MapMod path, the weapon is a
+ * CastList model drawn through the same GTE and the same ordering table -- it
+ * sorts against the walls rather than being pasted on top -- and the numbers on
+ * the HUD are the simulation's real inventory, not captions.
+ *
+ * The weapon models are already view models: they carry the player's arm, and
+ * their geometry is authored around the eye. So the viewmodel is placed at the
+ * camera, nudged forward and down, and turned to face the camera's yaw.
+ */
+static int cmd_fps(disc *d, const char *map, int zone_index, const char *weapon,
+                   const char *out_path, s32 yaw_offset, s32 gun_yaw)
+{
+    const int W = 512, H = 480;
+    q2_world_zone zone;
+    q2_camera cam;
+    psx_ot ot;
+    gte_state gte;
+    psx_framebuffer fb;
+    psx_raster_opts opts;
+    psx_vram *vram;
+    q2_world_stats wstats;
+    q2_inventory inv;
+    q2_vram_section vs;
+    bool have_vram = false;
+    u32 clut4_count_a = 0;
+
+    q2_buf cbuf;
+    q2_common_file cf;
+    q2_model_bank bank;
+    q2_model wmodel;
+    bool have_weapon = false;
+    char cpath[160];
+
+    if (q2_world_load_zone(&zone, d, map, zone_index) != Q2_OK) {
+        fprintf(stderr, "cannot load %s zone %d\n", map, zone_index);
+        return 1;
+    }
+
+    /*
+     * Stand where the game would put the player: a StartPos for this zone, at
+     * eye height. World Y grows downward, so the eye is at a SMALLER Y than the
+     * feet -- getting that sign wrong buries the camera in the floor.
+     */
+    q2_camera_default(&cam, W, H);
+    cam.yaw   = yaw_offset;
+    cam.pitch = 0;
+    {
+        char spath[160];
+        q2_buf sbuf;
+        bool placed = false;
+
+        snprintf(spath, sizeof(spath), "Q2DATA/LEVELS/%s/COMMON.DAT", map);
+        if (disc_read_file(d, spath, &sbuf) == Q2_OK) {
+            q2_common_file scf;
+            if (q2_common_open(&scf, &sbuf) == Q2_OK) {
+                q2_start_pos_list sl;
+                if (q2_start_pos_parse(&sl, &scf) == Q2_OK) {
+                    u32 k;
+                    for (k = 0; k < sl.count; k++) {
+                        q2_start_pos sp;
+                        if (!q2_start_pos_get(&sl, k, &sp) ||
+                            sp.zone != zone_index)
+                            continue;
+                        cam.pos[0] = sp.x;
+                        cam.pos[1] = sp.y - Q2_VIEW_STAND;
+                        cam.pos[2] = sp.z;
+                        cam.yaw    = sp.angle + yaw_offset;
+                        placed = true;
+                        printf("%s zone %d: eye at spawn [%d %d %d] yaw %d\n",
+                               map, zone_index, sp.x, sp.y, sp.z, cam.yaw);
+                        break;
+                    }
+
+                }
+                q2_common_close(&scf);
+            } else {
+                q2_buf_free(&sbuf);
+            }
+        }
+
+        if (!placed) {
+            s32 wmin[3], wmax[3];
+            q2_world_bounds(&zone, wmin, wmax);
+            cam.pos[0] = (wmin[0] + wmax[0]) / 2;
+            cam.pos[1] = (wmin[1] + wmax[1]) / 2;
+            cam.pos[2] = (wmin[2] + wmax[2]) / 2;
+            printf("%s zone %d: no start position, standing at the centre\n",
+                   map, zone_index);
+        }
+    }
+
+    if (psx_ot_init(&ot, 4096, 300000) != Q2_OK ||
+        psx_fb_init(&fb, W, H) != Q2_OK) {
+        q2_world_free_zone(&zone);
+        return 1;
+    }
+    vram = (psx_vram *)calloc(1, sizeof(psx_vram));
+    if (!vram) {
+        q2_world_free_zone(&zone);
+        return 1;
+    }
+
+    psx_raster_opts_default(&opts);
+    if (q2_vram_load(&vs, d, map) == Q2_OK) {
+        clut4_count_a = vs.clut4_count_a;
+        have_vram = (q2_vram_upload(&vs, vram) == Q2_OK);
+        q2_vram_free(&vs);
+    }
+    opts.textures = have_vram;
+
+    q2_world_build_ot(&zone, &cam, W, H, &ot, &gte, &wstats);
+    printf("  world         : %u of %u quads\n", wstats.quads_emitted,
+           wstats.quads_total);
+
+    /* The weapon, into the same ordering table. */
+    snprintf(cpath, sizeof(cpath), "Q2DATA/LEVELS/%s/COMMON.DAT", map);
+    if (weapon && disc_read_file(d, cpath, &cbuf) == Q2_OK) {
+        if (q2_common_open(&cf, &cbuf) == Q2_OK) {
+            if (q2_model_bank_from_common(&bank, &cf) == Q2_OK) {
+                u32 i;
+                for (i = 0; i < bank.count; i++) {
+                    q2_model probe;
+                    if (q2_model_get(&bank, i, &probe) != Q2_OK)
+                        continue;
+                    if (name_casecmp_local(probe.hdr.name, weapon) == 0) {
+                        wmodel = probe;
+                        have_weapon = true;
+                        break;
+                    }
+                }
+                if (!have_weapon) {
+                    char *endp;
+                    unsigned long n = strtoul(weapon, &endp, 0);
+                    if (*endp == 0 && n < bank.count &&
+                        q2_model_get(&bank, (u32)n, &wmodel) == Q2_OK)
+                        have_weapon = true;
+                }
+            }
+            if (!have_weapon)
+                q2_common_close(&cf);
+        } else {
+            q2_buf_free(&cbuf);
+        }
+    }
+
+    if (have_weapon) {
+        q2_model_instance inst;
+        q2_model_draw_stats mstats;
+        s32 fwd[3], right[3];
+        s32 s = q2_sin12(cam.yaw), c = q2_cos12(cam.yaw);
+
+        /* Camera basis on the ground plane. */
+        fwd[0]   =  s; fwd[2]   =  c;
+        right[0] =  c; right[2] = -s;
+
+        memset(&inst, 0, sizeof(inst));
+        inst.model         = &wmodel;
+        inst.pose          = NULL;
+        inst.yaw           = cam.yaw + gun_yaw;
+        inst.clut4_count_a = clut4_count_a;
+
+        /*
+         * In front of the eye, slightly right and below it. The offsets are
+         * scaled to the model's own extent rather than fixed, because a view
+         * model spans a few hundred units around its origin and a fixed nudge
+         * puts half of it behind the near plane -- which the GTE rejects
+         * outright, exactly as the hardware did.
+         */
+        {
+            s32 reach = 900, side = 220, drop = 260;
+            inst.origin[0] = cam.pos[0] +
+                             ((fwd[0] * reach + right[0] * side) >> 12);
+            inst.origin[1] = cam.pos[1] + drop;
+            inst.origin[2] = cam.pos[2] +
+                             ((fwd[2] * reach + right[2] * side) >> 12);
+        }
+
+        q2_model_build_ot(&inst, &cam, &ot, &gte, &mstats);
+        printf("  weapon        : %-13s %u of %u faces\n", wmodel.hdr.name,
+               mstats.faces_emitted, mstats.faces_total);
+        q2_common_close(&cf);
+    }
+
+    psx_fb_clear(&fb, psx_rgb555(2, 2, 5));
+    psx_raster_ot(&fb, &ot, vram, &opts);
+
+    /*
+     * The HUD, over the finished frame.
+     *
+     * Every number here is the simulation's, read from a freshly initialised
+     * inventory rather than typed in: 100 health because that is what
+     * q2_inventory_init sets, no armour because the player starts with none,
+     * ten shells because that is the blaster-and-shotgun start. When the
+     * simulation runs these move on their own.
+     */
+    {
+        char buf[32];
+        u16 white = psx_rgb555(29, 29, 27);
+        u16 amber = psx_rgb555(31, 21, 5);
+        u16 label = psx_rgb555(17, 17, 19);
+        int big = 4, small = 2;
+        int pad = 14;
+        int bar_h = 62;
+        int num_y = H - bar_h + 18;
+        int lab_y = H - bar_h + 6;
+
+        q2_inventory_init(&inv);
+
+        psx_fb_rect_blend(&fb, 0, H - bar_h, W, bar_h, psx_rgb555(0, 0, 0), 165);
+        psx_fb_rect(&fb, 0, H - bar_h, W, 1, psx_rgb555(10, 10, 12));
+
+        psx_fb_text(&fb, pad, lab_y, "HEALTH", label, small);
+        snprintf(buf, sizeof(buf), "%d", inv.health);
+        psx_fb_text(&fb, pad, num_y, buf, white, big);
+
+        psx_fb_text(&fb, W / 2 - 44, lab_y, "ARMOUR", label, small);
+        snprintf(buf, sizeof(buf), "%d", inv.armour);
+        psx_fb_text(&fb, W / 2 - 44, num_y, buf, white, big);
+
+        psx_fb_text(&fb, W - pad - psx_fb_text_width("SHELLS", small), lab_y,
+                    "SHELLS", label, small);
+        snprintf(buf, sizeof(buf), "%d", inv.ammo[Q2_AMMO_SHELLS]);
+        psx_fb_text(&fb, W - pad - psx_fb_text_width(buf, big), num_y, buf,
+                    amber, big);
+
+        /* Crosshair. */
+        psx_fb_rect(&fb, W / 2 - 9, H / 2 - 1, 6, 2, white);
+        psx_fb_rect(&fb, W / 2 + 4, H / 2 - 1, 6, 2, white);
+        psx_fb_rect(&fb, W / 2 - 1, H / 2 - 9, 2, 6, white);
+        psx_fb_rect(&fb, W / 2 - 1, H / 2 + 4, 2, 6, white);
+
+        psx_fb_text(&fb, pad, pad, map, label, small);
+        if (have_weapon)
+            psx_fb_text(&fb, pad, pad + 16, wmodel.hdr.name, label, small);
+    }
+
+    if (psx_fb_write_ppm(&fb, out_path) == Q2_OK)
+        printf("  wrote %s\n", out_path);
+
+    psx_fb_free(&fb);
+    psx_ot_free(&ot);
+    free(vram);
+    q2_world_free_zone(&zone);
     return 0;
 }
 
@@ -3473,6 +3805,25 @@ int main(int argc, char **argv)
         rc = cmd_cluts(d);
     } else if (strcmp(cmd, "anims") == 0) {
         rc = cmd_anims(d);
+    } else if (strcmp(cmd, "models") == 0) {
+        if (argc < 4) {
+            fprintf(stderr, "models needs a map name\n");
+            rc = 1;
+        } else {
+            rc = cmd_models(d, argv[3]);
+        }
+    } else if (strcmp(cmd, "fps") == 0) {
+        if (argc < 4) {
+            fprintf(stderr, "fps needs a map name\n");
+            rc = 1;
+        } else {
+            int zi = (argc >= 5) ? atoi(argv[4]) : 0;
+            const char *wp = (argc >= 6) ? argv[5] : NULL;
+            const char *outp = (argc >= 7) ? argv[6] : "fps.ppm";
+            s32 vy = (argc >= 8) ? (s32)strtol(argv[7], NULL, 10) : 0;
+            s32 gy = (argc >= 9) ? (s32)strtol(argv[8], NULL, 10) : 1536;
+            rc = cmd_fps(d, argv[3], zi, wp, outp, vy, gy);
+        }
     } else if (strcmp(cmd, "model") == 0) {
         if (argc < 5) {
             fprintf(stderr, "model needs a map and a model name or index\n");
@@ -3481,7 +3832,8 @@ int main(int argc, char **argv)
             int ci = (argc >= 6) ? atoi(argv[5]) : 0;
             int fr = (argc >= 7) ? atoi(argv[6]) : 0;
             const char *outp = (argc >= 8) ? argv[7] : "model.ppm";
-            rc = cmd_model(d, argv[3], argv[4], ci, fr, outp);
+            s32 vy = (argc >= 9) ? (s32)strtol(argv[8], NULL, 10) : 0;
+            rc = cmd_model(d, argv[3], argv[4], ci, fr, outp, vy);
         }
     } else if (strcmp(cmd, "bmodel") == 0) {
         if (argc < 4) {

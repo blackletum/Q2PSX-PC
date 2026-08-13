@@ -1,4 +1,6 @@
 add_library(q2psx_render STATIC
+    font.c
+    font.h
     raster.c
     raster.h
 )
