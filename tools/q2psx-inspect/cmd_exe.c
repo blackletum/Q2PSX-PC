@@ -445,6 +445,236 @@ int cmd_xrefs(const disc *d, const char *addr_s)
 }
 
 /* ------------------------------------------------------------------------- */
+/* bytes / find                                                               */
+/* ------------------------------------------------------------------------- */
+
+int cmd_bytes(const disc *d, const char *addr_s, int count)
+{
+    q2_exe exe;
+    u32 addr;
+    int row;
+
+    if (!open_exe(d, &exe))
+        return 1;
+
+    addr = parse_addr(addr_s);
+    if (count <= 0)
+        count = 128;
+
+    for (row = 0; row < count; row += 16) {
+        int i, n = (count - row < 16) ? count - row : 16;
+        printf("%08X ", addr + (u32)row);
+        for (i = 0; i < 16; i++) {
+            u8 b;
+            if (i < n && q2_exe_u8(&exe, addr + (u32)(row + i), &b))
+                printf(" %02X", b);
+            else
+                printf("   ");
+        }
+        printf("  ");
+        for (i = 0; i < n; i++) {
+            u8 b;
+            if (!q2_exe_u8(&exe, addr + (u32)(row + i), &b))
+                break;
+            putchar((b >= 0x20 && b < 0x7F) ? (char)b : '.');
+        }
+        printf("\n");
+    }
+
+    q2_exe_free(&exe);
+    return 0;
+}
+
+/* `pattern` is ASCII unless it starts with "0x", in which case it is a hex
+ * byte string. Both forms matter: one finds a chunk name, the other finds a
+ * constant a function is comparing against. */
+int cmd_find(const disc *d, const char *pattern)
+{
+    q2_exe exe;
+    u8 needle[64];
+    size_t len = 0;
+    u32 a, begin, end;
+    int hits = 0;
+
+    if (!open_exe(d, &exe))
+        return 1;
+
+    if (pattern[0] == '0' && (pattern[1] == 'x' || pattern[1] == 'X')) {
+        const char *p = pattern + 2;
+        while (p[0] && p[1] && len < sizeof(needle)) {
+            char tmp[3] = { p[0], p[1], 0 };
+            needle[len++] = (u8)strtoul(tmp, NULL, 16);
+            p += 2;
+        }
+    } else {
+        while (pattern[len] && len < sizeof(needle)) {
+            needle[len] = (u8)pattern[len];
+            len++;
+        }
+    }
+
+    if (len == 0) {
+        fprintf(stderr, "empty pattern\n");
+        q2_exe_free(&exe);
+        return 1;
+    }
+
+    begin = q2_exe_begin(&exe);
+    end   = q2_exe_end(&exe);
+
+    for (a = begin; a + len <= end; a++) {
+        const u8 *p = q2_exe_ptr(&exe, a, (u32)len);
+        if (p && memcmp(p, needle, len) == 0) {
+            printf("  0x%08X\n", a);
+            hits++;
+        }
+    }
+
+    printf("%d occurrence%s\n", hits, hits == 1 ? "" : "s");
+    q2_exe_free(&exe);
+    return 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Function attribution                                                       */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * There is no symbol table, so a function start is defined as "an address
+ * something calls". That is exact for everything reachable by jal, which is
+ * how this engine calls anything worth finding, and it is enough to say which
+ * function an interesting instruction lives in.
+ */
+typedef struct func_map {
+    u32 *start;
+    u32  count;
+} func_map;
+
+static void func_map_build(const q2_exe *e, func_map *m)
+{
+    u32 a, begin = q2_exe_begin(e), end = q2_exe_end(e);
+    u32 cap = 0;
+
+    m->start = NULL;
+    m->count = 0;
+
+    for (a = begin; a + 4 <= end; a += 4) {
+        q2_mips_insn in;
+        u32 word;
+
+        if (!q2_exe_u32(e, a, &word))
+            break;
+        q2_mips_decode(word, a, &in);
+        if (in.kind != Q2_MIPS_CALL || in.op != 0x03)
+            continue;
+        if (!q2_exe_contains(e, in.target, 4))
+            continue;
+
+        if (m->count == cap) {
+            u32 ncap = cap ? cap * 2 : 256;
+            u32 *n = (u32 *)realloc(m->start, ncap * sizeof(u32));
+            if (!n)
+                return;
+            m->start = n;
+            cap = ncap;
+        }
+        m->start[m->count++] = in.target;
+    }
+
+    /* Sort ascending, then unique — an insertion-order list would make the
+     * lookup below wrong rather than slow. */
+    {
+        u32 i, j, w = 0;
+        for (i = 1; i < m->count; i++) {
+            u32 v = m->start[i];
+            for (j = i; j > 0 && m->start[j - 1] > v; j--)
+                m->start[j] = m->start[j - 1];
+            m->start[j] = v;
+        }
+        for (i = 0; i < m->count; i++)
+            if (i == 0 || m->start[i] != m->start[i - 1])
+                m->start[w++] = m->start[i];
+        m->count = w;
+    }
+}
+
+static u32 func_map_owner(const func_map *m, u32 addr)
+{
+    u32 lo = 0, hi = m->count, best = 0;
+
+    while (lo < hi) {
+        u32 mid = (lo + hi) / 2;
+        if (m->start[mid] <= addr) {
+            best = m->start[mid];
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return best;
+}
+
+/* ------------------------------------------------------------------------- */
+/* access — every instruction that touches a given structure offset           */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * The workhorse for structure archaeology. "Which code reads +8 of a record"
+ * is the question that identifies a consumer, and grouping the answer by
+ * function turns a list of addresses into a short list of candidates.
+ */
+int cmd_access(const disc *d, const char *imm_s, const char *mnemonic)
+{
+    q2_exe exe;
+    func_map fm;
+    s32 want;
+    u32 a, begin, end, last_func = 0;
+    int hits = 0, funcs = 0;
+
+    if (!open_exe(d, &exe))
+        return 1;
+
+    want  = (s32)strtol(imm_s, NULL, 0);
+    begin = q2_exe_begin(&exe);
+    end   = q2_exe_end(&exe);
+    func_map_build(&exe, &fm);
+
+    for (a = begin; a + 4 <= end; a += 4) {
+        q2_mips_insn in;
+        u32 word, owner;
+
+        if (!q2_exe_u32(&exe, a, &word))
+            break;
+        q2_mips_decode(word, a, &in);
+
+        if (in.kind != Q2_MIPS_LOAD && in.kind != Q2_MIPS_STORE)
+            continue;
+        if (in.imm != want)
+            continue;
+        if (in.rs == 28 || in.rs == 29)
+            continue;   /* $gp and $sp are frames, not records */
+        if (mnemonic && strcmp(in.mnemonic, mnemonic) != 0)
+            continue;
+
+        owner = func_map_owner(&fm, a);
+        if (owner != last_func) {
+            printf("\nfunction 0x%08X:\n", owner);
+            last_func = owner;
+            funcs++;
+        }
+        printf("  %08X  %s\n", a, in.text);
+        hits++;
+    }
+
+    printf("\n%d access%s in %d function%s\n", hits, hits == 1 ? "" : "es",
+           funcs, funcs == 1 ? "" : "s");
+
+    free(fm.start);
+    q2_exe_free(&exe);
+    return 0;
+}
+
+/* ------------------------------------------------------------------------- */
 /* funcs — where the functions are                                            */
 /* ------------------------------------------------------------------------- */
 

@@ -326,14 +326,26 @@ u32 q2_world_build_ot(const q2_world_zone *z,
                 }
 
                 /*
-                 * UV corners map straight through: uv[i] belongs to vertex i.
+                 * UV corners are ROTATED AND REVERSED against the vertices, by
+                 * an amount the polygon carries in the top two bits of its UV
+                 * index byte:
                  *
-                 * The tempting alternative is that the UV table is in libgpu's
-                 * Z order while the vertices run around the perimeter, which
-                 * would mean swapping corners 2 and 3. It was tested by
-                 * rendering both ways: the swap visibly corrupts flat surfaces
-                 * (panel edges fragment, light fixtures garble), so the table
-                 * uses the same perimeter winding as vtx[].
+                 *     vertex j takes uv[(3 - f - j) & 3],  f = uvIdxFlags >> 6
+                 *
+                 * This is transcribed from the world renderer at 0x80068118 -
+                 * 0x800681D8, which writes the four packet corners from
+                 * uv[(3-f)&3], uv[(2-f)&3], uv[(0-f)&3] and uv[(1-f)&3] in
+                 * POLY_GT4 order, and whose colour writes in the same loop
+                 * establish that packet corner 2 is vertex 3 and corner 3 is
+                 * vertex 2. Undoing that Z-order shuffle leaves the rule above.
+                 *
+                 * Two earlier readings are dead. Straight-through (uv[i] to
+                 * vertex i) is a mirror of the truth, and the "UV table is in
+                 * libgpu Z order" reading was tested by rendering both ways and
+                 * rejected on the evidence. Neither could have been settled
+                 * from geometry alone: on a rectangular UV rect a reflection
+                 * still tiles cleanly, and only text and asymmetric decals show
+                 * it. f is non-zero on 11.7% of polygons.
                  *
                  * The else is not dead code even though the lookup currently
                  * succeeds for all 274,936 polygons on the disc: prim comes from
@@ -344,8 +356,9 @@ u32 q2_world_build_ot(const q2_world_zone *z,
                 if (rec.uv && poly.uv_idx < rec.uv_count) {
                     const u8 *uv = rec.uv + (size_t)poly.uv_idx * 8;
                     for (i = 0; i < 4; i++) {
-                        prim->uv[i].u = uv[i * 2 + 0];
-                        prim->uv[i].v = uv[i * 2 + 1];
+                        u32 c = (u32)((3 - poly.flags - i) & 3);
+                        prim->uv[i].u = uv[c * 2 + 0];
+                        prim->uv[i].v = uv[c * 2 + 1];
                     }
                 } else {
                     prim->kind = PSX_PRIM_G4;   /* Gouraud, untextured. */
@@ -354,14 +367,29 @@ u32 q2_world_build_ot(const q2_world_zone *z,
 
                 /*
                  * Translate the stored fields into what the GPU actually wants.
+                 * All three rules below are the world renderer's own, read out
+                 * of the executable rather than inferred:
                  *
-                 * poly.clut is NOT a hardware CLUT word: the high byte is an
-                 * index into the map's clut4[] array and the low bits select
-                 * semi-transparency. Feeding it to the rasteriser raw points
-                 * the sampler at a nonsense VRAM address.
+                 *   clut >> 8    indexes the CLUT-id table the engine builds
+                 *                at 0x80076378, one entry per 4bpp CLUT the
+                 *                map uploads   (0x80068288)
+                 *   clut & 3     non-zero sets the primitive's ABE bit, code
+                 *                0x3E instead of 0x3C   (0x800682A8)
+                 *   tpage & 0x1F indexes a table of GetTPage words built at
+                 *                0x80078034 as GetTPage(0, 0, 64*(i+1), 256).
+                 *                The literal 0 is the colour-mode argument, so
+                 *                4bpp is the executable's own statement, not an
+                 *                inference from CLUT geometry.
                  *
-                 * Texture pages sit at x = 64*(slot+1) halfwords, y = 256, and
-                 * are 4bpp — so the page index is tpage+1, not tpage.
+                 * The remaining six bits of the low byte are build-time residue
+                 * the engine never reads; they are set on 251,872 of 274,936
+                 * polygons, so a port that treats the u16 as a hardware CLUT
+                 * word samples a nonsense VRAM address on 92% of the world.
+                 *
+                 * The blend mode is ADD, not HALF: the opaque path ORs 32 into
+                 * the page's table entry at 0x80068320, which is ABR 1, and
+                 * writes it back, so by the time any semi-transparent polygon
+                 * on that page is drawn the mode is B+F.
                  */
                 {
                     u32 clut_index = q2_mapmod_clut_index(poly.clut);
@@ -369,7 +397,7 @@ u32 q2_world_build_ot(const q2_world_zone *z,
 
                     prim->clut  = q2_vram_clut_word(clut_index);
                     prim->tpage = psx_make_tpage((int)poly.tpage + 1, 1,
-                                                 PSX_BLEND_HALF, PSX_TEX_4BIT);
+                                                 PSX_BLEND_ADD, PSX_TEX_4BIT);
                     prim->semi_transparent = (semi != 0);
                 }
                 prim->textured_blend  = true;

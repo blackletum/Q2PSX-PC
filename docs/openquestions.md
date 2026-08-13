@@ -4,12 +4,19 @@ Prioritised by how much each blocks the native port. **Tier 0** holds the items 
 with their answers so nothing is silently dropped. Items in **Tier 1** stand between the project and a level
 you can walk around in. The tail is cosmetic or archival.
 
-**Where the blocking picture stands.** All four original Tier 1 blockers have been broken: the texture codec
-outright, the model vertex-index base outright, the `Events` framing outright, and the world scale down to a
-single remaining unknown. What that buys is textures decoded, static models correct, and the trigger graph
-readable. What it does *not* buy is textures **placed** — `MapMod.clut` (#1a) is now the one thing standing
-between the port and a correctly textured world, and both of its obvious readings were refuted rather than
-confirmed by the last pass, so it is a harder target than it looked, not an easier one.
+**Where the blocking picture stands.** The world is now correctly textured. All four original Tier 1
+blockers fell earlier — the texture codec, the model vertex-index base, the `Events` framing, and the world
+scale down to one residue — and the binding that stood between decoded textures and *placed* ones has now
+fallen with them: `MapMod.clut` (#1a), the tpage word (#1b) and the UV rotation (#11) were all read out of
+the world renderer at `0x80068044` and then checked against the disc.
+
+What made that possible is worth recording, because it changes what is attackable. The harness now carries
+its own PS-X EXE loader and R3000A disassembler (`q2psx-inspect exe / disasm / xrefs / access / funcs`), so
+questions about the original *code* no longer depend on an external disassembler session. Several items below
+were parked on "needs a working disassembler session" and are now simply open work.
+
+What remains blocking is animation and simulation, not appearance: the articulated models' bone matrices
+(#2a) and the `Events` per-frame integrators (#4a).
 
 Full structural detail, evidence and confidence markers live in [`FORMATS.md`](./FORMATS.md).
 
@@ -61,6 +68,25 @@ Legend: `[ ]` open · `[~]` partially resolved · `[x]` resolved (move the item,
       `Scene` node indices (up to 332), after load they are runtime object indices into a **48-entry** array.
       A port that feeds disc values to the exec handlers overruns that array by ~26 KB.
       Implemented in `src/formats/events.[ch]`. See #4a for what remains.
+- [x] **1a. `MapMod.clut` → VRAM CLUT binding. — SOLVED.**
+      The field is never read as a halfword. The world renderer at `0x80068044` takes the **high byte** as an
+      index into the CLUT-id table (`0x80068288`, table pointer at `0x800B2EDC`) and the **low two bits** as
+      the semi-transparency selector, choosing primitive code `0x3E` over `0x3C` (`0x800682A8`). The previous
+      refutation tested the whole `uint16_t` against the id table — the wrong quantity. The other six bits of
+      the low byte are build-time residue the engine never reads, set on **251,872 of 274,936** polygons,
+      which is precisely why the halfword reading looked unsalvageable.
+      Checked against the disc by `q2psx-inspect cluts`: the index is in range on **49 of 49** maps (max
+      16…85 against CLUT counts of 36…259). The port's existing assumption turns out to have been right;
+      it is now evidence rather than a guess.
+- [x] **1b. Where the GPU tpage word is assembled. — SOLVED. Texture pages are 4bpp, CONFIRMED.**
+      Nowhere per-polygon: `0x80077FE8` precomputes twenty words at `0x800DDD3C` via
+      `GetTPage(0, 0, tbl_X[i], tbl_Y[i])`, and that literal `0` is the colour-mode argument. `MapMod.tpage`
+      indexes the table. The earlier search failed because it looked for the bit arithmetic inline; it lives
+      inside libgpu's `GetTPage` at `0x8008A1C8`, once.
+- [x] **11. `MapMod` `Poly.uvIdxFlags` bits 6–7. — SOLVED. A UV rotation, not render flags.**
+      Vertex `j` takes `uv[(3 - f - j) & 3]`. Read from `0x80068118…0x800681D8`, then confirmed against the
+      disc by a test the disassembly cannot have arranged: over the 31,931 quads that carry a rotation, the
+      engine's rule holds texel-scale anisotropy to a mean of **1.33** against **7.61** for both rivals.
 
 ---
 
@@ -68,25 +94,6 @@ Legend: `[ ]` open · `[~]` partially resolved · `[x]` resolved (move the item,
 
 The residues of the four resolved blockers keep their parents' numbers.
 
-- [~] **1a. `MapMod.clut` → VRAM CLUT binding. — THE HIGHEST-VALUE REMAINING TARGET.**
-      Texture binding cannot be completed without it, and both obvious readings are now **refuted**, so this
-      is worse than previously thought rather than better. It is *not* an index into the CLUT-id table the
-      engine builds at `0x80076378`: `max(MapMod.clut)` reaches 21,808 against `n_clut4 <= 259` and exceeds
-      it on **49/49** maps. It is *not* a raw VRAM CLUT id in the engine's own uploaded layout either: 0 of
-      49 maps have every value inside the built id set, and only 6,689 of 274,936 polygons (2.43 %) even have
-      `clut >= 16384`, i.e. `y >= 256`, where the entire uploaded array lives.
-      *Attack:* the upload wrapper `0x800691A8` receives three arguments it never reads; its second caller
-      `0x8006901C` fills them from `0x800A32C4 = {0,16,32,48}` and `0x800A32EC = {256,...,272,...}`,
-      describing a 4×4 grid of 16×16 blocks at `(0…63, 256…319)`. That vestigial placement scheme is the only
-      other CLUT metadata in the binary.
-- [~] **1b. Where the GPU tpage word is assembled.**
-      Needed to upgrade "texture pages are 4bpp" from INFERRED to CONFIRMED. The supporting evidence is real
-      but circumstantial (16-halfword CLUT geometry; a 78.8 % median double-nibble rate in RLE run values
-      against a 5.88 % chance level, 0 of 331 pages below 0.25). Two arguments an earlier pass offered are
-      dead and must not be recycled — the `tpage` colour-mode bits are vacuous (an 8-bit field holding 0…11
-      has its high bits clear by construction) and the VRAM budget does not constrain depth (64 halfwords per
-      page at *any* bit depth). *Attack:* a full `.text` search for `andi 0x3ff` / `srl 6` returns zero hits
-      and no 13-slot tpage-attribute table exists, so the word is assembled somewhere not yet looked at.
 - [~] **2a. `CastList` per-part transform matrices.**
       The blocker for the 399 articulated models; the 1,324 static models are fully solved. Vertices are
       stored **part-local**: `ext2` matches raw vertex max-Y on **0 of 399** articulated models against
@@ -158,11 +165,13 @@ The residues of the four resolved blockers keep their parents' numbers.
 - [ ] **10. `Population` `spawn.classId` target table.** 25 distinct values 0…37; 15 of 673 records exceed
       the map's `ModelNames` count and name resolution yields semantically wrong results. Monsters and items
       cannot be mapped to classes until it is found.
-- [ ] **11. `MapMod` `Poly.uvIdxFlags` bits 6–7.** Render flags on 11.7 % of all polygons — likely
-      semi-transparency / double-sided / no-texture. Guessing will look wrong on a tenth of the world.
+- [x] **11. `MapMod` `Poly.uvIdxFlags` bits 6–7. — RESOLVED as a UV rotation; kept in Tier 0 above.**
 - [ ] **12. `Scene` node fields `flags08`, `unk0C`, `unk0D`, `unk0E`.** `unk0E` (0…197, 119 distinct values,
       non-zero on all but 3 of 17,035 nodes) is the highest-value single byte in the zone format.
-      *Attack:* find the 52-byte-stride `Scene` reader in the EXE and see what it does with byte 14.
+      *Attack:* the 52-byte-stride readers are now reachable — `q2psx-inspect access 14 lbu` lists every
+      instruction that loads byte 14 of any record, and the zone loader's own node walk is at `0x8007BD88`.
+      Known already from that walk: the loader clears the low 10 bits of `flags08` at load time and writes
+      `0x8000` into the halfword at `+0x0A`, so both are partly runtime fields.
 
 ---
 
@@ -226,9 +235,15 @@ The residues of the four resolved blockers keep their parents' numbers.
 - [ ] 30. **NTSC build values:** framebuffer height, `video_mode_const`, movie filename suffix, EXE hash,
       PVD fields. All must be **read**, never guessed — PAL turned out to be 512 × **248**, not the widely
       assumed 256, so the folklore 512 × 240 NTSC figure is *less* trustworthy now, not more.
-- [ ] 31. Locate real xrefs to the `.DAT` chunk-name literal pool at `0x800AD414`. Would settle its true
-      extent and whether a required-vs-optional flag exists per chunk. Blocked on a working disassembler
-      session.
+- [~] 31. Real xrefs to the `.DAT` chunk-name literal pool at `0x800AD414` — **found, and the pool is not
+      indexed.** The zone loader at `0x8007B3F8` names each chunk by materialising its 12-byte literal
+      directly (`0x8007BA78` for `MapMod`, `0x8007BB74` for `Points`, and so on), copying it to the stack and
+      calling the directory search at `0x8006DBC0`. There is no per-chunk flag word and no table walk, so
+      required-vs-optional is expressed only by what the loader does with a failed lookup. Still open: that
+      per-chunk failure handling, chunk by chunk. The same pass mapped each chunk to the global its pointer
+      lands in — `Scene` `0x800B2C3C`, `MapMod` `0x800B2C6C`, `Points` `0x800B2CA0`, `SortData` `0x800B2C84`,
+      `SpaceLights` `0x800B2ED0`, `AreaConx` `0x800B2D1C`, `PrimaryColl` `0x800B2E0C`, `MapNames`
+      `0x800B2C9C` — which is what makes each chunk's consumer findable with `xrefs`.
 - [ ] 32. Why `ModelNames` is present in all 49 `COMMON.DAT` files yet the string appears **zero** times in
       the 634,880-byte executable. Dead tool-only data, positional access, or a runtime-assembled name?
 - [ ] 33. Why `TriggerRemap` and `SecondaryRem` exist in the executable but are emitted by no file on the

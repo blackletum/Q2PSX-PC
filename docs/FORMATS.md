@@ -1001,18 +1001,49 @@ typedef struct {                /* 12 bytes; maps onto a PSX POLY_GT4 */
     uint8_t  col[4];            /* CONFIRMED: per-corner index into the record's RGB
                                  * table (Gouraud). Proven by the colour-table size
                                  * identity holding in 17035/17035.                  */
-    uint16_t clut;              /* CONFIRMED: PSX CLUT id. VRAM x = (clut & 0x3F)*16,
-                                 * observed 0..816, every value a multiple of 16
-                                 * (4bpp). y = clut >> 6, observed 0..340. 486
-                                 * distinct CLUTs across all 115 files.              */
-    uint8_t  tpage;             /* CONFIRMED: PSX texture-page attribute, 0..11       */
+    uint16_t clut;              /* CONFIRMED: NOT a hardware CLUT word, and never
+                                 * read as a halfword. High byte = index into the
+                                 * map's clut4[] array; low 2 bits = semi-transparency
+                                 * selector; the other 6 bits are dead build-time
+                                 * residue, set on 251,872 of 274,936 polygons.      */
+    uint8_t  tpage;             /* CONFIRMED: INDEX into a precomputed table of
+                                 * GetTPage words, 0..11 — not an attribute word.    */
     uint8_t  uvIdxFlags;        /* CONFIRMED: bits 0-5 index the record's UV table
                                  * (max index used 56 vs max nUvSets 57 — almost no
-                                 * headroom). Bits 6-7 are render flags, meaning
-                                 * UNKNOWN; distribution 0x00 88.3%, 0x80 4.55%,
+                                 * headroom). Bits 6-7 ROTATE the UV quad against the
+                                 * vertices; distribution 0x00 88.3%, 0x80 4.55%,
                                  * 0x40 3.64%, 0xC0 3.51%.                           */
 } Q2P_Poly;
 ```
+
+**How the engine turns a poly into a `POLY_GT4`** — transcribed from the world renderer at `0x80068044`,
+which is a shading pass over packets whose screen positions an earlier pass has already written:
+
+```
+POLY.clut  = clutIdTable[clut >> 8]           0x80068288   table ptr @0x800B2EDC
+POLY.code  = (clut & 3) ? 0x3E : 0x3C         0x800682A8   0x3E is GT4 with ABE
+POLY.tpage = tpageTable[tpage & 0x1F]         0x800682C8   table    @0x800DDD3C
+uv for vertex j = uv[(3 - f - j) & 3]         0x80068118   f = uvIdxFlags >> 6
+colour for vertex j = rgb[col[j]]             0x800681D8
+```
+
+The packet is in libgpu's Z order while `vtx[]`, `col[]` and `uv[]` are a perimeter winding, so the loop
+writes packet corners 0,1,2,3 from source corners 0,1,3,2 — visible in the colour writes, which land at
+packet offsets 4, 16, 28, 40 from `col[0]`, `col[1]`, `col[3]`, `col[2]`. Undoing that shuffle is what turns
+the four UV fetches — `(3-f)`, `(2-f)`, `(0-f)`, `(1-f)` — into the single rule above.
+
+> **The UV rotation is confirmed twice, independently.** Besides the transcription, `q2psx-inspect cluts`
+> scores each candidate corner rule on **texel-scale isotropy**: a flat brush face has a uniform texture
+> scale, so texels-per-world-unit measured along one quad edge must match the other, and a rule that is 90°
+> out maps the long texel axis onto the short world axis. Over the 31,931 quads that actually carry a
+> rotation, the engine's rule gives a mean anisotropy of **1.33** against **7.61** for straight-through and
+> **7.61** for the reversal without the rotation — and 23,972 quads within 1.25× against 19,316 and 19,250.
+> The test says nothing on the other 88.3 %, where all three rules agree by construction.
+>
+> A *shared-vertex* agreement test was tried first and is the wrong instrument: it ranks the no-rotation
+> reading highest (7.24 % against 5.89 %) because a rotated face is *meant* to disagree with its neighbours.
+> It is reported anyway, since it does settle the part it can see — both reversed rules beat straight-through
+> disc-wide, 6.01 % and 5.75 % against 4.64 %.
 
 ### 3.4 `PrimaryColl` / `SecondaryCol` — collision hulls
 
@@ -2182,22 +2213,24 @@ substantially resolved** and are recorded below with their answers; what remains
 The residues of #1–#4 above are now the highest-value targets in the whole document. They keep their parents'
 numbers so that nothing downstream needs renumbering.
 
-1a. **`MapMod.clut` → VRAM CLUT binding.** *The single highest-value remaining target.* Texture binding
-    cannot be completed without it, and both obvious readings are now **refuted**: it is not an index into
-    the CLUT-id table the engine builds at `0x80076378` (max `MapMod.clut` reaches 21,808 against
-    `n_clut4 <= 259`, exceeding it on 49/49 maps), and it is not a raw VRAM CLUT id in the engine's own
-    uploaded layout (0 of 49 maps have all values inside the built id set, and only 6,689 of 274,936 polygons
-    — 2.43 % — even have `clut >= 16384`, i.e. `y >= 256`, where the entire uploaded array lives). The
-    remapping happens through a path neither pass found. Best remaining lead: the upload wrapper
-    `0x800691A8` takes three arguments it never reads, and its second caller `0x8006901C` fills them from
-    `0x800A32C4 = {0,16,32,48}` and `0x800A32EC = {256,256,256,256,272,...}`, describing a 4×4 grid of 16×16
-    blocks at `(0…63, 256…319)` — an apparently vestigial CLUT placement scheme, and the only other placement
-    metadata in the binary.
+1a. **~~`MapMod.clut` → VRAM CLUT binding.~~ — SOLVED.** The world renderer at `0x80068044` reads the field
+    as two independent bytes and never as a halfword. `0x80068288` loads the polygon's byte at **+9** — the
+    high byte — doubles it, adds the CLUT-id table pointer at `0x800B2EDC`, and stores the halfword it finds
+    into `POLY_GT4.clut`. `0x800682A8` loads the byte at **+8** and tests only its low two bits, choosing
+    primitive code `0x3E` over `0x3C`. The earlier refutation measured the wrong quantity: it tested the
+    whole `uint16_t` against the id table, and the whole `uint16_t` is not the index. The other six bits of
+    the low byte are build-time residue the engine never reads — set on **251,872 of 274,936** polygons,
+    which is exactly why the halfword reading looked so hopeless. `q2psx-inspect cluts` checks the index
+    against each map's own CLUT count: max 16…85 against counts of 36…259, **in range on 49 of 49 maps**.
 
-1b. **Where the GPU tpage word is assembled** — the lead for upgrading "texture pages are 4bpp" from
-    INFERRED to CONFIRMED. A full `.text` search for `GetTPage`-shaped `andi 0x3ff` / `srl 6` returns zero
-    hits, and no precomputed 13-slot tpage-attribute table exists under any (colour-mode, abr) combination at
-    either candidate origin.
+1b. **~~Where the GPU tpage word is assembled.~~ — SOLVED, and texture pages are 4bpp, CONFIRMED.** The word
+    is never assembled per polygon. `0x80077FE8` precomputes a table of twenty at `0x800DDD3C`, calling
+    `GetTPage` (`0x8008A1C8`, whose body is libgpu's exact bit layout) as `GetTPage(0, 0, tbl_X[i],
+    tbl_Y[i])` for `i = 0…19`, from `tbl_X @0x800A3274 = {64,128,…,960}` and `tbl_Y @0x800A329C = {256}×15`.
+    The literal first argument is the colour-mode field and it is **0**, so 4bpp is the executable's own
+    statement rather than an inference from CLUT geometry. `MapMod.tpage` indexes that table
+    (`tpage & 0x1F`, `0x800682C8`); it is not an attribute word. The earlier search failed because it looked
+    for the bit arithmetic inline, and it lives in the library function, once.
 
 2a. **`CastList` per-part transform matrices.** The blocker for the 399 articulated models. Vertices are
     stored **part-local** — `ext2` matches raw vertex max-Y on 0 of 399 articulated models against 72.5 % of
@@ -2244,11 +2277,13 @@ numbers so that nothing downstream needs renumbering.
 10. **`Population` `spawn.classId` target table.** 25 distinct values 0…37; 15 of 673 records exceed the
     map's `ModelNames` count, and resolving against `ModelNames` yields semantically wrong results. Until it
     is found, monsters and items cannot be mapped to their classes.
-11. **`MapMod` `Poly.uvIdxFlags` bits 6–7.** Render flags on 11.7 % of all polygons. Almost certainly
-    semi-transparency / double-sided / no-texture; guessing will look wrong on a tenth of the world.
-    Ruled out as a brush-model concern: mover-driven nodes set these bits on 6.24 % of their polygons
-    against 11.84 % for static world nodes, so bmodels are *depleted* (0.53×), not enriched. Whatever
-    these bits do, they do it mostly to the static world. Measured by `q2psx-inspect polyflags`.
+11. **~~`MapMod` `Poly.uvIdxFlags` bits 6–7.~~ — SOLVED. They are a UV rotation, not render flags.** Vertex
+    `j` takes `uv[(3 - f - j) & 3]` with `f` the two bits, read straight out of `0x80068118…0x800681D8` and
+    confirmed against the disc by texel-scale isotropy (§3.3). Every guess on the table was wrong —
+    semi-transparency is in `clut & 3`, and nothing here is double-sided or no-texture. The measurement that
+    looked most like a clue was a red herring in a useful way: mover-driven nodes set these bits on 6.24 %
+    of their polygons against 11.84 % for static world nodes, which is just artists rotating textures on
+    world geometry more often than on doors.
 12. **`Scene` node fields `flags08`, `unk0C`, `unk0D`, `unk0E`.** `unk0E` (range 0…197, 119 distinct values,
     non-zero on all but 3 of 17,035 nodes) is the highest-value single byte in the zone format. Find the
     52-byte-stride `Scene` reader in the EXE and see what it does with byte 14.

@@ -342,6 +342,14 @@ size_t q2_packbits_decode(const u8 *src, size_t src_size,
 /* Index 0 is real and must not be treated as "no palette": 11,255 polygons   */
 /* use it, always on page 0 and always sampling the 64x64 tile at the page    */
 /* origin, which holds genuine texture content.                               */
+/*                                                                            */
+/* The executable now says the same thing outright. The world renderer at     */
+/* 0x80068288 loads the polygon's byte at +9 — the HIGH byte of this field —  */
+/* doubles it, adds the id-table pointer at 0x800B2EDC and stores the halfword*/
+/* it finds into POLY_GT4.clut; at 0x800682A8 it takes the byte at +8 and     */
+/* tests only its low two bits, choosing primitive code 0x3E over 0x3C. The   */
+/* statistical case above and the disassembly were reached independently and  */
+/* agree exactly, which is the strongest position this format gets to.        */
 /* ------------------------------------------------------------------------- */
 #define Q2_VRAM_CLUT_RESERVED 16   /* leading all-0x8000 palettes */
 

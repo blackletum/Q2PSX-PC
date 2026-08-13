@@ -36,6 +36,7 @@
 #include "xa.h"
 #include "q2psx.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -66,6 +67,7 @@ static void usage(void)
     puts("  events  <disc>              run every event script and census the opcodes");
     puts("  walk    <disc> <map> [z] [ticks]  drop a player in and simulate");
     puts("  textures <disc>             decode every compressed VRAM image");
+    puts("  cluts   <disc>              check CLUT binding and UV rotation on every poly");
     puts("  music   <disc>              demultiplex and decode the XA music streams");
     puts("  render  <disc> <map> [z] [out.ppm] [yaw] [pitch]  render a zone (4096 = full turn)");
     puts("  hexdump <disc> <path> [n]   hex dump the first n bytes of a file");
@@ -76,6 +78,9 @@ static void usage(void)
     puts("  disasm  <disc> <addr> [n]   disassemble n instructions (0 = to the return)");
     puts("  xrefs   <disc> <addr>       every reference to an address, code and data");
     puts("  funcs   <disc> [addr]       call targets found by sweeping the image");
+    puts("  bytes   <disc> <addr> [n]   hex dump executable memory by address");
+    puts("  find    <disc> <str|0xhex>  locate a string or byte pattern in the image");
+    puts("  access  <disc> <off> [insn] every instruction touching a record offset");
     puts("");
     puts("<disc> may be a .cue, .bin, .img or .iso.");
 }
@@ -1098,6 +1103,417 @@ static int cmd_polyflags(disc *d)
            overrun_zones, overrun_nodes);
 
     return 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * MapMod.clut and the UV rotation, checked against the whole disc.
+ *
+ * The engine's own reading of these fields was recovered from the world
+ * renderer at 0x80068044 (see docs/FORMATS.md §3.3). Reading it out of the code
+ * is not by itself proof that the code is what runs on this data — a wrong
+ * function, or a field that means something else on a different build, would
+ * look exactly the same in the disassembly. So restate each rule as a property
+ * the disc must satisfy and measure it:
+ *
+ *   clut >> 8   indexes the engine's CLUT-id table, which has clut4_count
+ *               entries for that map, so it must be < clut4_count everywhere.
+ *   clut & 3    selects semi-transparency, so the remaining six bits of the low
+ *               byte should be dead — if they are ever set, something else is
+ *               in there.
+ *   uvIdx & 63  indexes the UV table and must stay inside it.
+ */
+#define CLUT_CENSUS_MAX_MAPS 64
+
+typedef struct clut_map_stat {
+    char               name[64];
+    u32                clut4_count;
+    unsigned long long polys;
+    u32                max_index;
+    u32                zones;
+    bool               have_vram;
+} clut_map_stat;
+
+static clut_map_stat *clut_find_map(clut_map_stat *maps, int *count,
+                                    const char *name)
+{
+    int i;
+    for (i = 0; i < *count; i++)
+        if (strcmp(maps[i].name, name) == 0)
+            return &maps[i];
+    if (*count >= CLUT_CENSUS_MAX_MAPS)
+        return NULL;
+    memset(&maps[*count], 0, sizeof(maps[0]));
+    snprintf(maps[*count].name, sizeof(maps[0].name), "%s", name);
+    return &maps[(*count)++];
+}
+
+/* "/Q2DATA/LEVELS/BASE0/ZONE0.DAT" -> "BASE0". NULL if the path is not one. */
+static const char *clut_map_of(const char *path, char *buf, size_t cap)
+{
+    const char *rest, *slash;
+    size_t len;
+
+    if (*path == '/')
+        path++;
+    if (strncmp(path, "Q2DATA/LEVELS/", 14) != 0)
+        return NULL;
+
+    rest  = path + 14;
+    slash = strchr(rest, '/');
+    if (!slash)
+        return NULL;
+
+    len = (size_t)(slash - rest);
+    if (len >= cap)
+        len = cap - 1;
+    memcpy(buf, rest, len);
+    buf[len] = '\0';
+    return buf;
+}
+
+static double hypot2(int dx, int dy)
+{
+    return sqrt((double)dx * dx + (double)dy * dy);
+}
+
+static double hypot3(int dx, int dy, int dz)
+{
+    return sqrt((double)dx * dx + (double)dy * dy + (double)dz * dz);
+}
+
+static int cmd_cluts(disc *d)
+{
+    clut_map_stat maps[CLUT_CENSUS_MAX_MAPS];
+    int map_count = 0;
+    int i, n = disc_file_count(d);
+    unsigned long long polys = 0, low2[4] = {0,0,0,0}, rot[4] = {0,0,0,0};
+    unsigned long long high_bits_set = 0, uv_out_of_range = 0;
+    unsigned long long agree[3] = {0,0,0}, agree_pairs = 0;
+    unsigned long long rot_agree[3] = {0,0,0}, rot_pairs = 0;
+    unsigned long long iso_good[3] = {0,0,0}, iso_total = 0;
+    unsigned long long iso_rot_good[3] = {0,0,0}, iso_rot_total = 0;
+    double iso_sum[3] = {0.0,0.0,0.0}, iso_rot_sum[3] = {0.0,0.0,0.0};
+    static const char *const agree_name[3] = {
+        "uv[j]              (old)",
+        "uv[(3 - j) & 3]    (no f)",
+        "uv[(3 - f - j) & 3](engine)"
+    };
+    int maps_out_of_range = 0;
+    char mapbuf[64];
+
+    printf("MapMod.clut and uvIdxFlags, as the world renderer at 0x80068044"
+           " reads them\n\n");
+    printf("  clut >> 8      index into the map's clut4[] array\n");
+    printf("  clut & 3       non-zero selects semi-transparent (code 0x3E)\n");
+    printf("  uvIdx & 0x3F   index into the record's UV table\n");
+    printf("  uvIdx >> 6     UV rotation: vertex j takes uv[(3 - f - j) & 3]\n\n");
+
+    /* First pass: how many CLUTs each map actually uploads. */
+    for (i = 0; i < n; i++) {
+        const disc_file *f = disc_file_at(d, i);
+        clut_map_stat *m;
+        q2_vram_section vs;
+
+        if (!strstr(f->path, "SNDVRAM.DAT"))
+            continue;
+        if (!clut_map_of(f->path, mapbuf, sizeof(mapbuf)))
+            continue;
+        m = clut_find_map(maps, &map_count, mapbuf);
+        if (!m)
+            continue;
+        if (q2_vram_load(&vs, d, mapbuf) != Q2_OK)
+            continue;
+        m->clut4_count = vs.clut4_count;
+        m->have_vram   = true;
+        q2_vram_free(&vs);
+    }
+
+    /* Second pass: every polygon on the disc. */
+    for (i = 0; i < n; i++) {
+        const disc_file *f = disc_file_at(d, i);
+        const char *base = strrchr(f->path, '/');
+        clut_map_stat *m;
+        q2_buf buf;
+        q2_zone_file zf;
+        q2_scene scene;
+        q2_points pts;
+        bool have_pts;
+        u32 node;
+
+        base = base ? base + 1 : f->path;
+        if (strncmp(base, "ZONE", 4) != 0)
+            continue;
+        if (!clut_map_of(f->path, mapbuf, sizeof(mapbuf)))
+            continue;
+        m = clut_find_map(maps, &map_count, mapbuf);
+        if (!m)
+            continue;
+
+        if (disc_read_file(d, f->path, &buf) != Q2_OK)
+            continue;
+        if (q2_zone_open(&zf, &buf) != Q2_OK) {
+            q2_buf_free(&buf);
+            continue;
+        }
+        if (q2_scene_parse(&scene, &zf) != Q2_OK) {
+            q2_zone_close(&zf);
+            continue;
+        }
+
+        m->zones++;
+        have_pts = (q2_points_parse(&pts, &zf) == Q2_OK);
+
+        for (node = 0; node < scene.node_count; node++) {
+            q2_mapmod_rec rec;
+            const q2_point_group *grp = NULL;
+            u32 p;
+
+            if (have_pts && node < pts.group_count)
+                grp = &pts.groups[node];
+            /* One entry per polygon corner in this node: the vertex it uses,
+             * and the texel each candidate rule would give it. A node holds at
+             * most 63 quads. */
+            struct { u8 vtx; u8 rot; u8 uv[3][2]; } corner[63 * 4];
+            u32 corners = 0;
+
+            if (!q2_scene_get_mapmod(&scene, node, &rec))
+                continue;
+
+            for (p = 0; p < rec.num_polys; p++) {
+                q2_mapmod_poly poly;
+                u32 index, j;
+
+                if (!q2_mapmod_get_poly(&rec, p, &poly))
+                    continue;
+
+                index = (u32)(poly.clut >> 8);
+                polys++;
+                m->polys++;
+                if (index > m->max_index)
+                    m->max_index = index;
+
+                low2[poly.clut & 3]++;
+                rot[poly.flags & 3]++;
+
+                if ((poly.clut & 0xFC) != 0)
+                    high_bits_set++;
+                if (!rec.uv || poly.uv_idx >= rec.uv_count) {
+                    uv_out_of_range++;
+                    continue;
+                }
+
+                /*
+                 * Does the rule keep the texel scale isotropic?
+                 *
+                 * A quad's two edges have known world lengths. Whatever corner
+                 * rule is right, walking one edge in texel space and the same
+                 * edge in world space must give roughly the same texels per
+                 * unit on both axes, because these are flat brush faces with a
+                 * uniform texture scale. A rule that is 90 degrees out maps the
+                 * long texel axis onto the short world axis and the two scales
+                 * diverge. This is the test that can see a rotation, which the
+                 * shared-vertex test structurally cannot: a rotated face is
+                 * *meant* to disagree with its neighbours.
+                 */
+                if (grp) {
+                    const u8 *uv = rec.uv + (size_t)poly.uv_idx * 8;
+                    q2_point pt[4];
+                    bool have = true;
+                    u32 r;
+
+                    for (j = 0; j < 4; j++) {
+                        u32 vi = grp->first + poly.vtx[j];
+                        if (poly.vtx[j] >= grp->count ||
+                            !q2_points_get(&pts, vi, &pt[j]))
+                            have = false;
+                    }
+
+                    for (r = 0; have && r < 3; r++) {
+                        static const int rule_c[3][4] = {
+                            {0,1,2,3}, {3,2,1,0}, {0,0,0,0}   /* [2] filled below */
+                        };
+                        double wa, wb, ua, ub, sa, sb, ratio;
+                        int c0, c1, c2;
+
+                        if (r == 2) {
+                            c0 = (int)((3u - poly.flags - 0u) & 3u);
+                            c1 = (int)((3u - poly.flags - 1u) & 3u);
+                            c2 = (int)((3u - poly.flags - 2u) & 3u);
+                        } else {
+                            c0 = rule_c[r][0];
+                            c1 = rule_c[r][1];
+                            c2 = rule_c[r][2];
+                        }
+
+                        wa = hypot3(pt[1].x - pt[0].x, pt[1].y - pt[0].y,
+                                    pt[1].z - pt[0].z);
+                        wb = hypot3(pt[2].x - pt[1].x, pt[2].y - pt[1].y,
+                                    pt[2].z - pt[1].z);
+                        ua = hypot2(uv[c1 * 2 + 0] - uv[c0 * 2 + 0],
+                                    uv[c1 * 2 + 1] - uv[c0 * 2 + 1]);
+                        ub = hypot2(uv[c2 * 2 + 0] - uv[c1 * 2 + 0],
+                                    uv[c2 * 2 + 1] - uv[c1 * 2 + 1]);
+
+                        if (wa < 1.0 || wb < 1.0 || ua < 1.0 || ub < 1.0)
+                            break;   /* degenerate; scores no rule */
+
+                        sa = ua / wa;
+                        sb = ub / wb;
+                        ratio = (sa > sb) ? sa / sb : sb / sa;
+
+                        if (r == 0)
+                            iso_total++;
+                        iso_sum[r] += ratio;
+                        if (ratio < 1.25)
+                            iso_good[r]++;
+                        if (poly.flags != 0) {
+                            if (r == 0)
+                                iso_rot_total++;
+                            iso_rot_sum[r] += ratio;
+                            if (ratio < 1.25)
+                                iso_rot_good[r]++;
+                        }
+                    }
+                }
+
+                {
+                    const u8 *uv = rec.uv + (size_t)poly.uv_idx * 8;
+                    for (j = 0; j < 4 && corners < Q2PSX_ARRAY_COUNT(corner); j++) {
+                        u32 c1 = (3u - j) & 3u;
+                        u32 c2 = (3u - poly.flags - j) & 3u;
+
+                        corner[corners].vtx = poly.vtx[j];
+                        corner[corners].rot = poly.flags;
+                        corner[corners].uv[0][0] = uv[j * 2 + 0];
+                        corner[corners].uv[0][1] = uv[j * 2 + 1];
+                        corner[corners].uv[1][0] = uv[c1 * 2 + 0];
+                        corner[corners].uv[1][1] = uv[c1 * 2 + 1];
+                        corner[corners].uv[2][0] = uv[c2 * 2 + 0];
+                        corner[corners].uv[2][1] = uv[c2 * 2 + 1];
+                        corners++;
+                    }
+                }
+            }
+
+            /* Score the three rules on whether corners that share a vertex
+             * land on the same texel. */
+            {
+                u32 a, b, r;
+                for (a = 0; a < corners; a++) {
+                    for (b = a + 1; b < corners; b++) {
+                        bool rotated;
+
+                        if (corner[a].vtx != corner[b].vtx)
+                            continue;
+                        agree_pairs++;
+
+                        /* Rules 1 and 2 differ only where a rotation is
+                         * actually set, so the whole-disc rate is mostly pairs
+                         * both score identically. Count that subset apart or
+                         * the comparison measures nothing. */
+                        rotated = (corner[a].rot != 0 || corner[b].rot != 0);
+                        if (rotated)
+                            rot_pairs++;
+
+                        for (r = 0; r < 3; r++) {
+                            if (corner[a].uv[r][0] == corner[b].uv[r][0] &&
+                                corner[a].uv[r][1] == corner[b].uv[r][1]) {
+                                agree[r]++;
+                                if (rotated)
+                                    rot_agree[r]++;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (have_pts)
+            q2_points_free(&pts);
+        q2_zone_close(&zf);
+    }
+
+    printf("  %-12s %5s %10s %8s %7s  %s\n",
+           "map", "zones", "polys", "max idx", "clut4", "in range");
+    for (i = 0; i < map_count; i++) {
+        clut_map_stat *m = &maps[i];
+        bool ok;
+
+        if (m->polys == 0)
+            continue;
+        if (!m->have_vram) {
+            printf("  %-12s %5u %10llu %8u %7s  %s\n", m->name, m->zones,
+                   m->polys, m->max_index, "-", "no SNDVRAM");
+            continue;
+        }
+
+        ok = (m->max_index < m->clut4_count);
+        if (!ok)
+            maps_out_of_range++;
+        printf("  %-12s %5u %10llu %8u %7u  %s\n", m->name, m->zones, m->polys,
+               m->max_index, m->clut4_count, ok ? "yes" : "NO");
+    }
+
+    printf("\n  polygons                 : %llu\n", polys);
+    printf("  maps with an index past clut4_count : %d\n", maps_out_of_range);
+    printf("  polygons with clut bits 2-7 set     : %llu\n", high_bits_set);
+    printf("  polygons with uvIdx past the table  : %llu\n", uv_out_of_range);
+
+    printf("\n  clut & 3 (semi-transparency selector):\n");
+    for (i = 0; i < 4; i++)
+        printf("    %d : %12llu  %6.3f%%\n", i, low2[i],
+               polys ? 100.0 * (double)low2[i] / (double)polys : 0.0);
+
+    printf("\n  uvIdx >> 6 (UV rotation):\n");
+    for (i = 0; i < 4; i++)
+        printf("    %d : %12llu  %6.3f%%\n", i, rot[i],
+               polys ? 100.0 * (double)rot[i] / (double)polys : 0.0);
+
+    /*
+     * The rotation rule came out of the disassembly, so test it against
+     * something the disassembly cannot have arranged: whether polygons that
+     * share a vertex agree on that vertex's texel. A wrong corner rule
+     * scatters the assignment and the agreement rate collapses; the right one
+     * maximises it. Three rules are scored so the comparison has controls —
+     * ignoring the rotation entirely, and applying only the reversal.
+     */
+    printf("\n  Corner rule scored on shared-vertex UV agreement:\n");
+    printf("    %-28s %12s %12s  %s\n", "rule", "agree", "pairs", "rate");
+    for (i = 0; i < 3; i++)
+        printf("    %-28s %12llu %12llu  %6.3f%%\n", agree_name[i], agree[i],
+               agree_pairs,
+               agree_pairs ? 100.0 * (double)agree[i] / (double)agree_pairs
+                           : 0.0);
+
+    printf("\n  ... restricted to pairs carrying a rotation, the only ones on\n"
+           "      which the last two rules can disagree:\n");
+    for (i = 0; i < 3; i++)
+        printf("    %-28s %12llu %12llu  %6.3f%%\n", agree_name[i],
+               rot_agree[i], rot_pairs,
+               rot_pairs ? 100.0 * (double)rot_agree[i] / (double)rot_pairs
+                         : 0.0);
+
+    printf("\n  Corner rule scored on texel-scale isotropy (texels per world\n"
+           "  unit along each quad edge; a 90-degree error diverges them):\n");
+    printf("    %-28s %12s %12s  %s\n", "rule", "within 1.25x", "quads",
+           "mean ratio");
+    for (i = 0; i < 3; i++)
+        printf("    %-28s %12llu %12llu  %8.4f\n", agree_name[i], iso_good[i],
+               iso_total, iso_total ? iso_sum[i] / (double)iso_total : 0.0);
+
+    printf("\n  ... restricted to the quads that carry a rotation:\n");
+    for (i = 0; i < 3; i++)
+        printf("    %-28s %12llu %12llu  %8.4f\n", agree_name[i],
+               iso_rot_good[i], iso_rot_total,
+               iso_rot_total ? iso_rot_sum[i] / (double)iso_rot_total : 0.0);
+
+    printf("\n%s\n", (maps_out_of_range == 0 && uv_out_of_range == 0)
+           ? "PASS - every CLUT index addresses a CLUT the map uploads, and "
+             "every UV index is inside its table."
+           : "FAIL - see above.");
+
+    return maps_out_of_range || uv_out_of_range ? 1 : 0;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -2392,6 +2808,8 @@ int main(int argc, char **argv)
         rc = cmd_verify(d);
     } else if (strcmp(cmd, "polyflags") == 0) {
         rc = cmd_polyflags(d);
+    } else if (strcmp(cmd, "cluts") == 0) {
+        rc = cmd_cluts(d);
     } else if (strcmp(cmd, "bmodel") == 0) {
         if (argc < 4) {
             fprintf(stderr, "bmodel needs a map name\n");
@@ -2470,6 +2888,28 @@ int main(int argc, char **argv)
         }
     } else if (strcmp(cmd, "funcs") == 0) {
         rc = cmd_funcs(d, (argc >= 4) ? argv[3] : NULL);
+    } else if (strcmp(cmd, "bytes") == 0) {
+        if (argc < 4) {
+            fprintf(stderr, "bytes needs an address\n");
+            rc = 1;
+        } else {
+            int n = (argc >= 5) ? atoi(argv[4]) : 128;
+            rc = cmd_bytes(d, argv[3], n);
+        }
+    } else if (strcmp(cmd, "access") == 0) {
+        if (argc < 4) {
+            fprintf(stderr, "access needs a structure offset\n");
+            rc = 1;
+        } else {
+            rc = cmd_access(d, argv[3], (argc >= 5) ? argv[4] : NULL);
+        }
+    } else if (strcmp(cmd, "find") == 0) {
+        if (argc < 4) {
+            fprintf(stderr, "find needs a string or 0x-prefixed byte pattern\n");
+            rc = 1;
+        } else {
+            rc = cmd_find(d, argv[3]);
+        }
     } else if (strcmp(cmd, "extract") == 0) {
         if (argc < 4) {
             fprintf(stderr, "extract needs an output directory\n");

@@ -46,11 +46,31 @@
  * A poly is 12 bytes and maps directly onto a PSX POLY_GT4:
  *   0x00  u8[4] vtx     indices into this node's Points group, PSX quad order
  *   0x04  u8[4] col     per-corner index into this record's RGB table (Gouraud)
- *   0x08  u16   clut    PSX CLUT id: VRAM x = (clut & 0x3F)*16, y = clut >> 6
- *   0x0A  u8    tpage   PSX texture page attribute, 0..11
- *   0x0B  u8    uv_idx  bits 0-5 index the UV table; bits 6-7 are render flags
- *                       of unknown meaning (0x00 88.3%, 0x80 4.6%, 0x40 3.6%,
- *                       0xC0 3.5%)
+ *   0x08  u16   clut    NOT a hardware CLUT word. High byte indexes the map's
+ *                       clut4[] array; low two bits select semi-transparency;
+ *                       the other six bits are build-time residue the engine
+ *                       never reads (set on 251,872 of 274,936 polygons)
+ *   0x0A  u8    tpage   texture-page INDEX, 0..11, into a table of GetTPage
+ *                       words; not a page attribute word itself
+ *   0x0B  u8    uv_idx  bits 0-5 index the UV table; bits 6-7 rotate the UV
+ *                       quad against the vertices (0x00 88.3%, 0x80 4.6%,
+ *                       0x40 3.6%, 0xC0 3.5%)
+ *
+ * The world renderer at 0x80068044 settles all three, and each rule is checked
+ * against the disc by `q2psx-inspect cluts`:
+ *
+ *   POLY.clut  = clutIdTable[clut >> 8]         0x80068288
+ *   POLY.code  = (clut & 3) ? 0x3E : 0x3C       0x800682A8  (ABE = semi)
+ *   POLY.tpage = tpageTable[tpage & 0x1F]       0x800682C8
+ *   uv for vertex j = uv[(3 - f - j) & 3]       0x80068118, f = uv_idx >> 6
+ *
+ * tpageTable is built at 0x80078034 by GetTPage(0, 0, 64*(i+1), 256) for
+ * i = 0..19, and that literal first argument is the colour mode: the texture
+ * pages ARE 4bpp, stated by the executable rather than inferred.
+ *
+ * The CLUT index is in range on every map — max 16..85 against clut4 counts of
+ * 36..259, 49 of 49 — which is what makes the high-byte reading a measurement
+ * and not just a transcription.
  *
  * Vertex indices are u8, which is safe because a Points group never holds more
  * than 117 vertices.
