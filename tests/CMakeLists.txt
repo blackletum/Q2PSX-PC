@@ -33,3 +33,12 @@ target_link_libraries(test_monster PRIVATE
 )
 
 add_test(NAME monster COMMAND test_monster)
+
+add_executable(test_combat test_combat.c)
+
+target_link_libraries(test_combat PRIVATE
+    q2psx_common
+    q2psx_game
+)
+
+add_test(NAME combat COMMAND test_combat)

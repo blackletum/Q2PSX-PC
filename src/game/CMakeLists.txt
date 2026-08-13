@@ -3,6 +3,8 @@ add_library(q2psx_game STATIC
     events_rt.h
     aimodule.c
     aimodule.h
+    combat.c
+    combat.h
     inventory.c
     inventory.h
     monster.c
