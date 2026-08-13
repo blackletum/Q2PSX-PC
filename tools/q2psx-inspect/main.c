@@ -14,6 +14,7 @@
 #include "events_rt.h"
 #include "ident.h"
 #include "level.h"
+#include "mover.h"
 #include "points.h"
 #include "population.h"
 #include "trigger.h"
@@ -1482,6 +1483,7 @@ static int cmd_events(disc *d)
     u32 files = 0, records = 0, items = 0, named = 0;
     u32 ran = 0, movers = 0, zone_changes = 0;
     u32 op_hist[64];
+    u32 movers_built = 0, movers_moved = 0, movers_open = 0, movers_empty = 0;
 
     memset(op_hist, 0, sizeof(op_hist));
     printf("Running every event script on the disc...\n\n");
@@ -1538,6 +1540,29 @@ static int cmd_events(disc *d)
                 if (q2_event_rt_update(&rt) == Q2_EVENT_ZONE_CHANGE)
                     zone_changes++;
 
+                /* Build the zone's doors and lifts and run them for a while,
+                 * so the state machine is exercised rather than merely
+                 * constructed. */
+                {
+                    q2_mover_set ms;
+                    if (q2_movers_build(&ms, &ev) == Q2_OK) {
+                        u32 mi, t;
+                        movers_built += ms.count;
+                        for (mi = 0; mi < ms.count; mi++) {
+                            if (ms.movers[mi].part_count == 0)
+                                movers_empty++;
+                            q2_mover_trigger(&ms, mi);
+                        }
+                        for (t = 0; t < 400; t++)
+                            movers_moved += q2_movers_tick(&ms, 12, 0xFFFF);
+                        for (mi = 0; mi < ms.count; mi++) {
+                            if (ms.movers[mi].offset != 0)
+                                movers_open++;
+                        }
+                        q2_movers_free(&ms);
+                    }
+                }
+
                 ran    += rt.ran_count;
                 movers += rt.skipped_movers;
                 q2_event_rt_free(&rt);
@@ -1561,6 +1586,9 @@ static int cmd_events(disc *d)
     printf("  records executed  : %u\n", ran);
     printf("  movers skipped    : %u  (link not decoded)\n", movers);
     printf("  zone gates fired  : %u\n", zone_changes);
+    printf("  movers built      : %u  (%u with no nodes)\n", movers_built, movers_empty);
+    printf("  mover tick-moves  : %u\n", movers_moved);
+    printf("  movers displaced  : %u  after 400 ticks\n", movers_open);
 
     printf("\n  opcode census\n");
     {
