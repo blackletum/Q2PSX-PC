@@ -22,6 +22,7 @@
 #include "sim.h"
 #include "vram.h"
 #include "world.h"
+#include "worldscale.h"
 #include "trig.h"
 #include "vag.h"
 #include "xa.h"
@@ -837,6 +838,13 @@ static int cmd_verify(disc *d)
 static int cmd_render(disc *d, const char *map, int zone_index, const char *out_path,
                       s32 yaw, s32 pitch)
 {
+    /* pitch == 9999 is a sentinel meaning "stand at the spawn point and look
+     * ahead" rather than framing the whole zone from outside. It is the view a
+     * player actually gets, and therefore the honest test of the renderer. */
+    bool eye_view = (pitch == 9999);
+    if (eye_view)
+        pitch = 0;
+
     q2_world_zone zone;
     q2_camera cam;
     psx_ot ot;
@@ -869,6 +877,47 @@ static int cmd_render(disc *d, const char *map, int zone_index, const char *out_
     cam.yaw   = yaw;
     cam.pitch = pitch;
 
+    if (eye_view) {
+        /* Stand at a real spawn for this zone, at eye height. World Y grows
+         * downward, so the eye is at a SMALLER Y than the feet. */
+        char cpath[256];
+        q2_buf cbuf;
+        bool placed = false;
+
+        snprintf(cpath, sizeof(cpath), "Q2DATA/LEVELS/%s/COMMON.DAT", map);
+        if (disc_read_file(d, cpath, &cbuf) == Q2_OK) {
+            q2_common_file cf3;
+            if (q2_common_open(&cf3, &cbuf) == Q2_OK) {
+                q2_start_pos_list sl;
+                if (q2_start_pos_parse(&sl, &cf3) == Q2_OK) {
+                    u32 k;
+                    for (k = 0; k < sl.count; k++) {
+                        q2_start_pos sp;
+                        if (!q2_start_pos_get(&sl, k, &sp) || sp.zone != zone_index)
+                            continue;
+                        cam.pos[0] = sp.x;
+                        cam.pos[1] = sp.y - Q2_VIEW_STAND;
+                        cam.pos[2] = sp.z;
+                        if (yaw == 0)
+                            cam.yaw = sp.angle;
+                        placed = true;
+                        printf("  eye at spawn  : '%s' [%d %d %d] yaw=%d\n",
+                               sp.name, sp.x, sp.y, sp.z, cam.yaw);
+                        break;
+                    }
+                }
+                q2_common_close(&cf3);
+            } else {
+                q2_buf_free(&cbuf);
+            }
+        }
+        if (!placed)
+            printf("  eye at spawn  : none for this zone, framing instead\n");
+        eye_view = placed;
+    }
+
+    if (!eye_view) {
+
     /* Frame the whole zone: sit at its centre and back off along the camera's
      * own view direction by enough that the largest extent fits a 90-degree
      * field. Backing off in world -Z only works when looking down -Z, which
@@ -899,6 +948,7 @@ static int cmd_render(disc *d, const char *map, int zone_index, const char *out_
             cam.pos[1] = cy - (s32)(((s64)fy * dist) >> Q2_FRAC_12);
             cam.pos[2] = cz - (s32)(((s64)fz * dist) >> Q2_FRAC_12);
         }
+    }
     }
 
     printf("  camera        : [%d %d %d] yaw=%d pitch=%d h=%u\n",

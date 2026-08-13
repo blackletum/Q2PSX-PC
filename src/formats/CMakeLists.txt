@@ -19,6 +19,8 @@ add_library(q2psx_formats STATIC
     points.h
     trigger.c
     trigger.h
+    userfuncs.c
+    userfuncs.h
     scene.c
     scene.h
     vram.c

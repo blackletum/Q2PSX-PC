@@ -316,11 +316,17 @@ void psx_raster_prim(psx_framebuffer *fb,
     case PSX_PRIM_FT4:
     case PSX_PRIM_G4:
     case PSX_PRIM_GT4:
-        /* PSX quad corner order is a Z, not a winding: 0-1 across the top,
-         * 2-3 across the bottom. The triangles are therefore (0,1,2) and
-         * (1,3,2), NOT a fan. */
+        /*
+         * MapMod quad corners run around the PERIMETER, so the split is a fan:
+         * (0,1,2) and (0,2,3).
+         *
+         * A libgpu POLY_GT4 packet uses Z order, and assuming this data matched
+         * it produces a bowtie per quad — walls come out as a regular lattice of
+         * diamond holes that reads like a clipping bug rather than an index-order
+         * one. See the correction in scene.h.
+         */
         raster_triangle(fb, &v[0], &v[1], &v[2], prim, vram, opts);
-        raster_triangle(fb, &v[1], &v[3], &v[2], prim, vram, opts);
+        raster_triangle(fb, &v[0], &v[2], &v[3], prim, vram, opts);
         break;
 
     default:

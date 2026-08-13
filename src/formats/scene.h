@@ -55,10 +55,20 @@
  * Vertex indices are u8, which is safe because a Points group never holds more
  * than 117 vertices.
  *
- * The quad corner order is the PSX "Z" order — 0,1,2,3 are top-left, top-right,
- * bottom-left, bottom-right, so a triangle pair is (0,1,2) and (1,3,2). This is
- * not the same as a clockwise winding, and getting it wrong turns every quad
- * into an hourglass.
+ * CORRECTION — the quad corners are a WINDING, not the PSX "Z" order.
+ *
+ * A libgpu POLY_GT4 packet uses Z order (0,1,2 then 1,3,2), and assuming
+ * MapMod matched it is the obvious mistake to make. It does not: these indices
+ * run around the perimeter, so the triangles are (0,1,2) and (0,2,3).
+ *
+ * The symptom of getting it wrong is distinctive and worth recognising. Every
+ * quad renders as a bowtie, so a wall becomes a regular lattice of diamond
+ * holes with the background showing through. It looks like a near-plane or
+ * culling problem rather than an index-order one, which is what makes it worth
+ * writing down.
+ *
+ * Presumably the engine reorders when it builds the GPU packet. For a port that
+ * rasterises these directly, winding order is what the data says.
  */
 #ifndef Q2PSX_SCENE_H
 #define Q2PSX_SCENE_H
