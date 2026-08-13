@@ -17,6 +17,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 option(Q2PSX_BUILD_TOOLS  "Build offline inspection tools"    ON)
 option(Q2PSX_BUILD_CLIENT "Build the playable client (needs SDL3)" ON)
+option(Q2PSX_FETCH_SDL3   "Fetch and build SDL3 if not installed"  OFF)
 option(Q2PSX_WERROR      "Treat warnings as errors"           OFF)
 
 # ---------------------------------------------------------------------------
@@ -72,12 +73,31 @@ endif()
 # ---------------------------------------------------------------------------
 if(Q2PSX_BUILD_CLIENT)
     find_package(SDL3 QUIET CONFIG)
+
+    # No system SDL3? Optionally fetch and build it. This is off by default
+    # because it turns a five-second configure into a multi-minute one, and the
+    # core libraries and offline tools do not need it.
+    if(NOT SDL3_FOUND AND Q2PSX_FETCH_SDL3)
+        message(STATUS "SDL3 not found — fetching it (this takes a while)")
+        include(FetchContent)
+        FetchContent_Declare(SDL3
+            GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+            GIT_TAG        release-3.2.8
+            GIT_SHALLOW    TRUE)
+        set(SDL_SHARED ON  CACHE BOOL "" FORCE)
+        set(SDL_STATIC OFF CACHE BOOL "" FORCE)
+        set(SDL_TEST   OFF CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(SDL3)
+        set(SDL3_FOUND TRUE)
+    endif()
+
     if(SDL3_FOUND)
-        message(STATUS "SDL3 found — building playable client")
+        message(STATUS "building the playable client")
         add_subdirectory(src/client)
     else()
-        message(STATUS "SDL3 not found — skipping client (core libs and tools still build). "
-                       "Set SDL3_DIR to enable it.")
+        message(STATUS "SDL3 not found — skipping the client; core libs and tools still build.")
+        message(STATUS "  configure with -DQ2PSX_FETCH_SDL3=ON to build SDL3 from source,")
+        message(STATUS "  or set SDL3_DIR to an existing install.")
     endif()
 endif()
 
