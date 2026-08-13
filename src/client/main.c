@@ -34,6 +34,7 @@
 #include "raster.h"
 #include "sim.h"
 #include "trig.h"
+#include "vram.h"
 #include "world.h"
 #include "xa.h"
 
@@ -58,6 +59,7 @@ typedef struct client {
     psx_ot           ot;
     gte_state        gte;
     psx_framebuffer  fb;
+    psx_vram        *vram;
     psx_raster_opts  opts;
 
     SDL_Window      *window;
@@ -140,6 +142,21 @@ static bool client_load_zone(client *c, const char *map, int index)
     /* Hand the chosen position to the simulation. The ground plane is seeded
      * from the spawn height because real hull tracing is not wired yet -- see
      * q2_sim_trace. */
+    /* Upload this map's texture pages and palettes. Each map has its own bank,
+     * so this must happen per zone load, not once at startup. */
+    if (c->vram) {
+        q2_vram_section vs;
+        memset(c->vram, 0, sizeof(*c->vram));
+        if (q2_vram_load(&vs, c->disc, map) == Q2_OK) {
+            c->opts.textures = (q2_vram_upload(&vs, c->vram) == Q2_OK);
+            Q2_INFO("textures: %u pages, %u palettes",
+                    vs.texpage_count, vs.clut4_count);
+            q2_vram_free(&vs);
+        } else {
+            c->opts.textures = false;
+        }
+    }
+
     q2_sim_init(&c->sim, &c->zone, q2_build_tick_rate(&c->build));
     {
         s32 feet[3];
@@ -310,7 +327,7 @@ static void client_frame(client *c)
                       &c->ot, &c->gte, &stats);
 
     psx_fb_clear(&c->fb, psx_rgb555(16, 16, 32));
-    psx_raster_ot(&c->fb, &c->ot, NULL, &c->opts);
+    psx_raster_ot(&c->fb, &c->ot, c->vram, &c->opts);
 
     if (SDL_LockTexture(c->texture, NULL, &pixels, &pitch)) {
         int y;
@@ -427,7 +444,7 @@ int main(int argc, char **argv)
     psx_ot_init(&c.ot, 4096, 300000);
     psx_fb_init(&c.fb, c.width, c.height);
     psx_raster_opts_default(&c.opts);
-    c.opts.textures = false;      /* no texture codec yet */
+    c.vram = (psx_vram *)calloc(1, sizeof(psx_vram));
 
     q2_camera_default(&c.cam, c.width, c.height);
 
@@ -485,6 +502,7 @@ int main(int argc, char **argv)
 
 done:
     q2_world_free_zone(&c.zone);
+    free(c.vram);
     psx_fb_free(&c.fb);
     psx_ot_free(&c.ot);
     if (c.audio)    SDL_DestroyAudioStream(c.audio);
