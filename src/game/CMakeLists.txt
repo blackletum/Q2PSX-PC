@@ -5,6 +5,8 @@ add_library(q2psx_game STATIC
     inventory.h
     mover.c
     mover.h
+    pickup.c
+    pickup.h
     sim.c
     sim.h
     world.c

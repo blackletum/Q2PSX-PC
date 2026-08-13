@@ -16,6 +16,7 @@
 #include "level.h"
 #include "mover.h"
 #include "points.h"
+#include "pickup.h"
 #include "population.h"
 #include "trigger.h"
 #include "raster.h"
@@ -538,6 +539,8 @@ static int cmd_verify(disc *d)
     unsigned long long pop_paths = 0;
     unsigned long long trig_total = 0;
     unsigned long long trig_planes = 0;
+    unsigned long long pickups_total = 0;
+    unsigned long long pickups_taken = 0;
 
     printf("Verifying every level file against the typed schema...\n\n");
 
@@ -602,6 +605,34 @@ static int cmd_verify(disc *d)
                                 for (slot = 0; q2_pop_get_place(&pop, &g, slot, &pl2); slot++)
                                     pop_places++;
                             }
+                        }
+                    }
+                }
+
+                /* Pickups: build the live item set from the place records. */
+                {
+                    q2_population pop2;
+                    if (q2_population_parse(&pop2, &cf) == Q2_OK) {
+                        q2_pickup_set ps;
+                        if (q2_pickups_build(&ps, &pop2) == Q2_OK) {
+                            pickups_total += ps.count;
+                            /* With no definition table attached nothing can be
+                             * collected, which is the honest state until the
+                             * pickup table is decoded. Prove that rather than
+                             * assume it. */
+                            {
+                                q2_inventory inv;
+                                s32 at[3];
+                                u32 k;
+                                q2_inventory_init(&inv);
+                                for (k = 0; k < ps.count; k++) {
+                                    at[0] = ps.items[k].pos[0];
+                                    at[1] = ps.items[k].pos[1];
+                                    at[2] = ps.items[k].pos[2];
+                                    pickups_taken += q2_pickups_collect(&ps, at, &inv);
+                                }
+                            }
+                            q2_pickups_free(&ps);
                         }
                     }
                 }
@@ -811,6 +842,8 @@ static int cmd_verify(disc *d)
            convex_bad);
     printf("  spawns     : %llu\n", spawns_total);
     printf("  triggers   : %llu volumes, %llu planes\n", trig_total, trig_planes);
+    printf("  pickups    : %llu items, %llu collectable (no id table yet)\n",
+           pickups_total, pickups_taken);
     printf("  population : %llu groups, %llu actors, %llu placements, %llu path nodes\n",
            pop_groups, pop_spawns, pop_places, pop_paths);
     printf("  lights     : %llu, %llu failing the radius invariant\n",
