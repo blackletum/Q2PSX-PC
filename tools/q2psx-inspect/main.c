@@ -13,6 +13,7 @@
 #include "dat.h"
 #include "disc.h"
 #include "entity.h"
+#include "exe.h"
 #include "events_rt.h"
 #include "ident.h"
 #include "level.h"
@@ -1277,10 +1278,8 @@ static void anim_scan_bank(const q2_model_bank *bank, anim_stats *st)
             if (clip.frames > st->max_frames)
                 st->max_frames = clip.frames;
 
-            if (clip.flags & 1) {
+            if (clip.flags & 1)
                 st->variable_rate++;
-                continue;
-            }
 
             if (c == 0 && clip.frames == 1) {
                 u32 block_c_size = mdl.hdr.ofs_block_d - mdl.hdr.ofs_block_c;
@@ -1295,7 +1294,20 @@ static void anim_scan_bank(const q2_model_bank *bank, anim_stats *st)
             for (f = 0; f < clip.frames; f++) {
                 u32 p;
 
-                if (q2_model_pose_at(&mdl, &clip, f, pose) != Q2_OK) {
+                /* Sample the middle of each frame as well as its start, so the
+                 * variable-rate clips are exercised where they interpolate
+                 * rather than only where they land on a key. */
+                if (q2_model_pose_at(&mdl, &clip, f * Q2_MODEL_TICKS_PER_FRAME,
+                                     pose) != Q2_OK ||
+                    q2_model_pose_at(&mdl, &clip,
+                                     f * Q2_MODEL_TICKS_PER_FRAME + 5,
+                                     pose) != Q2_OK) {
+                    if (st->bad_keys < 6)
+                        printf("  BAD  %-12s clip %u/%u  frame %u/%u  parts %u"
+                               "  flags 0x%X  blockC %u..%u\n",
+                               mdl.hdr.name, c, n_clips, f, clip.frames,
+                               mdl.hdr.num_parts, clip.flags,
+                               mdl.hdr.ofs_block_c, mdl.hdr.ofs_block_d);
                     st->bad_keys++;
                     break;
                 }
@@ -1387,6 +1399,45 @@ static int cmd_anims(disc *d)
     printf("  translation range         : %d .. %d\n", st.t_min, st.t_max);
     printf("  |q|^2 in 1.3.12           : %d .. %d  (4096 == unit)\n",
            st.q_min_len, st.q_max_len);
+
+    /*
+     * The interpolator needs an inverse cosine, and the original ships it as a
+     * 4096-entry table. This port computes it instead, so measure the two
+     * against each other rather than assuming they agree — a slerp weight that
+     * is a few units out is invisible, but silently substituting a different
+     * function for one the original tabulated is not something to guess at.
+     */
+    {
+        q2_exe exe;
+
+        if (q2_exe_load(&exe, d, NULL) == Q2_OK) {
+            u32 idx, worst = 0, mismatches = 0;
+
+            for (idx = 0; idx < 4096; idx++) {
+                s16 stored;
+                s32 mine, diff;
+
+                if (!q2_exe_s16(&exe, 0x8009FC44 + idx * 2, &stored))
+                    break;
+
+                /* The table is indexed by cos/2 + 2048. */
+                mine = q2_acos12(((s32)idx - 2048) * 2);
+                diff = mine - stored;
+                if (diff < 0)
+                    diff = -diff;
+                if (diff) {
+                    mismatches++;
+                    if ((u32)diff > worst)
+                        worst = (u32)diff;
+                }
+            }
+
+            printf("\n  acos table vs q2_acos12   : %u of 4096 entries differ, "
+                   "worst by %u of 4096 (%.3f degrees)\n",
+                   mismatches, worst, (double)worst * 360.0 / 4096.0);
+            q2_exe_free(&exe);
+        }
+    }
 
     printf("\n%s\n", (st.bad_chain == 0 && st.bad_keys == 0)
            ? "PASS - every chain walks and every key lands inside its block."

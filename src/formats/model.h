@@ -296,10 +296,15 @@ Q2PSX_INLINE u32 q2_model_face_clut_index(const q2_model_face *f,
  * single-frame models have `u16@0 == 1`, `u16@2 == 0` and `u16@10 == 4`: one
  * frame, no flags, and a key offset of 4.
  *
- * NOT YET IMPLEMENTED: the variable-rate path (clip flags bit 0), which gives
- * each part its own key timing through a stream of 4-bit durations and
- * interpolates between keys. 0x8006B4DC has it. Clips without the flag hold
- * one key per part per frame, which is what q2_model_pose decodes.
+ * A clip with flags bit 0 set is laid out differently, and the difference is
+ * easy to miss: its four-byte entries are PER PART rather than per frame, and
+ * each names two things — a stream of 4-bit durations in frames, eight to a
+ * word, and that part's own list of keys. A part holds a key for as many frames
+ * as its nibble says, and poses between keys are interpolated: translations
+ * linearly, rotations by the spherical interpolator at 0x80069C64, which flips
+ * the second quaternion when the dot product is negative and falls back to a
+ * straight lerp below its angle threshold. 3,241 of the disc's 4,535 clips are
+ * this kind, so it is the common case rather than the exception.
  */
 #define Q2_MODEL_TICKS_PER_FRAME 10
 

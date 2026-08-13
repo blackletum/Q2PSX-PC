@@ -15,9 +15,9 @@ its own PS-X EXE loader and R3000A disassembler (`q2psx-inspect exe / disasm / x
 questions about the original *code* no longer depend on an external disassembler session. Several items below
 were parked on "needs a working disassembler session" and are now simply open work.
 
-Animation followed. There are no per-part matrices to find (#2a): a part's transform is a keyframed
-translation and quaternion in `CastList` block C, and all 399 articulated models now pose. What is left of
-that item is playback of the variable-rate clips (#2c), which is most of them.
+Animation followed, and is now complete. There are no per-part matrices to find (#2a): a part's transform is
+a keyframed translation and quaternion in `CastList` block C. All 399 articulated models pose, and all 4,535
+clips play, including the 3,241 variable-rate ones (#2c) — 2,036,080 keys decoded with none out of range.
 
 What remains blocking is simulation, not appearance: the `Events` per-frame integrators (#4a), which are
 what make doors and lifts move.
@@ -105,6 +105,15 @@ Legend: `[ ]` open · `[~]` partially resolved · `[x]` resolved (move the item,
       survives. The `12 + 8*numParts` size law that an earlier pass measured without explanation now falls
       out of the layout and holds on **1,265 of 1,265** single-frame clips.
       Implemented in `src/formats/model.[ch]` as `q2_model_anim_get` / `q2_model_pose_at`.
+- [x] **2c. The variable-rate clip path. — IMPLEMENTED.** Clips with `flags & 1` — 3,241 of 4,535, so the
+      common case — put their four-byte entries **per part** rather than per frame, each naming a stream of
+      4-bit frame durations and that part's own key list, with keys interpolated in between (`0x8006B4DC`,
+      and the quaternion slerp at `0x80069C64`). All 4,535 clips now decode: **2,036,080 keys**, none
+      escaping its block. Three details the disc had to teach: a zero duration nibble is legal and advances
+      the key index without consuming a frame; the tick clamp is to the *start* of the last frame, not the
+      clip end; and the last key of a model's last clip has no successor inside block C, which the original
+      reads anyway. The port's computed inverse cosine matches the original's 4096-entry table on 4,094
+      entries and is one unit out on the other two.
 
 ---
 
@@ -112,17 +121,13 @@ Legend: `[ ]` open · `[~]` partially resolved · `[x]` resolved (move the item,
 
 The residues of the resolved blockers keep their parents' numbers.
 
-- [ ] **2c. The variable-rate clip path — 3,241 of the 4,535 clips.** Clips with `flags & 1` give each part
-      its own key timing through a stream of 4-bit durations and interpolate between keys;
-      `0x8006B4DC` has it. `q2_model_pose_at()`
-      refuses those clips rather than decoding them as uniform, so until this lands most animations cannot be
-      played back even though every model can now be posed.
-  - [~] 2b. Cross-part index resolution for 21,217 faces (15.3 %), all inside the articulated models.
-        Last-writer-wins and a rival arithmetic rule both resolve 100 % of indices in range and differ on
-        18,283 articulated faces; geometry cannot separate them. Last-writer-wins wins on coverage
-        (100.0000 % / 1,723 models vs 99.6131 % / 1,462) and is what the module implements, behind one
-        function so it can be flipped. It can be revisited now: the poses the two rules would apply to
-        those borrowed vertices are decodable, so this is no longer blocked on anything.
+- [~] **2b. Cross-part index resolution for 21,217 faces (15.3 %), all inside the articulated
+      models.** Last-writer-wins and a rival arithmetic rule both resolve 100 % of indices in range and
+      differ on 18,283 articulated faces; geometry alone cannot separate them. Last-writer-wins wins on
+      coverage (100.0000 % / 1,723 models vs 99.6131 % / 1,462) and is what the module implements, behind one
+      function so it can be flipped. **It is now decidable**: the two rules transform those borrowed vertices
+      with different parts' poses, and the poses are decoded, so posing a model both ways and comparing the
+      seam quads against the stored vertex normals settles it.
 - [~] **3a. The PSX-texel to PC-texel ratio — the last step to CONFIRMED for S = 10.**
       The texture measurement fixes 10 world units per *PSX* texel, which is one equation in two unknowns.
       S = 10 requires PSX 64×64 tiles to be 1:1 with PC Quake II 64×64 textures at scale 1.0; a 2:1

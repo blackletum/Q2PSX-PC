@@ -28,6 +28,18 @@
 s32 q2_sin12(s32 angle);
 s32 q2_cos12(s32 angle);
 
+/*
+ * Inverse cosine: takes a 1.3.12 cosine and returns the angle, 0 for +1.0 and
+ * Q2_ANGLE_180 for -1.0. Inputs outside ±4096 are clamped.
+ *
+ * The original has this as a 4096-entry table at 0x8009FC44 indexed by
+ * cos/2 + 2048, used only by the quaternion interpolator. This computes the
+ * same function rather than shipping the table; `q2psx-inspect anims` measures
+ * the two against each other over all 4096 entries so the difference is a
+ * number rather than an assumption.
+ */
+s32 q2_acos12(s32 cos12);
+
 /* Build a 1.3.12 rotation matrix for yaw then pitch, in the order the camera
  * wants: yaw about Y, then pitch about X. `m` is row-major m[row][col]. */
 void q2_rotation_yaw_pitch(s16 m[3][3], s32 yaw, s32 pitch);

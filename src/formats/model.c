@@ -318,66 +318,232 @@ u32 q2_model_anim_count(const q2_model *m)
     return n;
 }
 
-q2_result q2_model_pose_at(const q2_model *m, const q2_model_anim *clip,
-                           u32 frame, q2_model_pose *out)
+/* Unpack one key's translation. The shifts are the engine's own, and they are
+ * what makes an 11-bit field cover a 12-bit range. */
+static void key_translation(u32 t, s16 out[3])
 {
-    u32 begin, end, entry, keys, part;
+    out[0] = (s16)(((s32)(t << 21) >> 21) * 2);
+    out[1] = (s16)(((s32)(t << 11) >> 22) * 4);
+    out[2] = (s16)(((s32)t >> 21) * 2);
+}
+
+/*
+ * Unpack one key's rotation. The three fields are HALF angles on the 4096-step
+ * circle — which is why they only need to span half of it — and 0x800699E8
+ * turns them into a quaternion with the textbook Euler products.
+ */
+static void key_rotation(u32 r, s16 out[4])
+{
+    s32 ha = (s32)(r & 0x7FF);
+    s32 hb = (s32)((r >> 11) & 0x3FF) * 2;   /* stored at half resolution */
+    s32 hc = (s32)(r >> 21);
+
+    s32 sa = q2_sin12(ha), ca = q2_cos12(ha);
+    s32 sb = q2_sin12(hb), cb = q2_cos12(hb);
+    s32 sc = q2_sin12(hc), cc = q2_cos12(hc);
+
+    s32 ss  = (sc * sa) >> 12;
+    s32 ccp = (cc * ca) >> 12;
+
+    out[0] = (s16)((((cb * cc) >> 12) * sa >> 12) - (((sb * sc) >> 12) * ca >> 12));
+    out[1] = (s16)(((sb * ccp) >> 12) + ((cb * ss) >> 12));
+    out[2] = (s16)((((cb * sc) >> 12) * ca >> 12) - (((sb * cc) >> 12) * sa >> 12));
+    out[3] = (s16)(((cb * ccp) >> 12) + ((sb * ss) >> 12));
+}
+
+/*
+ * Spherical interpolation, transcribed from 0x80069C64.
+ *
+ * Worth following exactly rather than substituting a textbook slerp, because
+ * two of its details are visible: it flips the second quaternion when the dot
+ * product is negative, so it always takes the short way round, and it falls
+ * back to a straight lerp once the angle drops below its threshold — which is
+ * where a "better" implementation would diverge from the original on nearly
+ * every frame of nearly every animation.
+ */
+static void quat_slerp(const s16 a[4], const s16 b[4], s32 t, s16 out[4])
+{
+    s32 bq[4];
+    s32 dot = 0, wa, wb;
+    int i;
+
+    for (i = 0; i < 4; i++) {
+        bq[i] = b[i];
+        dot  += (s32)a[i] * b[i];
+    }
+
+    if (dot < 0) {
+        for (i = 0; i < 4; i++)
+            bq[i] = -bq[i];
+        dot = -dot;
+    }
+
+    if (t <= 0) {
+        for (i = 0; i < 4; i++)
+            out[i] = a[i];
+        return;
+    }
+    if (t >= Q2_ONE_12) {
+        for (i = 0; i < 4; i++)
+            out[i] = (s16)bq[i];
+        return;
+    }
+
+    wa = Q2_ONE_12 - t;
+    wb = t;
+
+    /* `1 - cos(theta)` in 1.3.12. Below 0x80 the original does not bother with
+     * the trigonometry and lerps. */
+    if (Q2_ONE_12 - (dot >> 12) > 0x80) {
+        s32 ang = q2_acos12(dot >> 12);
+        s32 s   = q2_sin12(ang);
+
+        if (s != 0) {
+            wa = (q2_sin12((Q2_ONE_12 - t) * ang >> 12) << 12) / s;
+            wb = (q2_sin12(t * ang >> 12) << 12) / s;
+        }
+    }
+
+    for (i = 0; i < 4; i++)
+        out[i] = (s16)(((wa * a[i]) >> 12) + ((wb * bq[i]) >> 12));
+}
+
+/* One part's key stream in a variable-rate clip: a run of 4-bit durations in
+ * frames, eight to a word, and a parallel list of 8-byte keys. */
+static bool rate_nibble(const q2_model *m, u32 rate, u32 end, u32 index, u32 *out)
+{
+    u32 word_at = rate + (index / 8) * 4;
+
+    if (word_at + 4 > end)
+        return false;
+    *out = (q2_rd_u32(m->base + word_at) >> ((index % 8) * 4)) & 0xF;
+    return true;
+}
+
+q2_result q2_model_pose_at(const q2_model *m, const q2_model_anim *clip,
+                           u32 tick, q2_model_pose *out)
+{
+    u32 begin, end, entry, keys, part, duration;
 
     if (!m || !clip || !out)
         return Q2_ERR_INVALID_ARG;
     if (!anim_span(m, &begin, &end))
         return Q2_ERR_NOT_FOUND;
-    if (frame >= clip->frames)
-        return Q2_ERR_RANGE;
 
-    /* Bit 0 gives every part its own key timing through a nibble stream and
-     * interpolates; decoding it as uniform frames would silently produce the
-     * wrong pose, which is worse than refusing. */
-    if (clip->flags & 1)
-        return Q2_ERR_UNSUPPORTED;
+    /*
+     * The engine clamps to the START of the last frame, not to the end of the
+     * clip (0x8006B4F8: `if (duration - 10 < tick) tick = duration - 10`), so a
+     * caller that overruns holds the final pose.
+     *
+     * The difference from clamping at the clip end is not cosmetic. Ticks in
+     * the last ten subticks are inside the clip but past the last key, and a
+     * looser clamp walks the duration stream off its end: the nibbles for the
+     * final key are followed by zeros, and a zero duration advances the key
+     * index without consuming time, so the walk runs away. That is exactly what
+     * 428 of the disc's 123,704 frames do under the looser rule.
+     */
+    duration = (u32)clip->frames * Q2_MODEL_TICKS_PER_FRAME;
+    if (tick > duration - Q2_MODEL_TICKS_PER_FRAME)
+        tick = duration - Q2_MODEL_TICKS_PER_FRAME;
 
-    entry = clip->offset + 8 + frame * 4;
-    if (entry + 4 > end)
-        return Q2_ERR_BAD_FORMAT;
+    if (!(clip->flags & 1)) {
+        /* Uniform: one key block per frame, every part keyed every frame. */
+        entry = clip->offset + 8 + (tick / Q2_MODEL_TICKS_PER_FRAME) * 4;
+        if (entry + 4 > end)
+            return Q2_ERR_BAD_FORMAT;
 
-    /* The key offset is relative to the frame entry, not to the clip. */
-    keys = entry + q2_rd_u16(m->base + entry + 2);
-    if (keys + (size_t)m->hdr.num_parts * 8 > end)
-        return Q2_ERR_BAD_FORMAT;
+        /* The key offset is relative to the entry, not to the clip. */
+        keys = entry + q2_rd_u16(m->base + entry + 2);
+        if (keys + (size_t)m->hdr.num_parts * 8 > end)
+            return Q2_ERR_BAD_FORMAT;
 
+        for (part = 0; part < m->hdr.num_parts; part++) {
+            const u8 *k = m->base + keys + (size_t)part * 8;
+            key_translation(q2_rd_u32(k), out[part].t);
+            key_rotation(q2_rd_u32(k + 4), out[part].q);
+        }
+        return Q2_OK;
+    }
+
+    /*
+     * Variable rate: the four-byte entries after the header are PER PART, not
+     * per frame, and each names that part's own duration stream and key list.
+     * A part holds a key for as many frames as its nibble says, and the pose
+     * between keys is interpolated.
+     */
     for (part = 0; part < m->hdr.num_parts; part++) {
-        const u8 *k = m->base + keys + (size_t)part * 8;
-        u32 t = q2_rd_u32(k);
-        u32 r = q2_rd_u32(k + 4);
-        s32 ha, hb, hc;
-        s32 sa, ca, sb, cb, sc, cc, ss, ccp;
+        u32 rate, k = 0, frames_left, sub, span, pos, dur = 0;
+        s16 t0[3], t1[3], q0[4], q1[4];
+        const u8 *ka, *kb;
+        s32 scale;
+        int i;
 
-        /* Translation: three signed fields, each stored shifted down. The
-         * shifts are the engine's own (0x8006BA5C..0x8006BAA8) and are what
-         * makes an 11-bit field cover a 12-bit range. */
-        out[part].t[0] = (s16)(((s32)(t << 21) >> 21) * 2);
-        out[part].t[1] = (s16)(((s32)(t << 11) >> 22) * 4);
-        out[part].t[2] = (s16)(((s32)t >> 21) * 2);
+        entry = clip->offset + 8 + part * 4;
+        if (entry + 4 > end)
+            return Q2_ERR_BAD_FORMAT;
 
-        /* Rotation: three unsigned HALF angles on the 4096-step circle. The
-         * middle one is stored at half resolution and doubled. */
-        ha = (s32)(r & 0x7FF);
-        hb = (s32)((r >> 11) & 0x3FF) * 2;
-        hc = (s32)(r >> 21);
+        rate = entry + q2_rd_u16(m->base + entry + 0);
+        keys = entry + q2_rd_u16(m->base + entry + 2);
 
-        sa = q2_sin12(ha); ca = q2_cos12(ha);
-        sb = q2_sin12(hb); cb = q2_cos12(hb);
-        sc = q2_sin12(hc); cc = q2_cos12(hc);
+        frames_left = tick / Q2_MODEL_TICKS_PER_FRAME;
+        sub         = tick % Q2_MODEL_TICKS_PER_FRAME;
 
-        ss  = (sc * sa) >> 12;
-        ccp = (cc * ca) >> 12;
+        /*
+         * Walk the durations until the current time falls inside one.
+         *
+         * A zero nibble is legal and common: it advances the key index without
+         * consuming a frame, which is how a part gets two keys on the same
+         * frame. The walk still terminates because the index advances either
+         * way — but bound it anyway, since the stream is file data and a
+         * pathological one would otherwise run off the end of the block.
+         */
+        for (;;) {
+            if (k > (u32)clip->frames * 2 + 16)
+                return Q2_ERR_BAD_FORMAT;
+            if (!rate_nibble(m, rate, end, k, &dur))
+                return Q2_ERR_BAD_FORMAT;
+            if (frames_left * Q2_MODEL_TICKS_PER_FRAME + sub <=
+                dur * Q2_MODEL_TICKS_PER_FRAME)
+                break;
+            frames_left -= dur;
+            k++;
+        }
 
-        out[part].q[0] = (s16)((((cb * cc) >> 12) * sa >> 12) -
-                               (((sb * sc) >> 12) * ca >> 12));
-        out[part].q[1] = (s16)(((sb * ccp) >> 12) + ((cb * ss) >> 12));
-        out[part].q[2] = (s16)((((cb * sc) >> 12) * ca >> 12) -
-                               (((sb * cc) >> 12) * sa >> 12));
-        out[part].q[3] = (s16)(((cb * ccp) >> 12) + ((sb * ss) >> 12));
+        span = dur * Q2_MODEL_TICKS_PER_FRAME;
+        pos  = frames_left * Q2_MODEL_TICKS_PER_FRAME + sub;
+
+        if (keys + (size_t)(k + 1) * 8 > end)
+            return Q2_ERR_BAD_FORMAT;
+
+        ka = m->base + keys + (size_t)k * 8;
+
+        /*
+         * The original always reads the NEXT key, even on the last frame of the
+         * last clip, where the key list ends at block C and the read runs eight
+         * bytes into block D. On this disc that happens on 429 of 123,704
+         * frames — always the final frame of a model's final clip — so it is
+         * the tail of the data rather than a misread. Hold the last key instead
+         * of interpolating towards whatever follows the block.
+         */
+        kb = (keys + (size_t)(k + 2) * 8 <= end) ? ka + 8 : ka;
+
+        if (pos == span) {
+            key_translation(q2_rd_u32(kb), out[part].t);
+            key_rotation(q2_rd_u32(kb + 4), out[part].q);
+            continue;
+        }
+
+        key_translation(q2_rd_u32(ka), t0);
+        key_rotation(q2_rd_u32(ka + 4), q0);
+        key_translation(q2_rd_u32(kb), t1);
+        key_rotation(q2_rd_u32(kb + 4), q1);
+
+        /* Rounded division, as the original's (pos*4096 + span/2) / span. */
+        scale = (s32)((pos * (u32)Q2_ONE_12 + span / 2) / span);
+
+        for (i = 0; i < 3; i++)
+            out[part].t[i] = (s16)(t0[i] + (((t1[i] - t0[i]) * scale) >> 12));
+        quat_slerp(q0, q1, scale, out[part].q);
     }
 
     return Q2_OK;

@@ -561,10 +561,31 @@ first clips disc-wide, alongside the same pass's observation that those models c
 Census over the disc: **1,723 of 1,723** models have a walkable chain, 4,535 clips, 123,704 frames, and
 **zero** frames whose keys escape block C. All 399 articulated models are animated.
 
-> **Still open: the variable-rate path** (`flags & 1`), which is **3,241 of the 4,535 clips**. Those give each
-> part its own key timing through a stream of 4-bit durations and interpolate between keys; `0x8006B4DC`
-> holds it. `q2_model_pose_at()` refuses such a clip rather than decoding it as uniform, because a silently
-> wrong pose is worse than a missing one.
+**The variable-rate path** (`flags & 1`) — **3,241 of the 4,535 clips**, so the common case — lays the same
+clip out differently, and the difference is easy to miss: its four-byte entries are **per part**, not per
+frame. Each names a stream of 4-bit durations in frames, eight to a word and read from the low nibble up, and
+that part's own key list. A part holds a key for as many frames as its nibble says; poses between keys are
+interpolated, translations linearly and rotations by the spherical interpolator at `0x80069C64`.
+
+That interpolator is worth following exactly rather than substituting a textbook slerp, because two of its
+details are observable: it negates the second quaternion when the dot product is negative, so it always takes
+the short way round, and once `1 − cos θ` falls below `0x80` it drops to a straight lerp — which is most
+frames of most animations. Its inverse cosine is a 4096-entry table at `0x8009FC44` indexed by `cos/2 + 2048`;
+this port computes the function instead, and `q2psx-inspect anims` measures the substitution against the
+original: **4,094 of 4,096 entries identical, the other two off by one unit (0.088°)**.
+
+Three details of the walk are load-bearing, and each was found by the disc disagreeing with a first attempt:
+
+* **A zero duration nibble is legal and common.** It advances the key index without consuming a frame, which
+  is how a part gets two keys on one frame. Treating it as malformed rejects 3,178 frames.
+* **The tick clamp is to the START of the last frame**, `duration - 10`, not to the clip end. Ticks in the
+  final ten subticks are inside the clip but past the last key, and a looser clamp walks the duration stream
+  into the zeros that follow it, where the zero-nibble rule above then runs the key index away. 428 frames.
+* **The last key of a model's last clip has no successor inside block C.** The original reads one anyway,
+  eight bytes into block D; the port holds the final key instead. 429 frames, always the same position.
+
+Census with the path implemented: **2,036,080 keys** decoded across all 4,535 clips, **zero** escaping their
+block.
 >
 > The fixed-size effect renderer at `0x80064780` is a useful *analogy* but is **not** corroboration: its loop
 > bound is `slti $v0,$s3,79` at `0x80064BC4` (79 faces, not 54), its face stride is `addiu $s2,$s2,4` at

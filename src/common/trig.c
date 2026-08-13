@@ -50,6 +50,22 @@ s32 q2_cos12(s32 angle)
     return g_sin_table[wrap_angle(angle + Q2_ANGLE_90)];
 }
 
+s32 q2_acos12(s32 cos12)
+{
+    double radians, angle;
+
+    if (cos12 >  Q2_ONE_12) cos12 =  Q2_ONE_12;
+    if (cos12 < -Q2_ONE_12) cos12 = -Q2_ONE_12;
+
+    radians = acos((double)cos12 / (double)Q2_ONE_12);
+    angle   = radians * (double)Q2_ANGLE_360 /
+              (2.0 * 3.14159265358979323846);
+
+    /* Truncate rather than round: the original's table does, visibly so at the
+     * ends — its entry for cos = 4095/4096 is 20 where rounding gives 21. */
+    return (s32)angle;
+}
+
 void q2_rotation_yaw_pitch(s16 m[3][3], s32 yaw, s32 pitch)
 {
     s32 sy = q2_sin12(yaw),   cy = q2_cos12(yaw);
