@@ -32,6 +32,7 @@
 #include "raster.h"
 #include "trig.h"
 #include "world.h"
+#include "xa.h"
 
 typedef struct client {
     disc            *disc;
@@ -39,6 +40,14 @@ typedef struct client {
     q2_world_zone    zone;
     char             map[64];
     int              zone_index;
+
+    /* Streamed music. The XA decoder carries per-channel history across
+     * sectors, so it must persist for the life of a track. */
+    q2_xa_track      music;
+    q2_xa_decoder    music_dec;
+    u32              music_cursor;
+    bool             music_open;
+    SDL_AudioStream *audio;
 
     q2_camera        cam;
     psx_ot           ot;
@@ -126,6 +135,62 @@ static bool client_load_zone(client *c, const char *map, int index)
     Q2_INFO("%s: %u nodes, %u vertices",
             c->zone.name, c->zone.scene.node_count, c->zone.points.count);
     return true;
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * Music.
+ *
+ * The XA streams run at 37800 Hz, which no sound card wants. Rather than write
+ * a resampler, hand SDL an audio stream declared as 37800 Hz stereo and let it
+ * convert — the conversion is not part of the console's character, so there is
+ * nothing to be gained by reproducing it by hand.
+ *
+ * Sectors are decoded on demand rather than up front: one .XAI channel is
+ * several minutes of audio, and the original streamed it off the disc for
+ * exactly the same reason.
+ */
+static bool client_music_start(client *c, char letter, u8 channel)
+{
+    if (q2_xa_track_open(&c->music, c->disc, letter, channel) != Q2_OK) {
+        Q2_WARN("no music track QUAKE_%c channel %u", letter, channel);
+        return false;
+    }
+
+    q2_xa_decoder_reset(&c->music_dec);
+    c->music_cursor = 0;
+    c->music_open   = true;
+
+    Q2_INFO("music: QUAKE_%c channel %u", letter, channel);
+    return true;
+}
+
+static void client_music_pump(client *c)
+{
+    s16 pcm[XA_FRAMES_PER_SECTOR * 2];
+    int queued;
+
+    if (!c->music_open || !c->audio)
+        return;
+
+    /* Keep roughly a quarter second buffered. Less and it stutters when a frame
+     * runs long; much more and switching zones would keep playing the old
+     * track for noticeably too long. */
+    queued = SDL_GetAudioStreamQueued(c->audio);
+    while (queued < (int)(XA_SAMPLE_RATE / 4 * 2 * (int)sizeof(s16))) {
+        u32 n = q2_xa_track_read(&c->music, &c->music_dec, &c->music_cursor,
+                                 pcm, (u32)(sizeof(pcm) / sizeof(pcm[0])));
+        if (n == 0) {
+            /* End of stream: loop, which is what the original did for level
+             * music rather than falling silent. */
+            c->music_cursor = 0;
+            q2_xa_decoder_reset(&c->music_dec);
+            break;
+        }
+
+        SDL_PutAudioStreamData(c->audio, pcm, (int)(n * sizeof(s16)));
+        queued += (int)(n * sizeof(s16));
+    }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -261,10 +326,26 @@ int main(int argc, char **argv)
     c.width  = 320;
     c.height = (c.build.video == Q2_VIDEO_PAL) ? 256 : 240;
 
-    if (!SDL_Init(SDL_INIT_VIDEO)) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         disc_close(c.disc);
         return 1;
+    }
+
+    /* Declare the stream at the console's own 37800 Hz and let SDL resample to
+     * whatever the device wants. */
+    {
+        SDL_AudioSpec spec;
+        spec.format   = SDL_AUDIO_S16LE;
+        spec.channels = XA_CHANNELS;
+        spec.freq     = XA_SAMPLE_RATE;
+
+        c.audio = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
+                                            &spec, NULL, NULL);
+        if (c.audio)
+            SDL_ResumeAudioStreamDevice(c.audio);
+        else
+            Q2_WARN("no audio device: %s", SDL_GetError());
     }
 
     c.window = SDL_CreateWindow("Q2PSX-PC",
@@ -297,6 +378,11 @@ int main(int argc, char **argv)
         goto done;
     }
 
+    /* Level music. Which .XAI channel belongs to which map is part of the EXE's
+     * music table and is not decoded yet, so start on the first track rather
+     * than guess at a mapping that would be wrong. */
+    client_music_start(&c, 'A', 0);
+
     c.running = true;
     last = SDL_GetTicks();
 
@@ -328,6 +414,7 @@ int main(int argc, char **argv)
         }
 
         client_input(&c, dt);
+        client_music_pump(&c);
         client_frame(&c);
     }
 
@@ -335,6 +422,7 @@ done:
     q2_world_free_zone(&c.zone);
     psx_fb_free(&c.fb);
     psx_ot_free(&c.ot);
+    if (c.audio)    SDL_DestroyAudioStream(c.audio);
     if (c.texture)  SDL_DestroyTexture(c.texture);
     if (c.renderer) SDL_DestroyRenderer(c.renderer);
     if (c.window)   SDL_DestroyWindow(c.window);
