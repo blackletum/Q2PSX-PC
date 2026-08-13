@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "trig.h"
+#include "vram.h"
 
 q2_result q2_world_load_zone(q2_world_zone *out, const disc *d,
                              const char *map, int zone_index)
@@ -314,8 +315,26 @@ u32 q2_world_build_ot(const q2_world_zone *z,
                     }
                 }
 
-                prim->tpage           = poly.tpage;
-                prim->clut            = poly.clut;
+                /*
+                 * Translate the stored fields into what the GPU actually wants.
+                 *
+                 * poly.clut is NOT a hardware CLUT word: the high byte is an
+                 * index into the map's clut4[] array and the low bits select
+                 * semi-transparency. Feeding it to the rasteriser raw points
+                 * the sampler at a nonsense VRAM address.
+                 *
+                 * Texture pages sit at x = 64*(slot+1) halfwords, y = 256, and
+                 * are 4bpp — so the page index is tpage+1, not tpage.
+                 */
+                {
+                    u32 clut_index = q2_mapmod_clut_index(poly.clut);
+                    u32 semi       = q2_mapmod_clut_semi(poly.clut);
+
+                    prim->clut  = q2_vram_clut_word(clut_index);
+                    prim->tpage = psx_make_tpage((int)poly.tpage + 1, 1,
+                                                 PSX_BLEND_HALF, PSX_TEX_4BIT);
+                    prim->semi_transparent = (semi != 0);
+                }
                 prim->textured_blend  = true;
 
                 emitted++;

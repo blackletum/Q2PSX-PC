@@ -1,5 +1,7 @@
 #include "vram.h"
 
+#include "gpu.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -411,4 +413,82 @@ bool q2_vram_get_clut8(const q2_vram_section *section, u32 image_index,
         out[i] = q2_rd_u16(src + i * 2);
 
     return true;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Palette binding and VRAM upload                                            */
+/* ------------------------------------------------------------------------- */
+const u8 *q2_vram_clut(const q2_vram_section *section, u32 index)
+{
+    if (!section || !section->clut4 || index >= section->clut4_count)
+        return NULL;
+    return section->clut4 + (size_t)index * (Q2_VRAM_CLUT4_ENTRIES * 2);
+}
+
+q2_result q2_vram_upload(const q2_vram_section *section, struct psx_vram *vram)
+{
+    psx_vram *v = (psx_vram *)vram;
+    u8 *page;
+    u32 i;
+    q2_result r = Q2_OK;
+
+    if (!section || !v)
+        return Q2_ERR_INVALID_ARG;
+
+    /* Palettes first: they live at x 0..63, y 256+, which is exactly the cell
+     * the texture pages deliberately skip over. */
+    for (i = 0; i < section->clut4_count; i++) {
+        const u8 *entries = q2_vram_clut(section, i);
+        u32 x, y, e;
+
+        if (!entries)
+            break;
+
+        q2_vram_clut_pos(i, &x, &y);
+        if (y >= PSX_VRAM_HEIGHT)
+            break;
+
+        for (e = 0; e < Q2_VRAM_CLUT4_ENTRIES; e++) {
+            if (x + e >= PSX_VRAM_WIDTH)
+                break;
+            v->px[y][x + e] = q2_rd_u16(entries + e * 2);
+        }
+    }
+
+    /* Texture pages: decode each one and blit it as (width>>1) halfwords by
+     * height rows, at x = 64*(slot+1), y = 256. */
+    page = (u8 *)malloc((size_t)Q2_VRAM_TEXPAGE_W * Q2_VRAM_TEXPAGE_H);
+    if (!page)
+        return Q2_ERR_NO_MEMORY;
+
+    for (i = 0; i < section->texpage_count; i++) {
+        size_t decoded = 0;
+        u32 vx = 64u * (i + 1u);
+        u32 row;
+
+        if (q2_vram_decode(section, i,
+                           page, (size_t)Q2_VRAM_TEXPAGE_W * Q2_VRAM_TEXPAGE_H,
+                           &decoded) != Q2_OK) {
+            r = Q2_ERR_BAD_FORMAT;
+            continue;
+        }
+
+        for (row = 0; row < Q2_VRAM_TEXPAGE_H; row++) {
+            u32 halfwords = Q2_VRAM_TEXPAGE_W / 2;
+            u32 col;
+
+            if (256u + row >= PSX_VRAM_HEIGHT)
+                break;
+
+            for (col = 0; col < halfwords; col++) {
+                const u8 *src = page + (size_t)row * Q2_VRAM_TEXPAGE_W + col * 2;
+                if (vx + col >= PSX_VRAM_WIDTH)
+                    break;
+                v->px[256u + row][vx + col] = q2_rd_u16(src);
+            }
+        }
+    }
+
+    free(page);
+    return r;
 }

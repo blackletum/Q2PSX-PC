@@ -786,6 +786,7 @@ static int cmd_render(disc *d, const char *map, int zone_index, const char *out_
     gte_state gte;
     psx_framebuffer fb;
     psx_raster_opts opts;
+    psx_vram *vram = NULL;
     q2_world_stats stats;
     q2_result r;
     s32 wmin[3], wmax[3];
@@ -853,6 +854,14 @@ static int cmd_render(disc *d, const char *map, int zone_index, const char *out_
         return 1;
     }
 
+    vram = (psx_vram *)calloc(1, sizeof(psx_vram));
+    if (!vram) {
+        fprintf(stderr, "out of memory for VRAM\n");
+        psx_ot_free(&ot);
+        q2_world_free_zone(&zone);
+        return 1;
+    }
+
     r = psx_fb_init(&fb, W, H);
     if (r != Q2_OK) {
         fprintf(stderr, "cannot allocate framebuffer: %s\n", q2_result_str(r));
@@ -870,10 +879,28 @@ static int cmd_render(disc *d, const char *map, int zone_index, const char *out_
     printf("  ot overflow   : %u\n", stats.ot_overflow);
 
     psx_raster_opts_default(&opts);
-    opts.textures = false;    /* no texture codec yet — Gouraud only */
+
+    /* Upload the map's texture pages and palettes into VRAM, then render
+     * textured. Falls back to Gouraud-only if the map has no VRAM section. */
+    {
+        q2_vram_section vs;
+        if (q2_vram_load(&vs, d, map) == Q2_OK) {
+            if (q2_vram_upload(&vs, vram) == Q2_OK) {
+                printf("  textures      : %u pages, %u palettes uploaded\n",
+                       vs.texpage_count, vs.clut4_count);
+            } else {
+                printf("  textures      : upload failed, drawing untextured\n");
+                opts.textures = false;
+            }
+            q2_vram_free(&vs);
+        } else {
+            printf("  textures      : no VRAM section, drawing untextured\n");
+            opts.textures = false;
+        }
+    }
 
     psx_fb_clear(&fb, psx_rgb555(16, 16, 32));
-    psx_raster_ot(&fb, &ot, NULL, &opts);
+    psx_raster_ot(&fb, &ot, vram, &opts);
 
     r = psx_fb_write_ppm(&fb, out_path);
     if (r != Q2_OK) {
@@ -884,6 +911,7 @@ static int cmd_render(disc *d, const char *map, int zone_index, const char *out_
 
     psx_fb_free(&fb);
     psx_ot_free(&ot);
+    free(vram);
     q2_world_free_zone(&zone);
     return r == Q2_OK ? 0 : 1;
 }
