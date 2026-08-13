@@ -1,5 +1,7 @@
 #include "world.h"
 
+#include "mover.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -205,10 +207,22 @@ u32 q2_world_build_ot(const q2_world_zone *z,
         }
 
         /* The node's origin folds into the GTE translation, so each vertex stays
-         * a plain s16 exactly as it is stored. */
-        translation[0] = node.origin[0] - cam->pos[0];
-        translation[1] = node.origin[1] - cam->pos[1];
-        translation[2] = node.origin[2] - cam->pos[2];
+         * a plain s16 exactly as it is stored.
+         *
+         * A mover's displacement is added here rather than to the geometry,
+         * because that is where the original adds it: the zone draw reads the
+         * runtime object's s16 triple at +0x12 and offsets the node's
+         * camera-space position by it. Nothing in the Scene chunk moves. */
+        {
+            s32 shift[3] = { 0, 0, 0 };
+
+            if (z->movers)
+                q2_movers_node_offset(z->movers, n, shift);
+
+            translation[0] = node.origin[0] + shift[0] - cam->pos[0];
+            translation[1] = node.origin[1] + shift[1] - cam->pos[1];
+            translation[2] = node.origin[2] + shift[2] - cam->pos[2];
+        }
 
         /* Translation is applied after rotation by the GTE, so it must be
          * expressed in camera space. */

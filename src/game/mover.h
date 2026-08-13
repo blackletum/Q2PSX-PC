@@ -134,9 +134,15 @@ u32 q2_movers_tick(q2_mover_set *set, s32 dt, u16 player_keys);
 /*
  * The displacement to add to a Scene node's origin when drawing it, or zero.
  *
- * This is how movement reaches the renderer: the geometry is not modified, the
- * node is drawn offset. Linear scan because a zone has at most a few dozen
- * movers and this is called once per node per frame.
+ * This is how movement reaches the renderer, and it is the original's own
+ * mechanism rather than a convenience: the per-frame handler at 0x80025658
+ * accumulates the displacement in the mover's runtime object at +0x12, and the
+ * zone draw at 0x800678EC adds that triple to the node's camera-space position
+ * as it draws it. The geometry is never modified, which is why every node in a
+ * zone can share one origin and doors still move.
+ *
+ * Linear scan because a zone has at most a few dozen movers and this is called
+ * once per node per frame.
  */
 void q2_movers_node_offset(const q2_mover_set *set, u32 scene_node, s32 out[3]);
 

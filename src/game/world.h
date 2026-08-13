@@ -22,6 +22,8 @@
 #include "q2psx.h"
 #include "scene.h"
 
+struct q2_mover_set;
+
 /* One loaded zone, with its three geometry chunks resolved. */
 typedef struct q2_world_zone {
     q2_zone_file zone;
@@ -38,6 +40,19 @@ typedef struct q2_world_zone {
      */
     const u8    *node_filter;
     u32          node_filter_count;
+
+    /*
+     * Where movement enters the picture. A door does not have geometry of its
+     * own to animate — every node in a zone shares one origin — so the original
+     * keeps the displacement in the mover's runtime object and ADDS IT WHEN
+     * DRAWING: the zone draw at 0x800678EC reads the object's s16 triple at
+     * +0x12 and adds it to the node's camera-space position.
+     *
+     * This is the same mechanism, with the object reached through the mover set
+     * instead of through the engine's 48-entry array. NULL draws everything at
+     * rest, which is what a static render wants.
+     */
+    const struct q2_mover_set *movers;
 } q2_world_zone;
 
 /* Load "<map>/ZONE<index>.DAT" from the disc. */

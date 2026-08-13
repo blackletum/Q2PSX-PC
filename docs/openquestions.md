@@ -150,14 +150,19 @@ The residues of the resolved blockers keep their parents' numbers.
         and a single truncation can never *increase* a magnitude. Either the exporter dithered ±1 on top of
         the truncation, or more vertices are genuinely off-lattice than the residue-2…7 background implies.
         Does not affect the decode rule; it means the grid-snapping model is incomplete.
-- [~] **4a. `Events` `fnB` motion integrators and the 92-byte runtime object.**
-      This is what stands between a working trigger graph and working **doors and lifts**. 27 of the 43
-      `UserFuncs` primitives carry a second function pointer called once per frame from `0x8002DC04` via
-      `obj+0x2C`; none were decompiled, and their state lives in the runtime object.
-      Known object fields: `+0x38` the `Scene` node index it was built from, `+0x3A` `abs(item+4)`, `+0x3C`
-      `item+16`, `+0x42` the primary `Scene` node, `+0x44` `-(item+2)`, `+0x58` 1. Unknown: `+0x00…+0x24`,
-      `+0x30…+0x38`, `+0x46…+0x4C`, `+0x53…+0x57`. The reverse link is `Scene[node].flags08` low 10 bits ==
-      `objectIndex + 1`.
+- [x] **4a. `Events` `fnB` motion integrators and the 92-byte runtime object. — SOLVED.**
+      The per-frame handler every mover installs is `0x80025658`, reached from the sweep at `0x8002DC04`
+      that walks 48 objects of 92 bytes at `0x800D6BB0`. It is a seven-state machine — at rest, opening,
+      arrived, closing, blocked, delay, held open — driving `pos += speed * dt` along one axis, clamped to a
+      signed target, with the delta applied down the `+0x30` chain, an obstruction veto at `0x80051EC0`, a
+      16-tick blocked retry, and positional sounds at the node's bounding-box centre.
+      **It never touches geometry.** The displacement accumulates in the object at `+0x12`, and the zone
+      draw at `0x800678EC` adds it to the node's camera-space position as it draws. That is the piece the
+      earlier pass was missing when it concluded from the shared node origin that movers cannot displace
+      geometry: they displace it at draw time. Now wired into `q2_world_build_ot`, and visible —
+      `bmodel <map> <zone> <group> out.ppm 1` opens a BASE1 lift and it moves 1,151 units up the Y axis.
+      The full field map is in FORMATS.md §2.9.1. It corroborates the port's mover model, which was derived
+      independently from the on-disc payloads: same states, same single axis, same absolute-valued speed.
   - [ ] 4b. Which physical chunk backs `gp+0x174` versus `gp+0x178`. Both are set from loaded chunk pointers
         (`0x8007AD54`, `0x8007C234`) and the pre-pass runs immediately after `gp+0x178` is set
         (`0x8007C278`). Given `COMMON.Events == ZONE0.Events` in 49/49 and only the `Scene`-index slots

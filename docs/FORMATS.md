@@ -775,6 +775,63 @@ record; all offsets strictly ascending and in bounds.
 `uint32_t count` then `count` × `char[12]` NUL-padded script-primitive names. `len == 4 + 12*count` on 49/49;
 `count` observed 0…17; 38 distinct names game-wide.
 
+### 2.9.1 The `Events` runtime object and the mover integrator
+
+> **§4a's answer.** The per-frame handler every mover installs is `0x80025658`, reached from the sweep at
+> `0x8002DC04` which walks 48 objects of **92 bytes** at `0x800D6BB0` and calls each one's `+0x2C` if it is
+> non-null. The handler is a seven-state machine driving an axis-aligned translation, and it never touches
+> geometry: it accumulates a displacement in the object, and the zone draw adds that displacement as it
+> draws the node.
+
+That last point is the mechanism a previous pass could not find. Every `Scene` node in a zone shares one
+origin, so a door has no origin of its own to animate — and the conclusion drawn from that, "movers never
+displace geometry", was half right. The displacement lives in the runtime object, and `0x800678EC` reads the
+object's `s16` triple at `+0x12` (plus a second at `+0x18`) and adds it to the node's camera-space position.
+
+```
+runtime object, 92 bytes, 48 of them at 0x800D6BB0
+  +0x12  s16[3]  displacement, ADDED AT DRAW TIME
+  +0x18  s16[3]  second draw-time offset
+  +0x28  ptr     obstruction test target; 0x80051EC0 vetoes a move that would crush
+  +0x2C  ptr     the per-frame handler itself
+  +0x30  ptr     next object in the group -- the same delta is applied down the chain
+  +0x38  s16     Scene node index this object was built from
+  +0x3A  s16     speed, absolute value taken every frame
+  +0x3C  s16     the sound/trigger id announced when it starts
+  +0x42  s16     primary Scene node; bit 15 of its flags08 is the "at rest" bit
+  +0x44  s16     target displacement -- the sign is the direction
+  +0x4A  s16     partner object index
+  +0x4C  u16     delay countdown   (state 5)
+  +0x4E  u16     wait countdown    (state 6); 0xFFFF never auto-closes
+  +0x50  u32     flags; bits 14-15 select the axis, as ((f >> 13) & 6) picking
+                 +0x12, +0x14 or +0x16. Bit 24 is cleared every frame, bit 25
+                 latches "sound already played"
+  +0x52  u8      state
+  +0x53  u8      bit 0 is the request: should it be open
+  +0x56  u8      blocked retry counter, reloaded with 16
+  +0x57  u8      state saved across a block
+  +0x58  u8      bits 0/1: may be blocked while opening / while closing
+```
+
+| state | meaning |
+| --- | --- |
+| 0 | at rest |
+| 1 | opening |
+| 2 | arrived |
+| 3 | closing |
+| 4 | blocked, retrying |
+| 5 | delay before opening |
+| 6 | held open, waiting |
+
+The integration is `pos += speed * dt` against the global tick delta at `0x800B2DB4`, clamped to `+0x44` and
+signed by it, and the resulting delta is applied to every object down the `+0x30` chain. Sounds are
+positional: the handler takes the node's bounding-box centre and calls `0x80073704` with one of three ids
+from `gp+0x41CC`, `gp+0x41D0` and `gp+0x41D8`.
+
+This corroborates the port's mover model, which was derived independently from the on-disc payloads: same
+seven states, same single axis-aligned translation, same absolute-valued speed, same blocked-retry. What it
+adds is the draw-time offset, which is now wired into `q2_world_build_ot`.
+
 ### 2.10 `Events` — compiled trigger scripts
 
 ```

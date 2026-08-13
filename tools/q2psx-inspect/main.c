@@ -1972,7 +1972,7 @@ static int cmd_cluts(disc *d)
  * framing on its own bounds, makes the geometry and its texturing legible.
  */
 static int cmd_bmodel(disc *d, const char *map, int zone_index, int which,
-                      const char *out_path)
+                      const char *out_path, bool open_it)
 {
     q2_world_zone zone;
     q2_camera cam;
@@ -2040,7 +2040,32 @@ static int cmd_bmodel(disc *d, const char *map, int zone_index, int which,
         }
     }
 
-    q2_movers_free(&movers);
+    /*
+     * Optionally run the mover before drawing. The displacement never touches
+     * the geometry — the original offsets the node as it draws it — so this is
+     * also the check that the offset actually reaches the renderer.
+     */
+    if (open_it && which >= 0 && (u32)which < movers.count) {
+        s32 shift[3] = { 0, 0, 0 };
+        int tick;
+
+        q2_mover_trigger(&movers, (u32)which);
+
+        /* Stop at the top of the travel rather than running on: a door that
+         * auto-closes would otherwise be back where it started and the render
+         * would look like the offset never arrived. */
+        for (tick = 0; tick < 4000; tick++) {
+            if (movers.movers[which].state == Q2_MV_ARRIVED ||
+                movers.movers[which].state == Q2_MV_OPEN)
+                break;
+            q2_movers_tick(&movers, 10, 0xFFFF);
+        }
+
+        q2_movers_node_offset(&movers, (u32)movers.movers[which].node[0], shift);
+        printf("  opened        : state %u, node offset [%d %d %d]\n",
+               movers.movers[which].state, shift[0], shift[1], shift[2]);
+        zone.movers = &movers;
+    }
 
     if (!any) {
         fprintf(stderr, "no geometry-bearing mover nodes selected\n");
@@ -2107,6 +2132,8 @@ static int cmd_bmodel(disc *d, const char *map, int zone_index, int which,
     free(vram);
     free(mask);
     zone.node_filter = NULL;
+    zone.movers      = NULL;
+    q2_movers_free(&movers);
     q2_world_free_zone(&zone);
     return 0;
 }
@@ -3463,7 +3490,8 @@ int main(int argc, char **argv)
             int zi = (argc >= 5) ? atoi(argv[4]) : 0;
             int wh = (argc >= 6) ? atoi(argv[5]) : -1;
             const char *outp = (argc >= 7) ? argv[6] : "bmodel.ppm";
-            rc = cmd_bmodel(d, argv[3], zi, wh, outp);
+            bool open_it = (argc >= 8) && atoi(argv[7]) != 0;
+            rc = cmd_bmodel(d, argv[3], zi, wh, outp, open_it);
         }
     } else if (strcmp(cmd, "audio") == 0) {
         rc = cmd_audio(d);
