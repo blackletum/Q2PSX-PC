@@ -15,6 +15,41 @@ endif()
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# ---------------------------------------------------------------------------
+# Version
+#
+# The version is declared once, in the project() call above. The generated
+# header derives from it, so a binary cannot report a version that disagrees
+# with the build system.
+#
+# Git state is captured when available. Outside a checkout the describe string
+# falls back to the bare version rather than inventing a hash.
+# ---------------------------------------------------------------------------
+set(Q2PSX_GIT_DESCRIBE "v${PROJECT_VERSION}")
+set(Q2PSX_GIT_DIRTY 0)
+
+find_package(Git QUIET)
+if(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} describe --tags --always --dirty=-dirty
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE GIT_DESC
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+
+    if(GIT_DESC)
+        set(Q2PSX_GIT_DESCRIBE "${GIT_DESC}")
+        if(GIT_DESC MATCHES "-dirty$")
+            set(Q2PSX_GIT_DIRTY 1)
+        endif()
+    endif()
+endif()
+
+configure_file(
+    ${CMAKE_SOURCE_DIR}/src/common/version.h.in
+    ${CMAKE_BINARY_DIR}/generated/version.h
+    @ONLY)
+
 option(Q2PSX_BUILD_TOOLS  "Build offline inspection tools"    ON)
 option(Q2PSX_BUILD_CLIENT "Build the playable client (needs SDL3)" ON)
 option(Q2PSX_FETCH_SDL3   "Fetch and build SDL3 if not installed"  OFF)

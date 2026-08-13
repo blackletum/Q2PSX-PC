@@ -1,0 +1,259 @@
+# Manual release.
+#
+# Run from the Actions tab. Takes a version, bumps it in CMakeLists.txt, tags
+# the commit, builds every platform, and publishes a GitHub release with the
+# archives attached.
+#
+# Manual rather than tag-triggered on purpose: cutting a release should be a
+# decision someone makes, not a side effect of pushing a tag that might have
+# been created by accident or by a rebase.
+#
+# The build is deliberately verified BEFORE the tag is pushed. A tag that
+# points at a commit which does not compile is worse than no tag, because it
+# looks releasable forever after.
+#
+# NOTE ON CONTENT: the archives contain executables and documentation only.
+# This project ships no game assets — a user supplies their own disc — and the
+# packaging steps below list files explicitly rather than globbing a directory,
+# so nothing can be swept in by accident.
+
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. 0.2.0 (no leading v)'
+        required: true
+        type: string
+      prerelease:
+        description: 'Mark as a pre-release'
+        required: false
+        type: boolean
+        default: false
+      notes:
+        description: 'One-line summary for the release notes'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Reject a bad version before anything is built or tagged.
+  # ---------------------------------------------------------------------------
+  check:
+    name: Validate
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate the version
+        id: v
+        run: |
+          VERSION="${{ inputs.version }}"
+
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'$VERSION' is not MAJOR.MINOR.PATCH"
+            exit 1
+          fi
+
+          if git rev-parse "v$VERSION" >/dev/null 2>&1; then
+            echo "::error::tag v$VERSION already exists"
+            exit 1
+          fi
+
+          # Refuse to go backwards. Comparing against the highest existing tag
+          # catches the common slip of releasing 0.1.9 after 0.2.0.
+          LATEST=$(git tag -l 'v*' | sed 's/^v//' | sort -V | tail -1)
+          if [ -n "$LATEST" ]; then
+            HIGHEST=$(printf '%s\n%s\n' "$LATEST" "$VERSION" | sort -V | tail -1)
+            if [ "$HIGHEST" != "$VERSION" ]; then
+              echo "::error::$VERSION is not newer than the latest tag $LATEST"
+              exit 1
+            fi
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Releasing $VERSION (previous: ${LATEST:-none})"
+
+  # ---------------------------------------------------------------------------
+  # Build and test everything before the tag exists.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build ${{ matrix.name }}
+    needs: check
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+            cc: cl
+          - name: linux-x64
+            os: ubuntu-latest
+            cc: gcc
+          - name: macos-arm64
+            os: macos-latest
+            cc: clang
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - name: Set up MSVC
+        if: matrix.cc == 'cl'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install SDL build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libpulse-dev libx11-dev \
+            libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev \
+            libwayland-dev libxkbcommon-dev libdrm-dev libgbm-dev
+
+      # Set the version in the build system so the generated header matches the
+      # tag. This edit is local to the build job; the tag job commits its own.
+      - name: Set the version
+        shell: bash
+        run: |
+          sed -i.bak -E 's/^        VERSION [0-9]+\.[0-9]+\.[0-9]+/        VERSION ${{ needs.check.outputs.version }}/' CMakeLists.txt
+          rm -f CMakeLists.txt.bak
+          grep -n 'VERSION ${{ needs.check.outputs.version }}' CMakeLists.txt
+
+      - name: Configure
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=${{ matrix.cc }}
+          -DQ2PSX_BUILD_CLIENT=ON
+          -DQ2PSX_FETCH_SDL3=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      # Files are listed one by one rather than copied by glob: this project
+      # must never ship game assets, and an explicit list cannot sweep one in.
+      - name: Package
+        shell: bash
+        run: |
+          VERSION="${{ needs.check.outputs.version }}"
+          NAME="q2psx-pc-$VERSION-${{ matrix.name }}"
+          mkdir -p "dist/$NAME"
+
+          EXE=""
+          if [ "${{ runner.os }}" = "Windows" ]; then EXE=".exe"; fi
+
+          cp "build/bin/q2psx$EXE"          "dist/$NAME/" || true
+          cp "build/bin/q2psx-inspect$EXE"  "dist/$NAME/"
+
+          # SDL3 ships beside the client on Windows.
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp build/bin/SDL3.dll "dist/$NAME/" || true
+          fi
+
+          cp README.md              "dist/$NAME/"
+          cp docs/FORMATS.md        "dist/$NAME/"
+          cp docs/FIDELITY.md       "dist/$NAME/"
+          cp docs/ARCHITECTURE.md   "dist/$NAME/"
+          cp docs/openquestions.md  "dist/$NAME/"
+
+          cd dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "$NAME.zip" "$NAME"
+          else
+            tar czf "$NAME.tar.gz" "$NAME"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Only now that every platform built and tested: commit, tag, publish.
+  # ---------------------------------------------------------------------------
+  publish:
+    name: Tag and publish
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bump the version and tag
+        run: |
+          VERSION="${{ needs.check.outputs.version }}"
+
+          sed -i -E "s/^        VERSION [0-9]+\.[0-9]+\.[0-9]+/        VERSION $VERSION/" CMakeLists.txt
+          grep -n "VERSION $VERSION" CMakeLists.txt
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add CMakeLists.txt
+          git commit -m "Release $VERSION"
+          git tag -a "v$VERSION" -m "Release $VERSION"
+
+          git push origin HEAD:main
+          git push origin "v$VERSION"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List what is being published
+        run: ls -la artifacts
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.check.outputs.version }}
+          name: Q2PSX-PC ${{ needs.check.outputs.version }}
+          prerelease: ${{ inputs.prerelease }}
+          generate_release_notes: true
+          body: |
+            ${{ inputs.notes }}
+
+            A native PC recreation of Quake II for PlayStation. Not an emulator:
+            the game's logic runs natively, and the PlayStation's GPU and GTE
+            semantics are reproduced so it still looks the way it did.
+
+            **You need your own Quake II PSX disc.** This download contains no
+            game assets. Point the client at a `.cue`, `.bin`, `.img` or `.iso`:
+
+            ```
+            q2psx --disc "Quake II (Europe).cue"
+            ```
+
+            `q2psx-inspect` is the offline tool — it identifies a disc, verifies
+            every level file against the documented schema, decodes the audio
+            and textures, and renders a level to an image without a window.
+
+            See `FORMATS.md` for the reverse-engineered on-disc formats and
+            `openquestions.md` for what is still unknown.
+          files: |
+            artifacts/*.zip
+            artifacts/*.tar.gz
+          fail_on_unmatched_files: true

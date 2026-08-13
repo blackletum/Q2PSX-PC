@@ -1,0 +1,84 @@
+# Continuous integration.
+#
+# Builds the core libraries, the offline tools and the test suites on every
+# supported toolchain, then runs the tests.
+#
+# The client is deliberately NOT built here. It needs SDL3, and fetching and
+# compiling SDL3 turns a one-minute job into a ten-minute one for no extra
+# coverage of this project's own code. The release workflow builds it.
+#
+# Nothing here needs a Quake II disc: all seven test suites are self-contained.
+# The checks that DO need a disc (verify, textures, audio, reloc) are run
+# locally against the developer's own copy and cannot run in CI, which is why
+# the unit tests carry the invariants they can.
+#
+# WARNINGS-AS-ERRORS is on. Worth knowing before the first run: the code has
+# been verified warning-clean under clang only. GCC and MSVC each warn about
+# things clang does not, so the first run on those may well fail on something
+# harmless. That is the check doing its job rather than a broken pipeline —
+# fix the warning, do not reach for the switch.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux GCC
+            os: ubuntu-latest
+            cc: gcc
+          - name: Linux Clang
+            os: ubuntu-latest
+            cc: clang
+          - name: Windows MSVC
+            os: windows-latest
+            cc: cl
+          - name: macOS Clang
+            os: macos-latest
+            cc: clang
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # A shallow clone has no tags, so `git describe` would report a bare
+          # hash and the version header would lose its tag context.
+          fetch-depth: 0
+
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - name: Set up MSVC
+        if: matrix.cc == 'cl'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_C_COMPILER=${{ matrix.cc }}
+          -DQ2PSX_BUILD_CLIENT=OFF
+          -DQ2PSX_WERROR=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Report version
+        run: ./build/bin/q2psx-inspect --version
+        shell: bash

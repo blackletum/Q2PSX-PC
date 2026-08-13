@@ -26,6 +26,7 @@
 #include "scene.h"
 #include "spawn.h"
 #include "sim.h"
+#include "version.h"
 #include "vram.h"
 #include "world.h"
 #include "worldscale.h"
@@ -2009,6 +2010,12 @@ int main(int argc, char **argv)
     const char *cmd;
     const char *path;
     int rc;
+
+    if (argc >= 2 && (strcmp(argv[1], "--version") == 0 ||
+                      strcmp(argv[1], "-v") == 0)) {
+        q2_version_print();
+        return 0;
+    }
 
     if (argc < 3) {
         usage();

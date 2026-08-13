@@ -1,0 +1,41 @@
+/*
+ * version.h — generated from version.h.in by CMake. Do not edit the output.
+ *
+ * The version lives in exactly one place: the project() call in the top-level
+ * CMakeLists.txt. Everything else derives from it, so a release cannot ship
+ * with a header and a tag that disagree.
+ *
+ * The git describe string is captured at configure time when the source is a
+ * git checkout, which makes a binary traceable to a commit even when someone
+ * builds from a working tree that is ahead of the tag. In a tarball with no
+ * git metadata it falls back to the plain version, which is the honest answer
+ * rather than a fabricated hash.
+ */
+#ifndef Q2PSX_VERSION_H
+#define Q2PSX_VERSION_H
+
+#define Q2PSX_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define Q2PSX_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define Q2PSX_VERSION_PATCH @PROJECT_VERSION_PATCH@
+
+#define Q2PSX_VERSION_STRING "@PROJECT_VERSION@"
+
+/* "v0.2.0-14-gabc1234" or "v0.2.0" on an exact tag; falls back to the bare
+ * version string outside a git checkout. */
+#define Q2PSX_VERSION_GIT "@Q2PSX_GIT_DESCRIBE@"
+
+/* Set when the working tree had uncommitted changes at configure time. A
+ * release build must never have this. */
+#define Q2PSX_VERSION_DIRTY @Q2PSX_GIT_DIRTY@
+
+#define Q2PSX_BUILD_TYPE "@CMAKE_BUILD_TYPE@"
+#define Q2PSX_COMPILER   "@CMAKE_C_COMPILER_ID@ @CMAKE_C_COMPILER_VERSION@"
+#define Q2PSX_PLATFORM   "@CMAKE_SYSTEM_NAME@"
+
+/* One line suitable for --version output and for a crash report. */
+const char *q2_version_string(void);
+
+/* Multi-line detail: version, git, build type, compiler, platform. */
+void q2_version_print(void);
+
+#endif /* Q2PSX_VERSION_H */
