@@ -5,6 +5,7 @@ target_link_libraries(q2psx-inspect PRIVATE
     q2psx_disc
     q2psx_formats
     q2psx_build
+    q2psx_audio
     q2psx_render
     q2psx_game
 )

@@ -16,6 +16,7 @@
 #include "scene.h"
 #include "world.h"
 #include "trig.h"
+#include "vag.h"
 #include "q2psx.h"
 
 #include <stdio.h>
@@ -42,6 +43,7 @@ static void usage(void)
     puts("  dat     <disc> <path>       dump the chunk directory of one .DAT");
     puts("  dats    <disc>              census every .DAT chunk schema on the disc");
     puts("  verify  <disc>              check every level file against the typed schema");
+    puts("  audio   <disc>              decode every sound bank and validate it");
     puts("  render  <disc> <map> [z] [out.ppm] [yaw] [pitch]  render a zone (4096 = full turn)");
     puts("  hexdump <disc> <path> [n]   hex dump the first n bytes of a file");
     puts("  extract <disc> <outdir>     extract the whole filesystem");
@@ -756,6 +758,116 @@ static int cmd_render(disc *d, const char *map, int zone_index, const char *out_
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * Load and decode every sound bank on the disc.
+ *
+ * The strongest check here is not that decoding "works" but that the ADPCM
+ * block headers are all structurally valid and that every bank's bodies fit in
+ * the console's 512 KB of sound RAM. Both would fail loudly if the bank layout
+ * or the endianness were misread.
+ */
+static int cmd_audio(disc *d)
+{
+    int i, n = disc_file_count(d);
+    u32 banks = 0, sounds = 0, looping = 0, bad_blocks = 0, failed = 0;
+    u32 worst_body = 0;
+    char worst_map[64];
+    s16 *pcm = NULL;
+    size_t pcm_cap = 1 << 20;
+
+    worst_map[0] = '\0';
+    pcm = (s16 *)malloc(pcm_cap * sizeof(s16));
+    if (!pcm) {
+        fprintf(stderr, "out of memory\n");
+        return 1;
+    }
+
+    printf("Decoding every sound bank on the disc...\n\n");
+
+    for (i = 0; i < n; i++) {
+        const disc_file *f = disc_file_at(d, i);
+        const char *p = f->path;
+        const char *rest, *slash;
+        char map[64];
+        size_t len;
+        q2_sound_bank bank;
+        u32 s, total;
+
+        if (*p == '/')
+            p++;
+        if (strncmp(p, "Q2DATA/LEVELS/", 14) != 0)
+            continue;
+        if (!strstr(p, "SNDVRAM.DAT"))
+            continue;
+
+        rest  = p + 14;
+        slash = strchr(rest, '/');
+        if (!slash)
+            continue;
+        len = (size_t)(slash - rest);
+        if (len >= sizeof(map))
+            len = sizeof(map) - 1;
+        memcpy(map, rest, len);
+        map[len] = '\0';
+
+        if (q2_sound_bank_load(&bank, d, map) != Q2_OK) {
+            printf("  LOAD FAILED  %s\n", map);
+            failed++;
+            continue;
+        }
+
+        banks++;
+
+        for (s = 0; s < bank.count; s++) {
+            q2_vag vag;
+
+            if (!q2_sound_bank_get(&bank, s, &vag)) {
+                printf("  bad VAG %u in %s\n", s, map);
+                failed++;
+                continue;
+            }
+
+            sounds++;
+            if (vag.looping)
+                looping++;
+
+            bad_blocks += q2_spu_adpcm_validate(vag.body, vag.data_size);
+
+            /* Actually decode it, so a broken decoder cannot hide behind a
+             * header-only check. */
+            q2_spu_adpcm_decode(vag.body, vag.data_size, pcm, (u32)pcm_cap);
+        }
+
+        total = q2_sound_bank_total_body(&bank);
+        if (total > worst_body) {
+            worst_body = total;
+            strncpy(worst_map, map, sizeof(worst_map) - 1);
+            worst_map[sizeof(worst_map) - 1] = '\0';
+        }
+
+        q2_sound_bank_free(&bank);
+    }
+
+    free(pcm);
+
+    printf("  banks loaded    : %u\n", banks);
+    printf("  sounds          : %u\n", sounds);
+    printf("  looping         : %u\n", looping);
+    printf("  invalid blocks  : %u\n", bad_blocks);
+    printf("  failures        : %u\n", failed);
+    printf("  largest bank    : %s, %u bytes of ADPCM\n", worst_map, worst_body);
+    printf("  SPU RAM usable  : %d bytes\n", SPU_RAM_SIZE - SPU_RAM_RESERVED);
+    printf("  fits            : %s\n",
+           worst_body <= (u32)(SPU_RAM_SIZE - SPU_RAM_RESERVED) ? "yes" : "NO");
+
+    printf("\n%s\n", (failed == 0 && bad_blocks == 0)
+           ? "PASS - every bank parsed and every ADPCM block is structurally valid."
+           : "FAIL - see above.");
+
+    return (failed || bad_blocks) ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------------- */
 static int cmd_hexdump(disc *d, const char *path, size_t count)
 {
     q2_buf buf;
@@ -891,6 +1003,8 @@ int main(int argc, char **argv)
         rc = cmd_dats(d);
     } else if (strcmp(cmd, "verify") == 0) {
         rc = cmd_verify(d);
+    } else if (strcmp(cmd, "audio") == 0) {
+        rc = cmd_audio(d);
     } else if (strcmp(cmd, "render") == 0) {
         if (argc < 4) {
             fprintf(stderr, "render needs a map name\n");

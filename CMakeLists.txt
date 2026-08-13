@@ -59,6 +59,7 @@ add_subdirectory(src/disc)
 add_subdirectory(src/build)
 add_subdirectory(src/formats)
 add_subdirectory(src/psx)
+add_subdirectory(src/audio)
 add_subdirectory(src/render)
 add_subdirectory(src/game)
 
