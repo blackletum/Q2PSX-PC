@@ -42,3 +42,12 @@ target_link_libraries(test_combat PRIVATE
 )
 
 add_test(NAME combat COMMAND test_combat)
+
+add_executable(test_save test_save.c)
+
+target_link_libraries(test_save PRIVATE
+    q2psx_common
+    q2psx_game
+)
+
+add_test(NAME save COMMAND test_save)

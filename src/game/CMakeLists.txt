@@ -15,6 +15,8 @@ add_library(q2psx_game STATIC
     pickup.h
     spawn.c
     spawn.h
+    save.c
+    save.h
     sim.c
     sim.h
     world.c
