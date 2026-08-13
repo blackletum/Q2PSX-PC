@@ -1,0 +1,56 @@
+# ---------------------------------------------------------------------------
+# Game data must NEVER be committed. The port reads the user's own disc at
+# runtime; this repository contains code only.
+# ---------------------------------------------------------------------------
+ref/
+*.bin
+*.cue
+*.iso
+*.img
+*.ccd
+*.sub
+*.mds
+*.mdf
+*.chd
+*.pbp
+*.DAT
+*.dat
+*.XAI
+*.STX
+*.ALL
+SLES_*
+SLUS_*
+SLPS_*
+SLPM_*
+SCES_*
+SYSTEM.CNF
+
+# Build output
+build/
+out/
+cmake-build-*/
+*.o
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.lib
+*.a
+*.dll
+*.so
+*.dylib
+compile_commands.json
+.cache/
+
+# Editors
+.vs/
+.vscode/
+.idea/
+*.user
+*.swp
+*~
+
+# Extracted / working data
+extracted/
+dump/
+*.log

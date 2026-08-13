@@ -1,0 +1,150 @@
+#include "level.h"
+
+#include <string.h>
+
+const char *const q2_common_chunk_names[Q2_COMMON_CHUNK_COUNT] = {
+    "CreAIRel", "LevelRel", "Resources", "CastList", "TrigBounds",
+    "Lights", "ModelNames", "StartPos", "Population", "Strings",
+    "CreAIBin", "LevelBin", "UserFuncs", "Events", "GlintMod"
+};
+
+const char *const q2_zone_chunk_names[Q2_ZONE_CHUNK_COUNT] = {
+    "Events", "Scene", "CastList", "MapNames", "SpaceLights",
+    "SortData", "MapMod", "Points", "PrimaryColl", "SecondaryCol",
+    "PrimaryRemap", "AreaConx", "CreAIRel", "CreAIBin"
+};
+
+/* The optional chunks, which the loader tolerates being absent. Everything else
+ * is mandatory; a file missing one is not a build we understand. */
+static bool common_chunk_is_optional(int index)
+{
+    return index == Q2_COMMON_GLINT_MOD;
+}
+
+static bool zone_chunk_is_optional(int index)
+{
+    return index == Q2_ZONE_CRE_AI_REL || index == Q2_ZONE_CRE_AI_BIN;
+}
+
+static int lookup(const char *const *names, int count, const char *name)
+{
+    int i;
+
+    if (!name)
+        return -1;
+
+    for (i = 0; i < count; i++) {
+        if (strcmp(names[i], name) == 0)
+            return i;
+    }
+    return -1;
+}
+
+int q2_common_chunk_index(const char *name)
+{
+    return lookup(q2_common_chunk_names, Q2_COMMON_CHUNK_COUNT, name);
+}
+
+int q2_zone_chunk_index(const char *name)
+{
+    return lookup(q2_zone_chunk_names, Q2_ZONE_CHUNK_COUNT, name);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Resolution                                                                 */
+/* ------------------------------------------------------------------------- */
+static q2_result resolve(dat_archive *ar,
+                         const dat_chunk **slots,
+                         int slot_count,
+                         const char *const *names,
+                         bool (*is_optional)(int),
+                         const char *what)
+{
+    int i;
+
+    memset(slots, 0, (size_t)slot_count * sizeof(*slots));
+
+    for (i = 0; i < ar->chunk_count; i++) {
+        int index = lookup(names, slot_count, ar->chunks[i].name);
+
+        if (index < 0) {
+            /* An unknown chunk name means this build's schema differs from the
+             * one we catalogued. Refusing here beats misreading it later. */
+            Q2_ERROR("%s: unknown chunk '%s' — unsupported build?",
+                     what, ar->chunks[i].name);
+            return Q2_ERR_UNSUPPORTED;
+        }
+        slots[index] = &ar->chunks[i];
+    }
+
+    for (i = 0; i < slot_count; i++) {
+        if (!slots[i] && !is_optional(i)) {
+            Q2_ERROR("%s: missing mandatory chunk '%s'", what, names[i]);
+            return Q2_ERR_BAD_FORMAT;
+        }
+    }
+
+    return Q2_OK;
+}
+
+q2_result q2_common_open(q2_common_file *out, q2_buf *buf)
+{
+    q2_result r;
+
+    if (!out || !buf)
+        return Q2_ERR_INVALID_ARG;
+
+    memset(out, 0, sizeof(*out));
+
+    r = dat_open_buf(&out->ar, buf);
+    if (r != Q2_OK)
+        return r;
+
+    r = resolve(&out->ar, out->chunk, Q2_COMMON_CHUNK_COUNT,
+                q2_common_chunk_names, common_chunk_is_optional, "COMMON.DAT");
+    if (r != Q2_OK) {
+        dat_close(&out->ar);
+        return r;
+    }
+
+    return Q2_OK;
+}
+
+q2_result q2_zone_open(q2_zone_file *out, q2_buf *buf)
+{
+    q2_result r;
+
+    if (!out || !buf)
+        return Q2_ERR_INVALID_ARG;
+
+    memset(out, 0, sizeof(*out));
+
+    r = dat_open_buf(&out->ar, buf);
+    if (r != Q2_OK)
+        return r;
+
+    r = resolve(&out->ar, out->chunk, Q2_ZONE_CHUNK_COUNT,
+                q2_zone_chunk_names, zone_chunk_is_optional, "ZONE.DAT");
+    if (r != Q2_OK) {
+        dat_close(&out->ar);
+        return r;
+    }
+
+    return Q2_OK;
+}
+
+void q2_common_close(q2_common_file *f)
+{
+    if (!f)
+        return;
+    dat_close(&f->ar);
+    memset(f, 0, sizeof(*f));
+}
+
+void q2_zone_close(q2_zone_file *f)
+{
+    if (!f)
+        return;
+    dat_close(&f->ar);
+    memset(f, 0, sizeof(*f));
+}
