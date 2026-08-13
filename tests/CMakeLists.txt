@@ -15,3 +15,12 @@ target_link_libraries(test_sim PRIVATE
 )
 
 add_test(NAME sim_behaviour COMMAND test_sim)
+
+add_executable(test_inventory test_inventory.c)
+
+target_link_libraries(test_inventory PRIVATE
+    q2psx_common
+    q2psx_game
+)
+
+add_test(NAME inventory COMMAND test_inventory)
