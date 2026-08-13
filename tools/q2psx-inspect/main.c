@@ -1054,7 +1054,7 @@ static int cmd_music(disc *d)
  * Decode every compressed VRAM image on the disc.
  *
  * The acceptance bar is strict on purpose: a correct codec decodes every
- * payload to exactly width*height bytes with no overshoot and no starvation.
+ * payload to exactly its expected size with no overshoot and no starvation.
  * Anything less means it is wrong, or there is more than one codec.
  */
 static int cmd_textures(disc *d)
@@ -1111,7 +1111,9 @@ static int cmd_textures(disc *d)
         maps++;
 
         for (k = 0; k < vs.image_count; k++) {
-            size_t want = (size_t)vs.images[k].width * vs.images[k].height;
+            /* Not width*height — texture pages ignore their stored dimensions
+             * and are forced to 128x256 by the engine. */
+            size_t want = q2_vram_decoded_size(&vs, k);
             size_t got = 0;
 
             if (want > scratch_cap) {
@@ -1148,7 +1150,7 @@ static int cmd_textures(disc *d)
                (double)decoded_total / (double)packed_total);
 
     printf("\n%s\n", failed == 0
-           ? "PASS - every payload decoded to exactly width*height bytes."
+           ? "PASS - every payload decoded to exactly its expected size."
            : "FAIL - see above.");
 
     return failed ? 1 : 0;
