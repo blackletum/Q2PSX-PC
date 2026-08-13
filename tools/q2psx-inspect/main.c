@@ -74,7 +74,7 @@ static void usage(void)
     puts("  extract <disc> <outdir>     extract the whole filesystem");
     puts("");
     puts("executable:");
-    puts("  exe     <disc>              header, memory map and documented landmarks");
+    puts("  exe     <disc> [out.bin]    header, map, landmarks; optionally dump the segment");
     puts("  disasm  <disc> <addr> [n]   disassemble n instructions (0 = to the return)");
     puts("  xrefs   <disc> <addr>       every reference to an address, code and data");
     puts("  funcs   <disc> [addr]       call targets found by sweeping the image");
@@ -2870,7 +2870,7 @@ int main(int argc, char **argv)
             rc = cmd_hexdump(d, argv[3], count);
         }
     } else if (strcmp(cmd, "exe") == 0) {
-        rc = cmd_exe(d);
+        rc = cmd_exe(d, (argc >= 4) ? argv[3] : NULL);
     } else if (strcmp(cmd, "disasm") == 0) {
         if (argc < 4) {
             fprintf(stderr, "disasm needs an address\n");

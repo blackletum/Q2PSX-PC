@@ -186,7 +186,7 @@ typedef struct landmark {
     const char *what;
 } landmark;
 
-int cmd_exe(const disc *d)
+int cmd_exe(const disc *d, const char *save_path)
 {
     q2_exe exe;
     int i, ok = 0, bad = 0;
@@ -247,6 +247,30 @@ int cmd_exe(const disc *d)
     }
 
     printf("\n%d landmark%s confirmed, %d failed\n", ok, ok == 1 ? "" : "s", bad);
+
+    /*
+     * Write the loaded segment out, header stripped, so that a raw import at
+     * text_addr in any external disassembler maps one to one with the
+     * addresses used throughout the documentation. Writing the whole file
+     * instead would shift every address by 0x800, which is exactly the sort of
+     * silent off-by-header that makes two passes disagree.
+     */
+    if (save_path) {
+        const u8 *seg = q2_exe_ptr(&exe, exe.text_addr, exe.text_size);
+        FILE *fp = seg ? fopen(save_path, "wb") : NULL;
+
+        if (!fp) {
+            fprintf(stderr, "cannot write '%s'\n", save_path);
+            bad++;
+        } else {
+            size_t written = fwrite(seg, 1, exe.text_size, fp);
+            fclose(fp);
+            printf("\nwrote %s: %zu bytes, load address 0x%08X\n",
+                   save_path, written, exe.text_addr);
+            if (written != exe.text_size)
+                bad++;
+        }
+    }
 
     q2_exe_free(&exe);
     return bad ? 1 : 0;

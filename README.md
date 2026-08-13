@@ -124,6 +124,12 @@ build/bin/q2psx-inspect xrefs  "Quake II (Europe).cue" 0x80068A58   # calls, con
 `exe` re-checks nine addresses that `docs/FORMATS.md` makes claims about, so a
 documentation drift against the real executable fails the command.
 
+For the few functions where control flow matters more than field access,
+`tools/ghidra/decompile.py` is an optional headless script that decompiles
+addresses out of the same segment. Ghidra is not a dependency of anything here;
+`q2psx-inspect exe <disc> text.bin` writes the segment with its header stripped
+so a raw import at `0x80018000` lines up with every address in the docs.
+
 ## Legal
 
 This repository contains **no game assets and no id Software or Hammerhead code**. It is

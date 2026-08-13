@@ -3,7 +3,7 @@
 
 #include "disc.h"
 
-int cmd_exe(const disc *d);
+int cmd_exe(const disc *d, const char *save_path);
 int cmd_disasm(const disc *d, const char *addr, int count);
 int cmd_xrefs(const disc *d, const char *addr);
 int cmd_funcs(const disc *d, const char *filter);
