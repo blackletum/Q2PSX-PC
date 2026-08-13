@@ -6,6 +6,7 @@
  * here reads a real disc cleanly, the engine's loader will too, because they are
  * the same code.
  */
+#include "collision.h"
 #include "dat.h"
 #include "disc.h"
 #include "ident.h"
@@ -503,6 +504,9 @@ static int cmd_verify(disc *d)
     int i, n = disc_file_count(d);
     int common_ok = 0, zone_ok = 0, failed = 0, skipped = 0;
     unsigned long long points_total = 0;
+    unsigned long long quads_total = 0;
+    unsigned long long planes_total = 0;
+    unsigned long long normals_unit = 0;
 
     printf("Verifying every level file against the typed schema...\n\n");
 
@@ -545,8 +549,59 @@ static int cmd_verify(disc *d)
                  * chunk whose *internal* layout we claim to understand. */
                 r = q2_points_parse(&pts, &zf);
                 if (r == Q2_OK) {
+                    q2_collision coll;
+                    q2_scene sc;
+                    int sub_ok = 1;
+
                     zone_ok++;
                     points_total += pts.count;
+
+                    /* Scene/MapMod: walk every node's polygon record. */
+                    if (q2_scene_parse(&sc, &zf) == Q2_OK) {
+                        u32 ni;
+                        for (ni = 0; ni < sc.node_count; ni++) {
+                            q2_mapmod_rec rec;
+                            if (!q2_scene_get_mapmod(&sc, ni, &rec)) {
+                                printf("  mapmod node %u bad in %s\n", ni, f->path);
+                                sub_ok = 0;
+                                break;
+                            }
+                            quads_total += rec.num_polys;
+                        }
+                    } else {
+                        printf("  scene: parse failed  %s\n", f->path);
+                        sub_ok = 0;
+                    }
+
+                    /* Both collision hulls, including the normal-length check
+                     * that is the strongest evidence the layout is right. */
+                    {
+                        int w;
+                        for (w = 0; w < 2; w++) {
+                            u32 pi;
+                            if (q2_collision_parse(&coll, &zf,
+                                    w ? Q2_COLL_SECONDARY : Q2_COLL_PRIMARY) != Q2_OK) {
+                                printf("  collision[%d]: parse failed  %s\n", w, f->path);
+                                sub_ok = 0;
+                                continue;
+                            }
+                            for (pi = 0; pi < coll.plane_count; pi++) {
+                                q2_coll_plane pl;
+                                s32 len_sq;
+                                if (!q2_collision_get_plane(&coll, pi, &pl))
+                                    continue;
+                                len_sq = q2_coll_normal_len_sq(&pl);
+                                planes_total++;
+                                /* Unit length within 2 LSB: 4094^2 .. 4096^2 */
+                                if (len_sq >= 4094 * 4094 && len_sq <= 4096 * 4096)
+                                    normals_unit++;
+                            }
+                        }
+                    }
+
+                    if (!sub_ok)
+                        failed++;
+
                     q2_points_free(&pts);
                 } else {
                     printf("  points: %-6s %s\n", q2_result_str(r), f->path);
@@ -564,6 +619,10 @@ static int cmd_verify(disc *d)
     printf("  COMMON.DAT : %d resolved\n", common_ok);
     printf("  ZONE*.DAT  : %d resolved\n", zone_ok);
     printf("  vertices   : %llu across all zones\n", points_total);
+    printf("  quads      : %llu\n", quads_total);
+    printf("  coll planes: %llu, of which %llu are unit normals (%.2f%%)\n",
+           planes_total, normals_unit,
+           planes_total ? 100.0 * (double)normals_unit / (double)planes_total : 0.0);
     printf("  failed     : %d\n", failed);
     if (skipped)
         printf("  skipped    : %d\n", skipped);

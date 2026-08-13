@@ -1,4 +1,6 @@
 add_library(q2psx_formats STATIC
+    collision.c
+    collision.h
     dat.c
     dat.h
     level.c
