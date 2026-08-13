@@ -9,6 +9,7 @@
 #include "collision.h"
 #include "dat.h"
 #include "disc.h"
+#include "entity.h"
 #include "ident.h"
 #include "level.h"
 #include "points.h"
@@ -509,6 +510,9 @@ static int cmd_verify(disc *d)
     unsigned long long quads_total = 0;
     unsigned long long planes_total = 0;
     unsigned long long normals_unit = 0;
+    unsigned long long spawns_total = 0;
+    unsigned long long lights_total = 0;
+    unsigned long long lights_bad = 0;
 
     printf("Verifying every level file against the typed schema...\n\n");
 
@@ -533,7 +537,38 @@ static int cmd_verify(disc *d)
             q2_common_file cf;
             r = q2_common_open(&cf, &buf);
             if (r == Q2_OK) {
+                q2_start_pos_list spawns;
+                q2_light_list lights;
+
                 common_ok++;
+
+                if (q2_start_pos_parse(&spawns, &cf) == Q2_OK) {
+                    spawns_total += spawns.count;
+                } else {
+                    printf("  startpos: bad  %s\n", f->path);
+                    failed++;
+                }
+
+                if (q2_lights_parse(&lights, &cf) == Q2_OK) {
+                    u32 li;
+                    lights_total += lights.count;
+                    for (li = 0; li < lights.count; li++) {
+                        q2_light lt;
+                        if (!q2_light_get(&lights, li, &lt))
+                            continue;
+                        /* radius must be the integer square root of radius_sq,
+                         * and the inner radius must not exceed it. Both are
+                         * cheap invariants that a misread stride would break. */
+                        if ((u32)lt.radius * lt.radius > lt.radius_sq ||
+                            (u32)(lt.radius + 1) * (lt.radius + 1) <= lt.radius_sq ||
+                            lt.inner_radius_sq > lt.radius_sq)
+                            lights_bad++;
+                    }
+                } else {
+                    printf("  lights: bad  %s\n", f->path);
+                    failed++;
+                }
+
                 q2_common_close(&cf);
             } else {
                 printf("  %-13s %s\n", q2_result_str(r), f->path);
@@ -625,6 +660,9 @@ static int cmd_verify(disc *d)
     printf("  coll planes: %llu, of which %llu are unit normals (%.2f%%)\n",
            planes_total, normals_unit,
            planes_total ? 100.0 * (double)normals_unit / (double)planes_total : 0.0);
+    printf("  spawns     : %llu\n", spawns_total);
+    printf("  lights     : %llu, %llu failing the radius invariant\n",
+           lights_total, lights_bad);
     printf("  failed     : %d\n", failed);
     if (skipped)
         printf("  skipped    : %d\n", skipped);

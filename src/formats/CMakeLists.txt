@@ -3,6 +3,8 @@ add_library(q2psx_formats STATIC
     collision.h
     dat.c
     dat.h
+    entity.c
+    entity.h
     level.c
     level.h
     points.c
