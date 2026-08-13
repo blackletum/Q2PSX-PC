@@ -5,6 +5,8 @@ add_library(q2psx_formats STATIC
     level.h
     points.c
     points.h
+    scene.c
+    scene.h
 )
 
 target_include_directories(q2psx_formats PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

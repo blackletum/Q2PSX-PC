@@ -59,6 +59,8 @@ add_subdirectory(src/disc)
 add_subdirectory(src/build)
 add_subdirectory(src/formats)
 add_subdirectory(src/psx)
+add_subdirectory(src/render)
+add_subdirectory(src/game)
 
 if(Q2PSX_BUILD_TOOLS)
     add_subdirectory(tools/q2psx-inspect)

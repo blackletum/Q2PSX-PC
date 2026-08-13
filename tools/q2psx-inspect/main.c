@@ -11,6 +11,10 @@
 #include "ident.h"
 #include "level.h"
 #include "points.h"
+#include "raster.h"
+#include "scene.h"
+#include "world.h"
+#include "trig.h"
 #include "q2psx.h"
 
 #include <stdio.h>
@@ -37,6 +41,7 @@ static void usage(void)
     puts("  dat     <disc> <path>       dump the chunk directory of one .DAT");
     puts("  dats    <disc>              census every .DAT chunk schema on the disc");
     puts("  verify  <disc>              check every level file against the typed schema");
+    puts("  render  <disc> <map> [z] [out.ppm] [yaw] [pitch]  render a zone (4096 = full turn)");
     puts("  hexdump <disc> <path> [n]   hex dump the first n bytes of a file");
     puts("  extract <disc> <outdir>     extract the whole filesystem");
     puts("");
@@ -571,6 +576,127 @@ static int cmd_verify(disc *d)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * Render a zone to a PPM. This is the end-to-end test of the geometry path:
+ * disc -> zone chunks -> GTE -> ordering table -> rasteriser -> pixels, with no
+ * window and no GPU involved. If this produces a coherent image, every layer
+ * beneath it is working.
+ *
+ * The camera is placed automatically at the centre of the zone's true world
+ * bounds, backed off along -Z far enough to see the whole thing.
+ */
+static int cmd_render(disc *d, const char *map, int zone_index, const char *out_path,
+                      s32 yaw, s32 pitch)
+{
+    q2_world_zone zone;
+    q2_camera cam;
+    psx_ot ot;
+    gte_state gte;
+    psx_framebuffer fb;
+    psx_raster_opts opts;
+    q2_world_stats stats;
+    q2_result r;
+    s32 wmin[3], wmax[3];
+    const int W = 512, H = 480;   /* 2x the PAL framebuffer, for legibility */
+
+    r = q2_world_load_zone(&zone, d, map, zone_index);
+    if (r != Q2_OK) {
+        fprintf(stderr, "cannot load %s zone %d: %s\n", map, zone_index, q2_result_str(r));
+        return 1;
+    }
+
+    q2_world_bounds(&zone, wmin, wmax);
+
+    printf("%s\n", zone.name);
+    printf("  scene nodes   : %u\n", zone.scene.node_count);
+    printf("  vertices      : %u\n", zone.points.count);
+    printf("  world bounds  : [%d %d %d] .. [%d %d %d]\n",
+           wmin[0], wmin[1], wmin[2], wmax[0], wmax[1], wmax[2]);
+    printf("  world size    : %d x %d x %d\n",
+           wmax[0] - wmin[0], wmax[1] - wmin[1], wmax[2] - wmin[2]);
+
+    q2_camera_default(&cam, W, H);
+    cam.yaw   = yaw;
+    cam.pitch = pitch;
+
+    /* Frame the whole zone: sit at its centre and back off along the camera's
+     * own view direction by enough that the largest extent fits a 90-degree
+     * field. Backing off in world -Z only works when looking down -Z, which
+     * stops being true the moment a pitch is applied. */
+    {
+        s32 cx = (wmin[0] + wmax[0]) / 2;
+        s32 cy = (wmin[1] + wmax[1]) / 2;
+        s32 cz = (wmin[2] + wmax[2]) / 2;
+        s32 ex = wmax[0] - wmin[0];
+        s32 ey = wmax[1] - wmin[1];
+        s32 ez = wmax[2] - wmin[2];
+        s32 extent = ex > ez ? ex : ez;
+        s32 dist;
+
+        if (ey > extent)
+            extent = ey;
+        dist = extent;
+
+        /* Forward vector for yaw/pitch, in 1.3.12. */
+        {
+            s32 sy = q2_sin12(yaw),   cyaw = q2_cos12(yaw);
+            s32 sp = q2_sin12(pitch), cp   = q2_cos12(pitch);
+            s32 fx = (s32)(((s64)cp * sy) >> Q2_FRAC_12);
+            s32 fy = -sp;
+            s32 fz = (s32)(((s64)cp * cyaw) >> Q2_FRAC_12);
+
+            cam.pos[0] = cx - (s32)(((s64)fx * dist) >> Q2_FRAC_12);
+            cam.pos[1] = cy - (s32)(((s64)fy * dist) >> Q2_FRAC_12);
+            cam.pos[2] = cz - (s32)(((s64)fz * dist) >> Q2_FRAC_12);
+        }
+    }
+
+    printf("  camera        : [%d %d %d] yaw=%d pitch=%d h=%u\n",
+           cam.pos[0], cam.pos[1], cam.pos[2], cam.yaw, cam.pitch, cam.projection);
+
+    r = psx_ot_init(&ot, 4096, 300000);
+    if (r != Q2_OK) {
+        fprintf(stderr, "cannot allocate ordering table: %s\n", q2_result_str(r));
+        q2_world_free_zone(&zone);
+        return 1;
+    }
+
+    r = psx_fb_init(&fb, W, H);
+    if (r != Q2_OK) {
+        fprintf(stderr, "cannot allocate framebuffer: %s\n", q2_result_str(r));
+        psx_ot_free(&ot);
+        q2_world_free_zone(&zone);
+        return 1;
+    }
+
+    q2_world_build_ot(&zone, &cam, W, H, &ot, &gte, &stats);
+
+    printf("\n  quads total   : %u\n", stats.quads_total);
+    printf("  emitted       : %u\n", stats.quads_emitted);
+    printf("  rejected near : %u\n", stats.quads_rejected_near);
+    printf("  rejected bad  : %u\n", stats.quads_rejected_bad);
+    printf("  ot overflow   : %u\n", stats.ot_overflow);
+
+    psx_raster_opts_default(&opts);
+    opts.textures = false;    /* no texture codec yet — Gouraud only */
+
+    psx_fb_clear(&fb, psx_rgb555(16, 16, 32));
+    psx_raster_ot(&fb, &ot, NULL, &opts);
+
+    r = psx_fb_write_ppm(&fb, out_path);
+    if (r != Q2_OK) {
+        fprintf(stderr, "cannot write %s: %s\n", out_path, q2_result_str(r));
+    } else {
+        printf("\n  wrote %s (%dx%d)\n", out_path, W, H);
+    }
+
+    psx_fb_free(&fb);
+    psx_ot_free(&ot);
+    q2_world_free_zone(&zone);
+    return r == Q2_OK ? 0 : 1;
+}
+
+/* ------------------------------------------------------------------------- */
 static int cmd_hexdump(disc *d, const char *path, size_t count)
 {
     q2_buf buf;
@@ -706,6 +832,17 @@ int main(int argc, char **argv)
         rc = cmd_dats(d);
     } else if (strcmp(cmd, "verify") == 0) {
         rc = cmd_verify(d);
+    } else if (strcmp(cmd, "render") == 0) {
+        if (argc < 4) {
+            fprintf(stderr, "render needs a map name\n");
+            rc = 1;
+        } else {
+            int zi = (argc >= 5) ? atoi(argv[4]) : 0;
+            const char *outp = (argc >= 6) ? argv[5] : "zone.ppm";
+            s32 yaw   = (argc >= 7) ? (s32)strtol(argv[6], NULL, 10) : 0;
+            s32 pitch = (argc >= 8) ? (s32)strtol(argv[7], NULL, 10) : 0;
+            rc = cmd_render(d, argv[3], zi, outp, yaw, pitch);
+        }
     } else if (strcmp(cmd, "dat") == 0) {
         if (argc < 4) {
             fprintf(stderr, "dat needs a file path\n");
