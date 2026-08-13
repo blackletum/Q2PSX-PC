@@ -104,11 +104,10 @@
  * vertices with the READING part's matrix while last-writer-wins uses the
  * WRITING part's.
  *
- * The per-part transform matrices themselves are still undecoded, so the 399
- * articulated models cannot yet be posed. The 1,324 static models are complete.
- * Block C is NOT where the matrices live — a direct search of all 8 byte lanes
- * and all 7 halfword lanes of its per-part body finds nothing on any of the 399
- * models that actually have non-zero bases.
+ * The per-part transform is a keyframed translation and quaternion, decoded
+ * from block C — see the animation section below. There is no matrix stored
+ * anywhere, which is why searching block C's per-part body for one found
+ * nothing: it holds packed angles, not matrix elements.
  *
  * ---------------------------------------------------------------------------
  * Normals: the component order is z, x, y
@@ -164,16 +163,17 @@
  *            models have "16 zero bytes" there: eight empty chains). Each chain
  *            node is {u16 countAndFlags; u16 nextOffset; entry[count & 0x7F]},
  *            with each entry two u16 — and BOTH are multiplied by 10 at load.
- *   block C  is a chain of records whose s16 at +0 is multiplied by 10 and
- *            whose word at +4 is the byte delta to the next record.
+ *   block C  is the ANIMATION BANK; its per-clip u16 at +0 is a duration and
+ *            the multiply by 10 is what makes the runtime clock tick ten times
+ *            per animation frame. See the animation section below.
  *   block D  is a run of 20-byte records ending at a zero word, with three u16
  *            at +12, +14 and +16 each multiplied by 5.
  *
- * The scale factors are the interesting part. Ten is the world's own lattice
- * step, so block B and block C hold spatial quantities stored at a tenth of
- * runtime scale — which is what a per-part translation would look like, and
- * block B is per-instance and present only on articulated models. That is now
- * the best lead for the missing transforms; it is not yet a decode.
+ * The ten in block C is TIME, not distance. An earlier note here guessed it was
+ * spatial on the grounds that ten is also the world's lattice step; the pose
+ * selector shows it is a subtick rate. Whether block B's tens are times or
+ * distances is still open — its entries are pairs, which fits neither a 3-vector
+ * nor a duration obviously.
  */
 #ifndef Q2PSX_MODEL_H
 #define Q2PSX_MODEL_H
@@ -261,6 +261,62 @@ Q2PSX_INLINE u32 q2_model_face_clut_index(const q2_model_face *f,
     return clut4_count_a + (u32)f->texture;
 }
 
+/* ---------------------------------------------------------------------------
+ * Animation — block C
+ * ---------------------------------------------------------------------------
+ * Block C is the animation bank, and it is what poses the articulated models.
+ * The pose selector at 0x8006B924 walks it as a chain of clips, subtracting
+ * each clip's duration from the entity's tick counter until one contains the
+ * current time; then it decodes one keyframe per part.
+ *
+ *   clip:  u16 frames      duration; the loader multiplies it by 10, so the
+ *                          runtime clock ticks ten times per animation frame
+ *          u16 flags       bit 0 selects the variable-rate path (below)
+ *          u32 next        BYTE DELTA to the next clip; 0 ends the chain
+ *          then per frame f:  u16 rateOfs; u16 keyOfs
+ *                          keys are at (that entry's address) + keyOfs
+ *   key:   two u32 per part, in part order
+ *
+ * Both key words are packed three-field:
+ *
+ *   word 0   translation   bits 0-10 (x2), 11-20 (x4), 21-31 (x2), each signed
+ *   word 1   rotation      three unsigned half-angles: bits 0-10, 11-20 (x2),
+ *                          21-31, in the PlayStation's 4096-step circle
+ *
+ * The rotation is a QUATERNION, not a matrix. 0x800699E8 builds it with the
+ * textbook Euler-to-quaternion products against a {sin, cos} table at
+ * 0x800A5430 — x = SA*CB*CC - CA*SB*SC and the other three in the same shape —
+ * which is also why the angle fields only span half a circle: they are half
+ * angles. The output is 1.3.12, the same format as everything else here.
+ *
+ * The size law the earlier pass measured falls straight out of this: a
+ * single-frame clip is 8 bytes of header, one 4-byte frame entry and
+ * 8*numParts of keys, i.e. `12 + 8*numParts` — which held on 659 of 965 models
+ * for reasons nobody could state at the time. The same pass noted that
+ * single-frame models have `u16@0 == 1`, `u16@2 == 0` and `u16@10 == 4`: one
+ * frame, no flags, and a key offset of 4.
+ *
+ * NOT YET IMPLEMENTED: the variable-rate path (clip flags bit 0), which gives
+ * each part its own key timing through a stream of 4-bit durations and
+ * interpolates between keys. 0x8006B4DC has it. Clips without the flag hold
+ * one key per part per frame, which is what q2_model_pose decodes.
+ */
+#define Q2_MODEL_TICKS_PER_FRAME 10
+
+typedef struct q2_model_anim {
+    u32 offset;      /* byte offset of the clip from the model base */
+    u16 frames;      /* duration in animation frames                */
+    u16 flags;       /* bit 0: per-part variable-rate keys          */
+    u32 next;        /* byte delta to the next clip, 0 if last      */
+} q2_model_anim;
+
+/* One part's pose: a translation in world units and a unit quaternion in
+ * 1.3.12, ordered x, y, z, w as the engine builds it. */
+typedef struct q2_model_pose {
+    s16 t[3];
+    s16 q[4];
+} q2_model_pose;
+
 /* One model located inside a chunk. Borrows the chunk's buffer. */
 typedef struct q2_model {
     const u8        *base;         /* start of this model's 64-byte header */
@@ -314,5 +370,22 @@ q2_result q2_model_bake_indices(const q2_model *m, u16 *out);
  * mesh needing no per-part transform. 1,324 of the disc's 1,723 models.
  */
 bool q2_model_is_static(const q2_model *m);
+
+/* Walk the animation chain. `index` counts from the first clip; returns false
+ * past the end, on a malformed chain, or when the model has no block C. */
+bool q2_model_anim_get(const q2_model *m, u32 index, q2_model_anim *out);
+
+/* How many clips the chain holds. Zero for a model with no animation. */
+u32 q2_model_anim_count(const q2_model *m);
+
+/*
+ * Decode every part's pose at `frame` of `clip` into `out`, which must hold
+ * num_parts entries.
+ *
+ * Returns Q2_ERR_UNSUPPORTED for a variable-rate clip rather than decoding it
+ * wrongly — those need the interpolating path, which is not implemented.
+ */
+q2_result q2_model_pose_at(const q2_model *m, const q2_model_anim *clip,
+                           u32 frame, q2_model_pose *out);
 
 #endif /* Q2PSX_MODEL_H */

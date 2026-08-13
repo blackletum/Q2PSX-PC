@@ -1,5 +1,7 @@
 #include "model.h"
 
+#include "trig.h"
+
 #include <string.h>
 
 /* ------------------------------------------------------------------------- */
@@ -235,6 +237,150 @@ bool q2_model_is_static(const q2_model *m)
             return false;
     }
     return true;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Animation — block C                                                        */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Block C runs from ofs_block_c to ofs_block_d. Everything below stays inside
+ * that span: the clip chain is a linked list of byte deltas read from the file,
+ * so a malformed one could otherwise walk the whole chunk, and the keyframe
+ * offsets are file data too.
+ */
+static bool anim_span(const q2_model *m, u32 *begin, u32 *end)
+{
+    if (!m || m->hdr.ofs_block_c == 0)
+        return false;
+    if (m->hdr.ofs_block_d <= m->hdr.ofs_block_c)
+        return false;
+    if (m->hdr.ofs_block_d > m->size)
+        return false;
+
+    *begin = m->hdr.ofs_block_c;
+    *end   = m->hdr.ofs_block_d;
+    return true;
+}
+
+/* A clip's header is 8 bytes plus one 4-byte entry per frame. */
+static bool anim_read(const q2_model *m, u32 offset, u32 end, q2_model_anim *out)
+{
+    const u8 *p;
+
+    if (offset + 8 > end)
+        return false;
+
+    p = m->base + offset;
+    out->offset = offset;
+    out->frames = q2_rd_u16(p + 0);
+    out->flags  = q2_rd_u16(p + 2);
+    out->next   = q2_rd_u32(p + 4);
+
+    /* A clip with no frames has no keys to point at and would make the tick
+     * walk spin, so treat it as malformed rather than empty. */
+    if (out->frames == 0)
+        return false;
+    if (offset + 8 + (size_t)out->frames * 4 > end)
+        return false;
+
+    return true;
+}
+
+bool q2_model_anim_get(const q2_model *m, u32 index, q2_model_anim *out)
+{
+    u32 begin, end, offset, i;
+
+    if (!m || !out || !anim_span(m, &begin, &end))
+        return false;
+
+    offset = begin;
+    for (i = 0; ; i++) {
+        if (!anim_read(m, offset, end, out))
+            return false;
+        if (i == index)
+            return true;
+        if (out->next == 0)
+            return false;          /* end of chain */
+        if (out->next > end - offset)
+            return false;          /* delta escapes the block */
+        offset += out->next;
+    }
+}
+
+u32 q2_model_anim_count(const q2_model *m)
+{
+    q2_model_anim clip;
+    u32 n = 0;
+
+    while (q2_model_anim_get(m, n, &clip))
+        n++;
+    return n;
+}
+
+q2_result q2_model_pose_at(const q2_model *m, const q2_model_anim *clip,
+                           u32 frame, q2_model_pose *out)
+{
+    u32 begin, end, entry, keys, part;
+
+    if (!m || !clip || !out)
+        return Q2_ERR_INVALID_ARG;
+    if (!anim_span(m, &begin, &end))
+        return Q2_ERR_NOT_FOUND;
+    if (frame >= clip->frames)
+        return Q2_ERR_RANGE;
+
+    /* Bit 0 gives every part its own key timing through a nibble stream and
+     * interpolates; decoding it as uniform frames would silently produce the
+     * wrong pose, which is worse than refusing. */
+    if (clip->flags & 1)
+        return Q2_ERR_UNSUPPORTED;
+
+    entry = clip->offset + 8 + frame * 4;
+    if (entry + 4 > end)
+        return Q2_ERR_BAD_FORMAT;
+
+    /* The key offset is relative to the frame entry, not to the clip. */
+    keys = entry + q2_rd_u16(m->base + entry + 2);
+    if (keys + (size_t)m->hdr.num_parts * 8 > end)
+        return Q2_ERR_BAD_FORMAT;
+
+    for (part = 0; part < m->hdr.num_parts; part++) {
+        const u8 *k = m->base + keys + (size_t)part * 8;
+        u32 t = q2_rd_u32(k);
+        u32 r = q2_rd_u32(k + 4);
+        s32 ha, hb, hc;
+        s32 sa, ca, sb, cb, sc, cc, ss, ccp;
+
+        /* Translation: three signed fields, each stored shifted down. The
+         * shifts are the engine's own (0x8006BA5C..0x8006BAA8) and are what
+         * makes an 11-bit field cover a 12-bit range. */
+        out[part].t[0] = (s16)(((s32)(t << 21) >> 21) * 2);
+        out[part].t[1] = (s16)(((s32)(t << 11) >> 22) * 4);
+        out[part].t[2] = (s16)(((s32)t >> 21) * 2);
+
+        /* Rotation: three unsigned HALF angles on the 4096-step circle. The
+         * middle one is stored at half resolution and doubled. */
+        ha = (s32)(r & 0x7FF);
+        hb = (s32)((r >> 11) & 0x3FF) * 2;
+        hc = (s32)(r >> 21);
+
+        sa = q2_sin12(ha); ca = q2_cos12(ha);
+        sb = q2_sin12(hb); cb = q2_cos12(hb);
+        sc = q2_sin12(hc); cc = q2_cos12(hc);
+
+        ss  = (sc * sa) >> 12;
+        ccp = (cc * ca) >> 12;
+
+        out[part].q[0] = (s16)((((cb * cc) >> 12) * sa >> 12) -
+                               (((sb * sc) >> 12) * ca >> 12));
+        out[part].q[1] = (s16)(((sb * ccp) >> 12) + ((cb * ss) >> 12));
+        out[part].q[2] = (s16)((((cb * sc) >> 12) * ca >> 12) -
+                               (((sb * cc) >> 12) * sa >> 12));
+        out[part].q[3] = (s16)(((cb * ccp) >> 12) + ((sb * ss) >> 12));
+    }
+
+    return Q2_OK;
 }
 
 q2_result q2_model_bake_indices(const q2_model *m, u16 *out)

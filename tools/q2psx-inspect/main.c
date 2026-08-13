@@ -69,6 +69,7 @@ static void usage(void)
     puts("  walk    <disc> <map> [z] [ticks]  drop a player in and simulate");
     puts("  textures <disc>             decode every compressed VRAM image");
     puts("  cluts   <disc>              check CLUT binding and UV rotation on every poly");
+    puts("  anims   <disc>              decode every CastList animation clip");
     puts("  music   <disc>              demultiplex and decode the XA music streams");
     puts("  render  <disc> <map> [z] [out.ppm] [yaw] [pitch]  render a zone (4096 = full turn)");
     puts("  hexdump <disc> <path> [n]   hex dump the first n bytes of a file");
@@ -1208,6 +1209,192 @@ static void model_faces_check(const q2_model_bank *bank, u32 index,
     }
 }
 
+/* ------------------------------------------------------------------------- */
+/*
+ * Every animation clip on the disc, decoded.
+ *
+ * The clip layout was read out of the pose selector at 0x8006B924, so what this
+ * checks is whether the disc actually agrees: does the chain terminate, do the
+ * per-frame key offsets land inside block C, and does every part get a key.
+ * The single-frame size law `12 + 8*numParts` is reported alongside, because it
+ * is the one prediction the layout makes that an earlier pass had already
+ * measured (659 of 965) without being able to explain it.
+ */
+typedef struct anim_stats {
+    unsigned long long models, animated, clips, frames, keys;
+    unsigned long long variable_rate, bad_chain, bad_keys;
+    unsigned long long size_law_hits, single_frame;
+    unsigned long long articulated, articulated_animated;
+    u32 max_clips, max_frames, max_parts;
+    s32 t_min, t_max;
+    s32 q_min_len, q_max_len;
+} anim_stats;
+
+static void anim_scan_bank(const q2_model_bank *bank, anim_stats *st)
+{
+    u32 i;
+
+    for (i = 0; i < bank->count; i++) {
+        q2_model mdl;
+        q2_model_anim clip;
+        u32 n_clips = 0, c;
+        bool articulated;
+
+        if (q2_model_get(bank, i, &mdl) != Q2_OK)
+            continue;
+
+        st->models++;
+        articulated = !q2_model_is_static(&mdl);
+        if (articulated)
+            st->articulated++;
+
+        n_clips = q2_model_anim_count(&mdl);
+        if (n_clips == 0) {
+            /* A model with a block C that will not walk is a decode failure,
+             * not an unanimated model — separate the two. */
+            if (mdl.hdr.ofs_block_d > mdl.hdr.ofs_block_c)
+                st->bad_chain++;
+            continue;
+        }
+
+        st->animated++;
+        if (articulated)
+            st->articulated_animated++;
+        st->clips += n_clips;
+        if (n_clips > st->max_clips)
+            st->max_clips = n_clips;
+        if (mdl.hdr.num_parts > st->max_parts)
+            st->max_parts = mdl.hdr.num_parts;
+
+        for (c = 0; c < n_clips; c++) {
+            q2_model_pose pose[256];
+            u32 f;
+
+            if (!q2_model_anim_get(&mdl, c, &clip))
+                break;
+
+            st->frames += clip.frames;
+            if (clip.frames > st->max_frames)
+                st->max_frames = clip.frames;
+
+            if (clip.flags & 1) {
+                st->variable_rate++;
+                continue;
+            }
+
+            if (c == 0 && clip.frames == 1) {
+                u32 block_c_size = mdl.hdr.ofs_block_d - mdl.hdr.ofs_block_c;
+                st->single_frame++;
+                if (block_c_size == 12u + 8u * mdl.hdr.num_parts)
+                    st->size_law_hits++;
+            }
+
+            if (mdl.hdr.num_parts > Q2PSX_ARRAY_COUNT(pose))
+                continue;
+
+            for (f = 0; f < clip.frames; f++) {
+                u32 p;
+
+                if (q2_model_pose_at(&mdl, &clip, f, pose) != Q2_OK) {
+                    st->bad_keys++;
+                    break;
+                }
+
+                for (p = 0; p < mdl.hdr.num_parts; p++) {
+                    s32 len = 0;
+                    int k;
+
+                    st->keys++;
+                    for (k = 0; k < 3; k++) {
+                        if (pose[p].t[k] < st->t_min) st->t_min = pose[p].t[k];
+                        if (pose[p].t[k] > st->t_max) st->t_max = pose[p].t[k];
+                    }
+                    /* |q|^2 in 1.3.12: a real unit quaternion lands near
+                     * 4096*4096 >> 12 == 4096. This is the check that the
+                     * angle fields really are half angles — get that wrong and
+                     * the magnitude wanders. */
+                    for (k = 0; k < 4; k++)
+                        len += ((s32)pose[p].q[k] * pose[p].q[k]) >> 12;
+                    if (len < st->q_min_len) st->q_min_len = len;
+                    if (len > st->q_max_len) st->q_max_len = len;
+                }
+            }
+        }
+    }
+}
+
+static int cmd_anims(disc *d)
+{
+    anim_stats st;
+    int i, n = disc_file_count(d);
+
+    memset(&st, 0, sizeof(st));
+    st.t_min = 32767;
+    st.t_max = -32768;
+    st.q_min_len = 1 << 30;
+    st.q_max_len = -(1 << 30);
+
+    printf("CastList animation census — block C decoded as the pose selector\n"
+           "at 0x8006B924 reads it\n\n");
+
+    for (i = 0; i < n; i++) {
+        const disc_file *f = disc_file_at(d, i);
+        const char *base = strrchr(f->path, '/');
+        q2_buf buf;
+        q2_model_bank bank;
+
+        base = base ? base + 1 : f->path;
+        if (strcmp(base, "COMMON.DAT") != 0 && strncmp(base, "ZONE", 4) != 0)
+            continue;
+        if (disc_read_file(d, f->path, &buf) != Q2_OK)
+            continue;
+
+        if (strcmp(base, "COMMON.DAT") == 0) {
+            q2_common_file cf;
+            if (q2_common_open(&cf, &buf) == Q2_OK) {
+                if (q2_model_bank_from_common(&bank, &cf) == Q2_OK)
+                    anim_scan_bank(&bank, &st);
+                q2_common_close(&cf);
+            } else {
+                q2_buf_free(&buf);
+            }
+        } else {
+            q2_zone_file zf;
+            if (q2_zone_open(&zf, &buf) == Q2_OK) {
+                if (q2_model_bank_from_zone(&bank, &zf) == Q2_OK)
+                    anim_scan_bank(&bank, &st);
+                q2_zone_close(&zf);
+            } else {
+                q2_buf_free(&buf);
+            }
+        }
+    }
+
+    printf("  models                    : %llu\n", st.models);
+    printf("    with a walkable chain   : %llu\n", st.animated);
+    printf("    articulated             : %llu (%llu animated)\n",
+           st.articulated, st.articulated_animated);
+    printf("    block C that will NOT walk : %llu\n", st.bad_chain);
+    printf("  clips                     : %llu (max %u per model)\n",
+           st.clips, st.max_clips);
+    printf("  frames                    : %llu (longest clip %u)\n",
+           st.frames, st.max_frames);
+    printf("  variable-rate clips       : %llu\n", st.variable_rate);
+    printf("  keys decoded              : %llu\n", st.keys);
+    printf("  frames whose keys escape block C : %llu\n", st.bad_keys);
+    printf("  single-frame first clips  : %llu, of which %llu match "
+           "12 + 8*numParts\n", st.single_frame, st.size_law_hits);
+    printf("  translation range         : %d .. %d\n", st.t_min, st.t_max);
+    printf("  |q|^2 in 1.3.12           : %d .. %d  (4096 == unit)\n",
+           st.q_min_len, st.q_max_len);
+
+    printf("\n%s\n", (st.bad_chain == 0 && st.bad_keys == 0)
+           ? "PASS - every chain walks and every key lands inside its block."
+           : "FAIL - see above.");
+    return (st.bad_chain || st.bad_keys) ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------------- */
 static double hypot2(int dx, int dy)
 {
     return sqrt((double)dx * dx + (double)dy * dy);
@@ -2923,6 +3110,8 @@ int main(int argc, char **argv)
         rc = cmd_polyflags(d);
     } else if (strcmp(cmd, "cluts") == 0) {
         rc = cmd_cluts(d);
+    } else if (strcmp(cmd, "anims") == 0) {
+        rc = cmd_anims(d);
     } else if (strcmp(cmd, "bmodel") == 0) {
         if (argc < 4) {
             fprintf(stderr, "bmodel needs a map name\n");

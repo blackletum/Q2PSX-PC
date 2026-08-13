@@ -508,13 +508,63 @@ against +0.2450 / 65.51 % for whole-model absolute.
 > | block | structure | scaling |
 > | --- | --- | --- |
 > | B (`+0x30`) | 8 `u16` chain heads; node `{u16 countAndFlags; u16 next; entry[count & 0x7F]}`, entry = two `u16` | both `u16` of every entry **×10** |
-> | C (`+0x34`) | chain of records; `s16` at `+0`, word at `+4` is the byte delta to the next | the `s16` **×10** |
+> | C (`+0x34`) | the **animation bank** — see §2.2.1 | each clip's duration **×10** |
 > | D (`+0x38`) | 20-byte records, terminated by a zero word at `+0` | three `u16` at `+12`, `+14`, `+16` **×5** |
 >
 > Block B being an 8-entry head table is what the earlier measurement saw as "exactly 16 zero bytes in
-> 821/965 models": eight empty chains. The ×10 is the world's own lattice step, so blocks B and C hold
-> spatial quantities stored at a tenth of runtime scale — which is what a per-part translation looks like,
-> and block B is per-instance and populated only on articulated models. Best current lead for §2a.
+> 821/965 models": eight empty chains. Block C's ×10 is **time, not distance** — it is what makes the
+> runtime clock tick ten times per animation frame. (An earlier draft of this table guessed it was spatial
+> because ten is also the world's lattice step; the pose selector settles it.) Block B's tens are still
+> unattributed: its entries are pairs, which fits neither a 3-vector nor a duration cleanly.
+
+### 2.2.1 `CastList` block C — the animation bank
+
+> **This is §2a's answer: there are no per-part matrices, because the engine does not store any.** A part's
+> transform is a keyframed translation and a **quaternion**, unpacked from two 32-bit words. The pose
+> selector at `0x8006B924` walks the clip chain subtracting durations from the entity's tick counter at
+> `+0x100` until one clip contains the current time, then decodes one key per part.
+
+```c
+typedef struct {                /* clip header, 8 bytes */
+    uint16_t frames;            /* duration; the loader multiplies it by 10, so
+                                 * the clock runs at 10 subticks per frame      */
+    uint16_t flags;             /* bit 0 selects the variable-rate path         */
+    uint32_t next;              /* BYTE DELTA to the next clip; 0 ends the chain */
+    /* then, per frame: uint16_t rateOfs; uint16_t keyOfs;
+     * keys live at (address of that entry) + keyOfs
+     * then, per part, in part order: uint32_t translation; uint32_t rotation   */
+} q2p_anim_clip;
+```
+
+| word | field | bits | scaling |
+| --- | --- | --- | --- |
+| translation | x | 0–10, signed | ×2 |
+| | y | 11–20, signed | ×4 |
+| | z | 21–31, signed | ×2 |
+| rotation | half-angle A | 0–10, unsigned | — |
+| | half-angle B | 11–20, unsigned | ×2 |
+| | half-angle C | 21–31, unsigned | — |
+
+`0x800699E8` turns the three angles into a quaternion with the textbook products against the `{sin, cos}`
+table at `0x800A5430` (4096 entries, one full circle, 1.3.12):
+`x = SA·CB·CC − CA·SB·SC`, `y = SB·CA·CC + CB·SC·SA`, `z = CA·CB·SC − SA·SB·CC`, `w = CB·CC·CA + SB·SC·SA`.
+That the fields are *half* angles is why they only span half a circle, and it is checkable: decoded over the
+whole disc, `|q|²` lands in **4087…4098** against 4096 for a unit quaternion — 0.27 % worst case. A wrong
+angle scaling or table stride makes that magnitude wander immediately.
+
+**The size law now has a reason.** A single-frame clip is 8 bytes of header, one 4-byte frame entry and
+`8*numParts` of keys, i.e. `12 + 8*numParts` — the identity an earlier pass measured on 659 of 965 models
+without being able to explain. `q2psx-inspect anims` reports it holding on **1,265 of 1,265** single-frame
+first clips disc-wide, alongside the same pass's observation that those models carry `u16@0 == 1`,
+`u16@2 == 0` and `u16@10 == 4`: one frame, no flags, keys four bytes along.
+
+Census over the disc: **1,723 of 1,723** models have a walkable chain, 4,535 clips, 123,704 frames, and
+**zero** frames whose keys escape block C. All 399 articulated models are animated.
+
+> **Still open: the variable-rate path** (`flags & 1`), which is **3,241 of the 4,535 clips**. Those give each
+> part its own key timing through a stream of 4-bit durations and interpolate between keys; `0x8006B4DC`
+> holds it. `q2_model_pose_at()` refuses such a clip rather than decoding it as uniform, because a silently
+> wrong pose is worse than a missing one.
 >
 > The fixed-size effect renderer at `0x80064780` is a useful *analogy* but is **not** corroboration: its loop
 > bound is `slti $v0,$s3,79` at `0x80064BC4` (79 faces, not 54), its face stride is `addiu $s2,$s2,4` at

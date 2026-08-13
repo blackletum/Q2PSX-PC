@@ -15,8 +15,12 @@ its own PS-X EXE loader and R3000A disassembler (`q2psx-inspect exe / disasm / x
 questions about the original *code* no longer depend on an external disassembler session. Several items below
 were parked on "needs a working disassembler session" and are now simply open work.
 
-What remains blocking is animation and simulation, not appearance: the articulated models' bone matrices
-(#2a) and the `Events` per-frame integrators (#4a).
+Animation followed. There are no per-part matrices to find (#2a): a part's transform is a keyframed
+translation and quaternion in `CastList` block C, and all 399 articulated models now pose. What is left of
+that item is playback of the variable-rate clips (#2c), which is most of them.
+
+What remains blocking is simulation, not appearance: the `Events` per-frame integrators (#4a), which are
+what make doors and lifts move.
 
 Full structural detail, evidence and confidence markers live in [`FORMATS.md`](./FORMATS.md).
 
@@ -87,34 +91,38 @@ Legend: `[ ]` open · `[~]` partially resolved · `[x]` resolved (move the item,
       Vertex `j` takes `uv[(3 - f - j) & 3]`. Read from `0x80068118…0x800681D8`, then confirmed against the
       disc by a test the disassembly cannot have arranged: over the 31,931 quads that carry a rotation, the
       engine's rule holds texel-scale anisotropy to a mean of **1.33** against **7.61** for both rivals.
+- [x] **2a. `CastList` per-part transform matrices. — SOLVED, and there are no matrices.**
+      A part's transform is a keyframed **translation and quaternion**, packed two words per part per frame
+      in **block C**, which is the animation bank. The pose selector at `0x8006B924` walks the clip chain
+      subtracting durations from the entity's tick counter until a clip contains the current time, then
+      unpacks each part's key: three signed fields for the translation (bits 0–10 ×2, 11–20 ×4, 21–31 ×2)
+      and three unsigned **half** angles for the rotation, which `0x800699E8` turns into a quaternion with
+      the textbook Euler products against the `{sin, cos}` table at `0x800A5430`.
+      Searching block C for matrix elements found nothing because none are stored — it holds packed angles.
+      Verified by `q2psx-inspect anims` over the whole disc: **1,723 of 1,723** models walk, 4,535 clips,
+      123,704 frames, **zero** keys escaping their block, all **399** articulated models animated, and the
+      decoded quaternions are unit to **0.27 %** (|q|² 4087…4098 against 4096) — which no wrong angle scaling
+      survives. The `12 + 8*numParts` size law that an earlier pass measured without explanation now falls
+      out of the layout and holds on **1,265 of 1,265** single-frame clips.
+      Implemented in `src/formats/model.[ch]` as `q2_model_anim_get` / `q2_model_pose_at`.
 
 ---
 
 ## Tier 1 — Blocking: cannot render or load a level
 
-The residues of the four resolved blockers keep their parents' numbers.
+The residues of the resolved blockers keep their parents' numbers.
 
-- [~] **2a. `CastList` per-part transform matrices.**
-      The blocker for the 399 articulated models; the 1,324 static models are fully solved. Vertices are
-      stored **part-local**: `ext2` matches raw vertex max-Y on **0 of 399** articulated models against
-      72.5 % of single-part ones, and 44.8 % of articulated part centroids sit within 50 units of the origin
-      against 9.1 % for multi-part static parts.
-      *Attack:* **not** block C — a direct search of all 8 byte lanes and all 7 halfword lanes of its
-      per-part body finds the base sequence on 0 of 399 articulated models, and its supposed
-      `12 + 8*numParts*frames` size law fails on 458 of 1,723 models.
-      **The consumer is now located** and the earlier "not located" result explained: the loader at
-      `0x8006D124` relocates the model in place and walks the bank as a linked list, so nothing reads the
-      on-disc offsets. From it, block **B**'s structure is known (§2.2) — 8 `u16` chain heads, nodes of
-      `{count, next, entry[]}`, every entry a pair of `u16` multiplied by **10** at load. Ten is the world's
-      lattice step, block B is per-instance, and it is populated only on articulated models: that is a
-      per-part translation stream in all but name. What is still missing is which chain belongs to which part
-      and whether the pairs are two axes of a translation or something else. Next step is the reader of
-      `model + [+0x30]`, the one header offset the loader deliberately leaves relative.
+- [ ] **2c. The variable-rate clip path — 3,241 of the 4,535 clips.** Clips with `flags & 1` give each part
+      its own key timing through a stream of 4-bit durations and interpolate between keys;
+      `0x8006B4DC` has it. `q2_model_pose_at()`
+      refuses those clips rather than decoding them as uniform, so until this lands most animations cannot be
+      played back even though every model can now be posed.
   - [~] 2b. Cross-part index resolution for 21,217 faces (15.3 %), all inside the articulated models.
         Last-writer-wins and a rival arithmetic rule both resolve 100 % of indices in range and differ on
         18,283 articulated faces; geometry cannot separate them. Last-writer-wins wins on coverage
         (100.0000 % / 1,723 models vs 99.6131 % / 1,462) and is what the module implements, behind one
-        function so it can be flipped when the bone matrices land.
+        function so it can be flipped. It can be revisited now: the poses the two rules would apply to
+        those borrowed vertices are decodable, so this is no longer blocked on anything.
 - [~] **3a. The PSX-texel to PC-texel ratio — the last step to CONFIRMED for S = 10.**
       The texture measurement fixes 10 world units per *PSX* texel, which is one equation in two unknowns.
       S = 10 requires PSX 64×64 tiles to be 1:1 with PC Quake II 64×64 textures at scale 1.0; a 2:1
