@@ -18,6 +18,7 @@
 #include "world.h"
 #include "trig.h"
 #include "vag.h"
+#include "xa.h"
 #include "q2psx.h"
 
 #include <stdio.h>
@@ -45,6 +46,7 @@ static void usage(void)
     puts("  dats    <disc>              census every .DAT chunk schema on the disc");
     puts("  verify  <disc>              check every level file against the typed schema");
     puts("  audio   <disc>              decode every sound bank and validate it");
+    puts("  music   <disc>              demultiplex and decode the XA music streams");
     puts("  render  <disc> <map> [z] [out.ppm] [yaw] [pitch]  render a zone (4096 = full turn)");
     puts("  hexdump <disc> <path> [n]   hex dump the first n bytes of a file");
     puts("  extract <disc> <outdir>     extract the whole filesystem");
@@ -906,6 +908,107 @@ static int cmd_audio(disc *d)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * Demultiplex and decode the streamed music.
+ *
+ * The claim under test is the interleave: each .XAI carries four independent
+ * stereo streams and sector_index % 4 == channel_num with no exceptions. That
+ * is checked directly here rather than assumed, because if it were wrong every
+ * track would be a quarter of four different songs.
+ */
+static int cmd_music(disc *d)
+{
+    static const char letters[] = { 'A', 'B', 'C', 'D', 'E' };
+    s16 *pcm;
+    const u32 pcm_cap = XA_FRAMES_PER_SECTOR * 2;
+    u32 total_sectors = 0, audio_sectors = 0, bad_blocks = 0;
+    u32 interleave_violations = 0, skipped = 0;
+    size_t li;
+
+    pcm = (s16 *)malloc(pcm_cap * sizeof(s16));
+    if (!pcm) {
+        fprintf(stderr, "out of memory\n");
+        return 1;
+    }
+
+    printf("Demultiplexing the XA music streams...\n\n");
+    printf("  file       ch  sectors    seconds\n");
+
+    for (li = 0; li < sizeof(letters); li++) {
+        char path[64];
+        const disc_file *f;
+        u32 ch;
+
+        snprintf(path, sizeof(path), "Q2DATA/AUD/QUAKE_%c.XAI", letters[li]);
+        f = disc_find(d, path);
+        if (!f) {
+            printf("  QUAKE_%c    missing\n", letters[li]);
+            continue;
+        }
+
+        for (ch = 0; ch < XAI_CHANNEL_COUNT; ch++) {
+            q2_xa_track track;
+            q2_xa_decoder dec;
+            u32 cursor = 0, sectors = 0, n;
+
+            if (q2_xa_track_open(&track, d, letters[li], (u8)ch) != Q2_OK)
+                continue;
+
+            q2_xa_decoder_reset(&dec);
+
+            while ((n = q2_xa_track_read(&track, &dec, &cursor, pcm, pcm_cap)) > 0)
+                sectors++;
+
+            printf("  QUAKE_%c    %u   %-9u  %.1f\n",
+                   letters[li], ch, sectors,
+                   (double)sectors * XA_FRAMES_PER_SECTOR / (double)XA_SAMPLE_RATE);
+
+            audio_sectors += sectors;
+        }
+
+        /* Independently check the round-robin and the group parameters by
+         * walking the raw sectors, without going through the track reader. */
+        {
+            u32 count = (f->size + CD_SECTOR_FORM1 - 1) / CD_SECTOR_FORM1;
+            u32 i;
+
+            for (i = 0; i < count; i++) {
+                u8 raw[CD_SECTOR_RAW];
+
+                if (disc_read_raw_sector(d, f->lba + i, raw) != Q2_OK)
+                    break;
+
+                total_sectors++;
+
+                if (!(raw[18] & CD_SUBMODE_AUDIO) || !(raw[18] & CD_SUBMODE_FORM2)) {
+                    skipped++;
+                    continue;
+                }
+
+                if (raw[17] != (u8)(i % XAI_CHANNEL_COUNT))
+                    interleave_violations++;
+
+                bad_blocks += q2_xa_validate_sector(raw + 24);
+            }
+        }
+    }
+
+    free(pcm);
+
+    printf("\n  sectors scanned       : %u\n", total_sectors);
+    printf("  audio sectors decoded : %u\n", audio_sectors);
+    printf("  non-audio skipped     : %u\n", skipped);
+    printf("  interleave violations : %u  (expected 0)\n", interleave_violations);
+    printf("  invalid ADPCM blocks  : %u  (expected 0)\n", bad_blocks);
+
+    printf("\n%s\n", (interleave_violations == 0 && bad_blocks == 0)
+           ? "PASS - the round-robin holds and every sound group is valid."
+           : "FAIL - see above.");
+
+    return (interleave_violations || bad_blocks) ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------------- */
 static int cmd_hexdump(disc *d, const char *path, size_t count)
 {
     q2_buf buf;
@@ -1043,6 +1146,8 @@ int main(int argc, char **argv)
         rc = cmd_verify(d);
     } else if (strcmp(cmd, "audio") == 0) {
         rc = cmd_audio(d);
+    } else if (strcmp(cmd, "music") == 0) {
+        rc = cmd_music(d);
     } else if (strcmp(cmd, "render") == 0) {
         if (argc < 4) {
             fprintf(stderr, "render needs a map name\n");
