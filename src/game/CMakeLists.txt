@@ -1,6 +1,8 @@
 add_library(q2psx_game STATIC
     events_rt.c
     events_rt.h
+    aimodule.c
+    aimodule.h
     inventory.c
     inventory.h
     monster.c

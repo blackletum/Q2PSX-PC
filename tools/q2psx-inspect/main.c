@@ -6,6 +6,7 @@
  * here reads a real disc cleanly, the engine's loader will too, because they are
  * the same code.
  */
+#include "aimodule.h"
 #include "area.h"
 #include "collision.h"
 #include "dat.h"
@@ -1670,6 +1671,7 @@ static int cmd_reloc(disc *d)
     u32 modules = 0, empty = 0, failed = 0;
     unsigned long long fixups = 0, addends = 0, oob = 0;
     unsigned long long by_type[4] = { 0, 0, 0, 0 };
+    unsigned long long moves_found = 0, frames_found = 0, moves_coherent = 0;
 
     printf("Relocating every AI module on the disc...\n\n");
 
@@ -1712,10 +1714,24 @@ static int cmd_reloc(disc *d)
                     by_type[3] += st.by_type[3];
 
                     /* Now actually relocate it, so the write path is exercised
-                     * and not merely the scan. */
+                     * and not merely the scan, then read its animations out. */
                     {
                         q2_ai_module m;
                         if (q2_ai_module_load(&m, &cf, 0x80100000u) == Q2_OK) {
+                            q2_ai_moves mv;
+                            if (!m.empty && m.image.data &&
+                                q2_ai_moves_scan(&mv, m.image.data, m.image.size,
+                                                 0x80100000u) == Q2_OK) {
+                                u32 k;
+                                moves_found  += mv.count;
+                                frames_found += mv.total_frames;
+                                for (k = 0; k < mv.count; k++) {
+                                    if (q2_ai_move_verb_run(&mv, k, m.image.data,
+                                                            m.image.size) >= 2)
+                                        moves_coherent++;
+                                }
+                                q2_ai_moves_free(&mv);
+                            }
                             q2_ai_module_free(&m);
                         } else {
                             printf("  RELOCATE FAILED  %s\n", f->path);
@@ -1748,6 +1764,12 @@ static int cmd_reloc(disc *d)
 
     /* The addend count must equal the HI16 count exactly: one raw word each.
      * If a stream ever drifted, these would diverge. */
+    printf("\n  animations recovered\n");
+    printf("    moves            %llu\n", moves_found);
+    printf("    frames           %llu\n", frames_found);
+    printf("    with a verb run  %llu  (2+ consecutive same-verb frames)\n",
+           moves_coherent);
+
     printf("\n  addends == HI16 count : %s\n",
            (addends == by_type[1]) ? "yes" : "NO - the walk drifted");
 
