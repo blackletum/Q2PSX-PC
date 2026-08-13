@@ -63,22 +63,25 @@ releases move the executable's data tables. See [`docs/FORMATS.md`](docs/FORMATS
 
 ## Status
 
-Geometry loads and renders natively from a real disc. There is no simulation yet,
-and nothing is textured — the texture compression is the one format still unsolved,
-and it gates all visual detail.
+A level loads from a real disc and renders textured, models included, with the
+simulation running on top of it. What is missing is not any one format — it is
+the wiring between systems, and the parts of the original's behaviour that have
+not been read out of the executable yet.
 
 | Area | State |
 |---|---|
 | Disc access | cue/bin, iso, bare images; ISO9660; CD-XA Form 1 and 2 |
 | Build identification | by executable hash, not by region |
-| Level data | container, scene graph, geometry, collision, spawns, lights |
-| Rendering | software rasteriser with the PSX's rules; untextured |
+| Level data | container, scene graph, geometry, collision, spawns, lights, triggers |
+| Rendering | software rasteriser with the PSX's rules; world and models, textured |
+| Models | vertices, faces, texturing and animation — all 4,535 clips decode |
 | Audio | sound bank and SPU-ADPCM decode; music not yet wired |
-| Simulation | not started |
+| Simulation | movement, inventory, combat, creature AI, save games |
 
 Checked against the PAL disc: 164 level files, 461,852 vertices, 274,936 quads,
-139,240 collision planes, 2,475 sounds, zero failures. The remaining gaps are
-tracked in [`docs/openquestions.md`](docs/openquestions.md).
+139,240 collision planes, 1,723 models, 2,036,080 animation keys, 2,475 sounds,
+zero failures. The remaining gaps are tracked in
+[`docs/openquestions.md`](docs/openquestions.md).
 
 ## Building
 
@@ -105,6 +108,7 @@ build/bin/q2psx-inspect ident  "Quake II (Europe).cue"
 build/bin/q2psx-inspect verify "Quake II (Europe).cue"
 build/bin/q2psx-inspect audio  "Quake II (Europe).cue"
 build/bin/q2psx-inspect render "Quake II (Europe).cue" BASE0 0 out.ppm 0 1024
+build/bin/q2psx-inspect model  "Quake II (Europe).cue" BASE1 Soldier 0 0 out.ppm
 ```
 
 `render` needs no window — it writes a PPM. That is how the geometry pipeline was

@@ -11,6 +11,8 @@ add_library(q2psx_game STATIC
     inventory.h
     monster.c
     monster.h
+    modeldraw.c
+    modeldraw.h
     mover.c
     mover.h
     pickup.c

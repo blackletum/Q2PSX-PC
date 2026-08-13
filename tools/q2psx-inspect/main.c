@@ -19,6 +19,7 @@
 #include "level.h"
 #include "leveltable.h"
 #include "model.h"
+#include "modeldraw.h"
 #include "mover.h"
 #include "points.h"
 #include "pickup.h"
@@ -38,6 +39,7 @@
 #include "xa.h"
 #include "q2psx.h"
 
+#include <ctype.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -51,6 +53,20 @@
 #  include <sys/types.h>
 #  define q2_mkdir(p) mkdir((p), 0755)
 #endif
+
+/* Case-insensitive compare, local to the tool: the format layer's own is not
+ * exported and this is only used for matching a model name typed by a human. */
+static int name_casecmp_local(const char *a, const char *b)
+{
+    while (*a && *b) {
+        int ca = toupper((unsigned char)*a);
+        int cb = toupper((unsigned char)*b);
+        if (ca != cb)
+            return ca - cb;
+        a++; b++;
+    }
+    return (unsigned char)*a - (unsigned char)*b;
+}
 
 static void usage(void)
 {
@@ -71,6 +87,7 @@ static void usage(void)
     puts("  textures <disc>             decode every compressed VRAM image");
     puts("  cluts   <disc>              check CLUT binding and UV rotation on every poly");
     puts("  anims   <disc>              decode every CastList animation clip");
+    puts("  model   <disc> <map> <name|idx> [clip] [frame] [out.ppm]  render one model");
     puts("  music   <disc>              demultiplex and decode the XA music streams");
     puts("  render  <disc> <map> [z] [out.ppm] [yaw] [pitch]  render a zone (4096 = full turn)");
     puts("  hexdump <disc> <path> [n]   hex dump the first n bytes of a file");
@@ -2096,6 +2113,193 @@ static int cmd_bmodel(disc *d, const char *map, int zone_index, int which,
 
 /* ------------------------------------------------------------------------- */
 /*
+ * Render one CastList model, posed, on its own.
+ *
+ * This is the end-to-end check of the model path the way `render` is for the
+ * world: disc -> CastList -> animation keys -> per-part transform -> GTE ->
+ * ordering table -> pixels. If a monster comes out looking like a monster, the
+ * keyframe decode, the quaternion conversion, the scratch-window indexing and
+ * the second-section CLUT binding are all right at once, which no single
+ * numeric check establishes.
+ */
+static int cmd_model(disc *d, const char *map, const char *want, int clip_index,
+                     int frame, const char *out_path)
+{
+    const int W = 512, H = 480;
+    q2_buf buf;
+    q2_common_file cf;
+    q2_model_bank bank;
+    q2_model mdl;
+    q2_model_pose pose[256];
+    q2_model_anim clip;
+    q2_model_instance inst;
+    q2_model_draw_stats stats;
+    q2_camera cam;
+    q2_vram_section vs;
+    psx_ot ot;
+    gte_state gte;
+    psx_framebuffer fb;
+    psx_raster_opts opts;
+    psx_vram *vram;
+    char path[128];
+    u32 i, found = (u32)-1, clip_count;
+    bool have_pose = false;
+    s32 lo = 1 << 30, hi = -(1 << 30), extent;
+
+    snprintf(path, sizeof(path), "Q2DATA/LEVELS/%s/COMMON.DAT", map);
+    if (disc_read_file(d, path, &buf) != Q2_OK) {
+        fprintf(stderr, "cannot read %s\n", path);
+        return 1;
+    }
+    if (q2_common_open(&cf, &buf) != Q2_OK) {
+        fprintf(stderr, "%s is not a COMMON.DAT\n", path);
+        q2_buf_free(&buf);
+        return 1;
+    }
+    if (q2_model_bank_from_common(&bank, &cf) != Q2_OK || bank.count == 0) {
+        fprintf(stderr, "%s has no models\n", map);
+        q2_common_close(&cf);
+        return 1;
+    }
+
+    /* Accept an index or a name, because model names are not unique and an
+     * index is the only way to reach the duplicates. */
+    for (i = 0; i < bank.count; i++) {
+        q2_model probe;
+        if (q2_model_get(&bank, i, &probe) != Q2_OK)
+            continue;
+        if (name_casecmp_local(probe.hdr.name, want) == 0) {
+            found = i;
+            break;
+        }
+    }
+    if (found == (u32)-1) {
+        char *endp;
+        unsigned long n = strtoul(want, &endp, 0);
+        if (*endp == 0 && n < bank.count)
+            found = (u32)n;
+    }
+    if (found == (u32)-1 || q2_model_get(&bank, found, &mdl) != Q2_OK) {
+        fprintf(stderr, "no model '%s' in %s (%u models)\n", want, map,
+                bank.count);
+        q2_common_close(&cf);
+        return 1;
+    }
+
+    printf("%s model %u: %-12s %u parts, %u verts, %u faces, %s\n",
+           map, found, mdl.hdr.name, mdl.hdr.num_parts, mdl.hdr.num_verts,
+           mdl.hdr.num_faces,
+           q2_model_is_static(&mdl) ? "static" : "articulated");
+
+    clip_count = q2_model_anim_count(&mdl);
+    printf("  clips         : %u\n", clip_count);
+
+    if (clip_count && (u32)clip_index < clip_count &&
+        mdl.hdr.num_parts <= Q2PSX_ARRAY_COUNT(pose) &&
+        q2_model_anim_get(&mdl, (u32)clip_index, &clip)) {
+        u32 tick = (u32)frame * Q2_MODEL_TICKS_PER_FRAME;
+        printf("  clip %d       : %u frames, flags 0x%X%s\n", clip_index,
+               clip.frames, clip.flags,
+               (clip.flags & 1) ? " (variable rate)" : "");
+        if (q2_model_pose_at(&mdl, &clip, tick, pose) == Q2_OK)
+            have_pose = true;
+        else
+            fprintf(stderr, "  pose failed; drawing unposed\n");
+    }
+
+    /* Frame the model on its own posed extents. */
+    {
+        u32 part, cursor = 0;
+        for (part = 0; part < mdl.hdr.num_parts; part++) {
+            q2_model_part p;
+            s16 rot[3][3];
+            u32 v;
+
+            if (!q2_model_get_part(&mdl, part, &p))
+                break;
+            if (have_pose)
+                q2_quat_to_matrix(rot, pose[part].q);
+
+            for (v = 0; v < p.num_verts; v++) {
+                q2_model_vertex mv;
+                s32 y;
+
+                if (!q2_model_get_vertex(&mdl, cursor + v, &mv))
+                    break;
+                if (have_pose)
+                    y = (((s32)rot[1][0] * mv.x + (s32)rot[1][1] * mv.y +
+                          (s32)rot[1][2] * mv.z) >> 12) + pose[part].t[1];
+                else
+                    y = mv.y;
+                if (y < lo) lo = y;
+                if (y > hi) hi = y;
+            }
+            cursor += p.num_verts;
+        }
+    }
+    if (lo > hi) { lo = 0; hi = 256; }
+    extent = hi - lo;
+    if (extent < 64)
+        extent = 64;
+    printf("  posed Y range : %d .. %d   (header ext2 %d, ext3 %d)\n",
+           lo, hi, mdl.hdr.ext2, mdl.hdr.ext3);
+
+    memset(&inst, 0, sizeof(inst));
+    inst.model  = &mdl;
+    inst.pose   = have_pose ? pose : NULL;
+    inst.yaw    = 0;
+
+    q2_camera_default(&cam, W, H);
+    cam.pos[0] = 0;
+    cam.pos[1] = (lo + hi) / 2;
+    cam.pos[2] = -extent * 2;
+    cam.yaw    = 0;
+    cam.pitch  = 0;
+
+    if (psx_ot_init(&ot, 4096, 300000) != Q2_OK ||
+        psx_fb_init(&fb, W, H) != Q2_OK) {
+        q2_common_close(&cf);
+        return 1;
+    }
+    vram = (psx_vram *)calloc(1, sizeof(psx_vram));
+    if (!vram) { q2_common_close(&cf); return 1; }
+
+    psx_raster_opts_default(&opts);
+    if (q2_vram_load(&vs, d, map) == Q2_OK) {
+        inst.clut4_count_a = vs.clut4_count_a;
+        if (q2_vram_upload(&vs, vram) != Q2_OK)
+            opts.textures = false;
+        q2_vram_free(&vs);
+    } else {
+        opts.textures = false;
+    }
+
+    psx_ot_clear(&ot);
+    gte_init(&gte);
+    gte_set_projection(&gte, cam.projection, W / 2, H / 2);
+    gte.zsf3 = (s16)(Q2_ONE_12 / 3);
+    gte.zsf4 = (s16)(Q2_ONE_12 / 4);
+
+    q2_model_build_ot(&inst, &cam, &ot, &gte, &stats);
+    printf("  faces emitted : %u of %u  (near %u, bad %u)\n",
+           stats.faces_emitted, stats.faces_total, stats.faces_rejected_near,
+           stats.faces_rejected_bad);
+
+    psx_fb_clear(&fb, psx_rgb555(4, 4, 10));
+    psx_raster_ot(&fb, &ot, vram, &opts);
+
+    if (psx_fb_write_ppm(&fb, out_path) == Q2_OK)
+        printf("  wrote %s\n", out_path);
+
+    psx_fb_free(&fb);
+    psx_ot_free(&ot);
+    free(vram);
+    q2_common_close(&cf);
+    return 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/*
  * Render a zone to a PPM. This is the end-to-end test of the geometry path:
  * disc -> zone chunks -> GTE -> ordering table -> rasteriser -> pixels, with no
  * window and no GPU involved. If this produces a coherent image, every layer
@@ -3241,6 +3445,16 @@ int main(int argc, char **argv)
         rc = cmd_cluts(d);
     } else if (strcmp(cmd, "anims") == 0) {
         rc = cmd_anims(d);
+    } else if (strcmp(cmd, "model") == 0) {
+        if (argc < 5) {
+            fprintf(stderr, "model needs a map and a model name or index\n");
+            rc = 1;
+        } else {
+            int ci = (argc >= 6) ? atoi(argv[5]) : 0;
+            int fr = (argc >= 7) ? atoi(argv[6]) : 0;
+            const char *outp = (argc >= 8) ? argv[7] : "model.ppm";
+            rc = cmd_model(d, argv[3], argv[4], ci, fr, outp);
+        }
     } else if (strcmp(cmd, "bmodel") == 0) {
         if (argc < 4) {
             fprintf(stderr, "bmodel needs a map name\n");

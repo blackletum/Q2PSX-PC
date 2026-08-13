@@ -90,9 +90,16 @@ can reproduce the hardware's rules rather than approximate the result.
 See [`FIDELITY.md`](FIDELITY.md) for what that buys and how it is verified.
 
 ### `render`, `audio`, `game`, `client`
-Not yet implemented. `render` will consume `psx_ot`; `audio` needs SPU-ADPCM for
-sound effects, CD-XA ADPCM for streamed music, and plain PCM for the CD audio
-track; `game` is the reimplemented simulation; `client` is the SDL3 host.
+`render` consumes `psx_ot` and rasterises it with the hardware's rules. `audio`
+has SPU-ADPCM for sound effects and CD-XA ADPCM for streamed music; plain PCM for
+the CD audio track is not wired up. `game` is the reimplemented simulation, and
+it also owns the two modules that turn data into primitives: `world.c` for brush
+geometry and `modeldraw.c` for posed models. `client` is the SDL3 host.
+
+`build` has a second job beyond identifying the release. It carries a PS-X EXE
+loader and an R3000A disassembler, because the remaining unknowns are questions
+about the original's *code*, and answering them should not depend on a tool
+outside this repository.
 
 ## Why C11
 
@@ -120,11 +127,11 @@ statement the build system can evaluate rather than an assertion in a document.
 | `common` | working — types, fixed point, fixed-point trig, SHA-256 |
 | `disc` | working — cue/bin, iso, ISO9660, Form 1/2, SYSTEM.CNF |
 | `build` | working — PAL build fingerprinted and catalogued |
-| `formats` | container, level schema, vertex pool, scene/geometry, collision, spawns, lights |
+| `formats` | container, level schema, vertex pool, scene/geometry, collision, spawns, lights, models and their animation |
 | `psx` | GTE and ordering table implemented; needs conformance tests |
-| `render` | software rasteriser working; untextured until the codec falls |
+| `render` | software rasteriser working; world and models textured |
 | `audio` | sound bank and SPU-ADPCM working; XA music and CD-DA not started |
-| `game` | zone loading and OT construction; no simulation yet |
+| `game` | zone loading, OT construction, model drawing, and the simulation |
 | `client` | SDL3 client flies through a zone at the console's own resolution |
 
 Validated against the PAL disc (`q2psx-inspect verify` and `audio`):
