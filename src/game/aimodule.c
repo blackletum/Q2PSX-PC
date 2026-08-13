@@ -180,3 +180,109 @@ u32 q2_ai_move_verb_run(const q2_ai_moves *set, u32 move_index,
 
     return best;
 }
+
+/* ------------------------------------------------------------------------- */
+/* Fixup-guided scan                                                          */
+/* ------------------------------------------------------------------------- */
+
+/* Try to accept a move record at `at`, appending it on success. */
+static bool try_move_at(q2_ai_moves *out, const u8 *image, size_t size,
+                        u32 base, size_t at)
+{
+    s32 first, last;
+    u32 frames_ptr, endfunc_ptr, frames_off, endfunc_off = 0, count;
+    q2_ai_move *mv;
+    u32 i;
+
+    if (at + Q2_MMOVE_SIZE > size)
+        return false;
+
+    first       = q2_rd_s32(image + at + 0);
+    last        = q2_rd_s32(image + at + 4);
+    frames_ptr  = q2_rd_u32(image + at + 8);
+    endfunc_ptr = q2_rd_u32(image + at + 12);
+
+    if (first < 0 || last < first)
+        return false;
+
+    count = (u32)(last - first + 1);
+    if (count == 0 || count > Q2_AI_MAX_FRAMES)
+        return false;
+
+    if (!to_offset(frames_ptr, base, size, &frames_off))
+        return false;
+    if (endfunc_ptr != 0 && !to_offset(endfunc_ptr, base, size, &endfunc_off))
+        return false;
+    if (!frames_validate(image, size, frames_off, count))
+        return false;
+
+    /* The fixup stream can offer the same record twice when two candidate
+     * pointers resolve to one location; keep it once. */
+    for (i = 0; i < out->count; i++) {
+        if (out->moves[i].offset == (u32)at)
+            return false;
+    }
+
+    mv = moves_push(out);
+    if (!mv)
+        return false;
+
+    mv->offset         = (u32)at;
+    mv->first_frame    = first;
+    mv->last_frame     = last;
+    mv->frame_count    = count;
+    mv->frames_offset  = frames_off;
+    mv->endfunc_offset = endfunc_off;
+
+    out->total_frames += count;
+    return true;
+}
+
+q2_result q2_ai_moves_scan_guided(q2_ai_moves *out,
+                                  const u8 *image, size_t size,
+                                  const u8 *stream, size_t stream_size,
+                                  u32 base)
+{
+    size_t at = 0;
+
+    if (!out || !image || !stream)
+        return Q2_ERR_INVALID_ARG;
+
+    memset(out, 0, sizeof(*out));
+
+    /*
+     * Walk the fixup stream and, for each WORD32 site, test whether it is the
+     * frames pointer of a move — i.e. whether a valid record begins eight bytes
+     * earlier. Nothing else in the image is even considered.
+     */
+    while (at + 4 <= stream_size) {
+        u32 entry = q2_rd_u32(stream + at);
+        u32 offset, type;
+
+        at += 4;
+
+        if (entry == Q2_RELOC_TERMINATOR)
+            break;
+
+        offset = entry & ~3u;
+        type   = entry & 3u;
+
+        /* HI16 owns the following raw word; skipping it would put the walk one
+         * word out of phase for everything after. */
+        if (type == Q2_RELOC_HI16) {
+            if (at + 4 > stream_size)
+                break;
+            at += 4;
+            continue;
+        }
+
+        if (type != Q2_RELOC_WORD32)
+            continue;
+
+        /* A move's frames pointer sits at record + 8. */
+        if (offset >= 8)
+            (void)try_move_at(out, image, size, base, offset - 8);
+    }
+
+    return Q2_OK;
+}

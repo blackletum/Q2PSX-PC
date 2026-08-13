@@ -25,7 +25,30 @@
  * every ai byte in {0..5} or {0x80..0x85}, and the array fits in the image.
  *
  * ---------------------------------------------------------------------------
- * THIS SCAN OVER-MATCHES. Measured, not suspected.
+ * The guided scan finds EXACTLY the same records as the blind one
+ * ---------------------------------------------------------------------------
+ * Both return 251 moves and 4,428 frames over the 13 COMMON.DAT modules, to
+ * the unit. So restricting candidates to offsets the relocation stream
+ * actually points at removes nothing: every candidate already sits where a
+ * genuine WORD32 fixup places a pointer.
+ *
+ * That is worth knowing because it kills the assumption underneath the "this
+ * over-matches" note below. If the extra records were noise, relocation
+ * guidance would have cut them; it did not. Two readings survive:
+ *
+ *   - These really are 251 move records present in the images, and the
+ *     reference figure of 160 counts something narrower — most likely the
+ *     moves REACHABLE from a class descriptor, rather than every record
+ *     present. Unused or shared animations would explain the gap.
+ *   - Or some other structure shares the exact shape {int, int, data*, code*}
+ *     with a valid frame array behind the data pointer, which relocation
+ *     cannot separate either.
+ *
+ * Distinguishing them needs the descriptor walk, not another filter. Until
+ * then the count should not be treated as authoritative in either direction.
+ *
+ * ---------------------------------------------------------------------------
+ * The earlier over-match note, kept because the numbers still stand
  * ---------------------------------------------------------------------------
  * A disassembly-based census of the disc found roughly 160 moves and 2,675
  * frames across 22 modules. This scan, over only the 13 modules in COMMON.DAT,
@@ -92,9 +115,33 @@ typedef struct q2_ai_moves {
  *
  * `base` is the address the image was relocated to, needed to turn a relocated
  * pointer back into a module-relative offset.
+ *
+ * This is the blind version, kept for comparison. Prefer the fixup-guided scan
+ * below, which does not guess where a record might be.
  */
 q2_result q2_ai_moves_scan(q2_ai_moves *out, const u8 *image, size_t size,
                            u32 base);
+
+/*
+ * Scan guided by the relocation stream — deterministic where the blind scan
+ * guesses.
+ *
+ * A move's last two words are pointers: the frame array (data) and the end
+ * callback (code). Both are WORD32 relocations, four bytes apart. So instead of
+ * testing every word-aligned offset in the image, this only considers offsets
+ * where the fixup stream actually places a pointer, which is a far smaller and
+ * non-arbitrary candidate set.
+ *
+ * That matches what the relocation census found independently: WORD32 sites
+ * cluster into runs of exactly two, split about evenly between code and data
+ * targets — which is the shape of a {frames*, endfunc*} pair.
+ *
+ * `stream` is the module's fixup stream, already past its preamble.
+ */
+q2_result q2_ai_moves_scan_guided(q2_ai_moves *out,
+                                  const u8 *image, size_t size,
+                                  const u8 *stream, size_t stream_size,
+                                  u32 base);
 void      q2_ai_moves_free(q2_ai_moves *m);
 
 /* Read frame `index` of a move. */

@@ -1759,9 +1759,15 @@ static int cmd_reloc(disc *d)
                         q2_ai_module m;
                         if (q2_ai_module_load(&m, &cf, 0x80100000u) == Q2_OK) {
                             q2_ai_moves mv;
+
+                            /* Guided by the fixup stream rather than scanning
+                             * every offset: a move's frames pointer is a WORD32
+                             * relocation, so the stream says where to look. */
                             if (!m.empty && m.image.data &&
-                                q2_ai_moves_scan(&mv, m.image.data, m.image.size,
-                                                 0x80100000u) == Q2_OK) {
+                                q2_ai_moves_scan_guided(&mv, m.image.data, m.image.size,
+                                                        rel->data + Q2_RELOC_CREAI_PREAMBLE,
+                                                        rel->size - Q2_RELOC_CREAI_PREAMBLE,
+                                                        0x80100000u) == Q2_OK) {
                                 u32 k;
                                 moves_found  += mv.count;
                                 frames_found += mv.total_frames;
