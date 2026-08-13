@@ -17,6 +17,8 @@
  *   F1           toggle dithering
  *   F2           toggle affine UVs (perspective-correct comparison)
  *   F3           toggle the ordering-table sort
+ *   F4           toggle simulated movement vs free-fly camera
+ *   space/ctrl   jump / crouch (simulated movement only)
  *   Esc          quit
  */
 #include <SDL3/SDL.h>
@@ -30,6 +32,7 @@
 #include "ident.h"
 #include "q2psx.h"
 #include "raster.h"
+#include "sim.h"
 #include "trig.h"
 #include "world.h"
 #include "xa.h"
@@ -50,6 +53,8 @@ typedef struct client {
     SDL_AudioStream *audio;
 
     q2_camera        cam;
+    q2_sim           sim;
+    bool             sim_enabled;
     psx_ot           ot;
     gte_state        gte;
     psx_framebuffer  fb;
@@ -132,6 +137,19 @@ static bool client_load_zone(client *c, const char *map, int index)
         c->cam.pos[2] = (wmin[2] + wmax[2]) / 2;
     }
 
+    /* Hand the chosen position to the simulation. The ground plane is seeded
+     * from the spawn height because real hull tracing is not wired yet -- see
+     * q2_sim_trace. */
+    q2_sim_init(&c->sim, &c->zone, q2_build_tick_rate(&c->build));
+    {
+        s32 feet[3];
+        feet[0] = c->cam.pos[0];
+        feet[1] = c->cam.pos[1];
+        feet[2] = c->cam.pos[2];
+        q2_sim_spawn(&c->sim, feet, c->cam.yaw);
+        c->sim.player.ground_y = feet[1];
+    }
+
     Q2_INFO("%s: %u nodes, %u vertices",
             c->zone.name, c->zone.scene.node_count, c->zone.points.count);
     return true;
@@ -194,6 +212,46 @@ static void client_music_pump(client *c)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * Simulated movement: gather the pad state, hand it to the game tick, and read
+ * the camera back out of the player. The simulation runs at its own fixed rate
+ * regardless of how fast we render, which is the whole point of it owning the
+ * clock rather than the frame loop doing so.
+ */
+static void client_input_simulated(client *c, float dt)
+{
+    const bool *keys = SDL_GetKeyboardState(NULL);
+    q2_input in;
+    s32 eye[3];
+
+    memset(&in, 0, sizeof(in));
+
+    if (keys[SDL_SCANCODE_W]) in.forward =  1024;
+    if (keys[SDL_SCANCODE_S]) in.forward = -1024;
+    if (keys[SDL_SCANCODE_D]) in.strafe  =  1024;
+    if (keys[SDL_SCANCODE_A]) in.strafe  = -1024;
+
+    /* Turn rate is per second, so scale by the real frame time; the simulation
+     * consumes it as a per-tick delta. */
+    if (keys[SDL_SCANCODE_LEFT])  in.yaw_delta   -= (s32)(1500.0f * dt);
+    if (keys[SDL_SCANCODE_RIGHT]) in.yaw_delta   += (s32)(1500.0f * dt);
+    if (keys[SDL_SCANCODE_UP])    in.pitch_delta -= (s32)(1500.0f * dt);
+    if (keys[SDL_SCANCODE_DOWN])  in.pitch_delta += (s32)(1500.0f * dt);
+
+    in.jump   = keys[SDL_SCANCODE_SPACE] != 0;
+    in.crouch = keys[SDL_SCANCODE_LCTRL] != 0 || keys[SDL_SCANCODE_C] != 0;
+
+    q2_sim_advance(&c->sim, &in, (double)dt);
+
+    q2_sim_eye(&c->sim, eye);
+    c->cam.pos[0] = eye[0];
+    c->cam.pos[1] = eye[1];
+    c->cam.pos[2] = eye[2];
+    c->cam.yaw    = c->sim.player.yaw;
+    c->cam.pitch  = c->sim.player.pitch;
+}
+
+/* Free-fly camera, kept for inspecting geometry without physics in the way. */
 static void client_input(client *c, float dt)
 {
     const bool *keys = SDL_GetKeyboardState(NULL);
@@ -403,6 +461,10 @@ int main(int argc, char **argv)
                 case SDLK_ESCAPE: c.running = false; break;
                 case SDLK_F1: c.opts.dither    = !c.opts.dither;    break;
                 case SDLK_F2: c.opts.affine_uv = !c.opts.affine_uv; break;
+                case SDLK_F4:
+                    c.sim_enabled = !c.sim_enabled;
+                    Q2_INFO("movement: %s", c.sim_enabled ? "simulated" : "free-fly");
+                    break;
                 default:
                     if (ev.key.key >= SDLK_0 && ev.key.key <= SDLK_9) {
                         int z = (int)(ev.key.key - SDLK_0);
@@ -413,7 +475,10 @@ int main(int argc, char **argv)
             }
         }
 
-        client_input(&c, dt);
+        if (c.sim_enabled)
+            client_input_simulated(&c, dt);
+        else
+            client_input(&c, dt);
         client_music_pump(&c);
         client_frame(&c);
     }

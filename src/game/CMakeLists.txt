@@ -1,4 +1,6 @@
 add_library(q2psx_game STATIC
+    sim.c
+    sim.h
     world.c
     world.h
 )
