@@ -65,8 +65,14 @@
  * caused the record to run (the touching player, from record_exec's second
  * argument at 0x80027950), and a scalar that the CALL site always passes as
  * zero. That third argument is a damage amount on the two primitives that
- * double as damage callbacks (GLASS, SHOOTTHEN), which is why they no-op when
- * they are reached through CALL.
+ * double as damage callbacks (GLASS, SHOOTTHEN).
+ *
+ * CORRECTION — only SHOOTTHEN no-ops on a zero third argument (it returns at
+ * 0x8002E840). GLASS does NOT. It spawns its effect at 0x8002A384 before ever
+ * examining the argument, and a zero value makes the branch at 0x8002A390 skip
+ * the hit-point subtract and fall straight through to the destruction path. So
+ * calling GLASS from a script breaks the glass immediately. Treating it as a
+ * no-op leaves every scripted glass pane intact.
  *
  * Every primitive returns `item + len` — a cursor advance the CALL site does
  * not use. Length-checked primitives return the item unchanged on a mismatch.
@@ -113,6 +119,14 @@
  *               0x800C6F74 and aborts, so the rest of the record runs later.
  *               That makes TIMER a delayed continuation, not a sleep.
  *
+ *               Its delay scale is x30, NOT x300. The sequence at
+ *               0x800270F8-0x80027100 is `sll 4; subu; sll 1`, i.e. 15*2.
+ *               The movers' genuine x300 is a different idiom entirely
+ *               (`sll 2; addu; sll 4; subu; sll 2`, 5 -> 75 -> 300, e.g. LIFT1
+ *               at 0x8002DF94), and conflating the two makes every scripted
+ *               delay ten times too long — which would look like sluggish
+ *               pacing rather than a decoding error.
+ *
  * ---------------------------------------------------------------------------
  * Two engine-wide pass flags gate several primitives
  * ---------------------------------------------------------------------------
@@ -124,18 +138,50 @@
  *     gp+0x421C  set to 1 ONLY at 0x8007C2A4, alongside the above. LASERBEAM
  *                registers itself in a 32-entry active list when it is set;
  *                LASERWALL registers when set and deals damage when clear;
- *                MISEVENT fires only when clear. NOTHING in the main executable
- *                ever writes it non-zero outside that one pass, so on retail
- *                data LASERBEAM's registration path is unreachable from CALL.
+ *                MISEVENT fires only when clear. Nothing in the executable
+ *                writes it non-zero outside that one pass.
+ *
+ *                CORRECTION — do NOT conclude from that that LASERBEAM's
+ *                registration is unreachable. The pass at 0x80027CC4 is not a
+ *                single-record runner; it is a TRANSITIVE QUEUE DRAIN. It seeds
+ *                the queue at 0x800C6F24 and loops while the read cursor
+ *                (gp+0x4220) trails the write cursor (gp+0x4230), so TRIGGER
+ *                items enqueued DURING the pass are drained in the same call,
+ *                still with the flag set. All 332 LASERBEAM and 10 LASERWALL
+ *                calls on the disc sit in records reachable from the STARTLEV
+ *                entry through that closure — 188 of 188 laser-bearing records.
+ *                Registration is not merely reachable; it is the only thing
+ *                LASERBEAM ever does.
  *
  * ---------------------------------------------------------------------------
  * Operand widths are fixed per primitive — CONFIRMED twice over
  * ---------------------------------------------------------------------------
  * Each primitive has exactly ONE item length across all 3,760 CALL items, with
- * zero exceptions. 27 of the 43 primitives assert that length in code
+ * zero exceptions. 22 of the 43 primitives assert that length in code
  * (lbu item[1], compare, bail), and every asserted value equals the observed
  * one. The table below is the union of both sources; primitives never used on
  * this disc carry only the code-asserted value.
+ *
+ * (An earlier pass said 27, which is the count of non-null CONSTRUCTORS — a
+ * different set that happens to be nearby in the same table.)
+ *
+ * ---------------------------------------------------------------------------
+ * A warning about how these operand offsets were established
+ * ---------------------------------------------------------------------------
+ * They come from the disassembly, NOT from the corpus checks, and that
+ * distinction is load-bearing.
+ *
+ * Decoding all 3,760 items and finding no out-of-range operand sounds like
+ * strong confirmation. It is not. Re-running every operand at offsets +/-1,
+ * +/-2 and +/-4 gives 438 perturbations of which only 150 are caught: 288
+ * (65.8%) pass every check the corpus harness applies. Broken down, the
+ * harness catches NAME12 54/54 and OBJSLOT 57/90, but U16 only 15/108, VEC3
+ * 0/36, U8 9/72 and S16 8/42.
+ *
+ * So for every scalar and every VEC3, "the corpus decodes cleanly" would hold
+ * for two thirds of WRONG tables and is worth nothing as evidence. Trust the
+ * instruction-level derivations for those; trust the corpus only for the name
+ * and object-slot fields, where it genuinely discriminates.
  */
 #ifndef Q2PSX_USERFUNCS_H
 #define Q2PSX_USERFUNCS_H
@@ -343,6 +389,19 @@ enum {
     Q2_ENV_INLAVA      = 0x00001000,
     Q2_ENV_DONTJUMP    = 0x00020000
 };
+
+/*
+ * T_Damage (0x80057D54) takes five arguments and no hidden middle ones: the
+ * frame is -96 and the only stack read is `lw $s6,112($sp)`, i.e. argument 5.
+ *
+ * ENGINE BUG worth knowing about: opcode 0x13 sets up no fifth argument at all
+ * (it loads only a2 and a3 at 0x80027840), so it hands T_Damage an
+ * uninitialised stack slot. A port must decide whether to mirror that — the
+ * original's behaviour there depends on whatever the caller left on the stack —
+ * or to pass a defined value. Mirroring it faithfully is not reproducible;
+ * guarding it is a deliberate divergence. Either way it should be a choice, not
+ * an accident.
+ */
 
 /* Means-of-death codes passed to T_Damage (0x80057D54) by the CALL family.
  * The full set indexes two tables in the EXE — a 16-entry armour-absorption

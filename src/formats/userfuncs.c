@@ -27,7 +27,12 @@ static const q2_uf_prim_info uf_table[Q2_UF_PRIM_COUNT] = {
     {4,  1, Q2_UF_OP_NAME12, "map",
      "EXE level table at 0x8009C6C8; 129/135. Ignored when it equals the "
      "current map name at 0x800E46B4"},
-    {16, 1, Q2_UF_OP_NAME12, "start_pos", "StartPos entry name; 135/135"}}},
+    /* Resolved against the TARGET map's StartPos (named at +4), not the map the
+     * item lives in. Against the containing map it matches only 104/135;
+     * against the target, 129/129. Getting the namespace wrong drops the
+     * player at the wrong arrival point on a quarter of transitions. */
+    {16, 1, Q2_UF_OP_NAME12, "start_pos",
+     "StartPos entry of the TARGET map named at +4; 129/129"}}},
 
 {Q2_UF_MISCOMPLETE, "MISCOMPLETE", 4, false, false, 0, {OP_NONE}},
 
@@ -72,7 +77,7 @@ static const q2_uf_prim_info uf_table[Q2_UF_PRIM_COUNT] = {
 
 {Q2_UF_TIMER, "TIMER", 12, false, true, 4, {
     {4,  1, Q2_UF_OP_U16, "delay_base",
-     "ticks = (base + ((range * rand()) >> 15)) * 300"},
+     "ticks = (base + ((range * rand()) >> 15)) * 30 -- NOT 300"},
     {6,  1, Q2_UF_OP_U16, "delay_range", "rand() is BIOS A(0x2F)"},
     {8,  1, Q2_UF_OP_U16, "slot_arg", "copied to timer slot +8"},
     {10, 1, Q2_UF_OP_U16, "slot_arg2", "copied to timer slot +6"}}},
