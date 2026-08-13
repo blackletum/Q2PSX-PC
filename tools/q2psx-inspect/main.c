@@ -24,6 +24,7 @@
 #include "raster.h"
 #include "reloc.h"
 #include "scene.h"
+#include "spawn.h"
 #include "sim.h"
 #include "vram.h"
 #include "world.h"
@@ -546,6 +547,8 @@ static int cmd_verify(disc *d)
     unsigned long long trig_planes = 0;
     unsigned long long pickups_total = 0;
     unsigned long long pickups_taken = 0;
+    unsigned long long spawn_records = 0, spawn_placed = 0, spawn_oob = 0;
+    u8 class_seen[Q2_MONSTER_CLASS_COUNT];
 
     printf("Verifying every level file against the typed schema...\n\n");
 
@@ -639,6 +642,34 @@ static int cmd_verify(disc *d)
                             }
                             q2_pickups_free(&ps);
                         }
+                    }
+                }
+
+                /* Creature spawning. Every class the disc uses is treated as
+                 * registered here, so the count reflects the spawn records
+                 * rather than which modules we happen to have loaded. */
+                {
+                    q2_population pop3;
+                    if (q2_population_parse(&pop3, &cf) == Q2_OK) {
+                        q2_monster_set ms;
+                        q2_spawn_stats st;
+                        u32 k;
+
+                        memset(&ms, 0, sizeof(ms));
+                        for (k = 0; k < Q2_MONSTER_CLASS_COUNT; k++)
+                            q2_monster_set_register(&ms, k);
+
+                        if (q2_spawn_from_population(&ms, &pop3, &st) == Q2_OK) {
+                            spawn_records += st.records;
+                            spawn_placed  += st.placed;
+                            spawn_oob     += st.out_of_range;
+                            for (k = 0; k < ms.count; k++) {
+                                if (ms.monsters[k].class_id >= 0 &&
+                                    ms.monsters[k].class_id < Q2_MONSTER_CLASS_COUNT)
+                                    class_seen[ms.monsters[k].class_id] = 1;
+                            }
+                        }
+                        q2_monster_set_free(&ms);
                     }
                 }
 
@@ -849,6 +880,13 @@ static int cmd_verify(disc *d)
     printf("  triggers   : %llu volumes, %llu planes\n", trig_total, trig_planes);
     printf("  pickups    : %llu items, %llu collectable (no id table yet)\n",
            pickups_total, pickups_taken);
+    {
+        u32 k, distinct = 0;
+        for (k = 0; k < Q2_MONSTER_CLASS_COUNT; k++)
+            if (class_seen[k]) distinct++;
+        printf("  creatures  : %llu spawn records, %llu placed, %llu bad class, %u distinct classes\n",
+               spawn_records, spawn_placed, spawn_oob, distinct);
+    }
     printf("  population : %llu groups, %llu actors, %llu placements, %llu path nodes\n",
            pop_groups, pop_spawns, pop_places, pop_paths);
     printf("  lights     : %llu, %llu failing the radius invariant\n",

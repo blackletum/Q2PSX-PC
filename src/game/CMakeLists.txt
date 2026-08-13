@@ -13,6 +13,8 @@ add_library(q2psx_game STATIC
     mover.h
     pickup.c
     pickup.h
+    spawn.c
+    spawn.h
     sim.c
     sim.h
     world.c
