@@ -194,6 +194,18 @@ The residues of the resolved blockers keep their parents' numbers.
 
 ## Tier 2 — Blocking: degrades the level badly, does not prevent loading
 
+- [ ] **10b. One model part textures wrong, and it is the same part everywhere.** BASE1's `Soldier` renders
+      correctly except for part 2 — 30 faces covering the head and one shoulder — which comes out as
+      saturated purple noise. The evidence narrows it a long way without settling it:
+      the same model renders identically in BASE1, BASE2 and WASTE1, so it is **not** a per-map palette
+      problem; part 2 is the **only** part of the model that uses texture page 6 and CLUT index 46, and no
+      other part shares either; every other part of the same model, and every weapon and item model tested,
+      textures correctly under the same rule; and the map does upload seven pages, so page 6 exists.
+      Saturated purple on an otherwise green-and-grey model is the classic signature of a palette that is
+      right in form and wrong in identity. *Attack:* dump page 6 of a map's VRAM against several candidate
+      palettes and see which yields colours consistent with the rest of the model — the diagnostic in
+      `q2psx-inspect model` already reports the per-part page and texture ranges that localise it.
+
 - [ ] **7. `SortData` encoding.** Bit-packed, no offset table, no fixed per-node record (4.0…88.6 bytes per
       scene node — a 22× spread). Almost certainly draw-order data; transparency and overdraw will be wrong
       without it. Requires the EXE's bit reader.

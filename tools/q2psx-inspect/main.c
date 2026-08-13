@@ -2342,6 +2342,56 @@ static int cmd_model(disc *d, const char *map, const char *want, int clip_index,
            bmin[0], bmin[1], bmin[2], bmax[0], bmax[1], bmax[2],
            mdl.hdr.ext2, mdl.hdr.ext3);
 
+    /* Which texture page and palette each face asks for. A model that looks
+     * wrong in one region almost always asks for one page or one CLUT there,
+     * and this is the cheapest way to see that. */
+    {
+        u32 page_faces[32];
+        u32 clut_lo = 0xFFFFFFFFu, clut_hi = 0, f, distinct = 0;
+
+        memset(page_faces, 0, sizeof(page_faces));
+        for (f = 0; f < mdl.hdr.num_faces; f++) {
+            q2_model_face fc;
+            if (!q2_model_get_face(&mdl, f, &fc))
+                continue;
+            page_faces[q2_model_face_page(&fc)]++;
+            if (fc.texture < clut_lo) clut_lo = fc.texture;
+            if (fc.texture > clut_hi) clut_hi = fc.texture;
+        }
+        printf("  pages used    :");
+        for (f = 0; f < 32; f++)
+            if (page_faces[f]) {
+                printf(" %u(%u)", f, page_faces[f]);
+                distinct++;
+            }
+        printf("   [%u distinct]\n", distinct);
+        {
+            u32 part, face_cursor = 0;
+            printf("  per part      : (part: faces, page(s), texture(s))\n");
+            for (part = 0; part < mdl.hdr.num_parts; part++) {
+                q2_model_part pp;
+                u32 k, plo = 99, phi = 0, tlo = 999, thi = 0;
+
+                if (!q2_model_get_part(&mdl, part, &pp))
+                    break;
+                for (k = 0; k < pp.num_faces; k++) {
+                    q2_model_face fc;
+                    if (!q2_model_get_face(&mdl, face_cursor + k, &fc))
+                        break;
+                    if (q2_model_face_page(&fc) < plo) plo = q2_model_face_page(&fc);
+                    if (q2_model_face_page(&fc) > phi) phi = q2_model_face_page(&fc);
+                    if (fc.texture < tlo) tlo = fc.texture;
+                    if (fc.texture > thi) thi = fc.texture;
+                }
+                if (pp.num_faces)
+                    printf("      %2u: %3u faces  page %u-%u  tex %u-%u\n",
+                           part, pp.num_faces, plo, phi, tlo, thi);
+                face_cursor += pp.num_faces;
+            }
+        }
+        printf("  face.texture  : %u .. %u\n", clut_lo, clut_hi);
+    }
+
     memset(&inst, 0, sizeof(inst));
     inst.model  = &mdl;
     inst.pose   = have_pose ? pose : NULL;
