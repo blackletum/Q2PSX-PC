@@ -298,13 +298,36 @@ Q2PSX_INLINE u32 q2_model_face_clut_index(const q2_model_face *f,
  *
  * A clip with flags bit 0 set is laid out differently, and the difference is
  * easy to miss: its four-byte entries are PER PART rather than per frame, and
- * each names two things � a stream of 4-bit durations in frames, eight to a
+ * each names two things � a stream of 4-bit durations in frames, eight to a
  * word, and that part's own list of keys. A part holds a key for as many frames
  * as its nibble says, and poses between keys are interpolated: translations
  * linearly, rotations by the spherical interpolator at 0x80069C64, which flips
  * the second quaternion when the dot product is negative and falls back to a
  * straight lerp below its angle threshold. 3,241 of the disc's 4,535 clips are
  * this kind, so it is the common case rather than the exception.
+ */
+/*
+ * How a pose reaches the vertices, from the hand-written GTE routine at
+ * 0x800B1F90 — worth knowing before drawing anything, because the port has to
+ * reproduce the order, not just the arithmetic:
+ *
+ *   1. Every part's TRANSLATION is transformed first, in one pass, and kept in
+ *      a parallel array. The rotation that pass uses is the model's, not the
+ *      part's, so translations are model-space offsets.
+ *   2. Then, per part: the quaternion becomes a 3x3 with the standard form
+ *      (m00 = 1 - 2y^2 - 2z^2 and so on, in 1.3.12), and that matrix is
+ *      composed with two matrices held by the caller — one landing in the GTE's
+ *      LIGHT matrix, for normals, and one in its ROTATION matrix, for
+ *      positions. Neither is another part's matrix: parts do not inherit.
+ *   3. The part's translation goes into the GTE translation registers, and its
+ *      vertices go through RTPT three at a time, landing in the shared scratch
+ *      window at vert_base * 8. Normals go through the lighting op into the
+ *      same slots' colour halves.
+ *
+ * So a part's transform is v' = R(q) * v + t, applied per part with no
+ * hierarchy — which is what q2_quat_to_matrix and the pose translation give
+ * you. What is NOT yet established is what the caller's two matrices hold for a
+ * given entity; see openquestions #2d.
  */
 #define Q2_MODEL_TICKS_PER_FRAME 10
 

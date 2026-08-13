@@ -85,3 +85,30 @@ void q2_rotation_yaw_pitch(s16 m[3][3], s32 yaw, s32 pitch)
     m[2][1] = (s16)(-sp);
     m[2][2] = (s16)(((s64)cp * cy) >> Q2_FRAC_12);
 }
+
+void q2_quat_to_matrix(s16 m[3][3], const s16 q[4])
+{
+    /* Each product of two 1.3.12 values is brought back to 1.3.12 by >> 12
+     * before the quaternion form's doubling, so no term can overflow s16 for a
+     * unit quaternion. */
+    s32 x = q[0], y = q[1], z = q[2], w = q[3];
+
+    s32 xx = (x * x) >> Q2_FRAC_12, yy = (y * y) >> Q2_FRAC_12;
+    s32 zz = (z * z) >> Q2_FRAC_12;
+    s32 xy = (x * y) >> Q2_FRAC_12, xz = (x * z) >> Q2_FRAC_12;
+    s32 yz = (y * z) >> Q2_FRAC_12;
+    s32 wx = (w * x) >> Q2_FRAC_12, wy = (w * y) >> Q2_FRAC_12;
+    s32 wz = (w * z) >> Q2_FRAC_12;
+
+    m[0][0] = (s16)(Q2_ONE_12 - 2 * (yy + zz));
+    m[0][1] = (s16)(2 * (xy - wz));
+    m[0][2] = (s16)(2 * (xz + wy));
+
+    m[1][0] = (s16)(2 * (xy + wz));
+    m[1][1] = (s16)(Q2_ONE_12 - 2 * (xx + zz));
+    m[1][2] = (s16)(2 * (yz - wx));
+
+    m[2][0] = (s16)(2 * (xz - wy));
+    m[2][1] = (s16)(2 * (yz + wx));
+    m[2][2] = (s16)(Q2_ONE_12 - 2 * (xx + yy));
+}

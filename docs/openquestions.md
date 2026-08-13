@@ -114,6 +114,14 @@ Legend: `[ ]` open · `[~]` partially resolved · `[x]` resolved (move the item,
       clip end; and the last key of a model's last clip has no successor inside block C, which the original
       reads anyway. The port's computed inverse cosine matches the original's 4096-entry table on 4,094
       entries and is one unit out on the other two.
+- [ ] **2d. What the two caller matrices hold when a model is drawn.** `0x800B1F90` composes each part's
+      quaternion matrix with two matrices the caller sets up — one becomes the GTE light matrix, one the
+      rotation matrix — and pre-transforms every part translation with a third. Parts demonstrably do not
+      inherit from each other, so the per-part rule is `v' = R(q)·v + t`, but what the caller puts in those
+      matrices for a given entity is not established. The measurable symptom: posing an articulated model
+      flat does **not** restore agreement between its extents and the header's `ext2`/`ext3` (4/399 and
+      15/399 against 0/399 and 5/399 unposed), while static models are unaffected. Either those fields are
+      authored bounds, or a per-model transform is missing. Blocks nothing that can be checked by drawing.
 
 ---
 

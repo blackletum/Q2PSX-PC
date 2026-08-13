@@ -44,4 +44,11 @@ s32 q2_acos12(s32 cos12);
  * wants: yaw about Y, then pitch about X. `m` is row-major m[row][col]. */
 void q2_rotation_yaw_pitch(s16 m[3][3], s32 yaw, s32 pitch);
 
+/*
+ * Rotation matrix for a quaternion, both in 1.3.12. `q` is x, y, z, w, which is
+ * the order the model animation keys decode to. Row-major, and in the form the
+ * GTE's rotation registers want.
+ */
+void q2_quat_to_matrix(s16 m[3][3], const s16 q[4]);
+
 #endif /* Q2PSX_TRIG_H */

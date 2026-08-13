@@ -586,6 +586,28 @@ Three details of the walk are load-bearing, and each was found by the disc disag
 
 Census with the path implemented: **2,036,080 keys** decoded across all 4,535 clips, **zero** escaping their
 block.
+
+**How a pose reaches the vertices** — from the hand-written GTE routine at `0x800B1F90`, which is worth
+following because a port has to reproduce the order and not merely the arithmetic:
+
+1. Every part's **translation** is transformed first, in a single pass, and kept in a parallel array. That
+   pass uses the model's matrix rather than the part's, so translations are model-space offsets.
+2. Then per part: the quaternion becomes a 3×3 in the standard form (`m00 = 1 − 2y² − 2z²`, …, in 1.3.12),
+   and that matrix is composed with two matrices the caller supplies — one landing in the GTE's **light**
+   matrix, for normals, and one in its **rotation** matrix, for positions. Neither is another part's matrix:
+   **parts do not inherit**.
+3. The part's translation goes into the GTE translation registers and its vertices run through `RTPT` three
+   at a time, into the shared scratch window at `vert_base * 8`; normals run through the lighting op into the
+   same slots.
+
+> **An honest negative.** `ext2` / `ext3` match raw vertex max-Y / min-Y on most static models and on
+> essentially no articulated one, which is how part-local storage was established — so posing an articulated
+> model ought to restore the agreement. It does not: after posing at the first clip's first frame the
+> articulated match rate moves only from 0/399 and 5/399 to **4/399 and 15/399**. Static models are
+> unaffected (**912/1723** and **1177/1723**, i.e. their poses are near-identity, which is itself a useful
+> sanity check on the decode). Either `ext2`/`ext3` are authored bounds rather than measured ones, or the
+> caller's matrices carry a per-model transform that the extents include. This is recorded rather than
+> resolved; see openquestions #2d.
 >
 > The fixed-size effect renderer at `0x80064780` is a useful *analogy* but is **not** corroboration: its loop
 > bound is `slti $v0,$s3,79` at `0x80064BC4` (79 faces, not 54), its face stride is `addiu $s2,$s2,4` at

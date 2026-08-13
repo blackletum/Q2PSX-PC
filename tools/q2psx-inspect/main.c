@@ -1227,9 +1227,74 @@ typedef struct anim_stats {
     unsigned long long size_law_hits, single_frame;
     unsigned long long articulated, articulated_animated;
     u32 max_clips, max_frames, max_parts;
+    u32 vert_cursor;
+    unsigned long long extent_models, extent_max_hit, extent_min_hit;
+    unsigned long long extent_art_models, extent_art_max_hit, extent_art_min_hit;
     s32 t_min, t_max;
     s32 q_min_len, q_max_len;
 } anim_stats;
+
+/*
+ * Does posing a model make its extents agree with its header?
+ *
+ * ext2 and ext3 match raw vertex max-Y and min-Y on most STATIC models and on
+ * essentially none of the 399 articulated ones — which is what established that
+ * articulated vertices are part-local. If the keyframe decode is right and the
+ * poses are applied flat, one per part, then posing an articulated model should
+ * restore that agreement. Nothing about the decode was tuned to make this
+ * happen, so it is a genuine prediction rather than a fit.
+ */
+static void anim_extent_check(const q2_model *m, const q2_model_pose *pose,
+                              anim_stats *st, bool articulated)
+{
+    s32 lo = 1 << 30, hi = -(1 << 30);
+    u32 part;
+    bool ok2, ok3;
+
+    for (part = 0; part < m->hdr.num_parts; part++) {
+        q2_model_part p;
+        s16 rot[3][3];
+        u32 v;
+
+        if (!q2_model_get_part(m, part, &p))
+            return;
+
+        q2_quat_to_matrix(rot, pose[part].q);
+
+        for (v = 0; v < p.num_verts; v++) {
+            q2_model_vertex mv;
+            s32 y;
+
+            /* Part vertices are contiguous in file order, so the part's slice
+             * starts where the previous ones ended; walk them by counting. */
+            if (!q2_model_get_vertex(m, st->vert_cursor + v, &mv))
+                return;
+
+            y = ((s32)rot[1][0] * mv.x + (s32)rot[1][1] * mv.y +
+                 (s32)rot[1][2] * mv.z) >> 12;
+            y += pose[part].t[1];
+
+            if (y < lo) lo = y;
+            if (y > hi) hi = y;
+        }
+        st->vert_cursor += p.num_verts;
+    }
+
+    if (lo > hi)
+        return;
+
+    ok2 = (hi == m->hdr.ext2);
+    ok3 = (lo == m->hdr.ext3);
+
+    st->extent_models++;
+    if (ok2) st->extent_max_hit++;
+    if (ok3) st->extent_min_hit++;
+    if (articulated) {
+        st->extent_art_models++;
+        if (ok2) st->extent_art_max_hit++;
+        if (ok3) st->extent_art_min_hit++;
+    }
+}
 
 static void anim_scan_bank(const q2_model_bank *bank, anim_stats *st)
 {
@@ -1290,6 +1355,11 @@ static void anim_scan_bank(const q2_model_bank *bank, anim_stats *st)
 
             if (mdl.hdr.num_parts > Q2PSX_ARRAY_COUNT(pose))
                 continue;
+
+            if (c == 0 && q2_model_pose_at(&mdl, &clip, 0, pose) == Q2_OK) {
+                st->vert_cursor = 0;
+                anim_extent_check(&mdl, pose, st, articulated);
+            }
 
             for (f = 0; f < clip.frames; f++) {
                 u32 p;
@@ -1399,6 +1469,14 @@ static int cmd_anims(disc *d)
     printf("  translation range         : %d .. %d\n", st.t_min, st.t_max);
     printf("  |q|^2 in 1.3.12           : %d .. %d  (4096 == unit)\n",
            st.q_min_len, st.q_max_len);
+
+    printf("\n  Posed extents against the header's ext2 / ext3:\n");
+    printf("    all models        : max-Y %llu/%llu   min-Y %llu/%llu\n",
+           st.extent_max_hit, st.extent_models,
+           st.extent_min_hit, st.extent_models);
+    printf("    articulated only  : max-Y %llu/%llu   min-Y %llu/%llu\n",
+           st.extent_art_max_hit, st.extent_art_models,
+           st.extent_art_min_hit, st.extent_art_models);
 
     /*
      * The interpolator needs an inverse cosine, and the original ships it as a
