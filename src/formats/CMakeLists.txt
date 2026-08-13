@@ -1,4 +1,6 @@
 add_library(q2psx_formats STATIC
+    area.c
+    area.h
     collision.c
     collision.h
     dat.c

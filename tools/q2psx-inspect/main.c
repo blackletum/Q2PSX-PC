@@ -6,6 +6,7 @@
  * here reads a real disc cleanly, the engine's loader will too, because they are
  * the same code.
  */
+#include "area.h"
 #include "collision.h"
 #include "dat.h"
 #include "disc.h"
@@ -515,6 +516,10 @@ static int cmd_verify(disc *d)
     unsigned long long spawns_total = 0;
     unsigned long long lights_total = 0;
     unsigned long long lights_bad = 0;
+    unsigned long long areas_total = 0;
+    unsigned long long links_total = 0;
+    unsigned long long links_bad = 0;
+    unsigned long long names_total = 0;
 
     printf("Verifying every level file against the typed schema...\n\n");
 
@@ -612,6 +617,37 @@ static int cmd_verify(disc *d)
                         sub_ok = 0;
                     }
 
+                    /* Portal graph and name table. */
+                    {
+                        q2_area_graph ag;
+                        q2_map_name_table nt;
+
+                        if (q2_area_parse(&ag, &zf) == Q2_OK) {
+                            u32 a;
+                            areas_total += ag.area_count;
+                            for (a = 0; a < ag.area_count; a++) {
+                                u32 nl = q2_area_link_count(&ag, a), li2;
+                                for (li2 = 0; li2 < nl; li2++) {
+                                    q2_area_link lk;
+                                    if (q2_area_get_link(&ag, a, li2, &lk))
+                                        links_total++;
+                                    else
+                                        links_bad++;
+                                }
+                            }
+                        } else {
+                            printf("  areaconx: parse failed  %s\n", f->path);
+                            sub_ok = 0;
+                        }
+
+                        if (q2_map_names_parse(&nt, &zf) == Q2_OK) {
+                            names_total += nt.count;
+                        } else {
+                            printf("  mapnames: parse failed  %s\n", f->path);
+                            sub_ok = 0;
+                        }
+                    }
+
                     /* Both collision hulls, including the normal-length check
                      * that is the strongest evidence the layout is right. */
                     {
@@ -662,6 +698,9 @@ static int cmd_verify(disc *d)
     printf("  coll planes: %llu, of which %llu are unit normals (%.2f%%)\n",
            planes_total, normals_unit,
            planes_total ? 100.0 * (double)normals_unit / (double)planes_total : 0.0);
+    printf("  areas      : %llu with %llu links (%llu unreadable)\n",
+           areas_total, links_total, links_bad);
+    printf("  map names  : %llu\n", names_total);
     printf("  spawns     : %llu\n", spawns_total);
     printf("  lights     : %llu, %llu failing the radius invariant\n",
            lights_total, lights_bad);
