@@ -1485,10 +1485,19 @@ item records at run time instead of transcribing a table, so there is nothing to
       `q2logowire`, `joypadwire`, `Quaddamage` and the four coloured player models `Male2`, `Male2aqua`,
       `Male2purple`, `Male2red`. So the title screen is a rendered scene with menu text over it, not a page of
       art — which is why no static page table for it exists in the executable. Page 46 installs exactly **two**
-      item records (`0x800A3314` and `0x800A3344`, filled at run time), matching the capture's START / OPTIONS.
+      item records (`0x800A3314` and `0x800A3344`, filled at run time).
       A dev-time path `LEVELS\TITLE\` at `0x800AD090` is a leftover: no such directory ships.
-      *Still open:* the deeper pages' item records, which are built at run time by front-end code rather than
-      transcribed from a table.
+
+      **Correction: those two records are not START and OPTIONS.** This entry read them as matching the
+      capture, and the bytes say otherwise. `0x800A3314` holds `{ char *text; s16 x; s16 y; }` = `0x800AECC8`,
+      256, 124 — and `0x800AECC8` is the string **`LOADING`**, centred. `0x800A3344` is all zeros, and
+      `0x8001A474`'s own `lw v0, 0(s3); beq v0, zero` skips a record whose text pointer is null, so the
+      second call installs nothing at all at that moment. What `0x80079364` sets up is therefore the front
+      end's **loading screen**, shown while `LEVELS/QFRONT/` streams in — which fits: it is the first thing
+      `q2_menu_open`'s special case does, before the level that the title screen is drawn over exists.
+      *Still open, and further out than this entry implied:* where START and OPTIONS are written. They go
+      into the same two records later, from front-end code that has not been located; the reachable handle is
+      the function-pointer table at `0x80079ECC` (#42's blocker as well), not `0x80079364`.
 
 - [x] 45. **Word wrap in practice — SOLVED, and it was the wrong screen.** The wrap the capture shows is the
       **briefing's**, not the MISSION screen's: `#06A196` at `0x800AE740` sets margins 106 and 406, which is
