@@ -4002,9 +4002,20 @@ nothing saying so.
           unclaimed         28 ->  21        3:1 rule     105/108 -> 112/115
 
       The Arachner has a pain animation and a stand animation it did not have, and JAIL4 now resolves 9
-      creature sounds where it resolved 6. **One regression worth stating**: think indices went from 51 of 51
-      decoding to 54 of 55 — the new moves reach a think the decoder cannot follow, behind a branch. Finding
-      more behaviour found a gap in the decoder with it, and that is a better position than not knowing.
+      creature sounds where it resolved 6. It is not only the Arachner: the **Berserk** gains `"Attack2"`
+      (96-109), 14 frames wanting 42, and 42 is one of its clips — so the new move satisfies the rule on
+      arrival.
+
+      **One regression, run down rather than left as a number.** Think indices went from 51 of 51 decoding to
+      54 of 55. The single `?` is the **Berserk's think 1**:
+
+          [ 1] move(8010157C)? sound(80101758)?
+
+      Its move and its sound are both behind a branch the decoder will not follow, so their addresses are
+      candidates rather than facts. This is a decode-completeness gap and not a functional one — the same
+      creature's `port` line reads *5 of 5 think indices act*, because the hand-written Berserk binding
+      supplies that action. Three more think indices are now visible than before, and one of them is honest
+      about being uncertain, which is the trade this change makes.
 
       What is then left is exact: **two clips unclaimed, both 30 frames — ten AI frames each — and two moves
       unmatched, both nine AI frames.** Two leftovers on each side, differing by exactly one frame.
