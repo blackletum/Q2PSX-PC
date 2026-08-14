@@ -1981,6 +1981,17 @@ static void client_input_simulated(client *c, float dt)
             c->sim[0].pcombat[pi].self.origin[2] = pl->pos[2];
         }
 
+        /*
+         * And player 0's own aim is HELD too: fire on, no look input. Holding
+         * only the extra players' aim is what made three code changes produce
+         * byte-identical counters — player 0 was doing all the shooting, being
+         * aimed at the top of each frame and turning away inside its own tick.
+         */
+        in.attack   = true;
+        in.buttons |= Q2_BTN_ATTACK_PRESS;
+        in.yaw      = 0;
+        in.pitch    = 0;
+
         /* And player 0 looks back at the first of them. */
         if (c->sim_ready[1]) {
             s32 v[3];
@@ -1997,7 +2008,9 @@ static void client_input_simulated(client *c, float dt)
     if (c->mp_enabled)
         client_targets_for(c, 0);
 
+    q2_combat_scan_who = c->mp_enabled ? 0 : Q2_COMBAT_SCAN_OTHER;
     q2_sim_advance(&c->sim[0], &in, (double)dt);
+    q2_combat_scan_who = Q2_COMBAT_SCAN_OTHER;
     client_sync_parked_health(c);
     client_score_deaths(c);
 
@@ -2055,7 +2068,9 @@ static void client_input_simulated(client *c, float dt)
                     pin.pitch = 0;
                 }
                 client_targets_for(c, pi);
+                q2_combat_scan_who = pi;
                 q2_sim_advance_player(&c->sim[0], pi, &pin, ticks);
+                q2_combat_scan_who = Q2_COMBAT_SCAN_OTHER;
 
                 /*
                  * Did that player's frame actually take a shot? `last_shot` is
@@ -3168,17 +3183,25 @@ static void client_write_shot(client *c, bool numbered)
             int pi;
 
             for (pi = 0; pi < Q2_MP_MAX_PLAYERS; pi++) {
+                const q2_combat_scan_stats *sc0 = &q2_combat_scan_by[pi];
+
                 if (pi > 0 && !c->sim_ready[pi])
                     continue;
+                if (pi == 0)
+                    Q2_INFO("  scan[0]: %u tested, %u behind, %u beyond world,"
+                            " %u off axis, %u hit",
+                            sc0->tested, sc0->behind, sc0->beyond_world,
+                            sc0->off_axis, sc0->hit);
                 Q2_INFO("  player %d shots %u, dry %u", pi,
                         c->mp_shots[pi], c->mp_dry[pi]);
-                if (pi == 1)
-                    Q2_INFO("  scan: %u tested, %u skipped, %u dead, %u behind,"
-                            " %u beyond world, %u off axis, %u hit",
-                            q2_combat_scan.tested, q2_combat_scan.skipped,
-                            q2_combat_scan.dead, q2_combat_scan.behind,
-                            q2_combat_scan.beyond_world,
-                            q2_combat_scan.off_axis, q2_combat_scan.hit);
+                {
+                    const q2_combat_scan_stats *sc = &q2_combat_scan_by[pi];
+
+                    Q2_INFO("  scan[%d]: %u tested, %u behind, %u beyond world,"
+                            " %u off axis, %u hit",
+                            pi, sc->tested, sc->behind, sc->beyond_world,
+                            sc->off_axis, sc->hit);
+                }
                 Q2_INFO("  player %d at [%d %d %d] yaw %d, %d hp, moved %ld",
                         pi, c->sim[0].player[pi].pos[0],
                         c->sim[0].player[pi].pos[1],

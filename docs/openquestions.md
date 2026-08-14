@@ -3152,7 +3152,34 @@ player-versus-player damage:
       constantly, is aimed at the top of each frame by the staging, and then turns away during its own tick —
       which is exactly the 1988 `behind`. The staging holds the EXTRA players' aim and never held player 0's.
 
-- [ ] 59a. **Hold player 0's aim while staging, and count the extra players' scans separately.** One shared
+- [x] 59a. **DONE, and it reframed the question.** The scan counters gained a shooter dimension —
+      `q2_combat_scan_by[]` indexed 0..3 by player and 4 for everything else, set by whoever is about to
+      fire — and player 0's aim is held as well as the extra players'. The first capture with both said
+      something no total could have:
+
+          scan[0]: 4304 tested, 2806 behind, 1491 beyond world, 7 off axis, 0 hit
+          scan[1]: 0 tested,    0 behind,    0 beyond world,    0 off axis, 0 hit
+
+      **Player 1 fires 301 shots and produces zero traces.** That is not a miss — the hitscan path is not
+      the path its weapon takes. `q2_sim_fire`'s `default:` arm is
+      `q2_projectile_launch(&sim->combat.projectiles, &r, -1, sim->level_time)`, so a blaster bolt is a
+      PROJECTILE and never goes near `nearest_hit`. Four rounds of reasoning about aim, geometry and units
+      were about the wrong path, and one counter with a shooter dimension said so immediately.
+
+      Two real faults fell out of that:
+
+      - **A launched projectile has no owner.** The `-1` is the owner index, so a bolt that hits cannot say
+        who fired it, which is the projectile-level twin of the `entity+222` gap `owner`/`last_attacker`
+        closed for hitscan.
+      - **The projectile step ran once per PLAYER.** `q2_sim_combat_tick` steps every bolt in flight, and it
+        is called from the player half of the tick — so with four players a bolt advanced four times a frame
+        and a rocket crossed an arena at four times its speed. It is the same class of bug the world-half
+        gate exists for, missed because it lives in another file. Now gated on `cur_player == 0`.
+
+- [ ] 59b. **Give a projectile an owner, and check a bolt can hurt a player.** The launch passes -1; the
+      shooter's index is available at the call site. Until then a player-versus-player kill can happen and
+      still not be attributed. The scan counters cover hitscan only, so this wants the same treatment: count
+      where a projectile stops, per owner, rather than reasoning about it. One shared
       counter cannot say whose shot it was, which is the same mistake as reading a whole-capture creature
       count and attributing it to one creature. The counters want a per-player dimension before the next
       attempt, not another fix.

@@ -439,6 +439,18 @@ void q2_sim_combat_tick(q2_sim *sim)
     if (!sim)
         return;
 
+    /*
+     * The projectiles in flight are the WORLD's, not a player's — one list,
+     * shared, exactly like the entity sweep and the effects. So they step once
+     * a frame, not once a player: with four players a bolt was advancing four
+     * times per frame and a rocket crossed an arena at four times its speed.
+     *
+     * This is the same class of bug the world-half gate in `q2_sim_tick`
+     * exists for, and it was missed because it lives in another file.
+     */
+    if (sim->cur_player != 0)
+        return;
+
     for (i = 0; i < Q2_PROJ_MAX; i++) {
         q2_projectile *p = &sim->combat.projectiles.p[i];
         q2_proj_step step;

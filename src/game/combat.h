@@ -257,6 +257,22 @@ typedef struct q2_combat_scan_stats {
     u32 hit;
 } q2_combat_scan_stats;
 
+/*
+ * Per shooter, because one shared counter cannot say whose shot it was.
+ *
+ * Slot 0..3 is a player; slot 4 is everything else. `q2_combat_scan_who` is set
+ * by whoever is about to fire and left alone otherwise. Without this dimension
+ * a capture reports 2126 scans and no way to tell that every one of them
+ * belonged to the player who was not under test — which is exactly what
+ * happened, three code changes in a row, with byte-identical totals each time.
+ */
+#define Q2_COMBAT_SCAN_SLOTS 5
+#define Q2_COMBAT_SCAN_OTHER 4
+
+extern q2_combat_scan_stats q2_combat_scan_by[Q2_COMBAT_SCAN_SLOTS];
+extern int                  q2_combat_scan_who;
+
+/* The sum over every slot, for callers that only want a total. */
 extern q2_combat_scan_stats q2_combat_scan;
 
 void q2_actor_init(q2_actor *a);

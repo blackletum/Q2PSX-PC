@@ -511,6 +511,11 @@ s64 q2_combat_ray_dist_sq(const s32 origin[3], const s32 dir[3],
  * the right thing and guessing three times, which is what this cost.
  */
 q2_combat_scan_stats q2_combat_scan;
+q2_combat_scan_stats q2_combat_scan_by[Q2_COMBAT_SCAN_SLOTS];
+int                  q2_combat_scan_who = Q2_COMBAT_SCAN_OTHER;
+
+/* Both the total and the shooter's own slot, so neither has to be derived. */
+#define SCAN_BUMP(field)                                                          do {                                                                              q2_combat_scan.field++;                                                       if (q2_combat_scan_who >= 0 &&                                                    q2_combat_scan_who < Q2_COMBAT_SCAN_SLOTS)                                    q2_combat_scan_by[q2_combat_scan_who].field++;                        } while (0)
 
 /* Shared scan: the nearest actor whose sphere the ray crosses within the
  * fraction the world allows. Returns its index, or -1. */
@@ -528,33 +533,33 @@ static s32 nearest_hit(const s32 origin[3], const s32 dir[3],
         s64 along = 0, d2;
         s64 reach;
 
-        q2_combat_scan.tested++;
+        SCAN_BUMP(tested);
         if (!t || i == skip_mask_index) {
-            q2_combat_scan.skipped++;
+            SCAN_BUMP(skipped);
             continue;
         }
         if (t->health <= 0) {
-            q2_combat_scan.dead++;
+            SCAN_BUMP(dead);
             continue;
         }
 
         d2 = q2_combat_ray_dist_sq(origin, dir, t->origin, &along);
         if (along <= 0) {
-            q2_combat_scan.behind++;
+            SCAN_BUMP(behind);
             continue;
         }
         if (along > world_fraction) {
-            q2_combat_scan.beyond_world++;
+            SCAN_BUMP(beyond_world);
             continue;
         }
 
         reach = (s64)hit_radius + t->radius;
         if (d2 > reach * reach) {
-            q2_combat_scan.off_axis++;
+            SCAN_BUMP(off_axis);
             continue;
         }
 
-        q2_combat_scan.hit++;
+        SCAN_BUMP(hit);
 
         if (best < 0 || along < best_along) {
             best = (s32)i;
