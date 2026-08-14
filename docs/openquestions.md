@@ -2301,6 +2301,42 @@ not think, and it does not walk.
       established 3 used the first four moves, which are consecutive and short; nothing checked a move 35
       frames long. `q2psx-inspect mob <disc> <map> <zone> <n> <out.ppm> <ai-frame>` is what took those poses.
 
+## The multiplayer runtime had no caller anywhere in the game
+
+`multiplayer.[ch]` reconstructs the whole of QMULTI.C — the scoring, the frag and time limits, the VERSUS
+round rules, the spawn selector, the banner countdown, the attribution rule and the two game-state requests —
+and the test suite was the only thing that had ever run any of it. Nine of its entry points had no caller
+outside the module: `q2_mp_session_init`, `q2_mp_player_killed`, `q2_mp_frame`, `q2_mp_take_request`,
+`q2_mp_banner`, `q2_mp_may_respawn`, `q2_mp_attribute_kill`, `q2_mp_find_winner`, `q2_mp_hud_image`. The
+rules were right and nothing ever asked them anything.
+
+The client now runs a match. `--dm` boots an arena, `--dm-mode`, `--dm-players`, `--dm-frags` and
+`--dm-minutes` set it up, and what runs is the reconstruction rather than a re-statement of it:
+
+- **the spawn**: the local player starts at a `MultiSpawn`, picked by `q2_mp_select_spawn` — farthest from
+  everybody already placed, ties broken by an RNG. All five arenas tried resolve their points: MATRIX1 4,
+  MATRIX5 8, THEVAT 5, PODCITY 8, FRAGTOWE 4.
+- **the clock**: `q2_mp_frame` on the sim's own 1/300 s step. A one-minute match ends at 18010 dt — the
+  limit is `level_time > minutes * 18000` and 18000 units is sixty seconds — with the banner `TIME UP`,
+  then request 11, `load MPResults`, winner 8, `DRAWN MATCH`, scoreboard title `DM SCORES`, HUD set
+  `qk2_menu.lbm` for two players.
+- **the death**: a killed player goes to `q2_mp_attribute_kill` with the means of death and then to
+  `q2_mp_player_killed`, before the death screen opens.
+- **the cut modes**: asking for CTF prints that the mode is cut and the front end cannot select it, rather
+  than pretending it is a shipped feature.
+
+Taking the request also STOPS the session, which is not a detail: on the console the request changes the game
+state and the level hook stops running. The first version left it ticking and the runtime re-asked on every
+frame — sixty-odd identical requests for one match that ended once.
+
+- [ ] 52. **No HUD is drawn on any arena map.** Found by looking at a deathmatch instead of reasoning about
+      one. On BASE0 the overlay draws health, armour and ammo; on MATRIX5 it draws nothing, and it is the MAP
+      and not the session — the same map without `--dm` is equally blank. The gate is not the cause: at frame
+      60 on both maps `hud_ready 1, font 1, menu 0, mission 0, mcard 0`, so `q2_hud_build_ot` runs and emits
+      nothing visible. The font upload reports no failure either. The suspicion is VRAM: the HUD atlas is
+      uploaded into the map's own texture memory and an arena's pages may land on top of it, which would make
+      this a load-order fault rather than a HUD fault. Not chased yet.
+
 ---
 
 ## ⚠ Security note (carried forward, do not drop)

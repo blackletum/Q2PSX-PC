@@ -78,6 +78,7 @@
 #include "lighting.h"
 #include "rotator.h"
 #include "spacelights.h"
+#include "multiplayer.h"
 #include "userfuncs.h"
 #include "disc.h"
 #include "entity.h"
@@ -299,6 +300,19 @@ typedef struct client {
     u32               vw_events;
     s16               vw_last_event;
     int               cre_last_sound;
+    /* ------------------------------------------------------------------- */
+    /* The multiplayer session. QMULTI.C is a per-map LevelBin module and the
+     * engine only carries the hook, so this is what stands in for the module
+     * being installed: the rules ran nowhere before it. */
+    bool              mp_enabled;
+    q2_mp_session     mp;
+    u32               mp_spawn_count;
+    u32               mp_rng_state;
+    s32               mp_level_time;   /* 0x800AEBAC, in dt units             */
+    q2_mp_request     mp_last_request;
+    bool              mp_reported;
+
+    u32               mp_deaths;      /* kills fed to the session              */
     u32               cre_bodies;     /* deaths that found a death move        */
     u32               cre_drawn;      /* creatures with faces in the last view */
     u32               cre_faces;
@@ -793,6 +807,88 @@ static u32 client_move_ordinal(const q2_monster *m, const q2_mmove *mv)
 }
 
 /*
+ * The tie-break the spawn selector asks for. The original's is the engine's own
+ * RNG; any source does here, because it is only consulted when two spawn points
+ * are exactly equally far from everybody, and it must not be a constant or the
+ * same point wins every draw.
+ */
+static u32 client_mp_rng(void *user)
+{
+    client *c = (client *)user;
+
+    /* Numerical Recipes' LCG. The value is used modulo a small count. */
+    c->mp_rng_state = c->mp_rng_state * 1664525u + 1013904223u;
+    return c->mp_rng_state >> 16;
+}
+
+/*
+ * One frame of the multiplayer session — the per-frame hook QMULTI.C installs
+ * into the engine's level slot, which nothing in this port had ever called.
+ *
+ * The clock is the engine's at 0x800AEBAC and advances by the frame's dt, both
+ * in the sim's units, because that is what the time limit is compared against:
+ * `level_time > minutes * 18000`, and 18000 units is sixty seconds at 300 to
+ * the second.
+ */
+static void client_mp_tick(client *c, float dt)
+{
+    s32 ticks = (s32)((double)dt * 300.0 + 0.5);
+    q2_mp_request req;
+
+    if (!c->mp_enabled || c->mp_last_request != Q2_MP_REQ_NONE)
+        return;                     /* the match is over and asked for a screen */
+
+    if (ticks < 1)
+        ticks = 1;
+    c->mp_level_time += ticks;
+
+    req = q2_mp_frame(&c->mp, c->mp_level_time, ticks);
+
+    /* The frame that ends it, announced once. */
+    if (c->mp.end != Q2_MP_RUNNING && !c->mp_reported) {
+        c->mp_reported = true;
+        Q2_INFO("multiplayer: %s at %d dt (%d s) — banner '%s'",
+                c->mp.end == Q2_MP_END_TIME_UP     ? "time limit reached" :
+                c->mp.end == Q2_MP_END_FRAG_LIMIT  ? "frag limit reached" :
+                c->mp.end == Q2_MP_END_ROUND_OVER  ? "round over"         :
+                c->mp.end == Q2_MP_END_MATCH_OVER  ? "match over"         :
+                                                     "round drawn",
+                c->mp_level_time, c->mp_level_time / 300,
+                q2_mp_banner(&c->mp) ? q2_mp_banner(&c->mp) : "(none)");
+    }
+
+    if (req == Q2_MP_REQ_NONE)
+        return;
+
+    /*
+     * The banner has run out and the runtime wants a game state: 11 loads the
+     * scoreboard, 19 restarts the round. Both are the engine's own ids, and
+     * this port has neither screen, so the request is recorded and reported
+     * rather than acted on — which is the honest half of the pair.
+     *
+     * Taking it also stops the session: on the console the request CHANGES THE
+     * GAME STATE, so the level hook stops running. Leaving it ticking here made
+     * the runtime re-ask on every frame, which is what the first run of this
+     * code did — sixty-odd identical requests for one match that ended once.
+     */
+    c->mp_last_request = q2_mp_take_request(&c->mp);
+
+    {
+        int w = q2_mp_find_winner(&c->mp);
+        char buf[64];
+
+        Q2_INFO("multiplayer: request %d (%s); winner %d — %s",
+                (int)c->mp_last_request,
+                c->mp_last_request == Q2_MP_REQ_RESULTS ? "load MPResults"
+                                                        : "restart the round",
+                w, q2_mp_winner_text(&c->mp, w, NULL, buf, sizeof(buf)));
+        Q2_INFO("multiplayer: %s — %s, HUD set %s",
+                q2_mp_score_title(c->mp.mode), q2_mp_mode_name(c->mp.mode),
+                q2_mp_hud_image(true, c->mp.player_count));
+    }
+}
+
+/*
  * A script CALL reached a rotation primitive: ask that node's rotator to take
  * one step.
  *
@@ -851,7 +947,58 @@ static bool client_load_zone(client *c, const char *map, int index)
 
                 if (q2_start_pos_parse(&spawns, &common) == Q2_OK) {
                     u32 i;
-                    for (i = 0; i < spawns.count; i++) {
+
+                    /*
+                     * A deathmatch starts at a MultiSpawn, chosen the way the
+                     * original chooses one — the farthest from everybody who is
+                     * already standing somewhere, with ties broken by the RNG.
+                     * The eight names are fixed (`MultiSpawn0`..`MultiSpawn7`)
+                     * and only an arena carries any.
+                     */
+                    if (c->mp_enabled) {
+                        q2_mp_spawn ms[Q2_MP_MAX_SPAWNS];
+                        u32 n = 0;
+
+                        memset(ms, 0, sizeof(ms));
+                        for (i = 0; i < spawns.count && n < Q2_MP_MAX_SPAWNS; i++) {
+                            q2_start_pos sp;
+
+                            if (!q2_start_pos_get(&spawns, i, &sp))
+                                continue;
+                            if (sp.zone != index)
+                                continue;
+                            if (strncmp(sp.name, "MultiSpawn", 10) != 0)
+                                continue;
+
+                            ms[n].pos[0]  = sp.x;
+                            ms[n].pos[1]  = sp.y;
+                            ms[n].pos[2]  = sp.z;
+                            ms[n].angle   = sp.angle;
+                            ms[n].present = true;
+                            n++;
+                        }
+
+                        c->mp_spawn_count = n;
+                        if (n) {
+                            int pick = q2_mp_select_spawn(ms, NULL, 0,
+                                                          client_mp_rng, c);
+
+                            if (pick >= 0) {
+                                c->cam.pos[0] = ms[pick].pos[0];
+                                c->cam.pos[1] = ms[pick].pos[1];
+                                c->cam.pos[2] = ms[pick].pos[2];
+                                c->cam.yaw    = ms[pick].angle;
+                                placed = true;
+                                Q2_INFO("deathmatch: %u MultiSpawn points, "
+                                        "player 0 at %d", n, pick);
+                            }
+                        } else {
+                            Q2_WARN("deathmatch: %s zone %d has no MultiSpawn "
+                                    "points — this is not an arena", map, index);
+                        }
+                    }
+
+                    for (i = 0; !placed && i < spawns.count; i++) {
                         q2_start_pos sp;
                         if (!q2_start_pos_get(&spawns, i, &sp))
                             continue;
@@ -1629,6 +1776,9 @@ static void client_input_simulated(client *c, float dt)
     if (c->creatures_ready && (c->frame_index % 10) == 0)
         q2_trail_add(eye, (s16)c->sim.player.yaw);
 
+    /* The multiplayer session's own frame, on the same clock. */
+    client_mp_tick(c, dt);
+
     /* The rotating brushes, on the same 1/300 s clock as everything else. */
     if (c->rotators_ready) {
         s32 ticks = (s32)((double)dt * 300.0 + 0.5);
@@ -1652,7 +1802,31 @@ static void client_input_simulated(client *c, float dt)
      * every other page.
      */
     if (c->sim.combat.inv.health <= 0 && !c->menu.open && !c->mcard_open) {
+        /*
+         * In a match the death goes to the scoring first. The engine's hook at
+         * 0x800396AC hands the module a killer and a victim, taken from the
+         * entity's own bytes at +222 and +223; the port's single local player
+         * is victim 0, and a creature or the world killed them, which the
+         * attribution turns into the world's -1. The runtime's own first act is
+         * then to blame the victim for it.
+         */
+        if (c->mp_enabled && c->mp.end == Q2_MP_RUNNING) {
+            int killer = q2_mp_attribute_kill(-1, c->sim.combat.self.last_mod);
+
+            q2_mp_player_killed(&c->mp, killer, 0);
+            c->mp_deaths++;
+            Q2_INFO("multiplayer: player 0 killed by %d, frags now %d %d %d %d",
+                    killer, c->mp.frags[0], c->mp.frags[1], c->mp.frags[2],
+                    c->mp.frags[3]);
+        }
+
         Q2_INFO("player died");
+
+        /* Every mode but VERSUS lets a dead player back in (0x8003DEB4). The
+         * pad and menu gates the engine also applies belong to the client. */
+        if (c->mp_enabled && q2_mp_may_respawn(&c->mp))
+            Q2_INFO("multiplayer: respawn is allowed in this mode");
+
         q2_menu_open(&c->menu);
         q2_menu_goto(&c->menu, Q2_PAGE_DEATH);
     }
@@ -3229,6 +3403,13 @@ int main(int argc, char **argv)
     u64 last;
 
     memset(&c, 0, sizeof(c));
+    /* Deathmatch settings, applied after the map loads. -1 keeps the
+     * shipped default the session initialiser installs. */
+    q2_mp_mode mp_mode    = Q2_MP_DEATHMATCH;
+    int        mp_players = 2;
+    s16        mp_frags   = -2;
+    s16        mp_minutes = -2;
+
 
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--disc") && i + 1 < argc)       disc_path = argv[++i];
@@ -3245,6 +3426,18 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--shot-every") && i + 1 < argc)
             c.shot_every = strtol(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "--saves") && i + 1 < argc) q2_save_set_dir(argv[++i]);
+        else if (!strcmp(argv[i], "--dm")) {
+            c.mp_enabled = true;
+            if (!map_given) { map = "MATRIX1"; map_given = true; }
+        }
+        else if (!strcmp(argv[i], "--dm-mode") && i + 1 < argc)
+            mp_mode = (q2_mp_mode)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--dm-players") && i + 1 < argc)
+            mp_players = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--dm-frags") && i + 1 < argc)
+            mp_frags = (s16)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--dm-minutes") && i + 1 < argc)
+            mp_minutes = (s16)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--aspect") && i + 1 < argc) {
             const char *a = argv[++i];
             if      (!strcmp(a, "4:3"))     c.fit = Q2_SCREEN_FIT_FULL_4_3;
@@ -3524,6 +3717,31 @@ no_window:
         c.in_front_end = true;
         map = "QFRONT";
         zone_index = 0;
+    }
+
+    /*
+     * Start the match BEFORE the map loads, because placing the local player is
+     * part of loading it and the spawn selector needs the session to exist.
+     *
+     * This is what the port never did: multiplayer.[ch] reconstructs the whole
+     * of QMULTI.C — the scoring, the frag and time limits, the VERSUS round
+     * rules, the banner countdown and the two game-state requests — and not one
+     * of those entry points had a caller anywhere in the game. The rules ran in
+     * the test suite and nowhere else.
+     */
+    if (c.mp_enabled) {
+        q2_mp_session_init(&c.mp, mp_mode, mp_players);
+        if (mp_frags != -2)
+            c.mp.frag_limit = mp_frags;
+        if (mp_minutes != -2)
+            c.mp.time_limit = mp_minutes;
+        c.mp_rng_state = 0x13572468u;
+
+        Q2_INFO("multiplayer: %s, %d players, frag limit %d, time limit %d min"
+                "%s", q2_mp_mode_name(mp_mode), c.mp.player_count,
+                c.mp.frag_limit, c.mp.time_limit,
+                q2_mp_mode_selectable(mp_mode) ? ""
+                    : "  (this mode is CUT — the front end cannot select it)");
     }
 
     if (!client_load_zone(&c, map, zone_index)) {
