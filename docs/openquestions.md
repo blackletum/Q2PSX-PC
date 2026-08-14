@@ -3797,6 +3797,34 @@ nothing saying so.
       "this port only implements one way in". Dynamic lighting moves off the blocked list and onto the work
       list, with a fifteen-entry starting point.
 
+      **And the first of the fifteen is read.** `0x80048228` builds its arguments out of globals rather than
+      computing them:
+
+          80048204  lhu  a2, 2(v0)        ; v0 = 0x800AE958
+          80048208  lhu  v0, -5800(v1)
+          80048214  or   a2, v0, a2       ; a2 = lo | (hi << 16)
+          8004821C  lhu  a3, 2(v0)        ; v0 = 0x800AE95C
+          80048228  jal  0x80075C34
+          80048230  lhu  v0, -54(s3)      ; then test bit 0x10...
+          8004824C  lbu  v0, 1(a2)        ; ...and read RGB at 0x800AE954
+
+      So there is a **preset table**, and its bytes decode:
+
+          0x800AE954   FF 64 4B      RGB (255, 100, 75)   -- warm orange
+          0x800AE958   2C 01 20 03   two u16: 300 and 800  -- inner / outer radius
+          0x800AE95C   00 00 00 00
+          0x800AE960   20 03 40 06   two u16: 800 and 1600
+          0x800AE968   FF FF 00      RGB (255, 255, 0)    -- yellow
+          0x800AE96C   20 20 20      RGB ( 32,  32,  32)  -- dim grey
+
+      A colour triple and a packed `inner | outer << 16` radius pair, in a run. That is the piece every one
+      of the fifteen sites will need, so it is worth more than any single site: **the presets are data at
+      `0x800AE954`, not constants in code.** The second call, `0x800482A0`, is the same shape behind a
+      `& 0x10` flag test — one light unconditionally and a second when the bit is set.
+
+      What is NOT done: none of the fifteen is reconstructed. This locates their shared table and reads one
+      site's operands.
+
 ---
 
 ## ⚠ Security note (carried forward, do not drop)
