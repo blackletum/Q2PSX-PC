@@ -129,10 +129,21 @@ typedef enum q2_proj_kind {
  *     0x800AE958   2C 01 20 03   two u16 packed lo | hi<<16: 300 and 800
  *
  * so the colour and both radii are DATA, transcribed here rather than chosen.
- * `0x800482A0` adds a second light behind a `& 0x10` test on the projectile's
- * flags halfword; that one is not reconstructed yet because the flag's meaning
- * is not read. See openquestions #57.
+ * `0x800482A0` adds a SECOND light behind a `& 0x10` test on a halfword at
+ * `s3-54`. Its operands are read and are not guesses:
+ *
+ *     a1 = 0x800AE954 packed r | g<<8 | b<<16 | a<<24   -- the SAME colour
+ *     a2 = 0x800AE960 packed lo | hi<<16                -- 800 and 1600
+ *     a3 = 0x800AE95C                                   -- 0, as the first call
+ *
+ * so it is a wider, outer halo of the same warm orange: inner 800, outer 1600
+ * against the first light's 300 and 800. What is NOT read is the gate — which
+ * projectiles carry bit 0x10 — so it is defined here and deliberately not
+ * raised anywhere. Adding it for every projectile would double the light on
+ * bolts the original leaves alone. See openquestions #57.
  */
+#define Q2_PROJ_LIGHT2_INNER   800
+#define Q2_PROJ_LIGHT2_OUTER  1600
 #define Q2_PROJ_LIGHT_R       255
 #define Q2_PROJ_LIGHT_G       100
 #define Q2_PROJ_LIGHT_B        75

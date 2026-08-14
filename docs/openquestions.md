@@ -3840,8 +3840,18 @@ nothing saying so.
       worth more than the projectile light itself, and it was only visible because the counter reported
       added and dropped separately rather than "lights: 16".
 
-      Still not done: fourteen of the fifteen sites, and the second projectile light at `0x800482A0` behind
-      the `& 0x10` flag test.
+      **The second projectile light is read too**, and it is a wider halo rather than a different effect:
+
+          800482A0  a1 = 0x800AE954 packed r | g<<8 | b<<16 | a<<24   -- the SAME colour
+                    a2 = 0x800AE960 packed lo | hi<<16                -- 800 and 1600
+                    a3 = 0x800AE95C                                   -- 0, as the first call
+
+      So bit 0x10 buys a second light of the same warm orange at inner 800 / outer 1600, around the first
+      light's 300 / 800. Both constants are defined in `projectile.h` and **neither is raised**, because the
+      gate — which projectiles carry bit 0x10 in the halfword at `s3-54` — is not read. Raising it for every
+      projectile would double the light on bolts the original leaves alone, so it waits for the flag.
+
+      Still not done: fourteen of the fifteen sites, and that gate.
 
 ---
 
