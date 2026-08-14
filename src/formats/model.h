@@ -166,8 +166,10 @@
  *   block C  is the ANIMATION BANK; its per-clip u16 at +0 is a duration and
  *            the multiply by 10 is what makes the runtime clock tick ten times
  *            per animation frame. See the animation section below.
- *   block D  is a run of 20-byte records ending at a zero word, with three u16
- *            at +12, +14 and +16 each multiplied by 5.
+ *   block D  is a run of 20-byte records ending at a zero word. The claim that
+ *            its u16 at +12, +14 and +16 are multiplied by 5 at load is
+ *            UNSUPPORTED -- no such site exists; the x5 shape in this EXE is a
+ *            20-byte record stride. See the move table below and #51f.
  *
  * The ten in block C is TIME, not distance. An earlier note here guessed it was
  * spatial on the grounds that ten is also the world's lattice step; the pose
@@ -485,10 +487,15 @@ u32 q2_model_anim_count(const q2_model *m);
  * `rest` is `end` on 77 and `start` on 15. `one` is 1 on 90 and 0 on exactly
  * two — both a mover's move named "Move" — so it is a flag, not a constant.
  *
- * The even spans are what verifies the load-time multiply by 5. A move's frame
- * count is `value * 5 / 10`, i.e. `span / 2`, which is only ever integral
- * because every span is even — 92 for 92. Death1's 214 is 108 frames, Pain1's
- * 28 is 15, "Fire 1 Ready"'s 4 is 3. Those are Quake II animation lengths.
+ * The units of `start`/`end` are NOT established. An earlier pass here read the
+ * even spans as verifying a load-time multiply by 5 — `value * 5 / 10` frames,
+ * i.e. `span / 2` — but that multiply does not survive checking. Classifying
+ * every `sll rX,rY,2; addu rX,rX,rY` in the EXE by what follows it gives 44
+ * `x20`, 13 `x80`, 11 `x40` and 34 `x10`: the `x5` shape is overwhelmingly
+ * RECORD-STRIDE arithmetic, and 20 is this table's own stride. The one site
+ * that writes a move record's `+12` and `+14` — `0x80066954` — computes
+ * `s0 + s3 + index*20` and stores an UNSCALED value. So the even spans remain
+ * a real and unexplained regularity, not evidence for a scale factor.
  *
  * WHAT THIS TABLE IS NOT: the table `0x8007E9DC` walks. That one is reached
  * through the entity's linked object (`entity+0x2EC`, then its `+0x28`) and is

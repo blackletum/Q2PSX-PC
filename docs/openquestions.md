@@ -2425,10 +2425,10 @@ not think, and it does not walk.
       `start` on 15, `one` = 1 on 90** and 0 on exactly two — both a mover's move named "Move", so `one` is
       a flag rather than the constant it looked like at n=31.
 
-      **The even spans verify the load-time multiply by 5** that 51d had to leave standing. A move's frame
-      count is `value * 5 / 10` = `span / 2`, integral only because every span is even — 92 for 92. Death1's
-      214 is 108 frames, Pain1's 28 is 15, "Fire 1 Ready"'s 4 is 3. Those are Quake II animation lengths, and
-      the multiply is now supported by data instead of by a comment.
+      ~~**The even spans verify the load-time multiply by 5.**~~ **Withdrawn the same session — see 51f.**
+      The reasoning was that a move's frame count is `value * 5 / 10` = `span / 2`, integral only because
+      every span is even. The arithmetic is fine; the multiply it rests on is not there. The even spans stay
+      as a measured and still-unexplained regularity.
 
       **And block D is NOT the table `0x8007E9DC` walks.** That walk terminates on a *signed* halfword at +0;
       block D's +0 is a name. So the runtime table is built from block D at load — different layout, scaled
@@ -2438,6 +2438,36 @@ not think, and it does not walk.
 
       **Open as 51f: find the loader that builds the runtime move table from block D.** It should sit near
       the 140 strict `x5` sites, which are now the obvious place to look.
+
+- [x] 51f. **There is no load-time multiply by 5. The `x5` idiom is a 20-BYTE RECORD STRIDE.**
+      Following 51e's own pointer to the `x5` sites finds the one that writes a move record's `+12` and
+      `+14` — and it is not scaling anything:
+
+          80066954  sll  v0, v1, 2     ; index * 4
+          80066958  addu v0, v0, v1    ; index * 5
+          8006695C  sll  v0, v0, 2     ; index * 20   <-- a SECOND shift
+          80066960  addu v0, v0, s0
+          80066968  addu v0, v0, s3    ; &record[index]
+          8006696C  sh   v1, 12(v0)    ; start = an unscaled value from a0+158
+          80066990  sh   t2, 14(v0)    ; end   = 45, likewise unscaled
+
+      `sll 2; addu; sll 2` is `x5` then `x4`, which is **`x20` — this table's own record size**. Classifying
+      every strict `sll rX,rY,2; addu rX,rX,rY` in the EXE by the shift that follows it settles the shape of
+      the whole population:
+
+          x20 = 44     x80 = 13     x40 = 11     x10 = 34     bare x5 = 62
+
+      So the `x5` shape is dominantly address arithmetic for 20-, 40- and 80-byte records, and `x10` is the
+      tenths-of-a-frame divide from 51d. **No site scales `+12/+14/+16` by 5.** The note at the head of
+      `model.h` claimed one; it is now marked as unsupported there, and 51e's inference from the even spans
+      is withdrawn in place.
+
+      What survives untouched, because each was read off bytes or instructions rather than inferred:
+      block D's layout, the tiling with gap 2, the 92-move census, the tenths unit, and the fact that block D
+      is not the table `0x8007E9DC` walks. What is now open is narrower and better posed than 51f was:
+      **51g — what units are block D's `start`/`end` in, given no scale factor exists, and why is every span
+      even?** `0x80066954` is the place to resume: it builds records, and whatever feeds `a0+158` is the
+      answer.
 
 - [ ] ~~51. **The AI frame → model clip mapping drifts across a long move.**~~ `Q2_CRE_TICKS_PER_FRAME` is 3 and
       it lands the START of the Soldier's `Death1` correctly: posed at AI frames 310, 314, 318 and 322 the
