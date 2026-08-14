@@ -1592,7 +1592,21 @@ item records at run time instead of transcribing a table, so there is nothing to
       code. Two more engine slots come with it: `+0x200` installs an item record array (the title's call is
       `(module+0xEC3C, 32)`, against the executable's own `0x8001A474(record, 16)`) and `+0x290` is the
       per-frame page hook.
-      *What is left for the scene:* decoding `module+0x1163C` into that object table.
+      **`module+0x1163C` is four 8-byte records**, terminated by a zero word:
+
+          +0x1163C  data 0x80110D94   a -1   b 0
+          +0x11644  data 0x80110F94   a -1   b 3
+          +0x1164C  data 0x80111194   a -2   b 1
+          +0x11654  data 0x80111394   a -2   b 2
+
+      The `data` blocks are 0x200 bytes apart, so each object owns 512 bytes. `b` is 0, 3, 1, 2 — an index
+      the builder passes on as its own argument — and `a` is -1 for the first pair and -2 for the second,
+      which is what makes them two pairs rather than four singles.
+      The builder at `module+0x22C4` walks the list, and for each entry hands `engine+0x184` a four-halfword
+      record built on the stack as `{ 0, 255 - i, 256, 1 }` together with the object's data pointer. The
+      descending `255 - i` is a draw priority and 256 is a unit scale in the port's usual 1.8.8.
+      *What is left for the scene:* the 512-byte object blocks themselves, which is where a position can
+      actually live, and `engine+0x184`, which is what consumes them.
 
 - [x] 45. **Word wrap in practice — SOLVED, and it was the wrong screen.** The wrap the capture shows is the
       **briefing's**, not the MISSION screen's: `#06A196` at `0x800AE740` sets margins 106 and 406, which is
