@@ -681,11 +681,17 @@ u32 q2_creature_sound_names(const q2_creature *c, const u8 *image, size_t size,
         }
 
     /*
-     * A WARNING before the fallback: not every module HAS a sound-name table.
-     * The Berserk fills its sound slots from an import call's return value,
-     * with the argument packed from bytes near module+0x1A0 (0x801008A4 ..
-     * 0x801008CC) — there is no 12-byte name run to find, so whatever this
-     * returns for it is a false positive. See openquestions on the Berserk.
+     * A WARNING before the fallback: the name run is NOT what fills a module's
+     * sound slots. Both modules checked — the Berserk at 0x801008A4..0x801008CC
+     * and the Tank Commander at 0x80100638..0x80100648 — call an import with
+     * arguments packed from bytes (near module+0x1A0 and +0x1F4 respectively)
+     * and store its return value in the slot. No 12-byte name is read.
+     *
+     * So what this function finds is a run of name-like strings that may or may
+     * not BE the sound names. The Tank Commander's are: five of its eight match
+     * VAG entries on the disc by name. The Berserk's are not — three of its
+     * thirteen are its own move names. Only an external check tells them apart,
+     * so treat a result here as a candidate, not as a table.
      *
      * If the module's own name is not in its image, the anchor is gone but the
      * table need not be. Two of the seven -- Tankcomm and Berserk -- returned

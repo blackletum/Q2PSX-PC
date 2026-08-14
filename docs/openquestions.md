@@ -4771,8 +4771,24 @@ nothing saying so.
       arbitrary — **the table is not there**. That is why four attempts to pin its start all failed, and it
       means the Berserk's thirteen "names" are a false positive rather than a mis-anchored table.
 
-      Whether the Tank Commander is the same shape is unchecked. Its eight names matched #60's VAG entries
-      exactly, which is evidence its table IS real, so the two creatures may simply differ.
+      **The Tank Commander is the same shape**, checked rather than assumed:
+
+          80100638  addiu a2, a0, 500     ; module+0x1F4
+          8010063C  lbu   v1, 1(a2)       ; packed bytes again
+          8010062C  jalr  v0              ; an import
+          80100648  sw    v0, 8464(s6)    ; the handle -> module+0x2110
+
+      So neither creature fills its sound slots from a name table; both call an import with packed byte
+      arguments. **The name run is not the mechanism for either of them.**
+
+      What separates the two is corroboration, not structure. The Tank Commander's eight names were checked
+      against the disc independently — five of them are VAG entries with those exact names (#60) — so its
+      run is real data even though it is not what fills the slots. The Berserk's thirteen have no such
+      check, and three of them are its own move names, so its run is a false positive.
+
+      That distinction is worth keeping precisely because it is not visible in the code: two creatures with
+      identical slot-filling, one whose name run happens to be its sound names and one whose does not. The
+      only thing that told them apart was going to the disc and looking for VAGs.
 
       The state that ships is the plain fallback: **the Tank Commander correct and verified
       against #60's VAG names, the Berserk found but flagged.** A wrong table is worse than a missing one
