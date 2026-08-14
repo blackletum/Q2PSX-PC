@@ -87,6 +87,8 @@ int cmd_zonescript(const disc *d, const char *only_map)
     u32 zone_dirs = 0, zone_records = 0, common_records = 0;
     u32 past_common = 0, past_zone = 0;
     u32 zone_same = 0, zone_diff = 0;
+    u32 rot_prim_calls = 0, rot_too_short = 0, rot_no_object = 0,
+        rot_usable = 0;
     u32 live_built = 0, live_calls = 0, live_steps = 0, live_moved = 0,
         live_turned = 0;
     bool verbose = (only_map != NULL);
@@ -226,6 +228,75 @@ int cmd_zonescript(const disc *d, const char *only_map)
             q2_rotator_set rs;
             q2_event_rt    rt;
 
+            /*
+             * Coverage, stated rather than left to be inferred: how many CALL
+             * items in this map's script name a rotation primitive, against how
+             * many rotators get built from them. A SIMROT names up to four
+             * objects and builds one rotator each, so `built` is normally the
+             * larger; what matters is that no rotation call is skipped.
+             */
+            {
+                q2_event_record rec;
+
+                if (q2_userfuncs_parse(&uf, &cf) == Q2_OK &&
+                    q2_events_first_record(&cev, &rec)) {
+                    do {
+                        u32 it;
+
+                        for (it = 0; it < rec.n_items; it++) {
+                            q2_event_item item;
+                            q2_uf_call call;
+
+                            if (!q2_events_get_item(&cev, &rec, it, &item))
+                                break;
+                            if (!item.payload ||
+                                (item.opcode & Q2_EVOP_MASK) != Q2_EVOP_CALL)
+                                continue;
+                            if (q2_uf_decode_call(&call, &uf, &item) != Q2_OK)
+                                continue;
+
+                            {
+                                const u8 *pp = item.payload - 2;
+                                u32 need = 0;
+                                s16 first_obj = -1;
+
+                                switch (call.prim) {
+                                case Q2_UF_SIMROT:
+                                case Q2_UF_SIMROT2:
+                                    need = 24;
+                                    if (item.len >= need)
+                                        first_obj = q2_rd_s16(pp + 12);
+                                    break;
+                                case Q2_UF_ROTHATCH:
+                                    need = 20;
+                                    if (item.len >= need)
+                                        first_obj = q2_rd_s16(pp + 18);
+                                    break;
+                                case Q2_UF_ROTBUTTON:
+                                    need = 12;
+                                    if (item.len >= need)
+                                        first_obj = q2_rd_s16(pp + 10);
+                                    break;
+                                default:
+                                    break;
+                                }
+
+                                if (!need)
+                                    continue;
+
+                                rot_prim_calls++;
+                                if (item.len < need)
+                                    rot_too_short++;
+                                else if (first_obj < 0)
+                                    rot_no_object++;
+                                else
+                                    rot_usable++;
+                            }
+                        }
+                    } while (q2_events_next_record(&cev, &rec, &rec));
+                }
+            }
+
             memset(&rs, 0, sizeof(rs));
             if (q2_userfuncs_parse(&uf, &cf) == Q2_OK &&
                 q2_rotators_build(&rs, &cev, &uf) == Q2_OK &&
@@ -311,7 +382,15 @@ int cmd_zonescript(const disc *d, const char *only_map)
 
     printf("\n  COMMON's script, fired by every trigger volume — what the\n"
            "  console runs, since the zone loader never looks up \"Events\":\n");
-    printf("    rotators built  : %u\n", live_built);
+    printf("    rotation CALLs  : %u  in COMMON's scripts, disc-wide\n",
+           rot_prim_calls);
+    printf("      too short     : %u  (the item cannot hold the operands)\n",
+           rot_too_short);
+    printf("      no object     : %u  (first object slot is -1)\n",
+           rot_no_object);
+    printf("      usable        : %u\n", rot_usable);
+    printf("    rotators built  : %u  (one per object slot each call names)\n",
+           live_built);
     printf("    CALL items run  : %u\n", live_calls);
     printf("    rotation steps  : %u\n", live_steps);
     printf("    tick-moves      : %u\n", live_moved);

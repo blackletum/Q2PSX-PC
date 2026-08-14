@@ -2959,6 +2959,26 @@ non-combatant, correctly modelled by the generic handlers alone.
 
 WASTE4 reports `24 fire calls: 24 sent` and COMMAND holds at `22 of 22`. All 26 tests pass.
 
+## Rotator coverage is complete, and the number that looked like a gap is not one
+
+"26 rotators" has been quoted back at this project as though it were a fraction of something larger. It is
+not, and `zonescript` now says so in the output rather than leaving it to be inferred:
+
+    rotation CALLs  : 95  in COMMON's scripts, disc-wide
+      too short     : 0   (the item cannot hold the operands)
+      no object     : 69  (first object slot is -1)
+      usable        : 26
+    rotators built  : 26  (one per object slot each call names)
+
+Ninety-five CALL items across the disc name a rotation primitive. **Sixty-nine of them have -1 in their first
+object slot**, and the original's constructor stops at the first negative one — `0x80028628`, recorded in
+`rotator.h` since the builder was written. Those calls install nothing on the console either. Not one item is
+too short to hold its operands.
+
+So the ratio that matters is **26 of 26 usable calls build a rotator**, and the port skips nothing the
+hardware does not. A disc-wide count of what a system *could* act on is only a denominator if the data
+underneath it is live; here two thirds of it is not.
+
 ---
 
 ## ⚠ Security note (carried forward, do not drop)
