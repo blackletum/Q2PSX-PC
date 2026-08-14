@@ -4783,10 +4783,11 @@ static int cmd_events(disc *d)
     printf("  rotation steps    : %u  requested by those calls\n", rot_steps);
     printf("  rotator tick-moves: %u\n", rot_moved);
     printf("  rotators turned   : %u  after 400 ticks\n", rot_turned);
-    printf("\n  NOTE: a zone's Events chunk is never loaded by the engine —\n"
-           "  the zone loader does not look the name up. The five numbers above\n"
-           "  exercise the format; `zonescript` measures COMMON's script, which\n"
-           "  is the one the trigger volumes fire.\n");
+    printf("\n  NOTE: a zone's Events chunk IS loaded. The zone loader looks\n"
+           "  \"Events\" up at 0x8007C14C and stores it at gp+376, and a rotation\n"
+           "  CALL reads its object slots from THERE while stamping -1 into\n"
+           "  COMMON's copy. The note that used to print here said the opposite\n"
+           "  and cost this port most of its rotating geometry; see #56.\n");
     printf("  triggers w/ event : %u, of which %u name a record in COMMON's"
            " own script\n", trig_with_event, trig_in_common);
 

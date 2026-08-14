@@ -133,6 +133,7 @@ int cmd_zonescript(const disc *d, const char *only_map)
         rot_zone_slots = 0, rot_zone_nonneg = 0;
     u32 live_rot_fired = 0, live_rot_barren = 0;
     u32 rot_any_zone = 0, rot_no_zone = 0;
+    u32 light_timed = 0, light_flk = 0;
     u32 live_built = 0, live_calls = 0, live_steps = 0, live_moved = 0,
         live_turned = 0;
     bool verbose = (only_map != NULL);
@@ -303,6 +304,11 @@ int cmd_zonescript(const disc *d, const char *only_map)
                                 const u8 *pp = item.payload - 2;
                                 u32 need = 0;
                                 s16 first_obj = -1;
+
+                                if (call.prim == Q2_UF_TIMEDLIGHT)
+                                    light_timed++;
+                                else if (call.prim == Q2_UF_FLKLIGHT)
+                                    light_flk++;
 
                                 switch (call.prim) {
                                 case Q2_UF_SIMROT:
@@ -620,6 +626,8 @@ int cmd_zonescript(const disc *d, const char *only_map)
     printf("      zone slots examined %u, non-negative %u (%.1f%%)\n",
            rot_zone_slots, rot_zone_nonneg,
            rot_zone_slots ? 100.0 * rot_zone_nonneg / rot_zone_slots : 0.0);
+    printf("    script LIGHT calls in COMMON: %u TIMEDLIGHT, %u FLKLIGHT\n",
+           light_timed, light_flk);
     printf("    rotation CALLs the script RUNS : %u, of which turn nothing : %u\n",
            live_rot_fired, live_rot_barren);
     printf("    distinct rotation CALL sites the script reaches : %u\n",

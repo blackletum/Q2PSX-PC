@@ -4041,6 +4041,24 @@ nothing saying so.
       24 bytes / 4 operands. **What the port lacks is a handler**, which is exactly the state `SIMROT` was in
       before `q2_rotators_build` existed — a decoded command with no runtime behind it.
 
+      **TIMEDLIGHT is implemented.** `client_event_call` now raises a light event when the script runs one:
+      origin from +4 as three s32, `radius` from +18 **tripled** (the engine's own multiply, recorded in the
+      operand table, not a choice), and the packed colour at +24 read low-byte-first as r, g, b.
+
+      **FLKLIGHT is deliberately not handled.** Its on/off times are randomised as `((rand()*500)>>15)+400`,
+      so it needs the engine's RNG stream to be *right* rather than merely to look plausible.
+
+      How many exist, counted rather than grepped: **18 TIMEDLIGHT calls and 1 FLKLIGHT across COMMON's
+      scripts, disc-wide.** A passive capture triggers none of them — they are script records fired by
+      trigger volumes, exactly like the rotation calls — so the handler shows 0 in a fly-through and that is
+      the correct number, not a failure.
+
+      *A repeat of a mistake worth naming:* the first attempt to count these was
+      `q2psx-inspect events <map> | grep -i timedlight`, which returned zero for every map. That command
+      prints aggregate statistics and no primitive names, so the grep could not have found anything — the
+      same invalid search that made the Tank Commander's sounds look absent (#60). The counter above is in
+      `zonescript` now so the question has a real answer next time.
+
       So the shape of the remaining lighting work is now known: **not ten unrelated hunts, but the script
       light primitives, built the way the rotators were.** `0x80031094` being materialised at `0x8007DBBC`
       — inside the module loader — points the same way, since that is where the 71-slot import table is

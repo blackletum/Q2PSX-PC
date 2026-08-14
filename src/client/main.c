@@ -309,6 +309,7 @@ typedef struct client {
     u32               cre_sounds;
     u32               cre_sound_missing;
     u32               ent_light_added;
+    u32               script_lights;
     u32               ent_light_dropped;
     u32               ent_bursts;
     u32               burst_no_fx, burst_no_table, burst_no_model;
@@ -1210,6 +1211,44 @@ static void client_event_call(void *user, const q2_event_item *item,
 
     c->rot_steps += q2_rotators_call(&c->rotators, &c->sim[0].userfuncs,
                                      item, call_index);
+
+    /*
+     * TIMEDLIGHT — a script-placed dynamic light, and the last piece of the
+     * fifteen `0x80075C34` call sites that this port could reach without
+     * tracing a runtime value.
+     *
+     * The operand table (userfuncs.c) has carried its layout for a while with
+     * nothing behind it: origin at +4 as three s32, `radius` at +18 "tripled
+     * before the call", and a packed colour at +24. The triple is the engine's,
+     * not a guess. The colour's own consumer is 0x80075D14; the low three bytes
+     * are taken as r, g, b here, which is what every other packed colour on this
+     * path does.
+     *
+     * FLKLIGHT is deliberately NOT handled: its on/off times are randomised as
+     * ((rand()*500)>>15)+400, so it needs the engine's RNG stream to look right
+     * rather than merely to appear.
+     */
+    if (q2_userfuncs_prim(&c->sim[0].userfuncs, call_index) == Q2_UF_TIMEDLIGHT
+        && item->len >= 28 && item->payload) {
+        const u8 *p = item->payload - 2;
+        s32 at[3];
+        u8  rgb[3];
+        u32 packed;
+        s32 radius;
+
+        at[0]  = (s32)q2_rd_u32(p + 4);
+        at[1]  = (s32)q2_rd_u32(p + 8);
+        at[2]  = (s32)q2_rd_u32(p + 12);
+        radius = (s32)q2_rd_u16(p + 18) * 3;
+        packed = q2_rd_u32(p + 24);
+        rgb[0] = (u8)(packed & 0xFF);
+        rgb[1] = (u8)((packed >> 8) & 0xFF);
+        rgb[2] = (u8)((packed >> 16) & 0xFF);
+
+        if (radius > 0)
+            q2_ent_light_at(&c->sim[0].ent_world.events, at, rgb, radius);
+        c->script_lights++;
+    }
 }
 
 
@@ -3477,8 +3516,10 @@ static void client_write_shot(client *c, bool numbered)
                 c->sim[0].combat.projectiles.live, c->cre_bodies, c->rot_steps,
                 c->rot_moved, client_rot_turned(c),
                 c->sim[0].event_rt.call_count);
-        Q2_INFO("  entity ev %u lights added, %u dropped, %u bursts drawn",
-                c->ent_light_added, c->ent_light_dropped, c->ent_bursts);
+        Q2_INFO("  entity ev %u lights added, %u dropped, %u bursts drawn, "
+                "%u script lights",
+                c->ent_light_added, c->ent_light_dropped, c->ent_bursts,
+                c->script_lights);
         Q2_INFO("  burst why %u no fx, %u no table, %u no model, %u no bank, "
                 "%u bad model, %u no verts",
                 c->burst_no_fx, c->burst_no_table, c->burst_no_model,
