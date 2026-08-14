@@ -5042,9 +5042,30 @@ nothing saying so.
       Five creatures use every frame their model carries; two do not. Spare animation on a shipped disc is
       ordinary, and #51h's five "exceptions" were the same fact seen from the per-move side.
 
-      What remains genuinely open is narrower than it has been all session: **which clip those two Arachner
-      moves DO play**, given the two spare ones are the wrong length for them. Not why they break a rule —
-      they do not break it — but what the engine hands them.
+      ~~What remains open is which clip those two Arachner moves DO play.~~ **The question is malformed, and
+      `model.h:436` said so before this session began:**
+
+          "So a model's clips are ONE CONTINUOUS TIMELINE and the animation position is an offset into it;
+           a clip boundary is wherever the subtractions happen to fall. That matters to anything driving a
+           model from a creature, because it means THERE IS NO CLIP INDEX TO FIND: a move's frames map onto
+           this timeline and the walk lands in the right clip on its own."
+
+      The engine never selects a clip. `0x8007E9DC` computes a position from the frame and `0x8006B924`
+      walks the chain subtracting durations until it lands. A move is under no obligation to begin or end on
+      a clip boundary, and one that spans two is not an error.
+
+      So the whole frame collapses:
+
+        * The 96/101 statistic is not a lookup rule succeeding. It says most moves **happen** to align to
+          clip boundaries, which is a fact about how the animations were authored.
+        * The name-versus-length conflict dissolves — neither is a lookup, because there is no lookup.
+        * The Arachner's two moves land mid-clip or across a boundary. That is ordinary.
+        * `q2_model_anim_by_length()` is a port-side substitute for a mechanism that selects nothing, which
+          is what #51c already recorded: *the port's constant is not wrong; the port is missing a step.*
+
+      Nine hypotheses were spent on a residue that a paragraph in `model.h` had already declared a
+      non-question. The lesson is the one this session keeps paying for: **read what the repo already knows
+      before deciding what is unknown.**
 
       ~~So both readings are in trouble, and that was the honest state.~~ The length rule has a real statistic
       (96/101 against a 33% baseline) and assigns names that disagree; name-matching has the disc's own
