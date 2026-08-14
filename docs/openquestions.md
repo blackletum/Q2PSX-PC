@@ -2670,9 +2670,28 @@ So the attack move is installed three times and cut short before its sixth frame
       a hold in the middle of an attack.
 
       What remains: the attack move installs three times in a 500-frame capture and never advances past its
-      sixth frame, while the run move installs five times in the same capture. Something re-installs a move
-      within five AI ticks of an attack starting. The verb is not it, so the next place to look is what calls
-      `m->run` — the AI's own state transitions — rather than what the frames say.
+      sixth frame. The counters now cover every callback that can install a move, and the shape is:
+
+          attack set 3, melee 0, run 5, pain 0, die 0, stand 14
+
+      **Pain and die are ruled out** — the obvious guess, that the player shooting the creature in a `--watch`
+      capture keeps interrupting it, is wrong: neither fires once. **Stand is installed fourteen times**, more
+      than run and attack together, so the creature is oscillating back to standing rather than being
+      interrupted by damage.
+
+      Two more things checked and correct on the way past, so neither is looked at again: the medic branch of
+      the dead-enemy test (`enemy->health > 0` really does mean "stop caring" for a medic, and it is guarded
+      by `Q2_AI_MEDIC` exactly as id guards it), and the sight client the AI treats as the player, which is
+      set up with `in_use`, both halves of the INUSE flag, `client`, and health 100 — so creatures are not
+      dropping their enemy because the proxy looks dead.
+
+      Also measured: of 101 `checkattack` calls in that capture, 97 reach the decision and only 3 say yes.
+      That is consistent with `M_CheckAttack`'s own odds rather than a fault — the chances are 0.4, 0.2, 0.1
+      and 0.02 by range band.
+
+      What is left is a per-tick trace of one creature: which move is installed, which frame it is on, and
+      what replaced it. The counters say what happens across a capture; they cannot say what happens between
+      two consecutive ticks, and that is now the only question.
 
   *As first written:*
 

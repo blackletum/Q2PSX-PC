@@ -2925,13 +2925,16 @@ static void client_write_shot(client *c, bool numbered)
                 q2_ai_stats.attack_called, q2_ai_stats.attack_missing);
 
         Q2_INFO("  moves     attack set %u / missing %u, melee %u / %u, "
-                "run %u / %u",
+                "run %u / %u, pain %u, die %u, stand %u",
                 q2_cre_actions.move_via_set[6],
                 q2_cre_actions.move_via_missing[6],
                 q2_cre_actions.move_via_set[7],
                 q2_cre_actions.move_via_missing[7],
                 q2_cre_actions.move_via_set[4],
-                q2_cre_actions.move_via_missing[4]);
+                q2_cre_actions.move_via_missing[4],
+                q2_cre_actions.move_via_set[11],
+                q2_cre_actions.move_via_set[12],
+                q2_cre_actions.move_via_set[0]);
 
         {
             char buf[160];
