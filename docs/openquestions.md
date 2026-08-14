@@ -1560,6 +1560,12 @@ every creature on every map looks straight through the player. In `PrimaryColl` 
 sight works — on BASE1, twenty creatures, sixteen of which acquire the player with no walls in the way and two
 across the real geometry.
 
+**Population is per MAP and a session is in one ZONE**, and a spawn record carries no zone field, so the test
+has to be geometric: a creature inside no cell of this zone's hull belongs to another one. It is not a small
+correction — **twelve of BASE1's twenty**, seventeen of BASE2's twenty-eight and seven of COMMAND's eight
+stand in another zone's rooms, and without the test they think, are drawn and are shootable through the void.
+Single-zone BASE0 loses none of its ten, which is what says the test is measuring the right thing.
+
 - [ ] 47. **Which CastList clip a creature's move plays.** A module's moves are numbered in one global frame
       timeline — the Soldier's run 0..474, and `q2psx-inspect creatures` now prints every move's range —
       while its model carries a list of clips, 31 of them for the Soldier. Those clips are **not** that

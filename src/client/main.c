@@ -398,6 +398,30 @@ static void client_load_creatures(client *c, const s32 eye[3])
         return;
     }
 
+    /*
+     * Confine them to THIS zone.
+     *
+     * Population is per MAP and a session is in one ZONE — the same thing that
+     * makes q2_item_spawn_zone necessary — but a spawn record carries no zone
+     * field, so the test has to be geometric: a creature that is inside no cell
+     * of this zone's hull belongs to another one. On BASE1 that is eleven of
+     * twenty, standing in ZONE1's rooms while ZONE0 is loaded, thinking and
+     * being drawn and shootable through the void.
+     */
+    if (c->sim.coll_primary_ready) {
+        u32 elsewhere = 0;
+        for (i = 0; i < c->creatures.set.count; i++) {
+            q2_monster *m = &c->creatures.set.monsters[i];
+            if (q2_coll_find_node(&c->sim.coll_primary, m->pos, -1, true) < 0) {
+                m->in_use = false;
+                elsewhere++;
+            }
+        }
+        if (elsewhere)
+            Q2_INFO("creatures: %u of %u belong to another zone",
+                    elsewhere, c->creatures.set.count);
+    }
+
     c->cre_home = (s32 *)calloc(c->creatures.set.count ?
                                 c->creatures.set.count * 3 : 1, sizeof(s32));
 
@@ -476,11 +500,19 @@ static void client_load_creatures(client *c, const s32 eye[3])
     q2_creature_world_wake(&c->creatures, eye);
     c->ai_accum = 0.0;
 
-    Q2_INFO("creatures: %u of %u spawn records live, %u with a model"
-            "%s%s",
-            c->creatures.stats.placed, c->creatures.stats.records, resolved,
-            c->creatures.stats.no_module ? ", " : "",
-            c->creatures.stats.no_module ? "some classes have no module" : "");
+    {
+        u32 live = 0;
+        for (i = 0; i < c->creatures.set.count; i++)
+            if (c->creatures.set.monsters[i].in_use)
+                live++;
+
+        Q2_INFO("creatures: %u live in this zone, %u of %u spawn records "
+                "placed, %u with a model%s",
+                live, c->creatures.stats.placed, c->creatures.stats.records,
+                resolved,
+                c->creatures.stats.no_module
+                    ? ", some classes have no module" : "");
+    }
 }
 
 /*
