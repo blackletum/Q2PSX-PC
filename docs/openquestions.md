@@ -1869,11 +1869,21 @@ not damage. It then calls engine slots `+0xC8` and `+0xD8` with vectors.
       same. So a guard that reads as ordinary defensive coding disables every attack
       in the game — which is why creatures chase and never fire, and why the melee
       hook never fired either.
-      *Still open:* the default's address. `0x80061D10` fills the eight shared
-      movement verbs at `0x800D561C` and defaults 256 class-method slots at
-      `0x800D519C`, so the spawn path is the right neighbourhood, but the store to
-      `+0x104` is not in it. The guard stays until the default is read, because
-      returning false is at least the behaviour the port is tested against.
+      **The default is `0x8005D8C8`, and it is installed at `0x80061B18`.** Found by
+      scanning the whole text segment for the instruction rather than guessing at
+      neighbourhoods: `sw rt, 0x104(rs)` appears **ten** times in the image, six of
+      them with `rs = sp` (stack frames), one in the module import loader where
+      `+0x104` is an import slot rather than an entity field, and exactly one with an
+      entity base in the monster spawn — `0x80061B18`, guarded by
+      `bne a0, zero` two instructions above, so a caller can suppress it.
+      `0x8005D8C8` is `M_CheckAttack`: it reads the enemy through `entity+0xBC`,
+      tests its health at `+0x108`, builds the two eye points from `+0x00..0x08` and
+      `+0x4C`, and traces between them with contents mask `0x0200001B` before the
+      range and random decision.
+      *What is left is transcribing it* — about 150 instructions to `0x8005DAD8` and
+      beyond. The guard in `q2_ai_checkattack` stays until then: returning false is
+      the behaviour the port is tested against, and a hand-written stand-in would put
+      invented aggression on every creature in the game.
 
       The earlier statement that follows was written before this and is kept because
       the reasoning it records is still what eliminated the call route:

@@ -891,10 +891,16 @@ bool q2_ai_checkattack(q2_monster *m, s32 dist)
      * EVERY attack in the game: measured on BASE1 over 1800 frames with four
      * creatures hunting, the fire and melee hooks were invoked zero times.
      *
-     * The default itself has not been located yet, so the guard stays until it
-     * is — returning false is at least the behaviour the port has been tested
-     * against. What has changed is that it is now a known hole with a number
-     * against it rather than a line nobody had reason to look at.
+     * The default is `0x8005D8C8`, installed at `0x80061B18` under a
+     * `bne a0, zero` so a caller can suppress it — found by scanning the text
+     * segment for `sw rt, 0x104(rs)`, which appears ten times and exactly once
+     * with an entity base. It is `M_CheckAttack`: the enemy through
+     * `entity+0xBC`, its health at `+0x108`, the two eye points, and a trace
+     * between them with contents mask `0x0200001B`.
+     *
+     * The guard stays until that is transcribed — returning false is at least
+     * the behaviour the port has been tested against, and a hand-written
+     * stand-in would put invented aggression on every creature in the game.
      */
     if (!m->checkattack)
         return false;
