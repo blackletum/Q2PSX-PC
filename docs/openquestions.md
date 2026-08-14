@@ -2647,7 +2647,48 @@ alarming. The 1, 6 and 7 belong to the other creatures in that zone.
 
 So the attack move is installed three times and cut short before its sixth frame each time.
 
-- [ ] 57. **What cuts the attack animation short — and it is NOT the AI verb, which was my guess.**
+- [x] 57. **RETRACTED: nothing cuts it short. The premise was wrong.**
+
+      A per-tick trace — one creature, one line, showing its move, frame and attack state — settles it in
+      thirty lines. On COMMAND, creature 0:
+
+          t9    move 30   frame 31   as 4      <- the decision
+          t10   move 77   frame 32   as 1      <- the attack move installs
+          t11   move 77   frame 77   as 1      <- snaps to its first frame
+          t12   move 77   frame 78   as 1
+          ...   ...
+          t29   move 77   frame 95   as 1      <- still playing, nineteen ticks in
+
+      The Tank Commander's attack move plays through cleanly. It is never interrupted, by pain, by run, by
+      stand or by anything else. The question this entry was opened to ask does not exist.
+
+      What was actually happening is what question 54 already established and I then talked myself past: the
+      move that plays, 77-114, carries thinks `0*6 6 0*3 6 0*7 11 0*6 9 0*11 6` — a proximity call and two
+      sounds, and **no fire think at all**. Its fire thinks live in the other three moves the same callback
+      installs, and it never plays those:
+
+      | move | thinks in frame order | verbs |
+      | --- | --- | --- |
+      | 77-114 *(the one that plays)* | `0*6 6 0*3 6 0*7 11 0*6 9 0*11 6` | `5*38` |
+      | 168-196 | `0*5 13*19 0*5` | `4*5 0*19 4*5` |
+      | 115-135 | `0*15 6 0*5` | `4*21` |
+      | 55-70 | `0*9 8 0*2 8 0*2 8` | `4*16` |
+
+      The 168-196 move is worth looking at: nineteen consecutive frames of think 13 with no verb running under
+      them. That is a sustained burst — the creature holds still and fires for nineteen ticks.
+
+      The "cut short before its sixth frame" claim came from the Arachner on POWER1, where the counters said
+      the attack move installed three times and thinks 3 and 4 never ran. The trace shows why that was a bad
+      inference: creature 0 there spends the whole capture in its run loop with an enemy and `as 0`, so those
+      three attacks belonged to other creatures whose moves I never checked. Counters over a capture cannot
+      attribute an event to an actor; a trace can.
+
+      **Question 55 is therefore the whole of the remaining gap** — which of the four moves an attack callback
+      installs is the one the module picks. Nothing else is in the way.
+
+  *As first written:*
+
+- [ ] ~~57. **What cuts the attack animation short — and it is NOT the AI verb, which was my guess.**~~
 
       The census now prints the `ai` byte per frame beside the think byte, run-length encoded, and the answer
       is that the port already has this right. Across the disc the verbs land exactly where they should:

@@ -324,6 +324,8 @@ typedef struct client {
 
     u32               mp_deaths;      /* kills fed to the session              */
     bool              mp_scoreboard;  /* QMRESULT is up                        */
+    int               trace_cre;      /* creature index to trace, -1 for none  */
+    u32               trace_ticks;
 
     /* Where each player's viewport looks from. Player 0's is the sim's. */
     s32               mp_view_pos[Q2_MP_MAX_PLAYERS][3];
@@ -772,6 +774,28 @@ static void client_creatures_tick(client *c, float dt, const s32 eye[3])
     while (c->ai_accum >= 0.1 && guard++ < 8) {
         c->ai_accum -= 0.1;
         c->ai_thoughts += q2_creature_world_tick(&c->creatures, eye);
+
+        /*
+         * One creature, one line per AI tick: the move it is playing, the frame
+         * it is on, and its attack state. Counters say what happened across a
+         * capture and cannot say what happened between two consecutive ticks —
+         * and "the attack move is replaced within five ticks" is a question
+         * only consecutive ticks can answer. See openquestions #57.
+         */
+        if (c->trace_cre >= 0 &&
+            (u32)c->trace_cre < c->creatures.set.count &&
+            c->trace_ticks < 400) {
+            const q2_monster *m = &c->creatures.set.monsters[c->trace_cre];
+
+            Q2_INFO("t%-4u move %-4d frame %-4d as %d flags %08X %s%s%s",
+                    c->trace_ticks,
+                    m->currentmove ? m->currentmove->first_frame : -1,
+                    m->frame, m->attack_state, m->aiflags,
+                    m->enemy ? "enemy " : "no-enemy ",
+                    m->dead ? "dead " : "",
+                    m->in_use ? "" : "gone");
+            c->trace_ticks++;
+        }
     }
     if (c->ai_accum > 0.5)
         c->ai_accum = 0.0;
@@ -3668,6 +3692,8 @@ int main(int argc, char **argv)
     /* Deathmatch settings, applied after the map loads. -1 keeps the
      * shipped default the session initialiser installs. */
     q2_mp_mode mp_mode    = Q2_MP_DEATHMATCH;
+
+    c.trace_cre = -1;
     int        mp_players = 2;
     s16        mp_frags   = -2;
     s16        mp_minutes = -2;
@@ -3696,6 +3722,8 @@ int main(int argc, char **argv)
             mp_mode = (q2_mp_mode)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--dm-players") && i + 1 < argc)
             mp_players = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--trace-cre") && i + 1 < argc)
+            c.trace_cre = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--dm-frags") && i + 1 < argc)
             mp_frags = (s16)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--dm-minutes") && i + 1 < argc)
