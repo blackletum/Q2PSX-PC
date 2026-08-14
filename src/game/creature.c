@@ -914,6 +914,50 @@ static void add_named_but_unreached(q2_creature *c, dec *d, const u8 *image,
  * u16 last} record per move, and this splits at exactly those. A move the table
  * does not subdivide is left alone.
  */
+/*
+ * Shrink a move that CONTAINS another decoded move.
+ *
+ * `split_merged_moves` splits on the module's name records, which catches the
+ * Soldier. It does not catch the Tank Commander, whose 55-70 contains its own
+ * 65-70 as a separate decoded move — no name record marks that boundary, but
+ * another move does, and a move cannot span frames another move owns.
+ *
+ * The evidence this is real is arithmetic rather than structural: summing a
+ * creature's distinct move lengths and tripling gives its model's total clip
+ * frames exactly on four of seven creatures. The Tank Commander was -18, and
+ * 55-70 overlapping 65-70 double-counts exactly 6 AI frames. It is the only
+ * overlap on the disc.
+ */
+static void split_overlapping_moves(q2_creature *c)
+{
+    u32 i, j;
+
+    if (!c)
+        return;
+
+    for (i = 0; i < c->move_count; i++) {
+        s32 cut = -1;
+
+        for (j = 0; j < c->move_count; j++) {
+            const q2_cre_move *o = &c->move[j];
+
+            if (i == j)
+                continue;
+            if (o->first_frame <= c->move[i].first_frame ||
+                o->last_frame  >  c->move[i].last_frame)
+                continue;               /* not strictly inside */
+            if (cut < 0 || o->first_frame < cut)
+                cut = o->first_frame;
+        }
+
+        if (cut > c->move[i].first_frame) {
+            c->move[i].last_frame  = cut - 1;
+            c->move[i].frame_count =
+                (u32)(cut - c->move[i].first_frame);
+        }
+    }
+}
+
 static void split_merged_moves(q2_creature *c, const u8 *image, size_t size)
 {
     u32 i;
@@ -1064,6 +1108,7 @@ bool q2_creature_decode(q2_creature *out, const u8 *image, size_t size,
 
     add_named_but_unreached(out, &d, image, size);
     split_merged_moves(out, image, size);
+    split_overlapping_moves(out);
 
     return true;
 }

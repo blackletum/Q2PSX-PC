@@ -5006,8 +5006,28 @@ nothing saying so.
       6 model-frames more than 3x its AI total, which is two moves one frame short — the same conclusion the
       per-move matching reached, from totals that never looked at an individual move.
 
-      The Soldier's +27 is 9 AI-frames of animation its AI never plays, and the Tankcomm's -18 is 6 frames
-      its AI uses that its model does not carry. Both are worth a look and neither is the Arachner's problem.
+      **The Tankcomm's -18 is fixed, and the totals proved it.** Its AI used 6 frames more than its model
+      carries, and searching every creature for overlapping ranges found exactly one on the whole disc:
+      `65-70` lies inside `55-70`. A move cannot span frames another move owns, so `55-70` is a merged span
+      the name-record splitter could not see — no name marks that boundary, but another decoded move does.
+
+      `split_overlapping_moves()` shrinks a move that strictly contains another, and the arithmetic closes:
+
+          creature    AI*3  model    diff
+          Tankcomm     762    762       0     <- was -18
+          Insane       756    756       0
+          Gunner       570    570       0
+          Infantry     579    579       0
+          Berserk      363    363       0
+          Arachner     384    390       6
+          Soldier     1275   1302      27
+
+      **Five of seven exact.** This is the second merge bug found in the move decoder — the Soldier's came
+      from name records, the Tank Commander's from an overlap — and both were invisible until a total was
+      compared against something that had to equal it.
+
+      The Soldier's +27 is 9 AI-frames of animation its AI never plays, which may be genuine spare content
+      rather than a bug. The Arachner's +6 is its two moves, one frame short each.
 
       ~~So both readings are in trouble, and that was the honest state.~~ The length rule has a real statistic
       (96/101 against a 33% baseline) and assigns names that disagree; name-matching has the disc's own
