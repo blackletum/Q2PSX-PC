@@ -3430,7 +3430,17 @@ nothing saying so.
       is the original's own first line: `0x8006D6AC` opens `if (a0 == 0) return 0`, so an item with no model
       throws no particles there either. The port agrees with it by construction rather than by accident.
 
-      BASE0 is byte-identical, so nothing that was not collecting an item changed. The port has seven — explosion, blood, BFG,
+      BASE0 is byte-identical, so nothing that was not collecting an item changed.
+
+      **And the light event is answered too: no item on this disc glows.** `item.c:846` raises it for any
+      item whose flags carry `Q2_ITEM_GLOW` (bits 4-6, R/G/B), and across all 64 records of the item table the
+      only flag that ever appears is `spin`. Not one has a glow bit. The event has never fired in a capture
+      because there is nothing on the disc that would fire it — the same shape as the Tank Commander's absent
+      `tnk_` sounds and the 69 rotation calls whose first object slot is -1.
+
+      That is worth stating as a category, because three separate "untested" entries in this file turned out
+      to be it: **a path with no data behind it is not an incomplete port.** The way to tell them apart is to
+      go and count the data, which takes minutes, rather than to leave the question open indefinitely. The port has seven — explosion, blood, BFG,
       gib, scripted, spark and laser end — and none of them is the pickup burst. Choosing one would invent
       an effect rather than reconstruct it, so nothing is drawn yet. `0x8005B6C0` is the original's, and
       reading its particle table is what this needs; the event carries the position and the glow colour
