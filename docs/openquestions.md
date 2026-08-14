@@ -4980,7 +4980,36 @@ nothing saying so.
       the Soldier's `Death1` is 35 AI frames against a 108-frame clip (3.09), its `Pain1` 7 against 15
       (2.14). A mechanism should not give 3.09 and 2.14.
 
-      **So both readings are in trouble, and that is the honest state.** The length rule has a real statistic
+      **Resolved in favour of the length rule, by totals.** If an AI move's frame range and a block-D span
+      really measure the same thing at 3:1, then summing each creature's DISTINCT move lengths and
+      multiplying by three must equal the sum of its clip lengths. It does:
+
+          creature    AI*3  model    diff  diff/3
+          Insane       756    756       0     0.0
+          Gunner       570    570       0     0.0
+          Infantry     579    579       0     0.0
+          Berserk      363    363       0     0.0
+          Arachner     384    390       6     2.0
+          Soldier     1275   1302      27     9.0
+          Tankcomm     780    762     -18    -6.0
+
+      **Four of seven balance to zero.** Not approximately — exactly, across hundreds of frames, on a rule
+      that would drift visibly if the ratio were anything other than three. The premise the previous entry
+      doubted is sound: the two timelines are the same timeline, at exactly 3:1.
+
+      So the name disagreement is the thing that is wrong, not the ratio. Either `q2_creature_move_names`
+      pairs AI ranges to module names incorrectly, or a module's move names and a model's block-D names are
+      simply different vocabularies — the same creature calling its animations one thing in its AI and
+      another in its mesh. The second costs nothing to believe and explains everything.
+
+      **And the Arachner's residue is now exactly 2 AI frames**, arrived at independently: its model carries
+      6 model-frames more than 3x its AI total, which is two moves one frame short — the same conclusion the
+      per-move matching reached, from totals that never looked at an individual move.
+
+      The Soldier's +27 is 9 AI-frames of animation its AI never plays, and the Tankcomm's -18 is 6 frames
+      its AI uses that its model does not carry. Both are worth a look and neither is the Arachner's problem.
+
+      ~~So both readings are in trouble, and that was the honest state.~~ The length rule has a real statistic
       (96/101 against a 33% baseline) and assigns names that disagree; name-matching has the disc's own
       labels and implies no consistent ratio. One of the two premises underneath them — that an AI move's
       frame range and a block-D move's span measure the same thing — is probably false, and that is where a
