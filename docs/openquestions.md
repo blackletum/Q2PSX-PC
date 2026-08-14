@@ -1557,6 +1557,21 @@ item records at run time instead of transcribing a table, so there is nothing to
       inside the logo. Their placement is the module's, and until it is read there is no honest position to
       draw them at. The port therefore shows the menu over an empty scene rather than a guessed one.
 
+      **The thread to pull is the module's engine vtable**, and it is worth writing down because every
+      `LevelBin` reaches the engine the same way — `QMULTI.C` included. A module holds the block at its own
+      `+0x8`, the loader writes it, and the installer that fills it is the long run of stores from
+      `0x80079818`. So a slot is named by grepping that function for its offset:
+
+          +0x1C   0x8003B250      +0x20   0x8007F328
+          +0x170  0x80077D0C      +0x174  0x800781F0
+
+      QFRONT's `init` (export 0, module+0x30F4) calls `+0x170` with 0 and then `+0x174` with
+      **(0, 160, 4000)** before it does anything else. 160 is the world's own projection distance and 4000
+      a far plane, so that pair is the front end setting up **its own viewport** — which is an independent
+      corroboration of `proj = 160` from a code path that has nothing to do with `SetGeomScreen`'s eleven
+      call sites or the sky-wedge measurement against the retail capture.
+      Following `init` past that is what will produce the logo's position.
+
 - [x] 45. **Word wrap in practice — SOLVED, and it was the wrong screen.** The wrap the capture shows is the
       **briefing's**, not the MISSION screen's: `#06A196` at `0x800AE740` sets margins 106 and 406, which is
       the only place in the game that turns the flag on, and `#000000` at `0x800AE758` clears it again. The
