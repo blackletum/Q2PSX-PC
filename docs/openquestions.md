@@ -1570,7 +1570,29 @@ item records at run time instead of transcribing a table, so there is nothing to
       a far plane, so that pair is the front end setting up **its own viewport** — which is an independent
       corroboration of `proj = 160` from a code path that has nothing to do with `SetGeomScreen`'s eleven
       call sites or the sky-wedge measurement against the retail capture.
-      Following `init` past that is what will produce the logo's position.
+      Following `init` past that produced three more things, and one of them is behaviour rather than data.
+
+      **The front end dispatches on a mode the engine hands it.** `init` reads `engine+0x4A8` and branches:
+      1 goes to `module+0x35C8`, 2 to `module+0xCF68`, anything else to `module+0xCEE0`. Those first two are
+      the actions on the VIEW CREDITS and MULTI PLAYER item records, so the word is a **re-entry mode** —
+      how the front end comes back up on the right screen after a game or a deathmatch ends rather than
+      always at the title. `module+0xCEE0` is the title page's own builder.
+
+      **The title screen starts an attract demo after thirty seconds.** `module+0xCEE0` parks 9000 in
+      `module+0x12DC0` and installs `module+0xC6AC` as the page's per-frame hook, and that hook is a
+      countdown: any input resets it to 9000, otherwise it subtracts the frame delta and calls
+      `0x80101B08` when it reaches zero. 9000 of the console's 1/300 s units is **30 s**, and it is what
+      the `DEMO OF GAME` / `STARTING` pair in the string pool is for.
+
+      **The models are shown and hidden, not placed per page.** Every builder starts with
+      `module+0x3414(list, mode)`, which calls `engine+0x1E4(mode)` and then walks a table at
+      `module+0x12B20` — built at `init` from `module+0x1163C` — setting bit `0x80` in three fields (`+0x118`,
+      `+0x17C`, `+0x1E0`) of each object it names. So the scene's models are placed once and each page turns
+      the right ones on, which means the logo's position is in that object table rather than in per-page
+      code. Two more engine slots come with it: `+0x200` installs an item record array (the title's call is
+      `(module+0xEC3C, 32)`, against the executable's own `0x8001A474(record, 16)`) and `+0x290` is the
+      per-frame page hook.
+      *What is left for the scene:* decoding `module+0x1163C` into that object table.
 
 - [x] 45. **Word wrap in practice — SOLVED, and it was the wrong screen.** The wrap the capture shows is the
       **briefing's**, not the MISSION screen's: `#06A196` at `0x800AE740` sets margins 106 and 406, which is
