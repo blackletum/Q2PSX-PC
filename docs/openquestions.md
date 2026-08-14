@@ -4814,10 +4814,31 @@ nothing saying so.
       and the three before it are not. That is the first evidence for where the table starts, and it points
       at exactly the candidate rejected earlier for lack of any.
 
-      **It is still not adopted, because it contradicts the module.** The disassembly pins `ber_deth2` at
-      `module+0x18C` and `ber_idle1` at `+0x198` — twelve bytes apart, adjacent — while the heuristic's list
-      puts `inf_deth2` between them. Both cannot be right, so the run is misaligned *somewhere in its
-      middle*, and starting it three entries later would only move the error rather than fix it.
+      ~~It contradicts the module.~~ **There was no contradiction — the arithmetic was mine.** Dumping the
+      region at a 12-byte stride settles it:
+
+          80100144  Attack1      80100180  ber_deth2     801001BC  ber_sight
+          80100150  Attack2      8010018C  inf_deth2     801001C8  ber_srch1
+          8010015C  Attack3      80100198  ber_idle1     801001D4  msc_udeath
+          80100168  ber_pain2    801001A4  ber_attack    801001E0  "Clear Init B..."  <- run ends
+          80100174  inf_pain1    801001B0  inf_atck2
+
+      `ber_deth2` is at `+0x180`, not `+0x18C`; `+0x18C` is `inf_deth2`. The earlier note computed
+      `0x198 - 12` and assumed the answer, which put one entry in the wrong place and manufactured the
+      conflict. **`inf_deth2` does sit between `ber_deth2` and `ber_idle1`, exactly as the heuristic said.**
+
+      **And `Attack1` is a sound name.** `0x801002D4` loads `module+0x144` and packs its bytes into the
+      sound import the same way every other entry is packed:
+
+          801002D4  addiu t1, v0, 324     ; 0x80100144 = "Attack1"
+          801002DC  lbu   v1, 1(t1)
+          801002E0  lbu   t0, 324(v0)
+
+      So the table runs from `+0x144` to `+0x1D4`, thirteen entries, and **the heuristic's output is
+      correct**. The Berserk's names share three strings with its move names because the creature's attacks
+      are called the same thing, not because the scan drifted.
+
+      Seven attempts, and the answer is that nothing was wrong. The flag on this table is removed.
 
       One more thing the scan settles: `ber_idle1` has no VAG either, yet the disassembly proves it IS a
       name the module passes to the sound import. So **a name being requested does not mean a VAG of that

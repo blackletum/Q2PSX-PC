@@ -858,10 +858,11 @@ static void client_cre_sound(q2_monster *m, int which, void *user)
      *     Tankcomm 0   Berserk 0
      *
      * The finder locates the module's own name string and then takes the first
-     * run of three consecutive 12-byte name slots after it; for those two that
-     * heuristic finds nothing. Their sounds ARE on the disc -- 63 VAG entries
-     * begin `tnk_` -- so this is a gap in the finder, not in the data. See
-     * openquestions #60 and #61.
+     * run of three consecutive 12-byte name slots after it; those two modules do
+     * not carry the anchor where it looks, so it falls back to scanning from
+     * zero. Both results were checked against the modules' own code and are
+     * correct: the Berserk's thirteen run from module+0x144 to +0x1D4 and the
+     * Tank Commander's eight likewise. See openquestions #60 and #61.
      */
     name = q2_cre_soldier_sound_name(which);
     if (!name)

@@ -681,23 +681,11 @@ u32 q2_creature_sound_names(const q2_creature *c, const u8 *image, size_t size,
         }
 
     /*
-     * A WARNING before the fallback: the name run is NOT what fills a module's
-     * sound slots. Both modules checked — the Berserk at 0x801008A4..0x801008CC
-     * and the Tank Commander at 0x80100638..0x80100648 — call an import with
-     * arguments packed from bytes (near module+0x1A0 and +0x1F4 respectively)
-     * and store its return value in the slot. No 12-byte name is read.
-     *
-     * Those packed bytes ARE the name — the compiler rebuilds a 12-byte string in
-     * registers because it cannot use aligned loads. Read as ASCII, the Tank
-     * Commander's source region holds `tnk_step` at module+0x1E8 and
-     * `tnk_sight1` at +0x1F4; the Berserk's holds `ber_deth2` at +0x18C,
-     * `ber_idle1` at +0x198, `ber_attack` at +0x1A4 and `inf_atck2` at +0x1B0.
-     *
-     * So a real 12-byte-stride table exists for both and this function looks for
-     * the right thing. What it gets wrong for the Berserk is the START: it
-     * anchors on the module's own name string, which that module does not carry
-     * where it looks. Its result is still a candidate rather than a table until
-     * the anchor is fixed — the correct entries above are the reference.
+     * Both modules checked — the Berserk at 0x801008A4..0x801008CC and the Tank
+     * Commander at 0x80100638..0x80100648 — pass their sound names to an import
+     * BY VALUE, packing each 12-byte string into registers a byte at a time
+     * because the compiler cannot use aligned loads. So the run this function
+     * looks for is real, and it is what the module reads.
      *
      * If the module's own name is not in its image, the anchor is gone but the
      * table need not be. Two of the seven -- Tankcomm and Berserk -- returned
