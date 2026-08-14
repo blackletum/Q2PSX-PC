@@ -2001,9 +2001,13 @@ static void client_input_simulated(client *c, float dt)
                 pl->pitch = 0;
             }
 
-            c->sim[0].pcombat[pi].self.origin[0] = pl->pos[0];
-            c->sim[0].pcombat[pi].self.origin[1] = pl->pos[1];
-            c->sim[0].pcombat[pi].self.origin[2] = pl->pos[2];
+            /*
+             * The hurt-actor's origin is NOT set here. The sim maintains it
+             * every tick, at the eye, and writing the feet over it each frame
+             * put the target 572 units — two eye-heights — below the muzzle
+             * and made every bolt miss. A harness that overwrites the field it
+             * is measuring measures the harness.
+             */
         }
 
         /*
@@ -3228,6 +3232,16 @@ static void client_write_shot(client *c, bool numbered)
                             q2_sim_proj_scan.past_end,
                             (long long)q2_sim_proj_scan.closest_sq,
                             q2_sim_proj_scan.seg_len);
+                if (pi == 1)
+                    Q2_INFO("  closest: owner %d, bolt at [%d %d %d], "
+                            "target origin [%d %d %d]",
+                            q2_sim_proj_scan.closest_owner,
+                            q2_sim_proj_scan.closest_from[0],
+                            q2_sim_proj_scan.closest_from[1],
+                            q2_sim_proj_scan.closest_from[2],
+                            q2_sim_proj_scan.closest_origin[0],
+                            q2_sim_proj_scan.closest_origin[1],
+                            q2_sim_proj_scan.closest_origin[2]);
                 {
                     const q2_combat_scan_stats *sc = &q2_combat_scan_by[pi];
 

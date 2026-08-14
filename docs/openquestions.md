@@ -3204,7 +3204,40 @@ player-versus-player damage:
       eye for that reason, which is right on its own merits: what a shot has to intersect is the body, not
       the floor under it.
 
-- [ ] 59c. **And the measurement did not move.** `closest^2` is 333434 before and after, byte-identical —
+- [x] 59c. **ANSWERED by doing what it said. A player can hurt another player.**
+
+      The rule was: when a number does not move, stop fixing and find out whose number it is. Printing the
+      origin the scan actually read took one line and settled it:
+
+          closest: owner 0, bolt at [-9447 -1370 15759], target origin [-9382 -798 15307]
+
+      **572 apart vertically — two eye-heights.** The muzzle sits one `Q2_EYE_BASE` above the feet and the
+      target's origin was one below them, which is why the closest approach was pinned at 577 against a reach
+      of 572 no matter what was changed upstream.
+
+      The cause was the HARNESS. `--dm-stage` wrote `pcombat[pi].self.origin = pl->pos` every frame — the
+      feet — over the origin the sim now maintains at the eye. A harness that overwrites the field it is
+      measuring measures the harness, and that is what pinned the number through four separate fixes.
+
+      With those three lines gone, on the same capture:
+
+      | | before | after |
+      | --- | --- | --- |
+      | bolts hit | 0 | **4** |
+      | targets within reach | 0 | 690 |
+      | closest² | 333434 (577) | 110422 (332) |
+
+      And over 2400 frames **player 1 ends at 68 health**, down from 100 — four hits at eight damage, which
+      is exactly the arithmetic. A player can shoot another player, the damage lands, and the health is
+      theirs alone.
+
+      Not yet a kill: a blaster needs about thirteen hits and the staged pair land four in 2400 frames. The
+      scoring hook, the attribution and the frag limit are wired and unit-tested above; what has not been
+      seen is the moment they fire.
+
+  *As first written:*
+
+- [ ] ~~59c. **And the measurement did not move.**~~ `closest^2` is 333434 before and after, byte-identical —
       the THIRD time this session an unchanged number has meant "you are not measuring what you changed".
       The first cost two rounds on a creature count that belonged to a different creature; the second cost
       four on a scan counter that belonged to a different player. The pattern is now unmistakable and the

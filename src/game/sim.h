@@ -696,6 +696,12 @@ typedef struct q2_sim_proj_stats {
     u32 past_end;       /* ...but beyond the segment's far end               */
     s64 closest_sq;     /* the smallest perpendicular distance squared seen  */
     s32 seg_len;        /* the last segment's length, in world units         */
+
+    /* WHOSE origin produced `closest_sq`, and where it was. Printed rather
+     * than reasoned about — see question 59c. */
+    s32 closest_origin[3];
+    s32 closest_from[3];
+    s32 closest_owner;
 } q2_sim_proj_stats;
 
 extern q2_sim_proj_stats q2_sim_proj_scan;

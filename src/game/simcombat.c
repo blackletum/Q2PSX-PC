@@ -588,8 +588,16 @@ void q2_sim_combat_tick(q2_sim *sim)
 
                 d2 = q2_combat_ray_dist_sq(step.from, dir, t->origin, &along);
                 if (q2_sim_proj_scan.closest_sq == 0 ||
-                    d2 < q2_sim_proj_scan.closest_sq)
-                    q2_sim_proj_scan.closest_sq = d2;
+                    d2 < q2_sim_proj_scan.closest_sq) {
+                    q2_sim_proj_scan.closest_sq        = d2;
+                    q2_sim_proj_scan.closest_origin[0] = t->origin[0];
+                    q2_sim_proj_scan.closest_origin[1] = t->origin[1];
+                    q2_sim_proj_scan.closest_origin[2] = t->origin[2];
+                    q2_sim_proj_scan.closest_from[0]   = step.from[0];
+                    q2_sim_proj_scan.closest_from[1]   = step.from[1];
+                    q2_sim_proj_scan.closest_from[2]   = step.from[2];
+                    q2_sim_proj_scan.closest_owner     = p->owner;
+                }
 
                 reach = (s64)Q2_HITSCAN_RADIUS + t->radius;
                 if (d2 <= reach * reach) {
