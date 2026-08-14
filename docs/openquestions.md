@@ -4960,7 +4960,32 @@ nothing saying so.
       `q2_creature_move_names` (which would make this table meaningless), or the length agreement is a
       systematic coincidence and the port has been choosing wrong clips at a 95% "hit rate" all along.
 
-      **Checked on the Arachner only.** The first thing a next pass should do is run the same name-versus-
-      length table for the other six creatures: if they agree where the Arachner conflicts, the fault is in
-      this creature's naming; if they conflict too, #51h's mechanism is wrong and its statistic is measuring
-      something else.
+      **Now checked on all seven, and the conflict is universal:**
+
+          Soldier    2 of 29 named moves agree with block D by name
+          Tankcomm   1 of 16          Gunner     0 of 13
+          Insane     1 of 18          Infantry   1 of 11
+          Arachner   2 of 12          Berserk    0 of 10
+          -----------------------------------------------------
+          TOTAL      5 of 97
+
+      So it is not an Arachner quirk. For **every** creature on the disc, the clip picked by matching AI
+      length x 3 is a different clip from the one that shares the move's name, roughly 95% of the time.
+
+      Both name sources are solid, which is what makes this hard to dismiss. The AI side comes from
+      `q2_creature_move_names`, which matches a 20-byte record's two u16 frame bounds **exactly** against a
+      decoded move — not a fuzzy match. The model side is block D read straight out of the file.
+
+      And name-matching does not simply replace the rule, because the ratios it implies are inconsistent:
+      the Soldier's `Death1` is 35 AI frames against a 108-frame clip (3.09), its `Pain1` 7 against 15
+      (2.14). A mechanism should not give 3.09 and 2.14.
+
+      **So both readings are in trouble, and that is the honest state.** The length rule has a real statistic
+      (96/101 against a 33% baseline) and assigns names that disagree; name-matching has the disc's own
+      labels and implies no consistent ratio. One of the two premises underneath them — that an AI move's
+      frame range and a block-D move's span measure the same thing — is probably false, and that is where a
+      next pass should dig rather than at either rule.
+
+      Worth noting the port is not visibly broken by this: captures across many maps render creatures
+      animating plausibly. That is weak evidence — a wrong-but-same-length clip looks like an animation —
+      but it does mean this is a fidelity question rather than a crash-or-garbage one.
