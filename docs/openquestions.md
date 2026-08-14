@@ -4205,6 +4205,17 @@ nothing saying so.
                                        blast's 1000 / 1400, so the two are separate effects rather than one
                                        shared preset. Its two callers, 0x8005B3C4 and 0x8005B46C, sit
                                        beside the shrink-and-vanish helper item.c cites at 0x8005B368.
+
+                                       **Which damage effect is now read too.** The handler gates on one
+                                       byte: `lbu v0, 753(s1)` is `entity+0x2F1`, which combat.h maps to
+                                       `effect[1]`, and `sltiu v0, v0, 3` sends anything below three down a
+                                       different arm. `Q2_MOD_ENERGY_BOLT` is the mod that arms slot 1, and
+                                       it arms it with exactly **3** — so the green light is what an
+                                       energy-bolt hit looks like on the tick it lands, and the `< 3` arm is
+                                       that effect's tail. `q2_actor_energy_lit()` carries the predicate,
+                                       with `tests/combat` pinning the boundary at 3 rather than at 0:
+                                       a `> 0` reading would light the whole tail and look entirely
+                                       reasonable doing it.
           0x8002A868  in 0x8002A660  = the SCRIPT effect area (userfuncs.h cites 0x8002A384, GLASS's own
                                        effect spawn)
           0x80031048  in 0x80030E74  = EFFECT code (effect.c cites 0x80030430)

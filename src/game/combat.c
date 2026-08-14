@@ -50,6 +50,13 @@ s16 q2_mod_effect_timer(s16 mod, int *slot)
     }
 }
 
+bool q2_actor_energy_lit(const q2_actor *a)
+{
+    /* 0x80058650 reads entity+0x2F1, which combat.h maps to effect[1]; the
+     * lit path is the `>= 3` arm at 0x80058660. */
+    return a && a->effect[1] >= 3;
+}
+
 void q2_combat_rules_default(q2_combat_rules *r)
 {
     if (!r)

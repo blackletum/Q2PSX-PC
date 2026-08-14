@@ -528,6 +528,44 @@ static void test_mod_classification(void)
 }
 
 /* ------------------------------------------------------------------------- */
+
+/*
+ * The energy-bolt effect's light gate. 0x80058660 is `sltiu v0, v0, 3` — below
+ * three takes a different branch — so the lit arm is `>= 3`, and MOD_ENERGY_BOLT
+ * arms slot 1 with exactly 3. The boundary is the whole content of this: an
+ * implementation using `> 0` would light the entire tail of the effect.
+ */
+static void test_energy_light_gate(void)
+{
+    q2_actor a;
+
+    memset(&a, 0, sizeof(a));
+    check(!q2_actor_energy_lit(&a), "unarmed is dark");
+
+    a.effect[1] = 1;
+    check(!q2_actor_energy_lit(&a), "1 is below the gate");
+    a.effect[1] = 2;
+    check(!q2_actor_energy_lit(&a), "2 is below the gate");
+    a.effect[1] = 3;
+    check(q2_actor_energy_lit(&a),  "3 lights, the value the mod arms");
+    a.effect[1] = 255;
+    check(q2_actor_energy_lit(&a),  "and anything above it");
+
+    /* Slot 1 only: the other three mods arm other slots and must not light. */
+    memset(&a, 0, sizeof(a));
+    a.effect[0] = 15;
+    a.effect[2] = 30;
+    a.effect[4] = 5;
+    check(!q2_actor_energy_lit(&a), "the other three slots do not light");
+
+    {
+        int slot = -1;
+        check_eq_i(q2_mod_effect_timer(Q2_MOD_ENERGY_BOLT, &slot), 3,
+                 "the bolt arms with 3");
+        check_eq_i(slot, 1, "...in slot 1");
+    }
+}
+
 int main(void)
 {
     printf("combat behaviour\n\n");
@@ -540,6 +578,8 @@ int main(void)
     test_splash();
     test_hitscan();
     test_mod_classification();
+
+    test_energy_light_gate();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;

@@ -131,9 +131,37 @@ bool q2_mod_is_energy(s16 mod);
  * chain at 0x80057ED0..0x80057EE8. */
 bool q2_mod_knocks_back(s16 mod);
 
+/*
+ * The green light an armed energy-bolt effect casts.
+ *
+ * `0x80058638` is the handler that runs right after `q2_mod_effect_timer`'s
+ * range, and it gates on one byte:
+ *
+ *     80058650  lbu   v0, 753(s1)     ; entity+0x2F1 == effect[1]
+ *     80058658  beq   v0, zero, ...   ; nothing armed -> nothing to do
+ *     80058660  sltiu v0, v0, 3       ; below 3 takes a DIFFERENT branch
+ *     80058674  addiu a2, s0, -5460   ; 0x800AEAAC -- the colour
+ *
+ * `Q2_MOD_ENERGY_BOLT` is the mod that arms slot 1, and it arms it with exactly
+ * 3 — so this light is what an energy-bolt hit looks like on the tick it lands,
+ * and the `< 3` arm is the tail of the same effect. Its preset:
+ *
+ *     0x800AEAAC   00 FF 00      rgb(0, 255, 0)
+ *     0x800AEAB0   20 03 14 05   u16 800, 1300   inner, outer
+ *
+ * Close to the BFG blast's green but not equal to it (1000 / 1400), so the two
+ * are separate effects.
+ */
+#define Q2_ENERGY_LIGHT_R      0
+#define Q2_ENERGY_LIGHT_G    255
+#define Q2_ENERGY_LIGHT_B      0
+#define Q2_ENERGY_LIGHT_INNER  800
+#define Q2_ENERGY_LIGHT_OUTER 1300
+
 /* The damage-effect timer a mod arms, or 0. Returns the slot in `slot` and the
  * value as the result (0x800585A4..0x80058604). */
 s16 q2_mod_effect_timer(s16 mod, int *slot);
+
 
 /* ------------------------------------------------------------------------- */
 /* Rules that live in globals rather than in the damage function              */
@@ -245,6 +273,10 @@ typedef struct q2_actor {
     s16  last_mod;          /* entity+0xDF                                   */
     u8   effect[6];         /* entity+0x2F0..0x2F4                           */
 } q2_actor;
+
+/* True while an actor's energy-bolt effect is at full strength (effect[1] >= 3),
+ * which is the arm 0x80058660 takes to the lit path. */
+bool q2_actor_energy_lit(const q2_actor *a);
 
 /* Where a shot stopped considering a target — see the note in combat.c. */
 typedef struct q2_combat_scan_stats {
