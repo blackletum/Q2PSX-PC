@@ -3998,7 +3998,34 @@ nothing saying so.
       doubling them would light a BFG twice.
 
       Three of the fifteen sites are now settled: the projectile wired, the rocket proven a no-op, the BFG
-      wired. Twelve remain.
+      wired.
+
+      **Two more identified, and the route generalises.** `0x8004CA14` and `0x8004CDE4` read the same
+      presets, and both sit inside functions that are entries in a table at `0x8009D704`:
+
+          8009D704  8004EB08     8009D718  8004CA9C  <- 0x8004CDE4 is in here
+          8009D708  8004BFBC     8009D71C  8004EBDC
+          8009D70C  8004C1C0     8009D720  8004CE18
+          8009D710  8004C488     8009D724  8004D038
+          8009D714  8004C744  <- 0x8004CA14 is in here
+          ...       8009D730  8004EB10
+
+      Twelve entries, and `weapon.h` already names them: index 11 is the BFG at `0x8004EB10`, which pins the
+      base. So `0x8004CA14` belongs to the **Machinegun** (id 4) and `0x8004CDE4` to the **Chaingun** (id 5).
+      **These are muzzle flashes.** Their colour is `0x800AE9D4` — `C8 64 64`, `rgb(200, 100, 100)`, a pale
+      red.
+
+      Their radii are NOT from the palette:
+
+          8004C9F8  andi v0, s0, 0xFFFF
+          8004CA00  or   a2, v0, a2        ; low half from s0, high half computed
+
+      so both halves are computed at runtime — a flash that varies rather than a fixed glow. Reconstructing
+      them means tracing `s0`, not reading another table entry, which is why they are identified here and not
+      wired.
+
+      **Five of fifteen are now named**: projectile, rocket, BFG, machinegun, chaingun. The pointer table at
+      `0x8009D704` is likely to name more of the remaining ten the same way.
 
       Still not done: fourteen of the fifteen sites — but they share a dumped table now, and two of the
       fourteen are identified (rocket, and `0x8004B2B4` reached the same way).
