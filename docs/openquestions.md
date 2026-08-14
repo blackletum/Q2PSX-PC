@@ -2303,7 +2303,29 @@ not think, and it does not walk.
       Soldier's death move in clip 12 while clip 11 is the death animation, then **`entity+0x100` is not
       derived from the AI frame at all** — it is its own counter, advanced by something else.
 
-- [ ] 51b. **What advances `entity+0x100`?** That is the question 51 should have asked. The selector stays as
+- [ ] 51b. **What advances `entity+0x100`? — 23 writers, and none of them is the AI frame driver.**
+      `q2psx-inspect access 0x100` lists every instruction touching the field: twenty-three stores, and not
+      one lies in `0x80061000..0x80062FFF`, which is where `M_MoveFrame` and the class-method dispatch live.
+      **So the animation position is not written by the thing that advances an AI frame**, which is on its own
+      enough to say the port's `frame * Q2_CRE_TICKS_PER_FRAME` is a substitution rather than the rule.
+
+      The most promising of them is `0x8007EB18`, and it is worth writing down because it is several facts at
+      once:
+
+          8007EB18  sh   t2, 256(t1)      ; entity+0x100 = t2
+          8007EB28  sw   v1, 176(t1)      ; and flags at +0xB0 are rewritten around it
+          8007EB38  lw   a0, 748(t1)      ; entity+0x2EC, the linked object
+          8007EB48  sh   t2, 46(a0)       ; ...gets the SAME value at its +0x2E
+          8007EB4C  addiu t0, t0, 20      ; walking 20-BYTE records
+          8007EB50  lh   v0, 0(t0)        ; keyed on a leading s16
+          8007EB58  bgez v0, 0x8007EA14   ; ...until it goes negative
+
+      Twenty-byte records with a leading s16 are the same shape as the move-name table
+      (`{char[16]; u16 first; u16 last}`) this project already reads, and `entity+0x2EC` is the field
+      `0x80057D54` passes to T_Damage as a second target. So the position is set from a table walk, in company
+      with a linked object, by code sitting beside the module loader rather than in the AI.
+
+      That is where 51b resumes. The selector stays until it is answered. The selector stays as
       it is because it demonstrably picks the right clips — 93 of 97 moves have one of exactly the matching
       length, and the Soldier's four consecutive moves resolve to clips 1, 2, 3 and 4 — but it is a
       reconstruction standing in for a counter that has not been found, and this file should say so rather
