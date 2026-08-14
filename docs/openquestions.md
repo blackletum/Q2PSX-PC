@@ -1854,6 +1854,12 @@ rotator moves when SIMROT's exec calls `q2_rotator_trigger`, and the event runti
 has no primitive-dispatch hook to reach it from, so `q2_rotators_tick` reports zero
 moved. Built and ticking is not turning, and the log says which.
 
+— **the hook now exists** (`q2_event_rt.on_call`) and `q2_rotator_trigger` is called through
+`q2_rotators_call`; disc-wide, 46 steps turn 47 rotators. The client still reports zero, for a
+different reason: its rotators come from COMMON's script and the rotation calls are in each
+zone's, which nothing runs. See "Rotating brushes turn, and the script that turns them is in the
+other file" below, and question 50.
+
 ## Nothing had ever opened the death screen
 
 Page 41 has been transcribed since the menu was reconstructed — `RESTART LEVEL`,
@@ -2180,6 +2186,48 @@ Single-zone BASE0 loses none of its ten, which is what says the test is measurin
       214 of 214 unplaced and 412 of 432 sight lines blocked, because that is the hull a creature genuinely
       is outside.
       `src/game/aiworld.[ch]`; the counters are kept, and the client prints them next to every capture.
+
+## Rotating brushes turn, and the script that turns them is in the other file
+
+The rotator set built last round never moved: `rot moved 0` on every map. Not a bug in the rotation — every
+kind returns early unless a step is pending (`0x8002F1B8`), and the step is consumed after one step
+(`0x8002F204`). One request, one step, and **nothing was requesting**. `q2_rotator_trigger` had no caller.
+
+The request comes from a script `CALL`, and `Q2_EVOP_CALL` fell through the event runtime's `default:` case,
+counted with FX and WAIT as "recognised but not implemented". It is now reported to the owner rather than
+interpreted: `q2_event_rt.on_call` hands over the item and its UserFuncs index, because *which index is
+SIMROT* is a per-map question that `events_rt.[ch]` has no map to answer. What the operands mean lives in
+`q2_rotators_call`, beside the builder that reads the same offsets — they differ per primitive (SIMROT names
+four objects at +12..+18, ROTHATCH one at +18, ROTBUTTON one at +10) and two copies of that table would rot
+apart and turn the wrong geometry.
+
+Run over every script on the disc: **112 rotators built, 886 CALL items executed, 46 rotation steps requested,
+102 tick-moves, 47 rotators turned.** Before this, all five of those numbers after the first were zero.
+
+**But the client still shows none of it, and the reason is worth writing down.** The client builds its
+rotators from **COMMON's** Events, because that is the script its sim runs — and trigger volumes are parsed
+from COMMON.DAT, so their `event_offset` is an offset into COMMON's Events. That checks out: **886 of 886
+trigger volumes with an event name a record that exists in COMMON's own script**, so the sim fires the right
+chunk. The rotation calls are simply not there. They are in each **ZONE's** Events, which carry 2959 CALL
+items, 805 MOVER_A and 619 ZONEGATE across the disc — and *nothing in the port runs a zone's script at all*.
+
+- [ ] 50. **What fires a zone's Events records?** COMMON's are fired by trigger volumes, whose offsets all
+      resolve. A zone's script has its own record directory with named entries; the disc-wide harness fires
+      every one of them, which is a stand-in, not the engine's rule. Until this is answered the port runs
+      half of each level's scripting: no zone-local movers, no zone gates from a zone's own script, and no
+      rotation. This is the single largest piece of level behaviour still missing, and it was invisible while
+      the CALL opcode was being skipped.
+
+`render` grew an optional rotation-tick argument so a rotator can be looked at rather than counted: it builds
+the zone's rotators, drives them, frames the one that turns furthest and renders it. A negative count builds
+and frames without turning, which is the "before" of a pair taken from one camera — zero could not serve,
+because zero also means "no rotators" and frames the whole zone instead. Two things that pass a count and
+fail an eye: a **SNAP rotator turns exactly 2048 of 4096 about its own centre**, and a symmetric brush at 180°
+is byte-for-byte the frame it started as; and **one call buys one step**, so a single tap turns an ACCUM
+rotator by one speed's worth and stops. The render re-triggers each tick, which is a script holding the
+rotation on.
+
+---
 
 ---
 

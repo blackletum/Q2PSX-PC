@@ -64,6 +64,24 @@ typedef struct q2_event_rt {
      * implemented yet". */
     u32  ran_count;
     u32  skipped_movers;
+
+    /*
+     * Called for each Q2_EVOP_CALL item a running record reaches, with the
+     * item and its UserFuncs index.
+     *
+     * The runtime deliberately knows nothing about primitives: which index is
+     * SIMROT is a per-map question that `userfuncs.[ch]` answers and this
+     * module has no map. So a CALL is reported rather than interpreted, and
+     * the owner — who does hold the map's UserFuncs and its rotator set —
+     * decides what it means. Without this a rotator never receives the step
+     * request `q2_rotators_tick` waits for, and a level's turning geometry
+     * stands still: `rot moved 0` on every map.
+     */
+    void (*on_call)(void *user, const q2_event_item *item, u8 call_index);
+    void  *on_call_user;
+
+    u32  call_count;    /* CALL items reported, for the same "did anything
+                         * happen" reason as the counters above */
 } q2_event_rt;
 
 q2_result q2_event_rt_init(q2_event_rt *rt, const q2_events *events);

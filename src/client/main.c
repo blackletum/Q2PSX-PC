@@ -295,6 +295,7 @@ typedef struct client {
     u32               cre_sounds;
     u32               player_attacks;
     u32               rot_moved;
+    u32               rot_steps;   /* step requests the script has made */
     u32               vw_events;
     s16               vw_last_event;
     int               cre_last_sound;
@@ -745,6 +746,28 @@ static void client_creatures_tick(client *c, float dt, const s32 eye[3])
         c->ai_accum = 0.0;
 }
 
+/*
+ * A script CALL reached a rotation primitive: ask that node's rotator to take
+ * one step.
+ *
+ * The event runtime reports a CALL without interpreting it, because which
+ * index is SIMROT is a per-map question only the map's UserFuncs answers. What
+ * the operands mean is `rotator.[ch]`'s business, beside the builder that
+ * reads the same offsets.
+ */
+static void client_event_call(void *user, const q2_event_item *item,
+                              u8 call_index)
+{
+    client *c = (client *)user;
+
+    if (!c || !c->rotators_ready || !c->sim.userfuncs_ready)
+        return;
+
+    c->rot_steps += q2_rotators_call(&c->rotators, &c->sim.userfuncs,
+                                     item, call_index);
+}
+
+
 /* ------------------------------------------------------------------------- */
 static bool client_load_zone(client *c, const char *map, int index)
 {
@@ -1039,6 +1062,15 @@ static bool client_load_zone(client *c, const char *map, int index)
                 Q2_INFO("rotators: %u", c->rotators.count);
             }
         }
+
+        /*
+         * And the other half of a rotator: the step request. Building the set
+         * only says which nodes CAN turn — every kind sits still until a script
+         * CALL asks for a step (rotator.c, 0x8002F1B8), which is why the set
+         * built last round reported `rot moved 0` on every map.
+         */
+        c->sim.event_rt.on_call      = client_event_call;
+        c->sim.event_rt.on_call_user = c;
 
         q2_sim_spawn(&c->sim, feet, c->cam.yaw);
         c->sim.player.ground_y = feet[1];
@@ -2476,12 +2508,14 @@ static void client_write_shot(client *c, bool numbered)
         Q2_INFO("  creatures %u live, %u hunting, %u drawn (%u faces), "
                 "nearest %d units, moved %ld, player %d hp, "
                 "%u swings %u shots, %u sounds, %u dead, %ld hp total, "
-                "player attacked %u, targets %u, bolts %u, rot moved %u",
+                "player attacked %u, targets %u, bolts %u, "
+                "rot %u steps %u moved, %u calls",
                 live, hunting, c->cre_drawn, c->cre_faces, near_d, moved,
                 c->sim.combat.inv.health, c->cre_swings, c->cre_shots,
                 c->cre_sounds, dead, hp, c->player_attacks,
                 c->sim.combat.target_count,
-                c->sim.combat.projectiles.live, c->rot_moved);
+                c->sim.combat.projectiles.live, c->rot_steps,
+                c->rot_moved, c->sim.event_rt.call_count);
         Q2_INFO("  ai world  %u traces (%u unplaced, %u clear), "
                 "%u bottom (%u fail), %u los (%u blocked)",
                 c->ai_world.stats.traces, c->ai_world.stats.trace_unplaced,

@@ -233,6 +233,61 @@ void q2_rotator_trigger_node(q2_rotator_set *set, u32 node)
             rotator_fire(&set->rotators[i]);
 }
 
+u32 q2_rotators_call(q2_rotator_set *set, const q2_userfuncs *uf,
+                     const q2_event_item *item, u8 call_index)
+{
+    const u8 *p;
+    u32 slot, made = 0;
+    s16 node;
+
+    if (!set || !uf || !item || !item->payload)
+        return 0;
+
+    /* item.payload points past the two header bytes, so a documented offset of
+     * +N is payload[N - 2]. Same convention as the builder above. */
+    p = item->payload - 2;
+
+    switch (q2_userfuncs_prim(uf, call_index)) {
+    case Q2_UF_SIMROT:
+    case Q2_UF_SIMROT2:
+        if (item->len < 24)
+            break;
+        for (slot = 0; slot < 4; slot++) {
+            node = q2_rd_s16(p + 12 + 2 * (s32)slot);
+            if (node < 0)
+                break;              /* 0x80028628 stops at the first empty */
+            q2_rotator_trigger_node(set, (u32)node);
+            made++;
+        }
+        break;
+
+    case Q2_UF_ROTHATCH:
+        if (item->len < 20)
+            break;
+        node = q2_rd_s16(p + 18);
+        if (node >= 0) {
+            q2_rotator_trigger_node(set, (u32)node);
+            made++;
+        }
+        break;
+
+    case Q2_UF_ROTBUTTON:
+        if (item->len < 12)
+            break;
+        node = q2_rd_s16(p + 10);
+        if (node >= 0) {
+            q2_rotator_trigger_node(set, (u32)node);
+            made++;
+        }
+        break;
+
+    default:
+        break;
+    }
+
+    return made;
+}
+
 u32 q2_rotators_tick(q2_rotator_set *set, s32 dt)
 {
     u32 i, moved = 0;

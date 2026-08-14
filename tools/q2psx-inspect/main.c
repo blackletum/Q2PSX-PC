@@ -44,6 +44,7 @@
 #include "modeldraw.h"
 #include "mover.h"
 #include "points.h"
+#include "rotator.h"
 #include "population.h"
 #include "trigger.h"
 #include "raster.h"
@@ -180,7 +181,7 @@ static void usage(void)
     puts("  pmove   <disc> [map] [zone] player movement: styles, jump, view, volumes");
     puts("  screen  <disc> out.ppm [layout] [map] [zone]  compose one frame");
     puts("  music   <disc>              demultiplex and decode the XA music streams");
-    puts("  render  <disc> <map> [z] [out.ppm] [yaw] [pitch]  render a zone (4096 = full turn)");
+    puts("  render  <disc> <map> [z] [out.ppm] [yaw] [pitch] [rot-ticks]  render a zone");
     puts("  hexdump <disc> <path> [n]   hex dump the first n bytes of a file");
     puts("  extract <disc> <outdir>     extract the whole filesystem");
     puts("  export  <disc> <outdir> [what] [map]  decode assets: OBJ, PCX/PNG, WAV");
@@ -3491,8 +3492,13 @@ static int cmd_fps(disc *d, const char *map, int zone_index, const char *weapon,
  * The camera is placed automatically at the centre of the zone's true world
  * bounds, backed off along -Z far enough to see the whole thing.
  */
+/* Where `render` points the camera when it has a rotator worth looking at. */
+static bool g_focus_valid;
+static s32  g_focus[3];
+static s32  g_focus_size;
+
 static int cmd_render(disc *d, const char *map, int zone_index, const char *out_path,
-                      s32 yaw, s32 pitch)
+                      s32 yaw, s32 pitch, s32 rot_ticks)
 {
     /* pitch == 9999 is a sentinel meaning "stand at the spawn point and look
      * ahead" rather than framing the whole zone from outside. It is the view a
@@ -3528,6 +3534,139 @@ static int cmd_render(disc *d, const char *map, int zone_index, const char *out_
            wmin[0], wmin[1], wmin[2], wmax[0], wmax[1], wmax[2]);
     printf("  world size    : %d x %d x %d\n",
            wmax[0] - wmin[0], wmax[1] - wmin[1], wmax[2] - wmin[2]);
+
+    /*
+     * The zone's rotating brushes, turned by `rot_ticks` before drawing.
+     *
+     * This is how a rotator is looked at rather than counted: render the same
+     * zone twice, once with 0 ticks and once with several hundred, and the
+     * geometry that moves is the geometry a script turns. The rotators are
+     * built from the ZONE's own Events — the client builds from COMMON's,
+     * which is where its trigger volumes point but NOT where the rotation calls
+     * live, so it finds one or two per map and this finds dozens.
+     *
+     * Every rotator is stepped directly, standing in for the script call, since
+     * what fires a zone's records is still unknown (openquestions #50).
+     */
+    static q2_rotator_set g_render_rot;      /* outlives the draw */
+
+    /* A NEGATIVE tick count builds and frames the rotators without turning
+     * them: the "before" of a before/after pair, taken from the same camera,
+     * which a zero here could not give because zero also means "no rotators
+     * at all" and would frame the whole zone instead. */
+    if (rot_ticks != 0) {
+        char zpath[256], cpath[256];
+        q2_buf zbuf, cbuf;
+
+        snprintf(zpath, sizeof(zpath), "Q2DATA/LEVELS/%s/ZONE%d.DAT",
+                 map, zone_index);
+        snprintf(cpath, sizeof(cpath), "Q2DATA/LEVELS/%s/COMMON.DAT", map);
+
+        if (disc_read_file(d, zpath, &zbuf) == Q2_OK &&
+            disc_read_file(d, cpath, &cbuf) == Q2_OK) {
+            q2_zone_file   zf;
+            q2_common_file cf;
+            q2_events      zev;
+            q2_userfuncs   uf;
+
+            if (q2_zone_open(&zf, &zbuf) == Q2_OK &&
+                q2_common_open(&cf, &cbuf) == Q2_OK &&
+                q2_events_parse_zone(&zev, &zf) == Q2_OK &&
+                q2_userfuncs_parse(&uf, &cf) == Q2_OK &&
+                q2_rotators_build(&g_render_rot, &zev, &uf) == Q2_OK) {
+                u32 ri, moved = 0;
+                s32 t;
+
+                /*
+                 * Re-triggered every tick, which is a script holding the
+                 * rotation ON rather than tapping it once. One step is all a
+                 * single call buys — `q2_rotators_tick` consumes the request —
+                 * so a single tap turns an ACCUM rotator by one speed's worth
+                 * and stops, which is correct but shows nothing.
+                 *
+                 * Nothing is triggered on the "before" pass: a SNAP rotator
+                 * moves the moment it is asked, so triggering it and ticking
+                 * zero times would still show it turned.
+                 */
+                for (t = 0; t < rot_ticks; t++) {
+                    for (ri = 0; ri < g_render_rot.count; ri++)
+                        q2_rotator_trigger(&g_render_rot, ri);
+                    moved += q2_rotators_tick(&g_render_rot, 12);
+                }
+
+
+                zone.rotators = &g_render_rot;
+                printf("  rotators      : %u, %u tick-moves over %d ticks\n",
+                       g_render_rot.count, moved, rot_ticks);
+                for (ri = 0; ri < g_render_rot.count; ri++)
+                    printf("    node %d  axis %u  angle %d\n",
+                           g_render_rot.rotators[ri].node,
+                           g_render_rot.rotators[ri].axis,
+                           g_render_rot.rotators[ri].angle);
+
+                /*
+                 * Frame the rotator that turned the most, rather than the whole
+                 * zone. A rotating brush is one node among hundreds: from the
+                 * outside view it is a few pixels, and a render that cannot
+                 * show the motion cannot check it either.
+                 */
+                {
+                    s32 best = -1, best_angle = -1;
+                    q2_rotator_set probe;
+
+                    /*
+                     * Which rotator to look at is decided by a PROBE run, not
+                     * by the pass being rendered: the before pass has turned
+                     * nothing, so choosing by current angle would pick nothing
+                     * there and frame the whole zone, and the pair would come
+                     * from two different cameras. The probe is a second set off
+                     * the same script, run the same way, and thrown away.
+                     */
+                    memset(&probe, 0, sizeof(probe));
+                    if (q2_rotators_build(&probe, &zev, &uf) == Q2_OK) {
+                        u32 pi;
+                        s32 pt;
+
+                        for (pt = 0; pt < 400; pt++) {
+                            for (pi = 0; pi < probe.count; pi++)
+                                q2_rotator_trigger(&probe, pi);
+                            q2_rotators_tick(&probe, 12);
+                        }
+
+                        for (pi = 0; pi < probe.count; pi++) {
+                            s32 a = probe.rotators[pi].angle;
+
+                            if (a < 0)
+                                a = -a;
+                            if (probe.rotators[pi].node >= 0 && a > best_angle) {
+                                best_angle = a;
+                                best = probe.rotators[pi].node;
+                            }
+                        }
+                        q2_rotators_free(&probe);
+                    }
+
+                    if (best >= 0) {
+                        q2_scene_node nd;
+
+                        if (q2_scene_get_node(&zone.scene, (u32)best, &nd)) {
+                            s32 nmin[3], nmax[3];
+
+                            q2_scene_node_bounds(&nd, nmin, nmax);
+                            g_focus_valid = true;
+                            g_focus[0] = (nmin[0] + nmax[0]) / 2;
+                            g_focus[1] = (nmin[1] + nmax[1]) / 2;
+                            g_focus[2] = (nmin[2] + nmax[2]) / 2;
+                            g_focus_size = (nmax[0] - nmin[0]) +
+                                           (nmax[2] - nmin[2]);
+                            printf("    framing node %d, centre [%d %d %d]\n",
+                                   best, g_focus[0], g_focus[1], g_focus[2]);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     camera_console(&cam, W, H);
     cam.yaw   = yaw;
@@ -3570,6 +3709,29 @@ static int cmd_render(disc *d, const char *map, int zone_index, const char *out_
         if (!placed)
             printf("  eye at spawn  : none for this zone, framing instead\n");
         eye_view = placed;
+    }
+
+    /* A rotator was framed above: sit off its centre instead of the zone's. */
+    if (g_focus_valid) {
+        /* Back off by a few times the node's own size: a rotating brush is
+         * small, and sitting at its extent puts the camera inside it. */
+        /* Close enough that the brush fills the frame: its own size across,
+         * not three times it, which put a 287-unit door 860 units away and
+         * left it a few hundred pixels of a 1024-wide render. */
+        s32 dist = g_focus_size;
+
+        if (dist < 1200)
+            dist = 1200;
+        s32 sy = q2_sin12(yaw),   cyaw = q2_cos12(yaw);
+        s32 sp = q2_sin12(pitch), cp   = q2_cos12(pitch);
+        s32 fx = (s32)(((s64)cp * sy) >> Q2_FRAC_12);
+        s32 fy = -sp;
+        s32 fz = (s32)(((s64)cp * cyaw) >> Q2_FRAC_12);
+
+        cam.pos[0] = g_focus[0] - (s32)(((s64)fx * dist) >> Q2_FRAC_12);
+        cam.pos[1] = g_focus[1] - (s32)(((s64)fy * dist) >> Q2_FRAC_12);
+        cam.pos[2] = g_focus[2] - (s32)(((s64)fz * dist) >> Q2_FRAC_12);
+        eye_view = true;                 /* skip the whole-zone framing */
     }
 
     if (!eye_view) {
@@ -4270,6 +4432,26 @@ static int cmd_walk(disc *d, const char *map, int zone_index, int ticks)
  * opcode census and how much of it actually executes: a script that parses but
  * never runs anything would look fine to `verify` and be useless in a game.
  */
+/*
+ * A zone's rotators, driven by that zone's own scripts.
+ *
+ * The client installs exactly this hook on its event runtime; here it runs for
+ * every script on the disc at once, which is the only way to see the rotation
+ * calls without walking 42 maps into every trigger volume by hand.
+ */
+typedef struct ev_rot_ctx {
+    const q2_userfuncs *uf;
+    q2_rotator_set     *set;
+    u32                 steps;
+} ev_rot_ctx;
+
+static void ev_rot_call(void *user, const q2_event_item *item, u8 call_index)
+{
+    ev_rot_ctx *ctx = (ev_rot_ctx *)user;
+
+    ctx->steps += q2_rotators_call(ctx->set, ctx->uf, item, call_index);
+}
+
 static int cmd_events(disc *d)
 {
     int i, n = disc_file_count(d);
@@ -4277,6 +4459,8 @@ static int cmd_events(disc *d)
     u32 ran = 0, movers = 0, zone_changes = 0;
     u32 op_hist[64];
     u32 movers_built = 0, movers_moved = 0, movers_open = 0, movers_empty = 0;
+    u32 rot_built = 0, rot_calls = 0, rot_steps = 0, rot_moved = 0, rot_turned = 0;
+    u32 trig_with_event = 0, trig_in_common = 0;
 
     memset(op_hist, 0, sizeof(op_hist));
     printf("Running every event script on the disc...\n\n");
@@ -4322,6 +4506,52 @@ static int cmd_events(disc *d)
                     } while (q2_events_next_record(&ev, &rec, &rec));
                 }
 
+                /*
+                 * The zone's rotating brushes, wired to the scripts that turn
+                 * them. The UserFuncs table is per MAP and lives in its
+                 * COMMON.DAT, so it has to be opened alongside the zone — the
+                 * call index in a zone's script means nothing without it.
+                 */
+                q2_rotator_set rs;
+                q2_buf         cbuf;
+                q2_common_file ccf;
+                q2_userfuncs   cuf;
+                ev_rot_ctx     rctx;
+                bool           rot_ready = false, common_open = false;
+                char           cpath[256];
+                const char    *slash = strrchr(f->path, '/');
+
+                memset(&rs, 0, sizeof(rs));
+                memset(&rctx, 0, sizeof(rctx));
+
+                if (slash && (size_t)(slash - f->path) < sizeof(cpath) - 12) {
+                    memcpy(cpath, f->path, (size_t)(slash - f->path));
+                    strcpy(cpath + (slash - f->path), "/COMMON.DAT");
+
+                    if (disc_read_file(d, cpath, &cbuf) == Q2_OK) {
+                        if (q2_common_open(&ccf, &cbuf) == Q2_OK) {
+                            /*
+                             * The file stays OPEN across the run: the parsed
+                             * UserFuncs point into its buffer, and the hook
+                             * reads them on every CALL. Closing here segfaults
+                             * on the first script that calls anything.
+                             */
+                            common_open = true;
+                            if (q2_userfuncs_parse(&cuf, &ccf) == Q2_OK &&
+                                q2_rotators_build(&rs, &ev, &cuf) == Q2_OK) {
+                                rot_ready   = true;
+                                rot_built  += rs.count;
+                                rctx.uf     = &cuf;
+                                rctx.set    = &rs;
+                                rt.on_call      = ev_rot_call;
+                                rt.on_call_user = &rctx;
+                            }
+                        } else {
+                            q2_buf_free(&cbuf);
+                        }
+                    }
+                }
+
                 for (k = 0; k < ev.dir_count; k++) {
                     q2_event_dir_entry e;
                     if (!q2_events_get_dir_entry(&ev, k, &e))
@@ -4332,6 +4562,26 @@ static int cmd_events(disc *d)
 
                 if (q2_event_rt_update(&rt) == Q2_EVENT_ZONE_CHANGE)
                     zone_changes++;
+
+                if (rot_ready) {
+                    u32 t, ri;
+
+                    rot_steps += rctx.steps;
+
+                    /* Same 400 ticks the movers get, on the rotators' own
+                     * 1/300 s clock. */
+                    for (t = 0; t < 400; t++)
+                        rot_moved += q2_rotators_tick(&rs, 12);
+
+                    for (ri = 0; ri < rs.count; ri++)
+                        if (rs.rotators[ri].angle != 0)
+                            rot_turned++;
+
+                    q2_rotators_free(&rs);
+                }
+                rot_calls += rt.call_count;
+                if (common_open)
+                    q2_common_close(&ccf);
 
                 /* Build the zone's doors and lifts and run them for a while,
                  * so the state machine is exercised rather than merely
@@ -4367,6 +4617,48 @@ static int cmd_events(disc *d)
             if (q2_events_parse_common(&ev, &cf) == Q2_OK) {
                 files++;
                 records += ev.record_count;
+
+                /*
+                 * Which script do the trigger volumes fire?
+                 *
+                 * They are parsed from COMMON.DAT and the sim fires their
+                 * `event_offset` into COMMON's Events. But COMMON's script is
+                 * nearly empty while the ZONE's carries the movers and the
+                 * rotation calls — so before wiring anything further, count how
+                 * many trigger offsets actually name a record in COMMON's own
+                 * script. An offset that names no record there is firing into
+                 * the wrong chunk.
+                 */
+                q2_triggers tg;
+
+                if (q2_triggers_parse(&tg, &cf) == Q2_OK) {
+                    q2_event_rt probe;
+
+                    if (q2_event_rt_init(&probe, &ev) == Q2_OK) {
+                        u32 t;
+
+                        for (t = 0; t < tg.count; t++) {
+                            q2_trigger tr;
+                            u32 r;
+                            bool hit = false;
+
+                            if (!q2_trigger_get(&tg, t, &tr))
+                                continue;
+                            if (tr.event_offset == Q2_TRIGGER_NO_EVENT)
+                                continue;
+
+                            trig_with_event++;
+                            for (r = 0; r < probe.record_count; r++)
+                                if (probe.offsets[r] == tr.event_offset) {
+                                    hit = true;
+                                    break;
+                                }
+                            if (hit)
+                                trig_in_common++;
+                        }
+                        q2_event_rt_free(&probe);
+                    }
+                }
             }
             q2_common_close(&cf);
         }
@@ -4382,6 +4674,13 @@ static int cmd_events(disc *d)
     printf("  movers built      : %u  (%u with no nodes)\n", movers_built, movers_empty);
     printf("  mover tick-moves  : %u\n", movers_moved);
     printf("  movers displaced  : %u  after 400 ticks\n", movers_open);
+    printf("  rotators built    : %u\n", rot_built);
+    printf("  CALL items run    : %u\n", rot_calls);
+    printf("  rotation steps    : %u  requested by those calls\n", rot_steps);
+    printf("  rotator tick-moves: %u\n", rot_moved);
+    printf("  rotators turned   : %u  after 400 ticks\n", rot_turned);
+    printf("  triggers w/ event : %u, of which %u name a record in COMMON's"
+           " own script\n", trig_with_event, trig_in_common);
 
     printf("\n  opcode census\n");
     {
@@ -4877,7 +5176,8 @@ int main(int argc, char **argv)
             const char *outp = (argc >= 6) ? argv[5] : "zone.ppm";
             s32 yaw   = (argc >= 7) ? (s32)strtol(argv[6], NULL, 10) : 0;
             s32 pitch = (argc >= 8) ? (s32)strtol(argv[7], NULL, 10) : 0;
-            rc = cmd_render(d, argv[3], zi, outp, yaw, pitch);
+            s32 rott  = (argc >= 9) ? (s32)strtol(argv[8], NULL, 10) : 0;
+            rc = cmd_render(d, argv[3], zi, outp, yaw, pitch, rott);
         }
     } else if (strcmp(cmd, "dat") == 0) {
         if (argc < 4) {

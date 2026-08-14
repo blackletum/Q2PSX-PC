@@ -180,6 +180,23 @@ void q2_rotator_trigger(q2_rotator_set *set, u32 index);
 void q2_rotator_trigger_node(q2_rotator_set *set, u32 node);
 
 /*
+ * The other half of the builder: a running script has reached a CALL item, so
+ * ask the nodes it names to take a step. Returns how many requests it made,
+ * and zero for any call that is not one of the four rotation primitives.
+ *
+ * This lives beside `q2_rotators_build` because it must read the object slots
+ * from exactly the same operand offsets, and those differ per primitive —
+ * SIMROT names four objects at +12..+18, ROTHATCH one at +18, ROTBUTTON one at
+ * +10. Two copies of that table would rot apart and turn the wrong geometry.
+ *
+ * Nothing turns without this. Every kind sits still until a step is requested
+ * (0x8002F1B8), so a map whose rotators are built but never called reports
+ * `rot moved 0` forever, which is what it did until this existed.
+ */
+u32 q2_rotators_call(q2_rotator_set *set, const q2_userfuncs *uf,
+                     const q2_event_item *item, u8 call_index);
+
+/*
  * One pass of the 48-object sweep. Advances every rotator with a pending step
  * and consumes the request. Returns how many actually moved, so a caller can
  * tell a still frame from a turning one.

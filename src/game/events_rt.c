@@ -179,8 +179,20 @@ static q2_event_outcome run_item(q2_event_rt *rt, const q2_event_item *item)
         rt->skipped_movers++;
         return Q2_EVENT_UNSUPPORTED;
 
+    case Q2_EVOP_CALL: {
+        u8 index;
+
+        /* Reported, not interpreted — see the note on `on_call`. */
+        if (q2_events_get_call_index(item, &index)) {
+            rt->call_count++;
+            if (rt->on_call)
+                rt->on_call(rt->on_call_user, item, index);
+        }
+        return Q2_EVENT_OK;
+    }
+
     default:
-        /* FX, WAIT, CALL, FXGROUP and anything else: recognised but not yet
+        /* FX, WAIT, FXGROUP and anything else: recognised but not yet
          * implemented. Counting them separately from movers would imply more
          * certainty about them than we have. */
         return Q2_EVENT_OK;
