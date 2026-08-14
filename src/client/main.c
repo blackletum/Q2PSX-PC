@@ -293,6 +293,8 @@ typedef struct client {
     u32               cre_sounds;
     u32               player_attacks;
     u32               rot_moved;
+    u32               vw_events;
+    s16               vw_last_event;
     int               cre_last_sound;
     u32               cre_drawn;      /* creatures with faces in the last view */
     u32               cre_faces;
@@ -1403,9 +1405,40 @@ static void client_input_simulated(client *c, float dt)
             c->vw_last_weapon = c->sim.combat.weapon_id;
         }
 
-        swapped = q2_vw_advance(&c->vw, ticks, in.attack, Q2_VW_FIRED);
+        /*
+         * What the sim's own shot did, rather than an unconditional "it fired".
+         * `combat.last_shot.dry` is "out of ammo", which is the machine's
+         * `Q2_VW_FIRE_DENIED` (viewweapon.h) — and it is what makes an empty
+         * gun auto-switch instead of clicking. `fired` is false for an ordinary
+         * refire wait too, so it is the wrong flag to test.
+         */
+        swapped = q2_vw_advance(&c->vw, ticks, in.attack,
+                                (in.attack && c->sim.combat.last_shot.dry)
+                                    ? Q2_VW_FIRE_DENIED : Q2_VW_FIRED);
         if (swapped)
             client_bind_view_model(c);
+
+        /*
+         * The machine's two outputs, neither of which anything had ever
+         * drained. `q2_vw_take_refire`, `q2_vw_take_event` and
+         * `q2_vw_wants_fire` were all declared, implemented and never called.
+         *
+         * The refire signal is the pass on which the original recomputes the
+         * player's next and previous weapons (0x8004FB5C), so draining it is
+         * what makes running dry switch you off the empty gun. The event is the
+         * animation's own — a muzzle flash or a shell eject on the frame the
+         * clip says, not the frame the trigger was pressed.
+         */
+        if (q2_vw_take_refire(&c->vw))
+            q2_sim_cycle_weapon(&c->sim, +1);
+
+        {
+            s16 ev;
+            if (q2_vw_take_event(&c->vw, &ev)) {
+                c->vw_events++;
+                c->vw_last_event = ev;
+            }
+        }
     }
 
     /* The overlay ages on logic ticks, not on drawn frames — one notification

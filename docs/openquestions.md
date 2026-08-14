@@ -1805,8 +1805,17 @@ the death screen. That is a pattern rather than four coincidences, so it was wor
 measuring instead of noticing.
 
 Sweeping every `q2_*` and `psx_*` function declared in a header and counting calls
-across all of `src/` and `tools/` gives **100 that are never called from anywhere
-but their own definition**. Most are honest accessors. Some are whole subsystems:
+across all of `src/` and `tools/` gives **89 that are never mentioned anywhere but
+their own definition**. Most are honest accessors. Some are whole subsystems.
+
+**The first version of this sweep said 100, and it was wrong in a way worth
+recording**, because it is the same mistake as trusting a measurement without
+asking what it can and cannot see. It counted `name(` — call syntax — so every
+function installed as a FUNCTION POINTER looked dead. Eight are: the item thinks
+`q2_item_think` and `q2_item_shrink_think`, and the AI verbs `q2_ai_stand`,
+`q2_ai_walk`, `q2_ai_run`, `q2_ai_move`, `q2_ai_charge`. Those are wired and always
+were, and the table below no longer claims otherwise. Counting bare identifiers as
+well separates the two.
 
 | what | evidence |
 | --- | --- |
@@ -1815,9 +1824,15 @@ but their own definition**. Most are honest accessors. Some are whole subsystems
 | the **AI breadcrumb trail** | `q2_trail_init` and `q2_trail_add`, so the ring at `gp+17892` was always empty and a creature that lost you had nowhere to follow you to |
 | **`q2_monster_damage`** | the module-owned health path, which is how a creature with an AI brain is meant to take damage |
 | the **per-frame lighting** | `q2_light_world_begin_frame`, `q2_light_glow_fade`, `q2_light_env_apply` |
-| the **item thinks** | `q2_item_think`, `q2_item_shrink_think` — an item's spin and glow |
+| the **view weapon's own outputs** | `q2_vw_take_refire`, `q2_vw_take_event`, `q2_vw_wants_fire` — so running a gun dry never switched off it, and an animation event never reached the frame it belongs to |
+| **`q2_weapon_autoselect`** | what a pickup is meant to consult |
 
-Two are now wired. The client builds and ticks the rotator set — BASE0 has two
+Three are now wired. The view weapon's refire signal drives the auto-switch off an
+empty gun, and its event is drained on the frame the clip raises it rather than the
+frame the trigger was pressed — and the verdict handed back to the machine is now
+`last_shot.dry` rather than an unconditional "it fired", since `fired` is also
+false during an ordinary refire wait and would have reported every shot as denied.
+The client builds and ticks the rotator set — BASE0 has two
 rotators, BASE1, COMMAND and POWER1 one each, JAIL2 none — and drops a breadcrumb
 every ten frames. *Still open for the rotators:* nothing triggers a step. A
 rotator moves when SIMROT's exec calls `q2_rotator_trigger`, and the event runtime
