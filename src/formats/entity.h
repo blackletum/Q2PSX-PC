@@ -38,11 +38,14 @@
  *     0x11  u8        type        exactly five values game-wide: 7, 15, 23, 31,
  *                                 39, which is ((n<<3)|7) for n in 0..4. Those
  *                                 five n are the five arms of the STYLE switch
- *                                 at 0x8007572C, each selecting an animation
- *                                 curve: 0x800A1FDC, 0x800A2014, 0x800A2024 and
- *                                 0x800A203C, runs of 8-byte records in 1.3.12
- *                                 ending at a zero pair. The curves themselves
- *                                 are not decoded; the dispatch is.
+ *                                 at 0x8007572C, and each selects a LENS FLARE
+ *                                 element list: 0x800A1FDC, 0x800A2014,
+ *                                 0x800A2024 and 0x800A203C. All four are
+ *                                 already transcribed in game/flare.c as
+ *                                 k_style1..k_style4 — a burst plus a run of
+ *                                 discs — so `type` is a flare style, and the
+ *                                 only thing this note ever lacked was the
+ *                                 pointer to that file.
  *     0x12  u16       radius      equals isqrt(radius_sq) for all 7,814
  *     0x14  u32       inner_radius_sq   always <= radius_sq
  *     0x18  u32       radius_sq   the authoritative cut-off

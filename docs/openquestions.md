@@ -4171,10 +4171,21 @@ nothing saying so.
           0x800A2024  style 3   two records
           0x800A203C  style 4
 
-      The values are 1.3.12 fixed point — 4096 is 1.0, and the rest are 2048, 1536, 1100, 1024, 800, 768,
-      512, with some negative (61736 is -3800 as s16). So **`style` chooses a light ANIMATION CURVE and
-      `size_shift` scales it**, which is what a Quake light style has always been. The individual curves are
-      not decoded yet, but they are four named tables rather than an unknown.
+      ~~The individual curves are not decoded yet.~~ **They were decoded before this session started.**
+      `src/game/flare.c` has all four transcribed as `k_style1..k_style4`, at those exact addresses, with a
+      header naming the four routines involved and noting that `q2psx-inspect lights` reads the same bytes
+      back off the disc and compares them element by element.
+
+      So `style` is a **LENS FLARE style**: each list is one `BURST` element plus a run of `DISC`s, and
+      `size_shift` scales the whole flare. Style 2 is the core alone; style 4 is style 1 less one element.
+      The values I read as an "animation curve" — 4096, 2048, 0x044C, -0x0ED8 — are element sizes and
+      offsets along the centre-to-light line.
+
+      What was actually missing was a POINTER: `formats/entity.h` said "style semantics are unknown" while
+      `game/flare.c` had held the answer all along, and nothing connected the two. That note now points at
+      the file. **The lesson is not the light: it is that "unknown" in one file is worth grepping the tree
+      for before it is worth disassembling.** Four rounds of this session have now ended in a claim that was
+      already answered somewhere in the repo or already wrong.
 
       How many exist, counted rather than grepped: **18 TIMEDLIGHT calls and 1 FLKLIGHT across COMMON's
       scripts, disc-wide.** A passive capture triggers none of them — they are script records fired by
