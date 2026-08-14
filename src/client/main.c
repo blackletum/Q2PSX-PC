@@ -288,6 +288,8 @@ typedef struct client {
     double            ai_accum;       /* seconds owed to the 10 Hz AI clock    */
     u32               ai_thoughts;
     u32               cre_swings, cre_shots;   /* hook invocations */
+    u32               cre_sounds;
+    int               cre_last_sound;
     u32               cre_drawn;      /* creatures with faces in the last view */
     u32               cre_faces;
     s32              *cre_home;      /* where each creature spawned          */
@@ -654,17 +656,23 @@ static void client_cre_sound(q2_monster *m, int which, void *user)
         return;
 
     /*
-     * The module names a sound by an index into its own table, and resolving
-     * that table is a separate piece of work (#6). What is known is which
-     * BANK entries a creature uses, so the two that every module has are
-     * mapped and the rest are silent rather than arbitrary.
+     * The module names a sound by an index into its OWN table, and that table
+     * is not resolved yet (#6). This used to map indices 0 and 1 to
+     * `cre_pain1` and `cre_die1`, which was an invention twice over: the bank
+     * has no such names, so it silently played nothing, and the index-to-name
+     * mapping was never read.
+     *
+     * The bank's real convention is `<creature>_<action><n>`, the same shape as
+     * `wep_` and `itm_`: BASE0 carries `sol_atck1`, `sol_atck2`, `sol_atck3`,
+     * `sol_deth1..3`, `sol_idle1`, `sol_pain1`, `sol_pain2` and `sol_srch1` —
+     * exactly the five families id's soldier has. So the names are there to be
+     * matched once the module's table says which index is which; until then
+     * this stays silent rather than guessing, and the index is recorded so a
+     * caller can see what was asked for.
      */
-    switch (which) {
-    case 0:  name = "cre_pain1"; break;
-    case 1:  name = "cre_die1";  break;
-    default: return;
-    }
-    client_play_sound(c, name);
+    (void)name;
+    c->cre_sounds++;
+    c->cre_last_sound = which;
 }
 
 /*
@@ -2230,9 +2238,11 @@ static void client_write_shot(client *c, bool numbered)
                 near_d = d;
         }
         Q2_INFO("  creatures %u live, %u hunting, %u drawn (%u faces), "
-                "nearest %d units, moved %ld, player %d hp, %u swings %u shots",
+                "nearest %d units, moved %ld, player %d hp, "
+                "%u swings %u shots, %u sounds (last id %d)",
                 live, hunting, c->cre_drawn, c->cre_faces, near_d, moved,
-                c->sim.combat.inv.health, c->cre_swings, c->cre_shots);
+                c->sim.combat.inv.health, c->cre_swings, c->cre_shots,
+                c->cre_sounds, c->cre_last_sound);
         Q2_INFO("  ai world  %u traces (%u unplaced, %u clear), "
                 "%u bottom (%u fail), %u los (%u blocked)",
                 c->ai_world.stats.traces, c->ai_world.stats.trace_unplaced,

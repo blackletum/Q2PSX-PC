@@ -1776,6 +1776,18 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
 
 ## Two things the creature chain was still missing
 
+**A correction to this section's own first version.** The sound hook was wired with
+`cre_pain1` and `cre_die1` for indices 0 and 1, and that was an invention twice over:
+the bank has no such names, so it silently played nothing, and the index-to-name
+mapping had never been read. It is gone.
+What replaces it is the bank's real convention, which is worth having: sounds are
+`<creature>_<action><n>`, the same shape as `wep_` and `itm_`. BASE0 carries
+`sol_atck1`, `sol_atck2`, `sol_atck3`, `sol_deth1..3`, `sol_idle1`, `sol_pain1`,
+`sol_pain2` and `sol_srch1` — exactly the five families id's soldier has. So the names
+are there to be matched the moment the module's own sound table says which index is
+which. Measured meanwhile: over 1200 frames on BASE1 the hook is asked for a sound
+**21 times**, so the path works and only the mapping is missing.
+
 **Nothing had ever set the action hooks.** `crebind.h` defines a sound hook, a
 fire hook and a melee hook, and the only definitions of the setters were in
 `cre_soldier.c` — no caller anywhere in the tree. So every claw, every shot and
