@@ -1524,9 +1524,29 @@ item records at run time instead of transcribing a table, so there is nothing to
       attract loop.
       `q2psx-inspect modstrings <map> [crea]` is the reader; BASE0's `LevelBin` yields five runs against
       QFRONT's 349, which is the contrast that says the scan is finding a pool rather than manufacturing one.
-      *Still open:* the item RECORDS — which strings sit on which page, at what y, with what action. Those
-      are built by this module's code, and reading them is now a `levdisasm QFRONT` job rather than a search
-      of the wrong binary.
+      **And the item records are not built at run time either — they are a static array in the module,**
+      which `modxrefs` finds by asking what points at a string. Every one of the eight checked has exactly
+      one word reference, and it is the record's own first field. The layout is the executable's own, 24
+      bytes: `{ char *text; s16 x; s16 y; void (*action)(void); ... }`, so the engine's `0x8001A474` takes a
+      module's record and the executable's without knowing the difference.
+
+          module+0x0EC3C  START            256, 151  -> module+0xCDC4
+          module+0x0EC54  OPTIONS          256, 177  -> module+0xCCA4
+          module+0x0EC84  SINGLE PLAYER    256, 111  -> module+0xCD40
+          module+0x0EC9C  MULTI PLAYER     256, 137  -> module+0xCF68
+          module+0x0ED44  PLAYER OPTIONS   256,  85  -> module+0xCADC
+          module+0x0ED5C  SOUND OPTIONS    256, 111  -> module+0xCB74
+          module+0x0ED74  VIDEO OPTIONS    256, 137  -> module+0xCC0C
+          module+0x0ED8C  VIEW CREDITS     256, 163  -> module+0x35C8
+
+      Two things that are layout rather than data. Every row is **centred at x = 256** and the pitch is
+      **26 pixels** — 85, 111, 137, 163 on the OPTIONS page, 111 and 137 on START's, 151 and 177 on the
+      title's. And the title page's two rows sit *lower* than any sub-page's first row, which is the space
+      the `Q2LOGO` model occupies above them: the title screen is a rendered scene with two lines of menu
+      over it, as this entry said, and now the two lines have coordinates.
+      *Still open:* what each `action` does — eight module addresses, readable with `levdisasm` — and the
+      pages below these two levels (the deathmatch setup, VERSUS, CREDITS), which the same `modxrefs` walk
+      will reach one string at a time.
 
 - [x] 45. **Word wrap in practice — SOLVED, and it was the wrong screen.** The wrap the capture shows is the
       **briefing's**, not the MISSION screen's: `#06A196` at `0x800AE740` sets margins 106 and 406, which is

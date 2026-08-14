@@ -13,5 +13,6 @@ int cmd_access(const disc *d, const char *imm, const char *mnemonic);
 int cmd_moddisasm(const disc *d, const char *map, const char *addr, int count);
 int cmd_levdisasm(const disc *d, const char *map, const char *addr, int count);
 int cmd_modstrings(const disc *d, const char *map, bool level);
+int cmd_modxrefs(const disc *d, const char *map, const char *addr, bool level);
 
 #endif /* Q2PSX_INSPECT_CMD_EXE_H */

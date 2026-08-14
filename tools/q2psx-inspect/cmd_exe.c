@@ -1010,3 +1010,79 @@ int cmd_modstrings(const disc *d, const char *map, bool level)
     q2_common_close(&cf);
     return 0;
 }
+
+/* ------------------------------------------------------------------------- */
+/*
+ * References to an address inside a relocated module.
+ *
+ * `xrefs` sweeps the executable and cannot see a module, so a pointer into a
+ * module's own text pool had nothing that could find its consumer. This is the
+ * same idea against the relocated image: every word equal to the address, and
+ * every `lui`/`addiu` pair that materialises it.
+ *
+ * A word hit is the interesting one for the front end, because a menu item
+ * record starts with a `char *`, so the record IS the word's address.
+ */
+int cmd_modxrefs(const disc *d, const char *map, const char *addr_s, bool level)
+{
+    const char *what = level ? "LevelBin" : "CreAIBin";
+    char path[160];
+    q2_buf file;
+    q2_common_file cf;
+    q2_ai_module mod;
+    u32 want, i, words = 0, consts = 0;
+    reg_state st;
+
+    snprintf(path, sizeof(path), "Q2DATA/LEVELS/%s/COMMON.DAT", map);
+    if (disc_read_file(d, path, &file) != Q2_OK) {
+        fprintf(stderr, "cannot read %s\n", path);
+        return 1;
+    }
+    if (q2_common_open(&cf, &file) != Q2_OK) {
+        fprintf(stderr, "%s is not a COMMON.DAT\n", path);
+        q2_buf_free(&file);
+        return 1;
+    }
+    if ((level ? q2_level_module_load(&mod, &cf, Q2_MOD_BASE)
+               : q2_ai_module_load(&mod, &cf, Q2_MOD_BASE)) != Q2_OK ||
+        mod.empty) {
+        fprintf(stderr, "%s has no usable %s\n", map, what);
+        q2_common_close(&cf);
+        return 1;
+    }
+
+    want = parse_addr(addr_s);
+    if (want < mod.base)
+        want += mod.base;                /* accept a module-relative offset */
+
+    printf("%s %s: references to 0x%08X (module+0x%X)\n\n",
+           map, what, want, want - mod.base);
+
+    for (i = 0; i + 4 <= mod.image.size; i += 4) {
+        if (q2_rd_u32(mod.image.data + i) == want) {
+            printf("  word  module+0x%05X  0x%08X\n", i, mod.base + i);
+            words++;
+        }
+    }
+
+    reg_reset(&st, 0);
+    for (i = 0; i + 4 <= mod.image.size; i += 4) {
+        q2_mips_insn in;
+        u32 resolved = 0;
+
+        q2_mips_decode(q2_rd_u32(mod.image.data + i), mod.base + i, &in);
+        reg_step(&st, &in, &resolved);
+
+        if (resolved == want) {
+            printf("  const module+0x%05X  0x%08X  %s\n",
+                   i, mod.base + i, in.text);
+            consts++;
+        }
+    }
+
+    printf("\n  %u words, %u materialised constants\n", words, consts);
+
+    q2_ai_module_free(&mod);
+    q2_common_close(&cf);
+    return 0;
+}
