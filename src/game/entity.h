@@ -212,7 +212,8 @@ typedef struct q2_ent_event {
      * no bank to count with; the client does.
      */
     s32 model_index;
-    s32 radius;         /* Q2_ENT_EVENT_LIGHT                             */
+    s32 radius;         /* Q2_ENT_EVENT_LIGHT: the OUTER radius            */
+    s32 inner_radius;   /* Q2_ENT_EVENT_LIGHT: the inner, 0 if unspecified  */
 } q2_ent_event;
 
 typedef struct q2_ent_events {
@@ -223,8 +224,18 @@ typedef struct q2_ent_events {
 
 void q2_ent_events_clear(q2_ent_events *ev);
 void q2_ent_sound_at(q2_ent_events *ev, q2_ent_sound which, const s32 pos[3]);
+/*
+ * Raise a dynamic light.
+ *
+ * BOTH radii are carried. They were not always: the event held only the outer,
+ * and the client recovered the inner by matching the outer against the presets
+ * it knew (800 -> 300, 1400 -> 1000, 1300 -> 800). That worked while every
+ * preset had a distinct outer and would have failed silently the first time two
+ * shared one — a light of the wrong size, on a path with no error to report.
+ * Pass `inner` as 0 to mean "unspecified" and let the consumer choose.
+ */
 void q2_ent_light_at(q2_ent_events *ev, const s32 pos[3], const u8 glow[3],
-                     s32 radius);
+                     s32 inner_radius, s32 radius);
 void q2_ent_burst_at(q2_ent_events *ev, const s32 pos[3], const u8 glow[3],
                      s32 model_index);
 

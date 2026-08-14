@@ -323,8 +323,7 @@ q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
         s32 inner, outer;
 
         q2_weapon_muzzle_light(q2_rng_next(&sim->combat.rng), &inner, &outer);
-        (void)inner;
-        q2_ent_light_at(&sim->ent_world.events, eye, flash, outer);
+        q2_ent_light_at(&sim->ent_world.events, eye, flash, inner, outer);
     }
 
     sim->combat.next_fire = r.next_fire;
@@ -513,13 +512,14 @@ void q2_sim_combat_tick(q2_sim *sim)
 
         if (q2_actor_energy_lit(&sim->combat.self))
             q2_ent_light_at(&sim->ent_world.events, sim->combat.self.origin,
-                            energy, Q2_ENERGY_LIGHT_OUTER);
+                            energy, Q2_ENERGY_LIGHT_INNER,
+                            Q2_ENERGY_LIGHT_OUTER);
 
         for (t = 0; t < sim->world_target_count; t++) {
             const q2_actor *a = sim->world_targets ? sim->world_targets[t] : NULL;
             if (a && q2_actor_energy_lit(a))
                 q2_ent_light_at(&sim->ent_world.events, a->origin, energy,
-                                Q2_ENERGY_LIGHT_OUTER);
+                                Q2_ENERGY_LIGHT_INNER, Q2_ENERGY_LIGHT_OUTER);
         }
     }
 
@@ -553,6 +553,8 @@ void q2_sim_combat_tick(q2_sim *sim)
 
             q2_ent_light_at(&sim->ent_world.events, p->pos,
                             bfg ? bfg_glow : glow,
+                            bfg ? Q2_PROJ_BFG_LIGHT_INNER
+                                : Q2_PROJ_LIGHT_INNER,
                             bfg ? Q2_PROJ_BFG_LIGHT_OUTER
                                 : Q2_PROJ_LIGHT_OUTER);
         }

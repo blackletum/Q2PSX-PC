@@ -117,15 +117,16 @@ void q2_ent_sound_at(q2_ent_events *ev, q2_ent_sound which, const s32 pos[3])
 }
 
 void q2_ent_light_at(q2_ent_events *ev, const s32 pos[3], const u8 glow[3],
-                     s32 radius)
+                     s32 inner_radius, s32 radius)
 {
     q2_ent_event *e = event_push(ev);
 
     if (!e)
         return;
 
-    e->kind   = Q2_ENT_EVENT_LIGHT;
-    e->radius = radius;
+    e->kind         = Q2_ENT_EVENT_LIGHT;
+    e->radius       = radius;
+    e->inner_radius = inner_radius;
     event_fill(e, pos, glow);
 }
 

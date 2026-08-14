@@ -4223,12 +4223,17 @@ nothing saying so.
                                        the tick that armed it, so lighting it where the damage lands would
                                        give a one-frame flash where the original gives a burn.
 
-                                       The client pairs the inner radius off the outer the event carries
-                                       (1300 -> 800), which now distinguishes three presets — projectile
-                                       800, BFG 1400, energy 1300. That mapping is a workaround for the
-                                       event struct carrying one radius, and it stops working the moment
-                                       two presets share an outer; the event wants widening before a fourth
-                                       is added.
+                                       ~~The client pairs the inner radius off the outer the event
+                                       carries.~~ **The event carries both now**, which is the fix that
+                                       workaround was asking for. It held only the outer, and the client
+                                       recovered the inner by matching against the presets it knew —
+                                       800 -> 300, 1400 -> 1000, 1300 -> 800. That worked while every
+                                       preset had a distinct outer and would have failed **silently** the
+                                       first time two shared one: a light of the wrong size, on a path with
+                                       no error to report. `q2_ent_light_at` takes `inner` now, `0` means
+                                       the raiser had none to give, and every call site passes its own.
+                                       Same counts before and after — 499 on BASE3, 499 on JAIL2 — because
+                                       this changes what the code can express, not what it currently does.
           0x8002A868  in 0x8002A660  = the SCRIPT effect area (userfuncs.h cites 0x8002A384, GLASS's own
                                        effect spawn)
           0x80031048  in 0x80030E74  = EFFECT code (effect.c cites 0x80030430)

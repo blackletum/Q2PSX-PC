@@ -855,7 +855,7 @@ void q2_item_think(q2_entity *e, q2_entity_world *w)
         lit[0] = e->origin[0] + Q2_ITEM_LIGHT_OFFSET_X;
         lit[1] = e->origin[1] + Q2_ITEM_LIGHT_OFFSET_Y;
         lit[2] = e->origin[2];
-        q2_ent_light_at(&w->events, lit, e->glow,
+        q2_ent_light_at(&w->events, lit, e->glow, 0,
                         pulse + Q2_ITEM_GLOW_RADIUS_BIAS);
     }
 

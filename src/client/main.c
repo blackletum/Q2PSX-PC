@@ -1271,7 +1271,7 @@ static void client_event_call(void *user, const q2_event_item *item,
         rgb[2] = (u8)((packed >> 16) & 0xFF);
 
         if (radius > 0)
-            q2_ent_light_at(&c->sim[0].ent_world.events, at, rgb, radius);
+            q2_ent_light_at(&c->sim[0].ent_world.events, at, rgb, 0, radius);
         c->script_lights++;
     }
 }
@@ -3011,12 +3011,10 @@ static void client_entity_events(client *c)
              * 1000 and every other bolt's 800 pairs with 300. Both pairs are
              * read from 0x800AE9C0 and 0x800AE958 -- see projectile.h.
              */
-            s32 inner = Q2_PROJ_LIGHT_INNER;
-
-            if (ev->e[i].radius == Q2_PROJ_BFG_LIGHT_OUTER)
-                inner = Q2_PROJ_BFG_LIGHT_INNER;
-            else if (ev->e[i].radius == Q2_ENERGY_LIGHT_OUTER)
-                inner = Q2_ENERGY_LIGHT_INNER;
+            /* The event carries both radii now; 0 means the raiser had no
+             * inner to give, and the projectile's is the sane default. */
+            s32 inner = ev->e[i].inner_radius ? ev->e[i].inner_radius
+                                              : Q2_PROJ_LIGHT_INNER;
 
             if (!c->lights_ready ||
                 !q2_light_add_dynamic(&c->light_world, ev->e[i].pos,
