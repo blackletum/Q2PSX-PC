@@ -3397,10 +3397,22 @@ nothing saying so.
           do { p -= 8; total += (u8)p[3]; } while (--n);
           return total;
 
-      A sum of the byte at `+3` of each of `n` eight-byte records, and the caller divides it by fifteen. So a
-      pickup burst's quad count is **one fifteenth of a per-record total taken off whatever `entity+0x10`
-      points at** — its record count at `+0x16` and its table at `+0x28`. Identifying that structure is the
-      one step left, and it is a data question rather than a code one. The port has seven — explosion, blood, BFG,
+      A sum of the byte at `+3` of each of `n` eight-byte records, and the caller divides it by fifteen.
+
+      **The structure is the MODEL**, and `model.h` already had every field: `0x16` is `num_parts`, `0x28` is
+      `ofs_parts`, and the header's own note records that `ofs_faces - ofs_parts == 8 * num_parts` — 8-byte
+      part records. Within one, `num_faces` is at `+0`, `vert_base` at `+2` and **`num_verts` at `+3`**. So
+      `0x8006D6AC` totals the model's VERTICES across its parts, and a pickup burst throws
+
+          count = (sum of every part's num_verts) / 15
+
+      quads, from ramp 10 and ramp 0, at size 6144, area 0. A bigger item bursts bigger, in proportion to its
+      mesh.
+
+      No preset entry is needed after all: `q2_fx_group_spawn` already takes an explicit count, ramps, life,
+      size and area, so the variable count goes straight in. What is still inside `0x8005AB70` and not read
+      is the **life** and the **velocity spread** — the two remaining arguments — and those are a code
+      question rather than a data one, which is the reverse of where this started. The port has seven — explosion, blood, BFG,
       gib, scripted, spark and laser end — and none of them is the pickup burst. Choosing one would invent
       an effect rather than reconstruct it, so nothing is drawn yet. `0x8005B6C0` is the original's, and
       reading its particle table is what this needs; the event carries the position and the glow colour
