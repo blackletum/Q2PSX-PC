@@ -359,6 +359,12 @@ static void client_bind_view_model(client *c);
 
 /* Defined with the rest of the sound path, and called from the tick. */
 static void client_entity_events(client *c);
+static bool client_play_sound(client *c, const char *want);
+
+/* The creature hooks, defined below with the AI clock they run on. */
+static void client_cre_melee(q2_monster *m, const s32 aim[3], s32 damage,
+                             s32 kick, void *user);
+static void client_cre_sound(q2_monster *m, int which, void *user);
 
 /* ------------------------------------------------------------------------- */
 /*
@@ -510,6 +516,20 @@ static void client_load_creatures(client *c, const s32 eye[3])
                                                     : NULL);
     q2_ai_world_bind_install(&c->ai_world);
 
+    /*
+     * The hooks, before anything wakes. A creature that swings on its first
+     * think would otherwise swing into a null pointer.
+     *
+     * The FIRE hook is deliberately left unset. A module's melee carries real
+     * decoded figures — the Arachner's is `aim 1020,-48,0 dmg 20+r%5 kick 100`
+     * — but its shot reaches an indirect call the action decoder reports as
+     * `call(+D8)?`, so the damage a creature's gun does is not read yet (#6).
+     * Wiring it to an invented number would make every creature in the game
+     * lethal on a guess.
+     */
+    q2_cre_set_melee_hook(client_cre_melee, c);
+    q2_cre_set_sound_hook(client_cre_sound, c);
+
     q2_creature_world_wake(&c->creatures, eye);
     c->ai_accum = 0.0;
 
@@ -526,6 +546,67 @@ static void client_load_creatures(client *c, const s32 eye[3])
                 c->creatures.stats.no_module
                     ? ", some classes have no module" : "");
     }
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * The three hooks a creature reaches the rest of the game through.
+ *
+ * `crebind.h` has always defined them and NOTHING had ever set them, so every
+ * claw, every shot and every sound a creature made went to a null pointer.
+ * Creatures chased the player and could not touch them.
+ *
+ * They are hooks rather than direct calls for the reason the header gives: the
+ * module reaches the engine through its import table in the original, and
+ * keeping that shape stops every creature having to know about combat.
+ */
+static void client_cre_melee(q2_monster *m, const s32 aim[3], s32 damage,
+                             s32 kick, void *user)
+{
+    client *c = (client *)user;
+
+    (void)aim; (void)kick;
+
+    if (!c || !c->creatures_ready || damage <= 0)
+        return;
+
+    /*
+     * Only a creature that has actually acquired the player. A module's melee
+     * runs off its own animation frame and does not check who is in front of
+     * it, which is the engine's job — here that check is "is the player the
+     * thing it is hunting", because the port has one player and the AI's
+     * `enemy` is the sight client whenever it has one.
+     */
+    if (m->enemy != &c->creatures.sight)
+        return;
+
+    /* MOD 7 is `0x800612F0`, a creature's contact hit (combat.h) — armour
+     * applies, which is what makes it different from the environment's. */
+    q2_sim_hurt_player(&c->sim, NULL, (s16)damage, Q2_MOD_MELEE,
+                       c->creatures.sight.pos);
+}
+
+static void client_cre_sound(q2_monster *m, int which, void *user)
+{
+    client *c = (client *)user;
+    const char *name = NULL;
+
+    (void)m;
+    if (!c)
+        return;
+
+    /*
+     * The module names a sound by an index into its own table, and resolving
+     * that table is a separate piece of work (#6). What is known is which
+     * BANK entries a creature uses, so the two that every module has are
+     * mapped and the rest are silent rather than arbitrary.
+     */
+    switch (which) {
+    case 0:  name = "cre_pain1"; break;
+    case 1:  name = "cre_die1";  break;
+    default: return;
+    }
+    client_play_sound(c, name);
 }
 
 /*
@@ -2091,8 +2172,9 @@ static void client_write_shot(client *c, bool numbered)
                 near_d = d;
         }
         Q2_INFO("  creatures %u live, %u hunting, %u drawn (%u faces), "
-                "nearest %d units, moved %ld",
-                live, hunting, c->cre_drawn, c->cre_faces, near_d, moved);
+                "nearest %d units, moved %ld, player %d hp",
+                live, hunting, c->cre_drawn, c->cre_faces, near_d, moved,
+                c->sim.combat.inv.health);
         Q2_INFO("  ai world  %u traces (%u unplaced, %u clear), "
                 "%u bottom (%u fail), %u los (%u blocked)",
                 c->ai_world.stats.traces, c->ai_world.stats.trace_unplaced,

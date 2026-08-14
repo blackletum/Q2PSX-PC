@@ -1774,6 +1774,32 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
 
 ---
 
+## Two things the creature chain was still missing
+
+**Nothing had ever set the action hooks.** `crebind.h` defines a sound hook, a
+fire hook and a melee hook, and the only definitions of the setters were in
+`cre_soldier.c` — no caller anywhere in the tree. So every claw, every shot and
+every sound a creature made went to a null pointer: they chased the player and
+could not touch them. The melee and sound hooks are now wired in the client. The
+FIRE hook deliberately is not: a module's melee carries real decoded figures (the
+Arachner's is `aim 1020,-48,0 dmg 20+r%5 kick 100`) but its shot reaches an
+indirect call the action decoder reports as `call(+D8)?`, so what damage a
+creature's gun does is not read yet (#6), and an invented number would make every
+creature in the game lethal on a guess.
+
+**Eight of the disc's levels ship an EMPTY `CreAIBin` — four bytes — and place
+creatures anyway.** JAIL2, JAIL3 and JAIL4 have Infantry; SECURITY, WASTE2,
+BIGGUN, BOSS1 and BOSS2 likewise. Their spawn records name classes the class
+table resolves perfectly well, and the port placed nothing at all on them because
+the module was missing. The census had the answer and it was read as a
+convenience: fifteen module instances across the disc, **seven distinct**,
+deduplicated by name. A module of a given name is the same wherever it appears —
+the same argument that settled `QMULTI.C`, byte-identical on all thirteen arenas
+— so a map with none borrows from one that has them.
+JAIL2 goes from 0 creatures to 5, BOSS1 to 2, BIGGUN to 3; BASE1, which ships its
+own, is untouched at 22 of 22, which is what says the borrow only fires where it
+is needed. The assumption is written into `creworld.c` rather than buried.
+
 ## Putting the creatures in the client
 
 Every piece of the creature chain existed and nothing joined them up. The modules relocate, decode and bind;

@@ -1,5 +1,6 @@
 #include "creworld.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -128,6 +129,71 @@ static void modules_load(q2_creature_world *w, const q2_common_file *common)
     }
 }
 
+/*
+ * The maps that ship creature modules, most-carrying first.
+ *
+ * Eight of the disc's levels ship an EMPTY `CreAIBin` — four bytes — and still
+ * place creatures: JAIL2, JAIL3 and JAIL4 have Infantry, SECURITY, WASTE2,
+ * BIGGUN, BOSS1 and BOSS2 likewise. Their spawn records name classes that the
+ * class table resolves perfectly well; what is missing is the module, so the
+ * port used to place nothing at all on them.
+ *
+ * A module is taken from a donor map when this map ships none. That rests on a
+ * module of a given name being the same wherever it appears, which is what the
+ * disc-wide census has relied on all along — it finds fifteen module instances
+ * and reports seven DISTINCT, deduplicating by name — and which is the same
+ * argument that settled `QMULTI.C`, byte-identical on all thirteen arenas.
+ * It is an assumption, and it is written down here rather than buried.
+ */
+static const char *const k_module_donors[] = {
+    "WASTE4", "POWER1", "BASE0", "COMMAND", "WASTE3", "LAB", "POWER2", NULL
+};
+
+/*
+ * Load modules from donor maps until every class the table names has one, or
+ * the donors run out. Only classes with no module already are wanted, so a map
+ * that ships its own is untouched.
+ */
+static void modules_borrow(q2_creature_world *w, const disc *d)
+{
+    u32 i, k;
+
+    if (!d)
+        return;
+
+    for (k = 0; k_module_donors[k]; k++) {
+        char path[160];
+        q2_buf buf;
+        q2_common_file cf;
+        bool wanted = false;
+
+        /* Stop as soon as every named creature class resolves. */
+        for (i = 0; i < w->classes.count; i++) {
+            const q2_class_entry *e = &w->classes.entries[i];
+            if (!e->is_player && e->name[0] &&
+                e->id < Q2_MONSTER_CLASS_COUNT &&
+                module_index(w, e->name) < 0) {
+                wanted = true;
+                break;
+            }
+        }
+        if (!wanted)
+            return;
+
+        snprintf(path, sizeof(path), "Q2DATA/LEVELS/%s/COMMON.DAT",
+                 k_module_donors[k]);
+        if (disc_read_file(d, path, &buf) != Q2_OK)
+            continue;
+        if (q2_common_open(&cf, &buf) != Q2_OK) {
+            q2_buf_free(&buf);
+            continue;
+        }
+
+        modules_load(w, &cf);
+        q2_common_close(&cf);
+    }
+}
+
 /* ------------------------------------------------------------------------- */
 /*
  * Bind every class id in the table to the module that serves it.
@@ -203,6 +269,7 @@ q2_result q2_creature_world_load(q2_creature_world *w, const disc *d,
         Q2_WARN("no entity class table for this build — no creatures");
 
     modules_load(w, common);
+    modules_borrow(w, d);
     classes_bind(w);
 
     if (q2_population_parse(&pop, common) != Q2_OK)
