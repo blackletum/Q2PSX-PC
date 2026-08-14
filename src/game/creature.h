@@ -226,9 +226,19 @@ typedef enum q2_cre_op {
  *                         at the end of every Soldier fire think are MUZZLE
  *                         ARITHMETIC and not three shots
  *     +0xC4  0x8005C634
- *     +0xC8  0x8005F934
- *     +0xD8  0x8005BB58
+ *     +0xC8  0x8005F934   `vectoangles` — ratan2 through 0x8008A358, the
+ *                         horizontal length through 0x8008A7E8, and three
+ *                         angles written out; 3072 and 1024 are the quarter
+ *                         turns it returns looking straight down and up
+ *     +0xD8  0x8005BB58   angles to vectors — three angles masked to 0xFFF,
+ *                         each indexing the packed {sin, cos} table at
+ *                         0x800A5430
  *     +0xEC  0x80061118   `fire_hit`, the melee — Q2_IMP_FIRE_HIT below
+ *
+ * Which settles something about the Soldier's SHOT by elimination: its fire
+ * think calls +0xD8, +0x2C, +0x28, +0xC8, +0xD8, +0xC0 x3, and every one of
+ * those is now read and every one is AIMING ARITHMETIC. There is no fire call
+ * in it at all.
  */
 #define Q2_IMP_RAND      0x14
 #define Q2_IMP_SOUND     0x20

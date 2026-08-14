@@ -1824,9 +1824,25 @@ not damage. It then calls engine slots `+0xC8` and `+0xD8` with vectors.
       `+0xC0` is `0x8005C460`, a per-component scaled vector add
       (`out = a + (s*d) >> 12`), so **the three trailing calls are muzzle
       arithmetic, not three shots** — which is the specific wrong reading the
-      retraction above was heading towards. `+0xC4` is `0x8005C634`, `+0xC8` is
-      `0x8005F934`, `+0xD8` is `0x8005BB58`, and `+0xEC` is `0x80061118`, the
-      `fire_hit` the melee already uses. The shot is one of the two unread ones.
+      retraction above was heading towards. `+0xC4` is `0x8005C634`, `+0xEC` is
+      `0x80061118` — the `fire_hit` the melee already uses — and the two that
+      were unread are now read: `+0xC8` (`0x8005F934`) is **`vectoangles`**,
+      ratan2 through `0x8008A358` with the horizontal length through
+      `0x8008A7E8`, returning 3072 and 1024 for straight down and up; and
+      `+0xD8` (`0x8005BB58`) is **angles to vectors**, three angles masked to
+      `0xFFF` indexing the packed `{sin, cos}` table at `0x800A5430`.
+
+      **So there is no fire call in the Soldier's fire think at all.** Every one
+      of its six distinct imports is aiming arithmetic. That eliminates the whole
+      call route rather than narrowing it, and leaves one candidate standing: the
+      think loads `s7` from the flash table at `0x80101194` and the tables hold
+      INDICES, so the shot is most likely POSTED — a field written for an engine
+      pass to act on — which would put the damage in an engine table indexed by
+      those flash numbers. That is a hypothesis and is labelled one: neither the
+      store nor the table has been found. What is established is that looking for
+      a call was the wrong search, and the decoder's own step kinds say what to
+      look for instead, since it already classifies stores to `entity+0x138`,
+      `+0xD8` and `+0xDC` as their own actions.
       The port leaves the fire hook unset rather than guessing, and a Soldier
       chases and swings but does not shoot.
 
