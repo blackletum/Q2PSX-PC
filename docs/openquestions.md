@@ -2544,6 +2544,26 @@ not think, and it does not walk.
           Arachner   16-24     9 frames, wants 27      (the module lists this range twice)
           Arachner   25-33     9 frames, wants 27   -- likewise
 
+      **How strong is 96 of 101? Quantified, because a hit rate means nothing without its null.** For each
+      creature, the chance that an arbitrary multiple of three lands on one of its clip lengths:
+
+          Soldier   16/18 ( 89%)   chance 35.8%      Gunner    14/14 (100%)   chance 25.0%
+          Tankcomm  16/16 (100%)   chance 31.6%      Infantry  12/12 (100%)   chance 20.4%
+          Insane    19/19 (100%)   chance 35.0%      Berserk   10/10 (100%)   chance 45.0%
+          Arachner   9/12 ( 75%)   chance 40.0%
+          -------------------------------------------------------------------------------
+          TOTAL     96/101 (95%)   expected by chance 33.4 (33%)
+
+      **95% observed against 33% expected**, with five of the seven creatures perfect. The rule is not a
+      coincidence of a dense clip list.
+
+      **A tempting explanation for the five, tested and REJECTED.** Since a model's clips are one continuous
+      timeline, an exception could be a move spanning two clips rather than one — and indeed every one of the
+      five has a run of consecutive clips summing to exactly what it wants (Soldier's 99 = 30 + 69, Arachner's
+      27 = 9 + 18). That evidence is worthless: on the Soldier's chain **89% of arbitrary multiples of three**
+      have such a run, and 62% on the Arachner's. A test that almost everything passes distinguishes nothing.
+      The consecutive-clip story is dropped, and the five stay unexplained rather than explained badly.
+
       Four of the five have a clip at exactly **1x** their length instead of 3x. That is a suggestive
       pattern and it is deliberately NOT promoted to a rule here: it was noticed after the fact, from five
       cases, and a fallback ratio chosen because it makes the leftovers fit is the precise move this file has
