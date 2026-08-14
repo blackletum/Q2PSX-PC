@@ -1774,6 +1774,35 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
 
 ---
 
+## The creature modules name their own animations
+
+Chasing the sound table turned up a third table beside it, and it is the more
+useful of the two. Every creature module carries **three** blocks of text: its own
+name at about `+0x168` (`Soldier`, `Tank`, `Arachner`, `Gunner`, `Insane` — note
+that the module calls it `Tank` where the class table says `Tankcomm`), the
+12-byte sound-name table at about `+0x1C4`, and a **move-name table** further in.
+
+A move-name record is twenty bytes:
+
+        +0   char name[16]     NUL-padded, and NOT terminated when it fills the
+                               field — `Attak 1 Loop` is exactly twelve
+                               characters, the same rule the level table and the
+                               `Strings` dictionary use
+        +16  u16 first_frame
+        +18  u16 last_frame
+
+The two frames are the move's own range, which is what ties a name to a move
+**without depending on the table's order** — and that matters, because the order
+is not the decoder's: the decoder finds moves through whichever callback reached
+them first. Matching by range instead, `q2psx-inspect creatures` names **83 of the
+disc's 97 moves**, including the Soldier's, which a first look at the string pool
+had wrongly suggested carried none.
+
+So a creature's animation set is self-describing: `Start Walk` 34-49, `Attak 1
+Pre` 65-70, `Attak 1 Loop` 71-76, `Attak 1 End` 115-135, `Stop Walk` 222-253. That
+is what a port needs to say which move is which without inferring it from a
+callback slot, and it is on the disc.
+
 ## Two things the creature chain was still missing
 
 **A correction to this section's own first version.** The sound hook was wired with

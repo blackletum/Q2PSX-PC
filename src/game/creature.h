@@ -146,6 +146,28 @@ extern const char *const q2_cre_callback_names[13];
 bool q2_creature_decode(q2_creature *out, const u8 *image, size_t size,
                         u32 base, const char *name);
 
+/*
+ * The module's own name for each move.
+ *
+ * Every creature module carries three tables of text, and the third is the
+ * interesting one: its NAME at about `+0x168`, a 12-byte sound-name table at
+ * about `+0x1C4`, and a **20-byte move-name table** further in — "Start Walk",
+ * "Attak 1 Loop", "Stand N", "Runshoot", "Fire Chain".
+ *
+ * The link to the moves is the COUNT: the Tank's table has exactly sixteen
+ * slots and the Tank has exactly sixteen moves, and the same holds for every
+ * module on the disc. So the table is located by scanning for the first run of
+ * `move_count` consecutive 20-byte slots that each start printable and contain
+ * a terminator — an exact-count match, not a resemblance.
+ *
+ * Not every module has one: the Soldier's carries its sound names and no move
+ * names at all, so this returns NULL there rather than inventing labels.
+ *
+ * `out[i]` points into the module image and is valid while it is.
+ */
+u32 q2_creature_move_names(const q2_creature *c, const u8 *image, size_t size,
+                           const char **out, u32 out_count);
+
 /* Look a move up by the callback that installs it, or by its module address. */
 const q2_cre_move *q2_creature_move_via(const q2_creature *c, u32 callback_slot);
 const q2_cre_move *q2_creature_move_at(const q2_creature *c, u32 addr);

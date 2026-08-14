@@ -35,6 +35,8 @@ static int g_actions_done;
 static const u8 *g_img;
 static size_t g_img_size;
 static bool g_last_full;
+static int g_named;
+static int g_moves;
 
 static void report(const q2_creature *c, const q2_cre_impl *impl)
 {
@@ -71,6 +73,31 @@ static void report(const q2_creature *c, const q2_cre_impl *impl)
                 hi = c->move[i].last_frame;
         }
         printf("\n    highest frame : %d\n", hi);
+
+        /*
+         * The module's own labels for its moves, when it carries them. The
+         * Soldier's module has none; every other one on the disc does.
+         */
+        {
+            static const char *names[Q2_CRE_MAX_MOVES];
+            u32 named;
+
+            memset(names, 0, sizeof(names));
+            named = q2_creature_move_names(c, g_img, g_img_size, names,
+                                           (u32)(sizeof(names) /
+                                                 sizeof(names[0])));
+            if (named) {
+                u32 k;
+                printf("    named     : %u of %u\n", named, c->move_count);
+                for (k = 0; k < c->move_count; k++)
+                    if (names[k])
+                        printf("      %3d-%-3d  \"%.16s\"\n",
+                               c->move[k].first_frame, c->move[k].last_frame,
+                               names[k]);
+            }
+            g_named += (int)named;
+            g_moves += (int)c->move_count;
+        }
     }
 
     n = q2_creature_think_indices(c, idx, sizeof(idx));
@@ -243,6 +270,9 @@ int cmd_creatures(const disc *d)
     printf("  %d of %d creatures act: animations off the disc, and every think"
            " index they use resolves to a real action\n",
            g_covered, g_distinct);
+    printf("  %d of %d moves carry the module's own name for them — a 20-byte"
+           " {char[16], u16 first, u16 last} record, matched by frame range\n",
+           g_named, g_moves);
     printf("  %d of %d think indices across the disc decode to an action;"
            " a ? marks one behind a branch\n", g_actions_done, g_actions_total);
     printf("  a * marks an index with no hand transcription — it runs from the"

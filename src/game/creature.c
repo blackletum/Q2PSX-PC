@@ -507,6 +507,83 @@ static void follow_callback(q2_creature *c, dec *d, u32 entry, s32 via,
 }
 
 /* ------------------------------------------------------------------------- */
+/* ------------------------------------------------------------------------- */
+/* The module's move names — see the header for the record and the link.      */
+/* ------------------------------------------------------------------------- */
+#define CRE_MOVE_NAME_STRIDE 20
+#define CRE_MOVE_NAME_CHARS  16
+
+/*
+ * One record: `{ char name[16]; u16 first_frame; u16 last_frame }`.
+ *
+ * The name is NUL-padded and is NOT terminated when it fills its sixteen
+ * bytes, the same rule the level table and the `Strings` dictionary use. The
+ * two frames are the move's own range, which is what ties a name to a move
+ * without needing the table's order to match the decoder's.
+ */
+static bool name_slot_ok(const u8 *p, size_t avail)
+{
+    size_t i;
+
+    if (avail < CRE_MOVE_NAME_STRIDE)
+        return false;
+    if (p[0] < 0x20 || p[0] > 0x7E)
+        return false;
+
+    for (i = 0; i < CRE_MOVE_NAME_CHARS; i++) {
+        if (p[i] == 0)
+            break;
+        if (p[i] < 0x20 || p[i] > 0x7E)
+            return false;
+    }
+    if (i < 3)
+        return false;
+
+    return q2_rd_u16(p + 18) >= q2_rd_u16(p + 16);
+}
+
+u32 q2_creature_move_names(const q2_creature *c, const u8 *image, size_t size,
+                           const char **out, u32 out_count)
+{
+    size_t off;
+    u32 found = 0, i;
+
+    if (!c || !image || !out || c->move_count == 0)
+        return 0;
+
+    for (i = 0; i < out_count; i++)
+        out[i] = NULL;
+
+    /*
+     * Every record in the image is offered to every move, and a move takes the
+     * one whose two frames are its own. That is why the table's order does not
+     * have to match the decoder's — which it does not, since the decoder finds
+     * moves through whichever callback reached them first.
+     */
+    for (off = 0; off + CRE_MOVE_NAME_STRIDE <= size; off += 4) {
+        s32 first, last;
+
+        if (!name_slot_ok(image + off, size - off))
+            continue;
+
+        first = (s32)q2_rd_u16(image + off + 16);
+        last  = (s32)q2_rd_u16(image + off + 18);
+
+        for (i = 0; i < c->move_count && i < out_count; i++) {
+            if (out[i])
+                continue;
+            if (c->move[i].first_frame == first &&
+                c->move[i].last_frame  == last) {
+                out[i] = (const char *)image + off;
+                found++;
+                break;
+            }
+        }
+    }
+
+    return found;
+}
+
 bool q2_creature_decode(q2_creature *out, const u8 *image, size_t size,
                         u32 base, const char *name)
 {
