@@ -1823,11 +1823,26 @@ well separates the two.
 | the **rotating brushes** | `q2_rotators_build` had one caller and it was an inspector command, so ROTHATCH, SIMROT, SIMROT2 and ROTBUTTON were never even constructed in the game |
 | the **AI breadcrumb trail** | `q2_trail_init` and `q2_trail_add`, so the ring at `gp+17892` was always empty and a creature that lost you had nowhere to follow you to |
 | **`q2_monster_damage`** | the module-owned health path, which is how a creature with an AI brain is meant to take damage |
-| the **per-frame lighting** | `q2_light_world_begin_frame`, `q2_light_glow_fade`, `q2_light_env_apply` |
+| the **per-frame lighting** | `q2_light_world_begin_frame`, `q2_light_glow_fade`, `q2_light_env_apply` — and the client passed a NULL light world with `coll_node = -1`, so nothing that is not the world was lit at all |
 | the **view weapon's own outputs** | `q2_vw_take_refire`, `q2_vw_take_event`, `q2_vw_wants_fire` — so running a gun dry never switched off it, and an animation event never reached the frame it belongs to |
 | **`q2_weapon_autoselect`** | what a pickup is meant to consult |
 
-Three are now wired. The view weapon's refire signal drives the auto-switch off an
+**The lights are wired now**, and they were two separate omissions rather than one.
+The client passed `ectx.lights = NULL`, and it also passed `ectx.coll_node = -1` —
+"no node" — so even a light world would have handed every entity the fallback. Both
+come from what the sim already tracks: `Lights` out of COMMON.DAT, `SpaceLights`
+opened against the same `SecondaryCol` the sim uses (that being what partitions it,
+FORMATS §17), and the player's own cell.
+Items pick it up through the entity draw; creatures did not, because the creature
+loop calls `q2_model_build_ot` directly, so it gathers its own three — three being
+all the GTE's light matrix has rows for.
+The result is strongly coloured and that is the map, not a fault: `q2psx-inspect
+lit BASE1` reports the accepted lights in zone 0 as `rgb 2988 1992 937`,
+`1447 964 457` and `912 415 0`, so a Soldier standing in that room comes out
+orange. Checked rather than assumed, because the change is large enough to look
+like a bug.
+
+Three more are now wired. The view weapon's refire signal drives the auto-switch off an
 empty gun, and its event is drained on the frame the clip raises it rather than the
 frame the trigger was pressed — and the verdict handed back to the machine is now
 `last_shot.dry` rather than an unconditional "it fired", since `fired` is also

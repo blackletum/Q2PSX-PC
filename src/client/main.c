@@ -75,7 +75,9 @@
 #include "aiworld.h"
 #include "crebind.h"
 #include "creworld.h"
+#include "lighting.h"
 #include "rotator.h"
+#include "spacelights.h"
 #include "userfuncs.h"
 #include "disc.h"
 #include "entity.h"
@@ -338,6 +340,18 @@ typedef struct client {
      */
     q2_rotator_set   rotators;
     bool             rotators_ready;
+
+    /*
+     * The zone's lights, for everything that is not the world. The world's own
+     * lighting is baked into MapMod's per-corner RGB and nothing at runtime
+     * touches it (FORMATS §17), so this exists to shade MODELS — the items and
+     * the creatures — which the client had been drawing at a flat glow tint
+     * because it passed NULL for the light world.
+     */
+    q2_light_list    lights;
+    q2_spacelights   spacelights;
+    q2_light_world   light_world;
+    bool             lights_ready;
 
     bool             in_front_end;
     char             first_map[64];
@@ -985,6 +999,25 @@ static bool client_load_zone(client *c, const char *map, int index)
              */
             q2_sim_attach_glint(&c->sim, &c->common);
         }
+        /*
+         * The zone's lights: COMMON.DAT's `Lights` array and the zone's own
+         * per-node index lists, which is exactly the pair `q2_light_gather`
+         * wants. SpaceLights is partitioned by the SECONDARY collision node, so
+         * it is opened against the hull the sim already has.
+         */
+        c->lights_ready = false;
+        if (c->sim.coll_ready &&
+            q2_lights_parse(&c->lights, &c->common) == Q2_OK &&
+            q2_spacelights_open(&c->spacelights, &c->zone.zone,
+                                &c->sim.coll) == Q2_OK) {
+            memset(&c->light_world, 0, sizeof(c->light_world));
+            c->light_world.statics = &c->lights;
+            c->light_world.space   = &c->spacelights;
+            c->lights_ready = true;
+            Q2_INFO("lights: %u in the map, %u index entries",
+                    c->lights.count, c->spacelights.count);
+        }
+
         /*
          * The map's rotating brushes. Built from the same Events and UserFuncs
          * the movers come from, and handed to the zone, which adds each node's
@@ -2585,7 +2618,15 @@ static void client_draw_view(void *user, q2_screen *s, int p,
         ectx.clut4_count_a = c->clut4_count_a;
         ectx.player        = 0;
         ectx.tpage         = &c->render.tpage;
-        ectx.coll_node     = -1;
+
+        /*
+         * The lights, and the cell to gather them from. `coll_node` was -1,
+         * which is "no node" — so even had a light world been passed, every
+         * entity would have taken the fallback. The sim tracks the player's
+         * own cell every tick and that is the one the engine uses.
+         */
+        ectx.lights        = c->lights_ready ? &c->light_world : NULL;
+        ectx.coll_node     = c->sim.current_node;
 
         q2_entity_build_ot(&c->sim.entities, &ectx, &c->cam, ot, gte, &estats);
     }
@@ -2617,6 +2658,7 @@ static void client_draw_view(void *user, q2_screen *s, int p,
             q2_model_draw_stats st;
             q2_model_pose pose[64];
             q2_model_anim clip;
+            q2_light_env  cre_env;
             bool posed = false;
 
             if (!m->in_use || !c->cre_model_ok[i])
@@ -2641,6 +2683,22 @@ static void client_draw_view(void *user, q2_screen *s, int p,
             q2_model_instance_init(&inst);
             inst.model         = &c->cre_model[i];
             inst.pose          = posed ? pose : NULL;
+
+            /*
+             * The lights reaching this creature. The item draw gets these
+             * through the entity context; this loop calls q2_model_build_ot
+             * directly, so it has to gather its own — three lights per entity,
+             * which is all the GTE's light matrix has rows for (FORMATS §17).
+             */
+            if (c->lights_ready) {
+                q2_light_set  set;
+                s32 cell = q2_coll_find_node(&c->sim.coll, m->pos, -1, true);
+
+                q2_light_gather(&set, &c->light_world, m->pos, cell, false);
+                q2_light_env_build(&cre_env, &set, Q2_LIGHT_ONE,
+                                   Q2_LIGHT_ONE, NULL);
+                inst.light = &cre_env;
+            }
             inst.origin[0]     = m->pos[0];
             inst.origin[1]     = m->pos[1];
             inst.origin[2]     = m->pos[2];
