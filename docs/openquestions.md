@@ -4791,6 +4791,19 @@ nothing saying so.
       it interleaves `inf_deth2` between `ber_deth2` and `ber_idle1`, which the module does not — so its run
       is still misaligned, but the correct addresses are known now rather than guessed.
 
+      **A sixth attempt, using those anchors, and it made things worse.** Two rules were tried together:
+      require a run's START to have no name-like slot 12 bytes before it, and reject a run whose first slot
+      is one of the module's own move names, stepping past the whole run rather than four bytes.
+
+      The first rule changed nothing — `Attack1` is itself a run start. The second took the Berserk from 13
+      names to **0**, which says something the disassembly had not: **the move names and the sound names are
+      one contiguous run.** `Attack1, Attack2, Attack3` are followed immediately by `ber_pain2` and the rest,
+      so "skip the run" skips both tables and lands past everything.
+
+      Reverted — 13 flagged names beat 0. But the failure is informative: the two tables abut, so no rule
+      that treats a run as a unit can separate them. What is needed is a rule that ends the move-name run
+      where the move-name TABLE ends, and `q2_creature_move_names` already knows that extent.
+
       **The Tank Commander is the same shape**, checked rather than assumed:
 
           80100638  addiu a2, a0, 500     ; module+0x1F4
