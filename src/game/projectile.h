@@ -137,10 +137,23 @@ typedef enum q2_proj_kind {
  *     a3 = 0x800AE95C                                   -- 0, as the first call
  *
  * so it is a wider, outer halo of the same warm orange: inner 800, outer 1600
- * against the first light's 300 and 800. What is NOT read is the gate — which
- * projectiles carry bit 0x10 — so it is defined here and deliberately not
- * raised anywhere. Adding it for every projectile would double the light on
- * bolts the original leaves alone. See openquestions #57.
+ * against the first light's 300 and 800.
+ *
+ * THE GATE IS READ, and the answer is that it never opens on this path. The
+ * halfword is at `s3-54`, and `s3 = record + 88`, so the flag lives at
+ * **record+0x22**. `0x8004D7BC` writes it from `s1`, which `0x8004D714` loads as
+ * a STACK argument (`lhu s1, 128(sp)`) — so the flags are the spawner's fifth
+ * parameter. Its three callers pass:
+ *
+ *     0x8004C120   11  (0b01011)
+ *     0x8004D3EC   14  (0b01110)
+ *     0x800620D8   11  (0b01011)
+ *
+ * **Bit 0x10 is clear in all three.** The second light therefore does not fire
+ * for any projectile spawned through this function, and this port is right not
+ * to raise it — not because the gate is unknown, but because it is known to be
+ * shut. Other writers of a +0x22 halfword exist elsewhere in the image and
+ * belong to other structures; this reading is scoped to this spawner.
  */
 #define Q2_PROJ_LIGHT2_INNER   800
 #define Q2_PROJ_LIGHT2_OUTER  1600

@@ -3851,7 +3851,14 @@ nothing saying so.
       gate — which projectiles carry bit 0x10 in the halfword at `s3-54` — is not read. Raising it for every
       projectile would double the light on bolts the original leaves alone, so it waits for the flag.
 
-      Still not done: fourteen of the fifteen sites, and that gate.
+      **The gate is read, and it never opens.** `s3 = record + 88`, so the tested halfword is at
+      **record+0x22**; `0x8004D7BC` writes it from `s1`, which `0x8004D714` loads as a stack argument, so the
+      flags are the spawner's fifth parameter. Its three callers pass **11, 14 and 11** — `0b01011`,
+      `0b01110`, `0b01011` — and **bit 0x10 is clear in every one**. The second light does not fire for any
+      projectile spawned through that function, so raising it would have been wrong, and this port is right
+      by measurement rather than by caution.
+
+      Still not done: fourteen of the fifteen sites.
 
 ---
 
