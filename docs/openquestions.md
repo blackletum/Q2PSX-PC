@@ -4234,8 +4234,26 @@ nothing saying so.
                                        the raiser had none to give, and every call site passes its own.
                                        Same counts before and after — 499 on BASE3, 499 on JAIL2 — because
                                        this changes what the code can express, not what it currently does.
-          0x8002A868  in 0x8002A660  = the SCRIPT effect area (userfuncs.h cites 0x8002A384, GLASS's own
-                                       effect spawn)
+          0x8002A868  in 0x8002A660  = GLASS's destruction light. `userfuncs.h` already documents the
+                                       primitive — 16-byte item, object slot at +4, hit points at +6 — and
+                                       notes that GLASS spawns its effect at 0x8002A384 before examining
+                                       its damage argument. This light sits in that same path.
+
+                                       Its radii are NOT a palette entry. `a2` is read from `gp+16840`
+                                       (0x800B27C8), and that global is written a few instructions earlier
+                                       in the same function:
+
+                                           8002A7E4  addiu v1, zero, 1000
+                                           8002A7E8  sh    v1, 16840(gp)   ; 0x800B27C8
+                                           8002A7EC  addiu v1, zero, 2000
+                                           8002A7F0  sh    v1, 16842(gp)   ; 0x800B27CA
+
+                                       Two consecutive halfwords, which is exactly the `lo | hi<<16` pair
+                                       the light reads — so **breaking glass lights the room at inner 1000,
+                                       outer 2000**, the widest of any site read so far. The values are
+                                       immediates in the glass path rather than data, which is why the
+                                       palette sweep could not find them. Its colour is computed rather
+                                       than read from a preset, and is not yet traced.
           0x80031048  in 0x80030E74  = EFFECT code (effect.c cites 0x80030430)
           0x80028E6C  in 0x80028BDC  = the script command area, beside SHOOTTHEN
 
