@@ -366,6 +366,10 @@ typedef struct q2_sim {
      */
     q2_player_combat     pcombat[Q2_SIM_MAX_PLAYERS];
 
+    /* Everything a projectile can hit; see q2_sim_set_world_targets. */
+    q2_actor           **world_targets;
+    u32                  world_target_count;
+
     /* The level clock the weapon gates and the damage throttles use, in dt
      * units. Advanced by q2_sim_tick alongside the physics. */
     s32                  level_time;
@@ -672,6 +676,31 @@ void q2_sim_advance_player(q2_sim *sim, int index, const q2_input *input,
 
 /* Give an extra player a level start's inventory and weapon. */
 void q2_sim_player_reset_combat(q2_sim *sim, int index);
+
+/* Where the projectiles in flight got to — launched, stepped, expired, hit. */
+typedef struct q2_sim_proj_stats {
+    u32 launched;
+    u32 stepped;
+    u32 expired;
+    u32 hit;
+} q2_sim_proj_stats;
+
+extern q2_sim_proj_stats q2_sim_proj_scan;
+
+/*
+ * Everything a projectile in flight can hit, which is not the same list as
+ * whatever the player currently ticking can shoot at.
+ *
+ * `combat.targets` is the SHOOTER's list and deliberately excludes them. The
+ * projectile step runs on player 0's tick because bolts are the world's, so it
+ * was using player 0's list — and a bolt fired by player 1 at player 0 could
+ * never find its target, because player 0 is the one name that list leaves out.
+ * 601 bolts flew and none of them hit anything.
+ *
+ * The owner is skipped by pointer at impact instead, which is what makes a
+ * world-wide list safe.
+ */
+void q2_sim_set_world_targets(q2_sim *sim, q2_actor **targets, u32 count);
 
 /* One logic tick at the nominal step. Exposed so tests can drive it exactly. */
 void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt);

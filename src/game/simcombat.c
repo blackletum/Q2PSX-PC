@@ -365,7 +365,11 @@ q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
     }
 
     default:
-        q2_projectile_launch(&sim->combat.projectiles, &r, -1, sim->level_time);
+        /* WHO fired it. The -1 here meant "the world", so a bolt could not say
+         * who to credit and a kill by one had no killer. */
+        q2_sim_proj_scan.launched++;
+        q2_projectile_launch(&sim->combat.projectiles, &r,
+                             sim->cur_player, sim->level_time);
         break;
     }
 
@@ -431,6 +435,35 @@ q2_damage_result q2_sim_hurt_player(q2_sim *sim, q2_actor *attacker,
     return out;
 }
 
+/*
+ * The actor that fired a projectile, from the owner index the launch recorded.
+ *
+ * The step runs on player 0's tick — projectiles are the world's — so
+ * `combat.self` at step time is player 0 whoever fired. Passing that as the
+ * attacker credited every bolt in the air to player 0 and gave a
+ * player-versus-player kill the wrong killer, or the shooter their own bolt.
+ */
+/* Where a projectile got to, per the note on q2_combat_scan: "it missed" has
+ * several causes and a total cannot tell them apart. */
+q2_sim_proj_stats q2_sim_proj_scan;
+
+void q2_sim_set_world_targets(q2_sim *sim, q2_actor **targets, u32 count)
+{
+    if (!sim)
+        return;
+    sim->world_targets      = targets;
+    sim->world_target_count = count;
+}
+
+static q2_actor *attacker_for(q2_sim *sim, s32 owner)
+{
+    if (owner < 0 || owner >= Q2_SIM_MAX_PLAYERS)
+        return &sim->combat.self;
+    if (owner == sim->cur_player)
+        return &sim->combat.self;
+    return &sim->pcombat[owner].self;
+}
+
 /* ------------------------------------------------------------------------- */
 void q2_sim_combat_tick(q2_sim *sim)
 {
@@ -454,6 +487,8 @@ void q2_sim_combat_tick(q2_sim *sim)
     for (i = 0; i < Q2_PROJ_MAX; i++) {
         q2_projectile *p = &sim->combat.projectiles.p[i];
         q2_proj_step step;
+        q2_actor **hit_list;
+        u32 hit_count;
         s32 hit_index;
         s32 dir[3];
         int k;
@@ -461,10 +496,12 @@ void q2_sim_combat_tick(q2_sim *sim)
         if (!p->in_use)
             continue;
 
+        q2_sim_proj_scan.stepped++;
         q2_projectile_step(&sim->combat.projectiles, i, sim->gravity,
                            sim->level_time, &step);
 
         if (step.expired) {
+            q2_sim_proj_scan.expired++;
             /* The kind and the position have to be taken before the detonate,
              * because it frees the slot. */
             q2_fx_preset_id fx = fx_for_projectile(p->kind);
@@ -472,7 +509,8 @@ void q2_sim_combat_tick(q2_sim *sim)
 
             memcpy(where, p->pos, sizeof(where));
             q2_projectile_detonate(&sim->combat.projectiles, i,
-                                   &sim->combat.self, sim->combat.targets,
+                                   attacker_for(sim, p->owner),
+                                   sim->combat.targets,
                                    sim->combat.target_count,
                                    &sim->combat.rules);
             fx_at(sim, fx, where);
@@ -512,19 +550,30 @@ void q2_sim_combat_tick(q2_sim *sim)
         for (k = 0; k < 3; k++)
             dir[k] = step.to[k] - step.from[k];
 
+        hit_list  = sim->world_targets ? sim->world_targets
+                                       : sim->combat.targets;
+        hit_count = sim->world_targets ? sim->world_target_count
+                                       : sim->combat.target_count;
+
         hit_index = q2_combat_nearest_on_segment(step.from, dir,
                                                  Q2_HITSCAN_RADIUS,
-                                                 sim->combat.targets,
-                                                 sim->combat.target_count);
+                                                 hit_list, hit_count);
+
+        /* Never its own shooter: the world list holds everybody, including the
+         * player who fired this. */
+        if (hit_index >= 0 && hit_list[hit_index] == attacker_for(sim, p->owner))
+            hit_index = -1;
+
         if (hit_index >= 0) {
-            q2_actor *victim = sim->combat.targets[hit_index];
+            q2_actor *victim = hit_list[hit_index];
+
+            q2_sim_proj_scan.hit++;
             q2_fx_preset_id fx = fx_for_projectile(p->kind);
             bool was_alive = victim && victim->health > 0;
 
             q2_projectile_impact(&sim->combat.projectiles, i, step.to, NULL,
-                                 &sim->combat.self, victim,
-                                 sim->combat.targets,
-                                 sim->combat.target_count,
+                                 attacker_for(sim, p->owner), victim,
+                                 hit_list, hit_count,
                                  &sim->combat.rules);
 
             /*

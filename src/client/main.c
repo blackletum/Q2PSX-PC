@@ -330,6 +330,7 @@ typedef struct client {
 
     /* Creatures plus the other players, rebuilt per player. */
     q2_actor         *mp_target[Q2_CLIENT_MAX_TARGETS];
+    q2_actor         *mp_world_target[Q2_CLIENT_MAX_TARGETS];
     bool              mp_targets_logged;
     bool              mp_stage;
     u32               mp_shots[Q2_MP_MAX_PLAYERS];
@@ -987,6 +988,30 @@ static u32 client_targets_for(client *c, int who)
         }
 
     q2_sim_set_targets(&c->sim[0], c->mp_target, n);
+
+    /*
+     * And the world's list, which is every player and every creature with
+     * nobody left out — what a projectile in flight can hit. Built once here
+     * because it does not depend on who is shooting.
+     */
+    if (c->mp_enabled) {
+        u32 w = 0, k;
+
+        if (c->creatures_ready && c->cre_target)
+            for (k = 0; k < c->creatures.set.count &&
+                        w < Q2_CLIENT_MAX_TARGETS; k++)
+                c->mp_world_target[w++] = c->cre_target[k];
+
+        for (k = 0; k < Q2_MP_MAX_PLAYERS && w < Q2_CLIENT_MAX_TARGETS; k++) {
+            if (k > 0 && !c->sim_ready[k])
+                continue;
+            c->mp_world_target[w++] = (k == (u32)c->sim[0].cur_player)
+                                          ? &c->sim[0].combat.self
+                                          : &c->sim[0].pcombat[k].self;
+        }
+
+        q2_sim_set_world_targets(&c->sim[0], c->mp_world_target, w);
+    }
 
     /* Once, so a run says plainly how many things a player can hit. */
     if (!c->mp_targets_logged) {
@@ -3194,6 +3219,11 @@ static void client_write_shot(client *c, bool numbered)
                             sc0->off_axis, sc0->hit);
                 Q2_INFO("  player %d shots %u, dry %u", pi,
                         c->mp_shots[pi], c->mp_dry[pi]);
+                if (pi == 1)
+                    Q2_INFO("  proj: %u launched, %u stepped, %u expired, "
+                            "%u hit", q2_sim_proj_scan.launched,
+                            q2_sim_proj_scan.stepped, q2_sim_proj_scan.expired,
+                            q2_sim_proj_scan.hit);
                 {
                     const q2_combat_scan_stats *sc = &q2_combat_scan_by[pi];
 

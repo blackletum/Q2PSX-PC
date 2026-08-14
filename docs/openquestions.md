@@ -3176,7 +3176,28 @@ player-versus-player damage:
         and a rocket crossed an arena at four times its speed. It is the same class of bug the world-half
         gate exists for, missed because it lives in another file. Now gated on `cur_player == 0`.
 
-- [ ] 59b. **Give a projectile an owner, and check a bolt can hurt a player.** The launch passes -1; the
+- [~] 59b. **Owner given, world list built, three faults fixed — and a bolt still hits nothing.**
+
+      `q2_sim_proj_scan` counts what happens to the projectiles: `601 launched, 4356 stepped, 52 expired,
+      0 hit`. They fly. They are stepped. They never intersect anything.
+
+      Three real faults found and fixed on the way, none of which was the aim:
+
+      - **A launched bolt had no owner.** `q2_projectile_launch(..., -1, ...)` — so a bolt that hits could
+        not say who fired it. It now carries `cur_player`, and `attacker_for()` resolves that back to the
+        right actor at impact. Without it every bolt in the air was credited to whoever happened to be
+        ticking, which for the projectile step is always player 0.
+      - **The projectile step ran once per PLAYER**, so with four players a bolt advanced four times a frame.
+        Gated on `cur_player == 0`, like the entity sweep and the effects.
+      - **The step used the SHOOTER's target list.** `combat.targets` deliberately excludes the player it
+        belongs to, and the step runs on player 0's tick — so a bolt fired by player 1 at player 0 was tested
+        against a list whose one omission was player 0. `q2_sim_set_world_targets` now carries every player
+        and every creature with nobody left out, and the owner is skipped by pointer at impact instead.
+
+      What is left is the intersection itself: `q2_combat_nearest_on_segment(step.from, dir,
+      Q2_HITSCAN_RADIUS, ...)` against actors of radius 286. Whether a bolt's per-tick segment and that
+      radius can ever overlap a target is the next thing to measure — the counters say the bolt exists and
+      moves, so this is now one geometric test rather than a search. The launch passes -1; the
       shooter's index is available at the call site. Until then a player-versus-player kill can happen and
       still not be attributed. The scan counters cover hitscan only, so this wants the same treatment: count
       where a projectile stops, per owner, rather than reasoning about it. One shared
