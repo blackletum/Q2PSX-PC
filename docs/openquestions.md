@@ -4618,8 +4618,22 @@ nothing saying so.
 
       **Three attempts, three reverts, and the third says the model of the problem is wrong**: the run the
       scan finds is not the move-name table as read by `q2_creature_move_names`, even though its contents are
-      move names. Something else in that module carries those strings. That is the thing to find, and it is
-      a different question from the one these three attempts kept answering.
+      move names. Something else in that module carries those strings.
+
+      **A fourth idea, tested and also rejected.** Every other table's shape was censused looking for an
+      anchor to end the run on: `msc_udeath` is the last entry for the Tankcomm, Insane, Gunner and Berserk,
+      **absent** for the Soldier and Infantry, and **mid-table** for the Arachner (index 4 of 6, with
+      `Melee` after it). Four of seven is not an anchor.
+
+      What the census does show is that the Berserk's run is **thirteen entries where no other creature
+      exceeds eight**, and that its first three are the move names `Attack1/2/3`. Dropping exactly those
+      three gives ten, ending at `msc_udeath` — a plausible table. **It is not adopted**, because "plausible
+      and the right length" is the same evidence that supported the ×5, the consecutive-clip runs, the
+      off-by-one and the loop hypothesis, all four of which this file has had to withdraw.
+
+      Four approaches have now failed on this, and the failures agree on one thing: the discriminator is not
+      in the name run itself. It wants whatever code READS the Berserk's table at runtime, which is a
+      different search from any tried here.
 
       The state that ships is the plain fallback: **the Tank Commander correct and verified
       against #60's VAG names, the Berserk found but flagged.** A wrong table is worse than a missing one
