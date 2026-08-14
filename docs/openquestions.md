@@ -3802,7 +3802,21 @@ nothing saying so.
       zone 1 goes 0 -> 1. Zones whose Events chunk is byte-identical to COMMON's (21 of 74) are unchanged,
       which is why the default zone of most maps looks the same and why this hid for so long.
 
-      **What the remaining gap actually is, measured rather than estimated.** "54 calls name no object" is
+      **And the remaining gap is ONE call, not 29.** "29 executed calls turn nothing" was itself an artefact
+      of measuring one zone at a time: the engine holds one zone resident, so a call that turns nothing with
+      zone 0 loaded may turn geometry with zone 3. Sweeping every zone each map ships and asking whether a
+      call site turns something under ANY of them:
+
+          distinct rotation CALL sites the script reaches : 68
+            turn something under SOME zone : 67
+            barren under EVERY zone        : 1
+
+      The one holdout is named: **WASTE2, Events+774, barren under all four of its zones.** Everything else
+      the trigger sweep reaches now turns. That is the rotation question closed to a single site, and the
+      `cmd_zonescript.c` header that asserted the opposite has been rewritten in place rather than left to
+      mislead the next pass.
+
+      **What the remaining gap looked like before that sweep, measured rather than estimated.** "54 calls name no object" is
       not the same claim as "54 rotations are missing", because a call only matters if the script runs it.
       Counting the rotation primitives the trigger sweep actually reaches:
 

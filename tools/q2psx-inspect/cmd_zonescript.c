@@ -8,21 +8,30 @@
  * none of them — which looked like the largest piece of level behaviour still
  * missing.
  *
- * It is not missing. **The engine never loads a zone's Events chunk.** The zone
- * loader looks its chunks up by name — AreaConx, CastList, CreAIBin, CreAIRel,
- * MapMod, MapNames, Points, Scene, SortData, SpaceLights and the two collision
- * hulls — and `Events` is not among them. The whole image contains exactly one
- * copy of the string "Events" (0x800AD480) and exactly two references to it:
- * COMMON's loader at 0x8007AC30, which stores the matched chunk's pointer into
- * the events global at 0x800AE774 (0x8007AD54), and the teardown that clears
- * the same global (0x8007C250). Every one of the twenty-odd readers of that
- * global — the load-time pre-pass at 0x80026DC0, the execution dispatch at
- * 0x80027950 — therefore reads COMMON's script and only ever COMMON's.
+ * ** THE PARAGRAPH THAT USED TO BE HERE WAS WRONG. ** It said "the engine never
+ * loads a zone's Events chunk", and listed the zone loader's chunks as AreaConx,
+ * CastList, CreAIBin, CreAIRel, MapMod, MapNames, Points, Scene, SortData,
+ * SpaceLights and the two hulls, concluding `Events` was not among them.
  *
- * Two counting tests were run first and BOTH decided nothing, which is worth
- * recording so neither is repeated: all 834 trigger offsets start a record in
- * COMMON's script *and* in a zone's, and none of them runs past the end of
- * either chunk. An offset is just a number, and record starts are dense.
+ * `Events` IS among them. The zone loader's own name run is:
+ *
+ *     CastList  Events  CreAIBin  CreAIRel  SecondaryCol  SecondaryRem
+ *     MapNames  SpaceLights  SortData  Scene  MapMod  Points  AreaConx
+ *
+ * There are two Events LOADERS, not one. COMMON's at 0x8007AC30 stores into
+ * gp+372 (0x800AE774); the ZONE's at 0x8007C14C looks the same string up with
+ * base *(gp+18856) — the zone file — and stores into gp+376 (0x8007C234). The
+ * old note was right that the string has two references and wrong about what the
+ * second one does, and that error cost this port most of its rotating geometry:
+ * a rotation CALL reads its object slots from gp+376 while STAMPING -1 into
+ * gp+372 as it consumes them (0x800285F4 / 0x8002861C), so parsing COMMON alone
+ * sees an empty call every time. See openquestions #56.
+ *
+ * Two counting tests were run before that and BOTH decided nothing, which is
+ * worth keeping so neither is repeated: all 834 trigger offsets start a record
+ * in COMMON's script *and* in a zone's, and none runs past the end of either.
+ * An offset is just a number, and record starts are dense.
+ *
  *
  * What is left for this command to do is measure the script that does run:
  * COMMON's, fired by every trigger volume, with the rotators built from the
@@ -31,6 +40,7 @@
 #include "cmd_zonescript.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "events.h"
@@ -57,6 +67,12 @@ typedef struct live_rot_ctx {
     u32                 steps;
     u32                 rot_fired;   /* rotation CALLs the script actually ran */
     u32                 rot_barren;  /* ...of those, ones that turned nothing  */
+
+    /* Which item offsets turned something, so a call barren under THIS zone can
+     * be told apart from one barren under every zone the map ships. */
+    const u8           *chunk;
+    u8                 *turned;      /* one byte per chunk offset */
+    u8                 *seen;
 } live_rot_ctx;
 
 static void live_rot_call(void *user, const q2_event_item *item, u8 call_index)
@@ -79,6 +95,13 @@ static void live_rot_call(void *user, const q2_event_item *item, u8 call_index)
         ctx->rot_fired++;
         if (!hit)
             ctx->rot_barren++;
+
+        if (ctx->turned && ctx->chunk && item->payload) {
+            size_t off = (size_t)(item->payload - ctx->chunk);
+            ctx->seen[off] = 1;
+            if (hit)
+                ctx->turned[off] = 1;
+        }
     }
 }
 
@@ -109,6 +132,7 @@ int cmd_zonescript(const disc *d, const char *only_map)
         rot_usable = 0, rot_zone_rescue = 0, rot_zone_inrange = 0,
         rot_zone_slots = 0, rot_zone_nonneg = 0;
     u32 live_rot_fired = 0, live_rot_barren = 0;
+    u32 rot_any_zone = 0, rot_no_zone = 0;
     u32 live_built = 0, live_calls = 0, live_steps = 0, live_moved = 0,
         live_turned = 0;
     bool verbose = (only_map != NULL);
@@ -395,12 +419,20 @@ int cmd_zonescript(const disc *d, const char *only_map)
              * for a map whose zones are byte-identical to COMMON that is any of
              * them, and the count is unchanged.
              */
-            if (zcount) {
+            /*
+             * Sweep EVERY zone, not just the best one. A call that turns nothing
+             * with zone 0 resident may turn something with zone 3, and only a
+             * call barren under every zone the map ships is genuinely missing.
+             */
+            if (zcount && cev.size) {
+                u8 *any = (u8 *)calloc(cev.size, 1);
+                u8 *ran = (u8 *)calloc(cev.size, 1);
                 u32 best = 0, bz = 0, zq;
 
                 for (zq = 0; zq < zcount; zq++) {
                     q2_rotator_set probe;
                     q2_userfuncs puf;
+                    q2_event_rt prt;
 
                     memset(&probe, 0, sizeof(probe));
                     q2_rotators_set_operand_source(&probe, cev.data,
@@ -411,9 +443,51 @@ int cmd_zonescript(const disc *d, const char *only_map)
                             best = probe.count;
                             bz   = zq;
                         }
+                        if (any && ran && have_trig &&
+                            q2_event_rt_init(&prt, &cev) == Q2_OK) {
+                            live_rot_ctx pc;
+
+                            memset(&pc, 0, sizeof(pc));
+                            pc.uf     = &puf;
+                            pc.set    = &probe;
+                            pc.chunk  = cev.data;
+                            pc.turned = any;
+                            pc.seen   = ran;
+                            prt.on_call      = live_rot_call;
+                            prt.on_call_user = &pc;
+
+                            for (k = 0; k < tg.count; k++) {
+                                q2_trigger tr;
+                                if (!q2_trigger_get(&tg, k, &tr))
+                                    continue;
+                                if (tr.event_offset == Q2_TRIGGER_NO_EVENT)
+                                    continue;
+                                q2_event_rt_trigger(&prt, tr.event_offset);
+                            }
+                            q2_event_rt_update(&prt);
+                        }
                     }
                     q2_rotators_free(&probe);
                 }
+
+                if (any && ran) {
+                    u32 o;
+                    for (o = 0; o < cev.size; o++) {
+                        if (!ran[o])
+                            continue;
+                        if (any[o]) {
+                            rot_any_zone++;
+                        } else {
+                            rot_no_zone++;
+                            printf("  %s: rotation CALL at Events+%u turns "
+                                   "nothing under any of its %u zones\n",
+                                   g_maps[mi], o, zcount);
+                        }
+                    }
+                }
+                free(any);
+                free(ran);
+
                 q2_rotators_set_operand_source(&rs, cev.data,
                                                zev[bz].data, zev[bz].size);
             }
@@ -521,6 +595,10 @@ int cmd_zonescript(const disc *d, const char *only_map)
            rot_zone_slots ? 100.0 * rot_zone_nonneg / rot_zone_slots : 0.0);
     printf("    rotation CALLs the script RUNS : %u, of which turn nothing : %u\n",
            live_rot_fired, live_rot_barren);
+    printf("    distinct rotation CALL sites the script reaches : %u\n",
+           rot_any_zone + rot_no_zone);
+    printf("      turn something under SOME zone : %u\n", rot_any_zone);
+    printf("      barren under EVERY zone        : %u\n", rot_no_zone);
     printf("    rotators built  : %u  (one per object slot each call names)\n",
            live_built);
     printf("    CALL items run  : %u\n", live_calls);
