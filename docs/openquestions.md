@@ -1832,7 +1832,38 @@ not damage. It then calls engine slots `+0xC8` and `+0xD8` with vectors.
       `+0xD8` (`0x8005BB58`) is **angles to vectors**, three angles masked to
       `0xFFF` indexing the packed `{sin, cos}` table at `0x800A5430`.
 
-      **So there is no fire call in the Soldier's fire think at all.** Every one
+      **The shot was found, and it was one indirection further out.** `soldier_fire`
+      does not reach it through `s3`, the register the decoder follows, but through a
+      fresh `lui` — `lw v1, 128(v0)` with `v0 = module base` — which is import
+      `+0x80`. The loader at `0x8007DA00` names the whole family, and it is
+      contiguous, exactly as id's is:
+
+          +0x80  0x80062000  monster_fire_blaster
+          +0x84  0x80061DFC  monster_fire_bullet
+          +0x88  0x80061ED0  monster_fire_shotgun
+
+      And the Soldier's three arms carry their figures as immediates:
+
+          skin < 2   blaster    damage 5, speed 600
+          skin < 4   shotgun    damage 2, kick 1, spread 1000/500, 12 pellets
+          otherwise  bullet     damage 2, kick 4, spread 300/500
+
+      **Every one of those is id's own number** — `monster_fire_blaster(…, 5, 600, …)`,
+      `DEFAULT_SHOTGUN_HSPREAD` 1000 / `VSPREAD` 500 / `COUNT` 12,
+      `DEFAULT_BULLET_HSPREAD` 300 / `VSPREAD` 500 — which is the check that says the
+      read is right rather than merely self-consistent. The port's fire hook now
+      carries them, and a creature whose table it does not know is dropped rather
+      than handed a Soldier's gun.
+      *Measured, not assumed:* on BASE1 over 1800 frames with four creatures hunting,
+      the hook is invoked **zero** times, so something upstream of it does not reach
+      the attack. The client counts swings and shots beside every capture, so the next
+      pass starts from a number. The thing to establish is which of the two think
+      paths the frame driver takes — `q2_cre_run_think`'s decoded actions or the
+      class method table `q2_creature_spawn` installs.
+
+      The earlier statement that follows was written before this and is kept because
+      the reasoning it records is still what eliminated the call route:
+      **there is no fire call in the Soldier's fire think's IMPORT LIST.** Every one
       of its six distinct imports is aiming arithmetic. That eliminates the whole
       call route rather than narrowing it, and leaves one candidate standing: the
       think loads `s7` from the flash table at `0x80101194` and the tables hold

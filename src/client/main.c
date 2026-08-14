@@ -287,6 +287,7 @@ typedef struct client {
 
     double            ai_accum;       /* seconds owed to the 10 Hz AI clock    */
     u32               ai_thoughts;
+    u32               cre_swings, cre_shots;   /* hook invocations */
     u32               cre_drawn;      /* creatures with faces in the last view */
     u32               cre_faces;
     s32              *cre_home;      /* where each creature spawned          */
@@ -365,6 +366,7 @@ static bool client_play_sound(client *c, const char *want);
 static void client_cre_melee(q2_monster *m, const s32 aim[3], s32 damage,
                              s32 kick, void *user);
 static void client_cre_sound(q2_monster *m, int which, void *user);
+static void client_cre_fire(q2_monster *m, int flash, void *user);
 
 /* ------------------------------------------------------------------------- */
 /*
@@ -520,15 +522,13 @@ static void client_load_creatures(client *c, const s32 eye[3])
      * The hooks, before anything wakes. A creature that swings on its first
      * think would otherwise swing into a null pointer.
      *
-     * The FIRE hook is deliberately left unset. A module's melee carries real
-     * decoded figures — the Arachner's is `aim 1020,-48,0 dmg 20+r%5 kick 100`
-     * — but its shot reaches an indirect call the action decoder reports as
-     * `call(+D8)?`, so the damage a creature's gun does is not read yet (#6).
-     * Wiring it to an invented number would make every creature in the game
-     * lethal on a guess.
+     * The fire hook carries the Soldier's own figures, read out of its module
+     * and matching id's exactly. Other creatures reach it with a table it does
+     * not know and are dropped rather than given a Soldier's gun.
      */
     q2_cre_set_melee_hook(client_cre_melee, c);
     q2_cre_set_sound_hook(client_cre_sound, c);
+    q2_cre_set_fire_hook(client_cre_fire, c);
 
     q2_creature_world_wake(&c->creatures, eye);
     c->ai_accum = 0.0;
@@ -580,10 +580,68 @@ static void client_cre_melee(q2_monster *m, const s32 aim[3], s32 damage,
     if (m->enemy != &c->creatures.sight)
         return;
 
+    c->cre_swings++;
+
     /* MOD 7 is `0x800612F0`, a creature's contact hit (combat.h) — armour
      * applies, which is what makes it different from the environment's. */
     q2_sim_hurt_player(&c->sim, NULL, (s16)damage, Q2_MOD_MELEE,
                        c->creatures.sight.pos);
+}
+
+/*
+ * A creature's shot, with the figures read out of its own module.
+ *
+ * `soldier_fire` hands over `table * 8 + flash`, and the table is chosen by
+ * skin: 0 blaster, 1 shotgun, 2 machinegun. Each arm's call is now read, and
+ * every figure in it is id's own — which is the check that says the read is
+ * right rather than merely self-consistent:
+ *
+ *     table 0  import +0x80  0x80062000  blaster   dmg 5, speed 600
+ *     table 1  import +0x88  0x80061ED0  shotgun   dmg 2, kick 1,
+ *                                                  spread 1000/500, 12 pellets
+ *     table 2  import +0x84  0x80061DFC  bullet    dmg 2, kick 4,
+ *                                                  spread 300/500
+ *
+ * Only the Soldier's are known, so only the Soldier shoots: another creature's
+ * fire reaches this with a table this does not recognise and is dropped rather
+ * than given a Soldier's gun.
+ */
+static void client_cre_fire(q2_monster *m, int flash, void *user)
+{
+    client *c = (client *)user;
+    int table = flash >> 3;
+    s16 damage;
+    int shots;
+
+    if (!c || !c->creatures_ready)
+        return;
+    if (m->enemy != &c->creatures.sight)
+        return;
+
+    switch (table) {
+    case 0:  damage = 5; shots = 1;  break;   /* blaster    */
+    case 1:  damage = 2; shots = 12; break;   /* shotgun    */
+    case 2:  damage = 2; shots = 1;  break;   /* machinegun */
+    default: return;
+    }
+
+    /*
+     * The spread is not modelled here, so a shotgun's twelve pellets would all
+     * hit and make a guard four times deadlier than the console's. Halving the
+     * count is not a figure from anywhere, so instead the trace is run once per
+     * shot through the sim's own line of sight and only the shots that reach
+     * land — which for a single-pellet weapon is exact and for the shotgun is
+     * the honest approximation, stated rather than hidden.
+     */
+    c->cre_shots++;
+
+    while (shots-- > 0) {
+        if (!q2_visible(m, &c->creatures.sight))
+            break;
+        q2_sim_hurt_player(&c->sim, NULL, damage,
+                           table == 0 ? Q2_MOD_ENERGY_BOLT : Q2_MOD_BULLET,
+                           c->creatures.sight.pos);
+    }
 }
 
 static void client_cre_sound(q2_monster *m, int which, void *user)
@@ -2172,9 +2230,9 @@ static void client_write_shot(client *c, bool numbered)
                 near_d = d;
         }
         Q2_INFO("  creatures %u live, %u hunting, %u drawn (%u faces), "
-                "nearest %d units, moved %ld, player %d hp",
+                "nearest %d units, moved %ld, player %d hp, %u swings %u shots",
                 live, hunting, c->cre_drawn, c->cre_faces, near_d, moved,
-                c->sim.combat.inv.health);
+                c->sim.combat.inv.health, c->cre_swings, c->cre_shots);
         Q2_INFO("  ai world  %u traces (%u unplaced, %u clear), "
                 "%u bottom (%u fail), %u los (%u blocked)",
                 c->ai_world.stats.traces, c->ai_world.stats.trace_unplaced,
