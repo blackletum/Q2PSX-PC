@@ -4801,8 +4801,28 @@ nothing saying so.
       so "skip the run" skips both tables and lands past everything.
 
       Reverted — 13 flagged names beat 0. But the failure is informative: the two tables abut, so no rule
-      that treats a run as a unit can separate them. What is needed is a rule that ends the move-name run
-      where the move-name TABLE ends, and `q2_creature_move_names` already knows that extent.
+      that treats a run as a unit can separate them.
+
+      **A seventh angle: ask the disc which of those names are real sounds.** The same VAG scan that settled
+      the Tank Commander (#60), run over the Berserk's thirteen:
+
+          ber_pain2    8 VAG entries
+          Attack1      0        Attack2   0        Attack3   0
+          ber_idle1    0        Melee     0        ber_srch1 0
+
+      So `ber_pain2` — index 3, the first entry after the three move names — **is a real sound on the disc**,
+      and the three before it are not. That is the first evidence for where the table starts, and it points
+      at exactly the candidate rejected earlier for lack of any.
+
+      **It is still not adopted, because it contradicts the module.** The disassembly pins `ber_deth2` at
+      `module+0x18C` and `ber_idle1` at `+0x198` — twelve bytes apart, adjacent — while the heuristic's list
+      puts `inf_deth2` between them. Both cannot be right, so the run is misaligned *somewhere in its
+      middle*, and starting it three entries later would only move the error rather than fix it.
+
+      One more thing the scan settles: `ber_idle1` has no VAG either, yet the disassembly proves it IS a
+      name the module passes to the sound import. So **a name being requested does not mean a VAG of that
+      name exists** — `tnk_idle1` was the same (#60). Both are *idle* sounds, which suggests the disc simply
+      ships without them, and it means the VAG check is evidence FOR a name but not against one.
 
       **The Tank Commander is the same shape**, checked rather than assumed:
 
