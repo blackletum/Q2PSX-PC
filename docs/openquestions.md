@@ -2647,7 +2647,36 @@ alarming. The 1, 6 and 7 belong to the other creatures in that zone.
 
 So the attack move is installed three times and cut short before its sixth frame each time.
 
-- [ ] 57. **What cuts the attack animation short.** The generic run handler installs the run move whenever
+- [ ] 57. **What cuts the attack animation short — and it is NOT the AI verb, which was my guess.**
+
+      The census now prints the `ai` byte per frame beside the think byte, run-length encoded, and the answer
+      is that the port already has this right. Across the disc the verbs land exactly where they should:
+
+      | move installed by | verb its frames carry |
+      | --- | --- |
+      | stand | 1 |
+      | walk | 2 |
+      | run | 3 |
+      | attack, melee | 4 |
+      | pain, die | 5 |
+
+      and `q2_ai_verbs[]` is already one-based to match — `NULL, ai_stand, ai_walk, ai_run, ai_charge,
+      ai_move` in the executable's own slot order at `0x800D561C`. So the Arachner's attack move runs
+      `ai_charge` sixteen frames running (`ai: 4*16`), which is correct and does not hand the creature back to
+      the chase. **The suspicion recorded when this question was opened is wrong and is withdrawn.**
+
+      One move on the disc is worth noting on the way past: an attack whose verbs read `4*5 0*19 4*5`. Verb 0
+      is the slot the original stores zero in, so nineteen of its frames deliberately run no verb at all —
+      a hold in the middle of an attack.
+
+      What remains: the attack move installs three times in a 500-frame capture and never advances past its
+      sixth frame, while the run move installs five times in the same capture. Something re-installs a move
+      within five AI ticks of an attack starting. The verb is not it, so the next place to look is what calls
+      `m->run` — the AI's own state transitions — rather than what the frames say.
+
+  *As first written:*
+
+- [ ] ~~57. **What cuts the attack animation short.**~~ The generic run handler installs the run move whenever
       `m->run` is called, and the counters show run installed 5 times against attack's 3 in the same capture.
       In the original a monster's attack move plays out because its frames carry an AI verb — the `ai` byte of
       `{u8 ai; s8 dist; u8 think}` — that keeps the AI in the attack rather than returning it to the chase.

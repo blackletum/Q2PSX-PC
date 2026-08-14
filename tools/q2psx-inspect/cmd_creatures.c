@@ -151,6 +151,33 @@ static void report(const q2_creature *c, const q2_cre_impl *impl)
             if (prev >= 0)
                 printf(run > 1 ? " %d*%u" : " %d", prev, run);
         }
+
+        /*
+         * And the AI VERB each frame runs, the same way. This is what decides
+         * whether an animation plays out or hands the creature back to the
+         * chase on the next tick, so it belongs beside the thinks.
+         */
+        {
+            u32 arun = 0;
+            int aprev = -1;
+
+            printf("  ai:");
+            for (f = 0; f < mv->frame_count &&
+                        mv->frame_index + f < Q2_CRE_MAX_FRAMES; f++) {
+                int a = c->frames[mv->frame_index + f].ai;
+
+                if (a == aprev) {
+                    arun++;
+                    continue;
+                }
+                if (aprev >= 0)
+                    printf(arun > 1 ? " %d*%u" : " %d", aprev, arun);
+                aprev = a;
+                arun  = 1;
+            }
+            if (aprev >= 0)
+                printf(arun > 1 ? " %d*%u" : " %d", aprev, arun);
+        }
         printf("\n");
     }
 
