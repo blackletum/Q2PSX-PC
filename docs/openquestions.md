@@ -4024,8 +4024,27 @@ nothing saying so.
       them means tracing `s0`, not reading another table entry, which is why they are identified here and not
       wired.
 
-      **Five of fifteen are now named**: projectile, rocket, BFG, machinegun, chaingun. The pointer table at
-      `0x8009D704` is likely to name more of the remaining ten the same way.
+      **Five of fifteen are now named**: projectile, rocket, BFG, machinegun, chaingun.
+
+      **And the remaining ten are mostly SCRIPT.** Finding each site's enclosing function and asking what
+      references it puts `0x800287A0` in a second table, at `0x8009B930`, whose records carry their names
+      inline:
+
+          8009B930  8002E640  "FLKLIGHT"
+          8009B940  800287A0  "SHOOTTHEN"     <- 0x800288C8 is in this handler
+
+      That is the **UserFuncs command table**, and `src/formats/userfuncs.h` already lists those two
+      primitives adjacently in the same order — `Q2_UF_FLKLIGHT` then `Q2_UF_SHOOTTHEN` — so the table is
+      identified by two independent agreements, not by one string.
+
+      `userfuncs.c` even carries their operand layouts: `TIMEDLIGHT` 28 bytes / 5 operands, `FLKLIGHT`
+      24 bytes / 4 operands. **What the port lacks is a handler**, which is exactly the state `SIMROT` was in
+      before `q2_rotators_build` existed — a decoded command with no runtime behind it.
+
+      So the shape of the remaining lighting work is now known: **not ten unrelated hunts, but the script
+      light primitives, built the way the rotators were.** `0x80031094` being materialised at `0x8007DBBC`
+      — inside the module loader — points the same way, since that is where the 71-slot import table is
+      filled.
 
       Still not done: fourteen of the fifteen sites — but they share a dumped table now, and two of the
       fourteen are identified (rocket, and `0x8004B2B4` reached the same way).
