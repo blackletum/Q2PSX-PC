@@ -3960,6 +3960,33 @@ nothing saying so.
       That is worth more than the light would have been: one of the fifteen sites is now known to need no
       reconstruction at all.
 
+      **Every site mapped to its presets, in one sweep.** Scanning back from each `jal 0x80075C34` for the
+      globals it reads:
+
+          800288C8  78E                        8004AD20  990 992 994 996     rocket
+          80028E6C  799 79A 79B 79C 79E        8004B8A0  9BC..9C2 994 996
+          8002A868  78C 78E                    8004CA14  9D4 9D6 9D7 994 996
+          80031048  7D2                        8004CDE4  9D4 9D6 9D7 994 996
+          80031268  7D4..7DA                   800586D0  AAC..AB6
+          80048228  954..95E   projectile      800597C0  AB4 AB6
+          800482A0  954..962   projectile 2nd  8005A760  AD4..AD7 AB4 AB6
+                                               800648B8  B28 B2A B2C B2E
+
+      (all `0x800AE___`.) So the palette spans `0x800AE78C..0x800AEB2E`, far wider than the projectile's
+      corner, and several sites SHARE entries — `0x8004CA14` and `0x8004CDE4` read exactly the same set, and
+      `0x800AE994/996` is the `a3` (style, size) that five different sites pass.
+
+      Reading the radius pairs where they resolve:
+
+          800AE958   300  800   projectile        live
+          800AE960   800 1600   projectile 2nd    live, but its 0x10 gate is shut
+          800AE990  2000 1000   rocket            INNER > OUTER -- no-op
+          800AE9C0  1000 1400   0x8004B8A0        live
+
+      **Only the rocket has the inverted pair.** The others are ordinary, so the no-op result does not
+      generalise and twelve sites remain real work — but each now has its preset addresses written down
+      rather than needing its own hunt.
+
       Still not done: fourteen of the fifteen sites — but they share a dumped table now, and two of the
       fourteen are identified (rocket, and `0x8004B2B4` reached the same way).
 
