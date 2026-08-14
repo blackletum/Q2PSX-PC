@@ -3965,7 +3965,7 @@ nothing saying so.
       78-93, `"Stand"` 65-77) do not overlap either, so merging is not the answer for them. That is the whole
       remaining residue of the 51 series.
 
-- [~] 59. **The Arachner's residue, accounted for clip by clip: two moves and two clips, one frame apart.**
+- [ ] 59. **The Arachner's residue, accounted for clip by clip: two moves and two clips, one frame apart.**
       Its model has 13 clips and its module 11 decoded moves plus 2 the decoder never finds. Assigning each
       move to a clip by the 3:1 rule and striking that clip off:
 
@@ -3992,7 +3992,23 @@ nothing saying so.
       What is then left is exact: **two clips unclaimed, both 30 frames — ten AI frames each — and two moves
       unmatched, both nine AI frames.** Two leftovers on each side, differing by exactly one frame.
 
-      That points at an off-by-one in those two ranges rather than at the rule, and it is recorded as a LEAD,
-      not a result: n = 2, and this file has twice had to withdraw a story that fitted a handful of cases.
-      What would settle it is reading the two moves' frame records directly to see whether the span is 9 or
-      10 — a specific, bounded piece of work, and the last one the 51 series has left.
+      ~~That points at an off-by-one in those two ranges.~~ **Tested and REFUTED the same session.** The
+      move record is `{u32 first; u32 last; u32 frames; u32 endfunc}` read straight out of the module, so
+      there is no arithmetic for the decoder to get wrong, and the frame arrays confirm it independently:
+
+          ( 3) 801017DC end 00000000->00000000  16-24  -> 0*9  ai: 2*9
+          ( 4) 80101808 end 00000000->00000000  16-24  -> 0*9  ai: 3*9
+          (-1) 801018A4 end 80101010->80101738  25-33  -> 0*2 3 0*3 4 0*2  ai: 4*9
+
+      Nine frame entries each, every one validated against the verb table before the move was accepted, and
+      the name table independently agrees on 16-24. **Three sources say nine, so the spans are nine** and the
+      tidy "two leftovers, one frame apart" reading is wrong.
+
+      Also visible there: 16-24 is TWO distinct move records at different addresses (`801017DC` via callback
+      3, `80101808` via callback 4) that happen to share a range — not one move listed twice, as earlier
+      entries in this file assumed.
+
+      So the residue is real and stands: **the Arachner has two 9-frame moves wanting a 27-frame clip it does
+      not have, and two unused 30-frame clips nothing claims.** No off-by-one, no merge, no variant model —
+      its model is the only Arachner on the disc. This is where the 51 series ends for now, with the anomaly
+      stated precisely rather than dressed in an explanation that does not survive.
