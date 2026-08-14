@@ -58,6 +58,9 @@ static void bound_trace(void *user, const s32 start[3], const s16 mins[3],
 
     memset(out, 0, sizeof(*out));
 
+    if (b)
+        b->stats.traces++;
+
     if (!b || !b->coll) {
         out->fraction  = Q2_TRACE_ONE;
         out->endpos[0] = end[0];
@@ -66,12 +69,21 @@ static void bound_trace(void *user, const s32 start[3], const s16 mins[3],
         return;
     }
 
-    if (!q2_coll_move(b->coll, start, end, -1, pos, &node)) {
-        /*
-         * The walk could not even place the start point. Treat that as solid
-         * rather than clear: a creature that has fallen out of the hull must
-         * not be handed a free move through the level.
-         */
+    /*
+     * `q2_coll_move` returns false when the move was STOPPED, not when it could
+     * not begin — collision.h §0x80044C44 — and a stopped move is the normal,
+     * useful answer for a walker's step trace, which exists precisely to be
+     * stopped by the floor. `out_pos` is filled in either way; `out_node` is -1
+     * only when the walk never found a cell at all, which is the real "started
+     * outside the hull".
+     *
+     * Reading the false as start-solid is what made every creature in the game
+     * stand still: `SV_movestep` bails on `allsolid` before it ever looks at
+     * the fraction, so a creature standing on a floor was told it was buried in
+     * one. Measured on BASE1, 1052 of 1052 traces took that arm.
+     */
+    if (!q2_coll_move(b->coll, start, end, -1, pos, &node) && node < 0) {
+        b->stats.trace_unplaced++;
         out->fraction   = 0;
         out->startsolid = true;
         out->allsolid   = true;
@@ -86,6 +98,8 @@ static void bound_trace(void *user, const s32 start[3], const s16 mins[3],
     out->endpos[2] = pos[2];
     out->fraction  = travelled_fraction(start, end, pos);
     out->ent       = NULL;
+    if (out->fraction >= Q2_TRACE_ONE)
+        b->stats.trace_clear++;
 }
 
 static bool bound_los(void *user, const s32 a[3], const s32 b3[3])
@@ -97,12 +111,19 @@ static bool bound_los(void *user, const s32 a[3], const s32 b3[3])
     if (!b || !b->coll)
         return true;
 
-    if (!q2_coll_move(b->coll, a, b3, -1, pos, &node))
+    b->stats.los_calls++;
+
+    if (!q2_coll_move(b->coll, a, b3, -1, pos, &node)) {
+        b->stats.los_blocked++;
         return false;
+    }
 
     /* Sight is all-or-nothing in the original: `visible` tests the fraction
      * against 1.0 and takes anything less as blocked. */
-    return pos[0] == b3[0] && pos[1] == b3[1] && pos[2] == b3[2];
+    if (pos[0] == b3[0] && pos[1] == b3[1] && pos[2] == b3[2])
+        return true;
+    b->stats.los_blocked++;
+    return false;
 }
 
 static bool bound_bottom(void *user, const q2_monster *m)
@@ -114,6 +135,8 @@ static bool bound_bottom(void *user, const q2_monster *m)
     if (!b || !b->coll || !m)
         return true;
 
+    b->stats.bottom_calls++;
+
     start[0] = m->pos[0];
     start[1] = m->pos[1];
     start[2] = m->pos[2];
@@ -123,12 +146,24 @@ static bool bound_bottom(void *user, const q2_monster *m)
     end[1] = start[1] + b->bottom_reach;
     end[2] = start[2];
 
-    if (!q2_coll_move(b->coll, start, end, -1, pos, &node))
-        return false;
+    /*
+     * A probe that is STOPPED has found ground; one that runs the whole way has
+     * found a drop. So the return of `q2_coll_move` is the answer, inverted —
+     * the previous reading had it the right way round only by accident, because
+     * it also treated "stopped" as failure and so reported a drop under every
+     * creature standing on a floor.
+     */
+    if (!q2_coll_move(b->coll, start, end, -1, pos, &node)) {
+        if (node < 0) {
+            /* Never found a cell: the creature is outside the hull entirely. */
+            b->stats.bottom_fail++;
+            return false;
+        }
+        return true;                    /* stopped short: there is ground */
+    }
 
-    /* Ground is anything that stopped the probe short. A probe that ran the
-     * whole way means the creature is over a drop. */
-    return pos[1] < end[1];
+    b->stats.bottom_fail++;
+    return false;                       /* ran the whole way: a drop      */
 }
 
 void q2_ai_world_bind_init(q2_ai_world_bind *bind, q2_collision *coll)

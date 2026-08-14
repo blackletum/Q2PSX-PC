@@ -29,12 +29,33 @@
 #include "collision.h"
 #include "q2psx.h"
 
+/*
+ * What the binding did, so a creature that will not move is a measurement
+ * rather than a guess.
+ *
+ * `trace_unplaced` is the one that matters: `q2_coll_move` reports failure when
+ * it cannot find a cell for the START point, and a walker's step trace starts
+ * from a point the creature is not standing at. If nearly every trace lands
+ * there, the fault is in placing the start, not in the geometry.
+ */
+typedef struct q2_ai_world_stats {
+    u32 traces;
+    u32 trace_unplaced;     /* the start point resolved to no cell        */
+    u32 trace_clear;        /* ran the whole way: "walked off an edge"    */
+    u32 bottom_calls;
+    u32 bottom_fail;
+    u32 los_calls;
+    u32 los_blocked;
+} q2_ai_world_stats;
+
 typedef struct q2_ai_world_bind {
     q2_collision *coll;
 
     /* How far below a creature ground may be and still count. The step height,
      * because a creature that can climb a step can also stand off one. */
     s32 bottom_reach;
+
+    q2_ai_world_stats stats;
 
     /* Filled in by the binder; pass this to q2_ai_set_world. */
     q2_ai_world world;

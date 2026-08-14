@@ -1582,16 +1582,27 @@ Single-zone BASE0 loses none of its ten, which is what says the test is measurin
       What is missing is the engine's own selector, which will be wherever the creature draw turns an
       entity's frame into a pose.
 
-- [ ] 48. **A creature's movement has no hull to run against.** A box move wants a hull eroded by the
-      MOVER's own extent and the disc ships exactly one erosion, the player's. Put a creature's step through
-      `PrimaryColl` — the un-eroded hull, which is the right one for a *query* — and every step is rejected
-      against the floor it is standing on: measured on BASE1, creatures acquire the player and animate and
-      move zero units in 600 ticks. So the port binds the AI's **sight** to the real hull and leaves its
-      **trace** and **check_bottom** on the open stand-in, which means a creature walks through walls. That
-      is the visible failure rather than the hidden one, and it is deliberate: with the real hull they stand
-      still, which reads as the AI not working at all.
-      The thing to find is whether the original erodes at run time (in which case there is a routine to
-      read) or whether creature movement never traces the world hull at all.
+- [x] 48. **A creature's movement has no hull to run against — SOLVED, and it was never about the hull.**
+      The symptom was that a creature acquires the player, animates, and moves zero units for as long as you
+      care to watch. The diagnosis blamed the erosion: a box move wants a hull eroded by the MOVER's own
+      extent and the disc ships exactly one erosion, the player's.
+      That was wrong, and the thing that settled it was counting rather than reasoning. Instrumenting
+      `q2_ai_world_bind` says **1052 of 1052 traces** on BASE1 took the "could not place the start" arm, and
+      **84 of 84** ground probes reported a drop — under creatures standing on a floor. Numbers that
+      absolute are not geometry.
+      `q2_coll_move` **returns false when the move was STOPPED**, not when it could not begin
+      (collision.h §0x80044C44); `out_pos` is filled in either way and `out_node` is -1 only when the walk
+      never found a cell at all. A stopped move is the normal and useful answer for a walker's step trace,
+      which exists precisely to be stopped by the floor. The binding read that false as
+      `startsolid`/`allsolid`, and `SV_movestep` bails on `allsolid` before it ever looks at the fraction —
+      so every creature in the game was told it was buried in the floor it was standing on. `check_bottom`
+      had the same inversion: a probe that is stopped has FOUND ground, and it was reporting failure.
+      With the contract read correctly the same BASE1 run goes to **1 unplaced trace of 30, no ground-probe
+      failures, and 6,522 units of creature movement**; BASE2 and COMMAND move too. And the hull question
+      answers itself in passing: `PrimaryColl` is right for all three questions — with `SecondaryCol` it is
+      214 of 214 unplaced and 412 of 432 sight lines blocked, because that is the hull a creature genuinely
+      is outside.
+      `src/game/aiworld.[ch]`; the counters are kept, and the client prints them next to every capture.
 
 ---
 

@@ -467,35 +467,20 @@ static void client_load_creatures(client *c, const s32 eye[3])
     q2_sim_set_targets(&c->sim, c->cre_target, c->creatures.set.count);
 
     /*
-     * The world the AI asks its questions of, and the split is deliberate.
+     * The world the AI asks its three questions of, and it is `PrimaryColl`.
      *
-     * LINE OF SIGHT gets the zone's real hull, through `PrimaryColl` — the
-     * un-eroded query hull, which is the one the original uses for everything
-     * that is not a move (sim.h), and the one a creature is actually inside:
-     * `SecondaryCol` is `PrimaryColl` eroded by the PLAYER's 286-unit
-     * half-extent, and a Population spawn point sits in the part that erosion
-     * cuts away, so a creature looked up in it lands outside every cell and
-     * every trace from it fails. With this, creatures stop seeing through
-     * walls: on BASE1 twenty of them, sixteen acquire the player across the
-     * open room and two across the real geometry.
-     *
-     * MOVEMENT keeps the open stand-in, and that is a known gap rather than a
-     * choice. A box move wants a hull eroded by the MOVER's own extent and the
-     * disc ships exactly one erosion, the player's. Put a creature's step
-     * through `PrimaryColl` and every step is rejected against the floor it is
-     * standing on: it acquires, it animates, and it never moves. So for now a
-     * creature walks through walls, which is visible, rather than standing
-     * still, which reads as the AI not working at all.
+     * The un-eroded QUERY hull, which is the one the original uses for
+     * everything that is not a player move (sim.h), and the only one a creature
+     * is actually inside: `SecondaryCol` is `PrimaryColl` eroded by the
+     * PLAYER's 286-unit half-extent, and a Population spawn point sits in the
+     * part that erosion cuts away. Measured on BASE1 with the eroded hull, 214
+     * of 214 traces cannot place their start and 412 of 432 sight lines are
+     * blocked; with this one, 1 of 30 and 342 of 432.
      */
     q2_ai_world_bind_init(&c->ai_world,
                           c->sim.coll_primary_ready ? &c->sim.coll_primary
                                                     : NULL);
-    {
-        q2_ai_world w = c->ai_world.world;
-        w.trace        = NULL;    /* q2_ai_set_world fills these with the */
-        w.check_bottom = NULL;    /* open world's own                     */
-        q2_ai_set_world(&w);
-    }
+    q2_ai_world_bind_install(&c->ai_world);
 
     q2_creature_world_wake(&c->creatures, eye);
     c->ai_accum = 0.0;
@@ -2004,6 +1989,12 @@ static void client_write_shot(client *c, bool numbered)
         Q2_INFO("  creatures %u live, %u hunting, %u drawn (%u faces), "
                 "nearest %d units, moved %ld",
                 live, hunting, c->cre_drawn, c->cre_faces, near_d, moved);
+        Q2_INFO("  ai world  %u traces (%u unplaced, %u clear), "
+                "%u bottom (%u fail), %u los (%u blocked)",
+                c->ai_world.stats.traces, c->ai_world.stats.trace_unplaced,
+                c->ai_world.stats.trace_clear, c->ai_world.stats.bottom_calls,
+                c->ai_world.stats.bottom_fail, c->ai_world.stats.los_calls,
+                c->ai_world.stats.los_blocked);
     }
 }
 
