@@ -192,6 +192,11 @@ u32 q2_creature_sound_names(const q2_creature *c, const u8 *image, size_t size,
 u32 q2_creature_move_names(const q2_creature *c, const u8 *image, size_t size,
                            const char **out, u32 out_count);
 
+/* True when a think index's function is `jr ra` immediately -- the disc saying
+ * this frame does nothing, which is an answer rather than a failed decode. */
+bool q2_creature_think_is_empty(const q2_creature *c, const u8 *image,
+                                size_t size, u32 base, u32 index);
+
 /* Name records in the module that no decoded move claims. Non-zero means the
  * module names behaviour the decoder never reached. */
 u32 q2_creature_unclaimed_names(const q2_creature *c, const u8 *image,

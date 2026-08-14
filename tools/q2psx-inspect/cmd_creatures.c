@@ -32,6 +32,7 @@ static int g_covered;
 static int g_reloc_fail;
 static int g_actions_total;
 static int g_actions_done;
+static int g_actions_empty;
 static const u8 *g_img;
 static size_t g_img_size;
 static bool g_last_full;
@@ -254,8 +255,26 @@ static void report(const q2_creature *c, const q2_cre_impl *impl)
         static q2_cre_think th[Q2_CLASS_METHOD_COUNT];
         u32 got = q2_creature_decode_thinks(c, g_img, g_img_size, CRE_BASE,
                                             th, Q2_CLASS_METHOD_COUNT);
-        printf("    actions   : %u of %u think indices decode to an action\n",
-               got, n);
+        /*
+         * A think with no steps is not necessarily a failed decode. The
+         * Berserk's think 7 is `jr ra; nop` at 0x80101008 — an EMPTY function,
+         * and "this frame does nothing" is a real answer the disc gives. Count
+         * those separately so a deliberate no-op stops reading as a gap.
+         */
+        {
+            u32 empty = 0;
+            for (i = 0; i < n; i++)
+                if (!th[idx[i]].step_count &&
+                    q2_creature_think_is_empty(c, g_img, g_img_size, CRE_BASE,
+                                               idx[i]))
+                    empty++;
+            printf("    actions   : %u of %u think indices decode to an action",
+                   got, n);
+            if (empty)
+                printf(", and %u is an empty function on the disc", empty);
+            printf("\n");
+            g_actions_empty += (int)empty;
+        }
         for (i = 0; i < n; i++) {
             const q2_cre_think *t = &th[idx[i]];
             u32 k;
@@ -419,6 +438,10 @@ int cmd_creatures(const disc *d)
            " move claims\n", g_unnamed, g_unclaimed);
     printf("  %d of %d think indices across the disc decode to an action;"
            " a ? marks one behind a branch\n", g_actions_done, g_actions_total);
+    if (g_actions_empty)
+        printf("  %d of the remainder is an EMPTY function on the disc — `jr ra`"
+               " and nothing else, which is an answer rather than a gap\n",
+               g_actions_empty);
     printf("  a * marks an index with no hand transcription — it runs from the"
            " decoded action instead\n");
 

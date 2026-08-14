@@ -749,6 +749,33 @@ u32 q2_creature_move_names(const q2_creature *c, const u8 *image, size_t size,
     return found;
 }
 
+bool q2_creature_think_is_empty(const q2_creature *c, const u8 *image,
+                                size_t size, u32 base, u32 index)
+{
+    u32 addr, off, w;
+
+    if (!c || !image || index >= Q2_CLASS_METHOD_COUNT)
+        return false;
+
+    addr = c->method[index];
+    if (!addr || addr < base)
+        return false;
+
+    off = addr - base;
+    if ((size_t)off + 8 > size)
+        return false;
+
+    /*
+     * `jr ra` as the very first instruction. The Berserk's think 7 (0x80101008)
+     * is exactly that, and a frame naming it is asking for nothing to happen --
+     * a decoded answer, not a failure to decode. Without this the census reports
+     * it as a think that "does not decode to an action", which reads as a gap in
+     * the port when it is a property of the module.
+     */
+    w = q2_rd_u32(image + off);
+    return w == 0x03E00008u;
+}
+
 u32 q2_creature_unclaimed_names(const q2_creature *c, const u8 *image,
                                 size_t size, const char **out, u32 out_count)
 {

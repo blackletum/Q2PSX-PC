@@ -4011,11 +4011,24 @@ nothing saying so.
 
           [ 1] move(8010157C)? sound(80101758)?
 
-      Its move and its sound are both behind a branch the decoder will not follow, so their addresses are
-      candidates rather than facts. This is a decode-completeness gap and not a functional one — the same
-      creature's `port` line reads *5 of 5 think indices act*, because the hand-written Berserk binding
-      supplies that action. Three more think indices are now visible than before, and one of them is honest
-      about being uncertain, which is the trade this change makes.
+      ~~Its move and its sound are behind a branch the decoder will not follow.~~ **That was the wrong
+      think.** `gated` marks a step as CONDITIONAL, not undecoded, and think 1 decodes fine. The index with
+      no action is **think 7**, and disassembling it ends the question:
+
+          80101008  03E00008  jr      ra
+          8010100C  00000000  nop
+
+      **It is an empty function.** The move `"Attack2"` calls a think that deliberately does nothing, and
+      "this frame does nothing" is an answer the disc gives, not a failure to read it. There is no
+      regression: the count fell because the census had no way to say "decoded, and the answer is nothing".
+
+      `q2_creature_think_is_empty()` now distinguishes the two, and the census says so outright:
+
+          54 of 55 think indices across the disc decode to an action; a ? marks one behind a branch
+          1 of the remainder is an EMPTY function on the disc -- `jr ra` and nothing else
+
+      The lesson is the one this file keeps relearning: **a counter that cannot express "nothing" reports
+      absence as failure.** The same shape as `too short : 0` hiding WASTE2's truncated item.
 
       What is then left is exact: **two clips unclaimed, both 30 frames — ten AI frames each — and two moves
       unmatched, both nine AI frames.** Two leftovers on each side, differing by exactly one frame.
