@@ -4887,7 +4887,23 @@ nothing saying so.
                other      98 moves   n*3 97   (n+1)*3 1   neither 0
 
       Each hypothesis was built on the residue and each fitted it perfectly, which is exactly why none
-      survived a null test. The residue is three rows, two distinct moves, out of 115 — and the honest state
+      survived a null test.
+
+        6. *The frame records differ.* Dumping them (POWER1 carries the Arachner module) rather than
+           reasoning about them — the move the Berserk taught:
+
+               16-24  (miss)     02 0A 00 | 02 0A 00 | 02 0A 00 ...   nine frames
+               25-33  (miss)     04 00 00 | 04 00 00 | 04 00 03 ...   nine frames
+               130-132 (matches) 04 00 00 | 04 00 00 | 04 00 00
+               40-45   (matches) 05 00 00 | 05 00 00 | 05 00 00 ...
+
+           **Rejected as the discriminator**: `25-33` has the same middle byte as the moves that match. But
+           it is not nothing — `16-24`'s middle byte is `0x0A` where every other Arachner move examined has
+           `0`, and 16-24 is its walk. So the frame record's middle byte is a **per-frame distance**, set
+           only on locomotion, which is a field this project had not identified. It explains what the byte
+           is without explaining the clip mismatch.
+
+      The residue is three rows, two distinct moves, out of 115 — and the honest state after six hypotheses
       is that **no property yet examined separates them from the 113 that fit.**
 
       **Do not conclude the sounds are absent.** That was the previous answer here for many passes and it was
