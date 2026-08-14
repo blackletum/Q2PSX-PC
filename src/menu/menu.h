@@ -184,6 +184,14 @@ typedef enum q2_menu_action {
     Q2_ACT_NEW_GAME,           /* module+0xCD40  SINGLE PLAYER                */
     Q2_ACT_MULTIPLAYER,        /* module+0xCF68  MULTI PLAYER                 */
     Q2_ACT_CREDITS,            /* module+0x35C8  VIEW CREDITS                 */
+    Q2_ACT_PAGE_FRONT_NEWLOAD, /* module+0xCD40  SINGLE PLAYER                */
+    Q2_ACT_PAGE_FRONT_SKILL,   /* module+0xD0AC  NEW GAME                     */
+    Q2_ACT_LOAD_GAME,          /* module+0xD400  LOAD GAME                    */
+    Q2_ACT_SKILL_EASY,         /* module+0xD380                               */
+    Q2_ACT_SKILL_MEDIUM,       /* module+0xD3A8                               */
+    Q2_ACT_SKILL_HARD,         /* module+0xD3D4                               */
+    Q2_ACT_DM_MODE,            /* module+0x4AD8 — shared by all three modes   */
+    Q2_ACT_MP_SETTINGS,        /* module+0xD148 / +0xD1FC                     */
     Q2_ACT_COUNT
 } q2_menu_action;
 
@@ -231,7 +239,10 @@ typedef enum q2_menu_page_id {
      */
     Q2_PAGE_FRONT_TITLE      = 46,
     Q2_PAGE_FRONT_START      = 200,
-    Q2_PAGE_FRONT_OPTIONS    = 201
+    Q2_PAGE_FRONT_OPTIONS    = 201,
+    Q2_PAGE_FRONT_NEWLOAD    = 202,   /* NEW GAME / LOAD GAME             */
+    Q2_PAGE_FRONT_SKILL      = 203,   /* EASY / MEDIUM / HARD             */
+    Q2_PAGE_FRONT_MULTI      = 204    /* the five multiplayer rows        */
 } q2_menu_page_id;
 
 /*
@@ -314,7 +325,8 @@ typedef enum q2_menu_request {
     /* The front end's, which a caller answers by leaving the title screen. */
     Q2_MREQ_NEW_GAME,    /* SINGLE PLAYER: begin the game         */
     Q2_MREQ_MULTIPLAYER, /* MULTI PLAYER                          */
-    Q2_MREQ_CREDITS      /* VIEW CREDITS                          */
+    Q2_MREQ_CREDITS,     /* VIEW CREDITS                          */
+    Q2_MREQ_NOT_BUILT    /* a real front-end page the port lacks   */
 } q2_menu_request;
 
 #define Q2_MENU_MAX_ITEMS 12
@@ -371,6 +383,10 @@ typedef struct q2_menu {
 
     q2_menu_sound       sound;        /* one-shot, cleared by the reader     */
     q2_menu_request     request;      /* one-shot, cleared by the reader     */
+
+    /* What EASY / MEDIUM / HARD chose, 0..2, read alongside Q2_MREQ_NEW_GAME.
+     * The AI's own `q2_cre_set_skill` is what consumes it. */
+    int                 skill;
 } q2_menu;
 
 void q2_menu_init(q2_menu *m, q2_menu_settings *settings, int screen_h);

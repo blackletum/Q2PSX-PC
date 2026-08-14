@@ -542,19 +542,47 @@ static void run_action(q2_menu *m, int action)
      * lets TRIANGLE walk back to the title without a special case. */
     case Q2_ACT_PAGE_FRONT_START:   push(m, Q2_PAGE_FRONT_START);   break;
     case Q2_ACT_PAGE_FRONT_OPTIONS: push(m, Q2_PAGE_FRONT_OPTIONS); break;
+    case Q2_ACT_PAGE_FRONT_NEWLOAD: push(m, Q2_PAGE_FRONT_NEWLOAD); break;
+    case Q2_ACT_PAGE_FRONT_SKILL:   push(m, Q2_PAGE_FRONT_SKILL);   break;
 
     /*
      * And its three leaves. Each raises a request and closes, exactly as
      * RESUME and MISSION do: the menu does not know how to start a game, and
      * the caller does not need to know which row was on.
      */
+    /*
+     * SINGLE PLAYER opens NEW GAME / LOAD GAME rather than starting anything —
+     * the console's flow is START -> SINGLE PLAYER -> NEW GAME -> a difficulty,
+     * and only the difficulty begins the game.
+     */
     case Q2_ACT_NEW_GAME:
+        push(m, Q2_PAGE_FRONT_NEWLOAD);
+        break;
+
+    /* The three difficulties are one request with the skill attached, because
+     * the only thing that differs between them is a number the AI reads. */
+    case Q2_ACT_SKILL_EASY:
+    case Q2_ACT_SKILL_MEDIUM:
+    case Q2_ACT_SKILL_HARD:
+        m->skill = (action == Q2_ACT_SKILL_EASY)   ? 0
+                 : (action == Q2_ACT_SKILL_MEDIUM) ? 1 : 2;
         m->request = Q2_MREQ_NEW_GAME;
         q2_menu_close(m);
         break;
-    case Q2_ACT_MULTIPLAYER:
-        m->request = Q2_MREQ_MULTIPLAYER;
+
+    /*
+     * The rest of the front end's leaves. Each is a page the port has not built
+     * yet, and each closes rather than pretending to be one — which is visible,
+     * where a page that silently did nothing would not be.
+     */
+    case Q2_ACT_LOAD_GAME:
+    case Q2_ACT_DM_MODE:
+    case Q2_ACT_MP_SETTINGS:
+        m->request = Q2_MREQ_NOT_BUILT;
         q2_menu_close(m);
+        break;
+    case Q2_ACT_MULTIPLAYER:
+        push(m, Q2_PAGE_FRONT_MULTI);
         break;
     case Q2_ACT_CREDITS:
         m->request = Q2_MREQ_CREDITS;

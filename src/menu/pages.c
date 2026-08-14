@@ -242,6 +242,37 @@ static const q2_menu_item k_front_start[] = {
     { "MULTI PLAYER",  256, 137, Q2_ACT_MULTIPLAYER,  Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
 };
 
+/*
+ * module+0x0EF9C, module+0x0EFE4 and module+0x0F104 — the pages below START.
+ *
+ * The MULTI PLAYER page is the one that breaks the pattern: its five rows are
+ * 22 apart (80, 102, 124, 146, 168) where every other front-end page is 26. A
+ * five-row page is tightened to fit; two-, three- and four-row pages are not.
+ *
+ * And its first three rows share ONE action, `module+0x4AD8`, so the mode is
+ * decided by which row is on rather than by three handlers — which is what
+ * `QMULTI.C` wants, since it implements six modes of which three are
+ * selectable (#0).
+ */
+static const q2_menu_item k_front_newload[] = {
+    { "NEW GAME",  256, 111, Q2_ACT_PAGE_FRONT_SKILL, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "LOAD GAME", 256, 137, Q2_ACT_LOAD_GAME,        Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+};
+
+static const q2_menu_item k_front_skill[] = {
+    { "EASY",   256,  98, Q2_ACT_SKILL_EASY,   Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "MEDIUM", 256, 124, Q2_ACT_SKILL_MEDIUM, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "HARD",   256, 150, Q2_ACT_SKILL_HARD,   Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+};
+
+static const q2_menu_item k_front_multi[] = {
+    { "DEATHMATCH",      256,  80, Q2_ACT_DM_MODE,     Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "TEAM DEATHMATCH", 256, 102, Q2_ACT_DM_MODE,     Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "VERSUS",          256, 124, Q2_ACT_DM_MODE,     Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "LOAD SETTINGS",   256, 146, Q2_ACT_MP_SETTINGS, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "SAVE SETTINGS",   256, 168, Q2_ACT_MP_SETTINGS, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+};
+
 /* module+0x0ED44 */
 static const q2_menu_item k_front_options[] = {
     { "PLAYER OPTIONS", 256,  85, Q2_ACT_PAGE_PLAYER, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
@@ -274,6 +305,9 @@ static const q2_menu_page k_pages[] = {
     { Q2_PAGE_FRONT_TITLE,      NULL,         k_front_title,      N(k_front_title),      0,                  Q2_ACT_NONE,         0x8010EC3Cu, 0 },
     { Q2_PAGE_FRONT_START,      NULL,         k_front_start,      N(k_front_start),      0,                  Q2_ACT_BACK,         0x8010EC84u, 0 },
     { Q2_PAGE_FRONT_OPTIONS,    "OPTIONS",    k_front_options,    N(k_front_options),    0,                  Q2_ACT_BACK,         0x8010ED44u, 0 },
+    { Q2_PAGE_FRONT_NEWLOAD,    NULL,         k_front_newload,    N(k_front_newload),    0,                  Q2_ACT_BACK,         0x8010EF9Cu, 0 },
+    { Q2_PAGE_FRONT_SKILL,      NULL,         k_front_skill,      N(k_front_skill),      0,                  Q2_ACT_BACK,         0x8010EFE4u, 0 },
+    { Q2_PAGE_FRONT_MULTI,      NULL,         k_front_multi,      N(k_front_multi),      0,                  Q2_ACT_BACK,         0x8010F104u, 0 },
 };
 
 /* Variants, kept out of the main list so `q2_menu_pages` stays one page per

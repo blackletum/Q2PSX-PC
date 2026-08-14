@@ -1553,9 +1553,32 @@ item records at run time instead of transcribing a table, so there is nothing to
       title's. And the title page's two rows sit *lower* than any sub-page's first row, which is the space
       the `Q2LOGO` model occupies above them: the title screen is a rendered scene with two lines of menu
       over it, as this entry said, and now the two lines have coordinates.
-      *Still open:* what each `action` does — eight module addresses, readable with `levdisasm` — and the
-      pages below these two levels (the deathmatch setup, VERSUS, CREDITS), which the same `modxrefs` walk
-      will reach one string at a time.
+      **Three more pages came out of the same walk**, and every string in them has exactly one word
+      reference, so the arrays are contiguous 24-byte records like the first three:
+
+          module+0x0EF9C  NEW GAME        256, 111  -> module+0xD0AC
+          module+0x0EFB4  LOAD GAME       256, 137  -> module+0xD400
+          module+0x0EFE4  EASY            256,  98  -> module+0xD380
+          module+0x0EFFC  MEDIUM          256, 124  -> module+0xD3A8
+          module+0x0F014  HARD            256, 150  -> module+0xD3D4
+          module+0x0F104  DEATHMATCH      256,  80  -> module+0x4AD8
+          module+0x0F11C  TEAM DEATHMATCH 256, 102  -> module+0x4AD8
+          module+0x0F134  VERSUS          256, 124  -> module+0x4AD8
+          module+0x0F14C  LOAD SETTINGS   256, 146  -> module+0xD148
+          module+0x0F164  SAVE SETTINGS   256, 168  -> module+0xD1FC
+
+      Two things in there are not guessable from the capture. **The five-row page is tightened to a
+      22-pixel pitch** — 80, 102, 124, 146, 168 — where every two-, three- and four-row page in the front
+      end is 26. And **the three deathmatch modes share one action**, `module+0x4AD8`, so the mode is
+      decided by which row is on rather than by three handlers, which is what `QMULTI.C` wants: it
+      implements six modes of which three are selectable (#0).
+      The flow they describe is START -> SINGLE PLAYER -> NEW GAME -> a difficulty, and only the difficulty
+      begins the game — the port follows it, and hands the chosen skill to `q2_cre_set_skill` before the
+      level loads so the creatures that load already have it.
+      *Still open:* what each `action` does beyond the page it opens — fifteen module addresses now,
+      readable with `levdisasm` — and the deathmatch SETUP page, whose rows (`2 3 4 PLAYERS`,
+      `TIME LIMIT   10`, `FRAG LIMIT   10`, `GAME VARIABLES`) are widgets rather than plain text and so are
+      not a bare `{text, x, y, action}` record.
 
       *Also still open: the SCENE the title is drawn over,* and the reason is worth stating so nobody
       invents it. QFRONT's world is two nodes and eight vertices — there is no room in it for a title

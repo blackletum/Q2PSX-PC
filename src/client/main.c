@@ -73,6 +73,7 @@
 
 #include "ai.h"
 #include "aiworld.h"
+#include "crebind.h"
 #include "creworld.h"
 #include "disc.h"
 #include "entity.h"
@@ -1387,15 +1388,19 @@ static void client_menu_requests(client *c)
      * and the simulation takes over.
      */
     case Q2_MREQ_NEW_GAME:
-        Q2_INFO("front end: new game -> %s", c->first_map);
+        /* The difficulty is the AI's, and it is chosen before the level loads
+         * so the creatures spawned by that load already have it. */
+        q2_cre_set_skill(c->menu.skill);
+        Q2_INFO("front end: new game on skill %d -> %s",
+                c->menu.skill, c->first_map);
         c->in_front_end = false;
         client_load_zone(c, c->first_map, 0);
         q2_menu_close(&c->menu);
         break;
-    case Q2_MREQ_MULTIPLAYER:
     case Q2_MREQ_CREDITS:
-        /* Both are pages of the front end's own module that the port does not
-         * build yet, so they close back to the title rather than pretending. */
+    case Q2_MREQ_NOT_BUILT:
+        /* A real page of the front end's module that the port has not built.
+         * Going back to the title is visible; doing nothing would not be. */
         Q2_INFO("front end: that page is not reconstructed yet");
         q2_menu_open(&c->menu);
         q2_menu_goto(&c->menu, Q2_PAGE_FRONT_TITLE);
