@@ -67,9 +67,13 @@
 #include <SDL3/SDL.h>
 
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "ai.h"
+#include "aiworld.h"
+#include "creworld.h"
 #include "disc.h"
 #include "entity.h"
 #include "entitydraw.h"
@@ -231,6 +235,43 @@ typedef struct client {
     bool             vw_model_ready;
     int              vw_last_weapon;
 
+    /*
+     * The things in the level that are trying to kill you.
+     *
+     * Every piece of this was written and nothing called it: the modules
+     * relocate, decode and bind, the Population records spawn, and the AI runs
+     * — but only the inspector ever asked, and it draws a creature standing
+     * still at its spawn point. A level in the client was its geometry, its
+     * items, and nothing that moves. This is the join (creworld.h).
+     *
+     * `cre_model` is resolved once per zone load rather than per frame: a
+     * creature's model is named by its class and lives in either the map's
+     * CastList or the zone's, and searching two banks for every monster every
+     * frame is work with a fixed answer.
+     */
+    q2_creature_world creatures;
+    bool              creatures_ready;
+    q2_model_bank     zone_bank;
+    bool              zone_bank_ready;
+    q2_model         *cre_model;      /* one per monster, NULL when unresolved */
+    bool             *cre_model_ok;
+    q2_actor         *cre_actor;      /* what combat shoots at                 */
+    q2_actor        **cre_target;
+    /*
+     * The world the AI asks its three questions of — line of sight, a box
+     * move, and whether there is ground under a creature's feet. Without this
+     * the AI runs on the open stand-in, where every creature can see through
+     * every wall and stand on thin air. It borrows the sim's SecondaryCol, so
+     * it must not outlive a zone.
+     */
+    q2_ai_world_bind  ai_world;
+
+    double            ai_accum;       /* seconds owed to the 10 Hz AI clock    */
+    u32               ai_thoughts;
+    u32               cre_drawn;      /* creatures with faces in the last view */
+    u32               cre_faces;
+    s32              *cre_home;      /* where each creature spawned          */
+
     /* The map's CLUT split. A model face's palette index is offset by it —
      * model palettes live in the second section of the array (model.h §233). */
     u32              clut4_count_a;
@@ -277,6 +318,7 @@ typedef struct client {
      */
     bool             headless;
     bool             demo;               /* drive the pad from a script     */
+    bool             watch;              /* frame the nearest live creature  */
     q2_world_stats   shot_stats;         /* what the last viewport drew     */
     long             frame_index;
     long             frames_total;       /* 0 = run until the window closes */
@@ -289,6 +331,181 @@ static void client_bind_view_model(client *c);
 
 /* Defined with the rest of the sound path, and called from the tick. */
 static void client_entity_events(client *c);
+
+/* ------------------------------------------------------------------------- */
+/*
+ * The creatures a map places, made live.
+ *
+ * Called from the zone load, after the sim exists and the player has been put
+ * where the level starts them, because the AI's sight client is the player and
+ * a creature that wakes before there is one has nothing to acquire.
+ */
+static void client_free_creatures(client *c)
+{
+    free(c->cre_model);
+    free(c->cre_model_ok);
+    free(c->cre_actor);
+    free(c->cre_target);
+    free(c->cre_home);
+    c->cre_home     = NULL;
+    c->cre_model    = NULL;
+    c->cre_model_ok = NULL;
+    c->cre_actor    = NULL;
+    c->cre_target   = NULL;
+
+    if (c->creatures_ready) {
+        q2_sim_set_targets(&c->sim, NULL, 0);
+        q2_creature_world_free(&c->creatures);
+        c->creatures_ready = false;
+    }
+    c->zone_bank_ready = false;
+}
+
+static void client_load_creatures(client *c, const s32 eye[3])
+{
+    u32 i, resolved = 0;
+
+    client_free_creatures(c);
+
+    if (q2_creature_world_load(&c->creatures, c->disc, &c->build,
+                               &c->common) != Q2_OK) {
+        Q2_WARN("%s: creatures will not load", c->map);
+        return;
+    }
+    c->creatures_ready = true;
+
+    /* The zone's own CastList as well as the map's: a creature's model is as
+     * likely to be in one as the other, which is why the inspector's census
+     * searches both. */
+    c->zone_bank_ready =
+        (q2_model_bank_from_zone(&c->zone_bank, &c->zone.zone) == Q2_OK);
+
+    if (c->creatures.set.count) {
+        c->cre_model    = (q2_model *)calloc(c->creatures.set.count,
+                                             sizeof(*c->cre_model));
+        c->cre_model_ok = (bool *)calloc(c->creatures.set.count,
+                                         sizeof(*c->cre_model_ok));
+        c->cre_actor    = (q2_actor *)calloc(c->creatures.set.count,
+                                             sizeof(*c->cre_actor));
+        c->cre_target   = (q2_actor **)calloc(c->creatures.set.count,
+                                              sizeof(*c->cre_target));
+    }
+
+    if (!c->cre_model || !c->cre_model_ok || !c->cre_actor || !c->cre_target) {
+        if (c->creatures.set.count)
+            Q2_WARN("no memory for %u creatures", c->creatures.set.count);
+        client_free_creatures(c);
+        return;
+    }
+
+    c->cre_home = (s32 *)calloc(c->creatures.set.count ?
+                                c->creatures.set.count * 3 : 1, sizeof(s32));
+
+    for (i = 0; i < c->creatures.set.count; i++) {
+        const q2_monster *m = &c->creatures.set.monsters[i];
+        const char *name = q2_creature_world_model_name(&c->creatures, m);
+        s32 idx;
+
+        if (c->cre_home) {
+            c->cre_home[i * 3 + 0] = m->pos[0];
+            c->cre_home[i * 3 + 1] = m->pos[1];
+            c->cre_home[i * 3 + 2] = m->pos[2];
+        }
+
+        c->cre_target[i] = &c->cre_actor[i];
+        q2_actor_init(&c->cre_actor[i]);
+        q2_actor_from_monster(&c->cre_actor[i], m);
+
+        if (!name)
+            continue;
+
+        if (c->model_bank_ready) {
+            idx = q2_model_bank_find(&c->model_bank, name);
+            if (idx >= 0 &&
+                q2_model_get(&c->model_bank, (u32)idx,
+                             &c->cre_model[i]) == Q2_OK) {
+                c->cre_model_ok[i] = true;
+                resolved++;
+                continue;
+            }
+        }
+        if (c->zone_bank_ready) {
+            idx = q2_model_bank_find(&c->zone_bank, name);
+            if (idx >= 0 &&
+                q2_model_get(&c->zone_bank, (u32)idx,
+                             &c->cre_model[i]) == Q2_OK) {
+                c->cre_model_ok[i] = true;
+                resolved++;
+            }
+        }
+    }
+
+    q2_sim_set_targets(&c->sim, c->cre_target, c->creatures.set.count);
+
+    /*
+     * The world the AI asks its questions of, and the split is deliberate.
+     *
+     * LINE OF SIGHT gets the zone's real hull, through `PrimaryColl` — the
+     * un-eroded query hull, which is the one the original uses for everything
+     * that is not a move (sim.h), and the one a creature is actually inside:
+     * `SecondaryCol` is `PrimaryColl` eroded by the PLAYER's 286-unit
+     * half-extent, and a Population spawn point sits in the part that erosion
+     * cuts away, so a creature looked up in it lands outside every cell and
+     * every trace from it fails. With this, creatures stop seeing through
+     * walls: on BASE1 twenty of them, sixteen acquire the player across the
+     * open room and two across the real geometry.
+     *
+     * MOVEMENT keeps the open stand-in, and that is a known gap rather than a
+     * choice. A box move wants a hull eroded by the MOVER's own extent and the
+     * disc ships exactly one erosion, the player's. Put a creature's step
+     * through `PrimaryColl` and every step is rejected against the floor it is
+     * standing on: it acquires, it animates, and it never moves. So for now a
+     * creature walks through walls, which is visible, rather than standing
+     * still, which reads as the AI not working at all.
+     */
+    q2_ai_world_bind_init(&c->ai_world,
+                          c->sim.coll_primary_ready ? &c->sim.coll_primary
+                                                    : NULL);
+    {
+        q2_ai_world w = c->ai_world.world;
+        w.trace        = NULL;    /* q2_ai_set_world fills these with the */
+        w.check_bottom = NULL;    /* open world's own                     */
+        q2_ai_set_world(&w);
+    }
+
+    q2_creature_world_wake(&c->creatures, eye);
+    c->ai_accum = 0.0;
+
+    Q2_INFO("creatures: %u of %u spawn records live, %u with a model"
+            "%s%s",
+            c->creatures.stats.placed, c->creatures.stats.records, resolved,
+            c->creatures.stats.no_module ? ", " : "",
+            c->creatures.stats.no_module ? "some classes have no module" : "");
+}
+
+/*
+ * The AI clock, which is not the frame clock.
+ *
+ * `next_think` is on the engine's 10 Hz tick (monster.h), so the tick is run
+ * from an accumulator rather than once per drawn frame — otherwise a creature
+ * would think three times as often at 30 fps as it does on the console, and
+ * every one of the AI's timers is expressed in those ticks.
+ */
+static void client_creatures_tick(client *c, float dt, const s32 eye[3])
+{
+    int guard = 0;
+
+    if (!c->creatures_ready)
+        return;
+
+    c->ai_accum += (double)dt;
+    while (c->ai_accum >= 0.1 && guard++ < 8) {
+        c->ai_accum -= 0.1;
+        c->ai_thoughts += q2_creature_world_tick(&c->creatures, eye);
+    }
+    if (c->ai_accum > 0.5)
+        c->ai_accum = 0.0;
+}
 
 /* ------------------------------------------------------------------------- */
 static bool client_load_zone(client *c, const char *map, int index)
@@ -546,6 +763,14 @@ static bool client_load_zone(client *c, const char *map, int index)
         }
         q2_sim_spawn(&c->sim, feet, c->cam.yaw);
         c->sim.player.ground_y = feet[1];
+
+        /* Last, because it wakes the AI onto the player and therefore needs
+         * the player to already be standing somewhere. */
+        {
+            s32 eye[3];
+            q2_sim_eye(&c->sim, eye);
+            client_load_creatures(c, eye);
+        }
     }
 
     Q2_INFO("%s: %u nodes, %u vertices",
@@ -766,7 +991,32 @@ static void client_input_simulated(client *c, float dt)
     if (in.buttons & Q2_BTN_WEAP_NEXT) q2_sim_cycle_weapon(&c->sim, +1);
     if (in.buttons & Q2_BTN_WEAP_PREV) q2_sim_cycle_weapon(&c->sim, -1);
 
+    /*
+     * The creatures, published to combat as actors before the tick that may
+     * shoot one, and read back after it.
+     *
+     * They are two structures because they are two things: `q2_monster` is what
+     * the AI drives and `q2_actor` is what the damage function at 0x80057D54
+     * operates on, and combat.h supplies the pair of converters precisely so
+     * neither has to know about the other. Syncing on both sides of the tick is
+     * what makes a monster that has walked somewhere shootable where it now is,
+     * and a monster that has been shot notice.
+     */
+    if (c->creatures_ready && c->cre_actor) {
+        u32 i;
+        for (i = 0; i < c->creatures.set.count; i++)
+            q2_actor_from_monster(&c->cre_actor[i],
+                                  &c->creatures.set.monsters[i]);
+    }
+
     q2_sim_advance(&c->sim, &in, (double)dt);
+
+    if (c->creatures_ready && c->cre_actor) {
+        u32 i;
+        for (i = 0; i < c->creatures.set.count; i++)
+            q2_actor_to_monster(&c->cre_actor[i],
+                                &c->creatures.set.monsters[i]);
+    }
 
     /*
      * What the items did while that ran. Immediately after the tick, because
@@ -843,12 +1093,79 @@ static void client_input_simulated(client *c, float dt)
     q2_sim_eye(&c->sim, eye);
     q2_sim_view_angles(&c->sim, view);
 
+    /* The AI, on its own clock and looking at where the player is now. */
+    client_creatures_tick(c, dt, eye);
+
     c->cam.pos[0] = eye[0];
     c->cam.pos[1] = eye[1];
     c->cam.pos[2] = eye[2];
     c->cam.yaw    = view[1];
     c->cam.pitch  = view[0];
     c->cam.roll   = view[2];
+
+    /*
+     * `--watch`: turn the CAMERA, and only the camera, onto the nearest live
+     * creature. The player still walks, shoots and is shot at; what changes is
+     * where the view points, which is the one thing that decides whether a
+     * creature the frame has already emitted is a creature you can see.
+     *
+     * It exists because "20 drawn, 4100 faces" says nothing about whether a
+     * Soldier is standing in front of you: with an ordering table and no depth
+     * buffer, a creature behind a wall is emitted and then painted over.
+     */
+    if (c->watch && c->creatures_ready) {
+        const q2_monster *best = NULL;
+        s64 best_d = 0;
+        u32 i;
+
+        for (i = 0; i < c->creatures.set.count; i++) {
+            const q2_monster *m = &c->creatures.set.monsters[i];
+            s64 dx, dy, dz, d;
+
+            if (!m->in_use || m->dead || !c->cre_model_ok[i])
+                continue;
+
+            dx = m->pos[0] - eye[0];
+            dy = m->pos[1] - eye[1];
+            dz = m->pos[2] - eye[2];
+            d  = dx * dx + dy * dy + dz * dz;
+            if (!best || d < best_d) { best = m; best_d = d; }
+        }
+
+        if (best) {
+            s32 to[3];
+
+            /*
+             * Stand in front of it, at head height, looking at it — the
+             * inspector's `mob` framing, but of a LIVE creature: this one has
+             * thought, turned, and is playing whatever move its AI put it in.
+             * The camera moves and nothing else does; the player is still
+             * where the simulation left them.
+             */
+            c->cam.pos[0] = best->pos[0] +
+                            ((q2_sin12(best->angles[2]) * 700) >> Q2_FRAC_12);
+            c->cam.pos[1] = best->pos[1] - 250;
+            c->cam.pos[2] = best->pos[2] +
+                            ((q2_cos12(best->angles[2]) * 700) >> Q2_FRAC_12);
+            eye[0] = c->cam.pos[0];
+            eye[1] = c->cam.pos[1];
+            eye[2] = c->cam.pos[2];
+
+            to[0] = best->pos[0] - eye[0];
+            to[1] = best->pos[1] - eye[1] - 150;   /* look at the chest */
+            to[2] = best->pos[2] - eye[2];
+
+            double horiz = sqrt((double)to[0] * to[0] +
+                                (double)to[2] * to[2]);
+            double p = atan2((double)to[1], horiz > 1.0 ? horiz : 1.0);
+
+            c->cam.yaw   = q2_vectoyaw(to);
+            /* +Y is down, so a target below the eye needs a positive pitch. */
+            c->cam.pitch = (s32)(p * (double)Q2_ANGLE_360 /
+                                 (2.0 * 3.14159265358979323846));
+            c->cam.roll  = 0;
+        }
+    }
 }
 
 /* Free-fly camera, kept for inspecting geometry without physics in the way. */
@@ -1627,6 +1944,35 @@ static void client_write_shot(client *c, bool numbered)
             c->shot_stats.quads_rejected_near,
             c->shot_stats.quads_rejected_back,
             c->shot_stats.ot_overflow);
+
+    if (c->creatures_ready && c->creatures.set.count) {
+        u32 i, live = 0, hunting = 0;
+        s32 near_d = -1;
+        long moved = 0;
+
+        for (i = 0; i < c->creatures.set.count; i++) {
+            const q2_monster *m = &c->creatures.set.monsters[i];
+            s32 dx, dz, d;
+
+            if (!m->in_use || m->dead)
+                continue;
+            live++;
+            if (m->enemy)
+                hunting++;
+
+            moved += c->cre_home ? (labs(m->pos[0] - c->cre_home[i*3+0]) +
+                                    labs(m->pos[2] - c->cre_home[i*3+2])) : 0;
+
+            dx = m->pos[0] - c->cam.pos[0];
+            dz = m->pos[2] - c->cam.pos[2];
+            d  = (dx < 0 ? -dx : dx) + (dz < 0 ? -dz : dz);
+            if (near_d < 0 || d < near_d)
+                near_d = d;
+        }
+        Q2_INFO("  creatures %u live, %u hunting, %u drawn (%u faces), "
+                "nearest %d units, moved %ld",
+                live, hunting, c->cre_drawn, c->cre_faces, near_d, moved);
+    }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1728,6 +2074,8 @@ static void client_draw_view(void *user, q2_screen *s, int p,
     q2_world_build_ot(&c->zone, &c->cam, s->view[p].w, s->view[p].h,
                       ot, gte, &c->render, &stats);
     c->shot_stats = stats;
+    c->cre_drawn  = 0;
+    c->cre_faces  = 0;
 
     /*
      * The map's items, into the table the world has just been built into — the
@@ -1757,6 +2105,93 @@ static void client_draw_view(void *user, q2_screen *s, int p,
         ectx.coll_node     = -1;
 
         q2_entity_build_ot(&c->sim.entities, &ectx, &c->cam, ot, gte, &estats);
+    }
+
+    /*
+     * The creatures, into the same table for the same reason: a Soldier behind
+     * a crate sorts behind it because both are in one list.
+     *
+     * WHICH ANIMATION A CREATURE IS PLAYING, and what that rests on.
+     *
+     * A module's moves are numbered in one global frame timeline — the Soldier
+     * runs 0..474, and `q2psx-inspect creatures` prints every move's range —
+     * while the model carries a list of CastList clips (the Soldier's has 31).
+     * Those clips are not that timeline laid end to end: they total 434 frames
+     * against the module's 474. What they ARE is the moves themselves. Every one
+     * of the Soldier's clip lengths is exactly three ticks per frame times some
+     * move's length, and clips 1..4 are the four consecutive moves 50-54,
+     * 55-61, 62-79 and 80-96 in order.
+     *
+     * So the clip is chosen by matching its length to the current move's, and
+     * the frame within it is the AI frame's offset from the move's first. Where
+     * several clips share a length the first is taken, and where none matches
+     * the model draws on its first clip rather than not at all. What is NOT
+     * established is the index that the engine itself uses to pick the clip —
+     * see openquestions #47 — so a creature whose move length is ambiguous can
+     * play the wrong animation of the right duration.
+     */
+    if (c->creatures_ready && c->cre_model) {
+        u32 i;
+
+        for (i = 0; i < c->creatures.set.count; i++) {
+            const q2_monster *m = &c->creatures.set.monsters[i];
+            q2_model_instance inst;
+            q2_model_draw_stats st;
+            q2_model_pose pose[64];
+            q2_model_anim clip;
+            bool posed = false;
+
+            if (!m->in_use || !c->cre_model_ok[i])
+                continue;
+
+            {
+                const q2_model *mdl = &c->cre_model[i];
+                u32 clips = q2_model_anim_count(mdl);
+                u32 want = 0, pick = 0, ci;
+                s32 within = 0;
+
+                if (m->currentmove) {
+                    want = (u32)(m->currentmove->last_frame -
+                                 m->currentmove->first_frame + 1);
+                    within = m->frame - m->currentmove->first_frame;
+                    if (within < 0)
+                        within = 0;
+                }
+
+                for (ci = 0; want && ci < clips; ci++) {
+                    q2_model_anim a;
+                    if (!q2_model_anim_get(mdl, ci, &a))
+                        break;
+                    if (a.frames == want * Q2_CRE_TICKS_PER_FRAME) {
+                        pick = ci;
+                        break;
+                    }
+                }
+
+                if (clips && mdl->hdr.num_parts <= Q2PSX_ARRAY_COUNT(pose) &&
+                    q2_model_anim_get(mdl, pick, &clip)) {
+                    u32 t = (u32)within * Q2_CRE_TICKS_PER_FRAME;
+                    if (clip.frames && t >= clip.frames)
+                        t = clip.frames - 1;
+                    posed = (q2_model_pose_at(mdl, &clip, t, pose) == Q2_OK);
+                }
+            }
+
+            q2_model_instance_init(&inst);
+            inst.model         = &c->cre_model[i];
+            inst.pose          = posed ? pose : NULL;
+            inst.origin[0]     = m->pos[0];
+            inst.origin[1]     = m->pos[1];
+            inst.origin[2]     = m->pos[2];
+            inst.yaw           = m->angles[2];
+            inst.clut4_count_a = c->clut4_count_a;
+
+            q2_model_build_ot(&inst, &c->cam, ot, gte, &st);
+            if (st.faces_emitted) {
+                c->cre_drawn++;
+                c->cre_faces += st.faces_emitted;
+            }
+        }
     }
 
     /*
@@ -2141,6 +2576,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--headless"))              c.headless = true;
         else if (!strcmp(argv[i], "--demo"))                  c.demo = true;
+        else if (!strcmp(argv[i], "--watch"))                 c.watch = true;
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc)
             c.frames_total = strtol(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "--shot") && i + 1 < argc)

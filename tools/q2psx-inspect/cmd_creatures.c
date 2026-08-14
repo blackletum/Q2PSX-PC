@@ -55,6 +55,24 @@ static void report(const q2_creature *c, const q2_cre_impl *impl)
     printf("    moves %2u, frames %3u, methods %2u\n",
            c->move_count, c->frame_count, c->method_count);
 
+    /*
+     * Every move's frame RANGE, which is the number a port needs and the one
+     * the census never printed. A move is named by its first frame (crebind.h),
+     * and the highest last_frame a module reaches is what a drawing side has to
+     * be able to show — so the two together say how a creature's animation
+     * numbering relates to the CastList clips its model actually carries.
+     */
+    {
+        s32 hi = -1;
+        printf("    ranges    :");
+        for (i = 0; i < c->move_count; i++) {
+            printf(" %d-%d", c->move[i].first_frame, c->move[i].last_frame);
+            if (c->move[i].last_frame > hi)
+                hi = c->move[i].last_frame;
+        }
+        printf("\n    highest frame : %d\n", hi);
+    }
+
     n = q2_creature_think_indices(c, idx, sizeof(idx));
     printf("    think     :");
     for (i = 0; i < n; i++) {

@@ -2376,6 +2376,27 @@ static int cmd_model(disc *d, const char *map, const char *want, int clip_index,
     clip_count = q2_model_anim_count(&mdl);
     printf("  clips         : %u\n", clip_count);
 
+    /*
+     * Every clip's length, and the running total.
+     *
+     * The total is the number that matters to anything driving this model from
+     * a CREATURE, because a creature module's moves are numbered in one global
+     * frame timeline (`q2psx-inspect creatures` prints their ranges) and this
+     * says whether the clips laid end to end are that timeline.
+     */
+    if (clip_count > 1) {
+        u32 ci, total = 0;
+        printf("  clip lengths  :");
+        for (ci = 0; ci < clip_count; ci++) {
+            q2_model_anim a;
+            if (!q2_model_anim_get(&mdl, ci, &a))
+                break;
+            printf(" %u", a.frames);
+            total += a.frames;
+        }
+        printf("\n  clip frames   : %u in total\n", total);
+    }
+
     if (clip_count && (u32)clip_index < clip_count &&
         mdl.hdr.num_parts <= Q2PSX_ARRAY_COUNT(pose) &&
         q2_model_anim_get(&mdl, (u32)clip_index, &clip)) {

@@ -24,6 +24,8 @@ add_library(q2psx_game STATIC
     cre_actions.c
     cre_soldier.c
     cre_generic.c
+    creworld.c
+    creworld.h
     entity.c
     entity.h
     entitydraw.c

@@ -1532,6 +1532,63 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
 
 ---
 
+## Putting the creatures in the client
+
+Every piece of the creature chain existed and nothing joined them up. The modules relocate, decode and bind;
+Population's records spawn; the AI runs — and the only caller was the inspector, which decodes a module to
+report on it and draws a creature standing still at its spawn point. A level in the client was its geometry,
+its items, and nothing that moves. `src/game/creworld.[ch]` is the join, and making it work turned up three
+things worth recording and left two open.
+
+**Three numbers name a creature and they are not the same number.** A Population spawn record carries a
+**class id** 0..37; the executable's class table turns that into a **name** and a health, and names are not
+unique — ids 18, 19 and 20 are all `Soldier` with 30, 20 and 40 health; and a module serves one or more
+**class bytes** 64..94, the Soldier's being 87, 89 and 88 *in that order*. The module is found by matching its
+header name against the class table's name, which is the direction the engine's own lookup runs. The variant
+is taken from the id's ordinal among the entries sharing the name — three ids, three class bytes, in the order
+both tables state them. That last correspondence is inferred from the two tables agreeing in length and order,
+not read out of code, and it is the one inference in the module.
+
+**`q2_creature_spawn` overwrites `class_id` with the class BYTE**, because that byte is what the runtime bind
+is keyed on. After spawning there is nothing left on the monster that indexes the class table, so anything a
+caller wants out of that table — the model name above all — has to be taken while it is still there.
+
+**A creature's line of sight runs through `PrimaryColl`, not `SecondaryCol`.** `SecondaryCol` is `PrimaryColl`
+eroded by the *player's* 286-unit half-extent, and a Population spawn point sits in exactly the part the
+erosion cuts away: look a creature up in it and it lands outside every cell, so every trace from it fails and
+every creature on every map looks straight through the player. In `PrimaryColl` they are inside a cell and
+sight works — on BASE1, twenty creatures, sixteen of which acquire the player with no walls in the way and two
+across the real geometry.
+
+- [ ] 47. **Which CastList clip a creature's move plays.** A module's moves are numbered in one global frame
+      timeline — the Soldier's run 0..474, and `q2psx-inspect creatures` now prints every move's range —
+      while its model carries a list of clips, 31 of them for the Soldier. Those clips are **not** that
+      timeline laid end to end: they total 434 frames against the module's 474, and there are 31 of them to
+      the module's 18 moves.
+      What they are is the **moves themselves**. Every one of the Soldier's clip lengths is exactly three
+      ticks per frame times some move's length, and clips 1..4 are the four consecutive moves 50-54, 55-61,
+      62-79 and 80-96 *in order*. So the tick rate inside a clip is 3 — not `Q2_MODEL_TICKS_PER_FRAME`'s 10,
+      which is the view weapon's — and `q2psx-inspect model <map> <name>` now prints every clip's length so
+      the arithmetic can be checked on any creature.
+      *Open:* the index. Clip order is not move order (clip 0 is the 36-frame move 272-307) and it is not
+      frame order either. The port matches a move to a clip **by length**, first match wins, which is right
+      whenever the length is unique and can pick the wrong animation of the right duration when it is not.
+      What is missing is the engine's own selector, which will be wherever the creature draw turns an
+      entity's frame into a pose.
+
+- [ ] 48. **A creature's movement has no hull to run against.** A box move wants a hull eroded by the
+      MOVER's own extent and the disc ships exactly one erosion, the player's. Put a creature's step through
+      `PrimaryColl` — the un-eroded hull, which is the right one for a *query* — and every step is rejected
+      against the floor it is standing on: measured on BASE1, creatures acquire the player and animate and
+      move zero units in 600 ticks. So the port binds the AI's **sight** to the real hull and leaves its
+      **trace** and **check_bottom** on the open stand-in, which means a creature walks through walls. That
+      is the visible failure rather than the hidden one, and it is deliberate: with the real hull they stand
+      still, which reads as the AI not working at all.
+      The thing to find is whether the original erodes at run time (in which case there is a routine to
+      read) or whether creature movement never traces the world hull at all.
+
+---
+
 ## ⚠ Security note (carried forward, do not drop)
 
 - [ ] 38. A prior research pass reported that a fan wiki page about this game served content containing

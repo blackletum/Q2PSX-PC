@@ -88,7 +88,7 @@ not been read out of the executable yet.
 | Items | every one of the 64 table records — what it looks like, how it behaves, what collecting it does. 1,013 of 1,013 placed items resolve |
 | Weapons | all eleven read out of their own fire functions — damage, spread, kick, refire |
 | Damage | armour, power armour, knockback, splash, 21 means of death |
-| Creatures | every spawn resolves to its class, model and health — 651 of 651 |
+| Creatures | every spawn resolves to its class, model and health — 651 of 651 — and they are now **live in the client**: the map's own `CreAIBin` modules relocated, decoded and bound, the spawn records placed with the right variant and health, the AI running on its 10 Hz clock, sight traced through the real hull, and each one drawn into the world's ordering table and shootable. What they do not have is a movement hull: the disc ships one erosion and it is the player's, so a creature walks through walls |
 | Menus | every page, its navigation and its settings — 21 of 21 checked against the executable — drawn with the console's own three faces, its gouraud selection bar and its line-drawn sliders |
 | Memory card | all nine front-end screens and the release-gated state machine behind them — 31 of 31 items checked against the executable; the card I/O itself is a host interface, not an invention |
 | Saved games | four slots reached through that front end, plus quick save. The container is an ordinary host file — a stated divergence, since a save file's container is invisible where the rendering's limits are the point — but what it holds is the original's state: the level clock every powerup deadline is measured against, the script's event flags, which trigger volumes the player is standing in, which items have been collected, the mover's carried cell and frame delta, and the weapon generator. Chunked, checksummed and fixed-width, so a save written by one build loads under another |
@@ -127,6 +127,12 @@ script and writing the console's own framebuffer out:
 build-client/bin/q2psx --disc "Quake II (Europe).cue" --headless --demo \
                        --frames 120 --shot run.ppm --shot-every 10
 ```
+
+`--watch` adds a camera that stands in front of the nearest live creature and looks
+at it — the inspector's `mob` framing, but of a creature that has thought, turned and
+is playing whatever move its AI put it in. It exists because a face count says nothing
+about what you can see: with an ordering table and no depth buffer, a monster behind a
+wall is emitted and then painted over.
 
 That is not a convenience. `q2psx-inspect` composes its own frames, so it cannot
 catch anything that goes wrong *between* the client's systems — a table loaded after
