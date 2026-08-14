@@ -153,6 +153,10 @@ typedef struct q2_cre_action_stats {
      * a move for — 0 stand, 3 walk, 4 run, 6 attack, 7 melee. */
     u32 move_via_set[8];
     u32 move_via_missing[8];
+
+    /* How often each think index actually ran. A move whose fire think sits
+     * six frames in only reaches it if the animation is not cut short. */
+    u32 think_hits[32];
 } q2_cre_action_stats;
 
 extern q2_cre_action_stats q2_cre_actions;

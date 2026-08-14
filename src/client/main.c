@@ -2933,6 +2933,19 @@ static void client_write_shot(client *c, bool numbered)
                 q2_cre_actions.move_via_set[4],
                 q2_cre_actions.move_via_missing[4]);
 
+        {
+            char buf[160];
+            int  used = 0, ti;
+
+            buf[0] = ' ';
+            for (ti = 0; ti < 32; ti++)
+                if (q2_cre_actions.think_hits[ti] && used < 140)
+                    used += snprintf(buf + used, sizeof(buf) - (size_t)used,
+                                     " %d:%u", ti,
+                                     q2_cre_actions.think_hits[ti]);
+            Q2_INFO("  think hit%s", buf[0] ? buf : " (none)");
+        }
+
         Q2_INFO("  decoded   %u thinks (%u unbound), %u calls (%u unclassified), "
                 "%u fire calls: %u sent, %u no enemy, %u dead enemy",
                 q2_cre_actions.thinks_run, q2_cre_actions.thinks_unbound,

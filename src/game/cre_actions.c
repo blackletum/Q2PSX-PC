@@ -168,6 +168,8 @@ void q2_cre_run_think(q2_monster *m, u32 index)
     u32 i;
 
     q2_cre_actions.thinks_run++;
+    if (index < 32)
+        q2_cre_actions.think_hits[index]++;
 
     if (!b || !b->think || index >= b->think_count) {
         q2_cre_actions.thinks_unbound++;

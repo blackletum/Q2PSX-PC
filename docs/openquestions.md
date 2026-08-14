@@ -2625,6 +2625,37 @@ shots before and after.
       8, 10 and 13 and whether the attack move reaches them. On WASTE3 the Gunner never gets as far as one
       checkattack in 700 frames, and its module has no run move via slot 4 either — a separate thread.
 
+## Where a fire think sits in its move, and why the animation never gets there
+
+The census now prints each move's think bytes **in frame order, run-length encoded**, because which thinks a
+move calls is only half the question. `0*12 3 4` and `3 4 0*12` are the same set and a very different
+creature: an animation that is cut short reaches the second and never the first.
+
+The Arachner's attack move, 94-109, is `0*5 3 0*5 4 0*4`. Its fire thinks are 3 and 4 — both call `+0x8C`,
+the rail — and they sit at frame **6** and frame **12** of sixteen. The move has to survive six AI ticks
+before anything is fired.
+
+A per-index tally of which thinks actually run says it does not. On POWER1, 500 frames, five live creatures:
+
+    moves      attack set 3 / missing 0, run 5 / 0
+    think hit  1:12  6:9  7:12
+    decoded    33 thinks, 36 calls (36 unclassified), 0 fire calls
+
+Thinks 3 and 4 never run. Nor does 0 — which is the first thing the tally settled: **think byte 0 means "no
+think"**, and every move on the disc is mostly zeros, so an absent 0 in the tally is correct rather than
+alarming. The 1, 6 and 7 belong to the other creatures in that zone.
+
+So the attack move is installed three times and cut short before its sixth frame each time.
+
+- [ ] 57. **What cuts the attack animation short.** The generic run handler installs the run move whenever
+      `m->run` is called, and the counters show run installed 5 times against attack's 3 in the same capture.
+      In the original a monster's attack move plays out because its frames carry an AI verb — the `ai` byte of
+      `{u8 ai; s8 dist; u8 think}` — that keeps the AI in the attack rather than returning it to the chase.
+      The suspicion is that the port's frame driver maps that verb in a way that lets the chase reinstall the
+      run move on the next tick. That is the last thing between a decoded creature and a shot: the fire is
+      routed, the import is named, the think is decoded, the move is installed, and it is being interrupted
+      six frames too early.
+
 ---
 
 ## ⚠ Security note (carried forward, do not drop)

@@ -123,19 +123,33 @@ static void report(const q2_creature *c, const q2_cre_impl *impl)
         printf("      (%2d) %08X %3d-%-3d ->", mv->via, mv->addr,
                mv->first_frame, mv->last_frame);
 
-        for (f = 0; f < mv->frame_count &&
-                    mv->frame_index + f < Q2_CRE_MAX_FRAMES; f++) {
-            u8 th = c->frames[mv->frame_index + f].think;
-            u32 k;
-            bool dup = false;
+        /*
+         * In FRAME ORDER, run-length encoded. WHICH thinks a move calls is only
+         * half the question; WHERE they sit decides whether an animation that is
+         * cut short ever reaches them. `0*12 3 4` and `3 4 0*12` are the same
+         * set and a very different creature.
+         */
+        (void)seen;
+        (void)nseen;
+        {
+            u32 run = 0;
+            int prev = -1;
 
-            for (k = 0; k < nseen; k++)
-                if (seen[k] == th)
-                    dup = true;
-            if (dup || nseen >= sizeof(seen))
-                continue;
-            seen[nseen++] = th;
-            printf(" %u", th);
+            for (f = 0; f < mv->frame_count &&
+                        mv->frame_index + f < Q2_CRE_MAX_FRAMES; f++) {
+                int th = c->frames[mv->frame_index + f].think;
+
+                if (th == prev) {
+                    run++;
+                    continue;
+                }
+                if (prev >= 0)
+                    printf(run > 1 ? " %d*%u" : " %d", prev, run);
+                prev = th;
+                run  = 1;
+            }
+            if (prev >= 0)
+                printf(run > 1 ? " %d*%u" : " %d", prev, run);
         }
         printf("\n");
     }
