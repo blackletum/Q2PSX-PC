@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "aimove.h"
+#include "crebind.h"   /* q2_cre_skill — M_CheckAttack scales on it */
 #include "trig.h"
 
 /* ------------------------------------------------------------------------- */
@@ -878,34 +879,102 @@ bool q2_ai_checkattack(q2_monster *m, s32 dist)
     if (!q2_enemy_vis)
         return false;
 
-    /*
-     * THE ORIGINAL DOES NOT TEST THIS. `0x8005E320` is `lw v0, 260(s1)` and
-     * `0x8005E328` is `jalr v0` with no null check between them, so
-     * `entity+0x104` is never NULL on the console — the engine installs a
-     * default at spawn that a module may override.
-     *
-     * No creature module on the disc installs one. The Soldier's callbacks are
-     * stand, walk, run, dodge, attack, sight, pain and die; there is no
-     * checkattack among them, and the same is true of the other six. So this
-     * guard, which looks like ordinary defensive coding, silently disabled
-     * EVERY attack in the game: measured on BASE1 over 1800 frames with four
-     * creatures hunting, the fire and melee hooks were invoked zero times.
-     *
-     * The default is `0x8005D8C8`, installed at `0x80061B18` under a
-     * `bne a0, zero` so a caller can suppress it — found by scanning the text
-     * segment for `sw rt, 0x104(rs)`, which appears ten times and exactly once
-     * with an entity base. It is `M_CheckAttack`: the enemy through
-     * `entity+0xBC`, its health at `+0x108`, the two eye points, and a trace
-     * between them with contents mask `0x0200001B`.
-     *
-     * The guard stays until that is transcribed — returning false is at least
-     * the behaviour the port has been tested against, and a hand-written
-     * stand-in would put invented aggression on every creature in the game.
-     */
     if (!m->checkattack)
-        return false;
+        return q2_M_CheckAttack(m);
 
     return m->checkattack(m);
+}
+
+/* ------------------------------------------------------------------------- */
+/* M_CheckAttack — 0x8005D8C8                                                 */
+/* ------------------------------------------------------------------------- */
+/*
+ * The default every creature gets, installed at `0x80061B18` under a
+ * `bne a0, zero` so a caller can suppress it. NO module on the disc installs a
+ * checkattack of its own, so this one decides every attack in the game — which
+ * is why the port having only a `return false` in its place meant no creature
+ * could ever attack, measured as zero fire and melee hook calls over 1800
+ * frames with four creatures hunting.
+ *
+ * Every constant here is the original's, and every one of them is also id's,
+ * which is the check that the read is right rather than merely self-consistent:
+ * the four chances are 1638, 819, 410 and 82 out of 4096 — 0.4, 0.2, 0.1 and
+ * 0.02 — skill 0 halves them and skill 2 or more doubles them, and the flyer's
+ * sliding roll is 9830 of 32768, which is 0.3.
+ */
+static bool checkattack_decide(q2_monster *m);
+
+bool q2_M_CheckAttack(q2_monster *m)
+{
+    if (!m || !m->enemy)
+        return false;
+
+    /* The ENEMY's health, not this creature's (0x8005D8EC). */
+    if (m->enemy->health <= 0)
+        return checkattack_decide(m);
+
+    /*
+     * Eye to eye. When the trace reaches the enemy the decision is the ordinary
+     * one below; when it does not, the original falls into a blind-fire path
+     * whose second trace runs to `blind_target` at `+0x5C` with a bare
+     * `0x02000000` mask instead of `0x0200001B`. That path is not transcribed:
+     * it needs the trace's own `ent` and fraction, which the AI world's
+     * line-of-sight hook does not report, and inventing its outcome would make
+     * creatures fire through walls.
+     */
+    if (!q2_visible(m, m->enemy))
+        return false;
+
+    return checkattack_decide(m);
+}
+
+/*
+ * The half of the decision that does not depend on the trace: everything from
+ * `0x8005DAD8`, which is where both the dead-enemy branch and the
+ * trace-reached-the-enemy branch land.
+ */
+static bool checkattack_decide(q2_monster *m)
+{
+    s32 chance, skill = q2_cre_skill();
+
+    /* Melee range: a coin the lowest skill loses three times in four
+     * (0x8005DB04's `rand() & 3`), then melee if there is one and a missile
+     * otherwise. */
+    if (q2_enemy_range == Q2_RANGE_MELEE) {
+        if (skill == 0 && (rand() & 3) != 0)
+            return false;
+
+        m->attack_state = m->melee ? Q2_AS_MELEE : Q2_AS_MISSILE;
+        return true;
+    }
+
+    if (!m->attack)
+        return false;
+    if (q2_level_state.time < m->attack_finished)
+        return false;
+    if (q2_enemy_range == Q2_RANGE_FAR)
+        return false;
+
+    if (m->aiflags & Q2_AI_STAND_GROUND)      chance = 1638;   /* 0.40 */
+    else if (q2_enemy_range == Q2_RANGE_MELEE) chance = 819;   /* 0.20 */
+    else if (q2_enemy_range == Q2_RANGE_NEAR)  chance = 410;   /* 0.10 */
+    else if (q2_enemy_range == Q2_RANGE_MID)   chance = 82;    /* 0.02 */
+    else                                       return false;
+
+    if (skill == 0)      chance /= 2;
+    else if (skill >= 2) chance *= 2;
+
+    if ((rand() & 0xFFF) < chance) {
+        m->attack_state = Q2_AS_MISSILE;
+        m->attack_finished = q2_level_state.time + 2 * (rand() & 0x7FFF) / 32767;
+        return true;
+    }
+
+    /* A flyer that did not shoot picks a strafe instead — 9830 of 32768. */
+    if (m->flags & Q2_FL_FLY)
+        m->attack_state = ((rand() & 0x7FFF) < 9830) ? Q2_AS_SLIDING
+                                                     : Q2_AS_STRAIGHT;
+    return false;
 }
 
 /* ------------------------------------------------------------------------- */

@@ -103,6 +103,13 @@ extern q2_range_band q2_enemy_range;    /* gp+17880 */
 /* ------------------------------------------------------------------------- */
 s32  q2_anglemod(s32 a);                            /* 0x8005C7B8 */
 s16  q2_vectoyaw(const s32 v[3]);                   /* 0x8005F8E8 */
+
+/*
+ * The default checkattack, 0x8005D8C8 — installed on every creature at spawn
+ * (0x80061B18) and overridden by no module on the disc, so it decides every
+ * attack in the game.
+ */
+bool q2_M_CheckAttack(q2_monster *m);
 s32  q2_vector_length(const s32 v[3]);              /* 0x8005C4E8 */
 s64  q2_vector_length_sq(const s32 v[3]);           /* 0x8005C59C */
 s32  q2_vector_normalize(s32 v[3]);                 /* 0x8005C634 */

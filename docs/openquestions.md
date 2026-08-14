@@ -1880,8 +1880,21 @@ not damage. It then calls engine slots `+0xC8` and `+0xD8` with vectors.
       tests its health at `+0x108`, builds the two eye points from `+0x00..0x08` and
       `+0x4C`, and traces between them with contents mask `0x0200001B` before the
       range and random decision.
-      *What is left is transcribing it,* and it is **269 instructions**, not the 150
-      first estimated. Its shape, read but not yet implemented:
+      **Transcribed, and the creatures now attack.** On BASE1 the same run that
+      measured zero hook calls now reports **135 shots and the player at -353 hp**;
+      health falls from 100 as soon as a Soldier has line of sight. Every constant in
+      it is the original's and every one is also id's, which is the check that the
+      read is right rather than merely self-consistent: the four chances are 1638,
+      819, 410 and 82 out of 4096 — 0.4, 0.2, 0.1 and 0.02 — skill 0 halves them and
+      skill 2 or more doubles them, and the flyer's sliding roll is 9830 of 32768,
+      which is 0.3.
+      One branch is deliberately NOT transcribed: when the eye-to-eye trace does not
+      reach the enemy the original runs a second trace to `blind_target` at `+0x5C`
+      with a bare `0x02000000` mask and can fire blind. That needs the trace's own
+      `ent` and fraction, which the AI world's line-of-sight hook does not report, and
+      inventing its outcome would make creatures fire through walls. The port returns
+      false there, so a creature that cannot see you does not shoot.
+      Its shape, for the branch that remains:
 
         - the first gate is the ENEMY's health, reached through `entity+0xBC` then
           that object's `+0x24` then `+0x108`, and `blez` leaves immediately;
