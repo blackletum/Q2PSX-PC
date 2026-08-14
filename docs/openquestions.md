@@ -2375,6 +2375,39 @@ not think, and it does not walk.
       appear in `0x80064780`+460 instructions, where that note points. The tool reads a raw on-disc duration
       of 1 for BASE1's model 0, which is consistent with a multiply at load — but consistent is not shown.
       **Opened as 51d: find and read the multiply, or retract it.**
+
+- [x] 51d. **The position is in TENTHS of an animation frame — proven by a division, not by the note.**
+      Disassembling the whole EXE (158,000 instructions, 0.4s) and matching the shift-add multiply idiom
+      *strictly* — shift source and addend the same register, which array indexing never satisfies — leaves
+      37 `x10` sites out of a first pass of thousands. Five sit immediately before the pose selector, and the
+      first one reads:
+
+          8006B5D8  lui  v0, 0x6666
+          8006B5E4  ori  v0, v0, 0x6667  ; 0x66666667
+          8006B5E8  mult t1, v0
+          8006B5F0  mfhi t2
+          8006B5F4  sra  v1, t2, 2
+          8006B5F8  subu v1, v1, v0      ; v1 = t1 / 10
+          8006B5FC  sll  v0, v1, 2
+          8006B600  addu v0, v0, v1
+          8006B604  sll  v0, v0, 1       ; v0 = (t1/10) * 10
+          8006B608  subu fp, t1, v0      ; fp = t1 % 10
+
+      `0x66666667` with `sra 2` is the textbook signed divide-by-ten. So the `x10` here is not a multiply at
+      all — it is the **reconstruction step of a division**, and what it yields is a quotient in `v1` and a
+      remainder in `fp`. The engine divides the animation position by 10 to get a frame index and keeps the
+      remainder; `fp` is the sub-frame **interpolation fraction**, which is why the neighbouring code at
+      `0x8006B640` folds it back in per part.
+
+      **This proves the unit independently of the note**: the position is in tenths of an animation frame.
+      That is what 51c actually needed, and it now rests on an instruction rather than a comment. It also
+      confirms the 3:1 relation outright — 30 position-units per move frame over 10 per animation frame is
+      **three animation frames per move frame**.
+
+      **What is NOT retracted, and NOT confirmed:** the note's separate claims that block B's entries and
+      block D's `+12/+14/+16` are scaled at load. Those are about different fields, they do not conflict with
+      a tenths-unit position, and 140 strict `x5` sites remain unexamined. The specific claim that a *loader*
+      multiplies clip durations still has no disassembly behind it — but nothing now depends on it.
 - [ ] ~~51. **The AI frame → model clip mapping drifts across a long move.**~~ `Q2_CRE_TICKS_PER_FRAME` is 3 and
       it lands the START of the Soldier's `Death1` correctly: posed at AI frames 310, 314, 318 and 322 the
       model is a body collapsing to the floor, progressively. But the move runs 308-342, and at 330 and 336

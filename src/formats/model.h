@@ -269,8 +269,12 @@ Q2PSX_INLINE u32 q2_model_face_clut_index(const q2_model_face *f,
  * each clip's duration from the entity's tick counter until one contains the
  * current time; then it decodes one keyframe per part.
  *
- *   clip:  u16 frames      duration; the loader multiplies it by 10, so the
- *                          runtime clock ticks ten times per animation frame
+ *   clip:  u16 frames      duration; the runtime clock ticks TEN TIMES per
+ *                          animation frame -- see 0x8006B5D8, which divides the
+ *                          position by 10 (magic 0x66666667, sra 2) for a frame
+ *                          index and keeps the remainder as the lerp fraction.
+ *                          That division is the proof of the unit; the claim
+ *                          that a LOADER multiplies durations is unverified.
  *          u16 flags       bit 0 selects the variable-rate path (below)
  *          u32 next        BYTE DELTA to the next clip; 0 ends the chain
  *          then per frame f:  u16 rateOfs; u16 keyOfs
