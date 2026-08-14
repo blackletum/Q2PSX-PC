@@ -3782,6 +3782,18 @@ nothing saying so.
       zone 1 goes 0 -> 1. Zones whose Events chunk is byte-identical to COMMON's (21 of 74) are unchanged,
       which is why the default zone of most maps looks the same and why this hid for so long.
 
+      **What the remaining gap actually is, measured rather than estimated.** "54 calls name no object" is
+      not the same claim as "54 rotations are missing", because a call only matters if the script runs it.
+      Counting the rotation primitives the trigger sweep actually reaches:
+
+          rotation CALLs the script RUNS : 68, of which turn nothing : 29
+
+      So the honest figure is **29 executed rotation calls that still turn nothing**, not 54 — and 39 of the
+      68 now do turn something, against 13 before the fix. Of the 54 empty calls, 39 could not even be tested
+      against a zone chunk because COMMON's Events chunk is larger than the zone's at that offset; the engine
+      rebasing into a shorter buffer there would read past its end, so either those calls never fire or the
+      rebase has a bound this pass has not found.
+
       One trap worth recording: `q2_rotators_build` memsets the set, so setting the operand source before
       building — the only order that works, since the build does the reading — was silently discarded until
       the build was taught to carry those three fields across the memset. The creature binds lost a whole

@@ -55,13 +55,31 @@ typedef struct live_rot_ctx {
     const q2_userfuncs *uf;
     q2_rotator_set     *set;
     u32                 steps;
+    u32                 rot_fired;   /* rotation CALLs the script actually ran */
+    u32                 rot_barren;  /* ...of those, ones that turned nothing  */
 } live_rot_ctx;
 
 static void live_rot_call(void *user, const q2_event_item *item, u8 call_index)
 {
     live_rot_ctx *ctx = (live_rot_ctx *)user;
 
-    ctx->steps += q2_rotators_call(ctx->set, ctx->uf, item, call_index);
+    u32 hit = q2_rotators_call(ctx->set, ctx->uf, item, call_index);
+    q2_uf_prim prim = q2_userfuncs_prim(ctx->uf, call_index);
+
+    ctx->steps += hit;
+
+    /*
+     * A call that names no object is only a gap if the script ever RUNS it.
+     * Count the rotation primitives the trigger sweep actually reaches, and how
+     * many of those turned nothing, so "54 calls are empty" can be separated
+     * from "54 calls are dead script".
+     */
+    if (prim == Q2_UF_SIMROT || prim == Q2_UF_SIMROT2 ||
+        prim == Q2_UF_ROTHATCH || prim == Q2_UF_ROTBUTTON) {
+        ctx->rot_fired++;
+        if (!hit)
+            ctx->rot_barren++;
+    }
 }
 
 /* Does `offset` name the start of a record in this script? */
@@ -90,6 +108,7 @@ int cmd_zonescript(const disc *d, const char *only_map)
     u32 rot_prim_calls = 0, rot_too_short = 0, rot_no_object = 0,
         rot_usable = 0, rot_zone_rescue = 0, rot_zone_inrange = 0,
         rot_zone_slots = 0, rot_zone_nonneg = 0;
+    u32 live_rot_fired = 0, live_rot_barren = 0;
     u32 live_built = 0, live_calls = 0, live_steps = 0, live_moved = 0,
         live_turned = 0;
     bool verbose = (only_map != NULL);
@@ -407,6 +426,8 @@ int cmd_zonescript(const disc *d, const char *only_map)
                 ctx.uf = &uf;
                 ctx.set = &rs;
                 ctx.steps = 0;
+                ctx.rot_fired = 0;
+                ctx.rot_barren = 0;
                 rt.on_call      = live_rot_call;
                 rt.on_call_user = &ctx;
 
@@ -425,6 +446,8 @@ int cmd_zonescript(const disc *d, const char *only_map)
 
                 live_calls += rt.call_count;
                 live_steps += ctx.steps;
+                live_rot_fired  += ctx.rot_fired;
+                live_rot_barren += ctx.rot_barren;
                 for (t = 0; t < 400; t++)
                     live_moved += q2_rotators_tick(&rs, 12);
                 for (zi = 0; zi < rs.count; zi++)
@@ -496,6 +519,8 @@ int cmd_zonescript(const disc *d, const char *only_map)
     printf("      zone slots examined %u, non-negative %u (%.1f%%)\n",
            rot_zone_slots, rot_zone_nonneg,
            rot_zone_slots ? 100.0 * rot_zone_nonneg / rot_zone_slots : 0.0);
+    printf("    rotation CALLs the script RUNS : %u, of which turn nothing : %u\n",
+           live_rot_fired, live_rot_barren);
     printf("    rotators built  : %u  (one per object slot each call names)\n",
            live_built);
     printf("    CALL items run  : %u\n", live_calls);
