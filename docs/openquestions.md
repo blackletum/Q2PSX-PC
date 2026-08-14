@@ -1855,11 +1855,25 @@ not damage. It then calls engine slots `+0xC8` and `+0xD8` with vectors.
       carries them, and a creature whose table it does not know is dropped rather
       than handed a Soldier's gun.
       *Measured, not assumed:* on BASE1 over 1800 frames with four creatures hunting,
-      the hook is invoked **zero** times, so something upstream of it does not reach
-      the attack. The client counts swings and shots beside every capture, so the next
-      pass starts from a number. The thing to establish is which of the two think
-      paths the frame driver takes — `q2_cre_run_think`'s decoded actions or the
-      class method table `q2_creature_spawn` installs.
+      the hook is invoked **zero** times. **The root cause is found and it is a
+      one-line guard in the port.**
+      The frame driver dispatches a frame's think through the class method table, and
+      the Soldier's methods are installed, so that path was never the problem. What
+      stops it is one step earlier: `q2_ai_checkattack` ends with
+      `if (!m->checkattack) return false;`, and **the original does not test it** —
+      `0x8005E320` is `lw v0, 260(s1)` and `0x8005E328` is `jalr v0` with nothing
+      between them. `entity+0x104` is never NULL on the console, so the engine
+      installs a default at spawn that a module may override.
+      **No creature module on the disc installs one.** The Soldier's callbacks are
+      stand, walk, run, dodge, attack, sight, pain and die, and the other six are the
+      same. So a guard that reads as ordinary defensive coding disables every attack
+      in the game — which is why creatures chase and never fire, and why the melee
+      hook never fired either.
+      *Still open:* the default's address. `0x80061D10` fills the eight shared
+      movement verbs at `0x800D561C` and defaults 256 class-method slots at
+      `0x800D519C`, so the spawn path is the right neighbourhood, but the store to
+      `+0x104` is not in it. The guard stays until the default is read, because
+      returning false is at least the behaviour the port is tested against.
 
       The earlier statement that follows was written before this and is kept because
       the reasoning it records is still what eliminated the call route:

@@ -878,6 +878,24 @@ bool q2_ai_checkattack(q2_monster *m, s32 dist)
     if (!q2_enemy_vis)
         return false;
 
+    /*
+     * THE ORIGINAL DOES NOT TEST THIS. `0x8005E320` is `lw v0, 260(s1)` and
+     * `0x8005E328` is `jalr v0` with no null check between them, so
+     * `entity+0x104` is never NULL on the console — the engine installs a
+     * default at spawn that a module may override.
+     *
+     * No creature module on the disc installs one. The Soldier's callbacks are
+     * stand, walk, run, dodge, attack, sight, pain and die; there is no
+     * checkattack among them, and the same is true of the other six. So this
+     * guard, which looks like ordinary defensive coding, silently disabled
+     * EVERY attack in the game: measured on BASE1 over 1800 frames with four
+     * creatures hunting, the fire and melee hooks were invoked zero times.
+     *
+     * The default itself has not been located yet, so the guard stays until it
+     * is — returning false is at least the behaviour the port has been tested
+     * against. What has changed is that it is now a known hole with a number
+     * against it rather than a line nobody had reason to look at.
+     */
     if (!m->checkattack)
         return false;
 
