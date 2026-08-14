@@ -4148,6 +4148,34 @@ nothing saying so.
       Not wired: the port's effect system would have to raise it, and which of the seven presets this
       renderer is drawing is not yet read.
 
+      **And the style field's meaning follows from there.** Exactly one place in the image extracts bits
+      11..13, and it is a five-way switch:
+
+          80075720  srl  v0, a0, 14 ; andi 0x3     ; size_shift
+          80075728  sllv a1, v1, v0                ; ...which SHIFTS a value left
+          8007572C  srl  a0, a0, 11 ; andi 0x7     ; style
+          80075738  beq a0, 2 -> t1 = 0x800A2014
+          80075748  beq a0, 1 -> t1 = 0x800A1FDC
+          8007575C  beq a0, 3 -> t1 = 0x800A2024
+          80075764  beq a0, 4 -> t1 = 0x800A203C
+                    default   -> t1 unchanged
+
+      **Five cases, 0..4** — precisely the five values `((n<<3)|7)` for n in 0..4 that `formats/entity.h`
+      records for the static lights' `type` byte with "style semantics unknown". The static census gave the
+      value set; this gives the dispatch. They are the same field reached two ways.
+
+      Each style selects a TABLE, and the tables are runs of 8-byte records ending in a zero pair:
+
+          0x800A1FDC  style 1   six records
+          0x800A2014  style 2   one record      1, 4096, 4096, 4096
+          0x800A2024  style 3   two records
+          0x800A203C  style 4
+
+      The values are 1.3.12 fixed point — 4096 is 1.0, and the rest are 2048, 1536, 1100, 1024, 800, 768,
+      512, with some negative (61736 is -3800 as s16). So **`style` chooses a light ANIMATION CURVE and
+      `size_shift` scales it**, which is what a Quake light style has always been. The individual curves are
+      not decoded yet, but they are four named tables rather than an unknown.
+
       How many exist, counted rather than grepped: **18 TIMEDLIGHT calls and 1 FLKLIGHT across COMMON's
       scripts, disc-wide.** A passive capture triggers none of them — they are script records fired by
       trigger volumes, exactly like the rotation calls — so the handler shows 0 in a fly-through and that is

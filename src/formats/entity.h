@@ -36,8 +36,13 @@
  *     0x0F  u8        pad         zero in all 7,814
  *     0x10  u8        always_255  0xFF in all 7,814
  *     0x11  u8        type        exactly five values game-wide: 7, 15, 23, 31,
- *                                 39, which is ((n<<3)|7) for n in 0..4. The
- *                                 style semantics are unknown.
+ *                                 39, which is ((n<<3)|7) for n in 0..4. Those
+ *                                 five n are the five arms of the STYLE switch
+ *                                 at 0x8007572C, each selecting an animation
+ *                                 curve: 0x800A1FDC, 0x800A2014, 0x800A2024 and
+ *                                 0x800A203C, runs of 8-byte records in 1.3.12
+ *                                 ending at a zero pair. The curves themselves
+ *                                 are not decoded; the dispatch is.
  *     0x12  u16       radius      equals isqrt(radius_sq) for all 7,814
  *     0x14  u32       inner_radius_sq   always <= radius_sq
  *     0x18  u32       radius_sq   the authoritative cut-off
