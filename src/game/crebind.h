@@ -161,6 +161,20 @@ typedef struct q2_cre_action_stats {
 
 extern q2_cre_action_stats q2_cre_actions;
 
+/* The generic implementation and its handlers, so a PARTIAL transcription can
+ * write one callback and keep the decoded actions for the rest. */
+extern const q2_cre_impl q2_cre_generic;
+
+void q2_cre_generic_stand(q2_monster *m);
+void q2_cre_generic_idle(q2_monster *m);
+void q2_cre_generic_search(q2_monster *m);
+void q2_cre_generic_walk(q2_monster *m);
+void q2_cre_generic_run(q2_monster *m);
+void q2_cre_generic_attack(q2_monster *m);
+void q2_cre_generic_melee(q2_monster *m);
+void q2_cre_generic_pain(q2_monster *m);
+void q2_cre_generic_die(q2_monster *m);
+
 void q2_cre_run_think(q2_monster *m, u32 index);
 
 /* Skill, which several creatures gate their refire and opening shot on. */

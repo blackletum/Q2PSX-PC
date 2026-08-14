@@ -2785,6 +2785,40 @@ So the attack move is installed three times and cut short before its sixth frame
       routed, the import is named, the think is decoded, the move is installed, and it is being interrupted
       six frames too early.
 
+## A decoded creature fires
+
+`22 fire calls: 22 sent`, `think hit 8:22`, on COMMAND over 400 frames. The first shot from a creature this
+project never transcribed — and it took one function.
+
+The chain that had to hold, end to end: the AI grants an attack (`M_CheckAttack`, transcribed), the attack
+callback picks a move, the move's frames name a think, the think decodes to a step, the step names an import,
+the import is one of the five projectile spawners, and the hook fires. Every link was already in place. The
+attack callback was picking the wrong move.
+
+`cre_tankcomm.c` writes ONE callback. Everything else — stand, idle, search, walk, run, pain, die and all
+thirty-two think indices — stays on the generic handlers and the decoded actions. That is now possible
+because `q2_creature_bind` falls back to the generic implementation's method for any think index a partial
+transcription leaves NULL, which turns "transcribe a creature" from an all-or-nothing job into a per-function
+one.
+
+The transcription is the table read last round, with two departures stated in the file: the distance is
+compared as a square against 1501² and 3001² so no root is taken, which orders identically; and the timer at
+`entity+0xA8` that the long-range branch sets is not written, because which global it reads is not
+established. The move it accompanies is installed either way.
+
+Before and after on the same map and capture length:
+
+| | before | after |
+| --- | --- | --- |
+| think hits | 1:12 6:9 7:12 | **8:22** |
+| CALL steps reached | 31 | 88 |
+| fire calls | 0 | **22** |
+| fire sent | 0 | **22** |
+
+Five modules remain, and each is now a reading job at a printed address rather than a search: `q2psx-inspect
+creatures` gives every callback's address, every move's record address and installing callback, and the think
+bytes each move's frames call in frame order.
+
 ---
 
 ## ⚠ Security note (carried forward, do not drop)

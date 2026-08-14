@@ -66,8 +66,22 @@ bool q2_creature_bind(q2_cre_bind *b, const q2_creature *c,
      * exactly as the module's own init does through import +0x118. */
     for (i = 0; i < c->class_count; i++) {
         u32 k;
-        for (k = 0; k < Q2_CLASS_METHOD_COUNT; k++)
-            q2_class_method_set(c->class_byte[i], k, impl->method[k]);
+        for (k = 0; k < Q2_CLASS_METHOD_COUNT; k++) {
+            /*
+             * A think index the implementation does not write falls back to the
+             * generic one, which runs the action the decoder read out of that
+             * very function. That is what makes a PARTIAL transcription
+             * worthwhile: a creature can have one callback written by hand and
+             * keep the decoded actions for everything else, instead of the
+             * choice being all thirty-two or none.
+             */
+            q2_class_method fn = impl->method[k];
+
+            if (!fn && impl != &q2_cre_generic)
+                fn = q2_cre_generic.method[k];
+
+            q2_class_method_set(c->class_byte[i], k, fn);
+        }
         g_bind[c->class_byte[i]] = b;
     }
 
@@ -175,10 +189,11 @@ bool q2_cre_set_move(q2_monster *m, s32 first_frame)
 /* The registry of built-in implementations                                   */
 /* ------------------------------------------------------------------------- */
 extern const q2_cre_impl q2_cre_soldier;
-extern const q2_cre_impl q2_cre_generic;
+extern const q2_cre_impl q2_cre_tankcomm;
 
 static const q2_cre_impl *const g_impls[] = {
     &q2_cre_soldier,
+    &q2_cre_tankcomm,
     NULL
 };
 

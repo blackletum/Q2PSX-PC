@@ -59,14 +59,14 @@ static bool set_via(q2_monster *m, u32 slot)
     return q2_cre_set_move(m, cm->first_frame);
 }
 
-static void generic_stand(q2_monster *m)  { set_via(m, 0);  }
-static void generic_idle(q2_monster *m)   { set_via(m, 1);  }
-static void generic_search(q2_monster *m) { set_via(m, 2);  }
-static void generic_walk(q2_monster *m)   { set_via(m, 3);  }
-static void generic_attack(q2_monster *m) { set_via(m, 6);  }
-static void generic_melee(q2_monster *m)  { set_via(m, 7);  }
+void q2_cre_generic_stand(q2_monster *m)  { set_via(m, 0);  }
+void q2_cre_generic_idle(q2_monster *m)   { set_via(m, 1);  }
+void q2_cre_generic_search(q2_monster *m) { set_via(m, 2);  }
+void q2_cre_generic_walk(q2_monster *m)   { set_via(m, 3);  }
+void q2_cre_generic_attack(q2_monster *m) { set_via(m, 6);  }
+void q2_cre_generic_melee(q2_monster *m)  { set_via(m, 7);  }
 
-static void generic_run(q2_monster *m)
+void q2_cre_generic_run(q2_monster *m)
 {
     /* Standing ground beats running, exactly as every transcribed creature's
      * run callback opens — it is the one branch they all share. */
@@ -78,9 +78,9 @@ static void generic_run(q2_monster *m)
         set_via(m, 0);
 }
 
-static void generic_pain(q2_monster *m) { set_via(m, 11); }
+void q2_cre_generic_pain(q2_monster *m) { set_via(m, 11); }
 
-static void generic_die(q2_monster *m)
+void q2_cre_generic_die(q2_monster *m)
 {
     if (m->dead)
         return;
@@ -106,9 +106,9 @@ TRAMP(24) TRAMP(25) TRAMP(26) TRAMP(27) TRAMP(28) TRAMP(29) TRAMP(30) TRAMP(31)
 const q2_cre_impl q2_cre_generic = {
     NULL,
     {
-        generic_stand, generic_idle, generic_search, generic_walk,
-        generic_run, NULL, generic_attack, generic_melee,
-        NULL, NULL, NULL, generic_pain, generic_die
+        q2_cre_generic_stand, q2_cre_generic_idle, q2_cre_generic_search, q2_cre_generic_walk,
+        q2_cre_generic_run, NULL, q2_cre_generic_attack, q2_cre_generic_melee,
+        NULL, NULL, NULL, q2_cre_generic_pain, q2_cre_generic_die
     },
     {
         think_0,  think_1,  think_2,  think_3,  think_4,  think_5,
