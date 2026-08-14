@@ -4079,13 +4079,18 @@ nothing saying so.
       drawn from the same BIOS-identical generator, so the blink is the console's rather than a rhythm of
       this port's choosing.
 
-      Two behaviours are pinned by `tests/light` because they are the ones a plausible implementation gets
-      wrong. **Re-entry does not stack**: a script record can run again, and a second `add` with the same
-      `light_id` returns true without creating a second light. **The turn-over is a `while`, not an `if`**: a
-      long frame can cross several durations, and an `if` would leave the phase permanently behind the clock,
-      which looks like a slow flicker rather than a bug.
+      ~~Two behaviours are pinned by `tests/light`: re-entry does not stack, and the turn-over is a `while`
+      rather than an `if`.~~ **All of that is deleted, because the phase it protected does not exist.**
 
-      The set is fixed at eight with no allocation, because the disc carries exactly one FLKLIGHT call.
+      The exec at `0x800287A0` loops the primitive's objects, adds one dynamic light each, and returns at
+      `0x8002890C`. No timer, no state, nothing that could turn a light off. What makes a flicker flicker is
+      that **both radii are redrawn from `rand()` on every call**, so the same script record casts a
+      different-sized light each time it runs. FLKLIGHT is a transient exactly like TIMEDLIGHT.
+
+      Three commits to get here, and each intermediate one looked finished: implement the phase, correct its
+      constants, then find the phase should not exist. **The tell was that the tests passed at every stage** —
+      they pinned arithmetic that was correct throughout, while what was wrong was what the numbers were FOR.
+      A test that checks a formula cannot check its purpose.
 
       **And the handlers are reachable, which a fly-through could not show.** Firing every trigger volume on
       the disc through the script runtime:
