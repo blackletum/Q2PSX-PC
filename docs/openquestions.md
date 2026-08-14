@@ -2497,6 +2497,35 @@ not think, and it does not walk.
       different numbering. Joining the two — by name, by order, or by something else — is the last link
       between what the AI selects and what the model plays.
 
+- [~] 51h. **Three model frames per AI frame — 16 of the Soldier's 18 moves, and two that do not fit.**
+      BASE1 model 15 is the Soldier itself, so its 31 moves and the module's 18 can be compared directly.
+      Multiplying each AI move's length by 3 and asking whether the model has a clip of exactly that length:
+
+          AI 176-214 (39) -> 117 = clip 10      AI  50-54  (5) ->  15 = clip 1
+          AI 146-175 (30) ->  90 = clip 9       AI  55-61  (7) ->  21 = clip 2
+          AI 256-265 (10) ->  30 = clip 8       AI  62-79 (18) ->  54 = clip 3
+          AI  97-98   (2) ->   6 = clip 25      AI  80-96 (17) ->  51 = clip 4
+          AI  99-104  (6) ->  18 = clip 5       AI 272-307(36) -> 108 = clip 0
+          AI  12-29  (18) ->  54 = clip 3       AI 308-342(35) -> 105 = clip 11
+          AI  39-44   (6) ->  18 = clip 5       AI 441-464(24) ->  72 = clip 7
+          AI 109-122 (14) ->  42 = clip 14      AI 465-474(10) ->  30 = clip 8
+
+      **16 of 18.** The factor of three is not a new constant — it is `30 / 10`, the position units per AI
+      frame over the position units per model frame, so 51b and 51d already implied it and this is the first
+      time it has been checked against data. It also independently confirms the existing
+      `Q2_CRE_TICKS_PER_FRAME = 3`.
+
+      **The two that fail are the interesting part**, and they are recorded rather than explained away:
+      AI 215-247 (33 frames, wants a 99-frame clip) and AI 0-11 (12 frames, wants 36). The Soldier's model
+      has neither length. Its three classes (87, 89, 88) share a single model — BASE1 has exactly one
+      Soldier — so a variant model does not account for them. Either those two moves span more than one clip,
+      or the range for them is not a plain inclusive span.
+
+      Marked partial, not closed. **Only the Soldier could be tested**: it is the one creature with a model
+      in a zone bank, and the other six (Tankcomm, Gunner, Infantry, Berserk, Arachner, Insane) live in
+      COMMON.DAT, which `q2psx-inspect model` cannot currently open. Widening it there is the next step and
+      would take the sample from 18 moves to something worth calling a census.
+
 - [ ] ~~51. **The AI frame → model clip mapping drifts across a long move.**~~ `Q2_CRE_TICKS_PER_FRAME` is 3 and
       it lands the START of the Soldier's `Death1` correctly: posed at AI frames 310, 314, 318 and 322 the
       model is a body collapsing to the floor, progressively. But the move runs 308-342, and at 330 and 336

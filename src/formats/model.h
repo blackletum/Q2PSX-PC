@@ -546,10 +546,14 @@ bool q2_model_move_by_name(const q2_model *m, const char *name,
  * The clip a move drives, and the frame count they agree on.
  *
  * Move `index` drives clip `index` — verified on every model on the disc that
- * carries both, 34 for 34, by `span / 2 + 1 == clip.frames` in list order. This
- * replaces guessing a clip from a move's LENGTH (`q2_model_anim_by_length`,
- * which needs a `skip` to break ties between equal-length clips) with an exact
- * index, so it cannot pick the wrong one of two same-length moves.
+ * carries both, 34 for 34, by `span / 2 + 1 == clip.frames` in list order.
+ *
+ * `index` here is a BLOCK D move index, which is not a creature module's move
+ * index: the Soldier's model has 31 moves and its module has 18, in a different
+ * frame numbering (see #51h). So this does NOT yet replace
+ * `q2_model_anim_by_length()` on the AI path — that still matches on length
+ * with a `skip` to break ties. It replaces it only once a module's move can be
+ * named or ordered into this table.
  */
 bool q2_model_clip_for_move(const q2_model *m, u32 index, q2_model_anim *out);
 
