@@ -67,6 +67,7 @@ typedef struct live_rot_ctx {
     u32                 steps;
     u32                 rot_fired;   /* rotation CALLs the script actually ran */
     u32                 rot_barren;  /* ...of those, ones that turned nothing  */
+    u32                 lit_run;     /* light primitives the sweep actually ran */
 
     /* Which item offsets turned something, so a call barren under THIS zone can
      * be told apart from one barren under every zone the map ships. */
@@ -90,6 +91,9 @@ static void live_rot_call(void *user, const q2_event_item *item, u8 call_index)
      * many of those turned nothing, so "54 calls are empty" can be separated
      * from "54 calls are dead script".
      */
+    if (prim == Q2_UF_TIMEDLIGHT || prim == Q2_UF_FLKLIGHT)
+        ctx->lit_run++;
+
     if (prim == Q2_UF_SIMROT || prim == Q2_UF_SIMROT2 ||
         prim == Q2_UF_ROTHATCH || prim == Q2_UF_ROTBUTTON) {
         ctx->rot_fired++;
@@ -133,7 +137,7 @@ int cmd_zonescript(const disc *d, const char *only_map)
         rot_zone_slots = 0, rot_zone_nonneg = 0;
     u32 live_rot_fired = 0, live_rot_barren = 0;
     u32 rot_any_zone = 0, rot_no_zone = 0;
-    u32 light_timed = 0, light_flk = 0;
+    u32 light_timed = 0, light_flk = 0, live_lit_run = 0;
     u32 live_built = 0, live_calls = 0, live_steps = 0, live_moved = 0,
         live_turned = 0;
     bool verbose = (only_map != NULL);
@@ -535,6 +539,7 @@ int cmd_zonescript(const disc *d, const char *only_map)
                 ctx.steps = 0;
                 ctx.rot_fired = 0;
                 ctx.rot_barren = 0;
+                ctx.lit_run = 0;
                 rt.on_call      = live_rot_call;
                 rt.on_call_user = &ctx;
 
@@ -555,6 +560,7 @@ int cmd_zonescript(const disc *d, const char *only_map)
                 live_steps += ctx.steps;
                 live_rot_fired  += ctx.rot_fired;
                 live_rot_barren += ctx.rot_barren;
+                live_lit_run    += ctx.lit_run;
                 for (t = 0; t < 400; t++)
                     live_moved += q2_rotators_tick(&rs, 12);
                 for (zi = 0; zi < rs.count; zi++)
@@ -626,8 +632,9 @@ int cmd_zonescript(const disc *d, const char *only_map)
     printf("      zone slots examined %u, non-negative %u (%.1f%%)\n",
            rot_zone_slots, rot_zone_nonneg,
            rot_zone_slots ? 100.0 * rot_zone_nonneg / rot_zone_slots : 0.0);
-    printf("    script LIGHT calls in COMMON: %u TIMEDLIGHT, %u FLKLIGHT\n",
-           light_timed, light_flk);
+    printf("    script LIGHT calls in COMMON: %u TIMEDLIGHT, %u FLKLIGHT;"
+           " the trigger sweep RUNS %u of them\n",
+           light_timed, light_flk, live_lit_run);
     printf("    rotation CALLs the script RUNS : %u, of which turn nothing : %u\n",
            live_rot_fired, live_rot_barren);
     printf("    distinct rotation CALL sites the script reaches : %u\n",

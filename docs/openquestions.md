@@ -4086,6 +4086,20 @@ nothing saying so.
 
       The set is fixed at eight with no allocation, because the disc carries exactly one FLKLIGHT call.
 
+      **And the handlers are reachable, which a fly-through could not show.** Firing every trigger volume on
+      the disc through the script runtime:
+
+          script LIGHT calls in COMMON: 18 TIMEDLIGHT, 1 FLKLIGHT;
+          the trigger sweep RUNS 6 of them
+
+      So six of the nineteen are reached by a trigger alone — the handlers are not dead code, they are code
+      a passive capture never provokes. The other thirteen sit behind conditions the sweep does not satisfy
+      (a door opened, a counter reached), which is the same reason most rotation calls only fire in play.
+
+      That distinction is worth keeping: **"0 in a capture" and "0 reachable" look identical in a
+      screenshot**, and only the sweep separates them. It is the same question that turned "69 inert rotation
+      calls" into "67 of 68 live" and "54 barren" into "one truncated item".
+
       How many exist, counted rather than grepped: **18 TIMEDLIGHT calls and 1 FLKLIGHT across COMMON's
       scripts, disc-wide.** A passive capture triggers none of them — they are script records fired by
       trigger volumes, exactly like the rotation calls — so the handler shows 0 in a fly-through and that is
