@@ -2819,6 +2819,37 @@ Five modules remain, and each is now a reading job at a printed address rather t
 creatures` gives every callback's address, every move's record address and installing callback, and the think
 bytes each move's frames call in frame order.
 
+## The Gunner, and one more import named
+
+Second transcription, same shape as the first: one callback, everything else on the generic handlers and the
+decoded actions. `gunner_attack` is at `module+0x1814` and is shorter than the Tank Commander's —
+
+    v0 = import[+0xB4](self, self->enemy)
+    if (v0 == 0)                  move = M_137_143;
+    else if (import[+0x14]() & 1) move = M_108_128;
+    else                          move = M_137_143;
+
+**`import[+0xB4]` is `q2_range`**, which this port already carries — the eleventh import slot named, and this
+one identified by more than shape. `0x8005EF84` subtracts the two origins, takes `q2_vector_length_sq`
+(`0x8005C59C`, already named in `ai.h`), and compares against `0x003F803F` or `0x000FE00F` depending on
+whether the entity's class byte at `+0x23` is 68. Those are 2040² - 1 and 1020² - 1: the long-melee and
+ordinary melee bands, with the same off-by-one `q2_range` already reproduces in `monster.c`. So the branch is
+`range == Q2_RANGE_MELEE`, read rather than guessed.
+
+Unlike the Tank Commander, the Gunner was not silenced by the generic handler: **both** its attack moves are
+firing animations, so taking the first happened to agree with the original. The transcription makes that
+agreement deliberate and adds the melee-range branch the generic handler had no way to know about.
+
+On WASTE3 the Gunner now attacks — `2 checkattack, 1 yes, 1 attack call` — and **think 13 runs 33 times**,
+which is `M_137_143`'s first frame. It still fires nothing, and the census says why:
+
+- [ ] 58. **The Gunner's fire think is 2, and think 2 lives in a move nothing reaches.** Its move
+      `144-151` is eight frames of think 2, and think 2 is the one carrying `call(+0x84)` — the hitscan. That
+      move's `via` is **-1**: no callback installs it, so it is reached only through another move's endfunc.
+      Presumably `M_137_143` or `M_108_128` ends into it. The endfunc chain is resolved at bind time
+      (`resolve_endfunc`), so either the chain is not firing or the move it names is not the one the census
+      thinks. Sixteen of the disc's 101 moves are `via == -1` and this is the first one shown to matter.
+
 ---
 
 ## ⚠ Security note (carried forward, do not drop)

@@ -22,6 +22,7 @@ add_library(q2psx_game STATIC
     crebind.c
     crebind.h
     cre_actions.c
+    cre_gunner.c
     cre_soldier.c
     cre_tankcomm.c
     cre_generic.c
