@@ -372,6 +372,32 @@ bool q2_model_anim_at(const q2_model *m, u32 tick, q2_model_anim *out,
     }
 }
 
+bool q2_model_anim_by_length(const q2_model *m, u32 frames, u32 skip,
+                             q2_model_anim *out)
+{
+    u32 i, n, seen = 0;
+
+    if (!m || frames == 0)
+        return false;
+
+    n = q2_model_anim_count(m);
+    for (i = 0; i < n; i++) {
+        q2_model_anim a;
+
+        if (!q2_model_anim_get(m, i, &a))
+            break;
+        if (a.frames != frames)
+            continue;
+        if (seen++ < skip)
+            continue;
+        if (out)
+            *out = a;
+        return true;
+    }
+
+    return false;
+}
+
 u32 q2_model_anim_count(const q2_model *m)
 {
     q2_model_anim clip;

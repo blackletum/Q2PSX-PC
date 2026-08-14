@@ -768,6 +768,31 @@ static u32 client_rot_turned(const client *c)
 }
 
 /*
+ * How many of this creature's moves before `mv` have the same length, so a move
+ * can pick the matching one when several clips share a length. Both lists are
+ * walked in their own order, which is the same technique the move NAMES use.
+ */
+static u32 client_move_ordinal(const q2_monster *m, const q2_mmove *mv)
+{
+    const q2_cre_bind *b = q2_cre_bind_for(m);
+    s32 len;
+    u32 i, n = 0;
+
+    if (!b || !mv)
+        return 0;
+
+    len = mv->last_frame - mv->first_frame + 1;
+    for (i = 0; i < b->move_count; i++) {
+        if (&b->move[i] == mv)
+            break;
+        if (b->move[i].last_frame - b->move[i].first_frame + 1 == len)
+            n++;
+    }
+
+    return n;
+}
+
+/*
  * A script CALL reached a rotation primitive: ask that node's rotator to take
  * one step.
  *
@@ -2746,14 +2771,52 @@ static void client_draw_view(void *user, q2_screen *s, int p,
                 const q2_model *mdl = &c->cre_model[i];
                 s32 frame = m->frame;
                 u32 within = 0;
+                bool have_clip = false;
 
                 if (frame < 0)
                     frame = 0;
 
-                if (mdl->hdr.num_parts <= Q2PSX_ARRAY_COUNT(pose) &&
-                    q2_model_anim_at(mdl,
-                                     (u32)frame * Q2_CRE_TICKS_PER_FRAME,
-                                     &clip, &within))
+                if (mdl->hdr.num_parts > Q2PSX_ARRAY_COUNT(pose)) {
+                    have_clip = false;
+                } else if (m->currentmove) {
+                    /*
+                     * The clip its CURRENT MOVE plays, and the position within
+                     * that clip — not a position on one continuous timeline.
+                     * The engine keeps a current clip at model+0x34 and only
+                     * walks the chain when the position overruns it, so a move
+                     * selects a clip and the frame indexes into it. Walking the
+                     * whole chain instead drifts: the Soldier's death move at
+                     * AI frame 308 lands in the wrong clip and the body stands
+                     * up halfway through falling over.
+                     */
+                    const q2_mmove *mv = m->currentmove;
+                    s32 len = mv->last_frame - mv->first_frame + 1;
+
+                    if (len > 0) {
+                        s32 into = frame - mv->first_frame;
+
+                        if (into < 0)
+                            into = 0;
+                        if (into >= len)
+                            into = len - 1;
+
+                        have_clip = q2_model_anim_by_length(
+                            mdl, (u32)len * Q2_CRE_TICKS_PER_FRAME,
+                            client_move_ordinal(m, mv), &clip);
+                        within = (u32)into * Q2_CRE_TICKS_PER_FRAME;
+                        if (have_clip && within >= clip.frames)
+                            within = clip.frames ? clip.frames - 1 : 0;
+                    }
+                }
+
+                /* No move installed, or no clip of that length: the timeline
+                 * walk, which is what every creature used before this. */
+                if (!have_clip && mdl->hdr.num_parts <= Q2PSX_ARRAY_COUNT(pose))
+                    have_clip = q2_model_anim_at(
+                        mdl, (u32)frame * Q2_CRE_TICKS_PER_FRAME,
+                        &clip, &within);
+
+                if (have_clip)
                     posed = (q2_model_pose_at(mdl, &clip, within,
                                               pose) == Q2_OK);
             }

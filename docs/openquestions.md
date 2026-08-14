@@ -2267,7 +2267,32 @@ drawn — the draw loop only checks `in_use` — so a killed Soldier stood in wh
 mid-stride, for the rest of the level. A corpse now runs the frame driver and not the AI: it animates, it does
 not think, and it does not walk.
 
-- [ ] 51. **The AI frame → model clip mapping drifts across a long move.** `Q2_CRE_TICKS_PER_FRAME` is 3 and
+- [x] 51. **ANSWERED the same day: a move SELECTS a clip; the frame indexes into it.**
+      The port walked the whole clip chain treating an AI frame as a position on one continuous timeline.
+      That is what `0x8006B924` does when a position OVERRUNS its clip — but the engine holds a *current*
+      clip pointer at `model+0x34` and only walks when it has to, so the clip is chosen elsewhere and the
+      position is relative to it. What chooses it is not in the module's data, and the correspondence that
+      is: **a move's frame count times three is exactly some clip's length, for 93 of the disc's 97 moves.**
+      Per module: Tankcomm 16/16, Insane 18/18, Gunner 13/13, Infantry 11/11, Berserk 10/10, Soldier 16/18
+      (lengths 12 and 33 have no clip), Arachner 9/11. Where several clips share a length the k-th move of
+      that length takes the k-th clip, which reproduces the one correspondence already known from the other
+      direction: the Soldier's consecutive moves 50-54, 55-61, 62-79 and 80-96 resolve to clips 1, 2, 3 and 4.
+      Its death move 308-342 — 35 frames, 105 ticks — resolves to clip 11, which is 105 frames long and is
+      the death animation, standing to fallen. The timeline walk put frame 308 at tick 924, inside clip 12,
+      which is why a body stood up halfway through dying. The four moves with no matching clip fall back to
+      the old walk rather than to nothing. `q2_model_anim_by_length` is the selector.
+
+      The original evidence for `Q2_CRE_TICKS_PER_FRAME 3` stands and is now better supported: it was
+      measured on four short consecutive moves, and 93 of 97 across seven modules agree with it.
+
+- [ ] 51a. **What does the engine use to select the clip?** Matching lengths is a reconstruction, not a
+      read: it recovers the right answer 93 times out of 97 and the four misses are silent. Something in a
+      module's code sets `model+0x34` when it installs a move, and that store has not been found.
+
+  *The finding as originally written, kept because the render that produced it is the reason the drift was
+  visible at all:*
+
+- [ ] ~~51. **The AI frame → model clip mapping drifts across a long move.**~~ `Q2_CRE_TICKS_PER_FRAME` is 3 and
       it lands the START of the Soldier's `Death1` correctly: posed at AI frames 310, 314, 318 and 322 the
       model is a body collapsing to the floor, progressively. But the move runs 308-342, and at 330 and 336
       the same creature is standing upright again — the timeline has walked into the next clip well before

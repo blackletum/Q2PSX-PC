@@ -436,6 +436,31 @@ bool q2_model_anim_get(const q2_model *m, u32 index, q2_model_anim *out);
 bool q2_model_anim_at(const q2_model *m, u32 tick, q2_model_anim *out,
                       u32 *within);
 
+/*
+ * The `skip`-th clip whose length is exactly `frames`, or false if there is no
+ * such clip.
+ *
+ * This is how a MOVE finds its clip, and it is a different question from the
+ * one `q2_model_anim_at` answers. That function walks the chain subtracting
+ * lengths, which is right for a position on a running timeline — but the engine
+ * keeps a CURRENT clip pointer at `model+0x34` and only advances it when the
+ * position overruns, so the clip is selected elsewhere and the position is
+ * relative to it.
+ *
+ * What selects it is not in the module's data, so it is reconstructed here from
+ * the one thing that does correspond: a move's frame count times
+ * Q2_CRE_TICKS_PER_FRAME is exactly some clip's length. The Soldier's death
+ * move runs 308-342 — 35 frames, 105 ticks — and clip 11 is 105 frames long and
+ * is the death animation, standing to fallen. Treating the AI frame as a
+ * position on one continuous timeline instead puts frame 308 at tick 924, which
+ * lands in clip 12, and the creature stands up again halfway through dying.
+ *
+ * `skip` disambiguates lengths that repeat: the k-th move of a given length
+ * takes the k-th clip of the matching length, in each list's own order.
+ */
+bool q2_model_anim_by_length(const q2_model *m, u32 frames, u32 skip,
+                             q2_model_anim *out);
+
 /* How many clips the chain holds. Zero for a model with no animation. */
 u32 q2_model_anim_count(const q2_model *m);
 
