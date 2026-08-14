@@ -4181,7 +4181,17 @@ nothing saying so.
       index IS the sound number, so every Arachner sound would have shifted by one. A refinement that fixes
       the creature you are looking at and silently renumbers one you are not.
 
-      Both reverted. The state that ships is the plain fallback: **the Tank Commander correct and verified
+      *Skip the MOVE-name table by EXTENT rather than rejecting one candidate.* The move-name pointers give
+      the table's span, so the scan can resume past `mv_hi + 20` instead of advancing four bytes into the
+      middle of a string. This is the right shape and it changed nothing — the Berserk still starts at
+      `Attack1`, so the hit is not inside the span the move-name pointers describe. Reverted too.
+
+      **Three attempts, three reverts, and the third says the model of the problem is wrong**: the run the
+      scan finds is not the move-name table as read by `q2_creature_move_names`, even though its contents are
+      move names. Something else in that module carries those strings. That is the thing to find, and it is
+      a different question from the one these three attempts kept answering.
+
+      The state that ships is the plain fallback: **the Tank Commander correct and verified
       against #60's VAG names, the Berserk found but flagged.** A wrong table is worse than a missing one
       here, and the Berserk's is wrong in a way that reads as right — which is the whole reason it is
       labelled rather than used.
