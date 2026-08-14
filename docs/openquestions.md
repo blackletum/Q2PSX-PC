@@ -3725,3 +3725,41 @@ nothing saying so.
       Consequently, all web-sourced claims in the release census — the existence of the NTSC SKU, its
       timestamps and track lengths, barcodes, magazine demo-disc serials, and the absence of a Japanese
       release — remain **unverified** and should be treated as moderate confidence at best.
+
+- [ ] 56. **The 69 "inert" rotation calls are not inert — the operand is read from a SECOND buffer.**
+      `q2_rotators_call` reads a SIMROT's four object slots from `item + 12` in COMMON's Events chunk, finds
+      -1 in all four on 69 of 95 calls disc-wide, and builds nothing. The engine does not do that. At
+      `0x800285CC` it sets up **two** cursors:
+
+          800285CC  addiu s1, s5, 12       ; s1 = item + 12, in the chunk at gp+372
+          800285BC  lw    v0, 372(gp)      ; base A
+          800285C0  lw    a0, 376(gp)      ; base B
+          800285F0  subu  v0, s1, v0       ; s1 - baseA  = the offset
+          800285F4  addu  s2, v0, a0       ; s2 = that offset, rebased into base B
+          8002861C  sh    s6, 0(s1)        ; STAMP -1 into buffer A
+          80028620  lh    v0, 0(s2)        ; READ the slot from buffer B
+          80028628  bltz  v0, 0x8002875C   ; negative -> skip this slot
+
+      So the buffer we parse is the one the engine **writes -1 into**, and the operand it actually reads
+      lives at the same offset in another. Reading only buffer A is guaranteed to see -1 wherever the game
+      has run, which is exactly the shape of the 69.
+
+      **Tested against the disc.** Taking each call whose COMMON slots are all -1 and reading the same offset
+      in that map's ZONE Events chunks:
+
+          empty in COMMON, a ZONE reaches that offset : 15
+          ...and the ZONE has a non-negative slot     : 15
+          zone slots examined 236, non-negative 16 (6.8%)
+
+      **15 of 15**, against a 6.8% per-slot background. Coincidence would put roughly a quarter of the
+      fifteen over the line, not all of them, and the 16 non-negative slots are spread one per call rather
+      than clumped. `no object` falls 69 -> 54 and `usable` rises 26 -> 41 on that one change. The remaining
+      39 are untestable here only because no zone chunk on those maps reaches the offset.
+
+      **What is NOT established is what buffer B is.** This file's own header argues the engine never loads
+      a zone's Events chunk — one "Events" string, matched only by COMMON's loader at `0x8007AC30` storing
+      into `gp+372`. `gp+376` is written at `0x8007C234` from a stack slot and cleared beside `gp+372` at
+      teardown, so it is a peer of the events pointer, but its identity is unproven. The zone chunk is a
+      CANDIDATE that fits the data, not a demonstration. **Find what writes `gp+376`** — that is the whole
+      question, and it decides whether this port should be reading zone Events after all or some pristine
+      second copy of COMMON's.

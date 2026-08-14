@@ -88,7 +88,8 @@ int cmd_zonescript(const disc *d, const char *only_map)
     u32 past_common = 0, past_zone = 0;
     u32 zone_same = 0, zone_diff = 0;
     u32 rot_prim_calls = 0, rot_too_short = 0, rot_no_object = 0,
-        rot_usable = 0;
+        rot_usable = 0, rot_zone_rescue = 0, rot_zone_inrange = 0,
+        rot_zone_slots = 0, rot_zone_nonneg = 0;
     u32 live_built = 0, live_calls = 0, live_steps = 0, live_moved = 0,
         live_turned = 0;
     bool verbose = (only_map != NULL);
@@ -278,6 +279,57 @@ int cmd_zonescript(const disc *d, const char *only_map)
                                                 break;
                                             }
                                         }
+
+                                        /*
+                                         * If COMMON's copy has nothing, ask the
+                                         * ZONE's copy at the same offset.
+                                         *
+                                         * 0x800285CC..0x800285F4 sets up TWO
+                                         * cursors: s1 = item + 12 into the chunk
+                                         * at gp+372, and s2 = that same offset
+                                         * rebased into the chunk at gp+376. The
+                                         * loop READS the slot from s2 and stamps
+                                         * -1 into s1. So the buffer we parse need
+                                         * not be the buffer the operand lives in.
+                                         */
+                                        if (first_obj < 0) {
+                                            u32 off = (u32)(pp - cev.data);
+                                            u32 zj;
+
+                                            bool any_in_range = false;
+
+                                            for (zj = 0; zj < zcount; zj++) {
+                                                if (off + need > zev[zj].size)
+                                                    continue;
+                                                any_in_range = true;
+                                                for (sl = 0; sl < 4; sl++) {
+                                                    s16 q = q2_rd_s16(
+                                                        zev[zj].data + off +
+                                                        12 + 2 * (s32)sl);
+                                                    rot_zone_slots++;
+                                                    if (q >= 0)
+                                                        rot_zone_nonneg++;
+                                                }
+                                            }
+                                            if (any_in_range)
+                                                rot_zone_inrange++;
+
+                                            for (zj = 0; zj < zcount &&
+                                                         first_obj < 0; zj++) {
+                                                if (off + need > zev[zj].size)
+                                                    continue;
+                                                for (sl = 0; sl < 4; sl++) {
+                                                    s16 nd = q2_rd_s16(
+                                                        zev[zj].data + off +
+                                                        12 + 2 * (s32)sl);
+                                                    if (nd >= 0) {
+                                                        first_obj = nd;
+                                                        rot_zone_rescue++;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                     break;
                                 case Q2_UF_ROTHATCH:
@@ -402,6 +454,13 @@ int cmd_zonescript(const disc *d, const char *only_map)
     printf("      no object     : %u  (every slot the call has is -1)\n",
            rot_no_object);
     printf("      usable        : %u\n", rot_usable);
+    printf("      empty in COMMON, a ZONE reaches that offset : %u\n",
+           rot_zone_inrange);
+    printf("      ...and the ZONE has a non-negative slot     : %u\n",
+           rot_zone_rescue);
+    printf("      zone slots examined %u, non-negative %u (%.1f%%)\n",
+           rot_zone_slots, rot_zone_nonneg,
+           rot_zone_slots ? 100.0 * rot_zone_nonneg / rot_zone_slots : 0.0);
     printf("    rotators built  : %u  (one per object slot each call names)\n",
            live_built);
     printf("    CALL items run  : %u\n", live_calls);
