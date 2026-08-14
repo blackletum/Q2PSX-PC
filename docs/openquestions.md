@@ -2285,7 +2285,29 @@ not think, and it does not walk.
       The original evidence for `Q2_CRE_TICKS_PER_FRAME 3` stands and is now better supported: it was
       measured on four short consecutive moves, and 93 of 97 across seven modules agree with it.
 
-- [ ] 51a. **What does the engine use to select the clip?** Matching lengths is a reconstruction, not a
+- [x] 51a. **ANSWERED, and it corrects question 51's mechanism. There is no "current clip" to select.**
+
+      `0x8006B924` reads `model->[0x34]` — which `model.h` already lists as `ofs_block_c`, the head of the
+      clip chain — copies it to a STACK LOCAL at `16(sp)`, and walks that: `pos -= clip->frames`, advance,
+      repeat while the position is past the end. It never writes back. At `0x8006B9C4` it reads
+      `model->[0x34]` fresh again. So the pointer is the chain HEAD, read anew every call, and the walk is
+      purely local.
+
+      **The engine really does treat the position as an offset from the start of one continuous timeline**,
+      exactly as `q2_model_anim_at` does. Question 51 concluded the opposite — "a move SELECTS a clip; the
+      frame indexes into it" — on the strength of a `model+0x34` that turned out to be a file offset rather
+      than mutable state, and that conclusion is withdrawn.
+
+      What the length-matching selector actually fixed, then, is not the mechanism but the POSITION. If the
+      engine walks from the head with `entity+0x100`, and `frame * Q2_CRE_TICKS_PER_FRAME` lands the
+      Soldier's death move in clip 12 while clip 11 is the death animation, then **`entity+0x100` is not
+      derived from the AI frame at all** — it is its own counter, advanced by something else.
+
+- [ ] 51b. **What advances `entity+0x100`?** That is the question 51 should have asked. The selector stays as
+      it is because it demonstrably picks the right clips — 93 of 97 moves have one of exactly the matching
+      length, and the Soldier's four consecutive moves resolve to clips 1, 2, 3 and 4 — but it is a
+      reconstruction standing in for a counter that has not been found, and this file should say so rather
+      than describe it as the engine's own rule. Matching lengths is a reconstruction, not a
       read: it recovers the right answer 93 times out of 97 and the four misses are silent. Something in a
       module's code sets `model+0x34` when it installs a move, and that store has not been found.
 
