@@ -2403,7 +2403,34 @@ the status bar is fed from the one inventory that exists. The screen work, the l
 spread and the per-viewport HUD set are real; the other three participants are not, and the code says so
 where it does it rather than in a note here.
 
-- [~] 53. **Four simulated players — done in the client, still owed in `sim.c`.** `q2_sim` is now an array
+- [~] 53. **Four simulated players — the client half is done, and `sim.c` now holds four players instead of
+      one.** The scaffolding is in: `q2_sim.player` is `q2_player[Q2_SIM_MAX_PLAYERS]` with a `cur_player`
+      index, and every one of the 52 references in `sim.c`, 15 in `simcombat.c` and the rest across the tests
+      and tools goes through it. `cur_player` stays 0 and nothing sets it yet, so this is a change of shape
+      and not of behaviour — deliberately, because the way to verify a refactor of the file that owns the tick
+      is to prove it changed nothing.
+
+      **Verified byte-identical**: BASE0 in the client renders the same frame pixel for pixel before and
+      after; COMMAND still reports 22 fire calls, 22 sent; the four-player deathmatch still places four
+      players at four MultiSpawns; all 26 tests pass.
+
+      One thing found on the way and worth recording, because it nearly went in silently: `q2_save` has a
+      `player` member of its own, a single `q2_player` and not an array. A regex that turned `s->player` into
+      `s->player[0]` hit it in `save.c` and in the inspector's `save` command, where it compiled in one place
+      and not the other. The save format is untouched and the round-trip test — 156 checks over health,
+      armour, ammo, tier, keys, weapons, the held weapon, the refire gate, the view kick, the chaingun spin
+      and the weapon RNG — still passes.
+
+      What remains is the tick: `q2_sim_tick` runs the player half and the world half together, so four
+      players in one sim means splitting it and calling the world half once. The sections are already
+      separable — `q2_fx_tick`, `q2_fx_timed_tick`, `q2_fx_glint_advance` and
+      `q2_item_mega_health_tick` are world; everything from `update_view_offset` to `update_pain` is a
+      player's; `update_triggers` and `q2_sim_combat_tick` are per-player and want the world's script and
+      projectile list, which is exactly what one shared sim gives them.
+
+  *As first written:*
+
+- [ ] ~~53. **Four simulated players — done in the client, still owed in `sim.c`.**~~ `q2_sim` is now an array
       indexed by player, and players 1..3 each get their own instance: spawned at their own MultiSpawn,
       advanced every frame on their own `q2_pad_state`, with each viewport following its own player's eye and
       view angles rather than a camera parked at a spawn point. Measured on MATRIX5 with four players after

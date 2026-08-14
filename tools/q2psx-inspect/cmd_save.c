@@ -116,7 +116,7 @@ static bool fixture_open(fixture *f, const disc *d, const char *map, int zone)
         q2_sim_attach_items(&f->sim, &f->common, zone, NULL, NULL);
     }
     q2_sim_spawn(&f->sim, feet, 0);
-    f->sim.player.ground_y = feet[1];
+    f->sim.player[0].ground_y = feet[1];
 
     printf("%s zone %d: %u nodes, %u entities, %u events, %u triggers%s\n",
            map, zone, f->zone.scene.node_count, f->sim.entities.count,
@@ -616,7 +616,7 @@ int cmd_save(const disc *d, const char *map, const char *out)
             rc = q2_save_apply(&reloaded, &g.sim, NULL, id.serial, map);
             ok(rc == Q2_OK, "the save applies to the same map");
             if (rc == Q2_OK) {
-                ok_eq(g.sim.player.pos[0], captured.player.pos[0],
+                ok_eq(g.sim.player[0].pos[0], captured.player.pos[0],
                       "the player is back where they were");
                 ok_eq(g.sim.level_time, captured.level_time,
                       "the clock is back where it was");

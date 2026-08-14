@@ -81,16 +81,16 @@ static void test_gravity(void)
 
     /* Put the ground far below so the fall is unobstructed. World Y increases
      * downward on this disc, so "far below" is a large positive Y. */
-    sim.player.ground_y  = 100000;
-    sim.player.on_ground = false;
+    sim.player[0].ground_y  = 100000;
+    sim.player[0].on_ground = false;
 
-    last_y = sim.player.pos[1];
+    last_y = sim.player[0].pos[1];
     for (i = 0; i < 10; i++) {
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-        check(sim.player.pos[1] >= last_y, "falling moves the player downward");
-        last_y = sim.player.pos[1];
+        check(sim.player[0].pos[1] >= last_y, "falling moves the player downward");
+        last_y = sim.player[0].pos[1];
     }
-    check(sim.player.vel[1] > 0, "downward velocity accumulates");
+    check(sim.player[0].vel[1] > 0, "downward velocity accumulates");
 
     /*
      * Terminal velocity must actually bound the fall.
@@ -102,21 +102,21 @@ static void test_gravity(void)
      * nothing. Assert that terminal is REACHED as well as not exceeded, so the
      * test fails if the clamp is removed or if the player lands early.
      */
-    sim.player.ground_y  = INT32_MAX;
-    sim.player.on_ground = false;
+    sim.player[0].ground_y  = INT32_MAX;
+    sim.player[0].on_ground = false;
 
     for (i = 0; i < 200; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
 
-    check(sim.player.vel[1] == Q2_TERMINAL_VY,
+    check(sim.player[0].vel[1] == Q2_TERMINAL_VY,
           "a long fall reaches exactly terminal velocity and stops there");
     printf("  velocity after 200 falling ticks: %d (terminal %d)\n",
-           sim.player.vel[1], Q2_TERMINAL_VY);
+           sim.player[0].vel[1], Q2_TERMINAL_VY);
 
     /* And it must not creep past it on further ticks. */
     for (i = 0; i < 50; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check_eq_i(sim.player.vel[1], Q2_TERMINAL_VY, "terminal velocity is stable");
+    check_eq_i(sim.player[0].vel[1], Q2_TERMINAL_VY, "terminal velocity is stable");
 }
 
 /* ------------------------------------------------------------------------- */
@@ -133,16 +133,16 @@ static void test_ground_and_view(void)
     memset(&in, 0, sizeof(in));
     q2_sim_init(&sim, NULL, 50);
     q2_sim_spawn(&sim, spawn, 0);
-    sim.player.ground_y = 0;
+    sim.player[0].ground_y = 0;
 
     q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check(sim.player.on_ground, "the player lands on the ground plane");
-    check_eq_i(sim.player.pos[1], 0, "the player rests exactly on the ground");
+    check(sim.player[0].on_ground, "the player lands on the ground plane");
+    check_eq_i(sim.player[0].pos[1], 0, "the player rests exactly on the ground");
 
     /* The eye is above the feet, which with Y-down means a smaller Y. */
     q2_sim_eye(&sim, eye);
-    check(eye[1] < sim.player.pos[1], "the eye sits above the feet");
-    check_eq_i(sim.player.pos[1] - eye[1], Q2_VIEW_STAND, "standing eye height");
+    check(eye[1] < sim.player[0].pos[1], "the eye sits above the feet");
+    check_eq_i(sim.player[0].pos[1] - eye[1], Q2_VIEW_STAND, "standing eye height");
 
     /*
      * Crouching is an ENVIRONMENT flag, not a button: INCROUCH and INLOWCROUCH
@@ -160,28 +160,28 @@ static void test_ground_and_view(void)
      */
     q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
     q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check(sim.player.view_height < Q2_VIEW_STAND, "a crouch volume lowers the view");
-    check(sim.player.view_height > Q2_VIEW_CROUCH,
+    check(sim.player[0].view_height < Q2_VIEW_STAND, "a crouch volume lowers the view");
+    check(sim.player[0].view_height > Q2_VIEW_CROUCH,
           "the view eases rather than snapping");
-    check(sim.player.crouching, "and the player reports crouching");
+    check(sim.player[0].crouching, "and the player reports crouching");
 
     for (i = 0; i < 60; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check_eq_i(sim.player.view_height, Q2_VIEW_CROUCH,
+    check_eq_i(sim.player[0].view_height, Q2_VIEW_CROUCH,
                "the view settles at low-crouch height");
 
     /* The mid crouch is a different flag and a different height. */
     sim.env_flags = Q2_ENT_INCROUCH;
     for (i = 0; i < 60; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check_eq_i(sim.player.view_height, Q2_VIEW_MID,
+    check_eq_i(sim.player[0].view_height, Q2_VIEW_MID,
                "INCROUCH settles at the mid height, not the low one");
 
     sim.env_flags = 0;
     for (i = 0; i < 80; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check_eq_i(sim.player.view_height, Q2_VIEW_STAND, "and returns to standing");
-    check(!sim.player.crouching, "and stops reporting a crouch");
+    check_eq_i(sim.player[0].view_height, Q2_VIEW_STAND, "and returns to standing");
+    check(!sim.player[0].crouching, "and stops reporting a crouch");
 }
 
 /* ------------------------------------------------------------------------- */
@@ -202,21 +202,21 @@ static void test_wish_velocity(void)
     memset(&in, 0, sizeof(in));
     q2_sim_init(&sim, NULL, 50);
     q2_sim_spawn(&sim, spawn, 0);
-    sim.player.ground_y = 0;
+    sim.player[0].ground_y = 0;
 
     /* Full deflection must reach exactly the speed the executable's table names
      * — the >>7 is calibrated so Q2_INPUT_FULL lands on it and not near it. */
     in.forward = Q2_INPUT_FULL;
     for (i = 0; i < 200; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check_eq_i(sim.player.wish[2], Q2_SPEED_NORMAL,
+    check_eq_i(sim.player[0].wish[2], Q2_SPEED_NORMAL,
                "full forward deflection reaches exactly the normal max speed");
 
     /* Half deflection, half the speed. A shift, not a curve. */
     in.forward = Q2_INPUT_FULL / 2;
     for (i = 0; i < 200; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check_eq_i(sim.player.wish[2], Q2_SPEED_NORMAL / 2,
+    check_eq_i(sim.player[0].wish[2], Q2_SPEED_NORMAL / 2,
                "half deflection reaches half speed");
 
     /* Releasing decelerates at the same rate it accelerated, and reaches a hard
@@ -225,15 +225,15 @@ static void test_wish_velocity(void)
     in.forward = 0;
     for (i = 0; i < 200; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check_eq_i(sim.player.wish[2], 0, "releasing brings the wish to exactly zero");
-    check_eq_i(sim.player.vel[2], 0, "and the world velocity with it");
+    check_eq_i(sim.player[0].wish[2], 0, "releasing brings the wish to exactly zero");
+    check_eq_i(sim.player[0].vel[2], 0, "and the world velocity with it");
 
     /* The crouch flags cap the speed. */
     sim.env_flags = Q2_ENT_INLOWCROUCH;
     in.forward = Q2_INPUT_FULL;
     for (i = 0; i < 300; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check_eq_i(sim.player.wish[2], Q2_SPEED_LOWCROUCH,
+    check_eq_i(sim.player[0].wish[2], Q2_SPEED_LOWCROUCH,
                "a low crouch caps the wish at the crouch speed");
 
     /* Shallow water is the middle case, and it groups with UNDERWATER and
@@ -241,7 +241,7 @@ static void test_wish_velocity(void)
     sim.env_flags = Q2_ENT_INWATER;
     for (i = 0; i < 300; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check_eq_i(sim.player.wish[2], Q2_SPEED_WET,
+    check_eq_i(sim.player[0].wish[2], Q2_SPEED_WET,
                "shallow water caps the wish at the wet speed");
 }
 
@@ -264,44 +264,44 @@ static void test_look(void)
     memset(&in, 0, sizeof(in));
     q2_sim_init(&sim, NULL, 50);
     q2_sim_spawn(&sim, spawn, 0);
-    sim.player.ground_y = 0;
+    sim.player[0].ground_y = 0;
 
     in.yaw = Q2_INPUT_FULL;
     for (i = 0; i < 40; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check(sim.player.yaw > 0, "holding right turns right");
-    check_eq_i(sim.player.yaw_rate,
+    check(sim.player[0].yaw > 0, "holding right turns right");
+    check_eq_i(sim.player[0].yaw_rate,
                (Q2_INPUT_FULL * Q2_LOOK_SCALE_NUM) >> Q2_LOOK_SCALE_SHIFT,
                "the rate settles at three quarters of the stick");
 
     /* Glide: the rate decays over several ticks, so the view overshoots the
      * moment of release. A port that adds the stick straight to the angle has
      * no glide at all, which is the single most obvious way to feel wrong. */
-    yaw_at_release = sim.player.yaw;
+    yaw_at_release = sim.player[0].yaw;
     in.yaw = 0;
     q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check(sim.player.yaw > yaw_at_release, "the view glides on after release");
+    check(sim.player[0].yaw > yaw_at_release, "the view glides on after release");
 
     for (i = 0; i < 40; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check_eq_i(sim.player.yaw_rate, 0, "and the rate reaches exactly zero");
-    yaw_after = sim.player.yaw;
+    check_eq_i(sim.player[0].yaw_rate, 0, "and the rate reaches exactly zero");
+    yaw_after = sim.player[0].yaw;
     for (i = 0; i < 20; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check_eq_i(sim.player.yaw, yaw_after, "after which the view is still");
+    check_eq_i(sim.player[0].yaw, yaw_after, "after which the view is still");
 
     /* Pitch is clamped to a quarter circle, and hitting the clamp kills the
      * rate so the view stops dead rather than pressing against the limit. */
     in.pitch = Q2_INPUT_FULL;
     for (i = 0; i < 400; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check_eq_i(sim.player.pitch, Q2_PITCH_LIMIT, "pitch clamps at +90 degrees");
-    check_eq_i(sim.player.pitch_rate, 0, "and the clamp zeroes the pitch rate");
+    check_eq_i(sim.player[0].pitch, Q2_PITCH_LIMIT, "pitch clamps at +90 degrees");
+    check_eq_i(sim.player[0].pitch_rate, 0, "and the clamp zeroes the pitch rate");
 
     in.pitch = -Q2_INPUT_FULL;
     for (i = 0; i < 400; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check_eq_i(sim.player.pitch, -Q2_PITCH_LIMIT, "and at -90 the other way");
+    check_eq_i(sim.player[0].pitch, -Q2_PITCH_LIMIT, "and at -90 the other way");
 
     /*
      * A mouse or stick style sets the rate outright instead of easing it, and
@@ -311,20 +311,20 @@ static void test_look(void)
      * STANDARD A, which is what q2_sim_init leaves configured.
      */
     q2_sim_spawn(&sim, spawn, 0);
-    sim.player.look_scheme = Q2_LOOK_SCHEME_ANALOGUE - 1;   /* BOTH STICKS */
+    sim.player[0].look_scheme = Q2_LOOK_SCHEME_ANALOGUE - 1;   /* BOTH STICKS */
     in.pitch = 0;
     in.yaw   = Q2_INPUT_FULL;
     q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check_eq_i(sim.player.yaw_rate,
+    check_eq_i(sim.player[0].yaw_rate,
                (Q2_INPUT_FULL * Q2_LOOK_SCALE_NUM) >> Q2_LOOK_SCALE_SHIFT,
                "an analogue style reaches the full rate in one tick");
 
     /* And the digital styles do not, which is the same claim from the other
      * side and the one the port used to have backwards. */
     q2_sim_spawn(&sim, spawn, 0);
-    sim.player.look_scheme = Q2_LOOK_SCHEME_ANALOGUE;       /* STANDARD A  */
+    sim.player[0].look_scheme = Q2_LOOK_SCHEME_ANALOGUE;       /* STANDARD A  */
     q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check(sim.player.yaw_rate <
+    check(sim.player[0].yaw_rate <
               ((Q2_INPUT_FULL * Q2_LOOK_SCALE_NUM) >> Q2_LOOK_SCALE_SHIFT),
           "a digital style is still ramping after one tick");
 }
@@ -347,12 +347,12 @@ static void test_jump(void)
     memset(&in, 0, sizeof(in));
     q2_sim_init(&sim, NULL, 50);
     q2_sim_spawn(&sim, spawn, 0);
-    sim.player.ground_y = 0;
+    sim.player[0].ground_y = 0;
 
     /* Land first, so there is a ground normal to jump from. */
     for (i = 0; i < 4; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check(sim.player.on_ground, "the player is on the ground before jumping");
+    check(sim.player[0].on_ground, "the player is on the ground before jumping");
 
     in.buttons = Q2_BTN_JUMP;
     q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
@@ -365,16 +365,16 @@ static void test_jump(void)
      * a plain jump. It exists to bound stacked impulses, which is what makes the
      * rocket jump finite.
      */
-    check_eq_i(sim.player.vel[1], Q2_JUMP_IMPULSE + Q2_GRAVITY * Q2_DT_NOMINAL,
+    check_eq_i(sim.player[0].vel[1], Q2_JUMP_IMPULSE + Q2_GRAVITY * Q2_DT_NOMINAL,
                "a jump starts at the impulse plus one tick of gravity");
-    check(sim.player.vel[1] > Q2_IMPULSE_CEILING,
+    check(sim.player[0].vel[1] > Q2_IMPULSE_CEILING,
           "so a plain jump stays inside the impulse ceiling");
-    check(!sim.player.on_ground, "and the ground flag is dropped");
-    check_eq_i(sim.player.jump_hold, Q2_JUMP_HOLD, "the hold timer is armed");
+    check(!sim.player[0].on_ground, "and the ground flag is dropped");
+    check_eq_i(sim.player[0].jump_hold, Q2_JUMP_HOLD, "the hold timer is armed");
 
     /* Holding the button must not produce a second jump while rising. */
     q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check(sim.player.jump_hold != Q2_JUMP_HOLD,
+    check(sim.player[0].jump_hold != Q2_JUMP_HOLD,
           "holding the button does not re-arm the jump");
 
     /*
@@ -385,19 +385,19 @@ static void test_jump(void)
      * taken out of the way to measure a single arc.
      */
     in.buttons = 0;
-    peak = sim.player.pos[1];
+    peak = sim.player[0].pos[1];
     for (i = 0; i < 80; i++) {
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-        if (sim.player.pos[1] < peak)
-            peak = sim.player.pos[1];
+        if (sim.player[0].pos[1] < peak)
+            peak = sim.player[0].pos[1];
     }
     check(peak < 0, "the jump actually leaves the floor");
-    check(sim.player.on_ground, "and the player comes back down");
+    check(sim.player[0].on_ground, "and the player comes back down");
     printf("  peak height %d world units (%d PC units)\n", -peak,
            -peak / Q2_WORLD_SCALE);
 
     /* The hold is cancelled by the descent, not by running its 576 ticks out. */
-    check_eq_i(sim.player.jump_hold, 0,
+    check_eq_i(sim.player[0].jump_hold, 0,
                "the hold timer is cancelled once the fall starts");
 
     /* Holding the button off the ground bunny-hops rather than doing nothing. */
@@ -406,7 +406,7 @@ static void test_jump(void)
         int airborne = 0;
         for (i = 0; i < 120; i++) {
             q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-            if (!sim.player.on_ground)
+            if (!sim.player[0].on_ground)
                 airborne++;
         }
         check(airborne > 60, "a held jump button keeps the player hopping");
@@ -416,15 +416,15 @@ static void test_jump(void)
     in.buttons = 0;
     for (i = 0; i < 60; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check(sim.player.on_ground, "the player settles once the button is released");
+    check(sim.player[0].on_ground, "the player settles once the button is released");
 
     sim.env_flags = Q2_ENT_INLOWCROUCH;
     in.buttons    = Q2_BTN_JUMP;
     {
-        s32 y = sim.player.pos[1];
+        s32 y = sim.player[0].pos[1];
         for (i = 0; i < 20; i++)
             q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-        check_eq_i(sim.player.pos[1], y, "a crouching player cannot jump");
+        check_eq_i(sim.player[0].pos[1], y, "a crouching player cannot jump");
     }
 }
 
@@ -447,13 +447,13 @@ static void test_ground_projection(void)
     memset(&in, 0, sizeof(in));
     q2_sim_init(&sim, NULL, 50);
     q2_sim_spawn(&sim, spawn, 0);
-    sim.player.ground_y = 0;
+    sim.player[0].ground_y = 0;
 
     for (i = 0; i < 100; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
 
-    check(sim.player.on_ground, "the player is still standing after 100 ticks");
-    check_eq_i(sim.player.pos[1], 0, "and has not sunk");
+    check(sim.player[0].on_ground, "the player is still standing after 100 ticks");
+    check_eq_i(sim.player[0].pos[1], 0, "and has not sunk");
 
     /*
      * The steady state is ONE tick of gravity, not zero: the projection snaps the
@@ -462,7 +462,7 @@ static void test_ground_projection(void)
      * to Q2_TERMINAL_VY within a couple of seconds, so the figure to assert is
      * the fixed point rather than a bound.
      */
-    check_eq_i(sim.player.vel[1], Q2_GRAVITY * Q2_DT_NOMINAL,
+    check_eq_i(sim.player[0].vel[1], Q2_GRAVITY * Q2_DT_NOMINAL,
                "standing settles at exactly one tick of gravity, not terminal");
 }
 
@@ -513,17 +513,17 @@ static void test_liquid(void)
     /* Buoyant (contents 0x2000): eased toward -3072, i.e. upward. */
     q2_sim_init(&sim, NULL, 50);
     q2_sim_spawn(&sim, spawn, 0);
-    sim.player.ground_y = INT32_MAX;
+    sim.player[0].ground_y = INT32_MAX;
     liquid_volume(&sim, &vol, 0x2000);
 
     for (i = 0; i < 100; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
 
-    check(sim.player.ent.flags & Q2_ENT_LIQUID_FLOAT,
+    check(sim.player[0].ent.flags & Q2_ENT_LIQUID_FLOAT,
           "contents 0x2000 sets the float flag");
-    check_eq_i(sim.player.vel[1], Q2_LIQUID_FLOAT_VY,
+    check_eq_i(sim.player[0].vel[1], Q2_LIQUID_FLOAT_VY,
                "a buoyant volume settles at the float velocity");
-    check(sim.player.pos[1] < 0, "and carries the player upward");
+    check(sim.player[0].pos[1] < 0, "and carries the player upward");
 
     /*
      * The slow-sink arm (contents 0x0200). +1024 is a terminal velocity reached
@@ -534,33 +534,33 @@ static void test_liquid(void)
      */
     q2_sim_init(&sim, NULL, 50);
     q2_sim_spawn(&sim, spawn, 0);
-    sim.player.ground_y = INT32_MAX;
+    sim.player[0].ground_y = INT32_MAX;
     liquid_volume(&sim, &vol, 0x0200);
 
     for (i = 0; i < 4; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
 
-    check(sim.player.ent.flags & Q2_ENT_LIQUID_SINK,
+    check(sim.player[0].ent.flags & Q2_ENT_LIQUID_SINK,
           "contents 0x0200 sets the sink flag");
-    check_eq_i(sim.player.vel[1],
+    check_eq_i(sim.player[0].vel[1],
                4 * (Q2_GRAVITY - Q2_LIQUID_SINK_PUSH) * Q2_DT_NOMINAL,
                "from rest it gains gravity minus the push each tick");
 
     for (i = 0; i < 400; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check_eq_i(sim.player.vel[1], Q2_LIQUID_SINK_VY,
+    check_eq_i(sim.player[0].vel[1], Q2_LIQUID_SINK_VY,
                "and converges on the sink velocity from below");
 
     /* From above, the ease brings a fast fall back down to the same figure. */
     q2_sim_init(&sim, NULL, 50);
     q2_sim_spawn(&sim, spawn, 0);
-    sim.player.ground_y = INT32_MAX;
+    sim.player[0].ground_y = INT32_MAX;
     liquid_volume(&sim, &vol, 0x0200);
-    sim.player.vel[1] = 6000;
+    sim.player[0].vel[1] = 6000;
 
     for (i = 0; i < 200; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check_eq_i(sim.player.vel[1], Q2_LIQUID_SINK_VY,
+    check_eq_i(sim.player[0].vel[1], Q2_LIQUID_SINK_VY,
                "and on the same figure from above");
     check(Q2_LIQUID_SINK_VY * 8 == Q2_TERMINAL_VY,
           "a 0x0200 volume falls eight times slower than open air");
@@ -577,14 +577,14 @@ static void test_liquid(void)
      */
     q2_sim_init(&sim, NULL, 50);
     q2_sim_spawn(&sim, spawn, 0);
-    sim.player.ground_y = INT32_MAX;
+    sim.player[0].ground_y = INT32_MAX;
     sim.env_flags       = Q2_ENT_UNDERWATER;
 
     for (i = 0; i < 100; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check_eq_i(sim.player.vel[1], Q2_GROUND_STICK_VY,
+    check_eq_i(sim.player[0].vel[1], Q2_GROUND_STICK_VY,
                "a swimmer sinks at a constant rate, not an accelerating one");
-    check(sim.player.vel[1] < Q2_TERMINAL_VY / 8,
+    check(sim.player[0].vel[1] < Q2_TERMINAL_VY / 8,
           "which is nowhere near a fall — gravity really is off");
 
     /*
@@ -597,15 +597,15 @@ static void test_liquid(void)
     in.buttons = Q2_BTN_SWIM_UP;
     for (i = 0; i < 40; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check_eq_i(sim.player.vel[1],
+    check_eq_i(sim.player[0].vel[1],
                Q2_SWIM_UP_VY + Q2_GROUND_STICK_RATE * Q2_DT_NOMINAL,
                "swimming up settles at the swim-up velocity less one stick step");
 
     {
-        s32 y = sim.player.pos[1];
+        s32 y = sim.player[0].pos[1];
         for (i = 0; i < 40; i++)
             q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-        check(sim.player.pos[1] < y, "and carries the swimmer upward");
+        check(sim.player[0].pos[1] < y, "and carries the swimmer upward");
     }
 }
 
@@ -630,7 +630,7 @@ static void test_fall_damage(void)
     /* A short drop must not hurt. */
     q2_sim_init(&sim, NULL, 50);
     q2_sim_spawn(&sim, spawn, 0);
-    sim.player.ground_y = 200;
+    sim.player[0].ground_y = 200;
     health_before = sim.combat.self.health;
 
     for (i = 0; i < 40; i++)
@@ -641,23 +641,23 @@ static void test_fall_damage(void)
     /* A long one must, and must leave a view kick behind. */
     q2_sim_init(&sim, NULL, 50);
     q2_sim_spawn(&sim, spawn, 0);
-    sim.player.ground_y = 60000;
+    sim.player[0].ground_y = 60000;
     health_before = sim.combat.self.health;
 
     for (i = 0; i < 300; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check(sim.player.on_ground, "the long drop lands");
+    check(sim.player[0].on_ground, "the long drop lands");
     check(sim.combat.self.health < health_before, "and a long drop hurts");
-    check(sim.player.fall_value > 0, "and leaves a view kick");
-    check(sim.player.fall_value <= Q2_FALL_KICK_MAX,
+    check(sim.player[0].fall_value > 0, "and leaves a view kick");
+    check(sim.player[0].fall_value <= Q2_FALL_KICK_MAX,
           "which is capped at forty degrees");
     printf("  fell to terminal velocity: %d damage, kick %d/4096\n",
-           health_before - sim.combat.self.health, sim.player.fall_value);
+           health_before - sim.combat.self.health, sim.player[0].fall_value);
 
     /* Water suppresses it entirely — mask 0x104 at 0x80039CF4. */
     q2_sim_init(&sim, NULL, 50);
     q2_sim_spawn(&sim, spawn, 0);
-    sim.player.ground_y = 60000;
+    sim.player[0].ground_y = 60000;
     sim.env_flags       = Q2_ENT_INWATER;
     health_before = sim.combat.self.health;
 
@@ -669,7 +669,7 @@ static void test_fall_damage(void)
     /* And so does the cheat flag. */
     q2_sim_init(&sim, NULL, 50);
     q2_sim_spawn(&sim, spawn, 0);
-    sim.player.ground_y   = 60000;
+    sim.player[0].ground_y   = 60000;
     sim.no_fall_damage    = true;
     health_before = sim.combat.self.health;
 
@@ -692,7 +692,7 @@ static void test_movement(void)
     memset(&in, 0, sizeof(in));
     q2_sim_init(&sim, NULL, 50);
     q2_sim_spawn(&sim, spawn, 0);
-    sim.player.ground_y = 0;
+    sim.player[0].ground_y = 0;
 
     /* Facing yaw 0, forward is +Z. */
     in.forward = Q2_INPUT_FULL;
@@ -705,16 +705,16 @@ static void test_movement(void)
      * ticks; anything much slower means one of the two rates is wrong, and
      * anything that never arrives means the clamped approach is not snapping.
      */
-    check_eq_i(sim.player.vel[2], Q2_SPEED_NORMAL,
+    check_eq_i(sim.player[0].vel[2], Q2_SPEED_NORMAL,
                "twenty ticks of forward reaches exactly the top speed");
-    check_eq_i(sim.player.frame_delta[2],
+    check_eq_i(sim.player[0].frame_delta[2],
                Q2_SPEED_NORMAL * Q2_DT_NOMINAL / Q2_VEL_DIV,
                "and the frame delta is that speed over the tick");
 
-    check(sim.player.pos[2] > 0, "holding forward at yaw 0 moves along +Z");
-    check_eq_i(sim.player.pos[0], 0, "and does not drift sideways");
+    check(sim.player[0].pos[2] > 0, "holding forward at yaw 0 moves along +Z");
+    check_eq_i(sim.player[0].pos[0], 0, "and does not drift sideways");
     printf("  20 ticks of forward moved %d world units (%d PC units)\n",
-           sim.player.pos[2], sim.player.pos[2] / Q2_WORLD_SCALE);
+           sim.player[0].pos[2], sim.player[0].pos[2] / Q2_WORLD_SCALE);
 
     /*
      * Top speed in real units, as a sanity check against the PC game rather than
@@ -730,27 +730,27 @@ static void test_movement(void)
     in.forward = 0;
     for (i = 0; i < 200; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check_eq_i(sim.player.vel[2], 0, "releasing brings the player to rest");
+    check_eq_i(sim.player[0].vel[2], 0, "releasing brings the player to rest");
 
     /* Strafe must run along the perpendicular, and the roll must follow it. */
     q2_sim_spawn(&sim, spawn, 0);
-    sim.player.ground_y = 0;
+    sim.player[0].ground_y = 0;
     in.side = Q2_INPUT_FULL;
     for (i = 0; i < 40; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check(sim.player.pos[0] > 0, "strafing right at yaw 0 moves along +X");
-    check(sim.player.roll < 0, "and rolls the view the other way");
-    check_eq_i(sim.player.roll, -(s32)sim.player.wish[0] / Q2_ROLL_DIV,
+    check(sim.player[0].pos[0] > 0, "strafing right at yaw 0 moves along +X");
+    check(sim.player[0].roll < 0, "and rolls the view the other way");
+    check_eq_i(sim.player[0].roll, -(s32)sim.player[0].wish[0] / Q2_ROLL_DIV,
                "by exactly the side wish over 192");
     in.side = 0;
 
     /* Turning right by a quarter circle must make forward run along +X. */
     q2_sim_spawn(&sim, spawn, Q2_ANGLE_90);
-    sim.player.ground_y = 0;
+    sim.player[0].ground_y = 0;
     in.forward = Q2_INPUT_FULL;
     for (i = 0; i < 20; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check(sim.player.pos[0] > 0, "at yaw 90 forward moves along +X");
+    check(sim.player[0].pos[0] > 0, "at yaw 90 forward moves along +X");
 }
 
 /* ------------------------------------------------------------------------- */
@@ -858,16 +858,16 @@ static void test_hull_movement(void)
     spawn[1] = q2_sim_feet_y(HULL_SY / 2);
     spawn[2] = 2000;
     q2_sim_spawn(&sim, spawn, 0);
-    check(sim.player.ent.node == 0, "and the spawn lands in the one cell");
+    check(sim.player[0].ent.node == 0, "and the spawn lands in the one cell");
 
     /* Fall to the floor. The origin can reach the +Y face, so the feet settle
      * Q2_EYE_BASE below it. */
     for (i = 0; i < 60; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check(sim.player.on_ground, "the player lands on the hull's floor");
-    check_eq_i(sim.player.pos[1], q2_sim_feet_y(HULL_SY),
+    check(sim.player[0].on_ground, "the player lands on the hull's floor");
+    check_eq_i(sim.player[0].pos[1], q2_sim_feet_y(HULL_SY),
                "and rests with the origin exactly on the floor plane");
-    check_eq_i(sim.player.vel[1], Q2_GRAVITY * Q2_DT_NOMINAL,
+    check_eq_i(sim.player[0].vel[1], Q2_GRAVITY * Q2_DT_NOMINAL,
                "with the ground projection holding vertical velocity down");
 
     /*
@@ -877,24 +877,24 @@ static void test_hull_movement(void)
      * mover bug, and one that only shows up with a hull.
      */
     {
-        s32 from = sim.player.ent.pos[0];
+        s32 from = sim.player[0].ent.pos[0];
         int arrived = -1;
 
         in.forward = 0;
         in.side    = Q2_INPUT_FULL;      /* +X at yaw 0 */
         for (i = 0; i < 400; i++) {
             q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-            if (arrived < 0 && sim.player.vel[0] == Q2_SPEED_NORMAL)
+            if (arrived < 0 && sim.player[0].vel[0] == Q2_SPEED_NORMAL)
                 arrived = i;
         }
-        check(sim.player.ent.pos[0] < HULL_SX,
+        check(sim.player[0].ent.pos[0] < HULL_SX,
               "walking into a wall stops inside the hull");
-        check(sim.player.ent.pos[0] > HULL_SX - 200,
+        check(sim.player[0].ent.pos[0] > HULL_SX - 200,
               "and gets all the way up to it");
         check(arrived >= 0 && arrived < 30,
               "reaching top speed takes the same dozen ticks it does in the open");
         printf("  walked %d units to origin x = %d of %d, top speed at tick %d\n",
-               sim.player.ent.pos[0] - from, sim.player.ent.pos[0], HULL_SX,
+               sim.player[0].ent.pos[0] - from, sim.player[0].ent.pos[0], HULL_SX,
                arrived);
     }
 
@@ -912,13 +912,13 @@ static void test_hull_movement(void)
     in.buttons = Q2_BTN_JUMP;
     q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
     in.buttons = 0;
-    check(sim.player.vel[1] < 0, "the jump is rising");
+    check(sim.player[0].vel[1] < 0, "the jump is rising");
 
-    rise = sim.player.ent.pos[1];
+    rise = sim.player[0].ent.pos[1];
     for (i = 0; i < 12; i++) {
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-        if (sim.player.ent.pos[1] < rise)
-            rise = sim.player.ent.pos[1];
+        if (sim.player[0].ent.pos[1] < rise)
+            rise = sim.player[0].ent.pos[1];
     }
     check(rise >= 0, "the jump never leaves the hull through the ceiling");
 
@@ -936,8 +936,8 @@ static void test_hull_movement(void)
     /* It must come back down and land again. */
     for (i = 0; i < 60; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check(sim.player.on_ground, "and lands again");
-    check_eq_i(sim.player.ent.pos[1], HULL_SY, "back on the floor plane");
+    check(sim.player[0].on_ground, "and lands again");
+    check_eq_i(sim.player[0].ent.pos[1], HULL_SY, "back on the floor plane");
 
     /* q2_collision borrows the chunk it was parsed from; nothing to release. */
     sim.coll_ready = false;
@@ -965,7 +965,7 @@ static void test_ease_boundary(void)
     memset(&in, 0, sizeof(in));
     q2_sim_init(&sim, NULL, 50);
     q2_sim_spawn(&sim, spawn, 0);
-    sim.player.ground_y = 0;
+    sim.player[0].ground_y = 0;
 
     /*
      * The view offset has 290 units to travel and the biggest legal step is
@@ -976,24 +976,24 @@ static void test_ease_boundary(void)
     sim.env_flags = Q2_ENT_INLOWCROUCH;
     for (i = 0; i < 10; i++) {
         q2_sim_tick(&sim, &in, Q2_DT_MAX);
-        if (sim.player.view_height < Q2_VIEW_CROUCH) {
+        if (sim.player[0].view_height < Q2_VIEW_CROUCH) {
             check(false, "the view offset never undershoots the crouch target");
             break;
         }
     }
-    check_eq_i(sim.player.view_height, Q2_VIEW_CROUCH,
+    check_eq_i(sim.player[0].view_height, Q2_VIEW_CROUCH,
                "a step past the target snaps to it");
 
     for (i = 0; i < 10; i++)
         q2_sim_tick(&sim, &in, Q2_DT_MAX);
-    check_eq_i(sim.player.view_height, Q2_VIEW_CROUCH,
+    check_eq_i(sim.player[0].view_height, Q2_VIEW_CROUCH,
                "and stays there rather than oscillating");
 
     /* The same from the other direction. */
     sim.env_flags = 0;
     for (i = 0; i < 10; i++)
         q2_sim_tick(&sim, &in, Q2_DT_MAX);
-    check_eq_i(sim.player.view_height, Q2_VIEW_STAND,
+    check_eq_i(sim.player[0].view_height, Q2_VIEW_STAND,
                "and snaps to the target coming back up");
 
     /* And the wish velocity: a full-deflection target reached with the biggest
@@ -1001,7 +1001,7 @@ static void test_ease_boundary(void)
     in.forward = Q2_INPUT_FULL;
     for (i = 0; i < 20; i++)
         q2_sim_tick(&sim, &in, Q2_DT_MAX);
-    check_eq_i(sim.player.wish[2], Q2_SPEED_NORMAL,
+    check_eq_i(sim.player[0].wish[2], Q2_SPEED_NORMAL,
                "a large step still lands exactly on the max speed");
 }
 
@@ -1027,17 +1027,17 @@ static void test_variable_dt(void)
 
     q2_sim_init(&big, NULL, 50);
     q2_sim_spawn(&big, spawn, 0);
-    big.player.ground_y = 0;
+    big.player[0].ground_y = 0;
 
     q2_sim_init(&small, NULL, 50);
     q2_sim_spawn(&small, spawn, 0);
-    small.player.ground_y = 0;
+    small.player[0].ground_y = 0;
 
     q2_sim_tick(&big, &in, 24);
     q2_sim_tick(&small, &in, 12);
     q2_sim_tick(&small, &in, 12);
 
-    check(big.player.wish[2] == small.player.wish[2],
+    check(big.player[0].wish[2] == small.player[0].wish[2],
           "the wish converges to the same target either way");
 
     /*
@@ -1050,10 +1050,10 @@ static void test_variable_dt(void)
     q2_sim_tick(&small, &in, 12);
     q2_sim_tick(&small, &in, 12);
 
-    check(big.player.yaw != small.player.yaw,
+    check(big.player[0].yaw != small.player[0].yaw,
           "but one big step and two small ones do NOT give the same view angle");
     printf("  dt=24 once: yaw %d   dt=12 twice: yaw %d\n",
-           big.player.yaw, small.player.yaw);
+           big.player[0].yaw, small.player[0].yaw);
 }
 
 /* ------------------------------------------------------------------------- */

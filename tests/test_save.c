@@ -91,24 +91,24 @@ static void build_state(q2_sim *sim, q2_inventory *inv)
     q2_sim_init(sim, NULL, 50);
     q2_sim_spawn(sim, spawn, 700);
 
-    sim->player.pitch          = -250;
-    sim->player.roll           = 33;
-    sim->player.vel[0]         = 17;
-    sim->player.vel[1]         = -900;
-    sim->player.vel[2]         = 4;
-    sim->player.wish[0]        = -120;
-    sim->player.frame_delta[1] = -7;
-    sim->player.jump_hold      = 3;
-    sim->player.view_height    = 421;
-    sim->player.on_ground      = true;
-    sim->player.ground_y       = -5678;
-    sim->player.fall_value     = 61;
-    sim->player.fall_time      = 7777;
-    sim->player.foot           = 1;
-    sim->player.look_scheme    = 6;
-    sim->player.ent.flags      = 0xDEADBEEFu;
-    sim->player.ent.node       = 42;
-    sim->player.ent.ground_normal[1] = -4096;
+    sim->player[0].pitch          = -250;
+    sim->player[0].roll           = 33;
+    sim->player[0].vel[0]         = 17;
+    sim->player[0].vel[1]         = -900;
+    sim->player[0].vel[2]         = 4;
+    sim->player[0].wish[0]        = -120;
+    sim->player[0].frame_delta[1] = -7;
+    sim->player[0].jump_hold      = 3;
+    sim->player[0].view_height    = 421;
+    sim->player[0].on_ground      = true;
+    sim->player[0].ground_y       = -5678;
+    sim->player[0].fall_value     = 61;
+    sim->player[0].fall_time      = 7777;
+    sim->player[0].foot           = 1;
+    sim->player[0].look_scheme    = 6;
+    sim->player[0].ent.flags      = 0xDEADBEEFu;
+    sim->player[0].ent.node       = 42;
+    sim->player[0].ent.ground_normal[1] = -4096;
 
     sim->level_time   = 123456;
     sim->tick_count   = 4321;
@@ -321,7 +321,7 @@ static void test_apply(void)
     q2_inventory_init(&inv);
     inv.health        = 55;
     sim.level_time    = 9000;
-    sim.player.vel[1] = 640;
+    sim.player[0].vel[1] = 640;
     sim.trigger_inside[2]        = 1;
     sim.entities.ent[1].taken[0] = true;
     sim.entities.ent[1].hidden   = true;
@@ -329,9 +329,9 @@ static void test_apply(void)
     q2_save_capture(&saved, &sim, &inv, "SLES-01534", "BASE0", 0);
 
     /* Move away, get hurt, let time pass, pick the last item up. */
-    sim.player.pos[0]            = 99999;
-    sim.player.yaw               = 3000;
-    sim.player.vel[1]            = 12345;
+    sim.player[0].pos[0]            = 99999;
+    sim.player[0].yaw               = 3000;
+    sim.player[0].vel[1]            = 12345;
     inv.health                   = 1;
     sim.level_time               = 50000;
     sim.trigger_inside[2]        = 0;
@@ -341,8 +341,8 @@ static void test_apply(void)
 
     check(q2_save_apply(&saved, &sim, &inv, "SLES-01534", "BASE0") == Q2_OK,
           "applies to the matching disc and map");
-    check_eq_i(sim.player.pos[0], 100, "position restored");
-    check_eq_i(sim.player.yaw, 512, "yaw restored");
+    check_eq_i(sim.player[0].pos[0], 100, "position restored");
+    check_eq_i(sim.player[0].yaw, 512, "yaw restored");
     check_eq_i(inv.health, 55, "health restored");
     check_eq_i(sim.combat.inv.health, 55, "the sim's own inventory restored");
     check_eq_i(sim.level_time, 9000, "the level clock rewinds with the save");
@@ -352,7 +352,7 @@ static void test_apply(void)
      * wrong: a save made mid-jump has a real velocity, and zeroing it drops the
      * player straight down out of an arc they were in the middle of.
      */
-    check_eq_i(sim.player.vel[1], 640, "velocity restored, not zeroed");
+    check_eq_i(sim.player[0].vel[1], 640, "velocity restored, not zeroed");
 
     check_eq_i(sim.trigger_inside[2], 1, "trigger residency restored");
     check(sim.entities.ent[1].taken[0], "a collected item is still collected");
@@ -405,7 +405,7 @@ static void test_apply_rejects_mismatched_map(void)
     q2_sim_spawn(&b, spawn, 0);
     attach_fake_world(&b, 2, 4);
     b.entities.ent[2].place_id = 999;
-    b.player.pos[0] = 4242;
+    b.player[0].pos[0] = 4242;
     b.level_time    = 31337;
 
     check(q2_save_apply(&saved, &b, &inv, "SLES-01534", "BASE0")
@@ -418,7 +418,7 @@ static void test_apply_rejects_mismatched_map(void)
      * rewound the clock before it noticed — leaving a half-restored session,
      * which is worse than either outcome.
      */
-    check_eq_i(b.player.pos[0], 4242, "a refused apply does not move the player");
+    check_eq_i(b.player[0].pos[0], 4242, "a refused apply does not move the player");
     check_eq_i(b.level_time, 31337, "a refused apply does not touch the clock");
     check(!b.entities.ent[0].taken[0],
           "a refused apply does not touch the entities either");

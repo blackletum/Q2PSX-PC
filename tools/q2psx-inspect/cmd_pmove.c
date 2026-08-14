@@ -167,7 +167,7 @@ static void report_jump(void)
     memset(&in, 0, sizeof(in));
     q2_sim_init(&sim, NULL, 50);
     q2_sim_spawn(&sim, spawn, 0);
-    sim.player.ground_y = 0;
+    sim.player[0].ground_y = 0;
 
     /* Settle on the floor first: the jump reads the ground the previous move
      * left behind, so a jump on tick zero is a jump in mid-air. */
@@ -183,17 +183,17 @@ static void report_jump(void)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
         in.buttons = 0;   /* a tap, not a hold */
 
-        height = -(sim.player.pos[1] - spawn[1]);   /* +Y is down */
+        height = -(sim.player[0].pos[1] - spawn[1]);   /* +Y is down */
 
         if (height > apex) { apex = height; apex_tick = i; }
-        if (leave_tick < 0 && !sim.player.on_ground) leave_tick = i;
-        if (leave_tick >= 0 && land_tick < 0 && sim.player.on_ground)
+        if (leave_tick < 0 && !sim.player[0].on_ground) leave_tick = i;
+        if (leave_tick >= 0 && land_tick < 0 && sim.player[0].on_ground)
             land_tick = i;
 
         if (i < 20 || (land_tick >= 0 && i <= land_tick))
             printf("  %4d   %6d   %5d   %s\n", i, height,
-                   (s32)(s16)sim.player.vel[1],
-                   sim.player.on_ground ? "yes" : "");
+                   (s32)(s16)sim.player[0].vel[1],
+                   sim.player[0].on_ground ? "yes" : "");
         if (land_tick >= 0 && i > land_tick)
             break;
     }
@@ -233,20 +233,20 @@ static void report_view_height(void)
     memset(&in, 0, sizeof(in));
     q2_sim_init(&sim, NULL, 50);
     q2_sim_spawn(&sim, spawn, 0);
-    sim.player.ground_y = 0;
+    sim.player[0].ground_y = 0;
 
     /* Into a low-crouch volume. */
     sim.env_flags = Q2_ENT_INLOWCROUCH;
     for (i = 0; i < 60; i++) {
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-        if (settle_low < 0 && sim.player.view_height == Q2_VIEW_CROUCH)
+        if (settle_low < 0 && sim.player[0].view_height == Q2_VIEW_CROUCH)
             settle_low = i;
     }
 
     sim.env_flags = 0;
     for (i = 0; i < 60; i++) {
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-        if (settle_stand < 0 && sim.player.view_height == Q2_VIEW_STAND)
+        if (settle_stand < 0 && sim.player[0].view_height == Q2_VIEW_STAND)
             settle_stand = i;
     }
 
@@ -290,27 +290,27 @@ static void report_fall(void)
 
         spawn[1] = -heights[h];        /* +Y is down, so start above the floor */
         q2_sim_spawn(&sim, spawn, 0);
-        sim.player.ground_y = 0;
+        sim.player[0].ground_y = 0;
 
         before = sim.combat.inv.health;
 
         for (i = 0; i < 400; i++) {
-            s32 vy = (s32)(s16)sim.player.vel[1];
+            s32 vy = (s32)(s16)sim.player[0].vel[1];
             q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-            if (sim.player.on_ground) {
+            if (sim.player[0].on_ground) {
                 if (!impact)
                     impact = vy;
                 /* The damage arrives on the tick AFTER the landing, because it
                  * is the ground projection that removes the velocity. One more
                  * tick is all it needs. */
-                if (sim.player.fall_value || i > 2) {
+                if (sim.player[0].fall_value || i > 2) {
                     q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
                     break;
                 }
             }
         }
 
-        kick = sim.player.fall_value;
+        kick = sim.player[0].fall_value;
         {
             s32 dv = impact >> Q2_FALL_SHIFT;
             sev = (dv * dv) / Q2_FALL_DIV;
@@ -515,10 +515,10 @@ static void report_walk(const disc *d, const char *map, int zone_index)
     for (i = 0; i < 60; i++)          /* land */
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
 
-    ground_y = sim.player.pos[1];
+    ground_y = sim.player[0].pos[1];
     printf("  landed at y=%d, view height %d, %s\n",
-           ground_y, sim.player.view_height,
-           sim.player.on_ground ? "on the ground" : "STILL FALLING");
+           ground_y, sim.player[0].view_height,
+           sim.player[0].on_ground ? "on the ground" : "STILL FALLING");
 
     printf("\n  tick  height  view  pitch   yaw  roll   speed  sounds\n");
 
@@ -535,7 +535,7 @@ static void report_walk(const disc *d, const char *map, int zone_index)
 
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
 
-        height = ground_y - sim.player.pos[1];
+        height = ground_y - sim.player[0].pos[1];
         if (height > apex) apex = height;
 
         q2_sim_view_angles(&sim, view);
@@ -559,16 +559,16 @@ static void report_walk(const disc *d, const char *map, int zone_index)
 
         if (i % 5 == 0 || snd[0] || i == 30 || (i > 30 && i < 40))
             printf("  %4d  %6d  %4d  %5d %5d %5d  %6d  %s\n",
-                   i, height, (s32)sim.player.view_height,
+                   i, height, (s32)sim.player[0].view_height,
                    view[0], view[1], view[2],
-                   (s32)(s16)sim.player.vel[0] + (s32)(s16)sim.player.vel[2],
+                   (s32)(s16)sim.player[0].vel[0] + (s32)(s16)sim.player[0].vel[2],
                    snd);
     }
 
     printf("\n  jumped on tick %d, apex %d world units\n", jumped, apex);
     printf("  footstep sounds emitted : %u\n", steps);
     printf("  aim pitch/yaw/roll      : %d %d %d\n",
-           sim.player.pitch, sim.player.yaw, sim.player.roll);
+           sim.player[0].pitch, sim.player[0].yaw, sim.player[0].roll);
     {
         s32 view[3];
         q2_sim_view_angles(&sim, view);
@@ -591,7 +591,7 @@ static void report_walk(const disc *d, const char *map, int zone_index)
         for (i = 0; i < 40; i++)
             q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
         shot[0].what = "standing";
-        shot[0].dy   = Q2_VIEW_STAND - sim.player.view_height;
+        shot[0].dy   = Q2_VIEW_STAND - sim.player[0].view_height;
         shot[0].roll = 0;
 
         /* Crouched, driven by the same flag a volume asserts. */
@@ -599,7 +599,7 @@ static void report_walk(const disc *d, const char *map, int zone_index)
         for (i = 0; i < 40; i++)
             q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
         shot[1].what = "low crouch";
-        shot[1].dy   = Q2_VIEW_STAND - sim.player.view_height;
+        shot[1].dy   = Q2_VIEW_STAND - sim.player[0].view_height;
         shot[1].roll = 0;
         sim.env_flags = 0;
         for (i = 0; i < 40; i++)
@@ -613,7 +613,7 @@ static void report_walk(const disc *d, const char *map, int zone_index)
                 q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
             q2_sim_view_angles(&sim, view);
             shot[2].what = "strafing";
-            shot[2].dy   = Q2_VIEW_STAND - sim.player.view_height;
+            shot[2].dy   = Q2_VIEW_STAND - sim.player[0].view_height;
             shot[2].roll = view[2];
             in.side = 0;
             for (i = 0; i < 40; i++)
@@ -622,7 +622,7 @@ static void report_walk(const disc *d, const char *map, int zone_index)
 
         /* And the apex of a standing jump, measured rather than assumed. */
         {
-            s32 base = sim.player.pos[1];
+            s32 base = sim.player[0].pos[1];
             s32 best = 0;
 
             in.buttons = Q2_BTN_JUMP;
@@ -630,9 +630,9 @@ static void report_walk(const disc *d, const char *map, int zone_index)
                 s32 h;
                 q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
                 in.buttons = 0;
-                h = base - sim.player.pos[1];
+                h = base - sim.player[0].pos[1];
                 if (h > best) best = h;
-                if (i > 2 && sim.player.on_ground) break;
+                if (i > 2 && sim.player[0].on_ground) break;
             }
             shot[3].what = "jump apex";
             shot[3].dy   = -best;      /* the eye rises, and +Y is down */
@@ -669,7 +669,7 @@ static void report_walk(const disc *d, const char *map, int zone_index)
             in.attack = false;
 
             printf("    %-13s %4d ", q2_weapon_tables_builtin()->name[w],
-                   sim.player.pitch);
+                   sim.player[0].pitch);
             for (k = 0; k < 5; k++) {
                 q2_sim_view_angles(&sim, view);
                 printf(" %5d", view[0]);
@@ -724,7 +724,7 @@ static void report_walk(const disc *d, const char *map, int zone_index)
             for (i = 0; i < 60; i++)
                 q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
 
-            env = sim.player.ent.flags;
+            env = sim.player[0].ent.flags;
             printf("    %3u  %-24s %4d  %5d\n", v,
                    (env & Q2_ENV_INLOWCROUCH) ? "INLOWCROUCH" :
                    (env & Q2_ENV_INCROUCH)    ? "INCROUCH"    :
@@ -732,7 +732,7 @@ static void report_walk(const disc *d, const char *map, int zone_index)
                    (env & Q2_ENV_INWATER)     ? "INWATER"     :
                    (env & Q2_ENT_JUMP_LATCH)  ? "DONTJUMP"    :
                                                 "(centre outside the hull)",
-                   (s32)sim.player.view_height,
+                   (s32)sim.player[0].view_height,
                    (env & Q2_ENV_INLOWCROUCH) ? Q2_SPEED_LOWCROUCH :
                    (env & (Q2_ENV_INWATER | Q2_ENV_UNDERWATER | Q2_ENV_INCROUCH))
                        ? Q2_SPEED_WET : Q2_SPEED_NORMAL);

@@ -321,7 +321,7 @@ q2_result q2_save_capture(q2_save *out, const q2_sim *sim,
     out->timestamp = (u32)time(NULL);
 
     /* --- the player, whole ---------------------------------------------- */
-    out->player = sim->player;
+    out->player = sim->player[0];
 
     /* --- the clock and the rules ----------------------------------------- */
     out->level_time          = sim->level_time;
@@ -491,7 +491,7 @@ q2_result q2_save_apply(const q2_save *s, q2_sim *sim, q2_inventory *inv,
     }
 
     /* --- the player ------------------------------------------------------- */
-    sim->player = s->player;
+    sim->player[0] = s->player;
 
     /* --- the clock and the rules ------------------------------------------ */
     sim->level_time          = s->level_time;
@@ -622,7 +622,7 @@ q2_result q2_save_apply(const q2_save *s, q2_sim *sim, q2_inventory *inv,
         sim->ent_world.level_time = sim->level_time;
         sim->ent_world.cheats     = sim->cheats;
         sim->ent_world.deathmatch = sim->multiplayer;
-        q2_entity_world_move_player(&sim->ent_world, 0, sim->player.pos);
+        q2_entity_world_move_player(&sim->ent_world, 0, sim->player[0].pos);
     }
 
     /*

@@ -1363,7 +1363,7 @@ static bool client_load_zone(client *c, const char *map, int index)
         c->sim[0].event_rt.on_call_user = c;
 
         q2_sim_spawn(&c->sim[0], feet, c->cam.yaw);
-        c->sim[0].player.ground_y = feet[1];
+        c->sim[0].player[0].ground_y = feet[1];
 
         /*
          * The other players. Each gets its own sim, standing at its own
@@ -1397,7 +1397,7 @@ static bool client_load_zone(client *c, const char *map, int index)
                 pfeet[2] = c->mp_view_pos[pi][2];
 
                 q2_sim_spawn(&c->sim[pi], pfeet, c->mp_view_yaw[pi]);
-                c->sim[pi].player.ground_y = pfeet[1];
+                c->sim[pi].player[0].ground_y = pfeet[1];
                 c->sim_ready[pi] = true;
             }
         }
@@ -1645,7 +1645,7 @@ static void client_input_simulated(client *c, float dt)
     pad.buttons = client_pad_mask(c);
 
     q2_pad_config_default(&cfg);
-    cfg.style = c->sim[0].player.look_scheme;
+    cfg.style = c->sim[0].player[0].look_scheme;
 
     q2_pad_read(&pad, &cfg, &in);
 
@@ -1721,10 +1721,10 @@ static void client_input_simulated(client *c, float dt)
              * and not a combat fault. A test of whether the player can hurt a
              * creature has to be able to see one.
              */
-            c->sim[0].player.pos[0] = best->pos[0] +
+            c->sim[0].player[0].pos[0] = best->pos[0] +
                 ((q2_sin12(best->angles[2]) * 700) >> Q2_FRAC_12);
-            c->sim[0].player.pos[1] = best->pos[1];
-            c->sim[0].player.pos[2] = best->pos[2] +
+            c->sim[0].player[0].pos[1] = best->pos[1];
+            c->sim[0].player[0].pos[2] = best->pos[2] +
                 ((q2_cos12(best->angles[2]) * 700) >> Q2_FRAC_12);
             q2_sim_eye(&c->sim[0], eye0);
 
@@ -1735,8 +1735,8 @@ static void client_input_simulated(client *c, float dt)
             horiz = sqrt((double)to[0] * to[0] + (double)to[2] * to[2]);
             p = atan2((double)to[1], horiz > 1.0 ? horiz : 1.0);
 
-            c->sim[0].player.yaw   = (s16)q2_vectoyaw(to);
-            c->sim[0].player.pitch = (s16)(s32)(p * (double)Q2_ANGLE_360 /
+            c->sim[0].player[0].yaw   = (s16)q2_vectoyaw(to);
+            c->sim[0].player[0].pitch = (s16)(s32)(p * (double)Q2_ANGLE_360 /
                                              (2.0 * 3.14159265358979323846));
         }
     }
@@ -1792,7 +1792,7 @@ static void client_input_simulated(client *c, float dt)
                     client_demo_pad((long)c->frame_index + (long)pi * 37);
 
                 q2_pad_config_default(&pcfg);
-                pcfg.style = c->sim[pi].player.look_scheme;
+                pcfg.style = c->sim[pi].player[0].look_scheme;
                 q2_pad_read(&c->mp_pad[pi], &pcfg, &pin);
             }
 
@@ -1942,7 +1942,7 @@ static void client_input_simulated(client *c, float dt)
      * looks over.
      */
     if (c->creatures_ready && (c->frame_index % 10) == 0)
-        q2_trail_add(eye, (s16)c->sim[0].player.yaw);
+        q2_trail_add(eye, (s16)c->sim[0].player[0].yaw);
 
     /* The multiplayer session's own frame, on the same clock. */
     client_mp_tick(c, dt);
@@ -2553,8 +2553,8 @@ static bool client_apply_save(client *c, const q2_save *s)
     c->cam.pos[0] = eye[0];
     c->cam.pos[1] = eye[1];
     c->cam.pos[2] = eye[2];
-    c->cam.yaw    = c->sim[0].player.yaw;
-    c->cam.pitch  = c->sim[0].player.pitch;
+    c->cam.yaw    = c->sim[0].player[0].yaw;
+    c->cam.pitch  = c->sim[0].player[0].pitch;
 
     Q2_INFO("loaded %s zone %d at %d:%02d",
             s->map, (int)s->zone,
@@ -2897,11 +2897,11 @@ static void client_write_shot(client *c, bool numbered)
                 if (pi > 0 && !c->sim_ready[pi])
                     continue;
                 Q2_INFO("  player %d at [%d %d %d] yaw %d, %d hp, moved %ld",
-                        pi, c->sim[pi].player.pos[0], c->sim[pi].player.pos[1],
-                        c->sim[pi].player.pos[2], c->sim[pi].player.yaw,
+                        pi, c->sim[pi].player[0].pos[0], c->sim[pi].player[0].pos[1],
+                        c->sim[pi].player[0].pos[2], c->sim[pi].player[0].yaw,
                         c->sim[pi].combat.inv.health,
-                        labs(c->sim[pi].player.pos[0] - c->mp_view_pos[pi][0]) +
-                        labs(c->sim[pi].player.pos[2] - c->mp_view_pos[pi][2]));
+                        labs(c->sim[pi].player[0].pos[0] - c->mp_view_pos[pi][0]) +
+                        labs(c->sim[pi].player[0].pos[2] - c->mp_view_pos[pi][2]));
             }
         }
 
@@ -3104,8 +3104,8 @@ static void client_draw_view(void *user, q2_screen *s, int p,
         c->cam.pos[0] = eye[0];
         c->cam.pos[1] = eye[1];
         c->cam.pos[2] = eye[2];
-        c->cam.yaw    = c->sim[p].player.yaw;
-        c->cam.pitch  = c->sim[p].player.pitch;
+        c->cam.yaw    = c->sim[p].player[0].yaw;
+        c->cam.pitch  = c->sim[p].player[0].pitch;
     }
 
     /* The viewport's far distance is also the subdivision threshold: the same
@@ -3354,15 +3354,15 @@ static void client_draw_view(void *user, q2_screen *s, int p,
         proto.tpage         = &c->render.tpage;
         proto.clut4_count_a = c->clut4_count_a;
 
-        aim[0]  = (s16)c->sim[0].player.pitch;
-        aim[1]  = (s16)c->sim[0].player.yaw;
-        aim[2]  = (s16)c->sim[0].player.roll;
+        aim[0]  = (s16)c->sim[0].player[0].pitch;
+        aim[1]  = (s16)c->sim[0].player[0].yaw;
+        aim[2]  = (s16)c->sim[0].player[0].roll;
         kick[0] = c->sim[0].combat.kick[0];
         kick[1] = c->sim[0].combat.kick[1];
         kick[2] = c->sim[0].combat.kick[2];
 
         q2_vw_build_ot(&c->vw, &proto,
-                       c->sim[0].player.pos, c->sim[0].player.view_height,
+                       c->sim[0].player[0].pos, c->sim[0].player[0].view_height,
                        aim, kick, &c->cam, ot, gte, &mstats);
     }
 
@@ -3417,7 +3417,7 @@ static void client_frame(client *c)
      */
     {
         bool submerged =
-            (c->sim[0].player.ent.flags & Q2_ENT_UNDERWATER) != 0;
+            (c->sim[0].player[0].ent.flags & Q2_ENT_UNDERWATER) != 0;
         int p;
 
         for (p = 0; p < c->screen.view_count; p++)

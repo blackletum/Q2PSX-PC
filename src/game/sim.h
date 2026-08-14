@@ -149,6 +149,10 @@ typedef struct q2_input {
 /* ------------------------------------------------------------------------- */
 /* Player state                                                               */
 /* ------------------------------------------------------------------------- */
+/* Four pads, four viewports, four players — the same bound multiplayer.h uses
+ * and the same one the engine's own `killer < 4 && victim < 4` guard enforces. */
+#define Q2_SIM_MAX_PLAYERS 4
+
 typedef struct q2_player {
     s32  pos[3];        /* world units                                        */
     s32  vel[3];        /* world units per dt, pre-divide by Q2_VEL_DIV       */
@@ -316,7 +320,20 @@ typedef struct q2_sim_combat {
 /* ------------------------------------------------------------------------- */
 typedef struct q2_sim {
     const q2_world_zone *zone;
-    q2_player            player;
+    /*
+     * The players. One sim, one WORLD — its entities, its script, its items,
+     * its effects — and up to four players inside it, which is what makes a
+     * shared world possible at all: four separate sims each spawn their own
+     * copy of the map's items and run their own script, so nothing they do can
+     * be seen by anyone else.
+     *
+     * `cur_player` is which one the player half of a tick is running. It is set
+     * by `q2_sim_advance_player` and left alone otherwise, so every existing
+     * caller sees player 0 and behaves exactly as before.
+     */
+    q2_player            player[Q2_SIM_MAX_PLAYERS];
+    int                  cur_player;
+    int                  player_count;
     q2_sim_combat        combat;
 
     /* The level clock the weapon gates and the damage throttles use, in dt

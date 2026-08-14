@@ -261,27 +261,27 @@ static void test_view_kicks(void)
     check_eq_i(view[0], 0, "and the pitch with it");
 
     /* A firing kick at full strength: deadline exactly one period out. */
-    sim.player.kick[0]  = 100;
-    sim.player.kick[2]  = -40;
-    sim.player.kick_time = sim.level_time + Q2_VIEW_KICK_FIRE;
+    sim.player[0].kick[0]  = 100;
+    sim.player[0].kick[2]  = -40;
+    sim.player[0].kick_time = sim.level_time + Q2_VIEW_KICK_FIRE;
     q2_sim_view_angles(&sim, view);
     check_eq_i(view[0], 100, "a fresh firing kick lands at full amplitude");
     check_eq_i(view[2], -40, "on the roll as well");
 
     /* Half way through, half the kick. */
-    sim.player.kick_time = sim.level_time + Q2_VIEW_KICK_FIRE / 2;
+    sim.player[0].kick_time = sim.level_time + Q2_VIEW_KICK_FIRE / 2;
     q2_sim_view_angles(&sim, view);
     check_eq_i(view[0], 50, "half the time left is half the kick");
 
     /* Expired. */
-    sim.player.kick_time = sim.level_time - 1;
+    sim.player[0].kick_time = sim.level_time - 1;
     q2_sim_view_angles(&sim, view);
     check_eq_i(view[0], 0, "and a deadline in the past contributes nothing");
 
     /* The landing kick is the same shape over 90 ticks and pitch only. */
-    memset(sim.player.kick, 0, sizeof(sim.player.kick));
-    sim.player.fall_value = 200;
-    sim.player.fall_time  = sim.level_time + Q2_VIEW_KICK_FALL;
+    memset(sim.player[0].kick, 0, sizeof(sim.player[0].kick));
+    sim.player[0].fall_value = 200;
+    sim.player[0].fall_time  = sim.level_time + Q2_VIEW_KICK_FALL;
     q2_sim_view_angles(&sim, view);
     check_eq_i(view[0], 200, "a fresh landing kick lands at full amplitude");
     check_eq_i(view[2], 0, "and does not touch the roll");
@@ -293,9 +293,9 @@ static void test_view_kicks(void)
      * one field doing two jobs — and clamping it would be the port inventing a
      * fix.
      */
-    sim.player.fall_value  = 0;
-    sim.player.hurt_kick[0] = 100;
-    sim.player.pain_time    = sim.level_time + 210;
+    sim.player[0].fall_value  = 0;
+    sim.player[0].hurt_kick[0] = 100;
+    sim.player[0].pain_time    = sim.level_time + 210;
     q2_sim_view_angles(&sim, view);
     check_eq_i(view[0], (100 * ((210 << 12) / 150)) >> 12,
                "a fresh hurt kick overshoots, because 210 > 150");
@@ -320,38 +320,38 @@ static void test_recentre(void)
     memset(&in, 0, sizeof(in));
     q2_sim_init(&sim, NULL, 50);
     q2_sim_spawn(&sim, spawn, 0);
-    sim.player.ground_y = 0;
+    sim.player[0].ground_y = 0;
 
     /* Look down for a while. */
     in.pitch = Q2_PAD_FULL;
     for (i = 0; i < 60; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    pitched = sim.player.pitch;
+    pitched = sim.player[0].pitch;
     check(pitched > 200, "looking down moves the pitch well off level");
 
     /* Let go: it stays where it is. */
     in.pitch = 0;
     for (i = 0; i < 60; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check(sim.player.pitch > 200,
+    check(sim.player[0].pitch > 200,
           "and releasing leaves it there — there is no automatic levelling");
 
     /* One tick of the chord does nothing, because the shift register cancels
      * an arm on the first tick of any press. */
     in.buttons = Q2_BTN_LOOK_UP | Q2_BTN_LOOK_DOWN;
     q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check(!sim.player.recentring, "one tick of the chord does not arm it");
+    check(!sim.player[0].recentring, "one tick of the chord does not arm it");
 
     /* The second tick does. */
     q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check(sim.player.recentring, "the second tick arms it");
+    check(sim.player[0].recentring, "the second tick arms it");
 
     /* And then it walks all the way to level and disarms itself. */
     in.buttons = 0;
     for (i = 0; i < 200; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check_eq_i(sim.player.pitch, 0, "and it reaches exactly level");
-    check(!sim.player.recentring, "then disarms");
+    check_eq_i(sim.player[0].pitch, 0, "and it reaches exactly level");
+    check(!sim.player[0].recentring, "then disarms");
 
     q2_sim_free(&sim);
 }
@@ -373,28 +373,28 @@ static void test_fly(void)
 
     q2_sim_init(&sim, NULL, 50);
     q2_sim_spawn(&sim, spawn, 0);
-    sim.player.ground_y = 100000;      /* nothing to land on */
+    sim.player[0].ground_y = 100000;      /* nothing to land on */
     for (i = 0; i < 30; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    fell = sim.player.pos[1] - spawn[1];
+    fell = sim.player[0].pos[1] - spawn[1];
     check(fell > 0, "with the flag clear the player falls");
     q2_sim_free(&sim);
 
     q2_sim_init(&sim, NULL, 50);
     q2_sim_spawn(&sim, spawn, 0);
-    sim.player.ground_y        = 100000;
+    sim.player[0].ground_y        = 100000;
     sim.full_basis_movement    = true;
     for (i = 0; i < 30; i++)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check_eq_i(sim.player.pos[1] - spawn[1], 0,
+    check_eq_i(sim.player[0].pos[1] - spawn[1], 0,
                "with it set there is no gravity at all");
-    check(sim.player.ent2_flags & Q2_ENT2_FLY,
+    check(sim.player[0].ent2_flags & Q2_ENT2_FLY,
           "and the frame mirrors the setting into the flag every tick");
 
     /* And the jump is off, because a weightless entity has nothing to leave. */
     in.buttons = Q2_BTN_JUMP;
     q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
-    check_eq_i(sim.player.jump_hold, 0, "the jump is skipped while flying");
+    check_eq_i(sim.player[0].jump_hold, 0, "the jump is skipped while flying");
 
     q2_sim_free(&sim);
 }

@@ -18,7 +18,7 @@ void q2_sim_init(q2_sim *sim, const q2_world_zone *zone, int tick_rate_hz)
     memset(sim, 0, sizeof(*sim));
     sim->zone         = zone;
     sim->current_node = -1;
-    sim->player.ent.node = -1;
+    sim->player[sim->cur_player].ent.node = -1;
 
     /*
      * SecondaryCol is the hull entities move in — read out of the zone loader,
@@ -51,7 +51,7 @@ void q2_sim_init(q2_sim *sim, const q2_world_zone *zone, int tick_rate_hz)
         sim->dt_per_field = Q2_DT_PER_FIELD;
 
     sim->gravity            = Q2_GRAVITY;
-    sim->player.view_height = Q2_VIEW_STAND;
+    sim->player[sim->cur_player].view_height = Q2_VIEW_STAND;
 
     /*
      * STANDARD A, which is what 0x8001BDA8 writes for every player. It matters
@@ -60,7 +60,7 @@ void q2_sim_init(q2_sim *sim, const q2_world_zone *zone, int tick_rate_hz)
      * or set — so a caller that never configures a pad would otherwise get the
      * mouse's instant turn on a keyboard.
      */
-    sim->player.look_scheme = Q2_PAD_STYLE_STANDARD_A;
+    sim->player[sim->cur_player].look_scheme = Q2_PAD_STYLE_STANDARD_A;
 
     q2_sim_combat_init(sim);
 }
@@ -103,7 +103,7 @@ q2_result q2_sim_attach_items(q2_sim *sim, const q2_common_file *common,
     /* One player: this sim models one. The touch sweep walks
      * `player_count`, so registering slot 0 is what makes it run. */
     q2_entity_world_add_player(&sim->ent_world, 0, &sim->combat.inv,
-                               sim->player.pos);
+                               sim->player[sim->cur_player].pos);
 
     r = q2_population_parse(&pop, common);
     if (r != Q2_OK)
@@ -280,7 +280,7 @@ static void update_triggers(q2_sim *sim)
         return;
 
     for (i = 0; i < sim->triggers.count && i < sim->trigger_capacity; i++) {
-        bool inside = q2_trigger_contains(&sim->triggers, i, sim->player.pos);
+        bool inside = q2_trigger_contains(&sim->triggers, i, sim->player[sim->cur_player].pos);
         bool was    = sim->trigger_inside[i] != 0;
 
         sim->trigger_inside[i] = inside ? 1u : 0u;
@@ -423,26 +423,26 @@ void q2_sim_spawn(q2_sim *sim, const s32 pos[3], s32 yaw)
     if (!sim || !pos)
         return;
 
-    sim->player.pos[0] = pos[0];
-    sim->player.pos[1] = pos[1];
-    sim->player.pos[2] = pos[2];
+    sim->player[sim->cur_player].pos[0] = pos[0];
+    sim->player[sim->cur_player].pos[1] = pos[1];
+    sim->player[sim->cur_player].pos[2] = pos[2];
 
-    sim->player.vel[0] = sim->player.vel[1] = sim->player.vel[2] = 0;
-    sim->player.yaw    = yaw;
-    sim->player.pitch  = 0;
-    sim->player.roll   = 0;
+    sim->player[sim->cur_player].vel[0] = sim->player[sim->cur_player].vel[1] = sim->player[sim->cur_player].vel[2] = 0;
+    sim->player[sim->cur_player].yaw    = yaw;
+    sim->player[sim->cur_player].pitch  = 0;
+    sim->player[sim->cur_player].roll   = 0;
 
-    sim->player.wish[0] = sim->player.wish[1] = sim->player.wish[2] = 0;
-    sim->player.pitch_rate = sim->player.yaw_rate = 0;
+    sim->player[sim->cur_player].wish[0] = sim->player[sim->cur_player].wish[1] = sim->player[sim->cur_player].wish[2] = 0;
+    sim->player[sim->cur_player].pitch_rate = sim->player[sim->cur_player].yaw_rate = 0;
 
-    sim->player.impulse[0] = sim->player.impulse[1] = sim->player.impulse[2] = 0;
-    sim->player.impulse_armed = false;
-    sim->player.jump_hold     = 0;
+    sim->player[sim->cur_player].impulse[0] = sim->player[sim->cur_player].impulse[1] = sim->player[sim->cur_player].impulse[2] = 0;
+    sim->player[sim->cur_player].impulse_armed = false;
+    sim->player[sim->cur_player].jump_hold     = 0;
 
-    sim->player.fall_value    = 0;
-    sim->player.fall_time     = 0;
-    sim->player.footstep_time = 0;
-    sim->player.foot          = 0;
+    sim->player[sim->cur_player].fall_value    = 0;
+    sim->player[sim->cur_player].fall_time     = 0;
+    sim->player[sim->cur_player].footstep_time = 0;
+    sim->player[sim->cur_player].foot          = 0;
 
     /*
      * The view's own state. A spawn that kept these would put the player into
@@ -454,21 +454,21 @@ void q2_sim_spawn(q2_sim *sim, const s32 pos[3], s32 yaw)
      * would read a 100-point rise and, worse, a later drop back to 100 would
      * read as damage.
      */
-    sim->player.kick[0] = sim->player.kick[1] = sim->player.kick[2] = 0;
-    sim->player.kick_time     = 0;
-    sim->player.hurt_kick[0]  = sim->player.hurt_kick[1] = 0;
-    sim->player.pain_time     = 0;
-    sim->player.look_hist     = 0;
-    sim->player.recentring    = false;
-    sim->player.autocentre    = 0;
-    sim->player.ent2_flags    = 0;
-    sim->player.prev_health   = sim->combat.inv.health;
-    sim->player.prev_armour   = sim->combat.inv.armour;
+    sim->player[sim->cur_player].kick[0] = sim->player[sim->cur_player].kick[1] = sim->player[sim->cur_player].kick[2] = 0;
+    sim->player[sim->cur_player].kick_time     = 0;
+    sim->player[sim->cur_player].hurt_kick[0]  = sim->player[sim->cur_player].hurt_kick[1] = 0;
+    sim->player[sim->cur_player].pain_time     = 0;
+    sim->player[sim->cur_player].look_hist     = 0;
+    sim->player[sim->cur_player].recentring    = false;
+    sim->player[sim->cur_player].autocentre    = 0;
+    sim->player[sim->cur_player].ent2_flags    = 0;
+    sim->player[sim->cur_player].prev_health   = sim->combat.inv.health;
+    sim->player[sim->cur_player].prev_armour   = sim->combat.inv.armour;
 
-    sim->player.on_ground   = false;
-    sim->player.crouching   = false;
-    sim->player.view_height = Q2_VIEW_STAND;
-    sim->player.ground_y    = pos[1];
+    sim->player[sim->cur_player].on_ground   = false;
+    sim->player[sim->cur_player].crouching   = false;
+    sim->player[sim->cur_player].view_height = Q2_VIEW_STAND;
+    sim->player[sim->cur_player].ground_y    = pos[1];
 
     /*
      * The mover works in the ENTITY ORIGIN's frame, which sits Q2_EYE_BASE
@@ -476,10 +476,10 @@ void q2_sim_spawn(q2_sim *sim, const s32 pos[3], s32 yaw)
      * StartPos, i.e. the feet, so it is lifted here and lowered again after
      * every move.
      */
-    memset(&sim->player.ent, 0, sizeof(sim->player.ent));
-    sim->player.ent.pos[0] = pos[0];
-    sim->player.ent.pos[1] = q2_sim_origin_y(pos[1]);
-    sim->player.ent.pos[2] = pos[2];
+    memset(&sim->player[sim->cur_player].ent, 0, sizeof(sim->player[sim->cur_player].ent));
+    sim->player[sim->cur_player].ent.pos[0] = pos[0];
+    sim->player[sim->cur_player].ent.pos[1] = q2_sim_origin_y(pos[1]);
+    sim->player[sim->cur_player].ent.pos[2] = pos[2];
 
     /*
      * Locate the cell we spawned into. A spawn that lands outside every hull
@@ -487,10 +487,10 @@ void q2_sim_spawn(q2_sim *sim, const s32 pos[3], s32 yaw)
      * fresh entity: the first move then pays for one brute-force sweep and
      * self-corrects (0x80044C74).
      */
-    sim->player.ent.node = sim->coll_ready
-        ? q2_coll_find_node(&sim->coll, sim->player.ent.pos, -1, true)
+    sim->player[sim->cur_player].ent.node = sim->coll_ready
+        ? q2_coll_find_node(&sim->coll, sim->player[sim->cur_player].ent.pos, -1, true)
         : -1;
-    sim->current_node = sim->player.ent.node;
+    sim->current_node = sim->player[sim->cur_player].ent.node;
 
     /* Clear the entered-set so a spawn inside a volume fires it, rather than
      * being treated as "already inside". */
@@ -508,7 +508,7 @@ void q2_sim_spawn(q2_sim *sim, const s32 pos[3], s32 yaw)
  */
 static void update_contents(q2_sim *sim)
 {
-    q2_player *p = &sim->player;
+    q2_player *p = &sim->player[sim->cur_player];
     u16 contents;
 
     if (!sim->volume_count) {
@@ -571,7 +571,7 @@ static void update_contents(q2_sim *sim)
  */
 static void update_view_offset(q2_sim *sim, s32 dt)
 {
-    q2_player *p = &sim->player;
+    q2_player *p = &sim->player[sim->cur_player];
     s32 target;
     s16 v;
 
@@ -616,13 +616,13 @@ static void update_env_flags(q2_sim *sim)
         for (i = 0; i < sim->triggers.count; i++) {
             if (!sim->volume_env[i])
                 continue;
-            if (q2_trigger_contains(&sim->triggers, i, sim->player.pos))
+            if (q2_trigger_contains(&sim->triggers, i, sim->player[sim->cur_player].pos))
                 env |= sim->volume_env[i];
         }
     }
 
-    sim->player.ent.flags &= ~(u32)Q2_ENT_ENV_MASK;
-    sim->player.ent.flags |= env & Q2_ENT_ENV_MASK;
+    sim->player[sim->cur_player].ent.flags &= ~(u32)Q2_ENT_ENV_MASK;
+    sim->player[sim->cur_player].ent.flags |= env & Q2_ENT_ENV_MASK;
 }
 
 /* 0x8003A3B0 — max speed. Three cases in the original's order. */
@@ -645,7 +645,7 @@ static s32 max_speed(u32 flags)
  */
 static void water_exit_jump(q2_sim *sim, bool was_underwater, u32 *buttons)
 {
-    q2_player *p = &sim->player;
+    q2_player *p = &sim->player[sim->cur_player];
 
     if (!was_underwater)
         return;
@@ -679,7 +679,7 @@ static void water_exit_jump(q2_sim *sim, bool was_underwater, u32 *buttons)
  */
 static void update_wish(q2_sim *sim, const q2_input *in, s32 dt)
 {
-    q2_player *p     = &sim->player;
+    q2_player *p     = &sim->player[sim->cur_player];
     s32        speed = max_speed(p->ent.flags);
     bool       moving;
     s32        rate;
@@ -718,7 +718,7 @@ static void update_wish(q2_sim *sim, const q2_input *in, s32 dt)
  */
 static void update_look(q2_sim *sim, const q2_input *in, s32 dt)
 {
-    q2_player *p = &sim->player;
+    q2_player *p = &sim->player[sim->cur_player];
     s32 want_pitch = ((s32)in->pitch * Q2_LOOK_SCALE_NUM) >> Q2_LOOK_SCALE_SHIFT;
     s32 want_yaw   = ((s32)in->yaw   * Q2_LOOK_SCALE_NUM) >> Q2_LOOK_SCALE_SHIFT;
 
@@ -781,7 +781,7 @@ static void update_look(q2_sim *sim, const q2_input *in, s32 dt)
  */
 static void update_recentre(q2_sim *sim, const q2_input *in, s32 dt)
 {
-    q2_player *p = &sim->player;
+    q2_player *p = &sim->player[sim->cur_player];
     u32 look_mask = Q2_BTN_LOOK_DOWN | Q2_BTN_LOOK_UP;
     bool eased = p->look_scheme >= Q2_LOOK_SCHEME_ANALOGUE;
 
@@ -841,7 +841,7 @@ static void update_recentre(q2_sim *sim, const q2_input *in, s32 dt)
 /* 0x8003A990 — integrate the angles from the rates and clamp the pitch. */
 static void integrate_look(q2_sim *sim, s32 dt)
 {
-    q2_player *p = &sim->player;
+    q2_player *p = &sim->player[sim->cur_player];
 
     p->pitch = (s16)(p->pitch + ((s32)p->pitch_rate * dt) / Q2_LOOK_DIV);
     p->yaw   = (s16)(p->yaw   + ((s32)p->yaw_rate   * dt) / Q2_LOOK_DIV);
@@ -875,7 +875,7 @@ static void integrate_look(q2_sim *sim, s32 dt)
  */
 static bool player_jump(q2_sim *sim, bool pressed, s32 dt)
 {
-    q2_player *p = &sim->player;
+    q2_player *p = &sim->player[sim->cur_player];
     bool grounded;
 
     if (p->jump_hold != 0) {
@@ -937,7 +937,7 @@ static bool player_jump(q2_sim *sim, bool pressed, s32 dt)
  */
 static void wish_to_world(q2_sim *sim, bool moving, s32 dt)
 {
-    q2_player *p = &sim->player;
+    q2_player *p = &sim->player[sim->cur_player];
 
 
     /* 0x8006EFDC / 0x8006F11C both rotate by the basis matrix RotMatrix built
@@ -1008,7 +1008,7 @@ static void wish_to_world(q2_sim *sim, bool moving, s32 dt)
 /* 0x8003AB98 — swimming up. Only while fully submerged, and only up to -768. */
 static void swim_up(q2_sim *sim, const q2_input *in, s32 dt)
 {
-    q2_player *p = &sim->player;
+    q2_player *p = &sim->player[sim->cur_player];
 
     if (!(p->ent.flags & Q2_ENT_UNDERWATER))
         return;
@@ -1025,9 +1025,9 @@ static void swim_up(q2_sim *sim, const q2_input *in, s32 dt)
  * entity carries entity+0x10C bit 19, which nothing on the disc sets. */
 static void update_roll(q2_sim *sim)
 {
-    if (sim->player.ent2_flags & 0x80000u)
+    if (sim->player[sim->cur_player].ent2_flags & 0x80000u)
         return;
-    sim->player.roll = -(s32)sim->player.wish[0] / Q2_ROLL_DIV;
+    sim->player[sim->cur_player].roll = -(s32)sim->player[sim->cur_player].wish[0] / Q2_ROLL_DIV;
 }
 
 /*
@@ -1057,7 +1057,7 @@ static void update_roll(q2_sim *sim)
  */
 static void ground_project(q2_sim *sim)
 {
-    q2_player *p = &sim->player;
+    q2_player *p = &sim->player[sim->cur_player];
     s32 ny = p->ent.ground_normal[1];
 
     if (p->ent.max_slope_ny >= ny)
@@ -1096,7 +1096,7 @@ static void ground_project(q2_sim *sim)
  */
 static void integrate_vertical(q2_sim *sim, s32 dt, s16 out_delta[3])
 {
-    q2_player *p  = &sim->player;
+    q2_player *p  = &sim->player[sim->cur_player];
     s32        g  = sim->gravity ? sim->gravity : Q2_GRAVITY;
     s32        dv = g * dt;
     s32        dvdt;
@@ -1244,7 +1244,7 @@ static s32 scale_term(s32 n, s32 d)
 
 static void clip_velocity(q2_sim *sim)
 {
-    q2_player *p = &sim->player;
+    q2_player *p = &sim->player[sim->cur_player];
     const s16 *n = p->ent.last_normal;
     s32 d, keep;
 
@@ -1300,7 +1300,7 @@ static void clip_velocity(q2_sim *sim)
  */
 static void fall_damage(q2_sim *sim, s32 vy_before)
 {
-    q2_player *p = &sim->player;
+    q2_player *p = &sim->player[sim->cur_player];
     s32 delta, sev, dmg;
 
     if (!(p->ent.flags & Q2_ENT_ON_GROUND))
@@ -1349,7 +1349,7 @@ static void fall_damage(q2_sim *sim, s32 vy_before)
         return;
 
     q2_sim_hurt_player(sim, &sim->combat.self, (s16)dmg, Q2_MOD_FALLING,
-                       sim->player.pos);
+                       sim->player[sim->cur_player].pos);
 }
 
 /*
@@ -1360,7 +1360,7 @@ static void fall_damage(q2_sim *sim, s32 vy_before)
  */
 static void update_footsteps(q2_sim *sim)
 {
-    q2_player *p = &sim->player;
+    q2_player *p = &sim->player[sim->cur_player];
     s32 half = max_speed(p->ent.flags) / 2;
     s32 side = p->wish[0] < 0 ? -p->wish[0] : p->wish[0];
     s32 fwd  = p->wish[2] < 0 ? -p->wish[2] : p->wish[2];
@@ -1405,7 +1405,7 @@ static void update_footsteps(q2_sim *sim)
  */
 static void update_pain(q2_sim *sim)
 {
-    q2_player *p = &sim->player;
+    q2_player *p = &sim->player[sim->cur_player];
     s16 health = sim->combat.inv.health;
     s16 armour = sim->combat.inv.armour;
     bool hurt;
@@ -1538,7 +1538,7 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
     if (!sim || !input || dt <= 0)
         return;
 
-    p = &sim->player;
+    p = &sim->player[sim->cur_player];
 
     /*
      * The order below is 0x8003A1C8's, address by address, because several
@@ -1753,7 +1753,7 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
      * because the engine keeps it in the client rather than on an entity.
      */
     if (sim->entities_ready) {
-        q2_entity_world_move_player(&sim->ent_world, 0, sim->player.pos);
+        q2_entity_world_move_player(&sim->ent_world, 0, sim->player[sim->cur_player].pos);
         sim->ent_world.dt         = dt;
         sim->ent_world.deathmatch = sim->multiplayer;
         sim->ent_world.cheats     = sim->cheats;
@@ -1821,10 +1821,10 @@ void q2_sim_eye(const q2_sim *sim, s32 out_pos[3])
     if (!sim || !out_pos)
         return;
 
-    out_pos[0] = sim->player.pos[0];
+    out_pos[0] = sim->player[sim->cur_player].pos[0];
     /* World Y increases downward, so the eye sits at a smaller Y than the feet. */
-    out_pos[1] = sim->player.pos[1] - sim->player.view_height;
-    out_pos[2] = sim->player.pos[2];
+    out_pos[1] = sim->player[sim->cur_player].pos[1] - sim->player[sim->cur_player].view_height;
+    out_pos[2] = sim->player[sim->cur_player].pos[2];
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1865,7 +1865,7 @@ void q2_sim_view_angles(const q2_sim *sim, s32 out[3])
     if (!sim)
         return;
 
-    p = &sim->player;
+    p = &sim->player[sim->cur_player];
 
     out[0] = p->pitch;
     out[1] = p->yaw;

@@ -4329,9 +4329,9 @@ static int cmd_walk(disc *d, const char *map, int zone_index, int ticks)
                sim.coll_primary.node_count, pn);
     }
 
-    start_y = sim.player.pos[1];
-    walk_x  = sim.player.pos[0];
-    walk_z  = sim.player.pos[2];
+    start_y = sim.player[0].pos[1];
+    walk_x  = sim.player[0].pos[0];
+    walk_z  = sim.player[0].pos[2];
 
     memset(&in, 0, sizeof(in));
     for (i = 0; i < ticks; i++) {
@@ -4340,13 +4340,13 @@ static int cmd_walk(disc *d, const char *map, int zone_index, int ticks)
          * velocity is (maxspeed * axis) >> 7, so anything larger simply makes
          * the player faster than the executable's own speed table allows. */
         if (i == ticks / 2 + 1) {
-            walk_x = sim.player.pos[0];
-            walk_z = sim.player.pos[2];
+            walk_x = sim.player[0].pos[0];
+            walk_z = sim.player[0].pos[2];
         }
         in.forward = (i > ticks / 2) ? Q2_INPUT_FULL : 0;
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
 
-        if (sim.player.on_ground && grounded_at < 0)
+        if (sim.player[0].on_ground && grounded_at < 0)
             grounded_at = i;
         if (sim.coll_ready && sim.current_node < 0)
             escaped++;
@@ -4360,8 +4360,8 @@ static int cmd_walk(disc *d, const char *map, int zone_index, int ticks)
     }
 
     {
-        s32 dx = sim.player.pos[0] - walk_x;
-        s32 dz = sim.player.pos[2] - walk_z;
+        s32 dx = sim.player[0].pos[0] - walk_x;
+        s32 dz = sim.player[0].pos[2] - walk_z;
         walk_dist = (dx < 0 ? -dx : dx) + (dz < 0 ? -dz : dz);
     }
 
@@ -4370,7 +4370,7 @@ static int cmd_walk(disc *d, const char *map, int zone_index, int ticks)
            grounded_at >= 0 ? "yes" : "NO - fell the whole time");
     if (grounded_at >= 0)
         printf("    landed on tick %d\n", grounded_at);
-    printf("    fell        : %d world units\n", sim.player.pos[1] - start_y);
+    printf("    fell        : %d world units\n", sim.player[0].pos[1] - start_y);
 
     /*
      * How far the second half of the run actually travelled. A zero here with a

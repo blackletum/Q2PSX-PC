@@ -186,7 +186,7 @@ void q2_sim_combat_init(q2_sim *sim)
     sim->combat.inv.weapons      = q2_weapon_tables_builtin()->owned_bit[Q2_WID_BLASTER];
     sim->combat.chaingun_bullets = 1;
 
-    q2_actor_from_player(&sim->combat.self, &sim->combat.inv, sim->player.pos);
+    q2_actor_from_player(&sim->combat.self, &sim->combat.inv, sim->player[sim->cur_player].pos);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -201,8 +201,8 @@ void q2_sim_aim(const q2_sim *sim, s16 out[3])
         return;
     }
 
-    sy = q2_sin12(sim->player.yaw);   cy = q2_cos12(sim->player.yaw);
-    sp = q2_sin12(sim->player.pitch); cp = q2_cos12(sim->player.pitch);
+    sy = q2_sin12(sim->player[sim->cur_player].yaw);   cy = q2_cos12(sim->player[sim->cur_player].yaw);
+    sp = q2_sin12(sim->player[sim->cur_player].pitch); cp = q2_cos12(sim->player[sim->cur_player].pitch);
 
     /* The engine keeps this triple at player+0x3C..0x40 as a 1.3.12 unit
      * vector; every fire function then scales it for itself — >> 6 for a
@@ -298,11 +298,11 @@ q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
     q2_sim_aim(sim, aim);
 
     sim->combat.rules.level_time = sim->level_time;
-    q2_actor_from_player(&sim->combat.self, &sim->combat.inv, sim->player.pos);
+    q2_actor_from_player(&sim->combat.self, &sim->combat.inv, sim->player[sim->cur_player].pos);
 
     r = q2_weapon_fire(&sim->combat.inv, &sim->combat.rng, NULL,
                        sim->combat.weapon_id, eye,
-                       sim->player.yaw, sim->player.pitch, aim,
+                       sim->player[sim->cur_player].yaw, sim->player[sim->cur_player].pitch, aim,
                        sim->level_time, sim->combat.next_fire,
                        false, sim->combat.rules.deathmatch,
                        sim->combat.chaingun_bullets);
@@ -322,10 +322,10 @@ q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
      * read it. `q2_sim_view_angles` composes it over 30 ticks (FORMATS.md
      * §9.12.11a), so the deadline is what turns one number into recoil.
      */
-    sim->player.kick[0]  = r.kick[0];
-    sim->player.kick[1]  = r.kick[1];
-    sim->player.kick[2]  = r.kick[2];
-    sim->player.kick_time = sim->level_time + Q2_VIEW_KICK_FIRE;
+    sim->player[sim->cur_player].kick[0]  = r.kick[0];
+    sim->player[sim->cur_player].kick[1]  = r.kick[1];
+    sim->player[sim->cur_player].kick[2]  = r.kick[2];
+    sim->player[sim->cur_player].kick_time = sim->level_time + Q2_VIEW_KICK_FIRE;
 
     switch (r.kind) {
     case Q2_FK_BULLET:
@@ -383,7 +383,7 @@ q2_damage_result q2_sim_hurt_player(q2_sim *sim, q2_actor *attacker,
 
     /* Health and armour live in the inventory, everything else in the actor, so
      * the two are synchronised around the call rather than duplicated. */
-    q2_actor_from_player(&sim->combat.self, &sim->combat.inv, sim->player.pos);
+    q2_actor_from_player(&sim->combat.self, &sim->combat.inv, sim->player[sim->cur_player].pos);
     sim->combat.rules.level_time = sim->level_time;
 
     out = q2_combat_damage(attacker, &sim->combat.self, damage, mod, point,
@@ -417,15 +417,15 @@ q2_damage_result q2_sim_hurt_player(q2_sim *sim, q2_actor *attacker,
         /* Which side it came from: the hit point against the view's own right
          * vector, so a shot from the left rolls the view right. */
         if (point) {
-            s32 sy = q2_sin12(sim->player.yaw), cy = q2_cos12(sim->player.yaw);
-            s32 dx = point[0] - sim->player.pos[0];
-            s32 dz = point[2] - sim->player.pos[2];
+            s32 sy = q2_sin12(sim->player[sim->cur_player].yaw), cy = q2_cos12(sim->player[sim->cur_player].yaw);
+            s32 dx = point[0] - sim->player[sim->cur_player].pos[0];
+            s32 dz = point[2] - sim->player[sim->cur_player].pos[2];
 
             side = (cy * dx - sy * dz) >> Q2_FRAC_12;
         }
 
-        sim->player.hurt_kick[0] = (s16)(-amp);
-        sim->player.hurt_kick[1] = (s16)((side >= 0) ? -amp / 2 : amp / 2);
+        sim->player[sim->cur_player].hurt_kick[0] = (s16)(-amp);
+        sim->player[sim->cur_player].hurt_kick[1] = (s16)((side >= 0) ? -amp / 2 : amp / 2);
     }
 
     return out;
