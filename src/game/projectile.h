@@ -134,7 +134,11 @@ typedef enum q2_proj_kind {
  *
  *     a1 = 0x800AE954 packed r | g<<8 | b<<16 | a<<24   -- the SAME colour
  *     a2 = 0x800AE960 packed lo | hi<<16                -- 800 and 1600
- *     a3 = 0x800AE95C                                   -- 0, as the first call
+ *     a3 = 0x800AE95C                                   -- style 0, size_shift 0
+ *
+ * (`a3` is NOT a radius pair: 0x80075C70 takes its low half as a 3-bit style and
+ * its high half as a 2-bit size shift. `a2` carries both radii, sign-extended
+ * and squared into the light record at +20 and +24.)
  *
  * so it is a wider, outer halo of the same warm orange: inner 800, outer 1600
  * against the first light's 300 and 800.

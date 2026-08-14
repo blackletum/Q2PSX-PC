@@ -3896,10 +3896,27 @@ nothing saying so.
       varies per call, which is what a rocket whose trail dims would look like. Reading it means finding what
       fills `sp+32..35`, not reading another preset.
 
-      Two cautions recorded rather than resolved. The pair reads `2000, 1000` — **descending**, where the
-      projectile's `300, 800` ascends — so under the obvious `(inner, outer)` mapping the rocket's inner
-      exceeds its outer. Either the packing is not uniform across sites or one of these two readings is
-      wrong, and until that is settled nothing here should be wired.
+      **The packing question is settled by reading `0x80075C34` itself**, which is where it should have been
+      answered first instead of by comparing two call sites:
+
+          80075C3C  sw   a2, 8(sp)          80075C54  sw   a3, 12(sp)
+          80075CD0  lh   v0, 8(sp)          80075C70  lhu  v0, 12(sp)
+          80075CD8  mult v0, v0             80075C78  andi v0, v0, 0x7    -- 3 bits
+          80075CE4  sw   t1, 20(a0)         80075C7C  sll  v0, v0, 11
+          80075CE8  lh   v0, 10(sp)         80075C8C  lhu  v0, 14(sp)
+          80075CF0  mult v0, v0             80075C94  andi v0, v0, 0x3    -- 2 bits
+
+      **`a2` packs the two radii — both halves sign-extended and SQUARED into the light record — and `a3` is
+      not a radius pair at all**: its low half is a 3-bit `style` and its high half a 2-bit `size_shift`,
+      which is exactly the signature `q2_light_add_dynamic()` already has. Every site passing `a3 = 0` is
+      passing style 0, size 0, and the earlier note listing `a3` beside `a2` as though both were radii was
+      loose.
+
+      So the projectile's `300, 800` is inner 300 / outer 800 — what this port implemented — and the second
+      light's `800, 1600` likewise. **The rocket's `2000, 1000` really is inner > outer**, and that is now a
+      property of the data rather than an ambiguity in the reading. It is still a reason not to wire the
+      rocket blind: `q2_light_atten` computes `den = outer - inner`, so a negative denominator needs its
+      behaviour checked before a rocket lights anything.
 
       Still not done: fourteen of the fifteen sites — but they share a dumped table now, and two of the
       fourteen are identified (rocket, and `0x8004B2B4` reached the same way).
