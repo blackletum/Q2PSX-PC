@@ -4252,8 +4252,20 @@ nothing saying so.
                                        the light reads — so **breaking glass lights the room at inner 1000,
                                        outer 2000**, the widest of any site read so far. The values are
                                        immediates in the glass path rather than data, which is why the
-                                       palette sweep could not find them. Its colour is computed rather
-                                       than read from a preset, and is not yet traced.
+                                       palette sweep could not find them.
+
+                                       Its colour IS a palette entry after all — `0x800AE7A8`, `FF 00 00`,
+                                       **pure red**, with `0x800AE7AC` holding pure blue beside it. The
+                                       earlier sweep missed it only because that scan looked back 22
+                                       instructions from each `jal` and this load sits further out. So the
+                                       palette runs wider than the 0x800AE954 corner first examined, and a
+                                       red/blue pair sits near its start.
+
+                                       **And the red is why the label above is withdrawn**: pure red is not
+                                       what breaking glass looks like. Adjacency put this site in GLASS's
+                                       neighbourhood and that was worth having; it did not name it, and
+                                       calling it "GLASS's destruction light" was a step further than the
+                                       evidence went.
           0x80031048  in 0x80030E74  = EFFECT code (effect.c cites 0x80030430)
           0x80028E6C  in 0x80028BDC  = the script command area, beside SHOOTTHEN
 
