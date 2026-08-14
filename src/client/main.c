@@ -1242,6 +1242,68 @@ static void client_input_simulated(client *c, float dt)
      * this used to do by hand is the shared tail's job and happens once for every
      * button rather than once per key.
      */
+    /*
+     * `--watch` aims the PLAYER, and it has to happen BEFORE the tick: the shot
+     * is taken inside `q2_sim_advance`, so an aim written after it applies to
+     * the frame after the one that fired.
+     */
+    if (c->watch && c->creatures_ready) {
+        const q2_monster *best = NULL;
+        s64 best_d = 0;
+        s32 eye0[3];
+        u32 i;
+
+        q2_sim_eye(&c->sim, eye0);
+
+        for (i = 0; i < c->creatures.set.count; i++) {
+            const q2_monster *m = &c->creatures.set.monsters[i];
+            s64 dx, dy, dz, d;
+
+            if (!m->in_use || m->dead || !c->cre_model_ok[i])
+                continue;
+
+            dx = m->pos[0] - eye0[0];
+            dy = m->pos[1] - eye0[1];
+            dz = m->pos[2] - eye0[2];
+            d  = dx * dx + dy * dy + dz * dz;
+            if (!best || d < best_d) { best = m; best_d = d; }
+        }
+
+        if (best) {
+            s32 to[3];
+            double horiz, p;
+
+            /*
+             * Stand the PLAYER in front of it as well, 700 units along the
+             * creature's own facing and at head height — the same framing the
+             * camera uses below.
+             *
+             * Without this the demo can only shoot from wherever it wandered
+             * to, and on BASE1 that is a floor above: aiming correctly then
+             * put every bolt into the floor between them, which is geometry
+             * and not a combat fault. A test of whether the player can hurt a
+             * creature has to be able to see one.
+             */
+            c->sim.player.pos[0] = best->pos[0] +
+                ((q2_sin12(best->angles[2]) * 700) >> Q2_FRAC_12);
+            c->sim.player.pos[1] = best->pos[1];
+            c->sim.player.pos[2] = best->pos[2] +
+                ((q2_cos12(best->angles[2]) * 700) >> Q2_FRAC_12);
+            q2_sim_eye(&c->sim, eye0);
+
+            to[0] = best->pos[0] - eye0[0];
+            to[1] = best->pos[1] - eye0[1] - 150;
+            to[2] = best->pos[2] - eye0[2];
+
+            horiz = sqrt((double)to[0] * to[0] + (double)to[2] * to[2]);
+            p = atan2((double)to[1], horiz > 1.0 ? horiz : 1.0);
+
+            c->sim.player.yaw   = (s16)q2_vectoyaw(to);
+            c->sim.player.pitch = (s16)(s32)(p * (double)Q2_ANGLE_360 /
+                                             (2.0 * 3.14159265358979323846));
+        }
+    }
+
     if (in.buttons & Q2_BTN_WEAP_NEXT) q2_sim_cycle_weapon(&c->sim, +1);
     if (in.buttons & Q2_BTN_WEAP_PREV) q2_sim_cycle_weapon(&c->sim, -1);
 
@@ -1422,7 +1484,6 @@ static void client_input_simulated(client *c, float dt)
              * as 135 creature shots against the player and zero damage the
              * other way, which looked like a bug and was only ever the aim.
              */
-            c->sim.player.yaw = (s16)q2_vectoyaw(to);
             /* +Y is down, so a target below the eye needs a positive pitch. */
             c->cam.pitch = (s32)(p * (double)Q2_ANGLE_360 /
                                  (2.0 * 3.14159265358979323846));

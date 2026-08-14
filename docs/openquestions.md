@@ -1774,29 +1774,27 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
 
 ---
 
-- [ ] 49. **The player cannot damage a creature.** The reverse direction works — a
-      Soldier takes the player from 100 to below zero — and this one does not, with
-      every intermediate step measured rather than assumed:
-
-        - the player fires: **195** ticks of `attack` over 1500 frames, and
-          `q2_sim_advance` calls `q2_sim_fire` on each;
-        - bolts exist: **5 to 7 live** in `combat.projectiles` at any moment;
-        - targets are registered: **22**, the whole placed set;
-        - the actors carry a radius: `q2_actor_init` sets 286 and
-          `q2_actor_from_monster` keeps it, and `Q2_HITSCAN_RADIUS` is the same 286;
-        - the actors are synced both ways around the tick, `from_monster` before and
-          `to_monster` after;
-        - and creature health is **200 total, unchanged, 0 dead** throughout.
-
-      The aim is not the explanation, which was the first guess and is now ruled out:
-      `--watch` turns the PLAYER as well as the camera, yaw and pitch both, so the
-      demo shoots at the nearest creature rather than on a timer into a wall. Adding
-      the pitch mattered — the creature is a storey down and level shots pass 975
-      units over it — and it changed nothing.
-      What is left is the segment test itself, `q2_combat_nearest_on_segment`, and
-      whether a bolt's per-tick step is being handed to it in the frame the actors
-      are in. The counters are printed beside every capture so the next pass starts
-      from numbers, exactly as the creature-attack chain did.
+- [x] 49. **"The player cannot damage a creature" — RETRACTED the same day it was
+      written. They can; the test could not see one.**
+      The measurements in the original entry were all correct and the conclusion drawn
+      from them was not: 195 attack ticks, bolts in flight, 22 targets registered,
+      matching hit radii, actors synced both ways, and creature health unchanged. What
+      none of them measured was whether a bolt had anywhere to go.
+      Two faults in the test, and the second only showed up once the first was fixed.
+      The aim was being written AFTER `q2_sim_advance`, and the shot is taken inside
+      it, so an aim applied at the end of a frame governed the frame after the one
+      that fired — the run was firing wherever the demo happened to face. Correcting
+      that turned every bolt into a floor impact instead, which is the second fault:
+      on BASE1 the nearest creature is a storey below, so a correctly aimed shot goes
+      into the floor between them. **That is geometry, not combat.**
+      `--watch` now stands the PLAYER in front of the creature as well as the camera —
+      700 units along its own facing, at head height — and with a clear line the
+      player kills: eight creatures become seven, 200 total health becomes 180, in
+      under 250 frames.
+      The lesson is worth more than the item: every step of the chain was instrumented
+      and every number was right, and the conclusion was still wrong, because the one
+      thing not instrumented was whether the experiment was capable of a positive
+      result. A test that cannot succeed reports the same numbers as a broken feature.
 
 ## The creature modules name their own animations
 
