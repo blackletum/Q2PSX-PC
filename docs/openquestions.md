@@ -3811,10 +3811,26 @@ nothing saying so.
             turn something under SOME zone : 67
             barren under EVERY zone        : 1
 
-      The one holdout is named: **WASTE2, Events+774, barren under all four of its zones.** Everything else
-      the trigger sweep reaches now turns. That is the rotation question closed to a single site, and the
-      `cmd_zonescript.c` header that asserted the opposite has been rewritten in place rather than left to
-      mislead the next pass.
+      The one holdout is named — **WASTE2, Events+774** — and it turns out not to be a gap in the port at
+      all. Dumping its slots in every buffer:
+
+          COMMON (792 bytes) slots: (offset past the end)
+          ZONE0  (792 bytes) slots: (offset past the end)
+          ZONE1  (792 bytes) slots: (offset past the end)
+          ZONE2  (792 bytes) slots: (offset past the end)
+          ZONE3  (792 bytes) slots: (offset past the end)
+
+      WASTE2's Events chunk is 792 bytes in COMMON and in all four zones. The item starts at 772 and a
+      SIMROT's operands run to 796. **The item is truncated on the disc**: it declares a length that
+      overruns its own chunk by four bytes, so there is no buffer anywhere holding its object slots. The
+      engine reading it would read past the chunk into whatever follows.
+
+      So the rotation question closes completely: **68 of 68 reachable call sites accounted for — 67 turn,
+      and the 68th cannot, because the data for it is not on the disc.** Note this is invisible to the
+      `too short : 0` counter, which checks the item's declared length and not whether the chunk can hold it.
+
+      The `cmd_zonescript.c` header that asserted the opposite of all this has been rewritten in place rather
+      than left to mislead the next pass.
 
       **What the remaining gap looked like before that sweep, measured rather than estimated.** "54 calls name no object" is
       not the same claim as "54 rotations are missing", because a call only matters if the script runs it.

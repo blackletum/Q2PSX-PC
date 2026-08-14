@@ -478,10 +478,37 @@ int cmd_zonescript(const disc *d, const char *only_map)
                         if (any[o]) {
                             rot_any_zone++;
                         } else {
+                            u32 zq2;
+
                             rot_no_zone++;
                             printf("  %s: rotation CALL at Events+%u turns "
                                    "nothing under any of its %u zones\n",
                                    g_maps[mi], o, zcount);
+                            printf("    COMMON (%u bytes) slots:", cev.size);
+                            if (o >= 2 && o + 22 <= cev.size) {
+                                const u8 *qq = cev.data + o - 2;
+                                int sl2;
+                                for (sl2 = 0; sl2 < 4; sl2++)
+                                    printf(" %d",
+                                           (int)q2_rd_s16(qq + 12 + 2 * sl2));
+                            } else {
+                                printf(" (offset past the end)");
+                            }
+                            printf("\n");
+                            for (zq2 = 0; zq2 < zcount; zq2++) {
+                                printf("    ZONE%u (%u bytes) slots:", zq2,
+                                       zev[zq2].size);
+                                if (o >= 2 && o + 22 <= zev[zq2].size) {
+                                    const u8 *qq = zev[zq2].data + o - 2;
+                                    int sl2;
+                                    for (sl2 = 0; sl2 < 4; sl2++)
+                                        printf(" %d",
+                                               (int)q2_rd_s16(qq + 12 + 2 * sl2));
+                                } else {
+                                    printf(" (offset past the end)");
+                                }
+                                printf("\n");
+                            }
                         }
                     }
                 }
