@@ -1414,6 +1414,24 @@ static void client_input_simulated(client *c, float dt)
     /* The AI, on its own clock and looking at where the player is now. */
     client_creatures_tick(c, dt, eye);
 
+    /*
+     * DEATH. Page 41 has been transcribed since the menu was reconstructed —
+     * RESTART LEVEL, the resupply line with its own greying rule, QUIT GAME —
+     * and nothing had ever opened it, so the player's health simply ran
+     * negative and the game carried on. Measured before this: a Soldier took
+     * the player to -353 and the run continued as if nothing had happened.
+     *
+     * It is raised here rather than inside the sim because the sim has no menu
+     * and the page IS the death sequence on this console: the world stays
+     * frozen behind it, which is what `client_menu_frame` already does for
+     * every other page.
+     */
+    if (c->sim.combat.inv.health <= 0 && !c->menu.open && !c->mcard_open) {
+        Q2_INFO("player died");
+        q2_menu_open(&c->menu);
+        q2_menu_goto(&c->menu, Q2_PAGE_DEATH);
+    }
+
     c->cam.pos[0] = eye[0];
     c->cam.pos[1] = eye[1];
     c->cam.pos[2] = eye[2];
@@ -1552,11 +1570,24 @@ static void client_input(client *c, float dt)
  * scancodes. That keeps the navigation rules — wrap, skip, press-versus-release
  * — exactly as they were read out of the executable.
  */
-static u16 client_menu_pad(void)
+static u16 client_menu_pad(const client *c)
 {
-    const bool *k = SDL_GetKeyboardState(NULL);
+    const bool *k;
     u16 pad = 0;
 
+    /*
+     * A scripted run has to be able to answer a page too. Without this the
+     * death screen ends the run: the world freezes behind it, the demo's pad
+     * goes to the simulation which is no longer ticking, and every later frame
+     * is the same picture.
+     *
+     * CROSS on a slow cycle is enough — it takes the row the page opens on,
+     * which for the death page is RESTART LEVEL.
+     */
+    if (c && c->demo)
+        return ((c->frame_index % 30) < 3) ? Q2_PAD_CROSS : 0;
+
+    k = SDL_GetKeyboardState(NULL);
     if (!k)
         return 0;
 
@@ -2108,7 +2139,7 @@ static void client_card_finish(client *c)
 
 static void client_card_frame(client *c)
 {
-    u16 pad = client_menu_pad();
+    u16 pad = client_menu_pad(c);
     const q2_menu_page *page;
     q2_menu_sound snd;
 
@@ -2377,7 +2408,7 @@ static void client_menu_frame(client *c)
 {
     q2_menu_sound snd;
 
-    q2_menu_advance(&c->menu, client_menu_pad());
+    q2_menu_advance(&c->menu, client_menu_pad(c));
 
     snd = q2_menu_take_sound(&c->menu);
     if (snd != Q2_MSND_NONE)

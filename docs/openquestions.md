@@ -1796,6 +1796,27 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
       thing not instrumented was whether the experiment was capable of a positive
       result. A test that cannot succeed reports the same numbers as a broken feature.
 
+## Nothing had ever opened the death screen
+
+Page 41 has been transcribed since the menu was reconstructed — `RESTART LEVEL`,
+the resupply line with its own greying rule at `0x8001D774`, `QUIT GAME` — and no
+caller ever opened it. So the player's health simply ran negative and the game
+carried on: measured before the fix, a Soldier took the player to **-353** and the
+run continued as if nothing had happened. It is the same shape as the overlay that
+was never initialised, the creature hooks nothing ever set, and the free-fly camera
+a session booted into — a finished piece with no caller.
+
+It is raised from the client rather than the sim, because the sim has no menu and
+the page IS the death sequence here: the world freezes behind it, which is what
+every other page already does.
+
+That immediately exposed a second thing. A scripted run could not answer the page —
+`client_menu_pad` reads the keyboard — so the death screen ended every headless
+run: the world frozen, the demo's pad going to a simulation that was no longer
+ticking, every later frame identical. The demo now answers a page with CROSS on a
+slow cycle, which takes the row a page opens on, and a run dies, restarts and
+carries on.
+
 ## The creature modules name their own animations
 
 Chasing the sound table turned up a third table beside it, and it is the more
