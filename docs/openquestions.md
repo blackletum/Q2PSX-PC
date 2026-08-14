@@ -3858,7 +3858,28 @@ nothing saying so.
       projectile spawned through that function, so raising it would have been wrong, and this port is right
       by measurement rather than by caution.
 
-      Still not done: fourteen of the fifteen sites.
+      **The preset region is dumped, and it is bigger than the projectile's corner of it.** Two more sites
+      read from further in — `0x8004AD20` and `0x8004B8A0` both take `a3` from `0x800AE994` and `a2` from
+      `0x800AE990` / `0x800AE9C0`. The region `0x800AE950..0x800AE9D4`, as bytes and as u16 pairs:
+
+          800AE954  FF 64 4B    rgb(255,100, 75)      800AE98C  FF FF 00  rgb(255,255,  0)
+          800AE958  2C 01 20 03   u16   300   800     800AE990  D0 07 E8 03  u16 2000 1000
+          800AE960  20 03 40 06   u16   800  1600     800AE9A8  7F 7F 7F  rgb(127,127,127)
+          800AE968  FF FF 00    rgb(255,255,  0)      800AE9B0  2C 01 00 00  u16  300    0
+          800AE96C  20 20 20    rgb( 32, 32, 32)      800AE9BC  00 FF 00  rgb(  0,255,  0)
+          800AE970  C0 FF 40    rgb(192,255, 64)      800AE9C0  E8 03 78 05  u16 1000 1400
+          800AE980  50 00 CE FF                       800AE9D4  C8 64 64  rgb(200,100,100)
+
+      Warm orange for the projectile, yellow, white, green, a pale red — a palette of light presets with
+      radius pairs beside them, which is what every remaining site will index.
+
+      **One thing NOT to assume from this**: that `lo` is always the inner radius. The projectile's
+      `300, 800` ascends and `0x800AE990`'s `2000, 1000` descends, so the packing order is only established
+      for the site whose code was actually read. Each site's own `a2`/`a3` construction has to be read the
+      same way `0x80048228`'s was.
+
+      Still not done: fourteen of the fifteen sites — but they now share a dumped table rather than fifteen
+      separate hunts.
 
 ---
 
