@@ -681,6 +681,12 @@ u32 q2_creature_sound_names(const q2_creature *c, const u8 *image, size_t size,
         }
 
     /*
+     * A WARNING before the fallback: not every module HAS a sound-name table.
+     * The Berserk fills its sound slots from an import call's return value,
+     * with the argument packed from bytes near module+0x1A0 (0x801008A4 ..
+     * 0x801008CC) — there is no 12-byte name run to find, so whatever this
+     * returns for it is a false positive. See openquestions on the Berserk.
+     *
      * If the module's own name is not in its image, the anchor is gone but the
      * table need not be. Two of the seven -- Tankcomm and Berserk -- returned
      * zero names under the anchored scan while their sounds are demonstrably on

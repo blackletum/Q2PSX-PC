@@ -4753,6 +4753,27 @@ nothing saying so.
       in the name run itself. It wants whatever code READS the Berserk's table at runtime, which is a
       different search from any tried here.
 
+      **The fifth attempt did that, and the answer is that the Berserk has no name table to find.**
+      Disassembling its module and looking for what WRITES the sound slots:
+
+          801008A4  lbu  v0, 10(t0)      ; bytes from module+0x1A2
+          801008B0  or   a2, a2, v0      ; ...packed into a2
+          801008B8  lw   v0, 36(s2)      ; an IMPORT
+          801008C0  jalr v0
+          801008CC  sw   v0, 5976(v1)    ; the handle -> module+0x1758, the "sound" slot
+
+      The slot is filled with **an import call's return value**, and that import's argument is assembled from
+      packed BYTES near `module+0x1A0` — not from a 12-byte name. The same shape repeats for +0x175C,
+      +0x1750 and +0x1754.
+
+      So `q2_creature_sound_names()` is looking for a structure the Berserk does not have. Its heuristic
+      finds a run of name-like slots because module images are full of strings, and any start it picks is
+      arbitrary — **the table is not there**. That is why four attempts to pin its start all failed, and it
+      means the Berserk's thirteen "names" are a false positive rather than a mis-anchored table.
+
+      Whether the Tank Commander is the same shape is unchecked. Its eight names matched #60's VAG entries
+      exactly, which is evidence its table IS real, so the two creatures may simply differ.
+
       The state that ships is the plain fallback: **the Tank Commander correct and verified
       against #60's VAG names, the Berserk found but flagged.** A wrong table is worse than a missing one
       here, and the Berserk's is wrong in a way that reads as right — which is the whole reason it is
