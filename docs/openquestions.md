@@ -3386,7 +3386,21 @@ nothing saying so.
       it was right not to borrow one of the other seven. Adding it means either a variable-count spawn path
       or a stated approximation, and both are choices worth making deliberately rather than in passing.
 
-      The ramps, the size and the reason are recorded so the next attempt starts from them. The port has seven — explosion, blood, BFG,
+      The counter itself decodes cleanly, so the next attempt starts from the arithmetic rather than the
+      disassembly. `0x8006D6AC`:
+
+          if (!a0) return 0;
+          n = (s16)a0->[0x16];            ; a record count
+          if (!n) return 0;
+          p = a0->[0x28] + n * 8;         ; one past the end of an 8-byte-record table
+          total = 0;
+          do { p -= 8; total += (u8)p[3]; } while (--n);
+          return total;
+
+      A sum of the byte at `+3` of each of `n` eight-byte records, and the caller divides it by fifteen. So a
+      pickup burst's quad count is **one fifteenth of a per-record total taken off whatever `entity+0x10`
+      points at** — its record count at `+0x16` and its table at `+0x28`. Identifying that structure is the
+      one step left, and it is a data question rather than a code one. The port has seven — explosion, blood, BFG,
       gib, scripted, spark and laser end — and none of them is the pickup burst. Choosing one would invent
       an effect rather than reconstruct it, so nothing is drawn yet. `0x8005B6C0` is the original's, and
       reading its particle table is what this needs; the event carries the position and the glow colour
