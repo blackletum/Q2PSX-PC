@@ -243,6 +243,7 @@ extern const q2_cre_impl q2_cre_tankcomm;
 extern const q2_cre_impl q2_cre_gunner;
 extern const q2_cre_impl q2_cre_infantry;
 extern const q2_cre_impl q2_cre_arachner;
+extern const q2_cre_impl q2_cre_berserk;
 
 static const q2_cre_impl *const g_impls[] = {
     &q2_cre_soldier,
@@ -250,6 +251,7 @@ static const q2_cre_impl *const g_impls[] = {
     &q2_cre_gunner,
     &q2_cre_infantry,
     &q2_cre_arachner,
+    &q2_cre_berserk,
     NULL
 };
 

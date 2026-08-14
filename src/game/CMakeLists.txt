@@ -23,6 +23,7 @@ add_library(q2psx_game STATIC
     crebind.h
     cre_actions.c
     cre_arachner.c
+    cre_berserk.c
     cre_gunner.c
     cre_infantry.c
     cre_soldier.c

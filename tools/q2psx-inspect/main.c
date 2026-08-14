@@ -196,7 +196,7 @@ static void usage(void)
     puts("  disasm  <disc> <addr> [n]   disassemble n instructions (0 = to the return)");
     puts("  xrefs   <disc> <addr>       every reference to an address, code and data");
     puts("  funcs   <disc> [addr]       call targets found by sweeping the image");
-    puts("  moddisasm <disc> <map> [addr] [n]  disassemble a relocated CreAIBin module");
+    puts("  moddisasm <disc> <map> [addr] [n] [creature]  disassemble one CreAIBin module");
     puts("  levdisasm <disc> <map> [addr] [n]  disassemble a relocated LevelBin module");
     puts("  modstrings <disc> <map> [crea]  the text a relocated module carries");
     puts("  modxrefs <disc> <map> <addr> [crea]  references to an address in one");
@@ -5263,7 +5263,8 @@ int main(int argc, char **argv)
         } else {
             const char *at = (argc >= 5) ? argv[4] : NULL;
             int n = (argc >= 6) ? atoi(argv[5]) : 0;
-            rc = cmd_moddisasm(d, argv[3], at, n);
+            rc = cmd_moddisasm(d, argv[3], at, n,
+                               (argc >= 7) ? argv[6] : NULL);
         }
     } else if (strcmp(cmd, "levdisasm") == 0) {
         if (argc < 4) {

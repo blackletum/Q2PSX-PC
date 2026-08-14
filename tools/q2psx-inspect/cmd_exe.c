@@ -595,8 +595,74 @@ int cmd_find(const disc *d, const char *pattern)
  * that a LevelBin has no import table to name — it reaches the engine through
  * pointers the installer writes into its header instead.
  */
+/*
+ * Extract ONE creature module from a map's CreAIBin and relocate it on its own.
+ *
+ * `q2_ai_module_load` relocates the whole chunk as a single blob, which is
+ * right for a LevelBin and wrong for CreAIBin: that chunk is a LIST of modules,
+ * each a 12-byte name and a next-offset followed by a body, and `creatures`
+ * relocates each one separately to CRE_BASE. The two address spaces only agree
+ * on a map that carries exactly one module.
+ *
+ * That difference is a trap. A callback address printed by `creatures` fed to
+ * `moddisasm` on a multi-module map lands somewhere in the wrong creature and
+ * disassembles cleanly, because MIPS almost always does. The check that catches
+ * it — and the one that vouched for the four transcriptions already written —
+ * is whether the moves the code installs appear in that creature's own move
+ * list. `name` selects the module, so the question stops arising.
+ */
+static bool module_by_name(const q2_common_file *cf, const char *name,
+                           u32 base, q2_ai_module *out, char *got, size_t got_sz)
+{
+    const dat_chunk *bin = cf->chunk[q2_common_chunk_index("CreAIBin")];
+    const dat_chunk *rel = cf->chunk[q2_common_chunk_index("CreAIRel")];
+    u32 boff = 0, roff = 0;
+
+    memset(out, 0, sizeof(*out));
+    if (!bin || !rel || bin->size <= 4)
+        return false;
+
+    while (boff + 16 < bin->size) {
+        char nm[13];
+        u32 bnext = q2_rd_u32(bin->data + boff + 12);
+        u32 rnext = q2_rd_u32(rel->data + roff + 12);
+        size_t body = (bnext > boff ? bnext : bin->size) - boff - 16;
+
+        memcpy(nm, bin->data + boff, 12);
+        nm[12] = 0;
+
+        if (!name || strcmp(nm, name) == 0) {
+            u8 *img = (u8 *)malloc(body);
+            q2_reloc_stats st;
+
+            if (!img)
+                return false;
+            memcpy(img, bin->data + boff + 16, body);
+            if (q2_reloc_apply(img, body, rel->data + roff + 16,
+                               (rnext > roff ? rnext : rel->size) - roff - 16,
+                               base, &st) != Q2_OK) {
+                free(img);
+                return false;
+            }
+            out->image.data = img;
+            out->image.size = body;
+            out->base       = base;
+            if (got)
+                snprintf(got, got_sz, "%s", nm);
+            return true;
+        }
+
+        if (bnext <= boff || bnext >= bin->size)
+            break;
+        boff = bnext;
+        roff = rnext;
+    }
+
+    return false;
+}
+
 static int moddisasm(const disc *d, const char *map, const char *addr_s,
-                     int count, bool level)
+                     int count, bool level, const char *cre)
 {
     const char *what = level ? "LevelBin" : "CreAIBin";
     const u32 code_start = level ? Q2_LEVEL_HDR_SETTINGS + 4
@@ -619,21 +685,33 @@ static int moddisasm(const disc *d, const char *map, const char *addr_s,
         q2_buf_free(&file);
         return 1;
     }
-    if ((level ? q2_level_module_load(&mod, &cf, Q2_MOD_BASE)
-               : q2_ai_module_load(&mod, &cf, Q2_MOD_BASE)) != Q2_OK) {
-        fprintf(stderr, "%s has no relocatable %s\n", map, what);
-        q2_common_close(&cf);
-        return 1;
-    }
-    if (mod.empty) {
-        printf("%s has an empty %s\n", map, what);
-        q2_ai_module_free(&mod);
-        q2_common_close(&cf);
-        return 0;
-    }
+    if (!level && cre) {
+        char got[16];
 
-    printf("%s %s: %zu bytes relocated at 0x%08X\n", map, what, mod.image.size,
-           mod.base);
+        if (!module_by_name(&cf, cre, Q2_MOD_BASE, &mod, got, sizeof(got))) {
+            fprintf(stderr, "%s carries no creature module '%s'\n", map, cre);
+            q2_common_close(&cf);
+            return 1;
+        }
+        printf("%s CreAIBin module '%s': %zu bytes relocated at 0x%08X\n",
+               map, got, mod.image.size, mod.base);
+    } else {
+        if ((level ? q2_level_module_load(&mod, &cf, Q2_MOD_BASE)
+                   : q2_ai_module_load(&mod, &cf, Q2_MOD_BASE)) != Q2_OK) {
+            fprintf(stderr, "%s has no relocatable %s\n", map, what);
+            q2_common_close(&cf);
+            return 1;
+        }
+        if (mod.empty) {
+            printf("%s has an empty %s\n", map, what);
+            q2_ai_module_free(&mod);
+            q2_common_close(&cf);
+            return 0;
+        }
+
+        printf("%s %s: %zu bytes relocated at 0x%08X\n", map, what,
+               mod.image.size, mod.base);
+    }
     /* A level module has two exports and then an import slot the loader fills;
      * printing four would show string data and invite it to be read as a
      * pointer. A CreAI module really does have four. */
@@ -706,14 +784,15 @@ static int moddisasm(const disc *d, const char *map, const char *addr_s,
     return 0;
 }
 
-int cmd_moddisasm(const disc *d, const char *map, const char *addr_s, int count)
+int cmd_moddisasm(const disc *d, const char *map, const char *addr_s, int count,
+                  const char *cre)
 {
-    return moddisasm(d, map, addr_s, count, false);
+    return moddisasm(d, map, addr_s, count, false, cre);
 }
 
 int cmd_levdisasm(const disc *d, const char *map, const char *addr_s, int count)
 {
-    return moddisasm(d, map, addr_s, count, true);
+    return moddisasm(d, map, addr_s, count, true, NULL);
 }
 
 /* ------------------------------------------------------------------------- */

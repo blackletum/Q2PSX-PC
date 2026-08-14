@@ -2921,6 +2921,44 @@ attack in 500 frames. That is the same limit as ever: these creatures engage rar
 and a capture long enough to catch one costs more than the harness has. The transcriptions are read from the
 disassembly and tested for regressions; they are not yet confirmed in play, and this says so.
 
+## Two address spaces, and the check that tells them apart
+
+`moddisasm` was reading the wrong creature, and would have gone on doing it silently.
+
+`q2_ai_module_load` relocates a COMMON.DAT's whole `CreAIBin` as ONE blob. That is right for a LevelBin and
+wrong for CreAIBin: the chunk is a LIST of modules — a 12-byte name, a next-offset, a body — and `creatures`
+relocates each one separately to its own base. **The two address spaces agree only on a map carrying exactly
+one module.**
+
+The trap is that a wrong address disassembles perfectly well. Feeding the Berserk's melee address from
+`creatures` into `moddisasm WASTE4` produced clean, plausible MIPS: a health test, a move install, an aiflag
+clear — the Tank Commander's attack, in a different module entirely.
+
+**The check that catches it, and that vouches for the four transcriptions already written: do the moves the
+code installs appear in that creature's own move list?** Every one of the Tank Commander's, Gunner's,
+Infantry's and Arachner's did, which is why those reads were sound. The Berserk's did not, which is what
+exposed this.
+
+`moddisasm` now takes a creature name and relocates that module alone, so the addresses match what
+`creatures` prints and the question stops arising.
+
+## The Berserk, and the ranged set closed
+
+With the right module in view the Berserk's melee at `module+0x11D8` is the simplest of the five:
+
+    r    = import[+0x14]();            ; the random
+    move = (r & 1) ? M_84_95 : M_76_83;
+
+A coin. No range test, no health test. Both moves are swings — `76-83` carries thinks 3 and 4, `84-95` thinks
+3 and 6 — so the generic handler taking the first was half right, and this adds the other half: the creature
+alternates its two swings instead of always throwing the same one.
+
+That is **five of the seven modules** with a hand-written callback. The Soldier was transcribed long ago. The
+Insane has no attack, no melee, and its stand, walk and run callbacks are all the same address — a
+non-combatant, correctly modelled by the generic handlers alone.
+
+WASTE4 reports `24 fire calls: 24 sent` and COMMAND holds at `22 of 22`. All 26 tests pass.
+
 ---
 
 ## ⚠ Security note (carried forward, do not drop)
