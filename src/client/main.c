@@ -1938,10 +1938,25 @@ static void client_input_simulated(client *c, float dt)
                 continue;
 
             pl = &c->sim[0].player[pi];
-            /* A short step away, on the same floor, facing player 0. */
-            pl->pos[0]   = c->sim[0].player[0].pos[0] + 300 * pi;
-            pl->pos[1]   = c->sim[0].player[0].pos[1];
-            pl->pos[2]   = c->sim[0].player[0].pos[2] + 300;
+
+            /*
+             * IN FRONT of player 0, along the way they are facing — not at a
+             * blind diagonal offset, which is what the first version did and
+             * which put a wall between them: the scan counted 44 shots stopped
+             * by the world before reaching a target 339 units away. Player 0
+             * walked to where they are, so the space ahead of them is space
+             * they can see, the same reasoning `--watch` uses to frame a
+             * creature.
+             */
+            {
+                s32 fwd = 500 + 200 * pi;
+
+                pl->pos[0] = c->sim[0].player[0].pos[0] +
+                    ((q2_sin12(c->sim[0].player[0].yaw) * fwd) >> Q2_FRAC_12);
+                pl->pos[1] = c->sim[0].player[0].pos[1];
+                pl->pos[2] = c->sim[0].player[0].pos[2] +
+                    ((q2_cos12(c->sim[0].player[0].yaw) * fwd) >> Q2_FRAC_12);
+            }
             pl->ent.node = c->sim[0].player[0].ent.node;
             /*
              * Aimed at player 0's POSITION, not at the reverse of their
@@ -2012,7 +2027,9 @@ static void client_input_simulated(client *c, float dt)
                     client_demo_pad((long)c->frame_index + (long)pi * 37);
 
                 q2_pad_config_default(&pcfg);
-                pcfg.style = c->sim[pi].player[0].look_scheme;
+                /* Player `pi` lives in sim[0] now; `sim[pi]` has been an
+                 * uninitialised struct since they moved there. */
+                pcfg.style = c->sim[0].player[pi].look_scheme;
                 q2_pad_read(&c->mp_pad[pi], &pcfg, &pin);
             }
 
@@ -2026,6 +2043,16 @@ static void client_input_simulated(client *c, float dt)
                 if (c->mp_stage) {
                     pin.attack   = true;
                     pin.buttons |= Q2_BTN_ATTACK_PRESS;
+
+                    /*
+                     * And no look input: the aim is written before the tick and
+                     * `update_look` would turn them off it before the shot is
+                     * taken inside the same tick. The scan counted 1988 shots
+                     * with the target BEHIND the muzzle — a staged player was
+                     * being aimed and then immediately turning away.
+                     */
+                    pin.yaw   = 0;
+                    pin.pitch = 0;
                 }
                 client_targets_for(c, pi);
                 q2_sim_advance_player(&c->sim[0], pi, &pin, ticks);

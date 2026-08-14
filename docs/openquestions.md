@@ -3137,11 +3137,28 @@ player-versus-player damage:
       which confirms the convention already in use is the right one and that the 44 are the genuine
       in-front cases.
 
-      So the remaining question is those 44: two players 339 units apart with no wall between them, and the
-      world trace stopping the ray before it reaches. That is one comparison — `along > world_fraction` — with
-      `along` a distance along the ray and `world_fraction` whatever the world trace returned. Whether those
-      two are in the same units is the next thing to check, and it is a question about `q2_combat_hitscan`'s
-      contract rather than about multiplayer.
+      **The units are consistent** and that line of enquiry is closed: `along = (dot * 4096) / len2` is a
+      1.12 fraction of the ray, `world_fraction` is clamped to the same 0..4096, and `q2_combat_ray_dist_sq`
+      says why — "nothing is normalised because the direction's LENGTH is the weapon's range". So a shot
+      counted `beyond world` really was stopped by geometry.
+
+      Placing the staged player IN FRONT of player 0 rather than at a blind diagonal — the same reasoning
+      `--watch` uses to frame a creature — moved 9 shots from `beyond world` into `off axis`, which is the
+      first evidence of a shot reaching a target at all.
+
+      **And then three further changes produced byte-identical counters: 2126 / 1988 / 129 / 9 every time.**
+      That is the finding. Numbers that do not move when the thing they supposedly measure is changed are not
+      measuring it: the scans are player 0's shots, not player 1's. Player 0 fires from the demo pad
+      constantly, is aimed at the top of each frame by the staging, and then turns away during its own tick —
+      which is exactly the 1988 `behind`. The staging holds the EXTRA players' aim and never held player 0's.
+
+- [ ] 59a. **Hold player 0's aim while staging, and count the extra players' scans separately.** One shared
+      counter cannot say whose shot it was, which is the same mistake as reading a whole-capture creature
+      count and attributing it to one creature. The counters want a per-player dimension before the next
+      attempt, not another fix.
+
+      One real bug fell out of looking: `pcfg.style = c->sim[pi].player[0].look_scheme` still read the OLD
+      per-player sim array, which has been an uninitialised struct since the players moved into `sim[0]`.
 
   *As first written:*
 
