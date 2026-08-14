@@ -1530,6 +1530,7 @@ void q2_sim_trace(q2_sim *sim, const s32 start[3], const s32 end[3],
 void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
 {
     q2_player *p;
+    bool run_world;
     bool was_underwater;
     bool moving;
     u32  buttons;
@@ -1539,6 +1540,23 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
         return;
 
     p = &sim->player[sim->cur_player];
+
+    /*
+     * The WORLD half of a tick runs once per frame, not once per player.
+     *
+     * A tick is two things wearing one name: the player's frame — movement,
+     * view, weapon, the volumes they are standing in — and the world's, which
+     * is the entity sweep, the effects, the glint and the clock. With one
+     * player they are indistinguishable. With four they must not be: running
+     * the entity sweep four times would age every item respawn four times as
+     * fast and step the effects four times a frame.
+     *
+     * So the world half is gated on being player 0. `q2_sim_advance` sets
+     * `cur_player` to 0 and behaves exactly as it always has; the extra players
+     * go through `q2_sim_advance_player`, which runs their frame against the
+     * same world without advancing it again.
+     */
+    run_world = (sim->cur_player == 0);
 
     /*
      * The order below is 0x8003A1C8's, address by address, because several
@@ -1554,7 +1572,8 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
      * own frame emits into it — footsteps, the landing thump, the pain grunt —
      * and all three happen before the sweep runs.
      */
-    q2_ent_events_clear(&sim->ent_world.events);
+    if (run_world)
+        q2_ent_events_clear(&sim->ent_world.events);
 
     /*
      * 0x8003A41C — the fly bit, mirrored out of the GAME VARIABLES word before
@@ -1733,14 +1752,19 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
      * inside the draw, once per frame rather than once per viewport, which puts
      * it after everything gameplay did — the same place.
      */
-    q2_fx_tick(&sim->fx);
+    /* Once per frame, not once per player: the comment below already said
+     * "once per tick, not once per viewport", and a second player is a second
+     * viewport by another name. */
+    if (run_world) {
+        q2_fx_tick(&sim->fx);
 
-    /* The timed beams age by the frame delta, as 0x80048CE8 does. */
-    q2_fx_timed_tick(&sim->fx, dt);
+        /* The timed beams age by the frame delta, as 0x80048CE8 does. */
+        q2_fx_timed_tick(&sim->fx, dt);
 
-    /* The glint's bands advance once per tick, not once per viewport — see
-     * q2_fx_glint_advance. */
-    q2_fx_glint_advance(&sim->glint);
+        /* The glint's bands advance once per tick, not once per viewport — see
+         * q2_fx_glint_advance. */
+        q2_fx_glint_advance(&sim->glint);
+    }
 
     /*
      * The entity sweep, last, so an item's touch test sees where the player
@@ -1753,11 +1777,19 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
      * because the engine keeps it in the client rather than on an entity.
      */
     if (sim->entities_ready) {
-        q2_entity_world_move_player(&sim->ent_world, 0, sim->player[sim->cur_player].pos);
-        sim->ent_world.dt         = dt;
-        sim->ent_world.deathmatch = sim->multiplayer;
-        sim->ent_world.cheats     = sim->cheats;
-        q2_entity_run(&sim->entities, &sim->ent_world);
+        /*
+         * Every player publishes where they are — the entity world has taken a
+         * player INDEX since it was written, and nothing had ever passed
+         * anything but 0 — but only player 0's tick runs the sweep.
+         */
+        q2_entity_world_move_player(&sim->ent_world, sim->cur_player,
+                                    sim->player[sim->cur_player].pos);
+        if (run_world) {
+            sim->ent_world.dt         = dt;
+            sim->ent_world.deathmatch = sim->multiplayer;
+            sim->ent_world.cheats     = sim->cheats;
+            q2_entity_run(&sim->entities, &sim->ent_world);
+        }
     }
     q2_item_mega_health_tick(&sim->combat.inv, sim->level_time);
 
@@ -1766,7 +1798,34 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
      * because a medkit collected this tick counts as healing. */
     update_pain(sim);
 
-    sim->tick_count++;
+    if (run_world)
+        sim->tick_count++;
+}
+
+/*
+ * One extra player's frame, against the world `q2_sim_advance` has already
+ * advanced this frame.
+ *
+ * `index` must not be 0: player 0 is the one `q2_sim_advance` runs, and running
+ * it again here would advance the world twice. Everything a player owns —
+ * position, view, the volumes they stand in, their weapon — is theirs; the
+ * entity list, the script, the effects and the clock are the world's and are
+ * not touched.
+ */
+void q2_sim_advance_player(q2_sim *sim, int index, const q2_input *input,
+                           s32 dt)
+{
+    int saved;
+
+    if (!sim || !input || dt <= 0)
+        return;
+    if (index <= 0 || index >= Q2_SIM_MAX_PLAYERS)
+        return;
+
+    saved           = sim->cur_player;
+    sim->cur_player = index;
+    q2_sim_tick(sim, input, dt);
+    sim->cur_player = saved;
 }
 
 /* ------------------------------------------------------------------------- */

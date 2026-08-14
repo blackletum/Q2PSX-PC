@@ -630,6 +630,16 @@ void q2_sim_spawn(q2_sim *sim, const s32 pos[3], s32 yaw);
  */
 u32 q2_sim_advance(q2_sim *sim, const q2_input *input, double elapsed_seconds);
 
+/*
+ * One extra player's frame, against the world this frame has already advanced.
+ *
+ * `index` must be 1..3. The world half of a tick — the entity sweep, the
+ * effects, the glint, the clock — runs only for player 0, so four players in
+ * one sim share one world instead of each carrying a copy of it.
+ */
+void q2_sim_advance_player(q2_sim *sim, int index, const q2_input *input,
+                           s32 dt);
+
 /* One logic tick at the nominal step. Exposed so tests can drive it exactly. */
 void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt);
 

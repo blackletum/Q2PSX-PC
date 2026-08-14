@@ -2403,8 +2403,35 @@ the status bar is fed from the one inventory that exists. The screen work, the l
 spread and the per-viewport HUD set are real; the other three participants are not, and the code says so
 where it does it rather than in a note here.
 
-- [~] 53. **Four simulated players — the client half is done, and `sim.c` now holds four players instead of
-      one.** The scaffolding is in: `q2_sim.player` is `q2_player[Q2_SIM_MAX_PLAYERS]` with a `cur_player`
+- [x] 53. **DONE: four players in one world.**
+
+      The tick was two things wearing one name — the player's frame (movement, view, weapon, the volumes they
+      stand in) and the world's (the entity sweep, the effects, the glint, the clock). With one player they
+      are indistinguishable. With four they must not be: running the entity sweep four times would age every
+      item respawn four times as fast and step the effects four times a frame.
+
+      So the world half is gated on `cur_player == 0` and `q2_sim_advance_player` runs an extra player's frame
+      against the world that `q2_sim_advance` has already advanced this frame. The entity world has taken a
+      player INDEX since it was written and nothing had ever passed anything but 0; every player publishes
+      their position through it now, so they are all visible to the same item and trigger logic.
+
+      One bug caught by reading the numbers rather than the render: the extra players were seeded by copying
+      player 0's state and overwriting the position. A `q2_player` carries its collision NODE, and a node is
+      where you are — so a player placed elsewhere with someone else's node fell out of the world. Two of four
+      ended a capture at y 64847. Spawning each through `q2_sim_spawn` with `cur_player` set fixes it: four
+      players at y -1024, 604, 0 and 604, all on the floor.
+
+      **Single player is byte-identical** to before the whole refactor, all 26 tests pass, and the four-way
+      split renders four viewpoints of one MATRIX5.
+
+      What is NOT yet done is the shooting: `q2_sim.combat` is still one block, so the four share an
+      inventory and a weapon. Splitting that is the same exercise one level down and is now the only thing
+      between this and a playable deathmatch.
+
+  *As first written:*
+
+- [ ] ~~53. **Four simulated players — the client half is done, and `sim.c` now holds four players instead of
+      one.**~~ The scaffolding is in: `q2_sim.player` is `q2_player[Q2_SIM_MAX_PLAYERS]` with a `cur_player`
       index, and every one of the 52 references in `sim.c`, 15 in `simcombat.c` and the rest across the tests
       and tools goes through it. `cur_player` stays 0 and nothing sets it yet, so this is a change of shape
       and not of behaviour — deliberately, because the way to verify a refactor of the file that owns the tick

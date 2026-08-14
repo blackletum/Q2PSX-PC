@@ -1387,17 +1387,34 @@ static bool client_load_zone(client *c, const char *map, int index)
                 if (!c->mp_view_valid[pi])
                     continue;
 
-                q2_sim_free(&c->sim[pi]);
-                q2_sim_init(&c->sim[pi], &c->zone,
-                            q2_build_tick_rate(&c->build));
-                q2_sim_attach_gameplay(&c->sim[pi], &c->common);
-
                 pfeet[0] = c->mp_view_pos[pi][0];
                 pfeet[1] = c->mp_view_pos[pi][1];
                 pfeet[2] = c->mp_view_pos[pi][2];
 
-                q2_sim_spawn(&c->sim[pi], pfeet, c->mp_view_yaw[pi]);
-                c->sim[pi].player[0].ground_y = pfeet[1];
+                /*
+                 * Into player 0's sim, as player `pi` — one world, four
+                 * players. Each used to get a q2_sim of its own, which meant
+                 * four copies of the map's items and four scripts, and only
+                 * player 0's was ever read or drawn. Now they share the world
+                 * they are standing in, which is what lets them collect the
+                 * same pickup and see the same doors.
+                 */
+                {
+                    /*
+                     * Through the sim's own spawn, not by copying player 0.
+                     * Copying carried player 0's collision node across, and a
+                     * node is where you ARE — so a player placed somewhere else
+                     * with someone else's node fell out of the world. Two of
+                     * four ended a capture at y 64847.
+                     */
+                    int saved = c->sim[0].cur_player;
+
+                    c->sim[0].cur_player = pi;
+                    q2_sim_spawn(&c->sim[0], pfeet, c->mp_view_yaw[pi]);
+                    c->sim[0].player[pi].ground_y = pfeet[1];
+                    c->sim[0].cur_player = saved;
+                }
+                c->sim[0].player_count = pi + 1;
                 c->sim_ready[pi] = true;
             }
         }
@@ -1796,7 +1813,15 @@ static void client_input_simulated(client *c, float dt)
                 q2_pad_read(&c->mp_pad[pi], &pcfg, &pin);
             }
 
-            q2_sim_advance(&c->sim[pi], &pin, (double)dt);
+            {
+                s32 ticks = (s32)((double)dt * 300.0 + 0.5);
+
+                if (ticks < 1)
+                    ticks = 1;
+                if (ticks > 30)
+                    ticks = 30;      /* the same clamp q2_sim_advance applies */
+                q2_sim_advance_player(&c->sim[0], pi, &pin, ticks);
+            }
         }
     }
 
@@ -2896,12 +2921,13 @@ static void client_write_shot(client *c, bool numbered)
             for (pi = 0; pi < Q2_MP_MAX_PLAYERS; pi++) {
                 if (pi > 0 && !c->sim_ready[pi])
                     continue;
-                Q2_INFO("  player %d at [%d %d %d] yaw %d, %d hp, moved %ld",
-                        pi, c->sim[pi].player[0].pos[0], c->sim[pi].player[0].pos[1],
-                        c->sim[pi].player[0].pos[2], c->sim[pi].player[0].yaw,
-                        c->sim[pi].combat.inv.health,
-                        labs(c->sim[pi].player[0].pos[0] - c->mp_view_pos[pi][0]) +
-                        labs(c->sim[pi].player[0].pos[2] - c->mp_view_pos[pi][2]));
+                Q2_INFO("  player %d at [%d %d %d] yaw %d, moved %ld",
+                        pi, c->sim[0].player[pi].pos[0],
+                        c->sim[0].player[pi].pos[1],
+                        c->sim[0].player[pi].pos[2],
+                        c->sim[0].player[pi].yaw,
+                        labs(c->sim[0].player[pi].pos[0] - c->mp_view_pos[pi][0]) +
+                        labs(c->sim[0].player[pi].pos[2] - c->mp_view_pos[pi][2]));
             }
         }
 
@@ -3098,14 +3124,13 @@ static void client_draw_view(void *user, q2_screen *s, int p,
      * out of q2_sim, which is a change to sim.c rather than to this caller.
      */
     if (c->mp_enabled && p > 0 && p < Q2_MP_MAX_PLAYERS && c->sim_ready[p]) {
-        s32 eye[3];
+        const q2_player *pl = &c->sim[0].player[p];
 
-        q2_sim_eye(&c->sim[p], eye);
-        c->cam.pos[0] = eye[0];
-        c->cam.pos[1] = eye[1];
-        c->cam.pos[2] = eye[2];
-        c->cam.yaw    = c->sim[p].player[0].yaw;
-        c->cam.pitch  = c->sim[p].player[0].pitch;
+        c->cam.pos[0] = pl->pos[0];
+        c->cam.pos[1] = pl->pos[1] - Q2_EYE_BASE;
+        c->cam.pos[2] = pl->pos[2];
+        c->cam.yaw    = pl->yaw;
+        c->cam.pitch  = pl->pitch;
     }
 
     /* The viewport's far distance is also the subdivision threshold: the same
