@@ -3942,6 +3942,25 @@ nothing saying so.
       `"Stand"` 65-77 — none overlapping its anomalous 16-24 `"Sway"` or 25-33, so merging does not account
       for them. Those two are still open, and they are now the ONLY moves on the disc that resist the rule.
 
-      **Next:** split merged moves at the name table's boundaries in `q2_creature_decode`. The boundaries are
-      not a guess — the module ships them, and this pass has them printed. That is a change to how moves are
-      installed, so it wants its own pass rather than being tacked onto this one.
+      **DONE — `split_merged_moves()` in `creature.c`.** Every decoded move is checked against the module's
+      own name records, and any strict interior range becomes a move of its own; the parent shrinks to the
+      span before the earliest piece that follows it, so nothing that already refers to a move index changes
+      meaning. A move the table does not subdivide is untouched.
+
+          moves decoded        101 -> 108
+          named                 90 -> 100
+          unnamed               11 ->   8
+          unclaimed records     42 ->  28
+
+      And the rule itself, re-tested on the corrected boundaries:
+
+          3:1 rule after splitting: 105 of 108 (97%)
+            miss: Arachner 16-24 (9 frames wants 27)
+            miss: Arachner 16-24 (9 frames wants 27)   <- the same move, listed twice
+            miss: Arachner 25-33 (9 frames wants 27)
+
+      **The Soldier's two exceptions are gone**, exactly as the split predicted. What is left is two distinct
+      Arachner moves out of 107 distinct on the disc — `"Sway"` and its unnamed neighbour, both 9 frames
+      wanting a 27-frame clip the Arachner does not have. Its unclaimed records (`"udeath"` 0-0, `"Pain 2"`
+      78-93, `"Stand"` 65-77) do not overlap either, so merging is not the answer for them. That is the whole
+      remaining residue of the 51 series.

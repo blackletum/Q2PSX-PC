@@ -802,6 +802,112 @@ u32 q2_creature_unclaimed_names(const q2_creature *c, const u8 *image,
     return unclaimed;
 }
 
+/*
+ * Split a decoded move wherever the module's OWN name table says there is a
+ * boundary inside it.
+ *
+ * The decoder finds a move by following a callback to a frame record and
+ * walking forward, so two moves laid end to end in the image come back as one.
+ * The Soldier's 0-11 is really Run(0-0), Fire 1 Ready(1-5), Fire 1 Aim(6-8) and
+ * Fire 1 Shoot(9-11); its 215-247 is Fire 2 Done(215-224) and Walk 1 Loop
+ * (225-247). A merged move's length is a sum, so three times it matches no clip
+ * -- which is how these surfaced at all, as the only exceptions to the 3:1 rule
+ * (openquestions #51h, #58).
+ *
+ * The boundaries are not inferred: the module ships a {char[16], u16 first,
+ * u16 last} record per move, and this splits at exactly those. A move the table
+ * does not subdivide is left alone.
+ */
+static void split_merged_moves(q2_creature *c, const u8 *image, size_t size)
+{
+    u32 i;
+
+    if (!c || !image)
+        return;
+
+    for (i = 0; i < c->move_count; i++) {
+        size_t off;
+        u32 pieces = 0;
+
+        for (off = 0; off + CRE_MOVE_NAME_STRIDE <= size; off += 4) {
+            s32 first, last;
+            u32 fi;
+
+            if (!name_slot_ok(image + off, size - off))
+                continue;
+
+            first = (s32)q2_rd_u16(image + off + 16);
+            last  = (s32)q2_rd_u16(image + off + 18);
+
+            if (first > last || last > 1024)
+                continue;
+
+            /* A STRICT interior piece: inside the move, and not the move. */
+            if (first < c->move[i].first_frame || last > c->move[i].last_frame)
+                continue;
+            if (first == c->move[i].first_frame &&
+                last  == c->move[i].last_frame)
+                continue;
+            /*
+             * The piece that STARTS where the parent does is the parent, once
+             * the parent is shrunk below. Creating it as well would leave two
+             * moves with the same range.
+             */
+            if (first == c->move[i].first_frame)
+                continue;
+            if (c->move_count >= Q2_CRE_MAX_MOVES)
+                break;
+
+            /* Does a piece with this range already exist? */
+            for (fi = 0; fi < c->move_count; fi++)
+                if (c->move[fi].first_frame == first &&
+                    c->move[fi].last_frame  == last)
+                    break;
+            if (fi < c->move_count)
+                continue;
+
+            c->move[c->move_count] = c->move[i];
+            c->move[c->move_count].first_frame = first;
+            c->move[c->move_count].last_frame  = last;
+            c->move[c->move_count].frame_index =
+                c->move[i].frame_index +
+                (u32)(first - c->move[i].first_frame);
+            c->move[c->move_count].frame_count = (u32)(last - first + 1);
+            /* Only the piece that ends where the parent ended keeps the
+             * parent's endfunc; the others run on into the next piece. */
+            if (last != c->move[i].last_frame) {
+                c->move[c->move_count].endfunc_addr = 0;
+                c->move[c->move_count].endfunc_move = 0;
+            }
+            c->move_count++;
+            pieces++;
+        }
+
+        /* If the table subdivided this move, the merged span is not a move.
+         * Shrink it to its first piece rather than deleting it, so nothing that
+         * already refers to index i changes meaning. */
+        if (pieces) {
+            s32 lo = c->move[i].last_frame;
+            u32 k;
+
+            /* The parent keeps the span up to the earliest piece that follows
+             * it — that span is its own named move. */
+            for (k = c->move_count - pieces; k < c->move_count; k++)
+                if (c->move[k].first_frame > c->move[i].first_frame &&
+                    c->move[k].first_frame - 1 < lo)
+                    lo = c->move[k].first_frame - 1;
+
+            if (lo < c->move[i].last_frame) {
+                c->move[i].last_frame  = lo;
+                c->move[i].frame_count =
+                    (u32)(lo - c->move[i].first_frame + 1);
+                c->move[i].endfunc_addr = 0;
+                c->move[i].endfunc_move = 0;
+            }
+        }
+    }
+}
+
 bool q2_creature_decode(q2_creature *out, const u8 *image, size_t size,
                         u32 base, const char *name)
 {
@@ -859,6 +965,8 @@ bool q2_creature_decode(q2_creature *out, const u8 *image, size_t size,
         if (out->move_count == before)
             break;
     }
+
+    split_merged_moves(out, image, size);
 
     return true;
 }
