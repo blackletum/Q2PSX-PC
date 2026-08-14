@@ -1414,6 +1414,7 @@ static bool client_load_zone(client *c, const char *map, int index)
                     c->sim[0].player[pi].ground_y = pfeet[1];
                     c->sim[0].cur_player = saved;
                 }
+                q2_sim_player_reset_combat(&c->sim[0], pi);
                 c->sim[0].player_count = pi + 1;
                 c->sim_ready[pi] = true;
             }
@@ -2921,11 +2922,14 @@ static void client_write_shot(client *c, bool numbered)
             for (pi = 0; pi < Q2_MP_MAX_PLAYERS; pi++) {
                 if (pi > 0 && !c->sim_ready[pi])
                     continue;
-                Q2_INFO("  player %d at [%d %d %d] yaw %d, moved %ld",
+                Q2_INFO("  player %d at [%d %d %d] yaw %d, %d hp, moved %ld",
                         pi, c->sim[0].player[pi].pos[0],
                         c->sim[0].player[pi].pos[1],
                         c->sim[0].player[pi].pos[2],
                         c->sim[0].player[pi].yaw,
+                        pi == c->sim[0].cur_player
+                            ? c->sim[0].combat.inv.health
+                            : c->sim[0].pcombat[pi].inv.health,
                         labs(c->sim[0].player[pi].pos[0] - c->mp_view_pos[pi][0]) +
                         labs(c->sim[0].player[pi].pos[2] - c->mp_view_pos[pi][2]));
             }

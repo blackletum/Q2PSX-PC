@@ -315,6 +315,30 @@ typedef struct q2_sim_combat {
     q2_fire_result_v2 last_shot;
 } q2_sim_combat;
 
+/*
+ * The half of `q2_sim_combat` that belongs to a PLAYER rather than to the world.
+ *
+ * `rules`, `rng`, `projectiles`, `targets` and `target_count` are the world's:
+ * one list of bolts in flight, one set of things that can be hurt, one set of
+ * rules. Everything below is one player's, and four players need four of them.
+ *
+ * They are swapped in and out of `q2_sim.combat` around a player's tick rather
+ * than being addressed through an index, because `sim->combat.inv` appears
+ * eighty-six times across the game, the client and the tests, and every one of
+ * those sites means "the player whose frame is running" — which is exactly what
+ * the swap makes true. `cur_player` selects which, the same way it does for
+ * `player[]`.
+ */
+typedef struct q2_player_combat {
+    q2_inventory      inv;
+    int               weapon_id;
+    s32               next_fire;
+    s16               kick[3];
+    int               chaingun_bullets;
+    q2_actor          self;
+    q2_fire_result_v2 last_shot;
+} q2_player_combat;
+
 /* ------------------------------------------------------------------------- */
 /* Simulation                                                                 */
 /* ------------------------------------------------------------------------- */
@@ -335,6 +359,12 @@ typedef struct q2_sim {
     int                  cur_player;
     int                  player_count;
     q2_sim_combat        combat;
+
+    /*
+     * Each player's half of the above, parked while another player's frame
+     * runs. Slot `cur_player` is the one currently live in `combat`.
+     */
+    q2_player_combat     pcombat[Q2_SIM_MAX_PLAYERS];
 
     /* The level clock the weapon gates and the damage throttles use, in dt
      * units. Advanced by q2_sim_tick alongside the physics. */
@@ -639,6 +669,9 @@ u32 q2_sim_advance(q2_sim *sim, const q2_input *input, double elapsed_seconds);
  */
 void q2_sim_advance_player(q2_sim *sim, int index, const q2_input *input,
                            s32 dt);
+
+/* Give an extra player a level start's inventory and weapon. */
+void q2_sim_player_reset_combat(q2_sim *sim, int index);
 
 /* One logic tick at the nominal step. Exposed so tests can drive it exactly. */
 void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt);

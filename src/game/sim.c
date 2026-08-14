@@ -1812,6 +1812,38 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
  * entity list, the script, the effects and the clock are the world's and are
  * not touched.
  */
+/* Park the live player's combat half and load another's. */
+static void combat_swap_to(q2_sim *sim, int index)
+{
+    q2_player_combat *from = &sim->pcombat[sim->cur_player];
+    q2_player_combat *to   = &sim->pcombat[index];
+
+    if (index == sim->cur_player)
+        return;
+
+    from->inv              = sim->combat.inv;
+    from->weapon_id        = sim->combat.weapon_id;
+    from->next_fire        = sim->combat.next_fire;
+    from->kick[0]          = sim->combat.kick[0];
+    from->kick[1]          = sim->combat.kick[1];
+    from->kick[2]          = sim->combat.kick[2];
+    from->chaingun_bullets = sim->combat.chaingun_bullets;
+    from->self             = sim->combat.self;
+    from->last_shot        = sim->combat.last_shot;
+
+    sim->combat.inv              = to->inv;
+    sim->combat.weapon_id        = to->weapon_id;
+    sim->combat.next_fire        = to->next_fire;
+    sim->combat.kick[0]          = to->kick[0];
+    sim->combat.kick[1]          = to->kick[1];
+    sim->combat.kick[2]          = to->kick[2];
+    sim->combat.chaingun_bullets = to->chaingun_bullets;
+    sim->combat.self             = to->self;
+    sim->combat.last_shot        = to->last_shot;
+
+    sim->cur_player = index;
+}
+
 void q2_sim_advance_player(q2_sim *sim, int index, const q2_input *input,
                            s32 dt)
 {
@@ -1822,10 +1854,29 @@ void q2_sim_advance_player(q2_sim *sim, int index, const q2_input *input,
     if (index <= 0 || index >= Q2_SIM_MAX_PLAYERS)
         return;
 
-    saved           = sim->cur_player;
-    sim->cur_player = index;
+    saved = sim->cur_player;
+    combat_swap_to(sim, index);
     q2_sim_tick(sim, input, dt);
-    sim->cur_player = saved;
+    combat_swap_to(sim, saved);
+}
+
+/*
+ * Give player `index` the inventory and weapon a level start hands out, and
+ * park it. Called once per extra player, after `q2_sim_spawn` has placed them.
+ */
+void q2_sim_player_reset_combat(q2_sim *sim, int index)
+{
+    int saved;
+
+    if (!sim || index <= 0 || index >= Q2_SIM_MAX_PLAYERS)
+        return;
+
+    saved = sim->cur_player;
+    combat_swap_to(sim, index);
+    q2_inventory_init(&sim->combat.inv);
+    sim->combat.weapon_id = 0;
+    sim->combat.next_fire = 0;
+    combat_swap_to(sim, saved);
 }
 
 /* ------------------------------------------------------------------------- */

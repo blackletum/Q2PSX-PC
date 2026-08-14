@@ -2424,9 +2424,19 @@ where it does it rather than in a note here.
       **Single player is byte-identical** to before the whole refactor, all 26 tests pass, and the four-way
       split renders four viewpoints of one MATRIX5.
 
-      What is NOT yet done is the shooting: `q2_sim.combat` is still one block, so the four share an
-      inventory and a weapon. Splitting that is the same exercise one level down and is now the only thing
-      between this and a playable deathmatch.
+      **The combat block is split too.** `rules`, `rng`, `projectiles`, `targets` and `target_count` are the
+      world's — one list of bolts in flight, one set of things that can be hurt — and the inventory, weapon,
+      refire gate, view kick, chaingun spin, hurt-actor and last-shot record are a player's. Four players now
+      have four of each: `100 hp` apiece on MATRIX5.
+
+      They are SWAPPED in and out of `sim->combat` around a player's tick rather than addressed through an
+      index, because `sim->combat.inv` appears eighty-six times across the game, the client and the tests, and
+      every one of those sites means "the player whose frame is running" — which is precisely what the swap
+      makes true. `cur_player` selects which, exactly as it does for `player[]`. Four checks in `test_sim`
+      hold it down: a player's health survives another's tick, a player's weapon survives another's tick,
+      hurting one leaves the other alone, and three extra players do not advance the world clock.
+
+      Single player is byte-identical, all 26 tests pass, and COMMAND still reports 22 fire calls, 22 sent.
 
   *As first written:*
 

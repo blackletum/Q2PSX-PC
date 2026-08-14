@@ -1057,6 +1057,60 @@ static void test_variable_dt(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * Four players in one sim: their own health and weapon, one world.
+ *
+ * The point of the split is that the world half of a tick runs once a frame
+ * however many players there are, while everything a player owns is theirs.
+ * Both halves of that are checked here.
+ */
+static void test_four_players(void)
+{
+    q2_sim sim;
+    q2_input in;
+    s32 spawn[3] = { 0, 0, 0 };
+    u32 ticks_after_one, ticks_after_three;
+
+    printf("four players share one world\n");
+
+    q2_sim_init(&sim, NULL, 50);
+    q2_sim_spawn(&sim, spawn, 0);
+
+    /* Player 1 gets its own place and its own inventory. */
+    sim.cur_player = 1;
+    q2_sim_spawn(&sim, spawn, 0);
+    sim.cur_player = 0;
+    q2_sim_player_reset_combat(&sim, 1);
+
+    sim.combat.inv.health = 90;
+    check_eq_i(sim.pcombat[1].inv.health, 100,
+               "player 1 keeps its own health while player 0 is hurt");
+
+    /* And hurting player 1 leaves player 0 alone. */
+    memset(&in, 0, sizeof(in));
+    q2_sim_advance_player(&sim, 1, &in, 12);
+    check_eq_i(sim.combat.inv.health, 90,
+               "player 0's health survives another player's tick");
+
+    /*
+     * The world half runs once a frame. Player 0's advance ticks the clock;
+     * players 1..3 must not tick it again.
+     */
+    ticks_after_one = sim.tick_count;
+    q2_sim_advance_player(&sim, 1, &in, 12);
+    q2_sim_advance_player(&sim, 2, &in, 12);
+    q2_sim_advance_player(&sim, 3, &in, 12);
+    ticks_after_three = sim.tick_count;
+    check_eq_i((int)(ticks_after_three - ticks_after_one), 0,
+               "three more players do not advance the world clock");
+
+    /* A weapon is a player's, not the world's. */
+    sim.combat.weapon_id = 5;
+    q2_sim_advance_player(&sim, 1, &in, 12);
+    check_eq_i(sim.combat.weapon_id, 5,
+               "player 0's weapon survives another player's tick");
+}
+
 int main(void)
 {
     printf("Q2PSX-PC simulation tests\n\n");
@@ -1074,6 +1128,7 @@ int main(void)
     test_hull_movement();
     test_ease_boundary();
     test_variable_dt();
+    test_four_players();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     printf("%s\n", g_failures == 0 ? "PASS" : "FAIL");
