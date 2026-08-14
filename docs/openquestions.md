@@ -4113,3 +4113,23 @@ nothing saying so.
       lands 14% of the time for an arbitrary length — the same rate as `n*3` — so two distinct cases both
       hitting it is roughly a 2% coincidence. Suggestive, not a finding, and **no mechanism has been found
       that separates those two moves from the 113 that fit.** Recorded as the residue it is.
+
+- [ ] 61. **Why the Tank Commander is still silent, given its sounds ARE on the disc (#60).**
+      First move was to read the sound addresses the decoder reports for it — `sound(80102110)`,
+      `sound(80102118)`, `sound(8010211C)`. All three are **zero in the module image**: BSS, filled at
+      runtime. So those are not names, and no amount of reading them will produce one.
+
+      That is not what distinguishes the Tank Commander, though. The Berserk's `sound(8010175C)` is
+      **equally zero**, and the Berserk makes sounds. Both modules store a runtime handle in BSS; the port
+      resolves a creature's sounds through `q2_creature_sound_names()`, which reads a NAME TABLE out of the
+      module image, the same way move names are read. So the question is not "where is the address" but
+      **whether the Tank Commander's name table is being found**, and that is where this resumes.
+
+      Two counts worth carrying into it. Scanning the disc image for VAG headers gives 63 entries named
+      `tnk_*` (#60). Scanning for the bare strings gives more than that — `tnk_death` occurs 35 times of
+      which 13 are VAG names, and the disc carries only 15 creature module instances in total, so the
+      remaining ~19 are neither VAG headers nor module copies. Something else on the disc lists these names,
+      and finding what will probably answer this question and the "which bank holds them" question together.
+
+      **Do not conclude the sounds are absent.** That was the previous answer here for many passes and it was
+      wrong; see #60 for how the mistake was made and how it was caught.
