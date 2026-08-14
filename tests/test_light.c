@@ -16,6 +16,7 @@
 #include "flare.h"
 #include "gte.h"
 #include "lighting.h"
+#include "weapon.h"
 
 static int g_failures;
 static int g_checks;
@@ -422,6 +423,54 @@ static void test_dynamic(void)
 }
 
 /* ------------------------------------------------------------------------- */
+
+/*
+ * The muzzle flash's radii, against the shift-add chain 0x8004C978 actually
+ * emits. The compiler wrote `r*100` as ((r*2 + r) << 3 + r) << 2 and `r*200` as
+ * the same with one more shift; this recomputes both the long way and checks the
+ * port's multiply agrees at the ends of the range and at a value in the middle.
+ *
+ * The bases are the two `addiu` immediates, 250 and 700, and one rand draw feeds
+ * both radii -- so a shot's inner and outer always move together.
+ */
+static void test_muzzle_light(void)
+{
+    static const s32 draws[] = { 0, 1, 16384, 32767 };
+    u32 i;
+
+    for (i = 0; i < sizeof(draws) / sizeof(draws[0]); i++) {
+        s32 r = draws[i], inner = -1, outer = -1;
+        s32 want_in, want_out, t;
+
+        /* r * 100, as the shift-add chain builds it. */
+        t = r << 1; t += r; t <<= 3; t += r; t <<= 2;
+        want_in = (t >> 15) + 250;
+
+        /* r * 200 -- the same chain with the last shift one wider. */
+        t = r << 1; t += r; t <<= 3; t += r; t <<= 3;
+        want_out = (t >> 15) + 700;
+
+        q2_weapon_muzzle_light(r, &inner, &outer);
+        check_eq_i(inner, want_in,  "muzzle inner radius");
+        check_eq_i(outer, want_out, "muzzle outer radius");
+    }
+
+    /* The documented ranges, which are what a reader will sanity-check against. */
+    {
+        s32 lo_in, lo_out, hi_in, hi_out;
+        q2_weapon_muzzle_light(0, &lo_in, &lo_out);
+        q2_weapon_muzzle_light(32767, &hi_in, &hi_out);
+        check_eq_i(lo_in, 250,  "inner at rand 0");
+        check_eq_i(hi_in, 349,  "inner at rand 32767");
+        check_eq_i(lo_out, 700, "outer at rand 0");
+        check_eq_i(hi_out, 899, "outer at rand 32767");
+    }
+
+    check(q2_weapon_has_muzzle_light(Q2_WID_MACHINEGUN), "machinegun flashes");
+    check(q2_weapon_has_muzzle_light(Q2_WID_CHAINGUN),   "chaingun flashes");
+    check(!q2_weapon_has_muzzle_light(Q2_WID_BFG),       "the BFG does not");
+}
+
 int main(void)
 {
     printf("light model tests\n\n");
@@ -435,6 +484,7 @@ int main(void)
     test_flare_styles();
     test_glow_fade();
     test_dynamic();
+    test_muzzle_light();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;

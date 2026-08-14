@@ -91,6 +91,21 @@ void q2_rng_seed(q2_rng *r, u32 seed)
         r->state = seed ? seed : 1u;
 }
 
+bool q2_weapon_has_muzzle_light(u8 weapon_id)
+{
+    return weapon_id == Q2_WID_MACHINEGUN || weapon_id == Q2_WID_CHAINGUN;
+}
+
+void q2_weapon_muzzle_light(s32 rand_0_32767, s32 *inner, s32 *outer)
+{
+    if (inner)
+        *inner = ((rand_0_32767 * Q2_MUZZLE_INNER_SCALE) >> 15)
+                 + Q2_MUZZLE_INNER_BASE;
+    if (outer)
+        *outer = ((rand_0_32767 * Q2_MUZZLE_OUTER_SCALE) >> 15)
+                 + Q2_MUZZLE_OUTER_BASE;
+}
+
 s32 q2_rng_next(q2_rng *r)
 {
     if (!r)

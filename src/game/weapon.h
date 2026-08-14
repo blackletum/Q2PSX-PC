@@ -222,6 +222,41 @@ int q2_weapon_autoselect(const q2_inventory *inv);
 /* True when the id is owned and has ammo for one shot. */
 bool q2_weapon_usable(const q2_inventory *inv, int id);
 
+/*
+ * The MUZZLE FLASH light, for the two weapons that carry one.
+ *
+ * The machinegun's fire function (0x8004C744, weapon id 4) and the chaingun's
+ * (0x8004CA9C, id 5) each append a dynamic light. Both read their colour from
+ * 0x800AE9D4 -- `C8 64 64`, rgb(200, 100, 100) -- and both compute their radii
+ * from a SINGLE BIOS rand() draw (0x8004C970 -> 0x80089E28):
+ *
+ *     8004C978  sll/addu/sll/addu/sll   ; r * 100
+ *     8004C98C  sra  s0, s0, 15         ; >> 15
+ *     8004C994  addiu s0, s0, 250       ; inner = ((r*100)>>15) + 250
+ *
+ *     8004C998  sll/addu/sll/addu/sll   ; r * 200
+ *     8004C9AC  sra  v1, v1, 15         ; >> 15
+ *     8004C9C0  addiu v1, v1, 700       ; outer = ((r*200)>>15) + 700
+ *
+ * One draw feeds both, so the flash's size varies shot to shot but its inner and
+ * outer stay in proportion: 250..349 and 700..899. `q2_rng_next` is the BIOS
+ * generator bit for bit (see weapon.c), so this reproduces the console's
+ * sequence rather than approximating it.
+ */
+#define Q2_MUZZLE_LIGHT_R      200
+#define Q2_MUZZLE_LIGHT_G      100
+#define Q2_MUZZLE_LIGHT_B      100
+#define Q2_MUZZLE_INNER_BASE   250
+#define Q2_MUZZLE_INNER_SCALE  100
+#define Q2_MUZZLE_OUTER_BASE   700
+#define Q2_MUZZLE_OUTER_SCALE  200
+
+/* True for the two weapon ids whose fire function appends a light. */
+bool q2_weapon_has_muzzle_light(u8 weapon_id);
+
+/* The flash's radii from one rand draw, exactly as 0x8004C978 computes them. */
+void q2_weapon_muzzle_light(s32 rand_0_32767, s32 *inner, s32 *outer);
+
 /* ------------------------------------------------------------------------- */
 /* Firing                                                                     */
 /* ------------------------------------------------------------------------- */

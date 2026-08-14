@@ -311,6 +311,22 @@ q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
     if (!r.fired)
         return r;
 
+    /*
+     * The muzzle flash. Only the machinegun and the chaingun carry one, and its
+     * radii come from a single rand draw the way 0x8004C978 computes them --
+     * see weapon.h. Drawn AFTER the shot so the flash does not perturb the
+     * spread sequence, which is what the fire function's own ordering does.
+     */
+    if (q2_weapon_has_muzzle_light(sim->combat.weapon_id)) {
+        static const u8 flash[3] = { Q2_MUZZLE_LIGHT_R, Q2_MUZZLE_LIGHT_G,
+                                     Q2_MUZZLE_LIGHT_B };
+        s32 inner, outer;
+
+        q2_weapon_muzzle_light(q2_rng_next(&sim->combat.rng), &inner, &outer);
+        (void)inner;
+        q2_ent_light_at(&sim->ent_world.events, eye, flash, outer);
+    }
+
     sim->combat.next_fire = r.next_fire;
     sim->combat.kick[0] = r.kick[0];
     sim->combat.kick[1] = r.kick[1];

@@ -4015,14 +4015,26 @@ nothing saying so.
       **These are muzzle flashes.** Their colour is `0x800AE9D4` — `C8 64 64`, `rgb(200, 100, 100)`, a pale
       red.
 
-      Their radii are NOT from the palette:
+      Their radii are not from the palette — they are **drawn**, and the draw is now read:
 
-          8004C9F8  andi v0, s0, 0xFFFF
-          8004CA00  or   a2, v0, a2        ; low half from s0, high half computed
+          8004C970  jal  0x80089E28        ; BIOS rand(), 0..32767 -> v0
+          8004C978  sll/addu/sll/addu/sll  ; r * 100
+          8004C98C  sra  s0, s0, 15
+          8004C994  addiu s0, s0, 250      ; inner = ((r*100)>>15) + 250   250..349
+          8004C998  sll/addu/sll/addu/sll  ; r * 200
+          8004C9AC  sra  v1, v1, 15
+          8004C9C0  addiu v1, v1, 700      ; outer = ((r*200)>>15) + 700   700..899
 
-      so both halves are computed at runtime — a flash that varies rather than a fixed glow. Reconstructing
-      them means tracing `s0`, not reading another table entry, which is why they are identified here and not
-      wired.
+      **One draw feeds both**, so a shot's inner and outer always move together. And since `q2_rng_next` is
+      the BIOS generator bit for bit, this reproduces the console's sequence rather than approximating it.
+
+      **Wired**: `q2_weapon_muzzle_light()` in `weapon.c`, raised from the fire path for weapon ids 4 and 5
+      only. The draw happens AFTER the shot so it cannot perturb the spread sequence.
+
+      Proving it needed a test rather than a screenshot: a passive capture never fires, and deathmatch bots
+      fired 0 shots in 500 frames. `tests/light` now recomputes both radii the long way — `((r<<1)+r)<<3`,
+      `+r`, `<<2` — and checks the port's multiply agrees at 0, 1, 16384 and 32767, plus the documented
+      endpoints 250/349 and 700/899.
 
       **Five of fifteen are now named**: projectile, rocket, BFG, machinegun, chaingun.
 
