@@ -78,6 +78,9 @@
 #include "lighting.h"
 #include "rotator.h"
 #include "spacelights.h"
+/* Creatures on the biggest map plus three other players, with room to spare. */
+#define Q2_CLIENT_MAX_TARGETS 96
+
 #include "multiplayer.h"
 #include "userfuncs.h"
 #include "disc.h"
@@ -324,6 +327,10 @@ typedef struct client {
 
     u32               mp_deaths;      /* kills fed to the session              */
     bool              mp_scoreboard;  /* QMRESULT is up                        */
+
+    /* Creatures plus the other players, rebuilt per player. */
+    q2_actor         *mp_target[Q2_CLIENT_MAX_TARGETS];
+    bool              mp_targets_logged;
     int               trace_cre;      /* creature index to trace, -1 for none  */
     u32               trace_ticks;
 
@@ -931,6 +938,70 @@ static void client_mp_tick(client *c, float dt)
         Q2_INFO("multiplayer: %s — %s, HUD set %s",
                 q2_mp_score_title(c->mp.mode), q2_mp_mode_name(c->mp.mode),
                 q2_mp_hud_image(true, c->mp.player_count));
+    }
+}
+
+/*
+ * The things player `who` can hurt: every creature, plus every OTHER player.
+ *
+ * A player's own hurt-actor lives in the sim — the live one's in `combat.self`,
+ * a parked one's in `pcombat[i].self` — so the pointers are stable and the list
+ * is rebuilt per player rather than per frame. Registering a player against
+ * themselves would let a blaster bolt hit its own muzzle, which is why `who` is
+ * skipped.
+ *
+ * Nothing registered players before this: `combat.targets` held creatures only,
+ * so in a deathmatch every shot passed straight through everybody.
+ */
+static u32 client_targets_for(client *c, int who)
+{
+    u32 n = 0, i;
+
+    if (c->creatures_ready && c->cre_target)
+        for (i = 0; i < c->creatures.set.count && n < Q2_CLIENT_MAX_TARGETS; i++)
+            c->mp_target[n++] = c->cre_target[i];
+
+    if (c->mp_enabled)
+        for (i = 0; i < Q2_MP_MAX_PLAYERS && n < Q2_CLIENT_MAX_TARGETS; i++) {
+            if ((int)i == who || !c->sim_ready[i])
+                continue;
+            c->mp_target[n++] = (i == (u32)c->sim[0].cur_player)
+                                    ? &c->sim[0].combat.self
+                                    : &c->sim[0].pcombat[i].self;
+        }
+
+    q2_sim_set_targets(&c->sim[0], c->mp_target, n);
+
+    /* Once, so a run says plainly how many things a player can hit. */
+    if (!c->mp_targets_logged) {
+        c->mp_targets_logged = true;
+        Q2_INFO("multiplayer: player %d has %u targets (%u creatures, "
+                "%d other players)", who, n,
+                c->creatures_ready ? c->creatures.set.count : 0,
+                (int)n - (int)(c->creatures_ready ? c->creatures.set.count : 0));
+    }
+
+    return n;
+}
+
+/*
+ * A parked player takes damage on their ACTOR; their inventory is a separate
+ * field and only the live player's pair is synchronised. Copy it back so a hit
+ * landed while they were parked is still there when their frame runs.
+ */
+static void client_sync_parked_health(client *c)
+{
+    int i;
+
+    if (!c->mp_enabled)
+        return;
+
+    for (i = 0; i < Q2_MP_MAX_PLAYERS; i++) {
+        if (i == c->sim[0].cur_player || !c->sim_ready[i])
+            continue;
+        if (c->sim[0].pcombat[i].self.health != c->sim[0].pcombat[i].inv.health)
+            c->sim[0].pcombat[i].inv.health =
+                c->sim[0].pcombat[i].self.health;
     }
 }
 
@@ -1782,7 +1853,11 @@ static void client_input_simulated(client *c, float dt)
 
     if (in.attack) c->player_attacks++;
 
+    if (c->mp_enabled)
+        client_targets_for(c, 0);
+
     q2_sim_advance(&c->sim[0], &in, (double)dt);
+    client_sync_parked_health(c);
 
     /*
      * The other players, each on its own pad. In a headless demo run there is
@@ -1821,7 +1896,9 @@ static void client_input_simulated(client *c, float dt)
                     ticks = 1;
                 if (ticks > 30)
                     ticks = 30;      /* the same clamp q2_sim_advance applies */
+                client_targets_for(c, pi);
                 q2_sim_advance_player(&c->sim[0], pi, &pin, ticks);
+                client_sync_parked_health(c);
             }
         }
     }

@@ -1876,6 +1876,16 @@ void q2_sim_player_reset_combat(q2_sim *sim, int index)
     q2_inventory_init(&sim->combat.inv);
     sim->combat.weapon_id = 0;
     sim->combat.next_fire = 0;
+
+    /*
+     * And the actor, from the inventory, so the pair starts IN STEP. Leaving it
+     * zeroed is not harmless: a caller that copies the actor's health back into
+     * the inventory — which is what has to happen for a player hit while parked
+     * — would write 0 over a full one, and three of four players ended a
+     * capture dead without anything having shot them.
+     */
+    q2_actor_from_player(&sim->combat.self, &sim->combat.inv,
+                         sim->player[index].pos);
     combat_swap_to(sim, saved);
 }
 

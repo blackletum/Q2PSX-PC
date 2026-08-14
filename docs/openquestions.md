@@ -3043,6 +3043,33 @@ So the ratio that matters is **26 of 26 usable calls build a rotator**, and the 
 hardware does not. A disc-wide count of what a system *could* act on is only a denominator if the data
 underneath it is live; here two thirds of it is not.
 
+## Players can hit each other
+
+`combat.targets` held creatures and nothing else, so in a deathmatch every shot passed straight through
+everybody. It now holds every creature plus every OTHER player, rebuilt per player rather than per frame —
+a player's own actor is skipped, because registering it would let a bolt hit its own muzzle.
+
+The pointers are stable: the live player's hurt-actor is `sim->combat.self` and a parked one's is
+`sim->pcombat[i].self`, both inside the sim.
+
+Measured, which is the point of building it this way:
+
+| players | targets | of which |
+| --- | --- | --- |
+| 1 | 0 | — |
+| 2 | 1 | 1 other player |
+| 4 | 3 | 3 other players |
+| 2 on COMMAND | 26 | 26 creatures, 0 players (that map has no MultiSpawn, so only one spawns) |
+
+**A parked player takes damage on their actor, and their inventory is a separate field.** Only the live
+player's pair is synchronised, so a hit landed while parked has to be copied back or it is lost when their
+frame runs. That sync exposed a real bug immediately: `q2_sim_player_reset_combat` initialised an extra
+player's inventory but left their ACTOR zeroed, so the first sync wrote health 0 over a full 100 and three of
+four players ended a capture dead without anything having shot them. The actor is now built from the
+inventory at reset, so the pair starts in step.
+
+Single player is byte-identical, all 26 tests pass.
+
 ---
 
 ## ⚠ Security note (carried forward, do not drop)
