@@ -4053,3 +4053,23 @@ nothing saying so.
       not have, and two unused 30-frame clips nothing claims.** No off-by-one, no merge, no variant model —
       its model is the only Arachner on the disc. This is where the 51 series ends for now, with the anomaly
       stated precisely rather than dressed in an explanation that does not survive.
+
+- [ ] 60. **The Arachner's last two: the loop hypothesis tested and refuted.**
+      Reading the per-move lines gave a promising shape — the two 16-24 records are `via 3` and `via 4`, the
+      Arachner's WALK and RUN, and both have `end 00000000`, meaning they loop. A looping clip plausibly
+      carries one extra frame to close the cycle, which would turn 9 AI frames into 10 clip frames and land
+      exactly on the two unused 30-frame clips.
+
+      Tested across the disc, splitting every move by whether it loops:
+
+          ends  moves:  88   n*3 matches  87   (n+1)*3 matches   1   neither  0
+          loop  moves:  27   n*3 matches  25   (n+1)*3 matches   2   neither  0
+
+      **Refuted.** Twenty-five of twenty-seven looping moves match `n*3` exactly, so looping is not what
+      distinguishes the Arachner's two. And the third anomaly (25-33) is a TERMINATING move, so whatever the
+      property is, it is not "loops behave differently".
+
+      What is true is that all three anomalies match `(n+1)*3`. On the Arachner's clip list that fallback
+      lands 14% of the time for an arbitrary length — the same rate as `n*3` — so two distinct cases both
+      hitting it is roughly a 2% coincidence. Suggestive, not a finding, and **no mechanism has been found
+      that separates those two moves from the 113 that fit.** Recorded as the residue it is.
