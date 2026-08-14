@@ -4925,3 +4925,42 @@ nothing saying so.
 
       **Do not conclude the sounds are absent.** That was the previous answer here for many passes and it was
       wrong; see #60 for how the mistake was made and how it was caught.
+
+- [ ] 62. **The 3:1 length rule and the disc's own NAMES disagree about which clip a move plays.**
+      An eighth angle on the Arachner: match its AI moves to block-D moves **by name** instead of by length.
+      Both sets of names come off the disc — the AI's from the module's move-name table, the model's from
+      block D — so if a creature's move is called `Melee`, the animation it should play is surely the one
+      the model calls `Melee`.
+
+          name          AI range   n*3  blkD  verdict
+          Start Melee   0-12        39     9  conflict
+          Sway          16-24       27    39  conflict
+          Attack 1      94-109      48    30  conflict
+          Rear          130-132      9    48  conflict
+          Start Attack  133-135      9     9  AGREE
+          Pain 1        40-45       18    15  conflict
+          Melee         35-39       15    36  conflict
+          Attack 3      110-129     60    48  conflict
+          Death 2       53-64       36    60  conflict
+          Walk          136-138      9    30  conflict
+          Pain 2        78-93       48    18  conflict
+          Stand         65-77       39    39  AGREE
+
+      **Two of twelve.** Under the length rule the Arachner's `Melee` plays the clip block D calls `Pain 1`,
+      its `Walk` plays `Start Attack`, and its `Rear` plays `Start Melee`. Those are not near-misses; they
+      are different animations.
+
+      **This does not simply overturn #51h**, and the tension is the point:
+
+        * The length rule's null test is real — 96 of 101 across seven creatures against a 33% chance
+          baseline. AI lengths times three land on clip lengths far more often than chance allows.
+        * The name disagreement is also real, and names are the disc's own labels rather than an inference.
+
+      Both cannot be the assignment mechanism. Either the AI move names are paired to ranges wrongly by
+      `q2_creature_move_names` (which would make this table meaningless), or the length agreement is a
+      systematic coincidence and the port has been choosing wrong clips at a 95% "hit rate" all along.
+
+      **Checked on the Arachner only.** The first thing a next pass should do is run the same name-versus-
+      length table for the other six creatures: if they agree where the Arachner conflicts, the fault is in
+      this creature's naming; if they conflict too, #51h's mechanism is wrong and its statistic is measuring
+      something else.
