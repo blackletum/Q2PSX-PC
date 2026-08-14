@@ -314,6 +314,15 @@ typedef struct client {
      */
     q2_screen_fit    fit;
 
+    /*
+     * The title screen. `QFRONT` is a real level — the level table's record 0 —
+     * so the front end is that level loaded with the menu's page 46 over it,
+     * not a page of art. While it is up the simulation does not run: there is
+     * no player in it.
+     */
+    bool             in_front_end;
+    char             first_map[64];
+
     bool             show_glint;
     bool             force_underwater;   /* F3 — stands in for a water volume */
     bool             running;
@@ -1369,6 +1378,25 @@ static void client_menu_requests(client *c)
         break;
     case Q2_MREQ_QUIT:
         c->running = false;
+        break;
+    /*
+     * The front end's three leaves. SINGLE PLAYER is what turns the title
+     * screen into a game: the level table's own first playable map is loaded
+     * and the simulation takes over.
+     */
+    case Q2_MREQ_NEW_GAME:
+        Q2_INFO("front end: new game -> %s", c->first_map);
+        c->in_front_end = false;
+        client_load_zone(c, c->first_map, 0);
+        q2_menu_close(&c->menu);
+        break;
+    case Q2_MREQ_MULTIPLAYER:
+    case Q2_MREQ_CREDITS:
+        /* Both are pages of the front end's own module that the port does not
+         * build yet, so they close back to the title rather than pretending. */
+        Q2_INFO("front end: that page is not reconstructed yet");
+        q2_menu_open(&c->menu);
+        q2_menu_goto(&c->menu, Q2_PAGE_FRONT_TITLE);
         break;
     case Q2_MREQ_MISSION:
         /*
@@ -2654,6 +2682,7 @@ int main(int argc, char **argv)
     client c;
     const char *disc_path = NULL;
     const char *map = "BASE0";
+    bool map_given = false;
     int zone_index = 0;
     int scale = 3;
     int i;
@@ -2663,7 +2692,7 @@ int main(int argc, char **argv)
 
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--disc") && i + 1 < argc)       disc_path = argv[++i];
-        else if (!strcmp(argv[i], "--map") && i + 1 < argc)   map = argv[++i];
+        else if (!strcmp(argv[i], "--map") && i + 1 < argc) { map = argv[++i]; map_given = true; }
         else if (!strcmp(argv[i], "--zone") && i + 1 < argc)  zone_index = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--headless"))              c.headless = true;
@@ -2941,6 +2970,22 @@ no_window:
     if (!c.fx_tables_ready)
         Q2_WARN("no effect tables for this build — nothing will spark");
 
+    /*
+     * Boot into the FRONT END, which is what the console does: `q2_menu_open`
+     * special-cases page 46 (0x8001A40C) and the level it draws over is record
+     * 0 of the level table, `QFront` -> `LEVELS/QFRONT/`.
+     *
+     * `--map` overrides it, because going straight to a level is what every
+     * capture and every check in this project wants; without one, the game
+     * starts where a player starts it.
+     */
+    snprintf(c.first_map, sizeof(c.first_map), "%s", map);
+    if (!map_given) {
+        c.in_front_end = true;
+        map = "QFRONT";
+        zone_index = 0;
+    }
+
     if (!client_load_zone(&c, map, zone_index)) {
         fprintf(stderr, "cannot load %s zone %d\n", map, zone_index);
         goto done;
@@ -2981,6 +3026,14 @@ no_window:
      * already forced this on for exactly the same reason.
      */
     c.sim_enabled = true;
+
+    /* The title screen is the menu's page 46 over the QFRONT scene. It is
+     * opened rather than drawn, so it navigates with the same engine, the same
+     * selection bar and the same font as every other page. */
+    if (c.in_front_end) {
+        q2_menu_open(&c.menu);
+        q2_menu_goto(&c.menu, Q2_PAGE_FRONT_TITLE);
+    }
 
     c.running = true;
     last = c.headless ? 0 : SDL_GetTicks();

@@ -218,6 +218,38 @@ static const q2_menu_item k_death[] = {
  */
 #define EMPTY 0x8009B30Cu   /* the terminator table every text-only page uses */
 
+/*
+ * The front end, transcribed from QFRONT's `LevelBin` rather than from the
+ * executable — openquestions #44. The addresses are module offsets at
+ * Q2_MOD_BASE, which is what `q2psx-inspect modstrings` and `modxrefs` print,
+ * and every record was found by asking what points at its string: each has
+ * exactly one word reference and it is the record's own first field.
+ *
+ * The record layout is the executable's own 24 bytes, so the engine's item
+ * installer takes a module's record and the executable's without knowing the
+ * difference. Rows are centred at x = 256 with a 26-pixel pitch.
+ */
+
+/* module+0x0EC3C — over the QFRONT scene, below the Q2LOGO model */
+static const q2_menu_item k_front_title[] = {
+    { "START",   256, 151, Q2_ACT_PAGE_FRONT_START,   Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "OPTIONS", 256, 177, Q2_ACT_PAGE_FRONT_OPTIONS, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+};
+
+/* module+0x0EC84 */
+static const q2_menu_item k_front_start[] = {
+    { "SINGLE PLAYER", 256, 111, Q2_ACT_NEW_GAME,     Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "MULTI PLAYER",  256, 137, Q2_ACT_MULTIPLAYER,  Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+};
+
+/* module+0x0ED44 */
+static const q2_menu_item k_front_options[] = {
+    { "PLAYER OPTIONS", 256,  85, Q2_ACT_PAGE_PLAYER, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "SOUND OPTIONS",  256, 111, Q2_ACT_PAGE_SOUND,  Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "VIDEO OPTIONS",  256, 137, Q2_ACT_PAGE_VIDEO,  Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "VIEW CREDITS",   256, 163, Q2_ACT_CREDITS,     Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+};
+
 static const q2_menu_page k_pages[] = {
     { Q2_PAGE_SCREEN_POSITION,  "POSITION",   k_position,         N(k_position),         N(k_position),      Q2_ACT_PAGE_VIDEO,   0x8009AF4Cu, EMPTY },
     { Q2_PAGE_PAUSE_SP,         "PAUSED",     k_pause_sp,         N(k_pause_sp),         0,                  Q2_ACT_NONE,         0x8009AA0Cu, 0 },
@@ -236,6 +268,12 @@ static const q2_menu_page k_pages[] = {
     { Q2_PAGE_DEATH,            NULL,         k_death,            N(k_death),            0,                  Q2_ACT_NONE,         0x8009AB74u, 0 },
     { Q2_PAGE_VARIABLES,        "PAUSED",     k_vars_none,        N(k_vars_none),        0,                  Q2_ACT_BACK,         0x8009A6C4u, 0 },
     { Q2_PAGE_PAUSE_MP,         "PAUSED",     k_pause_mp,         N(k_pause_mp),         0,                  Q2_ACT_NONE,         0x8009A964u, 0 },
+
+    /* The front end. No title on the first: the Q2LOGO model above the rows is
+     * the title, which is why its two rows sit lower than any sub-page's. */
+    { Q2_PAGE_FRONT_TITLE,      NULL,         k_front_title,      N(k_front_title),      0,                  Q2_ACT_NONE,         0x8010EC3Cu, 0 },
+    { Q2_PAGE_FRONT_START,      NULL,         k_front_start,      N(k_front_start),      0,                  Q2_ACT_BACK,         0x8010EC84u, 0 },
+    { Q2_PAGE_FRONT_OPTIONS,    "OPTIONS",    k_front_options,    N(k_front_options),    0,                  Q2_ACT_BACK,         0x8010ED44u, 0 },
 };
 
 /* Variants, kept out of the main list so `q2_menu_pages` stays one page per

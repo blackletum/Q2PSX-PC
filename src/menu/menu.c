@@ -537,6 +537,30 @@ static void run_action(q2_menu *m, int action)
     case Q2_ACT_PAGE_PLAYER:     push(m, Q2_PAGE_PLAYER);           break;
     case Q2_ACT_PAGE_OPTIONS:    push(m, Q2_PAGE_OPTIONS);          break;
     case Q2_ACT_PAGE_POSITION:   push(m, Q2_PAGE_SCREEN_POSITION);  break;
+
+    /* The front end's two sub-pages. They push like any other, which is what
+     * lets TRIANGLE walk back to the title without a special case. */
+    case Q2_ACT_PAGE_FRONT_START:   push(m, Q2_PAGE_FRONT_START);   break;
+    case Q2_ACT_PAGE_FRONT_OPTIONS: push(m, Q2_PAGE_FRONT_OPTIONS); break;
+
+    /*
+     * And its three leaves. Each raises a request and closes, exactly as
+     * RESUME and MISSION do: the menu does not know how to start a game, and
+     * the caller does not need to know which row was on.
+     */
+    case Q2_ACT_NEW_GAME:
+        m->request = Q2_MREQ_NEW_GAME;
+        q2_menu_close(m);
+        break;
+    case Q2_ACT_MULTIPLAYER:
+        m->request = Q2_MREQ_MULTIPLAYER;
+        q2_menu_close(m);
+        break;
+    case Q2_ACT_CREDITS:
+        m->request = Q2_MREQ_CREDITS;
+        q2_menu_close(m);
+        break;
+
     case Q2_ACT_ASK_RESTART:     push(m, Q2_PAGE_RESTART_CONFIRM);  break;
     case Q2_ACT_ASK_QUIT:        push(m, Q2_PAGE_QUIT_CONFIRM);     break;
     case Q2_ACT_ASK_RESUPPLY:    push(m, Q2_PAGE_RESUPPLY_CONFIRM); break;

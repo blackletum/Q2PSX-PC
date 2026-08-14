@@ -176,6 +176,14 @@ typedef enum q2_menu_action {
     Q2_ACT_RESET_SOUND,        /* 0x8001FA50                                  */
     Q2_ACT_RESET_PLAYER,       /* 0x8001BDA8                                  */
     Q2_ACT_RESET_VARIABLES,    /* 0x8002048C                                  */
+
+    /* The front end's own, from QFRONT's module rather than the executable —
+     * the address after each is a module offset at Q2_MOD_BASE. */
+    Q2_ACT_PAGE_FRONT_START,   /* module+0xCDC4  START   -> SINGLE / MULTI    */
+    Q2_ACT_PAGE_FRONT_OPTIONS, /* module+0xCCA4  OPTIONS -> the four rows     */
+    Q2_ACT_NEW_GAME,           /* module+0xCD40  SINGLE PLAYER                */
+    Q2_ACT_MULTIPLAYER,        /* module+0xCF68  MULTI PLAYER                 */
+    Q2_ACT_CREDITS,            /* module+0x35C8  VIEW CREDITS                 */
     Q2_ACT_COUNT
 } q2_menu_action;
 
@@ -211,7 +219,19 @@ typedef enum q2_menu_page_id {
     Q2_PAGE_NO_CONTROLLER    = 38,
     Q2_PAGE_DEATH            = 41,
     Q2_PAGE_VARIABLES        = 42,
-    Q2_PAGE_PAUSE_MP         = 43
+    Q2_PAGE_PAUSE_MP         = 43,
+
+    /*
+     * The front end. Page 46 is the console's own id for it, special-cased
+     * inside q2_menu_open (0x8001A40C); the two below it have no id in the
+     * executable because they are not the executable's — the whole front end
+     * is QFRONT's LevelBin, and its item records are a static array in that
+     * module (openquestions #44). These two are the port's own numbering,
+     * chosen above every id the executable uses so they cannot collide.
+     */
+    Q2_PAGE_FRONT_TITLE      = 46,
+    Q2_PAGE_FRONT_START      = 200,
+    Q2_PAGE_FRONT_OPTIONS    = 201
 } q2_menu_page_id;
 
 /*
@@ -289,7 +309,12 @@ typedef enum q2_menu_request {
     Q2_MREQ_RESTART,     /* restart the level                     */
     Q2_MREQ_QUIT,        /* leave the game                        */
     Q2_MREQ_MISSION,     /* show the mission/intermission screen  */
-    Q2_MREQ_RESUPPLY     /* spend a resupply and restart          */
+    Q2_MREQ_RESUPPLY,    /* spend a resupply and restart          */
+
+    /* The front end's, which a caller answers by leaving the title screen. */
+    Q2_MREQ_NEW_GAME,    /* SINGLE PLAYER: begin the game         */
+    Q2_MREQ_MULTIPLAYER, /* MULTI PLAYER                          */
+    Q2_MREQ_CREDITS      /* VIEW CREDITS                          */
 } q2_menu_request;
 
 #define Q2_MENU_MAX_ITEMS 12
