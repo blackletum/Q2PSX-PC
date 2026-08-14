@@ -331,6 +331,7 @@ typedef struct client {
     /* Creatures plus the other players, rebuilt per player. */
     q2_actor         *mp_target[Q2_CLIENT_MAX_TARGETS];
     bool              mp_targets_logged;
+    bool              mp_stage;
     bool              mp_dead[Q2_MP_MAX_PLAYERS];
     int               trace_cre;      /* creature index to trace, -1 for none  */
     u32               trace_ticks;
@@ -1899,6 +1900,71 @@ static void client_input_simulated(client *c, float dt)
 
     if (in.attack) c->player_attacks++;
 
+    /*
+     * `--dm-stage`: put the other players in front of player 0 and point
+     * everyone at each other, with fire held.
+     *
+     * The same reason `--watch` exists. A scripted demo wanders; it does not
+     * arrange a fight, and four players scattered across an arena firing
+     * blindly produced no hits in 1200 frames — which says nothing about
+     * whether a hit would have registered. This stages the encounter so the
+     * scoring path can be exercised rather than reasoned about, and it is a
+     * harness, not gameplay.
+     */
+    if (c->mp_stage && c->mp_enabled) {
+        int pi;
+        s32 eye0[3];
+
+        q2_sim_eye(&c->sim[0], eye0);
+
+        for (pi = 1; pi < Q2_MP_MAX_PLAYERS; pi++) {
+            q2_player *pl;
+
+            if (!c->sim_ready[pi])
+                continue;
+
+            pl = &c->sim[0].player[pi];
+            /* A short step away, on the same floor, facing player 0. */
+            pl->pos[0]   = c->sim[0].player[0].pos[0] + 300 * pi;
+            pl->pos[1]   = c->sim[0].player[0].pos[1];
+            pl->pos[2]   = c->sim[0].player[0].pos[2] + 300;
+            pl->ent.node = c->sim[0].player[0].ent.node;
+            /*
+             * Aimed at player 0's POSITION, not at the reverse of their
+             * facing. The first version set `yaw + 2048`, which points a player
+             * back down player 0's own line of sight and only coincides with
+             * pointing AT them when player 0 happens to be looking at the
+             * spot — 900 frames of that produced no hits at all.
+             */
+            {
+                s32 v[3];
+
+                v[0] = c->sim[0].player[0].pos[0] - pl->pos[0];
+                v[1] = 0;
+                v[2] = c->sim[0].player[0].pos[2] - pl->pos[2];
+
+                pl->yaw   = q2_vectoyaw(v);
+                pl->pitch = 0;
+            }
+
+            c->sim[0].pcombat[pi].self.origin[0] = pl->pos[0];
+            c->sim[0].pcombat[pi].self.origin[1] = pl->pos[1];
+            c->sim[0].pcombat[pi].self.origin[2] = pl->pos[2];
+        }
+
+        /* And player 0 looks back at the first of them. */
+        if (c->sim_ready[1]) {
+            s32 v[3];
+
+            v[0] = c->sim[0].player[1].pos[0] - c->sim[0].player[0].pos[0];
+            v[1] = 0;
+            v[2] = c->sim[0].player[1].pos[2] - c->sim[0].player[0].pos[2];
+
+            c->sim[0].player[0].yaw   = q2_vectoyaw(v);
+            c->sim[0].player[0].pitch = 0;
+        }
+    }
+
     if (c->mp_enabled)
         client_targets_for(c, 0);
 
@@ -1943,6 +2009,10 @@ static void client_input_simulated(client *c, float dt)
                     ticks = 1;
                 if (ticks > 30)
                     ticks = 30;      /* the same clamp q2_sim_advance applies */
+                if (c->mp_stage) {
+                    pin.attack   = true;
+                    pin.buttons |= Q2_BTN_ATTACK_PRESS;
+                }
                 client_targets_for(c, pi);
                 q2_sim_advance_player(&c->sim[0], pi, &pin, ticks);
                 client_sync_parked_health(c);
@@ -3876,6 +3946,8 @@ int main(int argc, char **argv)
             mp_mode = (q2_mp_mode)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--dm-players") && i + 1 < argc)
             mp_players = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--dm-stage"))
+            c.mp_stage = true;
         else if (!strcmp(argv[i], "--trace-cre") && i + 1 < argc)
             c.trace_cre = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--dm-frags") && i + 1 < argc)

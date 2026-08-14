@@ -1872,9 +1872,21 @@ void q2_sim_player_reset_combat(q2_sim *sim, int index)
         return;
 
     saved = sim->cur_player;
-    combat_swap_to(sim, index);
-    q2_inventory_init(&sim->combat.inv);
-    sim->combat.weapon_id = 0;
+
+    /*
+     * What player 0 has, because a deathmatch starts everybody the same way and
+     * player 0 has already been through the level's own start. A bare
+     * `q2_inventory_init` leaves `weapon_id` at 0 — no weapon — so the extra
+     * players spawned holding nothing and could not fire a shot between them.
+     */
+    {
+        q2_inventory     start_inv = sim->combat.inv;
+        int              start_wep = sim->combat.weapon_id;
+
+        combat_swap_to(sim, index);
+        sim->combat.inv       = start_inv;
+        sim->combat.weapon_id = start_wep;
+    }
     sim->combat.next_fire = 0;
 
     /*

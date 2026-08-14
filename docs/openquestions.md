@@ -3095,6 +3095,33 @@ says so rather than implying otherwise.
 
 Single player is byte-identical, COMMAND still reports 22 fire calls of 22 sent, all 26 tests pass.
 
+## Staging an encounter, and what it has not yet shown
+
+Every unverified claim in the last few rounds has the same shape: "wired and unit-tested, not observed in
+play". The reason is always the harness — a scripted demo wanders, it does not arrange a fight. `--watch`
+already fixed that for one player against a creature by standing the player in front of one. `--dm-stage`
+does the equivalent for players: it puts the others a few hundred units from player 0, aims everyone at
+everyone by POSITION, and holds their fire button.
+
+Two real faults fell out of building it, both of which would have silently defeated any attempt to test
+player-versus-player damage:
+
+- **Aiming by reversing a yaw is not aiming at someone.** The first version set the other player's yaw to
+  player 0's plus 2048, which points them back down player 0's line of sight and only coincides with pointing
+  AT them when player 0 happens to be looking at the right spot. 900 frames of that produced nothing.
+  `q2_vectoyaw` on the difference of the two positions is the fix.
+- **The extra players had no weapon.** `q2_sim_player_reset_combat` called `q2_inventory_init` and set
+  `weapon_id = 0`, which is "no weapon" — so three of four players spawned holding nothing and could not have
+  fired a shot between them. They now start with what player 0 has, which is what a deathmatch start does.
+
+- [ ] 59. **A staged encounter still produces no damage.** Two players 339 units apart, facing each other by
+      position, both holding fire, both with the level's weapon, each registered in the other's target list
+      (`has 1 targets (0 creatures, 1 other players)`) — and both end 900 frames at 100 health. Everything
+      upstream is measured: the target list is right, the actors have `radius` 286, the attribution rule is
+      unit-tested and the kill hook is wired. What has NOT been measured is whether the shot is taken at all
+      for a player whose frame runs through `q2_sim_advance_player`, and that is the next thing to count
+      rather than reason about — the fire path reads `combat.last_shot`, which is part of the swapped half.
+
 ---
 
 ## ⚠ Security note (carried forward, do not drop)
