@@ -1605,8 +1605,16 @@ item records at run time instead of transcribing a table, so there is nothing to
       The builder at `module+0x22C4` walks the list, and for each entry hands `engine+0x184` a four-halfword
       record built on the stack as `{ 0, 255 - i, 256, 1 }` together with the object's data pointer. The
       descending `255 - i` is a draw priority and 256 is a unit scale in the port's usual 1.8.8.
-      *What is left for the scene:* the 512-byte object blocks themselves, which is where a position can
-      actually live, and `engine+0x184`, which is what consumes them.
+      *What is left for the scene:* the 512-byte object blocks themselves, and `engine+0x184`, which
+      consumes them. **Two dead ends recorded so they are not walked twice.**
+      `engine+0x184` cannot be named the way the other slots were: the installer's store is
+      `sw a1, 388(v1)` at `0x80079E3C`, so that slot is filled from an installer ARGUMENT rather than a
+      constant, and grepping the installer for the offset gives the parameter, not the callee. It has to be
+      reached from the installer's own caller.
+      And the object blocks are not coordinates. `0x80110D94` is 512 bytes of dense data with no run of
+      small signed values anywhere in it — nothing that reads as a position triple in any of the port's
+      fixed-point formats. Whatever a position is here, it is not stored plainly in the block, so the block
+      has to be identified before it can be read.
 
 - [x] 45. **Word wrap in practice — SOLVED, and it was the wrong screen.** The wrap the capture shows is the
       **briefing's**, not the MISSION screen's: `#06A196` at `0x800AE740` sets margins 106 and 406, which is
