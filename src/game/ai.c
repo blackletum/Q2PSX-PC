@@ -916,11 +916,17 @@ bool q2_M_CheckAttack(q2_monster *m)
     /*
      * Eye to eye. When the trace reaches the enemy the decision is the ordinary
      * one below; when it does not, the original falls into a blind-fire path
-     * whose second trace runs to `blind_target` at `+0x5C` with a bare
-     * `0x02000000` mask instead of `0x0200001B`. That path is not transcribed:
-     * it needs the trace's own `ent` and fraction, which the AI world's
-     * line-of-sight hook does not report, and inventing its outcome would make
-     * creatures fire through walls.
+     * whose second trace runs to `blind_target` at `+0x5C`.
+     *
+     * That path is DEAD CODE on this build, so returning false here is not a
+     * narrowing — it is what the console does. Its first gate is bit 17 of
+     * `entity+0x138` (`0x8005D9EC`: `srl 17; andi 1; beq`), and scanning the
+     * whole text segment for writes to that word finds eight outside stack
+     * frames: four are this function's own attack-state stores, which mask with
+     * `0xFFE3FFFF` and preserve bit 17; one is `ai_checkattack`'s; one writes
+     * bits 21 and up; and the two `sh` sites reach only the low halfword. **No
+     * instruction in the image ever sets bit 17.** The blindfire flag is
+     * therefore always clear and the branch behind it cannot be entered.
      */
     if (!q2_visible(m, m->enemy))
         return false;

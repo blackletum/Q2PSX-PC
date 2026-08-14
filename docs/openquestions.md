@@ -1888,12 +1888,17 @@ not damage. It then calls engine slots `+0xC8` and `+0xD8` with vectors.
       819, 410 and 82 out of 4096 — 0.4, 0.2, 0.1 and 0.02 — skill 0 halves them and
       skill 2 or more doubles them, and the flyer's sliding roll is 9830 of 32768,
       which is 0.3.
-      One branch is deliberately NOT transcribed: when the eye-to-eye trace does not
-      reach the enemy the original runs a second trace to `blind_target` at `+0x5C`
-      with a bare `0x02000000` mask and can fire blind. That needs the trace's own
-      `ent` and fraction, which the AI world's line-of-sight hook does not report, and
-      inventing its outcome would make creatures fire through walls. The port returns
-      false there, so a creature that cannot see you does not shoot.
+      **The blind-fire branch is dead code on this build, and the port returning false
+      there is what the console does rather than a narrowing** — which corrects the
+      caveat first written here. Its first gate is bit 17 of `entity+0x138`
+      (`0x8005D9EC`: `srl 17; andi 1; beq`), and scanning the whole text segment for
+      writes to that word finds eight outside stack frames: four are `M_CheckAttack`'s
+      own attack-state stores, which mask with `0xFFE3FFFF` and so PRESERVE bit 17;
+      one is `ai_checkattack`'s; one writes bits 21 and up; and the two `sh` sites
+      reach only the low halfword. **No instruction in the image ever sets bit 17.**
+      The blindfire flag is always clear, the branch cannot be entered, and
+      `blind_target` — which the port does write, in three places — is read by
+      nothing that can run.
       Its shape, for the branch that remains:
 
         - the first gate is the ENEMY's health, reached through `entity+0xBC` then
