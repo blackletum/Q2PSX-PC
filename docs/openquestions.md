@@ -3964,3 +3964,35 @@ nothing saying so.
       wanting a 27-frame clip the Arachner does not have. Its unclaimed records (`"udeath"` 0-0, `"Pain 2"`
       78-93, `"Stand"` 65-77) do not overlap either, so merging is not the answer for them. That is the whole
       remaining residue of the 51 series.
+
+- [~] 59. **The Arachner's residue, accounted for clip by clip: two moves and two clips, one frame apart.**
+      Its model has 13 clips and its module 11 decoded moves plus 2 the decoder never finds. Assigning each
+      move to a clip by the 3:1 rule and striking that clip off:
+
+          0-12    "Start Melee"  13 frames ->  39   clip
+          16-24   "Sway"          9 frames ->  27   NO CLIP
+          94-109  "Attack 1"     16 frames ->  48   clip
+          130-132 "Rear"          3 frames ->   9   clip
+          133-135 "Start Attack"  3 frames ->   9   clip
+          40-45   "Pain 1"        6 frames ->  18   clip
+          35-39   "Melee"         5 frames ->  15   clip
+          110-129 "Attack 3"     20 frames ->  60   clip
+          25-33   (unnamed)       9 frames ->  27   NO CLIP
+          53-64   "Death 2"      12 frames ->  36   clip
+          136-138 "Walk"          3 frames ->   9   clip
+
+      Then the two the module NAMES but the decoder never reaches:
+
+          78-93   "Pain 2"       16 frames ->  48   clip -- and it was unused
+          65-77   "Stand"        13 frames ->  39   clip -- and it was unused
+
+      **Both land on clips nothing else had claimed.** That is independent confirmation of the rule from a
+      direction that could easily have failed, and it identifies two real moves this port does not install.
+
+      What is then left is exact: **two clips unclaimed, both 30 frames — ten AI frames each — and two moves
+      unmatched, both nine AI frames.** Two leftovers on each side, differing by exactly one frame.
+
+      That points at an off-by-one in those two ranges rather than at the rule, and it is recorded as a LEAD,
+      not a result: n = 2, and this file has twice had to withdraw a story that fitted a handful of cases.
+      What would settle it is reading the two moves' frame records directly to see whether the span is 9 or
+      10 — a specific, bounded piece of work, and the last one the 51 series has left.
