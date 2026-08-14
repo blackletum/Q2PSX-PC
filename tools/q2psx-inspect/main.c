@@ -2368,6 +2368,54 @@ static int cmd_model(disc *d, const char *map, const char *want, int clip_index,
         if (*endp == 0 && n < bank.count)
             found = (u32)n;
     }
+
+    /*
+     * Not in COMMON.DAT — try the map's ZONE banks. The creature models live
+     * there: of the seven creatures BASE1 spawns, only the Soldier appears in a
+     * COMMON bank, so searching only COMMON makes six of them unreachable and
+     * makes the disc look as though it has almost no articulated models.
+     *
+     * The zone buffer has to outlive this function's drawing, so it is kept in
+     * statics rather than freed at the end of the search.
+     */
+    if (found == (u32)-1) {
+        static q2_buf zbuf;
+        static q2_zone_file zf;
+        static q2_model_bank zbank;
+        int z;
+
+        for (z = 0; z < 8 && found == (u32)-1; z++) {
+            char zpath[200];
+            u32 zi;
+
+            snprintf(zpath, sizeof(zpath), "Q2DATA/LEVELS/%s/ZONE%d.DAT",
+                     map, z);
+            if (disc_read_file(d, zpath, &zbuf) != Q2_OK)
+                continue;
+            if (q2_zone_open(&zf, &zbuf) != Q2_OK) {
+                q2_buf_free(&zbuf);
+                continue;
+            }
+            if (q2_model_bank_from_zone(&zbank, &zf) == Q2_OK) {
+                for (zi = 0; zi < zbank.count; zi++) {
+                    q2_model probe;
+                    if (q2_model_get(&zbank, zi, &probe) != Q2_OK)
+                        continue;
+                    if (name_casecmp_local(probe.hdr.name, want) == 0) {
+                        bank  = zbank;
+                        found = zi;
+                        printf("(from %s)\n", zpath);
+                        break;
+                    }
+                }
+            }
+            if (found == (u32)-1) {
+                q2_zone_close(&zf);
+                q2_buf_free(&zbuf);
+            }
+        }
+    }
+
     if (found == (u32)-1 || q2_model_get(&bank, found, &mdl) != Q2_OK) {
         fprintf(stderr, "no model '%s' in %s (%u models)\n", want, map,
                 bank.count);

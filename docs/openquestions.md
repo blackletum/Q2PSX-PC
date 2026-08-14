@@ -2497,7 +2497,7 @@ not think, and it does not walk.
       different numbering. Joining the two — by name, by order, or by something else — is the last link
       between what the AI selects and what the model plays.
 
-- [~] 51h. **Three model frames per AI frame — 16 of the Soldier's 18 moves, and two that do not fit.**
+- [x] 51h. **Three model frames per AI frame — 96 of 101 moves, across every creature on the disc.**
       BASE1 model 15 is the Soldier itself, so its 31 moves and the module's 18 can be compared directly.
       Multiplying each AI move's length by 3 and asking whether the model has a clip of exactly that length:
 
@@ -2521,10 +2521,34 @@ not think, and it does not walk.
       Soldier — so a variant model does not account for them. Either those two moves span more than one clip,
       or the range for them is not a plain inclusive span.
 
-      Marked partial, not closed. **Only the Soldier could be tested**: it is the one creature with a model
-      in a zone bank, and the other six (Tankcomm, Gunner, Infantry, Berserk, Arachner, Insane) live in
-      COMMON.DAT, which `q2psx-inspect model` cannot currently open. Widening it there is the next step and
-      would take the sample from 18 moves to something worth calling a census.
+      ~~Only the Soldier could be tested.~~ **Wrong, and backwards.** `cmd_model` reads a map's COMMON.DAT
+      only; the creature models are in its **ZONE** banks. Teaching the command to fall back to
+      `ZONE0..7.DAT` reaches all seven creatures at once, and the sample goes from 18 moves to 101:
+
+          Soldier    16 of 18      Gunner     14 of 14
+          Tankcomm   16 of 16      Infantry   12 of 12
+          Insane     19 of 19      Berserk    10 of 10
+          Arachner    9 of 12
+          ----------------------------------------------
+                              96 of 101
+
+      **96 of 101 AI moves have a clip of exactly three times their frame count.** That is the rule, across
+      every creature the game ships, and it settles the factor of three as data rather than as the
+      arithmetic consequence of `30 / 10` it started as.
+
+      The five exceptions, named rather than smoothed over:
+
+          Soldier   215-247   33 frames, wants 99   -- no clip of 99, and none of 33 either
+          Soldier     0-11    12 frames, wants 36   -- no clip of 36; there IS a 12 (clip 26)
+          Arachner   16-24     9 frames, wants 27   -- no clip of 27; there ARE three 9s
+          Arachner   16-24     9 frames, wants 27      (the module lists this range twice)
+          Arachner   25-33     9 frames, wants 27   -- likewise
+
+      Four of the five have a clip at exactly **1x** their length instead of 3x. That is a suggestive
+      pattern and it is deliberately NOT promoted to a rule here: it was noticed after the fact, from five
+      cases, and a fallback ratio chosen because it makes the leftovers fit is the precise move this file has
+      had to withdraw twice already. It is recorded as an observation. The one case that fits neither ratio
+      is the Soldier's 215-247.
 
 - [ ] ~~51. **The AI frame → model clip mapping drifts across a long move.**~~ `Q2_CRE_TICKS_PER_FRAME` is 3 and
       it lands the START of the Soldier's `Death1` correctly: posed at AI frames 310, 314, 318 and 322 the
