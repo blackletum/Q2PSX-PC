@@ -3114,7 +3114,38 @@ player-versus-player damage:
   `weapon_id = 0`, which is "no weapon" — so three of four players spawned holding nothing and could not have
   fired a shot between them. They now start with what player 0 has, which is what a deathmatch start does.
 
-- [ ] 59. **A staged encounter still produces no damage.** Two players 339 units apart, facing each other by
+- [~] 59. **A staged encounter produces shots but no damage, and the counters have narrowed it to one
+      comparison.** Three real faults fixed on the way, then an instrument that should have come first.
+
+      Fixed, each of which alone would have prevented a hit:
+
+      - **the target pointer aliased.** `client_targets_for` chose `&combat.self` for whichever player was
+        live when the list was BUILT — but `q2_sim_advance_player` swaps afterwards, so that pointer named a
+        different player by the time the shot traced. Player 1 was firing 301 shots at its own actor. Every
+        other player is parked during `who`'s tick, so `&pcombat[i].self` is always right.
+      - **the hurt-actor's position was stale.** `q2_actor_from_player` only runs inside
+        `q2_sim_hurt_player`, so an actor's origin was wherever that player last got SHOT. With one player
+        nothing ever traced at them and it never showed. It is now updated every tick.
+      - **the extra players had no weapon**, and aiming was by reversed yaw rather than at a position — both
+        recorded above.
+
+      Then the counters, which say where a shot stops considering a target: `190 tested, 0 skipped, 0 dead,
+      146 behind, 44 beyond world, 0 off axis, 0 hit`.
+
+      **Nothing is off-axis**, so aim is not the problem — the ray is either pointing away from the target
+      (146) or the world stopped it first (44). Adding 2048 to the computed yaw made it 1409 of 1409 behind,
+      which confirms the convention already in use is the right one and that the 44 are the genuine
+      in-front cases.
+
+      So the remaining question is those 44: two players 339 units apart with no wall between them, and the
+      world trace stopping the ray before it reaches. That is one comparison — `along > world_fraction` — with
+      `along` a distance along the ray and `world_fraction` whatever the world trace returned. Whether those
+      two are in the same units is the next thing to check, and it is a question about `q2_combat_hitscan`'s
+      contract rather than about multiplayer.
+
+  *As first written:*
+
+- [ ] ~~59. **A staged encounter still produces no damage.**~~ Two players 339 units apart, facing each other by
       position, both holding fire, both with the level's weapon, each registered in the other's target list
       (`has 1 targets (0 creatures, 1 other players)`) — and both end 900 frames at 100 health. Everything
       upstream is measured: the target list is right, the actors have `radius` 286, the attribution rule is

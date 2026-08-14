@@ -246,6 +246,19 @@ typedef struct q2_actor {
     u8   effect[6];         /* entity+0x2F0..0x2F4                           */
 } q2_actor;
 
+/* Where a shot stopped considering a target — see the note in combat.c. */
+typedef struct q2_combat_scan_stats {
+    u32 tested;
+    u32 skipped;        /* NULL, or the shooter itself                       */
+    u32 dead;
+    u32 behind;         /* the target is behind the muzzle                   */
+    u32 beyond_world;   /* the world stopped the ray first                   */
+    u32 off_axis;       /* the ray passed outside the target's sphere        */
+    u32 hit;
+} q2_combat_scan_stats;
+
+extern q2_combat_scan_stats q2_combat_scan;
+
 void q2_actor_init(q2_actor *a);
 
 /* Move state between the port's existing structures and an actor. */

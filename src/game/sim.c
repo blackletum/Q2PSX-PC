@@ -1793,6 +1793,23 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
     }
     q2_item_mega_health_tick(&sim->combat.inv, sim->level_time);
 
+    /*
+     * The hurt-actor's position, every tick.
+     *
+     * `q2_actor_from_player` only runs inside `q2_sim_hurt_player`, so before
+     * this an actor's origin was wherever it was the last time that player was
+     * SHOT. Nothing noticed while there was one player, because nothing ever
+     * traced at them. With four, a shot aimed at another player traced toward
+     * a position they had long since left, and 301 shots in a staged encounter
+     * hit nothing at all.
+     *
+     * Only the origin: `owner` and `last_attacker` must survive, and health is
+     * synchronised by the damage path itself.
+     */
+    sim->combat.self.origin[0] = p->pos[0];
+    sim->combat.self.origin[1] = p->pos[1];
+    sim->combat.self.origin[2] = p->pos[2];
+
     /* 0x8003AE10, the last thing the player's frame does: notice damage, grunt,
      * and take this tick's copy of the two figures. After the item sweep,
      * because a medkit collected this tick counts as healing. */

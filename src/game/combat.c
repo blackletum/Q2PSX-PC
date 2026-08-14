@@ -505,6 +505,13 @@ s64 q2_combat_ray_dist_sq(const s32 origin[3], const s32 dir[3],
     return cx * cx + cy * cy + cz * cz;
 }
 
+/*
+ * Where a shot stopped considering a target. "It missed" has five causes and
+ * only one of them is aim; counting them apart is the difference between fixing
+ * the right thing and guessing three times, which is what this cost.
+ */
+q2_combat_scan_stats q2_combat_scan;
+
 /* Shared scan: the nearest actor whose sphere the ray crosses within the
  * fraction the world allows. Returns its index, or -1. */
 static s32 nearest_hit(const s32 origin[3], const s32 dir[3],
@@ -521,18 +528,33 @@ static s32 nearest_hit(const s32 origin[3], const s32 dir[3],
         s64 along = 0, d2;
         s64 reach;
 
-        if (!t || i == skip_mask_index)
+        q2_combat_scan.tested++;
+        if (!t || i == skip_mask_index) {
+            q2_combat_scan.skipped++;
             continue;
-        if (t->health <= 0)
+        }
+        if (t->health <= 0) {
+            q2_combat_scan.dead++;
             continue;
+        }
 
         d2 = q2_combat_ray_dist_sq(origin, dir, t->origin, &along);
-        if (along <= 0 || along > world_fraction)
+        if (along <= 0) {
+            q2_combat_scan.behind++;
             continue;
+        }
+        if (along > world_fraction) {
+            q2_combat_scan.beyond_world++;
+            continue;
+        }
 
         reach = (s64)hit_radius + t->radius;
-        if (d2 > reach * reach)
+        if (d2 > reach * reach) {
+            q2_combat_scan.off_axis++;
             continue;
+        }
+
+        q2_combat_scan.hit++;
 
         if (best < 0 || along < best_along) {
             best = (s32)i;

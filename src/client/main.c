@@ -332,6 +332,8 @@ typedef struct client {
     q2_actor         *mp_target[Q2_CLIENT_MAX_TARGETS];
     bool              mp_targets_logged;
     bool              mp_stage;
+    u32               mp_shots[Q2_MP_MAX_PLAYERS];
+    u32               mp_dry[Q2_MP_MAX_PLAYERS];
     bool              mp_dead[Q2_MP_MAX_PLAYERS];
     int               trace_cre;      /* creature index to trace, -1 for none  */
     u32               trace_ticks;
@@ -967,9 +969,21 @@ static u32 client_targets_for(client *c, int who)
         for (i = 0; i < Q2_MP_MAX_PLAYERS && n < Q2_CLIENT_MAX_TARGETS; i++) {
             if ((int)i == who || !c->sim_ready[i])
                 continue;
-            c->mp_target[n++] = (i == (u32)c->sim[0].cur_player)
-                                    ? &c->sim[0].combat.self
-                                    : &c->sim[0].pcombat[i].self;
+            /*
+             * ALWAYS the parked slot, never `combat.self`.
+             *
+             * The list is built before `q2_sim_advance_player` swaps, and the
+             * swap moves the live player's half OUT of `combat` and the target
+             * player's IN. So a pointer to `combat.self` chosen here for "the
+             * player who is live right now" points at somebody else by the time
+             * the shot is traced — player 1 was firing 301 shots at its own
+             * actor and nobody was ever hit.
+             *
+             * During `who`'s tick every OTHER player is parked, so
+             * `pcombat[i].self` is exactly right for all of them, and `who`
+             * itself is skipped above.
+             */
+            c->mp_target[n++] = &c->sim[0].pcombat[i].self;
         }
 
     q2_sim_set_targets(&c->sim[0], c->mp_target, n);
@@ -2015,6 +2029,18 @@ static void client_input_simulated(client *c, float dt)
                 }
                 client_targets_for(c, pi);
                 q2_sim_advance_player(&c->sim[0], pi, &pin, ticks);
+
+                /*
+                 * Did that player's frame actually take a shot? `last_shot` is
+                 * part of the swapped half, so after the tick it is parked in
+                 * that player's slot. Counting it is what tells "the shot
+                 * missed" apart from "no shot was ever fired", and those want
+                 * very different fixes.
+                 */
+                if (c->sim[0].pcombat[pi].last_shot.fired)
+                    c->mp_shots[pi]++;
+                else if (c->sim[0].pcombat[pi].last_shot.dry)
+                    c->mp_dry[pi]++;
                 client_sync_parked_health(c);
                 client_score_deaths(c);
             }
@@ -3117,6 +3143,15 @@ static void client_write_shot(client *c, bool numbered)
             for (pi = 0; pi < Q2_MP_MAX_PLAYERS; pi++) {
                 if (pi > 0 && !c->sim_ready[pi])
                     continue;
+                Q2_INFO("  player %d shots %u, dry %u", pi,
+                        c->mp_shots[pi], c->mp_dry[pi]);
+                if (pi == 1)
+                    Q2_INFO("  scan: %u tested, %u skipped, %u dead, %u behind,"
+                            " %u beyond world, %u off axis, %u hit",
+                            q2_combat_scan.tested, q2_combat_scan.skipped,
+                            q2_combat_scan.dead, q2_combat_scan.behind,
+                            q2_combat_scan.beyond_world,
+                            q2_combat_scan.off_axis, q2_combat_scan.hit);
                 Q2_INFO("  player %d at [%d %d %d] yaw %d, %d hp, moved %ld",
                         pi, c->sim[0].player[pi].pos[0],
                         c->sim[0].player[pi].pos[1],
