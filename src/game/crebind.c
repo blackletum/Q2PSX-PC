@@ -43,6 +43,42 @@ static q2_endfunc resolve_endfunc(const q2_creature *c, const q2_cre_impl *impl,
     return NULL;
 }
 
+/*
+ * The endfunc for a move whose own ends in "install this other move".
+ *
+ * It takes only the entity, so which move to install has to come from the
+ * entity: `m->currentmove` is still the move that just finished, and its
+ * decoded record carries the address the module's installer would have written.
+ */
+static void chain_endfunc(q2_monster *m)
+{
+    q2_cre_bind *b = q2_cre_bind_for(m);
+    u32 i;
+
+    if (!b || !b->cre || !m->currentmove)
+        return;
+
+    for (i = 0; i < b->move_count && i < b->cre->move_count; i++) {
+        if (&b->move[i] != m->currentmove)
+            continue;
+
+        {
+            u32 target = b->cre->move[i].endfunc_move;
+            u32 k;
+
+            if (!target)
+                return;
+
+            for (k = 0; k < b->cre->move_count; k++)
+                if (b->cre->move[k].addr == target) {
+                    q2_cre_set_move(m, b->cre->move[k].first_frame);
+                    return;
+                }
+        }
+        return;
+    }
+}
+
 bool q2_creature_bind(q2_cre_bind *b, const q2_creature *c,
                       const q2_cre_impl *impl)
 {
@@ -56,9 +92,23 @@ bool q2_creature_bind(q2_cre_bind *b, const q2_creature *c,
     b->impl = impl;
 
     for (i = 0; i < c->move_count && i < Q2_CRE_MAX_MOVES; i++) {
-        q2_creature_mmove(c, &c->move[i],
-                          resolve_endfunc(c, impl, c->move[i].endfunc_addr),
-                          &b->move[i]);
+        q2_endfunc fn = resolve_endfunc(c, impl, c->move[i].endfunc_addr);
+
+        /*
+         * An endfunc that is nothing but an installer is neither a callback nor
+         * a think, so `resolve_endfunc` cannot name it and returned NULL — and
+         * the move chain it exists to make simply did not happen. The decoder
+         * records which move such a function installs; this runs it.
+         *
+         * The Gunner's hitscan is entirely on the far side of one of these: its
+         * fire think lives in move 144-151, which no callback installs and
+         * which `M_137_143`'s three-instruction endfunc at `module+0x11D8` is
+         * the only route to.
+         */
+        if (!fn && c->move[i].endfunc_move)
+            fn = chain_endfunc;
+
+        q2_creature_mmove(c, &c->move[i], fn, &b->move[i]);
         b->move_count++;
     }
 

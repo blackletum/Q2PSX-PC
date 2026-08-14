@@ -445,6 +445,62 @@ static bool add_move(q2_creature *c, dec *d, u32 move_addr, s32 via)
     m->last_frame   = last;
     m->frames_addr  = frames_addr;
     m->endfunc_addr = word_at(d, move_addr + 12);
+
+    /*
+     * If that endfunc is nothing but "install this other move", record which.
+     * The shape is three instructions — `lui`/`addiu` materialising a move
+     * record and `sw rX, 0xD8(a0)` — and a function that does more than that is
+     * left alone, because guessing at one would install a move the creature was
+     * never meant to play.
+     */
+    m->endfunc_move = 0;
+    if (m->endfunc_addr && in_image(d, m->endfunc_addr, 16)) {
+        u32 a, stores = 0, target = 0;
+        dec probe = *d;
+
+        dec_reset(&probe);
+        for (a = m->endfunc_addr; a < m->endfunc_addr + 32; a += 4) {
+            u32 w;
+
+            if (!in_image(&probe, a, 4))
+                break;
+            w = word_at(&probe, a);
+            dec_track(&probe, w);
+
+            if (OP(w) == OP_SW && IMM(w) == Q2_ENT_OFS_MOVE) {
+                u32 rt = RT(w);
+
+                stores++;
+                if (rt < 32 && probe.known[rt])
+                    target = probe.reg[rt];
+            }
+            /*
+             * `jr ra` ends it — but its DELAY SLOT is where the compiler puts
+             * the store, so the slot has to be examined before breaking rather
+             * than merely tracked. Missing that reported every one of these
+             * endfuncs as installing nothing.
+             */
+            if (OP(w) == 0 && (w & 0x3F) == 0x08) {
+                if (in_image(&probe, a + 4, 4)) {
+                    u32 dw = word_at(&probe, a + 4);
+
+                    dec_track(&probe, dw);
+                    if (OP(dw) == OP_SW && IMM(dw) == Q2_ENT_OFS_MOVE) {
+                        u32 drt = RT(dw);
+
+                        stores++;
+                        if (drt < 32 && probe.known[drt])
+                            target = probe.reg[drt];
+                    }
+                }
+                break;
+            }
+        }
+
+        /* Exactly one install, and it must validate as a move record. */
+        if (stores == 1 && target && in_image(d, target, 16))
+            m->endfunc_move = target;
+    }
     m->frame_index  = c->frame_count;
     m->frame_count  = n;
     m->via          = via;

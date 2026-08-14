@@ -120,8 +120,9 @@ static void report(const q2_creature *c, const q2_cre_impl *impl)
         u8 seen[64];
         u32 nseen = 0, f;
 
-        printf("      (%2d) %08X %3d-%-3d ->", mv->via, mv->addr,
-               mv->first_frame, mv->last_frame);
+        printf("      (%2d) %08X end %08X->%08X %3d-%-3d ->", mv->via, mv->addr,
+               mv->endfunc_addr, mv->endfunc_move, mv->first_frame,
+               mv->last_frame);
 
         /*
          * In FRAME ORDER, run-length encoded. WHICH thinks a move calls is only

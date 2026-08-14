@@ -2843,7 +2843,38 @@ agreement deliberate and adds the melee-range branch the generic handler had no 
 On WASTE3 the Gunner now attacks — `2 checkattack, 1 yes, 1 attack call` — and **think 13 runs 33 times**,
 which is `M_137_143`'s first frame. It still fires nothing, and the census says why:
 
-- [ ] 58. **The Gunner's fire think is 2, and think 2 lives in a move nothing reaches.** Its move
+- [x] 58. **ANSWERED AND FIXED: a move's endfunc could only be run if it was also a callback or a think.**
+
+      `resolve_endfunc` maps an endfunc address to one of the thirteen callbacks or thirty-two methods the
+      implementation carries. A standalone installer is neither, so it resolved to NULL and the chain it
+      exists to make simply did not happen.
+
+      The Gunner's is three instructions at `module+0x11D8`:
+
+          lui   v0, 0x8010
+          addiu v0, v0, 7292        ; 0x80101C7C — move 144-151
+          jr    ra
+          sw    v0, 216(a0)         ; delay slot: self->currentmove = it
+
+      That move is eight frames of think 2, and think 2 is the one carrying `call(+0x84)`, the hitscan. The
+      Gunner's entire ranged attack was on the far side of a function the port could not name.
+
+      The decoder now records what such an endfunc installs — one store to `entity+0xD8`, a materialised
+      address that validates as a move record, and nothing else, so a function that does more is left alone —
+      and the bind installs a shared endfunc that performs it. **43 of the disc's 101 moves have a decoded
+      endfunc target**, where none did.
+
+      A second delay slot caught this one out on the way: the store is in `jr ra`'s slot, and the first
+      version tracked that word without checking it, so every endfunc on the disc reported as installing
+      nothing. That is twice in two days the delay slot has hidden something — worth remembering as the first
+      thing to check when a linear walk comes back empty.
+
+      WASTE3, 700 frames: `think hit 1:22 2:1 6:15 7:15 13:1`, `1 fire calls: 1 sent`. The Gunner reaches
+      think 2 and fires. The Tank Commander is unaffected — COMMAND still reports 22 of 22.
+
+  *As first written:*
+
+- [ ] ~~58. **The Gunner's fire think is 2, and think 2 lives in a move nothing reaches.**~~ Its move
       `144-151` is eight frames of think 2, and think 2 is the one carrying `call(+0x84)` — the hitscan. That
       move's `via` is **-1**: no callback installs it, so it is reached only through another move's endfunc.
       Presumably `M_137_143` or `M_108_128` ends into it. The endfunc chain is resolved at bind time

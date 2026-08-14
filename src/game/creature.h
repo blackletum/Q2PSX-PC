@@ -96,6 +96,19 @@ typedef struct q2_cre_move {
     s32 last_frame;
     u32 frames_addr;
     u32 endfunc_addr;       /* 0 when the move loops               */
+
+    /*
+     * The move `endfunc_addr` installs, when it is nothing but an installer —
+     * three instructions that materialise a move record and store it to
+     * entity+0xD8. Zero when the endfunc does more than that, or does not exist.
+     *
+     * This matters because `resolve_endfunc` can only map an address to one of
+     * the thirteen callbacks or thirty-two methods an implementation carries. A
+     * standalone installer is neither, so it resolved to NULL and the chain died
+     * — which is why sixteen of the disc's moves have `via == -1` and nothing
+     * reaches them. The Gunner's whole hitscan attack is on the far side of one.
+     */
+    u32 endfunc_move;
     u32 frame_index;        /* into the owner's frame pool         */
     u32 frame_count;
     /* Which callback installed it, as an offset from Q2_ENT_OFS_STAND / 4,
