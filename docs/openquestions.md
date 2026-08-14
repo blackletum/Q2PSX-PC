@@ -4112,17 +4112,25 @@ nothing saying so.
       the player's machinegun flash**, which is a pleasing cross-check: two independently-read sites landing
       on one colour.
 
-      It is NOT wired, and the reason is specific rather than cautious. The radius is
+      ~~Its input is not a plain `rand()` draw — it carries a sign.~~ **Wrong, and reading four instructions
+      further back settles it.** There are TWO `jal 0x80089E28` calls, not zero:
 
-          800311F8  sll  v0, v1, 4
-          800311FC  bgez v0, +2          ; signed rounding: negatives get +32767
-          80031208  sra  v0, v0, 15
-          80031220  addiu v0, v0, 1200   ; base 1200, not the player's 700
+          800311B0  jal  0x80089E28       ; r1 = rand()
+          800311B8  sll/addu/sll/addu     ; r1 * 25
+          800311C8  sll  v0, v1, 3        ; r1 * 200
+          800311DC  addiu v0, v0, 850     ; inner = ((r1*200)>>15) + 850    850..1049
+          800311E0  jal  0x80089E28       ; r2 = rand()   (delay slot stores inner)
+          800311E8  sll/addu/sll/addu     ; r2 * 25
+          800311F8  sll  v0, v1, 4        ; r2 * 400
+          80031220  addiu v0, v0, 1200    ; outer = ((r2*400)>>15) + 1200  1200..1599
 
-      so it is a bigger flash on a different base, and its input is not a plain `rand()` draw — it carries a
-      sign, which a random 0..32767 never would. Wiring it with the player's formula would be a guess dressed
-      as a transcription. `cre_actions.c`'s slot map does not cover `+0xA0` either, so the port currently
-      counts that call as unhandled, which is at least honest.
+      The `bgez ...; addiu 32767` around each shift is the **compiler's signed-divide idiom**, not evidence
+      of a signed input — `rand()` returns 0..32767, so that arm is never taken. Reading it as a sign was the
+      whole reason the previous entry gave for not wiring this, and it was a misreading of boilerplate.
+
+      **Wired**: `q2_creature_muzzle_light()`, with `tests/light` pinning both endpoints and, importantly,
+      that the two draws are independent — the creature flash uses TWO where the player's uses one, so an
+      implementation that reused a single draw would produce correlated radii and look right.
 
       How many exist, counted rather than grepped: **18 TIMEDLIGHT calls and 1 FLKLIGHT across COMMON's
       scripts, disc-wide.** A passive capture triggers none of them — they are script records fired by

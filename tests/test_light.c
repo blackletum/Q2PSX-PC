@@ -466,6 +466,22 @@ static void test_muzzle_light(void)
         check_eq_i(hi_out, 899, "outer at rand 32767");
     }
 
+    /* The creature flash: two draws, bigger bases, same colour. */
+    {
+        s32 in0, out0, in1, out1;
+        q2_creature_muzzle_light(0, 0, &in0, &out0);
+        q2_creature_muzzle_light(32767, 32767, &in1, &out1);
+        check_eq_i(in0,   850, "creature inner at rand 0");
+        check_eq_i(in1,  1049, "creature inner at rand 32767");
+        check_eq_i(out0, 1200, "creature outer at rand 0");
+        check_eq_i(out1, 1599, "creature outer at rand 32767");
+
+        /* Two independent draws: the second must not move the first. */
+        q2_creature_muzzle_light(0, 32767, &in0, &out0);
+        check_eq_i(in0,   850, "inner ignores the second draw");
+        check_eq_i(out0, 1599, "outer ignores the first");
+    }
+
     check(q2_weapon_has_muzzle_light(Q2_WID_MACHINEGUN), "machinegun flashes");
     check(q2_weapon_has_muzzle_light(Q2_WID_CHAINGUN),   "chaingun flashes");
     check(!q2_weapon_has_muzzle_light(Q2_WID_BFG),       "the BFG does not");

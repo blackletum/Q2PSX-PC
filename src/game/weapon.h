@@ -251,6 +251,30 @@ bool q2_weapon_usable(const q2_inventory *inv, int id);
 #define Q2_MUZZLE_OUTER_BASE   700
 #define Q2_MUZZLE_OUTER_SCALE  200
 
+/*
+ * The CREATURE muzzle flash — import slot 0xA0, which only the Gunner's think 13
+ * calls on the whole disc.
+ *
+ * Same colour as the player's, and the same shape of computation, but bigger and
+ * drawn TWICE rather than once (0x800311B0 and 0x800311E0 are two separate
+ * rand() calls):
+ *
+ *     inner = ((r1 * 200) >> 15) + 850     850..1049
+ *     outer = ((r2 * 400) >> 15) + 1200   1200..1599
+ *
+ * The `bgez ...; addiu 32767` around each shift is the compiler's signed-divide
+ * idiom, not evidence of a signed input; `rand()` returns 0..32767 so it never
+ * takes that arm. An earlier note here read it as a sign and used it as a reason
+ * not to wire this — wrongly.
+ */
+#define Q2_CRE_MUZZLE_INNER_BASE   850
+#define Q2_CRE_MUZZLE_INNER_SCALE  200
+#define Q2_CRE_MUZZLE_OUTER_BASE  1200
+#define Q2_CRE_MUZZLE_OUTER_SCALE  400
+
+/* The creature flash's radii, from its TWO draws, as 0x800311B8 computes them. */
+void q2_creature_muzzle_light(s32 rand_a, s32 rand_b, s32 *inner, s32 *outer);
+
 /* True for the two weapon ids whose fire function appends a light. */
 bool q2_weapon_has_muzzle_light(u8 weapon_id);
 
