@@ -100,6 +100,38 @@ static void report(const q2_creature *c, const q2_cre_impl *impl)
         }
     }
 
+    /*
+     * Which THINK each move's frames call, and which callback installed the
+     * move. A think index only ever runs because a frame names it, so "the
+     * creature never reaches think 8" is answered here and nowhere else: if no
+     * frame of any move carries it, nothing the AI does will run it.
+     */
+    printf("    per move  : (via) range -> think bytes\n");
+    for (i = 0; i < c->move_count; i++) {
+        const q2_cre_move *mv = &c->move[i];
+        u8 seen[64];
+        u32 nseen = 0, f;
+
+        printf("      (%2d) %3d-%-3d ->", mv->via, mv->first_frame,
+               mv->last_frame);
+
+        for (f = 0; f < mv->frame_count &&
+                    mv->frame_index + f < Q2_CRE_MAX_FRAMES; f++) {
+            u8 th = c->frames[mv->frame_index + f].think;
+            u32 k;
+            bool dup = false;
+
+            for (k = 0; k < nseen; k++)
+                if (seen[k] == th)
+                    dup = true;
+            if (dup || nseen >= sizeof(seen))
+                continue;
+            seen[nseen++] = th;
+            printf(" %u", th);
+        }
+        printf("\n");
+    }
+
     n = q2_creature_think_indices(c, idx, sizeof(idx));
     printf("    think     :");
     for (i = 0; i < n; i++) {

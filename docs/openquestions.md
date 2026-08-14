@@ -2531,7 +2531,53 @@ the same map: `attack set 1 / missing 0, melee 0 / 0` — no phantom melee, and 
 The Soldier is unaffected, as it should be: its module has every callback, and BASE0 reports the same 19
 shots before and after.
 
-- [ ] 54. **A decoded creature has still not been seen firing.** Two real obstacles are gone — the think
+- [x] 54. **ANSWERED: the generic attack handler always takes the FIRST move its callback installs, and for
+      the Tank Commander that is the one attack of four that does not shoot.**
+
+      A think index only ever runs because an animation FRAME names it, so the question was never about the
+      AI — it was about which frames the move being played carries. `q2psx-inspect creatures` now prints that
+      for all 97 moves on the disc: `(via) range -> think bytes`, the callback that installed each move and
+      the distinct think bytes its frames call.
+
+      The Tank Commander's attack callback installs FOUR moves:
+
+      | range | thinks its frames call |
+      | --- | --- |
+      | 77-114 | 0, 6, 11, 9 |
+      | 168-196 | 0, **13** |
+      | 115-135 | 0, 6 |
+      | 55-70 | 0, **8** |
+
+      Its fire thinks are 8, 10 and 13. `generic_attack` calls `set_via(m, 6)`, which returns the first move
+      for that slot — 77-114, whose thinks are the `+0x12C` proximity call and two sounds. Every attack it
+      makes is the one that does not shoot, which is exactly the 31 unclassified calls and no fire calls the
+      counters reported. `cre_generic.c` documents "the first move a callback installs is the one taken" as a
+      caveat about randomised animation; for this creature it silently disables firing altogether.
+
+      The same census answers it for the others, and they do not all lose: **the Arachner's first attack move
+      (94-109) carries thinks 3 and 4 and both call `+0x8C`, the rail**, and the **Infantry's first (199-206)
+      carries think 11, which melees and calls `+0xFC`**. Those two should fire on the current code. The
+      Gunner loses the same way the Tank Commander does — its first attack move (108-128) carries thinks 0
+      and 1, while `+0x84` is on think 2. Berserk and Insane have no attack move at all, which is right: they
+      are melee creatures.
+
+- [ ] 55. **Which of a callback's several moves the module picks.** The module's attack function branches —
+      on range, on a roll, or on state — and the decoder records only WHICH moves a callback installs, not
+      the branch that chooses between them. Four attack moves for the Tank Commander, two for the Gunner,
+      two for the Infantry. Until that branch is read, a generic creature will always play one of them, and
+      for two of the four ranged creatures that one is silent. This is the concrete form of "transcribe the
+      remaining six modules" and it now has a per-creature list rather than a shrug.
+
+- [ ] 56. **Some callbacks have no move attributed to them at all.** The Arachner never moves on POWER1:
+      `run 0 / missing 2` — `set_via(m, 4)` is called and finds nothing, so there is no animation to play and
+      `q2_M_MoveFrame` advances nothing. Its module has a run callback (or `m->run` would now be NULL) but no
+      move records `via == 4`, which means it installs one indirectly — through another move's endfunc, which
+      the decoder marks `via == -1`. Sixteen of the disc's 97 moves are `via == -1`. The Gunner shows the same
+      shape on WASTE3, where it never reaches a single `checkattack` in 700 frames.
+
+  *As first written:*
+
+- [ ] ~~54. **A decoded creature has still not been seen firing.**~~ Two real obstacles are gone — the think
       table was being wiped, and the phantom melee was absorbing every attack — and the fire routing is
       covered by unit tests, but no capture has yet produced a `fire_sent`. What the counters now say is where
       to look: on COMMAND the Tank Commander's attack move installs and the thinks that run carry import
