@@ -2342,6 +2342,39 @@ not think, and it does not walk.
       exactly 3 and that is suspicious, but "suspicious" is not "measured", and this project has been wrong
       before by reasoning where it could have counted. **Open follow-up: 51c, are the two strides in the same
       units?**
+
+- [x] 51c. **Are the two strides in the same units? Yes — and that means 10 and 30 were never rivals.**
+      One instruction settles it. The pose selector `0x8006B924`, which walks the clip chain, starts with:
+
+          8006B95C  lh   s1, 256(s6)   ; s1 = entity+0x100
+          8006B960  lh   v0, 0(v1)     ; v0 = clip->frames, the duration
+          8006B968  slt  v0, s1, v0    ; while position >= duration...
+          8006B984  jal  0x80070188    ; ...advance the clip pointer by its `next`
+          8006B988  subu s1, s1, v1    ; ...and subtract that clip's duration
+
+      It reads `entity+0x100` — **the exact halfword `0x8007E9DC` writes**. The position the frame computes
+      is the position the clip walk consumes. Same field, same space, measured rather than argued.
+
+      So the two constants are not competing calibrations of one quantity, and changing 10 to 30 would have
+      been wrong:
+
+        * **10 is position-units per CLIP frame.** `src/formats/model.c:541` uses it as `tick / 10 * 4` to
+          index a 4-byte clip entry, matching the loader's documented multiply of clip durations by 10.
+        * **30 is position-units per MOVE frame** — `base + 30 * (frame - first)` out of a block-D record.
+
+      If the load-time multiply by 10 holds, one move frame spans exactly three clip frames. **The port's
+      constant is not wrong; the port is missing a step.** It substitutes `frame * 10` for the block-D
+      lookup, so it never applies a move's `base` and never gets the 3:1 relation — which is why animation
+      plays but need not line up with the move the AI actually selected.
+
+      The fix is therefore not a constant edit but an implementation of the block-D containment lookup. That
+      is the shape of the remaining work, and it is larger than the one-line change it looked like.
+
+      **Not verified:** the load-time multiply by 10 (and the by-5 on block D's `+12/+14/+16`) rests on the
+      note at `src/formats/model.h:165-170`, not on disassembly. The `x*5` / `x*10` shift-add idioms do not
+      appear in `0x80064780`+460 instructions, where that note points. The tool reads a raw on-disc duration
+      of 1 for BASE1's model 0, which is consistent with a multiply at load — but consistent is not shown.
+      **Opened as 51d: find and read the multiply, or retract it.**
 - [ ] ~~51. **The AI frame → model clip mapping drifts across a long move.**~~ `Q2_CRE_TICKS_PER_FRAME` is 3 and
       it lands the START of the Soldier's `Death1` correctly: posed at AI frames 310, 314, 318 and 322 the
       model is a body collapsing to the floor, progressively. But the move runs 308-342, and at 330 and 336
