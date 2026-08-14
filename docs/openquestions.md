@@ -2303,39 +2303,45 @@ not think, and it does not walk.
       Soldier's death move in clip 12 while clip 11 is the death animation, then **`entity+0x100` is not
       derived from the AI frame at all** — it is its own counter, advanced by something else.
 
-- [ ] 51b. **What advances `entity+0x100`? — 23 writers, and none of them is the AI frame driver.**
-      `q2psx-inspect access 0x100` lists every instruction touching the field: twenty-three stores, and not
-      one lies in `0x80061000..0x80062FFF`, which is where `M_MoveFrame` and the class-method dispatch live.
-      **So the animation position is not written by the thing that advances an AI frame**, which is on its own
-      enough to say the port's `frame * Q2_CRE_TICKS_PER_FRAME` is a substitution rather than the rule.
+- [x] 51b. **What advances `entity+0x100`? — the frame picks the position, at 30 units per frame.**
+      `0x8007E9DC` is the function, and it reads end to end. `a0` is the entity, `a1` an enable flag:
 
-      The most promising of them is `0x8007EB18`, and it is worth writing down because it is several facts at
-      once:
+          8007E9E0  lw   v0, 748(t1)     ; v0 = entity+0x2EC, the linked object
+          8007E9E8  lw   t0, 40(v0)      ; t0 = its +0x28, a table (null -> return)
+          8007EA00  lh   v0, 0(t0)       ; record[0], signed
+          8007EA08  bltz v0, ...         ; negative record[0] ends the table
+          8007EA1C  lh   a1, 56(v0)      ; a1 = (entity+0x2EC)->0x38, the CURRENT FRAME
+          8007EA24  slt  v0, a1, v1      ; frame <  record.first -> next record
+          8007EA38  slt  v0, v0, a1      ; frame >  record.last  -> next record
+          8007EA40  subu v0, a1, v1      ; v0 = frame - record.first
+          8007EA44  sll/subu/sll         ; v1 = ((v0<<4)-v0)<<1 = 30 * v0
+          8007EA54  lhu  v0, 16(a3)      ; record+18 = the move's BASE position
+          8007EA5C  addu v0, v0, v1      ; target = base + 30 * (frame - first)
 
-          8007EB18  sh   t2, 256(t1)      ; entity+0x100 = t2
-          8007EB28  sw   v1, 176(t1)      ; and flags at +0xB0 are rewritten around it
-          8007EB38  lw   a0, 748(t1)      ; entity+0x2EC, the linked object
-          8007EB48  sh   t2, 46(a0)       ; ...gets the SAME value at its +0x2E
-          8007EB4C  addiu t0, t0, 20      ; walking 20-BYTE records
-          8007EB50  lh   v0, 0(t0)        ; keyed on a leading s16
-          8007EB58  bgez v0, 0x8007EA14   ; ...until it goes negative
+      So the record is `{u16 first; u16 last; ...; u16 base}` in 20 bytes — the same table this project
+      already reads as move names — and it is searched by **containment**: the move is the one whose
+      `[first..last]` spans the current frame. The answer to 51 is therefore neither "a move selects a clip"
+      (withdrawn) nor a free-running timer: **the position is a pure function of the frame**, linear, with a
+      per-move base and a stride of 30.
 
-      Twenty-byte records with a leading s16 are the same shape as the move-name table
-      (`{char[16]; u16 first; u16 last}`) this project already reads, and `entity+0x2EC` is the field
-      `0x80057D54` passes to T_Damage as a second target. So the position is set from a table walk, in company
-      with a linked object, by code sitting beside the module loader rather than in the AI.
+      The rest of the function is bookkeeping that names three more fields:
 
-      That is where 51b resumes. The selector stays until it is answered. The selector stays as
-      it is because it demonstrably picks the right clips — 93 of 97 moves have one of exactly the matching
-      length, and the Soldier's four consecutive moves resolve to clips 1, 2, 3 and 4 — but it is a
-      reconstruction standing in for a counter that has not been found, and this file should say so rather
-      than describe it as the engine's own rule. Matching lengths is a reconstruction, not a
-      read: it recovers the right answer 93 times out of 97 and the four misses are silent. Something in a
-      module's code sets `model+0x34` when it installs a move, and that store has not been found.
+          8007EA58  srl  a0, a0, 17      ; CURRENT position = entity+0xB0 >> 17
+          8007EA6C  bne  a0, v0, ...     ; if it differs from target...
+          8007EA8C  sw   v0, 268(t1)     ; ...entity+0x10C bit 0x40 is cleared, else set
+          8007EB18  sh   t2, 256(t1)     ; entity+0x100 = the position
+          8007EB48  sh   t2, 46(a0)      ; and (entity+0x2EC)+0x2E takes the same value
 
-  *The finding as originally written, kept because the render that produced it is the reason the drift was
-  visible at all:*
+      `entity+0xB0` packs the live position in bits 17 and up; `+0x100` and the linked object's `+0x2E` are
+      copies; `+0x10C` bit 0x40 is an **on-frame flag** — set exactly when the position equals what the frame
+      says it should be.
 
+      **The port's stride is 10 (`Q2_MODEL_TICKS_PER_FRAME`, `src/formats/model.h:332`); the disc's is 30.**
+      Before changing it, the units have to be shown to be the same space — the port's 10 divides a tick to
+      index a 4-byte clip entry, while the disc's 30 accumulates into a 15-bit packed field. The ratio is
+      exactly 3 and that is suspicious, but "suspicious" is not "measured", and this project has been wrong
+      before by reasoning where it could have counted. **Open follow-up: 51c, are the two strides in the same
+      units?**
 - [ ] ~~51. **The AI frame → model clip mapping drifts across a long move.**~~ `Q2_CRE_TICKS_PER_FRAME` is 3 and
       it lands the START of the Soldier's `Death1` correctly: posed at AI frames 310, 314, 318 and 322 the
       model is a body collapsing to the floor, progressively. But the move runs 308-342, and at 330 and 336
