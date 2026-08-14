@@ -264,6 +264,17 @@ static void test_frames_drive(void)
           "and the per-frame distances move it");
 }
 
+/* Records what the fire hook was handed, for the decoded-fire check below. */
+static int g_test_fire_count;
+static int g_test_fire_flash;
+
+static void test_fire_hook(q2_monster *m, int flash, void *user)
+{
+    (void)m; (void)user;
+    g_test_fire_count++;
+    g_test_fire_flash = flash;
+}
+
 static void test_generic_fallback(void)
 {
     q2_cre_bind bind;
@@ -299,6 +310,70 @@ static void test_generic_fallback(void)
      * creature acts from what was read off the disc. */
     check(q2_class_method_get(TEST_CLASS, 6) != NULL,
           "and a think handler that runs the decoded action");
+
+    /*
+     * And a decoded FIRE reaches the fire hook. The five import slots the
+     * projectile spawners live in were named out of the loader at 0x8007DA00
+     * and confirmed by what each calls — the rocket at +0x98 goes through
+     * 0x8004AF28, which combat.h already records as being called from that very
+     * address. Before this, a CALL step of any kind did nothing, which is why
+     * six of the seven modules hunted the player and never shot.
+     */
+    {
+        static q2_cre_think think[8];
+
+        memset(think, 0, sizeof(think));
+        think[6].step_count      = 1;
+        think[6].step[0].op      = Q2_CRE_OP_CALL;
+        think[6].step[0].import_ofs = 0x98;          /* the rocket */
+
+        q2_creature_bind_thinks(&bind, think, 8);
+
+        q2_cre_set_fire_hook(test_fire_hook, NULL);
+        g_test_fire_count = 0;
+        g_test_fire_flash = -1;
+
+        /* No enemy: a decoded creature must not shoot at nothing. */
+        m.enemy = NULL;
+        q2_cre_run_think(&m, 6);
+        check_eq_i(g_test_fire_count, 0, "no enemy, no shot");
+
+        /* An enemy that is alive: the shot goes. */
+        {
+            static q2_monster foe;
+
+            q2_monster_init(&foe);
+            foe.health = 100;
+            m.enemy = &foe;
+            q2_cre_run_think(&m, 6);
+            check_eq_i(g_test_fire_count, 1, "a decoded fire reaches the hook");
+            check_eq_i(g_test_fire_flash, 0x98,
+                       "carrying the import slot it came from");
+
+            /* A dead enemy stops it, the same guard every refire has. */
+            foe.health = 0;
+            q2_cre_run_think(&m, 6);
+            check_eq_i(g_test_fire_count, 1, "and a dead enemy stops it");
+        }
+
+        /* The vector-maths imports are NOT shots: 40 of the disc's 107 call
+         * steps are these, and treating them as fire would have every creature
+         * shoot three times an animation frame. */
+        m.enemy = NULL;
+        {
+            static q2_monster foe2;
+
+            q2_monster_init(&foe2);
+            foe2.health = 100;
+            m.enemy = &foe2;
+            think[6].step[0].import_ofs = 0xC0;
+            q2_cre_run_think(&m, 6);
+            check_eq_i(g_test_fire_count, 1,
+                       "muzzle arithmetic is not a shot");
+        }
+
+        q2_cre_set_fire_hook(NULL, NULL);
+    }
 }
 
 static void test_soldier_present(void)

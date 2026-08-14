@@ -177,8 +177,14 @@ s32  q2_cre_skill(void)          { return g_skill; }
 /* through its import table; the port routes them through one callback so     */
 /* combat stays in combat.c rather than leaking into every creature.          */
 /* ------------------------------------------------------------------------- */
-static void (*g_fire)(q2_monster *m, int flash_index, void *user);
-static void  *g_fire_user;
+/* Shared with cre_actions.c, the same way the sound and melee hooks are: a
+ * decoded creature reaches the engine's spawners through the same one callback
+ * a transcribed one does. */
+void (*q2_cre_fire_fn)(q2_monster *m, int flash_index, void *user);
+void  *q2_cre_fire_user;
+
+#define g_fire      q2_cre_fire_fn
+#define g_fire_user q2_cre_fire_user
 
 void q2_cre_set_fire_hook(void (*fn)(q2_monster *, int, void *), void *user)
 {

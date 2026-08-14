@@ -41,6 +41,8 @@
 /* The hooks, shared with the hand-written creatures. */
 extern void (*q2_cre_sound_fn)(q2_monster *m, int which, void *user);
 extern void  *q2_cre_sound_user;
+extern void (*q2_cre_fire_fn)(q2_monster *m, int flash_index, void *user);
+extern void  *q2_cre_fire_user;
 extern void (*q2_cre_melee_fn)(q2_monster *m, const s32 aim[3],
                                s32 damage, s32 kick, void *user);
 extern void  *q2_cre_melee_user;
@@ -94,6 +96,48 @@ static void run_step(q2_monster *m, const q2_cre_step *s)
         break;
 
     case Q2_CRE_OP_CALL:
+        /*
+         * The engine's projectile spawners, reached through the module's import
+         * table. Which slot is which was settled by naming them out of the
+         * import loader at 0x8007DA00 — it writes all 71 slots individually —
+         * and then by what each named address CALLS, against addresses this
+         * project had already identified elsewhere:
+         *
+         *   +0x84  0x80061DFC  a hitscan: it goes through 0x80044C44, the
+         *                      swept move (collision.c), so it traces rather
+         *                      than spawning anything
+         *   +0x98  0x8006210C  a rocket: 0x80062164 calls 0x8004AF28, which
+         *                      combat.h already names as the rocket and even
+         *                      records as being called from this address
+         *   +0x8C  0x8006217C  the rail: 0x800621A4 calls 0x8004917C, named in
+         *                      combat.h as the rail
+         *   +0x80  0x80062000  a bolt with a visual — it calls 0x8004E920,
+         *                      which effect.h names as an effect constructor
+         *   +0xFC  0x80062240  three calls to one spawner (0x800619E0), which
+         *                      is the shape of a spread
+         *
+         * The four already named as vector arithmetic (+0xC0, +0xC4, +0xC8,
+         * +0xD8) are deliberately NOT here: they are the muzzle maths every
+         * fire think does before the shot, and 40 of the disc's 107 call steps
+         * are those. Treating them as shots would have every creature fire
+         * three times per animation frame.
+         *
+         * The flash index passed is the import slot itself. The port's fire
+         * hook takes a flash number that a transcribed creature maps through
+         * its own tables; a decoded one has no such table, so it hands over
+         * what it does know and the client decides. That is a stated shortfall,
+         * not a reconstruction.
+         */
+        switch (s->import_ofs) {
+        case 0x84: case 0x98: case 0x8C: case 0x80: case 0xFC:
+            if (q2_cre_fire_fn && m->enemy && m->enemy->health > 0)
+                q2_cre_fire_fn(m, (int)s->import_ofs, q2_cre_fire_user);
+            break;
+        default:
+            break;
+        }
+        break;
+
     default:
         break;
     }

@@ -7,13 +7,22 @@
  * narrow: it plays the animations the disc says they have, in the order the
  * disc says, driven by the real AI.
  *
- * So a Tank Commander stands, notices the player, turns, walks, breaks into
- * its run, chases through the level, and plays its attack animation. It does
- * not fire, because firing is a think function and this does not have one.
+ * So a Tank Commander stands, notices the player, turns, walks, breaks into its
+ * run, chases through the level, and plays its attack animation — and it acts
+ * while it does: every think index runs through `q2_cre_run_think`, which
+ * executes the sound, the melee, the frame jump and the AI flag the decoder
+ * read out of that very function, and now the projectile spawners too.
  *
- * That is a visible partial rather than a hidden one. Filling it in per
- * creature is the remaining work, and `q2psx-inspect creatures` prints exactly
- * which think indices each module still needs.
+ * (This comment used to end "it does not fire, because firing is a think
+ * function and this does not have one". That stopped being true when the
+ * trampolines below were added, and stayed in the file afterwards. What was
+ * still true until recently is narrower: firing goes through the module's
+ * IMPORT table, and an unclassified import did nothing. Five of them are now
+ * named — see cre_actions.c.)
+ *
+ * What remains is per-creature: `q2psx-inspect creatures` prints which think
+ * indices each module uses and which import each unclassified call wanted, so
+ * the gap has an address rather than a shrug.
  *
  * ---------------------------------------------------------------------------
  * How it picks an animation without knowing the creature

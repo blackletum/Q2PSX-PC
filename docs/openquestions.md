@@ -2428,6 +2428,48 @@ where it does it rather than in a note here.
       share one world — but it is a refactor of the client rather than a reconstruction of the original, and
       it is the largest single piece of multiplayer left.
 
+## Naming the import slots, and why six creatures never fired
+
+A decoded creature reaches the engine through its module's import table, and `cre_actions.c` ran every kind of
+decoded step except one: `Q2_CRE_OP_CALL` fell through to `default: break`. 107 call steps across the disc did
+nothing.
+
+The import loader at `0x8007DA00` writes all 71 slots individually — `sw v0, N(s0)` with the address
+materialised two instructions above — so any slot can be named by reading that one function. The method was
+already checked against `+0x28` (`0x8006FC1C`, the SVECTOR rotate) and `+0xEC` (`0x80061118`, `fire_hit`); it
+reproduces both. The rest of the slots the census reports:
+
+| slot | address | what it is |
+| --- | --- | --- |
+| +0x84 | 0x80061DFC | a hitscan — goes through `0x80044C44`, the swept move |
+| +0x98 | 0x8006210C | the rocket — `0x80062164` calls `0x8004AF28`, which combat.h already records as being called *from that address* |
+| +0x8C | 0x8006217C | the rail — `0x800621A4` calls `0x8004917C`, named in combat.h |
+| +0x80 | 0x80062000 | a bolt with a visual — calls `0x8004E920`, an effect constructor (effect.h) |
+| +0xFC | 0x80062240 | three calls to one spawner (`0x800619E0`) — the shape of a spread |
+| +0x1C | 0x8005C8C8 | unnamed |
+| +0x2C | 0x8006C6C8 | unnamed |
+| +0x38 | 0x8006CC44 | unnamed |
+| +0x94 | 0x800614D4 | unnamed |
+| +0xA0 | 0x80031094 | unnamed |
+| +0xB4 | 0x8005EF84 | unnamed |
+| +0x114 | 0x8005CBBC | unnamed |
+| +0x12C | 0x80040800 | unnamed |
+
+Three of those five confirm themselves against addresses this project had identified for other reasons
+entirely, which is the strongest form the evidence takes here.
+
+The five are now routed to the same fire hook a transcribed creature uses. **The four already named as vector
+arithmetic (+0xC0, +0xC4, +0xC8, +0xD8) are deliberately not:** they are the muzzle maths every fire think
+does first, and they are 40 of the 107 call steps. Treating them as shots would have every creature fire three
+times an animation frame — which is exactly the mistake the Soldier's transcription notes warn about.
+
+**What has NOT been observed is one of them firing in play.** Tankcomm's thinks 8, 10 and 13 carry +0x80,
++0x98 and +0x84, and every one is marked gated; a 400-frame `--watch` capture on COMMAND produces its sounds
+and no shots, and the same capture produces the same ten shots with the routing removed, so those ten are
+somebody else's. The creature is not reaching its attack thinks in a run that short. The routing is covered by
+five checks in `test_creature` instead — hook called with an enemy, not called without one, not called at a
+dead enemy, carrying the slot it came from, and not called for muzzle arithmetic.
+
 ---
 
 ## ⚠ Security note (carried forward, do not drop)
