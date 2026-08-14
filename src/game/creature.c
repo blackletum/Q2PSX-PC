@@ -680,10 +680,15 @@ u32 q2_creature_sound_names(const q2_creature *c, const u8 *image, size_t size,
             break;
         }
 
-    if (!name_off)
-        return 0;
-
-    for (at = name_off + 12; at + 36 <= size; at += 4) {
+    /*
+     * If the module's own name is not in its image, the anchor is gone but the
+     * table need not be. Two of the seven -- Tankcomm and Berserk -- returned
+     * zero names under the anchored scan while their sounds are demonstrably on
+     * the disc (63 VAG entries begin `tnk_`), so falling back to a whole-image
+     * scan is worth more than failing. The run-of-three test below is what
+     * actually validates a candidate either way.
+     */
+    for (at = name_off ? name_off + 12 : 0; at + 36 <= size; at += 4) {
         if (slot_is_name(image, size, at) &&
             slot_is_name(image, size, at + 12) &&
             slot_is_name(image, size, at + 24))

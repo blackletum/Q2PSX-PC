@@ -4147,9 +4147,26 @@ nothing saying so.
       nothing, so both are silent for the same reason — **and `main.c` carried a comment claiming "all seven
       creatures make their own sounds", which is now corrected in place.**
 
-      So this is one bug, not two, and it is in the finder rather than in the data. The next step is to find
-      where those two modules keep their tables — the `tnk_` strings are on the disc (#60), so they exist
-      somewhere the current scan does not reach.
+      So this is one bug, not two, and it is in the finder rather than in the data.
+
+      **Fixed.** The anchored scan starts at the module's own name string; when that name is not in the
+      image, `name_off` is 0 and the function gave up. It now falls back to scanning from offset 0, with the
+      run-of-three test doing the validating either way. The five that already worked are byte-identical,
+      because the fallback only runs when the anchor is missing:
+
+          Tankcomm 0 -> 8   tnk_idle1 tnk_pain tnk_death tnk_step tnk_sight1 pt1__strt
+                            tnk_atck1 msc_udeath
+          Berserk  0 -> 13  Attack1 Attack2 Attack3 ber_pain2 inf_pain1 ber_deth2 ...
+
+      **The Tank Commander's list is exactly the five names #60 found on the disc as VAGs, plus `tnk_idle1`
+      (which has no VAG), `tnk_atck1` and `msc_udeath`.** In play, WASTE4 zone 0 goes from 4 resolved sounds
+      to **6, with 0 not in bank** — the Tank Commander has a voice for the first time.
+
+      **The Berserk's list is NOT trustworthy yet** and is flagged rather than claimed: `Attack1`, `Attack2`
+      and `Attack3` are move names, and `inf_pain1` / `inf_deth2` / `inf_atck2` belong to the Infantry. The
+      whole-image scan is landing on a run that begins before the real table. Its first genuine entry is
+      probably `ber_idle1`. Slot INDEX is the sound number, so a table that starts early is worse than none —
+      **the Berserk's numbering should not be relied on until that start is pinned.**
 
       **Do not conclude the sounds are absent.** That was the previous answer here for many passes and it was
       wrong; see #60 for how the mistake was made and how it was caught.
