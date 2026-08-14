@@ -1808,6 +1808,25 @@ not damage. It then calls engine slots `+0xC8` and `+0xD8` with vectors.
       than the one it replaces: they are not in the flash tables, which hold
       muzzle-flash indices, and the module's own image does not carry them as
       immediates. Where they are is open.
+
+      **What the second attempt did establish is general, and worth more than the
+      one slot it was after.** The right indirection was never the LevelBin engine
+      vtable — a CreAI module reaches the engine through its OWN 71-pointer import
+      table at `module+0x14`, and the loader that fills it is at **`0x8007DA00`**,
+      writing every slot individually as `sw v0, N(s0)` with the address
+      materialised two instructions above. So any slot can be named by grepping
+      that one function for its offset, and the census's `call(+XX)?` reports stop
+      being opaque numbers. The method checks out on the slot already known:
+      `+0x28` resolves to `0x8006FC1C`, the SVECTOR rotate, which is
+      `Q2_IMP_LOCAL2WLD`.
+      Applied to the Soldier's fire think, whose actions decode as
+      `call(+D8)? call(+2C)? call(+28)? call(+C8)? call(+D8)? call(+C0)x3`:
+      `+0xC0` is `0x8005C460`, a per-component scaled vector add
+      (`out = a + (s*d) >> 12`), so **the three trailing calls are muzzle
+      arithmetic, not three shots** — which is the specific wrong reading the
+      retraction above was heading towards. `+0xC4` is `0x8005C634`, `+0xC8` is
+      `0x8005F934`, `+0xD8` is `0x8005BB58`, and `+0xEC` is `0x80061118`, the
+      `fire_hit` the melee already uses. The shot is one of the two unread ones.
       The port leaves the fire hook unset rather than guessing, and a Soldier
       chases and swings but does not shoot.
 

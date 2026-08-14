@@ -206,6 +206,30 @@ typedef enum q2_cre_op {
 } q2_cre_op;
 
 /* Import slots a think function reaches, named where they are identified. */
+/*
+ * ---------------------------------------------------------------------------
+ * Naming an import slot
+ * ---------------------------------------------------------------------------
+ * The loader that fills a module's 71 import pointers is at `0x8007DA00`, and
+ * it writes every slot individually — `sw v0, N(s0)` with the address
+ * materialised two instructions above. So ANY slot can be named by grepping
+ * that one function for its offset, which turns the census's `call(+XX)?`
+ * reports from opaque numbers into named engine calls.
+ *
+ * The method checks out on the slot that was already known: `+0x28` resolves to
+ * `0x8006FC1C`, the SVECTOR rotate, which is exactly `Q2_IMP_LOCAL2WLD`.
+ *
+ * Named this way so far, beyond the four below:
+ *
+ *     +0xC0  0x8005C460   a scaled vector add, `out = a + (s * d) >> 12`,
+ *                         per component — so the three consecutive `call(+C0)`
+ *                         at the end of every Soldier fire think are MUZZLE
+ *                         ARITHMETIC and not three shots
+ *     +0xC4  0x8005C634
+ *     +0xC8  0x8005F934
+ *     +0xD8  0x8005BB58
+ *     +0xEC  0x80061118   `fire_hit`, the melee — Q2_IMP_FIRE_HIT below
+ */
 #define Q2_IMP_RAND      0x14
 #define Q2_IMP_SOUND     0x20
 #define Q2_IMP_LOCAL2WLD 0x28
