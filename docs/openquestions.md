@@ -3316,6 +3316,35 @@ Measured over 300-frame captures, requested sounds against what the map's bank a
 `tnk_`. Its audio is not missing from the port; it is not there to load. That is worth knowing before anyone
 goes looking for a bug in the lookup.
 
+## The census was understating the creatures by a mile
+
+`q2psx-inspect creatures` reported `Tankcomm — transcribed by hand, 0 of 7 indices` for a creature whose
+attack is written out by hand and whose every think index acts. It counted `impl->method[k]`, which a PARTIAL
+transcription deliberately leaves NULL so `q2_creature_bind` falls back to the decoded action. The measure
+was counting the thing that is empty *because* the design works.
+
+Read the way the runtime actually resolves them:
+
+| creature | callbacks written by hand | think indices that act |
+| --- | --- | --- |
+| Soldier | 7 of 8 | 14 of 14 |
+| Tank Commander | 1 of 8 | 7 of 7 |
+| Gunner | 1 of 9 | 8 of 8 |
+| Infantry | 1 of 9 | 8 of 8 |
+| Arachner | 1 of 10 | 4 of 4 |
+| Berserk | 1 of 8 | 4 of 4 |
+| Insane | generic throughout | every index acts |
+
+**7 of 7 creatures act.** Every module on the disc that can attack has its attack callback read out of its own
+code and written by hand; the Insane has neither an attack nor a melee, and its stand, walk and run are one
+address — a non-combatant, correctly served by the generic handlers.
+
+The one-of-N callback figures are the point of the partial-transcription design, not a shortfall: what is
+written by hand is the branch the decoder cannot recover, and everything else runs from what it can.
+
+A `d` in the think list now marks an index that acts from a decoded action rather than a hand-written one, so
+the distinction is visible instead of being flattened into "missing".
+
 ---
 
 ## ⚠ Security note (carried forward, do not drop)

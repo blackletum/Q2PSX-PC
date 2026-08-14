@@ -185,9 +185,19 @@ static void report(const q2_creature *c, const q2_cre_impl *impl)
     n = q2_creature_think_indices(c, idx, sizeof(idx));
     printf("    think     :");
     for (i = 0; i < n; i++) {
-        bool have = impl && impl->method[idx[i]] != NULL;
-        printf(" %u%s", idx[i], have ? "" : "*");
-        if (!have)
+        /*
+         * An index is covered when the implementation writes it OR the generic
+         * one runs the decoded action, which is what a PARTIAL transcription
+         * relies on and what `q2_creature_bind` falls back to. Counting only
+         * `impl->method` reported "Tankcomm — 0 of 7 indices" for a creature
+         * whose every index acts and whose attack is hand-written: it read as
+         * missing work and was the opposite of the truth.
+         */
+        bool own  = impl && impl->method[idx[i]] != NULL;
+        bool acts = own || q2_cre_generic.method[idx[i]] != NULL;
+
+        printf(" %u%s", idx[i], own ? "" : (acts ? "d" : "*"));
+        if (!acts)
             missing++;
     }
     if (n == 0)
@@ -252,8 +262,20 @@ static void report(const q2_creature *c, const q2_cre_impl *impl)
     }
 
     if (impl && impl->name) {
-        printf("    port      : %s — transcribed by hand, %u of %u indices\n",
-               impl->name, n - missing, n);
+        u32 cb_own = 0, cb_have = 0;
+
+        for (i = 0; i < 13; i++) {
+            if (!c->callback[i])
+                continue;
+            cb_have++;
+            if (impl->callback[i] &&
+                impl->callback[i] != q2_cre_generic.callback[i])
+                cb_own++;
+        }
+
+        printf("    port      : %s — %u of %u callbacks written by hand, "
+               "%u of %u think indices act (d = decoded)\n",
+               impl->name, cb_own, cb_have, n - missing, n);
         if (missing == 0)
             g_covered++;
     } else {
