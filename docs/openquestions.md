@@ -4100,6 +4100,30 @@ nothing saying so.
       screenshot**, and only the sweep separates them. It is the same question that turned "69 inert rotation
       calls" into "67 of 68 live" and "54 barren" into "one truncated item".
 
+      **Another site named, and it belongs to a creature.** `0x80031268` sits inside `0x80031094`, which the
+      module loader writes to import-table offset **0xA0** (`0x8007DBC0`, `sw v0, 160(s0)`). Censusing every
+      import call the disc's creatures make finds eighteen distinct slots, and exactly one step calls this
+      one:
+
+          Gunner   [13] call(+A0)?
+
+      So **import +0xA0 is the creature muzzle-flash light**, and the Gunner's think 13 is its only caller on
+      the whole disc. Its colour is `0x800AE7D4` — `C8 64 64`, rgb(200, 100, 100) — **the same pale red as
+      the player's machinegun flash**, which is a pleasing cross-check: two independently-read sites landing
+      on one colour.
+
+      It is NOT wired, and the reason is specific rather than cautious. The radius is
+
+          800311F8  sll  v0, v1, 4
+          800311FC  bgez v0, +2          ; signed rounding: negatives get +32767
+          80031208  sra  v0, v0, 15
+          80031220  addiu v0, v0, 1200   ; base 1200, not the player's 700
+
+      so it is a bigger flash on a different base, and its input is not a plain `rand()` draw — it carries a
+      sign, which a random 0..32767 never would. Wiring it with the player's formula would be a guess dressed
+      as a transcription. `cre_actions.c`'s slot map does not cover `+0xA0` either, so the port currently
+      counts that call as unhandled, which is at least honest.
+
       How many exist, counted rather than grepped: **18 TIMEDLIGHT calls and 1 FLKLIGHT across COMMON's
       scripts, disc-wide.** A passive capture triggers none of them — they are script records fired by
       trigger volumes, exactly like the rotation calls — so the handler shows 0 in a fly-through and that is
