@@ -452,12 +452,28 @@ void q2_vw_place(const q2_viewweapon *vw,
      * A rotation matrix's inverse is its transpose, so this is the same matrix
      * read down its columns.
      */
-    q2_rotation_yaw_pitch(rot, ang[1], ang[0]);
+    /*
+     * All THREE angles, because `RotMatrix` takes all three.
+     *
+     * This used to build a yaw/pitch matrix and apply its transpose, which is
+     * the same thing as `q2_rotation_euler(pitch, yaw, 0)` applied directly —
+     * correct except that it silently drops the roll. `0x8004F464` hands
+     * `RotMatrix` the whole SVECTOR at `sp+40`, and `sp+44` is the z component,
+     * so the console rotates the offset by the roll as well. Dropping it means
+     * the weapon does not lean with the view: the strafe lean rolls the camera
+     * and the gun stays upright and slides, which is the one case where the
+     * two visibly separate.
+     *
+     * `q2_rotation_euler` is `RotMatrix`'s own composition — checked at
+     * `0x80089E38`, which writes `m[1][2] = -sin(x)` and
+     * `m[0][2] = sin(y)cos(x)`, the signature of Ry·Rx with Z outermost.
+     */
+    q2_rotation_euler(rot, ang[0], ang[1], ang[2]);
 
     for (i = 0; i < 3; i++) {
-        local[i] = ((s32)rot[0][i] * vw->cur_t[0]
-                  + (s32)rot[1][i] * vw->cur_t[1]
-                  + (s32)rot[2][i] * vw->cur_t[2]) >> Q2_FRAC_12;
+        local[i] = ((s32)rot[i][0] * vw->cur_t[0]
+                  + (s32)rot[i][1] * vw->cur_t[1]
+                  + (s32)rot[i][2] * vw->cur_t[2]) >> Q2_FRAC_12;
     }
 
     /*
@@ -529,7 +545,20 @@ u32 q2_vw_build_ot(const q2_viewweapon *vw,
         s16 inv[3][3], clip[3][3];
         int r, c, k;
 
-        q2_rotation_yaw_pitch(inv, angles_view[1], angles_view[0]);
+        /*
+         * The matrix to cancel is the CAMERA's, so it is built from the camera
+         * — with the camera's own builder — rather than reconstructed from the
+         * aim and the kick.
+         *
+         * Reconstructing it was exact only by luck. `q2_model_build_ot` uses
+         * `q2_rotation_view(cam->yaw, cam->pitch, cam->roll)`, and this built a
+         * yaw/pitch matrix from `angles_view`, so the two agreed only while the
+         * roll was zero and the caller's aim + kick happened to equal the
+         * camera's angles. Taking the camera directly makes
+         * `camera * (camera^T * clip) == clip` true by construction for any
+         * camera, which is what the cancellation is for.
+         */
+        q2_rotation_view(inv, cam->yaw, cam->pitch, cam->roll);
         q2_rotation_euler(clip, vw->cur_r[0], vw->cur_r[1], vw->cur_r[2]);
 
         for (r = 0; r < 3; r++) {

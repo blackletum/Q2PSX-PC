@@ -15,6 +15,7 @@
  * is unambiguous. That is deliberate: a test that used the real bank would be
  * testing the disc as much as the code.
  */
+#include "trig.h"
 #include "viewweapon.h"
 
 #include <stdio.h>
@@ -323,6 +324,60 @@ static void test_placement(void)
     }
 }
 
+/*
+ * The roll reaches the offset.
+ *
+ * `RotMatrix` takes all three angles (0x8004F464 hands it the whole SVECTOR at
+ * sp+40, whose z is at sp+44), so the console rotates the weapon's offset by the
+ * roll as well as the yaw and the pitch. The port used to build a yaw/pitch
+ * matrix and silently drop it, which meant the strafe lean rolled the camera and
+ * left the gun upright — the two visibly separating exactly when the lean is
+ * strongest.
+ *
+ * The check is the invariant rather than a number: rotating the resulting world
+ * offset BACK by the same three angles must recover `cur_t`, whatever they are.
+ * That holds for any roll if the offset was rotated by all three and fails as
+ * soon as one is dropped.
+ */
+static void test_roll_reaches_the_offset(void)
+{
+    q2_viewweapon vw;
+    s32 feet[3] = { 0, 0, 0 };
+    s16 zero[3] = { 0, 0, 0 };
+    s16 leaning[3] = { 300, 700, 512 };   /* pitch, yaw and a real roll */
+    s32 origin[3], ang[3];
+    s16 m[3][3];
+    s32 back[3];
+    int i;
+
+    q2_vw_init(&vw, &g_tab, 1);
+    q2_vw_advance(&vw, 20, false, Q2_VW_FIRED);
+
+    q2_vw_place(&vw, feet, 576, leaning, zero, origin, ang);
+
+    /* Undo the eye, so what is left is the rotated offset alone. */
+    origin[1] -= Q2_VW_EYE_BASE - 576;
+
+    /* The same three angles the placement used, transposed: M^T (M t) == t. */
+    q2_rotation_euler(m, ang[0] - vw.cur_r[0],
+                         ang[1] - vw.cur_r[1],
+                         ang[2] - vw.cur_r[2]);
+
+    for (i = 0; i < 3; i++)
+        back[i] = ((s32)m[0][i] * origin[0]
+                 + (s32)m[1][i] * origin[1]
+                 + (s32)m[2][i] * origin[2]) >> Q2_FRAC_12;
+
+    for (i = 0; i < 3; i++) {
+        s32 d = back[i] - vw.cur_t[i];
+        if (d < 0) d = -d;
+        /* Two units of slack for the 1.3.12 round trip. */
+        CHECK(d <= 2,
+              "roll must rotate the offset: axis %d recovered %d, wanted %d",
+              i, back[i], vw.cur_t[i]);
+    }
+}
+
 /* Weapon 0 is a live state, not an error: the clip table aliases slot 0 to
  * slot 1 exactly as the fire-function table does. */
 static void test_no_weapon(void)
@@ -348,6 +403,7 @@ int main(void)
     test_switch_cannot_cancel_a_shot();
     test_long_frame_consumes_keys();
     test_placement();
+    test_roll_reaches_the_offset();
     test_no_weapon();
 
     if (g_fail == 0)

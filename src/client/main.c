@@ -969,6 +969,8 @@ static u16 client_demo_pad(long frame)
     if (t >=  15 && t <  75) pad |= Q2_PAD_UP;       /* walk forward     */
     if (t >=  45 && t <  56) pad |= Q2_PAD_CROSS;    /* and shoot        */
     if (t >=  78 && t <  90) pad |= Q2_PAD_RIGHT;    /* turn             */
+    if (t >=  60 && t <  75) pad |= Q2_PAD_R2;       /* strafe, for the  */
+                                                     /* lean it rolls    */
     if (t >=  95 && t <  98) pad |= Q2_PAD_TRIANGLE; /* next weapon      */
     if (t >= 112 && t < 122) pad |= Q2_PAD_CROSS;    /* shoot again      */
     if (t >= 130 && t < 134) pad |= Q2_PAD_SQUARE;   /* a tap is a jump  */
