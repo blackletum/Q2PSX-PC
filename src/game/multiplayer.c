@@ -516,6 +516,59 @@ static const char *const k_team_name[Q2_MP_MAX_TEAMS] = {
     "BLUE", "RED", "PURPLE", "GREEN"
 };
 
+u32 q2_mp_scoreboard(const q2_mp_session *s, const char *const *names,
+                     char lines[][Q2_MP_SCORE_LINE], u32 max)
+{
+    static const char *const k_default_name[Q2_MP_MAX_PLAYERS] = {
+        "PLAYER 1", "PLAYER 2", "PLAYER 3", "PLAYER 4"
+    };
+    u32 n = 0;
+    int i, players;
+    bool team_mode;
+
+    if (!s || !lines || max == 0)
+        return 0;
+
+    players = s->player_count;
+    if (players < 1)
+        players = 1;
+    if (players > Q2_MP_MAX_PLAYERS)
+        players = Q2_MP_MAX_PLAYERS;
+
+    /* Modes 1 and 4 are the team ones; VERSUS scores per player and keeps its
+     * round wins in the team array, which the caller reads separately. */
+    team_mode = (s->mode == Q2_MP_TEAM_DEATHMATCH || s->mode == Q2_MP_TEAM_TAG);
+
+    if (n < max)
+        snprintf(lines[n++], Q2_MP_SCORE_LINE, "%s", q2_mp_score_title(s->mode));
+
+    for (i = 0; i < players && n < max; i++) {
+        const char *who = (names && names[i] && names[i][0])
+                              ? names[i] : k_default_name[i];
+
+        /* In VERSUS the number that matters is rounds won, which the session
+         * keeps in team_frags — the module's own use of that array. */
+        snprintf(lines[n++], Q2_MP_SCORE_LINE, "%-12s %4d", who,
+                 s->mode == Q2_MP_VERSUS ? s->team_frags[i] : s->frags[i]);
+    }
+
+    if (team_mode) {
+        for (i = 0; i < Q2_MP_MAX_TEAMS && n < max; i++) {
+            if (s->team_frags[i] == 0)
+                continue;
+            snprintf(lines[n++], Q2_MP_SCORE_LINE, "%s TEAM SCORED %d",
+                     q2_mp_team_name(i), s->team_frags[i]);
+        }
+    }
+
+    if (n < max)
+        snprintf(lines[n++], Q2_MP_SCORE_LINE, "ALL PLAYERS PRESS");
+    if (n < max)
+        snprintf(lines[n++], Q2_MP_SCORE_LINE, "FIRE TO CONTINUE");
+
+    return n;
+}
+
 const char *q2_mp_team_name(int team)
 {
     if (team < 0 || team >= Q2_MP_MAX_TEAMS)

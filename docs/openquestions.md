@@ -2357,6 +2357,31 @@ frame — sixty-odd identical requests for one match that ended once.
       uploaded into the map's own texture memory and an arena's pages may land on top of it, which would make
       this a load-order fault rather than a HUD fault. Not chased yet.
 
+## The scoreboard the runtime was asking for
+
+`Q2_MP_REQ_RESULTS` is engine state 11, "load MPResults", and until now the client recorded the request and
+did nothing with it. QMRESULT is a level directory of its own — an 840-byte zone, a 99 KB COMMON and a 29,988
+byte LevelBin — and that module carries every word the screen shows: the six titles in mode order, the four
+colour names, `"%s TEAM SCORED %d"`, and the prompt `ALL PLAYERS PRESS` / `FIRE TO CONTINUE`.
+
+`q2_mp_scoreboard` composes those lines from the session. Deathmatch gives the title, a line per player, and
+the prompt; a team mode inserts the team lines after the players, one for each team with a score; VERSUS
+prints ROUNDS WON rather than frags, because that is what its `team_frags` array holds. Nothing in the text
+is invented — the strings are the module's, read out of it.
+
+**The layout is not reconstructed and is marked as such.** Where QMRESULT puts each line goes through engine
+text calls whose offsets have not been read, so the port stacks them centred. Showing the right words in the
+right order is what it claims; the original's pixels are not.
+
+Two mistakes on the way, both worth keeping because both are easy to repeat:
+
+- **A line's position is the CONTEXT's home, not the pen's x and y.** The pen carries state across a string;
+  `ctx->home_x`/`home_y` say where a string starts. Setting the pen put all five lines on one row, each
+  beginning where the last one ended — and it looked like a layout bug rather than an API mistake.
+- **`q2_hud_measure` returns CHARACTERS, not pixels.** It is the original's measurer at 0x800702A0,
+  off-by-one and all, and the glyph advance is a constant 8. Centring on its raw value put the block half a
+  screen right.
+
 ---
 
 ## ⚠ Security note (carried forward, do not drop)

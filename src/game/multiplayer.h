@@ -478,6 +478,36 @@ const char *q2_mp_winner_text(const q2_mp_session *s, int winner,
                               const char *const *names,
                               char *out, u32 out_size);
 
+/* ------------------------------------------------------------------------- */
+/* The scoreboard                                                             */
+/* ------------------------------------------------------------------------- */
+/*
+ * The lines QMRESULT shows when a match ends — the screen the runtime asks for
+ * with Q2_MP_REQ_RESULTS, which is state 11, "load MPResults".
+ *
+ * QMRESULT is a level directory of its own with an 840-byte zone and a 29,988
+ * byte LevelBin, and that module carries every piece of text this composes: the
+ * six titles in mode order (`DM SCORES`, `TEAM DM SCORES`, `CTF SCORES`,
+ * `TAG SCORES`, `TEAM TAG SCORES`, `VERSUS SCORES`), the four colour names, the
+ * team line `"%s TEAM SCORED %d"`, and the two-line prompt `ALL PLAYERS PRESS`
+ * / `FIRE TO CONTINUE`. Nothing here is invented; the layout is, and is marked
+ * as such below.
+ *
+ * Writes up to `max` lines of Q2_MP_SCORE_LINE bytes and returns how many. In a
+ * team mode the per-team lines follow the per-player ones, which is the order
+ * the module's own strings sit in. `names` supplies the four player names as
+ * `q2_mp_winner_text` takes them; NULL gives "PLAYER 1".."PLAYER 4".
+ *
+ * What is NOT reconstructed is where on the screen each line goes: the module
+ * positions them through the engine's text calls and those offsets have not
+ * been read. A caller laying them out in order, centred, is showing the right
+ * words in the right sequence and not claiming the original's pixels.
+ */
+#define Q2_MP_SCORE_LINE 40
+
+u32 q2_mp_scoreboard(const q2_mp_session *s, const char *const *names,
+                     char lines[][Q2_MP_SCORE_LINE], u32 max);
+
 /* The team names, indexed 0..3 as the winner code's 4..7 arm indexes them. */
 const char *q2_mp_team_name(int team);
 

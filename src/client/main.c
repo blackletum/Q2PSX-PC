@@ -313,6 +313,7 @@ typedef struct client {
     bool              mp_reported;
 
     u32               mp_deaths;      /* kills fed to the session              */
+    bool              mp_scoreboard;  /* QMRESULT is up                        */
     u32               cre_bodies;     /* deaths that found a death move        */
     u32               cre_drawn;      /* creatures with faces in the last view */
     u32               cre_faces;
@@ -872,6 +873,12 @@ static void client_mp_tick(client *c, float dt)
      * code did — sixty-odd identical requests for one match that ended once.
      */
     c->mp_last_request = q2_mp_take_request(&c->mp);
+
+    /* State 11 is "load MPResults". The port shows the scoreboard rather than
+     * loading QMRESULT's own level, because what that level draws is its
+     * module's business and what it draws it FROM is the session. */
+    if (c->mp_last_request == Q2_MP_REQ_RESULTS)
+        c->mp_scoreboard = true;
 
     {
         int w = q2_mp_find_winner(&c->mp);
@@ -3255,6 +3262,42 @@ static void client_frame(client *c)
         c->hud.crosshair = (c->settings.v[Q2_SET_CROSSHAIR] != 0);
         q2_hud_ctx_centre_in(&ctx, c->width, c->height);
         q2_hud_build_ot(&c->hud, &c->hud_font, &ctx, &c->ot, 0);
+    }
+
+    /*
+     * The end-of-match scoreboard — what Q2_MP_REQ_RESULTS asks for.
+     *
+     * The console loads QMRESULT, a level directory of its own whose LevelBin
+     * draws the screen; this shows the lines that module composes, in its
+     * order, with the overlay's own text emitter. The words are the module's,
+     * read out of its strings; the LAYOUT is not — where QMRESULT puts each
+     * line goes through engine text calls whose offsets have not been read, so
+     * these are stacked and centred rather than placed.
+     */
+    if (c->mp_scoreboard && c->hud_font_ready) {
+        char lines[12][Q2_MP_SCORE_LINE];
+        u32 n = q2_mp_scoreboard(&c->mp, NULL, lines, 12);
+        u32 li;
+        q2_hud_ctx ctx;
+        q2_hud_pen pen;
+
+        q2_hud_ctx_centre_in(&ctx, c->width, c->height);
+        q2_hud_pen_default(&pen);
+
+        /*
+         * A line's position is the CONTEXT's home, not the pen's x and y —
+         * the pen carries state across a string, the context says where the
+         * string starts. Setting the pen instead put all five lines on one
+         * row, each starting where the last one ended.
+         */
+        for (li = 0; li < n; li++) {
+            /* `q2_hud_measure` is the original's measurer and returns
+             * CHARACTERS, not pixels — the glyph advance is a constant 8. */
+            ctx.home_x = (s16)(ctx.width / 2 -
+                               q2_hud_measure(lines[li]) * 8 / 2);
+            ctx.home_y = (s16)(ctx.height / 4 + (s32)li * 16);
+            q2_hud_print(&c->hud_font, &ctx, &pen, &c->ot, 0, lines[li]);
+        }
     }
 
     /*

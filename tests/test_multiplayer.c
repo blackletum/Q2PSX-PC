@@ -519,6 +519,65 @@ static void test_defaults(void)
           "and starts from a cleared scoreboard");
 }
 
+static void test_scoreboard(void)
+{
+    q2_mp_session s;
+    char lines[12][Q2_MP_SCORE_LINE];
+    u32 n;
+
+    /* Deathmatch: title, one line per player, then the two-line prompt. */
+    q2_mp_session_init(&s, Q2_MP_DEATHMATCH, 2);
+    s.frags[0] = 7;
+    s.frags[1] = 3;
+    n = q2_mp_scoreboard(&s, NULL, lines, 12);
+    CHECK(n == 5, "DM scoreboard is 5 lines, got %u", n);
+    CHECK(strcmp(lines[0], "DM SCORES") == 0, "titled DM SCORES, got '%s'",
+          lines[0]);
+    CHECK(strstr(lines[1], "PLAYER 1") && strstr(lines[1], "7"),
+          "player 1 scored 7, got '%s'", lines[1]);
+    CHECK(strstr(lines[2], "PLAYER 2") && strstr(lines[2], "3"),
+          "player 2 scored 3, got '%s'", lines[2]);
+    CHECK(strcmp(lines[3], "ALL PLAYERS PRESS") == 0, "then the prompt");
+    CHECK(strcmp(lines[4], "FIRE TO CONTINUE") == 0, "and its second line");
+
+    /* A team mode adds the module's own "%s TEAM SCORED %d" for each team
+     * with a score, after the players. */
+    q2_mp_session_init(&s, Q2_MP_TEAM_DEATHMATCH, 2);
+    s.frags[0] = 4;
+    s.team_frags[0] = 4;
+    s.team_frags[1] = 9;
+    n = q2_mp_scoreboard(&s, NULL, lines, 12);
+    CHECK(strcmp(lines[0], "TEAM DM SCORES") == 0, "team title, got '%s'",
+          lines[0]);
+    CHECK(strcmp(lines[3], "BLUE TEAM SCORED 4") == 0,
+          "blue team line, got '%s'", lines[3]);
+    CHECK(strcmp(lines[4], "RED TEAM SCORED 9") == 0,
+          "red team line, got '%s'", lines[4]);
+
+    /* VERSUS scores ROUNDS, which live in the team array. */
+    q2_mp_session_init(&s, Q2_MP_VERSUS, 2);
+    s.frags[0] = 99;
+    s.team_frags[0] = 2;
+    n = q2_mp_scoreboard(&s, NULL, lines, 12);
+    CHECK(strcmp(lines[0], "VERSUS SCORES") == 0, "versus title");
+    CHECK(strstr(lines[1], " 2") && !strstr(lines[1], "99"),
+          "versus shows rounds won, not frags, got '%s'", lines[1]);
+
+    /* Names, when the caller has them. */
+    {
+        const char *const names[4] = { "ADA", "GRACE", NULL, NULL };
+
+        q2_mp_session_init(&s, Q2_MP_DEATHMATCH, 2);
+        q2_mp_scoreboard(&s, names, lines, 12);
+        CHECK(strstr(lines[1], "ADA") != NULL, "a supplied name is used");
+    }
+
+    /* A caller with room for two lines gets two, not a smashed stack. */
+    q2_mp_session_init(&s, Q2_MP_DEATHMATCH, 4);
+    n = q2_mp_scoreboard(&s, NULL, lines, 2);
+    CHECK(n == 2, "the line count is a limit, got %u", n);
+}
+
 int main(void)
 {
     test_deathmatch_scoring();
@@ -543,6 +602,7 @@ int main(void)
     test_attribution();
     test_hud_set();
     test_defaults();
+    test_scoreboard();
 
     if (g_fail) {
         printf("\n%d multiplayer check%s failed\n", g_fail,
