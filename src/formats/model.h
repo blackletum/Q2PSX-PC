@@ -414,6 +414,28 @@ bool q2_model_is_static(const q2_model *m);
  * past the end, on a malformed chain, or when the model has no block C. */
 bool q2_model_anim_get(const q2_model *m, u32 index, q2_model_anim *out);
 
+/*
+ * The clip a TIME lands in, and how far into it — which is how the engine picks
+ * one, and it does not pick by index at all.
+ *
+ * `0x8006B924` holds the position in a halfword at `entity+0x100` and the
+ * current clip pointer at `model+0x34`, and while the position is past the
+ * clip's length it advances the pointer by the clip's own `next` byte delta
+ * (through `0x80070188`, which is `*p += d`) and subtracts that clip's
+ * `frames`. So a model's clips are ONE CONTINUOUS TIMELINE and the animation
+ * position is an offset into it; a clip boundary is wherever the subtractions
+ * happen to fall.
+ *
+ * That matters to anything driving a model from a creature, because it means
+ * there is no clip index to find: a move's frames map onto this timeline and
+ * the walk lands in the right clip on its own. See openquestions #47.
+ *
+ * Returns false when the timeline is shorter than `tick`, which is the walk
+ * running off the end rather than an error.
+ */
+bool q2_model_anim_at(const q2_model *m, u32 tick, q2_model_anim *out,
+                      u32 *within);
+
 /* How many clips the chain holds. Zero for a model with no animation. */
 u32 q2_model_anim_count(const q2_model *m);
 

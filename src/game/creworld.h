@@ -41,10 +41,16 @@
  * It notices the player, turns, chases, remembers where it last saw them, and
  * plays its own animations off the disc. Its health is the class table's.
  *
- * It does not collide with the world: `ai.[ch]`'s movement runs against the
- * stand-in world in `aiworld.[ch]`, and giving it the zone's real hull is a
- * separate piece of work. So a creature can walk through a wall, which is
- * visible rather than hidden, and is why this reports what it placed.
+ * It collides with the world too, through `aiworld.[ch]` bound to the zone's own
+ * `PrimaryColl` — sight, stepping and the ground probe all. That was not true
+ * when this file was written: the binding read `q2_coll_move`'s "stopped" return
+ * as "could not start", so every creature was told it was buried in the floor it
+ * stood on and none of them moved. See openquestions #48.
+ *
+ * What it still cannot do is anything its module's think functions have not been
+ * transcribed for. The Soldier's are written; the other six run on the generic
+ * implementation, which animates and chases correctly and performs no per-frame
+ * action, so a Tank Commander hunts you down and swings without firing.
  */
 #ifndef Q2PSX_CREWORLD_H
 #define Q2PSX_CREWORLD_H
@@ -73,8 +79,10 @@
  * moves 50-54, 55-61, 62-79 and 80-96. `Q2_MODEL_TICKS_PER_FRAME` is 10 and is
  * the view weapon's rate, which is a different thing.
  *
- * See openquestions #47 for what is still missing, which is how the engine
- * picks WHICH clip rather than how long a frame lasts inside one.
+ * How the engine picks a clip is no longer a question: it does not pick one.
+ * `0x8006B924` walks the clip list subtracting lengths from a running position,
+ * so the clips are one timeline and this scale is what puts an AI frame on it.
+ * See `q2_model_anim_at` and openquestions #47.
  */
 #define Q2_CRE_TICKS_PER_FRAME 3
 

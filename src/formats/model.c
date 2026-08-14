@@ -340,6 +340,38 @@ bool q2_model_anim_get(const q2_model *m, u32 index, q2_model_anim *out)
     }
 }
 
+bool q2_model_anim_at(const q2_model *m, u32 tick, q2_model_anim *out,
+                      u32 *within)
+{
+    u32 begin, end, offset;
+
+    if (!m || !out || !anim_span(m, &begin, &end))
+        return false;
+
+    offset = begin;
+    for (;;) {
+        if (!anim_read(m, offset, end, out))
+            return false;
+
+        /* The engine's own test is `position < clip->frames`, checked before
+         * the subtraction, so a clip of zero length is stepped over rather
+         * than being a resting place. */
+        if (tick < out->frames) {
+            if (within)
+                *within = tick;
+            return true;
+        }
+
+        tick -= out->frames;
+
+        if (out->next == 0)
+            return false;                  /* the timeline ends here */
+        if (out->next > end - offset)
+            return false;                  /* delta escapes the block */
+        offset += out->next;
+    }
+}
+
 u32 q2_model_anim_count(const q2_model *m)
 {
     q2_model_anim clip;

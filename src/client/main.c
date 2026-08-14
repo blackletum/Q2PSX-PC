@@ -2233,24 +2233,19 @@ static void client_draw_view(void *user, q2_screen *s, int p,
      * The creatures, into the same table for the same reason: a Soldier behind
      * a crate sorts behind it because both are in one list.
      *
-     * WHICH ANIMATION A CREATURE IS PLAYING, and what that rests on.
+     * WHICH ANIMATION A CREATURE IS PLAYING, and it is not chosen by index.
      *
-     * A module's moves are numbered in one global frame timeline — the Soldier
-     * runs 0..474, and `q2psx-inspect creatures` prints every move's range —
-     * while the model carries a list of CastList clips (the Soldier's has 31).
-     * Those clips are not that timeline laid end to end: they total 434 frames
-     * against the module's 474. What they ARE is the moves themselves. Every one
-     * of the Soldier's clip lengths is exactly three ticks per frame times some
-     * move's length, and clips 1..4 are the four consecutive moves 50-54,
-     * 55-61, 62-79 and 80-96 in order.
+     * `0x8006B924` keeps the animation position in a halfword at `entity+0x100`
+     * and the current clip at `model+0x34`, and while the position is past the
+     * clip's length it advances the pointer by that clip's own `next` delta and
+     * subtracts its `frames`. So a model's clips are ONE CONTINUOUS TIMELINE
+     * and the position is an offset into it — there is no clip index to find,
+     * which is what the port was previously trying to reconstruct by matching a
+     * move's length against a clip's.
      *
-     * So the clip is chosen by matching its length to the current move's, and
-     * the frame within it is the AI frame's offset from the move's first. Where
-     * several clips share a length the first is taken, and where none matches
-     * the model draws on its first clip rather than not at all. What is NOT
-     * established is the index that the engine itself uses to pick the clip —
-     * see openquestions #47 — so a creature whose move length is ambiguous can
-     * play the wrong animation of the right duration.
+     * A creature's AI frame is a position on that same timeline (its module's
+     * moves are numbered 0..474 for the Soldier), at three ticks per frame, so
+     * the walk lands in the right clip on its own.
      */
     if (c->creatures_ready && c->cre_model) {
         u32 i;
@@ -2268,35 +2263,18 @@ static void client_draw_view(void *user, q2_screen *s, int p,
 
             {
                 const q2_model *mdl = &c->cre_model[i];
-                u32 clips = q2_model_anim_count(mdl);
-                u32 want = 0, pick = 0, ci;
-                s32 within = 0;
+                s32 frame = m->frame;
+                u32 within = 0;
 
-                if (m->currentmove) {
-                    want = (u32)(m->currentmove->last_frame -
-                                 m->currentmove->first_frame + 1);
-                    within = m->frame - m->currentmove->first_frame;
-                    if (within < 0)
-                        within = 0;
-                }
+                if (frame < 0)
+                    frame = 0;
 
-                for (ci = 0; want && ci < clips; ci++) {
-                    q2_model_anim a;
-                    if (!q2_model_anim_get(mdl, ci, &a))
-                        break;
-                    if (a.frames == want * Q2_CRE_TICKS_PER_FRAME) {
-                        pick = ci;
-                        break;
-                    }
-                }
-
-                if (clips && mdl->hdr.num_parts <= Q2PSX_ARRAY_COUNT(pose) &&
-                    q2_model_anim_get(mdl, pick, &clip)) {
-                    u32 t = (u32)within * Q2_CRE_TICKS_PER_FRAME;
-                    if (clip.frames && t >= clip.frames)
-                        t = clip.frames - 1;
-                    posed = (q2_model_pose_at(mdl, &clip, t, pose) == Q2_OK);
-                }
+                if (mdl->hdr.num_parts <= Q2PSX_ARRAY_COUNT(pose) &&
+                    q2_model_anim_at(mdl,
+                                     (u32)frame * Q2_CRE_TICKS_PER_FRAME,
+                                     &clip, &within))
+                    posed = (q2_model_pose_at(mdl, &clip, within,
+                                              pose) == Q2_OK);
             }
 
             q2_model_instance_init(&inst);

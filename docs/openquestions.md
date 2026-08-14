@@ -1741,7 +1741,7 @@ correction — **twelve of BASE1's twenty**, seventeen of BASE2's twenty-eight a
 stand in another zone's rooms, and without the test they think, are drawn and are shootable through the void.
 Single-zone BASE0 loses none of its ten, which is what says the test is measuring the right thing.
 
-- [ ] 47. **Which CastList clip a creature's move plays.** A module's moves are numbered in one global frame
+- [x] 47. **Which CastList clip a creature's move plays. — SOLVED: none of them, and none is the point.** A module's moves are numbered in one global frame
       timeline — the Soldier's run 0..474, and `q2psx-inspect creatures` now prints every move's range —
       while its model carries a list of clips, 31 of them for the Soldier. Those clips are **not** that
       timeline laid end to end: they total 434 frames against the module's 474, and there are 31 of them to
@@ -1751,11 +1751,19 @@ Single-zone BASE0 loses none of its ten, which is what says the test is measurin
       62-79 and 80-96 *in order*. So the tick rate inside a clip is 3 — not `Q2_MODEL_TICKS_PER_FRAME`'s 10,
       which is the view weapon's — and `q2psx-inspect model <map> <name>` now prints every clip's length so
       the arithmetic can be checked on any creature.
-      *Open:* the index. Clip order is not move order (clip 0 is the 36-frame move 272-307) and it is not
-      frame order either. The port matches a move to a clip **by length**, first match wins, which is right
-      whenever the length is unique and can pick the wrong animation of the right duration when it is not.
-      What is missing is the engine's own selector, which will be wherever the creature draw turns an
-      entity's frame into a pose.
+      **The index does not exist, and that is the answer.** `0x8006B924` is the selector, and it does not
+      index anything: it holds the animation position in a halfword at `entity+0x100` and the current clip
+      at `model+0x34`, and *while* the position is past the clip's length it advances the pointer by that
+      clip's own `next` byte delta — through `0x80070188`, which is the two-instruction `*p += d` — and
+      subtracts that clip's `frames`. A model's clips are therefore **one continuous timeline** and the
+      animation position is an offset into it; a clip boundary is wherever the subtractions fall.
+      So the question "which clip does a move play" was malformed. A move's frames are positions on the same
+      timeline and the walk lands in the right clip on its own, which is also why the measured coincidence
+      held: clips 1..4 being the four consecutive moves 50-54, 55-61, 62-79 and 80-96 *in order* is what a
+      shared timeline looks like, not a lucky run of matching lengths.
+      The three-ticks-per-frame scale survives unchanged, and it is still measured rather than read.
+      `q2_model_anim_at` implements the walk and the client's creatures are drawn through it; the
+      match-by-length heuristic it replaces is gone.
 
 - [x] 48. **A creature's movement has no hull to run against — SOLVED, and it was never about the hull.**
       The symptom was that a creature acquires the player, animates, and moves zero units for as long as you
