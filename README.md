@@ -116,6 +116,26 @@ cmake --build build
 SDL3 is optional. Without it you still get the core libraries and the offline tools;
 with it you get the playable client.
 
+## Running the client without a player
+
+Everything the frame does — the tick, the viewport build, the world draw, the
+ordering table, the rasteriser, the HUD — happens before a single SDL call, so the
+client can run with no window at all, on a fixed 1/30 s step, driving the pad from a
+script and writing the console's own framebuffer out:
+
+```bash
+build-client/bin/q2psx --disc "Quake II (Europe).cue" --headless --demo \
+                       --frames 120 --shot run.ppm --shot-every 10
+```
+
+That is not a convenience. `q2psx-inspect` composes its own frames, so it cannot
+catch anything that goes wrong *between* the client's systems — a table loaded after
+the thing that reads it, a model never bound, a screen never fed. The first run of
+this found two: the overlay was initialised from a flag that had not been set yet, so
+the client had never drawn a notification or a crosshair; and a session booted into
+the free-fly debug camera, so none of the player's frame ran until you pressed a key
+nothing told you about.
+
 ## Tools
 
 `q2psx-inspect` is the reverse-engineering harness — it opens a disc image and dumps

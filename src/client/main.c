@@ -258,6 +258,31 @@ typedef struct client {
     bool             show_glint;
     bool             force_underwater;   /* F3 — stands in for a water volume */
     bool             running;
+
+    /*
+     * ---------------------------------------------------------------------
+     * Running without a window
+     * ---------------------------------------------------------------------
+     * The whole of the game's per-frame work — the sim tick, the screen's
+     * viewport build, the world draw, the ordering table, the rasteriser, the
+     * HUD and the menu — happens before a single SDL call. Only the last
+     * twenty lines of `client_frame` need a renderer, so the frame loop can run
+     * with none, at a fixed step, and write its framebuffer out.
+     *
+     * That is not a convenience. It is the only way the CLIENT's own wiring can
+     * be checked the way `q2psx-inspect` checks the libraries: the inspector
+     * composes its own frames and so cannot catch anything that goes wrong
+     * between the client's systems — a table loaded after the thing that reads
+     * it, a model never bound, a screen never fed.
+     */
+    bool             headless;
+    bool             demo;               /* drive the pad from a script     */
+    q2_world_stats   shot_stats;         /* what the last viewport drew     */
+    long             frame_index;
+    long             frames_total;       /* 0 = run until the window closes */
+    long             shot_every;         /* 0 = only the last frame         */
+    const char      *shot_path;          /* NULL = do not capture           */
+    long             shots_written;
 } client;
 
 static void client_bind_view_model(client *c);
@@ -603,50 +628,105 @@ static void client_music_pump(client *c)
  * regardless of how fast we render, which is the whole point of it owning the
  * clock rather than the frame loop doing so.
  */
-static void client_input_simulated(client *c, float dt)
+/*
+ * The pad, when the client is driving itself.
+ *
+ * A demo is not a recording — nothing on the disc is being replayed — it is a
+ * fixed button script, so that `--headless --demo` produces the same frames on
+ * every machine and a captured frame can be compared against the last one. The
+ * cycle walks, shoots, turns and jumps, because those are the four things that
+ * reach the most systems: the mover and the hull trace, the weapon state
+ * machine and the projectile list, the view's own kick decay, and the ground
+ * projection that fall damage is measured off.
+ */
+#define CLIENT_DEMO_PERIOD 150
+
+static u16 client_demo_pad(long frame)
 {
-    const bool *keys = SDL_GetKeyboardState(NULL);
-    q2_input in;
-    s32 eye[3], view[3];
+    long t = frame % CLIENT_DEMO_PERIOD;
+    u16  pad = 0;
 
-    /*
-     * The keyboard is wired to PAD BUTTONS, not to the input record, and the
-     * mapping from those to the record is 0x80019154's — see pad.h.
-     *
-     * This is not ceremony. Three things the player feels are decided in there
-     * rather than here: full deflection is 127 and not 128, so the walk speed is
-     * the console's 2778 and not 2800; jump and swim-up come out of ONE button,
-     * a tap for the former and a hold for the latter; and the configured style
-     * decides whether the look rate is eased or set, which is the difference
-     * between a view that glides and one that snaps.
-     */
-    static q2_pad_state pad;
-    q2_pad_config       cfg;
+    if (t >=  15 && t <  75) pad |= Q2_PAD_UP;       /* walk forward     */
+    if (t >=  45 && t <  56) pad |= Q2_PAD_CROSS;    /* and shoot        */
+    if (t >=  78 && t <  90) pad |= Q2_PAD_RIGHT;    /* turn             */
+    if (t >=  95 && t <  98) pad |= Q2_PAD_TRIANGLE; /* next weapon      */
+    if (t >= 112 && t < 122) pad |= Q2_PAD_CROSS;    /* shoot again      */
+    if (t >= 130 && t < 134) pad |= Q2_PAD_SQUARE;   /* a tap is a jump  */
 
-    pad.prev    = pad.buttons;
-    pad.buttons = 0;
+    return pad;
+}
 
-    if (keys[SDL_SCANCODE_W])     pad.buttons |= Q2_PAD_UP;
-    if (keys[SDL_SCANCODE_S])     pad.buttons |= Q2_PAD_DOWN;
-    if (keys[SDL_SCANCODE_A])     pad.buttons |= Q2_PAD_L2;
-    if (keys[SDL_SCANCODE_D])     pad.buttons |= Q2_PAD_R2;
-    if (keys[SDL_SCANCODE_LEFT])  pad.buttons |= Q2_PAD_LEFT;
-    if (keys[SDL_SCANCODE_RIGHT]) pad.buttons |= Q2_PAD_RIGHT;
+/*
+ * The pad this frame. The keyboard is wired to PAD BUTTONS, not to the input
+ * record, and the mapping from those to the record is 0x80019154's — see pad.h.
+ *
+ * This is not ceremony. Three things the player feels are decided in there
+ * rather than here: full deflection is 127 and not 128, so the walk speed is
+ * the console's 2778 and not 2800; jump and swim-up come out of ONE button, a
+ * tap for the former and a hold for the latter; and the configured style
+ * decides whether the look rate is eased or set, which is the difference
+ * between a view that glides and one that snaps.
+ */
+static u16 client_pad_mask(const client *c)
+{
+    const bool *keys;
+    u16 pad = 0;
+
+    if (c->demo)
+        return client_demo_pad(c->frame_index);
+
+    keys = SDL_GetKeyboardState(NULL);
+    if (!keys)
+        return 0;
+
+    if (keys[SDL_SCANCODE_W])     pad |= Q2_PAD_UP;
+    if (keys[SDL_SCANCODE_S])     pad |= Q2_PAD_DOWN;
+    if (keys[SDL_SCANCODE_A])     pad |= Q2_PAD_L2;
+    if (keys[SDL_SCANCODE_D])     pad |= Q2_PAD_R2;
+    if (keys[SDL_SCANCODE_LEFT])  pad |= Q2_PAD_LEFT;
+    if (keys[SDL_SCANCODE_RIGHT]) pad |= Q2_PAD_RIGHT;
 
     /* R1 looks down and L1 up, and holding BOTH is the chord that walks the
      * pitch back to level — the console's own recentre, which is why there is no
      * separate key for it. */
-    if (keys[SDL_SCANCODE_DOWN])  pad.buttons |= Q2_PAD_R1;
-    if (keys[SDL_SCANCODE_UP])    pad.buttons |= Q2_PAD_L1;
+    if (keys[SDL_SCANCODE_DOWN])  pad |= Q2_PAD_R1;
+    if (keys[SDL_SCANCODE_UP])    pad |= Q2_PAD_L1;
 
-    if (keys[SDL_SCANCODE_SPACE]) pad.buttons |= Q2_PAD_SQUARE;   /* jump/swim */
+    if (keys[SDL_SCANCODE_SPACE]) pad |= Q2_PAD_SQUARE;   /* jump/swim */
     if (keys[SDL_SCANCODE_LALT] || keys[SDL_SCANCODE_F])
-        pad.buttons |= Q2_PAD_CROSS;                              /* fire      */
+        pad |= Q2_PAD_CROSS;                              /* fire      */
 
     if (keys[SDL_SCANCODE_RIGHTBRACKET] || keys[SDL_SCANCODE_E])
-        pad.buttons |= Q2_PAD_TRIANGLE;                           /* weap +    */
+        pad |= Q2_PAD_TRIANGLE;                           /* weap +    */
     if (keys[SDL_SCANCODE_LEFTBRACKET] || keys[SDL_SCANCODE_Q])
-        pad.buttons |= Q2_PAD_CIRCLE;                             /* weap -    */
+        pad |= Q2_PAD_CIRCLE;                             /* weap -    */
+
+    return pad;
+}
+
+/* True while a debug key that stands in for a level's own volume is held. The
+ * demo never holds one, and a headless run has no keyboard to ask. */
+static bool client_key_down(const client *c, SDL_Scancode a, SDL_Scancode b)
+{
+    const bool *keys;
+
+    if (c->demo || c->headless)
+        return false;
+
+    keys = SDL_GetKeyboardState(NULL);
+    return keys && (keys[a] || keys[b]);
+}
+
+static void client_input_simulated(client *c, float dt)
+{
+    q2_input in;
+    s32 eye[3], view[3];
+
+    static q2_pad_state pad;
+    q2_pad_config       cfg;
+
+    pad.prev    = pad.buttons;
+    pad.buttons = client_pad_mask(c);
 
     q2_pad_config_default(&cfg);
     cfg.style = c->sim.player.look_scheme;
@@ -662,7 +742,7 @@ static void client_input_simulated(client *c, float dt)
      * which is the honest way to keep a debug crouch without inventing a mechanic.
      */
     c->sim.env_flags &= ~(u32)(Q2_ENT_INCROUCH | Q2_ENT_INLOWCROUCH);
-    if (keys[SDL_SCANCODE_LCTRL] || keys[SDL_SCANCODE_C])
+    if (client_key_down(c, SDL_SCANCODE_LCTRL, SDL_SCANCODE_C))
         c->sim.env_flags |= Q2_ENT_INLOWCROUCH;
 
     /*
@@ -780,6 +860,9 @@ static void client_input(client *c, float dt)
     s32 fwd[3], right[3];
     s32 sy, cy;
 
+    if (!keys)
+        return;
+
     if (keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT])
         speed *= 4;
 
@@ -832,6 +915,9 @@ static u16 client_menu_pad(void)
 {
     const bool *k = SDL_GetKeyboardState(NULL);
     u16 pad = 0;
+
+    if (!k)
+        return 0;
 
     if (k[SDL_SCANCODE_UP])        pad |= Q2_PAD_UP;
     if (k[SDL_SCANCODE_DOWN])      pad |= Q2_PAD_DOWN;
@@ -1494,6 +1580,55 @@ static void client_screenshot(client *c)
     Q2_INFO("screenshot: %s", path);
 }
 
+/*
+ * The capture a scripted run writes.
+ *
+ * `--shot out.ppm` alone writes the last frame to that name; with `--shot-every`
+ * it becomes a stem — `out.ppm` -> `out_0000.ppm`, `out_0030.ppm` — so a run
+ * produces a strip that can be flipped through. The framebuffer is written, not
+ * the window: these are the console's own 512x248 pixels, which is what every
+ * comparison in this project is made in.
+ */
+static void client_write_shot(client *c, bool numbered)
+{
+    char path[512];
+    q2_result rc;
+
+    if (!c->shot_path)
+        return;
+
+    if (numbered) {
+        const char *dot = strrchr(c->shot_path, '.');
+        size_t stem = dot ? (size_t)(dot - c->shot_path) : strlen(c->shot_path);
+
+        if (stem > sizeof(path) - 32)
+            stem = sizeof(path) - 32;
+        memcpy(path, c->shot_path, stem);
+        snprintf(path + stem, sizeof(path) - stem, "_%04ld%s",
+                 c->frame_index, dot ? dot : ".ppm");
+    } else {
+        snprintf(path, sizeof(path), "%s", c->shot_path);
+    }
+
+    rc = psx_fb_write_ppm(q2_screen_front(&c->screen), path);
+    if (rc != Q2_OK) {
+        Q2_ERROR("cannot write %s: %s", path, q2_result_str(rc));
+        return;
+    }
+
+    c->shots_written++;
+    Q2_INFO("frame %ld -> %s", c->frame_index, path);
+    Q2_INFO("  eye %d %d %d  yaw %d pitch %d  cell %d  "
+            "%u/%u quads, %u nodes, near %u back %u ot %u",
+            c->cam.pos[0], c->cam.pos[1], c->cam.pos[2],
+            c->cam.yaw, c->cam.pitch, c->sim.current_node,
+            c->shot_stats.quads_emitted, c->shot_stats.quads_total,
+            c->shot_stats.nodes_visited,
+            c->shot_stats.quads_rejected_near,
+            c->shot_stats.quads_rejected_back,
+            c->shot_stats.ot_overflow);
+}
+
 /* ------------------------------------------------------------------------- */
 /*
  * Bind the model the view weapon wants.
@@ -1592,6 +1727,7 @@ static void client_draw_view(void *user, q2_screen *s, int p,
 
     q2_world_build_ot(&c->zone, &c->cam, s->view[p].w, s->view[p].h,
                       ot, gte, &c->render, &stats);
+    c->shot_stats = stats;
 
     /*
      * The map's items, into the table the world has just been built into — the
@@ -1877,6 +2013,19 @@ static void client_frame(client *c)
     q2_screen_present(&c->screen);
     front = q2_screen_front(&c->screen);
 
+    /*
+     * The capture comes off the finished front buffer, before anything SDL
+     * touches it — so a headless run and a windowed one write byte-identical
+     * frames, and neither depends on a driver's idea of what a 15-bit texture
+     * looks like.
+     */
+    if (c->shot_path && c->shot_every > 0 &&
+        (c->frame_index % c->shot_every) == 0)
+        client_write_shot(c, true);
+
+    if (!c->texture || !c->renderer)
+        return;
+
     if (SDL_LockTexture(c->texture, NULL, &pixels, &pitch)) {
         int y;
         for (y = 0; y < c->height; y++) {
@@ -1965,6 +2114,12 @@ static void usage(void)
     printf("           square one buffer pixel per window pixel: a 1.5x stretch\n");
     printf("           stretch fill the window, whatever shape it is\n");
     printf("  --saves  where save files live (default: the platform's own)\n");
+    printf("\n  running without a player:\n");
+    printf("  --headless    no window, no audio; a fixed 1/30 s step\n");
+    printf("  --demo        drive the pad from a fixed script rather than keys\n");
+    printf("  --frames N    stop after N frames\n");
+    printf("  --shot P.ppm  write the console's own framebuffer to P.ppm\n");
+    printf("  --shot-every N  ...and one every N frames, numbered\n");
 }
 
 int main(int argc, char **argv)
@@ -1984,6 +2139,14 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--map") && i + 1 < argc)   map = argv[++i];
         else if (!strcmp(argv[i], "--zone") && i + 1 < argc)  zone_index = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--headless"))              c.headless = true;
+        else if (!strcmp(argv[i], "--demo"))                  c.demo = true;
+        else if (!strcmp(argv[i], "--frames") && i + 1 < argc)
+            c.frames_total = strtol(argv[++i], NULL, 10);
+        else if (!strcmp(argv[i], "--shot") && i + 1 < argc)
+            c.shot_path = argv[++i];
+        else if (!strcmp(argv[i], "--shot-every") && i + 1 < argc)
+            c.shot_every = strtol(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "--saves") && i + 1 < argc) q2_save_set_dir(argv[++i]);
         else if (!strcmp(argv[i], "--aspect") && i + 1 < argc) {
             const char *a = argv[++i];
@@ -2042,6 +2205,20 @@ int main(int argc, char **argv)
     /* Texture pages start at ABR 0 and are promoted as opaque geometry is
      * drawn, exactly as the engine's own table is. */
     q2_world_render_init(&c.render);
+
+    /*
+     * A headless run brings SDL up at all only to keep the shutdown path
+     * uniform; there is no video, no audio device and no window. Everything the
+     * frame needs — the ordering table, the rasteriser, the screen — is the
+     * port's own code and does not know SDL exists.
+     */
+    if (c.headless) {
+        Q2_INFO("headless: %ld frame%s at 1/30 s%s", c.frames_total,
+                c.frames_total == 1 ? "" : "s", c.demo ? ", demo pad" : "");
+        if (c.frames_total <= 0)
+            c.frames_total = 1;
+        goto no_window;
+    }
 
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
@@ -2112,6 +2289,7 @@ int main(int argc, char **argv)
     /* Nearest-neighbour: the whole point is to show the original's pixels. */
     SDL_SetTextureScaleMode(c.texture, SDL_SCALEMODE_NEAREST);
 
+no_window:
     /* 217 buckets, `ClearOTag(db + 10984, 217)` at 0x80018398 — the table is
      * carved into per-viewport slices, so its size is not a tuning knob. */
     psx_ot_init(&c.ot, Q2_SCREEN_OT_ENTRIES, 300000);
@@ -2162,15 +2340,6 @@ int main(int argc, char **argv)
 
     Q2_INFO("saves: %s", q2_save_dir());
 
-    if (c.hud_tables_ready) {
-        /* One player, so four notification lines — the table at 0x8009D648
-         * indexed by player count (hudtables.h). */
-        q2_hud_init(&c.hud, &c.hud_tables, 1);
-        c.hud.crosshair = (c.settings.v[Q2_SET_CROSSHAIR] != 0);
-        c.hud_ready = true;
-        q2_hud_message(&c.hud, "Quake II");
-    }
-
     /*
      * The UI's tables come out of the boot executable, not off the disc's data
      * files: the glyph coordinates for the 8-pixel face and — the part that
@@ -2191,6 +2360,22 @@ int main(int argc, char **argv)
         Q2_WARN("no status-bar tables for this build");
     if (!c.hud_tables_ready)
         Q2_WARN("no UI tables for this build — the menu will not draw");
+
+    /*
+     * The overlay, AFTER the tables it reads. This block used to sit above the
+     * load, testing a flag that `memset(&c, 0, ...)` had just cleared, so
+     * `q2_hud_init` never ran and `hud_ready` never became true — the client
+     * drew no notifications, no centre line and no crosshair, on a build whose
+     * tables load perfectly well.
+     */
+    if (c.hud_tables_ready) {
+        /* One player, so four notification lines — the table at 0x8009D648
+         * indexed by player count (hudtables.h). */
+        q2_hud_init(&c.hud, &c.hud_tables, 1);
+        c.hud.crosshair = (c.settings.v[Q2_SET_CROSSHAIR] != 0);
+        c.hud_ready = true;
+        q2_hud_message(&c.hud, "Quake II");
+    }
 
     /*
      * The view weapon's animation bank, out of the same executable. It is per
@@ -2238,19 +2423,42 @@ int main(int argc, char **argv)
      * than guess at a mapping that would be wrong. */
     client_music_start(&c, 'A', 0);
 
+    /*
+     * A session starts IN the game. The free-fly camera is a debug view for
+     * looking at geometry with no physics in the way, and F4 is how you get to
+     * it; booting into it meant a fresh launch ran none of the player's frame —
+     * no movement model, no view kicks, no weapon in the hands, no status bar —
+     * until a key was pressed that nothing tells the player about. A loaded save
+     * already forced this on for exactly the same reason.
+     */
+    c.sim_enabled = true;
+
     c.running = true;
-    last = SDL_GetTicks();
+    last = c.headless ? 0 : SDL_GetTicks();
 
     while (c.running) {
         SDL_Event ev;
-        u64 now = SDL_GetTicks();
-        float dt = (float)(now - last) / 1000.0f;
-        last = now;
+        u64   now;
+        float dt;
 
-        if (dt > 0.1f)
-            dt = 0.1f;
+        /*
+         * A scripted run advances on a FIXED step rather than on the wall
+         * clock, so its output is a function of the frame number alone. The
+         * step is the console's own 1/30 s — everything the port times is in
+         * 1/300 s units and the screen clamps a frame at 30 of them.
+         */
+        if (c.headless) {
+            dt = 1.0f / 30.0f;
+        } else {
+            now = SDL_GetTicks();
+            dt  = (float)(now - last) / 1000.0f;
+            last = now;
 
-        while (SDL_PollEvent(&ev)) {
+            if (dt > 0.1f)
+                dt = 0.1f;
+        }
+
+        while (!c.headless && SDL_PollEvent(&ev)) {
             if (ev.type == SDL_EVENT_QUIT) {
                 c.running = false;
             } else if (ev.type == SDL_EVENT_KEY_DOWN) {
@@ -2436,6 +2644,19 @@ int main(int argc, char **argv)
          */
         q2_screen_tick_dt(&c.screen, (double)dt);
         client_frame(&c);
+
+        c.frame_index++;
+        if (c.frames_total > 0 && c.frame_index >= c.frames_total)
+            c.running = false;
+    }
+
+    /*
+     * The last frame, always — a run with no `--shot-every` asks for one
+     * picture and gets exactly that, at the name it gave, with no number in it.
+     */
+    if (c.shot_path && (c.shot_every <= 0 || c.shots_written == 0)) {
+        c.frame_index--;
+        client_write_shot(&c, false);
     }
 
 done:
