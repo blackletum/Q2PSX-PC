@@ -927,3 +927,86 @@ int cmd_funcs(const disc *d, const char *filter)
     q2_exe_free(&exe);
     return 0;
 }
+
+/* ------------------------------------------------------------------------- */
+/*
+ * The strings a relocatable module carries.
+ *
+ * This exists because of open question #44. The front end's own menus — START,
+ * OPTIONS, SINGLE PLAYER, MULTI PLAYER — are not in the executable, which is
+ * why sweeping it for them kept failing, and they are not in QFRONT's `Strings`
+ * chunk either, which holds three test placeholders. They are in the module:
+ * `QFRONT` ships a 118 KiB `LevelBin` and its text pool sits at the very front
+ * of it, before the code.
+ *
+ * A module's pool is not addressed by a directory, so a printable-run scan is
+ * the honest way to read it: it says what text the module contains without
+ * claiming to know which page each string belongs to.
+ */
+int cmd_modstrings(const disc *d, const char *map, bool level)
+{
+    const char *what = level ? "LevelBin" : "CreAIBin";
+    char path[160];
+    q2_buf file;
+    q2_common_file cf;
+    q2_ai_module mod;
+    u32 i, start = 0, found = 0;
+
+    snprintf(path, sizeof(path), "Q2DATA/LEVELS/%s/COMMON.DAT", map);
+    if (disc_read_file(d, path, &file) != Q2_OK) {
+        fprintf(stderr, "cannot read %s\n", path);
+        return 1;
+    }
+    if (q2_common_open(&cf, &file) != Q2_OK) {
+        fprintf(stderr, "%s is not a COMMON.DAT\n", path);
+        q2_buf_free(&file);
+        return 1;
+    }
+    if ((level ? q2_level_module_load(&mod, &cf, Q2_MOD_BASE)
+               : q2_ai_module_load(&mod, &cf, Q2_MOD_BASE)) != Q2_OK) {
+        fprintf(stderr, "%s has no relocatable %s\n", map, what);
+        q2_common_close(&cf);
+        return 1;
+    }
+    if (mod.empty) {
+        printf("%s has an empty %s\n", map, what);
+        q2_ai_module_free(&mod);
+        q2_common_close(&cf);
+        return 0;
+    }
+
+    printf("%s %s: %zu bytes, strings\n\n", map, what, mod.image.size);
+
+    for (i = 0; i <= mod.image.size; i++) {
+        int c = (i < mod.image.size) ? mod.image.data[i] : 0;
+        bool printable = (c >= 0x20 && c <= 0x7E);
+
+        if (printable) {
+            if (start == 0)
+                start = i + 1;          /* +1 so zero means "not in a run" */
+            continue;
+        }
+
+        if (start) {
+            u32 begin = start - 1;
+            u32 len = i - begin;
+
+            /* Four is the shortest run that is text rather than coincidence in
+             * a code segment; the module's own pool is well above it. */
+            if (c == 0 && len >= 4) {
+                printf("  module+0x%05X  0x%08X  \"%.*s\"\n",
+                       begin, mod.base + begin, (int)len,
+                       (const char *)mod.image.data + begin);
+                found++;
+            }
+            start = 0;
+        }
+    }
+
+    printf("\n  %u NUL-terminated printable runs of four characters or more\n",
+           found);
+
+    q2_ai_module_free(&mod);
+    q2_common_close(&cf);
+    return 0;
+}

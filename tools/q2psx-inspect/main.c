@@ -194,6 +194,7 @@ static void usage(void)
     puts("  funcs   <disc> [addr]       call targets found by sweeping the image");
     puts("  moddisasm <disc> <map> [addr] [n]  disassemble a relocated CreAIBin module");
     puts("  levdisasm <disc> <map> [addr] [n]  disassemble a relocated LevelBin module");
+    puts("  modstrings <disc> <map> [crea]  the text a relocated module carries");
     puts("  bytes   <disc> <addr> [n]   hex dump executable memory by address");
     puts("  find    <disc> <str|0xhex>  locate a string or byte pattern in the image");
     puts("  access  <disc> <off> [insn] every instruction touching a record offset");
@@ -4928,6 +4929,14 @@ int main(int argc, char **argv)
             const char *at = (argc >= 5) ? argv[4] : NULL;
             int n = (argc >= 6) ? atoi(argv[5]) : 0;
             rc = cmd_levdisasm(d, argv[3], at, n);
+        }
+    } else if (strcmp(cmd, "modstrings") == 0) {
+        if (argc < 4) {
+            fprintf(stderr, "modstrings needs a map name\n");
+            rc = 1;
+        } else {
+            bool lev = (argc < 5) || strcmp(argv[4], "crea") != 0;
+            rc = cmd_modstrings(d, argv[3], lev);
         }
     } else if (strcmp(cmd, "funcs") == 0) {
         rc = cmd_funcs(d, (argc >= 4) ? argv[3] : NULL);

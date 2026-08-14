@@ -192,6 +192,7 @@ answers them from the disc, with no external disassembler in the loop:
 build/bin/q2psx-inspect exe    "Quake II (Europe).cue"              # map + landmarks
 build/bin/q2psx-inspect disasm "Quake II (Europe).cue" 0x80076378   # to the return
 build/bin/q2psx-inspect xrefs  "Quake II (Europe).cue" 0x80068A58   # calls, constants, tables
+build/bin/q2psx-inspect modstrings "Quake II (Europe).cue" QFRONT   # a level module's own text
 ```
 
 `exe` re-checks nine addresses that `docs/FORMATS.md` makes claims about, so a

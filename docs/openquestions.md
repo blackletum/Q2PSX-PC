@@ -1495,9 +1495,38 @@ item records at run time instead of transcribing a table, so there is nothing to
       second call installs nothing at all at that moment. What `0x80079364` sets up is therefore the front
       end's **loading screen**, shown while `LEVELS/QFRONT/` streams in — which fits: it is the first thing
       `q2_menu_open`'s special case does, before the level that the title screen is drawn over exists.
-      *Still open, and further out than this entry implied:* where START and OPTIONS are written. They go
-      into the same two records later, from front-end code that has not been located; the reachable handle is
-      the function-pointer table at `0x80079ECC` (#42's blocker as well), not `0x80079364`.
+      **And the front end's own code is not in the executable at all — it is `QFRONT`'s `LevelBin`.**
+      That is why every sweep for START and OPTIONS failed, and why the item records are "filled at run
+      time": the thing filling them is a relocatable module, exactly as `QMULTI.C` is for deathmatch. This
+      entry already had the piece that gives it away and did not follow it — record 0 of the level table is
+      `QFront` -> `LEVELS/QFRONT/` — and QFRONT ships a **118,216-byte `LevelBin`**, by far the largest
+      chunk in it, against 13,008 bytes of `LevelRel`. Its `Strings` chunk is a red herring: three
+      placeholders, `sTRING`, `Another String` and a lorem-ipsum wrap test.
+      The module's text pool sits at its very front, before the code, and it is the whole front end —
+      `q2psx-inspect modstrings QFRONT` lists 349 runs and the first eighty are the menus:
+
+          START / OPTIONS · SINGLE PLAYER / MULTI PLAYER · NEW GAME / LOAD GAME
+          EASY / MEDIUM / HARD · PLAYER OPTIONS / SOUND OPTIONS / VIDEO OPTIONS / VIEW CREDITS
+          CROSSHAIR · AUTOCENTRE · CONTROLLER · RESET TO DEFAULTS
+          "      MUSIC" / "   SOUND FX" · STEREO · HORIZONTAL SPLIT · SCREEN POSITION
+          DEATHMATCH / TEAM DEATHMATCH / VERSUS · LOAD SETTINGS / SAVE SETTINGS
+          "2 3 4 PLAYERS" · "TIME LIMIT   10" · "FRAG LIMIT   10" · GAME VARIABLES
+          GRAVITY · FALLING DAMAGE · WEAPON STAY · ONE SHOT KILL · GAME SPEED · BLAST FORCE
+          INFINITE AMMO · ALL WEAPONS · RULES, and the five modes' rule paragraphs in full
+
+      Two things fall out of the list that the capture could not show. The **leading spaces are the layout** —
+      `"      MUSIC"`, `"   SOUND FX"`, `"    GRAVITY"`, `" GAME SPEED"` are padded to right-align against
+      their sliders, which is why the in-game SOUND page's transcription needed no such padding and the
+      front end's does. And there are **five** deathmatch rule paragraphs, not three: alongside the three
+      selectable modes the capture shows, the pool carries full rules for a flag-capture mode and a
+      last-one-standing mode, matching the six modes `QMULTI.C` implements of which three are selectable
+      (#0). BRONZE cheats have an unlock file, and there is a `DEMO OF GAME` / `STARTING` pair for the
+      attract loop.
+      `q2psx-inspect modstrings <map> [crea]` is the reader; BASE0's `LevelBin` yields five runs against
+      QFRONT's 349, which is the contrast that says the scan is finding a pool rather than manufacturing one.
+      *Still open:* the item RECORDS — which strings sit on which page, at what y, with what action. Those
+      are built by this module's code, and reading them is now a `levdisasm QFRONT` job rather than a search
+      of the wrong binary.
 
 - [x] 45. **Word wrap in practice — SOLVED, and it was the wrong screen.** The wrap the capture shows is the
       **briefing's**, not the MISSION screen's: `#06A196` at `0x800AE740` sets margins 106 and 406, which is
