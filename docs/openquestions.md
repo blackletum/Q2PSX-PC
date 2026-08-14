@@ -1003,11 +1003,20 @@ The residues of the resolved blockers keep their parents' numbers.
       `src/build/musictable.[ch]`, `q2_level_playlist_next`; the client plays its map's playlist and
       advances on end of stream.
 
-- [ ] **13a. (was 13)** The remaining half: what, other than a stream ending, moves the playlist cursor.
-      `0x80071A68` is the only advance read so far and it runs when a track finishes. The earlier guess that
-      the per-map id was in the level `.DAT` chunks is retracted — it is in the executable's level table —
-      but whether a script event can jump the cursor (a boss room, a scripted set piece) is not established.
-      `gp+1536` has five references and only three have been followed.
+- [x] **13a. (was 13) What, other than a stream ending, moves the playlist cursor. — SOLVED: nothing does.**
+      The cursor at `gp+1536` has exactly **two** writers and both are now read.
+      `0x80071B34` is the entry point: it clears `0x800B2710`, sets the music-enabled flag at `gp+1532`, and
+      parks the cursor at `list - 1` — one before the first id, which is what the walk's pre-increment
+      wants. It has a **single caller**, `0x800796C8`, and that caller passes `*(gp+18832) + 34`.
+      `gp+18832` is the current level record (written at `0x8007C584`, at the head of the name lookup that
+      resolves a level), and 34 is `0x22`. So the only thing that starts a playlist is a level load, and the
+      list it starts is the level record's own — which corroborates the `+0x22` reading from the CONSUMER
+      side, independently of the data's shape.
+      The other writer is the walk itself at `0x80071A68`, and it runs when a stream ends. A zero byte ends
+      the list and calls `0x80071B6C`, which stops the CD; a negative byte jumps back and loops.
+      So there is no scripted music change: a level's seven tracks cycle for as long as the level lasts, and
+      nothing in a boss room or a set piece can jump the cursor. That is a negative result about the game's
+      design, not about the search.
 - [ ] **14. Does the engine loop XA tracks?** The duration field is converted to 50 Hz ticks and stored to
       two globals with a 30.0 s fallback — that looks like a countdown to a restart or fade — but the
       consuming code was not disassembled. One entry is **1.0 s short** of its measured stream length, hinting
