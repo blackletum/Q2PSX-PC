@@ -228,7 +228,18 @@ typedef struct q2_actor {
     bool no_knockback;      /* FL_NO_KNOCKBACK, 0x800: knockback forced to 0 */
     bool godmode;           /* FL_GODMODE, 0x10: damage forced to 0          */
 
+    /*
+     * Which player this actor IS, or -1 for anything that is not one.
+     *
+     * The engine carries the same thing as a signed byte at entity+222 — the
+     * killer's id, which `q2_mp_attribute_kill` already takes and which nothing
+     * had ever been able to supply, because an actor could not say who it
+     * belonged to. Without it a deathmatch kill has a victim and no killer.
+     */
+    s8   owner;
+
     /* Written by the damage function. */
+    s8   last_attacker;     /* entity+222: who last hurt this, -1 for world  */
     s32  knockback[3];      /* entity+0x2F8..0x2FC                           */
     bool knocked;           /* entity+0x10C bit 0x4000                       */
     s16  last_mod;          /* entity+0xDF                                   */

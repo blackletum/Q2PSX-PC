@@ -66,6 +66,8 @@ void q2_actor_init(q2_actor *a)
     if (!a)
         return;
     memset(a, 0, sizeof(*a));
+    a->owner         = -1;      /* not a player until a caller says so */
+    a->last_attacker = -1;
     a->radius = 286;      /* the movement sweep's half extent, FORMATS §5 */
 }
 
@@ -301,6 +303,10 @@ q2_damage_result q2_combat_damage(q2_actor *attacker, q2_actor *target,
 
     was_alive = target->health > 0;
     target->last_mod = mod;
+
+    /* Who did it, so a scoring hook has a killer as well as a victim. The
+     * engine's own byte is entity+222 and -1 there means the world. */
+    target->last_attacker = attacker ? attacker->owner : (s8)-1;
 
     if (amount <= 0)
         return out;

@@ -331,6 +331,7 @@ typedef struct client {
     /* Creatures plus the other players, rebuilt per player. */
     q2_actor         *mp_target[Q2_CLIENT_MAX_TARGETS];
     bool              mp_targets_logged;
+    bool              mp_dead[Q2_MP_MAX_PLAYERS];
     int               trace_cre;      /* creature index to trace, -1 for none  */
     u32               trace_ticks;
 
@@ -989,6 +990,49 @@ static u32 client_targets_for(client *c, int who)
  * field and only the live player's pair is synchronised. Copy it back so a hit
  * landed while they were parked is still there when their frame runs.
  */
+/*
+ * Any player whose health has crossed zero scores a frag for whoever did it.
+ *
+ * This is the engine's own hook at 0x800396AC — `(*module)->[4](killer,
+ * victim)` — with the killer taken from the actor's `last_attacker`, which is
+ * the byte the original keeps at entity+222. `q2_mp_attribute_kill` decides
+ * whether it counts: a world kill and the level's own hazards are nobody's
+ * frag, however the victim came to be standing in them.
+ */
+static void client_score_deaths(client *c)
+{
+    int i;
+
+    if (!c->mp_enabled || c->mp.end != Q2_MP_RUNNING)
+        return;
+
+    for (i = 0; i < Q2_MP_MAX_PLAYERS; i++) {
+        const q2_actor *a = (i == c->sim[0].cur_player)
+                                ? &c->sim[0].combat.self
+                                : &c->sim[0].pcombat[i].self;
+
+        if (i > 0 && !c->sim_ready[i])
+            continue;
+        if (a->health > 0) {
+            c->mp_dead[i] = false;
+            continue;
+        }
+        if (c->mp_dead[i])
+            continue;                /* already counted this death */
+
+        c->mp_dead[i] = true;
+        {
+            int killer = q2_mp_attribute_kill(a->last_attacker, a->last_mod);
+
+            q2_mp_player_killed(&c->mp, killer, i);
+            c->mp_deaths++;
+            Q2_INFO("multiplayer: player %d killed by %d — frags %d %d %d %d",
+                    i, killer, c->mp.frags[0], c->mp.frags[1],
+                    c->mp.frags[2], c->mp.frags[3]);
+        }
+    }
+}
+
 static void client_sync_parked_health(client *c)
 {
     int i;
@@ -1435,6 +1479,7 @@ static bool client_load_zone(client *c, const char *map, int index)
 
         q2_sim_spawn(&c->sim[0], feet, c->cam.yaw);
         c->sim[0].player[0].ground_y = feet[1];
+        c->sim[0].combat.self.owner  = 0;
 
         /*
          * The other players. Each gets its own sim, standing at its own
@@ -1486,6 +1531,7 @@ static bool client_load_zone(client *c, const char *map, int index)
                     c->sim[0].cur_player = saved;
                 }
                 q2_sim_player_reset_combat(&c->sim[0], pi);
+                c->sim[0].pcombat[pi].self.owner = (s8)pi;
                 c->sim[0].player_count = pi + 1;
                 c->sim_ready[pi] = true;
             }
@@ -1858,6 +1904,7 @@ static void client_input_simulated(client *c, float dt)
 
     q2_sim_advance(&c->sim[0], &in, (double)dt);
     client_sync_parked_health(c);
+    client_score_deaths(c);
 
     /*
      * The other players, each on its own pad. In a headless demo run there is
@@ -1899,6 +1946,7 @@ static void client_input_simulated(client *c, float dt)
                 client_targets_for(c, pi);
                 q2_sim_advance_player(&c->sim[0], pi, &pin, ticks);
                 client_sync_parked_health(c);
+                client_score_deaths(c);
             }
         }
     }

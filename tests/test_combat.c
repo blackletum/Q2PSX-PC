@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "combat.h"
+#include "multiplayer.h"
 #include "projectile.h"
 #include "trig.h"
 #include "weapon.h"
@@ -296,6 +297,38 @@ static void test_damage(void)
         r = q2_combat_damage(NULL, &god, 40, Q2_MOD_BULLET, NULL, &rules);
         check_eq_i(god.health, 100, "godmode takes nothing");
         check_eq_i(r.taken, 0, "and reports nothing taken");
+    }
+
+    /*
+     * Who did it. The engine keeps the killer's id as a signed byte at
+     * entity+222 and `q2_mp_attribute_kill` has always taken one; nothing could
+     * supply it, because an actor could not say which player it was. A
+     * deathmatch kill had a victim and no killer.
+     */
+    {
+        q2_actor shooter, victim;
+
+        place(&shooter, 0, 0, 0, 100);
+        place(&victim, 0, 0, 0, 100);
+        shooter.owner = 2;
+
+        q2_combat_damage(&shooter, &victim, 30, Q2_MOD_BULLET, NULL, &rules);
+        check_eq_i(victim.last_attacker, 2, "the shooter's id is recorded");
+        check_eq_i(q2_mp_attribute_kill(victim.last_attacker, victim.last_mod),
+                   2, "and attribution gives that player the frag");
+
+        /* World damage leaves -1, and attribution keeps it that way. */
+        place(&victim, 0, 0, 0, 100);
+        q2_combat_damage(NULL, &victim, 30, Q2_MOD_BULLET, NULL, &rules);
+        check_eq_i(victim.last_attacker, -1, "world damage has no attacker");
+        check_eq_i(q2_mp_attribute_kill(victim.last_attacker, victim.last_mod),
+                   -1, "and stays nobody's frag");
+
+        /* A hazard is nobody's frag even when a player last touched you. */
+        place(&victim, 0, 0, 0, 100);
+        q2_combat_damage(&shooter, &victim, 5, Q2_MOD_LAVA, NULL, &rules);
+        check_eq_i(q2_mp_attribute_kill(victim.last_attacker, victim.last_mod),
+                   -1, "lava is nobody's frag");
     }
 
     /* A corpse floors at -9999 however hard it is hit. */

@@ -3070,6 +3070,31 @@ inventory at reset, so the pair starts in step.
 
 Single player is byte-identical, all 26 tests pass.
 
+## A kill has a killer
+
+`q2_mp_attribute_kill` has taken a killer's id since it was written, and nothing could supply one. The engine
+keeps it as a signed byte at `entity+222`; the port's `q2_actor` had no equivalent, so a deathmatch kill had
+a victim and nobody to credit it to.
+
+An actor now carries `owner` — which player it is, or -1 for anything that is not one — and the damage
+function writes `target->last_attacker = attacker ? attacker->owner : -1`. Each player's actor is stamped
+with its own index at spawn, and any player whose health crosses zero goes through
+`q2_mp_attribute_kill` and then `q2_mp_player_killed`, which is the engine's own hook at `0x800396AC`
+reproduced: `(*module)->[4](killer, victim)`.
+
+Checked in `test_combat` rather than asserted:
+
+- a shooter with `owner = 2` leaves `last_attacker = 2` on its victim, and attribution gives player 2 the frag;
+- world damage leaves -1 and stays nobody's frag;
+- **lava is nobody's frag even when a player last touched you** — the environmental means of death are
+  excluded by the rule `q2_mp_attribute_kill` already carried, and this is the first caller able to reach it.
+
+Not observed in a capture: the demo players are scattered across an arena firing blindly and never hit each
+other in 1200 frames. The scoring path is wired and unit-tested; it has not scored a frag in play, and this
+says so rather than implying otherwise.
+
+Single player is byte-identical, COMMAND still reports 22 fire calls of 22 sent, all 26 tests pass.
+
 ---
 
 ## ⚠ Security note (carried forward, do not drop)
