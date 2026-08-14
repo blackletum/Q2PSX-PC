@@ -564,6 +564,42 @@ void q2_sim_combat_tick(q2_sim *sim)
         if (hit_index >= 0 && hit_list[hit_index] == attacker_for(sim, p->owner))
             hit_index = -1;
 
+        /*
+         * How close it came, whether or not it counted. Measured against the
+         * segment's LINE, so "near but past the end" separates a bolt that is
+         * badly aimed from one that is aimed correctly and simply has not
+         * arrived yet — which a short per-tick step makes the common case.
+         */
+        {
+            u32 k;
+            s64 dl = (s64)dir[0] * dir[0] + (s64)dir[1] * dir[1] +
+                     (s64)dir[2] * dir[2];
+
+            /* The square is enough to compare; the length is only printed. */
+            q2_sim_proj_scan.seg_len = (s32)dl;
+
+            for (k = 0; k < hit_count; k++) {
+                q2_actor *t = hit_list[k];
+                s64 along = 0, d2;
+                s64 reach;
+
+                if (!t || t == attacker_for(sim, p->owner) || t->health <= 0)
+                    continue;
+
+                d2 = q2_combat_ray_dist_sq(step.from, dir, t->origin, &along);
+                if (q2_sim_proj_scan.closest_sq == 0 ||
+                    d2 < q2_sim_proj_scan.closest_sq)
+                    q2_sim_proj_scan.closest_sq = d2;
+
+                reach = (s64)Q2_HITSCAN_RADIUS + t->radius;
+                if (d2 <= reach * reach) {
+                    q2_sim_proj_scan.near_miss++;
+                    if (along > 4096)
+                        q2_sim_proj_scan.past_end++;
+                }
+            }
+        }
+
         if (hit_index >= 0) {
             q2_actor *victim = hit_list[hit_index];
 

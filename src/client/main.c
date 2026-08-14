@@ -3221,9 +3221,13 @@ static void client_write_shot(client *c, bool numbered)
                         c->mp_shots[pi], c->mp_dry[pi]);
                 if (pi == 1)
                     Q2_INFO("  proj: %u launched, %u stepped, %u expired, "
-                            "%u hit", q2_sim_proj_scan.launched,
+                            "%u hit; near %u (past end %u), closest^2 %lld, "
+                            "seg^2 %d", q2_sim_proj_scan.launched,
                             q2_sim_proj_scan.stepped, q2_sim_proj_scan.expired,
-                            q2_sim_proj_scan.hit);
+                            q2_sim_proj_scan.hit, q2_sim_proj_scan.near_miss,
+                            q2_sim_proj_scan.past_end,
+                            (long long)q2_sim_proj_scan.closest_sq,
+                            q2_sim_proj_scan.seg_len);
                 {
                     const q2_combat_scan_stats *sc = &q2_combat_scan_by[pi];
 

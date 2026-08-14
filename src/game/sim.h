@@ -683,6 +683,19 @@ typedef struct q2_sim_proj_stats {
     u32 stepped;
     u32 expired;
     u32 hit;
+
+    /*
+     * How close a bolt ever came. `nearest_hit` wants the ray to pass within
+     * Q2_HITSCAN_RADIUS + the target's own 286, and it measures `along` as a
+     * FRACTION of the ray — so a per-tick segment that is short compared with
+     * the distance to the target puts the target past the far end and it is
+     * never considered, however well aimed. These say which of "nowhere near"
+     * and "near but rejected" is happening.
+     */
+    u32 near_miss;      /* a target within reach of the segment's line       */
+    u32 past_end;       /* ...but beyond the segment's far end               */
+    s64 closest_sq;     /* the smallest perpendicular distance squared seen  */
+    s32 seg_len;        /* the last segment's length, in world units         */
 } q2_sim_proj_stats;
 
 extern q2_sim_proj_stats q2_sim_proj_scan;

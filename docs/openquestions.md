@@ -3194,10 +3194,23 @@ player-versus-player damage:
         against a list whose one omission was player 0. `q2_sim_set_world_targets` now carries every player
         and every creature with nobody left out, and the owner is skipped by pointer at impact instead.
 
-      What is left is the intersection itself: `q2_combat_nearest_on_segment(step.from, dir,
-      Q2_HITSCAN_RADIUS, ...)` against actors of radius 286. Whether a bolt's per-tick segment and that
-      radius can ever overlap a target is the next thing to measure — the counters say the bolt exists and
-      moves, so this is now one geometric test rather than a search. The launch passes -1; the
+      The geometry is measured now, and it is very nearly right: `near 0 (past end 0), closest^2 333434,
+      seg^2 3973`. The closest a bolt ever came is **577 units** against a reach of `Q2_HITSCAN_RADIUS + 286
+      = 572`. It misses by five. A bolt travels 63 units a tick, and nothing is ever rejected for being past
+      the segment's end, so the step length is not the problem either.
+
+      577 against 572 is the height of a man: `q2_player.pos` is the FEET — what a StartPos names — while a
+      shot leaves the other player's EYE, `Q2_EYE_BASE` 286 above it. The hurt-actor's origin now sits at the
+      eye for that reason, which is right on its own merits: what a shot has to intersect is the body, not
+      the floor under it.
+
+- [ ] 59c. **And the measurement did not move.** `closest^2` is 333434 before and after, byte-identical —
+      the THIRD time this session an unchanged number has meant "you are not measuring what you changed".
+      The first cost two rounds on a creature count that belonged to a different creature; the second cost
+      four on a scan counter that belonged to a different player. The pattern is now unmistakable and the
+      response should be automatic: when a number does not move, stop fixing and find out whose number it is.
+      Here that means printing the origin the scan actually read, per target, rather than reasoning about
+      which actor `hit_list` holds during the step. The launch passes -1; the
       shooter's index is available at the call site. Until then a player-versus-player kill can happen and
       still not be attributed. The scan counters cover hitscan only, so this wants the same treatment: count
       where a projectile stops, per owner, rather than reasoning about it. One shared

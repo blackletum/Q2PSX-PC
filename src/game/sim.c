@@ -1806,8 +1806,20 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
      * Only the origin: `owner` and `last_attacker` must survive, and health is
      * synchronised by the damage path itself.
      */
+    /*
+     * At the EYE, not the feet.
+     *
+     * `q2_player.pos` is the feet — that is what a StartPos names — but the
+     * thing a shot has to intersect is the body, and a shot leaves another
+     * player's eye. With the origin on the floor a perfectly level shot passes
+     * exactly Q2_EYE_BASE above it, and the counters caught that precisely: the
+     * closest a bolt ever came was 577 units against a reach of 286 + 286 =
+     * 572. Missing by five, every time, for the height of a man.
+     *
+     * World Y grows downward, so the eye is at a SMALLER y.
+     */
     sim->combat.self.origin[0] = p->pos[0];
-    sim->combat.self.origin[1] = p->pos[1];
+    sim->combat.self.origin[1] = p->pos[1] - Q2_EYE_BASE;
     sim->combat.self.origin[2] = p->pos[2];
 
     /* 0x8003AE10, the last thing the player's frame does: notice damage, grunt,
