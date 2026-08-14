@@ -3822,8 +3822,26 @@ nothing saying so.
       `0x800AE954`, not constants in code.** The second call, `0x800482A0`, is the same shape behind a
       `& 0x10` flag test — one light unconditionally and a second when the bit is set.
 
-      What is NOT done: none of the fifteen is reconstructed. This locates their shared table and reads one
-      site's operands.
+      **The first of the fifteen is now reconstructed.** `0x80047C6C` is the PROJECTILE sweep — so what that
+      light is, is a bolt lighting the world it flies through. Every live projectile raises the light event
+      with the preset above (`simcombat.c`), and the client feeds it to the light world instead of dropping
+      it.
+
+      **And doing that found a second bug that had nothing to do with projectiles.** The first measurement
+      read `16 lights added, 481 dropped`: sixteen is the engine's ceiling, and the list was filling once
+      and never draining. `q2_light_world_begin_frame()` — a transcription of `0x80075B94`, which empties the
+      runtime lists at the top of every frame — **existed in this port and was called from nowhere.** With
+      it wired in:
+
+          BASE3   16 added, 481 dropped  ->  497 added, 0 dropped
+          JAIL2                          ->  496 added, 0 dropped
+
+      So any future dynamic light would have been silently capped at sixteen for the whole level. That is
+      worth more than the projectile light itself, and it was only visible because the counter reported
+      added and dropped separately rather than "lights: 16".
+
+      Still not done: fourteen of the fifteen sites, and the second projectile light at `0x800482A0` behind
+      the `& 0x10` flag test.
 
 ---
 

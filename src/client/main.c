@@ -308,6 +308,7 @@ typedef struct client {
     u32               cre_swings, cre_shots;   /* hook invocations */
     u32               cre_sounds;
     u32               cre_sound_missing;
+    u32               ent_light_added;
     u32               ent_light_dropped;
     u32               ent_bursts;
     u32               burst_no_fx, burst_no_table, burst_no_model;
@@ -2889,6 +2890,15 @@ static void client_entity_events(client *c)
     const q2_ent_events *ev = q2_sim_entity_events(&c->sim[0]);
     u32 i;
 
+    /*
+     * Empty last frame's runtime lights first — 0x80075B94 does this at the top
+     * of every frame and nothing in this port was calling it. Without it the
+     * sixteen dynamic slots fill on the first frames a projectile flies and stay
+     * full forever: a 500-frame BASE3 capture added 16 lights and dropped 481.
+     */
+    if (c->lights_ready)
+        q2_light_world_begin_frame(&c->light_world);
+
     if (!ev)
         return;
 
@@ -2908,7 +2918,21 @@ static void client_entity_events(client *c)
          * reconstruct it. See openquestions #60.
          */
         if (ev->e[i].kind == Q2_ENT_EVENT_LIGHT) {
-            c->ent_light_dropped++;
+            /*
+             * Fed to the light world rather than dropped. The event carries the
+             * colour and the outer radius the projectile sweep reads out of
+             * 0x800AE954; the inner comes from the same preset. Sixteen dynamic
+             * lights is the engine's own ceiling (lighting.h) and the
+             * seventeenth is dropped there, so a busy frame still counts what it
+             * could not take.
+             */
+            if (!c->lights_ready ||
+                !q2_light_add_dynamic(&c->light_world, ev->e[i].pos,
+                                      ev->e[i].glow, Q2_PROJ_LIGHT_INNER,
+                                      ev->e[i].radius, 0, 0))
+                c->ent_light_dropped++;
+            else
+                c->ent_light_added++;
             continue;
         }
         if (ev->e[i].kind == Q2_ENT_EVENT_BURST) {
@@ -3444,8 +3468,8 @@ static void client_write_shot(client *c, bool numbered)
                 c->sim[0].combat.projectiles.live, c->cre_bodies, c->rot_steps,
                 c->rot_moved, client_rot_turned(c),
                 c->sim[0].event_rt.call_count);
-        Q2_INFO("  entity ev %u lights dropped, %u bursts drawn",
-                c->ent_light_dropped, c->ent_bursts);
+        Q2_INFO("  entity ev %u lights added, %u dropped, %u bursts drawn",
+                c->ent_light_added, c->ent_light_dropped, c->ent_bursts);
         Q2_INFO("  burst why %u no fx, %u no table, %u no model, %u no bank, "
                 "%u bad model, %u no verts",
                 c->burst_no_fx, c->burst_no_table, c->burst_no_model,

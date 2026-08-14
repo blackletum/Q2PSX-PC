@@ -118,6 +118,27 @@ typedef enum q2_proj_kind {
  * inventing one. Passed in by the caller.
  */
 
+/*
+ * A projectile lights the world around it.
+ *
+ * The per-frame sweep at `0x80047C6C` calls the engine's dynamic-light append
+ * (`0x80075C34`) at `0x80048228` for every live projectile, and it does not
+ * compute the light -- it reads a preset out of globals:
+ *
+ *     0x800AE954   FF 64 4B      RGB (255, 100, 75), a warm orange
+ *     0x800AE958   2C 01 20 03   two u16 packed lo | hi<<16: 300 and 800
+ *
+ * so the colour and both radii are DATA, transcribed here rather than chosen.
+ * `0x800482A0` adds a second light behind a `& 0x10` test on the projectile's
+ * flags halfword; that one is not reconstructed yet because the flag's meaning
+ * is not read. See openquestions #57.
+ */
+#define Q2_PROJ_LIGHT_R       255
+#define Q2_PROJ_LIGHT_G       100
+#define Q2_PROJ_LIGHT_B        75
+#define Q2_PROJ_LIGHT_INNER   300
+#define Q2_PROJ_LIGHT_OUTER   800
+
 typedef struct q2_projectile {
     bool in_use;
     q2_proj_kind kind;

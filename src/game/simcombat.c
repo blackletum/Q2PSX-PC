@@ -497,6 +497,20 @@ void q2_sim_combat_tick(q2_sim *sim)
             continue;
 
         q2_sim_proj_scan.stepped++;
+
+        /*
+         * Every live projectile lights the world, from the preset the sweep at
+         * 0x80047C6C reads out of 0x800AE954 -- warm orange, outer radius 800.
+         * Raised before the step so the light sits where the bolt was drawn
+         * this frame rather than where it is about to be.
+         */
+        {
+            static const u8 glow[3] = { Q2_PROJ_LIGHT_R, Q2_PROJ_LIGHT_G,
+                                        Q2_PROJ_LIGHT_B };
+            q2_ent_light_at(&sim->ent_world.events, p->pos, glow,
+                            Q2_PROJ_LIGHT_OUTER);
+        }
+
         q2_projectile_step(&sim->combat.projectiles, i, sim->gravity,
                            sim->level_time, &step);
 
