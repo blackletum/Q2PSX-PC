@@ -3915,8 +3915,25 @@ nothing saying so.
       So the projectile's `300, 800` is inner 300 / outer 800 — what this port implemented — and the second
       light's `800, 1600` likewise. **The rocket's `2000, 1000` really is inner > outer**, and that is now a
       property of the data rather than an ambiguity in the reading. It is still a reason not to wire the
-      rocket blind: `q2_light_atten` computes `den = outer - inner`, so a negative denominator needs its
-      behaviour checked before a rocket lights anything.
+      rocket blind, and checking it sharpens the anomaly rather than dissolving it.
+
+      **The record layout confirms which half is which.** `formats/entity.h` documents the light record from
+      the map data: `0x14 u32 inner_radius_sq`, `0x18 u32 radius_sq`. The engine writes `a2`'s LOW half
+      squared to +20 and its HIGH half squared to +24, so **low is inner, high is outer** — the projectile's
+      300/800 is inner 300, outer 800, exactly as implemented.
+
+      That makes the rocket's 2000/1000 an inner radius larger than its outer, and the same doc records that
+      `inner_radius_sq` is **always <= radius_sq across all 7,814 static lights on the disc**. The rocket's
+      pair violates an invariant every static light obeys.
+
+      Three readings survive and none is chosen: the halfwords at `0x800AE990` and `0x800AE992` may be
+      independent globals rather than a pair; the runtime append may not honour the static invariant; or that
+      site is still misread. `q2_light_atten` computes `den = outer - inner` in UNSIGNED arithmetic, so
+      inner > outer underflows to a huge denominator and the light comes out at essentially zero — it would
+      not crash, it would silently do nothing.
+
+      **A light that silently does nothing is the worst thing to ship**, because it looks like the feature is
+      present. The rocket stays unwired until one of the three readings is settled.
 
       Still not done: fourteen of the fifteen sites — but they share a dumped table now, and two of the
       fourteen are identified (rocket, and `0x8004B2B4` reached the same way).
