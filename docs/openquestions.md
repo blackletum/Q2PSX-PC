@@ -1787,6 +1787,19 @@ indirect call the action decoder reports as `call(+D8)?`, so what damage a
 creature's gun does is not read yet (#6), and an invented number would make every
 creature in the game lethal on a guess.
 
+**Where a creature's shot damage actually lives — a redirect for #6.** It is not in
+the module. `soldier_fire` at `module+0x1120` picks one of three 8-entry tables by
+skin (`module+0x3240`, `+0x3260`, `+0x3280`) and the entries are **small integers**
+— table 0 reads 39, 40, 83, 86, 89, 92, 95, 98 — which are muzzle-flash indices,
+not damage. It then calls engine slots `+0xC8` and `+0xD8` with vectors, and
+`+0xC8` resolves to **`0x80078288`** while `+0xD8` is a DATA pointer,
+`0x800B2C2C`, not a function. So the figures are on the executable side, reachable
+from `0x80078288`, and every attempt to find them by decoding module images was
+looking in the wrong binary — the same mistake this document has now recorded
+three times (the multiplayer runtime, the front end, and this).
+The port therefore leaves the fire hook unset rather than guessing, and a Soldier
+chases and swings but does not shoot.
+
 **Eight of the disc's levels ship an EMPTY `CreAIBin` — four bytes — and place
 creatures anyway.** JAIL2, JAIL3 and JAIL4 have Infantry; SECURITY, WASTE2,
 BIGGUN, BOSS1 and BOSS2 likewise. Their spawn records name classes the class
