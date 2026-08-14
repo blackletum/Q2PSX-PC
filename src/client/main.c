@@ -3011,8 +3011,12 @@ static void client_entity_events(client *c)
              * 1000 and every other bolt's 800 pairs with 300. Both pairs are
              * read from 0x800AE9C0 and 0x800AE958 -- see projectile.h.
              */
-            s32 inner = (ev->e[i].radius == Q2_PROJ_BFG_LIGHT_OUTER)
-                            ? Q2_PROJ_BFG_LIGHT_INNER : Q2_PROJ_LIGHT_INNER;
+            s32 inner = Q2_PROJ_LIGHT_INNER;
+
+            if (ev->e[i].radius == Q2_PROJ_BFG_LIGHT_OUTER)
+                inner = Q2_PROJ_BFG_LIGHT_INNER;
+            else if (ev->e[i].radius == Q2_ENERGY_LIGHT_OUTER)
+                inner = Q2_ENERGY_LIGHT_INNER;
 
             if (!c->lights_ready ||
                 !q2_light_add_dynamic(&c->light_world, ev->e[i].pos,

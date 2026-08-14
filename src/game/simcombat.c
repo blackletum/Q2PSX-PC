@@ -500,6 +500,29 @@ void q2_sim_combat_tick(q2_sim *sim)
     if (sim->cur_player != 0)
         return;
 
+    /*
+     * The energy-bolt effect's green light, one per lit actor. 0x80058638 gates
+     * it on effect[1] >= 3 and reads its colour and radii from 0x800AEAAC and
+     * 0x800AEAB0 — see combat.h. Raised here rather than at the damage site so
+     * it lasts as long as the effect does rather than for the tick that armed it.
+     */
+    {
+        static const u8 energy[3] = { Q2_ENERGY_LIGHT_R, Q2_ENERGY_LIGHT_G,
+                                      Q2_ENERGY_LIGHT_B };
+        u32 t;
+
+        if (q2_actor_energy_lit(&sim->combat.self))
+            q2_ent_light_at(&sim->ent_world.events, sim->combat.self.origin,
+                            energy, Q2_ENERGY_LIGHT_OUTER);
+
+        for (t = 0; t < sim->world_target_count; t++) {
+            const q2_actor *a = sim->world_targets ? sim->world_targets[t] : NULL;
+            if (a && q2_actor_energy_lit(a))
+                q2_ent_light_at(&sim->ent_world.events, a->origin, energy,
+                                Q2_ENERGY_LIGHT_OUTER);
+        }
+    }
+
     for (i = 0; i < Q2_PROJ_MAX; i++) {
         q2_projectile *p = &sim->combat.projectiles.p[i];
         q2_proj_step step;

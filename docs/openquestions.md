@@ -4216,6 +4216,19 @@ nothing saying so.
                                        with `tests/combat` pinning the boundary at 3 rather than at 0:
                                        a `> 0` reading would light the whole tail and look entirely
                                        reasonable doing it.
+
+                                       **Raised** from the projectile tick in `simcombat.c` — the player's
+                                       own actor and every world target, one light each while lit. Put
+                                       there rather than at the damage site on purpose: the effect outlives
+                                       the tick that armed it, so lighting it where the damage lands would
+                                       give a one-frame flash where the original gives a burn.
+
+                                       The client pairs the inner radius off the outer the event carries
+                                       (1300 -> 800), which now distinguishes three presets — projectile
+                                       800, BFG 1400, energy 1300. That mapping is a workaround for the
+                                       event struct carrying one radius, and it stops working the moment
+                                       two presets share an outer; the event wants widening before a fourth
+                                       is added.
           0x8002A868  in 0x8002A660  = the SCRIPT effect area (userfuncs.h cites 0x8002A384, GLASS's own
                                        effect spawn)
           0x80031048  in 0x80030E74  = EFFECT code (effect.c cites 0x80030430)
