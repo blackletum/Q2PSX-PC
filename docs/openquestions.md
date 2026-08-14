@@ -4168,5 +4168,23 @@ nothing saying so.
       probably `ber_idle1`. Slot INDEX is the sound number, so a table that starts early is worse than none —
       **the Berserk's numbering should not be relied on until that start is pinned.**
 
+      **Two attempts at pinning it, both reverted, both instructive.**
+
+      *Reject a candidate whose first slot is a MOVE name.* The move names are already readable and
+      `Attack1/2/3` are three of the Berserk's own moves, so the discriminator is sound. But rejecting a
+      start advances the cursor by four bytes, which lands MID-STRING: the Berserk then reported
+      `ck1  ck2  ck3  pain2  pain1  deth2 ...` — the tails of `Attack1`, `ber_pain2`, `inf_pain1`. Names that
+      look entirely plausible and are the ends of other names.
+
+      *Also require a slot to START a string (`image[at-1] == 0`).* This fixes the mid-string reads and is
+      principled. It also **dropped `ara_melee1` from the Arachner**, taking it from 6 names to 5 — and slot
+      index IS the sound number, so every Arachner sound would have shifted by one. A refinement that fixes
+      the creature you are looking at and silently renumbers one you are not.
+
+      Both reverted. The state that ships is the plain fallback: **the Tank Commander correct and verified
+      against #60's VAG names, the Berserk found but flagged.** A wrong table is worse than a missing one
+      here, and the Berserk's is wrong in a way that reads as right — which is the whole reason it is
+      labelled rather than used.
+
       **Do not conclude the sounds are absent.** That was the previous answer here for many passes and it was
       wrong; see #60 for how the mistake was made and how it was caught.
