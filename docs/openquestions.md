@@ -1682,6 +1682,29 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
       how `cur_t` interpolates into it, or whether a per-part offset is being dropped — is short by about
       the same quarter screen. `0x8004F5E0`'s operands are the thing to read next.
 
+      **`0x8004F5E0`'s operands have now been read, and they say the port is right.** Three things are ruled
+      out, and they were the three this entry pointed at.
+      *The translation is the disc's.* `0x8004F47C…0x8004F5DC` interpolates the key's `+6` triple as
+      `base + (key - base) * (total - left) / total` and hands it to `0x8006FD38`, which is `(M · v) >> 12`
+      with the shift at `0x8006FE08`. The blaster's raise keys read `t 140 257 44`, `140 157 44`,
+      `140 157 104`, `140 157 44` — `t.x` is **140 on every key**, so there is no key the machine can rest
+      on that puts the grip further right.
+      *The interpolation is not it either*, since every key agrees on x.
+      *And the rotation ORDER is not it.* `RotMatrix` at `0x80089E38` reads a packed `{sin, cos}` table at
+      `0x800A5430` and writes `m[1][2] = -sin(x)` (`0x80089F0C`) and `m[0][2] = sin(y)·cos(x)`
+      (`0x80089F20`). Those two elements are the signature of **Ry·Rx** with Z outermost — `Rx·Ry` would give
+      `m[0][2] = sin(y)` and `m[1][2] = -sin(x)·cos(y)` — which is exactly what `q2_rotation_euler`
+      implements. A wrong order would have mattered a great deal here, because the blaster's clip rotation is
+      `(2248, 1280, 1748)`, about 198°, 112° and 154°.
+      So `q2_vw_place` agrees with the executable on every operand that can be checked against it, and the
+      quarter screen is not in it. What has NOT been checked is the port's own invention: `q2_vw_build_ot`
+      cancels the camera by drawing the model with `camera^T · clip`, which is not a transcription of
+      anything — the console composes `MulMatrix(RotMatrix(view), entity)` and lets the world draw apply the
+      camera. That cancellation is exact only when the two matrices are built the same way, and they are
+      not: `q2_vw_place` drops `ang[2]` where the camera's own `q2_rotation_view` includes roll. That is a
+      real divergence whenever the strafe lean is active, though it cannot explain a still frame at zero
+      roll — so the measurement itself may also want re-taking against a fresh capture.
+
 ---
 
 ## Putting the creatures in the client
