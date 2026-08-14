@@ -128,12 +128,23 @@ static void run_step(q2_monster *m, const q2_cre_step *s)
          * what it does know and the client decides. That is a stated shortfall,
          * not a reconstruction.
          */
+        q2_cre_actions.calls_seen++;
         switch (s->import_ofs) {
         case 0x84: case 0x98: case 0x8C: case 0x80: case 0xFC:
-            if (q2_cre_fire_fn && m->enemy && m->enemy->health > 0)
+            q2_cre_actions.fire_calls++;
+            if (!q2_cre_fire_fn)
+                q2_cre_actions.fire_no_hook++;
+            else if (!m->enemy)
+                q2_cre_actions.fire_no_enemy++;
+            else if (m->enemy->health <= 0)
+                q2_cre_actions.fire_dead_enemy++;
+            else {
+                q2_cre_actions.fire_sent++;
                 q2_cre_fire_fn(m, (int)s->import_ofs, q2_cre_fire_user);
+            }
             break;
         default:
+            q2_cre_actions.calls_unclassified++;
             break;
         }
         break;
@@ -143,14 +154,25 @@ static void run_step(q2_monster *m, const q2_cre_step *s)
     }
 }
 
+/*
+ * Where a decoded action stopped. Counters rather than a log, for the same
+ * reason every other measurement in this project is a counter: "it did not
+ * fire" has half a dozen causes and only one of them is the code being wrong.
+ */
+q2_cre_action_stats q2_cre_actions;
+
 void q2_cre_run_think(q2_monster *m, u32 index)
 {
     q2_cre_bind *b = q2_cre_bind_for(m);
     const q2_cre_think *t;
     u32 i;
 
-    if (!b || !b->think || index >= b->think_count)
+    q2_cre_actions.thinks_run++;
+
+    if (!b || !b->think || index >= b->think_count) {
+        q2_cre_actions.thinks_unbound++;
         return;
+    }
 
     t = &b->think[index];
     for (i = 0; i < t->step_count; i++)

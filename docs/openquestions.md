@@ -2470,6 +2470,40 @@ somebody else's. The creature is not reaching its attack thinks in a run that sh
 five checks in `test_creature` instead — hook called with an enemy, not called without one, not called at a
 dead enemy, carrying the slot it came from, and not called for muzzle arithmetic.
 
+## Every decoded creature has been doing nothing, and the counters found it in one run
+
+`cre_actions.c` decodes what each of a module's think functions DOES and executes it. Six of the seven
+modules on the disc run entirely on that. It had never executed anything.
+
+`creworld.c` called `q2_creature_bind_thinks(&m->bind, ...)` and then `q2_creature_bind(&m->bind, ...)`, and
+`q2_creature_bind` opens with `memset(b, 0, sizeof(*b))`. The think table was installed and wiped two lines
+later, so `q2_cre_run_think` found `b->think` NULL and returned — every time, for every creature, on every map.
+
+It was invisible because it looked exactly like the state it was meant to be an improvement on: a Tank
+Commander that walks, chases and does nothing is what "no hand transcription yet" looks like. The file's own
+header said as much, and had been stale since the trampolines were added.
+
+Found by counting rather than reading. Adding `q2_cre_action_stats` — thinks run, thinks unbound, calls seen,
+calls unclassified, fire calls, and where each fire call stopped — and running one 400-frame capture on
+COMMAND printed `31 thinks (31 unbound)`, which is not a subtle number. Moving one line below the bind:
+
+| | before | after |
+| --- | --- | --- |
+| thinks run / unbound | 31 / 31 | 31 / 0 |
+| CALL steps reached | 0 | 31 |
+| creature sounds | 3 | 34 |
+
+WASTE3's Gunner goes from 0 decoded thinks to 22 and from silence to 16 sounds. BASE0 reports 0 decoded
+thinks, which is correct: the Soldier is hand-transcribed and does not use this path.
+
+The 31 calls COMMAND reaches are all import `+0x12C` (`0x80040800`), which is not one of the five projectile
+spawners. It takes a player index or 4 for "all", reads the active player count at `0x800B2C2C`, walks the
+player array at `0x800D5C30` and tests each player's position against a supplied point and a radius on the
+stack — a per-player proximity call. Named that far and no further.
+
+So the fire routing committed an hour ago is still not observed in play: what a Tank Commander reaches in a
+400-frame capture is its sounds and this proximity call, not its attack thinks.
+
 ---
 
 ## ⚠ Security note (carried forward, do not drop)

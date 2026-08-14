@@ -2918,6 +2918,13 @@ static void client_write_shot(client *c, bool numbered)
                 c->sim[0].combat.projectiles.live, c->cre_bodies, c->rot_steps,
                 c->rot_moved, client_rot_turned(c),
                 c->sim[0].event_rt.call_count);
+        Q2_INFO("  decoded   %u thinks (%u unbound), %u calls (%u unclassified), "
+                "%u fire calls: %u sent, %u no enemy, %u dead enemy",
+                q2_cre_actions.thinks_run, q2_cre_actions.thinks_unbound,
+                q2_cre_actions.calls_seen, q2_cre_actions.calls_unclassified,
+                q2_cre_actions.fire_calls, q2_cre_actions.fire_sent,
+                q2_cre_actions.fire_no_enemy, q2_cre_actions.fire_dead_enemy);
+
         Q2_INFO("  ai world  %u traces (%u unplaced, %u clear), "
                 "%u bottom (%u fail), %u los (%u blocked)",
                 c->ai_world.stats.traces, c->ai_world.stats.trace_unplaced,

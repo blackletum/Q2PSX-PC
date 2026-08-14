@@ -92,9 +92,23 @@ static bool module_take(q2_creature_world *w, const u8 *bin, u32 boff, u32 bnext
      */
     q2_creature_decode_thinks(&m->cre, m->image, m->size, Q2_CREWORLD_BASE,
                               m->think, Q2_CLASS_METHOD_COUNT);
-    q2_creature_bind_thinks(&m->bind, m->think, Q2_CLASS_METHOD_COUNT);
 
     m->ready = q2_creature_bind(&m->bind, &m->cre, q2_cre_impl_find(nm));
+
+    /*
+     * AFTER the bind, not before. `q2_creature_bind` opens with
+     * `memset(b, 0, sizeof(*b))`, so installing the think table first handed it
+     * over and then wiped it two lines later — `q2_cre_run_think` found
+     * `b->think` NULL and returned, every time, for every creature on the disc.
+     *
+     * The cost was not subtle and was invisible: six of the seven modules run
+     * entirely on decoded actions, so none of them made a sound, swung a claw,
+     * jumped a frame or set an AI flag. They walked and chased and did nothing,
+     * and it looked exactly like the "not transcribed yet" state it was
+     * supposed to be an improvement on. Counted on COMMAND: 31 thinks run, 31
+     * unbound.
+     */
+    q2_creature_bind_thinks(&m->bind, m->think, Q2_CLASS_METHOD_COUNT);
     if (!m->ready) {
         free(m->image);
         m->image = NULL;

@@ -134,6 +134,24 @@ void q2_cre_set_melee_hook(void (*fn)(q2_monster *m, const s32 aim[3],
                            void *user);
 
 /* Run the decoded actions for one think index on `m`. */
+/*
+ * Where a decoded action went, so "it never fired" can be told apart from "it
+ * never got that far". Cumulative; zero it before a run.
+ */
+typedef struct q2_cre_action_stats {
+    u32 thinks_run;
+    u32 thinks_unbound;      /* no decoded think for that index               */
+    u32 calls_seen;          /* CALL steps reached                            */
+    u32 calls_unclassified;  /* an import slot with no meaning yet            */
+    u32 fire_calls;          /* CALL steps that named a projectile spawner    */
+    u32 fire_sent;           /* ...and reached the hook                       */
+    u32 fire_no_hook;
+    u32 fire_no_enemy;
+    u32 fire_dead_enemy;
+} q2_cre_action_stats;
+
+extern q2_cre_action_stats q2_cre_actions;
+
 void q2_cre_run_think(q2_monster *m, u32 index);
 
 /* Skill, which several creatures gate their refire and opening shot on. */
