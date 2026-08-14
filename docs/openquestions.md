@@ -4903,8 +4903,25 @@ nothing saying so.
            only on locomotion, which is a field this project had not identified. It explains what the byte
            is without explaining the clip mismatch.
 
-      The residue is three rows, two distinct moves, out of 115 — and the honest state after six hypotheses
-      is that **no property yet examined separates them from the 113 that fit.**
+        7. *The module and the model come from different maps.* POWER1 carries the Arachner's module and
+           JAIL4 its model, so the clip list being compared might not be the one that module drives.
+           Checked: **both maps ship the same thirteen clip lengths.** The assumption held.
+
+      **What the seventh attempt did establish** is that the two `16-24` records are one animation, not two.
+      Their frame arrays differ in exactly one byte per frame:
+
+           walk (via 3)   02 0A 00 | 02 0A 00 | ...
+           run  (via 4)   03 0A 00 | 03 0A 00 | ...
+
+      Same range, same per-frame distance (10), same think — only the AI verb differs. So the Arachner has
+      **thirteen distinct animations for thirteen clips**, eleven of which match by the 3:1 rule, leaving
+      exactly two moves (`16-24` and `25-33`, nine AI frames each) and exactly two clips (30 frames each)
+      unpaired.
+
+      That is as tight as the residue gets: two and two, wanting 27 where 30 is on offer. Three ticks short,
+      twice, with the frame count confirmed four independent ways. The honest state after seven hypotheses is
+      that **no property yet examined separates them from the 113 that fit**, and the arithmetic of the gap is
+      now exact rather than approximate.
 
       **Do not conclude the sounds are absent.** That was the previous answer here for many passes and it was
       wrong; see #60 for how the mistake was made and how it was caught.
