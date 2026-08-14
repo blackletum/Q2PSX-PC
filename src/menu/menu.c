@@ -575,9 +575,16 @@ static void run_action(q2_menu *m, int action)
      * yet, and each closes rather than pretending to be one — which is visible,
      * where a page that silently did nothing would not be.
      */
-    case Q2_ACT_LOAD_GAME:
+    /* Picking a mode opens the setup, which is the page the capture shows
+     * next: a player count, a map, the two limits, the variables and PROCEED. */
     case Q2_ACT_DM_MODE:
+        push(m, Q2_PAGE_FRONT_DMSETUP);
+        break;
+
+    case Q2_ACT_LOAD_GAME:
     case Q2_ACT_MP_SETTINGS:
+    case Q2_ACT_GAME_VARIABLES:
+    case Q2_ACT_PROCEED:
         m->request = Q2_MREQ_NOT_BUILT;
         q2_menu_close(m);
         break;

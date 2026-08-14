@@ -273,6 +273,32 @@ static const q2_menu_item k_front_multi[] = {
     { "SAVE SETTINGS",   256, 168, Q2_ACT_MP_SETTINGS, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
 };
 
+/*
+ * module+0x0F914 — the deathmatch setup, and the reason its rows look like
+ * widgets and are not.
+ *
+ * Every record here is the same bare 24 bytes as every other page's, with bytes
+ * +8 onward all zero: there is no widget field, no setting index and no bound
+ * variable. The values are in the TEXT — the pool holds `"TIME LIMIT   10"` and
+ * `"FRAG LIMIT   10"` with the number padded into the string, and the module
+ * rewrites it in place when the value changes. That is the same trick as the
+ * leading spaces on `"      MUSIC"` and `"    GRAVITY"`, which right-align
+ * against their sliders: this front end lays out with padding rather than with
+ * fields.
+ *
+ * The row at y = 81 carries a short string the module fills at run time — the
+ * chosen map's name — and the 74-pixel gap below it is where the capture's
+ * `multipics.lbm` preview thumbnail goes.
+ */
+static const q2_menu_item k_front_dmsetup[] = {
+    { "2 3 4 PLAYERS",   256,  64, Q2_ACT_NONE,           Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "",                256,  81, Q2_ACT_NONE,           Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "TIME LIMIT   10", 256, 155, Q2_ACT_NONE,           Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "FRAG LIMIT   10", 256, 172, Q2_ACT_NONE,           Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "GAME VARIABLES",  256, 189, Q2_ACT_GAME_VARIABLES, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "PROCEED",         256, 206, Q2_ACT_PROCEED,        Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+};
+
 /* module+0x0ED44 */
 static const q2_menu_item k_front_options[] = {
     { "PLAYER OPTIONS", 256,  85, Q2_ACT_PAGE_PLAYER, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
@@ -308,6 +334,7 @@ static const q2_menu_page k_pages[] = {
     { Q2_PAGE_FRONT_NEWLOAD,    NULL,         k_front_newload,    N(k_front_newload),    0,                  Q2_ACT_BACK,         0x8010EF9Cu, 0 },
     { Q2_PAGE_FRONT_SKILL,      NULL,         k_front_skill,      N(k_front_skill),      0,                  Q2_ACT_BACK,         0x8010EFE4u, 0 },
     { Q2_PAGE_FRONT_MULTI,      NULL,         k_front_multi,      N(k_front_multi),      0,                  Q2_ACT_BACK,         0x8010F104u, 0 },
+    { Q2_PAGE_FRONT_DMSETUP,    NULL,         k_front_dmsetup,    N(k_front_dmsetup),    0,                  Q2_ACT_BACK,         0x8010F914u, 0 },
 };
 
 /* Variants, kept out of the main list so `q2_menu_pages` stays one page per

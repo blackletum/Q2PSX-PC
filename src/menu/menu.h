@@ -192,6 +192,8 @@ typedef enum q2_menu_action {
     Q2_ACT_SKILL_HARD,         /* module+0xD3D4                               */
     Q2_ACT_DM_MODE,            /* module+0x4AD8 — shared by all three modes   */
     Q2_ACT_MP_SETTINGS,        /* module+0xD148 / +0xD1FC                     */
+    Q2_ACT_GAME_VARIABLES,     /* module+0x49F8                               */
+    Q2_ACT_PROCEED,            /* module+0x59CC                               */
     Q2_ACT_COUNT
 } q2_menu_action;
 
@@ -242,7 +244,8 @@ typedef enum q2_menu_page_id {
     Q2_PAGE_FRONT_OPTIONS    = 201,
     Q2_PAGE_FRONT_NEWLOAD    = 202,   /* NEW GAME / LOAD GAME             */
     Q2_PAGE_FRONT_SKILL      = 203,   /* EASY / MEDIUM / HARD             */
-    Q2_PAGE_FRONT_MULTI      = 204    /* the five multiplayer rows        */
+    Q2_PAGE_FRONT_MULTI      = 204,   /* the five multiplayer rows        */
+    Q2_PAGE_FRONT_DMSETUP    = 205    /* the deathmatch setup             */
 } q2_menu_page_id;
 
 /*

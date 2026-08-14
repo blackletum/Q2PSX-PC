@@ -1575,10 +1575,27 @@ item records at run time instead of transcribing a table, so there is nothing to
       The flow they describe is START -> SINGLE PLAYER -> NEW GAME -> a difficulty, and only the difficulty
       begins the game — the port follows it, and hands the chosen skill to `q2_cre_set_skill` before the
       level loads so the creatures that load already have it.
-      *Still open:* what each `action` does beyond the page it opens — fifteen module addresses now,
-      readable with `levdisasm` — and the deathmatch SETUP page, whose rows (`2 3 4 PLAYERS`,
-      `TIME LIMIT   10`, `FRAG LIMIT   10`, `GAME VARIABLES`) are widgets rather than plain text and so are
-      not a bare `{text, x, y, action}` record.
+      **The deathmatch SETUP page is the last one the capture shows, and its rows are not widgets** — this
+      entry guessed they were and that was wrong. `module+0x0F914` is six of exactly the same bare 24-byte
+      records, with bytes +8 onward all zero: no widget field, no setting index, no bound variable.
+
+          module+0x0F914  "2 3 4 PLAYERS"    256,  64   no action
+          module+0x0F92C  (filled at run time) 256, 81  no action
+          module+0x0F944  "TIME LIMIT   10"  256, 155   no action
+          module+0x0F95C  "FRAG LIMIT   10"  256, 172   no action
+          module+0x0F974  "GAME VARIABLES"   256, 189  -> module+0x49F8
+          module+0x0F98C  "PROCEED"          256, 206  -> module+0x59CC
+
+      **The values are in the TEXT.** The pool holds `"TIME LIMIT   10"` and `"FRAG LIMIT   10"` with the
+      number padded into the string, and the module rewrites it in place — the module image is RAM. That is
+      the same device as the leading spaces on `"      MUSIC"` and `"    GRAVITY"`, which right-align against
+      their sliders: this front end lays out with padding rather than with fields, which is why none of its
+      records needs a widget.
+      The row at y = 81 carries a short string filled at run time — the chosen map's name — and the
+      74-pixel gap below it is where the capture's `multipics.lbm` preview goes.
+      *Still open:* what each `action` does beyond the page it opens — seventeen module addresses now,
+      readable with `levdisasm` — and the VERSUS and CREDITS pages, which `2 3 4 PLAYERS` and
+      `GAME VARIABLES` each having a SECOND word reference says exist as their own record arrays.
 
       *Also still open: the SCENE the title is drawn over,* and the reason is worth stating so nobody
       invents it. QFRONT's world is two nodes and eight vertices — there is no room in it for a title
