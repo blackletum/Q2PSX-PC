@@ -55,7 +55,9 @@ compile_commands.json
 *.swp
 *~
 
-# Extracted / working data
+# Extracted / working data. .tmp/ is where `q2psx-inspect export` writes, and
+# what it writes is decoded game data — the same rule as the block above.
 extracted/
 dump/
+.tmp/
 *.log

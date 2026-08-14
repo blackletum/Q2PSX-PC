@@ -12,6 +12,28 @@ void psx_raster_opts_default(psx_raster_opts *opts)
     opts->affine_uv         = true;
     opts->semi_transparency = true;
     opts->textures          = true;
+    opts->clip_x = opts->clip_y = opts->clip_w = opts->clip_h = 0;
+    opts->ofs_x  = opts->ofs_y  = 0;
+}
+
+/*
+ * The pixel range the draw environment allows. A zero-size clip is "no draw env
+ * has been applied", which means the whole framebuffer.
+ */
+static void raster_clip(const psx_framebuffer *fb, const psx_raster_opts *opts,
+                        int *x0, int *y0, int *x1, int *y1)
+{
+    *x0 = 0;
+    *y0 = 0;
+    *x1 = fb->width;
+    *y1 = fb->height;
+
+    if (opts->clip_w > 0 && opts->clip_h > 0) {
+        if (opts->clip_x > *x0) *x0 = opts->clip_x;
+        if (opts->clip_y > *y0) *y0 = opts->clip_y;
+        if (opts->clip_x + opts->clip_w < *x1) *x1 = opts->clip_x + opts->clip_w;
+        if (opts->clip_y + opts->clip_h < *y1) *y1 = opts->clip_y + opts->clip_h;
+    }
 }
 
 q2_result psx_fb_init(psx_framebuffer *fb, int width, int height)
@@ -206,10 +228,14 @@ static void raster_triangle(psx_framebuffer *fb,
     min_y = a->y < b->y ? (a->y < c->y ? a->y : c->y) : (b->y < c->y ? b->y : c->y);
     max_y = a->y > b->y ? (a->y > c->y ? a->y : c->y) : (b->y > c->y ? b->y : c->y);
 
-    if (min_x < 0) min_x = 0;
-    if (min_y < 0) min_y = 0;
-    if (max_x >= fb->width)  max_x = fb->width - 1;
-    if (max_y >= fb->height) max_y = fb->height - 1;
+    {
+        int cx0, cy0, cx1, cy1;
+        raster_clip(fb, opts, &cx0, &cy0, &cx1, &cy1);
+        if (min_x < cx0) min_x = cx0;
+        if (min_y < cy0) min_y = cy0;
+        if (max_x >= cx1) max_x = cx1 - 1;
+        if (max_y >= cy1) max_y = cy1 - 1;
+    }
 
     for (py = min_y; py <= max_y; py++) {
         for (px = min_x; px <= max_x; px++) {
@@ -275,6 +301,85 @@ static void raster_triangle(psx_framebuffer *fb,
 }
 
 /* ------------------------------------------------------------------------- */
+/* Rectangles: sprites and tiles                                              */
+/*                                                                            */
+/* The GPU rasterises rectangles on a separate path from polygons, and the     */
+/* differences are visible rather than academic:                              */
+/*                                                                            */
+/*   - No interpolation. A sprite's texture coordinates step exactly one texel */
+/*     per pixel from its (u, v) origin, so a sprite is never stretched and    */
+/*     never warps. This is why the HUD is pin-sharp while the walls swim.     */
+/*   - Coordinates wrap in 8 bits, so a sprite that runs off the right edge of */
+/*     its texture page reappears at the left. The overlay's glyphs never do,  */
+/*     but the wrap is the hardware's and is preserved.                        */
+/*   - No dithering. The GPU does not dither rectangle fills, which is why a   */
+/*     flat HUD panel is flat and a Gouraud wall is not.                       */
+/* ------------------------------------------------------------------------- */
+static void raster_rect(psx_framebuffer *fb,
+                        const psx_prim *prim,
+                        const psx_vram *vram,
+                        const psx_raster_opts *opts)
+{
+    int x0 = prim->xy[0].x + opts->ofs_x;
+    int y0 = prim->xy[0].y + opts->ofs_y;
+    int x1 = prim->xy[2].x + opts->ofs_x;
+    int y1 = prim->xy[2].y + opts->ofs_y;
+    bool textured = (prim->kind == PSX_PRIM_SPRT);
+    int px, py;
+    int cx0, cy0, cx1, cy1;
+
+    if (x1 < x0) { int t = x0; x0 = x1; x1 = t; }
+    if (y1 < y0) { int t = y0; y0 = y1; y1 = t; }
+
+    raster_clip(fb, opts, &cx0, &cy0, &cx1, &cy1);
+
+    for (py = y0; py < y1; py++) {
+        if (py < cy0 || py >= cy1)
+            continue;
+        for (px = x0; px < x1; px++) {
+            int r = prim->rgb[0].r;
+            int g = prim->rgb[0].g;
+            int b = prim->rgb[0].b;
+            u16 *dst;
+
+            if (px < cx0 || px >= cx1)
+                continue;
+
+            if (textured && opts->textures && vram) {
+                int tr, tg, tb;
+                u8 u = (u8)(prim->uv[0].u + (px - x0));
+                u8 v = (u8)(prim->uv[0].v + (py - y0));
+
+                if (!sample_texture(vram, prim->tpage, prim->clut, u, v,
+                                    &tr, &tg, &tb))
+                    continue;      /* index 0 is transparent, not black */
+
+                if (prim->textured_blend) {
+                    r = (tr * r) >> 7;
+                    g = (tg * g) >> 7;
+                    b = (tb * b) >> 7;
+                } else {
+                    r = tr; g = tg; b = tb;
+                }
+            }
+
+            if (r < 0) r = 0; else if (r > 255) r = 255;
+            if (g < 0) g = 0; else if (g > 255) g = 255;
+            if (b < 0) b = 0; else if (b > 255) b = 255;
+
+            dst = &fb->px[py * fb->width + px];
+
+            if (opts->semi_transparency && prim->semi_transparent) {
+                *dst = blend_pixel(*dst, r, g, b,
+                                   (psx_blend)((prim->tpage >> 5) & 3));
+            } else {
+                *dst = psx_rgb555((u8)r, (u8)g, (u8)b);
+            }
+        }
+    }
+}
+
+/* ------------------------------------------------------------------------- */
 static void fill_vertex(raster_vertex *rv, const psx_prim *prim, int i, int colour_index)
 {
     rv->x = prim->xy[i].x;
@@ -301,8 +406,14 @@ void psx_raster_prim(psx_framebuffer *fb,
     gouraud = (prim->kind == PSX_PRIM_G3  || prim->kind == PSX_PRIM_GT3 ||
                prim->kind == PSX_PRIM_G4  || prim->kind == PSX_PRIM_GT4);
 
-    for (i = 0; i < 4; i++)
+    for (i = 0; i < 4; i++) {
         fill_vertex(&v[i], prim, i, gouraud ? i : 0);
+        /* DRAWENV.ofs — the drawing offset the current draw env installed. The
+         * GTE produced viewport-local pixels; this is what puts the viewport
+         * where it belongs in the buffer. */
+        v[i].x += opts->ofs_x;
+        v[i].y += opts->ofs_y;
+    }
 
     switch (prim->kind) {
     case PSX_PRIM_F3:
@@ -329,8 +440,13 @@ void psx_raster_prim(psx_framebuffer *fb,
         raster_triangle(fb, &v[0], &v[2], &v[3], prim, vram, opts);
         break;
 
+    case PSX_PRIM_SPRT:
+    case PSX_PRIM_TILE:
+        raster_rect(fb, prim, vram, opts);
+        break;
+
     default:
-        break;      /* lines, sprites and mode-setting packets: not yet drawn */
+        break;      /* lines and mode-setting packets: not yet drawn */
     }
 }
 

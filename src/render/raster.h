@@ -47,6 +47,20 @@ typedef struct psx_raster_opts {
     bool affine_uv;          /* affine UVs — off means perspective-correct   */
     bool semi_transparency;  /* honour the four blend modes                  */
     bool textures;           /* sample VRAM — off draws flat/Gouraud only    */
+
+    /*
+     * The current draw environment's clip rectangle and drawing offset —
+     * DRAWENV.clip and DRAWENV.ofs. On hardware these are not per-primitive
+     * state but GP0 modes that a draw-env packet in the ordering table changes
+     * partway through a frame, which is exactly how split screen is expressed:
+     * one table, one walk, a different clip in force over each viewport's
+     * slice. See src/screen.
+     *
+     * A clip of zero size means "the whole framebuffer", which is what
+     * psx_raster_opts_default sets, so callers that do not care are unaffected.
+     */
+    s16 clip_x, clip_y, clip_w, clip_h;
+    s16 ofs_x, ofs_y;
 } psx_raster_opts;
 
 void psx_raster_opts_default(psx_raster_opts *opts);

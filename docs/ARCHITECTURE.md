@@ -23,9 +23,11 @@ layer exists.
         │  client      window, input, main loop    │
         ├──────────────────────────────────────────┤
         │  game        entities, AI, physics       │
-        ├────────────────────┬─────────────────────┤
-        │  render            │  audio              │
-        ├────────────────────┴─────────────────────┤
+        ├──────────────┬───────────┬───────────────┤
+        │  screen      │  menu     │  audio        │
+        ├──────────────┴───────────┴───────────────┤
+        │  render      rasteriser, PSX rules       │
+        ├──────────────────────────────────────────┤
         │  psx         GTE + GPU primitive model   │   ← fidelity core
         ├──────────────────────────────────────────┤
         │  formats     .DAT container, level schema│
@@ -90,9 +92,15 @@ can reproduce the hardware's rules rather than approximate the result.
 See [`FIDELITY.md`](FIDELITY.md) for what that buys and how it is verified.
 
 ### `render`, `audio`, `game`, `client`
-`render` consumes `psx_ot` and rasterises it with the hardware's rules. `audio`
-has SPU-ADPCM for sound effects and CD-XA ADPCM for streamed music; plain PCM for
-the CD audio track is not wired up. `game` is the reimplemented simulation, and
+`render` consumes `psx_ot` and rasterises it with the hardware's rules. `screen`
+sits on top of it and owns everything the console's display code owned: the
+display and draw environments, the double buffer, the shape of the ordering
+table, the viewport layouts and the frame lock. It is the reason `render` grew a
+clip rectangle and a drawing offset, and the reason `psx_ot` grew a window — on
+the console those are not conveniences but the mechanism, because split screen
+is one table walked once with draw-env packets inside it changing the clip.
+`audio` has SPU-ADPCM for sound effects and CD-XA ADPCM for streamed music; plain
+PCM for the CD audio track is not wired up. `game` is the reimplemented simulation, and
 it also owns the two modules that turn data into primitives: `world.c` for brush
 geometry and `modeldraw.c` for posed models. `client` is the SDL3 host.
 

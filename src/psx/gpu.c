@@ -53,9 +53,35 @@ void psx_ot_clear(psx_ot *ot)
     if (!ot)
         return;
 
-    ot->prim_count = 0;
+    ot->prim_count  = 0;
+    ot->window_base = 0;
+    ot->window_len  = 0;
     for (i = 0; i < ot->bucket_count; i++)
         ot->bucket_head[i] = -1;
+}
+
+void psx_ot_set_window(psx_ot *ot, u32 base, u32 len)
+{
+    if (!ot)
+        return;
+
+    if (base >= ot->bucket_count) {
+        ot->window_base = 0;
+        ot->window_len  = 0;
+        return;
+    }
+    if (len > ot->bucket_count - base)
+        len = ot->bucket_count - base;
+
+    ot->window_base = base;
+    ot->window_len  = len;
+}
+
+u32 psx_ot_bucket_span(const psx_ot *ot)
+{
+    if (!ot)
+        return 0;
+    return ot->window_len ? ot->window_len : ot->bucket_count;
 }
 
 psx_prim *psx_ot_add(psx_ot *ot, u16 otz)
@@ -68,6 +94,11 @@ psx_prim *psx_ot_add(psx_ot *ot, u16 otz)
         return NULL;
 
     bucket = otz;
+    if (ot->window_len) {
+        if (bucket >= ot->window_len)
+            bucket = ot->window_len - 1;
+        bucket += ot->window_base;
+    }
     if (bucket >= ot->bucket_count)
         bucket = ot->bucket_count - 1;
 

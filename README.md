@@ -73,15 +73,22 @@ not been read out of the executable yet.
 | Disc access | cue/bin, iso, bare images; ISO9660; CD-XA Form 1 and 2 |
 | Build identification | by executable hash, not by region |
 | Level data | container, scene graph, geometry, collision, spawns, lights, triggers |
+| Collision | the portal-walking hull trace, sliding, stepping and the entity sweep — transcribed from the executable, 47 of 47 maps walkable |
 | Rendering | software rasteriser with the PSX's rules; world and models, textured |
 | Models | vertices, faces, texturing and animation — all 4,535 clips decode |
 | Audio | sound bank and SPU-ADPCM decode; music not yet wired |
 | Simulation | movement, inventory, combat, creature AI, save games |
+| Weapons | all eleven read out of their own fire functions — damage, spread, kick, refire |
+| Damage | armour, power armour, knockback, splash, 21 means of death |
 | Creatures | every spawn resolves to its class, model and health — 651 of 651 |
+| Menus | every page, its navigation and its settings — 21 of 21 checked against the executable |
+| Screen | display envs, double buffering, the sliced ordering table, all five viewport layouts and the frame lock — 59 of 59 constants checked against the executable |
+
+| HUD | the overlay, its markup language and its own font — and the proof there is no status bar |
 
 Checked against the PAL disc: 164 level files, 461,852 vertices, 274,936 quads,
-139,240 collision planes, 1,723 models, 2,036,080 animation keys, 2,475 sounds,
-zero failures. The remaining gaps are tracked in
+139,240 collision planes, 94,642 collision portals, 1,723 models, 2,036,080
+animation keys, 2,475 sounds, zero failures. The remaining gaps are tracked in
 [`docs/openquestions.md`](docs/openquestions.md).
 
 ## Building
@@ -107,9 +114,18 @@ an assertion in a document.
 ```bash
 build/bin/q2psx-inspect ident  "Quake II (Europe).cue"
 build/bin/q2psx-inspect verify "Quake II (Europe).cue"
+build/bin/q2psx-inspect coll   "Quake II (Europe).cue"             # every hull, checked
+build/bin/q2psx-inspect walk   "Quake II (Europe).cue" BASE1 0 150 # drop a player in
 build/bin/q2psx-inspect audio  "Quake II (Europe).cue"
 build/bin/q2psx-inspect render "Quake II (Europe).cue" BASE0 0 out.ppm 0 1024
 build/bin/q2psx-inspect model  "Quake II (Europe).cue" BASE1 Soldier 0 0 out.ppm
+
+build/bin/q2psx-inspect hud    "Quake II (Europe).cue" BASE0 hud.ppm
+build/bin/q2psx-inspect weapons "Quake II (Europe).cue"            # every weapon, checked
+build/bin/q2psx-inspect menu   "Quake II (Europe).cue"             # every page, checked
+build/bin/q2psx-inspect menu   "Quake II (Europe).cue" 26 pause.ppm
+build/bin/q2psx-inspect screen "Quake II (Europe).cue"             # every constant, checked
+build/bin/q2psx-inspect screen "Quake II (Europe).cue" split.ppm quad BASE1 0
 ```
 
 `render` needs no window — it writes a PPM. That is how the geometry pipeline was
@@ -151,6 +167,8 @@ src/build/      per-build (region/revision) identification and data tables
 src/formats/    on-disc asset parsers (.DAT container, zones, sound banks)
 src/psx/        exact GTE and GPU primitive model — the fidelity core
 src/render/     rasterizer backends that consume PSX primitives
+src/menu/       the menu pages and engine, read out of the executable
+src/screen/     display environments, viewports, the ordering table's shape
 src/audio/      SPU-ADPCM, XA-ADPCM, CD-DA
 src/game/       reimplemented game logic
 src/platform/   host layer (SDL3)

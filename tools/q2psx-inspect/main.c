@@ -8,14 +8,20 @@
  */
 #include "aimodule.h"
 #include "area.h"
+#include "cmd_coll.h"
 #include "cmd_exe.h"
 #include "cmd_export.h"
+#include "cmd_hud.h"
+#include "cmd_menu.h"
+#include "cmd_weapons.h"
+#include "cmd_screen.h"
 #include "classtable.h"
 #include "collision.h"
 #include "dat.h"
 #include "disc.h"
 #include "entity.h"
 #include "font.h"
+#include "hud.h"
 #include "exe.h"
 #include "events_rt.h"
 #include "ident.h"
@@ -82,6 +88,7 @@ static void usage(void)
     puts("  dat     <disc> <path>       dump the chunk directory of one .DAT");
     puts("  dats    <disc>              census every .DAT chunk schema on the disc");
     puts("  verify  <disc>              check every level file against the typed schema");
+    puts("  coll    <disc> [map] [zone] check the collision model against every hull");
     puts("  audio   <disc>              decode every sound bank and validate it");
     puts("  leveltable <disc>           dump the level table and check it against the disc");
     puts("  reloc   <disc>              relocate every AI module and census the fixups");
@@ -92,9 +99,14 @@ static void usage(void)
     puts("  anims   <disc>              decode every CastList animation clip");
     puts("  fps     <disc> <map> [zone] [weapon] [out.ppm] [yaw]  eye view + HUD");
     puts("  classes <disc>              the entity class table, checked against every spawn");
+    puts("  weapons <disc>              the weapon, armour and sound tables, checked");
     puts("  mob     <disc> <map> [zone] [n] [out.ppm]  stand in front of a creature");
     puts("  models  <disc> <map>        list a map's model bank");
     puts("  model   <disc> <map> <name|idx> [clip] [frame] [out.ppm] [yaw]  render one model");
+    puts("  hud     <disc> [map] [out.ppm]  the HUD's tables, or draw the overlay");
+    puts("  menu    <disc> [page] [out.ppm] [WxH]  the menu, checked against the executable");
+    puts("  screen  <disc>              display, viewports and the OT, checked");
+    puts("  screen  <disc> out.ppm [layout] [map] [zone]  compose one frame");
     puts("  music   <disc>              demultiplex and decode the XA music streams");
     puts("  render  <disc> <map> [z] [out.ppm] [yaw] [pitch]  render a zone (4096 = full turn)");
     puts("  hexdump <disc> <path> [n]   hex dump the first n bytes of a file");
@@ -2968,6 +2980,13 @@ static int cmd_fps(disc *d, const char *map, int zone_index, const char *weapon,
     q2_world_stats wstats;
     q2_inventory inv;
     q2_vram_section vs;
+    q2_hud_tables hud_tab;
+    q2_hud_font hud_font;
+    q2_hud hud;
+    q2_hud_ctx hud_ctx;
+    psx_ot hud_ot;
+    bool have_hud_tab = false;
+    bool have_hud = false;
     bool have_vram = false;
     u32 clut4_count_a = 0;
 
@@ -3051,6 +3070,21 @@ static int cmd_fps(disc *d, const char *map, int zone_index, const char *weapon,
     if (q2_vram_load(&vs, d, map) == Q2_OK) {
         clut4_count_a = vs.clut4_count_a;
         have_vram = (q2_vram_upload(&vs, vram) == Q2_OK);
+
+        /*
+         * The overlay's atlas rides in the same file as the world's texture
+         * pages, so it goes up while the section is still open. Its palettes
+         * come from the executable rather than from the disc.
+         */
+        {
+            q2_build_id bid;
+            if (q2_identify(d, &bid) == Q2_OK &&
+                q2_hud_tables_load(&hud_tab, d, &bid) == Q2_OK) {
+                have_hud_tab = true;
+                have_hud = (q2_hud_font_upload(&hud_font, &hud_tab, &vs,
+                                               vram) == Q2_OK);
+            }
+        }
         q2_vram_free(&vs);
     }
     opts.textures = have_vram;
@@ -3140,54 +3174,50 @@ static int cmd_fps(disc *d, const char *map, int zone_index, const char *weapon,
     psx_raster_ot(&fb, &ot, vram, &opts);
 
     /*
-     * The HUD, over the finished frame.
+     * The HUD, into its own ordering table and rasterised over the finished
+     * frame -- which is how the console does it: the 2D overlay has its own OT
+     * per player, drawn after the world.
      *
-     * Every number here is the simulation's, read from a freshly initialised
-     * inventory rather than typed in: 100 health because that is what
-     * q2_inventory_init sets, no armour because the player starts with none,
-     * ten shells because that is the blaster-and-shotgun start. When the
-     * simulation runs these move on their own.
+     * There is no status bar here because there is none in the game. What the
+     * console shows is a crosshair, a notification stack and a centred line, so
+     * that is what this shows: the weapon-selected message for the weapon
+     * actually in hand, drawn with the original's own word graphics out of
+     * chars.lbm, and a damage flash driven by the simulation's inventory.
+     * src/game/hud.h records how that conclusion was reached.
      */
-    {
-        char buf[32];
-        u16 white = psx_rgb555(29, 29, 27);
-        u16 amber = psx_rgb555(31, 21, 5);
-        u16 label = psx_rgb555(17, 17, 19);
-        int big = 4, small = 2;
-        int pad = 14;
-        int bar_h = 62;
-        int num_y = H - bar_h + 18;
-        int lab_y = H - bar_h + 6;
+    if (have_hud) {
+        /* Laid out in the console's 512x248 and translated into this larger
+         * debug frame; see the note on q2_hud_ctx. */
+        q2_hud_ctx_centre_in(&hud_ctx, W, H);
+        q2_hud_init(&hud, &hud_tab, 1);
 
         q2_inventory_init(&inv);
+        q2_hud_track(&hud, inv.health, inv.armour);
 
-        psx_fb_rect_blend(&fb, 0, H - bar_h, W, bar_h, psx_rgb555(0, 0, 0), 165);
-        psx_fb_rect(&fb, 0, H - bar_h, W, 1, psx_rgb555(10, 10, 12));
+        if (have_weapon) {
+            /*
+             * The glyph table is indexed by the live weapon id, and the model
+             * bank names its view models the same way the weapon table does, so
+             * the message says what is in the player's hands rather than what
+             * a caption says it is.
+             */
+            q2_hud_weapon_selected(&hud, &hud_tab,
+                                   q2_hud_weapon_by_model(&hud_tab,
+                                                          wmodel.hdr.name));
+        }
+        q2_hud_centre(&hud, &hud_tab, &hud_ctx, map);
 
-        psx_fb_text(&fb, pad, lab_y, "HEALTH", label, small);
-        snprintf(buf, sizeof(buf), "%d", inv.health);
-        psx_fb_text(&fb, pad, num_y, buf, white, big);
-
-        psx_fb_text(&fb, W / 2 - 44, lab_y, "ARMOUR", label, small);
-        snprintf(buf, sizeof(buf), "%d", inv.armour);
-        psx_fb_text(&fb, W / 2 - 44, num_y, buf, white, big);
-
-        psx_fb_text(&fb, W - pad - psx_fb_text_width("SHELLS", small), lab_y,
-                    "SHELLS", label, small);
-        snprintf(buf, sizeof(buf), "%d", inv.ammo[Q2_AMMO_SHELLS]);
-        psx_fb_text(&fb, W - pad - psx_fb_text_width(buf, big), num_y, buf,
-                    amber, big);
-
-        /* Crosshair. */
-        psx_fb_rect(&fb, W / 2 - 9, H / 2 - 1, 6, 2, white);
-        psx_fb_rect(&fb, W / 2 + 4, H / 2 - 1, 6, 2, white);
-        psx_fb_rect(&fb, W / 2 - 1, H / 2 - 9, 2, 6, white);
-        psx_fb_rect(&fb, W / 2 - 1, H / 2 + 4, 2, 6, white);
-
-        psx_fb_text(&fb, pad, pad, map, label, small);
-        if (have_weapon)
-            psx_fb_text(&fb, pad, pad + 16, wmodel.hdr.name, label, small);
+        if (psx_ot_init(&hud_ot, 8, 4096) == Q2_OK) {
+            q2_hud_build_ot(&hud, &hud_font, &hud_ctx, &hud_ot, 0);
+            psx_raster_ot(&fb, &hud_ot, vram, &opts);
+            psx_ot_free(&hud_ot);
+            printf("  hud           : overlay drawn from chars.lbm\n");
+        }
+    } else {
+        printf("  hud           : no chars.lbm on this map -- no overlay\n");
     }
+    if (have_hud_tab)
+        q2_hud_tables_free(&hud_tab);
 
     if (psx_fb_write_ppm(&fb, out_path) == Q2_OK)
         printf("  wrote %s\n", out_path);
@@ -3801,6 +3831,17 @@ static int cmd_walk(disc *d, const char *map, int zone_index, int ticks)
     printf("  spawn cell    : %d%s\n", sim.current_node,
            sim.current_node < 0 ? "  (outside every hull)" : "");
 
+    /*
+     * Both hulls, side by side. Movement runs against SecondaryCol — that is
+     * read out of the zone loader, not chosen — so when a spawn lands in one
+     * and not the other, the number to look at is which.
+     */
+    if (sim.coll_primary_ready) {
+        s32 pn = q2_coll_find_node(&sim.coll_primary, feet, -1, true);
+        printf("  primary hull  : %u nodes, spawn cell %d\n",
+               sim.coll_primary.node_count, pn);
+    }
+
     start_y = sim.player.pos[1];
 
     memset(&in, 0, sizeof(in));
@@ -3833,6 +3874,64 @@ static int cmd_walk(disc *d, const char *map, int zone_index, int ticks)
     printf("    ticks outside any hull: %d\n", escaped);
     printf("    events run  : %u\n", sim.events_ready ? sim.event_rt.ran_count : 0);
     printf("    zone gates  : %d\n", zone_gates);
+
+    /*
+     * Fire every weapon once into the real map, so the reconstructed combat is
+     * exercised against real geometry rather than only against a test's three
+     * actors in a line. What is checkable here is not damage — nothing is
+     * standing there to take it — but that every weapon produces the shape of
+     * shot its fire function produces, spends the ammo the table says, and that
+     * a hitscan trace actually meets the world instead of running to infinity.
+     */
+    {
+        static const char *const k_kind[] = {
+            "-", "hitscan", "bolt", "rail", "grenade", "thrown", "rocket", "bfg"
+        };
+        int w;
+
+        for (w = 0; w < Q2_AMMO_COUNT; w++)
+            sim.combat.inv.ammo[w] = 200;
+        sim.combat.inv.weapons = 0x7FF;
+
+        printf("  firing every weapon from the spawn:\n");
+        for (w = 1; w <= Q2_WID_COUNT; w++) {
+            q2_fire_result_v2 fr;
+            s16 before, after;
+            s32 type = q2_weapon_tables_builtin()->ammo_type[w];
+            s32 eye[3], frac = 4096;
+
+            sim.combat.weapon_id = w;
+            sim.combat.next_fire = 0;
+            before = sim.combat.inv.ammo[type];
+
+            fr = q2_sim_fire(&sim);
+            after = sim.combat.inv.ammo[type];
+
+            q2_sim_eye(&sim, eye);
+            if (fr.fired && fr.shot_count)
+                frac = 4096;
+
+            printf("    %-13s %-7s shots %2u  dmg %4d  ammo -%d%s\n",
+                   q2_weapon_tables_builtin()->name[w],
+                   k_kind[fr.kind], fr.shot_count,
+                   fr.shot_count ? fr.shot[0].damage : 0,
+                   before - after,
+                   fr.fired ? "" : "  (BLOCKED)");
+            (void)frac;
+        }
+        printf("    projectiles in flight: %u\n", sim.combat.projectiles.live);
+
+        /* Let them fly, so the world trace resolves every one of them. */
+        {
+            q2_input idle;
+            int t;
+            memset(&idle, 0, sizeof(idle));
+            for (t = 0; t < 600 && sim.combat.projectiles.live; t++)
+                q2_sim_tick(&sim, &idle, Q2_DT_NOMINAL);
+            printf("    still in flight after %d ticks: %u\n",
+                   t, sim.combat.projectiles.live);
+        }
+    }
 
     q2_world_free_zone(&zone);
 
@@ -4340,6 +4439,9 @@ int main(int argc, char **argv)
         rc = cmd_dats(d);
     } else if (strcmp(cmd, "verify") == 0) {
         rc = cmd_verify(d);
+    } else if (strcmp(cmd, "coll") == 0) {
+        int zi = (argc >= 5) ? atoi(argv[4]) : -1;
+        rc = cmd_coll(d, (argc >= 4) ? argv[3] : NULL, zi);
     } else if (strcmp(cmd, "polyflags") == 0) {
         rc = cmd_polyflags(d);
     } else if (strcmp(cmd, "cluts") == 0) {
@@ -4491,6 +4593,20 @@ int main(int argc, char **argv)
         } else {
             rc = cmd_access(d, argv[3], (argc >= 5) ? argv[4] : NULL);
         }
+    } else if (strcmp(cmd, "hud") == 0) {
+        rc = cmd_hud(d, (argc >= 4) ? argv[3] : NULL,
+                     (argc >= 5) ? argv[4] : NULL);
+    } else if (strcmp(cmd, "weapons") == 0) {
+        rc = cmd_weapons(d);
+    } else if (strcmp(cmd, "menu") == 0) {
+        rc = cmd_menu(d, (argc >= 4) ? argv[3] : NULL,
+                         (argc >= 5) ? argv[4] : NULL,
+                         (argc >= 6) ? argv[5] : NULL);
+    } else if (strcmp(cmd, "screen") == 0) {
+        rc = cmd_screen(d, (argc >= 4) ? argv[3] : NULL,
+                           (argc >= 5) ? argv[4] : NULL,
+                           (argc >= 6) ? argv[5] : NULL,
+                           (argc >= 7) ? atoi(argv[6]) : 0);
     } else if (strcmp(cmd, "find") == 0) {
         if (argc < 4) {
             fprintf(stderr, "find needs a string or 0x-prefixed byte pattern\n");

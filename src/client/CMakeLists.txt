@@ -7,6 +7,8 @@ target_link_libraries(q2psx PRIVATE
     q2psx_formats
     q2psx_psx
     q2psx_render
+    q2psx_menu
+    q2psx_screen
     q2psx_audio
     q2psx_game
     SDL3::SDL3

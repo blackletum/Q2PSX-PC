@@ -24,9 +24,38 @@ touches geometry — it accumulates a displacement in its runtime object and the
 why an earlier pass, having proved every node in a zone shares one origin, wrongly concluded movers could not
 displace anything.
 
-Nothing in Tier 1 is blocking any more. What is left is correctness and completeness: collision planes are
-only 95.6 % confirmed (#5), draw order is unimplemented (#7), and spawn classes cannot be mapped to models
-(#10), so the world is not yet populated.
+Collision followed, and it turned out to be the case where inference from data had been most misleading. The
+plane encoding was never the hard part; what mattered was everything the data could not show — that the
+`extra[]` array is a **portal list**, that bit 15 of `firstPlane` marks a node solid, that every query runs in
+16-bit wrapping arithmetic, that movement uses **`SecondaryCol`** rather than `PrimaryColl`, and that
+`SecondaryCol` is `PrimaryColl` **eroded by the player's own 286-unit half-extent**, so the runtime moves a
+point and never touches an entity's bounds. Three separate long-standing puzzles collapse into that last
+fact. Details in #5.
+
+Combat followed, and the reason it took three passes is worth recording. Two earlier passes swept the rodata
+around the ammo arrays for an eleven-entry table of damage values and found nothing, so the port carried
+figures inferred from the PC lineage and said so. The sweep was right and the conclusion was wrong in an
+instructive way: **there is no table**. Each weapon has its own fire function, reached through a 12-entry
+pointer array at `0x8009D704`, and damage, pellet count, spread, view kick and refire are immediate operands
+inside it. Slot 0 of that array is `0x8004EB08` — `jr ra; nop` — which is the cleanest proof yet of the
+1-based weapon indexing, because a do-nothing shot only makes sense as "no weapon".
+
+Everything downstream came with it: the damage function at `0x80057D54` and its twenty-one call sites, the
+armour table at `0x8009C5EC` whose six values are PC Quake II's exactly, power armour, knockback and the
+rocket jump's 3.2x self-multiplier, radius damage and its three read radii, the hitscan and rail paths, and
+the projectile entity list at `0x800C91C0` whose per-frame sweep settles what a bolt's `+0x1A` and `+0x52`
+mean. Full detail in FORMATS.md §13; `q2psx-inspect weapons` checks the data half against the disc, and
+`tests/test_weapon.c` and `tests/test_combat.c` check the behaviour half.
+
+Two negative results from that pass are load-bearing. The damage function **never kills** — there is no die
+or pain callback, health simply goes negative and the entity's own think notices later — and for a creature
+with an AI brain it does not even subtract health: it posts the amount to the module. So per-creature health,
+pain and death behaviour sit behind #6 rather than behind anything in the executable, which raises #6's
+priority again.
+
+What is left is correctness and completeness elsewhere: draw order is unimplemented (#7), area connectivity
+(#8) and per-node lighting (#9) are undecoded, and the relocatable module ABI (#6) still hides the level
+scripting and every creature's own attack figures.
 
 Full structural detail, evidence and confidence markers live in [`FORMATS.md`](./FORMATS.md).
 
@@ -120,6 +149,34 @@ Legend: `[ ]` open · `[~]` partially resolved · `[x]` resolved (move the item,
       clip end; and the last key of a model's last clip has no successor inside block C, which the original
       reads anyway. The port's computed inverse cosine matches the original's 4096-entry table on 4,094
       entries and is one unit out on the other two.
+- [x] **39. The weapon stats table. — SOLVED, and there is no table.**
+      Two passes swept the rodata around the ammo arrays for eleven damage values and found nothing. The
+      sweep was right: every weapon has its **own fire function**, reached through a 12-entry pointer array
+      at `0x8009D704`, and damage, pellets, spread, view kick and refire are immediates inside it. Slot 0 is
+      `0x8004EB08` — `jr ra; nop` — a shot that does nothing, which only makes sense as "no weapon" and is
+      the cleanest proof of the 1-based indexing.
+      Read out with them: the damage function `0x80057D54` and its 21 means of death; the armour table at
+      `0x8009C5EC`, whose six values are PC Quake II's exactly and whose rounding bias differs between
+      single player (4095) and deathmatch (2048); power armour at `0x80057A9C`; knockback, including the
+      3.2x self-multiplier that is the rocket jump and its −3072 single-player ceiling; radius damage at
+      `0x80050810` with grenade 1000 / rocket 1300 / BFG 1300; the hitscan path `0x8004874C` and the rail
+      `0x8004917C`; and the projectile entity list at `0x800C91C0`, whose per-frame sweep at `0x80047C6C`
+      proves a bolt's `+0x1A` is a lifetime and `+0x52` its velocity.
+      Two negatives worth keeping: the damage function **never kills** — no die or pain callback exists —
+      and for a creature with an AI brain it does not even subtract health, it posts to the module.
+      Implemented in `src/game/weapon.[ch]`, `combat.[ch]`, `projectile.[ch]` and
+      `src/build/weapontables.[ch]`. `q2psx-inspect weapons` reads the data half back off the disc and
+      compares it: **11 weapons, 3 armour classes, 22 sounds, 0 mismatches**. Full detail in FORMATS.md §13.
+  - [ ] 39a. Residue: the BFG blast's flight speed. `0x8004BE04` works out its own direction and the port
+        has not followed it; the 2400 at `0x8004BF20` goes to entity `+0xF4`, which the player spawn also
+        writes (as 1), so it is not a speed. The port flies it at the rocket's and names the substitution
+        `Q2_BFG_SPEED_UNREAD` so it is visible at every use.
+  - [ ] 39b. Residue: the grenade launcher's fuse. Its spawner stores 380 into the entity at `+0x4C`
+        alongside a second timer and which of the two is the fuse was not established. The hand grenade's
+        1650 IS read — it is argument 3 at `0x8004EC3C`.
+  - [ ] 39c. Residue: the chaingun's spin state. The bullet count per shot comes from the view model's
+        runtime object at `+0x2C` (`0x8004CAE0`), and the view model is not reconstructed, so the port takes
+        the count from its caller and defaults to one.
 - [ ] **2d. What the two caller matrices hold when a model is drawn.** `0x800B1F90` composes each part's
       quaternion matrix with two matrices the caller sets up — one becomes the GTE light matrix, one the
       rotation matrix — and pre-transforms every part translation with a third. Parts demonstrably do not
@@ -128,6 +185,21 @@ Legend: `[ ]` open · `[~]` partially resolved · `[x]` resolved (move the item,
       flat does **not** restore agreement between its extents and the header's `ext2`/`ext3` (4/399 and
       15/399 against 0/399 and 5/399 unposed), while static models are unaffected. Either those fields are
       authored bounds, or a per-model transform is missing. Blocks nothing that can be checked by drawing.
+
+- [x] **HUD. — SOLVED, and the answer is that there is no status bar.**
+      The game shows no health, ammo or armour readout. That was established by enumeration, not by looking:
+      every format string the executable hands to its text layer was resolved back through its `lui`/`addiu`
+      pair — all 30 call sites of `0x80043518`, all 3 of `0x800434B8`, and every `sprintf` in the image — and
+      none of them formats a player statistic. The only two readers of the font table at `0x8009D554` are the
+      markup interpreter and the menu's glyph loop, so no separate digit drawer exists either.
+      What the overlay *is*: a markup language (`0x80042328`) drawing 8x8 sprites out of `chars.lbm`, a
+      four-slot notification ring retiring one line every 60 ticks, a centred line with a backdrop that fades
+      by shrinking, a crosshair, and a damage flash whose colour says whether armour or flesh took the hit.
+      The atlas lands at VRAM (0, 384) — slot 15 with a v origin of 128, read out of `0x8003FEA4` →
+      `0x8006901C` → `0x800691A8` — and its palettes are in the executable's own bank at `0x800A2FEC`, not on
+      the disc. Full detail in FORMATS.md §11; implemented in `src/build/hudtables.[ch]` and
+      `src/game/hud.[ch]`, checked by `q2psx-inspect hud` and `tests/test_hud.c`.
+      This also settles the menu's open item: the menu font is the same atlas plus `frontend.lbm`.
 
 ---
 
@@ -177,11 +249,31 @@ The residues of the resolved blockers keep their parents' numbers.
         `MISEVENT` (**0/93** — entirely unlocated, not partially located). And record `flags` bits 3–5: the
         loader default `if ((f & 0x28) == 0) f |= 0x10` confirms `0x08`/`0x10`/`0x20` are alternatives with
         `0x10` as default, but the three categories are unidentified.
-- [ ] **5. Collision plane point encoding — only 95.6 % confirmed.**
-      The `uint16[3]` at `+0x00` reads as an unsigned offset from the owning node's `bboxMin`: 46,968 /
-      49,148 planes land inside their node, 91 % of nodes are convex-consistent. Not good enough to trust
-      player movement to. *Attack:* resolve the residual 4.4 % — different base, sign convention, or a second
-      plane class?
+- [x] **5. Collision plane point encoding. — SOLVED, and the whole collision model with it.**
+      The encoding was never the interesting part. It is an unsigned halfword offset from the owning node's
+      `bboxMin`, read that way at four separate sites (`0x800441DC`, `0x800446C0`, `0x80044384`,
+      `0x80043FB0`), and the "95.6 % / 99.85 % confirmed" figures were measuring how well a guessed reading
+      matched a geometric expectation rather than reading the code.
+      What the code says, in full, is in FORMATS.md §3.4. The load-bearing parts:
+      **`firstPlane` bit 15 is a SOLID flag** (`bltz` at `0x80044190` and `0x800442BC`, every reader then
+      masks `0x7FFF`); **`extra[]` is the PORTAL LIST**, `(planeInThisNode << 11) | neighbourNode` plus the
+      matching plane index in the neighbour; **`d`'s low byte is the node's contents id**; and every query
+      runs in **16-bit wrapping arithmetic** relative to the node's minimum corner, which a 32-bit port
+      silently diverges from on a long move.
+      **The movement hull is `SecondaryCol`, not `PrimaryColl`** — the mover at `0x80045144` loads the
+      context the loader filled from it — and `SecondaryCol` is `PrimaryColl` **eroded by 286 on every
+      axis**, i.e. the configuration-space hull of the player's own cube. That is measured, not asserted:
+      over 5,275 axis probes across all 115 zones the free space differs by exactly 286 in 37 % and by
+      286 ± 2 in 52 %. It explains the three things that never fitted — why Secondary has *fewer* nodes on 9
+      of 115 zones, why the player path contains no bounds access, and whether 286 is the real hull (it is).
+      Convexity is never assumed by the engine, so the 148 non-convex nodes are harmless.
+      `q2psx-inspect coll` checks every invariant the transcribed code depends on across all 230 chunks:
+      **0** out-of-range link nodes, planes or back-planes of 94,642 links; **0** nodes over the 32-plane
+      limit and **0** hulls over the 2048-node limit that the 5/11-bit packing imposes — both holding exactly
+      at their boundary; 94,620 reciprocal portal pairs; **0** traces leaving the hull. `q2psx-inspect walk`
+      then drops a player into **47 of 47** maps: every spawn lands in a cell, every player grounds, none
+      ever leaves the hull.
+      Implemented in `src/formats/collision.[ch]` and `src/game/trace.[ch]`.
 - [ ] **6. `LevelBin` / `CreAIBin` module ABI and the `Rel` fixup encoding.**
       Confirmed MIPS R3000; every fixup is a valid in-`Bin` offset, but only 31 % are 4-aligned, so it is not
       a plain word-address list. Level scripting and monster AI both sit behind this — and, on the evidence
@@ -189,6 +281,13 @@ The residues of the resolved blockers keep their parents' numbers.
       the Population group the script selects. **This has risen in priority accordingly.** The harness can
       already relocate every module; what it cannot yet do is disassemble one, which is the same code path
       as `disasm` pointed at a different buffer.
+      **#39 raised it again.** The damage function does not subtract a creature's health — it posts the
+      amount to the module through `0x800627F8` and returns — so every creature's health, pain threshold,
+      death behaviour and per-attack damage are inside these modules and nowhere else in the image. Combat
+      against creatures is complete on the player's side and hollow on theirs until this falls. What IS
+      known from the executable, and is implemented, is which mod each creature attack carries: a contact
+      hit is mod 7 (`0x800612F0`), a thrown grenade is the launcher's own spawner at speed 600 rather than
+      900 (`0x80061724`), and a creature rocket is `0x8004AF28` with the aim scaled by 3/2 (`0x80062164`).
 
 ---
 
@@ -298,11 +397,50 @@ The residues of the resolved blockers keep their parents' numbers.
       #1.** `width` is BYTES PER ROW of the decoded buffer, `height` is rows, and the VRAM rect is
       `width>>1` halfwords wide. Confirmed independently by `(width>>1) * height * 2 == decoded size` in
       553/553 records and by the allocator at `0x80068BAC` taking `mflo(mult(w,h))` with no shift.
-- [ ] **19. The secondary 512 × 256 display-env init function** (single unrelated caller). Proves the game
-      switches display configurations at least once — boot screen? loading screen? FMV? Resolve before the
-      port commits to a single display model.
-- [ ] **20. The `VSync(3)` path** (16.67 Hz on PAL), reached only through a function pointer. FMV, menu or
-      load-screen tick?
+- [x] **19. The secondary 512 × 256 display-env init function. — SOLVED, and it is dead.**
+      It is not a second display configuration the game switches to: it is the first half of the boot display
+      bring-up at `0x8006DFB8`, and **everything it writes is overwritten before it can reach the hardware**.
+      The two `SetDefDispEnv` calls at `0x8006E03C` / `0x8006E054` set 512 × 256 rectangles, and four
+      instructions later `0x8006E0C8` calls `0x80077540`, which rewrites both display envs to 512 × 248 at
+      (0,0). The draw envs it fills — including the giveaway per-buffer debug colours (255,8,32) and
+      (8,255,32), which would make a torn frame obvious — are rewritten every frame by `0x80076A74`. The
+      single unrelated caller is the host-filesystem boot path at `0x8006E150`, which is also where the
+      `c:\PsxData\Q2Data\` literal lives. **The game never displays 512 × 256**, and the port is safe to
+      commit to one display model. Checked by `q2psx-inspect screen`, which asserts both the rectangle and
+      the overwriting call.
+- [x] **20. The `VSync(3)` path. — SOLVED. It is a CD settling delay, not a frame rate.**
+      The site is `0x80069188`, inside the drive bring-up at `0x80069090`: poll `CdlNop` until the status
+      clears, retry `CdlGetTN` until it succeeds, `CdlSetmode(0x80)` — double speed — then `VSync(3)` and on
+      to `0x80071548`. Three fields is 60 ms on PAL, which is a mode-change settle, and nothing about it is
+      periodic. The earlier note that it was "reached only through a function pointer" was a search artefact;
+      the call is direct.
+- [ ] **39. The screen fade, if there is one.** `gp+16660` (`0x800B2714`) is set to **255** and `gp+16676`
+      (`0x800B2724`) to **−16** at the top of every session (`0x8001834C` / `0x80018354`) — a fade level and a
+      per-frame decrement if ever there was one — and **neither is read anywhere in the image**. Not
+      gp-relative, not through a materialised base, and neither address appears as a data word. Either the
+      consumer is in an overlay (the movie player, #16) or a relocatable module (#6), or the fade was cut and
+      the writes are vestigial. The port implements no fade on this evidence. *Attack:* look for the readers
+      once a relocated module can be disassembled — the same capability #6 and #10 needed.
+- [ ] **40. What SCREEN POSITION moves.** The menu page writes `0x800B3368` / `0x800B336A` (defaults 0 and
+      24), and the same sweep finds **no reader**. The obvious consumer would be the display env's screen
+      rectangle, which `SetDefDispEnv` at `0x8008AD5C` explicitly *zeroes* — the game never fills it. So
+      either the offsets are applied somewhere not in this image, or the page is inert on this build. Worth
+      settling before a port implements a screen-position control that the original may not have had.
+- [x] **20a. The menu system. — SOLVED, and it is data, not script.** Every menu is an array of 24-byte item
+      records in the executable's data segment, walked by an engine at `0x80019B88`…`0x8001BA14`: the record
+      is `{label, s16 x, s16 y, action, *toggle, *slider, on-release}`, the loader is `0x8001A474`, and a
+      page is one or two of those arrays with the *last* one deciding what is navigable — which is how a
+      page of pure text is expressed (a second call passing the empty table at `0x8009B30C`). All 17 page
+      ids, the four GAME VARIABLES tables selected by cheat level, the two VIDEO variants selected by
+      `0x800AEBCC`, the skip-on-`'g'` rule, the wrap, the fire-on-release flag, the toggle's
+      LEFT-means-ON, the slider's two-units-per-held-frame over `0..127`, and the four colour codes
+      `b/d/g/u` are all in FORMATS.md §10. Implemented in `src/menu/`, and
+      `q2psx-inspect menu <disc>` reads the tables back off the disc and compares them: **21 pages,
+      0 mismatches**.
+      Still open, and deliberately not guessed at: the menu **font** is texture data in VRAM that has not
+      been located (the port draws the real layout with a placeholder face); the memory-card front end
+      (`0x8009B06C`…`0x8009B42C`) has its tables read but its state machine unfollowed; and the MISSION
+      screen belongs to the HUD system rather than the menu.
 
 ---
 
@@ -322,11 +460,22 @@ The residues of the resolved blockers keep their parents' numbers.
       `+0x01` (261…333367). **Block C is not a vertex-base candidate** (#2a).
 - [ ] 22. `PrimaryRemap` value space. Definitively **not** a scene-node index — the max exceeds the scene
       node count in 100 of 115 files. Probably a polygon or surface id in a shared table.
-- [ ] 23. `CollNode` fields `c` (0…65,077,433, non-monotonic — 609 of 23,003 steps decrease) and `d` (0…75).
+- [~] 23. `CollNode` fields `c` and `d`. **`d` is SOLVED**: its low byte is the node's **contents id**,
+      read with `lbu +32` at `0x80044DB8` — where a trace records it into its contact list whenever it
+      changes along the path — and at `0x8004510C`. The other three bytes are zero on all 22,773 nodes.
+      **`c` (+28) remains unknown, and now has a negative result attached**: no instruction anywhere in the
+      634,880-byte image loads offset +28 of a collision node. It is build-time residue or tool data. It is
+      non-zero on 22,585 of 22,773 nodes, max 65,077,433.
 - [ ] 24. `Resources` `unk0` (−3000…6600, 49 distinct) and `unk4` (40…180, 17 distinct); `unk3` (64, but 80
       in two records).
-- [ ] 25. `TrigBounds` trigger `id` (9…75 plus 255, where 255 is "none") and `flags` (14 distinct values up
-      to 10240) semantics.
+- [~] 25. `TrigBounds` trigger `id` (9…75 plus 255, where 255 is "none") and `flags` (14 distinct values up
+      to 10240). **Three flag bits are now known**, read out of the contents test at `0x80050CE0` and the
+      player integrator that consumes it: `0x0200` makes an entity **sink slowly** (vertical velocity eased
+      toward +1024, decelerating by `dt*24` above it), `0x2000` makes it **buoyant** (eased toward −3072,
+      plus a −9216 impulse when it is already on the ground — the water boost), and `0x1000` gates the
+      entity's own `0x800` flag on `|vel.y| < 1024`. The mask the player passes is `0x3360`, so `0x0100`,
+      `0x0040` and `0x0020` are also volume classes it cares about and their effects are not yet traced.
+      The same test doubles as the entity-overlap query, which is how a trigger volume blocks movement.
 - [ ] 26. The five `Lights` style values (`(n<<3)|7` for n = 0…4) — what each style actually *does*.
 - [ ] 27. Pickup `flags` bits beyond 0, 1 and 8; and the pickup `extra` list's meaning (a consumer exists — a
       pointer to it is stored into the spawned entity's sub-structure — but the interpretation is unknown).
@@ -373,6 +522,19 @@ The residues of the resolved blockers keep their parents' numbers.
 - [ ] 36. The unused 20-byte tail of every Form 2 payload, and the always-zero `uint16_t` at `+2` of each
       music table record. Both are zero in 100 % of samples — nothing can be inferred from this disc.
 - [ ] 37. `GlintMod` (2608 bytes, one map only, high-entropy after the first few dozen bytes).
+- [ ] 39. The HUD's residuals, none of them blocking, now that the overlay itself is done.
+      **The MISSION / level-completion screen.** `0x80021ADC` draws it through the same markup layer this
+      project now implements, so the machinery is in place and what is missing is the screen's own flow. Its
+      rows are `Location`, `Secrets`, `Kills` and `Totals:` (format strings from `0x800AB8DC` to
+      `0x800AB9B8`); each is centred by the helper at `0x80022550` against a text box whose left edge and
+      width are `gp+352` / `gp+356`; the first row advances y by 10 and the rest by 8; and the body text comes
+      from buffers at `0x8009B5E8`, `0x8009B608` and `0x8009B634`. What it still needs from the port is the
+      counters — kills and secrets are simulation state that is not yet tallied.
+      **The split-screen overlay.** `multipics.lbm` and `multipic2.lbm` appear on one map each and neither was
+      decoded. The notification layer already narrows to 2 / 1 / 1 lines by player count, which is the only
+      part of split screen the overlay itself expresses.
+      **Three orphan words.** The icon vocabulary carries `was`, `die` and `door`, and no located string uses
+      any of them — the shape of a frag-message template (`&P was &O`) that was cut.
 
 ---
 

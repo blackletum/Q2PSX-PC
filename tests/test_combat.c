@@ -1,17 +1,24 @@
 /*
- * test_combat.c — firing, hit detection and splash damage.
+ * test_combat.c — damage, armour, knockback, splash, hitscan and firing.
  *
- * The stats table is inferred rather than read from the disc, so these tests
- * deliberately avoid asserting specific damage NUMBERS. Pinning a guessed value
- * would turn an open question into a regression test and make the real figure
- * look like a bug when it arrives. What is asserted is the mechanics, which
- * hold whatever the numbers turn out to be.
+ * The old version of this file deliberately avoided asserting damage NUMBERS,
+ * because the stats table was inferred from the PC lineage rather than read.
+ * That reservation is gone: the numbers are now transcribed from the eleven
+ * fire functions and the armour table is read out of the executable, so
+ * asserting them is asserting a reading and a wrong one is a real regression.
+ *
+ * What is still NOT asserted here is anything marked INFERRED or MODELLED in
+ * the headers — the grenade launcher's fuse and the bounce coefficient — for
+ * exactly the old reason: pinning a guess makes the real value look like a bug
+ * when it arrives.
  */
 #include <stdio.h>
 #include <string.h>
 
 #include "combat.h"
+#include "projectile.h"
 #include "trig.h"
+#include "weapon.h"
 
 static int g_failures;
 static int g_checks;
@@ -35,14 +42,12 @@ static void check_eq_i(s64 got, s64 want, const char *what)
     }
 }
 
-static void place(q2_monster *m, s32 x, s32 y, s32 z, s16 hp)
+static void place(q2_actor *a, s32 x, s32 y, s32 z, s16 hp)
 {
-    q2_monster_init(m);
-    m->in_use = true;
-    m->pos[0] = x; m->pos[1] = y; m->pos[2] = z;
-    m->health = hp;
-    m->max_health = hp;
-    m->gib_health = -60;
+    q2_actor_init(a);
+    a->origin[0] = x; a->origin[1] = y; a->origin[2] = z;
+    a->health = hp;
+    a->gib_health = -60;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -55,191 +60,410 @@ static void test_ray_distance(void)
 
     printf("ray distance\n");
 
-    /* Facing +Z as a 1.3.12 unit vector. */
-    dir[0] = 0; dir[1] = 0; dir[2] = Q2_ONE_12;
+    /* The fire functions hand over a direction whose LENGTH is the range, so
+     * `along` comes back as a 1.0.12 fraction of that length, not a distance. */
+    dir[0] = 0; dir[1] = 0; dir[2] = 10000;
 
-    /* Directly ahead: zero off-axis distance, along == the range. */
-    point[0] = 0; point[1] = 0; point[2] = 1000;
+    point[0] = 0; point[1] = 0; point[2] = 5000;
     d2 = q2_combat_ray_dist_sq(origin, dir, point, &along);
-    check_eq_i(d2, 0, "a point on the ray has zero off-axis distance");
-    check_eq_i(along, 1000, "and its along-distance is the range");
+    check_eq_i(d2, 0, "a point on the ray is at zero distance");
+    check_eq_i(along, 2048, "halfway along reads 2048");
 
-    /* Off to one side by 300 at a range of 1000. */
-    point[0] = 300; point[1] = 0; point[2] = 1000;
+    point[0] = 300; point[1] = 0; point[2] = 5000;
     d2 = q2_combat_ray_dist_sq(origin, dir, point, &along);
-    check_eq_i(d2, 300 * 300, "off-axis distance squared");
-    check_eq_i(along, 1000, "along-distance unaffected by the offset");
+    check_eq_i(d2, 300 * 300, "offset perpendicular gives that offset squared");
 
-    /* Behind the shooter gives a negative along-distance, which is what lets
-     * the caller reject targets behind it without a separate test. */
-    point[0] = 0; point[1] = 0; point[2] = -1000;
+    point[0] = 0; point[1] = 0; point[2] = -5000;
     q2_combat_ray_dist_sq(origin, dir, point, &along);
-    check(along < 0, "a point behind gives a negative along-distance");
+    check(along < 0, "behind the shooter reads negative");
 }
 
 /* ------------------------------------------------------------------------- */
-static void test_firing(void)
+static void test_armour_absorption(void)
 {
-    q2_combat c;
-    q2_inventory inv;
-    q2_monster mon;
-    q2_fire_result r;
-    s32 origin[3] = { 0, 0, 0 };
+    q2_actor a;
+    q2_combat_rules rules;
+    s16 save;
 
-    printf("firing\n");
+    printf("armour\n");
+    q2_combat_rules_default(&rules);
 
-    q2_combat_init(&c);
-    q2_inventory_init(&inv);
-    place(&mon, 0, 0, 2000, 100);
+    /* Jacket armour, 0.30 normal protection, with the single-player bias of
+     * 4095 that rounds every non-zero fraction up. */
+    place(&a, 0, 0, 0, 100);
+    a.has_client   = true;
+    a.armour       = 50;
+    a.armour_class = 0;
 
-    /* The blaster needs no ammo, so it always fires. */
-    r = q2_combat_fire(&c, &inv, origin, 0, 0, 0, &mon, 1, 400);
-    check(r.fired, "the blaster fires");
+    save = q2_combat_armour_absorb(&a, 100, false, false, &rules);
+    check_eq_i(save, (4095 + 1229 * 100) >> 12, "jacket takes 30% of 100");
+    check_eq_i(a.armour, (s16)(50 - save), "and spends exactly that much");
 
-    /* It is a projectile weapon, so nothing is hit this instant. */
-    check(r.spawn_projectile, "and requests a projectile");
-    check_eq_i(r.hits, 0, "with no immediate hit");
+    /* The energy column: jacket protects against energy not at all, so only the
+     * bias survives the shift — which is zero. */
+    place(&a, 0, 0, 0, 100);
+    a.has_client = true;
+    a.armour = 50;
+    save = q2_combat_armour_absorb(&a, 100, true, false, &rules);
+    check_eq_i(save, 0, "jacket stops no energy damage");
 
-    /* Refire: a second shot at the same instant must be refused. */
-    r = q2_combat_fire(&c, &inv, origin, 0, 0, 0, &mon, 1, 400);
-    check(!r.fired, "refire delay blocks a second shot");
+    /* Body armour is 0.80 normal and 0.60 energy. */
+    place(&a, 0, 0, 0, 100);
+    a.has_client = true;
+    a.armour = 200;
+    a.armour_class = 2;
+    save = q2_combat_armour_absorb(&a, 100, true, false, &rules);
+    check_eq_i(save, (4095 + 2458 * 100) >> 12, "body takes 60% of energy");
 
-    /* Far enough in the future it fires again. */
-    r = q2_combat_fire(&c, &inv, origin, 0, 0, 100, &mon, 1, 400);
-    check(r.fired, "and allows one later");
+    /* Capped at what is left. */
+    place(&a, 0, 0, 0, 100);
+    a.has_client = true;
+    a.armour = 5;
+    a.armour_class = 2;
+    save = q2_combat_armour_absorb(&a, 100, false, false, &rules);
+    check_eq_i(save, 5, "cannot absorb more than the armour held");
+    check_eq_i(a.armour, 0, "and is emptied");
+
+    /* Deathmatch swaps the bias to 2048, which rounds to nearest instead of
+     * up — very slightly weaker armour against small hits. */
+    {
+        q2_combat_rules dm;
+        q2_combat_rules_default(&dm);
+        dm.deathmatch = true;
+
+        place(&a, 0, 0, 0, 100);
+        a.has_client = true;
+        a.armour = 100;
+        a.armour_class = 0;
+        save = q2_combat_armour_absorb(&a, 1, false, false, &dm);
+        check_eq_i(save, (2048 + 1229) >> 12, "deathmatch bias rounds down");
+
+        place(&a, 0, 0, 0, 100);
+        a.has_client = true;
+        a.armour = 100;
+        a.armour_class = 0;
+        save = q2_combat_armour_absorb(&a, 1, false, false, &rules);
+        check_eq_i(save, 1, "single-player bias rounds a 1-point hit up");
+    }
+
+    /* No client means no armour at all: a creature never has any. */
+    place(&a, 0, 0, 0, 100);
+    a.has_client = false;
+    a.armour = 200;
+    check_eq_i(q2_combat_armour_absorb(&a, 100, false, false, &rules), 0,
+               "a creature has no armour");
+}
+
+static void test_power_armour(void)
+{
+    q2_actor a;
+    s16 save;
+
+    printf("power armour\n");
+
+    place(&a, 0, 0, 0, 100);
+    a.has_client = true;
+    a.powerups = Q2_POWERUP_POWER_ARMOUR;
+    a.cells = 100;
+
+    save = q2_combat_power_armour_absorb(&a, 90);
+    check_eq_i(save, 60, "absorbs two thirds");
+    check_eq_i(a.cells, 100 - 30, "one cell per two points absorbed");
+
+    /* Capped at twice the cells held. */
+    place(&a, 0, 0, 0, 100);
+    a.has_client = true;
+    a.powerups = Q2_POWERUP_POWER_ARMOUR;
+    a.cells = 5;
+    save = q2_combat_power_armour_absorb(&a, 300);
+    check_eq_i(save, 10, "capped at twice the cells");
+    check_eq_i(a.cells, 0, "which empties them");
+
+    /* Without the powerup bit it does nothing, however many cells are held. */
+    place(&a, 0, 0, 0, 100);
+    a.has_client = true;
+    a.cells = 200;
+    check_eq_i(q2_combat_power_armour_absorb(&a, 90), 0,
+               "no power item, no absorption");
 }
 
 /* ------------------------------------------------------------------------- */
-static void test_hitscan(void)
+static void test_damage(void)
 {
-    q2_combat c;
-    q2_inventory inv;
-    q2_monster mon[2];
-    q2_fire_result r;
-    s32 origin[3] = { 0, 0, 0 };
+    q2_actor target, attacker;
+    q2_combat_rules rules;
+    q2_damage_result r;
 
-    printf("hitscan\n");
+    printf("damage\n");
+    q2_combat_rules_default(&rules);
 
-    q2_combat_init(&c);
-    q2_inventory_init(&inv);
-    q2_inventory_add_weapon(&inv, Q2_WEAPON_RAILGUN);
-    q2_inventory_select(&inv, Q2_WEAPON_RAILGUN);
-    q2_inventory_add_ammo(&inv, Q2_AMMO_SLUGS, 10);
+    place(&target, 0, 0, 0, 100);
+    place(&attacker, 0, 0, -1000, 100);
 
-    /* One ahead, one behind. */
-    place(&mon[0], 0, 0,  2000, 500);
-    place(&mon[1], 0, 0, -2000, 500);
+    r = q2_combat_damage(&attacker, &target, 30, Q2_MOD_BULLET, NULL, &rules);
+    check_eq_i(r.taken, 30, "unarmoured damage reaches health in full");
+    check_eq_i(target.health, 70, "and health falls by it");
+    check(!r.killed, "and this did not kill");
 
-    r = q2_combat_fire(&c, &inv, origin, 0, 0, 0, mon, 2, 400);
-    check(r.fired, "the railgun fires");
-    check_eq_i(r.hits, 1, "hits exactly the one in front");
-    check(mon[0].health < 500, "the target in front took damage");
-    check_eq_i(mon[1].health, 500, "the one behind was untouched");
+    r = q2_combat_damage(&attacker, &target, 70, Q2_MOD_BULLET, NULL, &rules);
+    check(r.killed, "the hit that crosses zero reports the kill");
+    check(!r.gibbed, "but not a gib at exactly zero");
 
-    /* Ammo was consumed. */
-    check(inv.ammo[Q2_AMMO_SLUGS] < 10, "a slug was spent");
+    place(&target, 0, 0, 0, 10);
+    r = q2_combat_damage(&attacker, &target, 200, Q2_MOD_BULLET, NULL, &rules);
+    check(r.gibbed, "past the gib threshold reports a gib");
 
-    /* Out of ammo means no shot and no ammo change. */
-    inv.ammo[Q2_AMMO_SLUGS] = 0;
-    r = q2_combat_fire(&c, &inv, origin, 0, 0, 1000, mon, 2, 400);
-    check(!r.fired, "cannot fire with no ammo");
+    /* Mod 8 is the one class armour does not touch. */
+    place(&target, 0, 0, 0, 100);
+    target.has_client = true;
+    target.armour = 200;
+    target.armour_class = 2;
+    r = q2_combat_damage(&attacker, &target, 50, Q2_MOD_NO_ARMOUR, NULL, &rules);
+    check_eq_i(r.absorbed_armour, 0, "mod 8 bypasses armour");
+    check_eq_i(target.health, 50, "so all of it reaches health");
+
+    /* Invulnerability refuses everything. */
+    place(&target, 0, 0, 0, 100);
+    target.has_client = true;
+    target.invuln_until = 500;
+    rules.level_time = 100;
+    r = q2_combat_damage(&attacker, &target, 50, Q2_MOD_BULLET, NULL, &rules);
+    check(r.blocked, "invulnerability blocks");
+    check_eq_i(target.health, 100, "and health is untouched");
+    rules.level_time = 600;
+    r = q2_combat_damage(&attacker, &target, 50, Q2_MOD_BULLET, NULL, &rules);
+    check(!r.blocked, "and expires on the clock");
+
+    /* Skill 0 halves what a monster does to a player, and only that. */
+    {
+        q2_combat_rules easy;
+        q2_combat_rules_default(&easy);
+        easy.skill = 0;
+
+        place(&target, 0, 0, 0, 100);
+        target.has_client = true;
+        place(&attacker, 0, 0, -1000, 100);   /* no client: a creature */
+
+        q2_combat_damage(&attacker, &target, 31, Q2_MOD_BULLET, NULL, &easy);
+        check_eq_i(target.health, 100 - 16, "skill 0 halves, rounding up");
+
+        place(&target, 0, 0, 0, 100);
+        attacker.has_client = true;           /* now a player hurt a player */
+        q2_combat_damage(&attacker, &target, 31, Q2_MOD_BULLET, NULL, &easy);
+        check_eq_i(target.health, 100 - 31, "but not player-on-player");
+    }
+
+    /* A creature whose module owns its health is posted to, not decremented. */
+    place(&target, 0, 0, 0, 100);
+    target.ai_owned = true;
+    r = q2_combat_damage(NULL, &target, 40, Q2_MOD_BULLET, NULL, &rules);
+    check(r.posted_to_ai, "an AI-owned creature is posted to");
+    check_eq_i(target.health, 100, "and its health is left to the module");
 }
 
-/* ------------------------------------------------------------------------- */
-static void test_aim(void)
+static void test_knockback(void)
 {
-    q2_combat c;
-    q2_inventory inv;
-    q2_monster mon;
-    q2_fire_result r;
-    s32 origin[3] = { 0, 0, 0 };
+    q2_actor target, attacker;
+    q2_combat_rules rules;
+    s32 point[3] = { 0, 0, -100 };
 
-    printf("aim\n");
+    printf("knockback\n");
+    q2_combat_rules_default(&rules);
 
-    q2_combat_init(&c);
-    q2_inventory_init(&inv);
-    q2_inventory_add_weapon(&inv, Q2_WEAPON_RAILGUN);
-    q2_inventory_select(&inv, Q2_WEAPON_RAILGUN);
-    q2_inventory_add_ammo(&inv, Q2_AMMO_SLUGS, 50);
+    check(q2_mod_knocks_back(Q2_MOD_ROCKET), "the rocket pushes");
+    check(q2_mod_knocks_back(Q2_MOD_BULLET), "so does a bullet");
+    check(!q2_mod_knocks_back(Q2_MOD_LAVA), "lava does not");
+    check(!q2_mod_knocks_back(Q2_MOD_CRUSH), "nor does being crushed");
 
-    /* A target off to the +X side is missed when facing +Z... */
-    place(&mon, 4000, 0, 100, 500);
-    r = q2_combat_fire(&c, &inv, origin, 0, 0, 0, &mon, 1, 400);
-    check_eq_i(r.hits, 0, "misses a target well off-axis");
+    place(&target, 0, 0, 0, 100);
+    place(&attacker, 0, 0, -1000, 100);
+    rules.knockback_mass = 64;
 
-    /* ...and hit after turning a quarter circle toward it. */
-    place(&mon, 4000, 0, 0, 500);
-    r = q2_combat_fire(&c, &inv, origin, Q2_ANGLE_90, 0, 1000, &mon, 1, 400);
-    check_eq_i(r.hits, 1, "hits it after turning to face it");
+    q2_combat_damage(&attacker, &target, 100, Q2_MOD_ROCKET, point, &rules);
+    check(target.knocked, "a living target records the impulse");
+    check(target.knockback[2] > 0, "pushed away from the blast");
+
+    /* A mod that does not knock back leaves it alone. */
+    place(&target, 0, 0, 0, 100);
+    q2_combat_damage(&attacker, &target, 100, Q2_MOD_LAVA, point, &rules);
+    check_eq_i(target.knockback[2], 0, "lava imparts nothing");
+
+    /*
+     * Self-damage is 3.2 times as strong: the rocket jump. Measured on a
+     * horizontal axis, because the vertical one is capped at -3072 outside
+     * deathmatch and both cases would hit the cap.
+     */
+    {
+        q2_actor self, other;
+        s32 p[3] = { 0, 0, -100 };
+
+        place(&self, 0, 0, 0, 100);
+        self.has_client = true;
+        q2_combat_damage(&self, &self, 20, Q2_MOD_ROCKET, p, &rules);
+
+        place(&other, 0, 0, 0, 100);
+        other.has_client = true;
+        q2_combat_damage(&attacker, &other, 20, Q2_MOD_ROCKET, p, &rules);
+
+        check(self.knockback[2] > other.knockback[2] * 3,
+              "self-knockback is more than three times as strong");
+    }
+
+    /* The upward cap, which only single player has. */
+    {
+        q2_actor under;
+        q2_combat_rules dm;
+        s32 below[3] = { 0, 4000, 0 };   /* Y grows downward: this is beneath */
+
+        q2_combat_rules_default(&dm);
+        dm.deathmatch = true;
+        dm.knockback_mass = 64;
+
+        place(&under, 0, 0, 0, 400);
+        under.has_client = true;
+        q2_combat_damage(&under, &under, 100, Q2_MOD_ROCKET, below, &rules);
+        check_eq_i(under.knockback[1], -3072, "single player caps the lift");
+
+        place(&under, 0, 0, 0, 400);
+        under.has_client = true;
+        q2_combat_damage(&under, &under, 100, Q2_MOD_ROCKET, below, &dm);
+        check(under.knockback[1] < -3072, "deathmatch does not");
+    }
 }
 
 /* ------------------------------------------------------------------------- */
 static void test_splash(void)
 {
-    q2_monster mon[3];
-    u32 hurt;
+    q2_actor a[3];
+    q2_actor *list[3] = { &a[0], &a[1], &a[2] };
+    q2_combat_rules rules;
     s32 centre[3] = { 0, 0, 0 };
+    u32 hurt;
 
     printf("splash\n");
+    q2_combat_rules_default(&rules);
 
-    place(&mon[0], 0,   0, 0,    500);   /* at the centre    */
-    place(&mon[1], 0,   0, 500,  500);   /* half a radius out */
-    place(&mon[2], 0,   0, 5000, 500);   /* well outside      */
+    place(&a[0], 0, 0, 0, 500);        /* on top of it        */
+    place(&a[1], 0, 0, 500, 500);      /* half a radius away  */
+    place(&a[2], 0, 0, 9000, 500);     /* well outside        */
+    a[0].radius = a[1].radius = a[2].radius = 0;
 
-    hurt = q2_combat_splash(centre, 100, 1000, mon, 3);
+    hurt = q2_combat_radius_damage(NULL, NULL, centre, 200, 1300,
+                                   Q2_MOD_ROCKET, list, 3, &rules);
+    check_eq_i(hurt, 2, "two of three are inside the blast");
+    check_eq_i(a[0].health, 300, "the one at the centre takes all of it");
+    check(a[1].health > 300 && a[1].health < 500, "the near one takes less");
+    check_eq_i(a[2].health, 500, "the far one takes none");
 
-    check_eq_i(hurt, 2, "hurts the two inside the radius");
-    check(mon[2].health == 500, "and misses the one outside");
+    /* The falloff itself, which is a read constant. */
+    check_eq_i(q2_combat_splash_at(200, 0), 200, "no loss at the centre");
+    check_eq_i(q2_combat_splash_at(200, 4096), 200 - 170, "170/4096 per unit");
+    check_eq_i(q2_combat_splash_at(10, 100000), 0, "never goes negative");
 
-    /* Falloff is linear, so the nearer target must take strictly more. */
-    check(mon[0].health < mon[1].health, "damage falls off with distance");
+    /* An actor's own radius extends the blast's reach. */
+    place(&a[0], 0, 0, 1400, 500);
+    a[0].radius = 0;
+    hurt = q2_combat_radius_damage(NULL, NULL, centre, 200, 1300,
+                                   Q2_MOD_ROCKET, list, 1, &rules);
+    check_eq_i(hurt, 0, "a point target just outside is missed");
 
-    /* A target exactly at the radius takes nothing. */
-    place(&mon[0], 0, 0, 1000, 500);
-    q2_combat_splash(centre, 100, 1000, mon, 1);
-    check_eq_i(mon[0].health, 500, "zero damage exactly at the radius");
+    place(&a[0], 0, 0, 1400, 500);
+    a[0].radius = 286;
+    hurt = q2_combat_radius_damage(NULL, NULL, centre, 200, 1300,
+                                   Q2_MOD_ROCKET, list, 1, &rules);
+    check_eq_i(hurt, 1, "a body-sized one at the same place is caught");
 }
 
 /* ------------------------------------------------------------------------- */
-static void test_stats_are_replaceable(void)
+static void test_hitscan(void)
 {
-    q2_combat c;
+    q2_actor a[2];
+    q2_actor *list[2] = { &a[0], &a[1] };
+    q2_actor shooter;
+    q2_combat_rules rules;
+    s32 origin[3] = { 0, 0, 0 };
+    s32 dir[3]    = { 0, 0, 16384 };   /* the bullet path's own range */
+    q2_damage_result r;
+    s32 idx;
 
-    printf("stats table\n");
+    printf("hitscan\n");
+    q2_combat_rules_default(&rules);
+    place(&shooter, 0, 0, -1000, 100);
 
-    q2_combat_init(&c);
-    check(c.stats == q2_weapon_stats_inferred, "defaults to the inferred set");
+    place(&a[0], 0, 0, 8000, 100);
+    place(&a[1], 0, 0, 4000, 100);
+    a[0].radius = a[1].radius = 100;
 
-    /* The whole point of the indirection: the real table can be swapped in
-     * without touching combat.c. */
+    idx = q2_combat_fire_bullet(&shooter, origin, dir, 8, 4096, 100,
+                                list, 2, &rules, &r);
+    check_eq_i(idx, 1, "a bullet stops at the nearer target");
+    check_eq_i(a[1].health, 92, "which takes the damage");
+    check_eq_i(a[0].health, 100, "and the far one is shielded");
+
+    /* The rail does not stop. */
+    place(&a[0], 0, 0, 8000, 200);
+    place(&a[1], 0, 0, 4000, 200);
+    a[0].radius = a[1].radius = 100;
+    check_eq_i(q2_combat_fire_rail(&shooter, origin, dir, 100, 4096, 100,
+                                   list, 2, &rules), 2,
+               "the rail passes through both");
+    check_eq_i(a[0].health, 100, "hurting the far one too");
+
+    /* A world surface in the way shortens the trace. */
+    place(&a[0], 0, 0, 8000, 100);
+    place(&a[1], 0, 0, 4000, 100);
+    a[0].radius = a[1].radius = 100;
+    idx = q2_combat_fire_bullet(&shooter, origin, dir, 8, 512, 100,
+                                list, 2, &rules, &r);
+    check_eq_i(idx, -1, "a wall at 1/8 of the range stops the bullet");
+    check_eq_i(a[1].health, 100, "and nothing behind it is hit");
+
+    /* Nothing behind the shooter is ever hit. */
+    place(&a[0], 0, 0, -4000, 100);
+    a[0].radius = 100;
+    idx = q2_combat_fire_bullet(&shooter, origin, dir, 8, 4096, 100,
+                                list, 1, &rules, &r);
+    check_eq_i(idx, -1, "a target behind is not hit");
+}
+
+/* ------------------------------------------------------------------------- */
+static void test_mod_classification(void)
+{
+    printf("means of death\n");
+
+    /* The sixteen-entry table at 0x800ACE1C. */
+    check(q2_mod_is_energy(Q2_MOD_ENERGY_BOLT), "a bolt is energy damage");
+    check(q2_mod_is_energy(Q2_MOD_LASER), "so is a laser");
+    check(!q2_mod_is_energy(Q2_MOD_RAIL), "the rail is not");
+    check(!q2_mod_is_energy(Q2_MOD_GRENADE), "nor is a grenade");
+    check(!q2_mod_is_energy(Q2_MOD_ROCKET), "nor a rocket");
+    check(!q2_mod_is_energy(Q2_MOD_BULLET),
+          "and a bullet is past the table's bound, so ordinary");
+
     {
-        static q2_weapon_stats custom[Q2_WEAPON_COUNT];
-        memcpy(custom, q2_weapon_stats_inferred, sizeof(custom));
-        custom[Q2_WEAPON_BLASTER].damage = 999;
-
-        q2_combat_set_stats(&c, custom);
-        check(c.stats == custom, "accepts a replacement table");
-        check_eq_i(c.stats[Q2_WEAPON_BLASTER].damage, 999, "and uses it");
-
-        q2_combat_set_stats(&c, NULL);
-        check(c.stats == q2_weapon_stats_inferred, "NULL restores the default");
+        int slot = -1;
+        check_eq_i(q2_mod_effect_timer(Q2_MOD_2, &slot), 15, "mod 2 arms 15");
+        check_eq_i(slot, 0, "in the first slot");
+        check_eq_i(q2_mod_effect_timer(Q2_MOD_4, &slot), 30, "mod 4 arms 30");
+        check_eq_i(q2_mod_effect_timer(Q2_MOD_BULLET, &slot), 0,
+                   "a bullet arms nothing");
     }
 }
 
 /* ------------------------------------------------------------------------- */
 int main(void)
 {
-    printf("Q2PSX-PC combat tests\n\n");
+    printf("combat behaviour\n\n");
 
     test_ray_distance();
-    test_firing();
-    test_hitscan();
-    test_aim();
+    test_armour_absorption();
+    test_power_armour();
+    test_damage();
+    test_knockback();
     test_splash();
-    test_stats_are_replaceable();
+    test_hitscan();
+    test_mod_classification();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
-    printf("%s\n", g_failures == 0 ? "PASS" : "FAIL");
-
     return g_failures ? 1 : 0;
 }

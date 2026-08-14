@@ -97,6 +97,8 @@ add_subdirectory(src/formats)
 add_subdirectory(src/psx)
 add_subdirectory(src/audio)
 add_subdirectory(src/render)
+add_subdirectory(src/menu)
+add_subdirectory(src/screen)
 add_subdirectory(src/game)
 
 enable_testing()

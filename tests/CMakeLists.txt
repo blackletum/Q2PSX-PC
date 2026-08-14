@@ -60,3 +60,48 @@ target_link_libraries(test_ai PRIVATE
 )
 
 add_test(NAME ai COMMAND test_ai)
+
+add_executable(test_menu test_menu.c)
+
+target_link_libraries(test_menu PRIVATE
+    q2psx_common
+    q2psx_menu
+)
+
+add_test(NAME menu COMMAND test_menu)
+
+add_executable(test_hud test_hud.c)
+
+target_link_libraries(test_hud PRIVATE
+    q2psx_common
+    q2psx_game
+)
+
+add_test(NAME hud COMMAND test_hud)
+
+add_executable(test_screen test_screen.c)
+
+target_link_libraries(test_screen PRIVATE
+    q2psx_common
+    q2psx_screen
+)
+
+add_test(NAME screen COMMAND test_screen)
+
+add_executable(test_weapon test_weapon.c)
+
+target_link_libraries(test_weapon PRIVATE
+    q2psx_common
+    q2psx_game
+)
+
+add_test(NAME weapon COMMAND test_weapon)
+
+add_executable(test_coll test_coll.c)
+
+target_link_libraries(test_coll PRIVATE
+    q2psx_common
+    q2psx_game
+)
+
+add_test(NAME collision COMMAND test_coll)

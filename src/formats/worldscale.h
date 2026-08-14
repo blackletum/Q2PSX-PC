@@ -165,13 +165,24 @@ Q2PSX_INLINE s32 q2_world_snap(s32 v, s32 grid)
 #define Q2_VEL_DIV          320   /* 0x66666667 >> (32+7) at 0x80045FD8        */
 
 /*
- * The 8192 terminal-velocity clamp is PATH-DEPENDENT and exists only in the
- * secondary mover at 0x800463E8 (the clamp itself is at 0x80046490). The player
- * and step-slide integrator at 0x8004583C updates vertical velocity with
- * lhu/addu/sh at 0x80045FF8..0x80046004 and does NOT clamp. Applying it on the
- * player path makes the player fall wrong.
+ * Terminal velocity. There are TWO clamps at this value, not one: 0x80046490
+ * inside the secondary mover, and 0x80046084 on the player path — which an
+ * earlier pass missed, having stopped reading at the store at 0x80046004 and
+ * concluded the player never clamps.
+ *
+ * The player's clamp sits in the arm taken when the entity carries neither
+ * liquid flag. An entity in liquid is governed by 0x8006FE3C easing toward
+ * -3072 (buoyant, flag 0x10) or +1024 (sinking, flag 0x08) instead, and
+ * genuinely never reaches the clamp.
  */
 #define Q2_TERMINAL_VY     8192
+
+/* The liquid flags at entity+0x44, set from the contents test at 0x80050CE0. */
+#define Q2_ENT_LIQUID_SINK   0x08   /* contents 0x0200: eased toward +1024      */
+#define Q2_ENT_LIQUID_FLOAT  0x10   /* contents 0x2000: eased toward -3072      */
+#define Q2_LIQUID_SINK_VY    1024   /* @0x8004605C                              */
+#define Q2_LIQUID_FLOAT_VY  -3072   /* @0x80046034                              */
+#define Q2_LIQUID_BOOST     -9216   /* @0x80045948, posted when already grounded*/
 
 /*
  * 216 sits in the DELAY SLOT of the branch at 0x80045888, so it is the DEFAULT
@@ -182,15 +193,22 @@ Q2PSX_INLINE s32 q2_world_snap(s32 v, s32 grid)
 #define Q2_STEP_HEIGHT_LOW  108
 
 /*
- * The half-extent of the cube the MOVEMENT SWEEP inflates its AABB by, on all
- * six faces (0x80053DA4..0x80053DFC). The player really does reach it — the
- * chain 0x8003A1C8 -> 0x80039AA4 -> 0x8004583C -> 0x800456B0 -> 0x80045144 ->
- * 0x80053C58 contains no per-entity bounds access at all.
+ * The player's half-extent, on every axis.
  *
- * But do NOT treat this as a universal entity box. Entities carry real mins and
- * maxs at +0x6C/+0x72, read or written 96 times across about thirty functions.
- * This constant is the movement sweep extent and nothing else. Whether it is
- * the true player hull or a broad-phase query margin is still open.
+ * This is the real hull, not a query margin — that question is now closed.
+ * SecondaryCol, the hull entities move in, is PrimaryColl ERODED BY 286 on all
+ * six axes: measured over 5,275 axis probes across all 115 zones, the free
+ * space differs by exactly 286 in 37% of them and by 286 +/- 2 in 52%, against
+ * a distribution that would be flat if the hulls were unrelated. So the box is
+ * baked into the geometry and the runtime moves a point, which is why the whole
+ * player call chain contains no per-entity bounds access at all.
+ *
+ * The entity-vs-entity sweep keeps it explicit, because the other entity moves:
+ * 0x80053DA4..0x80053DFC inflates the move's AABB by it on all six faces.
+ *
+ * Do NOT treat this as a universal entity box. Other entities carry real mins
+ * and maxs at +0x6C/+0x72, read or written 96 times across about thirty
+ * functions. This one is the player's.
  */
 #define Q2_SWEEP_HALF_EXTENT 286
 

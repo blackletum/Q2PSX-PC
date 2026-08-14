@@ -118,7 +118,28 @@ typedef struct psx_ot {
     s32      *bucket_head; /* index of first prim in bucket, -1 if empty */
     s32      *next;        /* intrusive singly-linked list, parallel to prims */
     u32       bucket_count;
+
+    /*
+     * The slice of the table the current viewport owns.
+     *
+     * This is not a convenience: it is the hardware model. The console's world
+     * renderer is handed a base pointer (the per-viewport slice address parked
+     * in 0x800B2D60) and links primitives relative to it, which is how one
+     * table and one DrawOTag produce four independently clipped viewports. A
+     * window of zero length means the whole table.
+     */
+    u32       window_base;
+    u32       window_len;
 } psx_ot;
+
+/* Constrain subsequent psx_ot_add calls to [base, base+len). len == 0 releases
+ * the window. psx_ot_clear releases it too, so a window never outlives a frame
+ * by accident. */
+void psx_ot_set_window(psx_ot *ot, u32 base, u32 len);
+
+/* How many buckets an emitter may address right now — the window if one is
+ * installed, the whole table otherwise. */
+u32  psx_ot_bucket_span(const psx_ot *ot);
 
 q2_result psx_ot_init(psx_ot *ot, u32 bucket_count, u32 prim_capacity);
 void      psx_ot_free(psx_ot *ot);

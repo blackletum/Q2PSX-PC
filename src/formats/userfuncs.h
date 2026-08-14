@@ -406,13 +406,12 @@ enum {
 /* Means-of-death codes passed to T_Damage (0x80057D54) by the CALL family.
  * The full set indexes two tables in the EXE — a 16-entry armour-absorption
  * table at 0x800ACE1C (mod - 1) and a 21-entry hit-effect table at 0x800ACE5C
- * — so the space is at least 21 wide; only these four are reachable from a
- * script. */
-enum {
-    Q2_MOD_ACID = 9,
-    Q2_MOD_LAVA = 10,
-    Q2_MOD_LASER = 11
-};
+ * — so the space is at least 21 wide; only three are reachable from a script:
+ * 9 (acid), 10 (lava) and 11 (laser).
+ *
+ * The canonical list now lives in `src/game/combat.h`, which carries all
+ * twenty-one along with what each one does to armour and to knockback. They
+ * are deliberately not redeclared here, so the two cannot drift apart. */
 
 /* Scaling the movers apply to authoring units: obj+0x4C and obj+0x4E are set
  * from a u8 operand times 300, with 0xFF meaning 0xFFFF ("never"). DISH and

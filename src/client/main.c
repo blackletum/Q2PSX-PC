@@ -2,11 +2,16 @@
  * main.c — the playable client.
  *
  * Opens a disc, loads a zone, and lets you fly through it in real time. The
- * internal framebuffer is the console's own resolution — 320x240 on an NTSC
- * build, 320x256 on PAL — and is upscaled to the window. That is not a
- * concession to performance; rendering at the original resolution is part of
- * looking right, because the dither pattern and the vertex snapping are both
- * defined in terms of real pixels.
+ * internal framebuffer is the console's own — 512x248, read out of the display
+ * init at 0x800764DC rather than assumed — and is upscaled to the window. That
+ * is not a concession to performance; rendering at the original resolution is
+ * part of looking right, because the dither pattern and the vertex snapping are
+ * both defined in terms of real pixels.
+ *
+ * The frame is put together the way the console puts one together: swap, one
+ * background clear, then each viewport into its own slice of a single 217-entry
+ * ordering table, then one walk of that table with the draw-env packets in it
+ * doing the clipping. See src/screen.
  *
  * Controls
  *   W/A/S/D      move
@@ -18,8 +23,17 @@
  *   F2           toggle affine UVs (perspective-correct comparison)
  *   F3           toggle the ordering-table sort
  *   F4           toggle simulated movement vs free-fly camera
+ *   F5           cycle the console's viewport layouts (one, the two splits,
+ *                the 2x2, and the boot screen's single-buffered full screen)
  *   space/ctrl   jump / crouch (simulated movement only)
- *   Esc          quit
+ *   Esc          the pause menu — and QUIT GAME inside it leaves
+ *
+ * In the menu the keyboard stands in for the pad, because the menu engine is
+ * written against the console's 16-bit button mask and nothing is gained by
+ * giving it a second input model:
+ *
+ *   arrows       d-pad          Enter / Space   cross   (select)
+ *   Esc          triangle       Backspace       triangle (back)
  */
 #include <SDL3/SDL.h>
 
@@ -30,8 +44,11 @@
 #include "disc.h"
 #include "entity.h"
 #include "ident.h"
+#include "menu.h"
+#include "menudraw.h"
 #include "q2psx.h"
 #include "raster.h"
+#include "screen.h"
 #include "sim.h"
 #include "trig.h"
 #include "vram.h"
@@ -57,9 +74,15 @@ typedef struct client {
     q2_camera        cam;
     q2_sim           sim;
     bool             sim_enabled;
+
+    /* The pause menu, and the settings it edits. The settings outlive a zone
+     * load; the menu does not own them. */
+    q2_menu_settings settings;
+    q2_menu          menu;
+    q2_menu_style    menu_style;
     psx_ot           ot;
     gte_state        gte;
-    psx_framebuffer  fb;
+    q2_screen        screen;
     psx_vram        *vram;
     psx_raster_opts  opts;
 
@@ -230,6 +253,18 @@ static void client_music_pump(client *c)
             break;
         }
 
+        /* SOUND OPTIONS -> MUSIC. The original scales by the slider doubled
+         * (0x800205F4 stores music*2 into the volume global), so the top of
+         * the slider is full scale and the bottom is silence. */
+        {
+            s32 vol = c->settings.v[Q2_SET_MUSIC] * 2;
+            if (vol < 255) {
+                u32 i;
+                for (i = 0; i < n; i++)
+                    pcm[i] = (s16)((pcm[i] * vol) / 255);
+            }
+        }
+
         SDL_PutAudioStreamData(c->audio, pcm, (int)(n * sizeof(s16)));
         queued += (int)(n * sizeof(s16));
     }
@@ -264,6 +299,27 @@ static void client_input_simulated(client *c, float dt)
 
     in.jump   = keys[SDL_SCANCODE_SPACE] != 0;
     in.crouch = keys[SDL_SCANCODE_LCTRL] != 0 || keys[SDL_SCANCODE_C] != 0;
+    in.attack = keys[SDL_SCANCODE_LALT] != 0 || keys[SDL_SCANCODE_F] != 0;
+
+    /*
+     * Weapon switching is edge-triggered here rather than held, because the
+     * console's own repeat is a 70-tick countdown in the player's weapon block
+     * (0x8004ECF0) and the view model that paces it is not reconstructed yet.
+     * Holding the key would cycle at the frame rate, which the console never
+     * does.
+     */
+    {
+        static bool was_next, was_prev;
+        bool next = keys[SDL_SCANCODE_RIGHTBRACKET] != 0 ||
+                    keys[SDL_SCANCODE_E] != 0;
+        bool prev = keys[SDL_SCANCODE_LEFTBRACKET] != 0 ||
+                    keys[SDL_SCANCODE_Q] != 0;
+
+        if (next && !was_next) q2_sim_cycle_weapon(&c->sim, +1);
+        if (prev && !was_prev) q2_sim_cycle_weapon(&c->sim, -1);
+        was_next = next;
+        was_prev = prev;
+    }
 
     q2_sim_advance(&c->sim, &in, (double)dt);
 
@@ -324,23 +380,157 @@ static void client_input(client *c, float dt)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * The menu.
+ *
+ * The engine it drives is written against the console's button mask, so the
+ * keyboard is translated into one rather than the menu being taught about
+ * scancodes. That keeps the navigation rules — wrap, skip, press-versus-release
+ * — exactly as they were read out of the executable.
+ */
+static u16 client_menu_pad(void)
+{
+    const bool *k = SDL_GetKeyboardState(NULL);
+    u16 pad = 0;
+
+    if (k[SDL_SCANCODE_UP])        pad |= Q2_PAD_UP;
+    if (k[SDL_SCANCODE_DOWN])      pad |= Q2_PAD_DOWN;
+    if (k[SDL_SCANCODE_LEFT])      pad |= Q2_PAD_LEFT;
+    if (k[SDL_SCANCODE_RIGHT])     pad |= Q2_PAD_RIGHT;
+    if (k[SDL_SCANCODE_RETURN] ||
+        k[SDL_SCANCODE_KP_ENTER] ||
+        k[SDL_SCANCODE_SPACE])     pad |= Q2_PAD_CROSS;
+    if (k[SDL_SCANCODE_BACKSPACE]) pad |= Q2_PAD_TRIANGLE;
+
+    return pad;
+}
+
+/*
+ * Push the settings the menu edits into the systems that consume them. The
+ * original does this from the menu's own hooks; here it is one place so the
+ * effect of a page is visible rather than scattered.
+ */
+static void client_apply_settings(client *c)
+{
+    q2_menu_rules rules;
+
+    /* GAME VARIABLES only exist in a multiplayer session, which is exactly
+     * when the original enables them (0x8002033C passes 1 there and 0 in
+     * single player). */
+    q2_menu_apply_variables(&c->settings, c->menu.multiplayer,
+                            q2_build_tick_rate(&c->build), &rules);
+
+    c->sim.gravity = rules.gravity;
+    if (rules.tick_rate > 0)
+        c->sim.dt_per_field = 300 / rules.tick_rate;
+    if (c->sim.dt_per_field <= 0)
+        c->sim.dt_per_field = 1;
+}
+
+static void client_menu_requests(client *c)
+{
+    switch (q2_menu_take_request(&c->menu)) {
+    case Q2_MREQ_RESUME:
+        break;
+    case Q2_MREQ_RESTART:
+    case Q2_MREQ_RESUPPLY:
+        Q2_INFO("restarting %s zone %d", c->map, c->zone_index);
+        client_load_zone(c, c->map, c->zone_index);
+        q2_menu_close(&c->menu);
+        break;
+    case Q2_MREQ_QUIT:
+        c->running = false;
+        break;
+    case Q2_MREQ_MISSION:
+        /* The mission screen is a separate page of the original's HUD system
+         * and is not reconstructed yet; the menu closing is the part that is. */
+        Q2_INFO("mission screen: not implemented yet");
+        break;
+    default:
+        break;
+    }
+}
+
+static void client_menu_frame(client *c)
+{
+    q2_menu_sound snd;
+
+    q2_menu_advance(&c->menu, client_menu_pad());
+
+    snd = q2_menu_take_sound(&c->menu);
+    if (snd != Q2_MSND_NONE) {
+        /* The bank these live in decodes, but nothing plays one-shot effects
+         * yet; naming the sound is the honest half of the wiring. */
+        Q2_DEBUG("menu sound: %s", q2_menu_sound_name(snd));
+    }
+
+    client_menu_requests(c);
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * One frame, in the order 0x800182C8 does it.
+ *
+ * The swap comes first, so a frame is always built into the buffer that is not
+ * being shown. Then one full-screen background clear, then each live viewport
+ * in turn — each one loading the GTE from its own view record and filling its
+ * own 51-bucket slice of the single ordering table. Composition walks that one
+ * table once; the draw-env packets sitting in it are what clip each viewport.
+ *
+ * There is one simulated player, so every viewport gets the same camera. That
+ * is not a stand-in for split screen — it is what makes the reconstructed
+ * layouts visible, since a second player would change nothing about the screen
+ * work itself.
+ */
 static void client_frame(client *c)
 {
     q2_world_stats stats;
     void *pixels;
     int pitch;
+    const psx_framebuffer *front;
+    psx_framebuffer *back;
+    int p;
 
-    q2_world_build_ot(&c->zone, &c->cam, c->width, c->height,
-                      &c->ot, &c->gte, &stats);
+    q2_screen_frame_begin(&c->screen, &c->ot);
 
-    psx_fb_clear(&c->fb, psx_rgb555(16, 16, 32));
-    psx_raster_ot(&c->fb, &c->ot, c->vram, &c->opts);
+    /*
+     * 0x800780C0 clears the whole screen once and turns the per-viewport clears
+     * off, which is what paints the gutters between split viewports.
+     */
+    c->screen.disp.bg_rgb[0] = 16;
+    c->screen.disp.bg_rgb[1] = 16;
+    c->screen.disp.bg_rgb[2] = 32;
+    c->screen.disp.bg_enable = 1;
+    q2_screen_background(&c->screen);
+
+    for (p = 0; p < c->screen.view_count; p++) {
+        const q2_screen_view *v = &c->screen.view[p];
+
+        q2_screen_view_begin(&c->screen, p, &c->ot, &c->gte);
+
+        /* The viewport owns the field of view: SetGeomScreen(view+262) at
+         * 0x80076B90, and a geometry offset at the viewport's own centre. */
+        c->cam.projection = (u16)v->proj;
+        q2_world_build_ot(&c->zone, &c->cam, v->w, v->h,
+                          &c->ot, &c->gte, &stats);
+    }
+
+    q2_screen_compose(&c->screen, &c->ot, c->vram, &c->opts);
+
+    /* The menu draws over the frozen world, which is what pausing looks like
+     * on the console: the scene stays on screen behind it. It belongs to the
+     * overlay camera's full-screen space, not to any one viewport. */
+    back = q2_screen_back(&c->screen);
+    q2_menu_draw(&c->menu, back, &c->menu_style);
+
+    q2_screen_present(&c->screen);
+    front = q2_screen_front(&c->screen);
 
     if (SDL_LockTexture(c->texture, NULL, &pixels, &pitch)) {
         int y;
         for (y = 0; y < c->height; y++) {
             memcpy((u8 *)pixels + (size_t)y * pitch,
-                   c->fb.px + (size_t)y * c->width,
+                   front->px + (size_t)y * c->width,
                    (size_t)c->width * sizeof(u16));
         }
         SDL_UnlockTexture(c->texture);
@@ -402,11 +592,28 @@ int main(int argc, char **argv)
            c.build.desc ? c.build.desc->name : "uncatalogued build",
            c.build.serial, q2_video_std_str(c.build.video));
 
-    /* The console's own framebuffer size for this build. Everything is rendered
-     * here and upscaled; the dither and the vertex snapping are defined in these
-     * pixels, so rendering at a higher resolution would change the look. */
-    c.width  = 320;
-    c.height = (c.build.video == Q2_VIDEO_PAL) ? 256 : 240;
+    /*
+     * The console's own framebuffer, brought up the way 0x800764DC brings it
+     * up: 512 x 248 on PAL, read out of the executable rather than assumed.
+     * Everything is rendered here and upscaled; the dither and the vertex
+     * snapping are defined in these pixels, so rendering at a higher resolution
+     * would change the look.
+     *
+     * This is also what the menu's coordinates were always in — its tables put
+     * the title at x = 256 of 512 — so the screen and the menu now agree
+     * instead of the menu being mapped onto a smaller buffer.
+     */
+    if (q2_screen_init(&c.screen, c.build.video) != Q2_OK) {
+        fprintf(stderr, "cannot bring the screen up\n");
+        disc_close(c.disc);
+        return 1;
+    }
+    if (c.screen.disp.height_is_inferred)
+        Q2_WARN("no NTSC framebuffer has been read out of an NTSC build; "
+                "using PAL's 512x248");
+
+    c.width  = c.screen.disp.width;
+    c.height = c.screen.disp.height;
 
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
@@ -448,12 +655,31 @@ int main(int argc, char **argv)
     /* Nearest-neighbour: the whole point is to show the original's pixels. */
     SDL_SetTextureScaleMode(c.texture, SDL_SCALEMODE_NEAREST);
 
-    psx_ot_init(&c.ot, 4096, 300000);
-    psx_fb_init(&c.fb, c.width, c.height);
+    /* 217 buckets, `ClearOTag(db + 10984, 217)` at 0x80018398 — the table is
+     * carved into per-viewport slices, so its size is not a tuning knob. */
+    psx_ot_init(&c.ot, Q2_SCREEN_OT_ENTRIES, 300000);
     psx_raster_opts_default(&c.opts);
     c.vram = (psx_vram *)calloc(1, sizeof(psx_vram));
 
     q2_camera_default(&c.cam, c.width, c.height);
+
+    /*
+     * The menu's layout is in the console's own 512x248 framebuffer, which is
+     * where every coordinate in its tables was authored; the renderer maps that
+     * onto whatever this window is. Passing the NTSC height would be a guess —
+     * only PAL's 248 has been read out of a build (openquestions #30).
+     */
+    /*
+     * A session starts by installing a layout (0x8003F8D8's jump table on the
+     * session mode). The boot state the screen came up in is the front end's;
+     * this is single player in a level.
+     */
+    q2_screen_set_layout(&c.screen, Q2_SCREEN_LAYOUT_ONE, 1);
+
+    q2_menu_settings_defaults(&c.settings);
+    q2_menu_init(&c.menu, &c.settings, Q2_MENU_SCREEN_H);
+    q2_menu_style_default(&c.menu_style);
+    q2_menu_set_multiplayer(&c.menu, false);
 
     if (!client_load_zone(&c, map, zone_index)) {
         fprintf(stderr, "cannot load %s zone %d\n", map, zone_index);
@@ -482,15 +708,40 @@ int main(int argc, char **argv)
                 c.running = false;
             } else if (ev.type == SDL_EVENT_KEY_DOWN) {
                 switch (ev.key.key) {
-                case SDLK_ESCAPE: c.running = false; break;
+                case SDLK_ESCAPE:
+                    /* START on the console: it opens the pause menu, and
+                     * closes it again from the root page. Deeper in, the
+                     * menu's own TRIANGLE handling owns going back. */
+                    if (!c.menu.open)
+                        q2_menu_open(&c.menu);
+                    else if (c.menu.depth == 0)
+                        q2_menu_close(&c.menu);
+                    break;
                 case SDLK_F1: c.opts.dither    = !c.opts.dither;    break;
                 case SDLK_F2: c.opts.affine_uv = !c.opts.affine_uv; break;
                 case SDLK_F4:
                     c.sim_enabled = !c.sim_enabled;
                     Q2_INFO("movement: %s", c.sim_enabled ? "simulated" : "free-fly");
                     break;
+                case SDLK_F5: {
+                    /* Every layout the session code can install. There is one
+                     * simulated player, so the extra viewports show the same
+                     * camera — what is on show here is the screen work, not a
+                     * second player. */
+                    int next = (int)c.screen.layout + 1;
+                    if (next >= Q2_SCREEN_LAYOUT_COUNT)
+                        next = 0;
+                    q2_screen_set_layout(&c.screen, (q2_screen_layout)next,
+                                         next == Q2_SCREEN_LAYOUT_QUAD ? 4 : 2);
+                    Q2_INFO("layout: %s, %d viewport%s",
+                            q2_screen_layout_name(c.screen.layout),
+                            c.screen.view_count,
+                            c.screen.view_count == 1 ? "" : "s");
+                    break;
+                }
                 default:
-                    if (ev.key.key >= SDLK_0 && ev.key.key <= SDLK_9) {
+                    if (!c.menu.open &&
+                        ev.key.key >= SDLK_0 && ev.key.key <= SDLK_9) {
                         int z = (int)(ev.key.key - SDLK_0);
                         client_load_zone(&c, c.map, z);
                     }
@@ -499,10 +750,14 @@ int main(int argc, char **argv)
             }
         }
 
-        if (c.sim_enabled)
+        if (c.menu.open) {
+            /* The world is frozen while the menu is up: no input, no tick. */
+            client_menu_frame(&c);
+        } else if (c.sim_enabled) {
             client_input_simulated(&c, dt);
-        else
+        } else {
             client_input(&c, dt);
+        }
 
         /* A zone gate fired somewhere in the script. Load the target zone of
          * the same map -- cross-map progression needs the level table, which
@@ -514,6 +769,9 @@ int main(int argc, char **argv)
                 client_load_zone(&c, c.map, (int)target);
             }
         }
+        /* Every frame, not just menu frames: a zone load rebuilds the sim and
+         * would otherwise drop back to the compiled-in constants. */
+        client_apply_settings(&c);
         client_music_pump(&c);
         client_frame(&c);
     }
@@ -523,7 +781,7 @@ done:
     q2_common_close(&c.common);
     q2_world_free_zone(&c.zone);
     free(c.vram);
-    psx_fb_free(&c.fb);
+    q2_screen_free(&c.screen);
     psx_ot_free(&c.ot);
     if (c.audio)    SDL_DestroyAudioStream(c.audio);
     if (c.texture)  SDL_DestroyTexture(c.texture);

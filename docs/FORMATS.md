@@ -1223,51 +1223,204 @@ the four UV fetches — `(3-f)`, `(2-f)`, `(0-f)`, `(1-f)` — into the single r
 > It is reported anyway, since it does settle the part it can see — both reversed rules beat straight-through
 > disc-wide, 6.01 % and 5.75 % against 4.64 %.
 
-### 3.4 `PrimaryColl` / `SecondaryCol` — collision hulls
+### 3.4 `PrimaryColl` / `SecondaryCol` — collision hulls — **CONFIRMED, read from code**
 
-Both chunks share one layout. Size equation
-`4 + (numNodes+1)*36 + numPlanes*12 + numExtra*4` is **exact on all 230 chunks** (115 files × 2), with
-`sentinel.firstPlane == numPlanes` and `sentinel.firstExtra == numExtra`.
+Both chunks share one layout, and the layout is no longer fitted to the data: it is what the loader at
+`0x80051600` computes when it installs a chunk into a collision context.
 
 ```c
 /* uint16_t numNodes; uint16_t numPlanes;
  * Q2P_CollNode  node[numNodes + 1];   last entry is a totals sentinel
  * Q2P_CollPlane plane[numPlanes];
- * uint32_t      extra[numExtra];                                                     */
+ * Q2P_CollLink  link[numLinks];                                                      */
 
 typedef struct {                /* 36 bytes */
-    int32_t  bboxMin[3];        /* CONFIRMED                                          */
-    int32_t  bboxMax[3];        /* CONFIRMED                                          */
-    uint16_t firstPlane;        /* CONFIRMED: per-node count = node[i+1] - node[i]     */
-    uint16_t firstExtra;        /* CONFIRMED: same derivation                          */
-    uint32_t c;                 /* UNKNOWN: 0..65,077,433. NOT monotonic (609 of
-                                 * 23,003 node-to-node steps decrease).                */
-    uint32_t d;                 /* UNKNOWN: 0..75                                      */
+    int32_t  bboxMin[3];        /* CONFIRMED: 0x800440C8 gates every query on it       */
+    int32_t  bboxMax[3];        /* CONFIRMED                                           */
+    uint16_t firstPlane;        /* CONFIRMED. **BIT 15 IS A SOLID FLAG** — 0x80044190
+                                 * and 0x800442BC test it with `bltz` and refuse the
+                                 * node outright. Every reader then masks 0x7FFF.
+                                 * Per-node count = node[i+1] - node[i], masked.       */
+    uint16_t firstLink;         /* CONFIRMED: same derivation. Was called `firstExtra`.*/
+    uint32_t c;                 /* UNKNOWN: 0..65,077,433, non-zero on 22,585 of
+                                 * 22,773 nodes. **No instruction in the image reads
+                                 * offset +28 of a collision node.**                   */
+    uint8_t  contents;          /* CONFIRMED: the node's contents id, 0..75. Read with
+                                 * `lbu +32` at 0x80044DB8 (recorded whenever it
+                                 * changes along a trace) and 0x8004510C.              */
+    uint8_t  pad[3];            /* CONFIRMED zero on all 22,773 nodes                  */
 } Q2P_CollNode;
 
 typedef struct {                /* 12 bytes */
-    uint16_t a, b, c;           /* INFERRED: a point on the plane as an UNSIGNED offset
-                                 * from the owning node's bboxMin. Range 0..29439,
-                                 * never negative. 46,968 of 49,148 tested planes
-                                 * (95.6%) land inside their node's bbox under that
-                                 * reading; 91% of nodes are convex-consistent.        */
-    int16_t  nx, ny, nz;        /* CONFIRMED: 1.3.12 UNIT normal. |n| == 4096 in
-                                 * 120,911 planes, 4095 in 18,321 and 4094 in 8, out
-                                 * of 139,240 across all 115 files and both chunks —
-                                 * 100% within 2 LSB of unity. No other byte offset in
-                                 * the record comes close (s16@+0 hits unit magnitude
-                                 * in 0.4%). Diagonals appear as 2896 == round(4096/√2). */
+    uint16_t a, b, c;           /* CONFIRMED: a point on the plane as an UNSIGNED
+                                 * halfword offset from the owning node's bboxMin.
+                                 * Read at 0x800441DC, 0x800446C0, 0x80044384 and
+                                 * 0x80043FB0. Max component 29,439 disc-wide.         */
+    int16_t  nx, ny, nz;        /* CONFIRMED: 1.3.12 UNIT normal, pointing OUT of the
+                                 * empty cell. |n| == 4096 in 120,911 planes, 4095 in
+                                 * 18,321 and 4094 in 8, out of 139,240 — 100% within
+                                 * 2 LSB of unity. Diagonals appear as 2896.           */
 } Q2P_CollPlane;
+
+typedef struct {                /* 4 bytes — the chunk tail, formerly "extra[]"        */
+    uint16_t packed;            /* CONFIRMED: bits 15..11 = which plane OF THIS NODE
+                                 * the portal lies in; bits 10..0 = the neighbouring
+                                 * node index. 0x80044494 masks 0xF800 and compares
+                                 * against `hitPlane << 11`; 0x800444C0 masks 0x7FF.   */
+    uint16_t backPlane;         /* CONFIRMED: the same face's plane index IN THE
+                                 * NEIGHBOUR, passed at 0x800444BC as the plane the
+                                 * neighbour's occupancy test must skip.               */
+} Q2P_CollLink;
 ```
 
-Node-count relation: `SecondaryCol > PrimaryColl` in 89/115 files, equal in 17, **smaller in 9**. Do not
-assume Secondary is the finer hull. `PrimaryColl / Scene` node ratio spans 0.287…0.874, mean 0.537.
+**The context the queries take**, built by `0x80051600` — this is what fixes the layout:
 
-### 3.5 `PrimaryRemap`
+| field | value |
+|---|---|
+| `ctx+0x00` | the chunk |
+| `ctx+0x04` | `chunk + 4` — the node array |
+| `ctx+0x08` | `nodes + (numNodes+1)*36` — the plane array |
+| `ctx+0x0C` | `planes + numPlanes*12` — the link array |
+| `ctx+0x10` | the matching remap chunk |
+| `ctx+0x14` / `ctx+0x16` | `numPlanes` / `numNodes` |
+| `ctx+0x18` | the plane index, within its node, that a clip stopped at |
+| `ctx+0x1A` | the node a trace ended in |
+| `ctx+0x20` / `ctx+0x24` | the plane and node it stopped on |
+| `ctx+0x28` … `ctx+0xAC` | a list of up to eight `{int32 pos[3]; int16 id}` contact records |
 
-`uint16_t remap[PrimaryColl.numNodes]`, zero-padded to 4 bytes. `len == align4(2 * numNodes)` on 115/115.
-The maximum value **exceeds the `Scene` node count in 100 of 115 files**, so it is definitively *not* a
-scene-node index — probably a polygon or surface id in a shared table. UNKNOWN.
+#### Which hull is which — **SecondaryCol is the movement hull**
+
+The zone loader builds two contexts 344 bytes apart:
+
+| context | chunks | set at | used by |
+|---|---|---|---|
+| `0x800C8E90` | `PrimaryColl` + `PrimaryRemap` | `0x8007B508`, call `0x8007B5E8` | rays, line of sight, AI, spawning — 17 sites |
+| `0x800C8FE8` | `SecondaryCol` + `SecondaryRem` | `0x8007B648`, call `0x8007B6A8` | **entity movement**, via `0x800451B4` |
+
+and **SecondaryCol is PrimaryColl eroded by 286 on every axis** — the player's own half-extent. Measured by
+binary-searching the free space along all six axis directions from interior points in both hulls, over 5,275
+probes across all 115 zones:
+
+| difference (primary − secondary) | share |
+|---|---|
+| exactly 286 | 37.08 % |
+| 286 ± 2 | 51.98 % |
+| next largest single bucket (285) | 5.71 % |
+
+against a distribution that would be flat if the two hulls were unrelated. So SecondaryCol is the
+**configuration-space hull of the player's cube**: a POINT moving in it is that cube moving in the world.
+
+Three things fall out of that, all of which had been recorded as puzzles:
+
+- **`SecondaryCol` has FEWER nodes than `PrimaryColl` in 9 of 115 zones** (more in 89, equal in 17). Erosion
+  bevels most volumes into more faces but makes thin ones vanish entirely — a gap narrower than the player
+  simply is not there in the eroded hull.
+- **The player's whole call chain contains no per-entity bounds access.** It does not need one; the box is
+  baked into the geometry. §9.12 recorded this as a negative result without an explanation.
+- **The 286 cube is the real player hull**, not a broad-phase margin. §9.12's open question is closed.
+
+Rays use the primary hull because a ray is already a point: `0x80043BDC`, the ray marcher, hardcodes
+`0x800C8E90` at `0x80043C18` regardless of which context its caller passed.
+
+#### The query arithmetic is 16-bit
+
+Every test takes the point relative to the node's own minimum corner in SIXTEEN-bit wrapping arithmetic
+(`0x8004414C`…`0x80044184`, `lhu`/`lhu`/`subu`/`sh`):
+
+```c
+rel[i] = (int16_t)((uint16_t)point[i] - (uint16_t)node.bboxMin[i]);
+```
+
+A port that subtracts in 32 bits agrees only while the difference fits in a signed halfword. It always does
+for a point inside the node — the AABB gate runs first, and the largest node extent on the disc is 29,439 —
+but not for the far end of a long move, which is exactly where a trace would silently diverge. The remaining
+move inside `0x80044C44` is formed the same way (`0x80044DF0`), so a move longer than 32,767 units on an axis
+wraps and sets off in the wrong direction. Nothing in the game asks for one; a synthetic probe across a map
+does, and `q2psx-inspect coll` counts those separately for exactly that reason.
+
+One asymmetry, recorded because it looks like a bug and is not: `0x80044098` loads the plane point with `lhu`
+and truncates the difference to 16 bits, while `0x800445A4`, `0x80044294` and `0x80043E20` load it with `lh`
+and subtract in 32 bits. The two agree on every plane the disc holds, because no stored component reaches
+`0x8000`.
+
+#### The eight functions
+
+| address | what it does |
+|---|---|
+| `0x80044098` | point in node: AABB, then every plane, `d > 0` is outside; a solid node holds nothing |
+| `0x80044294` | may a point occupy this node, skipping one plane; **256-unit slack** (`slti 256` at `0x800443CC`) |
+| `0x80044420` | cross a portal: walk the links in the plane the clip stopped at, ask each neighbour |
+| `0x800445A4` | clip a move against one node, as an exact rational `num/den` initialised to `1/1` |
+| `0x80044C44` | the swept move: clip, scale, cross, repeat |
+| `0x80044F54` | locate a point: hint, then the hint's portal neighbours, then optionally every node |
+| `0x80045088` | locate + report contents and the nearest plane along a direction |
+| `0x80043E20` | distance along a direction to the nearest plane of a node |
+
+The clip never forms a fraction: it carries `num` and `den` and compares candidates with the 64-bit rational
+compare at `0x800B1010`, then scales the `int16` delta once through `0x8005652C`. `num == den` is how "nothing
+was hit" is signalled, and it is exact because the initialiser is `1/1` and only a strictly smaller fraction
+replaces it. A completed move ends at the destination EXACTLY (`0x80044D50` copies it wholesale) rather than
+at the accumulated sum of clipped steps.
+
+**Convexity is never assumed.** The clip skips planes the move is not heading toward (`n·delta <= 0`) and
+planes the point is already outside of (`num < 0`, `0x80044710`), and the occupancy test allows 256 units of
+slack. The 148 nodes that are not strictly convex are therefore harmless, and the old "95.6 % / 99.85 %
+confirmed" figures for the plane point — which measured how well a guessed reading matched a geometric
+expectation — are retired.
+
+Two outputs are written and never read: `0x800B2AF4` and `0x800B2AF0` receive the node a blocked trace could
+not quite enter and the plane that kept it out (`0x80044EC8`). Nothing in the 632 KB image loads either.
+
+#### Checked against the disc
+
+`q2psx-inspect coll` runs every invariant the transcribed code depends on across all 230 chunks:
+
+```
+nodes / planes / links       : 22,773 / 139,240 / 94,642
+solid nodes (bit 15)         : 0        <- the flag exists in code, unused on this disc
+nodes with > 32 planes       : 0        <- the 5-bit plane field's limit, exactly
+hulls with > 2048 nodes      : 0        <- the 11-bit node field's limit, exactly
+link node index out of range : 0
+link plane index out of range: 0
+link back plane out of range : 0
+reciprocal portal pairs      : 94,620 ok, 22 missing
+node axis extents > 65535    : 0   (max 29,439)
+plane points with bit 15     : 0   (max 29,439)
+normals not unit             : 0
+live traces leaving the hull : 0
+traces ending further away   : 5, and all 5 are the 5 that asked for a move > 16 bits
+```
+
+Both packing limits holding *exactly* at their boundaries is the strongest single piece of evidence: if the
+5/11 split were anywhere else, one of them would fail.
+
+The same command censuses the map's trigger volumes, which are collision targets too:
+
+```
+volumes                     : 1,356
+matching the contents mask  :    55   (0x3360)
+  sink slowly     (0x0200)  :     0   <- handled in code, never used on this disc
+  buoyant         (0x2000)  :     4
+  speed gate      (0x1000)  :    31
+swept against     (0x0810)  :   333
+```
+
+`0x0200` joining the solid bit as a code path with no data behind it is worth recording: both are real
+behaviour a faithful port must implement and neither can be observed by running this disc.
+
+The portal graph reaches every node in 192 of 230 hulls; 831 of 22,773 nodes (3.6 %) sit in components a walk
+from node 0 cannot reach, which is what sealed-off volumes look like.
+
+`q2psx-inspect walk <map> 0` then exercises the whole model on real geometry: on **47 of 47** maps with a
+zone-0 spawn, the spawn lands inside a cell, the player becomes grounded, and 150 ticks of falling and walking
+never leave the hull.
+
+### 3.5 `PrimaryRemap` / `SecondaryRem`
+
+`uint16_t remap[numNodes]`, zero-padded to 4 bytes; `len == align4(2 * numNodes)` on 115/115. Installed into
+the collision context at `ctx+0x10` alongside its hull (`0x80051798`), which is why the two always appear in
+matched pairs. The maximum value **exceeds the `Scene` node count in 100 of 115 files**, so it is definitively
+*not* a scene-node index — probably a polygon or surface id in a shared table. Still UNKNOWN.
 
 ### 3.6 `AreaConx` — area connection (portal) graph
 
@@ -2282,7 +2435,8 @@ derive them from PC Quake II through the world scale (§Conventions explains why
 
 #define Q2PSX_GRAVITY            32  /* @0x8001C7EC -> global 0x800AE924 (== gp+804)      */
 #define Q2PSX_VEL_DIV           320  /* 0x66666667 >> (32+7) @0x80045FD8, i.e. /320       */
-#define Q2PSX_TERMINAL_VY      8192  /* @0x80046490 -- SECONDARY MOVER PATH ONLY          */
+#define Q2PSX_TERMINAL_VY      8192  /* @0x80046084 on the player path, @0x80046490 on
+                                      * the secondary mover -- BOTH, see the note below  */
 #define Q2PSX_STEP_HEIGHT       216  /* @0x80045888 -- this is the DELAY SLOT, so default */
 #define Q2PSX_STEP_HEIGHT_LOW   108  /* @0x8004588C, taken when (flags & 0x600)           */
 #define Q2PSX_SWEEP_HALF_EXTENT 286  /* the movement sweep cube, 0x80053DA4..0x80053DFC   */
@@ -2304,35 +2458,88 @@ vel.y += dv
 The `/320` is bit-exact against the `0x66666667 >> (32+7)` magic sequence including its `subu sign`
 correction, so plain C `/` reproduces it.
 
-> **Terminal velocity is PATH-DEPENDENT.** The 8192 clamp exists **only** inside `0x800463E8` (at
-> `0x80046490`). The player / step-slide integrator `0x8004583C` updates `vel.y` with `lhu` / `addu` / `sh`
-> at `0x80045FF8…0x80046004` and does **not** clamp. Applying the clamp on the player path makes the player
-> fall wrong.
+> **CORRECTION — the 8192 clamp DOES apply on the player path.** An earlier pass recorded terminal velocity
+> as path-dependent, existing only inside `0x800463E8` at `0x80046490`. That is one of two clamps and the
+> wrong one. `0x8004583C` stores the new vertical velocity at `0x80046004`, then at `0x80046084` re-tests it
+> with `slti v0, v0, 8193` and rewrites it to 8192 when it is larger. The branch it sits in is the arm taken
+> when the entity carries neither liquid flag, so an entity in liquid is governed by `0x8006FE3C` instead and
+> genuinely never reaches it — which is presumably what the earlier reading was seeing.
+
+The vertical velocity is then shaped by the entity's liquid flags, which come from the contents test at
+`0x80050CE0` against the map's `TrigBounds` volumes:
+
+| flag | set from | effect on `vel.y` |
+|---|---|---|
+| `0x10` | contents `0x2000` | eased toward **−3072** at rate `dt*64` (`0x8006FE3C`) — buoyant, rises |
+| `0x08` | contents `0x0200` | eased toward **+1024** when below it, else decelerated by `dt*24` — sinks slowly |
+| neither | — | clamped to **8192** |
+
+Contents `0x2000` additionally posts an upward impulse of −9216 to the entity's accumulator when it is
+already on the ground (`0x80045940`), which is the water/jump-pad boost. Contents `0x1000` sets or clears the
+entity's own `0x800` flag depending on whether `|vel.y| < 1024`. This is the first behaviour read out of
+`TrigBounds.flags`, which §2.3 lists as UNKNOWN; bits `0x0200`, `0x1000` and `0x2000` are now accounted for.
 
 Step handling, transcribed from `0x8004583C:0x80045B24…0x80045BFC` with delay slots resolved:
 
 ```
 step  = (flags & 0x600) ? 108 : 216
 saved = pos.y
-Move(pos, {0, -step, 0},        mode = 0)    /* up   -- -Y is up   */
-Move(pos, frameDelta,           mode = 3)    /* slide              */
-drop  = saved - pos.y
-Move(pos, {0, drop + step, 0},  mode = 0)    /* down               */
+Move(pos, {0, -step, 0},        iters = 0, {ground=0, push=0})   /* up, -Y is up */
+Move(pos, frameDelta,           iters = 3, {ground=0, push=1})   /* slide        */
+drop  = saved - pos.y            /* how far the lift actually got */
+Move(pos, {0, drop + step, 0},  iters = 0, {ground=1, push=0})   /* down         */
 ```
 
-The mode argument is **not** constant: `a2` = 0 / 3 / 0 at `0x80045B4C` / `0x80045B80` / `0x80045BE8`. Frame
-deltas are `int16_t[3]`, written with `sh` (into `ent+0xEC…0xF0` and `sp+80/82/84`), so a port using `int32`
-diverges on overflow.
+**The `0 / 3 / 0` argument is the slide-attempt count, and there is a second one.** `0x80045144`'s third and
+fourth registers are each a PAIR OF HALFWORDS, not integers — read at `0x80045200` (a3 hi), `0x8004526C`
+(a2 lo), `0x800453F0` (a2 hi) and `0x80045444` (a3 lo):
 
-**Collision.** The player sweep inflates the `[start, end]` AABB by 286 on **all six faces**
-(`0x80053DA4…0x80053DFC`) and passes 286 plus the pair `(−286, +286)` to `0x80052C70`. This is the only
-extent on the player path — the call chain `0x8003A1C8 → 0x80039AA4 → 0x8004583C → 0x800456B0 → 0x80045144 →
-0x80053C58` contains **zero** `ent+0x6C…0x76` accesses.
+| field | meaning |
+|---|---|
+| `a2.lo` | record a contact as GROUND and set flag `0x20` when the surface is flat enough |
+| `a2.hi` | apply the one-unit unstick nudge (`0x8005625C`) after a hit |
+| `a3.lo` | how many further slide attempts to make — the `0 / 3 / 0` |
+| `a3.hi` | also sweep against other entities |
 
-> **But do NOT use 286 as a universal entity box.** Entities do carry real `mins`/`maxs` at `+0x6C`/`+0x72`,
-> read or written 96 times from non-stack bases across ~30 functions (49 of them in `0x80036348` alone). The
-> 286 cube is the *movement sweep* extent only. Whether it is the true player hull or a broad-phase query
-> margin is still open — `0x80052C70`'s use of those stack arguments was not traced.
+and the pairs come from a table at `0x800AE930`: `{0,0}` for the lift, `{0,1}` for the slide, `{1,0}` for the
+drop. **Ground is therefore decided by the DOWN move alone.** A port that sets on-ground from the horizontal
+slide reports standing on walls.
+
+The net vertical effect of the three moves is a **step DOWN of one step height per frame** — it lifts by
+`step`, then drops by `step` plus however far the lift got — which is what carries an entity smoothly off a
+ledge instead of dropping it.
+
+Frame deltas are `int16_t[3]`, written with `sh` (into `ent+0xEC…0xF0` and `sp+80/82/84`), so a port using
+`int32` diverges on overflow. So does every intermediate inside the collision walk; see §3.4.
+
+**Collision.** The world half is §3.4, and it explains the 286 that appears here: the movement hull
+`SecondaryCol` is `PrimaryColl` eroded by 286 on all six axes, so the player's box is baked into the geometry
+and the runtime moves a POINT. That is why the call chain `0x8003A1C8 → 0x80039AA4 → 0x8004583C →
+0x800456B0 → 0x80045144 → 0x80053C58` contains **zero** `ent+0x6C…0x76` accesses, and it settles the question
+this section used to leave open: **286 is the real player hull**, not a broad-phase margin.
+
+Entity-vs-entity collision keeps the box explicit, because the other entity moves. `0x80053C58` inflates the
+`[start, end]` AABB by 286 on all six faces (`0x80053DA4…0x80053DFC`), walks the 48-slot entity table at
+`0x800CAE10` (64-byte records, live when byte +54 is non-zero) and then the map's trigger volumes, and passes
+each candidate to `0x80052C70` with 286 and the pair `(−286, +286)`.
+
+`0x80052C70` adds the mover's half-extent to the TARGET's box and sweeps the mover as a point through it —
+the same Minkowski trick as the world hull, done per pair at runtime. It subtracts the target's own vertical
+displacement from the mover's delta first, which is exactly enough to ride a lift, and tests the six faces in
+the order **+Y, −Y, +Z, −Z, +X, −X**, taking the first that passes rather than the earliest impact. +Y is
+down, so the floor of the thing you are standing on is tested first. The contact normal comes from the six
+axis vectors at `0x800AEA2C` (8-byte stride, ±4096); the contact position is computed directly, never as a
+fraction of the move. The result lands in a struct at `0x800CBA10`:
+
+```c
+struct { int32_t pos[3]; int16_t normal[3]; int16_t type; int16_t id; int16_t index; };
+```
+
+with `type` = 2 for an entity, written by the caller at `0x80053E68`.
+
+> **Do NOT use 286 as a universal entity box.** Entities carry real `mins`/`maxs` at `+0x6C`/`+0x72`, read or
+> written 96 times from non-stack bases across ~30 functions (49 of them in `0x80036348` alone). 286 is the
+> player's, and the entity sweep above reads the other entity's own bounds from its record.
 
 **Camera.** `eye.y = pos.y + 286 − viewOffset`, with `viewOffset` eased toward 576 (stand) / 400 / 286
 (crouch) at rate `dt*4` via `0x8006FE3C`. Selection: bit 9 of flags → 400, else bit 10 → 286, else 576.
@@ -2349,6 +2556,748 @@ returns **zero**. There is also no scaled `pmove.c`: the `addiu`/`ori`-from-zero
 dominated by graphics and fixed-point values (4096 ×85, 255 ×74, 127 ×49, 128 ×48, 512 ×30) with no gameplay-
 length signature at any of S = 1, 2, 4, 5, 8, 10, 12, 16, 20. Hammerhead wrote their own physics and copied
 only id's *unitless* tables — the max-ammo triple at `0x8009C5C8` is byte-identical to PC Quake II.
+
+---
+
+## 10. The menu system — **CONFIRMED**
+
+The menus are not on the disc and are not scripted: they are arrays of 24-byte item records in the
+executable's data segment, walked by an engine at `0x80019B88`…`0x8001BA14`. Everything below was read out of
+that code and those tables, and `q2psx-inspect menu <disc>` reads the tables back off a disc and compares
+them to the port's transcription record by record — **21 pages, 0 mismatches** on `SLES_015.34`.
+
+### 10.1 The item record
+
+```c
+typedef struct q2psx_menu_item_t {   /* 24 bytes */
+    char    *label;      /* +0x00  may carry colour codes, see 10.5          */
+    int16_t  x, y;       /* +0x04  centre x and centre y, in 512 x 248       */
+    void   (*action)();  /* +0x08  -> object +0x4C                           */
+    int16_t *toggle;     /* +0x0C  -> object +0x58, an ON/OFF binding        */
+    int16_t *slider;     /* +0x10  -> object +0x50, a 0..127 bar binding     */
+    uint32_t on_release; /* +0x14  bit 0 -> object flags bit 13              */
+} q2psx_menu_item_t;
+```
+
+The loader is `0x8001A474(items, font_size)`. It walks until a null `label`, creating one 92-byte drawable per
+record at `0x800C35F0 + i*92` — `char text[32]; char label[32]; int16 x, y; uint32 flags; …` — and it
+**appends**: `0x800B32B0` carries the running object count across calls.
+
+A page calls the loader once per group and the *last* group is the navigable one, because each call rewrites
+the selectable range (`0x800B32AE` = first, `0x800B32B2` = last) from the count it started at. A page of pure
+text is therefore a real table followed by the **empty table at `0x8009B30C`**, which adds nothing and leaves
+the range empty. The confirmations put the question in one table and the answers in another for the same
+reason.
+
+`y` is the row's vertical *centre*, not its top: the title sits at 40 with a 32-pixel face while the first
+item sits at 64 with a 16-pixel one, which only works if both are centred.
+
+### 10.2 Page inventory
+
+Page ids are the values passed to `0x8001A384`, which also saves the outgoing page's cursor into
+`0x800C68A0[page*2]` — which is why returning to a page puts the cursor back where it was.
+
+| id | page | title | tables |
+| --- | --- | --- | --- |
+| 7 | SCREEN POSITION | `POSITION` | `0x8009AF4C` + empty |
+| 26 | PAUSE (single player) | `PAUSED` | `0x8009AA0C` |
+| 27 | OPTIONS | `OPTIONS` | `0x8009AB14` |
+| 28 | PLAYER | `PLAYER` | `0x8009ADFC` |
+| 29 | SOUND | `SOUND` | `0x8009AE74` |
+| 30 | VIDEO | `VIDEO` | `0x8009AF94` (1P) / `0x8009AEEC` (MP) |
+| 31 | CONTROLLER | `CONTROLLER` | `0x8009AFDC` |
+| 32 | RESTART LEVEL? | — | `0x8009ABD4` + `0x8009AC04` |
+| 33 | RESTARTING LEVEL | — | `0x8009AC4C` + empty |
+| 34 | RESUPPLY? | — | `0x8009AD54` + `0x8009ADB4` |
+| 35 | RESUPPLYING | — | `0x8009AC4C` + empty |
+| 36 | QUIT GAME? | — | `0x8009AC94` + `0x8009ACC4` |
+| 37 | QUITTING | — | `0x8009AD0C` + empty |
+| 38 | NO CONTROLLER | — | `0x8009B42C` |
+| 41 | DEATH | — | `0x8009AB74` |
+| 42 | GAME VARIABLES | `PAUSED` | `0x8009A6C4` / `A724` / `A7B4` / `A874` |
+| 43 | PAUSE (multiplayer) | `PAUSED` | `0x8009A964` |
+
+Two pages have variants chosen at install time rather than by the tables:
+
+* **VIDEO** (`0x800202B0`) offers `HORIZONTAL SPLIT` only when `0x800AEBCC` is non-zero, i.e. in a
+  multiplayer session; the single-player page is the two-item one.
+* **GAME VARIABLES** (`0x8001D510`) picks one of four tables from the unlocked cheat level at `0x800B335C`:
+  **3, 5, 7 or 9** items for NONE / BRONZE / SILVER / GOLD.
+
+The same `0x800AEBCC` selects which pause menu opens (`0x8001D5C8`): 43 in multiplayer, 26 otherwise. The
+single-player table has a **sixth record pointing at the empty string** which the page then excludes with
+`count -= 1` at `0x8001D6F4`, in the same breath as placing the `KILLS %d/%d    %d/%d SECRETS` line
+(`0x800AB30C`) at (256, 204).
+
+### 10.3 Navigation
+
+Buttons are read per player as a 16-bit mask; "just pressed" is `cur & ~prev` (`0x80019BFC`), with the
+console's own bit assignments (UP `0x10`, RIGHT `0x20`, DOWN `0x40`, LEFT `0x80`, TRIANGLE `0x1000`,
+CROSS `0x4000`).
+
+* **Skip rule** (`0x80019CC4`): an item is not navigable when the object's `int16` at `+0x4A` is non-zero, or
+  when *either* of its two text buffers begins `'g'`. Both the death screen's spent resupply line
+  (`0x8001D774`) and the controller page's stick-only rows (`0x8001CA28`) use this.
+* **Wrap** (`0x80019E8C`): nothing below the cursor wraps to the first selectable item and nothing above to
+  the last. The wrap is gated on flag bit 14 of the boundary item, which the item loader unconditionally
+  clears — so wrapping is always on.
+* **Activation** (`0x8001A0D8`): an item whose bit 13 is set fires on the **release** of CROSS; every other
+  item fires on the press. The pause menus, the death screen and the confirmations' YES/NO are on-release.
+* **TRIANGLE** runs the page's back handler, or does nothing where there is none — which is what makes the
+  root pause page unleavable except through its own items.
+* Sounds: `msc_menu2` on a cursor move, `msc_menu1` on an activation, `msc_menu3` on back, `itm_pkup` on a
+  toggle, `msc_comp_up` while a slider moves.
+
+### 10.4 Widgets
+
+| kind | binding | behaviour |
+| --- | --- | --- |
+| text | — | a label, which may run an action |
+| toggle | `+0x0C` | LEFT sets 1, RIGHT sets 0 — the row reads `LABEL  ON  OFF` and you move along it (`0x8001B720`) |
+| slider | `+0x10` | ±2 per frame while the direction is **held**, clamped to `0..127` (`0x8001C018`, `0x8001C1B8`) |
+| choice | — | the controller page only; ±1 per press with wrap inside a three-name class (`0x8001C944`) |
+
+A toggle's row is recomposed every frame: `sprintf(buf, "b%s %sON %sOFF", label, on?"b":"d", on?"d":"b")`
+when selected and `sprintf(buf, "%s %s", label, on?"ON":"OFF")` when not (`0x8001B8F4`, `0x8001B944`), with
+the plain label copied back afterwards (`0x8001A75C`).
+
+A slider draws a **133 x 8** bar whose top is `y - 4` and whose fill ends at `bar_x + value + 3`
+(`0x8001BBB4`, `0x8001BD28`). The bar starts where the label ends, which is why every slider label in the
+tables is space-padded to exactly 11 characters. It is white when the row is selected, `(74,143,170)` when
+not, and `(32,32,32)` when the label is greyed (`0x8001BAA8`).
+
+The **CONTROLLER** page is the one page whose records carry no bindings at all: its hook at `0x8001C81C`
+writes the per-player configuration block at `0x800B32B6 + player*34` directly. Which three style names the
+first row offers depends on the connected controller class — `[0,3)` for a mouse, `[3,6)` for an analogue
+pad, `[6,9)` otherwise, out of the nine strings at `0x800AB1D8`…`0x800AB244`, of which **6 = STANDARD A** is
+the reset default.
+
+### 10.5 Text and colour codes
+
+A label may contain one-character codes that the glyph loop at `0x8001AEF8` consumes without printing. The
+set is exactly **`b`, `d`, `g`, `u`** — the printable-length routine at `0x8001FD18` skips those four and no
+others. `b` returns to the normal colour, `d` selects the second font palette (`0x800E3FB4` against
+`0x800E3FB8`), `g` additionally modulates the glyph by 32 instead of 128 (`0x8001B14C`) *and* takes the item
+out of the navigation, and `u` adds an emphasis pass.
+
+Three font sizes exist — 8, 16 and 32 (`0x8001AF68`). The title is drawn at 32, x = 256, and
+**y = (framebuffer_height - 188) / 2 + 10** (`0x8001CF74`) — 40 on PAL's 248-line framebuffer. Items are
+drawn at 16 at every call site.
+
+### 10.6 Settings, defaults, and what the variables do
+
+Every setting is an `int16` in the block based at `0x800B2FE4`:
+
+| address | setting | default | reset routine |
+| --- | --- | --- | --- |
+| `0x800B333C` | HORIZONTAL SPLIT | 1 | `0x8001FA18` |
+| `0x800B3368` / `0x800B336A` | screen x / y offset | 0 / 24 | `0x8001FA18` |
+| `0x800B333E` | STEREO | 1 | `0x8001FA50` |
+| `0x800B3348` | MUSIC | 48 | `0x8001FA50` |
+| `0x800B334C` | SOUND FX | 96 | `0x8001FA50` |
+| `0x800B3340` | CROSSHAIR | 1 | `0x8001BDA8` |
+| `0x800B3342` | AUTOCENTRE | 1 | `0x8001BDA8` |
+| `0x800B32C2 + p*34` | MOUSE SPEED | 64 | `0x8001BDA8` |
+| `0x800B335A` | GRAVITY | 64 | `0x8002048C` |
+| `0x800B335E` | GAME SPEED | 64 | `0x8002048C` |
+| `0x800B3358` | BLAST FORCE | 64 | `0x8002048C` |
+| `0x800B3360` | WEAPON STAY | 0 | `0x8002048C` |
+| `0x800B3362` | INFINITE AMMO | 0 | `0x8002048C` |
+| `0x800B3364` | ALL WEAPONS | 0 | `0x8002048C` |
+| `0x800B3366` | FALLING DAMAGE | 1 | `0x8002048C` |
+| `0x800B336C` | ONE SHOT KILL | 0 | `0x8002048C` |
+
+`0x8001C698` is where the GAME VARIABLES page stops being cosmetic:
+
+```
+gravity  (0x800AE924) = (GRAVITY + 64) >> 2                 /* 32 at the default, and the
+                                                             * constant the "off" path writes */
+tick     (0x800B2DD8) = base * (GAME_SPEED + 64) >> 7        /* base unchanged at the default */
+cheats   (0x800B29EC) = INFINITE_AMMO ? 0x01 : 0
+                      | !FALLING_DAMAGE ? 0x40 : 0
+                      | ALL_WEAPONS   ? 0x20 : 0
+                      | ONE_SHOT_KILL ? 0x80 : 0
+```
+
+The music slider reaches the mixer doubled: `0x800B2E50 = MUSIC * 2` (`0x800205F4`), so the top of the slider
+is full scale.
+
+**The menu font has since been located** — see §11.2. The 8-pixel face is `chars.lbm`, the same atlas the
+HUD draws from, and the 16- and 32-pixel faces are `frontend.lbm`; both are standalone VRAM images in
+`SNDVRAM.DAT` with their palettes in the executable's built-in bank (§11.5).
+
+**What is still *not* reconstructed.** The memory-card front end
+(`0x8009B06C`…`0x8009B42C` — format, overwrite, slot select) has its tables read but its flow is a separate
+state machine that was not followed, and the MISSION screen is part of the HUD system rather than the menu.
+
+---
+
+## 11. The HUD — **CONFIRMED**
+
+### 11.1 There is no status bar, and that is the finding
+
+The game shows no health number, no ammo counter, no armour readout and no weapon icon. This is not an
+unresolved question; it is a result, and it was reached by enumeration rather than by looking and failing to
+find one.
+
+Every string the executable formats was listed: all **30** call sites of the text `printf` wrapper at
+`0x80043518`, all **3** of the queueing wrapper at `0x800434B8`, the single caller of `0x80043640`, and every
+`sprintf` (`0x800894B8`) in the 632 KB image, with each call's format-string argument resolved back through
+its `lui`/`addiu` pair. What the game formats is mission text, level-completion tallies, menu labels, debug
+overlays, pickup names and one weapon-selected line. **Nothing formats a player statistic.**
+
+A second, independent check agrees: the only two routines that read the 92-entry font table at `0x8009D554`
+are the markup interpreter and the menu's glyph loop. There is no third digit-drawing routine.
+
+> **A port that adds a status bar is adding a feature.** The rest of this section describes what the console
+> actually draws.
+
+### 11.2 The atlas — `chars.lbm`
+
+The overlay's glyphs and icons are one 4bpp image, `chars.lbm`, present as a standalone VRAM image in **47 of
+the 49** `SNDVRAM.DAT` files at 128 bytes per row by 128 rows — 256 x 128 texels.
+
+It is uploaded to **VRAM (0 halfwords, 384)**, which is texture page (0, 256) with a v origin of 128. That is
+read out of the registration chain rather than guessed: `0x8003FEA4` registers the name with slot 15 and the
+value 128; `0x8006901C` turns the slot into `x = tblX[15] = 0` and `y = tblY[15] = 256` from the tables at
+`0x800A3274` and `0x800A329C`; and `0x800691A8` **adds the third argument to y** before handing
+`RECT{x, y, width>>1, height}` to `LoadImage`. Every glyph's stored v is `>= 0x80`, which is exactly what a
+128-row image at a v origin of 128 requires.
+
+Nothing collides. The world's 4bpp CLUT array occupies rows 256…~285 of the same page (§4.1) and the thirteen
+texture pages start at x = 64.
+
+The atlas rows the tables address:
+
+| page v | content |
+| --- | --- |
+| `0x80` | lower case |
+| `0x98` | `Player` `HyperBlaster` `SuperShotgun` |
+| `0xA0` | `Machine` `Chain` `Grenade` `Launcher` `Rail` |
+| `0xA8` | `Rocket` `BFG` `was` `Ammo` `die` `door` `Sequence` |
+| `0xB0` | digits and punctuation |
+| `0xB8` | `A`…`P` |
+| `0xC0` | `Q`…`Z`, punctuation |
+| `0xF0` | the seven message-backdrop tiles, then the crosshair |
+
+### 11.3 Tables
+
+| base | stride | count | what |
+| --- | --- | --- | --- |
+| `0x8009D554` | 2 | 92 | glyph `{u, v}`, index = `c - 32`, `' '`…`'{'` |
+| `0x8009D60C` | 4 | 15 | icon `{u, v, w, h}` |
+| `0x8009D524` | 2 | 8 | backdrop tile `{u, v}` by `*N` |
+| `0x8009D534` | 4 | 8 | backdrop colour by `*N` — all `(0x78,0x78,0x78)` |
+| `0x8009D648` | 2 | 6 | notification lines by player count: `0, 4, 2, 1, 1, 0` |
+| `0x8009DC8C` | 3 | 12 | weapon glyph string, **1-based**, slot 0 is `"  "` |
+| `0x800A2FEC` | 8 | 80 | the built-in palette bank |
+
+**Glyphs are 8 x 8 sprites** — `SPRT_8`, primitive code `0x74`, emitted at `0x800426BC`. There is no width
+field and no proportional spacing: a drawn glyph always advances 8.
+
+**Icons are words, not pictures,** and they deliberately overlap. `SuperShotgun` spans u = `0x90`…`0xF0`;
+`Shotgun` is its last 56 pixels; `gun` is the last 24 of *that*. `GrenadeLauncher` is `Grenade` followed by
+`Launcher`, and all three are separate entries over one run of pixels. That is how an eleven-weapon
+vocabulary fits in fifteen boxes, and it is why five of the escapes emit two sprites.
+
+**The weapon glyph table is markup.** Its entries are `"&B"`, `"&S"`, `"&U"`… — icon escapes indexed by the
+live weapon id, so `Selected %s` at `0x8004EDF0` prints a picture of a word. Slot 0 being `"  "` is what makes
+the 1-based indexing safe for an unarmed player. The parallel 12-byte name table at `0x8009DBA8` holds the
+same weapons' names, and those names are also what the `CastList` bank calls the view models — the only link
+between the model in the player's hands and the glyph that names it.
+
+### 11.4 The markup language
+
+`0x80042328` interprets a string; `0x80043518` is `sprintf` into a 256-byte buffer at `0x800C8DDC` followed by
+a call to it. Escapes are consumed inline, so the pickup message really is the literal
+`@03BB8^828282|0~8%s~4`.
+
+| escape | meaning | parser |
+| --- | --- | --- |
+| `@XXXYY` | move the pen: 3 hex digits of x, **2** of y | `0x80041F94` |
+| `^RRGGBB` | colour, 6 hex digits, modulating the sprite | `0x80041DD4` |
+| `\|N` | `\|0` selects palette 72 and sub-mode 0; anything else selects palette 74, with sub-mode 2 for `\|1` and 1 otherwise | `0x800424DC` |
+| `~N` | space width, `N` in 1…15, else 4 | `0x800424B0` |
+| `#XXXYYY` | left and right margins, 3 hex digits each; non-zero enables word wrap | `0x80042110` |
+| `&X` | draw one or two icons | `0x800430F4` |
+| `*N` | arm the backdrop pass | `0x80042524` / `0x8004288C` |
+| `\n` `\r` | newline — **both**; `\r` falls through into the newline arm | `0x80042544` |
+
+Hex digits are classified as `c >= 'a' ? c-87 : c >= 58 ? c-55 : c-48`, so `':'` decodes as `0x0A`. One of the
+parsers is fed `%2X` output, so this never bites in practice.
+
+`~N` sets the **space** width only. A drawn glyph always advances 8 (`0x800AE8EC`, read twice and never
+written), which is why `~8` reads as loose text and `~4` as tight. Under `|1` the space draws its glyph and
+then advances 8 like any other.
+
+The shipped state, from the initialised data at `0x800AE8DC`: wrap off, margins `0x06A`/`0x196`, space width
+4, glyph advance 8, palette 74. All of it is `$gp` state that **persists from one string to the next** — a
+`|0` in a pickup message leaves palette 72 selected for everything drawn after it.
+
+`*N` draws nothing when it is read. It arms a second pass that walks the glyph positions recorded during the
+first (`0x800C8CDC`, four bytes each) and drops a 16 x 16 sprite behind every one of them at (x-4, y-4). The
+tiles shrink as N falls, so decrementing N once per frame — which the message layer does in place, in the
+message buffer — is how the box fades out.
+
+Ordering matters and is preserved: the backdrop is added to the ordering table **after** the glyphs, and
+`AddPrim` prepends, so the tiles draw first and end up behind.
+
+### 11.5 The palette bank — the font's colours are in the executable
+
+`0x8007610C` walks eight-byte records `{ const u16 *entries; u16 stp_mask; u16 index; }` from `0x800A2FF4`
+until it meets a NULL pointer — 79 of them on this build. Each is copied through its 16-bit mask, which
+decides per entry whether the semi-transparency bit is set, uploaded as a 16 x 1 rect, and its hardware CLUT
+id recorded at `0x800E3F2C + 2*index`.
+
+Placement walks columns of seven: record k goes to `x = 16*((k-1)/7)`, `y = 248 + ((k-1)%7)`. Rows 248…254 are
+the band between the two 512 x 248 framebuffers and the texture half of VRAM, which is why they are free.
+Record 0 is different — a 256-entry palette uploaded to (0, 255).
+
+| id | used by |
+| --- | --- |
+| 70 | a white-only mask palette, menu |
+| 72 | the font under `\|0`, and the crosshair |
+| 74 | the font under `\|1`, and the shipped default |
+| 76 | the `*N` backdrop ramp |
+
+### 11.6 What the overlay draws
+
+**Notifications.** A four-slot ring of 64-byte strings at `ctx+0x140`, pushed by `0x80042D24` with
+`strncpy(dst, src, 63)`. The visible count is capped by the by-player-count table; one line retires every 60
+ticks (`ctx+0x28E`). They are drawn newest-first at x = 24, `y = 9*i + (height>>5) + 16`, so the newest sits
+lowest. Because they are drawn newest-first and the colour is context state, a `^` in a newer line colours the
+older ones too.
+
+**The centre line.** One string at `ctx+0x240` with a 1200-tick life (`ctx+0x28C`), positioned by
+`0x80042E14` at `x = width/2 - 4*len`, `y = height/2 + 20`, prefixed `*7` unless the body already opens with
+`|0`.
+
+**The crosshair.** `0x80043A58`, a 16 x 16 sprite at (0, `0x88`) in the atlas, drawn at the middle of the view
+less half a sprite plus the view's own offset pair, in (127,127,127) through palette 72. The menu switch is
+`0x800B3340` (§10.6). The style pair at `gp+796`/`gp+797` is read but **never written anywhere in the image**,
+so there is exactly one crosshair.
+
+**The damage flash.** Raised at `0x8003AE10`, drawn at `0x80076764` as a full-screen semi-transparent tile
+whose colour is `rgb * strength/initial` in 16.16, with `strength` decremented once per drawn frame. Two
+colours: `0x800AE884` = `(0x40,0x40,0x40)` grey when the armour took it, `0x800AE888` = `(0x40,0,0)` red when
+it reached flesh. The armour branch is tested first, so a hit that costs both flashes grey.
+
+The strength arithmetic is asymmetric, and the asymmetry is real:
+
+```c
+health: strength = damage / 2 + 2;          /* bigger hit, brighter flash  */
+armour: strength = (cur - prev) / 2 + 2;    /* NEGATIVE for a bigger hit   */
+if ((uint8_t)strength >= 6) strength = 5;   /* which wraps, and saturates  */
+```
+
+So an armour graze flashes faintly, a five-point hit or worse flashes at full strength, and between them is a
+dead band where it does not flash at all.
+
+**Pain sounds** are the other channel the player has. `0x8003AF54` picks one by health bracket against
+25 / 50 / 75: `mal_pn25_1`, `mal_pn50_1`, `mal_pn75_1`, `mal_pn100_1` at `0x800AC510`.
+
+### 11.7 Two quirks reproduced on purpose
+
+The string measurer at `0x800702A0` returns **`strlen - 1`** for a non-empty string. The centre-message
+layout is built on it, so a corrected measure moves every centred line four pixels.
+
+That layout also mixes units. When a body opens with an icon escape, `0x80042EB4` subtracts 2 from a
+**character** count and adds the icon's width in **pixels**, then multiplies the whole thing by four. A line
+opening with `&O` therefore centres as though it were sixty-odd characters long.
+
+Both are implemented as they are, and `tests/test_hud.c` fails if either is "fixed".
+
+### 11.8 Layout space
+
+Everything above is in the console's own **512 x 248** framebuffer (§9.9), and it has to be: the `@` escape
+carries three hex digits of x but only **two** of y, so a y above 255 does not clamp — it lengthens the field
+and shifts every character after it. Presenting the overlay larger is a scaling decision for the client, not
+something the layout can absorb.
+
+## 12. The screen — **CONFIRMED**
+
+Everything between "the game has decided what to draw" and "a field is on the television": the display and
+draw environments, the double buffer, the shape of the ordering table, the viewport layouts, and the frame
+lock. All of it was read out of the executable and is transcribed in `src/screen/screen.[ch]`;
+`q2psx-inspect screen <disc>` reads every constant back off a disc and compares the immediate field of the
+instruction it came from — **59 checks, 0 failures** on `SLES_015.34`.
+
+### 12.1 Bring-up — `0x800764DC`
+
+Called once from `main`. In order:
+
+```
+SetVideoMode(1)                       /* MODE_PAL; the only call site in the image */
+0x800B2DA0 = 512 ; 0x800B2DA2 = 248   /* the framebuffer, and it is runtime state */
+0x800B2E14 = 0 ; 0x800B2DC0 = 0 ; 0x800B2DC4 = 0
+InitGeom()                            /* 0x8008E494 — enables COP2 in SR          */
+SetGeomOffset(width/2, height/2)      /* 0x8008A1A8 -> GTE OFX/OFY                */
+SetGeomScreen(gp+1608)                /* 0x8008A118 -> GTE H                      */
+0x800B2738 = 0 ; 0x800B2739 = 1       /* draw buffer, display buffer              */
+0x800B273C..E = {0, 1, 2}             /* a second, three-slot ring; see 11.4      */
+0x80077454()                          /* the display envs, below                  */
+0x80078378()                          /* the u16[5] {32,0,32,64,96} at 0x800B36D8 */
+SetDispMask(1)
+db = 0x800B3730 + buffer * 32408
+VSync(0) ; PutDrawEnv(db+528) ; PutDispEnv(db+10940)
+```
+
+`0x80077454` sets the two display envs **cross-paired** — `SetDefDispEnv(db0+10940, 512, 0, 512, 248)` and
+`SetDefDispEnv(db1+10940, 0, 0, 512, 248)` — clears both with `ClearImage(rect, 0,0,0)`, and sets `isbg = 1`
+with a black clear colour on each buffer's first viewport draw env.
+
+The libgpu entry points are identified from the debug-format strings the library still carries
+(`0x800ADA00`…`0x800ADBE0`), which name each function at its own call site: `SetDispMask 0x80083304`,
+`DrawSync 0x8008339C`, `ClearImage 0x80083520`, `ClearOTag 0x800837C0`, `ClearOTagR 0x80083888`,
+`DrawOTag 0x80083990`, `PutDrawEnv 0x80083A00`, `PutDispEnv 0x80083BCC`, `ResetGraph 0x80083194`. `VSync` is
+`0x800892A8`, `SetDefDispEnv` `0x8008AD5C`, `SetDefDrawEnv` `0x80089D58`, `SetDrawEnv` `0x800841E8`,
+`AddPrim` `0x800B0EE0`, `SetTile` `0x8008A798`, `GetRCnt` `0x80086EA4`.
+
+### 12.2 The double-buffer block — `0x800B3730`, stride 32408
+
+Two blocks, indexed by the buffer number. Offsets, all CONFIRMED at the instruction that materialises them:
+
+| offset | size | what |
+| --- | --- | --- |
+| 436 | 92 | `DRAWENV` — the full-screen background env (`0x800769DC`) |
+| 528 | 4 × 92 | `DRAWENV[4]` — one per viewport (`0x80076BD8`, stride 92 from `s0 = 92p`) |
+| 896 | 92 | `DRAWENV` — the overlay camera's env (`0x8007738C`) |
+| 10940 | 20 | `DISPENV` (`0x800185B0`) |
+| 10984 | 868 | the ordering table, 217 entries (`0x8001839C`) |
+
+`DRAWENV` is PSY-Q's 92-byte layout, and the port relies on two of its fields by offset: `isbg` at +24 and
+`r0,g0,b0` at +25…27, written per frame from the viewport's own record (`0x80076C58`…`0x80076CAC`).
+
+VRAM is 1024 × 512; the two 512 × 248 buffers sit side by side at x = 0 and x = 512, and the texture pages
+begin at y = 256, so the framebuffers and the textures do not overlap.
+
+### 12.3 The ordering table is sliced, and that is how split screen works
+
+`ClearOTag(db + 10984, 217)` at `0x80018398` — **forward** order, so bucket 0 draws first and higher buckets
+land on top. The 217 is not a tuning number; it is exactly what the slices tile:
+
+```
+  [0]          root
+  [1]          the full-screen background draw env      (0x800769A0)
+  [2   .. 52]  viewport 0   \
+  [53  ..103]  viewport 1    |  51 each; base = 10992 + 204*p (0x80076B10)
+  [104 ..154]  viewport 2    |
+  [155 ..205]  viewport 3   /
+  [206 ..216]  the overlay                              (0x80077230, base 11808)
+               = 2 + 4*51 + 11 = 217
+```
+
+The 51 is confirmed independently of the arithmetic: the boot display path clears exactly 51 entries at
+`db + 10992` (`0x8006E18C`).
+
+Each slice's **second** bucket holds that viewport's draw-env packet — `AddPrim(slice + 4, &drawenv[p].dr_env)`
+at `0x80076D44`. Because the env is linked *after* the geometry that shares its bucket, and a bucket is a
+prepend list, the env executes first. That single packet is what installs the viewport's clip rectangle and
+drawing offset, which is why four viewports need one table and one `DrawOTag` rather than four passes.
+
+> **What the port does differently, and why.** The console does not sort per polygon inside a slice: the zone
+> draw links a whole scene node's quads into one bucket with a single `AddPrim` (`0x800AF9BC`), chosen from
+> the still-undecoded `SortData` chunk (open question #7). The port sorts per quad by average depth inside the
+> slice — finer than the original, not coarser. `src/game/world.c` marks the line that changes when #7 falls.
+
+### 12.4 The swap — `0x80018214`
+
+```
+rotate3: {a,b,c} -> {b,c,a}            /* 0x800B273C..E, seeded {0,1,2}          */
+previous     = 0x800B2738
+0x800B2738   = 1 - previous            /* the draw buffer                        */
+0x800B2739   = previous                /* the displayed buffer                   */
+0x800B2754   = 0x800B3730 + draw * 32408
+0x800B2748   = 0x800B3730 + previous * 32408
+```
+
+The three-slot ring is a separate piece of state that advances alongside the buffer index; it is reproduced
+because dropping it would silently change whatever consumes it.
+
+### 12.5 One frame — `0x800182C8`
+
+The in-game loop, in order:
+
+```
+swap (11.4)
+ClearOTag(db + 10984, 217)
+dt accounting, then a CLAMP: slti 31 @0x800184B8 with 30 in the delay slot
+game tick (0x80033030), which is what builds the table (0x800780C0)
+optional hook 0x800B2DF4
+GetRCnt(RCntCNT1)
+DrawSync(0)                            /* 0x8008339C(0) @0x80018510              */
+VSync(2)                               /* 0x800892A8(2) @0x80018970              */
+optional 0x80043664 ; optional performance meter 0x80076E88
+PutDispEnv(db + 10940)                 /* @0x800185AC                            */
+DrawOTag(db + 10984)                   /* @0x800185BC                            */
+optional hook 0x800B2D90
+repeat while 0x800B2E28 == 0
+```
+
+`0x800780C0` is the per-frame build. It either arms **one** full-screen background clear (`0x800769A0`, which
+builds a 512 × 248 draw env with `isbg = 1` and the colour at `gp+1604`, and links it at OT[1]) and then
+clears every viewport's own `isbg`, or leaves the per-viewport clears in place — so the screen is cleared
+once, and in a split the full-screen env is what paints the gutters. It then calls the per-viewport draw
+(`0x80076A74`) once per live viewport, and finally the overlay (`0x80076E68` → `0x80077230`).
+
+`0x80076E88` is a **performance meter**, not a game element: it builds `TILE` primitives from `GetRCnt`
+deltas accumulated around the world draw and links them at OT[52] — the frontmost bucket of viewport 0's
+slice. It is gated on `0x800B2A64`.
+
+### 12.6 The per-viewport draw — `0x80076A74`
+
+```
+shake        = view+780 as {s16 x, s16 y}   -> 0x800B2C34 / 0x800B2C36
+slice        = db + 10992 + 204*p           -> 0x800B2D60
+SetGeomOffset(view+266, view+268)           /* the viewport's own centre         */
+SetGeomScreen(view+262)                     /* its projection distance           */
+0x800B2CCC   = view+264 ; 0x800B2CC8 = that / 4
+SetDefDrawEnv(&drawenv[p],
+              buf_x[buffer] + view+270 + shake.x,
+              buf_y[buffer] + view+272 + shake.y,
+              view+274 - shake.x,
+              view+276 - shake.y)
+drawenv[p].isbg      = view+260
+drawenv[p].r0,g0,b0  = view+256..258
+SetDrawEnv(&drawenv[p].dr_env, &drawenv[p])
+draw the damage flash (0x80076764)
+if (view+144 & 1) draw the world (0x80066858)
+AddPrim(slice + 4, &drawenv[p].dr_env)
+```
+
+The **screen shake displaces the origin and shrinks the rectangle by the same amount**, so the far edge is
+pinned and the shake bites into the viewport's own near edges — it can never bleed over a neighbour.
+
+### 12.7 The viewport layouts
+
+Five setup functions, all writing the 784-byte per-player view records at `0x800D5C30` (five slots, cleared
+as one 3920-byte block). The session mode at `0x800B3356` picks one through the jump table at `0x800AC90C`
+(`0x8003F8D8`): modes 0 and 1 → ONE, mode 2 → the split chosen by **HORIZONTAL SPLIT** at `0x800B333C`,
+mode 3 → the quad layout with the count then forced to 3 (`0x8003FAE4`), mode 4 → the quad layout.
+
+| layout | fn | viewports | size | origins | proj | far | depth | aspect divisor |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| one | `0x80077D0C` | 1 | 512 × 248 | (0,0) | 160 | 6400 | 8192 | fb height |
+| two-horizontal | `0x80077900` | 2 | 512 × 123 | (0,1), (0,121) | 160 | 6400 | 6144 | fb width |
+| two-vertical | `0x80077AEC` | 2 | 255 × 248 | (0,0), (256,0) | 175 | 6400 | 6144 | fb width |
+| quad | `0x8007771C` | 4 (or 3) | 256 × 123 | (1,1), (257,1), (1,124), (257,124) | 160 | 4000 | 6144 | fb width |
+| full-single | `0x80077540` | 1 | 512 × 248 | (0,0) | 320 | 6400 | 8192 | fb height |
+
+Details that only survive a port if they are transcribed rather than derived:
+
+* The geometry offset is always the viewport's own centre, halved **toward zero** — the vertical split's
+  255-pixel width gives 127.
+* The horizontal split's height is `(fb_h + 1) / 2 - 1 = 123` and its second viewport starts at **121**, so
+  the two overlap by three lines.
+* The horizontal split's 2D extent (view+278/+280) is **320 × 160**, which is not its viewport size; every
+  other layout copies the viewport size there.
+* The quad layout insets by one pixel: the columns are at 1 and 257, the rows at 1 and 124.
+* `view+282 = (w << 9) / divisor`, and the divisor is the framebuffer **height** for the two full-screen
+  layouts and its **width** for the three split ones. That asymmetry is in the code.
+* **full-single is single buffered.** It is the only layout that leaves both buffer origins at (0,0) and
+  writes both display envs to (0,0). It is the boot / front-end state (reached from `0x8006DFB8`); a session
+  installing any other layout is what turns double buffering on.
+
+The overlay camera is a sixth view record at `0x800D6870`, set up by `0x80077EAC` (which every layout calls):
+full screen, projection 320, depth scale 8192, and `isbg` forced to 0 — the overlay never clears.
+
+### 12.8 Timing
+
+`VSync(2)` at 50 Hz gives 25 Hz logic and `dt == 12` in the game's 1/300 s units. A long frame is **clamped,
+not averaged**: `slti 31` at `0x800184B8` with 30 in the delay slot, so a stall is lost time rather than a
+lurch.
+
+### 12.9 Negative results worth keeping
+
+* **The screen-position settings have no reader.** `0x800B3368` / `0x800B336A` (the SCREEN POSITION page's x
+  and y, defaults 0 and 24) are written only by the reset routine at `0x8001FA18`, and the sweep finds no
+  load anywhere in the image — not gp-relative, not through a materialised base, and the addresses do not
+  appear as data words either. Nothing in the executable moves the display by them.
+* **The fade globals have no reader either.** `gp+16660 = 255` and `gp+16676 = -16` are set at the top of
+  every session (`0x8001834C`, `0x80018354`) and read nowhere. 255 with a step of −16 is exactly a fade level
+  and its per-frame decrement, so a fade plausibly exists in an overlay module — but nothing in this image
+  consumes it, and the port does not implement one on that evidence.
+* **The MISSION item is a menu action, not a screen.** The label at `0x800AE624` is record 1 of the
+  single-player pause table, at (256, 96), whose action `0x8002033C` applies the game variables, clears four
+  halfwords at `0x800B3290`, restores the music volume and calls `0x800213B0(1, 15)` — i.e. it leaves the
+  menu with exit code 15. What state 15 then does is the outer state machine's business (`0x80018680` sets
+  `0x800B2A88`), not the screen's.
+
+---
+
+## 13. Combat — **CONFIRMED**
+
+There is no damage table. That is why an earlier pass could not find one: every weapon has its **own fire
+function**, and damage, pellet count, spread, view kick and refire are immediate operands inside it. The
+functions are reached through a 12-entry pointer array and the whole system is `q2psx-inspect weapons`.
+
+### 13.1 The fire-function array — `0x8009D704`, consumed 1-based
+
+Twelve words indexed by the live weapon id. **Slot 0 is `0x8004EB08`, which is literally `jr ra; nop`** — a
+call that returns. That stub is the cleanest proof of the 1-based indexing §9.6 derives from the auto-switch
+list, because it makes sense only as "fire no weapon".
+
+| id | weapon | fire fn | damage | quad | pellets | spread (shift on `rand−16384`) | kick | refire |
+|---|---|---|---|---|---|---|---|---|
+| 1 | Blaster | `0x8004BFBC` | 8 | 32 | 1 bolt | — | −11 | 30 |
+| 2 | Shotgun | `0x8004C1C0` | 6 | 24 | 5 | 4, 4, 4 (±1024) | −22 | 30 |
+| 3 | Super Shotgun | `0x8004C488` | 8 | 32 | 10 | 3, 4, 4 (±2048/±1024) | −22 | 30 |
+| 4 | Machinegun | `0x8004C744` | 8 | 32 | 1 | 5, 5, 5 (±512) | random | 30 |
+| 5 | Chaingun | `0x8004CA9C` | 8 | 32 | spin state | 5, 5, 5 | random | 30 |
+| 6 | Hand Grenade | `0x8004EBDC` | 120 | 480 | — | — | — | 30 |
+| 7 | Grenade Launcher | `0x8004CE18` | 120 | 480 | — | — | −11 | 30 |
+| 8 | Rocket Launcher | `0x8004D038` | `100 + rand()%20` | ×4 | — | — | −11 | 30 |
+| 9 | Hyperblaster | `0x8004D250` | 20 | 80 | 1 bolt | — | 0 | animation |
+| 10 | Railgun | `0x8004D498` | 100 / **150 in DM** | ×4 | trace | — | −34 | 30 |
+| 11 | BFG | `0x8004EB10` | 200 | 800 | — | — | — | 30 |
+
+Two of these are compound and land exactly on PC Quake II's own: `100 + random()*20` for the rocket and
+100/150 for the railgun. Nothing in the decode was tuned to produce either.
+
+**Quad is a multiply at the fire site, not a flag.** Each function compares the level clock against a
+per-player expiry word and picks one of two immediates — always exactly four times — or, where damage is
+computed, shifts left by two. So a rocket someone else fired does not gain quad's multiplier on its splash.
+
+**Refire is one gate, not a rate.** Every weapon that sets it writes `level_time + 30`, a tenth of a second
+on the 300 Hz level clock. The hyperblaster sets none: its rate is its view model animation's.
+
+**Spread is per world axis**, applied to an aim vector the fire function has already multiplied by four —
+not in the shooter's right/up plane the way the PC game does it. The magnitudes still line up two to one
+between the shotgun and the super shotgun, as they do there.
+
+### 13.2 Muzzle offsets — `0x800AE9C4` onward
+
+Three halfwords each, stored `(right, down, forward)`; every fire function negates the middle one and hands
+the triple to the local-to-world rotation at `0x8006FC1C`. Blaster (80, 56, 250), shotgun (76, 80, 250),
+super shotgun (96, 72, 250), machinegun (72, 80, 250), chaingun (104, 128, 250), grenade launcher
+(80, 40, 200), rocket launcher (40, 80, 100), hyperblaster (90, 140, 250), railgun (40, 96, 256). At the
+established scale of 10 the blaster's is (8.0, 5.6, 25.0) PC units against id's own (8, 8, viewheight−8) —
+an independent check on both the scale and the table's identity.
+
+The grenade launcher additionally ignores the aim vector: `0x8004CF40` rotates a **fixed** local direction
+of up 2048, forward 6144. That ratio is exactly id's 200-up-out-of-600-forward.
+
+### 13.3 The damage function — `0x80057D54`, twenty-one call sites
+
+`damage(attacker, target, amount, mod, point)`. In order: record who hit what; knockback for the four mods
+that carry it; halve if a monster hit a player at skill 0; refuse while invulnerable; power armour; armour;
+subtract; arm the mod's effect timer.
+
+Two things it does **not** do, and both matter:
+
+* **It never kills.** There is no die or pain callback; health goes negative and the entity's own think
+  notices later.
+* **For a creature with an AI brain it does not even subtract health.** `0x800584B4` posts the amount to the
+  module through `0x800627F8` and jumps past the health store. The module owns the creature's health, which
+  is why the per-creature figures are behind open question #6.
+
+### 13.4 Armour — `0x80057BE4`, table at `0x8009C5EC`
+
+Three six-byte records, immediately after the ammo-capacity tiers: `{u8 base, u8 max, s16 normal, s16 energy}`.
+
+| class | base | max | normal | energy |
+|---|---|---|---|---|
+| jacket | 25 | 50 | 1229/4096 = 0.300 | 0 |
+| combat | 50 | 100 | 2458/4096 = 0.600 | 1229/4096 = 0.300 |
+| body | 100 | 200 | 3277/4096 = 0.800 | 2458/4096 = 0.600 |
+
+All six protection values and all six counts are PC Quake II's exactly. Absorption is
+`(bias + protection * damage) >> 12`, capped at what is held, where the bias is **4095 outside deathmatch and
+2048 inside it** (`0x80057C0C`) — 4095 rounds every non-zero fraction up, so single-point hits are still
+absorbed, while 2048 rounds to nearest. Deathmatch armour is very slightly weaker against small hits, which
+is not the sort of thing that would ever be guessed.
+
+**Power armour** (`0x80057A9C`) runs first when the powerup word has bits `0x18000` and cells remain: it
+absorbs `damage*2/3`, capped at twice the cells, and spends one cell per two points absorbed.
+
+**Mod 8 skips both stages** — the only damage class in the game that ignores armour outright.
+
+### 13.5 Means of death — 1…21
+
+Read from the `a3` immediate at each call site, and from the two tables they index: a 16-entry
+armour-column selector at `0x800ACE1C` (mod−1) and a 21-entry pad-rumble table at `0x800ACE5C`.
+
+| mod | what | evidence |
+|---|---|---|
+| 1 | energy bolt | `0x80049E34` blaster bolt, `0x8004BC48` BFG |
+| 3 | rail | `0x80049330` |
+| 7 | creature contact hit | `0x800612F0` |
+| 8 | the class armour skips | `0x8003D380` |
+| 9 | acid | `0x8002E4B0`, throttled to once per 400 ticks |
+| 10 | lava | `0x8002E524`, throttled to once per 100 |
+| 11 | laser | `0x8002E284`, `0x80049B38` |
+| 13 | grenade | `0x80049FBC`, `0x8004A904` |
+| 15 | rocket | `0x8004AE14` |
+| 18 | bullet | `0x80048974` |
+| 20 | crush | `0x80051E74` |
+
+The **energy** set — the mods whose armour uses the `+4` column — is {1, 2, 4, 5, 6, 11, 12, 14, 16}. Mods
+past 16 miss the table's `sltiu ..., 16` bound entirely and are ordinary, which is how a bullet at 18 ends
+up in the normal column.
+
+**Knockback applies to exactly four**: rail, grenade, rocket and bullet (`0x80057ED0`…`0x80057EE8`). The
+impulse is `scale * unit(target − point) * damage / 2400 >> 4` with nothing dividing the unit vector's 4096
+back out, so the s16 clamps around it are reachable — anything past about 123 points saturates. The scale is
+`125*(mass+64)/64` normally and `25*(mass+64)/4` when a player hurt themselves, a factor of 3.2: the rocket
+jump. Outside deathmatch the upward component is capped at −3072, so single player's rocket jump has a
+ceiling deathmatch's does not.
+
+### 13.6 Hitscan, rail and splash
+
+`0x8004874C` is the one bullet path. The trace runs from the muzzle to **`origin + dir`** — the direction
+vector carries the range and nothing is normalised — draws the tracer, damages a breakable surface if the
+world was hit (`0x8002EF1C`, guarded by bit 2 of a 64-byte surface record's `+0x36`), then re-traces against
+entities and damages the first with mod 18. The rail (`0x8004917C`) is the same shape with mod 3 and does
+not stop at the first target.
+
+Radius damage is `0x80050810`: sweep a box of the blast radius, reject anything further than
+`radius + its own radius`, apply `damage − dist*170/4096`. The falloff is a length constant and was retuned —
+PC Quake II loses half a point per unit, which at this scale would be 0.05 against the console's 0.0415.
+Radii read from the seven call sites: **grenade 1000 with mod 13, rocket 1300 with mod 15, BFG 1300 with
+mod 1**. A rocket's direct hit is applied first at full damage, so a direct hit is damage *plus* splash.
+
+### 13.7 Projectiles
+
+Five spawners, reached by 12-byte class **name** rather than by index: `"Grenade2"` `0x8004A088`,
+`"Grenade3"` `0x8004AA6C`, `"Rocket"` `0x8004AF28`, `"Spin"` `0x8004B678`, `"BFGBlast"` `0x8004BE04`. The
+blaster and hyperblaster share a sixth path, `0x8004D70C`, which names no class: it allocates a bare entity,
+gives it eight hull corners read from `0x8009DB1C` — a 20 × 20 × 100 box — and links it. The hyperblaster's
+bolt sets bit 2 of its flags word and gets those corners rotated into place; the blaster's does not. That
+flag is the only difference between the two projectiles.
+
+Projectiles live in an 88-byte-record array at `0x800C91C0` walked by a per-frame sweep at `0x80047C6C`,
+which settles two fields the bolt spawner writes:
+
+* **`+0x1A` is a lifetime, not a speed.** The sweep subtracts the frame's dt and retires the entity at zero,
+  so the bolt's 2560 is about eight and a half seconds.
+* **`+0x52` is the velocity**, in world units per dt unit; the sweep multiplies it by dt to get the move.
+
+So the direction argument the bolt spawner receives *is* its velocity, and the hyperblaster's bolt is
+exactly half the speed of the blaster's because its shift is one bit deeper (`aim >> 7` against `aim >> 6`).
+The grenade and rocket are different: their spawners take an explicit speed (900 and 20000) and the
+direction only points.
+
+### 13.8 Creature attacks
+
+Creatures reach the same damage function; what is theirs is which mod and which projectile. A contact hit is
+**mod 7** (`0x800612F0`), which is not in the knockback set, so claws move nothing. A thrown grenade is the
+same spawner the launcher uses, at speed **600** rather than 900 (`0x80061724`). A rocket is `0x8004AF28`
+from `0x80062164` with the aim scaled by 3/2. A BFG blast is a two-line wrapper at `0x800621BC`.
+
+Per-creature damage figures are **not** here: they are in the relocated modules, which is open question #6.
+
+### 13.9 Negative results worth keeping
+
+* **There is no weapon stats table anywhere.** The sweep for an eleven-entry table of plausible damage values
+  around the ammo arrays found nothing because none exists; the numbers are immediates in eleven separate
+  functions. An inference from the PC lineage stood in for them for two passes and has now been replaced.
+* **The 1-based arrays overlap their neighbours.** Each is exactly eleven elements with its base one element
+  earlier, so index 0 and index 12 read whatever table abuts them: `ammo_per_shot[0]` is the bolt hull's
+  `0x7FFF` terminator and `ammo_per_shot[12]` is the auto-switch list's leading 10. One of those overlaps is
+  load-bearing — `owned_bit[12]` is the ammo-type array's own base word, and it is zero, which is the only
+  reason the cycle scan's walk into the phantom twelfth slot is rejected.
+* **The cycle scan really does run 1…12.** `0x80050780` sends a non-positive index to 12 and 13-or-more to 1.
+  Tightening the bound to 11 would change which weapon "previous" from the blaster lands on.
 
 ---
 
@@ -2605,6 +3554,14 @@ Prerequisites: Python 3 (no third-party packages needed), the extracted disc tre
    `align4(2 * PrimaryColl.numNodes)`.
 6. **`AreaConx` regression.** Parse the offset table at `+0x02` and assert the first non-zero offset equals
    `2 + 2*numAreas` on 115/115. If a change ever makes this fail on ~100 files, the `+0x04` bug has returned.
+6a. **Collision — `q2psx-inspect coll`.** The invariants here are not statistics; each one is something the
+   console would index out of range on. Assert, over all 230 chunks: every link's node index, plane index and
+   back-plane index in range; no node with more than 32 planes and no hull with more than 2048 nodes (the
+   5/11-bit packing's own limits, and both must hold *exactly* at the boundary); no node axis extent over
+   65535 and no plane point with bit 15 set, which is what makes the 16-bit relative frame lossless; and that
+   a live trace between node centres never ends outside every node. Then run `walk <map> 0` over the disc:
+   47 of 47 spawns land in a cell and 47 of 47 players ground without leaving the hull. A regression in the
+   link decode fails the first group; a regression in the walk fails the second.
 7. **Sector-level media.** Read the raw Track 1 `.bin` at the ISO-derived LBAs. Assert mode == 2, subheader
    duplication, and that the BCD MSF at `0x0C` decodes to `LBA + 150`. Recompute the ECMA-130 EDC (reflected
    polynomial `0xD8018001`) over raw bytes `0x10…0x817` and compare against the word at `0x818` — expect

@@ -5,8 +5,8 @@
 
 #include "trig.h"
 
-/* Defined below, but needed by init and spawn. */
-static s32 find_node(const q2_sim *sim, const s32 point[3], s32 hint);
+/* Defined below, but attach_gameplay needs it. */
+static void build_volumes(q2_sim *sim);
 
 void q2_sim_init(q2_sim *sim, const q2_world_zone *zone, int tick_rate_hz)
 {
@@ -16,12 +16,31 @@ void q2_sim_init(q2_sim *sim, const q2_world_zone *zone, int tick_rate_hz)
     memset(sim, 0, sizeof(*sim));
     sim->zone         = zone;
     sim->current_node = -1;
+    sim->player.ent.node = -1;
 
-    /* The primary hull is the one the player moves in. SecondaryCol is NOT
-     * reliably a finer version of it (it has fewer nodes on 9 of 115 zones), so
-     * it is deliberately not used as a fallback. */
-    if (zone && q2_collision_parse(&sim->coll, &zone->zone, Q2_COLL_PRIMARY) == Q2_OK)
+    /*
+     * SecondaryCol is the hull entities move in — read out of the zone loader,
+     * which points the mover's context (0x800C8FE8) at it, and not guessed from
+     * node counts. That also settles the old puzzle about SecondaryCol having
+     * FEWER nodes than PrimaryColl on 9 of 115 zones: it is not a refinement of
+     * the primary hull, it is a hull for a different job.
+     */
+    if (zone && q2_collision_parse(&sim->coll, &zone->zone, Q2_COLL_SECONDARY) == Q2_OK)
         sim->coll_ready = true;
+
+    if (zone && q2_collision_parse(&sim->coll_primary, &zone->zone,
+                                   Q2_COLL_PRIMARY) == Q2_OK)
+        sim->coll_primary_ready = true;
+
+    /*
+     * A zone that ships no SecondaryCol still has to be walkable, so fall back
+     * to the primary hull rather than to no collision at all. Every zone on the
+     * PAL disc carries both, so this never fires there.
+     */
+    if (!sim->coll_ready && sim->coll_primary_ready) {
+        sim->coll       = sim->coll_primary;
+        sim->coll_ready = true;
+    }
 
     /* dt advances by 300/field_rate per field. PAL fields run at 50 Hz giving
      * 6, NTSC at 60 giving 5. The engine's own PAL value is 6 (0x80018DB8). */
@@ -29,7 +48,10 @@ void q2_sim_init(q2_sim *sim, const q2_world_zone *zone, int tick_rate_hz)
     if (sim->dt_per_field <= 0)
         sim->dt_per_field = Q2_DT_PER_FIELD;
 
+    sim->gravity            = Q2_GRAVITY;
     sim->player.view_height = Q2_VIEW_STAND;
+
+    q2_sim_combat_init(sim);
 }
 
 void q2_sim_free(q2_sim *sim)
@@ -38,6 +60,7 @@ void q2_sim_free(q2_sim *sim)
         return;
     q2_event_rt_free(&sim->event_rt);
     free(sim->trigger_inside);
+    free(sim->volumes);
     memset(sim, 0, sizeof(*sim));
 }
 
@@ -62,6 +85,10 @@ q2_result q2_sim_attach_gameplay(q2_sim *sim, const q2_common_file *common)
         if (q2_event_rt_init(&sim->event_rt, &sim->events) == Q2_OK)
             sim->events_ready = true;
     }
+
+    /* The same volumes serve three jobs: firing scripts, answering the contents
+     * query, and being swept against. Build the sweep list once here. */
+    build_volumes(sim);
 
     return Q2_OK;
 }
@@ -118,6 +145,84 @@ static void update_triggers(q2_sim *sim)
     }
 }
 
+/* ------------------------------------------------------------------------- */
+/* Volumes                                                                    */
+/* ------------------------------------------------------------------------- */
+/*
+ * 0x8006FE3C — move `v` toward `target` by at most `rate`.
+ *
+ * The engine uses it for the two liquid velocity rules and for the view-height
+ * ease. It is a clamped approach, not a lerp: overshoot is impossible.
+ */
+static s32 ease_toward(s32 v, s32 target, s32 rate)
+{
+    if (rate < 0)
+        rate = -rate;
+
+    if (v < target)
+        return (target - v <= rate) ? target : v + rate;
+    if (v > target)
+        return (v - target <= rate) ? target : v - rate;
+    return v;
+}
+
+/*
+ * Turn the map's trigger volumes into the target list the sweep and the
+ * contents query walk. This is the port's stand-in for 0x800C9114, and the
+ * records are the same 36-byte TrigBounds triggers the original reads there —
+ * `q2_move_target.mask` is the trigger's own `flags` halfword.
+ */
+static void build_volumes(q2_sim *sim)
+{
+    u32 i;
+
+    free(sim->volumes);
+    sim->volumes      = NULL;
+    sim->volume_count = 0;
+
+    memset(&sim->move_world, 0, sizeof(sim->move_world));
+    sim->move_world.half_extent = Q2_SWEEP_HALF_EXTENT;
+
+    if (!sim->triggers_ready || sim->triggers.count == 0)
+        return;
+
+    sim->volumes = (q2_move_target *)calloc(sim->triggers.count,
+                                            sizeof(*sim->volumes));
+    if (!sim->volumes)
+        return;
+
+    for (i = 0; i < sim->triggers.count; i++) {
+        q2_trigger t;
+        int k;
+
+        if (!q2_trigger_get(&sim->triggers, i, &t))
+            continue;
+
+        for (k = 0; k < 3; k++) {
+            sim->volumes[i].min[k] = t.min[k];
+            sim->volumes[i].max[k] = t.max[k];
+        }
+        sim->volumes[i].mask   = t.flags;
+        sim->volumes[i].kind   = Q2_MOVE_KIND_VOLUME;
+        sim->volumes[i].id     = (s32)i;
+        sim->volumes[i].dy     = 0;
+        sim->volumes[i].active = true;
+    }
+
+    sim->volume_count           = sim->triggers.count;
+    sim->move_world.targets     = sim->volumes;
+    sim->move_world.count       = sim->volume_count;
+
+    /*
+     * 0x8005553C: the mask an entity sweeps volumes with is 0x810 when its own
+     * flag bit 0 is set and 0 otherwise. Which entities set that bit was not
+     * traced, so the port leaves it at 0 — meaning volumes are queried for
+     * contents but do not block movement. Set `sim->move_world.mask` to 0x810
+     * to turn them solid once that is known.
+     */
+    sim->move_world.mask = 0;
+}
+
 void q2_sim_spawn(q2_sim *sim, const s32 pos[3], s32 yaw)
 {
     if (!sim || !pos)
@@ -136,10 +241,27 @@ void q2_sim_spawn(q2_sim *sim, const s32 pos[3], s32 yaw)
     sim->player.view_height = Q2_VIEW_STAND;
     sim->player.ground_y    = pos[1];
 
-    /* Locate the cell we spawned into. A spawn point that lands outside every
-     * hull leaves current_node at -1, and the trace then lets the player move
-     * freely rather than wedging them at the origin. */
-    sim->current_node = find_node(sim, sim->player.pos, -1);
+    /*
+     * The mover works in the ENTITY ORIGIN's frame, which sits Q2_EYE_BASE
+     * above the feet — see the note on q2_sim_origin_y in sim.h. `pos` is a
+     * StartPos, i.e. the feet, so it is lifted here and lowered again after
+     * every move.
+     */
+    memset(&sim->player.ent, 0, sizeof(sim->player.ent));
+    sim->player.ent.pos[0] = pos[0];
+    sim->player.ent.pos[1] = q2_sim_origin_y(pos[1]);
+    sim->player.ent.pos[2] = pos[2];
+
+    /*
+     * Locate the cell we spawned into. A spawn that lands outside every hull
+     * leaves the cached cell at -1, which is what the original stores in a
+     * fresh entity: the first move then pays for one brute-force sweep and
+     * self-corrects (0x80044C74).
+     */
+    sim->player.ent.node = sim->coll_ready
+        ? q2_coll_find_node(&sim->coll, sim->player.ent.pos, -1, true)
+        : -1;
+    sim->current_node = sim->player.ent.node;
 
     /* Clear the entered-set so a spawn inside a volume fires it, rather than
      * being treated as "already inside". */
@@ -147,43 +269,86 @@ void q2_sim_spawn(q2_sim *sim, const s32 pos[3], s32 yaw)
         memset(sim->trigger_inside, 0, sim->trigger_capacity);
 }
 
+/*
+ * 0x800458A0 — query the volumes the entity is standing in and turn the answer
+ * into its own flags.
+ *
+ * Transcribed from 0x800458B4…0x80045970. Three of the mask's bits are
+ * understood; the query passes the whole 0x3360 because the original does, and
+ * the bits nothing consumes yet are simply not acted on.
+ */
+static void update_contents(q2_sim *sim)
+{
+    q2_player *p = &sim->player;
+    u16 contents;
+
+    if (!sim->volume_count) {
+        p->ent.flags &= ~(Q2_ENT_LIQUID_SINK | Q2_ENT_LIQUID_FLOAT | 0x800u);
+        return;
+    }
+
+    contents = q2_move_contents(&sim->move_world, p->ent.pos, Q2_CONTENTS_MASK);
+
+    /*
+     * 0x800458B4: inside a 0x1000 volume, flag 0x800 is set when the entity's
+     * last contact normal is nearly horizontal — `-1023 <= ny < 1024` on
+     * ent+0x14, which is the |ny|-maximising normal, not the velocity. So the
+     * flag means "in this volume AND touching a wall rather than a floor",
+     * which is a ladder-shaped condition.
+     */
+    if (contents & 0x1000u) {
+        s32 ny = p->ent.last_normal[1];
+
+        if (ny < 1024 && ny >= -1023)
+            p->ent.flags |= 0x800u;
+        else
+            p->ent.flags &= ~0x800u;
+    } else {
+        p->ent.flags &= ~0x800u;
+    }
+
+    /* 0x800458F8: 0x0200 — sinks slowly. */
+    if (contents & 0x0200u)
+        p->ent.flags |= Q2_ENT_LIQUID_SINK;
+    else
+        p->ent.flags &= ~Q2_ENT_LIQUID_SINK;
+
+    /* 0x80045920: 0x2000 — buoyant, and boosted when already on the ground. */
+    if (contents & 0x2000u) {
+        if (p->ent.flags & Q2_ENT_GROUNDED_MASK)
+            p->vel[1] += Q2_LIQUID_BOOST;
+        p->ent.flags |= Q2_ENT_LIQUID_FLOAT;
+    } else {
+        p->ent.flags &= ~Q2_ENT_LIQUID_FLOAT;
+    }
+}
+
 /* ------------------------------------------------------------------------- */
 /* Collision seam                                                             */
 /* ------------------------------------------------------------------------- */
-/* Which convex cell contains `point`, or -1. Searches from `hint` outward,
- * because the player is nearly always still in the cell they were in. */
-static s32 find_node(const q2_sim *sim, const s32 point[3], s32 hint)
-{
-    u32 i;
-
-    if (!sim->coll_ready)
-        return -1;
-
-    if (hint >= 0 && (u32)hint < sim->coll.node_count &&
-        q2_collision_point_in_node(&sim->coll, (u32)hint, point))
-        return hint;
-
-    for (i = 0; i < sim->coll.node_count; i++) {
-        if (q2_collision_point_in_node(&sim->coll, i, point))
-            return (s32)i;
-    }
-    return -1;
-}
-
-void q2_sim_trace(const q2_sim *sim, const s32 start[3], const s32 end[3],
+/*
+ * A swept segment through the hull, for callers that want one — weapon fire,
+ * line of sight, the walk diagnostic. Entity movement does NOT go through here;
+ * it goes through q2_move_step, which is what the original does.
+ *
+ * The fraction is reconstructed from the clipped end point along the longest
+ * axis. The engine never forms one: it carries an exact rational and scales an
+ * int16 delta by it, so any fraction here is the port's convenience and can be
+ * one unit out on a long move. Do not feed it back into the geometry.
+ */
+void q2_sim_trace(q2_sim *sim, const s32 start[3], const s32 end[3],
                   q2_trace *out)
 {
-    q2_coll_node here, next;
-    s32 node;
-    s32 best_frac = Q2_ONE_12;
-    s32 best_plane = -1;
-    u32 k;
+    s32 pos[3];
+    s32 node = -1;
+    bool complete;
 
     if (!out)
         return;
 
     memset(out, 0, sizeof(*out));
     out->fraction = Q2_ONE_12;
+    out->node     = -1;
 
     if (!sim || !start || !end)
         return;
@@ -192,70 +357,61 @@ void q2_sim_trace(const q2_sim *sim, const s32 start[3], const s32 end[3],
     out->end[1] = end[1];
     out->end[2] = end[2];
 
-    node = sim->current_node;
-    if (node < 0 || !sim->coll_ready)
-        return;             /* no cell known — move freely rather than wedge */
+    if (!sim->coll_ready)
+        return;             /* no hull — move freely rather than wedge */
 
-    if (!q2_collision_get_node(&sim->coll, (u32)node, &here) ||
-        !q2_collision_get_node(&sim->coll, (u32)node + 1, &next))
-        return;
+    complete = q2_coll_move(&sim->coll, start, end, sim->current_node,
+                            pos, &node);
 
-    /*
-     * The cell is empty space bounded by outward-facing planes, so the move is
-     * clipped where it would cross one from inside to outside. Distances come
-     * back scaled by 4096 (the normals are 1.3.12), and the ratio is taken in
-     * that same scale so no divide is needed until the very end.
-     */
-    for (k = here.first_plane; k < next.first_plane; k++) {
-        s32 d0 = q2_coll_plane_distance(&sim->coll, (u32)node, k, start);
-        s32 d1 = q2_coll_plane_distance(&sim->coll, (u32)node, k, end);
-        s32 frac;
+    out->end[0] = pos[0];
+    out->end[1] = pos[1];
+    out->end[2] = pos[2];
+    out->node   = node;
 
-        if (d0 >= 0)
-            continue;       /* already outside this plane — see the note below */
-        if (d1 <= 0)
-            continue;       /* stays inside, nothing to clip */
-
-        /* Crosses from inside to outside: the fraction where it hits zero. */
-        {
-            s64 denom = (s64)d0 - (s64)d1;
-            if (denom == 0)
-                continue;
-            frac = (s32)(((s64)d0 * Q2_ONE_12) / denom);
-        }
-
-        if (frac < 0)
-            frac = 0;
-        if (frac < best_frac) {
-            best_frac  = frac;
-            best_plane = (s32)k;
-        }
+    if (node >= 0) {
+        q2_coll_node n;
+        if (q2_collision_get_node(&sim->coll, (u32)node, &n))
+            out->contents = n.contents;
     }
 
-    /*
-     * Starting outside a plane is not treated as a collision. With 0.15% of
-     * planes geometrically inconsistent, and the player able to stand exactly
-     * on a boundary, refusing to move whenever d0 >= 0 would wedge them
-     * permanently. Ignoring those planes lets the move proceed and the next
-     * tick re-resolve, which degrades gracefully instead of locking up.
-     */
-
-    if (best_plane < 0)
+    if (complete)
         return;
 
-    out->fraction = best_frac;
-    out->hit      = true;
+    out->hit = true;
 
-    out->end[0] = start[0] + (s32)(((s64)(end[0] - start[0]) * best_frac) >> Q2_FRAC_12);
-    out->end[1] = start[1] + (s32)(((s64)(end[1] - start[1]) * best_frac) >> Q2_FRAC_12);
-    out->end[2] = start[2] + (s32)(((s64)(end[2] - start[2]) * best_frac) >> Q2_FRAC_12);
-
-    {
+    if (sim->coll.hit_plane_index >= 0) {
         q2_coll_plane pl;
-        if (q2_collision_get_plane(&sim->coll, (u32)best_plane, &pl)) {
+
+        if (q2_collision_get_plane(&sim->coll,
+                                   (u32)sim->coll.hit_plane_index, &pl)) {
             out->normal[0] = pl.nx;
             out->normal[1] = pl.ny;
             out->normal[2] = pl.nz;
+        }
+    }
+
+    /* Longest-axis ratio: the axis with the largest intended travel is the one
+     * whose quotient carries the least rounding error. */
+    {
+        int axis = 0, i;
+        s32 span = 0;
+
+        for (i = 0; i < 3; i++) {
+            s32 d = end[i] - start[i];
+            if (d < 0) d = -d;
+            if (d > span) { span = d; axis = i; }
+        }
+
+        if (span > 0) {
+            s64 got = (s64)(pos[axis] - start[axis]);
+            s64 all = (s64)(end[axis] - start[axis]);
+            s32 f   = (s32)((got * Q2_ONE_12) / all);
+
+            if (f < 0)          f = 0;
+            if (f > Q2_ONE_12)  f = Q2_ONE_12;
+            out->fraction = f;
+        } else {
+            out->fraction = Q2_ONE_12;
         }
     }
 }
@@ -297,12 +453,8 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
         p->vel[2] += (wish_z * dt) / Q2_DT_NOMINAL;
     }
 
-    /* --- gravity --------------------------------------------------------- */
-    if (!p->on_ground) {
-        p->vel[1] += Q2_GRAVITY * dt;
-        if (p->vel[1] > Q2_TERMINAL_VY)
-            p->vel[1] = Q2_TERMINAL_VY;
-    } else if (input->jump) {
+    /* --- jump ------------------------------------------------------------ */
+    if (p->on_ground && input->jump) {
         /* Jump clears the ground flag immediately so the same tick integrates
          * upward rather than being re-grounded. */
         p->vel[1]     = -Q2_TERMINAL_VY / 4;
@@ -315,80 +467,95 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
         p->vel[2] -= p->vel[2] / 4;
     }
 
-    /* --- integrate and collide ------------------------------------------- */
+    /* --- integrate ------------------------------------------------------- */
+    /*
+     * 0x80045FA4..0x80046090, the airborne integrator, verbatim:
+     *
+     *     dv   = gravity * dt
+     *     dY   = (vel.y*dt + (dv*dt)/2) / 320
+     *     dX   = vel.x*dt / 320          dZ = vel.z*dt / 320
+     *     vel.y += dv
+     *
+     * The half-step on gravity is not decoration — dropping it changes every
+     * jump arc — and both divisions truncate toward zero, which is what the
+     * 0x66666667 magic sequence with its sign correction computes.
+     */
     {
-        s32 want[3];
-        q2_trace tr;
-        int attempt;
+        s16 delta[3];
+        s32 dv   = (sim->gravity ? sim->gravity : Q2_GRAVITY) * dt;
+        s32 half = (dv * dt) / 2;
 
-        want[0] = p->pos[0] + (s32)(((s64)p->vel[0] * dt) / Q2_VEL_DIV);
-        want[1] = p->pos[1] + (s32)(((s64)p->vel[1] * dt) / Q2_VEL_DIV);
-        want[2] = p->pos[2] + (s32)(((s64)p->vel[2] * dt) / Q2_VEL_DIV);
+        /* The mover's frame: the entity origin, Q2_EYE_BASE above the feet. */
+        p->ent.pos[0] = p->pos[0];
+        p->ent.pos[1] = q2_sim_origin_y(p->pos[1]);
+        p->ent.pos[2] = p->pos[2];
 
-        p->on_ground = false;
+        /* --- contents ---------------------------------------------------- */
+        /*
+         * 0x800458A0 runs the volume query BEFORE the integration, with mask
+         * 0x3360, and turns the answer into the entity's own liquid flags. Those
+         * flags then choose which of the three vertical rules below applies and
+         * halve the step height, so this has to come first.
+         */
+        update_contents(sim);
+
+        delta[0] = (s16)(((s64)p->vel[0] * dt) / Q2_VEL_DIV);
+        delta[1] = (s16)((((s64)p->vel[1] * dt) + half) / Q2_VEL_DIV);
+        delta[2] = (s16)(((s64)p->vel[2] * dt) / Q2_VEL_DIV);
+
+        p->vel[1] += dv;
 
         /*
-         * Clip, slide along whatever was hit, and try again. Three attempts is
-         * enough to resolve a corner (two walls plus the floor) and bounds the
-         * work when the player is jammed into a crevice.
+         * Three mutually exclusive rules, in the original's own order
+         * (0x8004601C onward). The 8192 clamp DOES apply on the player path —
+         * 0x80046084 tests the newly stored velocity with `slti 8193` and
+         * rewrites it — but only in the arm where neither liquid flag is set.
+         * An earlier note in FORMATS.md said the clamp lived only in the mover
+         * at 0x800463E8; that was reading the wrong one of the two.
          */
-        for (attempt = 0; attempt < 3; attempt++) {
-            q2_sim_trace(sim, p->pos, want, &tr);
-
-            p->pos[0] = tr.end[0];
-            p->pos[1] = tr.end[1];
-            p->pos[2] = tr.end[2];
-
-            if (!tr.hit)
-                break;
-
-            /*
-             * Ground detection.
-             *
-             * Cell planes face OUTWARD, so the interior is on their negative
-             * side. Gravity increases Y, so the surface a falling player lands
-             * on bounds the cell in the +Y direction — and its outward normal
-             * therefore points +Y, not -Y.
-             *
-             * This was inverted at first, which made collision look completely
-             * broken (the player was correctly stopped by the floor every tick
-             * but never registered as grounded, so gravity kept accumulating).
-             * Verified against BASE1 node 161, an axis-aligned box whose six
-             * planes are exactly +/-4096 on each axis.
-             */
-            if (tr.normal[1] > Q2_ONE_12 / 2) {
-                p->on_ground = true;
-                p->vel[1]    = 0;
-            }
-
-            /* Slide: remove the velocity component running into the plane, and
-             * do the same to the remaining move so the next attempt continues
-             * along the surface instead of re-hitting it. */
-            {
-                s64 vd = ((s64)p->vel[0] * tr.normal[0]
-                        + (s64)p->vel[1] * tr.normal[1]
-                        + (s64)p->vel[2] * tr.normal[2]) >> Q2_FRAC_12;
-                s64 md = ((s64)(want[0] - p->pos[0]) * tr.normal[0]
-                        + (s64)(want[1] - p->pos[1]) * tr.normal[1]
-                        + (s64)(want[2] - p->pos[2]) * tr.normal[2]) >> Q2_FRAC_12;
-                int j;
-
-                for (j = 0; j < 3; j++) {
-                    p->vel[j] -= (s32)((vd * tr.normal[j]) >> Q2_FRAC_12);
-                    want[j]   -= (s32)((md * tr.normal[j]) >> Q2_FRAC_12);
-                }
-            }
+        if (p->ent.flags & Q2_ENT_LIQUID_FLOAT) {
+            p->vel[1] = ease_toward(p->vel[1], Q2_LIQUID_FLOAT_VY, dt * 64);
+        } else if (p->ent.flags & Q2_ENT_LIQUID_SINK) {
+            if (p->vel[1] < Q2_LIQUID_SINK_VY)
+                p->vel[1] = ease_toward(p->vel[1], Q2_LIQUID_SINK_VY, dt * 64);
+            else
+                p->vel[1] -= dt * 24;
+        } else if (p->vel[1] > Q2_TERMINAL_VY) {
+            p->vel[1] = Q2_TERMINAL_VY;
         }
 
-        /* Moving between cells is normal; re-locate rather than assuming. */
-        sim->current_node = find_node(sim, p->pos, sim->current_node);
+        /* --- collide ----------------------------------------------------- */
+        if (sim->coll_ready) {
+            /*
+             * Lift, slide, drop — 0x8004583C. Ground is decided by the drop
+             * alone, which is why walking into a wall does not read as landing
+             * on it, and why a step up to Q2_STEP_HEIGHT costs nothing.
+             */
+            q2_move_step(&sim->coll, &p->ent, delta,
+                         sim->volume_count ? &sim->move_world : NULL);
 
-        /* Without collision data, fall back to the seeded ground plane so the
-         * player does not drop forever in a zone whose hull failed to parse. */
-        if (!sim->coll_ready && p->pos[1] >= p->ground_y) {
-            p->pos[1]    = p->ground_y;
-            p->vel[1]    = 0;
-            p->on_ground = true;
+            p->pos[0] = p->ent.pos[0];
+            p->pos[1] = q2_sim_feet_y(p->ent.pos[1]);
+            p->pos[2] = p->ent.pos[2];
+
+            p->on_ground      = (p->ent.flags & Q2_ENT_GROUNDED_MASK) != 0;
+            sim->current_node = p->ent.node;
+
+            if (p->on_ground)
+                p->vel[1] = 0;
+        } else {
+            /* Without a hull, fall back to the seeded ground plane so the
+             * player does not drop forever in a zone that failed to parse. */
+            p->pos[0] += delta[0];
+            p->pos[1] += delta[1];
+            p->pos[2] += delta[2];
+
+            p->on_ground = false;
+            if (p->pos[1] >= p->ground_y) {
+                p->pos[1]    = p->ground_y;
+                p->vel[1]    = 0;
+                p->on_ground = true;
+            }
         }
     }
 
@@ -410,6 +577,18 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
 
     /* After movement, so a trigger sees where the player actually ended up. */
     update_triggers(sim);
+
+    /*
+     * The level clock the weapons gate on is this same dt counter: 300 units to
+     * the second, which is what makes the universal 30-tick refire a tenth of a
+     * second and what the mover scripting's own time unit is (userfuncs.h).
+     */
+    sim->level_time += dt;
+
+    if (input->attack)
+        q2_sim_fire(sim);
+
+    q2_sim_combat_tick(sim);
 
     sim->tick_count++;
 }

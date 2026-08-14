@@ -161,7 +161,15 @@ u32 q2_world_build_ot(const q2_world_zone *z,
     if (stats)
         memset(stats, 0, sizeof(*stats));
 
-    psx_ot_clear(ot);
+    /*
+     * An installed window means a caller owns the frame — the screen module has
+     * already cleared the table and is filling one viewport's slice, so
+     * clearing here would throw away the viewport drawn before this one. A
+     * caller with no window keeps the old "hand me a table, I will manage it"
+     * contract the offline tools use.
+     */
+    if (ot->window_len == 0)
+        psx_ot_clear(ot);
 
     gte_init(gte);
     gte_set_projection(gte, cam->projection, screen_w / 2, screen_h / 2);
@@ -309,8 +317,28 @@ u32 q2_world_build_ot(const q2_world_zone *z,
                  * whole depth-sorting mechanism: per primitive, not per pixel. */
                 otz = ((u32)depth[0] + depth[1] + depth[2] + depth[3]) / 4;
                 otz >>= 2;
-                if (otz >= ot->bucket_count)
-                    otz = ot->bucket_count - 1;
+                {
+                    /*
+                     * Fit the depth into whatever slice of the table this
+                     * viewport owns — 51 buckets when the screen module has
+                     * installed a window, the whole table otherwise.
+                     *
+                     * The console does NOT sort per polygon here: the zone draw
+                     * links a whole scene node's quads into one bucket chosen
+                     * from the `SortData` chunk, which is still undecoded
+                     * (openquestions #7) — the emitter at 0x800AF9BC does a
+                     * single AddPrim against one entry pointer per batch. So
+                     * the port's sort is finer than the original's, not
+                     * coarser, and the visible difference is that the
+                     * original's sort artefacts are per node and these are per
+                     * quad. When #7 falls this is the line that changes.
+                     */
+                    u32 span = psx_ot_bucket_span(ot);
+                    if (span == 0)
+                        span = 1;
+                    if (otz >= span)
+                        otz = span - 1;
+                }
 
                 prim = psx_ot_add(ot, (u16)otz);
                 if (!prim) {
