@@ -501,10 +501,15 @@ static void test_flklight(void)
     s32 at[3] = { 10, 20, 30 };
     u8  rgb[3] = { 200, 40, 40 };
 
-    check_eq_i(q2_flklight_on_time(0),      400, "on at rand 0");
-    check_eq_i(q2_flklight_on_time(32767),  899, "on at rand 32767");
-    check_eq_i(q2_flklight_off_time(0),    1000, "off at rand 0");
-    check_eq_i(q2_flklight_off_time(32767),1499, "off at rand 32767");
+    /* These two are RADII, not durations. 0x80028858 stores the first into a2's
+     * low half and 0x8002888C the second into its high half, and 0x800288C8
+     * hands that a2 straight to the light. An earlier version of this test
+     * asserted them as on/off times and passed, because the arithmetic is the
+     * same either way — only the destination distinguishes them. */
+    check_eq_i(q2_flklight_inner_radius(0),      400, "inner at rand 0");
+    check_eq_i(q2_flklight_inner_radius(32767),  899, "inner at rand 32767");
+    check_eq_i(q2_flklight_outer_radius(0),     1000, "outer at rand 0");
+    check_eq_i(q2_flklight_outer_radius(32767), 1499, "outer at rand 32767");
 
     memset(&set, 0, sizeof(set));
     q2_rng_seed(&rng, 1);
@@ -520,6 +525,9 @@ static void test_flklight(void)
     /* Nothing turns over before its time. */
     check_eq_i(q2_flklights_tick(&set, &rng, set.f[0].next_toggle - 1), 1,
                "still lit just before the turn-over");
+
+    check(set.f[0].inner >= 400 && set.f[0].inner <= 899,  "inner in range");
+    check(set.f[0].outer >= 1000 && set.f[0].outer <= 1499, "outer in range");
 
     /* At its time it flips, and the next turn-over moves forward. */
     {

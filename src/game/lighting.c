@@ -242,13 +242,15 @@ void q2_light_gather(q2_light_set *set, const q2_light_world *w,
 /* ------------------------------------------------------------------------- */
 /* FLKLIGHT                                                                   */
 /* ------------------------------------------------------------------------- */
-s32 q2_flklight_on_time(s32 rand_0_32767)
+s32 q2_flklight_inner_radius(s32 rand_0_32767)
 {
+    /* 0x8002882C: r*500 >> 15, + 400 -> a2's low half. */
     return ((rand_0_32767 * 500) >> 15) + 400;
 }
 
-s32 q2_flklight_off_time(s32 rand_0_32767)
+s32 q2_flklight_outer_radius(s32 rand_0_32767)
 {
+    /* 0x8002885C: the same chain, + 1000 -> a2's high half. */
     return ((rand_0_32767 * 500) >> 15) + 1000;
 }
 
@@ -279,7 +281,9 @@ bool q2_flklight_add(q2_flklights *set, const s32 pos[3], const u8 rgb[3],
 
     /* Starts LIT, and the first turn-over is a full on-time away. */
     f->lit         = true;
-    f->next_toggle = now + q2_flklight_on_time(rng ? q2_rng_next(rng) : 0);
+    f->inner       = q2_flklight_inner_radius(rng ? q2_rng_next(rng) : 0);
+    f->outer       = q2_flklight_outer_radius(rng ? q2_rng_next(rng) : 0);
+    f->next_toggle = now + Q2_FLK_PHASE_PLACEHOLDER;
     return true;
 }
 
@@ -299,11 +303,13 @@ u32 q2_flklights_tick(q2_flklights *set, q2_rng *rng, s32 now)
         /* `while`, not `if`: a long frame can cross more than one turn-over,
          * and skipping them would let the phase drift against the clock. */
         while (now >= f->next_toggle) {
-            s32 r = rng ? q2_rng_next(rng) : 0;
-
             f->lit = !f->lit;
-            f->next_toggle += f->lit ? q2_flklight_on_time(r)
-                                     : q2_flklight_off_time(r);
+            /* Radii are redrawn per flash; the DURATION is a placeholder. */
+            if (f->lit) {
+                f->inner = q2_flklight_inner_radius(rng ? q2_rng_next(rng) : 0);
+                f->outer = q2_flklight_outer_radius(rng ? q2_rng_next(rng) : 0);
+            }
+            f->next_toggle += Q2_FLK_PHASE_PLACEHOLDER;
         }
 
         if (f->lit)

@@ -4043,7 +4043,8 @@ nothing saying so.
       inline:
 
           8009B930  8002E640  "FLKLIGHT"
-          8009B940  800287A0  "SHOOTTHEN"     <- 0x800288C8 is in this handler
+          8009B940  800287A0  "SHOOTTHEN"     <- WRONG: 0x800288C8 is FLKLIGHT's, see below.
+                                                 The table reading was off by one record.
 
       That is the **UserFuncs command table**, and `src/formats/userfuncs.h` already lists those two
       primitives adjacently in the same order — `Q2_UF_FLKLIGHT` then `Q2_UF_SHOOTTHEN` — so the table is
@@ -4282,8 +4283,11 @@ nothing saying so.
                                        colour rather than its radius.
           0x80028E6C  in 0x80028BDC  = the script command area, beside SHOOTTHEN
 
-          0x800288C8  in 0x800287A0  = SHOOTTHEN itself — and it is the one site whose parameters are
-                                       **entirely runtime**. Every argument comes off the stack:
+          0x800288C8  in 0x800287A0  = **FLKLIGHT, not SHOOTTHEN.** The colour bytes come from the item at
+                                       +18/+19/+20 (`0x80028808`), which is FLKLIGHT's documented operand
+                                       layout and not SHOOTTHEN's 8-byte one — so the earlier reading of
+                                       the command table at 0x8009B930 was off by a record. Its parameters
+                                       are still assembled on the stack:
 
                                            80028890  lbu  v0, 26(sp)      ; colour bytes at sp+24..27
                                            800288BC  lhu  v0, 16(sp)      ; a2 low  = inner

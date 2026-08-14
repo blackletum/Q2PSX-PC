@@ -176,17 +176,26 @@ bool q2_light_add_dynamic(q2_light_world *w, const s32 pos[3],
 /* FLKLIGHT — a script-placed light that blinks                               */
 /* ------------------------------------------------------------------------- */
 /*
- * `FLKLIGHT` is one of the two script light primitives (userfuncs.h). Unlike
- * `TIMEDLIGHT`, which is a transient the script raises and forgets, a flicker
- * has PHASE: it is on for a while, then off for a while, and both durations are
- * redrawn each time it turns over —
+ * `FLKLIGHT` is one of the two script light primitives (userfuncs.h).
  *
- *     on  = ((rand() * 500) >> 15) + 400
- *     off = ((rand() * 500) >> 15) + 1000
+ * **The two randomised formulas are RADII, not durations.** `userfuncs.h`
+ * records them as "on/off times ... ((rand()*500)>>15)+400 and +1000", and an
+ * earlier version of this file implemented them that way. Reading the handler
+ * at `0x800287A0` shows where each value goes:
  *
- * per the operand table, in the port's 1/300 s units. `q2_rng_next` is the
- * PlayStation BIOS generator bit for bit (weapon.c), so seeding this from the
- * same stream reproduces the console's blink rather than inventing a rhythm.
+ *     8002884C  sra   v0, v0, 15
+ *     80028850  addiu v0, v0, 400     ; ((r1*500)>>15) + 400
+ *     80028858  sh    v0, 16(sp)      ; ...into a2's LOW half  = INNER radius
+ *     80028888  addiu v0, v0, 1000    ; ((r2*500)>>15) + 1000
+ *     8002888C  sh    v0, 18(sp)      ; ...into a2's HIGH half = OUTER radius
+ *
+ * and `0x800288C8` passes that `a2` straight to `0x80075C34`. So a flicker is
+ * 400..899 inner and 1000..1499 outer, redrawn per flash. Its colour comes from
+ * the item at +18/+19/+20, which is what the operand table already said.
+ *
+ * **What is NOT read is how long it stays on or off.** The phase machinery below
+ * is kept because a flicker plainly has one, but its durations are a stated
+ * placeholder rather than a transcription — see `Q2_FLK_PHASE_PLACEHOLDER`.
  *
  * The disc carries exactly ONE FLKLIGHT call, so this is deliberately small: a
  * fixed set, no allocation, and a tick that costs nothing when empty.
@@ -199,6 +208,7 @@ typedef struct q2_flklight {
     u8   rgb[3];
     s16  light_id;
     bool lit;
+    s32  inner, outer;  /* redrawn per flash, from the two rand draws */
     s32  next_toggle;   /* level time at which it turns over */
 } q2_flklight;
 
@@ -218,9 +228,17 @@ bool q2_flklight_add(q2_flklights *set, const s32 pos[3], const u8 rgb[3],
  */
 u32 q2_flklights_tick(q2_flklights *set, q2_rng *rng, s32 now);
 
-/* The on and off durations, exactly as the operand table records them. */
-s32 q2_flklight_on_time(s32 rand_0_32767);
-s32 q2_flklight_off_time(s32 rand_0_32767);
+/* The flicker's radii, as 0x8002882C and 0x8002885C compute them. */
+s32 q2_flklight_inner_radius(s32 rand_0_32767);
+s32 q2_flklight_outer_radius(s32 rand_0_32767);
+
+/*
+ * How long a flicker stays on or off. NOT READ from the disc — the formulas that
+ * looked like durations turned out to be radii. This is a placeholder so the
+ * light blinks at all; it is not the console's rhythm and must not be quoted as
+ * one.
+ */
+#define Q2_FLK_PHASE_PLACEHOLDER 300
 
 /* 0x80075B94 — empty the runtime lists at the top of a frame. */
 void q2_light_world_begin_frame(q2_light_world *w);

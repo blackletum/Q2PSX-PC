@@ -211,8 +211,11 @@ static const q2_uf_prim_info uf_table[Q2_UF_PRIM_COUNT] = {
     {16, 1, Q2_UF_OP_S16,      "light_id", "matched by 0x800689C0"},
     {18, 1, Q2_UF_OP_U8,       "colour_r", NULL},
     {19, 1, Q2_UF_OP_U8,       "colour_g",
-     "colour_b follows at +20; on/off times are randomised as "
-     "((rand()*500)>>15)+400 and +1000"}}},
+     "colour_b follows at +20. The ((rand()*500)>>15)+400 and +1000 formulas "
+     "this note once called on/off TIMES are the light's RADII: 0x80028858 "
+     "stores the first into a2's low half, 0x8002888C the second into its "
+     "high half, and 0x800288C8 hands that a2 to 0x80075C34. The flicker's "
+     "actual durations are unread"}}},
 
 {Q2_UF_SETWIBBLE, "SETWIBBLE", 8, true, false, 2, {
     {4, 1, Q2_UF_OP_S16, "scene_node",

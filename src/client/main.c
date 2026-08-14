@@ -2972,8 +2972,7 @@ static void client_entity_events(client *c)
             const q2_flklight *fl = &c->flklights.f[f];
             if (fl->in_use && fl->lit && c->lights_ready &&
                 q2_light_add_dynamic(&c->light_world, fl->pos, fl->rgb,
-                                     Q2_PROJ_LIGHT_INNER, Q2_PROJ_LIGHT_OUTER,
-                                     0, 0))
+                                     fl->inner, fl->outer, 0, 0))
                 c->ent_light_added++;
         }
     }
