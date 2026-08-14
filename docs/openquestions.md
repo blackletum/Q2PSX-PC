@@ -4197,7 +4197,14 @@ nothing saying so.
                                        because no item on the disc carries a glow bit.
           0x8005A760  in 0x8005A600  = ENTITY code (entity.c cites 0x8005A9DC nearby) — and also one of the
                                        23 writers of `entity+0x100` found back in #51b.
-          0x800586D0  in 0x80058638  = COMBAT code (combat.c cites 0x80058244)
+          0x800586D0  in 0x80058638  = a DAMAGE EFFECT. `combat.h` documents `q2_mod_effect_timer` as
+                                       spanning 0x800585A4..0x80058604 — "the damage-effect timer a mod
+                                       arms" — and 0x80058638 is the next function after it. Its light is
+                                       rgb(0, 255, 0) at 800 / 1300, read from 0x800AEAAC and 0x800AEAB0,
+                                       with style 0. Green, and close to but not the same as the BFG
+                                       blast's 1000 / 1400, so the two are separate effects rather than one
+                                       shared preset. Its two callers, 0x8005B3C4 and 0x8005B46C, sit
+                                       beside the shrink-and-vanish helper item.c cites at 0x8005B368.
           0x8002A868  in 0x8002A660  = the SCRIPT effect area (userfuncs.h cites 0x8002A384, GLASS's own
                                        effect spawn)
           0x80031048  in 0x80030E74  = EFFECT code (effect.c cites 0x80030430)
