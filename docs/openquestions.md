@@ -1880,10 +1880,25 @@ not damage. It then calls engine slots `+0xC8` and `+0xD8` with vectors.
       tests its health at `+0x108`, builds the two eye points from `+0x00..0x08` and
       `+0x4C`, and traces between them with contents mask `0x0200001B` before the
       range and random decision.
-      *What is left is transcribing it* — about 150 instructions to `0x8005DAD8` and
-      beyond. The guard in `q2_ai_checkattack` stays until then: returning false is
-      the behaviour the port is tested against, and a hand-written stand-in would put
-      invented aggression on every creature in the game.
+      *What is left is transcribing it,* and it is **269 instructions**, not the 150
+      first estimated. Its shape, read but not yet implemented:
+
+        - the first gate is the ENEMY's health, reached through `entity+0xBC` then
+          that object's `+0x24` then `+0x108`, and `blez` leaves immediately;
+        - it builds two eye points, self and enemy, each as the position triple at
+          `+0x00..0x08` with the view height at `+0x4C` added to the middle one;
+        - it calls `0x8005BD3C` — a trace — **twice, with different masks**:
+          `0x0200001B` for the first and a bare `0x02000000` for the second, the
+          second starting from `self+0x5C` rather than the eye, which is the
+          blind-fire target `blind_target` at `+0x5C` (§9.12);
+        - between them are five or six further gates on the enemy's flags, on
+          `self+0x138` bit 17, on `self+0x1C` against 201, and on `self+0x110` and
+          `self+0x124` against the global at `0x800E46DC`.
+
+      The guard in `q2_ai_checkattack` stays until all of that is transcribed rather
+      than some of it. A checkattack that returns true too readily is worse than one
+      that never does: it would put invented aggression on every creature in the game
+      and look like a working feature while doing it.
 
       The earlier statement that follows was written before this and is kept because
       the reasoning it records is still what eliminated the call route:
