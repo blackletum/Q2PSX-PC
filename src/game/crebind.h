@@ -148,6 +148,11 @@ typedef struct q2_cre_action_stats {
     u32 fire_no_hook;
     u32 fire_no_enemy;
     u32 fire_dead_enemy;
+
+    /* Which callback slots the generic implementation could and could not find
+     * a move for — 0 stand, 3 walk, 4 run, 6 attack, 7 melee. */
+    u32 move_via_set[8];
+    u32 move_via_missing[8];
 } q2_cre_action_stats;
 
 extern q2_cre_action_stats q2_cre_actions;

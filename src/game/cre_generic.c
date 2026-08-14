@@ -36,6 +36,7 @@
  */
 #include "ai.h"
 #include "crebind.h"
+#include "crebind.h"
 #include "monster.h"
 
 static bool set_via(q2_monster *m, u32 slot)
@@ -47,9 +48,14 @@ static bool set_via(q2_monster *m, u32 slot)
         return false;
 
     cm = q2_creature_move_via(b->cre, slot);
-    if (!cm)
+    if (!cm) {
+        if (slot < 8)
+            q2_cre_actions.move_via_missing[slot]++;
         return false;
+    }
 
+    if (slot < 8)
+        q2_cre_actions.move_via_set[slot]++;
     return q2_cre_set_move(m, cm->first_frame);
 }
 

@@ -102,21 +102,42 @@ void q2_creature_spawn(q2_cre_bind *b, q2_monster *m, u32 class_index)
     if (c->speed_scale > 0)
         m->speed_scale = (u8)c->speed_scale;
 
-    m->stand       = (void (*)(q2_monster *))b->impl->callback[0];
-    m->idle        = (void (*)(q2_monster *))b->impl->callback[1];
-    m->search      = (void (*)(q2_monster *))b->impl->callback[2];
-    m->walk        = (void (*)(q2_monster *))b->impl->callback[3];
-    m->run         = (void (*)(q2_monster *))b->impl->callback[4];
-    m->attack      = (void (*)(q2_monster *))b->impl->callback[6];
-    m->melee       = (void (*)(q2_monster *))b->impl->callback[7];
-    m->bigturn     = (void (*)(q2_monster *))b->impl->callback[10];
+    /*
+     * A callback the MODULE does not have must stay NULL, even when the
+     * implementation offers one.
+     *
+     * The generic implementation supplies a handler for every slot, because it
+     * does not know which creature it is being used for. Installing all of them
+     * unconditionally tells the AI things about the creature that are not true,
+     * and one of them matters: `M_CheckAttack` picks melee over a missile only
+     * when `m->melee` is set (0x8005DB04, and the transcription in ai.c). The
+     * Tank Commander's module has no melee callback at all — the census lists
+     * stand, idle, walk, run, attack, sight, pain and die — so it was being sent
+     * to a melee it does not have, 43 times in a 400-frame capture, where the
+     * generic handler found no move to play and it stood there. It never
+     * reached a missile attack, which is why it never fired.
+     *
+     * `c->callback[i]` is the module's own address for that slot, zero when it
+     * has none, so the module decides and the implementation only supplies.
+     */
+#define INSTALL(field, slot)     m->field = c->callback[slot]                    ? (void (*)(q2_monster *))b->impl->callback[slot] : NULL
+
+    INSTALL(stand,   0);
+    INSTALL(idle,    1);
+    INSTALL(search,  2);
+    INSTALL(walk,    3);
+    INSTALL(run,     4);
+    INSTALL(attack,  6);
+    INSTALL(melee,   7);
+    INSTALL(bigturn, 10);
+#undef INSTALL
 
     /* dodge, sight and checkattack take extra arguments, so they are wired
      * through their own signatures rather than the flat table. */
-    if (b->impl->callback[8])
+    if (b->impl->callback[8] && c->callback[8])
         m->sight = (void (*)(q2_monster *, q2_monster *))
                    (void *)b->impl->callback[8];
-    if (b->impl->callback[9])
+    if (b->impl->callback[9] && c->callback[9])
         m->checkattack = (bool (*)(q2_monster *))(void *)b->impl->callback[9];
 
     m->in_use      = true;

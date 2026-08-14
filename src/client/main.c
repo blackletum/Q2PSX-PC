@@ -2918,6 +2918,21 @@ static void client_write_shot(client *c, bool numbered)
                 c->sim[0].combat.projectiles.live, c->cre_bodies, c->rot_steps,
                 c->rot_moved, client_rot_turned(c),
                 c->sim[0].event_rt.call_count);
+        Q2_INFO("  attacks   %u checkattack (%u blind, %u decided, %u yes), "
+                "%u attack calls, %u missing",
+                q2_ai_stats.checkattack_calls, q2_ai_stats.checkattack_blind,
+                q2_ai_stats.checkattack_decided, q2_ai_stats.checkattack_yes,
+                q2_ai_stats.attack_called, q2_ai_stats.attack_missing);
+
+        Q2_INFO("  moves     attack set %u / missing %u, melee %u / %u, "
+                "run %u / %u",
+                q2_cre_actions.move_via_set[6],
+                q2_cre_actions.move_via_missing[6],
+                q2_cre_actions.move_via_set[7],
+                q2_cre_actions.move_via_missing[7],
+                q2_cre_actions.move_via_set[4],
+                q2_cre_actions.move_via_missing[4]);
+
         Q2_INFO("  decoded   %u thinks (%u unbound), %u calls (%u unclassified), "
                 "%u fire calls: %u sent, %u no enemy, %u dead enemy",
                 q2_cre_actions.thinks_run, q2_cre_actions.thinks_unbound,

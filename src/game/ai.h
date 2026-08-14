@@ -176,6 +176,22 @@ extern const q2_ai_verb_fn q2_ai_verbs[8];
  * the tick — the enemy died, an attack fired, the creature went back to
  * standing — and the calling verb must do nothing else.
  */
+/*
+ * Why a creature did or did not attack. "It never fires" has several causes and
+ * only one of them is the firing code: it may never be asked, asked and refused,
+ * or granted and then have no attack callback to run.
+ */
+typedef struct q2_ai_decision_stats {
+    u32 checkattack_calls;    /* ai_checkattack reached                       */
+    u32 checkattack_blind;    /* ...and the enemy was not visible             */
+    u32 checkattack_decided;  /* ...and the decision function ran             */
+    u32 checkattack_yes;      /* ...and said yes                              */
+    u32 attack_called;        /* the attack callback ran                      */
+    u32 attack_missing;       /* the state said attack and there was none     */
+} q2_ai_decision_stats;
+
+extern q2_ai_decision_stats q2_ai_stats;
+
 bool q2_ai_checkattack(q2_monster *m, s32 dist);
 
 /* Sidestep at ninety degrees, alternating hands on a block. Reachable through

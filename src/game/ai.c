@@ -702,8 +702,12 @@ void q2_ai_run_missile(q2_monster *m)
     q2_M_ChangeYaw(m);
 
     if (q2_facing_ideal(m)) {
-        if (m->attack)
+        if (m->attack) {
+            q2_ai_stats.attack_called++;
             m->attack(m);
+        } else {
+            q2_ai_stats.attack_missing++;
+        }
         m->attack_state = Q2_AS_STRAIGHT;
     }
 }
@@ -766,8 +770,12 @@ static void note_sighting(q2_monster *self)
     }
 }
 
+q2_ai_decision_stats q2_ai_stats;
+
 bool q2_ai_checkattack(q2_monster *m, s32 dist)
 {
+    q2_ai_stats.checkattack_calls++;
+
     s32 temp[3];
     bool hes_dead_jim;
 
@@ -876,13 +884,19 @@ bool q2_ai_checkattack(q2_monster *m, s32 dist)
     }
 
     /* Never attack something that cannot be seen. */
-    if (!q2_enemy_vis)
+    if (!q2_enemy_vis) {
+        q2_ai_stats.checkattack_blind++;
         return false;
+    }
 
-    if (!m->checkattack)
-        return q2_M_CheckAttack(m);
+    q2_ai_stats.checkattack_decided++;
+    {
+        bool yes = m->checkattack ? m->checkattack(m) : q2_M_CheckAttack(m);
 
-    return m->checkattack(m);
+        if (yes)
+            q2_ai_stats.checkattack_yes++;
+        return yes;
+    }
 }
 
 /* ------------------------------------------------------------------------- */

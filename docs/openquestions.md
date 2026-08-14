@@ -2504,6 +2504,41 @@ stack — a per-player proximity call. Named that far and no further.
 So the fire routing committed an hour ago is still not observed in play: what a Tank Commander reaches in a
 400-frame capture is its sounds and this proximity call, not its attack thinks.
 
+## A creature was being sent to a melee it does not have
+
+Chasing "why does a decoded creature never fire", with counters rather than reading. `q2_ai_decision_stats`
+records how far an attack got — checkattack reached, enemy invisible, decision run, decision yes, attack
+callback run, attack callback missing — and `q2_cre_action_stats` gained a per-slot tally of which moves the
+generic implementation could find. One capture on COMMAND said it:
+
+    attacks  190 checkattack (77 blind, 60 decided, 53 yes), 10 attack calls
+    moves    attack set 0 / missing 0, melee 0 / missing 43
+
+Fifty-three attacks granted, and the generic attack handler never ran once — while the melee handler ran 43
+times and found no move to play. The Tank Commander was going to melee, standing there, and going again.
+
+**Its module has no melee callback.** The census lists stand, idle, walk, run, attack, sight, pain and die.
+But `q2_creature_spawn` installed the IMPLEMENTATION's callbacks unconditionally, and the generic
+implementation supplies a handler for every slot because it does not know which creature it is being used
+for — so `m->melee` was non-NULL for a creature that has no melee. `M_CheckAttack` then does exactly what the
+original does: `m->attack_state = m->melee ? Q2_AS_MELEE : Q2_AS_MISSILE`. The transcription was right; it was
+being lied to about the creature.
+
+A callback the module does not have now stays NULL: `c->callback[slot]` is the module's own address for that
+slot and is zero when it has none, so the module decides and the implementation only supplies. After it, on
+the same map: `attack set 1 / missing 0, melee 0 / 0` — no phantom melee, and the attack move installs.
+
+The Soldier is unaffected, as it should be: its module has every callback, and BASE0 reports the same 19
+shots before and after.
+
+- [ ] 54. **A decoded creature has still not been seen firing.** Two real obstacles are gone — the think
+      table was being wiped, and the phantom melee was absorbing every attack — and the fire routing is
+      covered by unit tests, but no capture has yet produced a `fire_sent`. What the counters now say is where
+      to look: on COMMAND the Tank Commander's attack move installs and the thinks that run carry import
+      `+0x12C`, not the fire slots, so the question has narrowed to which of its animation frames carry think
+      8, 10 and 13 and whether the attack move reaches them. On WASTE3 the Gunner never gets as far as one
+      checkattack in 700 frames, and its module has no run move via slot 4 either — a separate thread.
+
 ---
 
 ## ⚠ Security note (carried forward, do not drop)
