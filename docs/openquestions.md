@@ -1548,6 +1548,15 @@ item records at run time instead of transcribing a table, so there is nothing to
       pages below these two levels (the deathmatch setup, VERSUS, CREDITS), which the same `modxrefs` walk
       will reach one string at a time.
 
+      *Also still open: the SCENE the title is drawn over,* and the reason is worth stating so nobody
+      invents it. QFRONT's world is two nodes and eight vertices — there is no room in it for a title
+      screen. The picture is its `ModelNames`: `Q2LOGO`, `q2title`, `q2logowire`, `joypadwire`,
+      `Quaddamage` and the four coloured player models. Every one of them is authored **centred on its own
+      origin** — `Q2LOGO`'s posed bounds are `[-725 -916 -80] .. [727 1081 81]` — and QFRONT's single
+      `StartPos` puts the eye at the world origin, so drawing them where they sit would put the camera
+      inside the logo. Their placement is the module's, and until it is read there is no honest position to
+      draw them at. The port therefore shows the menu over an empty scene rather than a guessed one.
+
 - [x] 45. **Word wrap in practice — SOLVED, and it was the wrong screen.** The wrap the capture shows is the
       **briefing's**, not the MISSION screen's: `#06A196` at `0x800AE740` sets margins 106 and 406, which is
       the only place in the game that turns the flag on, and `#000000` at `0x800AE758` clears it again. The
