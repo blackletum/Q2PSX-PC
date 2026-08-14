@@ -4187,6 +4187,27 @@ nothing saying so.
       for before it is worth disassembling.** Four rounds of this session have now ended in a claim that was
       already answered somewhere in the repo or already wrong.
 
+      **Applied immediately, and it places every remaining site with no new disassembly at all.** Grepping
+      the tree for each unidentified function's address and its neighbours:
+
+          0x800597C0  in 0x80059330  = THE ITEM THINK. `itemtable.h` names it outright, and `item.h`
+                                       already documents this very light: a quarter of the pulse per lit
+                                       channel (0x80059704), radius pulse + 100 (0x80059798), offsets
+                                       -50 / -500. Implemented at `item.c:846` and correctly dormant,
+                                       because no item on the disc carries a glow bit.
+          0x8005A760  in 0x8005A600  = ENTITY code (entity.c cites 0x8005A9DC nearby) — and also one of the
+                                       23 writers of `entity+0x100` found back in #51b.
+          0x800586D0  in 0x80058638  = COMBAT code (combat.c cites 0x80058244)
+          0x8002A868  in 0x8002A660  = the SCRIPT effect area (userfuncs.h cites 0x8002A384, GLASS's own
+                                       effect spawn)
+          0x80031048  in 0x80030E74  = EFFECT code (effect.c cites 0x80030430)
+          0x80028E6C  in 0x80028BDC  = the script command area, beside SHOOTTHEN
+
+      So the fifteen are no longer a list of addresses: **one is wired and dormant by design, one is the
+      creature flash, two are the player's, one each for projectile, rocket, BFG and the effect renderer, and
+      the rest sit in four named subsystems.** That map cost one `grep` per address, after several rounds of
+      disassembly had produced less.
+
       How many exist, counted rather than grepped: **18 TIMEDLIGHT calls and 1 FLKLIGHT across COMMON's
       scripts, disc-wide.** A passive capture triggers none of them — they are script records fired by
       trigger volumes, exactly like the rotation calls — so the handler shows 0 in a fly-through and that is
