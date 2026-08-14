@@ -803,6 +803,64 @@ u32 q2_creature_unclaimed_names(const q2_creature *c, const u8 *image,
 }
 
 /*
+ * Install moves the module NAMES but no callback path reached.
+ *
+ * The decoder finds moves by following callbacks and endfuncs, so a move only
+ * a branch-taken path installs is invisible to it — the Arachner names
+ * "Pain 2" (78-93) and "Stand" (65-77) and this port had neither, while those
+ * two spans are exactly the two clips in its model that nothing else claimed.
+ *
+ * The name record gives the frame RANGE but not the move record's address, so
+ * the range is what we search for: a move record is
+ * {u32 first; u32 last; u32 frames; u32 endfunc}, and scanning word-aligned for
+ * a first/last pair matching a named range finds it. `add_move` then validates
+ * it exactly as it validates one reached by a callback — the frames must be in
+ * the image and every ai byte must select a real verb — so a coincidental pair
+ * of words is rejected on the same terms as any other candidate.
+ *
+ * These come in with via == -2, distinct from -1 ("reached only through another
+ * move's endfunc"), so nothing mistakes them for callback-installed behaviour.
+ */
+static void add_named_but_unreached(q2_creature *c, dec *d, const u8 *image,
+                                    size_t size)
+{
+    size_t off;
+
+    for (off = 0; off + CRE_MOVE_NAME_STRIDE <= size; off += 4) {
+        s32 first, last;
+        u32 i, scan;
+        bool claimed = false;
+
+        if (!name_slot_ok(image + off, size - off))
+            continue;
+
+        first = (s32)q2_rd_u16(image + off + 16);
+        last  = (s32)q2_rd_u16(image + off + 18);
+        if (first > last || last > 1024)
+            continue;
+
+        for (i = 0; i < c->move_count; i++)
+            if (c->move[i].first_frame == first &&
+                c->move[i].last_frame  == last) {
+                claimed = true;
+                break;
+            }
+        if (claimed)
+            continue;
+
+        /* Find the move record carrying this range and let add_move judge it. */
+        for (scan = 0; (size_t)scan + 16 <= size; scan += 4) {
+            if ((s32)q2_rd_u32(image + scan) != first)
+                continue;
+            if ((s32)q2_rd_u32(image + scan + 4) != last)
+                continue;
+            if (add_move(c, d, d->base + scan, -2))
+                break;
+        }
+    }
+}
+
+/*
  * Split a decoded move wherever the module's OWN name table says there is a
  * boundary inside it.
  *
@@ -966,6 +1024,7 @@ bool q2_creature_decode(q2_creature *out, const u8 *image, size_t size,
             break;
     }
 
+    add_named_but_unreached(out, &d, image, size);
     split_merged_moves(out, image, size);
 
     return true;

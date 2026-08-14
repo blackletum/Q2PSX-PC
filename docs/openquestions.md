@@ -3987,7 +3987,24 @@ nothing saying so.
           65-77   "Stand"        13 frames ->  39   clip -- and it was unused
 
       **Both land on clips nothing else had claimed.** That is independent confirmation of the rule from a
-      direction that could easily have failed, and it identifies two real moves this port does not install.
+      direction that could easily have failed, and it identified two real moves this port did not install.
+
+      **Now installed — `add_named_but_unreached()` in `creature.c`.** The name record gives a range but not
+      the move record's address, so the range is what to search for: a move record is
+      `{u32 first; u32 last; u32 frames; u32 endfunc}`, and scanning word-aligned for a matching first/last
+      pair finds it. `add_move()` then validates the candidate on exactly the terms it validates a
+      callback-reached one — frames inside the image, every ai byte selecting a real verb — so a coincidental
+      pair of words is rejected the same way any other bad candidate is. They enter with `via == -2`, distinct
+      from `-1` ("reached only through another move's endfunc"), so nothing mistakes them for
+      callback-installed behaviour.
+
+          moves decoded    108 -> 115        named            100 -> 107
+          unclaimed         28 ->  21        3:1 rule     105/108 -> 112/115
+
+      The Arachner has a pain animation and a stand animation it did not have, and JAIL4 now resolves 9
+      creature sounds where it resolved 6. **One regression worth stating**: think indices went from 51 of 51
+      decoding to 54 of 55 — the new moves reach a think the decoder cannot follow, behind a branch. Finding
+      more behaviour found a gap in the decoder with it, and that is a better position than not knowing.
 
       What is then left is exact: **two clips unclaimed, both 30 frames — ten AI frames each — and two moves
       unmatched, both nine AI frames.** Two leftovers on each side, differing by exactly one frame.
