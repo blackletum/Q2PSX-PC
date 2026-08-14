@@ -314,6 +314,11 @@ typedef struct client {
 
     u32               mp_deaths;      /* kills fed to the session              */
     bool              mp_scoreboard;  /* QMRESULT is up                        */
+
+    /* Where each player's viewport looks from. Player 0's is the sim's. */
+    s32               mp_view_pos[Q2_MP_MAX_PLAYERS][3];
+    s16               mp_view_yaw[Q2_MP_MAX_PLAYERS];
+    bool              mp_view_valid[Q2_MP_MAX_PLAYERS];
     u32               cre_bodies;     /* deaths that found a death move        */
     u32               cre_drawn;      /* creatures with faces in the last view */
     u32               cre_faces;
@@ -987,18 +992,53 @@ static bool client_load_zone(client *c, const char *map, int index)
 
                         c->mp_spawn_count = n;
                         if (n) {
-                            int pick = q2_mp_select_spawn(ms, NULL, 0,
-                                                          client_mp_rng, c);
+                            q2_mp_player_view pv[Q2_MP_MAX_PLAYERS];
+                            int players = c->mp.player_count;
+                            int pi;
 
-                            if (pick >= 0) {
-                                c->cam.pos[0] = ms[pick].pos[0];
-                                c->cam.pos[1] = ms[pick].pos[1];
-                                c->cam.pos[2] = ms[pick].pos[2];
-                                c->cam.yaw    = ms[pick].angle;
-                                placed = true;
-                                Q2_INFO("deathmatch: %u MultiSpawn points, "
-                                        "player 0 at %d", n, pick);
+                            memset(pv, 0, sizeof(pv));
+                            if (players < 1)
+                                players = 1;
+
+                            /*
+                             * Every player, not just the local one, and each
+                             * placed AGAINST the ones already placed — which is
+                             * what the selector is for: it takes the spawn
+                             * farthest from everybody standing somewhere, so
+                             * four players spread out instead of piling onto
+                             * whichever point happens to be first.
+                             */
+                            for (pi = 0; pi < players; pi++) {
+                                int pick = q2_mp_select_spawn(ms, pv,
+                                                              (u32)pi,
+                                                              client_mp_rng, c);
+
+                                if (pick < 0)
+                                    break;
+
+                                c->mp_view_pos[pi][0] = ms[pick].pos[0];
+                                c->mp_view_pos[pi][1] = ms[pick].pos[1];
+                                c->mp_view_pos[pi][2] = ms[pick].pos[2];
+                                c->mp_view_yaw[pi]    = ms[pick].angle;
+                                c->mp_view_valid[pi]  = true;
+
+                                pv[pi].alive  = true;
+                                pv[pi].pos[0] = ms[pick].pos[0];
+                                pv[pi].pos[1] = ms[pick].pos[1];
+                                pv[pi].pos[2] = ms[pick].pos[2];
+
+                                if (pi == 0) {
+                                    c->cam.pos[0] = ms[pick].pos[0];
+                                    c->cam.pos[1] = ms[pick].pos[1];
+                                    c->cam.pos[2] = ms[pick].pos[2];
+                                    c->cam.yaw    = ms[pick].angle;
+                                    placed = true;
+                                }
+                                Q2_INFO("deathmatch: player %d at MultiSpawn %d",
+                                        pi, pick);
                             }
+                            Q2_INFO("deathmatch: %u MultiSpawn points on %s",
+                                    n, map);
                         } else {
                             Q2_WARN("deathmatch: %s zone %d has no MultiSpawn "
                                     "points — this is not an arena", map, index);
@@ -2883,6 +2923,27 @@ static void client_draw_view(void *user, q2_screen *s, int p,
     c->cam.ofs_y      = s->view[p].ofs_y;
     c->cam.far_z      = s->view[p].far_z;
 
+    /*
+     * In a split, each viewport is a different PLAYER, and until now every one
+     * of them showed the same camera — the screen work was right and there was
+     * only ever one thing to look at.
+     *
+     * Viewport 0 is the simulated player and keeps the camera the frame built.
+     * The others stand at their own MultiSpawn, chosen by the same selector, so
+     * a two- or four-way split shows the arena from the places the match would
+     * actually start people. What they do NOT do is move: there is one q2_sim,
+     * so players 1..3 are viewpoints and not participants, and nothing here
+     * pretends otherwise.
+     */
+    if (c->mp_enabled && p > 0 && p < Q2_MP_MAX_PLAYERS &&
+        c->mp_view_valid[p]) {
+        c->cam.pos[0] = c->mp_view_pos[p][0];
+        c->cam.pos[1] = c->mp_view_pos[p][1];
+        c->cam.pos[2] = c->mp_view_pos[p][2];
+        c->cam.yaw    = c->mp_view_yaw[p];
+        c->cam.pitch  = 0;
+    }
+
     /* The viewport's far distance is also the subdivision threshold: the same
      * view+264 the original parks at 0x800B2CCC serves both. */
     c->render.subdiv_threshold = s->view[p].far_z;
@@ -3797,6 +3858,33 @@ no_window:
         if (mp_minutes != -2)
             c.mp.time_limit = mp_minutes;
         c.mp_rng_state = 0x13572468u;
+
+        /*
+         * The split the session implies. The layout is chosen by the PLAYER
+         * COUNT at 0x800B3356 through the jump table at 0x800AC90C: one or none
+         * is full screen, two is a split whose axis is the HORIZONTAL SPLIT
+         * setting, three is the quad layout with the view count forced to three
+         * (0x8003FAE4), and four is the quad. Until now the client installed
+         * ONE and left every other layout to an F5 debug cycle.
+         */
+        {
+            q2_screen_layout lay = Q2_SCREEN_LAYOUT_ONE;
+            int views = c.mp.player_count;
+
+            if (views < 1)
+                views = 1;
+
+            if (views == 2)
+                lay = c.settings.v[Q2_SET_HORIZONTAL_SPLIT]
+                          ? Q2_SCREEN_LAYOUT_TWO_H : Q2_SCREEN_LAYOUT_TWO_V;
+            else if (views >= 3)
+                lay = Q2_SCREEN_LAYOUT_QUAD;
+
+            q2_screen_set_layout(&c.screen, lay, views);
+            Q2_INFO("multiplayer: %s, %d viewport%s",
+                    q2_screen_layout_name(lay), c.screen.view_count,
+                    c.screen.view_count == 1 ? "" : "s");
+        }
 
         Q2_INFO("multiplayer: %s, %d players, frag limit %d, time limit %d min"
                 "%s", q2_mp_mode_name(mp_mode), c.mp.player_count,

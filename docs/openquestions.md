@@ -2382,6 +2382,34 @@ Two mistakes on the way, both worth keeping because both are easy to repeat:
   off-by-one and all, and the glyph advance is a constant 8. Centring on its raw value put the block half a
   screen right.
 
+## The split screen, and what is behind each viewport
+
+The screen module has had every layout decoded for a long time — `ONE`, `TWO_H`, `TWO_V`, `QUAD`, with each
+viewport's origin, size, GTE projection, geometry offset, far plane and status-bar anchor — and the client
+installed `ONE` and left the rest to an F5 debug cycle whose own comment said the extra viewports show the
+same camera because there is one player. The layout is not a debug toy: it is chosen by the session's PLAYER
+COUNT at 0x800B3356, through the jump table at 0x800AC90C. One or none is full screen, two is a split whose
+axis is the HORIZONTAL SPLIT setting, three is the quad layout with the view count forced to three
+(0x8003FAE4), and four is the quad. `--dm-players` now installs it.
+
+Each viewport also looks from its own place. Every player is put through `q2_mp_select_spawn` in turn, each
+placed against the ones already placed — which is what that selector is *for*: it takes the point farthest
+from everybody standing somewhere, so four players spread across an arena instead of piling onto whichever
+point comes first. On MATRIX5 with four players they land on MultiSpawn 5, 3, 6 and 1 of the eight.
+
+**What each viewport is NOT is a second player.** There is one `q2_sim`. Viewport 0 is the simulated player;
+1 to 3 stand at their spawn and do not move, and their status bars read player 0's health and ammo because
+the status bar is fed from the one inventory that exists. The screen work, the layout selection, the spawn
+spread and the per-viewport HUD set are real; the other three participants are not, and the code says so
+where it does it rather than in a note here.
+
+- [ ] 53. **Four simulated players.** The remaining piece is `q2_sim` being an array rather than a member:
+      four players means four movement states, four inventories, four view weapons and four sets of pad
+      input, and every consumer in the client that says `c->sim` today means `c->sim[p]`. Nothing found so far
+      says the sim cannot be instanced — `q2_sim_init` already takes the zone as an argument, so several can
+      share one world — but it is a refactor of the client rather than a reconstruction of the original, and
+      it is the largest single piece of multiplayer left.
+
 ---
 
 ## ⚠ Security note (carried forward, do not drop)
