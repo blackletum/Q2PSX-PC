@@ -75,6 +75,8 @@
 #include "aiworld.h"
 #include "crebind.h"
 #include "creworld.h"
+#include "rotator.h"
+#include "userfuncs.h"
 #include "disc.h"
 #include "entity.h"
 #include "entitydraw.h"
@@ -290,6 +292,7 @@ typedef struct client {
     u32               cre_swings, cre_shots;   /* hook invocations */
     u32               cre_sounds;
     u32               player_attacks;
+    u32               rot_moved;
     int               cre_last_sound;
     u32               cre_drawn;      /* creatures with faces in the last view */
     u32               cre_faces;
@@ -325,6 +328,15 @@ typedef struct client {
      * not a page of art. While it is up the simulation does not run: there is
      * no player in it.
      */
+    /*
+     * Rotating brush geometry — ROTHATCH, SIMROT, SIMROT2, ROTBUTTON. The
+     * builder and the integrator have both existed since rotator.[ch] was
+     * written and the only caller was an inspector command, so nothing in the
+     * game ever turned. The set borrows the zone, which draws through it.
+     */
+    q2_rotator_set   rotators;
+    bool             rotators_ready;
+
     bool             in_front_end;
     char             first_map[64];
 
@@ -529,6 +541,15 @@ static void client_load_creatures(client *c, const s32 eye[3])
      * and matching id's exactly. Other creatures reach it with a table it does
      * not know and are dropped rather than given a Soldier's gun.
      */
+    /*
+     * The breadcrumb trail the AI hunts along — `0x800D517C`, the sixteen-slot
+     * ring at gp+17892. `q2_trail_add` had no caller anywhere in the tree, so
+     * the trail was always empty and the three-stage pursuit a creature runs
+     * when it loses you could never reach its second stage: it had nowhere to
+     * follow you to.
+     */
+    q2_trail_init();
+
     q2_cre_set_melee_hook(client_cre_melee, c);
     q2_cre_set_sound_hook(client_cre_sound, c);
     q2_cre_set_fire_hook(client_cre_fire, c);
@@ -962,6 +983,28 @@ static bool client_load_zone(client *c, const char *map, int index)
              */
             q2_sim_attach_glint(&c->sim, &c->common);
         }
+        /*
+         * The map's rotating brushes. Built from the same Events and UserFuncs
+         * the movers come from, and handed to the zone, which adds each node's
+         * rotation when it draws it.
+         */
+        if (c->rotators_ready) {
+            q2_rotators_free(&c->rotators);
+            c->rotators_ready = false;
+        }
+        {
+            q2_events    ev;
+            q2_userfuncs uf;
+
+            if (q2_events_parse_common(&ev, &c->common) == Q2_OK &&
+                q2_userfuncs_parse(&uf, &c->common) == Q2_OK &&
+                q2_rotators_build(&c->rotators, &ev, &uf) == Q2_OK) {
+                c->rotators_ready = true;
+                c->zone.rotators  = &c->rotators;
+                Q2_INFO("rotators: %u", c->rotators.count);
+            }
+        }
+
         q2_sim_spawn(&c->sim, feet, c->cam.yaw);
         c->sim.player.ground_y = feet[1];
 
@@ -1410,6 +1453,22 @@ static void client_input_simulated(client *c, float dt)
      */
     q2_sim_eye(&c->sim, eye);
     q2_sim_view_angles(&c->sim, view);
+
+    /*
+     * Drop a breadcrumb. The original writes one as the player moves, and the
+     * AI's lost-you pursuit walks them backwards; ten frames apart is close
+     * enough that a sixteen-slot ring covers the few seconds the pursuit
+     * looks over.
+     */
+    if (c->creatures_ready && (c->frame_index % 10) == 0)
+        q2_trail_add(eye, (s16)c->sim.player.yaw);
+
+    /* The rotating brushes, on the same 1/300 s clock as everything else. */
+    if (c->rotators_ready) {
+        s32 ticks = (s32)((double)dt * 300.0 + 0.5);
+        if (ticks < 1) ticks = 1;
+        c->rot_moved += q2_rotators_tick(&c->rotators, ticks);
+    }
 
     /* The AI, on its own clock and looking at where the player is now. */
     client_creatures_tick(c, dt, eye);
@@ -2351,12 +2410,12 @@ static void client_write_shot(client *c, bool numbered)
         Q2_INFO("  creatures %u live, %u hunting, %u drawn (%u faces), "
                 "nearest %d units, moved %ld, player %d hp, "
                 "%u swings %u shots, %u sounds, %u dead, %ld hp total, "
-                "player attacked %u, targets %u, bolts %u",
+                "player attacked %u, targets %u, bolts %u, rot moved %u",
                 live, hunting, c->cre_drawn, c->cre_faces, near_d, moved,
                 c->sim.combat.inv.health, c->cre_swings, c->cre_shots,
                 c->cre_sounds, dead, hp, c->player_attacks,
                 c->sim.combat.target_count,
-                c->sim.combat.projectiles.live);
+                c->sim.combat.projectiles.live, c->rot_moved);
         Q2_INFO("  ai world  %u traces (%u unplaced, %u clear), "
                 "%u bottom (%u fail), %u los (%u blocked)",
                 c->ai_world.stats.traces, c->ai_world.stats.trace_unplaced,

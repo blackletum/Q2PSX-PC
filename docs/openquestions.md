@@ -1796,6 +1796,34 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
       thing not instrumented was whether the experiment was capable of a positive
       result. A test that cannot succeed reports the same numbers as a broken feature.
 
+## The port's real gap is missing callers, and here is the list
+
+Four separate finds this session were the same shape — a finished piece with no
+caller: the overlay initialised from a flag that had not been set, the creature
+action hooks nothing ever assigned, the free-fly camera a session booted into, and
+the death screen. That is a pattern rather than four coincidences, so it was worth
+measuring instead of noticing.
+
+Sweeping every `q2_*` and `psx_*` function declared in a header and counting calls
+across all of `src/` and `tools/` gives **100 that are never called from anywhere
+but their own definition**. Most are honest accessors. Some are whole subsystems:
+
+| what | evidence |
+| --- | --- |
+| the **multiplayer runtime** | eleven functions — `q2_mp_session_init`, `q2_mp_frame`, `q2_mp_player_killed`, `q2_mp_find_winner`, `q2_mp_banner`, `q2_mp_score_title`, `q2_mp_team_name`, `q2_mp_may_respawn`, `q2_mp_attribute_kill`, `q2_mp_hud_image`, `q2_mp_take_request` — the whole `QMULTI.C` reconstruction, with nothing to drive it |
+| the **rotating brushes** | `q2_rotators_build` had one caller and it was an inspector command, so ROTHATCH, SIMROT, SIMROT2 and ROTBUTTON were never even constructed in the game |
+| the **AI breadcrumb trail** | `q2_trail_init` and `q2_trail_add`, so the ring at `gp+17892` was always empty and a creature that lost you had nowhere to follow you to |
+| **`q2_monster_damage`** | the module-owned health path, which is how a creature with an AI brain is meant to take damage |
+| the **per-frame lighting** | `q2_light_world_begin_frame`, `q2_light_glow_fade`, `q2_light_env_apply` |
+| the **item thinks** | `q2_item_think`, `q2_item_shrink_think` — an item's spin and glow |
+
+Two are now wired. The client builds and ticks the rotator set — BASE0 has two
+rotators, BASE1, COMMAND and POWER1 one each, JAIL2 none — and drops a breadcrumb
+every ten frames. *Still open for the rotators:* nothing triggers a step. A
+rotator moves when SIMROT's exec calls `q2_rotator_trigger`, and the event runtime
+has no primitive-dispatch hook to reach it from, so `q2_rotators_tick` reports zero
+moved. Built and ticking is not turning, and the log says which.
+
 ## Nothing had ever opened the death screen
 
 Page 41 has been transcribed since the menu was reconstructed — `RESTART LEVEL`,
