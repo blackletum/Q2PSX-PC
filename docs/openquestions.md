@@ -2403,7 +2403,25 @@ the status bar is fed from the one inventory that exists. The screen work, the l
 spread and the per-viewport HUD set are real; the other three participants are not, and the code says so
 where it does it rather than in a note here.
 
-- [ ] 53. **Four simulated players.** The remaining piece is `q2_sim` being an array rather than a member:
+- [~] 53. **Four simulated players — done in the client, still owed in `sim.c`.** `q2_sim` is now an array
+      indexed by player, and players 1..3 each get their own instance: spawned at their own MultiSpawn,
+      advanced every frame on their own `q2_pad_state`, with each viewport following its own player's eye and
+      view angles rather than a camera parked at a spawn point. Measured on MATRIX5 with four players after
+      400 frames — positions `[-14926 -1024 12546]`, `[9412 42 3321]`, `[-24811 -2556 4128]`,
+      `[-3204 611 17148]`, having moved 9029, 4239, 1923 and 6223 units from where they started, on three
+      different floors. Single player is byte-identical to before the refactor.
+
+      **What is still wrong is the world.** Each instance owns a copy of the map's items and its own script
+      runtime, because the player lives inside `q2_sim`, and only player 0's is read or drawn. The duplicates
+      are invisible and self-consistent, so this is a cost rather than a bug — but it means four players do
+      not yet share a world, and therefore cannot pick up the same item or shoot each other. Fixing it is a
+      change to `sim.c`: the world half and the player half want separating, and every rate, timer and event
+      in that file has to end up on the right side of the line. That is the remaining piece, and it is the
+      one that turns four people walking about into a match.
+
+  *As first written:*
+
+- [ ] ~~53. **Four simulated players.** The remaining piece is `q2_sim` being an array rather than a member:~~
       four players means four movement states, four inventories, four view weapons and four sets of pad
       input, and every consumer in the client that says `c->sim` today means `c->sim[p]`. Nothing found so far
       says the sim cannot be instanced — `q2_sim_init` already takes the zone as an argument, so several can

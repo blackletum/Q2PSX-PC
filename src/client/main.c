@@ -147,7 +147,17 @@ typedef struct client {
     SDL_AudioStream *audio;
 
     q2_camera        cam;
-    q2_sim           sim;
+    /*
+     * One sim per player. Index 0 owns the WORLD — the items, the script, the
+     * entity list, the effects — and 1..3 are movement instances: each has its
+     * own position, view, inventory and pad, and their world-side halves are
+     * ticked but never read or drawn. Sharing one world properly means pulling
+     * the player out of q2_sim, which is a change to sim.c and not to its
+     * caller; see openquestions #53.
+     */
+    q2_sim           sim[Q2_MP_MAX_PLAYERS];
+    bool             sim_ready[Q2_MP_MAX_PLAYERS];
+    q2_pad_state     mp_pad[Q2_MP_MAX_PLAYERS];
     bool             sim_enabled;
 
     /* World render state. It lives here rather than in the draw because the
@@ -443,7 +453,7 @@ static void client_free_creatures(client *c)
     c->cre_target   = NULL;
 
     if (c->creatures_ready) {
-        q2_sim_set_targets(&c->sim, NULL, 0);
+        q2_sim_set_targets(&c->sim[0], NULL, 0);
         q2_creature_world_free(&c->creatures);
         c->creatures_ready = false;
     }
@@ -497,11 +507,11 @@ static void client_load_creatures(client *c, const s32 eye[3])
      * twenty, standing in ZONE1's rooms while ZONE0 is loaded, thinking and
      * being drawn and shootable through the void.
      */
-    if (c->sim.coll_primary_ready) {
+    if (c->sim[0].coll_primary_ready) {
         u32 elsewhere = 0;
         for (i = 0; i < c->creatures.set.count; i++) {
             q2_monster *m = &c->creatures.set.monsters[i];
-            if (q2_coll_find_node(&c->sim.coll_primary, m->pos, -1, true) < 0) {
+            if (q2_coll_find_node(&c->sim[0].coll_primary, m->pos, -1, true) < 0) {
                 m->in_use = false;
                 elsewhere++;
             }
@@ -553,7 +563,7 @@ static void client_load_creatures(client *c, const s32 eye[3])
         }
     }
 
-    q2_sim_set_targets(&c->sim, c->cre_target, c->creatures.set.count);
+    q2_sim_set_targets(&c->sim[0], c->cre_target, c->creatures.set.count);
 
     /*
      * The world the AI asks its three questions of, and it is `PrimaryColl`.
@@ -567,7 +577,7 @@ static void client_load_creatures(client *c, const s32 eye[3])
      * blocked; with this one, 1 of 30 and 342 of 432.
      */
     q2_ai_world_bind_init(&c->ai_world,
-                          c->sim.coll_primary_ready ? &c->sim.coll_primary
+                          c->sim[0].coll_primary_ready ? &c->sim[0].coll_primary
                                                     : NULL);
     q2_ai_world_bind_install(&c->ai_world);
 
@@ -646,7 +656,7 @@ static void client_cre_melee(q2_monster *m, const s32 aim[3], s32 damage,
 
     /* MOD 7 is `0x800612F0`, a creature's contact hit (combat.h) — armour
      * applies, which is what makes it different from the environment's. */
-    q2_sim_hurt_player(&c->sim, NULL, (s16)damage, Q2_MOD_MELEE,
+    q2_sim_hurt_player(&c->sim[0], NULL, (s16)damage, Q2_MOD_MELEE,
                        c->creatures.sight.pos);
 }
 
@@ -700,7 +710,7 @@ static void client_cre_fire(q2_monster *m, int flash, void *user)
     while (shots-- > 0) {
         if (!q2_visible(m, &c->creatures.sight))
             break;
-        q2_sim_hurt_player(&c->sim, NULL, damage,
+        q2_sim_hurt_player(&c->sim[0], NULL, damage,
                            table == 0 ? Q2_MOD_ENERGY_BOLT : Q2_MOD_BULLET,
                            c->creatures.sight.pos);
     }
@@ -914,10 +924,10 @@ static void client_event_call(void *user, const q2_event_item *item,
 {
     client *c = (client *)user;
 
-    if (!c || !c->rotators_ready || !c->sim.userfuncs_ready)
+    if (!c || !c->rotators_ready || !c->sim[0].userfuncs_ready)
         return;
 
-    c->rot_steps += q2_rotators_call(&c->rotators, &c->sim.userfuncs,
+    c->rot_steps += q2_rotators_call(&c->rotators, &c->sim[0].userfuncs,
                                      item, call_index);
 }
 
@@ -1200,14 +1210,14 @@ static bool client_load_zone(client *c, const char *map, int index)
     /* q2_sim_init memsets the struct, so the previous zone's trigger bitmap and
      * event runtime have to be released first or they leak on every zone
      * change -- and zone changes are exactly what the gates now cause. */
-    q2_sim_free(&c->sim);
-    q2_sim_init(&c->sim, &c->zone, q2_build_tick_rate(&c->build));
+    q2_sim_free(&c->sim[0]);
+    q2_sim_init(&c->sim[0], &c->zone, q2_build_tick_rate(&c->build));
     {
         s32 feet[3];
         feet[0] = c->cam.pos[0];
         feet[1] = c->cam.pos[1];
         feet[2] = c->cam.pos[2];
-        q2_sim_attach_gameplay(&c->sim, &c->common);
+        q2_sim_attach_gameplay(&c->sim[0], &c->common);
 
         /*
          * The map's model bank, and the view weapon that draws out of it. The
@@ -1243,25 +1253,25 @@ static bool client_load_zone(client *c, const char *map, int index)
          */
         {
             q2_result ir = q2_sim_attach_items(
-                &c->sim, &c->common, index,
+                &c->sim[0], &c->common, index,
                 c->item_table_ready ? &c->item_table : NULL,
                 c->model_bank_ready ? &c->model_bank : NULL);
 
             if (ir == Q2_OK)
-                Q2_INFO("items: %u placed", c->sim.entities.count);
+                Q2_INFO("items: %u placed", c->sim[0].entities.count);
             else
                 Q2_WARN("%s places no items: %s", map, q2_result_str(ir));
         }
 
         if (c->vm_ready) {
-            q2_vw_init(&c->vw, &c->vm_tables, c->sim.combat.weapon_id);
-            c->vw_last_weapon = c->sim.combat.weapon_id;
+            q2_vw_init(&c->vw, &c->vm_tables, c->sim[0].combat.weapon_id);
+            c->vw_last_weapon = c->sim[0].combat.weapon_id;
             client_bind_view_model(c);
         }
         /* The zone number seeds the effect generator, so re-entering a zone
          * looks the same twice and two zones do not share a sequence. */
         if (c->fx_tables_ready) {
-            q2_sim_attach_effects(&c->sim, &c->fx_tables,
+            q2_sim_attach_effects(&c->sim[0], &c->fx_tables,
                                   0x51A5E5u + (u32)index);
 
             /*
@@ -1270,13 +1280,13 @@ static bool client_load_zone(client *c, const char *map, int index)
              * flat quads; with it they are the console's own textured ones.
              */
             if (c->hud_font_ready)
-                q2_fx_use_hud_atlas(&c->sim.fx, &c->hud_font);
+                q2_fx_use_hud_atlas(&c->sim[0].fx, &c->hud_font);
 
             /*
              * The glint mesh is the map's own `GlintMod` chunk, and only BIGGUN
              * has one. A map without it simply has no glint.
              */
-            q2_sim_attach_glint(&c->sim, &c->common);
+            q2_sim_attach_glint(&c->sim[0], &c->common);
         }
         /*
          * The zone's lights: COMMON.DAT's `Lights` array and the zone's own
@@ -1285,10 +1295,10 @@ static bool client_load_zone(client *c, const char *map, int index)
          * it is opened against the hull the sim already has.
          */
         c->lights_ready = false;
-        if (c->sim.coll_ready &&
+        if (c->sim[0].coll_ready &&
             q2_lights_parse(&c->lights, &c->common) == Q2_OK &&
             q2_spacelights_open(&c->spacelights, &c->zone.zone,
-                                &c->sim.coll) == Q2_OK) {
+                                &c->sim[0].coll) == Q2_OK) {
             memset(&c->light_world, 0, sizeof(c->light_world));
             c->light_world.statics = &c->lights;
             c->light_world.space   = &c->spacelights;
@@ -1325,17 +1335,54 @@ static bool client_load_zone(client *c, const char *map, int index)
          * CALL asks for a step (rotator.c, 0x8002F1B8), which is why the set
          * built last round reported `rot moved 0` on every map.
          */
-        c->sim.event_rt.on_call      = client_event_call;
-        c->sim.event_rt.on_call_user = c;
+        c->sim[0].event_rt.on_call      = client_event_call;
+        c->sim[0].event_rt.on_call_user = c;
 
-        q2_sim_spawn(&c->sim, feet, c->cam.yaw);
-        c->sim.player.ground_y = feet[1];
+        q2_sim_spawn(&c->sim[0], feet, c->cam.yaw);
+        c->sim[0].player.ground_y = feet[1];
+
+        /*
+         * The other players. Each gets its own sim, standing at its own
+         * MultiSpawn, and from here on each moves under its own pad — so a
+         * split-screen viewport shows a player walking rather than a fixed
+         * camera parked at a spawn point.
+         *
+         * Their world halves run and are ignored: each instance spawns its own
+         * copy of the map's items and runs its own script, and nothing reads or
+         * draws any of it. That is the cost of the player living inside q2_sim,
+         * and it is a cost rather than a bug — the duplicate worlds are
+         * invisible and self-consistent. Question 53 is the fix.
+         */
+        if (c->mp_enabled) {
+            int pi;
+
+            for (pi = 1; pi < c->mp.player_count &&
+                         pi < Q2_MP_MAX_PLAYERS; pi++) {
+                s32 pfeet[3];
+
+                if (!c->mp_view_valid[pi])
+                    continue;
+
+                q2_sim_free(&c->sim[pi]);
+                q2_sim_init(&c->sim[pi], &c->zone,
+                            q2_build_tick_rate(&c->build));
+                q2_sim_attach_gameplay(&c->sim[pi], &c->common);
+
+                pfeet[0] = c->mp_view_pos[pi][0];
+                pfeet[1] = c->mp_view_pos[pi][1];
+                pfeet[2] = c->mp_view_pos[pi][2];
+
+                q2_sim_spawn(&c->sim[pi], pfeet, c->mp_view_yaw[pi]);
+                c->sim[pi].player.ground_y = pfeet[1];
+                c->sim_ready[pi] = true;
+            }
+        }
 
         /* Last, because it wakes the AI onto the player and therefore needs
          * the player to already be standing somewhere. */
         {
             s32 eye[3];
-            q2_sim_eye(&c->sim, eye);
+            q2_sim_eye(&c->sim[0], eye);
             client_load_creatures(c, eye);
         }
     }
@@ -1574,7 +1621,7 @@ static void client_input_simulated(client *c, float dt)
     pad.buttons = client_pad_mask(c);
 
     q2_pad_config_default(&cfg);
-    cfg.style = c->sim.player.look_scheme;
+    cfg.style = c->sim[0].player.look_scheme;
 
     q2_pad_read(&pad, &cfg, &in);
 
@@ -1586,9 +1633,9 @@ static void client_input_simulated(client *c, float dt)
      * per map. The key drives the same environment flag the dispatcher would set,
      * which is the honest way to keep a debug crouch without inventing a mechanic.
      */
-    c->sim.env_flags &= ~(u32)(Q2_ENT_INCROUCH | Q2_ENT_INLOWCROUCH);
+    c->sim[0].env_flags &= ~(u32)(Q2_ENT_INCROUCH | Q2_ENT_INLOWCROUCH);
     if (client_key_down(c, SDL_SCANCODE_LCTRL, SDL_SCANCODE_C))
-        c->sim.env_flags |= Q2_ENT_INLOWCROUCH;
+        c->sim[0].env_flags |= Q2_ENT_INLOWCROUCH;
 
     /*
      * Being submerged is the same kind of thing and is held the same way. The
@@ -1598,9 +1645,9 @@ static void client_input_simulated(client *c, float dt)
      * and find water. F3 holds it on (see the key handler), which drives both
      * the swimming physics and the water screen effect.
      */
-    c->sim.env_flags &= ~(u32)(Q2_ENT_INWATER | Q2_ENT_UNDERWATER);
+    c->sim[0].env_flags &= ~(u32)(Q2_ENT_INWATER | Q2_ENT_UNDERWATER);
     if (c->force_underwater)
-        c->sim.env_flags |= Q2_ENT_INWATER | Q2_ENT_UNDERWATER;
+        c->sim[0].env_flags |= Q2_ENT_INWATER | Q2_ENT_UNDERWATER;
 
     /*
      * Weapon switching. The edge is the PAD's now — bits 26 and 27 are already
@@ -1619,7 +1666,7 @@ static void client_input_simulated(client *c, float dt)
         s32 eye0[3];
         u32 i;
 
-        q2_sim_eye(&c->sim, eye0);
+        q2_sim_eye(&c->sim[0], eye0);
 
         for (i = 0; i < c->creatures.set.count; i++) {
             const q2_monster *m = &c->creatures.set.monsters[i];
@@ -1650,12 +1697,12 @@ static void client_input_simulated(client *c, float dt)
              * and not a combat fault. A test of whether the player can hurt a
              * creature has to be able to see one.
              */
-            c->sim.player.pos[0] = best->pos[0] +
+            c->sim[0].player.pos[0] = best->pos[0] +
                 ((q2_sin12(best->angles[2]) * 700) >> Q2_FRAC_12);
-            c->sim.player.pos[1] = best->pos[1];
-            c->sim.player.pos[2] = best->pos[2] +
+            c->sim[0].player.pos[1] = best->pos[1];
+            c->sim[0].player.pos[2] = best->pos[2] +
                 ((q2_cos12(best->angles[2]) * 700) >> Q2_FRAC_12);
-            q2_sim_eye(&c->sim, eye0);
+            q2_sim_eye(&c->sim[0], eye0);
 
             to[0] = best->pos[0] - eye0[0];
             to[1] = best->pos[1] - eye0[1] - 150;
@@ -1664,14 +1711,14 @@ static void client_input_simulated(client *c, float dt)
             horiz = sqrt((double)to[0] * to[0] + (double)to[2] * to[2]);
             p = atan2((double)to[1], horiz > 1.0 ? horiz : 1.0);
 
-            c->sim.player.yaw   = (s16)q2_vectoyaw(to);
-            c->sim.player.pitch = (s16)(s32)(p * (double)Q2_ANGLE_360 /
+            c->sim[0].player.yaw   = (s16)q2_vectoyaw(to);
+            c->sim[0].player.pitch = (s16)(s32)(p * (double)Q2_ANGLE_360 /
                                              (2.0 * 3.14159265358979323846));
         }
     }
 
-    if (in.buttons & Q2_BTN_WEAP_NEXT) q2_sim_cycle_weapon(&c->sim, +1);
-    if (in.buttons & Q2_BTN_WEAP_PREV) q2_sim_cycle_weapon(&c->sim, -1);
+    if (in.buttons & Q2_BTN_WEAP_NEXT) q2_sim_cycle_weapon(&c->sim[0], +1);
+    if (in.buttons & Q2_BTN_WEAP_PREV) q2_sim_cycle_weapon(&c->sim[0], -1);
 
     /*
      * The creatures, published to combat as actors before the tick that may
@@ -1693,7 +1740,41 @@ static void client_input_simulated(client *c, float dt)
 
     if (in.attack) c->player_attacks++;
 
-    q2_sim_advance(&c->sim, &in, (double)dt);
+    q2_sim_advance(&c->sim[0], &in, (double)dt);
+
+    /*
+     * The other players, each on its own pad. In a headless demo run there is
+     * one script, so each is given a rotated slice of it — otherwise four
+     * players would walk in lockstep and a split screen would show one man
+     * reflected four times, which proves nothing about four sims running.
+     */
+    {
+        int pi;
+
+        for (pi = 1; pi < Q2_MP_MAX_PLAYERS; pi++) {
+            q2_input pin;
+
+            if (!c->sim_ready[pi])
+                continue;
+
+            pin = in;
+            if (c->demo) {
+                /* Each player reads the same script at a different phase, so
+                 * four sims produce four walks rather than one reflected. */
+                q2_pad_config pcfg;
+
+                c->mp_pad[pi].prev    = c->mp_pad[pi].buttons;
+                c->mp_pad[pi].buttons =
+                    client_demo_pad((long)c->frame_index + (long)pi * 37);
+
+                q2_pad_config_default(&pcfg);
+                pcfg.style = c->sim[pi].player.look_scheme;
+                q2_pad_read(&c->mp_pad[pi], &pcfg, &pin);
+            }
+
+            q2_sim_advance(&c->sim[pi], &pin, (double)dt);
+        }
+    }
 
     if (c->creatures_ready && c->cre_actor) {
         u32 i;
@@ -1743,9 +1824,9 @@ static void client_input_simulated(client *c, float dt)
         if (ticks < 1) ticks = 1;
         if (ticks > Q2_SCREEN_DT_MAX) ticks = Q2_SCREEN_DT_MAX;
 
-        if (c->sim.combat.weapon_id != c->vw_last_weapon) {
-            q2_vw_select(&c->vw, c->sim.combat.weapon_id);
-            c->vw_last_weapon = c->sim.combat.weapon_id;
+        if (c->sim[0].combat.weapon_id != c->vw_last_weapon) {
+            q2_vw_select(&c->vw, c->sim[0].combat.weapon_id);
+            c->vw_last_weapon = c->sim[0].combat.weapon_id;
         }
 
         /*
@@ -1756,7 +1837,7 @@ static void client_input_simulated(client *c, float dt)
          * refire wait too, so it is the wrong flag to test.
          */
         swapped = q2_vw_advance(&c->vw, ticks, in.attack,
-                                (in.attack && c->sim.combat.last_shot.dry)
+                                (in.attack && c->sim[0].combat.last_shot.dry)
                                     ? Q2_VW_FIRE_DENIED : Q2_VW_FIRED);
         if (swapped)
             client_bind_view_model(c);
@@ -1773,7 +1854,7 @@ static void client_input_simulated(client *c, float dt)
          * clip says, not the frame the trigger was pressed.
          */
         if (q2_vw_take_refire(&c->vw))
-            q2_sim_cycle_weapon(&c->sim, +1);
+            q2_sim_cycle_weapon(&c->sim[0], +1);
 
         {
             s16 ev;
@@ -1814,8 +1895,8 @@ static void client_input_simulated(client *c, float dt)
          * hand each player's flash to its own viewport, which is exactly what
          * the shared record does for free on the console.
          */
-        if (q2_hud_track(&c->hud, c->sim.combat.inv.health,
-                         c->sim.combat.inv.armour))
+        if (q2_hud_track(&c->hud, c->sim[0].combat.inv.health,
+                         c->sim[0].combat.inv.armour))
             q2_screen_flash_set(&c->screen, 0, c->hud.flash.rgb,
                                 c->hud.flash.strength, c->hud.flash.mode);
     }
@@ -1827,8 +1908,8 @@ static void client_input_simulated(client *c, float dt)
      * `player.pitch/yaw/roll` straight, which this did, throws all three away:
      * no recoil, no flinch, and no thump when you land.
      */
-    q2_sim_eye(&c->sim, eye);
-    q2_sim_view_angles(&c->sim, view);
+    q2_sim_eye(&c->sim[0], eye);
+    q2_sim_view_angles(&c->sim[0], view);
 
     /*
      * Drop a breadcrumb. The original writes one as the player moves, and the
@@ -1837,7 +1918,7 @@ static void client_input_simulated(client *c, float dt)
      * looks over.
      */
     if (c->creatures_ready && (c->frame_index % 10) == 0)
-        q2_trail_add(eye, (s16)c->sim.player.yaw);
+        q2_trail_add(eye, (s16)c->sim[0].player.yaw);
 
     /* The multiplayer session's own frame, on the same clock. */
     client_mp_tick(c, dt);
@@ -1864,7 +1945,7 @@ static void client_input_simulated(client *c, float dt)
      * frozen behind it, which is what `client_menu_frame` already does for
      * every other page.
      */
-    if (c->sim.combat.inv.health <= 0 && !c->menu.open && !c->mcard_open) {
+    if (c->sim[0].combat.inv.health <= 0 && !c->menu.open && !c->mcard_open) {
         /*
          * In a match the death goes to the scoring first. The engine's hook at
          * 0x800396AC hands the module a killer and a victim, taken from the
@@ -1874,7 +1955,7 @@ static void client_input_simulated(client *c, float dt)
          * then to blame the victim for it.
          */
         if (c->mp_enabled && c->mp.end == Q2_MP_RUNNING) {
-            int killer = q2_mp_attribute_kill(-1, c->sim.combat.self.last_mod);
+            int killer = q2_mp_attribute_kill(-1, c->sim[0].combat.self.last_mod);
 
             q2_mp_player_killed(&c->mp, killer, 0);
             c->mp_deaths++;
@@ -2080,11 +2161,11 @@ static void client_apply_settings(client *c)
     q2_menu_apply_variables(&c->settings, c->menu.multiplayer,
                             q2_build_tick_rate(&c->build), &rules);
 
-    c->sim.gravity = rules.gravity;
+    c->sim[0].gravity = rules.gravity;
     if (rules.tick_rate > 0)
-        c->sim.dt_per_field = 300 / rules.tick_rate;
-    if (c->sim.dt_per_field <= 0)
-        c->sim.dt_per_field = 1;
+        c->sim[0].dt_per_field = 300 / rules.tick_rate;
+    if (c->sim[0].dt_per_field <= 0)
+        c->sim[0].dt_per_field = 1;
 }
 
 static void client_menu_requests(client *c)
@@ -2341,7 +2422,7 @@ static const char *client_ent_sound_name(const client *c, u32 which)
 
 static void client_entity_events(client *c)
 {
-    const q2_ent_events *ev = q2_sim_entity_events(&c->sim);
+    const q2_ent_events *ev = q2_sim_entity_events(&c->sim[0]);
     u32 i;
 
     if (!ev)
@@ -2379,7 +2460,7 @@ static bool client_capture(client *c)
 
     q2_save_free(&c->snapshot);
 
-    rc = q2_save_capture(&c->snapshot, &c->sim, NULL, c->build.serial,
+    rc = q2_save_capture(&c->snapshot, &c->sim[0], NULL, c->build.serial,
                          c->map, c->zone_index);
     if (rc != Q2_OK) {
         Q2_ERROR("cannot capture a save: %s", q2_result_str(rc));
@@ -2412,7 +2493,7 @@ static bool client_apply_save(client *c, const q2_save *s)
         return false;
     }
 
-    rc = q2_save_apply(s, &c->sim, NULL, c->build.serial, c->map);
+    rc = q2_save_apply(s, &c->sim[0], NULL, c->build.serial, c->map);
     if (rc != Q2_OK) {
         Q2_ERROR("cannot apply the save: %s", q2_result_str(rc));
         return false;
@@ -2435,8 +2516,8 @@ static bool client_apply_save(client *c, const q2_save *s)
      * player holds whatever the fresh spawn gave them while the simulation
      * thinks they are holding the railgun. */
     if (c->vm_ready) {
-        q2_vw_init(&c->vw, &c->vm_tables, c->sim.combat.weapon_id);
-        c->vw_last_weapon = c->sim.combat.weapon_id;
+        q2_vw_init(&c->vw, &c->vm_tables, c->sim[0].combat.weapon_id);
+        c->vw_last_weapon = c->sim[0].combat.weapon_id;
         client_bind_view_model(c);
     }
 
@@ -2444,12 +2525,12 @@ static bool client_apply_save(client *c, const q2_save *s)
      * rather than in the free-fly camera. */
     c->sim_enabled = true;
 
-    q2_sim_eye(&c->sim, eye);
+    q2_sim_eye(&c->sim[0], eye);
     c->cam.pos[0] = eye[0];
     c->cam.pos[1] = eye[1];
     c->cam.pos[2] = eye[2];
-    c->cam.yaw    = c->sim.player.yaw;
-    c->cam.pitch  = c->sim.player.pitch;
+    c->cam.yaw    = c->sim[0].player.yaw;
+    c->cam.pitch  = c->sim[0].player.pitch;
 
     Q2_INFO("loaded %s zone %d at %d:%02d",
             s->map, (int)s->zone,
@@ -2778,12 +2859,27 @@ static void client_write_shot(client *c, bool numbered)
     Q2_INFO("  eye %d %d %d  yaw %d pitch %d  cell %d  "
             "%u/%u quads, %u nodes, near %u back %u ot %u",
             c->cam.pos[0], c->cam.pos[1], c->cam.pos[2],
-            c->cam.yaw, c->cam.pitch, c->sim.current_node,
+            c->cam.yaw, c->cam.pitch, c->sim[0].current_node,
             c->shot_stats.quads_emitted, c->shot_stats.quads_total,
             c->shot_stats.nodes_visited,
             c->shot_stats.quads_rejected_near,
             c->shot_stats.quads_rejected_back,
             c->shot_stats.ot_overflow);
+
+    if (c->mp_enabled) {
+            int pi;
+
+            for (pi = 0; pi < Q2_MP_MAX_PLAYERS; pi++) {
+                if (pi > 0 && !c->sim_ready[pi])
+                    continue;
+                Q2_INFO("  player %d at [%d %d %d] yaw %d, %d hp, moved %ld",
+                        pi, c->sim[pi].player.pos[0], c->sim[pi].player.pos[1],
+                        c->sim[pi].player.pos[2], c->sim[pi].player.yaw,
+                        c->sim[pi].combat.inv.health,
+                        labs(c->sim[pi].player.pos[0] - c->mp_view_pos[pi][0]) +
+                        labs(c->sim[pi].player.pos[2] - c->mp_view_pos[pi][2]));
+            }
+        }
 
     if (c->creatures_ready && c->creatures.set.count) {
         u32 i, live = 0, hunting = 0, dead = 0;
@@ -2816,12 +2912,12 @@ static void client_write_shot(client *c, bool numbered)
                 "player attacked %u, targets %u, bolts %u, %u bodies, "
                 "rot %u steps %u moved %u turned, %u calls",
                 live, hunting, c->cre_drawn, c->cre_faces, near_d, moved,
-                c->sim.combat.inv.health, c->cre_swings, c->cre_shots,
+                c->sim[0].combat.inv.health, c->cre_swings, c->cre_shots,
                 c->cre_sounds, dead, hp, c->player_attacks,
-                c->sim.combat.target_count,
-                c->sim.combat.projectiles.live, c->cre_bodies, c->rot_steps,
+                c->sim[0].combat.target_count,
+                c->sim[0].combat.projectiles.live, c->cre_bodies, c->rot_steps,
                 c->rot_moved, client_rot_turned(c),
-                c->sim.event_rt.call_count);
+                c->sim[0].event_rt.call_count);
         Q2_INFO("  ai world  %u traces (%u unplaced, %u clear), "
                 "%u bottom (%u fail), %u los (%u blocked)",
                 c->ai_world.stats.traces, c->ai_world.stats.trace_unplaced,
@@ -2928,20 +3024,26 @@ static void client_draw_view(void *user, q2_screen *s, int p,
      * of them showed the same camera — the screen work was right and there was
      * only ever one thing to look at.
      *
-     * Viewport 0 is the simulated player and keeps the camera the frame built.
-     * The others stand at their own MultiSpawn, chosen by the same selector, so
-     * a two- or four-way split shows the arena from the places the match would
-     * actually start people. What they do NOT do is move: there is one q2_sim,
-     * so players 1..3 are viewpoints and not participants, and nothing here
-     * pretends otherwise.
+     * Viewport 0 is player 0 and keeps the camera the frame built; the others
+     * follow their OWN sim's eye and view angles. Each of players 1..3 has a
+     * q2_sim of its own, spawned at its own MultiSpawn and advanced on its own
+     * pad every frame, so a split shows four people walking about rather than
+     * one camera reflected.
+     *
+     * What is still shared and should not be is the WORLD: each instance owns a
+     * copy of the map's items and its own script runtime, and only player 0's
+     * is read or drawn. See openquestions #53 — the fix is pulling the player
+     * out of q2_sim, which is a change to sim.c rather than to this caller.
      */
-    if (c->mp_enabled && p > 0 && p < Q2_MP_MAX_PLAYERS &&
-        c->mp_view_valid[p]) {
-        c->cam.pos[0] = c->mp_view_pos[p][0];
-        c->cam.pos[1] = c->mp_view_pos[p][1];
-        c->cam.pos[2] = c->mp_view_pos[p][2];
-        c->cam.yaw    = c->mp_view_yaw[p];
-        c->cam.pitch  = 0;
+    if (c->mp_enabled && p > 0 && p < Q2_MP_MAX_PLAYERS && c->sim_ready[p]) {
+        s32 eye[3];
+
+        q2_sim_eye(&c->sim[p], eye);
+        c->cam.pos[0] = eye[0];
+        c->cam.pos[1] = eye[1];
+        c->cam.pos[2] = eye[2];
+        c->cam.yaw    = c->sim[p].player.yaw;
+        c->cam.pitch  = c->sim[p].player.pitch;
     }
 
     /* The viewport's far distance is also the subdivision threshold: the same
@@ -2970,7 +3072,7 @@ static void client_draw_view(void *user, q2_screen *s, int p,
      * `lights` is NULL: the client has no q2_light_world, so an item is drawn
      * at its own glow tint exactly as this module did before lighting existed.
      */
-    if (c->sim.entities_ready) {
+    if (c->sim[0].entities_ready) {
         q2_entity_draw_ctx ectx;
         q2_entity_draw_stats estats;
 
@@ -2987,9 +3089,9 @@ static void client_draw_view(void *user, q2_screen *s, int p,
          * own cell every tick and that is the one the engine uses.
          */
         ectx.lights        = c->lights_ready ? &c->light_world : NULL;
-        ectx.coll_node     = c->sim.current_node;
+        ectx.coll_node     = c->sim[0].current_node;
 
-        q2_entity_build_ot(&c->sim.entities, &ectx, &c->cam, ot, gte, &estats);
+        q2_entity_build_ot(&c->sim[0].entities, &ectx, &c->cam, ot, gte, &estats);
     }
 
     /*
@@ -3091,7 +3193,7 @@ static void client_draw_view(void *user, q2_screen *s, int p,
              */
             if (c->lights_ready) {
                 q2_light_set  set;
-                s32 cell = q2_coll_find_node(&c->sim.coll, m->pos, -1, true);
+                s32 cell = q2_coll_find_node(&c->sim[0].coll, m->pos, -1, true);
 
                 q2_light_gather(&set, &c->light_world, m->pos, cell, false);
                 q2_light_env_build(&cre_env, &set, Q2_LIGHT_ONE,
@@ -3122,7 +3224,7 @@ static void client_draw_view(void *user, q2_screen *s, int p,
      * the reset per view would make split screen lose the beams in every
      * viewport but the first.
      */
-    q2_fx_build_ot(&c->sim.fx, &c->cam, (u32)p, ot, gte);
+    q2_fx_build_ot(&c->sim[0].fx, &c->cam, (u32)p, ot, gte);
 
     /*
      * The status bar, into this viewport's own slice — because the console
@@ -3138,9 +3240,9 @@ static void client_draw_view(void *user, q2_screen *s, int p,
     /* `icons_resident`, not `menu_font_ready`: the upload succeeds when any of
      * the three images lands, and the status bar needs THIS one. */
     if (c->icons_ready && c->menu_font_ready && c->menu_font.icons_resident) {
-        const q2_inventory *inv = &c->sim.combat.inv;
+        const q2_inventory *inv = &c->sim[0].combat.inv;
         /* The LIVE weapon, which combat owns — 1-based, 0 for none. */
-        int weapon = c->sim.combat.weapon_id;
+        int weapon = c->sim[0].combat.weapon_id;
         int ammo = 0;
 
         if (weapon > 0 && weapon < Q2_WEAPON_COUNT) {
@@ -3190,15 +3292,15 @@ static void client_draw_view(void *user, q2_screen *s, int p,
         proto.tpage         = &c->render.tpage;
         proto.clut4_count_a = c->clut4_count_a;
 
-        aim[0]  = (s16)c->sim.player.pitch;
-        aim[1]  = (s16)c->sim.player.yaw;
-        aim[2]  = (s16)c->sim.player.roll;
-        kick[0] = c->sim.combat.kick[0];
-        kick[1] = c->sim.combat.kick[1];
-        kick[2] = c->sim.combat.kick[2];
+        aim[0]  = (s16)c->sim[0].player.pitch;
+        aim[1]  = (s16)c->sim[0].player.yaw;
+        aim[2]  = (s16)c->sim[0].player.roll;
+        kick[0] = c->sim[0].combat.kick[0];
+        kick[1] = c->sim[0].combat.kick[1];
+        kick[2] = c->sim[0].combat.kick[2];
 
         q2_vw_build_ot(&c->vw, &proto,
-                       c->sim.player.pos, c->sim.player.view_height,
+                       c->sim[0].player.pos, c->sim[0].player.view_height,
                        aim, kick, &c->cam, ot, gte, &mstats);
     }
 
@@ -3214,11 +3316,11 @@ static void client_draw_view(void *user, q2_screen *s, int p,
      * The phase runs 4..1, which is what the script writes and what the band
      * formula's `4 - phase` expects.
      */
-    if (c->sim.glint.ready && (c->sim.glint.raised || c->show_glint)) {
+    if (c->sim[0].glint.ready && (c->sim[0].glint.raised || c->show_glint)) {
         s32 at[3];
 
-        q2_sim_eye(&c->sim, at);
-        q2_fx_glint_draw(&c->sim.glint, at, c->cam.yaw, &c->cam, ot, gte);
+        q2_sim_eye(&c->sim[0], at);
+        q2_fx_glint_draw(&c->sim[0].glint, at, c->cam.yaw, &c->cam, ot, gte);
     }
 }
 
@@ -3253,7 +3355,7 @@ static void client_frame(client *c)
      */
     {
         bool submerged =
-            (c->sim.player.ent.flags & Q2_ENT_UNDERWATER) != 0;
+            (c->sim[0].player.ent.flags & Q2_ENT_UNDERWATER) != 0;
         int p;
 
         for (p = 0; p < c->screen.view_count; p++)
@@ -3268,7 +3370,7 @@ static void client_frame(client *c)
     /* Every viewport has now drawn from the beam queue, so it can go. This is
      * the tail of 0x80064F10, moved out to where "the last viewport" is a
      * thing that can be said. */
-    q2_fx_beams_reset(&c->sim.fx);
+    q2_fx_beams_reset(&c->sim[0].fx);
 
     /*
      * The menu is part of the frame, not something painted over it afterwards.
@@ -4097,7 +4199,7 @@ no_window:
                      * deliberate look at a reconstruction, not gameplay. */
                     c.show_glint = !c.show_glint;
                     Q2_INFO("glint: %s%s", c.show_glint ? "on" : "off",
-                            c.sim.glint.ready ? "" : " (this map has no mesh)");
+                            c.sim[0].glint.ready ? "" : " (this map has no mesh)");
                     break;
                 default:
                     if (!c.menu.open &&
@@ -4131,7 +4233,7 @@ no_window:
          * lives in the executable and is not read yet. */
         {
             u32 target;
-            if (q2_sim_take_zone_change(&c.sim, &target)) {
+            if (q2_sim_take_zone_change(&c.sim[0], &target)) {
                 Q2_INFO("zone gate -> zone %u", target);
                 client_load_zone(&c, c.map, (int)target);
             }
@@ -4179,7 +4281,7 @@ done:
         q2_level_table_free(&c.level_table);
     q2_save_ui_free(&c.save_ui);
     q2_save_free(&c.snapshot);
-    q2_sim_free(&c.sim);
+    q2_sim_free(&c.sim[0]);
     q2_common_close(&c.common);
     q2_world_free_zone(&c.zone);
     free(c.vram);
