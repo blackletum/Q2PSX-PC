@@ -4766,10 +4766,30 @@ nothing saying so.
       packed BYTES near `module+0x1A0` — not from a 12-byte name. The same shape repeats for +0x175C,
       +0x1750 and +0x1754.
 
-      So `q2_creature_sound_names()` is looking for a structure the Berserk does not have. Its heuristic
-      finds a run of name-like slots because module images are full of strings, and any start it picks is
-      arbitrary — **the table is not there**. That is why four attempts to pin its start all failed, and it
-      means the Berserk's thirteen "names" are a false positive rather than a mis-anchored table.
+      ~~So the table is not there.~~ **Wrong — and reading the packed bytes as ASCII shows why.** The
+      argument being assembled is not an index or an ID: it is **the name itself, passed by value**. The
+      compiler could not use aligned loads, so it rebuilds a 12-byte string in registers a byte at a time.
+      Dumping the Tank Commander's source region:
+
+          801001E8  "tnk_" "step"          -> tnk_step
+          801001F4  "tnk_" "sigh" "t1.."   -> tnk_sight1
+
+      and the Berserk's:
+
+          8010018C  ber_deth2
+          80100198  "ber_" "idle" "1..."   -> ber_idle1
+          801001A4  "ber_" "atta" "ck.."   -> ber_attack
+          801001B0  "inf_" "atck"          -> inf_atck2
+
+      **Both creatures have a real 12-byte-stride name table**, and `q2_creature_sound_names()` is looking
+      for exactly the right structure. Four attempts failed at finding the Berserk's START, not because the
+      table was absent, but because the heuristic anchors on the module's own name string and the Berserk's
+      module does not carry one where it looks.
+
+      **And now there are anchors.** The entries above are confirmed by the code that reads them, so the
+      Berserk's table is pinned at `module+0x18C` onward. The heuristic's current output disagrees with it —
+      it interleaves `inf_deth2` between `ber_deth2` and `ber_idle1`, which the module does not — so its run
+      is still misaligned, but the correct addresses are known now rather than guessed.
 
       **The Tank Commander is the same shape**, checked rather than assumed:
 

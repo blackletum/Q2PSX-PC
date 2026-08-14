@@ -687,11 +687,17 @@ u32 q2_creature_sound_names(const q2_creature *c, const u8 *image, size_t size,
      * arguments packed from bytes (near module+0x1A0 and +0x1F4 respectively)
      * and store its return value in the slot. No 12-byte name is read.
      *
-     * So what this function finds is a run of name-like strings that may or may
-     * not BE the sound names. The Tank Commander's are: five of its eight match
-     * VAG entries on the disc by name. The Berserk's are not — three of its
-     * thirteen are its own move names. Only an external check tells them apart,
-     * so treat a result here as a candidate, not as a table.
+     * Those packed bytes ARE the name — the compiler rebuilds a 12-byte string in
+     * registers because it cannot use aligned loads. Read as ASCII, the Tank
+     * Commander's source region holds `tnk_step` at module+0x1E8 and
+     * `tnk_sight1` at +0x1F4; the Berserk's holds `ber_deth2` at +0x18C,
+     * `ber_idle1` at +0x198, `ber_attack` at +0x1A4 and `inf_atck2` at +0x1B0.
+     *
+     * So a real 12-byte-stride table exists for both and this function looks for
+     * the right thing. What it gets wrong for the Berserk is the START: it
+     * anchors on the module's own name string, which that module does not carry
+     * where it looks. Its result is still a candidate rather than a table until
+     * the anchor is fixed — the correct entries above are the reference.
      *
      * If the module's own name is not in its image, the anchor is gone but the
      * table need not be. Two of the seven -- Tankcomm and Berserk -- returned
