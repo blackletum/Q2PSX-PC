@@ -1,0 +1,323 @@
+/*
+ * cmd_zonescript — which script does a trigger volume fire, and what names does
+ * a zone's own script carry?
+ *
+ * Two scripts exist per map. COMMON.DAT has an Events chunk and so does every
+ * ZONE*.DAT, and only COMMON has the trigger volumes. A zone's carries 2959
+ * CALL items, 805 movers and 619 zone gates across the disc, and this port ran
+ * none of them — which looked like the largest piece of level behaviour still
+ * missing.
+ *
+ * It is not missing. **The engine never loads a zone's Events chunk.** The zone
+ * loader looks its chunks up by name — AreaConx, CastList, CreAIBin, CreAIRel,
+ * MapMod, MapNames, Points, Scene, SortData, SpaceLights and the two collision
+ * hulls — and `Events` is not among them. The whole image contains exactly one
+ * copy of the string "Events" (0x800AD480) and exactly two references to it:
+ * COMMON's loader at 0x8007AC30, which stores the matched chunk's pointer into
+ * the events global at 0x800AE774 (0x8007AD54), and the teardown that clears
+ * the same global (0x8007C250). Every one of the twenty-odd readers of that
+ * global — the load-time pre-pass at 0x80026DC0, the execution dispatch at
+ * 0x80027950 — therefore reads COMMON's script and only ever COMMON's.
+ *
+ * Two counting tests were run first and BOTH decided nothing, which is worth
+ * recording so neither is repeated: all 834 trigger offsets start a record in
+ * COMMON's script *and* in a zone's, and none of them runs past the end of
+ * either chunk. An offset is just a number, and record starts are dense.
+ *
+ * What is left for this command to do is measure the script that does run:
+ * COMMON's, fired by every trigger volume, with the rotators built from the
+ * same chunk the engine's global points at.
+ */
+#include "cmd_zonescript.h"
+
+#include <stdio.h>
+#include <string.h>
+
+#include "events.h"
+#include "events_rt.h"
+#include "level.h"
+#include "rotator.h"
+#include "trigger.h"
+#include "userfuncs.h"
+
+static const char *const g_maps[] = {
+    "BASE0", "BASE1", "BASE2", "BASE3", "BIGGUN", "BOSS1", "BOSS2",
+    "CITY1", "CITY2", "CITY3", "COMMAND", "COMPLEX", "CORE", "FACT1",
+    "FACT2", "FACT3", "HANGAR1", "HANGAR2", "JAIL2", "JAIL3", "JAIL4",
+    "JAIL5", "LAB", "MAGDEMO", "MINE1", "MINE2", "MINE3", "MINE4",
+    "MINTRO", "POWER1", "POWER2", "SECURITY", "SEWER1", "SPACE",
+    "STRIKE", "TRAIN", "WARE1", "WARE2", "WASTE1", "WASTE2", "WASTE3",
+    "WASTE4", NULL
+};
+
+/* The client's hook, run here over COMMON's script instead of live play. */
+typedef struct live_rot_ctx {
+    const q2_userfuncs *uf;
+    q2_rotator_set     *set;
+    u32                 steps;
+} live_rot_ctx;
+
+static void live_rot_call(void *user, const q2_event_item *item, u8 call_index)
+{
+    live_rot_ctx *ctx = (live_rot_ctx *)user;
+
+    ctx->steps += q2_rotators_call(ctx->set, ctx->uf, item, call_index);
+}
+
+/* Does `offset` name the start of a record in this script? */
+static bool offset_is_record(const q2_events *ev, u32 offset)
+{
+    q2_event_record rec;
+
+    if (!q2_events_first_record(ev, &rec))
+        return false;
+
+    do {
+        if (rec.offset == offset)
+            return true;
+    } while (q2_events_next_record(ev, &rec, &rec));
+
+    return false;
+}
+
+int cmd_zonescript(const disc *d, const char *only_map)
+{
+    int mi;
+    u32 t_total = 0, t_common = 0, t_zone = 0, t_both = 0, t_neither = 0;
+    u32 zone_dirs = 0, zone_records = 0, common_records = 0;
+    u32 past_common = 0, past_zone = 0;
+    u32 zone_same = 0, zone_diff = 0;
+    u32 live_built = 0, live_calls = 0, live_steps = 0, live_moved = 0,
+        live_turned = 0;
+    bool verbose = (only_map != NULL);
+
+    printf("Which Events chunk does a trigger volume fire?\n\n");
+
+    for (mi = 0; g_maps[mi]; mi++) {
+        char path[160];
+        q2_buf cbuf;
+        q2_common_file cf;
+        q2_events cev;
+        q2_triggers tg;
+        q2_events zev[8];
+        q2_buf zbuf[8];
+        q2_zone_file zf[8];
+        u32 zcount = 0, zi, k;
+        bool have_common = false, have_trig = false;
+
+        if (only_map && strcmp(only_map, g_maps[mi]) != 0)
+            continue;
+
+        snprintf(path, sizeof(path), "Q2DATA/LEVELS/%s/COMMON.DAT", g_maps[mi]);
+        if (disc_read_file(d, path, &cbuf) != Q2_OK)
+            continue;
+        if (q2_common_open(&cf, &cbuf) != Q2_OK) {
+            q2_buf_free(&cbuf);
+            continue;
+        }
+
+        have_common = (q2_events_parse_common(&cev, &cf) == Q2_OK);
+        have_trig   = (q2_triggers_parse(&tg, &cf) == Q2_OK);
+
+        /* Every zone of this map, so an offset can be tried against each. */
+        for (zi = 0; zi < 8; zi++) {
+            snprintf(path, sizeof(path), "Q2DATA/LEVELS/%s/ZONE%u.DAT",
+                     g_maps[mi], zi);
+            if (disc_read_file(d, path, &zbuf[zcount]) != Q2_OK)
+                continue;
+            if (q2_zone_open(&zf[zcount], &zbuf[zcount]) != Q2_OK) {
+                q2_buf_free(&zbuf[zcount]);
+                continue;
+            }
+            if (q2_events_parse_zone(&zev[zcount], &zf[zcount]) != Q2_OK) {
+                q2_zone_close(&zf[zcount]);
+                continue;
+            }
+            zcount++;
+        }
+
+        if (have_common)
+            common_records += cev.record_count;
+
+        /*
+         * The stronger test: an offset PAST THE END of a chunk cannot be an
+         * offset into it, whatever records happen to start where. Record-start
+         * membership proved nothing — every offset on the disc starts a record
+         * in both scripts — but a chunk's size is not a coincidence.
+         */
+        if (have_common && have_trig) {
+            u32 hi = 0;
+
+            for (k = 0; k < tg.count; k++) {
+                q2_trigger tr;
+
+                if (!q2_trigger_get(&tg, k, &tr))
+                    continue;
+                if (tr.event_offset == Q2_TRIGGER_NO_EVENT)
+                    continue;
+                if (tr.event_offset > hi)
+                    hi = tr.event_offset;
+            }
+
+            if (hi >= cev.size)
+                past_common++;
+            for (zi = 0; zi < zcount; zi++)
+                if (hi >= zev[zi].size) {
+                    past_zone++;
+                    break;
+                }
+
+            if (verbose)
+                printf("  highest trigger offset %u; COMMON events %u bytes, "
+                       "zone0 events %u bytes\n",
+                       hi, cev.size, zcount ? zev[0].size : 0);
+        }
+
+        if (verbose)
+            printf("%s: COMMON %u records, %u named; %u zones\n",
+                   g_maps[mi], have_common ? cev.record_count : 0,
+                   have_common ? cev.dir_count : 0, zcount);
+
+        for (zi = 0; zi < zcount; zi++) {
+            zone_records += zev[zi].record_count;
+            zone_dirs    += zev[zi].dir_count;
+
+            /*
+             * Is a zone's script a COPY of COMMON's? BASE0's is the same 604
+             * bytes, the same 23 records and the same two named entries, which
+             * would explain why every offset resolves in both at once.
+             */
+            if (have_common) {
+                if (zev[zi].size == cev.size && cev.size &&
+                    memcmp(zev[zi].data, cev.data, cev.size) == 0)
+                    zone_same++;
+                else
+                    zone_diff++;
+            }
+
+            if (verbose) {
+                printf("  ZONE%u: %u records, %u named\n",
+                       zi, zev[zi].record_count, zev[zi].dir_count);
+                for (k = 0; k < zev[zi].dir_count && k < 24; k++) {
+                    q2_event_dir_entry e;
+                    if (q2_events_get_dir_entry(&zev[zi], k, &e))
+                        printf("    %-13s +%u\n", e.name, e.offset);
+                }
+            }
+        }
+
+        if (verbose && have_common) {
+            printf("  COMMON named:\n");
+            for (k = 0; k < cev.dir_count && k < 24; k++) {
+                q2_event_dir_entry e;
+                if (q2_events_get_dir_entry(&cev, k, &e))
+                    printf("    %-13s +%u\n", e.name, e.offset);
+            }
+        }
+
+        /*
+         * What the console actually runs: COMMON's script, fired by the
+         * trigger volumes. Every volume with an event is fired once, which is
+         * a player who has walked the whole map, and the rotators are built
+         * from the same chunk the engine's global points at.
+         */
+        if (have_common && have_trig) {
+            q2_userfuncs   uf;
+            q2_rotator_set rs;
+            q2_event_rt    rt;
+
+            memset(&rs, 0, sizeof(rs));
+            if (q2_userfuncs_parse(&uf, &cf) == Q2_OK &&
+                q2_rotators_build(&rs, &cev, &uf) == Q2_OK &&
+                q2_event_rt_init(&rt, &cev) == Q2_OK) {
+                live_rot_ctx ctx;
+                u32 t;
+
+                ctx.uf = &uf;
+                ctx.set = &rs;
+                ctx.steps = 0;
+                rt.on_call      = live_rot_call;
+                rt.on_call_user = &ctx;
+
+                live_built += rs.count;
+
+                for (k = 0; k < tg.count; k++) {
+                    q2_trigger tr;
+
+                    if (!q2_trigger_get(&tg, k, &tr))
+                        continue;
+                    if (tr.event_offset == Q2_TRIGGER_NO_EVENT)
+                        continue;
+                    q2_event_rt_trigger(&rt, tr.event_offset);
+                }
+                q2_event_rt_update(&rt);
+
+                live_calls += rt.call_count;
+                live_steps += ctx.steps;
+                for (t = 0; t < 400; t++)
+                    live_moved += q2_rotators_tick(&rs, 12);
+                for (zi = 0; zi < rs.count; zi++)
+                    if (rs.rotators[zi].angle != 0)
+                        live_turned++;
+
+                q2_event_rt_free(&rt);
+            }
+            q2_rotators_free(&rs);
+        }
+
+        if (have_common && have_trig) {
+            for (k = 0; k < tg.count; k++) {
+                q2_trigger tr;
+                bool in_c, in_z = false;
+
+                if (!q2_trigger_get(&tg, k, &tr))
+                    continue;
+                if (tr.event_offset == Q2_TRIGGER_NO_EVENT)
+                    continue;
+
+                t_total++;
+                in_c = offset_is_record(&cev, tr.event_offset);
+                for (zi = 0; zi < zcount; zi++)
+                    if (offset_is_record(&zev[zi], tr.event_offset))
+                        in_z = true;
+
+                if (in_c && in_z) t_both++;
+                else if (in_c)    t_common++;
+                else if (in_z)    t_zone++;
+                else              t_neither++;
+            }
+        }
+
+        for (zi = 0; zi < zcount; zi++)
+            q2_zone_close(&zf[zi]);
+        q2_common_close(&cf);
+    }
+
+    printf("\n  COMMON records    : %u\n", common_records);
+    printf("  zone records      : %u\n", zone_records);
+    printf("  zone Events byte-identical to COMMON's: %u of %u\n",
+           zone_same, zone_same + zone_diff);
+    printf("  zone named entries: %u\n", zone_dirs);
+    printf("\n  trigger volumes naming an event : %u\n", t_total);
+    printf("    resolves in COMMON only       : %u\n", t_common);
+    printf("    resolves in a ZONE only       : %u\n", t_zone);
+    printf("    resolves in both              : %u  (says nothing either way)\n",
+           t_both);
+    printf("    resolves in neither           : %u\n", t_neither);
+
+    printf("\n  maps whose highest trigger offset runs PAST the end of\n");
+    printf("    COMMON's Events chunk         : %u\n", past_common);
+    printf("    a ZONE's Events chunk         : %u\n", past_zone);
+
+    printf("\n  COMMON's script, fired by every trigger volume — what the\n"
+           "  console runs, since the zone loader never looks up \"Events\":\n");
+    printf("    rotators built  : %u\n", live_built);
+    printf("    CALL items run  : %u\n", live_calls);
+    printf("    rotation steps  : %u\n", live_steps);
+    printf("    tick-moves      : %u\n", live_moved);
+    printf("    rotators turned : %u\n", live_turned);
+        printf("\n  Record-start membership decides NOTHING: every offset"
+               " starts a record in both.\n");
+
+    return 0;
+}

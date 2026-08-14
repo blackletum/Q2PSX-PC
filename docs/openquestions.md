@@ -1856,9 +1856,9 @@ moved. Built and ticking is not turning, and the log says which.
 
 — **the hook now exists** (`q2_event_rt.on_call`) and `q2_rotator_trigger` is called through
 `q2_rotators_call`; disc-wide, 46 steps turn 47 rotators. The client still reports zero, for a
-different reason: its rotators come from COMMON's script and the rotation calls are in each
-zone's, which nothing runs. See "Rotating brushes turn, and the script that turns them is in the
-other file" below, and question 50.
+different reason: the demo pad had not walked into a volume that fires one. It does on LAB —
+`rot 1 steps 0 moved 1 turned` — and `rot moved` was the wrong statistic anyway, since a SNAP
+takes its whole rotation at trigger time and never tick-moves. See question 50 below.
 
 ## Nothing had ever opened the death screen
 
@@ -2187,7 +2187,7 @@ Single-zone BASE0 loses none of its ten, which is what says the test is measurin
       is outside.
       `src/game/aiworld.[ch]`; the counters are kept, and the client prints them next to every capture.
 
-## Rotating brushes turn, and the script that turns them is in the other file
+## Rotating brushes turn, and the script that turns them was the one we were already running
 
 The rotator set built last round never moved: `rot moved 0` on every map. Not a bug in the rotation — every
 kind returns early unless a step is pending (`0x8002F1B8`), and the step is consumed after one step
@@ -2201,25 +2201,35 @@ SIMROT* is a per-map question that `events_rt.[ch]` has no map to answer. What t
 four objects at +12..+18, ROTHATCH one at +18, ROTBUTTON one at +10) and two copies of that table would rot
 apart and turn the wrong geometry.
 
-Run over every script on the disc: **112 rotators built, 886 CALL items executed, 46 rotation steps requested,
-102 tick-moves, 47 rotators turned.** Before this, all five of those numbers after the first were zero.
+**In the client, playing:** LAB, demo pad, 900 frames — `rot 1 steps 0 moved 1 turned, 4 calls`. The player
+walks into a volume, the volume fires a record, the record calls a rotation primitive, and a rotator that was
+standing at zero is standing turned. Across the disc, firing every trigger volume once — a player who has
+walked every map — **26 rotators built, 552 CALL items run, 17 rotation steps, 13 rotators turned.**
 
-**But the client still shows none of it, and the reason is worth writing down.** The client builds its
-rotators from **COMMON's** Events, because that is the script its sim runs — and trigger volumes are parsed
-from COMMON.DAT, so their `event_offset` is an offset into COMMON's Events. That checks out: **886 of 886
-trigger volumes with an event name a record that exists in COMMON's own script**, so the sim fires the right
-chunk. The rotation calls are simply not there. They are in each **ZONE's** Events, which carry 2959 CALL
-items, 805 MOVER_A and 619 ZONEGATE across the disc — and *nothing in the port runs a zone's script at all*.
+- [x] 50. **What fires a zone's Events records? — NOTHING, and that is the console's own behaviour.**
+      RETRACTED, same day: this was written up as "the single largest piece of level behaviour still missing"
+      on the strength of a zone's Events chunk carrying 2959 CALL items, 805 movers and 619 zone gates that
+      the port never ran. **The engine never loads that chunk.** The zone loader (0x8007B3F8) looks its
+      chunks up by name — PrimaryColl, SecondaryCol, PrimaryRemap, Scene, Points, MapMod, MapNames, SortData,
+      SpaceLights, AreaConx, CastList, CreAIBin, CreAIRel — and `Events` is not among them. The image holds
+      exactly one copy of the string "Events" (0x800AD480) and exactly two references to it: COMMON's loader
+      at 0x8007AC30, whose match stores the chunk pointer into the events global 0x800AE774 (0x8007AD54), and
+      the teardown that clears the same global (0x8007C250). Every reader of that global — the load-time
+      pre-pass at 0x80026DC0, the execution dispatch at 0x80027950 — therefore reads COMMON's script and only
+      COMMON's. A zone's Events chunk is build output the retail engine ignores; 21 of 74 are byte-identical
+      to their map's COMMON one and 53 differ, and it makes no difference either way. **The port was already
+      running the right script.**
 
-- [ ] 50. **What fires a zone's Events records?** COMMON's are fired by trigger volumes, whose offsets all
-      resolve. A zone's script has its own record directory with named entries; the disc-wide harness fires
-      every one of them, which is a stand-in, not the engine's rule. Until this is answered the port runs
-      half of each level's scripting: no zone-local movers, no zone gates from a zone's own script, and no
-      rotation. This is the single largest piece of level behaviour still missing, and it was invisible while
-      the CALL opcode was being skipped.
+**Two counting tests were run before that and both decided nothing** — recorded so neither is repeated. All
+834 trigger offsets start a record in COMMON's script *and* in a zone's (an offset is just a number, and
+record starts are dense); and none runs past the end of either chunk. The commit before this one cited the
+first of those as evidence the sim fires the right chunk. It was not evidence. The disassembly is.
+
+The disc-wide figures in the previous commit — 112 rotators, 46 steps, 47 turned — were measured on the zone
+chunk and so describe data no console ever executes. The live figures are the 26/17/13 above.
 
 `render` grew an optional rotation-tick argument so a rotator can be looked at rather than counted: it builds
-the zone's rotators, drives them, frames the one that turns furthest and renders it. A negative count builds
+the map's rotators from COMMON's script, drives them, frames the one that turns furthest and renders it. A negative count builds
 and frames without turning, which is the "before" of a pair taken from one camera — zero could not serve,
 because zero also means "no rotators" and frames the whole zone instead. Two things that pass a count and
 fail an eye: a **SNAP rotator turns exactly 2048 of 4096 about its own centre**, and a symmetric brush at 180°

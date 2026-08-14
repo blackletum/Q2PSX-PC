@@ -747,6 +747,26 @@ static void client_creatures_tick(client *c, float dt, const s32 eye[3])
 }
 
 /*
+ * How many rotators are standing at an angle other than the one they started
+ * at. `rot moved` counts TICK movement and a SNAP never tick-moves — it takes
+ * its whole rotation the moment it is asked (0x8002BFD8) — so a level whose
+ * only rotator is a button reads as still while its geometry has turned.
+ */
+static u32 client_rot_turned(const client *c)
+{
+    u32 i, n = 0;
+
+    if (!c->rotators_ready)
+        return 0;
+
+    for (i = 0; i < c->rotators.count; i++)
+        if (c->rotators.rotators[i].angle != 0)
+            n++;
+
+    return n;
+}
+
+/*
  * A script CALL reached a rotation primitive: ask that node's rotator to take
  * one step.
  *
@@ -2509,13 +2529,14 @@ static void client_write_shot(client *c, bool numbered)
                 "nearest %d units, moved %ld, player %d hp, "
                 "%u swings %u shots, %u sounds, %u dead, %ld hp total, "
                 "player attacked %u, targets %u, bolts %u, "
-                "rot %u steps %u moved, %u calls",
+                "rot %u steps %u moved %u turned, %u calls",
                 live, hunting, c->cre_drawn, c->cre_faces, near_d, moved,
                 c->sim.combat.inv.health, c->cre_swings, c->cre_shots,
                 c->cre_sounds, dead, hp, c->player_attacks,
                 c->sim.combat.target_count,
                 c->sim.combat.projectiles.live, c->rot_steps,
-                c->rot_moved, c->sim.event_rt.call_count);
+                c->rot_moved, client_rot_turned(c),
+                c->sim.event_rt.call_count);
         Q2_INFO("  ai world  %u traces (%u unplaced, %u clear), "
                 "%u bottom (%u fail), %u los (%u blocked)",
                 c->ai_world.stats.traces, c->ai_world.stats.trace_unplaced,

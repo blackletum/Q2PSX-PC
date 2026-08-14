@@ -23,6 +23,7 @@
 #include "cmd_ai.h"
 #include "cmd_creatures.h"
 #include "cmd_weapons.h"
+#include "cmd_zonescript.h"
 #include "cmd_screen.h"
 #include "cmd_viewweapon.h"
 #include "cmd_surfaces.h"
@@ -153,6 +154,7 @@ static void usage(void)
     puts("  leveltable <disc>           dump the level table and check it against the disc");
     puts("  reloc   <disc>              relocate every AI module and census the fixups");
     puts("  events  <disc>              run every event script and census the opcodes");
+    puts("  zonescript <disc> [map]     which Events chunk a trigger fires");
     puts("  walk    <disc> <map> [z] [ticks]  drop a player in and simulate");
     puts("  textures <disc>             decode every compressed VRAM image");
     puts("  cluts   <disc>              check CLUT binding and UV rotation on every poly");
@@ -3569,9 +3571,15 @@ static int cmd_render(disc *d, const char *map, int zone_index, const char *out_
             q2_events      zev;
             q2_userfuncs   uf;
 
+            /*
+             * COMMON's Events, not the zone's. The zone file carries a chunk
+             * named Events too, and the engine never loads it — its loader does
+             * not look the name up. Building from it showed rotators no console
+             * ever turns.
+             */
             if (q2_zone_open(&zf, &zbuf) == Q2_OK &&
                 q2_common_open(&cf, &cbuf) == Q2_OK &&
-                q2_events_parse_zone(&zev, &zf) == Q2_OK &&
+                q2_events_parse_common(&zev, &cf) == Q2_OK &&
                 q2_userfuncs_parse(&uf, &cf) == Q2_OK &&
                 q2_rotators_build(&g_render_rot, &zev, &uf) == Q2_OK) {
                 u32 ri, moved = 0;
@@ -4674,11 +4682,24 @@ static int cmd_events(disc *d)
     printf("  movers built      : %u  (%u with no nodes)\n", movers_built, movers_empty);
     printf("  mover tick-moves  : %u\n", movers_moved);
     printf("  movers displaced  : %u  after 400 ticks\n", movers_open);
-    printf("  rotators built    : %u\n", rot_built);
+    /*
+     * These come from the ZONE scripts this command runs, and the engine never
+     * loads a zone's Events chunk: its loader looks up twelve chunk names by
+     * hand and Events is not among them, while the only two references to the
+     * "Events" string in the image are COMMON's loader (0x8007AC30, storing to
+     * 0x800AE774) and the teardown that clears it. So this exercises the
+     * format, not the console. `zonescript` measures the script that runs.
+     */
+    printf("  rotators built    : %u  (from ZONE scripts — see below)\n",
+           rot_built);
     printf("  CALL items run    : %u\n", rot_calls);
     printf("  rotation steps    : %u  requested by those calls\n", rot_steps);
     printf("  rotator tick-moves: %u\n", rot_moved);
     printf("  rotators turned   : %u  after 400 ticks\n", rot_turned);
+    printf("\n  NOTE: a zone's Events chunk is never loaded by the engine —\n"
+           "  the zone loader does not look the name up. The five numbers above\n"
+           "  exercise the format; `zonescript` measures COMMON's script, which\n"
+           "  is the one the trigger volumes fire.\n");
     printf("  triggers w/ event : %u, of which %u name a record in COMMON's"
            " own script\n", trig_with_event, trig_in_common);
 
@@ -5152,6 +5173,8 @@ int main(int argc, char **argv)
         rc = cmd_leveltable(d);
     } else if (strcmp(cmd, "reloc") == 0) {
         rc = cmd_reloc(d);
+    } else if (strcmp(cmd, "zonescript") == 0) {
+        rc = cmd_zonescript(d, argc >= 4 ? argv[3] : NULL);
     } else if (strcmp(cmd, "events") == 0) {
         rc = cmd_events(d);
     } else if (strcmp(cmd, "walk") == 0) {

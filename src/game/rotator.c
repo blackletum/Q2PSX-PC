@@ -221,16 +221,20 @@ void q2_rotator_trigger(q2_rotator_set *set, u32 index)
     rotator_fire(&set->rotators[index]);
 }
 
-void q2_rotator_trigger_node(q2_rotator_set *set, u32 node)
+u32 q2_rotator_trigger_node(q2_rotator_set *set, u32 node)
 {
-    u32 i;
+    u32 i, fired = 0;
 
     if (!set)
-        return;
+        return 0;
 
     for (i = 0; i < set->count; i++)
-        if (set->rotators[i].node >= 0 && (u32)set->rotators[i].node == node)
+        if (set->rotators[i].node >= 0 && (u32)set->rotators[i].node == node) {
             rotator_fire(&set->rotators[i]);
+            fired++;
+        }
+
+    return fired;
 }
 
 u32 q2_rotators_call(q2_rotator_set *set, const q2_userfuncs *uf,
@@ -256,8 +260,7 @@ u32 q2_rotators_call(q2_rotator_set *set, const q2_userfuncs *uf,
             node = q2_rd_s16(p + 12 + 2 * (s32)slot);
             if (node < 0)
                 break;              /* 0x80028628 stops at the first empty */
-            q2_rotator_trigger_node(set, (u32)node);
-            made++;
+            made += q2_rotator_trigger_node(set, (u32)node);
         }
         break;
 
@@ -266,8 +269,7 @@ u32 q2_rotators_call(q2_rotator_set *set, const q2_userfuncs *uf,
             break;
         node = q2_rd_s16(p + 18);
         if (node >= 0) {
-            q2_rotator_trigger_node(set, (u32)node);
-            made++;
+            made += q2_rotator_trigger_node(set, (u32)node);
         }
         break;
 
@@ -276,8 +278,7 @@ u32 q2_rotators_call(q2_rotator_set *set, const q2_userfuncs *uf,
             break;
         node = q2_rd_s16(p + 10);
         if (node >= 0) {
-            q2_rotator_trigger_node(set, (u32)node);
-            made++;
+            made += q2_rotator_trigger_node(set, (u32)node);
         }
         break;
 

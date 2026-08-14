@@ -176,13 +176,17 @@ q2_rotator *q2_rotators_add(q2_rotator_set *set, q2_rot_kind kind,
 /* What SIMROT's exec does (0x8002DEC8): request one step. */
 void q2_rotator_trigger(q2_rotator_set *set, u32 index);
 
-/* Request a step on every rotator bound to `node`. */
-void q2_rotator_trigger_node(q2_rotator_set *set, u32 node);
+/* Request a step on every rotator bound to `node`. Returns how many were
+ * actually asked, which is 0 when the script names a node this map binds no
+ * rotator to — a distinction a caller counting its own requests cannot make. */
+u32 q2_rotator_trigger_node(q2_rotator_set *set, u32 node);
 
 /*
  * The other half of the builder: a running script has reached a CALL item, so
- * ask the nodes it names to take a step. Returns how many requests it made,
- * and zero for any call that is not one of the four rotation primitives.
+ * ask the nodes it names to take a step. Returns how many ROTATORS were asked —
+ * not how many slots the item names, which is a different and more flattering
+ * number: a script may name a node this map binds no rotator to, and counting
+ * the request instead of the hit reports rotation where there is none.
  *
  * This lives beside `q2_rotators_build` because it must read the object slots
  * from exactly the same operand offsets, and those differ per primitive —
