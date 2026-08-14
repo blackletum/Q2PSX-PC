@@ -1774,6 +1774,30 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
 
 ---
 
+- [ ] 49. **The player cannot damage a creature.** The reverse direction works — a
+      Soldier takes the player from 100 to below zero — and this one does not, with
+      every intermediate step measured rather than assumed:
+
+        - the player fires: **195** ticks of `attack` over 1500 frames, and
+          `q2_sim_advance` calls `q2_sim_fire` on each;
+        - bolts exist: **5 to 7 live** in `combat.projectiles` at any moment;
+        - targets are registered: **22**, the whole placed set;
+        - the actors carry a radius: `q2_actor_init` sets 286 and
+          `q2_actor_from_monster` keeps it, and `Q2_HITSCAN_RADIUS` is the same 286;
+        - the actors are synced both ways around the tick, `from_monster` before and
+          `to_monster` after;
+        - and creature health is **200 total, unchanged, 0 dead** throughout.
+
+      The aim is not the explanation, which was the first guess and is now ruled out:
+      `--watch` turns the PLAYER as well as the camera, yaw and pitch both, so the
+      demo shoots at the nearest creature rather than on a timer into a wall. Adding
+      the pitch mattered — the creature is a storey down and level shots pass 975
+      units over it — and it changed nothing.
+      What is left is the segment test itself, `q2_combat_nearest_on_segment`, and
+      whether a bolt's per-tick step is being handed to it in the frame the actors
+      are in. The counters are printed beside every capture so the next pass starts
+      from numbers, exactly as the creature-attack chain did.
+
 ## The creature modules name their own animations
 
 Chasing the sound table turned up a third table beside it, and it is the more

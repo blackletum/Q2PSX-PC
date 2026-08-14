@@ -289,6 +289,7 @@ typedef struct client {
     u32               ai_thoughts;
     u32               cre_swings, cre_shots;   /* hook invocations */
     u32               cre_sounds;
+    u32               player_attacks;
     int               cre_last_sound;
     u32               cre_drawn;      /* creatures with faces in the last view */
     u32               cre_faces;
@@ -1262,6 +1263,8 @@ static void client_input_simulated(client *c, float dt)
                                   &c->creatures.set.monsters[i]);
     }
 
+    if (in.attack) c->player_attacks++;
+
     q2_sim_advance(&c->sim, &in, (double)dt);
 
     if (c->creatures_ready && c->cre_actor) {
@@ -1412,7 +1415,14 @@ static void client_input_simulated(client *c, float dt)
                                 (double)to[2] * to[2]);
             double p = atan2((double)to[1], horiz > 1.0 ? horiz : 1.0);
 
-            c->cam.yaw   = q2_vectoyaw(to);
+            /*
+             * The PLAYER is turned too, not just the camera. Without it the
+             * demo fires on a timer into whatever it happens to be facing, so
+             * a run could never show whether a shot hits a creature — measured
+             * as 135 creature shots against the player and zero damage the
+             * other way, which looked like a bug and was only ever the aim.
+             */
+            c->sim.player.yaw = (s16)q2_vectoyaw(to);
             /* +Y is down, so a target below the eye needs a positive pitch. */
             c->cam.pitch = (s32)(p * (double)Q2_ANGLE_360 /
                                  (2.0 * 3.14159265358979323846));
@@ -2222,7 +2232,8 @@ static void client_write_shot(client *c, bool numbered)
             c->shot_stats.ot_overflow);
 
     if (c->creatures_ready && c->creatures.set.count) {
-        u32 i, live = 0, hunting = 0;
+        u32 i, live = 0, hunting = 0, dead = 0;
+        long hp = 0;
         s32 near_d = -1;
         long moved = 0;
 
@@ -2230,9 +2241,9 @@ static void client_write_shot(client *c, bool numbered)
             const q2_monster *m = &c->creatures.set.monsters[i];
             s32 dx, dz, d;
 
-            if (!m->in_use || m->dead)
-                continue;
+            if (!m->in_use || m->dead) { if (m->dead) dead++; continue; }
             live++;
+            hp += m->health;
             if (m->enemy)
                 hunting++;
 
@@ -2247,10 +2258,13 @@ static void client_write_shot(client *c, bool numbered)
         }
         Q2_INFO("  creatures %u live, %u hunting, %u drawn (%u faces), "
                 "nearest %d units, moved %ld, player %d hp, "
-                "%u swings %u shots, %u sounds (last id %d)",
+                "%u swings %u shots, %u sounds, %u dead, %ld hp total, "
+                "player attacked %u, targets %u, bolts %u",
                 live, hunting, c->cre_drawn, c->cre_faces, near_d, moved,
                 c->sim.combat.inv.health, c->cre_swings, c->cre_shots,
-                c->cre_sounds, c->cre_last_sound);
+                c->cre_sounds, dead, hp, c->player_attacks,
+                c->sim.combat.target_count,
+                c->sim.combat.projectiles.live);
         Q2_INFO("  ai world  %u traces (%u unplaced, %u clear), "
                 "%u bottom (%u fail), %u los (%u blocked)",
                 c->ai_world.stats.traces, c->ai_world.stats.trace_unplaced,
