@@ -308,6 +308,8 @@ typedef struct client {
     u32               cre_swings, cre_shots;   /* hook invocations */
     u32               cre_sounds;
     u32               cre_sound_missing;
+    u32               ent_light_dropped;
+    u32               ent_burst_dropped;
     u32               player_attacks;
     u32               rot_moved;
     u32               rot_steps;   /* step requests the script has made */
@@ -2787,6 +2789,26 @@ static void client_entity_events(client *c)
     for (i = 0; i < ev->count; i++) {
         const char *name;
 
+        /*
+         * Only SOUND is acted on. The entity world also raises _LIGHT (a
+         * dynamic light of `glow` and `radius`) and _BURST (the pickup particle
+         * burst at 0x8005B6C0), and both are dropped here — counted rather than
+         * silently ignored, because "the client handles entity events" was true
+         * of one kind in three and nothing said so.
+         *
+         * Neither is guessed at: the port has no preset for a pickup burst —
+         * its seven are explosion, blood, BFG, gib, scripted, spark and laser
+         * end — and choosing one of those would invent an effect rather than
+         * reconstruct it. See openquestions #60.
+         */
+        if (ev->e[i].kind == Q2_ENT_EVENT_LIGHT) {
+            c->ent_light_dropped++;
+            continue;
+        }
+        if (ev->e[i].kind == Q2_ENT_EVENT_BURST) {
+            c->ent_burst_dropped++;
+            continue;
+        }
         if (ev->e[i].kind != Q2_ENT_EVENT_SOUND)
             continue;
 
@@ -3316,6 +3338,9 @@ static void client_write_shot(client *c, bool numbered)
                 c->sim[0].combat.projectiles.live, c->cre_bodies, c->rot_steps,
                 c->rot_moved, client_rot_turned(c),
                 c->sim[0].event_rt.call_count);
+        Q2_INFO("  entity ev %u lights dropped, %u bursts dropped",
+                c->ent_light_dropped, c->ent_burst_dropped);
+
         Q2_INFO("  attacks   %u checkattack (%u blind, %u decided, %u yes), "
                 "%u attack calls, %u missing",
                 q2_ai_stats.checkattack_calls, q2_ai_stats.checkattack_blind,

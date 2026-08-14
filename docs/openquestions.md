@@ -3345,6 +3345,34 @@ written by hand is the branch the decoder cannot recover, and everything else ru
 A `d` in the think list now marks an index that acts from a decoded action rather than a hand-written one, so
 the distinction is visible instead of being flattened into "missing".
 
+## The client acts on one entity event in three
+
+`client_entity_events` handled `Q2_ENT_EVENT_SOUND` and fell through everything else without a word. The
+entity world raises three kinds, and `item.c` raises the other two: the pickup particle burst at `item.c:759`
+(the original's `0x8005B6C0`) and the item glow light at `item.c:858`.
+
+Counted rather than asserted, over 900-frame captures:
+
+| map | lights dropped | bursts dropped |
+| --- | --- | --- |
+| BASE0 | 0 | 0 |
+| BASE1 | 0 | 0 |
+| LAB | 0 | 0 |
+| WASTE3 | 0 | **2** |
+
+**Two items were collected on WASTE3 and both bursts were discarded.** That is the useful half of the
+measurement in both directions: the inventory path works — a demo run walks over an item, the pickup fires,
+the entity world raises the burst — and the client throws the visual away. The events are now counted rather
+than silently ignored, so "the client handles entity events" stops being true of one kind in three with
+nothing saying so.
+
+- [ ] 60. **The pickup burst has no preset to draw it with.** The port has seven — explosion, blood, BFG,
+      gib, scripted, spark and laser end — and none of them is the pickup burst. Choosing one would invent
+      an effect rather than reconstruct it, so nothing is drawn yet. `0x8005B6C0` is the original's, and
+      reading its particle table is what this needs; the event carries the position and the glow colour
+      already, so only the preset is missing. The light event has not fired in any capture yet, so whether
+      the client's light world can take a transient is untested.
+
 ---
 
 ## ⚠ Security note (carried forward, do not drop)
