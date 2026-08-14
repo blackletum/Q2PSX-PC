@@ -469,6 +469,68 @@ bool q2_model_anim_by_length(const q2_model *m, u32 frames, u32 skip,
 u32 q2_model_anim_count(const q2_model *m);
 
 /*
+ * Block D — the NAMED MOVE table.
+ *
+ * Read off the bytes, not off a guess. BASE1 model 15 (31 clips, 31 moves):
+ *
+ *   44 65 61 74 68 31 00 00 00 00 00 00 00 00 D6 00 00 00 01 00  |Death1......|
+ *   50 61 69 6E 31 00 00 00 00 00 00 00 D8 00 F4 00 D8 00 01 00  |Pain1.......|
+ *   50 61 69 6E 32 00 00 00 00 00 00 00 F6 00 1E 01 F6 00 01 00  |Pain2.......|
+ *   41 74 74 61 63 6B 34 00 00 00 00 00 F2 01 14 02 14 02 01 00  |Attack4.....|
+ *
+ * So a record is `{char name[12]; u16 start; u16 end; u16 rest; u16 one}`, and
+ * the ranges TILE A CONTINUOUS TIMELINE with a two-unit gap between moves:
+ * 0..214, 216..244, 246..286, 288..394, 396..496, 498..532, 534..850, ...
+ * Across 92 moves on 14 zones: every span is EVEN, every gap is exactly 2, and
+ * `rest` is `end` on 77 and `start` on 15. `one` is 1 on 90 and 0 on exactly
+ * two — both a mover's move named "Move" — so it is a flag, not a constant.
+ *
+ * The even spans are what verifies the load-time multiply by 5. A move's frame
+ * count is `value * 5 / 10`, i.e. `span / 2`, which is only ever integral
+ * because every span is even — 92 for 92. Death1's 214 is 108 frames, Pain1's
+ * 28 is 15, "Fire 1 Ready"'s 4 is 3. Those are Quake II animation lengths.
+ *
+ * WHAT THIS TABLE IS NOT: the table `0x8007E9DC` walks. That one is reached
+ * through the entity's linked object (`entity+0x2EC`, then its `+0x28`) and is
+ * searched by containment —
+ *
+ *     find the record with  record[0] <= frame <= record[2]
+ *     position = record[18] + 30 * (frame - record[0])
+ *
+ * — reading a SIGNED halfword at +0 as the terminator. Block D's +0 is ASCII,
+ * so it can never terminate that walk. The runtime table is therefore built
+ * from block D at load rather than being block D, and the note at the top of
+ * this file claims the build multiplies `+12/+14/+16` by 5. **That
+ * transformation is unverified**, so nothing here feeds the animation path yet
+ * — see openquestions #51e.
+ *
+ * The surrounding facts are settled: the position is in tenths of an animation
+ * frame (`0x8006B5D8` divides by 10, magic 0x66666667, keeping the remainder
+ * as the lerp fraction), and the pose selector at `0x8006B924` consumes it out
+ * of `entity+0x100`, the halfword `0x8007E9DC` writes. See #51b, #51c, #51d.
+ */
+typedef struct q2_model_move {
+    char name[13];       /* 12 bytes on disc, NUL-padded; "Pain1", "Death4"   */
+    u16  start;          /* +12 — first position of the move on the timeline  */
+    u16  end;            /* +14 — last position, inclusive                    */
+    u16  rest;           /* +16 — equals start on some moves, end on others   */
+    u16  one;            /* +18 — 1 on every record seen so far               */
+} q2_model_move;
+
+/* Read move `index` from block D. False past the end of the table. */
+bool q2_model_move_get(const q2_model *m, u32 index, q2_model_move *out);
+
+/* How many moves block D holds. Zero if the model has none. */
+u32 q2_model_move_count(const q2_model *m);
+
+/* Find a move by name, case-sensitive as stored. False if there is none. */
+bool q2_model_move_by_name(const q2_model *m, const char *name,
+                           q2_model_move *out);
+
+/* Position units per AI frame within a move, from `0x8007EA44`. */
+#define Q2_MODEL_POS_PER_MOVE_FRAME 30
+
+/*
  * Decode every part's pose at `frame` of `clip` into `out`, which must hold
  * num_parts entries.
  *

@@ -2404,6 +2404,26 @@ static int cmd_model(disc *d, const char *map, const char *want, int clip_index,
         printf("\n  clip frames   : %u in total\n", total);
     }
 
+    /* Block D — the move table, and what the containment rule makes of it. */
+    {
+        u32 moves = q2_model_move_count(&mdl), i;
+        printf("  moves         : %u\n", moves);
+        for (i = 0; i < moves && i < 24; i++) {
+            q2_model_move mv, prev;
+            int gap = -1;
+            if (!q2_model_move_get(&mdl, i, &mv))
+                break;
+            if (i && q2_model_move_get(&mdl, i - 1, &prev))
+                gap = (int)mv.start - (int)prev.end;
+            printf("    move %-3u  %-12s %5u..%-5u  span %4u  rest %5u%s"
+                   "  one %u  gap %d\n",
+                   i, mv.name, mv.start, mv.end, mv.end - mv.start, mv.rest,
+                   mv.rest == mv.start ? " (=start)" :
+                   mv.rest == mv.end   ? " (=end)  " : " (?)     ",
+                   mv.one, gap);
+        }
+    }
+
     if (clip_count && (u32)clip_index < clip_count &&
         mdl.hdr.num_parts <= Q2PSX_ARRAY_COUNT(pose) &&
         q2_model_anim_get(&mdl, (u32)clip_index, &clip)) {

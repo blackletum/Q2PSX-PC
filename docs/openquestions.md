@@ -2408,6 +2408,37 @@ not think, and it does not walk.
       block D's `+12/+14/+16` are scaled at load. Those are about different fields, they do not conflict with
       a tenths-unit position, and 140 strict `x5` sites remain unexamined. The specific claim that a *loader*
       multiplies clip durations still has no disassembly behind it — but nothing now depends on it.
+
+- [x] 51e. **Block D read off the bytes: a NAMED move table, and it is not the table the engine walks.**
+      Going to implement the containment lookup, I wrote the parser from `0x8007E9DC`'s offsets — `first` at
+      +0, `last` at +2, `base` at +18 — and the dump came out as nonsense: "frames 25924..29793", every base
+      1, `last` below `first` on a third of the records. `25924` is `0x6544`. **It was ASCII.** The hex says:
+
+          44 65 61 74 68 31 00 00 00 00 00 00 00 00 D6 00 00 00 01 00  |Death1......|
+          50 61 69 6E 31 00 00 00 00 00 00 00 D8 00 F4 00 D8 00 01 00  |Pain1.......|
+          41 74 74 61 63 6B 34 00 00 00 00 00 F2 01 14 02 14 02 01 00  |Attack4.....|
+
+      A record is `{char name[12]; u16 start; u16 end; u16 rest; u16 one}`, and the moves **tile one
+      continuous timeline**: 0..214, 216..244, 246..286, 288..394, 396..496, 498..532, 534..850, ...
+
+      Censused over 14 zones, 92 moves: **every span even, every gap exactly 2, `rest` = `end` on 77 and
+      `start` on 15, `one` = 1 on 90** and 0 on exactly two — both a mover's move named "Move", so `one` is
+      a flag rather than the constant it looked like at n=31.
+
+      **The even spans verify the load-time multiply by 5** that 51d had to leave standing. A move's frame
+      count is `value * 5 / 10` = `span / 2`, integral only because every span is even — 92 for 92. Death1's
+      214 is 108 frames, Pain1's 28 is 15, "Fire 1 Ready"'s 4 is 3. Those are Quake II animation lengths, and
+      the multiply is now supported by data instead of by a comment.
+
+      **And block D is NOT the table `0x8007E9DC` walks.** That walk terminates on a *signed* halfword at +0;
+      block D's +0 is a name. So the runtime table is built from block D at load — different layout, scaled
+      by 5 — and the containment lookup cannot be implemented against the file format directly. That is why
+      this round ships the reader and the census but wires nothing into the animation path: the missing piece
+      is the load-time transform, not the lookup.
+
+      **Open as 51f: find the loader that builds the runtime move table from block D.** It should sit near
+      the 140 strict `x5` sites, which are now the obvious place to look.
+
 - [ ] ~~51. **The AI frame → model clip mapping drifts across a long move.**~~ `Q2_CRE_TICKS_PER_FRAME` is 3 and
       it lands the START of the Soldier's `Death1` correctly: posed at AI frames 310, 314, 318 and 322 the
       model is a body collapsing to the floor, progressively. But the move runs 308-342, and at 330 and 336

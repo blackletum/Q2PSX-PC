@@ -295,6 +295,83 @@ static bool anim_span(const q2_model *m, u32 *begin, u32 *end)
     return true;
 }
 
+/*
+ * Block D runs from ofs_block_d to the end of the model. A record is 20 bytes
+ * and a negative `first` ends the run, exactly as `0x8007EA08` reads it.
+ */
+static bool move_span(const q2_model *m, u32 *begin, u32 *end)
+{
+    if (!m || m->hdr.ofs_block_d == 0)
+        return false;
+    if (m->hdr.ofs_block_d + 20 > m->size)
+        return false;
+
+    *begin = m->hdr.ofs_block_d;
+    *end   = m->size;
+    return true;
+}
+
+bool q2_model_move_get(const q2_model *m, u32 index, q2_model_move *out)
+{
+    u32 begin, end, at;
+    const u8 *p;
+    s16 first;
+
+    if (!out || !move_span(m, &begin, &end))
+        return false;
+
+    at = begin + index * 20;
+    if (at + 20 > end)
+        return false;
+
+    p = m->base + at;
+
+    /*
+     * A record with no name and no range is the end of the run. Block D has no
+     * signed sentinel — its +0 is ASCII — so an all-zero head is the terminator
+     * the note describes as "a zero word".
+     */
+    if (p[0] == 0 && q2_rd_u16(p + 12) == 0 && q2_rd_u16(p + 14) == 0)
+        return false;
+
+    memcpy(out->name, p, 12);
+    out->name[12] = '\0';
+    out->start = q2_rd_u16(p + 12);
+    out->end   = q2_rd_u16(p + 14);
+    out->rest  = q2_rd_u16(p + 16);
+    out->one   = q2_rd_u16(p + 18);
+    return true;
+}
+
+bool q2_model_move_by_name(const q2_model *m, const char *name,
+                           q2_model_move *out)
+{
+    q2_model_move mv;
+    u32 i = 0;
+
+    if (!name || !out)
+        return false;
+
+    while (q2_model_move_get(m, i, &mv)) {
+        if (strcmp(mv.name, name) == 0) {
+            *out = mv;
+            return true;
+        }
+        i++;
+    }
+    return false;
+}
+
+u32 q2_model_move_count(const q2_model *m)
+{
+    q2_model_move mv;
+    u32 n = 0;
+
+    while (q2_model_move_get(m, n, &mv))
+        n++;
+    return n;
+}
+
 /* A clip's header is 8 bytes plus one 4-byte entry per frame. */
 static bool anim_read(const q2_model *m, u32 offset, u32 end, q2_model_anim *out)
 {
