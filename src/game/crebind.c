@@ -241,11 +241,15 @@ bool q2_cre_set_move(q2_monster *m, s32 first_frame)
 extern const q2_cre_impl q2_cre_soldier;
 extern const q2_cre_impl q2_cre_tankcomm;
 extern const q2_cre_impl q2_cre_gunner;
+extern const q2_cre_impl q2_cre_infantry;
+extern const q2_cre_impl q2_cre_arachner;
 
 static const q2_cre_impl *const g_impls[] = {
     &q2_cre_soldier,
     &q2_cre_tankcomm,
     &q2_cre_gunner,
+    &q2_cre_infantry,
+    &q2_cre_arachner,
     NULL
 };
 

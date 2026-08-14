@@ -2881,6 +2881,46 @@ which is `M_137_143`'s first frame. It still fires nothing, and the census says 
       (`resolve_endfunc`), so either the chain is not firing or the move it names is not the one the census
       thinks. Sixteen of the disc's 101 moves are `via == -1` and this is the first one shown to matter.
 
+## The Infantry and the Arachner, and one attack that declines
+
+Two more attack callbacks read and written. Four of the seven modules now have one; the Berserk and the
+Insane have no attack callback at all, which is correct — they are melee creatures — so the ranged set is
+complete except for the Soldier, which was transcribed long ago.
+
+**Infantry**, `module+0x1848`, the shortest of the four:
+
+    v0   = q2_range(self, self->enemy);
+    move = (v0 != 0) ? M_184_198 : M_199_206;
+
+One range test, no roll. Both moves shoot — 199-206 carries think 11, a melee plus `call(+0xFC)`; 184-198
+carries think 8, `call(+0x84)` — so the generic handler's choice was not silent, merely always the
+close-quarters one.
+
+**Arachner**, `module+0x12CC`, the only one so far that can DECLINE:
+
+    v    = self->origin - enemy->origin;
+    dist = length(v);
+    if (dist < 1053) return;                       ; installs nothing
+    self->[0x5C..] = enemy->origin;
+    self->[0x60]  += enemy->[0x4C];
+    move = (|v.x| + |v.z| < |v.y|) ? M_94_109 : M_130_132;
+
+Two things the generic handler could not have expressed. It **installs nothing** below 1053 units, so a close
+Arachner carries on with whatever it was playing — `set_via` always installs something. And the choice is
+**vertical**: `|dx| + |dz| < |dy|` asks whether the target is further away up-or-down than along the floor,
+which for a creature that walks walls is the question that decides the attack. Not a range band, not a roll.
+94-109 is the rail (thinks 3 and 4, both `call(+0x8C)`); 130-132 is a three-frame gesture with no think at
+all.
+
+The `self->[0x5C]` block the original fills with the enemy's origin, and the accumulation into `self->[0x60]`,
+are not written: what reads them is not established and neither affects which move is installed.
+
+**Neither was observed firing in a capture.** POWER1 reports `1 fire calls: 1 sent`, but the think hits there
+are 2, 6, 7 and 13 — the Gunner's, since that zone carries one. POWER2's Infantry does not reach a single
+attack in 500 frames. That is the same limit as ever: these creatures engage rarely in a scripted demo run,
+and a capture long enough to catch one costs more than the harness has. The transcriptions are read from the
+disassembly and tested for regressions; they are not yet confirmed in play, and this says so.
+
 ---
 
 ## ⚠ Security note (carried forward, do not drop)
