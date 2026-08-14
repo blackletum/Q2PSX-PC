@@ -3034,10 +3034,19 @@ not, and `zonescript` now says so in the output rather than leaving it to be inf
       usable        : 26
     rotators built  : 26  (one per object slot each call names)
 
-Ninety-five CALL items across the disc name a rotation primitive. **Sixty-nine of them have -1 in their first
-object slot**, and the original's constructor stops at the first negative one — `0x80028628`, recorded in
-`rotator.h` since the builder was written. Those calls install nothing on the console either. Not one item is
-too short to hold its operands.
+Ninety-five CALL items across the disc name a rotation primitive. **Sixty-nine of them have -1 in EVERY
+object slot**, so they install nothing on the console either. Not one item is too short to hold its operands.
+
+That sentence used to say "in their first object slot", on the strength of a note in `rotator.h` claiming the
+constructor stops at the first negative one. **It does not stop, it skips.** `0x80028628` is
+`bltz v0, 0x8002875C`, and `0x8002875C` is the loop's own increment — `s1 += 2; s4 += 1; if (s4 < 4) loop` —
+so the constructor moves to the next of the four and carries on. The port implemented the note rather than
+the code, with a `break` where the original has a `continue`, and would have discarded every rotator in a
+call that had a gap before it.
+
+Fixed in both places that walk the slots. The count does not move: checking all four instead of the first
+still finds 69 calls with nothing in any of them, which is why the bug was invisible on this disc. It would
+not have stayed invisible on a mod.
 
 So the ratio that matters is **26 of 26 usable calls build a rotator**, and the port skips nothing the
 hardware does not. A disc-wide count of what a system *could* act on is only a denominator if the data

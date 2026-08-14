@@ -264,8 +264,21 @@ int cmd_zonescript(const disc *d, const char *only_map)
                                 case Q2_UF_SIMROT:
                                 case Q2_UF_SIMROT2:
                                     need = 24;
-                                    if (item.len >= need)
-                                        first_obj = q2_rd_s16(pp + 12);
+                                    /* ANY of the four, since a negative slot is
+                                     * skipped rather than terminating the loop
+                                     * (0x80028628 branches to the increment). */
+                                    if (item.len >= need) {
+                                        u32 sl;
+
+                                        for (sl = 0; sl < 4; sl++) {
+                                            s16 nd = q2_rd_s16(pp + 12 + 2 * (s32)sl);
+
+                                            if (nd >= 0) {
+                                                first_obj = nd;
+                                                break;
+                                            }
+                                        }
+                                    }
                                     break;
                                 case Q2_UF_ROTHATCH:
                                     need = 20;
@@ -386,7 +399,7 @@ int cmd_zonescript(const disc *d, const char *only_map)
            rot_prim_calls);
     printf("      too short     : %u  (the item cannot hold the operands)\n",
            rot_too_short);
-    printf("      no object     : %u  (first object slot is -1)\n",
+    printf("      no object     : %u  (every slot the call has is -1)\n",
            rot_no_object);
     printf("      usable        : %u\n", rot_usable);
     printf("    rotators built  : %u  (one per object slot each call names)\n",

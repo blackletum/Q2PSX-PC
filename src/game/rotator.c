@@ -94,13 +94,22 @@ q2_result q2_rotators_build(q2_rotator_set *out, const q2_events *events,
                 speed = q2_rd_s16(p + 4);
                 axis  = (u8)(q2_rd_u16(p + 20) & 3u);
 
-                /* Four object slots at +12, +14, +16, +18; the constructor
-                 * stops at the first negative one (0x80028628). */
+                /*
+                 * Four object slots at +12, +14, +16, +18. A negative one is
+                 * SKIPPED, not a terminator.
+                 *
+                 * `0x80028628` is `bltz v0, 0x8002875C`, and that target is the
+                 * loop's own increment — `s4++`, `if (s4 < 4) loop` — so the
+                 * constructor moves to the next slot and keeps going. This read
+                 * it as a break, which is the difference between "the rest of
+                 * this call is empty" and "this one slot is", and it silently
+                 * discarded every rotator whose call had a gap before it.
+                 */
                 for (slot = 0; slot < 4; slot++) {
                     s16 node = q2_rd_s16(p + 12 + 2 * (s32)slot);
 
                     if (node < 0)
-                        break;
+                        continue;
                     if (!q2_rotators_add(out, Q2_ROT_ACCUM, node, axis, speed)) {
                         q2_rotators_free(out);
                         return Q2_ERR_NO_MEMORY;
@@ -259,7 +268,7 @@ u32 q2_rotators_call(q2_rotator_set *set, const q2_userfuncs *uf,
         for (slot = 0; slot < 4; slot++) {
             node = q2_rd_s16(p + 12 + 2 * (s32)slot);
             if (node < 0)
-                break;              /* 0x80028628 stops at the first empty */
+                continue;           /* 0x80028628 SKIPS an empty slot */
             made += q2_rotator_trigger_node(set, (u32)node);
         }
         break;
