@@ -253,12 +253,56 @@ static void test_damage(void)
         check_eq_i(target.health, 100 - 31, "but not player-on-player");
     }
 
-    /* A creature whose module owns its health is posted to, not decremented. */
-    place(&target, 0, 0, 0, 100);
-    target.ai_owned = true;
-    r = q2_combat_damage(NULL, &target, 40, Q2_MOD_BULLET, NULL, &rules);
-    check(r.posted_to_ai, "an AI-owned creature is posted to");
-    check_eq_i(target.health, 100, "and its health is left to the module");
+    /*
+     * The surprise bonus, 0x800628C8. Replaces a test asserting that a
+     * module-driven creature has its damage posted to the AI rather than
+     * subtracted, which the disassembly does not support — T_Damage subtracts
+     * at 0x80062958 and the call that claim rested on passes a different
+     * entity entirely.
+     */
+    {
+        q2_actor mob;
+
+        place(&mob, 0, 0, 0, 100);
+        mob.is_monster = true;
+        mob.has_enemy  = false;
+        attacker.has_client = true;
+        r = q2_combat_damage(&attacker, &mob, 20, Q2_MOD_BULLET, NULL, &rules);
+        check(r.surprised, "an unaware monster is surprised");
+        check_eq_i(mob.health, 100 - 40, "and takes double");
+
+        /* Once it has an enemy the bonus is gone. */
+        place(&mob, 0, 0, 0, 100);
+        mob.is_monster = true;
+        mob.has_enemy  = true;
+        r = q2_combat_damage(&attacker, &mob, 20, Q2_MOD_BULLET, NULL, &rules);
+        check(!r.surprised, "a monster that has seen you is not");
+        check_eq_i(mob.health, 100 - 20, "and takes the plain amount");
+
+        /* And a monster shot by another monster never gets it. */
+        place(&mob, 0, 0, 0, 100);
+        mob.is_monster = true;
+        attacker.has_client = false;
+        r = q2_combat_damage(&attacker, &mob, 20, Q2_MOD_BULLET, NULL, &rules);
+        check(!r.surprised, "nor one shot by something with no client");
+    }
+
+    /* Godmode and the knockback flag, 0x8006292C and 0x8006291C. */
+    {
+        q2_actor god;
+
+        place(&god, 0, 0, 0, 100);
+        god.godmode = true;
+        r = q2_combat_damage(NULL, &god, 40, Q2_MOD_BULLET, NULL, &rules);
+        check_eq_i(god.health, 100, "godmode takes nothing");
+        check_eq_i(r.taken, 0, "and reports nothing taken");
+    }
+
+    /* A corpse floors at -9999 however hard it is hit. */
+    place(&target, 0, 0, 0, 10);
+    r = q2_combat_damage(NULL, &target, 30000, Q2_MOD_BULLET, NULL, &rules);
+    check(r.killed, "a big hit kills");
+    check_eq_i(target.health, Q2_HEALTH_FLOOR, "and health floors at -9999");
 }
 
 static void test_knockback(void)

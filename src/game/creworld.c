@@ -358,6 +358,29 @@ u32 q2_creature_world_tick(q2_creature_world *w, const s32 player_eye[3])
     return q2_monster_set_tick(&w->set);
 }
 
+/* Case-insensitive substring, over a name that is not NUL-terminated in the
+ * module image beyond 16 bytes. */
+static bool name_has_word(const char *name, const char *word)
+{
+    u32 i, j;
+
+    for (i = 0; i < 16 && name[i]; i++) {
+        for (j = 0; word[j]; j++) {
+            char a = name[i + j];
+            char b = word[j];
+
+            if (a >= 'A' && a <= 'Z')
+                a = (char)(a - 'A' + 'a');
+            if (a != b)
+                break;
+        }
+        if (!word[j])
+            return true;
+    }
+
+    return false;
+}
+
 const char *q2_creature_world_model_name(const q2_creature_world *w,
                                          const q2_monster *m)
 {
@@ -370,6 +393,69 @@ const char *q2_creature_world_model_name(const q2_creature_world *w,
 
     i = (size_t)(m - w->set.monsters);
     return w->model_name[i][0] ? w->model_name[i] : NULL;
+}
+
+/*
+ * The first frame of the module's death animation, or -1.
+ *
+ * A creature's module names its own moves — a 20-byte {char[16], u16 first,
+ * u16 last} record matched to a move by frame range — and every module on the
+ * disc that carries names has at least one whose name says death. That name is
+ * the only thing that identifies it: the moves are a flat list in frame order
+ * with nothing marking their role.
+ *
+ * This exists because a killed creature FROZE. The body was still drawn — the
+ * draw loop only checks `in_use` — but `q2_monster_set_tick` skipped anything
+ * with `dead` set, so it stood in whatever pose the shot caught it in, mid
+ * stride, forever. T_Damage ends by calling the entity's `die` at entity+0xA4
+ * (0x80062A9C); this is the part of what a module's die does that can be
+ * reconstructed from the module's own data rather than from its code.
+ */
+s32 q2_creature_world_death_frame(const q2_creature_world *w,
+                                  const q2_monster *m)
+{
+    static const char *const k_words[] = { "death", "die", "dead", NULL };
+    const q2_creature_module *mod = NULL;
+    const char *names[Q2_CRE_MAX_MOVES];
+    u32 i, k, named;
+
+    if (!w || !m)
+        return -1;
+
+    /* `class_id` is the module`s class BYTE after spawning, not the Population
+     * id — see the header. That byte is what identifies the module. */
+    for (i = 0; i < w->mod_count; i++) {
+        u32 j;
+
+        if (!w->mod[i].ready)
+            continue;
+        for (j = 0; j < w->mod[i].cre.class_count; j++)
+            if (w->mod[i].cre.class_byte[j] == m->class_id) {
+                mod = &w->mod[i];
+                break;
+            }
+        if (mod)
+            break;
+    }
+
+    if (!mod)
+        return -1;
+
+    memset(names, 0, sizeof(names));
+    named = q2_creature_move_names(&mod->cre, mod->image, mod->size, names,
+                                   (u32)(sizeof(names) / sizeof(names[0])));
+    if (!named)
+        return -1;
+
+    for (i = 0; i < mod->cre.move_count; i++) {
+        if (!names[i])
+            continue;
+        for (k = 0; k_words[k]; k++)
+            if (name_has_word(names[i], k_words[k]))
+                return mod->cre.move[i].first_frame;
+    }
+
+    return -1;
 }
 
 void q2_creature_world_free(q2_creature_world *w)

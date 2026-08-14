@@ -155,7 +155,29 @@ u32 q2_monster_set_tick(q2_monster_set *set)
     for (i = 0; i < set->count; i++) {
         q2_monster *m = &set->monsters[i];
 
-        if (!m->in_use || m->dead || !m->think)
+        if (!m->in_use)
+            continue;
+
+        /*
+         * A corpse still animates. It does NOT think: the AI is what decides
+         * where to walk and who to shoot, and a dead creature does neither —
+         * but its death move has to play out, and it only plays if something
+         * advances the frame. Running the driver alone is the whole of the
+         * difference between a body that falls and a body that freezes
+         * mid-stride on the frame it was killed, which is what this did before.
+         *
+         * `q2_M_MoveFrame` stops of its own accord at a move with no next, so a
+         * finished death animation holds its last frame rather than looping.
+         */
+        if (m->dead) {
+            if (m->currentmove) {
+                q2_M_MoveFrame(m);
+                ran++;
+            }
+            continue;
+        }
+
+        if (!m->think)
             continue;
         if (m->next_think > q2_level_state.time)
             continue;

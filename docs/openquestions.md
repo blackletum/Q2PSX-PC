@@ -2239,6 +2239,43 @@ rotation on.
 
 ---
 
+## The damage function does not post to the AI, and a corpse now falls over
+
+`q2_actor.ai_owned` carried this: *"a creature with a module posts rather than subtracts: 0x800584B4 hands the
+amount to 0x800627F8 and jumps past the health store"*. It does not. **0x800627F8 is T_Damage**, with id's own
+argument order and id's own content, and it subtracts health itself at 0x80062958 into `(entity+0x24)+0x108`.
+The call at 0x800584B4 passes a DIFFERENT entity — the one at `entity+0x2EC` — and the caller has already
+stored its own target's health at 0x800583F8. There is no posting anywhere. The flag was never set true, so
+deleting it changed no behaviour; what it had been hiding was three things T_Damage really does, now
+transcribed:
+
+- **the surprise bonus** (0x800628C8-0x80062910): `svflags & SVF_MONSTER`, attacker has a client block,
+  `!targ->enemy`, `targ->health > 0` → damage doubles. Four conditions, id's exactly. The first shot on a
+  creature that has not noticed you is worth two.
+- **FL_NO_KNOCKBACK** (0x800, 0x8006291C) zeroes the impulse and nothing else; **FL_GODMODE** (0x10,
+  0x8006292C) zeroes the damage.
+- **the corpse floor** (0x800629B4): health stops at -9999 however hard a body is hit.
+
+T_Damage ends by calling the entity's own `die` at `entity+0xA4` (0x80062A9C) or its `pain` at `entity+0xA0`
+(0x80062AF4). Neither had a caller here: `pain` and `die` are decoded into every creature's callback table and
+nothing ever dispatched them. What can be reconstructed from a module's DATA rather than its code is the
+animation, and that is now wired — every one of the seven modules names a death move (`Death1`, `Death 4`,
+`St Death`, `Death 2`, `Death`, `Death3`, `Death2`), matched by frame range, so a kill installs it.
+
+**`q2_monster_set_tick` skipped anything with `dead` set**, which is why this mattered. The body was still
+drawn — the draw loop only checks `in_use` — so a killed Soldier stood in whatever pose the shot caught it in,
+mid-stride, for the rest of the level. A corpse now runs the frame driver and not the AI: it animates, it does
+not think, and it does not walk.
+
+- [ ] 51. **The AI frame → model clip mapping drifts across a long move.** `Q2_CRE_TICKS_PER_FRAME` is 3 and
+      it lands the START of the Soldier's `Death1` correctly: posed at AI frames 310, 314, 318 and 322 the
+      model is a body collapsing to the floor, progressively. But the move runs 308-342, and at 330 and 336
+      the same creature is standing upright again — the timeline has walked into the next clip well before
+      the move ends. Either the move's frame range and the model's clip lengths do not correspond one to one
+      for this creature, or the tick scale is not a constant 3 across the whole timeline. The measurement that
+      established 3 used the first four moves, which are consecutive and short; nothing checked a move 35
+      frames long. `q2psx-inspect mob <disc> <map> <zone> <n> <out.ppm> <ai-frame>` is what took those poses.
+
 ---
 
 ## ⚠ Security note (carried forward, do not drop)

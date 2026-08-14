@@ -80,10 +80,8 @@ void q2_actor_from_monster(q2_actor *a, const q2_monster *m)
     a->health     = m->health;
     a->gib_health = m->gib_health;
     a->has_client = false;
-    /* Every spawned creature is driven by a relocated module, so the module
-     * owns its health — see the header. The port's own creatures do not have
-     * one yet, so this stays false until a module is bound. */
-    a->ai_owned = false;
+    a->is_monster = (m->svflags & Q2_SVF_MONSTER) != 0;
+    a->has_enemy  = (m->enemy != NULL);
 }
 
 void q2_actor_to_monster(const q2_actor *a, q2_monster *m)
@@ -309,7 +307,8 @@ q2_damage_result q2_combat_damage(q2_actor *attacker, q2_actor *target,
 
     /* Knockback comes first and does not care about armour: 0x80057EC0 runs
      * before any absorption, and only when a point was supplied. */
-    if (point && q2_mod_knocks_back(mod))
+    /* 0x8006291C: FL_NO_KNOCKBACK zeroes the impulse and nothing else. */
+    if (point && q2_mod_knocks_back(mod) && !target->no_knockback)
         apply_knockback(attacker, target, damage, point, rules);
 
     /*
@@ -363,13 +362,25 @@ q2_damage_result q2_combat_damage(q2_actor *attacker, q2_actor *target,
         return out;
 
     /*
-     * A creature with a module posts rather than subtracts: 0x800584B4 hands
-     * the amount to 0x800627F8 and jumps past the health store. Only brainless
-     * entities and players are decremented here.
+     * Both of these sit INSIDE T_Damage (0x800627F8), after the absorption the
+     * caller has already done — so they scale what armour left, not what the
+     * weapon started with. It makes no difference to a creature, which has no
+     * armour, and it would to a player who ever acquired SVF_MONSTER.
+     *
+     * The surprise bonus, 0x800628C8-0x80062910: a monster that has not
+     * acquired an enemy takes double from an attacker with a client block,
+     * while it is still alive. Four conditions, in the original's order.
      */
-    if (target->ai_owned && !target->has_client) {
-        out.posted_to_ai = true;
-        out.taken = (s16)amount;
+    if (target->is_monster && !target->has_enemy && was_alive &&
+        attacker && attacker->has_client) {
+        amount *= 2;
+        out.surprised = true;
+    }
+
+    /* 0x8006292C: godmode zeroes the damage. The engine's exemption is a
+     * dflags bit (0x20) that no caller in this port sets. */
+    if (target->godmode) {
+        out.surprised = false;
         return out;
     }
 
@@ -379,6 +390,11 @@ q2_damage_result q2_combat_damage(q2_actor *attacker, q2_actor *target,
     if (was_alive && target->health <= 0) {
         out.killed = true;
         out.gibbed = target->health <= target->gib_health;
+
+        /* 0x800629B4: a corpse's health floors at -9999, so a rocket into an
+         * already-dead body cannot run it down forever. */
+        if (target->health < Q2_HEALTH_FLOOR)
+            target->health = Q2_HEALTH_FLOOR;
     }
 
     {

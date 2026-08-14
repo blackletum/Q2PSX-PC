@@ -179,6 +179,9 @@ void q2_combat_rules_default(q2_combat_rules *r);
 #define Q2_ENV_THROTTLE_ACID   400
 #define Q2_ENV_THROTTLE_LAVA   100
 
+/* 0x800629B4: how far below zero a corpse's health is allowed to run. */
+#define Q2_HEALTH_FLOOR (-9999)
+
 /* ------------------------------------------------------------------------- */
 /* An actor: anything that can be hurt                                        */
 /*                                                                            */
@@ -205,9 +208,25 @@ typedef struct q2_actor {
     s32  protect_until;     /* client+0xB4                                   */
     s32  env_next;          /* client+0x94, the throttle for mods 9 and 10   */
 
-    /* True when a creature module owns this actor's health, in which case the
-     * damage function posts to it instead of subtracting. */
-    bool ai_owned;
+    /*
+     * What T_Damage (0x800627F8) reads to decide the surprise bonus: a monster
+     * that has not acquired an enemy yet takes DOUBLE from a shot fired by
+     * something with a client block, while it is still alive.
+     *
+     * This replaces an `ai_owned` flag that claimed a module-driven creature
+     * has its damage POSTED to the AI rather than subtracted. It does not: the
+     * subtraction is at 0x80062958, into (entity+0x24)+0x108, and the call at
+     * 0x800584B4 that the claim rested on passes a DIFFERENT entity — the one
+     * at entity+0x2EC — while the caller has already stored the target's own
+     * health at 0x800583F8. The flag was never set to true, so nothing changed
+     * when it went; what changed is that the surprise bonus now exists.
+     */
+    bool is_monster;        /* svflags & SVF_MONSTER, entity+0x40 bit 2      */
+    bool has_enemy;         /* entity+0xBC != NULL                           */
+
+    /* entity+0x20. Only the two bits the damage function tests are modelled. */
+    bool no_knockback;      /* FL_NO_KNOCKBACK, 0x800: knockback forced to 0 */
+    bool godmode;           /* FL_GODMODE, 0x10: damage forced to 0          */
 
     /* Written by the damage function. */
     s32  knockback[3];      /* entity+0x2F8..0x2FC                           */
@@ -235,7 +254,7 @@ typedef struct q2_damage_result {
     bool blocked;           /* invulnerable, or throttled                     */
     bool killed;            /* health crossed zero on this hit                */
     bool gibbed;            /* and went below gib_health                      */
-    bool posted_to_ai;      /* the AI module owns the subtraction             */
+    bool surprised;         /* the ×2 bonus applied — 0x800628F8              */
 } q2_damage_result;
 
 /*

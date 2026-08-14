@@ -17,6 +17,7 @@
 
 #include "ai.h"
 #include "aimove.h"
+#include "spawn.h"
 #include "trig.h"
 
 static int g_failures;
@@ -1179,6 +1180,42 @@ static void test_frame_driver(void)
     m.class_id = 5;
     q2_M_MoveFrame(&m);
     check_eq_i(m.next_think, 501, "the think re-arms for the next tick");
+
+    /*
+     * A corpse animates and does not think. The set tick used to skip anything
+     * with `dead` set, which left a killed creature standing in whatever pose
+     * the shot caught it in — drawn, because the draw loop only checks
+     * `in_use`, but frozen mid-stride forever.
+     */
+    {
+        q2_monster_set set;
+        q2_monster *d;
+
+        memset(&set, 0, sizeof(set));
+        set.monsters = &m;
+        set.count    = 1;
+
+        m.class_id    = 5;
+        m.currentmove = &move;
+        m.frame       = 10;
+        m.dead        = true;
+        m.in_use      = true;
+        m.think       = NULL;       /* a corpse has no AI to run */
+        d = &m;
+
+        q2_monster_set_tick(&set);
+        check_eq_i(d->frame, 11, "a dead monster's death move still advances");
+
+        q2_monster_set_tick(&set);
+        q2_monster_set_tick(&set);
+        check_eq_i(d->frame, 13, "up to its last frame");
+
+        /* And holds there: the move has an endfunc that installs nothing. */
+        q2_monster_set_tick(&set);
+        check_eq_i(d->frame, 10, "then the move restarts, as this one loops");
+
+        m.dead = false;
+    }
 
     q2_class_table_reset();
     q2_ai_set_world(NULL);

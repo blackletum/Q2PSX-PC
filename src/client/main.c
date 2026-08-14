@@ -299,6 +299,7 @@ typedef struct client {
     u32               vw_events;
     s16               vw_last_event;
     int               cre_last_sound;
+    u32               cre_bodies;     /* deaths that found a death move        */
     u32               cre_drawn;      /* creatures with faces in the last view */
     u32               cre_faces;
     s32              *cre_home;      /* where each creature spawned          */
@@ -1461,9 +1462,31 @@ static void client_input_simulated(client *c, float dt)
 
     if (c->creatures_ready && c->cre_actor) {
         u32 i;
-        for (i = 0; i < c->creatures.set.count; i++)
-            q2_actor_to_monster(&c->cre_actor[i],
-                                &c->creatures.set.monsters[i]);
+        for (i = 0; i < c->creatures.set.count; i++) {
+            q2_monster *m    = &c->creatures.set.monsters[i];
+            bool        was  = m->dead;
+
+            q2_actor_to_monster(&c->cre_actor[i], m);
+
+            /*
+             * The frame it died on. T_Damage ends by calling the entity's own
+             * `die` (entity+0xA4, 0x80062A9C); what can be reconstructed from
+             * the module's data rather than its code is the animation, so the
+             * body is put into its death move and left to play it out.
+             *
+             * Without this a killed creature simply vanished — the tick and the
+             * draw both skipped anything with `dead` set, so a Soldier shot
+             * dead was gone on the frame it died.
+             */
+            if (!was && m->dead) {
+                s32 f = q2_creature_world_death_frame(&c->creatures, m);
+
+                if (f >= 0 && q2_cre_set_move(m, f)) {
+                    m->frame     = (s16)f;
+                    c->cre_bodies++;
+                }
+            }
+        }
     }
 
     /*
@@ -2528,13 +2551,13 @@ static void client_write_shot(client *c, bool numbered)
         Q2_INFO("  creatures %u live, %u hunting, %u drawn (%u faces), "
                 "nearest %d units, moved %ld, player %d hp, "
                 "%u swings %u shots, %u sounds, %u dead, %ld hp total, "
-                "player attacked %u, targets %u, bolts %u, "
+                "player attacked %u, targets %u, bolts %u, %u bodies, "
                 "rot %u steps %u moved %u turned, %u calls",
                 live, hunting, c->cre_drawn, c->cre_faces, near_d, moved,
                 c->sim.combat.inv.health, c->cre_swings, c->cre_shots,
                 c->cre_sounds, dead, hp, c->player_attacks,
                 c->sim.combat.target_count,
-                c->sim.combat.projectiles.live, c->rot_steps,
+                c->sim.combat.projectiles.live, c->cre_bodies, c->rot_steps,
                 c->rot_moved, client_rot_turned(c),
                 c->sim.event_rt.call_count);
         Q2_INFO("  ai world  %u traces (%u unplaced, %u clear), "

@@ -171,6 +171,14 @@ u32 q2_creature_world_tick(q2_creature_world *w, const s32 player_eye[3]);
 const char *q2_creature_world_model_name(const q2_creature_world *w,
                                          const q2_monster *m);
 
+/*
+ * The first frame of this creature's death move, or -1 when its module carries
+ * no named move that says death. Pair it with `q2_cre_set_move` to put a body
+ * into its death animation instead of deleting it.
+ */
+s32 q2_creature_world_death_frame(const q2_creature_world *w,
+                                  const q2_monster *m);
+
 void q2_creature_world_free(q2_creature_world *w);
 
 #endif /* Q2PSX_CREWORLD_H */

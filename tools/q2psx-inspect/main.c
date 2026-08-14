@@ -9,6 +9,7 @@
 #include "aimodule.h"
 #include "area.h"
 #include "cmd_coll.h"
+#include "creworld.h"
 #include "cmd_effects.h"
 #include "cmd_exe.h"
 #include "cmd_export.h"
@@ -2838,9 +2839,16 @@ static int cmd_classes(disc *d)
  * them shows up here as a monster in a wall, a monster of the wrong kind, or no
  * monster at all.
  */
+/*
+ * `ai_frame` poses every creature at that AI animation frame instead of the
+ * first, which is how a death move is looked at: `q2_creature_world_death_frame`
+ * names its first frame, and the frames are one continuous timeline at
+ * Q2_CRE_TICKS_PER_FRAME model ticks each. Negative means "the first frame",
+ * which is what every caller wanted before this existed.
+ */
 static u32 draw_map_creatures(disc *d, const char *map, const q2_camera *cam,
                               psx_ot *ot, gte_state *gte, u32 clut4_count_a,
-                              u32 *out_drawn)
+                              u32 *out_drawn, s32 ai_frame)
 {
     char cpath[160], zpath[200];
     q2_buf cbuf;
@@ -2940,10 +2948,20 @@ static u32 draw_map_creatures(disc *d, const char *map, const q2_camera *cam,
                     /* Stand it on its first animation frame rather than the
                      * unposed rest, which for an articulated model is every
                      * part at the origin. */
-                    if (mdl.hdr.num_parts <= Q2PSX_ARRAY_COUNT(pose) &&
-                        q2_model_anim_get(&mdl, 0, &clip) &&
-                        q2_model_pose_at(&mdl, &clip, 0, pose) == Q2_OK)
+                    if (mdl.hdr.num_parts > Q2PSX_ARRAY_COUNT(pose)) {
+                        posed = false;
+                    } else if (ai_frame >= 0) {
+                        u32 within = 0;
+
+                        if (q2_model_anim_at(&mdl,
+                                             (u32)ai_frame * Q2_CRE_TICKS_PER_FRAME,
+                                             &clip, &within))
+                            posed = (q2_model_pose_at(&mdl, &clip, within,
+                                                      pose) == Q2_OK);
+                    } else if (q2_model_anim_get(&mdl, 0, &clip) &&
+                               q2_model_pose_at(&mdl, &clip, 0, pose) == Q2_OK) {
                         posed = true;
+                    }
 
                     q2_model_instance_init(&inst);
                     inst.model         = &mdl;
@@ -3101,7 +3119,7 @@ static u32 draw_map_items(disc *d, const char *map, const q2_camera *cam,
  * a wall, or floating, or facing the wrong way, is immediately visible.
  */
 static int cmd_mob(disc *d, const char *map, int zone_index, int which,
-                   const char *out_path)
+                   const char *out_path, s32 ai_frame)
 {
     const int W = TOOL_VIEW_W, H = TOOL_VIEW_H;
     q2_world_zone zone;
@@ -3162,7 +3180,8 @@ static int cmd_mob(disc *d, const char *map, int zone_index, int which,
 
     print_console_framing(&cam, W, H);
     q2_world_build_ot(&zone, &cam, W, H, &ot, &gte, NULL, &wstats);
-    cfaces = draw_map_creatures(d, map, &cam, &ot, &gte, clut4_count_a, &drawn);
+    cfaces = draw_map_creatures(d, map, &cam, &ot, &gte, clut4_count_a, &drawn,
+                                ai_frame);
     printf("  world %u quads, creatures %u visible / %u faces\n",
            wstats.quads_emitted, drawn, cfaces);
 
@@ -3341,7 +3360,7 @@ static int cmd_fps(disc *d, const char *map, int zone_index, const char *weapon,
     {
         u32 drawn = 0;
         u32 cfaces = draw_map_creatures(d, map, &cam, &ot, &gte,
-                                        clut4_count_a, &drawn);
+                                        clut4_count_a, &drawn, -1);
         printf("  creatures     : %u visible, %u faces\n", drawn, cfaces);
     }
 
@@ -5120,7 +5139,8 @@ int main(int argc, char **argv)
             int zi = (argc >= 5) ? atoi(argv[4]) : 0;
             int wh = (argc >= 6) ? atoi(argv[5]) : 0;
             const char *outp = (argc >= 7) ? argv[6] : "mob.ppm";
-            rc = cmd_mob(d, argv[3], zi, wh, outp);
+            rc = cmd_mob(d, argv[3], zi, wh, outp,
+                         (argc >= 8) ? (s32)strtol(argv[7], NULL, 10) : -1);
         }
     } else if (strcmp(cmd, "classes") == 0) {
         rc = cmd_classes(d);
