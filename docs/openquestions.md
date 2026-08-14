@@ -5026,8 +5026,25 @@ nothing saying so.
       from name records, the Tank Commander's from an overlap — and both were invisible until a total was
       compared against something that had to equal it.
 
-      The Soldier's +27 is 9 AI-frames of animation its AI never plays, which may be genuine spare content
-      rather than a bug. The Arachner's +6 is its two moves, one frame short each.
+      **The Soldier's +27 and the Arachner's +6 are the same phenomenon, and it is not a mismatch.** Mapping
+      the Arachner's frame numbering:
+
+          covered : 128 of 139 frames, 0..138
+          gaps    : 13-15 (3)   34 (1)   46-52 (7)   — 11 frames belonging to no move
+
+      128 x 3 = 384 against 390 model frames. The arithmetic tempts one last story: extend `16-24` to
+      `15-24` and `25-33` to `25-34`, both using an adjacent gap frame, and 130 x 3 = 390 exactly. **Refuted
+      the same way as before** — the frame arrays hold nine entries. `16-24`'s runs `0x801017C0..0x801017DA`,
+      twenty-seven bytes and a pad, ending where its move record begins. There is no tenth frame.
+
+      So the residue is not two moves that fail a rule. It is **six model frames the AI never reaches**,
+      which is exactly what the Soldier's +27 is — nine AI-frames of animation with no move pointing at it.
+      Five creatures use every frame their model carries; two do not. Spare animation on a shipped disc is
+      ordinary, and #51h's five "exceptions" were the same fact seen from the per-move side.
+
+      What remains genuinely open is narrower than it has been all session: **which clip those two Arachner
+      moves DO play**, given the two spare ones are the wrong length for them. Not why they break a rule —
+      they do not break it — but what the engine hands them.
 
       ~~So both readings are in trouble, and that was the honest state.~~ The length rule has a real statistic
       (96/101 against a 33% baseline) and assigns names that disagree; name-matching has the disc's own
