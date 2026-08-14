@@ -1791,14 +1791,25 @@ creature in the game lethal on a guess.
 the module. `soldier_fire` at `module+0x1120` picks one of three 8-entry tables by
 skin (`module+0x3240`, `+0x3260`, `+0x3280`) and the entries are **small integers**
 — table 0 reads 39, 40, 83, 86, 89, 92, 95, 98 — which are muzzle-flash indices,
-not damage. It then calls engine slots `+0xC8` and `+0xD8` with vectors, and
-`+0xC8` resolves to **`0x80078288`** while `+0xD8` is a DATA pointer,
-`0x800B2C2C`, not a function. So the figures are on the executable side, reachable
-from `0x80078288`, and every attempt to find them by decoding module images was
-looking in the wrong binary — the same mistake this document has now recorded
-three times (the multiplayer runtime, the front end, and this).
-The port therefore leaves the fire hook unset rather than guessing, and a Soldier
-chases and swings but does not shoot.
+not damage. It then calls engine slots `+0xC8` and `+0xD8` with vectors.
+
+      **A retraction, one step old.** This entry briefly said the figures were
+      "reachable from `0x80078288`", the callee of `+0xC8`. They are not:
+      `0x80078288` indexes the CAMERA array at `0x800D5C30` with a 784-byte
+      stride, reads its `+262`/`+266`/`+268`, and ends by loading the GTE's
+      `TRX`/`TRY`/`TRZ`. It is a view setup. The call being traced was placing
+      the muzzle in view space, not firing, and the inference from "the fire
+      function calls this" to "the damage is in this" skipped the step of
+      establishing WHICH of the calls is the shot. `+0xD8` resolving to
+      `0x800B2C2C` — a data address, not a function — is the other half of the
+      same warning: the base register in that fragment was never shown to be
+      the engine block.
+      So the shot figures remain unlocated, and the honest statement is narrower
+      than the one it replaces: they are not in the flash tables, which hold
+      muzzle-flash indices, and the module's own image does not carry them as
+      immediates. Where they are is open.
+      The port leaves the fire hook unset rather than guessing, and a Soldier
+      chases and swings but does not shoot.
 
 **Eight of the disc's levels ship an EMPTY `CreAIBin` — four bytes — and place
 creatures anyway.** JAIL2, JAIL3 and JAIL4 have Infantry; SECURITY, WASTE2,
