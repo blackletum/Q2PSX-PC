@@ -130,10 +130,14 @@ static void report(const q2_creature *c, const q2_cre_impl *impl)
                     if (nu) {
                         printf("    module names %u range(s) no decoded move "
                                "claims:", nu);
-                        for (z = 0; z < nu && z < 6; z++)
+                        printf("\n");
+                        for (z = 0; z < nu && z < 16; z++)
                             if (un[z])
-                                printf(" \"%.16s\"", un[z]);
-                        printf("%s\n", nu > 6 ? " ..." : "");
+                                printf("      %3d-%-3d  \"%.16s\"  "
+                                       "(no decoded move has this range)\n",
+                                       (int)q2_rd_u16((const u8 *)un[z] + 16),
+                                       (int)q2_rd_u16((const u8 *)un[z] + 18),
+                                       un[z]);
                     }
                 }
             }

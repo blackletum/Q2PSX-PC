@@ -3909,3 +3909,39 @@ nothing saying so.
       42 is still an upper bound, not a count: junk like `"! @"` and `"%(E"` survives the tighter filter.
       Tightening it further, or reaching those moves in the decoder, is the next step. **Do not quote 42 as
       a finding** — quote the named examples, which are individually checkable.
+
+- [x] 58. **Two of the four 3:1 exceptions are a DECODER bug: it merges adjacent moves into one.**
+      Printing the unclaimed name records WITH their frame ranges — rather than just their names — answers
+      51h's residue outright. The Soldier's module names these, and the decoder has no move for any of them:
+
+            0-0    "Run"            15-19  "Fire 2 Ready"
+            1-5    "Fire 1 Ready"   20-26  "Fire 2 Aim"
+            6-8    "Fire 1 Aim"     27-29  "Fire 2 Shoot"
+            9-11   "Fire 1 Shoot"  215-224 "Fire 2 Done"
+           12-14   "Fire 1 Done"   225-247 "Walk 1 Loop"
+
+      Now compare the decoder's two anomalous moves. Its **0-11** spans `Run` + `Fire 1 Ready` +
+      `Fire 1 Aim` + `Fire 1 Shoot`. Its **215-247** spans `Fire 2 Done` + `Walk 1 Loop`. **The decoder is
+      merging adjacent moves into one**, and a merged move's length is a sum, so three times it matches no
+      single clip — which is exactly and only how those two showed up as anomalies.
+
+      Split at the module's own boundaries, every piece lands:
+
+          0-0    "Run"           1 frame  ->   3  matches a clip
+          1-5    "Fire 1 Ready"  5 frames ->  15  matches a clip
+          6-8    "Fire 1 Aim"    3 frames ->   9  matches a clip
+          9-11   "Fire 1 Shoot"  3 frames ->   9  matches a clip
+        215-224  "Fire 2 Done"  10 frames ->  30  matches a clip
+        225-247  "Walk 1 Loop"  23 frames ->  69  matches a clip
+
+      **Six for six.** So the 3:1 rule was never violated here; the port's move boundaries were wrong. That
+      also explains why the "1x instead of 3x" coincidence looked tempting — a merge of a 1-frame move onto
+      others shifts the length by exactly the wrong amount to fake a different ratio.
+
+      **The Arachner's two remain.** Its unclaimed records are `"udeath"` 0-0, `"Pain 2"` 78-93 and
+      `"Stand"` 65-77 — none overlapping its anomalous 16-24 `"Sway"` or 25-33, so merging does not account
+      for them. Those two are still open, and they are now the ONLY moves on the disc that resist the rule.
+
+      **Next:** split merged moves at the name table's boundaries in `q2_creature_decode`. The boundaries are
+      not a guess — the module ships them, and this pass has them printed. That is a change to how moves are
+      installed, so it wants its own pass rather than being tacked onto this one.
