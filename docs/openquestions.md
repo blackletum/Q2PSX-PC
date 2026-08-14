@@ -4282,6 +4282,29 @@ nothing saying so.
                                        colour rather than its radius.
           0x80028E6C  in 0x80028BDC  = the script command area, beside SHOOTTHEN
 
+          0x800288C8  in 0x800287A0  = SHOOTTHEN itself — and it is the one site whose parameters are
+                                       **entirely runtime**. Every argument comes off the stack:
+
+                                           80028890  lbu  v0, 26(sp)      ; colour bytes at sp+24..27
+                                           800288BC  lhu  v0, 16(sp)      ; a2 low  = inner
+                                           80028894  lhu  a2, 18(sp)      ; a2 high = outer
+                                           800288B8  lbu  v1, 27(sp)
+
+                                       No palette entry, no immediate, no rand draw. The `78C / 78E` the
+                                       sweep attributed to it are the `a3` (style, size) pair and nothing
+                                       more. So a shootable trigger's flash is coloured and sized by
+                                       whatever set up that frame, and reading it means finding the caller
+                                       that fills sp+16..27 rather than reading another table.
+
+      **Four ways a site gets its parameters**, which is the useful generalisation from all of this:
+
+          a palette entry          the projectile, the BFG, the energy bolt, the effect ramp
+          a rand() draw            both muzzle flashes, player and creature
+          immediates -> globals    the red 1000/2000 site, written in its own function
+          entirely off the stack   SHOOTTHEN
+
+      A sweep that only reads the palette finds the first kind and misses three.
+
       **A caveat on that sweep, learned by it being wrong.** It scans back from each `jal` for annotated
       `0x800AE___` operands, and the annotation only appears when the disassembler can resolve the base
       register. `0x8002A868`'s colour load is `lbu a1, -6232(v0)` with `v0` materialised far earlier, so the
