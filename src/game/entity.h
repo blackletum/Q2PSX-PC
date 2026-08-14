@@ -202,6 +202,16 @@ typedef struct q2_ent_event {
     u8  sound;          /* a q2_ent_sound; only for Q2_ENT_EVENT_SOUND    */
     s32 pos[3];
     u8  glow[3];        /* Q2_ENT_EVENT_LIGHT and _BURST                  */
+
+    /*
+     * Which model the burst belongs to, for _BURST only, or -1.
+     *
+     * The original's burst counts the item's own VERTICES to decide how many
+     * quads to throw (0x8006D6AC, summing each 8-byte part's `num_verts` at
+     * +3), so a drawing side has to know which model it was. The game half has
+     * no bank to count with; the client does.
+     */
+    s32 model_index;
     s32 radius;         /* Q2_ENT_EVENT_LIGHT                             */
 } q2_ent_event;
 
@@ -215,7 +225,8 @@ void q2_ent_events_clear(q2_ent_events *ev);
 void q2_ent_sound_at(q2_ent_events *ev, q2_ent_sound which, const s32 pos[3]);
 void q2_ent_light_at(q2_ent_events *ev, const s32 pos[3], const u8 glow[3],
                      s32 radius);
-void q2_ent_burst_at(q2_ent_events *ev, const s32 pos[3], const u8 glow[3]);
+void q2_ent_burst_at(q2_ent_events *ev, const s32 pos[3], const u8 glow[3],
+                     s32 model_index);
 
 /* ------------------------------------------------------------------------- */
 /* The world a think runs in                                                  */

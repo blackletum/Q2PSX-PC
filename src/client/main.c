@@ -309,7 +309,9 @@ typedef struct client {
     u32               cre_sounds;
     u32               cre_sound_missing;
     u32               ent_light_dropped;
-    u32               ent_burst_dropped;
+    u32               ent_bursts;
+    u32               burst_no_fx, burst_no_table, burst_no_model;
+    u32               burst_no_bank, burst_bad_model, burst_no_verts;
     u32               player_attacks;
     u32               rot_moved;
     u32               rot_steps;   /* step requests the script has made */
@@ -439,6 +441,81 @@ typedef struct client {
 static void client_bind_view_model(client *c);
 
 /* Defined with the rest of the sound path, and called from the tick. */
+/*
+ * The pickup particle burst — 0x8005B6C0, which is a four-line wrapper around
+ * the shared spawner at 0x8005AB70:
+ *
+ *     q2_burst(pos, ramp 10, ramp 0, size 6144, area 0)
+ *
+ * The two pointers it passes are `0x8009BF88` and `0x8009BA60`, and the second
+ * is the ramp table itself (fxtables.h, nineteen 132-byte records), so their
+ * difference of 1320 makes the first ramp index 10.
+ *
+ * Its fifth argument is zero, which selects the spawner's second branch:
+ * **life 32**, and a velocity per component of
+ *
+ *     v = ((rand() - 16384) * 3) / 16384        ; truncating toward zero
+ *
+ * — the `sll 1 / addu / bgez +16383 / sra 14` at 0x8005AC4C, giving a drift of
+ * plus or minus three.
+ *
+ * And the COUNT is not a constant, which is why this could not be one of the
+ * port's seven presets: 0x8006D6AC totals the model's vertices across its
+ * eight-byte part records (`num_verts` at +3) and the caller divides by fifteen.
+ * A bigger item bursts bigger, in proportion to its own mesh.
+ */
+static void client_pickup_burst(client *c, const s32 pos[3], s32 model_index)
+{
+    q2_model mdl;
+    s16 vel[Q2_FX_GROUP_QUADS][3];
+    u32 total = 0, count, k;
+
+    /* Counted, not assumed: an early return here is silent otherwise, and
+     * "0 drawn" would read as "no bursts happened". */
+    if (!c->sim[0].fx_ready)      { c->burst_no_fx++;    return; }
+    if (!c->fx_tables_ready)      { c->burst_no_table++; return; }
+    if (model_index < 0)          { c->burst_no_model++; return; }
+    if (!c->model_bank_ready)     { c->burst_no_bank++;  return; }
+
+    if (q2_model_get(&c->model_bank, (u32)model_index, &mdl) != Q2_OK) {
+        c->burst_bad_model++;
+        return;
+    }
+
+    for (k = 0; k < mdl.hdr.num_parts; k++) {
+        q2_model_part part;
+
+        if (q2_model_get_part(&mdl, k, &part))
+            total += part.num_verts;
+    }
+
+    count = total / 15;
+    if (count == 0) {
+        c->burst_no_verts++;
+        return;
+    }
+    if (count > Q2_FX_GROUP_QUADS)
+        count = Q2_FX_GROUP_QUADS;
+
+    for (k = 0; k < count; k++) {
+        int a;
+
+        for (a = 0; a < 3; a++) {
+            s32 v = ((s32)q2_rng_next(&c->sim[0].combat.rng) & 0x7FFF) - 16384;
+
+            v *= 3;
+            if (v < 0)
+                v += 16383;
+            vel[k][a] = (s16)(v >> 14);
+        }
+    }
+
+    q2_fx_group_spawn(&c->sim[0].fx, pos, vel, count,
+                      q2_fx_ramp_at(&c->fx_tables, 10),
+                      q2_fx_ramp_at(&c->fx_tables, 0), 32, 6144, 0);
+    c->ent_bursts++;
+}
+
 static void client_entity_events(client *c);
 static bool client_play_sound(client *c, const char *want);
 
@@ -2806,7 +2883,7 @@ static void client_entity_events(client *c)
             continue;
         }
         if (ev->e[i].kind == Q2_ENT_EVENT_BURST) {
-            c->ent_burst_dropped++;
+            client_pickup_burst(c, ev->e[i].pos, ev->e[i].model_index);
             continue;
         }
         if (ev->e[i].kind != Q2_ENT_EVENT_SOUND)
@@ -3338,8 +3415,12 @@ static void client_write_shot(client *c, bool numbered)
                 c->sim[0].combat.projectiles.live, c->cre_bodies, c->rot_steps,
                 c->rot_moved, client_rot_turned(c),
                 c->sim[0].event_rt.call_count);
-        Q2_INFO("  entity ev %u lights dropped, %u bursts dropped",
-                c->ent_light_dropped, c->ent_burst_dropped);
+        Q2_INFO("  entity ev %u lights dropped, %u bursts drawn",
+                c->ent_light_dropped, c->ent_bursts);
+        Q2_INFO("  burst why %u no fx, %u no table, %u no model, %u no bank, "
+                "%u bad model, %u no verts",
+                c->burst_no_fx, c->burst_no_table, c->burst_no_model,
+                c->burst_no_bank, c->burst_bad_model, c->burst_no_verts);
 
         Q2_INFO("  attacks   %u checkattack (%u blind, %u decided, %u yes), "
                 "%u attack calls, %u missing",

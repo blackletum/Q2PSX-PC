@@ -129,14 +129,16 @@ void q2_ent_light_at(q2_ent_events *ev, const s32 pos[3], const u8 glow[3],
     event_fill(e, pos, glow);
 }
 
-void q2_ent_burst_at(q2_ent_events *ev, const s32 pos[3], const u8 glow[3])
+void q2_ent_burst_at(q2_ent_events *ev, const s32 pos[3], const u8 glow[3],
+                     s32 model_index)
 {
     q2_ent_event *e = event_push(ev);
 
     if (!e)
         return;
 
-    e->kind = Q2_ENT_EVENT_BURST;
+    e->kind        = Q2_ENT_EVENT_BURST;
+    e->model_index = model_index;
     event_fill(e, pos, glow);
 }
 

@@ -3366,7 +3366,7 @@ the entity world raises the burst — and the client throws the visual away. The
 than silently ignored, so "the client handles entity events" stops being true of one kind in three with
 nothing saying so.
 
-- [~] 60. **The pickup burst is READ, and it does not fit the port's preset shape — which is the finding.**
+- [x] 60. **DONE: the pickup burst is read and drawn.**
 
       `0x8005B6C0` is a four-line wrapper:
 
@@ -3409,10 +3409,28 @@ nothing saying so.
       quads, from ramp 10 and ramp 0, at size 6144, area 0. A bigger item bursts bigger, in proportion to its
       mesh.
 
-      No preset entry is needed after all: `q2_fx_group_spawn` already takes an explicit count, ramps, life,
-      size and area, so the variable count goes straight in. What is still inside `0x8005AB70` and not read
-      is the **life** and the **velocity spread** — the two remaining arguments — and those are a code
-      question rather than a data one, which is the reverse of where this started. The port has seven — explosion, blood, BFG,
+      No preset entry is needed: `q2_fx_group_spawn` already takes an explicit count, ramps, life, size and
+      area, so the variable count goes straight in.
+
+      **The last two arguments are read and it is implemented.** The wrapper's fifth argument is zero, which
+      selects the spawner's second branch at `0x8005AC34`: **life 32**, and a velocity per component of
+
+          v = ((rand() - 16384) * 3) / 16384      ; truncating toward zero
+
+      from the `sll 1 / addu / bgez +16383 / sra 14` at `0x8005AC4C` — a drift of plus or minus three. The
+      other branch, taken when that argument is non-zero, is fifteen quads at life 10 with a `>> 10` spread;
+      the pickup is not it.
+
+      So a pickup now bursts: ramp 10 and ramp 0, size 6144, area 0, life 32, `sum(part.num_verts) / 15`
+      quads. The burst event carries the item's `model_index` because the game half has no bank to count
+      with and the client does.
+
+      Measured, and the early returns are counted rather than silent: **JAIL2 draws 2 bursts** with no
+      rejections. WASTE3 collects two items and draws none — both are `no model`, `model_index < 0`, which
+      is the original's own first line: `0x8006D6AC` opens `if (a0 == 0) return 0`, so an item with no model
+      throws no particles there either. The port agrees with it by construction rather than by accident.
+
+      BASE0 is byte-identical, so nothing that was not collecting an item changed. The port has seven — explosion, blood, BFG,
       gib, scripted, spark and laser end — and none of them is the pickup burst. Choosing one would invent
       an effect rather than reconstruct it, so nothing is drawn yet. `0x8005B6C0` is the original's, and
       reading its particle table is what this needs; the event carries the position and the glow colour
