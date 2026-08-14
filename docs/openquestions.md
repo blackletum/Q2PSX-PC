@@ -3984,8 +3984,21 @@ nothing saying so.
           800AE9C0  1000 1400   0x8004B8A0        live
 
       **Only the rocket has the inverted pair.** The others are ordinary, so the no-op result does not
-      generalise and twelve sites remain real work — but each now has its preset addresses written down
-      rather than needing its own hunt.
+      generalise — but each site now has its preset addresses written down rather than needing its own hunt.
+
+      **`0x8004B2B4` is the BFG BLAST, and its light is wired.** The spawner that installs it at `+0x3C`
+      materialises the string `"BFGBlast"` (`0x800ACBBC`) two instructions earlier, so the identity is read,
+      not inferred. Its light at `0x8004B8A0` takes RGB from `0x800AE9BC` and radii from `0x800AE9C0`:
+
+          800AE9BC   00 FF 00      rgb(0, 255, 0)   green
+          800AE9C0   E8 03 78 05   u16 1000, 1400   inner, outer
+
+      A wide green glow against the small warm one every other bolt carries. Each kind's own think adds its
+      own light in the original, so this **replaces** the generic preset for a BFG rather than adding to it —
+      doubling them would light a BFG twice.
+
+      Three of the fifteen sites are now settled: the projectile wired, the rocket proven a no-op, the BFG
+      wired. Twelve remain.
 
       Still not done: fourteen of the fifteen sites — but they share a dumped table now, and two of the
       fourteen are identified (rocket, and `0x8004B2B4` reached the same way).

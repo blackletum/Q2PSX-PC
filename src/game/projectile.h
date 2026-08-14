@@ -161,6 +161,28 @@ typedef enum q2_proj_kind {
  */
 #define Q2_PROJ_LIGHT2_INNER   800
 #define Q2_PROJ_LIGHT2_OUTER  1600
+
+/*
+ * The BFG blast lights differently, and it says so itself.
+ *
+ * `0x8004B2B4` is installed as an entity think at `+0x3C` by the spawner that
+ * materialises the string "BFGBlast" (`0x800ACBBC`) beside it, so the identity
+ * is read rather than inferred. Its light at `0x8004B8A0` takes RGB from
+ * `0x800AE9BC` and radii from `0x800AE9C0`:
+ *
+ *     800AE9BC   00 FF 00      rgb(0, 255, 0)   -- green
+ *     800AE9C0   E8 03 78 05   u16 1000, 1400   -- inner, outer
+ *
+ * A wide green glow rather than the small warm one every other bolt carries.
+ * Each kind's own think adds its own light in the original, so this REPLACES
+ * the generic preset for a BFG rather than adding to it — doubling them would
+ * light a BFG twice.
+ */
+#define Q2_PROJ_BFG_LIGHT_R      0
+#define Q2_PROJ_BFG_LIGHT_G    255
+#define Q2_PROJ_BFG_LIGHT_B      0
+#define Q2_PROJ_BFG_LIGHT_INNER 1000
+#define Q2_PROJ_BFG_LIGHT_OUTER 1400
 #define Q2_PROJ_LIGHT_R       255
 #define Q2_PROJ_LIGHT_G       100
 #define Q2_PROJ_LIGHT_B        75

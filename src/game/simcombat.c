@@ -505,10 +505,17 @@ void q2_sim_combat_tick(q2_sim *sim)
          * this frame rather than where it is about to be.
          */
         {
-            static const u8 glow[3] = { Q2_PROJ_LIGHT_R, Q2_PROJ_LIGHT_G,
-                                        Q2_PROJ_LIGHT_B };
-            q2_ent_light_at(&sim->ent_world.events, p->pos, glow,
-                            Q2_PROJ_LIGHT_OUTER);
+            static const u8 glow[3]     = { Q2_PROJ_LIGHT_R, Q2_PROJ_LIGHT_G,
+                                            Q2_PROJ_LIGHT_B };
+            static const u8 bfg_glow[3] = { Q2_PROJ_BFG_LIGHT_R,
+                                            Q2_PROJ_BFG_LIGHT_G,
+                                            Q2_PROJ_BFG_LIGHT_B };
+            bool bfg = (p->kind == Q2_PROJ_BFG);
+
+            q2_ent_light_at(&sim->ent_world.events, p->pos,
+                            bfg ? bfg_glow : glow,
+                            bfg ? Q2_PROJ_BFG_LIGHT_OUTER
+                                : Q2_PROJ_LIGHT_OUTER);
         }
 
         q2_projectile_step(&sim->combat.projectiles, i, sim->gravity,
