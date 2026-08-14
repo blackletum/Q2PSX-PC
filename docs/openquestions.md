@@ -1593,9 +1593,27 @@ item records at run time instead of transcribing a table, so there is nothing to
       records needs a widget.
       The row at y = 81 carries a short string filled at run time — the chosen map's name — and the
       74-pixel gap below it is where the capture's `multipics.lbm` preview goes.
-      *Still open:* what each `action` does beyond the page it opens — seventeen module addresses now,
-      readable with `levdisasm` — and the VERSUS and CREDITS pages, which `2 3 4 PLAYERS` and
-      `GAME VARIABLES` each having a SECOND word reference says exist as their own record arrays.
+      **The padding and the x coordinate are the same fact.** Following the second word reference that
+      `2 3 4 PLAYERS` and `GAME VARIABLES` each carry reaches the VERSUS setup at `module+0x0F9BC` and the
+      GAME VARIABLES arrays at `module+0x0F194`, and the variables rows are the first in this whole front
+      end that are **not centred at x = 256**:
+
+          module+0x0F194  "    GRAVITY"        x 168, y  97
+          module+0x0F1AC  "FALLING DAMAGE"     x 256, y 124
+          module+0x0F1C4  "RESET TO DEFAULTS"  x 256, y 151
+
+      The rows at 168 are exactly the ones whose strings are PADDED — `"    GRAVITY"`, `" GAME SPEED"`, and
+      on the SOUND page `"      MUSIC"` and `"   SOUND FX"` — and the rows at 256 are exactly the ones that
+      are not. So the padding is not decoration: a padded label is left-anchored at 168 so its text ends
+      where the slider begins, and an unpadded one is centred at 256 because it has no slider to meet.
+      That is one rule covering both observations, and it is checkable on every row in the pool.
+      There are also **several variables arrays**, not one — `"    GRAVITY"` appears at `+0x0F194` (y 97)
+      and again at `+0x0F1F4` (y 76) with different neighbours — which is the same shape as the in-game
+      VARIABLES page's four cheat-level variants at `0x8009A6C4` (§10). Eight toggles spread across them.
+      VERSUS at `module+0x0F9BC` is four rows: the player count at y 63, the run-time map name at 82,
+      a third string at 153 and GAME VARIABLES at 172.
+      *Still open:* which variables array goes with which cheat level, and what each `action` does beyond
+      the page it opens.
 
       *Also still open: the SCENE the title is drawn over,* and the reason is worth stating so nobody
       invents it. QFRONT's world is two nodes and eight vertices — there is no room in it for a title
