@@ -496,10 +496,6 @@ static void test_muzzle_light(void)
  */
 static void test_flklight(void)
 {
-    q2_flklights set;
-    q2_rng rng;
-    s32 at[3] = { 10, 20, 30 };
-    u8  rgb[3] = { 200, 40, 40 };
 
     /* These two are RADII, not durations. 0x80028858 stores the first into a2's
      * low half and 0x8002888C the second into its high half, and 0x800288C8
@@ -511,35 +507,8 @@ static void test_flklight(void)
     check_eq_i(q2_flklight_outer_radius(0),     1000, "outer at rand 0");
     check_eq_i(q2_flklight_outer_radius(32767), 1499, "outer at rand 32767");
 
-    memset(&set, 0, sizeof(set));
-    q2_rng_seed(&rng, 1);
-
-    check(q2_flklight_add(&set, at, rgb, 7, &rng, 0), "adds");
-    check_eq_i(set.count, 1, "one in the set");
-    check(set.f[0].lit, "starts lit");
-
-    /* The same light_id again is the same script light, not a second one. */
-    check(q2_flklight_add(&set, at, rgb, 7, &rng, 0), "re-entry accepted");
-    check_eq_i(set.count, 1, "and does NOT stack");
-
-    /* Nothing turns over before its time. */
-    check_eq_i(q2_flklights_tick(&set, &rng, set.f[0].next_toggle - 1), 1,
-               "still lit just before the turn-over");
-
-    check(set.f[0].inner >= 400 && set.f[0].inner <= 899,  "inner in range");
-    check(set.f[0].outer >= 1000 && set.f[0].outer <= 1499, "outer in range");
-
-    /* At its time it flips, and the next turn-over moves forward. */
-    {
-        s32 was = set.f[0].next_toggle;
-        check_eq_i(q2_flklights_tick(&set, &rng, was), 0, "dark after flipping");
-        check(set.f[0].next_toggle > was, "next turn-over is later");
-    }
-
-    /* A jump far past several turn-overs leaves the phase AHEAD of the clock,
-     * not behind it — this is what the `while` in the tick is for. */
-    q2_flklights_tick(&set, &rng, 100000);
-    check(set.f[0].next_toggle > 100000, "phase caught up after a long frame");
+    /* No phase is tested because the original has none: the exec at 0x800287A0
+     * adds a light and returns. The radii above are the whole of it. */
 }
 
 int main(void)

@@ -193,52 +193,24 @@ bool q2_light_add_dynamic(q2_light_world *w, const s32 pos[3],
  * 400..899 inner and 1000..1499 outer, redrawn per flash. Its colour comes from
  * the item at +18/+19/+20, which is what the operand table already said.
  *
- * **What is NOT read is how long it stays on or off.** The phase machinery below
- * is kept because a flicker plainly has one, but its durations are a stated
- * placeholder rather than a transcription — see `Q2_FLK_PHASE_PLACEHOLDER`.
+ * **There is no on/off phase, and this port no longer invents one.** The exec at
+ * `0x800287A0` loops the primitive's objects, adds one dynamic light each and
+ * returns — no timer, no state, nothing that could turn it off. What makes a
+ * flicker flicker is that BOTH radii are redrawn from `rand()` on every call, so
+ * the same script record casts a different-sized light each time it runs.
+ *
+ * An earlier version of this file carried a `q2_flklights` set with an on/off
+ * phase and a placeholder duration. That machinery had no counterpart in the
+ * original and is gone; FLKLIGHT is raised as a transient, exactly like
+ * TIMEDLIGHT, and the two radius functions below are all that is needed.
  *
  * The disc carries exactly ONE FLKLIGHT call, so this is deliberately small: a
  * fixed set, no allocation, and a tick that costs nothing when empty.
  */
-#define Q2_FLK_MAX 8
-
-typedef struct q2_flklight {
-    bool in_use;
-    s32  pos[3];
-    u8   rgb[3];
-    s16  light_id;
-    bool lit;
-    s32  inner, outer;  /* redrawn per flash, from the two rand draws */
-    s32  next_toggle;   /* level time at which it turns over */
-} q2_flklight;
-
-typedef struct q2_flklights {
-    q2_flklight f[Q2_FLK_MAX];
-    u32         count;
-} q2_flklights;
-
-/* Add one. Returns false when the set is full or the arguments are unusable. */
-bool q2_flklight_add(q2_flklights *set, const s32 pos[3], const u8 rgb[3],
-                     s16 light_id, q2_rng *rng, s32 now);
-
-/*
- * Advance every flicker to `now`, turning any whose time has come and redrawing
- * its next duration. Returns how many are LIT afterwards, so a caller can tell a
- * dark frame from an empty set.
- */
-u32 q2_flklights_tick(q2_flklights *set, q2_rng *rng, s32 now);
-
 /* The flicker's radii, as 0x8002882C and 0x8002885C compute them. */
 s32 q2_flklight_inner_radius(s32 rand_0_32767);
 s32 q2_flklight_outer_radius(s32 rand_0_32767);
 
-/*
- * How long a flicker stays on or off. NOT READ from the disc — the formulas that
- * looked like durations turned out to be radii. This is a placeholder so the
- * light blinks at all; it is not the console's rhythm and must not be quoted as
- * one.
- */
-#define Q2_FLK_PHASE_PLACEHOLDER 300
 
 /* 0x80075B94 — empty the runtime lists at the top of a frame. */
 void q2_light_world_begin_frame(q2_light_world *w);

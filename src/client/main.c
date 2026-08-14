@@ -310,7 +310,6 @@ typedef struct client {
     u32               cre_sound_missing;
     u32               ent_light_added;
     u32               script_lights;
-    q2_flklights      flklights;
     u32               ent_light_dropped;
     u32               ent_bursts;
     u32               burst_no_fx, burst_no_table, burst_no_model;
@@ -1248,9 +1247,24 @@ static void client_event_call(void *user, const q2_event_item *item,
         rgb[1] = q2_rd_u8(p + 19);
         rgb[2] = q2_rd_u8(p + 20);
 
-        if (q2_flklight_add(&c->flklights, at, rgb, (s16)q2_rd_u16(p + 16),
-                            &c->sim[0].combat.rng, c->sim[0].level_time))
+        /*
+         * A transient, like TIMEDLIGHT — NOT a phased set. The exec at
+         * 0x800287A0 loops its objects, adds one dynamic light each, and
+         * returns; there is no on/off state anywhere in it. What makes a
+         * flicker flicker is that both radii are redrawn from rand() on every
+         * call, so the same script record gives a different-sized light each
+         * time it runs. An invented on/off phase would be a rhythm the console
+         * does not have.
+         */
+        {
+            s32 inner = q2_flklight_inner_radius(
+                            q2_rng_next(&c->sim[0].combat.rng));
+            s32 outer = q2_flklight_outer_radius(
+                            q2_rng_next(&c->sim[0].combat.rng));
+
+            q2_ent_light_at(&c->sim[0].ent_world.events, at, rgb, inner, outer);
             c->script_lights++;
+        }
     }
 
     if (q2_userfuncs_prim(&c->sim[0].userfuncs, call_index) == Q2_UF_TIMEDLIGHT
@@ -2963,19 +2977,7 @@ static void client_entity_events(client *c)
     if (c->lights_ready)
         q2_light_world_begin_frame(&c->light_world);
 
-    /* Blink the script flickers, and raise the ones that are lit this frame. */
-    {
-        u32 f;
-        q2_flklights_tick(&c->flklights, &c->sim[0].combat.rng,
-                          c->sim[0].level_time);
-        for (f = 0; f < c->flklights.count; f++) {
-            const q2_flklight *fl = &c->flklights.f[f];
-            if (fl->in_use && fl->lit && c->lights_ready &&
-                q2_light_add_dynamic(&c->light_world, fl->pos, fl->rgb,
-                                     fl->inner, fl->outer, 0, 0))
-                c->ent_light_added++;
-        }
-    }
+
 
     if (!ev)
         return;
