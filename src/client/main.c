@@ -1101,13 +1101,29 @@ static bool client_load_zone(client *c, const char *map, int index)
              */
             c->menu_font_ready = false;
             if (c->hud_tables_ready) {
+                /*
+                 * WHICH icon sheet is a session question, and asking the wrong
+                 * one fails silently: `q2_menu_icons_name` picks `qk_menu.lbm`
+                 * in single player, `qk2_menu.lbm` for a two-player match and
+                 * `qkm_menu.lbm` for three or four, and an arena carries only
+                 * the multiplayer ones. The upload still returns Q2_OK because
+                 * the atlases went in, so `menu_font_ready` was true, the
+                 * status bar drew into an empty texture page, and every arena
+                 * on the disc showed no health, no armour and no ammo. See
+                 * openquestions #52.
+                 */
+                int hud_players = c->mp_enabled ? c->mp.player_count : 1;
                 q2_result fr = q2_menu_font_upload(&c->menu_font,
                                                    &c->hud_tables, &vs,
                                                    c->vram,
-                                                   c->menu.multiplayer, 1);
+                                                   c->mp_enabled, hud_players);
                 c->menu_font_ready = (fr == Q2_OK);
                 if (!c->menu_font_ready)
                     Q2_WARN("%s carries no menu font", map);
+                if (!c->menu_font.icons_resident)
+                    Q2_WARN("%s carries no '%s' — the status bar will be blank",
+                            map, q2_menu_icons_name(c->mp_enabled,
+                                                    hud_players));
 
                 /* The overlay's own view of the same atlas. It re-uploads
                  * chars.lbm, which is harmless — the same halfwords to the
@@ -3051,7 +3067,9 @@ static void client_draw_view(void *user, q2_screen *s, int p,
      * CURRENT weapon uses, which is the same indirection the console makes
      * through its weapon-to-ammo map.
      */
-    if (c->icons_ready && c->menu_font_ready) {
+    /* `icons_resident`, not `menu_font_ready`: the upload succeeds when any of
+     * the three images lands, and the status bar needs THIS one. */
+    if (c->icons_ready && c->menu_font_ready && c->menu_font.icons_resident) {
         const q2_inventory *inv = &c->sim.combat.inv;
         /* The LIVE weapon, which combat owns — 1-based, 0 for none. */
         int weapon = c->sim.combat.weapon_id;

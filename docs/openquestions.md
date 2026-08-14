@@ -2329,7 +2329,27 @@ Taking the request also STOPS the session, which is not a detail: on the console
 state and the level hook stops running. The first version left it ticking and the runtime re-asked on every
 frame — sixty-odd identical requests for one match that ended once.
 
-- [ ] 52. **No HUD is drawn on any arena map.** Found by looking at a deathmatch instead of reasoning about
+- [x] 52. **ANSWERED: the client was asking for the single-player icon sheet on maps that carry only the
+      multiplayer ones, and the failure was silent.** `q2_menu_icons_name` picks `qk_menu.lbm` in single
+      player, `qk2_menu.lbm` for a two-player match and `qkm_menu.lbm` for three or four — which is the same
+      thing `q2_mp_hud_image` says, and neither had a caller that knew whether a match was running. The
+      client passed `menu.multiplayer, 1` — the MENU's flag, which is about which menu pages to show, not
+      whether a game is in progress — so every arena asked for `qk_menu.lbm`, and no arena carries it.
+
+      Silent because `q2_menu_font_upload` returns Q2_OK when ANY of its images lands, and the two text
+      atlases always do. `icons_resident` was false, `tpage_icons` addressed an empty texture page, and the
+      status bar dutifully emitted its quads into it. The draw is now gated on `icons_resident` rather than
+      on the upload having half-succeeded, and a map that lacks the sheet says which one it lacks.
+
+      Surveyed across the thirteen arenas: **none of them carries `qk_menu.lbm`**, which is right — an arena
+      is never played in single player — and all thirteen carry `qkm_menu.lbm`. Twelve carry `qk2_menu.lbm`;
+      **FRAGTOWE does not**, so a two-player match there has no status bar and a three- or four-player one
+      does. That is a fact about the disc, not about this port. No single-player map regressed: eight checked
+      by hand and BASE0's bar is pixel-identical before and after.
+
+  *As first written, before it was chased:*
+
+- [ ] ~~52. **No HUD is drawn on any arena map.**~~ Found by looking at a deathmatch instead of reasoning about
       one. On BASE0 the overlay draws health, armour and ammo; on MATRIX5 it draws nothing, and it is the MAP
       and not the session — the same map without `--dm` is equally blank. The gate is not the cause: at frame
       60 on both maps `hud_ready 1, font 1, menu 0, mission 0, mcard 0`, so `q2_hud_build_ot` runs and emits
