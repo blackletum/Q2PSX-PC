@@ -471,6 +471,53 @@ static void test_muzzle_light(void)
     check(!q2_weapon_has_muzzle_light(Q2_WID_BFG),       "the BFG does not");
 }
 
+
+/*
+ * FLKLIGHT's phase. The durations are the operand table's own formulas, and the
+ * behaviour worth pinning is the turn-over: a flicker starts lit, flips when its
+ * time comes, and a long frame that crosses several turn-overs must not leave
+ * the phase behind the clock.
+ */
+static void test_flklight(void)
+{
+    q2_flklights set;
+    q2_rng rng;
+    s32 at[3] = { 10, 20, 30 };
+    u8  rgb[3] = { 200, 40, 40 };
+
+    check_eq_i(q2_flklight_on_time(0),      400, "on at rand 0");
+    check_eq_i(q2_flklight_on_time(32767),  899, "on at rand 32767");
+    check_eq_i(q2_flklight_off_time(0),    1000, "off at rand 0");
+    check_eq_i(q2_flklight_off_time(32767),1499, "off at rand 32767");
+
+    memset(&set, 0, sizeof(set));
+    q2_rng_seed(&rng, 1);
+
+    check(q2_flklight_add(&set, at, rgb, 7, &rng, 0), "adds");
+    check_eq_i(set.count, 1, "one in the set");
+    check(set.f[0].lit, "starts lit");
+
+    /* The same light_id again is the same script light, not a second one. */
+    check(q2_flklight_add(&set, at, rgb, 7, &rng, 0), "re-entry accepted");
+    check_eq_i(set.count, 1, "and does NOT stack");
+
+    /* Nothing turns over before its time. */
+    check_eq_i(q2_flklights_tick(&set, &rng, set.f[0].next_toggle - 1), 1,
+               "still lit just before the turn-over");
+
+    /* At its time it flips, and the next turn-over moves forward. */
+    {
+        s32 was = set.f[0].next_toggle;
+        check_eq_i(q2_flklights_tick(&set, &rng, was), 0, "dark after flipping");
+        check(set.f[0].next_toggle > was, "next turn-over is later");
+    }
+
+    /* A jump far past several turn-overs leaves the phase AHEAD of the clock,
+     * not behind it — this is what the `while` in the tick is for. */
+    q2_flklights_tick(&set, &rng, 100000);
+    check(set.f[0].next_toggle > 100000, "phase caught up after a long frame");
+}
+
 int main(void)
 {
     printf("light model tests\n\n");
@@ -485,6 +532,7 @@ int main(void)
     test_glow_fade();
     test_dynamic();
     test_muzzle_light();
+    test_flklight();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;

@@ -68,6 +68,7 @@
 
 #include "gte.h"
 #include "q2psx.h"
+#include "weapon.h"
 #include "spacelights.h"
 
 /* The GTE holds three lights; the engine ranks four so the fourth can be the
@@ -170,6 +171,56 @@ typedef struct q2_light_world {
 bool q2_light_add_dynamic(q2_light_world *w, const s32 pos[3],
                           const u8 rgb[3], s32 inner_radius, s32 outer_radius,
                           u32 style, u32 size_shift);
+
+/* ------------------------------------------------------------------------- */
+/* FLKLIGHT — a script-placed light that blinks                               */
+/* ------------------------------------------------------------------------- */
+/*
+ * `FLKLIGHT` is one of the two script light primitives (userfuncs.h). Unlike
+ * `TIMEDLIGHT`, which is a transient the script raises and forgets, a flicker
+ * has PHASE: it is on for a while, then off for a while, and both durations are
+ * redrawn each time it turns over —
+ *
+ *     on  = ((rand() * 500) >> 15) + 400
+ *     off = ((rand() * 500) >> 15) + 1000
+ *
+ * per the operand table, in the port's 1/300 s units. `q2_rng_next` is the
+ * PlayStation BIOS generator bit for bit (weapon.c), so seeding this from the
+ * same stream reproduces the console's blink rather than inventing a rhythm.
+ *
+ * The disc carries exactly ONE FLKLIGHT call, so this is deliberately small: a
+ * fixed set, no allocation, and a tick that costs nothing when empty.
+ */
+#define Q2_FLK_MAX 8
+
+typedef struct q2_flklight {
+    bool in_use;
+    s32  pos[3];
+    u8   rgb[3];
+    s16  light_id;
+    bool lit;
+    s32  next_toggle;   /* level time at which it turns over */
+} q2_flklight;
+
+typedef struct q2_flklights {
+    q2_flklight f[Q2_FLK_MAX];
+    u32         count;
+} q2_flklights;
+
+/* Add one. Returns false when the set is full or the arguments are unusable. */
+bool q2_flklight_add(q2_flklights *set, const s32 pos[3], const u8 rgb[3],
+                     s16 light_id, q2_rng *rng, s32 now);
+
+/*
+ * Advance every flicker to `now`, turning any whose time has come and redrawing
+ * its next duration. Returns how many are LIT afterwards, so a caller can tell a
+ * dark frame from an empty set.
+ */
+u32 q2_flklights_tick(q2_flklights *set, q2_rng *rng, s32 now);
+
+/* The on and off durations, exactly as the operand table records them. */
+s32 q2_flklight_on_time(s32 rand_0_32767);
+s32 q2_flklight_off_time(s32 rand_0_32767);
 
 /* 0x80075B94 — empty the runtime lists at the top of a frame. */
 void q2_light_world_begin_frame(q2_light_world *w);

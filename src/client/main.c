@@ -310,6 +310,7 @@ typedef struct client {
     u32               cre_sound_missing;
     u32               ent_light_added;
     u32               script_lights;
+    q2_flklights      flklights;
     u32               ent_light_dropped;
     u32               ent_bursts;
     u32               burst_no_fx, burst_no_table, burst_no_model;
@@ -1228,6 +1229,30 @@ static void client_event_call(void *user, const q2_event_item *item,
      * ((rand()*500)>>15)+400, so it needs the engine's RNG stream to look right
      * rather than merely to appear.
      */
+    /*
+     * FLKLIGHT — registered once and then blinked by q2_flklights_tick. Origin
+     * at +4, light_id at +16, colour bytes at +18/+19/+20 (userfuncs.c). It
+     * needs phase, which is why it is a set rather than a transient like
+     * TIMEDLIGHT below.
+     */
+    if (q2_userfuncs_prim(&c->sim[0].userfuncs, call_index) == Q2_UF_FLKLIGHT
+        && item->len >= 24 && item->payload) {
+        const u8 *p = item->payload - 2;
+        s32 at[3];
+        u8  rgb[3];
+
+        at[0]  = (s32)q2_rd_u32(p + 4);
+        at[1]  = (s32)q2_rd_u32(p + 8);
+        at[2]  = (s32)q2_rd_u32(p + 12);
+        rgb[0] = q2_rd_u8(p + 18);
+        rgb[1] = q2_rd_u8(p + 19);
+        rgb[2] = q2_rd_u8(p + 20);
+
+        if (q2_flklight_add(&c->flklights, at, rgb, (s16)q2_rd_u16(p + 16),
+                            &c->sim[0].combat.rng, c->sim[0].level_time))
+            c->script_lights++;
+    }
+
     if (q2_userfuncs_prim(&c->sim[0].userfuncs, call_index) == Q2_UF_TIMEDLIGHT
         && item->len >= 28 && item->payload) {
         const u8 *p = item->payload - 2;
@@ -2937,6 +2962,21 @@ static void client_entity_events(client *c)
      */
     if (c->lights_ready)
         q2_light_world_begin_frame(&c->light_world);
+
+    /* Blink the script flickers, and raise the ones that are lit this frame. */
+    {
+        u32 f;
+        q2_flklights_tick(&c->flklights, &c->sim[0].combat.rng,
+                          c->sim[0].level_time);
+        for (f = 0; f < c->flklights.count; f++) {
+            const q2_flklight *fl = &c->flklights.f[f];
+            if (fl->in_use && fl->lit && c->lights_ready &&
+                q2_light_add_dynamic(&c->light_world, fl->pos, fl->rgb,
+                                     Q2_PROJ_LIGHT_INNER, Q2_PROJ_LIGHT_OUTER,
+                                     0, 0))
+                c->ent_light_added++;
+        }
+    }
 
     if (!ev)
         return;

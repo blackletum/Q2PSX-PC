@@ -4068,10 +4068,23 @@ nothing saying so.
       console's, bit for bit, given the same seed.** The comment there claimed "any full-period generator
       does", underselling what was already implemented; it is corrected.
 
-      So FLKLIGHT is buildable faithfully rather than approximately. What it still needs is **per-light state**
-      — an on/off phase that persists across frames — which the transient light event has no room for. There
-      is exactly **one FLKLIGHT call on the whole disc**, so that machinery would serve a single instance;
-      recorded as the next step rather than built here.
+      **FLKLIGHT is now implemented.** `q2_flklights` in `lighting.c` holds the phase the transient light
+      event has no room for: a flicker is registered once by the script, starts lit, and turns over on the
+      operand table's own durations —
+
+          on  = ((rand() * 500) >> 15) + 400        400..899
+          off = ((rand() * 500) >> 15) + 1000      1000..1499
+
+      drawn from the same BIOS-identical generator, so the blink is the console's rather than a rhythm of
+      this port's choosing.
+
+      Two behaviours are pinned by `tests/light` because they are the ones a plausible implementation gets
+      wrong. **Re-entry does not stack**: a script record can run again, and a second `add` with the same
+      `light_id` returns true without creating a second light. **The turn-over is a `while`, not an `if`**: a
+      long frame can cross several durations, and an `if` would leave the phase permanently behind the clock,
+      which looks like a slow flicker rather than a bug.
+
+      The set is fixed at eight with no allocation, because the disc carries exactly one FLKLIGHT call.
 
       How many exist, counted rather than grepped: **18 TIMEDLIGHT calls and 1 FLKLIGHT across COMMON's
       scripts, disc-wide.** A passive capture triggers none of them — they are script records fired by

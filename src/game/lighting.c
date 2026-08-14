@@ -239,6 +239,80 @@ void q2_light_gather(q2_light_set *set, const q2_light_world *w,
 }
 
 /* ------------------------------------------------------------------------- */
+/* ------------------------------------------------------------------------- */
+/* FLKLIGHT                                                                   */
+/* ------------------------------------------------------------------------- */
+s32 q2_flklight_on_time(s32 rand_0_32767)
+{
+    return ((rand_0_32767 * 500) >> 15) + 400;
+}
+
+s32 q2_flklight_off_time(s32 rand_0_32767)
+{
+    return ((rand_0_32767 * 500) >> 15) + 1000;
+}
+
+bool q2_flklight_add(q2_flklights *set, const s32 pos[3], const u8 rgb[3],
+                     s16 light_id, q2_rng *rng, s32 now)
+{
+    q2_flklight *f;
+    u32 i;
+
+    if (!set || !pos || !rgb || set->count >= Q2_FLK_MAX)
+        return false;
+
+    /* A light_id already present is the same script light running again, not a
+     * second one: the record can be re-entered and must not stack. */
+    for (i = 0; i < set->count; i++)
+        if (set->f[i].in_use && set->f[i].light_id == light_id)
+            return true;
+
+    f = &set->f[set->count++];
+    f->in_use   = true;
+    f->pos[0]   = pos[0];
+    f->pos[1]   = pos[1];
+    f->pos[2]   = pos[2];
+    f->rgb[0]   = rgb[0];
+    f->rgb[1]   = rgb[1];
+    f->rgb[2]   = rgb[2];
+    f->light_id = light_id;
+
+    /* Starts LIT, and the first turn-over is a full on-time away. */
+    f->lit         = true;
+    f->next_toggle = now + q2_flklight_on_time(rng ? q2_rng_next(rng) : 0);
+    return true;
+}
+
+u32 q2_flklights_tick(q2_flklights *set, q2_rng *rng, s32 now)
+{
+    u32 i, lit = 0;
+
+    if (!set)
+        return 0;
+
+    for (i = 0; i < set->count; i++) {
+        q2_flklight *f = &set->f[i];
+
+        if (!f->in_use)
+            continue;
+
+        /* `while`, not `if`: a long frame can cross more than one turn-over,
+         * and skipping them would let the phase drift against the clock. */
+        while (now >= f->next_toggle) {
+            s32 r = rng ? q2_rng_next(rng) : 0;
+
+            f->lit = !f->lit;
+            f->next_toggle += f->lit ? q2_flklight_on_time(r)
+                                     : q2_flklight_off_time(r);
+        }
+
+        if (f->lit)
+            lit++;
+    }
+
+    return lit;
+}
+
 /* 0x80075C34 — append a runtime light                                        */
 /* ------------------------------------------------------------------------- */
 bool q2_light_add_dynamic(q2_light_world *w, const s32 pos[3],
