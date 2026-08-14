@@ -3366,7 +3366,27 @@ the entity world raises the burst — and the client throws the visual away. The
 than silently ignored, so "the client handles entity events" stops being true of one kind in three with
 nothing saying so.
 
-- [ ] 60. **The pickup burst has no preset to draw it with.** The port has seven — explosion, blood, BFG,
+- [~] 60. **The pickup burst is READ, and it does not fit the port's preset shape — which is the finding.**
+
+      `0x8005B6C0` is a four-line wrapper:
+
+          q2_burst(pos, 0x8009BF88, 0x8009BA60, 6144, 0)   ; -> 0x8005AB70
+
+      `0x8009BA60` is already named in `fxtables.h` as the ramp table, nineteen 132-byte records. So the two
+      pointers are ramp indices, not addresses to chase: `0x8009BF88 - 0x8009BA60 = 1320 = 132 x 10`, so the
+      burst uses **ramp 10 and ramp 0**, at **size 6144**, area 0.
+
+      Three of the port's seven preset fields therefore fall out immediately. The fourth does not:
+      `0x8005AB70` opens by reading `a0->[0x10]` — a pointer off the entity — passing it to `0x8006D6AC`,
+      which walks a structure counting something (`lh a1, 22(a0)`, `lw v1, 40(a0)`), and dividing the result
+      by fifteen. **The count of quads in a pickup burst is computed from the item's own geometry, not
+      constant**, and `q2_fx_preset` has a constant `count`.
+
+      So this is not a missing table entry, it is a shape the preset structure cannot express — which is why
+      it was right not to borrow one of the other seven. Adding it means either a variable-count spawn path
+      or a stated approximation, and both are choices worth making deliberately rather than in passing.
+
+      The ramps, the size and the reason are recorded so the next attempt starts from them. The port has seven — explosion, blood, BFG,
       gib, scripted, spark and laser end — and none of them is the pickup burst. Choosing one would invent
       an effect rather than reconstruct it, so nothing is drawn yet. `0x8005B6C0` is the original's, and
       reading its particle table is what this needs; the event carries the position and the glow colour
