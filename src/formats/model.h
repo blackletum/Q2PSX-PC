@@ -487,15 +487,23 @@ u32 q2_model_anim_count(const q2_model *m);
  * `rest` is `end` on 77 and `start` on 15. `one` is 1 on 90 and 0 on exactly
  * two — both a mover's move named "Move" — so it is a flag, not a constant.
  *
- * The units of `start`/`end` are NOT established. An earlier pass here read the
- * even spans as verifying a load-time multiply by 5 — `value * 5 / 10` frames,
- * i.e. `span / 2` — but that multiply does not survive checking. Classifying
- * every `sll rX,rY,2; addu rX,rX,rY` in the EXE by what follows it gives 44
- * `x20`, 13 `x80`, 11 `x40` and 34 `x10`: the `x5` shape is overwhelmingly
- * RECORD-STRIDE arithmetic, and 20 is this table's own stride. The one site
- * that writes a move record's `+12` and `+14` — `0x80066954` — computes
- * `s0 + s3 + index*20` and stores an UNSCALED value. So the even spans remain
- * a real and unexplained regularity, not evidence for a scale factor.
+ * THE UNIT IS TWO PER ANIMATION FRAME, and move `i` IS clip `i`.
+ *
+ * Not inferred — compared. Model 15 of BASE1 carries 31 clips and 31 moves, and
+ * laying the two lists side by side gives, in order and with no exceptions:
+ *
+ *   clip lengths : 108 15 21 54 51 18 159 72 30 90 117 105 135 30 42 30 69 3 ...
+ *   span / 2 + 1 : 108 15 21 54 51 18 159 72 30 90 117 105 135 30 42 30 69 3 ...
+ *
+ * Censused over 25 zones, every model carrying both: **34 models, 0
+ * mismatches.** So a move of span S is S/2 + 1 frames, the two-unit gap between
+ * moves is exactly one frame, and the k-th move drives the k-th clip.
+ *
+ * That also recovers the factor of 5 arithmetically, without needing the load
+ * site that does not exist: block D counts 2 per frame, the animation position
+ * counts 10 per frame (`0x8006B5D8` divides by ten), and 2 * 5 = 10. The
+ * earlier claim of a load-time multiply was right about the RATIO and wrong
+ * about the mechanism, which is why it survived so long — see #51f and #51g.
  *
  * WHAT THIS TABLE IS NOT: the table `0x8007E9DC` walks. That one is reached
  * through the entity's linked object (`entity+0x2EC`, then its `+0x28`) and is
@@ -533,6 +541,23 @@ u32 q2_model_move_count(const q2_model *m);
 /* Find a move by name, case-sensitive as stored. False if there is none. */
 bool q2_model_move_by_name(const q2_model *m, const char *name,
                            q2_model_move *out);
+
+/*
+ * The clip a move drives, and the frame count they agree on.
+ *
+ * Move `index` drives clip `index` — verified on every model on the disc that
+ * carries both, 34 for 34, by `span / 2 + 1 == clip.frames` in list order. This
+ * replaces guessing a clip from a move's LENGTH (`q2_model_anim_by_length`,
+ * which needs a `skip` to break ties between equal-length clips) with an exact
+ * index, so it cannot pick the wrong one of two same-length moves.
+ */
+bool q2_model_clip_for_move(const q2_model *m, u32 index, q2_model_anim *out);
+
+/* A move's length in animation frames: span/2 + 1. */
+u32 q2_model_move_frames(const q2_model_move *mv);
+
+/* Block D counts 2 units per animation frame; the position counts 10. */
+#define Q2_MODEL_BLOCKD_PER_FRAME 2
 
 /* Position units per AI frame within a move, from `0x8007EA44`. */
 #define Q2_MODEL_POS_PER_MOVE_FRAME 30

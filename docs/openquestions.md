@@ -2469,6 +2469,34 @@ not think, and it does not walk.
       even?** `0x80066954` is the place to resume: it builds records, and whatever feeds `a0+158` is the
       answer.
 
+- [x] 51g. **Two units per animation frame — and move `i` IS clip `i`.**
+      Answered by comparison rather than by more disassembly. BASE1 model 15 carries 31 clips and 31 moves;
+      laying the lists side by side, in order:
+
+          clip lengths : 108 15 21 54 51 18 159 72 30 90 117 105 135 30 42 30 69 3 15 9 9 9 15 21 ...
+          span / 2 + 1 : 108 15 21 54 51 18 159 72 30 90 117 105 135 30 42 30 69 3 15 9 9 9 15 21 ...
+
+      Censused across 25 zones over every model carrying both a move table and a clip chain: **34 models,
+      0 mismatches.** So block D counts **2 units per animation frame**, a move of span S is `S/2 + 1`
+      frames, the two-unit gap between moves is exactly one frame, and **the k-th move drives the k-th clip**.
+
+      That also recovers the factor of 5 arithmetically, with no load site needed: block D counts 2 per
+      frame, the position counts 10 per frame, and 2 * 5 = 10. **The old note was right about the ratio and
+      wrong about the mechanism**, which is exactly why it survived three rounds of checking — 51f could
+      refute the multiply without touching the ratio it implied.
+
+      Shipped, because this one is finally implementable: `q2_model_clip_for_move()` maps a move to its clip
+      **by index**, replacing `q2_model_anim_by_length()`'s match-on-length-with-a-`skip`-to-break-ties. An
+      index cannot pick the wrong one of two equal-length moves; a length can, and the Soldier has four
+      30-frame clips. It returns false rather than posing from a clip whose length disagrees, so a model
+      outside the rule reports instead of animating wrongly. `tests/model` pins the unit.
+
+      **Still open — 51h: the AI frame timeline is not block D's.** A creature module numbers its moves in
+      its own global frame space (the Soldier's run 0-11, 12-29, ..., 441-464, top frame 474) and has 18
+      moves where its model has 31. Block D's ranges halve to 0-107, 108-122, 123-143, ... which is a
+      different numbering. Joining the two — by name, by order, or by something else — is the last link
+      between what the AI selects and what the model plays.
+
 - [ ] ~~51. **The AI frame → model clip mapping drifts across a long move.**~~ `Q2_CRE_TICKS_PER_FRAME` is 3 and
       it lands the START of the Soldier's `Death1` correctly: posed at AI frames 310, 314, 318 and 322 the
       model is a body collapsing to the floor, progressively. But the move runs 308-342, and at 330 and 336

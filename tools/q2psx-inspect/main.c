@@ -2391,7 +2391,7 @@ static int cmd_model(disc *d, const char *map, const char *want, int clip_index,
      * frame timeline (`q2psx-inspect creatures` prints their ranges) and this
      * says whether the clips laid end to end are that timeline.
      */
-    if (clip_count > 1) {
+    if (clip_count >= 1) {
         u32 ci, total = 0;
         printf("  clip lengths  :");
         for (ci = 0; ci < clip_count; ci++) {
@@ -2408,7 +2408,7 @@ static int cmd_model(disc *d, const char *map, const char *want, int clip_index,
     {
         u32 moves = q2_model_move_count(&mdl), i;
         printf("  moves         : %u\n", moves);
-        for (i = 0; i < moves && i < 24; i++) {
+        for (i = 0; i < moves; i++) {
             q2_model_move mv, prev;
             int gap = -1;
             if (!q2_model_move_get(&mdl, i, &mv))

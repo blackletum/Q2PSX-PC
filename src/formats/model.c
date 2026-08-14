@@ -343,6 +343,35 @@ bool q2_model_move_get(const q2_model *m, u32 index, q2_model_move *out)
     return true;
 }
 
+u32 q2_model_move_frames(const q2_model_move *mv)
+{
+    if (!mv || mv->end < mv->start)
+        return 0;
+    return (u32)(mv->end - mv->start) / Q2_MODEL_BLOCKD_PER_FRAME + 1;
+}
+
+bool q2_model_clip_for_move(const q2_model *m, u32 index, q2_model_anim *out)
+{
+    q2_model_move mv;
+
+    if (!out || !q2_model_move_get(m, index, &mv))
+        return false;
+
+    /* The k-th move drives the k-th clip; no length matching, no tie to break. */
+    if (!q2_model_anim_get(m, index, out))
+        return false;
+
+    /*
+     * The two agree on the frame count on every model on the disc that has
+     * both. A disagreement means we are reading a model this rule does not
+     * cover, so say so rather than pose it from the wrong clip.
+     */
+    if (out->frames != q2_model_move_frames(&mv))
+        return false;
+
+    return true;
+}
+
 bool q2_model_move_by_name(const q2_model *m, const char *name,
                            q2_model_move *out)
 {

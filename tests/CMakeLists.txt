@@ -235,3 +235,12 @@ target_link_libraries(test_leveltext PRIVATE
 )
 
 add_test(NAME leveltext COMMAND test_leveltext)
+
+add_executable(test_model test_model.c)
+
+target_link_libraries(test_model PRIVATE
+    q2psx_common
+    q2psx_formats
+)
+
+add_test(NAME model COMMAND test_model)
