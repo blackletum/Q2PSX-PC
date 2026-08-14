@@ -3621,9 +3621,25 @@ Measured over 300-frame captures, requested sounds against what the map's bank a
 | WASTE4 | Berserk | 7 | 0 |
 | COMMAND | Tank Commander | 4 | **4** |
 
-**The Tank Commander has no voice on this disc.** Its module asks for `tnk_idle1`, `tnk_pain`, `tnk_death`,
-`tnk_step` and `tnk_sight1`, and a search of every sound bank on the disc finds **zero** names beginning
-`tnk_`. Its audio is not missing from the port; it is not there to load. That is worth knowing before anyone
+~~**The Tank Commander has no voice on this disc.**~~ **WRONG, and refuted by scanning the disc image
+directly.** Searching the raw image for VAG headers and reading each one's name field finds **63 entries
+whose name begins `tnk_`**:
+
+    tnk_atck1  x13    tnk_death  x13    tnk_pain  x13    tnk_sight1 x12    tnk_step x12
+
+Five of the six sounds the module asks for are on the disc, in twelve or thirteen banks each. Only
+`tnk_idle1` genuinely has no VAG. **The Tank Commander's audio is there to load**, and the reason it does
+not play is somewhere in this port, not on the disc.
+
+How the original claim went wrong is worth recording, because the same mistake was nearly repeated while
+checking it: the first re-test this session was `q2psx-inspect audio | grep -i tnk_`, which returned zero —
+**but that command prints only aggregate statistics and no names at all**, so the grep could not have found
+anything either way. A search over output that cannot contain the answer returns zero and looks like
+evidence. The count is what broke it open: `tnk_death` occurs 35 times in the image while the disc carries
+only 15 creature modules in total, so most occurrences could not be module copies. The bytes before the
+first one read `VAGp`.
+
+The stale claim below is left for the record. That is worth knowing before anyone
 goes looking for a bug in the lookup.
 
 ## The census was understating the creatures by a mile
@@ -3745,12 +3761,19 @@ nothing saying so.
       **And the light event is answered too: no item on this disc glows.** `item.c:846` raises it for any
       item whose flags carry `Q2_ITEM_GLOW` (bits 4-6, R/G/B), and across all 64 records of the item table the
       only flag that ever appears is `spin`. Not one has a glow bit. The event has never fired in a capture
-      because there is nothing on the disc that would fire it — the same shape as the Tank Commander's absent
-      `tnk_` sounds and the 69 rotation calls whose first object slot is -1.
+      because there is nothing on the disc that would fire it.
 
-      That is worth stating as a category, because three separate "untested" entries in this file turned out
-      to be it: **a path with no data behind it is not an incomplete port.** The way to tell them apart is to
-      go and count the data, which takes minutes, rather than to leave the question open indefinitely. The port has seven — explosion, blood, BFG,
+      **The category this was filed under has since collapsed, and the collapse matters more than the
+      category did.** It claimed three examples of "a path with no data behind it is not an incomplete
+      port": the item glow, the Tank Commander's `tnk_` sounds, and the 69 rotation calls whose first object
+      slot is -1. **Two of the three were wrong.** The rotation calls read their operands from the ZONE's
+      Events chunk and most of them are live (#56); the `tnk_` sounds are on the disc as 63 VAG entries.
+      Only the item glow survives, and it survives because it was checked by enumerating all 64 item records
+      rather than by failing to find something.
+
+      So the rule to keep is the narrower one: **"I looked and found nothing" is only evidence if you can
+      say what you looked at and that it could have contained the answer.** Both refuted claims failed that
+      test — one searched a summary with no names in it, the other read a buffer the engine writes -1 into. The port has seven — explosion, blood, BFG,
       gib, scripted, spark and laser end — and none of them is the pickup burst. Choosing one would invent
       an effect rather than reconstruct it, so nothing is drawn yet. `0x8005B6C0` is the original's, and
       reading its particle table is what this needs; the event carries the position and the glow colour
