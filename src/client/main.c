@@ -1974,7 +1974,11 @@ static void client_input_simulated(client *c, float dt)
              * creature.
              */
             {
-                s32 fwd = 500 + 200 * pi;
+                /* Close enough that a bolt connects often: the actors' reach
+                 * is 286 + 286, so a few hundred units apart makes the target
+                 * subtend a wide angle and the staged exchange conclusive in a
+                 * capture short enough to run. */
+                s32 fwd = 360 + 120 * pi;
 
                 pl->pos[0] = c->sim[0].player[0].pos[0] +
                     ((q2_sin12(c->sim[0].player[0].yaw) * fwd) >> Q2_FRAC_12);

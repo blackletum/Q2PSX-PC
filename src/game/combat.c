@@ -98,9 +98,22 @@ void q2_actor_to_monster(const q2_actor *a, q2_monster *m)
 void q2_actor_from_player(q2_actor *a, const q2_inventory *inv,
                           const s32 pos[3])
 {
+    s8 owner;
+
     if (!a)
         return;
+
+    /*
+     * WHICH PLAYER this is survives the refresh. `q2_actor_init` clears it to
+     * -1, and this runs on every hit — so the first bolt that landed on a
+     * player erased their identity, and the kill that followed was attributed
+     * to the world. A staged pair produced exactly that: "player 1 killed by
+     * -1", and because the runtime blames the victim for a world kill, player
+     * 1 was docked a frag for being shot.
+     */
+    owner = a->owner;
     q2_actor_init(a);
+    a->owner = owner;
     if (pos) {
         a->origin[0] = pos[0];
         a->origin[1] = pos[1];

@@ -3264,6 +3264,30 @@ player-versus-player damage:
       for a player whose frame runs through `q2_sim_advance_player`, and that is the next thing to count
       rather than reason about — the fire path reads `combat.last_shot`, which is part of the swapped half.
 
+## A deathmatch, played through
+
+    multiplayer: player 1 killed by 0 — frags 1 0 0 0
+    multiplayer: frag limit reached at 500 dt (1 s) — banner 'GAME OVER'
+    multiplayer: request 11 (load MPResults); winner 0 — PLAYER 1 WINS
+    multiplayer: DM SCORES — DEATHMATCH, HUD set qk2_menu.lbm
+
+Every link, in one capture: a player fires, the bolt carries its owner, it finds a target in the world's own
+list, the damage lands on that player's inventory, the death is noticed, the attribution names the killer,
+the frag is scored, the frag limit ends the match, the banner runs, the runtime asks for state 11, and the
+scoreboard shows `PLAYER 1  1 / PLAYER 2  0` over the arena.
+
+One last fault, and it is the same shape as the rest: **`q2_actor_from_player` erased which player an actor
+was.** It calls `q2_actor_init`, which clears `owner` to -1, and it runs on every hit — so the first bolt to
+land wiped the victim's identity, the kill was attributed to the world, and because the runtime blames the
+victim for a world kill the *victim* was docked a frag. The capture said it plainly: `player 1 killed by -1 —
+frags 0 -1 0 0`. Preserving `owner` across the refresh turns that into `killed by 0 — frags 1 0 0 0`.
+
+The staged pair also moved from 600 units apart to about 400, which is inside the actors' combined reach and
+makes the exchange conclusive in a capture short enough to run: 13 hits rather than 4, and a death.
+
+Single player is byte-identical to before any of this began, all 26 tests pass, and COMMAND still reports 22
+fire calls of 22 sent.
+
 ---
 
 ## ⚠ Security note (carried forward, do not drop)
