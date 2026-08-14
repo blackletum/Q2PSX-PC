@@ -2564,6 +2564,29 @@ not think, and it does not walk.
       have such a run, and 62% on the Arachner's. A test that almost everything passes distinguishes nothing.
       The consecutive-clip story is dropped, and the five stay unexplained rather than explained badly.
 
+      **Where the five actually live: they are an IDENTIFICATION gap, not a rule gap.** Splitting the 101
+      moves by whether the module decoder could put a block-D name to them:
+
+          moves the namer RESOLVED : 88 hit, 2 miss  (98%)
+          moves it did NOT         :  8 hit, 3 miss  (73%)
+
+      And the five, named individually:
+
+          Soldier   215-247   33 frames wants  99  (unnamed)
+          Soldier     0-11    12 frames wants  36  (unnamed)
+          Arachner   16-24     9 frames wants  27  "Sway"
+          Arachner   16-24     9 frames wants  27  "Sway"   <- the module lists it twice
+          Arachner   25-33     9 frames wants  27  (unnamed)
+
+      The two Arachner "Sway" rows are one move counted twice, so there are **four distinct exceptions, and
+      three of them are moves whose identity is unresolved**. Exactly **one identified move on the whole
+      disc violates the 3:1 rule — the Arachner's "Sway"**.
+
+      That is a much narrower statement than "five moves do not fit": for every move the decoder can name,
+      the rule holds 88 times out of 89. The residue is concentrated where the decoder cannot say what the
+      move is, which is a different open question — and a cheaper one, since naming a move needs no new
+      theory of animation.
+
       Four of the five have a clip at exactly **1x** their length instead of 3x. That is a suggestive
       pattern and it is deliberately NOT promoted to a rule here: it was noticed after the fact, from five
       cases, and a fallback ratio chosen because it makes the leftovers fit is the precise move this file has
