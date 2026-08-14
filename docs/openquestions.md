@@ -4676,5 +4676,26 @@ nothing saying so.
       here, and the Berserk's is wrong in a way that reads as right — which is the whole reason it is
       labelled rather than used.
 
+      ---
+
+      **The Arachner's two moves: five hypotheses tested, five rejected.** Listed so none is tried a sixth
+      time:
+
+        1. *They span consecutive clips.* Every one of the five had such a run — but **89% of arbitrary
+           lengths** do on that chain. A test almost everything passes distinguishes nothing.
+        2. *An off-by-one in the range.* The move record, the frame array and the name table **all three**
+           say nine.
+        3. *A variant model.* The Arachner's is the only one on the disc.
+        4. *Looping moves carry an extra frame to close the cycle.* **25 of 27** looping moves match exactly.
+        5. *Locomotion is special* — the two are `via 3` and `via 4`, walk and run. But **15 of 17** walk/run
+           moves across the disc match exactly:
+
+               walk/run   17 moves   n*3 15   (n+1)*3 2   neither 0
+               other      98 moves   n*3 97   (n+1)*3 1   neither 0
+
+      Each hypothesis was built on the residue and each fitted it perfectly, which is exactly why none
+      survived a null test. The residue is three rows, two distinct moves, out of 115 — and the honest state
+      is that **no property yet examined separates them from the 113 that fit.**
+
       **Do not conclude the sounds are absent.** That was the previous answer here for many passes and it was
       wrong; see #60 for how the mistake was made and how it was caught.
