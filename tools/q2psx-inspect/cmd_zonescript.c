@@ -363,6 +363,41 @@ int cmd_zonescript(const disc *d, const char *only_map)
             }
 
             memset(&rs, 0, sizeof(rs));
+            /*
+             * Operands come from the ZONE's Events chunk, at the same offset —
+             * `gp+376`, which the zone loader fills at 0x8007C234 after looking
+             * "Events" up at 0x8007C14C. Set it before building so the build
+             * reads the slots the engine reads. See #56.
+             */
+            /*
+             * Per ZONE, not per map: the engine loads one zone at a time, so the
+             * same COMMON script drives different geometry depending on which
+             * zone is resident. Take the zone that yields the most rotators —
+             * for a map whose zones are byte-identical to COMMON that is any of
+             * them, and the count is unchanged.
+             */
+            if (zcount) {
+                u32 best = 0, bz = 0, zq;
+
+                for (zq = 0; zq < zcount; zq++) {
+                    q2_rotator_set probe;
+                    q2_userfuncs puf;
+
+                    memset(&probe, 0, sizeof(probe));
+                    q2_rotators_set_operand_source(&probe, cev.data,
+                                                   zev[zq].data, zev[zq].size);
+                    if (q2_userfuncs_parse(&puf, &cf) == Q2_OK &&
+                        q2_rotators_build(&probe, &cev, &puf) == Q2_OK) {
+                        if (probe.count > best) {
+                            best = probe.count;
+                            bz   = zq;
+                        }
+                    }
+                    q2_rotators_free(&probe);
+                }
+                q2_rotators_set_operand_source(&rs, cev.data,
+                                               zev[bz].data, zev[bz].size);
+            }
             if (q2_userfuncs_parse(&uf, &cf) == Q2_OK &&
                 q2_rotators_build(&rs, &cev, &uf) == Q2_OK &&
                 q2_event_rt_init(&rt, &cev) == Q2_OK) {

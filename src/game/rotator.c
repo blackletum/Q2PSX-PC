@@ -39,15 +39,65 @@ q2_rotator *q2_rotators_add(q2_rotator_set *set, q2_rot_kind kind,
     return r;
 }
 
+void q2_rotators_set_operand_source(q2_rotator_set *set, const u8 *base_a,
+                                    const u8 *base_b, u32 b_size)
+{
+    if (!set)
+        return;
+    set->operand_base_a = base_a;
+    set->operand_base_b = base_b;
+    set->operand_b_size = b_size;
+}
+
+/*
+ * The address an operand is actually read from — `p` rebased from chunk A into
+ * chunk B, per 0x800285F0. Falls back to `p` when no second chunk is set or the
+ * offset does not fit in it, so a caller that never calls
+ * q2_rotators_set_operand_source() behaves exactly as before.
+ */
+static const u8 *operand_at(const q2_rotator_set *set, const u8 *p, u32 need)
+{
+    size_t off;
+
+    if (!set || !set->operand_base_a || !set->operand_base_b)
+        return p;
+    if (p < set->operand_base_a)
+        return p;
+
+    off = (size_t)(p - set->operand_base_a);
+    if (off + need > set->operand_b_size)
+        return p;
+
+    return set->operand_base_b + off;
+}
+
 q2_result q2_rotators_build(q2_rotator_set *out, const q2_events *events,
                             const q2_userfuncs *uf)
 {
     q2_event_record rec;
 
+    const u8 *keep_a, *keep_b;
+    u32 keep_size;
+
     if (!out || !events)
         return Q2_ERR_INVALID_ARG;
 
+    /*
+     * Carry the operand source across the memset. Zeroing it here would make
+     * q2_rotators_set_operand_source() a no-op whenever it is called before
+     * building — which is the only order that works, since the build itself
+     * reads the slots. The creature binds lost a whole pass to exactly this:
+     * a memset downstream of the setter silently discarded it.
+     */
+    keep_a    = out->operand_base_a;
+    keep_b    = out->operand_base_b;
+    keep_size = out->operand_b_size;
+
     memset(out, 0, sizeof(*out));
+
+    out->operand_base_a = keep_a;
+    out->operand_base_b = keep_b;
+    out->operand_b_size = keep_size;
 
     /* No UserFuncs chunk means no CALL can resolve, which is a real state on
      * the 17 maps that declare none — not an error. */
@@ -106,7 +156,8 @@ q2_result q2_rotators_build(q2_rotator_set *out, const q2_events *events,
                  * discarded every rotator whose call had a gap before it.
                  */
                 for (slot = 0; slot < 4; slot++) {
-                    s16 node = q2_rd_s16(p + 12 + 2 * (s32)slot);
+                    const u8 *q = operand_at(out, p, 24);
+                    s16 node = q2_rd_s16(q + 12 + 2 * (s32)slot);
 
                     if (node < 0)
                         continue;
@@ -124,7 +175,7 @@ q2_result q2_rotators_build(q2_rotator_set *out, const q2_events *events,
                 if (item.len < 20)
                     break;
 
-                node   = q2_rd_s16(p + 18);
+                node   = q2_rd_s16(operand_at(out, p, 20) + 18);
                 target = q2_rd_s16(p + 6);
                 if (node < 0)
                     break;
@@ -161,7 +212,7 @@ q2_result q2_rotators_build(q2_rotator_set *out, const q2_events *events,
                 if (item.len < 12)
                     break;
 
-                node = q2_rd_s16(p + 10);
+                node = q2_rd_s16(operand_at(out, p, 12) + 10);
                 if (node < 0)
                     break;
 
@@ -266,7 +317,8 @@ u32 q2_rotators_call(q2_rotator_set *set, const q2_userfuncs *uf,
         if (item->len < 24)
             break;
         for (slot = 0; slot < 4; slot++) {
-            node = q2_rd_s16(p + 12 + 2 * (s32)slot);
+            const u8 *q = operand_at(set, p, 24);
+            node = q2_rd_s16(q + 12 + 2 * (s32)slot);
             if (node < 0)
                 continue;           /* 0x80028628 SKIPS an empty slot */
             made += q2_rotator_trigger_node(set, (u32)node);
@@ -276,7 +328,7 @@ u32 q2_rotators_call(q2_rotator_set *set, const q2_userfuncs *uf,
     case Q2_UF_ROTHATCH:
         if (item->len < 20)
             break;
-        node = q2_rd_s16(p + 18);
+        node = q2_rd_s16(operand_at(set, p, 20) + 18);
         if (node >= 0) {
             made += q2_rotator_trigger_node(set, (u32)node);
         }
@@ -285,7 +337,7 @@ u32 q2_rotators_call(q2_rotator_set *set, const q2_userfuncs *uf,
     case Q2_UF_ROTBUTTON:
         if (item->len < 12)
             break;
-        node = q2_rd_s16(p + 10);
+        node = q2_rd_s16(operand_at(set, p, 12) + 10);
         if (node >= 0) {
             made += q2_rotator_trigger_node(set, (u32)node);
         }

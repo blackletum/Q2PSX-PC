@@ -3726,7 +3726,7 @@ nothing saying so.
       timestamps and track lengths, barcodes, magazine demo-disc serials, and the absence of a Japanese
       release — remain **unverified** and should be treated as moderate confidence at best.
 
-- [ ] 56. **The 69 "inert" rotation calls are not inert — the operand is read from a SECOND buffer.**
+- [x] 56. **The 69 "inert" rotation calls are not inert — the operand is read from a SECOND buffer.**
       `q2_rotators_call` reads a SIMROT's four object slots from `item + 12` in COMMON's Events chunk, finds
       -1 in all four on 69 of 95 calls disc-wide, and builds nothing. The engine does not do that. At
       `0x800285CC` it sets up **two** cursors:
@@ -3756,7 +3756,38 @@ nothing saying so.
       than clumped. `no object` falls 69 -> 54 and `usable` rises 26 -> 41 on that one change. The remaining
       39 are untestable here only because no zone chunk on those maps reaches the offset.
 
-      **What is NOT established is what buffer B is.** This file's own header argues the engine never loads
+      **ANSWERED, and the header comment in `cmd_zonescript.c` was wrong.** That comment argued the engine
+      never loads a zone's Events chunk, listing the zone loader's chunks as "AreaConx, CastList, CreAIBin,
+      CreAIRel, MapMod, MapNames, Points, Scene, SortData, SpaceLights and the two collision hulls — and
+      `Events` is not among them." It is among them. The zone loader's own name run reads:
+
+          CastList   Events   CreAIBin   CreAIRel   SecondaryCol   SecondaryRem
+          MapNames   SpaceLights   SortData   Scene   MapMod   Points   AreaConx
+
+      `0x8007C14C` loads `0x800AD480 "Events"` and looks it up with base `*(gp+18856)` — the ZONE file's
+      base, the same base the CastList and CreAIBin lookups beside it use — then stores the result at
+      `gp+376` (`0x8007C234`). There are two Events LOADERS, not one: COMMON's at `0x8007AC30` into `gp+372`,
+      and the zone's here. The old claim of "exactly two references to the string" was right about the count
+      and wrong about what the second one does.
+
+      **Fixed and measured.** `q2_rotators_set_operand_source()` rebases each slot read the way
+      `0x800285F4` does. Disc-wide, through `zonescript`:
+
+          rotators built   26 -> 62
+          rotation steps   17 -> 40
+          tick-moves        8 -> 399
+          rotators turned  13 -> 36
+
+      In the client, per zone: **JAIL2 zone 1 goes 0 -> 10 rotators**, JAIL3 zone 1 goes 0 -> 2, WASTE2
+      zone 1 goes 0 -> 1. Zones whose Events chunk is byte-identical to COMMON's (21 of 74) are unchanged,
+      which is why the default zone of most maps looks the same and why this hid for so long.
+
+      One trap worth recording: `q2_rotators_build` memsets the set, so setting the operand source before
+      building — the only order that works, since the build does the reading — was silently discarded until
+      the build was taught to carry those three fields across the memset. The creature binds lost a whole
+      pass to exactly this shape of bug.
+
+      ~~What is NOT established is what buffer B is.~~ This file's own header argues the engine never loads
       a zone's Events chunk — one "Events" string, matched only by COMMON's loader at `0x8007AC30` storing
       into `gp+372`. `gp+376` is written at `0x8007C234` from a stack slot and cleared beside `gp+372` at
       teardown, so it is a peer of the events pointer, but its identity is unproven. The zone chunk is a

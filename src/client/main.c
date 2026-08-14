@@ -1588,12 +1588,29 @@ static bool client_load_zone(client *c, const char *map, int index)
             q2_events    ev;
             q2_userfuncs uf;
 
+            q2_events zev;
+            bool have_zev = (q2_events_parse_zone(&zev, &c->zone.zone) == Q2_OK);
+
             if (q2_events_parse_common(&ev, &c->common) == Q2_OK &&
-                q2_userfuncs_parse(&uf, &c->common) == Q2_OK &&
-                q2_rotators_build(&c->rotators, &ev, &uf) == Q2_OK) {
-                c->rotators_ready = true;
-                c->zone.rotators  = &c->rotators;
-                Q2_INFO("rotators: %u", c->rotators.count);
+                q2_userfuncs_parse(&uf, &c->common) == Q2_OK) {
+                /*
+                 * A rotation CALL's object slots are read from the ZONE's Events
+                 * chunk at the same offset, not from COMMON's -- 0x800285F4
+                 * rebases the cursor into gp+376, which the zone loader fills at
+                 * 0x8007C234. Reading COMMON's alone sees the -1 the engine
+                 * stamps there as it consumes each slot, which left most of the
+                 * disc's rotating geometry inert. See openquestions #56.
+                 */
+                if (have_zev)
+                    q2_rotators_set_operand_source(&c->rotators, ev.data,
+                                                   zev.data, zev.size);
+                if (q2_rotators_build(&c->rotators, &ev, &uf) == Q2_OK) {
+                    c->rotators_ready = true;
+                    c->zone.rotators  = &c->rotators;
+                    Q2_INFO("rotators: %u (operands from %s)",
+                            c->rotators.count,
+                            have_zev ? "the zone's Events" : "COMMON only");
+                }
             }
         }
 

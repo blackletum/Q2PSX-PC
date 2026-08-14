@@ -137,7 +137,39 @@ typedef struct q2_rotator_set {
     q2_rotator *rotators;
     u32         count;
     u32         capacity;
+
+    /*
+     * Where an object slot is READ from, which is not where the script is.
+     *
+     * `0x800285CC` walks the item in the chunk at `gp+372` but reads each slot
+     * from the same offset in the chunk at `gp+376`, and stamps -1 into the
+     * first as it goes:
+     *
+     *     800285F0  subu s2, s1, baseA      ; the offset within A
+     *     800285F4  addu s2, s2, baseB      ; the same offset within B
+     *     8002861C  sh   -1, 0(s1)          ; consume the slot in A
+     *     80028620  lh   v0, 0(s2)          ; read the operand from B
+     *
+     * A is COMMON's Events chunk; **B is the ZONE's** — the zone loader looks
+     * "Events" up between "CastList" and "CreAIBin" (`0x8007C14C`) and stores it
+     * at `gp+376` (`0x8007C234`). Parsing only A therefore sees -1 in every slot
+     * the game has already consumed, which is why 69 of 95 rotation calls looked
+     * inert. See openquestions #56.
+     *
+     * Leave both NULL to read operands in place, which is what tests want.
+     */
+    const u8   *operand_base_a;   /* the chunk the item pointer lives in */
+    const u8   *operand_base_b;   /* the chunk its operands live in      */
+    u32         operand_b_size;
 } q2_rotator_set;
+
+/*
+ * Point a set's operand reads at a second chunk, as the engine does.
+ * Passing NULL for either side restores reading operands in place.
+ */
+void q2_rotators_set_operand_source(q2_rotator_set *set,
+                                    const u8 *base_a,
+                                    const u8 *base_b, u32 b_size);
 
 /*
  * Build the set from a map's Events chunk: every SIMROT, SIMROT2, ROTHATCH and
