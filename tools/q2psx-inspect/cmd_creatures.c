@@ -54,6 +54,14 @@ static void report(const q2_creature *c, const q2_cre_impl *impl)
             printf(" %s", q2_cre_callback_names[i]);
     printf("\n");
 
+    /* The callback addresses, so one that installs no move can be gone and read
+     * rather than guessed at — the same reason `at:` prints the methods. */
+    printf("    cb at     :");
+    for (i = 0; i < 13; i++)
+        if (c->callback[i])
+            printf(" %s=%08X", q2_cre_callback_names[i], c->callback[i]);
+    printf("\n");
+
     printf("    moves %2u, frames %3u, methods %2u\n",
            c->move_count, c->frame_count, c->method_count);
 
@@ -112,8 +120,8 @@ static void report(const q2_creature *c, const q2_cre_impl *impl)
         u8 seen[64];
         u32 nseen = 0, f;
 
-        printf("      (%2d) %3d-%-3d ->", mv->via, mv->first_frame,
-               mv->last_frame);
+        printf("      (%2d) %08X %3d-%-3d ->", mv->via, mv->addr,
+               mv->first_frame, mv->last_frame);
 
         for (f = 0; f < mv->frame_count &&
                     mv->frame_index + f < Q2_CRE_MAX_FRAMES; f++) {

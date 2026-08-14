@@ -52,6 +52,21 @@ typedef struct dec {
     u32       reg[32];      /* last materialised constant per register */
     bool      known[32];
 
+    /*
+     * The last `lui` seen for each register, kept alongside the tracked value.
+     *
+     * MIPS has a branch DELAY SLOT, and the compiler puts a `lui` in it: when
+     * the branch is taken the `lui` still executes and its `addiu` is at the
+     * TARGET. A linear walk pairs that `addiu` with whatever the fall-through
+     * path last left in the register, which produces an address that is off by
+     * the fall-through's own offset — a plausible in-image number that fails
+     * validation and is silently dropped. Keeping the `lui` half lets a
+     * materialising `addiu` offer BOTH candidates; every one is validated
+     * structurally before being accepted, so the wrong one costs nothing.
+     */
+    u32       lui[32];
+    bool      lui_known[32];
+
     u32       shadow_addr[DEC_SHADOW_MAX];
     u32       shadow_val[DEC_SHADOW_MAX];
     u32       shadow_count;
@@ -101,6 +116,8 @@ static void dec_reset(dec *d)
 {
     memset(d->reg, 0, sizeof(d->reg));
     memset(d->known, 0, sizeof(d->known));
+    memset(d->lui, 0, sizeof(d->lui));
+    memset(d->lui_known, 0, sizeof(d->lui_known));
 }
 
 /*
@@ -146,8 +163,10 @@ static void dec_track(dec *d, u32 w)
 
     switch (op) {
     case OP_LUI:
-        d->reg[rt]   = IMMU(w) << 16;
-        d->known[rt] = true;
+        d->reg[rt]       = IMMU(w) << 16;
+        d->known[rt]     = true;
+        d->lui[rt]       = IMMU(w) << 16;
+        d->lui_known[rt] = true;
         break;
     case OP_ADDIU:
         if (rs == 0) { d->reg[rt] = (u32)IMM(w); d->known[rt] = true; }
@@ -503,6 +522,23 @@ static void follow_callback(q2_creature *c, dec *d, u32 entry, s32 via,
         rt = (OP(w) == 0) ? ((w >> 11) & 0x1F) : RT(w);
         if (rt != 0 && rt < 32 && d->known[rt] && in_image(d, d->reg[rt], 16))
             add_move(c, d, d->reg[rt], via);
+
+        /*
+         * ...and the same `addiu` paired with the register's last `lui`, which
+         * is the value it has when a branch was taken and the `lui` sat in the
+         * delay slot. The Arachner's run callback is exactly this shape: the
+         * stand-ground branch installs one move and the fall-through installs
+         * another, and only the first was ever recorded — so nothing had
+         * `via == 4`, the generic run handler found no move to play, and the
+         * creature stood still on POWER1 for the whole capture.
+         */
+        if (OP(w) == OP_ADDIU && rt != 0 && rt < 32 && RS(w) == rt &&
+            d->lui_known[rt]) {
+            u32 alt = d->lui[rt] + (u32)IMM(w);
+
+            if (alt != d->reg[rt] && in_image(d, alt, 16))
+                add_move(c, d, alt, via);
+        }
     }
 }
 

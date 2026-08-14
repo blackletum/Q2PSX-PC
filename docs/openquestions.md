@@ -2568,7 +2568,47 @@ shots before and after.
       for two of the four ranged creatures that one is silent. This is the concrete form of "transcribe the
       remaining six modules" and it now has a per-creature list rather than a shrug.
 
-- [ ] 56. **Some callbacks have no move attributed to them at all.** The Arachner never moves on POWER1:
+- [x] 56. **ANSWERED AND FIXED: the decoder was not modelling the branch DELAY SLOT.**
+      MIPS executes the delay slot whichever way a branch goes, and the compiler puts a `lui` in it: when the
+      branch is taken the `lui` runs and its matching `addiu` is at the TARGET. A linear register walk pairs
+      that `addiu` with whatever the FALL-THROUGH path last left in the register, which yields a plausible
+      in-image address that fails validation and is dropped without a word.
+
+      The Arachner's run callback (`0x80101010`) is exactly that shape:
+
+          lw   v0, 220(a0)        ; aiflags
+          andi v0, v0, 1          ; STAND_GROUND
+          beq  v0, zero, +0x18
+          lui  v0, 0x8010         ; <- delay slot
+          lui  v0, 0x8010
+          addiu v0, v0, 5944      ; 0x80101738, the stand-ground move
+          jr   ra
+          sw   v0, 216(a0)
+          addiu v0, v0, 6152      ; TARGET: 0x80100000 + 6152 = 0x80101808
+
+      The linear walk computed `0x80101738 + 6152`, not `0x80100000 + 6152`, so the real run move at
+      `0x80101808` was never recorded. The tracker now keeps each register's last `lui` beside its tracked
+      value and offers BOTH candidates for a materialising `addiu`; every candidate is validated structurally
+      before being accepted, so the wrong one costs nothing.
+
+      Disc-wide: **97 moves become 101, and moves attributed to the run callback go from 5 to 8.**
+
+      What that does in play, POWER1, the same 500-frame capture:
+
+      | | before | after |
+      | --- | --- | --- |
+      | checkattack reached | 0 | 101 |
+      | attack callback ran | 0 | 3 |
+      | run move found / missing | 0 / 2 | 5 / 0 |
+      | decoded thinks run | 28 | 33 |
+
+      The Arachner went from standing still for the whole capture — no run animation, so `M_MoveFrame` had
+      nothing to advance and it never moved a unit — to running, chasing and attacking. The Soldier is
+      unaffected: BASE0 reports the same 19 shots.
+
+  *As first written:*
+
+- [ ] ~~56. **Some callbacks have no move attributed to them at all.**~~ The Arachner never moves on POWER1:
       `run 0 / missing 2` — `set_via(m, 4)` is called and finds nothing, so there is no animation to play and
       `q2_M_MoveFrame` advances nothing. Its module has a run callback (or `m->run` would now be NULL) but no
       move records `via == 4`, which means it installs one indirectly — through another move's endfunc, which
