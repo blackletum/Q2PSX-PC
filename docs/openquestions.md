@@ -4132,6 +4132,22 @@ nothing saying so.
       that the two draws are independent — the creature flash uses TWO where the player's uses one, so an
       implementation that reused a single draw would produce correlated radii and look right.
 
+      **And one more site named, which turns up the first non-zero style.** `0x800648B8` sits in
+      `0x80064780`, which `model.h` already identifies as **the fixed-size effect renderer** — so this is an
+      effect's own light. Its operands:
+
+          800648AC  lhu  v0, 0x800AEB28   ; a2 = 300 | 800<<16   -- the projectile's radii exactly
+          800648A8  lhu  a3, 0x800AEB2C   ; a3 = 1 | 3<<16
+
+      `a3`'s halves are the 3-bit `style` and 2-bit `size_shift` (settled at `0x80075C70`), so this site
+      passes **style 1, size_shift 3** — every other site examined passes 0, 0. It is the first evidence that
+      those fields are used at all, and `formats/entity.h` records the static lights' `type` byte taking
+      exactly five values `((n<<3)|7)` for n in 0..4 with "style semantics unknown". A dynamic light asking
+      for style 1 is a second sighting of the same field, from a different direction.
+
+      Not wired: the port's effect system would have to raise it, and which of the seven presets this
+      renderer is drawing is not yet read.
+
       How many exist, counted rather than grepped: **18 TIMEDLIGHT calls and 1 FLKLIGHT across COMMON's
       scripts, disc-wide.** A passive capture triggers none of them — they are script records fired by
       trigger volumes, exactly like the rotation calls — so the handler shows 0 in a fly-through and that is
