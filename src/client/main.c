@@ -85,6 +85,8 @@
 #include "menudraw.h"
 #include "memcard.h"
 #include "menufont.h"
+#include "leveltable.h"
+#include "musictable.h"
 #include "briefing.h"
 #include "leveltext.h"
 #include "mission.h"
@@ -120,6 +122,22 @@ typedef struct client {
     q2_xa_decoder    music_dec;
     u32              music_cursor;
     bool             music_open;
+
+    /*
+     * WHICH music, which used to be "track A, because the mapping is not
+     * decoded yet". It is decoded now (musictable.h): a level record carries a
+     * seven-entry playlist of track ids, and an id names a file and a channel
+     * through the table at 0x800A1DD8. `music_cursor_at` is the engine's own
+     * walk position — the cursor at gp+1536 — so a track that ends advances the
+     * list instead of looping itself, which is what the console does.
+     */
+    q2_music_table   music_table;
+    bool             music_table_ready;
+    q2_level_table   level_table;
+    bool             level_table_ready;
+    const q2_level_entry *level;
+    int              music_cursor_at;
+    int              music_id;
     SDL_AudioStream *audio;
 
     q2_camera        cam;
@@ -823,6 +841,57 @@ static bool client_music_start(client *c, char letter, u8 channel)
     return true;
 }
 
+/*
+ * Play a track id, which is the unit the game thinks in.
+ *
+ * An id below 2 is silence — the table's `file` is negative there and the
+ * player's own `bltz` at 0x80071778 takes a different arm entirely — so this
+ * stops rather than pretending.
+ */
+static bool client_music_play_id(client *c, int id)
+{
+    const q2_music_entry *e = q2_music_get(&c->music_table, id);
+
+    if (!c->music_table_ready || !e || e->file < 0 ||
+        e->file >= Q2_MUSIC_FILES) {
+        c->music_open = false;
+        return false;
+    }
+
+    c->music_id = id;
+    return client_music_start(c, q2_music_files[e->file][6],
+                              (u8)e->channel);
+}
+
+/*
+ * The next track in this level's playlist, by the engine's own walk. Called
+ * when a stream runs out, which is the only thing that advances it.
+ */
+static void client_music_advance(client *c)
+{
+    int id;
+
+    if (!c->level || !c->music_table_ready) {
+        /* No playlist: loop what is playing, which is what the port did before
+         * any of this was decoded. */
+        c->music_cursor = 0;
+        q2_xa_decoder_reset(&c->music_dec);
+        return;
+    }
+
+    id = q2_level_playlist_next(c->level, &c->music_cursor_at);
+    if (id < 0) {
+        /* A list that ends rather than looping: restart it. */
+        c->music_cursor_at = -1;
+        id = q2_level_playlist_next(c->level, &c->music_cursor_at);
+    }
+
+    if (id < 0 || !client_music_play_id(c, id)) {
+        c->music_cursor = 0;
+        q2_xa_decoder_reset(&c->music_dec);
+    }
+}
+
 static void client_music_pump(client *c)
 {
     s16 pcm[XA_FRAMES_PER_SECTOR * 2];
@@ -839,10 +908,10 @@ static void client_music_pump(client *c)
         u32 n = q2_xa_track_read(&c->music, &c->music_dec, &c->music_cursor,
                                  pcm, (u32)(sizeof(pcm) / sizeof(pcm[0])));
         if (n == 0) {
-            /* End of stream: loop, which is what the original did for level
-             * music rather than falling silent. */
-            c->music_cursor = 0;
-            q2_xa_decoder_reset(&c->music_dec);
+            /* End of stream: the playlist advances. The engine's walk is what
+             * decides what comes next, and for every real level it eventually
+             * jumps back and starts the seven again. */
+            client_music_advance(c);
             break;
         }
 
@@ -2877,10 +2946,31 @@ no_window:
         goto done;
     }
 
-    /* Level music. Which .XAI channel belongs to which map is part of the EXE's
-     * music table and is not decoded yet, so start on the first track rather
-     * than guess at a mapping that would be wrong. */
-    client_music_start(&c, 'A', 0);
+    /*
+     * Level music — this map's own playlist, not "track A because the mapping
+     * is not decoded yet".
+     *
+     * The level record carries seven track ids and a jump-back byte, and an id
+     * names a file and a channel through the table at 0x800A1DD8 (musictable.h).
+     * A build whose tables are not catalogued falls silent rather than picking
+     * a track that would be somebody else's.
+     */
+    c.music_table_ready = (q2_music_table_load(&c.music_table, c.disc,
+                                               &c.build) == Q2_OK);
+    c.level_table_ready = (q2_level_table_load(&c.level_table, c.disc,
+                                               &c.build) == Q2_OK);
+    if (c.level_table_ready)
+        c.level = q2_level_find(&c.level_table, c.map);
+
+    c.music_cursor_at = -1;
+    if (c.level && c.music_table_ready) {
+        int id = q2_level_playlist_next(c.level, &c.music_cursor_at);
+        if (id >= 0)
+            client_music_play_id(&c, id);
+        Q2_INFO("music: %s plays %d first", c.map, id);
+    } else {
+        Q2_WARN("no music playlist for %s", c.map);
+    }
 
     /*
      * A session starts IN the game. The free-fly camera is a debug view for
@@ -3125,6 +3215,8 @@ done:
         q2_sound_bank_free(&c.sfx);
     if (c.icons_ready)
         q2_icon_tables_free(&c.icons);
+    if (c.level_table_ready)
+        q2_level_table_free(&c.level_table);
     q2_save_ui_free(&c.save_ui);
     q2_save_free(&c.snapshot);
     q2_sim_free(&c.sim);

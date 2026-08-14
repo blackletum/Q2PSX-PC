@@ -16,6 +16,8 @@ add_library(q2psx_build STATIC
     ident.c
     leveltable.c
     leveltable.h
+    musictable.c
+    musictable.h
     ident.h
     itemtable.c
     itemtable.h

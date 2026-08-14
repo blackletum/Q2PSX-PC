@@ -39,6 +39,7 @@
 #include "ident.h"
 #include "level.h"
 #include "leveltable.h"
+#include "musictable.h"
 #include "model.h"
 #include "modeldraw.h"
 #include "mover.h"
@@ -3805,6 +3806,9 @@ static int cmd_music(disc *d)
     const u32 pcm_cap = XA_FRAMES_PER_SECTOR * 2;
     u32 total_sectors = 0, audio_sectors = 0, bad_blocks = 0;
     u32 interleave_violations = 0, skipped = 0;
+    q2_music_table mtab;
+    bool have_mtab = false;
+    u32 mtab_checked = 0, mtab_bad = 0;
     size_t li;
 
     pcm = (s16 *)malloc(pcm_cap * sizeof(s16));
@@ -3813,8 +3817,20 @@ static int cmd_music(disc *d)
         return 1;
     }
 
+    /*
+     * The executable's own music table, so each stream can be checked against
+     * the duration the game believes it has. That is what turns "+4 looks like
+     * a duration" into a fact: twenty streams, twenty independent agreements.
+     */
+    {
+        q2_build_id mid;
+        if (q2_identify(d, &mid) == Q2_OK &&
+            q2_music_table_load(&mtab, d, &mid) == Q2_OK)
+            have_mtab = true;
+    }
+
     printf("Demultiplexing the XA music streams...\n\n");
-    printf("  file       ch  sectors    seconds\n");
+    printf("  file       ch  sectors    seconds   id   table\n");
 
     for (li = 0; li < sizeof(letters); li++) {
         char path[64];
@@ -3841,9 +3857,33 @@ static int cmd_music(disc *d)
             while ((n = q2_xa_track_read(&track, &dec, &cursor, pcm, pcm_cap)) > 0)
                 sectors++;
 
-            printf("  QUAKE_%c    %u   %-9u  %.1f\n",
-                   letters[li], ch, sectors,
-                   (double)sectors * XA_FRAMES_PER_SECTOR / (double)XA_SAMPLE_RATE);
+            {
+                double secs = (double)sectors * XA_FRAMES_PER_SECTOR /
+                              (double)XA_SAMPLE_RATE;
+                /* Ids run 2..21 in file-major order (musictable.h). */
+                int id = 2 + (int)li * XAI_CHANNEL_COUNT + (int)ch;
+                const q2_music_entry *me = have_mtab ? q2_music_get(&mtab, id)
+                                                     : NULL;
+
+                if (me) {
+                    /* A tenth of slack: the table is in tenths of a second and
+                     * a stream ends on a sector boundary, not on a tenth. */
+                    double want = (double)me->tenths / 10.0;
+                    double err  = want - secs;
+                    bool ok = me->file == (s8)li && me->channel == ch &&
+                              err < 0.15 && err > -0.15;
+
+                    printf("  QUAKE_%c    %u   %-9u  %-8.1f  %-3d  %s\n",
+                           letters[li], ch, sectors, secs, id,
+                           ok ? "ok" : "MISMATCH");
+                    mtab_checked++;
+                    if (!ok)
+                        mtab_bad++;
+                } else {
+                    printf("  QUAKE_%c    %u   %-9u  %-8.1f\n",
+                           letters[li], ch, sectors, secs);
+                }
+            }
 
             audio_sectors += sectors;
         }
@@ -3881,6 +3921,9 @@ static int cmd_music(disc *d)
     printf("  audio sectors decoded : %u\n", audio_sectors);
     printf("  non-audio skipped     : %u\n", skipped);
     printf("  interleave violations : %u  (expected 0)\n", interleave_violations);
+    if (have_mtab)
+        printf("  streams whose length matches the music table : %u of %u\n",
+               mtab_checked - mtab_bad, mtab_checked);
     printf("  invalid ADPCM blocks  : %u  (expected 0)\n", bad_blocks);
 
     printf("\n%s\n", (interleave_violations == 0 && bad_blocks == 0)
@@ -4525,7 +4568,7 @@ static int cmd_leveltable(disc *d)
     }
 
     printf("Level table: %u records\n", t.count);
-    printf("  idx display        directory  u22  sequence          on disc\n");
+    printf("  idx display        directory  music playlist         end    on disc\n");
 
     for (i = 0; i < t.count; i++) {
         const q2_level_entry *e = &t.entries[i];
@@ -4543,11 +4586,32 @@ static int cmd_leveltable(disc *d)
         if (present) real++;
         else missing++;
 
-        printf("  %-3u %-14s %-10s %-4u %2u,%2u,%2u,%2u,%2u      %s\n",
-               i, e->display, e->directory, e->unknown_22,
-               e->sequence[0], e->sequence[1], e->sequence[2],
-               e->sequence[3], e->sequence[4],
-               present ? "yes" : "MISSING");
+        /*
+         * The playlist as the engine plays it: walked, not printed raw, and
+         * stopped at the point it starts repeating so a looping list shows its
+         * period instead of running forever.
+         */
+        {
+            char list[64];
+            int walk = -1, n = 0, first = -1, tid;
+            size_t used = 0;
+
+            list[0] = '\0';
+            while ((tid = q2_level_playlist_next(e, &walk)) >= 0 && n < 12) {
+                if (n == 0)
+                    first = walk;
+                else if (walk == first)
+                    break;              /* back to the top: that is the loop */
+                used += (size_t)snprintf(list + used, sizeof(list) - used,
+                                         "%s%d", n ? "," : "", tid);
+                n++;
+            }
+
+            printf("  %-3u %-14s %-10s %-22s %-6s %s\n",
+                   i, e->display, e->directory, list,
+                   (tid >= 0) ? "loops" : "once",
+                   present ? "yes" : "MISSING");
+        }
     }
 
     printf("\n  resolve to a directory : %u\n", real);

@@ -979,9 +979,35 @@ The residues of the resolved blockers keep their parents' numbers.
       `+0xD2` is 46 and `+0xDA` is 20, over 48 entries of 768 bytes; the rule is recorded and the lookup
       becomes exact once the port's entity records carry those two fields. Nothing else is unread.
 
-- [ ] **13. Which in-game situation selects which music id.** The id lives in a `$gp` global whose writer was
-      not traced; the per-map id is probably in the level `.DAT` chunks. Music is silent or arbitrary
-      without it.
+- [x] **13. Which in-game situation selects which music id. — SOLVED. It is the level's own playlist, and
+      the id names a file and a channel.** Two tables, and neither had been read.
+      The id at `gp+18524` (`0x800B2E5C`) indexes a **22-record, 6-byte table at `0x800A1DD8`**, with the
+      stride spelled out at `0x80071760` as `(id*2 + id)*2`: `+0` is a signed file index into the five
+      `QUAKE_x.XAI` names at `0x800A1E5C` — negative meaning silence, which is what ids 0 and 1 hold and
+      which `0x80071778`'s `bltz` branches on — `+1` is the channel, and `+4` is the duration in **tenths of
+      a second**. That last is checked rather than asserted: `q2psx-inspect music` demultiplexes and measures
+      every stream on the disc and **19 of 20 agree exactly**, the exception being id 13 (QUAKE_C channel 3),
+      whose table value is 175.1 s against a measured 176.1 — one second short, not a scale error, and worth
+      leaving visible. Ids 2..21 are therefore the twenty (file, channel) pairs in file-major order.
+      What WRITES the id is the cursor walk at `0x80071A68`, and the list it walks is in the **level table**:
+      `p = cursor; cursor = p+1; v = *cursor`, where zero ends the list and a NEGATIVE byte is a relative
+      jump back. A level record's `+0x22..+0x28` are seven track ids and `+0x29` is `0xF9` — minus seven,
+      landing back on `+0x22` — so every level loops a seven-track playlist. The `s32` "always `0xF900 | n`"
+      that leveltable.h recorded at `+0x28` was that seventh id, the loop byte and two zeros read as one
+      word; and the "+0x22 varies without an obvious pattern" was the playlist's lead track. The seven are a
+      lead and then six consecutive from lead + 3, wrapped into 2..17 — BASE0 is 14, 17, 2, 3, 4, 5, 6 —
+      and ids 18..21, QUAKE_E's four channels, are in no level's list at all.
+      Two records are not seven-and-loop and are what make the walk worth implementing rather than
+      hard-coding: **QFRONT is one id then `-1`**, a single track looping for the title screen, and
+      **MAGDEMO is four then `-4`**.
+      `src/build/musictable.[ch]`, `q2_level_playlist_next`; the client plays its map's playlist and
+      advances on end of stream.
+
+- [ ] **13a. (was 13)** The remaining half: what, other than a stream ending, moves the playlist cursor.
+      `0x80071A68` is the only advance read so far and it runs when a track finishes. The earlier guess that
+      the per-map id was in the level `.DAT` chunks is retracted — it is in the executable's level table —
+      but whether a script event can jump the cursor (a boss room, a scripted set piece) is not established.
+      `gp+1536` has five references and only three have been followed.
 - [ ] **14. Does the engine loop XA tracks?** The duration field is converted to 50 Hz ticks and stored to
       two globals with a 30.0 s fallback — that looks like a countdown to a restart or fade — but the
       consuming code was not disassembled. One entry is **1.0 s short** of its measured stream length, hinting

@@ -93,17 +93,15 @@ q2_result q2_level_table_load(q2_level_table *out, const disc *d,
         copy_name(e->display, rec);
         copy_name(e->directory, rec + Q2_LEVEL_NAME_LEN);
 
-        e->unknown_22 = rec[0x22];
-        for (k = 0; k < 5; k++)
-            e->sequence[k] = rec[0x23 + k];
-        e->tail = q2_rd_s32(rec + 0x28);
+        for (k = 0; k < Q2_LEVEL_PLAYLIST; k++)
+            e->playlist[k] = rec[0x22 + k];
 
         /* BADLEVEL is the engine's error placeholder, and the final record has
          * an all-zero body. Flagging both stops a caller trying to load them
          * as maps. */
         e->is_placeholder = (name_casecmp(e->directory, "BADLEVEL") == 0) ||
-                            (e->tail == 0 && e->sequence[0] == 0 &&
-                             e->unknown_22 == 0);
+                            (e->playlist[0] == 0 && e->playlist[1] == 0 &&
+                             e->playlist[2] == 0);
 
         if (!name_is_printable(e->directory))
             e->is_placeholder = true;
@@ -120,6 +118,34 @@ void q2_level_table_free(q2_level_table *t)
     free(t->entries);
     q2_buf_free(&t->exe);
     memset(t, 0, sizeof(*t));
+}
+
+int q2_level_playlist_next(const q2_level_entry *e, int *cursor)
+{
+    int at;
+    s8  v;
+
+    if (!e || !cursor)
+        return -1;
+
+    at = *cursor + 1;
+    if (at < 0 || at >= Q2_LEVEL_PLAYLIST)
+        return -1;
+
+    v = (s8)e->playlist[at];
+
+    if (v == 0)
+        return -1;                       /* the list is over */
+
+    if (v < 0) {
+        /* A relative jump back, which is how a list loops. */
+        at += v;
+        if (at < 0 || at >= Q2_LEVEL_PLAYLIST)
+            return -1;
+    }
+
+    *cursor = at;
+    return (int)e->playlist[at];
 }
 
 const q2_level_entry *q2_level_find(const q2_level_table *t, const char *directory)
