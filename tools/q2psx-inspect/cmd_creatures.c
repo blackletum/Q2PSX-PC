@@ -36,6 +36,8 @@ static const u8 *g_img;
 static size_t g_img_size;
 static bool g_last_full;
 static int g_named;
+static int g_unnamed;
+static int g_unclaimed;
 static int g_moves;
 
 static void report(const q2_creature *c, const q2_cre_impl *impl)
@@ -102,6 +104,38 @@ static void report(const q2_creature *c, const q2_cre_impl *impl)
                         printf("      %3d-%-3d  \"%.16s\"\n",
                                c->move[k].first_frame, c->move[k].last_frame,
                                names[k]);
+            }
+            /*
+             * Which moves the module names but the DECODER never found, and
+             * which moves the decoder found that the module does not name. The
+             * first set says the disc knows about behaviour this port has not
+             * decoded; the second says the reverse. Printing both keeps
+             * "unnamed" from reading as "absent from the disc".
+             */
+            {
+                u32 k;
+                for (k = 0; k < c->move_count; k++)
+                    if (!names[k]) {
+                        printf("      %3d-%-3d  (this module does not name it)\n",
+                               c->move[k].first_frame, c->move[k].last_frame);
+                        g_unnamed++;
+                    }
+                {
+                    static const char *un[64];
+                    u32 nu, z;
+                    memset(un, 0, sizeof(un));
+                    nu = q2_creature_unclaimed_names(c, g_img, g_img_size, un,
+                                                     64);
+                    g_unclaimed += nu;
+                    if (nu) {
+                        printf("    module names %u range(s) no decoded move "
+                               "claims:", nu);
+                        for (z = 0; z < nu && z < 6; z++)
+                            if (un[z])
+                                printf(" \"%.16s\"", un[z]);
+                        printf("%s\n", nu > 6 ? " ..." : "");
+                    }
+                }
             }
             g_named += (int)named;
             g_moves += (int)c->move_count;
@@ -377,6 +411,8 @@ int cmd_creatures(const disc *d)
     printf("  %d of %d moves carry the module's own name for them — a 20-byte"
            " {char[16], u16 first, u16 last} record, matched by frame range\n",
            g_named, g_moves);
+    printf("  %d moves the module does not name, and %d name records no decoded"
+           " move claims\n", g_unnamed, g_unclaimed);
     printf("  %d of %d think indices across the disc decode to an action;"
            " a ? marks one behind a branch\n", g_actions_done, g_actions_total);
     printf("  a * marks an index with no hand transcription — it runs from the"

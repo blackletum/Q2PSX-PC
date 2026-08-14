@@ -728,6 +728,13 @@ u32 q2_creature_move_names(const q2_creature *c, const u8 *image, size_t size,
         first = (s32)q2_rd_u16(image + off + 16);
         last  = (s32)q2_rd_u16(image + off + 18);
 
+        /*
+         * A record names EVERY move whose range it matches, not just the first.
+         * A module may list the same range in more than one callback slot — the
+         * Arachner has 16-24 twice — and stopping at the first left the rest
+         * unnamed, which then read as "the disc does not name this move" when
+         * the name was right there.
+         */
         for (i = 0; i < c->move_count && i < out_count; i++) {
             if (out[i])
                 continue;
@@ -735,12 +742,64 @@ u32 q2_creature_move_names(const q2_creature *c, const u8 *image, size_t size,
                 c->move[i].last_frame  == last) {
                 out[i] = (const char *)image + off;
                 found++;
-                break;
             }
         }
     }
 
     return found;
+}
+
+u32 q2_creature_unclaimed_names(const q2_creature *c, const u8 *image,
+                                size_t size, const char **out, u32 out_count)
+{
+    size_t off;
+    u32 unclaimed = 0;
+
+    if (!c || !image)
+        return 0;
+
+    /*
+     * Name records the decoder's move list does not account for. A non-zero
+     * count means the module names behaviour we never reached -- a gap in the
+     * decode, not in the disc.
+     */
+    for (off = 0; off + CRE_MOVE_NAME_STRIDE <= size; off += 4) {
+        s32 first, last;
+        u32 i;
+        bool claimed = false;
+
+        if (!name_slot_ok(image + off, size - off))
+            continue;
+
+        first = (s32)q2_rd_u16(image + off + 16);
+        last  = (s32)q2_rd_u16(image + off + 18);
+
+        /*
+         * name_slot_ok() alone is far too weak here. Scanning every 4-byte
+         * window finds slices of the module's error strings -- "Invalid
+         * Creature", "Creature Interfa", "d Creature Inter" -- and an earlier
+         * version of this counter reported 241 "unclaimed names" that were
+         * almost all exactly that. A real record's frame pair is ordered and
+         * small; a slice of English text produces a wild one.
+         */
+        if (first > last || last > 1024)
+            continue;
+
+        for (i = 0; i < c->move_count; i++) {
+            if (c->move[i].first_frame == first &&
+                c->move[i].last_frame  == last) {
+                claimed = true;
+                break;
+            }
+        }
+        if (!claimed) {
+            unclaimed++;
+            if (out && unclaimed <= out_count)
+                out[unclaimed - 1] = (const char *)image + off;
+        }
+    }
+
+    return unclaimed;
 }
 
 bool q2_creature_decode(q2_creature *out, const u8 *image, size_t size,

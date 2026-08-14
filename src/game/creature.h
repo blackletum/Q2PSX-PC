@@ -192,6 +192,11 @@ u32 q2_creature_sound_names(const q2_creature *c, const u8 *image, size_t size,
 u32 q2_creature_move_names(const q2_creature *c, const u8 *image, size_t size,
                            const char **out, u32 out_count);
 
+/* Name records in the module that no decoded move claims. Non-zero means the
+ * module names behaviour the decoder never reached. */
+u32 q2_creature_unclaimed_names(const q2_creature *c, const u8 *image,
+                                size_t size, const char **out, u32 out_count);
+
 /* Look a move up by the callback that installs it, or by its module address. */
 const q2_cre_move *q2_creature_move_via(const q2_creature *c, u32 callback_slot);
 const q2_cre_move *q2_creature_move_at(const q2_creature *c, u32 addr);

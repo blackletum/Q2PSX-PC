@@ -3879,3 +3879,33 @@ nothing saying so.
       CANDIDATE that fits the data, not a demonstration. **Find what writes `gp+376`** — that is the whole
       question, and it decides whether this port should be reading zone Events after all or some pristine
       second copy of COMMON's.
+
+- [ ] 57. **The modules name moves this port's decoder never reaches — and the first count of them was junk.**
+      Chasing the three unnamed moves from 51h turned up a namer bug and then a measurement trap.
+
+      **The bug:** `q2_creature_move_names` matched a name record to a move and then `break`, so one record
+      could name only ONE move. A module may list the same range in two callback slots — the Arachner has
+      16-24 twice — and the duplicate came out unnamed, reading as "the disc does not name this" when the
+      name was right there. Fixed; disc-wide naming goes **89 -> 90 of 101**.
+
+      **The trap:** the obvious next question is the other direction — name records that no decoded move
+      claims, which would mean the module knows behaviour the decoder never found. The first counter said
+      **241**, and the number was worthless. Printing them showed what they were:
+
+          "Invalid Creature"  "Creature Interfa"  "d Creature Inter"  "eature Interface"
+
+      `name_slot_ok()` accepts any 4-byte-aligned window that looks name-like, so the scan was walking
+      straight through the modules' error strings and counting every misaligned slice of them. Requiring the
+      record's frame pair to be ordered and small (`first <= last`, `last <= 1024`) — which a slice of
+      English text will not satisfy — drops it to **42**, and real names appear:
+
+          Soldier   "Run"  "Fire 1 Ready"  "Fire 1 Aim"
+          others    "idle1"  "death"  "Walk"  "Pain 2"  "Stand"  "Attack2"
+
+      So the honest picture is two-sided: **11 decoded moves the module does not name, and at most 42 named
+      records no decoded move claims.** The Soldier naming a "Run" the decoder never installed is the
+      interesting one — it says the gap is in the decode, not on the disc.
+
+      42 is still an upper bound, not a count: junk like `"! @"` and `"%(E"` survives the tighter filter.
+      Tightening it further, or reaching those moves in the decoder, is the next step. **Do not quote 42 as
+      a finding** — quote the named examples, which are individually checkable.
