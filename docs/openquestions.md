@@ -4266,8 +4266,28 @@ nothing saying so.
                                        neighbourhood and that was worth having; it did not name it, and
                                        calling it "GLASS's destruction light" was a step further than the
                                        evidence went.
-          0x80031048  in 0x80030E74  = EFFECT code (effect.c cites 0x80030430)
+          0x80031048  in 0x80030E74  = EFFECT code (effect.c cites 0x80030430), and it does not read one
+                                       colour — it reads a **six-step fade ramp**, `0x800AE7BC..0x800AE7D0`:
+
+                                           rgb(153, 54, 0)   orange
+                                           rgb(122, 43, 0)
+                                           rgb( 91, 33, 0)
+                                           rgb( 61, 22, 0)
+                                           rgb( 31, 11, 0)
+                                           rgb(  0,  0, 0)   out
+
+                                       Each step is roughly 0.8x the last, ending at black. So this light
+                                       DIMS over six steps rather than holding a colour — an ember or an
+                                       explosion cooling, and the first site found that animates its own
+                                       colour rather than its radius.
           0x80028E6C  in 0x80028BDC  = the script command area, beside SHOOTTHEN
+
+      **A caveat on that sweep, learned by it being wrong.** It scans back from each `jal` for annotated
+      `0x800AE___` operands, and the annotation only appears when the disassembler can resolve the base
+      register. `0x8002A868`'s colour load is `lbu a1, -6232(v0)` with `v0` materialised far earlier, so the
+      sweep never saw `0x800AE7A8` — the entry that turned out to name that light. Widening the window from
+      22 instructions to 60 found more (`0x80031048`'s ramp among them) but cannot fix that class of miss.
+      **Absence from these lists is not evidence.**
 
       So the fifteen are no longer a list of addresses: **one is wired and dormant by design, one is the
       creature flash, two are the player's, one each for projectile, rocket, BFG and the effect renderer, and
