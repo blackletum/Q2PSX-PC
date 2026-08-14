@@ -6,6 +6,9 @@
 
 #include "hud.h"
 #include "hudtables.h"
+#include "icontable.h"
+#include "itemtable.h"
+#include "statusbar.h"
 #include "ident.h"
 #include "raster.h"
 #include "vram.h"
@@ -115,6 +118,148 @@ static void dump_tables(const q2_hud_tables *t)
             printf("...\n");
         }
     }
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * The status bar's data, and the check that it is a grid.
+ *
+ * This exists because §11.1 of FORMATS.md said for a long time that there was
+ * no status bar. There is; the enumeration that concluded otherwise looked only
+ * at text, and the bar is sprites. Printing the table with its regularity
+ * measured is the cheapest way to keep that from being re-forgotten.
+ */
+static int dump_icons(const disc *d, const q2_build_id *id)
+{
+    q2_icon_tables it;
+    u32 i, on_grid = 0, blank = 0;
+    int rows_seen[16];
+    int nrows = 0;
+
+    if (q2_icon_tables_load(&it, d, id) != Q2_OK) {
+        printf("\nstatus-bar tables: not catalogued for this build\n");
+        return 0;
+    }
+
+    memset(rows_seen, 0, sizeof(rows_seen));
+
+    printf("\nThe status bar — RETRACTION of \"there is no status bar\"\n");
+    printf("Health, ammo and armour are drawn as SPRITES, not text, so the"
+           " format-string sweep\n"
+           "that produced the old finding could not have seen them. See"
+           " FORMATS.md 11.1.\n\n");
+
+    printf("Icon rects (0x%08X, %u entries, 5 bytes each)\n",
+           Q2_ICON_ADDR_RECTS, it.rect_count);
+
+    for (i = 0; i < it.rect_count; i++) {
+        const q2_icon_rect *r = &it.rect[i];
+
+        if (r->w == 1 && r->h == 1) {
+            blank++;
+            continue;
+        }
+        if (q2_icon_on_grid(r)) {
+            int row = r->v / Q2_ICON_CELL_H;
+            on_grid++;
+            if (row >= 0 && row < 16 && !rows_seen[row]) {
+                rows_seen[row] = 1;
+                nrows++;
+            }
+        } else {
+            printf("  %2u  (%3u,%3u) %ux%u  OFF GRID\n", i, r->u, r->v,
+                   r->w, r->h);
+        }
+    }
+
+    printf("  %u of %u are %ux%u cells on an %u-wide grid, %u rows;"
+           " %u are the 1x1 blank\n",
+           on_grid, it.rect_count, Q2_ICON_CELL_W, Q2_ICON_CELL_H,
+           Q2_ICON_PER_ROW, (unsigned)nrows, blank);
+    printf("  the table ends at 0x%08X; what follows is not rectangles\n",
+           Q2_ICON_ADDR_AFTER);
+
+    /*
+     * The vocabulary. Each rect's fifth byte is the item's `effect` dispatch
+     * index, so joining against the item table names every icon — and the
+     * weapon-to-ammo table is the proof, because every weapon lands on its own
+     * ammunition and nothing in the decode arranged that.
+     */
+    {
+        q2_item_table itm;
+        bool have = (q2_item_table_load(&itm, d, id) == Q2_OK);
+        u32 named = 0, k;
+
+        printf("\nWhat each rect IS - the fifth byte is the item's `effect`\n");
+        for (i = 0; i < it.rect_count; i++) {
+            const char *what = NULL;
+
+            if (have && it.rect[i].id)
+                for (k = 0; k < itm.count; k++)
+                    if (itm.def[k].effect == it.rect[i].id) {
+                        what = itm.def[k].model;
+                        break;
+                    }
+            if (what)
+                named++;
+            else
+                printf("  rect %2u  effect %3u  (no item has this effect)\n",
+                       i, it.rect[i].id);
+        }
+        printf("  %u of %u rects name an item\n", named, it.rect_count);
+
+        printf("\nWeapon -> ammo (0x%08X, EFFECT IDS, consumed 1-based)\n",
+               Q2_ICON_ADDR_AMMO_ICON);
+        for (i = 0; i < Q2_ICON_WEAPONS; i++) {
+            const char *what = "(none)";
+
+            if (have && it.ammo_icon[i])
+                for (k = 0; k < itm.count; k++)
+                    if (itm.def[k].effect == it.ammo_icon[i]) {
+                        what = itm.def[k].model;
+                        break;
+                    }
+            printf("  weapon %2u -> effect %3u -> %-14s%s\n", i,
+                   it.ammo_icon[i], what, i == 0 ? "(no weapon)" : "");
+        }
+        printf("  every weapon names its own ammunition, which is what rules\n"
+               "  out reading these as rect indices - that gives the shotgun\n"
+               "  Flame Fuel and the rocket launcher Combat Armour.\n");
+    }
+
+    printf("\nSplit-screen size (0x800353C8): 1P %ux%u, 2P %ux%u, 3P+ %ux%u\n",
+           q2_icon_draw_size(1, 1).w, q2_icon_draw_size(1, 1).h,
+           q2_icon_draw_size(2, 1).w, q2_icon_draw_size(2, 1).h,
+           q2_icon_draw_size(4, 1).w, q2_icon_draw_size(4, 1).h);
+
+    printf("\nThe numerals (0x%08X): %d cells, %dx%d at v=%d, u = %d * digit\n",
+           Q2_SBAR_DIGIT_ADDR, Q2_SBAR_DIGITS, Q2_SBAR_DIGIT_W,
+           Q2_SBAR_DIGIT_H, Q2_SBAR_DIGIT_V, Q2_SBAR_DIGIT_PITCH);
+
+    printf("\nWhere it is drawn: 0x800337D0, the PER-VIEWPORT draw hook the\n"
+           "layout stores at view+308 - not a screen. Anchored at view+304 /\n"
+           "view+306, which screen.h carried as pad_a/pad_b, and which the\n"
+           "one-player layout sets to (93, 201).\n");
+    {
+        int c;
+        static const char *cname[] = { "health", "ammo", "armour" };
+        for (c = 0; c < Q2_SBAR_COUNTERS; c++) {
+            int d0 = q2_sbar_digit_field((q2_sbar_counter)c, 0);
+            int d1 = q2_sbar_digit_field((q2_sbar_counter)c, 1);
+            int d2 = q2_sbar_digit_field((q2_sbar_counter)c, 2);
+            int ic = q2_sbar_icon_field((q2_sbar_counter)c);
+            printf("  %-7s digits x %+4d %+4d %+4d   icon x %+4d\n", cname[c],
+                   q2_sbar_fields[d0].dx, q2_sbar_fields[d1].dx,
+                   q2_sbar_fields[d2].dx, q2_sbar_fields[ic].dx);
+        }
+    }
+    printf("  (the left-to-right order is from retail capture, not the code)\n");
+
+    printf("\nSTILL open: which rect is which item - the record's fifth byte is\n"
+           "an id whose value space is unidentified - and the field at +330.\n");
+
+    q2_icon_tables_free(&it);
+    return (on_grid + blank == it.rect_count) ? 0 : 1;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -285,17 +430,23 @@ int cmd_hud(const disc *d, const char *map, const char *out_path)
     }
 
     printf("HUD tables from %s\n\n", id.exe_name);
-    printf("There is no status bar. No health, ammo or armour readout exists"
-           " in this build:\n"
-           "every format string the executable hands to its text layer was"
-           " enumerated and\n"
-           "none of them formats a player statistic. What follows is what the"
-           " overlay is.\n\n");
+    printf("Two subsystems, both on screen at once.\n\n"
+           "The OVERLAY is text: notifications, the centre line, the crosshair"
+           " and the damage\n"
+           "flash, all drawn through the markup layer out of chars.lbm. Nothing"
+           " it formats is\n"
+           "a player statistic — that sweep was exhaustive and still holds.\n\n"
+           "The STATUS BAR is sprites, and it is why that sweep produced a"
+           " wrong conclusion\n"
+           "for so long: health, ammo and armour are pre-rendered numerals, so"
+           " enumerating\n"
+           "format strings could never have found them. See FORMATS.md 11.1.\n\n");
 
     dump_tables(&tab);
 
     if (!map) {
-        rc = check_atlas(d);
+        rc = dump_icons(d, &id);
+        rc |= check_atlas(d);
     } else {
         rc = render_overlay(d, &tab, map, out_path ? out_path : "hud.ppm");
     }

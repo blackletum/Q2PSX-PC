@@ -20,9 +20,15 @@
  *     matrix before truncation.
  *   - Four blend modes, no arbitrary alpha.
  *
- * Quads are drawn as two triangles in PSX corner order: (0,1,2) and (1,3,2).
- * The corners are a "Z", not a winding, so treating them as a triangle fan
- * produces an hourglass.
+ * Quads are drawn as two triangles by fanning the corners: (0,1,2) and (0,2,3).
+ * That is NOT the libgpu POLY_GT4 rule — a hardware packet's corners are a "Z"
+ * and split (0,1,2) and (1,3,2) — but the corners reaching this backend come
+ * from MapMod, which winds them around the perimeter (scene.h). Splitting a
+ * perimeter quad the "Z" way drops a triangular quarter out of every surface.
+ *
+ * Both windings are rasterised. Backface rejection belongs to the game, which
+ * does it with NCLIP before a primitive ever gets here (see world.c), exactly
+ * as the original does.
  */
 #ifndef Q2PSX_RASTER_H
 #define Q2PSX_RASTER_H

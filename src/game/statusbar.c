@@ -1,0 +1,283 @@
+#include "statusbar.h"
+
+#include <string.h>
+
+/*
+ * The thirteen fields, in the order the original builds them on the stack at
+ * `0x800337EC`…`0x80033A5C`. The order is the executable's, not sorted by x —
+ * kept that way so the table can be checked against the disassembly line for
+ * line rather than after a rearrangement.
+ */
+const q2_sbar_field q2_sbar_fields[Q2_SBAR_FIELDS] = {
+    /* --- the main row, at the anchor ---------------------------------- */
+    {   0,  0, 38, 14 },   /*  0  health icon, initialised 38 wide      */
+    { -71,  1,  8, 14 },   /*  1  health digit 0                        */
+    { -47,  1,  8, 14 },   /*  2  health digit 1                        */
+    { -23,  1,  8, 14 },   /*  3  health digit 2                        */
+    { 135,  1,  8, 14 },   /*  4  ammo icon                             */
+    {  64,  1,  8, 14 },   /*  5  ammo digit 0                          */
+    {  88,  1,  8, 14 },   /*  6  ammo digit 1                          */
+    { 112,  1,  8, 14 },   /*  7  ammo digit 2                          */
+    { 250,  0,  8, 14 },   /*  8  armour icon                           */
+    { 179,  1,  8, 14 },   /*  9  armour digit 0                        */
+    { 203,  1,  8, 14 },   /* 10  armour digit 1                        */
+    { 227,  1,  8, 14 },   /* 11  armour digit 2                        */
+    { 330,  0,  8, 14 },   /* 12  far right — the FRAG count in DM      */
+    /* --- the upper row, 24 to 25 above it ----------------------------- */
+    { 330, -25,  8, 14 },  /* 13  upper-right icon                      */
+    { 256, -24,  8, 14 },  /* 14  upper-right digit 0                   */
+    { 280, -24,  8, 14 },  /* 15  upper-right digit 1                   */
+    { -71, -25,  9, 14 }   /* 16  upper-LEFT icon, initialised 9 wide   */
+};
+
+/*
+ * The two-player layout, from `0x80033D30` — a different table, not a scaled
+ * one. Two counters, digits 20 apart, and the far-right field 24 further out
+ * than the one-player table puts it.
+ */
+const q2_sbar_field q2_sbar_fields_2p[Q2_SBAR_FIELDS_2P] = {
+    { 106,  0, 38, 14 },   /* 0  health icon                            */
+    {  46,  1,  8, 14 },   /* 1  health digit 0                         */
+    {  66,  1,  8, 14 },   /* 2  health digit 1                         */
+    {  86,  1,  8, 14 },   /* 3  health digit 2                         */
+    { 230,  1,  8, 14 },   /* 4  ammo icon                              */
+    { 170,  1,  8, 14 },   /* 5  ammo digit 0                           */
+    { 190,  1,  8, 14 },   /* 6  ammo digit 1                           */
+    { 210,  1,  8, 14 },   /* 7  ammo digit 2                           */
+    { 354,  1,  8, 14 }    /* 8  the frag count                         */
+};
+
+/*
+ * The quad layout, from 0x80034288. `dy` is the constant part only: the eight
+ * fields q2_sbar_field_4p_is_lower() flags have the live screen height
+ * subtracted, so they sit 40 pixels above the bottom of whatever mode the
+ * display is in rather than at a fixed line.
+ *
+ * Read verbatim, in the order the builder writes them — which is not sorted by
+ * position, and the field at +400 is the one that breaks the pattern. Left as
+ * found rather than tidied: an order that looks wrong and is the original's is
+ * worth more than one that looks right and is invented.
+ */
+const q2_sbar_field q2_sbar_fields_4p[Q2_SBAR_FIELDS_4P] = {
+    {  76,  1, 38, 14 },   /*  0  upper left  icon                       */
+    {  16,  0,  8, 14 },   /*  1  upper left  digit 0                    */
+    {  36,  0,  8, 14 },   /*  2  upper left  digit 1                    */
+    {  56,  0,  8, 14 },   /*  3  upper left  digit 2                    */
+    { 230,  1, 38, 14 },   /*  4  upper right icon                       */
+    { 170,  0,  8, 14 },   /*  5  upper right digit 0                    */
+    { 190,  0,  8, 14 },   /*  6  upper right digit 1                    */
+    { 210,  0,  8, 14 },   /*  7  upper right digit 2                    */
+    {  76, Q2_SBAR_4P_LOWER_DY,  8, 14 },   /*  8  lower left  icon      */
+    {  16, Q2_SBAR_4P_LOWER_DY,  8, 14 },   /*  9  lower left  digit 0   */
+    {  36, Q2_SBAR_4P_LOWER_DY,  8, 14 },   /* 10  lower left  digit 1   */
+    {  56, Q2_SBAR_4P_LOWER_DY,  8, 14 },   /* 11  lower left  digit 2   */
+    { 400,  0,  8, 14 },   /* 12  the odd one out, on the upper row      */
+    { 210, Q2_SBAR_4P_LOWER_DY,  8, 14 },   /* 13  lower right digit 2   */
+    { 170, Q2_SBAR_4P_LOWER_DY,  8, 14 },   /* 14  lower right digit 0   */
+    { 190, Q2_SBAR_4P_LOWER_DY,  8, 14 }    /* 15  lower right digit 1   */
+};
+
+bool q2_sbar_field_4p_is_lower(int field)
+{
+    return field >= 8 && field < Q2_SBAR_FIELDS_4P && field != 12;
+}
+
+/*
+ * Counter n's three digits and its icon, as indices into the table above. The
+ * grouping is what makes the layout legible: sorted by x the fields read
+ * digit, digit, digit, icon three times over, with the icon 24 past the last
+ * digit exactly as the digits are 24 apart.
+ */
+static const u8 k_digit_field[Q2_SBAR_COUNTERS][Q2_SBAR_COUNTER_DIGITS] = {
+    { 1, 2, 3 },
+    { 5, 6, 7 },
+    { 9, 10, 11 }
+};
+static const u8 k_icon_field[Q2_SBAR_COUNTERS] = { 0, 4, 8 };
+
+int q2_sbar_digit_field(q2_sbar_counter c, int digit)
+{
+    if ((int)c < 0 || (int)c >= Q2_SBAR_COUNTERS)
+        return -1;
+    if (digit < 0 || digit >= Q2_SBAR_COUNTER_DIGITS)
+        return -1;
+    return k_digit_field[c][digit];
+}
+
+int q2_sbar_icon_field(q2_sbar_counter c)
+{
+    if ((int)c < 0 || (int)c >= Q2_SBAR_COUNTERS)
+        return -1;
+    return k_icon_field[c];
+}
+
+/* ------------------------------------------------------------------------- */
+int q2_sbar_digits_of(int value, u8 out[Q2_SBAR_COUNTER_DIGITS])
+{
+    int n = 0, i;
+    u8 tmp[Q2_SBAR_COUNTER_DIGITS];
+
+    if (!out)
+        return 0;
+
+    if (value < 0)
+        value = 0;
+    /* Three cells is the whole counter, so 999 is the ceiling the layout
+     * imposes. The console's own maxima are lower than that everywhere. */
+    if (value > 999)
+        value = 999;
+
+    do {
+        tmp[n++] = (u8)(value % 10);
+        value /= 10;
+    } while (value > 0 && n < Q2_SBAR_COUNTER_DIGITS);
+
+    /* Most significant first, and no leading zeroes — capture shows "2" as one
+     * numeral rather than "002". */
+    for (i = 0; i < n; i++)
+        out[i] = tmp[n - 1 - i];
+    return n;
+}
+
+/* ------------------------------------------------------------------------- */
+void q2_statusbar_init(q2_statusbar *b, const q2_icon_tables *icons,
+                       int players)
+{
+    if (!b)
+        return;
+    memset(b, 0, sizeof(*b));
+    b->icons   = icons;
+    b->players = players > 0 ? players : 1;
+    b->visible = true;
+}
+
+void q2_statusbar_anchor(q2_statusbar *b, s16 x, s16 y)
+{
+    if (!b)
+        return;
+    b->anchor_x = x;
+    b->anchor_y = y;
+}
+
+/* ------------------------------------------------------------------------- */
+/* One cell of the sheet, as the emitter at 0x80033320 draws it: a POLY_GT4    */
+/* whose four corners carry the same colour.                                  */
+/* ------------------------------------------------------------------------- */
+static u32 emit_cell(psx_ot *ot, u32 bucket, u16 tpage, u16 clut,
+                     int x, int y, u8 u, u8 v, u8 sw, u8 sh, u8 dw, u8 dh)
+{
+    psx_prim *p;
+    int i;
+
+    if (sw == 0 || sh == 0 || dw == 0 || dh == 0)
+        return 0;
+
+    p = psx_ot_add_bucket(ot, bucket);
+    if (!p)
+        return 0;
+
+    p->kind  = PSX_PRIM_GT4;
+    p->tpage = tpage;
+    p->clut  = clut;
+    p->textured_blend = true;
+
+    /* Perimeter order and inclusive corners — the same two conventions the
+     * menu's glyphs need (menufont.c). */
+    p->xy[0].x = (s16)x;              p->xy[0].y = (s16)y;
+    p->xy[1].x = (s16)(x + dw - 1);   p->xy[1].y = (s16)y;
+    p->xy[2].x = (s16)(x + dw - 1);   p->xy[2].y = (s16)(y + dh - 1);
+    p->xy[3].x = (s16)x;              p->xy[3].y = (s16)(y + dh - 1);
+
+    p->uv[0].u = u;                   p->uv[0].v = v;
+    p->uv[1].u = (u8)(u + sw - 1);    p->uv[1].v = v;
+    p->uv[2].u = (u8)(u + sw - 1);    p->uv[2].v = (u8)(v + sh - 1);
+    p->uv[3].u = u;                   p->uv[3].v = (u8)(v + sh - 1);
+
+    for (i = 0; i < 4; i++) {
+        p->rgb[i].r = Q2_SBAR_MOD;
+        p->rgb[i].g = Q2_SBAR_MOD;
+        p->rgb[i].b = Q2_SBAR_MOD;
+    }
+    return 1;
+}
+
+/* One counter: its digits, then its icon. */
+static u32 emit_counter(const q2_statusbar *b, u16 tpage, u16 clut,
+                        psx_ot *ot, u32 bucket, int ox, int oy,
+                        q2_sbar_counter which, int value, int icon_id)
+{
+    u8 digits[Q2_SBAR_COUNTER_DIGITS];
+    int n = q2_sbar_digits_of(value, digits);
+    /* A numeral is 24 x 24 in the sheet, not the icons' 32 x 24; sizing it as
+     * an icon stretches every digit by a third. */
+    q2_icon_size size = q2_icon_draw_size_of(b->players, 1,
+                                             Q2_SBAR_DIGIT_W,
+                                             Q2_SBAR_DIGIT_H);
+    u32 emitted = 0;
+    int i;
+
+    /*
+     * Right-aligned inside the three cells: a two-digit figure uses the second
+     * and third, which is what puts the units column in the same place whatever
+     * the value. Capture confirms it — "2" sits where the last digit of "100"
+     * sits, not where its first does.
+     */
+    for (i = 0; i < n; i++) {
+        int slot = Q2_SBAR_COUNTER_DIGITS - n + i;
+        int f = q2_sbar_digit_field(which, slot);
+        const q2_sbar_field *fd;
+
+        if (f < 0)
+            continue;
+        fd = &q2_sbar_fields[f];
+
+        emitted += emit_cell(ot, bucket, tpage, clut,
+                             ox + b->anchor_x + fd->dx,
+                             oy + b->anchor_y + fd->dy,
+                             (u8)(digits[i] * Q2_SBAR_DIGIT_PITCH),
+                             Q2_SBAR_DIGIT_V,
+                             Q2_SBAR_DIGIT_W, Q2_SBAR_DIGIT_H,
+                             (u8)(size.w ? size.w : Q2_SBAR_DIGIT_W),
+                             (u8)(size.h ? size.h : Q2_SBAR_DIGIT_H));
+    }
+
+    /* The icon beside it, resolved from its item effect id. */
+    {
+        const q2_icon_rect *r = q2_icon_rect_for_id(b->icons, (u8)icon_id,
+                                                    NULL);
+        int f = q2_sbar_icon_field(which);
+
+        if (r && f >= 0 && !(r->w == 1 && r->h == 1)) {
+            const q2_sbar_field *fd = &q2_sbar_fields[f];
+            q2_icon_size is = q2_icon_draw_size_of(b->players, 1, r->w, r->h);
+
+            emitted += emit_cell(ot, bucket, tpage, clut,
+                                 ox + b->anchor_x + fd->dx,
+                                 oy + b->anchor_y + fd->dy,
+                                 r->u, r->v, r->w, r->h, is.w, is.h);
+        }
+    }
+
+    return emitted;
+}
+
+u32 q2_statusbar_build_ot(const q2_statusbar *b, u16 tpage, u16 clut,
+                          psx_ot *ot, u32 bucket, int origin_x, int origin_y)
+{
+    u32 n = 0;
+
+    if (!b || !ot || !b->visible || tpage == 0)
+        return 0;
+
+    n += emit_counter(b, tpage, clut, ot, bucket, origin_x, origin_y,
+                      Q2_SBAR_HEALTH, b->health, b->health_icon);
+
+    n += emit_counter(b, tpage, clut, ot, bucket, origin_x, origin_y,
+                      Q2_SBAR_AMMO, b->ammo,
+                      q2_icon_ammo_for_weapon(b->icons, b->weapon));
+
+    n += emit_counter(b, tpage, clut, ot, bucket, origin_x, origin_y,
+                      Q2_SBAR_ARMOUR, b->armour, b->armour_icon);
+
+    return n;
+}

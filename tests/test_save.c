@@ -4,12 +4,23 @@
  * The round trip is the point. A save format that writes without error and
  * reads back subtly different values is worse than one that fails, because the
  * damage shows up as a corrupted game rather than an error message.
+ *
+ * The tests below are in three groups:
+ *
+ *   the format    every field survives the file, including the ones a first
+ *                 pass at this forgot: the level clock, the mover state, the
+ *                 trigger residency, the entity set
+ *   the slots     four rows, their text, and what an empty or corrupt one does
+ *   the flow      the front end's three entry points, driven through both a
+ *                 save and a load without a screen anywhere near it
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "mission.h"
 #include "save.h"
+#include "saveui.h"
 
 static int g_failures;
 static int g_checks;
@@ -33,15 +44,132 @@ static void check_eq_i(s64 got, s64 want, const char *what)
     }
 }
 
+static const char *tmp_dir(void)
+{
+    static char path[512];
+    const char *dir = getenv("TEMP");
+
+    if (!dir || !*dir)
+        dir = getenv("TMPDIR");
+    if (!dir || !*dir)
+        dir = ".";
+    snprintf(path, sizeof(path), "%s/q2psx_save_test", dir);
+    return path;
+}
+
+/* Beside the slot directory rather than inside it: the loose-file tests run
+ * before anything has created one, and q2_save_slot_write is what makes it. */
 static const char *tmp_path(void)
 {
     static char path[512];
     const char *dir = getenv("TEMP");
 
     if (!dir || !*dir)
+        dir = getenv("TMPDIR");
+    if (!dir || !*dir)
         dir = ".";
     snprintf(path, sizeof(path), "%s/q2psx_save_test.sav", dir);
     return path;
+}
+
+/* Every slot file this run could have made. */
+static void clear_slots(void)
+{
+    int i;
+    for (i = 0; i < Q2_SAVE_SLOTS; i++)
+        q2_save_slot_delete(i);
+}
+
+/* ------------------------------------------------------------------------- */
+/* A sim with something in every corner of it, so the round trip has something */
+/* to lose.                                                                    */
+/* ------------------------------------------------------------------------- */
+static void build_state(q2_sim *sim, q2_inventory *inv)
+{
+    s32 spawn[3] = { 1234, -5678, 9012 };
+
+    q2_sim_init(sim, NULL, 50);
+    q2_sim_spawn(sim, spawn, 700);
+
+    sim->player.pitch          = -250;
+    sim->player.roll           = 33;
+    sim->player.vel[0]         = 17;
+    sim->player.vel[1]         = -900;
+    sim->player.vel[2]         = 4;
+    sim->player.wish[0]        = -120;
+    sim->player.frame_delta[1] = -7;
+    sim->player.jump_hold      = 3;
+    sim->player.view_height    = 421;
+    sim->player.on_ground      = true;
+    sim->player.ground_y       = -5678;
+    sim->player.fall_value     = 61;
+    sim->player.fall_time      = 7777;
+    sim->player.foot           = 1;
+    sim->player.look_scheme    = 6;
+    sim->player.ent.flags      = 0xDEADBEEFu;
+    sim->player.ent.node       = 42;
+    sim->player.ent.ground_normal[1] = -4096;
+
+    sim->level_time   = 123456;
+    sim->tick_count   = 4321;
+    sim->dt_accum     = 5;
+    sim->gravity      = 47;
+    sim->env_flags    = 0x1234u;
+    sim->cheats       = 0x40u;
+    sim->current_node = 42;
+    sim->no_fall_damage = true;
+
+    sim->combat.weapon_id        = 9;
+    sim->combat.next_fire        = 123500;
+    sim->combat.kick[0]          = -12;
+    sim->combat.chaingun_bullets = 3;
+    sim->combat.rng.state        = 0xABCDEF01u;
+    sim->fx_rng.state            = 0x0BADF00Du;
+
+    /* A rocket in flight is as much state as the player is. */
+    sim->combat.projectiles.p[2].in_use  = true;
+    sim->combat.projectiles.p[2].kind    = Q2_PROJ_ROCKET;
+    sim->combat.projectiles.p[2].pos[0]  = 5000;
+    sim->combat.projectiles.p[2].vel[2]  = -333;
+    sim->combat.projectiles.p[2].damage  = 100;
+    sim->combat.projectiles.p[2].expires = 200000;
+    sim->combat.projectiles.p[2].node    = 7;
+    sim->combat.projectiles.live         = 1;
+
+    q2_inventory_init(inv);
+    q2_inventory_add_weapon(inv, Q2_WEAPON_RAILGUN);
+    q2_inventory_add_ammo(inv, Q2_AMMO_SLUGS, 23);
+    q2_inventory_give_key(inv, 0x0005);
+    inv->health         = 77;
+    inv->armour         = 42;
+    inv->armour_class   = Q2_ARMOUR_BODY;
+    inv->silencer_shots = 12;
+    inv->quad_until     = 132456;
+    inv->ammo_tier      = Q2_AMMO_TIER_BANDOLIER;
+    inv->last_item      = 19;
+}
+
+/* The sim owns neither triggers nor items without a map, so the pieces that
+ * come from one are installed by hand — which is also what lets the test check
+ * them without a disc. */
+static void attach_fake_world(q2_sim *sim, u32 triggers, u32 entities)
+{
+    u32 i;
+
+    sim->trigger_capacity = triggers;
+    sim->trigger_inside   = (u8 *)calloc(triggers ? triggers : 1, 1);
+
+    for (i = 0; i < entities; i++) {
+        q2_entity *e = q2_entity_alloc(&sim->entities);
+        if (!e)
+            break;
+        e->place_id = (u16)(100 + i);
+        e->kind     = Q2_ENT_KIND_ITEM;
+        e->scale    = 4096;
+        e->pos[0]   = (s32)(i * 1000);
+        e->think    = q2_item_think;
+    }
+    sim->entities_ready = true;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -50,45 +178,126 @@ static void test_round_trip(void)
     q2_sim sim;
     q2_inventory inv;
     q2_save saved, loaded;
-    s32 spawn[3] = { 1234, -5678, 9012 };
 
     printf("round trip\n");
 
-    q2_sim_init(&sim, NULL, 50);
-    q2_sim_spawn(&sim, spawn, 700);
-    sim.player.pitch = -250;
+    build_state(&sim, &inv);
+    attach_fake_world(&sim, 5, 4);
 
-    q2_inventory_init(&inv);
-    q2_inventory_add_weapon(&inv, Q2_WEAPON_RAILGUN);
-    q2_inventory_add_ammo(&inv, Q2_AMMO_SLUGS, 23);
-    q2_inventory_give_key(&inv, 0x0005);
-    inv.health = 77;
-    inv.armour = 42;
+    /* Something has already happened in this level. */
+    sim.trigger_inside[1] = 1;
+    sim.trigger_inside[4] = 1;
+    sim.entities.ent[0].taken[0] = true;
+    sim.entities.ent[0].hidden   = true;
+    sim.entities.ent[0].respawn_at = 4000;
+    sim.entities.ent[2].scale    = 1024;
+    sim.entities.ent[2].think    = q2_item_shrink_think;
+    q2_entity_remove(&sim.entities.ent[3]);
 
     check(q2_save_capture(&saved, &sim, &inv, "SLES-01534", "BASE1", 2) == Q2_OK,
           "captures state");
-    check_eq_i(saved.pos[0], 1234, "captured x");
+    check_eq_i(saved.player.pos[0], 1234, "captured x");
     check_eq_i(saved.zone, 2, "captured zone");
+    check_eq_i(saved.entity_count, 4, "captured every entity slot");
 
     check(q2_save_write(&saved, tmp_path()) == Q2_OK, "writes to disk");
     check(q2_save_read(&loaded, tmp_path()) == Q2_OK, "reads back");
 
-    /* Every field must survive the trip byte for byte. */
-    check_eq_i(loaded.pos[0], saved.pos[0], "x survives");
-    check_eq_i(loaded.pos[1], saved.pos[1], "y survives, including negatives");
-    check_eq_i(loaded.pos[2], saved.pos[2], "z survives");
-    check_eq_i(loaded.yaw, saved.yaw, "yaw survives");
-    check_eq_i(loaded.pitch, saved.pitch, "pitch survives, including negatives");
-    check_eq_i(loaded.zone, saved.zone, "zone survives");
+    /* --- identity ------------------------------------------------------- */
     check(strcmp(loaded.map, "BASE1") == 0, "map name survives");
     check(strcmp(loaded.serial, "SLES-01534") == 0, "serial survives");
+    check_eq_i(loaded.zone, saved.zone, "zone survives");
+    check(loaded.label[0] != '\0', "a label was composed");
+    check(strcmp(loaded.label, saved.label) == 0, "label survives");
 
+    /* --- the player ------------------------------------------------------ */
+    check_eq_i(loaded.player.pos[0], saved.player.pos[0], "x survives");
+    check_eq_i(loaded.player.pos[1], saved.player.pos[1],
+               "y survives, including negatives");
+    check_eq_i(loaded.player.pos[2], saved.player.pos[2], "z survives");
+    check_eq_i(loaded.player.vel[1], -900, "velocity survives");
+    check_eq_i(loaded.player.yaw, saved.player.yaw, "yaw survives");
+    check_eq_i(loaded.player.pitch, -250, "pitch survives, including negatives");
+    check_eq_i(loaded.player.roll, 33, "roll survives");
+    check_eq_i(loaded.player.wish[0], -120, "the wish velocity survives");
+    check_eq_i(loaded.player.frame_delta[1], -7,
+               "the one-tick frame delta survives");
+    check_eq_i(loaded.player.jump_hold, 3, "jump hold survives");
+    check_eq_i(loaded.player.view_height, 421, "view height survives");
+    check(loaded.player.on_ground, "the ground flag survives");
+    check_eq_i(loaded.player.ground_y, -5678, "ground height survives");
+    check_eq_i(loaded.player.fall_value, 61, "the fall kick survives");
+    check_eq_i(loaded.player.fall_time, 7777, "the fall deadline survives");
+    check_eq_i(loaded.player.foot, 1, "which footstep is next survives");
+    check_eq_i(loaded.player.look_scheme, 6, "the control scheme survives");
+
+    /* The mover's own carried state. Losing this is what makes a restored
+     * player fall through the floor they were standing on. */
+    check_eq_i((s64)loaded.player.ent.flags, (s64)0xDEADBEEFu,
+               "the mover's flags word survives");
+    check_eq_i(loaded.player.ent.node, 42, "the cached collision cell survives");
+    check_eq_i(loaded.player.ent.ground_normal[1], -4096,
+               "the ground normal survives");
+
+    /* --- the clock -------------------------------------------------------- */
+    check_eq_i(loaded.level_time, 123456, "the level clock survives");
+    check_eq_i(loaded.tick_count, 4321, "the tick count survives");
+    check_eq_i(loaded.dt_accum, 5, "the leftover dt survives");
+    check_eq_i(loaded.gravity, 47, "gravity survives");
+    check_eq_i((s64)loaded.env_flags, 0x1234, "the environment flags survive");
+    check_eq_i((s64)loaded.cheats, 0x40, "the game-variable word survives");
+    check(loaded.no_fall_damage != 0, "the fall-damage rule survives");
+
+    /* --- inventory --------------------------------------------------------- */
     check_eq_i(loaded.inventory.health, 77, "health survives");
     check_eq_i(loaded.inventory.armour, 42, "armour survives");
+    check_eq_i(loaded.inventory.armour_class, Q2_ARMOUR_BODY,
+               "armour class survives");
     check_eq_i(loaded.inventory.ammo[Q2_AMMO_SLUGS], 23, "ammo survives");
-    check_eq_i(loaded.inventory.keys, 0x0005, "keys survive");
+    check_eq_i(loaded.inventory.ammo_tier, Q2_AMMO_TIER_BANDOLIER,
+               "the ammo tier survives");
+    check_eq_i(loaded.inventory.silencer_shots, 12, "silencer shots survive");
+    check_eq_i(loaded.inventory.last_item, 19, "the last item survives");
+    /* An absolute deadline on the level clock is meaningless without the clock;
+     * both are here, which is the point. */
+    check_eq_i(loaded.inventory.quad_until, 132456, "the quad deadline survives");
+    /* Keys are bits in the client flags word, not a field of their own — see
+     * the structure note in inventory.h. */
+    check(q2_inventory_has_keys(&loaded.inventory, 0x0005), "keys survive");
     check(q2_inventory_has_weapon(&loaded.inventory, Q2_WEAPON_RAILGUN),
           "weapons survive");
+
+    /* --- combat ----------------------------------------------------------- */
+    check_eq_i(loaded.weapon_id, 9, "the held weapon survives");
+    check_eq_i(loaded.next_fire, 123500, "the refire gate survives");
+    check_eq_i(loaded.kick[0], -12, "the view kick survives");
+    check_eq_i(loaded.chaingun_bullets, 3, "the chaingun spin survives");
+    check_eq_i((s64)loaded.rng_state, (s64)0xABCDEF01u,
+               "the weapon generator survives");
+    check_eq_i((s64)loaded.fx_rng_state, (s64)0x0BADF00Du,
+               "the effect generator survives");
+
+    check(loaded.proj[2].in_use, "a projectile in flight survives");
+    check_eq_i(loaded.proj[2].kind, Q2_PROJ_ROCKET, "its kind survives");
+    check_eq_i(loaded.proj[2].pos[0], 5000, "its position survives");
+    check_eq_i(loaded.proj[2].vel[2], -333, "its velocity survives");
+    check_eq_i(loaded.proj[2].node, 7, "its cached cell survives");
+    check(!loaded.proj[0].in_use, "an empty projectile slot stays empty");
+
+    /* --- the world --------------------------------------------------------- */
+    check_eq_i(loaded.trigger_count, 5, "the trigger residency survives");
+    check_eq_i(loaded.trigger_inside[1], 1, "a volume the player is in survives");
+    check_eq_i(loaded.trigger_inside[0], 0, "one they are not stays clear");
+
+    check_eq_i(loaded.entity_count, 4, "every entity slot survives");
+    check_eq_i(loaded.entities[0].place_id, 100, "an entity's place id survives");
+    check_eq_i(loaded.entities[0].taken, 1, "a collected item stays collected");
+    check_eq_i(loaded.entities[0].hidden, 1, "a hidden item stays hidden");
+    check_eq_i(loaded.entities[0].respawn_at, 4000, "its respawn timer survives");
+    check_eq_i(loaded.entities[2].scale, 1024, "a mid-shrink scale survives");
+    check_eq_i(loaded.entities[2].think, Q2_SAVE_THINK_SHRINK,
+               "which think is installed survives");
+    check_eq_i(loaded.entities[3].in_use, 0, "a freed slot stays freed");
 
     q2_save_free(&saved);
     q2_save_free(&loaded);
@@ -108,24 +317,48 @@ static void test_apply(void)
 
     q2_sim_init(&sim, NULL, 50);
     q2_sim_spawn(&sim, spawn, 512);
+    attach_fake_world(&sim, 3, 3);
     q2_inventory_init(&inv);
-    inv.health = 55;
+    inv.health        = 55;
+    sim.level_time    = 9000;
+    sim.player.vel[1] = 640;
+    sim.trigger_inside[2]        = 1;
+    sim.entities.ent[1].taken[0] = true;
+    sim.entities.ent[1].hidden   = true;
 
     q2_save_capture(&saved, &sim, &inv, "SLES-01534", "BASE0", 0);
 
-    /* Move away and get hurt, then restore. */
-    sim.player.pos[0] = 99999;
-    sim.player.yaw    = 3000;
-    inv.health        = 1;
+    /* Move away, get hurt, let time pass, pick the last item up. */
+    sim.player.pos[0]            = 99999;
+    sim.player.yaw               = 3000;
+    sim.player.vel[1]            = 12345;
+    inv.health                   = 1;
+    sim.level_time               = 50000;
+    sim.trigger_inside[2]        = 0;
+    sim.entities.ent[1].taken[0] = false;
+    sim.entities.ent[1].hidden   = false;
+    sim.entities.ent[2].taken[0] = true;
 
     check(q2_save_apply(&saved, &sim, &inv, "SLES-01534", "BASE0") == Q2_OK,
           "applies to the matching disc and map");
     check_eq_i(sim.player.pos[0], 100, "position restored");
     check_eq_i(sim.player.yaw, 512, "yaw restored");
     check_eq_i(inv.health, 55, "health restored");
+    check_eq_i(sim.combat.inv.health, 55, "the sim's own inventory restored");
+    check_eq_i(sim.level_time, 9000, "the level clock rewinds with the save");
 
-    /* Velocity must be cleared, or the player resumes mid-fall. */
-    check_eq_i(sim.player.vel[0], 0, "velocity cleared on restore");
+    /*
+     * Velocity is RESTORED, not cleared. It was cleared once, and that was
+     * wrong: a save made mid-jump has a real velocity, and zeroing it drops the
+     * player straight down out of an arc they were in the middle of.
+     */
+    check_eq_i(sim.player.vel[1], 640, "velocity restored, not zeroed");
+
+    check_eq_i(sim.trigger_inside[2], 1, "trigger residency restored");
+    check(sim.entities.ent[1].taken[0], "a collected item is still collected");
+    check(sim.entities.ent[1].hidden, "and still hidden");
+    check(!sim.entities.ent[2].taken[0],
+          "an item collected after the save is back");
 
     /* A save from a different release must be refused: the level table and
      * script offsets differ per build, so the coordinates mean something else. */
@@ -138,6 +371,61 @@ static void test_apply(void)
 
     q2_save_free(&saved);
     q2_sim_free(&sim);
+}
+
+/* A save whose entity set does not match the map's is a save for a different
+ * population, and applying it by index would put one item's state on another. */
+static void test_apply_rejects_mismatched_map(void)
+{
+    q2_sim a, b;
+    q2_inventory inv;
+    q2_save saved;
+    s32 spawn[3] = { 0, 0, 0 };
+
+    printf("apply, mismatched population\n");
+
+    q2_sim_init(&a, NULL, 50);
+    q2_sim_spawn(&a, spawn, 0);
+    attach_fake_world(&a, 2, 4);
+    q2_inventory_init(&inv);
+    q2_save_capture(&saved, &a, &inv, "SLES-01534", "BASE0", 0);
+
+    q2_sim_init(&b, NULL, 50);
+    q2_sim_spawn(&b, spawn, 0);
+    attach_fake_world(&b, 2, 6);
+
+    check(q2_save_apply(&saved, &b, &inv, "SLES-01534", "BASE0")
+              == Q2_ERR_BAD_FORMAT,
+          "refuses a save whose entity count disagrees with the map");
+
+    /* The same size but a different population: the place ids no longer line
+     * up, and that is caught too. */
+    q2_sim_free(&b);
+    q2_sim_init(&b, NULL, 50);
+    q2_sim_spawn(&b, spawn, 0);
+    attach_fake_world(&b, 2, 4);
+    b.entities.ent[2].place_id = 999;
+    b.player.pos[0] = 4242;
+    b.level_time    = 31337;
+
+    check(q2_save_apply(&saved, &b, &inv, "SLES-01534", "BASE0")
+              == Q2_ERR_BAD_FORMAT,
+          "refuses a save whose place ids disagree with the map");
+
+    /*
+     * And refusing means refusing ENTIRELY. The mismatch is on entity 2, so a
+     * restore that validated as it went would already have moved the player and
+     * rewound the clock before it noticed — leaving a half-restored session,
+     * which is worse than either outcome.
+     */
+    check_eq_i(b.player.pos[0], 4242, "a refused apply does not move the player");
+    check_eq_i(b.level_time, 31337, "a refused apply does not touch the clock");
+    check(!b.entities.ent[0].taken[0],
+          "a refused apply does not touch the entities either");
+
+    q2_save_free(&saved);
+    q2_sim_free(&a);
+    q2_sim_free(&b);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -168,7 +456,373 @@ static void test_rejects_bad_files(void)
         check(q2_save_read(&s, path) == Q2_ERR_BAD_FORMAT, "rejects a truncated file");
     }
 
+    /* A version this build does not read. */
+    {
+        u8 head[16];
+        memset(head, 0, sizeof(head));
+        memcpy(head, Q2_SAVE_MAGIC, 4);
+        head[4] = (u8)(Q2_SAVE_VERSION + 7);
+
+        f = fopen(path, "wb");
+        if (f) {
+            fwrite(head, 1, sizeof(head), f);
+            fclose(f);
+            check(q2_save_read(&s, path) == Q2_ERR_UNSUPPORTED,
+                  "rejects an unknown version rather than misreading it");
+        }
+    }
+
     remove(path);
+}
+
+/*
+ * A file that is the right length and wrong in the middle. The chunk sizes
+ * cannot catch this; the checksum is what exists for it, and a save system
+ * without one turns a bad byte into a game that behaves strangely.
+ */
+static void test_detects_corruption(void)
+{
+    q2_sim sim;
+    q2_inventory inv;
+    q2_save saved, loaded;
+    const char *path = tmp_path();
+    FILE *f;
+    long size;
+    u8 *bytes;
+
+    printf("corruption\n");
+
+    build_state(&sim, &inv);
+    q2_save_capture(&saved, &sim, &inv, "SLES-01534", "BASE1", 0);
+    check(q2_save_write(&saved, path) == Q2_OK, "writes a good file");
+
+    f = fopen(path, "rb");
+    if (!f) {
+        check(false, "reopens what it just wrote");
+        goto done;
+    }
+    fseek(f, 0, SEEK_END);
+    size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    bytes = (u8 *)malloc((size_t)size);
+    if (!bytes || fread(bytes, 1, (size_t)size, f) != (size_t)size) {
+        fclose(f);
+        free(bytes);
+        check(false, "reads it back for corrupting");
+        goto done;
+    }
+    fclose(f);
+
+    /* Flip one bit well inside the body, leaving the length untouched. */
+    bytes[size / 2] ^= 0x40;
+
+    f = fopen(path, "wb");
+    if (f) {
+        fwrite(bytes, 1, (size_t)size, f);
+        fclose(f);
+        check(q2_save_read(&loaded, path) == Q2_ERR_BAD_FORMAT,
+              "a single flipped bit is caught rather than loaded");
+    }
+    free(bytes);
+
+done:
+    q2_save_free(&saved);
+    q2_sim_free(&sim);
+    remove(path);
+}
+
+/* ------------------------------------------------------------------------- */
+static void test_mission_and_settings(void)
+{
+    q2_sim sim;
+    q2_inventory inv;
+    q2_save saved, loaded;
+    q2_mission mission, restored;
+    s16 settings[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    s16 back[8];
+    int secrets, secrets_total, kills, kills_total;
+
+    printf("mission tallies and settings\n");
+
+    build_state(&sim, &inv);
+    q2_save_capture(&saved, &sim, &inv, "SLES-01534", "BASE1", 0);
+
+    q2_mission_init(&mission);
+    mission.unit = 2;
+    q2_mission_set_row(&mission, 0, "OUTER BASE", 2, 3, 14, 20);
+    q2_mission_set_row(&mission, 1, "INSTALLATION", 1, 1, 9, 9);
+    q2_save_capture_mission(&saved, &mission);
+    q2_save_set_settings(&saved, settings, 8);
+
+    check(q2_save_write(&saved, tmp_path()) == Q2_OK, "writes");
+    check(q2_save_read(&loaded, tmp_path()) == Q2_OK, "reads back");
+
+    q2_mission_init(&restored);
+    q2_save_apply_mission(&loaded, &restored);
+
+    check_eq_i(restored.unit, 2, "the mission number survives");
+    check(strcmp(restored.row[0].name, "OUTER BASE") == 0,
+          "a level name survives");
+    check_eq_i(restored.row[0].kills, 14, "a kill count survives");
+    check_eq_i(restored.row[1].secrets_total, 1, "a secret total survives");
+
+    q2_mission_totals(&restored, &secrets, &secrets_total, &kills, &kills_total);
+    check_eq_i(kills, 23, "the totals still add up after a round trip");
+
+    memset(back, 0, sizeof(back));
+    check_eq_i(q2_save_get_settings(&loaded, back, 8), 8, "eight settings back");
+    check_eq_i(back[7], 8, "the last setting survives");
+
+    q2_save_free(&saved);
+    q2_save_free(&loaded);
+    q2_sim_free(&sim);
+    remove(tmp_path());
+}
+
+/* ------------------------------------------------------------------------- */
+static void test_slots(void)
+{
+    q2_sim sim;
+    q2_inventory inv;
+    q2_save saved, loaded;
+    q2_save_info info[Q2_SAVE_SLOTS];
+    char row[64];
+
+    printf("slots\n");
+
+    q2_save_set_dir(tmp_dir());
+    check(strcmp(q2_save_dir(), tmp_dir()) == 0, "the directory can be steered");
+    clear_slots();
+
+    build_state(&sim, &inv);
+    q2_save_capture(&saved, &sim, &inv, "SLES-01534", "BASE1", 2);
+
+    check_eq_i(q2_save_slots_scan(info, Q2_SAVE_SLOTS), 0,
+               "no slots are in use to begin with");
+    check(!info[0].used, "an empty slot reports unused");
+
+    check(q2_save_slot_write(&saved, 1) == Q2_OK, "writes slot 2");
+    check(q2_save_slot_write(&saved, 6) == Q2_ERR_RANGE,
+          "refuses a slot that does not exist");
+
+    check_eq_i(q2_save_slots_scan(info, Q2_SAVE_SLOTS), 1, "one slot in use");
+    check(info[1].used, "slot 2 is the one");
+    check(strcmp(info[1].map, "BASE1") == 0, "the header names the map");
+    check_eq_i(info[1].zone, 2, "and the zone");
+    check_eq_i(info[1].health, 77, "and the player's condition");
+    check_eq_i(info[1].level_time, 123456, "and how long they have played");
+    check_eq_i(info[1].weapon_id, 9, "and what they are holding");
+
+    /* The row text. An empty slot must be the EMPTY STRING: that is what makes
+     * the screen draw nothing and give it no selection bar. */
+    check(q2_save_slot_row(&info[0], 0, row, (u32)sizeof(row))[0] == '\0',
+          "an empty row is the empty string");
+    check(q2_save_slot_row(&info[1], 1, row, (u32)sizeof(row))[0] != '\0',
+          "a used row has text");
+    check(strstr(row, "BASE1") != NULL, "and the text names the map");
+
+    check(q2_save_slot_read(&loaded, 1) == Q2_OK, "reads the slot back");
+    check_eq_i(loaded.player.pos[0], 1234, "with the state intact");
+    q2_save_free(&loaded);
+
+    check(q2_save_slot_delete(1) == Q2_OK, "deletes a slot");
+    check_eq_i(q2_save_slots_scan(info, Q2_SAVE_SLOTS), 0, "and it is gone");
+    check(q2_save_slot_delete(1) != Q2_OK, "deleting it twice fails");
+
+    q2_save_free(&saved);
+    q2_sim_free(&sim);
+    clear_slots();
+}
+
+/* A slot whose file is nonsense must list as unused rather than as an error, so
+ * the screen still draws four rows and none of them is selectable. */
+static void test_slot_scan_survives_rubbish(void)
+{
+    q2_save_info info[Q2_SAVE_SLOTS];
+    char path[512];
+    FILE *f;
+
+    printf("slots, rubbish\n");
+
+    q2_save_set_dir(tmp_dir());
+    clear_slots();
+
+    check(q2_save_slot_path(2, path, (u32)sizeof(path)) == Q2_OK,
+          "resolves a slot path");
+    f = fopen(path, "wb");
+    if (f) {
+        fwrite("not a save file at all", 1, 22, f);
+        fclose(f);
+    }
+
+    check_eq_i(q2_save_slots_scan(info, Q2_SAVE_SLOTS), 0,
+               "a rubbish file does not count as a save");
+    check(!info[2].used, "and its row is not selectable");
+
+    clear_slots();
+}
+
+/* ------------------------------------------------------------------------- */
+/* The front end's three entry points, without a screen                        */
+/* ------------------------------------------------------------------------- */
+static void test_ui_save_flow(void)
+{
+    q2_sim sim;
+    q2_inventory inv;
+    q2_save snapshot;
+    q2_save_ui ui;
+
+    printf("front end: saving\n");
+
+    q2_save_set_dir(tmp_dir());
+    clear_slots();
+
+    build_state(&sim, &inv);
+    q2_save_capture(&snapshot, &sim, &inv, "SLES-01534", "BASE1", 2);
+
+    q2_save_ui_init(&ui);
+    q2_save_ui_open_save(&ui, &snapshot);
+
+    check(ui.open, "the front end is open");
+    check_eq_i(q2_save_ui_poll(&ui), Q2_SAVEUI_STATE_LIST,
+               "it starts on the list");
+    check(q2_save_ui_row(&ui, 0)[0] == '\0', "with four empty rows");
+
+    /* Row 0, into an empty slot: no overwrite question, straight to the work. */
+    q2_save_ui_choose(&ui, 0);
+    q2_save_ui_request(&ui, Q2_SAVEUI_STATE_LIST);
+    check_eq_i(q2_save_ui_poll(&ui), Q2_SAVEUI_STATE_BUSY,
+               "an empty slot goes straight to the busy state");
+
+    check_eq_i(q2_save_ui_update(&ui), Q2_SAVE_UI_SAVED, "the write succeeds");
+    check_eq_i(q2_save_ui_poll(&ui), Q2_SAVEUI_STATE_REPORT,
+               "and it reports the outcome");
+    check(ui.message[0] != '\0', "with something to say");
+    check(q2_save_ui_row(&ui, 0)[0] != '\0', "the row now shows the save");
+
+    q2_save_ui_acknowledge(&ui);
+    check(!ui.open, "acknowledging closes the front end");
+    check_eq_i(ui.status, Q2_SAVE_UI_SAVED, "with the save recorded");
+
+    /* Now the same slot again — this time the question is asked. */
+    q2_save_ui_open_save(&ui, &snapshot);
+    q2_save_ui_choose(&ui, 0);
+    q2_save_ui_request(&ui, Q2_SAVEUI_STATE_LIST);
+    check_eq_i(q2_save_ui_poll(&ui), Q2_SAVEUI_STATE_CHOICE,
+               "an occupied slot asks before overwriting");
+    check_eq_i(q2_save_ui_update(&ui), Q2_SAVE_UI_RUNNING,
+               "and does nothing while it waits");
+
+    /* The choice's NO arm: back to the list, nothing written. */
+    q2_save_ui_request(&ui, Q2_SAVEUI_STATE_START);
+    check_eq_i(q2_save_ui_poll(&ui), Q2_SAVEUI_STATE_LIST,
+               "declining returns to the list");
+
+    /* And the YES arm. */
+    q2_save_ui_choose(&ui, 0);
+    q2_save_ui_request(&ui, Q2_SAVEUI_STATE_LIST);
+    q2_save_ui_request(&ui, Q2_SAVEUI_STATE_BUSY);
+    check_eq_i(q2_save_ui_update(&ui), Q2_SAVE_UI_SAVED, "accepting overwrites");
+
+    q2_save_ui_acknowledge(&ui);
+    q2_save_ui_free(&ui);
+    q2_save_free(&snapshot);
+    q2_sim_free(&sim);
+    clear_slots();
+}
+
+static void test_ui_load_flow(void)
+{
+    q2_sim sim;
+    q2_inventory inv;
+    q2_save snapshot, taken;
+    q2_save_ui ui;
+
+    printf("front end: loading\n");
+
+    q2_save_set_dir(tmp_dir());
+    clear_slots();
+
+    build_state(&sim, &inv);
+    q2_save_capture(&snapshot, &sim, &inv, "SLES-01534", "BASE1", 2);
+    q2_save_slot_write(&snapshot, 3);
+
+    q2_save_ui_init(&ui);
+    q2_save_ui_open_load(&ui);
+
+    check_eq_i(q2_save_ui_poll(&ui), Q2_SAVEUI_STATE_LIST,
+               "loading starts on the list too");
+    check(q2_save_ui_row(&ui, 3)[0] != '\0', "the written slot shows");
+
+    /* An empty row must not start a load. */
+    q2_save_ui_choose(&ui, 0);
+    q2_save_ui_request(&ui, Q2_SAVEUI_STATE_LIST);
+    check_eq_i(q2_save_ui_poll(&ui), Q2_SAVEUI_STATE_LIST,
+               "an empty row does not start a load");
+
+    q2_save_ui_choose(&ui, 3);
+    q2_save_ui_request(&ui, Q2_SAVEUI_STATE_LIST);
+    check_eq_i(q2_save_ui_poll(&ui), Q2_SAVEUI_STATE_BUSY,
+               "a used row does");
+    check_eq_i(q2_save_ui_update(&ui), Q2_SAVE_UI_LOADED, "the read succeeds");
+
+    check(q2_save_ui_take_loaded(&ui, &taken), "the snapshot can be taken");
+    check_eq_i(taken.player.pos[0], 1234, "and it is the right one");
+    check(!q2_save_ui_take_loaded(&ui, &taken), "taking it twice does not");
+    q2_save_free(&taken);
+
+    q2_save_ui_acknowledge(&ui);
+    check(!ui.open, "and the front end closes");
+
+    /* Cancelling out of an open session leaves nothing behind. */
+    q2_save_ui_open_load(&ui);
+    q2_save_ui_close(&ui);
+    check(!ui.open, "cancelling closes it");
+    check_eq_i(ui.status, Q2_SAVE_UI_CANCELLED, "and says so");
+
+    q2_save_ui_free(&ui);
+    q2_save_free(&snapshot);
+    q2_sim_free(&sim);
+    clear_slots();
+}
+
+/* A load whose slot has been deleted between the listing and the choice: the
+ * front end has to report rather than pretend. */
+static void test_ui_reports_failure(void)
+{
+    q2_sim sim;
+    q2_inventory inv;
+    q2_save snapshot;
+    q2_save_ui ui;
+
+    printf("front end: failure\n");
+
+    q2_save_set_dir(tmp_dir());
+    clear_slots();
+
+    build_state(&sim, &inv);
+    q2_save_capture(&snapshot, &sim, &inv, "SLES-01534", "BASE1", 2);
+    q2_save_slot_write(&snapshot, 2);
+
+    q2_save_ui_init(&ui);
+    q2_save_ui_open_load(&ui);
+    q2_save_slot_delete(2);          /* it goes away under the front end */
+
+    q2_save_ui_choose(&ui, 2);
+    q2_save_ui_request(&ui, Q2_SAVEUI_STATE_LIST);
+    check_eq_i(q2_save_ui_update(&ui), Q2_SAVE_UI_FAILED,
+               "a vanished slot fails rather than loading rubbish");
+    check_eq_i(q2_save_ui_poll(&ui), Q2_SAVEUI_STATE_REPORT,
+               "and the failure is reported");
+    check(strstr(ui.message, "FAIL") != NULL, "in so many words");
+
+    q2_save_ui_acknowledge(&ui);
+    check_eq_i(ui.status, Q2_SAVE_UI_FAILED, "the outcome survives the close");
+
+    q2_save_ui_free(&ui);
+    q2_save_free(&snapshot);
+    q2_sim_free(&sim);
+    clear_slots();
 }
 
 /* ------------------------------------------------------------------------- */
@@ -178,7 +832,15 @@ int main(void)
 
     test_round_trip();
     test_apply();
+    test_apply_rejects_mismatched_map();
     test_rejects_bad_files();
+    test_detects_corruption();
+    test_mission_and_settings();
+    test_slots();
+    test_slot_scan_survives_rubbish();
+    test_ui_save_flow();
+    test_ui_load_flow();
+    test_ui_reports_failure();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     printf("%s\n", g_failures == 0 ? "PASS" : "FAIL");

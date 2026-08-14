@@ -1,5 +1,7 @@
 #include "hudtables.h"
 
+#include "gpu.h"
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -265,6 +267,38 @@ const q2_hud_palette *q2_hud_palette_get(const q2_hud_tables *t, u32 id)
     if (!t || id >= Q2_HUD_PALETTE_MAX || !t->palette[id].present)
         return NULL;
     return &t->palette[id];
+}
+
+u16 q2_hud_palette_clut(const q2_hud_tables *t, u32 id)
+{
+    const q2_hud_palette *p = q2_hud_palette_get(t, id);
+    return p ? p->clut_id : 0;
+}
+
+void q2_hud_palettes_upload(const q2_hud_tables *t, struct psx_vram *vram)
+{
+    psx_vram *dst = (psx_vram *)vram;
+    u32 i;
+
+    if (!t || !dst)
+        return;
+
+    for (i = 0; i < Q2_HUD_PALETTE_MAX; i++) {
+        const q2_hud_palette *p = &t->palette[i];
+        int e;
+
+        if (!p->present)
+            continue;
+        if (p->vram_y < 0 || p->vram_y >= PSX_VRAM_HEIGHT)
+            continue;
+
+        for (e = 0; e < Q2_HUD_PALETTE_SIZE; e++) {
+            int x = p->vram_x + e;
+            if (x < 0 || x >= PSX_VRAM_WIDTH)
+                break;
+            dst->px[p->vram_y][x] = p->entry[e];
+        }
+    }
 }
 
 static int name_casecmp(const char *a, const char *b)

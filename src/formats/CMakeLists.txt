@@ -11,6 +11,8 @@ add_library(q2psx_formats STATIC
     events.h
     level.c
     level.h
+    leveltext.c
+    leveltext.h
     model.c
     model.h
     population.c
@@ -25,6 +27,12 @@ add_library(q2psx_formats STATIC
     reloc.h
     scene.c
     scene.h
+    spacelights.c
+    spacelights.h
+    sortdata.c
+    sortdata.h
+    surface.c
+    surface.h
     vram.c
     vram.h
     worldscale.h

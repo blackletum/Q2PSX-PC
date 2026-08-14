@@ -2,23 +2,38 @@
  * hud.h — the console's heads-up display: the overlay, and everything it does.
  *
  * ---------------------------------------------------------------------------
- * What the HUD is, and what it is not
+ * ⚠ CORRECTION: there IS a status bar, and this module is not it
  * ---------------------------------------------------------------------------
- * There is no status bar. No health number, no ammo counter, no armour
- * readout, no weapon icon parked in a corner. That is not a gap in the
- * reverse engineering — it is the finding. Every string the executable ever
- * formats was enumerated (all 30 call sites of the text printf at 0x80043518,
- * all 3 of the queueing wrapper at 0x800434B8, and every `sprintf` in the
- * image) and not one of them formats a player statistic. Hammerhead shipped a
- * clean screen and told the player how they were doing three other ways:
+ * This header used to open by asserting that the game shows no health, ammo or
+ * armour readout. Retail screenshots refute that: the console draws a
+ * persistent bottom-of-screen bar with health, ammo and armour in large
+ * numerals beside their icons, plus a weapon strip.
+ *
+ * The reasoning that produced the wrong answer is worth keeping, because the
+ * evidence it rested on is still true. Every string the executable *formats*
+ * was enumerated — all 30 call sites of the text printf at 0x80043518, all 3 of
+ * the queueing wrapper at 0x800434B8, every `sprintf` in the image — and not
+ * one formats a player statistic. The only two readers of the font table at
+ * 0x8009D554 are the markup interpreter and the menu's glyph loop.
+ *
+ * Both of those look for statistics rendered as CHARACTERS. The bar does not
+ * use characters: it draws pre-rendered numeral sprites out of the icon sheet
+ * in VRAM slot 14 (`qk_menu.lbm`) through the quad emitter at 0x80033320,
+ * touching neither the font table nor a format string. An enumeration of
+ * printf sites cannot see it. See FORMATS.md §11.1 for the full retraction and
+ * openquestions #20c for what remains.
+ *
+ * **This module is the OVERLAY, which is a different subsystem and is correct
+ * as written**: the notification ring, the centre line, the crosshair and the
+ * damage flash. Those coexist with the bar on the console — the screenshots
+ * show "Selected Blaster" and a pickup caption above the bar, exactly as this
+ * module draws them. What Hammerhead additionally told the player through the
+ * overlay rather than through numbers:
  *
  *   - a **screen flash** whose colour distinguishes a hit absorbed by armour
  *     from one that reached flesh, and whose strength scales with the damage
  *   - **pain sounds** chosen by health bracket (25 / 50 / 75 / 100)
  *   - **messages**, which is what the overlay is for
- *
- * So a port that adds a status bar is adding a feature. This module implements
- * what is there.
  *
  * ---------------------------------------------------------------------------
  * The parts
@@ -279,8 +294,15 @@ void q2_hud_need_key(q2_hud *hud, const char *key_name);
  * Feed the player's condition in. The first call only records a baseline; every
  * later one raises a flash if either value fell, with the armour case taking
  * precedence exactly as the original's branch order does.
+ *
+ * Returns true on the call that RAISES a flash, which is the signal a caller
+ * needs in order to hand it on to `q2_screen_flash_set`. The console needs no
+ * such signal because the two halves are the same memory — `ctx+0x2A0` is
+ * `view+672`, the raise at 0x8003AE10 writes the very halfwords the viewport
+ * draw at 0x80076764 reads. This port keeps the overlay and the screen apart,
+ * so the one place they were joined has to be expressed rather than implied.
  */
-void q2_hud_track(q2_hud *hud, s16 health, s16 armour);
+bool q2_hud_track(q2_hud *hud, s16 health, s16 armour);
 
 /* Advance one game tick: age the messages, retire the oldest, fade the box. */
 void q2_hud_tick(q2_hud *hud, int ticks);

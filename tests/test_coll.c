@@ -413,16 +413,38 @@ static void test_step_move(void)
                "and the halved one when 0x600 is set");
 
     /*
-     * The sequence's net vertical effect is a STEP DOWN of one step height per
-     * frame: it lifts by `step`, slides, then drops by `step` plus however far
-     * the lift actually got. That is what carries an entity smoothly off a
-     * ledge instead of dropping it, and it means one frame from the middle of a
-     * tall cell does not reach the floor.
+     * The step sequence only runs for an entity that is ALREADY STANDING on
+     * something and is not submerged — 0x80045ADC tests `flags & 0x60` and
+     * `flags & 0x100` and branches to a plain slide at 0x80045CA4 otherwise.
+     * So every case below has to say which of the two it is exercising, and an
+     * entity fresh out of memset takes the AIRBORNE path.
      */
     memset(&ent, 0, sizeof(ent));
     ent.pos[0] = 500; ent.pos[1] = 500; ent.pos[2] = 500;
     ent.node = 0;
     ent.max_slope_ny = 2048;
+
+    delta[0] = 300; delta[1] = 0; delta[2] = 0;
+    q2_move_step(&c, &ent, delta, NULL);
+
+    check_eq_i(ent.pos[0], 800, "an airborne slide moves the full distance");
+    check_eq_i(ent.pos[1], 500,
+               "and does NOT step down — that would cancel a jump");
+    check(!(ent.flags & Q2_ENT_ON_GROUND),
+          "with nothing under it, nothing is touched");
+
+    /*
+     * Grounded, and the sequence's net vertical effect is a STEP DOWN of one
+     * step height per frame: it lifts by `step`, slides, then drops by `step`
+     * plus however far the lift actually got. That is what carries an entity
+     * smoothly off a ledge instead of dropping it, and it means one frame from
+     * the middle of a tall cell does not reach the floor.
+     */
+    memset(&ent, 0, sizeof(ent));
+    ent.pos[0] = 500; ent.pos[1] = 500; ent.pos[2] = 500;
+    ent.node = 0;
+    ent.max_slope_ny = 2048;
+    ent.flags = Q2_ENT_ON_GROUND;
 
     delta[0] = 300; delta[1] = 0; delta[2] = 0;
     q2_move_step(&c, &ent, delta, NULL);
@@ -438,6 +460,7 @@ static void test_step_move(void)
     ent.pos[0] = 500; ent.pos[1] = 900; ent.pos[2] = 500;
     ent.node = 0;
     ent.max_slope_ny = 2048;
+    ent.flags = Q2_ENT_ON_GROUND;
 
     delta[0] = 300; delta[1] = 0; delta[2] = 0;
     q2_move_step(&c, &ent, delta, NULL);
@@ -446,11 +469,38 @@ static void test_step_move(void)
     check_eq_i(ent.pos[1], 1000, "resting exactly on it");
     check_eq_i(ent.ground_normal[1], 4096, "with the floor's normal recorded");
 
+    /*
+     * And the airborne path lands too — it is the only way an entity ever
+     * BECOMES grounded, because the step sequence needs it to be already. Its
+     * slide carries ground_mode (table 0x800AE93C = {1,1}), so a fall that
+     * reaches the floor declares ground on the way through.
+     */
+    memset(&ent, 0, sizeof(ent));
+    ent.pos[0] = 500; ent.pos[1] = 900; ent.pos[2] = 500;
+    ent.node = 0;
+    ent.max_slope_ny = 2048;
+
+    delta[0] = 0; delta[1] = 300; delta[2] = 0;
+    q2_move_step(&c, &ent, delta, NULL);
+
+    check(ent.flags & Q2_ENT_ON_GROUND, "a falling entity lands on the floor");
+
+    /*
+     * A couple of units short of the plane, not exactly on it: the airborne
+     * slide runs with push_mode set (table 0x800AE93C is {1,1}), so the unstick
+     * nudge at 0x8005625C backs the entity off the surface it just hit. The
+     * step sequence's drop has push_mode clear and does land exactly, which is
+     * why the following tick puts it on 1000 — see test_sim's hull test.
+     */
+    check(ent.pos[1] > 1000 - 8 && ent.pos[1] <= 1000,
+          "just short of the plane, because the airborne slide nudges off it");
+
     /* Into the far wall of node 1: stopped, but still standing. */
     memset(&ent, 0, sizeof(ent));
     ent.pos[0] = 1900; ent.pos[1] = 900; ent.pos[2] = 500;
     ent.node = 1;
     ent.max_slope_ny = 2048;
+    ent.flags = Q2_ENT_ON_GROUND;
 
     delta[0] = 300; delta[1] = 0; delta[2] = 0;
     q2_move_step(&c, &ent, delta, NULL);

@@ -222,6 +222,18 @@ void      q2_hud_tables_free(q2_hud_tables *t);
 const q2_hud_palette *q2_hud_palette_get(const q2_hud_tables *t, u32 id);
 
 /*
+ * Put the whole bank in VRAM, at the (x, y) each record's position gives it —
+ * the boot loop at `0x8007610C`. Both the overlay and the menu draw out of it,
+ * so it lives here rather than in either of them; calling it twice is harmless
+ * because it writes the same halfwords to the same places.
+ */
+struct psx_vram;
+void q2_hud_palettes_upload(const q2_hud_tables *t, struct psx_vram *vram);
+
+/* The hardware CLUT word for a built-in palette id, or 0 when it is absent. */
+u16 q2_hud_palette_clut(const q2_hud_tables *t, u32 id);
+
+/*
  * Which weapon a view model belongs to, matched case-insensitively against the
  * name table. Returns the 1-based weapon id, or 0 for "not a weapon" — which is
  * also the id that selects the blank glyph, so a caller can pass the result

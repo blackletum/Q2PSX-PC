@@ -83,6 +83,31 @@ bool q2_pop_group_is_path(const q2_pop_group *g)
     }
 }
 
+int q2_pop_group_zone(const q2_pop_group *g)
+{
+    const char *n;
+    int zone = 0, digits = 0;
+
+    if (!g)
+        return -1;
+
+    n = g->name;
+    if (toupper((unsigned char)n[0]) != 'Z' ||
+        toupper((unsigned char)n[1]) != 'O' ||
+        toupper((unsigned char)n[2]) != 'N' ||
+        toupper((unsigned char)n[3]) != 'E')
+        return -1;
+
+    /* Only the run of digits straight after the word. A suffix beyond them is a
+     * batch name within that zone and is deliberately ignored. */
+    while (digits < 4 && n[4 + digits] >= '0' && n[4 + digits] <= '9') {
+        zone = zone * 10 + (n[4 + digits] - '0');
+        digits++;
+    }
+
+    return digits ? zone : -1;
+}
+
 /* Common bounds check for a record inside a list. */
 static const u8 *list_record(const q2_population *p, u32 list_offset,
                              u32 slot, u32 stride)

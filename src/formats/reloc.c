@@ -153,20 +153,16 @@ static bool chunk_is_empty(const dat_chunk *c)
     return !c || c->size <= 4;
 }
 
-q2_result q2_ai_module_load(q2_ai_module *out, const q2_common_file *common,
-                            u32 base)
+/* The two module kinds differ only in how much of the chunk is preamble. */
+static q2_result module_load(q2_ai_module *out, const dat_chunk *bin,
+                             const dat_chunk *rel, size_t pre, u32 base)
 {
-    const dat_chunk *bin, *rel;
     q2_result r;
-    size_t pre = Q2_RELOC_CREAI_PREAMBLE;
 
-    if (!out || !common)
+    if (!out)
         return Q2_ERR_INVALID_ARG;
 
     memset(out, 0, sizeof(*out));
-
-    bin = common->chunk[Q2_COMMON_CRE_AI_BIN];
-    rel = common->chunk[Q2_COMMON_CRE_AI_REL];
 
     if (chunk_is_empty(bin) || chunk_is_empty(rel)) {
         /* 29 of 98 zone files have no creatures. Not an error. */
@@ -195,6 +191,28 @@ q2_result q2_ai_module_load(q2_ai_module *out, const q2_common_file *common,
 
     out->base = base;
     return Q2_OK;
+}
+
+q2_result q2_ai_module_load(q2_ai_module *out, const q2_common_file *common,
+                            u32 base)
+{
+    if (!common)
+        return Q2_ERR_INVALID_ARG;
+
+    return module_load(out, common->chunk[Q2_COMMON_CRE_AI_BIN],
+                       common->chunk[Q2_COMMON_CRE_AI_REL],
+                       Q2_RELOC_CREAI_PREAMBLE, base);
+}
+
+q2_result q2_level_module_load(q2_ai_module *out, const q2_common_file *common,
+                               u32 base)
+{
+    if (!common)
+        return Q2_ERR_INVALID_ARG;
+
+    return module_load(out, common->chunk[Q2_COMMON_LEVEL_BIN],
+                       common->chunk[Q2_COMMON_LEVEL_REL],
+                       Q2_RELOC_LEVEL_PREAMBLE, base);
 }
 
 void q2_ai_module_free(q2_ai_module *m)

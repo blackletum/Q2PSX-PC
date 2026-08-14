@@ -272,7 +272,13 @@ static void test_ordering_table(void)
     p = psx_ot_add(&ot, 5); p->clut = 3;
 
     {
-        const psx_prim *first = &ot.prims[ot.bucket_head[5]];
+        /* A depth is not a bucket index: the table is walked forward, so depth
+         * 5 lands five buckets down from the far end. */
+        u32 bucket = psx_ot_depth_bucket(&ot, 5);
+        const psx_prim *first;
+
+        check_eq_i((int)bucket, 64 - 1 - 5, "depth 5 counts back from the far end");
+        first = &ot.prims[ot.bucket_head[bucket]];
         check_eq_i(first->clut, 3, "within a bucket, the last added draws first");
     }
 

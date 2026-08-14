@@ -45,6 +45,33 @@ s32 q2_acos12(s32 cos12);
 void q2_rotation_yaw_pitch(s16 m[3][3], s32 yaw, s32 pitch);
 
 /*
+ * Three Euler angles to a 1.3.12 rotation matrix, in libgte `RotMatrix`'s form:
+ * R = Rz(rz) * Ry(ry) * Rx(rx), angles on the 4096-step circle.
+ *
+ * This is what the zone draw builds from a rotating node's runtime object
+ * (0x800678B8 calls RotMatrix at 0x80089E38 on the object's +0x0C triple).
+ *
+ * The composition order is unobservable on this disc: the rotation integrator
+ * at 0x8002F1A8 stores to obj[0x0C + 2*axis] and nothing ever clears the other
+ * two slots, so exactly one angle is non-zero and the three orders agree. It is
+ * spelled out here so the general case is defined rather than accidental.
+ */
+void q2_rotation_euler(s16 m[3][3], s32 rx, s32 ry, s32 rz);
+
+/*
+ * The view basis, with the strafe roll.
+ *
+ * `RotMatrix` (0x80089E38) composes Rz * Ry * Rx, and the camera at 0x8004F40C
+ * hands it (pitch, yaw, roll) — so the roll is the OUTERMOST rotation, applied
+ * in screen space after the view direction is decided. That is what makes it a
+ * lean rather than a change of heading.
+ *
+ * Identical to q2_rotation_yaw_pitch when `roll` is zero, which is what keeps it
+ * safe to use on every camera rather than only the player's.
+ */
+void q2_rotation_view(s16 m[3][3], s32 yaw, s32 pitch, s32 roll);
+
+/*
  * Rotation matrix for a quaternion, both in 1.3.12. `q` is x, y, z, w, which is
  * the order the model animation keys decode to. Row-major, and in the form the
  * GTE's rotation registers want.

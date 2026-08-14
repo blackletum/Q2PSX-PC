@@ -28,6 +28,7 @@
 
 #include "gpu.h"
 #include "gte.h"
+#include "lighting.h"
 #include "model.h"
 #include "q2psx.h"
 #include "world.h"
@@ -39,6 +40,7 @@ typedef struct q2_model_draw_stats {
     u32 faces_rejected_near;   /* GTE divide overflow: at or behind the plane */
     u32 faces_rejected_bad;    /* index outside the scratch window            */
     u32 ot_overflow;
+    u32 faces_semi;            /* blend selector 1..4: drawn with ABE         */
 } q2_model_draw_stats;
 
 /*
@@ -53,8 +55,80 @@ typedef struct q2_model_instance {
     const q2_model_pose *pose;        /* num_parts entries, or NULL */
     s32                  origin[3];
     s32                  yaw;         /* 4096-step circle */
+
+    /*
+     * The other two angles, for the one thing on this disc that needs them.
+     *
+     * Nothing placed in the world tilts: the rotation integrator writes exactly
+     * one axis and the zone draw's own RotMatrix call is effectively yaw-only,
+     * which is why `yaw` was enough for every caller until now. The VIEW WEAPON
+     * is the exception — it is rotated by `RotMatrix(view angles + the
+     * animation's own)` at 0x8004F464, all three of them, with pitch negated at
+     * the sum. Leaving these zero reproduces the previous behaviour exactly.
+     */
+    s32                  pitch;
+    s32                  roll;
+
+    /*
+     * An explicit 3x3 rotation, 1.3.12, overriding the three angles above.
+     *
+     * The view weapon needs it and nothing else does. Its model is authored in
+     * VIEW space — `Blaster G` spans z 0..482 with the grip at the origin — so
+     * the matrix it wants is the camera's own inverse composed with the clip's
+     * rotation, and that is not expressible as three Euler angles the camera
+     * will then re-rotate. NULL keeps the angle path exactly as it was.
+     */
+    const s16          (*rot)[3];
     u32                  clut4_count_a;
+
+    /*
+     * Uniform scale, 1.0.12 — entity+0xFC. The engine applies it by scaling the
+     * rows of the entity's own rotation matrix before handing them to the GTE
+     * (0x8006B298: `ScaleMatrix(m, (a * b) >> 11)` three times), so it is a
+     * property of the transform rather than of the vertices, and it is how an
+     * item grows out of nothing when it materialises.
+     *
+     * Q2_ONE_12 is unscaled. Use q2_model_instance_init to get that default.
+     */
+    s32                  scale;
+
+    /*
+     * Per-vertex colour, entity+0x2AC. The world and model renderers both drive
+     * the GPU's modulate path, and 128 is neutral — which is what every caller
+     * used before items needed a tint, and what the engine writes at spawn
+     * (0x80058944 stores the three bytes of "000", i.e. 0x30, and the
+     * materialise ramp resets them to 127 at full size).
+     */
+    u8                   tint[3];
+
+    /*
+     * The lights reaching this instance, or NULL to draw it at `tint`.
+     *
+     * When it is present the vertices shade through the GTE's NCT path exactly
+     * as the original's do: the three directions become the light matrix (
+     * composed with the instance's own matrix and the part's, per part), the
+     * three colours become the colour matrix, and the entity's glow becomes the
+     * back colour. NCT does NOT multiply by the primitive's colour, so `tint`
+     * is unused in that case — the light IS the colour, and the ambient reaches
+     * the vertex through the back colour instead.
+     *
+     * Build one with q2_light_gather + q2_light_env_build.
+     */
+    const struct q2_light_env *light;
+
+    /*
+     * The engine's texture-page table, or NULL for a private one at ABR 0.
+     *
+     * Models and the world share it (0x800B36D8 is indexed by both emitters),
+     * and the world's opaque path mutates it, so a model drawn into a world
+     * frame should be handed the same q2_world_render's table. A model face's
+     * own blend selector is OR-ed on top without writing back (0x8006DE50).
+     */
+    const q2_tpage_table *tpage;
 } q2_model_instance;
+
+/* Zero the instance and set the fields whose neutral value is not zero. */
+void q2_model_instance_init(q2_model_instance *inst);
 
 /*
  * Transform one model instance and append its primitives to `ot`.

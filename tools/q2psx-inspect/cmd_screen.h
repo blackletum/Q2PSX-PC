@@ -11,7 +11,10 @@
  * With `out`, instead compose one real frame through the screen path and write
  * it as a PPM: the whole point of a table-slicing, draw-env-clipping screen is
  * something you have to look at to believe, and this needs no window. `layout`
- * is one of the names q2_screen_layout_name prints.
+ * is one of the names q2_screen_layout_name prints, optionally suffixed with
+ * `+water` to submerge every viewport — which runs the frame forward until the
+ * effect's amplitude has ramped, since a single frame under water looks exactly
+ * like a frame above it.
  */
 int cmd_screen(disc *d, const char *out, const char *layout,
                const char *map, int zone_index);

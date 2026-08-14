@@ -523,6 +523,7 @@ bool q2_move_step(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
     s32 saved_y;
     s32 drop;
     s16 v[3];
+    bool grounded;
 
     if (!coll || !ent || !delta)
         return false;
@@ -530,21 +531,79 @@ bool q2_move_step(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
     step    = q2_move_step_height(ent->flags);
     saved_y = ent->pos[1];
 
+    /*
+     * 0x80045ADC — the step sequence is for an entity that is ALREADY STANDING
+     * on something and is not submerged. Everything else takes the simple slide
+     * below.
+     *
+     * This is not an optimisation. The step sequence ends with a drop of a whole
+     * step height, which is far larger than one tick of a jump — a jump produces
+     * about 100 units of upward delta against a 216-unit step down — so running
+     * it while airborne cancels the jump completely and the player never leaves
+     * the floor. The flags are read here, before they are cleared.
+     */
+    grounded = (ent->flags & Q2_ENT_GROUNDED_MASK) != 0 &&
+               !(ent->flags & Q2_ENT_UNDERWATER);
+
     /* 0x80045B14: both contact flags are cleared before the frame's moves, so
      * ground is decided fresh every frame. */
     ent->flags &= ~(Q2_ENT_ON_GROUND | Q2_ENT_ON_ENTITY);
+
+    if (!grounded) {
+        /*
+         * 0x80045CA4 — airborne, or swimming. One slide with the frame delta,
+         * three further attempts, and BOTH modes on: this move may declare
+         * ground (which is how a fall lands) and it applies the unstick nudge.
+         * Table entry 0x800AE93C = {1, 1}.
+         */
+        q2_move_checked(coll, ent, delta, 3, true, true, NULL, NULL, world);
+
+        /*
+         * 0x80045CD0 — if that did not land but the running ground normal says
+         * a floor was touched, clear it and probe 20 units down to commit.
+         * Delta from 0x800AE940, mode {1, 0}.
+         */
+        if (!(ent->flags & Q2_ENT_GROUNDED_MASK) &&
+            ent->max_slope_ny < ent->ground_normal[1]) {
+            ent->ground_normal[0] = ent->ground_normal[1] =
+                ent->ground_normal[2] = 0;
+
+            v[0] = 0; v[1] = 20; v[2] = 0;
+            q2_move_checked(coll, ent, v, 0, true, false, NULL, NULL, world);
+        }
+
+        return (ent->flags & Q2_ENT_GROUNDED_MASK) != 0;
+    }
 
     /* Up. -Y is up. Table entry 0x800AE930 = {0, 0}, zero further attempts. */
     v[0] = 0; v[1] = (s16)(-step); v[2] = 0;
     q2_move_checked(coll, ent, v, 0, false, false, NULL, NULL, world);
 
+    /*
+     * How far the LIFT actually got, measured before the slide runs.
+     *
+     * 0x80045B90 reads pos.y here and 0x80045BA0 subtracts it from the value
+     * saved at 0x80045B68, which was read before the lift — so the drop is
+     * sized by the lift ALONE and any vertical motion the slide contributes is
+     * deliberately not counted. Measuring it after the slide instead (which is
+     * the natural way to write this, and what this function used to do) makes
+     * an entity sliding down a slope drop twice as far each frame and jitter.
+     */
+    drop = saved_y - ent->pos[1];
+
     /* Slide. 0x800AE934 = {0, 1}: nudge on, ground detection off, and three
      * further attempts — enough for a corner of two walls and a floor. */
     q2_move_checked(coll, ent, delta, 3, false, true, NULL, NULL, world);
 
-    /* Down, by however far the lift actually managed plus the step. 0x800AE938
-     * = {1, 0}: this move, and only this move, may declare ground. */
-    drop = saved_y - ent->pos[1];
+    /*
+     * 0x80045BC0..0x80045BD8 clears the ground normal before the down move, so
+     * the value the drop leaves is this frame's and never last frame's. The
+     * jump reads it, so a stale one lets you jump in mid-air.
+     */
+    ent->ground_normal[0] = ent->ground_normal[1] = ent->ground_normal[2] = 0;
+
+    /* Down, by however far the lift managed plus the step. 0x800AE938 = {1, 0}:
+     * this move, and only this move, may declare ground. */
     v[0] = 0; v[1] = (s16)(drop + step); v[2] = 0;
     q2_move_checked(coll, ent, v, 0, true, false, NULL, NULL, world);
 

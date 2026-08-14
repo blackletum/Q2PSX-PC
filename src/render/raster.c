@@ -380,6 +380,140 @@ static void raster_rect(psx_framebuffer *fb,
 }
 
 /* ------------------------------------------------------------------------- */
+/* VRAM -> VRAM copy — GP0(0x80), libgpu's DR_MOVE                            */
+/*                                                                            */
+/* The only primitive that reads pixels back out of the framebuffer. It is a  */
+/* blit and not a draw, so three of the rasteriser's rules do not apply to it: */
+/* the drawing offset is not added, the drawing area does not clip it, and    */
+/* neither the blend modes nor the dither are involved — the halfwords are     */
+/* copied verbatim, mask bit included.                                        */
+/*                                                                            */
+/* Only the framebuffer bounds constrain it, and the ORIGINAL DOES NOT CHECK   */
+/* THEM either: on hardware a copy that runs off the edge wraps within VRAM.   */
+/* This port's framebuffer is not the whole of VRAM (see src/screen), so a     */
+/* rectangle that leaves it is clipped rather than wrapped. That is a          */
+/* divergence, and it is the safe direction: the water warp is the only        */
+/* emitter and it keeps its rectangles inside the viewport by construction —   */
+/* which is exactly what the screen shake's inset is for.                      */
+/*                                                                            */
+/* Source and destination overlap on every single use, so the row copy runs    */
+/* in whichever direction keeps it non-destructive.                            */
+/* ------------------------------------------------------------------------- */
+static void raster_move(psx_framebuffer *fb, const psx_prim *prim)
+{
+    int sx = prim->xy[PSX_MOVE_SRC].x;
+    int sy = prim->xy[PSX_MOVE_SRC].y;
+    int dx = prim->xy[PSX_MOVE_DST].x;
+    int dy = prim->xy[PSX_MOVE_DST].y;
+    int w  = prim->xy[PSX_MOVE_SIZE].x;
+    int h  = prim->xy[PSX_MOVE_SIZE].y;
+    int step, y;
+
+    if (w <= 0 || h <= 0)
+        return;
+
+    /* Clip both rectangles together, so a copy never shears. */
+    if (sx < 0) { w += sx; dx -= sx; sx = 0; }
+    if (dx < 0) { w += dx; sx -= dx; dx = 0; }
+    if (sy < 0) { h += sy; dy -= sy; sy = 0; }
+    if (dy < 0) { h += dy; sy -= dy; dy = 0; }
+
+    if (sx + w > fb->width)  w = fb->width  - sx;
+    if (dx + w > fb->width)  w = fb->width  - dx;
+    if (sy + h > fb->height) h = fb->height - sy;
+    if (dy + h > fb->height) h = fb->height - dy;
+
+    if (w <= 0 || h <= 0)
+        return;
+
+    /* Rows overlap only when the two rectangles share columns; copying away
+     * from the direction of travel is what makes an overlapping move behave as
+     * though the source had been read whole. */
+    if (dy > sy) {
+        y    = h - 1;
+        step = -1;
+    } else {
+        y    = 0;
+        step = 1;
+    }
+
+    for (; y >= 0 && y < h; y += step)
+        memmove(&fb->px[(dy + y) * fb->width + dx],
+                &fb->px[(sy + y) * fb->width + sx],
+                (size_t)w * sizeof(u16));
+}
+
+/* ------------------------------------------------------------------------- */
+/* Lines                                                                      */
+/*                                                                            */
+/* LINE_F2 (code 0x40) and LINE_G2 (0x50). The GPU walks a line with a         */
+/* Bresenham-style DDA on the major axis and writes one pixel per step, so a   */
+/* line is exactly one pixel thick and its endpoints are BOTH drawn — unlike a */
+/* polygon, whose right and bottom edges are dropped. Gouraud lines            */
+/* interpolate the two endpoint colours along the same parameter.              */
+/*                                                                            */
+/* Nothing in the world renderer emits one. The menu does: a slider's frame is */
+/* four of them around a 133 x 8 box (0x8001BBAC), so before this existed a    */
+/* slider drew as a bare fill with no outline.                                 */
+/* ------------------------------------------------------------------------- */
+static void raster_line(psx_framebuffer *fb,
+                        const psx_prim *prim,
+                        const psx_raster_opts *opts)
+{
+    int x0 = prim->xy[0].x + opts->ofs_x;
+    int y0 = prim->xy[0].y + opts->ofs_y;
+    int x1 = prim->xy[1].x + opts->ofs_x;
+    int y1 = prim->xy[1].y + opts->ofs_y;
+    bool gouraud = (prim->kind == PSX_PRIM_LINE_G2);
+    int dx = x1 - x0, dy = y1 - y0;
+    int adx = dx < 0 ? -dx : dx;
+    int ady = dy < 0 ? -dy : dy;
+    int steps = adx > ady ? adx : ady;
+    int cx0, cy0, cx1, cy1;
+    int i;
+
+    raster_clip(fb, opts, &cx0, &cy0, &cx1, &cy1);
+
+    for (i = 0; i <= steps; i++) {
+        /* Rounded so the two ends land exactly on the given endpoints. */
+        int px = steps ? x0 + (dx * i + (dx < 0 ? -steps : steps) / 2) / steps : x0;
+        int py = steps ? y0 + (dy * i + (dy < 0 ? -steps : steps) / 2) / steps : y0;
+        int r, g, b;
+        u16 *dst;
+
+        if (px < cx0 || px >= cx1 || py < cy0 || py >= cy1)
+            continue;
+
+        if (gouraud && steps) {
+            r = prim->rgb[0].r + (prim->rgb[1].r - prim->rgb[0].r) * i / steps;
+            g = prim->rgb[0].g + (prim->rgb[1].g - prim->rgb[0].g) * i / steps;
+            b = prim->rgb[0].b + (prim->rgb[1].b - prim->rgb[0].b) * i / steps;
+        } else {
+            r = prim->rgb[0].r;
+            g = prim->rgb[0].g;
+            b = prim->rgb[0].b;
+        }
+
+        if (opts->dither) {
+            r = psx_dither_channel((u8)(r < 0 ? 0 : (r > 255 ? 255 : r)), px, py);
+            g = psx_dither_channel((u8)(g < 0 ? 0 : (g > 255 ? 255 : g)), px, py);
+            b = psx_dither_channel((u8)(b < 0 ? 0 : (b > 255 ? 255 : b)), px, py);
+        }
+        if (r < 0) r = 0; else if (r > 255) r = 255;
+        if (g < 0) g = 0; else if (g > 255) g = 255;
+        if (b < 0) b = 0; else if (b > 255) b = 255;
+
+        dst = &fb->px[py * fb->width + px];
+
+        if (opts->semi_transparency && prim->semi_transparent)
+            *dst = blend_pixel(*dst, r, g, b,
+                               (psx_blend)((prim->tpage >> 5) & 3));
+        else
+            *dst = psx_rgb555((u8)r, (u8)g, (u8)b);
+    }
+}
+
+/* ------------------------------------------------------------------------- */
 static void fill_vertex(raster_vertex *rv, const psx_prim *prim, int i, int colour_index)
 {
     rv->x = prim->xy[i].x;
@@ -445,8 +579,19 @@ void psx_raster_prim(psx_framebuffer *fb,
         raster_rect(fb, prim, vram, opts);
         break;
 
+    case PSX_PRIM_LINE_F2:
+    case PSX_PRIM_LINE_G2:
+        raster_line(fb, prim, opts);
+        break;
+
+    /* Deliberately outside the offset the loop above applied to `v`: a copy
+     * takes absolute coordinates. */
+    case PSX_PRIM_MOVE:
+        raster_move(fb, prim);
+        break;
+
     default:
-        break;      /* lines and mode-setting packets: not yet drawn */
+        break;      /* mode-setting packets carry no pixels */
     }
 }
 

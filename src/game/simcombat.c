@@ -21,6 +21,153 @@
 #include "trig.h"
 
 /* ------------------------------------------------------------------------- */
+/* Effects                                                                    */
+/* ------------------------------------------------------------------------- */
+void q2_sim_attach_effects(q2_sim *sim, const q2_fx_tables *tab, u32 seed)
+{
+    if (!sim)
+        return;
+
+    q2_fx_world_init(&sim->fx, tab);
+    q2_rng_seed(&sim->fx_rng, seed);
+    sim->fx_ready = (tab != NULL && tab->loaded);
+}
+
+bool q2_sim_attach_glint(q2_sim *sim, const q2_common_file *common)
+{
+    const dat_chunk *chunk;
+
+    if (!sim)
+        return false;
+
+    memset(&sim->glint, 0, sizeof(sim->glint));
+
+    if (!common)
+        return false;
+
+    chunk = common->chunk[Q2_COMMON_GLINT_MOD];
+    if (!chunk || !chunk->data)
+        return false;
+
+    sim->glint.ready = q2_fx_glint_mesh_decode(&sim->glint.mesh,
+                                               chunk->data, chunk->size);
+    if (!sim->glint.ready)
+        return false;
+
+    /*
+     * ASK THE LEVEL SCRIPT whether it turns a glint on, and take its numbers.
+     *
+     * The flag, the band count and the phase are all written by `LevelBin`, and
+     * this port does not execute one — but it can read it, which is enough. A
+     * map whose script raises no glint gets none; a map whose script uses
+     * different numbers gets those rather than BIGGUN's.
+     */
+    {
+        const dat_chunk *lb = common->chunk[Q2_COMMON_LEVEL_BIN];
+        q2_fx_glint_script script;
+        u32 i;
+
+        if (!lb || !lb->data ||
+            !q2_fx_glint_scan(&script, lb->data, lb->size)) {
+            /* The mesh is loaded and drawable, but nothing turns it on. */
+            return true;
+        }
+
+        sim->glint.raised     = true;
+        sim->glint.band_count = script.band_count ? script.band_count
+                                                  : Q2_FX_GLINT_BANDS;
+        sim->glint.phase      = script.phase ? script.phase
+                                             : Q2_FX_GLINT_PHASE_START;
+
+        /*
+         * The band records themselves are the one thing not readable: the
+         * script writes them through its import table (effect.h), into memory
+         * rather than into any chunk. The port lays them out evenly and says
+         * so — it is the only invented quantity left in the effect system, and
+         * it moves where the highlights sit, not whether or how they sweep.
+         */
+        sim->glint.tint[0] = 255;
+        sim->glint.tint[1] = 220;
+        sim->glint.tint[2] = 160;
+
+        for (i = 0; i < sim->glint.band_count &&
+                    i < Q2_FX_GLINT_BANDS_MAX; i++) {
+            sim->glint.band[i].angle[1] =
+                (s16)((s32)i * Q2_ONE_12 / (s32)sim->glint.band_count);
+            sim->glint.band[i].phase  = (u8)(sim->glint.phase - (i & 3u));
+            sim->glint.band[i].colour = 0x3AA0DCFFu;
+        }
+    }
+
+    return true;
+}
+
+/* A spawn that costs nothing when no tables are attached. */
+static void fx_at(q2_sim *sim, q2_fx_preset_id id, const s32 at[3])
+{
+    if (!sim->fx_ready || !at)
+        return;
+    q2_fx_spawn(&sim->fx, &sim->fx_rng, id, at, 0);
+}
+
+/*
+ * Where a hitscan shot leaves its mark.
+ *
+ * The port DOES have a contact point: `world_fraction_for` already runs the
+ * pellet through the hull and hands back the 1.0.12 fraction at which the world
+ * stopped it, and the direction carries the range, so `origin + dir * frac` is
+ * the impact. The original's own hitscan (0x8004874C) does the same thing — it
+ * forms the trace end as origin + dir, takes the clipped point back, and either
+ * sprays blood there (0x80048980 -> 0x80048B64) or throws a spark (0x800486EC).
+ *
+ * A pellet that hit nothing and was stopped by nothing marks nothing: a frac of
+ * 4096 with no victim means the shot ran out of range in open air.
+ */
+static void fx_hitscan_impact(q2_sim *sim, const s32 origin[3],
+                              const s32 dir[3], s32 frac, s32 victim,
+                              const q2_damage_result *dr)
+{
+    s32 at[3];
+    int k;
+
+    if (!sim->fx_ready)
+        return;
+
+    for (k = 0; k < 3; k++)
+        at[k] = origin[k] + (s32)(((s64)dir[k] * frac) >> Q2_FRAC_12);
+
+    if (victim >= 0) {
+        /* Flesh only: armour taking the whole hit is the case the HUD's damage
+         * flash also distinguishes. */
+        if (!dr || dr->taken > 0)
+            fx_at(sim, Q2_FX_BLOOD, at);
+        if (dr && dr->killed)
+            q2_fx_gib(&sim->fx, &sim->fx_rng, at, 0, Q2_FX_BLOOD_RED);
+        return;
+    }
+
+    if (frac < 4096)
+        fx_at(sim, Q2_FX_SPARK, at);
+}
+
+/*
+ * Which burst a projectile leaves behind.
+ *
+ * A bolt is the odd one out: 0x8004D74C reaches the small blue spark rather
+ * than the fireball, which is why blaster hits read as a flash and everything
+ * else reads as an explosion. The BFG has a burst of its own, four times the
+ * size of any other (0x8004BDBC).
+ */
+static q2_fx_preset_id fx_for_projectile(q2_proj_kind kind)
+{
+    switch (kind) {
+    case Q2_PROJ_BOLT: return Q2_FX_SPARK;
+    case Q2_PROJ_BFG:  return Q2_FX_BFG_BURST;
+    default:           return Q2_FX_EXPLOSION;
+    }
+}
+
+/* ------------------------------------------------------------------------- */
 void q2_sim_combat_init(q2_sim *sim)
 {
     if (!sim)
@@ -169,6 +316,17 @@ q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
     sim->combat.kick[1] = r.kick[1];
     sim->combat.kick[2] = r.kick[2];
 
+    /*
+     * And on to the view, which is where a kick was always going: the weapon
+     * table's figure has had a home in `combat.kick` for a while and nothing
+     * read it. `q2_sim_view_angles` composes it over 30 ticks (FORMATS.md
+     * §9.12.11a), so the deadline is what turns one number into recoil.
+     */
+    sim->player.kick[0]  = r.kick[0];
+    sim->player.kick[1]  = r.kick[1];
+    sim->player.kick[2]  = r.kick[2];
+    sim->player.kick_time = sim->level_time + Q2_VIEW_KICK_FIRE;
+
     switch (r.kind) {
     case Q2_FK_BULLET:
         /* Every pellet is its own trace, which is why a shotgun can catch two
@@ -176,20 +334,33 @@ q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
         for (i = 0; i < r.shot_count; i++) {
             const q2_shot *s = &r.shot[i];
             s32 frac = world_fraction_for(sim, s->origin, s->dir);
-            q2_combat_fire_bullet(&sim->combat.self, s->origin, s->dir,
-                                  s->damage, frac, Q2_HITSCAN_RADIUS,
-                                  sim->combat.targets,
-                                  sim->combat.target_count,
-                                  &sim->combat.rules, NULL);
+            q2_damage_result dr;
+            s32 victim;
+
+            victim = q2_combat_fire_bullet(&sim->combat.self, s->origin,
+                                           s->dir, s->damage, frac,
+                                           Q2_HITSCAN_RADIUS,
+                                           sim->combat.targets,
+                                           sim->combat.target_count,
+                                           &sim->combat.rules, &dr);
+            fx_hitscan_impact(sim, s->origin, s->dir, frac, victim, &dr);
         }
         break;
 
     case Q2_FK_RAIL: {
         const q2_shot *s = &r.shot[0];
         s32 frac = world_fraction_for(sim, s->origin, s->dir);
-        q2_combat_fire_rail(&sim->combat.self, s->origin, s->dir, s->damage,
-                            frac, Q2_HITSCAN_RADIUS, sim->combat.targets,
-                            sim->combat.target_count, &sim->combat.rules);
+        u32 hits = q2_combat_fire_rail(&sim->combat.self, s->origin, s->dir,
+                                       s->damage, frac, Q2_HITSCAN_RADIUS,
+                                       sim->combat.targets,
+                                       sim->combat.target_count,
+                                       &sim->combat.rules);
+
+        /* The rail does not stop at the first target, so it always marks the
+         * world where the beam ends and blood is left to the per-target pass
+         * this port does not get back from `fire_rail`. */
+        fx_hitscan_impact(sim, s->origin, s->dir, frac, -1, NULL);
+        (void)hits;
         break;
     }
 
@@ -219,6 +390,44 @@ q2_damage_result q2_sim_hurt_player(q2_sim *sim, q2_actor *attacker,
                            &sim->combat.rules);
 
     q2_actor_to_player(&sim->combat.self, &sim->combat.inv);
+
+    /* Blood only when flesh actually took some of it: armour absorbing the
+     * whole hit is the case the HUD's damage flash also distinguishes. */
+    if (out.taken > 0)
+        fx_at(sim, Q2_FX_BLOOD, point);
+
+    /*
+     * The flinch. Amplitude scaled by how much got through, capped at the same
+     * 40 degrees the fall kick is capped at, and pitched UP and rolled with the
+     * sign of the knockback so a hit from the left throws the view right.
+     *
+     * The amplitude is the port's: 0x80038334 reads client+0x9C and +0x9E and
+     * this is the only path that could write them, but the write itself sits
+     * behind the damage callback rather than in T_Damage, so what the console
+     * puts there is not established. The DECAY is the console's — 150 ticks
+     * against the pain deadline — and that is the part that is felt.
+     */
+    if (out.taken > 0) {
+        s32 amp = out.taken * 8;
+        s32 side = 0;
+
+        if (amp > Q2_FALL_KICK_MAX)
+            amp = Q2_FALL_KICK_MAX;
+
+        /* Which side it came from: the hit point against the view's own right
+         * vector, so a shot from the left rolls the view right. */
+        if (point) {
+            s32 sy = q2_sin12(sim->player.yaw), cy = q2_cos12(sim->player.yaw);
+            s32 dx = point[0] - sim->player.pos[0];
+            s32 dz = point[2] - sim->player.pos[2];
+
+            side = (cy * dx - sy * dz) >> Q2_FRAC_12;
+        }
+
+        sim->player.hurt_kick[0] = (s16)(-amp);
+        sim->player.hurt_kick[1] = (s16)((side >= 0) ? -amp / 2 : amp / 2);
+    }
+
     return out;
 }
 
@@ -244,11 +453,47 @@ void q2_sim_combat_tick(q2_sim *sim)
                            sim->level_time, &step);
 
         if (step.expired) {
+            /* The kind and the position have to be taken before the detonate,
+             * because it frees the slot. */
+            q2_fx_preset_id fx = fx_for_projectile(p->kind);
+            s32 where[3];
+
+            memcpy(where, p->pos, sizeof(where));
             q2_projectile_detonate(&sim->combat.projectiles, i,
                                    &sim->combat.self, sim->combat.targets,
                                    sim->combat.target_count,
                                    &sim->combat.rules);
+            fx_at(sim, fx, where);
             continue;
+        }
+
+        /*
+         * The BFG's beams — the game's weapon trail.
+         *
+         * 0x8004BD04 calls the beam maintainer every tick while the ball flies,
+         * and it holds a green beam on every target it can see, refreshing each
+         * one rather than adding a second (effect.h). The beams outlive the
+         * ball's passage by their own timer, which is what makes the BFG leave
+         * a lattice behind it rather than a single line.
+         *
+         * The port's visibility test is the same segment sweep the projectile
+         * itself uses, because it has no separate line-of-sight query; the
+         * original calls 0x80051874. Called out as the one substitution.
+         */
+        if (p->kind == Q2_PROJ_BFG && sim->fx_ready) {
+            u32 t;
+
+            for (t = 0; t < sim->combat.target_count; t++) {
+                const q2_actor *a = sim->combat.targets[t];
+                if (!a || a->health <= 0)
+                    continue;
+
+                q2_fx_beam_timed(&sim->fx, (s32)i, (s32)t,
+                                 p->pos, a->origin,
+                                 Q2_FX_TIMED_BEAM_RADIUS,
+                                 Q2_FX_TIMED_BEAM_STYLE,
+                                 Q2_FX_TIMED_BEAM_LIFE);
+            }
         }
 
         /* A creature in the way takes it before the world does. */
@@ -260,12 +505,31 @@ void q2_sim_combat_tick(q2_sim *sim)
                                                  sim->combat.targets,
                                                  sim->combat.target_count);
         if (hit_index >= 0) {
+            q2_actor *victim = sim->combat.targets[hit_index];
+            q2_fx_preset_id fx = fx_for_projectile(p->kind);
+            bool was_alive = victim && victim->health > 0;
+
             q2_projectile_impact(&sim->combat.projectiles, i, step.to, NULL,
-                                 &sim->combat.self,
-                                 sim->combat.targets[hit_index],
+                                 &sim->combat.self, victim,
                                  sim->combat.targets,
                                  sim->combat.target_count,
                                  &sim->combat.rules);
+
+            /*
+             * Three bursts can come out of one impact and they are separate
+             * effects in the original too: the projectile's own, the victim's
+             * blood, and the gib puff if that was the killing blow. The gib
+             * takes the creature's blood colour, which is a class property
+             * rather than an effect parameter (effect.h).
+             */
+            fx_at(sim, fx, step.to);
+            if (victim) {
+                fx_at(sim, Q2_FX_BLOOD, step.to);
+                if (was_alive && victim->health <= 0 && sim->fx_ready) {
+                    q2_fx_gib(&sim->fx, &sim->fx_rng, step.to, 0,
+                              Q2_FX_BLOOD_RED);
+                }
+            }
             continue;
         }
 
@@ -289,15 +553,69 @@ void q2_sim_combat_tick(q2_sim *sim)
                  * surface normal here, so a grenade landing on geometry stops
                  * rather than bouncing. Called out because the bounce sound is
                  * one of the twenty-two and the behaviour certainly exists. */
-                q2_projectile_impact(&sim->combat.projectiles, i, end, NULL,
-                                     &sim->combat.self, NULL,
-                                     sim->combat.targets,
-                                     sim->combat.target_count,
-                                     &sim->combat.rules);
+                bool consumed;
+                q2_fx_preset_id fx = fx_for_projectile(p->kind);
+
+                consumed = q2_projectile_impact(&sim->combat.projectiles, i,
+                                                end, NULL, &sim->combat.self,
+                                                NULL, sim->combat.targets,
+                                                sim->combat.target_count,
+                                                &sim->combat.rules);
+                /* A grenade that only bounced has not gone off, so it must not
+                 * leave a fireball behind. */
+                if (consumed)
+                    fx_at(sim, fx, end);
                 continue;
             }
         }
 
         q2_projectile_commit(&sim->combat.projectiles, i, step.to);
     }
+
+    /*
+     * Debris, through PRIMARY collision.
+     *
+     * 0x80046DA0 installs 0x800C8E90 as the hull and the entity's +0xA0 as its
+     * cell, where the player's path (0x80046DDC) installs SecondaryCol and
+     * +0xA2. Tracing shards against the player's eroded hull would leave every
+     * one of them floating 286 units off the floor.
+     */
+    for (i = 0; i < Q2_FX_DEBRIS_MAX; i++) {
+        q2_fx_debris *d = &sim->fx.debris[i];
+        q2_fx_debris_step step;
+
+        if (!d->in_use)
+            continue;
+
+        q2_fx_debris_step_one(&sim->fx, i, sim->gravity, &step);
+
+        if (step.expired) {
+            d->in_use = false;
+            continue;
+        }
+
+        if (sim->coll_primary_ready) {
+            s32 end[3], node = d->node;
+
+            if (!q2_coll_move(&sim->coll_primary, step.from, step.to, node,
+                              end, &node)) {
+                d->node = node;
+                q2_fx_debris_impact(&sim->fx, i, end);
+                continue;
+            }
+            d->node = node;
+        }
+
+        q2_fx_debris_commit(&sim->fx, i, step.to);
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+u32 q2_sim_debris_burst(q2_sim *sim, const s32 bmin[3], const s32 bmax[3],
+                        const s32 *at, u32 count, u8 area)
+{
+    if (!sim || !sim->fx_ready)
+        return 0;
+    return q2_fx_debris_burst(&sim->fx, &sim->fx_rng, bmin, bmax, at, count,
+                              area);
 }

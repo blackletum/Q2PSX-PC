@@ -148,4 +148,41 @@ void      q2_ai_module_free(q2_ai_module *m);
 /* An exported pointer from the relocated header, or 0 when absent. */
 u32 q2_ai_module_export(const q2_ai_module *m, u32 slot);
 
+/* ------------------------------------------------------------------------- */
+/* The LEVEL module                                                           */
+/* ------------------------------------------------------------------------- */
+/*
+ * LevelBin/LevelRel are the same format with a different header, and they are
+ * where a map's own game rules live. The installer at 0x8007A330 is what says
+ * so, and it is worth reading because it names every field:
+ *
+ *     0x80018000(module, fixups)      apply the relocations
+ *     0x800B2F58 = module             the level module pointer the rest of the
+ *                                     engine reaches the map's rules through
+ *     0x800B2F6C = *(module + 0x00)   export 0, called once per level load at
+ *                                     0x80070F5C
+ *     *(module + 0x08) = 0x800B2FE4   an IMPORT the loader writes: the settings
+ *                                     block, so the module can read the menu
+ *
+ * So the header is exports first, then a writable import area, exactly as the
+ * CreAI header is — but shorter, and with no preamble to skip.
+ *
+ * Export 1 (+0x04) is the one this project came here for: the player-killed-
+ * player hook at 0x8003978C calls `(*(0x800B2F58))->[4](killer, victim)` with
+ * two player indices, both bounds-checked against 4 first. Deathmatch scoring
+ * is therefore NOT in the executable; every arena carries its own copy.
+ */
+#define Q2_LEVEL_HDR_INIT     0x00   /* export 0 — level init                 */
+#define Q2_LEVEL_HDR_FRAG     0x04   /* export 1 — (killer, victim)           */
+#define Q2_LEVEL_HDR_SETTINGS 0x08   /* import  — written with 0x800B2FE4     */
+
+/*
+ * Load and relocate a COMMON.DAT's LevelBin using its LevelRel.
+ *
+ * Two maps ship an empty pair; `empty` is set for those exactly as it is for a
+ * creature-less CreAIBin, and the image is NULL.
+ */
+q2_result q2_level_module_load(q2_ai_module *out, const q2_common_file *common,
+                               u32 base);
+
 #endif /* Q2PSX_RELOC_H */

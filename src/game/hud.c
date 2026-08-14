@@ -630,18 +630,19 @@ void q2_hud_need_key(q2_hud *hud, const char *key_name)
     q2_hud_message(hud, buf);
 }
 
-void q2_hud_track(q2_hud *hud, s16 health, s16 armour)
+bool q2_hud_track(q2_hud *hud, s16 health, s16 armour)
 {
     int strength;
+    bool raised = false;
 
     if (!hud)
-        return;
+        return false;
 
     if (!hud->have_last) {
         hud->last_health = health;
         hud->last_armour = armour;
         hud->have_last   = true;
-        return;
+        return false;
     }
 
     /*
@@ -665,11 +666,13 @@ void q2_hud_track(q2_hud *hud, s16 health, s16 armour)
             hud->flash.strength = (s16)strength;
             hud->flash.initial  = (s16)strength;
             hud->flash.mode     = Q2_HUD_FLASH_MODE_SCALE;
+            raised = true;
         }
     }
 
     hud->last_health = health;
     hud->last_armour = armour;
+    return raised;
 }
 
 void q2_hud_tick(q2_hud *hud, int ticks)
@@ -709,48 +712,19 @@ static void fade_box(char *s)
         s[1] = (char)(s[1] - 1);
 }
 
-static void emit_flash(q2_hud *hud, const q2_hud_ctx *ctx, psx_ot *ot, u16 otz)
-{
-    psx_prim *p;
-    int i;
-
-    if (hud->flash.strength == 0 || hud->flash.initial == 0)
-        return;
-
-    p = psx_ot_add(ot, otz);
-    if (!p)
-        return;
-
-    p->kind = PSX_PRIM_TILE;
-    p->xy[0].x = ctx->origin_x;
-    p->xy[0].y = ctx->origin_y;
-    p->xy[1].x = (s16)(ctx->origin_x + ctx->width);
-    p->xy[1].y = ctx->origin_y;
-    p->xy[2].x = (s16)(ctx->origin_x + ctx->width);
-    p->xy[2].y = (s16)(ctx->origin_y + ctx->height);
-    p->xy[3].x = ctx->origin_x;
-    p->xy[3].y = (s16)(ctx->origin_y + ctx->height);
-
-    /* Mode 2 at 0x800768A4: the colour scaled by strength/initial in 16.16. */
-    {
-        s32 frac = ((s32)hud->flash.strength << 16) / hud->flash.initial;
-        u8  out[3];
-
-        for (i = 0; i < 3; i++) {
-            s32 v = ((s32)hud->flash.rgb[i] * frac) >> 16;
-            out[i] = (u8)q2_clamp_s32(v, 0, 255);
-        }
-        p->rgb[0].r = out[0];
-        p->rgb[0].g = out[1];
-        p->rgb[0].b = out[2];
-    }
-    /* `SetSemiTrans(prim, 1)` at 0x800767A0. */
-    p->semi_transparent = true;
-    p->tpage = psx_make_tpage(0, 0, PSX_BLEND_HALF, PSX_TEX_4BIT);
-
-    /* 0x80076980: one step of fade per drawn frame. */
-    hud->flash.strength--;
-}
+/*
+ * The damage flash is NOT drawn here, and that is a correction rather than an
+ * omission. `0x80076764` is called by the per-viewport draw (`0x80076CC8`), not
+ * by the overlay: the tile is sized to the viewport, linked into the viewport's
+ * own slice at its frontmost bucket, and its state lives in the view record at
+ * +672…+680. Drawing it with the overlay puts it in the wrong slice, at the
+ * wrong size in a split, and in front of the wrong things.
+ *
+ * What stays here is what raises it — q2_hud_track — because that is the HUD's
+ * own arithmetic. The tile itself is in src/screen/screen.c, which also carries
+ * the three flash modes this never implemented. A caller joins the two with
+ * q2_screen_flash_set.
+ */
 
 static void emit_crosshair(const q2_hud *hud, const q2_hud_font *font,
                            const q2_hud_ctx *ctx, psx_ot *ot, u16 otz)
@@ -809,7 +783,4 @@ void q2_hud_build_ot(q2_hud *hud, const q2_hud_font *font, q2_hud_ctx *ctx,
     }
 
     memcpy(ctx->rgb, saved_rgb, 3);
-
-    /* Last in, so it draws first and everything above lands on top of it. */
-    emit_flash(hud, ctx, ot, otz);
 }

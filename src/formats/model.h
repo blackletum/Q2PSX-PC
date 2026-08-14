@@ -375,6 +375,17 @@ q2_result q2_model_bank_from_zone(q2_model_bank *out, const q2_zone_file *f);
  */
 q2_result q2_model_get(const q2_model_bank *bank, u32 index, q2_model *out);
 
+/*
+ * The index of the model with this name, or -1.
+ *
+ * Case-insensitive, and FIRST MATCH WINS — names are not unique (11 maps carry
+ * duplicates), and the engine's own lookup at 0x8006D008 is a linear walk of the
+ * loaded list that stops at the first hit, so taking the first is behaviour
+ * rather than a shortcut. Every table that names a model — the entity class
+ * table, the item table — resolves through this.
+ */
+s32 q2_model_bank_find(const q2_model_bank *bank, const char *name);
+
 /* Decode one vertex, part or face. Return false if the index is out of range. */
 bool q2_model_get_vertex(const q2_model *m, u32 index, q2_model_vertex *out);
 bool q2_model_get_part(const q2_model *m, u32 index, q2_model_part *out);

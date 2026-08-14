@@ -164,6 +164,38 @@ q2_result q2_model_get(const q2_model_bank *bank, u32 index, q2_model *out)
     return Q2_OK;
 }
 
+s32 q2_model_bank_find(const q2_model_bank *bank, const char *name)
+{
+    u32 i;
+
+    if (!bank || !name || !name[0])
+        return -1;
+
+    for (i = 0; i < bank->count; i++) {
+        q2_model probe;
+        const char *a, *b;
+
+        if (q2_model_get(bank, i, &probe) != Q2_OK)
+            continue;
+
+        /* An inline compare rather than strcasecmp: that is not in C11 and the
+         * names are a fixed 12 bytes with no locale in play. */
+        a = probe.hdr.name;
+        b = name;
+        while (*a && *b) {
+            int ca = *a >= 'a' && *a <= 'z' ? *a - 32 : *a;
+            int cb = *b >= 'a' && *b <= 'z' ? *b - 32 : *b;
+            if (ca != cb)
+                break;
+            a++;
+            b++;
+        }
+        if (!*a && !*b)
+            return (s32)i;
+    }
+    return -1;
+}
+
 bool q2_model_get_vertex(const q2_model *m, u32 index, q2_model_vertex *out)
 {
     const u8 *v;

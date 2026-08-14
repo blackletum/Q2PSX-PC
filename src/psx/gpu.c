@@ -84,21 +84,35 @@ u32 psx_ot_bucket_span(const psx_ot *ot)
     return ot->window_len ? ot->window_len : ot->bucket_count;
 }
 
-psx_prim *psx_ot_add(psx_ot *ot, u16 otz)
+u32 psx_ot_depth_bucket(const psx_ot *ot, u32 otz)
 {
-    u32 bucket;
+    u32 base, span;
+
+    if (!ot || ot->bucket_count == 0)
+        return 0;
+
+    if (ot->window_len) {
+        base = ot->window_base;
+        span = ot->window_len;
+    } else {
+        base = 0;
+        span = ot->bucket_count;
+    }
+
+    if (otz >= span)
+        otz = span - 1;
+
+    /* Depth counts down from the far end: the table is drawn bucket 0 first, so
+     * the farthest primitive belongs in the lowest bucket of the span. */
+    return base + (span - 1u - otz);
+}
+
+/* The shared tail of both add paths, once the bucket is decided. */
+static psx_prim *ot_link(psx_ot *ot, u32 bucket, u16 otz)
+{
     u32 idx;
     psx_prim *prim;
 
-    if (!ot || ot->prim_count >= ot->prim_capacity)
-        return NULL;
-
-    bucket = otz;
-    if (ot->window_len) {
-        if (bucket >= ot->window_len)
-            bucket = ot->window_len - 1;
-        bucket += ot->window_base;
-    }
     if (bucket >= ot->bucket_count)
         bucket = ot->bucket_count - 1;
 
@@ -109,10 +123,45 @@ psx_prim *psx_ot_add(psx_ot *ot, u16 otz)
     prim->otz = otz;
 
     /* Prepend, matching the hardware's list construction. */
-    ot->next[idx]          = ot->bucket_head[bucket];
+    ot->next[idx]           = ot->bucket_head[bucket];
     ot->bucket_head[bucket] = (s32)idx;
 
     return prim;
+}
+
+u32 q2_ot_bucket_for_depth(const psx_ot *ot, u32 depth, s32 far_z)
+{
+    u32 span = psx_ot_bucket_span(ot);
+    u32 b;
+
+    if (span == 0)
+        span = 1;
+
+    if (far_z > 0) {
+        b = (u32)(((u64)depth * (span - 1)) / (u32)far_z);
+    } else {
+        b = depth >> 2;
+    }
+
+    if (b >= span)
+        b = span - 1;
+    return b;
+}
+
+psx_prim *psx_ot_add(psx_ot *ot, u16 otz)
+{
+    if (!ot || ot->prim_count >= ot->prim_capacity)
+        return NULL;
+
+    return ot_link(ot, psx_ot_depth_bucket(ot, otz), otz);
+}
+
+psx_prim *psx_ot_add_bucket(psx_ot *ot, u32 bucket)
+{
+    if (!ot || ot->prim_count >= ot->prim_capacity || ot->bucket_count == 0)
+        return NULL;
+
+    return ot_link(ot, bucket, (u16)bucket);
 }
 
 void psx_ot_walk(const psx_ot *ot, psx_ot_visit_fn fn, void *user)
@@ -122,8 +171,10 @@ void psx_ot_walk(const psx_ot *ot, psx_ot_visit_fn fn, void *user)
     if (!ot || !fn)
         return;
 
-    /* Far to near: the highest bucket index is the most distant. */
-    for (b = ot->bucket_count; b-- > 0; ) {
+    /* DrawOTag order: bucket 0 first, higher buckets on top of it. Depth is
+     * inverted on the way in (psx_ot_depth_bucket), so this is still far to
+     * near for anything that added itself by depth. */
+    for (b = 0; b < ot->bucket_count; b++) {
         s32 idx = ot->bucket_head[b];
         while (idx >= 0) {
             fn(&ot->prims[idx], user);

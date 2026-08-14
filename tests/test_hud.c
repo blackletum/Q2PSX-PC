@@ -277,7 +277,9 @@ static void test_backdrop(void)
      * three primitives inserted are the ones at the head.
      */
     {
-        s32 head = ot.bucket_head[0];
+        /* Depth 0 is the front of the table, which the forward walk reaches
+         * last — so the overlay's bucket is the far end of the array. */
+        s32 head = ot.bucket_head[psx_ot_depth_bucket(&ot, 0)];
         check(head >= 0, "bucket is not empty");
         check_eq_i(ot.prims[head].uv[0].v, 0xF0,
                    "the first primitive drawn is a backdrop tile");
@@ -412,6 +414,32 @@ static void test_measure_and_flash(void)
     q2_hud_track(&hud, 80, 40);
     check_eq_i(hud.flash.rgb[1], q2_hud_flash_armour_rgb[1],
                "a hit that costs both flashes grey");
+
+    /*
+     * The join. On the console the raise and the tile are the same halfwords —
+     * ctx+0x2A0 IS view+672 — so nothing has to be handed over. Here they are
+     * two modules, and the return value is the only moment at which the screen
+     * can be told, so it has to be true exactly when a flash was raised and
+     * false on every other call. A false negative loses the flash entirely; a
+     * false positive restarts its countdown every frame and it never fades.
+     */
+    q2_hud_init(&hud, &g_tab, 1);
+    check(!q2_hud_track(&hud, 100, 50), "the baseline sample raises nothing");
+    check(!q2_hud_track(&hud, 100, 50), "standing still raises nothing");
+    check( q2_hud_track(&hud,  90, 50), "losing health raises one");
+    check(!q2_hud_track(&hud,  90, 50), "and only on the frame it fell");
+    check( q2_hud_track(&hud,  90, 40), "losing armour raises one too");
+    check(!q2_hud_track(&hud, 100, 50), "healing raises nothing");
+
+    /*
+     * The armour arm's dead band, which is the one case where the arithmetic
+     * says "damage taken" and the flash is still not raised: `2 - loss/2` is
+     * zero for a 4-point hit, and a strength of zero is dropped.
+     */
+    q2_hud_init(&hud, &g_tab, 1);
+    q2_hud_track(&hud, 100, 50);
+    check(!q2_hud_track(&hud, 100, 46),
+          "a 4-point armour hit lands in the dead band and raises nothing");
 }
 
 static void test_layout(void)

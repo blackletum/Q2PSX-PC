@@ -20,9 +20,14 @@
 #include "cmd_menu.h"
 
 #include "exe.h"
+#include "hudtables.h"
+#include "ident.h"
+#include "memcard.h"
 #include "menu.h"
 #include "menudraw.h"
+#include "menufont.h"
 #include "raster.h"
+#include "vram.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -185,7 +190,24 @@ static int check_page(const q2_exe *e, const q2_menu_page *p, bool verbose)
          * disc: its hook installs all three once the 600-tick countdown at
          * 0x800205B0 expires, which is what makes the screen inert for a
          * moment after you die.
+         *
+         * And `0x8001FD80` is `jr ra; nop`. A record pointing at it HAS an
+         * action pointer and DOES nothing, which is not a discrepancy — it is
+         * the memory-card front end's design, and it is the same idiom as slot
+         * 0 of the weapon array being a shot that does nothing (§13.1). The
+         * port models it as no action, correctly, so the comparison has to know
+         * the stub rather than count pointers.
          */
+        if (act == Q2_MENU_ACTION_NOP)
+            act = 0;
+
+        /* SAVE?'s YES enters page 39 and installs the card state machine
+         * (memcard.h). That is not a page transition in this engine's sense, so
+         * the port carries no action for it and the client opens the front end
+         * itself; the pointer is still checked, by identity. */
+        if (act == Q2_MCARD_ACTION_ENTER)
+            act = 0;
+
         if (p->id != Q2_PAGE_DEATH &&
             (act != 0) != (it->action != Q2_ACT_NONE)) {
             printf("    ! item %u (%s): %s an action on disc, the port %s\n",
@@ -276,21 +298,145 @@ static void dump_page(const q2_menu_page *p, int cheat_level)
 }
 
 /*
- * Draw a page at the console's own resolution. The geometry pipeline was
- * brought up the same way — write a PPM, look at it — and a menu is no
- * different: a coordinate that is right in the table can still land in the
- * wrong place once it is drawn.
+ * Dump a 4bpp VRAM page through one of the executable's palettes, with the
+ * face's cell grid drawn over it.
+ *
+ * This is the diagnostic that settles the font: the locator computes a cell
+ * rather than reading a table, so a wrong cell size or column count does not
+ * fail — it draws legible-looking text out of the wrong halves of the right
+ * letters. Seeing the grid land on the letterforms is the check.
  */
-static int shoot_page(const q2_menu_page *p, int cheat_level, const char *out,
-                      int w, int h)
+static int dump_page_image(const psx_vram *vram, int vram_x, int vram_y,
+                           u16 clut_word, const q2_menu_face *grid,
+                           const char *out)
 {
+    const int W = 256, H = 256;
     psx_framebuffer fb;
-    q2_menu_settings set;
-    q2_menu_style    style;
-    q2_menu m;
+    int clut_x = (clut_word & 0x3F) * 16;
+    int clut_y = (clut_word >> 6) & 0x1FF;
+    int y;
 
-    if (psx_fb_init(&fb, w, h) != Q2_OK) {
-        fprintf(stderr, "cannot allocate a framebuffer\n");
+    if (psx_fb_init(&fb, W, H) != Q2_OK)
+        return 1;
+
+    for (y = 0; y < H; y++) {
+        int x;
+        if (vram_y + y >= PSX_VRAM_HEIGHT)
+            break;
+        for (x = 0; x < W; x++) {
+            int hw = vram_x + (x >> 2);
+            u16 word, entry;
+            int nib;
+
+            if (hw >= PSX_VRAM_WIDTH)
+                break;
+            word = vram->px[vram_y + y][hw];
+            nib  = (word >> ((x & 3) * 4)) & 0xF;
+            entry = vram->px[clut_y][clut_x + nib];
+            fb.px[y * W + x] = entry;
+        }
+    }
+
+    /* The grid, in a colour the palettes do not contain. */
+    if (grid) {
+        int c;
+        for (c = 0; c * grid->cell_w < W; c++)
+            for (y = 0; y < H; y++)
+                fb.px[y * W + c * grid->cell_w] = psx_rgb555(255, 0, 255);
+        for (c = 0; grid->v_origin + c * grid->cell_h < H; c++) {
+            int gy = grid->v_origin + c * grid->cell_h;
+            int x;
+            for (x = 0; x < W; x++)
+                fb.px[gy * W + x] = psx_rgb555(0, 255, 255);
+        }
+    }
+
+    if (psx_fb_write_ppm(&fb, out) != Q2_OK) {
+        psx_fb_free(&fb);
+        return 1;
+    }
+    printf("wrote %s (%dx%d)\n", out, W, H);
+    psx_fb_free(&fb);
+    return 0;
+}
+
+/*
+ * Draw a page at the console's own resolution, with the console's own font.
+ *
+ * The geometry pipeline was brought up the same way — write a PPM, look at it —
+ * and a menu is no different: a coordinate that is right in the table can still
+ * land in the wrong place once it is drawn. What is new is that this now needs
+ * a MAP, because the letterforms are texture data on the disc: `chars.lbm` for
+ * the 8-pixel face and `frontend.lbm` for the 16- and 32-pixel ones. Drawing a
+ * page is therefore also a check that the atlases are where the executable's
+ * slot tables say they are — a wrong VRAM origin does not fail, it produces
+ * legible-looking text made of the wrong glyphs.
+ */
+static int shoot_page(const disc *d, const q2_menu_page *p, int cheat_level,
+                      const char *out, const char *map)
+{
+    const int W = Q2_MENU_SCREEN_W, H = Q2_MENU_SCREEN_H;
+    q2_build_id id;
+    q2_hud_tables tab;
+    q2_vram_section vs;
+    q2_menu_font font;
+    q2_menu_draw_opts opts;
+    psx_framebuffer fb;
+    psx_raster_opts ropts;
+    psx_vram *vram;
+    psx_ot ot;
+    q2_menu_settings set;
+    q2_menu m;
+    q2_result r;
+    u32 prims;
+
+    if (q2_identify(d, &id) != Q2_OK) {
+        fprintf(stderr, "cannot identify this disc\n");
+        return 1;
+    }
+    if (q2_hud_tables_load(&tab, d, &id) != Q2_OK) {
+        fprintf(stderr, "cannot read the font tables out of %s\n", id.exe_name);
+        return 1;
+    }
+    if (q2_vram_load(&vs, d, map) != Q2_OK) {
+        fprintf(stderr, "cannot load %s/SNDVRAM.DAT\n", map);
+        q2_hud_tables_free(&tab);
+        return 1;
+    }
+
+    vram = (psx_vram *)calloc(1, sizeof(psx_vram));
+    if (!vram) {
+        q2_vram_free(&vs);
+        q2_hud_tables_free(&tab);
+        return 1;
+    }
+
+    r = q2_menu_font_upload(&font, &tab, &vs, vram, false, 1);
+    q2_vram_free(&vs);
+    if (r != Q2_OK) {
+        fprintf(stderr, "%s carries neither %s nor %s\n", map,
+                Q2_MENU_ATLAS_NAME, Q2_HUD_ATLAS_NAME);
+        free(vram);
+        q2_hud_tables_free(&tab);
+        return 1;
+    }
+
+    printf("\nfont from %s: %s%s%s\n", map,
+           font.item_resident  ? "frontend.lbm " : "",
+           font.small_resident ? "chars.lbm "    : "",
+           font.icons_resident ? "and the icon sheet" : "");
+    printf("  tpage item=0x%04X small=0x%04X icons=0x%04X\n",
+           font.tpage_item, font.tpage_small, font.tpage_icons);
+    printf("  clut  %d=0x%04X  %d=0x%04X  %d=0x%04X  %d=0x%04X\n",
+           Q2_MENU_PALETTE_TEXT,     font.clut_text,
+           Q2_MENU_PALETTE_ITEM_HI,  font.clut_item_hi,
+           Q2_MENU_PALETTE_TITLE_HI, font.clut_title_hi,
+           Q2_MENU_PALETTE_SMALL,    font.clut_small);
+
+    if (psx_ot_init(&ot, 256, 8192) != Q2_OK ||
+        psx_fb_init(&fb, W, H) != Q2_OK) {
+        free(vram);
+        q2_hud_tables_free(&tab);
         return 1;
     }
 
@@ -308,25 +454,63 @@ static int shoot_page(const q2_menu_page *p, int cheat_level, const char *out,
     if (p->id == Q2_PAGE_PAUSE_SP)
         q2_menu_set_stats(&m, 12, 40, 1, 3);
 
-    q2_menu_style_default(&style);
-    /* Nothing behind it here, so the backdrop is the whole picture. */
-    style.backdrop_alpha = 255;
+    /*
+     * The pages as VRAM holds them. `.item` and `.title` carry the face grid,
+     * which is the check that matters: the locator COMPUTES a cell rather than
+     * reading a table, so a wrong cell size or column count does not fail — it
+     * draws legible-looking text out of the wrong halves of the right letters.
+     * `.icons` is the sheet from slot 14, which is not a menu frame; see the
+     * note in menufont.h.
+     */
+    {
+        char path[512];
+        snprintf(path, sizeof(path), "%s.frontend.ppm", out);
+        dump_page_image(vram, Q2_MENU_ATLAS_PAGE_X * 64, 256,
+                        font.clut_text, NULL, path);
+        snprintf(path, sizeof(path), "%s.item.ppm", out);
+        dump_page_image(vram, Q2_MENU_ATLAS_PAGE_X * 64, 256, font.clut_text,
+                        q2_menu_face_get(Q2_MENU_FACE_ITEM), path);
+        snprintf(path, sizeof(path), "%s.title.ppm", out);
+        dump_page_image(vram, Q2_MENU_ATLAS_PAGE_X * 64, 256,
+                        font.clut_title_hi,
+                        q2_menu_face_get(Q2_MENU_FACE_TITLE), path);
+        snprintf(path, sizeof(path), "%s.icons.ppm", out);
+        dump_page_image(vram, Q2_MENU_ICONS_PAGE_X * 64, 256,
+                        font.clut_text, NULL, path);
+    }
+
+    q2_menu_draw_opts_default(&opts, &font);
+    /* Nothing behind it here, so give the page something to sit on. The
+     * console has the frozen world there instead. */
     psx_fb_clear(&fb, psx_rgb555(16, 16, 40));
 
-    q2_menu_draw(&m, &fb, &style);
+    /* The OT here is a bare 256 buckets rather than the screen's sliced 217,
+     * so the menu's own bucket is used as the absolute index it is. */
+    prims = q2_menu_build_ot(&m, &ot, &opts);
+
+    psx_raster_opts_default(&ropts);
+    psx_raster_ot(&fb, &ot, vram, &ropts);
 
     if (psx_fb_write_ppm(&fb, out) != Q2_OK) {
         fprintf(stderr, "cannot write %s\n", out);
         psx_fb_free(&fb);
+        psx_ot_free(&ot);
+        free(vram);
+        q2_hud_tables_free(&tab);
         return 1;
     }
 
-    printf("wrote %s (%dx%d)\n", out, fb.width, fb.height);
+    printf("wrote %s (%dx%d), %u primitives\n", out, fb.width, fb.height,
+           prims);
+
     psx_fb_free(&fb);
+    psx_ot_free(&ot);
+    free(vram);
+    q2_hud_tables_free(&tab);
     return 0;
 }
 
-int cmd_menu(const disc *d, const char *want, const char *out, const char *size)
+int cmd_menu(const disc *d, const char *want, const char *out, const char *map)
 {
     q2_exe exe;
     const q2_menu_page *pages;
@@ -338,20 +522,18 @@ int cmd_menu(const disc *d, const char *want, const char *out, const char *size)
 
     if (out) {
         const q2_menu_page *p = want ? q2_menu_page_find(atoi(want)) : NULL;
-        int w = Q2_MENU_SCREEN_W, h = Q2_MENU_SCREEN_H;
 
         if (!p) {
             fprintf(stderr, "a page id is needed to draw one; try 26\n");
             return 1;
         }
-        /* A size, because the layout is authored for the console's 512x248 and
-         * the client's surface is not that: seeing a page at the size it will
-         * actually be drawn is the check worth having. */
-        if (size && sscanf(size, "%dx%d", &w, &h) != 2) {
-            fprintf(stderr, "size must look like 320x256\n");
-            return 1;
-        }
-        return shoot_page(p, 0, out, w, h);
+        /*
+         * No size any more: the layout is 512x248 and the glyphs are 4bpp
+         * texels, so drawing it at any other size would mean filtering the
+         * atlas — which the console cannot do and neither can this pipeline.
+         * The fourth argument is now the MAP the font comes off.
+         */
+        return shoot_page(d, p, 0, out, map ? map : "BASE1");
     }
 
     /* Dump first: the reconstruction is useful even without a disc to check
@@ -395,6 +577,29 @@ int cmd_menu(const disc *d, const char *want, const char *out, const char *size)
     }
     bad += check_page(&exe, q2_menu_video_page(true), false);
     checked++;
+
+    /*
+     * The memory-card screens. They are not pages — they carry no page id and
+     * are installed directly rather than through 0x8001A384 — but they are
+     * built from the same 24-byte records, so the same check applies and the
+     * transcription is evidence rather than assertion (memcard.h).
+     */
+    {
+        u32 mc_count;
+        const q2_menu_page *mc = q2_mcard_pages(&mc_count);
+        u32 k;
+
+        printf("\nthe memory-card front end (%u screens, no page ids)\n",
+               mc_count);
+        for (k = 0; k < mc_count; k++) {
+            printf("  %-16s table %08X%s\n",
+                   q2_mcard_screen_name((q2_mcard_screen)(k + 1)),
+                   mc[k].addr,
+                   mc[k].addr2 ? " + answers" : "");
+            bad += check_page(&exe, &mc[k], false);
+            checked++;
+        }
+    }
 
     printf("%d page%s checked, %d mismatch%s\n",
            checked, checked == 1 ? "" : "s", bad, bad == 1 ? "" : "es");

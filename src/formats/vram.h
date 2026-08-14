@@ -211,6 +211,87 @@ struct psx_vram;
 #define Q2_VRAM_CLUT4_Y          256
 #define Q2_VRAM_CLUT4_W          64   /* halfwords: four 16-entry CLUTs per row */
 
+/*
+ * STANDALONE IMAGES GO IN THE SAME SLOT SPACE — RESOLVED.
+ *
+ * The two tables above are the first two of four indexed by an image SLOT, and
+ * the slot space is twenty entries wide, not thirteen. `0x8006901C(name, slot,
+ * v_offset)` reads all four, and `0x800691A8` uses the first two to build
+ * RECT{ x = slotX[slot], y = slotY[slot] + v_offset, width>>1, height } — so a
+ * standalone image is placed exactly the way a texture page is, and the "not
+ * established" note this comment used to carry was a gap in the reading rather
+ * than a gap in the data.
+ *
+ * The registrations are all in one function, `0x8003FE20`, and they are what
+ * makes the slots legible:
+ *
+ *     13  frontend.lbm    v 0  -> (896, 256)   the menu's 16- and 32-pixel faces
+ *     14  qk_menu.lbm     v 0  -> (960, 256)   the pause frame; qk2_/qkm_ in MP
+ *     15  chars.lbm       v128 -> (0,   384)   the 8-pixel face and the HUD atlas
+ *     12  Squiggle.lbm    v159 -> (832, 415)
+ *      0..11              the logos and the demo furniture, one map each
+ *
+ * Slots 0..14 are `64 * (slot + 1)` halfwords across at y = 256; slot 15 is
+ * (0, 256), which is why chars.lbm needs its v offset of 128 to clear the CLUT
+ * array living in the same cell. Slots 16..19 are zero in all four tables.
+ *
+ * The other two tables are a 16 x 16 CLUT cell per slot at
+ * (16 * (slot % 4), 256 + 16 * (slot / 4)); nothing in the reconstructed paths
+ * reads them, because the menu and the HUD both take their palettes from the
+ * executable's own bank instead, so they are recorded and not exposed.
+ */
+#define Q2_VRAM_IMAGE_SLOTS  20
+
+extern const s16 q2_vram_slot_x[Q2_VRAM_IMAGE_SLOTS];  /* 0x800A3274 */
+extern const s16 q2_vram_slot_y[Q2_VRAM_IMAGE_SLOTS];  /* 0x800A329C */
+
+/*
+ * WHICH SLOT EACH UI IMAGE TAKES — the whole of `0x8003FE20`, in its own order.
+ *
+ * Every standalone image the game owns is registered in that one function, so
+ * this is a complete list rather than a sample. Two helpers do the registering
+ * and the difference between them is immaterial to placement: `0x8006901C`
+ * takes an explicit v offset, and `0x80068FB0` passes zero and additionally
+ * writes 225 to `0x800B2A14`. Both end in `0x800691A8`.
+ *
+ * Slots are reused across images that never coexist — slot 4 is IdLogo,
+ * wipteam1, Legal and Globe1 — which is why resolving by NAME matters here for
+ * exactly the reason it matters for texture pages.
+ */
+/*
+ * `bpp` is the image's colour depth where it has been established by decoding
+ * the image and looking, and **0 where it has not** — this is not inferred from
+ * the record, because the record does not say.
+ *
+ * What does say is the geometry, and the argument is short: the upload rect is
+ * `width >> 1` halfwords, a texture page is 64 halfwords, and `u`/`v` in a
+ * primitive are eight bits. An image 64 halfwords across is 256 texels at 4bpp
+ * and fits; one 128 across is 512 at 4bpp and cannot, so it must be 8bpp, where
+ * it is 256 and fits exactly. Both halves of that were then checked by drawing:
+ * `frontend.lbm` at 4bpp produces the alphabet the menu needs, and
+ * `multipics.lbm` at 8bpp produces ten recognisable deathmatch screenshots. A
+ * wrong depth does not produce a slightly-off picture; it produces noise.
+ *
+ * So the two font atlases and the icon sheet are 4bpp and the front end's
+ * photographic art is 8bpp — a per-image property, not a global one. The
+ * 256-entry CLUT block the section carries for every standalone image cannot
+ * distinguish them: it is fully populated on all of them, `chars.lbm` included.
+ */
+typedef struct q2_vram_ui_image {
+    const char *name;
+    u8          slot;
+    u8          v_offset;
+    u8          bpp;        /* 4, 8, or 0 for "not established" */
+} q2_vram_ui_image;
+
+extern const q2_vram_ui_image q2_vram_ui_images[];
+u32  q2_vram_ui_image_count(void);
+
+/* The slot and v offset `name` registers with, or false if it is not one of
+ * the images `0x8003FE20` names. Case-insensitive, because the disc spells
+ * `frontend.lbm` and `FrontEnd.lbm` both ways across maps. */
+bool q2_vram_ui_slot(const char *name, u32 *slot, int *v_offset);
+
 /* The transparency/STP bit the load-time fix-up ORs into every live CLUT entry. */
 #define Q2_VRAM_STP_BIT  0x8000u
 
@@ -277,12 +358,27 @@ bool q2_vram_find_by_name(const q2_vram_section *section, const char *name,
                           u32 *index_out);
 
 /*
- * Where image `index` belongs in VRAM. `slot` is the engine texture-page slot
- * for a texture page; it is ignored for standalone images, whose placement is
- * not established and which come back at (0,0) for the caller to position.
+ * Where image `index` belongs in VRAM, given the engine slot it is registered
+ * under. Texture pages take their dimensions from the forced 128 x 256; a
+ * standalone image takes its own. `v_offset` is `0x8006901C`'s third argument
+ * and is added to the slot's y — 128 for chars.lbm, 159 for Squiggle.lbm, zero
+ * for everything else.
  */
 bool q2_vram_image_rect(const q2_vram_section *section, u32 index, u32 slot,
-                        q2_vram_rect *out);
+                        int v_offset, q2_vram_rect *out);
+
+/*
+ * Decode the image named `name` and blit it into `vram` at the rectangle its
+ * slot names — `0x8006901C` followed by `0x800691A8`, with the LoadImage at the
+ * end of it. `placed` receives the rectangle when it is not NULL.
+ *
+ * Returns Q2_ERR_NOT_FOUND when the map does not carry that image, which is a
+ * normal condition rather than a failure: three maps ship no `frontend.lbm` and
+ * two ship no `chars.lbm`.
+ */
+q2_result q2_vram_upload_named(const q2_vram_section *section, const char *name,
+                               u32 slot, int v_offset, struct psx_vram *vram,
+                               q2_vram_rect *placed);
 
 /* Where the 4bpp CLUT array belongs in VRAM. */
 void q2_vram_clut4_rect(const q2_vram_section *section, q2_vram_rect *out);
@@ -348,9 +444,26 @@ size_t q2_packbits_decode(const u8 *src, size_t src_size,
 /* and 0.533, i.e. exactly chance. The controls are what make the result mean */
 /* anything.                                                                  */
 /*                                                                            */
-/* Index 0 is real and must not be treated as "no palette": 11,255 polygons   */
-/* use it, always on page 0 and always sampling the 64x64 tile at the page    */
-/* origin, which holds genuine texture content.                               */
+/* CORRECTION — index 0 IS "no palette", and reading it as a real one is what */
+/* blacked out doorways all over the game.                                    */
+/*                                                                            */
+/* An earlier pass wrote "index 0 is real and must not be treated as no       */
+/* palette: 11,255 polygons use it, always on page 0 and always sampling the  */
+/* 64x64 tile at the page origin, which holds genuine texture content". The   */
+/* counts are right and the conclusion does not follow. The tile is real; the */
+/* PALETTE is not. clut4[0] is the first of the sixteen reserved all-0x8000   */
+/* blocks at the head of the array, and 0x8000 is opaque black, so every one  */
+/* of those 11,255 polygons paints black over whatever it stands in front of. */
+/*                                                                            */
+/* The set-equality result was the clue and was misread: {clut>>8} is exactly */
+/* {0} u [16, clut4_count_a). Real surface starts at 16 — past the reserved   */
+/* blocks — and 0 is the one value outside that range, which is what a        */
+/* sentinel looks like, not what a member looks like.                         */
+/*                                                                            */
+/* What those polygons are is settled in scene.h: they are sealing planes,    */
+/* they occupy whole nodes (no node mixes index 0 with a real palette), and   */
+/* no SortData stream on the disc ever names one. The console does not draw   */
+/* them. `q2psx-inspect surfaces` reports both halves of that comparison.     */
 /*                                                                            */
 /* The executable now says the same thing outright. The world renderer at     */
 /* 0x80068288 loads the polygon's byte at +9 — the HIGH byte of this field —  */

@@ -86,6 +86,67 @@ void q2_rotation_yaw_pitch(s16 m[3][3], s32 yaw, s32 pitch)
     m[2][2] = (s16)(((s64)cp * cy) >> Q2_FRAC_12);
 }
 
+void q2_rotation_view(s16 m[3][3], s32 yaw, s32 pitch, s32 roll)
+{
+    s16 base[3][3];
+    s32 sr, cr;
+    int c;
+
+    q2_rotation_yaw_pitch(base, yaw, pitch);
+
+    if (roll == 0) {
+        int r;
+        for (r = 0; r < 3; r++)
+            for (c = 0; c < 3; c++)
+                m[r][c] = base[r][c];
+        return;
+    }
+
+    sr = q2_sin12(roll);
+    cr = q2_cos12(roll);
+
+    /*
+     * Rz(roll) * base. Only the first two rows change: a rotation about the view
+     * axis mixes screen X and screen Y and leaves depth alone, which is exactly
+     * why the roll can be applied here instead of inside the basis and still be
+     * the console's.
+     */
+    for (c = 0; c < 3; c++) {
+        s32 x = base[0][c];
+        s32 y = base[1][c];
+
+        m[0][c] = (s16)((( (s64)cr * x) - ((s64)sr * y)) >> Q2_FRAC_12);
+        m[1][c] = (s16)((( (s64)sr * x) + ((s64)cr * y)) >> Q2_FRAC_12);
+        m[2][c] = base[2][c];
+    }
+}
+
+void q2_rotation_euler(s16 m[3][3], s32 rx, s32 ry, s32 rz)
+{
+    s32 sx = q2_sin12(rx), cx = q2_cos12(rx);
+    s32 sy = q2_sin12(ry), cy = q2_cos12(ry);
+    s32 sz = q2_sin12(rz), cz = q2_cos12(rz);
+
+    /* R = Rz * Ry * Rx, expanded so each entry costs at most two 1.3.12
+     * products. Written out rather than composed from three matrices because
+     * the intermediate rounding of a composed form differs from the original's
+     * and this is meant to match it. */
+    s32 sxsy = ((s64)sx * sy) >> Q2_FRAC_12;
+    s32 cxsy = ((s64)cx * sy) >> Q2_FRAC_12;
+
+    m[0][0] = (s16)(((s64)cz * cy) >> Q2_FRAC_12);
+    m[0][1] = (s16)((((s64)cz * sxsy) >> Q2_FRAC_12) - (((s64)sz * cx) >> Q2_FRAC_12));
+    m[0][2] = (s16)((((s64)cz * cxsy) >> Q2_FRAC_12) + (((s64)sz * sx) >> Q2_FRAC_12));
+
+    m[1][0] = (s16)(((s64)sz * cy) >> Q2_FRAC_12);
+    m[1][1] = (s16)((((s64)sz * sxsy) >> Q2_FRAC_12) + (((s64)cz * cx) >> Q2_FRAC_12));
+    m[1][2] = (s16)((((s64)sz * cxsy) >> Q2_FRAC_12) - (((s64)cz * sx) >> Q2_FRAC_12));
+
+    m[2][0] = (s16)(-sy);
+    m[2][1] = (s16)(((s64)cy * sx) >> Q2_FRAC_12);
+    m[2][2] = (s16)(((s64)cy * cx) >> Q2_FRAC_12);
+}
+
 void q2_quat_to_matrix(s16 m[3][3], const s16 q[4])
 {
     /* Each product of two 1.3.12 values is brought back to 1.3.12 by >> 12

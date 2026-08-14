@@ -68,6 +68,34 @@ static void gte_set_ir(gte_state *g, int idx, s32 value, bool lm)
     g->ir[idx] = (s16)value;
 }
 
+/* The colour FIFO saturates each component to a byte and flags it. Unlike IR,
+ * there is no limit-negative bit: the range is always 0..255. */
+static u8 gte_colour_sat(gte_state *g, int idx, s32 value)
+{
+    static const u32 sat_flag[3] = {
+        GTE_FLAG_COLOR_R_SAT, GTE_FLAG_COLOR_G_SAT, GTE_FLAG_COLOR_B_SAT
+    };
+
+    if (value < 0)        { value = 0;   g->flag |= sat_flag[idx]; }
+    else if (value > 255) { value = 255; g->flag |= sat_flag[idx]; }
+
+    return (u8)value;
+}
+
+/* RGB0..RGB2, three deep, newest in RGB2 — the same shape as the SXY FIFO.
+ * The `c` byte is carried through from RGBC unchanged; it is the GPU primitive
+ * code the caller loaded, not a colour. */
+static void gte_push_rgb(gte_state *g)
+{
+    g->rgb_fifo[0] = g->rgb_fifo[1];
+    g->rgb_fifo[1] = g->rgb_fifo[2];
+
+    g->rgb_fifo[2].r = gte_colour_sat(g, 0, g->mac[0] >> 4);
+    g->rgb_fifo[2].g = gte_colour_sat(g, 1, g->mac[1] >> 4);
+    g->rgb_fifo[2].b = gte_colour_sat(g, 2, g->mac[2] >> 4);
+    g->rgb_fifo[2].c = g->rgbc.c;
+}
+
 static void gte_push_sz(gte_state *g, s32 value)
 {
     g->sz[0] = g->sz[1];
@@ -110,6 +138,10 @@ void gte_init(gte_state *g)
     g->rot.m[2][2] = Q2_ONE_12;
 
     g->h = 320;
+
+    /* InitGeom's average-Z scale factors, which nothing overrides. */
+    g->zsf3 = GTE_ZSF3_INIT;
+    g->zsf4 = GTE_ZSF4_INIT;
 }
 
 void gte_set_projection(gte_state *g, u16 h, s32 centre_x, s32 centre_y)
@@ -129,6 +161,24 @@ void gte_set_translation(gte_state *g, s32 x, s32 y, s32 z)
     g->tr.x = x;
     g->tr.y = y;
     g->tr.z = z;
+}
+
+void gte_set_light_matrix(gte_state *g, const gte_matrix *m)
+{
+    g->light = *m;
+}
+
+void gte_set_colour_matrix(gte_state *g, const gte_matrix *m)
+{
+    g->colour = *m;
+}
+
+void gte_set_back_colour(gte_state *g, s32 r, s32 gr, s32 b)
+{
+    /* libgte's SetBackColor, 0x8008AD0C: three `sll 4` and three `ctc2`. */
+    g->bk.x = r  << 4;
+    g->bk.y = gr << 4;
+    g->bk.z = b  << 4;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -352,6 +402,138 @@ void gte_mvmva(gte_state *g, int sf, int mx, int vx, int tx, int lm)
         gte_set_ir(g, i, g->mac[i], lm != 0);
     }
 
+    gte_flag_finish(g);
+}
+
+/* ------------------------------------------------------------------------- */
+/* The lighting operations — NCS/NCT, NCCS/NCCT, NCDS/NCDT, CC, CDP           */
+/*                                                                            */
+/* All eight share one pipeline and differ only in which stages run. Written   */
+/* once, selected by the two flags below, because writing it eight times is    */
+/* how the saturation behaviour ends up subtly different in one of them.       */
+/* ------------------------------------------------------------------------- */
+enum { GTE_NC_PLAIN = 0, GTE_NC_COLOUR = 1, GTE_NC_DEPTH_CUE = 2 };
+
+/* Stage 1: the light matrix turns a normal into three N-dot-L terms.
+ * `lm` is set, so a surface facing away from a light contributes exactly zero
+ * rather than a negative amount — the hardware's own "unlit" rule. */
+static void gte_nc_light(gte_state *g, const gte_vec16 *v)
+{
+    int i;
+
+    for (i = 0; i < 3; i++) {
+        s64 acc = (s64)g->light.m[i][0] * v->x
+                + (s64)g->light.m[i][1] * v->y
+                + (s64)g->light.m[i][2] * v->z;
+        gte_set_mac(g, i, acc >> Q2_FRAC_12);
+        gte_set_ir(g, i, g->mac[i], true);
+    }
+}
+
+/* Stage 2: the colour matrix turns those three terms into RGB around the back
+ * colour. BK is 1.19.12, hence the shift up to meet the 12-bit products. */
+static void gte_nc_colour(gte_state *g)
+{
+    const s32 bk[3] = { g->bk.x, g->bk.y, g->bk.z };
+    int i;
+
+    for (i = 0; i < 3; i++) {
+        s64 acc = ((s64)bk[i] << Q2_FRAC_12)
+                + (s64)g->colour.m[i][0] * g->ir[0]
+                + (s64)g->colour.m[i][1] * g->ir[1]
+                + (s64)g->colour.m[i][2] * g->ir[2];
+        gte_set_mac(g, i, acc >> Q2_FRAC_12);
+        gte_set_ir(g, i, g->mac[i], true);
+    }
+}
+
+/* Stage 3, NCC and NCD only: modulate by the primitive's own colour. The <<4
+ * is the hardware's, and it is what makes RGBC 128 mean "unchanged". */
+static void gte_nc_modulate(gte_state *g)
+{
+    const s32 rgb[3] = { g->rgbc.r, g->rgbc.g, g->rgbc.b };
+    int i;
+
+    for (i = 0; i < 3; i++) {
+        s64 acc = ((s64)rgb[i] * (s64)g->ir[i]) << 4;
+        gte_set_mac(g, i, acc >> Q2_FRAC_12);
+        gte_set_ir(g, i, g->mac[i], true);
+    }
+}
+
+/*
+ * Stage 4, NCD and CDP only: MAC += (FC - MAC) * IR0, the depth cue.
+ *
+ * The difference passes through IR *without* the limit-negative bit, which is
+ * what lets the far colour pull a vertex down as well as up. IR0 is the 0.8.8
+ * factor RTPS left behind on its last vertex.
+ */
+static void gte_nc_depth_cue(gte_state *g)
+{
+    const s32 fc[3] = { g->fc.x, g->fc.y, g->fc.z };
+    s32 base[3];
+    int i;
+
+    for (i = 0; i < 3; i++)
+        base[i] = g->mac[i];
+
+    for (i = 0; i < 3; i++) {
+        gte_set_mac(g, i, (s64)fc[i] - (s64)base[i]);
+        gte_set_ir(g, i, g->mac[i], false);
+    }
+
+    for (i = 0; i < 3; i++) {
+        gte_set_mac(g, i, (((s64)g->ir[i] * g->ir0) >> Q2_FRAC_12) + base[i]);
+        gte_set_ir(g, i, g->mac[i], true);
+    }
+}
+
+static void gte_nc_vertex(gte_state *g, const gte_vec16 *v, int mode)
+{
+    gte_nc_light(g, v);
+    gte_nc_colour(g);
+
+    if (mode != GTE_NC_PLAIN)
+        gte_nc_modulate(g);
+    if (mode == GTE_NC_DEPTH_CUE)
+        gte_nc_depth_cue(g);
+
+    gte_push_rgb(g);
+}
+
+static void gte_nc_run(gte_state *g, int mode, int count)
+{
+    int i;
+
+    gte_flag_reset(g);
+    for (i = 0; i < count; i++)
+        gte_nc_vertex(g, &g->v[i], mode);
+    gte_flag_finish(g);
+}
+
+void gte_ncs(gte_state *g)  { gte_nc_run(g, GTE_NC_PLAIN, 1); }
+void gte_nct(gte_state *g)  { gte_nc_run(g, GTE_NC_PLAIN, 3); }
+void gte_nccs(gte_state *g) { gte_nc_run(g, GTE_NC_COLOUR, 1); }
+void gte_ncct(gte_state *g) { gte_nc_run(g, GTE_NC_COLOUR, 3); }
+void gte_ncds(gte_state *g) { gte_nc_run(g, GTE_NC_DEPTH_CUE, 1); }
+void gte_ncdt(gte_state *g) { gte_nc_run(g, GTE_NC_DEPTH_CUE, 3); }
+
+void gte_cc(gte_state *g)
+{
+    gte_flag_reset(g);
+    gte_nc_colour(g);
+    gte_nc_modulate(g);
+    gte_push_rgb(g);
+    gte_flag_finish(g);
+}
+
+void gte_cdp(gte_state *g)
+{
+    gte_flag_reset(g);
+    gte_nc_colour(g);
+    gte_nc_modulate(g);
+    gte_nc_depth_cue(g);
+    gte_push_rgb(g);
     gte_flag_finish(g);
 }
 

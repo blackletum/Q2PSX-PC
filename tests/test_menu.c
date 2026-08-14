@@ -8,7 +8,9 @@
  * what left and right do to each kind of widget, and what the GAME VARIABLES
  * page actually changes.
  */
+#include "memcard.h"
 #include "menu.h"
+#include "menufont.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -500,6 +502,335 @@ static void test_title_y(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * The font's cell arithmetic (FORMATS.md §10.7).
+ *
+ * These are the numbers a wrong reading gets *plausibly* wrong: the locator at
+ * 0x8001B494 computes a cell rather than looking one up, so a bad column count
+ * or v origin still lands inside the atlas and still draws letters — the wrong
+ * halves of the right ones. Nothing here needs a disc, because the arithmetic
+ * is code, not data.
+ */
+static void test_font_metrics(void)
+{
+    const q2_menu_face *item  = q2_menu_face_get(Q2_MENU_FACE_ITEM);
+    const q2_menu_face *title = q2_menu_face_get(Q2_MENU_FACE_TITLE);
+    const q2_menu_face *small = q2_menu_face_get(Q2_MENU_FACE_SMALL);
+
+    CHECK(item && title && small, "all three faces exist");
+    CHECK(q2_menu_face_get(24) == NULL, "there is no fourth size");
+    if (!item || !title || !small)
+        return;
+
+    /* 0x8001AD6C: s6 is the cell width and the advance, s2 the height. */
+    CHECK(item->cell_w == 16 && item->cell_h == 11 && item->advance == 16,
+          "the 16 face is 16x11 with a 16 advance, got %ux%u/%u",
+          item->cell_w, item->cell_h, item->advance);
+    CHECK(title->cell_w == 32 && title->cell_h == 20 && title->advance == 32,
+          "the 32 face is 32x20 with a 32 advance, got %ux%u/%u",
+          title->cell_w, title->cell_h, title->advance);
+    CHECK(small->cell_w == 8 && small->cell_h == 8 && small->advance == 8,
+          "the 8 face is 8x8");
+
+    /* Rows of 15 and 7, and the 16 face sits 100 rows down the page. */
+    CHECK(item->cols == 15 && item->v_origin == 100,
+          "the 16 face is 15 columns at v 100, got %u/%u",
+          item->cols, item->v_origin);
+    CHECK(title->cols == 7 && title->v_origin == 0,
+          "the 32 face is 7 columns at v 0, got %u/%u",
+          title->cols, title->v_origin);
+
+    /* An advance is the face size even where the cell is not square: the
+     * 16 face steps 16 across while being only 11 tall. */
+    CHECK(q2_menu_font_width(Q2_MENU_FACE_ITEM, "ABCDEFGHIJKLMNO") == 240,
+          "fifteen glyphs at 16 is 240 wide");
+    CHECK(q2_menu_font_width(Q2_MENU_FACE_TITLE, "PAUSED") == 192,
+          "six glyphs at 32 is 192 wide");
+    /* Colour codes are consumed, not printed (0x8001FD18), so a toggle's
+     * recomposed row measures as "ON OFF" — six cells, not eight. */
+    CHECK(q2_menu_font_width(Q2_MENU_FACE_ITEM, "bON dOFF") == 6 * 16,
+          "the codes do not take space, got %d",
+          q2_menu_font_width(Q2_MENU_FACE_ITEM, "bON dOFF"));
+}
+
+static void test_font_coverage(void)
+{
+    int c;
+
+    /* Letters and digits exist at both frontend faces; punctuation is row 2,
+     * and only the twelve marks with a jump-table arm of their own. */
+    for (c = 'A'; c <= 'Z'; c++) {
+        CHECK(q2_menu_glyph_defined(Q2_MENU_FACE_ITEM, (char)c),
+              "'%c' exists at 16", c);
+        CHECK(q2_menu_glyph_defined(Q2_MENU_FACE_TITLE, (char)c),
+              "'%c' exists at 32", c);
+    }
+    for (c = '0'; c <= '9'; c++)
+        CHECK(q2_menu_glyph_defined(Q2_MENU_FACE_ITEM, (char)c),
+              "'%c' exists at 16", c);
+
+    {
+        static const char *have = "-:/.?'!,&()i";
+        const char *s;
+        for (s = have; *s; s++)
+            CHECK(q2_menu_glyph_defined(Q2_MENU_FACE_ITEM, *s),
+                  "'%c' has a punctuation column", *s);
+    }
+
+    /* The default arm draws no cell — and a port must not quietly turn these
+     * into spaces, because the original does something else entirely. */
+    CHECK(!q2_menu_glyph_defined(Q2_MENU_FACE_ITEM, '#'), "'#' has no cell");
+    CHECK(!q2_menu_glyph_defined(Q2_MENU_FACE_ITEM, '"'), "'\"' has no cell");
+    CHECK(!q2_menu_glyph_defined(Q2_MENU_FACE_ITEM, '$'), "'$' has no cell");
+
+    /*
+     * The four size-32 overrides, which exist because rows 0..2 of the
+     * seven-wide face are already letters. Everything else about the big face
+     * is A..Z, so '5' must NOT resolve while '4' must.
+     */
+    CHECK(q2_menu_glyph_defined(Q2_MENU_FACE_TITLE, '2'), "'2' at 32");
+    CHECK(q2_menu_glyph_defined(Q2_MENU_FACE_TITLE, '3'), "'3' at 32");
+    CHECK(q2_menu_glyph_defined(Q2_MENU_FACE_TITLE, '4'), "'4' at 32");
+    CHECK(q2_menu_glyph_defined(Q2_MENU_FACE_TITLE, '?'), "'?' at 32");
+
+    /* Every one of the seven page titles must be drawable at size 32, which is
+     * the property the four overrides were added to preserve. */
+    {
+        static const char *titles[] = {
+            "PAUSED", "OPTIONS", "PLAYER", "SOUND", "VIDEO", "CONTROLLER",
+            "POSITION"
+        };
+        size_t i;
+        for (i = 0; i < sizeof(titles) / sizeof(titles[0]); i++) {
+            const char *s;
+            for (s = titles[i]; *s; s++)
+                CHECK(*s == ' ' ||
+                      q2_menu_glyph_defined(Q2_MENU_FACE_TITLE, *s),
+                      "'%c' of \"%s\" is drawable at 32", *s, titles[i]);
+        }
+    }
+}
+
+static void test_icons_variant(void)
+{
+    /* 0x8003FEAC picks the sheet by session mode, then by player count. */
+    CHECK(strcmp(q2_menu_icons_name(false, 1), "qk_menu.lbm") == 0,
+          "single player uses qk_menu.lbm");
+    CHECK(strcmp(q2_menu_icons_name(true, 2), "qk2_menu.lbm") == 0,
+          "two players use qk2_menu.lbm");
+    CHECK(strcmp(q2_menu_icons_name(true, 4), "qkm_menu.lbm") == 0,
+          "four players use qkm_menu.lbm");
+    /* The branch order is mode first: a single-player session with a stale
+     * player count still gets the single-player sheet. */
+    CHECK(strcmp(q2_menu_icons_name(false, 4), "qk_menu.lbm") == 0,
+          "the session mode decides before the player count");
+}
+
+/* ------------------------------------------------------------------------- */
+/* The memory-card front end (FORMATS.md §10.10).                             */
+/* ------------------------------------------------------------------------- */
+static int g_poll_state;
+static int g_requested = -1;
+static int g_chosen    = -1;
+
+static int  mc_poll(void *user)               { (void)user; return g_poll_state; }
+static void mc_request(void *user, int state) { (void)user; g_requested = state; }
+static void mc_choose(void *user, int row)    { (void)user; g_chosen = row; }
+
+static void mc_open(q2_mcard *m, q2_mcard_host *h)
+{
+    memset(h, 0, sizeof(*h));
+    h->poll    = mc_poll;
+    h->request = mc_request;
+    h->choose  = mc_choose;
+    q2_mcard_init(m, h);
+    g_requested = -1;
+    g_chosen    = -1;
+}
+
+/* Cross down for a frame, then up: the release is what every arm tests. */
+static void mc_release_cross(q2_mcard *m)
+{
+    q2_mcard_advance(m, Q2_PAD_CROSS);
+    q2_mcard_advance(m, 0);
+}
+
+static void test_mcard_screens(void)
+{
+    u32 count = 0;
+    const q2_menu_page *p = q2_mcard_pages(&count);
+    u32 i;
+
+    CHECK(p != NULL && count == 9, "nine memory-card screens, got %u", count);
+    if (!p)
+        return;
+
+    for (i = 0; i < count; i++) {
+        CHECK(p[i].id == 0, "screen %u has no page id", i);
+        CHECK(p[i].addr != 0, "screen %u names its table", i);
+        CHECK(p[i].first <= p[i].count, "screen %u's first is in range", i);
+    }
+
+    /* The two-table screens are question-then-answers, so only the answers
+     * are navigable — the same idiom as the pause confirmations. */
+    {
+        const q2_menu_page *nf = q2_mcard_page(Q2_MCARD_NOT_FORMATTED);
+        const q2_menu_page *ow = q2_mcard_page(Q2_MCARD_OVERWRITE);
+        CHECK(nf && nf->addr2 == 0x8009B204u && nf->first == 3,
+              "NOT FORMATTED's answers start at 3");
+        CHECK(ow && ow->addr2 == 0x8009B36Cu && ow->first == 2,
+              "OVERWRITE's answers start at 2");
+    }
+
+    /* SAVE FILE is a heading plus four empty, navigable slot rows. */
+    {
+        const q2_menu_page *sf = q2_mcard_page(Q2_MCARD_SAVE_FILE);
+        CHECK(sf && sf->count == 1 + Q2_MCARD_SLOTS && sf->first == 1,
+              "SAVE FILE is a heading and four slots");
+        if (sf) {
+            int k;
+            for (k = 1; k <= Q2_MCARD_SLOTS; k++)
+                CHECK(sf->items[k].label[0] == '\0',
+                      "slot row %d ships empty", k);
+        }
+    }
+
+    /* A pure-text screen has nothing selectable, which the engine expresses
+     * as first == count. */
+    {
+        const q2_menu_page *fm = q2_mcard_page(Q2_MCARD_FORMATTING);
+        CHECK(fm && fm->first == fm->count,
+              "FORMATTING is not navigable");
+    }
+
+    CHECK(q2_mcard_page(Q2_MCARD_NONE) == NULL, "NONE has no page");
+    CHECK(q2_mcard_page(Q2_MCARD_SCREEN_COUNT) == NULL, "the end has no page");
+}
+
+static void test_mcard_states(void)
+{
+    int s;
+    int live = 0;
+
+    for (s = 1; s <= Q2_MCARD_STATE_MAX; s++)
+        if (q2_mcard_state_live(s))
+            live++;
+    CHECK(live == 6, "six of the nineteen entries have an arm, got %d", live);
+
+    CHECK(q2_mcard_state_live(Q2_MCARD_STATE_LIST), "3 is live");
+    CHECK(q2_mcard_state_live(Q2_MCARD_STATE_CHOICE_19), "19 is live");
+    CHECK(!q2_mcard_state_live(1) && !q2_mcard_state_live(12),
+          "the fall-through states are not");
+
+    /* Only the two the arms settle are mapped; guessing the rest would look
+     * identical in the port and be wrong on the console. */
+    CHECK(q2_mcard_screen_for_state(Q2_MCARD_STATE_LIST) == Q2_MCARD_SAVE_FILE,
+          "state 3 is the slot list");
+    CHECK(q2_mcard_screen_for_state(Q2_MCARD_STATE_REPORT) ==
+          Q2_MCARD_LOAD_MESSAGE, "state 13 is the load message");
+    CHECK(q2_mcard_screen_for_state(Q2_MCARD_STATE_CHOICE_5) == Q2_MCARD_NONE,
+          "state 5's screen is not established");
+}
+
+static void test_mcard_fires_on_release(void)
+{
+    q2_mcard m;
+    q2_mcard_host h;
+
+    mc_open(&m, &h);
+    g_poll_state = Q2_MCARD_STATE_LIST;
+    m.cursor = 2;
+
+    /* Holding is not firing. */
+    q2_mcard_advance(&m, Q2_PAD_CROSS);
+    CHECK(!m.fired && g_chosen == -1, "the press does nothing");
+
+    /* Letting go is. */
+    q2_mcard_advance(&m, 0);
+    CHECK(m.fired, "the release fires");
+    CHECK(g_chosen == 2, "the chosen row is the cursor, got %d", g_chosen);
+    CHECK(g_requested == Q2_MCARD_STATE_LIST,
+          "a transition is requested after the row");
+}
+
+static void test_mcard_choices(void)
+{
+    q2_mcard m;
+    q2_mcard_host h;
+
+    /* 0x8001F790: row 1 goes on to 6, row 0 goes back to 1. */
+    mc_open(&m, &h);
+    g_poll_state = Q2_MCARD_STATE_CHOICE_5;
+    m.cursor = 1;
+    mc_release_cross(&m);
+    CHECK(g_requested == 6, "state 5 row 1 asks for 6, got %d", g_requested);
+
+    mc_open(&m, &h);
+    g_poll_state = Q2_MCARD_STATE_CHOICE_5;
+    m.cursor = 0;
+    mc_release_cross(&m);
+    CHECK(g_requested == 1, "state 5 row 0 asks for 1, got %d", g_requested);
+
+    /* 0x8001F718: row 1 goes to 20; row 0 falls through with no transition,
+     * which is a return rather than a request for state zero. */
+    mc_open(&m, &h);
+    g_poll_state = Q2_MCARD_STATE_CHOICE_19;
+    m.cursor = 1;
+    mc_release_cross(&m);
+    CHECK(g_requested == 20, "state 19 row 1 asks for 20, got %d", g_requested);
+
+    mc_open(&m, &h);
+    g_poll_state = Q2_MCARD_STATE_CHOICE_19;
+    m.cursor = 0;
+    mc_release_cross(&m);
+    CHECK(g_requested == -1, "state 19 row 0 asks for nothing");
+}
+
+static void test_mcard_accept(void)
+{
+    q2_mcard m;
+    q2_mcard_host h;
+    bool done;
+
+    /* 14 and 16 share one arm, and both mean "apply and leave". */
+    mc_open(&m, &h);
+    g_poll_state = Q2_MCARD_STATE_ACCEPT_A;
+    q2_mcard_advance(&m, Q2_PAD_CROSS);
+    done = q2_mcard_advance(&m, 0);
+    CHECK(done, "state 14 accepts");
+
+    mc_open(&m, &h);
+    g_poll_state = Q2_MCARD_STATE_ACCEPT_B;
+    q2_mcard_advance(&m, Q2_PAD_CROSS);
+    done = q2_mcard_advance(&m, 0);
+    CHECK(done, "state 16 accepts through the same arm");
+
+    /* A fall-through state does nothing at all, however the pad moves. */
+    mc_open(&m, &h);
+    g_poll_state = 12;
+    q2_mcard_advance(&m, Q2_PAD_CROSS);
+    done = q2_mcard_advance(&m, 0);
+    CHECK(!done && !m.fired && g_requested == -1,
+          "a state with no arm is inert");
+}
+
+static void test_mcard_names(void)
+{
+    q2_mcard m;
+    q2_mcard_host h;
+
+    mc_open(&m, &h);
+    q2_mcard_set_name(&m, 0, "QUAKE2 BASE1");
+    CHECK(strcmp(m.name[0], "QUAKE2 BASE1") == 0, "a slot name is kept");
+    q2_mcard_set_name(&m, 0, NULL);
+    CHECK(m.name[0][0] == '\0', "NULL empties a slot");
+    /* Out of range is ignored rather than scribbling. */
+    q2_mcard_set_name(&m, Q2_MCARD_SLOTS, "X");
+    q2_mcard_set_name(&m, -1, "X");
+    CHECK(m.name[0][0] == '\0', "an out-of-range slot writes nothing");
+}
+
+/* ------------------------------------------------------------------------- */
 int main(void)
 {
     test_defaults();
@@ -521,6 +852,15 @@ int main(void)
     test_video_variant();
     test_text_length();
     test_title_y();
+    test_font_metrics();
+    test_font_coverage();
+    test_icons_variant();
+    test_mcard_screens();
+    test_mcard_states();
+    test_mcard_fires_on_release();
+    test_mcard_choices();
+    test_mcard_accept();
+    test_mcard_names();
 
     if (g_fail) {
         printf("\n%d menu check%s failed\n", g_fail, g_fail == 1 ? "" : "s");

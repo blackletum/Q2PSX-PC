@@ -126,35 +126,35 @@ static void test_frame_distance(void)
 /* ------------------------------------------------------------------------- */
 static void test_infront(void)
 {
-    q2_monster m;
-    s32 ahead[3], behind[3], side[3];
+    q2_monster m, t;
 
     printf("forward cone\n");
 
     q2_monster_init(&m);
+    q2_monster_init(&t);
     m.pos[0] = 0; m.pos[1] = 0; m.pos[2] = 0;
-    m.angles[1] = 0;                     /* facing +Z */
+    m.angles[2] = 0;                     /* facing +Z: yaw is angles[2] */
 
-    ahead[0] = 0;    ahead[1] = 0;  ahead[2] = 1000;
-    behind[0] = 0;   behind[1] = 0; behind[2] = -1000;
-    side[0] = 1000;  side[1] = 0;   side[2] = 0;
+    t.pos[0] = 0; t.pos[1] = 0; t.pos[2] = 1000;
+    check(q2_infront(&m, &t), "sees straight ahead");
 
-    check(q2_monster_infront(&m, ahead), "sees straight ahead");
-    check(!q2_monster_infront(&m, behind), "does not see behind");
-    check(!q2_monster_infront(&m, side), "does not see exactly sideways");
+    t.pos[0] = 0; t.pos[2] = -1000;
+    check(!q2_infront(&m, &t), "does not see behind");
+
+    t.pos[0] = 1000; t.pos[2] = 0;
+    check(!q2_infront(&m, &t), "does not see exactly sideways");
 
     /* The cone is wide: a dot threshold of 1230/4096 is about 0.30, so roughly
      * 72 degrees off-axis is still visible. Check a point well off centre. */
-    {
-        s32 oblique[3];
-        oblique[0] = 900;  oblique[1] = 0; oblique[2] = 1000;
-        check(q2_monster_infront(&m, oblique), "the cone is wide, not narrow");
-    }
+    t.pos[0] = 900;  t.pos[2] = 1000;
+    check(q2_infront(&m, &t), "the cone is wide, not narrow");
 
     /* Turning around must reverse the answers. */
-    m.angles[1] = Q2_ANGLE_180;
-    check(!q2_monster_infront(&m, ahead), "turning around loses the target");
-    check(q2_monster_infront(&m, behind), "and acquires what was behind");
+    m.angles[2] = Q2_ANGLE_180;
+    t.pos[0] = 0; t.pos[2] = 1000;
+    check(!q2_infront(&m, &t), "turning around loses the target");
+    t.pos[2] = -1000;
+    check(q2_infront(&m, &t), "and acquires what was behind");
 }
 
 /* ------------------------------------------------------------------------- */

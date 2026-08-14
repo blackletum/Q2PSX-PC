@@ -9,17 +9,29 @@
 #include "aimodule.h"
 #include "area.h"
 #include "cmd_coll.h"
+#include "cmd_effects.h"
 #include "cmd_exe.h"
 #include "cmd_export.h"
 #include "cmd_hud.h"
+#include "cmd_text.h"
+#include "cmd_items.h"
+#include "cmd_lights.h"
 #include "cmd_menu.h"
+#include "cmd_pmove.h"
+#include "cmd_save.h"
+#include "cmd_multi.h"
+#include "cmd_ai.h"
+#include "cmd_creatures.h"
 #include "cmd_weapons.h"
 #include "cmd_screen.h"
+#include "cmd_viewweapon.h"
+#include "cmd_surfaces.h"
 #include "classtable.h"
 #include "collision.h"
 #include "dat.h"
 #include "disc.h"
 #include "entity.h"
+#include "entitydraw.h"
 #include "font.h"
 #include "hud.h"
 #include "exe.h"
@@ -31,12 +43,12 @@
 #include "modeldraw.h"
 #include "mover.h"
 #include "points.h"
-#include "pickup.h"
 #include "population.h"
 #include "trigger.h"
 #include "raster.h"
 #include "reloc.h"
 #include "scene.h"
+#include "screen.h"
 #include "spawn.h"
 #include "sim.h"
 #include "version.h"
@@ -62,6 +74,52 @@
 #  include <sys/types.h>
 #  define q2_mkdir(p) mkdir((p), 0755)
 #endif
+
+/* ------------------------------------------------------------------------- */
+/* The console's own framing, for the commands that claim to show it          */
+/* ------------------------------------------------------------------------- */
+/*
+ * Three commands here — `fps`, `mob` and `render` — exist to show what the game
+ * looked like, and until now they rendered into a 512 x 480 buffer with
+ * `q2_camera_default`, i.e. a projection distance of 512 over a square-pixel
+ * frame: about 53 degrees across where the console's one-player viewport is 116.
+ * The picture was honest about the geometry and wrong about the view.
+ *
+ * So they render at an integer multiple of the console's framebuffer with the
+ * projection distance scaled by the same multiple, which is exactly the
+ * console's frustum at a higher sampling rate. The output is therefore
+ * anamorphic, as the console's own output is: a viewer wants it 1.5x taller (or
+ * 2/3 as wide) to see what a television showed. Every PPM these commands write
+ * says so on the way out.
+ */
+#define TOOL_VIEW_SCALE 2
+#define TOOL_VIEW_W  (Q2_SCREEN_PAL_WIDTH  * TOOL_VIEW_SCALE)
+#define TOOL_VIEW_H  (Q2_SCREEN_PAL_HEIGHT * TOOL_VIEW_SCALE)
+
+static void camera_console(q2_camera *cam, int w, int h)
+{
+    q2_camera_default(cam, w, h);
+
+    /*
+     * `proj` scales with the width because that is what the console's own
+     * layouts do: 160 is paired with the 512-wide framebuffer, and the splits
+     * change it only when they change how much of that width a viewport gets.
+     */
+    cam->projection = (u16)((s32)Q2_SCREEN_BOOT_PROJECTION * w
+                            / Q2_SCREEN_PAL_WIDTH);
+    cam->ofs_x      = w / 2;
+    cam->ofs_y      = h / 2;
+}
+
+/* One line under any PPM written at the console's framing, so nobody measures a
+ * screenshot without knowing the pixels are not square. */
+static void print_console_framing(const q2_camera *cam, int w, int h)
+{
+    printf("  framing       : %d x %d, proj %u — the console's frustum at %dx.\n"
+           "                  Pixels are 2:3 as on a PAL television, so view it "
+           "%d x %d\n",
+           w, h, cam->projection, TOOL_VIEW_SCALE, w, h * 3 / 2);
+}
 
 /* Case-insensitive compare, local to the tool: the format layer's own is not
  * exported and this is only used for matching a model name typed by a human. */
@@ -97,15 +155,28 @@ static void usage(void)
     puts("  textures <disc>             decode every compressed VRAM image");
     puts("  cluts   <disc>              check CLUT binding and UV rotation on every poly");
     puts("  anims   <disc>              decode every CastList animation clip");
-    puts("  fps     <disc> <map> [zone] [weapon] [out.ppm] [yaw]  eye view + HUD");
+    puts("  fps     <disc> <map> [zone] [weapon] [out.ppm] [yaw] [gunyaw] [eye_dy] [roll]");
     puts("  classes <disc>              the entity class table, checked against every spawn");
+    puts("  items   <disc>              the item table and every place record, checked");
+    puts("  lights  <disc>              the lighting model: SpaceLights, styles, flares");
+    puts("  lit     <disc> [map]        gather the lights where the player starts");
     puts("  weapons <disc>              the weapon, armour and sound tables, checked");
+    puts("  effects <disc>              the particle, beam and laser tables, checked");
+    puts("  ai      <disc>              the creature AI, checked against the executable");
+    puts("  creatures <disc>            decode every creature module and report coverage");
+    puts("  ai      <disc>              the creature AI, checked against the executable");
+    puts("  creatures <disc>            decode every creature module and report coverage");
     puts("  mob     <disc> <map> [zone] [n] [out.ppm]  stand in front of a creature");
     puts("  models  <disc> <map>        list a map's model bank");
     puts("  model   <disc> <map> <name|idx> [clip] [frame] [out.ppm] [yaw]  render one model");
     puts("  hud     <disc> [map] [out.ppm]  the HUD's tables, or draw the overlay");
+    puts("  text    <disc> [map] [out.ppm]  the Strings chunk, the briefing screen, the UI chrome");
     puts("  menu    <disc> [page] [out.ppm] [WxH]  the menu, checked against the executable");
+    puts("  save    <disc> [map] [out]   the save system, round-tripped against a map");
+    puts("  multi   <disc> [map]        the multiplayer runtime, checked against the disc");
     puts("  screen  <disc>              display, viewports and the OT, checked");
+    puts("  viewweapon <disc> [weapon]  the weapon in hand, checked against the executable");
+    puts("  pmove   <disc> [map] [zone] player movement: styles, jump, view, volumes");
     puts("  screen  <disc> out.ppm [layout] [map] [zone]  compose one frame");
     puts("  music   <disc>              demultiplex and decode the XA music streams");
     puts("  render  <disc> <map> [z] [out.ppm] [yaw] [pitch]  render a zone (4096 = full turn)");
@@ -121,6 +192,7 @@ static void usage(void)
     puts("  xrefs   <disc> <addr>       every reference to an address, code and data");
     puts("  funcs   <disc> [addr]       call targets found by sweeping the image");
     puts("  moddisasm <disc> <map> [addr] [n]  disassemble a relocated CreAIBin module");
+    puts("  levdisasm <disc> <map> [addr] [n]  disassemble a relocated LevelBin module");
     puts("  bytes   <disc> <addr> [n]   hex dump executable memory by address");
     puts("  find    <disc> <str|0xhex>  locate a string or byte pattern in the image");
     puts("  access  <disc> <off> [insn] every instruction touching a record offset");
@@ -673,31 +745,45 @@ static int cmd_verify(disc *d)
                     }
                 }
 
-                /* Pickups: build the live item set from the place records. */
+                /*
+                 * Items: spawn every place record as the engine does, then walk
+                 * a player onto each in turn and count what is actually
+                 * collected. Until the item table was decoded this could only
+                 * prove that NOTHING could be collected; now it exercises the
+                 * whole path — table lookup, spawn, touch box, dispatch.
+                 */
                 {
                     q2_population pop2;
                     if (q2_population_parse(&pop2, &cf) == Q2_OK) {
-                        q2_pickup_set ps;
-                        if (q2_pickups_build(&ps, &pop2) == Q2_OK) {
-                            pickups_total += ps.count;
-                            /* With no definition table attached nothing can be
-                             * collected, which is the honest state until the
-                             * pickup table is decoded. Prove that rather than
-                             * assume it. */
-                            {
-                                q2_inventory inv;
-                                s32 at[3];
-                                u32 k;
-                                q2_inventory_init(&inv);
-                                for (k = 0; k < ps.count; k++) {
-                                    at[0] = ps.items[k].pos[0];
-                                    at[1] = ps.items[k].pos[1];
-                                    at[2] = ps.items[k].pos[2];
-                                    pickups_taken += q2_pickups_collect(&ps, at, &inv);
-                                }
+                        q2_entity_set es;
+                        q2_item_spawn_stats ist;
+
+                        memset(&es, 0, sizeof(es));
+                        if (q2_item_spawn_all(&es, &pop2, NULL, &ist) == Q2_OK) {
+                            q2_entity_world ew;
+                            q2_inventory inv;
+                            u32 k;
+
+                            pickups_total += ist.spawned;
+
+                            q2_entity_world_init(&ew);
+                            q2_inventory_init(&inv);
+                            q2_entity_world_add_player(&ew, 0, &inv,
+                                                       es.count ? es.ent[0].pos
+                                                                : NULL);
+                            ew.dt = 12;
+
+                            for (k = 0; k < es.count; k++) {
+                                q2_entity *e = &es.ent[k];
+                                if (!e->in_use)
+                                    continue;
+                                q2_entity_world_move_player(&ew, 0, e->pos);
+                                e->think(e, &ew);
+                                if (!e->in_use || e->taken[0])
+                                    pickups_taken++;
                             }
-                            q2_pickups_free(&ps);
                         }
+                        q2_entity_set_free(&es);
                     }
                 }
 
@@ -934,7 +1020,10 @@ static int cmd_verify(disc *d)
            convex_bad);
     printf("  spawns     : %llu\n", spawns_total);
     printf("  triggers   : %llu volumes, %llu planes\n", trig_total, trig_planes);
-    printf("  pickups    : %llu items, %llu collectable (no id table yet)\n",
+    /* One player with one inventory walks onto each item in turn, so the second
+     * shotgun and the ammo box that finds you full are correctly refused — the
+     * count is what a single sweep collects, not how many are collectable. */
+    printf("  items      : %llu spawned, %llu collected by one pass\n",
            pickups_total, pickups_taken);
     {
         u32 k, distinct = 0;
@@ -2129,7 +2218,7 @@ static int cmd_bmodel(disc *d, const char *map, int zone_index, int which,
     vram = (psx_vram *)calloc(1, sizeof(psx_vram));
     if (!vram) { free(mask); q2_world_free_zone(&zone); return 1; }
 
-    q2_world_build_ot(&zone, &cam, W, H, &ot, &gte, &stats);
+    q2_world_build_ot(&zone, &cam, W, H, &ot, &gte, NULL, &stats);
     printf("  quads emitted : %u of %u\n", stats.quads_emitted, stats.quads_total);
 
     psx_raster_opts_default(&opts);
@@ -2411,7 +2500,7 @@ static int cmd_model(disc *d, const char *map, const char *want, int clip_index,
         printf("  face.texture  : %u .. %u\n", clut_lo, clut_hi);
     }
 
-    memset(&inst, 0, sizeof(inst));
+    q2_model_instance_init(&inst);
     inst.model  = &mdl;
     inst.pose   = have_pose ? pose : NULL;
     inst.yaw    = view_yaw;
@@ -2829,7 +2918,7 @@ static u32 draw_map_creatures(disc *d, const char *map, const q2_camera *cam,
                         q2_model_pose_at(&mdl, &clip, 0, pose) == Q2_OK)
                         posed = true;
 
-                    memset(&inst, 0, sizeof(inst));
+                    q2_model_instance_init(&inst);
                     inst.model         = &mdl;
                     inst.pose          = posed ? pose : NULL;
                     inst.origin[0]     = sp.x;
@@ -2858,6 +2947,123 @@ static u32 draw_map_creatures(disc *d, const char *map, const q2_camera *cam,
     return faces;
 }
 
+/*
+ * The items a map places, drawn where the place records put them.
+ *
+ * The creature walk above resolves a class to a model and draws it directly;
+ * this goes through the entity system instead, because an item is not just a
+ * model at a position — it has a spin, a scale and a glow tint that its think
+ * produces, and drawing it any other way would not exercise the thing being
+ * checked. One tick is run before drawing so the spin and glow have values.
+ */
+static u32 draw_map_items(disc *d, const char *map, const q2_camera *cam,
+                          psx_ot *ot, gte_state *gte, u32 clut4_count_a,
+                          u32 *out_drawn, u32 *out_no_model)
+{
+    char cpath[160], zpath[200];
+    q2_buf cbuf;
+    q2_common_file cf;
+    q2_population pop;
+    q2_model_bank common_bank;
+    q2_entity_set set;
+    q2_entity_world world;
+    q2_inventory inv;
+    q2_entity_draw_ctx ctx;
+    q2_entity_draw_stats st;
+    u32 faces = 0;
+    int z;
+
+    q2_buf zbuf[8];
+    q2_zone_file zf[8];
+    q2_model_bank zbank[8];
+    bool zopen[8];
+
+    memset(zopen, 0, sizeof(zopen));
+    memset(&set, 0, sizeof(set));
+    memset(&st, 0, sizeof(st));
+
+    snprintf(cpath, sizeof(cpath), "Q2DATA/LEVELS/%s/COMMON.DAT", map);
+    if (disc_read_file(d, cpath, &cbuf) != Q2_OK)
+        return 0;
+    if (q2_common_open(&cf, &cbuf) != Q2_OK) {
+        q2_buf_free(&cbuf);
+        return 0;
+    }
+
+    if (q2_population_parse(&pop, &cf) != Q2_OK ||
+        q2_item_spawn_all(&set, &pop, NULL, NULL) != Q2_OK) {
+        q2_common_close(&cf);
+        q2_buf_free(&cbuf);
+        return 0;
+    }
+
+    /* Run one tick so the spin, the materialise ramp and the glow have run at
+     * least once. No player is registered, so nothing is collected. */
+    q2_entity_world_init(&world);
+    q2_inventory_init(&inv);
+    world.dt = 12;
+    q2_entity_run(&set, &world);
+
+    /*
+     * An item's model can be in COMMON's bank or in any zone's, exactly as a
+     * creature's can. Resolve against each in turn FIRST — each entity records
+     * the bank that had it — and only then draw, once. Drawing per bank would
+     * emit an entity as many times as there are banks, and would index the
+     * wrong bank while doing it.
+     */
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.clut4_count_a = clut4_count_a;
+    ctx.player        = 0;
+
+    if (q2_model_bank_from_common(&common_bank, &cf) == Q2_OK) {
+        u32 i;
+        ctx.bank = &common_bank;
+        for (i = 0; i < set.count; i++)
+            q2_entity_resolve_model(&set.ent[i], &common_bank);
+    }
+
+    for (z = 0; z < 8; z++) {
+        u32 i;
+
+        snprintf(zpath, sizeof(zpath), "Q2DATA/LEVELS/%s/ZONE%d.DAT", map, z);
+        if (disc_read_file(d, zpath, &zbuf[z]) != Q2_OK)
+            continue;
+        if (q2_zone_open(&zf[z], &zbuf[z]) != Q2_OK) {
+            q2_buf_free(&zbuf[z]);
+            continue;
+        }
+        zopen[z] = (q2_model_bank_from_zone(&zbank[z], &zf[z]) == Q2_OK);
+        if (!zopen[z]) {
+            q2_zone_close(&zf[z]);
+            q2_buf_free(&zbuf[z]);
+            continue;
+        }
+
+        for (i = 0; i < set.count; i++)
+            q2_entity_resolve_model(&set.ent[i], &zbank[z]);
+        if (!ctx.bank)
+            ctx.bank = &zbank[z];
+    }
+
+    faces = q2_entity_build_ot(&set, &ctx, cam, ot, gte, &st);
+
+    if (out_drawn)
+        *out_drawn = st.drawn;
+    if (out_no_model)
+        *out_no_model = st.no_model;
+
+    for (z = 0; z < 8; z++)
+        if (zopen[z]) {
+            q2_zone_close(&zf[z]);
+            q2_buf_free(&zbuf[z]);
+        }
+
+    q2_entity_set_free(&set);
+    q2_common_close(&cf);
+    q2_buf_free(&cbuf);
+    return faces;
+}
+
 /* ------------------------------------------------------------------------- */
 /*
  * Stand in front of one of a map's creatures and look at it.
@@ -2870,7 +3076,7 @@ static u32 draw_map_creatures(disc *d, const char *map, const q2_camera *cam,
 static int cmd_mob(disc *d, const char *map, int zone_index, int which,
                    const char *out_path)
 {
-    const int W = 512, H = 480;
+    const int W = TOOL_VIEW_W, H = TOOL_VIEW_H;
     q2_world_zone zone;
     q2_camera cam;
     psx_ot ot;
@@ -2900,7 +3106,7 @@ static int cmd_mob(disc *d, const char *map, int zone_index, int which,
 
     /* Back off along the creature's own facing, so it is seen from the front,
      * and raise the eye to roughly head height. */
-    q2_camera_default(&cam, W, H);
+    camera_console(&cam, W, H);
     cam.yaw   = facing + 2048;
     cam.pitch = 0;
     cam.pos[0] = pos[0] + ((q2_sin12(facing) * 700) >> 12);
@@ -2927,7 +3133,8 @@ static int cmd_mob(disc *d, const char *map, int zone_index, int which,
         opts.textures = false;
     }
 
-    q2_world_build_ot(&zone, &cam, W, H, &ot, &gte, &wstats);
+    print_console_framing(&cam, W, H);
+    q2_world_build_ot(&zone, &cam, W, H, &ot, &gte, NULL, &wstats);
     cfaces = draw_map_creatures(d, map, &cam, &ot, &gte, clut4_count_a, &drawn);
     printf("  world %u quads, creatures %u visible / %u faces\n",
            wstats.quads_emitted, drawn, cfaces);
@@ -2966,10 +3173,18 @@ static int cmd_mob(disc *d, const char *map, int zone_index, int which,
  * their geometry is authored around the eye. So the viewmodel is placed at the
  * camera, nudged forward and down, and turned to face the camera's yaw.
  */
+/*
+ * `eye_dy` and `roll` are the two things the movement frame contributes to a
+ * view that this command could not previously show: the eye's height above the
+ * feet, which a crouch volume and a jump both change, and the strafe lean. Pass
+ * the figures `q2psx-inspect pmove` measures and the frame is a real player's,
+ * not a hand-posed camera.
+ */
 static int cmd_fps(disc *d, const char *map, int zone_index, const char *weapon,
-                   const char *out_path, s32 yaw_offset, s32 gun_yaw)
+                   const char *out_path, s32 yaw_offset, s32 gun_yaw,
+                   s32 eye_dy, s32 roll)
 {
-    const int W = 512, H = 480;
+    const int W = TOOL_VIEW_W, H = TOOL_VIEW_H;
     q2_world_zone zone;
     q2_camera cam;
     psx_ot ot;
@@ -3007,9 +3222,10 @@ static int cmd_fps(disc *d, const char *map, int zone_index, const char *weapon,
      * eye height. World Y grows downward, so the eye is at a SMALLER Y than the
      * feet -- getting that sign wrong buries the camera in the floor.
      */
-    q2_camera_default(&cam, W, H);
+    camera_console(&cam, W, H);
     cam.yaw   = yaw_offset;
     cam.pitch = 0;
+    cam.roll  = roll;
     {
         char spath[160];
         q2_buf sbuf;
@@ -3028,7 +3244,7 @@ static int cmd_fps(disc *d, const char *map, int zone_index, const char *weapon,
                             sp.zone != zone_index)
                             continue;
                         cam.pos[0] = sp.x;
-                        cam.pos[1] = sp.y - Q2_VIEW_STAND;
+                        cam.pos[1] = sp.y - Q2_VIEW_STAND + eye_dy;
                         cam.pos[2] = sp.z;
                         cam.yaw    = sp.angle + yaw_offset;
                         placed = true;
@@ -3089,7 +3305,8 @@ static int cmd_fps(disc *d, const char *map, int zone_index, const char *weapon,
     }
     opts.textures = have_vram;
 
-    q2_world_build_ot(&zone, &cam, W, H, &ot, &gte, &wstats);
+    print_console_framing(&cam, W, H);
+    q2_world_build_ot(&zone, &cam, W, H, &ot, &gte, NULL, &wstats);
     printf("  world         : %u of %u quads\n", wstats.quads_emitted,
            wstats.quads_total);
 
@@ -3099,6 +3316,17 @@ static int cmd_fps(disc *d, const char *map, int zone_index, const char *weapon,
         u32 cfaces = draw_map_creatures(d, map, &cam, &ot, &gte,
                                         clut4_count_a, &drawn);
         printf("  creatures     : %u visible, %u faces\n", drawn, cfaces);
+    }
+
+    /* And the items, through the entity system, into the same table again. */
+    {
+        u32 drawn = 0, missing = 0;
+        u32 ifaces = draw_map_items(d, map, &cam, &ot, &gte,
+                                    clut4_count_a, &drawn, &missing);
+        printf("  items         : %u visible, %u faces", drawn, ifaces);
+        if (missing)
+            printf(", %u with no model in this map", missing);
+        printf("\n");
     }
 
     /* The weapon, into the same ordering table. */
@@ -3142,7 +3370,7 @@ static int cmd_fps(disc *d, const char *map, int zone_index, const char *weapon,
         fwd[0]   =  s; fwd[2]   =  c;
         right[0] =  c; right[2] = -s;
 
-        memset(&inst, 0, sizeof(inst));
+        q2_model_instance_init(&inst);
         inst.model         = &wmodel;
         inst.pose          = NULL;
         inst.yaw           = cam.yaw + gun_yaw;
@@ -3259,7 +3487,7 @@ static int cmd_render(disc *d, const char *map, int zone_index, const char *out_
     q2_world_stats stats;
     q2_result r;
     s32 wmin[3], wmax[3];
-    const int W = 512, H = 480;   /* 2x the PAL framebuffer, for legibility */
+    const int W = TOOL_VIEW_W, H = TOOL_VIEW_H;   /* the console's, at 2x */
 
     r = q2_world_load_zone(&zone, d, map, zone_index);
     if (r != Q2_OK) {
@@ -3277,7 +3505,7 @@ static int cmd_render(disc *d, const char *map, int zone_index, const char *out_
     printf("  world size    : %d x %d x %d\n",
            wmax[0] - wmin[0], wmax[1] - wmin[1], wmax[2] - wmin[2]);
 
-    q2_camera_default(&cam, W, H);
+    camera_console(&cam, W, H);
     cam.yaw   = yaw;
     cam.pitch = pitch;
 
@@ -3381,12 +3609,15 @@ static int cmd_render(disc *d, const char *map, int zone_index, const char *out_
         return 1;
     }
 
-    q2_world_build_ot(&zone, &cam, W, H, &ot, &gte, &stats);
+    print_console_framing(&cam, W, H);
+    q2_world_build_ot(&zone, &cam, W, H, &ot, &gte, NULL, &stats);
 
     printf("\n  quads total   : %u\n", stats.quads_total);
     printf("  emitted       : %u\n", stats.quads_emitted);
     printf("  rejected near : %u\n", stats.quads_rejected_near);
+    printf("  rejected back : %u\n", stats.quads_rejected_back);
     printf("  rejected bad  : %u\n", stats.quads_rejected_bad);
+    printf("  sealing nodes : %u skipped\n", stats.nodes_sealing);
     printf("  ot overflow   : %u\n", stats.ot_overflow);
 
     psx_raster_opts_default(&opts);
@@ -3766,6 +3997,7 @@ static int cmd_walk(disc *d, const char *map, int zone_index, int ticks)
     char path[256];
     s32 feet[3] = { 0, 0, 0 };
     s32 start_y;
+    s32 walk_x = 0, walk_z = 0, walk_dist = 0;
     int i, grounded_at = -1, escaped = 0, zone_gates = 0;
     bool have_spawn = false;
 
@@ -3843,12 +4075,20 @@ static int cmd_walk(disc *d, const char *map, int zone_index, int ticks)
     }
 
     start_y = sim.player.pos[1];
+    walk_x  = sim.player.pos[0];
+    walk_z  = sim.player.pos[2];
 
     memset(&in, 0, sizeof(in));
     for (i = 0; i < ticks; i++) {
         /* Walk forward for the second half so both falling and walking are
-         * exercised. */
-        in.forward = (i > ticks / 2) ? 1024 : 0;
+         * exercised. Q2_INPUT_FULL is the pad's own full deflection — the wish
+         * velocity is (maxspeed * axis) >> 7, so anything larger simply makes
+         * the player faster than the executable's own speed table allows. */
+        if (i == ticks / 2 + 1) {
+            walk_x = sim.player.pos[0];
+            walk_z = sim.player.pos[2];
+        }
+        in.forward = (i > ticks / 2) ? Q2_INPUT_FULL : 0;
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
 
         if (sim.player.on_ground && grounded_at < 0)
@@ -3864,12 +4104,27 @@ static int cmd_walk(disc *d, const char *map, int zone_index, int ticks)
         }
     }
 
+    {
+        s32 dx = sim.player.pos[0] - walk_x;
+        s32 dz = sim.player.pos[2] - walk_z;
+        walk_dist = (dx < 0 ? -dx : dx) + (dz < 0 ? -dz : dz);
+    }
+
     printf("  after %d ticks:\n", ticks);
     printf("    grounded    : %s\n",
            grounded_at >= 0 ? "yes" : "NO - fell the whole time");
     if (grounded_at >= 0)
         printf("    landed on tick %d\n", grounded_at);
     printf("    fell        : %d world units\n", sim.player.pos[1] - start_y);
+
+    /*
+     * How far the second half of the run actually travelled. A zero here with a
+     * grounded player is the signature of movement being cancelled by the mover
+     * rather than of a collision failure, which is exactly what the missing
+     * airborne branch at 0x80045CA4 used to produce for jumps.
+     */
+    printf("    walked      : %d world units in %d ticks\n",
+           walk_dist, ticks - ticks / 2 - 1);
     printf("    final cell  : %d\n", sim.current_node);
     printf("    ticks outside any hull: %d\n", escaped);
     printf("    events run  : %u\n", sim.events_ready ? sim.event_rt.ran_count : 0);
@@ -4446,6 +4701,8 @@ int main(int argc, char **argv)
         rc = cmd_polyflags(d);
     } else if (strcmp(cmd, "cluts") == 0) {
         rc = cmd_cluts(d);
+    } else if (strcmp(cmd, "surfaces") == 0) {
+        rc = cmd_surfaces(d);
     } else if (strcmp(cmd, "anims") == 0) {
         rc = cmd_anims(d);
     } else if (strcmp(cmd, "mob") == 0) {
@@ -4477,7 +4734,9 @@ int main(int argc, char **argv)
             const char *outp = (argc >= 7) ? argv[6] : "fps.ppm";
             s32 vy = (argc >= 8) ? (s32)strtol(argv[7], NULL, 10) : 0;
             s32 gy = (argc >= 9) ? (s32)strtol(argv[8], NULL, 10) : 1536;
-            rc = cmd_fps(d, argv[3], zi, wp, outp, vy, gy);
+            s32 dy = (argc >= 10) ? (s32)strtol(argv[9], NULL, 10) : 0;
+            s32 rl = (argc >= 11) ? (s32)strtol(argv[10], NULL, 10) : 0;
+            rc = cmd_fps(d, argv[3], zi, wp, outp, vy, gy, dy, rl);
         }
     } else if (strcmp(cmd, "model") == 0) {
         if (argc < 5) {
@@ -4576,6 +4835,15 @@ int main(int argc, char **argv)
             int n = (argc >= 6) ? atoi(argv[5]) : 0;
             rc = cmd_moddisasm(d, argv[3], at, n);
         }
+    } else if (strcmp(cmd, "levdisasm") == 0) {
+        if (argc < 4) {
+            fprintf(stderr, "levdisasm needs a map name\n");
+            rc = 1;
+        } else {
+            const char *at = (argc >= 5) ? argv[4] : NULL;
+            int n = (argc >= 6) ? atoi(argv[5]) : 0;
+            rc = cmd_levdisasm(d, argv[3], at, n);
+        }
     } else if (strcmp(cmd, "funcs") == 0) {
         rc = cmd_funcs(d, (argc >= 4) ? argv[3] : NULL);
     } else if (strcmp(cmd, "bytes") == 0) {
@@ -4596,12 +4864,40 @@ int main(int argc, char **argv)
     } else if (strcmp(cmd, "hud") == 0) {
         rc = cmd_hud(d, (argc >= 4) ? argv[3] : NULL,
                      (argc >= 5) ? argv[4] : NULL);
+    } else if (strcmp(cmd, "items") == 0) {
+        rc = cmd_items(d);
+    } else if (strcmp(cmd, "lights") == 0) {
+        rc = cmd_lights(d);
+    } else if (strcmp(cmd, "lit") == 0) {
+        rc = cmd_lit(d, argc > 3 ? argv[3] : NULL);
     } else if (strcmp(cmd, "weapons") == 0) {
         rc = cmd_weapons(d);
+    } else if (strcmp(cmd, "effects") == 0) {
+        rc = cmd_effects(d, (argc >= 4) ? argv[3] : NULL);
+    } else if (strcmp(cmd, "ai") == 0) {
+        rc = cmd_ai(d);
+    } else if (strcmp(cmd, "creatures") == 0) {
+        rc = cmd_creatures(d);
+    } else if (strcmp(cmd, "multi") == 0) {
+        rc = cmd_multi(d, (argc >= 4) ? argv[3] : NULL);
+    } else if (strcmp(cmd, "text") == 0) {
+        rc = cmd_text(d, (argc >= 4) ? argv[3] : NULL,
+                      (argc >= 5) ? argv[4] : NULL);
     } else if (strcmp(cmd, "menu") == 0) {
         rc = cmd_menu(d, (argc >= 4) ? argv[3] : NULL,
                          (argc >= 5) ? argv[4] : NULL,
                          (argc >= 6) ? argv[5] : NULL);
+    } else if (strcmp(cmd, "save") == 0) {
+        rc = cmd_save(d, (argc >= 4) ? argv[3] : NULL,
+                         (argc >= 5) ? argv[4] : NULL);
+    } else if (strcmp(cmd, "pmove") == 0) {
+        rc = cmd_pmove(d, (argc >= 4) ? argv[3] : NULL,
+                          (argc >= 5) ? atoi(argv[4]) : 0);
+    } else if (strcmp(cmd, "viewweapon") == 0) {
+        rc = cmd_viewweapon(d, (argc >= 4) ? argv[3] : NULL,
+                               (argc >= 5) ? argv[4] : NULL,
+                               (argc >= 6) ? argv[5] : NULL,
+                               (argc >= 7) ? atoi(argv[6]) : 0);
     } else if (strcmp(cmd, "screen") == 0) {
         rc = cmd_screen(d, (argc >= 4) ? argv[3] : NULL,
                            (argc >= 5) ? argv[4] : NULL,

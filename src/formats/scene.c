@@ -2,6 +2,10 @@
 
 #include <string.h>
 
+/* For q2_mapmod_clut_index — the palette binding lives with the VRAM layout it
+ * indexes, not with the chunk that stores it. */
+#include "vram.h"
+
 q2_result q2_scene_parse(q2_scene *out, const q2_zone_file *zone)
 {
     const dat_chunk *scene_chunk;
@@ -164,6 +168,28 @@ bool q2_mapmod_get_poly(const q2_mapmod_rec *rec, u32 poly, q2_mapmod_poly *out)
     out->tpage  = p[10];
     out->uv_idx = (u8)(p[11] & 0x3F);
     out->flags  = (u8)(p[11] >> 6);
+
+    return true;
+}
+
+bool q2_mapmod_rec_is_sealing(const q2_mapmod_rec *rec)
+{
+    u32 p;
+
+    /* A record with no polygons seals nothing. Five nodes on the disc are
+     * empty, and calling those sealing would be a vacuous truth that hides
+     * them from every caller that asks this question. */
+    if (!rec || rec->num_polys == 0)
+        return false;
+
+    for (p = 0; p < rec->num_polys; p++) {
+        q2_mapmod_poly poly;
+
+        if (!q2_mapmod_get_poly(rec, p, &poly))
+            return false;
+        if (q2_mapmod_clut_index(poly.clut) != 0)
+            return false;
+    }
 
     return true;
 }

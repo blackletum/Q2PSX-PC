@@ -75,16 +75,29 @@ not been read out of the executable yet.
 | Level data | container, scene graph, geometry, collision, spawns, lights, triggers |
 | Collision | the portal-walking hull trace, sliding, stepping and the entity sweep — transcribed from the executable, 47 of 47 maps walkable |
 | Rendering | software rasteriser with the PSX's rules; world and models, textured |
+| Surfaces | `Scene.flags08` fully decoded — object binding, hide flag, deferred path and the four draw variants; all four semi-transparency modes from the executable's own two tables; near-quad subdivision, which is what controls the affine texture warp |
+| Draw order | `SortData` decoded — a self-describing bit stream, 178,801 node references across 715,260 bytes with none out of range |
+| Lighting | the world's baked vertex lighting; the per-entity three-light gather through the GTE's own `NCT`; `SpaceLights` decoded — 37,285 index entries, none out of range; and the lens flares, whose four element tables match the executable's |
 | Models | vertices, faces, texturing and animation — all 4,535 clips decode |
 | Audio | sound bank and SPU-ADPCM decode; music not yet wired |
-| Simulation | movement, inventory, combat, creature AI, save games |
+| Player movement | the whole of the player's frame read out of `0x8003A1C8` — one clamped-approach primitive doing all acceleration and deceleration, the wish/rotate/ease chain, the posted-impulse jump, the ground projection, fall damage, the rate-based look, swimming and ladders. No friction coefficient, no crouch button and no slope limit exist to find |
+| Pad and view | the pad read at `0x80019154`: nine control styles, and the shared tail that turns four configurable pad masks into eleven derived bits — including the one that makes **jump and swim-up the same button**, a tap for one and a hold for the other. Full digital deflection is 127, not 128. And the view is not the aim: `0x80038260` composes three independently decaying kicks — firing over 30 ticks, damage over 150, landing over 90 — plus the strafe lean, and only then is it a camera |
+| Environment volumes | crouching, swimming and the no-jump zones are authored per map, not by the pad: they are `UserFuncs` primitives a trigger volume calls. Resolved across the whole disc — 37 `INCROUCH`, 21 `UNDERWATER`, 13 `INWATER`, 52 `DONTJUMP`, and exactly **2** `INLOWCROUCH`, both on `SECURITY`. `DONTJUMP` is what sets the jump gate this project had recorded as never set |
+| Simulation | inventory, combat, creature AI, save games |
+| Entities | one record with a think pointer, as the original has: spawn, tick, touch, draw |
+| Items | every one of the 64 table records — what it looks like, how it behaves, what collecting it does. 1,013 of 1,013 placed items resolve |
 | Weapons | all eleven read out of their own fire functions — damage, spread, kick, refire |
 | Damage | armour, power armour, knockback, splash, 21 means of death |
 | Creatures | every spawn resolves to its class, model and health — 651 of 651 |
-| Menus | every page, its navigation and its settings — 21 of 21 checked against the executable |
-| Screen | display envs, double buffering, the sliced ordering table, all five viewport layouts and the frame lock — 59 of 59 constants checked against the executable |
+| Menus | every page, its navigation and its settings — 21 of 21 checked against the executable — drawn with the console's own three faces, its gouraud selection bar and its line-drawn sliders |
+| Memory card | all nine front-end screens and the release-gated state machine behind them — 31 of 31 items checked against the executable; the card I/O itself is a host interface, not an invention |
+| Saved games | four slots reached through that front end, plus quick save. The container is an ordinary host file — a stated divergence, since a save file's container is invisible where the rendering's limits are the point — but what it holds is the original's state: the level clock every powerup deadline is measured against, the script's event flags, which trigger volumes the player is standing in, which items have been collected, the mover's carried cell and frame delta, and the weapon generator. Chunked, checksummed and fixed-width, so a save written by one build loads under another |
+| View weapon | the model in the player's hands: its animation bank, four-state machine and view-space transform — 20 of 20 checks against the executable |
+| Screen | display envs, double buffering, the sliced ordering table, all five viewport layouts, the frame lock, and the whole per-viewport draw — clip, clear, damage flash, world gate and the performance meter — 174 of 174 checks against the executable |
+| Screen effects | the damage flash, raised from the player's own health and armour and drawn as the viewport's own tile; and the **water effect** — a framebuffer warp that displaces columns and rows of the drawn frame by a travelling cosine, under a blue tint that ramps as you go under. It is what writes the screen shake, which had sat in the view record with no writer at all: the inset is the margin the warp copies from |
 
-| HUD | the overlay, its markup language and its own font — and the proof there is no status bar |
+| HUD | the overlay — notifications, centre line, crosshair, damage flash — its markup language and its own font; the MISSION screen, whose format strings turn out to be markup the game assembles at run time; and the **status bar**, which this project once proved did not exist. It does: health, ammo and armour in 24x24 numerals beside their icons, drawn by the per-viewport hook at `0x800337D0` and anchored to the viewport's own `view+304`. The earlier negative result came of enumerating format strings, and the bar draws sprites |
+| Effects | all five machines, nothing modelled: the fifteen-quad particle groups and their nineteen colour ramps, the one-frame beam pool and its folded hexagonal hull, the debris burst with the hull it slides in and the mover's own gravity and terminal velocity, and the `GlintMod` glint's two draw paths — which the port turns on by READING the level script that raises them, no interpreter needed. Spawned by the simulation, drawn into the same ordering table as the world. The weapon trail is the BFG's: a persistent green beam held on every target the ball can see, refreshed each tick and lingering 45 units after it passes |
 
 Checked against the PAL disc: 164 level files, 461,852 vertices, 274,936 quads,
 139,240 collision planes, 94,642 collision portals, 1,723 models, 2,036,080
@@ -116,16 +129,29 @@ build/bin/q2psx-inspect ident  "Quake II (Europe).cue"
 build/bin/q2psx-inspect verify "Quake II (Europe).cue"
 build/bin/q2psx-inspect coll   "Quake II (Europe).cue"             # every hull, checked
 build/bin/q2psx-inspect walk   "Quake II (Europe).cue" BASE1 0 150 # drop a player in
+build/bin/q2psx-inspect pmove  "Quake II (Europe).cue"             # styles, jump, view, volumes
+build/bin/q2psx-inspect pmove  "Quake II (Europe).cue" SECURITY 0  # and one map, frame by frame
 build/bin/q2psx-inspect audio  "Quake II (Europe).cue"
 build/bin/q2psx-inspect render "Quake II (Europe).cue" BASE0 0 out.ppm 0 1024
 build/bin/q2psx-inspect model  "Quake II (Europe).cue" BASE1 Soldier 0 0 out.ppm
 
 build/bin/q2psx-inspect hud    "Quake II (Europe).cue" BASE0 hud.ppm
 build/bin/q2psx-inspect weapons "Quake II (Europe).cue"            # every weapon, checked
+build/bin/q2psx-inspect effects "Quake II (Europe).cue"            # every ramp, beam and laser, checked
+build/bin/q2psx-inspect lights  "Quake II (Europe).cue"            # every light, its cell and its flare
+build/bin/q2psx-inspect lit     "Quake II (Europe).cue" BASE1      # what lights the player where they start
+build/bin/q2psx-inspect items   "Quake II (Europe).cue"            # every item, checked
 build/bin/q2psx-inspect menu   "Quake II (Europe).cue"             # every page, checked
-build/bin/q2psx-inspect menu   "Quake II (Europe).cue" 26 pause.ppm
+build/bin/q2psx-inspect menu   "Quake II (Europe).cue" 26 pause.ppm BASE1  # real font
+build/bin/q2psx-inspect text   "Quake II (Europe).cue"             # every map's text, checked
+build/bin/q2psx-inspect text   "Quake II (Europe).cue" SECURITY    # and the briefing it would show
 build/bin/q2psx-inspect screen "Quake II (Europe).cue"             # every constant, checked
+build/bin/q2psx-inspect viewweapon "Quake II (Europe).cue"         # the weapon in hand, checked
+build/bin/q2psx-inspect viewweapon "Quake II (Europe).cue" 10 rail.ppm COMMAND 0
 build/bin/q2psx-inspect screen "Quake II (Europe).cue" split.ppm quad BASE1 0
+build/bin/q2psx-inspect screen "Quake II (Europe).cue" wet.ppm one+water BASE1 0   # underwater
+build/bin/q2psx-inspect screen "Quake II (Europe).cue" hit.ppm one+flash BASE1 0   # damage flash
+build/bin/q2psx-inspect surfaces "Quake II (Europe).cue"           # flags, blends, draw order
 ```
 
 `render` needs no window — it writes a PPM. That is how the geometry pipeline was

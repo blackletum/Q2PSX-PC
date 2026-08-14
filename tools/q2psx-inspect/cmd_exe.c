@@ -589,8 +589,18 @@ int cmd_find(const disc *d, const char *pattern)
  */
 #define Q2_MOD_BASE 0x80100000u
 
-int cmd_moddisasm(const disc *d, const char *map, const char *addr_s, int count)
+/*
+ * `level` picks LevelBin over CreAIBin. They are the same format and the same
+ * relocation stream; what differs is the preamble, the header, and the fact
+ * that a LevelBin has no import table to name — it reaches the engine through
+ * pointers the installer writes into its header instead.
+ */
+static int moddisasm(const disc *d, const char *map, const char *addr_s,
+                     int count, bool level)
 {
+    const char *what = level ? "LevelBin" : "CreAIBin";
+    const u32 code_start = level ? Q2_LEVEL_HDR_SETTINGS + 4
+                                 : Q2_AI_HDR_CODE_START;
     char path[160];
     q2_buf file;
     q2_common_file cf;
@@ -609,28 +619,38 @@ int cmd_moddisasm(const disc *d, const char *map, const char *addr_s, int count)
         q2_buf_free(&file);
         return 1;
     }
-    if (q2_ai_module_load(&mod, &cf, Q2_MOD_BASE) != Q2_OK) {
-        fprintf(stderr, "%s has no relocatable CreAIBin\n", map);
+    if ((level ? q2_level_module_load(&mod, &cf, Q2_MOD_BASE)
+               : q2_ai_module_load(&mod, &cf, Q2_MOD_BASE)) != Q2_OK) {
+        fprintf(stderr, "%s has no relocatable %s\n", map, what);
         q2_common_close(&cf);
         return 1;
     }
     if (mod.empty) {
-        printf("%s has an empty CreAIBin (no creatures)\n", map);
+        printf("%s has an empty %s\n", map, what);
         q2_ai_module_free(&mod);
         q2_common_close(&cf);
         return 0;
     }
 
-    printf("%s CreAIBin: %zu bytes relocated at 0x%08X\n", map, mod.image.size,
+    printf("%s %s: %zu bytes relocated at 0x%08X\n", map, what, mod.image.size,
            mod.base);
-    for (i = 0; i < 4; i++) {
+    /* A level module has two exports and then an import slot the loader fills;
+     * printing four would show string data and invite it to be read as a
+     * pointer. A CreAI module really does have four. */
+    for (i = 0; i < (level ? 2u : 4u); i++) {
         u32 e = q2_ai_module_export(&mod, i);
-        printf("  export %u : 0x%08X%s\n", i, e,
-               e ? "" : "   (absent)");
+        printf("  export %u : 0x%08X%s%s\n", i, e,
+               e ? "" : "   (absent)",
+               (level && i == 0) ? "   init"
+                                 : ((level && i == 1) ? "   (killer, victim)"
+                                                      : ""));
     }
-    printf("  code     : 0x%08X\n", mod.base + Q2_AI_HDR_CODE_START);
+    if (level)
+        printf("  import   : 0x%08X   the engine block, written at load\n",
+               q2_ai_module_export(&mod, 2));
+    printf("  code     : 0x%08X\n", mod.base + code_start);
 
-    addr = addr_s ? parse_addr(addr_s) : (mod.base + Q2_AI_HDR_CODE_START);
+    addr = addr_s ? parse_addr(addr_s) : (mod.base + code_start);
     if (addr < mod.base)
         addr += mod.base;            /* accept a module-relative offset */
 
@@ -659,7 +679,7 @@ int cmd_moddisasm(const disc *d, const char *map, const char *addr_s, int count)
             printf("   ; 0x%08X", resolved);
             /* An import slot is the module's only way to call the engine, so
              * naming one turns an opaque indirect call into a known callee. */
-            if (resolved >= mod.base + Q2_AI_HDR_IMPORTS &&
+            if (!level && resolved >= mod.base + Q2_AI_HDR_IMPORTS &&
                 resolved <  mod.base + Q2_AI_HDR_CODE_START)
                 printf(" (import %u)",
                        (resolved - mod.base - Q2_AI_HDR_IMPORTS) / 4);
@@ -684,6 +704,16 @@ int cmd_moddisasm(const disc *d, const char *map, const char *addr_s, int count)
     q2_ai_module_free(&mod);
     q2_common_close(&cf);
     return 0;
+}
+
+int cmd_moddisasm(const disc *d, const char *map, const char *addr_s, int count)
+{
+    return moddisasm(d, map, addr_s, count, false);
+}
+
+int cmd_levdisasm(const disc *d, const char *map, const char *addr_s, int count)
+{
+    return moddisasm(d, map, addr_s, count, true);
 }
 
 /* ------------------------------------------------------------------------- */

@@ -14,6 +14,7 @@
 #include "screen.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int g_fail;
@@ -306,7 +307,7 @@ static void test_compose_clip(void)
     /* One huge white tile in the right-hand viewport, spanning far more than
      * the viewport holds. */
     q2_screen_view_begin(&s, 1, &ot, NULL);
-    p = psx_ot_add(&ot, q2_screen_view_otz(&s, 1, 0));
+    p = psx_ot_add_bucket(&ot, q2_screen_view_otz(&s, 1, 0));
     CHECK(p != NULL, "no room in the primitive pool");
     if (p) {
         p->kind = PSX_PRIM_TILE;
@@ -315,6 +316,7 @@ static void test_compose_clip(void)
         p->rgb[0].r = p->rgb[0].g = p->rgb[0].b = 255;
     }
 
+    q2_screen_view_end(&s, &ot);
     q2_screen_compose(&s, &ot, NULL, &opts);
     q2_screen_present(&s);
     fb = q2_screen_front(&s);
@@ -412,13 +414,14 @@ static void test_shake(void)
     q2_screen_frame_begin(&s, &ot);
     psx_fb_clear(q2_screen_back(&s), 0);
     q2_screen_view_begin(&s, 0, &ot, NULL);
-    p = psx_ot_add(&ot, q2_screen_view_otz(&s, 0, 0));
+    p = psx_ot_add_bucket(&ot, q2_screen_view_otz(&s, 0, 0));
     if (p) {
         p->kind = PSX_PRIM_TILE;
         p->xy[0].x = -900; p->xy[0].y = -900;
         p->xy[2].x =  900; p->xy[2].y =  900;
         p->rgb[0].r = p->rgb[0].g = p->rgb[0].b = 255;
     }
+    q2_screen_view_end(&s, &ot);
     q2_screen_compose(&s, &ot, NULL, &opts);
     q2_screen_present(&s);
     fb = q2_screen_front(&s);
@@ -445,14 +448,743 @@ static void test_shake(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * Which way the table is drawn. The env sits at the bottom of a slice and the
+ * flash at the top, so the walk must run bucket 0 upwards — which means a depth
+ * has to count DOWN into the slice. If that inverts, the frame draws far over
+ * near and every wall in the level occludes the one in front of it.
+ */
+static void test_depth_direction(void)
+{
+    q2_screen s;
+    psx_ot ot;
+    psx_raster_opts opts;
+    const psx_framebuffer *fb;
+    psx_prim *p;
+    u16 near_px, far_px;
+
+    q2_screen_init(&s, Q2_VIDEO_PAL);
+    q2_screen_set_layout(&s, Q2_SCREEN_LAYOUT_ONE, 1);
+    psx_ot_init(&ot, Q2_SCREEN_OT_ENTRIES, 16);
+    psx_raster_opts_default(&opts);
+    opts.textures = false;
+    opts.dither   = false;
+
+    q2_screen_frame_begin(&s, &ot);
+    psx_fb_clear(q2_screen_back(&s), 0);
+    q2_screen_view_begin(&s, 0, &ot, NULL);
+
+    /* Two tiles over the same pixels: one far, one near. */
+    p = psx_ot_add(&ot, 40);
+    if (p) {
+        p->kind = PSX_PRIM_TILE;
+        p->xy[0].x = 0;   p->xy[0].y = 0;
+        p->xy[2].x = 64;  p->xy[2].y = 64;
+        p->rgb[0].r = 255; p->rgb[0].g = 0; p->rgb[0].b = 0;
+    }
+    p = psx_ot_add(&ot, 2);
+    if (p) {
+        p->kind = PSX_PRIM_TILE;
+        p->xy[0].x = 0;   p->xy[0].y = 0;
+        p->xy[2].x = 64;  p->xy[2].y = 64;
+        p->rgb[0].r = 0; p->rgb[0].g = 0; p->rgb[0].b = 255;
+    }
+    q2_screen_view_end(&s, &ot);
+    q2_screen_compose(&s, &ot, NULL, &opts);
+    q2_screen_present(&s);
+
+    fb      = q2_screen_front(&s);
+    near_px = psx_rgb555(0, 0, 255);
+    far_px  = psx_rgb555(255, 0, 0);
+    CHECK(fb->px[10 * fb->width + 10] == near_px,
+          "the nearer primitive must survive, got %04X (far is %04X)",
+          fb->px[10 * fb->width + 10], far_px);
+
+    /* And the depth-to-bucket map has to agree with that: a bigger depth is a
+     * lower bucket, and both stay inside the slice's geometry range. */
+    {
+        u16 near_b = q2_screen_view_otz(&s, 0, 0);
+        u16 far_b  = q2_screen_view_otz(&s, 0, 48);
+        u16 clamp  = q2_screen_view_otz(&s, 0, 4000);
+
+        CHECK(near_b > far_b, "depth 0 (%u) should be nearer than 48 (%u)",
+              near_b, far_b);
+        CHECK(far_b == Q2_SCREEN_OT_VIEW_BASE + Q2_SCREEN_OT_VIEW_ENV + 1,
+              "the farthest depth is the slice's first geometry bucket, got %u",
+              far_b);
+        CHECK(near_b == Q2_SCREEN_OT_VIEW_BASE + Q2_SCREEN_OT_VIEW_STRIDE - 1,
+              "the nearest depth is the slice's last bucket, got %u", near_b);
+        CHECK(clamp == far_b, "an over-range depth clamps to the far end");
+    }
+
+    psx_ot_free(&ot);
+    q2_screen_free(&s);
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * The damage flash. Four modes, a countdown that runs once per drawn frame, and
+ * a place in the table — the front of its own viewport, so it tints the world
+ * and nothing else.
+ */
+static void test_flash(void)
+{
+    q2_screen s;
+    psx_ot ot;
+    static const u8 grey[3] = { 0x40, 0x40, 0x40 };
+    u32 bucket;
+    s32 head;
+
+    q2_screen_init(&s, Q2_VIDEO_PAL);
+    q2_screen_set_layout(&s, Q2_SCREEN_LAYOUT_TWO_V, 2);
+    psx_ot_init(&ot, Q2_SCREEN_OT_ENTRIES, 16);
+
+    /* Nothing is drawn while the strength is zero. */
+    q2_screen_frame_begin(&s, &ot);
+    q2_screen_view_begin(&s, 1, &ot, NULL);
+    CHECK(ot.prim_count == 0, "a flash of strength 0 drew something");
+
+    q2_screen_flash_set(&s, 1, grey, 4, Q2_SCREEN_FLASH_FADE);
+    CHECK(s.view[1].flash.initial == 4, "the initial value is the strength");
+
+    q2_screen_frame_begin(&s, &ot);
+    q2_screen_view_begin(&s, 1, &ot, NULL);
+
+    bucket = (u32)Q2_SCREEN_OT_VIEW_BASE + Q2_SCREEN_OT_VIEW_STRIDE
+           + Q2_SCREEN_OT_VIEW_FLASH;
+    head = ot.bucket_head[bucket];
+    CHECK(head >= 0, "the flash should link at viewport 1's frontmost bucket");
+    if (head >= 0) {
+        const psx_prim *t = &ot.prims[head];
+        CHECK(t->kind == PSX_PRIM_TILE, "the flash is a TILE");
+        CHECK(t->semi_transparent, "the flash sets the ABE bit");
+        CHECK(t->xy[0].x == 0 && t->xy[0].y == 0,
+              "the flash is viewport-local");
+        CHECK(t->xy[2].x == s.view[1].w && t->xy[2].y == s.view[1].h,
+              "the flash covers the whole viewport");
+        /* Mode 2 at full strength keeps the colour. */
+        CHECK(t->rgb[0].r == 0x40, "full strength should not fade, got %u",
+              t->rgb[0].r);
+    }
+    CHECK(s.view[1].flash.strength == 3,
+          "the flash steps down once per drawn frame, got %d",
+          (int)s.view[1].flash.strength);
+
+    /* Halfway through, the fade is linear in strength/initial. */
+    q2_screen_frame_begin(&s, &ot);
+    q2_screen_view_begin(&s, 1, &ot, NULL);
+    head = ot.bucket_head[bucket];
+    if (head >= 0)
+        CHECK(ot.prims[head].rgb[0].r == 0x30,
+              "3/4 of 0x40 is 0x30, got %u", ot.prims[head].rgb[0].r);
+
+    /* Mode 3 does not fade at all; mode 0 keeps whatever was there. */
+    q2_screen_flash_set(&s, 1, grey, 2, Q2_SCREEN_FLASH_SOLID);
+    q2_screen_frame_begin(&s, &ot);
+    q2_screen_view_begin(&s, 1, &ot, NULL);
+    head = ot.bucket_head[bucket];
+    if (head >= 0)
+        CHECK(ot.prims[head].rgb[0].b == 0x40, "mode 3 holds the colour");
+
+    /* A viewport that is not live never draws its flash. */
+    q2_screen_flash_set(&s, 0, grey, 3, Q2_SCREEN_FLASH_FADE);
+    q2_screen_frame_begin(&s, &ot);
+    CHECK(!q2_screen_view_begin(&s, 3, &ot, NULL),
+          "viewport 3 is not live in a two-player layout");
+    CHECK(s.view[0].flash.strength == 3,
+          "a viewport that was not drawn must not tick its flash down");
+
+    psx_ot_free(&ot);
+    q2_screen_free(&s);
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * The frame build's three-way clear decision, and the world gate. Neither is
+ * expressible as a constant: both are branches.
+ */
+static int g_view_hooks;
+static int g_overlay_hooks;
+
+static void count_view_hook(void *user, q2_screen *s, int p,
+                            psx_ot *ot, gte_state *gte)
+{
+    (void)user; (void)s; (void)p; (void)ot; (void)gte;
+    g_view_hooks++;
+}
+
+static void count_overlay_hook(void *user, q2_screen *s,
+                               psx_ot *ot, gte_state *gte)
+{
+    (void)user; (void)s; (void)ot; (void)gte;
+    g_overlay_hooks++;
+}
+
+static void test_build(void)
+{
+    q2_screen s;
+    psx_ot ot;
+    q2_screen_hooks hooks;
+    int i;
+
+    q2_screen_init(&s, Q2_VIDEO_PAL);
+    q2_screen_set_layout(&s, Q2_SCREEN_LAYOUT_QUAD, 3);
+    psx_ot_init(&ot, Q2_SCREEN_OT_ENTRIES, 64);
+
+    memset(&hooks, 0, sizeof(hooks));
+    hooks.view    = count_view_hook;
+    hooks.overlay = count_overlay_hook;
+
+    /* Neither flag: the per-viewport clears stand. */
+    for (i = 0; i < 4; i++)
+        s.view[i].bg_enable = 1;
+    s.suppress_clear    = false;
+    s.background_enable = false;
+    g_view_hooks = g_overlay_hooks = 0;
+
+    q2_screen_frame_begin(&s, &ot);
+    q2_screen_build(&s, &ot, NULL, &hooks);
+
+    CHECK(!s.background_armed, "no background env should be armed");
+    CHECK(s.view[0].bg_enable == 1, "the per-viewport clear should stand");
+    CHECK(g_view_hooks == 3, "three live viewports, got %d", g_view_hooks);
+    CHECK(g_overlay_hooks == 1, "one overlay, got %d", g_overlay_hooks);
+    CHECK(s.overlay_armed, "the overlay camera should be up");
+    CHECK(s.env_linked[0] && s.env_linked[2], "each viewport links its env");
+    CHECK(!s.env_linked[3], "the fourth quadrant of a three-player split");
+
+    /* The background flag: one full-screen clear, and every viewport's own is
+     * turned off so the gutters are the only thing it owns. */
+    for (i = 0; i < 4; i++)
+        s.view[i].bg_enable = 1;
+    s.background_enable = true;
+    q2_screen_frame_begin(&s, &ot);
+    q2_screen_build(&s, &ot, NULL, &hooks);
+    CHECK(s.background_armed, "the background env should be armed");
+    for (i = 0; i < s.view_count; i++)
+        CHECK(s.view[i].bg_enable == 0, "view %d still clears", i);
+    /* The loop is bounded by the LIVE count, so the fourth quadrant of a
+     * three-player split is left alone (0x80078178 reads 0x800B2C2C). */
+    CHECK(s.view[3].bg_enable == 1, "the dead quadrant should be untouched");
+
+    /* The suppress flag wins over it, and clears nothing at all. */
+    for (i = 0; i < 4; i++)
+        s.view[i].bg_enable = 1;
+    s.suppress_clear = true;
+    s.background_enable = false;
+    q2_screen_frame_begin(&s, &ot);
+    q2_screen_build(&s, &ot, NULL, &hooks);
+    CHECK(!s.background_armed, "suppressed frames arm no background");
+    for (i = 0; i < s.view_count; i++)
+        CHECK(s.view[i].bg_enable == 0, "view %d still clears", i);
+
+    /* The world gate: bit 0 of view+144. */
+    s.suppress_clear = false;
+    for (i = 0; i < 4; i++)
+        s.view[i].flags &= (u16)~Q2_SCREEN_VIEW_DRAW_WORLD;
+    g_view_hooks = 0;
+    q2_screen_frame_begin(&s, &ot);
+    q2_screen_build(&s, &ot, NULL, &hooks);
+    CHECK(g_view_hooks == 0, "the world drew with the gate closed");
+    CHECK(s.env_linked[0], "the env is still linked with the gate closed");
+
+    psx_ot_free(&ot);
+    q2_screen_free(&s);
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * What a viewport publishes while it is being drawn — the globals the renderers
+ * read instead of being passed anything.
+ */
+static void test_context(void)
+{
+    q2_screen s;
+    psx_ot ot;
+
+    q2_screen_init(&s, Q2_VIDEO_PAL);
+    q2_screen_set_layout(&s, Q2_SCREEN_LAYOUT_QUAD, 4);
+    psx_ot_init(&ot, Q2_SCREEN_OT_ENTRIES, 16);
+
+    s.view[2].shake_x = 5;
+    s.view[2].shake_y = 3;
+
+    q2_screen_frame_begin(&s, &ot);
+    q2_screen_view_begin(&s, 2, &ot, NULL);
+
+    CHECK(s.ctx.index == 2, "the viewport index");
+    CHECK(s.ctx.view == &s.view[2], "the view record");
+    CHECK(!s.ctx.overlay, "not the overlay");
+    CHECK(s.ctx.clip_w == s.view[2].w - 5 && s.ctx.clip_h == s.view[2].h - 3,
+          "the clip extent has the shake taken off it");
+    CHECK(s.ctx.far_z == 4000, "the quad layout's far distance, got %d",
+          (int)s.ctx.far_z);
+    CHECK(s.ctx.far_z_entities == 1000,
+          "entities are cut off at a quarter of it, got %d",
+          (int)s.ctx.far_z_entities);
+
+    /* The quarter truncates toward zero on both signs, which is what the
+     * bgez-guarded bias at 0x80076BB0 does. */
+    {
+        s16 saved = s.view[2].far_z;
+        s.view[2].far_z = -5;
+        q2_screen_view_begin(&s, 2, &ot, NULL);
+        CHECK(s.ctx.far_z_entities == -1,
+              "-5/4 should truncate to -1, got %d", (int)s.ctx.far_z_entities);
+        s.view[2].far_z = saved;
+    }
+    CHECK(s.ctx.slice_base == (u32)Q2_SCREEN_OT_VIEW_BASE
+                              + 2 * Q2_SCREEN_OT_VIEW_STRIDE,
+          "the slice base");
+
+    /* The overlay publishes itself as viewport 0, with no shake and its far
+     * distance left whole. */
+    q2_screen_overlay_begin(&s, &ot, NULL);
+    CHECK(s.ctx.overlay, "the overlay flag");
+    CHECK(s.ctx.index == 0, "the overlay publishes index 0");
+    CHECK(s.ctx.shake_x == 0 && s.ctx.shake_y == 0, "the overlay never shakes");
+    CHECK(s.ctx.clip_w == s.overlay.w, "the overlay's clip is its own size");
+
+    psx_ot_free(&ot);
+    q2_screen_free(&s);
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * Single buffering, and the display envs that express it. The boot layout shows
+ * one rectangle and draws into it; a session layout shows the other one.
+ */
+static void test_display_envs(void)
+{
+    q2_screen s;
+    int x, y, w, h;
+
+    q2_screen_init(&s, Q2_VIDEO_PAL);
+
+    CHECK(q2_screen_single_buffered(&s),
+          "the boot layout should be single buffered");
+    CHECK(q2_screen_front(&s) == q2_screen_back(&s),
+          "single buffered means you watch it being drawn");
+
+    q2_screen_set_layout(&s, Q2_SCREEN_LAYOUT_ONE, 1);
+    CHECK(!q2_screen_single_buffered(&s), "a session layout is double buffered");
+    CHECK(q2_screen_front(&s) != q2_screen_back(&s), "two buffers");
+
+    /* PutDispEnv takes the DRAWN buffer's env, and the cross pairing makes that
+     * the other buffer's rectangle. */
+    s.disp.draw_buffer = 0;
+    q2_screen_display_rect(&s, &x, &y, &w, &h);
+    CHECK(x == 512 && y == 0 && w == 512 && h == 248,
+          "drawing buffer 0 should display (512,0), got (%d,%d) %dx%d",
+          x, y, w, h);
+    s.disp.draw_buffer = 1;
+    q2_screen_display_rect(&s, &x, &y, NULL, NULL);
+    CHECK(x == 0 && y == 0, "drawing buffer 1 should display (0,0)");
+
+    q2_screen_free(&s);
+}
+
+/* ------------------------------------------------------------------------- */
+/* The performance meter: nine bars, halved heights, and six accumulators that
+ * the build resets. */
+static void test_meter(void)
+{
+    q2_screen s;
+    psx_ot ot;
+    q2_screen_hooks hooks;
+    int i, found = 0;
+    s32 idx;
+
+    q2_screen_init(&s, Q2_VIDEO_PAL);
+    q2_screen_set_layout(&s, Q2_SCREEN_LAYOUT_ONE, 1);
+    psx_ot_init(&ot, Q2_SCREEN_OT_ENTRIES, 64);
+    memset(&hooks, 0, sizeof(hooks));
+
+    for (i = 0; i < Q2_SCREEN_METER_BARS; i++)
+        s.meter.value[i] = 20 + i;
+
+    /* Off by default — 0x800B2A64 is in the zeroed segment. */
+    q2_screen_frame_begin(&s, &ot);
+    q2_screen_build(&s, &ot, NULL, &hooks);
+    CHECK(ot.bucket_head[Q2_SCREEN_OT_METER] < 0,
+          "the meter drew while it was off");
+
+    s.meter.enable = true;
+    q2_screen_frame_begin(&s, &ot);
+    q2_screen_build(&s, &ot, NULL, &hooks);
+
+    for (idx = ot.bucket_head[Q2_SCREEN_OT_METER]; idx >= 0; idx = ot.next[idx]) {
+        const psx_prim *p = &ot.prims[idx];
+        CHECK(p->kind == PSX_PRIM_TILE, "a meter bar is a TILE");
+        CHECK(p->xy[2].x - p->xy[0].x == Q2_SCREEN_METER_WIDTH,
+              "a meter bar is two pixels wide");
+        found++;
+    }
+    CHECK(found == Q2_SCREEN_METER_BARS, "%d bars, want %d",
+          found, Q2_SCREEN_METER_BARS);
+
+    CHECK(s.meter.value[3] == 0, "the summed accumulators reset");
+    CHECK(s.meter.value[0] == 20, "the sampled ones do not");
+
+    /* Bar 6 vanishes when its accumulator is zero. */
+    for (i = 0; i < Q2_SCREEN_METER_BARS; i++)
+        s.meter.value[i] = 10;
+    s.meter.value[6] = 0;
+    q2_screen_frame_begin(&s, &ot);
+    q2_screen_build(&s, &ot, NULL, &hooks);
+    found = 0;
+    for (idx = ot.bucket_head[Q2_SCREEN_OT_METER]; idx >= 0; idx = ot.next[idx])
+        found++;
+    CHECK(found == Q2_SCREEN_METER_BARS - 1,
+          "bar 6 should be skipped when it is zero, got %d bars", found);
+
+    psx_ot_free(&ot);
+    q2_screen_free(&s);
+}
+
+/* ------------------------------------------------------------------------- */
+/* The blend selectors the bring-up builds. */
+static void test_blend_table(void)
+{
+    CHECK(q2_screen_blend_word[0] == 32 && q2_screen_blend_word[1] == 0 &&
+          q2_screen_blend_word[2] == 32 && q2_screen_blend_word[3] == 64 &&
+          q2_screen_blend_word[4] == 96, "the blend table");
+    CHECK(q2_screen_blend_mode(0) == PSX_BLEND_ADD,
+          "selector 0 is additive, not half");
+    CHECK(q2_screen_blend_mode(1) == PSX_BLEND_HALF, "selector 1");
+    CHECK(q2_screen_blend_mode(3) == PSX_BLEND_SUB, "selector 3");
+    CHECK(q2_screen_blend_mode(4) == PSX_BLEND_QUARTER, "selector 4");
+    CHECK(!q2_screen_blend_defined(5),
+          "selectors past the table are not ours to invent");
+    CHECK(q2_screen_blend_bits(7) == q2_screen_blend_word[0],
+          "and they clamp rather than reading past it");
+}
+
+/* ------------------------------------------------------------------------- */
+/* The water effect — 0x80062DF0                                              */
+/* ------------------------------------------------------------------------- */
+/*
+ * Five properties, and the third is the one worth having a test for: every
+ * strip copy reads from INSIDE the viewport. That is not something the effect
+ * checks at run time — it falls out of the shake being exactly the largest
+ * value the cosine term can reach — so it is the property that breaks silently
+ * if either half of that relationship is transcribed wrong, and it breaks by
+ * dragging whatever is next to the viewport into it.
+ */
+static void water_frame(q2_screen *s, psx_ot *ot, int views)
+{
+    int p;
+
+    q2_screen_frame_begin(s, ot);
+    for (p = 0; p < views; p++) {
+        q2_screen_view_begin(s, p, ot, NULL);
+        q2_screen_view_end(s, ot);
+    }
+}
+
+static void test_water_ramp(void)
+{
+    q2_screen s;
+    psx_ot ot;
+    int i;
+
+    q2_screen_init(&s, Q2_VIDEO_PAL);
+    q2_screen_set_layout(&s, Q2_SCREEN_LAYOUT_ONE, 1);
+    psx_ot_init(&ot, Q2_SCREEN_OT_ENTRIES, 512);
+    s.dt = Q2_SCREEN_DT_NOMINAL;
+
+    /* A viewport with no owner is skipped before the ramp, so it is not the
+     * same thing as a viewport whose owner is dry. */
+    q2_screen_water_set(&s, 0, false, true);
+    water_frame(&s, &ot, 1);
+    CHECK(s.view[0].water.amp == 0, "an unowned viewport must not ramp");
+
+    q2_screen_water_set(&s, 0, true, true);
+    water_frame(&s, &ot, 1);
+    CHECK(s.view[0].water.amp == Q2_SCREEN_WATER_AMP_RATE * Q2_SCREEN_DT_NOMINAL,
+          "one frame submerged should be %d, got %d",
+          Q2_SCREEN_WATER_AMP_RATE * Q2_SCREEN_DT_NOMINAL, s.view[0].water.amp);
+
+    /* 4096 at 288 a frame is fourteen and a bit; give it twenty and check the
+     * clamp holds rather than wrapping the halfword. */
+    for (i = 0; i < 20; i++)
+        water_frame(&s, &ot, 1);
+    CHECK(s.view[0].water.amp == Q2_SCREEN_WATER_AMP_MAX,
+          "the ramp should clamp at %d, got %d",
+          Q2_SCREEN_WATER_AMP_MAX, s.view[0].water.amp);
+
+    /* Full amplitude is a 3 x 1 inset. Both come from the same product divided
+     * by 1024 and 2048, which is why the picture slides twice as far sideways. */
+    CHECK(s.view[0].shake_x == 3 && s.view[0].shake_y == 1,
+          "shake at full amplitude is (3,1), got (%d,%d)",
+          s.view[0].shake_x, s.view[0].shake_y);
+
+    /* Surfacing fades out at the same rate and then resets the wave, so going
+     * back under starts from the same phase rather than wherever it stopped. */
+    q2_screen_water_set(&s, 0, true, false);
+    for (i = 0; i < 20; i++)
+        water_frame(&s, &ot, 1);
+    CHECK(s.view[0].water.amp == 0, "surfacing should fade to 0, got %d",
+          s.view[0].water.amp);
+    CHECK(s.view[0].shake_x == 0 && s.view[0].shake_y == 0,
+          "a dry viewport must not be inset");
+    CHECK(s.view[0].water.phase_row == 0 && s.view[0].water.phase_col == 0,
+          "reaching zero resets both phases");
+
+    psx_ot_free(&ot);
+    q2_screen_free(&s);
+}
+
+static void test_water_amplitudes(void)
+{
+    s32 h, v;
+
+    q2_screen_water_amplitudes(Q2_SCREEN_WATER_AMP_MAX, &h, &v);
+    CHECK(h == 16380 && v == 8190, "amplitudes at full: %d/%d", (int)h, (int)v);
+
+    /* The shake is the amplitude over 4096, which is also the largest the
+     * cosine term can be — the relationship the next test depends on. */
+    CHECK(h / 4096 == 3 && v / 4096 == 1, "shake from amplitude");
+
+    q2_screen_water_amplitudes(0, &h, &v);
+    CHECK(h == 0 && v == 0, "a still viewport has no amplitude");
+}
+
+static void test_water_strips(void)
+{
+    q2_screen s;
+    psx_ot ot;
+    u32 b, moves = 0, tints = 0;
+    s32 idx;
+    int i;
+    bool escaped = false, tint_first = false;
+    const q2_screen_view *v;
+
+    q2_screen_init(&s, Q2_VIDEO_PAL);
+    q2_screen_set_layout(&s, Q2_SCREEN_LAYOUT_ONE, 1);
+    psx_ot_init(&ot, Q2_SCREEN_OT_ENTRIES, 512);
+    s.dt = Q2_SCREEN_DT_NOMINAL;
+    v = &s.view[0];
+
+    q2_screen_water_set(&s, 0, true, true);
+    for (i = 0; i < 20; i++)
+        water_frame(&s, &ot, 1);
+
+    b = (u32)Q2_SCREEN_OT_VIEW_BASE + Q2_SCREEN_OT_VIEW_WATER;
+
+    for (idx = ot.bucket_head[b]; idx >= 0; idx = ot.next[idx]) {
+        const psx_prim *p = &ot.prims[idx];
+
+        if (p->kind == PSX_PRIM_TILE) {
+            tints++;
+            /* The tile is added last and a bucket is walked most-recently-first,
+             * so it must be the head — the strips displace a picture that has
+             * already been tinted. */
+            tint_first = (idx == ot.bucket_head[b]);
+            CHECK(p->rgb[0].r == Q2_SCREEN_WATER_TINT_R &&
+                  p->rgb[0].g == Q2_SCREEN_WATER_TINT_G &&
+                  p->rgb[0].b == Q2_SCREEN_WATER_TINT_B,
+                  "tint at full amplitude is (%d,%d,%d), got (%d,%d,%d)",
+                  Q2_SCREEN_WATER_TINT_R, Q2_SCREEN_WATER_TINT_G,
+                  Q2_SCREEN_WATER_TINT_B,
+                  p->rgb[0].r, p->rgb[0].g, p->rgb[0].b);
+            CHECK(p->semi_transparent, "the tint is semi-transparent");
+            continue;
+        }
+
+        CHECK(p->kind == PSX_PRIM_MOVE, "bucket %u holds kind %d", b, (int)p->kind);
+        moves++;
+
+        /* THE PROPERTY. Both rectangles have to sit inside the viewport, or the
+         * wobble drags a neighbouring viewport's pixels into this one. */
+        if (p->xy[PSX_MOVE_SRC].x < v->x ||
+            p->xy[PSX_MOVE_SRC].y < v->y ||
+            p->xy[PSX_MOVE_SRC].x + p->xy[PSX_MOVE_SIZE].x > v->x + v->w ||
+            p->xy[PSX_MOVE_SRC].y + p->xy[PSX_MOVE_SIZE].y > v->y + v->h ||
+            p->xy[PSX_MOVE_DST].x < v->x ||
+            p->xy[PSX_MOVE_DST].y < v->y ||
+            p->xy[PSX_MOVE_DST].x + p->xy[PSX_MOVE_SIZE].x > v->x + v->w ||
+            p->xy[PSX_MOVE_DST].y + p->xy[PSX_MOVE_SIZE].y > v->y + v->h)
+            escaped = true;
+    }
+
+    CHECK(moves > 0, "a submerged viewport should wobble");
+    CHECK(tints == 1, "exactly one tint, got %u", tints);
+    CHECK(tint_first, "the tint must draw before the strips displace it");
+    CHECK(!escaped, "a strip copy reached outside its own viewport");
+
+    /* The pool is a hard per-frame cap, not a per-viewport one. */
+    CHECK(s.water_moves_used <= s.water_moves,
+          "%u copies out of a pool of %u", s.water_moves_used, s.water_moves);
+
+    psx_ot_free(&ot);
+    q2_screen_free(&s);
+}
+
+/*
+ * The pool is shared, and running out stops the wobble where it is rather than
+ * thinning it out — 0x800630EC jumps past both passes to the tint. So a split
+ * screen with every viewport submerged draws a complete wobble in the first
+ * viewports and none in the last, which is what the console does.
+ */
+static void test_water_pool(void)
+{
+    q2_screen s;
+    psx_ot ot;
+    int p, i;
+    u32 with_moves = 0;
+
+    q2_screen_init(&s, Q2_VIDEO_PAL);
+    q2_screen_set_layout(&s, Q2_SCREEN_LAYOUT_QUAD, 4);
+    psx_ot_init(&ot, Q2_SCREEN_OT_ENTRIES, 512);
+    s.dt = Q2_SCREEN_DT_NOMINAL;
+
+    for (p = 0; p < 4; p++)
+        q2_screen_water_set(&s, p, true, true);
+    for (i = 0; i < 20; i++)
+        water_frame(&s, &ot, 4);
+
+    CHECK(s.water_moves_used <= s.water_moves,
+          "four submerged viewports spent %u of %u", s.water_moves_used,
+          s.water_moves);
+
+    for (p = 0; p < 4; p++) {
+        u32 b = (u32)Q2_SCREEN_OT_VIEW_BASE
+              + (u32)p * Q2_SCREEN_OT_VIEW_STRIDE + Q2_SCREEN_OT_VIEW_WATER;
+        s32 idx;
+        bool any = false;
+
+        for (idx = ot.bucket_head[b]; idx >= 0; idx = ot.next[idx])
+            if (ot.prims[idx].kind == PSX_PRIM_MOVE)
+                any = true;
+        if (any)
+            with_moves++;
+
+        /* Every viewport gets its tint even when the pool ran dry, because the
+         * overrun branch lands on the tint rather than on the return. */
+        CHECK(ot.bucket_head[b] >= 0 &&
+              ot.prims[ot.bucket_head[b]].kind == PSX_PRIM_TILE,
+              "viewport %d lost its tint to the pool", p);
+    }
+    CHECK(with_moves >= 1 && with_moves <= 4,
+          "%u of four viewports wobbled", with_moves);
+
+    psx_ot_free(&ot);
+    q2_screen_free(&s);
+}
+
+/*
+ * End to end, through the rasteriser: a viewport painted in horizontal bands,
+ * composed once dry and once submerged. Submerged, the bands must actually
+ * move — that is the MOVE primitive doing its job — and nothing outside the
+ * viewport may change, which is what the clip-free blit has to get right on its
+ * own since no draw env constrains it.
+ */
+static void test_water_compose(void)
+{
+    q2_screen s;
+    psx_ot ot;
+    psx_raster_opts opts;
+    u16 *dry, *wet;
+    const psx_framebuffer *fb;
+    int x, y, i, moved = 0, outside = 0;
+    size_t bytes;
+
+    q2_screen_init(&s, Q2_VIDEO_PAL);
+    q2_screen_set_layout(&s, Q2_SCREEN_LAYOUT_TWO_V, 2);
+    psx_ot_init(&ot, Q2_SCREEN_OT_ENTRIES, 512);
+    psx_raster_opts_default(&opts);
+    opts.textures = false;
+    opts.dither   = false;
+    s.dt = Q2_SCREEN_DT_NOMINAL;
+
+    bytes = (size_t)s.buf[0].width * (size_t)s.buf[0].height * sizeof(u16);
+    dry = (u16 *)malloc(bytes);
+    wet = (u16 *)malloc(bytes);
+    if (!dry || !wet) {
+        CHECK(false, "out of memory");
+        free(dry); free(wet);
+        psx_ot_free(&ot);
+        q2_screen_free(&s);
+        return;
+    }
+
+    /* Two passes with the same content: one dry, one at full amplitude. The
+     * amplitude is ramped first so both composes see the same geometry. */
+    for (i = 0; i < 2; i++) {
+        int pass;
+
+        if (i == 1) {
+            q2_screen_water_set(&s, 0, true, true);
+            for (pass = 0; pass < 20; pass++)
+                water_frame(&s, &ot, 1);
+        }
+
+        q2_screen_frame_begin(&s, &ot);
+        psx_fb_clear(q2_screen_back(&s), 0);
+        q2_screen_view_begin(&s, 0, &ot, NULL);
+        {
+            /* Bands three pixels tall, so a one-pixel vertical displacement is
+             * visible without being ambiguous. */
+            int band;
+            for (band = 0; band * 3 < s.view[0].h; band++) {
+                psx_prim *p = psx_ot_add_bucket(&ot, q2_screen_view_otz(&s, 0, 0));
+                if (!p)
+                    break;
+                p->kind = PSX_PRIM_TILE;
+                p->xy[0].x = 0;
+                p->xy[0].y = (s16)(band * 3);
+                p->xy[2].x = s.view[0].w;
+                p->xy[2].y = (s16)(band * 3 + 1);
+                p->rgb[0].r = p->rgb[0].g = p->rgb[0].b = 255;
+            }
+        }
+        q2_screen_view_end(&s, &ot);
+        q2_screen_compose(&s, &ot, NULL, &opts);
+        q2_screen_present(&s);
+        fb = q2_screen_front(&s);
+        memcpy(i == 0 ? dry : wet, fb->px, bytes);
+    }
+
+    for (y = 0; y < s.buf[0].height; y++) {
+        for (x = 0; x < s.buf[0].width; x++) {
+            size_t o = (size_t)y * (size_t)s.buf[0].width + (size_t)x;
+            bool inside = (x >= s.view[0].x && x < s.view[0].x + s.view[0].w &&
+                           y >= s.view[0].y && y < s.view[0].y + s.view[0].h);
+
+            if (dry[o] == wet[o])
+                continue;
+            if (inside)
+                moved++;
+            else
+                outside++;
+        }
+    }
+
+    CHECK(moved > 0, "submerging changed nothing on screen");
+    CHECK(outside == 0,
+          "%d pixels changed outside the submerged viewport", outside);
+
+    free(dry);
+    free(wet);
+    psx_ot_free(&ot);
+    q2_screen_free(&s);
+}
+
+/* ------------------------------------------------------------------------- */
 static void test_dt_clamp(void)
 {
     q2_screen s;
 
     q2_screen_init(&s, Q2_VIDEO_PAL);
 
-    /* One VSync(2) field pair at 50 Hz is 12 units of 1/300 s. */
-    CHECK(q2_screen_tick_dt(&s, 2.0 / 50.0) == Q2_SCREEN_DT_NOMINAL,
+    /* One VSync(2) field pair at 50 Hz is 12 units of 1/300 s — and the period
+     * that produces it is the frame lock itself. */
+    CHECK(q2_screen_frame_period(&s) > 0.0399 &&
+          q2_screen_frame_period(&s) < 0.0401,
+          "the frame lock is two 50 Hz fields, got %f",
+          q2_screen_frame_period(&s));
+    CHECK(q2_screen_tick_dt(&s, q2_screen_frame_period(&s)) == Q2_SCREEN_DT_NOMINAL,
           "a nominal frame should be %d", Q2_SCREEN_DT_NOMINAL);
 
     /* 0x800184B8 clamps rather than averages, so a stalled frame is lost time
@@ -461,6 +1193,198 @@ static void test_dt_clamp(void)
           "a one-second frame should clamp to %d", Q2_SCREEN_DT_MAX);
     CHECK(q2_screen_tick_dt(&s, 30.0 / 300.0) == 30, "exactly 30 is not clamped");
     CHECK(q2_screen_tick_dt(&s, 0.0) == 1, "a zero frame still advances");
+
+    q2_screen_free(&s);
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * The pixel's shape, and the field of view that follows from it.
+ *
+ * None of this is a constant read off a disc — it is what a television does
+ * with a 512-wide PAL frame — so `q2psx-inspect screen` cannot check it and
+ * this is the only place it is pinned. What matters is that it is EXACT: 2:3
+ * with no rounding, because the ratio is 4*256 : 3*512.
+ */
+static void test_pixel_aspect(void)
+{
+    q2_screen s;
+    int n = 0, d = 0, w = 0, h = 0;
+
+    printf("pixel aspect\n");
+
+    CHECK(q2_screen_init(&s, Q2_VIDEO_PAL) == Q2_OK, "init failed");
+
+    q2_screen_pixel_aspect(&s, &n, &d);
+    CHECK(n == 2 && d == 3, "PAL 512-wide pixel is %d:%d, expected 2:3", n, d);
+
+    /* The picture, at one buffer pixel across per unit of scale. 512 columns
+     * against 512*3/2 = 768... no: the HEIGHT grows, 248 -> 372. */
+    q2_screen_window_size(&s, Q2_SCREEN_FIT_TELEVISION, 1, &w, &h);
+    CHECK(w == 512 && h == 372, "picture %dx%d, expected 512x372", w, h);
+
+    q2_screen_window_size(&s, Q2_SCREEN_FIT_TELEVISION, 3, &w, &h);
+    CHECK(w == 1536 && h == 1116, "3x picture %dx%d, expected 1536x1116", w, h);
+
+    /* SQUARE is the raw buffer, which is what the port used to present and is
+     * a 1.5x horizontal stretch of the above. */
+    q2_screen_window_size(&s, Q2_SCREEN_FIT_SQUARE, 1, &w, &h);
+    CHECK(w == 512 && h == 248, "square %dx%d, expected 512x248", w, h);
+
+    q2_screen_free(&s);
+}
+
+/*
+ * Fitting the picture into a window of any shape. The property that has to hold
+ * for every one of them is the same: the result is inside the window, centred,
+ * and the right aspect.
+ */
+static void test_fit_rect(void)
+{
+    static const struct { int w, h; } windows[] = {
+        { 1920, 1080 },   /* 16:9   — pillarboxed          */
+        { 1920, 1200 },   /* 16:10                          */
+        { 2560, 1080 },   /* 21:9                           */
+        { 1024,  768 },   /* 4:3    — very nearly exact     */
+        {  600, 1200 },   /* portrait — letterboxed         */
+        { 1536, 1116 },   /* the default window — exact fit */
+        {    1,    1 },   /* degenerate                     */
+        {    0,    0 }    /* and a caller that passed junk  */
+    };
+    q2_screen s;
+    size_t i;
+
+    printf("fit rect\n");
+
+    CHECK(q2_screen_init(&s, Q2_VIDEO_PAL) == Q2_OK, "init failed");
+
+    for (i = 0; i < sizeof(windows) / sizeof(windows[0]); i++) {
+        int ww = windows[i].w, wh = windows[i].h;
+        int x = -1, y = -1, w = -1, h = -1;
+        int cw = ww < 1 ? 1 : ww, ch = wh < 1 ? 1 : wh;
+
+        q2_screen_fit_rect(&s, Q2_SCREEN_FIT_TELEVISION, ww, wh,
+                           &x, &y, &w, &h);
+
+        CHECK(w >= 1 && h >= 1, "%dx%d gave a %dx%d picture", ww, wh, w, h);
+        CHECK(x >= 0 && y >= 0 && x + w <= cw && y + h <= ch,
+              "%dx%d: picture (%d,%d %dx%d) escapes the window",
+              ww, wh, x, y, w, h);
+        CHECK(x <= (cw - w + 1) / 2 && y <= (ch - h + 1) / 2,
+              "%dx%d: picture is not centred (%d,%d)", ww, wh, x, y);
+
+        /* The aspect, to within the pixel the integer fit has to give up. */
+        if (w > 8 && h > 8) {
+            double want = 512.0 * 2.0 / (248.0 * 3.0);
+            double got  = (double)w / (double)h;
+            CHECK(got > want * 0.99 && got < want * 1.01,
+                  "%dx%d: picture %dx%d is %.4f:1, wanted %.4f:1",
+                  ww, wh, w, h, got, want);
+        }
+    }
+
+    /* The exact-fit window loses nothing at all. */
+    {
+        int x = -1, y = -1, w = -1, h = -1;
+        q2_screen_fit_rect(&s, Q2_SCREEN_FIT_TELEVISION, 1536, 1116,
+                           &x, &y, &w, &h);
+        CHECK(x == 0 && y == 0 && w == 1536 && h == 1116,
+              "the default window should fit exactly, got (%d,%d %dx%d)",
+              x, y, w, h);
+    }
+
+    /* STRETCH is the one that is allowed to be any shape: it IS the window. */
+    {
+        int x = -1, y = -1, w = -1, h = -1;
+        q2_screen_fit_rect(&s, Q2_SCREEN_FIT_STRETCH, 1920, 1080,
+                           &x, &y, &w, &h);
+        CHECK(x == 0 && y == 0 && w == 1920 && h == 1080,
+              "stretch should fill, got (%d,%d %dx%d)", x, y, w, h);
+    }
+
+    q2_screen_free(&s);
+}
+
+/*
+ * The field of view every layout describes, and the one property that is shared
+ * by all five: the picture is squeezed by exactly 1.5.
+ *
+ * That is not a coincidence to be explained away — it is arithmetic. The
+ * squeeze is `(w/2 / proj) / (h/2 / proj)` over `w*2 / (h*3)`, i.e. 3/2 for any
+ * viewport whose geometry offset is its own middle. So this is really a check
+ * that every layout DOES centre its offset, which is the thing a mistranscribed
+ * `SetGeomOffset` argument would break, and that the halving toward zero has not
+ * been turned into a rounding somewhere.
+ */
+static void test_view_fov(void)
+{
+    static const struct {
+        q2_screen_layout layout;
+        int              players;
+        double           horizontal, vertical;
+    } want[] = {
+        { Q2_SCREEN_LAYOUT_ONE,         1, 116.0,  75.6 },
+        { Q2_SCREEN_LAYOUT_TWO_H,       2, 116.0,  41.7 },
+        { Q2_SCREEN_LAYOUT_TWO_V,       2,  71.9,  70.6 },
+        { Q2_SCREEN_LAYOUT_QUAD,        4,  77.3,  41.7 },
+        { Q2_SCREEN_LAYOUT_FULL_SINGLE, 1,  77.3,  42.4 }
+    };
+    q2_screen s;
+    size_t i;
+
+    printf("field of view\n");
+
+    CHECK(q2_screen_init(&s, Q2_VIDEO_PAL) == Q2_OK, "init failed");
+
+    for (i = 0; i < sizeof(want) / sizeof(want[0]); i++) {
+        q2_screen_fov fov;
+        const q2_screen_view *v;
+
+        q2_screen_set_layout(&s, want[i].layout, want[i].players);
+        v = &s.view[0];
+
+        CHECK(v->ofs_x == v->w / 2 && v->ofs_y == v->h / 2,
+              "%s: geometry offset (%d,%d) is not the viewport's middle of %dx%d",
+              q2_screen_layout_name(want[i].layout),
+              v->ofs_x, v->ofs_y, v->w, v->h);
+
+        q2_screen_view_fov(&s, v, &fov);
+
+        CHECK(fov.horizontal > want[i].horizontal - 0.1 &&
+              fov.horizontal < want[i].horizontal + 0.1,
+              "%s: horizontal fov %.1f, expected %.1f",
+              q2_screen_layout_name(want[i].layout),
+              fov.horizontal, want[i].horizontal);
+        CHECK(fov.vertical > want[i].vertical - 0.1 &&
+              fov.vertical < want[i].vertical + 0.1,
+              "%s: vertical fov %.1f, expected %.1f",
+              q2_screen_layout_name(want[i].layout),
+              fov.vertical, want[i].vertical);
+
+        /* Loose enough for the one-pixel halving of an odd viewport. */
+        CHECK(fov.squeeze > 1.48 && fov.squeeze < 1.52,
+              "%s: squeeze %.3f, expected 1.5",
+              q2_screen_layout_name(want[i].layout), fov.squeeze);
+    }
+
+    /* The overlay camera, which every layout installs and which is the HUD's. */
+    {
+        q2_screen_fov fov;
+        q2_screen_set_layout(&s, Q2_SCREEN_LAYOUT_ONE, 1);
+        q2_screen_view_fov(&s, &s.overlay, &fov);
+        CHECK(fov.horizontal > 77.2 && fov.horizontal < 77.4,
+              "overlay horizontal fov %.1f, expected 77.3", fov.horizontal);
+    }
+
+    /* A viewport with no projection distance is inert rather than a divide. */
+    {
+        q2_screen_view v;
+        q2_screen_fov fov;
+        memset(&v, 0, sizeof(v));
+        q2_screen_view_fov(&s, &v, &fov);
+        CHECK(fov.horizontal == 0.0 && fov.squeeze == 0.0,
+              "an empty viewport should report nothing");
+    }
 
     q2_screen_free(&s);
 }
@@ -476,7 +1400,22 @@ int main(void)
     test_compose_clip();
     test_background();
     test_shake();
+    test_depth_direction();
+    test_flash();
+    test_build();
+    test_context();
+    test_display_envs();
+    test_meter();
+    test_blend_table();
+    test_water_ramp();
+    test_water_amplitudes();
+    test_water_strips();
+    test_water_pool();
+    test_water_compose();
     test_dt_clamp();
+    test_pixel_aspect();
+    test_fit_rect();
+    test_view_fov();
 
     if (g_fail == 0)
         printf("test_screen: all checks passed\n");

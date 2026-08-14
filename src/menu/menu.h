@@ -30,6 +30,7 @@
 #ifndef Q2PSX_MENU_H
 #define Q2PSX_MENU_H
 
+#include "gamevars.h"
 #include "q2psx.h"
 
 /* The console's framebuffer, and so the coordinate space every item x/y in the
@@ -125,12 +126,10 @@ void q2_menu_reset_variables(q2_menu_settings *s);
  * What the game variables actually do, from 0x8001C698. The engine turns the
  * sliders into physics scalars and the toggles into a cheat mask; a port that
  * stores the settings without applying them has not implemented the page.
+ *
+ * The mask itself is in gamevars.h because the game layer reads it — the item
+ * dispatch changes how much ammo a weapon grants when INFINITE AMMO is on.
  */
-#define Q2_CHEAT_INFINITE_AMMO   0x01u  /* 0x8001C724                         */
-#define Q2_CHEAT_ALL_WEAPONS     0x20u  /* 0x8001C74C                         */
-#define Q2_CHEAT_NO_FALL_DAMAGE  0x40u  /* 0x8001C704, set when FALLING
-                                         * DAMAGE is *off*                    */
-#define Q2_CHEAT_ONE_SHOT_KILL   0x80u  /* 0x8001C774                         */
 
 typedef struct q2_menu_rules {
     s32 gravity;    /* (GRAVITY + 64) >> 2 — 32 when the variables are off   */

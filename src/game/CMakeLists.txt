@@ -1,37 +1,74 @@
 add_library(q2psx_game STATIC
     ai.c
     ai.h
+    aimove.c
+    aimove.h
+    aiworld.c
+    aiworld.h
+    effect.c
+    effect.h
     events_rt.c
     events_rt.h
+    flare.c
+    flare.h
     hud.c
     hud.h
     aimodule.c
     aimodule.h
     combat.c
     combat.h
+    creature.c
+    creature.h
+    crebind.c
+    crebind.h
+    cre_actions.c
+    cre_soldier.c
+    cre_generic.c
+    entity.c
+    entity.h
+    entitydraw.c
+    entitydraw.h
     inventory.c
     inventory.h
+    item.c
+    item.h
+    lighting.c
+    lighting.h
     monster.c
     monster.h
     modeldraw.c
     modeldraw.h
+    briefing.c
+    briefing.h
+    mission.c
+    mission.h
     mover.c
     mover.h
-    pickup.c
-    pickup.h
+    rotator.c
+    rotator.h
+    multiplayer.c
+    multiplayer.h
     projectile.c
     projectile.h
     weapon.c
     weapon.h
+    statusbar.c
+    statusbar.h
     spawn.c
     spawn.h
     save.c
     save.h
+    saveui.c
+    saveui.h
+    pad.c
+    pad.h
     sim.c
     sim.h
     simcombat.c
     trace.c
     trace.h
+    viewweapon.c
+    viewweapon.h
     world.c
     world.h
 )
@@ -42,5 +79,6 @@ target_link_libraries(q2psx_game PUBLIC
     q2psx_build
     q2psx_disc
     q2psx_formats
+    q2psx_menu
     q2psx_psx
 )

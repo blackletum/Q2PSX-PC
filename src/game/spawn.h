@@ -23,15 +23,26 @@
  * ---------------------------------------------------------------------------
  * What a spawned creature can and cannot do
  * ---------------------------------------------------------------------------
- * It exists, occupies a position, faces a direction, has health, and can be
- * shot and killed. It does not yet ACT, because acting means running the
- * per-frame think functions that live as MIPS code inside the module, and a
- * native port has to reimplement those creature by creature.
+ * It exists, occupies a position, faces a direction, has health, can be shot
+ * and killed — and it now runs the engine's AI: it notices the player, turns,
+ * chases through the level, remembers where it last saw you and hunts down
+ * your trail. All of that is engine code and is reconstructed in `ai.[ch]`.
  *
- * That is a real and visible halfway state, not a hidden one: monsters stand
- * still. Which is why q2_spawn_stats reports how many were placed and how many
- * had no module — the difference between "no monsters here" and "monsters we
- * could not resolve" is worth being able to see.
+ * Its ANIMATIONS come from its own module: `creature.[ch]` follows the
+ * module's code to its moves and frames and `crebind.[ch]` hands them to the
+ * frame driver, so a creature plays the right walk cycle and the right death
+ * without any of it being transcribed.
+ *
+ * What is still per-creature code is the body of each think function — the
+ * shot, the sound, the claw. The Soldier's are written; the other six modules
+ * run on the generic implementation, which animates and chases correctly and
+ * performs no per-frame action. So a Tank Commander will hunt you down and
+ * swing at you without ever firing, which is a visible partial rather than a
+ * hidden one.
+ *
+ * q2_spawn_stats reports how many were placed and how many had no module,
+ * because the difference between "no monsters here" and "monsters we could
+ * not resolve" is worth being able to see.
  */
 #ifndef Q2PSX_SPAWN_H
 #define Q2PSX_SPAWN_H
@@ -77,5 +88,27 @@ void q2_monster_set_register(q2_monster_set *set, u32 class_id);
  */
 q2_result q2_spawn_from_population(q2_monster_set *out, const q2_population *pop,
                                    q2_spawn_stats *stats);
+
+/*
+ * Wake every placed creature: monster_start_go on each, which points its think
+ * at the frame driver and schedules it for the next tick.
+ *
+ * `player` becomes the level's sight client — the entity FindTarget falls back
+ * on when no second-hand alert is pending — and may be NULL, in which case
+ * nothing will ever be acquired.
+ */
+void q2_monster_set_wake(q2_monster_set *set, q2_monster *player);
+
+/*
+ * Advance the AI clock by one tick and run every creature whose think is due.
+ *
+ * This is the engine's own loop shape: the clock moves, then each entity with
+ * `think` set and `next_think` reached is called once. A think that reschedules
+ * itself for the same tick is NOT run again, which is what stops a creature
+ * whose animation ends on its own first frame from spinning.
+ *
+ * Returns how many creatures thought.
+ */
+u32 q2_monster_set_tick(q2_monster_set *set);
 
 #endif /* Q2PSX_SPAWN_H */

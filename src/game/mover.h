@@ -3,12 +3,27 @@
  *
  * MOVER_A, MOVER_B and MOVER_C are not three motions. They are ONE motion —
  * an axis-aligned translation of a group of Scene nodes — with three
- * parameterisations. There is no rotation anywhere in the engine: no matrix, no
- * angle field, and no GTE call in the integrator.
+ * parameterisations. This integrator contains no rotation: no matrix, no angle
+ * field, and no GTE call.
  *
  *     MOVER_A  1,006 uses. Vertical, axis hard-wired to Y. Lifts and most doors.
  *     MOVER_B     20 uses. Horizontal, axis taken from the payload.
  *     MOVER_C    292 uses. Double door: two leaves moving opposite ways.
+ *
+ * CORRECTION — that is true of these three and NOT of the engine.
+ *
+ * This file used to say "there is no rotation anywhere in the engine". The zone
+ * draw refutes it: at 0x800678B4 it calls `RotMatrix` on three s16 Euler angles
+ * at the node's runtime object +0x0C, and then adds TWO independent s16 triples,
+ * +0x12 and +0x18, to the node's camera-space position. So a node carries a full
+ * rotation and two translations, and `ROTHATCH`, `SIMROT`, `SIMROT2` and
+ * `ROTBUTTON` — which userfuncs.c has always listed as rotating movers — drive
+ * the rotation slots of the same object this module writes the translation of.
+ *
+ * What is implemented here is the linear family and its +0x12 triple. The
+ * rotation slots and the second triple are decoded (see surface.h, which maps
+ * the whole object binding out of Scene.flags08 bits 0-9) but no integrator
+ * fills them yet, so rotating brush geometry stands still rather than turning.
  *
  * ---------------------------------------------------------------------------
  * Why this port does not reproduce the load-time pre-pass

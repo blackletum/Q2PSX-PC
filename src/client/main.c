@@ -8,6 +8,14 @@
  * part of looking right, because the dither pattern and the vertex snapping are
  * both defined in terms of real pixels.
  *
+ * Upscaled, NOT stretched to fill. A framebuffer pixel is two thirds as wide as
+ * it is tall on a PAL television — every one of the GPU's horizontal modes spans
+ * the same active line, so 512 columns are narrow columns, not a wider picture —
+ * and putting the buffer on a window one-for-one is a 1.5x horizontal stretch
+ * that makes a correctly reconstructed field of view read as a wrong one. The
+ * shape is q2_screen_fit_rect's, the window may be any size or aspect, and V
+ * cycles the choice. See the pixel-aspect section of src/screen/screen.h.
+ *
  * The frame is put together the way the console puts one together: swap, one
  * background clear, then each viewport into its own slice of a single 217-entry
  * ordering table, then one walk of that table with the draw-env packets in it
@@ -25,7 +33,22 @@
  *   F4           toggle simulated movement vs free-fly camera
  *   F5           cycle the console's viewport layouts (one, the two splits,
  *                the 2x2, and the boot screen's single-buffered full screen)
- *   space/ctrl   jump / crouch (simulated movement only)
+ *   F6           show the GlintMod glint (BIGGUN only; off by default because
+ *                nothing the engine does turns one on — see effect.h)
+ *   F7 / F8      the memory-card front end, saving and loading
+ *   F9 / F10     quick save and quick load, slot 1
+ *   F11          screenshot, of the 512x248 framebuffer rather than the window
+ *   V            cycle how the picture is shaped: the console's own pixel, the
+ *                raw buffer, a forced 4:3, or filling the window
+ *   space        jump — and, held, swim up. One key because it is one BUTTON:
+ *                the pad's tail writes bit 22 from its press edge and bit 21
+ *                from it being held (pad.h)
+ *   up/down      look — and holding BOTH is the console's own view recentre,
+ *                which is a chord rather than a setting (0x8003A780)
+ *   ctrl / c     hold a crouch. The one key here that is NOT the console's:
+ *                crouching is authored per map as a trigger volume, and this
+ *                asserts the same flag such a volume would (worldscale.h). The
+ *                map's own crouch volumes work without it
  *   Esc          the pause menu — and QUIT GAME inside it leaves
  *
  * In the menu the keyboard stands in for the pad, because the menu engine is
@@ -34,6 +57,12 @@
  *
  *   arrows       d-pad          Enter / Space   cross   (select)
  *   Esc          triangle       Backspace       triangle (back)
+ *
+ * The two save keys are the port's, and the reason they exist is that the
+ * console's own route to SAVE? is not reachable here: on the disc that prompt
+ * is reached from the front end and at a level boundary, neither of which this
+ * client has. Everything BEHIND the prompt is the console's — the screens, the
+ * four rows, the release rule and the state machine (memcard.h, saveui.h).
  */
 #include <SDL3/SDL.h>
 
@@ -43,14 +72,32 @@
 
 #include "disc.h"
 #include "entity.h"
+#include "entitydraw.h"
+#include "fxtables.h"
+#include "hudtables.h"
 #include "ident.h"
+#include "itemtable.h"
 #include "menu.h"
 #include "menudraw.h"
+#include "memcard.h"
+#include "menufont.h"
+#include "briefing.h"
+#include "leveltext.h"
+#include "mission.h"
+#include "panel.h"
+#include "prompt.h"
 #include "q2psx.h"
 #include "raster.h"
+#include "save.h"
+#include "saveui.h"
 #include "screen.h"
+#include "pad.h"
 #include "sim.h"
+#include "statusbar.h"
 #include "trig.h"
+#include "vag.h"
+#include "viewweapon.h"
+#include "vmtables.h"
 #include "vram.h"
 #include "world.h"
 #include "xa.h"
@@ -75,11 +122,119 @@ typedef struct client {
     q2_sim           sim;
     bool             sim_enabled;
 
+    /* World render state. It lives here rather than in the draw because the
+     * texture-page table's ABR promotions must persist across frames — see
+     * q2_world_render. */
+    q2_world_render  render;
+
     /* The pause menu, and the settings it edits. The settings outlive a zone
-     * load; the menu does not own them. */
+     * load; the menu does not own them.
+     *
+     * The FONT does not outlive one: its two atlases are VRAM images inside the
+     * map's own SNDVRAM.DAT (menufont.h), so it is uploaded per zone load
+     * alongside the texture pages, exactly as the console's image registration
+     * runs per level. */
     q2_menu_settings settings;
     q2_menu          menu;
-    q2_menu_style    menu_style;
+    q2_menu_font     menu_font;
+    bool             menu_font_ready;
+    q2_hud_tables    hud_tables;
+    bool             hud_tables_ready;
+
+    /* The HUD's own font — the same atlas, reached through the overlay's
+     * markup layer rather than the menu's glyph path — and the level-completion
+     * screen that draws through it. */
+    q2_hud_font      hud_font;
+    bool             hud_font_ready;
+    q2_mission       mission;
+    bool             mission_open;
+
+    /* The briefing screen, and the two pieces of UI chrome it shares with the
+     * mission screen and the memory-card questions. */
+    q2_briefing      briefing;
+    bool             briefing_open;
+    q2_prompt_bar    prompts;
+
+    /*
+     * The overlay itself: the notification ring, the centre line, the crosshair
+     * and the damage flash. It was reconstructed before anything called it —
+     * this is the call, and it is now fed the player's real condition every
+     * tick, so the flash reacts to damage the way the console's does.
+     */
+    q2_hud           hud;
+    bool             hud_ready;
+
+    /* The map's own sound bank, for the menu's five effects. Per zone load, as
+     * the bank is per map. */
+    q2_sound_bank    sfx;
+    bool             sfx_ready;
+
+    /*
+     * The status bar — the thing this project once proved did not exist. It is
+     * drawn per viewport by the same hook that draws that viewport's world
+     * (statusbar.h), so it is fed and emitted inside client_draw_view.
+     */
+    q2_icon_tables   icons;
+    bool             icons_ready;
+    q2_statusbar     sbar;
+
+    /*
+     * The memory-card front end. Its screens and its release-gated state
+     * machine are the console's (memcard.h); the card operations behind them
+     * are `libmcrd` talking to hardware this port does not have, so what sits
+     * behind the three function pointers here is the port's own file-backed
+     * save system (saveui.h) rather than a stub.
+     *
+     * `card_menu` is a second menu instance that exists only to NAVIGATE and
+     * DRAW one of those screens. The screens are ordinary 24-byte item tables,
+     * so the menu engine already knows how to walk them — running them through
+     * it is what gives the front end the same cursor rules, the same selection
+     * bar and the same font as every other page, instead of a second
+     * implementation that would drift.
+     */
+    q2_mcard         mcard;
+    q2_mcard_host    mcard_host;
+    bool             mcard_open;
+    q2_save_ui       save_ui;
+    q2_save_ui_mode  card_mode;
+    q2_menu          card_menu;
+    q2_mcard_screen  card_screen;
+
+    /* What a save writes. Held here rather than built inside the front end
+     * because q2_save_ui borrows it and the capture needs the whole client —
+     * the sim, the mission tallies and the menu settings. */
+    q2_save          snapshot;
+
+    /*
+     * The item table — 64 records, the 55-slot touch dispatch and the eleven
+     * sound names — out of the same executable as everything else here. Per
+     * disc rather than per map, and handed to the spawner so the items standing
+     * in the level come from the disc's own table rather than from the
+     * transcription of it.
+     */
+    q2_item_table    item_table;
+    bool             item_table_ready;
+
+    q2_fx_tables     fx_tables;
+    bool             fx_tables_ready;
+    /*
+     * The weapon in the player's hands. The bank is per disc — the animation
+     * clips live in the executable, not on a map — while the model itself comes
+     * out of whichever map is loaded, so the two are bound at different times.
+     */
+    q2_vm_tables     vm_tables;
+    bool             vm_ready;
+    q2_viewweapon    vw;
+    q2_model_bank    model_bank;
+    bool             model_bank_ready;
+    q2_model         vw_model;
+    bool             vw_model_ready;
+    int              vw_last_weapon;
+
+    /* The map's CLUT split. A model face's palette index is offset by it —
+     * model palettes live in the second section of the array (model.h §233). */
+    u32              clut4_count_a;
+
     psx_ot           ot;
     gte_state        gte;
     q2_screen        screen;
@@ -91,8 +246,24 @@ typedef struct client {
     SDL_Texture     *texture;
 
     int              width, height;
+
+    /*
+     * How the 512x248 buffer is fitted into the window. The console's pixels are
+     * two thirds as wide as they are tall (screen.h), so the default is not the
+     * one-buffer-pixel-to-one-window-pixel a framebuffer dump suggests — that is
+     * a 1.5x horizontal stretch. F7 cycles it.
+     */
+    q2_screen_fit    fit;
+
+    bool             show_glint;
+    bool             force_underwater;   /* F3 — stands in for a water volume */
     bool             running;
 } client;
+
+static void client_bind_view_model(client *c);
+
+/* Defined with the rest of the sound path, and called from the tick. */
+static void client_entity_events(client *c);
 
 /* ------------------------------------------------------------------------- */
 static bool client_load_zone(client *c, const char *map, int index)
@@ -152,6 +323,52 @@ static bool client_load_zone(client *c, const char *map, int index)
                  * and take ownership of this one. */
                 q2_common_close(&c->common);
                 c->common = common;
+
+                /*
+                 * The briefing's three fields, out of the map's own `Strings`
+                 * chunk (leveltext.h). `MapTitle` is the location; the orders
+                 * and the objective are keyed by unit number, which the game
+                 * knows and the port does not yet — so the first key that
+                 * resolves is taken, which for a single-unit map is the right
+                 * one and for a shared directory is the lowest unit present.
+                 */
+                {
+                    q2_leveltext tx;
+
+                    q2_briefing_init(&c->briefing);
+                    if (q2_leveltext_open(&tx, &c->common) == Q2_OK) {
+                        char key[Q2_LEVELTEXT_NAME_LEN + 1];
+                        const char *s2;
+                        int unit, step;
+
+                        s2 = q2_leveltext_find(&tx, "MapTitle");
+                        if (s2)
+                            q2_briefing_set_location(&c->briefing, s2);
+
+                        for (unit = 1; unit <= 9; unit++) {
+                            q2_leveltext_key_objective(key, unit);
+                            s2 = q2_leveltext_find(&tx, key);
+                            if (s2) {
+                                q2_briefing_set_objective(&c->briefing, s2);
+                                break;
+                            }
+                        }
+                        for (unit = 1; unit <= 9; unit++) {
+                            bool got = false;
+                            for (step = 0; step <= 15; step++) {
+                                q2_leveltext_key_orders(key, unit, step);
+                                s2 = q2_leveltext_find(&tx, key);
+                                if (s2) {
+                                    q2_briefing_set_orders(&c->briefing, s2);
+                                    got = true;
+                                    break;
+                                }
+                            }
+                            if (got)
+                                break;
+                        }
+                    }
+                }
             } else {
                 q2_buf_free(&buf);
             }
@@ -176,11 +393,50 @@ static bool client_load_zone(client *c, const char *map, int index)
             c->opts.textures = (q2_vram_upload(&vs, c->vram) == Q2_OK);
             Q2_INFO("textures: %u pages, %u palettes",
                     vs.texpage_count, vs.clut4_count);
+            c->clut4_count_a = vs.clut4_count_a;
+
+            /*
+             * The UI's own images, into the cells their registration slots
+             * name (0x8003FE20): `frontend.lbm` for the menu's 16- and
+             * 32-pixel faces, `chars.lbm` for the 8-pixel face and the HUD's
+             * atlas, and the icon sheet. Three maps carry no `frontend.lbm`
+             * and two no `chars.lbm`, so this is allowed to come back empty —
+             * the menu then has no letterforms and says so once.
+             */
+            c->menu_font_ready = false;
+            if (c->hud_tables_ready) {
+                q2_result fr = q2_menu_font_upload(&c->menu_font,
+                                                   &c->hud_tables, &vs,
+                                                   c->vram,
+                                                   c->menu.multiplayer, 1);
+                c->menu_font_ready = (fr == Q2_OK);
+                if (!c->menu_font_ready)
+                    Q2_WARN("%s carries no menu font", map);
+
+                /* The overlay's own view of the same atlas. It re-uploads
+                 * chars.lbm, which is harmless — the same halfwords to the
+                 * same place — and gives the markup layer its palettes. */
+                c->hud_font_ready =
+                    (q2_hud_font_upload(&c->hud_font, &c->hud_tables, &vs,
+                                        c->vram) == Q2_OK);
+            }
+
             q2_vram_free(&vs);
         } else {
             c->opts.textures = false;
+            c->menu_font_ready = false;
         }
     }
+
+    /* The same file's second section: the map's sound bank, which is where the
+     * menu's five effects live. */
+    if (c->sfx_ready) {
+        q2_sound_bank_free(&c->sfx);
+        c->sfx_ready = false;
+    }
+    c->sfx_ready = (q2_sound_bank_load(&c->sfx, c->disc, map) == Q2_OK);
+    if (c->sfx_ready)
+        Q2_INFO("sound bank: %u effects", c->sfx.count);
 
     /* q2_sim_init memsets the struct, so the previous zone's trigger bitmap and
      * event runtime have to be released first or they leak on every zone
@@ -193,6 +449,76 @@ static bool client_load_zone(client *c, const char *map, int index)
         feet[1] = c->cam.pos[1];
         feet[2] = c->cam.pos[2];
         q2_sim_attach_gameplay(&c->sim, &c->common);
+
+        /*
+         * The map's model bank, and the view weapon that draws out of it. The
+         * weapon starts already raised, which is what a level start does — the
+         * machine's own reset lands in RAISE at frame 0.
+         */
+        c->model_bank_ready =
+            (q2_model_bank_from_common(&c->model_bank, &c->common) == Q2_OK);
+
+        /*
+         * The things standing in the room when you arrive.
+         *
+         * Population's place records are the map's items, and until now the
+         * client was the one caller that never spawned them: the sim had the
+         * entity set, the thinks and the touch sweep, and the set was empty, so
+         * every level was a walk through an empty building.
+         *
+         * It goes AFTER the bank is opened because the bank is what resolves
+         * each item's model at spawn, which is where the engine resolves it
+         * (0x80058850) — an item whose model this map does not ship never
+         * spawns at all rather than being looked up mid-frame. And after
+         * q2_sim_attach_gameplay because a place list is per MAP, exactly as
+         * the triggers and the script are, and both come out of the same
+         * COMMON.DAT this call borrows.
+         *
+         * The player is registered by the attach and moved every tick, so the
+         * touch sweep works from the spawn below without anything here having
+         * to order the two.
+         *
+         * The zone goes in because Population is per MAP and a session is in
+         * one ZONE: without it a map's other four zones' items stand around in
+         * this one. What that can and cannot decide is q2_item_spawn_zone's.
+         */
+        {
+            q2_result ir = q2_sim_attach_items(
+                &c->sim, &c->common, index,
+                c->item_table_ready ? &c->item_table : NULL,
+                c->model_bank_ready ? &c->model_bank : NULL);
+
+            if (ir == Q2_OK)
+                Q2_INFO("items: %u placed", c->sim.entities.count);
+            else
+                Q2_WARN("%s places no items: %s", map, q2_result_str(ir));
+        }
+
+        if (c->vm_ready) {
+            q2_vw_init(&c->vw, &c->vm_tables, c->sim.combat.weapon_id);
+            c->vw_last_weapon = c->sim.combat.weapon_id;
+            client_bind_view_model(c);
+        }
+        /* The zone number seeds the effect generator, so re-entering a zone
+         * looks the same twice and two zones do not share a sequence. */
+        if (c->fx_tables_ready) {
+            q2_sim_attach_effects(&c->sim, &c->fx_tables,
+                                  0x51A5E5u + (u32)index);
+
+            /*
+             * The particle quads live on `chars.lbm`'s page, so the overlay's
+             * atlas is also the effect atlas. Without this they fall back to
+             * flat quads; with it they are the console's own textured ones.
+             */
+            if (c->hud_font_ready)
+                q2_fx_use_hud_atlas(&c->sim.fx, &c->hud_font);
+
+            /*
+             * The glint mesh is the map's own `GlintMod` chunk, and only BIGGUN
+             * has one. A map without it simply has no glint.
+             */
+            q2_sim_attach_glint(&c->sim, &c->common);
+        }
         q2_sim_spawn(&c->sim, feet, c->cam.yaw);
         c->sim.player.ground_y = feet[1];
     }
@@ -281,54 +607,168 @@ static void client_input_simulated(client *c, float dt)
 {
     const bool *keys = SDL_GetKeyboardState(NULL);
     q2_input in;
-    s32 eye[3];
-
-    memset(&in, 0, sizeof(in));
-
-    if (keys[SDL_SCANCODE_W]) in.forward =  1024;
-    if (keys[SDL_SCANCODE_S]) in.forward = -1024;
-    if (keys[SDL_SCANCODE_D]) in.strafe  =  1024;
-    if (keys[SDL_SCANCODE_A]) in.strafe  = -1024;
-
-    /* Turn rate is per second, so scale by the real frame time; the simulation
-     * consumes it as a per-tick delta. */
-    if (keys[SDL_SCANCODE_LEFT])  in.yaw_delta   -= (s32)(1500.0f * dt);
-    if (keys[SDL_SCANCODE_RIGHT]) in.yaw_delta   += (s32)(1500.0f * dt);
-    if (keys[SDL_SCANCODE_UP])    in.pitch_delta -= (s32)(1500.0f * dt);
-    if (keys[SDL_SCANCODE_DOWN])  in.pitch_delta += (s32)(1500.0f * dt);
-
-    in.jump   = keys[SDL_SCANCODE_SPACE] != 0;
-    in.crouch = keys[SDL_SCANCODE_LCTRL] != 0 || keys[SDL_SCANCODE_C] != 0;
-    in.attack = keys[SDL_SCANCODE_LALT] != 0 || keys[SDL_SCANCODE_F] != 0;
+    s32 eye[3], view[3];
 
     /*
-     * Weapon switching is edge-triggered here rather than held, because the
-     * console's own repeat is a 70-tick countdown in the player's weapon block
-     * (0x8004ECF0) and the view model that paces it is not reconstructed yet.
-     * Holding the key would cycle at the frame rate, which the console never
-     * does.
+     * The keyboard is wired to PAD BUTTONS, not to the input record, and the
+     * mapping from those to the record is 0x80019154's — see pad.h.
+     *
+     * This is not ceremony. Three things the player feels are decided in there
+     * rather than here: full deflection is 127 and not 128, so the walk speed is
+     * the console's 2778 and not 2800; jump and swim-up come out of ONE button,
+     * a tap for the former and a hold for the latter; and the configured style
+     * decides whether the look rate is eased or set, which is the difference
+     * between a view that glides and one that snaps.
      */
-    {
-        static bool was_next, was_prev;
-        bool next = keys[SDL_SCANCODE_RIGHTBRACKET] != 0 ||
-                    keys[SDL_SCANCODE_E] != 0;
-        bool prev = keys[SDL_SCANCODE_LEFTBRACKET] != 0 ||
-                    keys[SDL_SCANCODE_Q] != 0;
+    static q2_pad_state pad;
+    q2_pad_config       cfg;
 
-        if (next && !was_next) q2_sim_cycle_weapon(&c->sim, +1);
-        if (prev && !was_prev) q2_sim_cycle_weapon(&c->sim, -1);
-        was_next = next;
-        was_prev = prev;
-    }
+    pad.prev    = pad.buttons;
+    pad.buttons = 0;
+
+    if (keys[SDL_SCANCODE_W])     pad.buttons |= Q2_PAD_UP;
+    if (keys[SDL_SCANCODE_S])     pad.buttons |= Q2_PAD_DOWN;
+    if (keys[SDL_SCANCODE_A])     pad.buttons |= Q2_PAD_L2;
+    if (keys[SDL_SCANCODE_D])     pad.buttons |= Q2_PAD_R2;
+    if (keys[SDL_SCANCODE_LEFT])  pad.buttons |= Q2_PAD_LEFT;
+    if (keys[SDL_SCANCODE_RIGHT]) pad.buttons |= Q2_PAD_RIGHT;
+
+    /* R1 looks down and L1 up, and holding BOTH is the chord that walks the
+     * pitch back to level — the console's own recentre, which is why there is no
+     * separate key for it. */
+    if (keys[SDL_SCANCODE_DOWN])  pad.buttons |= Q2_PAD_R1;
+    if (keys[SDL_SCANCODE_UP])    pad.buttons |= Q2_PAD_L1;
+
+    if (keys[SDL_SCANCODE_SPACE]) pad.buttons |= Q2_PAD_SQUARE;   /* jump/swim */
+    if (keys[SDL_SCANCODE_LALT] || keys[SDL_SCANCODE_F])
+        pad.buttons |= Q2_PAD_CROSS;                              /* fire      */
+
+    if (keys[SDL_SCANCODE_RIGHTBRACKET] || keys[SDL_SCANCODE_E])
+        pad.buttons |= Q2_PAD_TRIANGLE;                           /* weap +    */
+    if (keys[SDL_SCANCODE_LEFTBRACKET] || keys[SDL_SCANCODE_Q])
+        pad.buttons |= Q2_PAD_CIRCLE;                             /* weap -    */
+
+    q2_pad_config_default(&cfg);
+    cfg.style = c->sim.player.look_scheme;
+
+    q2_pad_read(&pad, &cfg, &in);
+
+    (void)dt;
+
+    /*
+     * Crouch is not an input on the console — INCROUCH and INLOWCROUCH are event
+     * script primitives a trigger volume runs, so where you crouch is authored
+     * per map. The key drives the same environment flag the dispatcher would set,
+     * which is the honest way to keep a debug crouch without inventing a mechanic.
+     */
+    c->sim.env_flags &= ~(u32)(Q2_ENT_INCROUCH | Q2_ENT_INLOWCROUCH);
+    if (keys[SDL_SCANCODE_LCTRL] || keys[SDL_SCANCODE_C])
+        c->sim.env_flags |= Q2_ENT_INLOWCROUCH;
+
+    /*
+     * Being submerged is the same kind of thing and is held the same way. The
+     * map's own water volumes now work on their own — the sim resolves a
+     * volume's record to its UserFuncs primitive at load — so this is no longer
+     * the only source of the flag, just the one that does not need you to go
+     * and find water. F3 holds it on (see the key handler), which drives both
+     * the swimming physics and the water screen effect.
+     */
+    c->sim.env_flags &= ~(u32)(Q2_ENT_INWATER | Q2_ENT_UNDERWATER);
+    if (c->force_underwater)
+        c->sim.env_flags |= Q2_ENT_INWATER | Q2_ENT_UNDERWATER;
+
+    /*
+     * Weapon switching. The edge is the PAD's now — bits 26 and 27 are already
+     * press edges out of q2_pad_read, so the "was it down last frame" bookkeeping
+     * this used to do by hand is the shared tail's job and happens once for every
+     * button rather than once per key.
+     */
+    if (in.buttons & Q2_BTN_WEAP_NEXT) q2_sim_cycle_weapon(&c->sim, +1);
+    if (in.buttons & Q2_BTN_WEAP_PREV) q2_sim_cycle_weapon(&c->sim, -1);
 
     q2_sim_advance(&c->sim, &in, (double)dt);
 
+    /*
+     * What the items did while that ran. Immediately after the tick, because
+     * the event list is cleared at the top of the next one.
+     */
+    client_entity_events(c);
+
+    /*
+     * The weapon in the hands, advanced on the same clock. The selection comes
+     * from the simulation, but the SWAP does not happen when the selection
+     * changes — it happens when the lower clip has run and the 70-tick countdown
+     * has expired, which is the machine's job, not this caller's.
+     */
+    if (c->vm_ready) {
+        s32 ticks = (s32)((double)dt * 300.0 + 0.5);
+        bool swapped;
+
+        if (ticks < 1) ticks = 1;
+        if (ticks > Q2_SCREEN_DT_MAX) ticks = Q2_SCREEN_DT_MAX;
+
+        if (c->sim.combat.weapon_id != c->vw_last_weapon) {
+            q2_vw_select(&c->vw, c->sim.combat.weapon_id);
+            c->vw_last_weapon = c->sim.combat.weapon_id;
+        }
+
+        swapped = q2_vw_advance(&c->vw, ticks, in.attack, Q2_VW_FIRED);
+        if (swapped)
+            client_bind_view_model(c);
+    }
+
+    /* The overlay ages on logic ticks, not on drawn frames — one notification
+     * retires every 60 (hud.h). The flash is the other way round and is
+     * decremented inside q2_hud_build_ot. */
+    if (c->hud_ready) {
+        q2_hud_tick(&c->hud, 1);
+
+        /*
+         * The damage flash, fed the player's real condition. `q2_hud_track`
+         * raises it when either figure FALLS, with armour taking precedence
+         * exactly as the original's branch order does — grey for a hit the
+         * armour took, red for one that reached flesh, and the asymmetric
+         * strength arithmetic that gives an armour graze a fainter flash than
+         * a solid hit (hud.h).
+         *
+         * This is the last thing the overlay was missing: it was built, it was
+         * drawn, and nothing had ever told it how the player was doing.
+         *
+         * And raising it is only half of it. The overlay owns the arithmetic;
+         * the TILE is the screen's, sized to the viewport and linked into that
+         * viewport's own slice (screen.h), because on the console the two are
+         * one record — the raise at 0x8003AE10 writes `ctx+0x2A0` and the draw
+         * at 0x80076764 reads `view+672`, which are the same halfwords. Here
+         * they are two structs, so the frame the flash is raised is the frame
+         * it has to be handed over; after that the screen owns the countdown
+         * and the overlay must not touch it.
+         *
+         * Viewport 0 because there is one player. A split-screen session would
+         * hand each player's flash to its own viewport, which is exactly what
+         * the shared record does for free on the console.
+         */
+        if (q2_hud_track(&c->hud, c->sim.combat.inv.health,
+                         c->sim.combat.inv.armour))
+            q2_screen_flash_set(&c->screen, 0, c->hud.flash.rgb,
+                                c->hud.flash.strength, c->hud.flash.mode);
+    }
+
+    /*
+     * The camera is NOT the player's aim. 0x80038260 composes three decaying
+     * kicks — firing over 30 ticks, damage over 150, landing over 90 — on top of
+     * the aim angles, and 0x8004F41C is where the result becomes the view. Using
+     * `player.pitch/yaw/roll` straight, which this did, throws all three away:
+     * no recoil, no flinch, and no thump when you land.
+     */
     q2_sim_eye(&c->sim, eye);
+    q2_sim_view_angles(&c->sim, view);
+
     c->cam.pos[0] = eye[0];
     c->cam.pos[1] = eye[1];
     c->cam.pos[2] = eye[2];
-    c->cam.yaw    = c->sim.player.yaw;
-    c->cam.pitch  = c->sim.player.pitch;
+    c->cam.yaw    = view[1];
+    c->cam.pitch  = view[0];
+    c->cam.roll   = view[2];
 }
 
 /* Free-fly camera, kept for inspecting geometry without physics in the way. */
@@ -442,13 +882,654 @@ static void client_menu_requests(client *c)
         c->running = false;
         break;
     case Q2_MREQ_MISSION:
-        /* The mission screen is a separate page of the original's HUD system
-         * and is not reconstructed yet; the menu closing is the part that is. */
-        Q2_INFO("mission screen: not implemented yet");
+        /*
+         * The mission screen belongs to the HUD rather than the menu, and it
+         * draws into the overlay camera's context — so opening it is closing
+         * the menu and raising a flag the frame reads, not entering a page.
+         */
+        c->mission_open = true;
+        q2_menu_close(&c->menu);
         break;
     default:
         break;
     }
+}
+
+/*
+ * Play one of the menu's five effects.
+ *
+ * The engine names them by their bank keys — `msc_menu2` on a cursor move,
+ * `msc_menu1` on an activation, `msc_menu3` on back, `itm_pkup` on a toggle,
+ * `msc_comp_up` while a slider moves (FORMATS.md §10.3) — so playing one is a
+ * lookup by name in the map's own bank, a decode, and a push into the same
+ * stream the music uses. Mixed in rather than replacing: the console has an SPU
+ * with 24 voices and the effect does not stop the track.
+ *
+ * The SFX slider scales it. STEREO is not consulted because this path is mono
+ * and panning a UI sound centre is what stereo would do anyway.
+ */
+/* The bank's names are ASCII and the engine's keys are lower case; compare
+ * without dragging in a locale-aware `stricmp`. */
+static int name_eq(const char *a, const char *b)
+{
+    while (*a && *b) {
+        int ca = (*a >= 'A' && *a <= 'Z') ? *a + 32 : *a;
+        int cb = (*b >= 'A' && *b <= 'Z') ? *b + 32 : *b;
+        if (ca != cb)
+            return 0;
+        a++;
+        b++;
+    }
+    return *a == *b;
+}
+
+/* The same comparison, stopping after `n` characters — `pre` is a prefix of
+ * `s`. See client_find_sound for why that is a thing worth having. */
+static int name_is_prefix(const char *pre, const char *s, size_t n)
+{
+    size_t i;
+
+    for (i = 0; i < n; i++) {
+        int ca = (pre[i] >= 'A' && pre[i] <= 'Z') ? pre[i] + 32 : pre[i];
+        int cb = (s[i]   >= 'A' && s[i]   <= 'Z') ? s[i]   + 32 : s[i];
+        if (ca != cb)
+            return 0;
+    }
+    return 1;
+}
+
+/*
+ * Find one effect in the map's bank by the name a table gave.
+ *
+ * Exact first, and then the truncation rule — because a table's name field is
+ * TWELVE BYTES (itemtable.h) and several of the bank's names are longer than
+ * that. The disc carries `msc_ar2_pkup22k`; the item table can only hold
+ * `msc_ar2_pkup`. So a key that FILLS the field may be a truncation and has to
+ * be matched as a prefix, while one that does not fill it was not truncated and
+ * must match exactly — otherwise a short key would collide with anything that
+ * merely begins with it.
+ *
+ * That distinction is not a guess. Across all 49 banks on the disc, every one of
+ * the eleven item names shorter than twelve characters matches exactly in every
+ * bank that carries it, and every one that is exactly twelve — the three health
+ * names and both armour names — matches nowhere exactly and everywhere as a
+ * prefix of the same name with the sample rate appended. No name is ambiguous
+ * under this rule. Five of the eleven are unreachable without it.
+ */
+static bool client_find_sound(client *c, const char *want, q2_vag *out)
+{
+    size_t len;
+    u32 i, pass;
+
+    if (!c->sfx_ready || !want || !want[0])
+        return false;
+
+    len = strlen(want);
+
+    for (pass = 0; pass < 2; pass++) {
+        /* The second pass only applies to a key that filled the field. */
+        if (pass == 1 && len < Q2_ITEM_MODEL_LEN)
+            return false;
+
+        for (i = 0; i < c->sfx.count; i++) {
+            if (!q2_sound_bank_get(&c->sfx, i, out))
+                continue;
+            if (pass == 0 ? name_eq(out->name, want)
+                          : name_is_prefix(want, out->name, len))
+                return true;
+        }
+    }
+
+    return false;
+}
+
+/*
+ * Play one effect out of the map's own bank, by name.
+ *
+ * The menu names its five and the item table names its eleven, and both are
+ * keys into the same per-map bank, so there is one decoder here rather than
+ * two. Returns false when the map does not carry the name, which is a thing
+ * that happens and is not an error — three maps ship no `frontend.lbm` either.
+ */
+static bool client_play_sound(client *c, const char *want)
+{
+    q2_vag vag;
+
+    if (!c->audio || !client_find_sound(c, want, &vag))
+        return false;
+
+    {
+        s16 pcm[16384];
+        u32 n, k;
+        s32 vol;
+
+        n = q2_spu_adpcm_decode(vag.body, vag.data_size, pcm,
+                                (u32)(sizeof(pcm) / sizeof(pcm[0])));
+        if (n == 0)
+            return false;
+
+        /* 0..127 from the slider, and the console doubles the music one but
+         * not this (0x800205F4 is the music path alone). */
+        vol = c->settings.v[Q2_SET_SFX];
+        if (vol < 0)   vol = 0;
+        if (vol > 127) vol = 127;
+        for (k = 0; k < n; k++)
+            pcm[k] = (s16)((pcm[k] * vol) / 127);
+
+        SDL_PutAudioStreamData(c->audio, pcm, (int)(n * sizeof(s16)));
+        return true;
+    }
+}
+
+static void client_play_menu_sound(client *c, q2_menu_sound snd)
+{
+    const char *want = q2_menu_sound_name(snd);
+
+    if (!client_play_sound(c, want) && want && want[0])
+        Q2_DEBUG("menu sound '%s' is not in %s's bank", want, c->map);
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * What the tick asked to be heard.
+ *
+ * A think has no audio path of its own — it records what it would have played
+ * and the caller drains it (entity.h) — and so does the player's own frame. This
+ * is the other end of both: the queue is cleared at the TOP of a tick precisely
+ * so the caller can drain it afterwards (sim.c), and the drain cannot miss one,
+ * because q2_sim_advance runs the world exactly once per frame with a variable
+ * dt rather than sub-stepping (sim.h).
+ *
+ * The LIGHT and BURST events are not consumed. Both are real and both are
+ * dropped rather than faked: a glow light wants a q2_light_world for the entity
+ * draw to gather from and the client has none yet, and the pickup burst is a
+ * particle effect whose emitter is not reconstructed. An item therefore glows
+ * through its own tint (entitydraw.c) and vanishes without sparks, which is less
+ * than the console does rather than something the console does not do.
+ */
+static const char *client_ent_sound_name(const client *c, u32 which)
+{
+    const q2_item_table *t = c->item_table_ready ? &c->item_table
+                                                 : q2_item_table_builtin();
+
+    /*
+     * Q2_SND_TELEPORT is the materialise effect and is deliberately NOT in the
+     * eleven-name table at 0x800AC240 — the materialise block names it inline
+     * (FORMATS.md §"Materialise"), so it is named inline here too.
+     */
+    if (which == Q2_SND_TELEPORT)
+        return "msc_tele1";
+
+    /*
+     * The PLAYER's own sounds — footsteps, the landing thump, the four pain
+     * grunts — which share this queue because it is the one a headless caller
+     * can already drain (entity.h).
+     *
+     * These are NOT in the eleven-name table either: the executable holds them
+     * as resolved sound POINTERS at `0x800B28EC` and the seven beside it. The
+     * names are recoverable anyway, because the initialiser that fills those
+     * pointers looks each one up by name — `0x8003B900`…`0x8003C590`, a run of
+     * `find_sound(name)` / `sw v0, gp+N` pairs against the string pool at
+     * `0x800AC458`.
+     *
+     * The one trap in reading it: the compiler hoists the NEXT name's setup
+     * above the current store, so the `addiu t0, "pla_step2"` sitting one
+     * instruction before `sw v0, gp+17172` belongs to the following entry and
+     * not to that one. Pair them off by one and every sound here is wrong by
+     * exactly one slot, which sounds plausible and is not.
+     */
+    switch (which) {
+    case Q2_SND_FOOTSTEP_A:   return "pla_step1";    /* 0x800B2914 */
+    case Q2_SND_FOOTSTEP_B:   return "pla_step2";    /* 0x800B2918 */
+    case Q2_SND_FOOTSTEP_WET: return "pla_wade3";    /* 0x800B292C */
+    case Q2_SND_LAND:         return "pla_fall2";    /* 0x800B28EC */
+    case Q2_SND_PAIN_25:      return "mal_pn25_1";   /* 0x800B294C */
+    case Q2_SND_PAIN_50:      return "mal_pn50_1";   /* 0x800B2950 */
+    case Q2_SND_PAIN_75:      return "mal_pn75_1";   /* 0x800B2954 */
+    case Q2_SND_PAIN_100:     return "mal_pn100_1";  /* 0x800B2958 */
+    default: break;
+    }
+
+    if (which < sizeof(t->sound) / sizeof(t->sound[0]))
+        return t->sound[which];
+
+    return NULL;
+}
+
+static void client_entity_events(client *c)
+{
+    const q2_ent_events *ev = q2_sim_entity_events(&c->sim);
+    u32 i;
+
+    if (!ev)
+        return;
+
+    for (i = 0; i < ev->count; i++) {
+        const char *name;
+
+        if (ev->e[i].kind != Q2_ENT_EVENT_SOUND)
+            continue;
+
+        name = client_ent_sound_name(c, ev->e[i].sound);
+        if (name && !client_play_sound(c, name))
+            Q2_DEBUG("sound '%s' is not in %s's bank", name, c->map);
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* Saving and loading                                                         */
+/*                                                                            */
+/* The three function pointers the front end calls (`0x800B3234` poll,        */
+/* `0x800B3238` request, `0x800B324C` act on a row) are filled straight from   */
+/* saveui.h, which has their exact signatures — so the reconstruction drives   */
+/* the port's save system without either side knowing about the other.        */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Everything a save has to contain that does not live in the sim: the mission
+ * tallies, which the HUD owns, and the menu settings, which the pause menu
+ * edits and which state 14 "applies" on the console (memcard.h).
+ */
+static bool client_capture(client *c)
+{
+    q2_result rc;
+
+    q2_save_free(&c->snapshot);
+
+    rc = q2_save_capture(&c->snapshot, &c->sim, NULL, c->build.serial,
+                         c->map, c->zone_index);
+    if (rc != Q2_OK) {
+        Q2_ERROR("cannot capture a save: %s", q2_result_str(rc));
+        return false;
+    }
+
+    q2_save_capture_mission(&c->snapshot, &c->mission);
+    q2_save_set_settings(&c->snapshot, c->settings.v, Q2_SET_COUNT);
+    return true;
+}
+
+/*
+ * Put a loaded save back into the running game.
+ *
+ * The zone is reloaded first and unconditionally, even when the map and zone
+ * already match. Applying onto whatever the player happened to be standing in
+ * would leave anything the save does not cover — the models bound to this map,
+ * the effect generator's attachment, the spawn the mover cached — carrying over
+ * from a session that is being discarded. A load IS a level load; treating it
+ * as one is both simpler and correct.
+ */
+static bool client_apply_save(client *c, const q2_save *s)
+{
+    q2_result rc;
+    s32 eye[3];
+
+    if (!client_load_zone(c, s->map, s->zone)) {
+        Q2_ERROR("the save names %s zone %d, which will not load",
+                 s->map, (int)s->zone);
+        return false;
+    }
+
+    rc = q2_save_apply(s, &c->sim, NULL, c->build.serial, c->map);
+    if (rc != Q2_OK) {
+        Q2_ERROR("cannot apply the save: %s", q2_result_str(rc));
+        return false;
+    }
+
+    /* The settings travel with the save, and applying them is what states 14
+     * and 16 do on the console (0x8001C698, the GAME VARIABLES application). */
+    {
+        s16 v[Q2_SET_COUNT];
+        u32 n = q2_save_get_settings(s, v, (u32)Q2_SET_COUNT);
+        u32 k;
+        for (k = 0; k < n; k++)
+            c->settings.v[k] = v[k];
+    }
+    client_apply_settings(c);
+
+    q2_save_apply_mission(s, &c->mission);
+
+    /* The weapon in the hands follows the restored selection. Without this the
+     * player holds whatever the fresh spawn gave them while the simulation
+     * thinks they are holding the railgun. */
+    if (c->vm_ready) {
+        q2_vw_init(&c->vw, &c->vm_tables, c->sim.combat.weapon_id);
+        c->vw_last_weapon = c->sim.combat.weapon_id;
+        client_bind_view_model(c);
+    }
+
+    /* A restored game is a played game, so it resumes under the simulation
+     * rather than in the free-fly camera. */
+    c->sim_enabled = true;
+
+    q2_sim_eye(&c->sim, eye);
+    c->cam.pos[0] = eye[0];
+    c->cam.pos[1] = eye[1];
+    c->cam.pos[2] = eye[2];
+    c->cam.yaw    = c->sim.player.yaw;
+    c->cam.pitch  = c->sim.player.pitch;
+
+    Q2_INFO("loaded %s zone %d at %d:%02d",
+            s->map, (int)s->zone,
+            (int)(s->level_time / 300 / 60), (int)(s->level_time / 300 % 60));
+    return true;
+}
+
+static void client_notify(client *c, const char *text)
+{
+    Q2_INFO("%s", text);
+    if (c->hud_ready)
+        q2_hud_message(&c->hud, text);
+}
+
+/* ------------------------------------------------------------------------- */
+/* The front end                                                              */
+/* ------------------------------------------------------------------------- */
+static void client_card_open(client *c, q2_save_ui_mode mode)
+{
+    if (mode == Q2_SAVE_UI_SAVE && !client_capture(c)) {
+        client_notify(c, "CANNOT SAVE");
+        return;
+    }
+
+    c->card_mode = mode;
+    if (mode == Q2_SAVE_UI_SAVE)
+        q2_save_ui_open_save(&c->save_ui, &c->snapshot);
+    else
+        q2_save_ui_open_load(&c->save_ui);
+
+    /* A fresh session: the cursor, the pad edge and the screen all start
+     * clean, so the button that opened the front end cannot also pick a row. */
+    q2_mcard_init(&c->mcard, &c->mcard_host);
+    c->card_screen  = Q2_MCARD_NONE;
+    c->card_menu.page = NULL;
+    c->mcard_open   = true;
+
+    q2_menu_close(&c->menu);
+    c->mission_open = false;
+}
+
+static void client_card_close(client *c)
+{
+    q2_save_ui_close(&c->save_ui);
+    c->mcard_open = false;
+}
+
+/*
+ * The row text, and the one place the port has to put something on screen that
+ * the console's own screen gets from the card's directory.
+ *
+ * An empty slot is the EMPTY STRING when loading, which is exactly right: the
+ * selection bar tests the label against the empty string, so the row draws
+ * nothing and cannot be aimed at (memcard.h). When SAVING it cannot be empty,
+ * because a player has to be able to pick a free slot to write into — so it
+ * carries the slot number and nothing else, which is the least this port can
+ * invent and still work.
+ */
+static void client_card_rows(client *c)
+{
+    int i;
+
+    for (i = 0; i < Q2_SAVE_SLOTS && i < Q2_MENU_MAX_ITEMS - 1; i++) {
+        const q2_save_info *info = &c->save_ui.info[i];
+        char *dst = c->card_menu.text[i + 1];
+
+        if (info->used) {
+            snprintf(dst, Q2_MENU_TEXT_MAX, "%s", q2_save_ui_row(&c->save_ui, i));
+            c->card_menu.disabled[i + 1] = 0;
+        } else if (c->card_mode == Q2_SAVE_UI_SAVE) {
+            snprintf(dst, Q2_MENU_TEXT_MAX, "%d", i + 1);
+            c->card_menu.disabled[i + 1] = 0;
+        } else {
+            dst[0] = '\0';
+            c->card_menu.disabled[i + 1] = 1;
+        }
+    }
+}
+
+/* Point the shadow menu at the screen the current state shows, and fill in
+ * whatever that screen composes at run time. */
+static void client_card_sync(client *c)
+{
+    q2_mcard_screen want = q2_mcard_screen_for_state_port(c->save_ui.state);
+    const q2_menu_page *page;
+
+    if (want != c->card_screen) {
+        c->card_screen = want;
+        page = q2_mcard_page(want);
+
+        memset(c->card_menu.text, 0, sizeof(c->card_menu.text));
+        memset(c->card_menu.disabled, 0, sizeof(c->card_menu.disabled));
+        c->card_menu.page   = page;
+        c->card_menu.cursor = page ? (int)page->first : 0;
+        c->card_menu.open   = (page != NULL);
+        c->mcard.cursor     = 0;
+    }
+
+    page = c->card_menu.page;
+    if (!page)
+        return;
+
+    if (c->card_screen == Q2_MCARD_SAVE_FILE) {
+        client_card_rows(c);
+    } else if (c->card_screen == Q2_MCARD_LOAD_MESSAGE) {
+        /*
+         * The screen whose text the runtime composes — which is why state 13
+         * maps to it (memcard.h). BOTH of its rows are placeholders, and both
+         * have to be written: an empty override falls back to the table's own
+         * label, so leaving the second alone leaves the word HERE on screen.
+         * A single space is what blanks a line the report does not need.
+         */
+        snprintf(c->card_menu.text[0], Q2_MENU_TEXT_MAX, "%s",
+                 c->save_ui.message);
+        snprintf(c->card_menu.text[1], Q2_MENU_TEXT_MAX, "%s",
+                 c->save_ui.detail[0] ? c->save_ui.detail : " ");
+    }
+}
+
+/* What the front end left behind when it closed. */
+static void client_card_finish(client *c)
+{
+    q2_save loaded;
+
+    switch (c->save_ui.status) {
+    case Q2_SAVE_UI_SAVED:
+        client_notify(c, "GAME SAVED");
+        break;
+
+    case Q2_SAVE_UI_LOADED:
+        if (q2_save_ui_take_loaded(&c->save_ui, &loaded)) {
+            bool ok = client_apply_save(c, &loaded);
+            q2_save_free(&loaded);
+            client_notify(c, ok ? "GAME LOADED" : "LOAD FAILED");
+        }
+        break;
+
+    case Q2_SAVE_UI_FAILED:
+        client_notify(c, c->save_ui.message[0] ? c->save_ui.message
+                                               : "SAVE FAILED");
+        break;
+
+    default:
+        break;
+    }
+
+    c->mcard_open = false;
+}
+
+static void client_card_frame(client *c)
+{
+    u16 pad = client_menu_pad();
+    const q2_menu_page *page;
+    q2_menu_sound snd;
+
+    /*
+     * Last frame's work first. The read or write is deferred by exactly one
+     * frame so the busy screen is actually drawn — which is what the console
+     * has a DO NOT POWER-OFF screen for, and what a save that completes inside
+     * the same frame never shows.
+     */
+    q2_save_ui_update(&c->save_ui);
+
+    client_card_sync(c);
+    page = c->card_menu.page;
+
+    /* TRIANGLE backs out. The console's own arms do not handle it — they are
+     * four instructions long and test CROSS only — so this is the port's, and
+     * without it a front end with no live arm would be a trap. */
+    if ((pad & Q2_PAD_TRIANGLE) && !(c->card_menu.pad_prev & Q2_PAD_TRIANGLE)) {
+        c->card_menu.pad_prev = pad;
+        client_card_close(c);
+        return;
+    }
+
+    /* Navigation, through the real menu engine so the wrap and skip rules are
+     * the ones read out of the executable. */
+    q2_menu_advance(&c->card_menu, pad);
+
+    snd = q2_menu_take_sound(&c->card_menu);
+    if (snd != Q2_MSND_NONE)
+        client_play_menu_sound(c, snd);
+
+    /* The front end reads the cursor POSITIONALLY, as `cursor - first`
+     * (0x800B32AC minus 0x800B32AE). */
+    if (page) {
+        int rel = c->card_menu.cursor - (int)page->first;
+        c->mcard.cursor = rel < 0 ? 0 : rel;
+    }
+
+    if (q2_mcard_advance(&c->mcard, pad)) {
+        /* The accept arm applies the game variables and leaves (0x8001F0A4). */
+        client_apply_settings(c);
+    }
+
+    /*
+     * State 13 is live and has no arm of its own, so the press that dismisses
+     * the report is the port's — see q2_save_ui_acknowledge.
+     */
+    if (c->mcard.fired && c->save_ui.state == Q2_SAVEUI_STATE_REPORT)
+        q2_save_ui_acknowledge(&c->save_ui);
+
+    if (!c->save_ui.open) {
+        client_card_finish(c);
+        return;
+    }
+
+    /*
+     * Again, because the arms above may have changed the state and this frame
+     * still has to be DRAWN. Without it the busy screen would be skipped
+     * entirely: the work happens at the top of the next frame, so the frame in
+     * between is the only one that can show it.
+     */
+    client_card_sync(c);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Quick save and quick load — slot 1, no screens.                            */
+/*                                                                            */
+/* Entirely the port's: the console has no such thing, and it is here because  */
+/* a four-screen front end is the wrong tool for "try that jump again". It     */
+/* goes through exactly the same capture, file and apply paths, so it cannot   */
+/* drift from what the front end writes.                                      */
+/* ------------------------------------------------------------------------- */
+static void client_quick_save(client *c)
+{
+    q2_result rc;
+
+    if (!client_capture(c)) {
+        client_notify(c, "CANNOT SAVE");
+        return;
+    }
+
+    rc = q2_save_slot_write(&c->snapshot, 0);
+    if (rc != Q2_OK) {
+        Q2_ERROR("quick save failed: %s", q2_result_str(rc));
+        client_notify(c, "SAVE FAILED");
+        return;
+    }
+
+    client_notify(c, "QUICK SAVED");
+}
+
+static void client_quick_load(client *c)
+{
+    q2_save s;
+    q2_result rc = q2_save_slot_read(&s, 0);
+
+    if (rc != Q2_OK) {
+        Q2_ERROR("quick load failed: %s", q2_result_str(rc));
+        client_notify(c, rc == Q2_ERR_NOT_FOUND ? "NO QUICK SAVE"
+                                                : "LOAD FAILED");
+        return;
+    }
+
+    client_notify(c, client_apply_save(c, &s) ? "QUICK LOADED" : "LOAD FAILED");
+    q2_save_free(&s);
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * A screenshot, of the console's framebuffer rather than of the window.
+ *
+ * Entirely the port's, and the distinction is the point: the window is an
+ * upscale of a 512x248 buffer, so grabbing it back off the desktop resamples
+ * the very pixels — the dither pattern, the vertex snapping — that the whole
+ * renderer exists to get right. This writes the buffer the frame was composed
+ * into, at its own size, through the same P6 writer the offline tools use.
+ */
+static void client_screenshot(client *c)
+{
+    static int n = 0;
+    char path[64];
+    q2_result rc;
+
+    snprintf(path, sizeof(path), "q2psx-%03d.ppm", n);
+
+    rc = psx_fb_write_ppm(q2_screen_front(&c->screen), path);
+    if (rc != Q2_OK) {
+        Q2_ERROR("cannot write %s: %s", path, q2_result_str(rc));
+        return;
+    }
+
+    n++;
+    Q2_INFO("screenshot: %s", path);
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * Bind the model the view weapon wants.
+ *
+ * The clip bank names it — "Blaster G", "Supershot G" — and the map's own
+ * CastList is where the geometry lives, so this runs both when a zone loads and
+ * whenever the state machine finishes a swap. A weapon whose model this map
+ * does not ship simply draws nothing rather than drawing the wrong thing.
+ */
+static void client_bind_view_model(client *c)
+{
+    const char *name;
+    s32 index;
+
+    c->vw_model_ready = false;
+    q2_vw_set_model(&c->vw, NULL);
+
+    if (!c->vm_ready || !c->model_bank_ready)
+        return;
+
+    name = q2_vw_model_name(&c->vw);
+    if (!name || !name[0])
+        return;
+
+    index = q2_model_bank_find(&c->model_bank, name);
+    if (index < 0) {
+        Q2_DEBUG("no view model '%s' in %s", name, c->map);
+        return;
+    }
+
+    if (q2_model_get(&c->model_bank, (u32)index, &c->vw_model) != Q2_OK)
+        return;
+
+    c->vw_model_ready = true;
+    q2_vw_set_model(&c->vw, &c->vw_model);
+    Q2_INFO("view weapon: %s", name);
 }
 
 static void client_menu_frame(client *c)
@@ -458,11 +1539,8 @@ static void client_menu_frame(client *c)
     q2_menu_advance(&c->menu, client_menu_pad());
 
     snd = q2_menu_take_sound(&c->menu);
-    if (snd != Q2_MSND_NONE) {
-        /* The bank these live in decodes, but nothing plays one-shot effects
-         * yet; naming the sound is the honest half of the wiring. */
-        Q2_DEBUG("menu sound: %s", q2_menu_sound_name(snd));
-    }
+    if (snd != Q2_MSND_NONE)
+        client_play_menu_sound(c, snd);
 
     client_menu_requests(c);
 }
@@ -482,14 +1560,183 @@ static void client_menu_frame(client *c)
  * layouts visible, since a second player would change nothing about the screen
  * work itself.
  */
+/*
+ * The world draw, in the place 0x80066858 occupies: called from inside the
+ * viewport's own draw, after its state is published and under its own gate.
+ */
+static void client_draw_view(void *user, q2_screen *s, int p,
+                             psx_ot *ot, gte_state *gte)
+{
+    client *c = (client *)user;
+    q2_world_stats stats;
+
+    /*
+     * The viewport owns the field of view: SetGeomScreen(view+262) at
+     * 0x80076B90, and a geometry offset at the viewport's own centre
+     * (view+266/+268, SetGeomOffset at 0x80076B78).
+     *
+     * Both are taken from the view record rather than from the framebuffer,
+     * because in a split they are not the same thing — the quad layout puts four
+     * centres in one frame — and because this is the state q2_screen_view_begin
+     * has already installed in the GTE for this viewport. Handing it back keeps
+     * the world's own reload from quietly disagreeing with the screen's.
+     */
+    c->cam.projection = (u16)s->view[p].proj;
+    c->cam.ofs_x      = s->view[p].ofs_x;
+    c->cam.ofs_y      = s->view[p].ofs_y;
+    c->cam.far_z      = s->view[p].far_z;
+
+    /* The viewport's far distance is also the subdivision threshold: the same
+     * view+264 the original parks at 0x800B2CCC serves both. */
+    c->render.subdiv_threshold = s->view[p].far_z;
+
+    q2_world_build_ot(&c->zone, &c->cam, s->view[p].w, s->view[p].h,
+                      ot, gte, &c->render, &stats);
+
+    /*
+     * The map's items, into the table the world has just been built into — the
+     * same reason the weapon and the effects go there, and the reason
+     * entitydraw is a module rather than something done inline: an item sorts
+     * against the crate it stands behind because both are in one list.
+     *
+     * It comes straight after the world and before everything else because that
+     * is what it is: level content, not presentation.
+     *
+     * `player` is 0 because there is one, and it is what makes an item this
+     * player has already collected invisible to this view — the per-player
+     * block's whole purpose. The texture-page table is the world's, so an item
+     * on a page the world has already promoted blends at the promoted mode.
+     * `lights` is NULL: the client has no q2_light_world, so an item is drawn
+     * at its own glow tint exactly as this module did before lighting existed.
+     */
+    if (c->sim.entities_ready) {
+        q2_entity_draw_ctx ectx;
+        q2_entity_draw_stats estats;
+
+        memset(&ectx, 0, sizeof(ectx));
+        ectx.bank          = c->model_bank_ready ? &c->model_bank : NULL;
+        ectx.clut4_count_a = c->clut4_count_a;
+        ectx.player        = 0;
+        ectx.tpage         = &c->render.tpage;
+        ectx.coll_node     = -1;
+
+        q2_entity_build_ot(&c->sim.entities, &ectx, &c->cam, ot, gte, &estats);
+    }
+
+    /*
+     * Effects go into the SAME table as the world, which is the whole point of
+     * an ordering table: a spark behind a crate sorts behind it because both
+     * are in one list, not because anything tested them against each other.
+     *
+     * The beam pool is emptied after the last viewport rather than here, since
+     * one queue feeds every view — 0x80064F10 draws and then resets, and doing
+     * the reset per view would make split screen lose the beams in every
+     * viewport but the first.
+     */
+    q2_fx_build_ot(&c->sim.fx, &c->cam, (u32)p, ot, gte);
+
+    /*
+     * The status bar, into this viewport's own slice — because the console
+     * draws it from this very hook (`0x800337D0`), not from an overlay pass.
+     * Its anchor is the viewport's `sbar_x`/`sbar_y`, which is what those two
+     * halfwords turn out to be (statusbar.h).
+     *
+     * The data is the sim's, read here rather than pushed: health and armour
+     * come straight off the inventory, and the ammo shown is the ammo the
+     * CURRENT weapon uses, which is the same indirection the console makes
+     * through its weapon-to-ammo map.
+     */
+    if (c->icons_ready && c->menu_font_ready) {
+        const q2_inventory *inv = &c->sim.combat.inv;
+        /* The LIVE weapon, which combat owns — 1-based, 0 for none. */
+        int weapon = c->sim.combat.weapon_id;
+        int ammo = 0;
+
+        if (weapon > 0 && weapon < Q2_WEAPON_COUNT) {
+            s8 kind = q2_weapon_ammo[weapon];
+            if (kind >= 0 && kind < Q2_AMMO_COUNT)
+                ammo = inv->ammo[kind];
+        }
+
+        q2_statusbar_anchor(&c->sbar, s->view[p].sbar_x, s->view[p].sbar_y);
+        c->sbar.players = s->view_count > 0 ? s->view_count : 1;
+        c->sbar.health  = inv->health;
+        c->sbar.armour  = inv->armour;
+        c->sbar.ammo    = (s16)ammo;
+        c->sbar.weapon  = weapon;
+
+        /*
+         * The icons, named now that the vocabulary is decoded (icontable.h):
+         * the fifth byte of a rect record is the item's effect id, so an icon
+         * is asked for by the item it belongs to rather than by position.
+         * Health shows the medikit's cross; armour shows whichever armour is
+         * worn, and nothing at all when none is.
+         */
+        c->sbar.health_icon = Q2_SBAR_ICON_MEDIKIT;
+        c->sbar.armour_icon = inv->armour > 0 ? Q2_SBAR_ICON_ARMOUR_JACKET : 0;
+
+        q2_statusbar_build_ot(&c->sbar, c->menu_font.tpage_icons,
+                              c->menu_font.clut_text, ot,
+                              q2_screen_view_otz(s, p, 0), 0, 0);
+    }
+
+    /*
+     * The weapon in the hands, into the SAME table as the world it stands in.
+     * That is the whole reason it is a model and not an overlay: it sorts
+     * against the wall the player has walked into rather than always winning,
+     * which is exactly what the console does and exactly what a blit cannot.
+     *
+     * It is placed on the eye — `feet.y + 286 - view_height` is the camera's own
+     * expression (FORMATS §9.12) — so it crouches when the view crouches without
+     * anything here having to know that.
+     */
+    if (c->vw_model_ready) {
+        q2_model_instance proto;
+        q2_model_draw_stats mstats;
+        s16 aim[3], kick[3];
+
+        q2_model_instance_init(&proto);
+        proto.tpage         = &c->render.tpage;
+        proto.clut4_count_a = c->clut4_count_a;
+
+        aim[0]  = (s16)c->sim.player.pitch;
+        aim[1]  = (s16)c->sim.player.yaw;
+        aim[2]  = (s16)c->sim.player.roll;
+        kick[0] = c->sim.combat.kick[0];
+        kick[1] = c->sim.combat.kick[1];
+        kick[2] = c->sim.combat.kick[2];
+
+        q2_vw_build_ot(&c->vw, &proto,
+                       c->sim.player.pos, c->sim.player.view_height,
+                       aim, kick, &c->cam, ot, gte, &mstats);
+    }
+
+    /*
+     * The glint, OFF by default (F6 shows it).
+     *
+     * Nothing the engine does raises the `0x04000000` flag it draws on — only
+     * BIGGUN's level script does, and this port does not run relocated level
+     * modules yet. Drawing one anyway would be putting an effect on screen that
+     * the console never puts there, so the reconstruction sits behind a toggle
+     * and the default frame has no glint in it.
+     *
+     * The phase runs 4..1, which is what the script writes and what the band
+     * formula's `4 - phase` expects.
+     */
+    if (c->sim.glint.ready && (c->sim.glint.raised || c->show_glint)) {
+        s32 at[3];
+
+        q2_sim_eye(&c->sim, at);
+        q2_fx_glint_draw(&c->sim.glint, at, c->cam.yaw, &c->cam, ot, gte);
+    }
+}
+
 static void client_frame(client *c)
 {
-    q2_world_stats stats;
     void *pixels;
     int pitch;
     const psx_framebuffer *front;
-    psx_framebuffer *back;
-    int p;
+    q2_screen_hooks hooks;
 
     q2_screen_frame_begin(&c->screen, &c->ot);
 
@@ -501,27 +1748,131 @@ static void client_frame(client *c)
     c->screen.disp.bg_rgb[1] = 16;
     c->screen.disp.bg_rgb[2] = 32;
     c->screen.disp.bg_enable = 1;
-    q2_screen_background(&c->screen);
+    c->screen.background_enable = true;
 
-    for (p = 0; p < c->screen.view_count; p++) {
-        const q2_screen_view *v = &c->screen.view[p];
+    /*
+     * What the water effect reads off view+288, published before the build
+     * because the effect writes the shake and the build's draw envs read it.
+     *
+     * On the console this is not a publication at all: the viewport holds a
+     * pointer to its player's entity and reads bit 0x100 of the flag word
+     * itself. The port has no such pointer to hand the screen, so the one bit
+     * it wants is handed over instead. Every viewport gets the same answer for
+     * the same reason they all get the same camera — there is one player.
+     */
+    {
+        bool submerged =
+            (c->sim.player.ent.flags & Q2_ENT_UNDERWATER) != 0;
+        int p;
 
-        q2_screen_view_begin(&c->screen, p, &c->ot, &c->gte);
-
-        /* The viewport owns the field of view: SetGeomScreen(view+262) at
-         * 0x80076B90, and a geometry offset at the viewport's own centre. */
-        c->cam.projection = (u16)v->proj;
-        q2_world_build_ot(&c->zone, &c->cam, v->w, v->h,
-                          &c->ot, &c->gte, &stats);
+        for (p = 0; p < c->screen.view_count; p++)
+            q2_screen_water_set(&c->screen, p, true, submerged);
     }
 
-    q2_screen_compose(&c->screen, &c->ot, c->vram, &c->opts);
+    memset(&hooks, 0, sizeof(hooks));
+    hooks.view = client_draw_view;
+    hooks.user = c;
+    q2_screen_build(&c->screen, &c->ot, &c->gte, &hooks);
 
-    /* The menu draws over the frozen world, which is what pausing looks like
-     * on the console: the scene stays on screen behind it. It belongs to the
-     * overlay camera's full-screen space, not to any one viewport. */
-    back = q2_screen_back(&c->screen);
-    q2_menu_draw(&c->menu, back, &c->menu_style);
+    /* Every viewport has now drawn from the beam queue, so it can go. This is
+     * the tail of 0x80064F10, moved out to where "the last viewport" is a
+     * thing that can be said. */
+    q2_fx_beams_reset(&c->sim.fx);
+
+    /*
+     * The menu is part of the frame, not something painted over it afterwards.
+     * It links into the overlay slice (menudraw.h) BEFORE composition, so the
+     * one walk of the ordering table produces the world and then the menu on
+     * top of it — which is what the console does, and is why the frozen world
+     * shows through where the menu draws nothing.
+     */
+    if (c->menu.open && c->menu_font_ready) {
+        q2_menu_draw_opts mo;
+
+        q2_menu_draw_opts_default(&mo, &c->menu_font);
+        /* The layout is authored for 512x248; centre that block in whatever
+         * this window is rather than scaling 4bpp texels. */
+        mo.origin_x = (c->width  - Q2_MENU_SCREEN_W) / 2;
+        mo.origin_y = (c->height - Q2_MENU_SCREEN_H) / 2;
+        mo.view_x   = 0;
+        mo.view_w   = c->width < Q2_MENU_SCREEN_W ? c->width
+                                                  : Q2_MENU_SCREEN_W;
+        q2_menu_build_ot(&c->menu, &c->ot, &mo);
+    }
+
+    /*
+     * The card front end, through the same path � its screens ARE menu pages
+     * in every respect but having a page id, so they draw with the same font,
+     * the same bar and the same rules.
+     */
+    if (c->mcard_open && c->menu_font_ready && c->card_menu.page) {
+        q2_menu_draw_opts mo;
+
+        q2_menu_draw_opts_default(&mo, &c->menu_font);
+        mo.origin_x = (c->width  - Q2_MENU_SCREEN_W) / 2;
+        mo.origin_y = (c->height - Q2_MENU_SCREEN_H) / 2;
+        mo.view_x   = 0;
+        mo.view_w   = c->width < Q2_MENU_SCREEN_W ? c->width
+                                                  : Q2_MENU_SCREEN_W;
+
+        q2_menu_build_ot(&c->card_menu, &c->ot, &mo);
+    }
+
+    /*
+     * The overlay, whenever neither the menu nor the mission screen is up —
+     * which is the console's arrangement, since both of those are the overlay
+     * camera's and it draws one thing at a time. The crosshair follows the
+     * PLAYER page's setting, which is the one menu toggle the HUD reads
+     * (0x80043A58).
+     */
+    if (c->hud_ready && c->hud_font_ready &&
+        !c->menu.open && !c->mission_open && !c->mcard_open) {
+        q2_hud_ctx ctx;
+
+        c->hud.crosshair = (c->settings.v[Q2_SET_CROSSHAIR] != 0);
+        q2_hud_ctx_centre_in(&ctx, c->width, c->height);
+        q2_hud_build_ot(&c->hud, &c->hud_font, &ctx, &c->ot, 0);
+    }
+
+    /*
+     * The mission screen, into the same overlay slice — which is where the
+     * console's own overlay camera puts it (mission.h). It is mutually
+     * exclusive with the menu because opening it closes the menu.
+     */
+    if (c->mission_open && c->hud_font_ready) {
+        q2_hud_ctx ctx;
+        q2_hud_pen pen;
+
+        q2_hud_ctx_centre_in(&ctx, c->width, c->height);
+        q2_hud_pen_default(&pen);
+        /* The HUD layer takes a DEPTH rather than a bucket (gpu.h), and zero
+         * is the front — which lands in the overlay slice, since no viewport
+         * window is installed once q2_screen_build has returned. */
+        q2_mission_build_ot(&c->mission, &c->hud_font, &ctx, &pen,
+                            &c->ot, 0);
+    }
+
+    /*
+     * The briefing screen — the panel, the text over it, and the BACK prompt
+     * sliding up from the bottom. Mutually exclusive with the other two
+     * overlay screens for the same reason they are with each other.
+     */
+    if (c->briefing_open && c->hud_font_ready && c->menu_font_ready) {
+        q2_hud_ctx ctx;
+        q2_hud_pen pen;
+
+        q2_hud_ctx_centre_in(&ctx, c->width, c->height);
+        q2_hud_pen_default(&pen);
+        q2_briefing_build_ot(&c->briefing, &c->hud_font, &c->menu_font,
+                             &ctx, &pen, &c->ot, 2, 1, 0);
+        q2_prompt_build_ot(&c->prompts, &c->menu_font, &c->ot, 1);
+    }
+
+    /* The prompts animate whether or not anything is showing them, which is
+     * how they slide away when a screen closes (prompt.h). */
+    q2_prompt_step(&c->prompts);
+
+    q2_screen_compose(&c->screen, &c->ot, c->vram, &c->opts);
 
     q2_screen_present(&c->screen);
     front = q2_screen_front(&c->screen);
@@ -537,7 +1888,64 @@ static void client_frame(client *c)
     }
 
     SDL_RenderClear(c->renderer);
-    SDL_RenderTexture(c->renderer, c->texture, NULL, NULL);
+    {
+        /*
+         * SCREEN POSITION, honoured — openquestions #40.
+         *
+         * The page writes `0x800B3368` / `0x800B336A` (defaults 0 and 24) and
+         * an exhaustive sweep finds **no reader anywhere in the executable**:
+         * the obvious consumer would be the display env's screen rectangle,
+         * which `SetDefDispEnv` explicitly zeroes. So on this build the page is
+         * inert, and the port must not pretend otherwise about the CONSOLE.
+         *
+         * It can still do the honest thing for the player: a control that
+         * exists and does nothing is a bug from the outside. The offset is
+         * applied here, at presentation, where it shifts the finished image the
+         * way a television's own position control would — and nowhere near the
+         * ordering table, so it cannot perturb clipping or the viewport
+         * rectangles that the reconstruction does depend on.
+         *
+         * The default y of 24 is treated as the neutral point, because that is
+         * what the reset routine writes and a fresh install must not be
+         * off-centre.
+         */
+        /*
+         * THE PICTURE'S SHAPE, which is not the buffer's.
+         *
+         * The GPU's five horizontal modes all span the same active line, so a
+         * 512-wide frame is the same picture as a 320-wide one with pixels half
+         * as wide; PAL fills the 4:3 raster with 256 lines. That makes a
+         * framebuffer pixel exactly 2:3, and blitting the buffer to fill the
+         * window — which is what this did — a 1.5x horizontal stretch.
+         *
+         * q2_screen_fit_rect does the whole of it: the largest rectangle of the
+         * right shape that fits, centred, with the rest of the window left as
+         * border. It takes any window aspect, so a 16:9 monitor pillarboxes and
+         * a tall window letterboxes without this having to know which.
+         */
+        SDL_FRect dst;
+        int out_w = 0, out_h = 0;
+        int px = 0, py = 0, pw = 0, ph = 0;
+        float sx = (float)c->settings.v[Q2_SET_SCREEN_X];
+        float sy = (float)(c->settings.v[Q2_SET_SCREEN_Y] - 24);
+
+        SDL_GetCurrentRenderOutputSize(c->renderer, &out_w, &out_h);
+        q2_screen_fit_rect(&c->screen, c->fit, out_w, out_h,
+                           &px, &py, &pw, &ph);
+
+        /*
+         * SCREEN POSITION moves the picture, so its units are buffer pixels
+         * scaled by the PICTURE's size and not by the window's — otherwise the
+         * same setting would shift by a different amount depending on how much
+         * of the window is border.
+         */
+        dst.x = (float)px + sx * (float)pw / (float)Q2_SCREEN_PAL_WIDTH;
+        dst.y = (float)py + sy * (float)ph / (float)Q2_SCREEN_PAL_HEIGHT;
+        dst.w = (float)pw;
+        dst.h = (float)ph;
+
+        SDL_RenderTexture(c->renderer, c->texture, NULL, &dst);
+    }
     SDL_RenderPresent(c->renderer);
 }
 
@@ -545,11 +1953,18 @@ static void client_frame(client *c)
 static void usage(void)
 {
     printf("q2psx - native Quake II PSX\n\n");
-    printf("usage: q2psx --disc <path> [--map NAME] [--zone N] [--scale N]\n\n");
+    printf("usage: q2psx --disc <path> [--map NAME] [--zone N] [--scale N]\n"
+           "             [--aspect MODE] [--saves DIR]\n\n");
     printf("  --disc   a .cue, .bin, .img or .iso, or a drive letter\n");
     printf("  --map    level directory name (default BASE0)\n");
     printf("  --zone   zone index within the map (default 0)\n");
-    printf("  --scale  window scale factor (default 3)\n");
+    printf("  --scale  buffer pixels across, i.e. horizontal zoom (default 3)\n");
+    printf("  --aspect tv (default) | square | 4:3 | stretch\n");
+    printf("           tv     the console's own pixel shape, 2:3 on PAL\n");
+    printf("           square one buffer pixel per window pixel: a 1.5x stretch\n");
+    printf("           4:3    force the drawn buffer to exactly 4:3\n");
+    printf("           stretch fill the window, whatever shape it is\n");
+    printf("  --saves  where save files live (default: the platform's own)\n");
 }
 
 int main(int argc, char **argv)
@@ -569,6 +1984,15 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--map") && i + 1 < argc)   map = argv[++i];
         else if (!strcmp(argv[i], "--zone") && i + 1 < argc)  zone_index = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--saves") && i + 1 < argc) q2_save_set_dir(argv[++i]);
+        else if (!strcmp(argv[i], "--aspect") && i + 1 < argc) {
+            const char *a = argv[++i];
+            if      (!strcmp(a, "tv"))      c.fit = Q2_SCREEN_FIT_TELEVISION;
+            else if (!strcmp(a, "square"))  c.fit = Q2_SCREEN_FIT_SQUARE;
+            else if (!strcmp(a, "4:3"))     c.fit = Q2_SCREEN_FIT_FULL_4_3;
+            else if (!strcmp(a, "stretch")) c.fit = Q2_SCREEN_FIT_STRETCH;
+            else { usage(); return 1; }
+        }
         else { usage(); return 1; }
     }
 
@@ -615,6 +2039,10 @@ int main(int argc, char **argv)
     c.width  = c.screen.disp.width;
     c.height = c.screen.disp.height;
 
+    /* Texture pages start at ABR 0 and are promoted as opaque geometry is
+     * drawn, exactly as the engine's own table is. */
+    q2_world_render_init(&c.render);
+
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         disc_close(c.disc);
@@ -637,9 +2065,38 @@ int main(int argc, char **argv)
             Q2_WARN("no audio device: %s", SDL_GetError());
     }
 
-    c.window = SDL_CreateWindow("Q2PSX-PC",
-                                c.width * scale, c.height * scale,
-                                SDL_WINDOW_RESIZABLE);
+    /*
+     * The window opens at `scale` buffer pixels across and however tall the
+     * console's pixel shape makes that — 1536 x 1116 at the default scale of 3,
+     * not the 1536 x 744 the buffer's own dimensions suggest. Stretching
+     * vertically rather than squeezing horizontally keeps every one of the 512
+     * columns the 512-wide mode was chosen for.
+     *
+     * It is clamped to the display it opens on so a large scale on a small
+     * screen does not put the title bar off the top, and the fit is recomputed
+     * from the real window size every frame anyway, so a clamped window is
+     * simply a smaller correct picture.
+     */
+    {
+        int ww = 0, wh = 0;
+        SDL_Rect usable;
+
+        q2_screen_window_size(&c.screen, c.fit, scale, &ww, &wh);
+
+        if (SDL_GetDisplayUsableBounds(SDL_GetPrimaryDisplay(), &usable) &&
+            usable.w > 0 && usable.h > 0) {
+            int max_w = usable.w * 9 / 10;
+            int max_h = usable.h * 9 / 10;
+
+            if (ww > max_w) { wh = (int)((s64)wh * max_w / ww); ww = max_w; }
+            if (wh > max_h) { ww = (int)((s64)ww * max_h / wh); wh = max_h; }
+        }
+
+        if (ww < 64) ww = 64;
+        if (wh < 64) wh = 64;
+
+        c.window = SDL_CreateWindow("Q2PSX-PC", ww, wh, SDL_WINDOW_RESIZABLE);
+    }
     if (!c.window) {
         fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError());
         SDL_Quit();
@@ -678,8 +2135,98 @@ int main(int argc, char **argv)
 
     q2_menu_settings_defaults(&c.settings);
     q2_menu_init(&c.menu, &c.settings, Q2_MENU_SCREEN_H);
-    q2_menu_style_default(&c.menu_style);
     q2_menu_set_multiplayer(&c.menu, false);
+
+    /* The level-completion screen. Its counters are the sim's to fill; until
+     * kills and secrets are tallied it honestly reads zero. */
+    q2_mission_init(&c.mission);
+    q2_briefing_init(&c.briefing);
+    q2_prompt_init(&c.prompts);
+
+    /*
+     * The memory-card front end, with the port's file-backed save system behind
+     * its three function pointers. The signatures match exactly, so this is a
+     * plain assignment rather than three thunks.
+     */
+    q2_save_ui_init(&c.save_ui);
+    c.mcard_host.poll    = q2_save_ui_poll;
+    c.mcard_host.request = q2_save_ui_request;
+    c.mcard_host.choose  = q2_save_ui_choose;
+    c.mcard_host.user    = &c.save_ui;
+    q2_mcard_init(&c.mcard, &c.mcard_host);
+
+    /* The shadow menu the card screens navigate and draw through. It shares the
+     * settings block so a screen with a widget on it would work, though none
+     * of the nine has one. */
+    q2_menu_init(&c.card_menu, &c.settings, Q2_MENU_SCREEN_H);
+
+    Q2_INFO("saves: %s", q2_save_dir());
+
+    if (c.hud_tables_ready) {
+        /* One player, so four notification lines — the table at 0x8009D648
+         * indexed by player count (hudtables.h). */
+        q2_hud_init(&c.hud, &c.hud_tables, 1);
+        c.hud.crosshair = (c.settings.v[Q2_SET_CROSSHAIR] != 0);
+        c.hud_ready = true;
+        q2_hud_message(&c.hud, "Quake II");
+    }
+
+    /*
+     * The UI's tables come out of the boot executable, not off the disc's data
+     * files: the glyph coordinates for the 8-pixel face and — the part that
+     * matters here — the built-in palette bank every UI primitive samples
+     * through (hudtables.h §"Palettes"). Without it the menu's letterforms are
+     * in VRAM with no colours to read them by, so this is a hard requirement
+     * for the menu rather than an optional extra, and it is loaded once
+     * because a build's tables do not change per level.
+     */
+    c.hud_tables_ready = (q2_hud_tables_load(&c.hud_tables, c.disc,
+                                             &c.build) == Q2_OK);
+
+    /* The status bar's tables, from the same executable. */
+    c.icons_ready = (q2_icon_tables_load(&c.icons, c.disc, &c.build) == Q2_OK);
+    if (c.icons_ready)
+        q2_statusbar_init(&c.sbar, &c.icons, 1);
+    else
+        Q2_WARN("no status-bar tables for this build");
+    if (!c.hud_tables_ready)
+        Q2_WARN("no UI tables for this build — the menu will not draw");
+
+    /*
+     * The view weapon's animation bank, out of the same executable. It is per
+     * disc rather than per map because the clips are code-segment data — only
+     * the model the clips drive comes off a map.
+     */
+    c.vm_ready = (q2_vm_tables_load(&c.vm_tables, c.disc, &c.build) == Q2_OK);
+    if (c.vm_ready)
+        Q2_INFO("view weapon: %u animation keys", c.vm_tables.key_count);
+    else
+        Q2_WARN("no view-model bank for this build — no weapon in hand");
+
+    /*
+     * The item table, from the same executable. A build with no catalogued
+     * addresses falls back to the transcribed PAL table rather than to no items:
+     * unlike the effect ramps, the transcription is checked against the disc on
+     * every run of `q2psx-inspect items`, so it is a known-good copy of exactly
+     * this data rather than a guess.
+     */
+    c.item_table_ready = (q2_item_table_load(&c.item_table, c.disc,
+                                             &c.build) == Q2_OK);
+    if (c.item_table_ready)
+        Q2_INFO("item table: %u records", c.item_table.count);
+    else
+        Q2_WARN("no item table for this build — using the built-in one");
+
+    /*
+     * The effect tables, from the same executable and for the same reason: a
+     * ramp is nineteen gradients at a fixed address, and a build we have no
+     * addresses for gets no effects rather than nineteen gradients read out of
+     * somebody else's data.
+     */
+    c.fx_tables_ready = (q2_fx_tables_load_disc(&c.fx_tables, c.disc,
+                                                &c.build) == Q2_OK);
+    if (!c.fx_tables_ready)
+        Q2_WARN("no effect tables for this build — nothing will spark");
 
     if (!client_load_zone(&c, map, zone_index)) {
         fprintf(stderr, "cannot load %s zone %d\n", map, zone_index);
@@ -711,14 +2258,101 @@ int main(int argc, char **argv)
                 case SDLK_ESCAPE:
                     /* START on the console: it opens the pause menu, and
                      * closes it again from the root page. Deeper in, the
-                     * menu's own TRIANGLE handling owns going back. */
-                    if (!c.menu.open)
+                     * menu's own TRIANGLE handling owns going back. The
+                     * mission screen sits in front of all of that and takes
+                     * the press first. */
+                    if (c.mcard_open)
+                        client_card_close(&c);
+                    else if (c.mission_open)
+                        c.mission_open = false;
+                    else if (!c.menu.open)
                         q2_menu_open(&c.menu);
                     else if (c.menu.depth == 0)
                         q2_menu_close(&c.menu);
                     break;
+                case SDLK_F12:
+                    /*
+                     * The briefing. On the console it is shown between levels
+                     * by the outer state machine; what triggers it is not
+                     * established, so it gets a key rather than an invented
+                     * trigger — the same call the memory-card screens got.
+                     */
+                    c.briefing_open = !c.briefing_open;
+                    if (c.briefing_open) {
+                        c.menu.open = false;
+                        c.mission_open = false;
+                        q2_prompt_show(&c.prompts, Q2_PROMPT_BACK, 216);
+                    } else {
+                        q2_prompt_hide_all(&c.prompts);
+                    }
+                    break;
+                case SDLK_F7:
+                    /* The card front end, saving. On the console it is reached
+                     * from SAVE?'s YES (page 39); what SHOWS that prompt is not
+                     * established, so the port gives it a key rather than
+                     * inventing a trigger. */
+                    if (c.mcard_open)
+                        client_card_close(&c);
+                    else
+                        client_card_open(&c, Q2_SAVE_UI_SAVE);
+                    break;
+                case SDLK_F8:
+                    /* The same front end, loading. Same screens, same rules,
+                     * the other direction. */
+                    if (c.mcard_open)
+                        client_card_close(&c);
+                    else
+                        client_card_open(&c, Q2_SAVE_UI_LOAD);
+                    break;
+                /* Not while a screen is up: quick load reloads the zone, and
+                 * doing that under an open front end would pull the world out
+                 * from under it. */
+                case SDLK_F9:
+                    if (!c.mcard_open && !c.menu.open)
+                        client_quick_save(&c);
+                    break;
+                case SDLK_F10:
+                    if (!c.mcard_open && !c.menu.open)
+                        client_quick_load(&c);
+                    break;
+                case SDLK_F11:
+                    /* The framebuffer, not the window — see above. */
+                    client_screenshot(&c);
+                    break;
+                case SDLK_V: {
+                    /*
+                     * How the picture is shaped on the way out. The default is
+                     * the console's own 2:3 pixel; `square` is the raw buffer,
+                     * which is what every framebuffer dump of this game looks
+                     * like and is a 1.5x horizontal stretch of what a television
+                     * showed. Having both a key away is the point — the two are
+                     * easy to argue about and trivial to compare.
+                     */
+                    int next = (int)c.fit + 1;
+                    int pn = 1, pd = 1;
+
+                    if (next >= Q2_SCREEN_FIT_COUNT)
+                        next = 0;
+                    c.fit = (q2_screen_fit)next;
+                    q2_screen_pixel_aspect(&c.screen, &pn, &pd);
+                    Q2_INFO("aspect: %s (console pixel %d:%d)",
+                            q2_screen_fit_name(c.fit), pn, pd);
+                    break;
+                }
                 case SDLK_F1: c.opts.dither    = !c.opts.dither;    break;
                 case SDLK_F2: c.opts.affine_uv = !c.opts.affine_uv; break;
+                case SDLK_F3:
+                    /*
+                     * Submerge. Nothing in the port yet resolves a trigger
+                     * volume's event to UNDERWATER, so this stands in for the
+                     * volume exactly as the crouch key does — it sets the flag
+                     * the dispatcher would set, and everything downstream is
+                     * the console's: the swimming physics, and the screen
+                     * effect that ramps up over about fourteen frames.
+                     */
+                    c.force_underwater = !c.force_underwater;
+                    Q2_INFO("underwater: %s", c.force_underwater ? "on" : "off");
+                    break;
                 case SDLK_F4:
                     c.sim_enabled = !c.sim_enabled;
                     Q2_INFO("movement: %s", c.sim_enabled ? "simulated" : "free-fly");
@@ -739,6 +2373,15 @@ int main(int argc, char **argv)
                             c.screen.view_count == 1 ? "" : "s");
                     break;
                 }
+                case SDLK_F6:
+                    /* The glint. Off by default because only BIGGUN's level
+                     * script raises the flag that draws it, and this port does
+                     * not run relocated level modules — so showing one is a
+                     * deliberate look at a reconstruction, not gameplay. */
+                    c.show_glint = !c.show_glint;
+                    Q2_INFO("glint: %s%s", c.show_glint ? "on" : "off",
+                            c.sim.glint.ready ? "" : " (this map has no mesh)");
+                    break;
                 default:
                     if (!c.menu.open &&
                         ev.key.key >= SDLK_0 && ev.key.key <= SDLK_9) {
@@ -750,7 +2393,14 @@ int main(int argc, char **argv)
             }
         }
 
-        if (c.menu.open) {
+        if (c.mcard_open) {
+            /*
+             * The card front end sits in front of everything: it is a separate
+             * engine with its own state and its own release rule, not a page,
+             * so it takes the pad first and nothing ticks underneath it.
+             */
+            client_card_frame(&c);
+        } else if (c.menu.open) {
             /* The world is frozen while the menu is up: no input, no tick. */
             client_menu_frame(&c);
         } else if (c.sim_enabled) {
@@ -773,14 +2423,35 @@ int main(int argc, char **argv)
          * would otherwise drop back to the compiled-in constants. */
         client_apply_settings(&c);
         client_music_pump(&c);
+
+        /*
+         * The screen's own clock, in the 1/300 s units everything the console
+         * times is expressed in, clamped at 30 the way 0x800184B8 clamps it.
+         *
+         * It matters now that something reads it: the water effect ramps by
+         * 24 per unit, so without this a 144 Hz host would fade the effect in
+         * three times faster than the console does. Driving it from the real
+         * elapsed time is what keeps a frame-rate-independent port timing the
+         * effect the way the hardware timed it.
+         */
+        q2_screen_tick_dt(&c.screen, (double)dt);
         client_frame(&c);
     }
 
 done:
+    if (c.hud_tables_ready)
+        q2_hud_tables_free(&c.hud_tables);
+    if (c.sfx_ready)
+        q2_sound_bank_free(&c.sfx);
+    if (c.icons_ready)
+        q2_icon_tables_free(&c.icons);
+    q2_save_ui_free(&c.save_ui);
+    q2_save_free(&c.snapshot);
     q2_sim_free(&c.sim);
     q2_common_close(&c.common);
     q2_world_free_zone(&c.zone);
     free(c.vram);
+    q2_vm_tables_free(&c.vm_tables);
     q2_screen_free(&c.screen);
     psx_ot_free(&c.ot);
     if (c.audio)    SDL_DestroyAudioStream(c.audio);

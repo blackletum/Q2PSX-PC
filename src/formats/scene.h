@@ -17,13 +17,25 @@
  *                               so node i's record spans [off[i], off[i+1]) and
  *                               the last runs to the end of the chunk.
  *   0x04  u32   reserved        always 0
- *   0x08  u16   flags           bitfield; observed {0,0x400,0x800,0x1000,0x1400,
- *                               0x4000,0x4400,0x4800}. Meaning unknown.
- *   0x0A  u16   pad             always 0
+ *   0x08  u16   flags           SOLVED — four fields, see surface.h:
+ *                                 bits 0-9   runtime object slot + 1, 0 = none
+ *                                            (zero on disc; the loader clears
+ *                                            it and the script fills it in)
+ *                                 bits 10-13 the SETWIBBLE field; bits 10-11
+ *                                            select the draw/subdivision
+ *                                            variant, 3 = do not link
+ *                                 bit  14    deferred, depth-sorted draw
+ *                                 bit  15    do not draw (OBJDRAWOFF)
+ *                               On-disc values are exactly {0, 0x400, 0x800,
+ *                               0x1000, 0x1400, 0x4000, 0x4400, 0x4800}.
+ *   0x0A  u16   pad             always 0 on disc; the loader writes 0x8000
  *   0x0C  u8    unk0C           0..4, nonzero in 6 nodes disc-wide
  *   0x0D  u8    unk0D           0..3, nonzero in 5 nodes
- *   0x0E  u8    unk0E           0..197
- *   0x0F  u8    reserved        always 0
+ *   0x0E  u8    unk0E           0..197. Read only on the bit-14 deferred path
+ *                               (0x80066800): its low 7 bits index a 64-byte
+ *                               stride table at 0x800D8D78.
+ *   0x0F  u8    reserved        always 0; the zone draw uses it as scratch,
+ *                               writing a per-frame counter into it (0x80067A34)
  *   0x10  s32[3] bbox_min
  *   0x1C  s32[3] bbox_max
  *   0x28  s32[3] origin         world vertex = Points.xyz + origin
@@ -47,9 +59,16 @@
  *   0x00  u8[4] vtx     indices into this node's Points group, PSX quad order
  *   0x04  u8[4] col     per-corner index into this record's RGB table (Gouraud)
  *   0x08  u16   clut    NOT a hardware CLUT word. High byte indexes the map's
- *                       clut4[] array; low two bits select semi-transparency;
- *                       the other six bits are build-time residue the engine
- *                       never reads (set on 251,872 of 274,936 polygons)
+ *                       clut4[] array; low two bits select semi-transparency.
+ *                       Bits 2-5 are READ — draw variant 2 uses them as its
+ *                       per-polygon subdivision gate at 0x800AFBD4 (surface.h)
+ *                       — so "the engine never reads them" was wrong; but they
+ *                       are set on 71.9% of polygons inside variant-2 nodes
+ *                       against 94.1% outside, so they were not authored for
+ *                       that and remain best described as residue the engine
+ *                       consults. Bits 6-7 are set on ZERO of 274,936
+ *                       polygons, so the whole 251,872 residue figure is
+ *                       bits 2-5. Measured by `q2psx-inspect surfaces`.
  *   0x0A  u8    tpage   texture-page INDEX, 0..11, into a table of GetTPage
  *                       words; not a page attribute word itself
  *   0x0B  u8    uv_idx  bits 0-5 index the UV table; bits 6-7 rotate the UV
@@ -161,6 +180,34 @@ bool q2_scene_get_mapmod(const q2_scene *s, u32 index, q2_mapmod_rec *out);
 
 /* Decode polygon `poly` of a record. */
 bool q2_mapmod_get_poly(const q2_mapmod_rec *rec, u32 poly, q2_mapmod_poly *out);
+
+/*
+ * SEALING GEOMETRY — a node that exists but is never drawn.
+ *
+ * A node whose every polygon binds CLUT index 0 is not level surface. Index 0
+ * is one of the sixteen reserved all-0x8000 palettes at the head of the map's
+ * clut4 array (vram.h), so drawing such a polygon paints opaque black over
+ * whatever it stands in front of — and the disc is full of them: 11,255
+ * polygons in 1,749 nodes, mostly flat planes hanging in doorways and openings.
+ *
+ * THE CONSOLE NEVER DRAWS THEM, and that is measured rather than assumed. The
+ * zone's draw order comes from SortData, which names the nodes to draw one at a
+ * time (sortdata.h), and across all 115 zones — 8,968 streams, 178,801 node
+ * references — not one stream names one of these 1,749 nodes. Every other node
+ * is named by some stream 98.1% of the time. `q2psx-inspect surfaces` runs that
+ * comparison and prints both halves of it.
+ *
+ * Nothing else separates them. Their Scene flags are the ordinary 0x0000 on
+ * 1,739 of 1,749, their polygon counts run 1..63 like anyone else's, and 143 of
+ * them are not even flat. The null palette is the only marker, and it is exact:
+ * no node mixes index 0 with a real palette anywhere on the disc, so the
+ * property is a property of the node and not of a stray polygon.
+ *
+ * A renderer walking nodes in index order — which is what a port does until it
+ * knows which SortData stream a viewport wants (open question 7a) — has to
+ * apply this itself or it draws the black planes the streams were avoiding.
+ */
+bool q2_mapmod_rec_is_sealing(const q2_mapmod_rec *rec);
 
 /* The node's AABB, grown by Q2_SCENE_BBOX_SLOP so it actually contains its
  * geometry. Use this for culling, not the raw stored box. */

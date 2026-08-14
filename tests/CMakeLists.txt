@@ -1,3 +1,22 @@
+add_executable(test_surface test_surface.c)
+
+target_link_libraries(test_surface PRIVATE
+    q2psx_common
+    q2psx_formats
+)
+
+add_test(NAME surface COMMAND test_surface)
+
+add_executable(test_light test_light.c)
+
+target_link_libraries(test_light PRIVATE
+    q2psx_common
+    q2psx_game
+    q2psx_psx
+)
+
+add_test(NAME light_model COMMAND test_light)
+
 add_executable(test_gte test_gte.c)
 
 target_link_libraries(test_gte PRIVATE
@@ -15,6 +34,15 @@ target_link_libraries(test_sim PRIVATE
 )
 
 add_test(NAME sim_behaviour COMMAND test_sim)
+
+add_executable(test_pad test_pad.c)
+
+target_link_libraries(test_pad PRIVATE
+    q2psx_common
+    q2psx_game
+)
+
+add_test(NAME pad_and_view COMMAND test_pad)
 
 add_executable(test_inventory test_inventory.c)
 
@@ -105,3 +133,105 @@ target_link_libraries(test_coll PRIVATE
 )
 
 add_test(NAME collision COMMAND test_coll)
+
+add_executable(test_item test_item.c)
+
+target_link_libraries(test_item PRIVATE
+    q2psx_common
+    q2psx_game
+)
+
+add_test(NAME item COMMAND test_item)
+
+add_executable(test_multiplayer test_multiplayer.c)
+
+target_link_libraries(test_multiplayer PRIVATE
+    q2psx_common
+    q2psx_game
+)
+
+add_test(NAME multiplayer COMMAND test_multiplayer)
+
+add_executable(test_effect test_effect.c)
+
+target_link_libraries(test_effect PRIVATE
+    q2psx_common
+    q2psx_game
+)
+
+add_test(NAME effect COMMAND test_effect)
+
+add_executable(test_rotator test_rotator.c)
+
+target_link_libraries(test_rotator PRIVATE
+    q2psx_common
+    q2psx_game
+)
+
+add_test(NAME rotator COMMAND test_rotator)
+
+add_executable(test_creature test_creature.c)
+
+target_link_libraries(test_creature PRIVATE
+    q2psx_common
+    q2psx_game
+)
+
+add_test(NAME creature COMMAND test_creature)
+
+add_executable(test_mission test_mission.c)
+
+target_link_libraries(test_mission PRIVATE
+    q2psx_common
+    q2psx_game
+)
+
+add_test(NAME mission COMMAND test_mission)
+
+add_executable(test_viewweapon test_viewweapon.c)
+
+target_link_libraries(test_viewweapon PRIVATE
+    q2psx_common
+    q2psx_game
+)
+
+add_test(NAME viewweapon COMMAND test_viewweapon)
+
+add_executable(test_statusbar test_statusbar.c)
+
+target_link_libraries(test_statusbar PRIVATE
+    q2psx_common
+    q2psx_game
+)
+
+add_test(NAME statusbar COMMAND test_statusbar)
+
+add_executable(test_panel test_panel.c)
+
+target_link_libraries(test_panel PRIVATE
+    q2psx_common
+    q2psx_game
+    q2psx_menu
+)
+
+add_test(NAME panel COMMAND test_panel)
+
+add_executable(test_world test_world.c)
+
+target_link_libraries(test_world PRIVATE
+    q2psx_common
+    q2psx_formats
+    q2psx_game
+    q2psx_psx
+)
+
+add_test(NAME world_quads COMMAND test_world)
+
+add_executable(test_leveltext test_leveltext.c)
+
+target_link_libraries(test_leveltext PRIVATE
+    q2psx_common
+    q2psx_formats
+)
+
+add_test(NAME leveltext COMMAND test_leveltext)

@@ -178,11 +178,62 @@ Q2PSX_INLINE s32 q2_world_snap(s32 v, s32 grid)
 #define Q2_TERMINAL_VY     8192
 
 /* The liquid flags at entity+0x44, set from the contents test at 0x80050CE0. */
-#define Q2_ENT_LIQUID_SINK   0x08   /* contents 0x0200: eased toward +1024      */
+#define Q2_ENT_LIQUID_SINK   0x08   /* contents 0x0200                          */
 #define Q2_ENT_LIQUID_FLOAT  0x10   /* contents 0x2000: eased toward -3072      */
 #define Q2_LIQUID_SINK_VY    1024   /* @0x8004605C                              */
 #define Q2_LIQUID_FLOAT_VY  -3072   /* @0x80046034                              */
+#define Q2_LIQUID_SINK_PUSH    24   /* @0x80046070..0x8004607C, per dt unit     */
+#define Q2_LIQUID_EASE_RATE    64   /* @0x80046064, per dt unit                 */
 #define Q2_LIQUID_BOOST     -9216   /* @0x80045948, posted when already grounded*/
+
+/*
+ * The 0x08 arm's two branches are the wrong way round in FORMATS.md and were the
+ * wrong way round in this port. 0x80046050 branches on `vel.y < 1024` into
+ * 0x80046070, which computes `vel.y -= dt*24`; the FALL-THROUGH (`vel.y >= 1024`)
+ * is the ease toward +1024. So it is:
+ *
+ *     vel.y < 1024  ->  vel.y -= dt*24         (a constant upward push)
+ *     vel.y >= 1024 ->  ease(vel.y, 1024, dt*64)
+ *
+ * The net effect is still a slow sink, because the push (24 per dt) loses to
+ * gravity (32 per dt): a body at rest gains 8 per dt downward and converges on
+ * +1024 from below, while a fast fall is eased back down to it from above. So
+ * +1024 is a terminal velocity approached from both directions, eight times
+ * slower than Q2_TERMINAL_VY. Implementing the branches inverted converges
+ * somewhere above 1024 and oscillates instead of settling.
+ */
+
+/*
+ * The impulse accumulator at entity+0x2F8, three int16 written by whatever
+ * wants to change velocity outside the integrator: the jump (0x8003E1EC), the
+ * water boost (0x80045948), damage knockback (0x80057D54). It is applied and
+ * zeroed inside the integrator at 0x80046100..0x800461CC, and only when the
+ * entity's OTHER flag word (entity+0x10C) carries 0x4000 — which the poster
+ * sets. Applying it recomputes the frame's deltas, so an impulse takes effect
+ * on the same frame it is posted.
+ */
+#define Q2_ENT2_IMPULSE     0x4000  /* entity+0x10C, armed by the poster        */
+#define Q2_IMPULSE_CEILING  -3072   /* @0x80046148, single player only          */
+
+/*
+ * entity+0x10C bit 12, and it is bigger than its name in FORMATS.md suggested.
+ *
+ * 0x8003A41C sets it from the GAME VARIABLES word at 0x800B2AA4 and clears it
+ * when that is zero. Four separate places then read it, and only ONE of them is
+ * about the movement basis:
+ *
+ *     0x80045EE0  the FIRST test in the integrator — gravity is skipped
+ *     0x8003A8F0  the jump is skipped
+ *     0x8003A814  the view recentre is skipped
+ *     0x8003A544  the water-exit jump is skipped
+ *
+ * So it is the fly cheat: full 3D movement from the view basis, weightless, with
+ * the jump and the two things that fight a free camera turned off. Nothing in
+ * the image writes 0x800B2AA4, so it is zero on the retail disc and every one of
+ * these paths is dormant — which is why it can be transcribed with confidence
+ * and observed nowhere.
+ */
+#define Q2_ENT2_FLY         0x1000  /* entity+0x10C @0x8003A41C                 */
 
 /*
  * 216 sits in the DELAY SLOT of the branch at 0x80045888, so it is the DEFAULT
@@ -216,6 +267,143 @@ Q2PSX_INLINE s32 q2_world_snap(s32 v, s32 grid)
 #define Q2_VIEW_MID          400  /* 0x8003A214                                */
 #define Q2_VIEW_CROUCH       286  /* 0x8003A228                                */
 #define Q2_EYE_BASE          286  /* 0x80038638                                */
+#define Q2_VIEW_EASE_RATE      4  /* 0x8003A240: dt*4 toward the target        */
+
+/* ------------------------------------------------------------------------- */
+/* The environment flags at entity+0x98 — set by EVENT SCRIPT, not by input    */
+/* ------------------------------------------------------------------------- */
+/*
+ * These four are `UserFuncs` primitives: INWATER, UNDERWATER, INCROUCH and
+ * INLOWCROUCH are one-line functions that OR a bit into entity+0x98 (0x8002E574,
+ * 0x8002E594, 0x8002E5B4, 0x8002F214, bound by name at 0x8009B768..0x8009B7A4).
+ * The player's own frame clears all four at 0x8003A25C..0x8003A298 and then
+ * calls the volume dispatcher at 0x80027E64, which re-runs the events of every
+ * volume the entity is inside. So they are LEVEL-triggered environment state.
+ *
+ * The load-bearing consequence: THERE IS NO CROUCH BUTTON. Crouching is a
+ * property of where you are standing, authored per volume, not something the
+ * pad can ask for. A port that maps a key to it invents a mechanic.
+ */
+#define Q2_ENT_INWATER      0x0004u /* shallow water                           */
+#define Q2_ENT_UNDERWATER   0x0100u /* fully submerged                         */
+#define Q2_ENT_INCROUCH     0x0200u /* view 400                                */
+#define Q2_ENT_INLOWCROUCH  0x0400u /* view 286, max speed 1600                */
+#define Q2_ENT_NO_FOOTSTEP  0x0080u /* 0x8003AA4C                              */
+#define Q2_ENT_WALL_CONTACT 0x0800u /* 0x800458DC, inside a 0x1000 volume      */
+#define Q2_ENT_JUMP_LATCH   0x20000u/* 0x8003E190; nothing in the image sets it*/
+
+/* The flags the player's frame clears before the volume dispatcher runs. */
+#define Q2_ENT_ENV_MASK  (Q2_ENT_INWATER | Q2_ENT_UNDERWATER | \
+                          Q2_ENT_INCROUCH | Q2_ENT_INLOWCROUCH | \
+                          Q2_ENT_LIQUID_SINK | Q2_ENT_JUMP_LATCH)
+
+/* ------------------------------------------------------------------------- */
+/* Ground movement — 0x8003A1C8                                               */
+/* ------------------------------------------------------------------------- */
+/*
+ * Max speed, 0x8003A3B0. Three cases, tested in this order, and the middle one
+ * groups INWATER, UNDERWATER and 0x4 together as the single mask 0x304.
+ */
+#define Q2_SPEED_LOWCROUCH  1600  /* flags & 0x400   @0x8003A3C4              */
+#define Q2_SPEED_WET        2000  /* flags & 0x304   @0x8003A3D4              */
+#define Q2_SPEED_NORMAL     2800  /* otherwise       @0x8003A3D0              */
+
+/*
+ * The wish velocity is not an acceleration in the id sense: there is no
+ * separate friction term. One clamped approach (0x8006FE3C) does both jobs —
+ * when the stick is centred the target is zero and the same rate decelerates.
+ *
+ * Rate, 0x8003A584, assembled as `((k*dt) - dt) * 2`:
+ *     k = 20 normally, 16 when UNDERWATER and the stick is off centre,
+ *     8 when UNDERWATER and centred.
+ * So 38*dt, 30*dt and 14*dt. Being slower to STOP than to start underwater is
+ * what makes swimming feel like it drifts.
+ */
+#define Q2_WISH_RATE        38    /* per dt unit, dry                          */
+#define Q2_WISH_RATE_SWIM   30    /* per dt unit, UNDERWATER and moving        */
+#define Q2_WISH_RATE_DRIFT  14    /* per dt unit, UNDERWATER and centred       */
+
+/* Full analogue deflection. (maxspeed * axis) >> 7 at 0x8003A5E4 reaches
+ * exactly maxspeed at 128, which is a signed pad axis at full travel. */
+#define Q2_INPUT_FULL      128
+#define Q2_WISH_SHIFT        7
+
+/*
+ * Rotating the wish into world space, 0x8003ABC4. The rate is another clamped
+ * approach, so world velocity lags the wish rather than snapping to it.
+ */
+#define Q2_VEL_RATE         40    /* per dt unit, 0x8003AC7C                   */
+#define Q2_VEL_RATE_SLOW    10    /* UNDERWATER and centred, 0x8003ACDC        */
+
+/* The downward bias applied whenever the player is asking to move: it is what
+ * keeps them on the floor across the step-down. 0x8003AD58. */
+#define Q2_GROUND_STICK_VY  768
+#define Q2_GROUND_STICK_RATE 6
+
+/* Swimming up, 0x8003AB98: button bit 21, only while UNDERWATER. */
+#define Q2_SWIM_UP_VY      -768
+#define Q2_SWIM_UP_RATE     64
+
+/* ------------------------------------------------------------------------- */
+/* Jump — 0x8003E110                                                          */
+/* ------------------------------------------------------------------------- */
+/*
+ * The jump does not write velocity. It posts -3072 to the impulse accumulator,
+ * which the integrator applies later in the same frame and clamps to -3072 in
+ * single player — so the jump lands exactly on that ceiling and a rocket jump
+ * cannot exceed it either.
+ *
+ * `Q2_JUMP_HOLD` is a maximum, not a duration: the hold is cancelled as soon as
+ * vertical velocity turns downward (0x8003E140), so it only limits how long a
+ * held button can keep the jump un-repeatable.
+ */
+#define Q2_JUMP_IMPULSE    -3072  /* 0x8003E1E8                                */
+#define Q2_JUMP_HOLD         576  /* 0x8003E1F0                                */
+
+/* Pushing off a wall while Q2_ENT_WALL_CONTACT is set adds the reversed contact
+ * normal to the horizontal impulse (0x8003E1D0..0x8003E1E4). */
+
+/* ------------------------------------------------------------------------- */
+/* Look — 0x8003A658 .. 0x8003AA3C                                            */
+/* ------------------------------------------------------------------------- */
+#define Q2_LOOK_SCALE_NUM     3   /* (axis * 3) >> 2 is the target rate        */
+#define Q2_LOOK_SCALE_SHIFT   2
+#define Q2_LOOK_RATE          1   /* dt*1 when the input agrees with the rate  */
+#define Q2_LOOK_RATE_SNAP     4   /* dt*4 when it opposes it, or is centred    */
+#define Q2_LOOK_DIV          10   /* angle += (rate * dt) / 10, 0x8003A9C0     */
+#define Q2_PITCH_LIMIT     1024   /* +-90 deg, 0x8003AA08 / 0x8003AA28         */
+#define Q2_ROLL_DIV         192   /* roll = -wish.side / 192, 0x8003AB30       */
+#define Q2_LOOK_CENTRE_NUM    5   /* pitch = pitch * 5/6 then ease toward 0    */
+#define Q2_LOOK_CENTRE_DEN    6
+#define Q2_LOOK_SCHEME_ANALOGUE 6 /* schemes >= 6 set the rate directly        */
+
+/* The movement basis is rebuilt from the view angles each frame with RotMatrix
+ * (0x80089E38). In multiplayer only, the frame ENDS by rebuilding it from
+ * (-pitch/4, yaw, roll) — 0x8003AFEC. Single player never does. */
+#define Q2_BASIS_PITCH_DIV    4
+
+/* ------------------------------------------------------------------------- */
+/* Fall damage — 0x80039CB4                                                   */
+/* ------------------------------------------------------------------------- */
+/*
+ * `severity = ((dv >> 4) ^ 2) / 6144` where dv is how much the landing changed
+ * vertical velocity. The three thresholds and the /2 are id's; the constants
+ * around them are not.
+ */
+#define Q2_FALL_SHIFT         4
+#define Q2_FALL_DIV        6144   /* 0x2AAAAAAB, mfhi >> 10                    */
+#define Q2_FALL_MIN           8   /* below this, nothing happens               */
+#define Q2_FALL_SOFT         31   /* below this, only the landing sound        */
+#define Q2_FALL_DMG_BASE     30   /* damage = max((severity - 30) / 2, 1)      */
+#define Q2_FALL_KICK_MAX    455   /* 40 deg in the 4096 circle, 0x8003AD34     */
+#define Q2_FALL_KICK_TIME    90   /* 0x3/10 s, 0x8003AD48                      */
+#define Q2_MOD_FALLING       19   /* 0x8003ADB0                                */
+
+/* Footsteps, 0x8003AA3C: one every 120 dt units alternating between two
+ * sounds, or every 320 in the 0x4 (INWATER) state. Gated on either horizontal
+ * wish component exceeding half the max speed. */
+#define Q2_FOOTSTEP_PERIOD  120
+#define Q2_FOOTSTEP_PERIOD_WET 320
 
 /*
  * The vertical axis is index 1 and +Y points DOWN. A larger view offset

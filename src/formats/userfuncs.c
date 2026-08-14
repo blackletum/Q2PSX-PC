@@ -128,12 +128,21 @@ static const q2_uf_prim_info uf_table[Q2_UF_PRIM_COUNT] = {
     {17, 1, Q2_UF_OP_U8,      "time_b", "* 300; 0xFF => never"},
     {18, 1, Q2_UF_OP_OBJSLOT, "object", NULL}}},
 
-{Q2_UF_SIMROT, "SIMROT", 24, true, false, 1, {
+{Q2_UF_SIMROT, "SIMROT", 24, true, false, 3, {
+    {4,  1, Q2_UF_OP_S16,     "speed",
+     "angular speed into obj+0x3A (0x8002867C). The integrator at 0x8002F1A8 "
+     "adds speed*dt to a 32-bit accumulator and takes the angle from its bits "
+     "8..19, so this is 1/256 of an angle step per unit of dt"},
     {12, 4, Q2_UF_OP_OBJSLOT, "objects",
-     "sets obj+0x50 bit 24 on each; no timing operands"}}},
+     "sets obj+0x50 bit 24 on each; no timing operands"},
+    {20, 1, Q2_UF_OP_U16,     "axis",
+     "low 2 bits into obj+0x50 bits 14-15 (0x80028664): 0 = X, 1 = Y, 2 = Z. "
+     "Only obj[0x0C + 2*axis] is ever written, so one Euler angle is non-zero"}}},
 
-{Q2_UF_SIMROT2, "SIMROT2", 24, true, false, 1, {
-    {12, 4, Q2_UF_OP_OBJSLOT, "objects", NULL}}},
+{Q2_UF_SIMROT2, "SIMROT2", 24, true, false, 3, {
+    {4,  1, Q2_UF_OP_S16,     "speed", "as SIMROT"},
+    {12, 4, Q2_UF_OP_OBJSLOT, "objects", NULL},
+    {20, 1, Q2_UF_OP_U16,     "axis",  "as SIMROT"}}},
 
 {Q2_UF_PLATFORM, "PLATFORM", 32, true, true, 4, {
     {4,  1, Q2_UF_OP_VEC3_S32, "origin", "read by the constructor only"},

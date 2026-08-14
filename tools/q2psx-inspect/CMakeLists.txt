@@ -1,4 +1,4 @@
-add_executable(q2psx-inspect main.c cmd_coll.c cmd_exe.c cmd_hud.c cmd_export.c cmd_menu.c cmd_screen.c cmd_weapons.c)
+add_executable(q2psx-inspect main.c cmd_ai.c cmd_creatures.c cmd_coll.c cmd_exe.c cmd_effects.c cmd_hud.c cmd_text.c cmd_items.c cmd_lights.c cmd_export.c cmd_menu.c cmd_pmove.c cmd_multi.c cmd_save.c cmd_screen.c cmd_viewweapon.c cmd_surfaces.c cmd_weapons.c)
 
 target_link_libraries(q2psx-inspect PRIVATE
     q2psx_common

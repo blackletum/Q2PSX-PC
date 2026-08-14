@@ -116,6 +116,17 @@ typedef struct gte_state {
 /* ------------------------------------------------------------------------- */
 /* Lifecycle                                                                  */
 /* ------------------------------------------------------------------------- */
+/*
+ * What `InitGeom` leaves in the average-Z scale factors — 341 and 256, written
+ * by the `ctc2` pair at 0x8008E4C8 and 0x8008E4D4, and never overridden
+ * anywhere in the image. Both work out to a quarter of the mean vertex depth,
+ * which is libgte's default for a 1024-entry table and is far coarser than this
+ * game's 51-entry viewport slice — one of the reasons to believe the world's
+ * draw order comes from `SortData` rather than from the GTE.
+ */
+#define GTE_ZSF3_INIT 341
+#define GTE_ZSF4_INIT 256
+
 void gte_init(gte_state *g);
 
 /* Load the identity transform with a given projection distance and screen
@@ -126,6 +137,24 @@ void gte_set_projection(gte_state *g, u16 h, s32 centre_x, s32 centre_y);
 /* Set the rotation matrix / translation used by RTPS and RTPT. */
 void gte_set_rotation(gte_state *g, const gte_matrix *m);
 void gte_set_translation(gte_state *g, s32 x, s32 y, s32 z);
+
+/*
+ * The three lighting control registers, named after the libgte calls the
+ * original makes: SetLightMatrix (0x8008A1A8), SetColorMatrix (0x8008AD2C) and
+ * SetBackColor (0x8008AD0C).
+ *
+ * The light matrix holds one light DIRECTION per row; the colour matrix holds
+ * one light COLOUR per column, so row 0 is the three lights' red components.
+ * That transposition is the hardware's, not a convention chosen here — see
+ * lighting.c, which fills both from the original's own layout.
+ *
+ * gte_set_back_colour takes 0..255 components and shifts them left by 4, which
+ * is what libgte's SetBackColor does, so that a back colour of 255 contributes
+ * the same 4080 that a fully-lit light does.
+ */
+void gte_set_light_matrix(gte_state *g, const gte_matrix *m);
+void gte_set_colour_matrix(gte_state *g, const gte_matrix *m);
+void gte_set_back_colour(gte_state *g, s32 r, s32 gr, s32 b);
 
 /* ------------------------------------------------------------------------- */
 /* Operations. Names match the hardware mnemonics.                            */
@@ -150,6 +179,39 @@ void gte_avsz4(gte_state *g);
 /* MVMVA — general matrix/vector multiply-accumulate. `sf` selects the 12-bit
  * shift; the mx/vx/tx selectors match the hardware's encoding. */
 void gte_mvmva(gte_state *g, int sf, int mx, int vx, int tx, int lm);
+
+/* ------------------------------------------------------------------------- */
+/* The lighting operations.                                                   */
+/*                                                                            */
+/* Every one of them starts the same way: the vertex register is read as a     */
+/* NORMAL, the light matrix turns it into three N-dot-L terms (negatives       */
+/* clamped away, which is the hardware's `lm` bit doing the "facing away means */
+/* unlit" test for free), and the colour matrix turns those three terms into   */
+/* an RGB triple around the back colour. The result is pushed through the      */
+/* colour FIFO, so RGB2 always holds the newest vertex.                        */
+/*                                                                            */
+/* They differ only in what happens afterwards:                                */
+/*                                                                            */
+/*   NC    nothing — the light IS the colour. This is what Quake II PSX uses   */
+/*         for models (NCT at 0x800B23F0), which is why a model's texture is   */
+/*         modulated purely by the light reaching it.                         */
+/*   NCC   the result is multiplied by the primitive colour in RGBC.           */
+/*   NCD   the result is multiplied by RGBC and then depth-cued toward the far */
+/*         colour by IR0.                                                     */
+/*                                                                            */
+/* The S forms shade V0; the T forms shade V0, V1 and V2 in one operation.     */
+/* ------------------------------------------------------------------------- */
+void gte_ncs(gte_state *g);
+void gte_nct(gte_state *g);
+void gte_nccs(gte_state *g);
+void gte_ncct(gte_state *g);
+void gte_ncds(gte_state *g);
+void gte_ncdt(gte_state *g);
+
+/* CC / CDP — the same colour stages without the light-matrix stage, taking the
+ * N-dot-L terms already sitting in IR1..IR3. */
+void gte_cc(gte_state *g);
+void gte_cdp(gte_state *g);
 
 /* SQR — square IR1..IR3. */
 void gte_sqr(gte_state *g, int sf);

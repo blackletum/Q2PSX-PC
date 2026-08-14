@@ -2,6 +2,7 @@ add_library(q2psx_common STATIC
     q2psx.c
     q2psx.h
     fixed.h
+    gamevars.h
     sha256.c
     sha256.h
     trig.c

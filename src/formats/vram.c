@@ -317,36 +317,184 @@ bool q2_vram_find_by_name(const q2_vram_section *section, const char *name,
     return false;
 }
 
+/*
+ * The two placement tables, 0x800A3274 and 0x800A329C. Slots 0..14 march across
+ * the texture half of VRAM in 64-halfword steps; slot 15 is the cell at x = 0
+ * that also holds the CLUT array, which is why chars.lbm registers with a v
+ * offset of 128. Slots 16..19 are zero on this build and are registered by
+ * nothing.
+ */
+const s16 q2_vram_slot_x[Q2_VRAM_IMAGE_SLOTS] = {
+     64, 128, 192, 256, 320, 384, 448, 512, 576, 640,
+    704, 768, 832, 896, 960,   0,   0,   0,   0,   0
+};
+
+const s16 q2_vram_slot_y[Q2_VRAM_IMAGE_SLOTS] = {
+    256, 256, 256, 256, 256, 256, 256, 256, 256, 256,
+    256, 256, 256, 256, 256, 256,   0,   0,   0,   0
+};
+
+/*
+ * 0x8003FE20, in the order it registers them. Where a name appears once with a
+ * non-zero v offset that offset is the third argument to 0x8006901C; the rest
+ * are zero.
+ */
+const q2_vram_ui_image q2_vram_ui_images[] = {
+    /* name              slot  v    bpp */
+    { "control.lbm",     10,   0,   8 },  /* 0x8003FE34, via 0x80068FB0     */
+    { "mouse.lbm",        6,   0,   8 },  /* the pad diagrams, with callouts */
+    { "multipics.lbm",    8,   0,   8 },  /* ten deathmatch previews         */
+    { "multipic2.lbm",   12,   0,   8 },  /* two more                        */
+    { "frontend.lbm",    13,   0,   4 },  /* 0x8003FE74, via 0x8006901C     */
+    { "Squiggle.lbm",    12, 159,   0 },
+    { "chars.lbm",       15, 128,   4 },
+    { "qkm_menu.lbm",    14,   0,   4 },  /* the three are one slot, picked  */
+    { "qk2_menu.lbm",    14,   0,   4 },  /* by session mode at 0x8003FEAC   */
+    { "qk_menu.lbm",     14,   0,   4 },
+    { "EndDemo1.lbm",     2,   0,   0 },
+    { "FrDemo1.lbm",      2,   0,   0 },
+    { "DemoSp1.lbm",     11,   0,   0 },
+    { "DemoSp2.lbm",     12,   0,   0 },
+    { "HamLogo.lbm",      0,   0,   0 },
+    { "IdLogo.lbm",       4,   0,   0 },
+    { "wipteam1.lbm",     4,   0,   0 },
+    { "ActLogo.lbm",      8,   0,   0 },
+    { "Legal.lbm",        4,   0,   0 },
+    { "background3.lbm",  2,   0,   0 },  /* 256 halfwords: neither 4 nor 8
+                                           * fits one page, so unsettled     */
+    { "Screena.lbm",      0,   0,   0 },
+    { "Screenb.lbm",      2,   0,   0 },
+    { "Globe0.lbm",       4,   0,   0 },
+    { "Globe1.lbm",       5,   0,   0 },
+    { "Globe2.lbm",       6,   0,   0 },
+    { "Globe3.lbm",       7,   0,   0 },
+    { "Globe4.lbm",       8,   0,   0 },
+    { "Globe5.lbm",       9,   0,   0 },
+    { "Globe6.lbm",      10,   0,   0 },
+    { "Globe7.lbm",      11,   0,   0 }
+};
+
+u32 q2_vram_ui_image_count(void)
+{
+    return (u32)(sizeof(q2_vram_ui_images) / sizeof(q2_vram_ui_images[0]));
+}
+
+bool q2_vram_ui_slot(const char *name, u32 *slot, int *v_offset)
+{
+    u32 i, n = q2_vram_ui_image_count();
+
+    if (!name)
+        return false;
+
+    for (i = 0; i < n; i++) {
+        if (!name_equal_ci(q2_vram_ui_images[i].name, name))
+            continue;
+        if (slot)
+            *slot = q2_vram_ui_images[i].slot;
+        if (v_offset)
+            *v_offset = q2_vram_ui_images[i].v_offset;
+        return true;
+    }
+    return false;
+}
+
 bool q2_vram_image_rect(const q2_vram_section *section, u32 index, u32 slot,
-                        q2_vram_rect *out)
+                        int v_offset, q2_vram_rect *out)
 {
     const q2_vram_image *img;
     u32 w_bytes, h_rows;
 
     if (!section || !out || index >= section->image_count)
         return false;
+    if (slot >= Q2_VRAM_IMAGE_SLOTS)
+        return false;
 
     img = &section->images[index];
 
     if (index < section->texpage_count) {
+        /* A texture page ignores its stored dimensions (0x80068B74). */
         w_bytes = Q2_VRAM_TEXPAGE_W;
         h_rows  = Q2_VRAM_TEXPAGE_H;
-        out->x  = (s16)Q2_VRAM_TEXPAGE_X(slot);
-        out->y  = (s16)Q2_VRAM_TEXPAGE_Y;
     } else {
         w_bytes = img->width;
         h_rows  = img->height;
-        /* Standalone image placement is not established; the caller positions
-         * these itself rather than us inventing coordinates. */
-        out->x  = 0;
-        out->y  = 0;
     }
+
+    out->x = q2_vram_slot_x[slot];
+    out->y = (s16)(q2_vram_slot_y[slot] + v_offset);
 
     /* The engine halves the byte width to get halfwords (srl at 0x80069214). */
     out->w = (s16)(w_bytes >> 1);
     out->h = (s16)h_rows;
 
     return true;
+}
+
+q2_result q2_vram_upload_named(const q2_vram_section *section, const char *name,
+                               u32 slot, int v_offset, struct psx_vram *vram,
+                               q2_vram_rect *placed)
+{
+    psx_vram *dst = (psx_vram *)vram;
+    q2_vram_rect rect;
+    q2_vram_image *img;
+    u32 index;
+    size_t need, got = 0;
+    u8 *pixels;
+    q2_result r;
+    int row;
+
+    if (!section || !name || !dst)
+        return Q2_ERR_INVALID_ARG;
+
+    if (!q2_vram_find_by_name(section, name, &index))
+        return Q2_ERR_NOT_FOUND;
+    if (!q2_vram_image_rect(section, index, slot, v_offset, &rect))
+        return Q2_ERR_INVALID_ARG;
+
+    need = q2_vram_decoded_size(section, index);
+    if (need == 0)
+        return Q2_ERR_BAD_FORMAT;
+
+    pixels = (u8 *)malloc(need);
+    if (!pixels)
+        return Q2_ERR_NO_MEMORY;
+
+    r = q2_vram_decode(section, index, pixels, need, &got);
+    if (r != Q2_OK) {
+        free(pixels);
+        return r;
+    }
+
+    img = &section->images[index];
+
+    /*
+     * LoadImage, clipped. The source stride is the record's own `width` in
+     * bytes even for a texture page, because that is what the decoder wrote;
+     * the rect's width is what reaches VRAM.
+     */
+    for (row = 0; row < rect.h; row++) {
+        int vy = rect.y + row;
+        const u8 *src = pixels + (size_t)row * img->width;
+        int hw;
+
+        if (vy < 0 || vy >= PSX_VRAM_HEIGHT)
+            break;
+        if ((size_t)(row + 1) * img->width > got)
+            break;
+
+        for (hw = 0; hw < rect.w; hw++) {
+            int vx = rect.x + hw;
+            if (vx < 0 || vx >= PSX_VRAM_WIDTH)
+                break;
+            dst->px[vy][vx] = (u16)(src[hw * 2] | ((u16)src[hw * 2 + 1] << 8));
+        }
+    }
+
+    free(pixels);
+
+    if (placed)
+        *placed = rect;
+    return Q2_OK;
 }
 
 void q2_vram_clut4_rect(const q2_vram_section *section, q2_vram_rect *out)

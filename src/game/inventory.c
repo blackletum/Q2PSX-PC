@@ -1,5 +1,7 @@
 #include "inventory.h"
 
+#include "weapontables.h"
+
 #include <string.h>
 
 /*
@@ -212,12 +214,32 @@ s16 q2_inventory_apply_damage(q2_inventory *inv, s16 damage)
 void q2_inventory_give_key(q2_inventory *inv, u32 mask)
 {
     if (inv)
-        inv->keys |= mask;
+        inv->flags |= mask;
 }
 
 bool q2_inventory_has_keys(const q2_inventory *inv, u32 mask)
 {
     if (!inv)
         return false;
-    return (inv->keys & mask) == mask;
+    return (inv->flags & mask) == mask;
+}
+
+u32 q2_inventory_script_keys(const q2_inventory *inv)
+{
+    return inv ? (inv->flags & Q2_KEY_MASK) : 0u;
+}
+
+s16 q2_inventory_armour_max(const q2_inventory *inv)
+{
+    const q2_weapon_tables *wt = q2_weapon_tables_builtin();
+    u8 cls;
+
+    if (!inv || !wt)
+        return 0;
+
+    cls = inv->armour_class;
+    if (cls >= Q2_WT_ARMOUR_CLASSES)
+        cls = Q2_WT_ARMOUR_CLASSES - 1;
+
+    return (s16)wt->armour[cls].max_count;
 }

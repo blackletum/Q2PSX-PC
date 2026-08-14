@@ -101,13 +101,62 @@ the console those are not conveniences but the mechanism, because split screen
 is one table walked once with draw-env packets inside it changing the clip.
 `audio` has SPU-ADPCM for sound effects and CD-XA ADPCM for streamed music; plain
 PCM for the CD audio track is not wired up. `game` is the reimplemented simulation, and
-it also owns the two modules that turn data into primitives: `world.c` for brush
-geometry and `modeldraw.c` for posed models. `client` is the SDL3 host.
+it also owns the modules that turn data into primitives: `world.c` for brush
+geometry, `modeldraw.c` for posed models and `effect.c` for the presentation
+layer. `client` is the SDL3 host.
+
+`effect.c` is in `game` rather than in `render` on purpose. An effect is spawned
+by a gameplay event and integrated by the gameplay clock — the console puts its
+particle groups and debris on the same entity list as everything else — so a
+headless caller gets the bursts and their motion with no screen attached, and
+the client's only job is to append them to the frame's ordering table. Putting
+them in `render` would have made "what does a rocket detonating look like" a
+question only a windowed build could answer.
 
 `build` has a second job beyond identifying the release. It carries a PS-X EXE
 loader and an R3000A disassembler, because the remaining unknowns are questions
 about the original's *code*, and answering them should not depend on a tool
 outside this repository.
+
+### Saved games, and where the seam falls
+
+The save system is split across two layers, and the split is the interesting
+part rather than an implementation detail.
+
+`menu/memcard.[ch]` is the **front end**: nine screens transcribed from the
+executable's item tables, the release-gated state machine that drives them, and
+three function pointers — poll, request, act-on-a-row — where the console calls
+into `libmcrd`. That is where the reconstruction stops, because behind those
+pointers is hardware a PC does not have.
+
+`game/save.[ch]` and `game/saveui.[ch]` are the **back end**: what a save
+contains, how it is written, and a file-backed implementation of exactly those
+three function pointers. They are in `game` rather than beside the front end
+because they need the simulation and nothing from the menu — so the dependency
+points one way, and the whole flow can be driven and tested with no screen
+attached. `client` is the only thing that knows about both, and binding them is
+four assignments.
+
+Two consequences are worth stating.
+
+The **container is a deliberate divergence**. The original wrote 8 KB memory-card
+blocks with a directory and a whole layer of "insufficient free blocks" handling;
+this writes an ordinary host file with a chunked, checksummed, fixed-width
+layout. Unlike the rendering, where the hardware's limits *are* the experience, a
+save file's container is invisible — so reproducing block management would buy
+failure modes and nothing a player can perceive. What the save *contains* still
+mirrors the original's state.
+
+What it contains is the other consequence, and it is larger than it looks: the
+level clock (every powerup expiry and refire gate is an absolute deadline on it),
+the script's event flags, which trigger volumes the player is *standing in*,
+which items have been collected, the mover's carried state and the weapon
+generator. A save with position and inventory alone writes a file and does not
+restore a game.
+
+`q2psx-inspect save` runs the whole thing against a real map — capture, write,
+read back, compare field by field, apply to a fresh simulation — and can draw
+every screen the front end passes through.
 
 ## Why C11
 
@@ -139,7 +188,7 @@ statement the build system can evaluate rather than an assertion in a document.
 | `psx` | GTE and ordering table implemented; needs conformance tests |
 | `render` | software rasteriser working; world and models textured |
 | `audio` | sound bank and SPU-ADPCM working; XA music and CD-DA not started |
-| `game` | zone loading, OT construction, model drawing, and the simulation |
+| `game` | zone loading, OT construction, model drawing, the simulation, the effects, and the multiplayer session |
 | `client` | SDL3 client flies through a zone at the console's own resolution |
 
 Validated against the PAL disc (`q2psx-inspect verify` and `audio`):
@@ -200,6 +249,18 @@ worse than one built on an acknowledged gap.
   rather than trusted.
 - Collision plane *points* are only 95.6% confirmed. Player movement must not be
   built on them until that reaches 100%.
+
+**Closed since this list was written**, and worth recording because both closed
+the same way — by looking outside the executable:
+
+- The `UserFuncs` primitive a trigger volume calls is now resolved from its
+  record, so `INCROUCH`, `INLOWCROUCH`, `INWATER`, `UNDERWATER` and `DONTJUMP`
+  come from the level data rather than from a caller-supplied flag. That also
+  settles "`entity+0x98 & 0x20000` is never set": nothing in the *binary* sets
+  it, and 52 volumes across 15 maps do.
+- `client+0x156`'s three timed halfwords are the **view kicks**, not a wobble:
+  three amplitudes with three deadlines and three decay periods, composed into
+  the camera's angles at `0x80038260`.
 
 The reverse-engineering findings, with per-field confidence markers, live in
 [`FORMATS.md`](FORMATS.md); the prioritised gaps are in

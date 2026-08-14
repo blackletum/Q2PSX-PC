@@ -137,6 +137,32 @@ Consequences to preserve:
 
 ---
 
+## 6a. The framebuffer as a source
+
+One primitive reads pixels back: `PSX_PRIM_MOVE`, the GPU's VRAM-to-VRAM
+rectangle copy (GP0 0x80, libgpu's `DR_MOVE`). The underwater effect is built
+entirely out of it — it displaces strips of the frame that has already been
+drawn rather than distorting any geometry — so a backend has to support it or
+the effect simply does not appear.
+
+Three rules a backend must not "improve":
+
+- **No clip, no offset.** A copy takes absolute coordinates. The drawing area
+  and drawing offset are rasteriser state and do not apply, which is why the
+  effect computes its own buffer-relative origin.
+- **Overlap is the normal case, not an edge case.** Source and destination
+  overlap on every single copy the effect makes, and the result must be as if
+  the source were read whole before the destination was written.
+- **Nothing else in the pipeline touches it.** No dither, no blend, no mask
+  test beyond the hardware's own — the halfwords are copied verbatim.
+
+A hardware backend implementing this as a render-to-texture pass must therefore
+resolve the framebuffer before the copy and not batch it with the surrounding
+primitives, because its input is the output of everything that preceded it in
+the ordering table.
+
+---
+
 ## 7. Near-plane behaviour
 
 The GPU does not clip. Geometry crossing the projection plane produces garbage

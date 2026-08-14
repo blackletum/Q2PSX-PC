@@ -61,11 +61,23 @@
  *
  * Place record, 16 bytes:
  *     0x00  s32  x, y, z
- *     0x0C  u16  unk        NOT a plain angle — values include 4096, 32768,
- *                           36864, 53248, so it reads as flags OR'd with one
- *     0x0E  u16  id         0..56, 41 distinct. Same numeric range as the EXE's
- *                           class-table id byte, so most likely the link to the
- *                           global pickup table (INFERRED)
+ *     0x0C  u16  angle_flags   the LOW TWELVE BITS are a heading on the
+ *                           4096-step circle and bits 12..15 are something
+ *                           else. CONFIRMED from the reader: the entity spawner
+ *                           at 0x80058930 does `lhu`, `andi 0xFFF`, `sh` into
+ *                           the entity's yaw at +0xE8. An earlier note read the
+ *                           whole halfword as one value and concluded "flags
+ *                           OR'd with an angle" from the observed 4096 / 32768 /
+ *                           36864 / 53248 — those are all heading 0 with upper
+ *                           bits set. 627 of 1,013 records set at least one
+ *                           upper bit and all four are used; what they mean is
+ *                           still UNKNOWN.
+ *     0x0E  u16  id         0..56, 41 distinct. CONFIRMED as the key into the
+ *                           24-byte item table at 0x8009F5CC: the spawner scans
+ *                           it with `lb`, so only the low byte can ever match.
+ *                           All 1,013 place records on the disc resolve, and
+ *                           every one names a model its own map ships
+ *                           (`q2psx-inspect items`). See src/build/itemtable.h.
  *
  * Region between a list's terminator and the next declared offset is slack, not
  * data: two maps leave a 4-byte gap after the group table, as do 18 spawn lists
@@ -108,9 +120,13 @@ typedef struct q2_pop_path {
 
 typedef struct q2_pop_place {
     s32 x, y, z;
-    u16 unk;
-    u16 id;
+    u16 unk;    /* angle in bits 0..11, unknown flags in 12..15 */
+    u16 id;     /* keys the item table; see itemtable.h        */
 } q2_pop_place;
+
+/* The heading the entity spawner takes from a place record (0x80058938). */
+#define Q2_POP_PLACE_ANGLE(unk)  ((unk) & 0x0FFFu)
+#define Q2_POP_PLACE_FLAGS(unk)  ((unk) & 0xF000u)
 
 typedef struct q2_population {
     const u8 *data;
@@ -125,6 +141,37 @@ bool q2_pop_get_group(const q2_population *p, u32 index, q2_pop_group *out);
 /* True when this group's spawn list uses the path-node layout. Selected by
  * name, because nothing in the records distinguishes them. */
 bool q2_pop_group_is_path(const q2_pop_group *g);
+
+/*
+ * The zone a group's NAME claims, or -1 when it names none.
+ *
+ * ---------------------------------------------------------------------------
+ * Why a name is the only thing there is to go on
+ * ---------------------------------------------------------------------------
+ * A group is not spawned because it exists. It is spawned because a script
+ * SELECTED it: `0x80056C60` takes a twelve-byte name, finds the group, and sets
+ * bit 0 of its flags word; the spawn pass at `0x80056D68` then walks the table
+ * and runs only the groups with bit 0 set and bit 1 clear, setting bit 1 so one
+ * cannot run twice. Both are exported to the relocatable level modules through
+ * the import block at `0x800B2FE4` — slot 9 selects, slot 11 spawns one place
+ * record (FORMATS §15.5). And the flags word is ZERO ON DISC for all 222 groups
+ * of all 49 maps, so at level load nothing is selected and nothing spawns.
+ *
+ * Which groups a level selects therefore lives in its `LevelBin` module, which
+ * this port does not run yet. So a caller cannot know the real answer — but it
+ * can read the part the disc does state plainly, which is that 74 of the 222
+ * groups are named after a zone: every map that carries `Zone<N>` groups carries
+ * exactly one per zone it ships, `Zone0`…`Zone4` against ZONE0…ZONE4.DAT.
+ *
+ * A leading `Zone<digits>` is therefore taken as naming that zone, suffix and
+ * all — `Zone1bob`, `Zone1Key`, `Zone2_1` are batches OF that zone. Everything
+ * else (`Weapons`, `Ammo`, `ShotgunRoom`, `BerserkHide`, `PathCorner`) claims no
+ * zone and gets -1: the deathmatch maps partition their Population by item
+ * CATEGORY rather than by zone and have no `Zone<N>` group at all.
+ *
+ * Matched case-insensitively, as q2_pop_group_is_path is.
+ */
+int q2_pop_group_zone(const q2_pop_group *g);
 
 /*
  * Walk a group's lists. `slot` counts from 0; each returns false at the list's
