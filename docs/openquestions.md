@@ -4045,8 +4045,21 @@ nothing saying so.
       origin from +4 as three s32, `radius` from +18 **tripled** (the engine's own multiply, recorded in the
       operand table, not a choice), and the packed colour at +24 read low-byte-first as r, g, b.
 
-      **FLKLIGHT is deliberately not handled.** Its on/off times are randomised as `((rand()*500)>>15)+400`,
-      so it needs the engine's RNG stream to be *right* rather than merely to look plausible.
+      **FLKLIGHT is not handled yet, but the reason has changed.** Its on/off times are randomised as
+      `((rand()*500)>>15)+400`, which was recorded here as needing "the engine's RNG stream" — and the port
+      turns out to already have it.
+
+      `0x80089E28` is `addiu t2, zero, 160; jr t2` with `t1 = 0x2F`: a jump to the PlayStation **BIOS
+      A-function table**, entry 0x2F, which is `rand()`. The BIOS implements that as
+      `x = x*0x41C64E6D + 0x3039; return (x>>16) & 0x7FFF` — and `q2_rng_next` in `weapon.c` uses
+      `1103515245` and `12345`, which are those two constants in decimal. **The port's generator is the
+      console's, bit for bit, given the same seed.** The comment there claimed "any full-period generator
+      does", underselling what was already implemented; it is corrected.
+
+      So FLKLIGHT is buildable faithfully rather than approximately. What it still needs is **per-light state**
+      — an on/off phase that persists across frames — which the transient light event has no room for. There
+      is exactly **one FLKLIGHT call on the whole disc**, so that machinery would serve a single instance;
+      recorded as the next step rather than built here.
 
       How many exist, counted rather than grepped: **18 TIMEDLIGHT calls and 1 FLKLIGHT across COMMON's
       scripts, disc-wide.** A passive capture triggers none of them — they are script records fired by

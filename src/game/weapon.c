@@ -95,9 +95,20 @@ s32 q2_rng_next(q2_rng *r)
 {
     if (!r)
         return 0;
-    /* Any full-period generator does; what matters for fidelity is the RANGE,
-     * because every fire function subtracts 16384 from the result and shifts.
-     * 0x80089E28 returns 0..32767, so this must too. */
+    /*
+     * This IS the engine's generator, not merely one with the same range.
+     *
+     * 0x80089E28 is `addiu t2, zero, 160; jr t2` with `t1 = 0x2F` — a jump to
+     * the PlayStation BIOS A-function table, entry 0x2F, which is `rand()`. The
+     * BIOS implements it as `x = x*0x41C64E6D + 0x3039; return (x>>16) & 0x7FFF`,
+     * and the constants below are 0x41C64E6D and 0x3039 written in decimal.
+     *
+     * So given the same seed this reproduces the console's sequence exactly, and
+     * anything that needs the engine's randomness to be RIGHT rather than merely
+     * plausible — FLKLIGHT's on/off times, for one — can be built on it. An
+     * earlier version of this comment said "any full-period generator does",
+     * which undersold what was already here.
+     */
     r->state = r->state * 1103515245u + 12345u;
     return (s32)((r->state >> 16) & 0x7FFFu);
 }
