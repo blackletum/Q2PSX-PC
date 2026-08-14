@@ -2561,7 +2561,47 @@ shots before and after.
       and 1, while `+0x84` is on think 2. Berserk and Insane have no attack move at all, which is right: they
       are melee creatures.
 
-- [ ] 55. **Which of a callback's several moves the module picks.** The module's attack function branches —
+- [~] 55. **READ, for the Tank Commander. It is a range-and-chance table, and the move the port plays is the
+      one for a DEAD enemy.**
+
+      `tankcomm_attack` is at `module+0x11BC`, and it decodes cleanly:
+
+          v1 = self->enemy                     ; entity+0xBC
+          v0 = v1->[0x24]->[0x108]             ; the enemy's health
+          if (v0 < 0) {                        ; bgez v0, +0x54
+              self->currentmove = M_77_114;    ; module+0x1DE4
+              self->aiflags &= ~0x200;
+              return;
+          }
+          v    = enemy->origin - self->origin  ; three subtractions onto the stack
+          dist = import[+0xB8](v)              ; the vector's length
+          r    = import[+0x14]()               ; 0..32767
+
+          if (dist < 1501)       move = (r < 13106) ? M_168_196 : M_55_70;   ; 40%
+          else if (dist < 3001)  move = (r < 16384) ? M_168_196 : M_55_70;   ; 50%
+          else if (r < 10813)    move = M_168_196;                           ; 33%
+          else if (r < 21626)  { move = M_115_135; self->[0xA8] = g + 50; }  ; 66%
+          else                   move = M_55_70;
+
+      **The first branch is the whole bug.** `M_77_114` — the move the port plays every time, whose thinks are
+      a proximity call and two sounds — is what the creature does when its enemy's health has gone NEGATIVE.
+      It is the after-the-kill animation. `q2_creature_move_via` returns the first move for a slot in decode
+      order, and for this creature the first is the one that only ever runs over a corpse.
+
+      The three live-enemy moves are the ones that shoot: `M_168_196` at close range or on a roll (nineteen
+      consecutive frames of think 13 — the sustained burst), `M_55_70` otherwise (three separate think 8s),
+      and `M_115_135` on the middle roll at long range, which also sets a timer at `entity+0xA8`.
+
+      The 1501 and 3001 are the range bands in the module's own units, and 13106, 16384, 10813 and 21626 are
+      0.4, 0.5, 0.33 and 0.66 of 32768 — the same shape as `M_CheckAttack`'s odds and as id's `tank_attack`.
+
+      What is left is transcription: this is one of the six modules, read but not yet written, and the other
+      five have their own tables at their own `cb at` addresses. The census prints those addresses, the thinks
+      each move calls and where they sit, so each is now a reading job rather than a search.
+
+  *As first written:*
+
+- [ ] ~~55. **Which of a callback's several moves the module picks.**~~ The module's attack function branches —
       on range, on a roll, or on state — and the decoder records only WHICH moves a callback installs, not
       the branch that chooses between them. Four attack moves for the Tank Commander, two for the Gunner,
       two for the Infantry. Until that branch is read, a generic creature will always play one of them, and
