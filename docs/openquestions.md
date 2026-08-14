@@ -3288,6 +3288,34 @@ makes the exchange conclusive in a capture short enough to run: 13 hits rather t
 Single player is byte-identical to before any of this began, all 26 tests pass, and COMMAND still reports 22
 fire calls of 22 sent.
 
+## Six creatures were silent, and one of them has no voice on the disc
+
+Only the Soldier's sound names had been read — out of its own module, an eleven-entry table at
+`module+0x1D0` — so the other six played nothing. `cre_soldier.c` said as much: *"another creature's table
+has not been read, so it stays silent rather than borrowing these."*
+
+Every module carries the same table, and the slot INDEX is the sound number. That is not assumed: the
+Soldier's numbering was read out of its code — idle 0, sight 1, pain 2, death 5, shotgun cock 9 — and its
+slots sit in exactly that order. `q2_creature_sound_names` reads any module's the same way.
+
+The table is FOUND rather than offset: it sits `0x5C` past the module's own name string on three of the
+seven and `0x60` on the Arachner, so the reader takes the first place where three consecutive 12-byte slots
+all hold a printable NUL-terminated name.
+
+Measured over 300-frame captures, requested sounds against what the map's bank actually holds:
+
+| map | creature | sounds | not in bank |
+| --- | --- | --- | --- |
+| WASTE3 | Gunner | 16 | 0 |
+| POWER1 | Arachner | 7 | 0 |
+| WASTE4 | Berserk | 7 | 0 |
+| COMMAND | Tank Commander | 4 | **4** |
+
+**The Tank Commander has no voice on this disc.** Its module asks for `tnk_idle1`, `tnk_pain`, `tnk_death`,
+`tnk_step` and `tnk_sight1`, and a search of every sound bank on the disc finds **zero** names beginning
+`tnk_`. Its audio is not missing from the port; it is not there to load. That is worth knowing before anyone
+goes looking for a bug in the lookup.
+
 ---
 
 ## ⚠ Security note (carried forward, do not drop)

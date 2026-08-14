@@ -472,6 +472,40 @@ s32 q2_creature_world_death_frame(const q2_creature_world *w,
     return -1;
 }
 
+const char *q2_creature_world_sound_name(const q2_creature_world *w,
+                                         const q2_monster *m, u32 index)
+{
+    static const char *names[24];
+    const q2_creature_module *mod = NULL;
+    u32 i, n;
+
+    if (!w || !m)
+        return NULL;
+
+    for (i = 0; i < w->mod_count; i++) {
+        u32 j;
+
+        if (!w->mod[i].ready)
+            continue;
+        for (j = 0; j < w->mod[i].cre.class_count; j++)
+            if (w->mod[i].cre.class_byte[j] == m->class_id) {
+                mod = &w->mod[i];
+                break;
+            }
+        if (mod)
+            break;
+    }
+
+    if (!mod)
+        return NULL;
+
+    memset(names, 0, sizeof(names));
+    n = q2_creature_sound_names(&mod->cre, mod->image, mod->size, names,
+                                (u32)(sizeof(names) / sizeof(names[0])));
+
+    return (index < n) ? names[index] : NULL;
+}
+
 void q2_creature_world_free(q2_creature_world *w)
 {
     u32 i;

@@ -178,6 +178,17 @@ bool q2_creature_decode(q2_creature *out, const u8 *image, size_t size,
  *
  * `out[i]` points into the module image and is valid while it is.
  */
+/*
+ * The module's own sound names, indexed by sound number.
+ *
+ * A run of 12-byte slots past the module's name, one per sound, in the order
+ * the sound numbers use — checked against the Soldier, whose numbering was read
+ * out of its code: idle 0, sight 1, pain 2, death 5, shotgun cock 9, and its
+ * slots are in exactly that order. Returns how many were found.
+ */
+u32 q2_creature_sound_names(const q2_creature *c, const u8 *image, size_t size,
+                            const char **out, u32 out_count);
+
 u32 q2_creature_move_names(const q2_creature *c, const u8 *image, size_t size,
                            const char **out, u32 out_count);
 

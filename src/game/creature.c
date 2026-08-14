@@ -634,6 +634,73 @@ static bool name_slot_ok(const u8 *p, size_t avail)
     return q2_rd_u16(p + 18) >= q2_rd_u16(p + 16);
 }
 
+/* A 12-byte slot holding a NUL-terminated printable name of 3 or more bytes. */
+static bool slot_is_name(const u8 *image, size_t size, size_t off)
+{
+    size_t i;
+
+    if (off + 12 > size)
+        return false;
+
+    for (i = 0; i < 12; i++) {
+        u8 ch = image[off + i];
+
+        if (ch == 0)
+            return i >= 3;
+        if (ch < 0x20 || ch > 0x7E)
+            return false;
+    }
+
+    return false;               /* no terminator inside the slot */
+}
+
+u32 q2_creature_sound_names(const q2_creature *c, const u8 *image, size_t size,
+                            const char **out, u32 out_count)
+{
+    size_t at, name_off = 0;
+    u32 n = 0;
+
+    if (!c || !image || !out || out_count == 0)
+        return 0;
+
+    /*
+     * The module's sound names are a run of 12-byte slots a little way past its
+     * own name, and each slot's INDEX is the sound number — validated against
+     * the one creature whose numbering was already read from its code: the
+     * Soldier's table gives idle 0, sight 1, pain 2, death 5 and the shotgun
+     * cock 9, and its slots are in exactly that order.
+     *
+     * The gap after the module name is 0x5C on three of the seven and 0x60 on
+     * the Arachner, so it is FOUND rather than assumed: the first place where
+     * three consecutive slots all hold a name.
+     */
+    for (at = 0; at + 12 <= size; at += 4)
+        if (memcmp(image + at, c->name, strlen(c->name)) == 0) {
+            name_off = at;
+            break;
+        }
+
+    if (!name_off)
+        return 0;
+
+    for (at = name_off + 12; at + 36 <= size; at += 4) {
+        if (slot_is_name(image, size, at) &&
+            slot_is_name(image, size, at + 12) &&
+            slot_is_name(image, size, at + 24))
+            break;
+    }
+
+    if (at + 36 > size)
+        return 0;
+
+    while (n < out_count && slot_is_name(image, size, at)) {
+        out[n++] = (const char *)(image + at);
+        at += 12;
+    }
+
+    return n;
+}
+
 u32 q2_creature_move_names(const q2_creature *c, const u8 *image, size_t size,
                            const char **out, u32 out_count)
 {

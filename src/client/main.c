@@ -307,6 +307,7 @@ typedef struct client {
     u32               ai_thoughts;
     u32               cre_swings, cre_shots;   /* hook invocations */
     u32               cre_sounds;
+    u32               cre_sound_missing;
     u32               player_attacks;
     u32               rot_moved;
     u32               rot_steps;   /* step requests the script has made */
@@ -762,9 +763,18 @@ static void client_cre_sound(q2_monster *m, int which, void *user)
      * in the map's bank, so it can actually be played. Another creature's
      * table has not been read, so it stays silent rather than borrowing these.
      */
+    /*
+     * The Soldier's names are transcribed; every other module carries its own
+     * table and it is now read the same way, so all seven creatures make their
+     * own sounds instead of six of them being silent. The transcription is
+     * preferred where it exists because it was read out of code rather than
+     * inferred from slot order.
+     */
     name = q2_cre_soldier_sound_name(which);
-    if (name)
-        client_play_sound(c, name);
+    if (!name)
+        name = q2_creature_world_sound_name(&c->creatures, m, (u32)which);
+    if (name && !client_play_sound(c, name))
+        c->cre_sound_missing++;
 }
 
 /*
@@ -3294,12 +3304,14 @@ static void client_write_shot(client *c, bool numbered)
         }
         Q2_INFO("  creatures %u live, %u hunting, %u drawn (%u faces), "
                 "nearest %d units, moved %ld, player %d hp, "
-                "%u swings %u shots, %u sounds, %u dead, %ld hp total, "
+                "%u swings %u shots, %u sounds (%u not in bank), %u dead, "
+                "%ld hp total, "
                 "player attacked %u, targets %u, bolts %u, %u bodies, "
                 "rot %u steps %u moved %u turned, %u calls",
                 live, hunting, c->cre_drawn, c->cre_faces, near_d, moved,
                 c->sim[0].combat.inv.health, c->cre_swings, c->cre_shots,
-                c->cre_sounds, dead, hp, c->player_attacks,
+                c->cre_sounds, c->cre_sound_missing, dead, hp,
+                c->player_attacks,
                 c->sim[0].combat.target_count,
                 c->sim[0].combat.projectiles.live, c->cre_bodies, c->rot_steps,
                 c->rot_moved, client_rot_turned(c),

@@ -179,6 +179,13 @@ const char *q2_creature_world_model_name(const q2_creature_world *w,
 s32 q2_creature_world_death_frame(const q2_creature_world *w,
                                   const q2_monster *m);
 
+/*
+ * The name of sound `index` for this creature, out of its own module's table,
+ * or NULL. Every module carries one; only the Soldier's had been read.
+ */
+const char *q2_creature_world_sound_name(const q2_creature_world *w,
+                                         const q2_monster *m, u32 index);
+
 void q2_creature_world_free(q2_creature_world *w);
 
 #endif /* Q2PSX_CREWORLD_H */
