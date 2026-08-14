@@ -546,15 +546,15 @@ static void picture_aspect(const q2_screen *s, q2_screen_fit fit,
     int pn = 1, pd = 1;
 
     switch (fit) {
-    case Q2_SCREEN_FIT_FULL_4_3:
-        *wn = 4; *wd = 3;
-        return;
     case Q2_SCREEN_FIT_SQUARE:
         break;                    /* pixels stay 1:1 */
     case Q2_SCREEN_FIT_TELEVISION:
-    default:
         q2_screen_pixel_aspect(s, &pn, &pd);
         break;
+    case Q2_SCREEN_FIT_FULL_4_3:
+    default:
+        *wn = 4; *wd = 3;
+        return;
     }
 
     *wn = (int)s->disp.width  * pn;

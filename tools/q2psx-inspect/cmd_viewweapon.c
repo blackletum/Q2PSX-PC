@@ -231,7 +231,12 @@ static int render_view(disc *d, q2_vm_tables *tab, const char *map,
     scr.background_enable = true;
 
     q2_screen_view_begin(&scr, 0, &ot, &gte);
+    /* The viewport's, not the buffer's — proj, the geometry offset and the far
+     * distance are all view record fields (screen.h), and the weapon has to be
+     * projected through exactly the same three as the world it stands in. */
     cam.projection = (u16)scr.view[0].proj;
+    cam.ofs_x      = scr.view[0].ofs_x;
+    cam.ofs_y      = scr.view[0].ofs_y;
     cam.far_z      = scr.view[0].far_z;
     render.subdiv_threshold = scr.view[0].far_z;
     q2_world_build_ot(&zone, &cam, scr.view[0].w, scr.view[0].h,

@@ -248,10 +248,10 @@ typedef struct client {
     int              width, height;
 
     /*
-     * How the 512x248 buffer is fitted into the window. The console's pixels are
-     * two thirds as wide as they are tall (screen.h), so the default is not the
-     * one-buffer-pixel-to-one-window-pixel a framebuffer dump suggests — that is
-     * a 1.5x horizontal stretch. F7 cycles it.
+     * How the 512x248 buffer is fitted into the window. The default is 4:3, the
+     * shape the game is captured and played at; it is NOT the
+     * one-buffer-pixel-to-one-window-pixel a framebuffer dump suggests, which is
+     * a 1.5x horizontal stretch. V cycles it.
      */
     q2_screen_fit    fit;
 
@@ -1959,10 +1959,10 @@ static void usage(void)
     printf("  --map    level directory name (default BASE0)\n");
     printf("  --zone   zone index within the map (default 0)\n");
     printf("  --scale  buffer pixels across, i.e. horizontal zoom (default 3)\n");
-    printf("  --aspect tv (default) | square | 4:3 | stretch\n");
-    printf("           tv     the console's own pixel shape, 2:3 on PAL\n");
+    printf("  --aspect 4:3 (default) | tv | square | stretch\n");
+    printf("           4:3    the drawn buffer as 4:3, as the game is played\n");
+    printf("           tv     the strict pixel shape, 2:3 on PAL: 3%% taller\n");
     printf("           square one buffer pixel per window pixel: a 1.5x stretch\n");
-    printf("           4:3    force the drawn buffer to exactly 4:3\n");
     printf("           stretch fill the window, whatever shape it is\n");
     printf("  --saves  where save files live (default: the platform's own)\n");
 }
@@ -1987,9 +1987,9 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--saves") && i + 1 < argc) q2_save_set_dir(argv[++i]);
         else if (!strcmp(argv[i], "--aspect") && i + 1 < argc) {
             const char *a = argv[++i];
-            if      (!strcmp(a, "tv"))      c.fit = Q2_SCREEN_FIT_TELEVISION;
+            if      (!strcmp(a, "4:3"))     c.fit = Q2_SCREEN_FIT_FULL_4_3;
+            else if (!strcmp(a, "tv"))      c.fit = Q2_SCREEN_FIT_TELEVISION;
             else if (!strcmp(a, "square"))  c.fit = Q2_SCREEN_FIT_SQUARE;
-            else if (!strcmp(a, "4:3"))     c.fit = Q2_SCREEN_FIT_FULL_4_3;
             else if (!strcmp(a, "stretch")) c.fit = Q2_SCREEN_FIT_STRETCH;
             else { usage(); return 1; }
         }
@@ -2322,11 +2322,11 @@ int main(int argc, char **argv)
                 case SDLK_V: {
                     /*
                      * How the picture is shaped on the way out. The default is
-                     * the console's own 2:3 pixel; `square` is the raw buffer,
-                     * which is what every framebuffer dump of this game looks
-                     * like and is a 1.5x horizontal stretch of what a television
-                     * showed. Having both a key away is the point — the two are
-                     * easy to argue about and trivial to compare.
+                     * 4:3; `square` is the raw buffer, which is what every
+                     * framebuffer dump of this game looks like and is a 1.5x
+                     * horizontal stretch of what a television showed. Having
+                     * both a key away is the point — the two are easy to argue
+                     * about and trivial to compare.
                      */
                     int next = (int)c.fit + 1;
                     int pn = 1, pd = 1;

@@ -4657,7 +4657,47 @@ Details that only survive a port if they are transcribed rather than derived:
   other layout copies the viewport size there.
 * The quad layout insets by one pixel: the columns are at 1 and 257, the rows at 1 and 124.
 * `view+282 = (w << 9) / divisor`, and the divisor is the framebuffer **height** for the two full-screen
-  layouts and its **width** for the three split ones. That asymmetry is in the code.
+  layouts and its **width** for the three split ones. That asymmetry is in the code. **It has no reader.**
+  An exhaustive sweep of every `lb/lh/lw/lbu/lhu/sb/sh/sw/addiu` in the image with an immediate of 282 finds
+  nine sites: the five layout stores above, three stack writes inside the layout functions themselves, and
+  one load — `0x80039EF0`, `lh v0, 282(v1)` — which is not a view record at all. Its base is
+  `v1 = obj + ((a3 << 3) + a2) << 2` where `obj` is walked out of the pointer list at `0x800B2B90`…`0x800B2B98`,
+  and the halfword it reads is compared with a caller's argument before a range test on `+356`. So the five
+  layouts compute the field and nothing ever reads it back; the port transcribes it and consumes it nowhere.
+
+#### The shape of a pixel, and what the field of view therefore is
+
+Not in the executable — it is what the display does with what the GPU emits — but it is what makes the
+constants above mean something, so it belongs beside them.
+
+The GPU's five horizontal modes (256, 320, 368, 512, 640) all span the **same** 2560 cycles of active line,
+so a 512-wide frame is not a wider picture than a 320-wide one: it is the same picture with pixels half as
+wide. Retail capture of the running game confirms the result — the picture is pillarboxed inside a 16:9
+frame at **4:3**, so a framebuffer pixel is about 0.646 as wide as it is tall. The stricter hardware reading
+(PAL fills the 4:3 raster with 256 lines, of which this game draws 248) gives exactly 2:3 and a 1.376:1
+picture; the two differ by 3%.
+
+Two pieces of the disc's own art agree independently: the `qk_menu.lbm` faces and the 8 × 8 `chars.lbm` HUD
+face are drawn texel-for-pixel into square rectangles and are both authored about 1.35× wider than tall.
+
+The GTE projects with one distance for both axes — `H` reaches `SX` and `SY` alike — so the frustum is
+symmetric in framebuffer pixels while the display is not. That makes every layout's picture horizontally
+compressed by exactly 1.5, and there is nothing anywhere that undoes it: the only matrix scale on the world's
+chain is the uniform `(768, 768, 768)` at `0x800AEB30` applied per column by `0x80055AF8` (an object scale of
+3), and the view weapon's chain has no scale call at all. The squeeze is the game's.
+
+| layout | viewport | proj | horizontal | vertical | shown at | squeeze |
+| --- | --- | --- | --- | --- | --- | --- |
+| one | 512 × 248 | 160 | 116.0° | 75.6° | 1.376:1 | 1.50 |
+| two-horizontal | 512 × 123 | 160 | 116.0° | 41.7° | 2.775:1 | 1.51 |
+| two-vertical | 255 × 248 | 175 | 71.9° | 70.6° | 0.685:1 | 1.49 |
+| quad | 256 × 123 | 160 | 77.3° | 41.7° | 1.388:1 | 1.51 |
+| full-single | 512 × 248 | 320 | 77.3° | 42.4° | 1.376:1 | 1.50 |
+
+`q2psx-inspect screen` prints these under each layout, and `q2_screen_view_fov` computes them; the one-player
+row is confirmed against capture (openquestions, *In-game conformance*). The bring-up installs `proj` 160
+before any layout exists — `SetGeomScreen(gp+1608)` at `0x8007656C`, and the halfword at `0x800AEC48` is
+`0x00A0`.
 * **full-single is single buffered.** It is the only layout that calls `SetDefDispEnv` at all, and it hands
   each buffer's env that buffer's own origin — both (0,0) here — undoing the cross pairing. It is the boot /
   front-end state (reached from `0x8006DFB8`). The other four layouts never touch the display envs; what

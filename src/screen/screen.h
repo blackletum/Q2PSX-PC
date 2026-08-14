@@ -731,11 +731,25 @@ void q2_screen_pixel_aspect(const q2_screen *s, int *num, int *den);
 /* How the finished picture is fitted into a host window of `win_w` x `win_h`. */
 typedef enum q2_screen_fit {
     /*
-     * The console's own pixel shape, letterboxed or pillarboxed to fit whatever
-     * the window is. This is the only one that shows what the television showed,
-     * and it is the default.
+     * The drawn buffer as exactly 4:3, letterboxed or pillarboxed into whatever
+     * the window is. THE DEFAULT, and it is the default because it is what
+     * capture of the running game shows: a 4:3 picture pillarboxed inside a 16:9
+     * frame, with the 512 x 248 buffer filling it.
+     *
+     * It differs from FIT_TELEVISION below by 3%, because this treats the 248
+     * lines the game draws as the whole 4:3 picture where that one treats them
+     * as 248 of PAL's 256. Three percent is not worth arguing about; matching
+     * what the game is actually played and captured at is.
      */
-    Q2_SCREEN_FIT_TELEVISION = 0,
+    Q2_SCREEN_FIT_FULL_4_3 = 0,
+
+    /*
+     * The strict reading of the hardware: a pixel is 4*256 : 3*512 = 2:3, so the
+     * 248 drawn lines are 248/256 of the 4:3 raster and the picture comes out at
+     * 1.376:1 with the eight missing lines as extra border. Very slightly taller
+     * than FULL_4_3 and arguably what a real television did.
+     */
+    Q2_SCREEN_FIT_TELEVISION,
 
     /*
      * One buffer pixel to one window pixel, aspect preserved. Not what the
@@ -743,13 +757,6 @@ typedef enum q2_screen_fit {
      * framebuffer dump of this game is, so it is worth being able to ask for.
      */
     Q2_SCREEN_FIT_SQUARE,
-
-    /*
-     * Force the drawn buffer to exactly 4:3, ignoring the eight lines the game
-     * leaves as border. A hair taller than TELEVISION and what a "4:3" setting
-     * on a display would give.
-     */
-    Q2_SCREEN_FIT_FULL_4_3,
 
     /* Fill the window. Whatever shape it is. */
     Q2_SCREEN_FIT_STRETCH,

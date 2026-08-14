@@ -1231,6 +1231,15 @@ static void test_pixel_aspect(void)
     q2_screen_window_size(&s, Q2_SCREEN_FIT_SQUARE, 1, &w, &h);
     CHECK(w == 512 && h == 248, "square %dx%d, expected 512x248", w, h);
 
+    /*
+     * FULL_4_3 is the DEFAULT — a zero-initialised caller gets it — and it is
+     * the shape the running game is captured at: 512 across, 384 down, exactly
+     * 4:3, three percent shorter than the strict pixel reading above.
+     */
+    CHECK(Q2_SCREEN_FIT_FULL_4_3 == 0, "4:3 must be what a memset gives");
+    q2_screen_window_size(&s, Q2_SCREEN_FIT_FULL_4_3, 1, &w, &h);
+    CHECK(w == 512 && h == 384, "4:3 picture %dx%d, expected 512x384", w, h);
+
     q2_screen_free(&s);
 }
 

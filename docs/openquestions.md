@@ -1478,6 +1478,60 @@ item records at run time instead of transcribing a table, so there is nothing to
 
 ---
 
+## In-game conformance against retail capture
+
+The UI section above compared twelve menu screenshots. This is the first comparison against a frame of the
+game being **played** — the BASE0 spawn, looking down the opening canyon, blaster in hand — and it settles
+two things that the executable alone could not, and opens one.
+
+**The picture is 4:3.** The capture is pillarboxed inside a 16:9 frame with the game filling a 4:3
+rectangle, so the 512 × 248 buffer is presented at 1.333:1 and a framebuffer pixel is about 0.646 as wide as
+it is tall. Nothing in the executable says this — it is what the display does with what the GPU emits — and
+the port had been showing the buffer one pixel per window pixel, which is a **1.5× horizontal stretch**.
+`Q2_SCREEN_FIT_FULL_4_3` is now the default and the client letterboxes or pillarboxes into any window;
+`Q2_SCREEN_FIT_TELEVISION` keeps the stricter hardware reading (all five horizontal modes span the same
+active line, PAL fills the 4:3 raster with 256 of them, so a pixel is exactly 2:3 and the 248 drawn lines
+come out at 1.376:1). The two differ by 3%.
+
+Two independent pieces of the game's own art agree with a pixel narrower than it is tall, which is worth
+recording because it is evidence internal to the disc: the `qk_menu.lbm` menu faces and the 8 × 8 `chars.lbm`
+HUD face are both drawn texel-for-pixel into square rectangles and are both authored about 1.35× wider than
+tall — a normal letterform only once the display has narrowed the pixels.
+
+**The world's field of view is right.** With `proj` 160 over the 512 × 248 viewport the reconstruction puts
+the canyon's sky wedge at 0.37–0.53 of the picture width against the capture's 0.33–0.47 — the same 0.16
+width, offset by a slightly different yaw. So the one-player layout's 116.0° × 75.6° is confirmed against the
+running game, and with it the reading that `view+262` is `SetGeomScreen`'s argument.
+
+That also means **the console's own picture is anamorphic**, by exactly 1.5. The GTE has one projection
+distance and it reaches SX and SY alike, so the frustum is symmetric in framebuffer pixels while the display
+is 1.333:1. There is no term anywhere that undoes it: the only matrix scale on the world's transform chain is
+the uniform `(768, 768, 768)` at `0x800AEB30`, applied per column by `0x80055AF8` — an object scale of
+exactly 3 — and the view weapon's own chain (`RotMatrix` at `0x8004F464`, `MulMatrix` at `0x8004F474`) has no
+scale call at all. The squeeze is the game's, not the reconstruction's, and must not be "corrected".
+
+- [ ] 46. **The view weapon sits too far left, and it is not the projection.** Placed through
+      `q2_vw_place` at the BASE0 spawn, the blaster's drawn geometry spans x 278…376 of the 512-wide
+      viewport — 0.54…0.73 across. The capture has it running from about 0.79 to off the right edge, with
+      the forearm entering from the bottom-right corner rather than from the bottom centre. Vertical
+      placement and apparent size are close (the port's y 143…258 against a capture top edge at ≈0.62 of
+      the picture height); it is the horizontal offset that is wrong, by roughly a quarter of the screen.
+
+      What has been ruled out. The **projection** is shared with the world, which the sky-wedge measurement
+      above confirms is right, and the world and the weapon go through the same `SetGeomScreen` /
+      `SetGeomOffset` pair — the eleven `SetGeomScreen` call sites are all viewport or bring-up code, none
+      of them in the weapon's `0x8004Fxxx` range, and the only inline writes to `OFX`/`OFY` are at
+      `0x80065C54` and `0x80065E0C`, in the world renderer's own displaced-centre path and its restore.
+      A **scale** is ruled out by the matrix chain above. The `286 - viewOffset` eye base is confirmed at
+      `0x8004F608` and the drop with a crouch measures 290 as it should.
+
+      What is left is the translation itself: `q2_vw_place` puts the grip 140 right, 160 down and 44 forward
+      of the eye in view space at rest, and something about that triple — which key the idle clip rests on,
+      how `cur_t` interpolates into it, or whether a per-part offset is being dropped — is short by about
+      the same quarter screen. `0x8004F5E0`'s operands are the thing to read next.
+
+---
+
 ## ⚠ Security note (carried forward, do not drop)
 
 - [ ] 38. A prior research pass reported that a fan wiki page about this game served content containing
