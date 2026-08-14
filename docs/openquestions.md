@@ -3777,8 +3777,25 @@ nothing saying so.
       gib, scripted, spark and laser end — and none of them is the pickup burst. Choosing one would invent
       an effect rather than reconstruct it, so nothing is drawn yet. `0x8005B6C0` is the original's, and
       reading its particle table is what this needs; the event carries the position and the glow colour
-      already, so only the preset is missing. The light event has not fired in any capture yet, so whether
-      the client's light world can take a transient is untested.
+      already, so only the preset is missing.
+
+      **And the "the light event has not fired in any capture, so the transient path is untested" line was
+      also a statement about this port, not about the disc.** `q2_light_add_dynamic` transcribes
+      `0x80075C34`, and asking who calls it:
+
+          800288C8  80028E6C  8002A868  80031048  80031268  80048228  800482A0
+          8004AD20  8004B8A0  8004CA14  8004CDE4  800586D0  800597C0  8005A760
+          800648B8
+
+      **Fifteen call sites**, spread from the script area through the item and weapon code to `0x8005A760`
+      — which is also one of the twenty-three writers of `entity+0x100`. This port raises the light event
+      from exactly ONE place, `item.c:858`, for glowing items, and no item on this disc glows. So the
+      transient path is not untestable: **fourteen of the fifteen things that would exercise it are simply
+      not reconstructed yet**, and their addresses are listed above.
+
+      That is the third claim in a row of the form "the disc cannot exercise this" that turned out to mean
+      "this port only implements one way in". Dynamic lighting moves off the blocked list and onto the work
+      list, with a fifteen-entry starting point.
 
 ---
 
