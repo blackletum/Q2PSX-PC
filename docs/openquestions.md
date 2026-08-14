@@ -3878,8 +3878,31 @@ nothing saying so.
       for the site whose code was actually read. Each site's own `a2`/`a3` construction has to be read the
       same way `0x80048228`'s was.
 
-      Still not done: fourteen of the fifteen sites — but they now share a dumped table rather than fifteen
-      separate hunts.
+      **The second site is identified: `0x8004AC4C` is the ROCKET.** It is referenced only as a materialised
+      constant, never called — an entity think pointer — and the code that installs it names it beyond doubt:
+
+          8004B030  addiu v0, zero, 20000    ; the rocket's speed (projectile.h)
+          8004B034  sh    v0, 244(s0)
+          8004B03C  addiu v0, v0, -21428     ; 0x8004AC4C
+          8004B040  sw    v0, 60(s0)         ; installed as the entity's think at +0x3C
+
+      Its light, at `0x8004AD20`, is the same call shape as the projectile's but sources differently:
+
+          a2 = 0x800AE990 packed lo | hi<<16   -- 2000 and 1000
+          a3 = 0x800AE994                      -- 0
+          a1 = FOUR STACK BYTES at sp+32..35   -- NOT the preset table
+
+      So the rocket takes its radii from the palette and its **colour from somewhere computed** — the light
+      varies per call, which is what a rocket whose trail dims would look like. Reading it means finding what
+      fills `sp+32..35`, not reading another preset.
+
+      Two cautions recorded rather than resolved. The pair reads `2000, 1000` — **descending**, where the
+      projectile's `300, 800` ascends — so under the obvious `(inner, outer)` mapping the rocket's inner
+      exceeds its outer. Either the packing is not uniform across sites or one of these two readings is
+      wrong, and until that is settled nothing here should be wired.
+
+      Still not done: fourteen of the fifteen sites — but they share a dumped table now, and two of the
+      fourteen are identified (rocket, and `0x8004B2B4` reached the same way).
 
 ---
 
