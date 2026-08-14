@@ -670,9 +670,17 @@ static void client_cre_sound(q2_monster *m, int which, void *user)
      * this stays silent rather than guessing, and the index is recorded so a
      * caller can see what was asked for.
      */
-    (void)name;
     c->cre_sounds++;
     c->cre_last_sound = which;
+
+    /*
+     * The Soldier's names are read out of its module and every one of them is
+     * in the map's bank, so it can actually be played. Another creature's
+     * table has not been read, so it stays silent rather than borrowing these.
+     */
+    name = q2_cre_soldier_sound_name(which);
+    if (name)
+        client_play_sound(c, name);
 }
 
 /*

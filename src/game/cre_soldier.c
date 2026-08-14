@@ -74,17 +74,51 @@
 #define FRAME_walk101     215
 
 /* ------------------------------------------------------------------------- */
-/* Sounds. The module holds handles; the port holds ids and leaves the        */
-/* playing to whatever the host has wired up.                                 */
-/* ------------------------------------------------------------------------- */
+/*
+ * Sounds — and the module names them itself.
+ *
+ * This used to be five ids numbered 0..4 with addresses recorded for the first
+ * three and the last two simply following on. Two of them were wrong, and the
+ * module says so: it carries **two parallel tables**, eleven resolved handles
+ * at `module+0x32A0` on a 4-byte stride and eleven 12-byte NAME fields at
+ * `module+0x1D0`, sharing one index. The handles are zero on disc because the
+ * engine fills them at load; the names are on the disc and read straight out:
+ *
+ *     0  sol_idle1     4  sol_pain3     8  wep_machgf1b
+ *     1  sol_sght1     5  sol_deth1     9  wep_shotgf1b
+ *     2  sol_pain1     6  sol_deth2    10  msc_udeath
+ *     3  sol_pain2     7  sol_deth3
+ *
+ * That confirms the three ids the enum already had — `SOL_SND_COCK` at
+ * `+0x32C4` is index 9, `wep_shotgf1b`, which is a shotgun guard's own fire
+ * sound — and corrects the two it had guessed: pain is index 2 and death is
+ * index 5, not 3 and 4, which were `sol_pain2` and `sol_pain3`.
+ *
+ * `q2_cre_soldier_sound_name` hands the host the name so it can be matched in
+ * the map's bank, where the same eleven exist.
+ */
 typedef enum sol_sound {
-    SOL_SND_IDLE = 0,       /* module+0x32A0 */
-    SOL_SND_SIGHT,          /* module+0x32A4 */
-    SOL_SND_COCK,           /* module+0x32C4 */
-    SOL_SND_PAIN,
-    SOL_SND_DEATH,
-    SOL_SND_COUNT
+    SOL_SND_IDLE  = 0,      /* module+0x32A0  sol_idle1    */
+    SOL_SND_SIGHT = 1,      /* module+0x32A4  sol_sght1    */
+    SOL_SND_PAIN  = 2,      /* module+0x32A8  sol_pain1    */
+    SOL_SND_DEATH = 5,      /* module+0x32B4  sol_deth1    */
+    SOL_SND_COCK  = 9,      /* module+0x32C4  wep_shotgf1b */
+    SOL_SND_COUNT = 11
 } sol_sound_id;
+
+/* The eleven names, in the module's own order. */
+static const char *const k_sol_sound_names[SOL_SND_COUNT] = {
+    "sol_idle1", "sol_sght1", "sol_pain1", "sol_pain2", "sol_pain3",
+    "sol_deth1", "sol_deth2", "sol_deth3",
+    "wep_machgf1b", "wep_shotgf1b", "msc_udeath"
+};
+
+const char *q2_cre_soldier_sound_name(int which)
+{
+    if (which < 0 || which >= SOL_SND_COUNT)
+        return NULL;
+    return k_sol_sound_names[which];
+}
 
 void (*q2_cre_sound_fn)(q2_monster *m, int which, void *user);
 void  *q2_cre_sound_user;

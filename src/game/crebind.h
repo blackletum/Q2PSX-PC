@@ -140,6 +140,13 @@ void q2_cre_run_think(q2_monster *m, u32 index);
 void q2_cre_set_skill(s32 skill);
 s32  q2_cre_skill(void);
 
+/*
+ * The bank name for one of the Soldier's eleven sounds, or NULL. The module
+ * carries the names itself, 12-byte fields at `module+0x1D0` parallel to the
+ * handle table at `+0x32A0`; see cre_soldier.c.
+ */
+const char *q2_cre_soldier_sound_name(int which);
+
 /* Find the implementation for a module name, or NULL when the port has none. */
 const q2_cre_impl *q2_cre_impl_find(const char *module_name);
 

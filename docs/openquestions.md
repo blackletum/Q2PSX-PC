@@ -1780,13 +1780,25 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
 `cre_pain1` and `cre_die1` for indices 0 and 1, and that was an invention twice over:
 the bank has no such names, so it silently played nothing, and the index-to-name
 mapping had never been read. It is gone.
-What replaces it is the bank's real convention, which is worth having: sounds are
-`<creature>_<action><n>`, the same shape as `wep_` and `itm_`. BASE0 carries
-`sol_atck1`, `sol_atck2`, `sol_atck3`, `sol_deth1..3`, `sol_idle1`, `sol_pain1`,
-`sol_pain2` and `sol_srch1` — exactly the five families id's soldier has. So the names
-are there to be matched the moment the module's own sound table says which index is
-which. Measured meanwhile: over 1200 frames on BASE1 the hook is asked for a sound
-**21 times**, so the path works and only the mapping is missing.
+What replaces it is the module's own table, which turned out to be on the disc all
+along. A creature module carries **two parallel tables**: eleven resolved handles at
+`module+0x32A0` on a 4-byte stride, zero on disc because the engine fills them at
+load, and eleven 12-byte NAME fields at `module+0x1D0`, which are not:
+
+        0  sol_idle1     4  sol_pain3     8  wep_machgf1b
+        1  sol_sght1     5  sol_deth1     9  wep_shotgf1b
+        2  sol_pain1     6  sol_deth2    10  msc_udeath
+        3  sol_pain2     7  sol_deth3
+
+They share one index, and `cre_soldier.c` already recorded three handle addresses
+against its enum — which is what makes this checkable rather than merely plausible.
+All three agree: `SOL_SND_COCK` at `+0x32C4` is index 9, `wep_shotgf1b`, a shotgun
+guard's own fire sound. **And the two the enum had guessed were wrong**: it numbered
+pain and death 3 and 4, following on from the three it knew, where the table says 2
+and 5 — 3 and 4 are `sol_pain2` and `sol_pain3`.
+Every one of the eleven is in the map's bank, so the port now plays them. Another
+creature's table has not been read, so those stay silent rather than borrowing the
+Soldier's.
 
 **Nothing had ever set the action hooks.** `crebind.h` defines a sound hook, a
 fire hook and a melee hook, and the only definitions of the setters were in
