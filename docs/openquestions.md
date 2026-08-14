@@ -3932,8 +3932,33 @@ nothing saying so.
       inner > outer underflows to a huge denominator and the light comes out at essentially zero — it would
       not crash, it would silently do nothing.
 
-      **A light that silently does nothing is the worst thing to ship**, because it looks like the feature is
-      present. The rocket stays unwired until one of the three readings is settled.
+      **All three readings are now settled, and the answer is that the port is already faithful.**
+
+      *Independent globals?* No. Every reference to `0x800AE990` and `0x800AE958` computes the base with an
+      `addiu` and reads `+0` and `+2` from it; the `+2` halfword has **no independent reference anywhere in
+      the image**. They are pairs.
+
+      *Misread site?* No. The rocket's packing is instruction-for-instruction identical to the projectile's —
+      `lhu` the high half at `+2`, `lhu` the low half at `+0`, `sll 16`, `or`. The raw words are
+      `0x0320012C` (300, 800) and `0x03E807D0` (2000, 1000).
+
+      *Does the runtime append honour the invariant?* It does not have to, because **the engine's own
+      attenuation underflows exactly as this port's does.** `0x80076040`:
+
+          80076044  lw   v0, 24(a0)       ; radius_sq  (outer)
+          80076090  sltu v0, v1, a1       ; dist >= outer -> return 0
+          80076098  subu v1, a1, v1       ; num = outer - dist
+          8007609C  lw   v0, 20(a0)       ; inner_radius_sq
+          800760B0  subu a0, a1, v0       ; den = outer - inner   <- UNSIGNED
+          800760D8  beq  a0, zero, ...    ; only exact zero is special-cased
+
+      Both scaled by the same factor, so `inner > outer` survives scaling and `den` wraps to a huge unsigned
+      value on real hardware just as it would here. **The rocket's dynamic light contributes essentially
+      nothing in the original game.** Not wiring it is not an omission — it is the same result, reached
+      without adding code that appears to do something.
+
+      That is worth more than the light would have been: one of the fifteen sites is now known to need no
+      reconstruction at all.
 
       Still not done: fourteen of the fifteen sites — but they share a dumped table now, and two of the
       fourteen are identified (rocket, and `0x8004B2B4` reached the same way).
