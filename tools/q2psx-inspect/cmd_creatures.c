@@ -153,6 +153,20 @@ static void report(const q2_creature *c, const q2_cre_impl *impl)
      * creature never reaches think 8" is answered here and nowhere else: if no
      * frame of any move carries it, nothing the AI does will run it.
      */
+    /* The module's sound-name table, so "this creature is silent" can be told
+     * apart from "this creature's table was not found". */
+    {
+        static const char *sn[32];
+        u32 ns, z;
+        memset(sn, 0, sizeof(sn));
+        ns = q2_creature_sound_names(c, g_img, g_img_size, sn, 32);
+        printf("    sounds    : %u named", ns);
+        for (z = 0; z < ns && z < 12; z++)
+            if (sn[z])
+                printf(" [%u]%.11s", z, sn[z]);
+        printf("%s\n", ns > 12 ? " ..." : "");
+    }
+
     printf("    per move  : (via) range -> think bytes\n");
     for (i = 0; i < c->move_count; i++) {
         const q2_cre_move *mv = &c->move[i];

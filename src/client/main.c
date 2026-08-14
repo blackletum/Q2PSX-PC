@@ -844,10 +844,22 @@ static void client_cre_sound(q2_monster *m, int which, void *user)
      */
     /*
      * The Soldier's names are transcribed; every other module carries its own
-     * table and it is now read the same way, so all seven creatures make their
-     * own sounds instead of six of them being silent. The transcription is
-     * preferred where it exists because it was read out of code rather than
-     * inferred from slot order.
+     * table and it is read the same way. The transcription is preferred where it
+     * exists because it was read out of code rather than inferred from slot
+     * order.
+     *
+     * NOT "all seven creatures make their own sounds", which this comment used
+     * to claim. `q2psx-inspect creatures` prints each table, and two of the
+     * seven come back EMPTY:
+     *
+     *     Soldier  8   Insane 3   Arachner 6   Gunner 6   Infantry 4
+     *     Tankcomm 0   Berserk 0
+     *
+     * The finder locates the module's own name string and then takes the first
+     * run of three consecutive 12-byte name slots after it; for those two that
+     * heuristic finds nothing. Their sounds ARE on the disc -- 63 VAG entries
+     * begin `tnk_` -- so this is a gap in the finder, not in the data. See
+     * openquestions #60 and #61.
      */
     name = q2_cre_soldier_sound_name(which);
     if (!name)

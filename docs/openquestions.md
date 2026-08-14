@@ -4131,5 +4131,25 @@ nothing saying so.
       remaining ~19 are neither VAG headers nor module copies. Something else on the disc lists these names,
       and finding what will probably answer this question and the "which bank holds them" question together.
 
+      **Located.** Printing every creature's table shows the finder works for five of seven and fails for
+      exactly two:
+
+          Soldier  8  sol_idle1 sol_sght1 sol_pain1 sol_pain2 sol_pain3 sol_deth1 sol_deth2 sol_deth3
+          Insane   3  insane2 insane9 msc_udeath
+          Arachner 6  ara_melee1 ara_idle1 ara_srch1 ara_sght1 msc_udeath Melee
+          Gunner   6  gun_pain1 gun_death1 gun_sight1 gun_srch1 gun_idle1 msc_udeath
+          Infantry 4  inf_pain1 inf_pain2 inf_deth1 inf_deth2
+          Tankcomm 0
+          Berserk  0
+
+      `q2_creature_sound_names()` finds the module's own name string and then takes the first run of three
+      consecutive 12-byte name slots after it. For the Tank Commander and the Berserk that heuristic returns
+      nothing, so both are silent for the same reason — **and `main.c` carried a comment claiming "all seven
+      creatures make their own sounds", which is now corrected in place.**
+
+      So this is one bug, not two, and it is in the finder rather than in the data. The next step is to find
+      where those two modules keep their tables — the `tnk_` strings are on the disc (#60), so they exist
+      somewhere the current scan does not reach.
+
       **Do not conclude the sounds are absent.** That was the previous answer here for many passes and it was
       wrong; see #60 for how the mistake was made and how it was caught.
