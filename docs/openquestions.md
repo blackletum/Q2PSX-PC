@@ -4458,7 +4458,7 @@ nothing saying so.
       question, and it decides whether this port should be reading zone Events after all or some pristine
       second copy of COMMON's.
 
-- [ ] 57. **The modules name moves this port's decoder never reaches — and the first count of them was junk.**
+- [x] 57. **The modules name moves this port's decoder never reaches — and the first count of them was junk. CLOSED at THREE, all the Soldier's.**
       Chasing the three unnamed moves from 51h turned up a namer bug and then a measurement trap.
 
       **The bug:** `q2_creature_move_names` matched a name record to a move and then `break`, so one record
@@ -4487,6 +4487,32 @@ nothing saying so.
       42 is still an upper bound, not a count: junk like `"! @"` and `"%(E"` survives the tighter filter.
       Tightening it further, or reaching those moves in the decoder, is the next step. **Do not quote 42 as
       a finding** — quote the named examples, which are individually checkable.
+
+      **CLOSED, and the answer came from the decoder rather than from the filter.** #58's merge-splitting and
+      #59's named-but-unreached installer between them took the count from 42 to **three**, and all three are
+      the Soldier's:
+
+          30-31  "Death6"
+          32-35  "Fire 3 Aim"
+          36-38  "Fire 3 Shoot"
+
+      A structural test was tried on top and is NOT kept: requiring a candidate record to have a neighbour at
+      the 20-byte table stride — which is what actually separates a record from a lucky window — changes the
+      count by zero. The text filter was already sufficient on this disc, and adding a rule that rejects
+      nothing is code with no evidence behind it.
+
+      **What is peculiar about the three is the fourth.** `Fire 3 Done` (39-44) IS decoded and installed, so
+      the Soldier's third firing sequence is not absent from the module — only its aim and its shoot are.
+      Scanning the whole image word-aligned for a move record `{u32 first, u32 last, ...}` carrying 30-31,
+      32-35 or 36-38 finds **zero candidates**, where every range the installer does place finds one. So the
+      module names an aim and a shoot it carries no record for, and carries a record for the recovery that
+      follows them.
+
+      Two readings fit and the disc does not separate them: the pair was cut and the name table kept, or
+      their records are built at run time by a callback rather than sitting in the image. What can be said
+      is that the residue is three records, they are named, they are all one creature's, and the decoder is
+      not what is missing them — the same shape as the Tank Commander's five `tnk_` sounds that appear in no
+      sound bank (#104).
 
 - [x] 58. **Two of the four 3:1 exceptions are a DECODER bug: it merges adjacent moves into one.**
       Printing the unclaimed name records WITH their frame ranges — rather than just their names — answers
