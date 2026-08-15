@@ -328,7 +328,6 @@ q2_event_outcome q2_event_rt_update(q2_event_rt *rt)
         u32 offset;
         s32 slot;
         q2_event_record rec;
-        u32 i;
 
         /* Take from the front so triggers fire in the order they were queued. */
         offset = rt->pending[0];

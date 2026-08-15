@@ -997,9 +997,15 @@ typedef struct q2_fx_laser_result {
 /* Four groups per lit end. 0x8004908C / 0x80049138 both loop `s2 < 4`. */
 #define Q2_FX_LASER_END_GROUPS 4
 
+/*
+ * `area` is s16 and not u8 because the original's is: the script's own beams
+ * reach here with a raw collision-node index (0x8002EEB4 loads it with `lh`),
+ * and a level with more than 256 nodes would fold two rooms onto one otherwise.
+ * The end bursts still take a byte, which is the original's own narrowing.
+ */
 bool q2_fx_laser(q2_fx_world *w, q2_rng *rng, u32 kind,
                  const s32 from[3], const s32 to[3],
-                 u8 area, u32 ends, q2_fx_laser_result *out);
+                 s16 area, u32 ends, q2_fx_laser_result *out);
 
 /* ------------------------------------------------------------------------- */
 /* Drawing                                                                    */

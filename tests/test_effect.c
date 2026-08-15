@@ -11,6 +11,7 @@
  * LOOKUP visible in the assertion instead of hiding it behind a gradient.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "effect.h"
@@ -1313,6 +1314,134 @@ static void test_trail_band(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * An effect and the wall behind it must be measured against the SAME far
+ * distance, or the sort between them means nothing.
+ *
+ * This is not a preference. The effects used a fixed `depth >> 2` while the
+ * world and the models had both moved to the viewport's far_z, and against a
+ * real viewport slice that shift saturates everything past about 200 units onto
+ * the far end — which is the end drawn FIRST. A level's laser beams reached the
+ * table (970 faces) and changed seven pixels, because every one of them was
+ * sorted behind the walls it was in front of.
+ *
+ * So the check is a comparison, not a constant: the bucket an effect at depth d
+ * lands in must be the bucket the world's own mapping gives d.
+ */
+/* screen.h is not on this test's include path; the table size is the point,
+ * so it is named here and checked against the client's own constant by the
+ * client build rather than pulled in. */
+#define Q2_TEST_OT_ENTRIES 217
+
+static void test_effect_sorts_with_the_world(void)
+{
+    q2_fx_world w;
+    q2_rng rng;
+    q2_camera cam;
+    psx_ot ot;
+    gte_state gte;
+    s32 from[3], to[3];
+    u32 i;
+    u32 near_bucket = 0, far_bucket = 0;
+    bool got_near = false, got_far = false;
+
+    printf("sort: an effect and the world share one depth scale\n");
+
+    if (psx_ot_init(&ot, Q2_TEST_OT_ENTRIES, 4096) != Q2_OK) {
+        printf("  FAIL  could not allocate an ordering table\n");
+        g_failures++;
+        return;
+    }
+
+    gte_init(&gte);
+    gte_set_projection(&gte, 256, 256, 124);
+
+    memset(&cam, 0, sizeof(cam));
+    cam.projection = 256;
+    cam.far_z      = Q2_CAMERA_FAR_DEFAULT;
+
+    q2_fx_world_init(&w, &g_tab);
+    q2_rng_seed(&rng, 7);
+
+    /*
+     * Two beams down the view axis, one near and one far. Both are broadside
+     * enough to project, and the only thing that separates them is depth.
+     */
+    from[0] = -600; from[1] = 0; from[2] = 700;
+    to[0]   =  600; to[1]   = 0; to[2]   = 700;
+    check(q2_fx_beam_add_style(&w, from, to, 16, 0, 0), "a near beam queued");
+
+    from[2] = 5200;
+    to[2]   = 5200;
+    check(q2_fx_beam_add_style(&w, from, to, 16, 0, 0), "a far beam queued");
+
+    psx_ot_clear(&ot);
+    check(q2_fx_build_ot(&w, &cam, 0, &ot, &gte) > 0,
+          "both reached the table");
+
+    /*
+     * Which bucket each primitive landed in, read off the table's own heads
+     * rather than off the primitive — `psx_prim.otz` keeps the DEPTH it was
+     * offered, and the whole question here is what that depth became.
+     */
+    for (i = 0; i < (u32)Q2_TEST_OT_ENTRIES; i++) {
+        s32 head = ot.bucket_head[i];
+
+        if (head < 0)
+            continue;
+        if (!got_far) { far_bucket = i; got_far = true; }
+        near_bucket = i;
+        got_near = true;
+    }
+
+    check(got_near && got_far, "both beams landed somewhere");
+
+    /*
+     * The world's own answer for those two depths, computed the way world.c
+     * computes it: scale by far_z into the span, then let psx_ot_add invert.
+     */
+    {
+        u32 span = psx_ot_bucket_span(&ot);
+        u32 wn = (u32)(((u64)700  * span) / (u32)cam.far_z);
+        u32 wf = (u32)(((u64)5200 * span) / (u32)cam.far_z);
+
+        if (wn >= span) wn = span - 1;
+        if (wf >= span) wf = span - 1;
+
+        s32 wall_near = (s32)psx_ot_depth_bucket(&ot, (u16)wn);
+        s32 wall_far  = (s32)psx_ot_depth_bucket(&ot, (u16)wf);
+
+        /*
+         * Within a bucket, not exactly on one: a beam's depth is the mean of
+         * its four projected corners and the hull's radius moves those by a
+         * unit or two. Demanding equality would be pinning the hexagon, not
+         * the sort.
+         */
+        check(labs((long)near_bucket - wall_near) <= 2,
+              "the near beam lands where a wall at 700 would");
+        check(labs((long)far_bucket - wall_far) <= 2,
+              "the far beam lands where a wall at 5200 would");
+
+        /* And the ordering: bucket 0 is drawn first, so far must be lower. */
+        check(far_bucket < near_bucket,
+              "the far beam is drawn before the near one");
+
+        /*
+         * The defect, as a value rather than a story. Under the fixed shift
+         * this replaced, the NEAR beam's depth of 700 became otz 175 and landed
+         * in bucket 41 — while the wall at the same 700 units landed in 193.
+         * Bucket 41 is drawn first. The beam was in front of the wall in the
+         * world and behind it on the screen, every frame, and that is exactly
+         * how eleven queued beams and 970 emitted faces came to change seven
+         * pixels.
+         */
+        check((s32)psx_ot_depth_bucket(&ot, (u16)(700u >> 2)) < wall_near,
+              "the shift this replaced buried a near effect behind its wall");
+    }
+
+    psx_ot_free(&ot);
+}
+
 int main(void)
 {
     printf("effect system\n\n");
@@ -1336,6 +1465,7 @@ int main(void)
     test_gib_blood_colour();
     test_debris();
     test_build_ot();
+    test_effect_sorts_with_the_world();
     test_texture_survives_clear();
     test_timed_beams();
     test_glint_script_scan();

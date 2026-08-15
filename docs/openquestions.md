@@ -5845,6 +5845,10 @@ projection is right the weapon comes with it, and the two remaining entries on t
       none of them, which is the same shape as GLASS (#66) and means the same thing — it is reached from
       somewhere other than the trigger graph.
 
+      **Answered by #89, and the answer is that nothing is supposed to reach it.** A LASERBEAM is lit by
+      the bottom bit of its own first coordinate, carried in the ZONE's copy of the script, and the zone
+      load's registration pass is what raises it. Zero trigger runs was never evidence of a gap.
+
 - [x] 74. **STRING and SIMPLESOUND — the game speaks and makes noise.** Both were decoded long ago and
       neither was acted on. A trigger volume runs 33 STRING calls and all 33 SIMPLESOUND calls disc-wide,
       and the text is the map's own: JAIL2 says `Yellow Lasers deactivated`, LAB says `Access granted`,
@@ -6312,3 +6316,49 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
           Power2 -> command -> Boss1 -> Boss2 -> QENDMIS5
 
       twelve levels, five units, ending on the last unit's own end-of-mission screen.
+
+- [x] 89. **LASERBEAM — the beams a level ships, and the sort that was hiding them.** 72 items, zero reached
+      by a trigger volume, and the shape looked exactly like GLASS (#66). It is not that at all. Nothing is
+      supposed to reach a LASERBEAM: **which beams burn is a property of which zone the player is standing
+      in, and it is carried in the bottom bit of a coordinate.**
+
+      The constructor (`0x8002E718`) runs at every zone load and takes word 0 of each endpoint from the
+      OTHER buffer — the zone's own Events chunk, the #56 rebase. The exec (`0x8002E694`) then tests bit 0
+      of that word (`andi v0, v0, 1` at `0x8002E6C0`) and, if it is set, appends `{raiser, item}` to a
+      32-entry list at `0x800C7014`. A per-frame walk (`0x8002EE38`) re-submits the whole list for ever.
+
+      JAIL2's corridor grid is `X=7352` in COMMON and in zone 0, and `X=7353` in zones 1 and 2 — the same
+      coordinate with the bottom bit set, one unit wide of nothing. Disc-wide: **71 of the 72 beams are lit
+      in at least one zone, none is lit in every zone**, and the one lit nowhere is JAIL2's
+      `(0,0,0)->(0,0,0)` dead entry. Reading COMMON's copy alone calls 41 of 72 dark and is simply the wrong
+      buffer — the same mistake, in the same field, that #56 was about.
+
+      Two operand labels were wrong and are corrected in `userfuncs.c`. `+18` is not an OBJSLOT: the
+      constructor overwrites it with `q2_coll_find_node(PrimaryColl, &origin_a, hint -1, brute)`, so it is
+      the beam's **area**. `+34` is not a counter: it is the laser **kind**, clamped by the constructor to
+      the same six the dispatcher accepts (`sltiu v0, v1, 6`) — and all 72 disc beams are already in range,
+      which is what a kind field looks like and what a counter would not.
+
+      **This removes a lead #85 was following.** A LASERBEAM's `-1` at `+18` is not an unfilled object
+      handle; the field is not an object handle at all.
+
+      `gp+0x421C` is register-or-act, and LASERWALL proves it: the same flag, read at `0x8002E228`, sends it
+      to a list when set and straight to `T_Damage` (mod 11) when clear. A port need not model it — raising
+      the beams at zone load is when the console's registration pass raises them.
+
+- [x] 90. **Effects were sorted on a different depth scale from the world, and lost every argument.**
+      Found by wiring #89 and getting eleven beams queued, **970 faces emitted, and seven pixels different
+      on screen.**
+
+      `effect.c`'s `bucket_for` was `(depth / corners) >> 2` — the fixed shift the whole port used before
+      the viewport's far distance was available. `world.c` and `modeldraw.c` had both moved to `far_z`
+      scaling; the effects had not. Against the console's 217-bucket table (and a real viewport slice of 51)
+      the shift saturates: a beam 700 units away becomes otz 175 and lands in bucket 41, while the wall at
+      the same 700 units lands in 193. Bucket 0 is drawn first. **Every particle, glint and beam more than a
+      room away was emitted correctly, sorted behind the walls, and painted over.**
+
+      The fix is to share the world's mapping, and it is not a tuning choice: an effect and the wall behind
+      it have to be measured against the same far distance or the sort between them means nothing.
+      `tests/test_effect.c` now pins it by comparison rather than by constant — the bucket an effect at
+      depth d lands in must be the bucket the world's own mapping gives d — and asserts that the shift this
+      replaced buried a near effect behind its wall.

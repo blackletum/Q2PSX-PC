@@ -190,6 +190,9 @@ int cmd_zonescript(const disc *d, const char *only_map)
         brk_zone_rescue = 0;
     u32 live_glass_run = 0, live_glass_node = 0;
     u32 loadmap_calls = 0, live_loadmap = 0;
+    u32 laser_calls = 0, laser_lit = 0, laser_dark = 0, laser_clamped = 0;
+    u32 laser_zone_lit = 0, laser_always = 0;
+    u32 laser_kind[6];
     u32 secret_calls = 0, live_secret = 0;
     /*
      * CREBATCH names a Population GROUP. Whether that group claims a zone is
@@ -216,6 +219,7 @@ int cmd_zonescript(const disc *d, const char *only_map)
 
     memset(slot_hit, 0, sizeof(slot_hit));
     memset(slot_calls, 0, sizeof(slot_calls));
+    memset(laser_kind, 0, sizeof(laser_kind));
     memset(prim_run, 0, sizeof(prim_run));
     memset(prim_have, 0, sizeof(prim_have));
 
@@ -391,6 +395,68 @@ int cmd_zonescript(const disc *d, const char *only_map)
                                 if (call.prim >= 0 &&
                                     call.prim < Q2_UF_PRIM_COUNT)
                                     prim_have[call.prim]++;
+
+                                /*
+                                 * LASERBEAM, which no trigger reaches, and the
+                                 * reason it needs none.
+                                 *
+                                 * Its exec (0x8002E6C0) tests bit 0 of the
+                                 * first endpoint's X, and its constructor
+                                 * (0x8002E744) fills that word from the OTHER
+                                 * buffer — the zone's script — at load. So the
+                                 * enable flag is PER ZONE, and the same beam is
+                                 * lit in one room and dark in the next without
+                                 * anything firing. JAIL2's corridor grid is
+                                 * X=7352 in COMMON and in zone 0, and 7353 in
+                                 * zones 1 and 2: the coordinate with the bit
+                                 * set, one unit wide of nothing.
+                                 *
+                                 * Counting COMMON's copy alone therefore reads
+                                 * 41 of 72 beams as dark and is simply the
+                                 * wrong buffer. This counts per zone.
+                                 */
+                                if (call.prim == Q2_UF_LASERBEAM &&
+                                    item.len == 36) {
+                                    size_t boff = (size_t)(pp - cev.data);
+                                    s16 st = q2_rd_s16(pp + 34);
+                                    u32 zq, lit = 0;
+
+                                    laser_calls++;
+                                    if (st >= 0 && st < 6)
+                                        laser_kind[st]++;
+                                    else
+                                        laser_clamped++;
+
+                                    for (zq = 0; zq < zcount; zq++) {
+                                        if (boff + 36 > zev[zq].size)
+                                            continue;
+                                        if (q2_rd_s32(zev[zq].data + boff + 4)
+                                            & 1)
+                                            lit++;
+                                    }
+
+                                    laser_zone_lit += lit;
+                                    if (lit)
+                                        laser_lit++;
+                                    else
+                                        laser_dark++;
+                                    if (zcount && lit == zcount)
+                                        laser_always++;
+
+                                    if (verbose)
+                                        printf("    %s: LASERBEAM "
+                                               "(%d,%d,%d)->(%d,%d,%d)"
+                                               " kind %d, lit in %u of %u "
+                                               "zones\n",
+                                               g_maps[mi],
+                                               q2_rd_s32(pp + 4),
+                                               q2_rd_s32(pp + 8),
+                                               q2_rd_s32(pp + 12),
+                                               q2_rd_s32(pp + 20),
+                                               q2_rd_s32(pp + 24),
+                                               q2_rd_s32(pp + 28),
+                                               (int)st, lit, zcount);
+                                }
 
                                 if (call.prim == Q2_UF_CREBATCH) {
                                     char gname[Q2_UF_NAME_LEN + 1];
@@ -997,6 +1063,13 @@ int cmd_zonescript(const disc *d, const char *only_map)
     printf("    script LIGHT calls in COMMON: %u TIMEDLIGHT, %u FLKLIGHT;"
            " the trigger sweep RUNS %u of them\n",
            light_timed, light_flk, live_lit_run);
+    printf("    LASERBEAM items : %u - lit in at least one zone : %u, "
+           "in none : %u, in every zone : %u\n",
+           laser_calls, laser_lit, laser_dark, laser_always);
+    printf("      beam-zone pairs lit : %u\n", laser_zone_lit);
+    printf("      kind 0:%u 1:%u 2:%u 3:%u 4:%u 5:%u, out of range : %u\n",
+           laser_kind[0], laser_kind[1], laser_kind[2], laser_kind[3],
+           laser_kind[4], laser_kind[5], laser_clamped);
     printf("    breakable CALLs (GLASS, SHOOTTHEN) : %u\n", brk_calls);
     printf("      too short   : %u\n", brk_short);
     printf("      no object   : %u\n", brk_no_object);

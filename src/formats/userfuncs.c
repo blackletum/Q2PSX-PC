@@ -101,14 +101,45 @@ static const q2_uf_prim_info uf_table[Q2_UF_PRIM_COUNT] = {
     {20, 1, Q2_UF_OP_S16,     "damage",
      "T_Damage(entity, entity, damage, Q2_MOD_LASER, &entity.origin)"}}},
 
+/*
+ * CORRECTION — LASERBEAM's +18 is not an object slot, +34 is not a counter, and
+ * the enable flag is not a runtime toggle.
+ *
+ * All three were read off the operand shapes alone. Both halves of the UserFunc
+ * say otherwise, and the constructor at 0x8002E718 OVERWRITES two of the fields
+ * at every zone load:
+ *
+ *     8002E754  lw   v1, 4(v0)     ; origin_a word 0, from the ZONE's chunk
+ *     8002E768  jal  0x80044F54    ; q2_coll_find_node(PrimaryColl, &origin_a,
+ *     8002E780  sh   v0, 18(s0)    ;                   hint -1, brute)  -> +18
+ *     8002E778  slti v1, v1, 6     ; and +34, if it is NOT below six...
+ *     8002E784  sh   zero, 34(s0)  ; ...is zeroed
+ *
+ * so +18 is the collision node holding the near end — the beam's AREA — and
+ * +34 is the beam KIND, clamped to the same six the laser dispatcher accepts
+ * (`sltiu v0, v1, 6`). The per-frame walk at 0x8002EE38 passes both straight
+ * through as q2_fx_laser's third and fourth arguments, which is the check; and
+ * every one of the disc's 72 beams is already in range, which is what a kind
+ * field looks like and what a counter would not.
+ *
+ * Bit 0 of origin_a's X is real, but it is per ZONE: the word the exec tests
+ * (0x8002E6C0) is the one the constructor has just copied out of the zone's own
+ * Events chunk, so a beam is lit in the rooms whose script sets the bit and
+ * dark everywhere else. See levelbin.h for the whole mechanism.
+ *
+ * That also removes a lead #85 was following. A LASERBEAM's -1 at +18 is not an
+ * unfilled object handle; the field is not an object handle at all.
+ */
 {Q2_UF_LASERBEAM, "LASERBEAM", 36, true, true, 4, {
     {4,  1, Q2_UF_OP_VEC3_S32, "origin_a",
-     "absolute; restored from the pristine buffer by the constructor. Bit 0 "
-     "of the first word doubles as an enable flag"},
-    {18, 1, Q2_UF_OP_OBJSLOT,  "object", NULL},
-    {20, 1, Q2_UF_OP_VEC3_S32, "origin_b", "absolute"},
-    {34, 1, Q2_UF_OP_S16,      "counter",
-     "constructor zeroes it when it is below 6"}}},
+     "absolute; word 0 comes from the ZONE's chunk, and its bit 0 is the "
+     "per-zone enable flag the exec tests (0x8002E6C0)"},
+    {18, 1, Q2_UF_OP_S16,      "area",
+     "OVERWRITTEN at load with the collision node holding origin_a"},
+    {20, 1, Q2_UF_OP_VEC3_S32, "origin_b",
+     "absolute; word 0 also comes from the zone's chunk"},
+    {34, 1, Q2_UF_OP_S16,      "kind",
+     "the laser kind; the constructor zeroes it when it is 6 or more"}}},
 
 /* ---- movers ------------------------------------------------------------- */
 {Q2_UF_LIFT1, "LIFT1", 20, true, true, 5, {

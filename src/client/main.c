@@ -75,6 +75,7 @@
 #include "aiworld.h"
 #include "crebind.h"
 #include "creworld.h"
+#include "levelbin.h"
 #include "lighting.h"
 #include "rotator.h"
 #include "spacelights.h"
@@ -451,6 +452,21 @@ typedef struct client {
      * items, 20 MOVER_B and 292 MOVER_C stood still. It is the same shape as
      * the rotators before #56: a finished mechanism with nothing driving it.
      */
+    /*
+     * The beams a level ships. Built at load because their constructor runs at
+     * load — see levelbin.h — and re-queued every frame because the transient
+     * pool is refilled from empty each frame (effect.h).
+     */
+    q2_laserbeam_set  lasers;
+    u32               laser_drawn;
+
+    /* --at / --yaw: stand somewhere specific, for capture. */
+    s32               at[3];
+    s16               at_yaw;
+    bool              at_given;
+    bool              yaw_given;
+    bool              no_lasers;   /* --no-lasers: the before picture */
+
     q2_mover_set      movers;
     bool              movers_ready;
     u32               mover_triggers;   /* items the script reached */
@@ -2248,10 +2264,30 @@ static bool client_load_zone(client *c, const char *map, int index)
                         c->cam.pos[2] = sp.z;
                         c->cam.yaw    = sp.angle;
                         placed = true;
-                        Q2_INFO("spawned at '%s'", sp.name);
+                        Q2_INFO("spawned at '%s' (%d,%d,%d)",
+                                sp.name, sp.x, sp.y, sp.z);
                         break;
                     }
                 }
+                /*
+                 * `--at` overrides whatever placed the player, which is the
+                 * only way to photograph a part of a level a spawn point does
+                 * not look at. It is a capture tool and nothing else: the sim
+                 * is spawned at the overridden position, so the player really
+                 * is standing there and everything downstream — visibility,
+                 * the zone's own script, the creatures' interest — is the
+                 * game's, not a floating camera's.
+                 */
+                if (c->at_given) {
+                    c->cam.pos[0] = c->at[0];
+                    c->cam.pos[1] = c->at[1];
+                    c->cam.pos[2] = c->at[2];
+                    if (c->yaw_given)
+                        c->cam.yaw = c->at_yaw;
+                    Q2_INFO("--at (%d,%d,%d) yaw %d",
+                            c->at[0], c->at[1], c->at[2], (int)c->cam.yaw);
+                }
+
                 /* The sim borrows the triggers and script out of this file, so
                  * it has to outlive the zone. Release the previous map's copy
                  * and take ownership of this one. */
@@ -2625,6 +2661,16 @@ static bool client_load_zone(client *c, const char *map, int index)
                     c->zone.node_hidden       = c->node_hidden;
                     c->zone.node_hidden_count = c->node_hidden_count;
                 }
+
+                if (q2_laserbeams_build(&c->lasers, &ev, &uf,
+                                        &c->ev_operands,
+                                        c->sim[0].coll_primary.node_count
+                                            ? &c->sim[0].coll_primary
+                                            : NULL))
+                    Q2_INFO("lasers: %u beam%s raised%s",
+                            c->lasers.count,
+                            c->lasers.count == 1 ? "" : "s",
+                            c->lasers.declined ? " (some declared dark)" : "");
 
                 if (q2_movers_build(&c->movers, &ev) == Q2_OK) {
                     u32 opcode_built = c->movers.count;
@@ -3480,6 +3526,17 @@ static void client_input_simulated(client *c, float dt)
 
     /* The multiplayer session's own frame, on the same clock. */
     client_mp_tick(c, dt);
+
+    /*
+     * The level's own beams, re-queued because the transient pool empties every
+     * frame — which is exactly what the console's walk at 0x8002EE38 does with
+     * its own list, every frame, for ever. Not on the rotators' clock and not
+     * gated on them: a zone with lasers and no rotating brush is ordinary.
+     */
+    c->laser_drawn = c->no_lasers
+                     ? 0
+                     : q2_laserbeams_draw(&c->lasers, &c->sim[0].fx,
+                                          &c->sim[0].fx_rng);
 
     /* The rotating brushes, on the same 1/300 s clock as everything else. */
     if (c->rotators_ready) {
@@ -4549,6 +4606,15 @@ static void client_write_shot(client *c, bool numbered)
             }
         }
 
+    if (c->lasers.count || c->lasers.declined)
+        Q2_INFO("  lasers    %u raised in this zone, %u queued this frame, "
+                "%u declared dark here; pool %u queued %u dropped, "
+                "%u beam faces drawn",
+                c->lasers.count, c->laser_drawn, c->lasers.declined,
+                c->sim[0].fx.stats.beams_queued,
+                c->sim[0].fx.stats.beams_dropped,
+                c->sim[0].fx.stats.beam_faces_emitted);
+
     if (c->creatures_ready && c->creatures.set.count) {
         u32 i, live = 0, hunting = 0, dead = 0;
         long hp = 0;
@@ -5420,6 +5486,8 @@ static void usage(void)
     printf("  --frames N    stop after N frames\n");
     printf("  --shot P.ppm  write the console's own framebuffer to P.ppm\n");
     printf("  --shot-every N  ...and one every N frames, numbered\n");
+    printf("  --at X,Y,Z    stand here instead of at the zone's spawn point\n");
+    printf("  --yaw N       ...facing this way (the engine's 0..4095)\n");
 }
 
 int main(int argc, char **argv)
@@ -5460,6 +5528,21 @@ int main(int argc, char **argv)
             if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9')
                 c.fire_at_frame = strtol(argv[++i], NULL, 10);
             c.fire_interval = c.fire_at_frame > 0 ? c.fire_at_frame : 60;
+        }
+        else if (!strcmp(argv[i], "--at") && i + 1 < argc) {
+            int x = 0, y = 0, z = 0;
+            if (sscanf(argv[++i], "%d,%d,%d", &x, &y, &z) == 3) {
+                c.at[0] = x; c.at[1] = y; c.at[2] = z;
+                c.at_given = true;
+            } else {
+                fprintf(stderr, "--at wants X,Y,Z\n");
+                return 2;
+            }
+        }
+        else if (!strcmp(argv[i], "--no-lasers"))             c.no_lasers = true;
+        else if (!strcmp(argv[i], "--yaw") && i + 1 < argc) {
+            c.at_yaw = (s16)atoi(argv[++i]);
+            c.yaw_given = true;
         }
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc)
             c.frames_total = strtol(argv[++i], NULL, 10);

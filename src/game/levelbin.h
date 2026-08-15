@@ -59,7 +59,11 @@
 #ifndef Q2PSX_LEVELBIN_H
 #define Q2PSX_LEVELBIN_H
 
+#include "../formats/collision.h"
+#include "effect.h"
+#include "events.h"
 #include "population.h"
+#include "userfuncs.h"
 #include "q2psx.h"
 
 /* The group selector, `0x80056C60`. See the sweep above. */
@@ -128,5 +132,120 @@ u32 q2_levelbin_selected(const u8 *module, u32 size, u32 *out, u32 max);
 u32 q2_levelbin_selected_slot(const u8 *module, u32 size, s32 slot_off,
                               u32 *out, u32 max);
 
+
+
+/* ------------------------------------------------------------------------- */
+/* LASERBEAM — the beams a level ships                                        */
+/* ------------------------------------------------------------------------- */
+/*
+ * 72 `LASERBEAM` items on the disc and not one trigger volume reaches any of
+ * them. That looked like GLASS's problem (#66) — a primitive with no caller —
+ * and it is not. Nothing needs to reach a LASERBEAM. Which beams burn is a
+ * property of WHICH ZONE THE PLAYER IS STANDING IN, and it is carried in the
+ * bottom bit of a coordinate.
+ *
+ * THE CONSTRUCTOR, 0x8002E718, runs at every zone load:
+ *
+ *     8002E744  lw   v0, 372(gp)    ; the chunk being walked (COMMON's)
+ *     8002E748  lw   v1, 376(gp)    ; the chunk the engine reads from (the ZONE's)
+ *     8002E74C  subu v0, s0, v0     ; this item's offset...
+ *     8002E750  addu v0, v0, v1     ; ...rebased into the zone's copy
+ *     8002E754  lw   v1, 4(v0)      ; origin_a's first word, TAKEN FROM THERE
+ *     8002E760  lw   v0, 20(v0)     ; origin_b's, likewise
+ *     8002E758  addiu a2, zero, -1  ; hint  = -1
+ *     8002E764  addiu a3, zero, 1   ; brute = true
+ *     8002E768  jal  0x80044F54     ; q2_coll_find_node(PrimaryColl, &origin_a)
+ *     8002E780  sh   v0, 18(s0)     ; the NODE INDEX into item +18
+ *     8002E778  slti v1, v1, 6      ; and if +34 is NOT below six...
+ *     8002E784  sh   zero, 34(s0)   ; ...zero it
+ *
+ * THE EXEC, 0x8002E694, registers the beam if that word says to:
+ *
+ *     8002E6A8  lh   v0, 16924(gp)  ; the registration-pass gate, below
+ *     8002E6B8  lw   v0, 4(a2)      ; origin_a word 0...
+ *     8002E6C0  andi v0, v0, 1      ; ...bit 0 is the ENABLE FLAG
+ *     8002E6D4  slti v0, v1, 32     ; the list holds 32
+ *     8002E6F8  lhu  a1, 16936(gp)  ; the record now executing
+ *     8002E700  sh   a1, 0(v1)      ; -> 0x800C7014[n].raiser
+ *     8002E704  sh   v0, 2(v1)      ; -> 0x800C7014[n].item
+ *
+ * and the two halves together are the whole mechanism. The X the exec tests is
+ * not COMMON's X: it is the ZONE's, which the constructor has just copied over
+ * it. JAIL2's corridor grid is X=7352 in COMMON and in zone 0, and X=7353 in
+ * zones 1 and 2 — the same coordinate with the bottom bit set, one unit wide of
+ * nothing and invisible in a world this size. So the level author lights a grid
+ * in the rooms it guards by nudging one number, and the beam is dark everywhere
+ * else without a trigger, a timer or a script.
+ *
+ * Across the disc that reads: 71 of the 72 beams are lit in at least one zone,
+ * NONE is lit in every zone, and the single beam lit nowhere is JAIL2's
+ * (0,0,0)->(0,0,0), which is a dead entry. Reading COMMON's copy instead calls
+ * 41 of the 72 dark and is simply the wrong buffer — which is the same mistake,
+ * in the same field, that #56 was about.
+ *
+ * THE WALK, 0x8002EE38, runs every frame over the registered list. Nothing
+ * clears it — `gp+0x420C` is only ever incremented — so a beam registered at
+ * zone load burns until the zone changes:
+ *
+ *     8002EE88  lbu  v0, 3(base + entry.raiser)
+ *     8002EE90  andi v0, v0, 128    ; the raiser record's dead bit...
+ *     8002EE94  bne  -> skip        ; ...is the one off switch there is
+ *     8002EEB0  s0 = item + 4       ; from
+ *     8002EEC0  s1 = item + 20      ; to
+ *     8002EEB4  s2 = lh 18(item)    ; area
+ *     8002EEB8  s3 = lh 34(item)    ; kind
+ *     8002EEBC  jal  0x80089E18     ; the fifth argument, zeroed on the stack
+ *     8002EED0  jal  0x80048DC8     ; q2_fx_laser(from, to, area, kind, 0)
+ *
+ * and the zeroed fifth argument is why a level's beams do not spit particles:
+ * `ends = 0`, so neither end burst fires. Only the tube is drawn.
+ *
+ * `gp+0x421C` decides register-or-act, and LASERWALL is what proves it: the
+ * same flag, read at 0x8002E228, sends it to the same kind of list when set and
+ * straight to T_Damage (0x80057D54, mod 11) when clear. A port has no reason to
+ * model the flag. It can raise the beams at zone load, which is when the
+ * console's registration pass raises them.
+ */
+typedef struct q2_laserbeam {
+    s32 from[3];        /* item +4;  bit 0 of [0] is the enable flag  */
+    s32 to[3];          /* item +20                                   */
+    s16 area;           /* item +18, written by the constructor       */
+    s16 kind;           /* item +34, clamped below six there          */
+    u32 raiser;         /* the record's offset; its dead bit gates us */
+} q2_laserbeam;
+
+/* `slti v0, v1, 32` at 0x8002E6D4. */
+#define Q2_LASERBEAM_MAX 32
+
+typedef struct q2_laserbeam_set {
+    q2_laserbeam beam[Q2_LASERBEAM_MAX];
+    u32          count;
+    u32          declined;   /* declared, but dark in THIS zone */
+} q2_laserbeam_set;
+
+/*
+ * Raise every LASERBEAM this zone lights, as the registration pass does.
+ *
+ * `ops` is not a refinement here but the mechanism: `base_b` must be the
+ * RESIDENT ZONE's Events chunk, because that is the buffer holding the enable
+ * bit, and passing COMMON's for both leaves most of a level's lasers dark.
+ *
+ * `coll` should be PrimaryColl and may be NULL, in which case the area is left
+ * at the disc's value rather than resolved — the beam still draws, it is just
+ * not sorted into a room.
+ *
+ * Returns the number raised.
+ */
+u32 q2_laserbeams_build(q2_laserbeam_set *out, const q2_events *events,
+                        const q2_userfuncs *uf, const q2_uf_operands *ops,
+                        const q2_collision *coll);
+
+/*
+ * Queue every raised beam into this frame's pool. The transient pool empties
+ * every frame (effect.h), which is why the console's walk re-submits its whole
+ * list every frame too. Returns how many were queued.
+ */
+u32 q2_laserbeams_draw(const q2_laserbeam_set *set, q2_fx_world *w,
+                       q2_rng *rng);
 
 #endif /* Q2PSX_LEVELBIN_H */

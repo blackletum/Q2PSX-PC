@@ -10,7 +10,8 @@
 /* Small helpers                                                              */
 /* ------------------------------------------------------------------------- */
 
-static u32 bucket_for(const psx_ot *ot, u32 depth_sum, u32 corners);
+static u32 bucket_for(const psx_ot *ot, u32 depth_sum, u32 corners,
+                      s32 far_z);
 
 /*
  * `(a * b) >> 12`, rounding toward zero.
@@ -701,7 +702,7 @@ bool q2_fx_beam_hull(const q2_fx_beam *b, s32 out[Q2_FX_BEAM_VERTS][3])
 /* ------------------------------------------------------------------------- */
 bool q2_fx_laser(q2_fx_world *w, q2_rng *rng, u32 kind,
                  const s32 from[3], const s32 to[3],
-                 u8 area, u32 ends, q2_fx_laser_result *out)
+                 s16 area, u32 ends, q2_fx_laser_result *out)
 {
     const q2_fx_laser_kind *lk;
     const q2_fx_ramp *ramp;
@@ -719,7 +720,7 @@ bool q2_fx_laser(q2_fx_world *w, q2_rng *rng, u32 kind,
 
     r.damage = lk->damage;
     r.mod    = lk->mod;
-    r.queued = q2_fx_beam_add_style(w, from, to, lk->radius, (s16)area,
+    r.queued = q2_fx_beam_add_style(w, from, to, lk->radius, area,
                                     lk->style);
 
     ramp = q2_fx_ramp_at(w->tab, lk->ramp);
@@ -750,7 +751,8 @@ bool q2_fx_laser(q2_fx_world *w, q2_rng *rng, u32 kind,
             }
 
             if (q2_fx_group_spawn(w, at, vel, Q2_FX_GROUP_QUADS,
-                                  ramp, ramp, p->life, p->size, area) >= 0)
+                                  ramp, ramp, p->life, p->size,
+                                  (u8)area) >= 0)
                 r.groups++;
         }
     }
@@ -1100,7 +1102,7 @@ u32 q2_fx_glint_build_ot(const q2_fx_glint_mesh *mesh,
         if (!good)
             continue;
 
-        prim = psx_ot_add(ot, (u16)bucket_for(ot, depth, 4));
+        prim = psx_ot_add(ot, (u16)bucket_for(ot, depth, 4, cam->far_z));
         if (!prim)
             break;
 
@@ -1329,12 +1331,28 @@ static void to_camera(const s16 view[3][3], const q2_camera *cam,
     }
 }
 
-static u32 bucket_for(const psx_ot *ot, u32 depth_sum, u32 corners)
+/*
+ * Where an effect's primitive sorts.
+ *
+ * This used to be `(depth / corners) >> 2`, which is the fixed shift the whole
+ * port used before the viewport's far distance was available — and the world
+ * and the models both moved off it (world.c, modeldraw.c) while the effects did
+ * not. Against a real viewport slice of 51 buckets the shift saturates
+ * everything past about 200 units onto the far end of the slice, and the far
+ * end is drawn FIRST: so every particle, glint and beam more than a room away
+ * was emitted correctly, sorted behind the walls, and painted over.
+ *
+ * The symptom was a level's LASERBEAMs. Eleven queued, 970 faces drawn, seven
+ * pixels different on screen — geometry that reached the table and lost every
+ * argument with it. Sharing the world's mapping is the fix, and it is not a
+ * tuning choice: an effect and the wall behind it have to be measured against
+ * the same far distance or the sort between them means nothing.
+ */
+static u32 bucket_for(const psx_ot *ot, u32 depth_sum, u32 corners, s32 far_z)
 {
-    u32 otz = (depth_sum / corners) >> 2;
-    if (otz >= ot->bucket_count)
-        otz = ot->bucket_count - 1;
-    return otz;
+    if (corners == 0)
+        corners = 1;
+    return q2_ot_bucket_for_depth(ot, depth_sum / corners, far_z);
 }
 
 /* Split a table colour word into a psx_rgb and its ABE bit. */
@@ -1435,7 +1453,7 @@ static u32 draw_groups(q2_fx_world *w, const q2_camera *cam, u32 viewport,
                                    pt[2] - cam->pos[2], &xy, &z))
                 continue;
 
-            prim = psx_ot_add(ot, (u16)bucket_for(ot, z, 1));
+            prim = psx_ot_add(ot, (u16)bucket_for(ot, z, 1, cam->far_z));
             if (!prim) {
                 w->stats.ot_overflow++;
                 break;
@@ -1516,8 +1534,6 @@ static u32 draw_beam_ring(psx_ot *ot, gte_state *gte, const q2_camera *cam,
 {
     u32 emitted = 0, f;
 
-    (void)cam;
-
     /*
      * The table's four indices are a GPU packet's Z order; `psx_prim` wants the
      * perimeter. Corners 2 and 3 swap — see the note in draw_groups.
@@ -1541,7 +1557,7 @@ static u32 draw_beam_ring(psx_ot *ot, gte_state *gte, const q2_camera *cam,
         if (!good)
             continue;
 
-        prim = psx_ot_add(ot, (u16)bucket_for(ot, depth, 4));
+        prim = psx_ot_add(ot, (u16)bucket_for(ot, depth, 4, cam->far_z));
         if (!prim) {
             stats->ot_overflow++;
             break;

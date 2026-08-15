@@ -152,3 +152,118 @@ u32 q2_levelbin_selected(const u8 *module, u32 size, u32 *out, u32 max)
     return q2_levelbin_selected_slot(module, size,
                                      Q2_LEVELBIN_SLOT_SELECT, out, max);
 }
+
+/* ------------------------------------------------------------------------- */
+u32 q2_laserbeams_build(q2_laserbeam_set *out, const q2_events *events,
+                        const q2_userfuncs *uf, const q2_uf_operands *ops,
+                        const q2_collision *coll)
+{
+    q2_event_record rec;
+
+    if (!out || !events || !uf)
+        return 0;
+
+    memset(out, 0, sizeof(*out));
+
+    if (events->record_count == 0 || !q2_events_first_record(events, &rec))
+        return 0;
+
+    do {
+        u32 i;
+
+        for (i = 0; i < rec.n_items; i++) {
+            q2_event_item item;
+            q2_uf_call    call;
+            const u8     *p;
+            q2_laserbeam *b;
+            s32           node;
+            int           k;
+
+            if (!q2_events_get_item(events, &rec, i, &item))
+                break;
+            if (!item.payload)
+                continue;
+            if ((item.opcode & Q2_EVOP_MASK) != Q2_EVOP_CALL)
+                continue;
+            if (q2_uf_decode_call(&call, uf, &item) != Q2_OK)
+                continue;
+
+            /* `lbu v1, 1(s0)` against 36, in both halves. */
+            if (call.prim != Q2_UF_LASERBEAM || item.len != 36)
+                continue;
+
+            /* The constructor's own restore: both endpoints come from the
+             * pristine buffer, not the working one (0x8002E744). */
+            p = q2_uf_operand_at(ops, item.payload - 2, 36);
+
+            b = &out->beam[out->count];
+            memset(b, 0, sizeof(*b));
+
+            for (k = 0; k < 3; k++) {
+                b->from[k] = q2_rd_s32(p + 4  + 4 * k);
+                b->to[k]   = q2_rd_s32(p + 20 + 4 * k);
+            }
+            b->kind   = q2_rd_s16(p + 34);
+            b->area   = q2_rd_s16(p + 18);
+            b->raiser = rec.offset;
+
+            /* The load-time clamp, so an out-of-range kind is kind 0 here too
+             * and not a beam the dispatcher silently drops. No disc beam needs
+             * it — all 72 are already in range, which is itself the evidence
+             * that +34 is a kind and not the counter this table once called
+             * it. */
+            if (b->kind >= 6 || b->kind < 0)
+                b->kind = 0;
+
+            /*
+             * And the area, which the constructor resolves rather than reads:
+             * hint -1 forces the brute-force sweep, so this is the node holding
+             * the near end wherever in the hull it happens to be.
+             */
+            if (coll) {
+                node = q2_coll_find_node(coll, b->from, -1, true);
+                if (node >= 0)
+                    b->area = (s16)node;
+            }
+
+            /*
+             * `andi v0, v0, 1` at 0x8002E6C0, against the word the constructor
+             * has just copied out of the ZONE's chunk. Dark in this room.
+             */
+            if ((b->from[0] & 1) == 0) {
+                out->declined++;
+                continue;
+            }
+
+            /* `slti v0, v1, 32` — the list is a fixed 32 and the overflow is
+             * dropped, not wrapped. */
+            if (out->count >= Q2_LASERBEAM_MAX)
+                return out->count;
+
+            out->count++;
+        }
+    } while (q2_events_next_record(events, &rec, &rec));
+
+    return out->count;
+}
+
+u32 q2_laserbeams_draw(const q2_laserbeam_set *set, q2_fx_world *w, q2_rng *rng)
+{
+    u32 i, n = 0;
+
+    if (!set || !w || !rng)
+        return 0;
+
+    for (i = 0; i < set->count; i++) {
+        const q2_laserbeam *b = &set->beam[i];
+        q2_fx_laser_result  r;
+
+        /* ends = 0 — the fifth argument the walk zeroes on the stack at
+         * 0x8002EEBC. A level's beams are tube only. */
+        if (q2_fx_laser(w, rng, (u32)b->kind, b->from, b->to, b->area, 0, &r)
+            && r.queued)
+            n++;
+    }
+
+    return n;
+}
