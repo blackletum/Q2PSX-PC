@@ -421,6 +421,7 @@ typedef struct client {
     bool              leveltext_ready;
     u32               script_strings;   /* STRING calls that said something */
     u32               script_sounds;    /* SIMPLESOUND calls that played    */
+    u32               script_gated;     /* ONKEYDO predicates that said no  */
 
     /*
      * The doors and lifts.
@@ -1582,6 +1583,47 @@ static void client_event_call(void *user, const q2_event_item *item,
 
     c->rot_steps += q2_rotators_call(&c->rotators, &c->sim[0].userfuncs,
                                      item, call_index);
+
+    /*
+     * ONKEYDO — the key gate, and the reason it matters more now than it did
+     * an hour ago.
+     *
+     * It is a PREDICATE: it tests the player's key bits and, when they do not
+     * satisfy it, aborts the rest of the record it sits in. Nothing acted on
+     * it, so every gated script ran for free — which was invisible while the
+     * things they gate did nothing, and is not invisible now that the same
+     * records open doors and lifts.
+     *
+     * The four tests are `userfuncs.c`'s, and a zero operand disables its own
+     * test rather than requiring nothing to be set. The bitfield is the
+     * inventory's low twelve bits (inventory.h), the same field the movers'
+     * `key_mask` is checked against.
+     */
+    {
+        q2_uf_call call;
+
+        if (q2_uf_decode_call(&call, &c->sim[0].userfuncs, item) == Q2_OK &&
+            call.prim == Q2_UF_ONKEYDO) {
+            u32 all_set = 0, any_set = 0, all_clear = 0, any_clear = 0;
+            u16 keys = (u16)(c->sim[0].combat.inv.flags & 0x0FFFu);
+            bool pass = true;
+
+            q2_uf_operand_u32(&call, 0, 0, &all_set);
+            q2_uf_operand_u32(&call, 1, 0, &any_set);
+            q2_uf_operand_u32(&call, 2, 0, &all_clear);
+            q2_uf_operand_u32(&call, 3, 0, &any_clear);
+
+            if (all_set   && (keys & all_set)   != all_set)   pass = false;
+            if (any_set   && (keys & any_set)   == 0)         pass = false;
+            if (all_clear && (keys & all_clear) != 0)         pass = false;
+            if (any_clear && (keys & any_clear) == any_clear) pass = false;
+
+            if (!pass) {
+                c->sim[0].event_rt.abort_record = true;
+                c->script_gated++;
+            }
+        }
+    }
 
     /* A LIFT1 call is both the constructor and the trigger: the same item that
      * built the mover is what asks it to move. */
@@ -4258,6 +4300,8 @@ static void client_write_shot(client *c, bool numbered)
                 c->pose_by_name, c->pose_name_no_pos, c->pose_no_name);
         Q2_INFO("  breakable %u GLASS calls broke something, %u pieces thrown",
                 c->glass_calls, c->glass_pieces);
+        Q2_INFO("  script    %u strings, %u sounds, %u gated by ONKEYDO",
+                c->script_strings, c->script_sounds, c->script_gated);
         Q2_INFO("  movers    %u built, %u triggered by the script, %u tick-moves",
                 c->movers_ready ? c->movers.count : 0,
                 c->mover_triggers, c->mover_moved);

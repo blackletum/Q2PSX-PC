@@ -263,6 +263,15 @@ q2_event_outcome q2_event_rt_update(q2_event_rt *rt)
             r = run_item(rt, &item);
             if (r == Q2_EVENT_ZONE_CHANGE)
                 result = Q2_EVENT_ZONE_CHANGE;
+
+            /* A predicate said no. Everything after it in this record is what
+             * it was guarding, so the record stops here — and it is still
+             * marked as having run, exactly as the console's does, or a locked
+             * door would re-test on every touch. */
+            if (rt->abort_record) {
+                rt->abort_record = false;
+                break;
+            }
         }
 
         rt->flags[slot] |= Q2_EVREC_HASRUN;

@@ -6009,3 +6009,22 @@ i.e. the display already performing the correction the projection was accused of
 at a level start, stationary, weapon settled in idle. The port reproduces that state exactly and deterministically
 with `--headless --frames 90`, so the pose confound disappears and a single comparison settles it. Until such a
 frame exists, "the weapon looks smaller" is an impression from mid-play footage and not a finding.
+
+- [x] 77. **ONKEYDO: every gated script in the game ran for free.** It is a PREDICATE — it tests the
+      player's key bits and, when they do not satisfy it, aborts the rest of the record it sits in — and
+      nothing acted on it. That was invisible while the things those records gate did nothing, and stops
+      being invisible the moment the same records open doors: **JAIL2's mover triggers fall from 51 to
+      46** once the gate is honoured, which is five doors that used to open without the key.
+
+      The abort is a FLAG rather than a return value, because that is what the console does — `gp[0x423C]`,
+      set by the primitive and read by the record executor — and because an `on_call` hook that only
+      reports a CALL has nowhere to put an answer. `q2_event_rt.abort_record` is that flag; the executor
+      clears it and still marks the record as having run, exactly as the console's does, or a locked door
+      would re-test on every touch.
+
+      The four tests are `userfuncs.c`'s and a zero operand disables its own test rather than requiring
+      nothing to be set. Gated records per map with no keys held: JAIL2 5, LAB 5, POWER2 3, COMMAND 3,
+      BASE2 2, WASTE2 1.
+
+      *Note on the measurement:* `SIMPLESOUND` reports 0 played in every headless run, and that is the
+      absence of an audio device rather than of the wiring — `client_play_sound` needs one.

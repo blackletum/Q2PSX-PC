@@ -91,6 +91,19 @@ typedef struct q2_event_rt {
     void (*on_mover)(void *user, const q2_event_item *item);
     void  *on_mover_user;
 
+    /*
+     * ABORT THE REST OF THIS RECORD — the engine's own `gp[0x423C]`.
+     *
+     * `ONKEYDO` is a predicate: it tests the player's key bits and, when they
+     * do not satisfy it, stops the record it sits in so the items AFTER it do
+     * not run. The console expresses that as a flag the primitive sets and the
+     * record executor reads, which is why this is a field rather than a return
+     * value — a hook that only reports a CALL has nowhere to put an answer.
+     *
+     * Set it from an `on_call` hook; the executor clears it.
+     */
+    bool abort_record;
+
     u32  mover_count;   /* MOVER items reported                          */
     u32  call_count;    /* CALL items reported, for the same "did anything
                          * happen" reason as the counters above */
