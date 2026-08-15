@@ -244,3 +244,12 @@ target_link_libraries(test_model PRIVATE
 )
 
 add_test(NAME model COMMAND test_model)
+
+add_executable(test_movie test_movie.c)
+
+target_link_libraries(test_movie PRIVATE
+    q2psx_common
+    q2psx_formats
+)
+
+add_test(NAME movie_table COMMAND test_movie)

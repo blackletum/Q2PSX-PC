@@ -1004,8 +1004,12 @@ The residues of the resolved blockers keep their parents' numbers.
       two globals with a 30.0 s fallback — that looks like a countdown to a restart or fade — but the
       consuming code was not disassembled. One entry is **1.0 s short** of its measured stream length, hinting
       the value is a deliberate restart point rather than a length.
-- [~] **15. MDEC output depth for the movies (24-bit vs 15-bit).** *(#107 builds the demuxer and most of the BS v2 decoder; the depth question needs frames that actually decode.)* ~~Blocked on #16~~ — #16 is answered
-      by #92, so this is now blocked only on reading the QENDMIS module's code.
+- [x] **15. MDEC output depth for the movies (24-bit vs 15-bit). — the frames decode now (#115), and the
+      question is answered from the other side.** The MDEC's own output is 24-bit RGB and the console has a
+      24-bit display mode for exactly this; nothing in the bitstream chooses a depth, because the depth is
+      the DISPLAY's. This port decodes to 24-bit and truncates to the framebuffer's RGB555 when it blits,
+      which is a stated divergence marked at the blit: every other surface in this project is 15-bit
+      because the GPU drew it, and a movie is the one thing the GPU did not draw.
 - [x] **16. ~~Locate the movie player overlay.~~ — ANSWERED by #92.** It is a LevelBin module, and
       `QENDMIS1`..`QENDMIS5` are the maps that carry it. The filenames (`TAKE1BP.STX`, `OUTRO1P.STX`), the
       path pieces (`\Q2DATA\`, `MOVIES\`) and the MDEC decoder's own buffer names are all in there. The
@@ -6975,7 +6979,7 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       What is NOT reconstructed, and is a real remainder: the capture also shows a per-row bar in each
       player's own colour, a `READY` marker on a row whose player has pressed fire, and the backdrop scene
       QMRESULT's `ModelNames` describe. The rows are text on the overlay here.
-- [~] 107. **The movies: the demuxer is exact, the decoder is most of the way, and what is missing is five
+- [x] 107. **The movies: the demuxer is exact, the decoder is most of the way, and what is missing is five
       Huffman groups — named, counted, and bounded.**
 
       #92 established that `QENDMIS`'s module is the movie player and that the campaign ends on a 19.5 MB
@@ -7015,7 +7019,7 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       The IDCT here is a float separable one and is deliberately not the MDEC's fixed-point transform, so
       it will differ in the last bit or two. That is stated at the function rather than left to be
       discovered.
-- [~] 108. **The movie decoder's Huffman lengths, DERIVED from the disc — unmatched codes 1951 -> 110, and
+- [x] 108. **The movie decoder's Huffman lengths, DERIVED from the disc — unmatched codes 1951 -> 110, and
       the remaining fault is now named as a different one.** #107 left five groups missing and said a
       published table was needed. It was not. The disc has the codes in it.
 
@@ -7057,7 +7061,7 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
 
       **So the movies still do not play**, and the reason has changed from "five code groups are missing"
       to "the run/level column is wrong", which is a smaller and better-defined thing than it was.
-- [~] 109. **The movie decoder's remaining fault is NOT the run column, and the instrument that said it was
+- [x] 109. **The movie decoder's remaining fault is NOT the run column, and the instrument that said it was
       is measuring the victim.** #108 split the failures into "unmatched code" and "run overran 63" and
       concluded the second was a wrong run/level column. Splitting that number by CODE LENGTH says
       otherwise:
@@ -7084,7 +7088,7 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       that decode end to end, the code LENGTHS are derived from the disc (#108), and something in the
       common AC path — most likely the escape's field layout — puts the coefficient index somewhere it
       should not be. **The movies do not play.**
-- [~] 110. **The escape is ruled out by a sweep, AC decoding is proven to work, and the fault is the
+- [x] 110. **The escape is ruled out by a sweep, AC decoding is proven to work, and the fault is the
       run/level column after all.** #109 doubted that diagnosis on the strength of an overrun histogram
       that turned out to be naming victims. Three measurements settle it.
 
@@ -7121,7 +7125,7 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       to a different wrong picture, and the disc cannot say which is right.
 
       **The movies do not play.**
-- [~] 111. **"The disc cannot say which picture is right" was wrong, and building the oracle showed why the
+- [x] 111. **"The disc cannot say which picture is right" was wrong, and building the oracle showed why the
       decoder cannot be finished this way.** #110 closed on that sentence. It is false in principle — a
       frame of real video is SMOOTH and a frame of wrong coefficients is not, so mean absolute difference
       between adjacent pixels judges a candidate table without any reference at all. `movie` now reports it.
@@ -7152,7 +7156,7 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       column wrong, and **no self-contained way to fix it** (and see #112, which withdraws "correct" from
       the lengths and explains why every metric here was satisfied by a wrong table) — the frames that would judge a candidate are exactly the frames that do not decode.
       **The movies do not play.**
-- [ ] 112. **A correction to my own evidence: "frames decoded exactly" does NOT validate the AC table, and
+- [x] 112. **A correction to my own evidence: "frames decoded exactly" does NOT validate the AC table, and
       the length derivation is therefore unverified.**
 
       #108 derived the code lengths from the disc and #110 called them "derived and correct". That second
@@ -7182,7 +7186,7 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       known-good STR decoder to compare a single frame's coefficients against. Not because the work is
       hard, but because every self-contained metric available here is satisfied by a wrong table, and I
       have now demonstrated that rather than assumed it.
-- [ ] 113. **There IS a reference-free validator, `bs_num_codes` is it, and its verdict is that the AC code
+- [x] 113. **There IS a reference-free validator, `bs_num_codes` is it, and its verdict is that the AC code
       lengths are wrong.** #112 concluded that every self-contained metric available here is satisfied by a
       wrong table. That was also too strong — the frame header carries one that is not.
 
@@ -7218,7 +7222,7 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       Also worth keeping: only **3 of 1311** incomplete frames in OUTRO1P have already exceeded their
       `bs_num_codes` when they fail. The pair count almost never overshoots before the failure, which says
       the error is a code being read at the wrong LENGTH rather than the reader inventing extra pairs.
-- [ ] 114. **The headers alone say what the AC codes must average: `len + 1` = 10.5 bits, from two fields
+- [x] 114. **The headers alone say what the AC codes must average: `len + 1` = 10.5 bits, from two fields
       and no decoder.** With `bs_num_codes` decoded (#113), a frame's own header over-determines its
       bitstream, and the arithmetic needs nothing else:
 
@@ -7245,3 +7249,64 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
 
       What this does not do is decode a movie. It narrows the search that #113 made possible, and it is
       recorded because it cost two header fields and pins a number nothing else here could reach.
+- [x] 115. **The movies play. Five passes of instrumentation named the wrong fault four times, and what
+      settled it was a number in the frame header that had been sitting there unread.**
+
+      #107 through #114 built a demuxer, most of a decoder, and an increasingly elaborate set of instruments
+      that each pointed somewhere else: five missing code groups, then a wrong run column, then a
+      misconfigured escape, then a biased smoothness oracle, then "there is no self-contained validator".
+      **All 5,301 frames of all three films now decode**, and the repairs were two.
+
+      **The table's 8-leading-zero group is SIXTEEN codes of THIRTEEN bits, not eight of twelve.** #108
+      derived the long code lengths by bucketing failures on leading zeros and measuring the distinct tails
+      after the leading `1`. That method is ambiguous by exactly one bit and nothing in #108 noticed: a group
+      of sixteen 4-bit tails each followed by a sign shows the same "N distinct at width w, 2N at w+1"
+      signature as eight 3-bit tails each followed by a sign. Four of the five groups came out right and the
+      fifth came out one bit short, so every block reaching one of those codes read one bit too few and then
+      carried on finding valid-looking codes in mis-aligned data. That is why #112's frames "decoded exactly"
+      while showing bands of colour over grey: a desynchronised reader still terminates blocks.
+
+      **The bit reader's lookahead was broken at the end of every frame.** `br_get` returned `v << 1` when it
+      ran out of data instead of zero-padding to the width asked for, so a 17-bit peek with fewer than 17
+      bits left came back MISALIGNED. Every frame carries 8 to 47 bits of padding after its last block, so
+      the last block of every frame peeks past the end — and its EOB never matched. 640 frames of 5,301 used
+      to stop exactly one block short, always the last, and the histogram of that said "unmatched, twelve
+      leading zeros", which is the one branch B.14 leaves unused: the signature of a reader landing in
+      nothing, not of a missing row.
+
+      **`bs_num_codes` is the MDEC's DMA LENGTH, and #113's reading of it was wrong in a way that flattered
+      the wrong table.** It is not `1440 + pairs`. It is
+
+          words = 2 * blocks + pairs      (a DC word and an EOB word per block, one word per pair)
+          codes = round_up_32(ceil(words / 2))       (longwords, padded to 32 of them)
+
+      A DC-only 320x192 frame is 2*1440 = 2880 words = 1440 longwords, already a multiple of 32 — which is
+      exactly the number that made "one word per block" look confirmed on the only frames that could not
+      discriminate. Under the correct reading **5301 of 5301 frames agree**, AC-carrying ones included, and
+      it is the reference-free validator #112 said did not exist. #114's "mean code length must be 9.5 bits"
+      dissolves with it: pairs were undercounted 2.4x, and the real mean is about six, which is what a table
+      whose commonest code is two bits should give.
+
+      **And the macroblocks are stored COLUMN-MAJOR.** Left-hand column top to bottom, then the next. This is
+      invisible to every consistency check a decoder can run on itself — a row-major read consumes exactly
+      the same bits and produces exactly the same blocks — and visible immediately in a picture, as content
+      that is plainly real sitting in the wrong 16x16 cell. It cost one line and would never have been found
+      by any amount of counting.
+
+      **The escape is measured, not asserted.** With the decoder working, `movie sweep` finally
+      discriminates: of eighteen layouts exactly two decode every frame, run 5 / level 11 and run 6 /
+      level 10 — the same sixteen bits split differently, which synchronisation cannot separate. The picture
+      can, and does: roughness 3.37 against 4.18. The smoother is the MDEC's documented 6/10.
+
+      **What this leaves as the lesson.** Every instrument built in #109-#111 was sound and every conclusion
+      drawn from one was wrong, because each was scored on the frames that completed and the frames that
+      completed were the ones carrying no AC data. The check that worked was not a better instrument: it was
+      a field in the header, which states the answer per frame and needs no decode to be trusted. #113 found
+      it and then fitted it to the wrong formula for the same reason — the DC-only frames satisfy any
+      formula of that shape trivially.
+
+      **In the client:** `--movie NAME` plays one, and a QENDMIS map that names a film plays it instead of
+      the placard, so the campaign ends on the outro rather than on a paragraph explaining that it cannot.
+      The player is `src/game/movie.h`: a sector window, the 25 fps the container forces, and the XA in slot
+      7 read per sector because those sectors are Form 2 where the video is Form 1. Sound and picture come
+      out the same length on all three films.

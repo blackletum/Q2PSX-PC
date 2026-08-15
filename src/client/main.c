@@ -102,6 +102,7 @@
 #include "mover.h"
 #include <stdlib.h>
 #include "mission.h"
+#include "movie.h"
 #include "panel.h"
 #include "prompt.h"
 #include "q2psx.h"
@@ -469,8 +470,12 @@ typedef struct client {
     u32               laser_drawn;
 
     /*
-     * The movie table a QENDMIS map's module carries, and the end-of-mission
-     * screen this port shows in place of a movie it cannot decode.
+     * The movie table a QENDMIS map's module carries, the film it names, and
+     * the end-of-mission screen shown when there is no film to play.
+     *
+     * The placard used to be shown INSTEAD of a movie because there was no
+     * decoder. There is one now (stx.h), so a named `.STX` plays and the
+     * placard is what a unit whose ending this port has not read still gets.
      */
     q2_levelbin_movie movies[4];
     u32               movie_count;
@@ -478,6 +483,14 @@ typedef struct client {
     q2_endmission     endmis;
     bool              endmis_open;
     int               endmis_unit;
+
+    q2_movie          film;
+    bool              film_open;       /* a film is loaded and running   */
+    bool              film_done;       /* ...and has reached its end     */
+    u8               *film_rgb;        /* the frame most recently decoded */
+    bool              film_have_frame;
+    u32               film_frames;
+    const char       *film_arg;        /* --movie NAME: play it and stop */
 
     /* The map's own mission-event namespace, out of its LevelBin. */
     q2_levelbin_misevent misevent[32];
@@ -633,6 +646,12 @@ typedef struct client {
 } client;
 
 static void client_bind_view_model(client *c);
+
+/* Defined with the movie player, and called from the zone load that finds a
+ * QENDMIS map naming a film. */
+static bool client_film_start(client *c, const char *name);
+static void client_film_stop(client *c);
+static void client_film_tick(client *c, float dt);
 
 /* Defined with the rest of the sound path, and called from the tick. */
 /*
@@ -2904,24 +2923,32 @@ static bool client_load_zone(client *c, const char *map, int index)
                                          "MISSION COMPLETE");
                         }
 
-                        {
+                        /*
+                         * The film, if this map names one — and the placard
+                         * only if it does not.
+                         *
+                         * The disc carries ONE outro and only the last unit
+                         * reaches it, so units 1..4 end on something their own
+                         * module draws, which this port does not run. Playing
+                         * OUTRO1P on QENDMIS1 would be a confident wrong
+                         * answer; those units still get the placard, and it no
+                         * longer claims there is no decoder.
+                         */
+                        if (film && c->endmis_unit == 5 &&
+                            client_film_start(c, film)) {
+                            c->endmis_open   = false;
+                            c->briefing_open = false;
+                            c->leveltext_ready = false;
+                        } else {
                             char body[Q2_BRIEFING_FIELD_MAX * 2];
 
-                            /*
-                             * The disc carries ONE outro, and only the last
-                             * unit reaches it. Units 1..4 end on something the
-                             * module draws, and this port does not know what —
-                             * so it does not guess. Naming OUTRO1P.STX on
-                             * QENDMIS1 would be a confident wrong answer, which
-                             * is worse than an honest short one.
-                             */
-                            if (film && c->endmis_unit == 5)
+                            if (film)
                                 snprintf(body, sizeof(body),
                                          "The sequence here is a full-motion "
-                                         "video: %s, in the disc's MOVIES "
-                                         "directory. This port has no MDEC "
-                                         "decoder, so it is named rather than "
-                                         "shown.", film);
+                                         "video: %s. This unit's ending is "
+                                         "drawn by its own LevelBin module, "
+                                         "which this port reads but does not "
+                                         "run.", film);
                             else
                                 snprintf(body, sizeof(body),
                                          "The sequence here is drawn by this "
@@ -2929,12 +2956,12 @@ static bool client_load_zone(client *c, const char *map, int index)
                                          "this port reads but does not run.");
 
                             q2_endmission_set(&c->endmis, line, body);
-                        }
 
-                        c->endmis_open     = true;
-                        c->briefing_open   = false;
-                        c->leveltext_ready = false;
-                        q2_prompt_show(&c->prompts, Q2_PROMPT_BACK, 216);
+                            c->endmis_open     = true;
+                            c->briefing_open   = false;
+                            c->leveltext_ready = false;
+                            q2_prompt_show(&c->prompts, Q2_PROMPT_BACK, 216);
+                        }
                     }
                 }
 
@@ -5138,6 +5165,170 @@ static void client_bind_view_model(client *c)
     Q2_INFO("view weapon: %s", name);
 }
 
+/* ------------------------------------------------------------------------- */
+/* The movie player                                                           */
+/* ------------------------------------------------------------------------- */
+/*
+ * Start a film. `name` is a bare file name out of a QENDMIS module's movie
+ * table (`OUTRO1P.STX`) or off the command line; the directory is the disc's.
+ */
+static bool client_film_start(client *c, const char *name)
+{
+    char path[128];
+
+    if (!name || !*name || c->film_open)
+        return false;
+
+    if (!c->film_rgb) {
+        c->film_rgb = (u8 *)calloc((size_t)Q2_STX_WIDTH * Q2_STX_HEIGHT * 3, 1);
+        if (!c->film_rgb)
+            return false;
+    }
+
+    snprintf(path, sizeof(path), "Q2DATA/MOVIES/%s", name);
+    if (!q2_movie_open(&c->film, c->disc, path)) {
+        Q2_WARN("movie: cannot open %s", path);
+        return false;
+    }
+
+    c->film_open       = true;
+    c->film_done       = false;
+    c->film_have_frame = false;
+    c->film_frames     = 0;
+
+    /* The film carries its own sound. Whatever the level was playing stops,
+     * the way it does on the console when the drive is handed to the film. */
+    c->music_open = false;
+    if (c->audio)
+        SDL_ClearAudioStream(c->audio);
+
+    Q2_INFO("movie: playing %s", path);
+    return true;
+}
+
+static void client_film_stop(client *c)
+{
+    if (!c->film_open)
+        return;
+    c->film_open       = false;
+    c->film_done       = true;
+    c->film_have_frame = false;
+    if (c->audio)
+        SDL_ClearAudioStream(c->audio);
+    Q2_INFO("movie: %u frames shown", c->film_frames);
+}
+
+/*
+ * Advance the film and keep its audio fed.
+ *
+ * The two are separate on purpose and separate on the console: the SPU plays
+ * whatever the drive delivered and the MDEC decodes what it can, so a picture
+ * that falls behind does not take the sound with it.
+ */
+static void client_film_tick(client *c, float dt)
+{
+    if (!c->film_open)
+        return;
+
+    if (q2_movie_advance(&c->film, (double)dt, c->film_rgb)) {
+        c->film_have_frame = true;
+        c->film_frames++;
+    }
+
+    if (q2_movie_finished(&c->film)) {
+        client_film_stop(c);
+        return;
+    }
+
+    if (c->audio) {
+        s16 pcm[XA_FRAMES_PER_SECTOR * 2];
+        int queued = SDL_GetAudioStreamQueued(c->audio);
+
+        while (queued < (int)(XA_SAMPLE_RATE / 4 * 2 * (int)sizeof(s16))) {
+            u32 n = q2_movie_audio(&c->film, pcm,
+                                   (u32)(sizeof(pcm) / sizeof(pcm[0])));
+            s32 vol = c->settings.v[Q2_SET_MUSIC] * 2;
+
+            if (n == 0)
+                break;
+            if (vol < 0)
+                vol = 0;
+            if (vol < 255) {
+                u32 i;
+                for (i = 0; i < n; i++)
+                    pcm[i] = (s16)((pcm[i] * vol) / 255);
+            }
+            SDL_PutAudioStreamData(c->audio, pcm, (int)(n * sizeof(s16)));
+            queued += (int)(n * sizeof(s16));
+        }
+    }
+}
+
+/*
+ * Put the decoded frame on the screen.
+ *
+ * Straight into the buffer being drawn, and not through the ordering table:
+ * that is where the console puts it too. MDEC output is DMA'd to the frame
+ * buffer as a rectangle; it is not a GPU primitive, it has no ordering-table
+ * position, and nothing sorts against it. Anything the game wants OVER a movie
+ * is drawn afterwards, which here means after this call.
+ *
+ * WIDTH IS NOT PIXELS. The GPU's five horizontal modes all span the same active
+ * line, so 320 pixels and 512 pixels are the same picture with pixels of
+ * different widths — which is why this port's PAL buffer is 512 across. The
+ * console plays a 320-wide film by switching the display to a 320-wide mode,
+ * and the result fills the television. Centring 320 buffer pixels inside 512
+ * would show it at five-eighths size with black down both sides, so the film is
+ * stretched across the whole buffer width instead. That is not a scaling
+ * choice; it is the same physical picture.
+ *
+ * Vertically a buffer line IS a scanline, so 192 lines are placed 1:1 and
+ * centred — the letterbox the film is authored with.
+ */
+static void client_film_blit(client *c)
+{
+    psx_framebuffer *fb = q2_screen_back(&c->screen);
+    int oy, y, step;
+
+    if (!fb || !fb->px || !c->film_have_frame || !c->film_rgb)
+        return;
+
+    oy = (fb->height - (int)Q2_STX_HEIGHT) / 2;
+    if (oy < 0) oy = 0;
+
+    /* 16.16 source step: one film pixel per buffer pixel on a 320-wide buffer,
+     * five per eight on a 512-wide one. */
+    step = (int)((Q2_STX_WIDTH << 16) / (u32)(fb->width > 0 ? fb->width : 1));
+
+    for (y = 0; y < (int)Q2_STX_HEIGHT; y++) {
+        const u8 *src = c->film_rgb + (size_t)y * Q2_STX_WIDTH * 3;
+        u16 *dst;
+        int bx, u = 0;
+
+        if (oy + y >= fb->height)
+            break;
+        dst = fb->px + (size_t)(oy + y) * fb->width;
+        for (bx = 0; bx < fb->width; bx++, u += step) {
+            int x = u >> 16;
+
+            if (x >= (int)Q2_STX_WIDTH)
+                x = (int)Q2_STX_WIDTH - 1;
+            /*
+             * 24-bit to the framebuffer's RGB555. The console has a 24-bit
+             * display mode for exactly this and the movie player uses it, so
+             * the truncation here is the port's and is a stated divergence:
+             * every other surface in this project is 15-bit because the GPU
+             * drew it, and a movie is the one thing that was not.
+             */
+            u32 r = src[x * 3 + 0] >> 3;
+            u32 g = src[x * 3 + 1] >> 3;
+            u32 b = src[x * 3 + 2] >> 3;
+
+            dst[bx] = (u16)(r | (g << 5) | (b << 10));
+        }
+    }
+}
+
 static void client_menu_frame(client *c)
 {
     q2_menu_sound snd;
@@ -5823,6 +6014,22 @@ static void client_frame(client *c)
 
     q2_screen_compose(&c->screen, &c->ot, c->vram, &c->opts);
 
+    /*
+     * A film OWNS the screen.
+     *
+     * It is written straight into the finished buffer rather than linked into
+     * the ordering table, because that is what the hardware does: MDEC output
+     * is DMA'd to the frame buffer as a rectangle and never becomes a GPU
+     * primitive. So the composed frame is cleared away underneath it — the
+     * ordering table was still built and walked, which is work this frame did
+     * not need, and it is left that way because a QENDMIS map has no world in
+     * it to speak of and the alternative is a second frame path to maintain.
+     */
+    if (c->film_open) {
+        psx_fb_clear(q2_screen_back(&c->screen), 0);
+        client_film_blit(c);
+    }
+
     q2_screen_present(&c->screen);
     front = q2_screen_front(&c->screen);
 
@@ -5930,6 +6137,8 @@ static void usage(void)
     printf("\n  running without a player:\n");
     printf("  --headless    no window, no audio; a fixed 1/30 s step\n");
     printf("  --demo        drive the pad from a fixed script rather than keys\n");
+    printf("  --movie NAME  play a film from Q2DATA/MOVIES and nothing else\n"
+           "                (TAKE1BP.STX, OUTRO1P.STX, ROGUEINP.STX)\n");
     printf("  --frames N    stop after N frames\n");
     printf("  --shot P.ppm  write the console's own framebuffer to P.ppm\n");
     printf("  --shot-every N  ...and one every N frames, numbered\n");
@@ -5988,6 +6197,10 @@ int main(int argc, char **argv)
             }
         }
         else if (!strcmp(argv[i], "--no-lasers"))             c.no_lasers = true;
+        /* Play a film and nothing else — the campaign reaches OUTRO1P by
+         * finishing, and that is a long way to go to look at a decoder. */
+        else if (!strcmp(argv[i], "--movie") && i + 1 < argc)
+            c.film_arg = argv[++i];
         else if (!strcmp(argv[i], "--yaw") && i + 1 < argc) {
             c.at_yaw = (s16)atoi(argv[++i]);
             c.yaw_given = true;
@@ -6473,6 +6686,18 @@ no_window:
         q2_menu_goto(&c.menu, Q2_PAGE_FRONT_TITLE);
     }
 
+    /* `--movie NAME`: play a film over whatever was loaded, and close the
+     * front end so nothing is drawn on top of it. */
+    if (c.film_arg) {
+        if (client_film_start(&c, c.film_arg)) {
+            q2_menu_close(&c.menu);
+            c.in_front_end = false;
+        } else {
+            fprintf(stderr, "no such movie: %s\n", c.film_arg);
+            goto done;
+        }
+    }
+
     c.running = true;
     last = c.headless ? 0 : SDL_GetTicks();
 
@@ -6502,6 +6727,16 @@ no_window:
             if (ev.type == SDL_EVENT_QUIT) {
                 c.running = false;
             } else if (ev.type == SDL_EVENT_KEY_DOWN) {
+                /*
+                 * A film takes any key and stops. The console lets START or
+                 * X out of one, and a port with a keyboard has no reason to
+                 * be fussier than that — a movie you cannot skip is the
+                 * complaint every FMV of this era earned.
+                 */
+                if (c.film_open) {
+                    client_film_stop(&c);
+                    continue;
+                }
                 switch (ev.key.key) {
                 case SDLK_ESCAPE:
                     /* START on the console: it opens the pause menu, and
@@ -6820,6 +7055,28 @@ no_window:
         }
 
         client_music_pump(&c);
+
+        /*
+         * The film, on its own 25 fps clock rather than the game's 30 Hz tick.
+         * That rate is forced by the container (movie.h) and driving it off the
+         * tick would drop or double every fifth frame.
+         *
+         * When it ends, the placard the port would otherwise have shown takes
+         * over, so the campaign finishes on something rather than on black.
+         */
+        if (c.film_open) {
+            client_film_tick(&c, dt);
+            if (!c.film_open && c.endmission && !c.endmis_open) {
+                char line[Q2_BRIEFING_FIELD_MAX];
+
+                snprintf(line, sizeof(line), "MISSION %d COMPLETE",
+                         c.endmis_unit);
+                q2_endmission_set(&c.endmis, line,
+                                  "The campaign is over.");
+                c.endmis_open = true;
+                q2_prompt_show(&c.prompts, Q2_PROMPT_BACK, 216);
+            }
+        }
 
         /*
          * The screen's own clock, in the 1/300 s units everything the console

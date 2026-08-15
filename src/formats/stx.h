@@ -115,57 +115,33 @@ bool q2_stx_frame_decode(const q2_stx_frame *f, u8 *out,
                          u32 *out_blocks, u32 *out_bits);
 
 /*
- * How many lookaheads the AC table could not match, bucketed by LEADING ZEROS.
- *
- * Table B.14 is organised by that run, so the bucket names the missing group:
- * everything landing in one bucket is one group left to transcribe, and a
- * scatter across many would mean the fault is not in the table at all.
- */
-u32 q2_stx_unmatched_report(u32 *by_leading_zeros, u32 max);
-
-/*
- * The distinct `width`-bit tails seen after the leading `1` of an unmatched
- * code with `lz` leading zeros. A group of exactly 2^width distinct tails, with
- * no more appearing at width+1, is that group's code length pinned by the data.
- */
-u32 q2_stx_unmatched_tails(u32 lz, u32 width, u32 *out, u32 max);
-
-/* The most recent unmatched 17-bit lookahead, and how many bits were still
- * unread when it happened — "no code matches" and "the data ran out" look the
- * same from the outside and are different faults. */
-extern u32 q2_stx_last_look;
-extern u32 q2_stx_last_bits;
-
-/*
- * Why blocks gave up, split three ways. `unmatched` means a code LENGTH is
- * missing from the table; `overrun` means a RUN value is wrong, because the
- * coefficient index walked past 63; `dry` means the bits ran out. They were all
- * being reported as one thing, and they are three different repairs.
+ * Why blocks gave up, split three ways. `unmatched` means no code has this
+ * prefix, so a LENGTH is wrong; `overrun` means the coefficient index walked
+ * past 63, so a RUN is wrong; `dry` means the bits ran out. All three read zero
+ * across all 5301 frames of the disc's three films, and that — with every
+ * frame's own `bs_num_codes` agreeing — is the statement this decoder makes.
  */
 extern u32 q2_stx_fail_unmatched;
 extern u32 q2_stx_fail_overrun;
 extern u32 q2_stx_fail_dry;
 
-/* Which code length overran, and whether it was the escape (length 0 here,
- * because its run is six raw bits and not a table entry). */
-extern u32 q2_stx_overrun_by_len[20];
-extern u32 q2_stx_overrun_escape;
-extern u32 q2_stx_overrun_run_max;
-
 /*
- * Per TABLE ENTRY: how often each code was used, and how often it was the one
- * that pushed the coefficient index past 63. A high overrun-to-use ratio is a
- * row whose RUN is too large — which turns "the run column is wrong" into a
- * ranked list of which rows.
- */
-extern u32 q2_stx_overrun_by_code[128];
-extern u32 q2_stx_code_uses[128];
-
-/*
- * AC pairs found in the last frame decoded. The header's `bs_num_codes` should
- * be `1440 + pairs` rounded up to a multiple of 32 if it counts MDEC code
- * words — a check on the code LENGTHS that needs neither the run/level column
- * nor a completed frame.
+ * AC (run, level) pairs found in the last frame decoded.
+ *
+ * The frame's own header states this number, and that is what settled the
+ * format. `bs_num_codes` is the MDEC's DMA length: one 16-bit word per block
+ * for the DC, one per pair and one per block's EOB, moved as 32-bit words and
+ * padded to a multiple of 32 of them —
+ *
+ *     bs_num_codes == round_up_32(ceil((2 * blocks + pairs) / 2))
+ *
+ * — so a caller can check a decode against the disc with no reference, no
+ * capture and no second decoder. It depends on the code LENGTHS alone.
+ *
+ * The reading that came before this one was `1440 + pairs`, which fits every
+ * DC-only frame trivially (2 * 1440 longwords is 1440, already a multiple of
+ * 32) and no other. Fitting the frames that carry nothing is how a wrong
+ * formula survives.
  */
 extern u32 q2_stx_last_pairs;
 
@@ -174,14 +150,21 @@ u32 q2_stx_code_count(void);
 bool q2_stx_code_at(u32 i, u32 *len, u32 *run, u32 *level);
 
 /*
- * The escape's field widths. Nothing in the bitstream announces them, so they
- * are parameters the disc can score rather than an assertion — see stx.c.
- * Defaults are 6 and 10.
+ * Entry `i`'s code bits, right-aligned in the low `len` bits.
+ *
+ * Exposed for one reason: a table that is not PREFIX-FREE produces a decoder
+ * that works on most blocks and desynchronises on the rest, which reads like a
+ * data problem rather than a table problem. Two such collisions were shipped
+ * here before a mechanical check of every pair found them in seconds. That
+ * check lives in tests/test_movie.c and needs the codes.
  */
-void q2_stx_set_escape_layout(u32 run_bits, u32 level_bits);
+u32 q2_stx_code_bits(u32 i);
 
-/* Reset the failure counters, so a sweep scores each candidate on its own. */
-void q2_stx_reset_stats(void);
+/* The two codes matched ahead of the table, for the same check. */
+#define Q2_STX_EOB_BITS      0x02u
+#define Q2_STX_EOB_LEN       2u
+#define Q2_STX_ESCAPE_BITS   0x01u
+#define Q2_STX_ESCAPE_LEN    6u
 
 /*
  * The escape's field widths. Nothing in the bitstream announces them, so they

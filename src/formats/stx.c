@@ -132,8 +132,19 @@ static u32 br_get(bitreader *b, u32 n)
     while (n--) {
         if (b->bits == 0) {
             if (b->at + 2 > b->bytes) {
+                /*
+                 * Out of data: hand back what there was, ZERO-PADDED to the
+                 * width that was asked for. `v << 1` was the old answer and it
+                 * is wrong by however many bits are still owed, which matters
+                 * for exactly one caller and one place: the 17-bit LOOKAHEAD at
+                 * the end of a frame. Every frame carries 8 to 47 bits of
+                 * padding after its last block, so the last block of every
+                 * frame peeks past the end — and got a misaligned lookahead, so
+                 * its EOB never matched. That, and not the table, is why 640 of
+                 * the disc's 5301 frames used to stop exactly ONE block short.
+                 */
                 b->dry = true;
-                return v << 1;
+                return v << (n + 1);
             }
             b->word = q2_rd_u16(b->p + b->at);
             b->at  += 2;
@@ -194,7 +205,13 @@ typedef struct ac_code {
 } ac_code;
 
 static const ac_code k_ac[] = {
-    /* 2..7 bits â€” the common codes, and the ones the data confirms. */
+    /*
+     * 2..7 bits.  Leading-zero count is what separates the groups, and it is
+     * unique per group from six zeros down: 0 -> the 2-bit code (EOB shares the
+     * count and is matched first), 1 -> 3 and 4 bits, 2 -> 5 and 8 bits,
+     * 3 -> 6 bits, 4 -> 7 bits, 5 -> the ESCAPE alone, 6 -> 10 bits, and then
+     * one group per count up to eleven.
+     */
     { 0x03,  2,  0,  1 },   /* 11       */
     { 0x03,  3,  1,  1 },   /* 011      */
     { 0x04,  4,  0,  2 },   /* 0100     */
@@ -207,12 +224,12 @@ static const ac_code k_ac[] = {
     { 0x06,  6,  1,  2 },   /* 000110   */
     { 0x07,  6,  5,  1 },   /* 000111   */
     { 0x04,  7,  2,  2 },   /* 0000100  */
-    { 0x05,  7,  8,  1 },   /* 0000101  */
+    { 0x05,  7,  9,  1 },   /* 0000101  */
     { 0x06,  7,  0,  4 },   /* 0000110  */
-    { 0x07,  7,  9,  1 },   /* 0000111  */
+    { 0x07,  7,  8,  1 },   /* 0000111  */
 
     /*
-     * 8 bits, prefix `00100` â€” and only that prefix. An earlier pass had a
+     * 8 bits, prefix `00100` — and only that prefix. An earlier pass had a
      * second group at `00101xxx`, which is a PREFIX COLLISION with the 5-bit
      * `00101` above: a mechanical check of every pair caught it, and it is the
      * kind of error that produces a decoder which works on most blocks and
@@ -229,7 +246,7 @@ static const ac_code k_ac[] = {
 
     /*
      * 10 bits, prefix `0000001`. The same check caught these sitting under
-     * `000001`, which is the ESCAPE â€” every one of them was unreachable, and
+     * `000001`, which is the ESCAPE — every one of them was unreachable, and
      * the escape was swallowing bits that belonged to a coefficient.
      */
     { 0x008, 10, 16,  1 },  /* 0000001000 */
@@ -241,114 +258,107 @@ static const ac_code k_ac[] = {
     { 0x00E, 10, 14,  1 },  /* 0000001110 */
     { 0x00F, 10,  4,  2 },  /* 0000001111 */
 
-    /*
-     * 12 bits, and these two prefixes are DERIVED rather than recalled.
-     *
-     * Every lookahead the table could not match was bucketed by its run of
-     * leading zeros and its tail collected: the buckets are 7 zeros (845 of
-     * 1316) and 8 zeros (297), and their tails fill exactly 4 and 3 bits with
-     * the next bit taking both values â€” which is the signature of a fixed-width
-     * code followed by a sign. 7 zeros + a 1 + 4 bits and 8 zeros + a 1 + 3
-     * bits are both twelve. The remaining buckets (9, 10 and 11 zeros, 174
-     * samples) each hold ONE distinct pattern at every width, which is what a
-     * reader that has already lost sync sees in a run of padding, not a group.
-     *
-     * The run/level assignments below are B.14's and are NOT derived â€” sync
-     * depends only on the lengths, so a wrong assignment here is a wrong
-     * picture and not a failed decode. Which of those two the port is looking
-     * at is exactly what the frame counter now distinguishes.
-     */
+    /* 12 bits, prefix `00000001` — seven leading zeros, a `1`, four bits. */
     { 0x010, 12,  0, 11 },  /* 000000010000 */
-    { 0x011, 12,  0, 12 },
-    { 0x012, 12,  0, 13 },
-    { 0x013, 12,  0, 14 },
-    { 0x014, 12,  1,  5 },
-    { 0x015, 12,  1,  6 },
-    { 0x016, 12,  1,  7 },
-    { 0x017, 12,  2,  4 },
-    { 0x018, 12,  3,  3 },
-    { 0x019, 12,  5,  2 },
-    { 0x01A, 12,  6,  2 },
-    { 0x01B, 12,  7,  2 },
-    { 0x01C, 12,  8,  2 },
-    { 0x01D, 12,  9,  2 },
-    { 0x01E, 12, 17,  1 },
-    { 0x01F, 12, 18,  1 },
-
-    { 0x008, 12, 19,  1 },  /* 000000001000 */
-    { 0x009, 12, 20,  1 },
-    { 0x00A, 12, 21,  1 },
-    { 0x00B, 12, 22,  1 },
-    { 0x00C, 12, 23,  1 },
-    { 0x00D, 12, 24,  1 },
-    { 0x00E, 12, 25,  1 },
-    { 0x00F, 12, 26,  1 },
+    { 0x011, 12,  8,  2 },
+    { 0x012, 12,  4,  3 },
+    { 0x013, 12,  0, 10 },
+    { 0x014, 12,  2,  4 },
+    { 0x015, 12,  7,  2 },
+    { 0x016, 12, 21,  1 },
+    { 0x017, 12, 20,  1 },
+    { 0x018, 12,  0,  9 },
+    { 0x019, 12, 19,  1 },
+    { 0x01A, 12, 18,  1 },
+    { 0x01B, 12,  1,  5 },
+    { 0x01C, 12,  3,  3 },
+    { 0x01D, 12,  0,  8 },
+    { 0x01E, 12,  6,  2 },
+    { 0x01F, 12, 17,  1 },
 
     /*
-     * 14, 15 and 16 bits, all three DERIVED the same way as the twelves.
+     * 13 bits, prefix `000000001` — and this group is the whole repair.
      *
-     * With the twelves in, every remaining first-failure fell into the 9-, 10-
-     * and 11-zero buckets, and each one's tail fills exactly FOUR bits with the
-     * fifth taking both values â€” a fixed-width code and its sign. So the groups
-     * are `<9 zeros> 1 <4>`, `<10 zeros> 1 <4>` and `<11 zeros> 1 <4>`:
-     * fourteen, fifteen and sixteen bits, sixteen codes each.
-     *
-     * The run/level assignments are B.14's and are NOT derived. Synchronisation
-     * depends only on the lengths, so an assignment error here shows up as a
-     * wrong PICTURE from a frame that decoded, which the frame counter and the
-     * eye can tell apart â€” a length error shows up as a frame that does not
-     * decode at all.
+     * It had been transcribed as EIGHT codes of TWELVE bits (`000000001` and
+     * three more), which is one bit short of every code in it. The
+     * leading-zero derivation could not tell the two apart: a group of
+     * sixteen 4-bit tails each followed by a sign shows exactly the same
+     * "N distinct at width w, 2N at w+1" signature as eight 3-bit tails each
+     * followed by a sign, and the pass that derived it picked the shorter
+     * reading. Every block reaching one of these codes then read one bit too
+     * few and carried on decoding rubbish that still looked like valid codes,
+     * which is why 248 frames "decoded exactly" while showing nothing.
      */
-    { 0x0010, 14, 10,  2 },   /* 00000000010000 */
-    { 0x0011, 14, 11,  2 },
-    { 0x0012, 14, 12,  2 },
-    { 0x0013, 14, 13,  2 },
-    { 0x0014, 14, 14,  2 },
-    { 0x0015, 14, 15,  2 },
-    { 0x0016, 14, 16,  2 },
-    { 0x0017, 14, 27,  1 },
-    { 0x0018, 14, 28,  1 },
-    { 0x0019, 14, 29,  1 },
-    { 0x001A, 14, 30,  1 },
-    { 0x001B, 14, 31,  1 },
-    { 0x001C, 14,  0, 15 },
-    { 0x001D, 14,  0, 16 },
-    { 0x001E, 14,  0, 17 },
-    { 0x001F, 14,  0, 18 },
+    { 0x010, 13, 10,  2 },  /* 0000000010000 */
+    { 0x011, 13,  9,  2 },
+    { 0x012, 13,  5,  3 },
+    { 0x013, 13,  3,  4 },
+    { 0x014, 13,  2,  5 },
+    { 0x015, 13,  1,  7 },
+    { 0x016, 13,  1,  6 },
+    { 0x017, 13,  0, 15 },
+    { 0x018, 13,  0, 14 },
+    { 0x019, 13,  0, 13 },
+    { 0x01A, 13,  0, 12 },
+    { 0x01B, 13, 26,  1 },
+    { 0x01C, 13, 25,  1 },
+    { 0x01D, 13, 24,  1 },
+    { 0x01E, 13, 23,  1 },
+    { 0x01F, 13, 22,  1 },
 
-    { 0x0010, 15,  0, 19 },   /* 000000000010000 */
-    { 0x0011, 15,  0, 20 },
-    { 0x0012, 15,  0, 21 },
-    { 0x0013, 15,  0, 22 },
-    { 0x0014, 15,  0, 23 },
-    { 0x0015, 15,  0, 24 },
-    { 0x0016, 15,  0, 25 },
-    { 0x0017, 15,  0, 26 },
-    { 0x0018, 15,  1,  8 },
-    { 0x0019, 15,  1,  9 },
-    { 0x001A, 15,  1, 10 },
-    { 0x001B, 15,  1, 11 },
-    { 0x001C, 15,  1, 12 },
-    { 0x001D, 15,  1, 13 },
-    { 0x001E, 15,  1, 14 },
-    { 0x001F, 15,  1, 15 },
+    /* 14 bits, prefix `0000000001` — run 0, levels 31 down to 16. */
+    { 0x010, 14,  0, 31 },  /* 00000000010000 */
+    { 0x011, 14,  0, 30 },
+    { 0x012, 14,  0, 29 },
+    { 0x013, 14,  0, 28 },
+    { 0x014, 14,  0, 27 },
+    { 0x015, 14,  0, 26 },
+    { 0x016, 14,  0, 25 },
+    { 0x017, 14,  0, 24 },
+    { 0x018, 14,  0, 23 },
+    { 0x019, 14,  0, 22 },
+    { 0x01A, 14,  0, 21 },
+    { 0x01B, 14,  0, 20 },
+    { 0x01C, 14,  0, 19 },
+    { 0x01D, 14,  0, 18 },
+    { 0x01E, 14,  0, 17 },
+    { 0x01F, 14,  0, 16 },
 
-    { 0x0010, 16,  1, 16 },   /* 0000000000010000 */
-    { 0x0011, 16,  1, 17 },
-    { 0x0012, 16,  1, 18 },
-    { 0x0013, 16,  6,  3 },
-    { 0x0014, 16, 16,  2 },
-    { 0x0015, 16, 17,  2 },
-    { 0x0016, 16, 18,  2 },
-    { 0x0017, 16, 19,  2 },
-    { 0x0018, 16, 20,  2 },
-    { 0x0019, 16, 21,  2 },
-    { 0x001A, 16, 22,  2 },
-    { 0x001B, 16, 23,  2 },
-    { 0x001C, 16, 24,  2 },
-    { 0x001D, 16, 25,  2 },
-    { 0x001E, 16, 26,  2 },
-    { 0x001F, 16, 27,  2 }
+    /* 15 bits, prefix `00000000001`. */
+    { 0x010, 15,  0, 40 },  /* 000000000010000 */
+    { 0x011, 15,  0, 39 },
+    { 0x012, 15,  0, 38 },
+    { 0x013, 15,  0, 37 },
+    { 0x014, 15,  0, 36 },
+    { 0x015, 15,  0, 35 },
+    { 0x016, 15,  0, 34 },
+    { 0x017, 15,  0, 33 },
+    { 0x018, 15,  0, 32 },
+    { 0x019, 15,  1, 14 },
+    { 0x01A, 15,  1, 13 },
+    { 0x01B, 15,  1, 12 },
+    { 0x01C, 15,  1, 11 },
+    { 0x01D, 15,  1, 10 },
+    { 0x01E, 15,  1,  9 },
+    { 0x01F, 15,  1,  8 },
+
+    /* 16 bits, prefix `000000000001` — the longest, and the last group. */
+    { 0x010, 16,  1, 18 },  /* 0000000000010000 */
+    { 0x011, 16,  1, 17 },
+    { 0x012, 16,  1, 16 },
+    { 0x013, 16,  1, 15 },
+    { 0x014, 16,  6,  3 },
+    { 0x015, 16, 16,  2 },
+    { 0x016, 16, 15,  2 },
+    { 0x017, 16, 14,  2 },
+    { 0x018, 16, 13,  2 },
+    { 0x019, 16, 12,  2 },
+    { 0x01A, 16, 11,  2 },
+    { 0x01B, 16, 31,  1 },
+    { 0x01C, 16, 30,  1 },
+    { 0x01D, 16, 29,  1 },
+    { 0x01E, 16, 28,  1 },
+    { 0x01F, 16, 27,  1 }
 };
 
 
@@ -381,182 +391,65 @@ void q2_stx_set_escape_layout(u32 run_bits, u32 level_bits)
 }
 
 /* ------------------------------------------------------------------------- */
-/* What the table cannot match yet                                            */
+/* Why a block gave up                                                        */
 /* ------------------------------------------------------------------------- */
 /*
- * A decoder that desynchronises is only useful if it says WHERE. Every
- * unmatched 17-bit lookahead is recorded by its leading-zero count, which is
- * what identifies a Huffman group: MPEG-1's Table B.14 is organised by run of
- * leading zeros, so "everything unmatched has 11 leading zeros" names the
- * missing group exactly, and a scatter across many counts would mean the
- * problem is elsewhere.
- */
-#define Q2_STX_LZ_MAX 18
-static u32 g_stx_unmatched[Q2_STX_LZ_MAX];
-static u32 g_stx_unmatched_total;
-
-/*
- * And the PATTERNS themselves, deduplicated.
+ * Three reasons, counted apart, because they are three different repairs:
  *
- * The leading-zero histogram says which GROUPS are missing; it does not say how
- * long their codes are, and length is the only thing synchronisation depends
- * on. But the data says that too: a Huffman code is prefix-free, so for each
- * group the bits AFTER the leading `1` take every value of some fixed width and
- * no more. Collect the distinct tails and count them — sixteen distinct 4-bit
- * tails and nothing longer means the group is `<n zeros> 1 <4 bits>`, and the
- * code length falls out as n + 5.
- *
- * That is a derivation from the disc rather than a recollection of a table,
- * which matters here: two of the groups transcribed from memory were wrong in
- * ways that only a prefix check caught.
- */
-#define Q2_STX_PAT_MAX 256
-static u32 g_stx_pat[Q2_STX_PAT_MAX];
-static u32 g_stx_pat_lz[Q2_STX_PAT_MAX];
-static u32 g_stx_pat_n;
-
-u32 q2_stx_last_look;
-u32 q2_stx_last_bits;
-
-/*
- * WHY a block gave up, counted separately, because the three reasons are three
- * different faults and they had all been reported as "desynchronised".
- *
- *   unmatched  no code has this prefix        -> a LENGTH is missing
- *   overrun    the coefficient index passed 63 -> a RUN value is wrong
+ *   unmatched  no code has this prefix         -> a LENGTH is wrong
+ *   overrun    the coefficient index passed 63 -> a RUN is wrong
  *   dry        the bits ran out                -> either, downstream
+ *
+ * All three read zero across all 5301 frames of all three films, which is the
+ * statement this decoder is judged on. They are kept, rather than deleted with
+ * the rest of the hunt that needed them, because a table edit that breaks one
+ * of them should say which.
+ *
+ * What HAS been deleted is the machinery that found the fault: a leading-zero
+ * histogram of unmatched lookaheads and a collector for the distinct bit tails
+ * in each bucket. It derived four of the five long code groups correctly and
+ * the fifth wrong, and what finally settled the table was `bs_num_codes` — the
+ * frame's own MDEC DMA length, which is a per-frame check needing no reference
+ * at all. The derivation is recorded in openquestions #108 and #115; the code
+ * for it is not worth carrying.
  */
 u32 q2_stx_fail_unmatched;
 u32 q2_stx_fail_overrun;
 u32 q2_stx_fail_dry;
 
 /*
- * WHICH code overran, by its length — and by whether it was the ESCAPE, whose
- * run is six raw bits rather than a table entry. "A run value is wrong" is a
- * whole column; this says which row.
- */
-u32 q2_stx_overrun_by_len[20];
-u32 q2_stx_overrun_escape;
-u32 q2_stx_overrun_run_max;
-
-/*
- * Which TABLE ENTRY overran, not which length.
- *
- * A code whose run is too large pushes the coefficient index past 63 and does
- * it repeatedly; a code with the right run does not. Counting per entry turns
- * "the run column is wrong" into a ranked list of which rows, which is a
- * repair rather than a diagnosis. Blame goes to the code that made the jump,
- * so an entry that only ever fails because an earlier one left the index high
- * shows a low count while the real offender shows a high one.
- */
-u32 q2_stx_overrun_by_code[128];
-u32 q2_stx_code_uses[128];
-
-/*
  * How many AC (run, level) pairs the last frame produced.
  *
- * This is the one check available here that does not depend on the run/level
- * column and does not depend on a frame COMPLETING: the pair count is decided
- * by the code LENGTHS alone. The header's `bs_num_codes` is a multiple of 32
- * whose minimum across the disc is 1440 — exactly the block count — so if it
- * counts MDEC code words with one per block plus one per pair, then
+ * The check that settled this format. The frame header's `bs_num_codes` is the
+ * length of the DMA that feeds the MDEC: one 16-bit word per block for the DC,
+ * one per pair and one for each block's EOB, moved as 32-bit words and padded
+ * to a multiple of 32 of them. So
  *
- *     bs_num_codes  ==  round_up_32(1440 + pairs)
+ *     bs_num_codes  ==  round_up_32(ceil((2 * blocks + pairs) / 2))
  *
- * and every frame carries its own answer. A table with wrong lengths finds the
- * wrong number of pairs and misses; a table with right lengths hits, whatever
- * its run/level column says. That is exactly the discrimination every other
- * metric here lacked.
+ * and a frame therefore states its own pair count. That depends on the code
+ * LENGTHS and on nothing else — not the run column, not the level column, not
+ * the quantiser, not the transform — so it scores a candidate table without a
+ * reference, a capture, or a second decoder.
  */
 u32 q2_stx_last_pairs;
 
-static void q2_stx_unmatched(u32 look)
-{
-    u32 lz = 0, i;
-
-    q2_stx_last_look = look;
-
-    while (lz < 17 && ((look >> (16 - lz)) & 1u) == 0)
-        lz++;
-
-    if (lz < Q2_STX_LZ_MAX)
-        g_stx_unmatched[lz]++;
-    g_stx_unmatched_total++;
-
-    /*
-     * The bits after the leading `1`, left-aligned into eight.
-     *
-     * This used to shift by `17 - (lz+1) - 8`, which goes NEGATIVE as soon as
-     * lz reaches 8 — so every deep bucket reported one constant tail and looked
-     * like padding rather than a group. It was an artefact of the analysis, not
-     * a fact about the data, and it sent a whole pass looking in the wrong
-     * place. Aligning to the top of the byte instead is defined for every lz.
-     */
-    if (lz + 1 < 17) {
-        u32 avail = 17u - lz - 1u;
-        u32 tail  = look & ((1u << avail) - 1u);
-
-        tail = (avail >= 8u) ? (tail >> (avail - 8u)) : (tail << (8u - avail));
-
-        for (i = 0; i < g_stx_pat_n; i++)
-            if (g_stx_pat[i] == tail && g_stx_pat_lz[i] == lz)
-                return;
-        if (g_stx_pat_n < Q2_STX_PAT_MAX) {
-            g_stx_pat[g_stx_pat_n]    = tail;
-            g_stx_pat_lz[g_stx_pat_n] = lz;
-            g_stx_pat_n++;
-        }
-    }
-}
-
 void q2_stx_reset_stats(void)
 {
-    memset(g_stx_unmatched, 0, sizeof(g_stx_unmatched));
-    g_stx_unmatched_total  = 0;
-    g_stx_pat_n            = 0;
-    q2_stx_fail_unmatched  = 0;
-    q2_stx_fail_overrun    = 0;
-    q2_stx_fail_dry        = 0;
-    q2_stx_overrun_escape  = 0;
-    q2_stx_overrun_run_max = 0;
-    memset(q2_stx_overrun_by_len, 0, sizeof(q2_stx_overrun_by_len));
+    q2_stx_fail_unmatched = 0;
+    q2_stx_fail_overrun   = 0;
+    q2_stx_fail_dry       = 0;
 }
 
-u32 q2_stx_unmatched_report(u32 *by_leading_zeros, u32 max)
-{
-    u32 i;
-
-    for (i = 0; i < max && i < Q2_STX_LZ_MAX; i++)
-        by_leading_zeros[i] = g_stx_unmatched[i];
-    return g_stx_unmatched_total;
-}
-
-u32 q2_stx_unmatched_tails(u32 lz, u32 width, u32 *out, u32 max)
-{
-    u32 i, n = 0, shift = 8 - (width > 8 ? 8 : width);
-
-    for (i = 0; i < g_stx_pat_n; i++) {
-        u32 t, k;
-        bool seen = false;
-
-        if (g_stx_pat_lz[i] != lz)
-            continue;
-        t = g_stx_pat[i] >> shift;
-        for (k = 0; k < n; k++)
-            if (out[k] == t) { seen = true; break; }
-        if (seen)
-            continue;
-        if (n < max)
-            out[n] = t;
-        n++;
-    }
-
-    return n;
-}
 
 u32 q2_stx_code_count(void)
 {
     return AC_COUNT;
+}
+
+u32 q2_stx_code_bits(u32 i)
+{
+    return (i < AC_COUNT) ? k_ac[i].code : 0u;
 }
 
 bool q2_stx_code_at(u32 i, u32 *len, u32 *run, u32 *level)
@@ -637,7 +530,7 @@ static bool decode_block(bitreader *b, u32 qscale, s32 out[64])
 
     for (;;) {
         u32 look = br_peek(b, 17);
-        u32 run = 0, len = 0, which = 0xFFFFFFFFu;
+        u32 run = 0, len = 0;
         s32 level = 0;
         bool got = false;
 
@@ -669,15 +562,10 @@ static bool decode_block(bitreader *b, u32 qscale, s32 out[64])
                     level = k_ac[i].level;
                     len   = l;
                     got   = true;
-                    which = i;
-                    if (i < 128)
-                        q2_stx_code_uses[i]++;
                     break;
                 }
             }
             if (!got) {
-                q2_stx_unmatched(look);
-                q2_stx_last_bits = (b->bytes - b->at) * 8u + b->bits;
                 q2_stx_fail_unmatched++;
                 return false;
             }
@@ -697,14 +585,6 @@ static bool decode_block(bitreader *b, u32 qscale, s32 out[64])
         n += run + 1;
         if (n >= 64) {
             q2_stx_fail_overrun++;
-            if (len < 20)
-                q2_stx_overrun_by_len[len]++;
-            if (which < 128)
-                q2_stx_overrun_by_code[which]++;
-            if (len == 0)
-                q2_stx_overrun_escape++;
-            if (run > q2_stx_overrun_run_max)
-                q2_stx_overrun_run_max = run;
             return false;
         }
 
@@ -748,8 +628,16 @@ bool q2_stx_frame_decode(const q2_stx_frame *f, u8 *out,
     mbw = (f->width  + 15) / 16;
     mbh = (f->height + 15) / 16;
 
-    for (mb_y = 0; mb_y < mbh; mb_y++) {
-        for (mb_x = 0; mb_x < mbw; mb_x++) {
+    /*
+     * COLUMN-MAJOR macroblocks: the whole left-hand column top to bottom, then
+     * the next column. That is the MDEC's own order — the chip is fed a vertical
+     * strip at a time — and it is not guessable from the bitstream, because a
+     * frame decoded row-major consumes exactly the same bits and produces
+     * exactly the same blocks. It shows up only in the picture, as content that
+     * is plainly real sitting in the wrong 16x16 cell.
+     */
+    for (mb_x = 0; mb_x < mbw; mb_x++) {
+        for (mb_y = 0; mb_y < mbh; mb_y++) {
             u32 k, px, py;
 
             /* Cr, Cb, then the four luma quadrants — the MDEC's own order. */

@@ -5225,6 +5225,7 @@ static int cmd_movie_sweep(const disc *d)
     q2_buf buf;
     u32 ri, li;
     u32 best_ok = 0, best_run = 0, best_level = 0;
+    double best_rough = 1e9;
 
     if (disc_read_file(d, "Q2DATA/MOVIES/OUTRO1P.STX", &buf) != Q2_OK) {
         printf("  OUTRO1P.STX is not on this disc\n");
@@ -5232,14 +5233,16 @@ static int cmd_movie_sweep(const disc *d)
     }
 
     printf("\nscoring escape layouts against OUTRO1P.STX (1559 frames)\n");
-    printf("  %4s %5s  %8s  %10s\n", "run", "level", "exact", "overruns");
+    printf("  %4s %5s  %8s  %10s  %9s\n", "run", "level", "exact", "overruns",
+           "roughness");
 
     for (ri = 0; ri < sizeof(k_run) / sizeof(k_run[0]); ri++) {
         for (li = 0; li < sizeof(k_level) / sizeof(k_level[0]); li++) {
             size_t cursor = 0;
             static q2_stx_frame f;
             static u8 rgb[Q2_STX_WIDTH * Q2_STX_HEIGHT * 3];
-            u32 ok = 0;
+            u32 ok = 0, rough_n = 0;
+            double rough = 0.0;
 
             q2_stx_set_escape_layout(k_run[ri], k_level[li]);
             q2_stx_reset_stats();
@@ -5249,30 +5252,59 @@ static int cmd_movie_sweep(const disc *d)
                 u32 want = ((f.width + 15u) / 16u) *
                            ((f.height + 15u) / 16u) * 6u;
 
-                if (q2_stx_frame_decode(&f, rgb, &nb, &bits) && nb == want)
+                if (q2_stx_frame_decode(&f, rgb, &nb, &bits) && nb == want) {
                     ok++;
+                    if (bits > 12u * want) {
+                        rough += frame_roughness(rgb, f.width, f.height);
+                        rough_n++;
+                    }
+                }
             }
 
-            printf("  %4u %5u  %8u  %10u%s\n", k_run[ri], k_level[li], ok,
-                   q2_stx_fail_overrun, ok > best_ok ? "   <-- best" : "");
+            /*
+             * Two layouts decode every frame, and they cannot be told apart by
+             * synchronisation: the escape's run and level fields total sixteen
+             * bits, and where the boundary between them falls changes the
+             * NUMBERS a code carries and not how many bits it eats. So the
+             * picture is the discriminator — a boundary in the wrong place
+             * spills the run's top bit into the level's sign, and the frame
+             * gets rougher.
+             */
+            printf("  %4u %5u  %8u  %10u  %9.2f%s\n", k_run[ri], k_level[li],
+                   ok, q2_stx_fail_overrun,
+                   rough_n ? rough / (double)rough_n : 0.0,
+                   ok > best_ok ? "   <-- best" : "");
 
-            if (ok > best_ok) {
-                best_ok    = ok;
-                best_run   = k_run[ri];
-                best_level = k_level[li];
+            /*
+             * Ranked on frames decoded first and SMOOTHNESS second, because
+             * the first number cannot separate the two layouts that survive:
+             * the escape's run and level total sixteen bits either way, so
+             * where the boundary sits changes the numbers and not the
+             * synchronisation. The picture is what tells them apart.
+             */
+            {
+                double r = rough_n ? rough / (double)rough_n : 1e9;
+
+                if (ok > best_ok || (ok == best_ok && r < best_rough)) {
+                    best_ok    = ok;
+                    best_rough = r;
+                    best_run   = k_run[ri];
+                    best_level = k_level[li];
+                }
             }
         }
     }
 
-    printf("  best: run %u bits, level %u bits — %u of 1559 frames\n",
-           best_run, best_level, best_ok);
+    printf("  best: run %u bits, level %u bits — %u of 1559 frames,"
+           " roughness %.2f\n", best_run, best_level, best_ok, best_rough);
 
     q2_stx_set_escape_layout(6, 10);
     q2_buf_free(&buf);
     return 0;
 }
 
-static int cmd_movie(const disc *d, const char *name, const char *out_ppm)
+static int cmd_movie(const disc *d, const char *name, const char *out_ppm,
+                     u32 want_frame)
 {
     static const char *const k_film[] = {
         "Q2DATA/MOVIES/TAKE1BP.STX",
@@ -5287,11 +5319,9 @@ static int cmd_movie(const disc *d, const char *name, const char *out_ppm)
         size_t cursor = 0;
         u32 frames = 0, ok = 0, blocks_want = 0;
         u32 rich = 0, maxbits = 0, rough_n = 0;
-        u32 codes_hit = 0, codes_seen = 0;
-        u32 codes_violate = 0;
-        u32 ac_hit = 0, ac_seen = 0;
+        u32 codes_hit = 0, codes_seen = 0, ac_hit = 0, ac_seen = 0;
+        u32 dumped = 0;
         double rough_sum = 0.0;
-        u32 first_blocks = 0, first_bits = 0;
         static q2_stx_frame f;
         const char *base = strrchr(k_film[fi], '/');
 
@@ -5304,6 +5334,7 @@ static int cmd_movie(const disc *d, const char *name, const char *out_ppm)
             continue;
         }
 
+        q2_stx_reset_stats();
         printf("\n%s — %llu bytes, %llu sectors\n", base,
                (unsigned long long)buf.size,
                (unsigned long long)(buf.size / Q2_STX_SECTOR_SIZE));
@@ -5314,117 +5345,134 @@ static int cmd_movie(const disc *d, const char *name, const char *out_ppm)
             bool good;
 
             frames++;
-            blocks_want = ((f.width + 15u) / 16u) * ((f.height + 15u) / 16u) * 6u;
-
+            blocks_want = ((f.width + 15u) / 16u) *
+                          ((f.height + 15u) / 16u) * 6u;
             good = q2_stx_frame_decode(&f, rgb, &nb, &bits);
-            {
-                u32 want32 = ((1440u + q2_stx_last_pairs) + 31u) & ~31u;
 
-                if (good && nb == blocks_want) {
-                    if (want32 == f.num_codes) {
-                        codes_hit++;
-                        if (q2_stx_last_pairs) ac_hit++;
-                    }
-                    if (q2_stx_last_pairs) ac_seen++;
-                    codes_seen++;
-                } else if (1440u + q2_stx_last_pairs > f.num_codes) {
-                    codes_violate++;
+            if (!good || nb != blocks_want) {
+                if (rc == 0)
+                    printf("    FAILED at frame %u: %u of %u blocks,"
+                           " %u bits of %u\n", f.number, nb, blocks_want,
+                           bits, (f.size - 8) * 8);
+                rc = 1;
+                continue;
+            }
+
+            ok++;
+            codes_seen++;
+            /*
+             * The frame's own header, checked against what came out of it.
+             *
+             * `bs_num_codes` is the MDEC's DMA LENGTH: the chip is fed one
+             * 16-bit word per block for the DC, one per (run, level) pair and
+             * one for each block's EOB terminator, the DMA moves 32-bit words,
+             * and the length is padded to a multiple of 32 of them. So
+             *
+             *     words  = 2 * blocks + pairs
+             *     codes  = round_up_32(ceil(words / 2))
+             *
+             * and every frame therefore carries its own answer. It needs no
+             * reference, no capture and no second decoder — which is what
+             * makes it the check that settles whether the Huffman table is
+             * right. A DC-only frame is 2*1440 = 2880 words = 1440 longwords,
+             * already a multiple of 32, and reading THAT as "one word per
+             * block" is what made an earlier wrong formula look confirmed.
+             */
+            {
+                u32 words  = 2u * blocks_want + q2_stx_last_pairs;
+                u32 want32 = (((words + 1u) / 2u) + 31u) & ~31u;
+
+                if (want32 == f.num_codes)
+                    codes_hit++;
+                if (q2_stx_last_pairs) {
+                    ac_seen++;
+                    if (want32 == f.num_codes)
+                        ac_hit++;
                 }
             }
-            if (good && nb == blocks_want)
-            {
-                ok++;
-                if (bits > 12u * blocks_want) {
-                    rich++;
-                    rough_sum += frame_roughness(rgb, f.width, f.height);
-                    rough_n++;
-                }
-                if (bits > maxbits) maxbits = bits;
-            }
-            else if (frames <= 3)
-                printf("    frame %u: %u of %u blocks, %u bits of %u available"
-                       " — %s\n", f.number, nb, blocks_want, bits,
-                       (f.size - 8) * 8, good ? "short" : "desynchronised");
-                printf("      look %05X (%u leading zeros), %u bits left\n", q2_stx_last_look, 0u, q2_stx_last_bits);
 
-            if (good && nb == blocks_want && first_blocks == 0 && bits > 12u * blocks_want) {
-                first_blocks = nb;
-                first_bits   = bits;
-                if (out_ppm && *out_ppm) {
-                    FILE *fp = fopen(out_ppm, "wb");
-                    if (fp) {
-                        fprintf(fp, "P6\n%u %u\n255\n", f.width, f.height);
-                        fwrite(rgb, 1, (size_t)f.width * f.height * 3, fp);
-                        fclose(fp);
-                        printf("    frame 1 -> %s\n", out_ppm);
-                    }
+            if (bits > 12u * blocks_want) {
+                rich++;
+                rough_sum += frame_roughness(rgb, f.width, f.height);
+                rough_n++;
+                if (bits > maxbits)
+                    maxbits = bits;
+            }
+
+            /* Dump the frame that was asked for; frame 0 means "the first one
+             * that carries AC data", because the films open on a fade and a
+             * flat grey rectangle says nothing about a decoder. */
+            if (out_ppm && *out_ppm && !dumped &&
+                (want_frame ? f.number == want_frame
+                            : bits > 12u * blocks_want)) {
+                FILE *fp = fopen(out_ppm, "wb");
+
+                if (fp) {
+                    fprintf(fp, "P6\n%u %u\n255\n", f.width, f.height);
+                    fwrite(rgb, 1, (size_t)f.width * f.height * 3, fp);
+                    fclose(fp);
+                    printf("    frame %u -> %s\n", f.number, out_ppm);
+                    dumped = 1;
                 }
             }
         }
 
-        printf("    of those, %u carried AC data; most bits in a frame %u\n",
-               rich, maxbits);
+        printf("    %u frames, %u decoded exactly (%u blocks each);"
+               " %u carried AC data, most bits in one %u\n",
+               frames, ok, blocks_want, rich, maxbits);
+        printf("    bs_num_codes agrees on %u of %u, and on %u of %u"
+               " AC-carrying\n", codes_hit, codes_seen, ac_hit, ac_seen);
         if (rough_n)
-            printf("    mean roughness over %u AC frames: %.2f  "
-                   "(real video is a few units; noise is tens)\n",
-                   rough_n, rough_sum / (double)rough_n);
-        printf("    bs_num_codes agrees on %u of %u completed; %u incomplete frames already EXCEED it\n", codes_hit, codes_seen, codes_violate);
-        printf("      of the AC-carrying ones: %u of %u agree\n", ac_hit, ac_seen);
-        printf("    %u frames, %u decoded exactly (%u blocks each)\n",
-               frames, ok, blocks_want);
-        printf("    frame 1: %u blocks, %u bits used\n",
-               first_blocks, first_bits);
+            printf("    mean roughness %.2f over %u AC frames"
+                   " (real video is a few units; wrong coefficients are tens)\n",
+                   rough_sum / (double)rough_n, rough_n);
+        printf("    gave up: %u unmatched code, %u run overran 63,"
+               " %u out of bits\n", q2_stx_fail_unmatched,
+               q2_stx_fail_overrun, q2_stx_fail_dry);
+
+        /*
+         * And the SOUND, which rides in slot 7 of the same interleave.
+         *
+         * It is read a sector at a time rather than out of `buf`, because the
+         * audio slots are Form 2 and carry 2324 bytes where the video slots
+         * carry 2048 — and `disc_read_file` picks one strategy for a whole
+         * file, from its FIRST sector, which here is video. A player that took
+         * the audio out of that buffer would be handed 2048 of each sector's
+         * 2304 ADPCM bytes and would drift.
+         *
+         * The check that matters is the DURATION: one audio sector is 2016
+         * stereo frames at 37800 Hz, and if the reading of the interleave is
+         * right then the sound and the picture must come out the same length.
+         */
         {
-            u32 lz[18], t, i2;
+            const disc_file *df = disc_find(d, k_film[fi]);
+            u32 sectors = df ? (df->size + Q2_STX_SECTOR_SIZE - 1)
+                                   / Q2_STX_SECTOR_SIZE : 0;
+            u32 i, audio = 0, bad = 0, shortp = 0;
 
-            t = q2_stx_unmatched_report(lz, 18);
-            printf("    gave up: %u unmatched code, %u run overran 63, %u out of bits\n", q2_stx_fail_unmatched, q2_stx_fail_overrun, q2_stx_fail_dry);
-            {
-            {
-                u32 q, nc = q2_stx_code_count();
+            for (i = 0; df && i < sectors; i++) {
+                u8  payload[CD_SECTOR_RAW];
+                u32 len = 0;
 
-                printf("    worst rows (overrun / uses):\n");
-                for (q = 0; q < nc && q < 128; q++) {
-                    u32 ln = 0, rn = 0, lv = 0;
-
-                    if (!q2_stx_overrun_by_code[q])
-                        continue;
-                    if (q2_stx_overrun_by_code[q] * 4 <
-                        q2_stx_code_uses[q])
-                        continue;
-                    q2_stx_code_at(q, &ln, &rn, &lv);
-                    printf("      [%2u] %2u-bit run %2u level %2u : %5u of %6u\n", q, ln, rn, lv,
-                           q2_stx_overrun_by_code[q],
-                           q2_stx_code_uses[q]);
-                }
-            }
-                u32 q;
-                printf("    overran by code length:");
-                for (q = 0; q < 20; q++)
-                    if (q2_stx_overrun_by_len[q])
-                        printf("  %u-bit %u", q, q2_stx_overrun_by_len[q]);
-                printf("   escape %u, largest run %u\n", q2_stx_overrun_escape, q2_stx_overrun_run_max);
-            }
-            printf("    unmatched lookaheads: %u", t);
-            for (i2 = 0; i2 < 18; i2++)
-                if (lz[i2])
-                    printf("  [%u zeros] %u", i2, lz[i2]);
-            printf("\n");
-            for (i2 = 0; i2 < 18; i2++) {
-                u32 w;
-
-                if (!lz[i2])
+                if (!q2_stx_sector_is_audio(i))
                     continue;
-                for (w = 2; w <= 6; w++) {
-                    u32 tl[256];
-                    u32 nt = q2_stx_unmatched_tails(i2, w, tl, 256);
-
-                    printf("      lz %2u  width %u -> %3u distinct%s\n",
-                           i2, w, nt, nt == (1u << w) ? "   FULL" : "");
-                }
+                if (disc_read_sector_payload(d, df->lba + i, payload,
+                                             &len) != Q2_OK)
+                    break;
+                if (len < XA_SECTOR_ADPCM_BYTES) { shortp++; continue; }
+                audio++;
+                if (q2_xa_validate_sector(payload) != 0)
+                    bad++;
             }
+
+            printf("    audio: %u XA sectors, %u short, %u with an invalid"
+                   " sound group — %.1f s against %.1f s of picture\n",
+                   audio, shortp, bad,
+                   (double)audio * XA_FRAMES_PER_SECTOR / XA_SAMPLE_RATE,
+                   (double)frames / 25.0);
         }
-        if (ok != frames)
+
+        if (ok != frames || codes_hit != codes_seen)
             rc = 1;
 
         q2_buf_free(&buf);
@@ -5700,7 +5748,8 @@ int main(int argc, char **argv)
             rc = cmd_movie_sweep(d);
         else
             rc = cmd_movie(d, (argc >= 4) ? argv[3] : NULL,
-                              (argc >= 5) ? argv[4] : NULL);
+                              (argc >= 5) ? argv[4] : NULL,
+                              (argc >= 6) ? (u32)strtoul(argv[5], NULL, 0) : 0u);
     } else if (strcmp(cmd, "menu") == 0) {
         rc = cmd_menu(d, (argc >= 4) ? argv[3] : NULL,
                          (argc >= 5) ? argv[4] : NULL,

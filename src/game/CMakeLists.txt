@@ -49,6 +49,8 @@ add_library(q2psx_game STATIC
     briefing.h
     mission.c
     mission.h
+    movie.c
+    movie.h
     levelbin.c
     mover.c
     mover.h
@@ -83,6 +85,7 @@ add_library(q2psx_game STATIC
 
 target_include_directories(q2psx_game PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(q2psx_game PUBLIC
+    q2psx_audio
     q2psx_common
     q2psx_build
     q2psx_disc

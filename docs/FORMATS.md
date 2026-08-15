@@ -2211,11 +2211,20 @@ typedef struct {                /* 32 bytes */
     uint16_t width;             /* CONFIRMED: 320 (27831/27831)                      */
     uint16_t height;            /* CONFIRMED: 192 (27831/27831)                      */
     /* --- mirror of the frame bitstream's own first 8 bytes; do NOT re-prepend --- */
-    uint16_t bs_num_codes;      /* INFERRED: "number of 16-bit MDEC code words" is
-                                 * plausible but unvalidated. Byte facts: always a
-                                 * multiple of 32, range 1440..9568, and
-                                 * bs_num_codes*2 >= frame_size_bytes-8 in 5301/5301.
-                                 * It is NOT frame_size/4.                           */
+    uint16_t bs_num_codes;      /* CONFIRMED: the MDEC DMA LENGTH in 32-bit words.
+                                 * The chip is fed one 16-bit word per block for the
+                                 * DC, one per (run, level) pair and one for each
+                                 * block's EOB terminator; the DMA moves longwords
+                                 * and its length is padded to a multiple of 32:
+                                 *
+                                 *   words = 2*blocks + pairs
+                                 *   codes = round_up_32(ceil(words / 2))
+                                 *
+                                 * Holds for 5301/5301 frames of all three films
+                                 * once the bitstream is decoded — see §6.4. This is
+                                 * the check that settled the Huffman table, because
+                                 * the pair count depends on the code LENGTHS alone
+                                 * and every frame states its own.                   */
     uint16_t bs_magic;          /* CONFIRMED: 0x3800 (27831/27831)                   */
     uint16_t bs_qscale;         /* CONFIRMED: PER-FRAME quantization scale, observed
                                  * 1..20 across the three movies. MUST be read per
@@ -2236,7 +2245,7 @@ typedef struct {                /* 32 bytes */
 | `0x0C` | `uint32_t` | `frame_size_bytes` | Valid bitstream bytes this frame | CONFIRMED |
 | `0x10` | `uint16_t` | `width` | 320 | CONFIRMED |
 | `0x12` | `uint16_t` | `height` | 192 | CONFIRMED |
-| `0x14` | `uint16_t` | `bs_num_codes` | Multiple of 32; meaning unvalidated | INFERRED |
+| `0x14` | `uint16_t` | `bs_num_codes` | MDEC DMA length in longwords: `round_up_32(ceil((2*blocks + pairs)/2))` | CONFIRMED |
 | `0x16` | `uint16_t` | `bs_magic` | `0x3800` | CONFIRMED |
 | `0x18` | `uint16_t` | `bs_qscale` | Per-frame quant scale, 1…20 | CONFIRMED |
 | `0x1A` | `uint16_t` | `bs_version` | 2 | CONFIRMED |
@@ -2263,6 +2272,55 @@ sectors; 1,247 / 1,844 / 964 audio sectors; 544 / 0 / 12 null sectors.
 
 STX null sectors (submode `0x00`, channel 0) are **fully zero-filled** — 0 of 556 contain a non-zero byte.
 (This does *not* generalise to `.XAI` null sectors; see §7.)
+
+### 6.4 The BS v2 bitstream
+
+Decoded. **5,301 of 5,301 frames** across all three films decode to exactly 1,440 blocks with zero
+unmatched codes, zero run overruns and zero exhausted readers, and every one of them satisfies its own
+header's `bs_num_codes`.
+
+```
+                frames   decoded   AC-carrying   bs_num_codes agrees   roughness
+TAKE1BP.STX      1283      1283          1277           1283 / 1283        2.68
+OUTRO1P.STX      1559      1559          1320           1559 / 1559        3.37
+ROGUEINP.STX     2459      2459          2443           2459 / 2459        4.97
+```
+
+**Block layout.** Each 16x16 macroblock is six 8x8 blocks in the MDEC's order — **Cr, Cb, then the four
+luma quadrants** — and the macroblocks themselves are stored **column-major**: the whole left-hand column
+top to bottom, then the next column. Column order is invisible to a decoder's own consistency checks (a
+row-major read consumes exactly the same bits and produces exactly the same blocks) and shows up only in
+the picture, as content that is plainly real sitting in the wrong 16x16 cell.
+
+**Per block.** A 10-bit signed DC — a plain value, not a difference, which is what makes this v2 — then AC
+coefficients in zigzag order until an EOB.
+
+**The AC codes are MPEG-1's Table B.14**, 111 entries: 1 code of 2 bits, 1 of 3, 2 of 4, 3 of 5, 4 of 6,
+4 of 7, 8 of 8, 8 of 10, and 16 each at 12, 13, 14, 15 and 16 bits, each followed by a sign bit. `EOB` is
+`10` and the escape is `000001` followed by a **6-bit run and a 10-bit signed level** with no sign bit.
+
+The escape's split is not announced anywhere in the stream, so it was measured rather than asserted:
+`q2psx-inspect movie <disc> sweep` scores eighteen candidate layouts. Exactly two decode every frame — run
+5 / level 11 and run 6 / level 10, which are the same sixteen bits divided differently, so synchronisation
+cannot separate them. The picture can: mean roughness 3.37 against 4.18, and the smoother one is the MDEC's
+documented layout.
+
+Two properties of the table are checked by `tests/test_movie.c` without needing the disc: that no code is a
+prefix of another, and that the Kraft sum over every code plus EOB and the escape is exactly `1 - 2^-12` —
+the unused branch being the one under twelve leading zeros, which is why a reader that loses alignment
+reports its unmatched lookaheads with exactly that many.
+
+**Dequantisation** is the MDEC's: `coeff = (level * qscale * quant[i]) / 8` for the AC coefficients and
+`dc * quant[0]` for the DC, against MPEG-1's default intra table in natural order. The inverse transform
+here is a separable float IDCT and is deliberately **not** the chip's fixed-point one, so it differs in the
+last bit or two.
+
+**Playback** is `src/game/movie.h`: a sector window over the file, the 25 fps clock the container forces,
+and the XA in slot 7 through the same decoder the music uses. The audio sectors are **Form 2** where the
+video sectors are Form 1, so a player that reads the file with one strategy gets 2048 of each audio
+sector's 2304 ADPCM bytes and drifts; they must be read per sector. Decoded, the sound comes out the same
+length as the picture — 51.4 s against 51.3, 98.3 against 98.4 — except on `OUTRO1P`, where it runs 4 s
+longer, which is the tail §6.3 describes.
 
 ---
 
