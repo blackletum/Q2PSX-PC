@@ -5888,3 +5888,32 @@ is a video frame taken after the player moved.
 
 **Not applied to `effect.c`**, whose two `gte_set_rotation` sites were not audited — particles will be narrow
 until they get the same treatment.
+
+- [x] 75. **Every door and lift on the disc stood still, and the mover module has been finished the whole
+      time.** `mover.[ch]` carries the seven-state machine, all three payload shapes, the key gate and the
+      displacement the zone draw already adds through `q2_movers_node_offset` — and `q2_movers_build`,
+      `q2_movers_tick` and `q2_mover_trigger` had **no callers anywhere in the port**. 1,006 `MOVER_A`
+      items, 20 `MOVER_B` and 292 `MOVER_C`, none of them ever asked to move.
+
+      It is the same shape as the rotators before #56 and the same fix: the runtime reports a MOVER item
+      and the OWNER says which mover that is, because the set does not live in the runtime.
+
+      **The identity is the item's chunk offset**, stamped on every mover the builder pushes. An ordinal
+      would work only while build order and execution order agree and nothing guarantees they do; and it
+      has to be per-ITEM rather than per-mover because `MOVER_C` builds two movers from one item — the
+      two leaves of a double door — and a script that opens the door means both.
+
+      **`events_rt.c`'s note was right about the hazard and wrong about the conclusion.** It called the
+      MOVER opcodes "deliberately inert" because "the s16 slots hold Scene node indices on disc and
+      runtime object indices after a load-time pre-pass that has not been decoded". The disc values are
+      Scene node indices, and `mover.h` deliberately reads them as such rather than reproducing the
+      console's rewrite — so acting on them was correct all along.
+
+      Measured across seventeen maps, firing every trigger volume: BASE0 8 movers / 263 tick-moves,
+      LAB 34 / 442, COMMAND 10 / 982, POWER2 34 / 579. And from an ORDINARY demo walk with nothing
+      staged, LAB opens one door and moves it for 120 ticks — a player walking into a volume, which is
+      the path that matters.
+
+      **The picture is not subtle.** At LAB frame 780 the two runs differ by 94,068 pixels of 126,976:
+      with the movers inert the player is inside the closed door looking at its back face, and with them
+      working the door is open and they have walked through it. A closed door is a wall.
