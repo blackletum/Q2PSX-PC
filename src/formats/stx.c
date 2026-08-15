@@ -359,6 +359,26 @@ static const ac_code k_ac[] = {
 #define AC_ESCAPE_CODE 0x01u
 #define AC_ESCAPE_LEN  6u
 
+/*
+ * The escape's two field widths, SETTABLE so they can be swept.
+ *
+ * After `000001` come a run and a level, and nothing in the bitstream announces
+ * how wide either is. Rather than assert a layout, the widths are parameters
+ * and the disc scores them: a wrong pair desynchronises almost every frame and
+ * the right pair should stand out by a wide margin. That is the same argument
+ * the code LENGTHS were derived by (#108), applied to the one field the
+ * leading-zero method cannot reach — an escape has no Huffman code after it to
+ * measure.
+ */
+static u32 g_esc_run_bits   = 6;
+static u32 g_esc_level_bits = 10;
+
+void q2_stx_set_escape_layout(u32 run_bits, u32 level_bits)
+{
+    g_esc_run_bits   = run_bits ? run_bits : 6;
+    g_esc_level_bits = level_bits ? level_bits : 10;
+}
+
 /* ------------------------------------------------------------------------- */
 /* What the table cannot match yet                                            */
 /* ------------------------------------------------------------------------- */
@@ -455,6 +475,19 @@ static void q2_stx_unmatched(u32 look)
             g_stx_pat_n++;
         }
     }
+}
+
+void q2_stx_reset_stats(void)
+{
+    memset(g_stx_unmatched, 0, sizeof(g_stx_unmatched));
+    g_stx_unmatched_total  = 0;
+    g_stx_pat_n            = 0;
+    q2_stx_fail_unmatched  = 0;
+    q2_stx_fail_overrun    = 0;
+    q2_stx_fail_dry        = 0;
+    q2_stx_overrun_escape  = 0;
+    q2_stx_overrun_run_max = 0;
+    memset(q2_stx_overrun_by_len, 0, sizeof(q2_stx_overrun_by_len));
 }
 
 u32 q2_stx_unmatched_report(u32 *by_leading_zeros, u32 max)
@@ -570,10 +603,10 @@ static bool decode_block(bitreader *b, u32 qscale, s32 out[64])
             s32 v;
 
             br_get(b, AC_ESCAPE_LEN);
-            run = br_get(b, 6);
-            v   = (s32)br_get(b, 10);
-            if (v & 0x200)
-                v -= 0x400;
+            run = br_get(b, g_esc_run_bits);
+            v   = (s32)br_get(b, g_esc_level_bits);
+            if (v & (1 << (g_esc_level_bits - 1)))
+                v -= (1 << g_esc_level_bits);
             level = v;
             got   = true;
             len   = 0;

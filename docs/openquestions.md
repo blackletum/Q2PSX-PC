@@ -7084,3 +7084,40 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       that decode end to end, the code LENGTHS are derived from the disc (#108), and something in the
       common AC path — most likely the escape's field layout — puts the coefficient index somewhere it
       should not be. **The movies do not play.**
+- [~] 110. **The escape is ruled out by a sweep, AC decoding is proven to work, and the fault is the
+      run/level column after all.** #109 doubted that diagnosis on the strength of an overrun histogram
+      that turned out to be naming victims. Three measurements settle it.
+
+      **The escape layout makes no difference at all.** Nothing in the bitstream announces how wide the
+      escape's run and level fields are, so rather than assert a pair, `movie sweep` tries eighteen —
+      run 5/6/7 against level 8/9/10/11/12/16 — and scores each by frames decoded:
+
+          every one of the eighteen scores exactly 248 of 1559
+
+      A parameter that changes nothing is not the cause. It also means the successful frames never reach
+      an escape, so the sweep cannot pin the layout either; it is ruled out, not solved.
+
+      **EOB really can be the first AC code.** The hypothesis that `10` at the first coefficient is
+      (0, -1) rather than end-of-block — which would explain blocks terminating early — was tested and is
+      WRONG: it takes the count from 248 to **zero**. BS v2 is not MPEG-1 in that respect.
+
+      **And AC decoding works.** Counting the completed frames that consumed more than twelve bits per
+      block — i.e. that carried real AC coefficients rather than a DC and a terminator:
+
+          TAKE1BP 3 of 9      OUTRO1P 9 of 248      ROGUEINP 18 of 34
+
+      up to 42,824 bits in a single frame. So the AC path is not fundamentally broken. Thirty frames
+      decode end to end with genuine coefficient data.
+
+      **What they look like is the answer.** Dumped, an AC-carrying frame is not a picture: it is bands of
+      magenta, green and cyan blocks over a flat grey field — the signature of chroma coefficients taking
+      large wrong values. The frame CONSUMES the right number of bits and produces the wrong numbers,
+      which is precisely and only a run/level fault.
+
+      So #109's correction was itself too strong. The histogram was naming victims — that part stands —
+      but the conclusion it displaced was right: **the lengths are derived and correct, and the run/level
+      column is wrong.** Completing it needs the actual Table B.14 assignments; they cannot be derived from
+      synchronisation, because every wrong assignment that keeps the length produces a frame that decodes
+      to a different wrong picture, and the disc cannot say which is right.
+
+      **The movies do not play.**

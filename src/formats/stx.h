@@ -151,6 +151,26 @@ extern u32 q2_stx_overrun_by_len[20];
 extern u32 q2_stx_overrun_escape;
 extern u32 q2_stx_overrun_run_max;
 
+/*
+ * The escape's field widths. Nothing in the bitstream announces them, so they
+ * are parameters the disc can score rather than an assertion — see stx.c.
+ * Defaults are 6 and 10.
+ */
+void q2_stx_set_escape_layout(u32 run_bits, u32 level_bits);
+
+/* Reset the failure counters, so a sweep scores each candidate on its own. */
+void q2_stx_reset_stats(void);
+
+/*
+ * The escape's field widths. Nothing in the bitstream announces them, so they
+ * are parameters the disc can score rather than an assertion — see stx.c.
+ * Defaults are 6 and 10.
+ */
+void q2_stx_set_escape_layout(u32 run_bits, u32 level_bits);
+
+/* Reset the failure counters, so a sweep scores each candidate on its own. */
+void q2_stx_reset_stats(void);
+
 #ifdef __cplusplus
 }
 #endif

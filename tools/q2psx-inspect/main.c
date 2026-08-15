@@ -5176,6 +5176,68 @@ static int cmd_extract(disc *d, const char *outdir)
  * blocks or bits inside the first frame, so "5301 of 5301 frames, 1440 blocks
  * each" is a strong statement and "5300 of 5301" would be a broken one.
  */
+/*
+ * `movie sweep` — score every plausible escape layout against the disc.
+ *
+ * After `000001` the escape carries a run and a level and nothing announces how
+ * wide either is. Rather than assert a pair, try them: a wrong layout
+ * desynchronises nearly every frame, so the right one should stand out by a
+ * margin no coincidence produces. Frames decoded exactly is the score.
+ */
+static int cmd_movie_sweep(const disc *d)
+{
+    static const u32 k_run[]   = { 5, 6, 7 };
+    static const u32 k_level[] = { 8, 9, 10, 11, 12, 16 };
+    q2_buf buf;
+    u32 ri, li;
+    u32 best_ok = 0, best_run = 0, best_level = 0;
+
+    if (disc_read_file(d, "Q2DATA/MOVIES/OUTRO1P.STX", &buf) != Q2_OK) {
+        printf("  OUTRO1P.STX is not on this disc\n");
+        return 1;
+    }
+
+    printf("\nscoring escape layouts against OUTRO1P.STX (1559 frames)\n");
+    printf("  %4s %5s  %8s  %10s\n", "run", "level", "exact", "overruns");
+
+    for (ri = 0; ri < sizeof(k_run) / sizeof(k_run[0]); ri++) {
+        for (li = 0; li < sizeof(k_level) / sizeof(k_level[0]); li++) {
+            size_t cursor = 0;
+            static q2_stx_frame f;
+            static u8 rgb[Q2_STX_WIDTH * Q2_STX_HEIGHT * 3];
+            u32 ok = 0;
+
+            q2_stx_set_escape_layout(k_run[ri], k_level[li]);
+            q2_stx_reset_stats();
+
+            while (q2_stx_frame_next(buf.data, buf.size, &cursor, &f)) {
+                u32 nb = 0, bits = 0;
+                u32 want = ((f.width + 15u) / 16u) *
+                           ((f.height + 15u) / 16u) * 6u;
+
+                if (q2_stx_frame_decode(&f, rgb, &nb, &bits) && nb == want)
+                    ok++;
+            }
+
+            printf("  %4u %5u  %8u  %10u%s\n", k_run[ri], k_level[li], ok,
+                   q2_stx_fail_overrun, ok > best_ok ? "   <-- best" : "");
+
+            if (ok > best_ok) {
+                best_ok    = ok;
+                best_run   = k_run[ri];
+                best_level = k_level[li];
+            }
+        }
+    }
+
+    printf("  best: run %u bits, level %u bits — %u of 1559 frames\n",
+           best_run, best_level, best_ok);
+
+    q2_stx_set_escape_layout(6, 10);
+    q2_buf_free(&buf);
+    return 0;
+}
+
 static int cmd_movie(const disc *d, const char *name, const char *out_ppm)
 {
     static const char *const k_film[] = {
@@ -5190,6 +5252,7 @@ static int cmd_movie(const disc *d, const char *name, const char *out_ppm)
         q2_buf buf;
         size_t cursor = 0;
         u32 frames = 0, ok = 0, blocks_want = 0;
+        u32 rich = 0, maxbits = 0;
         u32 first_blocks = 0, first_bits = 0;
         static q2_stx_frame f;
         const char *base = strrchr(k_film[fi], '/');
@@ -5217,14 +5280,18 @@ static int cmd_movie(const disc *d, const char *name, const char *out_ppm)
 
             good = q2_stx_frame_decode(&f, rgb, &nb, &bits);
             if (good && nb == blocks_want)
+            {
                 ok++;
+                if (bits > 12u * blocks_want) rich++;
+                if (bits > maxbits) maxbits = bits;
+            }
             else if (frames <= 3)
                 printf("    frame %u: %u of %u blocks, %u bits of %u available"
                        " — %s\n", f.number, nb, blocks_want, bits,
                        (f.size - 8) * 8, good ? "short" : "desynchronised");
                 printf("      look %05X (%u leading zeros), %u bits left\n", q2_stx_last_look, 0u, q2_stx_last_bits);
 
-            if (good && nb == blocks_want && first_blocks == 0) {
+            if (good && nb == blocks_want && first_blocks == 0 && bits > 12u * blocks_want) {
                 first_blocks = nb;
                 first_bits   = bits;
                 if (out_ppm && *out_ppm) {
@@ -5239,6 +5306,8 @@ static int cmd_movie(const disc *d, const char *name, const char *out_ppm)
             }
         }
 
+        printf("    of those, %u carried AC data; most bits in a frame %u\n",
+               rich, maxbits);
         printf("    %u frames, %u decoded exactly (%u blocks each)\n",
                frames, ok, blocks_want);
         printf("    frame 1: %u blocks, %u bits used\n",
@@ -5547,8 +5616,11 @@ int main(int argc, char **argv)
         rc = cmd_text(d, (argc >= 4) ? argv[3] : NULL,
                       (argc >= 5) ? argv[4] : NULL);
     } else if (strcmp(cmd, "movie") == 0) {
-        rc = cmd_movie(d, (argc >= 4) ? argv[3] : NULL,
-                          (argc >= 5) ? argv[4] : NULL);
+        if (argc >= 4 && strcmp(argv[3], "sweep") == 0)
+            rc = cmd_movie_sweep(d);
+        else
+            rc = cmd_movie(d, (argc >= 4) ? argv[3] : NULL,
+                              (argc >= 5) ? argv[4] : NULL);
     } else if (strcmp(cmd, "menu") == 0) {
         rc = cmd_menu(d, (argc >= 4) ? argv[3] : NULL,
                          (argc >= 5) ? argv[4] : NULL,
