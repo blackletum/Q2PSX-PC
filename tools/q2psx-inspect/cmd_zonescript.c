@@ -138,6 +138,10 @@ int cmd_zonescript(const disc *d, const char *only_map)
     u32 live_rot_fired = 0, live_rot_barren = 0;
     u32 rot_any_zone = 0, rot_no_zone = 0;
     u32 light_timed = 0, light_flk = 0, live_lit_run = 0;
+    /* The breakables, counted the same way the rotators are, because they have
+     * the same shape of operand and the same two-buffer rebase applies. */
+    u32 brk_calls = 0, brk_short = 0, brk_no_object = 0, brk_usable = 0,
+        brk_zone_rescue = 0;
     u32 live_built = 0, live_calls = 0, live_steps = 0, live_moved = 0,
         live_turned = 0;
     bool verbose = (only_map != NULL);
@@ -399,6 +403,49 @@ int cmd_zonescript(const disc *d, const char *only_map)
                                     break;
                                 }
 
+                                /*
+                                 * GLASS and SHOOTTHEN, whose object slot is a
+                                 * single s16 at +4 rather than the rotators'
+                                 * four at +12. Counted separately because they
+                                 * answer a different question: a breaking pane
+                                 * is what `q2_sim_debris_burst` is waiting for
+                                 * a caller from, and whether it CAN be wired
+                                 * turns on whether these slots resolve at all.
+                                 *
+                                 * The two-buffer rebase (#56) is applied here
+                                 * too: an operand the game has already run is
+                                 * -1 in COMMON's copy and live in the zone's.
+                                 */
+                                if (call.prim == Q2_UF_GLASS ||
+                                    call.prim == Q2_UF_SHOOTTHEN) {
+                                    s16 obj = -1;
+
+                                    brk_calls++;
+                                    if (item.len < 6) {
+                                        brk_short++;
+                                    } else {
+                                        obj = q2_rd_s16(pp + 4);
+                                        if (obj < 0) {
+                                            u32 off = (u32)(pp - cev.data);
+                                            u32 zj;
+
+                                            for (zj = 0; zj < zcount &&
+                                                         obj < 0; zj++) {
+                                                if (off + 6 > zev[zj].size)
+                                                    continue;
+                                                obj = q2_rd_s16(zev[zj].data +
+                                                                off + 4);
+                                                if (obj >= 0)
+                                                    brk_zone_rescue++;
+                                            }
+                                        }
+                                        if (obj < 0)
+                                            brk_no_object++;
+                                        else
+                                            brk_usable++;
+                                    }
+                                }
+
                                 if (!need)
                                     continue;
 
@@ -635,6 +682,11 @@ int cmd_zonescript(const disc *d, const char *only_map)
     printf("    script LIGHT calls in COMMON: %u TIMEDLIGHT, %u FLKLIGHT;"
            " the trigger sweep RUNS %u of them\n",
            light_timed, light_flk, live_lit_run);
+    printf("    breakable CALLs (GLASS, SHOOTTHEN) : %u\n", brk_calls);
+    printf("      too short   : %u\n", brk_short);
+    printf("      no object   : %u\n", brk_no_object);
+    printf("      usable      : %u  (%u rescued from a ZONE's copy)\n",
+           brk_usable, brk_zone_rescue);
     printf("    rotation CALLs the script RUNS : %u, of which turn nothing : %u\n",
            live_rot_fired, live_rot_barren);
     printf("    distinct rotation CALL sites the script reaches : %u\n",

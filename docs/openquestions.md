@@ -5332,3 +5332,59 @@ Related: the health flash holds solid at or below zero (`blez` at `0x80035248`) 
 and is `sltiu`, so the two thresholds and the two zero behaviours are genuinely different and are kept apart.
 Not modelled: the health sub-draw writes the flash palette to all three digit fields (`0x80035268`–`0x80035270`)
 where the ammo one writes to a single field (`0x80035464`).
+
+
+---
+
+## A creature's claws had no owner, and landed on the player's own feet
+
+`q2_combat_melee` — the transcription of `0x800612F0`, a creature's contact hit — had **no caller
+anywhere in the port**. The client raised its own melee instead, and got two things wrong that no
+screenshot could show.
+
+**The damage point was the player's own position.** `0x800612F0` passes the ATTACKER's origin, and
+everything downstream of that point is directional: the knockback, where the blood sprays, and the
+flinch's roll, which `q2_sim_hurt_player` computes as the hit point against the view's own right vector.
+Handing it the player's position makes that difference the zero vector, so `side` came out 0 on every
+claw that ever landed in the game — a hit from the left rolled the view exactly as far as a hit from the
+right, which is to say not at all — and the blood sprayed from the player's own feet.
+
+**The attacker was NULL.** `q2_combat_damage` records `target->last_attacker = attacker->owner`, so a
+player clawed to death died with no killer. That is the one field the attribution rule exists to carry.
+
+Fixed on both sides: `q2_sim_hurt_player` routes a melee with an attacker through `q2_combat_melee` and
+**overrides** the point rather than trusting the caller — a melee is the one mod whose point is not free
+— and the client resolves which creature is swinging from the monster/actor arrays' pointer difference.
+
+Pinned in `tests/test_sim.c`, and checked against the DEFECT as well as the fix: with the override
+disabled the test reports `roll from the left -80, from the right -80` and fails; with it, `-80` and
+`+80`.
+
+Measured in the client rather than asserted. Sweeping twelve maps with `--watch`, melee reaches the
+player on two of them — **JAIL2 twice, POWER2 ten times** — and on POWER2 a Berserk now claws the player
+from 100 to **-3** and the death screen opens on `RESTART LEVEL`. Module action, AI tick, damage,
+attribution, death: the whole chain, in one capture.
+
+- [ ] 66. **The debris burst has a caller waiting for it, and the operand it needs RESOLVES.**
+      `q2_sim_debris_burst` is the other function in the sweep that is a feature rather than an accessor,
+      and `sim.h` says why it has no caller: *"the port exposes it rather than wiring it into the GLASS
+      primitive, because which Scene node a given pane owns is part of the UserFuncs runtime-object
+      mapping and not of the effect system."*
+
+      That mapping is no longer missing. It is the same two-buffer rebase #56 found for the rotators: an
+      operand the game has already run reads -1 in COMMON's Events copy and lives at the same offset in
+      the zone's. Applying it to the breakables — `GLASS` and `SHOOTTHEN`, whose object slot is a single
+      `s16` at `+4` rather than the rotators' four at `+12` — and counting disc-wide through
+      `q2psx-inspect zonescript`:
+
+          breakable CALLs (GLASS, SHOOTTHEN) : 10
+            too short   : 0
+            no object   : 0
+            usable      : 10  (4 rescued from a ZONE's copy)
+
+      **10 of 10**, and four of them only because of the rebase. So the stated blocker is gone: a pane's
+      Scene node is reachable, and with it the node's box, which is exactly what `q2_sim_debris_burst`
+      takes. What is still owed is the DISPATCH — GLASS is a damage callback (`userfuncs.h`: it spawns
+      its effect at `0x8002A384` before testing anything, so calling it from a script breaks the glass
+      immediately), and nothing in the port routes a hitscan or a splash into a UserFuncs object. That is
+      the piece to build, and it is now the only one.
