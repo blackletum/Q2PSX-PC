@@ -122,6 +122,29 @@ bool q2_stx_frame_decode(const q2_stx_frame *f, u8 *out,
  */
 u32 q2_stx_unmatched_report(u32 *by_leading_zeros, u32 max);
 
+/*
+ * The distinct `width`-bit tails seen after the leading `1` of an unmatched
+ * code with `lz` leading zeros. A group of exactly 2^width distinct tails, with
+ * no more appearing at width+1, is that group's code length pinned by the data.
+ */
+u32 q2_stx_unmatched_tails(u32 lz, u32 width, u32 *out, u32 max);
+
+/* The most recent unmatched 17-bit lookahead, and how many bits were still
+ * unread when it happened — "no code matches" and "the data ran out" look the
+ * same from the outside and are different faults. */
+extern u32 q2_stx_last_look;
+extern u32 q2_stx_last_bits;
+
+/*
+ * Why blocks gave up, split three ways. `unmatched` means a code LENGTH is
+ * missing from the table; `overrun` means a RUN value is wrong, because the
+ * coefficient index walked past 63; `dry` means the bits ran out. They were all
+ * being reported as one thing, and they are three different repairs.
+ */
+extern u32 q2_stx_fail_unmatched;
+extern u32 q2_stx_fail_overrun;
+extern u32 q2_stx_fail_dry;
+
 #ifdef __cplusplus
 }
 #endif

@@ -5222,6 +5222,7 @@ static int cmd_movie(const disc *d, const char *name, const char *out_ppm)
                 printf("    frame %u: %u of %u blocks, %u bits of %u available"
                        " — %s\n", f.number, nb, blocks_want, bits,
                        (f.size - 8) * 8, good ? "short" : "desynchronised");
+                printf("      look %05X (%u leading zeros), %u bits left\n", q2_stx_last_look, 0u, q2_stx_last_bits);
 
             if (good && nb == blocks_want && first_blocks == 0) {
                 first_blocks = nb;
@@ -5246,11 +5247,25 @@ static int cmd_movie(const disc *d, const char *name, const char *out_ppm)
             u32 lz[18], t, i2;
 
             t = q2_stx_unmatched_report(lz, 18);
+            printf("    gave up: %u unmatched code, %u run overran 63, %u out of bits\n", q2_stx_fail_unmatched, q2_stx_fail_overrun, q2_stx_fail_dry);
             printf("    unmatched lookaheads: %u", t);
             for (i2 = 0; i2 < 18; i2++)
                 if (lz[i2])
                     printf("  [%u zeros] %u", i2, lz[i2]);
             printf("\n");
+            for (i2 = 0; i2 < 18; i2++) {
+                u32 w;
+
+                if (!lz[i2])
+                    continue;
+                for (w = 2; w <= 6; w++) {
+                    u32 tl[256];
+                    u32 nt = q2_stx_unmatched_tails(i2, w, tl, 256);
+
+                    printf("      lz %2u  width %u -> %3u distinct%s\n",
+                           i2, w, nt, nt == (1u << w) ? "   FULL" : "");
+                }
+            }
         }
         if (ok != frames)
             rc = 1;

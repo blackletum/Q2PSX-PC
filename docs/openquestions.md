@@ -7015,3 +7015,45 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       The IDCT here is a float separable one and is deliberately not the MDEC's fixed-point transform, so
       it will differ in the last bit or two. That is stated at the function rather than left to be
       discovered.
+- [~] 108. **The movie decoder's Huffman lengths, DERIVED from the disc — unmatched codes 1951 -> 110, and
+      the remaining fault is now named as a different one.** #107 left five groups missing and said a
+      published table was needed. It was not. The disc has the codes in it.
+
+      **The method.** Bail at the first unmatched code, so each failed frame contributes exactly one
+      sample; bucket every sample by its run of LEADING ZEROS, which is how Table B.14 is organised; and
+      for each bucket collect the distinct TAILS after the leading `1`. A Huffman code is prefix-free, so a
+      group whose tails fill exactly four bits with the fifth taking both values is a four-bit code plus a
+      sign, and its length falls out as `zeros + 1 + 4`. That is a measurement, not a recollection.
+
+      Applied twice, because fixing the first two groups revealed the next three:
+
+          7 zeros, 4-bit tail  -> 12 bits, 16 codes
+          8 zeros, 3-bit tail  -> 12 bits,  8 codes
+          9 zeros, 4-bit tail  -> 14 bits, 16 codes
+         10 zeros, 4-bit tail  -> 15 bits, 16 codes
+         11 zeros, 4-bit tail  -> 16 bits, 16 codes
+
+      105 codes, and a pairwise check confirms not one is a prefix of another. **Unmatched lookaheads fell
+      from 1,951 to 110 on OUTRO1P**, and the same on the other two films.
+
+      **An analysis bug nearly ended this, and it is the part worth keeping.** The tail extractor shifted by
+      `17 - (lz + 1) - 8`, which goes NEGATIVE once lz reaches 8 — so the 9-, 10- and 11-zero buckets each
+      reported ONE constant tail at every width. That reads exactly like padding after a lost sync, and the
+      conclusion drawn from it was that those buckets were not real groups. They were three real groups,
+      and the evidence saying otherwise was undefined behaviour in the instrument. What caught it was
+      printing the actual failing lookahead instead of trusting the summary of it.
+
+      **What is left is a DIFFERENT fault, and the counters now say so.** Splitting why a block gives up:
+
+          TAKE1BP    98 unmatched code, 1176 run overran 63, 0 out of bits
+          OUTRO1P   110 unmatched code, 2475 run overran 63, 0 out of bits
+          ROGUEINP  122 unmatched code, 4886 run overran 63, 2 out of bits
+
+      A run that walks the coefficient index past 63 is a wrong RUN VALUE, not a wrong length —
+      synchronisation only ever depended on the lengths, which is why the table was written with its
+      run/level assignments flagged as not derived. Those assignments are the remaining work and they
+      cannot come from sync: a wrong one produces a frame that decodes to a wrong picture, and the disc
+      cannot say which picture is right.
+
+      **So the movies still do not play**, and the reason has changed from "five code groups are missing"
+      to "the run/level column is wrong", which is a smaller and better-defined thing than it was.
