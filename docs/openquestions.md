@@ -6101,3 +6101,25 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       target is in another one"; **that zone switch is not implemented**, so a target in the resident
       zone moves the player and one elsewhere is refused with a warning naming both zones — stated
       rather than silently teleporting into the wrong room.
+
+- [x] 81. **BUTTON and PISTON join the movers, and the rejections are the interesting part.** Both name a
+      target AND a speed, which is what a mover needs — a button's speed is literally one unit a tick
+      (`travel`'s sign selects `obj+0x3A` = +1 or -1 and its magnitude goes to `obj+0x44`), and a PISTON
+      is a crusher, so it ignores obstruction in both directions rather than one.
+
+      **PLATFORM and DISH are not built**, for the same reason as CAGELIFT1: PLATFORM names neither a
+      target nor a speed and DISH names no speed. A mover with speed zero is triggered, ticks, and never
+      arrives, so all three need their constructors read rather than a constant borrowed from a sibling.
+
+      The builder now DROPS a mover with no node or no speed rather than keeping one that cannot move,
+      and logging what it dropped is where the useful measurement is:
+
+          POWER2  PISTON built, 1 node — the crusher works
+          JAIL4   BUTTON rejected, 0 nodes — its object slot reads -1
+          LAB     4 LIFT1 rejected, 0 nodes; 2 built
+          BASE0   1 LIFT1 rejected with FOUR nodes and speed 0
+
+      So the OBJSLOT emptiness of #78 is not confined to OBJDRAWOFF: BUTTON has it too. But it is not
+      universal either — PISTON's slot resolves, and the rotators' resolve 41 of 95. Whatever leaves an
+      object slot empty is per-primitive or per-item rather than a property of the format, and BASE0's
+      LIFT1 shows the same thing on the OTHER operand: four good nodes and a speed of zero.

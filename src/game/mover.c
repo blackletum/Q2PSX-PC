@@ -195,6 +195,13 @@ q2_result q2_movers_build(q2_mover_set *out, const q2_events *events)
     return Q2_OK;
 }
 
+/* The one legal item length for each of the three, from the operand table. */
+static u32 info_len(q2_uf_prim prim)
+{
+    const q2_uf_prim_info *i = q2_uf_info(prim);
+    return i ? i->item_len : 0xFFFFu;
+}
+
 q2_result q2_movers_build_calls(q2_mover_set *out, const q2_events *events,
                                 const q2_userfuncs *uf,
                                 const q2_uf_operands *ops)
@@ -224,7 +231,11 @@ q2_result q2_movers_build_calls(q2_mover_set *out, const q2_events *events,
                 continue;
             if (q2_uf_decode_call(&call, uf, &item) != Q2_OK)
                 continue;
-            if (call.prim != Q2_UF_LIFT1 || item.len < 20)
+            if (call.prim != Q2_UF_LIFT1 &&
+                call.prim != Q2_UF_BUTTON &&
+                call.prim != Q2_UF_PISTON)
+                continue;
+            if (item.len < info_len(call.prim))
                 continue;
 
             /* The operands, rebased the way a rotation call's are: an item the
@@ -236,16 +247,61 @@ q2_result q2_movers_build_calls(q2_mover_set *out, const q2_events *events,
             if (!m)
                 return Q2_ERR_NO_MEMORY;
 
-            m->axis        = 1;                 /* a lift is vertical */
-            m->target      = (s16)-(s16)q2_rd_u16(p + 4);
-            m->speed       = (s16)abs(q2_rd_s16(p + 6));
-            collect_nodes(m, p, 8);
-            m->delay_timer = (u16)(p[16] * Q2_MOVER_TIMEBASE);
-            m->wait_timer  = (p[17] == 0xFF)
-                             ? Q2_MOVER_WAIT_NEVER
-                             : (u16)(p[17] * Q2_MOVER_TIMEBASE);
+            m->axis        = 1;      /* all three of these are vertical */
             m->item_offset = item.offset;
             m->block_flags = Q2_MV_BLK_IGNORE_OPENING;
+
+            switch (call.prim) {
+            case Q2_UF_LIFT1:
+                m->target      = (s16)-(s16)q2_rd_u16(p + 4);
+                m->speed       = (s16)abs(q2_rd_s16(p + 6));
+                collect_nodes(m, p, 8);
+                m->delay_timer = (u16)(p[16] * Q2_MOVER_TIMEBASE);
+                m->wait_timer  = (p[17] == 0xFF)
+                                 ? Q2_MOVER_WAIT_NEVER
+                                 : (u16)(p[17] * Q2_MOVER_TIMEBASE);
+                break;
+
+            case Q2_UF_BUTTON: {
+                /*
+                 * `travel`'s SIGN selects obj+0x3A = +1 or -1 and its magnitude
+                 * goes to obj+0x44 — so a button's speed is literally one unit
+                 * a tick and its target is the travel. `invert` negates the
+                 * target. Both are userfuncs.c's wording, not a reading of it.
+                 */
+                s16 travel = q2_rd_s16(p + 14);
+                s16 mag    = (s16)abs(travel);
+
+                m->target     = (s8)p[4] ? (s16)-mag : mag;
+                m->speed      = 1;
+                m->node[0]    = q2_rd_s16(p + 12);
+                m->part_count = (m->node[0] >= 0) ? 1 : 0;
+                m->wait_timer = (u16)(q2_rd_u16(p + 8) * Q2_MOVER_TIMEBASE);
+                break;
+            }
+
+            case Q2_UF_PISTON:
+                /* A crusher. `time` is UNSCALED, which is the table's word for
+                 * it and the reason it is not multiplied here. */
+                m->speed      = p[5];
+                m->target     = (s16)q2_rd_u16(p + 6);
+                m->node[0]    = q2_rd_s16(p + 8);
+                m->part_count = (m->node[0] >= 0) ? 1 : 0;
+                m->wait_timer = q2_rd_u16(p + 16);
+                /* A crusher does not stop for you: it is what a blocked mover
+                 * ignoring both directions is for. */
+                m->block_flags = Q2_MV_BLK_IGNORE_OPENING |
+                                 Q2_MV_BLK_IGNORE_CLOSING;
+                break;
+
+            default:
+                break;
+            }
+
+            /* A mover with no speed never arrives, and one with no node moves
+             * nothing. Either is a decode this port should not keep. */
+            if (m->speed == 0 || m->part_count == 0)
+                out->count--;
         }
     } while (q2_events_next_record(events, &rec, &rec));
 

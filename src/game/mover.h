@@ -182,6 +182,16 @@ u32 q2_movers_trigger_item(q2_mover_set *set, u32 item_offset);
  * OBJSLOTs and therefore subject to the two-buffer rebase (#56), so an `ops` is
  * taken; pass NULL to read them in place.
  *
+ * BUTTON and PISTON are built here too: both name a target AND a speed, which
+ * is what a mover needs. A button's speed is literally one unit a tick — the
+ * table says `travel`'s SIGN selects obj+0x3A = +1 or -1 and its magnitude goes
+ * to obj+0x44 — and a PISTON is a crusher, so it ignores obstruction in both
+ * directions rather than one.
+ *
+ * PLATFORM and DISH are NOT built, for the same reason as CAGELIFT1: PLATFORM
+ * names neither a target nor a speed and DISH names no speed, so both need
+ * their constructors read rather than a constant borrowed from a sibling.
+ *
  * CAGELIFT1 is deliberately NOT built here. Its operand table names no speed
  * (`{param_a, objects[4], time_b}`), and a mover with speed zero is one that is
  * triggered, ticks, and never arrives — so it needs its constructor read rather
