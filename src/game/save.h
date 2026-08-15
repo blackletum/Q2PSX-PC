@@ -86,6 +86,7 @@
 #include "events_rt.h"
 #include "inventory.h"
 #include "mover.h"
+#include "spawn.h"
 #include "projectile.h"
 #include "q2psx.h"
 #include "sim.h"
@@ -207,6 +208,31 @@ typedef struct q2_save_mover {
     s32 offset;         /* how far along its travel it is                    */
 } q2_save_mover;
 
+/*
+ * A creature's mutable state — what a player would notice, not the whole
+ * struct.
+ *
+ * The rest of `q2_monster` is function pointers and pointers to other monsters,
+ * and both are rebuilt at load: the module is relocated and bound again, so the
+ * callbacks come back by construction. What does NOT come back is who is dead,
+ * where the survivors are standing and how hurt they are, and without those a
+ * save reloads into a room the player has already cleared, full again.
+ *
+ * A STATED DIVERGENCE: the AI's own timers and its target are not carried, so a
+ * creature that was hunting the player resumes from its stand. The console
+ * keeps them; this port would have to serialise pointers into a set that is
+ * rebuilt, and restoring a stale enemy pointer is worse than restarting the
+ * hunt. Recorded here rather than left to be discovered.
+ */
+typedef struct q2_save_creature {
+    u8  in_use;
+    u8  dead;
+    s16 health;
+    s16 frame;
+    s16 angles[3];
+    s32 pos[3];
+} q2_save_creature;
+
 typedef struct q2_save_breakable {
     s32 scene_node;
     s16 health;
@@ -288,6 +314,14 @@ typedef struct q2_save {
     q2_save_mover *movers;
     u32            mover_count;
 
+    /*
+     * Who is dead and where the rest are standing. Parallel to the rebuilt
+     * creature set, which is built from the map's spawn records in a fixed
+     * order — the same assumption the entity chunk makes.
+     */
+    q2_save_creature *creatures;
+    u32               creature_count;
+
     /* --- presentation ---------------------------------------------------- */
     q2_save_level_stats mission[Q2_SAVE_MISSION_ROWS];
     s32  mission_unit;
@@ -337,6 +371,12 @@ q2_result q2_save_apply(const q2_save *s, q2_sim *sim, q2_inventory *inv,
  */
 void q2_save_capture_movers(q2_save *s, const q2_mover_set *set);
 void q2_save_apply_movers(const q2_save *s, q2_mover_set *set);
+
+/* And the creatures, for the same reason: the set lives in the client. The
+ * count must match on apply, or the save is for a different population and
+ * nothing is restored. */
+void q2_save_capture_creatures(q2_save *s, const q2_monster_set *set);
+void q2_save_apply_creatures(const q2_save *s, q2_monster_set *set);
 
 /* The mission tallies, which live in the client rather than the sim (mission.h
  * — the counters are inputs to the screen). Both are no-ops on NULL. */

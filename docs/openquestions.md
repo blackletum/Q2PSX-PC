@@ -7603,3 +7603,18 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       PLUS which of that item's movers it is: a `MOVER_C` double door is two leaves from one item, so the
       offset alone does not name a leaf. The test builds exactly that case and fails if the sequence number
       is dropped.
+
+      **And the CREATURES, which is the biggest of the three.** A save reloaded into a room the player had
+      already cleared, full again. A `CRES` chunk carries who is in use, who is dead, their health, the
+      frame they are posed on and where they are standing — parallel to the rebuilt set, whose order comes
+      from the map's spawn records and is fixed, and refusing outright when the counts disagree rather than
+      putting one creature's health on another.
+
+      *What is NOT carried, stated rather than left to be found:* the AI's own timers and its enemy. The
+      rest of `q2_monster` is function pointers and pointers to other monsters; the callbacks come back by
+      construction because the module is relocated and bound again at load, but a pointer into a set that
+      has been rebuilt cannot be. A creature that was hunting resumes from its stand. Restoring a stale
+      pointer would be worse than restarting the hunt.
+
+      Three chunks, all additive, none of them bumping the version — which is what the chunked format was
+      built for and the first time it has been used that way.

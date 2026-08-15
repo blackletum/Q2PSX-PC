@@ -38,6 +38,7 @@
 #define TAG_MISN TAG('M', 'I', 'S', 'N')   /* the mission tallies             */
 #define TAG_BRKS TAG('B', 'R', 'K', 'S')   /* which panes have been shot      */
 #define TAG_MOVR TAG('M', 'O', 'V', 'R')   /* which doors are open, and where */
+#define TAG_CRES TAG('C', 'R', 'E', 'S')   /* who is dead and where the rest are */
 #define TAG_SETT TAG('S', 'E', 'T', 'T')   /* the menu settings               */
 
 #define SAVE_FILE_HEADER 16                /* magic, version, size, crc       */
@@ -276,6 +277,7 @@ void q2_save_free(q2_save *s)
     free(s->entities);
     free(s->breakables);
     free(s->movers);
+    free(s->creatures);
     memset(s, 0, sizeof(*s));
 }
 
@@ -1286,6 +1288,120 @@ void q2_save_apply_movers(const q2_save *s, q2_mover_set *set)
     }
 }
 
+static void write_creatures(wbuf *w, const q2_save *s)
+{
+    size_t at = w_chunk_begin(w, TAG_CRES);
+    u32 i;
+
+    w_u32(w, s->creature_count);
+    for (i = 0; i < s->creature_count; i++) {
+        const q2_save_creature *c = &s->creatures[i];
+
+        w_u8(w, c->in_use);
+        w_u8(w, c->dead);
+        w_s16(w, c->health);
+        w_s16(w, c->frame);
+        w_s16v(w, c->angles, 3);
+        w_s32v(w, c->pos, 3);
+    }
+
+    w_chunk_end(w, at);
+}
+
+static bool read_creatures(rbuf *r, q2_save *s)
+{
+    u32 n = r_u32(r);
+    u32 i;
+
+    if (r->bad)
+        return false;
+    if (n == 0)
+        return true;
+    if (n > SAVE_MAX_ENTITIES)
+        return false;
+
+    free(s->creatures);
+    s->creatures = (q2_save_creature *)calloc(n, sizeof(*s->creatures));
+    if (!s->creatures)
+        return false;
+    s->creature_count = n;
+
+    for (i = 0; i < n; i++) {
+        q2_save_creature *c = &s->creatures[i];
+
+        c->in_use = r_u8(r);
+        c->dead   = r_u8(r);
+        c->health = r_s16(r);
+        c->frame  = r_s16(r);
+        r_s16v(r, c->angles, 3);
+        r_s32v(r, c->pos, 3);
+        if (r->bad)
+            return false;
+    }
+    return true;
+}
+
+void q2_save_capture_creatures(q2_save *s, const q2_monster_set *set)
+{
+    u32 i;
+
+    if (!s || !set || set->count == 0 || !set->monsters)
+        return;
+
+    free(s->creatures);
+    s->creatures = (q2_save_creature *)calloc(set->count, sizeof(*s->creatures));
+    if (!s->creatures)
+        return;
+    s->creature_count = set->count;
+
+    for (i = 0; i < set->count; i++) {
+        const q2_monster *m = &set->monsters[i];
+        q2_save_creature *d = &s->creatures[i];
+        int k;
+
+        d->in_use = m->in_use ? 1u : 0u;
+        d->dead   = m->dead ? 1u : 0u;
+        d->health = m->health;
+        d->frame  = m->frame;
+        for (k = 0; k < 3; k++) {
+            d->angles[k] = m->angles[k];
+            d->pos[k]    = m->pos[k];
+        }
+    }
+}
+
+void q2_save_apply_creatures(const q2_save *s, q2_monster_set *set)
+{
+    u32 i;
+
+    if (!s || !s->creatures || !set || !set->monsters)
+        return;
+
+    /*
+     * The count must match. The set is rebuilt from the map's spawn records in
+     * a fixed order, so a different count means a different population — a
+     * save from another zone, or from a build whose spawn pass differs — and
+     * restoring by index into that would put one creature's health on another.
+     */
+    if (s->creature_count != set->count)
+        return;
+
+    for (i = 0; i < set->count; i++) {
+        const q2_save_creature *d = &s->creatures[i];
+        q2_monster             *m = &set->monsters[i];
+        int k;
+
+        m->in_use = d->in_use != 0;
+        m->dead   = d->dead != 0;
+        m->health = d->health;
+        m->frame  = d->frame;
+        for (k = 0; k < 3; k++) {
+            m->angles[k] = d->angles[k];
+            m->pos[k]    = d->pos[k];
+        }
+    }
+}
+
 static void write_mission(wbuf *w, const q2_save *s)
 {
     size_t at = w_chunk_begin(w, TAG_MISN);
@@ -1412,6 +1528,7 @@ static q2_result build_body(const q2_save *s, wbuf *w)
     write_entities(w, s);
     write_breakables(w, s);
     write_movers(w, s);
+    write_creatures(w, s);
     write_mission(w, s);
     write_settings(w, s);
 
@@ -1608,6 +1725,11 @@ static q2_result read_body(q2_save *out, const u8 *body, size_t body_size)
 
         case TAG_MOVR:
             if (!read_movers(&c, out))
+                return Q2_ERR_BAD_FORMAT;
+            break;
+
+        case TAG_CRES:
+            if (!read_creatures(&c, out))
                 return Q2_ERR_BAD_FORMAT;
             break;
 

@@ -4606,6 +4606,10 @@ static bool client_capture(client *c)
      * script flags are carried, so the record that opened it has run. */
     if (c->movers_ready)
         q2_save_capture_movers(&c->snapshot, &c->movers);
+    /* And who is dead: without this a save reloads into a room the player has
+     * already cleared, full again. */
+    if (c->creatures_ready)
+        q2_save_capture_creatures(&c->snapshot, &c->creatures.set);
     q2_save_set_settings(&c->snapshot, c->settings.v, Q2_SET_COUNT);
     return true;
 }
@@ -4651,6 +4655,8 @@ static bool client_apply_save(client *c, const q2_save *s)
     q2_save_apply_mission(s, &c->mission);
     if (c->movers_ready)
         q2_save_apply_movers(s, &c->movers);
+    if (c->creatures_ready)
+        q2_save_apply_creatures(s, &c->creatures.set);
 
     /* The weapon in the hands follows the restored selection. Without this the
      * player holds whatever the fresh spawn gave them while the simulation

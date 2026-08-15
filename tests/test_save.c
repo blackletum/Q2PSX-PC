@@ -363,6 +363,51 @@ static void test_round_trip(void)
         q2_save_free(&back);
     }
 
+    /* The creatures: who is dead survives, and a mismatched count restores
+     * nothing rather than putting one creature's health on another. */
+    {
+        q2_monster_set cset;
+        q2_save out, back;
+
+        memset(&cset, 0, sizeof(cset));
+        cset.count    = 3;
+        cset.monsters = (q2_monster *)calloc(3, sizeof(q2_monster));
+        cset.monsters[0].in_use = true;
+        cset.monsters[0].health = 40;
+        cset.monsters[0].pos[0] = 900;
+        cset.monsters[1].in_use = true;
+        cset.monsters[1].dead   = true;
+        cset.monsters[1].health = -12;
+        cset.monsters[1].frame  = 77;
+        cset.monsters[2].in_use = true;
+        cset.monsters[2].health = 100;
+
+        memset(&out, 0, sizeof(out));
+        q2_save_capture_creatures(&out, &cset);
+        check(q2_save_write(&out, tmp_path()) == Q2_OK, "creatures write");
+        memset(&back, 0, sizeof(back));
+        check(q2_save_read(&back, tmp_path()) == Q2_OK, "creatures read back");
+        check_eq_i(back.creature_count, 3, "all three survive");
+
+        memset(cset.monsters, 0, 3 * sizeof(q2_monster));
+        q2_save_apply_creatures(&back, &cset);
+        check_eq_i(cset.monsters[1].dead, 1, "the dead one stays dead");
+        check_eq_i(cset.monsters[1].frame, 77, "in the pose it died in");
+        check_eq_i(cset.monsters[0].health, 40, "the hurt one stays hurt");
+        check_eq_i(cset.monsters[0].pos[0], 900, "where it had walked to");
+
+        /* A different population: restore nothing rather than by index. */
+        cset.count = 2;
+        memset(cset.monsters, 0, 3 * sizeof(q2_monster));
+        q2_save_apply_creatures(&back, &cset);
+        check_eq_i(cset.monsters[0].health, 0,
+                   "a mismatched count restores nothing");
+
+        free(cset.monsters);
+        q2_save_free(&out);
+        q2_save_free(&back);
+    }
+
     /*
      * And the round trip through the sim: applied to a registry whose panes are
      * in a DIFFERENT order, the match is by node and not by index.
