@@ -5801,7 +5801,7 @@ projection is right the weapon comes with it, and the two remaining entries on t
       neither agreed with the rasteriser, and the suite stayed green while the panel drew nothing. The
       assertion is now the rasteriser's, which is the only party whose opinion shows on screen.
 
-- [ ] 73. **What a trigger volume ASKS FOR, disc-wide — the list of what is left.**
+- [x] 73. **What a trigger volume ASKS FOR, disc-wide — the list of what is left. CLOSED: the list is empty.**
       `q2psx-inspect zonescript` now prints a histogram of every UserFuncs primitive a player who has
       walked the whole disc would run. It is the first time the remaining work has been a measured list
       rather than an impression, and it is short:
@@ -5855,6 +5855,24 @@ projection is right the weapon comes with it, and the two remaining entries on t
       **Answered by #89, and the answer is that nothing is supposed to reach it.** A LASERBEAM is lit by
       the bottom bit of its own first coordinate, carried in the ZONE's copy of the script, and the zone
       load's registration pass is what raises it. Zero trigger runs was never evidence of a gap.
+
+      **CLOSED.** Every entry on the "what is left" list above has since been resolved, and it is worth
+      keeping the list beside its answers because the shape of the answers is the finding:
+
+          MISEVENT      the namespace was not a chunk at all — a name+handler table (#93)
+          TIMER         a delayed continuation of the rest of the record (#83)
+          MISCOMPLETE   ends a UNIT, and reading it named Q2_SCREEN_EXIT_7 (#87)
+          CAGELIFT1     LIFT1's constructor operand for operand; the table was short a row (#82)
+          DISH          the speed is an immediate 1, not an operand (#120)
+          LASERWALL     0 armed of 2 declared: both name an empty object slot (#117)
+          PLATFORM      its target is the distance from its node's own box centre (#82)
+          DISABLEME     retires the record it runs in; the one reachable call is behind the key gate (#119)
+          LASERBEAM     nothing is supposed to reach it (#89)
+
+      Three of the nine turned out not to be gaps at all — LASERBEAM is reached from the zone load,
+      LASERWALL's two calls cannot fire on this disc, and DISH's missing speed did not exist. That ratio is
+      the reason the histogram was worth building: it is a list of things to LOOK at, and looking is what
+      distinguishes a missing caller from a primitive that is already doing what it should.
 
 - [x] 74. **STRING and SIMPLESOUND — the game speaks and makes noise.** Both were decoded long ago and
       neither was acted on. A trigger volume runs 33 STRING calls and all 33 SIMPLESOUND calls disc-wide,
