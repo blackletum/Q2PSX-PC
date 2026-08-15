@@ -6165,3 +6165,28 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
 
       `DISH` remains unread — its constructor writes only `obj+0x3E` from the operands, so its speed
       comes from somewhere this pass did not find.
+
+- [x] 83. **TIMER: the rest of the record, later.** "A delayed continuation of the rest of the record" —
+      the items before it run now and the ones after it run when the delay expires. The runtime had no
+      way to express that, because a record either ran to its end or was aborted.
+
+      Expressed the way the abort is, as a field an `on_call` hook writes (`q2_event_rt.defer_ticks`),
+      because the hook reports a CALL and has nowhere else to put an answer. A non-zero value stops the
+      record and queues its remainder against the runtime's own clock; `q2_event_rt_advance` moves that
+      clock and `q2_event_rt_update` runs whatever has come due BEFORE it takes anything new off the
+      queue — so a timer that expires runs on the frame it expires rather than behind whatever the player
+      has just walked into. A deferred record is not latched as having run until it finishes.
+
+      The delay is `(base + ((range * rand()) >> 15)) * 30`, and **the 30 is not the 300** every other
+      time on this clock uses; `userfuncs.c` calls that out and it is the sort of thing that is silently
+      four-fifths wrong if assumed. The RNG is the sim's rather than the BIOS's — a stated divergence,
+      so a timer's jitter is the right shape and not the same sequence.
+
+      Measured on LAB, whose two timers read `base 50, range 0` — 1,500 ticks, five seconds. From a
+      trigger at frame 60: **0 resumed at frame 200, 1 at 260, 2 at 400**, which is the deadline landing
+      where the arithmetic puts it.
+
+      *An artefact worth knowing:* in an ordinary `--fire-triggers` sweep the timers never resume,
+      because the same sweep fires the map's LOADMAP and the level ends four seconds before the deadline.
+      The measurement above suppresses the transition. A player who walks into one volume rather than all
+      of them does not have that problem.

@@ -62,6 +62,7 @@ typedef struct q2_event_rt {
 
     /* Counters, so a caller can tell "nothing happened" from "nothing is
      * implemented yet". */
+    u32  resumed_count; /* deferred records that came due and finished */
     u32  ran_count;
     u32  skipped_movers;
 
@@ -104,12 +105,44 @@ typedef struct q2_event_rt {
      */
     bool abort_record;
 
+    /*
+     * DEFER THE REST OF THIS RECORD — what `TIMER` means.
+     *
+     * `TIMER` is "a delayed continuation of the rest of the record": the items
+     * before it run now and the ones after it run later. Expressed the same way
+     * the abort is, as a field an `on_call` hook writes, because the hook
+     * reports a CALL and has nowhere else to put an answer. Non-zero stops the
+     * record HERE and queues its remainder for `clock + defer_ticks`.
+     *
+     * The delay is the primitive's: `(base + ((range * rand()) >> 15)) * 30`,
+     * and the 30 is not the 300 everything else on this clock uses — which
+     * `userfuncs.c` calls out and which is why the caller computes it.
+     */
+    s32 defer_ticks;
+
+    /*
+     * Records waiting to resume, and the clock they are waiting against.
+     * `q2_event_rt_advance` moves the clock; `q2_event_rt_update` runs whatever
+     * has come due before it takes anything new off the queue.
+     */
+    struct {
+        u32 offset;
+        u8  next_item;
+        s32 due;
+    }    deferred[Q2_EVENT_RT_PENDING_MAX];
+    u32  deferred_count;
+    s32  clock;
+
     u32  mover_count;   /* MOVER items reported                          */
     u32  call_count;    /* CALL items reported, for the same "did anything
                          * happen" reason as the counters above */
 } q2_event_rt;
 
 q2_result q2_event_rt_init(q2_event_rt *rt, const q2_events *events);
+
+/* Move the runtime's own clock, in the simulation's tick units. Deferred
+ * records come due against it. */
+void q2_event_rt_advance(q2_event_rt *rt, s32 ticks);
 void      q2_event_rt_free(q2_event_rt *rt);
 
 /* Queue the record at `offset` to run on the next update. */

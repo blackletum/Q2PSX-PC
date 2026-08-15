@@ -215,6 +215,64 @@ static q2_event_outcome run_item(q2_event_rt *rt, const q2_event_item *item)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * Run a record's items from `from`. Returns true when it DEFERRED — the record
+ * is unfinished, so the caller must not latch it as having run.
+ *
+ * Split out of the update loop because a deferred record resumes at an
+ * arbitrary item, and the two paths must otherwise behave identically: the
+ * same disabled-item skip, the same abort, the same zone-change result.
+ */
+static bool run_items(q2_event_rt *rt, const q2_event_record *rec, u32 from,
+                      u32 offset, q2_event_outcome *result)
+{
+    u32 i;
+
+    for (i = from; i < rec->n_items; i++) {
+        q2_event_item item;
+        q2_event_outcome r;
+
+        if (!q2_events_get_item(&rt->events, rec, i, &item))
+            break;
+        if (item.op & Q2_EVOP_DISABLED)
+            continue;
+
+        r = run_item(rt, &item);
+        if (r == Q2_EVENT_ZONE_CHANGE)
+            *result = Q2_EVENT_ZONE_CHANGE;
+
+        /* A predicate said no. Everything after it in this record is what it
+         * was guarding, so the record stops here - and it is still marked as
+         * having run, exactly as the console's does, or a locked door would
+         * re-test on every touch. */
+        if (rt->abort_record) {
+            rt->abort_record = false;
+            break;
+        }
+
+        /* A TIMER. The rest of the record waits. */
+        if (rt->defer_ticks > 0) {
+            if (rt->deferred_count < Q2_EVENT_RT_PENDING_MAX) {
+                rt->deferred[rt->deferred_count].offset    = offset;
+                rt->deferred[rt->deferred_count].next_item = (u8)(i + 1);
+                rt->deferred[rt->deferred_count].due =
+                    rt->clock + rt->defer_ticks;
+                rt->deferred_count++;
+            }
+            rt->defer_ticks = 0;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void q2_event_rt_advance(q2_event_rt *rt, s32 ticks)
+{
+    if (rt)
+        rt->clock += ticks;
+}
+
 q2_event_outcome q2_event_rt_update(q2_event_rt *rt)
 {
     q2_event_outcome result = Q2_EVENT_OK;
@@ -222,6 +280,49 @@ q2_event_outcome q2_event_rt_update(q2_event_rt *rt)
 
     if (!rt)
         return Q2_EVENT_OK;
+
+    /* Anything that has come due resumes BEFORE new triggers are taken, so a
+     * timer that has expired runs on the frame it expires rather than behind
+     * whatever else the player has just walked into. */
+    {
+        u32 d = 0;
+
+        while (d < rt->deferred_count) {
+            q2_event_record rec;
+            s32 due_slot;
+
+            if (rt->deferred[d].due > rt->clock) {
+                d++;
+                continue;
+            }
+
+            if (q2_events_record_at(&rt->events, rt->deferred[d].offset, &rec)) {
+                u32 from = rt->deferred[d].next_item;
+                u32 off  = rt->deferred[d].offset;
+
+                /* Drop the entry before running, or a record that timers twice
+                 * would push onto a list it is being walked out of. */
+                rt->deferred_count--;
+                memmove(&rt->deferred[d], &rt->deferred[d + 1],
+                        (size_t)(rt->deferred_count - d) *
+                        sizeof(rt->deferred[0]));
+
+                rt->resumed_count++;
+                if (!run_items(rt, &rec, from, off, &result)) {
+                    due_slot = record_slot(rt, off);
+                    if (due_slot >= 0) {
+                        rt->flags[due_slot] |= Q2_EVREC_HASRUN;
+                        rt->ran_count++;
+                    }
+                }
+                continue;
+            }
+
+            rt->deferred_count--;
+            memmove(&rt->deferred[d], &rt->deferred[d + 1],
+                    (size_t)(rt->deferred_count - d) * sizeof(rt->deferred[0]));
+        }
+    }
 
     while (rt->pending_count > 0 && guard < Q2_EVENT_RT_MAX_PER_UPDATE) {
         u32 offset;
@@ -251,28 +352,8 @@ q2_event_outcome q2_event_rt_update(q2_event_rt *rt)
         if (!q2_events_record_at(&rt->events, offset, &rec))
             continue;
 
-        for (i = 0; i < rec.n_items; i++) {
-            q2_event_item item;
-            q2_event_outcome r;
-
-            if (!q2_events_get_item(&rt->events, &rec, i, &item))
-                break;
-            if (item.op & Q2_EVOP_DISABLED)
-                continue;
-
-            r = run_item(rt, &item);
-            if (r == Q2_EVENT_ZONE_CHANGE)
-                result = Q2_EVENT_ZONE_CHANGE;
-
-            /* A predicate said no. Everything after it in this record is what
-             * it was guarding, so the record stops here — and it is still
-             * marked as having run, exactly as the console's does, or a locked
-             * door would re-test on every touch. */
-            if (rt->abort_record) {
-                rt->abort_record = false;
-                break;
-            }
-        }
+        if (run_items(rt, &rec, 0, offset, &result))
+            continue;   /* deferred: it is not finished, so do not latch it */
 
         rt->flags[slot] |= Q2_EVREC_HASRUN;
         rt->ran_count++;

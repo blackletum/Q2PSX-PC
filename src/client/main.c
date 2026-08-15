@@ -430,6 +430,7 @@ typedef struct client {
     u32               node_hidden_count;
     u32               script_hidden;    /* nodes hidden this level */
     u32               script_summoned;  /* creatures a CREBATCH woke */
+    u32               script_timers;    /* TIMER deferrals raised    */
     u32               script_teleports; /* TELEPORT calls that moved us */
     /*
      * A queued TELEPORT. Deferred to the top of the frame like the zone gate
@@ -1736,6 +1737,36 @@ static void client_event_call(void *user, const q2_event_item *item,
                     c->script_strings++;
                     Q2_INFO("help computer: \"%s\"", text);
                 }
+            }
+        }
+    }
+
+    /*
+     * TIMER — the rest of the record, later.
+     *
+     * `ticks = (base + ((range * rand()) >> 15)) * 30`, and the 30 is not the
+     * 300 every other time on this clock uses — `userfuncs.c` calls that out
+     * and it is the sort of thing that is silently four-fifths wrong if
+     * assumed. The RNG is the sim's rather than the BIOS's, which is a stated
+     * divergence: the console's `rand()` stream is not reproduced here, so a
+     * timer's jitter is the right shape and not the same sequence.
+     */
+    {
+        q2_uf_call call;
+
+        if (q2_uf_decode_call(&call, &c->sim[0].userfuncs, item) == Q2_OK &&
+            call.prim == Q2_UF_TIMER) {
+            u32 base = 0, range = 0;
+
+            q2_uf_operand_u32(&call, 0, 0, &base);
+            q2_uf_operand_u32(&call, 1, 0, &range);
+
+            {
+                s32 r  = (s32)(q2_rng_next(&c->sim[0].fx_rng) & 0x7FFFu);
+                s32 t  = (s32)base + (s32)(((s64)range * r) >> 15);
+
+                c->sim[0].event_rt.defer_ticks = t * 30;
+                c->script_timers++;
             }
         }
     }
@@ -3388,6 +3419,10 @@ static void client_input_simulated(client *c, float dt)
         if (ticks < 1) ticks = 1;
         c->rot_moved += q2_rotators_tick(&c->rotators, ticks);
 
+        /* The script's own clock, which is what a TIMER's deadline is measured
+         * against. */
+        q2_event_rt_advance(&c->sim[0].event_rt, (s32)ticks);
+
         /*
          * And the doors and lifts, on the same clock. `player_keys` gates a
          * locked door; the inventory's low twelve bits are the keys the script
@@ -4490,9 +4525,10 @@ static void client_write_shot(client *c, bool numbered)
         Q2_INFO("  breakable %u GLASS calls broke something, %u pieces thrown",
                 c->glass_calls, c->glass_pieces);
         Q2_INFO("  script    %u strings, %u sounds, %u gated by ONKEYDO, "
-                "%u nodes hidden, %u creatures summoned, %u teleports",
+                "%u nodes hidden, %u summoned, %u teleports, %u timers, %u resumed",
                 c->script_strings, c->script_sounds, c->script_gated,
-                c->script_hidden, c->script_summoned, c->script_teleports);
+                c->script_hidden, c->script_summoned, c->script_teleports,
+                c->script_timers, c->sim[0].event_rt.resumed_count);
         Q2_INFO("  movers    %u built, %u triggered by the script, %u tick-moves",
                 c->movers_ready ? c->movers.count : 0,
                 c->mover_triggers, c->mover_moved);
