@@ -376,6 +376,31 @@ typedef struct client {
     int               carry_chaingun;
     s32               carry_level_time;
 
+    /*
+     * THE MISSION SCREEN'S TWO COUNTERS, which mission.h names as the reason
+     * it stayed unimplemented long after the machinery to draw it existed:
+     * "Kills and Secrets are simulation state, and the sim did not tally
+     * either".
+     *
+     * SECRETS are `INSECRET` — a UserFuncs primitive a trigger volume calls,
+     * 34 of them on the disc and 33 reachable by a volume. The total is how
+     * many the map's script carries; the found count is how many DISTINCT ones
+     * have run. Distinct is the port's choice and is stated: the event runtime
+     * fires a volume on entry rather than continuously, so walking in and out
+     * of one would otherwise count the same secret twice, and a secrets figure
+     * that climbs as you pace about is the one shape that is definitely wrong.
+     *
+     * KILLS are the creature world's: how many of the map's placed creatures
+     * are dead. Both totals are per MAP, so both reset with it.
+     */
+    u32               secrets_total;
+    u32               secrets_found;
+    u32               secret_seen[64];   /* item offsets already counted */
+    u32               secret_seen_count;
+    int               mission_row_next;  /* which of the six rows to fill */
+    bool              mission_after_map; /* the screen is holding a LOADMAP */
+    u32               mission_frames;
+
     bool              map_change_pending;
     char              pending_map[Q2_UF_NAME_LEN + 1];
     char              pending_start[Q2_UF_NAME_LEN + 1];
@@ -1310,6 +1335,55 @@ static void client_sync_parked_health(client *c)
 static bool client_load_zone(client *c, const char *map, int index);
 
 /*
+ * How long a headless run holds the MISSION screen before going on. Long
+ * enough that a `--shot` lands on it, short enough that a scripted run through
+ * several levels does not spend its whole frame budget on intermissions.
+ */
+#define Q2_INTERMISSION_HEADLESS 45
+
+/*
+ * Write the level that is ending into the mission table.
+ *
+ * One row per level of the unit, six of them, and a row whose name is empty is
+ * skipped rather than drawn blank (mission.h) — so filling them in visit order
+ * is what makes a unit of three levels draw three rows.
+ *
+ * Kills come from the creature world rather than from a counter the client
+ * keeps, because the world already knows both halves: how many creatures the
+ * map placed and how many of them are dead. Counting deaths as they happen
+ * would drift the moment a creature is removed for any other reason.
+ */
+static void client_mission_record(client *c)
+{
+    u32 i, placed = 0, dead = 0;
+
+    if (c->creatures_ready) {
+        for (i = 0; i < c->creatures.set.count; i++) {
+            const q2_monster *m = &c->creatures.set.monsters[i];
+
+            /* Only the ones this zone actually made live: a creature filtered
+             * out as belonging to another zone was never killable here and
+             * must not inflate the denominator. */
+            if (!m->in_use && !m->dead)
+                continue;
+            placed++;
+            if (m->dead)
+                dead++;
+        }
+    }
+
+    if (c->mission_row_next < Q2_MISSION_ROWS) {
+        q2_mission_set_row(&c->mission, c->mission_row_next, c->map,
+                           (int)c->secrets_found, (int)c->secrets_total,
+                           (int)dead, (int)placed);
+        c->mission_row_next++;
+    }
+
+    Q2_INFO("mission: %s — secrets %u/%u, kills %u/%u",
+            c->map, c->secrets_found, c->secrets_total, dead, placed);
+}
+
+/*
  * Change level, at the arrival point the script names.
  *
  * Two things about the arrival are the operand table's, not this file's
@@ -1431,6 +1505,36 @@ static void client_event_call(void *user, const q2_event_item *item,
         if (pieces) {
             c->glass_calls++;
             c->glass_pieces += pieces;
+        }
+    }
+
+    /*
+     * INSECRET — the mission screen's Secrets column.
+     *
+     * Counted once per item offset. The runtime fires a trigger volume on the
+     * edge rather than every tick, so re-entering one would otherwise raise
+     * the count again; a secret is found once. See `secrets_found`.
+     */
+    {
+        q2_uf_call call;
+
+        if (q2_uf_decode_call(&call, &c->sim[0].userfuncs, item) == Q2_OK &&
+            call.prim == Q2_UF_INSECRET && item->payload) {
+            u32 off = (u32)(size_t)(item->payload - c->ev_operands.base_a);
+            u32 k;
+            bool seen = false;
+
+            for (k = 0; k < c->secret_seen_count; k++)
+                if (c->secret_seen[k] == off) { seen = true; break; }
+
+            if (!seen) {
+                if (c->secret_seen_count <
+                    sizeof(c->secret_seen) / sizeof(c->secret_seen[0]))
+                    c->secret_seen[c->secret_seen_count++] = off;
+                c->secrets_found++;
+                Q2_INFO("secret found: %u of %u", c->secrets_found,
+                        c->secrets_total);
+            }
         }
     }
 
@@ -1965,6 +2069,40 @@ static bool client_load_zone(client *c, const char *map, int index)
                 c->ev_operands.base_b = have_zev ? zev.data : NULL;
                 c->ev_operands.b_size = have_zev ? zev.size : 0;
 
+                /*
+                 * How many secrets this map HAS: every INSECRET call item in
+                 * its script. Counted here rather than asked of the sim,
+                 * because it is a property of the level and not of the play —
+                 * the denominator of the mission screen's Secrets column.
+                 */
+                c->secrets_total     = 0;
+                c->secrets_found     = 0;
+                c->secret_seen_count = 0;
+                {
+                    q2_event_record rec;
+
+                    if (q2_events_first_record(&ev, &rec)) {
+                        do {
+                            u32 it;
+
+                            for (it = 0; it < rec.n_items; it++) {
+                                q2_event_item item;
+                                q2_uf_call    call;
+
+                                if (!q2_events_get_item(&ev, &rec, it, &item))
+                                    break;
+                                if ((item.opcode & Q2_EVOP_MASK) !=
+                                    Q2_EVOP_CALL)
+                                    continue;
+                                if (q2_uf_decode_call(&call, &uf, &item) != Q2_OK)
+                                    continue;
+                                if (call.prim == Q2_UF_INSECRET)
+                                    c->secrets_total++;
+                            }
+                        } while (q2_events_next_record(&ev, &rec, &rec));
+                    }
+                }
+
                 if (have_zev)
                     q2_rotators_set_operand_source(&c->rotators, ev.data,
                                                    zev.data, zev.size);
@@ -1989,6 +2127,9 @@ static bool client_load_zone(client *c, const char *map, int index)
 
         q2_sim_spawn(&c->sim[0], feet, c->cam.yaw);
         c->sim[0].player[0].ground_y = feet[1];
+        /* A start position is not a standing position — drop onto the floor
+         * before the first frame rather than showing the fall (sim.c). */
+        q2_sim_settle(&c->sim[0]);
         c->sim[0].combat.self.owner  = 0;
 
         /*
@@ -5424,10 +5565,43 @@ no_window:
             }
         }
 
-        /* And a LOADMAP: the same deferral, one level up. */
+        /*
+         * And a LOADMAP: the same deferral, one level up — but the level that
+         * is ending gets its MISSION screen first.
+         *
+         * `mission.h` says the screen is "the one the game shows when a level
+         * ends", and main.c's briefing key used to carry the note that what
+         * triggers it "is not established". LOADMAP is what triggers it: it is
+         * the level ending. The destination waits behind the screen, which is
+         * what makes this an intermission rather than a flash.
+         */
         if (c.map_change_pending) {
             c.map_change_pending = false;
-            client_change_map(&c, c.pending_map, c.pending_start);
+
+            client_mission_record(&c);
+            c.mission_open      = true;
+            c.mission_after_map = true;
+            c.mission_frames    = 0;
+            q2_menu_close(&c.menu);
+        }
+
+        /*
+         * Leaving it. A press dismisses the screen (the ESCAPE handler below),
+         * and dismissing it with a destination waiting is what performs the
+         * load. Headless has no one to press anything, so it holds the screen
+         * for a fixed count and then goes on — otherwise every scripted run
+         * would stop at the first level boundary, which is precisely where the
+         * interesting part starts.
+         */
+        if (c.mission_after_map) {
+            c.mission_frames++;
+            if (c.headless && c.mission_frames >= Q2_INTERMISSION_HEADLESS)
+                c.mission_open = false;
+
+            if (!c.mission_open) {
+                c.mission_after_map = false;
+                client_change_map(&c, c.pending_map, c.pending_start);
+            }
         }
 
         /*

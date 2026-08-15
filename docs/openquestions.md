@@ -5594,3 +5594,36 @@ model's own scale, or the near-plane treatment of geometry that spans z = 44 to 
       reports `no zone 90 in BASE1` and the loader refuses it. A player never stands in every volume
       simultaneously; the warning is the sweep's, not the map's, and the refusal is the correct
       response to it.
+
+- [x] 69. **The MISSION screen had no trigger and no numbers, and both are now the level's own.**
+      `mission.h` named its own blocker: *"Kills and Secrets are simulation state, and the sim did not
+      tally either — which is the real reason this screen stayed unimplemented long after the machinery
+      to draw it existed."* And `main.c`'s briefing key carried the matching note that what shows the
+      screen between levels *"is not established"*.
+
+      **LOADMAP is what shows it.** The screen is the level ending, so it is raised where the level ends
+      and the destination waits behind it — which is what makes it an intermission rather than a flash.
+
+      **Secrets are `INSECRET`**, a UserFuncs primitive a trigger volume calls. Disc-wide:
+
+          INSECRET calls in COMMON: 34; the trigger sweep RUNS 33
+
+      The total is how many the map's script carries; the found count is how many DISTINCT ones have run.
+      *Distinct is the port's choice and is stated:* the runtime fires a volume on entry rather than
+      continuously, so pacing in and out of one would otherwise raise the count again, and a secrets
+      figure that climbs as you walk about is the one shape that is definitely wrong.
+
+      **Kills come from the creature world** — how many of the map's live-placed creatures are dead —
+      rather than from a counter incremented on each death, which would drift the moment a creature were
+      removed for any other reason.
+
+      Measured, and both halves move independently. Firing the same transition earlier or later on BASE1:
+      `kills 0/8` at frame 980 and **`kills 1/8`** at 1280, either side of the Soldier the `--watch`
+      player kills; and the secrets read `2/2` because BASE1 carries exactly two. Across fourteen maps
+      every one produces a record — BASE0 `3/4`, WASTE3 `4/4`, BIGGUN `0/0` — and LAB chains two
+      transitions in one run, LAB to COMMAND to BOSS1, so the screen releases as well as holds.
+
+      *Still owed:* the console waits for a press and this waits for ESCAPE (headless releases after 45
+      frames so a scripted run does not stop at the first boundary). The mission's *unit* number is the
+      port's `Mission 1` rather than the level table's, and `"Unit%dMiss1"` — the key that selects a
+      level's own display name — is read by nothing yet, so the Location column shows the directory name.

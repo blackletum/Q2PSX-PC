@@ -80,6 +80,7 @@ typedef struct live_rot_ctx {
      * walking the map runs one" are the two different questions, and only the
      * second says level progression is reachable. */
     u32                 loadmap_run;
+    u32                 secret_run;   /* INSECRET calls the sweep reaches */
     const q2_scene     *scene;
     q2_uf_operands      ops;
 
@@ -110,6 +111,9 @@ static void live_rot_call(void *user, const q2_event_item *item, u8 call_index)
 
     if (prim == Q2_UF_LOADMAP)
         ctx->loadmap_run++;
+
+    if (prim == Q2_UF_INSECRET)
+        ctx->secret_run++;
 
     /*
      * GLASS, resolved the way `q2_sim_breakable_call` resolves it — the same
@@ -177,6 +181,7 @@ int cmd_zonescript(const disc *d, const char *only_map)
         brk_zone_rescue = 0;
     u32 live_glass_run = 0, live_glass_node = 0;
     u32 loadmap_calls = 0, live_loadmap = 0;
+    u32 secret_calls = 0, live_secret = 0;
     u32 loadmap_map_ok = 0, loadmap_map_missing = 0,
         loadmap_start_ok = 0, loadmap_late_zone = 0;
     u32 live_built = 0, live_calls = 0, live_steps = 0, live_moved = 0,
@@ -351,6 +356,9 @@ int cmd_zonescript(const disc *d, const char *only_map)
                                 const u8 *pp = item.payload - 2;
                                 u32 need = 0;
                                 s16 first_obj = -1;
+
+                                if (call.prim == Q2_UF_INSECRET)
+                                    secret_calls++;
 
                                 if (call.prim == Q2_UF_LOADMAP) {
                                     char mname[Q2_UF_NAME_LEN + 1];
@@ -683,6 +691,7 @@ int cmd_zonescript(const disc *d, const char *only_map)
                 ctx.glass_run  = 0;
                 ctx.glass_node = 0;
                 ctx.loadmap_run = 0;
+                ctx.secret_run  = 0;
 
                 /* The best zone's Scene and its Events, so a GLASS slot is
                  * resolved against the same pair the engine holds resident. */
@@ -720,6 +729,7 @@ int cmd_zonescript(const disc *d, const char *only_map)
                 live_lit_run    += ctx.lit_run;
                 live_glass_run  += ctx.glass_run;
                 live_loadmap    += ctx.loadmap_run;
+                live_secret     += ctx.secret_run;
                 live_glass_node += ctx.glass_node;
                 for (t = 0; t < 400; t++)
                     live_moved += q2_rotators_tick(&rs, 12);
@@ -808,6 +818,8 @@ int cmd_zonescript(const disc *d, const char *only_map)
            loadmap_map_ok, loadmap_map_missing);
     printf("      start position resolves THERE  : %u, of which land past "
            "zone 0 : %u\n", loadmap_start_ok, loadmap_late_zone);
+    printf("    INSECRET calls in COMMON: %u; the trigger sweep RUNS %u\n",
+           secret_calls, live_secret);
     printf("    rotation CALLs the script RUNS : %u, of which turn nothing : %u\n",
            live_rot_fired, live_rot_barren);
     printf("    distinct rotation CALL sites the script reaches : %u\n",
