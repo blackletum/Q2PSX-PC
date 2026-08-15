@@ -486,6 +486,49 @@ s32 q2_creature_world_death_frame(const q2_creature_world *w,
     return -1;
 }
 
+/* Which module owns this creature's class. */
+static const q2_creature_module *module_for(const q2_creature_world *w,
+                                            const q2_monster *m)
+{
+    u32 i, j;
+
+    if (!w || !m)
+        return NULL;
+
+    for (i = 0; i < w->mod_count; i++) {
+        if (!w->mod[i].ready)
+            continue;
+        for (j = 0; j < w->mod[i].cre.class_count; j++)
+            if (w->mod[i].cre.class_byte[j] == m->class_id)
+                return &w->mod[i];
+    }
+
+    return NULL;
+}
+
+const char *q2_creature_world_sound_for_addr(const q2_creature_world *w,
+                                             const q2_monster *m, u32 addr)
+{
+    static q2_cre_sound_bind binds[48];
+    const q2_creature_module *mod = module_for(w, m);
+    u32 n;
+
+    if (!mod)
+        return NULL;
+
+    /*
+     * `Q2_CREWORLD_BASE` is where the loader relocates a module, and the
+     * registrations store absolute addresses — so the decode and the play
+     * site's `addr` are already in the same space and nothing has to be
+     * rebased.
+     */
+    n = q2_creature_sound_bindings(mod->image, mod->size, Q2_CREWORLD_BASE,
+                                   binds,
+                                   (u32)(sizeof(binds) / sizeof(binds[0])));
+
+    return q2_creature_sound_for_addr(binds, n, addr);
+}
+
 const char *q2_creature_world_sound_name(const q2_creature_world *w,
                                          const q2_monster *m, u32 index)
 {

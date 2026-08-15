@@ -734,6 +734,189 @@ u32 q2_creature_sound_names(const q2_creature *c, const u8 *image, size_t size,
     return n;
 }
 
+/* ------------------------------------------------------------------------- */
+/* A creature's sounds, decoded from the module's own registrations           */
+/* ------------------------------------------------------------------------- */
+#define SND_OP(w)     ((w) >> 26)
+#define SND_RS(w)     (((w) >> 21) & 0x1F)
+#define SND_RT(w)     (((w) >> 16) & 0x1F)
+#define SND_RD(w)     (((w) >> 11) & 0x1F)
+#define SND_FN(w)     ((w) & 0x3F)
+#define SND_IMM(w)    ((s32)(s16)((w) & 0xFFFF))
+
+#define SND_OP_LUI    0x0Fu
+#define SND_OP_LW     0x23u
+#define SND_OP_SW     0x2Bu
+#define SND_OP_ADDIU  0x09u
+#define SND_FN_JALR   0x09u
+
+/* The engine import the modules call to register a sound: block offset 36,
+ * which is slot 9. Both modules checked use it and nothing else does. */
+#define SND_IMPORT_SLOT 36
+
+/* How far the scheduler moves things. The widest gap measured between the
+ * `addiu` that forms a name pointer and the `jalr` that consumes it is 22
+ * instructions, in the Berserk. */
+#define SND_LOOKBACK  64
+#define SND_LOOKAHEAD 12
+
+/* A 12-byte NUL-terminated printable name with its padding checked. */
+static bool snd_name_at(const u8 *image, size_t size, u32 off, char *out)
+{
+    u32 i;
+    bool ended = false;
+    u32 n = 0;
+
+    if ((size_t)off + 12 > size)
+        return false;
+
+    for (i = 0; i < 12; i++) {
+        u8 ch = image[off + i];
+
+        if (ch == 0) {
+            ended = true;
+            continue;
+        }
+        if (ended)
+            return false;
+        if (ch < 0x20 || ch > 0x7E)
+            return false;
+        n++;
+    }
+
+    if (n < 3)
+        return false;
+
+    memcpy(out, image + off, 12);
+    out[12] = '\0';
+    return true;
+}
+
+u32 q2_creature_sound_bindings(const u8 *image, size_t size, u32 load_base,
+                               q2_cre_sound_bind *out, u32 max)
+{
+    size_t i;
+    u32 n = 0;
+
+    if (!image || size < 16)
+        return 0;
+
+    for (i = 0; i + 4 <= size; i += 4) {
+        u32 w = q2_rd_u32(image + i);
+        u32 target, j;
+        u32 hi[32];
+        bool hi_ok[32];
+        char name[13];
+        bool have_name = false;
+        u32 addr = 0;
+        bool have_addr = false;
+        int k;
+
+        /* `lw rT, 36(rB)` — the import fetch. */
+        if (SND_OP(w) != SND_OP_LW || SND_IMM(w) != SND_IMPORT_SLOT)
+            continue;
+        target = SND_RT(w);
+
+        /* ...consumed by a `jalr` a few instructions later. */
+        {
+            bool called = false;
+            size_t at;
+
+            for (j = 4; j <= SND_LOOKAHEAD * 4 && i + j + 4 <= size; j += 4) {
+                u32 v = q2_rd_u32(image + i + j);
+
+                if (SND_OP(v) == 0 && SND_FN(v) == SND_FN_JALR &&
+                    SND_RS(v) == target) {
+                    called = true;
+                    break;
+                }
+            }
+            if (!called)
+                continue;
+            at = i + j;            /* the jalr */
+
+            /*
+             * The NAME. Walk back tracking each register's most recent `lui`,
+             * then take the nearest `addiu rT, rY, imm` whose formed address
+             * lands on a real name. Tracking the `lui` is what makes this
+             * exact rather than a guess about which register holds the base.
+             */
+            for (k = 0; k < 32; k++)
+                hi_ok[k] = false;
+
+            {
+                size_t from = at > SND_LOOKBACK * 4
+                                  ? at - SND_LOOKBACK * 4 : 0;
+                size_t p;
+
+                for (p = from; p < at; p += 4) {
+                    u32 v = q2_rd_u32(image + p);
+
+                    if (SND_OP(v) == SND_OP_LUI) {
+                        hi[SND_RT(v)]    = (u32)(v & 0xFFFF) << 16;
+                        hi_ok[SND_RT(v)] = true;
+                        continue;
+                    }
+                    if (SND_OP(v) == SND_OP_ADDIU && hi_ok[SND_RS(v)]) {
+                        u32 a = hi[SND_RS(v)] + (u32)SND_IMM(v);
+
+                        if (a >= load_base &&
+                            snd_name_at(image, size, a - load_base, name))
+                            have_name = true;
+                        /* keep walking: the NEAREST match wins */
+                    }
+                }
+            }
+
+            if (!have_name)
+                continue;
+
+            /* And the handle's home: the first `sw v0, imm(rX)` after it. */
+            for (j = 4; j <= SND_LOOKAHEAD * 4 && at + j + 4 <= size; j += 4) {
+                u32 v = q2_rd_u32(image + at + j);
+
+                if (SND_OP(v) == SND_OP_LUI) {
+                    hi[SND_RT(v)]    = (u32)(v & 0xFFFF) << 16;
+                    hi_ok[SND_RT(v)] = true;
+                    continue;
+                }
+                if (SND_OP(v) == SND_OP_SW && SND_RT(v) == 2 /* v0 */ &&
+                    hi_ok[SND_RS(v)]) {
+                    addr      = hi[SND_RS(v)] + (u32)SND_IMM(v);
+                    have_addr = true;
+                    break;
+                }
+            }
+
+            if (!have_addr)
+                continue;
+        }
+
+        if (n < max && out) {
+            out[n].addr = addr;
+            memcpy(out[n].name, name, sizeof(out[n].name));
+        }
+        n++;
+    }
+
+    return n;
+}
+
+const char *q2_creature_sound_for_addr(const q2_cre_sound_bind *binds,
+                                       u32 count, u32 addr)
+{
+    u32 i;
+
+    if (!binds)
+        return NULL;
+
+    for (i = 0; i < count; i++)
+        if (binds[i].addr == addr)
+            return binds[i].name;
+
+    return NULL;
+}
+
 u32 q2_creature_move_names(const q2_creature *c, const u8 *image, size_t size,
                            const char **out, u32 out_count)
 {

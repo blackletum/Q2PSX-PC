@@ -202,6 +202,19 @@ const char *q2_creature_world_sound_name(const q2_creature_world *w,
                                          const q2_monster *m, u32 index);
 
 /*
+ * The sound a play site ASKS FOR, resolved the way the module resolves it.
+ *
+ * A decoded SOUND action carries the module ADDRESS of the handle
+ * (`q2_cre_action.addr`, creature.h) and `cre_actions.c` passes that address
+ * straight through — so treating it as an index into a name list, which this
+ * port did, asks for name 0x80101758 of eight. `q2_creature_sound_bindings`
+ * decodes the module's own registrations into address/name pairs; this is the
+ * lookup that joins the two ends together.
+ */
+const char *q2_creature_world_sound_for_addr(const q2_creature_world *w,
+                                             const q2_monster *m, u32 addr);
+
+/*
  * SUMMON a Population group — what `CREBATCH` means.
  *
  * A group is not spawned because it exists. `0x80056C60` takes a twelve-byte

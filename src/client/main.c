@@ -311,6 +311,7 @@ typedef struct client {
     u32               cre_swings, cre_shots;   /* hook invocations */
     u32               cre_sounds;
     u32               cre_sound_missing;
+    u32               cre_sound_unnamed;  /* the play site resolved to no name */
     u32               ent_light_added;
     u32               script_lights;
     u32               pose_by_name;
@@ -706,6 +707,7 @@ static void client_pickup_burst(client *c, const s32 pos[3], s32 model_index)
 
 static void client_entity_events(client *c);
 static bool client_play_sound(client *c, const char *want);
+static bool client_find_sound(client *c, const char *want, q2_vag *out);
 
 /* The creature hooks, defined below with the AI clock they run on. */
 static void client_cre_melee(q2_monster *m, const s32 aim[3], s32 damage,
@@ -1093,11 +1095,52 @@ static void client_cre_sound(q2_monster *m, int which, void *user)
      * correct: the Berserk's thirteen run from module+0x144 to +0x1D4 and the
      * Tank Commander's eight likewise. See openquestions #60 and #61.
      */
-    name = q2_cre_soldier_sound_name(which);
+    /*
+     * `which` is the module ADDRESS of the sound handle, not an index —
+     * `cre_actions.c` passes `q2_cre_action.addr` straight through. This used
+     * to hand it to `q2_creature_world_sound_name`, which indexes a name list,
+     * so every decoded creature was asking for name 0x80101758 of eight and
+     * getting nothing. Resolving the address against the module's own
+     * registrations is what the module itself does (creature.h).
+     */
+    name = q2_creature_world_sound_for_addr(&c->creatures, m, (u32)which);
+
+    /*
+     * The Soldier's transcription still wins where it applies, because it was
+     * read out of code rather than decoded — but it is indexed, so it is only
+     * consulted when the address lookup found nothing.
+     */
+    if (!name)
+        name = q2_cre_soldier_sound_name(which);
     if (!name)
         name = q2_creature_world_sound_name(&c->creatures, m, (u32)which);
-    if (name && !client_play_sound(c, name))
-        c->cre_sound_missing++;
+    /*
+     * Counted on whether the BANK HAS IT, not on whether it played.
+     *
+     * `client_play_sound` returns false when `c->audio` is NULL, which is every
+     * headless run — so `%u not in bank` was reporting the absence of an audio
+     * device and read as "this map does not carry the creature's sounds". JAIL4
+     * carries `sol_idle1`, `sol_sght1`, `sol_pain1`, `sol_deth2` and the rest;
+     * they were found every time and the counter said otherwise.
+     */
+    if (name) {
+        q2_vag vag;
+
+        /*
+         * A name the bank does not carry is SILENCE, and on this disc that is
+         * usually correct rather than a gap: `ara_idle1`, `ara_srch1`,
+         * `ber_idle1`, `ber_srch1` and `tnk_idle1` are registered by their
+         * modules and appear in NO map's bank anywhere on the disc. The
+         * console's loader returns a null handle for those and playing one does
+         * nothing. See openquestions #61.
+         */
+        if (!client_find_sound(c, name, &vag))
+            c->cre_sound_missing++;
+        else
+            client_play_sound(c, name);
+    } else {
+        c->cre_sound_unnamed++;
+    }
 }
 
 /*
@@ -4919,13 +4962,14 @@ static void client_write_shot(client *c, bool numbered)
         }
         Q2_INFO("  creatures %u live, %u hunting, %u drawn (%u faces), "
                 "nearest %d units, moved %ld, player %d hp, "
-                "%u swings %u shots, %u sounds (%u not in bank), %u dead, "
+                "%u swings %u shots, %u sounds (%u not in bank, %u unnamed), %u dead, "
                 "%ld hp total, "
                 "player attacked %u, targets %u, bolts %u, %u bodies, "
                 "rot %u steps %u moved %u turned, %u calls",
                 live, hunting, c->cre_drawn, c->cre_faces, near_d, moved,
                 c->sim[0].combat.inv.health, c->cre_swings, c->cre_shots,
-                c->cre_sounds, c->cre_sound_missing, dead, hp,
+                c->cre_sounds, c->cre_sound_missing, c->cre_sound_unnamed,
+                dead, hp,
                 c->player_attacks,
                 c->sim[0].combat.target_count,
                 c->sim[0].combat.projectiles.live, c->cre_bodies, c->rot_steps,

@@ -4648,7 +4648,7 @@ nothing saying so.
       hitting it is roughly a 2% coincidence. Suggestive, not a finding, and **no mechanism has been found
       that separates those two moves from the 113 that fit.** Recorded as the residue it is.
 
-- [ ] 61. **Why the Tank Commander is still silent, given its sounds ARE on the disc (#60).**
+- [x] 61. **Why the Tank Commander is still silent, given its sounds ARE on the disc (#60).** *(Answered by #98: the module registers by name, and the play site names a BSS word.)*
       First move was to read the sound addresses the decoder reports for it — `sound(80102110)`,
       `sound(80102118)`, `sound(8010211C)`. All three are **zero in the module image**: BSS, filled at
       runtime. So those are not names, and no amount of reading them will produce one.
@@ -6658,3 +6658,62 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
 
       The `unnamed` remainder is the honest fallback case and the only one left: a decoded move the module
       never names has nothing else to go on.
+- [x] 98. **The creature sound table is not a table — the module REGISTERS each sound by name, and the
+      play site names the BSS word it registered into.** #61 tried four ways to pin where a creature's
+      sound list starts, reverted three of them, and its third attempt concluded that the model of the
+      problem was wrong. It was.
+
+      `q2_creature_sound_names` finds a RUN of 12-byte name slots and calls that the table. The run is a
+      string POOL. The Berserk's proves it: the "table" comes back as
+      `Attack1 Attack2 Attack3 ber_pain2 inf_pain1 ber_deth2 inf_deth2 …` — three of its own MOVE names,
+      then a mix of its sounds and the INFANTRY's. Slot index was being used as the sound number, so a
+      pool read as a table misnumbers everything after the first wrong entry.
+
+      What the module actually does, at init:
+
+          801008D4  addiu t0, v1, 420      ; t0 = the name, module+0x1A4
+          801008D8  lbu   v0, 1(t0)        ; packed into a0..a3 a byte at a time,
+          801008DC  lbu   v1, 420(v1)      ;   because it is unaligned
+          801008B8  lw    v0, 36(s2)       ; import slot 9, the sound loader
+          801008C0  jalr  v0
+          801008CC  sw    v0, 5976(v1)     ; the HANDLE, into module+0x1758
+
+      and the code that plays a sound names that BSS word — which is exactly what the decoder already
+      printed at every site as `sound(8010175C)`, and exactly what #61 found to be zero in the image. Zero
+      because it is filled at load. **The name that fills it is in the instruction stream.**
+
+      `q2_creature_sound_bindings` decodes those registrations into address/name pairs. It is the same
+      by-value 12-byte decode the LevelBin group selector needs, tracking each register's most recent
+      `lui` so the name pointer is computed rather than guessed at. All seven creatures decode, the two
+      that returned nothing among them:
+
+          Soldier  12   Tankcomm  8   Insane 3   Arachner 8
+          Gunner   11   Infantry 12   Berserk  10
+
+      And the duplicates explain the pool. `80101750=ber_pain2` and `80101750=inf_pain1` register to the
+      SAME word; so do `801032C4=wep_shotgr1` and `801032C4=wep_sshotr1` for the Soldier. **One module
+      serves several classes and the class byte picks which registration runs** — which is why the
+      Berserk's module carries `inf_*` strings at all, and why no run-start could ever have been right.
+
+      **The consumer was wrong too, and in a way the counter hid.** `cre_actions.c` passes
+      `q2_cre_action.addr` — the module address — straight to the sound hook, and `main.c` handed it to a
+      function that INDEXES a name list. Every decoded creature was asking for name 0x80101758 of eight.
+
+      **And the counter that would have said so was measuring the audio device.** `%u sounds (%u not in
+      bank)` incremented when `client_play_sound` returned false, and that function returns false when
+      `c->audio` is NULL — which is every headless run. So `7 sounds (7 not in bank)` on JAIL4 meant "this
+      run had no speakers", while JAIL4 carries `sol_idle1`, `sol_sght1`, `sol_pain1` and `sol_deth2` and
+      found every one. Counting on bank residency instead:
+
+          JAIL4   7 sounds, 0 not in bank      BASE1  4 sounds, 0 not in bank
+          WASTE4  6 sounds, 4 not in bank      POWER1 7 sounds, 7 not in bank
+
+      **The remainder is the disc, not the port.** The names those two ask for and do not get are
+      `ber_idle1` and `gun_idle1`, and a sweep of every `SNDVRAM.DAT` on the disc says why:
+
+          ara_idle1  ara_srch1  ber_idle1  ber_srch1  tnk_idle1   -- NOWHERE on the disc
+          gun_idle1                                               -- on 13 maps, but not POWER1
+
+      A module registers more sounds than any bank carries. The console's loader returns a null handle for
+      those and playing one does nothing, so the silence is retail behaviour and matching it is correct.
+      Recorded because it is exactly the shape of a gap and is not one.

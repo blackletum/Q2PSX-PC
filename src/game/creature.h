@@ -193,6 +193,58 @@ bool q2_creature_decode(q2_creature *out, const u8 *image, size_t size,
 u32 q2_creature_sound_names(const q2_creature *c, const u8 *image, size_t size,
                             const char **out, u32 out_count);
 
+/* ------------------------------------------------------------------------- */
+/* A creature's sounds, decoded from the module's own registrations           */
+/* ------------------------------------------------------------------------- */
+/*
+ * `q2_creature_sound_names` finds a RUN of 12-byte name slots and calls the run
+ * the sound table. That works for five of seven creatures and is wrong in
+ * principle for all of them: the run it finds is a string POOL, not a table.
+ * The Berserk's proves it — the "table" comes back as
+ * `Attack1 Attack2 Attack3 ber_pain2 inf_pain1 ber_deth2 inf_deth2 ...`, which
+ * is three of its own MOVE names followed by a mix of its sounds and the
+ * Infantry's. Slot index is the sound number, so a pool read as a table
+ * misnumbers everything after the first wrong entry. #61 records three attempts
+ * to pin the run's start, all reverted, and the third one's conclusion was that
+ * the model of the problem was wrong.
+ *
+ * It was. The module does not index a table — it REGISTERS each sound by name
+ * at init and keeps the returned handle in its own BSS:
+ *
+ *     801008D4  addiu t0, v1, 420      ; t0 = the name, module+0x1A4
+ *     801008D8  lbu   v0, 1(t0)        ; ...packed into a0..a3 a byte at a
+ *     801008DC  lbu   v1, 420(v1)      ;    time, because it is unaligned
+ *     801008B8  lw    v0, 36(s2)       ; import slot 9, the sound loader
+ *     801008C0  jalr  v0
+ *     801008CC  sw    v0, 5976(v1)     ; the HANDLE, into module+0x1758
+ *
+ * and the code that plays a sound names that BSS address — which is exactly
+ * what the decoder already reports as `sound(8010175C)` and what #61 found to
+ * be zero in the image. Zero because it is filled at load; the NAME that fills
+ * it is right there in the instruction stream.
+ *
+ * So the mapping is address -> name, recovered rather than guessed, and it does
+ * not depend on any run, any anchor, or any ordering. It is the same decode the
+ * LevelBin group selector needs (levelbin.h) and for the same reason: a
+ * 12-byte string crossing a call boundary in this codebase is passed BY VALUE.
+ */
+typedef struct q2_cre_sound_bind {
+    u32  addr;              /* the BSS word the handle is stored in */
+    char name[13];          /* the name registered for it           */
+} q2_cre_sound_bind;
+
+/*
+ * Decode a module's sound registrations. `load_base` is where the image was
+ * relocated to. Returns how many were found; `max` bounds what is written.
+ */
+u32 q2_creature_sound_bindings(const u8 *image, size_t size, u32 load_base,
+                               q2_cre_sound_bind *out, u32 max);
+
+/* Which name a play site's BSS address was registered with, or NULL. */
+const char *q2_creature_sound_for_addr(const q2_cre_sound_bind *binds,
+                                       u32 count, u32 addr);
+
+
 u32 q2_creature_move_names(const q2_creature *c, const u8 *image, size_t size,
                            const char **out, u32 out_count);
 

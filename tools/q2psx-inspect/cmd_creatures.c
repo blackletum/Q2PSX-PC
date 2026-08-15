@@ -167,6 +167,25 @@ static void report(const q2_creature *c, const q2_cre_impl *impl)
         printf("%s\n", ns > 12 ? " ..." : "");
     }
 
+    /*
+     * And the REGISTRATIONS, decoded from the module's own init rather than
+     * found by a run heuristic. Each is a name the module hands to import slot
+     * 9 and the BSS word it parks the handle in — which is the address the
+     * decoder already prints at every `sound(...)` play site, so the two join
+     * up directly and no ordering has to be guessed.
+     */
+    {
+        static q2_cre_sound_bind sb[32];
+        u32 nb, z;
+
+        memset(sb, 0, sizeof(sb));
+        nb = q2_creature_sound_bindings(g_img, g_img_size, CRE_BASE, sb, 32);
+        printf("    registers : %u", nb);
+        for (z = 0; z < nb && z < 12; z++)
+            printf(" %08X=%.11s", sb[z].addr, sb[z].name);
+        printf("%s\n", nb > 12 ? " ..." : "");
+    }
+
     printf("    per move  : (via) range -> think bytes\n");
     for (i = 0; i < c->move_count; i++) {
         const q2_cre_move *mv = &c->move[i];
