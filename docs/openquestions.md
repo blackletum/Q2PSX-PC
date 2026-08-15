@@ -525,9 +525,33 @@ The residues of the resolved blockers keep their parents' numbers.
       then drops a player into **47 of 47** maps: every spawn lands in a cell, every player grounds, none
       ever leaves the hull.
       Implemented in `src/formats/collision.[ch]` and `src/game/trace.[ch]`.
-- [ ] **6. `LevelBin` / `CreAIBin` module ABI and the `Rel` fixup encoding. — HALF FALLEN.**
-      Confirmed MIPS R3000; every fixup is a valid in-`Bin` offset, but only 31 % are 4-aligned, so it is not
-      a plain word-address list. The fixup *encoding* is still open. What is no longer open is the **ABI**,
+- [x] **6. `LevelBin` / `CreAIBin` module ABI and the `Rel` fixup encoding. — FULLY FALLEN; the second half
+      was solved in `reloc.h` and this entry never caught up.**
+
+      **The 31% was the clue, not the obstacle.** "Every fixup is a valid in-`Bin` offset, but only 31% are
+      4-aligned, so it is not a plain word-address list" is exactly right and the conclusion drawn from it
+      was backwards. The low two bits were never alignment — they are a TYPE TAG:
+
+          offset = entry & ~3     type = entry & 3
+
+          0  WORD32    *t += base
+          1  HI16      consumes ONE EXTRA raw word as an addend, then
+                       *t = (*t & 0xFFFF0000) | (((addend + base + 0x8000) >> 16) & 0xFFFF)
+          2  LO16      *t = (*t & 0xFFFF0000) | ((*t + base) & 0xFFFF)
+          3  TARGET26  the jump target, shifted, rebased and re-packed
+
+      The residue histogram decomposes exactly into the four type counts, which is the check.
+
+      **The HI16 addend word is the trap and is worth carrying.** It is a raw value rather than a tagged
+      entry, and a decoder that fails to consume it stays in step almost all the time — a flat scan scores
+      **99.78%** against 100% for the correct parse, because only the 216 addend words whose low bits happen
+      to be `0b10` are misread as LO16 entries. Close enough to look like success, wrong enough to corrupt a
+      module. HI16 needs the separate addend because the modules carry no high half at all: every one of the
+      **28,191** HI16 sites is a `lui` whose immediate is zero.
+
+      Implemented in `src/formats/reloc.[ch]`, and the disc is the check: **15 of 15 creature modules over
+      13 maps relocate with zero failures**, the level scripts run, and QFRONT's and QENDMIS's modules give
+      up their menu pages and their movie table. What is no longer open is the **ABI**,
       and with it the whole engine side of monster AI.
 
       **The interface record is read.** `0x8007D990` builds a **304-byte, version 1** import table at the
@@ -1411,10 +1435,31 @@ The residues of the resolved blockers keep their parents' numbers.
       0xFFFF-terminated run of clip ids — and this port has been assigning it as exactly that since the
       item path was written: `e->clip[i] = def->extra[i]` in `item.c`. The consumer was located; the entry
       was never updated.
-- [ ] 28. `Q2Level` `+0x1C` (constant `jr ra` address, no located reader — possibly the high half of an
-      8-byte field whose low half is the runtime pointer at `+0x18`); the writers of the per-level
-      `runtime[8]` state; and the `music_playlist` field's real meaning, given that **no instruction anywhere
-      in the image loads offset `0x22` from a level record**.
+- [x] 28. **All three clauses answered, and two of them were answered elsewhere without this entry being
+      updated.**
+
+      **`+0x1C` is a per-level FUNCTION POINTER that every level fills with the same stub.** It reads
+      `0x800412C8` in all 52 real records — 52 raw words in the image equal that address, which is the
+      table itself — and `0x800412C8` is `jr ra; nop`, an empty function. That **refutes** this entry's own
+      guess that it might be the high half of an 8-byte field: `+0x18` is zero in every record and `+0x1C`
+      is a valid code address, which is not how a 64-bit quantity is laid out.
+
+      Nothing on this disc invokes it. Three sites in the image load `+0x1C` and call through it
+      (`0x80056B74`, `0x80083A6C`, `0x80085C98`), and the first — the only one in the game code — walks a
+      **48-byte** stride table and hands the callee an entity, so it is not this 56-byte record. A per-level
+      hook slot, filled with a stub by every level: the same shape as `EXPLO`, which is a pure stub in both
+      its binding-table slots.
+
+      **`music_playlist` was read a long time ago and this entry never caught up.** "No instruction loads
+      offset 0x22 from a level record" is true and is not evidence of anything: the player holds a CURSOR.
+      `0x80071A68` walks it — a positive byte is a track id, a negative byte is a relative jump back, a zero
+      ends the list — so the loads are `lb 0(cursor)`, never `lb 0x22(record)`. `leveltable.h` has carried
+      that reading, and the port plays every map's seven-track list from it, with 19 of 20 stream durations
+      matching to the tenth of a second.
+
+      **`runtime[8]` does not exist.** The record is 56 bytes and the layout accounts for all of them —
+      12 + 12 + 4 + 4 + 2 + 7 + 1 + 2 + 12. The field this clause asked after was a artefact of an earlier,
+      wrong stride.
 - [x] 29. **~~`SNDVRAM` section A header bytes `0x0E` and `0x0F`, and the split.~~ — FULLY RESOLVED.**
       They are 4bpp CLUT counts (the fix-up loop at `0x800762B4` adds them, shifts left by 4 and sets the STP
       bit over exactly that many halfwords), and the **split is world versus models**: the world renderer
