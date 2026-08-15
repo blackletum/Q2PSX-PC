@@ -18,6 +18,8 @@
  * null decides the widget, so that is checked too.
  */
 #include "cmd_menu.h"
+#include "level.h"
+#include "levelbin.h"
 
 #include "exe.h"
 #include "hudtables.h"
@@ -131,6 +133,27 @@ static int check_page(const q2_exe *e, const q2_menu_page *p, bool verbose)
 {
     u32 i, bad = 0, na, nb, want_a, want_b;
     char label[64];
+
+    /*
+     * A FRONT-END page is not in the executable and checking it there is not a
+     * failure — it is the wrong file.
+     *
+     * The front end is `QFRONT`'s LevelBin (#44), and its pages are static
+     * 24-byte arrays in the module at 0x8010xxxx. This checker reads the
+     * executable's segment, so every one of those pages came back as six lines
+     * of `record escapes the segment` and a `holds 0 records, the port
+     * transcribes N` — 26 complaints that said nothing except that the reader
+     * was pointed at the wrong place. `menu front` reads them out of the module
+     * and prints them against the same transcription.
+     */
+    if (p->addr >= 0x80100000u && p->addr < 0x80200000u) {
+        if (verbose)
+            printf("  %-22s %08X  %u item%s  (QFRONT's LevelBin, not the "
+                   "EXE - see `menu front`)\n",
+                   page_name(p->id), p->addr, p->count,
+                   p->count == 1 ? "" : "s");
+        return 0;
+    }
 
     na = table_length(e, p->addr);
     nb = table_length(e, p->addr2);
@@ -510,8 +533,76 @@ static int shoot_page(const disc *d, const q2_menu_page *p, int cheat_level,
     return 0;
 }
 
+/* ------------------------------------------------------------------------- */
+/* The FRONT END's pages, which are not in the executable                     */
+/* ------------------------------------------------------------------------- */
+/*
+ * `QFRONT`'s `LevelBin` is the front end (#44). Its pages are static 24-byte
+ * record arrays in the module, in the executable's own layout, so this reads
+ * them the way the engine's own page walker would — and prints them beside the
+ * hand transcription in that entry, which is what makes the decode checkable
+ * rather than plausible.
+ */
+static int front_end_pages(const disc *d)
+{
+    q2_common_file cf;
+    q2_buf buf;
+    const dat_chunk *lb;
+    static q2_lb_menu_page pages[64];
+    u32 n, i, rows = 0;
+
+    if (disc_read_file(d, "Q2DATA/LEVELS/QFRONT/COMMON.DAT", &buf) != Q2_OK) {
+        printf("  QFRONT is not on this disc\n");
+        return 1;
+    }
+    if (q2_common_open(&cf, &buf) != Q2_OK) {
+        q2_buf_free(&buf);
+        printf("  QFRONT's COMMON.DAT will not open\n");
+        return 1;
+    }
+
+    lb = cf.chunk[Q2_COMMON_LEVEL_BIN];
+    if (!lb || !lb->data || !lb->size) {
+        q2_common_close(&cf);
+        printf("  QFRONT carries no LevelBin\n");
+        return 1;
+    }
+
+    printf("\nThe front end's pages, out of QFRONT's %u-byte LevelBin\n",
+           lb->size);
+
+        /* The chunk is UNRELOCATED, so its pointers are still the module-relative
+     * offsets the fixups would turn into addresses — the same reason the
+     * mission-event scan passes a zero base (levelbin.h). */
+    n = q2_levelbin_menu_pages(lb->data, lb->size, 0, pages, 64);
+    for (i = 0; i < n && i < 64; i++) {
+        u32 k;
+
+        printf("  page at module+0x%05X, %u rows\n", pages[i].offset,
+               pages[i].count);
+        for (k = 0; k < pages[i].count; k++) {
+            const q2_lb_menu_row *r = &pages[i].row[k];
+
+            printf("    +0x%05X  %-18s %4d,%4d  ", r->offset, r->name,
+                   r->x, r->y);
+            if (r->action)
+                printf("-> module+0x%X\n", r->action - 0x80100000u);
+            else
+                printf("(no action)\n");
+        }
+        rows += pages[i].count;
+    }
+
+    printf("  %u pages, %u rows\n", n, rows);
+    q2_common_close(&cf);
+    return 0;
+}
+
 int cmd_menu(const disc *d, const char *want, const char *out, const char *map)
 {
+    if (want && strcmp(want, "front") == 0)
+        return front_end_pages(d);
+
     q2_exe exe;
     const q2_menu_page *pages;
     u32 count, i;

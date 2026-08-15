@@ -169,6 +169,56 @@ u32 q2_levelbin_misevents(const u8 *module, u32 size, u32 load_base,
                           q2_levelbin_misevent *out, u32 max);
 
 /* ------------------------------------------------------------------------- */
+/* The front end's own menu pages                                             */
+/* ------------------------------------------------------------------------- */
+/*
+ * The front end is not in the executable. It is `QFRONT`'s `LevelBin` — a
+ * 118,216-byte module against 13,008 bytes of `LevelRel` — which is why every
+ * sweep of the EXE for `START` and `OPTIONS` failed, and why page 46's two item
+ * records are `LOADING` and a NULL rather than the title screen (#44).
+ *
+ * Its pages are STATIC ARRAYS in the module, not built at run time, and the
+ * layout is the executable's own so `0x8001A474` takes a module's record and
+ * the engine's without knowing the difference:
+ *
+ *     +0x00  char *text      absolute, into the module's own text pool
+ *     +0x04  s16   x         256 on every row the front end draws: centred
+ *     +0x06  s16   y
+ *     +0x08  void (*action)(void)
+ *     ...    24 bytes in total
+ *
+ * A page is a run of those. The deathmatch SETUP page is the shape that stops a
+ * looser rule working: its six records have bytes +8 onward all zero — no
+ * action, no widget, no bound variable — because its values live IN THE TEXT
+ * (`"TIME LIMIT   10"`, rewritten in place, since the module image is RAM). So
+ * a null action is a legal record and cannot be the terminator.
+ *
+ * What anchors a run is the TEXT POINTER: it must land on a printable
+ * NUL-terminated string inside this module. Two independent things then have to
+ * hold for a false positive — a plausible pointer AND a plausible x/y — and the
+ * pages that come out can be checked against the capture #44 transcribed.
+ */
+typedef struct q2_lb_menu_row {
+    char name[32];      /* the row's text, from the module's pool */
+    s16  x, y;
+    u32  action;        /* absolute; 0 when the row does nothing */
+    u32  offset;        /* where the record sits in the module   */
+} q2_lb_menu_row;
+
+typedef struct q2_lb_menu_page {
+    u32         offset;         /* the first record */
+    u32         count;
+    q2_lb_menu_row row[8];
+} q2_lb_menu_page;
+
+/*
+ * Recover the module's menu pages. Returns how many were found; `max` bounds
+ * what is written. `load_base` is where the module was relocated to.
+ */
+u32 q2_levelbin_menu_pages(const u8 *module, u32 size, u32 load_base,
+                           q2_lb_menu_page *out, u32 max);
+
+/* ------------------------------------------------------------------------- */
 /* QENDMIS — the movie player, and what the end of the campaign actually is   */
 /* ------------------------------------------------------------------------- */
 /*

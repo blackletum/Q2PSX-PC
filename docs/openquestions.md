@@ -1460,7 +1460,7 @@ item records at run time instead of transcribing a table, so there is nothing to
       The three fields come from the map's own `Strings` chunk, which this pass also decoded — see the note
       under #45. FORMATS §11.12; `src/game/briefing.[ch]`; `q2psx-inspect text <map>`.
 
-- [ ] 44. **The front end's own menus.** A separate page set from the in-game pause menu — the in-game
+- [~] 44. **The front end's own menus.** *(#100 reads the pages out of the module and makes the transcription checkable; what remains is driving them.)* A separate page set from the in-game pause menu — the in-game
       OPTIONS at `0x8009AB14` has three items and no credits entry. Capture shows at least:
       the title screen (START / OPTIONS); START -> SINGLE PLAYER / MULTI PLAYER; OPTIONS -> PLAYER / SOUND /
       VIDEO OPTIONS / **VIEW CREDITS**; MULTIPLAYER -> DEATHMATCH / TEAM DEATHMATCH / VERSUS /
@@ -6753,3 +6753,41 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       mechanism left for those seven. That is what `q2_model_anim_by_length` is for and what the code
       already says it is for; what changes here is that it is now known to be needed for **one move per
       creature and nothing else**, rather than being an open-ended fallback of unknown size.
+- [x] 100. **The front end's pages are now READ out of QFRONT's module, not just transcribed from a
+      capture — and the port's own checker was reporting 26 failures for looking in the wrong file.**
+
+      #44 established that the front end is `QFRONT`'s `LevelBin` (118,216 bytes against 13,008 of
+      `LevelRel`), that its pages are static 24-byte record arrays in the executable's own layout
+      (`{ char *text; s16 x; s16 y; void (*action)(void); … }`), and transcribed a dozen of them by hand
+      with their coordinates. What it did not do was make that transcription checkable.
+
+      `q2_levelbin_menu_pages` reads them. The anchor is the TEXT POINTER — it must land on a printable
+      NUL-terminated string inside this module — and then x must be **256**, which every front-end row is
+      centred at, and y on screen. Two independent things have to hold before a record is believed, and a
+      run of two or more makes a page. **45 pages, 186 rows**, and they agree with #44's hand
+      transcription exactly:
+
+          +0x0EC3C  START            256, 151      +0x0ED44  PLAYER OPTIONS  256,  85
+          +0x0EC54  OPTIONS          256, 177      +0x0ED5C  SOUND OPTIONS   256, 111
+          +0x0EC84  SINGLE PLAYER    256, 111      +0x0ED74  VIDEO OPTIONS   256, 137
+          +0x0EC9C  MULTI PLAYER     256, 137      +0x0ED8C  VIEW CREDITS    256, 163
+
+      A **null action had to be legal** or nothing would parse: the deathmatch setup page's rows have
+      bytes +8 onward all zero, because its values live in the text and the module rewrites them in place.
+      So the terminator cannot be a null action, and the run's end is where the record shape stops
+      holding.
+
+      The reader also turned up pages the capture never showed, because they are transient — `STARTING` /
+      `GAME` for the attract loop's hand-off, `USE DIRECTIONAL BUTTONS` / `TO ADJUST DISPLAY` for the
+      screen-position adjuster, and a controller-port prompt.
+
+      **And the checker.** `cmd_menu` verifies every transcribed page against the executable's segment,
+      which is right for the 37 in-game pages and wrong for the front end's — those live at 0x8010xxxx in
+      a module. Every one of them produced `record escapes the segment` per item and then
+      `8010EC3C holds 0 records, the port transcribes 2`: **26 complaints that said nothing except that
+      the reader was pointed at the wrong file.** They are now recognised as module pages and sent to
+      `menu front`, and the run reads `37 pages checked, 0 mismatches`.
+
+      That noise mattered for the same reason #95's did. A checker that cries wolf on correct data is a
+      checker nobody reads, and this one had been reporting 26 failures for as long as the front end's
+      tables have been in the port.

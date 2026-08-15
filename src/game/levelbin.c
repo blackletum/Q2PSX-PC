@@ -3,6 +3,7 @@
  */
 #include "levelbin.h"
 
+#include <stdio.h>
 #include <string.h>
 
 bool q2_levelbin_names_group(const u8 *module, u32 size, const q2_pop_group *g)
@@ -299,6 +300,121 @@ u32 q2_levelbin_misevents(const u8 *module, u32 size, u32 load_base,
             }
             n++;
         }
+    }
+
+    return n;
+}
+
+/* ------------------------------------------------------------------------- */
+/* The front end's own menu pages                                             */
+/* ------------------------------------------------------------------------- */
+#define MENU_REC_SIZE 24u
+#define MENU_ROW_MAX   8u
+
+/* A row's text: printable, NUL-terminated, and inside the module. */
+static bool menu_text_at(const u8 *module, u32 size, u32 off, char *out)
+{
+    u32 i;
+
+    if (off >= size)
+        return false;
+
+    for (i = 0; i < 31 && off + i < size; i++) {
+        u8 ch = module[off + i];
+
+        if (ch == 0)
+            break;
+        if (ch < 0x20 || ch > 0x7E)
+            return false;
+    }
+
+    if (i < 3 || off + i >= size || module[off + i] != 0)
+        return false;
+
+    memcpy(out, module + off, i);
+    out[i] = '\0';
+    return true;
+}
+
+/* Does a 24-byte record look like a menu row? */
+static bool menu_row_at(const u8 *module, u32 size, u32 load_base, u32 off,
+                        q2_lb_menu_row *out)
+{
+    u32 text = q2_rd_u32(module + off);
+    s16 x    = q2_rd_s16(module + off + 4);
+    s16 y    = q2_rd_s16(module + off + 6);
+    u32 act  = q2_rd_u32(module + off + 8);
+    char name[32];
+
+    if (text < load_base || text - load_base >= size)
+        return false;
+    if (!menu_text_at(module, size, text - load_base, name))
+        return false;
+
+    /* Every front-end row is centred at 256 and sits on a 480-line screen. */
+    if (x != 256 || y < 0 || y > 480)
+        return false;
+
+    /* An action, when there is one, is code in this module. A NULL action is
+     * legal — the deathmatch setup page's rows have none. */
+    if (act != 0 && (act < load_base || act - load_base >= size))
+        return false;
+
+    if (out) {
+        memset(out, 0, sizeof(*out));
+        snprintf(out->name, sizeof(out->name), "%s", name);
+        out->x      = x;
+        out->y      = y;
+        out->action = act;
+        out->offset = off;
+    }
+    return true;
+}
+
+u32 q2_levelbin_menu_pages(const u8 *module, u32 size, u32 load_base,
+                           q2_lb_menu_page *out, u32 max)
+{
+    u32 off, n = 0;
+
+    if (!module || size < MENU_REC_SIZE)
+        return 0;
+
+    for (off = 0; off + MENU_REC_SIZE <= size; off += 4) {
+        u32 run = 0, at;
+
+        if (!menu_row_at(module, size, load_base, off, NULL))
+            continue;
+
+        for (at = off;
+             at + MENU_REC_SIZE <= size && run < MENU_ROW_MAX;
+             at += MENU_REC_SIZE) {
+            if (!menu_row_at(module, size, load_base, at, NULL))
+                break;
+            run++;
+        }
+
+        /*
+         * A page has at least two rows. One row on its own is far more likely
+         * to be a pointer that happens to sit next to a plausible pair of
+         * halfwords than a menu, and the front end has no one-row page.
+         */
+        if (run < 2) {
+            continue;
+        }
+
+        if (n < max && out) {
+            u32 k;
+
+            memset(&out[n], 0, sizeof(out[n]));
+            out[n].offset = off;
+            out[n].count  = run;
+            for (k = 0; k < run; k++)
+                menu_row_at(module, size, load_base, off + k * MENU_REC_SIZE,
+                            &out[n].row[k]);
+        }
+        n++;
+
+        off += (run - 1) * MENU_REC_SIZE;   /* the loop's += 4 finishes it */
     }
 
     return n;
