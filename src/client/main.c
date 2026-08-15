@@ -753,10 +753,35 @@ static void client_cre_melee(q2_monster *m, const s32 aim[3], s32 damage,
 
     c->cre_swings++;
 
-    /* MOD 7 is `0x800612F0`, a creature's contact hit (combat.h) — armour
-     * applies, which is what makes it different from the environment's. */
-    q2_sim_hurt_player(&c->sim[0], NULL, (s16)damage, Q2_MOD_MELEE,
-                       c->creatures.sight.pos);
+    /*
+     * WHICH creature is swinging, as an actor.
+     *
+     * This used to pass NULL, and a NULL attacker costs three things at once:
+     * the damage point defaults to the player's own position, so the blood and
+     * the flinch's roll both lose their direction (see q2_sim_hurt_player); the
+     * knockback has no source to push away from; and `last_attacker` is never
+     * recorded, so a player clawed to death by a Berserk died with no killer —
+     * which is precisely the attribution the scoring rule was built to honour.
+     *
+     * The monster and its actor are parallel arrays, so the index is the
+     * pointer difference. The actors are re-synced from the monsters at the top
+     * of every frame, before the tick this runs inside, so the origin here is
+     * where the creature is now.
+     *
+     * MOD 7 is `0x800612F0`, a creature's contact hit (combat.h) — armour
+     * applies, which is what makes it different from the environment's.
+     */
+    {
+        q2_actor *attacker = NULL;
+        size_t    idx      = (size_t)(m - c->creatures.set.monsters);
+
+        if (c->cre_actor && m >= c->creatures.set.monsters &&
+            idx < c->creatures.set.count)
+            attacker = &c->cre_actor[idx];
+
+        q2_sim_hurt_player(&c->sim[0], attacker, (s16)damage, Q2_MOD_MELEE,
+                           c->creatures.sight.pos);
+    }
 }
 
 /*

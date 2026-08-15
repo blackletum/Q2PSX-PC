@@ -1111,6 +1111,81 @@ static void test_four_players(void)
                "player 0's weapon survives another player's tick");
 }
 
+/* ------------------------------------------------------------------------- */
+/*
+ * A creature's contact hit lands AT THE CREATURE.
+ *
+ * `0x800612F0` passes the attacker's own origin as the damage point, which is
+ * the one line `q2_combat_melee` is, and `q2_sim_hurt_player` now enforces it
+ * rather than trusting whatever point the caller supplies. The client used to
+ * supply the player's own position, and this is the test that would have caught
+ * it: with the point at the player, the difference the roll is computed from is
+ * the zero vector, so every claw rolled the view the same way whichever side it
+ * came from.
+ */
+static void test_melee_point(void)
+{
+    q2_sim   sim;
+    q2_actor left, right;
+    s32      wrong_point[3];
+    s16      roll_left, roll_right;
+
+    printf("melee\n");
+
+    q2_sim_init(&sim, NULL, 50);
+    sim.player[0].yaw = 0;
+
+    wrong_point[0] = sim.player[0].pos[0];
+    wrong_point[1] = sim.player[0].pos[1];
+    wrong_point[2] = sim.player[0].pos[2];
+
+    /* Two attackers, one either side along the view's right vector at yaw 0. */
+    q2_actor_init(&left);
+    left.health = 100;
+    left.owner  = -1;
+    left.origin[0] = sim.player[0].pos[0] - 500;
+    left.origin[1] = sim.player[0].pos[1];
+    left.origin[2] = sim.player[0].pos[2];
+
+    right = left;
+    right.origin[0] = sim.player[0].pos[0] + 500;
+
+    /* Both are handed the SAME deliberately wrong point — the player's own
+     * position — so anything but an override gives both the same roll. */
+    q2_sim_hurt_player(&sim, &left, 20, Q2_MOD_MELEE, wrong_point);
+    roll_left = sim.player[0].hurt_kick[1];
+
+    q2_sim_init(&sim, NULL, 50);
+    sim.player[0].yaw = 0;
+    q2_sim_hurt_player(&sim, &right, 20, Q2_MOD_MELEE, wrong_point);
+    roll_right = sim.player[0].hurt_kick[1];
+
+    check(roll_left != 0 && roll_right != 0, "a claw that lands rolls the view");
+    check((roll_left > 0) != (roll_right > 0),
+          "and the two sides roll it opposite ways, so the point was overridden");
+    printf("  roll from the left %d, from the right %d\n",
+           (int)roll_left, (int)roll_right);
+
+    /*
+     * The control. A melee with no attacker has no origin to take, so the
+     * caller's point stands and both sides collapse to the same answer — which
+     * is exactly the behaviour the client had for every claw in the game.
+     */
+    q2_sim_init(&sim, NULL, 50);
+    sim.player[0].yaw = 0;
+    q2_sim_hurt_player(&sim, NULL, 20, Q2_MOD_MELEE, wrong_point);
+    check(sim.player[0].hurt_kick[1] == roll_left ||
+          sim.player[0].hurt_kick[1] == roll_right,
+          "with no attacker the caller's point stands, as it must for lava");
+
+    /* And the killer is recorded, which is what the scoring rule reads. */
+    q2_sim_init(&sim, NULL, 50);
+    left.owner = 2;
+    q2_sim_hurt_player(&sim, &left, 20, Q2_MOD_MELEE, wrong_point);
+    check_eq_i(sim.combat.self.last_attacker, 2,
+               "a melee records who swung it");
+}
+
 int main(void)
 {
     printf("Q2PSX-PC simulation tests\n\n");
@@ -1129,6 +1204,7 @@ int main(void)
     test_ease_boundary();
     test_variable_dt();
     test_four_players();
+    test_melee_point();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     printf("%s\n", g_failures == 0 ? "PASS" : "FAIL");

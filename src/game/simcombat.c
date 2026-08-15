@@ -405,8 +405,30 @@ q2_damage_result q2_sim_hurt_player(q2_sim *sim, q2_actor *attacker,
     q2_actor_from_player(&sim->combat.self, &sim->combat.inv, sim->player[sim->cur_player].pos);
     sim->combat.rules.level_time = sim->level_time;
 
-    out = q2_combat_damage(attacker, &sim->combat.self, damage, mod, point,
-                           &sim->combat.rules);
+    /*
+     * A CONTACT HIT LANDS AT THE ATTACKER, and that is not the caller's choice
+     * to make. `0x800612F0` passes the creature's own origin as the damage
+     * point — `q2_combat_melee` is that one line — and everything downstream of
+     * `point` is DIRECTIONAL: the knockback, where the blood sprays, and the
+     * flinch's roll, which is the hit point measured against the view's own
+     * right vector.
+     *
+     * The client used to hand this the PLAYER's own position for a melee, which
+     * makes that difference the zero vector. `side` came out 0 on every claw
+     * that ever landed, so a hit from the left rolled the view exactly as far
+     * as a hit from the right — which is to say not at all — and the blood
+     * sprayed from the player's own feet. Overriding the point here rather than
+     * trusting the caller is what stops that being reintroduced: a melee is the
+     * one mod whose point is not free.
+     */
+    if (mod == Q2_MOD_MELEE && attacker) {
+        out   = q2_combat_melee(attacker, &sim->combat.self, damage,
+                                &sim->combat.rules);
+        point = attacker->origin;
+    } else {
+        out = q2_combat_damage(attacker, &sim->combat.self, damage, mod, point,
+                               &sim->combat.rules);
+    }
 
     q2_actor_to_player(&sim->combat.self, &sim->combat.inv);
 
