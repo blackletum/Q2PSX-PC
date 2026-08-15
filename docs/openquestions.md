@@ -5585,9 +5585,18 @@ folds them into one helper with a sign flag fails rather than silently halves th
       (#, the entry above) a divergence rather than a reconstruction, notwithstanding that it measurably
       keeps the nearer face set.
 
-      Two readings survive and the disc has not yet separated them: either the linker takes a different
-      structure from the one `0x800B1F90` takes, or it takes the same one and the escape is always taken.
-      That is a sharp question with a sharp test, and it is a much better place than "nothing builds it".
+      **And the disc DOES separate the two readings — it is a different structure.** The same builder writes
+      `+0x00` as well, at `0x8006BBE8`: `sw s4, 0(s5)`, where `s4` is itself a pointer (`lw s4, 16(s6)` at
+      the top of the function). The linker opens with `lh t7, 0(a0)` and returns when it is zero — reading
+      the LOW HALFWORD OF A POINTER as a face count, which is not a thing this engine does anywhere.
+
+      So `0x800B2410` takes a descriptor of its own, not the one `0x8006B924` builds for `0x800B1F90`, and
+      the alarming consequence does not follow: **this port's model backface rejection is not shown to be a
+      divergence.** Saying so is the point — a half-tested claim that the game has no model culling would
+      have been worse than the gap it replaced.
+
+      What remains open is narrower than it was: the force-draw mask belongs to a descriptor built by
+      whatever calls `0x800B2410`, and nothing in this image calls it.
 
       **The other way in is closed: the linker has NO CALLER in the image.** Searching the whole
       loaded segment for `j`/`jal` to `0x800B2410`, for a materialised `lui`/`addiu` pair forming it, and
