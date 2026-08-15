@@ -6108,10 +6108,15 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       quad rather than per node. Its operand is a Scene NODE index and takes no rebase, which
       `userfuncs.c` is explicit about: the constructor only restores bytes, it never rewrites them.
 
-      `TELEPORT` resolves 28 of 28 against the map's own spawns. The console "switches zone first if the
-      target is in another one"; **that zone switch is not implemented**, so a target in the resident
-      zone moves the player and one elsewhere is refused with a warning naming both zones — stated
-      rather than silently teleporting into the wrong room.
+      `TELEPORT` resolves 28 of 28 against the map's own spawns, and the zone switch **is** implemented:
+      "switches zone first if the target is in another one, then sets entity position" is a zone load
+      with an arrival point on the end, which is the zone gate's own path. Queued to the top of the frame
+      like every other transition, because the CALL raising it runs inside the script a zone load frees.
+
+      Only BIGGUN carries any — two — and in the client both sit behind `ONKEYDO`, so the demo never
+      takes them: you cannot teleport without the key. The tool's sweep runs 2 of 2 because it does not
+      honour the gate, and the difference between the two numbers is the gate working rather than the
+      teleport failing.
 
 - [x] 81. **BUTTON and PISTON join the movers, and the rejections are the interesting part.** Both name a
       target AND a speed, which is what a mover needs — a button's speed is literally one unit a tick

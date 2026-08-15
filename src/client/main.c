@@ -431,6 +431,13 @@ typedef struct client {
     u32               script_hidden;    /* nodes hidden this level */
     u32               script_summoned;  /* creatures a CREBATCH woke */
     u32               script_teleports; /* TELEPORT calls that moved us */
+    /*
+     * A queued TELEPORT. Deferred to the top of the frame like the zone gate
+     * and the LOADMAP, and for the same reason: the CALL that raised it runs
+     * inside the script a zone load would free.
+     */
+    q2_start_pos      pending_teleport;
+    bool              pending_teleport_have;
 
     /*
      * The doors and lifts.
@@ -1684,22 +1691,19 @@ static void client_event_call(void *user, const q2_event_item *item,
 
                 if (q2_start_pos_parse(&spawns, &c->common) == Q2_OK &&
                     q2_start_pos_find(&spawns, key, &sp)) {
-                    if (sp.zone == c->zone_index) {
-                        s32 to[3];
-
-                        to[0] = sp.x; to[1] = sp.y; to[2] = sp.z;
-                        q2_sim_spawn(&c->sim[0], to, sp.angle);
-                        c->cam.pos[0] = sp.x;
-                        c->cam.pos[1] = sp.y;
-                        c->cam.pos[2] = sp.z;
-                        c->cam.yaw    = sp.angle;
-                        c->script_teleports++;
-                        Q2_INFO("TELEPORT to '%s'", sp.name);
-                    } else {
-                        Q2_WARN("TELEPORT '%s' is in zone %d, not %d — the "
-                                "zone switch is not implemented",
-                                sp.name, (int)sp.zone, c->zone_index);
-                    }
+                    /*
+                     * "Switches zone first if the target is in another one,
+                     * then sets entity position" — so a cross-zone teleport is
+                     * a zone load with an arrival point on the end, which is
+                     * the zone gate's own path. QUEUED rather than done here
+                     * for the reason every other transition is: this CALL is
+                     * running inside the script a zone load would free.
+                     */
+                    c->pending_teleport      = sp;
+                    c->pending_teleport_have = true;
+                    c->script_teleports++;
+                    Q2_INFO("TELEPORT to '%s' (zone %d)", sp.name,
+                            (int)sp.zone);
                 }
             }
 
@@ -6016,6 +6020,31 @@ no_window:
                 c.carry_same_map = true;
                 client_load_zone(&c, c.map, (int)target);
             }
+        }
+
+        /*
+         * A queued TELEPORT: switch zone first when the target is in another
+         * one, then place — which is the order userfuncs.c records.
+         */
+        if (c.pending_teleport_have) {
+            q2_start_pos sp = c.pending_teleport;
+            s32 to[3];
+
+            c.pending_teleport_have = false;
+
+            if (sp.zone != c.zone_index) {
+                c.carry_player   = true;
+                c.carry_same_map = true;
+                client_load_zone(&c, c.map, sp.zone);
+            }
+
+            to[0] = sp.x; to[1] = sp.y; to[2] = sp.z;
+            q2_sim_spawn(&c.sim[0], to, sp.angle);
+            c.cam.pos[0] = sp.x;
+            c.cam.pos[1] = sp.y;
+            c.cam.pos[2] = sp.z;
+            c.cam.yaw    = sp.angle;
+            Q2_INFO("teleported to '%s' in zone %d", sp.name, (int)sp.zone);
         }
 
         /*
