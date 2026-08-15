@@ -511,6 +511,7 @@ typedef struct client {
     bool              pitch_given;
     bool              no_lasers;   /* --no-lasers: the before picture */
     bool              shoot;       /* --shoot: hold fire              */
+    long              save_load_at; /* --save-load N                  */
     bool              all_keys;    /* --keys: every key in the pocket */
 
     q2_mover_set      movers;
@@ -6293,6 +6294,15 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(argv[i], "--no-lasers"))             c.no_lasers = true;
         else if (!strcmp(argv[i], "--shoot"))                 c.shoot = true;
+        /*
+         * `--save-load N`: quick-save at frame N and quick-load on the next
+         * frame, reporting the world state either side. A round-trip test at
+         * the data level cannot say whether the CLIENT hands over everything
+         * it owns — the movers, the panes and the creatures all live outside
+         * the sim and each had to be wired separately.
+         */
+        else if (!strcmp(argv[i], "--save-load") && i + 1 < argc)
+            c.save_load_at = strtol(argv[++i], NULL, 10);
         /* `--keys`: hand the player every key. A scripted run cannot go and
          * find one, and the records behind `ONKEYDO` are otherwise unreachable
          * in a sweep — which is the gate working, and also why what is behind
@@ -7160,6 +7170,35 @@ no_window:
         }
 
         client_music_pump(&c);
+
+        /* `--save-load N`, and the report is the point: what the client owned
+         * before the save and what it owns after the load. */
+        if (c.save_load_at > 0 && (long)c.frame_index == c.save_load_at) {
+            u32 dead = 0, open_doors = 0, broken = 0, i2;
+
+            for (i2 = 0; c.creatures_ready && i2 < c.creatures.set.count; i2++)
+                if (c.creatures.set.monsters[i2].dead) dead++;
+            for (i2 = 0; c.movers_ready && i2 < c.movers.count; i2++)
+                if (c.movers.movers[i2].offset != 0) open_doors++;
+            for (i2 = 0; i2 < c.sim[0].breakable_count; i2++)
+                if (c.sim[0].breakable[i2].broken) broken++;
+            Q2_INFO("save-load: BEFORE %u dead, %u doors moved, %u panes broken",
+                    dead, open_doors, broken);
+            client_quick_save(&c);
+        }
+        if (c.save_load_at > 0 && (long)c.frame_index == c.save_load_at + 1) {
+            u32 dead = 0, open_doors = 0, broken = 0, i2;
+
+            client_quick_load(&c);
+            for (i2 = 0; c.creatures_ready && i2 < c.creatures.set.count; i2++)
+                if (c.creatures.set.monsters[i2].dead) dead++;
+            for (i2 = 0; c.movers_ready && i2 < c.movers.count; i2++)
+                if (c.movers.movers[i2].offset != 0) open_doors++;
+            for (i2 = 0; i2 < c.sim[0].breakable_count; i2++)
+                if (c.sim[0].breakable[i2].broken) broken++;
+            Q2_INFO("save-load: AFTER  %u dead, %u doors moved, %u panes broken",
+                    dead, open_doors, broken);
+        }
 
         /*
          * The film, on its own 25 fps clock rather than the game's 30 Hz tick.

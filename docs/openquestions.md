@@ -7618,3 +7618,14 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
 
       Three chunks, all additive, none of them bumping the version — which is what the chunked format was
       built for and the first time it has been used that way.
+
+      **Checked end to end, not only round-tripped.** A data-level round trip cannot say whether the CLIENT
+      hands over everything it owns, and all three of these live outside the sim and had to be wired
+      separately. `--save-load N` quick-saves at frame N and quick-loads on the next, reporting the world
+      either side:
+
+          LAB,   pane shot            BEFORE 1 pane broken        AFTER 1 pane broken
+          LAB,   every trigger fired  BEFORE 35 doors moved       AFTER 35 doors moved
+          BASE1, a creature killed    BEFORE 1 dead               AFTER 1 dead
+
+      Before this pass all three of those AFTER columns were zero.
