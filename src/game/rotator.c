@@ -57,18 +57,16 @@ void q2_rotators_set_operand_source(q2_rotator_set *set, const u8 *base_a,
  */
 static const u8 *operand_at(const q2_rotator_set *set, const u8 *p, u32 need)
 {
-    size_t off;
+    q2_uf_operands src;
 
-    if (!set || !set->operand_base_a || !set->operand_base_b)
-        return p;
-    if (p < set->operand_base_a)
+    if (!set)
         return p;
 
-    off = (size_t)(p - set->operand_base_a);
-    if (off + need > set->operand_b_size)
-        return p;
+    src.base_a = set->operand_base_a;
+    src.base_b = set->operand_base_b;
+    src.b_size = set->operand_b_size;
 
-    return set->operand_base_b + off;
+    return q2_uf_operand_at(&src, p, need);
 }
 
 q2_result q2_rotators_build(q2_rotator_set *out, const q2_events *events,

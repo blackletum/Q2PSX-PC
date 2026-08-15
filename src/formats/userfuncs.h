@@ -377,6 +377,33 @@ bool q2_uf_operand_vec3(const q2_uf_call *c, u32 op, s32 out[3]);
 bool q2_uf_operand_slot_raw(const q2_uf_call *c, u32 op, u32 element, s16 *out);
 
 /* ------------------------------------------------------------------------- */
+/* WHERE AN OPERAND IS ACTUALLY READ FROM — the two-buffer rebase             */
+/* ------------------------------------------------------------------------- */
+/*
+ * `0x800285CC` sets up two cursors over the Events bytes and they are not the
+ * same chunk: it STAMPS -1 into the working copy at `gp+372` and READS the
+ * operand from the same offset in the pristine copy at `gp+376`. So an operand
+ * belonging to a record the game has already run is -1 wherever a port looks
+ * for it, and the value it wanted is sitting in the other buffer.
+ *
+ * This lived as a static inside rotator.c until the breakables needed exactly
+ * the same rebase — GLASS and SHOOTTHEN carry a single object slot at `+4`
+ * where the rotators carry four at `+12`, and 4 of the disc's 10 breakable
+ * calls are only reachable through it. A second copy of the arithmetic would
+ * rot apart from the first, which is the same argument the rotator's own
+ * operand offsets are kept in one place for.
+ *
+ * `base_b` NULL, or an offset that does not fit in it, reads `p` in place.
+ */
+typedef struct q2_uf_operands {
+    const u8 *base_a;      /* the chunk the caller is parsing   */
+    const u8 *base_b;      /* the chunk the engine reads from   */
+    u32       b_size;
+} q2_uf_operands;
+
+const u8 *q2_uf_operand_at(const q2_uf_operands *src, const u8 *p, u32 need);
+
+/* ------------------------------------------------------------------------- */
 /* Constants a port needs to reproduce behaviour, all read out of the EXE.    */
 /* ------------------------------------------------------------------------- */
 

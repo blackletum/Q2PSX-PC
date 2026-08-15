@@ -514,3 +514,19 @@ bool q2_uf_operand_slot_raw(const q2_uf_call *c, u32 op, u32 element, s16 *out)
 
     return true;
 }
+
+const u8 *q2_uf_operand_at(const q2_uf_operands *src, const u8 *p, u32 need)
+{
+    size_t off;
+
+    if (!src || !src->base_a || !src->base_b || !p)
+        return p;
+    if (p < src->base_a)
+        return p;
+
+    off = (size_t)(p - src->base_a);
+    if (off + need > src->b_size)
+        return p;
+
+    return src->base_b + off;
+}

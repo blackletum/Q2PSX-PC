@@ -47,6 +47,7 @@
 #include "events_rt.h"
 #include "level.h"
 #include "rotator.h"
+#include "scene.h"
 #include "trigger.h"
 #include "userfuncs.h"
 
@@ -68,6 +69,13 @@ typedef struct live_rot_ctx {
     u32                 rot_fired;   /* rotation CALLs the script actually ran */
     u32                 rot_barren;  /* ...of those, ones that turned nothing  */
     u32                 lit_run;     /* light primitives the sweep actually ran */
+    /* GLASS calls the trigger sweep reaches, and how many resolve a Scene node
+     * to break. A pane the script never calls is not a gap; one it calls and
+     * cannot resolve is. */
+    u32                 glass_run;
+    u32                 glass_node;
+    const q2_scene     *scene;
+    q2_uf_operands      ops;
 
     /* Which item offsets turned something, so a call barren under THIS zone can
      * be told apart from one barren under every zone the map ships. */
@@ -93,6 +101,22 @@ static void live_rot_call(void *user, const q2_event_item *item, u8 call_index)
      */
     if (prim == Q2_UF_TIMEDLIGHT || prim == Q2_UF_FLKLIGHT)
         ctx->lit_run++;
+
+    /*
+     * GLASS, resolved the way `q2_sim_breakable_call` resolves it — the same
+     * operand rebase and the same Scene lookup — so this counts the panes a
+     * player who has walked the whole map would actually shatter, rather than
+     * the ones the chunk merely contains.
+     */
+    if (prim == Q2_UF_GLASS && item->len >= 16 && item->payload) {
+        const u8 *pp = q2_uf_operand_at(&ctx->ops, item->payload - 2, 16);
+        s16 slot = q2_rd_s16(pp + 4);
+
+        ctx->glass_run++;
+        if (slot >= 0 && ctx->scene &&
+            (u32)slot < ctx->scene->node_count)
+            ctx->glass_node++;
+    }
 
     if (prim == Q2_UF_SIMROT || prim == Q2_UF_SIMROT2 ||
         prim == Q2_UF_ROTHATCH || prim == Q2_UF_ROTBUTTON) {
@@ -142,6 +166,7 @@ int cmd_zonescript(const disc *d, const char *only_map)
      * the same shape of operand and the same two-buffer rebase applies. */
     u32 brk_calls = 0, brk_short = 0, brk_no_object = 0, brk_usable = 0,
         brk_zone_rescue = 0;
+    u32 live_glass_run = 0, live_glass_node = 0;
     u32 live_built = 0, live_calls = 0, live_steps = 0, live_moved = 0,
         live_turned = 0;
     bool verbose = (only_map != NULL);
@@ -279,6 +304,8 @@ int cmd_zonescript(const disc *d, const char *only_map)
         if (have_common && have_trig) {
             q2_userfuncs   uf;
             q2_rotator_set rs;
+            q2_scene       gscene;
+            u32            best_zone = 0;   /* the zone the probe preferred */
             q2_event_rt    rt;
 
             /*
@@ -572,6 +599,7 @@ int cmd_zonescript(const disc *d, const char *only_map)
                 free(any);
                 free(ran);
 
+                best_zone = bz;
                 q2_rotators_set_operand_source(&rs, cev.data,
                                                zev[bz].data, zev[bz].size);
             }
@@ -587,6 +615,22 @@ int cmd_zonescript(const disc *d, const char *only_map)
                 ctx.rot_fired = 0;
                 ctx.rot_barren = 0;
                 ctx.lit_run = 0;
+                ctx.glass_run  = 0;
+                ctx.glass_node = 0;
+
+                /* The best zone's Scene and its Events, so a GLASS slot is
+                 * resolved against the same pair the engine holds resident. */
+                ctx.scene = NULL;
+                ctx.ops.base_a = cev.data;
+                ctx.ops.base_b = NULL;
+                ctx.ops.b_size = 0;
+                if (zcount) {
+                    if (q2_scene_parse(&gscene, &zf[best_zone]) == Q2_OK)
+                        ctx.scene = &gscene;
+                    ctx.ops.base_b = zev[best_zone].data;
+                    ctx.ops.b_size = zev[best_zone].size;
+                }
+
                 rt.on_call      = live_rot_call;
                 rt.on_call_user = &ctx;
 
@@ -608,6 +652,8 @@ int cmd_zonescript(const disc *d, const char *only_map)
                 live_rot_fired  += ctx.rot_fired;
                 live_rot_barren += ctx.rot_barren;
                 live_lit_run    += ctx.lit_run;
+                live_glass_run  += ctx.glass_run;
+                live_glass_node += ctx.glass_node;
                 for (t = 0; t < 400; t++)
                     live_moved += q2_rotators_tick(&rs, 12);
                 for (zi = 0; zi < rs.count; zi++)
@@ -687,6 +733,8 @@ int cmd_zonescript(const disc *d, const char *only_map)
     printf("      no object   : %u\n", brk_no_object);
     printf("      usable      : %u  (%u rescued from a ZONE's copy)\n",
            brk_usable, brk_zone_rescue);
+    printf("      the trigger sweep RUNS %u, of which resolve a Scene node : %u\n",
+           live_glass_run, live_glass_node);
     printf("    rotation CALLs the script RUNS : %u, of which turn nothing : %u\n",
            live_rot_fired, live_rot_barren);
     printf("    distinct rotation CALL sites the script reaches : %u\n",

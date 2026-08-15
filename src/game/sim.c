@@ -1983,8 +1983,36 @@ void q2_sim_eye(const q2_sim *sim, s32 out_pos[3])
         return;
 
     out_pos[0] = sim->player[sim->cur_player].pos[0];
-    /* World Y increases downward, so the eye sits at a smaller Y than the feet. */
-    out_pos[1] = sim->player[sim->cur_player].pos[1] - sim->player[sim->cur_player].view_height;
+    /*
+     * `pos.y + 286 - viewOffset`, and the 286 is NOT optional.
+     *
+     * 0x80038618 builds the view position by copying entity+0x54 and +0x5C
+     * straight through and putting the middle component together itself:
+     *
+     *     80038630  lw    v0, 88(a1)      entity+0x58, the feet
+     *     80038634  lh    v1, 246(a1)     entity+0xF6, the eased view offset
+     *     80038638  addiu v0, v0, 286
+     *     8003863C  subu  v0, v0, v1
+     *
+     * This used to read `pos.y - view_height`, which is the same expression
+     * with the constant dropped, and it put the camera 286 units above where
+     * the console puts it. World Y increases downward, so that is a bias in
+     * one direction only — the view never looked tilted or wrong, it just
+     * looked like a taller player, which is not something a screenshot of a
+     * corridor betrays.
+     *
+     * What DID betray it was the weapon in the hands. `q2_vw_place` carries
+     * this expression correctly (`Q2_VW_EYE_BASE`), so the gun hung off the
+     * console's eye while the camera looked from one 286 units higher, and it
+     * sat almost entirely below the bottom edge. Two subsystems that must
+     * agree, disagreeing by exactly the constant one of them had dropped.
+     *
+     * Anything reading the eye is therefore ONE definition away from the
+     * weapon: keep them in this function and in Q2_VW_EYE_BASE, and do not
+     * re-derive the height anywhere else.
+     */
+    out_pos[1] = sim->player[sim->cur_player].pos[1] + Q2_EYE_BASE
+               - sim->player[sim->cur_player].view_height;
     out_pos[2] = sim->player[sim->cur_player].pos[2];
 }
 

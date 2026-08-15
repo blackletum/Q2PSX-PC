@@ -84,6 +84,7 @@
 #include "events_rt.h"
 #include "item.h"
 #include "projectile.h"
+#include "scene.h"
 #include "trace.h"
 #include "trigger.h"
 #include "userfuncs.h"
@@ -590,12 +591,47 @@ bool q2_sim_attach_glint(q2_sim *sim, const q2_common_file *common);
  * q2_sim_combat_tick against PRIMARY collision, which is the hull the original
  * moves them in.
  *
- * This is what a breaking pane calls. The port exposes it rather than wiring it
- * into the GLASS primitive, because which Scene node a given pane owns is part
- * of the UserFuncs runtime-object mapping and not of the effect system.
+ * This is what a breaking pane calls, through q2_sim_breakable_call below.
  */
 u32 q2_sim_debris_burst(q2_sim *sim, const s32 bmin[3], const s32 bmax[3],
                         const s32 *at, u32 count, u8 area);
+
+/*
+ * GLASS and SHOOTTHEN, run from a script CALL.
+ *
+ * `0x8002A350` is GLASS, and reading it settles both what a pane throws and
+ * what a script can make it do:
+ *
+ *     obj = objectArray + 92 * item[+4]          ; 92-byte runtime objects
+ *     if (item[+4] >= 0)
+ *         debris(obj->node, obj->param_a, obj)   ; 0x8002A384, EVERY call
+ *     if (damage != 0) {
+ *         item[+6] -= damage                     ; hit points, mutated in place
+ *         if (item[+6] > 0) return               ; still standing
+ *     }
+ *     debris(obj->node, obj->param_b, 0)         ; 0x8002A3DC, the shatter
+ *     sound(id, centre of the node's box)        ; 0x8002A4A4
+ *
+ * `0x80064558` — the debris burst this port already transcribes — takes the
+ * SCENE NODE INDEX, a count, and a third argument that is a fixed origin or
+ * zero: zero scatters the pieces uniformly through the node's box, which is
+ * what makes a shattering window come apart across its whole surface. So the
+ * hit burst comes out of a point and the shatter comes out of the pane.
+ *
+ * A SCRIPTED call passes damage 0, and the branch at `0x8002A390` therefore
+ * skips the hit-point subtract entirely and falls straight through to the
+ * shatter — so a trigger volume that calls GLASS breaks it on the spot. That
+ * is the whole reason this is reachable now: it needs no damage dispatch.
+ *
+ * SHOOTTHEN is deliberately not run: it returns at `0x8002E840` on a zero
+ * damage argument, so a script call is a genuine no-op for it.
+ *
+ * `ops` supplies the two-buffer rebase (q2_uf_operand_at); pass NULL to read
+ * operands in place. Returns the pieces actually spawned.
+ */
+u32 q2_sim_breakable_call(q2_sim *sim, const q2_scene *scene,
+                          const q2_uf_operands *ops,
+                          const q2_event_item *item, u8 call_index);
 
 /*
  * Where the sim fires effects from, so a reader does not have to find them:

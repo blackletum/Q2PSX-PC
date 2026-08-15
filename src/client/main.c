@@ -320,6 +320,12 @@ typedef struct client {
     u32               player_attacks;
     u32               rot_moved;
     u32               rot_steps;   /* step requests the script has made */
+    /* The other thing a CALL can be: a pane of glass. Counted separately
+     * because "the script ran a CALL" and "something broke" are different
+     * questions, and only the second says the debris path is alive. */
+    u32               glass_calls;
+    u32               glass_pieces;
+    q2_uf_operands    ev_operands;  /* COMMON's chunk, and the zone's */
     u32               vw_events;
     s16               vw_last_event;
     int               cre_last_sound;
@@ -1259,6 +1265,22 @@ static void client_event_call(void *user, const q2_event_item *item,
                                      item, call_index);
 
     /*
+     * And the breakables. GLASS is the other primitive whose operand is an
+     * object slot, and a script CALL is enough to run it: the handler passes
+     * no damage, so the hit-point test at 0x8002A390 is skipped and the pane
+     * shatters where it stands. Same operand rebase as the rotators — 4 of
+     * the disc's 10 breakable calls are only reachable through it.
+     */
+    {
+        u32 pieces = q2_sim_breakable_call(&c->sim[0], &c->zone.scene,
+                                           &c->ev_operands, item, call_index);
+        if (pieces) {
+            c->glass_calls++;
+            c->glass_pieces += pieces;
+        }
+    }
+
+    /*
      * TIMEDLIGHT — a script-placed dynamic light, and the last piece of the
      * fifteen `0x80075C34` call sites that this port could reach without
      * tracing a runtime value.
@@ -1738,6 +1760,10 @@ static bool client_load_zone(client *c, const char *map, int index)
                  * stamps there as it consumes each slot, which left most of the
                  * disc's rotating geometry inert. See openquestions #56.
                  */
+                c->ev_operands.base_a = ev.data;
+                c->ev_operands.base_b = have_zev ? zev.data : NULL;
+                c->ev_operands.b_size = have_zev ? zev.size : 0;
+
                 if (have_zev)
                     q2_rotators_set_operand_source(&c->rotators, ev.data,
                                                    zev.data, zev.size);
@@ -3607,6 +3633,8 @@ static void client_write_shot(client *c, bool numbered)
                 c->sim[0].event_rt.call_count);
         Q2_INFO("  pose      %u by name, %u named but no position, %u unnamed",
                 c->pose_by_name, c->pose_name_no_pos, c->pose_no_name);
+        Q2_INFO("  breakable %u GLASS calls broke something, %u pieces thrown",
+                c->glass_calls, c->glass_pieces);
         Q2_INFO("  entity ev %u lights added, %u dropped, %u bursts drawn, "
                 "%u script lights",
                 c->ent_light_added, c->ent_light_dropped, c->ent_bursts,

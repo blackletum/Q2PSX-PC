@@ -808,3 +808,70 @@ u32 q2_sim_debris_burst(q2_sim *sim, const s32 bmin[3], const s32 bmax[3],
     return q2_fx_debris_burst(&sim->fx, &sim->fx_rng, bmin, bmax, at, count,
                               area);
 }
+
+u32 q2_sim_breakable_call(q2_sim *sim, const q2_scene *scene,
+                          const q2_uf_operands *ops,
+                          const q2_event_item *item, u8 call_index)
+{
+    const u8 *p;
+    q2_scene_node node;
+    s16 slot;
+    u32 count_a, count_b, made = 0;
+
+    if (!sim || !scene || !item || !item->payload || !sim->userfuncs_ready)
+        return 0;
+
+    /* Only GLASS. SHOOTTHEN's handler returns at 0x8002E840 when the damage
+     * argument is zero, and a script CALL always passes zero, so running it
+     * here would be inventing behaviour rather than reproducing it. */
+    if (q2_userfuncs_prim(&sim->userfuncs, call_index) != Q2_UF_GLASS)
+        return 0;
+
+    /* The item is 16 bytes and the operands live at +4, +6, +10 and +12; the
+     * payload points past the two header bytes, so a documented +N is
+     * payload[N - 2] — the same convention q2_rotators_call uses. */
+    if (item->len < 16)
+        return 0;
+
+    p = q2_uf_operand_at(ops, item->payload - 2, 16);
+
+    slot = q2_rd_s16(p + 4);
+    if (slot < 0 || !q2_scene_get_node(scene, (u32)slot, &node))
+        return 0;
+
+    count_a = q2_rd_u8(p + 10);
+    count_b = q2_rd_u8(p + 12);
+
+    /*
+     * The node's own box, WITHOUT q2_scene_node_bounds' slop. That margin
+     * exists so a node is not culled a pixel before its geometry reaches the
+     * edge of it; the console's burst reads +16..+36 raw (0x800645A8), and
+     * padding the box here would throw pieces from just outside the pane.
+     */
+
+    /*
+     * The hit burst first, out of a point, and then the shatter across the
+     * whole box — the two calls at 0x8002A384 and 0x8002A3DC in that order.
+     * A script call carries no damage, so 0x8002A390 falls straight through
+     * between them and both run.
+     *
+     * The point the hit burst comes out of is the runtime OBJECT, which this
+     * port does not allocate; the node's centre is the nearest thing it has
+     * and is where the destruction sound is placed (0x8002A4A4), so the two
+     * agree. Stated because it is the one invented quantity here.
+     */
+    {
+        s32 centre[3];
+        int k;
+
+        for (k = 0; k < 3; k++)
+            centre[k] = (node.bbox_min[k] + node.bbox_max[k]) / 2;
+
+        made += q2_sim_debris_burst(sim, node.bbox_min, node.bbox_max,
+                                    centre, count_a, 0);
+        made += q2_sim_debris_burst(sim, node.bbox_min, node.bbox_max,
+                                    NULL, count_b, 0);
+    }
+
+    return made;
+}

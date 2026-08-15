@@ -5384,7 +5384,49 @@ attribution, death: the whole chain, in one capture.
 
       **10 of 10**, and four of them only because of the rebase. So the stated blocker is gone: a pane's
       Scene node is reachable, and with it the node's box, which is exactly what `q2_sim_debris_burst`
-      takes. What is still owed is the DISPATCH — GLASS is a damage callback (`userfuncs.h`: it spawns
-      its effect at `0x8002A384` before testing anything, so calling it from a script breaks the glass
-      immediately), and nothing in the port routes a hitscan or a splash into a UserFuncs object. That is
-      the piece to build, and it is now the only one.
+      takes.
+
+      **GLASS is read and wired**, and reading `0x8002A350` settles both what a pane throws and what a
+      script can make it do:
+
+          obj = objectArray + 92 * item[+4]          ; 92-byte runtime objects
+          if (item[+4] >= 0)
+              debris(obj->node, obj->param_a, obj)   ; 0x8002A384, on EVERY call
+          if (damage != 0) {
+              item[+6] -= damage                     ; hit points, mutated in place
+              if (item[+6] > 0) return                ; still standing
+          }
+          debris(obj->node, obj->param_b, 0)         ; 0x8002A3DC, the shatter
+          sound(id, centre of the node's box)        ; 0x8002A4A4
+
+      `0x80064558` is `q2_fx_debris_burst`, which this port already had: it takes the SCENE NODE INDEX,
+      a count, and a third argument that is a fixed origin or zero — zero scatters the pieces uniformly
+      through the node's box (`beq s2, zero` at `0x80064614`), which is what makes a shattering window
+      come apart across its whole surface rather than out of its middle. So the hit burst comes out of a
+      point and the shatter comes out of the pane. `q2_sim_breakable_call` is that, and the client's CALL
+      dispatcher runs it beside the rotators'.
+
+      **And it fires zero times, which is the useful half of the measurement.** Sweeping every trigger
+      volume on the disc:
+
+          breakable CALLs (GLASS, SHOOTTHEN) : 10
+            usable      : 10  (4 rescued from a ZONE's copy)
+            the trigger sweep RUNS 0, of which resolve a Scene node : 0
+
+      No trigger volume on this disc calls GLASS. The ten CALL items exist so the LOAD-TIME constructor
+      can allocate each pane's runtime object; the engine then reaches the primitive from its damage
+      path, not from the script. So the scripted break is a real engine behaviour with no user on this
+      disc, and the code is there because it is what the damage dispatch will call — stated rather than
+      left to look like a working feature.
+
+- [ ] 67. **What is still owed: the route from a shot to a UserFuncs object.**
+      `obj+0x24` is the on-damage callback the load-time constructor installs, and nothing found so far
+      calls it from the weapon code. The 48-entry object array at `0x800D6BB0` has 48 materialised
+      references and every one of them is inside the `0x8002xxxx` UserFuncs runtime or the two at
+      `0x800688AC` / `0x80079958`, which are its reset — so the damage path does **not** scan the object
+      array looking for a victim. It must arrive with the object already in hand, which points at the
+      COLLISION node: the mover's two hull paths already carry a node slot per entity (`+0xA0` for
+      PrimaryColl, `+0xA2` for SecondaryCol, effect.h), and a hitscan traced against PrimaryColl ends on
+      a node. Whatever maps that node to a runtime object is the missing link, and it is the same shape
+      as the `SpaceLights` partition, which also turned out to hang off a collision node rather than a
+      scene one (#9).
