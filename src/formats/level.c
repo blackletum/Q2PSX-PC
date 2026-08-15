@@ -133,6 +133,53 @@ q2_result q2_zone_open(q2_zone_file *out, q2_buf *buf)
     return Q2_OK;
 }
 
+q2_result q2_common_move(q2_common_file *dst, q2_common_file *src)
+{
+    q2_result r;
+
+    if (!dst || !src)
+        return Q2_ERR_INVALID_ARG;
+    if (dst == src)
+        return Q2_OK;
+
+    dst->ar = src->ar;          /* the buffer and the inline directory */
+
+    r = resolve(&dst->ar, dst->chunk, Q2_COMMON_CHUNK_COUNT,
+                q2_common_chunk_names, common_chunk_is_optional, "COMMON.DAT");
+    if (r != Q2_OK) {
+        dat_close(&dst->ar);
+        memset(src, 0, sizeof(*src));
+        return r;
+    }
+
+    /* The source no longer owns the buffer, and must not close it. */
+    memset(src, 0, sizeof(*src));
+    return Q2_OK;
+}
+
+q2_result q2_zone_move(q2_zone_file *dst, q2_zone_file *src)
+{
+    q2_result r;
+
+    if (!dst || !src)
+        return Q2_ERR_INVALID_ARG;
+    if (dst == src)
+        return Q2_OK;
+
+    dst->ar = src->ar;
+
+    r = resolve(&dst->ar, dst->chunk, Q2_ZONE_CHUNK_COUNT,
+                q2_zone_chunk_names, zone_chunk_is_optional, "ZONE.DAT");
+    if (r != Q2_OK) {
+        dat_close(&dst->ar);
+        memset(src, 0, sizeof(*src));
+        return r;
+    }
+
+    memset(src, 0, sizeof(*src));
+    return Q2_OK;
+}
+
 void q2_common_close(q2_common_file *f)
 {
     if (!f)

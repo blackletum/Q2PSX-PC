@@ -32,7 +32,18 @@ q2_result q2_world_load_zone(q2_world_zone *out, const disc *d,
 
     r = disc_read_file(d, path, &buf);
     if (r != Q2_OK) {
-        Q2_ERROR("cannot read %s: %s", path, q2_result_str(r));
+        /*
+         * A MISSING zone file is how a caller learns where the zones stop.
+         * Nothing on the disc says how many a map has, so the client counts by
+         * probing until one is absent — which made 21 of the disc's 49 maps
+         * report an ERROR on a perfectly normal load, and buried the four maps
+         * that had a real one. Absent is INFO; anything else is still an error,
+         * because a zone that exists and will not read is a fault.
+         */
+        if (r == Q2_ERR_NOT_FOUND)
+            Q2_INFO("no %s — the map's zones end here", path);
+        else
+            Q2_ERROR("cannot read %s: %s", path, q2_result_str(r));
         return r;
     }
 

@@ -33,7 +33,8 @@ q2_result q2_start_pos_parse(q2_start_pos_list *out, const q2_common_file *commo
      * everything before it. Checking the remainder divides exactly is what makes
      * a misread stride impossible to miss. */
     if (chunk->size < 12 || (chunk->size - 12) % Q2_STARTPOS_SIZE != 0) {
-        Q2_ERROR("startpos: %u bytes is not 12 + n*%d", chunk->size, Q2_STARTPOS_SIZE);
+        Q2_ERROR("startpos: %u bytes is not 12 + n*%d", chunk->size,
+                 Q2_STARTPOS_SIZE);
         return Q2_ERR_BAD_FORMAT;
     }
 

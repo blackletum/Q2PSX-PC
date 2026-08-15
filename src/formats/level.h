@@ -100,6 +100,31 @@ typedef struct q2_zone_file {
 q2_result q2_common_open(q2_common_file *out, q2_buf *buf);
 q2_result q2_zone_open(q2_zone_file *out, q2_buf *buf);
 
+/*
+ * MOVE one of these, never assign one.
+ *
+ * `dat_archive` holds its directory INLINE (`dat_chunk chunks[DAT_MAX_CHUNKS]`)
+ * and `chunk[]` is an array of pointers INTO it. A plain struct assignment
+ * therefore copies pointers that still aim at the SOURCE object — so
+ * `dst = src` produces a `dst` whose every chunk lookup dereferences whatever
+ * the source's storage becomes next.
+ *
+ * This is not theoretical. The client's map change did exactly that
+ * (`c->common = common`), the source was a local, and on BIGGUN, FRAGTOWE,
+ * MATRIX1 and MATRIX5 the dead frame was overwritten before the level's first
+ * TELEPORT ran: `startpos: 2155905024 bytes` — 0x80808080, read through a
+ * pointer into a stack frame that had been reused. Every other chunk on those
+ * maps was being read the same way and happened to still find its old bytes.
+ *
+ * `q2_common_move` copies the archive, re-resolves the directory against the
+ * DESTINATION's own storage, and empties the source. The re-resolution is the
+ * point: it is the same call `q2_common_open` makes, so there is one place that
+ * knows how a directory is built.
+ */
+q2_result q2_common_move(q2_common_file *dst, q2_common_file *src);
+q2_result q2_zone_move(q2_zone_file *dst, q2_zone_file *src);
+
+
 void q2_common_close(q2_common_file *f);
 void q2_zone_close(q2_zone_file *f);
 

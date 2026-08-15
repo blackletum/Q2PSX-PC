@@ -6512,3 +6512,49 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       What the gate actually wants is the level's triggers to be loaded, which is the thing the loop under
       it walks. A whole-campaign run is the only check that would have caught it, and it is the check that
       did.
+- [x] 94. **Every chunk the client read after a map change was read through a dangling pointer.**
+      Found by sweeping all 49 maps for warnings and errors instead of reasoning about which might fail.
+
+      `q2_common_file` holds `dat_archive ar` — whose directory is INLINE, `dat_chunk
+      chunks[DAT_MAX_CHUNKS]` — and beside it `const dat_chunk *chunk[]`, an array of pointers **into that
+      inline array**. So the type is not safely assignable, and the client's map change assigned it:
+
+          q2_common_close(&c->common);
+          c->common = common;          // `common` is a LOCAL
+
+      Every `chunk[i]` in the destination still aimed at the source's storage, and the source died at the
+      end of the block. From that point on the Events chunk, the Scene, Strings, LevelBin and everything
+      else were read out of a dead stack frame that usually still held the right bytes.
+
+      Usually. On BIGGUN, FRAGTOWE, MATRIX1 and MATRIX5 the frame was reused before the level's first
+      `TELEPORT` ran, and the StartPos parse read a size of **2155905024** — 0x80808080. That is the only
+      way this ever announced itself, and it announced itself as a format error in a chunk that verifies
+      clean on all 49 maps.
+
+      `q2_common_move` / `q2_zone_move` copy the archive and then **re-resolve the directory against the
+      destination's own storage** — the same call `q2_common_open` makes, so there is one place that knows
+      how a directory is built — and empty the source so it cannot double-close.
+
+- [x] 95. **A whole-disc load sweep: 49 of 49 maps now load with no warning and no error.** It was 1 of 49.
+      Nothing else in this entry is a bug fix; it is the log telling the truth about what it found, which
+      is what made #94 visible in the first place.
+
+      Four classes of noise, each of which was a correct disc fact reported as a fault:
+
+      - **21 "cannot read ZONE`N`.DAT: not found" at ERROR.** Nothing on the disc says how many zones a map
+        has, so the client counts by probing until one is absent. The absence IS the answer. A zone that
+        exists and will not read is still an error.
+      - **28 "carries no `qk_menu.lbm` — the status bar will be blank".** The icon sheet is chosen by
+        session, and **an arena carries only the multiplayer sheets** because an arena cannot be played in
+        single player — MATRIX1 opened with `--dm` resolves its sheet immediately. The front-end maps carry
+        no sheet at all because they draw no status bar. Warning on all 28 buried the one case that would
+        have been a fault.
+      - **4 "no music playlist".** Those four directories — FRAGTOWE, QSTARTUP, QINTER, QMAGINTR — are not
+        in the LEVEL TABLE at all, so they have no playlist to have. The message blamed the music table for
+        the level table's silence.
+      - **1 "carries no menu font".** QFMV is the movie stub: 46 KB, no `frontend.lbm`, no `chars.lbm`, no
+        icon sheet. Warning that it has no font is warning that a film has no subtitles.
+
+      The general lesson is the one #94 depended on: a log that warns about normal conditions is a log
+      nobody reads, and the one real fault on the disc was sitting in the middle of 54 lines of correct
+      behaviour being reported as wrong.

@@ -2199,7 +2199,13 @@ static bool client_load_zone(client *c, const char *map, int index)
     bool placed = false;
 
     if (q2_world_load_zone(&loaded, c->disc, map, index) != Q2_OK) {
-        Q2_WARN("no zone %d in %s", index, map);
+        /* The client counts a map's zones by probing until one is absent, so
+         * "no zone N" is how the count ENDS, not a fault. It is a warning only
+         * when the caller asked for a specific zone. */
+        if (index == 0)
+            Q2_WARN("no zone 0 in %s", map);
+        else
+            Q2_INFO("%s has %d zone%s", map, index, index == 1 ? "" : "s");
         return false;
     }
 
@@ -2354,7 +2360,17 @@ static bool client_load_zone(client *c, const char *map, int index)
                  * it has to outlive the zone. Release the previous map's copy
                  * and take ownership of this one. */
                 q2_common_close(&c->common);
-                c->common = common;
+                /*
+                 * MOVED, not assigned. `q2_common_file` holds pointers into its
+                 * own inline directory, so `c->common = common` leaves every
+                 * one of them aimed at a local that is about to die — see
+                 * level.h. That is what put 0x80808080 into a StartPos size on
+                 * BIGGUN.
+                 */
+                if (q2_common_move(&c->common, &common) != Q2_OK) {
+                    Q2_ERROR("could not adopt %s's COMMON.DAT", map);
+                    return false;
+                }
 
                 /*
                  * The briefing's three fields, out of the map's own `Strings`
@@ -2488,12 +2504,61 @@ static bool client_load_zone(client *c, const char *map, int index)
                                                    c->vram,
                                                    c->mp_enabled, hud_players);
                 c->menu_font_ready = (fr == Q2_OK);
-                if (!c->menu_font_ready)
-                    Q2_WARN("%s carries no menu font", map);
-                if (!c->menu_font.icons_resident)
-                    Q2_WARN("%s carries no '%s' — the status bar will be blank",
-                            map, q2_menu_icons_name(c->mp_enabled,
-                                                    hud_players));
+                if (!c->menu_font_ready) {
+                    /*
+                     * A map with NEITHER letterform atlas has no text to draw.
+                     * QFMV is the movie stub — 46 KB, no `frontend.lbm`, no
+                     * `chars.lbm`, no icon sheet — and warning about its font
+                     * is warning that a film has no subtitles.
+                     */
+                    u32 fx;
+
+                    if (!q2_vram_find_by_name(&vs, "frontend.lbm", &fx) &&
+                        !q2_vram_find_by_name(&vs, "chars.lbm", &fx))
+                        Q2_INFO("%s carries no letterforms — it draws no text",
+                                map);
+                    else
+                        Q2_WARN("%s carries no menu font", map);
+                }
+                /*
+                 * A missing icon sheet is three different things and only one
+                 * of them is a fault.
+                 *
+                 * The sheet is chosen by session: `qk_menu.lbm` in single
+                 * player, `qk2_menu.lbm` for two, `qkm_menu.lbm` for three or
+                 * four. **An arena carries only the multiplayer ones**, because
+                 * an arena cannot be played in single player — so opening
+                 * MATRIX1 alone finds no `qk_menu.lbm` and that is the disc
+                 * being right, not the port being wrong. Loaded with `--dm` the
+                 * same map resolves its sheet immediately.
+                 *
+                 * And the front-end maps carry no sheet at all, because they
+                 * draw no status bar: QFRONT, QLOGOS, QENDMIS1..5 and the rest
+                 * are screens, not levels.
+                 *
+                 * Warning on all 28 of those buried the fault it was there to
+                 * report. So the probe asks which sheets the map DOES carry and
+                 * says which of the three cases this is.
+                 */
+                if (!c->menu_font.icons_resident) {
+                    u32 ix;
+                    bool has_mp =
+                        q2_vram_find_by_name(&vs, "qk2_menu.lbm", &ix) ||
+                        q2_vram_find_by_name(&vs, "qkm_menu.lbm", &ix);
+
+                    if (has_mp && !c->mp_enabled)
+                        Q2_INFO("%s is an arena: it carries the multiplayer "
+                                "icon sheets and no single-player one", map);
+                    else if (!has_mp &&
+                             !q2_vram_find_by_name(&vs, "qk_menu.lbm", &ix))
+                        Q2_INFO("%s carries no icon sheet — it draws no "
+                                "status bar", map);
+                    else
+                        Q2_WARN("%s carries no '%s' — the status bar will be "
+                                "blank", map,
+                                q2_menu_icons_name(c->mp_enabled,
+                                                   hud_players));
+                }
 
                 /* The overlay's own view of the same atlas. It re-uploads
                  * chars.lbm, which is harmless — the same halfwords to the
@@ -6206,6 +6271,15 @@ no_window:
         if (id >= 0)
             client_music_play_id(&c, id);
         Q2_INFO("music: %s plays %d first", c.map, id);
+    } else if (c.music_table_ready && !c.level) {
+        /*
+         * Not a missing playlist — a map the LEVEL TABLE does not name. Four
+         * directories on the disc are in that position (FRAGTOWE, QSTARTUP,
+         * QINTER, QMAGINTR), and the retail game never reaches them through
+         * the table, so they have no playlist to have. Saying "no music
+         * playlist" blamed the music table for the level table's silence.
+         */
+        Q2_INFO("%s is not in the level table, so it has no playlist", c.map);
     } else {
         Q2_WARN("no music playlist for %s", c.map);
     }
