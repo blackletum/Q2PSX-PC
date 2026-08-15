@@ -5287,6 +5287,9 @@ static int cmd_movie(const disc *d, const char *name, const char *out_ppm)
         size_t cursor = 0;
         u32 frames = 0, ok = 0, blocks_want = 0;
         u32 rich = 0, maxbits = 0, rough_n = 0;
+        u32 codes_hit = 0, codes_seen = 0;
+        u32 codes_violate = 0;
+        u32 ac_hit = 0, ac_seen = 0;
         double rough_sum = 0.0;
         u32 first_blocks = 0, first_bits = 0;
         static q2_stx_frame f;
@@ -5314,6 +5317,20 @@ static int cmd_movie(const disc *d, const char *name, const char *out_ppm)
             blocks_want = ((f.width + 15u) / 16u) * ((f.height + 15u) / 16u) * 6u;
 
             good = q2_stx_frame_decode(&f, rgb, &nb, &bits);
+            {
+                u32 want32 = ((1440u + q2_stx_last_pairs) + 31u) & ~31u;
+
+                if (good && nb == blocks_want) {
+                    if (want32 == f.num_codes) {
+                        codes_hit++;
+                        if (q2_stx_last_pairs) ac_hit++;
+                    }
+                    if (q2_stx_last_pairs) ac_seen++;
+                    codes_seen++;
+                } else if (1440u + q2_stx_last_pairs > f.num_codes) {
+                    codes_violate++;
+                }
+            }
             if (good && nb == blocks_want)
             {
                 ok++;
@@ -5351,6 +5368,8 @@ static int cmd_movie(const disc *d, const char *name, const char *out_ppm)
             printf("    mean roughness over %u AC frames: %.2f  "
                    "(real video is a few units; noise is tens)\n",
                    rough_n, rough_sum / (double)rough_n);
+        printf("    bs_num_codes agrees on %u of %u completed; %u incomplete frames already EXCEED it\n", codes_hit, codes_seen, codes_violate);
+        printf("      of the AC-carrying ones: %u of %u agree\n", ac_hit, ac_seen);
         printf("    %u frames, %u decoded exactly (%u blocks each)\n",
                frames, ok, blocks_want);
         printf("    frame 1: %u blocks, %u bits used\n",

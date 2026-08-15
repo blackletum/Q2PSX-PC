@@ -71,6 +71,7 @@ bool q2_stx_frame_next(const u8 *buf, size_t size, size_t *cursor,
     out->number = h.frame_number;
     out->size   = h.frame_size_bytes;
     out->qscale = h.bs_qscale;
+    out->num_codes = h.bs_num_codes;
     out->width  = h.width;
     out->height = h.height;
 
@@ -451,6 +452,24 @@ u32 q2_stx_overrun_run_max;
 u32 q2_stx_overrun_by_code[128];
 u32 q2_stx_code_uses[128];
 
+/*
+ * How many AC (run, level) pairs the last frame produced.
+ *
+ * This is the one check available here that does not depend on the run/level
+ * column and does not depend on a frame COMPLETING: the pair count is decided
+ * by the code LENGTHS alone. The header's `bs_num_codes` is a multiple of 32
+ * whose minimum across the disc is 1440 — exactly the block count — so if it
+ * counts MDEC code words with one per block plus one per pair, then
+ *
+ *     bs_num_codes  ==  round_up_32(1440 + pairs)
+ *
+ * and every frame carries its own answer. A table with wrong lengths finds the
+ * wrong number of pairs and misses; a table with right lengths hits, whatever
+ * its run/level column says. That is exactly the discrimination every other
+ * metric here lacked.
+ */
+u32 q2_stx_last_pairs;
+
 static void q2_stx_unmatched(u32 look)
 {
     u32 lz = 0, i;
@@ -673,6 +692,8 @@ static bool decode_block(bitreader *b, u32 qscale, s32 out[64])
             return false;
         }
 
+        q2_stx_last_pairs++;
+
         n += run + 1;
         if (n >= 64) {
             q2_stx_fail_overrun++;
@@ -721,6 +742,7 @@ bool q2_stx_frame_decode(const q2_stx_frame *f, u8 *out,
 
     /* The eight-byte header at the front is the mirror the container already
      * carries — skip it rather than parsing it twice. */
+    q2_stx_last_pairs = 0;
     br_init(&br, f->data + 8, f->size - 8);
 
     mbw = (f->width  + 15) / 16;

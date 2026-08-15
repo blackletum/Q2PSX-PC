@@ -7182,3 +7182,39 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       known-good STR decoder to compare a single frame's coefficients against. Not because the work is
       hard, but because every self-contained metric available here is satisfied by a wrong table, and I
       have now demonstrated that rather than assumed it.
+- [ ] 113. **There IS a reference-free validator, `bs_num_codes` is it, and its verdict is that the AC code
+      lengths are wrong.** #112 concluded that every self-contained metric available here is satisfied by a
+      wrong table. That was also too strong — the frame header carries one that is not.
+
+      **What `bs_num_codes` counts.** FORMATS.md recorded it as "multiple of 32, range 1440..9568, meaning
+      unvalidated". 1440 is exactly the block count of a 320x192 frame, which is the clue: if it counts MDEC
+      code words at one per block plus one per (run, level) pair, then
+
+          bs_num_codes  ==  round_up_32(1440 + pairs)
+
+      Tested, it agrees on **241 of 248** completed frames in OUTRO1P. The field is now decoded rather than
+      merely described, and #15's "meaning unvalidated" can go.
+
+      **Why it is the validator this needed.** The pair count depends on the code LENGTHS and on nothing
+      else — not the run column, not the level column, not the quantiser, not the IDCT. And it is per
+      frame, so it does not need a reference, a capture, or a known-good decoder. It is exactly the
+      discrimination #112 said was unavailable.
+
+      **Its verdict, split by whether a frame carries AC data at all:**
+
+          TAKE1BP   AC frames agreeing:  0 of 3
+          OUTRO1P                        2 of 9
+          ROGUEINP                       0 of 18
+
+      A DC-only frame agrees trivially — no pairs, and `bs_num_codes` is 1440. **A frame with real
+      coefficients essentially never agrees: 2 of 30.** So the AC lengths produce the wrong number of
+      pairs, and the derivation in #108 was fitting noise, exactly as #112 suspected but could not show.
+
+      That is a much better position than "unverifiable". The table can now be SCORED without a reference:
+      any candidate assignment of lengths is measured by how many AC-carrying frames satisfy their own
+      header. A search over the length assignments is the obvious next move, and it has an objective that
+      discriminates — which nothing before this did.
+
+      Also worth keeping: only **3 of 1311** incomplete frames in OUTRO1P have already exceeded their
+      `bs_num_codes` when they fail. The pair count almost never overshoots before the failure, which says
+      the error is a code being read at the wrong LENGTH rather than the reader inventing extra pairs.

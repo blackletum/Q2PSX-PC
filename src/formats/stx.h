@@ -81,6 +81,7 @@ Q2PSX_INLINE bool q2_stx_sector_is_audio(u32 index)
 typedef struct q2_stx_frame {
     u32 number;                 /* 1-based, contiguous          */
     u32 size;                   /* valid bitstream bytes        */
+    u16 num_codes;              /* the header's own count       */
     u16 qscale;                 /* per FRAME, 1..20 — not fixed */
     u16 width, height;
     u8  data[Q2_STX_MAX_CHUNKS * Q2_STX_VIDEO_PAYLOAD];
@@ -159,6 +160,14 @@ extern u32 q2_stx_overrun_run_max;
  */
 extern u32 q2_stx_overrun_by_code[128];
 extern u32 q2_stx_code_uses[128];
+
+/*
+ * AC pairs found in the last frame decoded. The header's `bs_num_codes` should
+ * be `1440 + pairs` rounded up to a multiple of 32 if it counts MDEC code
+ * words — a check on the code LENGTHS that needs neither the run/level column
+ * nor a completed frame.
+ */
+extern u32 q2_stx_last_pairs;
 
 /* The table, so a caller can report a row beside its counters. */
 u32 q2_stx_code_count(void);
