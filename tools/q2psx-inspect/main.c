@@ -52,6 +52,7 @@
 #include "raster.h"
 #include "reloc.h"
 #include "scene.h"
+#include "stx.h"
 #include "screen.h"
 #include "spawn.h"
 #include "sim.h"
@@ -5161,6 +5162,105 @@ static int cmd_extract(disc *d, const char *outdir)
 }
 
 /* ------------------------------------------------------------------------- */
+/* ------------------------------------------------------------------------- */
+/* movie — the three .STX films, demuxed and decoded                          */
+/* ------------------------------------------------------------------------- */
+/*
+ * The container has been verified for a long time (FORMATS.md §6) and the
+ * decoder had not been written, which is what left the campaign ending on a
+ * placard (#92). This runs the decoder over every frame of a film and reports
+ * the two numbers that say whether it is right: how many 8x8 BLOCKS came out
+ * and how many BITS went in.
+ *
+ * A wrong Huffman table does not make a slightly wrong picture. It runs out of
+ * blocks or bits inside the first frame, so "5301 of 5301 frames, 1440 blocks
+ * each" is a strong statement and "5300 of 5301" would be a broken one.
+ */
+static int cmd_movie(const disc *d, const char *name, const char *out_ppm)
+{
+    static const char *const k_film[] = {
+        "Q2DATA/MOVIES/TAKE1BP.STX",
+        "Q2DATA/MOVIES/OUTRO1P.STX",
+        "Q2DATA/MOVIES/ROGUEINP.STX"
+    };
+    u32 fi;
+    int rc = 0;
+
+    for (fi = 0; fi < 3; fi++) {
+        q2_buf buf;
+        size_t cursor = 0;
+        u32 frames = 0, ok = 0, blocks_want = 0;
+        u32 first_blocks = 0, first_bits = 0;
+        static q2_stx_frame f;
+        const char *base = strrchr(k_film[fi], '/');
+
+        base = base ? base + 1 : k_film[fi];
+        if (name && *name && strcmp(base, name) != 0)
+            continue;
+
+        if (disc_read_file(d, k_film[fi], &buf) != Q2_OK) {
+            printf("  %s: not on this disc\n", base);
+            continue;
+        }
+
+        printf("\n%s — %llu bytes, %llu sectors\n", base,
+               (unsigned long long)buf.size,
+               (unsigned long long)(buf.size / Q2_STX_SECTOR_SIZE));
+
+        while (q2_stx_frame_next(buf.data, buf.size, &cursor, &f)) {
+            static u8 rgb[Q2_STX_WIDTH * Q2_STX_HEIGHT * 3];
+            u32 nb = 0, bits = 0;
+            bool good;
+
+            frames++;
+            blocks_want = ((f.width + 15u) / 16u) * ((f.height + 15u) / 16u) * 6u;
+
+            good = q2_stx_frame_decode(&f, rgb, &nb, &bits);
+            if (good && nb == blocks_want)
+                ok++;
+            else if (frames <= 3)
+                printf("    frame %u: %u of %u blocks, %u bits of %u available"
+                       " — %s\n", f.number, nb, blocks_want, bits,
+                       (f.size - 8) * 8, good ? "short" : "desynchronised");
+
+            if (good && nb == blocks_want && first_blocks == 0) {
+                first_blocks = nb;
+                first_bits   = bits;
+                if (out_ppm && *out_ppm) {
+                    FILE *fp = fopen(out_ppm, "wb");
+                    if (fp) {
+                        fprintf(fp, "P6\n%u %u\n255\n", f.width, f.height);
+                        fwrite(rgb, 1, (size_t)f.width * f.height * 3, fp);
+                        fclose(fp);
+                        printf("    frame 1 -> %s\n", out_ppm);
+                    }
+                }
+            }
+        }
+
+        printf("    %u frames, %u decoded exactly (%u blocks each)\n",
+               frames, ok, blocks_want);
+        printf("    frame 1: %u blocks, %u bits used\n",
+               first_blocks, first_bits);
+        {
+            u32 lz[18], t, i2;
+
+            t = q2_stx_unmatched_report(lz, 18);
+            printf("    unmatched lookaheads: %u", t);
+            for (i2 = 0; i2 < 18; i2++)
+                if (lz[i2])
+                    printf("  [%u zeros] %u", i2, lz[i2]);
+            printf("\n");
+        }
+        if (ok != frames)
+            rc = 1;
+
+        q2_buf_free(&buf);
+    }
+
+    return rc;
+}
+
 int main(int argc, char **argv)
 {
     disc *d = NULL;
@@ -5423,6 +5523,9 @@ int main(int argc, char **argv)
     } else if (strcmp(cmd, "text") == 0) {
         rc = cmd_text(d, (argc >= 4) ? argv[3] : NULL,
                       (argc >= 5) ? argv[4] : NULL);
+    } else if (strcmp(cmd, "movie") == 0) {
+        rc = cmd_movie(d, (argc >= 4) ? argv[3] : NULL,
+                          (argc >= 5) ? argv[4] : NULL);
     } else if (strcmp(cmd, "menu") == 0) {
         rc = cmd_menu(d, (argc >= 4) ? argv[3] : NULL,
                          (argc >= 5) ? argv[4] : NULL,

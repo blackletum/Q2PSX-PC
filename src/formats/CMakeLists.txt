@@ -29,6 +29,8 @@ add_library(q2psx_formats STATIC
     scene.h
     spacelights.c
     spacelights.h
+    stx.c
+    stx.h
     sortdata.c
     sortdata.h
     surface.c

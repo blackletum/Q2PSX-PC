@@ -1004,7 +1004,7 @@ The residues of the resolved blockers keep their parents' numbers.
       two globals with a 30.0 s fallback — that looks like a countdown to a restart or fade — but the
       consuming code was not disassembled. One entry is **1.0 s short** of its measured stream length, hinting
       the value is a deliberate restart point rather than a length.
-- [ ] **15. MDEC output depth for the movies (24-bit vs 15-bit).** ~~Blocked on #16~~ — #16 is answered
+- [~] **15. MDEC output depth for the movies (24-bit vs 15-bit).** *(#107 builds the demuxer and most of the BS v2 decoder; the depth question needs frames that actually decode.)* ~~Blocked on #16~~ — #16 is answered
       by #92, so this is now blocked only on reading the QENDMIS module's code.
 - [x] **16. ~~Locate the movie player overlay.~~ — ANSWERED by #92.** It is a LevelBin module, and
       `QENDMIS1`..`QENDMIS5` are the maps that carry it. The filenames (`TAKE1BP.STX`, `OUTRO1P.STX`), the
@@ -6975,3 +6975,43 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       What is NOT reconstructed, and is a real remainder: the capture also shows a per-row bar in each
       player's own colour, a `READY` marker on a row whose player has pressed fire, and the backdrop scene
       QMRESULT's `ModelNames` describe. The rows are text on the overlay here.
+- [~] 107. **The movies: the demuxer is exact, the decoder is most of the way, and what is missing is five
+      Huffman groups — named, counted, and bounded.**
+
+      #92 established that `QENDMIS`'s module is the movie player and that the campaign ends on a 19.5 MB
+      `.STX`. FORMATS.md §6 had the container settled — verified across all 32,442 sectors — and no decoder
+      had ever been written, so the ending was a placard. This is the decoder, as far as it goes, and the
+      part that does not go is stated rather than implied.
+
+      **The demuxer is exact.** `q2_stx_frame_next` walks the 8-sector interleave, skips the audio slot and
+      the nulled tail, and reassembles each frame from its 5 or 6 chunks with every header cross-checked
+      against the frame it claims to belong to. Frame counts come out **1283 / 1559 / 2459** — the three
+      numbers §6 recorded from an independent pass, which is the check.
+
+      **The bitstream decoder's structure is right.** 243 of OUTRO1P's 1559 frames decode to exactly 1440
+      blocks — 20x12 macroblocks of six — consuming exactly **12 bits per block**, which is a 10-bit DC and
+      a 2-bit EOB and nothing else. Those are its fade frames, and they come out flat, which is what a
+      DC-only frame is. So the sector walk, the block order, the DC width, the EOB code and the geometry
+      are all correct; a frame with no AC coefficients decodes end to end.
+
+      **What is missing is the tail of Table B.14, and the histogram names it.** Every lookahead the AC
+      table cannot match is bucketed by its run of LEADING ZEROS, because that run is how B.14 is
+      organised. Across OUTRO1P:
+
+          unmatched: 1316   [7 zeros] 845  [8] 297  [9] 73  [10] 58  [11] 43
+
+      Five groups, nothing outside them, no scatter. The codes with 2 to 10 bits are in and correct; the
+      12-, 13-, 14-, 15- and 16-bit groups are not transcribed. That is a bounded piece of work — five rows
+      of a published table — rather than an unknown, and until it is done **the movies do not play**.
+
+      **Two errors this pass caught mechanically, worth keeping.** A first attempt put an 8-bit group at
+      `00101xxx`, which is a prefix collision with the 5-bit `00101`; and put the 10-bit group under
+      `000001`, which is the ESCAPE, making every one of them unreachable while the escape swallowed bits
+      belonging to a coefficient. Checking every pair of codes for one being a prefix of another found both
+      in seconds, and neither would have been obvious from the output — a prefix collision produces a
+      decoder that works on most blocks and desynchronises on the rest, which is exactly what "6 of 1283
+      frames decoded" looked like.
+
+      The IDCT here is a float separable one and is deliberately not the MDEC's fixed-point transform, so
+      it will differ in the last bit or two. That is stated at the function rather than left to be
+      discovered.
