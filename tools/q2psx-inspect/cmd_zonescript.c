@@ -48,6 +48,7 @@
 #include "level.h"
 #include "rotator.h"
 #include "scene.h"
+#include "entity.h"
 #include "trigger.h"
 #include "userfuncs.h"
 
@@ -176,6 +177,8 @@ int cmd_zonescript(const disc *d, const char *only_map)
         brk_zone_rescue = 0;
     u32 live_glass_run = 0, live_glass_node = 0;
     u32 loadmap_calls = 0, live_loadmap = 0;
+    u32 loadmap_map_ok = 0, loadmap_map_missing = 0,
+        loadmap_start_ok = 0, loadmap_late_zone = 0;
     u32 live_built = 0, live_calls = 0, live_steps = 0, live_moved = 0,
         live_turned = 0;
     bool verbose = (only_map != NULL);
@@ -349,8 +352,58 @@ int cmd_zonescript(const disc *d, const char *only_map)
                                 u32 need = 0;
                                 s16 first_obj = -1;
 
-                                if (call.prim == Q2_UF_LOADMAP)
+                                if (call.prim == Q2_UF_LOADMAP) {
+                                    char mname[Q2_UF_NAME_LEN + 1];
+                                    char sname[Q2_UF_NAME_LEN + 1];
+
                                     loadmap_calls++;
+
+                                    /*
+                                     * Both names, resolved the way the client
+                                     * resolves them: the map against the disc,
+                                     * and the start position against the
+                                     * TARGET map's spawns rather than this
+                                     * one's. Getting the second namespace
+                                     * wrong is silent - it lands the player at
+                                     * the level's own start instead of in the
+                                     * doorway - so it is counted rather than
+                                     * assumed.
+                                     */
+                                    if (q2_uf_operand_name(&call, 0, mname) &&
+                                        mname[0]) {
+                                        char   tp[256];
+                                        q2_buf tb;
+
+                                        if (!q2_uf_operand_name(&call, 1, sname))
+                                            sname[0] = ' ';
+
+                                        snprintf(tp, sizeof(tp),
+                                                 "Q2DATA/LEVELS/%s/COMMON.DAT",
+                                                 mname);
+                                        if (disc_read_file(d, tp, &tb) == Q2_OK) {
+                                            q2_common_file tcf;
+
+                                            loadmap_map_ok++;
+                                            if (q2_common_open(&tcf, &tb) == Q2_OK) {
+                                                q2_start_pos_list sl;
+                                                q2_start_pos sp;
+
+                                                if (sname[0] &&
+                                                    q2_start_pos_parse(&sl, &tcf) == Q2_OK &&
+                                                    q2_start_pos_find(&sl, sname, &sp)) {
+                                                    loadmap_start_ok++;
+                                                    if (sp.zone > 0)
+                                                        loadmap_late_zone++;
+                                                }
+                                                q2_common_close(&tcf);
+                                            } else {
+                                                q2_buf_free(&tb);
+                                            }
+                                        } else {
+                                            loadmap_map_missing++;
+                                        }
+                                    }
+                                }
 
                                 if (call.prim == Q2_UF_TIMEDLIGHT)
                                     light_timed++;
@@ -751,6 +804,10 @@ int cmd_zonescript(const disc *d, const char *only_map)
            live_glass_run, live_glass_node);
     printf("    LOADMAP calls in COMMON: %u; the trigger sweep RUNS %u\n",
            loadmap_calls, live_loadmap);
+    printf("      target map is on the disc      : %u  (missing %u)\n",
+           loadmap_map_ok, loadmap_map_missing);
+    printf("      start position resolves THERE  : %u, of which land past "
+           "zone 0 : %u\n", loadmap_start_ok, loadmap_late_zone);
     printf("    rotation CALLs the script RUNS : %u, of which turn nothing : %u\n",
            live_rot_fired, live_rot_barren);
     printf("    distinct rotation CALL sites the script reaches : %u\n",

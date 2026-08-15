@@ -335,6 +335,16 @@ typedef struct client {
      * The zone gate is deferred for the same reason and to the same place —
      * the top of the frame — so the two transitions behave alike.
      */
+    /*
+     * Fire every trigger volume once, on the first simulated frame.
+     *
+     * The same argument `--watch` and `--dm-stage` are made of: a scripted
+     * demo wanders, and the things worth testing are the ones a player reaches
+     * deliberately. 28 of the disc's LOADMAP calls are behind a trigger volume
+     * and a wandering pad walks into none of them in three thousand frames, so
+     * without this the level transition can only be argued for, not shown.
+     */
+    bool              fire_triggers;
     bool              map_change_pending;
     char              pending_map[Q2_UF_NAME_LEN + 1];
     char              pending_start[Q2_UF_NAME_LEN + 1];
@@ -1266,6 +1276,99 @@ static void client_sync_parked_health(client *c)
  * the operands mean is `rotator.[ch]`'s business, beside the builder that
  * reads the same offsets.
  */
+static bool client_load_zone(client *c, const char *map, int index);
+
+/*
+ * Change level, at the arrival point the script names.
+ *
+ * Two things about the arrival are the operand table's, not this file's
+ * invention (userfuncs.c): the start-position name resolves against the TARGET
+ * map's spawns rather than the map the item lives in — 129 of 129 against the
+ * target and only 104 of 135 against the container — and the spawn record
+ * carries the ZONE it belongs to, so the destination zone is the arrival
+ * point's, not zero. A transition that assumed zone 0 would drop the player at
+ * the level's own start on every LOADMAP that lands in a later zone.
+ *
+ * When the name resolves to nothing the load still happens, at the target's
+ * zone 0, because losing a level transition is a worse failure than arriving
+ * in the wrong doorway — and the warning says which.
+ */
+static bool client_change_map(client *c, const char *map, const char *start)
+{
+    int  zone = 0;
+    bool have_arrival = false;
+    q2_start_pos arrival;
+
+    memset(&arrival, 0, sizeof(arrival));
+
+    if (start && start[0]) {
+        char   path[256];
+        q2_buf buf;
+
+        snprintf(path, sizeof(path), "Q2DATA/LEVELS/%s/COMMON.DAT", map);
+        if (disc_read_file(c->disc, path, &buf) == Q2_OK) {
+            q2_common_file probe;
+
+            if (q2_common_open(&probe, &buf) == Q2_OK) {
+                q2_start_pos_list spawns;
+
+                if (q2_start_pos_parse(&spawns, &probe) == Q2_OK &&
+                    q2_start_pos_find(&spawns, start, &arrival)) {
+                    zone         = arrival.zone;
+                    have_arrival = true;
+                }
+                q2_common_close(&probe);
+            } else {
+                q2_buf_free(&buf);
+            }
+        }
+    }
+
+    if (!client_load_zone(c, map, zone)) {
+        Q2_WARN("LOADMAP: %s zone %d would not load", map, zone);
+        return false;
+    }
+
+    /* `client_load_zone` spawns at the first StartPos in the zone; the script
+     * named a particular one, so it wins. */
+    if (have_arrival) {
+        c->cam.pos[0] = arrival.x;
+        c->cam.pos[1] = arrival.y;
+        c->cam.pos[2] = arrival.z;
+        c->cam.yaw    = arrival.angle;
+        q2_sim_spawn(&c->sim[0], c->cam.pos, c->cam.yaw);
+    } else if (start && start[0]) {
+        Q2_WARN("LOADMAP: %s has no start position '%s'; using its own start",
+                map, start);
+    }
+
+    c->map_changes++;
+    Q2_INFO("LOADMAP -> %s zone %d%s%s", map, zone,
+            have_arrival ? " at " : "", have_arrival ? arrival.name : "");
+    return true;
+}
+
+/*
+ * Case-insensitive name compare. Map names reach this from two places that do
+ * not agree on case — the executable's level table, which LOADMAP names, and
+ * the ISO directory the loader walks — so comparing them exactly would make
+ * every transition look like a move to a different map, including the ones
+ * that name the map you are already standing in.
+ */
+static bool client_name_eq(const char *a, const char *b)
+{
+    while (*a && *b) {
+        int ca = (int)(unsigned char)*a++;
+        int cb = (int)(unsigned char)*b++;
+
+        if (ca >= 'A' && ca <= 'Z') ca += 'a' - 'A';
+        if (cb >= 'A' && cb <= 'Z') cb += 'a' - 'A';
+        if (ca != cb)
+            return false;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
 static void client_event_call(void *user, const q2_event_item *item,
                               u8 call_index)
 {
@@ -1319,7 +1422,7 @@ static void client_event_call(void *user, const q2_event_item *item,
             char start[Q2_UF_NAME_LEN + 1];
 
             if (q2_uf_operand_name(&call, 0, map) && map[0] &&
-                q2_stricmp(map, c->map) != 0) {
+                !client_name_eq(map, c->map)) {
                 if (!q2_uf_operand_name(&call, 1, start))
                     start[0] = '\0';
 
@@ -3717,7 +3820,7 @@ static void client_write_shot(client *c, bool numbered)
             char buf[160];
             int  used = 0, ti;
 
-            buf[0] = ' ';
+            buf[0] = '\0';
             for (ti = 0; ti < 32; ti++)
                 if (q2_cre_actions.think_hits[ti] && used < 140)
                     used += snprintf(buf + used, sizeof(buf) - (size_t)used,
@@ -4512,6 +4615,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--headless"))              c.headless = true;
         else if (!strcmp(argv[i], "--demo"))                  c.demo = true;
         else if (!strcmp(argv[i], "--watch"))                 c.watch = true;
+        else if (!strcmp(argv[i], "--fire-triggers"))         c.fire_triggers = true;
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc)
             c.frames_total = strtol(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "--shot") && i + 1 < argc)
@@ -5165,15 +5269,45 @@ no_window:
             client_input(&c, dt);
         }
 
-        /* A zone gate fired somewhere in the script. Load the target zone of
-         * the same map -- cross-map progression needs the level table, which
-         * lives in the executable and is not read yet. */
+        /* A zone gate fired somewhere in the script: another zone of the same
+         * map. Deferred to here because the gate fires inside the tick, and
+         * the load frees the triggers the runtime is standing in. */
         {
             u32 target;
             if (q2_sim_take_zone_change(&c.sim[0], &target)) {
                 Q2_INFO("zone gate -> zone %u", target);
                 client_load_zone(&c, c.map, (int)target);
             }
+        }
+
+        /* And a LOADMAP: the same deferral, one level up. */
+        if (c.map_change_pending) {
+            c.map_change_pending = false;
+            client_change_map(&c, c.pending_map, c.pending_start);
+        }
+
+        /*
+         * `--fire-triggers`: queue every trigger volume on this map once. The
+         * runtime runs the queue on its own next update, so this goes through
+         * exactly the path a player standing in the volume goes through — the
+         * only difference is who asked.
+         */
+        if (c.fire_triggers && c.sim_ready) {
+            u32 i, fired = 0;
+
+            c.fire_triggers = false;
+            for (i = 0; i < c.sim[0].triggers.count; i++) {
+                q2_trigger tr;
+
+                if (!q2_trigger_get(&c.sim[0].triggers, i, &tr))
+                    continue;
+                if (tr.event_offset == Q2_TRIGGER_NO_EVENT)
+                    continue;
+                if (q2_event_rt_trigger(&c.sim[0].event_rt, tr.event_offset))
+                    fired++;
+            }
+            Q2_INFO("--fire-triggers: queued %u of %u trigger volumes",
+                    fired, c.sim[0].triggers.count);
         }
         /* Every frame, not just menu frames: a zone load rebuilds the sim and
          * would otherwise drop back to the compiled-in constants. */

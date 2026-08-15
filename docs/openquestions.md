@@ -5485,3 +5485,56 @@ holds four `s16` pairs: **(388, 201) and (458, 201)** for one player and (381, 9
 y matches the status bar's own anchor row exactly. That accounts for what capture shows: one icon with only the
 blaster held, two once a second weapon is picked up. What writes `s7+96`/`s7+100` has not been traced, so the
 weapon-to-rect mapping is still missing and nothing is drawn yet rather than guessed.
+
+
+---
+
+## A session could never leave the map it booted into
+
+`Q2_UF_LOADMAP` — "change level" — has been decoded in `userfuncs.c` for a long time, with its two
+operands and the namespace note that goes with them, and **nothing in the port ever acted on it**. A zone
+gate was wired (another zone of the same map, deferred to the top of the frame); the level transition was
+not. Every session ended where it began.
+
+**It is not a corner the scripts rarely reach.** Sweeping every trigger volume on the disc:
+
+    LOADMAP calls in COMMON: 28; the trigger sweep RUNS 28
+      target map is on the disc      : 28  (missing 0)
+      start position resolves THERE  : 28, of which land past zone 0 : 12
+
+**28 of 28**, on every count. This is how the game advances.
+
+**Two operand rules are load-bearing and both were already written down.** The start position resolves
+against the TARGET map's spawns, not the map the item lives in — 129 of 129 against the target and only
+104 of 135 against the container — and a spawn record carries the ZONE it belongs to, so the destination
+zone is the arrival point's. **12 of the 28 land past zone 0**, so an implementation that assumed zone 0
+would arrive in the wrong part of the level on 43% of transitions, and would look like a working feature
+while doing it.
+
+Wired in `client_change_map`, deferred exactly as the zone gate is: a CALL runs inside `q2_sim_advance`,
+and loading a map there would free the triggers and the script the runtime is standing in the middle of.
+
+**Shown, not argued.** A demo pad wanders and walks into none of the 28 in three thousand frames, so the
+client grew `--fire-triggers` — queue every trigger volume once, through the same runtime path a player
+standing in one goes through. The transitions it produces are the game's own order:
+
+    BASE0    -> Base1    zone 0 at Default
+    BASE1    -> Base2    zone 0 at FromBase1
+    BASE2    -> Jail2    zone 0 at Default
+    BASE3    -> Base2    zone 2 at Base2Return
+    JAIL2    -> Jail3    zone 0 at Default
+    JAIL3    -> Security zone 0 at Default
+    LAB      -> Command  zone 1 at FromLab
+    WASTE1   -> Waste2   zone 3 at Default
+    WASTE2   -> Waste3   zone 0 at Default
+    POWER1   -> Power2   zone 1 at Default
+    COMMAND  -> Boss1    zone 0 at Default
+    SECURITY -> Power1   zone 0 at Default
+    BIGGUN   -> Command  zone 3 at FromBiggun
+
+The named arrivals are the tell: `FromBase1`, `FromLab`, `FromBiggun`, `Base2Return` are doorways
+authored for a particular approach, and three of the thirteen land in zones 1, 2 and 3.
+
+*Not done here.* The transition is the load, and nothing else: the MISSION screen the console shows
+between levels, the inventory that should survive the change, and the intermission's own game-state
+request are all still owed. What exists now is that the level ENDS and the next one begins.
