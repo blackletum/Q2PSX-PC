@@ -1261,8 +1261,30 @@ The residues of the resolved blockers keep their parents' numbers.
       The vertex array is NOT rescaled, so model vertices are already at world scale. Still open: what the
       values mean, block A's payloads, the animated-model frame layout, and the header's 24-bit field at
       `+0x01` (261…333367). **Block C is not a vertex-base candidate** (#2a).
-- [ ] 22. `PrimaryRemap` value space. Definitively **not** a scene-node index — the max exceeds the scene
-      node count in 100 of 115 files. Probably a polygon or surface id in a shared table.
+- [~] 22. `PrimaryRemap` value space — **narrowed by four measurements, and "probably a polygon id" does not
+      survive the first of them.** The max exceeds the scene node count in 100 of 115 files, which is where
+      this entry started. Measuring the values rather than their maximum:
+
+      1. **They are DISTINCT within a zone — 115 of 115.** One id per collision node, never repeated. A
+         polygon or surface CLASS id would not need that; an identity would.
+      2. **They repeat ACROSS the zones of a map.** BASE1's zones use 358 distinct values over 371 nodes,
+         BASE2's 404 over 434. So two zones can name the same id, which is what a boundary shared by a
+         zone cut looks like.
+      3. **Neighbouring nodes usually get neighbouring ids.** On BASE0 zone 0, 109 of 186 successive
+         differences are exactly +1, and the sequence is not sorted — so it is an ordering the zone
+         inherited, not one it was assigned.
+      4. **The value space is bounded by the map's quad count in 115 of 115** and by the zone's own in 107
+         of 115, but the max only reaches about a quarter of either on average.
+
+      Two hypotheses were tested and REFUTED. The values do not fall into a per-zone slice of the map's
+      quads concatenated in zone order — 47 of 115 — so it is not an index into a map-wide polygon array
+      laid out that way. And the map-wide maximum equals the map's quad count minus one on only 15 of 49
+      maps, so it does not span one either.
+
+      What fits all four is an id the zone INHERITED from whatever it was cut out of — an authoring
+      cross-reference rather than a runtime index — and the last measurement supports that: the pointer is
+      installed at `ctx+0x10` by `0x80051798` and **nothing in the collision code reads offset 0x10 of a
+      context**. This port implements the whole collision model without it and walks 47 of 47 maps.
 - [~] 23. `CollNode` fields `c` and `d`. **`d` is SOLVED**: its low byte is the node's **contents id**,
       read with `lbu +32` at `0x80044DB8` — where a trace records it into its contact list whenever it
       changes along the path — and at `0x8004510C`. The other three bytes are zero on all 22,773 nodes.
@@ -1348,7 +1370,7 @@ The residues of the resolved blockers keep their parents' numbers.
 - [ ] 36. The unused 20-byte tail of every Form 2 payload, and the always-zero `uint16_t` at `+2` of each
       music table record. Both are zero in 100 % of samples — nothing can be inferred from this disc.
 - [ ] 37. `GlintMod` (2608 bytes, one map only, high-entropy after the first few dozen bytes).
-- [ ] 39. The HUD's residuals, none of them blocking, now that the overlay itself is done.
+- [x] 39. The HUD's residuals, none of them blocking, now that the overlay itself is done. **CLOSED: every one of them below is answered, and the last is answered as a CUT feature rather than a missing one.**
       **~~The MISSION / level-completion screen.~~ — RECONSTRUCTED, and it draws.**
       `0x80021ADC` builds it with `sprintf` into a scratch buffer at `0x800C6EE8` and hands each row to the
       text printf at `0x80043518`, into the **overlay camera's** context at `0x800D6870` rather than into any
@@ -1397,7 +1419,10 @@ The residues of the resolved blockers keep their parents' numbers.
       So what remains of split screen in the overlay is what was already known and already implemented: the
       notification layer narrows to 2 / 1 / 1 lines by player count. There is nothing else to find.
       **Three orphan words.** The icon vocabulary carries `was`, `die` and `door`, and no located string uses
-      any of them — the shape of a frag-message template (`&P was &O`) that was cut.
+      any of them — the shape of a frag-message template (`&P was &O`) that was cut. That is the whole of
+      what is left of this entry, and it is an answer: a vocabulary entry with no user is the same finding
+      as the Tank Commander's five `tnk_` sounds that appear in no bank (#104) and the two LASERWALLs whose
+      object slots are empty (#117). The disc carries the pieces of things that were not finished.
 
 ---
 
@@ -4339,7 +4364,8 @@ nothing saying so.
 
 ## ⚠ Security note (carried forward, do not drop)
 
-- [ ] 38. A prior research pass reported that a fan wiki page about this game served content containing
+- [!] 38. **A STANDING CAUTION, not an open question — it is never going to be "resolved" and must not be
+      counted as work outstanding.** A prior research pass reported that a fan wiki page about this game served content containing
       **instructions addressed to AI agents** (create files, transfer funds, insult the operator, terminate
       operations). That URL was **not** fetched during verification. **Treat it as hostile for any automated
       fetch**; if data from it is wanted, a human should open it in a browser.
@@ -5242,7 +5268,7 @@ nothing saying so.
       the whole argument for the counter: 110 of 128 module move names ARE in their model's block D, so a
       path that never once succeeded should have been suspicious, and only a number said so.
 
-- [ ] 64. **The first code found that walks block D — and it names the `rest` field.**
+- [x] 64. **The first code found that walks block D — and it names the `rest` field. CLOSED: the pairing it pointed at was found from the other side.**
       Hunting the load-time transform (#51f, #63) by asking who reads `model+0x38`:
 
           8006D310  lw    v1, 56(a0)     ; v1 = model->ofs_block_d
@@ -5269,6 +5295,13 @@ nothing saying so.
       live block-D record pointers in `a1` and `a2` and reaches for two globals (`gp+17252`, `gp+17280`);
       whatever supplies those pointers knows which record belongs to what, which is precisely the link
       `position = block_d[k].start * 5 + 30 * (ai_frame - first)` is missing.
+
+      **It was not needed.** #63 found the pairing from the other end — a move is matched to its block-D
+      record by NAME, through the 12-byte compare at `0x8006D330` — and that path is now measured as
+      universal: across four maps with creatures in them, 1500 / 1158 / 894 / 519 poses resolve by name and
+      **not one name is absent from its model's block D** (#59). There is no missing pairing left to find
+      through the pointers. What this entry contributed and keeps is the reading of `rest`: it is a
+      CURSOR, and `0x8003CBE8` rewinds it to `start`.
 
 ---
 
