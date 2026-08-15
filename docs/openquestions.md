@@ -7121,3 +7121,34 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       to a different wrong picture, and the disc cannot say which is right.
 
       **The movies do not play.**
+- [~] 111. **"The disc cannot say which picture is right" was wrong, and building the oracle showed why the
+      decoder cannot be finished this way.** #110 closed on that sentence. It is false in principle — a
+      frame of real video is SMOOTH and a frame of wrong coefficients is not, so mean absolute difference
+      between adjacent pixels judges a candidate table without any reference at all. `movie` now reports it.
+
+      The oracle works and its first reading is the useful one:
+
+          TAKE1BP  roughness 1.21 over 3 AC frames
+          OUTRO1P  roughness 0.18 over 9
+          ROGUEINP roughness 0.48 over 18
+
+      **Those are far too LOW.** Real video at 320x192 runs to several units; 0.18 is a frame that is
+      almost uniform. So the frames that complete are not noisy — they are nearly flat, and the AC
+      coefficients they decode are barely reaching the picture.
+
+      **And that is the trap.** The only frames the decoder completes are the near-flat ones; every frame
+      with real content still fails. So the oracle can only ever score the least informative frames in the
+      film, and a table tuned to make THOSE smooth is being tuned on the frames that carry almost nothing.
+      The measurement is sound and the sample it can reach is biased, which is a different problem from
+      the one #110 named and a worse one.
+
+      One consequence, recorded so it is not retried blindly: removing the `/ 8` from the AC
+      dequantisation — arithmetically an eight-fold change in every AC amplitude — moves the roughness by
+      about **two**. That does not add up, and it is more evidence that the completing frames carry almost
+      no AC energy rather than evidence about the formula. The change is NOT applied; replacing a sourced
+      formula with an unexplained one is worse than leaving it.
+
+      So the position is unchanged and better understood: lengths derived and correct, escape ruled out by
+      sweep, AC path proven to work on thirty frames, run/level column wrong, and **no self-contained way
+      to fix it** — the frames that would judge a candidate are exactly the frames that do not decode.
+      **The movies do not play.**

@@ -656,6 +656,13 @@ static bool decode_block(bitreader *b, u32 qscale, s32 out[64])
 
         {
             u32 nat = k_zigzag[n];
+            /*
+             * The MDEC's own dequantisation. Removing the `/ 8` was tried and
+             * is NOT applied: it changes the decoded frames' roughness by about
+             * two rather than the eight the arithmetic predicts, which means
+             * the evidence does not support it, and replacing a sourced formula
+             * with an unexplained one is worse than leaving it alone.
+             */
             coeff[nat] = (level * (s32)qscale * (s32)k_quant[nat]) / 8;
         }
     }

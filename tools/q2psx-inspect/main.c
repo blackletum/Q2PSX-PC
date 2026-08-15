@@ -5184,6 +5184,40 @@ static int cmd_extract(disc *d, const char *outdir)
  * desynchronises nearly every frame, so the right one should stand out by a
  * margin no coincidence produces. Frames decoded exactly is the score.
  */
+/*
+ * How smooth a decoded frame is — the oracle this decoder was missing.
+ *
+ * "The disc cannot say which picture is right" is what the last pass concluded
+ * about the run/level column, and it is false. A frame of real video is SMOOTH:
+ * neighbouring pixels differ by a little. A frame decoded with wrong
+ * coefficients is not — it is the banding of magenta and green blocks the last
+ * dump showed. So mean absolute difference between horizontally adjacent pixels
+ * scores a candidate table, and the disc is the judge after all.
+ *
+ * Averaged over the frames that decode, and lower is better.
+ */
+static double frame_roughness(const u8 *rgb, u32 w, u32 h)
+{
+    double acc = 0.0;
+    u32 x, y, n = 0;
+
+    for (y = 0; y < h; y++) {
+        for (x = 1; x < w; x++) {
+            const u8 *a = rgb + ((size_t)y * w + x - 1) * 3;
+            const u8 *b = rgb + ((size_t)y * w + x) * 3;
+            int k;
+
+            for (k = 0; k < 3; k++) {
+                int d = (int)a[k] - (int)b[k];
+                acc += (d < 0) ? -d : d;
+                n++;
+            }
+        }
+    }
+
+    return n ? acc / (double)n : 0.0;
+}
+
 static int cmd_movie_sweep(const disc *d)
 {
     static const u32 k_run[]   = { 5, 6, 7 };
@@ -5252,7 +5286,8 @@ static int cmd_movie(const disc *d, const char *name, const char *out_ppm)
         q2_buf buf;
         size_t cursor = 0;
         u32 frames = 0, ok = 0, blocks_want = 0;
-        u32 rich = 0, maxbits = 0;
+        u32 rich = 0, maxbits = 0, rough_n = 0;
+        double rough_sum = 0.0;
         u32 first_blocks = 0, first_bits = 0;
         static q2_stx_frame f;
         const char *base = strrchr(k_film[fi], '/');
@@ -5282,7 +5317,11 @@ static int cmd_movie(const disc *d, const char *name, const char *out_ppm)
             if (good && nb == blocks_want)
             {
                 ok++;
-                if (bits > 12u * blocks_want) rich++;
+                if (bits > 12u * blocks_want) {
+                    rich++;
+                    rough_sum += frame_roughness(rgb, f.width, f.height);
+                    rough_n++;
+                }
                 if (bits > maxbits) maxbits = bits;
             }
             else if (frames <= 3)
@@ -5308,6 +5347,10 @@ static int cmd_movie(const disc *d, const char *name, const char *out_ppm)
 
         printf("    of those, %u carried AC data; most bits in a frame %u\n",
                rich, maxbits);
+        if (rough_n)
+            printf("    mean roughness over %u AC frames: %.2f  "
+                   "(real video is a few units; noise is tens)\n",
+                   rough_n, rough_sum / (double)rough_n);
         printf("    %u frames, %u decoded exactly (%u blocks each)\n",
                frames, ok, blocks_want);
         printf("    frame 1: %u blocks, %u bits used\n",
