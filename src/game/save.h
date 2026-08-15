@@ -85,6 +85,7 @@
 
 #include "events_rt.h"
 #include "inventory.h"
+#include "mover.h"
 #include "projectile.h"
 #include "q2psx.h"
 #include "sim.h"
@@ -182,6 +183,30 @@ typedef struct q2_save_entity {
  * the same class of defect as a save that shuts every door the player opened,
  * and that one was fixed by carrying the script flags.
  */
+/*
+ * A door or lift's mutable state.
+ *
+ * Keyed by the event item it was built from — the identity `mover.h` already
+ * establishes for exactly this reason — plus WHICH of that item's movers it is,
+ * because a `MOVER_C` double door is two leaves from one item.
+ *
+ * Without this a save reloads with every door shut, and worse than shut: the
+ * script flags ARE carried, so the record that opened it has already run and
+ * will not run again. The door is closed and cannot be reopened.
+ */
+typedef struct q2_save_mover {
+    u32 item_offset;
+    u8  seq;            /* 0 or 1: which leaf of this item                   */
+    u8  state;
+    u8  saved_state;
+    u8  block_timer;
+    u8  triggered;
+    u8  announced;
+    u16 delay_timer;    /* a countdown at run time, not just a setting       */
+    u16 wait_timer;
+    s32 offset;         /* how far along its travel it is                    */
+} q2_save_mover;
+
 typedef struct q2_save_breakable {
     s32 scene_node;
     s16 health;
@@ -259,6 +284,10 @@ typedef struct q2_save {
     q2_save_breakable *breakables;
     u32                breakable_count;
 
+    /* Which doors and lifts are open, and where in their travel. */
+    q2_save_mover *movers;
+    u32            mover_count;
+
     /* --- presentation ---------------------------------------------------- */
     q2_save_level_stats mission[Q2_SAVE_MISSION_ROWS];
     s32  mission_unit;
@@ -300,6 +329,14 @@ q2_result q2_save_capture(q2_save *out, const q2_sim *sim,
  */
 q2_result q2_save_apply(const q2_save *s, q2_sim *sim, q2_inventory *inv,
                         const char *serial, const char *map);
+
+/*
+ * The movers, which live in the CLIENT rather than the sim — the same shape as
+ * the mission tallies below, and for the same reason: `q2_save_capture` is
+ * handed a `q2_sim` and the door set is not in one.
+ */
+void q2_save_capture_movers(q2_save *s, const q2_mover_set *set);
+void q2_save_apply_movers(const q2_save *s, q2_mover_set *set);
 
 /* The mission tallies, which live in the client rather than the sim (mission.h
  * — the counters are inputs to the screen). Both are no-ops on NULL. */

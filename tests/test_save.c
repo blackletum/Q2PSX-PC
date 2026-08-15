@@ -316,6 +316,54 @@ static void test_round_trip(void)
     check_eq_i(loaded.breakables[1].health, 30, "and keeps what it has left");
 
     /*
+     * The movers, which the client owns: two leaves of one MOVER_C item, so the
+     * item offset alone does not identify a leaf and the sequence number is
+     * what separates them.
+     */
+    {
+        q2_mover_set set;
+        q2_save      out;
+        q2_save      back;
+
+        memset(&set, 0, sizeof(set));
+        set.count   = 2;
+        set.movers  = (q2_mover *)calloc(2, sizeof(q2_mover));
+        set.movers[0].item_offset = 0x240;
+        set.movers[0].state       = 3;
+        set.movers[0].offset      = 700;
+        set.movers[0].wait_timer  = 1200;
+        set.movers[1].item_offset = 0x240;   /* the other leaf */
+        set.movers[1].state       = 1;
+        set.movers[1].offset      = -700;
+
+        memset(&out, 0, sizeof(out));
+        q2_save_capture_movers(&out, &set);
+        check_eq_i(out.mover_count, 2, "both leaves captured");
+        check_eq_i(out.movers[0].seq, 0, "the first leaf is sequence 0");
+        check_eq_i(out.movers[1].seq, 1, "the second is sequence 1");
+
+        check(q2_save_write(&out, tmp_path()) == Q2_OK, "movers write");
+        memset(&back, 0, sizeof(back));
+        check(q2_save_read(&back, tmp_path()) == Q2_OK, "movers read back");
+
+        /* Applied to a set built fresh — everything shut, timers full. */
+        memset(set.movers, 0, 2 * sizeof(q2_mover));
+        set.movers[0].item_offset = 0x240;
+        set.movers[1].item_offset = 0x240;
+        q2_save_apply_movers(&back, &set);
+
+        check_eq_i(set.movers[0].state, 3, "the open leaf reopens");
+        check_eq_i(set.movers[0].offset, 700, "where it had travelled to");
+        check_eq_i(set.movers[0].wait_timer, 1200, "and its countdown");
+        check_eq_i(set.movers[1].state, 1, "the other leaf is its own state");
+        check_eq_i(set.movers[1].offset, -700, "and travelled the other way");
+
+        free(set.movers);
+        q2_save_free(&out);
+        q2_save_free(&back);
+    }
+
+    /*
      * And the round trip through the sim: applied to a registry whose panes are
      * in a DIFFERENT order, the match is by node and not by index.
      */

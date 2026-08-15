@@ -37,6 +37,7 @@
 #define TAG_ENTS TAG('E', 'N', 'T', 'S')   /* per-entity mutable state        */
 #define TAG_MISN TAG('M', 'I', 'S', 'N')   /* the mission tallies             */
 #define TAG_BRKS TAG('B', 'R', 'K', 'S')   /* which panes have been shot      */
+#define TAG_MOVR TAG('M', 'O', 'V', 'R')   /* which doors are open, and where */
 #define TAG_SETT TAG('S', 'E', 'T', 'T')   /* the menu settings               */
 
 #define SAVE_FILE_HEADER 16                /* magic, version, size, crc       */
@@ -274,6 +275,7 @@ void q2_save_free(q2_save *s)
     free(s->trigger_inside);
     free(s->entities);
     free(s->breakables);
+    free(s->movers);
     memset(s, 0, sizeof(*s));
 }
 
@@ -1150,6 +1152,140 @@ static bool read_breakables(rbuf *r, q2_save *s)
     return true;
 }
 
+static void write_movers(wbuf *w, const q2_save *s)
+{
+    size_t at = w_chunk_begin(w, TAG_MOVR);
+    u32 i;
+
+    w_u32(w, s->mover_count);
+    for (i = 0; i < s->mover_count; i++) {
+        const q2_save_mover *m = &s->movers[i];
+
+        w_u32(w, m->item_offset);
+        w_u8(w, m->seq);
+        w_u8(w, m->state);
+        w_u8(w, m->saved_state);
+        w_u8(w, m->block_timer);
+        w_u8(w, m->triggered);
+        w_u8(w, m->announced);
+        w_u16(w, m->delay_timer);
+        w_u16(w, m->wait_timer);
+        w_s32(w, m->offset);
+    }
+
+    w_chunk_end(w, at);
+}
+
+static bool read_movers(rbuf *r, q2_save *s)
+{
+    u32 n = r_u32(r);
+    u32 i;
+
+    if (r->bad)
+        return false;
+    if (n == 0)
+        return true;
+    if (n > SAVE_MAX_ENTITIES)
+        return false;
+
+    free(s->movers);
+    s->movers = (q2_save_mover *)calloc(n, sizeof(*s->movers));
+    if (!s->movers)
+        return false;
+    s->mover_count = n;
+
+    for (i = 0; i < n; i++) {
+        q2_save_mover *m = &s->movers[i];
+
+        m->item_offset = r_u32(r);
+        m->seq         = r_u8(r);
+        m->state       = r_u8(r);
+        m->saved_state = r_u8(r);
+        m->block_timer = r_u8(r);
+        m->triggered   = r_u8(r);
+        m->announced   = r_u8(r);
+        m->delay_timer = r_u16(r);
+        m->wait_timer  = r_u16(r);
+        m->offset      = r_s32(r);
+        if (r->bad)
+            return false;
+    }
+    return true;
+}
+
+/* Which occurrence of `item_offset` mover `index` is. A MOVER_C double door is
+ * two leaves from one item, so the offset alone does not identify a leaf. */
+static u8 mover_seq(const q2_mover_set *set, u32 index)
+{
+    u32 i, n = 0;
+
+    for (i = 0; i < index && i < set->count; i++)
+        if (set->movers[i].item_offset == set->movers[index].item_offset)
+            n++;
+    return (u8)(n > 255 ? 255 : n);
+}
+
+void q2_save_capture_movers(q2_save *s, const q2_mover_set *set)
+{
+    u32 i;
+
+    if (!s || !set || set->count == 0 || !set->movers)
+        return;
+
+    free(s->movers);
+    s->movers = (q2_save_mover *)calloc(set->count, sizeof(*s->movers));
+    if (!s->movers)
+        return;
+    s->mover_count = set->count;
+
+    for (i = 0; i < set->count; i++) {
+        const q2_mover *m = &set->movers[i];
+        q2_save_mover  *d = &s->movers[i];
+
+        d->item_offset = m->item_offset;
+        d->seq         = mover_seq(set, i);
+        d->state       = m->state;
+        d->saved_state = m->saved_state;
+        d->block_timer = m->block_timer;
+        d->triggered   = m->triggered;
+        d->announced   = m->announced;
+        d->delay_timer = m->delay_timer;
+        d->wait_timer  = m->wait_timer;
+        d->offset      = m->offset;
+    }
+}
+
+void q2_save_apply_movers(const q2_save *s, q2_mover_set *set)
+{
+    u32 i, j;
+
+    if (!s || !s->movers || !set || !set->movers)
+        return;
+
+    for (i = 0; i < s->mover_count; i++) {
+        const q2_save_mover *d = &s->movers[i];
+
+        for (j = 0; j < set->count; j++) {
+            q2_mover *m = &set->movers[j];
+
+            if (m->item_offset != d->item_offset)
+                continue;
+            if (mover_seq(set, j) != d->seq)
+                continue;
+
+            m->state       = d->state;
+            m->saved_state = d->saved_state;
+            m->block_timer = d->block_timer;
+            m->triggered   = d->triggered;
+            m->announced   = d->announced;
+            m->delay_timer = d->delay_timer;
+            m->wait_timer  = d->wait_timer;
+            m->offset      = d->offset;
+            break;
+        }
+    }
+}
+
 static void write_mission(wbuf *w, const q2_save *s)
 {
     size_t at = w_chunk_begin(w, TAG_MISN);
@@ -1275,6 +1411,7 @@ static q2_result build_body(const q2_save *s, wbuf *w)
     write_bytes_chunk(w, TAG_TRIG, s->trigger_inside, s->trigger_count);
     write_entities(w, s);
     write_breakables(w, s);
+    write_movers(w, s);
     write_mission(w, s);
     write_settings(w, s);
 
@@ -1466,6 +1603,11 @@ static q2_result read_body(q2_save *out, const u8 *body, size_t body_size)
 
         case TAG_BRKS:
             if (!read_breakables(&c, out))
+                return Q2_ERR_BAD_FORMAT;
+            break;
+
+        case TAG_MOVR:
+            if (!read_movers(&c, out))
                 return Q2_ERR_BAD_FORMAT;
             break;
 

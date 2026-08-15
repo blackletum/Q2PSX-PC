@@ -7591,3 +7591,15 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
 
       `tests/test_save.c` round-trips it through a registry whose two panes are in the OPPOSITE order, so
       the test fails if the match ever becomes positional.
+
+      **And the DOORS had the same hole, with a worse consequence.** The mover set lives in the client
+      rather than the sim, so `q2_save_capture` never saw it — a reload rebuilt every door shut. Worse than
+      shut: the script flags ARE carried, so the record that opened it has already run and will not run
+      again. The door was closed and could not be reopened.
+
+      A `MOVR` chunk carries state, saved state, the block, delay and wait countdowns — all three are
+      mutated at run time, not settings — the triggered and announced latches, and how far along its travel
+      it is. Keyed by the event item's offset, which `mover.h` already establishes as a mover's identity,
+      PLUS which of that item's movers it is: a `MOVER_C` double door is two leaves from one item, so the
+      offset alone does not name a leaf. The test builds exactly that case and fails if the sequence number
+      is dropped.
