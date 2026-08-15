@@ -5148,11 +5148,29 @@ nothing saying so.
       `q2_creature_move_names()` already reads — the names on both sides ARE the same strings
       (`Sway`, `Walk`, `Melee`, `Death 2` appear in the Arachner's module and its block D alike).
 
-      **Which sharpens #62 rather than settling it.** Pairing by name is not in doubt any more; what #62
-      measured was whether an AI move's length times three equals its same-named block-D move's length, and
-      that fails 92 of 97. Both cannot hold unless **an AI move's frame range is not the same quantity as its
-      animation's length** — which is now the single remaining question in this whole chain, and a much
-      better-posed one than "which clip does it play".
+      **And that last question answers itself from the record layout.** The runtime record the engine walks
+      holds `first`, `last` and `base`; block D holds `start`, `end` and a name. Put the two together and
+      what each field is becomes plain:
+
+          first, last   AI frames — how long the creature SPENDS in the move
+          base          where in the model's timeline that move begins
+                        (block D's `start`, x5, since block D counts 2/frame and position counts 10)
+          position      base + 30 * (ai_frame - first)
+
+      **These are different quantities and nothing requires them to agree.** An AI move's length is a
+      duration; a block-D move's span is an animation's extent. A move whose duration is shorter than its
+      animation simply stops partway; one that is longer runs on into whatever follows on the continuous
+      timeline — which `model.h:436` already said is legal, because a clip boundary is only where the
+      subtractions fall.
+
+      So #62's 92-of-97 is not a defect and never was. It is the observation that a creature's AI durations
+      and its animations' extents were authored independently, which is what one would expect. The 3:1 that
+      #51h measured is not a matching rule at all — it is just `30 / 10`, the ratio between the two units,
+      and the 96/101 is how often the two happen to coincide.
+
+      **The chain is closed**: name -> block D record -> `base` -> `position = base + 30*(f - first)` ->
+      walk the clip chain. Every term read from the disc, nothing inferred. What the port still lacks is
+      the code, not the knowledge.
 
 - [ ] 64. **The first code found that walks block D — and it names the `rest` field.**
       Hunting the load-time transform (#51f, #63) by asking who reads `model+0x38`:
