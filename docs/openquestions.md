@@ -5598,6 +5598,22 @@ folds them into one helper with a sign flag fails rather than silently halves th
       What remains open is narrower than it was: the force-draw mask belongs to a descriptor built by
       whatever calls `0x800B2410`, and nothing in this image calls it.
 
+      **Five approaches are now closed, which is worth recording so none is repeated.**
+
+      1. `jal` to `0x800B2410` — none in the image.
+      2. `lui`+`addiu` forming the address — none.
+      3. `lui`+`ori` forming it — none.
+      4. A raw pointer word equal to it, i.e. a dispatch table entry — none.
+      5. **The mask is not authored in the model file.** `block_b` was the candidate — "16 zero bytes on
+         821 models, larger on 144" is the right shape for a per-face bit array, since a 128-face model
+         needs exactly 16 bytes. Measured over all **1,723** models it is refuted: block B's size tracks
+         neither the face count (a 233-face model needs 32 bytes and carries 1,996) nor the part count
+         (size/parts ranges over 11.6, 12.0, 13.8, 17.3, 18.5, 26.3, 38.3, 46.5), and it is mostly
+         NON-zero where a sparse force-draw mask would be mostly zero.
+
+      What would settle it is a call site, and this image does not contain one. That is the honest end of
+      what this disc can be asked.
+
       **The other way in is closed: the linker has NO CALLER in the image.** Searching the whole
       loaded segment for `j`/`jal` to `0x800B2410`, for a materialised `lui`/`addiu` pair forming it, and
       for a raw word equal to it — a function-pointer table entry — finds **nothing, by all three**. So the
