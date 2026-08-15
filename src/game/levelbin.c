@@ -619,3 +619,80 @@ u32 q2_laserbeams_draw(const q2_laserbeam_set *set, q2_fx_world *w, q2_rng *rng)
 
     return n;
 }
+
+/* ------------------------------------------------------------------------- */
+/* VIEW CREDITS — see levelbin.h                                              */
+/* ------------------------------------------------------------------------- */
+/* Is `p` the start of a printable, NUL-terminated string of at least two
+ * characters? The pool is packed and 4-aligned, which is what makes walking it
+ * possible at all. */
+static bool credit_string_at(const u8 *module, u32 size, u32 off, u32 *len_out)
+{
+    u32 i = 0;
+
+    while (off + i < size && module[off + i] != 0) {
+        u8 ch = module[off + i];
+
+        if (ch < 0x20 || ch > 0x7E)
+            return false;
+        i++;
+        if (i > 63)
+            return false;
+    }
+    if (i < 2 || off + i >= size)
+        return false;
+    *len_out = i;
+    return true;
+}
+
+u32 q2_levelbin_credits(const u8 *module, u32 size,
+                        const char **out, u32 max)
+{
+    static const char k_first[] = "HAMMERHEAD LTD";
+    static const char k_stop[]  = "PLEASE WAIT WHILE";
+    u32 off, start = 0, n = 0;
+
+    if (!module || size == 0)
+        return 0;
+
+    /* Find the roll's first line. */
+    for (off = 0; off + sizeof(k_first) <= size; off += 4) {
+        u32 len;
+
+        if (!credit_string_at(module, size, off, &len))
+            continue;
+        if (len == sizeof(k_first) - 1 &&
+            memcmp(module + off, k_first, len) == 0) {
+            start = off;
+            break;
+        }
+    }
+    if (!start)
+        return 0;
+
+    /*
+     * Then walk the pool forward, string by string, to the disc-swap prompt.
+     * Strings are packed and each is padded to the next 4 bytes, which is what
+     * `+= (len + 4) & ~3` steps over — a run that does not step exactly onto
+     * the next string is not this pool and the walk stops.
+     */
+    for (off = start; off < size; ) {
+        u32 len;
+
+        if (!credit_string_at(module, size, off, &len))
+            break;
+        if (len == sizeof(k_stop) - 1 &&
+            memcmp(module + off, k_stop, len) == 0)
+            break;
+
+        if (out && n < max)
+            out[n] = (const char *)module + off;
+        n++;
+        if (n >= Q2_LB_CREDITS_MAX)
+            break;
+
+        off += (len + 4u) & ~3u;
+    }
+
+    return n;
+}

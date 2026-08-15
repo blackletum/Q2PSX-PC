@@ -7629,3 +7629,23 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
           BASE1, a creature killed    BEFORE 1 dead               AFTER 1 dead
 
       Before this pass all three of those AFTER columns were zero.
+- [x] 123. **VIEW CREDITS: the front end offered it and the port bounced off it. The whole roll is on the
+      disc, and none of it is a page record.**
+      `Q2_MREQ_CREDITS` fell through to `Q2_MREQ_NOT_BUILT` — "that page is not reconstructed yet" — and
+      went back to the title. The words were there the whole time: QFRONT's text pool carries the credit
+      roll as **101 contiguous strings**, from `HAMMERHEAD LTD` to `DAVID GRIJNS`, ending immediately
+      before `PLEASE WAIT WHILE`, which is the disc-swap prompt and the first string past the roll.
+
+      **And it is not a page array, which is the finding.** `q2_levelbin_menu_pages` reads 45 pages and 186
+      rows out of this module and exactly ONE of them mentions the credits: the `VIEW CREDITS` row on the
+      OPTIONS page, at 256,163. There is no `{text, x, y}` record for a single credit line, so how the roll
+      is paged or scrolled, and which lines are headings rather than names, lives in the module's CODE.
+
+      So the port does what it did for the deathmatch scoreboard (#106): **the words are the module's and
+      the layout is this port's, and it is marked at the reader rather than left to be discovered.** The
+      roll is presented in module order — the order it was written in — as a centred scroll in the game's
+      own font. What the port does NOT do is guess the pairing of role to name.
+
+      Anchored on the two strings rather than on offsets, so a build that moves the pool still finds it.
+      `q2psx-inspect menu <disc> pages QFRONT` prints the roll beside the pages, so "the words are on the
+      disc and the layout is not" is a claim that can be checked rather than taken.

@@ -512,6 +512,7 @@ typedef struct client {
     bool              no_lasers;   /* --no-lasers: the before picture */
     bool              shoot;       /* --shoot: hold fire              */
     long              save_load_at; /* --save-load N                  */
+    bool              show_credits; /* --credits                      */
     bool              all_keys;    /* --keys: every key in the pocket */
 
     q2_mover_set      movers;
@@ -616,6 +617,15 @@ typedef struct client {
     bool             lights_ready;
 
     bool             in_front_end;
+
+    /*
+     * VIEW CREDITS. The words are QFRONT's own roll (levelbin.h); the layout —
+     * a centred scroll — is this port's, and is marked so at the reader.
+     */
+    bool             credits_open;
+    const char      *credits[Q2_LB_CREDITS_MAX];
+    u32              credits_count;
+    s32              credits_scroll;
     char             first_map[64];
 
     bool             show_glint;
@@ -4275,7 +4285,32 @@ static void client_menu_requests(client *c)
         client_load_zone(c, c->first_map, 0);
         q2_menu_close(&c->menu);
         break;
-    case Q2_MREQ_CREDITS:
+    case Q2_MREQ_CREDITS: {
+        /*
+         * The credit roll, read out of the module the front end IS. It is not
+         * a page array — 45 pages and 186 rows in QFRONT and only one of them
+         * mentions the credits, which is the row that got us here — so the
+         * words are the module's and the scroll is this port's.
+         */
+        const dat_chunk *lb = c->common.chunk[Q2_COMMON_LEVEL_BIN];
+
+        c->credits_count = 0;
+        if (lb && lb->data && lb->size)
+            c->credits_count = q2_levelbin_credits(lb->data, lb->size,
+                                                   c->credits,
+                                                   Q2_LB_CREDITS_MAX);
+        if (c->credits_count) {
+            c->credits_open   = true;
+            c->credits_scroll = 0;
+            q2_menu_close(&c->menu);
+            Q2_INFO("front end: credits, %u lines", c->credits_count);
+        } else {
+            Q2_INFO("front end: this module carries no credit roll");
+            q2_menu_open(&c->menu);
+            q2_menu_goto(&c->menu, Q2_PAGE_FRONT_TITLE);
+        }
+        break;
+    }
     case Q2_MREQ_NOT_BUILT:
         /* A real page of the front end's module that the port has not built.
          * Going back to the title is visible; doing nothing would not be. */
@@ -5973,7 +6008,7 @@ static void client_frame(client *c)
      */
     if (c->hud_ready && c->hud_font_ready &&
         !c->menu.open && !c->mission_open && !c->mcard_open &&
-        !c->endmis_open) {
+        !c->endmis_open && !c->credits_open) {
         q2_hud_ctx ctx;
 
         c->hud.crosshair = (c->settings.v[Q2_SET_CROSSHAIR] != 0);
@@ -6051,6 +6086,41 @@ static void client_frame(client *c)
                              k_prompt[k].text);
             }
         }
+    }
+
+    /*
+     * VIEW CREDITS: the module's roll, scrolling up the middle of the screen.
+     *
+     * The scroll rate and the spacing are this port's, not a reading — the
+     * module's own arrangement is in code the port does not run, and #123 says
+     * so. What IS the disc's is every word and their order.
+     */
+    if (c->credits_open && c->hud_font_ready) {
+        q2_hud_ctx ctx;
+        q2_hud_pen pen;
+        u32 li;
+        s32 top;
+
+        q2_hud_ctx_centre_in(&ctx, c->width, c->height);
+        q2_hud_pen_default(&pen);
+
+        /* One line every 14 pixels, the whole roll sliding up at a pixel every
+         * other frame, and looping when the last line has left the top. */
+        top = (s32)ctx.height - (c->credits_scroll / 2);
+        if (top + (s32)c->credits_count * 14 < 0)
+            c->credits_scroll = 0;
+
+        for (li = 0; li < c->credits_count; li++) {
+            s32 y = top + (s32)li * 14;
+
+            if (y < -14 || y > (s32)ctx.height)
+                continue;
+            ctx.home_x = (s16)(ctx.width / 2 -
+                               q2_hud_measure(c->credits[li]) * 8 / 2);
+            ctx.home_y = (s16)y;
+            q2_hud_print(&c->hud_font, &ctx, &pen, &c->ot, 0, c->credits[li]);
+        }
+        c->credits_scroll++;
     }
 
     /*
@@ -6303,6 +6373,9 @@ int main(int argc, char **argv)
          */
         else if (!strcmp(argv[i], "--save-load") && i + 1 < argc)
             c.save_load_at = strtol(argv[++i], NULL, 10);
+        /* `--credits`: open the roll straight away. A headless run cannot walk
+         * the title screen to OPTIONS and press X. */
+        else if (!strcmp(argv[i], "--credits"))               c.show_credits = true;
         /* `--keys`: hand the player every key. A scripted run cannot go and
          * find one, and the records behind `ONKEYDO` are otherwise unreachable
          * in a sweep — which is the gate working, and also why what is behind
@@ -6809,6 +6882,22 @@ no_window:
         }
     }
 
+    if (c.show_credits) {
+        client_menu_requests(&c);   /* nothing pending; this just settles it */
+        {
+            const dat_chunk *lb = c.common.chunk[Q2_COMMON_LEVEL_BIN];
+
+            if (lb && lb->data && lb->size)
+                c.credits_count = q2_levelbin_credits(lb->data, lb->size,
+                                                      c.credits,
+                                                      Q2_LB_CREDITS_MAX);
+            c.credits_open = c.credits_count > 0;
+            if (c.credits_open)
+                q2_menu_close(&c.menu);
+            Q2_INFO("credits: %u lines", c.credits_count);
+        }
+    }
+
     c.running = true;
     last = c.headless ? 0 : SDL_GetTicks();
 
@@ -6846,6 +6935,13 @@ no_window:
                  */
                 if (c.film_open) {
                     client_film_stop(&c);
+                    continue;
+                }
+                /* Any key leaves the credits, back to the title. */
+                if (c.credits_open) {
+                    c.credits_open = false;
+                    q2_menu_open(&c.menu);
+                    q2_menu_goto(&c.menu, Q2_PAGE_FRONT_TITLE);
                     continue;
                 }
                 switch (ev.key.key) {

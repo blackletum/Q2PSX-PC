@@ -219,6 +219,36 @@ u32 q2_levelbin_menu_pages(const u8 *module, u32 size, u32 load_base,
                            q2_lb_menu_page *out, u32 max);
 
 /* ------------------------------------------------------------------------- */
+/* VIEW CREDITS — the one front-end page whose text is not in a page array     */
+/* ------------------------------------------------------------------------- */
+/*
+ * The title screen offers VIEW CREDITS and this port bounced straight back off
+ * it. The words are all there: QFRONT's text pool carries the whole credit roll
+ * as a contiguous run of strings, from `HAMMERHEAD LTD` to just before
+ * `PLEASE WAIT WHILE` — which is the disc-swap prompt and the first string past
+ * the end of it.
+ *
+ * They are NOT a page array. `q2_levelbin_menu_pages` finds 45 pages and 186
+ * rows in this module and exactly one of them mentions the credits: the row
+ * labelled `VIEW CREDITS` on the OPTIONS page. So there is no `{text, x, y}`
+ * record for a credit line anywhere, and the arrangement — how the roll is
+ * paged or scrolled, which lines are headings and which are names — is in the
+ * module's CODE, which this port does not run.
+ *
+ * So the words are the module's and the LAYOUT IS THIS PORT'S, exactly as it is
+ * for the deathmatch scoreboard (#106), and it is marked here rather than left
+ * to be discovered. What the port does not do is guess at the pairing: the run
+ * is presented in module order, which is the order the roll was written in.
+ *
+ * Anchored on the two strings rather than on offsets, so a build that moves the
+ * pool still finds it.
+ */
+#define Q2_LB_CREDITS_MAX 256
+
+u32 q2_levelbin_credits(const u8 *module, u32 size,
+                        const char **out, u32 max);
+
+/* ------------------------------------------------------------------------- */
 /* QENDMIS — the movie player, and what the end of the campaign actually is   */
 /* ------------------------------------------------------------------------- */
 /*

@@ -599,6 +599,28 @@ static int module_pages(const disc *d, const char *map)
     }
 
     printf("  %u pages, %u rows\n", n, rows);
+
+    /*
+     * And the credit roll, which is NOT one of those pages — see levelbin.h.
+     * Printed here because "the words are on the disc and the layout is not"
+     * is a claim worth being able to check.
+     */
+    {
+        static const char *cred[Q2_LB_CREDITS_MAX];
+        u32 nc = q2_levelbin_credits(lb->data, lb->size, cred,
+                                     Q2_LB_CREDITS_MAX);
+
+        if (nc) {
+            u32 k;
+
+            printf("\n  credit roll: %u lines, none of them a page record\n", nc);
+            for (k = 0; k < nc && k < 8; k++)
+                printf("    %s\n", cred[k]);
+            if (nc > 8)
+                printf("    ... and %u more, ending on \"%s\"\n",
+                       nc - 8, cred[nc - 1]);
+        }
+    }
     q2_common_close(&cf);
     return 0;
 }
