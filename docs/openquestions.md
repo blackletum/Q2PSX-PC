@@ -4569,7 +4569,7 @@ nothing saying so.
       78-93, `"Stand"` 65-77) do not overlap either, so merging is not the answer for them. That is the whole
       remaining residue of the 51 series.
 
-- [ ] 59. **The Arachner's residue, accounted for clip by clip: two moves and two clips, one frame apart.**
+- [x] 59. **The Arachner's residue, accounted for clip by clip: two moves and two clips, one frame apart.**
       Its model has 13 clips and its module 11 decoded moves plus 2 the decoder never finds. Assigning each
       move to a clip by the 3:1 rule and striking that clip off:
 
@@ -4658,7 +4658,7 @@ nothing saying so.
       its model is the only Arachner on the disc. This is where the 51 series ends for now, with the anomaly
       stated precisely rather than dressed in an explanation that does not survive.
 
-- [ ] 60. **The Arachner's last two: the loop hypothesis tested and refuted.**
+- [x] 60. **The Arachner's last two: the loop hypothesis tested and refuted.**
       Reading the per-move lines gave a promising shape — the two 16-24 records are `via 3` and `via 4`, the
       Arachner's WALK and RUN, and both have `end 00000000`, meaning they loop. A looping clip plausibly
       carries one extra frame to close the cycle, which would turn 9 AI frames into 10 clip frames and land
@@ -4677,6 +4677,27 @@ nothing saying so.
       lands 14% of the time for an arbitrary length — the same rate as `n*3` — so two distinct cases both
       hitting it is roughly a 2% coincidence. Suggestive, not a finding, and **no mechanism has been found
       that separates those two moves from the 113 that fit.** Recorded as the residue it is.
+
+      **CLOSED, by asking what the residue can REACH.** The 3:1 rule is the LENGTH heuristic, and #63 put
+      the engine's own path in front of it: a move whose module names it is posed by looking that name up
+      in the model's block D, and the length match is the fallback for a move with no name. So the question
+      is not whether the two Arachner moves fit the rule — it is whether anything consults the rule for
+      them. Measured over four maps with creatures in them:
+
+          JAIL2   1500 poses by name, 0 named but no position, 0 unnamed, 0 with no such name in block D
+          BASE1   1158 by name, 0 named but no position, 42 unnamed
+          BIGGUN   894 by name, 0 named but no position,  6 unnamed
+          BOSS1    519 by name, 0 named but no position, 81 unnamed
+
+      **The name path never misses.** Not one pose across those runs resolved a name and failed to place
+      it, and not one name was absent from its model's block D. `"Sway"` (16-24) is a named move, so it is
+      posed by name and the clip it "should" have by length is never asked for.
+
+      What is left of the residue is exactly one move: 25-33, which is UNNAMED and therefore does take the
+      length path — where its 9 frames want a 27-frame clip the Arachner does not have, so it falls to
+      `q2_model_anim_by_length`'s ordinal tie-break and may take a neighbouring clip. One unnamed move on
+      one creature, and the fact that stands behind it — two 9-frame moves and two unused 30-frame clips —
+      is a statement about the disc's authoring rather than about anything the port runs.
 
 - [x] 61. **Why the Tank Commander is still silent, given its sounds ARE on the disc (#60).** *(Answered by #98: the module registers by name, and the play site names a BSS word.)*
       First move was to read the sound addresses the decoder reports for it — `sound(80102110)`,
