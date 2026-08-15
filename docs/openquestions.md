@@ -6139,3 +6139,29 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       universal either — PISTON's slot resolves, and the rotators' resolve 41 of 95. Whatever leaves an
       object slot empty is per-primitive or per-item rather than a property of the format, and BASE0's
       LIFT1 shows the same thing on the OTHER operand: four good nodes and a speed of zero.
+
+- [x] 82. **CAGELIFT1 has a speed; the operand table was short an entry.** #81 declined to build one
+      because its table named none, and the table was wrong rather than the primitive.
+
+      Its constructor at `0x80029794` is LIFT1's, operand for operand. With `s0 = obj + 0x38` — pinned by
+      `sw a3, -12(s0)` writing the per-frame tick `0x80025658`, which `mover.h` already records both
+      lifts install:
+
+          800298BC  lhu  v0, 4(s5)      ; item +4
+          800298C4  subu v0, zero, v0   ; negated
+          800298C8  sh   v0, 12(s0)     ; -> obj+0x44, the TARGET
+          800298CC  lh   v0, 6(s5)      ; item +6
+          800298D4  bgez / subu         ; abs()
+          800298E0  sh   v0, 2(s0)      ; -> obj+0x3A, the SPEED
+
+      Built now, and it builds: BASE2 goes 1 -> 2 CALL movers, JAIL4 0 -> 1.
+
+      **And PLATFORM's table was wrong in the same way and in a more interesting place.** Its speed is at
+      `+18` (`0x8002CDC4`), which the table also omitted; and its `origin` is not "read by the
+      constructor only" — the TARGET is computed FROM it. `0x8002CCE8` sums three squared deltas and
+      passes them through `0x80055CBC`, so a platform's travel is the distance between the node's own
+      position and where the script says it ends up. That is why this port still does not build one: the
+      target needs the node's position, which the mover builder does not have. One call on the disc.
+
+      `DISH` remains unread — its constructor writes only `obj+0x3E` from the operands, so its speed
+      comes from somewhere this pass did not find.

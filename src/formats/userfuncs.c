@@ -118,8 +118,27 @@ static const q2_uf_prim_info uf_table[Q2_UF_PRIM_COUNT] = {
     {16, 1, Q2_UF_OP_U8,      "time_a",  "* 300 into obj+0x4C"},
     {17, 1, Q2_UF_OP_U8,      "time_b",  "* 300 into obj+0x4E; 0xFF => never"}}},
 
-{Q2_UF_CAGELIFT1, "CAGELIFT1", 20, true, true, 3, {
-    {4,  1, Q2_UF_OP_U16,     "param_a", NULL},
+/*
+ * CORRECTION — CAGELIFT1 has a SPEED and this table did not list it.
+ *
+ * Its constructor at `0x80029794` is LIFT1's, operand for operand. With
+ * `s0 = obj + 0x38` — pinned by `sw a3, -12(s0)` writing the per-frame tick
+ * `0x80025658`, which mover.h already records both lifts install:
+ *
+ *     800298BC  lhu v0, 4(s5)     ; item +4
+ *     800298C4  subu v0, zero, v0 ; negated
+ *     800298C8  sh  v0, 12(s0)    ; -> obj+0x44, the TARGET
+ *     800298CC  lh  v0, 6(s5)     ; item +6
+ *     800298D4  bgez / subu       ; abs()
+ *     800298E0  sh  v0, 2(s0)     ; -> obj+0x3A, the SPEED
+ *
+ * The omission is why `q2_movers_build_calls` could not build one and said so:
+ * "a mover with speed zero is triggered, ticks and never arrives". It has a
+ * speed; the table was short an entry.
+ */
+{Q2_UF_CAGELIFT1, "CAGELIFT1", 20, true, true, 4, {
+    {4,  1, Q2_UF_OP_U16,     "param_a", "negated into obj+0x44 (0x800298C4)"},
+    {6,  1, Q2_UF_OP_S16,     "param_b", "abs() into obj+0x3A (0x800298DC)"},
     {8,  4, Q2_UF_OP_OBJSLOT, "objects", "up to four"},
     {18, 1, Q2_UF_OP_U8,      "time_b",  "* 300; 0xFF => never"}}},
 
@@ -144,8 +163,28 @@ static const q2_uf_prim_info uf_table[Q2_UF_PRIM_COUNT] = {
     {12, 4, Q2_UF_OP_OBJSLOT, "objects", NULL},
     {20, 1, Q2_UF_OP_U16,     "axis",  "as SIMROT"}}},
 
-{Q2_UF_PLATFORM, "PLATFORM", 32, true, true, 4, {
-    {4,  1, Q2_UF_OP_VEC3_S32, "origin", "read by the constructor only"},
+/*
+ * PLATFORM's speed is at +18 and this table did not list it either, and its
+ * `origin` is not merely "read by the constructor" — it is what the TARGET is
+ * computed from. `0x8002CBB0`, with `s0` the object itself here rather than
+ * `obj + 0x38`:
+ *
+ *     8002CDB0  lh   v0, 18(t2)   ; t2 = the item (saved at 0x8002CC30)
+ *     8002CDB8  bgez / subu       ; abs()
+ *     8002CDC4  sh   v0, 58(s0)   ; -> obj+0x3A, the SPEED
+ *     8002CDB4  sh   s4, 68(s0)   ; -> obj+0x44, the TARGET
+ *
+ * and `s4` is a DISTANCE: three squared deltas summed and passed through
+ * `0x80055CBC`, between the `origin` operand and the object's own position. So
+ * a platform's travel is not authored as a length, it is the gap between where
+ * the node is and where the script says it should end up. That is why this
+ * port does not build one yet — the target needs the node's position, which
+ * the mover builder does not have.
+ */
+{Q2_UF_PLATFORM, "PLATFORM", 32, true, true, 5, {
+    {4,  1, Q2_UF_OP_VEC3_S32, "origin",
+     "the far END of the travel; the target is |origin - node| (0x8002CCE8)"},
+    {18, 1, Q2_UF_OP_S16,      "speed",  "abs() into obj+0x3A (0x8002CDC4)"},
     {20, 1, Q2_UF_OP_OBJSLOT,  "object", NULL},
     {28, 1, Q2_UF_OP_U8,       "time_a", "written to obj+0x4C UNSCALED"},
     {29, 1, Q2_UF_OP_U8,       "time_b", "* 300; 0xFF => never"}}},

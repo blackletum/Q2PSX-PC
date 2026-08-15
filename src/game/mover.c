@@ -232,6 +232,7 @@ q2_result q2_movers_build_calls(q2_mover_set *out, const q2_events *events,
             if (q2_uf_decode_call(&call, uf, &item) != Q2_OK)
                 continue;
             if (call.prim != Q2_UF_LIFT1 &&
+                call.prim != Q2_UF_CAGELIFT1 &&
                 call.prim != Q2_UF_BUTTON &&
                 call.prim != Q2_UF_PISTON)
                 continue;
@@ -260,6 +261,17 @@ q2_result q2_movers_build_calls(q2_mover_set *out, const q2_events *events,
                 m->wait_timer  = (p[17] == 0xFF)
                                  ? Q2_MOVER_WAIT_NEVER
                                  : (u16)(p[17] * Q2_MOVER_TIMEBASE);
+                break;
+
+            case Q2_UF_CAGELIFT1:
+                /* LIFT1's constructor operand for operand — see the correction
+                 * in userfuncs.c. Only the wait sits elsewhere. */
+                m->target      = (s16)-(s16)q2_rd_u16(p + 4);
+                m->speed       = (s16)abs(q2_rd_s16(p + 6));
+                collect_nodes(m, p, 8);
+                m->wait_timer  = (p[18] == 0xFF)
+                                 ? Q2_MOVER_WAIT_NEVER
+                                 : (u16)(p[18] * Q2_MOVER_TIMEBASE);
                 break;
 
             case Q2_UF_BUTTON: {
