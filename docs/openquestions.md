@@ -6077,3 +6077,27 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       Measured across twenty maps, every one of them summons — BASE1 19 creatures, JAIL2 31, JAIL4 26,
       BASE3 24, JAIL3 25. And BASE1 now starts with **4 live where it started with 8**, the other four
       arriving when the script asks for them.
+
+- [x] 80. **HELPCOMPUTER, SETWIBBLE and TELEPORT.** Three more from #73's histogram, and the first is the
+      one a player meets: 20 of the disc's 26 `HELPCOMPUTER` calls are reachable by a trigger volume, and
+      the two Strings keys each carries are the game's own objectives —
+
+          BASE1  "Locate Base Installation Elevator."
+          BASE2  "Use sewer tunnels to gain access to the Comm Centre."
+          JAIL4  "Get a Security Pass from the Cell Blocks to gain further access."
+          LAB    "Locate the Repair Facility and steal the Commander's head you find there."
+          POWER1 "Locate the Reactor Core and disable its safety mechanism."
+
+      — none of which had ever appeared. Its third operand selects a screen this port does not have; the
+      text goes to the overlay, where the port's own notifications go.
+
+      `SETWIBBLE` writes the low four bits of its operand into `flags08` bits 10..13, and bits 10-11 are
+      the DRAW VARIANT: variant 3 links nothing, which is the second way a script hides a surface group.
+      Only that case is acted on — the other three variants are subdivision choices this port makes per
+      quad rather than per node. Its operand is a Scene NODE index and takes no rebase, which
+      `userfuncs.c` is explicit about: the constructor only restores bytes, it never rewrites them.
+
+      `TELEPORT` resolves 28 of 28 against the map's own spawns. The console "switches zone first if the
+      target is in another one"; **that zone switch is not implemented**, so a target in the resident
+      zone moves the player and one elsewhere is refused with a warning naming both zones — stated
+      rather than silently teleporting into the wrong room.

@@ -430,6 +430,7 @@ typedef struct client {
     u32               node_hidden_count;
     u32               script_hidden;    /* nodes hidden this level */
     u32               script_summoned;  /* creatures a CREBATCH woke */
+    u32               script_teleports; /* TELEPORT calls that moved us */
 
     /*
      * The doors and lifts.
@@ -1645,6 +1646,92 @@ static void client_event_call(void *user, const q2_event_item *item,
             if (!pass) {
                 c->sim[0].event_rt.abort_record = true;
                 c->script_gated++;
+            }
+        }
+    }
+
+    /*
+     * TELEPORT, SETWIBBLE and HELPCOMPUTER — three more the histogram named.
+     *
+     * TELEPORT's `start_pos` resolves 28 of 28 disc-wide against the map's own
+     * spawns. The console "switches zone first if the target is in another
+     * one, then sets entity position"; the zone switch is not done here and is
+     * stated rather than hidden — a target in the resident zone moves the
+     * player, one elsewhere is refused and logged, so the two cases cannot be
+     * confused with each other.
+     *
+     * SETWIBBLE writes the low four bits of its operand into `flags08` bits
+     * 10..13, and bits 10-11 are the DRAW VARIANT: variant 3 links nothing,
+     * which is the other way a script hides a surface group (world.c). Only
+     * that case is acted on, because the other three variants are subdivision
+     * choices the port makes per quad rather than per node. Its operand is a
+     * Scene NODE index and takes no rebase — `userfuncs.c` is explicit that the
+     * constructor only restores bytes and never rewrites them.
+     *
+     * HELPCOMPUTER carries two Strings keys and shows them; the port puts them
+     * on the overlay, which is where its own notifications go. Its third
+     * operand selects a screen this port does not have.
+     */
+    {
+        q2_uf_call call;
+        char key[Q2_UF_NAME_LEN + 1];
+
+        if (q2_uf_decode_call(&call, &c->sim[0].userfuncs, item) == Q2_OK) {
+            if (call.prim == Q2_UF_TELEPORT &&
+                q2_uf_operand_name(&call, 0, key) && key[0]) {
+                q2_start_pos_list spawns;
+                q2_start_pos sp;
+
+                if (q2_start_pos_parse(&spawns, &c->common) == Q2_OK &&
+                    q2_start_pos_find(&spawns, key, &sp)) {
+                    if (sp.zone == c->zone_index) {
+                        s32 to[3];
+
+                        to[0] = sp.x; to[1] = sp.y; to[2] = sp.z;
+                        q2_sim_spawn(&c->sim[0], to, sp.angle);
+                        c->cam.pos[0] = sp.x;
+                        c->cam.pos[1] = sp.y;
+                        c->cam.pos[2] = sp.z;
+                        c->cam.yaw    = sp.angle;
+                        c->script_teleports++;
+                        Q2_INFO("TELEPORT to '%s'", sp.name);
+                    } else {
+                        Q2_WARN("TELEPORT '%s' is in zone %d, not %d — the "
+                                "zone switch is not implemented",
+                                sp.name, (int)sp.zone, c->zone_index);
+                    }
+                }
+            }
+
+            if (call.prim == Q2_UF_SETWIBBLE && item->len >= 8 &&
+                item->payload && c->node_hidden) {
+                const u8 *p    = item->payload - 2;
+                s16       node = q2_rd_s16(p + 4);
+                u16       wib  = q2_rd_u16(p + 6);
+
+                /* Bits 10-11 of flags08 are the variant; 3 links nothing. */
+                if (node >= 0 && (u32)node < c->node_hidden_count &&
+                    (wib & 3u) == 3u && !c->node_hidden[node]) {
+                    c->node_hidden[node] = 1;
+                    c->script_hidden++;
+                }
+            }
+
+            if (call.prim == Q2_UF_HELPCOMPUTER && c->leveltext_ready) {
+                int k;
+
+                for (k = 0; k < 2; k++) {
+                    const char *text;
+
+                    if (!q2_uf_operand_name(&call, (u32)k, key) || !key[0])
+                        continue;
+                    text = q2_leveltext_find(&c->leveltext, key);
+                    if (!text)
+                        continue;
+                    q2_hud_message(&c->hud, text);
+                    c->script_strings++;
+                    Q2_INFO("help computer: \"%s\"", text);
+                }
             }
         }
     }
@@ -4399,9 +4486,9 @@ static void client_write_shot(client *c, bool numbered)
         Q2_INFO("  breakable %u GLASS calls broke something, %u pieces thrown",
                 c->glass_calls, c->glass_pieces);
         Q2_INFO("  script    %u strings, %u sounds, %u gated by ONKEYDO, "
-                "%u nodes hidden, %u creatures summoned",
+                "%u nodes hidden, %u creatures summoned, %u teleports",
                 c->script_strings, c->script_sounds, c->script_gated,
-                c->script_hidden, c->script_summoned);
+                c->script_hidden, c->script_summoned, c->script_teleports);
         Q2_INFO("  movers    %u built, %u triggered by the script, %u tick-moves",
                 c->movers_ready ? c->movers.count : 0,
                 c->mover_triggers, c->mover_moved);
