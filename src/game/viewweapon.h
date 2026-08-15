@@ -238,6 +238,19 @@ bool q2_vw_wants_fire(const q2_viewweapon *vw);
  *
  * Writes the world position and the three angles the model should be drawn at.
  */
+/*
+ * ATTRIBUTED, and it is no longer the open question #41 recorded.
+ *
+ * `aim` is `player+230`, which the call site at 0x8004F40C reads straight out
+ * of the entity with `lhu` and uses. `kick` is what 0x80038260 returns, and
+ * that function is three near-identical blocks, each loading a DEADLINE
+ * (32/36/40 off obj+0xAC), subtracting the clock at 0x800B2BAC, dropping out if
+ * it has passed, and otherwise scaling a stored angle pair by the remaining
+ * fraction and accumulating into the SAME output. Three contributions, each
+ * decaying over its own period, summed - which is a kick and nothing else is.
+ * The periods are in the reciprocal constants: 0x88888889 is /30 (firing),
+ * 0x1B4E81B5 is /150 (damage), 0xB60B60B7 is /90 (landing).
+ */
 void q2_vw_place(const q2_viewweapon *vw,
                  const s32 feet[3], s32 view_offset,
                  const s16 aim[3], const s16 kick[3],

@@ -1070,13 +1070,13 @@ The residues of the resolved blockers keep their parents' numbers.
       port picks `B + F` for both this and the damage flash, on the grounds that both fade to `(0,0,0)` and
       only a mode where zero is a no-op makes that fade continuous — and that the world's own selector table
       makes an unset selector additive anyway. Reasoned, not transcribed, and marked as such in `screen.c`.
-- [ ] **41. Which of the view weapon's two angle triples is the aim and which the kick.** The transform at
+- [x] **41. Which of the view weapon's two angle triples is the aim and which the kick.** *(#103: `player+230` is the aim; `0x80038260` returns the kick.)* The transform at
       `0x8004F40C` sums the triple at player+230 with the one `0x80038260` returns, negates x, and hands the
       result to `RotMatrix`. Nothing at the call site distinguishes them — both are three signed angles added
       to the same matrix — so `src/game/viewweapon.c` takes them as two inputs and adds them the way the
       original does. If the attribution turns out to be the other way round, nothing in the port changes;
       this is recorded so the ambiguity is not mistaken for a decision.
-- [ ] **39. The screen fade, if there is one.** `gp+16660` (`0x800B2714`) is set to **255** and `gp+16676`
+- [x] **39. The screen fade, if there is one.** *(#102: cut. Every module and every file on the disc searched; no reader and no data reference anywhere.)* `gp+16660` (`0x800B2714`) is set to **255** and `gp+16676`
       (`0x800B2724`) to **−16** at the top of every session (`0x8001834C` / `0x80018354`) — a fade level and a
       per-frame decrement if ever there was one — and **neither is read anywhere in the image**. Not
       gp-relative, not through a materialised base, and neither address appears as a data word. Either the
@@ -6830,3 +6830,54 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       five entries in a level table pointing at five directories holding **the same bytes**; the digit
       patched into the name at `0x8001900C` selects a screen inside one shared module, not a different
       level. It also explains why the movie table is present in all five and identical in all five.
+- [x] 102. **The screen fade was CUT. The search space is now exhausted, not merely unsearched.**
+      #39 established that `gp+16660` (`0x800B2714`, set to 255) and `gp+16676` (`0x800B2724`, set to −16)
+      have exactly one writer each and **no reader anywhere in the executable** — not gp-relative, not
+      through a materialised base, and neither address as a data word. It left two possibilities open and
+      named the capability that would decide between them: *"Either the consumer is in an overlay (the
+      movie player, #16) or a relocatable module (#6) … look for the readers once a relocated module can be
+      disassembled."*
+
+      Both of those are now reachable. The movie player is a `LevelBin` module (#92), and modules are
+      decoded routinely. Scanning **every module on the disc** — 164 `COMMON.DAT` and `ZONE*.DAT` files —
+      for any `lui 0x800B` paired with a load or a store at either low half:
+
+          no reference of either kind, in any module on the disc
+
+      And a module cannot be handed the address either: scanning all **213** files for the raw words
+      `800B2714` / `800B2724` as data finds **zero**.
+
+      Executable: one writer, no reader. Every module: no reference. Every file: not passed as data. That
+      is the whole space. **The fade was cut and the two writes are vestigial**, which is what #39
+      suspected and could not show. The port implements no fade, and now that is a finding rather than a
+      default.
+
+- [x] 103. **The view weapon's two angle triples, attributed: `player+230` is the AIM and `0x80038260`
+      returns the KICK.** #41 recorded the ambiguity honestly — "nothing at the call site distinguishes
+      them" — and noted that if the attribution went the other way nothing in the port would change. It
+      does not go the other way, and the two are not symmetric at all once the second one is read.
+
+      The call site takes the first straight out of the entity:
+
+          8004F40C  lhu  v0, 230(s6)      ; the entity's own field, read and used
+          8004F410  lhu  v1, 32(sp)       ; the triple 0x80038260 returned
+          8004F418  addu v0, v0, v1
+          8004F41C  subu v0, zero, v0     ; x negated at the sum
+
+      `0x80038260` is not a field read. It is three near-identical blocks, each of which loads a DEADLINE
+      (`lw v1, 32(s3)` / `36(s3)` / `40(s3)`), subtracts the current time from `0x800B2BAC`, drops out on
+      `bltz` if it has passed, and otherwise scales a stored angle pair by the remaining fraction and
+      **accumulates into the same output pair** — so the three sum. Three independent contributions, each
+      decaying over its own period, added together: that is a kick and nothing else is.
+
+      The periods are in the reciprocal-multiply constants, and they are the three the port already
+      names:
+
+          0x88888889  ->  / 30     the firing kick
+          0x1B4E81B5  ->  / 150    the damage kick
+          0xB60B60B7  ->  / 90     the landing kick
+
+      So `main.c`'s standing comment — "0x80038260 composes three decaying kicks — firing over 30 ticks,
+      damage over 150, landing over 90" — was right, and it is what settles #41: a field with no decay is
+      the aim, and the thing with three decay periods is the kick. Nothing in the port changes, which #41
+      predicted; what changes is that the ambiguity is closed rather than carried.
