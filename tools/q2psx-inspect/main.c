@@ -5255,7 +5255,18 @@ int main(int argc, char **argv)
             int ci = (argc >= 6) ? atoi(argv[5]) : 0;
             int fr = (argc >= 7) ? atoi(argv[6]) : 0;
             const char *outp = (argc >= 8) ? argv[7] : "model.ppm";
-            s32 vy = (argc >= 9) ? (s32)strtol(argv[8], NULL, 10) : 0;
+            /*
+             * Default to the model's FRONT, not its back.
+             *
+             * Yaw 0 puts the eye behind whatever is being inspected, and the
+             * back of a creature is the half of it nobody has ever checked. It
+             * cost #10b three passes: a violet patch on the back of the
+             * Soldier's collar was written up as "the head textures wrong",
+             * and one look from the front would have closed it, because from
+             * the front the model is perfect.
+             */
+            s32 vy = (argc >= 9) ? (s32)strtol(argv[8], NULL, 10)
+                                 : Q2_ANGLE_180;
             rc = cmd_model(d, argv[3], argv[4], ci, fr, outp, vy);
         }
     } else if (strcmp(cmd, "bmodel") == 0) {
