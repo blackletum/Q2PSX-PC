@@ -5588,3 +5588,9 @@ never found it.
 distances from centre scale by 1.93 and 1.17 respectively, so no single `proj` change accounts for both. The
 placement expression is now confirmed correct against `0x80038638`, so the discrepancy is in the offset, the
 model's own scale, or the near-plane treatment of geometry that spans z = 44 to z = 526. Not guessed at.
+
+      **One artefact of `--fire-triggers` worth not chasing.** Firing every trigger volume at once also
+      queues zone gates whose payload is only meaningful from the volume they belong to, so a sweep
+      reports `no zone 90 in BASE1` and the loader refuses it. A player never stands in every volume
+      simultaneously; the warning is the sweep's, not the map's, and the refusal is the correct
+      response to it.
