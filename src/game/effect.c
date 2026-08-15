@@ -1388,6 +1388,12 @@ static u32 draw_groups(q2_fx_world *w, const q2_camera *cam, u32 viewport,
         {
             gte_matrix gm;
             memcpy(gm.m, view, sizeof(gm.m));
+            /* The pixel-aspect correction goes on the GTE's COPY, never on
+             * `view` itself — `to_camera` above uses the same matrix to build
+             * camera-space positions, and a scaled x there would corrupt every
+             * distance and depth derived from it. */
+            q2_rotation_aspect_x(gm.m, q2_aspect_x_12_centre(cam->ofs_x,
+                                                             cam->ofs_y, 0, 0));
             gte_set_rotation(gte, &gm);
         }
 
@@ -1707,6 +1713,9 @@ u32 q2_fx_build_ot(q2_fx_world *w,
 
     camera_basis(cam, view);
     memcpy(gm.m, view, sizeof(gm.m));
+    /* On the copy only — `view` stays unscaled for camera-space work. */
+    q2_rotation_aspect_x(gm.m, q2_aspect_x_12_centre(cam->ofs_x, cam->ofs_y,
+                                                     0, 0));
     gte_set_rotation(gte, &gm);
     gte_set_translation(gte, 0, 0, 0);
 

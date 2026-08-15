@@ -3147,7 +3147,7 @@ static void client_input_simulated(client *c, float dt)
          * locked door; the inventory's low twelve bits are the keys the script
          * tests (inventory.h), which is the same field ONKEYDO reads.
          */
-        if (c->movers_ready && !getenv("Q2_NO_MOVERS"))
+        if (c->movers_ready)
             c->mover_moved += q2_movers_tick(&c->movers, ticks,
                                              (u16)(c->sim[0].combat.inv.flags
                                                    & 0x0FFFu));
