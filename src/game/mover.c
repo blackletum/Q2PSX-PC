@@ -417,8 +417,17 @@ q2_result q2_movers_build_calls(q2_mover_set *out, const q2_events *events,
             if (m->speed == 0 || m->part_count == 0) {
                 const q2_uf_prim_info *pi = q2_uf_info(call.prim);
 
-                Q2_INFO("mover dropped: %s node %d speed %d target %d",
-                        pi ? pi->name : "?", m->node[0], m->speed, m->target);
+                /*
+                 * Say WHICH of the two, and do not print `node[0]` when there
+                 * are none: a dropped mover's node field is the zero the push
+                 * left, and printing it reads as "node 0" — a real index — for
+                 * a mover whose four object slots were all -1.
+                 */
+                Q2_INFO("mover dropped: %s — %s (speed %d, target %d)",
+                        pi ? pi->name : "?",
+                        m->part_count == 0 ? "no object slot resolves"
+                                           : "speed 0, it would never arrive",
+                        m->speed, m->target);
                 out->count--;
             }
         }
