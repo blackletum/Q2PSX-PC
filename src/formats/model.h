@@ -25,7 +25,16 @@
  *   0x20  u32    ofs_faces     ofs_block_a - ofs_faces == 16 * num_faces
  *   0x24  u32    ofs_verts     ALWAYS 0x40; num_verts = (ofs_parts - 0x40) / 12
  *   0x28  u32    ofs_parts     ofs_faces - ofs_parts == 8 * num_parts
- *   0x2C  u32    ofs_block_a   8 x {u16 count; u16 offset; u32 0} directory
+ *   0x2C  u32    ofs_block_a   8 x {u16 count; u16 offset; u32 force} — the
+ *                              FACE BATCH directory. `count` is how many faces
+ *                              the batch holds and `force` is a per-face
+ *                              FORCE-DRAW MASK, one bit per face MSB first,
+ *                              which the linker tests with `bltz` to skip
+ *                              backface rejection outright (0x800B2498).
+ *                              It is ZERO in all 13,784 entries of all 1,723
+ *                              models on this disc, which is why an earlier
+ *                              pass recorded the field as the constant 0 —
+ *                              see q2_model_batch_forces_draw and #65.
  *   0x30  u32    ofs_block_b   16 zero bytes on 821/965; larger on 144
  *   0x34  u32    ofs_block_c
  *   0x38  u32    ofs_block_d
@@ -346,6 +355,7 @@ typedef struct q2_model_anim {
 
 /* One part's pose: a translation in world units and a unit quaternion in
  * 1.3.12, ordered x, y, z, w as the engine builds it. */
+
 typedef struct q2_model_pose {
     s16 t[3];
     s16 q[4];
@@ -396,6 +406,26 @@ s32 q2_model_bank_find(const q2_model_bank *bank, const char *name);
 bool q2_model_get_vertex(const q2_model *m, u32 index, q2_model_vertex *out);
 bool q2_model_get_part(const q2_model *m, u32 index, q2_model_part *out);
 bool q2_model_get_face(const q2_model *m, u32 index, q2_model_face *out);
+
+/*
+ * Does the model's block-A directory force face `index` to be drawn?
+ *
+ * The batch directory is eight `{u16 count; u16 offset; u32 force}` entries;
+ * faces are walked in batch order, and a batch's `force` word carries one bit
+ * per face, MOST SIGNIFICANT FIRST — the linker shifts it left once per face
+ * (`sll t3, t3, 1` at 0x800B24F4) and tests the sign (`bltz t3` at
+ * 0x800B2498), so a set bit means "skip the NCLIP test and draw this face
+ * whichever way it is wound".
+ *
+ * Returns false for every face on this disc: the field is zero in all 13,784
+ * entries of all 1,723 models. It is honoured anyway, for the same reason the
+ * loader tolerates chunk names no file emits — the engine supports it, and a
+ * build that uses it should not be silently mis-drawn.
+ */
+#define Q2_MODEL_BLOCK_A_ENTRIES 8
+
+bool q2_model_batch_forces_draw(const q2_model *m, u32 face_index);
+
 
 /*
  * Resolve every face index to an index into the model's own vertex array, so a

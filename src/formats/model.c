@@ -255,6 +255,48 @@ bool q2_model_get_face(const q2_model *m, u32 index, q2_model_face *out)
     return true;
 }
 
+/*
+ * The block-A force-draw mask — see model.h.
+ *
+ * Faces are walked in batch order, so face `index` belongs to the first batch
+ * whose running total passes it, and its bit is that batch's `force` word
+ * counted from the TOP: the linker shifts left once per face and tests the
+ * sign, which makes face 0 of a batch bit 31.
+ */
+bool q2_model_batch_forces_draw(const q2_model *m, u32 face_index)
+{
+    u32 base = 0, k;
+
+    if (!m || face_index >= m->hdr.num_faces || !m->hdr.ofs_block_a)
+        return false;
+
+    for (k = 0; k < Q2_MODEL_BLOCK_A_ENTRIES; k++) {
+        const u8 *e = m->base + m->hdr.ofs_block_a + (size_t)k * 8;
+        u32 count, force, within;
+
+        if (m->hdr.ofs_block_a + (k + 1) * 8 > m->size)
+            return false;
+
+        count = q2_rd_u16(e);
+        if (count == 0)
+            continue;
+        if (face_index >= base + count) {
+            base += count;
+            continue;
+        }
+
+        force  = q2_rd_u32(e + 4);
+        within = face_index - base;
+        /* MSB first, and a batch longer than 32 faces has no bit for the
+         * rest — the shift runs off the top and the sign is then zero. */
+        if (within >= 32)
+            return false;
+        return ((force << within) & 0x80000000u) != 0;
+    }
+
+    return false;
+}
+
 bool q2_model_is_static(const q2_model *m)
 {
     u32 i;

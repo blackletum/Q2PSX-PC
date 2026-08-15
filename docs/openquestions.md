@@ -6,21 +6,26 @@
 every unit boundary and its mission screen, and ends on `OUTRO1P.STX` playing all 1,559 of its frames (#121).
 Every conformance command the harness carries passes over the whole disc, and 28 of 28 tests pass.
 
-**Four questions remain open, and none of them is behaviour the game needs.** All four are fields with no
-located reader, and the port does the thing each one would have explained without it:
+**One question remains open.** It is a field with no located reader, and the port does the thing it would
+have explained without it. The other three that stood here have since fallen — #6's fixup encoding and
+#28's three clauses were solved in the code and never marked, and #65 fell to noticing that the address it
+was hunting a caller for is a LABEL rather than a function.
 
 | | what is unread | and yet |
 |---|---|---|
 | #6 | the `Rel` fixup encoding's remaining cases | every module on the disc relocates, binds and runs |
 | #8 | the `AreaConx` 9-byte link payload | collision, line of sight and streaming run off `PrimaryColl` |
 | #28 | `Q2Level` `+0x1C`, the `runtime[8]` writers, `music_playlist` | the music plays the map's own seven-track list |
-| #65 | the model force-draw mask | models draw, backface-rejected; a two-sided surface somewhere is one-sided |
+| #65 | *resolved* — block A's third field, zero on all 1,723 models | ~~models draw, backface-rejected~~ |
 
-Two of the four have had their obvious approach CLOSED rather than merely untried, which is worth as much as
-an answer: #65's mask cannot be chased through the linker's caller, because searching the whole segment for a
-`jal`, a materialised address and a raw pointer word to `0x800B2410` finds nothing by all three; and #8's
-best candidate is now measured rather than guessed, with the discriminator stated (graph symmetry) and the
+#8's best candidate is measured rather than guessed, with the discriminator stated (graph symmetry) and the
 result — 25.6% — honest about not being enough.
+
+**A lesson from #65 worth carrying to #8.** Three separate searches for a caller of `0x800B2410` came back
+empty and were recorded as a finding twice. The address was never a function: it is a label inside
+`0x800B1F90`, which is called normally. A negative result about a wrongly-typed premise looks exactly like a
+discovery, and the only defence is to check the premise — here, "is this an entry point?" — before believing
+the search.
 
 A further four are **terminal**: they cannot be answered from this disc, and are marked `[!]` rather than
 left looking like work outstanding. #30 needs an NTSC disc, #35 is unverifiable at N = 1, #36 is a field that
@@ -5554,73 +5559,42 @@ Pinned in `tests/test_world.c` beside the world's, and deliberately beside it: t
 same square one rule draws is one the other drops, in both directions, so a later "simplification" that
 folds them into one helper with a sign flag fails rather than silently halves the game's models.
 
-- [ ] 65. **Residue: the force-draw mask.** `bltz t3` at `0x800B2498` skips the test outright, and `t3`
-      is shifted left one bit per face (`sll t3, t3, 1` in the delay slot), so it is **one bit per face,
-      MSB first**, over the same 32-face batches the attribute emitter at `0x8006A394` walks in. It is
-      loaded once per batch from `+4` of the descriptor in `a0`. Nothing found so far builds it, so this
-      port culls unconditionally; a two-sided surface on some model somewhere is drawn on one side only
-      until that is read. Worth noting the shape is right for a *near-plane* flag — a quad with a vertex
-      through the plane cannot be NCLIPped meaningfully — which would make it a correctness escape rather
-      than an authoring one.
+- [x] 65. **RESOLVED: the mask is block A's third field, it is zero on every model on the disc, and the
+      reason it looked unreachable is that `0x800B2410` is not a function.**
 
-      **THE PRODUCER IS FOUND, and what it writes is not a bitmask.** "Nothing found so far builds it" is no
-      longer true. The chain, from the one caller the 0x800B block does have:
+      **The mistake that cost this entry three passes, mine included.** `0x800B2410` has no `jal`, no
+      materialised address and no pointer word anywhere in the image, and I recorded that twice as
+      "the linker has no caller". It is not an entry point. Scanning back to the previous `jr ra` puts it
+      inside the function that begins at **`0x800B1F90`** — which is called, once, from `0x8006DCBC`. Both
+      of the NCLIPs at `0x800B24A0` and `0x800B24D0` belong to that function. Searching for callers of a
+      LABEL will always find none, and the negative result reads exactly like a discovery.
 
-          8006DCA4  a2 = sp + 16                  ; a DESCRIPTOR on the stack
-          8006DCAC  jal 0x8006B924                ; ...which this fills
-          8006DCBC  jal 0x800B1F90                ; ...and this consumes, a0 = sp + 16
+      **What `a0` holds there.** `0x800B22FC` loads `a0` from the descriptor's `+0x14`, and the code then
+      walks it in eight-byte steps testing `lh 0(a0)` for zero. That array is the model's **block A** — the
+      directory this project already documents as `8 x {u16 count; u16 offset; u32 0}`. So:
 
-      and inside `0x8006B924`, with `s5 = a2` (the descriptor) and `s7 = a1` (its second argument):
+          +0x00  u16  count   how many faces this batch holds
+          +0x02  u16  offset
+          +0x04  u32  force   ONE BIT PER FACE, most significant first
 
-          8006BC08  addiu v0, s7, 10
-          8006BC0C  sw    v0, 4(s5)               ; descriptor+0x04 = arg1 + 10
+      `lw t3, 4(a0)` is that third field; `sll t3, t3, 1` per face walks it from the top; `bltz t3` tests
+      the sign and skips the NCLIP test outright. The field an earlier pass recorded as the constant `0`
+      IS the force-draw mask.
 
-      So `+0x04` is written as a **POINTER** — `arg1 + 10`, and the same record's halfword at `+10` is read
-      two instructions later — where the linker loads it into `t3` and treats it as one bit per face.
+      **And it is zero everywhere: 0 of 13,784 block-A entries across all 1,723 models on the disc.** So
+      the escape never fires, this port's unconditional culling was right all along, and the worry this
+      entry ended on — "a two-sided surface on some model somewhere is drawn on one side only until that is
+      read" — is refuted. There is no such surface on this disc.
 
-      **That has a consequence large enough that it must be tested rather than asserted.** A KUSEG pointer
-      (`0x800xxxxx`) is NEGATIVE as a signed 32-bit value, so `bltz t3` at `0x800B2498` would be TAKEN, and
-      the escape is exactly "skip the NCLIP test entirely". If the linker's `a0` is this descriptor, models
-      on the console have **no backface rejection at all** — which would make this port's model rejection
-      (#, the entry above) a divergence rather than a reconstruction, notwithstanding that it measurably
-      keeps the nearer face set.
+      **Honoured anyway**, in `q2_model_batch_forces_draw`, for the same reason the loader now tolerates
+      chunk names no file emits (#33): the engine supports it and a build that uses it should not be
+      silently mis-drawn. Face counts are unchanged, which is the check — a mask of zero must change
+      nothing.
 
-      **And the disc DOES separate the two readings — it is a different structure.** The same builder writes
-      `+0x00` as well, at `0x8006BBE8`: `sw s4, 0(s5)`, where `s4` is itself a pointer (`lw s4, 16(s6)` at
-      the top of the function). The linker opens with `lh t7, 0(a0)` and returns when it is zero — reading
-      the LOW HALFWORD OF A POINTER as a face count, which is not a thing this engine does anywhere.
-
-      So `0x800B2410` takes a descriptor of its own, not the one `0x8006B924` builds for `0x800B1F90`, and
-      the alarming consequence does not follow: **this port's model backface rejection is not shown to be a
-      divergence.** Saying so is the point — a half-tested claim that the game has no model culling would
-      have been worse than the gap it replaced.
-
-      What remains open is narrower than it was: the force-draw mask belongs to a descriptor built by
-      whatever calls `0x800B2410`, and nothing in this image calls it.
-
-      **Five approaches are now closed, which is worth recording so none is repeated.**
-
-      1. `jal` to `0x800B2410` — none in the image.
-      2. `lui`+`addiu` forming the address — none.
-      3. `lui`+`ori` forming it — none.
-      4. A raw pointer word equal to it, i.e. a dispatch table entry — none.
-      5. **The mask is not authored in the model file.** `block_b` was the candidate — "16 zero bytes on
-         821 models, larger on 144" is the right shape for a per-face bit array, since a 128-face model
-         needs exactly 16 bytes. Measured over all **1,723** models it is refuted: block B's size tracks
-         neither the face count (a 233-face model needs 32 bytes and carries 1,996) nor the part count
-         (size/parts ranges over 11.6, 12.0, 13.8, 17.3, 18.5, 26.3, 38.3, 46.5), and it is mostly
-         NON-zero where a sparse force-draw mask would be mostly zero.
-
-      What would settle it is a call site, and this image does not contain one. That is the honest end of
-      what this disc can be asked.
-
-      **The other way in is closed: the linker has NO CALLER in the image.** Searching the whole
-      loaded segment for `j`/`jal` to `0x800B2410`, for a materialised `lui`/`addiu` pair forming it, and
-      for a raw word equal to it — a function-pointer table entry — finds **nothing, by all three**. So the
-      descriptor's producer cannot be found by reading whoever calls the linker, because on this image
-      nobody does. `0x800B2410` sits in the last few kilobytes before the `0x800B2800` BSS boundary, which
-      is where this build keeps code it copies somewhere before running, and that is the likeliest reason.
-      Recorded so the next pass does not repeat the search.
+      *A second correction, to my own working:* the descriptor field I found at `0x8006BC0C`
+      (`descriptor+0x04 = arg1 + 10`) is the OUTER descriptor's, not block A's, and it is not this mask.
+      The alarm I raised from it — that a pointer read as a mask would be negative and force every face —
+      does not arise, because `a0` at `0x800B2410` is not the descriptor.
 
 ## The status bar's fifth byte is a palette, and the HUD had been drawing the armour box for health
 

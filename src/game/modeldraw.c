@@ -336,7 +336,18 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
                 gte_sxy screen[4];
                 for (i = 0; i < 4; i++)
                     screen[i] = window[f.v[i]].xy;
-                if (!q2_model_quad_faces_camera(gte, screen)) {
+                /*
+                 * ...unless the model's own block-A batch directory FORCES the
+                 * face. `bltz t3` at 0x800B2498 skips the test outright, `t3`
+                 * being the batch's `force` word shifted one bit per face. It
+                 * is zero in all 13,784 entries of all 1,723 models on this
+                 * disc, so this never fires here — it is honoured for the same
+                 * reason the loader tolerates chunk names no file emits (#33):
+                 * the engine supports it, and a build that uses it should not
+                 * be silently mis-drawn.
+                 */
+                if (!q2_model_batch_forces_draw(m, face_index) &&
+                    !q2_model_quad_faces_camera(gte, screen)) {
                     if (stats)
                         stats->faces_rejected_back++;
                     continue;
