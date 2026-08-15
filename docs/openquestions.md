@@ -1714,7 +1714,8 @@ the uniform `(768, 768, 768)` at `0x800AEB30`, applied per column by `0x80055AF8
 exactly 3 — and the view weapon's own chain (`RotMatrix` at `0x8004F464`, `MulMatrix` at `0x8004F474`) has no
 scale call at all. The squeeze is the game's, not the reconstruction's, and must not be "corrected".
 
-- [ ] 46. **The view weapon sits too far left, and it is not the projection.** Placed through
+- [~] 46. **The view weapon sits too far left, and it is not the projection.** — *the pitched case is
+      solved by #96; what is left is the still frame at rest.* Placed through
       `q2_vw_place` at the BASE0 spawn, the blaster's drawn geometry spans x 278…376 of the 512-wide
       viewport — 0.54…0.73 across. The capture has it running from about 0.79 to off the right edge, with
       the forearm entering from the bottom-right corner rather than from the bottom centre. Vertical
@@ -6558,3 +6559,51 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       The general lesson is the one #94 depended on: a log that warns about normal conditions is a log
       nobody reads, and the one real fault on the disc was sitting in the middle of 54 lines of correct
       behaviour being reported as wrong.
+- [x] 96. **The view weapon left the hand whenever the player looked up or down — and #46 walked past it
+      three times because it was checking the wrong kind of thing.**
+
+      #46 read every operand in `q2_vw_place` against the executable and every one agreed: the translation
+      is 140 on every key, the interpolation is the disc's, the rotation order is `RotMatrix`'s Ry·Rx, the
+      eye base is `286 − viewOffset`. Three passes, all correct, and the weapon was still wrong.
+
+      The defect is not in an operand. It is in the IDENTITY the whole arrangement rests on, and nothing
+      asserted it. Follow a part origin through `modeldraw.c` — with `local` zero at the grip,
+      `inst.origin = feet + R_place·t`, and `cam.pos` the eye, which is the same `feet − view_offset`
+      `q2_vw_place` computes, deliberately:
+
+          camera_space = view · (inst.origin − cam.pos) = view · R_place · t
+
+      so the weapon lands where the clip authored it — at `t`, in view space — **only if `view · R_place`
+      is the identity**. The two matrices came from different builders fed differently-signed angles:
+      `q2_rotation_view(yaw, pitch, roll)` against `q2_rotation_euler(−pitch, yaw, roll)`. They agree on
+      yaw. They do not agree on pitch. Measured:
+
+          yaw    0  pitch    0  roll   0     identity
+          yaw 1024  pitch    0  roll   0     identity
+          yaw  700  pitch  300  roll   0     off by 3260/4096
+          yaw  700  pitch  300  roll  90     off by 3532/4096
+          yaw 3000  pitch −200  roll −90     off by 1878/4096
+
+      3260/4096 is not rounding. It is a rotation, and it meant the grip was placed by one basis and read
+      back by another the moment the player stopped looking level. On screen: pitched down, the blaster
+      floated up beside the crosshair with no arm under it; pitched up, it swung to the top-right corner.
+      **At pitch zero nothing moved, which is exactly why every still-frame comparison #46 made kept
+      agreeing with the code.**
+
+      The fix is to build the placement matrix with the CAMERA'S OWN function and apply its transpose. A
+      rotation matrix's transpose is its inverse, so `view · R_place == I` becomes true **by
+      construction, for any angles** rather than by two builders happening to agree. That is the identical
+      argument `q2_vw_build_ot` already makes for the ROTATION half — "taking the camera directly makes
+      `camera · (camera^T · clip) == clip` true by construction" — and it had simply never been applied to
+      the translation.
+
+      **This does not settle #46's original measurement.** That was a still frame at rest, and at rest
+      nothing here moves. Whether the remaining horizontal offset is real or was measured against a
+      pitched capture is now a much easier question, because the pitched case is no longer wrong.
+
+      Two tests, and the second is a repeat offence. `test_camera_undoes_the_placement` asserts the
+      identity across ten cameras — the check that did not exist. And `test_roll_reaches_the_offset` had
+      to be rewritten: it recovered the offset with the same `q2_rotation_euler` the emitter used, so the
+      test and the emitter agreed with each other and neither agreed with the camera. **That is the second
+      test this session written from the code under test rather than from what the code owes its caller**
+      — the briefing panel's was the first — and both pinned the defect instead of the requirement.

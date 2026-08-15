@@ -485,6 +485,8 @@ typedef struct client {
     s16               at_yaw;
     bool              at_given;
     bool              yaw_given;
+    s16               at_pitch;
+    bool              pitch_given;
     bool              no_lasers;   /* --no-lasers: the before picture */
 
     q2_mover_set      movers;
@@ -2352,6 +2354,10 @@ static bool client_load_zone(client *c, const char *map, int index)
                     c->cam.pos[2] = c->at[2];
                     if (c->yaw_given)
                         c->cam.yaw = c->at_yaw;
+                    if (c->pitch_given) {
+                        c->cam.pitch                 = c->at_pitch;
+                        c->sim[0].player[0].pitch    = c->at_pitch;
+                    }
                     Q2_INFO("--at (%d,%d,%d) yaw %d",
                             c->at[0], c->at[1], c->at[2], (int)c->cam.yaw);
                 }
@@ -3767,6 +3773,12 @@ static void client_input_simulated(client *c, float dt)
      * `player.pitch/yaw/roll` straight, which this did, throws all three away:
      * no recoil, no flinch, and no thump when you land.
      */
+    /* `--pitch` is a capture flag and has to be re-applied every frame: the
+     * pad's own pitch is zero and would otherwise level the view back out on
+     * the frame after the one the load set. */
+    if (c->pitch_given)
+        c->sim[0].player[0].pitch = c->at_pitch;
+
     q2_sim_eye(&c->sim[0], eye);
     q2_sim_view_angles(&c->sim[0], view);
 
@@ -5769,6 +5781,7 @@ static void usage(void)
     printf("  --shot-every N  ...and one every N frames, numbered\n");
     printf("  --at X,Y,Z    stand here instead of at the zone's spawn point\n");
     printf("  --yaw N       ...facing this way (the engine's 0..4095)\n");
+    printf("  --pitch N     ...and looking this far up or down\n");
 }
 
 int main(int argc, char **argv)
@@ -5824,6 +5837,10 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--yaw") && i + 1 < argc) {
             c.at_yaw = (s16)atoi(argv[++i]);
             c.yaw_given = true;
+        }
+        else if (!strcmp(argv[i], "--pitch") && i + 1 < argc) {
+            c.at_pitch = (s16)atoi(argv[++i]);
+            c.pitch_given = true;
         }
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc)
             c.frames_total = strtol(argv[++i], NULL, 10);

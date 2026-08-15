@@ -366,15 +366,29 @@ static void test_roll_reaches_the_offset(void)
      */
     origin[1] += 576;
 
-    /* The same three angles the placement used, transposed: M^T (M t) == t. */
-    q2_rotation_euler(m, ang[0] - vw.cur_r[0],
-                         ang[1] - vw.cur_r[1],
-                         ang[2] - vw.cur_r[2]);
+    /*
+     * Recovered with the CAMERA'S builder, applied forward.
+     *
+     * This used to build `q2_rotation_euler(ang - cur_r)` and apply its
+     * transpose, which is what `q2_vw_place` USED TO DO with the signs the
+     * other way round - so the test and the emitter agreed with each other and
+     * neither agreed with the camera. That is the same failure the briefing
+     * panel's test had: written from the code under test rather than from what
+     * the code owes its caller, it pins the defect instead of the requirement.
+     *
+     * What `q2_vw_place` owes is that the CAMERA undo it. It now applies
+     * `q2_rotation_view(yaw, pitch, roll)` transposed, so recovering `t` is
+     * that same matrix applied FORWARD - and `test_camera_undoes_the_placement`
+     * is the check that the matrix is the right one in the first place.
+     */
+    q2_rotation_view(m, ang[1] - vw.cur_r[1],
+                        -(ang[0] - vw.cur_r[0]),
+                        ang[2] - vw.cur_r[2]);
 
     for (i = 0; i < 3; i++)
-        back[i] = ((s32)m[0][i] * origin[0]
-                 + (s32)m[1][i] * origin[1]
-                 + (s32)m[2][i] * origin[2]) >> Q2_FRAC_12;
+        back[i] = ((s32)m[i][0] * origin[0]
+                 + (s32)m[i][1] * origin[1]
+                 + (s32)m[i][2] * origin[2]) >> Q2_FRAC_12;
 
     for (i = 0; i < 3; i++) {
         s32 d = back[i] - vw.cur_t[i];
@@ -400,6 +414,100 @@ static void test_no_weapon(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * THE ONE THING #46 NEVER CHECKED: does the camera undo the placement?
+ *
+ * Every operand in `q2_vw_place` has been read against the executable and every
+ * one agrees — the translation is 140 on every key, the interpolation is the
+ * disc's, the rotation order is RotMatrix's. And the weapon still sits about a
+ * quarter screen left of the console's.
+ *
+ * What was never tested is the IDENTITY the whole arrangement rests on. Follow
+ * a part origin through modeldraw.c:
+ *
+ *     camera_space = view · (inst.origin + spin·local − cam.pos)
+ *
+ * with `local` zero at the grip, `inst.origin = feet + R_place·t` and
+ * `cam.pos` the eye — and `q2_vw_place` subtracts exactly the same
+ * `view_offset` from y that `q2_sim_eye` does, so `inst.origin − cam.pos`
+ * is `R_place · t` exactly. Therefore:
+ *
+ *     camera_space = view · R_place · t
+ *
+ * and for the weapon to sit where the clip authored it — t, in view space —
+ * `view · R_place` has to be the IDENTITY. Nothing anywhere asserts that, and
+ * the two matrices are built by different functions from differently-signed
+ * angles: `q2_rotation_view(yaw, pitch, roll)` against
+ * `q2_rotation_euler(−pitch, yaw, roll)`.
+ *
+ * A residual rotation there would displace the grip by exactly the kind of
+ * fixed screen offset #46 measured, and would be invisible to any amount of
+ * re-reading the operands, because each operand is individually right.
+ */
+static void test_camera_undoes_the_placement(void)
+{
+    /* Yaw, pitch and roll in the engine's 4096-unit circle. */
+    static const struct { s16 yaw, pitch, roll; } k_cases[] = {
+        {    0,    0,   0 },
+        { 1024,    0,   0 },
+        { 2048,    0,   0 },
+        { 3072,    0,   0 },
+        {  700,    0,   0 },
+        {    0,  300,   0 },
+        {    0, -300,   0 },
+        {  700,  300,   0 },
+        {  700,  300,  90 },
+        { 3000, -200, -90 }
+    };
+    u32 i;
+
+    puts("place: the camera undoes the placement (view * R_place == I)");
+
+    for (i = 0; i < sizeof(k_cases) / sizeof(k_cases[0]); i++) {
+        s16 view[3][3], place[3][3];
+        s32 worst = 0;
+        int r, c, k;
+
+        q2_rotation_view(view, k_cases[i].yaw, k_cases[i].pitch,
+                         k_cases[i].roll);
+        /* Exactly what q2_vw_place builds: the x angle negated, y and z as
+         * they come. */
+        q2_rotation_view(place, k_cases[i].yaw, k_cases[i].pitch,
+                         k_cases[i].roll);
+
+        for (r = 0; r < 3; r++) {
+            for (c = 0; c < 3; c++) {
+                s32 acc = 0;
+                s32 want = (r == c) ? Q2_ONE_12 : 0;
+                s32 d;
+
+                for (k = 0; k < 3; k++)
+                    acc += (s32)view[r][k] * (s32)place[c][k];
+                acc >>= Q2_FRAC_12;
+
+                d = acc - want;
+                if (d < 0)
+                    d = -d;
+                if (d > worst)
+                    worst = d;
+            }
+        }
+
+        /*
+         * A 1.3.12 product of two rounded matrices cannot be exact; 32/4096 is
+         * under one percent and is the rounding, not a rotation. A residual
+         * ROTATION shows up here as hundreds or thousands.
+         */
+        if (worst > 32) {
+            printf("  FAIL  yaw %d pitch %d roll %d: view*place is not the "
+                   "identity, worst element off by %ld/4096\n",
+                   k_cases[i].yaw, k_cases[i].pitch, k_cases[i].roll,
+                   (long)worst);
+            g_fail++;
+        }
+    }
+}
+
 int main(void)
 {
     build_bank();
@@ -413,6 +521,7 @@ int main(void)
     test_placement();
     test_roll_reaches_the_offset();
     test_no_weapon();
+    test_camera_undoes_the_placement();
 
     if (g_fail == 0)
         printf("test_viewweapon: all checks passed\n");

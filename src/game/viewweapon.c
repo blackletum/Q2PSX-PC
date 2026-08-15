@@ -468,12 +468,47 @@ void q2_vw_place(const q2_viewweapon *vw,
      * `0x80089E38`, which writes `m[1][2] = -sin(x)` and
      * `m[0][2] = sin(y)cos(x)`, the signature of Ry·Rx with Z outermost.
      */
-    q2_rotation_euler(rot, ang[0], ang[1], ang[2]);
+    /*
+     * THE CAMERA'S OWN BUILDER, TRANSPOSED - and the transpose is the whole
+     * correctness argument.
+     *
+     * This used to be `q2_rotation_euler(rot, -pitch, yaw, roll)` applied
+     * directly, and every operand in it had been checked against the
+     * executable and agreed. It was still wrong, and openquestions #46 spent
+     * three passes re-reading operands, because the defect is not in any of
+     * them: it is in the IDENTITY the arrangement rests on.
+     *
+     * Follow a part origin through modeldraw.c. With `local` zero at the grip,
+     * `inst.origin = feet + R_place*t`, and `cam.pos` the eye - which is the
+     * same `feet - view_offset` this function computes, deliberately -
+     *
+     *     camera_space = view * (inst.origin - cam.pos) = view * R_place * t
+     *
+     * so the weapon lands where the clip authored it, at `t` in view space,
+     * only if **view * R_place is the identity**. Nothing asserted that, and it
+     * is not: `q2_rotation_view(yaw, pitch, roll)` and
+     * `q2_rotation_euler(-pitch, yaw, roll)` agree on yaw and disagree on
+     * pitch, so their product is the identity when the player looks level and
+     * is off by 3260/4096 at a 26-degree pitch. tests/test_viewweapon.c pins it
+     * now.
+     *
+     * Building the placement matrix with the CAMERA'S OWN function and applying
+     * its transpose makes `view * R_place == I` true by construction, for any
+     * angles, because a rotation matrix's transpose is its inverse. That is the
+     * same argument `q2_vw_build_ot` already makes for the ROTATION half; it
+     * was never applied to the translation.
+     *
+     * The argument ORDER is the camera's too: `q2_rotation_view` takes
+     * (yaw, pitch, roll), and `ang` is indexed (pitch, yaw, roll) - with
+     * `ang[0]` already negated at the sum above, which is 0x8004F40C's own
+     * negation and is why the pitch is passed back through un-negated here.
+     */
+    q2_rotation_view(rot, ang[1], -ang[0], ang[2]);
 
     for (i = 0; i < 3; i++) {
-        local[i] = ((s32)rot[i][0] * vw->cur_t[0]
-                  + (s32)rot[i][1] * vw->cur_t[1]
-                  + (s32)rot[i][2] * vw->cur_t[2]) >> Q2_FRAC_12;
+        local[i] = ((s32)rot[0][i] * vw->cur_t[0]
+                  + (s32)rot[1][i] * vw->cur_t[1]
+                  + (s32)rot[2][i] * vw->cur_t[2]) >> Q2_FRAC_12;
     }
 
     /*
