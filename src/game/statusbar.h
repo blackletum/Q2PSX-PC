@@ -213,6 +213,44 @@ struct q2_hud_tables;
 #define Q2_SBAR_WEAPON_NO_AMMO 1
 
 /* ------------------------------------------------------------------------- */
+/* The weapon strip — 0x80035EA0, positions from 0x8009C658                   */
+/* ------------------------------------------------------------------------- */
+/*
+ * After walking the thirteen field records ten bytes at a time, `0x80035EA0`
+ * draws TWO more sprites that are not fields at all. They have their own
+ * position table and their own guards:
+ *
+ *     80036180  lh   v1, 96(s7)          slot A's rect index
+ *     80036188  beq  v1, zero, skip      nothing selected, nothing drawn
+ *     80036190  lh   v0, 100(s7)         slot B's
+ *     80036198  beq  v1, v0, skip        the same weapon twice draws once
+ *     800361A0  sll  a3, v1, 2
+ *     800361A4  addu a3, a3, v1          index * 5, the rect stride again
+ *     80036258  lh   v1, 100(s7)         then slot B, guarded only on zero
+ *
+ * `0x8009C658` is the head of the structure icontable.h records as "a
+ * different structure that has not been identified" — it is this table, four
+ * `s16` pairs read as consecutive halfwords (`tbl[fp]`, `tbl[fp+1]`):
+ *
+ *     (388, 201)  (458, 201)     one player
+ *     (381,  95)  (419,  95)     a split viewport
+ *
+ * These are ABSOLUTE screen positions, not offsets from the bar's anchor —
+ * and the y is 201, which is the one-player anchor's own row, so the strip
+ * sits on the same line as the counters rather than being part of them.
+ *
+ * That accounts for what capture shows exactly: one icon with only the blaster
+ * held, because slot A is skipped when the two indices agree, and two once a
+ * second weapon is picked up.
+ */
+#define Q2_SBAR_STRIP_SLOTS 2
+
+typedef struct q2_sbar_strip_pos { s16 x, y; } q2_sbar_strip_pos;
+
+extern const q2_sbar_strip_pos q2_sbar_strip[Q2_SBAR_STRIP_SLOTS];
+extern const q2_sbar_strip_pos q2_sbar_strip_2p[Q2_SBAR_STRIP_SLOTS];
+
+/* ------------------------------------------------------------------------- */
 /* The field table — 0x800337EC onward                                        */
 /* ------------------------------------------------------------------------- */
 #define Q2_SBAR_FIELDS      17
@@ -338,6 +376,22 @@ typedef struct q2_statusbar {
      * global tick, not something the bar owns.
      */
     u32 ticks;
+
+    /*
+     * The weapon strip's two slots, as RECT INDICES. Zero draws nothing, and
+     * equal values draw once — both guards are the console's (see above).
+     *
+     * INFERRED, and flagged because the rest of this header is not: the two
+     * fields the console reads live at +96 and +100 of a 224-byte record in the
+     * array at `0x800C7C60`, and what writes them has not been traced. What the
+     * port puts here is the weapon id used directly as a rect index, which is
+     * the reading the sheet supports — rects 1..11 land on the eleven weapon
+     * cells, with slot 6 (hand grenades) sitting off the gun row exactly as an
+     * authoring pass would put it. It is checkable against capture and it is
+     * not read out of the executable; if the strip ever shows the wrong gun,
+     * this mapping is the thing to doubt first.
+     */
+    u8 strip[Q2_SBAR_STRIP_SLOTS];
 
     int players;                      /* drives the icon size reduction */
     bool visible;

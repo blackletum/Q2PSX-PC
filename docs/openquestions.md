@@ -5538,3 +5538,53 @@ authored for a particular approach, and three of the thirteen land in zones 1, 2
 *Not done here.* The transition is the load, and nothing else: the MISSION screen the console shows
 between levels, the inventory that should survive the change, and the intermission's own game-state
 request are all still owed. What exists now is that the level ENDS and the next one begins.
+
+- [x] 68. **Walking through a door reset the game.** `client_load_zone` re-inits the sim and `q2_sim_init`
+      memsets it, so every transition handed the player back a fresh blaster and 100 health. That is
+      obviously wrong for a LOADMAP, and it was equally true of a ZONE GATE — a door inside one level.
+
+      What carries is what `save.c` already treats as the player's rather than the level's: the
+      inventory, the weapon in hand, and the chaingun's spin-up count. Everything else in the sim is the
+      map's — triggers, script, entity set — and is meant to be rebuilt.
+
+      **The level CLOCK is the awkward one**, because the four powerup deadlines and the mega-health
+      bleed are absolute against it. A zone gate stays inside one level, so the clock carries with them
+      and nothing needs adjusting. A LOADMAP starts a new level at zero, so a quad picked up at 4,000
+      ticks would run for another 4,000 after the door — the deadlines are therefore rebased to preserve
+      REMAINING time. That is PC Quake II's behaviour on a level change and it is **stated as the port's
+      choice**: nothing in the executable has been read that settles what this console does, and a
+      deadline that survives a clock reset unrebased is the one shape that is definitely wrong.
+
+## The weapon strip is drawn, and two of its three numbers are measurements rather than reads
+
+`0x80035EA0`'s two extra sprites are now on screen. What is READ: the two guards (`0x80036188` skips a zero
+index, `0x80036198` collapses slot A when both slots name the same weapon), the `index * 5` rect stride, and the
+position table at `0x8009C658` — four `s16` pairs, **(388, 201) / (458, 201)** for one player and (381, 95) /
+(419, 95) for a split, absolute rather than anchor-relative. That table is the head of the structure
+icontable.h had recorded as unidentified.
+
+Two things are NOT read, and are flagged in the code:
+
+- **What fills the slots.** The console takes them from +96 and +100 of a 224-byte record in the array at
+  `0x800C7C60` (`s7` is built at `0x80035F08`), and nothing traced so far writes them — `0x800506C4` and
+  `0x80050758`, the next/previous-weapon helpers, write +102 and +214 of a different struct. The port derives
+  prev/next by walking the owned bitmask and uses the weapon id directly as a rect index. That mapping is
+  supported by the sheet — rects 1..11 land on the eleven weapon cells, with slot 6 (hand grenades) sitting off
+  the gun row the way an authoring pass would put it — and it produces the blaster icon capture shows. It is
+  still an inference.
+- **The anchoring.** Drawn with the table's x as the left edge, the icon lands exactly one icon-width right of
+  retail: capture puts it at framebuffer columns 427..451 and the table says 458, so 458 is the RIGHT edge. The
+  emitter's XY setup at `0x80033320` was not followed far enough to say whether it subtracts the width itself.
+
+Also fixed: the overlay's top line carried a hardcoded `"Quake II"` posted once at startup — a placeholder from
+before the overlay had anything real to say. It now names the weapon on a change, and the string is the weapon's
+GLYPH (`weapon_glyph[]` at `0x8009DC8C`, "&B"/"&S"/"&U"), which the markup layer expands into a pre-rendered word
+out of chars.lbm. "Shotgun" on screen is one sprite, not seven characters, which is why searching for the string
+never found it.
+
+**Still open: the view weapon is about two-thirds the size retail draws it.** Measured against the pillarboxed
+1500x1125 capture, retail's blaster body spans framebuffer columns 317..419 and the port's spans 280..348 —
+1.5x narrower and closer to the screen centre. It is not a projection difference: the horizontal and vertical
+distances from centre scale by 1.93 and 1.17 respectively, so no single `proj` change accounts for both. The
+placement expression is now confirmed correct against `0x80038638`, so the discrepancy is in the offset, the
+model's own scale, or the near-plane treatment of geometry that spans z = 44 to z = 526. Not guessed at.

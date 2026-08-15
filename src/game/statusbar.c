@@ -79,6 +79,17 @@ const q2_sbar_field q2_sbar_fields_4p[Q2_SBAR_FIELDS_4P] = {
     { 190, Q2_SBAR_4P_LOWER_DY,  8, 14 }    /* 15  lower right digit 1   */
 };
 
+/*
+ * The weapon strip's absolute positions, the four s16 pairs at 0x8009C658.
+ * Absolute, not anchor-relative — see statusbar.h.
+ */
+const q2_sbar_strip_pos q2_sbar_strip[Q2_SBAR_STRIP_SLOTS] = {
+    { 388, 201 }, { 458, 201 }
+};
+const q2_sbar_strip_pos q2_sbar_strip_2p[Q2_SBAR_STRIP_SLOTS] = {
+    { 381, 95 }, { 419, 95 }
+};
+
 bool q2_sbar_field_4p_is_lower(int field)
 {
     return field >= 8 && field < Q2_SBAR_FIELDS_4P && field != 12;
@@ -401,6 +412,48 @@ u32 q2_statusbar_build_ot(const q2_statusbar *b, u16 tpage, u16 clut,
         n += emit_counter(b, tpage, clut, ot, bucket, origin_x, origin_y,
                           Q2_SBAR_ARMOUR, b->armour, b->armour_icon,
                           Q2_SBAR_LOW_AMMO, false, true);
+
+    /*
+     * The weapon strip, last — two sprites at absolute positions, with the
+     * console's own two guards: nothing for a zero index, and one sprite when
+     * both slots name the same weapon (0x80036188 / 0x80036198).
+     */
+    {
+        const q2_sbar_strip_pos *pos =
+            (b->players >= 2) ? q2_sbar_strip_2p : q2_sbar_strip;
+        int i;
+
+        for (i = 0; i < Q2_SBAR_STRIP_SLOTS; i++) {
+            const q2_icon_rect *r;
+            q2_icon_size is;
+
+            if (b->strip[i] == 0)
+                continue;
+            /* Slot A yields to slot B when they name the same weapon. */
+            if (i == 0 && b->strip[0] == b->strip[1])
+                continue;
+
+            r = q2_icon_rect_get(b->icons, b->strip[i]);
+            if (!r || (r->w == 1 && r->h == 1))
+                continue;
+
+            is = q2_icon_draw_size_of(b->players, 1, r->w, r->h);
+            /*
+             * RIGHT-ANCHORED, and this one is from capture rather than code.
+             * Drawn with the table's x as the left edge the icon lands exactly
+             * one icon-width right of where retail puts it: the blaster-only
+             * capture has it spanning 427..451 in framebuffer columns and the
+             * table says 458, so 458 is the right edge. The emitter's XY setup
+             * was not followed far enough to say whether it subtracts the
+             * width itself or is handed a different number; the offset is a
+             * measurement, and if it is ever read properly this is the line to
+             * replace.
+             */
+            n += emit_cell(ot, bucket, tpage, pal_clut(b, r->id, clut),
+                           origin_x + pos[i].x - is.w, origin_y + pos[i].y,
+                           r->u, r->v, r->w, r->h, is.w, is.h);
+        }
+    }
 
     return n;
 }

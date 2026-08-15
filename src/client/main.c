@@ -345,6 +345,37 @@ typedef struct client {
      * without this the level transition can only be argued for, not shown.
      */
     bool              fire_triggers;
+    long              fire_at_frame;
+
+    /*
+     * WHAT THE PLAYER TAKES THROUGH A DOOR.
+     *
+     * `client_load_zone` re-inits the sim, and `q2_sim_init` memsets it, so
+     * before this every transition handed the player back a fresh blaster and
+     * 100 health — walking through a ZONE GATE, which is a door inside one
+     * level, reset the game as thoroughly as starting a new one did.
+     *
+     * What carries is what the save system already treats as the player's
+     * rather than the level's (`save.c`): the inventory, the weapon in hand,
+     * and the chaingun's spin-up count. Everything else in the sim is the
+     * map's — the triggers, the script, the entity set — and is meant to be
+     * rebuilt.
+     *
+     * The level CLOCK is the awkward one, because the powerup deadlines are
+     * absolute against it. A zone gate stays inside one level, so the clock
+     * carries and the deadlines need nothing. A LOADMAP starts a new level at
+     * zero, so the deadlines are rebased to preserve REMAINING time rather
+     * than absolute time — which is PC Quake II's behaviour on a level change
+     * and is a stated choice here, since nothing in the executable has been
+     * read that settles it.
+     */
+    bool              carry_player;    /* set by the two transition paths */
+    bool              carry_same_map;
+    q2_inventory      carry_inv;
+    int               carry_weapon_id;
+    int               carry_chaingun;
+    s32               carry_level_time;
+
     bool              map_change_pending;
     char              pending_map[Q2_UF_NAME_LEN + 1];
     char              pending_start[Q2_UF_NAME_LEN + 1];
@@ -1324,8 +1355,15 @@ static bool client_change_map(client *c, const char *map, const char *start)
         }
     }
 
+    /* A level change is a transition, so the player keeps what they are
+     * carrying; the clock is a new level's, so the powerup deadlines are
+     * rebased rather than kept. See `carry_player`. */
+    c->carry_player   = true;
+    c->carry_same_map = false;
+
     if (!client_load_zone(c, map, zone)) {
         Q2_WARN("LOADMAP: %s zone %d would not load", map, zone);
+        c->carry_player = false;
         return false;
     }
 
@@ -1788,6 +1826,15 @@ static bool client_load_zone(client *c, const char *map, int index)
     if (c->sfx_ready)
         Q2_INFO("sound bank: %u effects", c->sfx.count);
 
+    /* Take the player's own state off the sim before it goes, if this is a
+     * transition rather than a fresh start. See `carry_player`. */
+    if (c->carry_player) {
+        c->carry_inv        = c->sim[0].combat.inv;
+        c->carry_weapon_id  = c->sim[0].combat.weapon_id;
+        c->carry_chaingun   = c->sim[0].combat.chaingun_bullets;
+        c->carry_level_time = c->sim[0].level_time;
+    }
+
     /* q2_sim_init memsets the struct, so the previous zone's trigger bitmap and
      * event runtime have to be released first or they leak on every zone
      * change -- and zone changes are exactly what the gates now cause. */
@@ -1943,6 +1990,48 @@ static bool client_load_zone(client *c, const char *map, int index)
         q2_sim_spawn(&c->sim[0], feet, c->cam.yaw);
         c->sim[0].player[0].ground_y = feet[1];
         c->sim[0].combat.self.owner  = 0;
+
+        /*
+         * And give the player back what they walked in with. After the spawn,
+         * because `q2_sim_spawn` is a level start and resets the loadout — the
+         * whole point of a transition is that this one is not.
+         */
+        if (c->carry_player) {
+            c->carry_player = false;
+
+            c->sim[0].combat.inv              = c->carry_inv;
+            c->sim[0].combat.weapon_id        = c->carry_weapon_id;
+            c->sim[0].combat.chaingun_bullets = c->carry_chaingun;
+
+            if (c->carry_same_map) {
+                /* One level, one clock: the deadlines stay absolute. */
+                c->sim[0].level_time = c->carry_level_time;
+            } else {
+                /* A new level restarts the clock, so a deadline expressed
+                 * against the old one has to be re-expressed against this one
+                 * or a quad picked up at 4,000 ticks would run for another
+                 * 4,000 after the door. Remaining time is what carries. */
+                q2_inventory *inv = &c->sim[0].combat.inv;
+                s32 *deadline[5];
+                int  k;
+
+                deadline[0] = &inv->quad_until;
+                deadline[1] = &inv->invuln_until;
+                deadline[2] = &inv->enviro_until;
+                deadline[3] = &inv->breather_until;
+                deadline[4] = &inv->mega_health_next;
+
+                for (k = 0; k < 5; k++) {
+                    s32 left = *deadline[k] - c->carry_level_time;
+                    *deadline[k] = (*deadline[k] && left > 0) ? left : 0;
+                }
+                inv->item_name_until = 0;
+            }
+
+            Q2_INFO("carried through: %d hp, %d armour, weapon %d, weapons %04X",
+                    c->sim[0].combat.inv.health, c->sim[0].combat.inv.armour,
+                    c->sim[0].combat.weapon_id, c->sim[0].combat.inv.weapons);
+        }
 
         /*
          * The other players. Each gets its own sim, standing at its own
@@ -2596,6 +2685,27 @@ static void client_input_simulated(client *c, float dt)
         if (c->sim[0].combat.weapon_id != c->vw_last_weapon) {
             q2_vw_select(&c->vw, c->sim[0].combat.weapon_id);
             c->vw_last_weapon = c->sim[0].combat.weapon_id;
+
+            /*
+             * Name the weapon, which is what that line of the overlay is FOR.
+             *
+             * The string is the weapon's GLYPH, not its name: `weapon_glyph[]`
+             * at 0x8009DC8C holds "&B", "&S", "&U" and the markup layer expands
+             * an escape into a pre-rendered word out of chars.lbm's icon table
+             * (hudtables.h). So "Shotgun" on screen is one sprite, not seven
+             * characters, which is why hunting for the string never found it.
+             *
+             * This line used to carry a hardcoded "Quake II" posted once at
+             * startup — a placeholder from before the overlay had anything real
+             * to say, which then sat there for the whole session because
+             * nothing ever replaced it.
+             */
+            if (c->hud_ready && c->hud_tables_ready) {
+                int w = c->sim[0].combat.weapon_id;
+
+                if (w > 0 && w < Q2_HUD_WEAPON_SLOTS)
+                    q2_hud_message(&c->hud, c->hud_tables.weapon_glyph[w]);
+            }
         }
 
         /*
@@ -4233,6 +4343,32 @@ static void client_draw_view(void *user, q2_screen *s, int p,
          * Armour still varies here, because the armour sub-draw's other arm
          * selects the blank when the flag says none is worn.
          */
+        /*
+         * The weapon strip's two slots. The console reads them out of a record
+         * whose writer has not been traced, so what goes in is derived here:
+         * the weapon before and the weapon after the one in hand, walking the
+         * owned bitmask in slot order and wrapping. With only the blaster both
+         * come out the same and the bar's own guard collapses them to one
+         * icon, which is what capture shows.
+         */
+        {
+            int cur = weapon, prev = weapon, next = weapon, k;
+
+            for (k = 1; k < Q2_HUD_WEAPON_SLOTS; k++) {
+                int lo = cur - k, hi = cur + k;
+
+                while (lo < 1) lo += Q2_HUD_WEAPON_SLOTS - 1;
+                while (hi >= Q2_HUD_WEAPON_SLOTS) hi -= Q2_HUD_WEAPON_SLOTS - 1;
+
+                if (prev == cur && (inv->weapons & (1u << lo)))
+                    prev = lo;
+                if (next == cur && (inv->weapons & (1u << hi)))
+                    next = hi;
+            }
+            c->sbar.strip[0] = (u8)(prev > 0 ? prev : 0);
+            c->sbar.strip[1] = (u8)(next > 0 ? next : 0);
+        }
+
         c->sbar.health_icon = Q2_SBAR_ICON_HEALTH;
         c->sbar.armour_icon = inv->armour > 0 ? Q2_SBAR_ICON_ARMOUR
                                               : Q2_SBAR_ICON_NONE;
@@ -4615,7 +4751,14 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--headless"))              c.headless = true;
         else if (!strcmp(argv[i], "--demo"))                  c.demo = true;
         else if (!strcmp(argv[i], "--watch"))                 c.watch = true;
-        else if (!strcmp(argv[i], "--fire-triggers"))         c.fire_triggers = true;
+        else if (!strcmp(argv[i], "--fire-triggers")) {
+            /* An optional frame to fire ON, so a test can let the player take
+             * damage or collect something first and then walk through the
+             * door. Without it, the first simulated frame. */
+            c.fire_triggers = true;
+            if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9')
+                c.fire_at_frame = strtol(argv[++i], NULL, 10);
+        }
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc)
             c.frames_total = strtol(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "--shot") && i + 1 < argc)
@@ -4929,7 +5072,6 @@ no_window:
         q2_hud_init(&c.hud, &c.hud_tables, 1);
         c.hud.crosshair = (c.settings.v[Q2_SET_CROSSHAIR] != 0);
         c.hud_ready = true;
-        q2_hud_message(&c.hud, "Quake II");
     }
 
     /*
@@ -5276,6 +5418,8 @@ no_window:
             u32 target;
             if (q2_sim_take_zone_change(&c.sim[0], &target)) {
                 Q2_INFO("zone gate -> zone %u", target);
+                c.carry_player   = true;
+                c.carry_same_map = true;
                 client_load_zone(&c, c.map, (int)target);
             }
         }
@@ -5292,7 +5436,8 @@ no_window:
          * exactly the path a player standing in the volume goes through — the
          * only difference is who asked.
          */
-        if (c.fire_triggers && c.sim_ready) {
+        if (c.fire_triggers && c.sim_ready &&
+            (long)c.frame_index >= c.fire_at_frame) {
             u32 i, fired = 0;
 
             c.fire_triggers = false;
