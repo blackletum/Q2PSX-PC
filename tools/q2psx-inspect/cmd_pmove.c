@@ -6,6 +6,7 @@
 #include "entity.h"      /* q2_start_pos_*                                   */
 #include "level.h"       /* q2_common_open                                   */
 #include "pad.h"
+#include "combat.h"
 #include "sim.h"
 #include "trigger.h"
 #include "userfuncs.h"
@@ -339,6 +340,8 @@ static void report_fall(void)
 typedef struct env_tally {
     u32 maps;
     u32 crouch, lowcrouch, water, underwater, dontjump;
+    u32 acid, lava, laser;
+    u32 laser_seen, laser_noslot;
     u32 volumes;
 } env_tally;
 
@@ -346,13 +349,15 @@ typedef struct env_tally {
 static env_tally g_env;
 
 static void census_map(const disc *d, const char *map, env_tally *t,
-                       bool verbose)
+                       bool verbose, bool only_one)
 {
     q2_buf buf;
     q2_common_file cf;
     q2_sim sim;
     char path[256];
     u32 i, crouch = 0, low = 0, water = 0, under = 0, nojump = 0;
+    u32 acid = 0, lava = 0, laser = 0, hurt_total = 0;
+    u32 laser_seen = 0, laser_noslot = 0;
 
     snprintf(path, sizeof(path), "Q2DATA/LEVELS/%s/COMMON.DAT", map);
     if (disc_read_file(d, path, &buf) != Q2_OK)
@@ -369,6 +374,74 @@ static void census_map(const disc *d, const char *map, env_tally *t,
 
     for (i = 0; i < (sim.triggers_ready ? sim.triggers.count : 0); i++) {
         u32 e = sim.volume_env ? sim.volume_env[i] : 0;
+
+        /* The damage volumes, which the same pass reads and the same pass
+         * applies — the amount is the primitive's own constant except for
+         * LASERWALL, which carries its own. */
+        if (sim.volume_damage && sim.volume_damage[i]) {
+            hurt_total += (u32)sim.volume_damage[i];
+            switch (sim.volume_mod[i]) {
+            case Q2_MOD_ACID:  acid++;  break;
+            case Q2_MOD_LAVA:  lava++;  break;
+            case Q2_MOD_LASER: laser++; break;
+            default: break;
+            }
+            /* One map at a time: print where to STAND, so the effect can be
+             * driven rather than asserted. `--at` takes exactly this. */
+            if (verbose && only_one) {
+                q2_trigger tg;
+
+                if (q2_trigger_get(&sim.triggers, i, &tg))
+                    printf("      volume %3u  %2d damage mod %2d  centre "
+                           "%d,%d,%d  floor y %d\n", i, sim.volume_damage[i],
+                           sim.volume_mod[i],
+                           (tg.min[0] + tg.max[0]) / 2,
+                           (tg.min[1] + tg.max[1]) / 2,
+                           (tg.min[2] + tg.max[2]) / 2,
+                           tg.max[1]);
+            }
+        }
+
+        /*
+         * LASERWALL separately, because the census found ZERO armed and the
+         * question is whether that is the reader or the disc. Its handler
+         * returns before the damage when the object slot at +18 is negative
+         * (`bltz` at 0x8002E220), so a wall with no object never fires — the
+         * same shape as OBJDRAWOFF's empty slots (#78). Counting declared
+         * against armed is what tells those two apart.
+         */
+        {
+            q2_trigger tg;
+            q2_event_record rec;
+            u32 k;
+
+            if (q2_trigger_get(&sim.triggers, i, &tg) &&
+                tg.event_offset != Q2_TRIGGER_NO_EVENT &&
+                q2_events_record_at(&sim.events, tg.event_offset, &rec)) {
+                for (k = 0; k < rec.n_items; k++) {
+                    q2_event_item it;
+                    u8 ci;
+                    q2_uf_call call;
+                    s16 slot = 0;
+
+                    if (!q2_events_get_item(&sim.events, &rec, k, &it))
+                        break;
+                    if (it.opcode != Q2_EVOP_CALL)
+                        continue;
+                    if (!q2_events_get_call_index(&it, &ci))
+                        continue;
+                    if (q2_userfuncs_prim(&sim.userfuncs, ci) !=
+                        Q2_UF_LASERWALL)
+                        continue;
+                    laser_seen++;
+                    if (q2_uf_decode_call(&call, &sim.userfuncs, &it) == Q2_OK
+                        && q2_uf_operand_slot_raw(&call, 0, 0, &slot)
+                        && slot < 0)
+                        laser_noslot++;
+                }
+            }
+        }
+
         if (!e)
             continue;
         if (e & Q2_ENV_INCROUCH)    crouch++;
@@ -385,10 +458,16 @@ static void census_map(const disc *d, const char *map, env_tally *t,
     t->water      += water;
     t->underwater += under;
     t->dontjump   += nojump;
+    t->acid        += acid;
+    t->lava        += lava;
+    t->laser       += laser;
+    t->laser_seen  += laser_seen;
+    t->laser_noslot += laser_noslot;
 
-    if (verbose && (crouch | low | water | under | nojump))
-        printf("  %-10s %5u %5u %5u %5u %5u\n",
-               map, crouch, low, water, under, nojump);
+    if (verbose && (crouch | low | water | under | nojump | acid | lava | laser))
+        printf("  %-10s %5u %5u %5u %5u %5u %5u %5u %5u\n",
+               map, crouch, low, water, under, nojump, acid, lava, laser);
+    (void)hurt_total;
 
     q2_sim_free(&sim);
     q2_common_close(&cf);
@@ -405,11 +484,12 @@ static void report_env(const disc *d, const char *only_map)
 
     printf("\n\nEnvironment volumes -- the UserFuncs the dispatcher at "
            "0x80027E64 runs\n\n");
-    printf("  %-10s %5s %5s %5s %5s %5s\n",
-           "map", "crch", "low", "watr", "under", "nojmp");
+    printf("  %-10s %5s %5s %5s %5s %5s %5s %5s %5s\n",
+           "map", "crch", "low", "watr", "under", "nojmp",
+           "acid", "lava", "lasr");
 
     if (only_map) {
-        census_map(d, only_map, &t, true);
+        census_map(d, only_map, &t, true, true);
     } else {
         n = disc_file_count(d);
         for (i = 0; i < n; i++) {
@@ -439,7 +519,7 @@ static void report_env(const disc *d, const char *only_map)
             strncpy(current, dir, sizeof(current) - 1);
             current[sizeof(current) - 1] = '\0';
 
-            census_map(d, dir, &t, true);
+            census_map(d, dir, &t, true, false);
         }
     }
 
@@ -452,6 +532,14 @@ static void report_env(const disc *d, const char *only_map)
     printf("  DONTJUMP          : %u   (entity flag 0x20000 -- the jump gate\n"
            "                       worldscale.h recorded as never set)\n",
            t.dontjump);
+    printf("  INACID/UNDERACID  : %u   1 damage, mod 9, throttled to 400 ticks\n",
+           t.acid);
+    printf("  INLAVA/UNDERLAVA  : %u   20 damage, mod 10, throttled to 100\n",
+           t.lava);
+    printf("  LASERWALL         : %u armed of %u declared; %u name an EMPTY\n"
+           "                       object slot, and its handler returns before\n"
+           "                       the damage when that slot is negative\n",
+           t.laser, t.laser_seen, t.laser_noslot);
 
     g_env = t;
 }
@@ -465,6 +553,137 @@ static void report_env(const disc *d, const char *only_map)
  * look at — the aim and the view are not the same numbers, and the difference is
  * three decaying kicks.
  */
+/* ------------------------------------------------------------------------- */
+/* Standing in it                                                             */
+/* ------------------------------------------------------------------------- */
+/*
+ * The census says which volumes hurt and for how much. This says what that
+ * DOES, which is a different claim and the one that can be wrong.
+ *
+ * The player is placed at each damage volume's centre and the sim is ticked for
+ * 900 units of level clock — three seconds — with no input. What is being
+ * measured is the RATE: the damage function throttles mods 9 and 10 per target
+ * (`env_next`, 400 and 100 ticks), so acid should land about twice in three
+ * seconds and lava about nine times, whatever the tick rate of the host.
+ *
+ * That throttle is also the reason this check exists. It was silently broken
+ * for as long as the port had one: `q2_actor_from_player` rebuilt the actor
+ * from the inventory on every hit and cleared the deadline it had just armed,
+ * so lava landed once per tick. The failure is invisible in the census and
+ * obvious here — a full-health player dies in under a fifth of a second.
+ */
+static void report_hazards(const disc *d, const char *map, int zone_index)
+{
+    q2_world_zone zone;
+    q2_sim sim;
+    q2_input in;
+    q2_buf buf;
+    q2_common_file cf;
+    char path[256];
+    u32 i, shown = 0;
+
+    if (q2_world_load_zone(&zone, d, map, zone_index) != Q2_OK)
+        return;
+
+    snprintf(path, sizeof(path), "Q2DATA/LEVELS/%s/COMMON.DAT", map);
+    if (disc_read_file(d, path, &buf) != Q2_OK) {
+        q2_world_free_zone(&zone);
+        return;
+    }
+    if (q2_common_open(&cf, &buf) != Q2_OK) {
+        q2_buf_free(&buf);
+        q2_world_free_zone(&zone);
+        return;
+    }
+
+    printf("\n\nStanding in %s's damage volumes for three seconds of level "
+           "clock\n\n", map);
+    printf("  %-6s %-6s %6s %7s %7s   %s\n",
+           "volume", "mod", "amount", "hits", "health", "expected");
+
+    for (i = 0; ; i++) {
+        s32 feet[3];
+        q2_trigger tg;
+        u32 hits;
+        const char *what;
+        int want;
+
+        q2_sim_init(&sim, &zone, 50);
+        q2_sim_attach_gameplay(&sim, &cf);
+
+        if (!sim.triggers_ready || i >= sim.triggers.count) {
+            q2_sim_free(&sim);
+            break;
+        }
+        if (!sim.volume_damage || !sim.volume_damage[i] ||
+            !q2_trigger_get(&sim.triggers, i, &tg)) {
+            q2_sim_free(&sim);
+            continue;
+        }
+
+        feet[0] = (tg.min[0] + tg.max[0]) / 2;
+        feet[1] = (tg.min[1] + tg.max[1]) / 2;
+        feet[2] = (tg.min[2] + tg.max[2]) / 2;
+
+        /*
+         * Spawned WITHOUT settling. The settle loop drives real ticks, so a
+         * volume the player cannot stand in would take its damage before the
+         * measurement started and the health column would report a corpse.
+         */
+        q2_sim_spawn(&sim, feet, 0);
+        sim.hazard_hits = 0;
+
+        memset(&in, 0, sizeof(in));
+        while (sim.level_time < 900) {
+            /*
+             * HELD in the volume. Without this the player falls out of it —
+             * these centres are points in space, not ledges — and the count
+             * measures how long gravity took rather than the throttle. The
+             * first run of this gave 1, 2 and 3 hits for identical acid
+             * volumes, which is exactly what that looks like.
+             */
+            sim.player[0].pos[0] = feet[0];
+            sim.player[0].pos[1] = feet[1];
+            sim.player[0].pos[2] = feet[2];
+            q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
+        }
+
+        hits = sim.hazard_hits;
+        switch (sim.volume_mod[i]) {
+        /*
+         * One hit per throttle window over the three seconds, rounded up: the
+         * first lands at t=0 and each later one at the first TICK past its
+         * deadline, so nine for lava and three for acid.
+         */
+        case Q2_MOD_ACID:
+            what = "acid";
+            want = (900 + Q2_ENV_THROTTLE_ACID - 1) / Q2_ENV_THROTTLE_ACID;
+            break;
+        case Q2_MOD_LAVA:
+            what = "lava";
+            want = (900 + Q2_ENV_THROTTLE_LAVA - 1) / Q2_ENV_THROTTLE_LAVA;
+            break;
+        default:
+            what = "laser";
+            want = -1;
+            break;
+        }
+
+        printf("  %6u %-6s %6d %7u %7d   %d\n", i, what, sim.volume_damage[i],
+               hits, sim.combat.inv.health, want);
+        shown++;
+
+        q2_sim_free(&sim);
+    }
+
+    if (!shown)
+        printf("  (none in this zone)\n");
+
+    q2_common_close(&cf);
+    q2_buf_free(&buf);
+    q2_world_free_zone(&zone);
+}
+
 static void report_walk(const disc *d, const char *map, int zone_index)
 {
     q2_world_zone zone;
@@ -760,8 +979,10 @@ int cmd_pmove(const disc *d, const char *map, int zone_index)
         return 0;
 
     report_env(d, map);
-    if (map)
+    if (map) {
+        report_hazards(d, map, zone_index);
         report_walk(d, map, zone_index);
+    }
 
     /*
      * The verdict, and it is deliberately about the DATA rather than about the

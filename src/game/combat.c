@@ -118,8 +118,29 @@ void q2_actor_from_player(q2_actor *a, const q2_inventory *inv,
      * -1", and because the runtime blames the victim for a world kill, player
      * 1 was docked a frag for being shot.
      */
-    owner = a->owner;
-    q2_actor_init(a);
+    /*
+     * And so do the three CLIENT TIMERS, for the same reason and with a worse
+     * failure. `env_next` is client+0x94, the deadline that throttles acid and
+     * lava to once per 400 and once per 100 ticks; the invulnerability and
+     * protection deadlines are client+0xB0 and +0xB4. All three are properties
+     * of the player and not of a hit, and clearing them here made the throttle
+     * unobservable: a hazard volume calls this every tick, each call reset the
+     * deadline it had just armed, and 20 points of lava landed thirty times a
+     * second instead of three. Standing in it killed a full-health player
+     * inside a fifth of a second, which is fast enough to look like the volume
+     * test being wrong rather than the throttle being erased.
+     */
+    owner   = a->owner;
+    {
+        s32 env     = a->env_next;
+        s32 invuln  = a->invuln_until;
+        s32 protect = a->protect_until;
+
+        q2_actor_init(a);
+        a->env_next      = env;
+        a->invuln_until  = invuln;
+        a->protect_until = protect;
+    }
     a->owner = owner;
     if (pos) {
         a->origin[0] = pos[0];

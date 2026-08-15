@@ -7310,3 +7310,52 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       The player is `src/game/movie.h`: a sector window, the 25 fps the container forces, and the XA in slot
       7 read per sector because those sectors are Form 2 where the video is Form 1. Sound and picture come
       out the same length on all three films.
+- [x] 116. **Lava, acid and the laser walls: 89 volumes on the disc that could not hurt anybody, and a
+      throttle that had been erased by the actor refresh.**
+
+      Six primitives assert an environment bit and this port has run them since #71. Five more are DAMAGE
+      volumes and nothing had ever called them, so the player could stand in lava indefinitely. Read out of
+      their handlers, which are as short as the environment ones:
+
+          INACID     0x8002E49C   damage(nobody, ent,  1, mod 9)
+          UNDERACID  0x8002E4C8   ent+0x98 |= 0x1100; damage(nobody, ent,  1, mod 9)
+          INLAVA     0x8002E500   ent+0x98 |= 0x1000; damage(nobody, ent, 20, mod 10)
+          UNDERLAVA  0x8002E53C   ent+0x98 |= 0x1100; damage(nobody, ent, 20, mod 10)
+          LASERWALL  0x8002E1F0   damage(ent, ent, item[+20], mod 11)
+
+      Read the same way the environment bits are — once at attach, off each volume's own record — and
+      applied on the same per-tick pass, because that is what the volume dispatcher's predicate arm amounts
+      to. **45 acid volumes and 44 lava volumes** across the disc: BOSS1 has seven, MATRIX5 eleven, WASTE1
+      eleven, POWER1 seven of acid and two of lava.
+
+      **LEVEL-triggered, and that is forced rather than chosen.** The damage function keeps a per-target
+      deadline for mods 9 and 10 (`env_next`, client+0x94, 400 ticks and 100), and a throttle only means
+      something if the call repeats. Firing once on entry would make lava a single point of damage.
+
+      **The throttle had been unobservable, and the bug is one this project has already had once.**
+      `q2_actor_from_player` rebuilds the hurt-actor from the inventory on every hit, and it cleared
+      `env_next` along with everything else — so each call reset the deadline the previous call had armed,
+      and lava landed thirty times a second instead of three. A full-health player died in under a fifth of
+      a second, which reads like the volume test being wrong rather than the throttle being erased. The
+      invulnerability and protection deadlines (client+0xB0/+0xB4) were being cleared by the same line and
+      are preserved with it. #59's `owner` field was the same fault in the same function.
+
+      Measured, `q2psx-inspect pmove <disc> <map>` now stands the player in each damage volume for three
+      seconds of level clock and reports the hits against what the throttle predicts:
+
+          BOSS1   7 lava volumes   9 hits each, health 100 -> -80   (expected 9)
+          WASTE1 11 acid volumes   3 hits each, health 100 ->  97   (expected 3)
+
+      Held in place, because these centres are points in space rather than ledges: the first run of it gave
+      1, 2 and 3 hits for identical acid volumes, which was gravity being measured rather than the throttle.
+
+      **The two LASERWALLs on the disc cannot fire, and that is a reading rather than a gap.** Its handler
+      returns before the damage when the object slot at +18 is negative (`bltz` at 0x8002E220), and both
+      calls name an empty slot — `0 armed of 2 declared`. That is the same shape as OBJDRAWOFF's empty
+      slots (#78) and the BUTTON in #81: whatever leaves an object slot empty is not confined to one
+      primitive.
+
+      **The latching flags are deliberately not asserted.** `sim.c` already records why: the frame's clear
+      at 0x8003A25C does not include 0x1000, so that bit is not a per-tick environment and something else
+      owns its lifetime. Setting it every tick would set a flag nothing takes back. The damage does not
+      depend on it.

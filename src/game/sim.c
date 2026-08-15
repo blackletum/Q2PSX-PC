@@ -73,6 +73,8 @@ void q2_sim_free(q2_sim *sim)
     q2_entity_set_free(&sim->entities);
     free(sim->trigger_inside);
     free(sim->volumes);
+    free(sim->volume_damage);
+    free(sim->volume_mod);
     free(sim->volume_env);
     memset(sim, 0, sizeof(*sim));
 }
@@ -188,6 +190,96 @@ static u32 record_env_mask(const q2_events *ev, const q2_userfuncs *uf,
     return mask;
 }
 
+/*
+ * The same walk, for what the record HURTS you for.
+ *
+ * Five primitives are damage volumes, and their handlers are as short as the
+ * environment ones — an OR of a flag, if any, and one call to the damage
+ * function with a constant amount and mod:
+ *
+ *   INACID     0x8002E49C   damage(0, ent,  1, mod 9)
+ *   UNDERACID  0x8002E4C8   ent+0x98 |= 0x1100; damage(0, ent,  1, mod 9)
+ *   INLAVA     0x8002E500   ent+0x98 |= 0x1000; damage(0, ent, 20, mod 10)
+ *   UNDERLAVA  0x8002E53C   ent+0x98 |= 0x1100; damage(0, ent, 20, mod 10)
+ *   LASERWALL  0x8002E1F0   damage(ent, ent, item[+20], mod 11)
+ *
+ * The flag bits are deliberately NOT asserted here and the reason is above the
+ * environment walk: the frame's clear at 0x8003A25C does not include 0x1000, so
+ * that bit latches and something other than the volume owns its lifetime.
+ * Setting it every tick would set a flag nothing takes back. The damage does
+ * not depend on it.
+ *
+ * LASERWALL's attacker is the TARGET, not nobody — `a0` still holds the entity
+ * at its call site where the other four zero it. It changes nothing here (the
+ * player is the only thing these volumes can reach) and it is recorded because
+ * it is the sort of asymmetry that looks like a transcription slip later.
+ *
+ * A record with more than one of them takes the LAST, which is the engine's
+ * outcome too: the calls run in order and each one hurts, but the throttle the
+ * first arms suppresses the rest within its window.
+ */
+static void record_hazard(const q2_events *ev, const q2_userfuncs *uf,
+                          u32 record_offset, s16 *out_damage, s16 *out_mod)
+{
+    q2_event_record rec;
+    u32 i;
+
+    *out_damage = 0;
+    *out_mod    = 0;
+
+    if (!q2_events_record_at(ev, record_offset, &rec))
+        return;
+
+    for (i = 0; i < rec.n_items; i++) {
+        q2_event_item item;
+        u8            call_index;
+        q2_uf_prim    prim;
+
+        if (!q2_events_get_item(ev, &rec, i, &item))
+            break;
+        if (item.opcode != Q2_EVOP_CALL)
+            continue;
+        if (!q2_events_get_call_index(&item, &call_index))
+            continue;
+
+        prim = q2_userfuncs_prim(uf, call_index);
+
+        switch (prim) {
+        case Q2_UF_INACID:
+        case Q2_UF_UNDERACID:
+            *out_damage = 1;
+            *out_mod    = Q2_MOD_ACID;
+            break;
+        case Q2_UF_INLAVA:
+        case Q2_UF_UNDERLAVA:
+            *out_damage = 20;
+            *out_mod    = Q2_MOD_LAVA;
+            break;
+        case Q2_UF_LASERWALL: {
+            q2_uf_call call;
+            s32        amount = 0;
+
+            if (q2_uf_decode_call(&call, uf, &item) != Q2_OK)
+                break;
+            if (!q2_uf_operand_s32(&call, 1, 0, &amount))
+                break;
+            /* `bltz` on the object slot at +18 returns before the damage, so a
+             * wall with no object never fires. */
+            {
+                s16 slot = 0;
+
+                if (q2_uf_operand_slot_raw(&call, 0, 0, &slot) && slot < 0)
+                    break;
+            }
+            *out_damage = (s16)amount;
+            *out_mod    = Q2_MOD_LASER;
+            break;
+        }
+        default: break;
+        }
+    }
+}
+
 /* Build the per-volume environment masks. Silently leaves them all zero when
  * the map has no UserFuncs table, which is the same as having no such volume. */
 static void build_volume_env(q2_sim *sim)
@@ -195,14 +287,20 @@ static void build_volume_env(q2_sim *sim)
     u32 i;
 
     free(sim->volume_env);
-    sim->volume_env = NULL;
+    free(sim->volume_damage);
+    free(sim->volume_mod);
+    sim->volume_env    = NULL;
+    sim->volume_damage = NULL;
+    sim->volume_mod    = NULL;
 
     if (!sim->triggers_ready || !sim->events_ready ||
         !sim->userfuncs_ready || sim->triggers.count == 0)
         return;
 
-    sim->volume_env = (u32 *)calloc(sim->triggers.count, sizeof(u32));
-    if (!sim->volume_env)
+    sim->volume_env    = (u32 *)calloc(sim->triggers.count, sizeof(u32));
+    sim->volume_damage = (s16 *)calloc(sim->triggers.count, sizeof(s16));
+    sim->volume_mod    = (s16 *)calloc(sim->triggers.count, sizeof(s16));
+    if (!sim->volume_env || !sim->volume_damage || !sim->volume_mod)
         return;
 
     for (i = 0; i < sim->triggers.count; i++) {
@@ -215,6 +313,8 @@ static void build_volume_env(q2_sim *sim)
 
         sim->volume_env[i] = record_env_mask(&sim->events, &sim->userfuncs,
                                              t.event_offset);
+        record_hazard(&sim->events, &sim->userfuncs, t.event_offset,
+                      &sim->volume_damage[i], &sim->volume_mod[i]);
     }
 }
 
@@ -614,10 +714,34 @@ static void update_env_flags(q2_sim *sim)
      */
     if (sim->volume_env && sim->triggers_ready) {
         for (i = 0; i < sim->triggers.count; i++) {
-            if (!sim->volume_env[i])
+            bool hazard = sim->volume_damage && sim->volume_damage[i] != 0;
+
+            if (!sim->volume_env[i] && !hazard)
                 continue;
-            if (q2_trigger_contains(&sim->triggers, i, sim->player[sim->cur_player].pos))
-                env |= sim->volume_env[i];
+            if (!q2_trigger_contains(&sim->triggers, i,
+                                     sim->player[sim->cur_player].pos))
+                continue;
+
+            env |= sim->volume_env[i];
+
+            /*
+             * And the damage, on the same pass and for the same reason: it
+             * describes where the player IS. The amount and the mod were read
+             * at attach (record_hazard); the RATE is the damage function's own
+             * per-target throttle, which is what stops twenty points of lava
+             * three hundred times a second.
+             *
+             * Nobody is the attacker. Lava is not a frag.
+             */
+            if (hazard) {
+                q2_damage_result dr =
+                    q2_sim_hurt_player(sim, NULL, sim->volume_damage[i],
+                                       sim->volume_mod[i],
+                                       sim->player[sim->cur_player].ent.pos);
+
+                if (!dr.blocked)
+                    sim->hazard_hits++;
+            }
         }
     }
 

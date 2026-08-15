@@ -420,6 +420,34 @@ typedef struct q2_sim {
      * back to `env_flags` alone.
      */
     u32         *volume_env;
+
+    /*
+     * And what a volume HURTS you for, read the same way and applied on the
+     * same pass.
+     *
+     * Five primitives are damage volumes and their bodies are as short as the
+     * environment ones: `INACID` is one point at mod 9, `INLAVA` twenty at mod
+     * 10, the two `UNDER` variants are the same amounts with an extra flag, and
+     * `LASERWALL` carries its amount in its own operand at mod 11. Read out of
+     * 0x8002E49C, 0x8002E4C8, 0x8002E500, 0x8002E53C and 0x8002E1F0.
+     *
+     * They are LEVEL-triggered — asserted every tick you stand in the volume,
+     * not once on entry — and that is not a choice: the damage function keeps a
+     * per-target throttle for mods 9 and 10 (`env_next`, 400 and 100 ticks),
+     * and a throttle only means something if the call repeats. Firing once on
+     * entry would make lava a single point of damage you could stand in.
+     *
+     * The attacker is NOBODY, which is the `a0 = zero` at every one of those
+     * call sites, and is why drowning in lava is not a frag for anyone.
+     */
+    s16         *volume_damage;
+    s16         *volume_mod;
+
+    /* How many hazard hits actually LANDED — the throttle blocks most of the
+     * calls, so this is the number that says the rate is right rather than the
+     * number of times the volume was tested. */
+    u32          hazard_hits;
+
     q2_userfuncs userfuncs;
     bool         userfuncs_ready;
 
