@@ -1583,6 +1583,11 @@ static void client_event_call(void *user, const q2_event_item *item,
     c->rot_steps += q2_rotators_call(&c->rotators, &c->sim[0].userfuncs,
                                      item, call_index);
 
+    /* A LIFT1 call is both the constructor and the trigger: the same item that
+     * built the mover is what asks it to move. */
+    if (c->movers_ready)
+        c->mover_triggers += q2_movers_trigger_item(&c->movers, item->offset);
+
     /*
      * And the breakables. GLASS is the other primitive whose operand is an
      * object slot, and a script CALL is enough to run it: the handler passes
@@ -2292,9 +2297,19 @@ static bool client_load_zone(client *c, const char *map, int index)
                  * operand rebase is needed here.
                  */
                 if (q2_movers_build(&c->movers, &ev) == Q2_OK) {
+                    u32 opcode_built = c->movers.count;
+
+                    /* And the lifts a CALL builds rather than an opcode: same
+                     * set, same tick, same draw offset (mover.h). */
+                    q2_movers_build_calls(&c->movers, &ev, &uf,
+                                          &c->ev_operands);
+
                     c->movers_ready = true;
                     c->zone.movers  = &c->movers;
-                    Q2_INFO("movers: %u doors and lifts", c->movers.count);
+                    Q2_INFO("movers: %u doors and lifts (%u from MOVER opcodes,"
+                            " %u from LIFT1 calls)",
+                            c->movers.count, opcode_built,
+                            c->movers.count - opcode_built);
                 }
 
                 if (q2_rotators_build(&c->rotators, &ev, &uf) == Q2_OK) {

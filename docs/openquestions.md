@@ -5957,3 +5957,20 @@ far has been mid-play.
 looks smaller than retail's. Scaling the projection made that look better, which is exactly why it was
 convincing, but a change that improves one object's appearance while contradicting the transform chain is a
 coincidence and not a fix. The real cause is unfound.
+
+- [x] 76. **The other half of the lifts: the ones a CALL builds.** `MOVER_A/B/C` are opcodes in the record
+      stream; `LIFT1` is a CALL primitive that builds the same kind of runtime object, and it accounts for
+      56 of the runs in #73's histogram. `userfuncs.c`'s operand table maps one onto the other exactly —
+      `param_a` is the target negated, `param_b` the speed, `objects[4]` the Scene nodes, `time_a`/`time_b`
+      the delay and the wait — so `q2_movers_build_calls` appends them to the same set the opcodes build,
+      and they share a tick, a draw offset and a trigger. The object slots take the #56 rebase, as a
+      rotation call's do.
+
+      A LIFT1 call is both the constructor and the trigger: the same item that built the mover is the one
+      that asks it to move.
+
+      Per map: LAB 34 opcode movers plus **4 lifts**, POWER2 34 plus 4, COMMAND 10 plus 2, BASE0 8 plus 2.
+
+      **CAGELIFT1 is deliberately not built** — three calls on the disc, and its operand table names no
+      speed. A mover with speed zero is one that is triggered, ticks and never arrives, so it needs its
+      constructor read rather than a constant borrowed from `LIFT1`.
