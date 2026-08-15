@@ -5743,3 +5743,32 @@ projection is right the weapon comes with it, and the two remaining entries on t
       Eleven levels, five units, a MISSION screen at every boundary and the inventory carried across all
       of them — and by BOSS1 the log reads `weapon 8, weapons 0081`, so a weapon picked up two levels
       earlier is still in the player's hands.
+
+- [x] 71. **The briefing now has its trigger too, and one defect underneath it is exposed rather than
+      caused.** `main.c` said of the briefing that *"on the console it is shown between levels by the
+      outer state machine; what triggers it is not established"*, and gave it a key. A completed LOADMAP
+      is that trigger: the MISSION screen belongs to the level being left and the briefing to the one
+      being entered, so the two sit either side of the boundary. Only on a level change — a zone gate
+      stays inside one level and has no new orders to give.
+
+      **And the overlay is cleared with the level.** The notifications carry a lifetime on the LEVEL
+      clock and a level change restarts that clock, so the first capture of the arrival briefing had
+      `You have found a secret.` from the previous map still sitting over the new one's first frames.
+
+- [ ] 72. **The briefing's PANEL does not draw, and the buckets are not why.**
+      `q2_briefing_build_ot` calls `q2_panel_build_ot` before printing, and the text appears while the
+      panel behind it does not — so the briefing is unreadable green-on-orange over whatever wall the
+      player arrived facing. It mattered little while the screen was on a debug key; it shows on every
+      level transition now.
+
+      The obvious explanation is the mismatch this port already documents: `q2_hud_print` takes a DEPTH
+      that is resolved against the ordering table's current window, while `q2_panel_build_ot` takes
+      ABSOLUTE buckets through `psx_ot_add_bucket` — gpu.h's own "escape". So the panel's 2 and 1 and the
+      text's 0 are not in the same space.
+
+      **Tested, and that is not it.** Passing 0 for all three draws the text and still no panel, so the
+      panel is not merely landing behind the world or outside the slice — nothing of it reaches the
+      frame. The next thing to check is whether `psx_ot_add_bucket` hands back a primitive at all with a
+      window installed, since `q2_panel_body_ot` breaks out of its loop the moment it returns NULL and
+      would then emit silently nothing. `q2_briefing_build_ot` is the only caller of the panel anywhere
+      in the port, which is why this has never been noticed.

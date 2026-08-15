@@ -410,6 +410,7 @@ typedef struct client {
     int               map_unit;          /* from `Unit<N>Miss1`              */
     bool              mission_after_map; /* the screen is holding a LOADMAP */
     u32               mission_frames;
+    u32               briefing_frames;
 
     bool              map_change_pending;
     char              pending_map[Q2_UF_NAME_LEN + 1];
@@ -1489,6 +1490,16 @@ static bool client_change_map(client *c, const char *map, const char *start)
         Q2_WARN("LOADMAP: %s has no start position '%s'; using its own start",
                 map, start);
     }
+
+    /*
+     * A new level starts with a clean overlay. The notifications carry a
+     * lifetime on the LEVEL clock, and a level change restarts that clock, so
+     * without this the "You have found a secret." from the level you just left
+     * is still sitting over the new one's first frames — which is exactly what
+     * the first capture of the arrival briefing showed.
+     */
+    if (c->hud_ready)
+        q2_hud_init(&c->hud, &c->hud_tables, 1);
 
     c->map_changes++;
     Q2_INFO("LOADMAP -> %s zone %d%s%s", map, zone,
@@ -5667,6 +5678,15 @@ no_window:
          * would stop at the first level boundary, which is precisely where the
          * interesting part starts.
          */
+        /* The briefing, released the same way and for the same reason. */
+        if (c.briefing_open) {
+            c.briefing_frames++;
+            if (c.headless && c.briefing_frames >= Q2_INTERMISSION_HEADLESS) {
+                c.briefing_open = false;
+                q2_prompt_hide_all(&c.prompts);
+            }
+        }
+
         if (c.mission_after_map) {
             c.mission_frames++;
             if (c.headless && c.mission_frames >= Q2_INTERMISSION_HEADLESS)
@@ -5674,7 +5694,23 @@ no_window:
 
             if (!c.mission_open) {
                 c.mission_after_map = false;
-                client_change_map(&c, c.pending_map, c.pending_start);
+                if (client_change_map(&c, c.pending_map, c.pending_start)) {
+                    /*
+                     * And the ARRIVAL half of the intermission: the briefing,
+                     * which is the new level's orders. `main.c` used to say of
+                     * it that "on the console it is shown between levels by the
+                     * outer state machine; what triggers it is not established"
+                     * — a LOADMAP that has just completed is that trigger, and
+                     * it is the other side of the boundary from the MISSION
+                     * screen the level being left raises.
+                     *
+                     * Only on a level change: a zone gate stays inside one
+                     * level and has no new orders to give.
+                     */
+                    c.briefing_open   = true;
+                    c.briefing_frames = 0;
+                    q2_prompt_show(&c.prompts, Q2_PROMPT_BACK, 216);
+                }
 
                 /* Re-arm, so one `--fire-triggers` walks the game rather than
                  * one level. Without this a scripted run stops at the first
