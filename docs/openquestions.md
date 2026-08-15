@@ -1356,19 +1356,65 @@ The residues of the resolved blockers keep their parents' numbers.
       lands in — `Scene` `0x800B2C3C`, `MapMod` `0x800B2C6C`, `Points` `0x800B2CA0`, `SortData` `0x800B2C84`,
       `SpaceLights` `0x800B2ED0`, `AreaConx` `0x800B2D1C`, `PrimaryColl` `0x800B2E0C`, `MapNames`
       `0x800B2C9C` — which is what makes each chunk's consumer findable with `xrefs`.
-- [ ] 32. Why `ModelNames` is present in all 49 `COMMON.DAT` files yet the string appears **zero** times in
-      the 634,880-byte executable. Dead tool-only data, positional access, or a runtime-assembled name?
+- [x] 32. **`ModelNames` is tool-only data, and the proof is that this port has never read it.** The chunk
+      is present in all 49 `COMMON.DAT` files and the string appears zero times in the executable, which
+      left three hypotheses: dead data, positional access, or a runtime-assembled name.
+
+      Its layout, measured: a flat run of 12-byte NUL-padded names, padded to the container's 4-byte
+      multiple — 49 of 49 maps, **1,407 names**. BASE0's are `Debris1`, `Debris2`, `Debris3`, `Chest`,
+      `HelpComputer`, `Blaster G`, `Shotgun G`, `Gib meat` and ten more.
+
+      **It is redundant.** `model.h` already records that a CastList model carries its own `name[12]` at
+      `+0x08` and that it appears in this map's ModelNames on all 49 maps. So the engine has every name it
+      needs inside the model bank, which is why it never has to look this chunk up — and why its name is
+      not in the executable to look up with.
+
+      The port is the check: `Q2_COMMON_MODEL_NAMES` appears in the chunk-name table in `level.c` and
+      **nowhere else in `src/` or `tools/`**. Every model on the disc — 1,723 of them — every creature's,
+      every item's and the view weapon's, resolves by the CastList name with this chunk unread. A
+      reconstruction that works without it is the strongest statement available about whether the engine
+      needs it.
 - [ ] 33. Why `TriggerRemap` and `SecondaryRem` exist in the executable but are emitted by no file on the
       disc. Cut features, or read from a source not on this disc — a parser should tolerate them appearing.
-- [ ] 34. Why the zone directory order permutes the `SecondaryCol` / `PrimaryRemap` / `AreaConx` trio as a
-      function of zone index. Perfect and exceptionless correlation; the build-tool mechanism is unexplained.
-      Matters only as further proof that index-based chunk lookup is unsafe.
-- [ ] 35. `MAP.ALL`'s purpose; its four header words at `+0x40` (three decode as plausible floats near
-      −1.93…−1.97); and whether the 16-entry table length is right (unverifiable — N = 1). Almost certainly
-      an editor leftover: the filename appears **zero** times in the EXE and the file's last 44 bytes are
-      MSVC uninitialised-heap fill.
-- [ ] 36. The unused 20-byte tail of every Form 2 payload, and the always-zero `uint16_t` at `+2` of each
-      music table record. Both are zero in 100 % of samples — nothing can be inferred from this disc.
+- [x] 34. **The permutation is three states keyed to zone index, stated exactly — and only three chunks
+      ever move.** "Perfect and exceptionless correlation" was the observation; this is the rule:
+
+          zone 0    SecondaryCol  PrimaryRemap  AreaConx      49 zones
+          zone 1    PrimaryRemap  SecondaryCol  AreaConx      33
+          zone >=2  PrimaryRemap  AreaConx      SecondaryCol  33
+
+      Exceptionless over all 115 zone files. It is not a rotation by index — it is three arrangements with
+      everything from zone 2 up sharing one.
+
+      **And the whole directory has only FIVE distinct orders**, over 115 files: every chunk except those
+      three sits in a fixed position, and the two remaining variants are the same three arrangements
+      without `CreAIRel`/`CreAIBin` on the zones that carry no creatures. So the variation is entirely
+      those three names and nothing else.
+
+      Ordering by SIZE is refuted — 82 of 115 zones have the trio in neither ascending nor descending size
+      order, and the 33 that are ascending are exactly the zone-1 group, which is that arrangement's
+      coincidence rather than a rule.
+
+      The build tool's internal reason is not on the disc and cannot be. What matters for a parser is, and
+      it is now exact rather than "unsafe in general": **look chunks up by name**, which this port does.
+- [!] 35. **`MAP.ALL` — TERMINAL: the disc cannot answer this and the answer it does give is "nothing reads
+      it".** Its purpose, its four header words at `+0x40` (three decode as plausible floats near
+      −1.93…−1.97) and whether the 16-entry table length is right are all unverifiable at N = 1. What IS
+      established points one way and only one way: the filename appears **zero** times in the executable,
+      and the file's last 44 bytes are MSVC uninitialised-heap fill — a buffer written out longer than the
+      data in it. Both are the signature of an editor leftover shipped by accident. Kept as a standing
+      note rather than an open question, because no further evidence exists on this disc to gather.
+- [!] 36. **TERMINAL, and the entry says so itself: both are zero in 100% of samples.** The unused 20-byte
+      tail of every Form 2 payload and the always-zero `uint16_t` at `+2` of each music table record.
+
+      The tail is not even a disc question: a CD-XA audio sector's 2,324-byte Form 2 payload carries 18
+      sound groups of 128 bytes — 2,304 — and the remaining 20 are unused by the standard, which is why
+      `xa.h` warns that a decoder consuming 2,324 will drift. Zero in all 70,663 audio sectors is the
+      standard being followed, not a field withholding its meaning.
+
+      The music record's `+2` has no such external explanation and no internal one either: a field that is
+      zero in every sample carries no information about itself. Kept as a standing note. Nothing further
+      can be gathered here.
 - [ ] 37. `GlintMod` (2608 bytes, one map only, high-entropy after the first few dozen bytes).
 - [x] 39. The HUD's residuals, none of them blocking, now that the overlay itself is done. **CLOSED: every one of them below is answered, and the last is answered as a CUT feature rather than a missing one.**
       **~~The MISSION / level-completion screen.~~ — RECONSTRUCTED, and it draws.**
