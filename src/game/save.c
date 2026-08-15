@@ -36,6 +36,7 @@
 #define TAG_TRIG TAG('T', 'R', 'I', 'G')   /* trigger residency               */
 #define TAG_ENTS TAG('E', 'N', 'T', 'S')   /* per-entity mutable state        */
 #define TAG_MISN TAG('M', 'I', 'S', 'N')   /* the mission tallies             */
+#define TAG_BRKS TAG('B', 'R', 'K', 'S')   /* which panes have been shot      */
 #define TAG_SETT TAG('S', 'E', 'T', 'T')   /* the menu settings               */
 
 #define SAVE_FILE_HEADER 16                /* magic, version, size, crc       */
@@ -272,6 +273,7 @@ void q2_save_free(q2_save *s)
     free(s->event_flags);
     free(s->trigger_inside);
     free(s->entities);
+    free(s->breakables);
     memset(s, 0, sizeof(*s));
 }
 
@@ -387,6 +389,24 @@ q2_result q2_save_capture(q2_save *out, const q2_sim *sim,
 
         memcpy(out->trigger_inside, sim->trigger_inside, n);
         out->trigger_count = n;
+    }
+
+    /* --- the breakables ---------------------------------------------------- */
+    if (sim->breakable_count > 0) {
+        u32 n = sim->breakable_count, i;
+
+        out->breakables = (q2_save_breakable *)calloc(n, sizeof(*out->breakables));
+        if (!out->breakables) {
+            q2_save_free(out);
+            return Q2_ERR_NO_MEMORY;
+        }
+        out->breakable_count = n;
+
+        for (i = 0; i < n; i++) {
+            out->breakables[i].scene_node = sim->breakable[i].scene_node;
+            out->breakables[i].health     = sim->breakable[i].health;
+            out->breakables[i].broken     = sim->breakable[i].broken ? 1u : 0u;
+        }
     }
 
     /* --- the entity set ---------------------------------------------------- */
@@ -558,6 +578,28 @@ q2_result q2_save_apply(const q2_save *s, q2_sim *sim, q2_inventory *inv,
             if (n > sim->trigger_capacity)
                 n = sim->trigger_capacity;
             memcpy(sim->trigger_inside, s->trigger_inside, n);
+        }
+    }
+
+    /*
+     * --- the breakables --------------------------------------------------
+     *
+     * Matched by SCENE NODE, not by index: the registry is rebuilt from the map
+     * on load and an ordinal is only stable while build order never changes.
+     * A pane the file does not mention is left as the map built it, which is
+     * what a save written before this chunk existed produces.
+     */
+    if (s->breakables) {
+        u32 i, j;
+
+        for (i = 0; i < s->breakable_count; i++) {
+            for (j = 0; j < sim->breakable_count; j++) {
+                if (sim->breakable[j].scene_node != s->breakables[i].scene_node)
+                    continue;
+                sim->breakable[j].health = s->breakables[i].health;
+                sim->breakable[j].broken = s->breakables[i].broken != 0;
+                break;
+            }
         }
     }
 
@@ -1065,6 +1107,49 @@ static bool read_entities(rbuf *r, q2_save *s)
     return true;
 }
 
+static void write_breakables(wbuf *w, const q2_save *s)
+{
+    size_t at = w_chunk_begin(w, TAG_BRKS);
+    u32 i;
+
+    w_u32(w, s->breakable_count);
+    for (i = 0; i < s->breakable_count; i++) {
+        w_s32(w, s->breakables[i].scene_node);
+        w_s16(w, s->breakables[i].health);
+        w_u8(w, s->breakables[i].broken);
+    }
+
+    w_chunk_end(w, at);
+}
+
+static bool read_breakables(rbuf *r, q2_save *s)
+{
+    u32 n = r_u32(r);
+    u32 i;
+
+    if (r->bad)
+        return false;
+    if (n == 0)
+        return true;
+    if (n > SAVE_MAX_ENTITIES)
+        return false;
+
+    free(s->breakables);
+    s->breakables = (q2_save_breakable *)calloc(n, sizeof(*s->breakables));
+    if (!s->breakables)
+        return false;
+    s->breakable_count = n;
+
+    for (i = 0; i < n; i++) {
+        s->breakables[i].scene_node = r_s32(r);
+        s->breakables[i].health     = r_s16(r);
+        s->breakables[i].broken     = r_u8(r);
+        if (r->bad)
+            return false;
+    }
+    return true;
+}
+
 static void write_mission(wbuf *w, const q2_save *s)
 {
     size_t at = w_chunk_begin(w, TAG_MISN);
@@ -1189,6 +1274,7 @@ static q2_result build_body(const q2_save *s, wbuf *w)
     write_bytes_chunk(w, TAG_EVNT, s->event_flags, s->event_count);
     write_bytes_chunk(w, TAG_TRIG, s->trigger_inside, s->trigger_count);
     write_entities(w, s);
+    write_breakables(w, s);
     write_mission(w, s);
     write_settings(w, s);
 
@@ -1375,6 +1461,11 @@ static q2_result read_body(q2_save *out, const u8 *body, size_t body_size)
 
         case TAG_ENTS:
             if (!read_entities(&c, out))
+                return Q2_ERR_BAD_FORMAT;
+            break;
+
+        case TAG_BRKS:
+            if (!read_breakables(&c, out))
                 return Q2_ERR_BAD_FORMAT;
             break;
 

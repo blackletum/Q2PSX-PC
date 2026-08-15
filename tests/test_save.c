@@ -194,6 +194,20 @@ static void test_round_trip(void)
     sim.entities.ent[2].think    = q2_item_shrink_think;
     q2_entity_remove(&sim.entities.ent[3]);
 
+    /*
+     * A pane that has been shot. Without this in the file, a save made after
+     * breaking a window restores it whole and the shards already on the floor
+     * come back as glass — the same defect as a save that shuts every door the
+     * player opened, which is why the script flags are carried.
+     */
+    sim.breakable_count = 2;
+    sim.breakable[0].scene_node = 187;
+    sim.breakable[0].health     = -4;
+    sim.breakable[0].broken     = true;
+    sim.breakable[1].scene_node = 205;
+    sim.breakable[1].health     = 30;
+    sim.breakable[1].broken     = false;
+
     check(q2_save_capture(&saved, &sim, &inv, "SLES-01534", "BASE1", 2) == Q2_OK,
           "captures state");
     check_eq_i(saved.player.pos[0], 1234, "captured x");
@@ -293,6 +307,34 @@ static void test_round_trip(void)
     check_eq_i(loaded.entities[0].place_id, 100, "an entity's place id survives");
     check_eq_i(loaded.entities[0].taken, 1, "a collected item stays collected");
     check_eq_i(loaded.entities[0].hidden, 1, "a hidden item stays hidden");
+
+    check_eq_i(loaded.breakable_count, 2, "both panes survive");
+    check_eq_i(loaded.breakables[0].scene_node, 187, "a pane is keyed by node");
+    check_eq_i(loaded.breakables[0].broken, 1, "a broken pane stays broken");
+    check_eq_i(loaded.breakables[0].health, -4, "its hit points survive");
+    check_eq_i(loaded.breakables[1].broken, 0, "an intact pane stays intact");
+    check_eq_i(loaded.breakables[1].health, 30, "and keeps what it has left");
+
+    /*
+     * And the round trip through the sim: applied to a registry whose panes are
+     * in a DIFFERENT order, the match is by node and not by index.
+     */
+    {
+        q2_sim s2;
+
+        memset(&s2, 0, sizeof(s2));
+        s2.breakable_count = 2;
+        s2.breakable[0].scene_node = 205;   /* swapped */
+        s2.breakable[1].scene_node = 187;
+        s2.breakable[0].health = 50;
+        s2.breakable[1].health = 50;
+
+        q2_save_apply(&loaded, &s2, NULL, "SLES-01534", "BASE1");
+        check_eq_i(s2.breakable[1].broken, 1,
+                   "the broken pane is found by node, not by index");
+        check_eq_i(s2.breakable[0].broken, 0, "and the intact one is not");
+        check_eq_i(s2.breakable[1].health, -4, "with its hit points");
+    }
     check_eq_i(loaded.entities[0].respawn_at, 4000, "its respawn timer survives");
     check_eq_i(loaded.entities[2].scale, 1024, "a mid-shrink scale survives");
     check_eq_i(loaded.entities[2].think, Q2_SAVE_THINK_SHRINK,

@@ -7577,3 +7577,17 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       it, and the kill counters read 0 all the way down — it is a demonstration that the level flow, the
       unit boundaries, the mission screens, the objectives and the ending are all connected. The last frame
       is the placard the campaign used to END on, now shown after the film rather than instead of it.
+- [x] 122. **A save shut every window the player had broken, which is a defect this session introduced and
+      the same one the script flags were carried to fix.**
+      `q2_save_capture` carries the script's event flags precisely so a save does not restore a level with
+      every door the player opened shut again. #117 gave the port breakable panes with state — hit points
+      that count down and a broken latch — and nothing carried them, so a save made after shooting a window
+      brought the window back while the shards stayed on the floor.
+
+      A `BRKS` chunk now does, keyed by SCENE NODE rather than by index: the registry is rebuilt from the
+      map on load, and an ordinal is stable only while build order never changes. The version is NOT bumped
+      — the chunked format exists so a reader skips a tag it does not know, and a save written before this
+      simply has no panes in it, which restores them as the map built them.
+
+      `tests/test_save.c` round-trips it through a registry whose two panes are in the OPPOSITE order, so
+      the test fails if the match ever becomes positional.

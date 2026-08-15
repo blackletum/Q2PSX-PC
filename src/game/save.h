@@ -103,7 +103,10 @@
  *
  * Version 1 was a flat format that stored a raw `q2_inventory`.
  */
-#define Q2_SAVE_VERSION    3
+#define Q2_SAVE_VERSION    3   /* the BRKS chunk is additive: an older file
+                               * simply has none, and a reader that does not
+                               * know the tag skips it — which is what the
+                               * chunked format is for */
 
 #define Q2_SAVE_MAP_LEN    16
 #define Q2_SAVE_SERIAL_LEN 16
@@ -165,6 +168,25 @@ typedef struct q2_save_entity {
     s32 pos[3];           /* +0x54 — a dropped item does not stay where it
                            * spawned, so position is state, not map data      */
 } q2_save_entity;
+
+/*
+ * A breakable's mutable state.
+ *
+ * Keyed by SCENE NODE rather than by index, for the same reason a mover is
+ * keyed by its item's offset: the registry is rebuilt from the map on load and
+ * an ordinal is only stable while build order never changes. The node is the
+ * pane's identity in the map.
+ *
+ * Without this a save made after shooting a window restores it intact, and the
+ * shards that were already on the floor come back as a whole pane — which is
+ * the same class of defect as a save that shuts every door the player opened,
+ * and that one was fixed by carrying the script flags.
+ */
+typedef struct q2_save_breakable {
+    s32 scene_node;
+    s16 health;
+    u8  broken;
+} q2_save_breakable;
 
 /* ------------------------------------------------------------------------- */
 /* One level's tally, as the MISSION screen's 25-byte record holds it          */
@@ -232,6 +254,10 @@ typedef struct q2_save {
     /* Per-entity mutable state, parallel to the rebuilt entity set. */
     q2_save_entity *entities;
     u32             entity_count;
+
+    /* Which panes have been shot, and how much they have left. */
+    q2_save_breakable *breakables;
+    u32                breakable_count;
 
     /* --- presentation ---------------------------------------------------- */
     q2_save_level_stats mission[Q2_SAVE_MISSION_ROWS];
