@@ -443,6 +443,33 @@ bool q2_model_anim_at(const q2_model *m, u32 tick, q2_model_anim *out,
                       u32 *within);
 
 /*
+ * The same walk, holding the last frame instead of failing off the end.
+ *
+ * `q2_model_anim_at` is the engine's loop exactly — `position < clip->frames`,
+ * then subtract, then advance — and the engine has NO end-of-chain test at all
+ * (0x8006B924's loop, with 0x80070188 as the advance, is four instructions and
+ * checks nothing). It relies on the position always landing inside.
+ *
+ * It does not always land inside here, and the reason is not arithmetic. An AI
+ * move's length and its animation's extent are different quantities authored
+ * independently (#63): the Enforcer's `Duck` is a 30-frame AI move whose
+ * animation begins at model frame 1287 of a 1302-frame timeline, so it has
+ * five AI frames of animation and twenty-five frames of nothing after it. At
+ * `into = 5` the position is frame 1302 — one past the last — and the walk
+ * fails.
+ *
+ * On the console the move would have ended by then: the animation's end
+ * callback fires and the creature is in a different move. This port's frame
+ * counter is not driven by that callback, so it can sit past the end, and the
+ * choice is between holding the last pose and falling back to matching a clip
+ * by LENGTH — something the disc never does. Holding is the smaller lie, and
+ * it is the one the caller can see: `*clamped` says it happened.
+ */
+bool q2_model_anim_at_held(const q2_model *m, u32 tick, q2_model_anim *out,
+                           u32 *within, bool *clamped);
+
+
+/*
  * The `skip`-th clip whose length is exactly `frames`, or false if there is no
  * such clip.
  *

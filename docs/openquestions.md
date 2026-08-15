@@ -5063,7 +5063,7 @@ nothing saying so.
       animating plausibly. That is weak evidence — a wrong-but-same-length clip looks like an animation —
       but it does mean this is a fidelity question rather than a crash-or-garbage one.
 
-- [ ] 63. **What implementing the real animation path still needs, stated exactly.**
+- [x] 63. **What implementing the real animation path still needs, stated exactly.** *(Closed by #97: every named move now poses by name.)*
       Everything about the engine's mechanism is now read, so it is worth writing down what is and is not in
       hand — the answer is one missing link, not a system.
 
@@ -6607,3 +6607,54 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       test and the emitter agreed with each other and neither agreed with the camera. **That is the second
       test this session written from the code under test rather than from what the code owes its caller**
       — the briefing panel's was the first — and both pinned the defect instead of the requirement.
+- [x] 97. **The animation path now poses every named move by name — it was doing so for 40% of them.**
+      #63 closed the chain (name -> block D -> `base` -> `position = base + 30*(f − first)` -> walk) and
+      wired it, and reported the split honestly: `BASE2 1745 poses by name, 2655 by the fallback`. The
+      fallback is `q2_model_anim_by_length`, which matches a clip by LENGTH — something the disc never
+      does. So most poses were still being chosen by a mechanism that does not exist on the console, and
+      the entry left it there.
+
+      Splitting the one failure counter into two says where it goes, and the answer was not what the
+      remaining-work note assumed:
+
+          BASE1   431 by name, 369 named but no position   -- 0 of those names missing from block D
+          BASE2   322 by name, 678 named but no position   -- 0 missing
+          JAIL4   847 by name, 753 named but no position   -- 0 missing
+
+      **Every name resolved.** The pairing was complete. What failed was the walk: the position landed past
+      the end of the timeline. Traced, the case is exact — the Enforcer's `Duck` is a **30-frame AI move
+      whose animation begins at model frame 1287 of a 1302-frame timeline.** Five AI frames of animation,
+      twenty-five frames of nothing after it, and at `into = 5` the position is frame 1302: one past the
+      last.
+
+      That is #63's own finding arriving in the renderer. An AI move's length and its animation's extent
+      are different quantities authored independently, so a move CAN outlast its animation — and when it
+      is the last move on the timeline there is nothing after it to run on into. The engine does not care:
+      its loop (`0x8006B924`, with `0x80070188` as the advance) has **no end-of-chain test at all** and
+      would read past the block, because on the console the move's end callback has fired by then and the
+      creature is in a different move.
+
+      `q2_model_anim_at_held` holds the last frame instead, and reports that it did. It is a stated
+      divergence and the smaller of the two available lies — the alternative was falling back to length
+      matching, which is not a divergence but a different mechanism. `q2_model_anim_at` keeps the engine's
+      exact loop, and `tests/test_model.c` pins the two apart against a synthetic three-clip chain: inside
+      the timeline both agree and neither reports a hold; one past, the engine's walk fails and the hold
+      lands on the last clip's LAST frame; far past, the same frame, because a hold must not drift.
+
+      **And a garbage move name, found by the same counter.** With the walk fixed, JAIL4 still showed 177
+      names missing from block D — and the name was `@.B$L`. `name_slot_ok` required a printable run of
+      three or more and never required it to be TERMINATED, so a five-character window cut out of a
+      module's code, followed by two halfwords that happened to satisfy `last >= first`, was accepted as a
+      move name. Two guards fix it, and they are the two the LevelBin mission-event scan needed for exactly
+      the same reason (#91): the field must be NUL-terminated with its padding checked, and a record may
+      not BEGIN inside a printable run.
+
+      Checked against the thing that would have caught over-tightening: **108 of 115 moves carry the
+      module's own name both before and after**, so no real name was lost and one invented one is gone.
+
+          JAIL4   1570 by name, 0 missed, 30 unnamed      (was 1393 / 177 / 30)
+          BASE2    994 by name, 0 missed,  6 unnamed
+          POWER1   856 by name, 0 missed, 144 unnamed
+
+      The `unnamed` remainder is the honest fallback case and the only one left: a decoded move the module
+      never names has nothing else to go on.

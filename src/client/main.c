@@ -316,6 +316,8 @@ typedef struct client {
     u32               pose_by_name;
     u32               pose_name_no_pos;
     u32               pose_no_name;
+    u32               pose_name_absent;   /* the name is not in block D */
+    u32               pose_held;   /* ...by holding the timeline's last frame */
     u32               ent_light_dropped;
     u32               ent_bursts;
     u32               burst_no_fx, burst_no_table, burst_no_model;
@@ -4931,6 +4933,9 @@ static void client_write_shot(client *c, bool numbered)
                 c->sim[0].event_rt.call_count);
         Q2_INFO("  pose      %u by name, %u named but no position, %u unnamed",
                 c->pose_by_name, c->pose_name_no_pos, c->pose_no_name);
+        Q2_INFO("            %u held the timeline's last frame; of the misses "
+                "%u had no such name in block D",
+                c->pose_held, c->pose_name_absent);
         Q2_INFO("  breakable %u GLASS calls broke something, %u pieces thrown",
                 c->glass_calls, c->glass_pieces);
         Q2_INFO("  script    %u strings, %u sounds, %u gated by ONKEYDO, "
@@ -5244,6 +5249,7 @@ static void client_draw_view(void *user, q2_screen *s, int p,
                          */
                         const char *mname = client_move_name(m, mv);
                         u32 pos = 0;
+                        bool pose_held = false;
 
                         /*
                          * `into` is already clamped to [0, len-1] above, which
@@ -5255,9 +5261,12 @@ static void client_draw_view(void *user, q2_screen *s, int p,
                          * move's base means anyway — the move begins there.
                          */
                         have_clip = false;
-                        if (mname && q2_model_position_for_move(
+                        if (mname && !q2_model_position_for_move(
                                 mdl, mname, mv->first_frame + into,
                                 mv->first_frame, &pos))
+                            /* The NAME is not in this model's block D. */
+                            c->pose_name_absent++;
+                        else if (mname)
                             /*
                              * `pos` is in TENTHS of an animation frame, which
                              * is the engine's unit (0x8006B5D8 divides it by
@@ -5269,12 +5278,23 @@ static void client_draw_view(void *user, q2_screen *s, int p,
                              * the timeline and the walk fails on every creature,
                              * silently, back to the length path.
                              */
-                            have_clip = q2_model_anim_at(
+                            have_clip = q2_model_anim_at_held(
                                 mdl, pos / Q2_MODEL_TICKS_PER_FRAME,
-                                &clip, &within);
+                                &clip, &within, &pose_held);
+                        if (have_clip && pose_held) c->pose_held++;
                         if (have_clip)      c->pose_by_name++;
                         else if (mname)     c->pose_name_no_pos++;
                         else                c->pose_no_name++;
+
+
+                        /*
+                         * WHICH half fails matters and the one counter could
+                         * not say. `pose_name_absent` is the name missing from
+                         * block D — a real pairing gap. Everything else in
+                         * `pose_name_no_pos` is a name that RESOLVED and whose
+                         * position then fell off the end of the clip chain,
+                         * which is an arithmetic fault, not a missing pairing.
+                         */
 
                         if (!have_clip) {
                             have_clip = q2_model_anim_by_length(

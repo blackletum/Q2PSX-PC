@@ -616,6 +616,7 @@ static void follow_callback(q2_creature *c, dec *d, u32 entry, s32 via,
 static bool name_slot_ok(const u8 *p, size_t avail)
 {
     size_t i;
+    bool terminated = false;
 
     if (avail < CRE_MOVE_NAME_STRIDE)
         return false;
@@ -623,13 +624,34 @@ static bool name_slot_ok(const u8 *p, size_t avail)
         return false;
 
     for (i = 0; i < CRE_MOVE_NAME_CHARS; i++) {
-        if (p[i] == 0)
+        if (p[i] == 0) {
+            terminated = true;
             break;
+        }
         if (p[i] < 0x20 || p[i] > 0x7E)
             return false;
     }
     if (i < 3)
         return false;
+
+    /*
+     * TERMINATED, not merely printable.
+     *
+     * Without this a run of printable bytes that fills the field passes, and a
+     * module has plenty: JAIL4 was naming a move `@.B$L` — a five-character
+     * window cut out of code, followed by two halfwords that happened to
+     * satisfy `last >= first`. That name then went to the block-D lookup,
+     * missed, and 177 poses a run fell back to matching a clip by LENGTH,
+     * which is something the disc never does.
+     *
+     * The padding after the NUL is checked too: a field that goes back to
+     * printable is two things next to each other, not a name.
+     */
+    if (!terminated)
+        return false;
+    for (; i < CRE_MOVE_NAME_CHARS; i++)
+        if (p[i] != 0)
+            return false;
 
     return q2_rd_u16(p + 18) >= q2_rd_u16(p + 16);
 }
@@ -735,6 +757,27 @@ u32 q2_creature_move_names(const q2_creature *c, const u8 *image, size_t size,
 
         if (!name_slot_ok(image + off, size - off))
             continue;
+
+        /*
+         * And a record may not BEGIN inside a printable run, or the scan takes
+         * the tail of a longer string for a field. Three consecutive printable
+         * bytes before the slot is the line — one or two out of an instruction
+         * word are not text. Same rule, same reason, as the LevelBin mission
+         * event scan (levelbin.c).
+         */
+        {
+            size_t back = 0;
+
+            while (back < 3 && back < off) {
+                u8 ch = image[off - 1 - back];
+
+                if (ch < 0x20 || ch > 0x7E)
+                    break;
+                back++;
+            }
+            if (back >= 3)
+                continue;
+        }
 
         first = (s32)q2_rd_u16(image + off + 16);
         last  = (s32)q2_rd_u16(image + off + 18);

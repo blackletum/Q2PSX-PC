@@ -500,6 +500,55 @@ bool q2_model_anim_at(const q2_model *m, u32 tick, q2_model_anim *out,
     }
 }
 
+bool q2_model_anim_at_held(const q2_model *m, u32 tick, q2_model_anim *out,
+                           u32 *within, bool *clamped)
+{
+    u32 begin, end, offset;
+    q2_model_anim last;
+    bool have_last = false;
+
+    if (clamped)
+        *clamped = false;
+
+    if (!m || !out || !anim_span(m, &begin, &end))
+        return false;
+
+    offset = begin;
+    for (;;) {
+        if (!anim_read(m, offset, end, out))
+            break;
+
+        if (tick < out->frames) {
+            if (within)
+                *within = tick;
+            return true;
+        }
+
+        tick -= out->frames;
+
+        if (out->frames) {
+            last      = *out;
+            have_last = true;
+        }
+
+        if (out->next == 0)
+            break;
+        if (out->next > end - offset)
+            break;
+        offset += out->next;
+    }
+
+    if (!have_last)
+        return false;
+
+    *out = last;
+    if (within)
+        *within = last.frames ? last.frames - 1 : 0;
+    if (clamped)
+        *clamped = true;
+    return true;
+}
+
 bool q2_model_anim_by_length(const q2_model *m, u32 frames, u32 skip,
                              q2_model_anim *out)
 {

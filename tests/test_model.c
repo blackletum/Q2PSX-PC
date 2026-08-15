@@ -113,6 +113,110 @@ static void test_position_formula(void)
     check_eq(Q2_MODEL_TICKS_PER_FRAME,    10, "the position counts 10");
 }
 
+/* ------------------------------------------------------------------------- */
+/* Walking off the end of the timeline                                        */
+/* ------------------------------------------------------------------------- */
+/*
+ * `q2_model_anim_at` is the ENGINE'S loop and nothing more: `position <
+ * clip->frames`, subtract, advance, with NO end-of-chain test anywhere
+ * (0x8006B924's loop is four instructions and 0x80070188, its advance, is
+ * `*cursor += delta`). It relies on the position always landing inside.
+ *
+ * It does not always land inside, and the reason is not arithmetic. An AI
+ * move's length and its animation's extent are different quantities authored
+ * independently (#63): the Enforcer's `Duck` is a 30-frame AI move whose
+ * animation begins at model frame 1287 of a 1302-frame timeline. Five AI frames
+ * of animation, twenty-five frames of nothing after it, and at `into = 5` the
+ * position is frame 1302 — one past the last.
+ *
+ * `q2_model_anim_at_held` holds the last frame there. That is this port's
+ * divergence and not the console's, so the two must stay distinguishable —
+ * anything that quietly turned the first into the second would make the
+ * divergence invisible. Before the hold, 678 of BASE2's 1000 poses fell back to
+ * matching a clip by LENGTH, which is something the disc never does.
+ *
+ * The chain here is synthetic because these tests carry no disc: three clips of
+ * 4, 6 and 5 frames, laid out exactly as `anim_read` reads them — u16 frames,
+ * u16 flags, u32 delta to the next, then `frames` four-byte keys.
+ */
+#define TL_CLIPS 3
+
+static u8 g_timeline[512];
+
+static void build_timeline(q2_model *m)
+{
+    static const u16 k_frames[TL_CLIPS] = { 4, 6, 5 };
+    /* The chain starts at 16, not 0: `anim_span` treats ofs_block_c == 0 as
+     * "this model has no block C" and refuses. */
+    u32 at = 16;
+    int i;
+
+    memset(g_timeline, 0, sizeof(g_timeline));
+    memset(m, 0, sizeof(*m));
+
+    for (i = 0; i < TL_CLIPS; i++) {
+        u32 size = 8u + (u32)k_frames[i] * 4u;
+        u32 next = (i + 1 < TL_CLIPS) ? size : 0;
+
+        g_timeline[at + 0] = (u8)(k_frames[i] & 0xFF);
+        g_timeline[at + 1] = (u8)(k_frames[i] >> 8);
+        g_timeline[at + 4] = (u8)(next & 0xFF);
+        g_timeline[at + 5] = (u8)((next >> 8) & 0xFF);
+        at += size;
+    }
+
+    m->base              = g_timeline;
+    m->size              = sizeof(g_timeline);
+    m->hdr.ofs_block_c   = 16;
+    m->hdr.ofs_block_d   = at;   /* block C ends where block D begins */
+}
+
+static void test_anim_at_holds_the_last_frame(void)
+{
+    q2_model m;
+    q2_model_anim a;
+    u32 within = 0;
+    bool held = true;
+    const u32 total = 4 + 6 + 5;
+
+    build_timeline(&m);
+
+    /* Inside: both walks agree and neither reports a hold. */
+    {
+        q2_model_anim plain;
+        u32 pw = 0;
+
+        check_eq(q2_model_anim_at(&m, 7, &plain, &pw), 1,
+                 "frame 7 resolves on the engine's walk");
+        check_eq(q2_model_anim_at_held(&m, 7, &a, &within, &held), 1,
+                 "...and on the holding one");
+        check_eq(held, 0, "frame 7 is not a hold");
+        check_eq(within, pw, "both give the same offset into the clip");
+        check_eq(within, 3, "which is 7 - 4, inside the six-frame clip");
+    }
+
+    /* The timeline's own last frame is inside it, not a hold. */
+    check_eq(q2_model_anim_at_held(&m, total - 1, &a, &within, &held), 1,
+             "the last frame of the timeline resolves");
+    check_eq(held, 0, "and is the real last frame, not a hold");
+    check_eq(within, 4, "at offset 4 of the five-frame clip");
+
+    /* One past: the engine's walk fails, the holding walk holds. */
+    check_eq(q2_model_anim_at(&m, total, &a, &within), 0,
+             "one past the end fails the engine's own walk");
+    check_eq(q2_model_anim_at_held(&m, total, &a, &within, &held), 1,
+             "and is held by the port's");
+    check_eq(held, 1, "which says so, so the divergence is visible");
+    check_eq(a.frames, 5, "on the last clip");
+    check_eq(within, 4, "at its last frame, not its first");
+
+    /* Far past: the same place. A hold does not drift. */
+    check_eq(q2_model_anim_at_held(&m, total + 5000, &a, &within, &held), 1,
+             "far past the end still resolves");
+    check_eq(held, 1, "and is held");
+    check_eq(within, 4, "at the same frame — a hold does not drift");
+}
+
 int main(void)
 {
     puts("block D: the move table");
@@ -122,6 +226,7 @@ int main(void)
     test_degenerate_spans();
     test_moves_tile_without_gaps();
     test_position_formula();
+    test_anim_at_holds_the_last_frame();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;
