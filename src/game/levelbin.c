@@ -305,6 +305,91 @@ u32 q2_levelbin_misevents(const u8 *module, u32 size, u32 load_base,
 }
 
 /* ------------------------------------------------------------------------- */
+/* QENDMIS — the movie table                                                  */
+/* ------------------------------------------------------------------------- */
+static bool movie_field(const u8 *p, char *out)
+{
+    u32 i;
+    bool ended = false;
+    u32 n = 0;
+
+    for (i = 0; i < 12; i++) {
+        u8 ch = p[i];
+
+        if (ch == 0) {
+            ended = true;
+            continue;
+        }
+        if (ended)
+            return false;
+        if (ch < 32 || ch > 126) {
+            /* The trace labels end in a newline before their padding —
+             * `Do Intro\n` — so that one control character is a field
+             * character here and nothing else is. */
+            if (ch != '\n')
+                return false;
+        }
+        n++;
+    }
+
+    if (n < 2)
+        return false;
+
+    memcpy(out, p, 12);
+    out[12] = '\0';
+    return true;
+}
+
+/* Does this field end in `.STX`? That is what makes a record a movie rather
+ * than three names that happen to sit in a row. */
+static bool movie_is_stx(const char *s)
+{
+    size_t n = strlen(s);
+
+    return n > 4 && memcmp(s + n - 4, ".STX", 4) == 0;
+}
+
+u32 q2_levelbin_movies(const u8 *module, u32 size,
+                       q2_levelbin_movie *out, u32 max)
+{
+    u32 i, n = 0;
+
+    if (!module || size < 36)
+        return 0;
+
+    for (i = 0; i + 36 <= size; i += 4) {
+        char a[13], b[13], f[13];
+
+        if (!movie_field(module + i, a))
+            continue;
+        if (!movie_field(module + i + 12, b))
+            continue;
+        if (!movie_field(module + i + 24, f))
+            continue;
+
+        /*
+         * Anchored on the FILENAME, which is the one field with a shape a
+         * coincidence does not have. Three printable twelve-byte fields in a
+         * row are common in a module; three of them where the third ends in
+         * `.STX` are not.
+         */
+        if (!movie_is_stx(f))
+            continue;
+
+        if (n < max && out) {
+            memcpy(out[n].screen, a, sizeof(out[n].screen));
+            memcpy(out[n].label,  b, sizeof(out[n].label));
+            memcpy(out[n].file,   f, sizeof(out[n].file));
+            out[n].offset = i;
+        }
+        n++;
+        i += 32;        /* the loop's own += 4 completes the record */
+    }
+
+    return n;
+}
+
+/* ------------------------------------------------------------------------- */
 u32 q2_laserbeams_build(q2_laserbeam_set *out, const q2_events *events,
                         const q2_userfuncs *uf, const q2_uf_operands *ops,
                         const q2_collision *coll)

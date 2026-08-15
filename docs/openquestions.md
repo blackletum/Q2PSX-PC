@@ -1004,10 +1004,12 @@ The residues of the resolved blockers keep their parents' numbers.
       two globals with a 30.0 s fallback — that looks like a countdown to a restart or fade — but the
       consuming code was not disassembled. One entry is **1.0 s short** of its measured stream length, hinting
       the value is a deliberate restart point rather than a length.
-- [ ] **15. MDEC output depth for the movies (24-bit vs 15-bit).** Blocked on #16.
-- [ ] **16. Locate the movie player overlay.** The executable contains **no** `.STX` / `MOVIES` / `STX`
-      string at all, so both the player and its filename assembly live elsewhere. Solving this also settles
-      the movie filename suffix and #15 in one pass.
+- [ ] **15. MDEC output depth for the movies (24-bit vs 15-bit).** ~~Blocked on #16~~ — #16 is answered
+      by #92, so this is now blocked only on reading the QENDMIS module's code.
+- [x] **16. ~~Locate the movie player overlay.~~ — ANSWERED by #92.** It is a LevelBin module, and
+      `QENDMIS1`..`QENDMIS5` are the maps that carry it. The filenames (`TAKE1BP.STX`, `OUTRO1P.STX`), the
+      path pieces (`\Q2DATA\`, `MOVIES\`) and the MDEC decoder's own buffer names are all in there. The
+      executable has none of it because none of it is in the executable.
 - [ ] **17. SPU RAM base / reverb work area,** and whether reverb is disabled — the worst-case map leaves a
       **240-byte** margin against SPU RAM, suspiciously tight if a reverb buffer is also allocated.
 - [x] **18. ~~`VramImageRec.width` / `height`: dimensions, or VRAM placement coordinates?~~ — RESOLVED by
@@ -6420,3 +6422,54 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       The engine's own half either side of the handler is two lines and neither needs reproducing:
       `0x8006D2EC` parks the twelve-byte name in a global at `0x800DD950`, and `0x800435D0` spills three
       words and returns — a logger compiled out of the retail build.
+- [x] 92. **QENDMIS is the MOVIE PLAYER, which answers #16 and unblocks #15.** The campaign's last map
+      loaded as two quads, eight vertices and a black screen, and that was recorded as end-of-mission
+      content this port fails to draw. **There is no content to draw.** A `QENDMIS<N>` map is a container
+      for the movie player overlay, and its LevelBin says so outright:
+
+          module+0x0310  "\Q2DATA\"          module+0x03E0  "MDEC_in_sync"
+          module+0x031C  "MOVIES\"           module+0x03F0  "MDEC_out_sync"
+          module+0x033C  "ring buffer"       module+0x0348  "vlc buffer 0"
+          module+0x0368  "image buffer"      module+0x0358  "vlc buffer 1"
+
+      with a table of 36-byte records from module+0xB8 — three twelve-byte fields, a screen name, a trace
+      label and a FILENAME:
+
+          +0x00B8  "Intro FMV"   "Do Intro\n"   "TAKE1BP.STX"
+          +0x00DC  "Extro FMV"   "Do Extro\n"   "OUTRO1P.STX"
+
+      and the disc carries exactly those, 15.1 MB and 19.5 MB, in `/Q2DATA/MOVIES`.
+
+      **This answers #16**, which read: *"The executable contains no `.STX` / `MOVIES` / `STX` string at
+      all, so both the player and its filename assembly live elsewhere."* Elsewhere is here. All five
+      QENDMIS maps carry the identical module and no gameplay map carries any of it. #15 — the MDEC output
+      depth — was blocked on #16 and is now blocked only on reading this module's code.
+
+      A module+0x7C table of twelve-byte names sits above it: `EndMission 1`..`EndMission 5`, then
+      `QLogos2`, `QLogos`, `Dummy`, `MagazineIntr`, `MagazineExtr`, `MPResults`. So the same module is the
+      whole front end — logos, magazine demo bookends and the multiplayer results screen, whose text is
+      also in there (`DM SCORES`, `%s TEAM SCORED %d`, `ALL PLAYERS PRESS` / `FIRE TO CONTINUE`).
+      `ROGUEINP.STX` is on the disc and is named by neither the module nor the executable.
+
+      **What the port does about it.** It cannot decode MDEC, so it stops pretending: `q2_levelbin_movies`
+      recovers the table, and `q2_endmission_build_ot` draws a placard on the console's own panel naming
+      the unit and what would play. A campaign run from BASE0 still walks twelve levels and five units and
+      now *ends* on something rather than on a black field that reads as a crash.
+
+      The placard does not guess. The disc has one outro and only the last unit reaches it, so units 1..4
+      say the sequence is drawn by the map's module and name no file — a confident wrong answer on
+      QENDMIS1 would be worse than a short true one.
+
+- [x] 93. **`--fire-triggers` was disabled by a warning fix, in the same session that wrote the warning
+      fix.** Worth recording because the failure mode is the interesting part.
+
+      The gate read `if (c.fire_triggers && c.sim_ready && ...)`. `sim_ready` is `bool[Q2_MP_MAX_PLAYERS]`,
+      so the test was an array decaying to a pointer: always true, and the build said so
+      (`-Wpointer-bool-conversion`). Changing it to `c.sim_ready[0]` looks like the obvious fix and is
+      wrong — `sim_ready[]` is filled only by the MULTIPLAYER spawn path and player 0 never enters it. The
+      flag went from accidentally-always-on to silently-always-off, the campaign run stopped at BASE0, and
+      nothing failed: no warning, no error, 27/27 tests still green.
+
+      What the gate actually wants is the level's triggers to be loaded, which is the thing the loop under
+      it walks. A whole-campaign run is the only check that would have caught it, and it is the check that
+      did.

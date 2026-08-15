@@ -147,6 +147,43 @@ u32 q2_briefing_build_ot(const q2_briefing *b, const q2_hud_font *font,
                          q2_hud_ctx *ctx, q2_hud_pen *pen, psx_ot *ot,
                          u32 body_bucket, u32 frame_bucket, u16 text_bucket);
 
+/* ------------------------------------------------------------------------- */
+/* The end-of-mission placard                                                 */
+/* ------------------------------------------------------------------------- */
+/*
+ * A QENDMIS map is the movie player's container and carries no geometry
+ * (levelbin.h): the campaign's last map draws two quads on a black field, which
+ * reads as a crash rather than as an ending. What belongs there is a 19.5 MB
+ * MDEC video this port cannot decode.
+ *
+ * So it says so, on the console's own panel — the same furniture the briefing
+ * uses, because a second framed-text screen would be a second thing to keep in
+ * step with `panel.h`'s geometry. The LABELS are not the briefing's: `Location`
+ * and `Current Orders` over an ending would be worse than the black screen,
+ * because they would look deliberate.
+ *
+ * `title` is the headline, `body` the lines under it. Both are the caller's —
+ * this module knows how to draw a placard, not what a given ending should say.
+ */
+typedef struct q2_endmission {
+    char title[Q2_BRIEFING_FIELD_MAX];
+    char body[Q2_BRIEFING_FIELD_MAX * 2];
+    q2_panel_rect box;
+} q2_endmission;
+
+void q2_endmission_init(q2_endmission *e);
+void q2_endmission_set(q2_endmission *e, const char *title, const char *body);
+
+/* Compose the markup, the way q2_briefing_compose does and with the same
+ * margin escape — that escape is what turns wrapping on at all (hud.h). */
+u32 q2_endmission_compose(const q2_endmission *e, char *out, u32 out_size);
+
+/* Draw it. The bucket arguments are DEPTHS, as the briefing's are. */
+u32 q2_endmission_build_ot(const q2_endmission *e, const q2_hud_font *font,
+                           const q2_menu_font *menu_font,
+                           q2_hud_ctx *ctx, q2_hud_pen *pen, psx_ot *ot,
+                           u32 body_bucket, u32 frame_bucket, u16 text_bucket);
+
 #ifdef __cplusplus
 }
 #endif

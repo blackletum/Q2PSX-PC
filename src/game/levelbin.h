@@ -169,6 +169,59 @@ u32 q2_levelbin_misevents(const u8 *module, u32 size, u32 load_base,
                           q2_levelbin_misevent *out, u32 max);
 
 /* ------------------------------------------------------------------------- */
+/* QENDMIS — the movie player, and what the end of the campaign actually is   */
+/* ------------------------------------------------------------------------- */
+/*
+ * `QENDMIS1`..`QENDMIS5` are what the level table names `EndMission 1`..
+ * `EndMission 5`, and a campaign run ends on one (#88). This port loads
+ * QENDMIS5 as two quads, eight vertices and a black screen, which was recorded
+ * as content the port fails to draw.
+ *
+ * **There is no content to draw.** A QENDMIS map is a container for the MOVIE
+ * PLAYER, and its module says so outright:
+ *
+ *     module+0x0310  "\Q2DATA\"
+ *     module+0x031C  "MOVIES\"
+ *     module+0x03E0  "MDEC_in_sync"      module+0x0348  "vlc buffer 0"
+ *     module+0x03F0  "MDEC_out_sync"     module+0x0358  "vlc buffer 1"
+ *     module+0x033C  "ring buffer"       module+0x0368  "image buffer"
+ *
+ * with a table of 36-byte records from module+0xB8 — three twelve-byte fields,
+ * a screen name, a trace label and a FILENAME:
+ *
+ *     +0x00B8  "Intro FMV"   "Do Intro\n"   "TAKE1BP.STX"
+ *     +0x00DC  "Extro FMV"   "Do Extro\n"   "OUTRO1P.STX"
+ *
+ * and the disc carries exactly those, 15.1 MB and 19.5 MB, in /Q2DATA/MOVIES.
+ *
+ * **THIS ANSWERS #16.** That question read "the executable contains no `.STX`
+ * / `MOVIES` / `STX` string at all, so both the player and its filename
+ * assembly live elsewhere" — and elsewhere is here. All five QENDMIS maps carry
+ * the same module and no gameplay map carries any of it. #15 (the MDEC output
+ * depth) was blocked on #16 and is now only blocked on reading this module's
+ * code.
+ *
+ * So the end of the campaign is a 19.5 MB MDEC video, and a port that has no
+ * MDEC decoder cannot show it. What it can do is stop pretending: name the
+ * movie, say what would play, and end the campaign visibly rather than on a
+ * black screen that reads as a crash.
+ */
+typedef struct q2_levelbin_movie {
+    char screen[13];        /* "Intro FMV", "Extro FMV" */
+    char label[13];         /* the module's own trace label */
+    char file[13];          /* "TAKE1BP.STX" */
+    u32  offset;
+} q2_levelbin_movie;
+
+/*
+ * Recover the movie table. Returns how many records were found; `max` bounds
+ * what is written. A map with no player module returns 0, which is every map
+ * that is not a QENDMIS.
+ */
+u32 q2_levelbin_movies(const u8 *module, u32 size,
+                       q2_levelbin_movie *out, u32 max);
+
+/* ------------------------------------------------------------------------- */
 /* LASERBEAM — the beams a level ships                                        */
 /* ------------------------------------------------------------------------- */
 /*

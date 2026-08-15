@@ -460,6 +460,17 @@ typedef struct client {
     q2_laserbeam_set  lasers;
     u32               laser_drawn;
 
+    /*
+     * The movie table a QENDMIS map's module carries, and the end-of-mission
+     * screen this port shows in place of a movie it cannot decode.
+     */
+    q2_levelbin_movie movies[4];
+    u32               movie_count;
+    bool              endmission;      /* this map IS an end-of-mission */
+    q2_endmission     endmis;
+    bool              endmis_open;
+    int               endmis_unit;
+
     /* The map's own mission-event namespace, out of its LevelBin. */
     q2_levelbin_misevent misevent[32];
     u32               misevent_count;
@@ -2711,6 +2722,99 @@ static bool client_load_zone(client *c, const char *map, int index)
                 if (c->node_hidden) {
                     c->zone.node_hidden       = c->node_hidden;
                     c->zone.node_hidden_count = c->node_hidden_count;
+                }
+
+                /*
+                 * A QENDMIS map is not a level. It is the container for the
+                 * MOVIE PLAYER (levelbin.h), and the campaign's last map is
+                 * one — so a run that reaches it and shows two quads on a black
+                 * field looks exactly like a crash. Recover what would play and
+                 * raise a screen that says so.
+                 */
+                {
+                    const dat_chunk *vlb =
+                        c->common.chunk[Q2_COMMON_LEVEL_BIN];
+
+                    c->movie_count = 0;
+                    c->endmission  = false;
+                    if (vlb && vlb->data && vlb->size) {
+                        u32 got = q2_levelbin_movies(vlb->data, vlb->size,
+                                                     c->movies, 4);
+                        c->movie_count = got > 4 ? 4 : got;
+                    }
+                    if (c->movie_count) {
+                        u32 mq;
+                        char line[Q2_BRIEFING_FIELD_MAX];
+                        const char *film = NULL;
+
+                        c->endmission = true;
+                        for (mq = 0; mq < c->movie_count; mq++) {
+                            Q2_INFO("movie: '%s' plays %s",
+                                    c->movies[mq].screen, c->movies[mq].file);
+                            /* The END of the campaign is the Extro. */
+                            if (!film ||
+                                client_name_eq(c->movies[mq].screen,
+                                               "Extro FMV"))
+                                film = c->movies[mq].file;
+                        }
+
+                        /*
+                         * The unit is the map's own digit. `QENDMIS<N>` is what
+                         * the level table calls `EndMission <N>` and reaching
+                         * it is how unit N ends (#88), so the name IS the
+                         * number — `map_unit` is a gameplay map's field and is
+                         * not set here.
+                         */
+                        {
+                            const char *nm = c->map;
+                            int unit = 0;
+                            size_t ln = strlen(nm);
+
+                            if (ln && nm[ln - 1] >= '1' && nm[ln - 1] <= '9')
+                                unit = nm[ln - 1] - '0';
+
+                            q2_endmission_init(&c->endmis);
+                            c->endmis_unit = unit;
+                            if (unit)
+                                snprintf(line, sizeof(line),
+                                         "MISSION %d COMPLETE", unit);
+                            else
+                                snprintf(line, sizeof(line),
+                                         "MISSION COMPLETE");
+                        }
+
+                        {
+                            char body[Q2_BRIEFING_FIELD_MAX * 2];
+
+                            /*
+                             * The disc carries ONE outro, and only the last
+                             * unit reaches it. Units 1..4 end on something the
+                             * module draws, and this port does not know what —
+                             * so it does not guess. Naming OUTRO1P.STX on
+                             * QENDMIS1 would be a confident wrong answer, which
+                             * is worse than an honest short one.
+                             */
+                            if (film && c->endmis_unit == 5)
+                                snprintf(body, sizeof(body),
+                                         "The sequence here is a full-motion "
+                                         "video: %s, in the disc's MOVIES "
+                                         "directory. This port has no MDEC "
+                                         "decoder, so it is named rather than "
+                                         "shown.", film);
+                            else
+                                snprintf(body, sizeof(body),
+                                         "The sequence here is drawn by this "
+                                         "map's own LevelBin module, which "
+                                         "this port reads but does not run.");
+
+                            q2_endmission_set(&c->endmis, line, body);
+                        }
+
+                        c->endmis_open     = true;
+                        c->briefing_open   = false;
+                        c->leveltext_ready = false;
+                        q2_prompt_show(&c->prompts, Q2_PROMPT_BACK, 216);
+                    }
                 }
 
                 /*
@@ -5386,7 +5490,8 @@ static void client_frame(client *c)
      * (0x80043A58).
      */
     if (c->hud_ready && c->hud_font_ready &&
-        !c->menu.open && !c->mission_open && !c->mcard_open) {
+        !c->menu.open && !c->mission_open && !c->mcard_open &&
+        !c->endmis_open) {
         q2_hud_ctx ctx;
 
         c->hud.crosshair = (c->settings.v[Q2_SET_CROSSHAIR] != 0);
@@ -5453,7 +5558,24 @@ static void client_frame(client *c)
      * sliding up from the bottom. Mutually exclusive with the other two
      * overlay screens for the same reason they are with each other.
      */
-    if (c->briefing_open && c->hud_font_ready && c->menu_font_ready) {
+    /*
+     * The end-of-mission placard, on the same furniture and in the same slice.
+     * Mutually exclusive with the briefing for the same reason the briefing is
+     * with the menu.
+     */
+    if (c->endmis_open && c->hud_font_ready && c->menu_font_ready) {
+        q2_hud_ctx ctx;
+        q2_hud_pen pen;
+
+        q2_hud_ctx_centre_in(&ctx, c->width, c->height);
+        q2_hud_pen_default(&pen);
+        q2_endmission_build_ot(&c->endmis, &c->hud_font, &c->menu_font,
+                               &ctx, &pen, &c->ot, 2, 1, 0);
+        q2_prompt_build_ot(&c->prompts, &c->menu_font, &c->ot, 1);
+    }
+
+    if (c->briefing_open && !c->endmis_open &&
+        c->hud_font_ready && c->menu_font_ready) {
         q2_hud_ctx ctx;
         q2_hud_pen pen;
 
@@ -6406,7 +6528,15 @@ no_window:
          * exactly the path a player standing in the volume goes through — the
          * only difference is who asked.
          */
-        if (c.fire_triggers && c.sim_ready[0] &&
+        /*
+         * `sim_ready[]` is the MULTIPLAYER spawn's array and player 0 never
+         * enters it, so this used to test `c.sim_ready` — an array, always
+         * true — and worked by accident. Testing `[0]` was a correct-looking
+         * fix that silently disabled the whole flag. What this actually needs
+         * is the level's triggers to be loaded, which is the thing the loop
+         * below walks.
+         */
+        if (c.fire_triggers && c.sim[0].triggers.count &&
             (long)c.frame_index >= c.fire_at_frame) {
             u32 i, fired = 0;
 

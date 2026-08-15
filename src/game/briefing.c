@@ -183,3 +183,82 @@ u32 q2_briefing_build_ot(const q2_briefing *b, const q2_hud_font *font,
     n += q2_hud_print(font, ctx, pen, ot, text_bucket, text);
     return n;
 }
+
+/* ------------------------------------------------------------------------- */
+/* The end-of-mission placard                                                 */
+/* ------------------------------------------------------------------------- */
+void q2_endmission_init(q2_endmission *e)
+{
+    if (!e)
+        return;
+
+    memset(e, 0, sizeof(*e));
+    e->box.x = Q2_BRIEFING_BOX_X;
+    e->box.y = Q2_BRIEFING_BOX_Y;
+    e->box.w = Q2_BRIEFING_BOX_W;
+    e->box.h = Q2_BRIEFING_BOX_H;
+}
+
+void q2_endmission_set(q2_endmission *e, const char *title, const char *body)
+{
+    if (!e)
+        return;
+
+    if (title)
+        snprintf(e->title, sizeof(e->title), "%s", title);
+    if (body)
+        snprintf(e->body, sizeof(e->body), "%s", body);
+}
+
+u32 q2_endmission_compose(const q2_endmission *e, char *out, u32 out_size)
+{
+    char margins[16];
+    u32 len = 0;
+
+    if (!e || !out || out_size == 0)
+        return 0;
+    out[0] = '\0';
+
+    sprintf(margins, "#%03X%03X", Q2_BRIEFING_MARGIN_L, Q2_BRIEFING_MARGIN_R);
+
+    if (!append(out, out_size, &len, margins))                      return 0;
+    if (!append(out, out_size, &len, "|0\n\n"))                     return 0;
+
+    if (!append_colour(out, out_size, &len, q2_briefing_rgb_label)) return 0;
+    if (!append(out, out_size, &len, e->title))                     return 0;
+    if (!append(out, out_size, &len, "\n\n"))                       return 0;
+
+    if (!append_colour(out, out_size, &len, q2_briefing_rgb_value)) return 0;
+    if (!append(out, out_size, &len, e->body))                      return 0;
+    if (!append(out, out_size, &len, "\n"))                         return 0;
+
+    if (!append(out, out_size, &len, "#000000"))                    return 0;
+
+    return len;
+}
+
+u32 q2_endmission_build_ot(const q2_endmission *e, const q2_hud_font *font,
+                           const q2_menu_font *menu_font,
+                           q2_hud_ctx *ctx, q2_hud_pen *pen, psx_ot *ot,
+                           u32 body_bucket, u32 frame_bucket, u16 text_bucket)
+{
+    char text[Q2_BRIEFING_FIELD_MAX * 4];
+    u32 n = 0;
+
+    if (!e || !font || !ctx || !pen || !ot)
+        return 0;
+
+    if (menu_font)
+        n += q2_panel_build_ot(menu_font, &e->box, ot,
+                               psx_ot_depth_bucket(ot, body_bucket),
+                               psx_ot_depth_bucket(ot, frame_bucket), NULL);
+
+    if (q2_endmission_compose(e, text, sizeof(text)) == 0)
+        return n;
+
+    ctx->home_x = (s16)e->box.x;
+    ctx->home_y = (s16)e->box.y;
+
+    n += q2_hud_print(font, ctx, pen, ot, text_bucket, text);
+    return n;
+}
