@@ -1369,7 +1369,13 @@ The residues of the resolved blockers keep their parents' numbers.
 
 ## Tier 5 — Archival / other-build / process
 
-- [ ] 30. **NTSC build values:** framebuffer height, `video_mode_const`, movie filename suffix, EXE hash,
+- [!] 30. **TERMINAL WITHOUT THE DISC — and what is needed is small and listed.** Every value here is a
+      property of a release this project does not have a copy of, so no amount of work on the PAL disc
+      produces one. What makes it terminal rather than open is that the port is already structured for the
+      answer: builds are identified by EXECUTABLE HASH rather than by region (`src/build/`), so an NTSC
+      disc supplies its own row and nothing else has to change. The list below is that row.
+
+      **NTSC build values:** framebuffer height, `video_mode_const`, movie filename suffix, EXE hash,
       PVD fields. All must be **read**, never guessed — PAL turned out to be 512 × **248**, not the widely
       assumed 256, so the folklore 512 × 240 NTSC figure is *less* trustworthy now, not more.
 - [~] 31. Real xrefs to the `.DAT` chunk-name literal pool at `0x800AD414` — **found, and the pool is not
@@ -1452,7 +1458,15 @@ The residues of the resolved blockers keep their parents' numbers.
       The music record's `+2` has no such external explanation and no internal one either: a field that is
       zero in every sample carries no information about itself. Kept as a standing note. Nothing further
       can be gathered here.
-- [ ] 37. `GlintMod` (2608 bytes, one map only, high-entropy after the first few dozen bytes).
+- [x] 37. **`GlintMod` is a MESH, decoded and drawn — "high-entropy after the first few dozen bytes" was
+      the description of an index array read as noise.** The chunk splits at 864 bytes: an index array of
+      four bytes per face, then an `s16[4]` vertex array of `{x, y, z, band}`. BIGGUN's 2,608 bytes are
+      **216 faces and 218 vertices, highest index 217, bands 1024..31744** — `q2psx-inspect effects` prints
+      exactly that, and `q2_fx_glint_mesh_decode` is the reader. The entropy was the low, slowly-rising
+      face indices of a mesh, which is what a run of small increasing bytes looks like to a histogram.
+
+      Its two draw paths, its band phase and what raises the `0x04000000` flag are all in `effect.h`; only
+      BIGGUN carries one, and the level script that turns it on is that map's own.
 - [x] 39. The HUD's residuals, none of them blocking, now that the overlay itself is done. **CLOSED: every one of them below is answered, and the last is answered as a CUT feature rather than a missing one.**
       **~~The MISSION / level-completion screen.~~ — RECONSTRUCTED, and it draws.**
       `0x80021ADC` builds it with `sprintf` into a scratch buffer at `0x800C6EE8` and hands each row to the
