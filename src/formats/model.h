@@ -528,7 +528,10 @@ typedef struct q2_model_move {
     char name[13];       /* 12 bytes on disc, NUL-padded; "Pain1", "Death4"   */
     u16  start;          /* +12 — first position of the move on the timeline  */
     u16  end;            /* +14 — last position, inclusive                    */
-    u16  rest;           /* +16 — equals start on some moves, end on others   */
+    u16  rest;           /* +16 — the record's CURRENT POSITION, a cursor.
+                          * 0x8003CBF4 writes `start` here to rewind a record,
+                          * so the 15 records sitting at `start` are rewound and
+                          * the 77 at `end` have played out. Not a flag. */
     u16  one;            /* +18 — 1 on every record seen so far               */
 } q2_model_move;
 

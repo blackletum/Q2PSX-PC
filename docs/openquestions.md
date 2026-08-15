@@ -5108,3 +5108,31 @@ nothing saying so.
       block D counts 2 per frame and the position counts 10. Every term is known except **which k goes with
       which AI move**. Find the load-time transform and the animation path is a short function, not a
       project.
+
+- [ ] 64. **The first code found that walks block D — and it names the `rest` field.**
+      Hunting the load-time transform (#51f, #63) by asking who reads `model+0x38`:
+
+          8006D310  lw    v1, 56(a0)     ; v1 = model->ofs_block_d
+          8006D318  lw    v0, 0(v1)      ; the record's first word
+          8006D320  bne   v0, zero, ...  ; a ZERO first word ends the run
+          8006D324  addiu v1, v1, 20     ; 20-byte stride
+
+      That is block D, walked exactly as `model.h` describes it, and it is the **only** function on the disc
+      that does so. It has one caller, `0x8003CC00`, and the two instructions either side of that call are
+      more informative than the walk:
+
+          8003CBEC  lhu  v1, 12(a1)      ; a block-D record's `start`
+          8003CBF4  sh   v1, 16(a1)      ; ...written to its `rest`
+          8003CBF8  lhu  v1, 12(a2)      ; and the same for a second record
+          8003CC04  sh   v1, 16(a2)
+
+      **So `rest` is a CURSOR, and this resets it to `start`.** This project had only been able to say that
+      `rest` equals `start` on 15 records and `end` on 77 — a statistic with no meaning attached. It is the
+      record's current position, and a record sitting at its `end` is one whose animation has finished.
+      That also explains the split: the 15 at `start` are rewound, the 77 at `end` have played out, and the
+      disc simply ships whatever state the authoring tool left.
+
+      **This is where #63's missing pairing should be looked for.** The function around `0x8003CBE8` holds
+      live block-D record pointers in `a1` and `a2` and reaches for two globals (`gp+17252`, `gp+17280`);
+      whatever supplies those pointers knows which record belongs to what, which is precisely the link
+      `position = block_d[k].start * 5 + 30 * (ai_frame - first)` is missing.
