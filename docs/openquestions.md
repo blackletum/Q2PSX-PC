@@ -575,78 +575,6 @@ The residues of the resolved blockers keep their parents' numbers.
 
 ## Tier 2 — Blocking: degrades the level badly, does not prevent loading
 
-- [ ] **10b. One model part textures wrong, and it is the same part everywhere.** BASE1's `Soldier` renders
-      correctly except for part 2 — 30 faces covering the head and one shoulder — which comes out as
-      saturated purple noise. The evidence narrows it a long way without settling it:
-      the same model renders identically in BASE1, BASE2 and WASTE1, so it is **not** a per-map palette
-      problem; part 2 is the **only** part of the model that uses texture page 6 and CLUT index 46, and no
-      other part shares either; every other part of the same model, and every weapon and item model tested,
-      textures correctly under the same rule; and the map does upload seven pages, so page 6 exists.
-      Saturated purple on an otherwise green-and-grey model is the classic signature of a palette that is
-      right in form and wrong in identity. *Attack:* dump page 6 of a map's VRAM against several candidate
-      palettes and see which yields colours consistent with the rest of the model — the diagnostic in
-      `q2psx-inspect model` already reports the per-part page and texture ranges that localise it.
-
-- [x] **7. `SortData` encoding. — SOLVED, and the world is not depth-sorted at all.**
-      "No fixed per-node record" was the finding, not the obstacle: there are no records. It is a
-      **self-describing variable-width opcode stream**, and the reader is the zone draw's own, inlined seven
-      times between `0x80066B70` and `0x800676D8`. Bits are LSB-first inside little-endian 32-bit words
-      against a mask table at `0x8009FBF0`; the start offset is a **byte** offset from the viewport record's
-      `+28`, word-aligned down with the remainder consumed as bits.
-      The header is seven fields, each holding its width **minus one** (widths 1…16), in the literal order of
-      the `slti` bounds: `4,3,4,3,3,3,4` bits giving `w_base, w_op_short, w_op_long, w_f1, w_f3, w_f4, w_f2`,
-      then `w_base` bits of `base`. Then opcodes: **0** ends, **1** is an entity draw record (four fields, and
-      `f2` is the BIT length of a payload the entity consumes only if it was drawn — otherwise the stream
-      skips it), **2** switches between a windowed mode that adds `base` and an absolute mode that does not,
-      carrying the replacement opcode at the new mode's width, and **≥3** is a scene node, `op - 3`.
-      **The load-bearing consequence.** The ordering-table bucket starts at 45 (`0x80066978`) or 43
-      (`0x80066A3C`) and is decremented in exactly one place — after an entity record (`0x800675E0`). The node
-      path never touches it: it draws a whole node into the current bucket and stops the stream once the
-      bucket falls below 4. So **the world's draw order is authored, and the ordering table only carries it**;
-      buckets exist to interleave entities with the world at the right depth. A port that computes a bucket
-      per quad from the GTE's depth — which this one did — produces a *different* order, not a finer one.
-      Implemented in `src/formats/sortdata.[ch]`, unit-tested in `tests/test_surface.c` against an
-      independent encoder (word-straddling fields, multi-word skips, both modes, unaligned starts).
-      Checked disc-wide by `q2psx-inspect surfaces`, which **tiles** each chunk end to end — decode to the end
-      opcode, round up to the next byte, start again — over all 115 chunks and 715,260 bytes: **8,968 streams,
-      87 overruns at chunk tails, 178,801 node references and ZERO out of range.** A desynchronised bit reader
-      does not land on a valid header 8,968 times in a row, which is what makes tiling a test rather than an
-      illustration.
-  - [~] 7a. Residue: which stream a given viewport starts at — **narrowed, and no longer a functional gap.**
-        The offset is an `int16_t` at `+28` of a 36-byte record indexed by the viewport's own `+146`
-        (`0x80066AFC`), reached through the table pointer at `0x800C8E94`. That record is runtime state: the
-        chunk pointer `0x800B2C84` has exactly **one** reader in the whole image (`0x80066B00`, the stream
-        init) and two writers, both in the zone loader, and `+28` likewise has exactly one reader. Nothing on
-        the disc carries the mapping. `Resources` was the obvious candidate and is ruled out — 32 bytes per
-        record, not 36.
-        What removes the practical consequence is that the streams are **self-delimiting and therefore
-        enumerable**: `q2_sortdata_enumerate` / `q2_sortdata_stream_offset` tile a chunk and hand back a stable
-        stream INDEX, which is a disc-derived handle where a raw byte offset is not. The renderer takes one;
-        stream 0 is what a single-stream chunk holds. What remains unknown is only which index a given
-        viewport picks, not how to reach any of them.
-- [ ] **8. `AreaConx` 9-byte link payload.** No fixed offset yields a 1.3.12 unit normal in more than 39 % of
-      3,494 links. Histograms suggest **unaligned** `int16_t` values that no single struct layout can express
-      (links start at `record + 1 + 9*L`, so parity alternates). Byte `+3` is the best neighbour-index
-      candidate. Blocks portal-based visibility.
-- [x] **9. `SpaceLights` per-node partition. — SOLVED, and the partition was never in this chunk.**
-      Two passes tried to split the array across the zone's **scene** nodes and got 0.68…7.12 entries per
-      node with no rule that fit. The key is a **collision** node, and specifically a `SecondaryCol` one:
-
-          lights of secondary node i = SpaceLights[ node[i].c_hi .. node[i+1].c_hi )
-
-      where `c_hi` is the high halfword of the 36-byte node's field at `+28` — the field #23 recorded as
-      unread because *"no instruction in the image loads offset +28"*. None does. The gather at
-      `0x8006B0E4` loads offset **+30**, and its successor's at +66, exactly as the plane and link ranges are
-      derived, which is what the totals sentinel was always there for. The entries are indices into
-      `COMMON.DAT`'s `Lights` array (`0x800B2ED4`, stride 28, materialised at `0x8006B12C`).
-      Checked disc-wide by `q2psx-inspect lights`: `PrimaryColl` carries the field on **0 of 115** zones —
-      an independent confirmation that the engine's choice of hull is forced, not incidental — `SecondaryCol`
-      is non-decreasing and starts at zero on **115 of 115**, and all **37,285** reachable entries name a
-      light the map actually ships, **zero** out of range against light counts of 96…374. 13,805 nodes, mean
-      2.70 lights each, max 45, 1,682 with none, and 15 zones (the front end, the intermissions and the FMV
-      stubs) with an entirely zero partition. The 331 halfwords past the sentinel disc-wide are build
-      residue the engine cannot reach.
-      Implemented in `src/formats/spacelights.[ch]`; consumed by `src/game/lighting.c` and `flare.c`.
 - [x] **10. `Population` `spawn.classId` target table. — SOLVED.**
       It is not an index into anything on the disc. The id is stored beside a **name** in a 48-byte-stride
       table at `0x800A3368`, and the engine reaches it from the other side: a `CreAI` module's 16-byte
@@ -658,17 +586,53 @@ The residues of the resolved blockers keep their parents' numbers.
       `q2psx-inspect classes` checks it disc-wide: **651 of 651** spawn records resolve to a class, and
       **651 of 651** of those classes name a model the same map ships. Implemented in
       `src/build/classtable.[ch]`. Full table in FORMATS.md §9.8.
-- [ ] **10b. One model part textures wrong, and it is the same part everywhere.** BASE1's `Soldier` renders
-      correctly except for part 2 — 30 faces covering the head and one shoulder — which comes out as
-      saturated purple noise. The evidence narrows it a long way without settling it:
-      the same model renders identically in BASE1, BASE2 and WASTE1, so it is **not** a per-map palette
-      problem; part 2 is the **only** part of the model that uses texture page 6 and CLUT index 46, and no
-      other part shares either; every other part of the same model, and every weapon and item model tested,
-      textures correctly under the same rule; and the map does upload seven pages, so page 6 exists.
-      Saturated purple on an otherwise green-and-grey model is the classic signature of a palette that is
-      right in form and wrong in identity. *Attack:* dump page 6 of a map's VRAM against several candidate
-      palettes and see which yields colours consistent with the rest of the model — the diagnostic in
-      `q2psx-inspect model` already reports the per-part page and texture ranges that localise it.
+- [ ] **10b. One model part textures wrong — and it is NOT the part this entry has named for three passes.**
+      The symptom is unchanged: BASE1's `Soldier` is green and grey except for a block of saturated violet
+      over the head. Everything else this entry said about it was wrong, and the corrections are more
+      useful than the symptom.
+
+      **It is not part 2, and part 2 is not broken.** Drawing one part at a time (`Q2_ONLY_PART` while
+      bringing this up) shows part 2 IS the head — a helmet, correctly textured in olive and grey — and
+      the violet belongs to **part 1**, the torso, whose faces reach up over the neck and paint on top of
+      it. The old attribution came of noticing that part 2 is the only part using page 6 and texture 46 and
+      assuming the odd part out was the broken one.
+
+      **The suggested attack is answered and it exonerates the binding.** Page 6 under CLUT 114 — part 2's
+      pair — decodes to the helmet, visor and all. There was never a wrong palette to find there.
+
+      **The violet is CLUT 107**, which the pixel is traced to rather than reasoned to: probing the frame
+      buffer at a violet pixel reports `tpage 0x0032 clut 0x4683`, which is page 1 and clut4 entry 107,
+      from part 1's `texture` 39 against `clut4_count_a` 68. And 107 is not a rogue palette: its entries
+      0-10 are the same olive ramp as 113's, and only 11, 13, 14 and 15 differ — violet where 113 has dark
+      red. So the texels the head samples land in the palette's TAIL, and the tail is what varies.
+
+      **Four candidate causes are eliminated against the executable, not against intuition:**
+
+      - The CLUT base is `clut4_count_a`. `0x8006A3FC` adds the halfword at `0x800B2EEC`, and the only
+        write to it is `0x80068AD0`, which stores the section header's byte `+2` — `clut4_count_a` — as
+        `img_open` parses it. Confirmed, not assumed.
+      - The CLUT id is `q2_vram_clut_word`. The id table is built at `0x80076378` as
+        `((y & 0x1FF) << 6) | ((x & 0x3FF) >> 4)` over `x = 16*(i&3)`, `y = 256 + (i>>2)` — the port's
+        formula character for character.
+      - The face record is right. `0x8006A390` sets the cursor to `faces + 12` and steps 16, reading
+        `flags` at `+0` and `texture` at `+1` and the four UV halfwords at `-8, -6, -4, -2`: exactly
+        `v[4]` at `+0`, `uv[4][2]` at `+4`, `flags` at `+12`, `texture` at `+13`, stride 16.
+      - The page is right. `tpageTable` is twenty `GetTPage(0, 0, slotX[i], slotY[i])` at `0x8007801C`
+        over the same two slot tables the image loader uses, and face page 6 lands on VRAM cell 7.
+
+      **And one thing the reading gained on the way**, which is checked in and not residue: the emitter
+      stores file `uv3` into POLY `uv2` and file `uv2` into POLY `uv3` (`0x8006A3E4` / `0x8006A3F0`), and
+      the linker does the same with the corners (`0x800B2478` puts file `v3` in `SXY2`). That is the
+      file-perimeter to hardware-Z conversion, and it confirms that a model quad's corners are in
+      PERIMETER order in the file — so this port's fan split is right for models exactly as it is for the
+      world.
+
+      *Where to go next.* The remaining question is narrow: what does the original draw where this port
+      draws palette entries 11-15? Two shapes are left. Either the entity carries something that shifts
+      the palette — the `skinnum` field exists and the class table gives the Soldier three variants — or
+      those texels are not meant to be reached at all and something upstream of the UV is clamping or
+      windowing them. The first is checkable by finding a reader of `skinnum` on the draw path; the second
+      by asking whether the engine ever writes a texture-window register.
 
 - [x] **7. `SortData` encoding. — SOLVED, and the world is not depth-sorted at all.**
       "No fixed per-node record" was the finding, not the obstacle: there are no records. It is a
@@ -5232,3 +5196,62 @@ nothing saying so.
       live block-D record pointers in `a1` and `a2` and reaches for two globals (`gp+17252`, `gp+17280`);
       whatever supplies those pointers knows which record belongs to what, which is precisely the link
       `position = block_d[k].start * 5 + 30 * (ai_frame - first)` is missing.
+
+---
+
+## Models had no backface rejection, and the world's rule is not the model's
+
+Chasing #10b's violet head meant reading the model draw end to end, and the thing that came out of it is
+not what the chase was for: **`q2_model_build_ot` emitted every face of every model, both sides of it.**
+
+The world has had rejection since the sealing pass — `q2_world_quad_faces_camera`, an NCLIP pair
+transcribed from all three of the world's quad linkers. Nothing equivalent existed on the model path, and
+because the ordering table has no depth buffer, "emitted" means "will paint over whatever the sort put
+behind it". On a closed mesh that is the far side of the model showing through the near side.
+
+**The linker is at `0x800B2410`** — the same function whose NCT writes the per-vertex colours this port
+already transcribes — and it loads the corners exactly as the world's does:
+
+    800B2478  srl  v1, t6, 21     ; file v3 ...
+    800B248C  mtc2 v0, SXY2       ; ...into SXY2
+    800B2498  bltz t3, 0x800B24F0 ; force-draw bit: skip the test entirely
+    800B24A0  nclip               ; on (v0, v1, v3)
+    800B24C0  mtc2 v0, SXY0       ; SXY0 = file v2
+    800B24C8  blez t8, 0x800B250C ; MAC0 <= 0 -> draw
+    800B24D0  nclip               ; on (v2, v1, v3)
+    800B24E0  bgtz t8, 0x800B250C ; MAC0 >  0 -> draw
+    800B24E8  b    0x800B2528     ;             otherwise store NULL: dropped
+
+**The comparisons are the world's exchanged.** The world's are `bgtz` then `bgez`-to-drop
+(`0x800AF8B4` / `0x800AF8D4`); the model's are `blez` then `bgtz`. Same registers, same corner order,
+opposite sign — so **model quads are wound the other way round from world quads**. That is a fact about
+the two authoring pipelines, and it is the sort of thing that is invisible until something asks.
+
+**Measured rather than eyeballed, because "looks better" nearly sent this the wrong way.** A first pass
+scored the two candidate signs by looking at the render and picked the *inverted* one, which drops the
+near faces and shows the model's inside — and which looked cleaner only because it happened to hide the
+violet. Averaging each group's projected depth settles it without appeal to taste: over the Soldier the
+rule above keeps faces of mean depth **1174** and drops mean **1233**, and the same split holds on **all
+fourteen** of its parts. The kept set is the nearer one, which is what front-facing means.
+
+Face counts, at the same camera:
+
+| | before | after |
+| --- | --- | --- |
+| `Soldier` | 233 | 129 |
+| `Infantry` | 230 | 119 |
+| `Chest` | 52 | 15 |
+| BASE1, 22 creatures in frame | 5,120 | 3,589 |
+
+Pinned in `tests/test_world.c` beside the world's, and deliberately beside it: the test asserts that the
+same square one rule draws is one the other drops, in both directions, so a later "simplification" that
+folds them into one helper with a sign flag fails rather than silently halves the game's models.
+
+- [ ] 65. **Residue: the force-draw mask.** `bltz t3` at `0x800B2498` skips the test outright, and `t3`
+      is shifted left one bit per face (`sll t3, t3, 1` in the delay slot), so it is **one bit per face,
+      MSB first**, over the same 32-face batches the attribute emitter at `0x8006A394` walks in. It is
+      loaded once per batch from `+4` of the descriptor in `a0`. Nothing found so far builds it, so this
+      port culls unconditionally; a two-sided surface on some model somewhere is drawn on one side only
+      until that is read. Worth noting the shape is right for a *near-plane* flag — a quad with a vertex
+      through the plane cannot be NCLIPped meaningfully — which would make it a correctness escape rather
+      than an authoring one.

@@ -39,9 +39,59 @@ typedef struct q2_model_draw_stats {
     u32 faces_emitted;
     u32 faces_rejected_near;   /* GTE divide overflow: at or behind the plane */
     u32 faces_rejected_bad;    /* index outside the scratch window            */
+    u32 faces_rejected_back;   /* both NCLIP halves faced away                */
     u32 ot_overflow;
     u32 faces_semi;            /* blend selector 1..4: drawn with ABE         */
 } q2_model_draw_stats;
+
+/*
+ * BACKFACE REJECTION for a model face, and why its sign is the WORLD'S
+ * INVERTED.
+ *
+ * The model linker at 0x800B2410 loads the projected corners into the GTE in
+ * the same shape the world linker does, and runs the same pair of NCLIPs:
+ *
+ *     SXY0,SXY1,SXY2 = v0,v1,v3 ; NCLIP ; MAC0 <= 0 -> draw   (0x800B24A0)
+ *     SXY0           = v2       ; NCLIP ; MAC0 >  0 -> draw   (0x800B24D0)
+ *                                        otherwise   -> drop
+ *
+ * Compare `q2_world_quad_faces_camera`, whose two tests are `MAC0 > 0 -> draw`
+ * and `MAC0 < 0 -> draw` (0x800AF8A8 / 0x800AF8C8). The comparisons are exactly
+ * exchanged, so MODEL QUADS ARE WOUND THE OPPOSITE WAY ROUND FROM WORLD QUADS.
+ * That is not an inference from how it looks: it is `bgtz` in one linker and
+ * `blez` in the other, on the identical register.
+ *
+ * It is also measurable, which is what settles it independently of the sign
+ * convention this port's GTE happens to use. Averaging the projected depth of
+ * each group over the Soldier: the faces this rule KEEPS mean 1174 and the ones
+ * it drops mean 1233, and the same split holds on all fourteen of its parts.
+ * The kept set is the nearer one, which is what "front facing" means.
+ *
+ * The corner order is the file's — the perimeter — exactly as the world's is;
+ * the linker's 2/3 swap is the file-to-hardware Z-order conversion and applies
+ * to the UVs in the same breath (0x8006A3E4 stores face uv3 into POLY uv2).
+ *
+ * RESIDUE. The linker has an escape: `bltz t3` at 0x800B2498 skips the test
+ * entirely, and `t3` is a 32-bit mask shifted left once per face, so it is one
+ * FORCE-DRAW BIT PER FACE, MSB first, over the same 32-face batches the
+ * attribute emitter walks in. Nothing here builds that mask, so this port culls
+ * unconditionally; what sets a bit is unread. See openquestions #10b.
+ *
+ * Clobbers the GTE's SXY registers and MAC0.
+ */
+Q2PSX_INLINE bool q2_model_quad_faces_camera(gte_state *g, const gte_sxy screen[4])
+{
+    g->sxy[0] = screen[0];
+    g->sxy[1] = screen[1];
+    g->sxy[2] = screen[3];
+    gte_nclip(g);
+    if (g->mac0 <= 0)
+        return true;
+
+    g->sxy[0] = screen[2];
+    gte_nclip(g);
+    return g->mac0 > 0;
+}
 
 /*
  * Where and how a model instance sits in the world.

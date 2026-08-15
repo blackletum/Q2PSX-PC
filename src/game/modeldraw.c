@@ -325,6 +325,24 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
                 continue;
             }
 
+            /*
+             * The linker's own NCLIP pair, before anything is allocated. An
+             * ordering table has no depth buffer, so a face that has been
+             * emitted is a face that will paint over whatever the sort put
+             * behind it — which on a closed mesh is the far side of the model
+             * showing through the near side. See q2_model_quad_faces_camera.
+             */
+            {
+                gte_sxy screen[4];
+                for (i = 0; i < 4; i++)
+                    screen[i] = window[f.v[i]].xy;
+                if (!q2_model_quad_faces_camera(gte, screen)) {
+                    if (stats)
+                        stats->faces_rejected_back++;
+                    continue;
+                }
+            }
+
             for (i = 0; i < 4; i++)
                 otz += window[f.v[i]].z;
             otz = q2_ot_bucket_for_depth(ot, otz / 4, cam->far_z);

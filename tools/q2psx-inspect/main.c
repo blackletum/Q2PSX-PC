@@ -2571,25 +2571,38 @@ static int cmd_model(disc *d, const char *map, const char *want, int clip_index,
         printf("   [%u distinct]\n", distinct);
         {
             u32 part, face_cursor = 0;
-            printf("  per part      : (part: faces, page(s), texture(s))\n");
+            printf("  per part      : (part: faces, page(s), texture(s), uv box)\n");
             for (part = 0; part < mdl.hdr.num_parts; part++) {
                 q2_model_part pp;
                 u32 k, plo = 99, phi = 0, tlo = 999, thi = 0;
+                u32 ulo = 256, uhi = 0, vlo = 256, vhi = 0;
 
                 if (!q2_model_get_part(&mdl, part, &pp))
                     break;
                 for (k = 0; k < pp.num_faces; k++) {
                     q2_model_face fc;
+                    u32 c;
                     if (!q2_model_get_face(&mdl, face_cursor + k, &fc))
                         break;
                     if (q2_model_face_page(&fc) < plo) plo = q2_model_face_page(&fc);
                     if (q2_model_face_page(&fc) > phi) phi = q2_model_face_page(&fc);
                     if (fc.texture < tlo) tlo = fc.texture;
                     if (fc.texture > thi) thi = fc.texture;
+                    /* Where on the page a part samples localises a wrong-looking
+                     * region far faster than the page number alone: two parts on
+                     * one page can read opposite corners of it. */
+                    for (c = 0; c < 4; c++) {
+                        if (fc.uv[c][0] < ulo) ulo = fc.uv[c][0];
+                        if (fc.uv[c][0] > uhi) uhi = fc.uv[c][0];
+                        if (fc.uv[c][1] < vlo) vlo = fc.uv[c][1];
+                        if (fc.uv[c][1] > vhi) vhi = fc.uv[c][1];
+                    }
                 }
                 if (pp.num_faces)
-                    printf("      %2u: %3u faces  page %u-%u  tex %u-%u\n",
-                           part, pp.num_faces, plo, phi, tlo, thi);
+                    printf("      %2u: %3u faces  page %u-%u  tex %u-%u"
+                           "  u %u-%u  v %u-%u\n",
+                           part, pp.num_faces, plo, phi, tlo, thi,
+                           ulo, uhi, vlo, vhi);
                 face_cursor += pp.num_faces;
             }
         }
@@ -2643,9 +2656,9 @@ static int cmd_model(disc *d, const char *map, const char *want, int clip_index,
     gte.zsf4 = (s16)(Q2_ONE_12 / 4);
 
     q2_model_build_ot(&inst, &cam, &ot, &gte, &stats);
-    printf("  faces emitted : %u of %u  (near %u, bad %u)\n",
+    printf("  faces emitted : %u of %u  (near %u, bad %u, back %u)\n",
            stats.faces_emitted, stats.faces_total, stats.faces_rejected_near,
-           stats.faces_rejected_bad);
+           stats.faces_rejected_bad, stats.faces_rejected_back);
 
     psx_fb_clear(&fb, psx_rgb555(4, 4, 10));
     psx_raster_ot(&fb, &ot, vram, &opts);
