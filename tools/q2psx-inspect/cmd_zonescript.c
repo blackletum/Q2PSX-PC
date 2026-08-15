@@ -81,6 +81,10 @@ typedef struct live_rot_ctx {
      * second says level progression is reachable. */
     u32                 loadmap_run;
     u32                 secret_run;   /* INSECRET calls the sweep reaches */
+    /* Every primitive the sweep reaches, by kind. The port acts on a handful
+     * and the rest are silently nothing; a histogram is the only thing that
+     * says WHICH, and it is the list of what is left to build. */
+    u32                *prim_run;
     const q2_scene     *scene;
     q2_uf_operands      ops;
 
@@ -99,6 +103,9 @@ static void live_rot_call(void *user, const q2_event_item *item, u8 call_index)
     q2_uf_prim prim = q2_userfuncs_prim(ctx->uf, call_index);
 
     ctx->steps += hit;
+
+    if (ctx->prim_run && prim >= 0 && prim < Q2_UF_PRIM_COUNT)
+        ctx->prim_run[prim]++;
 
     /*
      * A call that names no object is only a gap if the script ever RUNS it.
@@ -182,11 +189,16 @@ int cmd_zonescript(const disc *d, const char *only_map)
     u32 live_glass_run = 0, live_glass_node = 0;
     u32 loadmap_calls = 0, live_loadmap = 0;
     u32 secret_calls = 0, live_secret = 0;
+    u32 prim_run[Q2_UF_PRIM_COUNT];
+    u32 prim_have[Q2_UF_PRIM_COUNT];
     u32 loadmap_map_ok = 0, loadmap_map_missing = 0,
         loadmap_start_ok = 0, loadmap_late_zone = 0;
     u32 live_built = 0, live_calls = 0, live_steps = 0, live_moved = 0,
         live_turned = 0;
     bool verbose = (only_map != NULL);
+
+    memset(prim_run, 0, sizeof(prim_run));
+    memset(prim_have, 0, sizeof(prim_have));
 
     printf("Which Events chunk does a trigger volume fire?\n\n");
 
@@ -357,6 +369,10 @@ int cmd_zonescript(const disc *d, const char *only_map)
                                 u32 need = 0;
                                 s16 first_obj = -1;
 
+                                if (call.prim >= 0 &&
+                                    call.prim < Q2_UF_PRIM_COUNT)
+                                    prim_have[call.prim]++;
+
                                 if (call.prim == Q2_UF_INSECRET)
                                     secret_calls++;
 
@@ -383,7 +399,7 @@ int cmd_zonescript(const disc *d, const char *only_map)
                                         q2_buf tb;
 
                                         if (!q2_uf_operand_name(&call, 1, sname))
-                                            sname[0] = ' ';
+                                            sname[0] = '\0';
 
                                         snprintf(tp, sizeof(tp),
                                                  "Q2DATA/LEVELS/%s/COMMON.DAT",
@@ -692,6 +708,7 @@ int cmd_zonescript(const disc *d, const char *only_map)
                 ctx.glass_node = 0;
                 ctx.loadmap_run = 0;
                 ctx.secret_run  = 0;
+                ctx.prim_run    = prim_run;
 
                 /* The best zone's Scene and its Events, so a GLASS slot is
                  * resolved against the same pair the engine holds resident. */
@@ -820,6 +837,27 @@ int cmd_zonescript(const disc *d, const char *only_map)
            "zone 0 : %u\n", loadmap_start_ok, loadmap_late_zone);
     printf("    INSECRET calls in COMMON: %u; the trigger sweep RUNS %u\n",
            secret_calls, live_secret);
+
+    /*
+     * Every primitive a player who has walked the whole disc would run, by
+     * kind. This is the list of what a script can ask the game to do, ordered
+     * by how often it asks — and therefore the list of what is left to build,
+     * measured rather than guessed at.
+     */
+    printf("\n  what a trigger volume ASKS FOR, disc-wide\n");
+    printf("    %-14s %8s %8s\n", "primitive", "in COMMON", "run");
+    {
+        int pi;
+        for (pi = 0; pi < Q2_UF_PRIM_COUNT; pi++) {
+            const q2_uf_prim_info *pinfo;
+
+            if (!prim_have[pi] && !prim_run[pi])
+                continue;
+            pinfo = q2_uf_info((q2_uf_prim)pi);
+            printf("    %-14s %8u %8u\n",
+                   pinfo ? pinfo->name : "?", prim_have[pi], prim_run[pi]);
+        }
+    }
     printf("    rotation CALLs the script RUNS : %u, of which turn nothing : %u\n",
            live_rot_fired, live_rot_barren);
     printf("    distinct rotation CALL sites the script reaches : %u\n",

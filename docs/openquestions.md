@@ -5793,3 +5793,54 @@ projection is right the weapon comes with it, and the two remaining entries on t
       from the emitter rather than from the consumer — so emitter and test agreed with each other and
       neither agreed with the rasteriser, and the suite stayed green while the panel drew nothing. The
       assertion is now the rasteriser's, which is the only party whose opinion shows on screen.
+
+- [ ] 73. **What a trigger volume ASKS FOR, disc-wide — the list of what is left.**
+      `q2psx-inspect zonescript` now prints a histogram of every UserFuncs primitive a player who has
+      walked the whole disc would run. It is the first time the remaining work has been a measured list
+      rather than an impression, and it is short:
+
+          primitive      in COMMON      run        acted on?
+          LIFT1                58       56         no   — the lifts
+          CREBATCH             92       82         no   — script-spawned creature groups
+          ROTBUTTON            58       53         yes
+          STRING               68       33         YES (new)
+          SIMPLESOUND          33       33         YES (new)
+          INSECRET             34       33         yes
+          DONTJUMP             34       33         yes
+          LOADMAP              28       28         yes
+          INCROUCH             29       27         yes
+          HELPCOMPUTER         26       20         no
+          ONKEYDO              30       20         no   — the key/inventory gate
+          INACID               19       19         yes
+          MISEVENT             20       16         no
+          ROTHATCH             15       15         yes
+          INLAVA               14       14         yes
+          INWATER              10       10         yes
+          PISTON               13        8         no   — crushers
+          TIMER                14        7         no
+          UNDERWATER            7        7         yes
+          OBJDRAWOFF            7        6         no
+          MISCOMPLETE           5        5         no   — end of unit
+          TIMEDLIGHT           18        5         yes
+          BUTTON, CAGELIFT1, UNDERACID, SIMPLESOUND, TELEPORT, SETWIBBLE,
+          DISH, LASERWALL, PLATFORM, FLKLIGHT, DISABLEME, INLOWCROUCH  (1-3 each)
+          LASERBEAM            72        0         no   — never trigger-reached
+          SIMROT/SIMROT2       22        0         (reached through their own path)
+          GLASS                 6        0         wired, never called (#66)
+
+      **The two that matter most by volume are the movers and the spawns.** `LIFT1` runs 56 times and
+      moves nothing — `events_rt.c` marks the MOVER opcodes "deliberately inert" because their slots are
+      Scene node indices on disc and runtime object indices after a load-time pre-pass, which is the same
+      obstacle #56 solved for the rotators and is now solvable the same way. `CREBATCH` runs 82 times and
+      spawns nothing, so every scripted ambush in the game is absent.
+
+- [x] 74. **STRING and SIMPLESOUND — the game speaks and makes noise.** Both were decoded long ago and
+      neither was acted on. A trigger volume runs 33 STRING calls and all 33 SIMPLESOUND calls disc-wide,
+      and the text is the map's own: JAIL2 says `Yellow Lasers deactivated`, LAB says `Access granted`,
+      `Maintenance bridge unlocked`, `Level Two security disabled`, `Level Three security disabled`, and
+      WASTE3 says `Find and activate both coolant pumps.`
+
+      A STRING key with no text is silence rather than a warning, because `userfuncs.c` already records
+      that a miss is normal — 165 of 363 uses resolve disc-wide. SIMPLESOUND's absolute world position is
+      **not** used: this port's mixer has no positional path, so the sound plays flat, and that is stated
+      at the site rather than left to be discovered.

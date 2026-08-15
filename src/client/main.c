@@ -408,6 +408,17 @@ typedef struct client {
     char              map_title[64];     /* the level's own name, `MapTitle` */
     char              secret_message[64];/* `FoundASecret`, the map's words  */
     int               map_unit;          /* from `Unit<N>Miss1`              */
+    /*
+     * The map's own text, kept open for the level rather than read once for
+     * the briefing and dropped. STRING names a key in it, and 33 of the disc's
+     * 68 STRING calls are reachable by a trigger volume — so a script that
+     * wants to say something needs this to still be here when it asks. It
+     * borrows `common`, which outlives the zone.
+     */
+    q2_leveltext      leveltext;
+    bool              leveltext_ready;
+    u32               script_strings;   /* STRING calls that said something */
+    u32               script_sounds;    /* SIMPLESOUND calls that played    */
     bool              mission_after_map; /* the screen is holding a LOADMAP */
     u32               mission_frames;
     u32               briefing_frames;
@@ -1556,6 +1567,47 @@ static void client_event_call(void *user, const q2_event_item *item,
     }
 
     /*
+     * STRING and SIMPLESOUND — what a script says and what it plays.
+     *
+     * Both were decoded and neither was acted on, and both are things a player
+     * meets constantly: sweeping every trigger volume on the disc runs 33 of
+     * the 68 STRING calls and 33 of the 33 SIMPLESOUND ones.
+     *
+     * STRING's key resolves against the MAP's own `Strings` chunk, and
+     * userfuncs.c already records that a miss is normal rather than a fault —
+     * 165 of 363 uses resolve disc-wide — so a key with no text is silence and
+     * not a warning.
+     *
+     * SIMPLESOUND carries an ABSOLUTE world position and a bank name. The
+     * position is not used: this port's mixer has no positional path, so the
+     * sound plays flat. That is a stated shortfall rather than a silent one.
+     */
+    {
+        q2_uf_call call;
+
+        if (q2_uf_decode_call(&call, &c->sim[0].userfuncs, item) == Q2_OK) {
+            char key[Q2_UF_NAME_LEN + 1];
+
+            if (call.prim == Q2_UF_STRING && c->leveltext_ready &&
+                q2_uf_operand_name(&call, 0, key) && key[0]) {
+                const char *text = q2_leveltext_find(&c->leveltext, key);
+
+                if (text) {
+                    q2_hud_message(&c->hud, text);
+                    c->script_strings++;
+                    Q2_INFO("script says: \"%s\"", text);
+                }
+            }
+
+            if (call.prim == Q2_UF_SIMPLESOUND &&
+                q2_uf_operand_name(&call, 2, key) && key[0]) {
+                if (client_play_sound(c, key))
+                    c->script_sounds++;
+            }
+        }
+    }
+
+    /*
      * INSECRET — the mission screen's Secrets column.
      *
      * Counted once per item offset. The runtime fires a trigger volume on the
@@ -1866,6 +1918,10 @@ static bool client_load_zone(client *c, const char *map, int index)
                     q2_leveltext tx;
 
                     q2_briefing_init(&c->briefing);
+                    c->leveltext_ready =
+                        (q2_leveltext_open(&c->leveltext, &c->common) == Q2_OK);
+                    c->script_strings = 0;
+                    c->script_sounds  = 0;
                     if (q2_leveltext_open(&tx, &c->common) == Q2_OK) {
                         char key[Q2_LEVELTEXT_NAME_LEN + 1];
                         const char *s2;
@@ -1879,7 +1935,7 @@ static bool client_load_zone(client *c, const char *map, int index)
                          * not it: that column reads "Base1".
                          */
                         s2 = q2_leveltext_find(&tx, "MapTitle");
-                        c->map_title[0] = ' ';
+                        c->map_title[0] = '\0';
                         if (s2) {
                             q2_briefing_set_location(&c->briefing, s2);
                             snprintf(c->map_title, sizeof(c->map_title),
@@ -1891,7 +1947,7 @@ static bool client_load_zone(client *c, const char *map, int index)
                          * is the map's own words rather than a string this port
                          * would otherwise have had to invent.
                          */
-                        c->secret_message[0] = ' ';
+                        c->secret_message[0] = '\0';
                         s2 = q2_leveltext_find(&tx, "FoundASecret");
                         if (s2)
                             snprintf(c->secret_message,
