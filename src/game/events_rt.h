@@ -121,6 +121,21 @@ typedef struct q2_event_rt {
     s32 defer_ticks;
 
     /*
+     * DISABLE THE RECORD THAT IS RUNNING — what `DISABLEME` means.
+     *
+     * `0x8002EAA8` reads the record currently being executed out of gp+16936,
+     * adds the Events base and ORs 0x80 into its header byte at +3. That bit is
+     * the DISABLED flag the dispatcher tests at 0x8002799C before it runs
+     * anything, so the record never runs again.
+     *
+     * Written by an `on_call` hook for the same reason `defer_ticks` is: the
+     * hook reports a CALL and has nowhere else to put an answer. Unlike the
+     * defer it does not stop the record — the console's primitive sets a bit
+     * and returns, so the items after it still run this once.
+     */
+    bool disable_self;
+
+    /*
      * Records waiting to resume, and the clock they are waiting against.
      * `q2_event_rt_advance` moves the clock; `q2_event_rt_update` runs whatever
      * has come due before it takes anything new off the queue.

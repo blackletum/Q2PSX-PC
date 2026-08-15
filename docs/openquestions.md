@@ -7436,3 +7436,23 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       now fire: `q2psx-inspect pmove <disc> BASE0` shoots node 271 for 100 and reports `1` record raised,
       and WASTE4's node 143 the same. It is the same registry, sweep and router GLASS uses (#117) —
       SHOOTTHEN simply answers with a record rather than with debris.
+- [x] 119. **DISABLEME retires the record it is running in, and the one call a sweep can reach is behind
+      the key gate — which is how it was never observed.**
+
+      `0x8002EAA8` is four instructions of substance: read the record currently executing out of gp+16936,
+      add the Events base, OR 0x80 into its header byte at +3. That bit is the DISABLED flag the record
+      dispatcher tests at `0x8002799C` before it runs anything, so the record never runs again. It does NOT
+      stop the record — the primitive sets the bit and returns, so what follows it runs this once.
+
+      Expressed the way `TIMER`'s deferral is (#83), as a field an `on_call` hook writes, because the hook
+      reports a CALL and has nowhere else to put an answer.
+
+      **Two calls on the disc and only one is reachable, and finding it needed a new flag.** JAIL2's sits in
+      a record no trigger volume runs. BIGGUN's is reached — the tool's sweep runs it — but in the client it
+      is behind `ONKEYDO`, and a scripted run cannot go and find a key. `--keys` hands the player all twelve
+      key bits, which is what makes what is behind the gate measurable at all:
+
+          BIGGUN --fire-triggers            : 0 records retired  (gated)
+          BIGGUN --keys --fire-triggers     : 1 record retired
+
+      The difference between those two lines is the gate working and the primitive working, in one run.

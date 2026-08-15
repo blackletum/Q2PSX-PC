@@ -250,6 +250,19 @@ static bool run_items(q2_event_rt *rt, const q2_event_record *rec, u32 from,
             break;
         }
 
+        /*
+         * A DISABLEME. The bit goes on now and the record still finishes: the
+         * primitive sets it and returns, so what follows it in the record runs
+         * this once and never again.
+         */
+        if (rt->disable_self) {
+            s32 slot = record_slot(rt, offset);
+
+            rt->disable_self = false;
+            if (slot >= 0)
+                rt->flags[slot] |= Q2_EVREC_DISABLED;
+        }
+
         /* A TIMER. The rest of the record waits. */
         if (rt->defer_ticks > 0) {
             if (rt->deferred_count < Q2_EVENT_RT_PENDING_MAX) {

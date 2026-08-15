@@ -440,7 +440,8 @@ typedef struct client {
     u32               node_hidden_count;
     u32               script_hidden;    /* nodes hidden this level */
     u32               script_summoned;  /* creatures a CREBATCH woke */
-    u32               script_timers;    /* TIMER deferrals raised    */
+    u32               script_timers;
+    u32               script_disabled;  /* DISABLEME, records retired*/
     u32               script_units;     /* MISCOMPLETE, units ended  */
     u32               script_teleports; /* TELEPORT calls that moved us */
     /*
@@ -510,6 +511,7 @@ typedef struct client {
     bool              pitch_given;
     bool              no_lasers;   /* --no-lasers: the before picture */
     bool              shoot;       /* --shoot: hold fire              */
+    bool              all_keys;    /* --keys: every key in the pocket */
 
     q2_mover_set      movers;
     bool              movers_ready;
@@ -1945,6 +1947,21 @@ static void client_event_call(void *user, const q2_event_item *item,
                 c->script_timers++;
             }
         }
+    }
+
+    /*
+     * DISABLEME — the record retiring itself.
+     *
+     * `0x8002EAA8` ORs 0x80 into the running record's header byte at +3, which
+     * is the DISABLED bit the dispatcher tests at 0x8002799C before it runs
+     * anything. Two calls on the disc and neither had a consumer, so a record
+     * that is meant to fire once could fire every time the player walked back
+     * into its volume. It does NOT stop the record: the primitive sets the bit
+     * and returns, so the rest of the record still runs this once.
+     */
+    if (q2_userfuncs_prim(&c->sim[0].userfuncs, call_index) == Q2_UF_DISABLEME) {
+        c->sim[0].event_rt.disable_self = true;
+        c->script_disabled++;
     }
 
     /*
@@ -5105,10 +5122,12 @@ static void client_write_shot(client *c, bool numbered)
                 c->sim[0].breakable_count, c->sim[0].breakable_hits,
                 c->sim[0].breakable_pieces, c->sim[0].breakable_fired);
         Q2_INFO("  script    %u strings, %u sounds, %u gated by ONKEYDO, "
-                "%u nodes hidden, %u summoned, %u teleports, %u timers, %u resumed",
+                "%u nodes hidden, %u summoned, %u teleports, %u timers, %u resumed,"
+                " %u records retired",
                 c->script_strings, c->script_sounds, c->script_gated,
                 c->script_hidden, c->script_summoned, c->script_teleports,
-                c->script_timers, c->sim[0].event_rt.resumed_count);
+                c->script_timers, c->sim[0].event_rt.resumed_count,
+                c->script_disabled);
         Q2_INFO("  movers    %u built, %u triggered by the script, %u tick-moves",
                 c->movers_ready ? c->movers.count : 0,
                 c->mover_triggers, c->mover_moved);
@@ -6239,6 +6258,11 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(argv[i], "--no-lasers"))             c.no_lasers = true;
         else if (!strcmp(argv[i], "--shoot"))                 c.shoot = true;
+        /* `--keys`: hand the player every key. A scripted run cannot go and
+         * find one, and the records behind `ONKEYDO` are otherwise unreachable
+         * in a sweep — which is the gate working, and also why what is behind
+         * it goes unmeasured. */
+        else if (!strcmp(argv[i], "--keys"))                  c.all_keys = true;
         /* Play a film and nothing else — the campaign reaches OUTRO1P by
          * finishing, and that is a long way to go to look at a decoder. */
         else if (!strcmp(argv[i], "--movie") && i + 1 < argc)
@@ -7079,6 +7103,10 @@ no_window:
         /* Every frame, not just menu frames: a zone load rebuilds the sim and
          * would otherwise drop back to the compiled-in constants. */
         client_apply_settings(&c);
+        /* `--keys`: re-asserted every frame, because a zone load rebuilds the
+         * inventory the same way it rebuilds the settings. */
+        if (c.all_keys)
+            c.sim[0].combat.inv.flags |= 0x0FFFu;
         /*
          * The music countdown, on the console's own 50 Hz. At zero the engine
          * moves to the next playlist entry (0x80071A58) rather than waiting for
