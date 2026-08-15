@@ -541,6 +541,16 @@ bool q2_model_move_get(const q2_model *m, u32 index, q2_model_move *out);
 /* How many moves block D holds. Zero if the model has none. */
 u32 q2_model_move_count(const q2_model *m);
 
+/*
+ * Find a move by name — and this is the ENGINE'S OWN mechanism, not a
+ * convenience. `0x8006D330` walks block D comparing each record's 12-byte name
+ * field against a name the caller passes by value in a1/a2/a3, three words at a
+ * time, and returns the match. The engine never indexes block D and never
+ * matches by clip length.
+ *
+ * So this function is the right way to reach a move, and
+ * `q2_model_anim_by_length()` is a substitute for something the disc does not do.
+ */
 /* Find a move by name, case-sensitive as stored. False if there is none. */
 bool q2_model_move_by_name(const q2_model *m, const char *name,
                            q2_model_move *out);

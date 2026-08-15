@@ -5106,8 +5106,32 @@ nothing saying so.
 
       So: `position = block_d[k].start * 5 + 30 * (ai_frame - ai_move.first)` is the formula, `* 5` because
       block D counts 2 per frame and the position counts 10. Every term is known except **which k goes with
-      which AI move**. Find the load-time transform and the animation path is a short function, not a
-      project.
+      which AI move**.
+
+      **ANSWERED: the pairing is a lookup BY NAME, and `0x8006D330` is it.**
+
+          8006D334  sw   a1, 20(sp)      ; the wanted name, three words passed BY VALUE
+          8006D338  sw   a2, 24(sp)
+          8006D33C  sw   a3, 28(sp)
+          8006D340  lw   a1, 56(a0)      ; a1 = model->ofs_block_d
+          8006D34C  lw   v1, 0(a1)       ; the record's word 0 — its NAME
+          8006D364  lw   v0, 20(sp)      ; the wanted name's word 0
+          8006D36C  bne  v0, v1, next    ; compare, twelve bytes as three words
+          8006D374  lw   v0, 24(sp)      ; ...word 1
+          8006D378  lw   v1, 4(a1)
+
+      So the engine does not index block D and does not match by length. It **walks block D comparing the
+      12-byte name field** against a name handed in by the caller, three words at a time, and returns the
+      matching record. The same by-value name passing the creature sound imports use (#61) — this codebase
+      does that wherever a 12-byte string crosses a call boundary.
+
+      That makes `q2_model_move_by_name()`, added earlier in this session, exactly the right API and
+      `q2_model_anim_by_length()` exactly the wrong one. It also explains why #62's name comparison found
+      92 conflicts of 97: names ARE the mechanism, so the conflict means the port is pairing AI ranges to the
+      wrong names, not that names are irrelevant.
+
+      **What is now the open question** is narrower again: what name does the caller pass? `0x8003CBD8`
+      builds it from bytes before the call, and finding that source finishes the chain.
 
 - [ ] 64. **The first code found that walks block D — and it names the `rest` field.**
       Hunting the load-time transform (#51f, #63) by asking who reads `model+0x38`:
