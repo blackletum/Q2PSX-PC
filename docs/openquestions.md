@@ -1,5 +1,33 @@
 # Open Questions — Quake II PSX (`SLES-01534`) reverse engineering
 
+## Where this stands
+
+**The game plays from the front end to the credits.** One run walks all five units and eleven levels, takes
+every unit boundary and its mission screen, and ends on `OUTRO1P.STX` playing all 1,559 of its frames (#121).
+Every conformance command the harness carries passes over the whole disc, and 28 of 28 tests pass.
+
+**Four questions remain open, and none of them is behaviour the game needs.** All four are fields with no
+located reader, and the port does the thing each one would have explained without it:
+
+| | what is unread | and yet |
+|---|---|---|
+| #6 | the `Rel` fixup encoding's remaining cases | every module on the disc relocates, binds and runs |
+| #8 | the `AreaConx` 9-byte link payload | collision, line of sight and streaming run off `PrimaryColl` |
+| #28 | `Q2Level` `+0x1C`, the `runtime[8]` writers, `music_playlist` | the music plays the map's own seven-track list |
+| #65 | the model force-draw mask | models draw, backface-rejected; a two-sided surface somewhere is one-sided |
+
+Two of the four have had their obvious approach CLOSED rather than merely untried, which is worth as much as
+an answer: #65's mask cannot be chased through the linker's caller, because searching the whole segment for a
+`jal`, a materialised address and a raw pointer word to `0x800B2410` finds nothing by all three; and #8's
+best candidate is now measured rather than guessed, with the discriminator stated (graph symmetry) and the
+result — 25.6% — honest about not being enough.
+
+A further four are **terminal**: they cannot be answered from this disc, and are marked `[!]` rather than
+left looking like work outstanding. #30 needs an NTSC disc, #35 is unverifiable at N = 1, #36 is a field that
+is zero in 100% of samples, and #38 is a standing security caution rather than a question at all.
+
+---
+
 Prioritised by how much each blocks the native port. **Tier 0** holds the items that have fallen, kept here
 with their answers so nothing is silently dropped. Items in **Tier 1** stand between the project and a level
 you can walk around in. The tail is cosmetic or archival.
