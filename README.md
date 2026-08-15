@@ -67,6 +67,14 @@ releases move the executable's data tables. See [`docs/FORMATS.md`](docs/FORMATS
 levels — takes the unit boundaries and their mission screens, reaches *"All missions complete. Return to
 Command Ship."*, and ends on `OUTRO1P.STX` playing all 1,559 of its frames.
 
+**And the format is fully read.** [`docs/openquestions.md`](docs/openquestions.md) has **no open
+questions**: 157 resolved, 18 partial where a residue is stated, and 4 marked terminal because this disc
+cannot answer them — an NTSC release nobody here owns, a file with N = 1, a field that is zero in every
+sample, and a standing security caution. The last two to fall, `AreaConx`'s link payload and the model
+force-draw mask, were the same mistake three entries apart: each stood on a premise nobody had tested — *this
+address is a function*, *this record is an array of structs* — and every search that followed was sound,
+exhaustive, and answering the wrong question.
+
 
 A level loads from a real disc and renders textured, models included, with the
 simulation running on top of it. What is missing is not any one format — it is
