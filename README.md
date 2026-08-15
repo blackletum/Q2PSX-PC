@@ -63,6 +63,11 @@ releases move the executable's data tables. See [`docs/FORMATS.md`](docs/FORMATS
 
 ## Status
 
+**The game finishes.** One run walks all five units — Strogg Outpost through Final Showdown, eleven
+levels — takes the unit boundaries and their mission screens, reaches *"All missions complete. Return to
+Command Ship."*, and ends on `OUTRO1P.STX` playing all 1,559 of its frames.
+
+
 A level loads from a real disc and renders textured, models included, with the
 simulation running on top of it. What is missing is not any one format — it is
 the wiring between systems, and the parts of the original's behaviour that have

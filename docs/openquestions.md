@@ -5308,6 +5308,14 @@ folds them into one helper with a sign flag fails rather than silently halves th
       through the plane cannot be NCLIPped meaningfully — which would make it a correctness escape rather
       than an authoring one.
 
+      **And the obvious way in is closed: the linker has NO CALLER in the image.** Searching the whole
+      loaded segment for `j`/`jal` to `0x800B2410`, for a materialised `lui`/`addiu` pair forming it, and
+      for a raw word equal to it — a function-pointer table entry — finds **nothing, by all three**. So the
+      descriptor's producer cannot be found by reading whoever calls the linker, because on this image
+      nobody does. `0x800B2410` sits in the last few kilobytes before the `0x800B2800` BSS boundary, which
+      is where this build keeps code it copies somewhere before running, and that is the likeliest reason.
+      Recorded so the next pass does not repeat the search.
+
 ## The status bar's fifth byte is a palette, and the HUD had been drawing the armour box for health
 
 Two separate colour defects were reported together — "everything is inverted, red shows as blue" — and they
@@ -7526,3 +7534,25 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       The build now also SAYS what it dropped and what it built from — `mover dropped: LIFT1 node 0 speed 4`
       and `built from: MOVER_A/B/C DISH` — because an empty object slot and a primitive the port cannot
       build look identical in a count, which is the point #81 made and could not act on.
+- [x] 121. **The game finishes. One run, eleven levels, five units, and the outro plays.**
+      Every piece of this had been measured on its own — #88's LOADMAP, #87's MISCOMPLETE, #92's movie
+      player, #115's decoder — and the whole had not been run end to end since the decoder existed. It
+      does:
+
+          mission: Strogg Outpost   (unit 1)      mission: Powerplant       (unit 3)
+          mission: Outer Base       (unit 1)      mission: The Reactor      (unit 3)
+          mission: Installation     (unit 1)      help computer: "Locate unit exit and kill all resistance."
+          mission: Detention Centre (unit 2)      help computer: "Unit Objective Completed."
+          mission: Security Complex (unit 2)      mission: Defence Command  (unit 4)
+          mission: Grid Control     (unit 2)      mission: Inner Chamber    (unit 5)
+          script says: "Mission Complete."        help computer: "All missions complete. Return to Command Ship."
+                                                  MISCOMPLETE: unit 5 over -> EndMission 5 (QENDMIS5)
+                                                  mission: Final Showdown   (unit 5)
+                                                  movie: 'Extro FMV' plays OUTRO1P.STX
+                                                  movie: 1559 frames shown
+
+      `--keys --fire-triggers` is what walks it: a player who has every key and steps into every trigger
+      volume on every map. That is not a demonstration of PLAYING the game well — no creature is killed in
+      it, and the kill counters read 0 all the way down — it is a demonstration that the level flow, the
+      unit boundaries, the mission screens, the objectives and the ending are all connected. The last frame
+      is the placard the campaign used to END on, now shown after the film rather than instead of it.
