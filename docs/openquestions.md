@@ -5974,3 +5974,38 @@ coincidence and not a fix. The real cause is unfound.
       **CAGELIFT1 is deliberately not built** — three calls on the disc, and its operand table names no
       speed. A mover with speed zero is one that is triggered, ticks and never arrives, so it needs its
       constructor read rather than a constant borrowed from `LIFT1`.
+
+## CLOSED: the view weapon "looks smaller than retail"
+
+Carried as an open gap for three rounds and used to justify a wrong change to the projection. It is closed as
+**not established as a defect**, and the reason is that every instrument built to measure it was confounded.
+
+**What the port can be held to, and passes.** `q2psx-inspect viewweapon` checks the weapon against the
+executable rather than against a screenshot: the four key-field offsets, the 70-tick switch countdown, the
+286-unit eye base at `0x8004F608`, the state machine's transitions, and placement — that the weapon drops with
+the eye by exactly `576 - 286`, that a quarter turn moves it, and that its distance from the eye is unchanged
+by turning. **20 of 20 pass.** The translation it is placed with is the animation bank's own `t`, constant at
+(140, 157, 44) across the idle, and the model is the CastList's own geometry. There is no free parameter left
+in which a size error could hide without one of those checks failing.
+
+**Why the visual impression cannot be promoted to a defect.** Three separate attempts to measure it:
+
+- *Eyeballed bounding boxes*, twice, which disagreed with each other on the direction.
+- *The sky gap*, which is a world feature and therefore moves with the player — the reference frame was taken
+  after the player had walked forward, so everything in it is nearer.
+- *The muzzle stripe across 22 idle frames at a HUD-calibrated mapping.* The best of the three, and still wrong:
+  the weapon is camera-locked only for a fixed animation POSE, and the reference is mid-play at 2:43 of a video
+  while the sweep was a stationary idle. The stripe sits on an angled face, so a few degrees of pose changes its
+  projected width by more than the effect being measured.
+
+A fourth attempt, segmenting the arm as a pose-robust proxy anchored at the fixed grip, failed outright — a
+tan arm against tan rock does not segment, and the "measurement" returned the search window's own bounds.
+
+**What the code says.** screen.h's search of the transform chain found no anamorphic term to undo, and the HUD
+calibration independently measured the display pixel aspect at 1.4498 — the television narrowing the pixels,
+i.e. the display already performing the correction the projection was accused of missing.
+
+**What would reopen it**, for anyone who wants certainty rather than the absence of evidence: a retail capture
+at a level start, stationary, weapon settled in idle. The port reproduces that state exactly and deterministically
+with `--headless --frames 90`, so the pose confound disappears and a single comparison settles it. Until such a
+frame exists, "the weapon looks smaller" is an impression from mid-play footage and not a finding.
