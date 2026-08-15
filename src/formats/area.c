@@ -80,11 +80,31 @@ bool q2_area_get_link(const q2_area_graph *g, u32 area, u32 index,
     if (index >= count)
         return false;
 
-    payload = offset + 1 + index * Q2_AREA_LINK_SIZE;
-    if (payload + Q2_AREA_LINK_SIZE > g->size)
-        return false;
+    /*
+     * Two arrays, not one array of structs — see area.h. The neighbours are
+     * bytes, the planes are halfwords, and the halfword array is padded to an
+     * even offset WITHIN THE RECORD, which is where the corpus size identity
+     * `9n + 2 - (n & 1)` comes from.
+     */
+    {
+        u32 planes = offset + 1 + count;
+        int k;
 
-    out->payload = g->base + payload;
+        planes += (planes - offset) & 1u;
+
+        if (offset + 1 + index >= g->size)
+            return false;
+        if (planes + (index + 1) * 8u > g->size)
+            return false;
+
+        payload = planes + index * 8u;
+
+        out->neighbour = g->base[offset + 1 + index];
+        out->dist      = (s16)q2_rd_u16(g->base + payload);
+        for (k = 0; k < 3; k++)
+            out->normal[k] = (s16)q2_rd_u16(g->base + payload + 2 + k * 2);
+    }
+
     return true;
 }
 

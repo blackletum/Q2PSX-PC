@@ -1612,11 +1612,30 @@ Link record: `uint8_t nLinks;` then `nLinks` × 9 bytes.
 is followed by 0 or 2 trailing bytes because the chunk is padded to 4 — so the formula cannot be checked that
 way for the final record.) `nLinks` observed 1…7 and 9, never 8.
 
-The 9-byte link payload is **UNKNOWN**. No fixed byte offset yields a 1.3.12 unit normal in more than 39 % of
-3,494 links; byte histograms show `0x10`/`0xF0` clustering consistent with *unaligned* `int16_t` values of
-`0x1000`/`0xF000`, but links start at `record + 1 + 9*L` so their parity alternates and no single struct
-layout can express it. Byte `+3` is 0 in 2,132 of 3,494 links with small values otherwise, and is the best
-neighbour-index candidate.
+> **CORRECTION — the link payload is not a 9-byte struct, and that premise is what hid it.** Read as `n`
+> interleaved 9-byte records, no byte offset yields a 1.3.12 unit normal in more than 39% of 3,494 links,
+> and byte histograms show `0x10`/`0xF0` clustering that looks like halfwords sliced at the wrong parity.
+> All of that is true and all of it follows from the wrong shape. The record is two ARRAYS:
+
+```c
+/* CONFIRMED on all 1,725 records / 3,494 links. */
+uint8_t  num_links;
+uint8_t  neighbour[num_links];      /* the adjacent area                         */
+uint8_t  pad;                       /* only when (1 + num_links) is odd          */
+struct { int16_t dist; int16_t n[3]; } plane[num_links];
+```
+
+`1 + n + pad + 8n` **is** `9*n + 2 - (n & 1)`, the size identity above: the formula was describing this
+layout the whole time.
+
+**What identifies it** is a property the interleaved reading cannot satisfy: an adjacency graph must be
+symmetric. The first `n` bytes give **3,494 of 3,494 edges with their reverse present — 100%** — against
+25.6% for the best interleaved candidate. With the boundary pinned, **3,494 of 3,494 plane normals are unit
+length in 1.3.12**, 3,150 of them axis-aligned with a component of exactly 4096, and none zero. `dist` is
+non-negative, a multiple of 256, and runs 0…9984.
+
+`q2psx-inspect verify` checks both facts on every link on the disc: 0 name a missing area, 0 carry a
+non-unit normal.
 
 ### 3.7 `Events` (zone)
 

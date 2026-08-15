@@ -671,7 +671,7 @@ static int cmd_verify(disc *d)
     unsigned long long lights_bad = 0;
     unsigned long long areas_total = 0;
     unsigned long long links_total = 0;
-    unsigned long long links_bad = 0;
+    unsigned long long links_bad = 0, links_far = 0, links_skew = 0;
     unsigned long long names_total = 0;
     unsigned long long convex_ok = 0;
     unsigned long long convex_bad = 0;
@@ -908,9 +908,26 @@ static int cmd_verify(disc *d)
                                 u32 nl = q2_area_link_count(&ag, a), li2;
                                 for (li2 = 0; li2 < nl; li2++) {
                                     q2_area_link lk;
-                                    if (q2_area_get_link(&ag, a, li2, &lk))
+                                    if (q2_area_get_link(&ag, a, li2, &lk)) {
+                                        s32 m2;
+
                                         links_total++;
-                                    else
+                                        /*
+                                         * The two facts that DECODE this record
+                                         * (area.h): the neighbour must be a real
+                                         * area, and the plane's normal must be a
+                                         * 1.3.12 unit. Both hold on every link on
+                                         * the disc, and either failing means the
+                                         * two-array reading is wrong.
+                                         */
+                                        if (lk.neighbour >= ag.area_count)
+                                            links_far++;
+                                        m2 = (s32)lk.normal[0] * lk.normal[0] +
+                                             (s32)lk.normal[1] * lk.normal[1] +
+                                             (s32)lk.normal[2] * lk.normal[2];
+                                        if (m2 < 4014*4014 || m2 > 4178*4178)
+                                            links_skew++;
+                                    } else
                                         links_bad++;
                                 }
                             }
@@ -1018,8 +1035,9 @@ static int cmd_verify(disc *d)
     printf("  coll planes: %llu, of which %llu are unit normals (%.2f%%)\n",
            planes_total, normals_unit,
            planes_total ? 100.0 * (double)normals_unit / (double)planes_total : 0.0);
-    printf("  areas      : %llu with %llu links (%llu unreadable)\n",
-           areas_total, links_total, links_bad);
+    printf("  areas      : %llu with %llu links (%llu unreadable);"
+           " %llu name a missing area, %llu carry a non-unit normal\n",
+           areas_total, links_total, links_bad, links_far, links_skew);
     printf("  map names  : %llu\n", names_total);
     printf("  convexity  : %llu/%llu planes consistent (%.3f%%), %llu violations\n",
            convex_ok, convex_ok + convex_bad,

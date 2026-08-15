@@ -6,20 +6,24 @@
 every unit boundary and its mission screen, and ends on `OUTRO1P.STX` playing all 1,559 of its frames (#121).
 Every conformance command the harness carries passes over the whole disc, and 28 of 28 tests pass.
 
-**One question remains open.** It is a field with no located reader, and the port does the thing it would
-have explained without it. The other three that stood here have since fallen — #6's fixup encoding and
-#28's three clauses were solved in the code and never marked, and #65 fell to noticing that the address it
-was hunting a caller for is a LABEL rather than a function.
+**No questions remain open.** The four that stood here have all fallen: #6's fixup encoding and #28's three
+clauses were solved in the code and never marked; #65 fell to noticing that the address it was hunting a
+caller for is a LABEL rather than a function; and #8 fell to noticing that its "9-byte record" is two
+arrays.
 
-| | what is unread | and yet |
-|---|---|---|
-| #6 | the `Rel` fixup encoding's remaining cases | every module on the disc relocates, binds and runs |
-| #8 | the `AreaConx` 9-byte link payload | collision, line of sight and streaming run off `PrimaryColl` |
-| #28 | `Q2Level` `+0x1C`, the `runtime[8]` writers, `music_playlist` | the music plays the map's own seven-track list |
-| #65 | *resolved* — block A's third field, zero on all 1,723 models | ~~models draw, backface-rejected~~ |
+**The last two are the same mistake, and it is the one worth carrying out of this project.** Both stood on
+a premise nobody tested — *this address is a function*, *this record is an array of structs* — and in both,
+every search that followed was sound, exhaustive, and answering the wrong question. A negative result about
+a wrong premise is indistinguishable from a discovery. What broke each was asking what would have to be
+TRUE for the premise to hold, and testing that instead: an entry point has callers, and an adjacency graph
+is symmetric. The second gave 100% against 25.6% on the first try.
 
-#8's best candidate is measured rather than guessed, with the discriminator stated (graph symmetry) and the
-result — 25.6% — honest about not being enough.
+| | how it fell |
+|---|---|
+| #6 | the low two bits of a fixup are a TYPE TAG, not alignment — which is why only 31% looked 4-aligned |
+| #8 | the link record is two arrays, not nine interleaved bytes; the neighbour graph is 100% symmetric and every normal is a 1.3.12 unit |
+| #28 | `+0x1C` is a per-level hook every map fills with the same `jr ra` stub; the playlist is walked by a cursor, so nothing loads `+0x22` |
+| #65 | the mask is block A's third field — the one recorded as "always 0" — and it is zero on all 1,723 models, so the escape never fires |
 
 **A lesson from #65 worth carrying to #8.** Three separate searches for a caller of `0x800B2410` came back
 empty and were recorded as a finding twice. The address was never a function: it is a label inside
@@ -747,41 +751,43 @@ The residues of the resolved blockers keep their parents' numbers.
         stream INDEX, which is a disc-derived handle where a raw byte offset is not. The renderer takes one;
         stream 0 is what a single-stream chunk holds. What remains unknown is only which index a given
         viewport picks, not how to reach any of them.
-- [ ] **8. `AreaConx` 9-byte link payload — STILL OPEN, with two measurements added and one candidate
-      strengthened.** Re-derived from the disc: 5,223 areas, 1,725 link records, **3,494 links**, matching
-      the counts this entry was written against, so the walk below is the same one.
+- [x] **8. `AreaConx` — SOLVED. It was never a 9-byte record, and the premise is what held it for three
+      passes.**
 
-      **Byte 0 is the neighbour-index candidate, not byte +3.** Tested by graph SYMMETRY, which is the
-      property an adjacency list should have and which no byte histogram can fake: for each of the nine
-      positions, take the value as an area index and count the edges `(a,b)` whose reverse `(b,a)` also
-      appears.
+      The payload was read as `n` interleaved 9-byte structs, and everything that followed from that is
+      true: no byte offset gives a 1.3.12 unit normal in more than 39% of links, and the byte histograms
+      show `0x10`/`0xF0` clustering that looks like halfwords sliced at the wrong parity. The record is two
+      ARRAYS:
 
-          byte 0  in range 3388/3494 (97.0%)  symmetric edges 810
-          byte 1                90.5%                         568
-          byte 2                99.1%                          67
-          byte 3                98.3%                          29
-          bytes 4-8            88..93%                        3..9
+          u8   num_links
+          u8   neighbour[num_links]              the adjacent area
+          u8   pad                               only when (1 + num_links) is odd
+          struct { s16 dist; s16 n[3]; }[num_links]
 
-      Byte 0 beats every other position by more than an order of magnitude on the measure that matters,
-      and masking it (`& 0x7F`, `& 0x3F`) does not improve it. But 810 of 3,170 edges is **25.6%**, so it
-      is not a clean symmetric adjacency either — a portal graph need not be symmetric, and this one is
-      not enough to call it.
+      and that IS the size identity this entry was written against: `1 + n + pad + 8n` is
+      `9n + 2 - (n & 1)`, which holds on all 1,675 interior records. The formula was describing the layout
+      the whole time.
 
-      **The vector at +3 is BIMODAL rather than 39% right.** Reading three unaligned `s16` at each offset
-      and binning the magnitude in units of 512, offset 3 is the only one that clusters:
+      **What broke the premise is a test the interleaved reading cannot pass.** An adjacency graph must be
+      SYMMETRIC. Taking the first `n` bytes as neighbours gives **3,494 of 3,494 edges with their reverse
+      present — 100%** — against 25.6% for the best interleaved candidate. That pins the array boundary,
+      and with it pinned the rest falls out at once: **3,494 of 3,494 normals are unit length in 1.3.12**,
+      3,150 of them axis-aligned with a component of exactly 4096, and not one zero or otherwise. `dist` is
+      non-negative, a multiple of 256, and runs 0..9984 — the plane's distance.
 
-          offset 3:  |v| < 512 : 1816     |v| in 4096..4607 : 1276     everything else : 402
-          offsets 0-2: no such split — the mass is spread across every bin
+      So a link is a PORTAL PLANE to a named area, which is what an area connection graph needs and what
+      the chunk's name says it is.
 
-      So at +3 a link carries either something near unit length or something near zero, and almost nothing
-      in between — which is the shape of an optional normal. It is still not a clean read: 578 links are
-      exactly zero, 1,381 are unit within 3%, and 1,535 are small non-zero values like `(0,240,0)` and
-      `(18,0,0)` that are neither. Recorded as the better description it is, not as an answer.
+      Decoded in `q2_area_get_link`, and `q2psx-inspect verify` now checks the two facts that identify the
+      layout on every link on the disc: **0 name a missing area, 0 carry a non-unit normal.** Either
+      failing would mean the two-array reading is wrong.
 
-      Original text follows. No fixed offset yields a 1.3.12 unit normal in more than 39 % of
-      3,494 links. Histograms suggest **unaligned** `int16_t` values that no single struct layout can express
-      (links start at `record + 1 + 9*L`, so parity alternates). Byte `+3` is the best neighbour-index
-      candidate. Blocks portal-based visibility.
+      *The same mistake as #65, three entries apart.* Both stood on a premise that was never tested — "this
+      address is a function", "this record is an array of structs" — and in both the searches that followed
+      were sound, exhaustive, and answering the wrong question. A negative result about a wrong premise is
+      indistinguishable from a discovery, and the only defence is to ask what would have to be true for the
+      premise itself to hold.
+
 - [x] **9. `SpaceLights` per-node partition. — SOLVED, and the partition was never in this chunk.**
       Two passes tried to split the array across the zone's **scene** nodes and got 0.68…7.12 entries per
       node with no rule that fit. The key is a **collision** node, and specifically a `SecondaryCol` one:

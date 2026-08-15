@@ -17,22 +17,37 @@
  * With the correct base, every offset is in bounds on all 115 files, the first
  * non-zero offset equals 2 + 2*num_areas, and 1,725 records recover cleanly.
  *
- * A link record is a count byte followed by that many 9-byte payloads:
+ * A link record is NOT an array of 9-byte structs. It is a count, a byte array
+ * of NEIGHBOURS, and then a halfword array of PLANES:
  *
  *     u8   num_links
- *     u8   payload[num_links][9]
+ *     u8   neighbour[num_links]        the adjacent area
+ *     u8   pad                         only when (1 + num_links) is odd
+ *     struct { s16 dist; s16 n[3]; }   plane[num_links]
  *
- * and the record size satisfies 9*n + 2 - (n & 1) exactly on all 1,675 interior
- * records. The final record in a chunk cannot be checked that way because the
- * chunk is padded to 4 bytes. `num_links` is observed 1..7 and 9 — never 8.
+ * and that layout is exactly the record size the corpus shows:
+ * `1 + n + pad + 8n` is `9n + 2 - (n & 1)`, which holds on all 1,675 interior
+ * records. `num_links` is observed 1..7 and 9 — never 8.
  *
- * The 9-byte payload is UNDECODED. No fixed byte offset yields a 1.3.12 unit
- * normal in more than 39% of 3,494 links. Byte histograms show 0x10/0xF0
- * clustering consistent with unaligned s16 values of 0x1000/0xF000, but links
- * begin at record + 1 + 9*L so their alignment alternates and no single struct
- * can express it. Byte +3 is zero in 2,132 of 3,494 links and is the best
- * neighbour-index candidate. The payload is therefore exposed as raw bytes
- * rather than a struct that would encode a guess.
+ * ---------------------------------------------------------------------------
+ * Why this took three passes, and it was never the data
+ * ---------------------------------------------------------------------------
+ * The payload was read as "n interleaved 9-byte records" and every attempt to
+ * find a normal inside one failed — no byte offset gave a 1.3.12 unit vector in
+ * more than 39% of links, and byte histograms showed 0x10/0xF0 clustering that
+ * looked like s16 values sliced at the wrong parity. All of that is true and
+ * all of it followed from the premise. The arrays are SEPARATE, so a "byte +3"
+ * belongs to a different link's field depending on n.
+ *
+ * The premise fell to a test the interleaved reading could not pass: an
+ * adjacency graph must be SYMMETRIC. Reading the first n bytes as neighbours
+ * gives **3,494 of 3,494 edges with their reverse present — 100%** — against
+ * 25.6% for the best interleaved candidate. With that pinning the array
+ * boundary, the plane array falls out: **3,494 of 3,494 normals are unit length
+ * in 1.3.12**, 3,150 of them axis-aligned with a component of exactly 4096, and
+ * not one is zero or anything else.
+ *
+ * `dist` is non-negative, a multiple of 256, and runs 0..9984.
  *
  * ---------------------------------------------------------------------------
  * MapNames — a name/id table
@@ -51,10 +66,13 @@
 #include "level.h"
 #include "q2psx.h"
 
+/* Bytes per link across the two arrays: one neighbour and four halfwords. */
 #define Q2_AREA_LINK_SIZE 9
 
 typedef struct q2_area_link {
-    const u8 *payload;    /* 9 undecoded bytes */
+    u8  neighbour;        /* the area on the other side                      */
+    s16 dist;             /* multiples of 256, 0..9984                       */
+    s16 normal[3];        /* 1.3.12, unit length on 3494/3494                */
 } q2_area_link;
 
 typedef struct q2_area_graph {
