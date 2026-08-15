@@ -138,9 +138,30 @@ u32 q2_briefing_build_ot(const q2_briefing *b, const q2_hud_font *font,
      * two land in ordering-table buckets that put the frame behind the glyphs
      * either way. Here the buckets say it, so the call order is free.
      */
+    /*
+     * THE PANEL'S TWO NUMBERS ARE DEPTHS HERE AND BUCKETS THERE, and that is
+     * why the briefing drew as unreadable text over bare geometry for as long
+     * as it existed.
+     *
+     * `q2_hud_print` takes a DEPTH: `psx_ot_add` inverts it, so depth 0 is the
+     * front. `q2_panel_build_ot` takes an ABSOLUTE BUCKET through
+     * `psx_ot_add_bucket` — gpu.h's own "escape", for packets whose place is
+     * structural rather than depth-derived — and `psx_ot_walk` draws bucket 0
+     * FIRST. So the caller's `2, 1, 0`, which reads as three depths going from
+     * back to front, put the panel at the two furthest-back buckets in the
+     * whole table and the text at the front: the world was drawn on top of the
+     * panel and under the glyphs.
+     *
+     * The two numbers are depths at this interface, because the third one is
+     * and a caller cannot reasonably be asked to mix the two spaces in one
+     * call. Mapping them here is what makes `2, 1, 0` mean what it looks like.
+     *
+     * It went unnoticed because this is the panel's ONLY caller in the port.
+     */
     if (menu_font)
         n += q2_panel_build_ot(menu_font, &b->box, ot,
-                               body_bucket, frame_bucket, NULL);
+                               psx_ot_depth_bucket(ot, body_bucket),
+                               psx_ot_depth_bucket(ot, frame_bucket), NULL);
 
     if (q2_briefing_compose(b, text, sizeof(text)) == 0)
         return n;

@@ -5772,3 +5772,24 @@ projection is right the weapon comes with it, and the two remaining entries on t
       window installed, since `q2_panel_body_ot` breaks out of its loop the moment it returns NULL and
       would then emit silently nothing. `q2_briefing_build_ot` is the only caller of the panel anywhere
       in the port, which is why this has never been noticed.
+
+      **FOUND, and it was two bugs stacked, neither of which any test could see.**
+
+      *One.* `psx_ot_walk` draws **bucket 0 FIRST** — far geometry before near — and `psx_ot_add` INVERTS
+      a depth on the way in, so depth 0 is the front. `q2_hud_print` takes a depth; `q2_panel_build_ot`
+      takes an absolute bucket. The caller's `2, 1, 0` reads as three depths back-to-front and was two of
+      them, so the panel went to the two furthest-back buckets in the whole table and the world was drawn
+      on top of it. `q2_briefing_build_ot` now maps its two panel arguments through
+      `psx_ot_depth_bucket`, which is what makes `2, 1, 0` mean what it looks like.
+
+      *Two, underneath it.* With that fixed the FRAME appeared and the body still did not.
+      `q2_panel_body_ot` wrote `xy[0] = position, xy[1] = size` — which is the hardware TILE packet's own
+      shape — while `raster_rect` takes the rectangle from `xy[0]` and `xy[2]`. `xy[2]` was never
+      written, so the darkening tile rendered as a small box at the top-left corner of the screen. Every
+      other rectangle in the port already writes corners: the HUD's sprites, the damage flash, the
+      viewport tiles. This was the only one that did not, and it is the only one nothing else called.
+
+      **`tests/test_panel.c` asserted the defect.** It required `xy[1] == size`, because it was written
+      from the emitter rather than from the consumer — so emitter and test agreed with each other and
+      neither agreed with the rasteriser, and the suite stayed green while the panel drew nothing. The
+      assertion is now the rasteriser's, which is the only party whose opinion shows on screen.

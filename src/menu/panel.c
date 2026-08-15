@@ -158,8 +158,21 @@ u32 q2_panel_body_ot(const q2_panel_rect *r, psx_ot *ot, u32 bucket)
         p->tpage = psx_make_tpage(0, 0, PSX_BLEND_HALF, PSX_TEX_4BIT);
         p->clut  = 0;
 
-        p->xy[0].x = r->x;          p->xy[0].y = r->y;
-        p->xy[1].x = (s16)r->w;     p->xy[1].y = (s16)r->h;
+        /*
+         * OPPOSITE CORNERS, not position-and-size.
+         *
+         * A hardware TILE packet carries {xy, wh}, and this used to write that
+         * — which is faithful to the packet and wrong for this port, because
+         * `raster_rect` takes the rectangle from `xy[0]` and `xy[2]`. `xy[2]`
+         * was never written, so the darkening tile came out as a small box in
+         * the corner of the screen at (0,0)-(x,y) and the panel had no body at
+         * all. Every other rectangle in the port — the HUD's sprites
+         * (`hud.c`), the damage flash and the viewport tiles (`screen.c`) —
+         * already writes corners; this was the one that did not, and it is the
+         * one nothing else called.
+         */
+        p->xy[0].x = r->x;                  p->xy[0].y = r->y;
+        p->xy[2].x = (s16)(r->x + r->w);    p->xy[2].y = (s16)(r->y + r->h);
 
         p->rgb[0].r = Q2_PANEL_BODY_SHADE;
         p->rgb[0].g = Q2_PANEL_BODY_SHADE;

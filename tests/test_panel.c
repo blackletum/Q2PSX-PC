@@ -189,8 +189,21 @@ static void test_body_is_black_and_doubled(void)
          * moment anything else translucent overlapped it. */
         CHECK(p[i]->rgb[0].r == 0 && p[i]->rgb[0].g == 0 && p[i]->rgb[0].b == 0,
               "tile %u is black", i);
+        /*
+         * OPPOSITE CORNERS in xy[0] and xy[2] — which is what `raster_rect`
+         * reads, and therefore what "covers the rectangle" has to mean.
+         *
+         * This assertion used to require `xy[0] = position, xy[1] = size`,
+         * which is the hardware TILE packet's own shape and which the emitter
+         * duly produced. Both were self-consistent and the panel drew nothing:
+         * the rasteriser took `xy[2]`, never written, and rendered a box at
+         * (0,0) instead. A test written from the emitter rather than from the
+         * consumer pinned the defect in place — worth stating, because it is
+         * the reason this survived a passing suite.
+         */
         CHECK(p[i]->xy[0].x == r.x && p[i]->xy[0].y == r.y &&
-              p[i]->xy[1].x == r.w && p[i]->xy[1].y == r.h,
+              p[i]->xy[2].x == (s16)(r.x + r.w) &&
+              p[i]->xy[2].y == (s16)(r.y + r.h),
               "tile %u covers the rectangle exactly", i);
     }
     CHECK(n >= 2 && p[0]->xy[0].x == p[1]->xy[0].x,
