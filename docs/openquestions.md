@@ -2579,7 +2579,7 @@ not think, and it does not walk.
       had to withdraw twice already. It is recorded as an observation. The one case that fits neither ratio
       is the Soldier's 215-247.
 
-- [ ] ~~51. **The AI frame → model clip mapping drifts across a long move.**~~ `Q2_CRE_TICKS_PER_FRAME` is 3 and
+- [x] ~~51. **The AI frame → model clip mapping drifts across a long move.**~~ `Q2_CRE_TICKS_PER_FRAME` is 3 and
       it lands the START of the Soldier's `Death1` correctly: posed at AI frames 310, 314, 318 and 322 the
       model is a body collapsing to the floor, progressively. But the move runs 308-342, and at 330 and 336
       the same creature is standing upright again — the timeline has walked into the next clip well before
@@ -2636,7 +2636,7 @@ frame — sixty-odd identical requests for one match that ended once.
 
   *As first written, before it was chased:*
 
-- [ ] ~~52. **No HUD is drawn on any arena map.**~~ Found by looking at a deathmatch instead of reasoning about
+- [x] ~~52. **No HUD is drawn on any arena map.**~~ Found by looking at a deathmatch instead of reasoning about
       one. On BASE0 the overlay draws health, armour and ammo; on MATRIX5 it draws nothing, and it is the MAP
       and not the session — the same map without `--dm` is equally blank. The gate is not the cause: at frame
       60 on both maps `hud_ready 1, font 1, menu 0, mission 0, mcard 0`, so `q2_hud_build_ot` runs and emits
@@ -2727,7 +2727,7 @@ where it does it rather than in a note here.
 
   *As first written:*
 
-- [ ] ~~53. **Four simulated players — the client half is done, and `sim.c` now holds four players instead of
+- [x] ~~53. **Four simulated players — the client half is done, and `sim.c` now holds four players instead of
       one.**~~ The scaffolding is in: `q2_sim.player` is `q2_player[Q2_SIM_MAX_PLAYERS]` with a `cur_player`
       index, and every one of the 52 references in `sim.c`, 15 in `simcombat.c` and the rest across the tests
       and tools goes through it. `cur_player` stays 0 and nothing sets it yet, so this is a change of shape
@@ -2754,7 +2754,7 @@ where it does it rather than in a note here.
 
   *As first written:*
 
-- [ ] ~~53. **Four simulated players — done in the client, still owed in `sim.c`.**~~ `q2_sim` is now an array
+- [x] ~~53. **Four simulated players — done in the client, still owed in `sim.c`.**~~ `q2_sim` is now an array
       indexed by player, and players 1..3 each get their own instance: spawned at their own MultiSpawn,
       advanced every frame on their own `q2_pad_state`, with each viewport following its own player's eye and
       view angles rather than a camera parked at a spawn point. Measured on MATRIX5 with four players after
@@ -2772,7 +2772,7 @@ where it does it rather than in a note here.
 
   *As first written:*
 
-- [ ] ~~53. **Four simulated players.** The remaining piece is `q2_sim` being an array rather than a member:~~
+- [x] ~~53. **Four simulated players.** The remaining piece is `q2_sim` being an array rather than a member:~~
       four players means four movement states, four inventories, four view weapons and four sets of pad
       input, and every consumer in the client that says `c->sim` today means `c->sim[p]`. Nothing found so far
       says the sim cannot be instanced — `q2_sim_init` already takes the zone as an argument, so several can
@@ -2952,7 +2952,7 @@ shots before and after.
 
   *As first written:*
 
-- [ ] ~~55. **Which of a callback's several moves the module picks.**~~ The module's attack function branches —
+- [x] ~~55. **Which of a callback's several moves the module picks.**~~ The module's attack function branches —
       on range, on a roll, or on state — and the decoder records only WHICH moves a callback installs, not
       the branch that chooses between them. Four attack moves for the Tank Commander, two for the Gunner,
       two for the Infantry. Until that branch is read, a generic creature will always play one of them, and
@@ -2999,7 +2999,7 @@ shots before and after.
 
   *As first written:*
 
-- [ ] ~~56. **Some callbacks have no move attributed to them at all.**~~ The Arachner never moves on POWER1:
+- [x] ~~56. **Some callbacks have no move attributed to them at all.**~~ The Arachner never moves on POWER1:
       `run 0 / missing 2` — `set_via(m, 4)` is called and finds nothing, so there is no animation to play and
       `q2_M_MoveFrame` advances nothing. Its module has a run callback (or `m->run` would now be NULL) but no
       move records `via == 4`, which means it installs one indirectly — through another move's endfunc, which
@@ -3008,7 +3008,7 @@ shots before and after.
 
   *As first written:*
 
-- [ ] ~~54. **A decoded creature has still not been seen firing.**~~ Two real obstacles are gone — the think
+- [x] ~~54. **A decoded creature has still not been seen firing.**~~ Two real obstacles are gone — the think
       table was being wiped, and the phantom melee was absorbing every attack — and the fire routing is
       covered by unit tests, but no capture has yet produced a `fire_sent`. What the counters now say is where
       to look: on COMMAND the Tank Commander's attack move installs and the thinks that run carry import
@@ -3079,7 +3079,7 @@ So the attack move is installed three times and cut short before its sixth frame
 
   *As first written:*
 
-- [ ] ~~57. **What cuts the attack animation short — and it is NOT the AI verb, which was my guess.**~~
+- [x] ~~57. **What cuts the attack animation short — and it is NOT the AI verb, which was my guess.**~~
 
       The census now prints the `ai` byte per frame beside the think byte, run-length encoded, and the answer
       is that the port already has this right. Across the disc the verbs land exactly where they should:
@@ -3127,7 +3127,7 @@ So the attack move is installed three times and cut short before its sixth frame
 
   *As first written:*
 
-- [ ] ~~57. **What cuts the attack animation short.**~~ The generic run handler installs the run move whenever
+- [x] ~~57. **What cuts the attack animation short.**~~ The generic run handler installs the run move whenever
       `m->run` is called, and the counters show run installed 5 times against attack's 3 in the same capture.
       In the original a monster's attack move plays out because its frames carry an AI verb — the `ai` byte of
       `{u8 ai; s8 dist; u8 think}` — that keeps the AI in the attack rather than returning it to the chase.
@@ -3225,7 +3225,7 @@ which is `M_137_143`'s first frame. It still fires nothing, and the census says 
 
   *As first written:*
 
-- [ ] ~~58. **The Gunner's fire think is 2, and think 2 lives in a move nothing reaches.**~~ Its move
+- [x] ~~58. **The Gunner's fire think is 2, and think 2 lives in a move nothing reaches.**~~ Its move
       `144-151` is eight frames of think 2, and think 2 is the one carrying `call(+0x84)` — the hitscan. That
       move's `via` is **-1**: no callback installs it, so it is reached only through another move's endfunc.
       Presumably `M_137_143` or `M_108_128` ends into it. The endfunc chain is resolved at bind time
@@ -3533,7 +3533,7 @@ player-versus-player damage:
 
   *As first written:*
 
-- [ ] ~~59c. **And the measurement did not move.**~~ `closest^2` is 333434 before and after, byte-identical —
+- [x] ~~59c. **And the measurement did not move.**~~ `closest^2` is 333434 before and after, byte-identical —
       the THIRD time this session an unchanged number has meant "you are not measuring what you changed".
       The first cost two rounds on a creature count that belonged to a different creature; the second cost
       four on a scan counter that belonged to a different player. The pattern is now unmistakable and the
@@ -3552,7 +3552,7 @@ player-versus-player damage:
 
   *As first written:*
 
-- [ ] ~~59. **A staged encounter still produces no damage.**~~ Two players 339 units apart, facing each other by
+- [x] ~~59. **A staged encounter still produces no damage.**~~ Two players 339 units apart, facing each other by
       position, both holding fire, both with the level's weapon, each registered in the other's target list
       (`has 1 targets (0 creatures, 1 other players)`) — and both end 900 frames at 100 health. Everything
       upstream is measured: the target list is right, the actors have `radius` 286, the attribution rule is
@@ -4912,7 +4912,7 @@ nothing saying so.
       **Do not conclude the sounds are absent.** That was the previous answer here for many passes and it was
       wrong; see #60 for how the mistake was made and how it was caught.
 
-- [ ] 62. **The 3:1 length rule and the disc's own NAMES disagree about which clip a move plays.**
+- [x] 62. **The 3:1 length rule and the disc's own NAMES disagree about which clip a move plays.**
       An eighth angle on the Arachner: match its AI moves to block-D moves **by name** instead of by length.
       Both sets of names come off the disc — the AI's from the module's move-name table, the model's from
       block D — so if a creature's move is called `Melee`, the animation it should play is surely the one
@@ -5758,7 +5758,7 @@ projection is right the weapon comes with it, and the two remaining entries on t
       clock and a level change restarts that clock, so the first capture of the arrival briefing had
       `You have found a secret.` from the previous map still sitting over the new one's first frames.
 
-- [ ] 72. **The briefing's PANEL does not draw, and the buckets are not why.**
+- [x] 72. **The briefing's PANEL does not draw, and the buckets are not why.**
       `q2_briefing_build_ot` calls `q2_panel_build_ot` before printing, and the text appears while the
       panel behind it does not — so the briefing is unreadable green-on-orange over whatever wall the
       player arrived facing. It mattered little while the screen was on a debug key; it shows on every
