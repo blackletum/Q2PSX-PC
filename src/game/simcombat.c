@@ -920,6 +920,7 @@ u32 q2_sim_attach_breakables(q2_sim *sim, const q2_scene *scene,
     sim->breakable_count  = 0;
     sim->breakable_hits   = 0;
     sim->breakable_pieces = 0;
+    sim->breakable_fired  = 0;
     sim->breakable_scene  = scene;
 
     if (!scene || !sim->events_ready || !sim->userfuncs_ready)
@@ -937,7 +938,9 @@ u32 q2_sim_attach_breakables(q2_sim *sim, const q2_scene *scene,
             q2_scene_node node;
             q2_breakable *b;
             const u8 *p;
+            q2_uf_prim prim;
             u8  call_index;
+            u32 need;
             s16 slot;
             int k;
 
@@ -947,16 +950,18 @@ u32 q2_sim_attach_breakables(q2_sim *sim, const q2_scene *scene,
                 continue;
             if (!q2_events_get_call_index(&item, &call_index))
                 continue;
-            if (q2_userfuncs_prim(&sim->userfuncs, call_index) != Q2_UF_GLASS)
+            prim = q2_userfuncs_prim(&sim->userfuncs, call_index);
+            if (prim != Q2_UF_GLASS && prim != Q2_UF_SHOOTTHEN)
                 continue;
-            if (item.len < 16)
+            need = (prim == Q2_UF_GLASS) ? 16u : 8u;
+            if (item.len < need)
                 continue;
             if (sim->breakable_count >= Q2_SIM_MAX_BREAKABLES)
                 break;
 
             /* The same rebase the scripted call uses: four of the disc's ten
              * object slots read -1 in COMMON's copy (#66). */
-            p = q2_uf_operand_at(ops, item.payload - 2, 16);
+            p = q2_uf_operand_at(ops, item.payload - 2, need);
 
             slot = q2_rd_s16(p + 4);
             if (slot < 0 || !q2_scene_get_node(scene, (u32)slot, &node))
@@ -975,9 +980,22 @@ u32 q2_sim_attach_breakables(q2_sim *sim, const q2_scene *scene,
                 b->bmin[k] = node.bbox_min[k];
                 b->bmax[k] = node.bbox_max[k];
             }
-            b->health  = q2_rd_s16(p + 6);
-            b->count_a = q2_rd_u8(p + 10);
-            b->count_b = q2_rd_u8(p + 12);
+            b->health = q2_rd_s16(p + 6);
+            b->kind   = (prim == Q2_UF_GLASS) ? (u8)Q2_BREAKABLE_GLASS
+                                              : (u8)Q2_BREAKABLE_SHOOTTHEN;
+            if (prim == Q2_UF_GLASS) {
+                b->count_a = q2_rd_u8(p + 10);
+                b->count_b = q2_rd_u8(p + 12);
+            } else {
+                /*
+                 * SHOOTTHEN's constructor caches the record it is being built
+                 * in (gp+16936) in obj+0x40, and its exec hands that back to
+                 * the record dispatcher. Here the walk already knows which
+                 * record the item came out of, so the cache is the loop's own
+                 * variable.
+                 */
+                b->record_offset = rec.offset;
+            }
             sim->breakable_count++;
         }
     }
@@ -1079,6 +1097,27 @@ u32 q2_sim_breakable_shot(q2_sim *sim, const s32 from[3], const s32 to[3],
             return 0;
 
         sim->breakable_hits++;
+
+        /*
+         * SHOOTTHEN is the other primitive with a box, and it throws nothing:
+         * `0x8002E81C` subtracts the damage from the item's hit points and, at
+         * zero, frees the box and hands the record it was constructed in to the
+         * record dispatcher. Shoot the panel, and whatever the rest of that
+         * record does happens.
+         */
+        if (b->kind == Q2_BREAKABLE_SHOOTTHEN) {
+            if (damage == 0)
+                return 0;                    /* 0x8002E840: a script call */
+            b->health = (s16)(b->health - damage);
+            if (b->health > 0)
+                return 0;
+
+            b->broken = true;                /* the box is freed, not reused */
+            if (sim->events_ready &&
+                q2_event_rt_trigger(&sim->event_rt, b->record_offset))
+                sim->breakable_fired++;
+            return 0;
+        }
 
         /*
          * The hit burst runs on EVERY call — 0x8002A384 is before the branch

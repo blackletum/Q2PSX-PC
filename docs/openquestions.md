@@ -7415,3 +7415,24 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       guess, and bound zero panes on every map — `q2_coll_find_node` returns -1 for a point inside a pane,
       because the hull's nodes are EMPTY volumes. That failure is what sent this back to the disassembly,
       and the answer was two functions away.
+- [x] 118. **SHOOTTHEN is a shoot-to-activate switch, and with #117's route in hand it works.**
+      #66 declined to run it from a script and was right to: `0x8002E840` returns on a zero damage
+      argument, and a script CALL always passes zero. What it does with a NON-zero one is the whole
+      primitive:
+
+          if (item.len != 8)  return
+          if (damage == 0)    return               ; the scripted no-op #66 found
+          item[+6] -= damage                       ; hit points, in the ITEM
+          if (item[+6] > 0)   return
+          0x80055750(obj+0x28)                     ; free the damageable box
+          obj+0x28 = 0
+          0x80027950(obj+0x40, 0, item)            ; RUN THE RECORD
+
+      `0x80027950` is the record execution dispatcher this project already knows, and `obj+0x40` is the
+      record the item's constructor was building in (cached from gp+16936 at `0x8002BD24`). So SHOOTTHEN
+      means: shoot this panel, and when it gives out, run the rest of whatever record it belongs to.
+
+      Four calls on the disc, two of which resolve their object slot without the rebase and both of which
+      now fire: `q2psx-inspect pmove <disc> BASE0` shoots node 271 for 100 and reports `1` record raised,
+      and WASTE4's node 143 the same. It is the same registry, sweep and router GLASS uses (#117) —
+      SHOOTTHEN simply answers with a record rather than with debris.

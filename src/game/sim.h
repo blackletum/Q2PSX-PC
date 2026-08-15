@@ -345,13 +345,31 @@ typedef struct q2_player_combat {
 /* ------------------------------------------------------------------------- */
 #define Q2_SIM_MAX_BREAKABLES 48   /* the console's object array is 48 */
 
+/*
+ * The two primitives that own a damageable box, and they do different things
+ * when it runs out of hit points:
+ *
+ *   GLASS      throws debris — a burst per hit and a shatter at the end.
+ *   SHOOTTHEN  RUNS ITS OWN RECORD. `0x8002E81C` frees the box and calls the
+ *              record dispatcher (0x80027950) with the offset its constructor
+ *              cached in obj+0x40, so the primitive is a shoot-to-activate
+ *              switch: shoot the panel, and whatever the rest of that record
+ *              does happens. Four calls on the disc.
+ */
+typedef enum q2_breakable_kind {
+    Q2_BREAKABLE_GLASS = 0,
+    Q2_BREAKABLE_SHOOTTHEN
+} q2_breakable_kind;
+
 typedef struct q2_breakable {
     s32 scene_node;
     s32 bmin[3];        /* the box the shot is tested against                */
     s32 bmax[3];
     s16 health;         /* item[+6], which the console mutates IN THE ITEM   */
-    u8  count_a;        /* item[+10]: pieces per hit, out of the hit point   */
-    u8  count_b;        /* item[+12]: pieces on shattering, across the box   */
+    u8  count_a;        /* GLASS item[+10]: pieces per hit, from the point   */
+    u8  count_b;        /* GLASS item[+12]: pieces on shattering, box-wide   */
+    u8  kind;           /* q2_breakable_kind                                 */
+    u32 record_offset;  /* SHOOTTHEN: the record to run — obj+0x40           */
     bool broken;
 } q2_breakable;
 
@@ -460,6 +478,7 @@ typedef struct q2_sim {
     u32          breakable_count;
     u32          breakable_hits;   /* shots that reached one                 */
     u32          breakable_pieces; /* and the debris they threw              */
+    u32          breakable_fired;  /* SHOOTTHEN records raised by a shot     */
     /* The scene the panes' nodes belong to, kept so the hitscan path can throw
      * their debris without every shot carrying a scene pointer. */
     const struct q2_scene *breakable_scene;

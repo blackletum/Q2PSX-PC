@@ -684,6 +684,93 @@ static void report_hazards(const disc *d, const char *map, int zone_index)
     q2_world_free_zone(&zone);
 }
 
+/* ------------------------------------------------------------------------- */
+/* Shooting the breakables                                                    */
+/* ------------------------------------------------------------------------- */
+/*
+ * The registry and the sweep, exercised: each box is registered, a segment is
+ * fired straight through its middle, and what came back is reported.
+ *
+ * GLASS answers in DEBRIS and SHOOTTHEN answers by RAISING ITS RECORD, and the
+ * two numbers are the two halves of `0x8002EF1C`'s job. Firing a segment rather
+ * than driving a weapon is deliberate: where a pane sits relative to a floor
+ * the player can stand on is a property of the map, and this is a check on the
+ * route, not on the level design.
+ *
+ * The operands are read IN PLACE — no zone rebase — so a map whose slot the
+ * engine has already consumed reports fewer boxes here than in the client. The
+ * client logs its own count at load and applies the rebase.
+ */
+static void report_breakables(const disc *d, const char *map, int zone_index)
+{
+    q2_world_zone zone;
+    q2_sim sim;
+    q2_buf buf;
+    q2_common_file cf;
+    char path[256];
+    u32 i, n;
+
+    if (q2_world_load_zone(&zone, d, map, zone_index) != Q2_OK)
+        return;
+
+    snprintf(path, sizeof(path), "Q2DATA/LEVELS/%s/COMMON.DAT", map);
+    if (disc_read_file(d, path, &buf) != Q2_OK) {
+        q2_world_free_zone(&zone);
+        return;
+    }
+    if (q2_common_open(&cf, &buf) != Q2_OK) {
+        q2_buf_free(&buf);
+        q2_world_free_zone(&zone);
+        return;
+    }
+
+    q2_sim_init(&sim, &zone, 50);
+    q2_sim_attach_gameplay(&sim, &cf);
+    n = q2_sim_attach_breakables(&sim, &zone.scene, NULL);
+
+    if (n) {
+        printf("\n\n%s's breakables, each shot through the middle of its box\n\n",
+               map);
+        printf("  %-3s %-10s %5s %5s %7s %8s   %s\n",
+               "#", "kind", "node", "hp", "pieces", "records", "box");
+        printf("  (hp is what the shot LEFT; pieces read zero here because"
+               " this harness attaches no\n   effect tables — the client"
+               " reports them, 11 on LAB's second pane)\n");
+    }
+
+    for (i = 0; i < n; i++) {
+        const q2_breakable *b = &sim.breakable[i];
+        s32 from[3], to[3];
+        u32 pieces, before = sim.breakable_fired;
+        int k;
+
+        /* Straight through the box on its widest axis, starting well outside
+         * it so the segment genuinely crosses. */
+        for (k = 0; k < 3; k++) {
+            s32 mid = (b->bmin[k] + b->bmax[k]) / 2;
+
+            from[k] = mid;
+            to[k]   = mid;
+        }
+        from[0] = b->bmin[0] - 4096;
+        to[0]   = b->bmax[0] + 4096;
+
+        pieces = q2_sim_breakable_shot(&sim, from, to, 100);
+
+        printf("  %-3u %-10s %5d %5d %7u %8u   (%d,%d,%d)-(%d,%d,%d)\n", i,
+               b->kind == Q2_BREAKABLE_SHOOTTHEN ? "SHOOTTHEN" : "GLASS",
+               b->scene_node, b->health, pieces,
+               sim.breakable_fired - before,
+               b->bmin[0], b->bmin[1], b->bmin[2],
+               b->bmax[0], b->bmax[1], b->bmax[2]);
+    }
+
+    q2_sim_free(&sim);
+    q2_common_close(&cf);
+    q2_buf_free(&buf);
+    q2_world_free_zone(&zone);
+}
+
 static void report_walk(const disc *d, const char *map, int zone_index)
 {
     q2_world_zone zone;
@@ -981,6 +1068,7 @@ int cmd_pmove(const disc *d, const char *map, int zone_index)
     report_env(d, map);
     if (map) {
         report_hazards(d, map, zone_index);
+        report_breakables(d, map, zone_index);
         report_walk(d, map, zone_index);
     }
 

@@ -2827,9 +2827,11 @@ static bool client_load_zone(client *c, const char *map, int index)
                     for (bi = 0; bi < n; bi++) {
                         const q2_breakable *b = &c->sim[0].breakable[bi];
 
-                        Q2_INFO("breakable %u: node %d, %d hp, %u+%u pieces,"
-                                " box (%d,%d,%d)-(%d,%d,%d)",
-                                bi, b->scene_node, b->health,
+                        Q2_INFO("breakable %u: %s node %d, %d hp, %u+%u"
+                                " pieces, box (%d,%d,%d)-(%d,%d,%d)",
+                                bi, b->kind == Q2_BREAKABLE_SHOOTTHEN
+                                        ? "SHOOTTHEN" : "GLASS",
+                                b->scene_node, b->health,
                                 b->count_a, b->count_b,
                                 b->bmin[0], b->bmin[1], b->bmin[2],
                                 b->bmax[0], b->bmax[1], b->bmax[2]);
@@ -5098,10 +5100,10 @@ static void client_write_shot(client *c, bool numbered)
                 "%u had no such name in block D",
                 c->pose_held, c->pose_name_absent);
         Q2_INFO("  breakable %u GLASS calls broke something, %u pieces thrown;"
-                " %u panes registered, %u SHOT, %u pieces from shots",
+                " %u boxes registered, %u SHOT, %u pieces, %u SHOOTTHEN records raised",
                 c->glass_calls, c->glass_pieces,
                 c->sim[0].breakable_count, c->sim[0].breakable_hits,
-                c->sim[0].breakable_pieces);
+                c->sim[0].breakable_pieces, c->sim[0].breakable_fired);
         Q2_INFO("  script    %u strings, %u sounds, %u gated by ONKEYDO, "
                 "%u nodes hidden, %u summoned, %u teleports, %u timers, %u resumed",
                 c->script_strings, c->script_sounds, c->script_gated,
