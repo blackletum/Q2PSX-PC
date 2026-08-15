@@ -6717,3 +6717,39 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       A module registers more sounds than any bank carries. The console's loader returns a null handle for
       those and playing one does nothing, so the silence is retail behaviour and matching it is correct.
       Recorded because it is exactly the shape of a gap and is not one.
+- [x] 99. **The seven unnamed moves cannot be resolved by position, and the reason closes the question
+      rather than leaving it open.** #97 left `POWER1 856 by name, 0 missed, 144 unnamed` and the unnamed
+      remainder looked like the next thing to chase. It is not chaseable, and measuring why is the answer.
+
+      Disc-wide there are **exactly seven unnamed moves and exactly one per creature**:
+
+          Soldier 97-98   Tankcomm 30-33   Insane 0-39   Arachner 25-33
+          Berserk 36-41   Gunner 94-101    Infantry 74-85
+
+      A move is named by a 20-byte `{char[16], u16 first, u16 last}` record matched on frame range, so an
+      unnamed move is one whose range the module's own table has no record for. One per module is a
+      pattern rather than seven accidents, but it does not make the name recoverable.
+
+      **The idea worth testing was position.** Block D's records tile a model's timeline contiguously
+      (`test_moves_tile_without_gaps`), and the AI ranges tile too — so if the two orders agreed, an
+      unnamed move's record would be determined by its named neighbours' and nothing would need guessing.
+
+      They do not agree, and not marginally. Crossing the Soldier's 27 named moves against BASE1 model 15's
+      block D, in AI-frame order:
+
+          ai    0  Run            block-D  2538
+          ai    1  Fire 1 Ready   block-D  2292
+          ai   45  Attack4        block-D   498
+          ai   50  Walk           block-D  1950
+          ai  308  Death1         block-D     0
+          ai  465  Death5         block-D   852
+
+      `Run` is the first move the AI has and the *last* stretch of the model's timeline; `Death1` is late
+      in the AI's ordering and sits at block-D zero. **The two orderings are independent**, which is #63's
+      own conclusion — durations and extents are different quantities, authored separately — arriving in
+      one more place.
+
+      So there is nothing between the neighbours to interpolate, and matching a clip by LENGTH is the only
+      mechanism left for those seven. That is what `q2_model_anim_by_length` is for and what the code
+      already says it is for; what changes here is that it is now known to be needed for **one move per
+      creature and nothing else**, rather than being an open-ended fallback of unknown size.

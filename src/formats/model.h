@@ -491,6 +491,19 @@ bool q2_model_anim_at_held(const q2_model *m, u32 tick, q2_model_anim *out,
  * `skip` disambiguates lengths that repeat: the k-th move of a given length
  * takes the k-th clip of the matching length, in each list's own order.
  */
+/*
+ * Matching a clip by LENGTH — a substitute for something the disc never does,
+ * and now known to be needed for exactly one move per creature.
+ *
+ * A move is named by a record matched on frame range, and seven moves on the
+ * disc — one in each of the seven creature modules — have no such record. The
+ * obvious way to recover them was POSITION: block D tiles the timeline and the
+ * AI ranges tile too, so a move between two named ones would have a determined
+ * record. Measured, the two orderings are independent — the Soldier's `Run` is
+ * its first AI move and the LAST stretch of its model's timeline, while
+ * `Death1` is late in the AI's order and sits at block-D zero. There is nothing
+ * to interpolate. See openquestions #99.
+ */
 bool q2_model_anim_by_length(const q2_model *m, u32 frames, u32 skip,
                              q2_model_anim *out);
 
