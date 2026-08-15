@@ -6040,11 +6040,18 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       SECURITY's is never reached).
 
       **On JAIL4 all four calls ARE reached and all four read `-1 -1 -1 -1`**, through the #56 rebase and
-      not merely from COMMON's copy. That is the same shape as the 39 rotation calls #56 could not test:
-      the operand lives in a zone's Events chunk that the resident zone does not reach. So the wiring is
-      right and the data is not available under one zone — the fix is the rotators' other half, sweeping
-      the zones a map ships and taking the one whose chunk reaches the offset, which `zonescript` already
-      does for rotators and the client does not do for anything.
+      not merely from COMMON's copy.
+
+      **And it is not a resident-zone problem, which was the obvious guess.** #56's other half — the
+      engine holds one zone resident, so a call barren under zone 0 may be live under zone 3 — was tested
+      here and does not apply: JAIL4 under **all four** of its zones and BASE2 under all three give
+      `0 nodes hidden`. The operand is -1 in every buffer the map ships.
+
+      So the slots for these calls are genuinely empty on this disc, and OBJDRAWOFF's runtime object must
+      be getting its node from somewhere other than the item — which is the same shape as the `rest`
+      field and the mission counters: a field that is runtime state rather than authored data. The
+      mechanism is wired and will work the moment something puts a node in it; what is unread is who
+      does.
 
 - [x] 79. **CREBATCH: every scripted ambush in the game was already standing in the room.** #73 called
       this blocked on `LevelBin` and that was too quick. The question it turns on is what the calls NAME,
