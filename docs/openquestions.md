@@ -6190,3 +6190,36 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       because the same sweep fires the map's LOADMAP and the level ends four seconds before the deadline.
       The measurement above suppresses the transition. A player who walks into one volume rather than all
       of them does not have that problem.
+
+- [x] 84. **PLATFORM is read in full, and its slot is empty like the others — which is now a pattern, not
+      an accident.**
+
+      The target is the DISTANCE from the node's bounding-box CENTRE to the `origin` operand.
+      `0x8002CC98`..`0x8002CCE8` reads the node record's `+16/+28`, `+20/+32` and `+24/+36` — the two bbox
+      corners — halves each pair, subtracts it from the item's VEC3 at `+4`, squares and sums; then
+      `(sum >> 2)` goes through the integer square root at `0x80055CBC` and the result is doubled
+      (`sll s4, v0, 1`). `isqrt(n/4) * 2` is `isqrt(n)`: the halving keeps the intermediate in range and
+      is not part of the answer. The axis is Y — `and 0xFFFF3FFF` then `ori 0x4000` puts 1 in `obj+0x50`'s
+      two-bit axis field, the same write CAGELIFT1's constructor makes.
+
+      So a platform's travel is not authored as a length. It is the gap between where the node IS and
+      where the script says it ends up, which is why `origin` looked like it was "read by the constructor
+      only".
+
+      **And the one PLATFORM on the disc reads `slot -1 speed -4`.** The speed is real; the object slot
+      is empty — the third primitive to do that, after `OBJDRAWOFF` (#78) and `BUTTON` (#81).
+
+- [ ] 85. **What actually fills an object slot — the question all three of those roll up into.**
+      Six CALL primitives on this disc carry an OBJSLOT, and they split cleanly:
+
+          resolve      the rotators (41 of 95), PISTON, LIFT1 (some), CAGELIFT1
+          read -1      OBJDRAWOFF (4 of 4 on JAIL4, under ALL FOUR zones),
+                       BUTTON (JAIL4), PLATFORM (BIGGUN), some LIFT1
+
+      So it is not the format, not the two-buffer rebase (#56 is applied throughout), and not the
+      resident zone (#78 tested all of JAIL4's and BASE2's). It is per-item. The remaining candidates are
+      that these particular items are written by a `LevelBin` module this port does not run — the same
+      answer `population.h` reached for the group flags, which are also zero on disc for all 222 groups —
+      or that they are filled by a load-time pass keyed on something not yet read. The first is the one
+      the evidence points at, because it explains why the affected items cluster on particular maps
+      rather than on particular primitives.

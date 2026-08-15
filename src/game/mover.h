@@ -202,7 +202,8 @@ u32 q2_movers_trigger_item(q2_mover_set *set, u32 item_offset);
  */
 q2_result q2_movers_build_calls(q2_mover_set *out, const q2_events *events,
                                 const q2_userfuncs *uf,
-                                const q2_uf_operands *ops);
+                                const q2_uf_operands *ops,
+                                const q2_scene *scene);
 
 /*
  * Advance every mover by `dt` in the simulation's own units.

@@ -2564,7 +2564,7 @@ static bool client_load_zone(client *c, const char *map, int index)
                     /* And the lifts a CALL builds rather than an opcode: same
                      * set, same tick, same draw offset (mover.h). */
                     q2_movers_build_calls(&c->movers, &ev, &uf,
-                                          &c->ev_operands);
+                                          &c->ev_operands, &c->zone.scene);
 
                     c->movers_ready = true;
                     c->zone.movers  = &c->movers;

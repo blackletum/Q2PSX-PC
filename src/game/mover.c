@@ -202,9 +202,62 @@ static u32 info_len(q2_uf_prim prim)
     return i ? i->item_len : 0xFFFFu;
 }
 
+/*
+ * PLATFORM's target: the distance from the node's BOX CENTRE to the `origin`
+ * operand, which is where the script says the platform ends up.
+ *
+ * `0x8002CC98`..`0x8002CCE8` reads the node record's `+16/+28`, `+20/+32` and
+ * `+24/+36` — the two bbox corners — halves each pair, subtracts it from the
+ * item's VEC3 at `+4`, squares and sums; then `(sum >> 2)` goes through the
+ * integer square root at `0x80055CBC` and the result is doubled
+ * (`sll s4, v0, 1`). `isqrt(n/4) * 2` is `isqrt(n)`: the halving is to keep the
+ * intermediate in range, not part of the answer.
+ *
+ * The magnitude is what the console stores — `sh s4, 68(s0)` with s4 positive —
+ * so the DIRECTION is not in this operand and is transcribed literally rather
+ * than guessed at. A positive target moves +Y, which is down in this engine.
+ */
+static s16 platform_target(const q2_scene *scene, s16 node, const u8 *item)
+{
+    q2_scene_node n;
+    s64 sum = 0;
+    int k;
+
+    if (!scene || node < 0 || !q2_scene_get_node(scene, (u32)node, &n))
+        return 0;
+
+    for (k = 0; k < 3; k++) {
+        s64 centre = ((s64)n.bbox_min[k] + n.bbox_max[k]) / 2;
+        s64 d      = (s64)q2_rd_s32(item + 4 + 4 * k) - centre;
+
+        sum += d * d;
+    }
+
+    {
+        /* isqrt, by the same Newton step the console's is. */
+        s64 x = sum, r = 0, bit = (s64)1 << 62;
+
+        while (bit > x)
+            bit >>= 2;
+        while (bit) {
+            if (x >= r + bit) {
+                x -= r + bit;
+                r = (r >> 1) + bit;
+            } else {
+                r >>= 1;
+            }
+            bit >>= 2;
+        }
+        if (r > 32767)
+            r = 32767;
+        return (s16)r;
+    }
+}
+
 q2_result q2_movers_build_calls(q2_mover_set *out, const q2_events *events,
                                 const q2_userfuncs *uf,
-                                const q2_uf_operands *ops)
+                                const q2_uf_operands *ops,
+                                const q2_scene *scene)
 {
     q2_event_record rec;
 
@@ -234,7 +287,8 @@ q2_result q2_movers_build_calls(q2_mover_set *out, const q2_events *events,
             if (call.prim != Q2_UF_LIFT1 &&
                 call.prim != Q2_UF_CAGELIFT1 &&
                 call.prim != Q2_UF_BUTTON &&
-                call.prim != Q2_UF_PISTON)
+                call.prim != Q2_UF_PISTON &&
+                call.prim != Q2_UF_PLATFORM)
                 continue;
             if (item.len < info_len(call.prim))
                 continue;
@@ -291,6 +345,20 @@ q2_result q2_movers_build_calls(q2_mover_set *out, const q2_events *events,
                 m->wait_timer = (u16)(q2_rd_u16(p + 8) * Q2_MOVER_TIMEBASE);
                 break;
             }
+
+            case Q2_UF_PLATFORM:
+                /* Speed at +18 and the target computed from the node's own
+                 * position — see platform_target and the correction in
+                 * userfuncs.c. */
+                m->node[0]     = q2_rd_s16(p + 20);
+                m->part_count  = (m->node[0] >= 0) ? 1 : 0;
+                m->target      = platform_target(scene, m->node[0], p);
+                m->speed       = (s16)abs(q2_rd_s16(p + 18));
+                m->delay_timer = p[28];          /* UNSCALED, per the table */
+                m->wait_timer  = (p[29] == 0xFF)
+                                 ? Q2_MOVER_WAIT_NEVER
+                                 : (u16)(p[29] * Q2_MOVER_TIMEBASE);
+                break;
 
             case Q2_UF_PISTON:
                 /* A crusher. `time` is UNSCALED, which is the table's word for
