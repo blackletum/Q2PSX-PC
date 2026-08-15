@@ -1000,7 +1000,7 @@ The residues of the resolved blockers keep their parents' numbers.
       So there is no scripted music change: a level's seven tracks cycle for as long as the level lasts, and
       nothing in a boss room or a set piece can jump the cursor. That is a negative result about the game's
       design, not about the search.
-- [ ] **14. Does the engine loop XA tracks?** The duration field is converted to 50 Hz ticks and stored to
+- [x] **14. Does the engine loop XA tracks?** *(#104: no. It fades each in and out over 64 ticks and advances the playlist when the duration expires.)* The duration field is converted to 50 Hz ticks and stored to
       two globals with a 30.0 s fallback — that looks like a countdown to a restart or fade — but the
       consuming code was not disassembled. One entry is **1.0 s short** of its measured stream length, hinting
       the value is a deliberate restart point rather than a length.
@@ -6881,3 +6881,47 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       damage over 150, landing over 90" — was right, and it is what settles #41: a field with no decay is
       the aim, and the thing with three decay periods is the kick. Nothing in the port changes, which #41
       predicted; what changes is that the ambiguity is closed rather than carried.
+- [x] 104. **The engine does not loop an XA track — it FADES it and moves on, and the duration is the
+      moment it moves.** #14 asked the question and said exactly what was missing: *"the consuming code was
+      not disassembled."* It is four sites, and together they answer the question, explain the entry that
+      measures 1.0 s short, and turn up a fade nobody had found.
+
+      **The two globals, and what fills them.** `0x80071898` reads the music table's `tenths`;
+      `0x800718C0` multiplies it by five into `0x800B2710`; `0x800718C8` copies the same value to
+      `0x800B2708`. Tenths x 5 is tenths-to-50-Hz-ticks, and `0x80071878` supplies **300 tenths — 30.0
+      seconds — when an entry names no duration**, which is #14's "30.0 s fallback" exactly. **A is what
+      remains; B is the total.**
+
+      **What reads them.** `0x80071954` and `0x80071980`, in the same handful of instructions:
+
+          80071954  lw   a0, 0x800B2710     ; remaining
+          8007195C  slti v0, a0, 64         ; ...under 64 ticks?
+          80071964  mult v1, a0             ; volume * remaining
+          80071970  sra  v1, v0, 6          ;              / 64
+          80071980  lw   v0, 0x800B2708     ; total
+          80071988  subu a0, v0, a0         ; elapsed
+          8007198C  slti v0, a0, 64         ; ...under 64 ticks?
+
+      A track **fades in over its first 64 ticks and out over its last 64** — 1.28 seconds each way at
+      50 Hz. Nothing had found this; #39 spent a whole entry looking for a fade and this is not the one it
+      was looking for, but it is a real one.
+
+      **And what happens at zero.** `0x80071A58` tests the countdown, and when it has run out:
+
+          80071A68  lw    v0, 1536(gp)      ; the playlist cursor
+          80071A70  addiu v1, v0, 1         ; advanced
+          80071A78  lb    v0, 1(v0)         ; the next entry
+          80071A80  bne   v0, zero, ...     ; zero is the end of the list
+          80071A88  jal   0x80071B6C        ;   ...which restarts it
+
+      So the engine plays each track for its TABLE duration and then moves to the next, restarting the
+      playlist when it runs off the end. **It does not loop a track.** And the entry that is 1.0 s longer
+      than its table value is not an error, which is what #14 suspected: the last second is simply never
+      heard, because the fade-out has finished and the cursor has moved.
+
+      **Wired.** The port advanced only on END OF STREAM, so a track that outlasts its duration played to
+      its own end and the fade did not exist at all. It now runs the countdown on the console's 50 Hz,
+      advances on zero, keeps the end-of-stream path for a stream that runs out early, and applies both
+      ramps. The constants are named — `Q2_MUSIC_FALLBACK_TENTHS` 300 and `Q2_MUSIC_FADE_TICKS` 64 — rather
+      than left inside the expressions, because each is a separate reading of the disassembly and getting
+      either wrong is a silent difference in how the music behaves.

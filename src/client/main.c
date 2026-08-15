@@ -312,6 +312,11 @@ typedef struct client {
     u32               cre_sounds;
     u32               cre_sound_missing;
     u32               cre_sound_unnamed;  /* the play site resolved to no name */
+
+    /* The music countdown, in 50 Hz ticks — 0x800B2710 and 0x800B2708. */
+    s32               music_total;
+    s32               music_left;
+    double            music_clock;
     u32               ent_light_added;
     u32               script_lights;
     u32               pose_by_name;
@@ -3169,6 +3174,10 @@ static bool client_music_start(client *c, char letter, u8 channel)
  * player's own `bltz` at 0x80071778 takes a different arm entirely — so this
  * stops rather than pretending.
  */
+/* The console's own numbers: the fallback duration and the fade's width. */
+#define Q2_MUSIC_FALLBACK_TENTHS 300   /* 0x80071878, 30.0 s   */
+#define Q2_MUSIC_FADE_TICKS       64   /* 0x8007195C / 0x8007198C */
+
 static bool client_music_play_id(client *c, int id)
 {
     const q2_music_entry *e = q2_music_get(&c->music_table, id);
@@ -3179,7 +3188,27 @@ static bool client_music_play_id(client *c, int id)
         return false;
     }
 
-    c->music_id = id;
+    /*
+     * THE DURATION IS A COUNTDOWN, and the engine acts on it.
+     *
+     * `0x80071898` reads the table's `tenths`, `0x800718C0` multiplies it by
+     * five into `0x800B2710` and `0x800718C8` copies the same value to
+     * `0x800B2708` — tenths -> 50 Hz ticks, with a 300-tenths (30.0 s) fallback
+     * at `0x80071878` for an entry that names none. A is what remains, B is the
+     * total, and neither is a length the stream has to agree with: at
+     * `0x80071A58` a countdown of zero ADVANCES THE PLAYLIST CURSOR, and an end
+     * of list restarts it at `0x80071B6C`.
+     *
+     * That is what #14 was asking. The engine does not loop a track; it plays
+     * each for its table duration and moves on, which is why the one entry that
+     * measures 1.0 s LONGER than its table value is not an error — the last
+     * second is simply never heard.
+     */
+    c->music_id     = id;
+    c->music_total  = (e->tenths ? e->tenths : Q2_MUSIC_FALLBACK_TENTHS) * 5;
+    c->music_left   = c->music_total;
+    c->music_clock  = 0.0;
+
     return client_music_start(c, q2_music_files[e->file][6],
                               (u8)e->channel);
 }
@@ -3231,7 +3260,11 @@ static void client_music_pump(client *c)
         if (n == 0) {
             /* End of stream: the playlist advances. The engine's walk is what
              * decides what comes next, and for every real level it eventually
-             * jumps back and starts the seven again. */
+             * jumps back and starts the seven again.
+             *
+             * This is the SECOND thing that advances it. The first is the
+             * countdown below, which is the console's own trigger; a stream
+             * that runs out early still has to move on. */
             client_music_advance(c);
             break;
         }
@@ -3241,6 +3274,27 @@ static void client_music_pump(client *c)
          * the slider is full scale and the bottom is silence. */
         {
             s32 vol = c->settings.v[Q2_SET_MUSIC] * 2;
+
+            /*
+             * And the FADE, which is what the two duration globals are for.
+             * `0x80071954` scales the volume by `remaining / 64` while the
+             * countdown is under 64 ticks, and `0x80071980` scales it by
+             * `elapsed / 64` while the elapsed count is — so a track fades in
+             * over its first 64 ticks and out over its last 64. At 50 Hz that
+             * is 1.28 seconds each way, and it is the reason the durations are
+             * restart points rather than lengths.
+             */
+            if (c->music_total > 0) {
+                s32 elapsed = c->music_total - c->music_left;
+
+                if (c->music_left < Q2_MUSIC_FADE_TICKS && c->music_left >= 0)
+                    vol = (vol * c->music_left) / Q2_MUSIC_FADE_TICKS;
+                if (elapsed < Q2_MUSIC_FADE_TICKS && elapsed >= 0)
+                    vol = (vol * elapsed) / Q2_MUSIC_FADE_TICKS;
+            }
+
+            if (vol < 0)
+                vol = 0;
             if (vol < 255) {
                 u32 i;
                 for (i = 0; i < n; i++)
@@ -6712,6 +6766,23 @@ no_window:
         /* Every frame, not just menu frames: a zone load rebuilds the sim and
          * would otherwise drop back to the compiled-in constants. */
         client_apply_settings(&c);
+        /*
+         * The music countdown, on the console's own 50 Hz. At zero the engine
+         * moves to the next playlist entry (0x80071A58) rather than waiting for
+         * the stream to run out, which is what makes a duration a restart point
+         * and not a length.
+         */
+        if (c.music_open && c.music_total > 0) {
+            c.music_clock += dt * 50.0;
+            while (c.music_clock >= 1.0) {
+                c.music_clock -= 1.0;
+                if (c.music_left > 0)
+                    c.music_left--;
+            }
+            if (c.music_left <= 0)
+                client_music_advance(&c);
+        }
+
         client_music_pump(&c);
 
         /*
