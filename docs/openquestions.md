@@ -6223,3 +6223,33 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       or that they are filled by a load-time pass keyed on something not yet read. The first is the one
       the evidence points at, because it explains why the affected items cluster on particular maps
       rather than on particular primitives.
+
+- [x] 86. **MISCOMPLETE ends a UNIT, and reading it names `Q2_SCREEN_EXIT_7`.**
+      `0x8002DC68` is four instructions of substance: copy the fixed string `"Default"` into the
+      arrival-point buffer at `0x800C8CD0`, and write **7** into the game-state word at `0x800B2E28`.
+
+      `screen.h` had exit 7 listed by number with no name. `0x80018ED8` names it: it tears the level's
+      two module images down (`0x8006D280` on `0x800CBA28` and `0x800CBD28`), runs the outer state
+      machine at `0x80018868` until it answers, and then either loads **`"Extro FMV"`** on answer 5 — the
+      ending — or **`"EndMission N"`** with the digit at index 11 patched from `0x800B2E20`
+      (`lbu 11(a0)` / `addu` / `sb 11(a0)` at `0x8001900C`..`0x80019028`). Those are the `QENDMIS1`..
+      `QENDMIS5` maps the level table carries as `EndMission 1`..`EndMission 5`.
+
+      Wired, and it resolves by DISPLAY name because `"EndMission N"` is one — which also gives
+      `q2_level_find_display` its first caller. The four maps that carry a MISCOMPLETE each go to their
+      own unit's screen, and the unit numbers recovered from `Unit<N>Miss1` (#70) land exactly right:
+
+          SECURITY  unit 2 -> EndMission 2 (QENDMIS2)
+          POWER2    unit 3 -> EndMission 3 (QENDMIS3)
+          COMMAND   unit 4 -> EndMission 4 (QENDMIS4)
+          BOSS2     unit 5 -> EndMission 5 (QENDMIS5)
+
+      That is an independent check on the unit reading: nothing in #70 was tuned to produce it.
+
+      **The choice between `EndMission N` and `Extro FMV` is the port's**, made from the unit the map
+      declares rather than from the outer state machine's answer, because that machine is not
+      reconstructed. Stated because it is the one invented step; unit 5 is the last on this disc.
+
+      *And the destination is a stub in this port.* `QENDMIS2` loads as 2 quads and 2 nodes and draws
+      nothing, because its content is its `LevelBin` module's — the same blocker as #85, #6 and
+      CREBATCH's initial selection. The transition is real; what is on the other side of it is not yet.

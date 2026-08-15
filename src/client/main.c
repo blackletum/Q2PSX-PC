@@ -431,6 +431,7 @@ typedef struct client {
     u32               script_hidden;    /* nodes hidden this level */
     u32               script_summoned;  /* creatures a CREBATCH woke */
     u32               script_timers;    /* TIMER deferrals raised    */
+    u32               script_units;     /* MISCOMPLETE, units ended  */
     u32               script_teleports; /* TELEPORT calls that moved us */
     /*
      * A queued TELEPORT. Deferred to the top of the frame like the zone gate
@@ -1737,6 +1738,59 @@ static void client_event_call(void *user, const q2_event_item *item,
                     c->script_strings++;
                     Q2_INFO("help computer: \"%s\"", text);
                 }
+            }
+        }
+    }
+
+    /*
+     * MISCOMPLETE — the unit is over.
+     *
+     * `0x8002DC68` is four instructions of substance: it copies the fixed
+     * string `"Default"` into the arrival-point buffer at `0x800C8CD0` and
+     * writes **7** into the game-state word at `0x800B2E28`. Nothing else.
+     *
+     * Exit 7 is `0x80018ED8`, which `screen.h` had listed by number with no
+     * name. Reading it names it: it tears the level's two module images down,
+     * runs the outer state machine until it answers, and then either loads
+     * `"Extro FMV"` on answer 5 — the ending — or `"EndMission N"` with the
+     * digit at index 11 patched from `0x800B2E20` (`lbu`/`addu`/`sb` at
+     * `0x8001900C`..`0x80019028`). Those are the `QENDMIS1`..`QENDMIS5` maps
+     * the level table carries as `EndMission 1`..`EndMission 5`.
+     *
+     * So a MISCOMPLETE ends a UNIT rather than a level, and the port does what
+     * it can read: raise the mission screen — which already says
+     * "Mission N - Complete" — and go to that unit's end-of-mission map,
+     * resolved by DISPLAY name because "EndMission N" is a display name and
+     * not a directory.
+     *
+     * The outer state machine is not reconstructed, so the choice between
+     * `EndMission N` and `Extro FMV` is made here from the unit the map
+     * declares rather than from that machine's answer. Stated, because it is
+     * the one invented step: unit 5 is the last on this disc.
+     */
+    {
+        q2_uf_call call;
+
+        if (q2_uf_decode_call(&call, &c->sim[0].userfuncs, item) == Q2_OK &&
+            call.prim == Q2_UF_MISCOMPLETE && c->level_table_ready) {
+            char want[32];
+            const q2_level_entry *e;
+
+            snprintf(want, sizeof(want), "EndMission %d",
+                     c->map_unit > 0 ? c->map_unit : 1);
+            e = q2_level_find_display(&c->level_table, want);
+
+            if (e && !e->is_placeholder && e->directory[0]) {
+                snprintf(c->pending_map, sizeof(c->pending_map), "%s",
+                         e->directory);
+                snprintf(c->pending_start, sizeof(c->pending_start),
+                         "Default");
+                c->map_change_pending = true;
+                c->script_units++;
+                Q2_INFO("MISCOMPLETE: unit %d over -> %s (%s)",
+                        c->map_unit, want, e->directory);
+            } else {
+                Q2_WARN("MISCOMPLETE: no level named '%s'", want);
             }
         }
     }
