@@ -543,33 +543,38 @@ static int shoot_page(const disc *d, const q2_menu_page *p, int cheat_level,
  * hand transcription in that entry, which is what makes the decode checkable
  * rather than plausible.
  */
-static int front_end_pages(const disc *d)
+static int module_pages(const disc *d, const char *map)
 {
+    char path[256];
+
     q2_common_file cf;
     q2_buf buf;
     const dat_chunk *lb;
     static q2_lb_menu_page pages[64];
     u32 n, i, rows = 0;
 
-    if (disc_read_file(d, "Q2DATA/LEVELS/QFRONT/COMMON.DAT", &buf) != Q2_OK) {
-        printf("  QFRONT is not on this disc\n");
+    if (!map || !map[0])
+        map = "QFRONT";
+
+    snprintf(path, sizeof(path), "Q2DATA/LEVELS/%s/COMMON.DAT", map);
+    if (disc_read_file(d, path, &buf) != Q2_OK) {
+        printf("  %s is not on this disc\n", map);
         return 1;
     }
     if (q2_common_open(&cf, &buf) != Q2_OK) {
         q2_buf_free(&buf);
-        printf("  QFRONT's COMMON.DAT will not open\n");
+        printf("  %s's COMMON.DAT will not open\n", map);
         return 1;
     }
 
     lb = cf.chunk[Q2_COMMON_LEVEL_BIN];
     if (!lb || !lb->data || !lb->size) {
         q2_common_close(&cf);
-        printf("  QFRONT carries no LevelBin\n");
+        printf("  %s carries no LevelBin\n", map);
         return 1;
     }
 
-    printf("\nThe front end's pages, out of QFRONT's %u-byte LevelBin\n",
-           lb->size);
+    printf("\nMenu pages in %s's %u-byte LevelBin\n", map, lb->size);
 
         /* The chunk is UNRELOCATED, so its pointers are still the module-relative
      * offsets the fixups would turn into addresses — the same reason the
@@ -600,8 +605,17 @@ static int front_end_pages(const disc *d)
 
 int cmd_menu(const disc *d, const char *want, const char *out, const char *map)
 {
+    /*
+     * `menu pages <MAP>` reads a module's own page tables. The front end
+     * is QFRONT's (#44) and the deathmatch scoreboard is QMRESULT's
+     * (#46) - the same 24-byte records in both, because the engine's page
+     * walker takes a module's record and the executable's without knowing
+     * the difference.
+     */
     if (want && strcmp(want, "front") == 0)
-        return front_end_pages(d);
+        return module_pages(d, "QFRONT");
+    if (want && strcmp(want, "pages") == 0)
+        return module_pages(d, map);
 
     q2_exe exe;
     const q2_menu_page *pages;

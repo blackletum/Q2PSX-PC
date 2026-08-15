@@ -1225,7 +1225,7 @@ The residues of the resolved blockers keep their parents' numbers.
         record are the same in all three layouts — a source rect of (255, 255) sized 1 x 1, the blank — and
         are initial values the draw overwrites, not layout.
         `src/game/statusbar.[ch]`, `q2_sbar_fields_4p`; `tests/test_statusbar.c`.
-- [ ] 46. **The deathmatch scoreboard.** Capture shows a `DM SCORES` screen: a title on a **red** bar rather
+- [~] 46. **The deathmatch scoreboard.** *(#101 reads its static page and recovers the six mode titles; the per-player rows are runtime, not records.)* Capture shows a `DM SCORES` screen: a title on a **red** bar rather
       than the usual blue, one row per player carrying that player's own bar colour (RETRODAN red, PLAYER 1
       blue) with a name and a frag count, a `READY` marker on the left of a row that has pressed fire, a
       backdrop image, and a centred `ALL PLAYERS PRESS / FIRE TO CONTINUE` in the 16-pixel face. Every part
@@ -6791,3 +6791,42 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       That noise mattered for the same reason #95's did. A checker that cries wolf on correct data is a
       checker nobody reads, and this one had been reporting 26 failures for as long as the front end's
       tables have been in the port.
+- [x] 101. **The scoreboard's static furniture is read, its six titles recovered, and the QENDMIS maps
+      turn out to be one file five times over.** #46 read the capture and concluded the missing piece was
+      "the same run-time item construction as #44". #100 built the reader #44 needed, and it applies here
+      unchanged — the engine's page walker takes a module's record and the executable's without knowing
+      the difference, so one decoder serves both.
+
+      `QMRESULT`'s module carries **exactly one page, of exactly the two rows the capture shows**, with
+      coordinates the capture could not give:
+
+          module+0x051F0  ALL PLAYERS PRESS   256, 180
+          module+0x05208  FIRE TO CONTINUE    256, 200
+
+      Centred at 256 like every other page in this family, on a **20-pixel pitch** — tighter than the front
+      end's 26 and looser than its five-row 22. And one page is the finding, not a shortfall: the
+      per-player rows are NOT menu records. They are built from the match state, which is why nothing
+      static describes them and why #46's guess that they were widgets was the right thing to check and
+      the wrong answer.
+
+      **The six scoreboard titles are in the same pool**, in mode order, and the capture could only ever
+      show one of them:
+
+          DM SCORES · TEAM DM SCORES · CTF SCORES · TAG SCORES
+          TEAM TAG SCORES · VERSUS SCORES
+
+      six titles for the six modes `QMULTI.C` implements of which three are selectable (#0), alongside
+      `%s TEAM SCORED %d` and the team colour names `BLUE`, `PURPLE`, `GREEN`. #44 found five deathmatch
+      RULE paragraphs where the capture showed three; this is the same three-of-six split seen from the
+      results end.
+
+      **And the front-end family shares its module.** Hashing every `COMMON.DAT` in it:
+
+          QENDMIS1..QENDMIS5   e9b11b33d7f0   88,804 bytes — ONE FILE, five directories
+          QSTARTUP, QINTER     80a2498b432e   53,544 bytes — likewise
+          QMRESULT  101,664   QLOGOS  102,464   QFMV  46,624   QFRONT  235,340
+
+      That settles what #92 could only infer from the strings matching. `EndMission 1`..`EndMission 5` are
+      five entries in a level table pointing at five directories holding **the same bytes**; the digit
+      patched into the name at `0x8001900C` selects a screen inside one shared module, not a different
+      level. It also explains why the movie table is present in all five and identical in all five.
