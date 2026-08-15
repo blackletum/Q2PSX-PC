@@ -262,7 +262,8 @@ static bool counter_is_low(const q2_statusbar *b, int value, int threshold,
 static u32 emit_counter(const q2_statusbar *b, u16 tpage, u16 clut,
                         psx_ot *ot, u32 bucket, int ox, int oy,
                         q2_sbar_counter which, int value, int icon_index,
-                        int low_threshold, bool solid_at_zero)
+                        int low_threshold, bool solid_at_zero,
+                        bool digits_visible)
 {
     u8 digits[Q2_SBAR_COUNTER_DIGITS];
     int n = q2_sbar_digits_of(value, digits);
@@ -288,7 +289,7 @@ static u32 emit_counter(const q2_statusbar *b, u16 tpage, u16 clut,
      * the value. Capture confirms it — "2" sits where the last digit of "100"
      * sits, not where its first does.
      */
-    for (i = 0; i < n; i++) {
+    for (i = 0; digits_visible && i < n; i++) {
         int slot = Q2_SBAR_COUNTER_DIGITS - n + i;
         int f = q2_sbar_digit_field(which, slot);
         const q2_sbar_field *fd;
@@ -342,18 +343,43 @@ u32 q2_statusbar_build_ot(const q2_statusbar *b, u16 tpage, u16 clut,
 
     n += emit_counter(b, tpage, clut, ot, bucket, origin_x, origin_y,
                       Q2_SBAR_HEALTH, b->health, b->health_icon,
-                      Q2_SBAR_LOW_HEALTH, true);
+                      Q2_SBAR_LOW_HEALTH, true, true);
 
     /*
      * `q2_icon_ammo_for_weapon` returns `ammoIcon[weapon]` verbatim, and that
      * table holds rect INDICES — 0x80035374 multiplies its entry by five and
      * adds the rect base. Feeding it to the effect-id scan, as this used to,
      * gave every weapon somebody else's icon.
+     *
+     * THE BLASTER SHOWS NO AMMO COUNTER, and the mechanism is not a zero test.
+     * Last round left this open because the ammo sub-draw has no early-out and
+     * the splitter always emits a units digit, so by the code as read a
+     * blaster-only player should see a "0" that retail does not show. The
+     * branch that does it is at the END of the sub-draw:
+     *
+     *     80035498  addiu v0, zero, 1
+     *     8003549C  bne   s0, v0, 0x80035538      weapon != 1, leave it alone
+     *     800354A8  lbu   v0, 66(v1)              v1 = 0x8009C598
+     *     800354D4  sb    v0, 7(s3)               ... into the field's h
+     *
+     * It overwrites the digit fields with the four bytes at `0x8009C5DA`,
+     * which are `{50, 0, 250, 0}` — and the last of those is the HEIGHT. A
+     * zero-height sprite draws nothing. So weapon 1 blanks its own digits by
+     * writing a degenerate rect over them, after computing them normally.
+     *
+     * That address is past the end of the numeral table and inside the
+     * unidentified structure that follows it, so the console is reading bytes
+     * that are not numeral records at all. Whether the original meant to point
+     * at a blank cell or simply landed on one is not knowable from here; what
+     * is knowable is the effect, and all three retail captures agree with it —
+     * blaster shows no ammo, shotgun shows "10". Modelled as the behaviour
+     * rather than by reproducing the out-of-bounds read.
      */
     n += emit_counter(b, tpage, clut, ot, bucket, origin_x, origin_y,
                       Q2_SBAR_AMMO, b->ammo,
                       q2_icon_ammo_for_weapon(b->icons, b->weapon),
-                      Q2_SBAR_LOW_AMMO, false);
+                      Q2_SBAR_LOW_AMMO, false,
+                      b->weapon != Q2_SBAR_WEAPON_NO_AMMO);
 
     /*
      * ARMOUR AT ZERO DRAWS NOTHING AT ALL — not a zero, not a blank icon.
@@ -374,7 +400,7 @@ u32 q2_statusbar_build_ot(const q2_statusbar *b, u16 tpage, u16 clut,
     if (b->armour > 0)
         n += emit_counter(b, tpage, clut, ot, bucket, origin_x, origin_y,
                           Q2_SBAR_ARMOUR, b->armour, b->armour_icon,
-                          Q2_SBAR_LOW_AMMO, false);
+                          Q2_SBAR_LOW_AMMO, false, true);
 
     return n;
 }

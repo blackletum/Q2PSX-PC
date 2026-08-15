@@ -74,6 +74,11 @@ typedef struct live_rot_ctx {
      * cannot resolve is. */
     u32                 glass_run;
     u32                 glass_node;
+    /* LOADMAP: the level-to-level transition, and whether a trigger reaches
+     * one. Counted here because "the chunk contains a LOADMAP" and "a player
+     * walking the map runs one" are the two different questions, and only the
+     * second says level progression is reachable. */
+    u32                 loadmap_run;
     const q2_scene     *scene;
     q2_uf_operands      ops;
 
@@ -101,6 +106,9 @@ static void live_rot_call(void *user, const q2_event_item *item, u8 call_index)
      */
     if (prim == Q2_UF_TIMEDLIGHT || prim == Q2_UF_FLKLIGHT)
         ctx->lit_run++;
+
+    if (prim == Q2_UF_LOADMAP)
+        ctx->loadmap_run++;
 
     /*
      * GLASS, resolved the way `q2_sim_breakable_call` resolves it — the same
@@ -167,6 +175,7 @@ int cmd_zonescript(const disc *d, const char *only_map)
     u32 brk_calls = 0, brk_short = 0, brk_no_object = 0, brk_usable = 0,
         brk_zone_rescue = 0;
     u32 live_glass_run = 0, live_glass_node = 0;
+    u32 loadmap_calls = 0, live_loadmap = 0;
     u32 live_built = 0, live_calls = 0, live_steps = 0, live_moved = 0,
         live_turned = 0;
     bool verbose = (only_map != NULL);
@@ -339,6 +348,9 @@ int cmd_zonescript(const disc *d, const char *only_map)
                                 const u8 *pp = item.payload - 2;
                                 u32 need = 0;
                                 s16 first_obj = -1;
+
+                                if (call.prim == Q2_UF_LOADMAP)
+                                    loadmap_calls++;
 
                                 if (call.prim == Q2_UF_TIMEDLIGHT)
                                     light_timed++;
@@ -617,6 +629,7 @@ int cmd_zonescript(const disc *d, const char *only_map)
                 ctx.lit_run = 0;
                 ctx.glass_run  = 0;
                 ctx.glass_node = 0;
+                ctx.loadmap_run = 0;
 
                 /* The best zone's Scene and its Events, so a GLASS slot is
                  * resolved against the same pair the engine holds resident. */
@@ -653,6 +666,7 @@ int cmd_zonescript(const disc *d, const char *only_map)
                 live_rot_barren += ctx.rot_barren;
                 live_lit_run    += ctx.lit_run;
                 live_glass_run  += ctx.glass_run;
+                live_loadmap    += ctx.loadmap_run;
                 live_glass_node += ctx.glass_node;
                 for (t = 0; t < 400; t++)
                     live_moved += q2_rotators_tick(&rs, 12);
@@ -735,6 +749,8 @@ int cmd_zonescript(const disc *d, const char *only_map)
            brk_usable, brk_zone_rescue);
     printf("      the trigger sweep RUNS %u, of which resolve a Scene node : %u\n",
            live_glass_run, live_glass_node);
+    printf("    LOADMAP calls in COMMON: %u; the trigger sweep RUNS %u\n",
+           loadmap_calls, live_loadmap);
     printf("    rotation CALLs the script RUNS : %u, of which turn nothing : %u\n",
            live_rot_fired, live_rot_barren);
     printf("    distinct rotation CALL sites the script reaches : %u\n",

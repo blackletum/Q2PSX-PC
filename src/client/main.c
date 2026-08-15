@@ -326,6 +326,19 @@ typedef struct client {
     u32               glass_calls;
     u32               glass_pieces;
     q2_uf_operands    ev_operands;  /* COMMON's chunk, and the zone's */
+
+    /*
+     * LOADMAP, queued rather than acted on where it fires.
+     *
+     * A CALL runs inside `q2_sim_advance`, and loading a map there would free
+     * the triggers and the script the runtime is standing in the middle of.
+     * The zone gate is deferred for the same reason and to the same place —
+     * the top of the frame — so the two transitions behave alike.
+     */
+    bool              map_change_pending;
+    char              pending_map[Q2_UF_NAME_LEN + 1];
+    char              pending_start[Q2_UF_NAME_LEN + 1];
+    u32               map_changes;    /* how many the session has made */
     u32               vw_events;
     s16               vw_last_event;
     int               cre_last_sound;
@@ -1277,6 +1290,44 @@ static void client_event_call(void *user, const q2_event_item *item,
         if (pieces) {
             c->glass_calls++;
             c->glass_pieces += pieces;
+        }
+    }
+
+    /*
+     * LOADMAP — the level-to-level transition, and the reason a session could
+     * never leave the map it booted into.
+     *
+     * The primitive has been decoded in `userfuncs.c` for a long time with
+     * nothing acting on it: `map` is a 12-byte name at +4 against the
+     * executable's level table, and `start_pos` a 12-byte name at +16 resolved
+     * against the TARGET map's spawns rather than this one's. Sweeping every
+     * trigger volume on the disc runs **28 of 28** of them, so this is not a
+     * corner the scripts rarely reach — it is how the game advances.
+     *
+     * `0x800E46B4` holds the current map's name and the handler compares
+     * against it, so a LOADMAP naming the map you are already in is a no-op
+     * rather than a reload. That matters here because several maps carry one.
+     *
+     * Queued, not loaded: see `map_change_pending`.
+     */
+    {
+        q2_uf_call call;
+
+        if (q2_uf_decode_call(&call, &c->sim[0].userfuncs, item) == Q2_OK &&
+            call.prim == Q2_UF_LOADMAP) {
+            char map[Q2_UF_NAME_LEN + 1];
+            char start[Q2_UF_NAME_LEN + 1];
+
+            if (q2_uf_operand_name(&call, 0, map) && map[0] &&
+                q2_stricmp(map, c->map) != 0) {
+                if (!q2_uf_operand_name(&call, 1, start))
+                    start[0] = '\0';
+
+                snprintf(c->pending_map, sizeof(c->pending_map), "%s", map);
+                snprintf(c->pending_start, sizeof(c->pending_start), "%s",
+                         start);
+                c->map_change_pending = true;
+            }
         }
     }
 

@@ -5430,3 +5430,58 @@ attribution, death: the whole chain, in one capture.
       a node. Whatever maps that node to a runtime object is the missing link, and it is the same shape
       as the `SpaceLights` partition, which also turned out to hang off a collision node rather than a
       scene one (#9).
+
+## The blaster blanks its own ammo digits, and the camera had dropped a constant
+
+Two follow-ons from the colour round, both closed.
+
+**What suppresses the ammo counter — ANSWERED.** The previous entry left this open on the grounds that the ammo
+sub-draw has no early-out and the splitter at `0x80034E6C` always emits a units digit, so a blaster-only player
+should show a "0" retail does not. The branch is at the END of the sub-draw, after the digits have already been
+computed normally:
+
+```
+80035498  addiu v0, zero, 1
+8003549C  bne   s0, v0, 0x80035538      ; weapon != 1, leave the digits alone
+800354A8  lbu   v0, 66(v1)              ; v1 = 0x8009C598
+800354D4  sb    v0, 7(s3)               ; ... into the field's HEIGHT
+```
+
+It overwrites the three digit fields with the four bytes at `0x8009C5DA`, which are `{50, 0, 250, 0}` — and the
+last is the height. **A zero-height sprite draws nothing.** So weapon 1 blanks its own digits by writing a
+degenerate rect over them. That address is past the end of the numeral table, inside the unidentified structure
+that follows it, so the console is reading bytes that are not numeral records; whether the original meant to
+point at a blank cell or merely landed on one is not knowable from here. The effect is what all three retail
+captures show — blaster no ammo, shotgun "10", and armour "31" displayed beside a blaster with no ammo readout,
+which is what rules out any "hide the counter when the value is zero" reading.
+
+The port models the behaviour rather than reproducing the out-of-bounds read.
+
+**The camera was 286 units too high, and the weapon in the hands is what proved it.** `0x80038618` builds the
+view position by copying entity+0x54 and +0x5C straight through and computing the middle component:
+
+```
+80038630  lw    v0, 88(a1)      ; entity+0x58, the feet
+80038634  lh    v1, 246(a1)     ; entity+0xF6, the eased view offset
+80038638  addiu v0, v0, 286
+8003863C  subu  v0, v0, v1
+```
+
+`q2_sim_eye` had this as `pos.y - view_height` — the same expression with the constant dropped. World Y increases
+downward, so the error is a bias in one direction only: the view never looked tilted, just taller, which a
+screenshot of a corridor does not betray. `q2_vw_place` carries the expression correctly (`Q2_VW_EYE_BASE`), so
+the gun hung off the console's eye while the camera looked from one 286 units above it, and the weapon sat almost
+entirely below the bottom edge. `q2psx-inspect viewweapon` never showed it because that path builds its own camera
+from the same expression the weapon uses, so both were consistently wrong together and the render looked right.
+
+**Two subsystems that must agree, disagreeing by exactly the constant one of them had dropped** — worth stating as
+a pattern, because it is the second time this session that the bug lived in the seam between two components rather
+than in either. Anything reading the eye should go through `q2_sim_eye`.
+
+**Found, not yet wired: the weapon strip.** `0x80035EA0` walks the thirteen field records ten bytes at a time and
+then draws TWO extra sprites, from rect indices at `s7+96` and `s7+100`, the first skipped when the two are equal.
+Their positions come from `0x8009C658` — the head of the structure icontable.h records as "not identified" — which
+holds four `s16` pairs: **(388, 201) and (458, 201)** for one player and (381, 95) / (419, 95) for a split. The
+y matches the status bar's own anchor row exactly. That accounts for what capture shows: one icon with only the
+blaster held, two once a second weapon is picked up. What writes `s7+96`/`s7+100` has not been traced, so the
+weapon-to-rect mapping is still missing and nothing is drawn yet rather than guessed.

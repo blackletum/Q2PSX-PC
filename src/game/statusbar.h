@@ -205,6 +205,13 @@ struct q2_hud_tables;
 #define Q2_SBAR_LOW_AMMO     6
 #define Q2_SBAR_BLINK_BIT 0x80u
 
+/*
+ * The one weapon whose ammo digits are blanked — the blaster, slot 1.
+ * `0x8003549C` tests for exactly this id and overwrites the three digit fields
+ * with a zero-height rect; see the note at the ammo counter in statusbar.c.
+ */
+#define Q2_SBAR_WEAPON_NO_AMMO 1
+
 /* ------------------------------------------------------------------------- */
 /* The field table — 0x800337EC onward                                        */
 /* ------------------------------------------------------------------------- */
