@@ -5372,7 +5372,7 @@ player on two of them — **JAIL2 twice, POWER2 ten times** — and on POWER2 a 
 from 100 to **-3** and the death screen opens on `RESTART LEVEL`. Module action, AI tick, damage,
 attribution, death: the whole chain, in one capture.
 
-- [ ] 66. **The debris burst has a caller waiting for it, and the operand it needs RESOLVES.**
+- [x] 66. **The debris burst has a caller waiting for it, and the operand it needs RESOLVES.**
       `q2_sim_debris_burst` is the other function in the sweep that is a feature rather than an accessor,
       and `sim.h` says why it has no caller: *"the port exposes it rather than wiring it into the GLASS
       primitive, because which Scene node a given pane owns is part of the UserFuncs runtime-object
@@ -5426,7 +5426,7 @@ attribution, death: the whole chain, in one capture.
       disc, and the code is there because it is what the damage dispatch will call — stated rather than
       left to look like a working feature.
 
-- [ ] 67. **What is still owed: the route from a shot to a UserFuncs object.**
+- [x] 67. **What is still owed: the route from a shot to a UserFuncs object.**
       `obj+0x24` is the on-damage callback the load-time constructor installs, and nothing found so far
       calls it from the weapon code. The 48-entry object array at `0x800D6BB0` has 48 materialised
       references and every one of them is inside the `0x8002xxxx` UserFuncs runtime or the two at
@@ -7359,3 +7359,59 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       at 0x8003A25C does not include 0x1000, so that bit is not a per-tick environment and something else
       owns its lifetime. Setting it every tick would set a flag nothing takes back. The damage does not
       depend on it.
+- [x] 117. **The route from a shot to a breakable, which is a registry of BOXES and not the collision node
+      #67 guessed. Glass breaks now.**
+
+      #66 wired GLASS to the debris burst and measured that no trigger volume on the disc ever calls it;
+      #67 said what was still owed was "the route from a shot to a UserFuncs object" and guessed the
+      collision node, on the grounds that a hitscan ends on one. It is a separate structure, and following
+      it took four reads:
+
+          0x800CAE10  48 records of 64 bytes — DAMAGEABLE BOXES. The byte at +54
+                      is the slot's use flag; bit 0x4 is "can be damaged" and
+                      bit 0x8 is set the first time something hits it.
+          0x800555D8  allocates one, copying the geometry out of a Scene node's
+                      own record. Returns the record pointer.
+          0x80053AA4  the SWEEP, inside the shot trace: walk all 48, test the ray
+                      against each in-use one (0x80052078), and on a hit write
+                      hit-kind 2 and the slot INDEX into the trace result at +18
+                      and +22.
+          0x800488DC  a weapon's impact: read the index back, re-form the record
+                      pointer (`sll v0, v0, 6` — the 64-byte stride is what named
+                      the array), check bit 0x4, set bit 0x8, and call...
+          0x8002EF1C  the ROUTER: walk the 48-entry OBJECT array at 0x800D6BB0
+                      (92-byte stride) and for every object whose +0x28 equals
+                      that record pointer, store the damage point at +0x00 and
+                      call the object's own +0x24 callback. Five call sites, all
+                      weapons: 0x80046634, 0x80047E54, 0x800488DC, 0x800492E8
+                      and 0x80049B18.
+          0x8002A518  GLASS's load constructor, which ties them together: it
+                      allocates the box from the pane's Scene node and stores the
+                      returned pointer in obj+0x28.
+
+      So a pane's identity to the weapon code is a box in a registry the shot trace tests **separately from
+      the world hull**. That is why #67 found no reference to the object array from the weapon code and
+      concluded the damage path must arrive with the object in hand: it does, by index, through a structure
+      neither side of that search was looking at.
+
+      **The port keeps the mechanism and not the memory layout.** Each GLASS call's Scene node box is
+      registered at zone load (through the same two-buffer rebase #66 needed — four of the ten slots read
+      -1 in COMMON's copy), the shot is swept against those boxes, and the nearest crossing runs GLASS's
+      own body: the hit burst out of the crossing point, the hit-point subtract in the item, and the
+      shatter across the whole box. The ray test is a slab test rather than 0x80052078 transcribed, which
+      is stated at the function.
+
+      **Both the hitscan and the projectile paths route**, because the console's five call sites are not
+      all hitscan — a bolt's is one of them, and a blaster is what a player has in hand when they first
+      meet a window. A projectile is tested over the STEP it just took rather than at its impact point: a
+      pane is thinner than a step at bolt speed.
+
+      Measured on LAB, whose two panes bind: standing at 3200,-160,-4478 and firing, `1 SHOT, 11 pieces`
+      — 1 from the hit and 10 from the shatter, which is exactly what that item's own operands at +10 and
+      +12 say. Nine maps carry a breakable: BASE0, BASE1, BASE3, COMMAND, JAIL2, LAB (two), MAGDEMO,
+      WASTE2 and WASTE4.
+
+      *An error worth keeping:* the first implementation matched on the collision node, following #67's
+      guess, and bound zero panes on every map — `q2_coll_find_node` returns -1 for a point inside a pane,
+      because the hull's nodes are EMPTY volumes. That failure is what sent this back to the disassembly,
+      and the answer was two functions away.

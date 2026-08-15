@@ -509,6 +509,7 @@ typedef struct client {
     s16               at_pitch;
     bool              pitch_given;
     bool              no_lasers;   /* --no-lasers: the before picture */
+    bool              shoot;       /* --shoot: hold fire              */
 
     q2_mover_set      movers;
     bool              movers_ready;
@@ -2811,6 +2812,31 @@ static bool client_load_zone(client *c, const char *map, int index)
                 c->ev_operands.b_size = have_zev ? zev.size : 0;
 
                 /*
+                 * The breakables, now that the rebase is in hand: each pane's
+                 * Scene node resolved to the COLLISION node it sits in, which
+                 * is the identity the weapon code matches on (#67). Registered
+                 * here rather than in attach_gameplay because it needs the
+                 * zone — both halves of the rebase and the hull.
+                 */
+                {
+                    u32 n = q2_sim_attach_breakables(&c->sim[0],
+                                                     &c->zone.scene,
+                                                     &c->ev_operands);
+                    u32 bi;
+
+                    for (bi = 0; bi < n; bi++) {
+                        const q2_breakable *b = &c->sim[0].breakable[bi];
+
+                        Q2_INFO("breakable %u: node %d, %d hp, %u+%u pieces,"
+                                " box (%d,%d,%d)-(%d,%d,%d)",
+                                bi, b->scene_node, b->health,
+                                b->count_a, b->count_b,
+                                b->bmin[0], b->bmin[1], b->bmin[2],
+                                b->bmax[0], b->bmax[1], b->bmax[2]);
+                    }
+                }
+
+                /*
                  * How many secrets this map HAS: every INSECRET call item in
                  * its script. Counted here rather than asked of the sim,
                  * because it is a property of the level and not of the play —
@@ -3447,6 +3473,16 @@ static void client_input_simulated(client *c, float dt)
     cfg.style = c->sim[0].player[0].look_scheme;
 
     q2_pad_read(&pad, &cfg, &in);
+
+    /*
+     * `--shoot`: hold fire. The same kind of scripted stand-in as `--demo` and
+     * `--dm-stage` — a headless run cannot press a button, and "shoot the pane
+     * and see it break" is not a claim a still frame can make on its own.
+     */
+    if (c->shoot) {
+        in.attack   = true;
+        in.buttons |= Q2_BTN_ATTACK | Q2_BTN_ATTACK_PRESS;
+    }
 
     (void)dt;
 
@@ -5061,8 +5097,11 @@ static void client_write_shot(client *c, bool numbered)
         Q2_INFO("            %u held the timeline's last frame; of the misses "
                 "%u had no such name in block D",
                 c->pose_held, c->pose_name_absent);
-        Q2_INFO("  breakable %u GLASS calls broke something, %u pieces thrown",
-                c->glass_calls, c->glass_pieces);
+        Q2_INFO("  breakable %u GLASS calls broke something, %u pieces thrown;"
+                " %u panes registered, %u SHOT, %u pieces from shots",
+                c->glass_calls, c->glass_pieces,
+                c->sim[0].breakable_count, c->sim[0].breakable_hits,
+                c->sim[0].breakable_pieces);
         Q2_INFO("  script    %u strings, %u sounds, %u gated by ONKEYDO, "
                 "%u nodes hidden, %u summoned, %u teleports, %u timers, %u resumed",
                 c->script_strings, c->script_sounds, c->script_gated,
@@ -6197,6 +6236,7 @@ int main(int argc, char **argv)
             }
         }
         else if (!strcmp(argv[i], "--no-lasers"))             c.no_lasers = true;
+        else if (!strcmp(argv[i], "--shoot"))                 c.shoot = true;
         /* Play a film and nothing else — the campaign reaches OUTRO1P by
          * finishing, and that is a long way to go to look at a decoder. */
         else if (!strcmp(argv[i], "--movie") && i + 1 < argc)

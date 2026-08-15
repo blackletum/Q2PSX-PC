@@ -343,6 +343,18 @@ typedef struct q2_player_combat {
 /* ------------------------------------------------------------------------- */
 /* Simulation                                                                 */
 /* ------------------------------------------------------------------------- */
+#define Q2_SIM_MAX_BREAKABLES 48   /* the console's object array is 48 */
+
+typedef struct q2_breakable {
+    s32 scene_node;
+    s32 bmin[3];        /* the box the shot is tested against                */
+    s32 bmax[3];
+    s16 health;         /* item[+6], which the console mutates IN THE ITEM   */
+    u8  count_a;        /* item[+10]: pieces per hit, out of the hit point   */
+    u8  count_b;        /* item[+12]: pieces on shattering, across the box   */
+    bool broken;
+} q2_breakable;
+
 typedef struct q2_sim {
     const q2_world_zone *zone;
     /*
@@ -442,6 +454,15 @@ typedef struct q2_sim {
      */
     s16         *volume_damage;
     s16         *volume_mod;
+
+    /* The map's breakable panes, and which collision node each one occupies. */
+    q2_breakable breakable[Q2_SIM_MAX_BREAKABLES];
+    u32          breakable_count;
+    u32          breakable_hits;   /* shots that reached one                 */
+    u32          breakable_pieces; /* and the debris they threw              */
+    /* The scene the panes' nodes belong to, kept so the hitscan path can throw
+     * their debris without every shot carrying a scene pointer. */
+    const struct q2_scene *breakable_scene;
 
     /* How many hazard hits actually LANDED — the throttle blocks most of the
      * calls, so this is the number that says the rate is right rather than the
@@ -660,6 +681,69 @@ u32 q2_sim_debris_burst(q2_sim *sim, const s32 bmin[3], const s32 bmax[3],
 u32 q2_sim_breakable_call(q2_sim *sim, const q2_scene *scene,
                           const q2_uf_operands *ops,
                           const q2_event_item *item, u8 call_index);
+
+/* ------------------------------------------------------------------------- */
+/* Shooting one                                                               */
+/* ------------------------------------------------------------------------- */
+/*
+ * The route from a shot to a breakable, which openquestions #67 called "what is
+ * still owed". It is a real chain in the executable and this is all of it:
+ *
+ *   0x800CAE10  a 48-entry array of 64-byte records — **damageable boxes**, one
+ *               per breakable, allocated by 0x800555D8 from a Scene node's own
+ *               box. The byte at +54 is the slot's use flag: zero means free,
+ *               bit 0x4 means "this box can be damaged" and bit 0x8 is set the
+ *               first time something hits it.
+ *
+ *   0x80053AA4  the SWEEP. The shot's trace walks all 48 slots, tests the ray
+ *               against each in-use one (0x80052078) and, on a hit, writes hit
+ *               kind 2 and the slot INDEX into the trace result at +18 and +22.
+ *
+ *   0x800488DC  a weapon's impact. It reads that index back, re-forms the
+ *               record pointer, checks bit 0x4, sets bit 0x8, and calls...
+ *
+ *   0x8002EF1C  the ROUTER: walk the 48-entry runtime object array at
+ *               0x800D6BB0 (92-byte stride), and for every object whose +0x28
+ *               equals that record pointer, store the damage point in the
+ *               object at +0x00..+0x08 and call the object's own +0x24
+ *               callback with its CALL item. Five call sites, all weapons:
+ *               0x80046634, 0x80047E54, 0x800488DC, 0x800492E8, 0x80049B18.
+ *
+ *   0x8002A518  GLASS's load constructor, which is what ties the two together:
+ *               it takes the pane's Scene node, allocates a box from it through
+ *               0x800555D8, and stores the returned record pointer in obj+0x28.
+ *
+ * So a pane's identity, as far as the weapon code is concerned, is a BOX in a
+ * 48-entry registry that the shot trace tests separately from the world hull.
+ * #67 guessed a collision node and that was close but not it — the registry is
+ * its own structure, which is why the object array has no reference from the
+ * weapon code and why nothing scans it looking for a victim.
+ *
+ * This port keeps the registry and the sweep and not the console's memory
+ * layout: the box is the Scene node's, and the ray test is a slab test rather
+ * than 0x80052078 transcribed, which is stated rather than implied.
+ */
+/*
+ * Register the map's breakables. `ops` supplies the two-buffer rebase, exactly
+ * as `q2_sim_breakable_call` takes it, because four of the disc's ten object
+ * slots read -1 in COMMON's copy and resolve only in a zone's.
+ *
+ * Returns how many were registered.
+ */
+u32 q2_sim_attach_breakables(q2_sim *sim, const q2_scene *scene,
+                             const q2_uf_operands *ops);
+
+/*
+ * The sweep and the router in one: does the segment `from` -> `to` cross a
+ * breakable's box, and if so, hurt it.
+ *
+ * Returns the pieces thrown, zero when nothing was in the way. The hit burst
+ * comes out of the crossing POINT and the shatter out of the pane's whole box,
+ * which is the difference between the two debris calls at 0x8002A384 and
+ * 0x8002A3DC.
+ */
+u32 q2_sim_breakable_shot(q2_sim *sim, const s32 from[3], const s32 to[3],
+                          s16 damage);
 
 /*
  * Where the sim fires effects from, so a reader does not have to find them:

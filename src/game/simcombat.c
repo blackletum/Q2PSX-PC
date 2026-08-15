@@ -125,7 +125,7 @@ static void fx_at(q2_sim *sim, q2_fx_preset_id id, const s32 at[3])
  */
 static void fx_hitscan_impact(q2_sim *sim, const s32 origin[3],
                               const s32 dir[3], s32 frac, s32 victim,
-                              const q2_damage_result *dr)
+                              const q2_damage_result *dr, s16 damage)
 {
     s32 at[3];
     int k;
@@ -146,8 +146,16 @@ static void fx_hitscan_impact(q2_sim *sim, const s32 origin[3],
         return;
     }
 
-    if (frac < 4096)
+    if (frac < 4096) {
         fx_at(sim, Q2_FX_SPARK, at);
+
+        /*
+         * And the BREAKABLE, tested along the whole shot rather than at its
+         * end: the console's sweep runs INSIDE the trace, so a pane in front of
+         * the wall is what the shot hits, not the wall behind it.
+         */
+        q2_sim_breakable_shot(sim, origin, at, damage);
+    }
 }
 
 /*
@@ -358,7 +366,8 @@ q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
                                            sim->combat.targets,
                                            sim->combat.target_count,
                                            &sim->combat.rules, &dr);
-            fx_hitscan_impact(sim, s->origin, s->dir, frac, victim, &dr);
+            fx_hitscan_impact(sim, s->origin, s->dir, frac, victim, &dr,
+                              s->damage);
         }
         break;
 
@@ -374,7 +383,8 @@ q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
         /* The rail does not stop at the first target, so it always marks the
          * world where the beam ends and blood is left to the per-target pass
          * this port does not get back from `fire_rail`. */
-        fx_hitscan_impact(sim, s->origin, s->dir, frac, -1, NULL);
+        fx_hitscan_impact(sim, s->origin, s->dir, frac, -1, NULL,
+                          s->damage);
         (void)hits;
         break;
     }
@@ -737,6 +747,25 @@ void q2_sim_combat_tick(q2_sim *sim)
                                     end, &node);
             p->node = node;
 
+            /*
+             * A pane in the way, tested over the step the projectile just took.
+             * The console routes to a breakable from five weapon call sites and
+             * a bolt's is one of them (0x80049B18), so this is not confined to
+             * hitscan — and a blaster is the weapon a player has in hand when
+             * they first meet a window.
+             *
+             * Tested against the step rather than the impact point, because a
+             * pane is thinner than a step: at the projectile's speed the shot
+             * would otherwise pass through it between one tick and the next.
+             */
+            if (sim->breakable_count) {
+                u32 pieces = q2_sim_breakable_shot(sim, step.from,
+                                                   complete ? step.to : end,
+                                                   (s16)p->damage);
+                if (pieces)
+                    fx_at(sim, fx_for_projectile(p->kind), step.to);
+            }
+
             if (!complete) {
                 /* The hull gives back the clipped point; the port has no
                  * surface normal here, so a grenade landing on geometry stops
@@ -873,5 +902,206 @@ u32 q2_sim_breakable_call(q2_sim *sim, const q2_scene *scene,
                                     NULL, count_b, 0);
     }
 
+    return made;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Shooting a breakable — the port's 0x80053AA4 sweep and 0x8002EF1C router    */
+/* ------------------------------------------------------------------------- */
+u32 q2_sim_attach_breakables(q2_sim *sim, const q2_scene *scene,
+                             const q2_uf_operands *ops)
+{
+    q2_event_record rec, prev;
+    bool more;
+
+    if (!sim)
+        return 0;
+
+    sim->breakable_count  = 0;
+    sim->breakable_hits   = 0;
+    sim->breakable_pieces = 0;
+    sim->breakable_scene  = scene;
+
+    if (!scene || !sim->events_ready || !sim->userfuncs_ready)
+        return 0;
+
+    for (more = q2_events_first_record(&sim->events, &rec);
+         more;
+         more = q2_events_next_record(&sim->events, &prev, &rec)) {
+        u32 i;
+
+        prev = rec;
+
+        for (i = 0; i < rec.n_items; i++) {
+            q2_event_item item;
+            q2_scene_node node;
+            q2_breakable *b;
+            const u8 *p;
+            u8  call_index;
+            s16 slot;
+            int k;
+
+            if (!q2_events_get_item(&sim->events, &rec, i, &item))
+                break;
+            if (item.opcode != Q2_EVOP_CALL || !item.payload)
+                continue;
+            if (!q2_events_get_call_index(&item, &call_index))
+                continue;
+            if (q2_userfuncs_prim(&sim->userfuncs, call_index) != Q2_UF_GLASS)
+                continue;
+            if (item.len < 16)
+                continue;
+            if (sim->breakable_count >= Q2_SIM_MAX_BREAKABLES)
+                break;
+
+            /* The same rebase the scripted call uses: four of the disc's ten
+             * object slots read -1 in COMMON's copy (#66). */
+            p = q2_uf_operand_at(ops, item.payload - 2, 16);
+
+            slot = q2_rd_s16(p + 4);
+            if (slot < 0 || !q2_scene_get_node(scene, (u32)slot, &node))
+                continue;
+
+            /*
+             * The box, straight off the Scene node and WITHOUT the culling
+             * slop q2_scene_node_bounds adds — 0x800555D8 copies the node
+             * record's own numbers, and a padded box would be shootable from
+             * just outside the pane.
+             */
+            b = &sim->breakable[sim->breakable_count];
+            memset(b, 0, sizeof(*b));
+            b->scene_node = slot;
+            for (k = 0; k < 3; k++) {
+                b->bmin[k] = node.bbox_min[k];
+                b->bmax[k] = node.bbox_max[k];
+            }
+            b->health  = q2_rd_s16(p + 6);
+            b->count_a = q2_rd_u8(p + 10);
+            b->count_b = q2_rd_u8(p + 12);
+            sim->breakable_count++;
+        }
+    }
+
+    return sim->breakable_count;
+}
+
+/*
+ * Segment against an axis-aligned box: the standard slab test, in the fixed
+ * point everything here is in.
+ *
+ * The console's own test is 0x80052078 and is not transcribed. What matters for
+ * the behaviour is which box the shot crosses first, and that is a property of
+ * the geometry rather than of the arithmetic; where the two could differ is a
+ * shot that grazes an edge.
+ */
+static bool segment_hits_box(const s32 from[3], const s32 to[3],
+                             const s32 bmin[3], const s32 bmax[3],
+                             s32 out[3])
+{
+    /* Parametrised in 1.0.12 along the segment, as every other fraction in
+     * this file is. */
+    s32 t0 = 0, t1 = 4096;
+    int k;
+
+    for (k = 0; k < 3; k++) {
+        s32 d = to[k] - from[k];
+
+        if (d == 0) {
+            if (from[k] < bmin[k] || from[k] > bmax[k])
+                return false;
+            continue;
+        }
+        {
+            s64 a = ((s64)(bmin[k] - from[k]) << 12) / d;
+            s64 b = ((s64)(bmax[k] - from[k]) << 12) / d;
+            s32 lo = (s32)(a < b ? a : b);
+            s32 hi = (s32)(a < b ? b : a);
+
+            if (lo > t0) t0 = lo;
+            if (hi < t1) t1 = hi;
+            if (t0 > t1)
+                return false;
+        }
+    }
+
+    if (t0 < 0 || t0 > 4096)
+        return false;
+
+    for (k = 0; k < 3; k++)
+        out[k] = from[k] + (s32)((((s64)(to[k] - from[k])) * t0) >> 12);
+    return true;
+}
+
+u32 q2_sim_breakable_shot(q2_sim *sim, const s32 from[3], const s32 to[3],
+                          s16 damage)
+{
+    q2_scene_node node;
+    s32 best_at[3] = { 0, 0, 0 };
+    s32 at[3];
+    u32 i, made = 0;
+    int best = -1;
+    s64 best_d2 = 0;
+
+    if (!sim || !sim->breakable_scene || !sim->breakable_count || !from || !to)
+        return 0;
+
+    /* The sweep: every in-use slot, nearest crossing wins — 0x80053AA4 walks
+     * all 48 and keeps the closest for the same reason. */
+    for (i = 0; i < sim->breakable_count; i++) {
+        const q2_breakable *b = &sim->breakable[i];
+        s64 d2;
+        int k;
+
+        if (b->broken)
+            continue;
+        if (!segment_hits_box(from, to, b->bmin, b->bmax, at))
+            continue;
+
+        d2 = 0;
+        for (k = 0; k < 3; k++) {
+            s64 d = (s64)at[k] - from[k];
+            d2 += d * d;
+        }
+        if (best < 0 || d2 < best_d2) {
+            best    = (int)i;
+            best_d2 = d2;
+            best_at[0] = at[0]; best_at[1] = at[1]; best_at[2] = at[2];
+        }
+    }
+
+    if (best < 0)
+        return 0;
+
+    {
+        q2_breakable *b = &sim->breakable[best];
+
+        if (!q2_scene_get_node(sim->breakable_scene, (u32)b->scene_node, &node))
+            return 0;
+
+        sim->breakable_hits++;
+
+        /*
+         * The hit burst runs on EVERY call — 0x8002A384 is before the branch
+         * that tests the damage — and comes out of the crossing point. Then the
+         * hit points, which the console subtracts in the ITEM rather than in
+         * the object, so a pane that has taken two shots remembers it.
+         */
+        made += q2_sim_debris_burst(sim, node.bbox_min, node.bbox_max, best_at,
+                                    b->count_a, 0);
+
+        if (damage != 0) {
+            b->health = (s16)(b->health - damage);
+            if (b->health > 0)
+                return made;
+        }
+
+        /* The shatter, across the whole box: 0x8002A3DC passes zero for the
+         * origin and the burst then scatters uniformly through the node. */
+        made += q2_sim_debris_burst(sim, node.bbox_min, node.bbox_max, NULL,
+                                    b->count_b, 0);
+        b->broken = true;
+    }
+
+    sim->breakable_pieces += made;
     return made;
 }
