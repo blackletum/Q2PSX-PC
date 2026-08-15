@@ -5130,8 +5130,29 @@ nothing saying so.
       92 conflicts of 97: names ARE the mechanism, so the conflict means the port is pairing AI ranges to the
       wrong names, not that names are irrelevant.
 
-      **What is now the open question** is narrower again: what name does the caller pass? `0x8003CBD8`
-      builds it from bytes before the call, and finding that source finishes the chain.
+      **And the name the caller passes is a string literal in the EXE.** `0x8003C854` and `0x8003C8EC`
+      materialise `0x800AC584` and `0x800AC590`, and that region is a 12-byte-stride table of its own:
+
+          800AC560  Run          800AC59C  Jump
+          800AC56C  Attak        800AC5A8  Pain 1
+          800AC578  Death 1      800AC5B4  Pain 2
+          800AC584  Death 2
+          800AC590  Death 3
+
+      `Run`, `Attak`, `Death 1/2/3`, `Jump`, `Pain 1/2` — **a player's animation set**, not a creature's, and
+      `Attak` is spelt that way on the disc. So `0x8003CBxx` is the player-model path, and it reaches its
+      animations exactly as predicted: build a 12-byte name, hand it to `0x8006D330`, get a block-D record.
+
+      So the chain is complete for the player and the mechanism is confirmed twice over. For a creature the
+      same lookup must be handed the creature's own move name, which is the table
+      `q2_creature_move_names()` already reads — the names on both sides ARE the same strings
+      (`Sway`, `Walk`, `Melee`, `Death 2` appear in the Arachner's module and its block D alike).
+
+      **Which sharpens #62 rather than settling it.** Pairing by name is not in doubt any more; what #62
+      measured was whether an AI move's length times three equals its same-named block-D move's length, and
+      that fails 92 of 97. Both cannot hold unless **an AI move's frame range is not the same quantity as its
+      animation's length** — which is now the single remaining question in this whole chain, and a much
+      better-posed one than "which clip does it play".
 
 - [ ] 64. **The first code found that walks block D — and it names the `rest` field.**
       Hunting the load-time transform (#51f, #63) by asking who reads `model+0x38`:
