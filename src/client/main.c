@@ -346,6 +346,13 @@ typedef struct client {
      */
     bool              fire_triggers;
     long              fire_at_frame;
+    /*
+     * Re-armed after every level change, so one invocation walks the game
+     * rather than one level. The interval is measured from each arrival, which
+     * is what gives a map time to load, spawn and settle before its volumes
+     * are fired.
+     */
+    long              fire_interval;
 
     /*
      * WHAT THE PLAYER TAKES THROUGH A DOOR.
@@ -398,6 +405,9 @@ typedef struct client {
     u32               secret_seen[64];   /* item offsets already counted */
     u32               secret_seen_count;
     int               mission_row_next;  /* which of the six rows to fill */
+    char              map_title[64];     /* the level's own name, `MapTitle` */
+    char              secret_message[64];/* `FoundASecret`, the map's words  */
+    int               map_unit;          /* from `Unit<N>Miss1`              */
     bool              mission_after_map; /* the screen is holding a LOADMAP */
     u32               mission_frames;
 
@@ -1372,15 +1382,41 @@ static void client_mission_record(client *c)
         }
     }
 
+    /*
+     * A UNIT's table, not a session's. The screen says "Mission N - Complete"
+     * and lists that unit's levels in its six rows, so crossing into a new unit
+     * starts a new table rather than pushing the previous unit's levels off the
+     * bottom. The unit is the map's own, from `Unit<N>Miss1`, and the disc's
+     * maps group by it exactly as the game does: Base 1, Jail and Security 2,
+     * Power and Waste 3, Lab/Command/BigGun 4, the bosses 5.
+     */
+    if (c->map_unit > 0 && c->map_unit != c->mission.unit &&
+        c->mission_row_next > 0) {
+        q2_mission_init(&c->mission);
+        c->mission_row_next = 0;
+    }
+
     if (c->mission_row_next < Q2_MISSION_ROWS) {
-        q2_mission_set_row(&c->mission, c->mission_row_next, c->map,
+        /* The level's OWN name, not its directory: `MapTitle` says "Outer
+         * Base" where the folder says BASE1, and the console's Location column
+         * is the former. Falling back to the directory keeps a map with no
+         * Strings chunk from drawing a blank row, which would be skipped. */
+        const char *name = c->map_title[0] ? c->map_title : c->map;
+
+        q2_mission_set_row(&c->mission, c->mission_row_next, name,
                            (int)c->secrets_found, (int)c->secrets_total,
                            (int)dead, (int)placed);
         c->mission_row_next++;
     }
 
-    Q2_INFO("mission: %s — secrets %u/%u, kills %u/%u",
-            c->map, c->secrets_found, c->secrets_total, dead, placed);
+    /* "Mission %d - Complete" wants the unit, and the map tells us which it is
+     * through the `Unit<N>Miss1` key it carries. */
+    if (c->map_unit > 0)
+        c->mission.unit = c->map_unit;
+
+    Q2_INFO("mission: %s (unit %d) — secrets %u/%u, kills %u/%u",
+            c->map_title[0] ? c->map_title : c->map, c->mission.unit,
+            c->secrets_found, c->secrets_total, dead, placed);
 }
 
 /*
@@ -1532,8 +1568,15 @@ static void client_event_call(void *user, const q2_event_item *item,
                     sizeof(c->secret_seen) / sizeof(c->secret_seen[0]))
                     c->secret_seen[c->secret_seen_count++] = off;
                 c->secrets_found++;
-                Q2_INFO("secret found: %u of %u", c->secrets_found,
-                        c->secrets_total);
+
+                /* The map's own words, on the overlay — which is what makes
+                 * "counter++" a thing the player can see happen. */
+                if (c->secret_message[0])
+                    q2_hud_message(&c->hud, c->secret_message);
+
+                Q2_INFO("secret found: %u of %u — \"%s\"", c->secrets_found,
+                        c->secrets_total,
+                        c->secret_message[0] ? c->secret_message : "(no text)");
             }
         }
     }
@@ -1817,15 +1860,45 @@ static bool client_load_zone(client *c, const char *map, int index)
                         const char *s2;
                         int unit, step;
 
+                        /*
+                         * `MapTitle` is the level's OWN name — "Outer Base"
+                         * where the directory says BASE1 — and it is what the
+                         * mission screen's Location column wants as much as
+                         * the briefing does. The level table's `display` is
+                         * not it: that column reads "Base1".
+                         */
                         s2 = q2_leveltext_find(&tx, "MapTitle");
-                        if (s2)
+                        c->map_title[0] = ' ';
+                        if (s2) {
                             q2_briefing_set_location(&c->briefing, s2);
+                            snprintf(c->map_title, sizeof(c->map_title),
+                                     "%s", s2);
+                        }
 
+                        /*
+                         * `FoundASecret` is the message INSECRET shows, and it
+                         * is the map's own words rather than a string this port
+                         * would otherwise have had to invent.
+                         */
+                        c->secret_message[0] = ' ';
+                        s2 = q2_leveltext_find(&tx, "FoundASecret");
+                        if (s2)
+                            snprintf(c->secret_message,
+                                     sizeof(c->secret_message), "%s", s2);
+
+                        /*
+                         * And the UNIT, which the mission screen's title needs
+                         * ("Mission %d - Complete") and which nothing was
+                         * reading. The scan below already finds it — a map
+                         * carries `Unit<N>Miss1` for its own unit and no other
+                         * — so it is recorded rather than discarded.
+                         */
                         for (unit = 1; unit <= 9; unit++) {
                             q2_leveltext_key_objective(key, unit);
                             s2 = q2_leveltext_find(&tx, key);
                             if (s2) {
                                 q2_briefing_set_objective(&c->briefing, s2);
+                                c->map_unit = unit;
                                 break;
                             }
                         }
@@ -4899,6 +4972,7 @@ int main(int argc, char **argv)
             c.fire_triggers = true;
             if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9')
                 c.fire_at_frame = strtol(argv[++i], NULL, 10);
+            c.fire_interval = c.fire_at_frame > 0 ? c.fire_at_frame : 60;
         }
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc)
             c.frames_total = strtol(argv[++i], NULL, 10);
@@ -5601,6 +5675,14 @@ no_window:
             if (!c.mission_open) {
                 c.mission_after_map = false;
                 client_change_map(&c, c.pending_map, c.pending_start);
+
+                /* Re-arm, so one `--fire-triggers` walks the game rather than
+                 * one level. Without this a scripted run stops at the first
+                 * boundary, having proved only that the first boundary works. */
+                if (c.fire_interval > 0) {
+                    c.fire_triggers = true;
+                    c.fire_at_frame = (long)c.frame_index + c.fire_interval;
+                }
             }
         }
 

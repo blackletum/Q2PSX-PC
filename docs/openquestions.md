@@ -5666,3 +5666,45 @@ those marker heights ever turn out to mean something, the spread above is the ev
 
 **Still open, unchanged:** the view weapon is about two-thirds the size retail draws it, and no single `proj`
 change accounts for it.
+
+## The view weapon was never separately wrong: it and the FOV are one bug
+
+Measuring the reconstruction against the pillarboxed retail capture (game area 1500x1125, so both normalise to
+the same 0..1 frame), with everything expressed as a fraction of frame width/height:
+
+| feature | retail | port |
+|---|---|---|
+| HUD "100" | 0.053 .. 0.187 | 0.047 .. 0.180 |
+| HUD cross | 0.197 .. 0.233 | 0.193 .. 0.233 |
+| weapon strip icon | 0.833 .. 0.880 | 0.840 .. 0.893 |
+| blaster, **height** | 0.205 | 0.195 |
+| blaster, **width** | 0.197 | 0.127 |
+
+The HUD is drawn in framebuffer pixels and matches everywhere. The weapon is drawn through the projection, and
+its HEIGHT matches while its WIDTH does not — which is not a scale error and not a placement error. It is an
+anamorphic one, and it applies to the whole world, not to the weapon:
+
+    ours w/h 0.651   retail w/h 0.961   ratio 0.678
+
+**The factor is exact.** The framebuffer is 512x248 shown on a 4:3 display, so its pixels are not square:
+
+    (512/248) / (4/3) = 1.5484        and        1 / 0.678 = 1.475 measured
+
+`proj` is 160 and the GTE applies one `h` to both axes, giving hFOV 116.0 and vFOV 75.6. A geometrically
+correct image at that vFOV on a 4:3 display needs hFOV **91.9**, i.e. a horizontal projection distance of
+**247.7 = 160 x 1.5484**. Retail is the correct one; the port is the 116-degree one. The doorway confirms it
+independently: retail's centre at 0.407 squashed about the screen centre by 2/3 predicts 0.438, and the port
+draws it at 0.434.
+
+So `q2psx-inspect`'s "the console's frustum" framing note is describing an anamorphic frustum as if it were the
+finished picture.
+
+**Where the correction cannot go: the GTE.** `gte_rtps` is a bit-exact hardware model with conformance tests
+(FIDELITY.md), and the hardware has exactly one `h`. A separate `h` for x would be inventing a register. The
+console must therefore carry the aspect somewhere the GTE already reads it — the obvious candidate is the view
+ROTATION matrix, whose first row can absorb a 1.5484 scale at no runtime cost, which would also explain why no
+second projection constant has ever turned up in the view record. Not yet verified, and the risk to check first
+is whether that matrix is also used for anything normal-like, where a scaled row would be wrong.
+
+Consequence worth stating plainly: **there is no separate view-weapon sizing bug to chase.** Once the horizontal
+projection is right the weapon comes with it, and the two remaining entries on this list collapse into one.
