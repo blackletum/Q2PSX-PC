@@ -76,6 +76,43 @@ static void test_moves_tile_without_gaps(void)
     check_eq(216 - 214, Q2_MODEL_BLOCKD_PER_FRAME, "the gap is one frame");
 }
 
+
+/*
+ * The position formula, against the Arachner's real block-D table.
+ *
+ * Its `Walk` record is 360..418 in block-D units, so `start` is 360 and the
+ * animation begins at position 360 * 5 = 1800. Its AI walk is frames 16..24, so
+ * frame 16 sits at 1800 and each AI frame after adds 30.
+ *
+ * The x5 and the 30 are the two units meeting: block D counts 2 per animation
+ * frame, the position counts 10, and an AI frame is three animation frames.
+ * Getting either wrong is a silent mis-pose rather than a failure, which is why
+ * this pins the arithmetic directly rather than through a lookup.
+ */
+static void test_position_formula(void)
+{
+    /* start * 5 + 30 * (f - first), computed the long way. */
+    struct { s32 start, first, f, want; } k[] = {
+        { 360, 16, 16, 1800 },          /* the move's own first frame */
+        { 360, 16, 17, 1830 },          /* one AI frame on */
+        { 360, 16, 24, 2040 },          /* its last, eight frames in */
+        {   0,  0,  0,    0 },          /* a move at the timeline's start */
+        {   0,  0, 10,  300 },          /* ten AI frames = 30 model frames */
+    };
+    u32 i;
+
+    for (i = 0; i < sizeof(k) / sizeof(k[0]); i++) {
+        s32 got = k[i].start * 5
+                + (k[i].f - k[i].first) * Q2_MODEL_POS_PER_MOVE_FRAME;
+        check_eq(got, k[i].want, "position = start*5 + 30*(f - first)");
+    }
+
+    /* The two units, stated so a change to either is caught here. */
+    check_eq(Q2_MODEL_POS_PER_MOVE_FRAME, 30, "30 position units per AI frame");
+    check_eq(Q2_MODEL_BLOCKD_PER_FRAME,    2, "block D counts 2 per frame");
+    check_eq(Q2_MODEL_TICKS_PER_FRAME,    10, "the position counts 10");
+}
+
 int main(void)
 {
     puts("block D: the move table");
@@ -84,6 +121,7 @@ int main(void)
     test_span_matches_clip_length();
     test_degenerate_spans();
     test_moves_tile_without_gaps();
+    test_position_formula();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;

@@ -576,6 +576,32 @@ u32 q2_model_move_frames(const q2_model_move *mv);
 /* Block D counts 2 units per animation frame; the position counts 10. */
 #define Q2_MODEL_BLOCKD_PER_FRAME 2
 
+/*
+ * The animation POSITION for an AI frame — the engine's own path, end to end.
+ *
+ *     position = block_d[name].start * 5 + 30 * (ai_frame - move_first)
+ *
+ * Each term is read off the disc:
+ *
+ *   name lookup   0x8006D330 walks block D comparing 12-byte names
+ *   * 5           block D counts 2 units per animation frame, the position 10
+ *   30 per frame  0x8007EA44, which is 3 model frames at 10 units each
+ *   the walk      0x8006B924 subtracts clip durations until the position lands
+ *
+ * `ai_frame` and `move_first` come from the CREATURE, not the model: they are a
+ * duration, how long the creature spends in the move. The block-D span is the
+ * animation's extent. Nothing requires them to agree — a move shorter than its
+ * animation stops partway, and a longer one runs on into whatever follows on the
+ * continuous timeline, which is legal because a clip boundary is only where the
+ * subtractions fall.
+ *
+ * Feed the result to `q2_model_anim_at()`, which already walks a position to a
+ * clip. That pair replaces `q2_model_anim_by_length()`, which matches a clip by
+ * length — something the disc never does.
+ */
+bool q2_model_position_for_move(const q2_model *m, const char *move_name,
+                                s32 ai_frame, s32 move_first, u32 *out_pos);
+
 /* Position units per AI frame within a move, from `0x8007EA44`. */
 #define Q2_MODEL_POS_PER_MOVE_FRAME 30
 

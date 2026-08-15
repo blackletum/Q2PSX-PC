@@ -372,6 +372,28 @@ bool q2_model_clip_for_move(const q2_model *m, u32 index, q2_model_anim *out)
     return true;
 }
 
+bool q2_model_position_for_move(const q2_model *m, const char *move_name,
+                                s32 ai_frame, s32 move_first, u32 *out_pos)
+{
+    q2_model_move mv;
+    s32 pos;
+
+    if (!out_pos || !q2_model_move_by_name(m, move_name, &mv))
+        return false;
+    if (ai_frame < move_first)
+        return false;
+
+    /* block D counts 2 units per animation frame; the position counts 10. */
+    pos = (s32)mv.start * 5
+        + (ai_frame - move_first) * Q2_MODEL_POS_PER_MOVE_FRAME;
+
+    if (pos < 0)
+        return false;
+
+    *out_pos = (u32)pos;
+    return true;
+}
+
 bool q2_model_move_by_name(const q2_model *m, const char *name,
                            q2_model_move *out)
 {

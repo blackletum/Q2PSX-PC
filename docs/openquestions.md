@@ -5169,8 +5169,20 @@ nothing saying so.
       and the 96/101 is how often the two happen to coincide.
 
       **The chain is closed**: name -> block D record -> `base` -> `position = base + 30*(f - first)` ->
-      walk the clip chain. Every term read from the disc, nothing inferred. What the port still lacks is
-      the code, not the knowledge.
+      walk the clip chain. Every term read from the disc, nothing inferred.
+
+      **And it is now code.** `q2_model_position_for_move()` looks the move up by name — the engine's own
+      mechanism, `0x8006D330` — and returns
+
+          position = block_d[name].start * 5 + 30 * (ai_frame - move_first)
+
+      which feeds `q2_model_anim_at()`, the walk this port already had. Together they replace
+      `q2_model_anim_by_length()`, which matches a clip by length: something the disc never does.
+
+      `tests/model` pins the arithmetic against the Arachner's real table — its `Walk` starts at block-D 360,
+      so position 1800, and each AI frame adds 30 — and asserts all three units (2 per frame in block D, 10
+      in the position, 30 per AI frame). Getting any of them wrong is a silent mis-pose rather than a
+      failure, which is why they are pinned as constants rather than left implicit in one formula.
 
 - [ ] 64. **The first code found that walks block D — and it names the `rest` field.**
       Hunting the load-time transform (#51f, #63) by asking who reads `model+0x38`:
