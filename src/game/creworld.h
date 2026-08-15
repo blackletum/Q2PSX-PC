@@ -222,16 +222,24 @@ u32 q2_creature_world_summon(q2_creature_world *w, const char *group);
 /*
  * Hold back every creature whose group is a script's rather than the level's.
  *
- * A group named `Zone<N>` is that zone's own population and stands there from
- * the start; anything else — `ShotgunRoom`, `BerserkHide` — is a batch. That
- * split is `q2_pop_group_zone`'s and it is what stands in for the LevelBin
- * selection this port cannot run: 58 of the disc's 89 resolvable CREBATCH
- * calls name a group claiming no zone, so the two readings agree.
+ * WHICH groups stand there is the map's LevelBin's answer, and it is now read
+ * rather than guessed at (levelbin.h): `q2_levelbin_selected` decodes the
+ * module's calls to the engine's group selector and hands back the names. Pass
+ * the module and it is used.
+ *
+ * Without one, the fallback is the naming rule #79 used — a group called
+ * `Zone<N>` is that zone's own population and anything else is a batch. That
+ * rule is not a guess any more either: across the disc the modules make 83
+ * selector calls, 71 resolve to a real group, and **69 of those 71 claim a
+ * zone**. The two that do not are JAIL3's `Jail4Return` and `Jail5Return` —
+ * populations for coming BACK to a level, which the module selects
+ * conditionally and a static scan cannot gate.
  *
  * Call after the world has loaded and before it wakes. Returns how many were
  * held.
  */
-u32 q2_creature_world_hold_batches(q2_creature_world *w, int resident_zone);
+u32 q2_creature_world_hold_batches(q2_creature_world *w, int resident_zone,
+                                   const u8 *levelbin, u32 levelbin_size);
 
 void q2_creature_world_free(q2_creature_world *w);
 

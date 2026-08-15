@@ -854,8 +854,10 @@ static void client_load_creatures(client *c, const s32 eye[3])
      * See q2_creature_world_hold_batches.
      */
     {
-        u32 held = q2_creature_world_hold_batches(&c->creatures,
-                                                  c->zone_index);
+        const dat_chunk *lb = c->common.chunk[Q2_COMMON_LEVEL_BIN];
+        u32 held = q2_creature_world_hold_batches(
+            &c->creatures, c->zone_index,
+            lb ? lb->data : NULL, lb ? lb->size : 0);
         if (held)
             Q2_INFO("creatures: %u held back, waiting for a CREBATCH", held);
     }
@@ -1780,7 +1782,19 @@ static void client_event_call(void *user, const q2_event_item *item,
                      c->map_unit > 0 ? c->map_unit : 1);
             e = q2_level_find_display(&c->level_table, want);
 
-            if (e && !e->is_placeholder && e->directory[0]) {
+            if (c->map_change_pending) {
+                /*
+                 * A LOADMAP already queued this frame wins.
+                 *
+                 * A unit's last level carries BOTH — BASE2 has three LOADMAPs
+                 * and the unit-1 MISCOMPLETE — and a player fires one of them,
+                 * by walking into one volume. `--fire-triggers` fires every
+                 * volume at once, so within that one artificial batch the
+                 * ordering means nothing and a later item must not clobber an
+                 * earlier decision. First writer wins.
+                 */
+                Q2_INFO("MISCOMPLETE: a level change is already queued");
+            } else if (e && !e->is_placeholder && e->directory[0]) {
                 snprintf(c->pending_map, sizeof(c->pending_map), "%s",
                          e->directory);
                 snprintf(c->pending_start, sizeof(c->pending_start),

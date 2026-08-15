@@ -50,6 +50,7 @@
 #include "scene.h"
 #include "entity.h"
 #include "population.h"
+#include "levelbin.h"
 #include "trigger.h"
 #include "userfuncs.h"
 
@@ -200,6 +201,11 @@ int cmd_zonescript(const disc *d, const char *only_map)
      */
     u32 crebatch_calls = 0, crebatch_found = 0, crebatch_zone = 0,
         crebatch_batch = 0;
+    /* Which groups a map's own LevelBin names — the initial selection the
+     * console makes and this port could only guess at. See levelbin.h. */
+    u32 lb_maps = 0, lb_groups = 0, lb_zone = 0, lb_batch = 0;
+    u32 lb_sel_calls = 0, lb_sel_ok = 0, lb_sel_zone = 0, lb_sel_batch = 0;
+    u32 slot_hit[128], slot_calls[128];
     u32 prim_run[Q2_UF_PRIM_COUNT];
     u32 prim_have[Q2_UF_PRIM_COUNT];
     u32 loadmap_map_ok = 0, loadmap_map_missing = 0,
@@ -208,6 +214,8 @@ int cmd_zonescript(const disc *d, const char *only_map)
         live_turned = 0;
     bool verbose = (only_map != NULL);
 
+    memset(slot_hit, 0, sizeof(slot_hit));
+    memset(slot_calls, 0, sizeof(slot_calls));
     memset(prim_run, 0, sizeof(prim_run));
     memset(prim_have, 0, sizeof(prim_have));
 
@@ -642,6 +650,128 @@ int cmd_zonescript(const disc *d, const char *only_map)
              * with zone 0 resident may turn something with zone 3, and only a
              * call barren under every zone the map ships is genuinely missing.
              */
+            /*
+             * Which groups does this map's own LevelBin name?
+             *
+             * That is the initial selection the console makes and #79 could
+             * only approximate by a group's name claiming a zone. Reading it
+             * needs no interpreter — see levelbin.h.
+             */
+            {
+                const dat_chunk *lb = cf.chunk[Q2_COMMON_LEVEL_BIN];
+                q2_population    pop;
+
+                if (lb && lb->data && lb->size &&
+                    q2_population_parse(&pop, &cf) == Q2_OK) {
+                    u32 gi, named = 0;
+
+                    for (gi = 0; gi < pop.group_count; gi++) {
+                        q2_pop_group g;
+
+                        if (!q2_pop_get_group(&pop, gi, &g))
+                            continue;
+                        if (!q2_levelbin_names_group(lb->data, lb->size, &g))
+                            continue;
+
+                        named++;
+                        if (q2_pop_group_zone(&g) >= 0)
+                            lb_zone++;
+                        else
+                            lb_batch++;
+                        if (verbose)
+                            printf("    %s: LevelBin names group '%s'"
+                                   " (zone %d)\n",
+                                   g_maps[mi], g.name, q2_pop_group_zone(&g));
+                    }
+
+                    lb_groups += named;
+                    if (named)
+                        lb_maps++;
+
+                    /*
+                     * And the SELECTIONS, decoded from the call sites rather
+                     * than the strings. Every offset must land on a name the
+                     * map's Population actually carries — that is the check,
+                     * and there is no reason for a wrong decode to pass it.
+                     */
+                    /*
+                     * WHICH SLOT is the selector, swept rather than assumed.
+                     * For every offset a module calls with a name argument,
+                     * count how many of the names are real groups. The right
+                     * slot's are all of them; every other slot's are none.
+                     */
+                    {
+                        s32 so;
+
+                        for (so = 0; so < 512; so += 4) {
+                            u32 sl[32];
+                            u32 k, got = q2_levelbin_selected_slot(
+                                lb->data, lb->size, so, sl, 32);
+
+                            for (k = 0; k < got && k < 32; k++) {
+                                char nm[13];
+
+                                memcpy(nm, lb->data + sl[k], 12);
+                                nm[12] = 0;
+
+                                for (gi = 0; gi < pop.group_count; gi++) {
+                                    q2_pop_group g;
+
+                                    if (!q2_pop_get_group(&pop, gi, &g))
+                                        continue;
+                                    if (strcmp(g.name, nm) != 0)
+                                        continue;
+                                    slot_hit[so / 4]++;
+                                    break;
+                                }
+                                slot_calls[so / 4]++;
+                            }
+                        }
+                    }
+
+                    {
+                        u32 sel[32];
+                        u32 k, got = q2_levelbin_selected(lb->data, lb->size,
+                                                          sel, 32);
+
+                        lb_sel_calls += got;
+                        for (k = 0; k < got && k < 32; k++) {
+                            char nm[13];
+                            bool matched = false;
+
+                            memcpy(nm, lb->data + sel[k], 12);
+                            nm[12] = 0;
+
+                            for (gi = 0; gi < pop.group_count; gi++) {
+                                q2_pop_group g;
+
+                                if (!q2_pop_get_group(&pop, gi, &g))
+                                    continue;
+                                if (strcmp(g.name, nm) != 0)
+                                    continue;
+                                matched = true;
+                                if (q2_pop_group_zone(&g) >= 0)
+                                    lb_sel_zone++;
+                                else
+                                    lb_sel_batch++;
+                                if (verbose)
+                                    printf("    %s: LevelBin SELECTS '%s'"
+                                           " (zone %d)\n",
+                                           g_maps[mi], g.name,
+                                           q2_pop_group_zone(&g));
+                                break;
+                            }
+
+                            if (matched)
+                                lb_sel_ok++;
+                            else if (verbose)
+                                printf("    %s: LevelBin selects '%s'"
+                                       " — NO SUCH GROUP\n", g_maps[mi], nm);
+                        }
+                    }
+                }
+            }
+
             if (zcount && cev.size) {
                 u8 *any = (u8 *)calloc(cev.size, 1);
                 u8 *ran = (u8 *)calloc(cev.size, 1);
@@ -888,6 +1018,22 @@ int cmd_zonescript(const disc *d, const char *only_map)
            crebatch_zone);
     printf("      the group claims none (a batch a script summons)     : %u\n",
            crebatch_batch);
+    printf("    the map's own LevelBin NAMES a group on %u maps, %u groups\n",
+           lb_maps, lb_groups);
+    printf("      of those, claiming a zone : %u, claiming none : %u\n",
+           lb_zone, lb_batch);
+    printf("    LevelBin SELECT call sites decoded : %u, naming a real "
+           "group : %u\n", lb_sel_calls, lb_sel_ok);
+    printf("      the group claims a zone : %u, claims none : %u\n",
+           lb_sel_zone, lb_sel_batch);
+    printf("    which engine slot takes a GROUP NAME (offset: hits/calls)\n");
+    {
+        int so;
+        for (so = 0; so < 128; so++)
+            if (slot_calls[so])
+                printf("      +%-4d  %4u / %-4u\n",
+                       so * 4, slot_hit[so], slot_calls[so]);
+    }
 
     /*
      * Every primitive a player who has walked the whole disc would run, by

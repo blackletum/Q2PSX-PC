@@ -6253,3 +6253,62 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       *And the destination is a stub in this port.* `QENDMIS2` loads as 2 quads and 2 nodes and draws
       nothing, because its content is its `LevelBin` module's — the same blocker as #85, #6 and
       CREBATCH's initial selection. The transition is real; what is on the other side of it is not yet.
+
+- [x] 87. **The LevelBin's group selection, read without running the module — and #79's rule turns out to
+      be the module's own.**
+
+      `population.h` states the blocker: a group is spawned because a script SELECTED it, the flags word
+      is zero on disc for all 222 groups of all 49 maps, and *"which groups a level selects therefore
+      lives in its `LevelBin`, which this port does not run"*. #79 approximated it by a naming rule. The
+      module can be READ instead, which is what `q2_fx_glint_scan` already does for the glint.
+
+      **The call, from BASE1's zone handler at module+0x94:**
+
+          801000A0  addiu a3, v0, 12     ; a3 = module + 0xC = "Zone0"
+          801000A4  lbu   v1, 1(a3)      ; ...and twenty more
+          ...       lw    vX, 36(rY)     ; the engine block's slot 9
+          ...       jalr  vX
+
+      A twelve-byte name arrives BY VALUE in a0/a1/a2, assembled byte by byte from a pointer the compiler
+      picked — which is why a first attempt that looked for `addiu a0` found 21 call sites and **zero**
+      real group names.
+
+      **Which slot is the selector was SWEPT, not assumed.** For every offset a module calls with a
+      name-shaped argument, count how many of those names are groups the map ships:
+
+          +36    71 / 83      <- the selector
+          +136    4 / 5
+          +28     1 / 20
+          +32     1 / 20
+          everything else  0 / n
+
+      One offset accounts for essentially every hit and the rest for none. `36 = 4 * 9`, so FORMATS §15.5's
+      slot numbering indexes the block directly — slot 0 IS the size word — and an earlier reading here of
+      "4 + 4*N" was wrong.
+
+      **And the answer confirms #79 rather than replacing it.** Of the 71 selections that resolve, **69
+      claim a zone**. The two that do not are JAIL3's `Jail4Return` and `Jail5Return` — populations for
+      coming BACK to a level, selected conditionally, and now reachable because the client takes the
+      module's list first and falls back to the naming rule only where the module says nothing. No
+      CREBATCH names either of them, so before this they could never have spawned at all.
+
+      Also settled by the string scan alongside it: every group a level uses is named in its LevelBin —
+      75 groups across 21 maps — but a mention is not a selection. JAIL3's `Bridge` is named by the module
+      AND by a CREBATCH, which is what forced the call decode rather than the string search.
+
+- [x] 88. **The campaign runs end to end.** Five maps carry a `MISCOMPLETE` and it is **one per unit, on
+      that unit's last level**: BASE2 ends unit 1, SECURITY 2, POWER2 3, COMMAND 4, BOSS2 5. Nothing was
+      tuned to produce that; it falls out of the unit numbers recovered from `Unit<N>Miss1` (#70) meeting
+      the five calls.
+
+      A unit's last level therefore carries BOTH a LOADMAP and a MISCOMPLETE — BASE2 has three of the
+      former — and a player fires one of them by walking into one volume. `--fire-triggers` fires every
+      volume at once, so within that artificial batch the ordering means nothing and the first writer
+      wins; otherwise the unit end clobbers the level exit and a scripted run stops at BASE2.
+
+      With that, one run walks:
+
+          BASE0 -> Base1 -> Base2 -> Jail2 -> Jail3 -> Security -> Power1 ->
+          Power2 -> command -> Boss1 -> Boss2 -> QENDMIS5
+
+      twelve levels, five units, ending on the last unit's own end-of-mission screen.

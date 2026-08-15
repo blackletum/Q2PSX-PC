@@ -1,5 +1,7 @@
 #include "creworld.h"
 
+#include "levelbin.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -547,12 +549,18 @@ u32 q2_creature_world_summon(q2_creature_world *w, const char *group)
     return woke;
 }
 
-u32 q2_creature_world_hold_batches(q2_creature_world *w, int resident_zone)
+u32 q2_creature_world_hold_batches(q2_creature_world *w, int resident_zone,
+                                   const u8 *levelbin, u32 levelbin_size)
 {
     u32 i, held = 0;
+    u32 sel[32];
+    u32 sel_count = 0;
 
     if (!w || !w->pop_ready)
         return 0;
+
+    if (levelbin && levelbin_size)
+        sel_count = q2_levelbin_selected(levelbin, levelbin_size, sel, 32);
 
     for (i = 0; i < w->set.count; i++) {
         q2_monster *m = &w->set.monsters[i];
@@ -565,6 +573,33 @@ u32 q2_creature_world_hold_batches(q2_creature_world *w, int resident_zone)
             continue;
 
         zone = q2_pop_group_zone(&g);
+
+        /*
+         * The module's own answer first: a group its init SELECTS is one the
+         * level starts with, whatever the group is called. That is what makes
+         * JAIL3's `Jail4Return` reachable at all — the naming rule below would
+         * hold it back for ever, since no CREBATCH names it either.
+         */
+        if (sel_count) {
+            u32 k;
+            bool selected = false;
+
+            for (k = 0; k < sel_count; k++) {
+                char nm[13];
+
+                if (sel[k] + 12 > levelbin_size)
+                    continue;
+                memcpy(nm, levelbin + sel[k], 12);
+                nm[12] = 0;
+                if (strcmp(nm, g.name) == 0) {
+                    selected = true;
+                    break;
+                }
+            }
+
+            if (selected && (zone < 0 || zone == resident_zone))
+                continue;
+        }
 
         /* A group named after THIS zone is the level's own population. One
          * named after another zone is that zone's business. Anything else is a

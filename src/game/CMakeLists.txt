@@ -49,6 +49,7 @@ add_library(q2psx_game STATIC
     briefing.h
     mission.c
     mission.h
+    levelbin.c
     mover.c
     mover.h
     rotator.c
