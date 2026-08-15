@@ -438,6 +438,19 @@ u32 q2_stx_overrun_by_len[20];
 u32 q2_stx_overrun_escape;
 u32 q2_stx_overrun_run_max;
 
+/*
+ * Which TABLE ENTRY overran, not which length.
+ *
+ * A code whose run is too large pushes the coefficient index past 63 and does
+ * it repeatedly; a code with the right run does not. Counting per entry turns
+ * "the run column is wrong" into a ranked list of which rows, which is a
+ * repair rather than a diagnosis. Blame goes to the code that made the jump,
+ * so an entry that only ever fails because an earlier one left the index high
+ * shows a low count while the real offender shows a high one.
+ */
+u32 q2_stx_overrun_by_code[128];
+u32 q2_stx_code_uses[128];
+
 static void q2_stx_unmatched(u32 look)
 {
     u32 lz = 0, i;
@@ -522,6 +535,21 @@ u32 q2_stx_unmatched_tails(u32 lz, u32 width, u32 *out, u32 max)
     return n;
 }
 
+u32 q2_stx_code_count(void)
+{
+    return AC_COUNT;
+}
+
+bool q2_stx_code_at(u32 i, u32 *len, u32 *run, u32 *level)
+{
+    if (i >= AC_COUNT)
+        return false;
+    if (len)   *len   = k_ac[i].len;
+    if (run)   *run   = k_ac[i].run;
+    if (level) *level = k_ac[i].level;
+    return true;
+}
+
 /* ------------------------------------------------------------------------- */
 static void idct8x8(const s32 in[64], s32 out[64])
 {
@@ -590,7 +618,7 @@ static bool decode_block(bitreader *b, u32 qscale, s32 out[64])
 
     for (;;) {
         u32 look = br_peek(b, 17);
-        u32 run = 0, len = 0;
+        u32 run = 0, len = 0, which = 0xFFFFFFFFu;
         s32 level = 0;
         bool got = false;
 
@@ -622,6 +650,9 @@ static bool decode_block(bitreader *b, u32 qscale, s32 out[64])
                     level = k_ac[i].level;
                     len   = l;
                     got   = true;
+                    which = i;
+                    if (i < 128)
+                        q2_stx_code_uses[i]++;
                     break;
                 }
             }
@@ -647,6 +678,8 @@ static bool decode_block(bitreader *b, u32 qscale, s32 out[64])
             q2_stx_fail_overrun++;
             if (len < 20)
                 q2_stx_overrun_by_len[len]++;
+            if (which < 128)
+                q2_stx_overrun_by_code[which]++;
             if (len == 0)
                 q2_stx_overrun_escape++;
             if (run > q2_stx_overrun_run_max)
@@ -719,6 +752,10 @@ bool q2_stx_frame_decode(const q2_stx_frame *f, u8 *out,
 
                     li = (py / 8) * 2 + (px / 8);
                     yy = blk[2 + li][(py % 8) * 8 + (px % 8)] + 128;
+                    /* Cr then Cb. Swapping them was tried and changes the
+                     * COLOURS of the artefacts without changing their
+                     * structure, so it is not the fault and the documented
+                     * order stands. */
                     cr = blk[0][(py / 2) * 8 + (px / 2)];
                     cb = blk[1][(py / 2) * 8 + (px / 2)];
 

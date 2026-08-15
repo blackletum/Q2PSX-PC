@@ -5361,6 +5361,24 @@ static int cmd_movie(const disc *d, const char *name, const char *out_ppm)
             t = q2_stx_unmatched_report(lz, 18);
             printf("    gave up: %u unmatched code, %u run overran 63, %u out of bits\n", q2_stx_fail_unmatched, q2_stx_fail_overrun, q2_stx_fail_dry);
             {
+            {
+                u32 q, nc = q2_stx_code_count();
+
+                printf("    worst rows (overrun / uses):\n");
+                for (q = 0; q < nc && q < 128; q++) {
+                    u32 ln = 0, rn = 0, lv = 0;
+
+                    if (!q2_stx_overrun_by_code[q])
+                        continue;
+                    if (q2_stx_overrun_by_code[q] * 4 <
+                        q2_stx_code_uses[q])
+                        continue;
+                    q2_stx_code_at(q, &ln, &rn, &lv);
+                    printf("      [%2u] %2u-bit run %2u level %2u : %5u of %6u\n", q, ln, rn, lv,
+                           q2_stx_overrun_by_code[q],
+                           q2_stx_code_uses[q]);
+                }
+            }
                 u32 q;
                 printf("    overran by code length:");
                 for (q = 0; q < 20; q++)

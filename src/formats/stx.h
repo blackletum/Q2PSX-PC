@@ -152,6 +152,19 @@ extern u32 q2_stx_overrun_escape;
 extern u32 q2_stx_overrun_run_max;
 
 /*
+ * Per TABLE ENTRY: how often each code was used, and how often it was the one
+ * that pushed the coefficient index past 63. A high overrun-to-use ratio is a
+ * row whose RUN is too large — which turns "the run column is wrong" into a
+ * ranked list of which rows.
+ */
+extern u32 q2_stx_overrun_by_code[128];
+extern u32 q2_stx_code_uses[128];
+
+/* The table, so a caller can report a row beside its counters. */
+u32 q2_stx_code_count(void);
+bool q2_stx_code_at(u32 i, u32 *len, u32 *run, u32 *level);
+
+/*
  * The escape's field widths. Nothing in the bitstream announces them, so they
  * are parameters the disc can score rather than an assertion — see stx.c.
  * Defaults are 6 and 10.

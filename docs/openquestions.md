@@ -7148,7 +7148,37 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       no AC energy rather than evidence about the formula. The change is NOT applied; replacing a sourced
       formula with an unexplained one is worse than leaving it.
 
-      So the position is unchanged and better understood: lengths derived and correct, escape ruled out by
-      sweep, AC path proven to work on thirty frames, run/level column wrong, and **no self-contained way
-      to fix it** — the frames that would judge a candidate are exactly the frames that do not decode.
+      So the position is unchanged and better understood: lengths derived, escape not reached, run/level
+      column wrong, and **no self-contained way to fix it** (and see #112, which withdraws "correct" from
+      the lengths and explains why every metric here was satisfied by a wrong table) — the frames that would judge a candidate are exactly the frames that do not decode.
       **The movies do not play.**
+- [ ] 112. **A correction to my own evidence: "frames decoded exactly" does NOT validate the AC table, and
+      the length derivation is therefore unverified.**
+
+      #108 derived the code lengths from the disc and #110 called them "derived and correct". That second
+      word is not supported, and the picture is what shows it.
+
+      An AC-carrying frame that DECODES — right block count, right bit consumption — looks like this: the
+      first few macroblock ROWS are bands of alternating coloured blocks, and everything below is flat grey
+      with faint texture. That is not a frame with wrong coefficients. **That is a frame that lost
+      synchronisation partway and then degenerated into DC-plus-EOB for the rest.** A desynchronised reader
+      still finds valid-looking codes, so it still terminates each block and still reaches 1440 of them.
+
+      So "decoded exactly" means SELF-CONSISTENT, not correct. Which invalidates the metric everything
+      downstream was scored on:
+
+      - The 248 completions are evidence for the container, the geometry, the 10-bit DC and the 2-bit EOB.
+        They are evidence for **no AC code at all** — every one of those blocks is DC + EOB.
+      - The length derivation used tails collected at the first failure of frames that were, on this
+        reading, already mis-parsed. Fitting a width to those tails may have been fitting noise.
+      - The escape sweep scoring 248 for all eighteen layouts is consistent with the escape never being
+        correctly reached, not with the escape being irrelevant.
+
+      Things that ARE established and survive this: the container and demuxer (frame counts match an
+      independent pass), the frame geometry, the DC width, the EOB code, and that the chroma order is not
+      the fault (swapping Cr and Cb changes the artefacts' colours and not their structure).
+
+      **What this needs is a reference** — MPEG-1 Table B.14's codes with their run/level column, or a
+      known-good STR decoder to compare a single frame's coefficients against. Not because the work is
+      hard, but because every self-contained metric available here is satisfied by a wrong table, and I
+      have now demonstrated that rather than assumed it.
