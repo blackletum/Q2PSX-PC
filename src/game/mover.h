@@ -100,6 +100,9 @@ enum {
     Q2_MV_BLK_IGNORE_CLOSING = 2
 };
 
+/* `prim` for a mover built from a MOVER_A/B/C opcode rather than a CALL. */
+#define Q2_MOVER_PRIM_OPCODE 0xFFu
+
 typedef struct q2_mover {
     s16 node[Q2_MOVER_MAX_PARTS];   /* Scene nodes this group translates */
     u32 part_count;
@@ -122,6 +125,12 @@ typedef struct q2_mover {
     u8  touch_opens;
 
     s32 offset;         /* current displacement along the axis */
+
+    /* Which primitive built it, or Q2_MOVER_PRIM_OPCODE for the MOVER_A/B/C
+     * opcodes, which are not UserFuncs calls at all. Only for reporting: a
+     * build that drops a mover and one that never saw it look identical in a
+     * count. */
+    u8  prim;
 
     s32 partner;        /* index of the other leaf, -1 when single */
 

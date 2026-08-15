@@ -5128,6 +5128,28 @@ static void client_write_shot(client *c, bool numbered)
                 c->script_hidden, c->script_summoned, c->script_teleports,
                 c->script_timers, c->sim[0].event_rt.resumed_count,
                 c->script_disabled);
+        {
+            u32 mi;
+            char kinds[256];
+            size_t at = 0;
+
+            kinds[0] = ' ';
+            for (mi = 0; c->movers_ready && mi < c->movers.count; mi++) {
+                u8 pr = c->movers.movers[mi].prim;
+                const q2_uf_prim_info *pi =
+                    (pr == Q2_MOVER_PRIM_OPCODE) ? NULL
+                                                 : q2_uf_info((q2_uf_prim)pr);
+                const char *nm = (pr == Q2_MOVER_PRIM_OPCODE)
+                                 ? "MOVER_A/B/C" : (pi ? pi->name : NULL);
+
+                if (!nm || strstr(kinds, nm))
+                    continue;
+                at += (size_t)snprintf(kinds + at, sizeof(kinds) - at,
+                                       "%s%s", at ? " " : "", nm);
+            }
+            if (at)
+                Q2_INFO("  movers    built from: %s", kinds);
+        }
         Q2_INFO("  movers    %u built, %u triggered by the script, %u tick-moves",
                 c->movers_ready ? c->movers.count : 0,
                 c->mover_triggers, c->mover_moved);

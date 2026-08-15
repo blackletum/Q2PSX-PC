@@ -7456,3 +7456,29 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
           BIGGUN --keys --fire-triggers     : 1 record retired
 
       The difference between those two lines is the gate working and the primitive working, in one run.
+- [x] 120. **DISH's speed is the constant ONE, and #81 was reading the wrong half of the primitive.**
+      #81 declined to build a DISH because "its operand table names no speed", and #82 left it as the last
+      unbuilt mover. The table is right and the conclusion was wrong: there is no operand because there is
+      no choice. `0x8002E314` writes an immediate —
+
+          80: if (item.len != 8)          return
+          84: obj = objects + 92 * lh(item+6)   ; the object, allocated at load
+          88: if (obj+0x52 != 0)          return ; a ONE-SHOT latch
+          8C: obj+0x52 = 1
+          90: obj+0x44 = (s8)item[+5] << 5      ; the travel
+          94: obj+0x3A = 1                      ; THE SPEED, an immediate
+          98: obj+0x4E = clock + 300            ; one second, the wait
+
+      — exactly as a BUTTON's speed is one unit a tick. Built now, and the last of the movers is in.
+
+      **Where the node comes from is the other half.** The constructor at `0x8002A8DC` rebases `item+6`
+      into the ZONE's copy of the Events chunk and reads the Scene node there, then stamps the runtime
+      object index back over COMMON's copy — which is why the slot reads -1 to anything looking at COMMON.
+      That is #56's two-buffer rebase, and BASE3 shows it plainly: the DISH is dropped under zones 0, 1 and
+      2 with `node -1` and **builds under zone 3 with node 129**. The port asks the rebase for the item's
+      own length rather than a constant 20, because an eight-byte item cannot satisfy a twenty-byte request
+      and would silently fall back to COMMON's -1.
+
+      The build now also SAYS what it dropped and what it built from — `mover dropped: LIFT1 node 0 speed 4`
+      and `built from: MOVER_A/B/C DISH` — because an empty object slot and a primitive the port cannot
+      build look identical in a count, which is the point #81 made and could not act on.

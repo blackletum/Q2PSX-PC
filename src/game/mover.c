@@ -23,6 +23,9 @@ static q2_mover *mover_push(q2_mover_set *set)
         m->portal_node = -1;
         m->partner     = -1;
         m->wait_timer  = Q2_MOVER_WAIT_NEVER;
+        /* Not a primitive: the MOVER_A/B/C opcodes build these, and only the
+         * CALL path overwrites it. Zero would read as the first table row. */
+        m->prim        = Q2_MOVER_PRIM_OPCODE;
         return m;
     }
 }
@@ -288,6 +291,7 @@ q2_result q2_movers_build_calls(q2_mover_set *out, const q2_events *events,
                 call.prim != Q2_UF_CAGELIFT1 &&
                 call.prim != Q2_UF_BUTTON &&
                 call.prim != Q2_UF_PISTON &&
+                call.prim != Q2_UF_DISH &&
                 call.prim != Q2_UF_PLATFORM)
                 continue;
             if (item.len < info_len(call.prim))
@@ -296,13 +300,17 @@ q2_result q2_movers_build_calls(q2_mover_set *out, const q2_events *events,
             /* The operands, rebased the way a rotation call's are: an item the
              * game has already run reads -1 in COMMON's copy and lives at the
              * same offset in the zone's (#56). */
-            p = q2_uf_operand_at(ops, item.payload - 2, 20);
+            /* Ask the rebase for the item's OWN length, not a constant 20:
+             * DISH's item is eight bytes and asking for twenty would refuse to
+             * rebase it and read the -1 in COMMON's copy instead. */
+            p = q2_uf_operand_at(ops, item.payload - 2, item.len);
 
             m = mover_push(out);
             if (!m)
                 return Q2_ERR_NO_MEMORY;
 
             m->axis        = 1;      /* all three of these are vertical */
+            m->prim        = (u8)call.prim;
             m->item_offset = item.offset;
             m->block_flags = Q2_MV_BLK_IGNORE_OPENING;
 
@@ -360,6 +368,27 @@ q2_result q2_movers_build_calls(q2_mover_set *out, const q2_events *events,
                                  : (u16)(p[29] * Q2_MOVER_TIMEBASE);
                 break;
 
+            case Q2_UF_DISH:
+                /*
+                 * The speed is not authored: it is the immediate ONE, written
+                 * by the exec at `0x8002E314` (`addiu v1, zero, 1; sh v1,
+                 * 58(a0)`) exactly as a button's is. #81 read the operand table,
+                 * found no speed in it and concluded the primitive needed more
+                 * reading — which was right about the table and wrong about the
+                 * conclusion. There is no operand because there is no choice.
+                 *
+                 * The rest is `0x8002E2A0`: the object slot is at +6, the travel
+                 * is `(s8)item[+5] << 5` into obj+0x44, obj+0x52 is a one-shot
+                 * latch tested before anything else, and obj+0x4E is set to the
+                 * clock plus 300 — one second, which is the wait.
+                 */
+                m->node[0]     = q2_rd_s16(p + 6);
+                m->part_count  = (m->node[0] >= 0) ? 1 : 0;
+                m->target      = (s16)((s16)(s8)p[5] << 5);
+                m->speed       = 1;
+                m->wait_timer  = Q2_MOVER_TIMEBASE;
+                break;
+
             case Q2_UF_PISTON:
                 /* A crusher. `time` is UNSCALED, which is the table's word for
                  * it and the reason it is not multiplied here. */
@@ -378,10 +407,20 @@ q2_result q2_movers_build_calls(q2_mover_set *out, const q2_events *events,
                 break;
             }
 
-            /* A mover with no speed never arrives, and one with no node moves
-             * nothing. Either is a decode this port should not keep. */
-            if (m->speed == 0 || m->part_count == 0)
+            /*
+             * A mover with no speed never arrives and one with no node moves
+             * nothing. Either is a decode this port should not keep — and
+             * saying WHICH is dropped is the measurement, because an empty
+             * object slot and a primitive this port cannot build look identical
+             * in a count. #81 is the entry that made that point.
+             */
+            if (m->speed == 0 || m->part_count == 0) {
+                const q2_uf_prim_info *pi = q2_uf_info(call.prim);
+
+                Q2_INFO("mover dropped: %s node %d speed %d target %d",
+                        pi ? pi->name : "?", m->node[0], m->speed, m->target);
                 out->count--;
+            }
         }
     } while (q2_events_next_record(events, &rec, &rec));
 
