@@ -195,6 +195,63 @@ q2_result q2_movers_build(q2_mover_set *out, const q2_events *events)
     return Q2_OK;
 }
 
+q2_result q2_movers_build_calls(q2_mover_set *out, const q2_events *events,
+                                const q2_userfuncs *uf,
+                                const q2_uf_operands *ops)
+{
+    q2_event_record rec;
+
+    if (!out || !events || !uf)
+        return Q2_ERR_INVALID_ARG;
+
+    if (events->record_count == 0 || !q2_events_first_record(events, &rec))
+        return Q2_OK;
+
+    do {
+        u32 i;
+
+        for (i = 0; i < rec.n_items; i++) {
+            q2_event_item item;
+            q2_uf_call    call;
+            const u8     *p;
+            q2_mover     *m;
+
+            if (!q2_events_get_item(events, &rec, i, &item))
+                break;
+            if (!item.payload)
+                continue;
+            if ((item.opcode & Q2_EVOP_MASK) != Q2_EVOP_CALL)
+                continue;
+            if (q2_uf_decode_call(&call, uf, &item) != Q2_OK)
+                continue;
+            if (call.prim != Q2_UF_LIFT1 || item.len < 20)
+                continue;
+
+            /* The operands, rebased the way a rotation call's are: an item the
+             * game has already run reads -1 in COMMON's copy and lives at the
+             * same offset in the zone's (#56). */
+            p = q2_uf_operand_at(ops, item.payload - 2, 20);
+
+            m = mover_push(out);
+            if (!m)
+                return Q2_ERR_NO_MEMORY;
+
+            m->axis        = 1;                 /* a lift is vertical */
+            m->target      = (s16)-(s16)q2_rd_u16(p + 4);
+            m->speed       = (s16)abs(q2_rd_s16(p + 6));
+            collect_nodes(m, p, 8);
+            m->delay_timer = (u16)(p[16] * Q2_MOVER_TIMEBASE);
+            m->wait_timer  = (p[17] == 0xFF)
+                             ? Q2_MOVER_WAIT_NEVER
+                             : (u16)(p[17] * Q2_MOVER_TIMEBASE);
+            m->item_offset = item.offset;
+            m->block_flags = Q2_MV_BLK_IGNORE_OPENING;
+        }
+    } while (q2_events_next_record(events, &rec, &rec));
+
+    return Q2_OK;
+}
+
 void q2_movers_free(q2_mover_set *set)
 {
     if (!set)

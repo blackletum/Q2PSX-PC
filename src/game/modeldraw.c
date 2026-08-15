@@ -94,12 +94,6 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
     /* The same basis the world is drawn with, roll included — models and brush
      * geometry must lean together or the two separate as soon as you strafe. */
     q2_rotation_view(view, cam->yaw, cam->pitch, cam->roll);
-    /*
-     * And the same correction the world gets, on the basis everything is
-     * composed onto — so models, and the weapon in the hands through them, stay
-     * the same shape as the geometry they stand in.
-     */
-    q2_rotation_aspect_x(view, q2_aspect_x_12_centre(cam->ofs_x, cam->ofs_y, 0, 0));
 
     /*
      * The instance's own facing, composed into the camera's rotation once

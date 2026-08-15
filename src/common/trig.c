@@ -173,23 +173,3 @@ void q2_quat_to_matrix(s16 m[3][3], const s16 q[4])
     m[2][1] = (s16)(2 * (yz + wx));
     m[2][2] = (s16)(Q2_ONE_12 - 2 * (xx + yy));
 }
-
-/* ------------------------------------------------------------------------- */
-void q2_rotation_aspect_x(s16 m[3][3], s32 scale_12)
-{
-    int c;
-
-    if (!m || scale_12 == 4096)
-        return;
-
-    for (c = 0; c < 3; c++) {
-        s32 v = ((s32)m[0][c] * scale_12) >> 12;
-
-        /* The row stays s16 because the GTE's registers are. At the console's
-         * own 1.5484 the largest entry reaches 6342, well inside the range; the
-         * clamp is here so an absurd viewport cannot corrupt the matrix. */
-        if (v >  32767) v =  32767;
-        if (v < -32768) v = -32768;
-        m[0][c] = (s16)v;
-    }
-}

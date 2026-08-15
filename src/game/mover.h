@@ -76,6 +76,7 @@
 #define Q2PSX_MOVER_H
 
 #include "events.h"
+#include "userfuncs.h"
 #include "q2psx.h"
 #include "scene.h"
 
@@ -162,6 +163,36 @@ void q2_mover_trigger(q2_mover_set *set, u32 index);
  * Returns how many were triggered.
  */
 u32 q2_movers_trigger_item(q2_mover_set *set, u32 item_offset);
+
+/*
+ * THE OTHER HALF OF THE LIFTS: the ones a CALL builds.
+ *
+ * `MOVER_A/B/C` are opcodes in the record stream and `q2_movers_build` reads
+ * them. `LIFT1` is a CALL PRIMITIVE that builds the same kind of runtime
+ * object, and userfuncs.c's operand table maps one onto the other exactly:
+ *
+ *     LIFT1, len 20        this module's field
+ *     +4  u16 param_a      target, NEGATED (the ctor writes -value to obj+0x44)
+ *     +6  s16 param_b      speed, abs() (obj+0x3A)
+ *     +8  s16 objects[4]   node[], negative terminates
+ *     +16 u8  time_a       delay,  x300 (obj+0x4C)
+ *     +17 u8  time_b       wait,   x300 (obj+0x4E); 0xFF means never
+ *
+ * The axis is Y, as `MOVER_A`'s is: these are lifts. The object slots are
+ * OBJSLOTs and therefore subject to the two-buffer rebase (#56), so an `ops` is
+ * taken; pass NULL to read them in place.
+ *
+ * CAGELIFT1 is deliberately NOT built here. Its operand table names no speed
+ * (`{param_a, objects[4], time_b}`), and a mover with speed zero is one that is
+ * triggered, ticks, and never arrives — so it needs its constructor read rather
+ * than a borrowed constant. Three calls on the disc.
+ *
+ * Appends to `set`, so call it after `q2_movers_build` with the same set: the
+ * two families share a tick, a draw offset and a trigger.
+ */
+q2_result q2_movers_build_calls(q2_mover_set *out, const q2_events *events,
+                                const q2_userfuncs *uf,
+                                const q2_uf_operands *ops);
 
 /*
  * Advance every mover by `dt` in the simulation's own units.

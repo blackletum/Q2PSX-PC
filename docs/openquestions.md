@@ -5917,3 +5917,43 @@ until they get the same treatment.
       **The picture is not subtle.** At LAB frame 780 the two runs differ by 94,068 pixels of 126,976:
       with the movers inert the player is inside the closed door looking at its back face, and with them
       working the door is open and they have walked through it. A closed door is a wall.
+
+## RETRACTION: the horizontal projection correction, and why the measurement was wrong
+
+Two commits back the world's horizontal projection was scaled by 1.5484 on the grounds that the port was
+anamorphic against retail. **Both are reverted.** screen.h had already settled this, in terms that name the
+mistake in advance:
+
+> the console's own image is horizontally compressed by a factor of 1.5. That is not a defect in this
+> reconstruction and it must not be "corrected": there is no anamorphic term anywhere in the image to undo it.
+
+That is a search of the transform chain — the only matrix scale on it is the uniform (768,768,768) at
+`0x800AEB30`, an object scale applied per column by `0x80055AF8`, and the projection distance reaches the GTE
+untouched from view+262 — corroborated by the 2D art, whose menu letterforms are authored about 1.35x wider
+than tall and only read correctly once the television has narrowed the pixels. A code-level finding beats a
+pixel measurement, and this file had it written down the whole time.
+
+**Where the measurement went wrong, because the method looked sound.** The claim rested on the blaster's muzzle
+stripe: rigidly attached to the camera, therefore independent of where the player is standing, measured across
+22 frames of idle at a mapping calibrated from the HUD. Every one of those steps was a genuine improvement on
+the eyeballing that preceded it — and the conclusion was still wrong, for a reason none of them addressed.
+
+The weapon is camera-locked **only for a given animation pose**. The reference is a frame from a video at 2:43
+with the player moving; the port's sweep was of a stationary player's idle cycle. The stripe sits on an angled
+face, so a pose difference of a few degrees changes its projected width by more than the factor being measured.
+"Rigidly attached" was doing work it could not do.
+
+The calibration actually argues the other way and it was not read that way at the time: solving the
+framebuffer-to-image mapping from the HUD gives x 1.2809 and y 1.8571, a display pixel aspect of **1.4498** —
+which IS the television narrowing the pixels. The display already undoes the compression. That number was
+measured, written down, and its meaning missed.
+
+**What would settle it**, if anyone wants to close it properly rather than trust the code reading: a retail
+capture at a level start, stationary, with the weapon settled in idle. That is a pose the port reproduces
+exactly and deterministically (`--headless --frames 90`), so the confound disappears. Every reference used so
+far has been mid-play.
+
+**Still open, and now with no proposed cause:** in a side-by-side at the calibrated mapping the port's weapon
+looks smaller than retail's. Scaling the projection made that look better, which is exactly why it was
+convincing, but a change that improves one object's appearance while contradicting the transform chain is a
+coincidence and not a fix. The real cause is unfound.
