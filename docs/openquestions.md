@@ -5828,11 +5828,22 @@ projection is right the weapon comes with it, and the two remaining entries on t
           SIMROT/SIMROT2       22        0         (reached through their own path)
           GLASS                 6        0         wired, never called (#66)
 
-      **The two that matter most by volume are the movers and the spawns.** `LIFT1` runs 56 times and
-      moves nothing — `events_rt.c` marks the MOVER opcodes "deliberately inert" because their slots are
-      Scene node indices on disc and runtime object indices after a load-time pre-pass, which is the same
-      obstacle #56 solved for the rotators and is now solvable the same way. `CREBATCH` runs 82 times and
-      spawns nothing, so every scripted ambush in the game is absent.
+      **The two that mattered most by volume were the movers and the spawns**, and both are done: #75/#76
+      for the doors and lifts, #79 for the ambushes. What the histogram now leaves, in order of runs:
+
+          MISEVENT      16   namespace UNLOCATED — 0 of 93 resolve against Strings
+          TIMER          7   delayed continuation of the rest of a record
+          MISCOMPLETE    5   end of unit
+          CAGELIFT1      3   names no speed (#81)
+          DISH           2   names no speed (#81)
+          LASERWALL      2   a damage volume
+          PLATFORM       1   names neither target nor speed (#81)
+          DISABLEME      1   sets DISABLED on the running record
+          LASERBEAM     72   in COMMON and reached by NO trigger volume
+
+      Everything else on it is acted on. `LASERBEAM` is the odd one: 72 items and a trigger volume runs
+      none of them, which is the same shape as GLASS (#66) and means the same thing — it is reached from
+      somewhere other than the trigger graph.
 
 - [x] 74. **STRING and SIMPLESOUND — the game speaks and makes noise.** Both were decoded long ago and
       neither was acted on. A trigger volume runs 33 STRING calls and all 33 SIMPLESOUND calls disc-wide,
