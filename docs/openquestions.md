@@ -5563,7 +5563,33 @@ folds them into one helper with a sign flag fails rather than silently halves th
       through the plane cannot be NCLIPped meaningfully — which would make it a correctness escape rather
       than an authoring one.
 
-      **And the obvious way in is closed: the linker has NO CALLER in the image.** Searching the whole
+      **THE PRODUCER IS FOUND, and what it writes is not a bitmask.** "Nothing found so far builds it" is no
+      longer true. The chain, from the one caller the 0x800B block does have:
+
+          8006DCA4  a2 = sp + 16                  ; a DESCRIPTOR on the stack
+          8006DCAC  jal 0x8006B924                ; ...which this fills
+          8006DCBC  jal 0x800B1F90                ; ...and this consumes, a0 = sp + 16
+
+      and inside `0x8006B924`, with `s5 = a2` (the descriptor) and `s7 = a1` (its second argument):
+
+          8006BC08  addiu v0, s7, 10
+          8006BC0C  sw    v0, 4(s5)               ; descriptor+0x04 = arg1 + 10
+
+      So `+0x04` is written as a **POINTER** — `arg1 + 10`, and the same record's halfword at `+10` is read
+      two instructions later — where the linker loads it into `t3` and treats it as one bit per face.
+
+      **That has a consequence large enough that it must be tested rather than asserted.** A KUSEG pointer
+      (`0x800xxxxx`) is NEGATIVE as a signed 32-bit value, so `bltz t3` at `0x800B2498` would be TAKEN, and
+      the escape is exactly "skip the NCLIP test entirely". If the linker's `a0` is this descriptor, models
+      on the console have **no backface rejection at all** — which would make this port's model rejection
+      (#, the entry above) a divergence rather than a reconstruction, notwithstanding that it measurably
+      keeps the nearer face set.
+
+      Two readings survive and the disc has not yet separated them: either the linker takes a different
+      structure from the one `0x800B1F90` takes, or it takes the same one and the escape is always taken.
+      That is a sharp question with a sharp test, and it is a much better place than "nothing builds it".
+
+      **The other way in is closed: the linker has NO CALLER in the image.** Searching the whole
       loaded segment for `j`/`jal` to `0x800B2410`, for a materialised `lui`/`addiu` pair forming it, and
       for a raw word equal to it — a function-pointer table entry — finds **nothing, by all three**. So the
       descriptor's producer cannot be found by reading whoever calls the linker, because on this image
