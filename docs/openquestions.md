@@ -5708,3 +5708,38 @@ is whether that matrix is also used for anything normal-like, where a scaled row
 
 Consequence worth stating plainly: **there is no separate view-weapon sizing bug to chase.** Once the horizontal
 projection is right the weapon comes with it, and the two remaining entries on this list collapse into one.
+
+- [x] 70. **The game plays through, end to end, and three of the mission screen's own fields turned out to
+      be sitting in the map's `Strings` chunk unread.**
+
+      `MapTitle` is the level's OWN name — "Outer Base" where the directory says BASE1 — and it is what
+      the Location column wants. The level table's `display` is not it: that column reads `Base1`.
+
+      `FoundASecret` is the message `INSECRET` shows, in the map's own words, which is what makes
+      "counter++" something the player sees happen rather than a number that changes on a screen they are
+      not looking at.
+
+      And the UNIT, which `"Mission %d - Complete"` needs and nothing was reading: a map carries
+      `Unit<N>Miss1` for its own unit and no other, and the briefing's key scan already found N and threw
+      it away. Recovered, the disc's maps group **exactly as the game's units do**, which is an
+      independent check on the reading rather than a restatement of it:
+
+          unit 1  Strogg Outpost, Outer Base, Installation
+          unit 2  Detention Centre, Security Complex, Grid Control
+          unit 3  Powerplant, The Reactor, Toxic Waste Dump
+          unit 4  Research Lab, Defence Command, Gravity Booster
+          unit 5  Inner Chamber
+
+      The table now resets when the unit changes, because the screen lists a UNIT's levels in its six
+      rows rather than a session's.
+
+      **And the whole chain runs.** `--fire-triggers` re-arms after each transition, so one invocation
+      walks the game:
+
+          Strogg Outpost -> Outer Base -> Installation -> Detention Centre ->
+          Security Complex -> Grid Control -> Powerplant -> The Reactor ->
+          Defence Command -> Inner Chamber -> Boss2
+
+      Eleven levels, five units, a MISSION screen at every boundary and the inventory carried across all
+      of them — and by BOSS1 the log reads `weapon 8, weapons 0081`, so a weapon picked up two levels
+      earlier is still in the player's hands.
