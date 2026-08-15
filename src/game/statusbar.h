@@ -105,6 +105,10 @@
 #include "gpu.h"
 #include "icontable.h"
 
+/* Forward-declared so a caller that never colours the bar need not pull the
+ * whole executable-table module in. */
+struct q2_hud_tables;
+
 /* ------------------------------------------------------------------------- */
 /* The numeral cells — 0x8009C598                                             */
 /* ------------------------------------------------------------------------- */
@@ -118,17 +122,88 @@
 /* Unity for a modulated primitive — the same 0x80 every other UI sprite uses. */
 #define Q2_SBAR_MOD 128
 
+/* ------------------------------------------------------------------------- */
+/* The icons — RECT INDICES, hard-coded, NOT item effect ids                  */
+/* ------------------------------------------------------------------------- */
 /*
- * The item effect ids the bar names, from the table at 0x8009F5CC. Health has
- * no single "health" item, so the cross is the plain medikit's icon — the one
- * the sheet draws as a cross — and the four armours are listed because the
- * armour field shows whichever is worn.
+ * CORRECTION — the bar indexes the rect table. It does not scan it.
+ *
+ * This block used to name item `effect` ids and resolve them through
+ * `q2_icon_rect_for_id()`, on icontable.h's reading that a rect record's fifth
+ * byte is the item's touch-dispatch index. The three sub-draws say otherwise,
+ * in the plainest way a disassembly can:
+ *
+ *     80035190  lbu  v0, 170(t0)     t0 = 0x8009C478   health, ALWAYS 170
+ *     8003565C  lbu  v0, 150(a0)     a0 = 0x8009C478   armour, ALWAYS 150
+ *     80035374  sll  v0, a0, 2       a0 = ammoIcon[weapon]
+ *     80035378  addu v0, v0, a0                        ammo,   a0 * 5
+ *     80035380  addu v1, a0, t0                        &rect[a0]
+ *
+ * 170 and 150 are byte offsets into a five-byte record: rect 34 and rect 30.
+ * The ammo path multiplies its table entry by five and adds the same base, so
+ * `ammoIcon[]` is a rect index too. There is no strcmp, no scan, no compare of
+ * the fifth byte anywhere in any of the three.
+ *
+ * WHAT THE OLD READING DREW, and why it looked plausible enough to ship:
+ * scanning for effect 34 finds rect **30**, because rect 30's fifth byte
+ * happens to be 34. Rect 30 is the ARMOUR icon. So the health field drew the
+ * armour box — a chunky machine-looking sprite where retail shows a blue cross
+ * — and because it drew *something* recognisable, it read as a mis-picked icon
+ * rather than as a whole mis-read table. Rect 34 is the cross.
+ *
+ * The fifth byte is a PALETTE INDEX (see below), which is why joining it to
+ * the item table produced a near-monotonic and therefore convincing-looking
+ * correspondence. Two independent tells confirm the index reading against it:
+ * the cell the effect reading assigns to the power shield is EMPTY, and the
+ * cells the index reading assigns to the six ammo types are six ammo boxes.
  */
-#define Q2_SBAR_ICON_MEDIKIT      34   /* Medi P        */
-#define Q2_SBAR_ICON_ARMOUR_BODY  26   /* Body P        */
-#define Q2_SBAR_ICON_ARMOUR_COMBAT 27  /* Combat P      */
-#define Q2_SBAR_ICON_ARMOUR_JACKET 28  /* Jacket P      */
-#define Q2_SBAR_ICON_ARMOUR_SHARD 29   /* Shard P       */
+#define Q2_SBAR_ICON_HEALTH   34   /* 0x80035178, offset 170 — the cross */
+#define Q2_SBAR_ICON_ARMOUR   30   /* 0x80035554, offset 150             */
+#define Q2_SBAR_ICON_NONE      0   /* rect 0 is the 1x1 blank            */
+
+/* ------------------------------------------------------------------------- */
+/* The palettes — one per sprite, and the port used to ignore all of them     */
+/* ------------------------------------------------------------------------- */
+/*
+ * A field record is TEN bytes and the last two are not padding:
+ *
+ *     +0 s16 x   +2 s16 y   +4 u  +5 v  +6 w  +7 h  +8 PALETTE  +9 SLOT
+ *
+ * `0x800337EC` onward initialises all thirteen with +9 = 14 — the VRAM slot
+ * qk_menu.lbm registers under — and +8 = 8 for every field except the health
+ * icon, which gets 38 (`addiu v0, zero, 38` at 0x800337FC, stored at
+ * 0x80033810). The sub-draws then overwrite +8 per sprite: an icon takes the
+ * fifth byte of its own rect record (0x80035210 / 0x8003540C), and a counter
+ * running low takes 7.
+ *
+ * Those three indices are the built-in palette bank's (hudtables.h), and
+ * reading them out settles what they are beyond argument:
+ *
+ *     8   pale cyan ramp to (160,200,224)   the numerals
+ *     38  blue ramp to near-white           the health cross
+ *     7   red/orange ramp to (248,64,0)     the low-value flash
+ *
+ * The port passed ONE clut — the menu font's — for every sprite in the bar,
+ * so the numerals, the icons and the flash all came out in the font's colours.
+ * That is what made the HUD look wrong while the world looked right, and it is
+ * a separate defect from the framebuffer-format swap in client/main.c: this one
+ * is visible in a `--shot` capture, and that one is not.
+ */
+#define Q2_SBAR_PAL_DIGITS   8   /* field init, 0x800337FC..0x80033814      */
+#define Q2_SBAR_PAL_LOW      7   /* 0x8003524C / 0x80035460                 */
+
+/*
+ * When a counter flashes. Health is `slti v1, 26` at 0x8003523C and ammo is
+ * `sltiu v0, 6` at 0x80035440 — different numbers, so they are kept apart
+ * rather than folded into one "low" constant.
+ *
+ * Below the threshold the digits alternate between their own palette and 7 on
+ * bit 7 of the frame counter at `0x800AEBAC`, except that health at or below
+ * zero holds 7 solid (the `blez` at 0x80035248 skips the blink test).
+ */
+#define Q2_SBAR_LOW_HEALTH  26
+#define Q2_SBAR_LOW_AMMO     6
+#define Q2_SBAR_BLINK_BIT 0x80u
 
 /* ------------------------------------------------------------------------- */
 /* The field table — 0x800337EC onward                                        */
@@ -233,16 +308,29 @@ typedef struct q2_statusbar {
     int weapon;                       /* 1-based; selects the ammo icon */
 
     /*
-     * The health and armour icons, as item EFFECT ids — the same vocabulary the
-     * ammo table speaks (icontable.h). The bar resolves one to a rect by
-     * scanning for a record whose fifth byte matches.
+     * The health and armour icons, as RECT INDICES into the table at
+     * 0x8009C478 — see the correction above. The console hard-codes both (34
+     * and 30); they are inputs here only so that armour can show the blank
+     * when none is worn, which is what the armour sub-draw's other arm does.
      *
-     * They are inputs rather than constants because which one to show is a
-     * game decision, not a layout one: armour's icon is whichever armour the
-     * player is wearing. Zero matches no record and draws nothing.
+     * Q2_SBAR_ICON_NONE is rect 0, the 1x1 blank, and draws nothing.
      */
     u8 health_icon;
     u8 armour_icon;
+
+    /*
+     * The palette bank, for resolving a sprite's palette index to a CLUT word.
+     * Optional: with no tables the bar falls back to the single clut passed to
+     * q2_statusbar_build_ot(), which is what it always used to do.
+     */
+    const struct q2_hud_tables *hud;
+
+    /*
+     * The frame counter the flash is phased on — `0x800AEBAC`, tested against
+     * Q2_SBAR_BLINK_BIT. Supplied by the caller because it is the engine's
+     * global tick, not something the bar owns.
+     */
+    u32 ticks;
 
     int players;                      /* drives the icon size reduction */
     bool visible;
@@ -250,6 +338,12 @@ typedef struct q2_statusbar {
 
 void q2_statusbar_init(q2_statusbar *b, const q2_icon_tables *icons,
                        int players);
+
+/*
+ * Give the bar the built-in palette bank, so each sprite can be drawn in its
+ * own colours rather than all of them in one. Optional — see `hud` above.
+ */
+void q2_statusbar_set_palettes(q2_statusbar *b, const struct q2_hud_tables *t);
 
 /* Place it. A viewport's own anchor — `sbar_x`/`sbar_y` in screen.h. */
 void q2_statusbar_anchor(q2_statusbar *b, s16 x, s16 y);

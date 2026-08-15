@@ -4018,14 +4018,18 @@ static void client_draw_view(void *user, q2_screen *s, int p,
         c->sbar.weapon  = weapon;
 
         /*
-         * The icons, named now that the vocabulary is decoded (icontable.h):
-         * the fifth byte of a rect record is the item's effect id, so an icon
-         * is asked for by the item it belongs to rather than by position.
-         * Health shows the medikit's cross; armour shows whichever armour is
-         * worn, and nothing at all when none is.
+         * The icons, as RECT INDICES — the console hard-codes both (offsets
+         * 170 and 150 into a five-byte record, so rect 34 and rect 30) and
+         * never scans the table. See the correction in statusbar.h; asking by
+         * item effect id drew the armour box on the health field.
+         *
+         * Armour still varies here, because the armour sub-draw's other arm
+         * selects the blank when the flag says none is worn.
          */
-        c->sbar.health_icon = Q2_SBAR_ICON_MEDIKIT;
-        c->sbar.armour_icon = inv->armour > 0 ? Q2_SBAR_ICON_ARMOUR_JACKET : 0;
+        c->sbar.health_icon = Q2_SBAR_ICON_HEALTH;
+        c->sbar.armour_icon = inv->armour > 0 ? Q2_SBAR_ICON_ARMOUR
+                                              : Q2_SBAR_ICON_NONE;
+        c->sbar.ticks       = c->frame_index;
 
         q2_statusbar_build_ot(&c->sbar, c->menu_font.tpage_icons,
                               c->menu_font.clut_text, ot,
@@ -4561,12 +4565,69 @@ int main(int argc, char **argv)
     }
 
     c.renderer = SDL_CreateRenderer(c.window, NULL);
-    c.texture  = SDL_CreateTexture(c.renderer, SDL_PIXELFORMAT_XRGB1555,
+    /*
+     * XBGR1555, NOT XRGB1555 — RED LIVES IN THE LOW BITS.
+     *
+     * The framebuffer is uploaded by a straight memcpy of the console's own
+     * halfwords, so the texture format has to name the console's own bit
+     * layout. The PSX GPU packs a 15-bit pixel as
+     *
+     *     bit 15    mask/STP        bits 14..10  B
+     *     bits 9..5 G               bits 4..0    R
+     *
+     * which is red-in-the-low-bits: `psx_rgb555()` in gpu.h builds exactly
+     * that, and `unpack555()` in raster.c reads it back the same way. SDL
+     * names formats most-significant-channel-first, so that layout is
+     * XBGR1555; XRGB1555 is its mirror and reads B where R is.
+     *
+     * That mirror is what a wrong value here looks like: the picture is
+     * otherwise perfect, and red and blue are exchanged in every pixel of it.
+     * Quake II's rust-brown rock renders slate blue and its violet sky renders
+     * crimson, which reads as a palette or a PAL-vs-NTSC fault rather than as
+     * one enum, and sends the search a long way from the actual line.
+     *
+     * Nothing upstream of here is affected, and that is the tell: `--shot`
+     * writes its PPM off the same front buffer through `unpack555()` before
+     * SDL is handed anything, so the captures come out right while the window
+     * does not. A defect visible only in the window and never in a capture is
+     * a presentation-format defect by construction.
+     */
+    c.texture  = SDL_CreateTexture(c.renderer, SDL_PIXELFORMAT_XBGR1555,
                                    SDL_TEXTUREACCESS_STREAMING,
                                    c.width, c.height);
 
     /* Nearest-neighbour: the whole point is to show the original's pixels. */
     SDL_SetTextureScaleMode(c.texture, SDL_SCALEMODE_NEAREST);
+
+    /*
+     * And prove the format above, rather than trusting the name.
+     *
+     * The whole defect this guards against is silent: a wrong enum produces a
+     * complete, sharp, correctly-lit picture with two channels exchanged, and
+     * nothing in the pipeline objects. Worse, `--shot` keeps writing correct
+     * PPMs the whole time, so the project's own comparison workflow reports
+     * everything is fine while the window says otherwise.
+     *
+     * So ask SDL what it would pack pure red into and check it against what the
+     * GPU model packs pure red into. They must be the same halfword. This costs
+     * one call at startup and turns "the colours look odd" into a line of
+     * output naming the two values.
+     */
+    {
+        const SDL_PixelFormatDetails *fd =
+            SDL_GetPixelFormatDetails(SDL_PIXELFORMAT_XBGR1555);
+
+        if (fd) {
+            u32 sdl_red = SDL_MapRGB(fd, NULL, 255, 0, 0);
+            u16 psx_red = psx_rgb555(255, 0, 0);
+
+            if ((u16)sdl_red != psx_red)
+                Q2_WARN("framebuffer format mismatch: SDL packs red as %04X, "
+                        "the GPU model as %04X — red and blue will be "
+                        "exchanged on screen",
+                        (unsigned)sdl_red, (unsigned)psx_red);
+        }
+    }
 
 no_window:
     /* 217 buckets, `ClearOTag(db + 10984, 217)` at 0x80018398 — the table is
@@ -4635,6 +4696,13 @@ no_window:
     c.icons_ready = (q2_icon_tables_load(&c.icons, c.disc, &c.build) == Q2_OK);
     if (c.icons_ready)
         q2_statusbar_init(&c.sbar, &c.icons, 1);
+    /*
+     * The palette bank, so the bar draws each sprite in its own colours. The
+     * bank is already in VRAM by this point — the menu font uploads it — so
+     * this hands over the clut ids, not the pixels.
+     */
+    if (c.icons_ready && c.hud_tables_ready)
+        q2_statusbar_set_palettes(&c.sbar, &c.hud_tables);
     else
         Q2_WARN("no status-bar tables for this build");
     if (!c.hud_tables_ready)

@@ -1,5 +1,7 @@
 #include "statusbar.h"
 
+#include "hudtables.h"
+
 #include <string.h>
 
 /*
@@ -151,6 +153,13 @@ void q2_statusbar_init(q2_statusbar *b, const q2_icon_tables *icons,
     b->visible = true;
 }
 
+void q2_statusbar_set_palettes(q2_statusbar *b, const struct q2_hud_tables *t)
+{
+    if (!b)
+        return;
+    b->hud = t;
+}
+
 void q2_statusbar_anchor(q2_statusbar *b, s16 x, s16 y)
 {
     if (!b)
@@ -201,10 +210,59 @@ static u32 emit_cell(psx_ot *ot, u32 bucket, u16 tpage, u16 clut,
     return 1;
 }
 
+/*
+ * A sprite's palette index to the CLUT word the primitive carries.
+ *
+ * `fallback` is what the bar drew with before per-sprite palettes existed —
+ * the single clut the caller passes — and it is still what comes out when no
+ * palette bank has been supplied, or when the bank has no such entry. Falling
+ * back rather than dropping the sprite matters: a missing palette should show
+ * the bar in the wrong colours, not delete the player's health readout.
+ */
+static u16 pal_clut(const q2_statusbar *b, u32 index, u16 fallback)
+{
+    u16 c;
+
+    if (!b->hud)
+        return fallback;
+    c = q2_hud_palette_clut(b->hud, index);
+    return c ? c : fallback;
+}
+
+/*
+ * Whether a counter's digits are showing the low-value flash this frame.
+ *
+ * Below the threshold the digits take palette 7 while bit 7 of the frame
+ * counter at `0x800AEBAC` is CLEAR, and their own palette while it is set — so
+ * the readout blinks rather than simply turning red.
+ *
+ * `solid_at_zero` is HEALTH'S ALONE. Its sub-draw carries a `blez` at
+ * 0x80035248 that jumps past the blink test, so a dead player's readout holds
+ * the flash steady instead of winking. The ammo path at 0x80035440 has no such
+ * branch and — being `sltiu`, unsigned — does not treat zero specially at all,
+ * so folding the two into one rule would make an empty magazine stop blinking.
+ *
+ * NOT MODELLED, and recorded rather than invented: the health sub-draw writes
+ * the flash to all three of its digit fields (0x80035268..0x80035270) while the
+ * ammo one writes to a single field (0x80035464). Whether that is a deliberate
+ * difference or a detail of how the ammo sub-draw is handed its fields has not
+ * been read, so the flash is applied per counter here.
+ */
+static bool counter_is_low(const q2_statusbar *b, int value, int threshold,
+                           bool solid_at_zero)
+{
+    if (value >= threshold)
+        return false;
+    if (solid_at_zero && value <= 0)
+        return true;
+    return (b->ticks & Q2_SBAR_BLINK_BIT) == 0;
+}
+
 /* One counter: its digits, then its icon. */
 static u32 emit_counter(const q2_statusbar *b, u16 tpage, u16 clut,
                         psx_ot *ot, u32 bucket, int ox, int oy,
-                        q2_sbar_counter which, int value, int icon_id)
+                        q2_sbar_counter which, int value, int icon_index,
+                        int low_threshold, bool solid_at_zero)
 {
     u8 digits[Q2_SBAR_COUNTER_DIGITS];
     int n = q2_sbar_digits_of(value, digits);
@@ -215,6 +273,14 @@ static u32 emit_counter(const q2_statusbar *b, u16 tpage, u16 clut,
                                              Q2_SBAR_DIGIT_H);
     u32 emitted = 0;
     int i;
+
+    /* The numerals' own palette, or the flash while the counter is low. */
+    u16 digit_clut = pal_clut(b,
+                              counter_is_low(b, value, low_threshold,
+                                             solid_at_zero)
+                                  ? Q2_SBAR_PAL_LOW
+                                  : Q2_SBAR_PAL_DIGITS,
+                              clut);
 
     /*
      * Right-aligned inside the three cells: a two-digit figure uses the second
@@ -231,7 +297,7 @@ static u32 emit_counter(const q2_statusbar *b, u16 tpage, u16 clut,
             continue;
         fd = &q2_sbar_fields[f];
 
-        emitted += emit_cell(ot, bucket, tpage, clut,
+        emitted += emit_cell(ot, bucket, tpage, digit_clut,
                              ox + b->anchor_x + fd->dx,
                              oy + b->anchor_y + fd->dy,
                              (u8)(digits[i] * Q2_SBAR_DIGIT_PITCH),
@@ -241,17 +307,22 @@ static u32 emit_counter(const q2_statusbar *b, u16 tpage, u16 clut,
                              (u8)(size.h ? size.h : Q2_SBAR_DIGIT_H));
     }
 
-    /* The icon beside it, resolved from its item effect id. */
+    /*
+     * The icon beside it. INDEXED, not scanned — the three sub-draws all do
+     * `base + index * 5` and never compare the fifth byte (statusbar.h). The
+     * fifth byte is instead this sprite's palette, which is how the cross comes
+     * out blue while the numerals beside it come out cyan.
+     */
     {
-        const q2_icon_rect *r = q2_icon_rect_for_id(b->icons, (u8)icon_id,
-                                                    NULL);
+        const q2_icon_rect *r = q2_icon_rect_get(b->icons, (u32)icon_index);
         int f = q2_sbar_icon_field(which);
 
         if (r && f >= 0 && !(r->w == 1 && r->h == 1)) {
             const q2_sbar_field *fd = &q2_sbar_fields[f];
             q2_icon_size is = q2_icon_draw_size_of(b->players, 1, r->w, r->h);
 
-            emitted += emit_cell(ot, bucket, tpage, clut,
+            emitted += emit_cell(ot, bucket, tpage,
+                                 pal_clut(b, r->id, clut),
                                  ox + b->anchor_x + fd->dx,
                                  oy + b->anchor_y + fd->dy,
                                  r->u, r->v, r->w, r->h, is.w, is.h);
@@ -270,14 +341,40 @@ u32 q2_statusbar_build_ot(const q2_statusbar *b, u16 tpage, u16 clut,
         return 0;
 
     n += emit_counter(b, tpage, clut, ot, bucket, origin_x, origin_y,
-                      Q2_SBAR_HEALTH, b->health, b->health_icon);
+                      Q2_SBAR_HEALTH, b->health, b->health_icon,
+                      Q2_SBAR_LOW_HEALTH, true);
 
+    /*
+     * `q2_icon_ammo_for_weapon` returns `ammoIcon[weapon]` verbatim, and that
+     * table holds rect INDICES — 0x80035374 multiplies its entry by five and
+     * adds the rect base. Feeding it to the effect-id scan, as this used to,
+     * gave every weapon somebody else's icon.
+     */
     n += emit_counter(b, tpage, clut, ot, bucket, origin_x, origin_y,
                       Q2_SBAR_AMMO, b->ammo,
-                      q2_icon_ammo_for_weapon(b->icons, b->weapon));
+                      q2_icon_ammo_for_weapon(b->icons, b->weapon),
+                      Q2_SBAR_LOW_AMMO, false);
 
-    n += emit_counter(b, tpage, clut, ot, bucket, origin_x, origin_y,
-                      Q2_SBAR_ARMOUR, b->armour, b->armour_icon);
+    /*
+     * ARMOUR AT ZERO DRAWS NOTHING AT ALL — not a zero, not a blank icon.
+     *
+     * `0x80035594` loads the armour halfword and branches straight to
+     * `0x80035630`, which zeroes the sub-draw's own live flag; the test at
+     * `0x80035634` then skips the entire body. So an unarmoured player has no
+     * third counter, which is what retail capture shows at a level start and
+     * what the port used to contradict by parking a "0" there.
+     *
+     * The ammo counter is NOT known to do the same. Its sub-draw has no such
+     * early-out — the only zero test in it collapses the ICON to the 1x1 blank
+     * (0x800353B0) and leaves the digits alone — yet capture shows no ammo
+     * readout at all with the blaster in hand. Something suppresses it that has
+     * not been found, so nothing is done about it here rather than guessing at
+     * a threshold; it is openquestions material, not a fix.
+     */
+    if (b->armour > 0)
+        n += emit_counter(b, tpage, clut, ot, bucket, origin_x, origin_y,
+                          Q2_SBAR_ARMOUR, b->armour, b->armour_icon,
+                          Q2_SBAR_LOW_AMMO, false);
 
     return n;
 }

@@ -203,11 +203,16 @@ static void test_quad_layout(void)
 static void test_icon_vocabulary(void)
 {
     /*
-     * The fifth byte of a rect record is the item's `effect` dispatch index.
-     * The proof is that every weapon's ammo entry names its own ammunition —
-     * an eleven-way agreement nothing in the decode arranged. These check the
-     * six ammo types by name, which is the part that would break first if the
-     * reading were wrong.
+     * These check the ITEM table: effect 18 is Shells P, and so on. That is a
+     * fact about `0x8009F5CC` and is unaffected by what follows.
+     *
+     * They used to be presented as proof that a rect record's fifth byte is an
+     * effect id, on the strength of the weapon-to-ammo table lining up when
+     * read that way. It is not — the byte is a palette index and the ammo table
+     * holds rect indices, both straight off the disassembly (icontable.h).
+     * The agreement these numbers show is real and means less than it looked
+     * like: two near-monotonic sequences a small constant apart will line up
+     * over any window you pick.
      */
     static const struct { u8 effect; const char *name; } ammo[] = {
         { 18, "Shells P"  },
@@ -226,11 +231,26 @@ static void test_icon_vocabulary(void)
               got ? got : "(none)");
     }
 
-    /* The icons the bar names for itself. */
-    CHECK(q2_icon_name_for_id(Q2_SBAR_ICON_MEDIKIT) != NULL,
-          "the medikit icon names an item");
-    CHECK(q2_icon_name_for_id(Q2_SBAR_ICON_ARMOUR_JACKET) != NULL,
-          "the jacket armour icon names an item");
+    /*
+     * The icons the bar names for itself are RECT INDICES, not effect ids.
+     *
+     * These are the two hard-coded offsets in the sub-draws divided by the
+     * five-byte record: 170/5 at 0x80035190 and 150/5 at 0x8003565C. Pinned
+     * here because the reading that shipped before treated them as effect ids
+     * and the mistake was invisible — scanning for effect 34 finds rect 30,
+     * which is a real icon, just the armour's rather than health's.
+     */
+    CHECK(Q2_SBAR_ICON_HEALTH == 170 / Q2_ICON_RECORD,
+          "the health icon is rect 34, the offset 170 divided by the record");
+    CHECK(Q2_SBAR_ICON_ARMOUR == 150 / Q2_ICON_RECORD,
+          "the armour icon is rect 30, from offset 150");
+    CHECK(Q2_SBAR_ICON_HEALTH != Q2_SBAR_ICON_ARMOUR,
+          "health and armour are different icons");
+
+    /* And the three palettes the bar selects between are three distinct
+     * entries of the built-in bank — 8 cyan, 38 blue, 7 red. */
+    CHECK(Q2_SBAR_PAL_DIGITS != Q2_SBAR_PAL_LOW,
+          "the low-value flash is not the numerals' own palette");
 
     /* Zero is "no icon" and must not match the front of the table. */
     CHECK(q2_icon_name_for_id(0) == NULL, "effect 0 names nothing");

@@ -586,10 +586,35 @@ The residues of the resolved blockers keep their parents' numbers.
       `q2psx-inspect classes` checks it disc-wide: **651 of 651** spawn records resolve to a class, and
       **651 of 651** of those classes name a model the same map ships. Implemented in
       `src/build/classtable.[ch]`. Full table in FORMATS.md §9.8.
-- [ ] **10b. One model part textures wrong — and it is NOT the part this entry has named for three passes.**
-      The symptom is unchanged: BASE1's `Soldier` is green and grey except for a block of saturated violet
-      over the head. Everything else this entry said about it was wrong, and the corrections are more
-      useful than the symptom.
+- [x] **10b. One model part textures wrong. — ANSWERED, and nothing textures wrong.**
+      The Soldier is correct. Every clause of this entry except the existence of violet pixels was wrong,
+      and the way each one fell is worth more than the entry was.
+
+      **The camera was behind the model.** `q2psx-inspect model` defaults to yaw 0, which is the Soldier's
+      BACK, and three passes described "the head" without ever turning it round. From the front the model
+      is a Quake II soldier in every detail — grey helmet, visor, green torso, bare arms. The violet is on
+      the back of the collar and is not visible from any angle a player meets one at.
+
+      **It is not noise and it is not a wrong palette.** The violet is palette entries 11, 13, 14 and 15
+      of CLUT 107, and those four are a clean four-step ramp — (104,72,192), (80,40,160), (56,24,104),
+      (40,16,64). Entries 0-10 of 107 are byte-identical to 113's, so what varies between the model's
+      palettes is only an ACCENT of four: violet in 107, red in 113, brown in 114. Over the patch behind
+      the head, 33 of 255 texels take the accent and they draw a coherent ribbed structure, not speckle.
+      A four-step ramp used by a coherent pattern is authored.
+
+      **And the binding reproduces three separate atlases exactly.** The same model is re-laid-out per
+      map: part 1 is pages 1-5 / textures 39-45 on BASE1, pages 1-7 / 46-60 on BASE2, and pages 3-7 /
+      76-88 on WASTE1. Rendered through the port's page-and-CLUT rule the three come out **pixel
+      identical** — 22 and 86 differing pixels out of 245,760, none of them in the violet. A binding
+      defect cannot make three independently authored palette tables agree to 0.03%.
+
+      So the answer is that **the disc says violet**, and the port is drawing what it is given. What
+      remains open is only the narrow possibility that something rewrites a CLUT at runtime for a
+      particular entity — the `skinnum` field exists and the class table gives the Soldier three variants
+      — which would be a different mechanism entirely and is not evidenced by anything found here.
+
+      The rest of this entry is kept because the four negative results are load-bearing for anyone who
+      later suspects the model texture path.
 
       **It is not part 2, and part 2 is not broken.** Drawing one part at a time (`Q2_ONLY_PART` while
       bringing this up) shows part 2 IS the head — a helmet, correctly textured in olive and grey — and
@@ -627,12 +652,6 @@ The residues of the resolved blockers keep their parents' numbers.
       PERIMETER order in the file — so this port's fan split is right for models exactly as it is for the
       world.
 
-      *Where to go next.* The remaining question is narrow: what does the original draw where this port
-      draws palette entries 11-15? Two shapes are left. Either the entity carries something that shifts
-      the palette — the `skinnum` field exists and the class table gives the Soldier three variants — or
-      those texels are not meant to be reached at all and something upstream of the UV is clamping or
-      windowing them. The first is checkable by finding a reader of `skinnum` on the draw path; the second
-      by asking whether the engine ever writes a texture-window register.
 
 - [x] **7. `SortData` encoding. — SOLVED, and the world is not depth-sorted at all.**
       "No fixed per-node record" was the finding, not the obstacle: there are no records. It is a
@@ -5255,3 +5274,61 @@ folds them into one helper with a sign flag fails rather than silently halves th
       until that is read. Worth noting the shape is right for a *near-plane* flag — a quad with a vertex
       through the plane cannot be NCLIPped meaningfully — which would make it a correctness escape rather
       than an authoring one.
+
+## The status bar's fifth byte is a palette, and the HUD had been drawing the armour box for health
+
+Two separate colour defects were reported together — "everything is inverted, red shows as blue" — and they
+turned out to share nothing but a symptom. Recording both, because the first one is a trap this project's own
+tooling is structurally blind to.
+
+**The window, not the renderer.** The client uploaded the front buffer to an `SDL_PIXELFORMAT_XRGB1555`
+texture by memcpy. The console's halfword is `STP | B | G | R` with red in bits 0–4, so that enum reads B
+where R is and exchanges the two channels in every pixel. Fixed to `XBGR1555`; the full argument, and why
+PAL has nothing to do with it, is now FIDELITY.md §4a. What matters here is the epistemics: `--shot` captures
+come off the front buffer *before* SDL sees it, so they were correct the entire time. Every comparison this
+project makes is made in those captures. **A rendering claim verified only by `--shot` says nothing about
+what the window shows**, and that gap had been open since the client got a window.
+
+**The rect table is indexed, not scanned — icontable.h's "SOLVED" was wrong.** That header claimed a rect
+record's fifth byte is the item's `effect` dispatch index, on the strength of the weapon-to-ammo table
+reading correctly as effect ids six ways over. All three status-bar sub-draws say otherwise, in the plainest
+possible terms: `lbu v0, 170(t0)` at `0x80035190` and `lbu v0, 150(a0)` at `0x8003565C` with `t0`/`a0` =
+`0x8009C478`, and `a0 * 5 + t0` at `0x80035374`. Five-byte stride on five-byte records, two hard-coded
+multiples of five, and no compare against the fifth byte anywhere.
+
+The fifth byte is a **palette index**. The sub-draws store it into byte +8 of a ten-byte field record
+(`0x80035210`), which is the same slot a counter running low takes 7 in (`0x8003524C`) — an effect id could
+not be written there. `0x800337EC` initialises all thirteen fields with +8 = 8 and +9 = 14, and 14 is
+`qk_menu.lbm`'s VRAM slot, so +9 is the sheet. Reading the three palettes the bar selects between closes it:
+
+| index | ramp | what it colours |
+|---|---|---|
+| 8 | pale cyan to (160,200,224) | the numerals |
+| 38 | blue to near-white | the health cross |
+| 7 | red/orange to (248,64,0) | the low-value flash |
+
+**What the wrong reading cost.** Health asked for effect 34 and the scan returned rect **30**, whose fifth
+byte is 34 — and rect 30 is the *armour* icon. So the health field drew an armour box, and because the wrong
+answer was still a real icon it read as a mis-picked sprite rather than as a mis-read table. Health is rect
+**34**, which is the cross. Separately, every sprite in the bar was drawn with the menu font's single CLUT,
+because the port had nowhere to put a per-sprite palette.
+
+Why the join looked so convincing is worth keeping: palette indices and effect ids both run near-monotonically
+over the grid and stay a small constant apart, so any window of them agrees. The two checks that break the tie
+appeal to neither reading — under the effect reading the cell assigned to the power shield is **empty**, and
+under the index reading the six cells the ammo table selects are six ammo boxes.
+
+**Still open — what suppresses the ammo counter.** Retail capture at a level start shows health and its cross
+and nothing else; the port now matches on armour, because `0x80035594` branches to `0x80035630` on a zero
+armour value and the test at `0x80035634` skips the whole sub-draw. The ammo sub-draw has **no equivalent
+early-out**. Its only zero test (`0x800353B0`) collapses the icon to the 1x1 blank and leaves the digits
+alone, and the splitter at `0x80034E6C` blanks leading zeroes but always emits the units digit — so by the
+code as read, a blaster-only player should see a "0" that retail does not show. Either a guard exists
+somewhere not yet walked, or one of the three field pointers the sub-draw is handed is not what it looks
+like. Left alone rather than papered over with a threshold: the port draws the "0" and is wrong in a way
+that is visible and documented, which is better than being right by accident.
+
+Related: the health flash holds solid at or below zero (`blez` at `0x80035248`) while the ammo flash does not
+and is `sltiu`, so the two thresholds and the two zero behaviours are genuinely different and are kept apart.
+Not modelled: the health sub-draw writes the flash palette to all three digit fields (`0x80035268`–`0x80035270`)
+where the ammo one writes to a single field (`0x80035464`).

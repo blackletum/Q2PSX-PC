@@ -41,16 +41,17 @@
  *     grid in the same sheet — see statusbar.h.
  *
  * ---------------------------------------------------------------------------
- * The vocabulary — SOLVED. The fifth byte is the item's `effect`
+ * The vocabulary — RETRACTED. The fifth byte is a PALETTE INDEX
  * ---------------------------------------------------------------------------
- * Each rect record's fifth byte was recorded here as "an id whose value space
- * is unidentified". It is the **item's touch-dispatch index** — the `effect`
- * column of the item table at `0x8009F5CC` (itemtable.h), the one the pickup
- * handler takes as `effect - 2`. Joining the two names every icon.
+ * This block used to read "SOLVED — the fifth byte is the item's `effect`",
+ * and everything that followed from it was wrong. The retraction is kept in
+ * full, argument and all, because the argument is a good one and someone will
+ * otherwise rebuild it from the same data and reach the same wrong place.
  *
- * The proof is the weapon-to-ammo table, and it is an eleven-way coincidence
- * that nothing in the decode was arranged to produce. Read as effect ids, its
- * entries are:
+ * WHAT IT CLAIMED. That the fifth byte is the item's touch-dispatch index —
+ * the `effect` column of the item table at `0x8009F5CC` — and that the runtime
+ * therefore resolves an icon by SCANNING for a record whose fifth byte matches.
+ * Its evidence was the weapon-to-ammo table read as effect ids:
  *
  *     Shotgun, Super Shotgun   18  ->  Shells P
  *     Machinegun, Chaingun     19  ->  Bullets P
@@ -59,19 +60,48 @@
  *     HyperBlaster, BFG        22  ->  Cells P
  *     Railgun                  23  ->  Slugs P
  *
- * Every weapon names its own ammunition. Read instead as rect INDICES — the
- * other candidate — the same table gives the shotgun "Flame Fuel" and the
- * rocket launcher "Combat Armour", which is how that reading was ruled out.
+ * Every weapon naming its own ammunition, six ways, is not nothing. It is also
+ * not enough, and the reason is that the rival reading was never tested against
+ * the machine code — only against ITSELF. "Read as rect indices the shotgun
+ * gets Flame Fuel" names the cell using the effect join, which is the very
+ * thing in dispute. The refutation was circular.
  *
- * A second confirmation falls out of the same join: a weapon pickup's own
- * effect is its **1-based weapon slot** — Shotgun 2, Super Shotgun 3,
- * Machinegun 4, Chaingun 5, Grenade Launcher 7, Rocket Launcher 8,
- * HyperBlaster 9, Railgun 10, BFG 11 — which is the weapon numbering
- * FORMATS.md §9.6 derived from a completely different direction.
+ * WHAT THE CODE DOES. All three status-bar sub-draws index. None scans:
  *
- * So `q2_icon_rect_for_id` is a SCAN, not an index. That is what the runtime
- * does too, and it is why the table carries the id at all: an array indexed by
- * effect would not need one.
+ *     80035190  lbu  v0, 170(t0)     t0 = 0x8009C478   health, ALWAYS 170
+ *     8003565C  lbu  v0, 150(a0)     a0 = 0x8009C478   armour, ALWAYS 150
+ *     80035374  sll  v0, a0, 2       a0 = ammoIcon[weapon]
+ *     80035378  addu v0, v0, a0                        ammo, a0 * 5
+ *     80035380  addu v1, a0, t0                        &rect[a0]
+ *
+ * A five-byte stride on a table of five-byte records, and two hard-coded
+ * multiples of five for the two fixed icons. There is no compare instruction
+ * against the fifth byte anywhere in any of them.
+ *
+ * WHAT THE FIFTH BYTE IS. The sub-draws store it into byte +8 of a field
+ * record (0x80035210, 0x8003540C), and byte +8 is the field's PALETTE index
+ * into the built-in bank — the same slot a counter running low takes 7 in
+ * (0x8003524C). Reading the three that the bar actually selects settles it:
+ * 8 is a pale cyan ramp, 38 a blue one, 7 a red one, which are the numerals,
+ * the health cross and the low-value flash. See statusbar.h.
+ *
+ * WHY THE JOIN LOOKED SO GOOD. Both sequences run near-monotonically over the
+ * grid, so palette indices and effect ids stay a small constant apart across
+ * long stretches, and any window of them lines up. Two checks break the tie
+ * without appealing to either reading: under the effect reading the cell
+ * assigned to the power shield is EMPTY, and under the index reading the six
+ * cells the ammo table selects are six ammo boxes. Look at the sheet.
+ *
+ * WHAT IT COST. `q2_sbar_icon_field` asked for effect 34 to get health's
+ * cross. The scan returns rect 30 — whose fifth byte is 34 — and rect 30 is
+ * the ARMOUR icon, so the health field drew an armour box for as long as the
+ * bar has existed. It looked like a mis-picked icon rather than a mis-read
+ * table because the wrong answer was still a real icon.
+ *
+ * `q2_icon_rect_for_id` is kept: it is a useful lookup for tooling that wants
+ * to ask "which rect carries palette N". It is NOT what the runtime does, and
+ * a renderer reaching for it is almost certainly making this mistake again —
+ * use `q2_icon_rect_get` with an index.
  *
  * Where the bar is DRAWN is now known and lives in statusbar.h: `0x800337D0` is
  * the per-viewport draw hook, not a screen.
@@ -151,7 +181,13 @@ q2_icon_size q2_icon_draw_size(int players, int weapon_id);
 
 typedef struct q2_icon_rect {
     u8 u, v, w, h;
-    u8 id;          /* the record's own fifth byte; its meaning is unread */
+    /*
+     * The record's fifth byte: the PALETTE INDEX this sprite is drawn with,
+     * into the built-in bank (hudtables.h). Named `id` from when its meaning
+     * was unread; kept because renaming it would silently retarget every
+     * caller. NOT an item effect id — see the retraction at the top.
+     */
+    u8 id;
 } q2_icon_rect;
 
 typedef struct q2_icon_tables {
@@ -160,8 +196,12 @@ typedef struct q2_icon_tables {
     q2_icon_rect rect[Q2_ICON_COUNT];
     u32          rect_count;
 
-    /* Indexed by the live weapon id. `ammo_icon` is a rect index; `ammo_kind`
-     * selects which counter the bar reads, and its value space is unread. */
+    /*
+     * Indexed by the live weapon id. `ammo_icon` is a rect INDEX — the ammo
+     * sub-draw multiplies it by five and adds the rect base (0x80035374), so
+     * it is fed to q2_icon_rect_get and never to the effect-id scan.
+     * `ammo_kind` picks which of the player's six ammo counters is read.
+     */
     u8           ammo_icon[Q2_ICON_WEAPONS];
     u8           ammo_kind[Q2_ICON_WEAPONS];
 } q2_icon_tables;
@@ -174,18 +214,22 @@ void      q2_icon_tables_free(q2_icon_tables *t);
 const q2_icon_rect *q2_icon_rect_get(const q2_icon_tables *t, u32 index);
 
 /*
- * The rect whose fifth byte is `effect`, or NULL. A scan, because that is what
- * the id being stored in the record rather than implied by its position means.
- * `index_out` receives the rect index when it is not NULL.
+ * The first rect whose fifth byte equals `id`, or NULL. `index_out` receives
+ * the rect index when it is not NULL.
+ *
+ * NOT WHAT THE RUNTIME DOES. Every path in the console indexes this table;
+ * nothing scans it. This is a reverse lookup for tooling — "which rect uses
+ * palette N" — and a renderer calling it is very likely repeating the mistake
+ * the header's retraction describes. Draw with q2_icon_rect_get.
  */
 const q2_icon_rect *q2_icon_rect_for_id(const q2_icon_tables *t, u8 effect,
                                         u32 *index_out);
 
 /*
- * The ammo a weapon shows, as an item EFFECT id — feed it to
- * `q2_icon_rect_for_id`. Weapon 0, "no weapon", gives 0, which matches no
- * record, so an unarmed player's field is empty rather than reading off the
- * front of the table.
+ * The ammo icon a weapon shows, as a RECT INDEX — feed it to
+ * `q2_icon_rect_get`. Weapon 0 and the blaster both give 0, which is the 1 x 1
+ * blank, so a weapon with no ammunition draws no icon. That is the table's own
+ * doing, not a guard here.
  */
 u8 q2_icon_ammo_for_weapon(const q2_icon_tables *t, int weapon_id);
 

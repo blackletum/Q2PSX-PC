@@ -101,6 +101,51 @@ alpha.
 
 **Setting.** `r_psx_dither` (default on), `r_psx_15bit` (default on).
 
+### 4a. Channel order — red lives in the LOW bits
+
+Calling the format "RGB555" is how this went wrong once already, so state it as
+bits. A PSX framebuffer halfword is
+
+```
+ 15   14 .. 10   9 .. 5   4 .. 0
+ STP      B         G        R
+```
+
+Red occupies bits 0–4. `psx_rgb555()` in `src/psx/gpu.h` builds that layout and
+`unpack555()` in `src/render/raster.c` reads it back; every palette on the disc
+is stored the same way, which is why `src/formats/vram.h` calls CLUT entries
+BGR555 rather than RGB555. Nothing inside the port ever holds a pixel with red
+in the high bits.
+
+**Where it can go wrong is the hand-off to the host**, and only there. The
+client uploads the finished front buffer to an SDL texture with a plain memcpy,
+so the texture's format has to name the console's layout — SDL orders its format
+names most-significant-channel-first, which makes that `SDL_PIXELFORMAT_XBGR1555`.
+`XRGB1555` is the mirror image and was what shipped: it produced a complete,
+sharp, correctly-lit picture with **red and blue exchanged in every pixel**.
+Quake II's rust-brown rock came out slate blue and its violet sky came out
+crimson, which reads like a palette fault or a PAL/NTSC problem and sends the
+search a long way from the one line responsible.
+
+Two things make this defect worth its own section:
+
+- **It is invisible to this project's own comparison workflow.** `--shot` writes
+  its PPM off the front buffer through `unpack555()`, *before* SDL is handed
+  anything. Captures stayed correct for as long as the bug existed, so a
+  before/after screenshot could not show it and the disagreement only appeared
+  when someone looked at the window and the capture side by side. A defect
+  visible in the window and never in a capture is, by construction, in the
+  presentation format.
+- **Region has nothing to do with it.** PAL and NTSC differ in line count and
+  field rate — 256 lines at 50 Hz against 240 at 60 — and in nothing about
+  colour. The GPU packs the same halfword either way. "The PAL disc has
+  different colours" is not a hypothesis this hardware supports.
+
+**Guard.** `src/client/main.c` asks SDL what it would pack pure red into,
+immediately after creating the texture, and compares it against
+`psx_rgb555(255, 0, 0)`. They must both be `0x001F`. A mismatch warns with both
+values rather than letting the picture argue for itself.
+
 ---
 
 ## 5. Semi-transparency
