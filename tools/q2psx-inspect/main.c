@@ -5248,6 +5248,14 @@ static int cmd_movie(const disc *d, const char *name, const char *out_ppm)
 
             t = q2_stx_unmatched_report(lz, 18);
             printf("    gave up: %u unmatched code, %u run overran 63, %u out of bits\n", q2_stx_fail_unmatched, q2_stx_fail_overrun, q2_stx_fail_dry);
+            {
+                u32 q;
+                printf("    overran by code length:");
+                for (q = 0; q < 20; q++)
+                    if (q2_stx_overrun_by_len[q])
+                        printf("  %u-bit %u", q, q2_stx_overrun_by_len[q]);
+                printf("   escape %u, largest run %u\n", q2_stx_overrun_escape, q2_stx_overrun_run_max);
+            }
             printf("    unmatched lookaheads: %u", t);
             for (i2 = 0; i2 < 18; i2++)
                 if (lz[i2])

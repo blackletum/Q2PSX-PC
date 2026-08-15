@@ -193,7 +193,7 @@ typedef struct ac_code {
 } ac_code;
 
 static const ac_code k_ac[] = {
-    /* 2..7 bits — the common codes, and the ones the data confirms. */
+    /* 2..7 bits â€” the common codes, and the ones the data confirms. */
     { 0x03,  2,  0,  1 },   /* 11       */
     { 0x03,  3,  1,  1 },   /* 011      */
     { 0x04,  4,  0,  2 },   /* 0100     */
@@ -211,7 +211,7 @@ static const ac_code k_ac[] = {
     { 0x07,  7,  9,  1 },   /* 0000111  */
 
     /*
-     * 8 bits, prefix `00100` — and only that prefix. An earlier pass had a
+     * 8 bits, prefix `00100` â€” and only that prefix. An earlier pass had a
      * second group at `00101xxx`, which is a PREFIX COLLISION with the 5-bit
      * `00101` above: a mechanical check of every pair caught it, and it is the
      * kind of error that produces a decoder which works on most blocks and
@@ -228,7 +228,7 @@ static const ac_code k_ac[] = {
 
     /*
      * 10 bits, prefix `0000001`. The same check caught these sitting under
-     * `000001`, which is the ESCAPE — every one of them was unreachable, and
+     * `000001`, which is the ESCAPE â€” every one of them was unreachable, and
      * the escape was swallowing bits that belonged to a coefficient.
      */
     { 0x008, 10, 16,  1 },  /* 0000001000 */
@@ -246,13 +246,13 @@ static const ac_code k_ac[] = {
      * Every lookahead the table could not match was bucketed by its run of
      * leading zeros and its tail collected: the buckets are 7 zeros (845 of
      * 1316) and 8 zeros (297), and their tails fill exactly 4 and 3 bits with
-     * the next bit taking both values — which is the signature of a fixed-width
+     * the next bit taking both values â€” which is the signature of a fixed-width
      * code followed by a sign. 7 zeros + a 1 + 4 bits and 8 zeros + a 1 + 3
      * bits are both twelve. The remaining buckets (9, 10 and 11 zeros, 174
      * samples) each hold ONE distinct pattern at every width, which is what a
      * reader that has already lost sync sees in a run of padding, not a group.
      *
-     * The run/level assignments below are B.14's and are NOT derived — sync
+     * The run/level assignments below are B.14's and are NOT derived â€” sync
      * depends only on the lengths, so a wrong assignment here is a wrong
      * picture and not a failed decode. Which of those two the port is looking
      * at is exactly what the frame counter now distinguishes.
@@ -288,14 +288,14 @@ static const ac_code k_ac[] = {
      *
      * With the twelves in, every remaining first-failure fell into the 9-, 10-
      * and 11-zero buckets, and each one's tail fills exactly FOUR bits with the
-     * fifth taking both values — a fixed-width code and its sign. So the groups
+     * fifth taking both values â€” a fixed-width code and its sign. So the groups
      * are `<9 zeros> 1 <4>`, `<10 zeros> 1 <4>` and `<11 zeros> 1 <4>`:
      * fourteen, fifteen and sixteen bits, sixteen codes each.
      *
      * The run/level assignments are B.14's and are NOT derived. Synchronisation
      * depends only on the lengths, so an assignment error here shows up as a
      * wrong PICTURE from a frame that decoded, which the frame counter and the
-     * eye can tell apart — a length error shows up as a frame that does not
+     * eye can tell apart â€” a length error shows up as a frame that does not
      * decode at all.
      */
     { 0x0010, 14, 10,  2 },   /* 00000000010000 */
@@ -408,6 +408,15 @@ u32 q2_stx_last_bits;
 u32 q2_stx_fail_unmatched;
 u32 q2_stx_fail_overrun;
 u32 q2_stx_fail_dry;
+
+/*
+ * WHICH code overran, by its length — and by whether it was the ESCAPE, whose
+ * run is six raw bits rather than a table entry. "A run value is wrong" is a
+ * whole column; this says which row.
+ */
+u32 q2_stx_overrun_by_len[20];
+u32 q2_stx_overrun_escape;
+u32 q2_stx_overrun_run_max;
 
 static void q2_stx_unmatched(u32 look)
 {
@@ -603,6 +612,12 @@ static bool decode_block(bitreader *b, u32 qscale, s32 out[64])
         n += run + 1;
         if (n >= 64) {
             q2_stx_fail_overrun++;
+            if (len < 20)
+                q2_stx_overrun_by_len[len]++;
+            if (len == 0)
+                q2_stx_overrun_escape++;
+            if (run > q2_stx_overrun_run_max)
+                q2_stx_overrun_run_max = run;
             return false;
         }
 

@@ -145,6 +145,12 @@ extern u32 q2_stx_fail_unmatched;
 extern u32 q2_stx_fail_overrun;
 extern u32 q2_stx_fail_dry;
 
+/* Which code length overran, and whether it was the escape (length 0 here,
+ * because its run is six raw bits and not a table entry). */
+extern u32 q2_stx_overrun_by_len[20];
+extern u32 q2_stx_overrun_escape;
+extern u32 q2_stx_overrun_run_max;
+
 #ifdef __cplusplus
 }
 #endif

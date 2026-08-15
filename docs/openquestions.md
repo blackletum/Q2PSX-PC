@@ -7057,3 +7057,30 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
 
       **So the movies still do not play**, and the reason has changed from "five code groups are missing"
       to "the run/level column is wrong", which is a smaller and better-defined thing than it was.
+- [~] 109. **The movie decoder's remaining fault is NOT the run column, and the instrument that said it was
+      is measuring the victim.** #108 split the failures into "unmatched code" and "run overran 63" and
+      concluded the second was a wrong run/level column. Splitting that number by CODE LENGTH says
+      otherwise:
+
+          overran by code length:  0-bit 141  2-bit 178  3-bit 126  4-bit 115  5-bit 142
+                                   6-bit 192  7-bit  89  8-bit 109  10-bit 37  12-bit 129
+                                   14-bit 29  16-bit 12    escape 141, largest run 63
+
+      **The 2-bit code carries run 0.** It cannot overrun unless the coefficient index is ALREADY 63 when
+      it arrives — and it is, 178 times. So the overrun is not the code that reports it; one wrong jump
+      earlier leaves the index high and every code after it reports the failure. The histogram identifies
+      whichever code was next, which is exactly the shape of a measurement that looks conclusive and names
+      the wrong thing.
+
+      Two facts survive and are worth carrying:
+
+      - **`largest run 63` and 141 escapes.** The escape's run field is six raw bits, so 63 is its maximum
+        and hitting the maximum repeatedly is what a MISREAD FIELD looks like — either its width, its
+        position, or the level width after it. That is the first thing to check.
+      - Setting every long code's run to zero moved the total by 60 frames out of 1559, which is far too
+        little for the long codes to be the cause. Whatever is wrong is in the common path.
+
+      So the state is: the container is exact, the geometry, DC width and EOB are confirmed by 248 frames
+      that decode end to end, the code LENGTHS are derived from the disc (#108), and something in the
+      common AC path — most likely the escape's field layout — puts the coefficient index somewhere it
+      should not be. **The movies do not play.**
