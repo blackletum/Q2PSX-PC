@@ -64,6 +64,11 @@ typedef struct q2_cre_bind {
     const q2_cre_impl *impl;
     q2_mmove           move[Q2_CRE_MAX_MOVES];
     u32                move_count;
+
+    /* The module's name for each move, parallel to `move[]`. NULL entries are
+     * normal: not every move is named. See q2_creature_bind_move_names. */
+    const char *const *move_name;
+    u32                move_name_count;
     bool               ready;
 
     /*
@@ -77,6 +82,18 @@ typedef struct q2_cre_bind {
 } q2_cre_bind;
 
 /* Attach a decoded action set. Call before spawning from this bind. */
+/*
+ * The module's own NAME for each decoded move, in move order.
+ *
+ * Supplied by the caller for the same reason the thinks are: reading them needs
+ * the relocated image, which the bind does not keep. Names matter because they
+ * are how the ENGINE reaches an animation — `0x8006D330` walks block D comparing
+ * 12-byte names — so a move without one cannot be posed the way the disc does
+ * it. `names[i]` may be NULL where the module names nothing.
+ */
+void q2_creature_bind_move_names(q2_cre_bind *b, const char *const *names,
+                                 u32 count);
+
 void q2_creature_bind_thinks(q2_cre_bind *b, const q2_cre_think *think,
                              u32 count);
 

@@ -109,6 +109,15 @@ static bool module_take(q2_creature_world *w, const u8 *bin, u32 boff, u32 bnext
      * unbound.
      */
     q2_creature_bind_thinks(&m->bind, m->think, Q2_CLASS_METHOD_COUNT);
+
+    /*
+     * And the move names, bound after the same memset for the same reason.
+     * These point into `m->image`, which this struct owns, so they stay valid
+     * for the module's lifetime.
+     */
+    q2_creature_move_names(&m->cre, m->image, m->size, m->move_name,
+                           Q2_CRE_MAX_MOVES);
+    q2_creature_bind_move_names(&m->bind, m->move_name, m->cre.move_count);
     if (!m->ready) {
         free(m->image);
         m->image = NULL;

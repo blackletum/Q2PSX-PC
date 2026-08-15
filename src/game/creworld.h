@@ -101,6 +101,16 @@ typedef struct q2_creature_module {
     q2_creature  cre;
     q2_cre_bind  bind;
     q2_cre_think think[Q2_CLASS_METHOD_COUNT];
+
+    /*
+     * The module's own name for each move, pointing into `image`. Kept here
+     * because the bind does not own the image and the names must outlive the
+     * call that reads them. They are how the ENGINE reaches an animation --
+     * 0x8006D330 walks block D comparing 12-byte names -- so the draw path
+     * needs them to pose a creature the way the disc does.
+     */
+    const char  *move_name[Q2_CRE_MAX_MOVES];
+
     bool         ready;
 } q2_creature_module;
 

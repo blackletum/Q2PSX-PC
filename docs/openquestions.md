@@ -5184,6 +5184,27 @@ nothing saying so.
       in the position, 30 per AI frame). Getting any of them wrong is a silent mis-pose rather than a
       failure, which is why they are pinned as constants rather than left implicit in one formula.
 
+      **Wired into the draw path**, with the move names plumbed through `q2_creature_bind_move_names()` —
+      the bind does not own the module image, so the names are read once in `creworld.c` and bound the same
+      way the thinks are. The client tries the name path first and falls back to length matching when a
+      module names a move its model's block D does not carry.
+
+          BASE2   1745 poses by name, 2655 by the fallback
+          BASE1   1386 / 1814
+          JAIL4   1775 / 1425
+
+      **Two bugs the counters caught that a screenshot could not.** The first: the guard
+      `if (ai_frame < move_first) return false` rejected every pose, because a monster whose frame counter
+      has not caught up sits at frame 0 while its move starts at 146 — the surrounding code had always
+      clamped that, and the fix is to use its clamped value. The second, and the reason the first fix
+      changed nothing: **`q2_model_anim_at()` walks in whole model frames while the position is in tenths**,
+      so passing the position straight in overran the timeline and failed on every creature, silently, back
+      to the length path. `pos / 10` is the conversion.
+
+      Both showed as `0 by name` and a pixel-identical frame. Nothing looked wrong at any point, which is
+      the whole argument for the counter: 110 of 128 module move names ARE in their model's block D, so a
+      path that never once succeeded should have been suspicious, and only a number said so.
+
 - [ ] 64. **The first code found that walks block D — and it names the `rest` field.**
       Hunting the load-time transform (#51f, #63) by asking who reads `model+0x38`:
 

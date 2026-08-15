@@ -310,6 +310,9 @@ typedef struct client {
     u32               cre_sound_missing;
     u32               ent_light_added;
     u32               script_lights;
+    u32               pose_by_name;
+    u32               pose_name_no_pos;
+    u32               pose_no_name;
     u32               ent_light_dropped;
     u32               ent_bursts;
     u32               burst_no_fx, burst_no_table, burst_no_model;
@@ -942,6 +945,23 @@ static u32 client_rot_turned(const client *c)
  * can pick the matching one when several clips share a length. Both lists are
  * walked in their own order, which is the same technique the move NAMES use.
  */
+/* The module's own name for a move, or NULL. Mirrors client_move_ordinal, and
+ * exists because the engine reaches an animation by name (0x8006D330). */
+static const char *client_move_name(const q2_monster *m, const q2_mmove *mv)
+{
+    const q2_cre_bind *b = q2_cre_bind_for(m);
+    u32 i;
+
+    if (!b || !mv || !b->move_name)
+        return NULL;
+
+    for (i = 0; i < b->move_count && i < b->move_name_count; i++)
+        if (&b->move[i] == mv)
+            return b->move_name[i];
+
+    return NULL;
+}
+
 static u32 client_move_ordinal(const q2_monster *m, const q2_mmove *mv)
 {
     const q2_cre_bind *b = q2_cre_bind_for(m);
@@ -3560,6 +3580,8 @@ static void client_write_shot(client *c, bool numbered)
                 c->sim[0].combat.projectiles.live, c->cre_bodies, c->rot_steps,
                 c->rot_moved, client_rot_turned(c),
                 c->sim[0].event_rt.call_count);
+        Q2_INFO("  pose      %u by name, %u named but no position, %u unnamed",
+                c->pose_by_name, c->pose_name_no_pos, c->pose_no_name);
         Q2_INFO("  entity ev %u lights added, %u dropped, %u bursts drawn, "
                 "%u script lights",
                 c->ent_light_added, c->ent_light_dropped, c->ent_bursts,
@@ -3848,12 +3870,61 @@ static void client_draw_view(void *user, q2_screen *s, int p,
                         if (into >= len)
                             into = len - 1;
 
-                        have_clip = q2_model_anim_by_length(
-                            mdl, (u32)len * Q2_CRE_TICKS_PER_FRAME,
-                            client_move_ordinal(m, mv), &clip);
-                        within = (u32)into * Q2_CRE_TICKS_PER_FRAME;
-                        if (have_clip && within >= clip.frames)
-                            within = clip.frames ? clip.frames - 1 : 0;
+                        /*
+                         * BY NAME first, which is what the engine does:
+                         * 0x8006D330 walks block D comparing 12-byte names,
+                         * and 0x8007EA44 places the frame at
+                         * `start * 5 + 30 * (f - first)`. That per-move base is
+                         * exactly what a bare `frame * 10` lacks, and lacking
+                         * it is what made the timeline walk drift.
+                         *
+                         * Falls back to matching a clip by LENGTH when the
+                         * module does not name the move — a substitute for
+                         * something the disc never does, kept only because a
+                         * decoded move without a name has nothing else to go on.
+                         */
+                        const char *mname = client_move_name(m, mv);
+                        u32 pos = 0;
+
+                        /*
+                         * `into` is already clamped to [0, len-1] above, which
+                         * matters: a monster whose frame counter has not caught
+                         * up to its move sits at frame 0 while the move starts
+                         * at 146, and the raw frame would be rejected as before
+                         * the move's start. Clamping is what the surrounding
+                         * code has always done and what a position before a
+                         * move's base means anyway — the move begins there.
+                         */
+                        have_clip = false;
+                        if (mname && q2_model_position_for_move(
+                                mdl, mname, mv->first_frame + into,
+                                mv->first_frame, &pos))
+                            /*
+                             * `pos` is in TENTHS of an animation frame, which
+                             * is the engine's unit (0x8006B5D8 divides it by
+                             * ten). q2_model_anim_at walks in whole model
+                             * frames — the fallback below passes
+                             * `frame * Q2_CRE_TICKS_PER_FRAME`, three model
+                             * frames per AI frame — so the position has to come
+                             * down by ten. Passing tenths straight in overruns
+                             * the timeline and the walk fails on every creature,
+                             * silently, back to the length path.
+                             */
+                            have_clip = q2_model_anim_at(
+                                mdl, pos / Q2_MODEL_TICKS_PER_FRAME,
+                                &clip, &within);
+                        if (have_clip)      c->pose_by_name++;
+                        else if (mname)     c->pose_name_no_pos++;
+                        else                c->pose_no_name++;
+
+                        if (!have_clip) {
+                            have_clip = q2_model_anim_by_length(
+                                mdl, (u32)len * Q2_CRE_TICKS_PER_FRAME,
+                                client_move_ordinal(m, mv), &clip);
+                            within = (u32)into * Q2_CRE_TICKS_PER_FRAME;
+                            if (have_clip && within >= clip.frames)
+                                within = clip.frames ? clip.frames - 1 : 0;
+                        }
                     }
                 }
 

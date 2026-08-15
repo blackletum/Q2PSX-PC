@@ -139,6 +139,15 @@ bool q2_creature_bind(q2_cre_bind *b, const q2_creature *c,
     return true;
 }
 
+void q2_creature_bind_move_names(q2_cre_bind *b, const char *const *names,
+                                 u32 count)
+{
+    if (!b)
+        return;
+    b->move_name       = names;
+    b->move_name_count = count;
+}
+
 void q2_creature_bind_thinks(q2_cre_bind *b, const q2_cre_think *think,
                              u32 count)
 {
