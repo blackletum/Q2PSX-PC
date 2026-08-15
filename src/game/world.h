@@ -57,6 +57,20 @@ typedef struct q2_world_zone {
     const struct q2_mover_set *movers;
 
     /*
+     * Nodes a script has hidden — one byte per Scene node, or NULL.
+     *
+     * `flags08` bit 15 IS the hide flag and the draw already honours it, but it
+     * is clear on every node on the disc: `OBJDRAWOFF` sets it at RUN TIME, on
+     * the runtime object rather than on the chunk. This port does not build the
+     * console's 48-entry object array (mover.h says why), so the runtime state
+     * lives beside the zone instead, and the draw checks both.
+     *
+     * Owned by the caller and expected to outlive the zone.
+     */
+    const u8 *node_hidden;
+    u32       node_hidden_count;
+
+    /*
      * The AUTHORED draw order, from the zone's SortData chunk.
      *
      * When this is NULL the renderer walks nodes in index order and derives an

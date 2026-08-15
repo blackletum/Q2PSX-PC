@@ -422,6 +422,13 @@ typedef struct client {
     u32               script_strings;   /* STRING calls that said something */
     u32               script_sounds;    /* SIMPLESOUND calls that played    */
     u32               script_gated;     /* ONKEYDO predicates that said no  */
+    /*
+     * Nodes OBJDRAWOFF has hidden, one byte per Scene node. The zone borrows
+     * it (world.h), so it is owned here and lives as long as the zone does.
+     */
+    u8               *node_hidden;
+    u32               node_hidden_count;
+    u32               script_hidden;    /* nodes hidden this level */
 
     /*
      * The doors and lifts.
@@ -1625,6 +1632,39 @@ static void client_event_call(void *user, const q2_event_item *item,
         }
     }
 
+    /*
+     * OBJDRAWOFF — a script hiding geometry.
+     *
+     * `flags08` bit 15 is the hide flag and the zone draw has always honoured
+     * it; it is clear on every node on the disc because this primitive sets it
+     * at RUN TIME. Six calls a trigger volume reaches. The slots are Scene node
+     * indices and take the #56 rebase, as every other object slot does.
+     */
+    {
+        q2_uf_call call;
+
+        if (q2_uf_decode_call(&call, &c->sim[0].userfuncs, item) == Q2_OK &&
+            call.prim == Q2_UF_OBJDRAWOFF && item->len >= 12 &&
+            item->payload && c->node_hidden) {
+            const u8 *p = q2_uf_operand_at(&c->ev_operands,
+                                           item->payload - 2, 12);
+            int k;
+
+            for (k = 0; k < 4; k++) {
+                s16 node = q2_rd_s16(p + 4 + 2 * k);
+
+                if (node < 0)
+                    continue;            /* negative terminates, per the table */
+                if ((u32)node >= c->node_hidden_count)
+                    continue;
+                if (!c->node_hidden[node]) {
+                    c->node_hidden[node] = 1;
+                    c->script_hidden++;
+                }
+            }
+        }
+    }
+
     /* A LIFT1 call is both the constructor and the trigger: the same item that
      * built the mover is what asks it to move. */
     if (c->movers_ready)
@@ -2268,6 +2308,12 @@ static bool client_load_zone(client *c, const char *map, int index)
             q2_rotators_free(&c->rotators);
             c->rotators_ready = false;
         }
+        free(c->node_hidden);
+        c->node_hidden       = NULL;
+        c->node_hidden_count = 0;
+        c->zone.node_hidden  = NULL;
+        c->zone.node_hidden_count = 0;
+
         if (c->movers_ready) {
             q2_movers_free(&c->movers);
             c->movers_ready = false;
@@ -2338,6 +2384,16 @@ static bool client_load_zone(client *c, const char *map, int index)
                  * object indices — so the payload is the only input and no
                  * operand rebase is needed here.
                  */
+                /* One byte per Scene node, for the nodes a script hides. */
+                c->node_hidden_count = c->zone.scene.node_count;
+                c->node_hidden = (u8 *)calloc(c->node_hidden_count
+                                              ? c->node_hidden_count : 1, 1);
+                c->script_hidden = 0;
+                if (c->node_hidden) {
+                    c->zone.node_hidden       = c->node_hidden;
+                    c->zone.node_hidden_count = c->node_hidden_count;
+                }
+
                 if (q2_movers_build(&c->movers, &ev) == Q2_OK) {
                     u32 opcode_built = c->movers.count;
 
@@ -4300,8 +4356,10 @@ static void client_write_shot(client *c, bool numbered)
                 c->pose_by_name, c->pose_name_no_pos, c->pose_no_name);
         Q2_INFO("  breakable %u GLASS calls broke something, %u pieces thrown",
                 c->glass_calls, c->glass_pieces);
-        Q2_INFO("  script    %u strings, %u sounds, %u gated by ONKEYDO",
-                c->script_strings, c->script_sounds, c->script_gated);
+        Q2_INFO("  script    %u strings, %u sounds, %u gated by ONKEYDO, "
+                "%u nodes hidden",
+                c->script_strings, c->script_sounds, c->script_gated,
+                c->script_hidden);
         Q2_INFO("  movers    %u built, %u triggered by the script, %u tick-moves",
                 c->movers_ready ? c->movers.count : 0,
                 c->mover_triggers, c->mover_moved);

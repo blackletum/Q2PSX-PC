@@ -549,6 +549,13 @@ u32 q2_world_build_ot(const q2_world_zone *z,
             continue;
         }
 
+        /* The same bit, set at run time rather than on the chunk — see
+         * `node_hidden`. A script that has hidden this node hides it here. */
+        if (z->node_hidden && n < z->node_hidden_count && z->node_hidden[n]) {
+            if (stats) stats->nodes_hidden++;
+            continue;
+        }
+
         variant = q2_scene_flags_variant(node.flags);
         if (variant == Q2_SURF_VARIANT_HIDDEN) {
             if (stats) stats->nodes_hidden++;

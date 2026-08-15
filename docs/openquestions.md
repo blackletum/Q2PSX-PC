@@ -6028,3 +6028,20 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
 
       *Note on the measurement:* `SIMPLESOUND` reports 0 played in every headless run, and that is the
       absence of an audio device rather than of the wiring — `client_play_sound` needs one.
+
+- [~] 78. **OBJDRAWOFF is wired and its operands read -1, which is a measurement rather than a failure.**
+      `flags08` bit 15 is the hide flag and the zone draw has honoured it since the surface pass; it is
+      clear on every node on the disc because this primitive sets it at RUN TIME, on the runtime object.
+      This port does not build the console's 48-entry object array (mover.h says why), so the runtime
+      state lives beside the zone — `q2_world_zone.node_hidden`, one byte per Scene node, owned by the
+      client and checked by the draw next to the chunk's own bit.
+
+      Only four maps carry the primitive at all: BASE2 1, JAIL4 4, JAIL5 1, SECURITY 1 (of which
+      SECURITY's is never reached).
+
+      **On JAIL4 all four calls ARE reached and all four read `-1 -1 -1 -1`**, through the #56 rebase and
+      not merely from COMMON's copy. That is the same shape as the 39 rotation calls #56 could not test:
+      the operand lives in a zone's Events chunk that the resident zone does not reach. So the wiring is
+      right and the data is not available under one zone — the fix is the rotators' other half, sweeping
+      the zones a map ships and taking the one whose chunk reaches the offset, which `zonescript` already
+      does for rotators and the client does not do for anything.
