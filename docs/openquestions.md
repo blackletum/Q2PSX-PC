@@ -1299,7 +1299,19 @@ The residues of the resolved blockers keep their parents' numbers.
       obvious next test — that it is a second partition of the same shape into another chunk — is
       **REFUTED**: it is non-decreasing on only 30 and 15 of 115 zones respectively, where the light index
       is monotonic on all 115. Whatever it is, it is not a running offset.
-- [ ] 24. `Resources` `unk0` (−3000…6600, 49 distinct) and `unk4` (40…180, 17 distinct); `unk3` (64, but 80
+- [~] 24. **`Resources` `unk0` and `unk4` are authored constants, not derived budgets — measured against
+      six properties of the zone each one names and correlated with none of them.** Over all 115
+      record/zone pairs:
+
+          unk4 vs scene nodes 0.07   coll nodes 0.03   areas 0.13   points 0.09   sort 0.00   lights 0.17
+          unk0 vs scene nodes 0.20   coll nodes 0.27   areas 0.26   points 0.16   sort 0.24   lights 0.20
+
+      Every |r| is under 0.27, including against the zone FILE SIZE (0.09 and 0.17). So "per-zone budget or
+      limit" in the sense of something computed from the zone's contents is refuted: whatever these are,
+      they were typed in rather than measured out. The port loads all 115 zones without reading either.
+      Original text follows.
+
+      `Resources` `unk0` (−3000…6600, 49 distinct) and `unk4` (40…180, 17 distinct); `unk3` (64, but 80
       in two records).
 - [~] 25. `TrigBounds` trigger `id` (9…75 plus 255, where 255 is "none") and `flags` (14 distinct values up
       to 10240). **Three flag bits are now known**, read out of the contents test at `0x80050CE0` and the
@@ -1325,8 +1337,21 @@ The residues of the resolved blockers keep their parents' numbers.
       for something that does not exist. Full detail in FORMATS.md §17.3; implemented in
       `src/game/flare.[ch]` and checked element-for-element against the executable by
       `q2psx-inspect lights`.
-- [ ] 27. Pickup `flags` bits beyond 0, 1 and 8; and the pickup `extra` list's meaning (a consumer exists — a
-      pointer to it is stored into the spawned entity's sub-structure — but the interpretation is unknown).
+- [x] 27. **Both halves are answered, and the first was answered without anyone marking it.** The entry
+      asked for the flag bits beyond 0, 1 and 8 and for the `extra` list's meaning.
+
+      **The flags are all named.** `q2_item_flag` now carries nine bits, each with the address that reads
+      it: SPIN (0x8005 9458), MATERIALISE (0x80059488), TIMED (0x800597C8), OBJECTIVE, the three GLOW
+      channels (0x80059648..0x8005973C), NO_ANIM (0x800593F4) and NO_SPAWN_ARG (0x80059A44). Measured over
+      the whole table, the union of every flag word set anywhere is **0x01FB**, and the bits it contains
+      that no `q2_item_flag` names are **0x0000** — `q2psx-inspect items` prints both. Nothing is left to
+      name. (0x0004 is absent from the union, which matches TIMED's own note: the runtime sets it on items
+      a dying actor drops, and no authored record carries it.)
+
+      **`extra` is the model's CLIP LIST.** The spawner does `ent->model->clips = &rec->extra[0]` — a
+      0xFFFF-terminated run of clip ids — and this port has been assigning it as exactly that since the
+      item path was written: `e->clip[i] = def->extra[i]` in `item.c`. The consumer was located; the entry
+      was never updated.
 - [ ] 28. `Q2Level` `+0x1C` (constant `jr ra` address, no located reader — possibly the high half of an
       8-byte field whose low half is the runtime pointer at `+0x18`); the writers of the per-level
       `runtime[8]` state; and the `music_playlist` field's real meaning, given that **no instruction anywhere

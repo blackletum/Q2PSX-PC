@@ -170,6 +170,25 @@ int cmd_items(disc *d)
 
     /* ------------------------------------------------------------------ */
     printf("\nEffect dispatch, %d slots:\n", Q2_ITEM_EFFECT_COUNT);
+    /*
+     * The union of every record's flag word, and the union of the bits none of
+     * `q2_item_flag` names. #27 asked what the bits beyond 0, 1 and 8 mean;
+     * they are all named now, and the second number is what says whether any
+     * remain to name at all.
+     */
+    {
+        u32 i, all = 0, unknown = 0;
+        u32 known = Q2_ITEM_SPIN | Q2_ITEM_MATERIALISE | Q2_ITEM_TIMED |
+                    Q2_ITEM_OBJECTIVE | Q2_ITEM_GLOW | Q2_ITEM_NO_ANIM |
+                    Q2_ITEM_NO_SPAWN_ARG;
+
+        for (i = 0; i < table->count; i++)
+            all |= table->def[i].flags;
+        unknown = all & ~known;
+        printf("  flag bits set anywhere : 0x%04X;"
+               " bits no q2_item_flag names : 0x%04X\n", all, unknown);
+    }
+
     {
         u32 e;
         printf("  live  :");
