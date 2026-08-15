@@ -690,7 +690,38 @@ The residues of the resolved blockers keep their parents' numbers.
         stream INDEX, which is a disc-derived handle where a raw byte offset is not. The renderer takes one;
         stream 0 is what a single-stream chunk holds. What remains unknown is only which index a given
         viewport picks, not how to reach any of them.
-- [ ] **8. `AreaConx` 9-byte link payload.** No fixed offset yields a 1.3.12 unit normal in more than 39 % of
+- [ ] **8. `AreaConx` 9-byte link payload — STILL OPEN, with two measurements added and one candidate
+      strengthened.** Re-derived from the disc: 5,223 areas, 1,725 link records, **3,494 links**, matching
+      the counts this entry was written against, so the walk below is the same one.
+
+      **Byte 0 is the neighbour-index candidate, not byte +3.** Tested by graph SYMMETRY, which is the
+      property an adjacency list should have and which no byte histogram can fake: for each of the nine
+      positions, take the value as an area index and count the edges `(a,b)` whose reverse `(b,a)` also
+      appears.
+
+          byte 0  in range 3388/3494 (97.0%)  symmetric edges 810
+          byte 1                90.5%                         568
+          byte 2                99.1%                          67
+          byte 3                98.3%                          29
+          bytes 4-8            88..93%                        3..9
+
+      Byte 0 beats every other position by more than an order of magnitude on the measure that matters,
+      and masking it (`& 0x7F`, `& 0x3F`) does not improve it. But 810 of 3,170 edges is **25.6%**, so it
+      is not a clean symmetric adjacency either — a portal graph need not be symmetric, and this one is
+      not enough to call it.
+
+      **The vector at +3 is BIMODAL rather than 39% right.** Reading three unaligned `s16` at each offset
+      and binning the magnitude in units of 512, offset 3 is the only one that clusters:
+
+          offset 3:  |v| < 512 : 1816     |v| in 4096..4607 : 1276     everything else : 402
+          offsets 0-2: no such split — the mass is spread across every bin
+
+      So at +3 a link carries either something near unit length or something near zero, and almost nothing
+      in between — which is the shape of an optional normal. It is still not a clean read: 578 links are
+      exactly zero, 1,381 are unit within 3%, and 1,535 are small non-zero values like `(0,240,0)` and
+      `(18,0,0)` that are neither. Recorded as the better description it is, not as an answer.
+
+      Original text follows. No fixed offset yields a 1.3.12 unit normal in more than 39 % of
       3,494 links. Histograms suggest **unaligned** `int16_t` values that no single struct layout can express
       (links start at `record + 1 + 9*L`, so parity alternates). Byte `+3` is the best neighbour-index
       candidate. Blocks portal-based visibility.
