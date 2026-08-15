@@ -355,8 +355,16 @@ static void test_roll_reaches_the_offset(void)
 
     q2_vw_place(&vw, feet, 576, leaning, zero, origin, ang);
 
-    /* Undo the eye, so what is left is the rotated offset alone. */
-    origin[1] -= Q2_VW_EYE_BASE - 576;
+    /*
+     * Undo the eye, so what is left is the rotated offset alone.
+     *
+     * The placement is `feet + local - viewOffset`: the console's 286 applies
+     * to the ENTITY ORIGIN and this function is handed the feet, so the two
+     * constants cancel and only the view offset has to come back off. This
+     * used to add `Q2_VW_EYE_BASE - 576` and passed only because the placement
+     * carried the same surplus 286.
+     */
+    origin[1] += 576;
 
     /* The same three angles the placement used, transposed: M^T (M t) == t. */
     q2_rotation_euler(m, ang[0] - vw.cur_r[0],

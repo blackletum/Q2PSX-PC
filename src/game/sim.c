@@ -1977,6 +1977,81 @@ u32 q2_sim_advance(q2_sim *sim, const q2_input *input, double elapsed_seconds)
     return ticks;
 }
 
+/* ------------------------------------------------------------------------- */
+/*
+ * SETTLE THE PLAYER ONTO THE FLOOR, at a spawn.
+ *
+ * A `Population` start position is not a standing position. Measured against
+ * the collision hull, the marker sits above the floor by wildly different
+ * amounts across the disc -- 154 units on BASE1, 990 on BASE0, 1372 on BASE3,
+ * 3814 on WASTE1 -- so it is neither a level author's small placement margin
+ * nor the feet under another name. Dropped in under gravity the player visibly
+ * falls for the first half-second of every level, which retail does not do.
+ *
+ * So the drop is resolved BEFORE the first frame, with the real mover rather
+ * than a downward ray: `q2_move_step` is lift-slide-drop, so stepping it with a
+ * purely downward delta lands the player exactly where walking onto that spot
+ * would, including on a slope, and leaves the grounded state and contact normal
+ * the mover would have set.
+ *
+ * NOT read out of the executable, and flagged as such. What the console does at
+ * a spawn has not been traced; this matches the observable behaviour, which is
+ * that the player is standing when the level starts. If those marker heights
+ * ever turn out to mean something, this is the thing to revisit and the spread
+ * above is the evidence to explain.
+ *
+ * Bounded, because a spawn over a hole must not spin here. The cap clears
+ * WASTE1's 3814 several times over; anything beyond it falls the old way on the
+ * first tick rather than hanging.
+ */
+/* Ticks allowed to land. WASTE1's 3814-unit marker lands in well under this;
+ * a spawn over a hole simply gives up and falls the ordinary way. */
+#define Q2_SETTLE_STEPS  180
+
+void q2_sim_settle(q2_sim *sim)
+{
+    q2_player *p;
+    q2_input  in;
+    int i;
+
+    if (!sim || !sim->coll_ready)
+        return;
+
+    p = &sim->player[sim->cur_player];
+
+    /*
+     * Through the TICK, not through `q2_move_step` directly. The mover needs
+     * the state the tick sets up around it — the entity's node above all, which
+     * a fresh spawn has not established, so a bare move resolves against
+     * nothing and the player does not budge. Driving the real path costs a
+     * dozen ticks of level clock at a level start and gets the landing, the
+     * grounded flag and the contact normal exactly right.
+     */
+    memset(&in, 0, sizeof(in));
+
+    for (i = 0; i < Q2_SETTLE_STEPS; i++) {
+        q2_sim_tick(sim, &in, Q2_DT_NOMINAL);
+        if (p->on_ground)
+            break;
+    }
+
+    /*
+     * However it ended, the player is not mid-fall: keeping the velocity and
+     * the fall accumulator would charge them damage on the first tick for a
+     * drop they never saw, and leave the landing view-kick to play over the
+     * first frame the player sees.
+     */
+    p->vel[0] = p->vel[1] = p->vel[2] = 0;
+    p->frame_delta[0] = p->frame_delta[1] = p->frame_delta[2] = 0;
+    p->fall_value  = 0;
+    p->fall_time   = 0;
+    p->ground_y    = p->pos[1];
+    p->view_height = Q2_VIEW_STAND;
+    p->pitch       = 0;
+    p->roll        = 0;
+}
+
+/* ------------------------------------------------------------------------- */
 void q2_sim_eye(const q2_sim *sim, s32 out_pos[3])
 {
     if (!sim || !out_pos)
@@ -1984,34 +2059,38 @@ void q2_sim_eye(const q2_sim *sim, s32 out_pos[3])
 
     out_pos[0] = sim->player[sim->cur_player].pos[0];
     /*
-     * `pos.y + 286 - viewOffset`, and the 286 is NOT optional.
+     * `feet - viewOffset`, which IS the console's `origin + 286 - viewOffset`.
      *
      * 0x80038618 builds the view position by copying entity+0x54 and +0x5C
-     * straight through and putting the middle component together itself:
+     * straight through and computing the middle component:
      *
-     *     80038630  lw    v0, 88(a1)      entity+0x58, the feet
+     *     80038630  lw    v0, 88(a1)      entity+0x58
      *     80038634  lh    v1, 246(a1)     entity+0xF6, the eased view offset
      *     80038638  addiu v0, v0, 286
      *     8003863C  subu  v0, v0, v1
      *
-     * This used to read `pos.y - view_height`, which is the same expression
-     * with the constant dropped, and it put the camera 286 units above where
-     * the console puts it. World Y increases downward, so that is a bias in
-     * one direction only — the view never looked tilted or wrong, it just
-     * looked like a taller player, which is not something a screenshot of a
-     * corridor betrays.
+     * entity+0x58 is the ENTITY ORIGIN, not the feet — the point the mover
+     * works in, 286 above the feet (see the note at q2_sim_origin_y). Fold that
+     * in and the two 286s cancel:
      *
-     * What DID betray it was the weapon in the hands. `q2_vw_place` carries
-     * this expression correctly (`Q2_VW_EYE_BASE`), so the gun hung off the
-     * console's eye while the camera looked from one 286 units higher, and it
-     * sat almost entirely below the bottom edge. Two subsystems that must
-     * agree, disagreeing by exactly the constant one of them had dropped.
+     *     eye = (feet - 286) + 286 - viewOffset = feet - viewOffset
      *
-     * Anything reading the eye is therefore ONE definition away from the
-     * weapon: keep them in this function and in Q2_VW_EYE_BASE, and do not
-     * re-derive the height anywhere else.
+     * and standing, at 576, puts the eye 576 above the feet, which is the
+     * player's own height. `player.pos` here is the feet, so the subtraction
+     * below is the whole expression and the constant does not appear.
+     *
+     * ADDING 286 here is wrong and was briefly done: it reads the disassembly
+     * with entity+0x58 taken for the feet, which puts the eye 290 above them —
+     * half the player's height, a crouch. The tell is the crouch case rather
+     * than the standing one: at viewOffset 286 the expression collapses to
+     * `eye = origin`, the middle of the player, which is where a crouched eye
+     * belongs and is nonsense if the base is the feet.
+     *
+     * The weapon in the hands must come out at the SAME point, and it does not
+     * get there by this function — see the note in q2_vw_place, which converts
+     * the other way for the same reason.
      */
-    out_pos[1] = sim->player[sim->cur_player].pos[1] + Q2_EYE_BASE
+    out_pos[1] = sim->player[sim->cur_player].pos[1]
                - sim->player[sim->cur_player].view_height;
     out_pos[2] = sim->player[sim->cur_player].pos[2];
 }

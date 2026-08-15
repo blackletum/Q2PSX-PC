@@ -692,6 +692,14 @@ bool q2_sim_take_zone_change(q2_sim *sim, u32 *out_zone);
 void q2_sim_spawn(q2_sim *sim, const s32 pos[3], s32 yaw);
 
 /*
+ * Drop the player onto the floor beneath where they were spawned, using the
+ * mover, and clear the fall state. Call after q2_sim_spawn and before the first
+ * tick — a start position is not a standing position (see the note in sim.c).
+ * Does nothing without a collision hull.
+ */
+void q2_sim_settle(q2_sim *sim);
+
+/*
  * Advance the world by `elapsed_seconds` of real time.
  *
  * Converts to dt units, clamps as the original did, and runs whole logic ticks.

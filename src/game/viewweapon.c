@@ -477,13 +477,28 @@ void q2_vw_place(const q2_viewweapon *vw,
     }
 
     /*
-     * 0x8004F5E8…0x8004F640. The eye's own expression, not an approximation of
-     * it: FORMATS §9.12 gives `eye.y = pos.y + 286 - viewOffset`, and +Y is
-     * down, so a larger view offset raises both the camera and the weapon by
-     * the same amount.
+     * 0x8004F5E8…0x8004F640, and the base is the ENTITY ORIGIN.
+     *
+     * The console's expression is `pos.y + 286 - viewOffset` where `pos` is
+     * entity+0x58 — the point the mover works in, 286 above the feet. This
+     * function is handed the FEET (that is what `q2_player.pos` holds), so the
+     * conversion has to happen before the 286 is added, and then the two
+     * cancel:
+     *
+     *     (feet - 286) + 286 - viewOffset  ==  feet - viewOffset
+     *
+     * which is exactly what q2_sim_eye computes. That identity is the whole
+     * point: the weapon hangs off the eye, so the two must be the same
+     * arithmetic, and writing it as `feet + 286 - viewOffset` — adding the
+     * constant to a base that is already 286 low — put the weapon 286 units
+     * below the camera and dropped it off the bottom of the screen.
+     *
+     * `Q2_VW_EYE_BASE` is kept for the two tests that pin the constant against
+     * 0x8004F608, and deliberately not used in the sum: there is nothing here
+     * to add it to that is not immediately subtracted again.
      */
     origin_out[0] = feet[0] + local[0];
-    origin_out[1] = feet[1] + local[1] + Q2_VW_EYE_BASE - view_offset;
+    origin_out[1] = feet[1] + local[1] - view_offset;
     origin_out[2] = feet[2] + local[2];
 }
 

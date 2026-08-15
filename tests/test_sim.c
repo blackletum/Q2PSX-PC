@@ -140,16 +140,19 @@ static void test_ground_and_view(void)
     check_eq_i(sim.player[0].pos[1], 0, "the player rests exactly on the ground");
 
     /*
-     * The eye is above the feet, which with Y-down means a smaller Y — and it
-     * is `pos.y + 286 - viewOffset` (0x80038638), not `pos.y - viewOffset`.
-     * Pinned as the arithmetic rather than as a height, because dropping the
-     * constant is exactly the mistake that was made here and it survives any
-     * test phrased as "the eye is above the feet".
+     * The eye is above the feet, which with Y-down means a smaller Y.
+     *
+     * The console computes `entity_origin + 286 - viewOffset` (0x80038638) and
+     * the origin is 286 above the feet, so the constants cancel and a standing
+     * eye is `viewOffset` above the feet — 576, the player's own height. Pinned
+     * at both offsets, because the standing case alone survives adding the 286
+     * a second time (it just makes a shorter player) while the crouch case does
+     * not: at 286 the eye would land ON the feet.
      */
     q2_sim_eye(&sim, eye);
     check(eye[1] < sim.player[0].pos[1], "the eye sits above the feet");
-    check_eq_i(sim.player[0].pos[1] - eye[1], Q2_VIEW_STAND - Q2_EYE_BASE,
-               "standing eye height is 286 - viewOffset above the feet");
+    check_eq_i(sim.player[0].pos[1] - eye[1], Q2_VIEW_STAND,
+               "a standing eye is viewOffset above the feet");
 
     /*
      * Crouching is an ENVIRONMENT flag, not a button: INCROUCH and INLOWCROUCH

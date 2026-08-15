@@ -5627,3 +5627,42 @@ model's own scale, or the near-plane treatment of geometry that spans z = 44 to 
       frames so a scripted run does not stop at the first boundary). The mission's *unit* number is the
       port's `Mission 1` rather than the level table's, and `"Unit%dMiss1"` — the key that selects a
       level's own display name — is read by nothing yet, so the Location column shows the directory name.
+
+## The 286 belonged to the weapon, not the camera — and a start position is not a standing position
+
+**Correction to the previous entry.** That entry claimed `q2_sim_eye` had dropped the console's 286 and "the
+camera was 286 units too high". It was the wrong half. `0x80038638` computes `entity+0x58 + 286 - viewOffset`,
+and entity+0x58 is the ENTITY ORIGIN — the point the mover works in, 286 above the feet (sim.h). `player.pos`
+holds the feet, so the constants cancel:
+
+```
+eye = (feet - 286) + 286 - viewOffset = feet - viewOffset
+```
+
+Standing, at 576, that is 576 above the feet: the player's own height. The version committed last round gave
+`feet - 290`, half the player's height, and lowered the whole view by 286.
+
+**The crouch case is the tell, not the standing one.** At viewOffset 286 the expression collapses to
+`eye = origin` — the middle of the player, which is where a crouched eye belongs. Read with the feet as the
+base it collapses to `eye = feet + 0`, an eye on the floor, which is nonsense. A standing-only check cannot
+distinguish the two readings (it just makes a shorter player), so the test now pins both offsets.
+
+What was genuinely wrong was `q2_vw_place`, which added 286 to a base that was already the feet and hung the
+weapon 286 below the camera. Both now compute `feet - viewOffset` and the gun sits where retail has it.
+
+**A `Population` start position is not a standing position — and this is behaviour-matched, not read.**
+Measured against the collision hull, the marker sits above the floor by amounts that vary far too much to be an
+author's placement margin: 154 units on BASE1, 225 on BASE2, 612 on BIGGUN, 879 on BOSS1, 990 on BASE0, 1372 on
+BASE3, **3814 on WASTE1**. Dropped in under gravity the player visibly falls for the first half-second of every
+level. `q2_sim_settle` now resolves the drop before the first frame and clears the fall accumulator, the landing
+kick and the view state with it.
+
+It runs the real tick rather than `q2_move_step` directly: a bare move resolves against nothing because a fresh
+spawn has not established the entity's node, which is why the first attempt left the player exactly where it
+found them. Cost is a dozen ticks of level clock at a level start.
+
+What the console does at a spawn has NOT been traced, so this matches the observable behaviour and says so. If
+those marker heights ever turn out to mean something, the spread above is the evidence to explain.
+
+**Still open, unchanged:** the view weapon is about two-thirds the size retail draws it, and no single `proj`
+change accounts for it.
