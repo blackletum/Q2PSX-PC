@@ -123,6 +123,18 @@ typedef struct q2_mover {
     s32 offset;         /* current displacement along the axis */
 
     s32 partner;        /* index of the other leaf, -1 when single */
+
+    /*
+     * The byte offset of the event item this mover was built from — its
+     * IDENTITY.
+     *
+     * The runtime reports a MOVER item when a script reaches one, and the
+     * owner has to say which of the built movers that is. An ordinal would
+     * work only while build order and execution order agree and nothing
+     * guarantees they do; the item's own offset (`q2_event_item.offset`)
+     * cannot drift.
+     */
+    u32 item_offset;
 } q2_mover;
 
 typedef struct q2_mover_set {
@@ -137,6 +149,19 @@ void      q2_movers_free(q2_mover_set *set);
 /* Latch a mover so it acts on the next tick. Reversing a closing door is
  * immediate, which is why this is not just a flag set. */
 void q2_mover_trigger(q2_mover_set *set, u32 index);
+
+/*
+ * Trigger every mover built from the item at `item_offset`.
+ *
+ * "Every" because MOVER_C builds TWO movers from one item — the two leaves of
+ * a double door — and a script that opens the door means both.
+ *
+ * This is the piece that was missing. `q2_movers_build` had no caller anywhere
+ * in the port and `q2_mover_trigger` had none either, so every door and lift
+ * on the disc stood still: 1,006 MOVER_A items, 20 MOVER_B and 292 MOVER_C.
+ * Returns how many were triggered.
+ */
+u32 q2_movers_trigger_item(q2_mover_set *set, u32 item_offset);
 
 /*
  * Advance every mover by `dt` in the simulation's own units.

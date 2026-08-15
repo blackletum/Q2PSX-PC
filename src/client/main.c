@@ -98,6 +98,8 @@
 #include "musictable.h"
 #include "briefing.h"
 #include "leveltext.h"
+#include "mover.h"
+#include <stdlib.h>
 #include "mission.h"
 #include "panel.h"
 #include "prompt.h"
@@ -419,6 +421,21 @@ typedef struct client {
     bool              leveltext_ready;
     u32               script_strings;   /* STRING calls that said something */
     u32               script_sounds;    /* SIMPLESOUND calls that played    */
+
+    /*
+     * The doors and lifts.
+     *
+     * `mover.[ch]` has been complete for a long time — the seven-state machine,
+     * the three payload shapes, the displacement the zone draw already adds
+     * through `q2_movers_node_offset` — and had NO CALLER. `q2_movers_build`,
+     * `q2_movers_tick` and `q2_mover_trigger` were all dead, so 1,006 MOVER_A
+     * items, 20 MOVER_B and 292 MOVER_C stood still. It is the same shape as
+     * the rotators before #56: a finished mechanism with nothing driving it.
+     */
+    q2_mover_set      movers;
+    bool              movers_ready;
+    u32               mover_triggers;   /* items the script reached */
+    u32               mover_moved;      /* ticks on which one moved */
     bool              mission_after_map; /* the screen is holding a LOADMAP */
     u32               mission_frames;
     u32               briefing_frames;
@@ -1539,6 +1556,22 @@ static bool client_name_eq(const char *a, const char *b)
     return *a == '\0' && *b == '\0';
 }
 
+/*
+ * A script reached a MOVER item: open that door.
+ *
+ * The runtime reports the item and this maps it to the movers built from it —
+ * plural, because MOVER_C is a double door and one item builds both leaves.
+ */
+static void client_event_mover(void *user, const q2_event_item *item)
+{
+    client *c = (client *)user;
+
+    if (!c || !c->movers_ready || !item)
+        return;
+
+    c->mover_triggers += q2_movers_trigger_item(&c->movers, item->offset);
+}
+
 static void client_event_call(void *user, const q2_event_item *item,
                               u8 call_index)
 {
@@ -2188,6 +2221,11 @@ static bool client_load_zone(client *c, const char *map, int index)
             q2_rotators_free(&c->rotators);
             c->rotators_ready = false;
         }
+        if (c->movers_ready) {
+            q2_movers_free(&c->movers);
+            c->movers_ready = false;
+            c->zone.movers  = NULL;
+        }
         {
             q2_events    ev;
             q2_userfuncs uf;
@@ -2246,6 +2284,19 @@ static bool client_load_zone(client *c, const char *map, int index)
                 if (have_zev)
                     q2_rotators_set_operand_source(&c->rotators, ev.data,
                                                    zev.data, zev.size);
+                /*
+                 * The movers, from the same chunk. They take the disc's own
+                 * Scene node indices — mover.h deliberately does not
+                 * reproduce the console's load-time rewrite into runtime
+                 * object indices — so the payload is the only input and no
+                 * operand rebase is needed here.
+                 */
+                if (q2_movers_build(&c->movers, &ev) == Q2_OK) {
+                    c->movers_ready = true;
+                    c->zone.movers  = &c->movers;
+                    Q2_INFO("movers: %u doors and lifts", c->movers.count);
+                }
+
                 if (q2_rotators_build(&c->rotators, &ev, &uf) == Q2_OK) {
                     c->rotators_ready = true;
                     c->zone.rotators  = &c->rotators;
@@ -2262,8 +2313,10 @@ static bool client_load_zone(client *c, const char *map, int index)
          * CALL asks for a step (rotator.c, 0x8002F1B8), which is why the set
          * built last round reported `rot moved 0` on every map.
          */
-        c->sim[0].event_rt.on_call      = client_event_call;
-        c->sim[0].event_rt.on_call_user = c;
+        c->sim[0].event_rt.on_call       = client_event_call;
+        c->sim[0].event_rt.on_call_user  = c;
+        c->sim[0].event_rt.on_mover      = client_event_mover;
+        c->sim[0].event_rt.on_mover_user = c;
 
         q2_sim_spawn(&c->sim[0], feet, c->cam.yaw);
         c->sim[0].player[0].ground_y = feet[1];
@@ -3088,6 +3141,16 @@ static void client_input_simulated(client *c, float dt)
         s32 ticks = (s32)((double)dt * 300.0 + 0.5);
         if (ticks < 1) ticks = 1;
         c->rot_moved += q2_rotators_tick(&c->rotators, ticks);
+
+        /*
+         * And the doors and lifts, on the same clock. `player_keys` gates a
+         * locked door; the inventory's low twelve bits are the keys the script
+         * tests (inventory.h), which is the same field ONKEYDO reads.
+         */
+        if (c->movers_ready && !getenv("Q2_NO_MOVERS"))
+            c->mover_moved += q2_movers_tick(&c->movers, ticks,
+                                             (u16)(c->sim[0].combat.inv.flags
+                                                   & 0x0FFFu));
     }
 
     /* The AI, on its own clock and looking at where the player is now. */
@@ -4180,6 +4243,9 @@ static void client_write_shot(client *c, bool numbered)
                 c->pose_by_name, c->pose_name_no_pos, c->pose_no_name);
         Q2_INFO("  breakable %u GLASS calls broke something, %u pieces thrown",
                 c->glass_calls, c->glass_pieces);
+        Q2_INFO("  movers    %u built, %u triggered by the script, %u tick-moves",
+                c->movers_ready ? c->movers.count : 0,
+                c->mover_triggers, c->mover_moved);
         Q2_INFO("  entity ev %u lights added, %u dropped, %u bursts drawn, "
                 "%u script lights",
                 c->ent_light_added, c->ent_light_dropped, c->ent_bursts,

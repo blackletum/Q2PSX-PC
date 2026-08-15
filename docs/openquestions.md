@@ -5844,3 +5844,47 @@ projection is right the weapon comes with it, and the two remaining entries on t
       that a miss is normal — 165 of 363 uses resolve disc-wide. SIMPLESOUND's absolute world position is
       **not** used: this port's mixer has no positional path, so the sound plays flat, and that is stated
       at the site rather than left to be discovered.
+
+## The world was anamorphic, and the way to measure it is a rigidly-attached object
+
+Applied, after two earlier attempts got the sign wrong by eyeballing screenshots. The method matters more than
+the number, so it is recorded first.
+
+**Calibrate, do not assume the capture's aspect.** The reference is a DuckStation capture at 640x480. Rather
+than guessing what it was displayed at — an assumption that produced a 4:3 reading, a 1.486 reading and a 1.45
+reading on three different attempts — solve the framebuffer-to-image mapping from the **HUD**, which is drawn in
+framebuffer pixels at coordinates the executable states. The cyan numerals give x scale 1.2809, y scale 1.8571,
+origin y 10. Everything downstream is then exact and no longer depends on what the emulator chose.
+
+**Measure something bolted to the camera.** A first attempt used the canyon's sky gap and concluded the opposite,
+because the reference frame was taken after the player had walked forward, so every world feature was nearer.
+The blaster's muzzle stripe cannot move relative to the camera, so it isolates the projection.
+
+**Sample the whole idle cycle.** The weapon sways, so one frame proves nothing. Over 22 frames:
+
+| | stripe w/h, median | range | median area |
+|---|---|---|---|
+| before | 0.67 | 0.41 .. 0.81 | 90 |
+| after | 0.85 | 0.64 .. 1.19 | 147 |
+| retail | 1.00 | — | 139 |
+
+Before, the stripe never once reached retail's WIDTH while its height comfortably exceeded it — a horizontal
+deficiency, not a scale error, and the shape of the evidence that says "anamorphic" rather than "too small".
+
+**The fix.** `gte_rtps` computes both axes from one `h`; that is the hardware and there is no second register.
+So a 512 x 248 buffer on a 4:3 screen is anamorphic — hFOV 116.0 against vFOV 75.6, where a correct picture at
+that vFOV wants 91.9 — unless view-space x is scaled before the divide. The only thing upstream of `ir[0]` is
+the rotation matrix, so the factor goes in its first ROW, which costs nothing at run time and explains why no
+second projection constant has ever appeared in the view record:
+
+    (512/248) / (4/3) = 1.5484        measured shortfall 1/0.67 = 1.49
+
+Derived from the viewport rather than baked in, and taken from the projection CENTRE the camera already carries,
+so a split viewport gets its own correction rather than the whole frame's.
+
+After it, the weapon's area agrees with retail to within 6% where it was 35% under, and retail's shape ratio
+falls inside our idle range. The residual world differences in a side-by-side are player position: the reference
+is a video frame taken after the player moved.
+
+**Not applied to `effect.c`**, whose two `gte_set_rotation` sites were not audited — particles will be narrow
+until they get the same treatment.

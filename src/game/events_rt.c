@@ -172,6 +172,21 @@ static q2_event_outcome run_item(q2_event_rt *rt, const q2_event_item *item)
     case Q2_EVOP_MOVER_B:
     case Q2_EVOP_MOVER_C:
         /*
+         * REPORTED, not interpreted — the same split as a CALL.
+         *
+         * The note below was right about the hazard and wrong about the
+         * conclusion. The disc values ARE Scene node indices, and `mover.h`
+         * deliberately reads them as such rather than reproducing the
+         * console's load-time rewrite into runtime object indices — so acting
+         * on them is correct. What this file cannot do is say WHICH mover,
+         * because the set belongs to the owner.
+         */
+        if (rt->on_mover) {
+            rt->on_mover(rt->on_mover_user, item);
+            rt->mover_count++;
+            return Q2_EVENT_OK;
+        }
+        /*
          * Deliberately inert. The s16 slots hold Scene node indices on disc and
          * runtime object indices after a load-time pre-pass that has not been
          * decoded, so acting on the disc values would move the wrong geometry.

@@ -62,6 +62,7 @@ q2_result q2_movers_build(q2_mover_set *out, const q2_events *events)
         for (i = 0; i < rec.n_items; i++) {
             q2_event_item item;
             const u8 *p;
+            u32 first;
 
             if (!q2_events_get_item(events, &rec, i, &item))
                 break;
@@ -73,6 +74,10 @@ q2_result q2_movers_build(q2_mover_set *out, const q2_events *events)
              * code and subtract once, rather than pre-subtracting and losing
              * the correspondence with the header. */
             p = item.payload - 2;
+
+            /* Where this item's movers start, so its offset can be stamped on
+             * whatever the switch pushes — one for A and B, two for C. */
+            first = out->count;
 
             switch (item.opcode) {
             case Q2_EVOP_MOVER_A: {
@@ -181,6 +186,9 @@ q2_result q2_movers_build(q2_mover_set *out, const q2_events *events)
             default:
                 break;
             }
+
+            for (; first < out->count; first++)
+                out->movers[first].item_offset = item.offset;
         }
     } while (q2_events_next_record(events, &rec, &rec));
 
@@ -196,6 +204,23 @@ void q2_movers_free(q2_mover_set *set)
 }
 
 /* ------------------------------------------------------------------------- */
+u32 q2_movers_trigger_item(q2_mover_set *set, u32 item_offset)
+{
+    u32 i, n = 0;
+
+    if (!set)
+        return 0;
+
+    for (i = 0; i < set->count; i++) {
+        if (set->movers[i].item_offset != item_offset)
+            continue;
+        q2_mover_trigger(set, i);
+        n++;
+    }
+
+    return n;
+}
+
 void q2_mover_trigger(q2_mover_set *set, u32 index)
 {
     q2_mover *m;

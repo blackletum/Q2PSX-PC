@@ -469,6 +469,11 @@ u32 q2_world_build_ot(const q2_world_zone *z,
                        (cam->ofs_x || cam->ofs_y) ? cam->ofs_y : screen_h / 2);
 
     q2_rotation_view(rot.m, cam->yaw, cam->pitch, cam->roll);
+    /* The pixel-aspect correction, into the row the projection reads as x. The
+     * GTE has one `h`, so this is the only place a horizontal field of view can
+     * live — see the note at q2_rotation_aspect_x. */
+    q2_rotation_aspect_x(rot.m, q2_aspect_x_12_centre(cam->ofs_x, cam->ofs_y,
+                                                      screen_w, screen_h));
     gte_set_rotation(gte, &rot);
 
     /*

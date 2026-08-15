@@ -80,6 +80,18 @@ typedef struct q2_event_rt {
     void (*on_call)(void *user, const q2_event_item *item, u8 call_index);
     void  *on_call_user;
 
+    /*
+     * A MOVER opcode, reported for the same reason a CALL is: the runtime
+     * knows a door was asked to open and not WHICH door, because a mover's
+     * identity is the item's chunk offset and the SET that maps it lives with
+     * the owner (mover.h). Without this `q2_movers_build` and
+     * `q2_mover_trigger` had no callers at all and every door and lift on the
+     * disc stood still — 1,006 MOVER_A items, 20 MOVER_B, 292 MOVER_C.
+     */
+    void (*on_mover)(void *user, const q2_event_item *item);
+    void  *on_mover_user;
+
+    u32  mover_count;   /* MOVER items reported                          */
     u32  call_count;    /* CALL items reported, for the same "did anything
                          * happen" reason as the counters above */
 } q2_event_rt;
