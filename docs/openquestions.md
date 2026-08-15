@@ -5076,3 +5076,35 @@ nothing saying so.
       Worth noting the port is not visibly broken by this: captures across many maps render creatures
       animating plausibly. That is weak evidence — a wrong-but-same-length clip looks like an animation —
       but it does mean this is a fidelity question rather than a crash-or-garbage one.
+
+- [ ] 63. **What implementing the real animation path still needs, stated exactly.**
+      Everything about the engine's mechanism is now read, so it is worth writing down what is and is not in
+      hand — the answer is one missing link, not a system.
+
+      **What the engine does** (#51b, #51c, #51d, #47):
+
+          position = base + 30 * (ai_frame - move.first)          0x8007EA44
+          then walk the clip chain subtracting durations          0x8006B924
+          position is in TENTHS of an animation frame             0x8006B5D8 divides by 10
+          30 per AI frame / 10 per model frame = 3 model frames per AI frame
+
+      No clip is selected; the walk lands wherever the subtractions fall (`model.h:436`).
+
+      **What the port has**: `q2_model_move_get/count`, the block-D layout `{name[12], start, end, rest,
+      one}` with `start`/`end` in 2-per-frame units, `move i drives clip i` verified 34/34, the AI move
+      ranges out of each creature module, and `q2_model_anim_at()` which already walks a tick to a clip.
+
+      **The one missing link**: the engine's runtime record carries `first`, `last` AND `base` together —
+      AI frames and position in the same record — so the mapping is internal to it. Block D carries
+      `start`/`end` (positions) and a name, but no AI frames. The creature module carries AI frames but no
+      positions. **Nothing on the disc has been found that pairs a given AI move to a given block-D move**,
+      and that pairing is precisely what the runtime table's load-time construction supplies (#51f, still
+      unread).
+
+      Matching by length is what this port does and it lands 96 of 101, but #62 showed the names disagree on
+      92 of 97, so length matching is a coincidence-driven substitute rather than the pairing.
+
+      So: `position = block_d[k].start * 5 + 30 * (ai_frame - ai_move.first)` is the formula, `* 5` because
+      block D counts 2 per frame and the position counts 10. Every term is known except **which k goes with
+      which AI move**. Find the load-time transform and the animation path is a short function, not a
+      project.
