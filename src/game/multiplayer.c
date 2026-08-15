@@ -561,10 +561,13 @@ u32 q2_mp_scoreboard(const q2_mp_session *s, const char *const *names,
         }
     }
 
-    if (n < max)
-        snprintf(lines[n++], Q2_MP_SCORE_LINE, "ALL PLAYERS PRESS");
-    if (n < max)
-        snprintf(lines[n++], Q2_MP_SCORE_LINE, "FIRE TO CONTINUE");
+    /*
+     * `ALL PLAYERS PRESS` / `FIRE TO CONTINUE` used to be appended here and are
+     * not part of the score list. QMRESULT's module holds them as a static
+     * two-row page at 256,180 and 256,200 (#101) — fixed furniture the score
+     * rows grow above, not two more scores. Appending them made their position
+     * depend on the player count.
+     */
 
     return n;
 }

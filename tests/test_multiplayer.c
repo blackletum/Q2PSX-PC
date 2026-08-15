@@ -525,20 +525,36 @@ static void test_scoreboard(void)
     char lines[12][Q2_MP_SCORE_LINE];
     u32 n;
 
-    /* Deathmatch: title, one line per player, then the two-line prompt. */
+    /*
+     * Deathmatch: the title, then one line per player. And NOTHING ELSE —
+     * `ALL PLAYERS PRESS` / `FIRE TO CONTINUE` used to come off the end of this
+     * list and they are not scores. QMRESULT's module holds them as a static
+     * two-row page at 256,180 and 256,200 (openquestions #101), so appending
+     * them here made their position depend on the player count: four players
+     * pushed the prompt two rows further down the screen than two did.
+     *
+     * The line count is the assertion that keeps them out, because a caller
+     * that draws every line it is given would put them back by accident.
+     */
     q2_mp_session_init(&s, Q2_MP_DEATHMATCH, 2);
     s.frags[0] = 7;
     s.frags[1] = 3;
     n = q2_mp_scoreboard(&s, NULL, lines, 12);
-    CHECK(n == 5, "DM scoreboard is 5 lines, got %u", n);
+    CHECK(n == 3, "DM scoreboard is a title and two players, got %u", n);
     CHECK(strcmp(lines[0], "DM SCORES") == 0, "titled DM SCORES, got '%s'",
           lines[0]);
     CHECK(strstr(lines[1], "PLAYER 1") && strstr(lines[1], "7"),
           "player 1 scored 7, got '%s'", lines[1]);
     CHECK(strstr(lines[2], "PLAYER 2") && strstr(lines[2], "3"),
           "player 2 scored 3, got '%s'", lines[2]);
-    CHECK(strcmp(lines[3], "ALL PLAYERS PRESS") == 0, "then the prompt");
-    CHECK(strcmp(lines[4], "FIRE TO CONTINUE") == 0, "and its second line");
+
+    /* Four players move the last SCORE row and nothing else; the prompt is not
+     * in here to be moved. */
+    q2_mp_session_init(&s, Q2_MP_DEATHMATCH, 4);
+    n = q2_mp_scoreboard(&s, NULL, lines, 12);
+    CHECK(n == 5, "four players give a title and four rows, got %u", n);
+    CHECK(strstr(lines[4], "PLAYER 4") != NULL,
+          "the last line is a player, not a prompt: '%s'", lines[4]);
 
     /* A team mode adds the module's own "%s TEAM SCORED %d" for each team
      * with a score, after the players. */

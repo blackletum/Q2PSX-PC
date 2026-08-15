@@ -1010,7 +1010,7 @@ The residues of the resolved blockers keep their parents' numbers.
       `QENDMIS1`..`QENDMIS5` are the maps that carry it. The filenames (`TAKE1BP.STX`, `OUTRO1P.STX`), the
       path pieces (`\Q2DATA\`, `MOVIES\`) and the MDEC decoder's own buffer names are all in there. The
       executable has none of it because none of it is in the executable.
-- [ ] **17. SPU RAM base / reverb work area,** and whether reverb is disabled — the worst-case map leaves a
+- [~] **17. SPU RAM base / reverb work area,** *(#105: reverb is off — no mode fits. The RAM base itself is still unread.)* and whether reverb is disabled — the worst-case map leaves a
       **240-byte** margin against SPU RAM, suspiciously tight if a reverb buffer is also allocated.
 - [x] **18. ~~`VramImageRec.width` / `height`: dimensions, or VRAM placement coordinates?~~ — RESOLVED by
       #1.** `width` is BYTES PER ROW of the decoded buffer, `height` is rows, and the VRAM rect is
@@ -1225,7 +1225,7 @@ The residues of the resolved blockers keep their parents' numbers.
         record are the same in all three layouts — a source rect of (255, 255) sized 1 x 1, the blank — and
         are initial values the draw overwrites, not layout.
         `src/game/statusbar.[ch]`, `q2_sbar_fields_4p`; `tests/test_statusbar.c`.
-- [~] 46. **The deathmatch scoreboard.** *(#101 reads its static page and recovers the six mode titles; the per-player rows are runtime, not records.)* Capture shows a `DM SCORES` screen: a title on a **red** bar rather
+- [x] 46. **The deathmatch scoreboard.** *(#101 reads its static page and recovers the six mode titles; #106 puts the prompt where the module puts it. The per-player rows are runtime, not records, which is the answer rather than the gap.)* Capture shows a `DM SCORES` screen: a title on a **red** bar rather
       than the usual blue, one row per player carrying that player's own bar colour (RETRODAN red, PLAYER 1
       blue) with a name and a frag count, a `READY` marker on the left of a row that has pressed fire, a
       backdrop image, and a centred `ALL PLAYERS PRESS / FIRE TO CONTINUE` in the 16-pixel face. Every part
@@ -6925,3 +6925,53 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       ramps. The constants are named — `Q2_MUSIC_FALLBACK_TENTHS` 300 and `Q2_MUSIC_FADE_TICKS` 64 — rather
       than left inside the expressions, because each is a separate reading of the disassembly and getting
       either wrong is a silent difference in how the music behaves.
+- [x] 105. **Reverb is OFF, and the sample data proves it without needing the code.** #17 suspected as much
+      from a "240-byte margin" and left it there. Measuring every map's SNDVRAM against SPU RAM settles it,
+      and the margin is even tighter than the entry remembered.
+
+      Summing the `VAGp` body sizes in each map's bank, against the SPU's 524,288 bytes:
+
+          FRAGTOWE  60 samples   522,000 bytes    2,288 free
+          WASTE3    82 samples   512,400 bytes   11,888 free
+          JAIL3     77 samples   512,192 bytes   12,096 free
+          POWER2    79 samples   511,344 bytes   12,944 free
+
+      And libspu's reverb work areas, smallest first:
+
+          STUDIO_A  8,000 · ROOM 9,920 · STUDIO_B 18,496 · HALL 44,512 · SPACE 63,168
+
+      **The smallest one libspu offers does not fit in the tightest map's free space**, and FRAGTOWE's
+      2,288 bytes are short of it by a factor of three and a half. The work area is a single global
+      allocation rather than something re-sized per level, so it has to fit the worst map — and it cannot.
+      Reverb is disabled.
+
+      The port implements no reverb, and this is what turns that from a default into a finding.
+
+      **Why the register scan found nothing**, recorded so it is not repeated: sweeping the executable for
+      any `lui 0x1F80` paired with a load or store in `0x1F801D80..0x1F801DBF` returns **no site at all**.
+      The game reaches the SPU only through libspu, which keeps its own attribute struct and flushes it, so
+      `SPUCNT`'s reverb-enable bit is never written by an instruction this port can point at. That is why
+      the answer had to come from the data rather than the code.
+
+      One loose end, stated rather than smoothed over: FRAGTOWE's 522,000 bytes plus libspu's own 4,112-byte
+      reserved area at the bottom of SPU RAM comes to 1,824 bytes MORE than the SPU has. So either not
+      every sample in that bank is resident at once, or the reserve is smaller on this build. It does not
+      change the conclusion — every reading of it leaves far less room than any reverb mode needs — but it
+      means the exact SPU RAM base is still unread, which was the other half of #17's title.
+- [x] 106. **The scoreboard's prompt was drifting with the player count, because it was being treated as a
+      score.** #101 read QMRESULT's static page and found the two rows it holds — `ALL PLAYERS PRESS` at
+      256,180 and `FIRE TO CONTINUE` at 256,200 — and that is the whole of what the module holds
+      statically. The port had the right TEXT and the wrong idea of what it was.
+
+      `q2_mp_scoreboard` appended both to its line list, and the client drew every line stacked 16 pixels
+      apart from a fixed start. So the prompt sat two rows further down with four players than with two:
+      it moved because the scores above it moved, which fixed furniture does not do.
+
+      They are out of the line list now and drawn at the module's own coordinates, and the score rows grow
+      between the title and them. `tests/test_multiplayer.c` pins the split by COUNT — a deathmatch
+      scoreboard is a title and one row per player and nothing else — because a caller that draws every
+      line it is handed would otherwise put them back by accident, which is exactly how they got there.
+
+      What is NOT reconstructed, and is a real remainder: the capture also shows a per-row bar in each
+      player's own colour, a `READY` marker on a row whose player has pressed fire, and the backdrop scene
+      QMRESULT's `ModelNames` describe. The rows are text on the overlay here.

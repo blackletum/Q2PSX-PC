@@ -5728,6 +5728,42 @@ static void client_frame(client *c)
             ctx.home_y = (s16)(ctx.height / 4 + (s32)li * 16);
             q2_hud_print(&c->hud_font, &ctx, &pen, &c->ot, 0, lines[li]);
         }
+
+        /*
+         * And the two rows the module holds STATICALLY, which is the whole of
+         * what it holds — the per-player rows are built from the session, which
+         * is why nothing static describes them (#101).
+         *
+         *     module+0x051F0  ALL PLAYERS PRESS   256, 180
+         *     module+0x05208  FIRE TO CONTINUE    256, 200
+         *
+         * They used to come off the END of `q2_mp_scoreboard`'s line list and
+         * stack 16 pixels under the last score, which put them wherever the
+         * player count left them — four players pushed them two rows further
+         * down than two did. They are furniture, not scores: fixed rows on the
+         * module's own page, and the score list grows between the title and
+         * them.
+         *
+         * x is 256 because the console's screen is 512 wide and every row in
+         * this family is centred; the port centres in its own width for the
+         * same reason. y is scaled by the same ratio rather than used raw, so
+         * the pair keeps its 20-pixel gap at any height.
+         */
+        {
+            static const struct { const char *text; int y; } k_prompt[] = {
+                { "ALL PLAYERS PRESS", 180 },
+                { "FIRE TO CONTINUE",  200 }
+            };
+            u32 k;
+
+            for (k = 0; k < 2; k++) {
+                ctx.home_x = (s16)(ctx.width / 2 -
+                                   q2_hud_measure(k_prompt[k].text) * 8 / 2);
+                ctx.home_y = (s16)((s32)ctx.height * k_prompt[k].y / 240);
+                q2_hud_print(&c->hud_font, &ctx, &pen, &c->ot, 0,
+                             k_prompt[k].text);
+            }
+        }
     }
 
     /*
