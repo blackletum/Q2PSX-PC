@@ -45,10 +45,18 @@ static const q2_uf_prim_info uf_table[Q2_UF_PRIM_COUNT] = {
     {4, 1, Q2_UF_OP_NAME12, "group",
      "Population group name; 458/472. Spawns that group's list"}}},
 
+/*
+ * CORRECTION — MISEVENT's key is not a Strings key.
+ *
+ * 0 of 93 resolved against Strings because Strings is the wrong chunk. The
+ * consumer at 0x800419A0 searches a table of `name[12] + handler` records, and
+ * the executable carries one at 0x8009B680: Pump1On, Pump2On, CheckPumps.
+ * See the q2_misevent block in userfuncs.h for the derivation.
+ */
 {Q2_UF_MISEVENT, "MISEVENT", 16, true, true, 1, {
     {4, 1, Q2_UF_OP_NAME12, "key",
-     "Namespace UNLOCATED: 0/93 resolve against Strings. Consumer is "
-     "0x800419A0, which walks the entity array at 0x800D5C30"}}},
+     "a mission-event name, looked up in the EXE table at 0x8009B680 and then "
+     "in the level's own at [0x800B30E4]; the record's +12 is the handler"}}},
 
 {Q2_UF_HELPCOMPUTER, "HELPCOMPUTER", 32, true, false, 3, {
     {4,  1, Q2_UF_OP_NAME12, "key_a", "Strings key; 122/127 with key_b"},
@@ -599,4 +607,42 @@ const u8 *q2_uf_operand_at(const q2_uf_operands *src, const u8 *p, u32 need)
         return p;
 
     return src->base_b + off;
+}
+
+/* ------------------------------------------------------------------------- */
+/* MISEVENT                                                                   */
+/* ------------------------------------------------------------------------- */
+static const q2_misevent k_misevent[Q2_MISEVENT_COUNT] = {
+    { "Pump1On",    0x80024134u },
+    { "Pump2On",    0x80024170u },
+    { "CheckPumps", 0x800238ACu }
+};
+
+const q2_misevent *q2_misevent_table(void)
+{
+    return k_misevent;
+}
+
+const q2_misevent *q2_misevent_find(const char *name)
+{
+    u32 i;
+
+    if (!name || !name[0])
+        return NULL;
+
+    for (i = 0; i < Q2_MISEVENT_COUNT; i++) {
+        char field[Q2_UF_NAME_LEN];
+        size_t n = strlen(k_misevent[i].name);
+
+        /* The console compares the twelve bytes as they sit, so the padding is
+         * part of the key and `Pump1` does not match `Pump1On`. */
+        memset(field, 0, sizeof(field));
+        memcpy(field, k_misevent[i].name, n);
+
+        if (memcmp(field, name, n) == 0 &&
+            (n == Q2_UF_NAME_LEN || name[n] == '\0'))
+            return &k_misevent[i];
+    }
+
+    return NULL;
 }

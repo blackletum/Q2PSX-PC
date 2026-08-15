@@ -344,6 +344,55 @@ static void test_snap_button(void)
     q2_rotators_free(&set);
 }
 
+/*
+ * MISEVENT's namespace, and the compare that finds a key in it.
+ *
+ * The engine's search (0x8006DB10) reads THREE WORDS and compares them whole.
+ * It is not a strcmp: the twelve-byte field is the key, padding included, so a
+ * prefix is not a match and a name that fills the field has no terminator to
+ * look for. `Pump1` must miss `Pump1On` — a port that used strncmp would let it
+ * through and fire the wrong mission event.
+ */
+static void test_misevent_namespace(void)
+{
+    const q2_misevent *t = q2_misevent_table();
+
+    puts("misevent: the executable's table at 0x8009B680");
+
+    check(t != NULL, "the table is there");
+    if (!t)
+        return;
+
+    /* The three records, in the order the executable holds them. */
+    check(strcmp(t[0].name, "Pump1On") == 0,    "record 0 is Pump1On");
+    check(strcmp(t[1].name, "Pump2On") == 0,    "record 1 is Pump2On");
+    check(strcmp(t[2].name, "CheckPumps") == 0, "record 2 is CheckPumps");
+
+    check(t[0].handler == 0x80024134u, "Pump1On's handler");
+    check(t[1].handler == 0x80024170u, "Pump2On's handler");
+    check(t[2].handler == 0x800238ACu, "CheckPumps' handler");
+
+    check(q2_misevent_find("Pump1On") == &t[0],    "Pump1On resolves");
+    check(q2_misevent_find("CheckPumps") == &t[2], "CheckPumps resolves");
+
+    /* A prefix is a different twelve bytes, so it is a different key. */
+    check(q2_misevent_find("Pump1") == NULL,
+          "a prefix does not match — the compare is twelve bytes, not a strcmp");
+    check(q2_misevent_find("Pump1OnX") == NULL, "nor does a longer name");
+    check(q2_misevent_find("pump1on") == NULL,  "and the compare is exact");
+    check(q2_misevent_find("") == NULL,         "an empty key resolves to nothing");
+    check(q2_misevent_find(NULL) == NULL,       "and so does none at all");
+
+    /*
+     * The other seventeen keys on the disc — Laser0, Bridge, OrbActive and the
+     * rest — are NOT here, and that is the finding rather than a gap: they live
+     * in each map's own LevelBin table, which is why 0x800419A0 searches two
+     * namespaces and not one.
+     */
+    check(q2_misevent_find("Laser0") == NULL,
+          "a map's own event is not in the executable's table");
+}
+
 int main(void)
 {
     puts("rotating brush geometry");
@@ -356,6 +405,7 @@ int main(void)
     test_axis_and_transform();
     test_pivot_is_fixed();
     test_euler_single_axis();
+    test_misevent_namespace();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;

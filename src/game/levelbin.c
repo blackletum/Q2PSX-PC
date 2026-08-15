@@ -154,6 +154,157 @@ u32 q2_levelbin_selected(const u8 *module, u32 size, u32 *out, u32 max)
 }
 
 /* ------------------------------------------------------------------------- */
+/* The map's own MISEVENT table                                               */
+/* ------------------------------------------------------------------------- */
+static bool misevent_name(const u8 *p, char *out, bool *out_padded)
+{
+    u32 i;
+    bool ended = false;
+    u32 n = 0;
+
+    /*
+     * Printable, then NUL padding, and the padding is checked: a field that
+     * goes back to printable after a NUL is not a name, it is two things that
+     * happen to sit next to each other.
+     */
+    for (i = 0; i < 12; i++) {
+        u8 ch = p[i];
+
+        if (ch == 0) {
+            ended = true;
+            continue;
+        }
+        if (ended)
+            return false;
+        if (ch < 32 || ch > 126)
+            return false;
+        n++;
+    }
+
+    if (n < 2)
+        return false;
+
+    if (out) {
+        memcpy(out, p, 12);
+        out[12] = '\0';
+    }
+    if (out_padded)
+        *out_padded = ended;
+
+    return true;
+}
+
+/*
+ * A record cannot BEGIN in the middle of a printable RUN.
+ *
+ * This is what separates a field from a substring, and it took two goes.
+ * BIGGUN needed the check at all: the backward walk from its real table ran on
+ * into `TeleportDeat` and `royGlassZone`, twelve-character windows cut out of
+ * longer strings, each followed by something that passed for a handler. But
+ * "the preceding byte is not printable" was too blunt — three real tables sit
+ * immediately after a function epilogue, and `addiu sp, sp, 32` ends in 0x27,
+ * which is an apostrophe. BASE0's `DOCRATES`, COMMAND's `Comp1` and JAIL3's
+ * `Bridge` all vanished on that.
+ *
+ * So it is a RUN, not a byte: text that reaches the field is text, and one or
+ * two stray printable bytes out of an instruction word are not.
+ */
+#define Q2_MISEVENT_TEXT_RUN 3
+
+static bool misevent_starts_field(const u8 *module, u32 at)
+{
+    u32 run = 0;
+
+    while (run < Q2_MISEVENT_TEXT_RUN && run < at) {
+        u8 ch = module[at - 1 - run];
+
+        if (ch < 32 || ch > 126)
+            break;
+        run++;
+    }
+
+    return run < Q2_MISEVENT_TEXT_RUN;
+}
+
+static bool misevent_handler(const u8 *p, u32 size, u32 load_base, u32 *out)
+{
+    u32 h = q2_rd_u32(p + 12);
+
+    /* A handler is code: non-zero, word-aligned, and inside this module. */
+    if (h == 0 || (h & 3u) != 0)
+        return false;
+    if (h < load_base || h >= load_base + size)
+        return false;
+
+    if (out)
+        *out = h;
+    return true;
+}
+
+u32 q2_levelbin_misevents(const u8 *module, u32 size, u32 load_base,
+                          q2_levelbin_misevent *out, u32 max)
+{
+    u32 i, n = 0;
+
+    if (!module || size < 20)
+        return 0;
+
+    /*
+     * Anchored on the TERMINATOR, not on a name.
+     *
+     * Two earlier anchors both failed, and both failures are worth keeping.
+     * Anchoring on "any name-shaped record" walks straight into a module's
+     * text: QENDMIS5's is thirty kilobytes of strings, and a twelve-byte window
+     * inside `Initialise %` or `MDEC_out_sync` is printable and is followed by
+     * something small, so twenty screens were reported that do not exist.
+     * Anchoring on "a NUL-PADDED record" fixed that and then missed any table
+     * whose names fill the field — BOSS1's begins `LaserButton0`,
+     * `LaserButton1` and BIGGUN's is `STOPPLATFORM`, `Destroy Grav`, all four
+     * exactly twelve characters, and all four came back as script naming
+     * events that do not exist.
+     *
+     * The zero word is the engine's own marker: 0x8006DB10 stops its search
+     * there. So find one, walk BACKWARD while the record shape holds, and take
+     * the maximal run. It anchors on structure rather than on how long the
+     * level designer's names happen to be.
+     */
+    for (i = 16; i + 4 <= size; i += 4) {
+        u32 head, run = 0, j;
+
+        if (q2_rd_u32(module + i) != 0)
+            continue;
+        if (!misevent_name(module + i - 16, NULL, NULL))
+            continue;
+        if (!misevent_handler(module + i - 16, size, load_base, NULL))
+            continue;
+        if (!misevent_starts_field(module, i - 16))
+            continue;
+
+        head = i;
+        while (head >= 16 &&
+               misevent_name(module + head - 16, NULL, NULL) &&
+               misevent_handler(module + head - 16, size, load_base, NULL) &&
+               misevent_starts_field(module, head - 16)) {
+            head -= 16;
+            run++;
+        }
+
+        for (j = 0; j < run; j++) {
+            const u8 *rec = module + head + j * 16;
+
+            if (n < max && out) {
+                misevent_name(rec, out[n].name, NULL);
+                misevent_handler(rec, size, load_base, &out[n].handler);
+                out[n].offset = head + j * 16;
+            }
+            n++;
+        }
+    }
+
+    return n;
+}
+
+/* ------------------------------------------------------------------------- */
 u32 q2_laserbeams_build(q2_laserbeam_set *out, const q2_events *events,
                         const q2_userfuncs *uf, const q2_uf_operands *ops,
                         const q2_collision *coll)

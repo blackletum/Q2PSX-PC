@@ -49,12 +49,12 @@ static bool set_via(q2_monster *m, u32 slot)
 
     cm = q2_creature_move_via(b->cre, slot);
     if (!cm) {
-        if (slot < 8)
+        if (slot < Q2_CRE_CALLBACK_SLOTS)
             q2_cre_actions.move_via_missing[slot]++;
         return false;
     }
 
-    if (slot < 8)
+    if (slot < Q2_CRE_CALLBACK_SLOTS)
         q2_cre_actions.move_via_set[slot]++;
     return q2_cre_set_move(m, cm->first_frame);
 }

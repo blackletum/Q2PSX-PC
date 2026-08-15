@@ -166,10 +166,20 @@ typedef struct q2_cre_action_stats {
     u32 fire_no_enemy;
     u32 fire_dead_enemy;
 
-    /* Which callback slots the generic implementation could and could not find
-     * a move for — 0 stand, 3 walk, 4 run, 6 attack, 7 melee. */
-    u32 move_via_set[8];
-    u32 move_via_missing[8];
+    /*
+     * Which callback slots the generic implementation could and could not find
+     * a move for — 0 stand, 1 idle, 2 search, 3 walk, 4 run, 6 attack,
+     * 7 melee, 11 pain, 12 die.
+     *
+     * Sized to the creature's own callback table (`u32 callback[13]`) and NOT
+     * to eight, which is what it was. Pain and die live at 11 and 12, so the
+     * recorder's `slot < 8` guard dropped them both on the floor and the stats
+     * line then read two words PAST the array to print them. Two subsystems
+     * disagreeing about how many slots there are is exactly the kind of thing
+     * a fixed 8 hides.
+     */
+    u32 move_via_set[Q2_CRE_CALLBACK_SLOTS];
+    u32 move_via_missing[Q2_CRE_CALLBACK_SLOTS];
 
     /* How often each think index actually ran. A move whose fire think sits
      * six frames in only reaches it if the animation is not cut short. */

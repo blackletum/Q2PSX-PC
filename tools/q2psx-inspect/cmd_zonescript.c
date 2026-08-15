@@ -192,6 +192,8 @@ int cmd_zonescript(const disc *d, const char *only_map)
     u32 loadmap_calls = 0, live_loadmap = 0;
     u32 laser_calls = 0, laser_lit = 0, laser_dark = 0, laser_clamped = 0;
     u32 laser_zone_lit = 0, laser_always = 0;
+    u32 misevent_calls = 0, misevent_known = 0, misevent_exe = 0;
+    u32 misevent_tables = 0, misevent_records = 0;
     u32 laser_kind[6];
     u32 secret_calls = 0, live_secret = 0;
     /*
@@ -369,6 +371,29 @@ int cmd_zonescript(const disc *d, const char *only_map)
              */
             {
                 q2_event_record rec;
+                q2_levelbin_misevent mev[32];
+                u32 mev_count = 0;
+
+                {
+                    const dat_chunk *mlb = cf.chunk[Q2_COMMON_LEVEL_BIN];
+
+                    if (mlb && mlb->data && mlb->size) {
+                        mev_count = q2_levelbin_misevents(mlb->data, mlb->size,
+                                                          0, mev, 32);
+                        if (mev_count > 32)
+                            mev_count = 32;
+                        misevent_tables += mev_count ? 1 : 0;
+                        misevent_records += mev_count;
+                        if (verbose) {
+                            u32 mq;
+                            for (mq = 0; mq < mev_count; mq++)
+                                printf("    %s: LevelBin event '%s'"
+                                       " -> module+0x%04X (record +0x%04X)\n",
+                                       g_maps[mi], mev[mq].name,
+                                       mev[mq].handler, mev[mq].offset);
+                        }
+                    }
+                }
 
                 if (q2_userfuncs_parse(&uf, &cf) == Q2_OK &&
                     q2_events_first_record(&cev, &rec)) {
@@ -456,6 +481,77 @@ int cmd_zonescript(const disc *d, const char *only_map)
                                                q2_rd_s32(pp + 24),
                                                q2_rd_s32(pp + 28),
                                                (int)st, lit, zcount);
+                                }
+
+                                /*
+                                 * MISEVENT's key, against the namespace the
+                                 * executable actually carries: a three-record
+                                 * table of `name[12] + handler` at 0x8009B680,
+                                 * NUL-terminated, which 0x800419A0 searches
+                                 * with the 12-byte compare at 0x8006DB10. It is
+                                 * not a Strings key and never was.
+                                 */
+                                if (call.prim == Q2_UF_MISEVENT) {
+                                    char kn[Q2_UF_NAME_LEN + 1];
+
+                                    misevent_calls++;
+                                    if (q2_uf_operand_name(&call, 0, kn) &&
+                                        kn[0]) {
+                                        u32 mk;
+                                        bool found =
+                                            q2_misevent_find(kn) != NULL;
+
+                                        if (found)
+                                            misevent_exe++;
+
+                                        /*
+                                         * And the map's own table, recovered
+                                         * from its LevelBin. `load_base` is 0
+                                         * because the chunk here is UNRELOCATED
+                                         * and its handler words are still the
+                                         * module-relative offsets the fixups
+                                         * would turn into addresses.
+                                         */
+                                        for (mk = 0; !found && mk < mev_count;
+                                             mk++)
+                                            if (strcmp(mev[mk].name, kn) == 0)
+                                                found = true;
+
+                                        if (found)
+                                            misevent_known++;
+                                        else if (verbose) {
+                                            const dat_chunk *xl =
+                                                cf.chunk[Q2_COMMON_LEVEL_BIN];
+                                            u32 at;
+                                            bool raw = false;
+                                            size_t kl = strlen(kn);
+
+                                            printf("    %s: MISEVENT '%s'"
+                                                   " - in NEITHER table\n",
+                                                   g_maps[mi], kn);
+
+                                            if (xl && xl->data)
+                                                for (at = 0;
+                                                     at + 16 <= xl->size; at++)
+                                                    if (memcmp(xl->data + at,
+                                                               kn, kl) == 0) {
+                                                        printf("      module"
+                                                               " holds it at"
+                                                               " +0x%04X,"
+                                                               " +12 word"
+                                                               " 0x%08X\n",
+                                                               at,
+                                                               q2_rd_u32(
+                                                                 xl->data + at
+                                                                 + 12));
+                                                        raw = true;
+                                                        break;
+                                                    }
+                                            if (!raw)
+                                                printf("      the module does"
+                                                       " not hold it\n");
+                                        }
+                                    }
                                 }
 
                                 if (call.prim == Q2_UF_CREBATCH) {
@@ -1063,6 +1159,11 @@ int cmd_zonescript(const disc *d, const char *only_map)
     printf("    script LIGHT calls in COMMON: %u TIMEDLIGHT, %u FLKLIGHT;"
            " the trigger sweep RUNS %u of them\n",
            light_timed, light_flk, live_lit_run);
+    printf("    MISEVENT keys : %u, resolved : %u (EXE table %u, the map's own %u)\n",
+           misevent_calls, misevent_known, misevent_exe,
+           misevent_known - misevent_exe);
+    printf("      LevelBin MISEVENT tables found : %u, %u records\n",
+           misevent_tables, misevent_records);
     printf("    LASERBEAM items : %u - lit in at least one zone : %u, "
            "in none : %u, in every zone : %u\n",
            laser_calls, laser_lit, laser_dark, laser_always);

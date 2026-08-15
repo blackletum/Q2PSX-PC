@@ -460,6 +460,15 @@ typedef struct client {
     q2_laserbeam_set  lasers;
     u32               laser_drawn;
 
+    /* The map's own mission-event namespace, out of its LevelBin. */
+    q2_levelbin_misevent misevent[32];
+    u32               misevent_count;
+    u32               misevents;      /* MISEVENT calls run           */
+    u32               misevent_exe;   /* ...naming an EXE event       */
+    u32               misevent_map;   /* ...naming one of this map's  */
+    u32               misevent_unknown;
+    char              misevent_last[Q2_UF_NAME_LEN + 1];
+
     /* --at / --yaw: stand somewhere specific, for capture. */
     s32               at[3];
     s16               at_yaw;
@@ -1976,6 +1985,48 @@ static void client_event_call(void *user, const q2_event_item *item,
     }
 
     /*
+     * MISEVENT — the map's named mission events.
+     *
+     * The engine's half is two lines: park the twelve-byte name in a global
+     * (0x8006D2EC writes 0x800DD950) and call the handler the namespace gave
+     * back. Both namespaces are read here — the executable's three-record table
+     * and the map's own, recovered from its LevelBin (levelbin.h) — and 20 of
+     * the disc's 20 keys resolve in one or the other.
+     *
+     * The handler is where it stops. It is MIPS in the module and this port
+     * does not run modules, so what a mission event DOES is not reproduced; the
+     * event is named, attributed to its table, and counted. Saying so is the
+     * point — a MISEVENT that silently did nothing would look like the script
+     * working.
+     */
+    {
+        q2_uf_call call;
+        char key[Q2_UF_NAME_LEN + 1];
+
+        if (q2_uf_decode_call(&call, &c->sim[0].userfuncs, item) == Q2_OK &&
+            call.prim == Q2_UF_MISEVENT &&
+            q2_uf_operand_name(&call, 0, key) && key[0]) {
+            const q2_misevent *exe = q2_misevent_find(key);
+            u32 k;
+
+            c->misevents++;
+            snprintf(c->misevent_last, sizeof(c->misevent_last), "%s", key);
+
+            if (exe) {
+                c->misevent_exe++;
+            } else {
+                for (k = 0; k < c->misevent_count; k++)
+                    if (client_name_eq(c->misevent[k].name, key)) {
+                        c->misevent_map++;
+                        break;
+                    }
+                if (k == c->misevent_count)
+                    c->misevent_unknown++;
+            }
+        }
+    }
+
+    /*
      * INSECRET — the mission screen's Secrets column.
      *
      * Counted once per item offset. The runtime fires a trigger volume on the
@@ -2660,6 +2711,41 @@ static bool client_load_zone(client *c, const char *map, int index)
                 if (c->node_hidden) {
                     c->zone.node_hidden       = c->node_hidden;
                     c->zone.node_hidden_count = c->node_hidden_count;
+                }
+
+                /*
+                 * And the map's mission-event table, read out of the same
+                 * module the group selection comes from. Zero load base: the
+                 * chunk is unrelocated here and its handler words are still
+                 * the module-relative offsets the fixups would resolve.
+                 */
+                {
+                    const dat_chunk *mlb =
+                        c->common.chunk[Q2_COMMON_LEVEL_BIN];
+
+                    c->misevent_count = 0;
+                    if (mlb && mlb->data && mlb->size) {
+                        u32 got = q2_levelbin_misevents(mlb->data, mlb->size, 0,
+                                                        c->misevent, 32);
+                        c->misevent_count = got > 32 ? 32 : got;
+                        if (c->misevent_count) {
+                            char list[512];
+                            u32 mq;
+                            size_t at = 0;
+
+                            list[0] = '\0';
+                            for (mq = 0; mq < c->misevent_count; mq++) {
+                                int w = snprintf(list + at, sizeof(list) - at,
+                                                 "%s%s", at ? ", " : "",
+                                                 c->misevent[mq].name);
+                                if (w <= 0 || (size_t)w >= sizeof(list) - at)
+                                    break;
+                                at += (size_t)w;
+                            }
+                            Q2_INFO("misevents: %u named by this map's "
+                                    "LevelBin: %s", c->misevent_count, list);
+                        }
+                    }
                 }
 
                 if (q2_laserbeams_build(&c->lasers, &ev, &uf,
@@ -4606,6 +4692,14 @@ static void client_write_shot(client *c, bool numbered)
             }
         }
 
+    if (c->misevents || c->misevent_count)
+        Q2_INFO("  misevent  %u run (%u EXE, %u this map's, %u in neither), "
+                "%u in the map's table%s%s",
+                c->misevents, c->misevent_exe, c->misevent_map,
+                c->misevent_unknown, c->misevent_count,
+                c->misevent_last[0] ? ", last " : "",
+                c->misevent_last[0] ? c->misevent_last : "");
+
     if (c->lasers.count || c->lasers.declined)
         Q2_INFO("  lasers    %u raised in this zone, %u queued this frame, "
                 "%u declared dark here; pool %u queued %u dropped, "
@@ -6312,7 +6406,7 @@ no_window:
          * exactly the path a player standing in the volume goes through — the
          * only difference is who asked.
          */
-        if (c.fire_triggers && c.sim_ready &&
+        if (c.fire_triggers && c.sim_ready[0] &&
             (long)c.frame_index >= c.fire_at_frame) {
             u32 i, fired = 0;
 

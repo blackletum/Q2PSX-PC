@@ -6362,3 +6362,61 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       `tests/test_effect.c` now pins it by comparison rather than by constant — the bucket an effect at
       depth d lands in must be the bucket the world's own mapping gives d — and asserts that the shift this
       replaced buried a near effect behind its wall.
+- [x] 91. **MISEVENT's namespace, located: it was never a Strings key.** 0 of 93 resolved against the
+      Strings chunk, and that is because Strings is the wrong chunk.
+
+      The exec at `0x8002BA1C` gathers item +4..+15 **byte by byte** into three words — an unaligned
+      twelve-byte load, not three numbers — and hands them to `0x800419A0`, which searches with the
+      twelve-byte compare at `0x8006DB10` and then does this:
+
+          800419FC  lw   s4, 17480(gp)     ; pass 0: the executable's namespace
+          80041A08  lw   s4, 12516(v0)     ; pass 1: [0x800B30E4], the level's
+          80041A1C  jal  0x8006DB10        ; (key, list, stride 16)
+          80041AD8  lw   v0, 12(s2)        ; the found record's +12...
+          80041AE8  jalr v0                ; ...IS A HANDLER, and it is called
+
+      So a namespace is a table of `name[12] + handler`, sixteen bytes a record, NUL-terminated — the
+      UserFuncs binding table's shape with one pointer instead of two. **The executable carries one at
+      `0x8009B680`, three records long, immediately before the UserFuncs table itself**: `Pump1On`,
+      `Pump2On`, `CheckPumps`. That is WASTE3's coolant pumps, and it pairs exactly with the line #74
+      found in that map's own Strings — `Find and activate both coolant pumps.`
+
+      The second namespace is the map's, and no engine code ever stores a non-zero into `[0x800B30E4]`, so
+      a module writes it. **The module carries the table as data**, and it can be recovered rather than
+      executed, the way the group selector is (#87). LAB's is:
+
+          801016D4  "Laser0\0\0\0\0\0\0"  80101628
+          801016E4  "Laser1\0\0\0\0\0\0"  80101648
+          801016F4  00000000                          <- the terminator
+
+      **20 of the disc's 20 MISEVENT keys now resolve** — 3 in the executable's table, 17 in ten maps'
+      own — with no false positive in QENDMIS5's thirty kilobytes of module text.
+
+      Three anchors were tried and the two that failed are worth keeping, because each failed silently in
+      a different direction:
+
+      - *Any name-shaped record.* Walks straight into module text. A twelve-byte window inside
+        `Initialise %` or `MDEC_out_sync` is printable and is followed by something small, so QENDMIS5
+        reported twenty screens that do not exist.
+      - *A NUL-padded record.* Fixes that and then misses any table whose names fill the field. BOSS1's
+        begins `LaserButton0`, `LaserButton1`; BIGGUN's is `STOPPLATFORM`, `Destroy Grav`. All four are
+        exactly twelve characters, and all four came back as script naming events that do not exist.
+      - *The terminator.* The zero word is the engine's own marker — `0x8006DB10` stops there — so find
+        one, walk backward while the record shape holds, take the maximal run. It anchors on structure
+        rather than on how long a level designer's names happen to be.
+
+      One more guard was needed and its first form was also wrong. A record may not begin inside a
+      printable RUN, or BIGGUN's backward walk runs on into `TeleportDeat` and `royGlassZone` — windows
+      cut out of longer strings. But "the preceding byte is not printable" is too blunt: three real tables
+      sit immediately after a function epilogue, and `addiu sp, sp, 32` ends in `0x27`, an apostrophe.
+      BASE0's `DOCRATES`, COMMAND's `Comp1` and JAIL3's `Bridge` all vanished on that. Three consecutive
+      printable bytes is the line.
+
+      **Where it stops is the handler.** It is MIPS in the module and this port does not run modules, so
+      what a mission event DOES is not reproduced. The client names the event, attributes it to its table
+      and counts it, and says so — a MISEVENT that silently did nothing would look like the script
+      working.
+
+      The engine's own half either side of the handler is two lines and neither needs reproducing:
+      `0x8006D2EC` parks the twelve-byte name in a global at `0x800DD950`, and `0x800435D0` spills three
+      words and returns — a logger compiled out of the retail build.

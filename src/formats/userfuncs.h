@@ -404,6 +404,58 @@ typedef struct q2_uf_operands {
 const u8 *q2_uf_operand_at(const q2_uf_operands *src, const u8 *p, u32 need);
 
 /* ------------------------------------------------------------------------- */
+/* MISEVENT — the mission events, and where their names live                  */
+/* ------------------------------------------------------------------------- */
+/*
+ * `MISEVENT` names a 12-byte key and the port resolved 0 of 93 of them against
+ * the Strings chunk, which is why its namespace was recorded as UNLOCATED. It
+ * was the wrong chunk. It is not a chunk at all.
+ *
+ * The exec at 0x8002BA1C gathers item +4..+15 BYTE BY BYTE into three words —
+ * an unaligned 12-byte load, not three numbers — and hands them to 0x800419A0,
+ * which searches a list with the 12-byte compare at 0x8006DB10:
+ *
+ *     800419FC  lw   s4, 17480(gp)        ; pass 0: the first namespace
+ *     80041A08  lw   s4, 12516(v0)        ; pass 1: [0x800B30E4], the level's
+ *     80041A1C  jal  0x8006DB10           ; (key, list, stride 16)
+ *     80041AD8  lw   v0, 12(s2)           ; the found record's +12...
+ *     80041AE8  jalr v0                   ; ...IS A HANDLER, and it is called
+ *
+ * So the namespace is a table of `name[12] + handler`, sixteen bytes a record,
+ * NUL-terminated — the UserFuncs binding table's shape with one pointer instead
+ * of two. And the executable carries one, at 0x8009B680, three records long,
+ * sitting immediately before the UserFuncs table itself:
+ *
+ *     Pump1On      0x80024134
+ *     Pump2On      0x80024170
+ *     CheckPumps   0x800238AC
+ *     <zero>                          -- 0x8006DB10 stops on a zero first word
+ *
+ * which is WASTE3's coolant pumps, and it pairs exactly with the line #74 found
+ * in that map's own Strings: `Find and activate both coolant pumps.`
+ *
+ * The second namespace — `[0x800B30E4]`, zeroed at teardown by 0x8007075C — is
+ * the level's own, and no code in the executable ever stores a non-zero into
+ * it, so it is filled by a module rather than by the engine. That is the same
+ * shape as the LevelBin group selector (#87) and is where the rest of a map's
+ * mission events must live.
+ */
+typedef struct q2_misevent {
+    const char *name;       /* the 12-byte key, NUL-padded on disc */
+    u32         handler;    /* the record's +12: what running it calls */
+} q2_misevent;
+
+#define Q2_MISEVENT_COUNT 3
+
+/* The executable's own table, 0x8009B680. */
+const q2_misevent *q2_misevent_table(void);
+
+/* Which entry `name` selects, or NULL. The compare is 12 bytes, not a strcmp:
+ * 0x8006DB10 reads three words and a name that fills the field has no
+ * terminator to find. */
+const q2_misevent *q2_misevent_find(const char *name);
+
+/* ------------------------------------------------------------------------- */
 /* Constants a port needs to reproduce behaviour, all read out of the EXE.    */
 /* ------------------------------------------------------------------------- */
 

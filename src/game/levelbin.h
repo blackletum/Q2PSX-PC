@@ -135,6 +135,40 @@ u32 q2_levelbin_selected_slot(const u8 *module, u32 size, s32 slot_off,
 
 
 /* ------------------------------------------------------------------------- */
+/* The map's own MISEVENT table                                               */
+/* ------------------------------------------------------------------------- */
+/*
+ * `MISEVENT` looks its key up in two namespaces (userfuncs.h): the executable's
+ * three-record table at 0x8009B680, and the level's own at `[0x800B30E4]` —
+ * which no engine code ever writes a non-zero into, so a module writes it.
+ *
+ * The module carries it as data, in the same `name[12] + handler` records the
+ * engine's table uses and the same zero terminator 0x8006DB10 stops on. LAB's
+ * is at module+0x16D4 and reads exactly:
+ *
+ *     801016D4  "Laser0\0\0\0\0\0\0"  80101628
+ *     801016E4  "Laser1\0\0\0\0\0\0"  80101648
+ *     801016F4  00000000                          <- the terminator
+ *
+ * so it can be RECOVERED rather than executed, the way the group selector is
+ * (q2_levelbin_selected): find a run of records whose first twelve bytes are a
+ * NUL-padded printable name and whose thirteenth through sixteenth are an
+ * address inside this module. Two independent things have to hold at once for a
+ * false positive, and the names are checkable against the script's own keys.
+ *
+ * `load_base` is where the module was relocated to — the handlers are absolute
+ * addresses in it, and that is the whole test.
+ */
+typedef struct q2_levelbin_misevent {
+    char name[13];
+    u32  handler;       /* absolute, inside the module */
+    u32  offset;        /* where the record sits in the module */
+} q2_levelbin_misevent;
+
+u32 q2_levelbin_misevents(const u8 *module, u32 size, u32 load_base,
+                          q2_levelbin_misevent *out, u32 max);
+
+/* ------------------------------------------------------------------------- */
 /* LASERBEAM — the beams a level ships                                        */
 /* ------------------------------------------------------------------------- */
 /*

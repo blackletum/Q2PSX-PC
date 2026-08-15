@@ -116,6 +116,10 @@ typedef struct q2_cre_move {
     s32 via;
 } q2_cre_move;
 
+/* How many callback slots a creature carries. 0 stand, 1 idle, 2 search,
+ * 3 walk, 4 run, 6 attack, 7 melee, 11 pain, 12 die. */
+#define Q2_CRE_CALLBACK_SLOTS 13
+
 typedef struct q2_creature {
     char name[13];          /* the module header's own 12-byte name */
 
@@ -131,7 +135,7 @@ typedef struct q2_creature {
      * slot 0 is stand, 1 idle, 2 search, 3 walk, 4 run, 5 dodge, 6 attack,
      * 7 melee, 8 sight, 9 checkattack, 10 bigturn, 11 pain, 12 die. Zero when
      * not installed. */
-    u32 callback[13];
+    u32 callback[Q2_CRE_CALLBACK_SLOTS];
     s32 speed_scale;        /* -1 when the spawn function did not set one */
     s32 mass;
 
