@@ -6215,20 +6215,59 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       **And the one PLATFORM on the disc reads `slot -1 speed -4`.** The speed is real; the object slot
       is empty — the third primitive to do that, after `OBJDRAWOFF` (#78) and `BUTTON` (#81).
 
-- [ ] 85. **What actually fills an object slot — the question all three of those roll up into.**
-      Six CALL primitives on this disc carry an OBJSLOT, and they split cleanly:
+- [x] 85. **What actually fills an object slot — ANSWERED. A slot is PER ZONE, and −1 is the right answer
+      in every zone the object is not in.**
 
-          resolve      the rotators (41 of 95), PISTON, LIFT1 (some), CAGELIFT1
-          read -1      OBJDRAWOFF (4 of 4 on JAIL4, under ALL FOUR zones),
-                       BUTTON (JAIL4), PLATFORM (BIGGUN), some LIFT1
+      The question assumed a slot reading −1 was an unfilled handle. It is not. `OBJDRAWOFF`'s constructor
+      at `0x8002BD58` is four instructions of substance and they say so outright:
 
-      So it is not the format, not the two-buffer rebase (#56 is applied throughout), and not the
-      resident zone (#78 tested all of JAIL4's and BASE2's). It is per-item. The remaining candidates are
-      that these particular items are written by a `LevelBin` module this port does not run — the same
-      answer `population.h` reached for the group flags, which are also zero on disc for all 222 groups —
-      or that they are filled by a load-time pass keyed on something not yet read. The first is the one
-      the evidence points at, because it explains why the affected items cluster on particular maps
-      rather than on particular primitives.
+          8002BD90  lw    v0, 372(gp)      ; the working chunk
+          8002BD94  lw    v1, 376(gp)      ; the pristine one
+          8002BD98  subu  v0, s1, v0       ; s1 = item + 4
+          8002BD9C  addu  s0, v0, v1
+          8002BDA0  addiu v0, zero, -1
+          8002BDA4  sh    v0, 0(s1)        ; WORKING SLOT := -1, unconditionally
+          8002BDA8  lh    v0, 0(s0)        ; and the authored index comes from PRISTINE
+          8002BDB0  bltz  v0, skip         ; negative there means "no object here"
+          ...
+          8002BE60  sh    a0, 0(s1)        ; the allocated object's index, written back
+
+      So −1 in the working buffer is not a missing value: it is **what the constructor puts there**, and
+      the authored Scene node index lives in the other buffer. That is #56's shape again, in a field #56
+      never looked at.
+
+      Measured across the disc — every OBJSLOT-carrying item's first slot, in COMMON and in every zone:
+
+          85 items;  usable in COMMON : 26,  usable in some zone : 81,  nowhere : 4
+
+      and the per-item picture is unambiguous. **Each object exists in exactly one zone:**
+
+          JAIL4  OBJDRAWOFF x4   COMMON -1, zones 0/1/2 -1, zone 3 -> 203, 196, 189, 182
+          BASE2  OBJDRAWOFF      COMMON 215, zone 0 215, zones 1/2 -1
+          JAIL5  OBJDRAWOFF      zone 2 -> 46
+          SECURITY OBJDRAWOFF    zone 2 -> 21
+          BIGGUN PLATFORM        zone 2 -> 31
+          BASE2  BUTTON          zone 2 -> 278
+          JAIL2  BUTTON          zone 2 -> 96
+
+      **So nothing was broken.** The port already reads the resident zone's copy, and it already acts on
+      it: JAIL4 zone 3 reports `4 nodes hidden` and zones 0, 1 and 2 report none, which is exactly the
+      four slots that resolve there and nowhere else. BASE2 zone 0 and JAIL5 zone 2 each hide their one.
+      The earlier reading — "OBJDRAWOFF, 4 of 4 on JAIL4, under ALL FOUR zones" — was measuring something
+      that was answering correctly.
+
+      Two corrections fall out of having measured it properly. BUTTON's slot is at **+12** and PLATFORM's
+      at **+20**, not +4; a census that reads +4 for all three is reading BUTTON's invert flag and the
+      first word of PLATFORM's origin, which is how those two came to be on the broken list at all.
+
+      **Four items resolve in no zone, and those are dead script**: COMMAND's two PISTONs and one LIFT1,
+      and JAIL4's BUTTON. A primitive declared with no object is something the level author left behind,
+      and the console does the same nothing with it that this port does — `bltz` and skip.
+
+      This also closes the loop with #89. A LASERBEAM is lit by a bit in the zone's copy of a coordinate;
+      an object slot is filled by an index in the zone's copy of the slot. **Which things exist is a
+      property of the room you are standing in, and it is carried in the zone's script, not in COMMON's.**
+      That is one mechanism, and it has now been mistaken for a bug twice.
 
 - [x] 86. **MISCOMPLETE ends a UNIT, and reading it names `Q2_SCREEN_EXIT_7`.**
       `0x8002DC68` is four instructions of substance: copy the fixed string `"Default"` into the

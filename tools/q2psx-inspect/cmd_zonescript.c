@@ -193,6 +193,8 @@ int cmd_zonescript(const disc *d, const char *only_map)
     u32 laser_calls = 0, laser_lit = 0, laser_dark = 0, laser_clamped = 0;
     u32 laser_zone_lit = 0, laser_always = 0;
     u32 misevent_calls = 0, misevent_known = 0, misevent_exe = 0;
+    u32 objslot_items = 0, objslot_common = 0, objslot_zone = 0;
+    u32 objslot_nowhere = 0;
     u32 misevent_tables = 0, misevent_records = 0;
     u32 laser_kind[6];
     u32 secret_calls = 0, live_secret = 0;
@@ -440,6 +442,86 @@ int cmd_zonescript(const disc *d, const char *only_map)
                                  * 41 of 72 beams as dark and is simply the
                                  * wrong buffer. This counts per zone.
                                  */
+                                /*
+                                 * #85, measured rather than reasoned about.
+                                 *
+                                 * OBJDRAWOFF's constructor (0x8002BD58) STAMPS
+                                 * -1 into the working buffer's slot and reads
+                                 * the authored Scene node index out of the
+                                 * PRISTINE one:
+                                 *
+                                 *   8002BDA0  addiu v0, zero, -1
+                                 *   8002BDA4  sh    v0, 0(s1)   ; working = -1
+                                 *   8002BDA8  lh    v0, 0(s0)   ; pristine!
+                                 *   8002BDB0  bltz  v0, skip
+                                 *
+                                 * So -1 in COMMON is not a missing object. It
+                                 * is what a slot is SUPPOSED to read there.
+                                 * This prints COMMON's value beside every
+                                 * zone's, which is the only thing that says
+                                 * whether the authored value exists at all.
+                                 */
+                                if (call.prim == Q2_UF_OBJDRAWOFF ||
+                                    call.prim == Q2_UF_BUTTON ||
+                                    call.prim == Q2_UF_PLATFORM ||
+                                    call.prim == Q2_UF_PISTON ||
+                                    call.prim == Q2_UF_LIFT1 ||
+                                    call.prim == Q2_UF_CAGELIFT1) {
+                                    size_t boff = (size_t)(pp - cev.data);
+                                    u32 zq, so;
+                                    bool any = false;
+                                    /* The slot's own offset, per primitive —
+                                     * OBJDRAWOFF's is +4, BUTTON's +12,
+                                     * PLATFORM's +20, and reading +4 for all
+                                     * three is reading the invert flag and a
+                                     * coordinate. */
+                                    u32 sl = 4;
+
+                                    if (call.prim == Q2_UF_BUTTON)   sl = 12;
+                                    if (call.prim == Q2_UF_PLATFORM) sl = 20;
+                                    if (call.prim == Q2_UF_LIFT1 ||
+                                        call.prim == Q2_UF_CAGELIFT1) sl = 8;
+                                    if (call.prim == Q2_UF_PISTON)   sl = 8;
+
+                                    so = (u32)(sl + 2);
+                                    if (item.len < so)
+                                        continue;
+
+                                    objslot_items++;
+                                    if (q2_rd_s16(pp + sl) >= 0)
+                                        objslot_common++;
+
+                                    for (zq = 0; zq < zcount; zq++) {
+                                        if (boff + so > zev[zq].size)
+                                            continue;
+                                        if (q2_rd_s16(zev[zq].data + boff + sl)
+                                            >= 0)
+                                            any = true;
+                                    }
+                                    if (any)
+                                        objslot_zone++;
+                                    else
+                                        objslot_nowhere++;
+
+                                    if (verbose) {
+                                        printf("    %s: %-10s slot COMMON %d",
+                                               g_maps[mi],
+                                               call.info ? call.info->name
+                                                         : "?",
+                                               q2_rd_s16(pp + sl));
+                                        for (zq = 0; zq < zcount; zq++) {
+                                            if (boff + so > zev[zq].size) {
+                                                printf(", zone%u SHORT", zq);
+                                                continue;
+                                            }
+                                            printf(", zone%u %d", zq,
+                                                   q2_rd_s16(zev[zq].data +
+                                                             boff + sl));
+                                        }
+                                        printf("\n");
+                                    }
+                                }
+
                                 if (call.prim == Q2_UF_LASERBEAM &&
                                     item.len == 36) {
                                     size_t boff = (size_t)(pp - cev.data);
@@ -1159,6 +1241,9 @@ int cmd_zonescript(const disc *d, const char *only_map)
     printf("    script LIGHT calls in COMMON: %u TIMEDLIGHT, %u FLKLIGHT;"
            " the trigger sweep RUNS %u of them\n",
            light_timed, light_flk, live_lit_run);
+    printf("    OBJSLOT-carrying items : %u; first slot usable in "
+           "COMMON : %u, in some zone : %u, nowhere : %u\n",
+           objslot_items, objslot_common, objslot_zone, objslot_nowhere);
     printf("    MISEVENT keys : %u, resolved : %u (EXE table %u, the map's own %u)\n",
            misevent_calls, misevent_known, misevent_exe,
            misevent_known - misevent_exe);

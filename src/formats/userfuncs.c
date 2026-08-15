@@ -224,7 +224,8 @@ static const q2_uf_prim_info uf_table[Q2_UF_PRIM_COUNT] = {
     {4,  1, Q2_UF_OP_VEC3_S32, "origin",
      "the far END of the travel; the target is |origin - node| (0x8002CCE8)"},
     {18, 1, Q2_UF_OP_S16,      "speed",  "abs() into obj+0x3A (0x8002CDC4)"},
-    {20, 1, Q2_UF_OP_OBJSLOT,  "object", NULL},
+    {20, 1, Q2_UF_OP_OBJSLOT,  "object",
+     "at +20, NOT +4 — a census that read +4 was reading origin's first word"},
     {28, 1, Q2_UF_OP_U8,       "time_a", "written to obj+0x4C UNSCALED"},
     {29, 1, Q2_UF_OP_U8,       "time_b", "* 300; 0xFF => never"}}},
 
@@ -243,7 +244,8 @@ static const q2_uf_prim_info uf_table[Q2_UF_PRIM_COUNT] = {
 {Q2_UF_BUTTON, "BUTTON", 16, true, true, 4, {
     {4,  1, Q2_UF_OP_S8,      "invert", "non-zero negates obj+0x44"},
     {8,  1, Q2_UF_OP_U16,     "time_b", "* 300 into obj+0x4E"},
-    {12, 1, Q2_UF_OP_OBJSLOT, "object", NULL},
+    {12, 1, Q2_UF_OP_OBJSLOT, "object",
+     "at +12, NOT +4 — a census that read +4 was reading `invert`"},
     {14, 1, Q2_UF_OP_S16,     "travel",
      "sign selects obj+0x3A = +1 or -1; magnitude goes to obj+0x44"}}},
 
@@ -302,8 +304,28 @@ static const q2_uf_prim_info uf_table[Q2_UF_PRIM_COUNT] = {
     {6, 1, Q2_UF_OP_U16, "wibble",
      "low 4 bits are written to Scene.flags08 bits 10..13"}}},
 
+/*
+ * An OBJSLOT reads -1 in most of a map's zones and that is CORRECT.
+ *
+ * The constructor at 0x8002BD58 stamps -1 into the working buffer's slot
+ * unconditionally and then reads the authored Scene node index out of the
+ * PRISTINE one — the zone's copy:
+ *
+ *     8002BDA0  addiu v0, zero, -1
+ *     8002BDA4  sh    v0, 0(s1)     ; s1 = item + 4; working := -1
+ *     8002BDA8  lh    v0, 0(s0)     ; s0 = the same offset, pristine
+ *     8002BDB0  bltz  v0, skip      ; negative THERE means no object
+ *     8002BE60  sh    a0, 0(s1)     ; else the allocated object's index
+ *
+ * So an object exists in exactly the zone whose script names it. Across the
+ * disc 81 of 85 slots resolve in exactly one zone, and JAIL4's four
+ * OBJDRAWOFFs — -1 in COMMON and in zones 0, 1 and 2 — hold 203, 196, 189 and
+ * 182 in zone 3. See openquestions #85.
+ */
 {Q2_UF_OBJDRAWOFF, "OBJDRAWOFF", 12, true, true, 1, {
-    {4, 4, Q2_UF_OP_OBJSLOT, "objects", "up to four; negative terminates"}}},
+    {4, 4, Q2_UF_OP_OBJSLOT, "objects",
+     "up to four; negative terminates. -1 in a zone means the object is not "
+     "in that zone, not that the slot is unfilled"}}},
 
 {Q2_UF_OBJDRAWON, "OBJDRAWON", 12, false, false, 1, {
     {4, 4, Q2_UF_OP_S16, "scene_nodes",
