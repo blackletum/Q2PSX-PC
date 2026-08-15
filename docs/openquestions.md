@@ -7218,3 +7218,30 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       Also worth keeping: only **3 of 1311** incomplete frames in OUTRO1P have already exceeded their
       `bs_num_codes` when they fail. The pair count almost never overshoots before the failure, which says
       the error is a code being read at the wrong LENGTH rather than the reader inventing extra pairs.
+- [ ] 114. **The headers alone say what the AC codes must average: `len + 1` = 10.5 bits, from two fields
+      and no decoder.** With `bs_num_codes` decoded (#113), a frame's own header over-determines its
+      bitstream, and the arithmetic needs nothing else:
+
+          bits_used = 1440 * 12  +  SUM over pairs of (code_len + 1)
+
+      — 1440 blocks, each a 10-bit DC and a 2-bit EOB, and every pair costing its code plus a sign. With
+      `pairs = bs_num_codes - 1440` the mean falls straight out. Across every AC-carrying frame on the
+      disc (`tools/stx_implied_len.py`):
+
+          OUTRO1P   1320 frames   mean 10.52   median 10.49
+          ROGUEINP  2443 frames   mean 10.18   median 10.33
+          TAKE1BP   1277 frames   mean 10.82   median 10.81
+
+      **Mean code length about 9.5 bits**, tight across three films and 5,040 frames. That is a hard
+      constraint on any candidate table and it was free — no decode, no reference, two header fields.
+
+      It also has to be reconciled, and the reconciliation is the next question. Nine and a half bits is
+      long for a table whose commonest code is two, which admits two readings: either PSX MDEC content at
+      qscale up to 20 really is sparse enough that the surviving coefficients carry large runs and long
+      codes, or `bs_num_codes` is not `1440 + pairs` and the fit in #113 was carried by the DC-only frames
+      that satisfy any such formula trivially. **The two are distinguishable** — a candidate table whose
+      realised mean is 9.5 and which also satisfies the per-frame count is the first reading; one that
+      cannot reach 9.5 at all is the second — and either answer is worth more than the guess.
+
+      What this does not do is decode a movie. It narrows the search that #113 made possible, and it is
+      recorded because it cost two header fields and pins a number nothing else here could reach.
