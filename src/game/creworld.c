@@ -298,6 +298,9 @@ q2_result q2_creature_world_load(q2_creature_world *w, const disc *d,
     if (q2_population_parse(&pop, common) != Q2_OK)
         return Q2_OK;                   /* a map with no population is fine */
 
+    w->pop       = pop;
+    w->pop_ready = true;
+
     if (q2_spawn_from_population(&w->set, &pop, &w->stats) != Q2_OK)
         return Q2_ERR_NO_MEMORY;
 
@@ -513,6 +516,67 @@ const char *q2_creature_world_sound_name(const q2_creature_world *w,
                                 (u32)(sizeof(names) / sizeof(names[0])));
 
     return (index < n) ? names[index] : NULL;
+}
+
+u32 q2_creature_world_summon(q2_creature_world *w, const char *group)
+{
+    u32 gi, i, woke = 0;
+
+    if (!w || !w->pop_ready || !group || !group[0])
+        return 0;
+
+    for (gi = 0; gi < w->pop.group_count; gi++) {
+        q2_pop_group g;
+
+        if (!q2_pop_get_group(&w->pop, gi, &g))
+            continue;
+        if (strcmp(g.name, group) != 0)
+            continue;
+
+        for (i = 0; i < w->set.count; i++) {
+            q2_monster *m = &w->set.monsters[i];
+
+            if (m->group != gi || m->in_use || m->dead)
+                continue;
+            m->in_use = true;
+            woke++;
+        }
+        break;
+    }
+
+    return woke;
+}
+
+u32 q2_creature_world_hold_batches(q2_creature_world *w, int resident_zone)
+{
+    u32 i, held = 0;
+
+    if (!w || !w->pop_ready)
+        return 0;
+
+    for (i = 0; i < w->set.count; i++) {
+        q2_monster *m = &w->set.monsters[i];
+        q2_pop_group g;
+        int zone;
+
+        if (!m->in_use)
+            continue;
+        if (!q2_pop_get_group(&w->pop, m->group, &g))
+            continue;
+
+        zone = q2_pop_group_zone(&g);
+
+        /* A group named after THIS zone is the level's own population. One
+         * named after another zone is that zone's business. Anything else is a
+         * batch and waits to be called for. */
+        if (zone == resident_zone)
+            continue;
+
+        m->in_use = false;
+        held++;
+    }
+
+    return held;
 }
 
 void q2_creature_world_free(q2_creature_world *w)

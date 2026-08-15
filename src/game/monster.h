@@ -276,6 +276,22 @@ typedef struct q2_monster {
     u16 flags;              /* +0x20  FL_*                                   */
     u8  class_id;           /* +0x23  indexes the class method table         */
     u8  class_byte;         /* the local descriptor key, 64..94 for monsters */
+
+    /*
+     * WHICH POPULATION GROUP PLACED THIS CREATURE.
+     *
+     * A group is not spawned because it exists; it is spawned because a script
+     * SELECTED it — `0x80056C60` takes a name and sets bit 0 of the group's
+     * flags, and the spawn pass runs only the selected ones (population.h).
+     * The flags word is zero on disc for all 222 groups of all 49 maps, so
+     * nothing is standing there at load until something asks.
+     *
+     * `CREBATCH` is that ask, and 58 of the disc's 89 resolvable calls name a
+     * group claiming NO zone — `ShotgunRoom`, `BerserkHide` — which is an
+     * ambush waiting to be summoned. Keeping the group index on the creature is
+     * what lets one be held back and then released.
+     */
+    u16 group;
     u32 svflags;            /* +0x40  SVF_MONSTER and the freed bit          */
     bool client;            /* +0x3C  non-NULL for a player                  */
 

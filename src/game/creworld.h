@@ -128,6 +128,11 @@ typedef struct q2_creature_world {
     q2_monster_set     set;
     q2_spawn_stats     stats;
 
+    /* Kept rather than dropped, because CREBATCH names a GROUP and the names
+     * live here. Borrows COMMON.DAT, which outlives the zone. */
+    q2_population      pop;
+    bool               pop_ready;
+
     /*
      * The class table name each placed creature resolved to, one per monster.
      *
@@ -195,6 +200,38 @@ s32 q2_creature_world_death_frame(const q2_creature_world *w,
  */
 const char *q2_creature_world_sound_name(const q2_creature_world *w,
                                          const q2_monster *m, u32 index);
+
+/*
+ * SUMMON a Population group — what `CREBATCH` means.
+ *
+ * A group is not spawned because it exists. `0x80056C60` takes a twelve-byte
+ * name, finds the group and sets bit 0 of its flags; the spawn pass runs only
+ * the selected ones and sets bit 1 so a group cannot run twice
+ * (population.h). The flags word is ZERO ON DISC for all 222 groups of all 49
+ * maps, so at load nothing is selected.
+ *
+ * This port spawns every record up front and holds the ones a script owns
+ * DORMANT — `in_use` clear — because the alternative is re-running the spawn
+ * pass mid-level against a set other systems already hold pointers into. The
+ * effect is the console's: an ambush is not standing there until it is called
+ * for. Returns how many creatures this call woke, which is 0 for a group
+ * already summoned — the bit-1 latch.
+ */
+u32 q2_creature_world_summon(q2_creature_world *w, const char *group);
+
+/*
+ * Hold back every creature whose group is a script's rather than the level's.
+ *
+ * A group named `Zone<N>` is that zone's own population and stands there from
+ * the start; anything else — `ShotgunRoom`, `BerserkHide` — is a batch. That
+ * split is `q2_pop_group_zone`'s and it is what stands in for the LevelBin
+ * selection this port cannot run: 58 of the disc's 89 resolvable CREBATCH
+ * calls name a group claiming no zone, so the two readings agree.
+ *
+ * Call after the world has loaded and before it wakes. Returns how many were
+ * held.
+ */
+u32 q2_creature_world_hold_batches(q2_creature_world *w, int resident_zone);
 
 void q2_creature_world_free(q2_creature_world *w);
 

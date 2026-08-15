@@ -89,6 +89,7 @@ q2_result q2_spawn_from_population(q2_monster_set *out, const q2_population *pop
                 return Q2_ERR_NO_MEMORY;
             }
 
+            m->group  = (u16)gi;
             m->pos[0] = rec.x;
             m->pos[1] = rec.y;
             m->pos[2] = rec.z;

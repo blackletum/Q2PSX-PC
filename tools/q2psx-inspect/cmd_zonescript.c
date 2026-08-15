@@ -49,6 +49,7 @@
 #include "rotator.h"
 #include "scene.h"
 #include "entity.h"
+#include "population.h"
 #include "trigger.h"
 #include "userfuncs.h"
 
@@ -189,6 +190,16 @@ int cmd_zonescript(const disc *d, const char *only_map)
     u32 live_glass_run = 0, live_glass_node = 0;
     u32 loadmap_calls = 0, live_loadmap = 0;
     u32 secret_calls = 0, live_secret = 0;
+    /*
+     * CREBATCH names a Population GROUP. Whether that group claims a zone is
+     * the whole question: a group named `Zone<N>` is that zone's own
+     * population and the level starts with it standing there, while a group
+     * named `ShotgunRoom` or `BerserkHide` is a batch a script summons. If the
+     * calls name the second kind, then gating them is right and needs no
+     * LevelBin.
+     */
+    u32 crebatch_calls = 0, crebatch_found = 0, crebatch_zone = 0,
+        crebatch_batch = 0;
     u32 prim_run[Q2_UF_PRIM_COUNT];
     u32 prim_have[Q2_UF_PRIM_COUNT];
     u32 loadmap_map_ok = 0, loadmap_map_missing = 0,
@@ -372,6 +383,40 @@ int cmd_zonescript(const disc *d, const char *only_map)
                                 if (call.prim >= 0 &&
                                     call.prim < Q2_UF_PRIM_COUNT)
                                     prim_have[call.prim]++;
+
+                                if (call.prim == Q2_UF_CREBATCH) {
+                                    char gname[Q2_UF_NAME_LEN + 1];
+
+                                    crebatch_calls++;
+                                    if (q2_uf_operand_name(&call, 0, gname) &&
+                                        gname[0]) {
+                                        q2_population pop;
+                                        u32 gi;
+
+                                        if (q2_population_parse(&pop, &cf) == Q2_OK) {
+                                            for (gi = 0; gi < pop.group_count; gi++) {
+                                                q2_pop_group g;
+
+                                                if (!q2_pop_get_group(&pop, gi, &g))
+                                                    continue;
+                                                if (strcmp(g.name, gname) != 0)
+                                                    continue;
+
+                                                crebatch_found++;
+                                                if (q2_pop_group_zone(&g) >= 0)
+                                                    crebatch_zone++;
+                                                else
+                                                    crebatch_batch++;
+                                                if (verbose)
+                                                    printf("    %s: CREBATCH '%s'"
+                                                           " -> zone %d\n",
+                                                           g_maps[mi], gname,
+                                                           q2_pop_group_zone(&g));
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
 
                                 if (call.prim == Q2_UF_INSECRET)
                                     secret_calls++;
@@ -837,6 +882,12 @@ int cmd_zonescript(const disc *d, const char *only_map)
            "zone 0 : %u\n", loadmap_start_ok, loadmap_late_zone);
     printf("    INSECRET calls in COMMON: %u; the trigger sweep RUNS %u\n",
            secret_calls, live_secret);
+    printf("    CREBATCH calls in COMMON: %u, naming a group that exists: %u\n",
+           crebatch_calls, crebatch_found);
+    printf("      the group claims a ZONE (the level's own population) : %u\n",
+           crebatch_zone);
+    printf("      the group claims none (a batch a script summons)     : %u\n",
+           crebatch_batch);
 
     /*
      * Every primitive a player who has walked the whole disc would run, by

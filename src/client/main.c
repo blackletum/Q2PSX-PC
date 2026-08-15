@@ -429,6 +429,7 @@ typedef struct client {
     u8               *node_hidden;
     u32               node_hidden_count;
     u32               script_hidden;    /* nodes hidden this level */
+    u32               script_summoned;  /* creatures a CREBATCH woke */
 
     /*
      * The doors and lifts.
@@ -832,6 +833,22 @@ static void client_load_creatures(client *c, const s32 eye[3])
     q2_cre_set_melee_hook(client_cre_melee, c);
     q2_cre_set_sound_hook(client_cre_sound, c);
     q2_cre_set_fire_hook(client_cre_fire, c);
+
+    /*
+     * Hold back the batches before waking anything.
+     *
+     * The console spawns nothing at load — every group's flags word is zero on
+     * disc — and a script selects what stands there. This port spawns every
+     * record and holds the ones a script owns dormant instead, which reaches
+     * the same place: an ambush is not in the room until it is called for.
+     * See q2_creature_world_hold_batches.
+     */
+    {
+        u32 held = q2_creature_world_hold_batches(&c->creatures,
+                                                  c->zone_index);
+        if (held)
+            Q2_INFO("creatures: %u held back, waiting for a CREBATCH", held);
+    }
 
     q2_creature_world_wake(&c->creatures, eye);
     c->ai_accum = 0.0;
@@ -1628,6 +1645,31 @@ static void client_event_call(void *user, const q2_event_item *item,
             if (!pass) {
                 c->sim[0].event_rt.abort_record = true;
                 c->script_gated++;
+            }
+        }
+    }
+
+    /*
+     * CREBATCH — the ambush arriving.
+     *
+     * 89 of the disc's 92 calls name a group that exists and 58 of those name a
+     * group claiming no zone, which is a batch rather than a level's own
+     * population. Every one of them used to be standing in the room from the
+     * moment the level loaded.
+     */
+    {
+        q2_uf_call call;
+        char group[Q2_UF_NAME_LEN + 1];
+
+        if (c->creatures_ready &&
+            q2_uf_decode_call(&call, &c->sim[0].userfuncs, item) == Q2_OK &&
+            call.prim == Q2_UF_CREBATCH &&
+            q2_uf_operand_name(&call, 0, group) && group[0]) {
+            u32 woke = q2_creature_world_summon(&c->creatures, group);
+
+            if (woke) {
+                c->script_summoned += woke;
+                Q2_INFO("CREBATCH '%s' woke %u", group, woke);
             }
         }
     }
@@ -4357,9 +4399,9 @@ static void client_write_shot(client *c, bool numbered)
         Q2_INFO("  breakable %u GLASS calls broke something, %u pieces thrown",
                 c->glass_calls, c->glass_pieces);
         Q2_INFO("  script    %u strings, %u sounds, %u gated by ONKEYDO, "
-                "%u nodes hidden",
+                "%u nodes hidden, %u creatures summoned",
                 c->script_strings, c->script_sounds, c->script_gated,
-                c->script_hidden);
+                c->script_hidden, c->script_summoned);
         Q2_INFO("  movers    %u built, %u triggered by the script, %u tick-moves",
                 c->movers_ready ? c->movers.count : 0,
                 c->mover_triggers, c->mover_moved);

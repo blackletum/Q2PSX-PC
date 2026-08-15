@@ -6045,3 +6045,28 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       right and the data is not available under one zone — the fix is the rotators' other half, sweeping
       the zones a map ships and taking the one whose chunk reaches the offset, which `zonescript` already
       does for rotators and the client does not do for anything.
+
+- [x] 79. **CREBATCH: every scripted ambush in the game was already standing in the room.** #73 called
+      this blocked on `LevelBin` and that was too quick. The question it turns on is what the calls NAME,
+      and that is measurable:
+
+          CREBATCH calls in COMMON: 92, naming a group that exists: 89
+            the group claims a ZONE (the level's own population) : 31
+            the group claims none (a batch a script summons)     : 58
+
+      **58 of 89 name a group claiming no zone**, and the names say what they are: `ShotgunRoom`,
+      `LiftRoom`, `BerserkHide`, `InTheRoom`, `Upstairs`, `MainRoom`, `KeyConsole`, `batchx`, `batch3`,
+      `Z0Bat0`. A group named `Zone<N>` is that zone's own population and stands there from the start;
+      anything else waits to be called for. `population.h` had already established that split from the
+      other side — 74 of 222 groups are named after a zone, one per zone a map ships — so the two
+      readings agree without either being tuned to the other.
+
+      That is what stands in for the LevelBin selection this port cannot run, and it needs no LevelBin.
+
+      **The port spawns every record and holds the batches DORMANT** rather than re-running the spawn
+      pass mid-level against a set other systems already hold pointers into. The effect is the console's,
+      and the bit-1 latch is honoured: a group already summoned wakes nobody.
+
+      Measured across twenty maps, every one of them summons — BASE1 19 creatures, JAIL2 31, JAIL4 26,
+      BASE3 24, JAIL3 25. And BASE1 now starts with **4 live where it started with 8**, the other four
+      arriving when the script asks for them.
