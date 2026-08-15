@@ -1374,8 +1374,20 @@ The residues of the resolved blockers keep their parents' numbers.
       every item's and the view weapon's, resolves by the CastList name with this chunk unread. A
       reconstruction that works without it is the strongest statement available about whether the engine
       needs it.
-- [ ] 33. Why `TriggerRemap` and `SecondaryRem` exist in the executable but are emitted by no file on the
-      disc. Cut features, or read from a source not on this disc — a parser should tolerate them appearing.
+- [x] 33. **`TriggerRemap` and `SecondaryRem` are emitted by no file, and the port would have REFUSED one
+      that shipped them — which is the part worth fixing.** A census of all 164 containers finds exactly
+      25 distinct chunk names and neither of these is among them, confirming the original observation.
+
+      Which of "cut" and "another source" is right cannot be settled from a disc that carries neither. What
+      could be settled was this entry's own recommendation — *a parser should tolerate them appearing* —
+      and this port did not: `resolve()` REFUSES an unknown chunk name outright, on the reasonable grounds
+      that misreading an unfamiliar schema is worse than failing on it. The consequence was that a release
+      emitting either chunk would not open at all, and the failure would read as an unsupported build
+      rather than as two extra chunks.
+
+      Both names are now optional zone slots. They cost two enum entries, they are absent on this disc, and
+      a build that ships them loads with them simply unread. `verify` still passes over all 164 containers,
+      which is the check that the change costs nothing here.
 - [x] 34. **The permutation is three states keyed to zone index, stated exactly — and only three chunks
       ever move.** "Perfect and exceptionless correlation" was the observation; this is the rule:
 

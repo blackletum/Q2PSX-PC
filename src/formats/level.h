@@ -71,6 +71,20 @@ typedef enum q2_zone_chunk {
     Q2_ZONE_AREA_CONX,          /* area connectivity — portals / streaming    */
     Q2_ZONE_CRE_AI_REL,         /* OPTIONAL — present in 98 of 115 zones      */
     Q2_ZONE_CRE_AI_BIN,         /* OPTIONAL — present in 98 of 115 zones      */
+
+    /*
+     * OPTIONAL and emitted by NO file on this disc — but the executable knows
+     * both names, so a build that ships them is a build this loader should
+     * open rather than refuse (#33).
+     *
+     * That is not hypothetical politeness. `resolve()` REFUSES a chunk name it
+     * does not know, on the grounds that misreading a schema is worse than
+     * failing on it — which is right, and which meant a release emitting either
+     * of these would not load at all. Naming them costs two slots and turns a
+     * refusal into an unread chunk.
+     */
+    Q2_ZONE_TRIGGER_REMAP,      /* OPTIONAL — 0 of 115 zones on the PAL disc  */
+    Q2_ZONE_SECONDARY_REM,      /* OPTIONAL — 0 of 115 zones on the PAL disc  */
     Q2_ZONE_CHUNK_COUNT
 } q2_zone_chunk;
 

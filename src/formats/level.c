@@ -11,7 +11,8 @@ const char *const q2_common_chunk_names[Q2_COMMON_CHUNK_COUNT] = {
 const char *const q2_zone_chunk_names[Q2_ZONE_CHUNK_COUNT] = {
     "Events", "Scene", "CastList", "MapNames", "SpaceLights",
     "SortData", "MapMod", "Points", "PrimaryColl", "SecondaryCol",
-    "PrimaryRemap", "AreaConx", "CreAIRel", "CreAIBin"
+    "PrimaryRemap", "AreaConx", "CreAIRel", "CreAIBin",
+    "TriggerRemap", "SecondaryRem"
 };
 
 /* The optional chunks, which the loader tolerates being absent. Everything else
@@ -23,7 +24,12 @@ static bool common_chunk_is_optional(int index)
 
 static bool zone_chunk_is_optional(int index)
 {
-    return index == Q2_ZONE_CRE_AI_REL || index == Q2_ZONE_CRE_AI_BIN;
+    return index == Q2_ZONE_CRE_AI_REL ||
+           index == Q2_ZONE_CRE_AI_BIN ||
+           /* Neither is on this disc; the executable knows both names, so a
+            * build that ships one should open rather than be refused (#33). */
+           index == Q2_ZONE_TRIGGER_REMAP ||
+           index == Q2_ZONE_SECONDARY_REM;
 }
 
 static int lookup(const char *const *names, int count, const char *name)
