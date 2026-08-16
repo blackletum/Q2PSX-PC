@@ -5939,6 +5939,22 @@ terminates in the world: the opaque path at `0x80068300` ORs `blendTable[2]` int
 writes it back (§4.6), `blendTable[2]` is 32, and 32 is ABR 1 — `B + F`. The flares link into the viewport
 slice's last bucket, after all of it, and come out additive.
 
+**Which lights can carry one, and the one that tries.** `AddDynamicLight` (`0x80075C34`, §17.5) takes the
+style and the size shift packed into its fourth argument and ORs them into `light+16` at bits 11–13 and
+14–15 — the same fields a `Lights` record's `type` byte fills. Fifteen call sites raise a dynamic light, and
+the four constant records they read (`0x800AE7D8`, `0x800AE95C`, `0x800AE994`, `0x800AEAB4`) are all zero, so
+every muzzle flash, projectile and effect light in the game is style 0 and is never seen as a flare.
+
+**One is not.** The glint renderer at `0x800648B8` reads `0x800AEB28` — inner 300, outer 800, **style 1, size
+shift 3** — the full six-element flare at a reach of `64 << 3`, the largest the engine can ask for and the
+only runtime request for one. It never arrives. The frame at `0x80038F5C` runs the flare stage at
+`0x80039008`, the entity draw at `0x80039010` and the light list's reset (`0x80075B94`, which parks the write
+pointer back at `0x800E3D18`) at `0x8003903C`, last of all — and the glint is an entity draw, so its light is
+raised one stage too late for this frame's flare pass and cleared before the next one. The light is real and
+lights whatever the entity stage draws after it; the style and the shift are dead operands. `src/game/effect.h`
+records it and the client raises it in the same place, reproducing the unreachability rather than moving the
+light earlier to make an effect appear that the console never shows.
+
 **Where they are drawn.** `0x80075BDC` is the whole stage: it tests a word at `0x800B2ECC`, gives up unless
 the viewport count at `0x800B2C2C` is positive, and otherwise runs `0x800759F0` once per viewport. That gate
 has one writer in the image — `0x80071448` stores 1 during start-up — and nothing clears it, so on this disc

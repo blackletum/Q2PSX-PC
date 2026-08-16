@@ -7372,6 +7372,27 @@ static void client_draw_view(void *user, q2_screen *s, int p,
 
         q2_sim_eye(&c->sim[0], at);
         q2_fx_glint_draw(&c->sim[0].glint, at, c->cam.yaw, &c->cam, ot, gte);
+
+        /*
+         * And the LIGHT the renderer raises alongside the mesh — 0x800648B8,
+         * unconditional in both of its callers, and the only site in the image
+         * that asks for a flare style at runtime (effect.h).
+         *
+         * It will not produce one, here or on the console. The engine's frame
+         * runs the flare stage, then the entity draw, then the light list's
+         * reset; the glint is an entity draw, so the light is raised one stage
+         * too late and cleared before the next pass. This port has the same
+         * shape — the flare pass is inside q2_world_build_ot above, and
+         * q2_light_world_begin_frame clears on the next tick — so the
+         * unreachability is reproduced rather than worked around. Raising it
+         * earlier would put an effect on screen the console never shows.
+         */
+        if (c->lights_ready)
+            q2_light_add_dynamic(&c->light_world, at, c->sim[0].glint.tint,
+                                 Q2_FX_GLINT_LIGHT_INNER,
+                                 Q2_FX_GLINT_LIGHT_OUTER,
+                                 Q2_FX_GLINT_LIGHT_STYLE,
+                                 Q2_FX_GLINT_LIGHT_SHIFT);
     }
 }
 
@@ -7834,6 +7855,14 @@ int main(int argc, char **argv)
             }
         }
         else if (!strcmp(argv[i], "--no-lasers"))             c.no_lasers = true;
+        /*
+         * `--glint`: what F6 toggles, from the command line. The glint was only
+         * reachable by keypress, which put it out of reach of a headless
+         * capture — and it is the one effect in the engine that raises a style-1
+         * dynamic light, so "does the glint's flare come out" was a question no
+         * scripted run could ask.
+         */
+        else if (!strcmp(argv[i], "--glint"))                 c.show_glint = true;
         else if (!strcmp(argv[i], "--shoot"))                 c.shoot = true;
         /*
          * `--save-load N`: quick-save at frame N and quick-load on the next

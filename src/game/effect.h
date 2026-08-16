@@ -236,6 +236,41 @@ typedef struct q2_fx_timed_beam {
 #define Q2_FX_GLINT_VERTS      96
 
 /* ------------------------------------------------------------------------- */
+/* A glint is also a LIGHT, and the only style-1 flare the engine ever raises  */
+/* ------------------------------------------------------------------------- */
+/*
+ * 0x800648B8, near the top of the glint renderer: `AddDynamicLight` with the
+ * four-halfword record at 0x800AEB28 — inner 300, outer 800, style 1, size
+ * shift 3 — coloured by the glint's own tint and positioned at the entity's
+ * origin (ent+164). It is gated on the renderer's fifth argument and both of
+ * its callers (0x80064D7C, 0x80064E2C) pass 1, so every drawn glint raises one.
+ *
+ * It is the only such request in the image. Every other AddDynamicLight site
+ * carries style 0 and is therefore never seen as a flare — the four constant
+ * records at 0x800AE7D8, 0x800AE95C, 0x800AE994 and 0x800AEAB4 are all zero —
+ * so the glint alone asks for a runtime flare, and it asks for the largest one
+ * there is: all six of style 1's elements at a reach of `64 << 3` rather than
+ * the disc's uniform 64.
+ *
+ * AND IT NEVER GETS ONE. The frame at 0x80038F5C runs the flare stage
+ * (0x80075BDC) at 0x80039008, the entity draw (0x800304A8) at 0x80039010, and
+ * the dynamic-light list's RESET (0x80075B94, which parks the write pointer
+ * back at 0x800E3D18) at 0x8003903C — last, after every stage. The glint is an
+ * entity draw, so its light is raised one stage too late for this frame's flare
+ * pass and is cleared before the next one. The light is real and lights whatever
+ * the entity stage draws after it; the style and the shift are dead operands.
+ *
+ * The port raises it in the same place for the same reason and reproduces the
+ * same unreachability, rather than moving it earlier to make the flare appear —
+ * that would put an effect on screen the console never puts there. See flare.h
+ * for what the style and the shift would have bought.
+ */
+#define Q2_FX_GLINT_LIGHT_INNER  300
+#define Q2_FX_GLINT_LIGHT_OUTER  800
+#define Q2_FX_GLINT_LIGHT_STYLE    1
+#define Q2_FX_GLINT_LIGHT_SHIFT    3
+
+/* ------------------------------------------------------------------------- */
 /* What turns a glint on, and it is not the executable                        */
 /* ------------------------------------------------------------------------- */
 /*
