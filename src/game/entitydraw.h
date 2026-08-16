@@ -72,14 +72,21 @@ typedef struct q2_entity_draw_ctx {
      *
      * When it is present each entity gets its own gather — the engine does one
      * per entity per frame (0x8006BBCC, called from the draw itself), not one
-     * per frame — and shades through the GTE. `coll_node` is the SecondaryCol
-     * node to gather static lights from; the engine takes it from the entity's
-     * own +0xA2, which this port does not track per item yet, so a caller that
-     * knows the player's node can pass it and every entity in the zone will use
-     * it. Negative means the fallback light, which is what an item away from
-     * the player's own cell would otherwise get for free.
+     * per frame — and shades through the GTE.
+     *
+     * `coll` is the hull the gather resolves each entity's own cell in, which
+     * is what the engine's entity+0xA2 holds. Pass it and every item is lit by
+     * the lights of the room it is actually standing in.
+     *
+     * `coll_node` is the fallback for a caller that has no hull: one node for
+     * the whole set, usually the player's. That was all this context used to
+     * carry, so an item in the next room took the player's lights, and on any
+     * frame where the camera resolved to no cell at all — which happens
+     * routinely — every item in the level fell back to the grey default.
+     * Negative still means the fallback light.
      */
     const q2_light_world *lights;
+    const q2_collision   *coll;
     s32                   coll_node;
 } q2_entity_draw_ctx;
 

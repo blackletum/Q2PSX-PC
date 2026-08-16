@@ -120,13 +120,21 @@ bool q2_briefing_popup_raise(q2_briefing_popup *p, s32 delay, s32 seconds,
     }
 
     /*
-     * 0x800213E8: `gp+284 = delay * frame_dt * 2` and `gp+288 = seconds`. The
-     * doubling is the instruction's, not a unit conversion — the multiply is
-     * against the frame delta and the result is shifted left one.
+     * 0x800213E8: `gp+284 = delay * frame_dt * 2` and `gp+288 = seconds`.
+     *
+     * AND THE FRAME DELTA IN THAT EXPRESSION IS A HALF ONE. `[0x800B2DB4]` is
+     * `[0x800B2DD8] << 1`, so the global the multiply reads is half the frame
+     * delta and the `* 2` puts it back — the pair is an idiom, not a unit
+     * conversion. The countdown below is then decremented by the FULL delta.
+     *
+     * This port has only the full delta to hand, so `delay * frame_dt` is the
+     * transcription-exact form: `delay` frames of wait, which is what the
+     * console computes. Writing `delay * frame_dt * 2` here doubled every
+     * authored delay.
      */
     if (frame_dt <= 0)
         frame_dt = 1;
-    p->delay_ticks   = delay * frame_dt * 2;
+    p->delay_ticks   = delay * frame_dt;
     p->delay_seconds = seconds;
     return false;
 }

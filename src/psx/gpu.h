@@ -95,6 +95,23 @@ typedef struct psx_prim {
     bool     semi_transparent;  /* the primitive's ABE bit                */
     bool     textured_blend;    /* modulate texture by rgb (libgpu "raw") */
 
+    /*
+     * Which corner order this quad's four slots are in.
+     *
+     * false — PERIMETER, the default and what MapMod stores: the four corners
+     *         walk round the quad, so it fans as (0,1,2)+(0,2,3).
+     * true  — libgpu Z ORDER, which is what the hardware's own POLY_x4 packets
+     *         use: 0 1 / 2 3 across two rows, fanning as (0,1,2)+(1,3,2).
+     *
+     * The flare pass builds real console packets and therefore hands over Z
+     * order; splitting those on the perimeter rule drew half of every sector as
+     * a black sliver, turning the 12-gon glow into a six-spoke pinwheel and the
+     * ghosts into bowties. Rather than reorder the packets — which would stop
+     * them matching 0x800754D8..0x80075554 field for field — the backend is
+     * told which convention it is looking at.
+     */
+    bool     quad_zorder;
+
     u16      otz;          /* ordering-table bucket this landed in       */
 } psx_prim;
 

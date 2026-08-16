@@ -863,9 +863,11 @@ void q2_sim_combat_tick(q2_sim *sim)
             continue;
         }
 
-        if (sim->coll_ready) {
+        if (sim->coll_ready || sim->coll_primary_ready) {
             s32 end[3], node = p->node;
             bool complete;
+            q2_collision *phull = sim->coll_primary_ready
+                                      ? &sim->coll_primary : &sim->coll;
 
             /*
              * Traced from the PROJECTILE's own cell, not the player's. A rocket
@@ -873,8 +875,14 @@ void q2_sim_combat_tick(q2_sim *sim)
              * the hull to clip a segment starting in the shooter's cell answers
              * a different question — one whose answer is usually "no obstacle",
              * which is how a projectile ends up flying through walls.
+             *
+             * Through PrimaryColl, for the reason q2_sim_trace now states: a
+             * bolt is a point and the eroded hull stopped it 286 units short of
+             * every surface, leaving rockets to burst in mid-air short of the
+             * wall and grenades to stop above the floor. `p->node` is cached
+             * against this hull throughout, so the hint stays meaningful.
              */
-            complete = q2_coll_move(&sim->coll, step.from, step.to, node,
+            complete = q2_coll_move(phull, step.from, step.to, node,
                                     end, &node);
             p->node = node;
 

@@ -762,24 +762,52 @@ u32 q2_world_build_ot(const q2_world_zone *z,
                 depth[1]  = gte->sz[2];
                 depth[2]  = gte->sz[3];
 
-                if (gte->flag & GTE_FLAG_DIV_OVERFLOW) {
-                    /* Behind or through the projection plane. The hardware could
-                     * not clip, so the original rejected these outright — and so
-                     * do we, because that popping is part of the look. */
-                    if (stats) stats->quads_rejected_near++;
-                    continue;
-                }
-
+                /*
+                 * NO BLANKET NEAR REJECTION — this is what was eating the
+                 * geometry at the edge of the viewport.
+                 *
+                 * Two `if (gte->flag & GTE_FLAG_DIV_OVERFLOW) continue;` blocks
+                 * used to sit here, one after the RTPT and one after the RTPS,
+                 * on the claim that "the original rejected these outright". The
+                 * divide overflows for any corner nearer than H/2 — 80 units at
+                 * the one-player viewport's projection distance of 160 — and
+                 * that is not "behind the camera", it is *close*. A wall or a
+                 * floor the player is standing next to has one corner inside 80
+                 * units and the WHOLE quad went, so 1898 of 7364 quads were
+                 * being dropped in an ordinary standing view.
+                 *
+                 * And near geometry projects to the frame's BORDER, which is why
+                 * the holes always appeared at the outskirts of the viewport
+                 * rather than in the middle of it.
+                 *
+                 * The original's near-plane treatment is not rejection, it is
+                 * SUBDIVISION (0x800AF7CC and 0x800AFA2C, and see the emit
+                 * below): a near quad is replaced by a 4x4 mesh whose pieces
+                 * each project sanely. Only draw variant 1 rejects anything, and
+                 * that test is its own, is address-backed, and is still applied
+                 * a few lines down.
+                 */
                 gte->v[0].x = pt[3].x; gte->v[0].y = pt[3].y; gte->v[0].z = pt[3].z;
                 gte_rtps(gte, false);
 
-                if (gte->flag & GTE_FLAG_DIV_OVERFLOW) {
+                screen[3] = gte->sxy[2];
+                depth[3]  = gte->sz[3];
+
+                /*
+                 * The one case that really has nothing to draw: EVERY corner at
+                 * or through the projection plane. This is gte_divide's own
+                 * condition (gte.c: `h >= sz3 * 2`), applied per corner rather
+                 * than to a sticky flag, so a quad with even one usable corner
+                 * is linked — which is what the two culling variants do. A zero
+                 * depth satisfies it trivially.
+                 */
+                if ((u32)cam->projection >= (u32)depth[0] * 2u &&
+                    (u32)cam->projection >= (u32)depth[1] * 2u &&
+                    (u32)cam->projection >= (u32)depth[2] * 2u &&
+                    (u32)cam->projection >= (u32)depth[3] * 2u) {
                     if (stats) stats->quads_rejected_near++;
                     continue;
                 }
-
-                screen[3] = gte->sxy[2];
-                depth[3]  = gte->sz[3];
 
                 /*
                  * Draw variant 1's own rejection (0x800AFD20 / 0x800AFD34): if

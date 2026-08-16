@@ -100,12 +100,21 @@ static void test_frame_shape(void)
               "while the top-left runs downwards");
     }
 
-    /* The corner patch is 46 x 29 on screen and 46 x 29 in the sheet: 1:1. */
+    /*
+     * The corner patch is 46 x 29 on screen and 46 x 29 in the sheet: 1:1.
+     *
+     * HALF-OPEN. The packet's far corner is one past the last covered pixel,
+     * exactly as the console writes it, so the extent is the plain difference
+     * and not the difference plus one. These used to carry a `+ 1` because the
+     * emitter pulled the far corner back a pixel to compensate for a rasteriser
+     * that filled both edges; raster.c implements the GPU's own fill rule now
+     * and panel.c hands the coordinates over untouched.
+     */
     {
-        int w = abs(p[0]->xy[1].x - p[0]->xy[0].x) + 1;
-        int h = abs(p[0]->xy[3].y - p[0]->xy[0].y) + 1;
-        int uw = abs((int)p[0]->uv[1].u - (int)p[0]->uv[0].u) + 1;
-        int vh = abs((int)p[0]->uv[3].v - (int)p[0]->uv[0].v) + 1;
+        int w = abs(p[0]->xy[1].x - p[0]->xy[0].x);
+        int h = abs(p[0]->xy[3].y - p[0]->xy[0].y);
+        int uw = abs((int)p[0]->uv[1].u - (int)p[0]->uv[0].u);
+        int vh = abs((int)p[0]->uv[3].v - (int)p[0]->uv[0].v);
 
         CHECK(w == Q2_PANEL_CORNER_W && uw == Q2_PANEL_CORNER_W,
               "the corner is %d wide from %d texels, want %d",
@@ -119,14 +128,14 @@ static void test_frame_shape(void)
      * is the difference between an edge and a corner, and getting it backwards
      * gives a border with a 19-pixel gap in the middle of every side. */
     {
-        int span = p[4]->xy[1].x - p[4]->xy[0].x + 1;
-        int texels = (int)p[4]->uv[1].u - (int)p[4]->uv[0].u + 1;
+        int span = p[4]->xy[1].x - p[4]->xy[0].x;
+        int texels = (int)p[4]->uv[1].u - (int)p[4]->uv[0].u;
 
         CHECK(texels == Q2_PANEL_EDGE_H_W,
               "the top edge samples %d texels, want %d",
               texels, Q2_PANEL_EDGE_H_W);
         CHECK(span > texels * 4, "and stretches them across %d pixels", span);
-        CHECK(p[4]->xy[0].x == r.x + 36 && p[4]->xy[1].x == r.x + r.w - 35,
+        CHECK(p[4]->xy[0].x == r.x + 36 && p[4]->xy[1].x == r.x + r.w - 34,
               "meeting the corners at both ends");
     }
 

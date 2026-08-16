@@ -160,8 +160,14 @@ u32 q2_entity_build_ot(q2_entity_set *set, const q2_entity_draw_ctx *ctx,
          */
         if (ctx->lights) {
             q2_light_set lit;
+            /* The entity's OWN cell when the hull is available — the engine
+             * keeps it at entity+0xA2 — and the caller's single node only as a
+             * fallback. See the note in entitydraw.h. */
+            s32 node = ctx->coll
+                           ? q2_coll_find_node(ctx->coll, e->origin, -1, true)
+                           : ctx->coll_node;
 
-            q2_light_gather(&lit, ctx->lights, e->origin, ctx->coll_node, false);
+            q2_light_gather(&lit, ctx->lights, e->origin, node, false);
             /*
              * The intensity is the entity's OWN SCALE, not a neutral constant.
              * `0x8006B298` reads `+0xFC` and `+0xFE` and folds them as

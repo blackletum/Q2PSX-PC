@@ -719,6 +719,14 @@ typedef struct client {
     u32               mover_sounds;     /* transitions that made a noise */
     u32               breakable_opened; /* doors opened by being shot   */
     bool              mission_after_map; /* the screen is holding a LOADMAP */
+    /*
+     * Has this level put a frame on the screen yet? Cleared by every zone load
+     * and set once the first frame is composed, so a script call can tell "the
+     * player walked into this volume" from "this volume contains the spawn
+     * point". The objective board uses it — see the HELPCOMPUTER arm.
+     */
+    bool              level_frames_drawn;
+
     u32               mission_frames;
     u32               briefing_frames;
 
@@ -1935,6 +1943,9 @@ static void client_sync_parked_health(client *c)
  * reads the same offsets.
  */
 static bool client_load_zone(client *c, const char *map, int index);
+/* Selects the loaded level's music. Defined beside the rest of the music code;
+ * declared here because client_load_zone ends by calling it. */
+static void client_music_for_level(client *c, bool force);
 
 /*
  * How long a headless run holds the MISSION screen before going on. Long
@@ -2297,6 +2308,24 @@ static void client_event_call(void *user, const q2_event_item *item,
                 delay = (s32)param;
                 if (delay < Q2_BRIEFING_DELAY_MIN)
                     delay = Q2_BRIEFING_DELAY_MIN;
+
+                /*
+                 * A HELPCOMPUTER THE PLAYER IS ALREADY STANDING IN opens at
+                 * once. BASE0's objective board is one: the spawn point is
+                 * inside the volume, so the call fires on the level's very
+                 * first tick, and waiting out its authored delay put the board
+                 * up a beat after the level had already appeared. On the
+                 * console it is up as the level arrives.
+                 *
+                 * `delay == 0` is the executable's own immediate-open arm
+                 * (0x8002146C -> 0x8002149C); choosing it HERE, for a call that
+                 * lands before the level has drawn a frame, is this port's, and
+                 * is stated as such. The other 25 HELPCOMPUTERs on the disc are
+                 * genuine reactions to walking into a volume mid-level and keep
+                 * the authored delay.
+                 */
+                if (!c->level_frames_drawn)
+                    delay = 0;
 
                 q2_briefing_popup_raise(&c->popup, delay,
                                         Q2_BRIEFING_SECONDS,
@@ -2754,6 +2783,9 @@ static bool client_load_zone(client *c, const char *map, int index)
     q2_world_zone loaded;
     s32 wmin[3], wmax[3];
     bool placed = false;
+
+    /* Nothing of this level is on screen yet — see the field's note. */
+    c->level_frames_drawn = false;
 
     if (q2_world_load_zone(&loaded, c->disc, map, index) != Q2_OK) {
         /* The client counts a map's zones by probing until one is absent, so
@@ -3730,6 +3762,15 @@ static bool client_load_zone(client *c, const char *map, int index)
 
     Q2_INFO("%s: %u nodes, %u vertices",
             c->zone.name, c->zone.scene.node_count, c->zone.points.count);
+
+    /*
+     * And this level's music. Here rather than in `main()` because a session
+     * loads many zones and only the first one used to be asked what it sounded
+     * like. A gate between zones of the same map resolves to the same level
+     * record and is left alone — see client_music_for_level.
+     */
+    client_music_for_level(c, false);
+
     return true;
 }
 
@@ -3805,6 +3846,63 @@ static bool client_music_play_id(client *c, int id)
 
     return client_music_start(c, q2_music_files[e->file][6],
                               (u8)e->channel);
+}
+
+/*
+ * THE MUSIC FOR THE LEVEL THAT IS NOW LOADED.
+ *
+ * This used to be a straight-line block in `main()`, run once, just after the
+ * boot map was loaded — so the map the session STARTED on chose the music for
+ * the whole session. Walking Strogg Outpost to Boss2 played BASE1's playlist
+ * over all eleven levels, because nothing on the LOADMAP path ever looked at
+ * the level record again. The track was being selected correctly and then never
+ * re-selected.
+ *
+ * `0x8007C584` is the name lookup that resolves a level record, and the
+ * console's single call to the playlist-start entry point hangs off it, so this
+ * belongs at the end of a successful zone load and nowhere else.
+ *
+ * A ZONE GATE IS NOT A LEVEL CHANGE. Both resolve to the same level record, and
+ * restarting the playlist on every gate would restart the music every time the
+ * player crossed a zone boundary inside one map — so the record is compared and
+ * an unchanged one is left playing. `force` is for the one caller that needs
+ * the restart anyway: coming back off a film, where the drive was taken away.
+ */
+static bool client_music_play_id(client *c, int id);
+
+static void client_music_for_level(client *c, bool force)
+{
+    const q2_level_entry *lv;
+
+    if (!c->level_table_ready || !c->music_table_ready)
+        return;
+
+    lv = q2_level_find(&c->level_table, c->map);
+    if (lv == c->level && !force)
+        return;                 /* same level: a zone gate, or nothing moved */
+
+    c->level           = lv;
+    c->music_cursor_at = -1;
+
+    if (!lv) {
+        /*
+         * Not a missing playlist — a map the LEVEL TABLE does not name. Four
+         * directories on the disc are in that position (FRAGTOWE, QSTARTUP,
+         * QINTER, QMAGINTR), and the retail game never reaches them through
+         * the table, so they have no playlist to have.
+         */
+        Q2_INFO("%s is not in the level table, so it has no playlist", c->map);
+        c->music_open = false;
+        return;
+    }
+
+    {
+        int id = q2_level_playlist_next(lv, &c->music_cursor_at);
+
+        if (id < 0 || !client_music_play_id(c, id))
+            c->music_open = false;
+        Q2_INFO("music: %s plays %d first", c->map, id);
+    }
 }
 
 /*
@@ -4670,34 +4768,26 @@ static void client_input_simulated(client *c, float dt)
         }
     }
 
-    if (c->creatures_ready && c->cre_actor) {
-        u32 i;
-        for (i = 0; i < c->creatures.set.count; i++) {
-            q2_monster *m    = &c->creatures.set.monsters[i];
-            bool        was  = m->dead;
-
-            q2_actor_to_monster(&c->cre_actor[i], m);
-
-            /*
-             * The frame it died on. T_Damage ends by calling the entity's own
-             * `die` (entity+0xA4, 0x80062A9C); what can be reconstructed from
-             * the module's data rather than its code is the animation, so the
-             * body is put into its death move and left to play it out.
-             *
-             * Without this a killed creature simply vanished — the tick and the
-             * draw both skipped anything with `dead` set, so a Soldier shot
-             * dead was gone on the frame it died.
-             */
-            if (!was && m->dead) {
-                s32 f = q2_creature_world_death_frame(&c->creatures, m);
-
-                if (f >= 0 && q2_cre_set_move(m, f)) {
-                    m->frame     = (s16)f;
-                    c->cre_bodies++;
-                }
-            }
-        }
-    }
+    /*
+     * THE ACTOR-TO-MONSTER WRITE-BACK USED TO BE HERE, AND THAT IS WHY NOTHING
+     * COULD BE SHOT.
+     *
+     * The pair is a sync, not a copy: `q2_actor_from_monster` rebuilds the
+     * actor from the monster at the top of the frame (and `q2_actor_init`
+     * zeroes health before reassigning it), and `q2_actor_to_monster` carries
+     * the damage back. Draining it HERE — before the two `q2_sim_fire` sites
+     * below — meant every hitscan hit landed on an actor that was overwritten
+     * from the undamaged monster on the very next frame. Measured against
+     * BASE1 creature 3: 200 machinegun shots reported 200 hits and left the
+     * creature on 40 of 40 hp, with the actor holding the 24 hp nobody read.
+     *
+     * The blaster hid it. Projectiles are resolved by `q2_sim_combat_tick`,
+     * which runs INSIDE `q2_sim_advance` — between the two syncs — so bolts
+     * always counted and only the four hitscan weapons were inert.
+     *
+     * It is drained below instead, after the last thing in the frame that can
+     * damage a creature. See client_drain_creature_damage.
+     */
 
     /*
      * What the items did while that ran. Immediately after the tick, because
@@ -5161,6 +5251,41 @@ static void client_input_simulated(client *c, float dt)
              * the report describes. The real mechanism is the trigger volume in
              * front of the door, and that is fixed in update_triggers.
              */
+        }
+    }
+
+    /*
+     * WHAT THE FRAME'S SHOTS DID — drained here because this is below every
+     * site that can damage a creature: the sim tick (projectiles, splash and
+     * the creatures' own attacks), the view weapon's trigger, and the fire
+     * driver's per-animation-frame shots. See the note at the old site above.
+     */
+    if (c->creatures_ready && c->cre_actor) {
+        u32 i;
+        for (i = 0; i < c->creatures.set.count; i++) {
+            q2_monster *m    = &c->creatures.set.monsters[i];
+            bool        was  = m->dead;
+
+            q2_actor_to_monster(&c->cre_actor[i], m);
+
+            /*
+             * The frame it died on. T_Damage ends by calling the entity's own
+             * `die` (entity+0xA4, 0x80062A9C); what can be reconstructed from
+             * the module's data rather than its code is the animation, so the
+             * body is put into its death move and left to play it out.
+             *
+             * Without this a killed creature simply vanished — the tick and the
+             * draw both skipped anything with `dead` set, so a Soldier shot
+             * dead was gone on the frame it died.
+             */
+            if (!was && m->dead) {
+                s32 f = q2_creature_world_death_frame(&c->creatures, m);
+
+                if (f >= 0 && q2_cre_set_move(m, f)) {
+                    m->frame     = (s16)f;
+                    c->cre_bodies++;
+                }
+            }
         }
     }
 
@@ -7115,6 +7240,16 @@ static void client_film_stop(client *c)
     c->bed_pos    = 0;
     if (c->audio)
         SDL_ClearAudioStream(c->audio);
+
+    /*
+     * And give the level its music back. `client_film_start` clears
+     * `music_open` and nothing used to set it again, so a session was silent
+     * from the first cutscene onwards — including one that was skipped.
+     * `force`, because the level record has not changed and the ordinary
+     * early-out would decline to restart it.
+     */
+    client_music_for_level(c, true);
+
     Q2_INFO("movie: %u frames shown", c->film_frames);
 }
 
@@ -7511,6 +7646,10 @@ static void client_draw_view(void *user, q2_screen *s, int p,
          * 0 contributes nothing of its own and the gather is exactly the five.
          */
         ectx.coll_node     = client_light_node(c, p);
+        /* And the hull, so each entity resolves its OWN cell rather than
+         * borrowing the player's. `coll_node` above stays as the fallback for
+         * the title screen, which has no collision world at all. */
+        ectx.coll          = c->sim[0].coll_ready ? &c->sim[0].coll : NULL;
 
         q2_entity_build_ot(&c->sim[0].entities, &ectx, &c->cam, ot, gte, &estats);
     }
@@ -7679,19 +7818,45 @@ static void client_draw_view(void *user, q2_screen *s, int p,
             if (c->lights_ready) {
                 q2_light_set  set;
                 s32 cell = q2_coll_find_node(&c->sim[0].coll, m->pos, -1, true);
+                /*
+                 * The ambient the entity carries, which used to be NULL — so a
+                 * vertex none of the three gathered lights reached came out
+                 * pure black rather than dim, and a creature in an unlit
+                 * corridor was a silhouette. 0x80058944 stores "000" as the
+                 * spawn default, i.e. 0x30 per component.
+                 */
+                static const u8 cre_glow[3] = { 0x30, 0x30, 0x30 };
 
                 q2_light_gather(&set, &c->light_world, m->pos, cell, false);
                 q2_light_env_build(&cre_env, &set, Q2_LIGHT_ONE,
-                                   Q2_LIGHT_ONE, NULL);
+                                   Q2_LIGHT_ONE, cre_glow);
                 inst.light = &cre_env;
             }
             inst.origin[0]     = m->pos[0];
-            /* `m->pos` is the entity ORIGIN; a model is placed on its FEET,
-             * which is Q2_EYE_BASE below. The same conversion item.c makes
-             * between an item's entity position and its draw origin, and the
-             * reason this frame is pixel-identical to the one before the
-             * spawn lift went in. */
-            inst.origin[1]     = m->pos[1] + Q2_EYE_BASE;
+            /*
+             * `m->pos` is the entity ORIGIN; a model is placed on its FEET,
+             * which is Q2_EYE_BASE below.
+             *
+             * AND THEN RAISED AGAIN BY THE MODEL'S OWN BIAS, which this path
+             * did not do — so every creature on the disc was drawn sunk into
+             * the floor by `ext2`: 251 units for a Soldier, 419 for a Berserk,
+             * 507 for a Tank Commander. That is a Soldier cut off flat at the
+             * shins, and it is the "monsters clip into the geometry" report.
+             *
+             * 0x8006D118 and 0x800588E4..0x80058904 (FORMATS §5398, §5422) put
+             * it exactly this way: the draw origin is the position lowered by
+             * 286 and raised again by the model's own bias, kept at entity+0xF8
+             * out of `lh model[+0x1C]`. item.c:651 has always done it; this
+             * loop never did.
+             *
+             * ext2 IS the posed sole height on every creature model the disc
+             * ships — Soldier 251 against a posed maximum of 251, Arachner
+             * 217/217, Gunner 380/376 — so subtracting it stands the model on
+             * the floor the drop sweep found. Nothing else moves: the hit
+             * sphere, the AI and the collision all key off `m->pos`.
+             */
+            inst.origin[1]     = m->pos[1] + Q2_EYE_BASE
+                                 - c->cre_model[i].hdr.ext2;
             inst.origin[2]     = m->pos[2];
             inst.yaw           = m->angles[2];
             inst.clut4_count_a = c->clut4_count_a;
@@ -7833,6 +7998,21 @@ static void client_draw_view(void *user, q2_screen *s, int p,
         q2_model_instance_init(&proto);
         proto.tpage         = &c->render.tpage;
         proto.clut4_count_a = c->clut4_count_a;
+        /*
+         * THE GUN IS ONE THING IN THE TABLE, and it is in front of the world.
+         *
+         * Sorted per face it spanned three buckets with wall polygons landing
+         * between them, so geometry the player stood close to painted over the
+         * muzzle — the "view weapon clips into world geometry" report. The
+         * original links a model's faces at ONE point (modeldraw.h), and for
+         * the weapon in hand that point is ahead of the geometry: it is drawn
+         * over the view, not into it.
+         *
+         * Zero is the NEAREST depth — `psx_ot_depth_bucket` counts down from
+         * the far end, so an otz of 0 lands in the frontmost bucket of
+         * whichever viewport window is installed.
+         */
+        proto.bucket_override = 0;
 
         aim[0]  = (s16)c->sim[0].player[0].pitch;
         aim[1]  = (s16)c->sim[0].player[0].yaw;
@@ -8905,11 +9085,6 @@ no_window:
                     : "  (this mode is CUT — the front end cannot select it)");
     }
 
-    if (!client_load_zone(&c, map, zone_index)) {
-        fprintf(stderr, "cannot load %s zone %d\n", map, zone_index);
-        goto done;
-    }
-
     /*
      * Level music — this map's own playlist, not "track A because the mapping
      * is not decoded yet".
@@ -8918,31 +9093,22 @@ no_window:
      * names a file and a channel through the table at 0x800A1DD8 (musictable.h).
      * A build whose tables are not catalogued falls silent rather than picking
      * a track that would be somebody else's.
+     *
+     * LOADED BEFORE THE FIRST ZONE, because the zone load is what selects the
+     * music now (client_music_for_level). Loading them after it, as this used
+     * to, meant the boot map ran its selection with both tables still marked
+     * unready and started silent.
      */
     c.music_table_ready = (q2_music_table_load(&c.music_table, c.disc,
                                                &c.build) == Q2_OK);
     c.level_table_ready = (q2_level_table_load(&c.level_table, c.disc,
                                                &c.build) == Q2_OK);
-    if (c.level_table_ready)
-        c.level = q2_level_find(&c.level_table, c.map);
+    if (!c.music_table_ready)
+        Q2_WARN("no music table for this build: the game will be silent");
 
-    c.music_cursor_at = -1;
-    if (c.level && c.music_table_ready) {
-        int id = q2_level_playlist_next(c.level, &c.music_cursor_at);
-        if (id >= 0)
-            client_music_play_id(&c, id);
-        Q2_INFO("music: %s plays %d first", c.map, id);
-    } else if (c.music_table_ready && !c.level) {
-        /*
-         * Not a missing playlist — a map the LEVEL TABLE does not name. Four
-         * directories on the disc are in that position (FRAGTOWE, QSTARTUP,
-         * QINTER, QMAGINTR), and the retail game never reaches them through
-         * the table, so they have no playlist to have. Saying "no music
-         * playlist" blamed the music table for the level table's silence.
-         */
-        Q2_INFO("%s is not in the level table, so it has no playlist", c.map);
-    } else {
-        Q2_WARN("no music playlist for %s", c.map);
+    if (!client_load_zone(&c, map, zone_index)) {
+        fprintf(stderr, "cannot load %s zone %d\n", map, zone_index);
+        goto done;
     }
 
     /*
@@ -9649,6 +9815,9 @@ no_window:
          */
         q2_screen_tick_dt(&c.screen, (double)dt);
         client_frame(&c);
+        /* This level has now been seen, so a script call from here on is the
+         * player having walked somewhere rather than the level arriving. */
+        c.level_frames_drawn = true;
 
         c.frame_index++;
         if (c.frames_total > 0 && c.frame_index >= c.frames_total)

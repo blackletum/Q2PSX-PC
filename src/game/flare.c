@@ -437,6 +437,12 @@ static u32 flare_emit(const q2_flare_style *style, psx_xy at, s32 scale,
 
                 p->semi_transparent = true;
                 p->textured_blend   = false;
+                /* These four corners really are in libgpu's Z order — see the
+                 * fan note above — so the backend must split them on the other
+                 * diagonal. Without this the second triangle of every sector
+                 * came out as a black sliver and the 12-gon glow drew as a
+                 * six-spoke pinwheel. */
+                p->quad_zorder      = true;
                 p->tpage            = flare_blend();
                 emitted++;
             }

@@ -49,6 +49,28 @@ static void matrix_apply(const s16 m[3][3], const s32 v[3], s32 out[3])
     }
 }
 
+/*
+ * The same, through the matrix's TRANSPOSE — which for a rotation is its
+ * inverse.
+ *
+ * A model's normals are part-LOCAL and the light directions are in WORLD space,
+ * so one of the two has to cross into the other's frame before they can be
+ * dotted. The instance matrix carries local -> world, so the directions need
+ * its inverse. Rotating them FORWARDS instead, which is what this module used
+ * to do, mirrors every model's shading about its own facing: normals pointing
+ * at a lamp came out black and normals pointing away came out fully lit.
+ */
+static void matrix_apply_t(const s16 m[3][3], const s32 v[3], s32 out[3])
+{
+    int r;
+
+    for (r = 0; r < 3; r++) {
+        s64 sum = (s64)m[0][r] * v[0] + (s64)m[1][r] * v[1] +
+                  (s64)m[2][r] * v[2];
+        out[r] = (s32)(sum >> Q2_FRAC_12);
+    }
+}
+
 void q2_model_instance_init(q2_model_instance *inst)
 {
     if (!inst)
@@ -56,6 +78,7 @@ void q2_model_instance_init(q2_model_instance *inst)
     memset(inst, 0, sizeof(*inst));
     inst->scale   = Q2_ONE_12;
     inst->tint[0] = inst->tint[1] = inst->tint[2] = 128;
+    inst->bucket_override = -1;    /* sort per face unless a caller says not to */
 }
 
 u32 q2_model_build_ot(const q2_model_instance *inst,
@@ -65,7 +88,7 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
                       q2_model_draw_stats *stats)
 {
     scratch_vertex window[Q2_MODEL_SCRATCH_MAX];
-    s16 view[3][3], world[3][3], spin[3][3];
+    s16 view[3][3], world[3][3], spin[3][3], spin_unscaled[3][3];
     q2_tpage_table private_tpage;
     const q2_tpage_table *tpage;
     const q2_model *m;
@@ -119,6 +142,17 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
      * materialises. A scale above 4096 would push the 1.3.12 matrix entries out
      * of s16, so it is clamped rather than allowed to wrap.
      */
+    /*
+     * The UNSCALED instance rotation, kept for the light basis.
+     *
+     * Scale belongs on the position path — a part's translation has to shrink
+     * with the model or the parts drift apart — but a light DIRECTION is not a
+     * position. Composing the scaled matrix into the light basis applied the
+     * scale a second time (the caller already passes it as `intensity_a`), so a
+     * half-size instance was lit at a quarter.
+     */
+    memcpy(spin_unscaled, spin, sizeof(spin_unscaled));
+
     if (inst->scale != Q2_ONE_12) {
         s32 s = inst->scale;
         int r, c;
@@ -196,7 +230,10 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
             gte_matrix lm;
             u32 j;
 
-            matrix_mul(basis, spin, rot);
+            /* Unscaled, and INVERTED below: `basis` carries part-local to
+             * world, and what a world-space light direction needs is the trip
+             * the other way. See matrix_apply_t. */
+            matrix_mul(basis, spin_unscaled, rot);
             memset(&lm, 0, sizeof(lm));
 
             for (j = 0; j < Q2_LIGHT_ACTIVE_MAX; j++) {
@@ -208,7 +245,7 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
 
                 for (c = 0; c < 3; c++)
                     in[c] = inst->light->dir[j][c];
-                matrix_apply(basis, in, out);
+                matrix_apply_t(basis, in, out);
                 for (c = 0; c < 3; c++)
                     lm.m[j][c] = (s16)out[c];
             }
@@ -354,9 +391,15 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
                 }
             }
 
-            for (i = 0; i < 4; i++)
-                otz += window[f.v[i]].z;
-            otz = q2_ot_bucket_for_depth(ot, otz / 4, cam->far_z);
+            if (inst->bucket_override >= 0) {
+                /* One link point for the whole model, as the original has —
+                 * see q2_model_instance.bucket_override. */
+                otz = inst->bucket_override;
+            } else {
+                for (i = 0; i < 4; i++)
+                    otz += window[f.v[i]].z;
+                otz = q2_ot_bucket_for_depth(ot, otz / 4, cam->far_z);
+            }
 
             prim = psx_ot_add(ot, (u16)otz);
             if (!prim) {

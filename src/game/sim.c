@@ -2023,6 +2023,26 @@ static void update_pain(q2_sim *sim)
  * line of sight, the walk diagnostic. Entity movement does NOT go through here;
  * it goes through q2_move_step, which is what the original does.
  *
+ * AND IT IS THE PRIMARY HULL, not the movement one.
+ *
+ * SecondaryCol is PrimaryColl eroded by the body's 286-unit half-extent on all
+ * six axes, so that a swept POINT stands in for a swept BOX. A ray is already a
+ * point: eroding for it subtracts a body that is not there, and every shot
+ * stopped 286 units short of the surface it was aimed at. A shot angled down at
+ * a creature standing on the floor covered barely half its distance and was
+ * then discarded as beyond the world, which is the other half of "you cannot
+ * damage the monsters" — the first half being the write-back order in the
+ * client. Measured on one ray: 583 units of reach against 1156.
+ *
+ * 0x80043BDC, the ray marcher, hardcodes 0x800C8E90 — PrimaryColl — at
+ * 0x80043C18 no matter which context its caller passed (FORMATS §1493), and the
+ * context table assigns the primary hull to rays, line of sight, the AI and
+ * spawning, leaving the secondary one to entity movement alone (§1467).
+ * simcombat.c's debris path had already worked this out and written it down.
+ *
+ * `current_node` is not passed on as the search hint: it is a SecondaryCol cell
+ * index and means nothing in the other hull.
+ *
  * The fraction is reconstructed from the clipped end point along the longest
  * axis. The engine never forms one: it carries an exact rational and scales an
  * int16 delta by it, so any fraction here is the port's convenience and can be
@@ -2034,6 +2054,7 @@ void q2_sim_trace(q2_sim *sim, const s32 start[3], const s32 end[3],
     s32 pos[3];
     s32 node = -1;
     bool complete;
+    q2_collision *hull;
 
     if (!out)
         return;
@@ -2049,11 +2070,12 @@ void q2_sim_trace(q2_sim *sim, const s32 start[3], const s32 end[3],
     out->end[1] = end[1];
     out->end[2] = end[2];
 
-    if (!sim->coll_ready)
+    if (!sim->coll_ready && !sim->coll_primary_ready)
         return;             /* no hull — move freely rather than wedge */
 
-    complete = q2_coll_move(&sim->coll, start, end, sim->current_node,
-                            pos, &node);
+    hull = sim->coll_primary_ready ? &sim->coll_primary : &sim->coll;
+
+    complete = q2_coll_move(hull, start, end, -1, pos, &node);
 
     out->end[0] = pos[0];
     out->end[1] = pos[1];
@@ -2062,7 +2084,7 @@ void q2_sim_trace(q2_sim *sim, const s32 start[3], const s32 end[3],
 
     if (node >= 0) {
         q2_coll_node n;
-        if (q2_collision_get_node(&sim->coll, (u32)node, &n))
+        if (q2_collision_get_node(hull, (u32)node, &n))
             out->contents = n.contents;
     }
 
@@ -2071,11 +2093,11 @@ void q2_sim_trace(q2_sim *sim, const s32 start[3], const s32 end[3],
 
     out->hit = true;
 
-    if (sim->coll.hit_plane_index >= 0) {
+    if (hull->hit_plane_index >= 0) {
         q2_coll_plane pl;
 
-        if (q2_collision_get_plane(&sim->coll,
-                                   (u32)sim->coll.hit_plane_index, &pl)) {
+        if (q2_collision_get_plane(hull,
+                                   (u32)hull->hit_plane_index, &pl)) {
             out->normal[0] = pl.nx;
             out->normal[1] = pl.ny;
             out->normal[2] = pl.nz;
@@ -2122,6 +2144,22 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
 
     if (!sim || !input || dt <= 0)
         return;
+
+    /*
+     * THE TICK'S OWN LENGTH, set FIRST.
+     *
+     * This used to be assigned near the end of the tick, after
+     * `update_triggers` had already run — so anything a trigger called saw the
+     * PREVIOUS frame's delta, and on the first tick of a level saw zero. The
+     * briefing pop-up is the case that showed it: a HELPCOMPUTER volume arms
+     * its countdown as `delay * frame_dt`, and with frame_dt clamped up from
+     * zero to 1 the objective screen came up on an arbitrary fraction of the
+     * delay it was authored with.
+     *
+     * Nothing in the tick wants the previous dt: the projectile sweep this
+     * field was added for reads it after this point either way.
+     */
+    sim->cur_dt = dt;
 
     p = &sim->player[sim->cur_player];
 
@@ -2325,14 +2363,9 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
      */
     sim->level_time += dt;
 
-    /*
-     * And the tick's OWN length, kept beside the clock because the world half
-     * of the tick needs it and does not take it as an argument. The projectile
-     * sweep is the one that matters: 0x80047D40 advances a missile by
-     * `vel * dt`, and reading only `level_time` here left it advancing by one
-     * dt unit a frame.
-     */
-    sim->cur_dt = dt;
+    /* `sim->cur_dt` is set at the TOP of this function — see the note there.
+     * The world half of the tick and the projectile sweep (0x80047D40, which
+     * advances a missile by `vel * dt`) both read it. */
 
     /*
      * THE SIM NO LONGER FIRES FROM RAW INPUT.

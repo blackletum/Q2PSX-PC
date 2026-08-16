@@ -13,18 +13,12 @@
  *     a Z-ordered quad draws a bowtie (menufont.c says the same thing about
  *     glyphs, and there it turns 'B' into 'E').
  *
- *   - INCLUSIVE CORNERS. The GPU's fill rule drops the right and bottom edges,
- *     so its (x0, y0)..(x1, y1) covers the pixels strictly inside. This
- *     rasteriser admits them, so the far corner is pulled one pixel back
- *     *towards* the near one — which for a mirrored patch means pulling it
- *     forwards, hence the sign test rather than a subtraction.
+ *   - HALF-OPEN CORNERS. The GPU's fill rule drops the right and bottom edges,
+ *     so its (x0, y0)..(x1, y1) covers the pixels strictly inside. The corners
+ *     used to be pulled one pixel back towards the near one to compensate for a
+ *     rasteriser that admitted both edges; raster.c implements the real rule
+ *     now, so the console's coordinates go through untouched.
  */
-static int step_back(int far, int near)
-{
-    if (far > near) return far - 1;
-    if (far < near) return far + 1;
-    return far;
-}
 
 static psx_prim *emit_patch(psx_ot *ot, u32 bucket, u16 tpage, u16 clut,
                             int x0, int y0, int x1, int y1,
@@ -35,11 +29,6 @@ static psx_prim *emit_patch(psx_ot *ot, u32 bucket, u16 tpage, u16 clut,
 
     if (!p)
         return NULL;
-
-    x1 = step_back(x1, x0);
-    y1 = step_back(y1, y0);
-    u1 = step_back(u1, u0);
-    v1 = step_back(v1, v0);
 
     p->kind  = PSX_PRIM_FT4;
     p->tpage = tpage;

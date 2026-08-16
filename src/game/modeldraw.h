@@ -175,6 +175,28 @@ typedef struct q2_model_instance {
      * own blend selector is OR-ed on top without writing back (0x8006DE50).
      */
     const q2_tpage_table *tpage;
+
+    /*
+     * ONE BUCKET FOR THE WHOLE MODEL, or < 0 to sort each face on its own
+     * depth.
+     *
+     * The original never sorts a model's faces against each other. Its vertex
+     * loop (0x800B23A0) stores SXY and RGB and no SZ at all, so no per-face
+     * depth exists to sort by; the face loop appends packet pointers to a flat
+     * array at 0x800DDDCC, and the tail chains every one of them into a SINGLE
+     * ordering-table link point taken from the entity's own projected origin
+     * (0x8006BF34 stores SZ3 of the origin at record+84). A model is one thing
+     * in the table, not N.
+     *
+     * This port buckets per face, which for most models is invisible — they are
+     * small and land in one bucket anyway — but the VIEW WEAPON spans a large
+     * part of the near range, so its 62 faces landed in three different buckets
+     * and any wall polygon whose own depth fell between them was painted over
+     * the gun. That is the "view weapon clips into world geometry" report:
+     * measured at 9-17% of the weapon's pixels eaten, concentrated on the
+     * muzzle.
+     */
+    s32                  bucket_override;
 } q2_model_instance;
 
 /* Zero the instance and set the fields whose neutral value is not zero. */

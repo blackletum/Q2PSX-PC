@@ -196,6 +196,22 @@ static int edge(const raster_vertex *a, const raster_vertex *b, int px, int py)
     return (b->x - a->x) * (py - a->y) - (b->y - a->y) * (px - a->x);
 }
 
+/*
+ * Is a->b a TOP or LEFT edge of the (already winding-normalised) triangle?
+ *
+ * With screen y increasing downwards and the weights normalised positive, an
+ * edge that travels UP the screen is a left edge, and a horizontal edge that
+ * travels RIGHT is a top edge. Those two are the ones the GPU fills; the right
+ * and bottom edges are excluded, so a pixel on the seam between two triangles
+ * belongs to exactly one of them. See the note in raster_triangle.
+ */
+static bool edge_is_top_left(const raster_vertex *a, const raster_vertex *b)
+{
+    if (b->y == a->y)
+        return b->x > a->x;     /* horizontal: top when it runs right */
+    return b->y < a->y;         /* travels up the screen: a left edge  */
+}
+
 static void raster_triangle(psx_framebuffer *fb,
                             const raster_vertex *v0,
                             const raster_vertex *v1,
@@ -237,6 +253,33 @@ static void raster_triangle(psx_framebuffer *fb,
         if (max_y >= cy1) max_y = cy1 - 1;
     }
 
+    /*
+     * THE FILL RULE, and why a transparent surface used to have its own mesh
+     * printed on it.
+     *
+     * The edge test was inclusive on all three edges (`w >= 0`), so a pixel
+     * lying exactly on an edge SHARED by two triangles was rasterised twice.
+     * For opaque geometry the second write lays down the same colour and
+     * nothing shows, which is why this survived; for a semi-transparent one the
+     * blend runs twice and the pixel comes out at B + 2F. Every quad is fanned
+     * as (0,1,2)+(0,2,3), so its own diagonal is a shared edge; neighbouring
+     * quads share their borders; and a subdivided near quad has 24 of them. The
+     * result was the tessellation drawn onto every transparent surface as a
+     * bright grid with a diagonal through each cell.
+     *
+     * The hardware's rule — stated three times in this tree already
+     * (raster.h, menufont.c, panel.c) and never implemented here — is that the
+     * right and bottom edges of a primitive do not draw. Expressed on the edge
+     * function, an edge is "top or left" when it goes up the screen, or is
+     * horizontal and runs to the right; those keep `>= 0` and every other edge
+     * takes `> 0`. Applied AFTER the winding normalisation above, because the
+     * swap changes which edge is which.
+     */
+    {
+        int bias0 = edge_is_top_left(b, c) ? 0 : -1;
+        int bias1 = edge_is_top_left(c, a) ? 0 : -1;
+        int bias2 = edge_is_top_left(a, b) ? 0 : -1;
+
     for (py = min_y; py <= max_y; py++) {
         for (px = min_x; px <= max_x; px++) {
             int w0 = edge(b, c, px, py);
@@ -245,7 +288,7 @@ static void raster_triangle(psx_framebuffer *fb,
             int r, g, bl;
             u16 *dst;
 
-            if (w0 < 0 || w1 < 0 || w2 < 0)
+            if (w0 + bias0 < 0 || w1 + bias1 < 0 || w2 + bias2 < 0)
                 continue;
 
             /* Gouraud: barycentric interpolation of the per-vertex colours. */
@@ -297,6 +340,7 @@ static void raster_triangle(psx_framebuffer *fb,
                 *dst = psx_rgb555((u8)r, (u8)g, (u8)bl);
             }
         }
+    }
     }
 }
 
@@ -569,9 +613,18 @@ void psx_raster_prim(psx_framebuffer *fb,
          * it produces a bowtie per quad — walls come out as a regular lattice of
          * diamond holes that reads like a clipping bug rather than an index-order
          * one. See the correction in scene.h.
+         *
+         * `quad_zorder` says this particular packet really is in the hardware's
+         * order — the flares are built as console packets — and then the split
+         * is (0,1,2) and (1,3,2), which is the other diagonal. Getting that
+         * second triangle's corner order wrong blacks out half of every quad,
+         * which is exactly the symptom the flag exists to cure.
          */
         raster_triangle(fb, &v[0], &v[1], &v[2], prim, vram, opts);
-        raster_triangle(fb, &v[0], &v[2], &v[3], prim, vram, opts);
+        if (prim->quad_zorder)
+            raster_triangle(fb, &v[1], &v[3], &v[2], prim, vram, opts);
+        else
+            raster_triangle(fb, &v[0], &v[2], &v[3], prim, vram, opts);
         break;
 
     case PSX_PRIM_SPRT:

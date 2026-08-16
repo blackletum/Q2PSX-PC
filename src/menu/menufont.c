@@ -253,25 +253,26 @@ static psx_prim *emit_quad(psx_ot *ot, u32 bucket, u16 tpage, u16 clut,
      * glyph means the right quarter of every letter goes missing and 'B' comes
      * out as 'E'. So the corners are transposed here, once, at the seam.
      *
-     * HALF-OPEN ON THE HARDWARE, INCLUSIVE HERE. The console's packet spans
+     * HALF-OPEN, as on the hardware. The console's packet spans
      * (x, y)…(x + 16, y + 11) and the GPU covers the 16 x 11 pixels *inside*
-     * that, because its fill rule drops the right and bottom edges. This
-     * rasteriser's edge test admits them, so the same numbers would cover
-     * 17 x 12 and sample one texel past the cell — and since the atlas packs
-     * its glyphs at a 16 pitch with a 1-pixel gutter, that extra column is the
-     * first column of the NEXT letter, visible as a sliver after every glyph.
-     * Handing it the inclusive corner instead reproduces the console's coverage
-     * exactly: w pixels, w texels, one to one.
+     * that, because its fill rule drops the right and bottom edges.
+     *
+     * This used to hand the rasteriser the INCLUSIVE corner (`+ w - 1`) to
+     * compensate for an edge test that admitted both edges; without that, a
+     * glyph covered 17 x 12 and sampled the first column of the next letter out
+     * of the atlas's 16-pitch cells. The rasteriser implements the real fill
+     * rule now (raster.c), so the console's own numbers are handed over
+     * unaltered and the coverage comes out the same: w pixels, w texels.
      */
     p->xy[0].x = (s16)x;             p->xy[0].y = (s16)y;
-    p->xy[1].x = (s16)(x + w - 1);   p->xy[1].y = (s16)y;
-    p->xy[2].x = (s16)(x + w - 1);   p->xy[2].y = (s16)(y + h - 1);
-    p->xy[3].x = (s16)x;             p->xy[3].y = (s16)(y + h - 1);
+    p->xy[1].x = (s16)(x + w);       p->xy[1].y = (s16)y;
+    p->xy[2].x = (s16)(x + w);       p->xy[2].y = (s16)(y + h);
+    p->xy[3].x = (s16)x;             p->xy[3].y = (s16)(y + h);
 
     p->uv[0].u = uu;                 p->uv[0].v = vv;
-    p->uv[1].u = (u8)(uu + w - 1);   p->uv[1].v = vv;
-    p->uv[2].u = (u8)(uu + w - 1);   p->uv[2].v = (u8)(vv + h - 1);
-    p->uv[3].u = uu;                 p->uv[3].v = (u8)(vv + h - 1);
+    p->uv[1].u = (u8)(uu + w);       p->uv[1].v = vv;
+    p->uv[2].u = (u8)(uu + w);       p->uv[2].v = (u8)(vv + h);
+    p->uv[3].u = uu;                 p->uv[3].v = (u8)(vv + h);
 
     for (i = 0; i < 4; i++) {
         p->rgb[i].r = mod;
