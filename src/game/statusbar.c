@@ -274,17 +274,20 @@ static u32 emit_cell(psx_ot *ot, u32 bucket, u16 tpage, u16 clut,
     p->clut  = clut;
     p->textured_blend = true;
 
-    /* Perimeter order and inclusive corners — the same two conventions the
-     * menu's glyphs need (menufont.c). */
+    /* Perimeter order and HALF-OPEN corners — the same two conventions the
+     * menu's glyphs need (menufont.c). The `- 1` these used to carry
+     * compensated for a rasteriser that filled both edges; raster.c has the
+     * GPU's own fill rule now, so the console's numbers go through as they
+     * are. */
     p->xy[0].x = (s16)x;              p->xy[0].y = (s16)y;
-    p->xy[1].x = (s16)(x + dw - 1);   p->xy[1].y = (s16)y;
-    p->xy[2].x = (s16)(x + dw - 1);   p->xy[2].y = (s16)(y + dh - 1);
-    p->xy[3].x = (s16)x;              p->xy[3].y = (s16)(y + dh - 1);
+    p->xy[1].x = (s16)(x + dw);       p->xy[1].y = (s16)y;
+    p->xy[2].x = (s16)(x + dw);       p->xy[2].y = (s16)(y + dh);
+    p->xy[3].x = (s16)x;              p->xy[3].y = (s16)(y + dh);
 
     p->uv[0].u = u;                   p->uv[0].v = v;
-    p->uv[1].u = (u8)(u + sw - 1);    p->uv[1].v = v;
-    p->uv[2].u = (u8)(u + sw - 1);    p->uv[2].v = (u8)(v + sh - 1);
-    p->uv[3].u = u;                   p->uv[3].v = (u8)(v + sh - 1);
+    p->uv[1].u = (u8)(u + sw);        p->uv[1].v = v;
+    p->uv[2].u = (u8)(u + sw);        p->uv[2].v = (u8)(v + sh);
+    p->uv[3].u = u;                   p->uv[3].v = (u8)(v + sh);
 
     for (i = 0; i < 4; i++) {
         p->rgb[i].r = Q2_SBAR_MOD;

@@ -171,8 +171,34 @@ typedef struct q2_mission {
     q2_mission_box box;
 
     int  unit;                              /* the mission number            */
-    char subtitle[Q2_MISSION_LINE_MAX];     /* 0x8009B608                    */
-    char footer[Q2_MISSION_LINE_MAX];       /* 0x8009B634                    */
+
+    /*
+     * THE TWO CENTRED LINES UNDER THE TITLE, and they are ONE MESSAGE WRAPPED.
+     *
+     * Nothing in this port writes either, so both draw blank and the board has
+     * an empty band where the console has text. What they are is now read
+     * rather than guessed:
+     *
+     *   0x800220C8  takes a string in a0 and fills BOTH buffers. It memsets
+     *               0x8009B608 and 0x8009B634 to 42 bytes of zero (0x80089E18),
+     *               measures the source with 0x8008A0E8, and at 0x80022150
+     *               compares the length against 36 — `slti v0, v0, 36`. Under
+     *               36 the whole string goes to the first buffer and the second
+     *               stays empty; at 36 or over it breaks at the last space
+     *               (0x8008A0C8 is called with 32) and the remainder goes to the
+     *               second. So `subtitle` and `footer` are line one and line two
+     *               of a word-wrap, not two independent fields, and 42 is the
+     *               buffer size rather than the column count.
+     *
+     *   0x80022094  is its only caller, and the string it hands over is the
+     *               return of 0x800701B4 at 0x8002208C.
+     *
+     * WHAT 0x800701B4 RETURNS IS THE REMAINING GAP. Until that is read, filling
+     * these with anything would be inventing the level-end text, so they are
+     * left empty and the band with them.
+     */
+    char subtitle[Q2_MISSION_LINE_MAX];     /* 0x8009B608, wrapped line 1    */
+    char footer[Q2_MISSION_LINE_MAX];       /* 0x8009B634, wrapped line 2    */
 
     /* The six level rows, which the caller tallies. */
     q2_mission_row row[Q2_MISSION_ROWS];

@@ -115,6 +115,9 @@
 /* Creatures on the biggest map plus three other players, with room to spare. */
 #define Q2_CLIENT_MAX_TARGETS 96
 
+/* The item table's sound-name array — eleven, at 0x800AC240. */
+#define Q2_CLIENT_ITEM_SOUNDS 11
+
 #include "multiplayer.h"
 #include "userfuncs.h"
 #include "disc.h"
@@ -721,6 +724,7 @@ typedef struct client {
      * many frames, and that a press cancels it — is the module's.
      */
     u32               attract_idle;     /* frames the title has sat idle   */
+    u32               attract_frames;   /* --attract N: override the wait  */
 
     /* The map's own mission-event namespace, out of its LevelBin. */
     q2_levelbin_misevent misevent[32];
@@ -787,6 +791,12 @@ typedef struct client {
      * recomputed from the live set.
      */
     u32               cre_in_zone;
+
+    /*
+     * The eleven item sounds as THIS map's bank can actually play them, with
+     * the console's substitutions applied. See client_item_sounds_resolve.
+     */
+    char              item_sound[Q2_CLIENT_ITEM_SOUNDS][Q2_ITEM_MODEL_LEN + 1];
 
     u32               mission_frames;
     u32               briefing_frames;
@@ -1172,6 +1182,14 @@ static bool client_find_sound(client *c, const char *want, q2_vag *out);
 /* Defined with the mixer. The zone load calls this before it frees the bank a
  * playing voice is reading out of. */
 static void client_voices_stop(client *c);
+
+/* The eleven item sounds, resolved against THIS map's bank with the console's
+ * own substitutions applied. Called once the bank is open. */
+static void client_item_sounds_resolve(client *c);
+
+/* The pause page's KILLS/SECRETS row, filled from the same counters the level
+ * tally uses. Called just before the page opens. */
+static void client_menu_fill_stats(client *c);
 
 /* The creature hooks, defined below with the AI clock they run on. */
 static void client_cre_melee(q2_monster *m, const s32 aim[3], s32 damage,
@@ -2072,6 +2090,26 @@ static void client_music_for_level(client *c, bool force);
  * map placed and how many of them are dead. Counting deaths as they happen
  * would drift the moment a creature is removed for any other reason.
  */
+/*
+ * The pause page's status row. The same two pairs the level tally shows, so a
+ * player can ask mid-level how they are doing — which is what the row is for.
+ */
+static void client_menu_fill_stats(client *c)
+{
+    u32 i, dead = 0;
+
+    if (!c)
+        return;
+
+    if (c->creatures_ready)
+        for (i = 0; i < c->creatures.set.count; i++)
+            if (c->creatures.set.monsters[i].dead)
+                dead++;
+
+    q2_menu_set_stats(&c->menu, (int)dead, (int)c->cre_in_zone,
+                      (int)c->secrets_found, (int)c->secrets_total);
+}
+
 static void client_mission_record(client *c)
 {
     u32 i, placed = 0, dead = 0;
@@ -3311,6 +3349,8 @@ static bool client_load_zone(client *c, const char *map, int index)
     c->sfx_ready = (q2_sound_bank_load(&c->sfx, c->disc, map) == Q2_OK);
     if (c->sfx_ready)
         Q2_INFO("sound bank: %u effects", c->sfx.count);
+
+    client_item_sounds_resolve(c);
 
     /* Take the player's own state off the sim before it goes, if this is a
      * transition rather than a fresh start. See `carry_player`. */
@@ -6517,6 +6557,101 @@ static void client_play_menu_sound(client *c, q2_menu_sound snd)
  * through its own tint (entitydraw.c) and vanishes without sparks, which is less
  * than the console does rather than something the console does not do.
  */
+/*
+ * THE ELEVEN ITEM SOUNDS, and the SUBSTITUTIONS a map that is missing one gets.
+ *
+ * 0x800374BC resolves the eleven names into gp+17032..gp+17072 once per map,
+ * and 0x80037B24 then PATCHES the slots that came back null. This port resolved
+ * by name at every play instead, so there was nowhere for a patched slot to
+ * live and a map whose bank lacks a name simply played nothing.
+ *
+ * The chain, read at 0x80037B24..0x80037BCC. Slots are four bytes apart from
+ * gp+17032, so 17044/17048/17052 are slots 3/4/5 and 17056/17060 are 6/7:
+ *
+ *   17048 || 17052 null -> BOTH take the OR, i.e. whichever one loaded
+ *                          (`or v1,v1,v0` / `or v0,v0,v1` at 0x80037B4C)
+ *   17044       null    -> takes 17048
+ *   17056 || 17060 null -> BOTH take the OR, the same idiom
+ *   17056 still null    -> BOTH take 17032
+ *
+ * The other five get no fallback and stay silent, which is also the console's
+ * behaviour rather than an omission here.
+ *
+ * Held as NAMES rather than bank indices because everything downstream plays by
+ * name; a patched slot is simply the donor's name copied into it.
+ */
+static void client_item_sounds_resolve(client *c)
+{
+    const q2_item_table *t;
+    q2_vag scratch;
+    bool   have[Q2_CLIENT_ITEM_SOUNDS];
+    u32    i;
+
+    if (!c)
+        return;
+
+    t = c->item_table_ready ? &c->item_table : q2_item_table_builtin();
+
+    for (i = 0; i < Q2_CLIENT_ITEM_SOUNDS; i++) {
+        snprintf(c->item_sound[i], sizeof(c->item_sound[i]), "%s", t->sound[i]);
+        have[i] = c->item_sound[i][0] &&
+                  client_find_sound(c, c->item_sound[i], &scratch);
+    }
+
+    /* 4 and 5: the large and normal health pickups. */
+    if (!have[4] || !have[5]) {
+        int donor = have[4] ? 4 : (have[5] ? 5 : -1);
+        if (donor >= 0) {
+            int k;
+            for (k = 4; k <= 5; k++) {
+                snprintf(c->item_sound[k], sizeof(c->item_sound[k]),
+                         "%s", c->item_sound[donor]);
+                have[k] = true;
+            }
+        }
+    }
+
+    /* 3: the mega health, which falls back to the large one. */
+    if (!have[3] && have[4]) {
+        snprintf(c->item_sound[3], sizeof(c->item_sound[3]),
+                 "%s", c->item_sound[4]);
+        have[3] = true;
+    }
+
+    /* 6 and 7: the two armour pickups. */
+    if (!have[6] || !have[7]) {
+        int donor = have[6] ? 6 : (have[7] ? 7 : -1);
+        if (donor >= 0) {
+            int k;
+            for (k = 6; k <= 7; k++) {
+                snprintf(c->item_sound[k], sizeof(c->item_sound[k]),
+                         "%s", c->item_sound[donor]);
+                have[k] = true;
+            }
+        }
+    }
+
+    /* ...and if neither armour sound exists, both become the generic pickup. */
+    if (!have[6] && have[0]) {
+        int k;
+        for (k = 6; k <= 7; k++) {
+            snprintf(c->item_sound[k], sizeof(c->item_sound[k]),
+                     "%s", c->item_sound[0]);
+            have[k] = true;
+        }
+    }
+
+    {
+        u32 patched = 0;
+        for (i = 0; i < Q2_CLIENT_ITEM_SOUNDS; i++)
+            if (t->sound[i][0] && strcmp(c->item_sound[i], t->sound[i]) != 0)
+                patched++;
+        if (patched)
+            Q2_INFO("item sounds: %u of %u substituted for this bank",
+                    patched, (u32)Q2_CLIENT_ITEM_SOUNDS);
+    }
+}
+
 static const char *client_ent_sound_name(const client *c, u32 which)
 {
     const q2_item_table *t = c->item_table_ready ? &c->item_table
@@ -6561,6 +6696,12 @@ static const char *client_ent_sound_name(const client *c, u32 which)
     case Q2_SND_DROWN:        return "pla_drown1";   /* 0x800B28E8 */
     default: break;
     }
+
+    /* The RESOLVED slot, which is the raw name unless this map's bank was
+     * missing it and the chain substituted a donor. See
+     * client_item_sounds_resolve. */
+    if (which < Q2_CLIENT_ITEM_SOUNDS && c->item_sound[which][0])
+        return c->item_sound[which];
 
     if (which < sizeof(t->sound) / sizeof(t->sound[0]))
         return t->sound[which];
@@ -7564,7 +7705,13 @@ static void client_film_tick(client *c, float dt)
 
 static void client_attract_tick(client *c)
 {
-    if (c->film_open || c->headless || c->credits_open || c->mcard_open)
+    u32 wait = c->attract_frames ? c->attract_frames : Q2_ATTRACT_IDLE_FRAMES;
+
+    if (c->film_open || c->credits_open || c->mcard_open)
+        return;
+    /* Headless waits for ever unless a run has asked for a number, which is
+     * what makes the reel reachable from a script at all. */
+    if (c->headless && !c->attract_frames)
         return;
 
     /*
@@ -7577,7 +7724,7 @@ static void client_attract_tick(client *c)
         return;
     }
 
-    if (++c->attract_idle < Q2_ATTRACT_IDLE_FRAMES)
+    if (++c->attract_idle < wait)
         return;
 
     c->attract_idle = 0;
@@ -8183,6 +8330,11 @@ static void client_draw_view(void *user, q2_screen *s, int p,
             inst.origin[2]     = m->pos[2];
             inst.yaw           = m->angles[2];
             inst.clut4_count_a = c->clut4_count_a;
+            /* The map's own page table, so a creature's faces reach the pages
+             * they ask for — and share the world's ABR promotions. Without it
+             * q2_tpage_model falls back to the canonical table, which is right
+             * but does not carry this frame's promotions. */
+            inst.tpage         = &c->render.tpage;
 
             q2_model_build_ot(&inst, &c->cam, ot, gte, &st);
             if (st.faces_emitted) {
@@ -8229,8 +8381,17 @@ static void client_draw_view(void *user, q2_screen *s, int p,
      * through its weapon-to-ammo map.
      */
     /* `icons_resident`, not `menu_font_ready`: the upload succeeds when any of
-     * the three images lands, and the status bar needs THIS one. */
-    if (c->icons_ready && c->menu_font_ready && c->menu_font.icons_resident) {
+     * the three images lands, and the status bar needs THIS one.
+     *
+     * And it goes away on the same screens the overlay does. The suppression
+     * rule below covered the crosshair and the HUD and not this, so the level
+     * tally was drawn over a live status bar — health, armour and the ammo
+     * counter sitting on top of a board that belongs to the overlay camera and
+     * draws one thing at a time. The pause menu is deliberately NOT in the
+     * list: the world, the bar and the gun stay visible behind it. */
+    if (c->icons_ready && c->menu_font_ready && c->menu_font.icons_resident &&
+        !c->mission_open && !c->endmis_open && !c->credits_open &&
+        !c->mcard_open) {
         const q2_inventory *inv = &c->sim[0].combat.inv;
         /* The LIVE weapon, which combat owns — 1-based, 0 for none. */
         int weapon = c->sim[0].combat.weapon_id;
@@ -8313,7 +8474,10 @@ static void client_draw_view(void *user, q2_screen *s, int p,
      * expression (FORMATS §9.12) — so it crouches when the view crouches without
      * anything here having to know that.
      */
-    if (c->vw_model_ready) {
+    /* Off on the overlay-camera screens, for the reason the status bar is —
+     * the gun was being drawn over the level tally. */
+    if (c->vw_model_ready && !c->mission_open && !c->endmis_open &&
+        !c->credits_open && !c->mcard_open) {
         q2_model_instance proto;
         q2_model_draw_stats mstats;
         s16 aim[3], kick[3];
@@ -8625,6 +8789,9 @@ static void client_frame(client *c)
          * window is installed once q2_screen_build has returned. */
         q2_mission_build_ot(&c->mission, &c->hud_font, &ctx, &pen,
                             &c->ot, 0);
+        /* And the press that leaves it, on the same bar the briefing and the
+         * placard use. See where the board is raised. */
+        q2_prompt_build_ot(&c->prompts, &c->menu_font, &c->ot, 1);
     }
 
     /*
@@ -8820,6 +8987,7 @@ static void usage(void)
     printf("  --movie NAME  play a film from Q2DATA/MOVIES and nothing else\n"
            "                (TAKE1BP.STX, OUTRO1P.STX, ROGUEINP.STX)\n");
     printf("  --new-game    press SINGLE PLAYER: the intro film, then level 1\n");
+    printf("  --attract N   idle frames on the title before the attract reel\n");
     printf("  --frames N    stop after N frames\n");
     printf("  --shot P.ppm  write the console's own framebuffer to P.ppm\n");
     printf("  --shot-every N  ...and one every N frames, numbered\n");
@@ -8908,6 +9076,14 @@ int main(int argc, char **argv)
          * of the title page rather than committing to it.
          */
         else if (!strcmp(argv[i], "--new-game"))              c.start_new_game = true;
+        /*
+         * `--attract N`: how many idle frames on the title screen before the
+         * reel starts, instead of the default thirty seconds. Also what makes
+         * it reachable headless at all — a capture that sat through the default
+         * wait would be capturing a film it did not ask for.
+         */
+        else if (!strcmp(argv[i], "--attract") && i + 1 < argc)
+            c.attract_frames = (u32)strtoul(argv[++i], NULL, 10);
         /* `--keys`: hand the player every key. A scripted run cannot go and
          * find one, and the records behind `ONKEYDO` are otherwise unreachable
          * in a sweep — which is the gate working, and also why what is behind
@@ -9439,6 +9615,28 @@ no_window:
     if (!c.music_table_ready)
         Q2_WARN("no music table for this build: the game will be silent");
 
+    /*
+     * `--map` takes a directory OR a level table display name.
+     *
+     * Not a convenience. The two cinematic screens are only reachable by
+     * display name: `Intro FMV` and `Extro FMV` are records 10 and 11 of the
+     * level table and BOTH are the directory `QFMV`, so a directory name cannot
+     * distinguish them — the name IS the selector, which is exactly how the
+     * module chooses between TAKE1BP and OUTRO1P. It is also how the engine
+     * itself names levels: MISCOMPLETE looks its destination up this way.
+     */
+    if (map_given && c.level_table_ready) {
+        const q2_level_entry *e = q2_level_find_display(&c.level_table, map);
+
+        if (e && !e->is_placeholder && e->directory[0] &&
+            !client_name_eq(map, e->directory)) {
+            snprintf(c.film_screen, sizeof(c.film_screen), "%s", map);
+            Q2_INFO("--map '%s' is the level table's %s", map, e->directory);
+            map = e->directory;
+            snprintf(c.first_map, sizeof(c.first_map), "%s", map);
+        }
+    }
+
     if (!client_load_zone(&c, map, zone_index)) {
         fprintf(stderr, "cannot load %s zone %d\n", map, zone_index);
         goto done;
@@ -9594,8 +9792,18 @@ no_window:
                         client_card_close(&c);
                     else if (c.mission_open)
                         c.mission_open = false;
-                    else if (!c.menu.open)
+                    else if (!c.menu.open) {
+                        /*
+                         * The pause page's KILLS/SECRETS row, which was dead
+                         * code: `q2_menu_set_stats` implements the disc's own
+                         * format string at 0x800AB30C and had no caller
+                         * anywhere in src/, so `m->status` was always empty and
+                         * menudraw's `if (m->status[0])` never fired. The
+                         * numbers are the ones the level tally already keeps.
+                         */
+                        client_menu_fill_stats(&c);
                         q2_menu_open(&c.menu);
+                    }
                     else if (c.menu.depth == 0)
                         q2_menu_close(&c.menu);
                     break;
@@ -9941,6 +10149,16 @@ no_window:
             c.mission_after_map = true;
             c.mission_frames    = 0;
             q2_menu_close(&c.menu);
+            /*
+             * AND SAY THAT IT CAN BE DISMISSED. The console's tally spins on a
+             * pad press with no timeout at all (0x80018214 latches the edge
+             * inside the loop) and draws a prompt to say so. This port had the
+             * press wired and no prompt, so the only way out of the board was
+             * to guess — which is the whole reason a 10-second timeout was
+             * invented for it. With the prompt up the timeout is headless-only,
+             * where there is nobody to press anything.
+             */
+            q2_prompt_show(&c.prompts, Q2_PROMPT_SELECT, 216);
         }
 
         /*
@@ -9964,18 +10182,22 @@ no_window:
         if (c.mission_after_map) {
             c.mission_frames++;
             /*
-             * RELEASES IN A WINDOW TOO. The `c.headless &&` guard meant an
-             * interactive player had to guess ESCAPE or a right-click to leave
-             * a screen nothing told them about — and until they did, the world
-             * behind it was running. With the freeze above that is no longer
-             * lethal, but a board with no visible way out is still a dead end.
+             * HEADLESS ONLY, now that the board says how to leave it.
              *
-             * The console leaves its tally on a pad press (0x80018214 latches
-             * the edge inside the spin loop); the timeout is the port's, and
-             * the press is wired below.
+             * The console's tally has NO timeout: 0x80018214 spins until a pad
+             * edge arrives, and it draws a prompt so the player knows to give
+             * it one. The port had the press wired and drew no prompt, so a
+             * windowed player faced a board with no visible way out — which is
+             * why a 10-second release was invented for it. The prompt is raised
+             * with the board now, so the invented release goes and the press is
+             * the only way out, exactly as on the console.
+             *
+             * A headless run still needs one: there is nobody to press
+             * anything, and without it every scripted run would stop at the
+             * first level boundary, which is precisely where the interesting
+             * part starts.
              */
-            if (c.mission_frames >= (c.headless ? Q2_INTERMISSION_HEADLESS
-                                                : Q2_INTERMISSION_WINDOW))
+            if (c.headless && c.mission_frames >= Q2_INTERMISSION_HEADLESS)
                 c.mission_open = false;
 
             if (!c.mission_open) {

@@ -109,12 +109,16 @@ u32 q2_prompt_build_ot(const q2_prompt_bar *b, const q2_menu_font *font,
          * with the same +4/+6. Code 0x2C — textured and modulated, unlike the
          * panel frame's raw 0x2D.
          *
-         * Inclusive corners, as everywhere else in this port (menufont.c).
+         * HALF-OPEN corners, as everywhere else in this port (menufont.c,
+         * panel.c). These carried the `- 1` that compensated for a rasteriser
+         * which filled both edges; raster.c implements the GPU's own fill rule
+         * now, so the far corner is the console's and the coverage comes out
+         * the same width it samples.
          */
-        x1 = r->x + (int)r->w - 1;
-        y1 = r->y + (int)r->h - 1;
-        u1 = (u8)(r->u + r->w - 1);
-        v1 = (u8)(r->v + r->h - 1);
+        x1 = r->x + (int)r->w;
+        y1 = r->y + (int)r->h;
+        u1 = (u8)(r->u + r->w);
+        v1 = (u8)(r->v + r->h);
 
         p->kind  = PSX_PRIM_FT4;
         p->tpage = font->tpage_item;   /* frontend.lbm */

@@ -127,7 +127,10 @@ static void emit_select_bar(psx_ot *ot, u32 bucket, int colour,
     int y1 = origin_y + cy - cell_h / 2 + cell_h + 1;
     int x0 = origin_x + view_x;
     int xm = x0 + half;
-    int x1 = x0 + view_w - 1;
+    /* Half-open, like every other far corner in the port: raster.c implements
+     * the GPU's fill rule, so the `- 1` that used to compensate for an
+     * inclusive edge test would now leave the bar a pixel short. */
+    int x1 = x0 + view_w;
     psx_prim *p;
     int i;
 
@@ -223,15 +226,17 @@ u32 q2_menu_draw_icon(const q2_menu_font *font, psx_ot *ot, u32 bucket,
     p->clut  = font->clut_text;
     p->textured_blend = true;
 
+    /* Half-open, as everywhere else — see menufont.c. The `- 1` here used to
+     * compensate for a rasteriser that filled both edges. */
     p->xy[0].x = (s16)x;             p->xy[0].y = (s16)y;
-    p->xy[1].x = (s16)(x + w - 1);   p->xy[1].y = (s16)y;
-    p->xy[2].x = (s16)(x + w - 1);   p->xy[2].y = (s16)(y + h - 1);
-    p->xy[3].x = (s16)x;             p->xy[3].y = (s16)(y + h - 1);
+    p->xy[1].x = (s16)(x + w);       p->xy[1].y = (s16)y;
+    p->xy[2].x = (s16)(x + w);       p->xy[2].y = (s16)(y + h);
+    p->xy[3].x = (s16)x;             p->xy[3].y = (s16)(y + h);
 
     p->uv[0].u = u;                  p->uv[0].v = v;
-    p->uv[1].u = (u8)(u + w - 1);    p->uv[1].v = v;
-    p->uv[2].u = (u8)(u + w - 1);    p->uv[2].v = (u8)(v + h - 1);
-    p->uv[3].u = u;                  p->uv[3].v = (u8)(v + h - 1);
+    p->uv[1].u = (u8)(u + w);        p->uv[1].v = v;
+    p->uv[2].u = (u8)(u + w);        p->uv[2].v = (u8)(v + h);
+    p->uv[3].u = u;                  p->uv[3].v = (u8)(v + h);
 
     for (i = 0; i < 4; i++) {
         p->rgb[i].r = Q2_MENU_MOD_NORMAL;
