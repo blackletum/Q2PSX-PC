@@ -98,8 +98,18 @@ static void test_raise_to_idle(void)
     q2_viewweapon vw;
     int t;
 
+    /*
+     * A fresh view model starts in LOWER, not RAISE — 0x8004F7A4 writes state
+     * 3 with total 1 and left 0, so the lower completes on the first tick and
+     * goes through the SWAP arm, which is what resolves the model. This check
+     * used to pin RAISE, citing 0x8004FA48; that address is the state after a
+     * swap, which is a different moment.
+     */
     q2_vw_init(&vw, &g_tab, 1);
-    CHECK(vw.state == Q2_VM_RAISE, "a fresh weapon starts in raise, got %s",
+    CHECK(vw.state == Q2_VM_LOWER, "a fresh weapon starts in lower, got %s",
+          q2_vm_state_name(vw.state));
+    q2_vw_advance(&vw, 10, false, Q2_VW_FIRE_NONE);
+    CHECK(vw.state == Q2_VM_RAISE, "and reaches raise on the first tick, got %s",
           q2_vm_state_name(vw.state));
     CHECK(vw.weapon == 1, "weapon %d", vw.weapon);
 
@@ -132,20 +142,49 @@ static void test_fire(void)
     q2_vw_advance(&vw, 10, true, Q2_VW_FIRED);
     CHECK(vw.state == Q2_VM_FIRE, "the trigger should enter fire, got %s",
           q2_vm_state_name(vw.state));
-    CHECK(vw.fire_latch, "the latch should be set while a shot is in flight");
 
-    /* Holding must NOT restart the clip every tick. */
-    for (i = 0; i < 200 && vw.state == Q2_VM_FIRE; i++) {
-        q2_vw_advance(&vw, 10, true, Q2_VW_FIRED);
-        if (q2_vw_take_event(&vw, &ev) && ev == 7)
-            got_event = true;
+    /*
+     * AND THE LATCH IS NOT SET. This check used to assert it was, on the
+     * reading that viewmodel+216 means "a shot is in flight". It is the DRY
+     * latch: inside the state machine the halfword is only ever cleared, and
+     * the two non-zero writes in the whole image (0x80050230, 0x800502FC) both
+     * follow a fire function returning 2.
+     *
+     * The cost of the misreading was visible rather than academic. The arm
+     * that clears the latch also raises `refire`, the caller turns that into
+     * the auto-switch pass, and a selection change plays a full LOWER then
+     * RAISE — so the gun dipped out of view and swung back in after every
+     * single shot.
+     */
+    CHECK(!vw.fire_latch, "a successful shot does not set the dry latch");
+
+    /*
+     * Holding must not restart the clip every tick. Counted rather than
+     * observed as a state change: once the clip ends the machine returns to
+     * IDLE and, with the trigger still down and the shot still reported, fires
+     * again on that same tick — so a loop watching for `state != FIRE` never
+     * sees it, which is what this check used to do.
+     */
+    {
+        u32 before = vw.fires_started;
+
+        for (i = 0; i < 200; i++) {
+            q2_vw_advance(&vw, 10, true, Q2_VW_FIRED);
+            if (q2_vw_take_event(&vw, &ev) && ev == 7)
+                got_event = true;
+        }
+        CHECK(vw.fires_started > before,
+              "the clip ended and the next shot started");
+        /* Strictly fewer than one per tick. The cadence itself is the fire
+         * clip's own length — three keys in this synthetic table, 110 ticks
+         * for the disc's real blaster — so the bound here only has to catch
+         * "restarted every tick", which is what the missing FIRE_NONE case
+         * and the mis-set latch each produced in their own way. */
+        CHECK(vw.fires_started - before < 100u,
+              "but not once per tick: got %u clips in 200 ticks",
+              (unsigned)(vw.fires_started - before));
     }
-    CHECK(i < 200, "the fire clip never ended while the trigger was held");
     CHECK(got_event, "the fire clip's event was never raised");
-
-    /* Releasing clears the latch so the next press fires again. */
-    q2_vw_advance(&vw, 10, false, Q2_VW_FIRED);
-    CHECK(!vw.fire_latch, "releasing the trigger should clear the latch");
 }
 
 static void test_fire_denied(void)

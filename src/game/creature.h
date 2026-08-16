@@ -94,6 +94,36 @@ typedef struct q2_cre_move {
     u32 addr;               /* module address of the record        */
     s32 first_frame;
     s32 last_frame;
+
+    /*
+     * TRUE for a range this decoder INVENTED by cutting a module mmove at the
+     * model's clip-name boundaries, rather than one the module declares.
+     *
+     * Both matter, and they are not the same thing. The clip pieces are what
+     * the animation census counts — summing a creature's distinct move lengths
+     * and tripling gives its model's total clip frames, which is how the
+     * move-to-clip correspondence was established in the first place. The
+     * module's own mmove records are what the AI INSTALLS, and their ranges and
+     * endfuncs are load-bearing: the Soldier's two attack moves are
+     * {first 0, last 11, endfunc soldier_run} at 0x80102E74 and
+     * {first 12, last 29, endfunc soldier_run} at 0x80102EBC, and its refire
+     * thinks jump to the absolute frames 1, 9, 15 and 27.
+     *
+     * Cutting the parents down to their first piece and clearing their
+     * endfuncs — which is what this decoder used to do — turned those into a
+     * ONE-frame and a THREE-frame move with no endfunc. q2_M_MoveFrame wraps a
+     * move with no endfunc back to its first frame forever, and every
+     * `nextframe` the refire chain asks for lands outside the piece and is
+     * discarded. A Soldier that decided to attack was frozen for the rest of
+     * the level, playing a dist-0 charge frame and never calling SV_movestep
+     * again. The Soldier ships on seven of the thirteen AI maps.
+     *
+     * So both live in the array — index-parallel, because crebind.c's
+     * chain_endfunc and the client's move-name lookup both walk it by index —
+     * and q2_cre_find_move skips the pieces, so only a real mmove is ever
+     * installed on a creature.
+     */
+    bool clip_piece;
     u32 frames_addr;
     u32 endfunc_addr;       /* 0 when the move loops               */
 

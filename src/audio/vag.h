@@ -65,6 +65,28 @@
 #ifndef Q2PSX_VAG_H
 #define Q2PSX_VAG_H
 
+/* ------------------------------------------------------------------------- */
+/* The SPU pitch modifier                                                     */
+/* ------------------------------------------------------------------------- */
+/*
+ * A voice's playback pitch is not simply its VAG header rate. The engine
+ * derives the SPU pitch from that rate and then scales it by a per-sound
+ * modifier over 32; the DEFAULT is 35, i.e. 1.09375, about one and a half
+ * semitones up.
+ *
+ * A player that ignores it runs every effect in the game 9.375% flat, which is
+ * audible as a general dullness rather than as any one wrong sound — which is
+ * why it survived a pass that fixed which sounds play and when.
+ *
+ * The per-sound values are NOT transcribed yet. Two things are known to differ
+ * from the default and are recorded here rather than guessed at in code: the
+ * weapon path draws a fresh modifier per shot from a small range, so no two
+ * shots are identical clips, and several named sounds carry their own fixed
+ * offsets. Until those are read, everything plays at the default.
+ */
+#define Q2_SFX_PITCH_UNITY    32
+#define Q2_SFX_PITCH_DEFAULT  35
+
 #include "disc.h"
 #include "q2psx.h"
 
@@ -133,7 +155,34 @@ typedef struct q2_spu_voice {
     s32       prev1;      /* the predictor's two-sample history        */
     s32       prev2;
     bool      done;       /* the End flag was seen, or the body ran out */
+
+    /*
+     * WHERE A LOOP GOES BACK TO — the block whose flags carry LoopStart, or
+     * block 0 when none does.
+     *
+     * On the SPU, End alone stops the voice and End|Repeat JUMPS to the loop
+     * address and carries on. The decoder used to stop on End regardless of
+     * Repeat, so all 118 of the disc's looping samples — the ambiences, the
+     * plasma burn, the spark loops, exactly the sustained ones — played once
+     * and were dropped.
+     *
+     * The predictor history is deliberately NOT reset across the loop point:
+     * the hardware carries prev1/prev2 through, and clearing them puts a click
+     * on every repeat.
+     */
+    u32       loop_off;
+    bool      looped;     /* it has wrapped at least once              */
 } q2_spu_voice;
+
+/*
+ * WHO STOPS A LOOPING VOICE. Nothing in this module does — that is the point
+ * of a loop — and the client has no per-entity ownership to hang one off yet.
+ * What bounds it today is the zone load: `client_voices_stop` silences every
+ * voice before the sound bank is freed, because a playing voice borrows the
+ * bank's buffer. So a looping ambience runs for the level and dies with it,
+ * which is right for an ambience and is NOT right for a loop a script means to
+ * stop early. Recorded rather than papered over with a timeout.
+ */
 
 /* Point a voice at a sample body. `adpcm` must outlive the voice — for a bank
  * sample that means the bank must not be freed while it is playing. */

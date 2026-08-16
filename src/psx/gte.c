@@ -431,17 +431,44 @@ static void gte_nc_light(gte_state *g, const gte_vec16 *v)
 }
 
 /* Stage 2: the colour matrix turns those three terms into RGB around the back
- * colour. BK is 1.19.12, hence the shift up to meet the 12-bit products. */
+ * colour. BK is 1.19.12, hence the shift up to meet the 12-bit products.
+ *
+ * THE INPUT VECTOR IS SNAPSHOTTED, and it has to be. `gte_set_ir` writes back
+ * into `g->ir`, so reading `g->ir[]` inside the loop meant iteration 0 replaced
+ * light 0's N-dot-L with the RED RESULT before iterations 1 and 2 had read it.
+ * Green was then `m[1][0] * red` instead of `m[1][0] * (N.L)`, i.e. scaled by a
+ * further colour/4096.
+ *
+ * It is a matrix multiply: all three rows read the same input. The hardware
+ * latches it; `gte_nc_depth_cue` below already snapshots for the same reason.
+ *
+ * What it looked like: with ONE light reaching a model — the common case, and
+ * true of BASE1's and BASE2's nearest Soldier — columns 1 and 2 of the colour
+ * matrix are zero, so the corrupted ir[0] is the only term green and blue have
+ * and the model comes out PURE RED. Measured against BASE2's actual light
+ * (slot colour 2250/1895/1235) at N.L = 0.5, this returned (140, 65, 42) where
+ * the answer is (140, 118, 77) — and 65/140 = 1895/4096, 42/140 = 1235/4096,
+ * the extra divide exactly. After the rasteriser's modulate and RGB555's
+ * truncation the body pixels were literally (16,0,0), (24,0,0), (32,0,0).
+ *
+ * With two or more lights the uncorrupted ir[1] term survives and the model
+ * looks nearly right, which is why this read as intermittent rather than as a
+ * systematic fault.
+ *
+ * `gte_ncs` has exactly one caller in the port — modeldraw.c's per-model light
+ * pass — so this was a model-rendering bug and touched nothing else.
+ */
 static void gte_nc_colour(gte_state *g)
 {
     const s32 bk[3] = { g->bk.x, g->bk.y, g->bk.z };
+    const s32 ir[3] = { g->ir[0], g->ir[1], g->ir[2] };
     int i;
 
     for (i = 0; i < 3; i++) {
         s64 acc = ((s64)bk[i] << Q2_FRAC_12)
-                + (s64)g->colour.m[i][0] * g->ir[0]
-                + (s64)g->colour.m[i][1] * g->ir[1]
-                + (s64)g->colour.m[i][2] * g->ir[2];
+                + (s64)g->colour.m[i][0] * ir[0]
+                + (s64)g->colour.m[i][1] * ir[1]
+                + (s64)g->colour.m[i][2] * ir[2];
         gte_set_mac(g, i, acc >> Q2_FRAC_12);
         gte_set_ir(g, i, g->mac[i], true);
     }

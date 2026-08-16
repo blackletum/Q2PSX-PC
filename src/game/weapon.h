@@ -322,11 +322,16 @@ void q2_rng_seed(q2_rng *r, u32 seed);
 /* 0..32767, the range every fire function assumes when it subtracts 16384. */
 s32  q2_rng_next(q2_rng *r);
 
-/* Where the shot leaves the player. `muzzle` comes from the weapon tables and
- * `eye` is the player's eye position; the offset is rotated by yaw and pitch
- * the way 0x8006FC1C does, then added. */
+/*
+ * Where the shot leaves the player.
+ *
+ * `muzzle` is the weapon table's triple and its middle component is DOWN, not
+ * up — see weapontables.h. `eye` is the player's eye. The offset is rotated by
+ * the camera's own matrix, transposed, so the point lands in the frame the
+ * picture is drawn in; the roll is included for the same reason.
+ */
 void q2_weapon_muzzle_origin(const s16 muzzle[3], const s32 eye[3],
-                             s32 yaw, s32 pitch, s32 out[3]);
+                             s32 yaw, s32 pitch, s32 roll, s32 out[3]);
 
 /*
  * One shot's worth of trace or projectile, produced by q2_weapon_fire.
@@ -377,7 +382,7 @@ typedef struct q2_fire_result_v2 {
 q2_fire_result_v2 q2_weapon_fire(q2_inventory *inv, q2_rng *rng,
                                  const q2_weapon_tables *tab,
                                  int weapon_id,
-                                 const s32 eye[3], s32 yaw, s32 pitch,
+                                 const s32 eye[3], s32 yaw, s32 pitch, s32 roll,
                                  const s16 aim[3],
                                  s32 now, s32 next_fire,
                                  bool quad, bool deathmatch,

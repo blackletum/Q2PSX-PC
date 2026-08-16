@@ -1176,11 +1176,17 @@ static void split_overlapping_moves(q2_creature *c)
                 cut = o->first_frame;
         }
 
-        if (cut > c->move[i].first_frame) {
-            c->move[i].last_frame  = cut - 1;
-            c->move[i].frame_count =
-                (u32)(cut - c->move[i].first_frame);
-        }
+        /*
+         * AND THIS ONE DOES NOT TRUNCATE EITHER, for the same reason.
+         *
+         * It used to cut a move short wherever another move started strictly
+         * inside it — the Tank Commander's 55..70 against its 65..70, which
+         * became 55..64. Both are module records with their own endfuncs, and
+         * an installer that asks for 55 wants the range the module gave it.
+         * The overlap is a property of the clip table, not an error in the
+         * mmove list.
+         */
+        (void)cut;
     }
 }
 
@@ -1233,6 +1239,7 @@ static void split_merged_moves(q2_creature *c, const u8 *image, size_t size)
                 continue;
 
             c->move[c->move_count] = c->move[i];
+            c->move[c->move_count].clip_piece  = true;
             c->move[c->move_count].first_frame = first;
             c->move[c->move_count].last_frame  = last;
             c->move[c->move_count].frame_index =
@@ -1249,28 +1256,19 @@ static void split_merged_moves(q2_creature *c, const u8 *image, size_t size)
             pieces++;
         }
 
-        /* If the table subdivided this move, the merged span is not a move.
-         * Shrink it to its first piece rather than deleting it, so nothing that
-         * already refers to index i changes meaning. */
-        if (pieces) {
-            s32 lo = c->move[i].last_frame;
-            u32 k;
-
-            /* The parent keeps the span up to the earliest piece that follows
-             * it — that span is its own named move. */
-            for (k = c->move_count - pieces; k < c->move_count; k++)
-                if (c->move[k].first_frame > c->move[i].first_frame &&
-                    c->move[k].first_frame - 1 < lo)
-                    lo = c->move[k].first_frame - 1;
-
-            if (lo < c->move[i].last_frame) {
-                c->move[i].last_frame  = lo;
-                c->move[i].frame_count =
-                    (u32)(lo - c->move[i].first_frame + 1);
-                c->move[i].endfunc_addr = 0;
-                c->move[i].endfunc_move = 0;
-            }
-        }
+        /*
+         * THE PARENT IS LEFT ALONE. It used to be shrunk to its first piece
+         * with its endfunc cleared, on the reading that "the merged span is not
+         * a move". It is: the module declares it, with a first frame, a last
+         * frame and an endfunc, and it is what the AI installs.
+         *
+         * The pieces are the MODEL's clip boundaries, which is a different
+         * fact about the same frames and is what the animation census needs.
+         * Both are kept; the pieces are flagged so q2_cre_find_move will not
+         * hand one to a creature. See q2_cre_move in creature.h for what
+         * shrinking the parents cost.
+         */
+        (void)pieces;
     }
 }
 

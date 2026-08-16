@@ -100,10 +100,27 @@
  * Muzzle offsets
  * ---------------------------------------------------------------------------
  * Each fire function loads three halfwords, negates the middle one, and hands
- * them to the local-to-world rotation at 0x8006FC1C. So the stored triple is
- * (right, down, forward) and the engine flips the middle to get up. They are
- * stored here already flipped, as (right, up, forward), because every consumer
- * wants that and reproducing the negation at each call site would be noise.
+ * them to the local-to-world rotation at 0x8006FC1C.
+ *
+ * THE ENGINE NEGATES IT TWICE. This block used to stop at the first negation
+ * and conclude "the stored triple is (right, down, forward) and the engine
+ * flips the middle to get up". The second one is at 0x8004C04C, a `subu` on
+ * the ROTATED Y as it is added to the origin, and it cancels the first — so
+ * the value reaches world space with its sign unchanged and the stored triple
+ * is (right, DOWN, forward).
+ *
+ * The values here are the disc's, unmodified. The consumer
+ * (q2_weapon_muzzle_origin) takes them as (right, down, forward) and rotates
+ * them by the camera matrix's transpose, whose row 1 is already the downward
+ * axis, so nothing negates anything.
+ *
+ * What the misreading cost: q2_weapon_muzzle_origin built an "up" vector by
+ * negating one component of the view matrix's row 1. That put every muzzle on
+ * the wrong side of the eye — 112 world units for the blaster, 280 for the
+ * hyperblaster — and, because only one of three components was flipped, left
+ * the basis non-orthonormal, so at a 45-degree pitch the vertical part of the
+ * offset was applied along FORWARD instead. The test pinned the inverted sign
+ * and only ever exercised pitch 0.
  *
  * At the established world scale of 10, the blaster's (80, 56, 250) is (8.0,
  * 5.6, 25.0) PC units against id's own (8, 8, viewheight-8) — the horizontal

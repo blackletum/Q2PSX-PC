@@ -169,6 +169,31 @@
 /* Two blocks: enough that a compaction always leaves room for the next one. */
 #define CLIENT_VOICE_BUF (SPU_SAMPLES_PER_BLOCK * 2)
 
+/*
+ * The constant-power pan table at 0x800A1F20 — 31 entries, one side of the
+ * curve. The near channel takes `pan[idx]` and the far one `pan[30 - idx]`,
+ * with idx 15 dead centre, which is why the middle nine entries are not flat:
+ * a source in front of the listener is not half in each ear.
+ */
+#define CLIENT_PAN_STEPS 31
+static const u8 k_pan[CLIENT_PAN_STEPS] = {
+    0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xF3,0xF3,
+    0xE6,0xE6,0xDA,0xDA,0xCD,0xB3,0xA7,0x9B,0x8F,0x83,
+    0x77,0x6B,0x5F,0x53,0x47,0x3C,0x30,0x23,0x17,0x0C,
+    0x00
+};
+
+/*
+ * A sound's own level before the slider, and the distance at which it reaches
+ * zero. `level = base * (reach - dist) / 4096`, so a source at the listener is
+ * three times its base and one at the reach is silent.
+ */
+#define CLIENT_SFX_BASE   63
+#define CLIENT_SFX_REACH  12288
+/* What a listener-local sound gets instead — the menu, the player's own weapon
+ * and footsteps, the HUD. Never attenuated, never panned. */
+#define CLIENT_SFX_LOCAL  254
+
 typedef struct client_voice {
     bool         active;
     q2_spu_voice dec;
@@ -177,6 +202,20 @@ typedef struct client_voice {
     u32          pos;                    /* 16.16 read cursor into `buf`  */
     u32          step;                   /* 16.16 advance per output frame */
     s32          vol;                    /* 0..127, latched at the start  */
+
+    /*
+     * WHERE IT IS, which nothing used to record — so a creature idling across
+     * the map, a door eight thousand units away and the shotgun in your hands
+     * were all mixed at identical level and dead centre. That is the single
+     * most audible departure from the console in the whole audio path.
+     */
+    bool         positional;
+    s32          pos_world[3];
+
+    /* Recomputed every frame from the listener, because a source moves and so
+     * does the listener; 0..255 each. */
+    s32          level;
+    s32          pan_l, pan_r;
 } client_voice;
 
 typedef struct client {
@@ -311,6 +350,27 @@ typedef struct client {
      * mission screen and the memory-card questions. */
     q2_briefing      briefing;
     bool             briefing_open;
+
+    /*
+     * THE OBJECTIVES POP-UP — the state machine around the same screen.
+     *
+     * `briefing_open` is the between-levels arrival briefing, raised by the
+     * zone load. This is the in-level one: HELPCOMPUTER raises it from a
+     * trigger volume and the pause menu's MISSION row raises it on demand, it
+     * holds the world while it is up, and it closes on its own deadline or on
+     * CROSS. See briefing.h — the composer was already here and everything
+     * around it was not.
+     *
+     * The two strings live on the pop-up rather than on `briefing` because
+     * they are GLOBAL on the console: two writers, one reader, never reset per
+     * level. A zone load rebuilds `briefing`; it must not rebuild these.
+     */
+    q2_briefing_popup popup;
+    bool             popup_cross_prev;
+    client_voice    *voice_last;   /* the voice client_play_sound just took */
+    u32              popup_raises;
+    u32              popup_opens;
+    s32              popup_at_frame;   /* --objectives N; 0 is off */
     q2_prompt_bar    prompts;
 
     /*
@@ -656,7 +716,6 @@ typedef struct client {
     bool              movers_ready;
     u32               mover_triggers;   /* items the script reached */
     u32               mover_moved;      /* ticks on which one moved */
-    u32               mover_touched;    /* opens raised by walking into one */
     bool              mission_after_map; /* the screen is holding a LOADMAP */
     u32               mission_frames;
     u32               briefing_frames;
@@ -1035,35 +1094,8 @@ static bool client_mover_blocked(u32 index, s32 step, void *user)
     return false;
 }
 
-/* The touch-opening doors. */
-static void client_movers_touch(client *c)
-{
-    s32 plo[3], phi[3];
-    u32 t;
-
-    if (!c->movers_ready || !c->sim[0].mover_count)
-        return;
-
-    client_player_box(c, plo, phi);
-
-    for (t = 0; t < c->sim[0].mover_count; t++) {
-        const q2_move_target *mt = &c->sim[0].volumes[t];
-        const q2_mover *m;
-
-        if (!mt->active || mt->id < 0 || (u32)mt->id >= c->movers.count)
-            continue;
-
-        m = &c->movers.movers[mt->id];
-        if (!m->touch_opens)
-            continue;
-
-        if (q2_move_box_overlap(plo, phi, mt->min, mt->max)) {
-            q2_mover_trigger(&c->movers, (u32)mt->id);
-            c->mover_touched++;
-        }
-    }
-}
 static bool client_play_sound(client *c, const char *want);
+static bool client_play_sound_at(client *c, const char *want, const s32 at[3]);
 static bool client_find_sound(client *c, const char *want, q2_vag *out);
 
 /* Defined with the mixer. The zone load calls this before it frees the bank a
@@ -1545,7 +1577,7 @@ static void client_cre_sound(q2_monster *m, int which, void *user)
         if (!client_find_sound(c, name, &vag))
             c->cre_sound_missing++;
         else
-            client_play_sound(c, name);
+            client_play_sound_at(c, name, m->pos);
     } else {
         c->cre_sound_unnamed++;
     }
@@ -2216,21 +2248,49 @@ static void client_event_call(void *user, const q2_event_item *item,
                 }
             }
 
-            if (call.prim == Q2_UF_HELPCOMPUTER && c->leveltext_ready) {
+            if (call.prim == Q2_UF_HELPCOMPUTER) {
+                const char *text[2] = { NULL, NULL };
+                u32 param = 0;
+                s32 delay;
                 int k;
 
+                /*
+                 * 0x80021250. The two keys go through the level's Strings and
+                 * miss to the shipped defaults; the third operand is the
+                 * DELAY, clamped UP to a minimum of 5 (`slti v0,s3,5` at
+                 * 0x8002136C); and the screen is then raised for 15 seconds.
+                 *
+                 * These used to be posted to the HUD's notification overlay,
+                 * which is where the port's own messages go — so the game's
+                 * orders scrolled past as two lines of chatter and the screen
+                 * that exists to hold them was never raised.
+                 */
                 for (k = 0; k < 2; k++) {
-                    const char *text;
-
                     if (!q2_uf_operand_name(&call, (u32)k, key) || !key[0])
                         continue;
-                    text = q2_leveltext_find(&c->leveltext, key);
-                    if (!text)
-                        continue;
-                    q2_hud_message(&c->hud, text);
-                    c->script_strings++;
-                    Q2_INFO("help computer: \"%s\"", text);
+                    if (c->leveltext_ready)
+                        text[k] = q2_leveltext_find(&c->leveltext, key);
+                    if (text[k])
+                        c->script_strings++;
                 }
+
+                q2_briefing_popup_set(&c->popup, text[0], text[1]);
+
+                (void)q2_uf_operand_u32(&call, 2, 0, &param);
+                delay = (s32)param;
+                if (delay < Q2_BRIEFING_DELAY_MIN)
+                    delay = Q2_BRIEFING_DELAY_MIN;
+
+                q2_briefing_popup_raise(&c->popup, delay,
+                                        Q2_BRIEFING_SECONDS,
+                                        c->sim[0].level_time,
+                                        c->sim[0].cur_dt);
+                c->popup_raises++;
+                /* The sound plays at the RAISE, not at the open (0x800213B0
+                 * calls it before it looks at the delay). */
+                client_play_sound(c, "msc_comp_up");
+                Q2_INFO("help computer: \"%s\" / \"%s\" in %d",
+                        c->popup.orders, c->popup.objective, (int)delay);
             }
         }
     }
@@ -2459,7 +2519,17 @@ static void client_event_call(void *user, const q2_event_item *item,
 
             if (call.prim == Q2_UF_SIMPLESOUND &&
                 q2_uf_operand_name(&call, 2, key) && key[0]) {
-                if (client_play_sound(c, key))
+                s32 at[3];
+                bool ok;
+
+                /* Its first operand is an absolute world position
+                 * (userfuncs.c), which is exactly what a positional voice
+                 * wants — and what the port used to throw away. */
+                if (q2_uf_operand_vec3(&call, 0, at))
+                    ok = client_play_sound_at(c, key, at);
+                else
+                    ok = client_play_sound(c, key);
+                if (ok)
                     c->script_sounds++;
             }
         }
@@ -3908,8 +3978,10 @@ static void client_voice_mix(client_voice *v, s16 *dst, u32 frames)
         s   = a + (((b - a) * (s32)(v->pos & 0xFFFF)) >> 16);
         s   = (s * v->vol) / 127;
 
-        l = dst[i * XA_CHANNELS]     + s;
-        r = dst[i * XA_CHANNELS + 1] + s;
+        /* Level and pan are the console's two per-voice bytes; both are 0..255
+         * so the pair is a 16-bit scale. */
+        l = dst[i * XA_CHANNELS]     + ((s * v->level * v->pan_l) >> 16);
+        r = dst[i * XA_CHANNELS + 1] + ((s * v->level * v->pan_r) >> 16);
         if (l >  32767) l =  32767;
         if (l < -32768) l = -32768;
         if (r >  32767) r =  32767;
@@ -4710,6 +4782,43 @@ static void client_input_simulated(client *c, float dt)
             client_bind_view_model(c);
 
         /*
+         * AND THE SHOTS THE FIRE-STATE DRIVER ASKED FOR.
+         *
+         * The four per-weapon arms of 0x8004FEE8 call the weapon's fire
+         * function themselves, once per animation frame or once per 30 units
+         * of accumulated step depending on the weapon — that is what makes a
+         * held chaingun a stream rather than one shot. They are drained here
+         * and turned into real shots against the sim.
+         *
+         * The sim's own refire gate still applies. For the four weapons that
+         * have an arm the console has no gate but the animation, so the two
+         * agree as long as the clip is slower than 30 ticks; where they do not,
+         * the gate wins and the shot is skipped, which is the conservative
+         * half. Weapon 6, the hand grenade, raises none of these — its arm is
+         * the cook, and the throw is the clip ending.
+         */
+        {
+            u32 n = q2_vw_take_frame_fires(&c->vw);
+            s16 snd;
+
+            while (n--) {
+                q2_sim_fire(&c->sim[0]);
+                c->player_attacks++;
+            }
+
+            /* And the clip's own sound at a band boundary — the chaingun's
+             * spin-up, loop and spin-down, three of the eleven weapon sounds
+             * the table names and nothing had ever played. */
+            snd = q2_vw_take_frame_sound(&c->vw);
+            if (snd >= 0 && (u32)snd < Q2_WT_SOUND_COUNT) {
+                const q2_weapon_tables *wt = q2_weapon_tables_builtin();
+
+                if (wt->sound[snd][0])
+                    client_play_sound(c, wt->sound[snd]);
+            }
+        }
+
+        /*
          * The machine's two outputs, neither of which anything had ever
          * drained. `q2_vw_take_refire`, `q2_vw_take_event` and
          * `q2_vw_wants_fire` were all declared, implemented and never called.
@@ -4873,8 +4982,23 @@ static void client_input_simulated(client *c, float dt)
      * rotator build failed silently stopped every door, every lift, and the
      * script's own deferred-timer clock along with them.
      */
-    {
-        s32 ticks = (s32)((double)dt * 300.0 + 0.5);
+    /*
+     * AND IT IS THE SIM'S CLOCK, not the frame's.
+     *
+     * These used to run every rendered frame on `dt * 300`, while the player's
+     * own move runs inside q2_sim_advance, which only steps once the
+     * accumulator reaches Q2_DT_NOMINAL. At 60 Hz that is every second or third
+     * frame, so a mover advanced two or three times between consecutive player
+     * moves — and `q2_move_target.dy`, which is the vertical motion the sweep
+     * makes the player RELATIVE TO, only ever carried the last slice of it.
+     * That is what a lift you cannot ride feels like, and it got worse the
+     * faster the machine.
+     *
+     * Running them on the tick the sim actually took makes the door, the script
+     * clock and the player agree on how much time has passed.
+     */
+    if (ticked) {
+        s32 ticks = c->sim[0].cur_dt;
         if (ticks < 1) ticks = 1;
 
         /* The rotating brushes. */
@@ -4894,6 +5018,16 @@ static void client_input_simulated(client *c, float dt)
          * is about to run has to see the door where it is NOW — 0x80051EC0 is
          * called from the mover's own per-frame handler for the same reason.
          */
+        /*
+         * The pop-up's own countdown. A HELPCOMPUTER is a DELAYED raise —
+         * 0x800213B0 arms `delay * frame_dt * 2` and 0x80021830 counts it down
+         * by the frame's dt — so this has to run while the world is running,
+         * which is exactly when the pop-up is NOT up.
+         */
+        if (q2_briefing_popup_tick(&c->popup, ticks, c->sim[0].level_time,
+                                   false, false))
+            c->popup_opens++;
+
         if (c->movers_ready) {
             client_mover_ctx bctx;
 
@@ -4906,11 +5040,21 @@ static void client_input_simulated(client *c, float dt)
             q2_sim_movers_update(&c->sim[0], &c->movers);
 
             /*
-             * And the 65 MOVER_A items whose +20 halfword says they open on
-             * TOUCH (mover.h). The field was decoded and had no reader, so
-             * those doors only ever opened from a script record.
+             * NO TOUCH PASS. `client_movers_touch` used to be called here, on
+             * the reading that MOVER_A's +20 halfword is "also opens on touch".
+             * It is not: 0x80025E98 tests it for > 0 and installs 0x8002F050 at
+             * object+0x24, and that handler subtracts an AMOUNT from it and
+             * opens only when it reaches zero. It is HIT POINTS. The five
+             * readers of object+0x24 (through 0x8002EF1C) all sit immediately
+             * after a TRACE and read the trace result's hit-box index — so the
+             * door opens by being SHOT, not by being walked into.
+             *
+             * Walking into the door's own leaf was also self-defeating: the
+             * same boxes are solid, so the only way to overlap one is to graze
+             * its edge, which is precisely the "takes some moving around"
+             * the report describes. The real mechanism is the trigger volume in
+             * front of the door, and that is fixed in update_triggers.
              */
-            client_movers_touch(c);
         }
     }
 
@@ -5430,7 +5574,8 @@ static void client_apply_input(client *c)
 static bool client_ui_open(const client *c)
 {
     return c->menu.open || c->mcard_open || c->mission_open ||
-           c->briefing_open || c->credits_open || c->film_open;
+           c->briefing_open || c->credits_open || c->film_open ||
+           c->popup.visible;
 }
 
 static void client_update_grab(client *c)
@@ -5544,11 +5689,24 @@ static void client_menu_requests(client *c)
         break;
     case Q2_MREQ_MISSION:
         /*
-         * The mission screen belongs to the HUD rather than the menu, and it
-         * draws into the overlay camera's context — so opening it is closing
-         * the menu and raising a flag the frame reads, not entering a page.
+         * THE PAUSE MENU'S MISSION ROW OPENS THE OBJECTIVES POP-UP, not the
+         * level-completion tally.
+         *
+         * 0x8002033C ends `jal 0x800213B0` with a0 = 1 and a1 = 15 — a raise
+         * with a one-frame delay and a fifteen-second deadline. FORMATS.md
+         * reads that call as "it leaves the menu with exit code 15"; it is not
+         * an exit code, it is the two arguments. The tally screen at
+         * 0x80021ADC has exactly one caller, 0x80018944, the level-end state,
+         * and the pause menu never reaches it.
+         *
+         * The tally is still reachable — that is what the unit boundary shows
+         * — but not from here.
          */
-        c->mission_open = true;
+        q2_briefing_popup_raise(&c->popup, Q2_BRIEFING_MENU_DELAY,
+                                Q2_BRIEFING_SECONDS,
+                                c->sim[0].level_time, c->sim[0].cur_dt);
+        c->popup_raises++;
+        client_play_sound(c, "msc_comp_up");
         q2_menu_close(&c->menu);
         break;
     default:
@@ -5698,12 +5856,136 @@ static bool client_play_sound(client *c, const char *want)
 
     memset(v, 0, sizeof(*v));
     q2_spu_voice_start(&v->dec, vag.body, vag.data_size);
-    v->step   = (u32)(((u64)rate << 16) / XA_SAMPLE_RATE);
+    /* Listener-local until a caller says otherwise; client_voices_update
+     * recomputes both the moment it has a position. */
+    v->level = CLIENT_SFX_LOCAL;
+    v->pan_l = 0xFF;
+    v->pan_r = 0xFF;
+    /*
+     * THE PITCH MODIFIER, which this played without.
+     *
+     * The console derives the SPU pitch from the VAG's header rate the same way
+     * and then multiplies by a per-sound modifier whose DEFAULT is 35/32 —
+     * 1.09375, about one and a half semitones. Playing at the bare header rate
+     * makes every effect in the game 9.375% flat.
+     *
+     * Q2_SFX_PITCH_DEFAULT is the default only. Individual sounds push their
+     * own, and the weapon path draws a fresh one per shot from a small range,
+     * which is what stops two shots being bit-identical clips — that per-sound
+     * table is not transcribed yet and is the remaining half of this.
+     */
+    v->step   = (u32)(((u64)rate * Q2_SFX_PITCH_DEFAULT << 16) /
+                      (Q2_SFX_PITCH_UNITY * (u64)XA_SAMPLE_RATE));
     v->vol    = vol;
     v->active = true;
     c->voice_started++;
+    c->voice_last = v;
 
     return true;
+}
+
+/*
+ * The same sound, but somewhere in the world.
+ *
+ * The console's own split: `0x80072E24` takes the listener-local arm when
+ * `0x800AE8B4` is set and the positional one otherwise, and everything the
+ * player themselves makes goes through the first. Here the caller says which,
+ * because the port has no equivalent global and the distinction is per sound
+ * rather than per state.
+ */
+static bool client_play_sound_at(client *c, const char *want, const s32 at[3])
+{
+    if (!client_play_sound(c, want))
+        return false;
+
+    if (c->voice_last && at) {
+        c->voice_last->positional  = true;
+        c->voice_last->pos_world[0] = at[0];
+        c->voice_last->pos_world[1] = at[1];
+        c->voice_last->pos_world[2] = at[2];
+    }
+    return true;
+}
+
+/*
+ * Attenuate and pan every live voice against where the listener is NOW.
+ *
+ * `level = 63 * (12288 - dist) / 4096` on the horizontal distance, and the pan
+ * index is the source's sideways offset in the camera's own basis over that
+ * distance, fifteen either side of centre. Both are recomputed every frame
+ * rather than latched at the start, because the console updates its voices per
+ * frame — which is what makes a rocket's flight sweep across the stereo field
+ * instead of being stamped where it was launched.
+ *
+ * With STEREO off the pan table is not consulted at all and both channels take
+ * half, which is the else-branch of the console's own CdMix.
+ */
+static void client_voices_update(client *c)
+{
+    s32 eye[3], fwd[3], right[3];
+    bool stereo = c->settings.v[Q2_SET_STEREO] != 0;
+    u32 i;
+
+    q2_sim_eye(&c->sim[0], eye);
+    {
+        s32 yaw = c->cam.yaw;
+        s32 sy = q2_sin12(yaw), cy = q2_cos12(yaw);
+
+        fwd[0]   =  sy; fwd[1]   = 0; fwd[2]   =  cy;
+        right[0] =  cy; right[1] = 0; right[2] = -sy;
+    }
+
+    for (i = 0; i < CLIENT_VOICES; i++) {
+        client_voice *v = &c->voice[i];
+        s32 d[3], along, side, dist, level, idx;
+
+        if (!v->active)
+            continue;
+
+        if (!v->positional) {
+            v->level = CLIENT_SFX_LOCAL;
+            v->pan_l = v->pan_r = stereo ? 0xFF : 0x80;
+            continue;
+        }
+
+        d[0] = v->pos_world[0] - eye[0];
+        d[1] = 0;                        /* horizontal only, as the console is */
+        d[2] = v->pos_world[2] - eye[2];
+
+        along = (s32)(((s64)d[0] * fwd[0]   + (s64)d[2] * fwd[2])   >> 12);
+        side  = (s32)(((s64)d[0] * right[0] + (s64)d[2] * right[2]) >> 12);
+
+        {
+            s64 len2 = (s64)along * along + (s64)side * side;
+            s64 lo = 0, hi = 0x7FFFFFFF, len = 0;
+
+            while (lo <= hi) {
+                s64 mid = lo + (hi - lo) / 2;
+                if (mid * mid <= len2) { len = mid; lo = mid + 1; }
+                else hi = mid - 1;
+            }
+            dist = (s32)(len > 0 ? len : 1);
+        }
+
+        level = (CLIENT_SFX_BASE * (CLIENT_SFX_REACH - dist)) / 4096;
+        if (level < 0)   level = 0;
+        if (level > 255) level = 255;
+        v->level = level;
+
+        if (!stereo) {
+            v->pan_l = v->pan_r = 0x80;
+            continue;
+        }
+
+        idx = 15 + (15 * side) / dist;
+        if (idx < 0)                  idx = 0;
+        if (idx >= CLIENT_PAN_STEPS)  idx = CLIENT_PAN_STEPS - 1;
+
+        /* The table is one side of the curve: the far channel reads it
+         * backwards, which is what makes the pair constant-power. */
+        v->pan_l = k_pan[idx];
+        v->pan_r = k_pan[CLIENT_PAN_STEPS - 1 - idx];
+    }
 }
 
 static void client_play_menu_sound(client *c, q2_menu_sound snd)
@@ -5880,8 +6162,31 @@ static void client_entity_events(client *c)
             continue;
 
         name = client_ent_sound_name(c, ev->e[i].sound);
-        if (name && !client_play_sound(c, name))
-            Q2_DEBUG("sound '%s' is not in %s's bank", name, c->map);
+        if (name) {
+            bool ok;
+
+            /*
+             * The PLAYER'S own are listener-local — footsteps, the landing
+             * thump, the pain grunts — and everything else is where the event
+             * says. That is the console's own split at 0x80072E24, made per
+             * sound because this port has no "a menu owns the frame" global to
+             * branch on.
+             */
+            if (ev->e[i].sound == Q2_SND_FOOTSTEP_A ||
+                ev->e[i].sound == Q2_SND_FOOTSTEP_B ||
+                ev->e[i].sound == Q2_SND_FOOTSTEP_WET ||
+                ev->e[i].sound == Q2_SND_LAND ||
+                ev->e[i].sound == Q2_SND_PAIN_25 ||
+                ev->e[i].sound == Q2_SND_PAIN_50 ||
+                ev->e[i].sound == Q2_SND_PAIN_75 ||
+                ev->e[i].sound == Q2_SND_PAIN_100)
+                ok = client_play_sound(c, name);
+            else
+                ok = client_play_sound_at(c, name, ev->e[i].pos);
+
+            if (!ok)
+                Q2_DEBUG("sound '%s' is not in %s's bank", name, c->map);
+        }
     }
 }
 
@@ -6528,9 +6833,9 @@ static void client_write_shot(client *c, bool numbered)
                 if (c->movers.movers[mi].sealed)                 sealed++;
             }
             Q2_INFO("  movers    %u built, %u triggered by the script, "
-                    "%u tick-moves, %u opened by touch",
+                    "%u tick-moves",
                     c->movers_ready ? c->movers.count : 0,
-                    c->mover_triggers, c->mover_moved, c->mover_touched);
+                    c->mover_triggers, c->mover_moved);
             Q2_INFO("  movers    %u part boxes solid, %u blocked now, "
                     "%u sealing their portal",
                     c->sim[0].mover_count, blocked, sealed);
@@ -6775,6 +7080,39 @@ static void client_film_blit(client *c)
             dst[bx] = (u16)(r | (g << 5) | (b << 10));
         }
     }
+}
+
+/*
+ * One frame with the objectives pop-up up.
+ *
+ * The world is held — see the caller — so all this does is advance the screen's
+ * own clock and read CROSS. The dismiss is an EDGE and the console arms it late
+ * (0x80021818 only sets the arm flag on a frame where CROSS is NOT held), so
+ * the press that raised the screen from the pause menu cannot also dismiss it.
+ */
+static void client_popup_frame(client *c, float dt)
+{
+    s32  ticks = (s32)((double)dt * 300.0 + 0.5);
+    bool cross;
+    u16  pad;
+
+    if (ticks < 1)
+        ticks = 1;
+
+    pad   = client_menu_pad(c);
+    cross = (pad & Q2_PAD_CROSS) != 0;
+
+    /*
+     * The level clock does not advance while the world is held, so the
+     * deadline is measured against a clock that has to keep moving on its own.
+     * The console gets this for free — 0x800AEBAC is advanced by the display
+     * loop, not by the game logic the menu flag skips.
+     */
+    c->sim[0].level_time += ticks;
+
+    (void)q2_briefing_popup_tick(&c->popup, ticks, c->sim[0].level_time,
+                                 cross, c->popup_cross_prev);
+    c->popup_cross_prev = cross;
 }
 
 static void client_menu_frame(client *c)
@@ -7666,6 +8004,34 @@ static void client_frame(client *c)
         q2_prompt_build_ot(&c->prompts, &c->menu_font, &c->ot, 1);
     }
 
+    /*
+     * THE OBJECTIVES POP-UP, on the same furniture — it is the same screen.
+     *
+     * The composer reads `q2_briefing`, so the pop-up's two global strings are
+     * copied in here rather than duplicated: the Location field stays the map's
+     * own, which is what the console shows, and the orders and objective are
+     * whatever the last HELPCOMPUTER left in the globals.
+     *
+     * Drawn last of the three so it is on top of an arrival briefing that has
+     * not been dismissed, which is the order the console's frame gives it
+     * (0x80038EDC runs the driver after the menu draw and suppresses that draw
+     * while the pop-up is up).
+     */
+    if (c->popup.visible && c->hud_font_ready && c->menu_font_ready) {
+        q2_briefing view = c->briefing;
+        q2_hud_ctx  ctx;
+        q2_hud_pen  pen;
+
+        q2_briefing_set_orders(&view, c->popup.orders);
+        q2_briefing_set_objective(&view, c->popup.objective);
+
+        q2_hud_ctx_centre_in(&ctx, c->width, c->height);
+        q2_hud_pen_default(&pen);
+        q2_briefing_build_ot(&view, &c->hud_font, &c->menu_font,
+                             &ctx, &pen, &c->ot, 2, 1, 0);
+        q2_prompt_build_ot(&c->prompts, &c->menu_font, &c->ot, 1);
+    }
+
     /* The prompts animate whether or not anything is showing them, which is
      * how they slide away when a screen closes (prompt.h). */
     q2_prompt_step(&c->prompts);
@@ -7881,6 +8247,13 @@ int main(int argc, char **argv)
          * in a sweep — which is the gate working, and also why what is behind
          * it goes unmeasured. */
         else if (!strcmp(argv[i], "--keys"))                  c.all_keys = true;
+        /*
+         * `--objectives N`: raise the objectives pop-up at frame N. The screen
+         * is normally reached from a trigger volume's HELPCOMPUTER or from the
+         * pause menu's MISSION row, and a headless run can walk into neither.
+         */
+        else if (!strcmp(argv[i], "--objectives") && i + 1 < argc)
+            c.popup_at_frame = (s32)strtol(argv[++i], NULL, 10);
         /* `--weapon N`: hold weapon slot N, fed. See the field's note. */
         else if (!strcmp(argv[i], "--weapon") && i + 1 < argc)
             c.give_weapon = (int)strtol(argv[++i], NULL, 10);
@@ -8195,6 +8568,10 @@ no_window:
     q2_mission_init(&c.mission);
     q2_briefing_init(&c.briefing);
     q2_prompt_init(&c.prompts);
+    /* ONCE per session, not per level: the two strings are global on the
+     * console and are never reset, so the game shows "Awaiting Orders." until
+     * its first HELPCOMPUTER and each one after that advances the pair. */
+    q2_briefing_popup_init(&c.popup);
 
     /*
      * The memory-card front end, with the port's file-backed save system behind
@@ -8756,6 +9133,17 @@ no_window:
                 q2_sim_scene_advance(&c.sim[0], (double)dt);
                 client_scene_lights(&c);
             }
+        } else if (c.popup.visible) {
+            /*
+             * THE OBJECTIVES POP-UP HOLDS THE WORLD, the same way the menu
+             * does and for the same reason: 0x800213B0 raises the engine's
+             * "a menu owns the frame" flag at 0x800AE8B4, and 0x800190C8
+             * branches the whole in-game logic block around it.
+             *
+             * Only the pop-up's own tick runs, so its deadline still counts
+             * down and CROSS can still dismiss it.
+             */
+            client_popup_frame(&c, dt);
         } else if (c.sim_enabled) {
             client_input_simulated(&c, dt);
         } else {
@@ -8916,6 +9304,14 @@ no_window:
          * inventory the same way it rebuilds the settings. */
         if (c.all_keys)
             c.sim[0].combat.inv.flags |= 0x0FFFu;
+        /* `--objectives N`: the raise the pause menu's MISSION row performs. */
+        if (c.popup_at_frame > 0 && (s32)c.frame_index == c.popup_at_frame) {
+            q2_briefing_popup_raise(&c.popup, Q2_BRIEFING_MENU_DELAY,
+                                    Q2_BRIEFING_SECONDS,
+                                    c.sim[0].level_time, c.sim[0].cur_dt);
+            c.popup_raises++;
+            Q2_INFO("--objectives: raised at frame %d", (int)c.frame_index);
+        }
         /* `--armour`: likewise re-asserted, and likewise only for observability.
          * The points are re-topped rather than latched so a run that takes
          * damage still exercises the armour arm to the end. */
@@ -9022,6 +9418,8 @@ no_window:
          * the film is one of the two beds it can draw from and a film that ends
          * this frame should not have a sector of it pulled afterwards.
          */
+        /* Where the listener is now, before the mix that uses it. */
+        client_voices_update(&c);
         client_audio_pump(&c);
 
         /*

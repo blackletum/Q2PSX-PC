@@ -245,11 +245,32 @@ u32 q2_spu_voice_block(q2_spu_voice *v, s16 *out)
 
     v->off = off + SPU_BLOCK_SIZE;
 
-    /* Stop on the end marker, AFTER emitting its block. Samples that simply run
-     * out without one are handled by the bound above, which is why the 176
-     * terminator-less one-shots do not overrun here. */
-    if (flags & SPU_FLAG_END)
-        v->done = true;
+    /*
+     * The LoopStart flag names where a repeat goes back to. Recorded as it is
+     * passed rather than scanned for, which is what the hardware does — the
+     * SPU latches the loop address when it decodes the block carrying the bit.
+     */
+    if (flags & SPU_FLAG_LOOP_START)
+        v->loop_off = off;
+
+    /*
+     * End marker, AFTER emitting its block. Samples that simply run out without
+     * one are handled by the bound above, which is why the 176 terminator-less
+     * one-shots do not overrun here.
+     *
+     * END ALONE STOPS; END|REPEAT LOOPS. This used to stop on End regardless of
+     * Repeat, so every looping sample on the disc played exactly once. The
+     * predictor history is carried across the jump, as the hardware carries it
+     * — resetting it clicks on every repeat.
+     */
+    if (flags & SPU_FLAG_END) {
+        if (flags & SPU_FLAG_REPEAT) {
+            v->off    = v->loop_off;
+            v->looped = true;
+        } else {
+            v->done = true;
+        }
+    }
 
     return SPU_SAMPLES_PER_BLOCK;
 }
@@ -270,6 +291,15 @@ u32 q2_spu_adpcm_decode(const u8 *adpcm, u32 size, s16 *out, u32 out_capacity)
         u32 take;
 
         if (n == 0)
+            break;
+
+        /*
+         * ONE PASS. This helper's contract is "decode this sample into a
+         * buffer", and a looping voice never reports done — so without this it
+         * would fill `out_capacity` with repeats of a two-second ambience. The
+         * VOICE path is the one that loops; see q2_spu_voice.looped.
+         */
+        if (v.looped)
             break;
 
         /* A capacity that ends mid-block keeps the samples that fit, which is

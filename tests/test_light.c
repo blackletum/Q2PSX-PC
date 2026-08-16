@@ -306,6 +306,62 @@ static void test_ncs(void)
     check_eq_i(g.rgb_fifo[2].r, 64, "an unlit vertex is the back colour");
 }
 
+/*
+ * A COLOURED light, dim enough not to saturate — the case the white-light check
+ * above cannot see.
+ *
+ * The colour stage is a matrix multiply and all three rows read the same input
+ * vector. `gte_set_ir` writes back into that vector, so a loop that reads
+ * `g->ir[]` as it goes feeds the RED result into the green and blue rows, and
+ * both come out scaled by a further colour/4096. With one light reaching a
+ * model the other two columns are zero, so the model goes pure red.
+ *
+ * The white-light check passes straight through it: at 255/255/255 both
+ * channels saturate at 255 in gte_colour_sat, so `r == g` holds while the
+ * underlying values are 428 and 358. Non-white and non-saturating is the only
+ * shape that catches it.
+ *
+ * The figures are BASE2 creature 0's real light — record 136, rgb 184/155/101,
+ * attenuated slot colour 2250/1895/1235 — at half deflection.
+ */
+static void test_ncs_coloured(void)
+{
+    gte_state g;
+    int i;
+
+    printf("NCS does not feed red into green and blue\n");
+
+    gte_init(&g);
+
+    /* One light along +Z at the magnitude q2_light_env_build produces (the
+     * normalised direction doubled), and its colour in column 0. */
+    for (i = 0; i < 3; i++) {
+        int k;
+        for (k = 0; k < 3; k++) {
+            g.light.m[i][k]  = 0;
+            g.colour.m[i][k] = 0;
+        }
+    }
+    g.light.m[0][2]  = 8192;
+    g.colour.m[0][0] = 2250;
+    g.colour.m[1][0] = 1895;
+    g.colour.m[2][0] = 1235;
+    gte_set_back_colour(&g, 0, 0, 0);
+
+    /* Half deflection, so nothing saturates. */
+    g.v[0].x = 0; g.v[0].y = 0; g.v[0].z = 2048;
+    gte_ncs(&g);
+
+    check_eq_i(g.rgb_fifo[2].r, 140, "red is the light's own red term");
+    check_eq_i(g.rgb_fifo[2].g, 118, "green is its GREEN term, not red again");
+    check_eq_i(g.rgb_fifo[2].b,  77, "and blue its blue term");
+
+    /* The signature of the aliasing, stated as a ratio so a future regression
+     * is recognisable: green would come out at green/4096 of red. */
+    check(g.rgb_fifo[2].g != (s32)(((s64)140 * 1895) >> 12),
+          "green is not red scaled by the green column");
+}
+
 /* ------------------------------------------------------------------------- */
 static void test_flare_styles(void)
 {
@@ -834,6 +890,7 @@ int main(void)
     test_env();
     test_normalise();
     test_ncs();
+    test_ncs_coloured();
     test_flare_styles();
     test_flare_geometry();
     test_glow_fade();

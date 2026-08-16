@@ -395,7 +395,9 @@ q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
 
     r = q2_weapon_fire(&sim->combat.inv, &sim->combat.rng, NULL,
                        sim->combat.weapon_id, eye,
-                       sim->player[sim->cur_player].yaw, sim->player[sim->cur_player].pitch, aim,
+                       sim->player[sim->cur_player].yaw,
+                       sim->player[sim->cur_player].pitch,
+                       sim->player[sim->cur_player].roll, aim,
                        sim->level_time, sim->combat.next_fire,
                        false, sim->combat.rules.deathmatch,
                        sim->combat.chaingun_bullets);
@@ -425,14 +427,21 @@ q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
 
         q2_weapon_muzzle_light(q2_rng_next(&sim->combat.rng), &inner, &outer);
         /*
-         * At the player ENTITY, not at the eye. The console passes
-         * `addiu a0, s3, 84` — player + 0x54, the entity origin — to the light
-         * appender, and `sim->player[].pos` is this port's name for it. Small
-         * and worth being right: the eye is 576 above the feet and the origin
-         * 286, so a muzzle flash lit the ceiling from nearly a foot too high.
+         * At the player ENTITY ORIGIN, not at the eye and not at the feet.
+         * The console passes `addiu a0, s3, 84` — player + 0x54.
+         *
+         * `sim->player[].pos` is the FEET (sim.h says so at the top of the
+         * file, and sim.c converts with q2_sim_origin_y everywhere it wants
+         * the entity). Passing it raw moved the flash from 290 above the
+         * origin to 286 below it — a correction in the right direction that
+         * overshot by the whole body.
          */
-        q2_ent_light_at(&sim->ent_world.events,
-                        sim->player[sim->cur_player].pos, flash, inner, outer);
+        s32 lit[3];
+
+        lit[0] = sim->player[sim->cur_player].pos[0];
+        lit[1] = q2_sim_origin_y(sim->player[sim->cur_player].pos[1]);
+        lit[2] = sim->player[sim->cur_player].pos[2];
+        q2_ent_light_at(&sim->ent_world.events, lit, flash, inner, outer);
     }
 
     sim->combat.next_fire = r.next_fire;

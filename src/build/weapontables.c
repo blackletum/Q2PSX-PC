@@ -186,10 +186,10 @@ q2_result q2_weapon_tables_load(q2_weapon_tables *out, const disc *d,
                 if (!q2_exe_s16(&out->exe, k_muzzle_addr[i] + 2 * (u32)k, &v[k]))
                     goto bad;
 
-            /* Every fire function negates the middle component on its way to
-             * the rotation, and world Y grows downward, so the value as stored
-             * is already the magnitude of the offset UPWARD. It is kept that
-             * way here and the negation is applied where the vector is built. */
+            /* Stored exactly as the disc holds them: (right, DOWN, forward).
+             * The fire function negates the middle component into the rotation
+             * and negates the rotated Y again coming out (0x8004C01C and
+             * 0x8004C04C), so the two cancel — see weapontables.h. */
             out->muzzle[i][0] = v[0];
             out->muzzle[i][1] = v[1];
             out->muzzle[i][2] = v[2];

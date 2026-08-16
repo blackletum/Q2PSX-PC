@@ -226,9 +226,23 @@ const q2_mmove *q2_cre_find_move(const q2_monster *m, s32 first_frame)
     if (!b)
         return NULL;
 
-    for (i = 0; i < b->move_count; i++)
+    /*
+     * SKIP THE CLIP PIECES. `b->move[]` carries both the module's own mmove
+     * records and the ranges the decoder cut out of them at the model's clip
+     * boundaries (creature.h). Only the first kind is a move a creature can be
+     * put into; a piece has no endfunc and a truncated range, and installing
+     * one freezes the creature.
+     *
+     * They stay in the array rather than being filtered out of it because
+     * `chain_endfunc` above and the client's move-name lookup both index
+     * `b->move[]` and `b->cre->move[]` in lockstep.
+     */
+    for (i = 0; i < b->move_count; i++) {
+        if (b->cre && i < b->cre->move_count && b->cre->move[i].clip_piece)
+            continue;
         if (b->move[i].first_frame == first_frame)
             return &b->move[i];
+    }
 
     return NULL;
 }

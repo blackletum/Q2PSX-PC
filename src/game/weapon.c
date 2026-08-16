@@ -234,10 +234,9 @@ int q2_weapon_autoselect(const q2_inventory *inv)
 /* Muzzle                                                                     */
 /* ------------------------------------------------------------------------- */
 void q2_weapon_muzzle_origin(const s16 muzzle[3], const s32 eye[3],
-                             s32 yaw, s32 pitch, s32 out[3])
+                             s32 yaw, s32 pitch, s32 roll, s32 out[3])
 {
-    s32 sy, cy, sp, cp;
-    s32 right[3], up[3], fwd[3];
+    s16 rot[3][3];
     int i;
 
     if (!out)
@@ -247,27 +246,45 @@ void q2_weapon_muzzle_origin(const s16 muzzle[3], const s32 eye[3],
         return;
     }
 
-    sy = q2_sin12(yaw);   cy = q2_cos12(yaw);
-    sp = q2_sin12(pitch); cp = q2_cos12(pitch);
-
-    /* Forward, right and up for this orientation, 1.3.12. World Y grows
-     * downward, which is why the up vector's Y is negative. */
-    fwd[0]   = (s32)(((s64)cp * sy) >> 12);
-    fwd[1]   = -sp;
-    fwd[2]   = (s32)(((s64)cp * cy) >> 12);
-
-    right[0] =  cy;
-    right[1] =  0;
-    right[2] = -sy;
-
-    up[0]    = (s32)(((s64)sp * sy) >> 12);
-    up[1]    = -cp;
-    up[2]    = (s32)(((s64)sp * cy) >> 12);
+    /*
+     * THE CAMERA'S OWN MATRIX, APPLIED AS ITS TRANSPOSE — the same three lines
+     * q2_vw_place already uses to put the weapon MODEL in the world, and that
+     * is the whole correctness argument: the shot has to leave from the point
+     * the picture draws the barrel at, and the picture is drawn with
+     * q2_rotation_view(cam->yaw, cam->pitch, cam->roll) (world.c, modeldraw.c).
+     * Applying that matrix's transpose is what makes the two agree.
+     *
+     * WHAT WAS HERE, and why 28 passing tests did not catch it. The basis was
+     * hand-rolled as right/up/fwd, and the `up` row was the view matrix's row 1
+     * with ONLY its middle component negated: (sp*sy, -cp, sp*cy) against the
+     * matrix's (sp*sy, +cp, sp*cy). Two things followed.
+     *
+     *   - The vertical offset went the wrong way. muzzle[1] is DOWN (see
+     *     weapontables.h), so the muzzle was placed ABOVE the eye instead of
+     *     below it: an error of 2*cos(pitch)*muzzle[1], which is 112 world
+     *     units for the blaster and 280 for the hyperblaster.
+     *   - Flipping one component of three left the basis NOT ORTHONORMAL.
+     *     dot(up, fwd) = 2*sin(p)*cos(p), so at a 45-degree pitch `up` and
+     *     `fwd` are the identical vector and the whole vertical part of the
+     *     offset is applied along forward instead.
+     *
+     * The test only ever exercised pitch 0 — the one pitch at which the
+     * hand-rolled basis happens to be orthonormal — and pinned the inverted
+     * sign as the expected answer.
+     *
+     * ON THE ROLL, precisely. This is NOT the console's composition: the
+     * transpose of q2_rotation_view(Y,P,R) is Ry(Y)Rx(P)Rz(-R), while the
+     * engine's fire matrix is Rz(-r)Ry(Y)Rx(P), and the roll factor does not
+     * commute across. It is the PORT'S camera composition, which is the frame
+     * the shot has to be in for it to line up with what is drawn. Claiming it
+     * reproduces 0x8004C024 under roll would be false.
+     */
+    q2_rotation_view(rot, yaw, pitch, roll);
 
     for (i = 0; i < 3; i++) {
-        s64 v = (s64)right[i] * muzzle[0]
-              + (s64)up[i]    * muzzle[1]
-              + (s64)fwd[i]   * muzzle[2];
+        s64 v = (s64)rot[0][i] * muzzle[0]
+              + (s64)rot[1][i] * muzzle[1]
+              + (s64)rot[2][i] * muzzle[2];
         out[i] = eye[i] + (s32)(v >> 12);
     }
 }
@@ -296,7 +313,7 @@ static s32 spread_draw(q2_rng *rng, int shift)
 q2_fire_result_v2 q2_weapon_fire(q2_inventory *inv, q2_rng *rng,
                                  const q2_weapon_tables *tab,
                                  int weapon_id,
-                                 const s32 eye[3], s32 yaw, s32 pitch,
+                                 const s32 eye[3], s32 yaw, s32 pitch, s32 roll,
                                  const s16 aim[3],
                                  s32 now, s32 next_fire,
                                  bool quad, bool deathmatch,
@@ -364,7 +381,8 @@ q2_fire_result_v2 q2_weapon_fire(q2_inventory *inv, q2_rng *rng,
     if (w->refire > 0)
         res.next_fire = now + w->refire;
 
-    q2_weapon_muzzle_origin(tab->muzzle[weapon_id], eye, yaw, pitch, origin);
+    q2_weapon_muzzle_origin(tab->muzzle[weapon_id], eye, yaw, pitch, roll,
+                            origin);
 
     /* View kick. */
     if (w->kick_random) {
@@ -481,10 +499,19 @@ q2_fire_result_v2 q2_weapon_fire(q2_inventory *inv, q2_rng *rng,
         /* The launcher ignores the aim vector: it rotates a fixed local
          * direction, up 2048 and forward 6144, by the view (0x8004CF40). */
         local[0] = 0;
-        local[1] = Q2_GRENADE_LAUNCH_UP;
+        /*
+         * NEGATED at the call site, and the constant left positive so it keeps
+         * matching the disc word at 0x800AE9F8. The launcher's local direction
+         * is (0, 2048, 6144) with the Y meaning UP, and q2_weapon_muzzle_origin
+         * now takes a (right, DOWN, forward) triple — the same convention the
+         * muzzle table uses. The console gets there the other way round: it
+         * rotates the constant unnegated and negates the rotated Y afterwards
+         * (0x8004CF94), with no pre-negation, which is the same result.
+         */
+        local[1] = -Q2_GRENADE_LAUNCH_UP;
         local[2] = Q2_GRENADE_LAUNCH_FORWARD;
         q2_weapon_muzzle_origin(local, (const s32[3]){ 0, 0, 0 },
-                                yaw, pitch, dir);
+                                yaw, pitch, roll, dir);
         memcpy(s->dir, dir, sizeof(s->dir));
         s->damage = damage;
 

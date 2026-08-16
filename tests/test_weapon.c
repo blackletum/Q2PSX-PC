@@ -144,7 +144,7 @@ static void test_firing(void)
 
     /* The blaster: a bolt, no ammo cost, damage 8. */
     give_all(&inv);
-    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_BLASTER, eye, 0, 0, aim,
+    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_BLASTER, eye, 0, 0, 0, aim,
                        0, 0, false, false, 0);
     check(r.fired, "the blaster fires");
     check_eq_i(r.kind, Q2_FK_BOLT, "as a bolt");
@@ -154,13 +154,13 @@ static void test_firing(void)
     check_eq_i(r.kick[0], -11, "with a kick of -11");
 
     /* Quad is a multiply at the fire site, and it is always four. */
-    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_BLASTER, eye, 0, 0, aim,
+    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_BLASTER, eye, 0, 0, 0, aim,
                        0, 0, true, false, 0);
     check_eq_i(r.shot[0].damage, 32, "quad makes it 32");
 
     /* The shotgun: five pellets at 6, one shell. */
     give_all(&inv);
-    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_SHOTGUN, eye, 0, 0, aim,
+    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_SHOTGUN, eye, 0, 0, 0, aim,
                        0, 0, false, false, 0);
     check_eq_i(r.shot_count, 5, "the shotgun throws five pellets");
     check_eq_i(r.shot[0].damage, 6, "at 6 each");
@@ -168,7 +168,7 @@ static void test_firing(void)
 
     /* The super shotgun: ten at 8, two shells, and twice the lateral spread. */
     give_all(&inv);
-    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_SUPER_SHOTGUN, eye, 0, 0, aim,
+    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_SUPER_SHOTGUN, eye, 0, 0, 0, aim,
                        0, 0, false, false, 0);
     check_eq_i(r.shot_count, 10, "the super shotgun throws ten");
     check_eq_i(r.shot[0].damage, 8, "at 8 each");
@@ -176,13 +176,13 @@ static void test_firing(void)
 
     /* The railgun: 100, or 150 in deathmatch. */
     give_all(&inv);
-    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_RAILGUN, eye, 0, 0, aim,
+    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_RAILGUN, eye, 0, 0, 0, aim,
                        0, 0, false, false, 0);
     check_eq_i(r.shot[0].damage, 100, "the railgun does 100");
     check_eq_i(r.kick[0], -34, "with the heaviest kick in the game");
 
     give_all(&inv);
-    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_RAILGUN, eye, 0, 0, aim,
+    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_RAILGUN, eye, 0, 0, 0, aim,
                        0, 0, false, true, 0);
     check_eq_i(r.shot[0].damage, 150, "and 150 in deathmatch");
 
@@ -195,7 +195,7 @@ static void test_firing(void)
         for (i = 0; i < 32; i++) {
             give_all(&inv);
             r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_ROCKET_LAUNCHER,
-                               eye, 0, 0, aim, 0, 0, false, false, 0);
+                               eye, 0, 0, 0, aim, 0, 0, false, false, 0);
             check_eq_i(r.shot[0].damage >= 100 && r.shot[0].damage < 120, 1,
                        "rocket damage stays in 100..119");
             if (i == 0) first = r.shot[0].damage;
@@ -207,14 +207,14 @@ static void test_firing(void)
     /* The BFG's fifty cells, and what happens with forty-nine. */
     give_all(&inv);
     inv.ammo[Q2_AMMO_CELLS] = 50;
-    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_BFG, eye, 0, 0, aim,
+    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_BFG, eye, 0, 0, 0, aim,
                        0, 0, false, false, 0);
     check(r.fired, "fifty cells fires the BFG");
     check_eq_i(inv.ammo[Q2_AMMO_CELLS], 0, "and spends all of them");
 
     give_all(&inv);
     inv.ammo[Q2_AMMO_CELLS] = 49;
-    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_BFG, eye, 0, 0, aim,
+    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_BFG, eye, 0, 0, 0, aim,
                        0, 0, false, false, 0);
     check(!r.fired, "forty-nine does not");
     check(r.dry, "and reports the dry click");
@@ -223,7 +223,7 @@ static void test_firing(void)
 
     /* The refire gate is checked before ammo, so a blocked shot is free. */
     give_all(&inv);
-    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_SHOTGUN, eye, 0, 0, aim,
+    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_SHOTGUN, eye, 0, 0, 0, aim,
                        10, 30, false, false, 0);
     check(!r.fired, "a shot inside the refire window is refused");
     check(!r.dry, "without claiming to be out of ammo");
@@ -231,20 +231,20 @@ static void test_firing(void)
 
     /* The hyperblaster sets no gate: its animation paces it. */
     give_all(&inv);
-    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_HYPERBLASTER, eye, 0, 0, aim,
+    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_HYPERBLASTER, eye, 0, 0, 0, aim,
                        100, 0, false, false, 0);
     check_eq_i(r.next_fire, 0, "the hyperblaster arms no refire gate");
     check_eq_i(r.shot[0].damage, 20, "and does 20 a bolt");
 
     /* The chaingun fires as many as its spin state says. */
     give_all(&inv);
-    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_CHAINGUN, eye, 0, 0, aim,
+    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_CHAINGUN, eye, 0, 0, 0, aim,
                        0, 0, false, false, 3);
     check_eq_i(r.shot_count, 3, "three bullets from a spun-up chaingun");
 
     /* Slot 0 is a call that returns. */
     give_all(&inv);
-    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_NONE, eye, 0, 0, aim,
+    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_NONE, eye, 0, 0, 0, aim,
                        0, 0, false, false, 0);
     check(!r.fired, "firing no weapon does nothing");
 }
@@ -258,17 +258,83 @@ static void test_muzzle(void)
 
     printf("muzzle\n");
 
-    /* Facing +Z with no pitch, the blaster's (80 right, 56 up, 250 forward)
-     * lands on the axes it names. World Y grows downward, so "up" subtracts. */
-    q2_weapon_muzzle_origin(t->muzzle[Q2_WID_BLASTER], eye, 0, 0, out);
+    /*
+     * Facing +Z with no pitch, the blaster's triple lands on the axes it names.
+     *
+     * THE MIDDLE COMPONENT IS DOWN. This check used to expect `2000 - 56` under
+     * the comment "56 up, which is -56 in world Y", and that expectation is
+     * where the misaligned muzzle came from. weapontables.h saw the fire
+     * function's `subu` on the way IN to the rotation and concluded the stored
+     * value was down-and-must-be-flipped; there is a second `subu` at
+     * 0x8004C04C on the rotated Y coming OUT, and the two cancel. The stored
+     * triple is (right, DOWN, forward) and it stays down.
+     */
+    q2_weapon_muzzle_origin(t->muzzle[Q2_WID_BLASTER], eye, 0, 0, 0, out);
     check_eq_i(out[0], 1000 + 80, "80 to the right");
-    check_eq_i(out[1], 2000 - 56, "56 up, which is -56 in world Y");
+    check_eq_i(out[1], 2000 + 56, "56 DOWN — the executable negates it twice");
     check_eq_i(out[2], 3000 + 250, "250 forward");
 
     /* Turned a quarter circle, right and forward trade places. */
-    q2_weapon_muzzle_origin(t->muzzle[Q2_WID_BLASTER], eye, 1024, 0, out);
+    q2_weapon_muzzle_origin(t->muzzle[Q2_WID_BLASTER], eye, 1024, 0, 0, out);
     check_eq_i(out[0], 1000 + 250, "forward is now +X");
     check_eq_i(out[2], 3000 - 80, "and right is -Z");
+
+    /*
+     * AND THE BASIS IS ORTHONORMAL AT EVERY PITCH, which is the half of the bug
+     * that pitch 0 could never show. The old hand-rolled basis negated one
+     * component of the up row, so dot(up, fwd) = 2 sin p cos p: at a 45-degree
+     * pitch `up` and `fwd` were the SAME vector and the vertical part of the
+     * offset was applied along forward.
+     *
+     * A rotation preserves length, so the offset's distance from the eye is the
+     * same at every angle. One unit of tolerance for the 1.3.12 rounding.
+     */
+    {
+        static const s32 k_pitch[4] = { 0, 512, 1024, -512 };
+        s64 len0 = 0;
+        int p;
+
+        for (p = 0; p < 4; p++) {
+            s64 dx, dy, dz, len;
+
+            q2_weapon_muzzle_origin(t->muzzle[Q2_WID_BLASTER], eye,
+                                    700, k_pitch[p], 0, out);
+            dx = out[0] - eye[0];
+            dy = out[1] - eye[1];
+            dz = out[2] - eye[2];
+            len = dx * dx + dy * dy + dz * dz;
+
+            if (p == 0)
+                len0 = len;
+            else
+                check(len > len0 - 4 * 4096 && len < len0 + 4 * 4096,
+                      "the muzzle offset keeps its length as the pitch turns");
+        }
+    }
+
+    /*
+     * A pure forward offset must land exactly where the aim points, because
+     * both are the same rotation applied to +Z. That is the property the shot
+     * and the drawn weapon have to share, and it is what fails when the two
+     * transforms differ.
+     */
+    {
+        s16 fwd_only[3] = { 0, 0, 4096 };
+        s32 a[3], b[3];
+
+        q2_weapon_muzzle_origin(fwd_only, eye, 700, 512, 0, a);
+        q2_weapon_muzzle_origin(fwd_only, eye, 700, 512, 0, b);
+        check(a[0] == b[0] && a[1] == b[1] && a[2] == b[2],
+              "the transform is a pure function of the angles");
+        /* +Z through a yaw-only rotation is (sin, 0, cos) — no vertical term
+         * at zero pitch, which the broken basis also satisfied, so pitch is
+         * where it has to be checked. */
+        q2_weapon_muzzle_origin(fwd_only, eye, 0, 1024, 0, a);
+        check_eq_i(a[1] - eye[1], -4096,
+                   "pitched a quarter circle, forward is straight up");
+        check(a[2] - eye[2] > -8 && a[2] - eye[2] < 8,
+              "and nothing is left along Z");
+    }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -288,14 +354,14 @@ static void test_projectiles(void)
     give_all(&inv);
 
     /* Hitscan produces no entity. */
-    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_SHOTGUN, eye, 0, 0, aim,
+    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_SHOTGUN, eye, 0, 0, 0, aim,
                        0, 0, false, false, 0);
     check_eq_i(q2_projectile_launch(&list, &r, 0, 0), -1,
                "a shotgun leaves nothing in the world");
 
     /* A rocket does, with the read splash radius. */
     give_all(&inv);
-    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_ROCKET_LAUNCHER, eye, 0, 0,
+    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_ROCKET_LAUNCHER, eye, 0, 0, 0,
                        aim, 0, 0, false, false, 0);
     idx = q2_projectile_launch(&list, &r, 0, 0);
     check(idx >= 0, "a rocket does");
@@ -333,7 +399,7 @@ static void test_projectiles(void)
         s32 blaster_idx, hyper_idx;
 
         give_all(&inv);
-        r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_BLASTER, eye, 0, 0, aim,
+        r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_BLASTER, eye, 0, 0, 0, aim,
                            0, 0, false, false, 0);
         blaster_idx = q2_projectile_launch(&list, &r, 0, 0);
         check(blaster_idx >= 0, "the blaster spawns a bolt");
@@ -343,7 +409,7 @@ static void test_projectiles(void)
                    "and no blast at all");
 
         give_all(&inv);
-        r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_HYPERBLASTER, eye, 0, 0,
+        r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_HYPERBLASTER, eye, 0, 0, 0,
                            aim, 0, 0, false, false, 0);
         hyper_idx = q2_projectile_launch(&list, &r, 0, 0);
         check(hyper_idx >= 0, "the hyperblaster spawns one too");
@@ -354,7 +420,7 @@ static void test_projectiles(void)
 
     /* A grenade is fused and falls. */
     give_all(&inv);
-    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_GRENADE_LAUNCHER, eye, 0, 0,
+    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_GRENADE_LAUNCHER, eye, 0, 0, 0,
                        aim, 0, 0, false, false, 0);
     idx = q2_projectile_launch(&list, &r, 0, 100);
     check(idx >= 0, "the launcher spawns a grenade");
@@ -394,7 +460,7 @@ static void test_projectiles(void)
 
         q2_projectiles_init(&l2);
         give_all(&inv);
-        r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_BLASTER, eye, 0, 0,
+        r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_BLASTER, eye, 0, 0, 0,
                            aim, 0, 0, false, false, 0);
         b = q2_projectile_launch(&l2, &r, 0, 0);
         check(b >= 0, "a bolt to measure");
@@ -429,7 +495,7 @@ static void test_projectiles(void)
 
         q2_projectiles_init(&l3);
         give_all(&inv);
-        r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_GRENADE_LAUNCHER, eye, 0, 0,
+        r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_GRENADE_LAUNCHER, eye, 0, 0, 0,
                            aim, 0, 0, false, false, 0);
         g = q2_projectile_launch(&l3, &r, 0, 0);
         check(g >= 0, "a grenade to measure");

@@ -565,13 +565,40 @@ bool q2_sim_take_zone_change(q2_sim *sim, u32 *out_zone)
  */
 static void update_triggers(q2_sim *sim)
 {
+    s32 at[3];
     u32 i;
 
     if (!sim->triggers_ready || !sim->events_ready)
         return;
 
+    /*
+     * THE SAMPLE POINT IS THE ENTITY ORIGIN, and this was the whole of "doors
+     * are stubborn, and take some moving around to eventually trigger".
+     *
+     * The engine has exactly one trigger dispatcher — 0x80027E64, reached only
+     * from 0x8003A29C with the player entity in a0 — and at 0x80027F0C it takes
+     * `addiu a1, fp, 84`, entity+0x54, and hands that ONE POINT to the
+     * point-in-box test at 0x80044098. entity+0x54 is the origin: 0x8003A308
+     * passes the same address to the find-cell routine, and the eye is built
+     * from it at 0x80038630 as `origin.y + 286 - viewOffset`.
+     *
+     * This tested `player.pos`, the FEET, which is 286 lower. TrigBounds boxes
+     * are authored around the body CENTRE, so their floor-side face sits 40 to
+     * 220 units above the floor — measured on BASE1, of 27 volumes a player can
+     * stand in, 26 contain the origin (with margins of 60 to 303 units) and
+     * only 11 contain the feet, every one of those by 1 to 17 units. Fifteen
+     * could not be entered at all. A door whose volume the player can only
+     * clip the corner of is a door that opens when you shuffle about.
+     *
+     * The port was already inconsistent with itself: `update_contents` queries
+     * the same volume set with `p->ent.pos`, the origin.
+     */
+    at[0] = sim->player[sim->cur_player].pos[0];
+    at[1] = q2_sim_origin_y(sim->player[sim->cur_player].pos[1]);
+    at[2] = sim->player[sim->cur_player].pos[2];
+
     for (i = 0; i < sim->triggers.count && i < sim->trigger_capacity; i++) {
-        bool inside = q2_trigger_contains(&sim->triggers, i, sim->player[sim->cur_player].pos);
+        bool inside = q2_trigger_contains(&sim->triggers, i, at);
         bool was    = sim->trigger_inside[i] != 0;
 
         sim->trigger_inside[i] = inside ? 1u : 0u;

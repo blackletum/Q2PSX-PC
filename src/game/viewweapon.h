@@ -97,6 +97,7 @@
 #include "modeldraw.h"
 #include "q2psx.h"
 #include "vmtables.h"
+#include "weapontables.h"   /* Q2_WSND_*: the chaingun arm names its own */
 #include "world.h"
 
 /* 0x8004ECEC — the switch countdown the LOWER state waits on. */
@@ -194,7 +195,61 @@ typedef struct q2_viewweapon {
      * several times higher, at whatever rate it happens to call `advance`.
      */
     u32         fires_started;
+
+    /* ---------------------------------------------------------------------
+     * The per-weapon FIRE-state driver's own state — 0x8004FEE8
+     * ------------------------------------------------------------------- */
+    /*
+     * A fifth thing the machine does that had no counterpart here at all.
+     * 0x8004FEE8 runs on EVERY substep of the key loop (called at 0x8004EF4C),
+     * is gated on `state == FIRE` (0x8004FF38), and then switches on the
+     * weapon id to drive the frame directly. Four weapons have an arm:
+     *
+     *   4  machinegun    while held, frame 2 wraps to 0 — a 3-key cycle
+     *   5  chaingun      while held, frame 17 wraps to 9 — the LOOP; on
+     *                    release from the loop it jumps to 27, the spin-down.
+     *                    Sounds at frames 0, 10 and 18 (up / loop / down) and
+     *                    a spin rate of 1, 2 or 3 by frame band.
+     *   9  hyperblaster  while held, frame 5 wraps to 1, skipping frame 6
+     *   6  hand grenade  the COOK: the frame is pinned at 1 and the key's
+     *                    remaining time grows, so it holds while primed
+     *
+     * Without it the chaingun played spin-up, loop and spin-down once and
+     * stopped, the machinegun played its three keys once, the hyperblaster did
+     * not hold, and a grenade could not be cooked.
+     */
+    s32         spin_accum;      /* +52: the shot accumulator, threshold 30  */
+    s32         spin_rate;       /* +44: 1, 2 or 3 by the chaingun's band    */
+    s32         last_fire_frame; /* +218: fire once per NEW frame            */
+    bool        cook;            /* the grenade is primed and held           */
+
+    /* The frame-driven shot the arms ask for, drained by the caller: on the
+     * console these arms `jalr` the fire function themselves. */
+    u32         frame_fires;
+
+    /*
+     * And the sound one of them asks for. The chaingun's arm plays a different
+     * clip at each band boundary — frame 0 spin-up, frame 10 the loop, frame 18
+     * spin-down (0x800B2B38 / 0x800B2B3C / 0x800B2B40) — and all three are in
+     * the weapon table and were never emitted by anything.
+     *
+     * -1 when nothing is pending; the caller drains it.
+     */
+    s16         frame_sound;
 } q2_viewweapon;
+
+/*
+ * Take the shot the FIRE-state driver asked for, if it asked for one.
+ *
+ * The four per-weapon arms call the weapon's fire function directly rather
+ * than going through the idle check, which is how a chaingun fires once per
+ * animation frame while its loop runs. A caller drains this and performs the
+ * shot; returns how many were asked for since the last drain.
+ */
+u32 q2_vw_take_frame_fires(q2_viewweapon *vw);
+
+/* The sound a frame boundary asked for, or -1. Drains it. */
+s16 q2_vw_take_frame_sound(q2_viewweapon *vw);
 
 /* ------------------------------------------------------------------------- */
 /* Lifecycle                                                                  */
