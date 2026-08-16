@@ -300,6 +300,19 @@ u32 q2_sim_attach_scene(q2_sim *sim, const q2_common_file *common,
         if (!e)
             continue;
 
+        /*
+         * RESOLVED FIRST, because resolving fills in the model's vertical bias
+         * and recomputes the draw origin from it (entitydraw.c) — and the
+         * builder below is entitled to overwrite that origin outright. With the
+         * resolve last, the logo was moved to pos + 286 - ext2 = -1111 instead
+         * of the module's own 0: still built into the table at 145 faces a
+         * frame, but 1111 units above the eye and therefore outside the
+         * module's five-light rig, so every vertex shaded black and the title
+         * screen came up empty.
+         */
+        if (bank)
+            q2_entity_resolve_model(e, bank);
+
         /* 0x8010C654..0x8010C66C, in that order. `q2_item_spawn` has already
          * set the draw origin from the place record; this is the builder
          * overwriting it, which is why the two do not have to agree. */
@@ -329,8 +342,6 @@ u32 q2_sim_attach_scene(q2_sim *sim, const q2_common_file *common,
                 e->taken[p] = true;
         }
 
-        if (bank)
-            q2_entity_resolve_model(e, bank);
         n++;
     }
 
