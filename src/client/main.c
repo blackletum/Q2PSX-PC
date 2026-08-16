@@ -2113,11 +2113,35 @@ static void client_music_for_level(client *c, bool force);
 /*
  * How long the title screen sits before the attract reel starts.
  *
- * A PORT CONSTANT, and the one number in the whole cinematic path that the disc
- * does not supply — the store QFRONT's module counts down is zero in the image
- * and nothing writes it (see `attract_idle`). Thirty seconds at 30 fps, which
- * is the usual length for the era and long enough that a player reading the
- * menu is not interrupted mid-thought.
+ * A PORT CONSTANT — and now known to be modelling the WRONG THING ENTIRELY.
+ *
+ * The note that used to sit here said the disc does not supply this number,
+ * because "the store QFRONT's module counts down is zero in the image and
+ * nothing writes it". There IS a writer, and the reason it was missed is that
+ * it sits in a DELAY SLOT eight instructions after its own `lui`:
+ *
+ *     80101E50  lui   v0, 0x8011
+ *     80101E54  addiu v1, zero, 150
+ *     80101E6C  jal   0x80103414
+ *     80101E70  sh    v1, 11664(v0)      ; -> 0x80112D90, in the delay slot
+ *
+ * so a scan that pairs a `lui` with a nearby load or store finds only the
+ * reader and the decrement in 0x80101CD0.
+ *
+ * But 150 is NOT an idle timeout. 0x80101E4C is called from the three SKILL
+ * handlers (0x8010D380 / 0x8010D3A8 / 0x8010D3D4, the EASY/MEDIUM/HARD menu
+ * records at module+0xEFE0/+0xEFF8/+0xF010): each stores the skill into
+ * engine+0x366 and then calls this, which arms the countdown, hides the five
+ * title objects, and installs 0x80101CD0 as the frame hook. That hook
+ * subtracts the per-tick dt and, when it goes negative, plays
+ * ROGUEINP.STX. So the reel is what runs after you CONFIRM A DIFFICULTY, and
+ * 150 is the short beat between the menu closing and the film starting —
+ * well under two seconds on any reading of the clock, not thirty.
+ *
+ * Changing 900 to 150 on its own would therefore make things worse: it would
+ * fire the reel a quarter of a second after the title screen appeared. The two
+ * belong together and are left together, so this stays an idle timeout until
+ * the reel is moved onto the skill handlers.
  *
  * Not applied in a headless run: a scripted capture that sat on the title
  * screen for thirty seconds would suddenly find itself inside a 98-second film,
@@ -10558,6 +10582,33 @@ no_window:
                                   "The campaign is over.");
                 c.endmis_open = true;
                 q2_prompt_show(&c.prompts, Q2_PROMPT_BACK, 216);
+            } else {
+                /*
+                 * A FILM THAT ENDS WITH NOWHERE TO GO GOES TO THE FRONT END,
+                 * because the alternative is a black screen with no way out.
+                 *
+                 * The Extro is the case that reaches here: the MISCOMPLETE arm
+                 * sets `film_screen` to "Extro FMV" and never sets
+                 * `film_next_map`, so when OUTRO1P runs out none of the three
+                 * branches above applies and the session simply stops on the
+                 * last frame. A player who finishes the campaign is left
+                 * looking at nothing.
+                 *
+                 * The console does not stop either: QFMV's extro handler
+                 * 0x80103DF8 waits four ticks and then writes 17 into the outer
+                 * state word (0x800B2E28), and the dispatcher at 0x800187F8
+                 * turns state 17 into a one-line setter and then state 6, which
+                 * RE-ENTERS the main loop. The intro's 0x80103DBC does the same
+                 * with state 6 directly. Handing the screen back is the shape of
+                 * both; which page it lands on is this port's choice and the
+                 * title is the only one that is always there.
+                 */
+                c.film_is_attract = false;
+                c.in_front_end    = true;
+                c.attract_idle    = 0;
+                q2_menu_open(&c.menu);
+                q2_menu_goto(&c.menu, Q2_PAGE_FRONT_TITLE);
+                Q2_INFO("movie: over with no destination — back to the front end");
             }
         }
 
