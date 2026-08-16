@@ -1168,8 +1168,35 @@ static bool client_mover_blocked(u32 index, s32 step, void *user)
         if (step > 0) hi[axis] += step;
         else          lo[axis] += step;
 
-        if (q2_move_box_overlap(plo, phi, lo, hi))
-            return true;
+        if (!q2_move_box_overlap(plo, phi, lo, hi))
+            continue;
+
+        /*
+         * A RIDER IS NOT AN OBSTRUCTION, and this is what broke the lifts.
+         *
+         * The test above is "does the player's box overlap the box this mover
+         * is about to sweep into", and a player STANDING ON a lift overlaps it
+         * by definition — the swept box grows along the axis it is travelling
+         * and the rider is sitting on that face. So every vertical mover with
+         * somebody on it reported blocked on its first step, went to
+         * Q2_MV_BLOCKED, and never moved: the start sound played and the
+         * platform stayed where it was.
+         *
+         * That surfaced when the invented `Q2_MV_BLK_IGNORE_OPENING` came off
+         * the CALL primitives. The flag was wrong — only MOVER_A has it — but
+         * it had been hiding this, because ignoring obstruction entirely also
+         * ignores the rider.
+         *
+         * The distinction the console gets from carrying the entity, this gets
+         * geometrically: +Y is down, so the player's FEET are `phi[1]` and the
+         * mover's TOP face is `mt->min[1]`. Feet at or above that face, within a
+         * step, means the player is standing ON the mover and is carried by it.
+         * Anything else — beside it, under it, embedded in it — still blocks.
+         */
+        if (phi[1] <= mt->min[1] + Q2_STEP_HEIGHT)
+            continue;
+
+        return true;
     }
 
     return false;
@@ -2445,23 +2472,24 @@ static void client_event_call(void *user, const q2_event_item *item,
                     delay = Q2_BRIEFING_DELAY_MIN;
 
                 /*
-                 * A HELPCOMPUTER THE PLAYER IS ALREADY STANDING IN opens at
-                 * once. BASE0's objective board is one: the spawn point is
-                 * inside the volume, so the call fires on the level's very
-                 * first tick, and waiting out its authored delay put the board
-                 * up a beat after the level had already appeared. On the
-                 * console it is up as the level arrives.
+                 * THE AUTHORED DELAY, INCLUDING AT SPAWN — and it is meant to
+                 * be felt.
                  *
-                 * `delay == 0` is the executable's own immediate-open arm
-                 * (0x8002146C -> 0x8002149C); choosing it HERE, for a call that
-                 * lands before the level has drawn a frame, is this port's, and
-                 * is stated as such. The other 25 HELPCOMPUTERs on the disc are
-                 * genuine reactions to walking into a volume mid-level and keep
-                 * the authored delay.
+                 * BASE0's board is raised by a HELPCOMPUTER whose volume
+                 * contains the spawn point, so the call fires on the level's
+                 * very first tick. This briefly forced `delay = 0` for that
+                 * case, which put the board up on frame 0 — and that is not
+                 * retail either: the console gives you just long enough to see
+                 * the blaster come up before the screen arrives. The operand is
+                 * the delay, and honouring it is what produces that beat.
+                 *
+                 * What was really wrong was the arithmetic, and that is fixed
+                 * elsewhere: `sim->cur_dt` is now assigned at the TOP of the
+                 * tick, so a trigger firing on the first tick no longer arms its
+                 * countdown with zero, and the raise no longer doubles the
+                 * operand (briefing.c). With those two right the authored
+                 * delay lands where the console puts it and needs no override.
                  */
-                if (!c->level_frames_drawn)
-                    delay = 0;
-
                 q2_briefing_popup_raise(&c->popup, delay,
                                         Q2_BRIEFING_SECONDS,
                                         c->sim[0].level_time,

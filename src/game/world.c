@@ -794,19 +794,47 @@ u32 q2_world_build_ot(const q2_world_zone *z,
                 depth[3]  = gte->sz[3];
 
                 /*
-                 * The one case that really has nothing to draw: EVERY corner at
-                 * or through the projection plane. This is gte_divide's own
-                 * condition (gte.c: `h >= sz3 * 2`), applied per corner rather
-                 * than to a sticky flag, so a quad with even one usable corner
-                 * is linked — which is what the two culling variants do. A zero
-                 * depth satisfies it trivially.
+                 * A CORNER THAT OVERFLOWED THE DIVIDE HAS NO USABLE SCREEN
+                 * POSITION, and the quad is rejected unless SUBDIVISION is
+                 * going to rescue it.
+                 *
+                 * This is the near-plane rule, and getting it wrong in either
+                 * direction is visible. Rejecting whenever ANY corner overflows
+                 * — the sticky-flag test that used to be here — throws away a
+                 * quarter of an ordinary view, and near geometry projects to
+                 * the frame's border, so the holes appear at the outskirts.
+                 * Keeping such a quad instead is worse: `gte_divide` clamps to
+                 * 0x1FFFF on overflow, so that corner comes back SATURATED, and
+                 * the quad is emitted stretched across the screen where it
+                 * paints over everything behind it. That reads as "distant
+                 * geometry is being culled" and is the opposite — it is near
+                 * geometry being smeared over the distance.
+                 *
+                 * The original resolves it by SUBDIVIDING (0x800AF7CC,
+                 * 0x800AFA2C): the 4x4 mesh's pieces each project sanely, so
+                 * there is nothing to reject. Where subdivision does not apply —
+                 * draw variant 1, which never subdivides, and variant 2's
+                 * untagged polygons — the quad really is undrawable and goes.
+                 * So the test is "any corner overflowed AND nothing is going to
+                 * subdivide this", which is the same predicate consulted below,
+                 * asked early.
                  */
-                if ((u32)cam->projection >= (u32)depth[0] * 2u &&
-                    (u32)cam->projection >= (u32)depth[1] * 2u &&
-                    (u32)cam->projection >= (u32)depth[2] * 2u &&
-                    (u32)cam->projection >= (u32)depth[3] * 2u) {
-                    if (stats) stats->quads_rejected_near++;
-                    continue;
+                {
+                    u32 h = (u32)cam->projection;
+                    bool over = (h >= (u32)depth[0] * 2u) ||
+                                (h >= (u32)depth[1] * 2u) ||
+                                (h >= (u32)depth[2] * 2u) ||
+                                (h >= (u32)depth[3] * 2u);
+
+                    if (over &&
+                        !(render->subdiv_threshold > 0 &&
+                          q2_surf_should_subdivide(variant, poly.clut,
+                                                   (s32)depth[1] + (s32)depth[3],
+                                                   render->subdiv_threshold,
+                                                   render->pressure))) {
+                        if (stats) stats->quads_rejected_near++;
+                        continue;
+                    }
                 }
 
                 /*
