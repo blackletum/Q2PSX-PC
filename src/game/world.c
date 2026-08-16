@@ -352,6 +352,17 @@ static u32 emit_subdivided(psx_ot *ot,
             if ((gx == 0 || gx == N) && (gy == 0 || gy == N)) {
                 int corner = (gy == 0) ? (gx == 0 ? 0 : 1)
                                        : (gx == 0 ? 3 : 2);
+
+                /*
+                 * ...but only if that corner PROJECTED. A corner whose divide
+                 * overflowed came back saturated at 0x1FFFF, and reusing it
+                 * would put a garbage vertex into the mesh — which is the whole
+                 * fault subdivision exists to avoid. Decline instead, and let
+                 * the caller drop the quad.
+                 */
+                if ((u32)cam->projection >= (u32)flat->depth[corner] * 2u)
+                    return 0;
+
                 grid_xy[gy][gx] = flat->screen[corner];
                 grid_z[gy][gx]  = flat->depth[corner];
                 continue;
@@ -936,10 +947,22 @@ u32 q2_world_build_ot(const q2_world_zone *z,
                  * depth the original tests is the sum of two opposite corners
                  * (0x800AF874), not the average of four, so use exactly that.
                  *
-                 * A grid point that fails to project falls back to the flat
-                 * quad rather than dropping the surface; the original cannot
-                 * reach that case because it never subdivides a quad the near
-                 * test already rejected.
+                 * A QUAD THAT ASKED FOR SUBDIVISION AND DID NOT GET IT IS
+                 * DROPPED, not drawn flat.
+                 *
+                 * `emit_subdivided` declines when a grid point — or a reused
+                 * corner — fails to project, and falling back to the flat quad
+                 * there is what put a screenful of enormous skewed polygons over
+                 * the view, HUD included: `gte_divide` clamps to 0x1FFFF on
+                 * overflow, so the flat quad's own corner is saturated and the
+                 * primitive is emitted stretched across the framebuffer.
+                 *
+                 * The original cannot reach that case at all, because it never
+                 * subdivides a quad its near test already rejected — so there is
+                 * no console behaviour to fall back TO. A quad that is near
+                 * enough to need the mesh and cannot be meshed has no drawable
+                 * form, and going is exactly what the near test would have done
+                 * with it.
                  */
                 if (render->subdiv_threshold > 0 &&
                     q2_surf_should_subdivide(variant, poly.clut,
@@ -952,8 +975,10 @@ u32 q2_world_build_ot(const q2_world_zone *z,
                     if (sub) {
                         emitted += sub;
                         if (stats) stats->quads_subdivided++;
-                        continue;
+                    } else if (stats) {
+                        stats->quads_rejected_near++;
                     }
+                    continue;
                 }
 
                 prim = emit_quad(ot, cam, render, &q, &poly, forced_bucket, stats);
