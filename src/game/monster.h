@@ -350,6 +350,26 @@ typedef struct q2_monster {
     void (*sight)(struct q2_monster *m, struct q2_monster *other);
                                                                /* +0x100 */
     bool (*checkattack)(struct q2_monster *m);                 /* +0x104 */
+
+    /*
+     * PAIN and DIE — entity+0xA0 and +0xA4, written by the Soldier's module at
+     * 0x80101684 and 0x80101690.
+     *
+     * These had no home at all, so `crebind`'s install list skipped slots 11
+     * and 12 and `soldier_pain` / `soldier_die` were dead code: damage reached
+     * a creature through `q2_actor_to_monster`, which sets health and a bool
+     * and calls nothing. No pain animation, no pain sound, no death sound, no
+     * random choice among the death moves.
+     *
+     * The original passes T_Damage's attacker, inflictor, damage and point to
+     * both. This port's implementations take only the entity — the same
+     * convention every other callback here uses — because nothing on the
+     * reconstructed side reads the rest yet. Stated rather than silently
+     * dropped: a `soldier_pain` that wanted the damage to pick pain4 would
+     * need the argument added here first.
+     */
+    void (*pain)(struct q2_monster *m);                        /* +0xA0 */
+    void (*die)(struct q2_monster *m);                         /* +0xA4 */
     /*
      * +0x108, with its threshold at +0x140. Not in the PC lineage: M_ChangeYaw
      * and SV_StepDirection both call it INSTEAD of turning when the turn they

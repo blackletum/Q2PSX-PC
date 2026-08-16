@@ -776,6 +776,12 @@ typedef struct client {
     u32               mover_moved;      /* ticks on which one moved */
     u32               mover_sounds;     /* transitions that made a noise */
     u32               rot_sounds;       /* ...and the hatches' own       */
+    /* The module's own pain/die callbacks, which had no caller until they had
+     * somewhere to be installed. `move_via_set` cannot see these: it only
+     * counts the GENERIC fallback dispatcher, so a creature with a real
+     * implementation reads zero there however often it is hurt. */
+    u32               cre_pain_calls;
+    u32               cre_die_calls;
     u32               breakable_opened; /* doors opened by being shot   */
     bool              mission_after_map; /* the screen is holding a LOADMAP */
     /*
@@ -5592,26 +5598,52 @@ static void client_input_simulated(client *c, float dt)
         for (i = 0; i < c->creatures.set.count; i++) {
             q2_monster *m    = &c->creatures.set.monsters[i];
             bool        was  = m->dead;
+            s16         hp   = m->health;
 
             q2_actor_to_monster(&c->cre_actor[i], m);
 
             /*
-             * The frame it died on. T_Damage ends by calling the entity's own
-             * `die` (entity+0xA4, 0x80062A9C); what can be reconstructed from
-             * the module's data rather than its code is the animation, so the
-             * body is put into its death move and left to play it out.
+             * T_Damage ends by calling the entity's own `pain` (+0xA0) or `die`
+             * (+0xA4) — 0x80062A9C for the latter — and this port had neither
+             * installed, so `soldier_pain` and `soldier_die` were dead code and
+             * damage only ever moved a number. Now that crebind installs them,
+             * this is the site that calls them: it is the one place that can
+             * see the health CROSS a threshold.
+             *
+             * The attacker is the sight client, which is where the player is;
+             * the port has no inflictor entity to hand over.
+             */
+            if (!was && m->dead) {
+                if (m->die) {
+                    m->die(m);
+                    c->cre_die_calls++;
+                }
+            } else if (!m->dead && m->health < hp && m->pain) {
+                m->pain(m);
+                c->cre_pain_calls++;
+            }
+
+            /*
+             * The frame it died on. What can be reconstructed from the module's
+             * data rather than its code is the animation, so a body whose own
+             * `die` did not choose a move is put into one and left to play it
+             * out — and it now STOPS there rather than looping, because
+             * M_MoveFrame raises the corpse bit when a dead creature's move
+             * runs out (monster.c).
              *
              * Without this a killed creature simply vanished — the tick and the
              * draw both skipped anything with `dead` set, so a Soldier shot
              * dead was gone on the frame it died.
              */
-            if (!was && m->dead) {
+            if (!was && m->dead && !m->currentmove) {
                 s32 f = q2_creature_world_death_frame(&c->creatures, m);
 
                 if (f >= 0 && q2_cre_set_move(m, f)) {
                     m->frame     = (s16)f;
                     c->cre_bodies++;
                 }
+            } else if (!was && m->dead) {
+                c->cre_bodies++;
             }
         }
     }
@@ -7606,6 +7638,10 @@ static void client_write_shot(client *c, bool numbered)
                 q2_ai_stats.checkattack_calls, q2_ai_stats.checkattack_blind,
                 q2_ai_stats.checkattack_decided, q2_ai_stats.checkattack_yes,
                 q2_ai_stats.attack_called, q2_ai_stats.attack_missing);
+
+        Q2_INFO("  callbacks %u pain, %u die (the module's own, not the "
+                "generic fallback below)",
+                c->cre_pain_calls, c->cre_die_calls);
 
         Q2_INFO("  moves     attack set %u / missing %u, melee %u / %u, "
                 "run %u / %u, pain %u, die %u, stand %u",

@@ -213,6 +213,17 @@ void q2_creature_spawn(q2_cre_bind *b, q2_monster *m, u32 class_index)
     if (b->impl->callback[9] && c->callback[9])
         m->checkattack = (bool (*)(q2_monster *))(void *)b->impl->callback[9];
 
+    /*
+     * Slots 11 and 12 — pain and die — which the install list simply did not
+     * cover, so both were dead code in every creature on the disc. The module
+     * writes them to entity+0xA0 and +0xA4 (the Soldier at 0x80101684 and
+     * 0x80101690), and they take extra arguments like sight does.
+     */
+    if (b->impl->callback[11] && c->callback[11])
+        m->pain = (void (*)(q2_monster *))(void *)b->impl->callback[11];
+    if (b->impl->callback[12] && c->callback[12])
+        m->die = (void (*)(q2_monster *))(void *)b->impl->callback[12];
+
     m->in_use      = true;
     m->spawnflags |= Q2_SVFLAG_INUSE;
     m->svflags    |= Q2_SVF_MONSTER;

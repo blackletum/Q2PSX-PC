@@ -283,6 +283,28 @@ void q2_M_MoveFrame(q2_monster *m)
                 move = m->currentmove;
                 if (!move || !move->frames)
                     return;
+            } else if (m->dead) {
+                /*
+                 * A CORPSE STOPS ON ITS LAST FRAME.
+                 *
+                 * Every death move on the Soldier carries the endfunc
+                 * module+0x20F0 — a three-store routine that zeroes entity+0x90,
+                 * rewrites entity+0x20's bits 18-21 and ORs 2 into svflags,
+                 * which is precisely the bit tested above. `resolve_endfunc`
+                 * can only bind an address that is one of the module's 13
+                 * callbacks or one of its think methods; 0x801020F0 is neither,
+                 * and it installs no move either, so `chain_endfunc` does not
+                 * apply. The endfunc resolved to NULL and the wrap below sent
+                 * the body back to the move's first frame — a corpse replaying
+                 * its own death for ever.
+                 *
+                 * Raising the same bit here reproduces what that routine does
+                 * to this module's own bail-out, for the one case the port can
+                 * identify without binding the address: the creature is dead
+                 * and its move has run out.
+                 */
+                m->svflags |= 0x2;
+                return;
             }
         }
 
