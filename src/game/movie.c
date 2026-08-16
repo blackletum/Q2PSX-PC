@@ -103,6 +103,41 @@ bool q2_movie_open(q2_movie *m, const disc *d, const char *path)
     return true;
 }
 
+u32 q2_movie_retail_length(const char *file)
+{
+    /*
+     * The three call sites, transcribed. Kept as a table rather than folded
+     * into the player because these are the MODULES' numbers and not this
+     * port's: a disc whose modules said something else would want a different
+     * row, and a film nobody's module names has no row at all.
+     */
+    static const struct { const char *file; u32 frames; } k_len[] = {
+        { "TAKE1BP.STX",  1281u },   /* QFMV,   "Intro FMV" */
+        { "OUTRO1P.STX",  1500u },   /* QFMV,   "Extro FMV" */
+        { "ROGUEINP.STX", 2457u }    /* QFRONT, the attract reel */
+    };
+    u32 i;
+
+    if (!file)
+        return 0;
+
+    for (i = 0; i < sizeof(k_len) / sizeof(k_len[0]); i++) {
+        const char *a = file, *b = k_len[i].file;
+
+        while (*a && *b) {
+            char ca = (*a >= 'a' && *a <= 'z') ? (char)(*a - 32) : *a;
+
+            if (ca != *b)
+                break;
+            a++; b++;
+        }
+        if (!*a && !*b)
+            return k_len[i].frames;
+    }
+
+    return 0;
+}
+
 bool q2_movie_advance(q2_movie *m, double dt, u8 *rgb)
 {
     double due;
@@ -146,6 +181,16 @@ bool q2_movie_advance(q2_movie *m, double dt, u8 *rgb)
         }
 
         m->cursor = m->window_base + (u32)local;
+
+        /*
+         * The console's stop point, checked exactly where it checks it: on the
+         * frame's own number, before the frame is decoded, so the frame that
+         * carries the limit is not shown (movie.h).
+         */
+        if (m->frame_limit && m->frame.number >= m->frame_limit) {
+            m->finished = true;
+            return false;
+        }
 
         if (!q2_stx_frame_decode(&m->frame, rgb, &blocks, &bits))
             continue;   /* a frame that will not decode is skipped, not fatal */

@@ -172,6 +172,20 @@ u32 q2_stx_code_bits(u32 i);
  * Defaults are 6 and 10.
  */
 void q2_stx_set_escape_layout(u32 run_bits, u32 level_bits);
+void q2_stx_get_escape_layout(u32 *run_bits, u32 *level_bits);
+
+/*
+ * The quantisation matrix and the zigzag, in the decoder's own storage.
+ *
+ * Exposed for the ENCODER, which has to invert precisely these — a second copy
+ * of a 64-entry table is a transcription waiting to drift, and a drift here
+ * does not crash anything: it produces a file that decodes to a slightly wrong
+ * picture, which is the hardest kind of wrong to notice. Both are 64 bytes;
+ * the quant table is in natural (raster) order and the zigzag maps a scan
+ * position to a natural index.
+ */
+const u8 *q2_stx_quant_table(void);
+const u8 *q2_stx_zigzag_table(void);
 
 /* Reset the failure counters, so a sweep scores each candidate on its own. */
 void q2_stx_reset_stats(void);

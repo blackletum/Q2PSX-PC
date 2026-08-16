@@ -396,7 +396,21 @@ typedef struct q2_menu {
     int                 screen_h;     /* 0x800B2DA2 — the title's y follows  */
 
     /* The death screen is inert until its countdown expires (0x8002052C). */
+    /*
+     * The death page's own countdown, in the LEVEL CLOCK's units — 300 to the
+     * second, the same units the mover scripting and the weapon refire use.
+     *
+     * 0x80020544 subtracts the frame's dt from it, so the console's 600 is two
+     * seconds. This port decremented it by ONE PER FRAME, which made it 600
+     * frames: twenty seconds at the headless 1/30 s step, and a different wait
+     * on every host frame rate.
+     */
     int                 arm_ticks;
+
+    /* The frame delta `q2_menu_advance` spends on `arm_ticks`, in those same
+     * units. Zero falls back to a nominal 30 Hz frame so a caller that does not
+     * set it still counts down in real time rather than stalling. */
+    s32                 frame_dt;
 
     /* Held-direction repeat gate for the slider sound (gp+184). */
     s32                 slide_repeat;

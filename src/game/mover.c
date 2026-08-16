@@ -22,6 +22,24 @@ static void mover_sound(q2_mover *m, s8 which)
     m->sound_pending = which;
 }
 
+/*
+ * Snapshot the authored timers, once the build has finished decoding them.
+ *
+ * Run at the end of a build rather than beside each of the fourteen places
+ * that write a timer, so a primitive added later cannot forget to do it.
+ */
+static void mover_arm_resets(q2_mover_set *set)
+{
+    u32 i;
+
+    if (!set)
+        return;
+    for (i = 0; i < set->count; i++) {
+        set->movers[i].delay_reset = set->movers[i].delay_timer;
+        set->movers[i].wait_reset  = set->movers[i].wait_timer;
+    }
+}
+
 s8 q2_mover_take_sound(q2_mover_set *set, u32 index)
 {
     s8 s;
@@ -249,6 +267,7 @@ q2_result q2_movers_build(q2_mover_set *out, const q2_events *events,
         }
     } while (q2_events_next_record(events, &rec, &rec));
 
+    mover_arm_resets(out);
     return Q2_OK;
 }
 
@@ -366,7 +385,15 @@ q2_result q2_movers_build_calls(q2_mover_set *out, const q2_events *events,
             m->axis        = 1;      /* all three of these are vertical */
             m->prim        = (u8)call.prim;
             m->item_offset = item.offset;
-            m->block_flags = Q2_MV_BLK_IGNORE_OPENING;
+            /*
+             * NO BLANKET "IGNORE OBSTRUCTION". This used to set
+             * Q2_MV_BLK_IGNORE_OPENING on every CALL primitive, which is
+             * MOVER_A's property and nobody else's: on the console a lift, a
+             * cage lift or a platform that touches the player STOPS, and here
+             * they pushed straight through whatever was in the way. Left at the
+             * zero `mover_push` already memsets, exactly as MOVER_B and MOVER_C
+             * are.
+             */
 
             switch (call.prim) {
             case Q2_UF_LIFT1:
@@ -459,10 +486,12 @@ q2_result q2_movers_build_calls(q2_mover_set *out, const q2_events *events,
                 m->node[0]    = q2_rd_s16(p + 8);
                 m->part_count = (m->node[0] >= 0) ? 1 : 0;
                 m->wait_timer = q2_rd_u16(p + 16);
-                /* A crusher does not stop for you: it is what a blocked mover
-                 * ignoring both directions is for. */
-                m->block_flags = Q2_MV_BLK_IGNORE_OPENING |
-                                 Q2_MV_BLK_IGNORE_CLOSING;
+                /*
+                 * "A crusher does not stop for you" was this port's reading,
+                 * not the console's: PISTON's constructor (0x8002D114) installs
+                 * no obstruction override, and only MOVER_A's arm sets one. It
+                 * stops like everything else.
+                 */
                 break;
 
             default:
@@ -510,6 +539,7 @@ q2_result q2_movers_build_calls(q2_mover_set *out, const q2_events *events,
         }
     } while (q2_events_next_record(events, &rec, &rec));
 
+    mover_arm_resets(out);
     return Q2_OK;
 }
 
@@ -549,10 +579,28 @@ void q2_mover_trigger(q2_mover_set *set, u32 index)
     m = &set->movers[index];
     m->triggered = 1;
 
-    /* A closing door reverses at once rather than waiting for the next tick;
-     * anything not fully shut ignores the trigger. */
-    if (m->state == Q2_MV_CLOSING)
+    /*
+     * 0x8002752C..0x800275CC, in that order.
+     *
+     * A closing door reverses at once rather than waiting for the next tick,
+     * and that arm does NOT re-arm the timers — a door caught on its way shut
+     * carries on with what it had. An IDLE one reloads both from the item's own
+     * bytes, and anything else (already opening, holding open, waiting out its
+     * delay) is left alone.
+     *
+     * THE RELOAD IS WHY THIS IS HERE. `delay_timer` and `wait_timer` are
+     * counted down destructively by the state machine, and they used to be
+     * written once at build time and never again — so a door's pre-open delay
+     * and its hold-open time were spent on the first use and every use after
+     * that was instant. That is the "movers don't feel like retail" report:
+     * the first trigger in a level behaves and none of the rest do.
+     */
+    if (m->state == Q2_MV_CLOSING) {
         m->state = Q2_MV_OPENING;
+    } else if (m->state == Q2_MV_IDLE) {
+        m->delay_timer = m->delay_reset;
+        m->wait_timer  = m->wait_reset;
+    }
 }
 
 /* ------------------------------------------------------------------------- */

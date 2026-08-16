@@ -1996,7 +1996,28 @@ static void update_pain(q2_sim *sim)
 
     hurt = (health < p->prev_health) || (armour < p->prev_armour);
 
-    if (hurt && sim->level_time > p->pain_time) {
+    /*
+     * THE KILLING TICK IS NOT A PAIN TICK.
+     *
+     * The death handler raises pla_death4 and jumps PAST the pain raise, so a
+     * player whose health has just crossed zero cries out once, in the voice
+     * for dying. This port ran the pain bracket unconditionally and the death
+     * sound did not exist at all, so a death sounded like a flesh wound —
+     * mal_pn25_1, because health under 25 is also health under 0.
+     *
+     * pla_drown1 takes its place when the client's air field says the player
+     * went under rather than being shot.
+     */
+    if (health <= 0) {
+        if (p->prev_health > 0) {
+            q2_ent_sound_at(&sim->ent_world.events,
+                            (p->ent.flags & Q2_ENT_UNDERWATER)
+                                ? Q2_SND_DROWN : Q2_SND_DEATH,
+                            p->pos);
+            /* The camera builder's own gate — see Q2_ENT2_DEAD. */
+            p->ent2_flags |= Q2_ENT2_DEAD;
+        }
+    } else if (hurt && sim->level_time > p->pain_time) {
         q2_ent_sound which;
 
         /* 0x8003AF54: four brackets on the health that is LEFT, so the voice

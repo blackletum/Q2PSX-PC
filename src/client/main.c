@@ -669,6 +669,59 @@ typedef struct client {
     u32               film_frames;
     const char       *film_arg;        /* --movie NAME: play it and stop */
 
+    /*
+     * ---------------------------------------------------------------------
+     * QFMV: the level that IS a cinematic
+     * ---------------------------------------------------------------------
+     * The level table's records 10 and 11 are `Intro FMV` and `Extro FMV` and
+     * BOTH resolve to the directory `QFMV` — 45 KB with no geometry, no font
+     * and no icon sheet. Loading it is not loading a level; it is asking the
+     * shared module to play a film, and WHICH film is chosen by the display
+     * name the level was entered under, which the module compares against its
+     * own table (levelbin.h) before calling the player:
+     *
+     *     if (!strcmp(screen, "Intro FMV")) play("TAKE1BP.STX", 1281, ...)
+     *     if (!strcmp(screen, "Extro FMV")) play("OUTRO1P.STX", 1500, ...)
+     *
+     * So the screen name has to survive the map change, which is what this is:
+     * `film_screen` is the name QFMV was entered under, and `film_next_map` is
+     * where to go when the film is over — because a cinematic is a step on the
+     * way somewhere and not a destination.
+     */
+    char              film_screen[16];
+    char              film_next_map[64];
+    bool              film_is_attract;  /* the title screen's own reel     */
+
+    /*
+     * ---------------------------------------------------------------------
+     * The attract reel
+     * ---------------------------------------------------------------------
+     * `ROGUEINP.STX` is the third film on the disc — 28.8 MB, 2,459 frames,
+     * the fleet approaching the Strogg homeworld — and it is named by NO
+     * movie-table record, because the table's filename field is twelve bytes
+     * and "ROGUEINP.STX" needs thirteen with its terminator. It is named
+     * directly, as a literal at QFRONT's module+0xDC4, by the front end:
+     *
+     *     80101CF4  lhu  v0, 0x2D90(a0)      ; the idle store
+     *     80101CF8  lhu  v1, 0(v1)           ; the frame delta
+     *     80101D00  subu v0, v0, v1
+     *     80101D0C  bgez v0, +0x128          ; still counting: do nothing
+     *     ...
+     *     80101D34  addiu a0, a0, 0xDC4      ; "ROGUEINP.STX"
+     *     80101D38  addiu a1, zero, 2457
+     *     80101D4C  jal   0x8010B2EC         ; play it
+     *
+     * — the title screen idling into the intro reel, which is what a PlayStation
+     * front end does. THE THRESHOLD IS NOT RECOVERABLE. The store at
+     * module+0x12D90 is zero in the module image and those two instructions are
+     * its only reader and its only writer anywhere in the 118 KB module, so the
+     * disc does not say how long the title screen waits. The count below is
+     * therefore THIS PORT'S, and is marked as such rather than presented as
+     * read; everything else about the reel — that it exists, which file, how
+     * many frames, and that a press cancels it — is the module's.
+     */
+    u32               attract_idle;     /* frames the title has sat idle   */
+
     /* The map's own mission-event namespace, out of its LevelBin. */
     q2_levelbin_misevent misevent[32];
     u32               misevent_count;
@@ -689,6 +742,7 @@ typedef struct client {
     bool              shoot;       /* --shoot: hold fire              */
     long              save_load_at; /* --save-load N                  */
     bool              show_credits; /* --credits                      */
+    bool              start_new_game; /* --new-game                   */
     bool              all_keys;    /* --keys: every key in the pocket */
 
     /*
@@ -726,6 +780,13 @@ typedef struct client {
      * point". The objective board uses it — see the HELPCOMPUTER arm.
      */
     bool              level_frames_drawn;
+
+    /*
+     * How many creatures this ZONE placed, fixed when the map loads. The kill
+     * tally's denominator — see client_mission_record for why it cannot be
+     * recomputed from the live set.
+     */
+    u32               cre_in_zone;
 
     u32               mission_frames;
     u32               briefing_frames;
@@ -1195,6 +1256,9 @@ static void client_load_creatures(client *c, const s32 eye[3])
      * twenty, standing in ZONE1's rooms while ZONE0 is loaded, thinking and
      * being drawn and shootable through the void.
      */
+    /* Everything the map placed, until the zone test says otherwise. */
+    c->cre_in_zone = c->creatures.set.count;
+
     if (c->sim[0].coll_primary_ready) {
         u32 elsewhere = 0;
         for (i = 0; i < c->creatures.set.count; i++) {
@@ -1207,6 +1271,16 @@ static void client_load_creatures(client *c, const s32 eye[3])
         if (elsewhere)
             Q2_INFO("creatures: %u of %u belong to another zone",
                     elsewhere, c->creatures.set.count);
+        /*
+         * THE KILL TOTAL IS FIXED AT LOAD, and this is the only place that can
+         * fix it. Both this test and the CREBATCH hold below clear `in_use`, so
+         * by the time the tally is drawn the two are indistinguishable — and
+         * counting live creatures there made the denominator "creatures woken
+         * so far", which climbs as the player springs each ambush. A level with
+         * 22 records and 13 in another zone has 9 kills to get, whether or not
+         * the player ever triggers the batch that holds five of them.
+         */
+        c->cre_in_zone = c->creatures.set.count - elsewhere;
     }
 
     /*
@@ -1966,6 +2040,27 @@ static void client_music_for_level(client *c, bool force);
 #define Q2_INTERMISSION_WINDOW   300
 
 /*
+ * How long the title screen sits before the attract reel starts.
+ *
+ * A PORT CONSTANT, and the one number in the whole cinematic path that the disc
+ * does not supply — the store QFRONT's module counts down is zero in the image
+ * and nothing writes it (see `attract_idle`). Thirty seconds at 30 fps, which
+ * is the usual length for the era and long enough that a player reading the
+ * menu is not interrupted mid-thought.
+ *
+ * Not applied in a headless run: a scripted capture that sat on the title
+ * screen for thirty seconds would suddenly find itself inside a 98-second film,
+ * which is a surprising thing for a shot of the front end to contain.
+ */
+#define Q2_ATTRACT_IDLE_FRAMES   900
+
+/*
+ * The last unit on this disc. A MISCOMPLETE here ends the GAME — the outer
+ * state machine's answer 5, which loads `Extro FMV` — rather than the mission.
+ */
+#define Q2_LAST_UNIT             5
+
+/*
  * Write the level that is ending into the mission table.
  *
  * One row per level of the unit, six of them, and a row whose name is empty is
@@ -1985,15 +2080,17 @@ static void client_mission_record(client *c)
         for (i = 0; i < c->creatures.set.count; i++) {
             const q2_monster *m = &c->creatures.set.monsters[i];
 
-            /* Only the ones this zone actually made live: a creature filtered
-             * out as belonging to another zone was never killable here and
-             * must not inflate the denominator. */
-            if (!m->in_use && !m->dead)
-                continue;
-            placed++;
             if (m->dead)
                 dead++;
         }
+        /*
+         * The DENOMINATOR is the count this zone placed, taken at load — not
+         * the number that happen to be live now. A creature held back for a
+         * CREBATCH has `in_use` clear exactly as an out-of-zone one does, so
+         * counting live bodies here made the total grow as the player sprang
+         * each ambush: "3/3 kills" on a level with nine.
+         */
+        placed = c->cre_in_zone;
     }
 
     /*
@@ -2366,6 +2463,13 @@ static void client_event_call(void *user, const q2_event_item *item,
      * `EndMission N` and `Extro FMV` is made here from the unit the map
      * declares rather than from that machine's answer. Stated, because it is
      * the one invented step: unit 5 is the last on this disc.
+     *
+     * BOTH BRANCHES NOW EXIST. The `Extro FMV` half used to be a comment about
+     * a path the port did not take — the last unit went to `EndMission 5` like
+     * every other, and the outro was started from there because that was the
+     * only place a film could be started from. `Extro FMV` is a level table
+     * record (index 11) resolving to QFMV, QFMV plays the film its module names
+     * for that screen, and so the campaign now ends the way 0x80018ED8 ends it.
      */
     {
         q2_uf_call call;
@@ -2374,10 +2478,21 @@ static void client_event_call(void *user, const q2_event_item *item,
             call.prim == Q2_UF_MISCOMPLETE && c->level_table_ready) {
             char want[32];
             const q2_level_entry *e;
+            /* Answer 5: the last unit on this disc ends the game rather than
+             * the mission. */
+            bool ending = c->map_unit >= Q2_LAST_UNIT;
 
-            snprintf(want, sizeof(want), "EndMission %d",
-                     c->map_unit > 0 ? c->map_unit : 1);
+            if (ending)
+                snprintf(want, sizeof(want), "Extro FMV");
+            else
+                snprintf(want, sizeof(want), "EndMission %d",
+                         c->map_unit > 0 ? c->map_unit : 1);
             e = q2_level_find_display(&c->level_table, want);
+
+            /* Which of QFMV's two films to play, carried across the load —
+             * the screen name IS the selector (see `film_screen`). */
+            if (ending)
+                snprintf(c->film_screen, sizeof(c->film_screen), "%s", want);
 
             if (c->map_change_pending) {
                 /*
@@ -3401,9 +3516,22 @@ static bool client_load_zone(client *c, const char *map, int index)
                  * because it is a property of the level and not of the play —
                  * the denominator of the mission screen's Secrets column.
                  */
+                /*
+                 * The FOUND count survives a zone gate; only the total is
+                 * recounted.
+                 *
+                 * A map's zones share one mission row, and this ran on every
+                 * zone load — so walking through a gate reset the player's
+                 * secrets to zero and the tally reported what they had found
+                 * since the last gate. `carry_same_map` is exactly "this is the
+                 * same level, a zone boundary", which is the case that must not
+                 * clear it.
+                 */
                 c->secrets_total     = 0;
-                c->secrets_found     = 0;
-                c->secret_seen_count = 0;
+                if (!c->carry_same_map) {
+                    c->secrets_found     = 0;
+                    c->secret_seen_count = 0;
+                }
                 {
                     q2_event_record rec;
 
@@ -3450,15 +3578,26 @@ static bool client_load_zone(client *c, const char *map, int index)
                 }
 
                 /*
-                 * A QENDMIS map is not a level. It is the container for the
-                 * MOVIE PLAYER (levelbin.h), and the campaign's last map is
-                 * one — so a run that reaches it and shows two quads on a black
-                 * field looks exactly like a crash. Recover what would play and
-                 * raise a screen that says so.
+                 * A QFMV or QENDMIS map is not a level. It is a container for
+                 * the MOVIE PLAYER (levelbin.h) — so a run that reaches one and
+                 * shows two quads on a black field looks exactly like a crash.
+                 *
+                 * The two are not the same container, and reading the table is
+                 * not enough to tell them apart: the shared module is carried by
+                 * every screen map on the disc, QLOGOS and QDUMMY included, so
+                 * "this map has a movie table" says almost nothing. What decides
+                 * is the NAME the level table gives it — `Intro FMV` and
+                 * `Extro FMV` both resolve to QFMV, and `EndMission N` to
+                 * QENDMIS<N> — which is also what the module compares against
+                 * to choose its film.
                  */
                 {
                     const dat_chunk *vlb =
                         c->common.chunk[Q2_COMMON_LEVEL_BIN];
+                    bool is_fmv    = client_name_eq(c->map, "QFMV");
+                    bool is_endmis = strlen(c->map) == 8 &&
+                                     c->map[7] >= '1' && c->map[7] <= '9' &&
+                                     strncmp(c->map, "QENDMIS", 7) == 0;
 
                     c->movie_count = 0;
                     c->endmission  = false;
@@ -3467,7 +3606,46 @@ static bool client_load_zone(client *c, const char *map, int index)
                                                      c->movies, 4);
                         c->movie_count = got > 4 ? 4 : got;
                     }
-                    if (c->movie_count) {
+
+                    /*
+                     * QFMV: the screen name picks the film, exactly as the
+                     * module picks it, and the film is the whole map. Nothing
+                     * else about this "level" is drawn — it has no geometry, no
+                     * letterforms and no icon sheet — and when the film ends the
+                     * queued destination takes over (`film_next_map`).
+                     */
+                    if (is_fmv && c->movie_count) {
+                        const char *want = c->film_screen[0] ? c->film_screen
+                                                             : "Intro FMV";
+                        const char *film = NULL;
+                        u32 mq;
+
+                        for (mq = 0; mq < c->movie_count; mq++) {
+                            Q2_INFO("movie: '%s' plays %s",
+                                    c->movies[mq].screen, c->movies[mq].file);
+                            if (client_name_eq(c->movies[mq].screen, want))
+                                film = c->movies[mq].file;
+                        }
+                        /* A screen this table does not carry is a caller's
+                         * mistake, not a disc fact — say so and take the first
+                         * record rather than loading a level that draws
+                         * nothing at all. */
+                        if (!film) {
+                            Q2_WARN("movie: QFMV has no '%s' record; "
+                                    "playing '%s'", want,
+                                    c->movies[0].screen);
+                            film = c->movies[0].file;
+                        }
+
+                        c->endmis_open     = false;
+                        c->briefing_open   = false;
+                        c->leveltext_ready = false;
+                        if (!client_film_start(c, film))
+                            Q2_WARN("movie: QFMV could not play %s", film);
+                        /* Consumed. A later entry with nobody setting it is an
+                         * Intro, not whatever the last one happened to be. */
+                        c->film_screen[0] = '\0';
+                    } else if (is_endmis && c->movie_count) {
                         u32 mq;
                         char line[Q2_BRIEFING_FIELD_MAX];
                         const char *film = NULL;
@@ -3512,12 +3690,16 @@ static bool client_load_zone(client *c, const char *map, int index)
                          * The film, if this map names one — and the placard
                          * only if it does not.
                          *
-                         * The disc carries ONE outro and only the last unit
-                         * reaches it, so units 1..4 end on something their own
-                         * module draws, which this port does not run. Playing
-                         * OUTRO1P on QENDMIS1 would be a confident wrong
-                         * answer; those units still get the placard, and it no
-                         * longer claims there is no decoder.
+                         * A FALLBACK, and it did not used to be. The console
+                         * does not end the campaign here at all: the outer
+                         * state machine answers 5 and loads `Extro FMV`, which
+                         * is QFMV, and QFMV is what plays OUTRO1P — so the
+                         * campaign now goes there (see MISCOMPLETE) and reaches
+                         * QENDMIS5 only if someone asks for it by name. Units
+                         * 1..4 end on something their own module draws, which
+                         * this port does not run; playing OUTRO1P on QENDMIS1
+                         * would be a confident wrong answer, so those still get
+                         * the placard.
                          */
                         if (film && c->endmis_unit == 5 &&
                             client_film_start(c, film)) {
@@ -5227,10 +5409,24 @@ static void client_input_simulated(client *c, float dt)
                         break;
                     }
 
-                    if (have)
-                        client_play_sound_at(c, q2_mover_sound_name[which], at);
-                    else
-                        client_play_sound(c, q2_mover_sound_name[which]);
+                    /*
+                     * NO BOX, NO SOUND.
+                     *
+                     * A mover whose object slots all resolved to -1 belongs to
+                     * ANOTHER ZONE — it has no collision volume in this one and
+                     * nothing to be heard from. Falling back to the
+                     * listener-local call played it at full volume in the
+                     * player's ear, so a door somewhere else in the map
+                     * thudded as if it were in the room. That is what the
+                     * "door sounds are wrong" report is: not the wrong sound —
+                     * 0x80025A5C really does play pt1__strt for a linear door —
+                     * but the right one, unattenuated, for a door that is not
+                     * there.
+                     */
+                    if (!have)
+                        continue;
+
+                    client_play_sound_at(c, q2_mover_sound_name[which], at);
                     c->mover_sounds++;
                 }
             }
@@ -5349,9 +5545,37 @@ static void client_input_simulated(client *c, float dt)
     c->cam.pos[0] = eye[0];
     c->cam.pos[1] = eye[1];
     c->cam.pos[2] = eye[2];
-    c->cam.yaw    = view[1];
-    c->cam.pitch  = view[0];
-    c->cam.roll   = view[2];
+
+    /*
+     * THE DEATH CAM. 0x80038618's other branch, which this port did not have.
+     *
+     * A live player's camera takes all three angles from the view. A DEAD one
+     * keeps the yaw and pitch it died with — the corpse is not looking around —
+     * and rolls, easing toward -384 on the 4096-step circle, about 34 degrees.
+     * That roll is the whole of the effect: the horizon tips as the body goes
+     * down. The position still comes from the eye, so the view also settles as
+     * the corpse falls.
+     *
+     * The ease is the engine's short-way angle lerp (0x8006FAC8): take the
+     * difference modulo the circle, and go whichever way round is shorter.
+     */
+    if (c->sim[0].player[0].ent2_flags & Q2_ENT2_DEAD) {
+        s32 cur  = c->cam.roll & 0xFFF;
+        s32 want = (-384) & 0xFFF;
+        s32 d    = (want - cur) & 0xFFF;
+        s32 frac = 100;                 /* 1/2048 units per frame of ease */
+
+        if (!(d & 0x800))
+            cur = cur + ((d * frac + 2047) >> 11);
+        else
+            cur = cur - (((4096 - d) * frac + 2047) >> 11);
+
+        c->cam.roll = (s16)(cur & 0xFFF);
+    } else {
+        c->cam.yaw    = view[1];
+        c->cam.pitch  = view[0];
+        c->cam.roll   = view[2];
+    }
 
     /*
      * `--watch`: turn the CAMERA, and only the camera, onto the nearest live
@@ -5889,19 +6113,50 @@ static void client_menu_requests(client *c)
      * screen into a game: the level table's own first playable map is loaded
      * and the simulation takes over.
      */
-    case Q2_MREQ_NEW_GAME:
+    case Q2_MREQ_NEW_GAME: {
+        /*
+         * A new game does not open on a level. It opens on the INTRO FMV.
+         *
+         * `Intro FMV` is record 10 of the level table and resolves to QFMV,
+         * whose module plays `TAKE1BP.STX` for exactly that screen name — so
+         * starting a game is loading that level and letting the film hand over
+         * to the first map when it ends (`film_next_map`). The port went
+         * straight to the first map because it had no decoder when this was
+         * written, and then kept doing it after it had one.
+         *
+         * A disc with no such record, or a film that will not open, still
+         * starts the game: the cinematic is the opening, not the gate.
+         */
+        const q2_level_entry *fmv = c->level_table_ready
+            ? q2_level_find_display(&c->level_table, "Intro FMV") : NULL;
+
         /* The difficulty is the AI's, and it is chosen before the level loads
          * so the creatures spawned by that load already have it. */
         q2_cre_set_skill(c->menu.skill);
         Q2_INFO("front end: new game on skill %d -> %s",
                 c->menu.skill, c->first_map);
         c->in_front_end   = false;
+        c->film_is_attract = false;
+        c->attract_idle    = 0;
         /* A new game carries nothing either. */
         c->carry_player   = false;
         c->carry_same_map = false;
-        client_load_zone(c, c->first_map, 0);
         q2_menu_close(&c->menu);
+
+        if (fmv && !fmv->is_placeholder && fmv->directory[0]) {
+            snprintf(c->film_screen, sizeof(c->film_screen), "Intro FMV");
+            snprintf(c->film_next_map, sizeof(c->film_next_map), "%s",
+                     c->first_map);
+            if (client_load_zone(c, fmv->directory, 0) && c->film_open)
+                break;
+            /* It loaded and did not play, or did not load: go on without it
+             * rather than leaving the player on an empty container map. */
+            c->film_next_map[0] = '\0';
+            Q2_WARN("front end: no intro film — starting on %s", c->first_map);
+        }
+        client_load_zone(c, c->first_map, 0);
         break;
+    }
     case Q2_MREQ_CREDITS: {
         /*
          * The credit roll, read out of the module the front end IS. It is not
@@ -6302,6 +6557,8 @@ static const char *client_ent_sound_name(const client *c, u32 which)
     case Q2_SND_PAIN_50:      return "mal_pn50_1";   /* 0x800B2950 */
     case Q2_SND_PAIN_75:      return "mal_pn75_1";   /* 0x800B2954 */
     case Q2_SND_PAIN_100:     return "mal_pn100_1";  /* 0x800B2958 */
+    case Q2_SND_DEATH:        return "pla_death4";   /* 0x800B28E4 */
+    case Q2_SND_DROWN:        return "pla_drown1";   /* 0x800B28E8 */
     default: break;
     }
 
@@ -6877,10 +7134,10 @@ static void client_write_shot(client *c, bool numbered)
 
     c->shots_written++;
     Q2_INFO("frame %ld -> %s", c->frame_index, path);
-    Q2_INFO("  eye %d %d %d  yaw %d pitch %d  cell %d  "
+    Q2_INFO("  eye %d %d %d  yaw %d pitch %d roll %d  cell %d  "
             "%u/%u quads, %u nodes, near %u back %u ot %u",
             c->cam.pos[0], c->cam.pos[1], c->cam.pos[2],
-            c->cam.yaw, c->cam.pitch, c->sim[0].current_node,
+            c->cam.yaw, c->cam.pitch, c->cam.roll, c->sim[0].current_node,
             c->shot_stats.quads_emitted, c->shot_stats.quads_total,
             c->shot_stats.nodes_visited,
             c->shot_stats.quads_rejected_near,
@@ -7187,12 +7444,13 @@ static void client_bind_view_model(client *c)
 /* The movie player                                                           */
 /* ------------------------------------------------------------------------- */
 /*
- * Start a film. `name` is a bare file name out of a QENDMIS module's movie
- * table (`OUTRO1P.STX`) or off the command line; the directory is the disc's.
+ * Start a film. `name` is a bare file name out of a module's movie table
+ * (`OUTRO1P.STX`) or off the command line; the directory is the disc's.
  */
 static bool client_film_start(client *c, const char *name)
 {
     char path[128];
+    u32  limit;
 
     if (!name || !*name || c->film_open)
         return false;
@@ -7209,6 +7467,15 @@ static bool client_film_start(client *c, const char *name)
         return false;
     }
 
+    /*
+     * The stop point the module passes the player. All three films are cut
+     * short by it and the outro is cut by 59 frames, so playing a file out is
+     * NOT the faithful thing — it is two and a half seconds of ending nobody
+     * has ever seen. A film with no row plays out. See movie.h.
+     */
+    limit = q2_movie_retail_length(name);
+    c->film.frame_limit = limit;
+
     c->film_open       = true;
     c->film_done       = false;
     c->film_have_frame = false;
@@ -7224,7 +7491,11 @@ static bool client_film_start(client *c, const char *name)
     if (c->audio)
         SDL_ClearAudioStream(c->audio);
 
-    Q2_INFO("movie: playing %s", path);
+    if (limit)
+        Q2_INFO("movie: playing %s, %u frames (the module's own stop point)",
+                path, limit - 1u);
+    else
+        Q2_INFO("movie: playing %s to the end — no module names it", path);
     return true;
 }
 
@@ -7274,6 +7545,52 @@ static void client_film_tick(client *c, float dt)
 
     if (q2_movie_finished(&c->film))
         client_film_stop(c);
+}
+
+/*
+ * The title screen idling into the attract reel.
+ *
+ * QFRONT's module counts a store down by the frame delta and, when it goes
+ * negative, plays `ROGUEINP.STX` — the third film, 28.8 MB and 2,459 frames of
+ * the fleet arriving, which no movie-table record can even name because the
+ * table's filename field is twelve bytes and that name needs thirteen. See
+ * `attract_idle` for the disassembly and for what about this is read and what
+ * is invented (the threshold, and only the threshold).
+ *
+ * Not in a headless run: a capture of the front end should be a capture of the
+ * front end however many frames it is asked to hold for.
+ */
+#define Q2_ATTRACT_FILM "ROGUEINP.STX"
+
+static void client_attract_tick(client *c)
+{
+    if (c->film_open || c->headless || c->credits_open || c->mcard_open)
+        return;
+
+    /*
+     * Any pad at all, or any page but the title, and the count starts over.
+     * The console's countdown is reset by the same things for the same reason:
+     * a player who is doing something is not idle.
+     */
+    if (client_menu_pad(c) != 0 || c->menu.page_id != Q2_PAGE_FRONT_TITLE) {
+        c->attract_idle = 0;
+        return;
+    }
+
+    if (++c->attract_idle < Q2_ATTRACT_IDLE_FRAMES)
+        return;
+
+    c->attract_idle = 0;
+    if (!client_film_start(c, Q2_ATTRACT_FILM))
+        return;
+
+    /*
+     * The reel OWNS the screen while it runs, so the title goes away — but the
+     * level stays loaded, because QFRONT is what the reel returns to.
+     */
+    c->film_is_attract = true;
+    c->in_front_end    = false;
+    q2_menu_close(&c->menu);
 }
 
 /*
@@ -7452,6 +7769,12 @@ static void client_menu_frame(client *c)
         client_play_menu_sound(c, Q2_MSND_BACK);
         return;
     }
+
+    /* The death page's arm countdown is spent in level-clock units, so it needs
+     * this frame's delta rather than a count of frames. See q2_menu.frame_dt. */
+    c->menu.frame_dt = q2_build_tick_rate(&c->build) > 0
+                           ? (s32)(Q2_DT_HZ / q2_build_tick_rate(&c->build))
+                           : Q2_DT_NOMINAL;
 
     q2_menu_advance(&c->menu, pad);
 
@@ -8496,6 +8819,7 @@ static void usage(void)
     printf("  --demo        drive the pad from a fixed script rather than keys\n");
     printf("  --movie NAME  play a film from Q2DATA/MOVIES and nothing else\n"
            "                (TAKE1BP.STX, OUTRO1P.STX, ROGUEINP.STX)\n");
+    printf("  --new-game    press SINGLE PLAYER: the intro film, then level 1\n");
     printf("  --frames N    stop after N frames\n");
     printf("  --shot P.ppm  write the console's own framebuffer to P.ppm\n");
     printf("  --shot-every N  ...and one every N frames, numbered\n");
@@ -8575,6 +8899,15 @@ int main(int argc, char **argv)
         /* `--credits`: open the roll straight away. A headless run cannot walk
          * the title screen to OPTIONS and press X. */
         else if (!strcmp(argv[i], "--credits"))               c.show_credits = true;
+        /*
+         * `--new-game`: press SINGLE PLAYER for the player.
+         *
+         * Same reason as `--credits`, and it is the only way to reach the INTRO
+         * FMV from a script: the intro is not a map you can ask for, it is what
+         * beginning a game does, and the demo pad deliberately steps in and out
+         * of the title page rather than committing to it.
+         */
+        else if (!strcmp(argv[i], "--new-game"))              c.start_new_game = true;
         /* `--keys`: hand the player every key. A scripted run cannot go and
          * find one, and the records behind `ONKEYDO` are otherwise unreachable
          * in a sweep — which is the gate working, and also why what is behind
@@ -9175,6 +9508,19 @@ no_window:
         }
     }
 
+    /*
+     * `--new-game`: the request the SINGLE PLAYER row raises, raised here.
+     *
+     * Through the menu's own one-shot rather than by calling the load directly,
+     * so a scripted start goes down exactly the path a player's start goes
+     * down — the skill, the carry flags, the intro film and the hand-off to
+     * the first map, in that order.
+     */
+    if (c.start_new_game && !c.film_arg) {
+        c.menu.request = Q2_MREQ_NEW_GAME;
+        client_menu_requests(&c);
+    }
+
     if (c.show_credits) {
         client_menu_requests(&c);   /* nothing pending; this just settles it */
         {
@@ -9464,6 +9810,22 @@ no_window:
             if (c.in_front_end) {
                 q2_sim_scene_advance(&c.sim[0], (double)dt);
                 client_scene_lights(&c);
+                client_attract_tick(&c);
+            } else if (c.menu.page_id == Q2_PAGE_DEATH) {
+                /*
+                 * AND NEITHER IS THE DEATH PAGE A PAUSED WORLD.
+                 *
+                 * Page 41 is drawn over a level that is still running: the body
+                 * falls, the camera rolls into the death cam, and the creatures
+                 * that killed you carry on. Freezing it made death a still
+                 * frame the instant the page opened — the roll never started,
+                 * because nothing advanced to roll it.
+                 *
+                 * The pad still belongs to the menu, so the input the sim gets
+                 * is the neutral one; the world half of the tick is what has to
+                 * keep running.
+                 */
+                client_input_simulated(&c, dt);
             }
         } else if (c.mission_open || c.briefing_open || c.endmis_open) {
             /*
@@ -9780,9 +10142,51 @@ no_window:
          * When it ends, the placard the port would otherwise have shown takes
          * over, so the campaign finishes on something rather than on black.
          */
-        if (c.film_open) {
+        if (c.film_open)
             client_film_tick(&c, dt);
-            if (!c.film_open && c.endmission && !c.endmis_open) {
+
+        /*
+         * A film that has ended hands over to whatever it was in front of.
+         *
+         * Three cases and they are not the same thing. A cinematic on the WAY
+         * somewhere — the intro, and the extro if a later disc ever carries one
+         * — resumes the journey. The attract reel goes back to the title screen
+         * it interrupted. And an end-of-mission film with nowhere to go leaves
+         * the placard up, which is what the campaign's last frame has been.
+         *
+         * OUTSIDE the tick, on `film_done`, because a film does not only end by
+         * running out: a press stops it, and that press is taken in the event
+         * loop where there is no tick to notice. Handling this inside the tick
+         * meant a skipped attract reel left the front end with no title screen
+         * and no menu — a black QFRONT that took a restart to leave.
+         */
+        if (!c.film_open && c.film_done) {
+            c.film_done = false;
+
+            if (c.film_next_map[0]) {
+                char next[64];
+
+                snprintf(next, sizeof(next), "%s", c.film_next_map);
+                c.film_next_map[0] = '\0';
+                c.film_is_attract  = false;
+                c.endmission       = false;
+                c.endmis_open      = false;
+                Q2_INFO("movie: over — on to %s", next);
+                if (!client_load_zone(&c, next, 0))
+                    Q2_WARN("movie: cannot load %s after the film", next);
+            } else if (c.film_is_attract) {
+                /*
+                 * Back to the title. The reel plays OVER the front end rather
+                 * than replacing it — QFRONT is still loaded underneath — so
+                 * there is nothing to reload, only a menu to re-open.
+                 */
+                c.film_is_attract = false;
+                c.in_front_end    = true;
+                c.attract_idle    = 0;
+                q2_menu_open(&c.menu);
+                q2_menu_goto(&c.menu, Q2_PAGE_FRONT_TITLE);
+                Q2_INFO("movie: attract reel over — back to the title screen");
+            } else if (c.endmission && !c.endmis_open) {
                 char line[Q2_BRIEFING_FIELD_MAX];
 
                 snprintf(line, sizeof(line), "MISSION %d COMPLETE",

@@ -27,6 +27,8 @@
  */
 #include "menu.h"
 
+#include "worldscale.h"   /* Q2_DT_NOMINAL: the arm countdown's fallback step */
+
 #include <stdio.h>
 #include <string.h>
 
@@ -865,8 +867,12 @@ void q2_menu_advance(q2_menu *m, u16 buttons)
     }
 
     if (m->arm_ticks > 0) {
-        /* The death screen ignores everything until it arms itself. */
-        m->arm_ticks--;
+        /* The death screen ignores everything until it arms itself, and the
+         * countdown is spent in LEVEL CLOCK units — 0x80020544 subtracts the
+         * frame's dt from it, not one. See q2_menu.frame_dt. */
+        m->arm_ticks -= (m->frame_dt > 0) ? m->frame_dt : Q2_DT_NOMINAL;
+        if (m->arm_ticks < 0)
+            m->arm_ticks = 0;
         return;
     }
 

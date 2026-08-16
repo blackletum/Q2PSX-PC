@@ -236,6 +236,17 @@ Q2PSX_INLINE s32 q2_world_snap(s32 v, s32 grid)
 #define Q2_ENT2_FLY         0x1000  /* entity+0x10C @0x8003A41C                 */
 
 /*
+ * DEAD. entity+0x10C bit 0x00080000, and the camera builder's own gate.
+ *
+ * 0x80038618 has an explicit dead branch: it stops taking the aim from the
+ * player's look angles and rolls the view instead, which is the death cam. The
+ * bit was never defined in this port and therefore never set, so the camera
+ * took the live branch over a corpse and the view simply stopped where the
+ * player had been looking.
+ */
+#define Q2_ENT2_DEAD        0x00080000
+
+/*
  * 216 sits in the DELAY SLOT of the branch at 0x80045888, so it is the DEFAULT
  * and 108 is the value taken when the entity's flags have 0x600 set. Reading
  * the two the other way round is the easy mistake here.

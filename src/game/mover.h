@@ -115,9 +115,19 @@
  *   BUTTON                                  -> amb_butn2 and nothing else
  *   PISTON, DISH                            -> silent, deliberately
  *
+ * PLATFORM REACHES THE SAME THREE BY A DIFFERENT ROUTE, and the folding above
+ * is a convenience rather than a reading of the engine. 0x80025658 is installed
+ * by four constructors — 0x80025E84 (MOVER_A), 0x800265F0 (MOVER_B/C) and the
+ * two 20-byte lift constructors 0x800282A4 and 0x80029898. PLATFORM's own
+ * constructor 0x8002CBB0 installs a different handler, 0x8002C2D4, at
+ * 0x8002CD80; that handler happens to play the identical set — msc_keyuse at
+ * 0x8002C40C, msc_keytry at 0x8002C4C0, pt1__strt at 0x8002C5C0 and 0x8002C6A0
+ * — so the outcome agrees even though the code path does not.
+ *
  * WHERE it comes from: every call passes the CENTRE of the mover's collision
  * box, and the CLOSING one adds the live displacement (0x80025A00 onward), so
- * the sound follows the door.
+ * the sound follows the door. A mover with no box in this zone is not in this
+ * zone, and is silent rather than listener-local.
  */
 typedef enum q2_mover_sound {
     Q2_MVSND_NONE = -1,
@@ -202,6 +212,18 @@ typedef struct q2_mover {
      * therefore position the voice.
      */
     s8  sound_pending;
+
+    /*
+     * The AUTHORED values of the two timers, snapshotted once the build has
+     * decoded them.
+     *
+     * `delay_timer` and `wait_timer` are counted down destructively, so a
+     * mover that has opened once has spent both. The console reloads them from
+     * the item's own bytes whenever an IDLE mover is triggered (0x800275CC),
+     * which needs somewhere to reload them FROM — this is it.
+     */
+    u16 delay_reset;
+    u16 wait_reset;
 
     s32 offset;         /* current displacement along the axis */
 

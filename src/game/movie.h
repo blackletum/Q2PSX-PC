@@ -71,6 +71,14 @@ typedef struct q2_movie {
     bool  frame_valid;
     u32   frames_shown;
 
+    /*
+     * Stop when a frame's own number reaches this. 0 plays the file out.
+     *
+     * Not a convenience: it is an ARGUMENT of the console's player, and every
+     * one of the three films is cut short by it. See `q2_movie_retail_length`.
+     */
+    u32   frame_limit;
+
     double clock;             /* seconds of film presented so far           */
     bool   finished;
 
@@ -104,6 +112,46 @@ bool q2_movie_advance(q2_movie *m, double dt, u8 *rgb);
 
 /* Has the film run out of frames? */
 Q2PSX_INLINE bool q2_movie_finished(const q2_movie *m) { return m->finished; }
+
+/*
+ * How many frames the console plays of `file` — a bare name, "OUTRO1P.STX".
+ * 0 for a film the disc's modules do not name.
+ *
+ * ---------------------------------------------------------------------------
+ * Where this comes from, and why a film is not simply played out
+ * ---------------------------------------------------------------------------
+ * The player is a function in the shared LevelBin module and it takes five
+ * arguments. QFMV's two call sites are
+ *
+ *     play("TAKE1BP.STX", 1281, 0x10000, 1, 255)      ; module 0x80100958
+ *     play("OUTRO1P.STX", 1500, 0x10000, 1, 255)      ; module 0x801009CC
+ *
+ * and QFRONT's attract state is
+ *
+ *     play("ROGUEINP.STX", 2457, 0x10000, 1, 255)     ; module 0x8010D5F8
+ *
+ * The second argument is stored (module+0x7384) and read in the frame handler
+ * at 0x80102A5C, where it is compared against the STR frame header's own
+ * `frame_number` at +0x08:
+ *
+ *     lw   v1, 8(a1)            ; StrFrameHeader.frame_number
+ *     lw   v0, 0x7384(v0)       ; the argument
+ *     sltu v1, v1, v0           ; number < limit ?
+ *     bne  v1, zero, +16        ; ...keep going
+ *     sw   1, 0x7388(v1)        ; else: done
+ *
+ * — so it is a stop point, and the frame carrying that number is NOT shown.
+ * The disc holds 1283, 1559 and 2459 frames, so the console plays 1,280 of the
+ * intro, **1,499 of the 1,559 in the outro** — the last 2.4 seconds are on the
+ * disc and are never seen — and 2,456 of the attract reel.
+ *
+ * The other three arguments are read the same way and are not timing: 0x10000
+ * is the size in bytes of each of the two VLC buffers, allocated by name at
+ * 0x80102F0C / 0x80102F28 ("vlc buffer 0", "vlc buffer 1") and defaulting to
+ * 0x20400 when zero; the 1 gates two engine calls; the 255 is pushed at sp+16.
+ * None of them changes what a port that is not managing the MDEC's DMA does.
+ */
+u32 q2_movie_retail_length(const char *file);
 
 /*
  * Pull up to `max_samples` of interleaved stereo PCM16 out of the audio slots,

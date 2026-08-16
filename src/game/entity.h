@@ -231,6 +231,15 @@ typedef enum q2_ent_sound {
     Q2_SND_PAIN_75     = 18,  /* 0x800B2954                                 */
     Q2_SND_PAIN_100    = 19,  /* 0x800B2958                                 */
 
+    /*
+     * DYING, which the player had never done audibly. The death handler picks
+     * between these two on the client's own air/underwater field and explicitly
+     * does NOT raise a pain grunt on the killing tick — so the port, which ran
+     * update_pain unconditionally, played a wounded noise for a death.
+     */
+    Q2_SND_DEATH       = 20,  /* 0x800B28E4, pla_death4                     */
+    Q2_SND_DROWN       = 21,  /* 0x800B28E8, pla_drown1 — drowned instead   */
+
     Q2_SND_COUNT
 } q2_ent_sound;
 

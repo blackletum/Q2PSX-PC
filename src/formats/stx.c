@@ -390,6 +390,15 @@ void q2_stx_set_escape_layout(u32 run_bits, u32 level_bits)
     g_esc_level_bits = level_bits ? level_bits : 10;
 }
 
+void q2_stx_get_escape_layout(u32 *run_bits, u32 *level_bits)
+{
+    if (run_bits)   *run_bits   = g_esc_run_bits;
+    if (level_bits) *level_bits = g_esc_level_bits;
+}
+
+const u8 *q2_stx_quant_table(void)  { return k_quant; }
+const u8 *q2_stx_zigzag_table(void) { return k_zigzag; }
+
 /* ------------------------------------------------------------------------- */
 /* Why a block gave up                                                        */
 /* ------------------------------------------------------------------------- */
