@@ -27,43 +27,68 @@
  * 0x8004C814, 0x8004CB5C, 0x8004CEA0, 0x8004D0C0 and 0x8004D5BC. The
  * hyperblaster writes none: its rate is the view model animation's.
  */
+/*
+ * THE 30-TICK GATE IS NOT THE CONSOLE'S, and it was in every row of this table.
+ *
+ * `weapon.h` above says "thirty ticks, written as `level_time + 30`, for every
+ * weapon that sets it". The write is real — the blaster's is at 0x8004BFFC,
+ * `addiu v0, s0, 30; sw v0, 204(s1)` — and NOTHING READS CLIENT+204 anywhere in
+ * the weapon path. It is a value the fire functions store and the engine never
+ * consults.
+ *
+ * What actually limits the rate is the animation. On the console the IDLE arm
+ * of the view-model machine calls the fire function itself (`jalr` at
+ * 0x8004FB30) and only then enters FIRE, so a weapon fires once per fire clip
+ * — the blaster's is 110 ticks — and the four weapons that need to be faster
+ * have their own frame driver at 0x8004FEE8 to make it so.
+ *
+ * With a 30-tick gate on top the port fired every weapon at ten a second
+ * regardless of its clip, which is the "reload times and general handling"
+ * the report is about. Every row is zero now and the clip is the rate, which
+ * is what the field's own comment ("0 when the animation drives the rate")
+ * has said all along.
+ *
+ * The dry click keeps its own deadline — see Q2_WEAPON_DRY_REFIRE. That one is
+ * the port's, because the port asks the fire function every tick and the
+ * console asks it once per pass.
+ */
 const q2_weapon_behaviour q2_weapon_behaviour_table[Q2_WT_SLOTS] = {
     /* 0 — no weapon. 0x8004EB08 is `jr ra; nop`. */
     { Q2_FK_NONE, 0, 0, 0, {{0,0,0}}, 0, false, 0, 0, 0x8004EB08u },
 
     /* 1 blaster — a bolt entity, no ammo, no scatter. */
-    { Q2_FK_BOLT, 8, 32, 1, {{0,0,0}}, -11, false, 30,
+    { Q2_FK_BOLT, 8, 32, 1, {{0,0,0}}, -11, false, 0,
       Q2_MOD_ENERGY_BOLT, 0x8004BFBCu },
 
     /* 2 shotgun — five pellets, +-1024 on every axis. */
-    { Q2_FK_BULLET, 6, 24, 5, {{4,4,4}}, -22, false, 30,
+    { Q2_FK_BULLET, 6, 24, 5, {{4,4,4}}, -22, false, 0,
       Q2_MOD_BULLET, 0x8004C1C0u },
 
     /* 3 super shotgun — ten pellets, +-2048 across and +-1024 otherwise.
      * 0x8004C5F0 shifts by 3 where 0x8004C60C and 0x8004C634 shift by 4. */
-    { Q2_FK_BULLET, 8, 32, 10, {{3,4,4}}, -22, false, 30,
+    { Q2_FK_BULLET, 8, 32, 10, {{3,4,4}}, -22, false, 0,
       Q2_MOD_BULLET, 0x8004C488u },
 
     /* 4 machinegun — one bullet, +-512, random kick. */
-    { Q2_FK_BULLET, 8, 32, 1, {{5,5,5}}, 0, true, 30,
+    { Q2_FK_BULLET, 8, 32, 1, {{5,5,5}}, 0, true, 0,
       Q2_MOD_BULLET, 0x8004C744u },
 
     /* 5 chaingun — as the machinegun, but the pellet count comes from the
      * spin state the caller passes in. */
-    { Q2_FK_BULLET, 8, 32, 0, {{5,5,5}}, 0, true, 30,
+    { Q2_FK_BULLET, 8, 32, 0, {{5,5,5}}, 0, true, 0,
       Q2_MOD_BULLET, 0x8004CA9Cu },
 
     /* 6 hand grenade. */
-    { Q2_FK_HAND_GRENADE, 120, 480, 1, {{0,0,0}}, 0, false, 30,
+    { Q2_FK_HAND_GRENADE, 120, 480, 1, {{0,0,0}}, 0, false, 0,
       Q2_MOD_GRENADE, 0x8004EBDCu },
 
     /* 7 grenade launcher. */
-    { Q2_FK_GRENADE, 120, 480, 1, {{0,0,0}}, -11, false, 30,
+    { Q2_FK_GRENADE, 120, 480, 1, {{0,0,0}}, -11, false, 0,
       Q2_MOD_GRENADE, 0x8004CE18u },
 
     /* 8 rocket launcher — damage is 100 + rand() % 20, quad shifts it left
      * by two rather than picking a second immediate. */
-    { Q2_FK_ROCKET, 0, 0, 1, {{0,0,0}}, -11, false, 30,
+    { Q2_FK_ROCKET, 0, 0, 1, {{0,0,0}}, -11, false, 0,
       Q2_MOD_ROCKET, 0x8004D038u },
 
     /* 9 hyperblaster — no kick, no refire gate of its own. */
@@ -71,11 +96,11 @@ const q2_weapon_behaviour q2_weapon_behaviour_table[Q2_WT_SLOTS] = {
       Q2_MOD_ENERGY_BOLT, 0x8004D250u },
 
     /* 10 railgun — 100, or 150 in deathmatch; quad shifts left by two. */
-    { Q2_FK_RAIL, 0, 0, 1, {{0,0,0}}, -34, false, 30,
+    { Q2_FK_RAIL, 0, 0, 1, {{0,0,0}}, -34, false, 0,
       Q2_MOD_RAIL, 0x8004D498u },
 
     /* 11 BFG — fifty cells a shot, the most expensive in the game. */
-    { Q2_FK_BFG, 200, 800, 1, {{0,0,0}}, 0, false, 30,
+    { Q2_FK_BFG, 200, 800, 1, {{0,0,0}}, 0, false, 0,
       Q2_MOD_ENERGY_BOLT, 0x8004EB10u },
 
     /* 12 — the phantom slot the cycle scan walks into. */

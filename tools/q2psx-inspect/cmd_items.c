@@ -37,7 +37,7 @@ static void flag_text(u16 f, char *out, size_t n)
         { Q2_ITEM_GLOW_G,        "G"         },
         { Q2_ITEM_GLOW_B,        "B"         },
         { Q2_ITEM_NO_ANIM,       "noanim"    },
-        { Q2_ITEM_NO_SPAWN_ARG,  "noarg"     }
+        { Q2_ITEM_NO_DROP,  "nodrop"    }
     };
 
     out[0] = '\0';
@@ -180,7 +180,7 @@ int cmd_items(disc *d)
         u32 i, all = 0, unknown = 0;
         u32 known = Q2_ITEM_SPIN | Q2_ITEM_MATERIALISE | Q2_ITEM_TIMED |
                     Q2_ITEM_OBJECTIVE | Q2_ITEM_GLOW | Q2_ITEM_NO_ANIM |
-                    Q2_ITEM_NO_SPAWN_ARG;
+                    Q2_ITEM_NO_DROP;
 
         for (i = 0; i < table->count; i++)
             all |= table->def[i].flags;

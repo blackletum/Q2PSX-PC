@@ -3,6 +3,37 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* The bank keys, registered by name at 0x8002D4E0..0x8002D800. */
+const char *const q2_mover_sound_name[Q2_MVSND_COUNT] = {
+    "msc_keyuse",   /* 0x800B27CC */
+    "msc_keytry",   /* 0x800B27D0 */
+    "pt1__strt",    /* 0x800B27D8 */
+    "amb_butn2"     /* 0x800B27E4 */
+};
+
+/* Ask for a sound, unless this family has none. A BUTTON has exactly one and
+ * uses it for everything; PISTON and DISH have none at all. */
+static void mover_sound(q2_mover *m, s8 which)
+{
+    if (m->silent)
+        return;
+    if (m->is_button)
+        which = Q2_MVSND_BUTTON;
+    m->sound_pending = which;
+}
+
+s8 q2_mover_take_sound(q2_mover_set *set, u32 index)
+{
+    s8 s;
+
+    if (!set || index >= set->count)
+        return Q2_MVSND_NONE;
+    s = set->movers[index].sound_pending;
+    set->movers[index].sound_pending = Q2_MVSND_NONE;
+    return s;
+}
+
+
 /* ------------------------------------------------------------------------- */
 /* Building movers from the script                                            */
 /* ------------------------------------------------------------------------- */
@@ -25,6 +56,7 @@ static q2_mover *mover_push(q2_mover_set *set)
         m->wait_timer  = Q2_MOVER_WAIT_NEVER;
         /* A mover starts fully closed, so its portal starts sealed. */
         m->sealed      = 1;
+        m->sound_pending = Q2_MVSND_NONE;
         /* Not a primitive: the MOVER_A/B/C opcodes build these, and only the
          * CALL path overwrites it. Zero would read as the first table row. */
         m->prim        = Q2_MOVER_PRIM_OPCODE;
@@ -359,6 +391,9 @@ q2_result q2_movers_build_calls(q2_mover_set *out, const q2_events *events,
                 break;
 
             case Q2_UF_BUTTON: {
+                /* Its handler 0x80029C28 plays amb_butn2 (0x80029E04) and
+                 * references none of the other five handles. */
+                m->is_button = 1;
                 /*
                  * `travel`'s SIGN selects obj+0x3A = +1 or -1 and its magnitude
                  * goes to obj+0x44 — so a button's speed is literally one unit
@@ -391,6 +426,10 @@ q2_result q2_movers_build_calls(q2_mover_set *out, const q2_events *events,
                 break;
 
             case Q2_UF_DISH:
+                /* Neither DISH's constructor (0x8002A880) nor PISTON's
+                 * (0x8002D114) installs 0x80025658, and neither references any
+                 * of the six sound handles: silent, deliberately. */
+                m->silent = 1;
                 /*
                  * The speed is not authored: it is the immediate ONE, written
                  * by the exec at `0x8002E314` (`addiu v1, zero, 1; sh v1,
@@ -412,6 +451,7 @@ q2_result q2_movers_build_calls(q2_mover_set *out, const q2_events *events,
                 break;
 
             case Q2_UF_PISTON:
+                m->silent = 1;          /* see DISH above */
                 /* A crusher. `time` is UNSCALED, which is the table's word for
                  * it and the reason it is not multiplied here. */
                 m->speed      = p[5];
@@ -690,14 +730,20 @@ u32 q2_movers_tick_blocked(q2_mover_set *set, s32 dt, u16 player_keys,
                 m->announced = 0;
                 break;
             }
-            /* Locked doors complain once, not every tick. */
+            /* Locked doors complain once, not every tick — 0x8002585C is
+             * behind the same latch, so the refusal sound is once too. */
             if (m->key_mask && !(player_keys & m->key_mask)) {
+                if (!m->announced)
+                    mover_sound(m, Q2_MVSND_KEY_TRY);
                 m->announced = 1;
                 break;
             }
             m->state = Q2_MV_DELAY;
-            if (m->key_mask)
+            if (m->key_mask) {
+                /* 0x800257A8: the key was accepted. */
+                mover_sound(m, Q2_MVSND_KEY_USE);
                 m->announced = 1;
+            }
             break;
 
         case Q2_MV_DELAY:
@@ -705,7 +751,9 @@ u32 q2_movers_tick_blocked(q2_mover_set *set, s32 dt, u16 player_keys,
                 m->delay_timer = (u16)(m->delay_timer - dt);
                 break;
             }
+            /* 0x800258F0 -> 0x80025A5C: the motion starts. */
             m->state = Q2_MV_OPENING;
+            mover_sound(m, Q2_MVSND_START);
             break;
 
         case Q2_MV_ARRIVED:
@@ -726,7 +774,10 @@ u32 q2_movers_tick_blocked(q2_mover_set *set, s32 dt, u16 player_keys,
                 m->wait_timer = 1;
                 break;
             }
+            /* 0x800259BC -> the same 0x80025A5C. A door closing plays the
+             * same start sound; there is no separate close. */
             m->state = Q2_MV_CLOSING;
+            mover_sound(m, Q2_MVSND_START);
             break;
         }
 

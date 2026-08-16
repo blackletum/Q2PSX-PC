@@ -53,6 +53,7 @@
 #ifndef Q2PSX_GAME_ENTITY_H
 #define Q2PSX_GAME_ENTITY_H
 
+#include "collision.h"   /* the placement drop traces against SecondaryCol */
 #include "fixed.h"
 #include "gamevars.h"
 #include "inventory.h"
@@ -60,6 +61,46 @@
 #include "q2psx.h"
 #include "weapon.h"      /* q2_rng — the engine's own pseudo-random source */
 #include "worldscale.h"
+
+/* ------------------------------------------------------------------------- */
+/* The shared placement drop — the tail of 0x80050FA0                        */
+/* ------------------------------------------------------------------------- */
+/*
+ * EVERY placed entity in this engine is dropped onto the floor at spawn, and
+ * the port did not do it for any of them.
+ *
+ * 0x80050FA0 is the shared placement routine — the item spawner, the creature
+ * spawner, the save restore and two others all reach it. Its tail lifts the
+ * record's Y by 286 and then by a further 30 (`addiu v0, v0, -286` at
+ * 0x80051068 and `addiu v0, v0, -30` at 0x800510A4, +Y being down), and then
+ * runs a DOWNWARD SWEEP of up to `dist` units against SecondaryCol, writing
+ * back the Y it stopped at — offset +4 and nothing else (0x800511C0) — and the
+ * cell it ended in at +0x4E (0x80051228).
+ *
+ * The distance is the caller's. The item spawner passes 1024 (`sll a3, a3, 10`
+ * at 0x80059A50) unless the item's table flag 0x100 is set, and the creature
+ * spawner passes the same 1024 out of the word at 0x800AE894, whose halfwords
+ * are 0xFFFF and 0x0400 — a zone hint of -1 and a drop of 1024.
+ *
+ * So the authored Y is a HINT, not a position: the level is authored with
+ * things floating above their floor and the engine settles them. Without it an
+ * item hangs where the record put it and a creature hangs in the air — which
+ * is why a creature could be reasoned about correctly by the collision layer
+ * and still look wrong, and why "monsters stuck in geometry" survived two
+ * rounds of collision fixes that were each individually right.
+ *
+ * `pos` is in and out, in the ENTITY ORIGIN frame, and only its Y is written.
+ * Returns false when the sweep could not place the start at all, which the
+ * original treats as a hard failure — it frees the item and error-loops on a
+ * creature — so a caller must not carry on as if the entity were placed.
+ */
+bool q2_entity_drop_to_floor(q2_collision *coll, s32 pos[3], s32 dist,
+                             s32 *out_node);
+
+/* The nudge above the record before the sweep, 0x800510A4. */
+#define Q2_ENTITY_SPAWN_NUDGE 30
+/* What the item and creature spawners both pass — 0x80059A50 and 0x800AE894. */
+#define Q2_ENTITY_DROP_DIST   1024
 
 struct q2_entity;
 struct q2_entity_world;
@@ -101,6 +142,10 @@ typedef struct q2_entity {
     s16  model_offset;          /* +0xF8 */
     s32  frame;                 /* +0x100 */
     s16  health;                /* +0x108 */
+
+    /* +0x4E — the cell the placement drop ended in, which q2_move_ent calls
+     * `node` at the same offset (trace.h). -1 when nothing placed it. */
+    s32  node;
 
     s32  remove_in;             /* +0xF4 */
     s32  respawn_at;            /* +0x4C */

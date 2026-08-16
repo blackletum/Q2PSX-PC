@@ -120,8 +120,16 @@ enum q2_item_flag {
     /* 0x800593F4: suppresses the per-tick frame advance, so the model holds
      * frame 0. Set on disc only by Blackhole P. */
     Q2_ITEM_NO_ANIM     = 0x0080,
-    /* 0x80059A44: clears the 0x400 argument the spawner is otherwise given. */
-    Q2_ITEM_NO_SPAWN_ARG = 0x0100
+    /*
+     * 0x80059A44: clears the 0x400 argument the spawner is otherwise given.
+     *
+     * AND THE 0x400 IS NOW IDENTIFIED. It is the DROP DISTANCE the shared
+     * placement routine sweeps downward at spawn — `sll a3, a3, 10` at
+     * 0x80059A50 turns it into 1024 — so this flag is Quake II's own no-drop
+     * flag and the name says so. The creature spawner passes the same 1024 out
+     * of 0x800AE894. See q2_entity_drop_to_floor.
+     */
+    Q2_ITEM_NO_DROP = 0x0100
 };
 
 /* One 24-byte record. */

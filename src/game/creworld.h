@@ -162,10 +162,15 @@ typedef struct q2_creature_world {
  * `common` must outlive the call but not the result — the modules are copied
  * and relocated into storage this owns. Returns Q2_OK even when a map places no
  * creatures; `w->stats` says what happened.
+ *
+ * `coll` is the zone's SecondaryCol and is what DROPS each creature onto its
+ * floor — the console's shared placement sweep. Passing NULL leaves every
+ * creature at the authored height, which is a hint rather than a position.
  */
 q2_result q2_creature_world_load(q2_creature_world *w, const disc *d,
                                  const q2_build_id *id,
-                                 const q2_common_file *common);
+                                 const q2_common_file *common,
+                                 q2_collision *coll);
 
 /*
  * Wake every creature and point the AI at the player. Call once the player is

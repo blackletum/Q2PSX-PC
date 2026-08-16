@@ -716,6 +716,8 @@ typedef struct client {
     bool              movers_ready;
     u32               mover_triggers;   /* items the script reached */
     u32               mover_moved;      /* ticks on which one moved */
+    u32               mover_sounds;     /* transitions that made a noise */
+    u32               breakable_opened; /* doors opened by being shot   */
     bool              mission_after_map; /* the screen is holding a LOADMAP */
     u32               mission_frames;
     u32               briefing_frames;
@@ -1143,8 +1145,9 @@ static void client_load_creatures(client *c, const s32 eye[3])
 
     client_free_creatures(c);
 
-    if (q2_creature_world_load(&c->creatures, c->disc, &c->build,
-                               &c->common) != Q2_OK) {
+    if (q2_creature_world_load(&c->creatures, c->disc, &c->build, &c->common,
+                               c->sim[0].coll_ready ? &c->sim[0].coll
+                                                    : NULL) != Q2_OK) {
         Q2_WARN("%s: creatures will not load", c->map);
         return;
     }
@@ -1941,6 +1944,17 @@ static bool client_load_zone(client *c, const char *map, int index);
 #define Q2_INTERMISSION_HEADLESS 45
 
 /*
+ * And how long one stays up in a WINDOW before releasing itself.
+ *
+ * A PORT CONSTANT. The console's tally is dismissed by a pad press latched
+ * inside its own spin loop (0x80018214) and has no timeout at all — but it
+ * also draws a prompt telling you to press something, which this port does not
+ * reconstruct for the tally. Ten seconds at 30 fps, so a player who does not
+ * press anything is not stranded, and a player who does leaves at once.
+ */
+#define Q2_INTERMISSION_WINDOW   300
+
+/*
  * Write the level that is ending into the mission table.
  *
  * One row per level of the unit, six of them, and a row whose name is empty is
@@ -2062,7 +2076,10 @@ static bool client_change_map(client *c, const char *map, const char *start)
 
     if (!client_load_zone(c, map, zone)) {
         Q2_WARN("LOADMAP: %s zone %d would not load", map, zone);
-        c->carry_player = false;
+        c->carry_player   = false;
+        c->carry_same_map = false;   /* both, or the next carry takes the
+                                      * one-level clock branch on a stale
+                                      * absolute level_time */
         return false;
     }
 
@@ -2746,6 +2763,16 @@ static bool client_load_zone(client *c, const char *map, int index)
             Q2_WARN("no zone 0 in %s", map);
         else
             Q2_INFO("%s has %d zone%s", map, index, index == 1 ? "" : "s");
+
+        /*
+         * A load that never touched the sim must not leave a transition
+         * ARMED. `carry_player` is only cleared by the successful restore, so
+         * a failed zone gate left it up and the next load — a restart, a new
+         * game — took the carry path and imported whatever the sim happened to
+         * hold. client_change_map already does this on its own failure.
+         */
+        c->carry_player   = false;
+        c->carry_same_map = false;
         return false;
     }
 
@@ -3152,6 +3179,9 @@ static bool client_load_zone(client *c, const char *map, int index)
      * change -- and zone changes are exactly what the gates now cause. */
     q2_sim_free(&c->sim[0]);
     q2_sim_init(&c->sim[0], &c->zone, q2_build_tick_rate(&c->build));
+    /* The client owns a view-weapon machine, so the machine decides when a
+     * shot happens — the tick must not also fire from the raw trigger. */
+    c->sim[0].fire_from_input = false;
     {
         s32 feet[3];
         feet[0] = c->cam.pos[0];
@@ -4764,6 +4794,21 @@ static void client_input_simulated(client *c, float dt)
         {
             q2_vw_fire_result report = Q2_VW_FIRE_NONE;
 
+            /*
+             * THE MACHINE OWNS THE TRIGGER. `q2_vw_wants_fire` is this port's
+             * name for the console's own condition — IDLE with the dry latch
+             * clear — and it sat here with no caller anywhere for as long as
+             * the sim fired on its own tick.
+             *
+             * With the invented 30-tick gate gone (weapon.c), the rate of fire
+             * is the fire CLIP, which is what the console does: its IDLE arm
+             * calls the fire function and then enters FIRE. The three weapons
+             * that need to be faster get it from their own frame driver, which
+             * is drained just below.
+             */
+            if (ticks > 0 && in.attack && q2_vw_wants_fire(&c->vw))
+                q2_sim_fire(&c->sim[0]);
+
             if (c->sim[0].combat.shot_serial != c->shot_serial_shown) {
                 c->shot_serial_shown = c->sim[0].combat.shot_serial;
 
@@ -5038,6 +5083,67 @@ static void client_input_simulated(client *c, float dt)
                                              & 0x0FFFu),
                                        client_mover_blocked, &bctx);
             q2_sim_movers_update(&c->sim[0], &c->movers);
+
+            /*
+             * A SHOOTABLE LEAF whose hit points ran out. The sim queues the
+             * event item; opening it is this side's business because the mover
+             * set is here. `q2_movers_trigger_item` is the same entry a script
+             * uses, so a shot and a switch open a door the same way — and a
+             * MOVER_C's two leaves both go, which is what "every mover built
+             * from this item" is for.
+             */
+            {
+                u32 q;
+
+                for (q = 0; q < c->sim[0].breakable_open_count; q++) {
+                    u32 n = q2_movers_trigger_item(&c->movers,
+                                                   c->sim[0].breakable_open[q]);
+                    if (n) {
+                        c->mover_triggers += n;
+                        c->breakable_opened++;
+                    }
+                }
+                c->sim[0].breakable_open_count = 0;
+            }
+
+            /*
+             * AND WHAT THE TRANSITIONS SOUND LIKE. The mover set asks; this is
+             * the only place that knows where a mover's box is, and the
+             * console positions every one of these calls at the CENTRE of that
+             * box (with the live displacement added on the closing arm), so
+             * the sound follows the door.
+             */
+            {
+                u32 mi;
+
+                for (mi = 0; mi < c->movers.count; mi++) {
+                    s8 which = q2_mover_take_sound(&c->movers, mi);
+                    s32 at[3];
+                    u32 t;
+                    bool have = false;
+
+                    if (which < 0 || which >= Q2_MVSND_COUNT)
+                        continue;
+
+                    for (t = 0; t < c->sim[0].mover_count; t++) {
+                        const q2_move_target *mt = &c->sim[0].volumes[t];
+                        int k;
+
+                        if (mt->id != (s32)mi)
+                            continue;
+                        for (k = 0; k < 3; k++)
+                            at[k] = (mt->min[k] + mt->max[k]) / 2;
+                        have = true;
+                        break;
+                    }
+
+                    if (have)
+                        client_play_sound_at(c, q2_mover_sound_name[which], at);
+                    else
+                        client_play_sound(c, q2_mover_sound_name[which]);
+                    c->mover_sounds++;
+                }
+            }
 
             /*
              * NO TOUCH PASS. `client_movers_touch` used to be called here, on
@@ -5633,6 +5739,20 @@ static void client_menu_requests(client *c)
     case Q2_MREQ_RESTART:
     case Q2_MREQ_RESUPPLY:
         Q2_INFO("restarting %s zone %d", c->map, c->zone_index);
+        /*
+         * A RESTART IS NOT A TRANSITION, and the carry flags must be down
+         * before the load or the player is handed back the corpse they just
+         * died as. Only the successful restore clears `carry_player`, and a
+         * failed zone gate leaves it up — so a player who died anywhere on a
+         * map with a zone gate restarted at 0 health, died again, and looped.
+         * Observed: died -> restarting -> died -> 0 hp -> restarting.
+         */
+        c->carry_player   = false;
+        c->carry_same_map = false;
+        /* And the board that was up must not survive the restart, or the
+         * player comes back alive standing behind it. */
+        c->mission_open   = false;
+        c->briefing_open  = false;
         client_load_zone(c, c->map, c->zone_index);
         q2_menu_close(&c->menu);
         break;
@@ -5650,7 +5770,10 @@ static void client_menu_requests(client *c)
         q2_cre_set_skill(c->menu.skill);
         Q2_INFO("front end: new game on skill %d -> %s",
                 c->menu.skill, c->first_map);
-        c->in_front_end = false;
+        c->in_front_end   = false;
+        /* A new game carries nothing either. */
+        c->carry_player   = false;
+        c->carry_same_map = false;
         client_load_zone(c, c->first_map, 0);
         q2_menu_close(&c->menu);
         break;
@@ -6833,9 +6956,10 @@ static void client_write_shot(client *c, bool numbered)
                 if (c->movers.movers[mi].sealed)                 sealed++;
             }
             Q2_INFO("  movers    %u built, %u triggered by the script, "
-                    "%u tick-moves",
+                    "%u tick-moves, %u sounds, %u shot open",
                     c->movers_ready ? c->movers.count : 0,
-                    c->mover_triggers, c->mover_moved);
+                    c->mover_triggers, c->mover_moved, c->mover_sounds,
+                    c->breakable_opened);
             Q2_INFO("  movers    %u part boxes solid, %u blocked now, "
                     "%u sealing their portal",
                     c->sim[0].mover_count, blocked, sealed);
@@ -7090,6 +7214,31 @@ static void client_film_blit(client *c)
  * (0x80021818 only sets the arm flag on a frame where CROSS is NOT held), so
  * the press that raised the screen from the pause menu cannot also dismiss it.
  */
+/*
+ * One frame with an intermission board up — the level-end tally, the arrival
+ * briefing or the end-of-mission placard.
+ *
+ * The world is FROZEN, which is the console's own behaviour: 0x80018ED8 spins
+ * on the tally and zeroes the frame-delta accumulator each pass, so no game
+ * time elapses. All this does is take the dismiss.
+ */
+static void client_intermission_frame(client *c, float dt)
+{
+    u16 pad = client_menu_pad(c);
+    bool cross = (pad & (Q2_PAD_CROSS | Q2_PAD_START)) != 0;
+
+    (void)dt;
+
+    /* An edge, so the press that opened the board cannot also close it. */
+    if (cross && !c->popup_cross_prev) {
+        if (c->endmis_open)       c->endmis_open   = false;
+        else if (c->mission_open) c->mission_open  = false;
+        else                      c->briefing_open = false;
+        q2_prompt_hide_all(&c->prompts);
+    }
+    c->popup_cross_prev = cross;
+}
+
 static void client_popup_frame(client *c, float dt)
 {
     s32  ticks = (s32)((double)dt * 300.0 + 0.5);
@@ -7255,6 +7404,10 @@ static void client_draw_view(void *user, q2_screen *s, int p,
      * the world's own reload from quietly disagreeing with the screen's.
      */
     c->cam.projection = (u16)s->view[p].proj;
+    /* The 2D extent as well as the offset — the flare rings scale by it, and
+     * the two fields only differ on the two-horizontal split. */
+    c->cam.ext_w      = s->view[p].vw;
+    c->cam.ext_h      = s->view[p].vh;
     c->cam.ofs_x      = s->view[p].ofs_x;
     c->cam.ofs_y      = s->view[p].ofs_y;
     c->cam.far_z      = s->view[p].far_z;
@@ -8451,6 +8604,19 @@ int main(int argc, char **argv)
     }
 
     c.renderer = SDL_CreateRenderer(c.window, NULL);
+
+    /*
+     * VSYNC, so the front end does not free-run.
+     *
+     * QFRONT is two nodes and eight vertices and drew at around 560 fps
+     * uncapped. Nothing here is wrong at that rate any more — the accumulator
+     * carries its remainder now — but the console presents at the field rate
+     * and a title screen spinning a logo as fast as the GPU will go is not
+     * what it did. Failure is ignored: a driver that will not vsync still
+     * gets a correct, faster picture.
+     */
+    if (c.renderer)
+        SDL_SetRenderVSync(c.renderer, 1);
     /*
      * XBGR1555, NOT XRGB1555 — RED LIVES IN THE LOW BITS.
      *
@@ -9133,6 +9299,30 @@ no_window:
                 q2_sim_scene_advance(&c.sim[0], (double)dt);
                 client_scene_lights(&c);
             }
+        } else if (c.mission_open || c.briefing_open || c.endmis_open) {
+            /*
+             * AND THE INTERMISSION BOARDS FREEZE IT TOO. This was the bug that
+             * killed the player at every level exit.
+             *
+             * The level-end tally is not a screen drawn over a running world:
+             * 0x80018ED8 SPIN-LOOPS on it —
+             *
+             *     80018F08  jal 0x80018868      one iteration of the tally
+             *     80018F10  beq v0, zero, 0x80018F08
+             *
+             * — and the in-game logic at 0x800190AC is AFTER that loop, not
+             * inside it. 0x80018868 draws and swaps and nothing else, and at
+             * 0x80018928 it ZEROES the frame-delta accumulator the in-game
+             * frame reads, so no time passes at all while the board is up.
+             *
+             * The port left the sim running behind it. The creature that was
+             * shooting you when you reached the exit kept shooting, the death
+             * check kept running, and the HUD was suppressed so the health
+             * draining was not even visible. Measured windowed on Base2: the
+             * board comes up at 100 hp and the player is dead by frame 4600,
+             * still standing at the door, with the level change never made.
+             */
+            client_intermission_frame(&c, dt);
         } else if (c.popup.visible) {
             /*
              * THE OBJECTIVES POP-UP HOLDS THE WORLD, the same way the menu
@@ -9161,10 +9351,22 @@ no_window:
         {
             u32 target;
             if (q2_sim_take_zone_change(&c.sim[0], &target)) {
-                Q2_INFO("zone gate -> zone %u", target);
-                c.carry_player   = true;
-                c.carry_same_map = true;
-                client_load_zone(&c, c.map, (int)target);
+                /*
+                 * A GATE TO THE ZONE WE ARE ALREADY IN IS NOT A GATE.
+                 * 0x80079178 makes the same test before it stores the request,
+                 * and without it a volume in the middle of zone 0 that names
+                 * "Zone0" reloads the zone every time the player walks through
+                 * it — which reads as the level restarting under you.
+                 */
+                if ((int)target == c.zone_index) {
+                    Q2_DEBUG("zone gate names the zone we are in (%u)", target);
+                } else {
+                    Q2_INFO("zone gate -> zone %u ('%s')", target,
+                            c.sim[0].event_rt.pending_zone_name);
+                    c.carry_player   = true;
+                    c.carry_same_map = true;
+                    client_load_zone(&c, c.map, (int)target);
+                }
             }
         }
 
@@ -9224,7 +9426,8 @@ no_window:
         /* The briefing, released the same way and for the same reason. */
         if (c.briefing_open) {
             c.briefing_frames++;
-            if (c.headless && c.briefing_frames >= Q2_INTERMISSION_HEADLESS) {
+            if (c.briefing_frames >= (c.headless ? Q2_INTERMISSION_HEADLESS
+                                                 : Q2_INTERMISSION_WINDOW)) {
                 c.briefing_open = false;
                 q2_prompt_hide_all(&c.prompts);
             }
@@ -9232,7 +9435,19 @@ no_window:
 
         if (c.mission_after_map) {
             c.mission_frames++;
-            if (c.headless && c.mission_frames >= Q2_INTERMISSION_HEADLESS)
+            /*
+             * RELEASES IN A WINDOW TOO. The `c.headless &&` guard meant an
+             * interactive player had to guess ESCAPE or a right-click to leave
+             * a screen nothing told them about — and until they did, the world
+             * behind it was running. With the freeze above that is no longer
+             * lethal, but a board with no visible way out is still a dead end.
+             *
+             * The console leaves its tally on a pad press (0x80018214 latches
+             * the edge inside the spin loop); the timeout is the port's, and
+             * the press is wired below.
+             */
+            if (c.mission_frames >= (c.headless ? Q2_INTERMISSION_HEADLESS
+                                                : Q2_INTERMISSION_WINDOW))
                 c.mission_open = false;
 
             if (!c.mission_open) {

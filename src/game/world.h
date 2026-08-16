@@ -152,6 +152,22 @@ typedef struct q2_camera {
     s32 ofs_x, ofs_y;
 
     /*
+     * The viewport's 2D EXTENT — view+278/+280, which is NOT the same field as
+     * its size at +274/+276 even though four of the five layouts copy one into
+     * the other. Two-horizontal is the one that does not: it stores 320 there
+     * against a 512-wide viewport.
+     *
+     * Three of the flare generators read the extent — the 12-gon burst rim,
+     * the disc's hexagon and the starburst's arm lengths — so feeding them the
+     * size instead makes a split-screen flare 1.6x too wide and 0.77x too
+     * short, an ellipse where the console draws a circle.
+     *
+     * Zero on both means "use the buffer you were handed", the same paired
+     * sentinel `ofs_x`/`ofs_y` use.
+     */
+    s32 ext_w, ext_h;
+
+    /*
      * The viewport's far distance — view+264, which the per-viewport draw parks
      * at 0x800B2CCC for the polygon emitter. It is 6400 for every layout except
      * the quad split, which uses 4000.

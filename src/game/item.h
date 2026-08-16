@@ -190,7 +190,8 @@ typedef struct q2_item_spawn_stats {
  * behaviour too: nothing spawns and the record is silently skipped.
  */
 q2_entity *q2_item_spawn(q2_entity_set *set, const q2_pop_place *place,
-                         const q2_item_table *table, s16 model_offset);
+                         const q2_item_table *table, s16 model_offset,
+                         q2_collision *coll);
 
 /*
  * Every place record of every group the loaded zone could own. Path groups
@@ -222,6 +223,7 @@ q2_entity *q2_item_spawn(q2_entity_set *set, const q2_pop_place *place,
  */
 q2_result q2_item_spawn_zone(q2_entity_set *set, const q2_population *pop,
                              int zone, const q2_item_table *table,
+                             q2_collision *coll,
                              q2_item_spawn_stats *stats);
 
 /* Every group of the map, whichever zone it names. `q2_item_spawn_zone` with

@@ -377,7 +377,26 @@ typedef struct q2_player_combat {
  */
 typedef enum q2_breakable_kind {
     Q2_BREAKABLE_GLASS = 0,
-    Q2_BREAKABLE_SHOOTTHEN
+    Q2_BREAKABLE_SHOOTTHEN,
+    /*
+     * A SHOOTABLE DOOR OR BUTTON, and they are the same thing.
+     *
+     * Not a CALL primitive at all — it is a plain MOVER_A whose s16 at +20 is
+     * non-zero. Its load handler at 0x80025D24 then installs the damage
+     * callback 0x8002F050 at object+0x24 and flags the object's box with bit
+     * 0x4, and bit 0x4 is the only thing a weapon impact gates on. 14 such
+     * panels exist, across ten maps.
+     *
+     * The port used to decode that halfword as a boolean `touch_opens` and
+     * read it nowhere, and the box registry only ever scanned CALL items — so
+     * there was no path from a shot to a mover at all and a shootable button
+     * did nothing.
+     *
+     * BUTTON and ROTBUTTON, the two CALL primitives with the word in their
+     * name, are NOT shootable: neither constructor allocates a box or installs
+     * a +0x24 callback. A shot correctly does nothing to those.
+     */
+    Q2_BREAKABLE_MOVER
 } q2_breakable_kind;
 
 typedef struct q2_breakable {
@@ -389,6 +408,9 @@ typedef struct q2_breakable {
     u8  count_b;        /* GLASS item[+12]: pieces on shattering, box-wide   */
     u8  kind;           /* q2_breakable_kind                                 */
     u32 record_offset;  /* SHOOTTHEN: the record to run — obj+0x40           */
+    /* MOVER: the event item the leaf was built from, which is the identity
+     * q2_movers_trigger_item keys on. */
+    u32 item_offset;
     bool broken;
 } q2_breakable;
 
@@ -431,6 +453,16 @@ typedef struct q2_sim {
      * it anyway: a projectile advances by `vel * dt`, not by `vel`.
      */
     s32                  cur_dt;
+
+    /*
+     * Whether the TICK may fire the weapon from `input->attack`.
+     *
+     * False for a caller that owns a view-weapon machine, because on the
+     * console the machine is the only thing that calls a fire function. True
+     * for one that does not — the offline harness, the tests — so a shot can
+     * still be made without an animation to drive it.
+     */
+    bool                 fire_from_input;
 
     /*
      * The hull entities move in is SecondaryCol, not PrimaryColl. The zone
@@ -506,6 +538,12 @@ typedef struct q2_sim {
     u32          breakable_hits;   /* shots that reached one                 */
     u32          breakable_pieces; /* and the debris they threw              */
     u32          breakable_fired;  /* SHOOTTHEN records raised by a shot     */
+    /*
+     * Shootable leaves whose hit points reached zero this tick, by event-item
+     * offset. Queued rather than opened here: the mover set is the caller's.
+     */
+    u32          breakable_open[8];
+    u32          breakable_open_count;
     /* The scene the panes' nodes belong to, kept so the hitscan path can throw
      * their debris without every shot carrying a scene pointer. */
     const struct q2_scene *breakable_scene;
@@ -553,6 +591,23 @@ typedef struct q2_sim {
     u32          zone_change_target;
 
     s32  dt_accum;      /* leftover dt units not yet consumed by a tick       */
+
+    /*
+     * AND THE SUB-UNIT REMAINDER, which the accumulator used to throw away.
+     *
+     * `(s32)(elapsed * 300)` truncates. A frame shorter than 1/300 s adds
+     * ZERO, so above 300 fps the accumulator never reaches Q2_DT_NOMINAL and
+     * the world never steps at all — and between the two, a fixed fraction of
+     * every frame is lost. The front end is the one scene light enough to
+     * cross that cliff: QFRONT is two nodes and eight vertices and runs at
+     * around 560 fps in a window, where a BASE1 session runs at about 31.
+     * That is why the title logo stuttered and nothing in a level did.
+     *
+     * Carried across ticks and NEVER cleared. Clearing it alongside dt_accum
+     * would discard up to a whole 1/300 s per tick — most of the error this
+     * exists to remove.
+     */
+    double dt_frac;
     u32  tick_count;
     s32  dt_per_field;  /* 6 on PAL, 5 on NTSC — the build's field rate       */
 

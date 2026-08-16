@@ -928,8 +928,13 @@ u32 q2_world_build_ot(const q2_world_zone *z,
                                                           : screen_w / 2);
         view.centre[1] = (s16)((cam->ofs_x || cam->ofs_y) ? cam->ofs_y
                                                           : screen_h / 2);
-        view.extent[0] = (s16)screen_w;
-        view.extent[1] = (s16)screen_h;
+        /* The 2D EXTENT, not the size — see q2_camera. Paired sentinel, so a
+         * layout with a legitimately-zero component on one axis does not fall
+         * back on that axis alone. */
+        view.extent[0] = (s16)((cam->ext_w || cam->ext_h) ? cam->ext_w
+                                                          : screen_w);
+        view.extent[1] = (s16)((cam->ext_w || cam->ext_h) ? cam->ext_h
+                                                          : screen_h);
 
         /*
          * One bucket for all of them, as the original has. Nearest in the

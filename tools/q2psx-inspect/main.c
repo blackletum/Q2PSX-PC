@@ -810,7 +810,8 @@ static int cmd_verify(disc *d)
                         for (k = 0; k < Q2_MONSTER_CLASS_COUNT; k++)
                             q2_monster_set_register(&ms, k);
 
-                        if (q2_spawn_from_population(&ms, &pop3, &st) == Q2_OK) {
+                        /* A census with no hull: no drop, which is what a count wants. */
+                        if (q2_spawn_from_population(&ms, &pop3, NULL, &st) == Q2_OK) {
                             spawn_records += st.records;
                             spawn_placed  += st.placed;
                             spawn_oob     += st.out_of_range;

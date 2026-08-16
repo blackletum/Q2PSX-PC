@@ -1,5 +1,6 @@
 #include "spawn.h"
 
+#include "entity.h"       /* q2_entity_drop_to_floor: the shared spawn drop */
 #include "worldscale.h"   /* Q2_EYE_BASE: the record is the feet */
 
 #include <stdlib.h>
@@ -40,7 +41,7 @@ static q2_monster *monster_push(q2_monster_set *set)
 }
 
 q2_result q2_spawn_from_population(q2_monster_set *out, const q2_population *pop,
-                                   q2_spawn_stats *stats)
+                                   q2_collision *coll, q2_spawn_stats *stats)
 {
     q2_spawn_stats local;
     u32 gi;
@@ -114,8 +115,40 @@ q2_result q2_spawn_from_population(q2_monster_set *out, const q2_population *pop
              * hull in the first place (openquestions #48) — a sound experiment
              * on a wrong premise.
              */
-            m->pos[1] = rec.y - Q2_EYE_BASE;
+            /*
+             * AND THE FURTHER 30, AND THE DROP. The 286 alone is the frame
+             * conversion; the shared placement routine 0x80050FA0 also nudges
+             * by 30 (0x800510A4) and then sweeps DOWN by the distance its
+             * caller passes. The creature spawner's call at 0x8003B5C4 takes
+             * that distance from the word at 0x800AE894, whose halfwords are
+             * 0xFFFF and 0x0400 — a zone hint of -1 and 1024 units, the same
+             * distance the item spawner passes.
+             *
+             * This is why "monsters stuck in geometry" survived two rounds of
+             * collision fixes that were each individually correct. The hull
+             * select, the four-corner CheckBottom and the three-trace
+             * movestep were all reasoning correctly about a creature that was
+             * never put on the floor in the first place: the authored Y is a
+             * HINT and the engine settles it.
+             */
+            m->pos[1] = rec.y - Q2_EYE_BASE - Q2_ENTITY_SPAWN_NUDGE;
             m->pos[2] = rec.z;
+
+            if (coll && !q2_entity_drop_to_floor(coll, m->pos,
+                                                 Q2_ENTITY_DROP_DIST, NULL)) {
+                /*
+                 * 0x8003B624 error-loops here. The port cannot, and must not
+                 * drop the record either: Population is per MAP and a session
+                 * is in one ZONE, so most of what fails to place is simply a
+                 * creature standing in another zone's rooms — and the caller's
+                 * own geometric filter is what decides that, after this. A
+                 * CREBATCH can also summon one of them later.
+                 *
+                 * So it is COUNTED and left at its authored height, which is
+                 * exactly where it was before this drop existed.
+                 */
+                local.unplaced++;
+            }
 
             /* The stored angle is INFERRED to be on the 4096-step circle: the
              * observed range is 0..3958 and the four dominant values are close

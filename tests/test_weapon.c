@@ -150,7 +150,13 @@ static void test_firing(void)
     check_eq_i(r.kind, Q2_FK_BOLT, "as a bolt");
     check_eq_i(r.shot_count, 1, "one shot");
     check_eq_i(r.shot[0].damage, 8, "for 8");
-    check_eq_i(r.next_fire, 30, "and gates the next shot 30 ticks out");
+    /*
+     * NO GATE. The fire functions write level_time + 30 to client+204 and
+     * nothing in the weapon path ever reads it back — the rate of fire is the
+     * fire CLIP, because the console's idle state calls the fire function
+     * itself and then enters FIRE. This check used to pin the invented gate.
+     */
+    check_eq_i(r.next_fire, 0, "and gates nothing: the animation is the rate");
     check_eq_i(r.kick[0], -11, "with a kick of -11");
 
     /* Quad is a multiply at the fire site, and it is always four. */

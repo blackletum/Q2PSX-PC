@@ -47,6 +47,7 @@
 #ifndef Q2PSX_SPAWN_H
 #define Q2PSX_SPAWN_H
 
+#include "collision.h"
 #include "monster.h"
 #include "population.h"
 #include "q2psx.h"
@@ -62,6 +63,11 @@ typedef struct q2_spawn_stats {
     u32 placed;         /* creatures created                     */
     u32 no_module;      /* class_id with no registered module    */
     u32 out_of_range;   /* class_id >= 38, which should never happen */
+    /* The placement drop could not find a cell for the start point at all.
+     * The console error-loops on this; the port leaves the creature out and
+     * counts it, because a creature the hull cannot place is exactly what
+     * three reports of "stuck in geometry" have been about. */
+    u32 unplaced;
 } q2_spawn_stats;
 
 typedef struct q2_monster_set {
@@ -86,8 +92,14 @@ void q2_monster_set_register(q2_monster_set *set, u32 class_id);
  * placed, so the caller can see the shortfall rather than silently getting
  * fewer monsters than the level intends.
  */
+/*
+ * `coll` is the zone's SecondaryCol, and it is what puts a creature ON THE
+ * FLOOR: the console's shared placement routine sweeps 1024 units down from
+ * the nudged record height and takes the Y it stops at. NULL skips the drop,
+ * which is right for a census and wrong for a live level.
+ */
 q2_result q2_spawn_from_population(q2_monster_set *out, const q2_population *pop,
-                                   q2_spawn_stats *stats);
+                                   q2_collision *coll, q2_spawn_stats *stats);
 
 /*
  * Wake every placed creature: monster_start_go on each, which points its think

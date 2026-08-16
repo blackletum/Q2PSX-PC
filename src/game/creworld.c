@@ -271,7 +271,8 @@ static void classes_bind(q2_creature_world *w)
 /* ------------------------------------------------------------------------- */
 q2_result q2_creature_world_load(q2_creature_world *w, const disc *d,
                                  const q2_build_id *id,
-                                 const q2_common_file *common)
+                                 const q2_common_file *common,
+                                 q2_collision *coll)
 {
     q2_population pop;
     u32 i;
@@ -305,7 +306,7 @@ q2_result q2_creature_world_load(q2_creature_world *w, const disc *d,
     w->pop       = pop;
     w->pop_ready = true;
 
-    if (q2_spawn_from_population(&w->set, &pop, &w->stats) != Q2_OK)
+    if (q2_spawn_from_population(&w->set, &pop, coll, &w->stats) != Q2_OK)
         return Q2_ERR_NO_MEMORY;
 
     /*

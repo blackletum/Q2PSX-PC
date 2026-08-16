@@ -1077,7 +1077,58 @@ u32 q2_sim_attach_breakables(q2_sim *sim, const q2_scene *scene,
 
             if (!q2_events_get_item(&sim->events, &rec, i, &item))
                 break;
-            if (item.opcode != Q2_EVOP_CALL || !item.payload)
+            if (!item.payload)
+                continue;
+
+            /*
+             * A SHOOTABLE DOOR OR BUTTON IS A MOVER_A, not a CALL.
+             *
+             * 0x80025E98 tests the item's s16 at +20 for > 0 and, when it is,
+             * installs the damage callback at object+0x24 and flags the box
+             * 0x4 — and bit 0x4 is the only thing a weapon impact gates on. So
+             * a panel you shoot to open a door is an ordinary MOVER_A with hit
+             * points, and this loop never looked at one. Fourteen of them, in
+             * ten maps.
+             *
+             * The hit points come from `p`, the WALKED copy: 0x80025E98 is
+             * `lh v0, 20(s0)` with s0 the item in the record being walked, and
+             * only the object slots are rebased (mover.h). The node slot is
+             * therefore read from the rebased pointer and the health is not.
+             */
+            if (item.opcode == Q2_EVOP_MOVER_A) {
+                const u8 *mp = item.payload - 2;
+                const u8 *mq;
+                s16 hp, mslot;
+
+                if (item.len < 24)
+                    continue;
+                hp = q2_rd_s16(mp + 20);
+                if (hp <= 0)
+                    continue;               /* an ordinary door */
+                if (sim->breakable_count >= Q2_SIM_MAX_BREAKABLES)
+                    break;
+
+                mq    = q2_uf_operand_at(ops, mp, item.len);
+                mslot = q2_rd_s16(mq + 8);   /* the first node slot */
+                if (mslot < 0 || !q2_scene_get_node(scene, (u32)mslot, &node))
+                    continue;
+
+                b = &sim->breakable[sim->breakable_count];
+                memset(b, 0, sizeof(*b));
+                b->scene_node = mslot;
+                for (k = 0; k < 3; k++) {
+                    b->bmin[k] = node.bbox_min[k];
+                    b->bmax[k] = node.bbox_max[k];
+                }
+                b->health       = hp;
+                b->kind         = (u8)Q2_BREAKABLE_MOVER;
+                b->item_offset  = item.offset;
+                b->record_offset = rec.offset;
+                sim->breakable_count++;
+                continue;
+            }
+
+            if (item.opcode != Q2_EVOP_CALL)
                 continue;
             if (!q2_events_get_call_index(&item, &call_index))
                 continue;
@@ -1236,6 +1287,33 @@ u32 q2_sim_breakable_shot(q2_sim *sim, const s32 from[3], const s32 to[3],
          * record dispatcher. Shoot the panel, and whatever the rest of that
          * record does happens.
          */
+        /*
+         * A SHOOTABLE LEAF. 0x8002F050 subtracts the amount from the item's
+         * own hit points and opens the door when they reach zero.
+         *
+         * The box is NOT freed and `broken` is not set: the console leaves the
+         * counter at or below zero in the item, so every later shot re-opens
+         * the leaf. That is the behaviour, and it is what makes a shoot-to-open
+         * door work twice.
+         *
+         * The open itself is queued rather than done here — the mover set is
+         * the caller's, not the sim's.
+         */
+        if (b->kind == Q2_BREAKABLE_MOVER) {
+            if (damage == 0)
+                return 0;
+            sim->breakable_hits++;
+            b->health = (s16)(b->health - damage);
+            if (b->health > 0)
+                return 0;
+
+            if (sim->breakable_open_count <
+                    sizeof(sim->breakable_open) / sizeof(sim->breakable_open[0]))
+                sim->breakable_open[sim->breakable_open_count++] =
+                    b->item_offset;
+            return 0;
+        }
+
         if (b->kind == Q2_BREAKABLE_SHOOTTHEN) {
             if (damage == 0)
                 return 0;                    /* 0x8002E840: a script call */

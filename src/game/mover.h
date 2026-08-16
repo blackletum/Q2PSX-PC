@@ -84,6 +84,53 @@
 #define Q2_MOVER_TIMEBASE 300
 #define Q2_MOVER_WAIT_NEVER 0xFFFFu
 
+/* ------------------------------------------------------------------------- */
+/* The sounds — 0x80025658's three, and they are per OPCODE FAMILY            */
+/* ------------------------------------------------------------------------- */
+/*
+ * A mover made no sound at all, and the reason is that this module never had a
+ * sound path: `q2_movers_tick` reaches all three of the transitions the
+ * original plays on and plays nothing at any of them.
+ *
+ * The linear handler at 0x80025658 makes exactly three `jal 0x80073704` calls:
+ *
+ *   0x800257A8  msc_keyuse   a keyed door accepted the player's key
+ *   0x8002585C  msc_keytry   it refused, and only the first time — the same
+ *                            once-only latch `announced` already models
+ *   0x80025A5C  pt1__strt    the motion starts, reached from BOTH the
+ *                            DELAY->OPENING arm (0x800258F0) and the
+ *                            OPEN->CLOSING arm (0x800259BC)
+ *
+ * There is NO arrival sound and NO looping move sound on a linear door. Do not
+ * assume the start/loop/stop shape: only ROTHATCH has it (0x8002B250 plays
+ * pt1__strt, then pt1__mid through the LOOPING entry point 0x80073734, and
+ * pt1__end on arrival, stopping the loop with 0x8007398C).
+ *
+ * The six handles are all `lw a0, N(gp)` GLOBALS registered by name at
+ * 0x8002D4E0..0x8002D800 — not one is loaded from the runtime object, and no
+ * payload carries a sound operand. So the sound is a property of the opcode
+ * family, and this port folds several families into one set:
+ *
+ *   MOVER_A/B/C, LIFT1, CAGELIFT1, PLATFORM -> the three above
+ *   BUTTON                                  -> amb_butn2 and nothing else
+ *   PISTON, DISH                            -> silent, deliberately
+ *
+ * WHERE it comes from: every call passes the CENTRE of the mover's collision
+ * box, and the CLOSING one adds the live displacement (0x80025A00 onward), so
+ * the sound follows the door.
+ */
+typedef enum q2_mover_sound {
+    Q2_MVSND_NONE = -1,
+    Q2_MVSND_KEY_USE = 0,   /* msc_keyuse, 0x800B27CC */
+    Q2_MVSND_KEY_TRY,       /* msc_keytry, 0x800B27D0 */
+    Q2_MVSND_START,         /* pt1__strt,  0x800B27D8 */
+    Q2_MVSND_BUTTON,        /* amb_butn2,  0x800B27E4 */
+    Q2_MVSND_COUNT
+} q2_mover_sound;
+
+/* The bank keys, in that order. */
+extern const char *const q2_mover_sound_name[Q2_MVSND_COUNT];
+
 /* obj+0x52 in the original. */
 typedef enum q2_mover_state {
     Q2_MV_IDLE = 0,
@@ -140,6 +187,21 @@ typedef struct q2_mover {
      * and no renderer did.
      */
     u8  sealed;
+
+    /*
+     * Which family's sounds this mover uses. BUTTON has its own single sound;
+     * PISTON and DISH have none. Set at build from the primitive, because the
+     * handler a constructor installs is what decides it.
+     */
+    u8  silent;        /* PISTON, DISH: no sound at all      */
+    u8  is_button;     /* amb_butn2 instead of the three     */
+
+    /*
+     * The sound this tick asked for, or Q2_MVSND_NONE. Drained by the owner,
+     * which is also the only thing that knows where the mover's box is and can
+     * therefore position the voice.
+     */
+    s8  sound_pending;
 
     s32 offset;         /* current displacement along the axis */
 
@@ -253,6 +315,9 @@ q2_result q2_movers_build_calls(q2_mover_set *out, const q2_events *events,
  * can tell a static frame from a busy one.
  */
 u32 q2_movers_tick(q2_mover_set *set, s32 dt, u16 player_keys);
+
+/* Take the sound a mover asked for this tick, or Q2_MVSND_NONE. */
+s8 q2_mover_take_sound(q2_mover_set *set, u32 index);
 
 /*
  * The same tick, with an OBSTRUCTION TEST — the half of the state machine that

@@ -154,7 +154,7 @@ static void test_glow_colours(void)
           "Bluekey materialises");
     check(find("Blackhole P")->flags & Q2_ITEM_NO_ANIM,
           "Blackhole holds frame 0");
-    check(find("Blackhole P")->flags & Q2_ITEM_NO_SPAWN_ARG,
+    check(find("Blackhole P")->flags & Q2_ITEM_NO_DROP,
           "Blackhole clears the spawner's 0x400 argument");
 }
 
@@ -483,7 +483,7 @@ static void test_spawn_and_think(void)
     place.unk = 0x9400;          /* bits 12..15 set, plus a heading of 0x400 */
     place.id = 39;               /* Shotgun P */
 
-    e = q2_item_spawn(&set, &place, NULL, 0);
+    e = q2_item_spawn(&set, &place, NULL, 0, NULL);
     check(e != NULL, "a known place id spawns");
     check_eq_i(e->effect, 2, "and carries the table's effect index");
     check_eq_i(e->kind, Q2_ENT_KIND_ITEM, "and the item kind, 46");
@@ -508,7 +508,7 @@ static void test_spawn_and_think(void)
 
     /* An id no record names spawns nothing at all. */
     place.id = 22;               /* the one gap inside the used range */
-    check(q2_item_spawn(&set, &place, NULL, 0) == NULL,
+    check(q2_item_spawn(&set, &place, NULL, 0, NULL) == NULL,
           "an unnamed place id spawns nothing");
 
     /* 0x8005947C: the spin is -3 per tick of the level clock. */
@@ -524,7 +524,7 @@ static void test_spawn_and_think(void)
         q2_entity *m;
 
         place.id = 45;           /* Bluekey P — the only record with the bit */
-        m = q2_item_spawn(&set, &place, NULL, 0);
+        m = q2_item_spawn(&set, &place, NULL, 0, NULL);
         check(m != NULL, "Bluekey P spawns");
         check_eq_i(m->scale, 0, "and starts at nothing");
 
@@ -561,7 +561,7 @@ static void test_touch_sweep(void)
 
     memset(&place, 0, sizeof(place));
     place.id = 27;               /* Shells P */
-    e = q2_item_spawn(&set, &place, NULL, 0);
+    e = q2_item_spawn(&set, &place, NULL, 0, NULL);
     check(e != NULL, "Shells P spawns");
 
     /* Out of reach: nothing happens. */
@@ -582,7 +582,7 @@ static void test_touch_sweep(void)
     memset(&set, 0, sizeof(set));
     world_with_player(&w, &inv);
     inv.health = 0;
-    e = q2_item_spawn(&set, &place, NULL, 0);
+    e = q2_item_spawn(&set, &place, NULL, 0, NULL);
     q2_entity_world_move_player(&w, 0, pos);
     e->think(e, &w);
     check_eq_i(inv.ammo[Q2_AMMO_SHELLS], 0, "a dead player collects nothing");
@@ -592,7 +592,7 @@ static void test_touch_sweep(void)
     memset(&set, 0, sizeof(set));
     world_with_player(&w, &inv);
     w.deathmatch = true;
-    e = q2_item_spawn(&set, &place, NULL, 0);
+    e = q2_item_spawn(&set, &place, NULL, 0, NULL);
     q2_entity_world_move_player(&w, 0, pos);
     e->think(e, &w);
     check(e->in_use, "in deathmatch the entity survives");
@@ -634,7 +634,7 @@ static void test_timed_removal(void)
 
     memset(&place, 0, sizeof(place));
     place.id = 27;
-    e = q2_item_spawn(&set, &place, NULL, 0);
+    e = q2_item_spawn(&set, &place, NULL, 0, NULL);
     check_eq_i(e->remove_in, Q2_ITEM_DROP_LIFE,
                "an item spawns with a 1500-tick life");
 
@@ -735,7 +735,7 @@ static u32 spawn_count(const q2_population *pop, int zone, u32 *other_zone)
     u32 n;
 
     memset(&set, 0, sizeof(set));
-    q2_item_spawn_zone(&set, pop, zone, NULL, &st);
+    q2_item_spawn_zone(&set, pop, zone, NULL, NULL, &st);
     n = set.count;
     if (other_zone)
         *other_zone = st.other_zone;

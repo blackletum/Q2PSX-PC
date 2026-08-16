@@ -59,6 +59,10 @@ typedef struct q2_event_rt {
     /* Set when a zone gate fires. The caller is responsible for the load. */
     bool has_zone_change;
     u32  pending_zone;
+    /* The 12-byte NAME12 the gate actually carries — "Zone0", "Zone1". The
+     * index above is its trailing decimal; the name is kept so an owner can
+     * check the zone exists before loading rather than trusting the parse. */
+    char pending_zone_name[13];
 
     /* Counters, so a caller can tell "nothing happened" from "nothing is
      * implemented yet". */

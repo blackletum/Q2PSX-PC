@@ -565,7 +565,8 @@ q2_touch_result q2_item_touch(u32 effect, q2_inventory *inv, const s32 pos[3],
 /* Spawning                                                                   */
 /* ------------------------------------------------------------------------- */
 q2_entity *q2_item_spawn(q2_entity_set *set, const q2_pop_place *place,
-                         const q2_item_table *table, s16 model_offset)
+                         const q2_item_table *table, s16 model_offset,
+                         q2_collision *coll)
 {
     const q2_item_def *def;
     q2_entity *e;
@@ -600,15 +601,41 @@ q2_entity *q2_item_spawn(q2_entity_set *set, const q2_pop_place *place,
 
     /*
      * 0x80051054 copies the place record straight in, then 0x80051068 and
-     * 0x800510A4 raise y by 286 and 30. +Y is down, so both subtract. The
-     * engine follows this with a hull query that drops the entity onto the
-     * surface below (0x80044F54 against the SecondaryCol context); that part is
-     * not reproduced yet, so an item on a slope sits where the record put it
-     * rather than on the floor.
+     * 0x800510A4 raise y by 286 and 30. +Y is down, so both subtract.
+     *
+     * AND THEN IT DROPS. The note here used to say the engine "follows this
+     * with a hull query that drops the entity onto the surface below
+     * (0x80044F54)" and that the part was not reproduced. Two things were
+     * wrong with that: 0x80044F54 is `q2_coll_find_node`, which locates the
+     * cell holding a point and clips nothing, and the drop is not a detail —
+     * it is a 1024-unit downward SWEEP, and the authored Y is a hint rather
+     * than a position. Without it every item in the game hangs where the
+     * record put it.
+     *
+     * The distance is the item's own: `sll a3, a3, 10` at 0x80059A50 unless
+     * the table's 0x100 flag is set, which is the no-drop flag Quake II's own
+     * items carry. See q2_entity_drop_to_floor.
      */
     e->pos[0] = place->x;
     e->pos[1] = place->y - Q2_ITEM_SPAWN_LIFT;
     e->pos[2] = place->z;
+
+    /*
+     * 0x800588C0 frees an entity the hull cannot place. This port does NOT,
+     * and the difference is the same one the creature spawner makes: this
+     * runs over the whole map's Population while a session holds one zone, so
+     * most of what fails to place is an item standing in another zone's rooms
+     * — and the zone filter above has already decided which those are. An
+     * item that fails here keeps the height the record gave it, which is
+     * exactly where every item was before this drop existed.
+     *
+     * Discarding them instead made four maps report "places no items".
+     */
+    if (!q2_entity_drop_to_floor(coll, e->pos,
+                                 (def->flags & Q2_ITEM_NO_DROP)
+                                     ? 0 : Q2_ENTITY_DROP_DIST,
+                                 &e->node))
+        e->node = -1;
 
     /* 0x80058930: the low twelve bits of the place record's halfword are the
      * heading. Bits 12..15 are something else and are left alone. */
@@ -653,6 +680,7 @@ q2_entity *q2_item_spawn(q2_entity_set *set, const q2_pop_place *place,
 
 q2_result q2_item_spawn_zone(q2_entity_set *set, const q2_population *pop,
                              int zone, const q2_item_table *table,
+                             q2_collision *coll,
                              q2_item_spawn_stats *stats)
 {
     q2_item_spawn_stats local;
@@ -692,7 +720,7 @@ q2_result q2_item_spawn_zone(q2_entity_set *set, const q2_population *pop,
 
             local.places++;
 
-            e = q2_item_spawn(set, &place, table, 0);
+            e = q2_item_spawn(set, &place, table, 0, coll);
             if (!e) {
                 if (q2_item_find(table, (s32)place.id))
                     local.no_memory++;
@@ -719,7 +747,8 @@ q2_result q2_item_spawn_all(q2_entity_set *set, const q2_population *pop,
                             const q2_item_table *table,
                             q2_item_spawn_stats *stats)
 {
-    return q2_item_spawn_zone(set, pop, -1, table, stats);
+    /* A census, not a placement: no hull, so no drop. */
+    return q2_item_spawn_zone(set, pop, -1, table, NULL, stats);
 }
 
 /* ------------------------------------------------------------------------- */

@@ -144,6 +144,53 @@ void q2_ent_burst_at(q2_ent_events *ev, const s32 pos[3], const u8 glow[3],
 }
 
 /* ------------------------------------------------------------------------- */
+/* The shared placement drop — see entity.h                                   */
+/* ------------------------------------------------------------------------- */
+bool q2_entity_drop_to_floor(q2_collision *coll, s32 pos[3], s32 dist,
+                             s32 *out_node)
+{
+    s32 dest[3], end[3];
+    s32 node = -1;
+
+    if (out_node)
+        *out_node = -1;
+    if (!pos)
+        return false;
+
+    /* No hull to drop against, or a caller that asked for no drop: the
+     * position stands. That is the item flag's arm, not a failure. */
+    if (!coll || dist <= 0)
+        return true;
+
+    dest[0] = pos[0];
+    dest[1] = pos[1] + dist;      /* +Y is down */
+    dest[2] = pos[2];
+
+    /*
+     * `q2_coll_move` returns false when the move was STOPPED, which is the
+     * answer this probe wants — a drop exists to be stopped by a floor. What
+     * it cannot place at all is reported by `node < 0`.
+     */
+    if (!q2_coll_move(coll, pos, dest, -1, end, &node) && node < 0)
+        return false;
+
+    /*
+     * A COMPLETED move means the sweep never met anything in `dist` units.
+     * collision.h warns that a completed move returns `end` verbatim, which
+     * here is 1024 units below the authored floor — so taking it would bury
+     * the entity rather than place it. The original's caller treats an
+     * unplaced entity as a failure; a completed drop is the same situation
+     * seen from the other side, and the position is left where it was.
+     */
+    if (end[1] < dest[1])
+        pos[1] = end[1];
+
+    if (out_node)
+        *out_node = node;
+    return true;
+}
+
+/* ------------------------------------------------------------------------- */
 void q2_entity_world_init(q2_entity_world *w)
 {
     if (!w)

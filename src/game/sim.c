@@ -52,6 +52,9 @@ void q2_sim_init(q2_sim *sim, const q2_world_zone *zone, int tick_rate_hz)
     if (sim->dt_per_field <= 0)
         sim->dt_per_field = Q2_DT_PER_FIELD;
 
+    /* Default ON: a caller with a view-weapon machine turns it off, and every
+     * other caller — the harness, the tests — keeps the old behaviour. */
+    sim->fire_from_input    = true;
     sim->gravity            = Q2_GRAVITY;
     sim->player[sim->cur_player].view_height = Q2_VIEW_STAND;
 
@@ -115,7 +118,11 @@ q2_result q2_sim_attach_items(q2_sim *sim, const q2_common_file *common,
     if (r != Q2_OK)
         return r;
 
-    r = q2_item_spawn_zone(&sim->entities, &pop, zone, table, NULL);
+    /* SecondaryCol, so every item is dropped onto its floor as the console
+     * drops it. NULL until the zone's hull is parsed, which is the order
+     * q2_sim_attach_zone already establishes. */
+    r = q2_item_spawn_zone(&sim->entities, &pop, zone, table,
+                           sim->coll_ready ? &sim->coll : NULL, NULL);
     if (r != Q2_OK)
         return r;
 
@@ -190,6 +197,28 @@ void q2_sim_scene_page(q2_sim *sim, bool title, bool visible)
     e->think = title ? scene_logo_title_think : scene_logo_sub_think;
 }
 
+/*
+ * Real time into the engine's 1/300 s units, CARRYING the fraction.
+ *
+ * `commit` consumes the remainder; a speculative caller (the mouse's
+ * look-ahead, which asks what the next step would be without taking it) must
+ * pass false or it steals time from the tick that follows.
+ */
+static s32 sim_whole_units(q2_sim *sim, double elapsed_seconds, bool commit)
+{
+    double frac = sim->dt_frac + elapsed_seconds * (double)Q2_DT_HZ;
+    double whole;
+
+    if (frac < 0.0)
+        frac = 0.0;
+    whole = (double)(s32)frac;      /* toward zero; frac is non-negative */
+
+    if (commit)
+        sim->dt_frac = frac - whole;
+
+    return (s32)whole;
+}
+
 u32 q2_sim_scene_advance(q2_sim *sim, double elapsed_seconds)
 {
     s32 dt;
@@ -197,10 +226,12 @@ u32 q2_sim_scene_advance(q2_sim *sim, double elapsed_seconds)
     if (!sim || !sim->scene_ready || elapsed_seconds <= 0.0)
         return 0;
 
-    dt = q2_sim_next_dt(sim, elapsed_seconds);
-    sim->dt_accum += (s32)(elapsed_seconds * (double)Q2_DT_HZ);
-    if (dt == 0)
+    sim->dt_accum += sim_whole_units(sim, elapsed_seconds, true);
+    dt = sim->dt_accum;
+    if (dt < Q2_DT_NOMINAL)
         return 0;
+    if (dt > Q2_DT_MAX)
+        dt = Q2_DT_MAX;
     sim->dt_accum = 0;
 
     sim->level_time          += dt;
@@ -258,7 +289,10 @@ u32 q2_sim_attach_scene(q2_sim *sim, const q2_common_file *common,
         place.unk = 0x1000u;
         place.id  = scene.id[i];
 
-        e = q2_item_spawn(&sim->entities, &place, table, 0);
+        /* The front end's props are a synthetic template at the origin and
+         * the builder overwrites their origin below — there is no floor to
+         * drop to and nothing that would use it. */
+        e = q2_item_spawn(&sim->entities, &place, table, 0, NULL);
         if (!e)
             continue;
 
@@ -2300,7 +2334,27 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
      */
     sim->cur_dt = dt;
 
-    if (input->attack)
+    /*
+     * THE SIM NO LONGER FIRES FROM RAW INPUT.
+     *
+     * On the console only the view-model machine may call a fire function: the
+     * IDLE arm of 0x8004F87C does it through viewmodel+32 (`jalr` at
+     * 0x8004FB30) and the four per-weapon arms of 0x8004FEE8 do it per
+     * animation frame. `xrefs 0x8004BFBC` finds the blaster's fire function
+     * referenced by exactly one word in the whole image — its table entry —
+     * and by no call at all.
+     *
+     * Firing here as well meant two independent things decided when a shot
+     * happened, and with the invented 30-tick gate removed this one fired on
+     * EVERY tick the trigger was down. The owner drives it now:
+     * `q2_vw_wants_fire` asks the machine, and `q2_vw_take_frame_fires` drains
+     * what the per-weapon arms asked for.
+     *
+     * `q2_sim_fire_from_input` keeps the old behaviour for a caller with no
+     * view model — the headless harness and the tests — and gates it on the
+     * dry deadline so it is not a free-running stream.
+     */
+    if (sim->fire_from_input && input->attack)
         q2_sim_fire(sim);
 
     q2_sim_combat_tick(sim);
@@ -2520,8 +2574,9 @@ s32 q2_sim_next_dt(const q2_sim *sim, double elapsed_seconds)
     if (!sim || elapsed_seconds <= 0.0)
         return 0;
 
-    /* Real time -> the engine's 1/300 s units. */
-    accum = sim->dt_accum + (s32)(elapsed_seconds * (double)Q2_DT_HZ);
+    /* Real time -> the engine's 1/300 s units, with the sub-unit remainder
+     * carried. PEEKED, not consumed: this is the speculative query. */
+    accum = sim->dt_accum + sim_whole_units(sim, elapsed_seconds, false);
 
     if (accum < Q2_DT_NOMINAL)
         return 0;
@@ -2538,7 +2593,7 @@ u32 q2_sim_advance(q2_sim *sim, const q2_input *input, double elapsed_seconds)
 
     dt = q2_sim_next_dt(sim, elapsed_seconds);
 
-    sim->dt_accum += (s32)(elapsed_seconds * (double)Q2_DT_HZ);
+    sim->dt_accum += sim_whole_units(sim, elapsed_seconds, true);
 
     if (dt == 0)
         return 0;
