@@ -171,7 +171,13 @@ q2_result q2_creature_world_load(q2_creature_world *w, const disc *d,
  * Wake every creature and point the AI at the player. Call once the player is
  * standing where the level starts them.
  */
-void q2_creature_world_wake(q2_creature_world *w, const s32 player_eye[3]);
+/*
+ * `player_origin` is the player's ENTITY ORIGIN — feet - Q2_EYE_BASE, which is
+ * what sim.c already keeps in `player.ent.pos` — NOT the eye. The sight
+ * client's own view height converts, exactly as 0x8005B950 does for every
+ * other entity. Passing the eye adds the view height twice.
+ */
+void q2_creature_world_wake(q2_creature_world *w, const s32 player_origin[3]);
 
 /*
  * One AI tick. `player_eye` moves the sight client first, so a creature that
@@ -179,7 +185,7 @@ void q2_creature_world_wake(q2_creature_world *w, const s32 player_eye[3]);
  *
  * Returns how many creatures thought, which is zero on a level with none.
  */
-u32 q2_creature_world_tick(q2_creature_world *w, const s32 player_eye[3]);
+u32 q2_creature_world_tick(q2_creature_world *w, const s32 player_origin[3]);
 
 /* The model name for a live creature — the class table's name, which is also
  * the name its model carries in the map's CastList. NULL when unresolvable. */

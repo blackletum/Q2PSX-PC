@@ -10,6 +10,7 @@
 
 #include "projectile.h"
 #include "weapon.h"
+#include "worldscale.h"   /* Q2_DT_NOMINAL, Q2_GRAVITY, Q2_VEL_DIV */
 
 static int g_failures;
 static int g_checks;
@@ -368,7 +369,7 @@ static void test_projectiles(void)
         q2_proj_step step;
         s32 before = list.p[idx].vel[1];
 
-        q2_projectile_step(&list, (u32)idx, 40, 101, &step);
+        q2_projectile_step(&list, (u32)idx, 40, Q2_DT_NOMINAL, 101, &step);
         check(list.p[idx].vel[1] > before, "gravity pulls it back down");
         check(step.to[2] > step.from[2], "while it keeps going forward");
         check(!step.expired, "and the fuse has not run out");
@@ -377,8 +378,74 @@ static void test_projectiles(void)
     /* The fuse does run out. */
     {
         q2_proj_step step;
-        q2_projectile_step(&list, (u32)idx, 40, 100000, &step);
+        q2_projectile_step(&list, (u32)idx, 40, Q2_DT_NOMINAL, 100000, &step);
         check(step.expired, "eventually");
+    }
+
+    /*
+     * THE STEP IS SCALED BY dt, which it was not — every projectile flew at a
+     * twelfth of its speed at the nominal tick and a twentieth in the headless
+     * 1/30 s step. 0x80047D40 forms the destination as `pos += vel * dt`.
+     */
+    {
+        q2_projectiles l2;
+        q2_proj_step   s1, s2;
+        s32 b;
+
+        q2_projectiles_init(&l2);
+        give_all(&inv);
+        r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_BLASTER, eye, 0, 0,
+                           aim, 0, 0, false, false, 0);
+        b = q2_projectile_launch(&l2, &r, 0, 0);
+        check(b >= 0, "a bolt to measure");
+
+        q2_projectile_step(&l2, (u32)b, 0, Q2_DT_NOMINAL, 1, &s1);
+        q2_projectile_step(&l2, (u32)b, 0, Q2_DT_NOMINAL * 2, 1, &s2);
+
+        {
+            s64 d1 = (s64)s1.to[2] - s1.from[2];
+            s64 d2 = (s64)s2.to[2] - s2.from[2];
+
+            check(d1 != 0, "a bolt actually moves in one tick");
+            check(d2 == d1 * 2, "and twice the dt moves it exactly twice as far");
+        }
+
+        /* And the absolute figure: a bolt's velocity IS its direction in
+         * 1.0.12, so a nominal tick advances it by dir * 12. */
+        check_eq_i((s64)s1.to[2] - s1.from[2],
+                   ((s64)l2.p[b].vel[2] * Q2_DT_NOMINAL) >> 12,
+                   "one tick is vel * dt >> 12");
+    }
+
+    /*
+     * And the grenade's gravity is in the PROJECTILE's scale, not the player's.
+     * `+= gravity` added 32 to a 1.0.12 velocity — 0.008 units a tick — so the
+     * launcher had no arc at all.
+     */
+    {
+        q2_projectiles l3;
+        q2_proj_step   st;
+        s32 g, before;
+
+        q2_projectiles_init(&l3);
+        give_all(&inv);
+        r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_GRENADE_LAUNCHER, eye, 0, 0,
+                           aim, 0, 0, false, false, 0);
+        g = q2_projectile_launch(&l3, &r, 0, 0);
+        check(g >= 0, "a grenade to measure");
+
+        before = l3.p[g].vel[1];
+        q2_projectile_step(&l3, (u32)g, Q2_GRAVITY, Q2_DT_NOMINAL, 1, &st);
+        check_eq_i(l3.p[g].vel[1] - before,
+                   ((s64)Q2_GRAVITY * Q2_DT_NOMINAL * 4096) / Q2_VEL_DIV,
+                   "one tick of gravity is g * dt * 4096 / Q2_VEL_DIV");
+
+        /* Which is the same fall the PLAYER integrator produces: the player
+         * adds g*dt to a velocity that moves it by vel*dt/Q2_VEL_DIV, so the
+         * position delta changes by g*dt*dt/Q2_VEL_DIV either way. */
+        check_eq_i(((s64)(l3.p[g].vel[1] - before) * Q2_DT_NOMINAL) >> 12,
+                   ((s64)Q2_GRAVITY * Q2_DT_NOMINAL * Q2_DT_NOMINAL) / Q2_VEL_DIV,
+                   "and it falls at the same rate the player does");
     }
 }
 

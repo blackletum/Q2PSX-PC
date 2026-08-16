@@ -191,9 +191,25 @@ int q2_move_sweep_world(const q2_move_world *w, const s32 pos[3],
             if (!t->active)
                 continue;               /* 0x80053E20, byte +54 of the slot */
 
-            /* 0x80054050: a target that declares flags is only considered when
-             * they intersect the mover's own mask. */
-            if (t->mask && !(t->mask & w->mask))
+            /*
+             * THE MASK TEST BELONGS TO THE VOLUME ARM ONLY.
+             *
+             * 0x80053C58 walks the 48-slot ENTITY table first and the trigger
+             * volumes second, and the mask compare at 0x80054050 is inside the
+             * second walk. An entity — a door, a lift, a crusher — is solid to
+             * anything that reaches it; a volume is not, unless the mover's own
+             * mask says so.
+             *
+             * Written as one shared test with `t->mask && ...`, a volume whose
+             * flags halfword is ZERO fell through the guard and blocked. That
+             * was harmless only for as long as the sweep was unreachable
+             * (nothing armed it). BASE1 zone 0 has three such volumes — one of
+             * them a 728 x 1186 x 980 box straddling a corridor — so arming the
+             * sweep without fixing this would have shipped three invisible
+             * walls.
+             */
+            if (t->kind == Q2_MOVE_KIND_VOLUME &&
+                !(t->mask & w->mask))
                 continue;
 
             /* The move's AABB, rebuilt each iteration because a contact moves
@@ -242,6 +258,57 @@ int q2_move_sweep_world(const q2_move_world *w, const s32 pos[3],
 /* ------------------------------------------------------------------------- */
 /* 0x80050CE0 — which volume is the entity in                                 */
 /* ------------------------------------------------------------------------- */
+/*
+ * 0x80050CE0's OTHER arm — a2 = 1, the one 0x8004576C calls before deciding
+ * whether a move needs the entity sweep at all.
+ *
+ * Same box as the contents query (286 / 285 / 286 half-extents), but tested
+ * against the ENTITY slots' swept ENVELOPE rather than against volumes' live
+ * boxes: 0x80050D94 reads slot+0x20, which is the +0x18..+0x2C pair. So the
+ * question it answers is "could a mover's travel reach me this frame", not
+ * "am I inside one now".
+ *
+ * This function had no counterpart in the port, which is why q2_move_checked's
+ * retry — and therefore q2_move_sweep_world itself — was unreachable: all five
+ * callers passed a NULL stuck_test, and a NULL test returns before the arm
+ * that turns entity sweeping on.
+ */
+bool q2_move_overlaps_any(const q2_move_world *w, const s32 pos[3])
+{
+    s32 lo[3], hi[3];
+    u32 i;
+
+    if (!w || !w->targets || !pos)
+        return false;
+
+    lo[0] = pos[0] - Q2_CONTENTS_HALF_XZ;
+    lo[1] = pos[1] - Q2_CONTENTS_HALF_Y;
+    lo[2] = pos[2] - Q2_CONTENTS_HALF_XZ;
+    hi[0] = pos[0] + Q2_CONTENTS_HALF_XZ;
+    hi[1] = pos[1] + Q2_CONTENTS_HALF_Y;
+    hi[2] = pos[2] + Q2_CONTENTS_HALF_XZ;
+
+    for (i = 0; i < w->count; i++) {
+        const q2_move_target *t = &w->targets[i];
+
+        if (!t->active || t->kind != Q2_MOVE_KIND_ENTITY)
+            continue;
+        if (q2_move_box_overlap(lo, hi, t->env_min, t->env_max))
+            return true;
+    }
+
+    return false;
+}
+
+/* The stuck_test shape q2_move_checked wants, over the move world it is
+ * already carrying. */
+bool q2_move_near_entity(const q2_move_ent *ent, void *user)
+{
+    const q2_move_world *w = (const q2_move_world *)user;
+
+    return ent && q2_move_overlaps_any(w, ent->pos);
+}
+
 u16 q2_move_contents(const q2_move_world *w, const s32 pos[3], u16 mask)
 {
     s32 lo[3], hi[3];
@@ -556,7 +623,8 @@ bool q2_move_step(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
          * ground (which is how a fall lands) and it applies the unstick nudge.
          * Table entry 0x800AE93C = {1, 1}.
          */
-        q2_move_checked(coll, ent, delta, 3, true, true, NULL, NULL, world);
+        q2_move_checked(coll, ent, delta, 3, true, true,
+                        q2_move_near_entity, (void *)world, world);
 
         /*
          * 0x80045CD0 — if that did not land but the running ground normal says
@@ -569,7 +637,8 @@ bool q2_move_step(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
                 ent->ground_normal[2] = 0;
 
             v[0] = 0; v[1] = 20; v[2] = 0;
-            q2_move_checked(coll, ent, v, 0, true, false, NULL, NULL, world);
+            q2_move_checked(coll, ent, v, 0, true, false,
+                        q2_move_near_entity, (void *)world, world);
         }
 
         return (ent->flags & Q2_ENT_GROUNDED_MASK) != 0;
@@ -577,7 +646,8 @@ bool q2_move_step(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
 
     /* Up. -Y is up. Table entry 0x800AE930 = {0, 0}, zero further attempts. */
     v[0] = 0; v[1] = (s16)(-step); v[2] = 0;
-    q2_move_checked(coll, ent, v, 0, false, false, NULL, NULL, world);
+    q2_move_checked(coll, ent, v, 0, false, false,
+                    q2_move_near_entity, (void *)world, world);
 
     /*
      * How far the LIFT actually got, measured before the slide runs.
@@ -593,7 +663,8 @@ bool q2_move_step(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
 
     /* Slide. 0x800AE934 = {0, 1}: nudge on, ground detection off, and three
      * further attempts — enough for a corner of two walls and a floor. */
-    q2_move_checked(coll, ent, delta, 3, false, true, NULL, NULL, world);
+    q2_move_checked(coll, ent, delta, 3, false, true,
+                    q2_move_near_entity, (void *)world, world);
 
     /*
      * 0x80045BC0..0x80045BD8 clears the ground normal before the down move, so
@@ -605,7 +676,8 @@ bool q2_move_step(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
     /* Down, by however far the lift managed plus the step. 0x800AE938 = {1, 0}:
      * this move, and only this move, may declare ground. */
     v[0] = 0; v[1] = (s16)(drop + step); v[2] = 0;
-    q2_move_checked(coll, ent, v, 0, true, false, NULL, NULL, world);
+    q2_move_checked(coll, ent, v, 0, true, false,
+                        q2_move_near_entity, (void *)world, world);
 
     return (ent->flags & Q2_ENT_GROUNDED_MASK) != 0;
 }

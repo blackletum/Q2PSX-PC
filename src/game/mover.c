@@ -23,6 +23,8 @@ static q2_mover *mover_push(q2_mover_set *set)
         m->portal_node = -1;
         m->partner     = -1;
         m->wait_timer  = Q2_MOVER_WAIT_NEVER;
+        /* A mover starts fully closed, so its portal starts sealed. */
+        m->sealed      = 1;
         /* Not a primitive: the MOVER_A/B/C opcodes build these, and only the
          * CALL path overwrites it. Zero would read as the first table row. */
         m->prim        = Q2_MOVER_PRIM_OPCODE;
@@ -44,7 +46,8 @@ static void collect_nodes(q2_mover *m, const u8 *payload, u32 at)
     }
 }
 
-q2_result q2_movers_build(q2_mover_set *out, const q2_events *events)
+q2_result q2_movers_build(q2_mover_set *out, const q2_events *events,
+                          const q2_uf_operands *ops)
 {
     q2_event_record rec;
 
@@ -64,7 +67,7 @@ q2_result q2_movers_build(q2_mover_set *out, const q2_events *events)
 
         for (i = 0; i < rec.n_items; i++) {
             q2_event_item item;
-            const u8 *p;
+            const u8 *p, *q;
             u32 first;
 
             if (!q2_events_get_item(events, &rec, i, &item))
@@ -77,6 +80,25 @@ q2_result q2_movers_build(q2_mover_set *out, const q2_events *events)
              * code and subtract once, rather than pre-subtracting and losing
              * the correspondence with the header. */
             p = item.payload - 2;
+
+            /*
+             * AND THE OBJECT SLOTS COME FROM THE OTHER BUFFER.
+             *
+             * `0x80029794` is explicit about it: it sets s2 = item+8 in
+             * COMMON's copy, forms s3 = gp+376 + (s2 - gp+372) at
+             * 0x80029824/0x80029828, WRITES -1 through s2 at 0x80029850 and
+             * then READS the node index through s3 at 0x80029854. COMMON.DAT's
+             * Events is a snapshot that agrees with ZONE0's only; every zone
+             * above zero carries its own slot values, and reading COMMON's
+             * built a door with no parts and animated whichever nodes ZONE0
+             * happened to name.
+             *
+             * ONLY the slot cursor rebases. 0x80025D70-0x80025E30 takes
+             * travel, speed, the key mask and the two timers from the record
+             * it is walking; the pristine copy is consulted for the portal
+             * node at +6 and the node array alone. `q` is that copy.
+             */
+            q = q2_uf_operand_at(ops, p, item.len);
 
             /* Where this item's movers start, so its offset can be stamped on
              * whatever the switch pushes — one for A and B, two for C. */
@@ -94,8 +116,8 @@ q2_result q2_movers_build(q2_mover_set *out, const q2_events *events)
                 m->axis        = 1;                          /* hard-wired */
                 m->target      = (s16)-q2_rd_s16(p + 2);
                 m->speed       = (s16)abs(q2_rd_s16(p + 4));
-                m->portal_node = q2_rd_s16(p + 6);
-                collect_nodes(m, p, 8);
+                m->portal_node = q2_rd_s16(q + 6);
+                collect_nodes(m, q, 8);
                 m->key_mask    = q2_rd_u16(p + 16);
                 m->delay_timer = (u16)(p[18] * Q2_MOVER_TIMEBASE);
                 m->wait_timer  = (p[19] == 0xFF)
@@ -122,8 +144,8 @@ q2_result q2_movers_build(q2_mover_set *out, const q2_events *events)
                                  ? q2_rd_s16(p + 2)
                                  : (s16)-q2_rd_s16(p + 2);
                 m->speed       = (s16)abs(q2_rd_s16(p + 4));
-                m->portal_node = q2_rd_s16(p + 6);
-                collect_nodes(m, p, 10);
+                m->portal_node = q2_rd_s16(q + 6);
+                collect_nodes(m, q, 10);
                 m->key_mask    = q2_rd_u16(p + 18);
                 m->delay_timer = (u16)(p[20] * Q2_MOVER_TIMEBASE);
                 m->wait_timer  = (p[21] == 0xFF)
@@ -144,7 +166,7 @@ q2_result q2_movers_build(q2_mover_set *out, const q2_events *events)
 
                 travel     = q2_rd_s16(p + 2);
                 speed      = (s16)abs(q2_rd_s16(p + 4));
-                portal     = q2_rd_s16(p + 6);
+                portal     = q2_rd_s16(q + 6);
                 axis_field = q2_rd_s16(p + 8);
                 keys       = q2_rd_u16(p + 26);
                 delay      = p[28];
@@ -159,7 +181,7 @@ q2_result q2_movers_build(q2_mover_set *out, const q2_events *events)
                 leaf0->target      = travel;
                 leaf0->speed       = speed;
                 leaf0->portal_node = -1;      /* leaf 1 owns the portal */
-                collect_nodes(leaf0, p, 10);
+                collect_nodes(leaf0, q, 10);
                 leaf0->key_mask    = keys;
                 leaf0->delay_timer = (u16)(delay * Q2_MOVER_TIMEBASE);
                 leaf0->wait_timer  = (wait == 0xFF)
@@ -177,7 +199,7 @@ q2_result q2_movers_build(q2_mover_set *out, const q2_events *events)
                 leaf1->target      = (s16)-travel;   /* opposite leaf */
                 leaf1->speed       = speed;
                 leaf1->portal_node = portal;
-                collect_nodes(leaf1, p, 18);
+                collect_nodes(leaf1, q, 18);
                 leaf1->key_mask    = keys;
                 leaf1->delay_timer = leaf0->delay_timer;
                 leaf1->wait_timer  = leaf0->wait_timer;
@@ -423,11 +445,26 @@ q2_result q2_movers_build_calls(q2_mover_set *out, const q2_events *events,
                  * left, and printing it reads as "node 0" — a real index — for
                  * a mover whose four object slots were all -1.
                  */
-                Q2_INFO("mover dropped: %s — %s (speed %d, target %d)",
-                        pi ? pi->name : "?",
-                        m->part_count == 0 ? "no object slot resolves"
-                                           : "speed 0, it would never arrive",
-                        m->speed, m->target);
+                /*
+                 * "No object slot resolves" is USUALLY NOT A FAULT and used to
+                 * be reported as one. A CALL-built lift belonging to another
+                 * zone genuinely has four -1 slots in the copy this zone
+                 * carries — BASE1's CAGELIFT1 at item offset 704 is one, and
+                 * its nodes (215 and 216) are sitting in ZONE1's copy where
+                 * they belong. Every zone load printed one of these per
+                 * out-of-zone lift and it read as a decode failure.
+                 *
+                 * Speed 0 IS a fault: such a mover triggers, ticks, and never
+                 * arrives, so it keeps the loud level.
+                 */
+                if (m->part_count == 0)
+                    Q2_DEBUG("mover %s not in this zone: all four object slots "
+                             "are -1 (speed %d, target %d)",
+                             pi ? pi->name : "?", m->speed, m->target);
+                else
+                    Q2_INFO("mover dropped: %s — speed 0, it would never "
+                            "arrive (target %d)",
+                            pi ? pi->name : "?", m->target);
                 out->count--;
             }
         }
@@ -481,6 +518,33 @@ void q2_mover_trigger(q2_mover_set *set, u32 index)
 /* ------------------------------------------------------------------------- */
 /* The state machine                                                          */
 /* ------------------------------------------------------------------------- */
+/*
+ * The displacement `mover_move` is about to apply along the mover's own axis,
+ * clamped to the travel exactly as the move itself clamps it. Split out so the
+ * obstruction test can ask "would this step run into something" before the
+ * step happens, which is the order 0x80025CBC works in.
+ */
+static s32 mover_step(const q2_mover *m, s32 dt, int dir)
+{
+    s32 step = m->speed * dt;
+    s32 to;
+
+    if (dir)
+        to = (m->target > 0) ? (m->offset + step) : (m->offset - step);
+    else
+        to = (m->target > 0) ? (m->offset - step) : (m->offset + step);
+
+    if (dir) {
+        if (m->target > 0 && to > m->target) to = m->target;
+        if (m->target < 0 && to < m->target) to = m->target;
+    } else {
+        if (m->target > 0 && to < 0) to = 0;
+        if (m->target < 0 && to > 0) to = 0;
+    }
+
+    return to - m->offset;
+}
+
 static void mover_move(q2_mover_set *set, q2_mover *m, s32 dt, int dir)
 {
     s32 old = m->offset;
@@ -501,8 +565,6 @@ static void mover_move(q2_mover_set *set, q2_mover *m, s32 dt, int dir)
             }
         }
 
-        if (m->state == Q2_MV_BLOCKED && --m->block_timer == 0)
-            m->state = m->saved_state;
     } else {
         if (m->target > 0) {
             m->offset -= m->speed * dt;
@@ -522,23 +584,93 @@ static void mover_move(q2_mover_set *set, q2_mover *m, s32 dt, int dir)
     }
 
     /*
+     * The BLOCKED countdown, out of the `if (dir)` arm it used to sit in.
+     *
+     * 0x80025D08 reloads obj+0x56 with 16 on both arms and the decrement is
+     * outside the direction test, so a door blocked while closing counted down
+     * and one blocked while opening did not. And the decrement was `--` on a
+     * u8 with no guard: unreachable while nothing ever assigned Q2_MV_BLOCKED,
+     * and a 255-tick freeze the moment something did.
+     */
+    if (m->state == Q2_MV_BLOCKED) {
+        if (m->block_timer)
+            m->block_timer--;
+        if (m->block_timer == 0)
+            m->state = m->saved_state;
+    }
+
+    /*
      * The portal node's visibility bit follows the door, EXCEPT that a leaf
      * whose partner is still moving must not re-seal the opening. That is what
      * stops a double door going opaque the instant its first leaf shuts.
+     *
+     * 0x80025C5C-0x80025C74 writes bit 15 of the portal node's `flags08`: set
+     * on the tick the leaf settles fully CLOSED, cleared otherwise, and the
+     * write skipped entirely while the partner object's state byte at +0x52 is
+     * non-zero (0x80025C24-0x80025C54).
+     *
+     * `sealed` is that bit. It is recorded on the mover rather than written
+     * into the client's node-hidden array, because that array has another
+     * writer — OBJDRAWOFF, which the script uses to hide nodes and which keeps
+     * a count — and two writers fighting over one byte would make a door
+     * un-hide whatever a script had hidden. The zone draw reads this instead.
      */
     if (m->portal_node >= 0) {
         bool partner_busy = false;
 
         if (m->partner >= 0 && (u32)m->partner < set->count)
-            partner_busy = settled && set->movers[m->partner].state != Q2_MV_IDLE;
+            partner_busy = set->movers[m->partner].state != Q2_MV_IDLE;
 
-        (void)partner_busy;   /* consumed by the renderer's visibility pass */
+        if (!partner_busy)
+            m->sealed = (u8)(settled ? 1 : 0);
     }
 
     (void)old;
 }
 
 u32 q2_movers_tick(q2_mover_set *set, s32 dt, u16 player_keys)
+{
+    return q2_movers_tick_blocked(set, dt, player_keys, NULL, NULL);
+}
+
+/*
+ * Would this mover's next step run into something, and is it allowed to?
+ *
+ * 0x80025CBC. The direction decides which bit of `block_flags` exempts it: bit
+ * 0 while opening, bit 1 while closing. A PISTON has both — it is a crusher —
+ * and everything else has neither, so an ordinary door stops.
+ */
+static bool mover_obstructed(q2_mover_set *set, u32 index, q2_mover *m,
+                             s32 step, q2_mover_blocked_fn blocked, void *user)
+{
+    u8 exempt;
+
+    if (!blocked || step == 0)
+        return false;
+    if (!blocked(index, step, user))
+        return false;
+
+    exempt = (m->state == Q2_MV_CLOSING ||
+              (m->state == Q2_MV_BLOCKED && m->saved_state == Q2_MV_CLOSING))
+           ? Q2_MV_BLK_IGNORE_CLOSING : Q2_MV_BLK_IGNORE_OPENING;
+
+    /* 0x80025D08 reloads the timer on BOTH arms; only the flag decides whether
+     * the state changes with it. */
+    m->block_timer = Q2_MOVER_BLOCK_TICKS;
+
+    if (m->block_flags & exempt)
+        return false;               /* a crusher does not care */
+
+    if (m->state != Q2_MV_BLOCKED) {
+        m->saved_state = m->state;
+        m->state       = Q2_MV_BLOCKED;
+    }
+    (void)set;
+    return true;
+}
+
+u32 q2_movers_tick_blocked(q2_mover_set *set, s32 dt, u16 player_keys,
+                           q2_mover_blocked_fn blocked, void *user)
 {
     u32 moved = 0, i;
 
@@ -599,18 +731,29 @@ u32 q2_movers_tick(q2_mover_set *set, s32 dt, u16 player_keys)
         }
 
         case Q2_MV_OPENING:
-            mover_move(set, m, dt, 1);
+            if (!mover_obstructed(set, i, m, mover_step(m, dt, 1),
+                                  blocked, user))
+                mover_move(set, m, dt, 1);
             break;
 
         case Q2_MV_CLOSING:
-            mover_move(set, m, dt, 0);
+            if (!mover_obstructed(set, i, m, mover_step(m, dt, 0),
+                                  blocked, user))
+                mover_move(set, m, dt, 0);
             break;
 
-        case Q2_MV_BLOCKED:
+        case Q2_MV_BLOCKED: {
             /* A door blocked while closing reverses; one blocked opening
              * carries on in the direction it was already going. */
-            mover_move(set, m, dt, m->saved_state == Q2_MV_CLOSING);
+            int dir = m->saved_state == Q2_MV_CLOSING;
+
+            if (!mover_obstructed(set, i, m, mover_step(m, dt, dir),
+                                  blocked, user))
+                mover_move(set, m, dt, dir);
+            else if (m->block_timer == 0)
+                m->state = m->saved_state;
             break;
+        }
 
         default:
             m->state = Q2_MV_IDLE;

@@ -744,6 +744,72 @@ static void move_cursor(q2_menu *m)
     }
 }
 
+/* ------------------------------------------------------------------------- */
+/* Pointing at it — see menu.h                                                */
+/* ------------------------------------------------------------------------- */
+bool q2_menu_point_at(q2_menu *m, int index)
+{
+    if (!m || !m->open || !m->page)
+        return false;
+    if (index == m->cursor)
+        return false;
+    if (!q2_menu_item_selectable(m, index))
+        return false;
+
+    /*
+     * The SCREEN POSITION page has nothing to point at — it is two lines of
+     * static text and the d-pad drives the offset — so the cursor there is not
+     * a thing a pointer may move.
+     */
+    if (m->page_id == Q2_PAGE_SCREEN_POSITION)
+        return false;
+
+    m->cursor = index;
+    m->sound  = Q2_MSND_MOVE;
+    return true;
+}
+
+bool q2_menu_set_slider(q2_menu *m, int index, int value)
+{
+    s16 *v;
+
+    if (!m || !m->open || !m->page)
+        return false;
+    if (index < 0 || index >= (int)m->page->count)
+        return false;
+    if (m->page->items[index].widget != Q2_WIDGET_SLIDER)
+        return false;
+
+    v = binding(m, index);
+    if (!v)
+        return false;
+
+    if (value < 0)
+        value = 0;
+    if (value > Q2_MENU_SLIDER_MAX)
+        value = Q2_MENU_SLIDER_MAX;
+
+    if (*v != (s16)value) {
+        *v = (s16)value;
+
+        /*
+         * The same repeat gate the held-direction path uses, so a drag ticks
+         * at the rate a held press does instead of once per frame. Dragging
+         * the SOUND FX slider is the one that is meant to be audible, which is
+         * why that gate is not reset for it (0x8001BF1C).
+         */
+        if (m->page->items[index].setting != Q2_SET_SFX)
+            m->slide_repeat = 0;
+        if (m->slide_repeat < 0) {
+            m->slide_repeat = 8;
+            m->sound = Q2_MSND_SLIDE;
+        }
+        m->slide_repeat--;
+    }
+
+    return true;
+}
+
 /*
  * The SCREEN POSITION page has no items at all: the d-pad moves the display
  * offset directly and × or △ leaves. 0x8001CD64 is the hook that applies it;

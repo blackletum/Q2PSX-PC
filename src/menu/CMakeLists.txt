@@ -5,6 +5,8 @@ add_library(q2psx_menu STATIC
     menudraw.h
     menufont.c
     menufont.h
+    menumouse.c
+    menumouse.h
     memcard.c
     memcard.h
     panel.c

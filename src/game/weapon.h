@@ -159,6 +159,20 @@ typedef struct q2_weapon_behaviour {
 /* Indexed by the 1-based weapon id; slot 0 is the do-nothing stub. */
 extern const q2_weapon_behaviour q2_weapon_behaviour_table[Q2_WT_SLOTS];
 
+/*
+ * How long an EMPTY weapon waits before it will click again.
+ *
+ * A PORT CONSTANT, not a read one, and there is no figure to read: on the
+ * console the idle state calls the fire function once per fire pass and the
+ * animation gates the rate, so a dry trigger has no deadline of its own to
+ * carry. Here the sim fires from its own tick, so without a gate the no-ammo
+ * branch re-runs — and re-plays its sound — every tick the trigger is held.
+ *
+ * 30 is the universal refire the level clock's 300-per-second makes a tenth of
+ * a second, which is the shortest interval anything else in the fire path uses.
+ */
+#define Q2_WEAPON_DRY_REFIRE 30
+
 /* Rocket damage is `100 + rand() % 20` (0x8004D0C4..0x8004D0F8) and railgun
  * damage is 150 in deathmatch and 100 otherwise (0x8004D5D8). Both are
  * computed rather than immediate, so they get named constants instead. */
@@ -218,6 +232,16 @@ int q2_weapon_cycle(const q2_inventory *inv, int current_id, int dir);
  * Explosives are deliberately absent. Returns 0 when nothing is usable.
  */
 int q2_weapon_autoselect(const q2_inventory *inv);
+
+/*
+ * Put back what a shot cost, for the one case where the shot does not happen
+ * after `q2_weapon_fire` has already charged for it: the projectile pool being
+ * full. Not a game mechanic — the original's entity pool can fail the same way
+ * — but the alternative is charging the player for a rocket that never exists.
+ * The caller restores the refire deadline itself, since it is the one holding
+ * the value from before the shot.
+ */
+void q2_weapon_refund(q2_inventory *inv, int weapon_id);
 
 /* True when the id is owned and has ammo for one shot. */
 bool q2_weapon_usable(const q2_inventory *inv, int id);

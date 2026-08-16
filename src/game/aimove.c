@@ -204,18 +204,84 @@ bool q2_SV_movestep(q2_monster *m, const s32 move[3], bool relink)
     }
 
     /* --- walking --------------------------------------------------------- */
+    /*
+     * THREE TRACES, NOT ONE — 0x8005FC78's walk arm, and getting this wrong is
+     * what let a creature walk into a wall.
+     *
+     * What used to be here was real Quake II's shape: one trace from a step
+     * above the DESTINATION down to a step below it. That asks "is there floor
+     * in the destination column", and nothing at all about the path between
+     * here and there. So a creature was teleported to `tr.endpos` whenever the
+     * far side had ground, walls in between included.
+     *
+     * This executable does it in three, each through the same helper
+     * (0x8005BD3C), and the middle one is the one that was missing:
+     *
+     *     0x8005FFA8   the LIFT: origin -> (x, y - step, z), in place
+     *     0x80060068   the MOVE: the lift's endpos -> origin + move, at the
+     *                  raised height. 0x80060070 compares its fraction against
+     *                  4096 and `bne` to 0x8006030C with `addu v0, zero, zero`
+     *                  in the delay slot — SV_movestep RETURNS FALSE. A step
+     *                  that cannot travel horizontally is refused outright.
+     *     0x800600C4   the DROP: the forward endpos -> origin + move + step
+     *
+     * and only then the fraction == 4096 "walked off the edge" test, the
+     * origin copy from res+12/16/20 (0x80060268), and M_CheckBottom.
+     */
     stepsize = (m->aiflags & Q2_AI_NOSTEP) ? Q2_STEPSIZE_NOSTEP : Q2_STEPSIZE;
 
-    neworg[0] = m->pos[0] + move[0];
-    neworg[1] = m->pos[1] + move[1];
-    neworg[2] = m->pos[2] + move[2];
+    /* --- 1. the lift, in place ------------------------------------------- */
+    {
+        s32 lift[3];
 
-    /* Push down from a step height above the wished position. Y is down, so
-     * "above" subtracts. */
-    neworg[1] -= stepsize;
+        lift[0] = m->pos[0];
+        lift[1] = m->pos[1] - stepsize;   /* Y is down, so "up" subtracts */
+        lift[2] = m->pos[2];
 
+        w->trace(w->user, m->pos, m->mins, m->maxs, lift, m,
+                 Q2_MASK_MONSTERSOLID, &tr);
+
+        if (tr.allsolid)
+            return false;
+
+        /* The console's alternate arm at 0x8005FFC4 branches on the result's
+         * startsolid into a whole recovery block (0x800600EC..0x80060214) that
+         * this port does not have; refusing the step is the conservative half
+         * of it and is what was here before. */
+        if (tr.startsolid)
+            return false;
+
+        neworg[0] = tr.endpos[0];
+        neworg[1] = tr.endpos[1];
+        neworg[2] = tr.endpos[2];
+    }
+
+    /* --- 2. the horizontal move, at the raised height -------------------- */
+    {
+        end[0] = m->pos[0] + move[0];
+        end[1] = neworg[1];
+        end[2] = m->pos[2] + move[2];
+
+        w->trace(w->user, neworg, m->mins, m->maxs, end, m,
+                 Q2_MASK_MONSTERSOLID, &tr);
+
+        if (tr.allsolid || tr.startsolid)
+            return false;
+
+        /* 0x80060070: anything short of the whole way and the step is refused.
+         * This is the gate the port never had, and the reason a creature could
+         * push its body into geometry. */
+        if (tr.fraction != Q2_TRACE_ONE)
+            return false;
+
+        neworg[0] = tr.endpos[0];
+        neworg[1] = tr.endpos[1];
+        neworg[2] = tr.endpos[2];
+    }
+
+    /* --- 3. the drop ----------------------------------------------------- */
     end[0] = neworg[0];
-    end[1] = neworg[1] + stepsize * 2;
+    end[1] = m->pos[1] + move[1] + stepsize;
     end[2] = neworg[2];
 
     w->trace(w->user, neworg, m->mins, m->maxs, end, m,

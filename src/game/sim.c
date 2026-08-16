@@ -4,7 +4,9 @@
 #include <string.h>
 
 #include "entitydraw.h"   /* q2_entity_resolve_model */
+#include "levelbin.h"     /* q2_levelbin_scene — the title screen's objects */
 #include "pad.h"          /* the default control style */
+#include "reloc.h"        /* q2_level_module_load */
 #include "trig.h"
 
 /* Defined below, but attach_gameplay needs it. */
@@ -73,6 +75,8 @@ void q2_sim_free(q2_sim *sim)
     q2_entity_set_free(&sim->entities);
     free(sim->trigger_inside);
     free(sim->volumes);
+    free(sim->mover_base);
+    free(sim->mover_last_off);
     free(sim->volume_damage);
     free(sim->volume_mod);
     free(sim->volume_env);
@@ -123,6 +127,186 @@ q2_result q2_sim_attach_items(q2_sim *sim, const q2_common_file *common,
 
     sim->entities_ready = true;
     return Q2_OK;
+}
+
+/*
+ * The Q2LOGO's own think, which the module installs over the item one on every
+ * page change — module+0x9D24 on the title screen, module+0x9E0C on every other
+ * front-end page. See levelbin.h for the pair side by side; the only difference
+ * is which way the scale ramp runs and where it stops.
+ *
+ * The spin is `yaw -= 4 * dt` in both, taken from `*(engine+0xD4)` — the same
+ * level-clock delta the item think reads, so `w->dt` is it.
+ */
+static void scene_logo_spin(q2_entity *e, q2_entity_world *w)
+{
+    e->angles[1] = (s32)(s16)(e->angles[1] - Q2_LB_SCENE_SPIN * (w ? w->dt : 0));
+}
+
+static void scene_logo_title_think(q2_entity *e, q2_entity_world *w)
+{
+    if (!e)
+        return;
+    /*
+     * 0x80109D38: the test is on the OLD value and the add is in the branch's
+     * delay slot, so a scale of 3968 goes to 4224 for one frame and is clamped
+     * the next. That overshoot is the original's and is left in.
+     */
+    if (e->scale < Q2_LB_SCENE_SCALE_FULL)
+        e->scale = (s16)(e->scale + Q2_LB_SCENE_SCALE_STEP);
+    else
+        e->scale = Q2_LB_SCENE_SCALE_FULL;
+    scene_logo_spin(e, w);
+}
+
+static void scene_logo_sub_think(q2_entity *e, q2_entity_world *w)
+{
+    if (!e)
+        return;
+    /* 0x80109E20, the same shape the other way: below the floor it snaps. */
+    if (e->scale < Q2_LB_SCENE_SCALE_SUB + 1)
+        e->scale = Q2_LB_SCENE_SCALE_SUB;
+    else
+        e->scale = (s16)(e->scale - Q2_LB_SCENE_SCALE_STEP);
+    scene_logo_spin(e, w);
+}
+
+void q2_sim_scene_page(q2_sim *sim, bool title, bool visible)
+{
+    q2_entity *e;
+    u32 p;
+
+    if (!sim || !sim->scene_ready || sim->entities.count == 0)
+        return;
+
+    /* Object 0 and only object 0 — 0x80103564 indexes the array directly. */
+    e = &sim->entities.ent[0];
+    if (!e->in_use)
+        return;
+
+    for (p = 0; p < Q2_MAX_PLAYERS; p++)
+        e->taken[p] = !visible;
+
+    e->think = title ? scene_logo_title_think : scene_logo_sub_think;
+}
+
+u32 q2_sim_scene_advance(q2_sim *sim, double elapsed_seconds)
+{
+    s32 dt;
+
+    if (!sim || !sim->scene_ready || elapsed_seconds <= 0.0)
+        return 0;
+
+    dt = q2_sim_next_dt(sim, elapsed_seconds);
+    sim->dt_accum += (s32)(elapsed_seconds * (double)Q2_DT_HZ);
+    if (dt == 0)
+        return 0;
+    sim->dt_accum = 0;
+
+    sim->level_time          += dt;
+    sim->ent_world.dt         = dt;
+    sim->ent_world.deathmatch = sim->multiplayer;
+    q2_entity_run(&sim->entities, &sim->ent_world);
+    return 1;
+}
+
+u32 q2_sim_attach_scene(q2_sim *sim, const q2_common_file *common,
+                        const q2_item_table *table,
+                        const struct q2_model_bank *bank)
+{
+    q2_ai_module mod;
+    q2_lb_scene scene;
+    u32 i, n = 0;
+
+    if (!sim || !common)
+        return 0;
+
+    if (q2_level_module_load(&mod, common, Q2_SIM_SCENE_BASE) != Q2_OK)
+        return 0;
+    if (mod.empty ||
+        !q2_levelbin_scene(mod.image.data, (u32)mod.image.size, mod.base,
+                           &scene)) {
+        q2_ai_module_free(&mod);
+        return 0;
+    }
+    q2_ai_module_free(&mod);
+
+    if (!table)
+        table = q2_item_table_builtin();
+
+    /*
+     * The world has to exist before the thinks can run against it, and the
+     * front end never calls q2_sim_attach_items — there is no Population to
+     * attach — so this does the same setup that one does. No player is
+     * registered: the front end has none, which is also why the touch sweep
+     * the module guards against never runs.
+     */
+    if (!sim->entities_ready) {
+        q2_entity_world_init(&sim->ent_world);
+        sim->ent_world.deathmatch = sim->multiplayer;
+        sim->ent_world.items      = table;
+        sim->ent_world.level_time = sim->level_time;
+    }
+
+    for (i = 0; i < scene.count; i++) {
+        q2_pop_place place;
+        q2_entity *e;
+
+        /* module+0xE48, the template the spawner fills: every field zero but
+         * the flags nibble and the id. */
+        memset(&place, 0, sizeof(place));
+        place.unk = 0x1000u;
+        place.id  = scene.id[i];
+
+        e = q2_item_spawn(&sim->entities, &place, table, 0);
+        if (!e)
+            continue;
+
+        /* 0x8010C654..0x8010C66C, in that order. `q2_item_spawn` has already
+         * set the draw origin from the place record; this is the builder
+         * overwriting it, which is why the two do not have to agree. */
+        e->angles[0] = 0;
+        e->angles[1] = Q2_LB_SCENE_YAW;
+        e->angles[2] = 0;
+        e->render_flags = 0;
+        e->origin[0] = 0;
+        e->origin[1] = 0;
+        e->origin[2] = Q2_LB_SCENE_DIST;
+        e->pos[0] = e->origin[0];
+        e->pos[1] = e->origin[1];
+        e->pos[2] = e->origin[2];
+
+        /*
+         * module+0x3414 hides all five — bit 0x80 of every player's block —
+         * and then shows exactly one back. So the four coloured player models
+         * are spawned and never drawn on any page this port reaches, and that
+         * is the module's doing rather than a gap here.
+         */
+        {
+            u32 p;
+            for (p = 0; p < Q2_MAX_PLAYERS; p++)
+                e->taken[p] = true;
+        }
+
+        if (bank)
+            q2_entity_resolve_model(e, bank);
+        n++;
+    }
+
+    if (n) {
+        sim->entities_ready = true;
+        sim->scene_ready    = true;
+        /*
+         * The scale the title screen ramps up FROM. `q2_item_spawn` leaves an
+         * item at full size unless its record materialises, and the module's
+         * think reads whatever is there — so starting at zero is what makes the
+         * logo grow into the screen instead of appearing at full size on frame
+         * one and never moving.
+         */
+        sim->entities.ent[0].scale = 0;
+        q2_sim_scene_page(sim, true, true);
+    }
+    return n;
 }
 
 const q2_ent_events *q2_sim_entity_events(const q2_sim *sim)
@@ -461,6 +645,206 @@ static s32 ease32(s32 v, s32 target, s32 rate)
     return t;
 }
 
+/* ------------------------------------------------------------------------- */
+/* Doors and lifts as solid boxes — 0x800555D8 and 0x80051EC0                 */
+/* ------------------------------------------------------------------------- */
+/*
+ * A mover's displacement used to reach only the RENDERER. `q2_movers_tick`
+ * accumulates an offset in the runtime object and the zone draw adds it to the
+ * node's camera-space position as it draws it (mover.h) — which is exactly what
+ * the console does, and is only half of what the console does. It ALSO
+ * registers one 64-byte AABB per mover part in the fixed 48-slot table at
+ * 0x800CAE10 — allocator 0x800555D8, which is handed `scene_node_record + 16`
+ * and copies the six words verbatim — chains the group through slot+0x3C, and
+ * shifts the whole chain every tick through 0x80051EC0.
+ *
+ * Without that half a door is visually present and physically absent, which is
+ * exactly the report: movers "are non-solid and do not do anything".
+ */
+static void mover_part_box(const q2_scene *scene, s32 node,
+                           s32 min_out[3], s32 max_out[3])
+{
+    q2_scene_node n;
+    int k;
+
+    for (k = 0; k < 3; k++) {
+        min_out[k] = 0;
+        max_out[k] = 0;
+    }
+
+    if (!scene || node < 0 || !q2_scene_get_node(scene, (u32)node, &n))
+        return;
+
+    /*
+     * The RAW record, not q2_scene_node_bounds. That helper inflates every
+     * face by Q2_SCENE_BBOX_SLOP so a node's own faces are strictly inside its
+     * box; the allocator does no such thing. Four units on a door edge is four
+     * units the player is stopped short by, on every door in the game.
+     */
+    for (k = 0; k < 3; k++) {
+        min_out[k] = n.bbox_min[k];
+        max_out[k] = n.bbox_max[k];
+    }
+}
+
+static void mover_targets_drop(q2_sim *sim)
+{
+    if (!sim->mover_count || !sim->volumes)
+        return;
+
+    memmove(sim->volumes, sim->volumes + sim->mover_count,
+            (sim->volume_count - sim->mover_count) * sizeof(*sim->volumes));
+    sim->volume_count -= sim->mover_count;
+    sim->mover_count   = 0;
+
+    free(sim->mover_base);
+    free(sim->mover_last_off);
+    sim->mover_base     = NULL;
+    sim->mover_last_off = NULL;
+}
+
+q2_result q2_sim_attach_movers(q2_sim *sim, const q2_mover_set *set,
+                               const q2_scene *scene)
+{
+    q2_move_target *grown;
+    u32 parts = 0, i, p, out;
+
+    if (!sim)
+        return Q2_ERR_INVALID_ARG;
+
+    /* Rebuild from the volumes alone, so a second call cannot accumulate stale
+     * boxes from a zone that has been unloaded. */
+    mover_targets_drop(sim);
+
+    if (set && scene) {
+        for (i = 0; i < set->count; i++)
+            parts += set->movers[i].part_count;
+    }
+
+    if (parts == 0) {
+        sim->move_world.targets = sim->volumes;
+        sim->move_world.count   = sim->volume_count;
+        return Q2_OK;
+    }
+
+    grown = (q2_move_target *)calloc(sim->volume_count + parts, sizeof(*grown));
+    if (!grown)
+        return Q2_ERR_NO_MEMORY;
+
+    sim->mover_base     = (s32 *)calloc(parts * 6u, sizeof(s32));
+    sim->mover_last_off = (s32 *)calloc(parts, sizeof(s32));
+    if (!sim->mover_base || !sim->mover_last_off) {
+        free(grown);
+        free(sim->mover_base);
+        free(sim->mover_last_off);
+        sim->mover_base     = NULL;
+        sim->mover_last_off = NULL;
+        return Q2_ERR_NO_MEMORY;
+    }
+
+    /*
+     * ENTITIES FIRST, then the volumes — 0x80053C58 walks the entity table and
+     * then the volume table, and the order is not cosmetic: the sweep keeps the
+     * LAST contact rather than the nearest.
+     */
+    if (sim->volumes && sim->volume_count)
+        memcpy(grown + parts, sim->volumes,
+               sim->volume_count * sizeof(*grown));
+    free(sim->volumes);
+    sim->volumes = grown;
+
+    out = 0;
+    for (i = 0; i < set->count; i++) {
+        const q2_mover *m = &set->movers[i];
+
+        for (p = 0; p < m->part_count && out < parts; p++) {
+            q2_move_target *t = &sim->volumes[out];
+            s32 *base = &sim->mover_base[out * 6u];
+            int k;
+
+            mover_part_box(scene, m->node[p], base, base + 3);
+
+            for (k = 0; k < 3; k++) {
+                t->min[k] = t->env_min[k] = base[k];
+                t->max[k] = t->env_max[k] = base[3 + k];
+            }
+            t->kind   = Q2_MOVE_KIND_ENTITY;
+            /* The MOVER's index, not the part's: a contact has to name a door,
+             * and a door with two leaves is still one door to open. */
+            t->id     = (s32)i;
+            t->mask   = 0;
+            t->dy     = 0;
+            t->active = true;
+
+            sim->mover_last_off[out] = m->offset;
+            out++;
+        }
+    }
+
+    sim->mover_count   = out;
+    sim->volume_count += out;
+
+    sim->move_world.targets = sim->volumes;
+    sim->move_world.count   = sim->volume_count;
+    return Q2_OK;
+}
+
+void q2_sim_movers_update(q2_sim *sim, const q2_mover_set *set)
+{
+    u32 i, p, out = 0;
+
+    if (!sim || !sim->volumes || !sim->mover_count || !sim->mover_base || !set)
+        return;
+
+    for (i = 0; i < set->count; i++) {
+        const q2_mover *m = &set->movers[i];
+
+        for (p = 0; p < m->part_count && out < sim->mover_count; p++, out++) {
+            q2_move_target *t    = &sim->volumes[out];
+            const s32      *base = &sim->mover_base[out * 6u];
+            u32 axis = m->axis < 3u ? m->axis : 1u;
+            int k;
+
+            /*
+             * THE LIVE BOX translates — both corners by the same amount
+             * (0x80051F08-0x80051F7C). Derived from the pristine box and the
+             * mover's own accumulated offset rather than integrated, because
+             * the zone draw adds that same `m->offset` to the same node and
+             * the hull is not allowed to disagree with what is on screen by
+             * so much as a unit.
+             */
+            for (k = 0; k < 3; k++) {
+                t->min[k] = base[k];
+                t->max[k] = base[3 + k];
+            }
+            t->min[axis] += m->offset;
+            t->max[axis] += m->offset;
+
+            /*
+             * THE ENVELOPE only ever grows — 0x80051FBC onward adds the delta
+             * to ONE corner, chosen by its sign, so the box ends up covering
+             * the whole of the travel rather than following it. It is what the
+             * broad-phase gate at 0x80050CE0 reads, and testing the live box
+             * there instead would only arm the entity sweep for a player who
+             * is already inside the door.
+             */
+            for (k = 0; k < 3; k++) {
+                if (t->min[k] < t->env_min[k]) t->env_min[k] = t->min[k];
+                if (t->max[k] > t->env_max[k]) t->env_max[k] = t->max[k];
+            }
+
+            /*
+             * And the frame's vertical motion, which q2_move_sweep_box takes as
+             * `other_dy`. This is what lets a player ride a lift instead of
+             * being left standing in the air as it goes up.
+             */
+            t->dy = (axis == 1u)
+                  ? (s16)(m->offset - sim->mover_last_off[out]) : (s16)0;
+            sim->mover_last_off[out] = m->offset;
+        }
+    }
+}
+
 /*
  * Turn the map's trigger volumes into the target list the sweep and the
  * contents query walk. This is the port's stand-in for 0x800C9114, and the
@@ -474,6 +858,13 @@ static void build_volumes(q2_sim *sim)
     free(sim->volumes);
     sim->volumes      = NULL;
     sim->volume_count = 0;
+    /* The mover boxes live at the front of the same array, so rebuilding the
+     * volumes discards them too; the caller re-attaches after a zone load. */
+    free(sim->mover_base);
+    free(sim->mover_last_off);
+    sim->mover_base     = NULL;
+    sim->mover_last_off = NULL;
+    sim->mover_count    = 0;
 
     memset(&sim->move_world, 0, sizeof(sim->move_world));
     sim->move_world.half_extent = Q2_SWEEP_HALF_EXTENT;
@@ -505,6 +896,7 @@ static void build_volumes(q2_sim *sim)
     }
 
     sim->volume_count           = sim->triggers.count;
+    sim->mover_count            = 0;
     sim->move_world.targets     = sim->volumes;
     sim->move_world.count       = sim->volume_count;
 
@@ -1809,7 +2201,7 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
          * The delta is LAST tick's, per q2_player.frame_delta.
          */
         q2_move_step(&sim->coll, &p->ent, p->frame_delta,
-                     sim->volume_count ? &sim->move_world : NULL);
+                     sim->move_world.count ? &sim->move_world : NULL);
 
         p->pos[0] = p->ent.pos[0];
         p->pos[1] = q2_sim_feet_y(p->ent.pos[1]);
@@ -1864,6 +2256,15 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
      * second and what the mover scripting's own time unit is (userfuncs.h).
      */
     sim->level_time += dt;
+
+    /*
+     * And the tick's OWN length, kept beside the clock because the world half
+     * of the tick needs it and does not take it as an argument. The projectile
+     * sweep is the one that matters: 0x80047D40 advances a missile by
+     * `vel * dt`, and reading only `level_time` here left it advancing by one
+     * dt unit a frame.
+     */
+    sim->cur_dt = dt;
 
     if (input->attack)
         q2_sim_fire(sim);
@@ -1951,6 +2352,11 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
      * because a medkit collected this tick counts as healing. */
     update_pain(sim);
 
+    /* And drop the armour class bits if the armour they describe is gone —
+     * 0x80035580, which the console does from inside the status bar. Here
+     * because a headless run has no bar and the state is the inventory's. */
+    q2_inventory_armour_upkeep(&sim->combat.inv);
+
     if (run_world)
         sim->tick_count++;
 }
@@ -1983,6 +2389,7 @@ static void combat_swap_to(q2_sim *sim, int index)
     from->chaingun_bullets = sim->combat.chaingun_bullets;
     from->self             = sim->combat.self;
     from->last_shot        = sim->combat.last_shot;
+    from->shot_serial      = sim->combat.shot_serial;
 
     sim->combat.inv              = to->inv;
     sim->combat.weapon_id        = to->weapon_id;
@@ -1993,6 +2400,7 @@ static void combat_swap_to(q2_sim *sim, int index)
     sim->combat.chaingun_bullets = to->chaingun_bullets;
     sim->combat.self             = to->self;
     sim->combat.last_shot        = to->last_shot;
+    sim->combat.shot_serial      = to->shot_serial;
 
     sim->cur_player = index;
 }
@@ -2055,50 +2463,64 @@ void q2_sim_player_reset_combat(q2_sim *sim, int index)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * ONE tick per frame, with a VARIABLE dt. Read out of the frame loop at
+ * 0x80018440: the step is either `gamespeed * 2` (0x80018468, giving the
+ * nominal 12) or the count of fields that actually elapsed (0x80018480), it is
+ * clamped to 30 at 0x800184B8, and then 0x800184D8 runs the world exactly once.
+ * The engine has no sub-stepping loop anywhere.
+ *
+ * That is why `q2_sim_advance` does not run several 12-unit ticks to catch up.
+ * Every rate in the movement code is `k * dt`, and a clamped approach with rate
+ * `k * 24` is NOT two approaches with rate `k * 12` — it overshoots less.
+ * Sub-stepping would be the more "correct" integrator and the wrong game.
+ *
+ * The arithmetic lives HERE, in the function that only reports it, so a caller
+ * that asks in advance (see sim.h) cannot be told a step the tick then
+ * disagrees with.
+ */
+s32 q2_sim_next_dt(const q2_sim *sim, double elapsed_seconds)
+{
+    s32 accum;
+
+    if (!sim || elapsed_seconds <= 0.0)
+        return 0;
+
+    /* Real time -> the engine's 1/300 s units. */
+    accum = sim->dt_accum + (s32)(elapsed_seconds * (double)Q2_DT_HZ);
+
+    if (accum < Q2_DT_NOMINAL)
+        return 0;
+
+    return accum > Q2_DT_MAX ? Q2_DT_MAX : accum;
+}
+
 u32 q2_sim_advance(q2_sim *sim, const q2_input *input, double elapsed_seconds)
 {
     s32 dt;
-    u32 ticks = 0;
 
     if (!sim || !input || elapsed_seconds <= 0.0)
         return 0;
 
-    /* Real time -> the engine's 1/300 s units. */
-    dt = (s32)(elapsed_seconds * (double)Q2_DT_HZ);
-    sim->dt_accum += dt;
+    dt = q2_sim_next_dt(sim, elapsed_seconds);
 
-    if (sim->dt_accum < Q2_DT_NOMINAL)
+    sim->dt_accum += (s32)(elapsed_seconds * (double)Q2_DT_HZ);
+
+    if (dt == 0)
         return 0;
 
     /*
-     * ONE tick per frame, with a VARIABLE dt. Read out of the frame loop at
-     * 0x80018440: the step is either `gamespeed * 2` (0x80018468, giving the
-     * nominal 12) or the count of fields that actually elapsed (0x80018480),
-     * it is clamped to 30 at 0x800184B8, and then 0x800184D8 runs the world
-     * exactly once. The engine has no sub-stepping loop anywhere.
-     *
-     * That is why this does not run several 12-unit ticks to catch up. Every
-     * rate in the movement code is `k * dt`, and a clamped approach with rate
-     * `k * 24` is NOT two approaches with rate `k * 12` — it overshoots less.
-     * Sub-stepping would be the more "correct" integrator and the wrong game.
+     * The accumulator is emptied either way. Past the clamp the surplus is
+     * DISCARDED rather than carried, which is how the original slows down
+     * instead of catching up (0x800184C8 writes the clamped value back over
+     * it); below the clamp the step IS the accumulator, so subtracting it
+     * leaves the same zero.
      */
-    dt = sim->dt_accum;
-    if (dt > Q2_DT_MAX) {
-        /*
-         * Past the clamp the surplus is DISCARDED rather than carried, which is
-         * how the original slows down instead of catching up: 0x800184C8 writes
-         * the clamped value back over the accumulator.
-         */
-        dt = Q2_DT_MAX;
-        sim->dt_accum = 0;
-    } else {
-        sim->dt_accum -= dt;
-    }
+    sim->dt_accum = 0;
 
     q2_sim_tick(sim, input, dt);
-    ticks = 1;
 
-    return ticks;
+    return 1;
 }
 
 /* ------------------------------------------------------------------------- */

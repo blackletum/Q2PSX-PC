@@ -211,6 +211,37 @@ s16 q2_inventory_apply_damage(q2_inventory *inv, s16 damage)
     return damage;
 }
 
+void q2_inventory_armour_upkeep(q2_inventory *inv)
+{
+    if (!inv)
+        return;
+
+    /*
+     * 0x80035570-0x80035590, at the top of the status bar's armour sub-draw:
+     *
+     *     lh   v0, 78(a0)          the armour points
+     *     bne  v0, zero, ...       non-zero, leave the flags alone
+     *     lui  v1, 0x7 / ori 0x8FFF
+     *     lw   v0, 92(a0) / and / sw   flags &= 0x00078FFF
+     *
+     * The three CLASS bits are cleared the moment armour reaches zero, and
+     * nothing else in the word is touched — the keys below 0x1000 and the
+     * three above 0x4000 (shield, screen, mega health) survive.
+     *
+     * The port only cleared these at pickup time, so armour shot down to zero
+     * left the class bit standing. That was invisible while the bar chose one
+     * hard-coded icon; now that it selects on the flags, a player who had body
+     * armour, lost it, and picked up a shard would wear jacket armour and be
+     * shown the red vest.
+     *
+     * It lives here rather than in the bar because a headless simulation has no
+     * bar, and the console's placement is an artefact of where the write was
+     * cheap rather than of what owns the state.
+     */
+    if (inv->armour == 0)
+        inv->flags &= ~(u32)Q2_INV_ARMOUR_MASK;
+}
+
 void q2_inventory_give_key(q2_inventory *inv, u32 mask)
 {
     if (inv)

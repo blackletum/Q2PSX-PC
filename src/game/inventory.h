@@ -221,6 +221,14 @@ s16 q2_inventory_apply_damage(q2_inventory *inv, s16 damage);
 /* Keys are bits, not items, and they share a word with the armour class and the
  * power items — so giving one ORs into `flags` and the script only ever sees the
  * low twelve bits. */
+/*
+ * Drop the armour CLASS bits when the armour points reach zero — the
+ * `flags &= 0x00078FFF` the console performs every frame at 0x80035580.
+ * Call it once per tick; see the note beside the implementation for why it is
+ * here and not in the status bar, which is where the original writes it.
+ */
+void q2_inventory_armour_upkeep(q2_inventory *inv);
+
 void q2_inventory_give_key(q2_inventory *inv, u32 mask);
 bool q2_inventory_has_keys(const q2_inventory *inv, u32 mask);
 

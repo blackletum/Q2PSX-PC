@@ -1,5 +1,7 @@
 #include "monster.h"
 
+#include "worldscale.h"
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -29,13 +31,48 @@ void q2_monster_init(q2_monster *m)
     m->speed_scale = 10;      /* neutral: the frame scale is /10 */
     m->yaw_speed   = 200;     /* a shade under 18 degrees a tick */
 
-    /* The movement hull the loader fills from SecondaryCol. A creature with a
-     * zero box would pass through everything, so give it the player's. */
-    m->mins[0] = m->mins[2] = -286;
-    m->maxs[0] = m->maxs[2] =  286;
-    m->mins[1] = -560;        /* Y points down, so mins is above  */
-    m->maxs[1] =    0;
-    m->view_height = -400;
+    /*
+     * The movement box, in the ORIGIN frame — a 572 cube centred on the entity.
+     *
+     * That is what 0x80050FA0 writes, and it is a SHARED placement routine
+     * rather than an item quirk: it takes a halfword pair from its caller and
+     * builds mins = (-a,-a,-a), maxs = (+b,+b,+b) at obj+0x6C..0x76, and both
+     * pairs reachable on this disc (0x800AEAB8 and 0x800AECEC) hold 286 / 572.
+     * 0x8005CCF4 then reads those six halfwords back for every step trace.
+     *
+     * It used to be a FEET-frame box — mins[1] = -560, maxs[1] = 0 — which was
+     * asymmetric about a point the rest of the system treats as the centre.
+     * Only the sign of "is this box degenerate" depended on it until now; with
+     * the hull select in aiworld.c it decides which collision model a trace
+     * runs against, and q2_SV_CloseEnough reads it directly.
+     *
+     * NOT filled per model. The comment here used to claim "the loader fills
+     * it from SecondaryCol" and nothing ever did; the claim that the original
+     * varies it per MODEL is also unproven — every writer reachable from here
+     * passes the same 286/572 pair. What does differ is by CLASS: 0x8005CCFC
+     * short-circuits class 114, the path corner, to a -96/+96 cube.
+     */
+    m->mins[0] = m->mins[1] = m->mins[2] = -286;
+    m->maxs[0] = m->maxs[1] = m->maxs[2] =  286;
+
+    /*
+     * The eye, as an offset from the ORIGIN — `visible` (0x8005B950) adds this
+     * to the entity's origin, not to its feet.
+     *
+     * -290 puts a creature's eye exactly where a player's is: the player's
+     * origin is feet - Q2_EYE_BASE and the player's eye is feet -
+     * Q2_VIEW_STAND, so the offset between them is 290. A STAND-IN, because
+     * the console's figure is per entity and this port has nowhere to keep it
+     * — walkmonster_start (0x80062448) computes `nor v0, zero, *(u16*)(obj +
+     * 0xF8)`, flymonster (0x800624F0) stores -250 and swimmonster -100.
+     *
+     * It was -400, which was chosen when `pos` was the FEET and put the eye
+     * 400 above them. Left at -400 after the origin lift it becomes 686 above
+     * the feet — a hundred units above the creature's own head, and therefore
+     * usually inside the ceiling. Measured on BASE1 standing 1600 units from a
+     * Soldier: 260 of 260 sight lines blocked and nothing ever hunting.
+     */
+    m->view_height = -(s16)(Q2_VIEW_STAND - Q2_EYE_BASE);
 }
 
 s32 q2_monster_frame_dist(const q2_monster *m, const q2_mframe *frame)

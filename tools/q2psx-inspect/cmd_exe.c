@@ -1165,3 +1165,108 @@ int cmd_modxrefs(const disc *d, const char *map, const char *addr_s, bool level)
     q2_common_close(&cf);
     return 0;
 }
+
+/* ------------------------------------------------------------------------- */
+/*
+ * A relocated module's bytes.
+ *
+ * `bytes` reads the executable's segment and a module is not in it, so every
+ * question about a module's *data* — as opposed to its code — had to be
+ * answered by disassembling whatever walked it and reading the offsets back
+ * out of the loads. That works and it is slow, and it cannot show a table the
+ * code indexes rather than names.
+ *
+ * Open question #44 is the case in point: QFRONT's scene is placed by a table
+ * at `module+0x11 63C` whose entries point at four 512-byte blocks, and the
+ * blocks are the models' transforms. Nothing could read them until this.
+ *
+ * The word column is here because these blocks are mostly 32-bit fields, and
+ * because a relocated pointer is only recognisable as one when it is shown
+ * whole — the byte column would split 0x80110D94 across four cells.
+ */
+int cmd_modbytes(const disc *d, const char *map, const char *addr_s, int count,
+                 bool level)
+{
+    const char *what = level ? "LevelBin" : "CreAIBin";
+    char path[160];
+    q2_buf file;
+    q2_common_file cf;
+    q2_ai_module mod;
+    u32 addr, off;
+    int row;
+
+    snprintf(path, sizeof(path), "Q2DATA/LEVELS/%s/COMMON.DAT", map);
+    if (disc_read_file(d, path, &file) != Q2_OK) {
+        fprintf(stderr, "cannot read %s\n", path);
+        return 1;
+    }
+    if (q2_common_open(&cf, &file) != Q2_OK) {
+        fprintf(stderr, "%s is not a COMMON.DAT\n", path);
+        q2_buf_free(&file);
+        return 1;
+    }
+    if ((level ? q2_level_module_load(&mod, &cf, Q2_MOD_BASE)
+               : q2_ai_module_load(&mod, &cf, Q2_MOD_BASE)) != Q2_OK ||
+        mod.empty) {
+        fprintf(stderr, "%s has no usable %s\n", map, what);
+        q2_common_close(&cf);
+        return 1;
+    }
+
+    addr = parse_addr(addr_s);
+    if (addr < mod.base)
+        addr += mod.base;                /* accept a module-relative offset */
+
+    if (count <= 0)
+        count = 128;
+
+    printf("%s %s: %zu bytes at 0x%08X, dumping 0x%08X (module+0x%X)\n\n",
+           map, what, mod.image.size, mod.base, addr, addr - mod.base);
+
+    for (row = 0; row < count; row += 16) {
+        int i, n = (count - row < 16) ? count - row : 16;
+
+        off = (addr + (u32)row) - mod.base;
+        if (off >= mod.image.size)
+            break;
+
+        printf("%08X ", addr + (u32)row);
+        for (i = 0; i < 16; i++) {
+            u32 o = off + (u32)i;
+            if (i < n && o < mod.image.size)
+                printf(" %02X", mod.image.data[o]);
+            else
+                printf("   ");
+        }
+
+        /* The four words, then the text. A word that lands inside the module
+         * is flagged, because that is what a relocated pointer looks like and
+         * mistaking one for two shorts is the easy error here. */
+        printf("  ");
+        for (i = 0; i < 4; i++) {
+            u32 o = off + (u32)i * 4;
+            u32 w;
+            if (i * 4 >= n || o + 4 > mod.image.size) {
+                printf("         ");
+                continue;
+            }
+            w = q2_rd_u32(mod.image.data + o);
+            printf(" %08X", w);
+        }
+
+        printf("  ");
+        for (i = 0; i < n; i++) {
+            u32 o = off + (u32)i;
+            u8 b;
+            if (o >= mod.image.size)
+                break;
+            b = mod.image.data[o];
+            putchar((b >= 0x20 && b < 0x7F) ? (char)b : '.');
+        }
+        printf("\n");
+    }
+
+    q2_ai_module_free(&mod);
+    q2_common_close(&cf);
+    return 0;
+}

@@ -148,6 +148,27 @@ typedef enum q2_move_kind {
 
 typedef struct q2_move_target {
     s32 min[3], max[3];  /* the target's own bounds                          */
+
+    /*
+     * THE SWEPT ENVELOPE — slot +0x18..+0x2C, and it is a second box, not a
+     * copy of the first.
+     *
+     * 0x80051EC0 maintains both when a mover moves. The live box at +0x00 gets
+     * the frame's delta added to BOTH corners (0x80051F08-0x80051F7C), so it
+     * translates. The envelope gets it added to ONE corner at a time, chosen
+     * by the sign of each component (`bgez v1` -> +0x24 when positive, +0x18
+     * when negative, at 0x80051FBC onward), so it only ever GROWS: it covers
+     * the whole of the door's travel.
+     *
+     * The distinction is load-bearing. The broad-phase gate that decides
+     * whether to sweep entities at all (0x80050CE0 with a2 = 1) reads the
+     * ENVELOPE — 0x80050D94 `lw v0, 32(a0)` is slot+0x20 — while the narrow
+     * sweep uses the live box. Gating on the live box would only arm the sweep
+     * for a player already inside the door, not for one about to be crossed by
+     * it.
+     */
+    s32 env_min[3], env_max[3];
+
     s16 dy;              /* its vertical motion this frame; lifts use it     */
     u16 mask;            /* flags; 0 means "always considered"               */
     s16 kind;            /* q2_move_kind                                     */
@@ -229,15 +250,30 @@ int q2_move(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
             const q2_move_mode *mode);
 
 /*
+ * 0x80050CE0 with a2 = 1 — does a 286/285/286 box around `pos` overlap the
+ * swept ENVELOPE of any active ENTITY target?
+ *
+ * This is 0x8004576C's gate: the answer decides whether the move is worth
+ * re-running with entity sweeping on. Testing the envelope rather than the
+ * live box is what makes it arm for a player a moving door is about to reach,
+ * as opposed to one already inside it.
+ */
+bool q2_move_overlaps_any(const q2_move_world *w, const s32 pos[3]);
+
+/*
  * 0x800456B0 — move, and if the entity ends up somewhere it may not be, put it
  * back and try again with entity sweeping enabled.
  *
  * The original's retry condition is 0x80050CE0, the contents/entity overlap
  * test. The port runs the same move twice only when `stuck_test` is supplied
  * and reports that the resulting position is invalid; with no test it is one
- * plain `q2_move`, which is what a zone with no entities does anyway.
+ * plain `q2_move` — and with no test ANYWHERE, which is how this shipped, the
+ * entity sweep is dead code and no mover can block anything.
  */
 typedef bool (*q2_move_stuck_fn)(const q2_move_ent *ent, void *user);
+
+/* The gate above, in that shape; `user` is the q2_move_world. */
+bool q2_move_near_entity(const q2_move_ent *ent, void *user);
 
 int q2_move_checked(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
                     s32 iterations, bool ground_mode, bool push_mode,

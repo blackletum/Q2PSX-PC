@@ -1850,6 +1850,75 @@ item records at run time instead of transcribing a table, so there is nothing to
       inside the logo. Their placement is the module's, and until it is read there is no honest position to
       draw them at. The port therefore shows the menu over an empty scene rather than a guessed one.
 
+      **Answered: the scene is five ITEMS, and the spinning logo spins because it is one.** The reader that
+      settles it is new — `q2psx-inspect modbytes <disc> <map> <addr> [n]` hex dumps a *relocated* module's
+      image, which nothing could do before: `bytes` reads the executable and cannot see a module at all, so
+      every question about a module's DATA had to be answered by disassembling whatever walked it. This is
+      the first one that needed the table itself.
+      `init` calls `module+0xC5BC(module+0x10D7C, module+0x12B20)` and that function is a five-line spawner:
+      it walks a -1-terminated list of **item table ids** — `57 Q2LOGO`, `59 Male2`, `60 Male2red`,
+      `61 Male2purple`, `62 Male2aqua` — pushing each through a 16-byte `q2_pop_place` template at
+      `module+0xE48` into `engine+0x2C`, which is `0x800599DC`, **the engine's own item spawner**. Then it
+      overwrites the entity by hand:
+
+          8010C658  sh  2048, 232(v0)   +0xE8  yaw, half a circle
+          8010C660  sw  zero, 268(v0)   +0x10C render_flags
+          8010C664  sw  zero, 164(v0)   +0xA4  origin[0]
+          8010C668  sw  zero, 168(v0)   +0xA8  origin[1]
+          8010C66C  sw  1700, 172(v0)   +0xAC  origin[2]
+          8010C680  jalr v1             engine+0x114 = 0x80089E38, RotMatrix
+
+      So every object stands at `(0, 0, 1700)` facing yaw 2048, and **the eye is not inside the logo after
+      all** — it is 1700 units in front of it, which is what this entry could not know without the table.
+      All five records carry the `spin` flag, and ids 57..64 are exactly the eight `records no map ever
+      places` that `q2psx-inspect items` has always listed. That is what they are for.
+
+      **Only one of the five is ever shown, and it does not use the item think.** `module+0x3414` — the two
+      lines every front-end page builder opens with — hides all five (bit 0x80 of `+0x118 + p*100`, all four
+      players) and its tail shows exactly one back:
+
+          80103554  lh   v1, 710(engine)   ; the live page id
+          8010355C  beq  v1, 11            ; page 11 keeps even this one hidden
+          80103574  and  v0, ~0x80         ; objs[0] shown
+          8010358C  bne  v0, zero          ; page 0 is the title screen
+          801035B0  sw   v1, 60(objs[0])   ; +0x3C — the THINK, per page
+
+      The four coloured player models are spawned and never drawn on any page reached so far, and the logo's
+      motion is not `0x80059330` at all — the module overwrites `+0x3C` with one of its own on every page
+      change: `module+0x9D24` on the title screen and `module+0x9E0C` everywhere else. They differ in one
+      thing each:
+
+          module+0x9D24   scale += 256, capped at 4096      module+0x9E0C   scale -= 256, floored at 1024
+          both            yaw   -= 4 * dt
+
+      So the logo GROWS into the title screen from nothing and SHRINKS to a quarter when you step into a
+      sub-page — an animation no still capture could show — and it turns at `4 * dt` against the item spin's
+      `3 * dt` (`0x8005947C`), so a port that reused the item think would run it a third slow. `dt` is
+      `*(engine+0xD4)` = `0x800B2DB4`, the same level-clock delta the item think reads.
+      **And the marking is not a draw flag.** The only reader of bit 0x80 is the deathmatch respawn
+      countdown at `0x80059374`; the front end has no players for the touch sweep to walk anyway. It is the
+      module keeping the sweep off its own scenery.
+      The port spawns all five, hides four, runs the two thinks and steps the entity set while the front end
+      is up — which it did not do before, because "the world is frozen while a menu is open" is right for a
+      pause menu and wrong for a title screen that IS a running level. `q2psx-inspect menu pages "" QFRONT`
+      prints the list with each id's table record; `src/game/levelbin.[ch]`, `q2_sim_attach_scene`.
+
+      **Still open: the title screen's LIGHTS, and they are the reason it renders dark.** `q2psx-inspect lit
+      QFRONT` accepts zero lights at the spawn point, so shading the logo through the light path takes it to
+      black and the port draws it on the fallback light instead. That is not where the console gets its
+      light. The menu's own frame at `0x8001A1E8`/`0x8001A200` calls two module hooks every frame —
+      `engine+0x298` and `engine+0x294`, which QFRONT's `init` fills with `module+0x32BC` and
+      `module+0x2BD8` — and the first is only the controller-unplugged check (page 20, the
+      `PLEASE INSERT / CONTROLLER INTO / CONTROLLER PORT XX` records at `module+0x11670`). **The second
+      spawns dynamic lights.** It reaches `engine+0x3C` five times, and `engine+0x3C` is `0x80075C34`,
+      *append a runtime light to the world list* — the same entry `FLKLIGHT` uses, with the radii packed
+      into `a2` as inner-low/outer-high exactly as `lighting.h` records. Three of the five calls differ only
+      in one stack word, which steps `-200, 0, +200`: a row of three lights. Two colour/radius records are
+      built on the frame: `(64,127,127)` at radii `500/1500` and `(16,255,64)` at `100/200`, and there is a
+      600/900 pair further in. What is NOT settled is the argument order past `a2` — the stack words go to
+      `sp+48..56` rather than the `sp+16` an o32 call would use — so the positions are not transcribed here
+      rather than guessed at. That is the next piece, and it is bounded: one function, five call sites.
+
       **The thread to pull is the module's engine vtable**, and it is worth writing down because every
       `LevelBin` reaches the engine the same way — `QMULTI.C` included. A module holds the block at its own
       `+0x8`, the loader writes it, and the installer that fills it is the long run of stores from
@@ -5635,10 +5704,21 @@ not be written there. `0x800337EC` initialises all thirteen fields with +8 = 8 a
 | 7 | red/orange to (248,64,0) | the low-value flash |
 
 **What the wrong reading cost.** Health asked for effect 34 and the scan returned rect **30**, whose fifth
-byte is 34 — and rect 30 is the *armour* icon. So the health field drew an armour box, and because the wrong
-answer was still a real icon it read as a mis-picked sprite rather than as a mis-read table. Health is rect
-**34**, which is the cross. Separately, every sprite in the bar was drawn with the menu font's single CLUT,
-because the port had nowhere to put a per-sprite palette.
+byte is 34 — and rect 30 is the *power shield*. So the health field drew a red-lamp device, and because the
+wrong answer was still a real icon it read as a mis-picked sprite rather than as a mis-read table. Health is
+rect **34**, which is the cross. Separately, every sprite in the bar was drawn with the menu font's single
+CLUT, because the port had nowhere to put a per-sprite palette.
+
+**And rect 30 was then written down as the armour icon, which cost a second bug.** The correction above
+recorded `8003565C lbu v0, 150(a0)` as "armour, ALWAYS 150" beside health's genuinely unconditional
+`lbu v0, 170(t0)`. The instruction is real; "ALWAYS" was never tested. It is one of **five arms** of a select
+on the inventory flag word at `0x80035554` — `andi 0x8000` power shield → 150, `andi 0x4000` body → 130,
+`andi 0x2000` combat → 135, `andi 0x1000` jacket → 140, fall through → rect 0. Rendered with their own
+palettes, 26/27/28 are three armour vests in red, gold and grey and 30 is not a vest at all. So every player
+wearing any armour was shown a power shield. The same shape as the mistake it was correcting, one field over:
+an instruction read correctly, and a premise about its **reachability** never checked. The armour field also
+has a state machine in front of it — a cells gate, a one-second alternation on the level clock, and the cells
+count rather than the armour points in the power state — which had no counterpart in the port at all.
 
 Why the join looked so convincing is worth keeping: palette indices and effect ids both run near-monotonically
 over the grid and stay a small constant apart, so any window of them agrees. The two checks that break the tie

@@ -51,12 +51,45 @@
  *                map's own crouch volumes work without it
  *   Esc          the pause menu — and QUIT GAME inside it leaves
  *
+ * The mouse
+ *   move         look. The three MOUSE control styles are the console's own —
+ *                0x80019224 and the two after it — so this selects one rather
+ *                than adding a tenth: USE MOUSE on the CONTROLLER page decides
+ *                which class of styles that page offers, exactly as the
+ *                connected controller decides it at 0x8001C8A8, and on a PC
+ *                the mouse is what is connected. MOUSE SPEED is its
+ *                sensitivity and SWAP Y AXIS inverts it
+ *   mouse 1      attack        mouse 2      jump — and, held, swim up
+ *   wheel        next / previous weapon
+ *
+ * Both buttons are the scheme's rather than this port's choice: RIGHT MOUSE
+ * fires on the mouse's left button and jumps on its right, because the console
+ * merges the pair into L3 and R3 and that is which mask each one feeds.
+ *
+ * Turning USE MOUSE off puts the styles back to the STANDARD group and every
+ * key below keeps working unchanged — the keyboard is bound to MEANINGS through
+ * q2_pad_style_bindings, not to pad buttons, so a style change moves what a key
+ * means instead of breaking it. Under a mouse style the arrows have no look
+ * buttons to press and drive the look AXIS instead, so they still turn.
+ *
  * In the menu the keyboard stands in for the pad, because the menu engine is
  * written against the console's 16-bit button mask and nothing is gained by
  * giving it a second input model:
  *
  *   arrows       d-pad          Enter / Space   cross   (select)
  *   Esc          triangle       Backspace       triangle (back)
+ *
+ * and the mouse is a pad too, with the two things a pad cannot say — land on
+ * THAT row, set that slider to THAT value — going through menu.c's pointer
+ * entry points instead (menumouse.h):
+ *
+ *   move         highlight the row under the pointer
+ *   mouse 1      select it; on a toggle, aim at the ON or OFF word; on a
+ *                slider, click or drag the bar itself
+ *   mouse 2      back, which is triangle — and on the pause page, where
+ *                triangle has no parent to go to, it closes the menu as Esc
+ *                does
+ *   wheel        move the cursor
  *
  * The two save keys are the port's, and the reason they exist is that the
  * console's own route to SAVE? is not reachable here: on the disc that prompt
@@ -95,6 +128,7 @@
 #include "menudraw.h"
 #include "memcard.h"
 #include "menufont.h"
+#include "menumouse.h"
 #include "leveltable.h"
 #include "musictable.h"
 #include "briefing.h"
@@ -120,6 +154,30 @@
 #include "vram.h"
 #include "world.h"
 #include "xa.h"
+
+/* ------------------------------------------------------------------------- */
+/* One playing effect                                                         */
+/*                                                                            */
+/* The console's SPU has twenty-four voices and an effect does not stop the    */
+/* track, so there are twenty-four here and an effect is summed into it. A     */
+/* voice borrows the bank's ADPCM rather than copying it — the sample is       */
+/* decoded 28 samples at a time as it plays (vag.h) — which is why every voice */
+/* has to be stopped before the bank it points into is freed.                  */
+/* ------------------------------------------------------------------------- */
+#define CLIENT_VOICES 24
+
+/* Two blocks: enough that a compaction always leaves room for the next one. */
+#define CLIENT_VOICE_BUF (SPU_SAMPLES_PER_BLOCK * 2)
+
+typedef struct client_voice {
+    bool         active;
+    q2_spu_voice dec;
+    s16          buf[CLIENT_VOICE_BUF];  /* decoded, not yet stepped over */
+    u32          have;                   /* samples in `buf`              */
+    u32          pos;                    /* 16.16 read cursor into `buf`  */
+    u32          step;                   /* 16.16 advance per output frame */
+    s32          vol;                    /* 0..127, latched at the start  */
+} client_voice;
 
 typedef struct client {
     disc            *disc;
@@ -152,6 +210,61 @@ typedef struct client {
     int              music_cursor_at;
     int              music_id;
     SDL_AudioStream *audio;
+
+    /*
+     * ---------------------------------------------------------------------
+     * The mixer, and why there has to be one
+     * ---------------------------------------------------------------------
+     * There is ONE device stream, and `SDL_PutAudioStreamData` APPENDS to it.
+     * It is a FIFO, not a mixer. Music was pushed into it a sector at a time
+     * and every effect was pushed into the same FIFO, so an effect did not
+     * play with the music — it played AFTER everything already queued, and it
+     * pushed the music further back by its own length.
+     *
+     * That is what made the sound "randomly ongoing". The music pump tops up
+     * only while the queue is under its target, so it stops contributing as
+     * soon as effects fill it; the effects do not stop, because footsteps,
+     * creature idles and weapon fire keep arriving. The queue therefore grew
+     * without bound and the device played out an ever-later backlog of
+     * unrelated effects, minutes behind the thing that raised them.
+     *
+     * Two further faults rode along with it. The stream is declared STEREO at
+     * XA's 37800 Hz because that is what the music is, and a bank effect is
+     * MONO at its own 11025 or 22050 (vag.h) — so each effect was read as
+     * interleaved stereo, splitting alternate samples across the two channels,
+     * and played back between 1.7 and 3.4 times too fast.
+     *
+     * So the effects go through voices instead: twenty-four of them, which is
+     * the SPU's own count and the number the comment on the menu path always
+     * claimed this had. Each one decodes its sample a block at a time, steps
+     * through it at the ratio between its rate and the stream's, and is summed
+     * into the music bed. One push per chunk, mixed, at the stream's format.
+     */
+    client_voice     voice[CLIENT_VOICES];
+    u32              voice_started;
+    u32              voice_dropped;   /* all 24 busy, as the SPU would be */
+
+    /*
+     * The shot this client has already been told about, against the sim's own
+     * counter — see the reads in `client_input_simulated`.
+     *
+     * TWO cursors against ONE counter, because each read CONSUMES: the first
+     * one to notice a new serial moves the cursor past it, and a shared cursor
+     * would therefore let whichever ran first swallow the shot and leave the
+     * other with nothing. The view model runs first, so sharing would give a
+     * firing weapon a fire clip and no sound.
+     */
+    u32              shot_serial_heard;   /* the sound has been played  */
+    u32              shot_serial_shown;   /* the view model has been told */
+
+    /*
+     * The bed the voices are mixed into: one decoded sector of music or film,
+     * handed out in chunks smaller than a sector so the queue can sit close to
+     * its target instead of overshooting by 53 ms at a time.
+     */
+    s16              bed[XA_FRAMES_PER_SECTOR * XA_CHANNELS];
+    u32              bed_frames;      /* frames decoded into it   */
+    u32              bed_pos;         /* frames handed out so far */
 
     q2_camera        cam;
     /*
@@ -329,6 +442,9 @@ typedef struct client {
     u32               ent_bursts;
     u32               burst_no_fx, burst_no_table, burst_no_model;
     u32               burst_no_bank, burst_bad_model, burst_no_verts;
+    /* Faces the projectile bodies put in the table. Counted because "bolts N"
+     * says how many are alive, not whether any of them reached the screen. */
+    u32               proj_prims;
     u32               player_attacks;
     u32               rot_moved;
     u32               rot_steps;   /* step requests the script has made */
@@ -515,10 +631,32 @@ typedef struct client {
     bool              show_credits; /* --credits                      */
     bool              all_keys;    /* --keys: every key in the pocket */
 
+    /*
+     * `--armour <class>`: put a class of armour on the player, the way `--keys`
+     * puts keys in the pocket. The status bar's armour field is a five-way
+     * select on the inventory flag word and there is no other way to reach four
+     * of the five arms from a headless run — a scripted player cannot go and
+     * find a Body P, and three of the four armour items are placed on maps the
+     * demo pad never reaches. Zero means "leave the inventory alone".
+     */
+    u32               give_armour_flag;
+    s16               give_armour_points;
+    s16               give_armour_cells;
+
+    /*
+     * `--weapon N`: own every weapon, hold slot N, and keep it fed. The eleven
+     * fire functions are all transcribed and only ONE of them can be reached
+     * from a headless run — a player who spawns with the blaster and cannot go
+     * and find a shotgun. So the hitscan path, the rail, the grenades and the
+     * BFG had no way to be looked at at all. Zero leaves the inventory alone.
+     */
+    int               give_weapon;
+
     q2_mover_set      movers;
     bool              movers_ready;
     u32               mover_triggers;   /* items the script reached */
     u32               mover_moved;      /* ticks on which one moved */
+    u32               mover_touched;    /* opens raised by walking into one */
     bool              mission_after_map; /* the screen is holding a LOADMAP */
     u32               mission_frames;
     u32               briefing_frames;
@@ -529,6 +667,21 @@ typedef struct client {
     u32               map_changes;    /* how many the session has made */
     u32               vw_events;
     s16               vw_last_event;
+
+    /*
+     * Player 0's shots, counted off the sim's serial rather than off its latch,
+     * so one pull is one count no matter how many frames pass before the next.
+     * `mp_shots[]` is the same figure for players 1..3 and its loop starts at 1;
+     * player 0 does not go through `q2_sim_advance_player` and so was never
+     * counted at all.
+     *
+     * The point of having them is the comparison in the shot report:
+     * `vw.fires_started` should equal `shots_fired`, and any other answer means
+     * the view model is being told about shots that did not happen.
+     */
+    u32               shots_fired;
+    u32               shots_dry;
+
     int               cre_last_sound;
     /* ------------------------------------------------------------------- */
     /* The multiplayer session. QMULTI.C is a per-map LevelBin module and the
@@ -588,6 +741,54 @@ typedef struct client {
      * a 1.5x horizontal stretch. V cycles it.
      */
     q2_screen_fit    fit;
+
+    /*
+     * ---------------------------------------------------------------------
+     * The mouse
+     * ---------------------------------------------------------------------
+     * The console supports one — three of the nine control styles are its, and
+     * the CONTROLLER page has a USE MOUSE row — so mouselook is not an invented
+     * feature here. What is the port's is the plumbing: turning a host's
+     * DISPLACEMENT into the rate the look path wants, and pointing at a menu
+     * the console could only walk with a d-pad.
+     *
+     * `look_acc_*` are motion that has arrived and not yet been handed to a
+     * tick, in window pixels, sign-corrected to the pad's axes. They are
+     * doubles because the conversion divides by the tick's own step and the
+     * remainder has to survive: truncating it every frame would quietly lose a
+     * fraction of every movement, which reads as a mouse that drifts short.
+     */
+    bool             mouse_look;      /* wanted at all — never headless      */
+    bool             mouse_grabbed;   /* relative mode is on right now       */
+    double           look_acc_x;
+    double           look_acc_y;
+
+    bool             mouse_left;      /* held, this frame                    */
+    bool             mouse_right;
+    bool             mouse_left_prev; /* so a click has an edge              */
+    bool             mouse_right_prev;
+
+    /*
+     * The wheel, queued rather than applied. Every pad bit it feeds — weapon
+     * next and previous in play, the cursor in a menu — is tested as a PRESS
+     * EDGE, so a notch has to be one frame on and one frame off however fast
+     * the wheel is spun. Positive is up.
+     */
+    int              wheel_queue;
+    bool             wheel_gap;
+
+    /* Where the pointer is, in window pixels, while it is not grabbed. */
+    float            pointer_x, pointer_y;
+    bool             pointer_valid;
+
+    /*
+     * What the left button went down on, held until it comes up: a press
+     * belongs to the row it started on however far the pointer then travels,
+     * which is what makes a slider draggable and stops a click sliding off one
+     * control onto another.
+     */
+    int              menu_click_index;
+    u8               menu_click_part;  /* q2_menu_hit_part                   */
 
     /*
      * The title screen. `QFRONT` is a real level — the level table's record 0 —
@@ -744,8 +945,125 @@ static void client_pickup_burst(client *c, const s32 pos[3], s32 model_index)
 }
 
 static void client_entity_events(client *c);
+
+/* ------------------------------------------------------------------------- */
+/* Movers meeting the player                                                  */
+/* ------------------------------------------------------------------------- */
+/*
+ * The two things a solid door has to be able to do beyond standing still.
+ *
+ * BLOCKED: 0x80025CBC asks its integrator whether the step it is about to take
+ * sweeps through an entity, and stops, reverses or crushes on the answer. The
+ * port's whole state machine for that was decoded and unreachable because
+ * nothing ever answered the question. This is the answer, for the one entity
+ * this port has: the player.
+ *
+ * TOUCH: 65 of the disc's 1,006 MOVER_A items carry a non-zero +20, which
+ * mover.h records as "also opens on touch". Nothing read it.
+ *
+ * Both work in the ENTITY ORIGIN frame — the mover boxes are world-space and
+ * the player's `pos` is the feet — and both use the same 286/285/286
+ * half-extents the engine's own overlap test does (trace.h).
+ */
+typedef struct client_mover_ctx { client *c; } client_mover_ctx;
+
+/* The player's box, in the frame the mover boxes are in. */
+static void client_player_box(const client *c, s32 lo[3], s32 hi[3])
+{
+    s32 o[3];
+
+    o[0] = c->sim[0].player[0].pos[0];
+    o[1] = q2_sim_origin_y(c->sim[0].player[0].pos[1]);
+    o[2] = c->sim[0].player[0].pos[2];
+
+    lo[0] = o[0] - Q2_CONTENTS_HALF_XZ;
+    lo[1] = o[1] - Q2_CONTENTS_HALF_Y;
+    lo[2] = o[2] - Q2_CONTENTS_HALF_XZ;
+    hi[0] = o[0] + Q2_CONTENTS_HALF_XZ;
+    hi[1] = o[1] + Q2_CONTENTS_HALF_Y;
+    hi[2] = o[2] + Q2_CONTENTS_HALF_XZ;
+}
+
+/*
+ * Does any part of mover `index`, swept by `step` along its own axis, overlap
+ * the player? The SWEPT box, not the current one — a door moving faster than
+ * the player is wide would otherwise step straight over them.
+ */
+static bool client_mover_blocked(u32 index, s32 step, void *user)
+{
+    client_mover_ctx *ctx = (client_mover_ctx *)user;
+    client *c = ctx->c;
+    s32 plo[3], phi[3];
+    u32 t;
+
+    if (!c->movers_ready || index >= c->movers.count)
+        return false;
+    if (!c->sim[0].mover_count)
+        return false;
+
+    client_player_box(c, plo, phi);
+
+    for (t = 0; t < c->sim[0].mover_count; t++) {
+        const q2_move_target *mt = &c->sim[0].volumes[t];
+        s32 lo[3], hi[3];
+        u32 axis;
+        int k;
+
+        if (!mt->active || mt->id != (s32)index)
+            continue;
+
+        axis = c->movers.movers[index].axis;
+        if (axis > 2u)
+            axis = 1u;
+
+        for (k = 0; k < 3; k++) {
+            lo[k] = mt->min[k];
+            hi[k] = mt->max[k];
+        }
+        if (step > 0) hi[axis] += step;
+        else          lo[axis] += step;
+
+        if (q2_move_box_overlap(plo, phi, lo, hi))
+            return true;
+    }
+
+    return false;
+}
+
+/* The touch-opening doors. */
+static void client_movers_touch(client *c)
+{
+    s32 plo[3], phi[3];
+    u32 t;
+
+    if (!c->movers_ready || !c->sim[0].mover_count)
+        return;
+
+    client_player_box(c, plo, phi);
+
+    for (t = 0; t < c->sim[0].mover_count; t++) {
+        const q2_move_target *mt = &c->sim[0].volumes[t];
+        const q2_mover *m;
+
+        if (!mt->active || mt->id < 0 || (u32)mt->id >= c->movers.count)
+            continue;
+
+        m = &c->movers.movers[mt->id];
+        if (!m->touch_opens)
+            continue;
+
+        if (q2_move_box_overlap(plo, phi, mt->min, mt->max)) {
+            q2_mover_trigger(&c->movers, (u32)mt->id);
+            c->mover_touched++;
+        }
+    }
+}
 static bool client_play_sound(client *c, const char *want);
 static bool client_find_sound(client *c, const char *want, q2_vag *out);
+
+/* Defined with the mixer. The zone load calls this before it frees the bank a
+ * playing voice is reading out of. */
+static void client_voices_stop(client *c);
 
 /* The creature hooks, defined below with the AI clock they run on. */
 static void client_cre_melee(q2_monster *m, const s32 aim[3], s32 damage,
@@ -843,6 +1161,36 @@ static void client_load_creatures(client *c, const s32 eye[3])
                     elsewhere, c->creatures.set.count);
     }
 
+    /*
+     * And how many of the ones that stay are standing CLEAR of the geometry.
+     *
+     * SecondaryCol is PrimaryColl eroded by the body's own half-extent, so a
+     * creature whose origin resolves to a cell of it is one whose whole box
+     * fits — and one whose origin does not is embedded in a wall or a floor by
+     * up to 286 units. That is the "monsters stuck in geometry" report, made
+     * countable.
+     *
+     * It reads zero for every map while a creature's position is the spawn
+     * record's FEET, which is how the wrong hull came to be wired in for the
+     * AI in the first place (see the bind below).
+     */
+    if (c->sim[0].coll_ready) {
+        u32 clear = 0, live = 0;
+
+        for (i = 0; i < c->creatures.set.count; i++) {
+            const q2_monster *m = &c->creatures.set.monsters[i];
+
+            if (!m->in_use)
+                continue;
+            live++;
+            if (q2_coll_find_node(&c->sim[0].coll, m->pos, -1, true) >= 0)
+                clear++;
+        }
+        if (live)
+            Q2_INFO("creatures: %u of %u stand clear of the geometry "
+                    "(inside SecondaryCol)", clear, live);
+    }
+
     c->cre_home = (s32 *)calloc(c->creatures.set.count ?
                                 c->creatures.set.count * 3 : 1, sizeof(s32));
 
@@ -888,19 +1236,27 @@ static void client_load_creatures(client *c, const s32 eye[3])
     q2_sim_set_targets(&c->sim[0], c->cre_target, c->creatures.set.count);
 
     /*
-     * The world the AI asks its three questions of, and it is `PrimaryColl`.
+     * The world the AI asks its three questions of — and it is BOTH hulls,
+     * because 0x8005BD3C picks one per call on whether the caller handed it a
+     * real box. Sight and the ground probe get `PrimaryColl`; a walking
+     * creature's step trace gets `SecondaryCol`, which is PrimaryColl already
+     * eroded by the body's 286-unit half-extent.
      *
-     * The un-eroded QUERY hull, which is the one the original uses for
-     * everything that is not a player move (sim.h), and the only one a creature
-     * is actually inside: `SecondaryCol` is `PrimaryColl` eroded by the
-     * PLAYER's 286-unit half-extent, and a Population spawn point sits in the
-     * part that erosion cuts away. Measured on BASE1 with the eroded hull, 214
-     * of 214 traces cannot place their start and 412 of 432 sight lines are
-     * blocked; with this one, 1 of 30 and 342 of 432.
+     * THE MEASUREMENT THAT USED TO BE HERE was real and answered the wrong
+     * question. It said: with the eroded hull, 214 of 214 traces cannot place
+     * their start. True — because the creature's position was the Population
+     * record's FEET, and every hull query is in the entity ORIGIN frame, 286
+     * above them. The conclusion drawn was "creatures are not inside
+     * SecondaryCol, so use PrimaryColl", and the consequence was that a
+     * creature's CENTRE was swept as a point through the un-eroded hull and
+     * could travel until the centre reached the wall — half a body inside it.
+     * With the spawn lifted (spawn.c) the same records are inside the eroded
+     * hull, and the creature stops flush against the wall instead.
      */
     q2_ai_world_bind_init(&c->ai_world,
                           c->sim[0].coll_primary_ready ? &c->sim[0].coll_primary
-                                                    : NULL);
+                                                    : NULL,
+                          c->sim[0].coll_ready ? &c->sim[0].coll : NULL);
     q2_ai_world_bind_install(&c->ai_world);
 
     /*
@@ -942,7 +1298,16 @@ static void client_load_creatures(client *c, const s32 eye[3])
             Q2_INFO("creatures: %u held back, waiting for a CREBATCH", held);
     }
 
-    q2_creature_world_wake(&c->creatures, eye);
+    /* The sight client is placed at the player's entity ORIGIN, not the eye —
+     * q2_visible adds the view height itself. See creworld.h. */
+    {
+        s32 player_origin[3];
+
+        player_origin[0] = eye[0];
+        player_origin[1] = q2_sim_origin_y(c->sim[0].player[0].pos[1]);
+        player_origin[2] = eye[2];
+        q2_creature_world_wake(&c->creatures, player_origin);
+    }
     c->ai_accum = 0.0;
 
     {
@@ -2680,7 +3045,16 @@ static bool client_load_zone(client *c, const char *map, int index)
     }
 
     /* The same file's second section: the map's sound bank, which is where the
-     * menu's five effects live. */
+     * menu's five effects live.
+     *
+     * Every voice is silenced first. A playing voice holds a pointer INTO this
+     * bank's buffer and decodes from it as it goes (vag.h), so freeing the bank
+     * under one would have it reading freed memory — and a zone load is exactly
+     * when something is mid-play, because the door that triggered it just made
+     * a noise. */
+    client_voices_stop(c);
+    c->bed_frames = 0;
+    c->bed_pos    = 0;
     if (c->sfx_ready) {
         q2_sound_bank_free(&c->sfx);
         c->sfx_ready = false;
@@ -2752,6 +3126,24 @@ static bool client_load_zone(client *c, const char *map, int index)
                 Q2_INFO("items: %u placed", c->sim[0].entities.count);
             else
                 Q2_WARN("%s places no items: %s", map, q2_result_str(ir));
+
+            /*
+             * And the TITLE SCREEN's objects, which are items too but are not
+             * in Population — QFRONT's is empty. Its `LevelBin` names five
+             * table ids and spawns them itself, which is where the logo comes
+             * from and why it turns (levelbin.h). Every other map's module
+             * names none, so this is a no-op everywhere else and does not have
+             * to be gated on the front end.
+             */
+            {
+                u32 sn = q2_sim_attach_scene(
+                    &c->sim[0], &c->common,
+                    c->item_table_ready ? &c->item_table : NULL,
+                    c->model_bank_ready ? &c->model_bank : NULL);
+
+                if (sn)
+                    Q2_INFO("scene: %u objects from %s's LevelBin", sn, map);
+            }
         }
 
         if (c->vm_ready) {
@@ -3066,7 +3458,7 @@ static bool client_load_zone(client *c, const char *map, int index)
                             c->lasers.count == 1 ? "" : "s",
                             c->lasers.declined ? " (some declared dark)" : "");
 
-                if (q2_movers_build(&c->movers, &ev) == Q2_OK) {
+                if (q2_movers_build(&c->movers, &ev, &c->ev_operands) == Q2_OK) {
                     u32 opcode_built = c->movers.count;
 
                     /* And the lifts a CALL builds rather than an opcode: same
@@ -3080,6 +3472,20 @@ static bool client_load_zone(client *c, const char *map, int index)
                             " %u from LIFT1 calls)",
                             c->movers.count, opcode_built,
                             c->movers.count - opcode_built);
+
+                    /*
+                     * And make them SOLID. Until this call the mover's
+                     * displacement reached the renderer and nothing else, so a
+                     * closed door was a picture of a door.
+                     *
+                     * After q2_sim_attach_gameplay, which is what builds the
+                     * volume half of the target array this appends to.
+                     */
+                    if (q2_sim_attach_movers(&c->sim[0], &c->movers,
+                                             &c->zone.scene) == Q2_OK &&
+                        c->sim[0].mover_count)
+                        Q2_INFO("movers: %u part boxes in the collision world",
+                                c->sim[0].mover_count);
                 }
 
                 if (q2_rotators_build(&c->rotators, &ev, &uf) == Q2_OK) {
@@ -3325,69 +3731,243 @@ static void client_music_advance(client *c)
     }
 }
 
-static void client_music_pump(client *c)
+/*
+ * The music volume for the sector about to be handed out — the slider, and the
+ * fade the two duration globals exist for.
+ *
+ * SOUND OPTIONS -> MUSIC. The original scales by the slider doubled
+ * (0x800205F4 stores music*2 into the volume global), so the top of the slider
+ * is full scale and the bottom is silence.
+ *
+ * `0x80071954` then scales by `remaining / 64` while the countdown is under 64
+ * ticks and `0x80071980` by `elapsed / 64` while the elapsed count is — so a
+ * track fades in over its first 64 ticks and out over its last 64. At 50 Hz
+ * that is 1.28 seconds each way, and it is the reason the durations are restart
+ * points rather than lengths.
+ */
+static s32 client_music_volume(const client *c)
 {
-    s16 pcm[XA_FRAMES_PER_SECTOR * 2];
-    int queued;
+    s32 vol = c->settings.v[Q2_SET_MUSIC] * 2;
 
-    if (!c->music_open || !c->audio)
-        return;
+    /* A film carries its own track and has no countdown to fade against. */
+    if (!c->film_open && c->music_total > 0) {
+        s32 elapsed = c->music_total - c->music_left;
 
-    /* Keep roughly a quarter second buffered. Less and it stutters when a frame
-     * runs long; much more and switching zones would keep playing the old
-     * track for noticeably too long. */
-    queued = SDL_GetAudioStreamQueued(c->audio);
-    while (queued < (int)(XA_SAMPLE_RATE / 4 * 2 * (int)sizeof(s16))) {
-        u32 n = q2_xa_track_read(&c->music, &c->music_dec, &c->music_cursor,
-                                 pcm, (u32)(sizeof(pcm) / sizeof(pcm[0])));
+        if (c->music_left < Q2_MUSIC_FADE_TICKS && c->music_left >= 0)
+            vol = (vol * c->music_left) / Q2_MUSIC_FADE_TICKS;
+        if (elapsed < Q2_MUSIC_FADE_TICKS && elapsed >= 0)
+            vol = (vol * elapsed) / Q2_MUSIC_FADE_TICKS;
+    }
+
+    if (vol < 0)
+        vol = 0;
+    return vol;
+}
+
+/*
+ * Decode one more sector of bed — the film's track if one is running, otherwise
+ * the level's music. False means neither had anything, and the caller mixes the
+ * voices into silence instead.
+ */
+static bool client_bed_refill(client *c)
+{
+    const u32 cap = (u32)(sizeof(c->bed) / sizeof(c->bed[0]));
+    u32 n = 0;
+
+    c->bed_frames = 0;
+    c->bed_pos    = 0;
+
+    if (c->film_open) {
+        n = q2_movie_audio(&c->film, c->bed, cap);
+    } else if (c->music_open) {
+        n = q2_xa_track_read(&c->music, &c->music_dec, &c->music_cursor,
+                             c->bed, cap);
         if (n == 0) {
-            /* End of stream: the playlist advances. The engine's walk is what
+            /*
+             * End of stream: the playlist advances. The engine's walk is what
              * decides what comes next, and for every real level it eventually
              * jumps back and starts the seven again.
              *
              * This is the SECOND thing that advances it. The first is the
-             * countdown below, which is the console's own trigger; a stream
-             * that runs out early still has to move on. */
-            client_music_advance(c);
-            break;
-        }
-
-        /* SOUND OPTIONS -> MUSIC. The original scales by the slider doubled
-         * (0x800205F4 stores music*2 into the volume global), so the top of
-         * the slider is full scale and the bottom is silence. */
-        {
-            s32 vol = c->settings.v[Q2_SET_MUSIC] * 2;
-
-            /*
-             * And the FADE, which is what the two duration globals are for.
-             * `0x80071954` scales the volume by `remaining / 64` while the
-             * countdown is under 64 ticks, and `0x80071980` scales it by
-             * `elapsed / 64` while the elapsed count is — so a track fades in
-             * over its first 64 ticks and out over its last 64. At 50 Hz that
-             * is 1.28 seconds each way, and it is the reason the durations are
-             * restart points rather than lengths.
+             * countdown in the frame loop, which is the console's own trigger;
+             * a stream that runs out early still has to move on.
+             *
+             * One retry, so the new track starts in this call rather than a
+             * frame later — and only one, so a playlist of empty tracks cannot
+             * spin here.
              */
-            if (c->music_total > 0) {
-                s32 elapsed = c->music_total - c->music_left;
+            client_music_advance(c);
+            if (c->music_open)
+                n = q2_xa_track_read(&c->music, &c->music_dec, &c->music_cursor,
+                                     c->bed, cap);
+        }
+    }
 
-                if (c->music_left < Q2_MUSIC_FADE_TICKS && c->music_left >= 0)
-                    vol = (vol * c->music_left) / Q2_MUSIC_FADE_TICKS;
-                if (elapsed < Q2_MUSIC_FADE_TICKS && elapsed >= 0)
-                    vol = (vol * elapsed) / Q2_MUSIC_FADE_TICKS;
-            }
+    /* Less than one frame is not a bed. Guarding it here is what stops
+     * `client_bed_read` spinning on a refill that succeeds and yields nothing. */
+    if (n < XA_CHANNELS)
+        return false;
 
-            if (vol < 0)
-                vol = 0;
-            if (vol < 255) {
-                u32 i;
-                for (i = 0; i < n; i++)
-                    pcm[i] = (s16)((pcm[i] * vol) / 255);
-            }
+    {
+        s32 vol = client_music_volume(c);
+
+        if (vol < 255) {
+            u32 i;
+            for (i = 0; i < n; i++)
+                c->bed[i] = (s16)((c->bed[i] * vol) / 255);
+        }
+    }
+
+    c->bed_frames = n / XA_CHANNELS;
+    return true;
+}
+
+/* Hand out `frames` of bed, padding with silence when nothing is playing. */
+static void client_bed_read(client *c, s16 *dst, u32 frames)
+{
+    u32 done = 0;
+
+    while (done < frames) {
+        u32 avail = c->bed_frames - c->bed_pos;
+        u32 take;
+
+        if (avail == 0) {
+            if (!client_bed_refill(c))
+                break;
+            continue;
         }
 
-        SDL_PutAudioStreamData(c->audio, pcm, (int)(n * sizeof(s16)));
-        queued += (int)(n * sizeof(s16));
+        take = frames - done;
+        if (take > avail)
+            take = avail;
+
+        memcpy(dst + done * XA_CHANNELS,
+               c->bed + c->bed_pos * XA_CHANNELS,
+               (size_t)take * XA_CHANNELS * sizeof(s16));
+        done       += take;
+        c->bed_pos += take;
     }
+
+    if (done < frames)
+        memset(dst + done * XA_CHANNELS, 0,
+               (size_t)(frames - done) * XA_CHANNELS * sizeof(s16));
+}
+
+/*
+ * Sum one voice into `dst`.
+ *
+ * The sample's rate is 11025 or 22050 and the stream's is 37800, so the cursor
+ * steps through the source by a fraction of a sample per output frame and the
+ * pair either side of it are interpolated. That is not the SPU's own four-tap
+ * gaussian, and it is not pretending to be: what matters here is that an effect
+ * plays at its own pitch rather than at 1.7 to 3.4 times it, which is what
+ * handing mono 11025 to a stereo 37800 stream did.
+ *
+ * Mono goes to both channels. There is no panning: the events carry a world
+ * position and the port has no listener basis wired to it (openquestions #60),
+ * so centring is the honest reading rather than a guessed pan.
+ */
+static void client_voice_mix(client_voice *v, s16 *dst, u32 frames)
+{
+    u32 i;
+
+    for (i = 0; i < frames; i++) {
+        u32 idx;
+        s32 a, b, s, l, r;
+
+        /* Keep two samples ahead of the cursor, so the pair to interpolate is
+         * always there. Compacting first means `have` is at most 1 when the
+         * next block lands, so the 2-block buffer cannot overflow. */
+        while ((v->pos >> 16) + 1 >= v->have) {
+            u32 shift = v->pos >> 16;
+            u32 n;
+
+            if (shift > 0) {
+                memmove(v->buf, v->buf + shift,
+                        (size_t)(v->have - shift) * sizeof(s16));
+                v->have -= shift;
+                v->pos  -= shift << 16;
+            }
+
+            n = q2_spu_voice_block(&v->dec, v->buf + v->have);
+            if (n == 0) {
+                v->active = false;
+                return;
+            }
+            v->have += n;
+        }
+
+        idx = v->pos >> 16;
+        a   = v->buf[idx];
+        b   = v->buf[idx + 1];
+        s   = a + (((b - a) * (s32)(v->pos & 0xFFFF)) >> 16);
+        s   = (s * v->vol) / 127;
+
+        l = dst[i * XA_CHANNELS]     + s;
+        r = dst[i * XA_CHANNELS + 1] + s;
+        if (l >  32767) l =  32767;
+        if (l < -32768) l = -32768;
+        if (r >  32767) r =  32767;
+        if (r < -32768) r = -32768;
+        dst[i * XA_CHANNELS]     = (s16)l;
+        dst[i * XA_CHANNELS + 1] = (s16)r;
+
+        v->pos += v->step;
+    }
+}
+
+/*
+ * Feed the device: bed, plus every live voice, pushed once per chunk.
+ *
+ * THE TARGET IS A LATENCY, not just a stutter margin, and that is new. It used
+ * to be a quarter second because nothing but music went through here and a
+ * quarter second of music is simply a quarter second of lead. Now a footstep
+ * waits behind whatever is queued before it is heard, so the queue is held near
+ * a sixteenth of a second — about 63 ms, still two frames of headroom at 30 fps
+ * and short enough that a shot does not lag the muzzle flash.
+ *
+ * The chunk is much smaller than a sector for the same reason: topping up a
+ * sector at a time would overshoot the target by up to 53 ms every time.
+ */
+#define CLIENT_AUDIO_TARGET_FRAMES (XA_SAMPLE_RATE / 16)
+#define CLIENT_AUDIO_CHUNK_FRAMES  256
+
+static void client_audio_pump(client *c)
+{
+    s16 mix[CLIENT_AUDIO_CHUNK_FRAMES * XA_CHANNELS];
+    const int target = (int)(CLIENT_AUDIO_TARGET_FRAMES * XA_CHANNELS *
+                             sizeof(s16));
+    const int chunk  = (int)(CLIENT_AUDIO_CHUNK_FRAMES * XA_CHANNELS *
+                             sizeof(s16));
+    int queued;
+
+    if (!c->audio)
+        return;
+
+    queued = SDL_GetAudioStreamQueued(c->audio);
+
+    while (queued < target) {
+        u32 i;
+
+        client_bed_read(c, mix, CLIENT_AUDIO_CHUNK_FRAMES);
+
+        for (i = 0; i < CLIENT_VOICES; i++)
+            if (c->voice[i].active)
+                client_voice_mix(&c->voice[i], mix, CLIENT_AUDIO_CHUNK_FRAMES);
+
+        SDL_PutAudioStreamData(c->audio, mix, chunk);
+        queued += chunk;
+    }
+}
+
+/* Silence every voice. Called before the sound bank is freed, because a voice
+ * borrows the bank's ADPCM and would otherwise read a freed buffer. */
+static void client_voices_stop(client *c)
+{
+    u32 i;
+
+    for (i = 0; i < CLIENT_VOICES; i++)
+        c->voice[i].active = false;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -3438,7 +4018,23 @@ static u16 client_demo_pad(long frame)
  * decides whether the look rate is eased or set, which is the difference
  * between a view that glides and one that snaps.
  */
-static u16 client_pad_mask(const client *c)
+/*
+ * ---------------------------------------------------------------------------
+ * And why the keys are bound to MEANINGS rather than to buttons
+ * ---------------------------------------------------------------------------
+ * This used to be STANDARD A's arm of that table written out by hand — W on
+ * Q2_PAD_UP, A on L2, the arrows on LEFT/RIGHT and the shoulders. That is fine
+ * until the style changes, and then every key still works and none of them
+ * means what it did: under RIGHT MOUSE, L2 is the PREVIOUS WEAPON, so strafing
+ * left cycled the inventory.
+ *
+ * So the keyboard is bound through `q2_pad_style_bindings`, which is the same
+ * table read backwards. One key mapping, nine styles, and selecting a style on
+ * the CONTROLLER page moves what a key means instead of breaking it. Every key
+ * below keeps the button it had under STANDARD A, because under STANDARD A the
+ * lookup returns exactly the constants that used to be written here.
+ */
+static u16 client_pad_mask(const client *c, const q2_pad_bindings *b)
 {
     const bool *keys;
     u16 pad = 0;
@@ -3450,29 +4046,67 @@ static u16 client_pad_mask(const client *c)
     if (!keys)
         return 0;
 
-    if (keys[SDL_SCANCODE_W])     pad |= Q2_PAD_UP;
-    if (keys[SDL_SCANCODE_S])     pad |= Q2_PAD_DOWN;
-    if (keys[SDL_SCANCODE_A])     pad |= Q2_PAD_L2;
-    if (keys[SDL_SCANCODE_D])     pad |= Q2_PAD_R2;
-    if (keys[SDL_SCANCODE_LEFT])  pad |= Q2_PAD_LEFT;
-    if (keys[SDL_SCANCODE_RIGHT]) pad |= Q2_PAD_RIGHT;
+    if (keys[SDL_SCANCODE_W])     pad |= (u16)b->forward;
+    if (keys[SDL_SCANCODE_S])     pad |= (u16)b->back;
+    if (keys[SDL_SCANCODE_A])     pad |= (u16)b->strafe_left;
+    if (keys[SDL_SCANCODE_D])     pad |= (u16)b->strafe_right;
+    if (keys[SDL_SCANCODE_LEFT])  pad |= (u16)b->turn_left;
+    if (keys[SDL_SCANCODE_RIGHT]) pad |= (u16)b->turn_right;
 
-    /* R1 looks down and L1 up, and holding BOTH is the chord that walks the
-     * pitch back to level — the console's own recentre, which is why there is no
-     * separate key for it. */
-    if (keys[SDL_SCANCODE_DOWN])  pad |= Q2_PAD_R1;
-    if (keys[SDL_SCANCODE_UP])    pad |= Q2_PAD_L1;
+    /* R1 looks down and L1 up under the digital styles, and holding BOTH is the
+     * chord that walks the pitch back to level — the console's own recentre,
+     * which is why there is no separate key for it. Both are zero under a mouse
+     * or stick style, which has no look buttons at all; the arrows drive the
+     * look AXIS there instead (see client_input_simulated). */
+    if (keys[SDL_SCANCODE_DOWN])  pad |= (u16)b->look_down;
+    if (keys[SDL_SCANCODE_UP])    pad |= (u16)b->look_up;
 
-    if (keys[SDL_SCANCODE_SPACE]) pad |= Q2_PAD_SQUARE;   /* jump/swim */
+    if (keys[SDL_SCANCODE_SPACE]) pad |= (u16)b->jump;    /* jump/swim */
     if (keys[SDL_SCANCODE_LALT] || keys[SDL_SCANCODE_F])
-        pad |= Q2_PAD_CROSS;                              /* fire      */
+        pad |= (u16)b->fire;
 
     if (keys[SDL_SCANCODE_RIGHTBRACKET] || keys[SDL_SCANCODE_E])
-        pad |= Q2_PAD_TRIANGLE;                           /* weap +    */
+        pad |= (u16)b->weapon_next;
     if (keys[SDL_SCANCODE_LEFTBRACKET] || keys[SDL_SCANCODE_Q])
-        pad |= Q2_PAD_CIRCLE;                             /* weap -    */
+        pad |= (u16)b->weapon_prev;
+
+    /*
+     * The two mouse buttons, onto the same two masks the keys use. Under the
+     * mouse styles those masks ARE the mouse's buttons — 0x80019224 reads L3
+     * and R3, which is where the console merges them — so MOUSE1 fires and
+     * MOUSE2 jumps because that is what RIGHT MOUSE says they do, not because
+     * this line chose it.
+     */
+    if (c->mouse_left)  pad |= (u16)b->fire;
+    if (c->mouse_right) pad |= (u16)b->jump;
 
     return pad;
+}
+
+/*
+ * One notch of the wheel, or 0: +1 up, -1 down.
+ *
+ * Every bit a notch feeds is tested as a press EDGE — the weapon bits are 26
+ * and 27 out of the pad's shared tail, and the menu's cursor is `cur & ~prev` —
+ * so a notch has to be one frame ON and one frame OFF however fast the wheel is
+ * spun. That is what the gap flag is: without it a flick of the wheel is one
+ * long hold and switches one weapon.
+ */
+static int client_wheel_notch(client *c)
+{
+    int n = 0;
+
+    if (c->wheel_gap) {
+        c->wheel_gap = false;
+        return 0;
+    }
+
+    if (c->wheel_queue > 0)      { n =  1; c->wheel_queue--; }
+    else if (c->wheel_queue < 0) { n = -1; c->wheel_queue++; }
+
+    if (n)
+        c->wheel_gap = true;
+    return n;
 }
 
 /* True while a debug key that stands in for a level's own volume is held. The
@@ -3488,19 +4122,130 @@ static bool client_key_down(const client *c, SDL_Scancode a, SDL_Scancode b)
     return keys && (keys[a] || keys[b]);
 }
 
+/*
+ * ---------------------------------------------------------------------------
+ * MOUSELOOK — pixels of motion per unit of pad deflection
+ * ---------------------------------------------------------------------------
+ * The whole chain, at the default MOUSE SPEED of 64:
+ *
+ *     in.yaw      = (lx * (speed + 32)) >> 4          = lx * 6     (0x80019230)
+ *     yaw_rate    = (in.yaw * 3) >> 2                              (0x8003A67C)
+ *     yaw        += yaw_rate * dt / 10                             (0x8003A9C0)
+ *
+ * so feeding `lx = pixels * 10 / (DIV * dt)` — which is what the code below
+ * does — turns the player by `pixels * 18 / (4 * DIV)` angle units, and the
+ * circle is 4096. With DIV at 4 that is 3641 pixels for a full turn: about
+ * 4.5 inches on an 800 DPI mouse, which is an ordinary sensitivity. The slider
+ * spans roughly 13.6 inches at 0 to 3 inches at 127.
+ *
+ * The `10 / dt` is not a tuning constant, it is the compensation: the angle
+ * integrates a RATE over the tick's own step, and a frame at 60 fps carries
+ * half the motion into a step half as long. Without it the same physical
+ * movement would turn the player half as far at 60 fps as at 30, and a
+ * "sensitivity" that moves with the frame rate is the single thing that makes
+ * ported mouselook feel wrong.
+ */
+#define CLIENT_MOUSE_DIV 4
+
 static void client_input_simulated(client *c, float dt)
 {
     q2_input in;
     s32 eye[3], view[3];
+    bool ticked;
 
     static q2_pad_state pad;
     q2_pad_config       cfg;
+    q2_pad_bindings     bind;
+    int                 style = c->sim[0].player[0].look_scheme;
+
+    if (!q2_pad_style_bindings(style, &bind))
+        memset(&bind, 0, sizeof(bind));
 
     pad.prev    = pad.buttons;
-    pad.buttons = client_pad_mask(c);
+    pad.buttons = client_pad_mask(c, &bind);
+    pad.lx = pad.ly = pad.rx = pad.ry = 0;
 
     q2_pad_config_default(&cfg);
-    cfg.style = c->sim[0].player[0].look_scheme;
+    cfg.style       = style;
+    cfg.swap_y      = c->settings.v[Q2_SET_SWAP_Y];
+    cfg.mouse_speed = c->settings.v[Q2_SET_MOUSE_SPEED];
+
+    /* The wheel, onto the same two masks the weapon keys use. */
+    {
+        int notch = client_wheel_notch(c);
+
+        if (notch > 0)      pad.buttons |= (u16)bind.weapon_next;
+        else if (notch < 0) pad.buttons |= (u16)bind.weapon_prev;
+    }
+
+    /*
+     * The look axis, on the styles that have one. Two sources land in the same
+     * pair and are summed:
+     *
+     *   the mouse    a displacement, converted to a rate against the step the
+     *                tick is about to take
+     *   the arrows   a rate already, because these styles have no look BUTTONS
+     *                for the keys to press — leaving them dead would be the
+     *                regression this whole arrangement exists to avoid
+     */
+    if (q2_pad_style_look(style) == Q2_PAD_LOOK_MOUSE) {
+        s32 step  = q2_sim_next_dt(&c->sim[0], (double)dt);
+        int scale = (cfg.mouse_speed + 32) >> 4;
+        int lx = 0, ly = 0;
+
+        if (scale < 1)
+            scale = 1;
+
+        if (step > 0) {
+            /* Pixels one unit of deflection is worth this tick. The remainder
+             * stays in the accumulator: a fast flick that clamps at full
+             * deflection is spread over the next frame or two rather than
+             * thrown away. */
+            double per = (double)CLIENT_MOUSE_DIV * (double)step /
+                         (double)Q2_LOOK_DIV;
+
+            if (per > 0.0) {
+                int mx = (int)(c->look_acc_x / per);
+                int my = (int)(c->look_acc_y / per);
+
+                c->look_acc_x -= (double)mx * per;
+                c->look_acc_y -= (double)my * per;
+
+                lx += mx;
+                ly += my;
+            }
+        }
+
+        /*
+         * A held arrow asks for the rate the digital styles reach: their look
+         * axis saturates at Q2_PAD_FULL, and the mouse scale is applied on top
+         * of this one, so dividing it out lands on the same turn.
+         */
+        {
+            const bool *keys = c->demo ? NULL : SDL_GetKeyboardState(NULL);
+            int key_full = Q2_PAD_FULL / scale;
+
+            if (key_full < 1)
+                key_full = 1;
+
+            if (keys) {
+                if (keys[SDL_SCANCODE_LEFT])  lx -= key_full;
+                if (keys[SDL_SCANCODE_RIGHT]) lx += key_full;
+                /* The same way round as the digital styles' look buttons:
+                 * SDL_SCANCODE_UP drives `look_up`, which is +Q2_PAD_FULL. */
+                if (keys[SDL_SCANCODE_UP])    ly += key_full;
+                if (keys[SDL_SCANCODE_DOWN])  ly -= key_full;
+            }
+        }
+
+        if (lx >  Q2_PAD_FULL) lx =  Q2_PAD_FULL;
+        if (lx < -Q2_PAD_FULL) lx = -Q2_PAD_FULL;
+        if (ly >  Q2_PAD_FULL) ly =  Q2_PAD_FULL;
+        if (ly < -Q2_PAD_FULL) ly = -Q2_PAD_FULL;
+
+        pad.lx = (s8)lx;
+        pad.ly = (s8)ly;
+    }
 
     q2_pad_read(&pad, &cfg, &in);
 
@@ -3732,7 +4477,13 @@ static void client_input_simulated(client *c, float dt)
         client_targets_for(c, 0);
 
     q2_combat_scan_who = c->mp_enabled ? 0 : Q2_COMBAT_SCAN_OTHER;
-    q2_sim_advance(&c->sim[0], &in, (double)dt);
+    /*
+     * WHETHER THE WORLD ACTUALLY MOVED. `q2_sim_advance` returns 0 when the
+     * accumulated time has not reached one tick, which at any frame rate above
+     * the nominal 25 Hz is most frames — and on those frames nothing in the sim
+     * changed, including its event queue.
+     */
+    ticked = (q2_sim_advance(&c->sim[0], &in, (double)dt) != 0);
     q2_combat_scan_who = Q2_COMBAT_SCAN_OTHER;
     client_sync_parked_health(c);
     client_score_deaths(c);
@@ -3844,8 +4595,17 @@ static void client_input_simulated(client *c, float dt)
     /*
      * What the items did while that ran. Immediately after the tick, because
      * the event list is cleared at the top of the next one.
+     *
+     * AND ONLY IF ONE RAN. The list is cleared at the top of a tick and this is
+     * the only thing that drains it, so a frame on which the sim did not tick
+     * finds the PREVIOUS tick's events still sitting there — and used to play
+     * every one of them again. At 90 fps against a 25 Hz tick that is every
+     * footstep, pain grunt and pickup heard three or four times, with the count
+     * wobbling as the frame rate did. It is also why the sixteen dynamic light
+     * slots were being refilled from the same events several times a frame.
      */
-    client_entity_events(c);
+    if (ticked)
+        client_entity_events(c);
 
     /*
      * The weapon in the hands, advanced on the same clock. The selection comes
@@ -3887,15 +4647,60 @@ static void client_input_simulated(client *c, float dt)
         }
 
         /*
-         * What the sim's own shot did, rather than an unconditional "it fired".
-         * `combat.last_shot.dry` is "out of ammo", which is the machine's
-         * `Q2_VW_FIRE_DENIED` (viewweapon.h) — and it is what makes an empty
-         * gun auto-switch instead of clicking. `fired` is false for an ordinary
-         * refire wait too, so it is the wrong flag to test.
+         * WHAT THE SIM'S SHOT ACTUALLY DID.
+         *
+         * This used to report Q2_VW_FIRED whenever the trigger was down and the
+         * weapon was not dry — which is every frame of a held trigger, refire
+         * gate or no refire gate. So the fire clip played for shots that never
+         * happened, and it played at RENDER rate: q2_vw_advance runs every
+         * frame while the sim ticks every second frame in the headless step.
+         *
+         * The three outcomes are distinct and only one of them is a shot:
+         *
+         *     dry     -> Q2_VW_FIRE_DENIED, the empty-gun pass that makes the
+         *                machine switch you off the weapon
+         *     fired   -> Q2_VW_FIRED
+         *     neither -> the refire gate said no; the machine must not be told
+         *                anything, or the clip restarts on a tick that did not
+         *                fire
+         *
+         * THE SERIAL IS WHAT MAKES IT AN EVENT, and this used to gate on `ticks`
+         * instead — which is clamped to a minimum of 1 fifty lines above and is
+         * therefore always true. It gated nothing. `last_shot` is a latch that
+         * holds the last ATTEMPT, so on the frames between ticks it still reads
+         * `fired`, and the third outcome above was unreachable from here: a held
+         * trigger re-reported one shot on every rendered frame, and the clip
+         * restarted as fast as the machine's latch could clear. That is the very
+         * defect the comment above claimed the gate was preventing, and it is
+         * the same one the sound below had.
+         *
+         * `shot_serial` is bumped once per fire attempt (sim.h), so a value this
+         * client has not seen means a NEW attempt and nothing else does. The
+         * trigger drops out of the condition with it: the sim only attempts a
+         * shot on a tick whose input had `attack` set, so a fresh serial already
+         * says the trigger was down when it mattered — which is not the same
+         * question as whether it is still down on this frame.
+         *
+         * `in.attack` is still passed to the machine, because that argument is
+         * the TRIGGER, not the report.
          */
-        swapped = q2_vw_advance(&c->vw, ticks, in.attack,
-                                (in.attack && c->sim[0].combat.last_shot.dry)
-                                    ? Q2_VW_FIRE_DENIED : Q2_VW_FIRED);
+        {
+            q2_vw_fire_result report = Q2_VW_FIRE_NONE;
+
+            if (c->sim[0].combat.shot_serial != c->shot_serial_shown) {
+                c->shot_serial_shown = c->sim[0].combat.shot_serial;
+
+                if (c->sim[0].combat.last_shot.dry) {
+                    report = Q2_VW_FIRE_DENIED;
+                    c->shots_dry++;
+                } else if (c->sim[0].combat.last_shot.fired) {
+                    report = Q2_VW_FIRED;
+                    c->shots_fired++;
+                }
+            }
+
+            swapped = q2_vw_advance(&c->vw, ticks, in.attack, report);
+        }
         if (swapped)
             client_bind_view_model(c);
 
@@ -3904,20 +4709,76 @@ static void client_input_simulated(client *c, float dt)
          * drained. `q2_vw_take_refire`, `q2_vw_take_event` and
          * `q2_vw_wants_fire` were all declared, implemented and never called.
          *
-         * The refire signal is the pass on which the original recomputes the
-         * player's next and previous weapons (0x8004FB5C), so draining it is
-         * what makes running dry switch you off the empty gun. The event is the
-         * animation's own — a muzzle flash or a shell eject on the frame the
-         * clip says, not the frame the trigger was pressed.
+         * THE REFIRE PASS IS A SELECTION, NOT A CYCLE. It used to call
+         * q2_sim_cycle_weapon(+1). The console's refire pass calls 0x800506C4
+         * (`jal` at 0x8004FB60), which walks the fixed auto-switch preference
+         * list at 0x8009DB7C and takes the first entry that is both OWNED and
+         * FED, writing it to player+0x66 and the view model's +214. That is
+         * idempotent: holding the best affordable weapon, it picks the same one
+         * and nothing changes.
+         *
+         * q2_weapon_cycle is the transcription of the OTHER function,
+         * 0x80050758 — the +/-1 neighbour scan the console calls twice at
+         * 0x8004FB70 and 0x8004FB88 only to refill the next/previous caches at
+         * player+0x64 and +0x60. It never sets the held weapon. Calling it here
+         * meant every shot walked the player one step forward through the
+         * carousel; invisible on BASE1, where the blaster is the only weapon
+         * owned and the cycle returns "no change".
+         *
+         * q2_weapon_autoselect — the correct transcription — was already in the
+         * tree with no production caller at all.
          */
         if (q2_vw_take_refire(&c->vw))
-            q2_sim_cycle_weapon(&c->sim[0], +1);
+            q2_sim_autoselect_weapon(&c->sim[0]);
 
+        /*
+         * The animation's own per-key event. Drained and RECORDED rather than
+         * acted on, and deliberately so: the original's consumer is 0x80050454,
+         * a multi-way dispatch on the id with an arm for 2 and a shared arm for
+         * {3,6,7,8,11}, reading state+0x114/+0x116 and calling 0x800739B8 and
+         * 0x8007270C. Nothing read so far says which id is a muzzle flash and
+         * which is a shell eject, and hanging an invented meaning on a decoded
+         * id is exactly the mistake this project keeps paying for. Counted so
+         * the ids that actually occur can be seen; see openquestions.
+         */
         {
             s16 ev;
             if (q2_vw_take_event(&c->vw, &ev)) {
                 c->vw_events++;
                 c->vw_last_event = ev;
+            }
+        }
+
+        /*
+         * AND THE SHOT'S SOUND, which every one of the eleven fire functions
+         * computes into `res.sound` and nothing has ever played. Firing any
+         * weapon was silent, and a dry trigger did not click.
+         *
+         * IT IS CONSUMED, not sampled. `last_shot` is a latch that is written
+         * on a trigger pull and never cleared, so `fired` stays true after the
+         * trigger is released — and this read used to be gated on `ticks`,
+         * which is clamped to a minimum of 1 just above and is therefore
+         * always true. Every rendered frame replayed the same shot: one pull,
+         * and then that shot for as long as the player stood there. Between
+         * ticks it also fired several times per shot while the trigger WAS
+         * held, because a fire attempt happens on a tick and this runs on a
+         * frame.
+         *
+         * The serial is what makes it an event: it is bumped once per attempt
+         * (sim.h), so a shot is heard exactly once no matter how many frames
+         * pass before the next one.
+         */
+        if (c->sim[0].combat.shot_serial != c->shot_serial_heard) {
+            const q2_fire_result_v2 *shot = &c->sim[0].combat.last_shot;
+
+            c->shot_serial_heard = c->sim[0].combat.shot_serial;
+
+            if ((shot->fired || shot->dry) && shot->sound >= 0) {
+                const q2_weapon_tables *wt = q2_weapon_tables_builtin();
+
+                if ((u32)shot->sound < Q2_WT_SOUND_COUNT &&
+                    wt->sound[shot->sound][0])
+                    client_play_sound(c, wt->sound[shot->sound]);
             }
         }
     }
@@ -3997,29 +4858,71 @@ static void client_input_simulated(client *c, float dt)
                      : q2_laserbeams_draw(&c->lasers, &c->sim[0].fx,
                                           &c->sim[0].fx_rng);
 
-    /* The rotating brushes, on the same 1/300 s clock as everything else. */
-    if (c->rotators_ready) {
+    /*
+     * The 1/300 s clock three separate subsystems run on, and each is now
+     * gated on its OWN readiness rather than on the rotators'.
+     *
+     * All three used to sit inside `if (c->rotators_ready)`, which is a
+     * dependency none of them has: q2_rotators_build is reached only when both
+     * q2_events_parse_common and q2_userfuncs_parse succeed, so a map whose
+     * rotator build failed silently stopped every door, every lift, and the
+     * script's own deferred-timer clock along with them.
+     */
+    {
         s32 ticks = (s32)((double)dt * 300.0 + 0.5);
         if (ticks < 1) ticks = 1;
-        c->rot_moved += q2_rotators_tick(&c->rotators, ticks);
+
+        /* The rotating brushes. */
+        if (c->rotators_ready)
+            c->rot_moved += q2_rotators_tick(&c->rotators, ticks);
 
         /* The script's own clock, which is what a TIMER's deadline is measured
-         * against. */
+         * against. It has no readiness flag of its own and never needed one. */
         q2_event_rt_advance(&c->sim[0].event_rt, (s32)ticks);
 
         /*
-         * And the doors and lifts, on the same clock. `player_keys` gates a
-         * locked door; the inventory's low twelve bits are the keys the script
-         * tests (inventory.h), which is the same field ONKEYDO reads.
+         * And the doors and lifts. `player_keys` gates a locked door; the
+         * inventory's low twelve bits are the keys the script tests
+         * (inventory.h), which is the same field ONKEYDO reads.
+         *
+         * The hull follows the tick immediately, because the sweep the player
+         * is about to run has to see the door where it is NOW — 0x80051EC0 is
+         * called from the mover's own per-frame handler for the same reason.
          */
-        if (c->movers_ready)
-            c->mover_moved += q2_movers_tick(&c->movers, ticks,
-                                             (u16)(c->sim[0].combat.inv.flags
-                                                   & 0x0FFFu));
+        if (c->movers_ready) {
+            client_mover_ctx bctx;
+
+            bctx.c = c;
+            c->mover_moved +=
+                q2_movers_tick_blocked(&c->movers, ticks,
+                                       (u16)(c->sim[0].combat.inv.flags
+                                             & 0x0FFFu),
+                                       client_mover_blocked, &bctx);
+            q2_sim_movers_update(&c->sim[0], &c->movers);
+
+            /*
+             * And the 65 MOVER_A items whose +20 halfword says they open on
+             * TOUCH (mover.h). The field was decoded and had no reader, so
+             * those doors only ever opened from a script record.
+             */
+            client_movers_touch(c);
+        }
     }
 
-    /* The AI, on its own clock and looking at where the player is now. */
-    client_creatures_tick(c, dt, eye);
+    /*
+     * The AI, on its own clock and looking at where the player is now — as an
+     * entity ORIGIN, not an eye. `q2_visible` adds the sight client's view
+     * height itself, so handing it the eye added the view height twice and put
+     * the player end of every sight line 400 units into the ceiling.
+     */
+    {
+        s32 player_origin[3];
+
+        player_origin[0] = c->sim[0].player[0].pos[0];
+        player_origin[1] = q2_sim_origin_y(c->sim[0].player[0].pos[1]);
+        player_origin[2] = c->sim[0].player[0].pos[2];
+        client_creatures_tick(c, dt, player_origin);
+    }
 
     /*
      * DEATH. Page 41 has been transcribed since the menu was reconstructed —
@@ -4101,6 +5004,9 @@ static void client_input_simulated(client *c, float dt)
 
         if (best) {
             s32 to[3];
+            /* The framing below is measured from the creature's FEET, which is
+             * where its model stands; `pos` is the entity origin. */
+            s32 feet_y = best->pos[1] + Q2_EYE_BASE;
 
             /*
              * Stand in front of it, at head height, looking at it — the
@@ -4111,7 +5017,7 @@ static void client_input_simulated(client *c, float dt)
              */
             c->cam.pos[0] = best->pos[0] +
                             ((q2_sin12(best->angles[2]) * 700) >> Q2_FRAC_12);
-            c->cam.pos[1] = best->pos[1] - 250;
+            c->cam.pos[1] = feet_y - 250;
             c->cam.pos[2] = best->pos[2] +
                             ((q2_cos12(best->angles[2]) * 700) >> Q2_FRAC_12);
             eye[0] = c->cam.pos[0];
@@ -4119,7 +5025,7 @@ static void client_input_simulated(client *c, float dt)
             eye[2] = c->cam.pos[2];
 
             to[0] = best->pos[0] - eye[0];
-            to[1] = best->pos[1] - eye[1] - 150;   /* look at the chest */
+            to[1] = feet_y - eye[1] - 150;         /* look at the chest */
             to[2] = best->pos[2] - eye[2];
 
             double horiz = sqrt((double)to[0] * to[0] +
@@ -4160,6 +5066,33 @@ static void client_input(client *c, float dt)
     if (keys[SDL_SCANCODE_RIGHT]) c->cam.yaw   += turn;
     if (keys[SDL_SCANCODE_UP])    c->cam.pitch -= turn;
     if (keys[SDL_SCANCODE_DOWN])  c->cam.pitch += turn;
+
+    /*
+     * And the mouse, which looks the same way here as it does in play: forward
+     * is up, which is a POSITIVE pitch (a frame rendered at pitch 500 is looking
+     * at the ceiling). There is no tick to scale against in this mode — the
+     * camera is moved directly rather than through a rate — so the whole
+     * accumulator is spent every frame, and the divisor is the same one play
+     * uses so the two feel alike.
+     *
+     * NOTE that the four keys above pitch the OTHER way round: this camera's
+     * up arrow looks down, which it has always done and which disagrees with
+     * the player's. Left alone deliberately — it is a keyboard binding, and
+     * changing one was not part of adding a mouse.
+     */
+    {
+        /* The angle units a pixel is worth in play, with the dt cancelled out:
+         * ((speed + 32) >> 4) * 3 / (4 * DIV). MOUSE SPEED moves this camera
+         * exactly as far as it moves the player's. */
+        double gain = (double)(((c->settings.v[Q2_SET_MOUSE_SPEED] + 32) >> 4) *
+                               Q2_LOOK_SCALE_NUM) /
+                      (double)((1 << Q2_LOOK_SCALE_SHIFT) * CLIENT_MOUSE_DIV);
+
+        c->cam.yaw   += (s32)(c->look_acc_x * gain);
+        c->cam.pitch += (s32)(c->look_acc_y * gain);
+        c->look_acc_x = 0.0;
+        c->look_acc_y = 0.0;
+    }
 
     if (c->cam.pitch >  Q2_ANGLE_90) c->cam.pitch =  Q2_ANGLE_90;
     if (c->cam.pitch < -Q2_ANGLE_90) c->cam.pitch = -Q2_ANGLE_90;
@@ -4231,6 +5164,175 @@ static u16 client_menu_pad(const client *c)
         k[SDL_SCANCODE_SPACE])     pad |= Q2_PAD_CROSS;
     if (k[SDL_SCANCODE_BACKSPACE]) pad |= Q2_PAD_TRIANGLE;
 
+    /*
+     * And the RIGHT BUTTON, which is TRIANGLE — the console's own back. It is
+     * held rather than pulsed so the engine sees the same press-and-release a
+     * key gives it, and it costs nothing in play because in play the same
+     * button is read through a different function entirely.
+     *
+     * The LEFT button is not here: what a click means depends on what it landed
+     * on, so client_menu_pointer decides and ORs its answer in.
+     */
+    if (c->mouse_right) pad |= Q2_PAD_TRIANGLE;
+
+    return pad;
+}
+
+/* ------------------------------------------------------------------------- */
+/* The pointer, over a menu                                                   */
+/* ------------------------------------------------------------------------- */
+/*
+ * Where the console's 512x248 menu block sits inside this buffer. One function
+ * because the DRAW does the same arithmetic, and a pointer that disagrees with
+ * the picture by a few pixels is a menu whose rows are hit slightly above
+ * themselves.
+ */
+static void client_menu_origin(const client *c, int *ox, int *oy)
+{
+    if (ox) *ox = (c->width  - Q2_MENU_SCREEN_W) / 2;
+    if (oy) *oy = (c->height - Q2_MENU_SCREEN_H) / 2;
+}
+
+/*
+ * The pointer in menu space, undoing the two transforms the frame applied on
+ * the way out: the window fit (q2_screen_fit_rect plus SCREEN POSITION, exactly
+ * as client_frame composes them) and then the menu block's origin.
+ *
+ * False when there is no pointer to speak of — headless, or grabbed for
+ * mouselook, in which case its motion is look input and its position is
+ * meaningless.
+ */
+static bool client_menu_pointer_pos(const client *c, int *mx, int *my)
+{
+    int out_w = 0, out_h = 0;
+    int px = 0, py = 0, pw = 0, ph = 0;
+    int ox = 0, oy = 0;
+    double sx, sy, fx, fy;
+
+    if (c->headless || !c->renderer || !c->pointer_valid || c->mouse_grabbed)
+        return false;
+
+    SDL_GetCurrentRenderOutputSize(c->renderer, &out_w, &out_h);
+    q2_screen_fit_rect(&c->screen, c->fit, out_w, out_h, &px, &py, &pw, &ph);
+    if (pw <= 0 || ph <= 0)
+        return false;
+
+    sx = (double)c->settings.v[Q2_SET_SCREEN_X];
+    sy = (double)(c->settings.v[Q2_SET_SCREEN_Y] - 24);
+
+    fx = ((double)c->pointer_x -
+          ((double)px + sx * (double)pw / (double)Q2_SCREEN_PAL_WIDTH)) *
+         (double)c->width / (double)pw;
+    fy = ((double)c->pointer_y -
+          ((double)py + sy * (double)ph / (double)Q2_SCREEN_PAL_HEIGHT)) *
+         (double)c->height / (double)ph;
+
+    client_menu_origin(c, &ox, &oy);
+
+    if (mx) *mx = (int)fx - ox;
+    if (my) *my = (int)fy - oy;
+    return true;
+}
+
+/*
+ * One frame of the pointer over `m`, returning the pad bits it is asking for.
+ *
+ * The division of labour is the point: everything a mouse can say that a pad
+ * can also say goes back through the pad, so the navigation rules, the sounds,
+ * the press-versus-release split and the page transitions are the ones read out
+ * of the executable rather than a second implementation. Only the two things a
+ * pad cannot say — land on that row, set that slider to that value — go through
+ * menu.c's own pointer entry points.
+ */
+static u16 client_menu_pointer(client *c, q2_menu *m)
+{
+    q2_menu_hit hit;
+    int  mx = 0, my = 0;
+    bool have_pos, have_hit, pressed;
+    u16  pad = 0;
+
+    /* A scripted run has no pointer, and letting a stray one move the cursor
+     * would make its output depend on where the mouse happened to be. */
+    if (!m->open || !m->page || c->demo)
+        return 0;
+
+    have_pos = client_menu_pointer_pos(c, &mx, &my);
+    have_hit = have_pos && q2_menu_hit_test(m, mx, my, &hit);
+    pressed  = c->mouse_left && !c->mouse_left_prev;
+
+    /*
+     * Hover, but only while nothing is held: once the button is down the press
+     * belongs to the row it started on, however far the pointer then travels.
+     * That is what makes a slider draggable and what stops a click that drifts
+     * a pixel activating the row below.
+     */
+    if (have_hit && !c->mouse_left && !c->mouse_right)
+        q2_menu_point_at(m, hit.index);
+
+    if (pressed) {
+        c->menu_click_index = -1;
+        c->menu_click_part  = Q2_MENU_HIT_NONE;
+
+        if (have_hit) {
+            q2_menu_point_at(m, hit.index);
+            c->menu_click_index = hit.index;
+            c->menu_click_part  = (u8)hit.part;
+
+            /* A slider takes its value from the press itself, so the bar jumps
+             * to where it was clicked rather than only responding to a drag. */
+            if (hit.part == Q2_MENU_HIT_SLIDER)
+                q2_menu_set_slider(m, hit.index, hit.value);
+        }
+    }
+
+    if (c->mouse_left && c->menu_click_index >= 0) {
+        switch (c->menu_click_part) {
+        case Q2_MENU_HIT_SLIDER: {
+            int value;
+
+            /* Tracked by x alone: see q2_menu_slider_at. */
+            if (have_pos &&
+                q2_menu_slider_at(m, c->menu_click_index, mx, &value))
+                q2_menu_set_slider(m, c->menu_click_index, value);
+            break;
+        }
+
+        /* 0x8001B720: the row reads "LABEL ON OFF" and LEFT means ON because
+         * you are moving along it, so aiming at a word is the same press. */
+        case Q2_MENU_HIT_ON:
+        case Q2_MENU_HIT_PREV:
+            pad |= Q2_PAD_LEFT;
+            break;
+        case Q2_MENU_HIT_OFF:
+        case Q2_MENU_HIT_NEXT:
+            pad |= Q2_PAD_RIGHT;
+            break;
+
+        /*
+         * CROSS, HELD. The engine fires most rows on the press and some on the
+         * release (0x8001A0D8), and a real click is both — so holding the bit
+         * while the button is down and dropping it on release gives each kind
+         * the edge it asks for without this having to know which is which.
+         */
+        default:
+            pad |= Q2_PAD_CROSS;
+            break;
+        }
+    }
+
+    if (!c->mouse_left) {
+        c->menu_click_index = -1;
+        c->menu_click_part  = Q2_MENU_HIT_NONE;
+    }
+
+    /* The wheel walks the cursor, one row per notch. */
+    {
+        int notch = client_wheel_notch(c);
+
+        if (notch > 0)      pad |= Q2_PAD_UP;
+        else if (notch < 0) pad |= Q2_PAD_DOWN;
+    }
+
     return pad;
 }
 
@@ -4254,6 +5356,110 @@ static void client_apply_settings(client *c)
         c->sim[0].dt_per_field = 300 / rules.tick_rate;
     if (c->sim[0].dt_per_field <= 0)
         c->sim[0].dt_per_field = 1;
+}
+
+/*
+ * The CONTROLLER page, applied — which until now it was not. Nothing anywhere
+ * read Q2_SET_PAD_STYLE, so the page was five rows that remembered what you
+ * chose and changed nothing, and `look_scheme` sat at the STANDARD A that
+ * q2_sim_init writes.
+ *
+ * WHICH styles the page offers is not the player's choice either: 0x8001C8A8
+ * picks [0,3) for a mouse, [3,6) for an analogue pad and [6,9) otherwise, from
+ * the CONTROLLER THAT IS CONNECTED. On a PC with USE MOUSE on, the mouse is the
+ * connected controller — so the toggle drives the class, and the page offers
+ * RIGHT MOUSE / RIGHT MOUSE 2 / HUNTER MOUSE instead of three schemes there is
+ * no stick to drive. The analogue class is never selected because this port has
+ * no gamepad path at all: styles 3..5 are unreachable rather than broken.
+ *
+ * Cheap enough to run every frame, which is what makes the toggle take effect
+ * the moment it is flipped rather than at the next page change.
+ */
+static void client_apply_input(client *c)
+{
+    bool want_mouse = c->settings.v[Q2_SET_USE_MOUSE] != 0;
+    int  style;
+    int  i;
+
+    if (want_mouse) {
+        c->settings.v[Q2_SET_PAD_CLASS] = 0;
+        if (c->settings.v[Q2_SET_PAD_STYLE] < 0 ||
+            c->settings.v[Q2_SET_PAD_STYLE] >= Q2_PAD_STYLE_RIGHT_STICK)
+            c->settings.v[Q2_SET_PAD_STYLE] = Q2_PAD_STYLE_RIGHT_MOUSE;
+    } else {
+        c->settings.v[Q2_SET_PAD_CLASS] = 2;
+        if (c->settings.v[Q2_SET_PAD_STYLE] < Q2_PAD_STYLE_STANDARD_A ||
+            c->settings.v[Q2_SET_PAD_STYLE] >= Q2_PAD_STYLE_COUNT)
+            c->settings.v[Q2_SET_PAD_STYLE] = Q2_PAD_STYLE_STANDARD_A;
+    }
+
+    style = c->settings.v[Q2_SET_PAD_STYLE];
+    for (i = 0; i < Q2_SIM_MAX_PLAYERS; i++)
+        c->sim[0].player[i].look_scheme = style;
+
+    /* A scripted run has no mouse to grab, and its pad script is STANDARD A's. */
+    c->mouse_look = want_mouse && !c->headless && !c->demo;
+}
+
+/*
+ * Whether the pointer belongs to the world or to a screen in front of it.
+ *
+ * Everything listed here is something the player is meant to be able to point
+ * at or dismiss, and none of them wants the pointer locked to the centre of the
+ * window — so the grab follows this, and the system cursor reappears over a
+ * menu without the port having to draw one of its own.
+ */
+static bool client_ui_open(const client *c)
+{
+    return c->menu.open || c->mcard_open || c->mission_open ||
+           c->briefing_open || c->credits_open || c->film_open;
+}
+
+static void client_update_grab(client *c)
+{
+    bool want;
+
+    if (c->headless || !c->window)
+        return;
+
+    want = c->mouse_look && !client_ui_open(c) &&
+           (SDL_GetWindowFlags(c->window) & SDL_WINDOW_INPUT_FOCUS) != 0;
+
+    if (want == c->mouse_grabbed)
+        return;
+
+    if (!SDL_SetWindowRelativeMouseMode(c->window, want)) {
+        Q2_ERROR("cannot %s the mouse: %s", want ? "grab" : "release",
+                 SDL_GetError());
+        return;
+    }
+
+    c->mouse_grabbed = want;
+
+    /*
+     * Motion that arrived while the pointer was free is not look input, and
+     * motion that arrived while it was grabbed is not a cursor position. Either
+     * way the accumulator is stale across the boundary, and keeping it would
+     * fling the view on the frame the menu closes.
+     */
+    c->look_acc_x = 0.0;
+    c->look_acc_y = 0.0;
+
+    /*
+     * And the QUEUE, which is the half that actually bit: taking the pointer
+     * warps it, and the warp is itself a motion event sitting in the queue
+     * behind this call. The next poll would read it as look input and throw the
+     * view somewhere — measured as a first frame that was already pitched at
+     * the ceiling before the mouse had been touched. Clearing the accumulator
+     * alone does not help, because the offending delta has not arrived yet.
+     */
+    SDL_PumpEvents();
+    SDL_FlushEvent(SDL_EVENT_MOUSE_MOTION);
+
+    /* Where the pointer reappears is the platform's business, not the last
+     * place it was before the grab. */
+    if (!want)
+        c->pointer_valid = false;
 }
 
 static void client_menu_requests(client *c)
@@ -4430,32 +5636,56 @@ static bool client_find_sound(client *c, const char *want, q2_vag *out)
  */
 static bool client_play_sound(client *c, const char *want)
 {
+    client_voice *v = NULL;
     q2_vag vag;
+    u32 i, rate;
+    s32 vol;
 
     if (!c->audio || !client_find_sound(c, want, &vag))
         return false;
 
-    {
-        s16 pcm[16384];
-        u32 n, k;
-        s32 vol;
+    if (!vag.body || vag.data_size < SPU_BLOCK_SIZE)
+        return false;
 
-        n = q2_spu_adpcm_decode(vag.body, vag.data_size, pcm,
-                                (u32)(sizeof(pcm) / sizeof(pcm[0])));
-        if (n == 0)
-            return false;
-
-        /* 0..127 from the slider, and the console doubles the music one but
-         * not this (0x800205F4 is the music path alone). */
-        vol = c->settings.v[Q2_SET_SFX];
-        if (vol < 0)   vol = 0;
-        if (vol > 127) vol = 127;
-        for (k = 0; k < n; k++)
-            pcm[k] = (s16)((pcm[k] * vol) / 127);
-
-        SDL_PutAudioStreamData(c->audio, pcm, (int)(n * sizeof(s16)));
-        return true;
+    for (i = 0; i < CLIENT_VOICES; i++) {
+        if (!c->voice[i].active) {
+            v = &c->voice[i];
+            break;
+        }
     }
+
+    /*
+     * All twenty-four busy. The console has no twenty-fifth either, so this
+     * drops rather than stealing one — a stolen voice cuts a sound already
+     * being heard, which is a louder mistake than a sound never started. It is
+     * counted, because a client that keeps hitting this ceiling is a client
+     * raising more events than the hardware ever could.
+     */
+    if (!v) {
+        c->voice_dropped++;
+        return false;
+    }
+
+    /* 0..127 from the slider, and the console doubles the music one but not
+     * this (0x800205F4 is the music path alone). */
+    vol = c->settings.v[Q2_SET_SFX];
+    if (vol < 0)   vol = 0;
+    if (vol > 127) vol = 127;
+
+    /* 11025 and 22050 are the only two the disc carries (vag.h); anything else
+     * would be a header this reader misparsed, so it is not trusted. */
+    rate = vag.sample_rate;
+    if (rate < 1000 || rate > XA_SAMPLE_RATE)
+        rate = 22050;
+
+    memset(v, 0, sizeof(*v));
+    q2_spu_voice_start(&v->dec, vag.body, vag.data_size);
+    v->step   = (u32)(((u64)rate << 16) / XA_SAMPLE_RATE);
+    v->vol    = vol;
+    v->active = true;
+    c->voice_started++;
+
+    return true;
 }
 
 static void client_play_menu_sound(client *c, q2_menu_sound snd)
@@ -4864,7 +6094,7 @@ static void client_card_finish(client *c)
 
 static void client_card_frame(client *c)
 {
-    u16 pad = client_menu_pad(c);
+    u16 pad;
     const q2_menu_page *page;
     q2_menu_sound snd;
 
@@ -4879,9 +6109,19 @@ static void client_card_frame(client *c)
     client_card_sync(c);
     page = c->card_menu.page;
 
+    /*
+     * The pointer, over the same shadow menu the screens are drawn from — so
+     * the card front end is clickable for exactly the same reason it is
+     * navigable, which is that its screens ARE menu pages.
+     */
+    pad  = client_menu_pointer(c, &c->card_menu);
+    pad |= client_menu_pad(c);
+
     /* TRIANGLE backs out. The console's own arms do not handle it — they are
      * four instructions long and test CROSS only — so this is the port's, and
-     * without it a front end with no live arm would be a trap. */
+     * without it a front end with no live arm would be a trap. The right mouse
+     * button is folded into TRIANGLE by client_menu_pad, so it backs out here
+     * too. */
     if ((pad & Q2_PAD_TRIANGLE) && !(c->card_menu.pad_prev & Q2_PAD_TRIANGLE)) {
         c->card_menu.pad_prev = pad;
         client_card_close(c);
@@ -5048,6 +6288,18 @@ static void client_write_shot(client *c, bool numbered)
             c->shot_stats.quads_rejected_back,
             c->shot_stats.ot_overflow);
 
+    /*
+     * The weapon in the hands against the shots the sim actually took. These two
+     * figures are the whole point of the line: the machine is told about a shot
+     * once per fire ATTEMPT, so a run where the clips outnumber the shots is one
+     * where the client is sampling `last_shot` instead of consuming its serial —
+     * the fire clip restarting at render rate, which is what it used to do.
+     */
+    if (c->vm_ready)
+        Q2_INFO("  view weapon: %u fire clips, %u shots, %u dry, %u keys",
+                c->vw.fires_started, c->shots_fired, c->shots_dry,
+                c->vw.keys_played);
+
     if (c->mp_enabled) {
             int pi;
 
@@ -5149,7 +6401,8 @@ static void client_write_shot(client *c, bool numbered)
                 "nearest %d units, moved %ld, player %d hp, "
                 "%u swings %u shots, %u sounds (%u not in bank, %u unnamed), %u dead, "
                 "%ld hp total, "
-                "player attacked %u, targets %u, bolts %u, %u bodies, "
+                "player attacked %u, targets %u, bolts %u (%u faces, %u dropped "
+                "on a full pool), %u bodies, "
                 "rot %u steps %u moved %u turned, %u calls",
                 live, hunting, c->cre_drawn, c->cre_faces, near_d, moved,
                 c->sim[0].combat.inv.health, c->cre_swings, c->cre_shots,
@@ -5157,9 +6410,18 @@ static void client_write_shot(client *c, bool numbered)
                 dead, hp,
                 c->player_attacks,
                 c->sim[0].combat.target_count,
-                c->sim[0].combat.projectiles.live, c->cre_bodies, c->rot_steps,
+                c->sim[0].combat.projectiles.live,
+                c->proj_prims, q2_sim_proj_scan.dropped_full,
+                c->cre_bodies, c->rot_steps,
                 c->rot_moved, client_rot_turned(c),
                 c->sim[0].event_rt.call_count);
+        /* The mixer, because "sounds are broken" needs a number to argue with.
+         * `dropped` is voices that found all 24 busy — a steady stream of those
+         * means something is raising more than the SPU could ever have played. */
+        Q2_INFO("  audio     %u voices started, %u dropped on a full 24, "
+                "%d bytes queued",
+                c->voice_started, c->voice_dropped,
+                c->audio ? SDL_GetAudioStreamQueued(c->audio) : 0);
         Q2_INFO("  pose      %u by name, %u named but no position, %u unnamed",
                 c->pose_by_name, c->pose_name_no_pos, c->pose_no_name);
         Q2_INFO("            %u held the timeline's last frame; of the misses "
@@ -5199,9 +6461,21 @@ static void client_write_shot(client *c, bool numbered)
             if (at)
                 Q2_INFO("  movers    built from: %s", kinds);
         }
-        Q2_INFO("  movers    %u built, %u triggered by the script, %u tick-moves",
-                c->movers_ready ? c->movers.count : 0,
-                c->mover_triggers, c->mover_moved);
+        {
+            u32 mi, blocked = 0, sealed = 0;
+
+            for (mi = 0; c->movers_ready && mi < c->movers.count; mi++) {
+                if (c->movers.movers[mi].state == Q2_MV_BLOCKED) blocked++;
+                if (c->movers.movers[mi].sealed)                 sealed++;
+            }
+            Q2_INFO("  movers    %u built, %u triggered by the script, "
+                    "%u tick-moves, %u opened by touch",
+                    c->movers_ready ? c->movers.count : 0,
+                    c->mover_triggers, c->mover_moved, c->mover_touched);
+            Q2_INFO("  movers    %u part boxes solid, %u blocked now, "
+                    "%u sealing their portal",
+                    c->sim[0].mover_count, blocked, sealed);
+        }
         Q2_INFO("  entity ev %u lights added, %u dropped, %u bursts drawn, "
                 "%u script lights",
                 c->ent_light_added, c->ent_light_dropped, c->ent_bursts,
@@ -5328,8 +6602,12 @@ static bool client_film_start(client *c, const char *name)
     c->film_frames     = 0;
 
     /* The film carries its own sound. Whatever the level was playing stops,
-     * the way it does on the console when the drive is handed to the film. */
+     * the way it does on the console when the drive is handed to the film —
+     * and so does every effect, since none of them belong over a cutscene. */
     c->music_open = false;
+    client_voices_stop(c);
+    c->bed_frames = 0;
+    c->bed_pos    = 0;
     if (c->audio)
         SDL_ClearAudioStream(c->audio);
 
@@ -5344,17 +6622,22 @@ static void client_film_stop(client *c)
     c->film_open       = false;
     c->film_done       = true;
     c->film_have_frame = false;
+    client_voices_stop(c);
+    c->bed_frames = 0;
+    c->bed_pos    = 0;
     if (c->audio)
         SDL_ClearAudioStream(c->audio);
     Q2_INFO("movie: %u frames shown", c->film_frames);
 }
 
 /*
- * Advance the film and keep its audio fed.
+ * Advance the film.
  *
- * The two are separate on purpose and separate on the console: the SPU plays
- * whatever the drive delivered and the MDEC decodes what it can, so a picture
- * that falls behind does not take the sound with it.
+ * Its audio is NOT pulled here. Picture and sound are separate on the console —
+ * the SPU plays whatever the drive delivered and the MDEC decodes what it can,
+ * so a picture that falls behind does not take the sound with it — and they are
+ * separate here for the same reason: the film's track is just another bed for
+ * `client_audio_pump`, which feeds the device whether or not a frame decoded.
  */
 static void client_film_tick(client *c, float dt)
 {
@@ -5366,33 +6649,8 @@ static void client_film_tick(client *c, float dt)
         c->film_frames++;
     }
 
-    if (q2_movie_finished(&c->film)) {
+    if (q2_movie_finished(&c->film))
         client_film_stop(c);
-        return;
-    }
-
-    if (c->audio) {
-        s16 pcm[XA_FRAMES_PER_SECTOR * 2];
-        int queued = SDL_GetAudioStreamQueued(c->audio);
-
-        while (queued < (int)(XA_SAMPLE_RATE / 4 * 2 * (int)sizeof(s16))) {
-            u32 n = q2_movie_audio(&c->film, pcm,
-                                   (u32)(sizeof(pcm) / sizeof(pcm[0])));
-            s32 vol = c->settings.v[Q2_SET_MUSIC] * 2;
-
-            if (n == 0)
-                break;
-            if (vol < 0)
-                vol = 0;
-            if (vol < 255) {
-                u32 i;
-                for (i = 0; i < n; i++)
-                    pcm[i] = (s16)((pcm[i] * vol) / 255);
-            }
-            SDL_PutAudioStreamData(c->audio, pcm, (int)(n * sizeof(s16)));
-            queued += (int)(n * sizeof(s16));
-        }
-    }
 }
 
 /*
@@ -5463,12 +6721,73 @@ static void client_film_blit(client *c)
 static void client_menu_frame(client *c)
 {
     q2_menu_sound snd;
+    u16 pad;
 
-    q2_menu_advance(&c->menu, client_menu_pad(c));
+    /*
+     * The CONTROLLER page's two greyed rows, given back — the port's decision,
+     * kept in the port's own layer so menu.c stays the transcription it is.
+     *
+     * 0x8001CA28 takes SWAP Y AXIS and USE MOUSE out of the navigation unless
+     * the connected controller is an ANALOGUE PAD, which is the right answer
+     * for a console whose only analogue device is a stick. On a host that
+     * always has a mouse it is two traps: SWAP Y AXIS is read by the mouse
+     * styles and nothing else (pad.c's `invert`), so greying it under a mouse
+     * greys the only row that does anything; and greying USE MOUSE would mean
+     * the toggle that selects the device could never be reached to select it —
+     * or, once off, ever be turned back on.
+     */
+    if (c->menu.page_id == Q2_PAGE_CONTROLLER) {
+        c->menu.disabled[3] = 0;                       /* USE MOUSE   */
+        if (c->settings.v[Q2_SET_PAD_CLASS] == 0)
+            c->menu.disabled[2] = 0;                   /* SWAP Y AXIS */
+    }
+
+    /*
+     * The pointer first, because what a click MEANS depends on the row it is
+     * over and the cursor has to be there before the press is handed to the
+     * engine.
+     */
+    pad  = client_menu_pointer(c, &c->menu);
+    pad |= client_menu_pad(c);
+
+    /*
+     * RIGHT-CLICK OUT OF THE PAUSE MENU.
+     *
+     * Deeper in, TRIANGLE is the back and the engine owns it. On the pause page
+     * itself there is no parent and TRIANGLE does nothing (0x8001D824) — which
+     * on the console is fine, because START closes the menu, and here Esc does.
+     * A player driving the menu with the mouse alone would have no way out, so
+     * the right button does there exactly what Esc does.
+     *
+     * The two PAUSE pages by name, not "any page with no parent": the death
+     * screen and the front end's title also have none, and neither is a screen
+     * anyone may dismiss — one is the end of a life and the other is the bottom
+     * of the game.
+     */
+    if (c->mouse_right && !c->mouse_right_prev && c->menu.depth == 0 &&
+        (c->menu.page_id == Q2_PAGE_PAUSE_SP ||
+         c->menu.page_id == Q2_PAGE_PAUSE_MP)) {
+        q2_menu_close(&c->menu);
+        client_play_menu_sound(c, Q2_MSND_BACK);
+        return;
+    }
+
+    q2_menu_advance(&c->menu, pad);
 
     snd = q2_menu_take_sound(&c->menu);
     if (snd != Q2_MSND_NONE)
         client_play_menu_sound(c, snd);
+
+    /*
+     * The scene follows the page, because the module makes it follow the page:
+     * every front-end builder opens with `module+0x3414`, and that call ends by
+     * putting one of two thinks on the logo depending on which page is now up
+     * (levelbin.h). Stepping off the title screen therefore shrinks it, and
+     * stepping back grows it again.
+     */
+    if (c->in_front_end)
+        q2_sim_scene_page(&c->sim[0],
+                          c->menu.page_id == Q2_PAGE_FRONT_TITLE, true);
 
     client_menu_requests(c);
 }
@@ -5583,7 +6902,15 @@ static void client_draw_view(void *user, q2_screen *s, int p,
          * own cell every tick and that is the one the engine uses.
          */
         ectx.lights        = c->lights_ready ? &c->light_world : NULL;
-        ectx.coll_node     = c->sim[0].current_node;
+        /*
+         * The node the lights are gathered from is the PLAYER's, and the title
+         * screen has no player — so `current_node` there is slot 0 of a world
+         * that reaches no light at all (`q2psx-inspect lit QFRONT`: one spawn
+         * point, zero lights accepted), and the logo shaded to black. Negative
+         * is the fallback light, which is what "this entity stands in no cell"
+         * already means to the gather.
+         */
+        ectx.coll_node     = c->in_front_end ? -1 : c->sim[0].current_node;
 
         q2_entity_build_ot(&c->sim[0].entities, &ectx, &c->cam, ot, gte, &estats);
     }
@@ -5759,7 +7086,12 @@ static void client_draw_view(void *user, q2_screen *s, int p,
                 inst.light = &cre_env;
             }
             inst.origin[0]     = m->pos[0];
-            inst.origin[1]     = m->pos[1];
+            /* `m->pos` is the entity ORIGIN; a model is placed on its FEET,
+             * which is Q2_EYE_BASE below. The same conversion item.c makes
+             * between an item's entity position and its draw origin, and the
+             * reason this frame is pixel-identical to the one before the
+             * spawn lift went in. */
+            inst.origin[1]     = m->pos[1] + Q2_EYE_BASE;
             inst.origin[2]     = m->pos[2];
             inst.yaw           = m->angles[2];
             inst.clut4_count_a = c->clut4_count_a;
@@ -5783,6 +7115,19 @@ static void client_draw_view(void *user, q2_screen *s, int p,
      * viewport but the first.
      */
     q2_fx_build_ot(&c->sim[0].fx, &c->cam, (u32)p, ot, gte);
+
+    /*
+     * And the projectiles themselves, which nothing has ever drawn. Until now
+     * the only thing a bolt, a rocket or a BFG ball put on screen was the
+     * dynamic light it casts — the room brightened where the bolt was and the
+     * bolt was not there. Same table as the world and the effects, for the
+     * same reason: the sort has to be able to put a bolt behind a crate.
+     *
+     * See entitydraw.h for where the geometry comes from and which part of it
+     * is inference rather than transcription.
+     */
+    c->proj_prims += q2_projectiles_build_ot(&c->sim[0].combat.projectiles,
+                                             &c->cam, ot, gte);
 
     /*
      * The status bar, into this viewport's own slice — because the console
@@ -5817,15 +7162,6 @@ static void client_draw_view(void *user, q2_screen *s, int p,
         c->sbar.weapon  = weapon;
 
         /*
-         * The icons, as RECT INDICES — the console hard-codes both (offsets
-         * 170 and 150 into a five-byte record, so rect 34 and rect 30) and
-         * never scans the table. See the correction in statusbar.h; asking by
-         * item effect id drew the armour box on the health field.
-         *
-         * Armour still varies here, because the armour sub-draw's other arm
-         * selects the blank when the flag says none is worn.
-         */
-        /*
          * The weapon strip's two slots. The console reads them out of a record
          * whose writer has not been traced, so what goes in is derived here:
          * the weapon before and the weapon after the one in hand, walking the
@@ -5851,10 +7187,28 @@ static void client_draw_view(void *user, q2_screen *s, int p,
             c->sbar.strip[1] = (u8)(next > 0 ? next : 0);
         }
 
+        /*
+         * The health icon IS hard-coded — offset 170 into a five-byte record,
+         * rect 34, with no branch above it (0x80035190).
+         *
+         * The armour icon is not, and used to be. `armour > 0 ? 30 : 0` put
+         * rect 30 — the POWER SHIELD — on the bar for every player wearing any
+         * vest, because statusbar.h recorded 0x8003565C's `lbu 150(a0)` as
+         * unconditional when it is one of five arms of a select on the flag
+         * word. q2_statusbar_armour_state runs that select, and the state
+         * machine in front of it (cells gate, one-second alternation, pinned
+         * power state) that chooses which of the two readouts the counter
+         * shows.
+         *
+         * The clock it runs on is the LEVEL clock, which is what 0x800AEBAC
+         * is — 300 ticks to the second. This used to be `c->frame_index`, a
+         * rendered-frame count at 30 Hz, which made the low-value blink and
+         * the armour alternation ten times too slow.
+         */
         c->sbar.health_icon = Q2_SBAR_ICON_HEALTH;
-        c->sbar.armour_icon = inv->armour > 0 ? Q2_SBAR_ICON_ARMOUR
-                                              : Q2_SBAR_ICON_NONE;
-        c->sbar.ticks       = c->frame_index;
+        c->sbar.cells       = inv->ammo[Q2_AMMO_CELLS];
+        c->sbar.ticks       = (u32)c->sim[0].level_time;
+        q2_statusbar_armour_state(&c->sbar, inv->flags);
 
         q2_statusbar_build_ot(&c->sbar, c->menu_font.tpage_icons,
                               c->menu_font.clut_text, ot,
@@ -5972,9 +7326,9 @@ static void client_frame(client *c)
 
         q2_menu_draw_opts_default(&mo, &c->menu_font);
         /* The layout is authored for 512x248; centre that block in whatever
-         * this window is rather than scaling 4bpp texels. */
-        mo.origin_x = (c->width  - Q2_MENU_SCREEN_W) / 2;
-        mo.origin_y = (c->height - Q2_MENU_SCREEN_H) / 2;
+         * this window is rather than scaling 4bpp texels. The pointer undoes
+         * exactly this, which is why the origin is one function. */
+        client_menu_origin(c, &mo.origin_x, &mo.origin_y);
         mo.view_x   = 0;
         mo.view_w   = c->width < Q2_MENU_SCREEN_W ? c->width
                                                   : Q2_MENU_SCREEN_W;
@@ -5990,8 +7344,7 @@ static void client_frame(client *c)
         q2_menu_draw_opts mo;
 
         q2_menu_draw_opts_default(&mo, &c->menu_font);
-        mo.origin_x = (c->width  - Q2_MENU_SCREEN_W) / 2;
-        mo.origin_y = (c->height - Q2_MENU_SCREEN_H) / 2;
+        client_menu_origin(c, &mo.origin_x, &mo.origin_y);
         mo.view_x   = 0;
         mo.view_w   = c->width < Q2_MENU_SCREEN_W ? c->width
                                                   : Q2_MENU_SCREEN_W;
@@ -6381,6 +7734,34 @@ int main(int argc, char **argv)
          * in a sweep — which is the gate working, and also why what is behind
          * it goes unmeasured. */
         else if (!strcmp(argv[i], "--keys"))                  c.all_keys = true;
+        /* `--weapon N`: hold weapon slot N, fed. See the field's note. */
+        else if (!strcmp(argv[i], "--weapon") && i + 1 < argc)
+            c.give_weapon = (int)strtol(argv[++i], NULL, 10);
+        /* `--armour body|combat|jacket|shield|shard`: see the field's note. */
+        else if (!strcmp(argv[i], "--armour") && i + 1 < argc) {
+            const char *w = argv[++i];
+
+            c.give_armour_points = 100;
+            c.give_armour_cells  = 0;
+            if      (!strcmp(w, "body"))   c.give_armour_flag = Q2_INV_ARMOUR_BODY;
+            else if (!strcmp(w, "combat")) c.give_armour_flag = Q2_INV_ARMOUR_COMBAT;
+            else if (!strcmp(w, "jacket") ||
+                     !strcmp(w, "shard"))  c.give_armour_flag = Q2_INV_ARMOUR_JACKET;
+            else if (!strcmp(w, "shield")) {
+                c.give_armour_flag   = Q2_INV_POWER_SHIELD;
+                c.give_armour_points = 0;
+                c.give_armour_cells  = 100;
+            }
+            else if (!strcmp(w, "both")) {
+                /* A vest AND a shield — the one state that alternates. */
+                c.give_armour_flag   = Q2_INV_ARMOUR_COMBAT | Q2_INV_POWER_SHIELD;
+                c.give_armour_cells  = 100;
+            }
+            else {
+                fprintf(stderr, "--armour wants body|combat|jacket|shield|both\n");
+                return 2;
+            }
+        }
         /* Play a film and nothing else — the campaign reaches OUTRO1P by
          * finishing, and that is a long way to go to look at a decoder. */
         else if (!strcmp(argv[i], "--movie") && i + 1 < argc)
@@ -6637,6 +8018,28 @@ no_window:
     q2_screen_set_layout(&c.screen, Q2_SCREEN_LAYOUT_ONE, 1);
 
     q2_menu_settings_defaults(&c.settings);
+
+    /*
+     * USE MOUSE, on — and only for a run with a window and a player at it.
+     *
+     * `q2_menu_reset_player` writes 0 because it is 0x8001BDA8 transcribed, and
+     * the console's default controller is a pad. This is the same question
+     * 0x8001C8A8 asks — WHICH controller is connected — with the answer a PC
+     * gives, so it is set here rather than by editing the reset routine, which
+     * has to keep saying what the executable says. RESET TO DEFAULTS on the
+     * PLAYER page turns it off again, which is the player's call to make.
+     *
+     * A scripted run keeps the console's answer: its pad script is written in
+     * STANDARD A's buttons and there is no mouse to grab.
+     */
+    if (!c.headless && !c.demo)
+        c.settings.v[Q2_SET_USE_MOUSE] = 1;
+
+    /* Nothing is being clicked yet. Zero is a valid item index, so the idle
+     * value has to be -1. */
+    c.menu_click_index = -1;
+    c.menu_click_part  = Q2_MENU_HIT_NONE;
+
     q2_menu_init(&c.menu, &c.settings, Q2_MENU_SCREEN_H);
     q2_menu_set_multiplayer(&c.menu, false);
 
@@ -7080,8 +8483,76 @@ no_window:
                     }
                     break;
                 }
+            } else if (ev.type == SDL_EVENT_MOUSE_MOTION) {
+                /*
+                 * Grabbed, the mouse is the look axis and its POSITION means
+                 * nothing — the pointer is pinned and only the deltas are real.
+                 * Free, it is a pointer and the deltas mean nothing.
+                 *
+                 * The two signs are the port's and were settled against the
+                 * picture rather than argued: a frame rendered at pitch 500
+                 * looks at the ceiling, so up is POSITIVE pitch, and moving the
+                 * mouse forward is a negative yrel. Yaw needs no correction.
+                 */
+                if (c.mouse_grabbed) {
+                    c.look_acc_x += (double)ev.motion.xrel;
+                    c.look_acc_y -= (double)ev.motion.yrel;
+                } else {
+                    c.pointer_x     = ev.motion.x;
+                    c.pointer_y     = ev.motion.y;
+                    c.pointer_valid = true;
+                }
+            } else if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+                       ev.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+                bool down = (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
+
+                if (!c.mouse_grabbed) {
+                    c.pointer_x     = ev.button.x;
+                    c.pointer_y     = ev.button.y;
+                    c.pointer_valid = true;
+                }
+
+                if (ev.button.button == SDL_BUTTON_LEFT)
+                    c.mouse_left = down;
+                else if (ev.button.button == SDL_BUTTON_RIGHT)
+                    c.mouse_right = down;
+
+                /*
+                 * The two screens that take ANY key also take any click: a
+                 * film and the credit roll. Answering them with the keyboard
+                 * only would be the one place the mouse stopped working.
+                 */
+                if (down && c.film_open) {
+                    client_film_stop(&c);
+                } else if (down && c.credits_open) {
+                    c.credits_open = false;
+                    q2_menu_open(&c.menu);
+                    q2_menu_goto(&c.menu, Q2_PAGE_FRONT_TITLE);
+                } else if (down && ev.button.button == SDL_BUTTON_RIGHT &&
+                           c.mission_open) {
+                    /* The back gesture, on the one screen in front of the menu
+                     * that Esc also dismisses. */
+                    c.mission_open = false;
+                }
+            } else if (ev.type == SDL_EVENT_MOUSE_WHEEL) {
+                /*
+                 * Queued rather than applied — see client_wheel_notch. Bounded
+                 * so a violent spin cannot take a second to drain: past a few
+                 * notches the player has stopped meaning individual weapons.
+                 */
+                c.wheel_queue += (int)ev.wheel.y;
+                if (c.wheel_queue >  8) c.wheel_queue =  8;
+                if (c.wheel_queue < -8) c.wheel_queue = -8;
             }
         }
+
+        /*
+         * Who owns the pointer this frame, and what the CONTROLLER page has
+         * been set to. Both before the input dispatch below, so a menu closed
+         * on the previous frame has the mouse back on this one.
+         */
+        client_apply_input(&c);
+        client_update_grab(&c);
 
         if (c.mcard_open) {
             /*
@@ -7091,13 +8562,27 @@ no_window:
              */
             client_card_frame(&c);
         } else if (c.menu.open) {
-            /* The world is frozen while the menu is up: no input, no tick. */
+            /* The world is frozen while the menu is up: no input, no tick.
+             *
+             * Except on the TITLE SCREEN, which is not a paused world — it is
+             * QFRONT running with page 46 over it, and its module keeps a
+             * per-frame hook (levelbin.h). Freezing it froze the logo, which is
+             * why the scene appeared as a still the moment it was spawned.
+             * Only the entity set steps; see q2_sim_scene_advance for why that
+             * is the whole of this level rather than a shortcut through it. */
             client_menu_frame(&c);
+            if (c.in_front_end)
+                q2_sim_scene_advance(&c.sim[0], (double)dt);
         } else if (c.sim_enabled) {
             client_input_simulated(&c, dt);
         } else {
             client_input(&c, dt);
         }
+
+        /* The button edges the menu's click handling is built on, taken after
+         * everything that reads them. */
+        c.mouse_left_prev  = c.mouse_left;
+        c.mouse_right_prev = c.mouse_right;
 
         /* A zone gate fired somewhere in the script: another zone of the same
          * map. Deferred to here because the gate fires inside the tick, and
@@ -7248,6 +8733,39 @@ no_window:
          * inventory the same way it rebuilds the settings. */
         if (c.all_keys)
             c.sim[0].combat.inv.flags |= 0x0FFFu;
+        /* `--armour`: likewise re-asserted, and likewise only for observability.
+         * The points are re-topped rather than latched so a run that takes
+         * damage still exercises the armour arm to the end. */
+        if (c.give_armour_flag) {
+            q2_inventory *inv = &c.sim[0].combat.inv;
+
+            inv->flags |= c.give_armour_flag;
+            if (inv->armour < c.give_armour_points)
+                inv->armour = c.give_armour_points;
+            if (inv->ammo[Q2_AMMO_CELLS] < c.give_armour_cells)
+                inv->ammo[Q2_AMMO_CELLS] = c.give_armour_cells;
+        }
+        /* `--weapon N`: same treatment. The ammo is topped up every frame
+         * rather than given once, so a long run does not quietly turn into a
+         * test of the dry-trigger path halfway through. */
+        if (c.give_weapon > 0 && c.give_weapon < Q2_WEAPON_COUNT) {
+            q2_inventory *inv = &c.sim[0].combat.inv;
+            const q2_weapon_tables *wt = q2_weapon_tables_builtin();
+            int a;
+
+            for (a = 1; a < Q2_WEAPON_COUNT; a++)
+                inv->weapons |= wt->owned_bit[a];
+            for (a = 0; a < Q2_AMMO_COUNT; a++)
+                inv->ammo[a] = q2_inventory_ammo_max(inv, (q2_ammo)a);
+
+            if (c.sim[0].combat.weapon_id != c.give_weapon) {
+                c.sim[0].combat.weapon_id = c.give_weapon;
+                if (c.vm_ready) {
+                    q2_vw_select(&c.vw, c.give_weapon);
+                    client_bind_view_model(&c);
+                }
+            }
+        }
         /*
          * The music countdown, on the console's own 50 Hz. At zero the engine
          * moves to the next playlist entry (0x80071A58) rather than waiting for
@@ -7264,8 +8782,6 @@ no_window:
             if (c.music_left <= 0)
                 client_music_advance(&c);
         }
-
-        client_music_pump(&c);
 
         /* `--save-load N`, and the report is the point: what the client owned
          * before the save and what it owns after the load. */
@@ -7317,6 +8833,13 @@ no_window:
                 q2_prompt_show(&c.prompts, Q2_PROMPT_BACK, 216);
             }
         }
+
+        /*
+         * The one place audio reaches the device. After the film tick, because
+         * the film is one of the two beds it can draw from and a film that ends
+         * this frame should not have a sector of it pulled afterwards.
+         */
+        client_audio_pump(&c);
 
         /*
          * The screen's own clock, in the 1/300 s units everything the console

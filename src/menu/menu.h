@@ -238,6 +238,23 @@ typedef enum q2_menu_page_id {
      * is QFRONT's LevelBin, and its item records are a static array in that
      * module (openquestions #44). These two are the port's own numbering,
      * chosen above every id the executable uses so they cannot collide.
+     *
+     * The MODULE's own ids are small and they are recorded here rather than
+     * adopted, because they are not free. Each builder opens with
+     * `module+0x3414(banner, id)` and that id goes straight to the page-enter
+     * routine at `0x8001A384`, so the front end and the executable share one id
+     * space and the front end sits at the bottom of it:
+     *
+     *     0  title        1  START         2  OPTIONS      3  PLAYER
+     *     4  SOUND        5  VIDEO         6  CONTROLS     8  SINGLE PLAYER
+     *     9  DIFFICULTY  10  MULTIPLAYER  15  CREDITS     16  LOAD
+     *
+     * They collide with nothing in the original because a page's TABLE comes
+     * from whichever image installed it, and only one front end is ever up.
+     * This port keeps one page array for both, so adopting them would make id 3
+     * mean two different pages; the numbering below is what keeps that honest.
+     * The ids still matter — the scene's own code reads the live one and
+     * changes what the logo does (levelbin.h) — so they are written down.
      */
     Q2_PAGE_FRONT_TITLE      = 46,
     Q2_PAGE_FRONT_START      = 200,
@@ -402,6 +419,27 @@ void q2_menu_goto(q2_menu *m, int page_id);
 
 /* One frame. `buttons` is the current pad mask; "just pressed" is derived. */
 void q2_menu_advance(q2_menu *m, u16 buttons);
+
+/* ------------------------------------------------------------------------- */
+/* Pointing at it
+ *
+ * Two things a pad cannot express and a pointer can: landing on a row without
+ * passing through the ones above it, and naming a slider's value outright
+ * rather than walking to it two units a frame. Both are the port's — the
+ * console had no pointer — and both are here rather than in the client so the
+ * cursor rules and the slider's clamp stay in one place. Everything else a
+ * mouse does is a pad button (menumouse.h), and goes through q2_menu_advance
+ * like any other press.
+ */
+
+/* Put the cursor on `index`. False, and no move, when it is not selectable or
+ * is already where the cursor is. Plays the cursor sound when it moves, so a
+ * page sounds the same swept with a pointer as walked with the d-pad. */
+bool q2_menu_point_at(q2_menu *m, int index);
+
+/* Set a slider outright. False unless `index` really is a bound slider; the
+ * value is clamped by the adjust loop's own rule (0x8001C1B8). */
+bool q2_menu_set_slider(q2_menu *m, int index, int value);
 
 /* Context the pages read. Set these before opening. */
 void q2_menu_set_multiplayer(q2_menu *m, bool on);

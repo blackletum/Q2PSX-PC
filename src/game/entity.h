@@ -189,7 +189,27 @@ typedef enum q2_ent_sound {
     Q2_SND_COUNT
 } q2_ent_sound;
 
-#define Q2_ENT_EVENTS_MAX 32
+/*
+ * The per-tick event queue.
+ *
+ * This was 32, and 32 is exactly the size of the projectile pool — one-for-one,
+ * because every live projectile raises one LIGHT event per tick. A frame with
+ * the pool full therefore filled the queue before the entity sweep ran, and
+ * every item glow, creature sound and pain grunt raised after it was dropped.
+ * Measured at the time: a 200-frame standing `--shoot` run reported
+ * "2704 lights added, 1526 dropped".
+ *
+ * The saturation itself was a symptom of projectiles moving at a twentieth of
+ * their speed and never reaching a wall, and that is fixed — the steady state
+ * is now one or two bolts alive. The ceiling is raised anyway, because
+ * one-to-one with the projectile pool leaves the queue with no room for the
+ * rest of the world in a busy fight, and dropping a pain grunt to a rocket is
+ * not a trade anything here wants to make.
+ *
+ * Not a read constant: the console appends to the light list directly and has
+ * no queue of this kind. It is the port's seam and is sized for headroom.
+ */
+#define Q2_ENT_EVENTS_MAX 96
 
 typedef enum q2_ent_event_kind {
     Q2_ENT_EVENT_SOUND = 0,   /* play `sound` at `pos`                        */

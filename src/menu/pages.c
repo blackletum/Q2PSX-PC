@@ -326,15 +326,27 @@ static const q2_menu_page k_pages[] = {
     { Q2_PAGE_VARIABLES,        "PAUSED",     k_vars_none,        N(k_vars_none),        0,                  Q2_ACT_BACK,         0x8009A6C4u, 0 },
     { Q2_PAGE_PAUSE_MP,         "PAUSED",     k_pause_mp,         N(k_pause_mp),         0,                  Q2_ACT_NONE,         0x8009A964u, 0 },
 
-    /* The front end. No title on the first: the Q2LOGO model above the rows is
-     * the title, which is why its two rows sit lower than any sub-page's. */
-    { Q2_PAGE_FRONT_TITLE,      NULL,         k_front_title,      N(k_front_title),      0,                  Q2_ACT_NONE,         0x8010EC3Cu, 0 },
-    { Q2_PAGE_FRONT_START,      NULL,         k_front_start,      N(k_front_start),      0,                  Q2_ACT_BACK,         0x8010EC84u, 0 },
-    { Q2_PAGE_FRONT_OPTIONS,    "OPTIONS",    k_front_options,    N(k_front_options),    0,                  Q2_ACT_BACK,         0x8010ED44u, 0 },
-    { Q2_PAGE_FRONT_NEWLOAD,    NULL,         k_front_newload,    N(k_front_newload),    0,                  Q2_ACT_BACK,         0x8010EF9Cu, 0 },
-    { Q2_PAGE_FRONT_SKILL,      NULL,         k_front_skill,      N(k_front_skill),      0,                  Q2_ACT_BACK,         0x8010EFE4u, 0 },
-    { Q2_PAGE_FRONT_MULTI,      NULL,         k_front_multi,      N(k_front_multi),      0,                  Q2_ACT_BACK,         0x8010F104u, 0 },
-    { Q2_PAGE_FRONT_DMSETUP,    NULL,         k_front_dmsetup,    N(k_front_dmsetup),    0,                  Q2_ACT_BACK,         0x8010F914u, 0 },
+    /*
+     * The front end.
+     *
+     * The BANNERS are the module's, and they were missing because they are not
+     * in the page arrays: a front-end page is built by `module+0x3414(title,
+     * page_id)` and the banner is that call's first argument, installed through
+     * the same `0x8001F820` the in-game pages use. Every builder is one such
+     * call followed by `engine+0x200(records, 32)`, so the pairing is exact —
+     * `module+0xCDC4` is the START page and it passes `module+0x30`, "START".
+     *
+     * Only the title screen passes NULL, and that is the Q2LOGO model standing
+     * where a banner would go, which is why its two rows sit lower than any
+     * sub-page's first row.
+     */
+    { Q2_PAGE_FRONT_TITLE,      NULL,            k_front_title,      N(k_front_title),      0,                  Q2_ACT_NONE,         0x8010EC3Cu, 0 },
+    { Q2_PAGE_FRONT_START,      "START",         k_front_start,      N(k_front_start),      0,                  Q2_ACT_BACK,         0x8010EC84u, 0 },
+    { Q2_PAGE_FRONT_OPTIONS,    "OPTIONS",       k_front_options,    N(k_front_options),    0,                  Q2_ACT_BACK,         0x8010ED44u, 0 },
+    { Q2_PAGE_FRONT_NEWLOAD,    "SINGLE PLAYER", k_front_newload,    N(k_front_newload),    0,                  Q2_ACT_BACK,         0x8010EF9Cu, 0 },
+    { Q2_PAGE_FRONT_SKILL,      "DIFFICULTY",    k_front_skill,      N(k_front_skill),      0,                  Q2_ACT_BACK,         0x8010EFE4u, 0 },
+    { Q2_PAGE_FRONT_MULTI,      "MULTIPLAYER",   k_front_multi,      N(k_front_multi),      0,                  Q2_ACT_BACK,         0x8010F104u, 0 },
+    { Q2_PAGE_FRONT_DMSETUP,    NULL,            k_front_dmsetup,    N(k_front_dmsetup),    0,                  Q2_ACT_BACK,         0x8010F914u, 0 },
 };
 
 /* Variants, kept out of the main list so `q2_menu_pages` stays one page per

@@ -83,6 +83,7 @@
 #include "entity.h"
 #include "events_rt.h"
 #include "item.h"
+#include "mover.h"
 #include "projectile.h"
 #include "scene.h"
 #include "trace.h"
@@ -314,6 +315,23 @@ typedef struct q2_sim_combat {
 
     /* The last shot, so a caller can draw tracers and play the sound. */
     q2_fire_result_v2 last_shot;
+
+    /*
+     * How many times `last_shot` has been written, so a caller can tell a NEW
+     * shot from the same one read twice.
+     *
+     * It is needed because `last_shot` is a latch, not an event: it is written
+     * when the trigger is pulled and never cleared, so `fired` stays true from
+     * the last shot until the next pull. A caller playing a sound off `fired`
+     * alone therefore played it again on every frame after the trigger was
+     * released — one shot, and then that shot forever.
+     *
+     * The frame rate made it worse rather than causing it. A fire attempt
+     * happens on a TICK and the client reads this every rendered FRAME, so even
+     * while the trigger was held each shot was heard once per frame between
+     * ticks — three times over at 90 fps.
+     */
+    u32 shot_serial;
 } q2_sim_combat;
 
 /*
@@ -338,6 +356,7 @@ typedef struct q2_player_combat {
     int               chaingun_bullets;
     q2_actor          self;
     q2_fire_result_v2 last_shot;
+    u32               shot_serial;   /* swapped with it; see q2_sim_combat */
 } q2_player_combat;
 
 /* ------------------------------------------------------------------------- */
@@ -404,6 +423,14 @@ typedef struct q2_sim {
     /* The level clock the weapon gates and the damage throttles use, in dt
      * units. Advanced by q2_sim_tick alongside the physics. */
     s32                  level_time;
+
+    /*
+     * THIS tick's dt, in the same units — the port's stand-in for the global
+     * frame delta at 0x800B2DB4. Set by q2_sim_tick beside the clock, for the
+     * world half of the tick, which does not take dt as an argument and needs
+     * it anyway: a projectile advances by `vel * dt`, not by `vel`.
+     */
+    s32                  cur_dt;
 
     /*
      * The hull entities move in is SecondaryCol, not PrimaryColl. The zone
@@ -492,11 +519,33 @@ typedef struct q2_sim {
     bool         userfuncs_ready;
 
     /*
-     * The same volumes as sweep targets and contents sources — the port's
-     * stand-in for the engine's 0x800C9114 table. Built from `triggers`.
+     * The sweep and contents target list, in the ORDER the original walks it:
+     * the 48-slot ENTITY table at 0x800CAE10 first, then the map's trigger
+     * volumes at 0x800C9114. One allocation, because `q2_move_world` takes one
+     * array and because the order is what decides which contact survives — the
+     * sweep keeps the LAST one, not the nearest.
+     *
+     * `mover_count` entries at the front are mover PARTS: one box per Scene
+     * node a door or lift translates, refreshed every tick from the mover's
+     * accumulated offset. Before this the array held volumes only, nothing ever
+     * produced a Q2_MOVE_KIND_ENTITY target, and a closed door was scenery the
+     * player walked through.
      */
     q2_move_target *volumes;
-    u32             volume_count;
+    u32             volume_count;   /* mover parts + trigger volumes           */
+    u32             mover_count;    /* how many of them are mover parts        */
+
+    /*
+     * The mover parts' PRISTINE boxes, six s32 each, parallel to the first
+     * `mover_count` entries above. The live box is the pristine one plus the
+     * mover's accumulated offset, recomputed each tick rather than integrated,
+     * because the DRAW adds `m->offset` to the same node and a hull that
+     * accumulated its own rounding would drift away from the geometry it is
+     * supposed to be.
+     */
+    s32            *mover_base;
+    s32            *mover_last_off; /* previous tick's offset, for `dy`        */
+
     q2_move_world   move_world;
 
     /* Set when a zone gate fires; the caller performs the load. */
@@ -568,6 +617,11 @@ typedef struct q2_sim {
     q2_entity_set   entities;
     q2_entity_world ent_world;
     bool            entities_ready;
+
+    /* The entity set holds QFRONT's title-screen objects rather than a map's
+     * items, so `q2_sim_scene_page` has something to address. See
+     * q2_sim_attach_scene. */
+    bool            scene_ready;
 
     /*
      * The presentation layer.
@@ -767,17 +821,53 @@ u32 q2_sim_breakable_shot(q2_sim *sim, const s32 from[3], const s32 to[3],
 /*
  * Where the sim fires effects from, so a reader does not have to find them:
  *
- *   a projectile detonating          -> explosion  (0x800486EC)
- *   a bolt striking anything         -> spark      (0x8003E0C0)
- *   a creature taking damage         -> blood      (0x80048C08)
+ *   a projectile detonating          -> explosion   (0x800486EC), x2
+ *   the BFG ball detonating          -> BFG burst   (0x8004BDC4), x3
+ *   a bullet stopping on the WORLD   -> bullet puff (0x800489D8) through the
+ *                                       second spawner 0x8003004C
+ *   a creature taking damage         -> blood       (0x80048C08), x2
  *   the player taking damage         -> blood
- *   a creature reaching zero health  -> gib        (0x800596B0)
+ *   a creature reaching zero health  -> gib         (0x800596B0)
  *
- * The hitscan weapons do not spawn anything here yet: the port resolves a
- * pellet against the target list rather than against the hull, so it has a
- * victim but not a contact point, and putting the burst at the muzzle would be
- * worse than putting it nowhere. Called out rather than approximated.
+ * Both stale claims this block used to make are gone. "A bolt striking
+ * anything -> spark (0x8003E0C0)" was wrong: the spark's only reachable caller
+ * in the executable is in the player's per-frame state think, which this port
+ * does not model, and the address the mapping rested on is an entity
+ * allocator rather than a burst. And "the hitscan weapons do not spawn
+ * anything here yet" stopped being true when fx_hitscan_impact was added —
+ * `world_fraction_for` gives the contact point, which is exactly what the note
+ * said was missing.
+ *
+ * The `xN` are the outer loops the sites sit in. See `repeat` in effect.h.
  */
+
+/*
+ * Put a zone's DOORS AND LIFTS into the move world, so they are solid.
+ *
+ * One target per Scene node each mover translates, taking the node record's
+ * raw bbox — 0x800555D8 copies `scene_node_record + 16`, six s32, verbatim, so
+ * NOT q2_scene_node_bounds, which inflates by Q2_SCENE_BBOX_SLOP.
+ *
+ * Call after q2_movers_build (and q2_movers_build_calls) and after
+ * q2_sim_attach_gameplay, which is what allocates the volume half of the list.
+ * The set is borrowed, not owned; q2_sim_movers_update reads it every tick.
+ */
+q2_result q2_sim_attach_movers(q2_sim *sim, const q2_mover_set *set,
+                               const q2_scene *scene);
+
+/*
+ * Slide the registered boxes to where the movers now are — 0x80051EC0, which
+ * the original runs once per mover per frame.
+ *
+ * Two boxes move, differently. The live box translates by the frame's delta;
+ * the swept envelope only ever grows, one corner at a time by the sign of each
+ * component, so it ends up covering the whole travel. `dy` takes the frame's
+ * vertical change, which is what q2_move_sweep_box consumes as `other_dy` and
+ * therefore what lets a player ride a lift.
+ *
+ * Call once per tick, immediately after q2_movers_tick.
+ */
+void q2_sim_movers_update(q2_sim *sim, const q2_mover_set *set);
 
 /*
  * Attach the map's trigger volumes and event script.
@@ -808,6 +898,54 @@ q2_result q2_sim_attach_gameplay(q2_sim *sim, const q2_common_file *common);
  * renderer never has to look one up mid-frame; without it, the resolve happens
  * on first draw instead.
  */
+/*
+ * The TITLE SCREEN's objects, which are not a Population and not a scene: five
+ * item table ids QFRONT's `LevelBin` hands the engine's own item spawner, all
+ * standing at (0, 0, 1700) facing half a circle round. The whole derivation is
+ * in levelbin.h; the short version is that the spinning logo is an item and
+ * spins for the same reason a shotgun on a pedestal does.
+ *
+ * Returns how many were spawned — 0 for every map that is not the front end,
+ * because no other module carries the list. Call it INSTEAD of
+ * q2_sim_attach_items, which QFRONT's empty Population would leave with nothing
+ * in the set and `entities_ready` false, so the thinks never ran.
+ */
+#define Q2_SIM_SCENE_BASE 0x80100000u
+
+u32 q2_sim_attach_scene(q2_sim *sim, const q2_common_file *common,
+                        const q2_item_table *table,
+                        const struct q2_model_bank *bank);
+
+/*
+ * What a front-end page change does to the scene — `module+0x3414`'s tail.
+ *
+ * `title` picks which of the module's two thinks the logo runs: the title
+ * screen's grows it to full size, every other page's shrinks it to a quarter.
+ * `visible` is false for the one page that hides even the logo (id 11).
+ *
+ * The four player models are not addressed: the module shows object 0 and only
+ * object 0, so they stay hidden whatever the page.
+ */
+void q2_sim_scene_page(q2_sim *sim, bool title, bool visible);
+
+/*
+ * One frame of the TITLE SCREEN, which is not one frame of the game.
+ *
+ * The client freezes the world while a menu is up, and for the pause menu that
+ * is right — the original stops the level clock. The front end is the case that
+ * rule gets wrong: it is a LEVEL with a page over it, its module installs a
+ * per-frame hook (`engine+0x290`), and the logo's rotation is that level
+ * running. Frozen, the scene is a still.
+ *
+ * This runs the entity set and nothing else, on the same clock and the same
+ * accumulator `q2_sim_advance` uses, and returns 1 on the frames that stepped.
+ * The narrowing is not a simplification: QFRONT is two nodes and eight
+ * vertices with an empty `Population`, no `Events` and no player, so movement,
+ * triggers, projectiles and the touch sweep have nothing to act on. Running
+ * them would be running them over nothing.
+ */
+u32 q2_sim_scene_advance(q2_sim *sim, double elapsed_seconds);
+
 q2_result q2_sim_attach_items(q2_sim *sim, const q2_common_file *common,
                               int zone, const q2_item_table *table,
                               const struct q2_model_bank *bank);
@@ -838,6 +976,24 @@ void q2_sim_settle(q2_sim *sim);
  * caller should still render, interpolating if it wants smoothness.
  */
 u32 q2_sim_advance(q2_sim *sim, const q2_input *input, double elapsed_seconds);
+
+/*
+ * The step that call would run with, without running it — 0 when it would not
+ * tick at all.
+ *
+ * This exists for POINTING DEVICES. Every look input the engine has asks for a
+ * RATE, and the angle integrates it as `rate * dt / 10`; a stick can do that
+ * because a stick is held, but a mouse reports a DISPLACEMENT that has already
+ * happened. Turning one into the other needs the step it is about to be
+ * integrated over, and a host that guesses gets a sensitivity that changes with
+ * the frame rate — the same physical movement turning the player half as far at
+ * 60 fps as at 30, because each frame carries half the motion into a step half
+ * as long.
+ *
+ * `q2_sim_advance` decides its own step through this function, so the answer a
+ * caller is given is the one the tick then uses.
+ */
+s32 q2_sim_next_dt(const q2_sim *sim, double elapsed_seconds);
 
 /*
  * One extra player's frame, against the world this frame has already advanced.
@@ -877,6 +1033,11 @@ typedef struct q2_sim_proj_stats {
     s32 closest_origin[3];
     s32 closest_from[3];
     s32 closest_owner;
+
+    /* Shots that reached the launcher and found the 32-slot pool full. Counted
+     * because the alternative — the shot vanishing after the ammo is spent —
+     * is invisible, and was for as long as it was happening every tick. */
+    u32 dropped_full;
 } q2_sim_proj_stats;
 
 extern q2_sim_proj_stats q2_sim_proj_scan;
@@ -975,8 +1136,18 @@ void q2_sim_combat_tick(q2_sim *sim);
 bool q2_sim_give_weapon(q2_sim *sim, int weapon_id);
 
 /* Step to the next or previous usable weapon. Returns false when there is
- * nothing to switch to, which is what the original's cycle reports. */
+ * nothing to switch to, which is what the original's cycle reports.
+ *
+ * This is the PAD's function — 0x80050758, the +/-1 neighbour scan. It is not
+ * what a refire pass runs; see below. */
 bool q2_sim_cycle_weapon(q2_sim *sim, int dir);
+
+/*
+ * Take the best weapon that is both owned and fed, from the fixed auto-switch
+ * preference list — 0x800506C4, which the console's refire pass calls after
+ * every shot. Idempotent, and returns true only when the held weapon changed.
+ */
+bool q2_sim_autoselect_weapon(q2_sim *sim);
 
 /*
  * Fire the held weapon.

@@ -113,7 +113,24 @@
  */
 typedef enum q2_vw_fire_result {
     Q2_VW_FIRED = 0,
-    Q2_VW_FIRE_DENIED = 2
+    Q2_VW_FIRE_DENIED = 2,
+
+    /*
+     * NOT A CONSOLE VALUE, and negative so it cannot be confused with one.
+     *
+     * On the console the idle state CALLS the fire function and branches on
+     * what it returns, so "the caller decided not to shoot" is not a case that
+     * can arise. In this port the sim fires from its own tick and the machine
+     * is told afterwards, which introduces a third outcome the original has no
+     * encoding for: the trigger was held, the weapon was not dry, and the
+     * refire gate said no.
+     *
+     * Reporting that as Q2_VW_FIRED plays a fire clip for a shot that never
+     * happened; reporting it as Q2_VW_FIRE_DENIED switches the player off a
+     * perfectly loaded gun. It has to be its own value, and the machine's
+     * response to it is to leave the idle state alone.
+     */
+    Q2_VW_FIRE_NONE = -1
 } q2_vw_fire_result;
 
 typedef struct q2_viewweapon {
@@ -167,6 +184,16 @@ typedef struct q2_viewweapon {
 
     /* Diagnostics: how many keys have been consumed since the last reset. */
     u32         keys_played;
+
+    /*
+     * And how many times the fire clip has been STARTED, which is the number a
+     * caller has to be able to see: the machine is told about a shot, but it is
+     * the latch and the state that decide whether that becomes a clip. A caller
+     * feeding it one report per shot should find this equal to its own count of
+     * shots; a caller sampling a latch instead of consuming an event finds it
+     * several times higher, at whatever rate it happens to call `advance`.
+     */
+    u32         fires_started;
 } q2_viewweapon;
 
 /* ------------------------------------------------------------------------- */

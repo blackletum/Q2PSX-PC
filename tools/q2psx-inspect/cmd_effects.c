@@ -264,17 +264,30 @@ static u32 exercise(const q2_fx_tables *t)
     /* --- the pool refuses when full ------------------------------------- */
     {
         s32 at[3] = { 0, 0, 0 };
-        u32 made = 0;
+        u32 made = 0, tries, want;
+        const q2_fx_preset *sp = q2_fx_preset_at(Q2_FX_SPARK);
+        u32 rep = (sp && sp->repeat) ? sp->repeat : 1u;
+
+        /*
+         * ONE q2_fx_spawn IS NOT ONE GROUP. Six of the eight spawn sites sit
+         * inside an outer loop and the preset's `repeat` column carries the
+         * bound; the spark's is four (`slti v0, s2, 4` at 0x8003E0DC). This
+         * check used to assume one and read a correct pool as broken the
+         * moment the loop was implemented.
+         */
+        tries = w.group_count / rep + 8u;
+        want  = w.group_count / rep;
 
         q2_fx_world_clear(&w);
-        for (i = 0; i < w.group_count + 8; i++) {
+        for (i = 0; i < tries; i++) {
             if (q2_fx_spawn(&w, &rng, Q2_FX_SPARK, at, 0) >= 0)
                 made++;
         }
-        printf("\n  pool refuses when full : %u of %u accepted%s\n",
-               made, w.group_count + 8,
-               made == w.group_count ? "" : "   <-- WRONG");
-        if (made != w.group_count)
+        printf("\n  pool refuses when full : %u of %u calls accepted"
+               " (%u groups each, pool %u)%s\n",
+               made, tries, rep, w.group_count,
+               made == want ? "" : "   <-- WRONG");
+        if (made != want)
             bad++;
     }
 

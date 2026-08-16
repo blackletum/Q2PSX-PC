@@ -329,6 +329,112 @@ static void test_presets(void)
 
     check(q2_fx_preset_at(Q2_FX_PRESET_COUNT) == NULL,
           "an unknown preset is NULL");
+
+    /*
+     * The outer loop each site sits in — the column the table did not have, so
+     * the port emitted between a half and a quarter of the console's burst
+     * density and consumed the generator a different number of times.
+     */
+    check_eq_i(q2_fx_preset_at(Q2_FX_EXPLOSION)->repeat, 2,
+               "the explosion spawns twice (slti v0,s7,2 at 0x800486F4)");
+    check_eq_i(q2_fx_preset_at(Q2_FX_BLOOD)->repeat, 2,
+               "blood spawns twice (0x80048C24)");
+    check_eq_i(q2_fx_preset_at(Q2_FX_BFG_BURST)->repeat, 3,
+               "the BFG spawns three times (0x8004BDD0)");
+    check_eq_i(q2_fx_preset_at(Q2_FX_SPARK)->repeat, 4,
+               "the spark spawns four times (0x8003E0DC)");
+    check_eq_i(q2_fx_preset_at(Q2_FX_GIB)->repeat, 1,
+               "the gib site has no outer loop");
+    /* Not 4: q2_fx_laser spawns its own four groups and never comes through
+     * q2_fx_spawn, so a 4 here would be sixteen. */
+    check_eq_i(q2_fx_preset_at(Q2_FX_LASER_END)->repeat, 1,
+               "the laser end's repeat lives in q2_fx_laser, not the table");
+
+    /* And the Y acceleration four sites write after the spawner returns. */
+    check_eq_i(q2_fx_preset_at(Q2_FX_SPARK)->accel_y, 4,
+               "the spark sags at 4 (sh 4, 98(v1) at 0x8003E0D4)");
+    check_eq_i(q2_fx_preset_at(Q2_FX_BLOOD)->accel_y, 2,
+               "blood sags at 2 (0x80048C1C)");
+    check_eq_i(q2_fx_preset_at(Q2_FX_LASER_END)->accel_y, 2,
+               "a laser end sags at 2 (0x80049088 / 0x80049134)");
+    check_eq_i(q2_fx_preset_at(Q2_FX_EXPLOSION)->accel_y, 0,
+               "the explosion site writes none");
+}
+
+/*
+ * The second spawner, 0x8003004C, and the bullet puff that is its reason for
+ * existing here.
+ */
+static void test_spawn_offsets_and_puff(void)
+{
+    q2_fx_world w;
+    q2_rng rng;
+    s32 at[3] = { 1000, 2000, 3000 };
+    s16 offs[Q2_FX_GROUP_QUADS][3], vel[Q2_FX_GROUP_QUADS][3];
+    s32 slot;
+    u32 i;
+    int scattered = 0;
+
+    printf("group: the offset-taking spawner and the bullet puff\n");
+
+    q2_fx_world_init(&w, &g_tab);
+
+    for (i = 0; i < Q2_FX_GROUP_QUADS; i++) {
+        offs[i][0] = (s16)(i * 160);   /* >> 4 gives i * 10 */
+        offs[i][1] = 0;
+        offs[i][2] = (s16)-(s16)(i * 160);
+        vel[i][0] = vel[i][1] = vel[i][2] = 0;
+    }
+
+    slot = q2_fx_group_spawn_offsets(&w, at, offs, vel, Q2_FX_GROUP_QUADS,
+                                     &g_tab.ramp[6], &g_tab.ramp[4],
+                                     32, 4096, 0);
+    check(slot >= 0, "the offset spawn took a slot");
+
+    /* offset[i-1] = offs[i] >> 4, and offs[0] is discarded because particle 0
+     * is the origin. */
+    check_eq_i(w.group[slot].offset[0][0], 10,
+               "particle 1 takes offs[1] >> 4");
+    check_eq_i(w.group[slot].offset[13][0], 140,
+               "and particle 14 takes offs[14] >> 4");
+    check_eq_i(w.group[slot].offset[0][2], -10,
+               "the shift is arithmetic, so a negative offset survives");
+
+    /* Particle 0 is still exactly on the origin. */
+    {
+        s32 pt[3];
+        q2_fx_group_point(&w.group[slot], 0, pt);
+        check(pt[0] == at[0] && pt[1] == at[1] && pt[2] == at[2],
+              "particle 0 is the origin, with no offset of its own");
+    }
+
+    /* The puff itself: one group, life 32, ramps 6 and 4, pre-scattered. */
+    q2_fx_world_init(&w, &g_tab);
+    q2_rng_seed(&rng, 4242);
+
+    slot = q2_fx_bullet_puff(&w, &rng, at, 0);
+    check(slot >= 0, "the bullet puff spawned");
+    check_eq_i(w.group[slot].life, Q2_FX_BULLET_PUFF_LIFE,
+               "and lives 32 ticks, not the spark's 25");
+    check_eq_i(w.group[slot].count, 15, "fifteen quads");
+    check(w.group[slot].ramp[0] != w.group[slot].ramp[1],
+          "grey and dark red, not one ramp twice");
+    check(w.group[slot].ramp[0] == q2_fx_ramp_at(&g_tab, 6) &&
+          w.group[slot].ramp[1] == q2_fx_ramp_at(&g_tab, 4),
+          "ramp records 6 and 4 (0x8009BD78 and 0x8009BC70)");
+
+    /* ONE group: this site has no outer loop. A second slot would mean the
+     * repeat was applied where the disassembly shows none. */
+    check(w.group[1].life == 0, "the bullet site spawns exactly one group");
+
+    /* And it starts already scattered, which is the whole point of the second
+     * spawner — the first one leaves every particle on the origin. */
+    for (i = 0; i < Q2_FX_GROUP_FOLLOWERS; i++) {
+        if (w.group[slot].offset[i][0] || w.group[slot].offset[i][1] ||
+            w.group[slot].offset[i][2])
+            scattered++;
+    }
+    check(scattered > 0, "the puff is pre-scattered at spawn");
 }
 
 static void test_spawn_preset_separates(void)
@@ -671,7 +777,10 @@ static void test_build_ot(void)
         if (ot.prims[i].kind == PSX_PRIM_F4)
             quads++;
     }
-    check_eq_i(quads, 15, "fifteen flat quads with no image registered");
+    /* THIRTY, not fifteen: the explosion site loops twice (`slti v0, s7, 2`
+     * at 0x800486F4), so one q2_fx_spawn is two groups of fifteen. This check
+     * pinned 15 while the port emitted half the console's burst density. */
+    check_eq_i(quads, 30, "two groups of fifteen flat quads for an explosion");
 
     /* Register one and the quads become what the hardware drew. */
     q2_fx_set_texture(&w, 0x001Au, 0x7C10u);
@@ -697,7 +806,8 @@ static void test_build_ot(void)
         check_eq_i(p->tpage, 0x001Au | Q2_FX_ABR_ADD,
                    "page word carries the ramp's blend mode");
     }
-    check_eq_i(quads, 15, "fifteen textured quads once an image is registered");
+    check_eq_i(quads, 30,
+               "two groups of fifteen textured quads once an image is registered");
 
     w.untextured = true;
     quads = 15;
@@ -1457,6 +1567,7 @@ int main(void)
     test_one_ramp_defaults_to_both();
     test_budget();
     test_presets();
+    test_spawn_offsets_and_puff();
     test_spawn_preset_separates();
     test_beam_pool();
     test_beam_hull();

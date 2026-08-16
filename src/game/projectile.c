@@ -1,5 +1,7 @@
 #include "projectile.h"
 
+#include "worldscale.h"
+
 #include <string.h>
 
 void q2_projectiles_init(q2_projectiles *list)
@@ -145,8 +147,8 @@ s32 q2_projectile_launch(q2_projectiles *list, const q2_fire_result_v2 *fire,
 }
 
 /* ------------------------------------------------------------------------- */
-void q2_projectile_step(q2_projectiles *list, u32 index, s32 gravity, s32 now,
-                        q2_proj_step *out)
+void q2_projectile_step(q2_projectiles *list, u32 index, s32 gravity, s32 dt,
+                        s32 now, q2_proj_step *out)
 {
     q2_projectile *p;
     int k;
@@ -160,14 +162,46 @@ void q2_projectile_step(q2_projectiles *list, u32 index, s32 gravity, s32 now,
     if (!p->in_use)
         return;
 
-    /* Only the grenades fall; the bolt, the rocket and the BFG blast fly
-     * straight, which is why nothing but the grenades has a launch arc. */
+    if (dt <= 0)
+        dt = Q2_DT_NOMINAL;
+
+    /*
+     * Only the grenades fall; the bolt, the rocket and the BFG blast fly
+     * straight, which is why nothing but the grenades has a launch arc.
+     *
+     * THE SCALE. `gravity` is Q2_GRAVITY in the PLAYER's units, where a
+     * position advances as `vel * dt / Q2_VEL_DIV` and the integrator adds
+     * `g * dt` to the velocity each tick (sim.c's integrate_vertical). A
+     * projectile's velocity is 1.0.12 and advances as `(vel * dt) >> 12`, so
+     * the same acceleration expressed in projectile units is
+     *
+     *     dv_p = g * dt * 4096 / Q2_VEL_DIV
+     *
+     * which at g = 32, dt = 12 gives 4915 against the 384 the player adds, and
+     * both move the per-tick position delta by the same 14.4 units. This used
+     * to be a bare `+= gravity` — 32 in a 1.0.12 velocity, an acceleration of
+     * 0.008 units a tick, about 600 times too small. Which is why the grenade
+     * launcher and the hand grenade had no arc at all.
+     */
     if (p->kind == Q2_PROJ_GRENADE || p->kind == Q2_PROJ_HAND_GRENADE)
-        p->vel[1] += gravity;
+        p->vel[1] += (s32)(((s64)gravity * dt * 4096) / Q2_VEL_DIV);
 
     memcpy(out->from, p->pos, sizeof(out->from));
+
+    /*
+     * AND THE FRAME DELTA, which this step used to drop entirely.
+     *
+     * The original's sweep at 0x80047D40 forms the destination as
+     * `pos += vel * dt`, dt being the global frame delta at 0x800B2DB4. Both
+     * sides' velocities are per-dt-UNIT: the bolt's is stored raw as `aim >> 6`
+     * and q2_projectile_launch divides every other kind by Q2_TICKS_PER_SECOND
+     * for exactly that reason. Advancing by one dt unit per FRAME instead of by
+     * dt made every projectile 12x too slow at the nominal tick and 20x too
+     * slow in the 1/30 s headless step — a blaster bolt crawling at 64 units a
+     * frame where it should cover 768.
+     */
     for (k = 0; k < 3; k++)
-        out->to[k] = p->pos[k] + (p->vel[k] >> 12);
+        out->to[k] = p->pos[k] + (s32)(((s64)p->vel[k] * dt) >> 12);
 
     if (p->expires && now >= p->expires)
         out->expired = true;

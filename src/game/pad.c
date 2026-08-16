@@ -121,6 +121,62 @@ void q2_pad_config_default(q2_pad_config *cfg)
 }
 
 /* ------------------------------------------------------------------------- */
+/* The table, read backwards — see pad.h                                      */
+/* ------------------------------------------------------------------------- */
+bool q2_pad_style_bindings(int style, q2_pad_bindings *out)
+{
+    const style_def *s;
+
+    if (!out)
+        return false;
+
+    memset(out, 0, sizeof(*out));
+
+    if (style < 0 || style >= Q2_PAD_STYLE_COUNT)
+        return false;
+
+    s = &STYLES[style];
+
+    /*
+     * Which of `fwd_pos`/`fwd_neg` is forward, and which of `side_pos`/
+     * `side_neg` is right, is decided by `axis()` and not by the field names:
+     * it returns +127 for the `pos` mask, and the wish arithmetic takes a
+     * positive side axis as a step to the RIGHT.
+     */
+    out->forward      = s->fwd_pos;
+    out->back         = s->fwd_neg;
+    out->strafe_left  = s->side_neg;
+    out->strafe_right = s->side_pos;
+
+    /* Zero on every style that does not look with buttons — the six below
+     * Q2_PAD_STYLE_EASED_FROM. */
+    out->turn_left    = s->yaw_neg;
+    out->turn_right   = s->yaw_pos;
+    out->look_up      = s->look_up;
+    out->look_down    = s->look_down;
+
+    out->fire         = s->fire;
+    out->jump         = s->jump;
+    out->weapon_next  = s->wnext;
+    out->weapon_prev  = s->wprev;
+
+    return true;
+}
+
+q2_pad_look_src q2_pad_style_look(int style)
+{
+    if (style < 0 || style >= Q2_PAD_STYLE_COUNT)
+        return Q2_PAD_LOOK_BUTTONS;
+
+    switch (STYLES[style].look) {
+    case LOOK_MOUSE: return Q2_PAD_LOOK_MOUSE;
+    case LOOK_LEFT:  return Q2_PAD_LOOK_LEFT_STICK;
+    case LOOK_RIGHT: return Q2_PAD_LOOK_RIGHT_STICK;
+    default:         return Q2_PAD_LOOK_BUTTONS;
+    }
+}
+
+/* ------------------------------------------------------------------------- */
 /* Pieces of one arm                                                          */
 /* ------------------------------------------------------------------------- */
 

@@ -51,14 +51,14 @@ static void vec_copy(s32 out[3], const s32 in[3])
 /* actually loads.                                                            */
 /* ------------------------------------------------------------------------- */
 static const q2_fx_preset k_preset[Q2_FX_PRESET_COUNT] = {
-    /* count life size   shift ramp0 ramp1 site        */
-    { 15,    15,  8192,  9,    9,    9,    0x800486ECu },  /* EXPLOSION  */
-    { 15,    15,  6144,  10,   2,    3,    0x80048C08u },  /* BLOOD      */
-    { 15,    15,  20000, 9,    11,   11,   0x8004BDC4u },  /* BFG_BURST  */
-    { 15,    10,  10000, 9,    1,    1,    0x800596B0u },  /* GIB        */
-    { 15,     0,  0,     9,    1,    0,    0x80028DC8u },  /* SCRIPTED   */
-    { 15,    25,  3072,  9,    0,    0,    0x8003E0C0u },  /* SPARK      */
-    { 15,    15,  6144,  10,   1,    1,    0x80049074u }   /* LASER_END  */
+    /* count life size   shift ramp0 ramp1 rpt accY site        */
+    { 15,    15,  8192,  9,    9,    9,    2,  0,  0x800486ECu },  /* EXPLOSION */
+    { 15,    15,  6144,  10,   2,    3,    2,  2,  0x80048C08u },  /* BLOOD     */
+    { 15,    15,  20000, 9,    11,   11,   3,  0,  0x8004BDC4u },  /* BFG_BURST */
+    { 15,    10,  10000, 9,    1,    1,    1,  0,  0x800596B0u },  /* GIB       */
+    { 15,     0,  0,     9,    1,    0,    1,  0,  0x80028DC8u },  /* SCRIPTED  */
+    { 15,    25,  3072,  9,    0,    0,    4,  4,  0x8003E0C0u },  /* SPARK     */
+    { 15,    15,  6144,  10,   1,    1,    1,  2,  0x80049074u }   /* LASER_END */
 };
 
 const q2_fx_preset *q2_fx_preset_at(q2_fx_preset_id id)
@@ -301,6 +301,77 @@ s32 q2_fx_group_spawn(q2_fx_world *w,
     return (s32)slot;
 }
 
+s32 q2_fx_group_spawn_offsets(q2_fx_world *w,
+                              const s32 origin[3],
+                              const s16 (*offs)[3], const s16 (*vel)[3],
+                              u32 count,
+                              const q2_fx_ramp *ramp0, const q2_fx_ramp *ramp1,
+                              u32 life, s32 size, u8 area)
+{
+    s32 slot = q2_fx_group_spawn(w, origin, vel, count, ramp0, ramp1,
+                                 life, size, area);
+    q2_fx_group *g;
+    u32 i;
+
+    if (slot < 0 || !offs)
+        return slot;
+
+    /*
+     * 0x80030174: `sll 16 / sra 20`, i.e. the caller's s16 arithmetic-shifted
+     * right by four. offs[0] is DISCARDED — particle 0 is the group's origin
+     * and has no offset slot — so the array is read from index 1, exactly as
+     * the velocity array is.
+     */
+    count = count > Q2_FX_GROUP_QUADS ? Q2_FX_GROUP_QUADS : count;
+    g = &w->group[slot];
+
+    for (i = 1; i < count && i <= Q2_FX_GROUP_FOLLOWERS; i++) {
+        int k;
+        for (k = 0; k < 3; k++)
+            g->offset[i - 1][k] = (s16)(offs[i][k] >> 4);
+    }
+
+    return slot;
+}
+
+s32 q2_fx_bullet_puff(q2_fx_world *w, q2_rng *rng, const s32 at[3], u8 area)
+{
+    s16 offs[Q2_FX_GROUP_QUADS][3], vel[Q2_FX_GROUP_QUADS][3];
+    const q2_fx_ramp *r0, *r1;
+    u32 i;
+
+    if (!w || !rng || !at)
+        return -1;
+
+    /*
+     * 0x800489D8, reached from the bullet trace at 0x80048990 when the sweep
+     * stopped on the WORLD rather than on an entity. Six draws per particle,
+     * interleaved — three offsets then three velocities — which is the order
+     * the loop at 0x80048A0C..0x80048A88 makes them in, and reproducing it is
+     * what keeps a seeded replay on the generator's own sequence.
+     */
+    for (i = 0; i < Q2_FX_BULLET_PUFF_COUNT; i++) {
+        offs[i][0] = (s16)draw(rng, Q2_FX_BULLET_PUFF_OFFS_SHIFT);
+        offs[i][1] = (s16)draw(rng, Q2_FX_BULLET_PUFF_OFFS_SHIFT);
+        offs[i][2] = (s16)draw(rng, Q2_FX_BULLET_PUFF_OFFS_SHIFT);
+        vel[i][0]  = (s16)draw(rng, Q2_FX_BULLET_PUFF_VEL_SHIFT);
+        vel[i][1]  = (s16)draw(rng, Q2_FX_BULLET_PUFF_VEL_SHIFT);
+        vel[i][2]  = (s16)draw(rng, Q2_FX_BULLET_PUFF_VEL_SHIFT);
+    }
+
+    /* a3 = 0x8009BD78 and sp+16 = 0x8009BC70: ramp records 6 and 4. Grey
+     * additive on quads 0-2, 6-8, 12-14 and dark red SUBTRACTIVE on the rest,
+     * which is the three-quad ramp swap at 0x80030A14. */
+    r0 = q2_fx_ramp_at(w->tab, Q2_FX_BULLET_PUFF_RAMP0);
+    r1 = q2_fx_ramp_at(w->tab, Q2_FX_BULLET_PUFF_RAMP1);
+
+    /* No outer loop at this site: one group. */
+    return q2_fx_group_spawn_offsets(w, at, offs, vel,
+                                     Q2_FX_BULLET_PUFF_COUNT, r0, r1,
+                                     Q2_FX_BULLET_PUFF_LIFE,
+                                     Q2_FX_BULLET_PUFF_SIZE, area);
+}
+
 void q2_fx_group_point(const q2_fx_group *g, u32 i, s32 out[3])
 {
     if (!g || !out)
@@ -390,7 +461,8 @@ s32 q2_fx_spawn(q2_fx_world *w, q2_rng *rng, q2_fx_preset_id id,
     const q2_fx_ramp *r0, *r1;
     u32 life;
     s32 size;
-    u32 i;
+    u32 i, rep, repeat;
+    s32 first = -1;
 
     if (!w || !rng || !p || !at)
         return -1;
@@ -409,16 +481,46 @@ s32 q2_fx_spawn(q2_fx_world *w, q2_rng *rng, q2_fx_preset_id id,
         size = (q2_rng_next(rng) & 0x2047) + 12000;
     }
 
-    for (i = 0; i < p->count; i++) {
-        vel[i][0] = (s16)draw(rng, p->spread_shift);
-        vel[i][1] = (s16)draw(rng, p->spread_shift);
-        vel[i][2] = (s16)draw(rng, p->spread_shift);
-    }
-
     r0 = q2_fx_ramp_at(w->tab, p->ramp0);
     r1 = q2_fx_ramp_at(w->tab, p->ramp1);
 
-    return q2_fx_group_spawn(w, at, vel, p->count, r0, r1, life, size, area);
+    /*
+     * THE OUTER LOOP. Most sites spawn the same burst two, three or four times
+     * over, re-drawing all fifteen velocities each pass — see `repeat` in
+     * effect.h. The draws stay INSIDE the loop because they are what makes the
+     * repeats differ from each other, and because a seeded replay has to
+     * consume the generator the same number of times the console does.
+     *
+     * A pool that fills part-way through is not an error: the original's
+     * spawner returns null on a full pool and the loop simply carries on, so a
+     * busy frame gets fewer groups rather than none.
+     */
+    repeat = p->repeat ? p->repeat : 1u;
+
+    for (rep = 0; rep < repeat; rep++) {
+        s32 slot;
+
+        for (i = 0; i < p->count; i++) {
+            vel[i][0] = (s16)draw(rng, p->spread_shift);
+            vel[i][1] = (s16)draw(rng, p->spread_shift);
+            vel[i][2] = (s16)draw(rng, p->spread_shift);
+        }
+
+        slot = q2_fx_group_spawn(w, at, vel, p->count, r0, r1, life, size,
+                                 area);
+        if (slot < 0)
+            continue;
+
+        /* `sh v0, 98(v1)` — the site's own Y acceleration, written straight
+         * after the spawner returns and guarded on it having returned one. */
+        if (p->accel_y)
+            w->group[slot].accel[1] = p->accel_y;
+
+        if (first < 0)
+            first = slot;
+    }
+
+    return first;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -750,10 +852,19 @@ bool q2_fx_laser(q2_fx_world *w, q2_rng *rng, u32 kind,
                 vel[q][2] = (s16)draw(rng, p->spread_shift);
             }
 
-            if (q2_fx_group_spawn(w, at, vel, Q2_FX_GROUP_QUADS,
-                                  ramp, ramp, p->life, p->size,
-                                  (u8)area) >= 0)
+            s32 slot = q2_fx_group_spawn(w, at, vel, Q2_FX_GROUP_QUADS,
+                                         ramp, ramp, p->life, p->size,
+                                         (u8)area);
+
+            if (slot >= 0) {
+                /* Both end sites write accel[1] straight after the spawner
+                 * returns — 0x80049088 and 0x80049134, `sh v0(=2), 98(v1)`.
+                 * This path does not go through q2_fx_spawn, so the preset's
+                 * accel column has to be applied here by hand. */
+                if (p->accel_y)
+                    w->group[slot].accel[1] = p->accel_y;
                 r.groups++;
+            }
         }
     }
 

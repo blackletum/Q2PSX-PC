@@ -124,6 +124,23 @@ typedef struct q2_mover {
     u8  announced;      /* so a locked door only complains once */
     u8  touch_opens;
 
+    /*
+     * The portal node's visibility bit — `flags08` bit 15, written at
+     * 0x80025C5C when the leaf settles fully closed and cleared otherwise,
+     * with the write skipped while the partner leaf is still moving.
+     *
+     * Kept here rather than pushed into the caller's hide array because that
+     * array has a second writer (the script's OBJDRAWOFF) and a per-tick
+     * unconditional write from here would undo it.
+     *
+     * NO CONSUMER YET, and said so rather than left looking wired: the port's
+     * zone draw has no portal-visibility test for it to feed. What is fixed is
+     * that the value is now COMPUTED — `partner_busy` was calculated and then
+     * `(void)`-cast away under a comment claiming the renderer consumed it,
+     * and no renderer did.
+     */
+    u8  sealed;
+
     s32 offset;         /* current displacement along the axis */
 
     /* Which primitive built it, or Q2_MOVER_PRIM_OPCODE for the MOVER_A/B/C
@@ -153,7 +170,17 @@ typedef struct q2_mover_set {
     u32       capacity;
 } q2_mover_set;
 
-q2_result q2_movers_build(q2_mover_set *out, const q2_events *events);
+/*
+ * Build every mover the MOVER_A/B/C opcodes declare.
+ *
+ * `ops` carries the two-buffer rebase (#56, userfuncs.h): the object SLOTS are
+ * read out of the pristine copy of the Events chunk, not the one being walked.
+ * Pass NULL to read in place, which is right only for zone 0 — COMMON.DAT's
+ * Events snapshot agrees with ZONE0's and with no other, so 239 mover items
+ * disc-wide otherwise build with the wrong nodes or with none at all.
+ */
+q2_result q2_movers_build(q2_mover_set *out, const q2_events *events,
+                          const q2_uf_operands *ops);
 void      q2_movers_free(q2_mover_set *set);
 
 /* Latch a mover so it acts on the next tick. Reversing a closing door is
@@ -197,14 +224,19 @@ u32 q2_movers_trigger_item(q2_mover_set *set, u32 item_offset);
  * to obj+0x44 — and a PISTON is a crusher, so it ignores obstruction in both
  * directions rather than one.
  *
- * PLATFORM and DISH are NOT built, for the same reason as CAGELIFT1: PLATFORM
- * names neither a target nor a speed and DISH names no speed, so both need
- * their constructors read rather than a constant borrowed from a sibling.
+ * STALE TEXT REMOVED. This block used to say PLATFORM, DISH and CAGELIFT1 were
+ * "deliberately NOT built here" because none of them names both a target and a
+ * speed. All three ARE built — the code below has read each constructor since
+ * — and the paragraph survived to contradict it, which is the sort of thing
+ * that makes the next reader distrust the file rather than the sentence.
  *
- * CAGELIFT1 is deliberately NOT built here. Its operand table names no speed
- * (`{param_a, objects[4], time_b}`), and a mover with speed zero is one that is
- * triggered, ticks, and never arrives — so it needs its constructor read rather
- * than a borrowed constant. Three calls on the disc.
+ * What is still true of CAGELIFT1: it takes TWO boxes, not one. Its
+ * constructor at 0x80029794 calls the slot allocator twice (0x80029A78 and
+ * 0x80029B1C) and chains them through +0x3C — a top slab whose max[1] is
+ * min[1] + item[+17] and a bottom slab whose min[1] is max[1] - item[+16]. It
+ * is a cage with a floor and a ceiling. The collision registration in
+ * q2_sim_attach_movers gives every part one box, so a cage lift is currently
+ * solid through its middle. Written down rather than approximated.
  *
  * Appends to `set`, so call it after `q2_movers_build` with the same set: the
  * two families share a tick, a draw offset and a trigger.
@@ -221,6 +253,38 @@ q2_result q2_movers_build_calls(q2_mover_set *out, const q2_events *events,
  * can tell a static frame from a busy one.
  */
 u32 q2_movers_tick(q2_mover_set *set, s32 dt, u16 player_keys);
+
+/*
+ * The same tick, with an OBSTRUCTION TEST — the half of the state machine that
+ * was decoded and dead.
+ *
+ * `Q2_MV_BLOCKED` had a `case` and a countdown and nothing anywhere assigned
+ * it, and `block_flags` had three writers and no reader, so a door closing on
+ * the player neither stopped, nor reversed, nor crushed: it passed through
+ * them, which is the other half of "movers are non-solid".
+ *
+ * `blocked(index, step, user)` is asked, before a step is committed, whether
+ * moving mover `index` by `step` along its own axis would sweep through
+ * something. That is 0x80051EC0's return — it reports 0 when 0x800519B0 finds
+ * an entity in the swept box — and 0x80025CBC is what acts on it:
+ *
+ *   opening (state 1) and bit 0 of obj+0x58 clear -> stop
+ *   closing (state 3) and bit 1 clear             -> stop
+ *   the matching bit SET                          -> carry on regardless
+ *
+ * and "stop" means: save the state, enter state 4, load the timer at obj+0x56
+ * with 16. A PISTON sets both bits, which is what makes it a crusher.
+ *
+ * Passing NULL is the old behaviour and never blocks.
+ */
+typedef bool (*q2_mover_blocked_fn)(u32 index, s32 step, void *user);
+
+u32 q2_movers_tick_blocked(q2_mover_set *set, s32 dt, u16 player_keys,
+                           q2_mover_blocked_fn blocked, void *user);
+
+/* How long a blocked mover waits before trying again — obj+0x56, loaded with
+ * 16 at 0x80025D08 on both the stopped and the crushing arm. */
+#define Q2_MOVER_BLOCK_TICKS 16
 
 /*
  * The displacement to add to a Scene node's origin when drawing it, or zero.

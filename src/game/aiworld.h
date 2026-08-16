@@ -11,13 +11,40 @@
  * binding is thin rather than a reimplementation:
  *
  *   line_of_sight   `visible` (0x8005B950) ends in a swept move through the
- *                   collision graph at 0x80044C44 — `q2_coll_move` here.
- *   trace           the same walk, because the movement hull `SecondaryCol` is
- *                   already `PrimaryColl` eroded by the mover's own box. The
- *                   AI's mins/maxs are therefore advisory: the erosion has
- *                   done the work, exactly as it does for the player.
- *   check_bottom    M_CheckBottom (0x8005FB24), a downward probe of a step
- *                   height plus a margin under the creature's centre.
+ *                   collision graph at 0x80044C44 against PrimaryColl
+ *                   (0x800C8E90) — `q2_coll_move` here.
+ *   trace           the same walk, but against the OTHER hull; see below.
+ *   check_bottom    M_CheckBottom (0x8005FB24) — FOUR corner sweeps, not one
+ *                   probe under the centre.
+ *
+ * ---------------------------------------------------------------------------
+ * WHICH HULL, and the two mistakes that came of getting it wrong
+ * ---------------------------------------------------------------------------
+ * This header used to say the AI's mins/maxs are "advisory", because
+ * SecondaryCol is PrimaryColl already eroded by the mover's box. The design
+ * statement was right and the WIRING contradicted it: bound_trace discarded the
+ * box it was handed and swept a bare point through PrimaryColl, the UN-eroded
+ * hull. A creature's centre was therefore allowed to travel until the CENTRE
+ * touched the wall, i.e. up to its own half-extent embedded in it.
+ *
+ * The original picks per call. 0x8005BD3C compares the caller's mins and maxs
+ * against the shared zero vector at 0x8009FBE4 and branches:
+ *
+ *     0x8005BE4C  addiu s0, 0x800C8FE8   SecondaryCol, when the box is real
+ *     0x8005BEB8  addiu s0, 0x800C8E90   PrimaryColl,  when it is zero or NULL
+ *
+ * and SV_movestep (0x8005FC78) always passes a real box — 0x8005CCF4 fills it
+ * from obj+0x6C..0x76 before the call — so a walking creature is a BOX in the
+ * eroded hull. Sight and the ground probe pass no box and stay on PrimaryColl.
+ *
+ * The second mistake is what made the first one look right. A Population spawn
+ * record's Y is the FEET, and every consumer here treats the creature's `pos`
+ * as the entity ORIGIN, 286 above them (worldscale.h's Q2_EYE_BASE; the same
+ * lift sim.c already applies to the player and item.c to an item). With the
+ * feet value fed to the eroded hull, 214 of 214 creatures resolved to no cell
+ * at all — a measurement that was sound, was recorded, and answered the wrong
+ * question. Lifted, 21 of 22 in-zone spawn records on four maps are inside
+ * SecondaryCol. The two changes are only correct together.
  *
  * A creature whose zone has no collision loaded falls back to the open world,
  * which is the same failure the stand-in has and is visible rather than silent.
@@ -42,6 +69,8 @@ typedef struct q2_ai_world_stats {
     u32 traces;
     u32 trace_unplaced;     /* the start point resolved to no cell        */
     u32 trace_clear;        /* ran the whole way: "walked off an edge"    */
+    u32 trace_boxed;        /* took the eroded hull, i.e. a real box      */
+    u32 trace_fallback;     /* the eroded hull could not place the start  */
     u32 bottom_calls;
     u32 bottom_fail;
     u32 los_calls;
@@ -49,7 +78,17 @@ typedef struct q2_ai_world_stats {
 } q2_ai_world_stats;
 
 typedef struct q2_ai_world_bind {
+    /*
+     * BOTH hulls, because 0x8005BD3C selects between them per call.
+     *
+     * `coll` is PrimaryColl — sight, the ground probe, and any trace whose box
+     * is degenerate. `move_hull` is SecondaryCol, PrimaryColl eroded by the
+     * body's own half-extent, and is what a walking creature's box moves in.
+     * A NULL `move_hull` degrades to `coll`, which is the old behaviour and is
+     * counted rather than silent.
+     */
     q2_collision *coll;
+    q2_collision *move_hull;
 
     /* How far below a creature ground may be and still count. The step height,
      * because a creature that can climb a step can also stand off one. */
@@ -62,12 +101,14 @@ typedef struct q2_ai_world_bind {
 } q2_ai_world_bind;
 
 /*
- * Point `bind` at a zone's hull and install it as the AI's world.
+ * Point `bind` at a zone's hulls and install it as the AI's world.
  *
- * The binding borrows `coll`; the caller keeps ownership and must not free it
- * while creatures are thinking. Passing a NULL hull installs the open world.
+ * The binding borrows both; the caller keeps ownership and must not free them
+ * while creatures are thinking. Passing a NULL `coll` installs the open world.
+ * `move_hull` may be NULL, in which case every trace uses `coll`.
  */
-void q2_ai_world_bind_init(q2_ai_world_bind *bind, q2_collision *coll);
+void q2_ai_world_bind_init(q2_ai_world_bind *bind, q2_collision *coll,
+                           q2_collision *move_hull);
 void q2_ai_world_bind_install(q2_ai_world_bind *bind);
 
 #endif /* Q2PSX_AIWORLD_H */

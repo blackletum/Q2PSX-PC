@@ -122,6 +122,20 @@ static void fx_at(q2_sim *sim, q2_fx_preset_id id, const s32 at[3])
  *
  * A pellet that hit nothing and was stopped by nothing marks nothing: a frac of
  * 4096 with no victim means the shot ran out of range in open air.
+ *
+ * CORRECTION — the world arm is NOT a spark, and this was the loud half of
+ * "all effects are broken". It used to raise Q2_FX_SPARK, whose site
+ * (0x8003E0C0) sits inside 0x8003E014, and `xrefs 0x8003E014` returns exactly
+ * one caller: 0x8003D4C4, inside the player's per-frame STATE think. No weapon
+ * in the executable reaches it. Its ramp is record 0 — (64,64,255), pure blue,
+ * additive — so every pellet that struck a wall painted a blue disc, fifteen
+ * quads at a time, and a burst of buckshot painted a screenful of them.
+ *
+ * The real world arm is 0x80048990 -> 0x800489D8, which spawns through the
+ * SECOND group spawner (0x8003004C) with grey and dark-red ramps: a smoke
+ * puff. See q2_fx_bullet_puff. The address the old note cited for the spark,
+ * 0x800486EC, is the EXPLOSION site and is what the missile tick's world arm
+ * uses — not the bullet's.
  */
 static void fx_hitscan_impact(q2_sim *sim, const s32 origin[3],
                               const s32 dir[3], s32 frac, s32 victim,
@@ -147,7 +161,15 @@ static void fx_hitscan_impact(q2_sim *sim, const s32 origin[3],
     }
 
     if (frac < 4096) {
-        fx_at(sim, Q2_FX_SPARK, at);
+        /*
+         * The area byte the console forwards here (`lbu s1, 32(v1)` at
+         * 0x80048854, the trace's own area record) has no counterpart in this
+         * port yet — nothing maps a contact point to an area key, and the
+         * group draw has no visibility test to spend it on either. Zero, and
+         * said so, rather than a fabricated key.
+         */
+        if (sim->fx_ready)
+            q2_fx_bullet_puff(&sim->fx, &sim->fx_rng, at, 0);
 
         /*
          * And the BREAKABLE, tested along the whole shot rather than at its
@@ -161,15 +183,48 @@ static void fx_hitscan_impact(q2_sim *sim, const s32 origin[3],
 /*
  * Which burst a projectile leaves behind.
  *
- * A bolt is the odd one out: 0x8004D74C reaches the small blue spark rather
- * than the fireball, which is why blaster hits read as a flash and everything
- * else reads as an explosion. The BFG has a burst of its own, four times the
- * size of any other (0x8004BDBC).
+ * The BFG has a burst of its own, four times the size of any other
+ * (0x8004BDBC). Everything else detonates as the missile tick's world arm
+ * does: 0x800486EC, ramp 9, two groups.
+ *
+ * A BOLT USED TO BE MAPPED TO THE BLUE SPARK, on the strength of a comment
+ * saying "0x8004D74C reaches the small blue spark rather than the fireball".
+ * That is false, and the address does not say what it was read as saying:
+ * 0x8004D74C is `jal 0x80048AFC` inside the bolt SPAWNER at 0x8004D70C — the
+ * entity allocator, whose result is tested `beq s2, zero` two instructions
+ * later and then filled in as a 104-byte missile record. It is not a burst
+ * site at all, and the spark's only reachable caller is in the player's state
+ * think (see fx_hitscan_impact).
+ *
+ * SO WHAT DOES A BOLT DO? Measured, not chosen. The missile tick (0x80047C6C)
+ * has exactly two burst arms — 0x80048B64 blood when a victim was hit, and the
+ * world arm at 0x8004866C which loads ramp 9 and loops `slti v0,s7,2` — and
+ * BOTH are gated on bit 3 of the missile record's flag halfword at +0x22
+ * (`lhu v0,-54(s3); andi v0,8; beq -> 0x80048700`, at 0x80048624 and
+ * 0x80048658). The spawner writes that halfword from its FIFTH argument:
+ * `lhu s1, 128(sp)` at 0x8004D714 against its own `addiu sp, sp, -112`, stored
+ * by `sh s1, 34(s2)` at 0x8004D7BC.
+ *
+ * Reading the fifth argument at every call site settles it. `xrefs 0x8004D70C`
+ * gives three:
+ *
+ *     0x8004C134   sw 11, 16(sp)          0b1011 — bit 3 set
+ *     0x8004D400   sw 14, 16(sp)          0b1110 — bit 3 set
+ *     0x800620EC   sw 11 or 14, 16(sp)    both arms, bit 3 set
+ *
+ * Every bolt on the disc carries the bit, so every bolt detonates through the
+ * world arm — the same orange two-group burst every other missile gets. The
+ * blue spark was never any part of it.
+ *
+ * STILL OWED: the gate ITSELF. This port raises a detonation burst for every
+ * kind unconditionally, where the original tests bit 3 per record. It happens
+ * to agree for the bolt because the bit is always set there; it will not agree
+ * for whatever kind is spawned without it, and that kind has not been looked
+ * for.
  */
 static q2_fx_preset_id fx_for_projectile(q2_proj_kind kind)
 {
     switch (kind) {
-    case Q2_PROJ_BOLT: return Q2_FX_SPARK;
     case Q2_PROJ_BFG:  return Q2_FX_BFG_BURST;
     default:           return Q2_FX_EXPLOSION;
     }
@@ -266,6 +321,33 @@ bool q2_sim_cycle_weapon(q2_sim *sim, int dir)
     return true;
 }
 
+bool q2_sim_autoselect_weapon(q2_sim *sim)
+{
+    int best;
+
+    if (!sim)
+        return false;
+
+    /*
+     * 0x800506C4, the refire pass's own selection: walk the fixed preference
+     * list and take the first entry that is both owned and fed. Idempotent —
+     * a player already holding the best affordable weapon re-picks it and
+     * nothing changes, which is exactly why the console can afford to run it
+     * after every shot.
+     *
+     * This is NOT q2_sim_cycle_weapon. That one transcribes 0x80050758, the
+     * +/-1 neighbour scan the console runs twice per pass only to refill its
+     * next/previous caches, and it never writes the held weapon. The refire
+     * pass used to call it, so every shot advanced the carousel by one.
+     */
+    best = q2_weapon_autoselect(&sim->combat.inv);
+    if (best == Q2_WID_NONE || best == sim->combat.weapon_id)
+        return false;
+
+    sim->combat.weapon_id = best;
+    return true;
+}
+
 /* ------------------------------------------------------------------------- */
 /*
  * How far along a shot's direction the world lets it travel, as a 1.0.12
@@ -295,12 +377,15 @@ q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
     q2_fire_result_v2 r;
     s32 eye[3];
     s16 aim[3];
+    s32 prev_next_fire;
     u32 i;
 
     memset(&r, 0, sizeof(r));
     r.sound = -1;
     if (!sim)
         return r;
+
+    prev_next_fire = sim->combat.next_fire;
 
     q2_sim_eye(sim, eye);
     q2_sim_aim(sim, aim);
@@ -316,8 +401,16 @@ q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
                        sim->combat.chaingun_bullets);
 
     sim->combat.last_shot = r;
-    if (!r.fired)
+    sim->combat.shot_serial++;
+    if (!r.fired) {
+        /* A dry trigger still takes the gate — see Q2_WEAPON_DRY_REFIRE. A
+         * shot blocked by the clock does not, and must not: overwriting the
+         * deadline from a blocked tick would push it forward forever and the
+         * weapon would never fire again. */
+        if (r.dry)
+            sim->combat.next_fire = r.next_fire;
         return r;
+    }
 
     /*
      * The muzzle flash. Only the machinegun and the chaingun carry one, and its
@@ -331,7 +424,15 @@ q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
         s32 inner, outer;
 
         q2_weapon_muzzle_light(q2_rng_next(&sim->combat.rng), &inner, &outer);
-        q2_ent_light_at(&sim->ent_world.events, eye, flash, inner, outer);
+        /*
+         * At the player ENTITY, not at the eye. The console passes
+         * `addiu a0, s3, 84` — player + 0x54, the entity origin — to the light
+         * appender, and `sim->player[].pos` is this port's name for it. Small
+         * and worth being right: the eye is 576 above the feet and the origin
+         * 286, so a muzzle flash lit the ceiling from nearly a foot too high.
+         */
+        q2_ent_light_at(&sim->ent_world.events,
+                        sim->player[sim->cur_player].pos, flash, inner, outer);
     }
 
     sim->combat.next_fire = r.next_fire;
@@ -393,8 +494,29 @@ q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
         /* WHO fired it. The -1 here meant "the world", so a bolt could not say
          * who to credit and a kill by one had no killer. */
         q2_sim_proj_scan.launched++;
-        q2_projectile_launch(&sim->combat.projectiles, &r,
-                             sim->cur_player, sim->level_time);
+        if (q2_projectile_launch(&sim->combat.projectiles, &r,
+                                 sim->cur_player, sim->level_time) < 0) {
+            /*
+             * THE POOL WAS FULL, and the shot has already been paid for:
+             * q2_weapon_fire decrements the ammo and advances the refire gate
+             * before this line is reached, so swallowing the launch charges the
+             * player for nothing. Refund both and report the shot as not fired,
+             * which is also what stops the view model playing a fire clip for a
+             * projectile that does not exist.
+             *
+             * This used to be unreachable in practice only because projectiles
+             * never terminated (they moved at a twentieth of their speed and
+             * filled the pool); with the step fixed it is rare, and it is still
+             * wrong to lose a rocket to it.
+             */
+            q2_sim_proj_scan.dropped_full++;
+            q2_weapon_refund(&sim->combat.inv, sim->combat.weapon_id);
+            sim->combat.next_fire = prev_next_fire;
+            r.fired = false;
+            /* The same attempt amended, not a new one, so the serial stays
+             * where the write above left it. */
+            sim->combat.last_shot = r;
+        }
         break;
     }
 
@@ -592,7 +714,7 @@ void q2_sim_combat_tick(q2_sim *sim)
         }
 
         q2_projectile_step(&sim->combat.projectiles, i, sim->gravity,
-                           sim->level_time, &step);
+                           sim->cur_dt, sim->level_time, &step);
 
         if (step.expired) {
             q2_sim_proj_scan.expired++;

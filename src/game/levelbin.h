@@ -59,6 +59,7 @@
 #ifndef Q2PSX_LEVELBIN_H
 #define Q2PSX_LEVELBIN_H
 
+#include "../build/itemtable.h"     /* Q2_ITEM_COUNT — the scene's id list */
 #include "../formats/collision.h"
 #include "effect.h"
 #include "events.h"
@@ -247,6 +248,129 @@ u32 q2_levelbin_menu_pages(const u8 *module, u32 size, u32 load_base,
 
 u32 q2_levelbin_credits(const u8 *module, u32 size,
                         const char **out, u32 max);
+
+/* ------------------------------------------------------------------------- */
+/* The title screen's SCENE — what the menu is drawn over                     */
+/* ------------------------------------------------------------------------- */
+/*
+ * #44 left this open and said why: QFRONT's world is two nodes and eight
+ * vertices, its models are all authored centred on their own origin, and its
+ * single `StartPos` puts the eye at the world origin — so drawing them where
+ * they sit would put the camera inside the logo, and there was no honest
+ * position to draw them at. The port showed the menu over an empty scene.
+ *
+ * The position is in the module, and it is not a scene graph. **The title
+ * screen's models are ITEMS.** `init` (module+0x30F4) calls
+ * `module+0xC5BC(module+0x10D7C, module+0x12B20)`, and that function is a
+ * five-line spawner:
+ *
+ *     8010C5E8  lw   a2, 0(t1)         ; a 16-byte q2_pop_place template,
+ *     ...                              ; module+0xE48, all zero but +12 = 0x1000
+ *     8010C614  lh   v0, 0(s0)         ; the next id; < 0 ends the list
+ *     8010C628  sh   v1, 30(sp)        ; ...into the template's `id` field
+ *     8010C634  jalr v0                ; engine+0x2C = 0x800599DC, item spawn
+ *     8010C650  sw   v0, 0(v1)         ; keep the entity in module+0x12B20[i]
+ *     8010C658  sh   2048, 232(v0)     ; +0xE8  angles[1] — yaw, half a circle
+ *     8010C660  sw   zero, 268(v0)     ; +0x10C render_flags
+ *     8010C664  sw   zero, 164(v0)     ; +0xA4  origin[0]
+ *     8010C668  sw   zero, 168(v0)     ; +0xA8  origin[1]
+ *     8010C66C  sw   1700, 172(v0)     ; +0xAC  origin[2]
+ *     8010C680  jalr v1                ; engine+0x114 = 0x80089E38, RotMatrix
+ *
+ * So every object stands at (0, 0, 1700) facing yaw 2048, and the list at
+ * `module+0x10D7C` is five ITEM TABLE ids terminated by -1:
+ *
+ *     57  Q2LOGO        59  Male2        60  Male2red
+ *     61  Male2purple   62  Male2aqua
+ *
+ * ---------------------------------------------------------------------------
+ * Which answers the spinning as well, and it was never the front end's
+ * ---------------------------------------------------------------------------
+ * All five of those table records carry the `spin` flag (`q2psx-inspect
+ * items`), and `0x80059330` — the item think the spawner installs — is what
+ * turns them. The logo on the title screen rotates for exactly the same reason
+ * and at exactly the same rate as a shotgun on a pedestal: it IS an item, and
+ * the front end adds nothing to make it move. Ids 57..64 are the eight records
+ * `records no map ever places` has always listed, and this is what they are
+ * for.
+ *
+ * The module then marks each one taken by all four players
+ * (`module+0x3414`, bit 0x80 of +0x118 + p*100). That is the touch sweep being
+ * kept off them, not a draw flag: the only reader of that bit is the deathmatch
+ * respawn countdown at `0x80059374`, and the front end has no players for the
+ * sweep to run over anyway.
+ *
+ * Only the id list is read from the module here. The transform is the
+ * builder's code, not its data, so it is transcribed with the address it came
+ * from — the same split every other table in this port uses.
+ */
+#define Q2_LB_SCENE_MAX 8
+
+/* 0x8010C654 / 0x8010C664..0x8010C66C. */
+#define Q2_LB_SCENE_YAW  2048
+#define Q2_LB_SCENE_DIST 1700
+
+typedef struct q2_lb_scene {
+    u32 offset;                    /* where the id list sits in the module */
+    u32 count;
+    u16 id[Q2_LB_SCENE_MAX];       /* item table ids, in spawn order       */
+} q2_lb_scene;
+
+/*
+ * ---------------------------------------------------------------------------
+ * Only the first object is ever shown, and it does not use the item think
+ * ---------------------------------------------------------------------------
+ * `module+0x3414` — the two lines every front-end page builder opens with —
+ * hides all five, and then its tail shows exactly one back:
+ *
+ *     80103554  lh   v1, 710(engine)   ; the live page id
+ *     8010355C  beq  v1, 11            ; page 11 keeps even this one hidden
+ *     8010356C  lw   v0, 280(objs[0])  ; +0x118
+ *     80103574  and  v0, ~0x80         ; ...shown
+ *     80103584  lh   v0, 710(engine)
+ *     8010358C  bne  v0, zero          ; page 0 is the title screen
+ *     801035B0  sw   v1, 60(objs[0])   ; +0x3C — the THINK, per page
+ *
+ * So `objs[0]`, the Q2LOGO, is the only thing on screen; the four coloured
+ * player models are spawned and stay hidden, and belong to a screen this port
+ * has not reached. And the logo's motion is not the item think at all — the
+ * module overwrites `+0x3C` with one of its own on every page change:
+ *
+ *     module+0x9D24   the title screen        module+0x9E0C   every other page
+ *     scale += 256, capped at 4096            scale -= 256, floored at 1024
+ *     yaw   -= 4 * dt                         yaw   -= 4 * dt
+ *
+ * Two things fall out of that pair. The logo GROWS into the title screen from
+ * nothing and SHRINKS to a quarter when you step into a sub-page, which is the
+ * animation a still capture cannot show. And it turns at `4 * dt` against the
+ * item spin's `3 * dt` (`Q2_ITEM_SPIN_RATE`, 0x8005947C) — so it is close to a
+ * pickup's rotation but is not the same number, and a port that reused the item
+ * think would be a third slow.
+ */
+#define Q2_LB_SCENE_SPIN       4     /* module+0x9D24: yaw -= 4 * dt        */
+#define Q2_LB_SCENE_SCALE_STEP 256   /* per FRAME, not per tick             */
+#define Q2_LB_SCENE_SCALE_FULL 4096  /* the title screen's size             */
+#define Q2_LB_SCENE_SCALE_SUB  1024  /* what a sub-page shrinks it to       */
+
+/*
+ * Find the scene's id list. True when one was found.
+ *
+ * Anchored the way `q2_levelbin_menu_pages` is, on two things that have to hold
+ * at once rather than on an offset: the run must be u32 item ids below the
+ * table's own record count, terminated by -1, AND the module must materialise
+ * its address with a `lui`/`addiu` pair — a list nothing points at is not a
+ * list.
+ *
+ * **This one needs the RELOCATED image**, unlike the page and credit scans,
+ * and the reason is the second test. An unrelocated `lui`/`addiu` pair holds
+ * only the low half of the offset — QFRONT's is `lui a0, 0` / `addiu a0, a0,
+ * 0x0D7C` for a list at +0x10D7C — and the high half arrives from the fixup.
+ * Matching on the low half alone would be a 16-bit coincidence rather than a
+ * reference, so the caller relocates (`q2_level_module_load`) and passes the
+ * base it relocated to.
+ */
+bool q2_levelbin_scene(const u8 *module, u32 size, u32 load_base,
+                       q2_lb_scene *out);
 
 /* ------------------------------------------------------------------------- */
 /* QENDMIS — the movie player, and what the end of the campaign actually is   */

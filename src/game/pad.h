@@ -186,4 +186,55 @@ void q2_pad_read(const q2_pad_state *pad, const q2_pad_config *cfg,
  */
 void q2_pad_config_default(q2_pad_config *cfg);
 
+/* ------------------------------------------------------------------------- */
+/* The same table, read the other way round                                   */
+/* ------------------------------------------------------------------------- */
+/*
+ * Which pad bits a style reads for each thing the player can ASK FOR.
+ *
+ * A host that maps its keys straight to pad BUTTONS has silently committed to
+ * one style. The client's keyboard was STANDARD A's arm written out by hand, so
+ * selecting any other style turned the strafe keys into weapon switches and the
+ * look keys into nothing — the keys had not moved, but what they meant had.
+ * This is the per-style table read backwards, so ONE key mapping serves all
+ * nine and a style change moves the meaning rather than breaking it.
+ *
+ * A field is zero where the style has no button for that meaning, and those
+ * blanks are not gaps in the transcription — they are what the style IS. The
+ * three mouse and three stick styles have no turn or look buttons at all
+ * because their look comes from an analogue pair, and BOTH STICKS has no
+ * movement buttons for the same reason. A host that wants those keys to keep
+ * working feeds the AXIS instead; q2_pad_style_look says which one.
+ */
+typedef struct q2_pad_bindings {
+    u32 forward, back;
+    u32 strafe_left, strafe_right;
+    u32 turn_left, turn_right;
+    u32 look_up, look_down;
+    u32 fire, jump;
+    u32 weapon_next, weapon_prev;
+} q2_pad_bindings;
+
+/* False, leaving `out` zeroed, for a style outside the table. */
+bool q2_pad_style_bindings(int style, q2_pad_bindings *out);
+
+/*
+ * Where a style's look comes from, which is the one thing a host has to know
+ * before it can decide what to do with a pointing device.
+ */
+typedef enum q2_pad_look_src {
+    Q2_PAD_LOOK_BUTTONS = 0,  /* the two look bits above                     */
+    Q2_PAD_LOOK_MOUSE,        /* lx/ly, scaled by MOUSE SPEED                */
+    Q2_PAD_LOOK_LEFT_STICK,   /* lx/ly, raw signed bytes                     */
+    Q2_PAD_LOOK_RIGHT_STICK   /* rx/ry, raw signed bytes                     */
+} q2_pad_look_src;
+
+/*
+ * BOTH STICKS reports LEFT because that is where its yaw comes from; its pitch
+ * is the right stick's, which is the one place this summary is coarser than
+ * the arm it summarises. Nothing that only wants to know "is the look an axis,
+ * and is it scaled" is affected.
+ */
+q2_pad_look_src q2_pad_style_look(int style);
+
 #endif /* Q2PSX_PAD_H */

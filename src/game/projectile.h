@@ -242,14 +242,21 @@ typedef struct q2_proj_step {
 } q2_proj_step;
 
 /*
- * Advance one projectile by a tick and report where it wants to move. Apply
- * gravity to the grenades only, in the caller's own units.
+ * Advance one projectile by the tick's `dt` and report where it wants to move.
+ * Apply gravity to the grenades only, in the caller's own units.
+ *
+ * `dt` IS REQUIRED and is the same dt the sim's own tick ran on. A projectile's
+ * velocity is per dt UNIT, exactly as the original's is (0x80047D40 forms the
+ * destination as `pos += vel * dt` against the frame delta at 0x800B2DB4), so
+ * dropping it does not slow a bolt by a rounding error — it slows it by the
+ * whole tick length, twelve to twenty times. Zero or negative falls back to
+ * Q2_DT_NOMINAL rather than freezing every projectile in the air.
  *
  * The caller then traces `from`..`to`, and either commits the move or calls
  * q2_projectile_impact.
  */
-void q2_projectile_step(q2_projectiles *list, u32 index, s32 gravity, s32 now,
-                        q2_proj_step *out);
+void q2_projectile_step(q2_projectiles *list, u32 index, s32 gravity, s32 dt,
+                        s32 now, q2_proj_step *out);
 
 /* Commit a move that met nothing. */
 void q2_projectile_commit(q2_projectiles *list, u32 index, const s32 to[3]);

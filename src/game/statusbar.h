@@ -104,6 +104,7 @@
 
 #include "gpu.h"
 #include "icontable.h"
+#include "inventory.h"   /* the armour field selects on the Q2_INV_* flags */
 
 /* Forward-declared so a caller that never colours the bar need not pull the
  * whole executable-table module in. */
@@ -134,32 +135,80 @@ struct q2_hud_tables;
  * in the plainest way a disassembly can:
  *
  *     80035190  lbu  v0, 170(t0)     t0 = 0x8009C478   health, ALWAYS 170
- *     8003565C  lbu  v0, 150(a0)     a0 = 0x8009C478   armour, ALWAYS 150
  *     80035374  sll  v0, a0, 2       a0 = ammoIcon[weapon]
  *     80035378  addu v0, v0, a0                        ammo,   a0 * 5
  *     80035380  addu v1, a0, t0                        &rect[a0]
  *
- * 170 and 150 are byte offsets into a five-byte record: rect 34 and rect 30.
- * The ammo path multiplies its table entry by five and adds the same base, so
- * `ammoIcon[]` is a rect index too. There is no strcmp, no scan, no compare of
- * the fifth byte anywhere in any of the three.
+ * 170 is a byte offset into a five-byte record: rect 34. The ammo path
+ * multiplies its table entry by five and adds the same base, so `ammoIcon[]`
+ * is a rect index too. There is no strcmp, no scan, no compare of the fifth
+ * byte anywhere in any of the three.
  *
  * WHAT THE OLD READING DREW, and why it looked plausible enough to ship:
  * scanning for effect 34 finds rect **30**, because rect 30's fifth byte
- * happens to be 34. Rect 30 is the ARMOUR icon. So the health field drew the
- * armour box — a chunky machine-looking sprite where retail shows a blue cross
- * — and because it drew *something* recognisable, it read as a mis-picked icon
- * rather than as a whole mis-read table. Rect 34 is the cross.
+ * happens to be 34. So the health field drew a chunky machine-looking sprite
+ * where retail shows a blue cross — and because it drew *something*
+ * recognisable, it read as a mis-picked icon rather than as a whole mis-read
+ * table. Rect 34 is the cross.
  *
  * The fifth byte is a PALETTE INDEX (see below), which is why joining it to
  * the item table produced a near-monotonic and therefore convincing-looking
  * correspondence. Two independent tells confirm the index reading against it:
- * the cell the effect reading assigns to the power shield is EMPTY, and the
- * cells the index reading assigns to the six ammo types are six ammo boxes.
+ * the cell the effect reading assigns to rect 25 is EMPTY, and the cells the
+ * index reading assigns to the six ammo types are six ammo boxes.
+ *
+ * ---------------------------------------------------------------------------
+ * CORRECTION, the second one — THE ARMOUR ICON IS NOT ONE RECT
+ * ---------------------------------------------------------------------------
+ * This block used to carry a third line beside the two above:
+ *
+ *     8003565C  lbu  v0, 150(a0)     a0 = 0x8009C478   armour, ALWAYS 150
+ *
+ * "ALWAYS" was the error, and it is the same shape as the one it replaced: the
+ * instruction is real, the offset is real, and the premise that it is
+ * unconditional was never tested. It is not. It sits inside ONE OF FIVE ARMS
+ * of the armour sub-draw at `0x80035554`, and the arm is guarded by the POWER
+ * SHIELD bit:
+ *
+ *     8003564C  andi v0, v0, 0x8000     Q2_INV_POWER_SHIELD
+ *     80035650  beq  v0, zero, 0x800356E0
+ *     8003565C  lbu  v0, 150(a0)        -> rect 30, the power shield
+ *     8003576C  andi v1, v1, 0x4000     Q2_INV_ARMOUR_BODY
+ *     8003577C  lbu  v0, 130(t0)        -> rect 26, the red vest
+ *     80035800  andi v1, v1, 0x2000     Q2_INV_ARMOUR_COMBAT
+ *     80035810  lbu  v0, 135(t0)        -> rect 27, the gold vest
+ *     80035894  andi v1, v1, 0x1000     Q2_INV_ARMOUR_JACKET
+ *     800358A4  lbu  v0, 140(t0)        -> rect 28, the grey vest
+ *     80035928  (falls through)         -> rect 0, the blank
+ *
+ * The five-byte stride is proved inside the function rather than assumed: the
+ * body arm reads 130, 131, then 132, 133, then `addiu v0, zero, 130 / addu
+ * v0, v0, t0 / lbu v0, 4(v0)` = 134. Records run 130..134, 135..139, 140..144
+ * and 150..154 — rects 26, 27, 28 and 30.
+ *
+ * Rendering those cells out of `qk_menu.lbm` with each rect's OWN palette (the
+ * fifth byte: 31, 32, 33 and 34) settles what they are: 26/27/28 are three
+ * armour vests in red, gold and grey, and 30 is a red-lamp device that is not
+ * a vest at all. Reading 150 unconditionally therefore put the POWER SHIELD on
+ * the bar for every player wearing any armour, which is the reported bug.
+ *
+ * The test order matters and is the console's: body, combat, jacket. A player
+ * who has held body armour keeps 0x4000 up while wearing a weaker class, so
+ * testing weakest-first would show the wrong vest.
  */
-#define Q2_SBAR_ICON_HEALTH   34   /* 0x80035178, offset 170 — the cross */
-#define Q2_SBAR_ICON_ARMOUR   30   /* 0x80035554, offset 150             */
-#define Q2_SBAR_ICON_NONE      0   /* rect 0 is the 1x1 blank            */
+#define Q2_SBAR_ICON_HEALTH        34  /* 0x80035178, offset 170 — the cross  */
+#define Q2_SBAR_ICON_ARMOUR_BODY   26  /* 0x8003577C, offset 130 — flag 0x4000 */
+#define Q2_SBAR_ICON_ARMOUR_COMBAT 27  /* 0x80035810, offset 135 — flag 0x2000 */
+#define Q2_SBAR_ICON_ARMOUR_JACKET 28  /* 0x800358A4, offset 140 — flag 0x1000 */
+#define Q2_SBAR_ICON_POWER_SHIELD  30  /* 0x8003565C, offset 150 — flag 0x8000 */
+#define Q2_SBAR_ICON_NONE           0  /* rect 0 is the 1x1 blank             */
+
+/*
+ * The armour field's five-way select, as a pure function of the inventory's
+ * flag word. `show_power` is the sub-draw's own live state (see
+ * q2_statusbar_armour_state below), not a property of the inventory.
+ */
+u8 q2_sbar_armour_icon(u32 inv_flags, bool show_power);
 
 /* ------------------------------------------------------------------------- */
 /* The palettes — one per sprite, and the port used to ignore all of them     */
@@ -204,6 +253,13 @@ struct q2_hud_tables;
 #define Q2_SBAR_LOW_HEALTH  26
 #define Q2_SBAR_LOW_AMMO     6
 #define Q2_SBAR_BLINK_BIT 0x80u
+
+/*
+ * How long the armour field holds each of its two readouts when the player has
+ * both a power item and a vest — `addiu v0, v0, 300` at 0x8003560C, on the
+ * level clock, so exactly one second.
+ */
+#define Q2_SBAR_POWER_ALTERNATE 300u
 
 /*
  * The one weapon whose ammo digits are blanked — the blaster, slot 1.
@@ -354,14 +410,40 @@ typedef struct q2_statusbar {
 
     /*
      * The health and armour icons, as RECT INDICES into the table at
-     * 0x8009C478 — see the correction above. The console hard-codes both (34
-     * and 30); they are inputs here only so that armour can show the blank
-     * when none is worn, which is what the armour sub-draw's other arm does.
+     * 0x8009C478 — see the correction above. Only HEALTH is hard-coded (34);
+     * the armour field is a five-way select on the inventory's flag word and
+     * on the sub-draw's own live power state, which is what
+     * q2_statusbar_armour_state() below computes.
      *
      * Q2_SBAR_ICON_NONE is rect 0, the 1x1 blank, and draws nothing.
      */
     u8 health_icon;
     u8 armour_icon;
+
+    /*
+     * The armour field's other half. In the POWER state the counter shows the
+     * CELLS count and is drawn unconditionally (`lhu a0, 116(v0)` at
+     * 0x80035754, straight into the shared draw at 0x800359A8); in the regular
+     * state it shows armour points and is skipped at zero (0x80035994).
+     */
+    s16 cells;
+
+    /*
+     * The sub-draw's own retained state: client+88, the flag saying the power
+     * item is being shown, and client+192, the deadline it alternates on.
+     *
+     *   cells == 0                       -> regular, always (0x80035630)
+     *   a power bit and no armour class  -> power, pinned  (0x80035628)
+     *   a power bit and an armour class  -> alternate every 300 ticks of
+     *                                       0x800AEBAC   (0x800355C8-0x80035614)
+     *
+     * 300 is ONE SECOND: 0x800AEBAC is the level clock at 300 ticks to the
+     * second (combat.h, entity.h), not a frame counter. Feeding this bar a
+     * render-frame index instead makes both this and the low-value blink ten
+     * times too slow.
+     */
+    bool showing_power;
+    u32  power_toggle_at;
 
     /*
      * The palette bank, for resolving a sprite's palette index to a CLUT word.
@@ -371,9 +453,16 @@ typedef struct q2_statusbar {
     const struct q2_hud_tables *hud;
 
     /*
-     * The frame counter the flash is phased on — `0x800AEBAC`, tested against
+     * The clock the flash is phased on — `0x800AEBAC`, tested against
      * Q2_SBAR_BLINK_BIT. Supplied by the caller because it is the engine's
      * global tick, not something the bar owns.
+     *
+     * It is the LEVEL CLOCK, 300 ticks to the second (combat.h's
+     * Q2_TICKS_PER_SECOND, entity.h's note on 0x800AEBAC, and sim.c's
+     * `level_time += dt`) — NOT a rendered-frame counter. The half-period of
+     * the blink is 128/300 = 0.43 s; against a 30 Hz frame index it would be
+     * 4.3 s, and the armour alternation above would be ten seconds instead of
+     * one. Both were wrong for the same one-line reason.
      */
     u32 ticks;
 
@@ -408,6 +497,22 @@ void q2_statusbar_set_palettes(q2_statusbar *b, const struct q2_hud_tables *t);
 
 /* Place it. A viewport's own anchor — `sbar_x`/`sbar_y` in screen.h. */
 void q2_statusbar_anchor(q2_statusbar *b, s16 x, s16 y);
+
+/*
+ * Run the armour field's state machine and choose its icon — 0x80035554's
+ * prologue, everything before the five-way select.
+ *
+ * Separate from the emit because it MUTATES: the console keeps the power flag
+ * and its deadline in the player record and rewrites them from inside the bar.
+ * Call it once per tick, before q2_statusbar_build_ot; `b->ticks` must already
+ * hold the level clock. It sets `armour_icon`, `showing_power` and the counter
+ * the emit draws.
+ *
+ * `inv_flags` is the inventory's flag word (Q2_INV_*). Armour and cells are
+ * taken from the bar's own `armour` and `cells` fields, which the caller fills
+ * from the same inventory.
+ */
+void q2_statusbar_armour_state(q2_statusbar *b, u32 inv_flags);
 
 /*
  * Emit the bar into bucket `bucket`.

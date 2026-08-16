@@ -117,6 +117,37 @@ u32 q2_sound_bank_total_body(const q2_sound_bank *bank);
  */
 u32 q2_spu_adpcm_decode(const u8 *adpcm, u32 size, s16 *out, u32 out_capacity);
 
+/* ------------------------------------------------------------------------- */
+/* One voice, decoded a block at a time                                       */
+/*                                                                            */
+/* The hardware never decodes a sample up front: a voice holds an address into */
+/* sound RAM and the SPU decodes the next 16-byte block when it needs the next */
+/* 28 samples. A mixer wants the same shape — twenty-four of these cost 24 * a  */
+/* few dozen bytes instead of twenty-four whole samples — so the block step is  */
+/* exposed here and `q2_spu_adpcm_decode` is written in terms of it.            */
+/* ------------------------------------------------------------------------- */
+typedef struct q2_spu_voice {
+    const u8 *adpcm;      /* borrowed: the sample body, NOT owned      */
+    u32       size;       /* body bytes                                */
+    u32       off;        /* byte offset of the next block             */
+    s32       prev1;      /* the predictor's two-sample history        */
+    s32       prev2;
+    bool      done;       /* the End flag was seen, or the body ran out */
+} q2_spu_voice;
+
+/* Point a voice at a sample body. `adpcm` must outlive the voice — for a bank
+ * sample that means the bank must not be freed while it is playing. */
+void q2_spu_voice_start(q2_spu_voice *v, const u8 *adpcm, u32 size);
+
+/*
+ * Decode the next block into `out`, which must hold SPU_SAMPLES_PER_BLOCK
+ * samples. Returns the number written, or 0 once the sample has ended.
+ *
+ * The End flag is acted on AFTER its block is emitted, which is what makes a
+ * terminator-less one-shot stop in the right place — see the trap note above.
+ */
+u32 q2_spu_voice_block(q2_spu_voice *v, s16 *out);
+
 /* Validate an ADPCM stream's block headers without decoding it. Returns the
  * number of structurally invalid blocks — zero is expected for real data. */
 u32 q2_spu_adpcm_validate(const u8 *adpcm, u32 size);

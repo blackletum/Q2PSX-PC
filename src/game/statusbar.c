@@ -180,6 +180,79 @@ void q2_statusbar_anchor(q2_statusbar *b, s16 x, s16 y)
 }
 
 /* ------------------------------------------------------------------------- */
+/* The armour field — 0x80035554                                              */
+/* ------------------------------------------------------------------------- */
+/*
+ * The five-way select, in the console's own test order.
+ *
+ *     8003564C  andi 0x8000  -> 8003565C  lbu 150(a0)   rect 30  power shield
+ *     8003576C  andi 0x4000  -> 8003577C  lbu 130(t0)   rect 26  body
+ *     80035800  andi 0x2000  -> 80035810  lbu 135(t0)   rect 27  combat
+ *     80035894  andi 0x1000  -> 800358A4  lbu 140(t0)   rect 28  jacket
+ *     80035928  (fall through)              base + 0    rect 0   blank
+ *
+ * BODY FIRST is not a stylistic choice. The pickup handlers only raise the bit
+ * for their own class when no STRONGER bit is up (item.c, and 0x80036C28 /
+ * 0x80036CA0 / 0x80036D08), so a player who has worn body armour keeps 0x4000
+ * raised while wearing combat. Testing weakest-first would draw the grey vest
+ * for a player in red.
+ *
+ * The power arm's `else` is not the blank by omission: 0x800356E0 reads the
+ * rect table's byte 0, i.e. rect 0, explicitly. So the power state with the
+ * shield bit down — reachable only through Q2_INV_POWER_SCREEN, which has no
+ * touch handler on this disc — draws nothing.
+ */
+u8 q2_sbar_armour_icon(u32 inv_flags, bool show_power)
+{
+    if (show_power)
+        return (inv_flags & Q2_INV_POWER_SHIELD) ? Q2_SBAR_ICON_POWER_SHIELD
+                                                 : Q2_SBAR_ICON_NONE;
+
+    if (inv_flags & Q2_INV_ARMOUR_BODY)   return Q2_SBAR_ICON_ARMOUR_BODY;
+    if (inv_flags & Q2_INV_ARMOUR_COMBAT) return Q2_SBAR_ICON_ARMOUR_COMBAT;
+    if (inv_flags & Q2_INV_ARMOUR_JACKET) return Q2_SBAR_ICON_ARMOUR_JACKET;
+    return Q2_SBAR_ICON_NONE;
+}
+
+void q2_statusbar_armour_state(q2_statusbar *b, u32 inv_flags)
+{
+    const u32 power = Q2_INV_POWER_SHIELD | Q2_INV_POWER_SCREEN;
+
+    if (!b)
+        return;
+
+    /*
+     * 0x80035594 / 0x8003559C: no cells, no power state. This is the FIRST
+     * test after the class-bit clear, so an empty shield falls back to the
+     * vest rather than showing an empty power readout.
+     */
+    if (b->cells == 0) {
+        b->showing_power = false;
+    }
+    else if (inv_flags & Q2_INV_ARMOUR_MASK) {
+        /*
+         * Both held: alternate. 0x800355C8 compares the level clock against
+         * the deadline at client+192 and, when it has passed, flips
+         * client+88 and rewrites the deadline to clock + 300 — one second.
+         *
+         * `(s32)(ticks - deadline) > 0` rather than `ticks > deadline` so a
+         * clock that wraps does not park the toggle for two billion ticks.
+         */
+        if ((inv_flags & power) &&
+            (s32)(b->ticks - b->power_toggle_at) > 0) {
+            b->showing_power   = !b->showing_power;
+            b->power_toggle_at = b->ticks + Q2_SBAR_POWER_ALTERNATE;
+        }
+    }
+    else if (inv_flags & power) {
+        /* 0x80035618: a power item and no armour class pins the power arm. */
+        b->showing_power = true;
+    }
+
+    b->armour_icon = q2_sbar_armour_icon(inv_flags, b->showing_power);
+}
+
+/* ------------------------------------------------------------------------- */
 /* One cell of the sheet, as the emitter at 0x80033320 draws it: a POLY_GT4    */
 /* whose four corners carry the same colour.                                  */
 /* ------------------------------------------------------------------------- */
@@ -395,11 +468,27 @@ u32 q2_statusbar_build_ot(const q2_statusbar *b, u16 tpage, u16 clut,
     /*
      * ARMOUR AT ZERO DRAWS NOTHING AT ALL — not a zero, not a blank icon.
      *
-     * `0x80035594` loads the armour halfword and branches straight to
+     * CORRECTION to the three addresses this note used to cite. It said
+     * "`0x80035594` loads the armour halfword and branches straight to
      * `0x80035630`, which zeroes the sub-draw's own live flag; the test at
-     * `0x80035634` then skips the entire body. So an unarmoured player has no
-     * third counter, which is what retail capture shows at a level start and
-     * what the port used to contradict by parking a "0" there.
+     * `0x80035634` then skips the entire body". All three clauses are wrong,
+     * and the conclusion was right for a different reason:
+     *
+     *   0x80035570  lh   v0, 78(a0)    the armour halfword is HERE
+     *   0x80035594  lhu  v0, 116(a0)   0x80035594 is the CELLS count
+     *   0x80035630  sw   zero, 88(a0)  clears the POWER-STATE flag, on cells=0
+     *   0x80035634  beq  v0, zero, 0x80035764   branches INTO the regular arm,
+     *                                           it does not skip the body
+     *   0x80035994  beq  a0, zero, 0x800359B0   THIS is what skips the draw
+     *
+     * So: the regular arm computes normally and then declines to call the
+     * counter emitter when armour is zero. Which is the behaviour below, and
+     * is what retail capture shows at a level start — the port used to
+     * contradict it by parking a "0" there.
+     *
+     * The POWER arm has no such guard: 0x80035754 loads the cells count and
+     * jumps straight to the shared draw at 0x800359A8, so a power item with
+     * cells showing reads out even at zero armour.
      *
      * The ammo counter is NOT known to do the same. Its sub-draw has no such
      * early-out — the only zero test in it collapses the ICON to the 1x1 blank
@@ -408,7 +497,11 @@ u32 q2_statusbar_build_ot(const q2_statusbar *b, u16 tpage, u16 clut,
      * not been found, so nothing is done about it here rather than guessing at
      * a threshold; it is openquestions material, not a fix.
      */
-    if (b->armour > 0)
+    if (b->showing_power)
+        n += emit_counter(b, tpage, clut, ot, bucket, origin_x, origin_y,
+                          Q2_SBAR_ARMOUR, b->cells, b->armour_icon,
+                          Q2_SBAR_LOW_AMMO, false, true);
+    else if (b->armour > 0)
         n += emit_counter(b, tpage, clut, ot, bucket, origin_x, origin_y,
                           Q2_SBAR_ARMOUR, b->armour, b->armour_icon,
                           Q2_SBAR_LOW_AMMO, false, true);

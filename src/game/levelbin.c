@@ -696,3 +696,102 @@ u32 q2_levelbin_credits(const u8 *module, u32 size,
 
     return n;
 }
+
+/* ------------------------------------------------------------------------- */
+/* The title screen's scene — see the derivation in levelbin.h                */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Does the module materialise `addr` with a `lui`/`addiu` pair?
+ *
+ * The two halves are almost never adjacent — the scheduler fills the load
+ * delay — so this is the same bounded look-back `q2_levelbin_misevents` uses
+ * for its own constants: find the `addiu`, then walk up to eight instructions
+ * back for a `lui` into the register it reads.
+ *
+ * A `lui` whose low half is negative carries a borrow, which is why the sum is
+ * taken over sign-extended halves rather than concatenated.
+ */
+static bool module_materialises(const u8 *module, u32 size, u32 addr)
+{
+    u32 i;
+
+    for (i = 0; i + 4 <= size; i += 4) {
+        u32 w = q2_rd_u32(module + i);
+        u32 rs, j;
+        s32 lo;
+
+        if ((w >> 26) != 0x09)                 /* addiu rt, rs, imm */
+            continue;
+        rs = (w >> 21) & 0x1F;
+        lo = (s32)(s16)(u16)(w & 0xFFFF);
+
+        for (j = 4; j <= 32 && j <= i; j += 4) {
+            u32 p = q2_rd_u32(module + i - j);
+
+            if ((p >> 26) != 0x0F)             /* lui rt, imm */
+                continue;
+            if (((p >> 16) & 0x1F) != rs)
+                continue;
+            if ((u32)(((p & 0xFFFF) << 16) + lo) == addr)
+                return true;
+            break;
+        }
+    }
+    return false;
+}
+
+bool q2_levelbin_scene(const u8 *module, u32 size, u32 load_base,
+                       q2_lb_scene *out)
+{
+    u32 off;
+
+    if (!out)
+        return false;
+    memset(out, 0, sizeof(*out));
+    if (!module || size < 8)
+        return false;
+
+    for (off = 0; off + 8 <= size; off += 4) {
+        u32 run = 0, at;
+
+        for (at = off; at + 4 <= size; at += 4) {
+            u32 w = q2_rd_u32(module + at);
+
+            if (w == 0xFFFFFFFFu)
+                break;
+            /*
+             * The spawner reads the id with `lh`, so a word is only an id when
+             * its upper half is clear as well — which is what stops a run of
+             * relocated pointers or small negative constants reading as a
+             * short list of low ids.
+             */
+            if (w >= Q2_ITEM_COUNT)
+                break;
+            if (++run > Q2_LB_SCENE_MAX)
+                break;
+        }
+
+        /*
+         * Two independent things, as `q2_levelbin_menu_pages` needs two: a
+         * terminated run of plausible ids, and an address the module actually
+         * names. QFRONT has exactly one such list; a module with none — every
+         * other map's — finds nothing rather than the first pair of small
+         * words that happens to sit next to a -1.
+         */
+        if (run < 2 || run > Q2_LB_SCENE_MAX)
+            continue;
+        if (at + 4 > size || q2_rd_u32(module + at) != 0xFFFFFFFFu)
+            continue;
+        if (!module_materialises(module, size, load_base + off))
+            continue;
+
+        out->offset = off;
+        out->count  = run;
+        for (at = 0; at < run; at++)
+            out->id[at] = (u16)q2_rd_u32(module + off + at * 4);
+        return true;
+    }
+
+    return false;
+}

@@ -57,7 +57,7 @@
  *
  *     +0x00  s32 origin[3]        particle 0, absolute
  *     +0x0C  s16 offset[14][3]    particles 1..14, relative to particle 0
- *     +0x60  s16 accel[3]         added to vel each tick; ALWAYS ZERO at spawn
+ *     +0x60  s16 accel[3]         added to vel each tick; zeroed by the SPAWNER
  *     +0x66  s16 vel[3]           particle 0, absolute
  *     +0x6C  s16 rel_vel[14][3]   particles 1..14, relative to particle 0
  *     +0xC0  s16 size             world size, scaled by [0x800D5D46] at spawn
@@ -69,6 +69,37 @@
  *
  * The accel slot sits inside what would otherwise be a fifteenth offset, which
  * is exactly why the burst is capped at fifteen quads and not sixteen.
+ *
+ * "ALWAYS ZERO at spawn" used to be stated here as a property of the EFFECT.
+ * It is a property of the SPAWNER — 0x800301F0 and 0x8003040C memset it — and
+ * four call sites overwrite it the instant the spawner returns:
+ *
+ *     0x8003E0D4  sh v0(=4), 98(v1)     the spark
+ *     0x80048C1C  sh v0(=2), 98(v1)     the blood spray
+ *     0x80049088  sh v0(=2), 98(v1)     the laser end, first site
+ *     0x80049134  sh v0(=2), 98(v1)     the laser end, second site
+ *
+ * 98 = 0x62 = accel[1], and every one of the four is guarded on the spawner's
+ * return value being non-null. So sparks, blood and laser ends SAG; taking the
+ * comment at face value made them drift in a straight line forever.
+ *
+ * ---------------------------------------------------------------------------
+ * There are THREE spawners, not one
+ * ---------------------------------------------------------------------------
+ * This header used to say the engine has one group spawner. It has three, and
+ * they differ in their argument lists rather than in what they build:
+ *
+ *     0x80030284   8 call sites   velocities only; every burst starts at a point
+ *     0x8003004C   6 call sites   velocities AND a fifteen-entry OFFSET array,
+ *                                 stored as offset[i-1] = offs[i] >> 4, so the
+ *                                 burst starts already scattered
+ *     0x8002FDFC   6 call sites   a second array of stride 12, not 6 — a third
+ *                                 signature reading an interleaved record, and
+ *                                 a separate transcription job
+ *
+ * Only the first was modelled. The bullet's world impact is a 0x8003004C site
+ * (0x80048AC4) and its absence is why a bullet hitting a wall used to raise the
+ * PLAYER-STATE spark — ramp 0, pure blue — instead of a grey smoke puff.
  *
  * ---------------------------------------------------------------------------
  * Two ramps, alternating in threes
@@ -615,6 +646,53 @@ s32 q2_fx_group_spawn(q2_fx_world *w,
                       u32 life, s32 size, u8 area);
 
 /*
+ * The SECOND spawner, 0x8003004C — six call sites, none of which this port had.
+ *
+ * Identical to the above except that it also takes a fifteen-entry offset
+ * array and stores `offset[i-1] = offs[i] >> 4` for i in 1..count-1
+ * (0x80030174, `sll 16 / sra 20`). `offs[0]` is discarded, because particle 0
+ * IS the origin and has no offset slot.
+ *
+ * The practical difference is small and real: a burst raised through this
+ * spawner starts already scattered instead of at a point. At the bullet site
+ * the offsets are drawn with shift 7 and then shifted a further 4, so the
+ * pre-scatter is about +/-8 world units — a jitter, not a cloud.
+ */
+s32 q2_fx_group_spawn_offsets(q2_fx_world *w,
+                              const s32 origin[3],
+                              const s16 (*offs)[3], const s16 (*vel)[3],
+                              u32 count,
+                              const q2_fx_ramp *ramp0, const q2_fx_ramp *ramp1,
+                              u32 life, s32 size, u8 area);
+
+/* ------------------------------------------------------------------------- */
+/* The bullet's world impact — 0x800489D8, spawning through 0x8003004C        */
+/* ------------------------------------------------------------------------- */
+/*
+ * What a hitscan pellet leaves on a WALL. Reached from the bullet trace at
+ * 0x8004874C: 0x80048928 tests whether the sweep found an entity, 0x80048980
+ * takes the blood branch and 0x80048990 this one.
+ *
+ * It is NOT the spark. Q2_FX_SPARK's site (0x8003E0C0) lives in a function
+ * whose only caller in the entire executable is 0x8003D4C4, inside the
+ * player's per-frame state think — no weapon reaches it. Raising it for every
+ * bullet impact is what covered the screen in pure-blue additive discs, and it
+ * was the reported bug: ramp 0 is (64,64,255).
+ *
+ * These two ramps are grey (record 6, 64/64/64, B+F) and dark red (record 4,
+ * 64/32/32, B-F), striped three quads at a time — a smoke puff.
+ */
+#define Q2_FX_BULLET_PUFF_COUNT      15
+#define Q2_FX_BULLET_PUFF_LIFE       32
+#define Q2_FX_BULLET_PUFF_SIZE       4096
+#define Q2_FX_BULLET_PUFF_RAMP0      6    /* 0x8009BD78 */
+#define Q2_FX_BULLET_PUFF_RAMP1      4    /* 0x8009BC70 */
+#define Q2_FX_BULLET_PUFF_OFFS_SHIFT 7    /* sra 7  at 0x80048A0C onward */
+#define Q2_FX_BULLET_PUFF_VEL_SHIFT  11   /* sra 11 at the same site     */
+
+s32 q2_fx_bullet_puff(q2_fx_world *w, q2_rng *rng, const s32 at[3], u8 area);
+
+/*
  * One tick of the integrator, exactly as the tail of 0x800304A8 runs it:
  *
  *     life--
@@ -920,6 +998,37 @@ typedef struct q2_fx_preset {
     u8   spread_shift;
     u8   ramp0;          /* ARRAY index into the ramp table            */
     u8   ramp1;
+
+    /*
+     * HOW MANY GROUPS THE SITE SPAWNS.
+     *
+     * Six of the eight sites of 0x80030284 sit inside an outer loop that
+     * re-draws all fifteen velocities and spawns again, and this table used to
+     * have no column for it — so the port emitted between a half and a quarter
+     * of the original's burst density, and every seeded replay diverged after
+     * the first burst because each repeat consumes 45 more `rand()` draws.
+     *
+     *     0x800486F4  slti v0, s7, 2   explosion  2
+     *     0x80048C24  slti v0, s2, 2   blood      2
+     *     0x8004BDD0  slti v0, s3, 3   BFG        3
+     *     0x8003E0DC  slti v0, s2, 4   spark      4
+     *     0x800596B0                   gib        1 (falls through, no loop)
+     *
+     * LASER_END is 1 here on purpose even though its two sites (0x80049090 and
+     * 0x8004913C) both loop four times: q2_fx_laser spawns its four groups
+     * itself and never goes through q2_fx_spawn. Putting 4 in this row would be
+     * dead today and a sixteen-group bug the moment anyone routed the laser
+     * through the generic path.
+     */
+    u8   repeat;
+
+    /*
+     * The Y ACCELERATION the site writes into the group after the spawner
+     * returns — `sh v0, 98(v1)`, accel[1]. Zero for the sites that do not.
+     * See the record layout at the top of this header.
+     */
+    s16  accel_y;
+
     u32  site;           /* the spawn site this was read out of        */
 } q2_fx_preset;
 

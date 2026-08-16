@@ -234,18 +234,36 @@ static void test_icon_vocabulary(void)
     /*
      * The icons the bar names for itself are RECT INDICES, not effect ids.
      *
-     * These are the two hard-coded offsets in the sub-draws divided by the
-     * five-byte record: 170/5 at 0x80035190 and 150/5 at 0x8003565C. Pinned
-     * here because the reading that shipped before treated them as effect ids
-     * and the mistake was invisible — scanning for effect 34 finds rect 30,
-     * which is a real icon, just the armour's rather than health's.
+     * These are the hard-coded offsets in the sub-draws divided by the
+     * five-byte record. Pinned here because the reading that shipped before
+     * treated them as effect ids and the mistake was invisible — scanning for
+     * effect 34 finds rect 30, which is a real icon, just the wrong one.
+     *
+     * ONLY HEALTH IS UNCONDITIONAL. The armour field is a five-way select on
+     * the flag word (0x80035554); this test used to pin the power shield's
+     * rect as "the armour icon", which is the misreading that put a power
+     * shield on the bar for every armoured player, and pinning it is what let
+     * 28 of 28 tests pass while the bug shipped.
      */
     CHECK(Q2_SBAR_ICON_HEALTH == 170 / Q2_ICON_RECORD,
           "the health icon is rect 34, the offset 170 divided by the record");
-    CHECK(Q2_SBAR_ICON_ARMOUR == 150 / Q2_ICON_RECORD,
-          "the armour icon is rect 30, from offset 150");
-    CHECK(Q2_SBAR_ICON_HEALTH != Q2_SBAR_ICON_ARMOUR,
-          "health and armour are different icons");
+    CHECK(Q2_SBAR_ICON_ARMOUR_BODY == 130 / Q2_ICON_RECORD,
+          "body armour is rect 26, from offset 130 (flag 0x4000)");
+    CHECK(Q2_SBAR_ICON_ARMOUR_COMBAT == 135 / Q2_ICON_RECORD,
+          "combat armour is rect 27, from offset 135 (flag 0x2000)");
+    CHECK(Q2_SBAR_ICON_ARMOUR_JACKET == 140 / Q2_ICON_RECORD,
+          "jacket armour is rect 28, from offset 140 (flag 0x1000)");
+    CHECK(Q2_SBAR_ICON_POWER_SHIELD == 150 / Q2_ICON_RECORD,
+          "the power shield is rect 30, from offset 150 (flag 0x8000)");
+
+    /* All five distinct: an off-by-one in the offsets above would otherwise
+     * collide two fields onto one cell and still pass. */
+    CHECK(Q2_SBAR_ICON_HEALTH != Q2_SBAR_ICON_ARMOUR_BODY &&
+          Q2_SBAR_ICON_ARMOUR_BODY != Q2_SBAR_ICON_ARMOUR_COMBAT &&
+          Q2_SBAR_ICON_ARMOUR_COMBAT != Q2_SBAR_ICON_ARMOUR_JACKET &&
+          Q2_SBAR_ICON_ARMOUR_JACKET != Q2_SBAR_ICON_POWER_SHIELD &&
+          Q2_SBAR_ICON_POWER_SHIELD != Q2_SBAR_ICON_HEALTH,
+          "the five icons the bar names are five different cells");
 
     /* And the three palettes the bar selects between are three distinct
      * entries of the built-in bank — 8 cyan, 38 blue, 7 red. */
@@ -297,6 +315,112 @@ static void test_split_screen_sizes(void)
           "no weapon draws the blank");
 }
 
+/* ------------------------------------------------------------------------- */
+/* The armour field's five-way select and the state machine in front of it    */
+/* ------------------------------------------------------------------------- */
+static void test_armour_icon_select(void)
+{
+    q2_statusbar b;
+
+    /* The select alone — 0x8003564C / 0x8003576C / 0x80035800 / 0x80035894. */
+    CHECK(q2_sbar_armour_icon(Q2_INV_ARMOUR_BODY, false) ==
+          Q2_SBAR_ICON_ARMOUR_BODY, "body armour draws rect 26");
+    CHECK(q2_sbar_armour_icon(Q2_INV_ARMOUR_COMBAT, false) ==
+          Q2_SBAR_ICON_ARMOUR_COMBAT, "combat armour draws rect 27");
+    CHECK(q2_sbar_armour_icon(Q2_INV_ARMOUR_JACKET, false) ==
+          Q2_SBAR_ICON_ARMOUR_JACKET, "jacket armour draws rect 28");
+    CHECK(q2_sbar_armour_icon(0, false) == Q2_SBAR_ICON_NONE,
+          "no armour draws the blank");
+    CHECK(q2_sbar_armour_icon(Q2_INV_POWER_SHIELD, true) ==
+          Q2_SBAR_ICON_POWER_SHIELD, "the power state draws rect 30");
+
+    /*
+     * BODY BEFORE COMBAT BEFORE JACKET. The pickup handlers only raise the bit
+     * for their own class when no stronger bit is up, so a player who has worn
+     * body armour keeps 0x4000 while wearing combat — and testing the weak bit
+     * first would draw the grey vest for a player in red.
+     */
+    CHECK(q2_sbar_armour_icon(Q2_INV_ARMOUR_BODY | Q2_INV_ARMOUR_JACKET,
+                              false) == Q2_SBAR_ICON_ARMOUR_BODY,
+          "body wins over jacket when both bits are up");
+
+    /* The power shield does NOT displace the vest by itself: only the state
+     * machine's own flag selects the power arm (0x80035634). */
+    CHECK(q2_sbar_armour_icon(Q2_INV_POWER_SHIELD | Q2_INV_ARMOUR_COMBAT,
+                              false) == Q2_SBAR_ICON_ARMOUR_COMBAT,
+          "holding a shield while not in the power state still draws the vest");
+
+    /* --- the state machine, 0x80035594 onward ---------------------------- */
+    q2_statusbar_init(&b, NULL, 1);
+
+    /* No cells: the power arm cannot be entered at all (0x80035630). */
+    b.cells = 0;
+    b.ticks = 0;
+    q2_statusbar_armour_state(&b, Q2_INV_POWER_SHIELD | Q2_INV_ARMOUR_BODY);
+    CHECK(!b.showing_power && b.armour_icon == Q2_SBAR_ICON_ARMOUR_BODY,
+          "an empty shield falls back to the vest");
+
+    /* Cells and a power item but NO vest: pinned to the power arm. */
+    b.cells = 50;
+    q2_statusbar_armour_state(&b, Q2_INV_POWER_SHIELD);
+    CHECK(b.showing_power && b.armour_icon == Q2_SBAR_ICON_POWER_SHIELD,
+          "a shield with no vest pins the power readout");
+
+    /* Both: alternates, and only once the 300-tick deadline passes. */
+    b.showing_power   = false;
+    b.power_toggle_at = 0;
+    b.ticks           = 1;
+    q2_statusbar_armour_state(&b, Q2_INV_POWER_SHIELD | Q2_INV_ARMOUR_BODY);
+    CHECK(b.showing_power, "with both held the field flips to the shield");
+    b.ticks = 1 + Q2_SBAR_POWER_ALTERNATE - 1;
+    q2_statusbar_armour_state(&b, Q2_INV_POWER_SHIELD | Q2_INV_ARMOUR_BODY);
+    CHECK(b.showing_power, "and holds it for the whole 300 ticks");
+    b.ticks = 1 + Q2_SBAR_POWER_ALTERNATE + 1;
+    q2_statusbar_armour_state(&b, Q2_INV_POWER_SHIELD | Q2_INV_ARMOUR_BODY);
+    CHECK(!b.showing_power && b.armour_icon == Q2_SBAR_ICON_ARMOUR_BODY,
+          "then flips back to the vest");
+}
+
+/*
+ * The stale class bit. Body armour shot down to zero and then a shard picked
+ * up leaves the player in JACKET armour, and the bar must say so — 0x80035580
+ * clears the class bits every frame the armour reads zero.
+ */
+static void test_armour_class_upkeep(void)
+{
+    q2_inventory inv;
+
+    q2_inventory_init(&inv);
+    inv.flags  |= Q2_INV_ARMOUR_BODY;
+    inv.armour  = 40;
+
+    q2_inventory_armour_upkeep(&inv);
+    CHECK((inv.flags & Q2_INV_ARMOUR_BODY) != 0,
+          "armour still worn keeps its class bit");
+
+    inv.armour = 0;
+    q2_inventory_armour_upkeep(&inv);
+    CHECK((inv.flags & Q2_INV_ARMOUR_MASK) == 0,
+          "armour driven to zero drops every class bit");
+
+    /* And nothing else in the word: 0x00078FFF keeps the keys and the three
+     * bits above the classes. */
+    q2_inventory_init(&inv);
+    inv.flags  = Q2_KEY_BLUE | Q2_INV_ARMOUR_BODY | Q2_INV_POWER_SHIELD |
+                 Q2_INV_MEGA_HEALTH;
+    inv.armour = 0;
+    q2_inventory_armour_upkeep(&inv);
+    CHECK(inv.flags == (u32)(Q2_KEY_BLUE | Q2_INV_POWER_SHIELD |
+                             Q2_INV_MEGA_HEALTH),
+          "the clear takes the classes and nothing else");
+
+    /* The selector then picks the shard's jacket rather than the dead body
+     * bit — which is the wrong-icon bug this upkeep exists to prevent. */
+    inv.flags |= Q2_INV_ARMOUR_JACKET;
+    CHECK(q2_sbar_armour_icon(inv.flags, false) == Q2_SBAR_ICON_ARMOUR_JACKET,
+          "a shard after losing body armour draws the grey vest");
+}
+
 int main(void)
 {
     test_field_groups();
@@ -308,6 +432,8 @@ int main(void)
     test_icon_vocabulary();
     test_digits_of();
     test_split_screen_sizes();
+    test_armour_icon_select();
+    test_armour_class_upkeep();
 
     if (g_fail) {
         printf("\n%d status-bar check%s failed\n", g_fail,

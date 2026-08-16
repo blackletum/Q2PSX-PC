@@ -69,14 +69,23 @@
  * WHAT THE CODE DOES. All three status-bar sub-draws index. None scans:
  *
  *     80035190  lbu  v0, 170(t0)     t0 = 0x8009C478   health, ALWAYS 170
- *     8003565C  lbu  v0, 150(a0)     a0 = 0x8009C478   armour, ALWAYS 150
+ *     8003565C  lbu  v0, 150(a0)     a0 = 0x8009C478   the POWER SHIELD arm
  *     80035374  sll  v0, a0, 2       a0 = ammoIcon[weapon]
  *     80035378  addu v0, v0, a0                        ammo, a0 * 5
  *     80035380  addu v1, a0, t0                        &rect[a0]
  *
- * A five-byte stride on a table of five-byte records, and two hard-coded
- * multiples of five for the two fixed icons. There is no compare instruction
- * against the fifth byte anywhere in any of them.
+ * A five-byte stride on a table of five-byte records, and hard-coded multiples
+ * of five for the fixed icons. There is no compare instruction against the
+ * fifth byte anywhere in any of them.
+ *
+ * "ALWAYS" holds for health and NOT for armour, which is a second correction
+ * layered on this one. 0x8003565C is one of five arms of a select on the
+ * inventory's flag word, and 150 is only the arm the POWER SHIELD bit takes;
+ * the other four read 130, 135, 140 and 0 for body, combat, jacket and none.
+ * See the block in statusbar.h. Reading it as unconditional put a power shield
+ * on the bar for every armoured player — the same error as the one below in a
+ * different field: an instruction correctly read, and a premise about its
+ * reachability never tested.
  *
  * WHAT THE FIFTH BYTE IS. The sub-draws store it into byte +8 of a field
  * record (0x80035210, 0x8003540C), and byte +8 is the field's PALETTE index
@@ -94,8 +103,8 @@
  *
  * WHAT IT COST. `q2_sbar_icon_field` asked for effect 34 to get health's
  * cross. The scan returns rect 30 — whose fifth byte is 34 — and rect 30 is
- * the ARMOUR icon, so the health field drew an armour box for as long as the
- * bar has existed. It looked like a mis-picked icon rather than a mis-read
+ * the POWER SHIELD, so the health field drew a red-lamp device for as long as
+ * the bar has existed. It looked like a mis-picked icon rather than a mis-read
  * table because the wrong answer was still a real icon.
  *
  * `q2_icon_rect_for_id` is kept: it is a useful lookup for tooling that wants

@@ -169,6 +169,56 @@ static void test_fire_denied(void)
     CHECK(!vw.fire_latch, "a denied shot should not latch");
 }
 
+/*
+ * The port's own third outcome: the trigger is DOWN, the weapon is fed, and no
+ * shot happened — the sim's refire gate had not expired, or the frame ran no
+ * tick at all. The machine must be told Q2_VW_FIRE_NONE and must keep idling.
+ *
+ * This is the case a caller reaches only by consuming an EVENT. The client used
+ * to gate its report on `ticks`, which is clamped to a minimum of 1 and is
+ * therefore always true, so it re-reported the last attempt's latched
+ * `last_shot` on every rendered frame and this arm was never taken: the fire
+ * clip restarted as fast as the latch could clear, at render rate rather than
+ * once per shot. `shot_serial` is what makes it an event; this is what the
+ * machine owes a caller that gets that right.
+ */
+static void test_fire_none_holds_the_clip(void)
+{
+    q2_viewweapon vw;
+    int i;
+
+    q2_vw_init(&vw, &g_tab, 1);
+    run_until(&vw, Q2_VM_IDLE, false, 100);
+
+    for (i = 0; i < 50; i++)
+        q2_vw_advance(&vw, 10, true, Q2_VW_FIRE_NONE);
+
+    CHECK(vw.state == Q2_VM_IDLE,
+          "a held trigger with no shot should stay idle, got %s",
+          q2_vm_state_name(vw.state));
+    CHECK(vw.fires_started == 0,
+          "a held trigger with no shot started %u fire clips",
+          vw.fires_started);
+
+    /* And the shot that DOES arrive still fires: staying idle must not have
+     * cost the machine the pass that takes it. */
+    q2_vw_advance(&vw, 10, true, Q2_VW_FIRED);
+    CHECK(vw.state == Q2_VM_FIRE, "the shot after the gate should fire, got %s",
+          q2_vm_state_name(vw.state));
+    CHECK(vw.fires_started == 1, "one shot should be one clip, got %u",
+          vw.fires_started);
+
+    /*
+     * One shot, ONE clip, however long the trigger stays down afterwards with
+     * nothing more to report — which is the whole shape of the defect.
+     */
+    for (i = 0; i < 200; i++)
+        q2_vw_advance(&vw, 10, true, Q2_VW_FIRE_NONE);
+
+    CHECK(vw.fires_started == 1,
+          "holding after one shot started %u clips, not 1", vw.fires_started);
+}
+
 static void test_switch(void)
 {
     q2_viewweapon vw;
@@ -515,6 +565,7 @@ int main(void)
     test_raise_to_idle();
     test_fire();
     test_fire_denied();
+    test_fire_none_holds_the_clip();
     test_switch();
     test_switch_cannot_cancel_a_shot();
     test_long_frame_consumes_keys();

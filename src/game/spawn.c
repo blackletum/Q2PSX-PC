@@ -1,5 +1,7 @@
 #include "spawn.h"
 
+#include "worldscale.h"   /* Q2_EYE_BASE: the record is the feet */
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -91,7 +93,28 @@ q2_result q2_spawn_from_population(q2_monster_set *out, const q2_population *pop
 
             m->group  = (u16)gi;
             m->pos[0] = rec.x;
-            m->pos[1] = rec.y;
+            /*
+             * THE RECORD'S Y IS THE FEET. `m->pos` is the entity ORIGIN, which
+             * is Q2_EYE_BASE above them.
+             *
+             * This is the shared placement convention, not an item quirk:
+             * 0x80050FA0 is called by the item spawner, the save restore and
+             * three others, and at 0x80051068 it does `addiu v0, v0, -286` to
+             * the record's Y before writing the entity. sim.c already lifts the
+             * player (`q2_sim_origin_y`) and item.c already lifts an item
+             * (`- Q2_ITEM_SPAWN_LIFT`); creatures were the one entity class
+             * that never got it.
+             *
+             * What it cost: everything downstream — the movement hull, the step
+             * trace, M_CheckBottom's 502, the sight line — is defined in the
+             * origin frame, so a creature was being reasoned about 286 units
+             * below where it was. Fed the eroded hull, 214 of 214 spawns
+             * resolved to no cell; lifted, 21 of 22 on four maps are inside it.
+             * That measurement is why PrimaryColl was wired in as the movement
+             * hull in the first place (openquestions #48) — a sound experiment
+             * on a wrong premise.
+             */
+            m->pos[1] = rec.y - Q2_EYE_BASE;
             m->pos[2] = rec.z;
 
             /* The stored angle is INFERRED to be on the 4096-step circle: the

@@ -201,6 +201,7 @@ static void usage(void)
     puts("  levdisasm <disc> <map> [addr] [n]  disassemble a relocated LevelBin module");
     puts("  modstrings <disc> <map> [crea]  the text a relocated module carries");
     puts("  modxrefs <disc> <map> <addr> [crea]  references to an address in one");
+    puts("  modbytes <disc> <map> <addr> [n] [crea]  hex dump a module's image");
     puts("  bytes   <disc> <addr> [n]   hex dump executable memory by address");
     puts("  find    <disc> <str|0xhex>  locate a string or byte pattern in the image");
     puts("  access  <disc> <off> [insn] every instruction touching a record offset");
@@ -1149,7 +1150,7 @@ static int cmd_polyflags(disc *d)
         }
 
         if (q2_events_parse_zone(&ev, &zf) == Q2_OK &&
-            q2_movers_build(&movers, &ev) == Q2_OK) {
+            q2_movers_build(&movers, &ev, NULL) == Q2_OK) {
             u32 m, k;
             for (m = 0; m < movers.count; m++) {
                 for (k = 0; k < movers.movers[m].part_count; k++) {
@@ -2134,7 +2135,7 @@ static int cmd_bmodel(disc *d, const char *map, int zone_index, int which,
     }
 
     if (q2_events_parse_zone(&ev, &zone.zone) != Q2_OK ||
-        q2_movers_build(&movers, &ev) != Q2_OK) {
+        q2_movers_build(&movers, &ev, NULL) != Q2_OK) {
         fprintf(stderr, "no movers in %s zone %d\n", map, zone_index);
         q2_world_free_zone(&zone);
         return 1;
@@ -4715,7 +4716,7 @@ static int cmd_events(disc *d)
                  * constructed. */
                 {
                     q2_mover_set ms;
-                    if (q2_movers_build(&ms, &ev) == Q2_OK) {
+                    if (q2_movers_build(&ms, &ev, NULL) == Q2_OK) {
                         u32 mi, t;
                         movers_built += ms.count;
                         for (mi = 0; mi < ms.count; mi++) {
@@ -5721,6 +5722,15 @@ int main(int argc, char **argv)
         } else {
             bool lev = (argc < 6) || strcmp(argv[5], "crea") != 0;
             rc = cmd_modxrefs(d, argv[3], argv[4], lev);
+        }
+    } else if (strcmp(cmd, "modbytes") == 0) {
+        if (argc < 5) {
+            fprintf(stderr, "modbytes needs a map name and an address\n");
+            rc = 1;
+        } else {
+            int n = (argc >= 6) ? atoi(argv[5]) : 0;
+            bool lev = (argc < 7) || strcmp(argv[6], "crea") != 0;
+            rc = cmd_modbytes(d, argv[3], argv[4], n, lev);
         }
     } else if (strcmp(cmd, "funcs") == 0) {
         rc = cmd_funcs(d, (argc >= 4) ? argv[3] : NULL);

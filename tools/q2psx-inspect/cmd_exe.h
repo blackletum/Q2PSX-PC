@@ -18,5 +18,11 @@ int cmd_moddisasm(const disc *d, const char *map, const char *addr, int count,
 int cmd_levdisasm(const disc *d, const char *map, const char *addr, int count);
 int cmd_modstrings(const disc *d, const char *map, bool level);
 int cmd_modxrefs(const disc *d, const char *map, const char *addr, bool level);
+/* Hex dump a relocated module's image by address. `bytes` reads the executable
+ * and so cannot see a module at all; a module's data — its object tables, its
+ * static records — was only reachable by disassembling the code that walked
+ * it. This reads it directly. */
+int cmd_modbytes(const disc *d, const char *map, const char *addr, int count,
+                 bool level);
 
 #endif /* Q2PSX_INSPECT_CMD_EXE_H */

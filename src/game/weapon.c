@@ -197,6 +197,22 @@ int q2_weapon_cycle(const q2_inventory *inv, int current_id, int dir)
     return Q2_WID_NONE;
 }
 
+void q2_weapon_refund(q2_inventory *inv, int weapon_id)
+{
+    const q2_weapon_tables *tab = q2_weapon_tables_builtin();
+    u32 need;
+    s8  type;
+
+    if (!inv || weapon_id <= 0 || weapon_id >= Q2_WEAPON_COUNT)
+        return;
+
+    need = tab->ammo_per_shot[weapon_id];
+    type = tab->ammo_type[weapon_id];
+
+    if (need > 0 && type >= 0 && type < Q2_AMMO_COUNT)
+        inv->ammo[type] = (s16)(inv->ammo[type] + (s16)need);
+}
+
 int q2_weapon_autoselect(const q2_inventory *inv)
 {
     const q2_weapon_tables *t = q2_weapon_tables_builtin();
@@ -326,6 +342,19 @@ q2_fire_result_v2 q2_weapon_fire(q2_inventory *inv, q2_rng *rng,
         if (type < 0 || type >= Q2_AMMO_COUNT || inv->ammo[type] < (s16)need) {
             res.dry   = true;
             res.sound = Q2_WSND_NO_AMMO;
+            /*
+             * AND THE DRY PATH TAKES THE GATE TOO, which it did not: it
+             * returned before `res.next_fire` was advanced, so an empty weapon
+             * re-ran this branch on every single tick. That was invisible for
+             * as long as nothing consumed `res.sound`; the moment the no-ammo
+             * click has a speaker it becomes a buzz at tick rate.
+             *
+             * The console cannot show us a figure for this — its idle state
+             * only asks the fire function once per fire pass, so it has no
+             * dry deadline to read. Q2_WEAPON_DRY_REFIRE is therefore the
+             * port's own, and marked as such.
+             */
+            res.next_fire = now + Q2_WEAPON_DRY_REFIRE;
             return res;
         }
         inv->ammo[type] = (s16)(inv->ammo[type] - need);

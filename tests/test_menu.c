@@ -11,6 +11,7 @@
 #include "memcard.h"
 #include "menu.h"
 #include "menufont.h"
+#include "menumouse.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -831,6 +832,227 @@ static void test_mcard_names(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/* The pointer — menumouse.c, which is the inverse of menudraw.c              */
+/* ------------------------------------------------------------------------- */
+
+static int last_selectable_index(const q2_menu *m)
+{
+    int i, found = -1;
+
+    for (i = (int)m->page->first; i < (int)m->page->count; i++)
+        if (q2_menu_item_selectable(m, i))
+            found = i;
+    return found;
+}
+
+/* The centre of an item's row, which is where a pointer aiming at it lands. */
+static void item_centre(const q2_menu *m, int index, int *x, int *y)
+{
+    int x0, y0, x1, y1;
+
+    if (!q2_menu_item_rect(m, index, &x0, &y0, &x1, &y1)) {
+        *x = *y = -10000;
+        return;
+    }
+    *x = (x0 + x1) / 2;
+    *y = (y0 + y1) / 2;
+}
+
+static void test_hit_rows(void)
+{
+    q2_menu_settings s;
+    q2_menu m;
+    q2_menu_hit hit;
+    int i, x, y;
+
+    q2_menu_settings_defaults(&s);
+    open_menu(&m, &s, false);   /* the single-player pause page */
+
+    /* Every navigable row can be hit at its own centre, and reports itself. */
+    for (i = (int)m.page->first; i < (int)m.page->count; i++) {
+        if (!q2_menu_item_selectable(&m, i))
+            continue;
+        item_centre(&m, i, &x, &y);
+        CHECK(q2_menu_hit_test(&m, x, y, &hit) && hit.index == i,
+              "row %d hits itself (got %d)", i, hit.index);
+    }
+
+    /* The rows are 24 apart with an 11-pixel face, so a point well above the
+     * first is on nothing at all. */
+    item_centre(&m, (int)m.page->first, &x, &y);
+    CHECK(!q2_menu_hit_test(&m, x, y - 40, &hit) && hit.index == -1,
+          "the gap above the first row hits nothing");
+
+    /* And so is a point far off to the side of a centred label. */
+    CHECK(!q2_menu_hit_test(&m, x - 240, y, &hit),
+          "beside the label hits nothing");
+}
+
+static void test_hit_skips_the_unreachable(void)
+{
+    q2_menu_settings s;
+    q2_menu m;
+    q2_menu_hit hit;
+    int x, y;
+
+    q2_menu_settings_defaults(&s);
+    q2_menu_init(&m, &s, Q2_MENU_SCREEN_H);
+    q2_menu_open(&m);
+    q2_menu_goto(&m, Q2_PAGE_RESTART_CONFIRM);
+    q2_menu_advance(&m, 0);
+
+    /* Item 0 is the question, which sits above the navigable group. The d-pad
+     * cannot reach it and neither may the pointer. */
+    item_centre(&m, 0, &x, &y);
+    CHECK(!q2_menu_hit_test(&m, x, y, &hit),
+          "the static question is not clickable");
+
+    /* Both answers are. */
+    item_centre(&m, 1, &x, &y);
+    CHECK(q2_menu_hit_test(&m, x, y, &hit) && hit.index == 1, "NO is clickable");
+    item_centre(&m, 2, &x, &y);
+    CHECK(q2_menu_hit_test(&m, x, y, &hit) && hit.index == 2, "YES is clickable");
+
+    /* The death page greys its middle row when there are no resupplies, which
+     * takes it out of the navigation — and out of reach of the pointer. */
+    q2_menu_set_resupplies(&m, 0);
+    q2_menu_goto(&m, Q2_PAGE_DEATH);
+    item_centre(&m, 1, &x, &y);
+    CHECK(!q2_menu_hit_test(&m, x, y, &hit), "a greyed row is not clickable");
+}
+
+static void test_hit_toggle_words(void)
+{
+    q2_menu_settings s;
+    q2_menu m;
+    q2_menu_hit hit;
+    int x0, y0, x1, y1, y;
+
+    q2_menu_settings_defaults(&s);
+    q2_menu_init(&m, &s, Q2_MENU_SCREEN_H);
+    q2_menu_open(&m);
+    q2_menu_goto(&m, Q2_PAGE_SOUND);
+    q2_menu_advance(&m, 0);
+
+    /* STEREO is item 2: "STEREO ON OFF" when the cursor is on it. */
+    CHECK(q2_menu_item_rect(&m, 2, &x0, &y0, &x1, &y1), "the toggle has a rect");
+    y = (y0 + y1) / 2;
+
+    /* The row is hit at its widest whether or not the cursor is on it, which is
+     * what stops the box growing as the pointer enters. */
+    CHECK(q2_menu_hit_test(&m, x1 - 1, y, &hit) &&
+          hit.index == 2 && hit.part == Q2_MENU_HIT_OFF,
+          "the right end of the row is OFF (part %d)", (int)hit.part);
+
+    /* Six columns back from the end is ON; the face advances 16 a column. */
+    CHECK(q2_menu_hit_test(&m, x1 - 1 - 5 * 16, y, &hit) &&
+          hit.index == 2 && hit.part == Q2_MENU_HIT_ON,
+          "five columns back is ON (part %d)", (int)hit.part);
+
+    /* And the label itself is neither. */
+    CHECK(q2_menu_hit_test(&m, x0 + 8, y, &hit) &&
+          hit.index == 2 && hit.part == Q2_MENU_HIT_LABEL,
+          "the label is the label (part %d)", (int)hit.part);
+}
+
+static void test_hit_slider(void)
+{
+    q2_menu_settings s;
+    q2_menu m;
+    q2_menu_hit hit;
+    int x0, y0, x1, y1, y, v;
+
+    q2_menu_settings_defaults(&s);
+    q2_menu_init(&m, &s, Q2_MENU_SCREEN_H);
+    q2_menu_open(&m);
+    q2_menu_goto(&m, Q2_PAGE_SOUND);
+    q2_menu_advance(&m, 0);
+
+    /* MUSIC is item 0, and its rect runs out over the 133-pixel track. */
+    CHECK(q2_menu_item_rect(&m, 0, &x0, &y0, &x1, &y1), "the slider has a rect");
+    y = (y0 + y1) / 2;
+
+    CHECK(q2_menu_hit_test(&m, x1, y, &hit) &&
+          hit.index == 0 && hit.part == Q2_MENU_HIT_SLIDER,
+          "the track is the slider (part %d)", (int)hit.part);
+
+    /* 0x8001BD28 fills to bar_x + value + 3, so the last pixel of the 133-wide
+     * track is past the maximum and pins to it. */
+    CHECK(hit.value == Q2_MENU_SLIDER_MAX, "the far end is %d, want %d",
+          hit.value, Q2_MENU_SLIDER_MAX);
+
+    /* And the mapping in between is that formula read backwards: the track
+     * starts at x1 - 132, so 50 units along it is 53 pixels in. */
+    CHECK(q2_menu_hit_test(&m, x1 - 132 + 53, y, &hit) && hit.value == 50,
+          "53 pixels along the track is 50 (got %d)", hit.value);
+
+    CHECK(q2_menu_slider_at(&m, 0, -10000, &v) && v == 0,
+          "a drag off the left pins to 0 (got %d)", v);
+    CHECK(q2_menu_slider_at(&m, 0, 10000, &v) && v == Q2_MENU_SLIDER_MAX,
+          "a drag off the right pins to the max (got %d)", v);
+
+    /* STEREO is not a slider, and saying so is how the client knows a drag
+     * belongs to something else. */
+    CHECK(!q2_menu_slider_at(&m, 2, 0, &v), "a toggle is not a slider");
+
+    /* And setting one goes through the same clamp. */
+    CHECK(q2_menu_set_slider(&m, 0, 200) &&
+          s.v[Q2_SET_MUSIC] == Q2_MENU_SLIDER_MAX,
+          "an over-range set clamps (got %d)", s.v[Q2_SET_MUSIC]);
+    CHECK(q2_menu_set_slider(&m, 0, -5) && s.v[Q2_SET_MUSIC] == 0,
+          "an under-range set clamps (got %d)", s.v[Q2_SET_MUSIC]);
+    CHECK(!q2_menu_set_slider(&m, 2, 10), "a toggle cannot be set as a slider");
+}
+
+static void test_hit_choice_halves(void)
+{
+    q2_menu_settings s;
+    q2_menu m;
+    q2_menu_hit hit;
+    int x0, y0, x1, y1, y;
+
+    q2_menu_settings_defaults(&s);
+    q2_menu_init(&m, &s, Q2_MENU_SCREEN_H);
+    q2_menu_open(&m);
+    q2_menu_goto(&m, Q2_PAGE_CONTROLLER);
+    q2_menu_advance(&m, 0);
+
+    CHECK(q2_menu_item_rect(&m, 0, &x0, &y0, &x1, &y1), "the choice has a rect");
+    y = (y0 + y1) / 2;
+
+    CHECK(q2_menu_hit_test(&m, x0 + 2, y, &hit) &&
+          hit.part == Q2_MENU_HIT_PREV, "the left half steps back");
+    CHECK(q2_menu_hit_test(&m, x1 - 2, y, &hit) &&
+          hit.part == Q2_MENU_HIT_NEXT, "the right half steps on");
+}
+
+static void test_point_at(void)
+{
+    q2_menu_settings s;
+    q2_menu m;
+    int last;
+
+    q2_menu_settings_defaults(&s);
+    open_menu(&m, &s, false);
+
+    last = last_selectable_index(&m);
+    CHECK(m.cursor != last, "the cursor does not start on the last row");
+
+    CHECK(q2_menu_point_at(&m, last) && m.cursor == last,
+          "pointing moves the cursor straight there");
+    CHECK(q2_menu_take_sound(&m) == Q2_MSND_MOVE,
+          "and it sounds like a cursor move");
+
+    /* Pointing at where it already is is not a move, and must not click. */
+    CHECK(!q2_menu_point_at(&m, last), "pointing at the current row does nothing");
+    CHECK(q2_menu_take_sound(&m) == Q2_MSND_NONE, "and makes no sound");
+
+    /* The static group above a page's navigable part is not a place to land. */
+    q2_menu_goto(&m, Q2_PAGE_RESTART_CONFIRM);
+    CHECK(!q2_menu_point_at(&m, 0), "the static question cannot be pointed at");
+}
+
+/* ------------------------------------------------------------------------- */
 int main(void)
 {
     test_defaults();
@@ -861,6 +1083,13 @@ int main(void)
     test_mcard_choices();
     test_mcard_accept();
     test_mcard_names();
+
+    test_hit_rows();
+    test_hit_skips_the_unreachable();
+    test_hit_toggle_words();
+    test_hit_slider();
+    test_hit_choice_halves();
+    test_point_at();
 
     if (g_fail) {
         printf("\n%d menu check%s failed\n", g_fail, g_fail == 1 ? "" : "s");

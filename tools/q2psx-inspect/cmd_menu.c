@@ -29,6 +29,7 @@
 #include "menudraw.h"
 #include "menufont.h"
 #include "raster.h"
+#include "reloc.h"
 #include "vram.h"
 
 #include <stdio.h>
@@ -621,6 +622,49 @@ static int module_pages(const disc *d, const char *map)
                        nc - 8, cred[nc - 1]);
         }
     }
+
+    /*
+     * And the SCENE the pages are drawn over, which #44 left open and which is
+     * not a scene at all: five item table ids the module hands the engine's own
+     * item spawner. Printed with each id's table record, because "the title
+     * screen's logo is an item and that is why it spins" is exactly the kind of
+     * claim that should fail loudly if the ids ever stop resolving.
+     */
+    {
+        q2_lb_scene scene;
+        q2_ai_module mod;
+        bool got = false;
+
+        /* The relocated image, not the chunk — see q2_levelbin_scene. */
+        if (q2_level_module_load(&mod, &cf, 0x80100000u) == Q2_OK) {
+            if (!mod.empty)
+                got = q2_levelbin_scene(mod.image.data, (u32)mod.image.size,
+                                        mod.base, &scene);
+            q2_ai_module_free(&mod);
+        }
+
+        if (got) {
+            const q2_item_table *t = q2_item_table_builtin();
+            u32 k;
+
+            printf("\n  scene: %u objects from module+0x%05X, each spawned at "
+                   "(0, 0, %d) facing yaw %d\n",
+                   scene.count, scene.offset,
+                   Q2_LB_SCENE_DIST, Q2_LB_SCENE_YAW);
+            for (k = 0; k < scene.count; k++) {
+                const q2_item_def *def = q2_item_find(t, (s32)scene.id[k]);
+
+                printf("    id %2u  %-14s %s\n", scene.id[k],
+                       def ? def->model : "(no table record)",
+                       (def && (def->flags & Q2_ITEM_SPIN))
+                           ? "spin — 0x80059330 turns it"
+                           : "does not spin");
+            }
+        } else {
+            printf("\n  scene: none — this module places no objects\n");
+        }
+    }
+
     q2_common_close(&cf);
     return 0;
 }

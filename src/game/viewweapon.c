@@ -212,9 +212,21 @@ static void q2_vw_idle_fire_check(q2_viewweapon *vw, bool fire_held,
         return;
     }
 
+    /*
+     * And the port's own third case: the trigger is down, the weapon is fed,
+     * and no shot happened because the refire gate had not expired. The
+     * original cannot reach this — its idle state calls the fire function
+     * rather than being told about it afterwards — so the machine simply stays
+     * idle. Without this the fire clip restarted on every held-trigger frame,
+     * at RENDER rate rather than tick rate.
+     */
+    if (fired == Q2_VW_FIRE_NONE)
+        return;
+
     vw->state      = Q2_VM_FIRE;
     vw->frame      = 0;
     vw->fire_latch = true;
+    vw->fires_started++;
     begin_key(vw);
 }
 

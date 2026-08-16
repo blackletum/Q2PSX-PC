@@ -184,54 +184,104 @@ u32 q2_spu_adpcm_validate(const u8 *adpcm, u32 size)
     return bad;
 }
 
+void q2_spu_voice_start(q2_spu_voice *v, const u8 *adpcm, u32 size)
+{
+    if (!v)
+        return;
+
+    memset(v, 0, sizeof(*v));
+    v->adpcm = adpcm;
+    v->size  = size;
+    v->done  = (adpcm == NULL || size < SPU_BLOCK_SIZE);
+}
+
+u32 q2_spu_voice_block(q2_spu_voice *v, s16 *out)
+{
+    const u8 *adpcm;
+    u32 off;
+    u8  shift, filter, flags;
+    int i;
+
+    if (!v || !out || v->done || !v->adpcm)
+        return 0;
+
+    off = v->off;
+    if (off + SPU_BLOCK_SIZE > v->size) {
+        v->done = true;
+        return 0;
+    }
+
+    adpcm  = v->adpcm;
+    shift  = adpcm[off] & 0x0F;
+    filter = adpcm[off] >> 4;
+    flags  = adpcm[off + 1];
+
+    if (filter > 4)
+        filter = 0;
+    /* A shift above 12 is undefined on hardware; treat it as maximum
+     * attenuation rather than shifting by a wild amount. */
+    if (shift > 12)
+        shift = 12;
+
+    for (i = 0; i < SPU_SAMPLES_PER_BLOCK; i++) {
+        u8  byte   = adpcm[off + 2 + i / 2];
+        s32 nibble = (i & 1) ? (byte >> 4) : (byte & 0x0F);
+        s32 sample;
+
+        /* Sign-extend the 4-bit residual into the high bits, then scale. */
+        sample = (s32)((u32)nibble << 12);
+        sample = (s32)((s16)sample) >> shift;
+
+        sample += (SPU_F0[filter] * v->prev1 + SPU_F1[filter] * v->prev2) / 64;
+
+        if (sample >  32767) sample =  32767;
+        if (sample < -32768) sample = -32768;
+
+        out[i] = (s16)sample;
+
+        v->prev2 = v->prev1;
+        v->prev1 = sample;
+    }
+
+    v->off = off + SPU_BLOCK_SIZE;
+
+    /* Stop on the end marker, AFTER emitting its block. Samples that simply run
+     * out without one are handled by the bound above, which is why the 176
+     * terminator-less one-shots do not overrun here. */
+    if (flags & SPU_FLAG_END)
+        v->done = true;
+
+    return SPU_SAMPLES_PER_BLOCK;
+}
+
 u32 q2_spu_adpcm_decode(const u8 *adpcm, u32 size, s16 *out, u32 out_capacity)
 {
-    s32 prev1 = 0, prev2 = 0;
-    u32 written = 0, off;
+    q2_spu_voice v;
+    s16 block[SPU_SAMPLES_PER_BLOCK];
+    u32 written = 0;
 
     if (!adpcm || !out)
         return 0;
 
-    for (off = 0; off + SPU_BLOCK_SIZE <= size; off += SPU_BLOCK_SIZE) {
-        u8 shift  = adpcm[off] & 0x0F;
-        u8 filter = adpcm[off] >> 4;
-        u8 flags  = adpcm[off + 1];
-        int i;
+    q2_spu_voice_start(&v, adpcm, size);
 
-        if (filter > 4)
-            filter = 0;
-        /* A shift above 12 is undefined on hardware; treat it as maximum
-         * attenuation rather than shifting by a wild amount. */
-        if (shift > 12)
-            shift = 12;
+    for (;;) {
+        u32 n = q2_spu_voice_block(&v, block);
+        u32 take;
 
-        for (i = 0; i < SPU_SAMPLES_PER_BLOCK; i++) {
-            u8  byte   = adpcm[off + 2 + i / 2];
-            s32 nibble = (i & 1) ? (byte >> 4) : (byte & 0x0F);
-            s32 sample;
+        if (n == 0)
+            break;
 
-            /* Sign-extend the 4-bit residual into the high bits, then scale. */
-            sample = (s32)((u32)nibble << 12);
-            sample = (s32)((s16)sample) >> shift;
+        /* A capacity that ends mid-block keeps the samples that fit, which is
+         * what the flat decoder has always done. */
+        take = n;
+        if (written + take > out_capacity)
+            take = out_capacity - written;
 
-            sample += (SPU_F0[filter] * prev1 + SPU_F1[filter] * prev2) / 64;
+        memcpy(out + written, block, take * sizeof(s16));
+        written += take;
 
-            if (sample >  32767) sample =  32767;
-            if (sample < -32768) sample = -32768;
-
-            if (written >= out_capacity)
-                return written;
-
-            out[written++] = (s16)sample;
-
-            prev2 = prev1;
-            prev1 = sample;
-        }
-
-        /* Stop on the end marker. Samples that simply run out without one are
-         * handled by the loop bound, which is why the 176 terminator-less
-         * one-shots do not overrun here. */
-        if (flags & SPU_FLAG_END)
+        if (written >= out_capacity)
             break;
     }
 

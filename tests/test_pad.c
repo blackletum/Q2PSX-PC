@@ -400,9 +400,184 @@ static void test_fly(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/* The bindings — the style table read backwards                              */
+/*                                                                            */
+/* What these pin down is that the backwards read and the forwards one agree:  */
+/* a host that presses the button `q2_pad_style_bindings` names for a meaning  */
+/* must get that meaning out of `q2_pad_read`, on every style. Checked by      */
+/* driving it rather than by comparing two tables, so a change to either side  */
+/* has to survive the round trip.                                             */
+/* ------------------------------------------------------------------------- */
+static void test_bindings(void)
+{
+    q2_pad_bindings b;
+    q2_input in;
+    int style;
+
+    check(!q2_pad_style_bindings(-1, &b), "a style below the table is refused");
+    check(!q2_pad_style_bindings(Q2_PAD_STYLE_COUNT, &b),
+          "a style above it is refused");
+    check(b.forward == 0 && b.fire == 0, "and the refusal zeroes the bindings");
+
+    /*
+     * STANDARD A's must be exactly the constants the client used to write out
+     * by hand, because that is the mapping the keyboard has always had and the
+     * whole point of the lookup is that it did not change.
+     */
+    check(q2_pad_style_bindings(Q2_PAD_STYLE_STANDARD_A, &b), "standard A reads");
+    check_eq_i(b.forward,      Q2_PAD_UP,       "standard A forward is UP");
+    check_eq_i(b.back,         Q2_PAD_DOWN,     "standard A back is DOWN");
+    check_eq_i(b.strafe_left,  Q2_PAD_L2,       "standard A strafes left on L2");
+    check_eq_i(b.strafe_right, Q2_PAD_R2,       "standard A strafes right on R2");
+    check_eq_i(b.turn_left,    Q2_PAD_LEFT,     "standard A turns left on LEFT");
+    check_eq_i(b.turn_right,   Q2_PAD_RIGHT,    "standard A turns right on RIGHT");
+    check_eq_i(b.look_up,      Q2_PAD_L1,       "standard A looks up on L1");
+    check_eq_i(b.look_down,    Q2_PAD_R1,       "standard A looks down on R1");
+    check_eq_i(b.fire,         Q2_PAD_CROSS,    "standard A fires on CROSS");
+    check_eq_i(b.jump,         Q2_PAD_SQUARE,   "standard A jumps on SQUARE");
+    check_eq_i(b.weapon_next,  Q2_PAD_TRIANGLE, "standard A next is TRIANGLE");
+    check_eq_i(b.weapon_prev,  Q2_PAD_CIRCLE,   "standard A prev is CIRCLE");
+
+    /*
+     * RIGHT MOUSE is the one the port selects with a mouse plugged in, and the
+     * two buttons the player asked for are the console's own: 0x80019224 reads
+     * L3 and R3, where the mouse's pair is merged.
+     */
+    check(q2_pad_style_bindings(Q2_PAD_STYLE_RIGHT_MOUSE, &b), "right mouse reads");
+    check_eq_i(b.fire, Q2_PAD_MOUSE_L, "right mouse fires on the left button");
+    check_eq_i(b.jump, Q2_PAD_MOUSE_R, "right mouse jumps on the right button");
+    check(b.turn_left == 0 && b.turn_right == 0 &&
+          b.look_up == 0 && b.look_down == 0,
+          "and it has no turn or look buttons at all");
+
+    /* RIGHT MOUSE 2 is the same pad with that pair swapped (0x800192F4). */
+    check(q2_pad_style_bindings(Q2_PAD_STYLE_RIGHT_MOUSE2, &b), "right mouse 2 reads");
+    check_eq_i(b.fire, Q2_PAD_MOUSE_R, "right mouse 2 swaps the buttons");
+    check_eq_i(b.jump, Q2_PAD_MOUSE_L, "...both ways");
+
+    /* The round trip, on every style that has a button for the meaning. */
+    for (style = 0; style < Q2_PAD_STYLE_COUNT; style++) {
+        char what[64];
+
+        check(q2_pad_style_bindings(style, &b), "bindings exist");
+
+        if (b.forward) {
+            press(&in, style, b.forward);
+            snprintf(what, sizeof(what), "style %d walks forward on its own bit",
+                     style);
+            check(in.forward > 0, what);
+        }
+        if (b.strafe_right) {
+            press(&in, style, b.strafe_right);
+            snprintf(what, sizeof(what), "style %d strafes right on its own bit",
+                     style);
+            check(in.side > 0, what);
+        }
+        if (b.strafe_left) {
+            press(&in, style, b.strafe_left);
+            snprintf(what, sizeof(what), "style %d strafes left on its own bit",
+                     style);
+            check(in.side < 0, what);
+        }
+        if (b.turn_right) {
+            press(&in, style, b.turn_right);
+            snprintf(what, sizeof(what), "style %d turns right on its own bit",
+                     style);
+            check(in.yaw > 0, what);
+        }
+        if (b.fire) {
+            press(&in, style, b.fire);
+            snprintf(what, sizeof(what), "style %d fires on its own bit", style);
+            check(in.attack, what);
+        }
+        if (b.jump) {
+            press(&in, style, b.jump);
+            snprintf(what, sizeof(what), "style %d jumps on its own bit", style);
+            check((in.buttons & Q2_BTN_JUMP) != 0, what);
+        }
+        if (b.weapon_next) {
+            press(&in, style, b.weapon_next);
+            snprintf(what, sizeof(what), "style %d cycles forward on its own bit",
+                     style);
+            check((in.buttons & Q2_BTN_WEAP_NEXT) != 0, what);
+        }
+        if (b.weapon_prev) {
+            press(&in, style, b.weapon_prev);
+            snprintf(what, sizeof(what), "style %d cycles back on its own bit",
+                     style);
+            check((in.buttons & Q2_BTN_WEAP_PREV) != 0, what);
+        }
+    }
+}
+
+static void test_look_source(void)
+{
+    /* The three mouse styles are the scaled pair, which is what tells a host
+     * that MOUSE SPEED applies and that a displacement has somewhere to go. */
+    check_eq_i(q2_pad_style_look(Q2_PAD_STYLE_RIGHT_MOUSE),  Q2_PAD_LOOK_MOUSE,
+               "RIGHT MOUSE looks with the mouse");
+    check_eq_i(q2_pad_style_look(Q2_PAD_STYLE_RIGHT_MOUSE2), Q2_PAD_LOOK_MOUSE,
+               "RIGHT MOUSE 2 does too");
+    check_eq_i(q2_pad_style_look(Q2_PAD_STYLE_HUNTER_MOUSE), Q2_PAD_LOOK_MOUSE,
+               "and HUNTER MOUSE");
+
+    check_eq_i(q2_pad_style_look(Q2_PAD_STYLE_RIGHT_STICK),
+               Q2_PAD_LOOK_RIGHT_STICK, "RIGHT STICK looks with the right pair");
+    check_eq_i(q2_pad_style_look(Q2_PAD_STYLE_LEFT_STICK),
+               Q2_PAD_LOOK_LEFT_STICK, "LEFT STICK with the left");
+
+    /* The three STANDARD styles are the ones with look BUTTONS, and they are
+     * exactly the ones at or above the eased threshold. */
+    check_eq_i(q2_pad_style_look(Q2_PAD_STYLE_STANDARD_A), Q2_PAD_LOOK_BUTTONS,
+               "STANDARD A looks with buttons");
+    check_eq_i(q2_pad_style_look(Q2_PAD_STYLE_STANDARD_C), Q2_PAD_LOOK_BUTTONS,
+               "so does STANDARD C");
+    check_eq_i(q2_pad_style_look(999), Q2_PAD_LOOK_BUTTONS,
+               "and an out-of-range style is not claimed to have an axis");
+}
+
+/*
+ * The step a mouse has to scale itself against — sim.h's reason for exposing it.
+ *
+ * What matters to a caller is that the answer is the one the tick then uses,
+ * and that asking does not consume anything.
+ */
+static void test_next_dt(void)
+{
+    q2_sim sim;
+    q2_input in;
+    s32 first;
+
+    memset(&in, 0, sizeof(in));
+    q2_sim_init(&sim, NULL, 50);
+
+    /* A frame too short to tick reports no step, and asking twice is the same
+     * answer: the accumulator is the sim's to move, not the question's. */
+    check_eq_i(q2_sim_next_dt(&sim, 1.0 / 300.0), 0,
+               "a frame under the nominal step does not tick");
+    check_eq_i(q2_sim_next_dt(&sim, 1.0 / 300.0), 0, "and asking is free");
+
+    /* A nominal frame reports the step it is about to take, and the tick that
+     * follows agrees — which is the whole contract. */
+    first = q2_sim_next_dt(&sim, 1.0 / 25.0);
+    check_eq_i(first, Q2_DT_NOMINAL, "a 1/25 s frame is the nominal 12");
+    check_eq_i(q2_sim_advance(&sim, &in, 1.0 / 25.0), 1, "and it ticks once");
+
+    /* A long frame is clamped rather than caught up on. */
+    check_eq_i(q2_sim_next_dt(&sim, 1.0), Q2_DT_MAX,
+               "a one-second frame clamps to the maximum");
+
+    q2_sim_free(&sim);
+}
+
+/* ------------------------------------------------------------------------- */
 int main(void)
 {
     printf("Q2PSX-PC pad and view tests\n\n");
+
+    test_bindings();
+    test_look_source();
+    test_next_dt();
 
     test_defaults();
     test_standard_a();

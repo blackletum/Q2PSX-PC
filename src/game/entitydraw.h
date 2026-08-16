@@ -104,4 +104,43 @@ u32 q2_entity_build_ot(q2_entity_set *set, const q2_entity_draw_ctx *ctx,
  */
 bool q2_entity_resolve_model(q2_entity *e, const q2_model_bank *bank);
 
+/* ------------------------------------------------------------------------- */
+/* Projectiles in flight                                                      */
+/* ------------------------------------------------------------------------- */
+/*
+ * The bolt's own body, as the eight corners of a 20 x 20 x 100 box oriented
+ * along its direction of travel.
+ *
+ * WHERE THE GEOMETRY COMES FROM, and what is inferred. The eight local points
+ * are `0x8009DB1C`, an executable table this port already decodes
+ * (weapontables.h). The spawner at 0x8004D70C builds a rotation from the
+ * bolt's direction (`jal 0x80089E38`, RotMatrix) and rotates all eight into
+ * the ENTITY, at +12, +20, +28, +36, +44, +52, +60 and +68 — eight SVECTORs,
+ * one `jal 0x8006FC1C` each, at 0x8004D848 through 0x8004D8B8.
+ *
+ * What is NOT established is that the console DRAWS them. It was previously
+ * recorded as a collision hull, on the strength of the very next instruction
+ * block: 0x8004D8D4 calls q2_coll_probe_point. But that call takes `a1 =
+ * s2 + 76`, which is the field AFTER the eight corners, not the corners
+ * themselves — so the probe is not their consumer, and nothing else in the
+ * three references to the missile array (0x80047CD4, 0x80048B08, 0x80048C58)
+ * reads them either.
+ *
+ * So: the geometry is the disc's, the orientation is the disc's, and the
+ * conclusion that these corners are what a bolt looks like is an INFERENCE
+ * from "they are written per bolt and nothing else reads them". It is marked
+ * here rather than presented as a transcription. Without it a bolt is
+ * invisible and only its dynamic light exists, which is worse.
+ *
+ * The colour is the projectile's own glow from 0x800AE954 — the same preset
+ * the light uses — so nothing about the appearance is invented beyond the
+ * decision to draw it at all.
+ *
+ * Returns the number of primitives emitted.
+ */
+struct q2_projectiles;
+
+u32 q2_projectiles_build_ot(const struct q2_projectiles *list,
+                            const q2_camera *cam, psx_ot *ot, gte_state *gte);
+
 #endif /* Q2PSX_ENTITYDRAW_H */

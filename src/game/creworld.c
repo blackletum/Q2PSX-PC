@@ -1,5 +1,7 @@
 #include "creworld.h"
 
+#include "worldscale.h"
+
 #include "levelbin.h"
 
 #include <stdio.h>
@@ -346,16 +348,30 @@ q2_result q2_creature_world_load(q2_creature_world *w, const disc *d,
 }
 
 /* ------------------------------------------------------------------------- */
-static void sight_place(q2_creature_world *w, const s32 eye[3])
+/*
+ * The sight client's position, and it is the player's ENTITY ORIGIN.
+ *
+ * `q2_visible` (ai.c, transcribing 0x8005B950) forms each end as
+ * `pos + view_height`, and 0x8005B950 adds +0x4C to the entity's ORIGIN. The
+ * caller used to pass the player's EYE — already feet - Q2_VIEW_STAND — so the
+ * view height was added a second time and the player end of every sight line
+ * sat 400 units above the eye, in the ceiling.
+ *
+ * The sight entity's own view height is therefore set so that origin +
+ * view_height lands back on the console's eye: with the origin at
+ * feet - Q2_EYE_BASE and the eye at feet - Q2_VIEW_STAND, that is
+ * -(Q2_VIEW_STAND - Q2_EYE_BASE) = -290.
+ */
+static void sight_place(q2_creature_world *w, const s32 origin[3])
 {
-    if (!eye)
+    if (!origin)
         return;
-    w->sight.pos[0] = eye[0];
-    w->sight.pos[1] = eye[1];
-    w->sight.pos[2] = eye[2];
+    w->sight.pos[0] = origin[0];
+    w->sight.pos[1] = origin[1];
+    w->sight.pos[2] = origin[2];
 }
 
-void q2_creature_world_wake(q2_creature_world *w, const s32 player_eye[3])
+void q2_creature_world_wake(q2_creature_world *w, const s32 player_origin[3])
 {
     if (!w)
         return;
@@ -372,17 +388,20 @@ void q2_creature_world_wake(q2_creature_world *w, const s32 player_eye[3])
     w->sight.client      = true;     /* entity+0x0C != NULL: this is a player */
     w->sight.health      = 100;
     w->sight.max_health  = 100;
-    sight_place(w, player_eye);
+    /* The eye the console's `visible` reconstructs from the origin: the
+     * origin is feet - 286 and the eye is feet - 576, so -290. */
+    w->sight.view_height = -(s16)(Q2_VIEW_STAND - Q2_EYE_BASE);
+    sight_place(w, player_origin);
 
     q2_monster_set_wake(&w->set, &w->sight);
 }
 
-u32 q2_creature_world_tick(q2_creature_world *w, const s32 player_eye[3])
+u32 q2_creature_world_tick(q2_creature_world *w, const s32 player_origin[3])
 {
     if (!w || !w->ready)
         return 0;
 
-    sight_place(w, player_eye);
+    sight_place(w, player_origin);
     return q2_monster_set_tick(&w->set);
 }
 
