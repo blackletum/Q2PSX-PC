@@ -817,6 +817,11 @@ typedef struct client {
     q2_light_world   light_world;
     bool             lights_ready;
 
+    /* The title screen's two wandering lights keep their x across frames, in
+     * the module's own stores at +0x11664 and +0x11668. See
+     * q2_levelbin_scene_lights. */
+    s32              scene_wander[2];
+
     bool             in_front_end;
 
     /*
@@ -5148,8 +5153,21 @@ static u16 client_menu_pad(const client *c)
      * CROSS on a slow cycle is enough — it takes the row the page opens on,
      * which for the death page is RESTART LEVEL.
      */
-    if (c && c->demo)
-        return ((c->frame_index % 30) < 3) ? Q2_PAD_CROSS : 0;
+    if (c && c->demo) {
+        if ((c->frame_index % 30) >= 3)
+            return 0;
+        /*
+         * In the FRONT END, alternate CROSS and TRIANGLE rather than pressing
+         * CROSS forever. Pressing forward four times leaves the title screen
+         * for a game thirty frames in, and a scripted run then never sees the
+         * page graph at all — nor the logo's own two thinks, which only differ
+         * once you have gone somewhere and come back (levelbin.h). Stepping in
+         * and out keeps a headless capture on the screen it is capturing.
+         */
+        if (c->in_front_end && ((c->frame_index / 30) & 1))
+            return Q2_PAD_TRIANGLE;
+        return Q2_PAD_CROSS;
+    }
 
     k = SDL_GetKeyboardState(NULL);
     if (!k)
@@ -5763,6 +5781,34 @@ static const char *client_ent_sound_name(const client *c, u32 which)
     return NULL;
 }
 
+/*
+ * The TITLE SCREEN's lighting — `module+0x2BD8`, the second of the two hooks
+ * the menu's own frame calls (`0x8001A200`). The derivation is in levelbin.h;
+ * what is here is the wiring, and it is deliberately not inside
+ * `client_entity_events`: that runs off the sim tick and the front end does not
+ * tick. The console's hook runs off the MENU frame, so this does too.
+ *
+ * The clear is the load-bearing half. Sixteen dynamic slots, five lights a
+ * frame, and `0x80075C34` drops the seventeenth silently — without it the rig
+ * fills the list in four frames and the logo is then lit by a frozen snapshot
+ * of frame four for the rest of the session.
+ */
+static void client_scene_lights(client *c)
+{
+    q2_lb_light light[Q2_LB_LIGHT_MAX];
+    u32 n, i;
+
+    if (!c->lights_ready || !c->sim[0].scene_ready)
+        return;
+
+    q2_light_world_begin_frame(&c->light_world);
+
+    n = q2_levelbin_scene_lights(light, c->scene_wander, &c->sim[0].combat.rng);
+    for (i = 0; i < n; i++)
+        q2_light_add_dynamic(&c->light_world, light[i].pos, light[i].rgb,
+                             light[i].inner, light[i].outer, 0, 0);
+}
+
 static void client_entity_events(client *c)
 {
     const q2_ent_events *ev = q2_sim_entity_events(&c->sim[0]);
@@ -6289,6 +6335,19 @@ static void client_write_shot(client *c, bool numbered)
             c->shot_stats.ot_overflow);
 
     /*
+     * The lens flares. `lit` can say how many flare-carrying lights a cell
+     * holds; only this can say how many of them reached the screen, because the
+     * near cull and the attenuation both happen after the gather. A line of
+     * zeroes where the cell has flares means the pass is not running at all,
+     * which is a different fault from one where they are all culled.
+     */
+    Q2_INFO("  flares    %u lights, %u styled, %u too near, %u dark, "
+            "%u drawn, %u prims",
+            c->shot_stats.flare_lights, c->shot_stats.flare_styled,
+            c->shot_stats.flare_near,   c->shot_stats.flare_dark,
+            c->shot_stats.flare_drawn,  c->shot_stats.flare_prims);
+
+    /*
      * The weapon in the hands against the shots the sim actually took. These two
      * figures are the whole point of the line: the machine is told about a shot
      * once per fire ATTEMPT, so a run where the clips outnumber the shots is one
@@ -6808,6 +6867,35 @@ static void client_menu_frame(client *c)
  * work itself.
  */
 /*
+ * Which collision cell a viewport gathers its lights from.
+ *
+ * Both the lens flares and the per-entity three-light gather ask this, and they
+ * must agree: the flare pass and the entity gather read the SAME SpaceLights
+ * partition, so a viewport that lit its models out of one cell and its flares
+ * out of another would be showing two different rooms at once. It is the
+ * SecondaryCol node — see spacelights.h for why that hull and not PrimaryColl.
+ *
+ * In a split each viewport is its own player standing in its own cell, so the
+ * node comes from that player's entity rather than from the sim's `current_node`
+ * (which tracks whichever player last ticked).
+ *
+ * Zero rather than -1 in the front end, and the difference is not cosmetic: -1
+ * selects the fallback record 0x8006B150 builds for a node-less entity, a grey
+ * light of radius 0x7FFF sitting on the entity itself that outranks anything and
+ * would take one of the three slots from the module's own rig every frame.
+ */
+static s32 client_light_node(const client *c, int p)
+{
+    if (c->in_front_end)
+        return 0;
+
+    if (c->mp_enabled && p > 0 && p < Q2_MP_MAX_PLAYERS && c->sim_ready[p])
+        return c->sim[0].player[p].ent.node;
+
+    return c->sim[0].current_node;
+}
+
+/*
  * The world draw, in the place 0x80066858 occupies: called from inside the
  * viewport's own draw, after its state is published and under its own gate.
  */
@@ -6863,6 +6951,24 @@ static void client_draw_view(void *user, q2_screen *s, int p,
      * view+264 the original parks at 0x800B2CCC serves both. */
     c->render.subdiv_threshold = s->view[p].far_z;
 
+    /*
+     * The LENS FLARES, which had a complete implementation and no caller: the
+     * zone's two flare fields were never assigned, so `q2_world_build_ot` took
+     * the `if (z->lights)` branch on a null pointer every frame of every run and
+     * the pass this project transcribed out of 0x800759F0 has never executed.
+     * BASE3's zone 2 reports six flare-carrying lights in the cell the player
+     * starts in and drew none of them.
+     *
+     * Both fields are per-VIEWPORT, which is why they are set here and not once
+     * at load: the original's pass is driven off the same per-viewport loop this
+     * function is, and in a split each player stands in a different cell. The
+     * node is the SecondaryCol one, because that is what partitions SpaceLights
+     * — see spacelights.h — and it is the same node the entity gather below
+     * uses, for the same reason.
+     */
+    c->zone.lights     = c->lights_ready ? &c->light_world : NULL;
+    c->zone.light_node = client_light_node(c, p);
+
     q2_world_build_ot(&c->zone, &c->cam, s->view[p].w, s->view[p].h,
                       ot, gte, &c->render, &stats);
     c->shot_stats = stats;
@@ -6904,13 +7010,16 @@ static void client_draw_view(void *user, q2_screen *s, int p,
         ectx.lights        = c->lights_ready ? &c->light_world : NULL;
         /*
          * The node the lights are gathered from is the PLAYER's, and the title
-         * screen has no player — so `current_node` there is slot 0 of a world
-         * that reaches no light at all (`q2psx-inspect lit QFRONT`: one spawn
-         * point, zero lights accepted), and the logo shaded to black. Negative
-         * is the fallback light, which is what "this entity stands in no cell"
-         * already means to the gather.
+         * screen has no player — see client_light_node, which the flare pass
+         * above shares so the two cannot pick different cells.
+         *
+         * The front end's rig is the evidence for the 0 that helper returns. A
+         * front end that lit its logo by falling through to the node-less grey
+         * would not spend five `0x80075C34` calls a frame placing lights around
+         * it (levelbin.h). QFRONT's two nodes carry no static lights either, so
+         * 0 contributes nothing of its own and the gather is exactly the five.
          */
-        ectx.coll_node     = c->in_front_end ? -1 : c->sim[0].current_node;
+        ectx.coll_node     = client_light_node(c, p);
 
         q2_entity_build_ot(&c->sim[0].entities, &ectx, &c->cam, ot, gte, &estats);
     }
@@ -7278,10 +7387,19 @@ static void client_frame(client *c)
     /*
      * 0x800780C0 clears the whole screen once and turns the per-viewport clears
      * off, which is what paints the gutters between split viewports.
+     *
+     * THE COLOUR IS BLACK, and this used to write (16, 16, 32) with that
+     * address as its authority. `0x800780C0` writes no colour at all: it zeroes
+     * `view+260` on every viewport and calls the full-screen background env.
+     * The colour lives at gp+1604, and there are exactly three references to it
+     * in the whole image — `0x80076A00` reads it into the env's rgb, and
+     * `0x8006E0B0` and `0x80070FA0` each `memset` it to zero. It is four zero
+     * bytes on disc and nothing ever writes anything else, so `q2_screen_init`
+     * already has it right and the frame should not overwrite it.
+     *
+     * It showed up as a navy field behind the title screen, which is where a
+     * retail capture is unambiguous: the front end draws one model over black.
      */
-    c->screen.disp.bg_rgb[0] = 16;
-    c->screen.disp.bg_rgb[1] = 16;
-    c->screen.disp.bg_rgb[2] = 32;
     c->screen.disp.bg_enable = 1;
     c->screen.background_enable = true;
 
@@ -8269,6 +8387,40 @@ no_window:
      * opened rather than drawn, so it navigates with the same engine, the same
      * selection bar and the same font as every other page. */
     if (c.in_front_end) {
+        /*
+         * The camera is the WORLD ORIGIN, looking down +z with no rotation, and
+         * it is not the spawn point. `engine+0x170` — which QFRONT's `init`
+         * calls with 0 before anything else — is `0x80077D0C`, and its first
+         * act is `memset(0x800D5C30, 0, 3920)`: the whole five-viewport array
+         * zeroed, position and rotation included. Only then does
+         * `engine+0x174(0, 160, 4000)` put the projection and far plane back.
+         *
+         * So the front end deliberately throws the level's `StartPos` away, and
+         * this port had been leaving the camera where the spawn settle dropped
+         * it — 54 units below the origin, which at z = 1700 and proj 160 is
+         * five pixels of vertical error on the logo.
+         */
+        c.cam.pos[0] = 0;
+        c.cam.pos[1] = 0;
+        c.cam.pos[2] = 0;
+        c.cam.yaw    = 0;
+        c.cam.pitch  = 0;
+        c.cam.roll   = 0;
+        /*
+         * And the front end's own far plane, on the VIEWPORT rather than the
+         * camera — the camera reloads `view[p].far_z` every frame (see the
+         * viewport note in client_frame), so writing the camera here would last
+         * exactly one frame.
+         *
+         * This is `engine+0x174(0, 160, 4000)`, `init`'s second act, and it is
+         * a straight overwrite of what `engine+0x170` — which is
+         * `0x80077D0C`, the ONE layout `q2_screen_set_layout` already
+         * reproduces — had just installed. Same proj, far 4000 where a session
+         * layout uses 6400.
+         */
+        if (c.screen.view_count > 0)
+            c.screen.view[0].far_z = 4000;
+
         q2_menu_open(&c.menu);
         q2_menu_goto(&c.menu, Q2_PAGE_FRONT_TITLE);
     }
@@ -8571,8 +8723,10 @@ no_window:
              * Only the entity set steps; see q2_sim_scene_advance for why that
              * is the whole of this level rather than a shortcut through it. */
             client_menu_frame(&c);
-            if (c.in_front_end)
+            if (c.in_front_end) {
                 q2_sim_scene_advance(&c.sim[0], (double)dt);
+                client_scene_lights(&c);
+            }
         } else if (c.sim_enabled) {
             client_input_simulated(&c, dt);
         } else {

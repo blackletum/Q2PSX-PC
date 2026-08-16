@@ -162,7 +162,22 @@ u32 q2_entity_build_ot(q2_entity_set *set, const q2_entity_draw_ctx *ctx,
             q2_light_set lit;
 
             q2_light_gather(&lit, ctx->lights, e->origin, ctx->coll_node, false);
-            q2_light_env_build(&env, &lit, Q2_LIGHT_ONE, Q2_LIGHT_ONE,
+            /*
+             * The intensity is the entity's OWN SCALE, not a neutral constant.
+             * `0x8006B298` reads `+0xFC` and `+0xFE` and folds them as
+             * `(a * b) >> 11`; the allocator sets both to 4096 at
+             * `0x8006C1B8`, and `+0xFE` is never written again on anything this
+             * port spawns — but `+0xFC` is `e->scale`, and it moves.
+             *
+             * So an item is lit in proportion to how big it currently is: a
+             * materialising pickup fades up with its own growth instead of
+             * arriving fully lit at zero size, and the title screen's logo dims
+             * to a quarter when a sub-page shrinks it (levelbin.h). Passing
+             * Q2_LIGHT_ONE twice reproduced the engine only for entities that
+             * happened to be at full size, which is most of them and is why the
+             * substitution went unnoticed.
+             */
+            q2_light_env_build(&env, &lit, e->scale, Q2_LIGHT_ONE,
                                (e->flags & Q2_ITEM_GLOW) ? e->glow : NULL);
             inst.light = &env;
         }

@@ -917,8 +917,17 @@ u32 q2_world_build_ot(const q2_world_zone *z,
         q2_flare_view view;
 
         memset(&view, 0, sizeof(view));
-        view.centre[0] = (s16)(screen_w / 2);
-        view.centre[1] = (s16)(screen_h / 2);
+
+        /*
+         * The centre is view+266/+268 — the SAME geometry offset the projection
+         * above was given, not a bare half-extent. On a split screen the two
+         * part company, and an element positioned against the wrong one slides
+         * along its own centre-to-light line by the difference.
+         */
+        view.centre[0] = (s16)((cam->ofs_x || cam->ofs_y) ? cam->ofs_x
+                                                          : screen_w / 2);
+        view.centre[1] = (s16)((cam->ofs_x || cam->ofs_y) ? cam->ofs_y
+                                                          : screen_h / 2);
         view.extent[0] = (s16)screen_w;
         view.extent[1] = (s16)screen_h;
 
@@ -940,8 +949,23 @@ u32 q2_world_build_ot(const q2_world_zone *z,
         gte_set_rotation(gte, &rot);
         gte_set_translation(gte, 0, 0, 0);
 
-        emitted += q2_flare_draw_all(z->lights, cam, z->light_node, &view,
-                                     ot, gte, NULL);
+        {
+            q2_flare_stats fs;
+
+            memset(&fs, 0, sizeof(fs));
+            emitted += q2_flare_draw_all(z->lights, cam, z->light_node, &view,
+                                         ot, gte, &fs);
+
+            if (stats) {
+                stats->flare_lights += fs.lights_considered;
+                stats->flare_styled += fs.lights_styled;
+                stats->flare_near   += fs.rejected_near;
+                stats->flare_dark   += fs.rejected_dark;
+                stats->flare_drawn  += fs.flares_drawn;
+                stats->flare_prims  += fs.prims_emitted;
+                stats->ot_overflow  += fs.ot_overflow;
+            }
+        }
     }
 
     /* How much of the slice the sort actually reached. One bucket means no

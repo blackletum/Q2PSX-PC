@@ -5904,19 +5904,72 @@ centre. The four styles are nested, so the only authored choice is how much of t
 45°, 90° and 135° in both directions. There is no flare texture anywhere on the disc, which is why looking
 for one never found anything.
 
-The ring's radius is a fraction of the **viewport**, not a pixel count: the generator divides by `320 · 4096`
-in x and `240 · 4096` in y after multiplying by the viewport's own width and height. The spikes use four
-compiler-folded rational scales whose closed form was not recovered; their measured effect is that the axis
-spikes are 1.637× the disc radius and the diagonals 1.170×, consistently in both axes. `src/game/flare.c`
-reproduces the magic multiplies rather than guessing at the constants behind them.
+**The two rim generators are two routines, not one.** `0x80074E6C` is a general n-gon and the BURST calls it
+with 12. The DISC does not call it at all: `0x800755CC` calls `0x80074C4C`, which is written out flat, reads
+a *single* table entry — index 682, the 60° a hexagon turns by — and mirrors it into all six vertices; its
+vertical radius divides by 240 where the generator divides by `240 · 4096` against a cosine of 4096, and its
+vertex order starts at the top where the generator starts at the bottom. A hexagon has 180° symmetry, so the
+two agree on the shape and differ only in the arithmetic. Both index the executable's own `{sin, cos}` table
+at `0x800A5430` — 4096 entries of two halfwords, sine first, a full turn in 4096 steps.
+
+**All six of the folded divides have closed forms, and they are exact.** Each is a
+`mult`/`mfhi`/`sra`/`subu` magic sequence, and a magic `M` with post-shift `p` is a signed divide by the
+*unique* integer `d` satisfying `M == floor(2^(32+p)/d) + 1`. Solving all six leaves nothing over:
+
+| divide | magic | shift | divisor | |
+|---|---|---|---|---|
+| ring x | `0x66666667` | 19 | 1310720 | = 320 · 4096 |
+| ring y | `0x88888889` | 19 | 983040 | = 240 · 4096 |
+| spike x | `0x14F8B589` | 16 | 800000 | = 320 · 2500 |
+| spike y | `0x6FD91D85` | 18 | 600000 | = 240 · 2500 |
+| diagonal x | `0x1DF5959F` | 17 | 1120000 | = 320 · 3500 |
+| diagonal y | `0x09FC8735` | 15 | 840000 | = 240 · 3500 |
+
+So every one of them is `x · extent / (REF · k)` against the same 320×240 reference screen and only `k`
+changes: 4096 for the rings, **2500** for the starburst's axis arms and **3500** for its diagonals. A ring's
+radius is therefore a fraction of the *viewport* rather than a pixel count, an axis arm reaches `4096/2500` =
+1.6384× the glow's radius and a diagonal `4096/3500` = 1.1703× — which is what the earlier pass measured as
+1.637 and 1.170 while reproducing the multiplies without their source. `src/game/flare.c` now divides by
+these numbers directly; C's `/` on `int32_t` truncates toward zero, which is precisely what the sequence's
+trailing `- (n >> 31)` produces.
+
+**Nothing declares the blend; it is inherited.** None of the three packets carries a texture page, and an
+untextured semi-transparent primitive takes its mode from the GPU's *current* draw mode. The chain
+terminates in the world: the opaque path at `0x80068300` ORs `blendTable[2]` into the page's entry and
+writes it back (§4.6), `blendTable[2]` is 32, and 32 is ABR 1 — `B + F`. The flares link into the viewport
+slice's last bucket, after all of it, and come out additive.
+
+**Where they are drawn.** `0x80075BDC` is the whole stage: it tests a word at `0x800B2ECC`, gives up unless
+the viewport count at `0x800B2C2C` is positive, and otherwise runs `0x800759F0` once per viewport. That gate
+has one writer in the image — `0x80071448` stores 1 during start-up — and nothing clears it, so on this disc
+flares are unconditionally on. Every flare links at `db + 11192 + 204·p`, which is slice bucket 50, the
+frontmost of the viewport and the same one the damage flash uses (§16.4).
+
+**The GTE translation.** Both the flare pass and the entity draw load TRX/TRY/TRZ from `0x800DDD7C`, the
+translation slot of a `MATRIX` at `0x800DDD68`. That object has **no writer anywhere in the image** and sits
+past the end of the text segment at `0x800B2800`, so it is BSS: zero from start-up. Its three readers agree —
+two of them (`0x80058450`, `0x80058484`) pass it to `T_Damage` as *both* the `dir` and the `point` argument,
+a call that only makes sense as "no direction, no impact point". It is a static zero vector the engine reuses
+wherever it needs one, and loading it means "rotation only".
 
 ### 17.4 What is checked, and what is not
 
 `q2psx-inspect lights` checks the `SpaceLights` partition on every zone (§3.11.1), censuses the type byte,
 reads all four flare element tables back out of the executable and compares them element for element, and
-compares the reciprocal-square-root table entry for entry. `tests/test_light.c` checks the arithmetic those
-claims feed: the attenuation curve and its two boundary cases, the 16-bit wrapping delta, the ranking, the
-colour matrix's transposition, `VectorNormal`, and `NCS` producing the colour that arithmetic implies.
+compares the reciprocal-square-root table entry for entry. It also **re-solves the six folded divides from
+the instruction stream** — reading each `lui`/`ori` pair and its `sra` back off the disc and recovering the
+divisor — so the closed forms above are a measurement rather than a constant somebody copied into a header;
+and it compares all 4096 entries of the executable's `{sin, cos}` table against this port's `q2_sin12` and
+`q2_cos12`, which come out identical in both columns, so the flare geometry stands on the console's own trig.
+
+`tests/test_light.c` checks the arithmetic those claims feed: the attenuation curve and its two boundary
+cases, the 16-bit wrapping delta, the ranking, the colour matrix's transposition, `VectorNormal`, and `NCS`
+producing the colour that arithmetic implies. It also reads a drawn flare back out of the ordering table and
+measures its geometry — twelve *distinct* rim vertices, roundness at 320×240, every primitive additive, the
+arms at 4096/2500 and 4096/3500 of the rim, and each ghost's width following its own `size`. The vertex
+count is there for a reason: the n-gon generator's two cursors walk from opposite ends and write at +4 from
+each, so iteration *k* fills `out[k+1]` and `out[n+1-k]`. This port had `out[n-k]`, which silently drops a
+vertex and doubles another, and no screenshot can tell an 11-gon with a duplicate from a 12-gon.
 
 ### 17.5 The runtime lights — `0x80075C34`
 

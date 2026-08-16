@@ -12,7 +12,13 @@
  *      Reported as its own census so the five observed values are visible.
  *   3. The four flare element lists in the executable match the ones the port
  *      carries, element for element.
- *   4. The reciprocal-square-root table the port computes matches the one the
+ *   4. The six folded divides the flare geometry is built out of solve to the
+ *      closed forms flare.h claims. The magics and their post-shifts are read
+ *      back out of the instruction stream and re-solved, so this checks the
+ *      code and not a constant somebody copied into a header.
+ *   5. The {sin, cos} table both flare ring generators index matches the one
+ *      this port builds from libm, entry for entry and column for column.
+ *   6. The reciprocal-square-root table the port computes matches the one the
  *      executable ships, entry for entry — the same substitution measurement
  *      `anims` makes for the inverse cosine.
  */
@@ -30,6 +36,7 @@
 #include "lighting.h"
 #include "sim.h"
 #include "spacelights.h"
+#include "trig.h"
 
 /* Where the tables live in the PAL executable. */
 #define ADDR_FLARE_STYLE1 0x800A1FDCu
@@ -196,6 +203,174 @@ static int check_flare_tables(const q2_exe *exe)
                    s + 1, e, builtin->count);
             bad++;
         }
+    }
+
+    return bad;
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * The {sin, cos} table both flare ring generators index — 4096 entries of two
+ * halfwords, a full turn in 4096 steps, sine first. Everything about a flare's
+ * shape comes through it, so measure it rather than trusting that a table built
+ * from the host's libm lands on the console's numbers.
+ *
+ * The second column is checked too, and separately: the generators read the
+ * cosine as `lh 2(entry)` rather than as a second lookup a quarter turn along,
+ * so "cos is sin shifted by 1024" is a claim about the disc and not a
+ * definition.
+ */
+static int check_sincos(const q2_exe *exe)
+{
+    u32 i;
+    u32 sin_same = 0, cos_same = 0, shifted = 0;
+    s32 worst_sin = 0, worst_cos = 0;
+
+    for (i = 0; i < Q2_TRIG_TABLE_ENTRIES; i++) {
+        s16 disc_sin, disc_cos;
+        s32 ours_sin, ours_cos, d;
+
+        if (!q2_exe_s16(exe, Q2_TRIG_TABLE_ADDR + i * Q2_TRIG_TABLE_STRIDE + 0,
+                        &disc_sin) ||
+            !q2_exe_s16(exe, Q2_TRIG_TABLE_ADDR + i * Q2_TRIG_TABLE_STRIDE + 2,
+                        &disc_cos))
+            return -1;
+
+        ours_sin = q2_sin12((s32)i);
+        ours_cos = q2_cos12((s32)i);
+
+        d = ours_sin - disc_sin;
+        if (d == 0) sin_same++;
+        else if (d < 0 ? -d > worst_sin : d > worst_sin) worst_sin = d < 0 ? -d : d;
+
+        d = ours_cos - disc_cos;
+        if (d == 0) cos_same++;
+        else if (d < 0 ? -d > worst_cos : d > worst_cos) worst_cos = d < 0 ? -d : d;
+
+        {
+            s16 quarter;
+            u32 at = Q2_TRIG_TABLE_ADDR
+                   + ((i + Q2_ANGLE_90) % Q2_TRIG_TABLE_ENTRIES)
+                     * Q2_TRIG_TABLE_STRIDE;
+
+            if (!q2_exe_s16(exe, at, &quarter))
+                return -1;
+            if (quarter == disc_cos)
+                shifted++;
+        }
+    }
+
+    printf("\nThe {sin, cos} table at 0x%08X, %u entries, that both flare rings"
+           " index:\n", Q2_TRIG_TABLE_ADDR, (unsigned)Q2_TRIG_TABLE_ENTRIES);
+    printf("  sine   identical %u of %u (worst %d)\n",
+           sin_same, (unsigned)Q2_TRIG_TABLE_ENTRIES, (int)worst_sin);
+    printf("  cosine identical %u of %u (worst %d)\n",
+           cos_same, (unsigned)Q2_TRIG_TABLE_ENTRIES, (int)worst_cos);
+    printf("  the disc's cosine column IS its sine column a quarter turn on: "
+           "%u of %u\n", shifted, (unsigned)Q2_TRIG_TABLE_ENTRIES);
+
+    return (int)(2u * Q2_TRIG_TABLE_ENTRIES - sin_same - cos_same);
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * The six folded divides the flare geometry is built out of.
+ *
+ * Each is a `mult`/`mfhi`/`sra`/`subu` magic sequence, and a magic M with
+ * post-shift p is a signed divide by the UNIQUE integer d satisfying
+ * M == floor(2^(32+p)/d) + 1. So the divisor is recoverable from the
+ * instruction stream rather than merely approximable, and the port can carry it
+ * as `x * extent / (320 * k)` instead of reproducing the multiply.
+ *
+ * This reads the `lui`/`ori` pair and the `sra` back out of the executable and
+ * re-solves them, which is what turns the closed forms in flare.h from a claim
+ * into a measurement. It is deliberately keyed on instruction addresses: if a
+ * future build moves the code the check fails loudly rather than passing on a
+ * constant somebody copied into a header.
+ */
+static u32 insn_lui_ori(const q2_exe *exe, u32 lui_at, bool *ok)
+{
+    u32 hi = 0, lo = 0;
+
+    if (!q2_exe_u32(exe, lui_at, &hi) || !q2_exe_u32(exe, lui_at + 4, &lo) ||
+        (hi >> 26) != 0x0Fu || (lo >> 26) != 0x0Du) {
+        *ok = false;
+        return 0;
+    }
+    return ((hi & 0xFFFFu) << 16) | (lo & 0xFFFFu);
+}
+
+static int insn_sra_amount(const q2_exe *exe, u32 at, bool *ok)
+{
+    u32 w = 0;
+
+    if (!q2_exe_u32(exe, at, &w) || (w & 0xFC00003Fu) != 0x00000003u) {
+        *ok = false;
+        return 0;
+    }
+    return (int)((w >> 6) & 0x1Fu);
+}
+
+static int check_divisors(const q2_exe *exe)
+{
+    static const struct {
+        u32         lui_at;    /* the lui of the magic's lui/ori pair */
+        u32         sra_at;    /* the post-shift applied to the mfhi  */
+        s32         expect;    /* what flare.h says it solves to      */
+        const char *what;
+    } k[] = {
+        { 0x80074F10u, 0x80074F24u, (s32)Q2_FLARE_REF_W * 4096,
+          "ring x      (0x80074E6C)" },
+        { 0x80074F68u, 0x80074F94u, (s32)Q2_FLARE_REF_H * 4096,
+          "ring y      (0x80074E6C)" },
+        { 0x8007513Cu, 0x80075158u, (s32)Q2_FLARE_REF_W * Q2_FLARE_SPIKE_REF,
+          "spike x     (0x80074FF4)" },
+        { 0x8007514Cu, 0x8007516Cu, (s32)Q2_FLARE_REF_H * Q2_FLARE_SPIKE_REF,
+          "spike y     (0x80074FF4)" },
+        { 0x80075104u, 0x80075120u, (s32)Q2_FLARE_REF_W * Q2_FLARE_DIAG_REF,
+          "diagonal x  (0x80074FF4)" },
+        { 0x80075114u, 0x80075138u, (s32)Q2_FLARE_REF_H * Q2_FLARE_DIAG_REF,
+          "diagonal y  (0x80074FF4)" }
+    };
+    const u32 n = (u32)(sizeof k / sizeof k[0]);
+    u32 i;
+    int bad = 0;
+
+    printf("\nThe six folded divides, re-solved from the instruction stream:\n");
+    printf("  %-24s %10s %5s %12s %12s\n",
+           "divide", "magic", "shift", "solves to", "flare.h");
+
+    for (i = 0; i < n; i++) {
+        bool ok = true;
+        u32 magic = insn_lui_ori(exe, k[i].lui_at, &ok);
+        int shift  = insn_sra_amount(exe, k[i].sra_at, &ok);
+        unsigned long long two_pow, d;
+        s32 solved = 0;
+
+        if (!ok) {
+            printf("  %-24s  NOT THE EXPECTED INSTRUCTIONS\n", k[i].what);
+            bad++;
+            continue;
+        }
+
+        two_pow = 1ULL << (32 + shift);
+        if (magic) {
+            unsigned long long lo = two_pow / magic;
+            unsigned long long hi = lo + 2;
+
+            for (d = (lo > 2 ? lo - 2 : 1); d <= hi; d++)
+                if (two_pow / d + 1ULL == (unsigned long long)magic) {
+                    solved = (s32)d;
+                    break;
+                }
+        }
+
+        printf("  %-24s 0x%08X %5d %12ld %12ld%s\n",
+               k[i].what, magic, shift, (long)solved, (long)k[i].expect,
+               solved == k[i].expect ? "" : "   MISMATCH");
+
+        if (solved != k[i].expect)
+            bad++;
     }
 
     return bad;
@@ -566,6 +741,14 @@ int cmd_lights(const disc *d)
 
     {
         int r = check_flare_tables(&exe);
+        if (r > 0) bad += r;
+    }
+    {
+        int r = check_divisors(&exe);
+        if (r > 0) bad += r;
+    }
+    {
+        int r = check_sincos(&exe);
         if (r > 0) bad += r;
     }
     {

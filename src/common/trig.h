@@ -24,6 +24,21 @@
 #define Q2_ANGLE_180 2048
 #define Q2_ANGLE_90  1024
 
+/*
+ * The executable's own table, for tools that want to measure this one against
+ * it: 4096 entries of two halfwords, {sine, cosine}, at 0x800A5430 in the PAL
+ * build. The flare ring generators index it directly — `lh 0(e)` for the sine
+ * and `lh 2(e)` for the cosine of the same entry, stepping by whole entries —
+ * which is why the pair layout matters and not just the sine column.
+ *
+ * `q2psx-inspect lights` compares all 4096 of both columns against q2_sin12 and
+ * q2_cos12 and reports 4096 of 4096 on each, so the table this file builds from
+ * libm is the console's table and not an approximation of it.
+ */
+#define Q2_TRIG_TABLE_ADDR    0x800A5430u
+#define Q2_TRIG_TABLE_ENTRIES Q2_ANGLE_360
+#define Q2_TRIG_TABLE_STRIDE  4
+
 /* Angle may be any value; it is reduced modulo a full circle. */
 s32 q2_sin12(s32 angle);
 s32 q2_cos12(s32 angle);

@@ -353,6 +353,78 @@ typedef struct q2_lb_scene {
 #define Q2_LB_SCENE_SCALE_SUB  1024  /* what a sub-page shrinks it to       */
 
 /*
+ * ---------------------------------------------------------------------------
+ * The LIGHTS, which are the reason a faithful title screen is not a dark one
+ * ---------------------------------------------------------------------------
+ * `q2psx-inspect lit QFRONT` accepts ZERO lights at the spawn point, and the
+ * map's `Lights` chunk is 28 bytes. Shading the logo through the light path
+ * therefore takes it to black, and that is not a gap in the map: the front end
+ * lights its own scene, every frame, from code.
+ *
+ * The menu's own frame calls two module hooks — `0x8001A1E8` and `0x8001A200`
+ * read `engine+0x298` and `engine+0x294`, which QFRONT's `init` fills with
+ * `module+0x32BC` and `module+0x2BD8`. The first is only the
+ * controller-unplugged check. **The second is a five-light rig**, and it reaches
+ * `engine+0x3C` — `0x80075C34`, `q2_light_add_dynamic` — five times a frame.
+ *
+ * The signature had to be read off the callee, because the call sites write
+ * their arguments to `sp+48..56` and that is not where an o32 stack argument
+ * goes. `0x80075C34` spills a1/a2/a3 into the caller's own home slots and reads
+ * them back as halfwords, so there are only ever four register arguments:
+ *
+ *     a0  s32 *pos            80075CA4  lw t1,0(t0) / t2,4 / t3,8
+ *     a1  r | g<<8 | b<<16    80075CBC  lwl/lwr sp+4 -> light+12
+ *     a2  inner | outer<<16   80075CD0  lh sp+8 squared, lh sp+10 squared
+ *     a3  style | size<<16    80075C70  lhu sp+12 & 7, lhu sp+14 & 3
+ *
+ * and `sp+48..56` is the local `pos[3]` whose address `a0` carries — `s3` is
+ * `addiu s3, sp, 48` in the hook's prologue. With that, the rig reads out
+ * whole:
+ *
+ *     three at (0, y, 500) for y = -200, 0, +200   rgb (16,255,64)  100/1500
+ *     two   at (x, 600, 900), x mirrored           rgb (64, g, 127) 500/1500
+ *
+ * The two big ones are alive and the three small ones are not. Each big light
+ * draws `rand()` twice a frame: its GREEN channel is `(rand() & 63) + 64`, so
+ * it flickers between 64 and 127 while red and blue hold, and its X eases a
+ * quarter of the way toward `±((rand() & 511) + 200)` every frame — one to the
+ * right, one to the left, from persistent stores at `module+0x11664` and
+ * `module+0x11668` which the module image starts at zero. So the pair drifts
+ * apart and back across the logo, and that drift is what makes the retail title
+ * screen's lighting move while the geometry only turns.
+ *
+ * `rand()` is BIOS `A(2Fh)` — `engine+0x10C` is `0x80089E28`, the two-
+ * instruction thunk `addiu t2,0xA0; jr t2; addiu t1,47` — which is the
+ * generator `q2_rng_next` already reproduces bit for bit (weapon.h). The four
+ * draws happen in a fixed order, and it is kept: right x, right green, left x,
+ * left green.
+ *
+ * One consequence worth stating because it is load-bearing: the dynamic list
+ * holds sixteen and `0x80075C34` silently drops the seventeenth, so the caller
+ * must clear it per frame (`q2_light_world_begin_frame`) or the rig fills it in
+ * four frames and then stops updating.
+ */
+#define Q2_LB_LIGHT_MAX 5
+
+typedef struct q2_lb_light {
+    s32 pos[3];
+    u8  rgb[3];
+    s32 inner, outer;
+} q2_lb_light;
+
+/*
+ * Build the front end's five lights for this frame, advancing `wander` and
+ * `rng` exactly as `module+0x2BD8` advances its own two stores and the BIOS
+ * generator. Writes `Q2_LB_LIGHT_MAX` entries and returns that count.
+ *
+ * `wander` is the module's own pair of persistent stores — `[0]` is `+0x11668`,
+ * the light that drifts RIGHT, and `[1]` is `+0x11664`, the one that drifts
+ * left. Zero-initialise it once, as the module image is.
+ */
+u32 q2_levelbin_scene_lights(q2_lb_light out[Q2_LB_LIGHT_MAX],
+                             s32 wander[2], q2_rng *rng);
+
+/*
  * Find the scene's id list. True when one was found.
  *
  * Anchored the way `q2_levelbin_menu_pages` is, on two things that have to hold

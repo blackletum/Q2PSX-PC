@@ -16,6 +16,7 @@
 #include "flare.h"
 #include "gte.h"
 #include "lighting.h"
+#include "trig.h"
 #include "weapon.h"
 
 static int g_failures;
@@ -26,6 +27,20 @@ static void check(bool condition, const char *what)
     g_checks++;
     if (!condition) {
         printf("  FAIL  %s\n", what);
+        g_failures++;
+    }
+}
+
+static void check_near(s64 got, s64 want, s64 tol, const char *what)
+{
+    s64 d = got - want;
+
+    g_checks++;
+    if (d < 0)
+        d = -d;
+    if (d > tol) {
+        printf("  FAIL  %s: got %lld, want %lld +/- %lld\n",
+               what, (long long)got, (long long)want, (long long)tol);
         g_failures++;
     }
 }
@@ -511,6 +526,304 @@ static void test_flklight(void)
      * adds a light and returns. The radii above are the whole of it. */
 }
 
+/* ------------------------------------------------------------------------- */
+/*
+ * The flare's GEOMETRY, read back out of the ordering table.
+ *
+ * This is here because the alternative is looking at a screenshot, and a
+ * screenshot cannot tell a twelve-sided glow from an eleven-sided one with a
+ * doubled vertex — which is exactly the bug the ring generator had. Its two
+ * cursors walk from opposite ends and write at +4 from each, so iteration k
+ * fills out[k+1] and out[n+1-k]; the port had out[n-k], which silently drops a
+ * vertex and duplicates another, and additively blended over a bright wall it
+ * looks like nothing at all.
+ *
+ * Everything below is checked through q2_flare_draw rather than against the
+ * generators directly, so the wiring — kinds, blend mode, colours, bucket — is
+ * on trial with the arithmetic.
+ */
+static void flare_test_view(q2_flare_view *v, u16 bucket)
+{
+    memset(v, 0, sizeof(*v));
+    v->centre[0] = Q2_FLARE_REF_W / 2;
+    v->centre[1] = Q2_FLARE_REF_H / 2;
+    v->extent[0] = Q2_FLARE_REF_W;      /* the console's own viewport, so the */
+    v->extent[1] = Q2_FLARE_REF_H;      /* two ring divisors cancel to 4096   */
+    v->bucket    = bucket;
+}
+
+static void test_flare_geometry(void)
+{
+    q2_flare_view  view;
+    q2_flare_stats stats;
+    q2_camera cam;
+    gte_state gte;
+    psx_ot    ot;
+    q2_light  l;
+    gte_matrix rot;
+
+    printf("flare geometry\n");
+
+    if (psx_ot_init(&ot, 64, 4096) != Q2_OK) {
+        check(false, "the test ordering table allocates");
+        return;
+    }
+
+    flare_test_view(&view, 32);
+    memset(&stats, 0, sizeof(stats));
+    memset(&cam, 0, sizeof(cam));
+
+    /*
+     * Straight ahead and close enough to be inside the inner radius, which is
+     * what puts the light on the GROW side of 4096 — full colour and a scale
+     * that is the attenuation rather than the floor.
+     */
+    /*
+     * A big flare on purpose. The attenuation only exceeds 4096 inside the
+     * inner radius, and the flare's screen radius is `atten >> 7`, so a light
+     * with its inner radius close to its outer one gives a few hundred pixels
+     * instead of the floor's 32 — and at a few hundred pixels the one-pixel
+     * truncations below are noise rather than the whole measurement.
+     */
+    make_light(&l, 0, 0, 1000, 255, 255, 255, 4000);
+    l.type = (2 << 3) | 7;                 /* style 2: the core alone */
+    l.inner_radius_sq = 3900u * 3900u;
+
+    gte_init(&gte);
+    /* Identity: the camera looks down +z with no rotation, so a light on the
+     * axis lands on the geometry offset. */
+    memset(&rot, 0, sizeof(rot));
+    rot.m[0][0] = rot.m[1][1] = rot.m[2][2] = Q2_ONE_12;
+    gte_set_rotation(&gte, &rot);
+    gte_set_translation(&gte, 0, 0, 0);
+    gte_set_projection(&gte, Q2_FLARE_REF_W, view.centre[0], view.centre[1]);
+
+    q2_flare_draw(&l, &cam, &view, &ot, &gte, &stats);
+
+    check_eq_i(stats.flares_drawn, 1, "a light in range draws its flare");
+
+    /*
+     * Style 2 is one BURST element and nothing else: six Gouraud quads for the
+     * twelve-sided glow, then eight Gouraud lines for the star.
+     */
+    check_eq_i(stats.prims_emitted, Q2_FLARE_BURST_SIDES / 2 + Q2_FLARE_BURST_LINES,
+               "the core is six quads and eight lines");
+
+    {
+        u32 quads = 0, lines = 0, wrong_blend = 0, opaque = 0, i;
+        s32 rim_x = 0, rim_y = 0;      /* the widest rim offset seen  */
+        s32 arm_x = 0, arm_y = 0;      /* the longest arm             */
+        s32 diag_x = 0;
+        psx_xy centre;
+        bool have_centre = false;
+
+        for (i = 0; i < ot.prim_count; i++) {
+            const psx_prim *p = &ot.prims[i];
+
+            if (!p->semi_transparent)
+                opaque++;
+            if (((p->tpage >> 5) & 3u) != PSX_BLEND_ADD)
+                wrong_blend++;
+
+            if (p->kind == PSX_PRIM_G4) {
+                quads++;
+                /* xy[1] is the centre corner — the bright one. */
+                centre = p->xy[1];
+                have_centre = true;
+            } else if (p->kind == PSX_PRIM_LINE_G2) {
+                lines++;
+            }
+        }
+
+        check_eq_i(quads, Q2_FLARE_BURST_SIDES / 2, "six quads make the glow");
+        check_eq_i(lines, Q2_FLARE_BURST_LINES, "eight lines make the star");
+        check_eq_i(opaque, 0, "every flare primitive is semi-transparent");
+        check_eq_i(wrong_blend, 0,
+                   "and every one blends additively, as the world leaves the "
+                   "draw mode");
+        check(have_centre, "the glow has a centre corner");
+
+        /* The rim, and the arms, measured as offsets from that centre. */
+        for (i = 0; i < ot.prim_count; i++) {
+            const psx_prim *p = &ot.prims[i];
+            int c;
+
+            if (p->kind == PSX_PRIM_G4) {
+                for (c = 0; c < 4; c++) {
+                    s32 dx = p->xy[c].x - centre.x;
+                    s32 dy = p->xy[c].y - centre.y;
+
+                    if (dx < 0) dx = -dx;
+                    if (dy < 0) dy = -dy;
+                    if (dx > rim_x) rim_x = dx;
+                    if (dy > rim_y) rim_y = dy;
+                }
+            } else if (p->kind == PSX_PRIM_LINE_G2) {
+                s32 dx = p->xy[1].x - centre.x;
+                s32 dy = p->xy[1].y - centre.y;
+
+                check(p->xy[0].x == centre.x && p->xy[0].y == centre.y,
+                      "every arm starts at the glow's centre");
+                check(p->rgb[1].r == 0 && p->rgb[1].g == 0 && p->rgb[1].b == 0,
+                      "and fades to black at its tip");
+
+                if (dx < 0) dx = -dx;
+                if (dy < 0) dy = -dy;
+
+                if (dy == 0 && dx > arm_x) arm_x = dx;
+                if (dx == 0 && dy > arm_y) arm_y = dy;
+                if (dx != 0 && dy != 0 && dx > diag_x) diag_x = dx;
+            }
+        }
+
+        /*
+         * The rim is a circle at 320x240, because that is the reference both
+         * ring divisors are taken against and the viewport above is exactly it.
+         * Anywhere else it is an ellipse, which is the console's own behaviour
+         * and not a fault: the divisors are per-axis.
+         */
+        check_eq_i(rim_x, rim_y, "the glow is round on a 320x240 viewport");
+        check(rim_x > 100, "and big enough for the ratios below to mean something");
+
+        /*
+         * The arms, against the six divisors solved out of the instruction
+         * stream. An axis arm reaches 4096/2500 of the rim and a diagonal
+         * 4096/3500 of it — each measured against the rim's OWN reach in that
+         * direction, which for the diagonal is not a vertex of a twelve-gon and
+         * so is recomputed here from the ring divisor.
+         *
+         * Within a pixel rather than exactly, because the two paths truncate at
+         * different points: the rim divides by 320*4096 and the arm by 320*2500
+         * from the same product. A wrong divisor would be out by a third, not
+         * by one.
+         */
+        {
+            s32 rim45 = (s32)(q2_sin12(Q2_ANGLE_360 / 8) * rim_x) * view.extent[0]
+                      / ((s32)Q2_FLARE_REF_W * Q2_ONE_12);
+
+            check_near(arm_x, (s32)((s64)rim_x * Q2_ONE_12 / Q2_FLARE_SPIKE_REF), 1,
+                       "an axis arm reaches 4096/2500 of the rim");
+            check_near(arm_y, (s32)((s64)rim_y * Q2_ONE_12 / Q2_FLARE_SPIKE_REF), 1,
+                       "in both axes");
+            check_near(diag_x, (s32)((s64)rim45 * Q2_ONE_12 / Q2_FLARE_DIAG_REF), 1,
+                       "and a diagonal reaches 4096/3500 of it");
+            check(diag_x < arm_x,
+                  "so a diagonal is the shorter of the two, 5/7 of an axis arm");
+        }
+
+        /*
+         * The regression the ring's off-by-one caused: with out[n-k] instead of
+         * out[n+1-k] the rim visits only eleven distinct directions and doubles
+         * one, so the widest LEFT offset stops matching the widest right one.
+         * Count the distinct rim points instead of trusting the extremes.
+         */
+        {
+            psx_xy seen[Q2_FLARE_BURST_SIDES * 4];
+            u32 n = 0, j;
+
+            for (i = 0; i < ot.prim_count; i++) {
+                const psx_prim *p = &ot.prims[i];
+                int c;
+
+                if (p->kind != PSX_PRIM_G4)
+                    continue;
+                for (c = 0; c < 4; c++) {
+                    if (p->xy[c].x == centre.x && p->xy[c].y == centre.y)
+                        continue;               /* the centre corner */
+                    for (j = 0; j < n; j++)
+                        if (seen[j].x == p->xy[c].x && seen[j].y == p->xy[c].y)
+                            break;
+                    if (j == n && n < (u32)(sizeof seen / sizeof seen[0]))
+                        seen[n++] = p->xy[c];
+                }
+            }
+
+            check_eq_i(n, Q2_FLARE_BURST_SIDES,
+                       "the rim has twelve distinct vertices, not eleven and a "
+                       "duplicate");
+        }
+    }
+
+    /*
+     * The GHOSTS, which is the half of the effect that makes it a lens flare.
+     *
+     * Style 1 is the same core followed by five DISC elements, each placed at
+     * its own fraction along the line from the screen centre to the light —
+     * three of them past the centre, on the far side. Redraw the same light as
+     * style 1 and check that the five hexagons land where their `pos` says and
+     * that they are hexagons, which is `flare_hex` (0x80074C4C) rather than the
+     * twelve-gon generator the port used to reuse here.
+     */
+    psx_ot_clear(&ot);
+    memset(&stats, 0, sizeof(stats));
+    l.type = (1 << 3) | 7;
+
+    q2_flare_draw(&l, &cam, &view, &ot, &gte, &stats);
+
+    {
+        const q2_flare_style *style = q2_flare_style_table(1);
+        u32 flat = 0, i;
+        u32 e;
+
+        for (i = 0; i < ot.prim_count; i++)
+            if (ot.prims[i].kind == PSX_PRIM_F4)
+                flat++;
+
+        check_eq_i(flat, (style->count - 1) * (Q2_FLARE_DISC_SIDES / 2),
+                   "five ghosts, three flat quads each");
+
+        /*
+         * How big each one is. The light is dead ahead here, so every element
+         * collapses onto the geometry offset and the PLACEMENT cannot be read
+         * off the primitives — but the widths can, and a ghost's width is
+         * `scale * size >> 12` run through the ring divisor, so the five must
+         * come out in the same order as the table's five sizes.
+         *
+         * That ordering is not monotone: style 1 runs 2048, 1100, 800, 512,
+         * 768, so the last ghost is WIDER than the one before it. A test that
+         * only asserted "they shrink" would pass on a build that ignored `size`
+         * for the tail.
+         */
+        {
+            s32 width[8];
+            u32 n = 0;
+
+            for (i = 0; i < ot.prim_count && n < 8; i++) {
+                const psx_prim *p = &ot.prims[i];
+                s32 lo = 1 << 30, hi = -(1 << 30);
+                int c;
+
+                if (p->kind != PSX_PRIM_F4)
+                    continue;
+                for (c = 0; c < 4; c++) {
+                    if (p->xy[c].x < lo) lo = p->xy[c].x;
+                    if (p->xy[c].x > hi) hi = p->xy[c].x;
+                }
+                width[n++] = hi - lo;
+            }
+
+            /* Three quads per ghost, emitted together, so element e's width is
+             * at index 3e. */
+            for (e = 1; e + 1 < style->count; e++) {
+                u32 a = (e - 1) * (Q2_FLARE_DISC_SIDES / 2);
+                u32 b = e * (Q2_FLARE_DISC_SIDES / 2);
+
+                if (b >= n)
+                    break;
+                check((width[a] > width[b]) ==
+                      (style->element[e].size > style->element[e + 1].size),
+                      "each ghost's width follows its own `size`, including "
+                      "the last one, which grows again");
+            }
+
+            check(n >= 3 && width[0] > width[n - 1],
+                  "and the first ghost is the widest of them");
+        }
+    }
+
+    psx_ot_free(&ot);
+}
+
 int main(void)
 {
     printf("light model tests\n\n");
@@ -522,6 +835,7 @@ int main(void)
     test_normalise();
     test_ncs();
     test_flare_styles();
+    test_flare_geometry();
     test_glow_fade();
     test_dynamic();
     test_muzzle_light();

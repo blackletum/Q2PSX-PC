@@ -247,6 +247,19 @@ typedef struct q2_world_stats {
     u32 quads_semi;            /* clut & 3 non-zero: drawn with ABE       */
     u32 quads_rejected_flat;   /* variant 1's zero-depth corner rejection */
     u32 quads_subdivided;      /* replaced by a 4x4 mesh                  */
+
+    /*
+     * The lens flare pass, which is otherwise invisible: a flare that never
+     * gets drawn and a flare that is drawn off the edge of the screen look the
+     * same from here, and `lit` can only say how many the CELL holds — not how
+     * many survived the near cull or the attenuation. Mirrors q2_flare_stats.
+     */
+    u32 flare_lights;          /* lights the pass looked at               */
+    u32 flare_styled;          /* of those, ones carrying a flare style   */
+    u32 flare_near;            /* rejected: camera-space Z under 256      */
+    u32 flare_dark;            /* rejected: attenuation fell to zero      */
+    u32 flare_drawn;
+    u32 flare_prims;
 } q2_world_stats;
 
 /*

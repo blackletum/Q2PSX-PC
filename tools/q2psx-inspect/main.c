@@ -185,7 +185,7 @@ static void usage(void)
     puts("  pmove   <disc> [map] [zone] player movement: styles, jump, view, volumes");
     puts("  screen  <disc> out.ppm [layout] [map] [zone]  compose one frame");
     puts("  music   <disc>              demultiplex and decode the XA music streams");
-    puts("  render  <disc> <map> [z] [out.ppm] [yaw] [pitch] [rot-ticks]  render a zone");
+    puts("  render  <disc> <map> [z] [out.ppm] [yaw] [pitch] [rot-ticks] [eye-pitch]");
     puts("  hexdump <disc> <path> [n]   hex dump the first n bytes of a file");
     puts("  extract <disc> <outdir>     extract the whole filesystem");
     puts("  export  <disc> <outdir> [what] [map]  decode assets: OBJ, PCX/PNG, WAV");
@@ -3620,14 +3620,16 @@ static s32  g_focus[3];
 static s32  g_focus_size;
 
 static int cmd_render(disc *d, const char *map, int zone_index, const char *out_path,
-                      s32 yaw, s32 pitch, s32 rot_ticks)
+                      s32 yaw, s32 pitch, s32 rot_ticks, s32 eye_pitch)
 {
     /* pitch == 9999 is a sentinel meaning "stand at the spawn point and look
      * ahead" rather than framing the whole zone from outside. It is the view a
-     * player actually gets, and therefore the honest test of the renderer. */
+     * player actually gets, and therefore the honest test of the renderer.
+     * `eye_pitch` is the pitch to apply once standing there, since the sentinel
+     * has taken `pitch` over. */
     bool eye_view = (pitch == 9999);
     if (eye_view)
-        pitch = 0;
+        pitch = eye_pitch;
 
     q2_world_zone zone;
     q2_camera cam;
@@ -3900,6 +3902,62 @@ static int cmd_render(disc *d, const char *map, int zone_index, const char *out_
     printf("  camera        : [%d %d %d] yaw=%d pitch=%d h=%u\n",
            cam.pos[0], cam.pos[1], cam.pos[2], cam.yaw, cam.pitch, cam.projection);
 
+    /*
+     * The LENS FLARES, which this renderer has never drawn: `q2_world_zone`
+     * carries `lights` and `light_node` for exactly this pass and nothing here
+     * ever set them, so the draw took the null branch every time.
+     *
+     * Static because the light world BORROWS all three of the structures below
+     * — the map's Lights list lives in the COMMON buffer, and the SpaceLights
+     * partition indexes the SecondaryCol hull — and every one of them has to
+     * outlive the draw call at the bottom of this function.
+     *
+     * A camera outside the movement hull finds no node and therefore no static
+     * lights, which is the console's own behaviour and not a gap here: a flare
+     * is visible from inside the cells the level's build tool assigned its light
+     * to and nowhere else. That means the whole-zone framing view sees none and
+     * the `pitch 9999` eye view, which stands at a real spawn, sees what a
+     * player would.
+     */
+    static q2_buf         g_lit_common, g_lit_zone;
+    static q2_common_file g_lit_cf;
+    static q2_zone_file   g_lit_zf;
+    static q2_collision   g_lit_sec;
+    static q2_spacelights g_lit_sl;
+    static q2_light_list  g_lit_list;
+    static q2_light_world g_lit_world;
+    {
+        char cpath[256], zpath[256];
+        bool ok = false;
+
+        snprintf(cpath, sizeof(cpath), "Q2DATA/LEVELS/%s/COMMON.DAT", map);
+        snprintf(zpath, sizeof(zpath), "Q2DATA/LEVELS/%s/ZONE%d.DAT",
+                 map, zone_index);
+
+        if (disc_read_file(d, cpath, &g_lit_common) == Q2_OK &&
+            disc_read_file(d, zpath, &g_lit_zone) == Q2_OK &&
+            q2_common_open(&g_lit_cf, &g_lit_common) == Q2_OK &&
+            q2_zone_open(&g_lit_zf, &g_lit_zone) == Q2_OK &&
+            q2_lights_parse(&g_lit_list, &g_lit_cf) == Q2_OK &&
+            q2_collision_parse(&g_lit_sec, &g_lit_zf,
+                               Q2_COLL_SECONDARY) == Q2_OK &&
+            q2_spacelights_open(&g_lit_sl, &g_lit_zf, &g_lit_sec) == Q2_OK) {
+            memset(&g_lit_world, 0, sizeof(g_lit_world));
+            g_lit_world.statics = &g_lit_list;
+            g_lit_world.space   = &g_lit_sl;
+
+            zone.lights     = &g_lit_world;
+            zone.light_node = q2_coll_find_node(&g_lit_sec, cam.pos, -1, true);
+            ok = true;
+        }
+
+        if (ok)
+            printf("  lights        : %u in the map, camera in cell %d\n",
+                   g_lit_list.count, zone.light_node);
+        else
+            printf("  lights        : unavailable; no flares will be drawn\n");
+    }
+
     r = psx_ot_init(&ot, 4096, 300000);
     if (r != Q2_OK) {
         fprintf(stderr, "cannot allocate ordering table: %s\n", q2_result_str(r));
@@ -3933,6 +3991,10 @@ static int cmd_render(disc *d, const char *map, int zone_index, const char *out_
     printf("  rejected bad  : %u\n", stats.quads_rejected_bad);
     printf("  sealing nodes : %u skipped\n", stats.nodes_sealing);
     printf("  ot overflow   : %u\n", stats.ot_overflow);
+    printf("  flares        : %u lights, %u styled, %u too near, %u dark, "
+           "%u drawn, %u prims\n",
+           stats.flare_lights, stats.flare_styled, stats.flare_near,
+           stats.flare_dark, stats.flare_drawn, stats.flare_prims);
 
     psx_raster_opts_default(&opts);
 
@@ -5652,7 +5714,12 @@ int main(int argc, char **argv)
             s32 yaw   = (argc >= 7) ? (s32)strtol(argv[6], NULL, 10) : 0;
             s32 pitch = (argc >= 8) ? (s32)strtol(argv[7], NULL, 10) : 0;
             s32 rott  = (argc >= 9) ? (s32)strtol(argv[8], NULL, 10) : 0;
-            rc = cmd_render(d, argv[3], zi, outp, yaw, pitch, rott);
+            /* The eye view's own pitch. `pitch` is spent on the 9999 sentinel
+             * that selects the eye view at all, so looking UP from a spawn had
+             * no expression — and a lens flare's ghosts are usually above the
+             * horizon, because the lights that carry one are ceiling lamps. */
+            s32 epitch = (argc >= 10) ? (s32)strtol(argv[9], NULL, 10) : 0;
+            rc = cmd_render(d, argv[3], zi, outp, yaw, pitch, rott, epitch);
         }
     } else if (strcmp(cmd, "dat") == 0) {
         if (argc < 4) {

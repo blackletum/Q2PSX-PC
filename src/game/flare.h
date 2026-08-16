@@ -60,10 +60,47 @@
  *     4096, which is why a flare blooms as you walk into it and fades as you
  *     walk away.
  *
- * Both element kinds are untextured and additive: the disc is a fan of Gouraud
+ * Both element kinds are untextured and additive: the glow is a fan of Gouraud
  * quads bright at the centre and black at the rim, and kind 1 adds eight
  * Gouraud lines radiating from the centre. There is no flare texture anywhere
  * on the disc, which is why looking for one never found anything.
+ *
+ * ---------------------------------------------------------------------------
+ * The two ring generators, which are two routines and not one
+ * ---------------------------------------------------------------------------
+ * The BURST's 12-gon comes from a general n-gon generator at 0x80074E6C. The
+ * DISC's hexagon does NOT: 0x800755CC calls 0x80074C4C, a separate routine that
+ * is written out flat, reads a single table entry (index 682 — the 60 degrees a
+ * hexagon turns by) and mirrors it into all six vertices rather than looking
+ * three of them up. Its vertical radius divides by 240 where the generator
+ * divides by 240*4096 against a cosine of 4096, and its vertex order starts at
+ * the top where the generator starts at the bottom. A hexagon has 180-degree
+ * symmetry, so the two agree on the shape and disagree only in the arithmetic —
+ * which is why both are transcribed rather than one aliased onto the other.
+ *
+ * Both read their angles from the executable's own {sin, cos} table at
+ * 0x800A5430: 4096 entries of two halfwords, a full turn in 4096 steps.
+ * `q2psx-inspect lights` reads all 16,384 bytes of it back off the disc and
+ * compares them against this port's `q2_sin12`/`q2_cos12` — 4096 of 4096 in
+ * both columns, so the flare geometry stands on the console's own trig.
+ *
+ * ---------------------------------------------------------------------------
+ * The frame entry, and the gate
+ * ---------------------------------------------------------------------------
+ * 0x80075BDC is the whole flare stage: it tests a word at 0x800B2ECC, gives up
+ * if the viewport count at 0x800B2C2C is not positive, and otherwise runs
+ * 0x800759F0 once per viewport. That gate has exactly one writer in the image —
+ * 0x80071448 stores 1 to it during start-up — and nothing ever clears it, so on
+ * this disc the flares are unconditionally on and the flag is vestigial. It is
+ * named here because a reader finding the branch should not have to go looking.
+ *
+ * The stage is the sixteenth of the frame (0x8003932C stamps 16 into the
+ * profiler's slot before the call), which puts it after the world and before
+ * the entity draw. Call order does not decide draw order, though: every flare
+ * links into the viewport slice's LAST bucket — `db + 11192 + 204*p`, which is
+ * slice bucket 50, the same one the damage flash uses — so with the table
+ * running forward a flare paints over everything the viewport drew, which is
+ * what a lens flare is.
  */
 #ifndef Q2PSX_FLARE_H
 #define Q2PSX_FLARE_H
@@ -92,10 +129,39 @@
 #define Q2_FLARE_MIN_SCALE 32
 #define Q2_FLARE_SCALE_SHIFT 7
 
-/* The reference screen the ring generator's divisors are expressed against
- * (0x80074F94's /983040 and 0x80074EE4's /1310720, both over 4096). */
+/*
+ * The reference screen every one of the six folded divides is expressed
+ * against, and the three denominators that divide it.
+ *
+ * Each divide is a `mult`/`mfhi`/`sra`/`subu` magic sequence, and a magic M
+ * with post-shift p is a signed divide by the unique d satisfying
+ * M == floor(2^(32+p)/d) + 1. Solving all six gives 1310720, 983040, 800000,
+ * 600000, 1120000 and 840000 — that is 320 and 240 times 4096, 2500 and 3500,
+ * with nothing left over. So the rings are a fraction of the VIEWPORT rather
+ * than a count of pixels, and the starburst's arms are the same fraction taken
+ * against a smaller reference: an axis arm reaches 4096/2500 = 1.6384x the
+ * glow's radius and a diagonal 4096/3500 = 1.1703x.
+ */
 #define Q2_FLARE_REF_W 320
 #define Q2_FLARE_REF_H 240
+#define Q2_FLARE_SPIKE_REF 2500   /* the starburst's axis arms  */
+#define Q2_FLARE_DIAG_REF  3500   /* its diagonals              */
+
+/* The rims. The burst's 12-gon comes from the general generator at 0x80074E6C;
+ * the disc's hexagon from its own unrolled routine at 0x80074C4C, which reads
+ * only the one table entry named here. */
+#define Q2_FLARE_BURST_SIDES 12
+#define Q2_FLARE_DISC_SIDES   6
+#define Q2_FLARE_HEX_ANGLE  (4096 / Q2_FLARE_DISC_SIDES)   /* 682 */
+
+/* The starburst is eight lines drawn as four opposed pairs (0x80074FF4's
+ * `a1 = 8`, halved for the loop bound). */
+#define Q2_FLARE_BURST_LINES 8
+
+/* The rim buffer both generators write into. Three past the last vertex,
+ * because the fan reads out[i+1..i+3] and the generators duplicate out[1] and
+ * out[2] at the top rather than wrapping the index. */
+#define Q2_FLARE_RING_MAX 16
 
 typedef enum q2_flare_kind {
     Q2_FLARE_KIND_NONE  = 0,
@@ -131,9 +197,13 @@ const q2_flare_style *q2_flare_style_table(u32 style);
 
 /*
  * Where the flare pass draws into. `centre` and `extent` are the viewport's
- * own, and they are two different things in the original — the screen centre
- * at playerctx+266/+268 that elements are positioned against, and the width and
- * height at +278/+280 that the ring generator scales by.
+ * own, and they are two different things in the original — the GTE geometry
+ * offset at view+266/+268 that elements are positioned against, and the 2D
+ * extent at +278/+280 that both ring generators scale by. The offset is where
+ * the projection puts the view axis, so it is the screen centre in the sense
+ * that matters here; pass the same value the world draw gives SetGeomOffset,
+ * not a bare width/2, or every element slides along its own line on a viewport
+ * whose offset has been moved.
  */
 typedef struct q2_flare_view {
     s16 centre[2];
@@ -160,13 +230,21 @@ typedef struct q2_flare_stats {
  * through MVMVA exactly as the original does, so the flare lands on the same
  * pixel the geometry does.
  *
- * The GTE's TRANSLATION must be zero. The original's per-viewport pass loads
- * TRX/TRY/TRZ from a scratch matrix at 0x800DDD7C whose contents were not
- * traced — neither of its two readers writes it. Zero is what makes the
- * transform self-consistent, because the vector fed to the GTE is already the
- * light's offset FROM the camera, and a non-zero translation there would move
- * every flare off its light by the same amount. It is a substitution, and this
- * is where it is recorded.
+ * The GTE's TRANSLATION must be zero, and that is now read rather than assumed.
+ * The per-viewport pass loads TRX/TRY/TRZ from 0x800DDD7C, the translation
+ * slot of a MATRIX at 0x800DDD68 — and that object has no writer anywhere in
+ * the image. It sits at 0x800DDD68, well past the end of the text segment at
+ * 0x800B2800, so it is BSS: zero from start-up and zero for the life of the
+ * session. Its three readers agree. Two of them (0x80058450 and 0x80058484)
+ * pass 0x800DDD7C to T_Damage as BOTH the `dir` and the `point` argument, which
+ * is a call that only makes sense as "no direction, no impact point" — a
+ * non-zero vector there would knock the target somewhere. The third
+ * (0x80030598) is the entity draw doing exactly what the flare pass does.
+ *
+ * So it is a static zero VECTOR the engine reuses wherever it needs one, and
+ * loading it into TRX/TRY/TRZ is how both passes say "rotation only". That is
+ * also what makes the transform self-consistent, because the vector fed to the
+ * GTE is already the light's offset FROM the camera.
  */
 u32 q2_flare_draw(const q2_light *l, const q2_camera *cam,
                   const q2_flare_view *view, psx_ot *ot, gte_state *gte,

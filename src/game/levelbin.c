@@ -795,3 +795,71 @@ bool q2_levelbin_scene(const u8 *module, u32 size, u32 load_base,
 
     return false;
 }
+
+/* ------------------------------------------------------------------------- */
+/* The title screen's lights — module+0x2BD8, see levelbin.h                   */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * 0x80102DB4..0x80102DC8, and again at 0x80102E84..0x80102E9C. The compiler's
+ * signed divide-by-four: `d >= 0 ? d >> 2 : (d + 3) >> 2`, which rounds toward
+ * zero. Written out rather than left as `/ 4` because the two arms are visible
+ * in the disassembly and this is the only place the port needs to agree with
+ * them on a negative delta — which the LEFT light spends its whole life on.
+ */
+static s32 ease_quarter(s32 cur, s32 target)
+{
+    s32 d = target - cur;
+    return cur + ((d >= 0) ? (d >> 2) : ((d + 3) >> 2));
+}
+
+u32 q2_levelbin_scene_lights(q2_lb_light out[Q2_LB_LIGHT_MAX],
+                             s32 wander[2], q2_rng *rng)
+{
+    /* The three small ones are constants on the frame: 0x80102BFC packs their
+     * radii as 0x00C80064 and 0x80102C9C packs their colour as 0x0040FF10. */
+    static const s32 k_small_y[3] = { -200, 0, 200 };
+    u32 i;
+
+    if (!out || !wander || !rng)
+        return 0;
+
+    for (i = 0; i < 3; i++) {
+        out[i].pos[0] = 0;
+        out[i].pos[1] = k_small_y[i];
+        out[i].pos[2] = 500;
+        out[i].rgb[0] = 16;
+        out[i].rgb[1] = 255;
+        out[i].rgb[2] = 64;
+        out[i].inner  = 100;
+        out[i].outer  = 200;
+    }
+
+    /*
+     * The two big ones, in the module's own draw order — right x, right green,
+     * left x, left green. The order is kept because the generator is shared:
+     * reordering the four draws would give every light a different value from
+     * the frame after the first, and the flicker is visible.
+     */
+    for (i = 0; i < 2; i++) {
+        s32 target = (q2_rng_next(rng) & 0x1FF) + 200;
+        s32 green;
+
+        if (i == 1)
+            target = -target;              /* 80102E80: subu v0, zero, v0 */
+
+        wander[i]        = ease_quarter(wander[i], target);
+        green            = (q2_rng_next(rng) & 0x3F) + 64;
+
+        out[3 + i].pos[0] = wander[i];
+        out[3 + i].pos[1] = 600;
+        out[3 + i].pos[2] = 900;
+        out[3 + i].rgb[0] = 64;
+        out[3 + i].rgb[1] = (u8)green;
+        out[3 + i].rgb[2] = 127;
+        out[3 + i].inner  = 500;
+        out[3 + i].outer  = 1500;
+    }
+
+    return Q2_LB_LIGHT_MAX;
+}

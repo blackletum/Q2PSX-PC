@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "levelbin.h"
 #include "sim.h"
 #include "trig.h"
 
@@ -65,6 +66,93 @@ static void test_tick_rate(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/* ------------------------------------------------------------------------- */
+/*
+ * The TITLE SCREEN's five lights — module+0x2BD8, transcribed in levelbin.h.
+ *
+ * Worth pinning because none of it is checkable against a table: the rig is
+ * code, the two big lights share one pseudo-random generator, and the order
+ * they draw from it decides every value after the first frame. A reordering
+ * would still produce five plausible lights and a visibly different screen.
+ */
+static void test_scene_lights(void)
+{
+    q2_lb_light l[Q2_LB_LIGHT_MAX];
+    s32 wander[2] = { 0, 0 };
+    q2_rng rng;
+    u32 n, i, f;
+
+    q2_rng_seed(&rng, 1);
+    n = q2_levelbin_scene_lights(l, wander, &rng);
+    check(n == Q2_LB_LIGHT_MAX, "the rig is five lights");
+
+    /* The three small ones are constants: 0x80102BFC packs their radii and
+     * 0x80102C9C their colour, and only y moves. */
+    for (i = 0; i < 3; i++) {
+        check(l[i].pos[0] == 0 && l[i].pos[2] == 500,
+              "a small light stands on the axis at z 500");
+        check(l[i].rgb[0] == 16 && l[i].rgb[1] == 255 && l[i].rgb[2] == 64,
+              "a small light is green");
+        check(l[i].inner == 100 && l[i].outer == 200,
+              "a small light is 100/200");
+    }
+    check(l[0].pos[1] == -200 && l[1].pos[1] == 0 && l[2].pos[1] == 200,
+          "the three small lights are a column 200 apart");
+
+    /*
+     * ...and being 200 across at 1200 from the logo, NONE of them reaches it:
+     * `q2_light_set_add` rejects on any axis delta at or beyond the radius. The
+     * rig places them anyway and the gather throws them out, which is the
+     * behaviour, not a bug to be tidied.
+     */
+    check(l[0].outer < Q2_LB_SCENE_DIST - l[0].pos[2],
+          "a small light cannot reach the logo");
+
+    /* The two big ones are 500/1500 at y 600, z 900, mirrored in x. */
+    for (i = 3; i < 5; i++) {
+        check(l[i].pos[1] == 600 && l[i].pos[2] == 900,
+              "a big light sits above and in front");
+        check(l[i].rgb[0] == 64 && l[i].rgb[2] == 127,
+              "a big light holds red and blue");
+        check(l[i].rgb[1] >= 64 && l[i].rgb[1] <= 127,
+              "a big light's green is (rand & 63) + 64");
+        check(l[i].inner == 500 && l[i].outer == 1500,
+              "a big light is 500/1500");
+    }
+    check(l[3].pos[0] >= 0 && l[4].pos[0] <= 0,
+          "the big pair drifts apart, one each way");
+
+    /*
+     * The ease is a quarter of the way per frame toward a target in
+     * ±(200..711), so x is bounded by the target range however long it runs —
+     * and the left one's delta is negative every frame, which is the arm
+     * `(d + 3) >> 2` exists for.
+     */
+    for (f = 0; f < 400; f++)
+        q2_levelbin_scene_lights(l, wander, &rng);
+    check(l[3].pos[0] > 0 && l[3].pos[0] <= 711,
+          "the right light stays inside its target range");
+    check(l[4].pos[0] < 0 && l[4].pos[0] >= -711,
+          "the left light stays inside its target range");
+
+    /* Same seed, same sequence — the generator is the console's, so a replay
+     * of the title screen is reproducible. */
+    {
+        q2_lb_light a[Q2_LB_LIGHT_MAX], b[Q2_LB_LIGHT_MAX];
+        s32 wa[2] = { 0, 0 }, wb[2] = { 0, 0 };
+        q2_rng ra, rb;
+
+        q2_rng_seed(&ra, 7);
+        q2_rng_seed(&rb, 7);
+        for (f = 0; f < 20; f++) {
+            q2_levelbin_scene_lights(a, wa, &ra);
+            q2_levelbin_scene_lights(b, wb, &rb);
+        }
+        check(memcmp(a, b, sizeof(a)) == 0 && wa[0] == wb[0] && wa[1] == wb[1],
+              "one seed gives one title screen");
+    }
+}
+
 static void test_gravity(void)
 {
     q2_sim sim;
@@ -1202,6 +1290,7 @@ int main(void)
 
     test_tick_rate();
     test_gravity();
+    test_scene_lights();
     test_ground_and_view();
     test_movement();
     test_wish_velocity();

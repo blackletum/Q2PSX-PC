@@ -1431,6 +1431,25 @@ The residues of the resolved blockers keep their parents' numbers.
       for something that does not exist. Full detail in FORMATS.md §17.3; implemented in
       `src/game/flare.[ch]` and checked element-for-element against the executable by
       `q2psx-inspect lights`.
+
+      **And the whole of it has now been read down to the last constant, which turned up four things the
+      first pass had left standing.** *(1)* The four "magic multiplies whose closed form was not recovered"
+      are all exact integer divides: a magic `M` with post-shift `p` is a divide by the unique `d` with
+      `M == floor(2^(32+p)/d) + 1`, and all six of the flare's divides solve to `320` or `240` times 4096,
+      2500 or 3500. The starburst's proportions are `4096/2500` and `4096/3500`, which is what the earlier
+      pass measured as 1.637 and 1.170. *(2)* The DISC does not use the n-gon generator at all — `0x80074C4C`
+      is its own unrolled hexagon, reading one table entry and mirroring it. *(3)* The translation vector at
+      `0x800DDD7C` was recorded as an untraced substitution; it has no writer anywhere in the image, sits in
+      BSS, and two of its three readers hand it to `T_Damage` as both `dir` and `point` — it is a static
+      zero vector, and zero was right for a reason rather than by luck. *(4)* The generator's mirror index is
+      `out[n+1-k]`, not `out[n-k]`; this port had the latter, which turns the 12-gon into an 11-gon with a
+      doubled vertex. `tests/test_light.c` now counts the distinct rim vertices, because a screenshot cannot.
+
+      **The pass also had no caller.** `q2_world_zone` carries `lights` and `light_node` for exactly this and
+      nothing ever assigned them, so `q2_world_build_ot` took the null branch every frame of every run and
+      not one flare has ever been drawn by this port. Wired in `src/client/main.c` and in the offline
+      renderer, and both now report a per-frame flare census — considered, styled, culled near, culled dark,
+      drawn, primitives — because "0 drawn" and "6 drawn but all off-screen" are different faults.
 - [x] 27. **Both halves are answered, and the first was answered without anyone marking it.** The entry
       asked for the flag bits beyond 0, 1 and 8 and for the `extra` list's meaning.
 
@@ -1903,21 +1922,83 @@ item records at run time instead of transcribing a table, so there is nothing to
       pause menu and wrong for a title screen that IS a running level. `q2psx-inspect menu pages "" QFRONT`
       prints the list with each id's table record; `src/game/levelbin.[ch]`, `q2_sim_attach_scene`.
 
-      **Still open: the title screen's LIGHTS, and they are the reason it renders dark.** `q2psx-inspect lit
-      QFRONT` accepts zero lights at the spawn point, so shading the logo through the light path takes it to
-      black and the port draws it on the fallback light instead. That is not where the console gets its
-      light. The menu's own frame at `0x8001A1E8`/`0x8001A200` calls two module hooks every frame —
-      `engine+0x298` and `engine+0x294`, which QFRONT's `init` fills with `module+0x32BC` and
-      `module+0x2BD8` — and the first is only the controller-unplugged check (page 20, the
-      `PLEASE INSERT / CONTROLLER INTO / CONTROLLER PORT XX` records at `module+0x11670`). **The second
-      spawns dynamic lights.** It reaches `engine+0x3C` five times, and `engine+0x3C` is `0x80075C34`,
-      *append a runtime light to the world list* — the same entry `FLKLIGHT` uses, with the radii packed
-      into `a2` as inner-low/outer-high exactly as `lighting.h` records. Three of the five calls differ only
-      in one stack word, which steps `-200, 0, +200`: a row of three lights. Two colour/radius records are
-      built on the frame: `(64,127,127)` at radii `500/1500` and `(16,255,64)` at `100/200`, and there is a
-      600/900 pair further in. What is NOT settled is the argument order past `a2` — the stack words go to
-      `sp+48..56` rather than the `sp+16` an o32 call would use — so the positions are not transcribed here
-      rather than guessed at. That is the next piece, and it is bounded: one function, five call sites.
+      **The title screen's LIGHTS are the module's too, and they are the reason it renders dark without
+      them.** `q2psx-inspect lit QFRONT` accepts zero lights at the spawn point and the map's `Lights` chunk
+      is 28 bytes, so shading the logo through the light path takes it to black. That is not a gap in the
+      map: the front end lights its own scene, from code, every frame.
+      The menu's own frame at `0x8001A1E8`/`0x8001A200` calls two module hooks — `engine+0x298` and
+      `engine+0x294`, which `init` fills with `module+0x32BC` and `module+0x2BD8`. The first is only the
+      controller-unplugged check (page 20, the `PLEASE INSERT / CONTROLLER INTO / CONTROLLER PORT XX`
+      records at `module+0x11670`). **The second is a five-light rig**, reaching `engine+0x3C` —
+      `0x80075C34`, *append a runtime light* — five times a frame.
+      The signature had to be read off the CALLEE, because the call sites write their arguments to
+      `sp+48..56` and that is not where an o32 stack argument goes. `0x80075C34` spills a1/a2/a3 into the
+      caller's own home slots and reads them back as halfwords, so there are only ever four register
+      arguments — `a0` a `s32 *pos`, `a1` the packed rgb, `a2` inner-low/outer-high, `a3` style/size — and
+      `sp+48` is the local `pos[3]` whose address `a0` carries (`addiu s3, sp, 48` in the prologue). With
+      that the rig reads out whole:
+
+          three at (0, y, 500) for y = -200, 0, +200    rgb (16,255,64)   100/200
+          two   at (x, 600, 900), x mirrored            rgb (64, g, 127)  500/1500
+
+      The two big ones are alive and the three small ones are not. Each big light draws `rand()` twice a
+      frame: its GREEN channel is `(rand() & 63) + 64`, so it flickers between 64 and 127 while red and blue
+      hold, and its X eases a quarter of the way toward `±((rand() & 511) + 200)` every frame — one right,
+      one left, from persistent stores at `module+0x11664` and `+0x11668` that the module image starts at
+      zero. That drift is what makes the retail title screen's lighting move while the geometry only turns.
+      `rand()` is BIOS `A(2Fh)`: `engine+0x10C` is `0x80089E28`, the two-instruction thunk
+      `addiu t2,0xA0; jr t2; addiu t1,47` — the generator `q2_rng_next` already reproduces bit for bit. The
+      four draws happen in a fixed order and it is kept, because they share one generator and reordering
+      them changes every value after the first frame.
+      **The three small ones never reach the logo**, and that is not an error to tidy: 200 of outer radius
+      against 1200 of separation, and `q2_light_set_add` rejects on any axis delta at or beyond the radius.
+      The rig places them and the gather throws them out. They are transcribed as they are.
+      One consequence is load-bearing: the dynamic list holds sixteen and `0x80075C34` drops the seventeenth
+      silently, so the list must be cleared per frame or the rig fills it in four frames and the logo is
+      then lit by a frozen snapshot of frame four.
+
+      **Three smaller corrections this pass owes.**
+      *The camera is the world origin, not the spawn point.* `engine+0x170` — which `init` calls with 0
+      before anything else — is `0x80077D0C`, and its first act is `memset(0x800D5C30, 0, 3920)`: the whole
+      five-viewport array zeroed, position and rotation included, before `engine+0x174(0, 160, 4000)` puts
+      the projection and far plane back. So the front end throws QFRONT's `StartPos` away deliberately. It
+      also writes **1** into the player count at `0x800B2C2C`, which is why the module bothers to mark its
+      scenery taken: with one player registered the touch sweep really would run over it.
+      *`proj = 160` is confirmed from a third direction* — `engine+0x174(0, 160, 4000)` agrees with
+      `SetGeomScreen`'s eleven call sites and with the sky-wedge measurement.
+      *The logo is NOT born small.* An earlier pass here had it grow in from zero on the first frame, and
+      nothing in the module zeroes `+0xFC`: `q2_item_spawn` leaves a non-materialising record at full size
+      and the think reads what is there. What the title screen's ramp is for is the way BACK — a sub-page
+      has driven the scale to 1024 and returning walks it up to 4096 again. It is one animation seen from
+      two ends, and it only runs after you have been somewhere.
+      And the earlier guess in this entry that the rows sit low because the logo occupies the space *above*
+      them is superseded by the geometry: at scale 4096, z 1700 and proj 160 the posed bounds
+      `[-916 .. 1081]` in y project to screen y 38..226, so the logo fills the frame and the two rows sit
+      over its lower half. The rows are low because that is where the model's legs are, not because the
+      model stops above them.
+
+      **And the logo settles a question about `0x800B2CC8` that had nothing to do with the front end.**
+      `screen.h` called that field "the distance past which an entity is not drawn at all". It is `far / 4`,
+      the front end installs `far = 4000`, and the one model it draws stands at z = 1700 — so a cut-off read
+      that way would blank the retail title screen. Whatever the field gates, it is not a plain compare
+      against an entity's z. The note is corrected and nothing culls on it.
+      **And the background is BLACK, which is the one thing about this screen a capture settles instantly.**
+      The client painted it navy — it wrote `(16, 16, 32)` into the display's clear colour every frame and
+      cited `0x800780C0` for it. That function writes no colour: it zeroes `view+260` on every viewport and
+      calls the full-screen background env. The colour is gp+1604, and the whole image holds exactly three
+      references to it — `0x80076A00` reads it into the env's rgb, and `0x8006E0B0` and `0x80070FA0` each
+      `memset` it to zero. Four zero bytes on disc, no writer that puts anything else there. The invented
+      navy was invisible in a lit corridor and obvious the moment the front end drew one model over it.
+      One more thing the entity draw owed: **the light intensity is the entity's own scale.** `0x8006B298`
+      folds `+0xFC` and `+0xFE` as `(a * b) >> 11`, the allocator sets both to 4096 at `0x8006C1B8`, and
+      `+0xFC` is the scale — so an item is lit in proportion to how big it currently is. The port passed a
+      neutral pair, which agrees with the engine only for entities at full size. It shows here because the
+      logo's own think moves that field: shrunk onto a sub-page it is lit at a quarter.
+
+      *Still open on the front end:* the **attract loop**. `module+0xCEE0` parks 9000 (30 s at 1/300) in
+      `module+0x12DC0` and installs `module+0xC6AC` as the page hook; any input resets it and zero calls
+      `0x80101B08`. That is what the `DEMO OF GAME` / `STARTING` pair in the string pool is for, and the
+      port does not have it.
 
       **The thread to pull is the module's engine vtable**, and it is worth writing down because every
       `LevelBin` reaches the engine the same way — `QMULTI.C` included. A module holds the block at its own

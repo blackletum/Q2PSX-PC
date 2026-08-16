@@ -272,9 +272,12 @@ u32 q2_sim_attach_scene(q2_sim *sim, const q2_common_file *common,
         e->origin[0] = 0;
         e->origin[1] = 0;
         e->origin[2] = Q2_LB_SCENE_DIST;
-        e->pos[0] = e->origin[0];
-        e->pos[1] = e->origin[1];
-        e->pos[2] = e->origin[2];
+        /*
+         * `pos` (+0x54) is deliberately left where the place record put it. The
+         * builder writes +0xA4 and nothing else, so the two disagree in the
+         * original too — the draw reads +0xA4 and the touch sweep reads +0x54,
+         * and the sweep is the one the module has already disarmed.
+         */
 
         /*
          * module+0x3414 hides all five — bit 0x80 of every player's block —
@@ -297,13 +300,17 @@ u32 q2_sim_attach_scene(q2_sim *sim, const q2_common_file *common,
         sim->entities_ready = true;
         sim->scene_ready    = true;
         /*
-         * The scale the title screen ramps up FROM. `q2_item_spawn` leaves an
-         * item at full size unless its record materialises, and the module's
-         * think reads whatever is there — so starting at zero is what makes the
-         * logo grow into the screen instead of appearing at full size on frame
-         * one and never moving.
+         * The scale is left where `q2_item_spawn` put it, which for a record
+         * that does not materialise is full size (0x80059A98). Nothing in the
+         * module zeroes it, so the logo is NOT born small and does not grow in
+         * on the first frame — an earlier pass here made it do that and the
+         * ramp had no source.
+         *
+         * What the title screen's ramp is actually for is the way BACK: a
+         * sub-page has driven the scale down to 1024, and returning to the
+         * title walks it up to 4096 again. It is one animation seen from two
+         * ends, and it only runs after you have been somewhere.
          */
-        sim->entities.ent[0].scale = 0;
         q2_sim_scene_page(sim, true, true);
     }
     return n;

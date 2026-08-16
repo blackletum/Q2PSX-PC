@@ -444,8 +444,16 @@ typedef struct q2_screen_view {
  * renderers actually consume — the clip extent at 0x800B2C20/0x800B2C22 bounds
  * every polygon (read at 0x800657B8, 0x800659FC, 0x80065B64, 0x8006BFD4 and by
  * the assembly emitter at 0x800AF820), the slice pointer at 0x800B2D60 is where
- * primitives link, and 0x800B2CC8 is the distance past which an entity is not
- * drawn at all.
+ * primitives link, and 0x800B2CC8 is far/4.
+ *
+ * **0x800B2CC8 is NOT "the distance past which an entity is not drawn", which
+ * this note used to call it, and the title screen is the counter-example.**
+ * QFRONT's front end installs far = 4000 (`engine+0x174(0, 160, 4000)`, its
+ * `init`'s second act), so far/4 is 1000 — and the Q2LOGO it draws stands at
+ * z = 1700 and is the only thing on the screen. A cut-off read that way would
+ * blank the retail title screen. Whatever the field gates, it is not a plain
+ * compare against an entity's z, so nothing here applies it and the port does
+ * not cull on it. See openquestions #44.
  *
  * Keeping them in one struct rather than as loose globals is the only liberty
  * taken; the contents and the moment each is written are the original's.
