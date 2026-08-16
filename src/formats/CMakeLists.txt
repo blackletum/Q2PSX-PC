@@ -31,6 +31,8 @@ add_library(q2psx_formats STATIC
     spacelights.h
     stx.c
     stx.h
+    stxenc.c
+    stxenc.h
     sortdata.c
     sortdata.h
     surface.c
@@ -41,4 +43,7 @@ add_library(q2psx_formats STATIC
 )
 
 target_include_directories(q2psx_formats PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(q2psx_formats PUBLIC q2psx_common q2psx_disc q2psx_psx)
+# The ADPCM half of a film's container is the same codec the music uses, so the
+# encoder borrows the audio library rather than carrying a second copy.
+target_link_libraries(q2psx_formats PUBLIC q2psx_common q2psx_disc q2psx_psx
+                                           q2psx_audio)

@@ -108,6 +108,192 @@ u32 q2_xa_decode_sector(q2_xa_decoder *dec, const u8 *adpcm, s16 *out, u32 out_c
 }
 
 /* ------------------------------------------------------------------------- */
+/* The other direction                                                        */
+/* ------------------------------------------------------------------------- */
+void q2_xa_encoder_reset(q2_xa_encoder *enc)
+{
+    if (enc)
+        memset(enc, 0, sizeof(*enc));
+}
+
+/*
+ * One block: 28 samples of one channel, at one filter and one shift.
+ *
+ * Every line here is the DECODER's line rearranged, and deliberately so — the
+ * prediction, the truncating divide by 64, the shift-as-attenuation and the
+ * clamp all have to be the decoder's exactly or the reconstruction the encoder
+ * thinks it is producing is not the one that comes back. Returns the squared
+ * error, and leaves the predictor where the decoder will leave it.
+ */
+static u64 xa_try_block(const s16 *src, u32 have, int filter, int shift,
+                        s32 in1, s32 in2, u8 *nibbles,
+                        s32 *out1, s32 *out2)
+{
+    const s32 step = (s32)1 << (12 - shift);
+    u64 err = 0;
+    u32 i;
+
+    for (i = 0; i < XA_SAMPLES_PER_BLOCK; i++) {
+        s32 want = (i < have) ? (s32)src[(size_t)i * 2] : 0;
+        s32 pred = (XA_K0[filter] * in1 + XA_K1[filter] * in2) / 64;
+        s32 res  = want - pred;
+        s32 q, rec, d;
+
+        /* Round to nearest rather than truncate: a half-step of bias per
+         * sample is a DC offset the predictor then chases. */
+        q = (res >= 0) ? (res + step / 2) / step
+                       : -((-res + step / 2) / step);
+        if (q >  7) q =  7;
+        if (q < -8) q = -8;
+
+        rec = q * step + pred;
+        if (rec >  32767) rec =  32767;
+        if (rec < -32768) rec = -32768;
+
+        nibbles[i] = (u8)(q & 0x0F);
+        d = rec - want;
+        err += (u64)((s64)d * d);
+
+        in2 = in1;
+        in1 = rec;
+    }
+
+    *out1 = in1;
+    *out2 = in2;
+    return err;
+}
+
+/*
+ * Which shift to start looking at.
+ *
+ * A residual has to survive `nibble << (12 - shift)` with the nibble in -8..7,
+ * so the step must be at least |residual| / 7 — and a LARGER shift is a FINER
+ * step, which is the opposite sense to SPU-ADPCM and the thing to get wrong
+ * here. This estimates the residuals against the source rather than against the
+ * reconstruction, so it can be off by one either way; the caller tries the
+ * neighbours.
+ */
+static int xa_guess_shift(const s16 *src, u32 have, int filter, s32 in1, s32 in2)
+{
+    s32 peak = 0;
+    int shift;
+    u32 i;
+
+    for (i = 0; i < XA_SAMPLES_PER_BLOCK; i++) {
+        s32 want = (i < have) ? (s32)src[(size_t)i * 2] : 0;
+        s32 pred = (XA_K0[filter] * in1 + XA_K1[filter] * in2) / 64;
+        s32 res  = want - pred;
+
+        if (res < 0) res = -res;
+        if (res > peak) peak = res;
+
+        in2 = in1;
+        in1 = want;
+    }
+
+    for (shift = 12; shift > 0; shift--)
+        if ((s32)7 * ((s32)1 << (12 - shift)) >= peak)
+            break;
+
+    return shift;
+}
+
+void q2_xa_encode_sector(q2_xa_encoder *enc, const s16 *pcm, u32 frames,
+                         u8 *adpcm)
+{
+    int g, b;
+
+    if (!enc || !adpcm)
+        return;
+
+    memset(adpcm, 0, XA_SECTOR_ADPCM_BYTES);
+
+    for (g = 0; g < XA_GROUPS_PER_SECTOR; g++) {
+        u8 *group = adpcm + (size_t)g * XA_SOUND_GROUP_SIZE;
+
+        for (b = 0; b < XA_BLOCKS_PER_GROUP; b++) {
+            /* The decoder's own addressing, read backwards: block b of group g
+             * is channel b&1, frames (b/2)*28 into the group's 112. */
+            int ch    = b & 1;
+            u32 first = (u32)(g * (XA_BLOCKS_PER_GROUP / 2) *
+                              XA_SAMPLES_PER_BLOCK +
+                              (b / 2) * XA_SAMPLES_PER_BLOCK);
+            u32 have  = (pcm && frames > first) ? frames - first : 0;
+            const s16 *src = pcm ? pcm + (size_t)first * 2 + ch : NULL;
+            u8  best_nib[XA_SAMPLES_PER_BLOCK];
+            u64 best_err = (u64)-1;
+            int best_f = 0, best_s = 12, f;
+            s32 best1 = enc->prev1[ch], best2 = enc->prev2[ch];
+
+            if (have > XA_SAMPLES_PER_BLOCK)
+                have = XA_SAMPLES_PER_BLOCK;
+
+            for (f = 0; f < 4; f++) {
+                int guess = xa_guess_shift(src, have, f,
+                                           enc->prev1[ch], enc->prev2[ch]);
+                int k;
+
+                /*
+                 * The guess and its two neighbours. One step coarser is the
+                 * safety net for a residual the source-predicted estimate
+                 * underestimated; one finer sometimes wins outright because
+                 * the feedback keeps the residuals smaller than the estimate.
+                 */
+                for (k = -1; k <= 1; k++) {
+                    int shift = guess + k;
+                    u8  nib[XA_SAMPLES_PER_BLOCK];
+                    s32 p1, p2;
+                    u64 err;
+
+                    if (shift < 0 || shift > 12)
+                        continue;
+
+                    err = xa_try_block(src, have, f, shift,
+                                       enc->prev1[ch], enc->prev2[ch],
+                                       nib, &p1, &p2);
+                    if (err < best_err) {
+                        best_err = err;
+                        best_f   = f;
+                        best_s   = shift;
+                        best1    = p1;
+                        best2    = p2;
+                        memcpy(best_nib, nib, sizeof(nib));
+                    }
+                }
+            }
+
+            enc->prev1[ch] = best1;
+            enc->prev2[ch] = best2;
+
+            /* The parameter byte, in both of its copies. Bytes 4..7 and 12..15
+             * are the authoritative ones and 0..3 / 8..11 are the mirror the
+             * standard asks for; writing only one of them produces a file some
+             * players read and others do not. */
+            {
+                u8 param = (u8)(((best_f & 3) << 4) | (best_s & 0x0F));
+                int slot = (b < 4) ? b : b - 4;
+                int base = (b < 4) ? 0 : 8;
+
+                group[base + slot]     = param;
+                group[base + 4 + slot] = param;
+            }
+
+            {
+                u32 n;
+
+                for (n = 0; n < XA_SAMPLES_PER_BLOCK; n++) {
+                    u8 *word = group + 16 + (size_t)n * 4;
+                    u32 v    = q2_rd_u32(word);
+
+                    v |= (u32)(best_nib[n] & 0x0F) << (4 * b);
+                    q2_wr_u32(word, v);
+                }
+            }
+        }
+    }
+}
+
+/* ------------------------------------------------------------------------- */
 /* Track access                                                               */
 /* ------------------------------------------------------------------------- */
 q2_result q2_xa_track_open(q2_xa_track *out, const disc *d, char letter, u8 channel)

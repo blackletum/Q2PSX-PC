@@ -1,4 +1,6 @@
 add_library(q2psx_disc STATIC
+    cdxa.c
+    cdxa.h
     disc.c
     disc.h
 )

@@ -65,7 +65,13 @@ releases move the executable's data tables. See [`docs/FORMATS.md`](docs/FORMATS
 
 **The game finishes.** One run walks all five units — Strogg Outpost through Final Showdown, eleven
 levels — takes the unit boundaries and their mission screens, reaches *"All missions complete. Return to
-Command Ship."*, and ends on `OUTRO1P.STX` playing all 1,559 of its frames.
+Command Ship."*, and ends on `Extro FMV` — which is the level table's own name for the map `QFMV` — playing
+`OUTRO1P.STX`.
+
+**And it starts on one too.** A new game opens on `Intro FMV`, the same map under its other name, playing
+`TAKE1BP.STX`; the title screen idles into `ROGUEINP.STX`, the third film, which no movie table can even
+name. All three run to the stop point their module passes the player rather than to the end of the file:
+the outro is cut at frame **1,500 of 1,559**, so the last 2.4 seconds are on the disc and were never seen.
 
 **And the format is fully read.** [`docs/openquestions.md`](docs/openquestions.md) has **no open
 questions**: 157 resolved, 18 partial where a residue is stated, and 4 marked terminal because this disc
@@ -100,6 +106,8 @@ not been read out of the executable yet.
 | Level flow | **the game plays through**: `LOADMAP` was decoded and nothing acted on it, so a session ended on the map it booted into. All 28 calls on the disc are reachable by a trigger volume and all 28 resolve — and 12 land past zone 0, so the destination zone is the named arrival point's rather than zero. One run now walks Strogg Outpost to Boss2, eleven levels and five units, with the MISSION screen at every boundary, the briefing on arrival, and the inventory carried across — by BOSS1 a weapon picked up two levels earlier is still in hand. The MISSION screen's own counters are the level's: secrets are `INSECRET` calls counted once each, kills come from the creature world, and the unit and the level's display name were sitting unread in each map's `Strings` chunk |
 | Level scripting, part two | what a trigger volume ASKS FOR, measured rather than guessed — a histogram of every UserFuncs primitive a player walking the whole disc would run. It found five finished subsystems with no caller. **Doors and lifts**: `q2_movers_build`, `q2_movers_tick` and `q2_mover_trigger` were all dead, so 1,006 `MOVER_A` items stood still and a closed door was a wall — at one LAB frame the before and after differ by 94,068 pixels of 126,976, because before it the player is inside the door looking at its back face. **Scripted ambushes**: 58 of 89 resolvable `CREBATCH` calls name a group claiming no zone — `ShotgunRoom`, `BerserkHide` — and every one of them was standing in the room from level load. **The key gate**: `ONKEYDO` aborts the record it guards and nothing honoured it, so JAIL2 opened five doors without the key. **What the game says**: `STRING`, `SIMPLESOUND` and `HELPCOMPUTER` — *"Locate the Repair Facility and steal the Commander's head you find there."* — none of which had ever appeared |
 | Movies | the three `.STX` films, decoded and playing. **5,301 of 5,301 frames** across all three, zero unmatched codes and zero desynchronisations, and every frame satisfies its own header — `bs_num_codes` turns out to be the MDEC's DMA length, `round_up_32(ceil((2*blocks + pairs)/2))`, which is a per-frame check needing no reference and is what settled a Huffman table that four earlier passes had each diagnosed differently. The AC codes are MPEG-1's Table B.14, the macroblocks are column-major, and the escape's 6/10 split is measured rather than assumed: eighteen layouts, two decode everything, and the picture separates them. `--movie NAME` plays one, and the campaign now ends on the outro instead of a placard explaining that it cannot |
+| Cinematics, wired | a decoder is not a cinematic. **`QFMV` is the map that IS one**: the level table's records 10 and 11 are `Intro FMV` and `Extro FMV` and both resolve to that one 45 KB directory, so the DISPLAY NAME is what picks the film — which is exactly how the module picks it, comparing the name it was entered under against its own table before calling the player. So a new game opens on the intro, the campaign's last `MISCOMPLETE` goes to `Extro FMV` the way `0x80018ED8` goes there instead of to `EndMission 5`, and the title screen counts down into the attract reel that QFRONT's module names at `module+0xDC4`. **And the player takes a length**: `play(name, frames, ...)` compares its second argument against the STR header's `frame_number`, so the console plays 1,280 of the intro, 1,499 of the outro and 2,456 of the reel — never the whole file |
+| Cinematics, written | **the encoder** (`src/formats/stxenc.[ch]`), because a format is only read when you can write it back. Strict inverse of the decoder against its own tables: forward DCT with the decoder's cosine matrix, `round(F * 8 / (qscale * quant))`, zigzag, B.14, 16-bit LE words MSB first, Cr/Cb/four-luma in column-major macroblocks. The 6,5,5,5 cadence turns out to be the encoder's CONSTRAINT and not its decoration — 21 video sectors per 4 frames is what is left after the audio takes its three — so the quantiser is chosen to fit the budget, which is the rate control the original must have had. XA ADPCM for the soundtrack and real Mode 2 sectors underneath it: **all 7,712 of the disc's own sectors of TAKE1BP.STX come back byte-identical** from the EDC and Reed-Solomon builder. Re-encoding 400 frames of ROGUEINP gives 400 of 400 decoding exactly, `bs_num_codes` agreeing on 400 of 400, no frame over its budget, **45.4 dB mean PSNR**, and audio that round-trips sample-for-sample |
 | Hazards | lava, acid and the laser walls — 89 damage volumes across the disc that had no caller, so a player could stand in lava indefinitely. Read out of the five primitives' own handlers (1 point at mod 9, 20 at mod 10) and applied level-triggered, which the per-target throttle forces: firing once on entry would make lava a single point of damage. Standing in BOSS1's lava for three seconds of level clock lands 9 hits and takes 100 health to -80, which is what the 100-tick throttle predicts. Finding that also found that the throttle had never worked: the hurt-actor refresh cleared the deadline it had just armed, along with the invulnerability and protection clocks |
 | Breakables | glass breaks when you shoot it. The route from a shot to a pane was the last thing openquestions called "still owed", and it is not the collision node it was guessed to be: it is a 48-entry registry of BOXES that the shot trace sweeps separately from the world hull, whose index the trace reports and whose record pointer is the key the object router matches. Both the hitscan and the projectile paths route, because a bolt is one of the console's five call sites and a blaster is what you have in hand at the first window. LAB's pane throws 11 pieces — 1 from the hit and 10 from the shatter, which is what that item's own two operands say. `SHOOTTHEN` shares the registry and answers differently: shoot the panel and it RUNS THE RECORD it belongs to, which is a shoot-to-activate switch and was previously a primitive with no non-scripted caller |
 | Script residue | `DISABLEME` retires the record it runs in — the DISABLED bit the dispatcher tests before running anything. Two calls on the disc: one sits in a record nothing runs, and the other is behind `ONKEYDO`, which is why it had never been seen fire. `--keys` opens the gate for a scripted run and BIGGUN goes from 0 records retired to 1 |
@@ -151,6 +159,20 @@ script and writing the console's own framebuffer out:
 build-client/bin/q2psx --disc "Quake II (Europe).cue" --headless --demo \
                        --frames 120 --shot run.ppm --shot-every 10
 build-client/bin/q2psx --disc "Quake II (Europe).cue" --movie OUTRO1P.STX
+```
+
+The cinematics are reachable the way the game reaches them. `--new-game` presses SINGLE
+PLAYER, which opens on the intro film and hands over to the first level when it ends;
+`--map` takes a level table DISPLAY name as well as a directory, which is the only way
+to ask for one of the two FMV screens, since `Intro FMV` and `Extro FMV` are both the
+directory `QFMV` and the name is what chooses the film; and `--attract N` sets how many
+idle frames on the title screen start the attract reel (30 s by default, and never in a
+headless run unless you ask, so a capture of the front end stays one).
+
+```bash
+build-client/bin/q2psx --disc "Quake II (Europe).cue" --new-game
+build-client/bin/q2psx --disc "Quake II (Europe).cue" --map "Extro FMV"
+build-client/bin/q2psx --disc "Quake II (Europe).cue" --attract 20 --headless --frames 90
 ```
 
 `--watch` adds a camera that stands in front of the nearest live creature and looks
@@ -206,7 +228,16 @@ build/bin/q2psx-inspect surfaces "Quake II (Europe).cue"           # flags, blen
 build/bin/q2psx-inspect movie  "Quake II (Europe).cue"            # every film, every frame, checked
 build/bin/q2psx-inspect movie  "Quake II (Europe).cue" OUTRO1P.STX out.ppm 200
 build/bin/q2psx-inspect movie  "Quake II (Europe).cue" sweep      # score the escape's field widths
+build/bin/q2psx-inspect movie  "Quake II (Europe).cue" encode ROGUEINP.STX out.stx 400
 ```
+
+`movie encode` is the round trip: it decodes a film off the disc, re-encodes it into a
+new `.STX` — real Mode 2 sectors, XA audio in slot 7, the 6,5,5,5 cadence — and then
+reads what it wrote back with the same decoder, reporting whether every frame decodes
+exactly, whether each satisfies its own `bs_num_codes`, whether any frame overran its
+sector budget, and how far the picture and the sound moved. It checks the sector builder
+against the disc's own sectors first, so "0 sectors failing their EDC or parity" is a
+statement about a 1997 master and not about the tool agreeing with itself.
 
 `render` needs no window — it writes a PPM. That is how the geometry pipeline was
 brought up before the client existed, and it remains the quickest way to check a

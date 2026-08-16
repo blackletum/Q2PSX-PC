@@ -53,6 +53,8 @@
 #include "reloc.h"
 #include "scene.h"
 #include "stx.h"
+#include "stxenc.h"
+#include "cdxa.h"
 #include "screen.h"
 #include "spawn.h"
 #include "sim.h"
@@ -5563,6 +5565,487 @@ static int cmd_movie(const disc *d, const char *name, const char *out_ppm,
     return rc;
 }
 
+/* ------------------------------------------------------------------------- */
+/* movie encode — the other direction, and the check that it is exact         */
+/* ------------------------------------------------------------------------- */
+/*
+ * Re-encode one of the disc's films and decode the result back.
+ *
+ * A decoder can be wrong in ways a picture never shows. A quantiser off by a
+ * constant, a zigzag transposed, the DC's scale folded into the transform —
+ * each of those produces something that still looks like video, and the only
+ * way to catch them is to build the inverse and make the two meet in the
+ * middle. That is what this is: the disc's own frames go in, a NEW `.STX` comes
+ * out, and the same decoder that read the disc reads what was written.
+ *
+ * What it reports is what an encoder can be judged on:
+ *
+ *   - every frame decodes, at the full block count, with no unmatched code
+ *   - every frame satisfies its own `bs_num_codes` — the MDEC DMA length,
+ *     which depends on the code LENGTHS and so cannot be satisfied by accident
+ *   - the cadence is 6,5,5,5 and the audio is at slot 7 of every 8
+ *   - PSNR against the source frames, which says the picture survived
+ *   - the raw sectors' EDC and parity are the ones a drive would compute
+ */
+typedef struct enc_sink_state {
+    FILE *fp;             /* the raw 2352-byte CD-XA stream           */
+    u8   *flat;           /* ...and a 2048-per-sector mirror of it    */
+    u32   flat_cap;
+    u32   flat_used;
+    u32   lba;            /* where the file is imagined to sit        */
+    u32   bad_sectors;    /* sectors whose own EDC/parity disagree    */
+    u32   audio_slots_ok;
+    u32   audio_slots_bad;
+    bool  failed;
+
+    /* The audio, decoded straight back out of what was just written, so the
+     * ADPCM can be scored against the PCM it was made from. A codec that only
+     * reports "the sound groups are structurally valid" is reporting that it
+     * wrote 2304 bytes, not that it wrote the right ones. */
+    q2_xa_decoder xa_back;
+    s16  *pcm_back;
+    u32   pcm_back_cap;   /* in stereo frames */
+    u32   pcm_back_frames;
+} enc_sink_state;
+
+static bool enc_sink(void *user, u32 index, q2_stx_form form,
+                     const u8 *payload, u32 len)
+{
+    enc_sink_state *s = (enc_sink_state *)user;
+    u8   raw[CD_SECTOR_RAW];
+    bool form2 = (form == Q2_STX_FORM_AUDIO);
+    u8   submode;
+
+    if (!s || s->failed)
+        return false;
+
+    /*
+     * The subheader the disc uses on these files: file 1, channel 1, and the
+     * submode is the ONLY thing separating a video sector from an audio one —
+     * they share the file and channel numbers (FORMATS.md §6).
+     */
+    submode = form2 ? (u8)(CD_SUBMODE_AUDIO | CD_SUBMODE_REALTIME |
+                           CD_SUBMODE_FORM2)
+                    : (u8)CD_SUBMODE_DATA;
+
+    cd_sector_build(raw, s->lba + index, 1, 1, submode,
+                    form2 ? 0x01u : 0x00u, payload, form2);
+
+    /* Immediately read back what was built, through the same checker the
+     * disc's own sectors are put through. An encoder that cannot satisfy its
+     * own EDC has no business claiming to satisfy a drive's. */
+    if (cd_sector_check(raw) != 0)
+        s->bad_sectors++;
+
+    if (form2) {
+        if (q2_xa_validate_sector(payload) == 0)
+            s->audio_slots_ok++;
+        else
+            s->audio_slots_bad++;
+
+        if (s->pcm_back &&
+            s->pcm_back_frames + XA_FRAMES_PER_SECTOR <= s->pcm_back_cap) {
+            u32 n = q2_xa_decode_sector(&s->xa_back, payload,
+                                        s->pcm_back +
+                                            (size_t)s->pcm_back_frames * 2,
+                                        XA_FRAMES_PER_SECTOR * 2);
+
+            s->pcm_back_frames += n / 2;
+        }
+    }
+
+    if (s->fp && fwrite(raw, 1, CD_SECTOR_RAW, s->fp) != CD_SECTOR_RAW) {
+        s->failed = true;
+        return false;
+    }
+
+    /*
+     * The flat mirror, for the round trip. Audio slots become 2048 zero bytes
+     * — which is exactly what an extraction does to them, and exactly what the
+     * demuxer expects to skip, since it decides what a sector IS from its
+     * index and not from its content.
+     */
+    if (s->flat && s->flat_used + Q2_STX_SECTOR_SIZE <= s->flat_cap) {
+        memset(s->flat + s->flat_used, 0, Q2_STX_SECTOR_SIZE);
+        if (!form2)
+            memcpy(s->flat + s->flat_used, payload,
+                   len < Q2_STX_SECTOR_SIZE ? len : Q2_STX_SECTOR_SIZE);
+        s->flat_used += Q2_STX_SECTOR_SIZE;
+    }
+
+    return true;
+}
+
+static double psnr_rgb(const u8 *a, const u8 *b, u32 n)
+{
+    double sum = 0.0;
+    u32 i;
+
+    for (i = 0; i < n; i++) {
+        double d = (double)a[i] - (double)b[i];
+
+        sum += d * d;
+    }
+    if (sum <= 0.0)
+        return 99.0;
+    return 10.0 * log10(255.0 * 255.0 * (double)n / sum);
+}
+
+static int cmd_movie_encode(const disc *d, const char *name, const char *out,
+                            u32 want_frames)
+{
+    char path[64];
+    const disc_file *df;
+    q2_buf src;
+    size_t cursor = 0;
+    static q2_stx_frame f;
+    static u8 rgb_src[Q2_STX_WIDTH * Q2_STX_HEIGHT * 3];
+    static u8 rgb_back[Q2_STX_WIDTH * Q2_STX_HEIGHT * 3];
+    static u8 worst_src[Q2_STX_WIDTH * Q2_STX_HEIGHT * 3];
+    static u8 worst_enc[Q2_STX_WIDTH * Q2_STX_HEIGHT * 3];
+    u32 worst_num = 0;
+    q2_stx_writer w;
+    enc_sink_state st;
+    q2_xa_decoder xa;
+    s16   *abuf = NULL;
+    u32    abuf_frames = 0, abuf_at = 0, audio_cursor = 0;
+    s16   *pcm_src = NULL;         /* what went in, to score what came out */
+    u32    pcm_src_cap = 0, pcm_src_frames = 0;
+    u32    frames = 0;
+    double psnr_sum = 0.0, psnr_min = 1e9;
+    int    rc = 0;
+
+    if (!name || !*name) {
+        printf("  movie encode needs a film name\n");
+        return 1;
+    }
+    snprintf(path, sizeof(path), "Q2DATA/MOVIES/%s", name);
+
+    df = disc_find(d, path);
+    if (!df || disc_read_file(d, path, &src) != Q2_OK) {
+        printf("  %s is not on this disc\n", name);
+        return 1;
+    }
+
+    if (!want_frames)
+        want_frames = 250u;      /* ten seconds: a check, not a transcode */
+
+    memset(&st, 0, sizeof(st));
+    st.lba = df->lba;
+    st.fp  = out ? fopen(out, "wb") : NULL;
+    if (out && !st.fp) {
+        printf("  cannot write %s\n", out);
+        q2_buf_free(&src);
+        return 1;
+    }
+
+    /* Six sectors a frame, plus the tail. */
+    st.flat_cap = (want_frames + 8u) * 8u * Q2_STX_SECTOR_SIZE;
+    st.flat     = (u8 *)calloc(st.flat_cap, 1);
+    abuf        = (s16 *)calloc((size_t)XA_FRAMES_PER_SECTOR * 2 * 4,
+                                sizeof(s16));
+
+    /* One picture is 1512 stereo frames of sound; a couple of sectors of slack
+     * covers the tail the writer drains after the last picture. */
+    pcm_src_cap      = (want_frames + 8u) * 1512u;
+    pcm_src          = (s16 *)calloc((size_t)pcm_src_cap * 2, sizeof(s16));
+    st.pcm_back_cap  = pcm_src_cap + XA_FRAMES_PER_SECTOR * 4u;
+    st.pcm_back      = (s16 *)calloc((size_t)st.pcm_back_cap * 2, sizeof(s16));
+    q2_xa_decoder_reset(&st.xa_back);
+
+    if (!st.flat || !abuf || !pcm_src || !st.pcm_back) {
+        printf("  out of memory\n");
+        rc = 1;
+        goto cleanup;
+    }
+
+    q2_xa_decoder_reset(&xa);
+    q2_stx_writer_init(&w, Q2_STX_WIDTH, Q2_STX_HEIGHT, true, enc_sink, &st);
+
+    printf("\nre-encoding %s -> %s\n", name, out ? out : "(no file)");
+
+    /*
+     * Before writing a single sector: put THIS FILM'S OWN sectors through the
+     * same EDC and parity code the writer uses.
+     *
+     * A sector builder that satisfies itself has proved nothing — a consistent
+     * mistake is still a mistake. What settles it is the disc: recompute the
+     * CRC and the Reed-Solomon P/Q for sectors that were mastered in 1997 and
+     * see whether the four and 276 bytes that come back are the ones already
+     * there. If they are, the builder is the drive's.
+     */
+    {
+        u32 total = (u32)(src.size / Q2_STX_SECTOR_SIZE);
+        u32 i, checked = 0, disagree = 0, form2 = 0;
+
+        for (i = 0; i < total; i++) {
+            u8 raw[CD_SECTOR_RAW];
+            u32 bad;
+
+            if (disc_read_raw_sector(d, df->lba + i, raw) != Q2_OK)
+                break;
+            if (raw[18] & CD_SUBMODE_FORM2)
+                form2++;
+            bad = cd_sector_check(raw);
+            checked++;
+            if (bad)
+                disagree++;
+        }
+
+        printf("  the disc's own %u sectors of this film (%u of them Form 2):"
+               " %u disagree with this builder\n", checked, form2, disagree);
+        if (disagree)
+            rc = 1;
+    }
+
+    while (frames < want_frames &&
+           q2_stx_frame_next(src.data, src.size, &cursor, &f)) {
+        u32 blocks = 0, bits = 0;
+        u32 need = 37800u / 25u;      /* 1512 stereo frames under one picture */
+
+        if (!q2_stx_frame_decode(&f, rgb_src, &blocks, &bits)) {
+            printf("  source frame %u will not decode\n", f.number);
+            rc = 1;
+            break;
+        }
+
+        /*
+         * The audio that plays under this frame, pulled out of the source's own
+         * slot-7 sectors. Three of them cover four pictures exactly, which is
+         * the arithmetic that makes this container 25.000 fps.
+         */
+        while (abuf_frames - abuf_at < need) {
+            u8  payload[CD_SECTOR_RAW];
+            u32 len = 0;
+
+            while (audio_cursor < (u32)(src.size / Q2_STX_SECTOR_SIZE) &&
+                   !q2_stx_sector_is_audio(audio_cursor))
+                audio_cursor++;
+            if (audio_cursor >= (u32)(src.size / Q2_STX_SECTOR_SIZE))
+                break;
+
+            if (disc_read_sector_payload(d, df->lba + audio_cursor,
+                                         payload, &len) != Q2_OK)
+                break;
+            audio_cursor++;
+            if (len < XA_SECTOR_ADPCM_BYTES ||
+                q2_xa_validate_sector(payload) != 0)
+                continue;
+
+            /* Compact what is left, then decode one more sector behind it. */
+            memmove(abuf, abuf + (size_t)abuf_at * 2,
+                    (size_t)(abuf_frames - abuf_at) * 2 * sizeof(s16));
+            abuf_frames -= abuf_at;
+            abuf_at      = 0;
+            abuf_frames += q2_xa_decode_sector(&xa, payload,
+                                               abuf + (size_t)abuf_frames * 2,
+                                               XA_FRAMES_PER_SECTOR * 2) / 2;
+        }
+
+        {
+            u32 have = abuf_frames - abuf_at;
+            u32 take = have < need ? have : need;
+
+            if (!q2_stx_writer_frame(&w, rgb_src,
+                                     take ? abuf + (size_t)abuf_at * 2 : NULL,
+                                     take)) {
+                printf("  the encoder gave up on frame %u\n", f.number);
+                rc = 1;
+                break;
+            }
+            if (take && pcm_src_frames + take <= pcm_src_cap) {
+                memcpy(pcm_src + (size_t)pcm_src_frames * 2,
+                       abuf + (size_t)abuf_at * 2,
+                       (size_t)take * 2 * sizeof(s16));
+                pcm_src_frames += take;
+            }
+            abuf_at += take;
+        }
+
+        frames++;
+    }
+
+    q2_stx_writer_finish(&w);
+
+    printf("  %u frames, %u video + %u audio + %u null = %u sectors\n",
+           w.frames, w.video_sectors, w.audio_sectors, w.null_sectors,
+           w.sector);
+    printf("  qscale %u..%u, mean %.2f\n", w.qscale_min, w.qscale_max,
+           w.frames ? (double)w.qscale_sum / (double)w.frames : 0.0);
+    printf("  raw sectors failing their own EDC or parity: %u\n",
+           st.bad_sectors);
+    printf("  audio slots: %u valid, %u malformed\n",
+           st.audio_slots_ok, st.audio_slots_bad);
+    if (st.bad_sectors || st.audio_slots_bad)
+        rc = 1;
+
+    /*
+     * The ADPCM, scored against the PCM it was made from — decoded back out of
+     * the sectors that were just written, by the same decoder the player uses.
+     * 4-bit ADPCM is lossy by construction, so the number to watch is not "is
+     * it exact" but "is it in the twenties of dB and STABLE": a codec that
+     * feeds its predictor the sample it wanted rather than the sample it
+     * produced starts fine and drifts, and the drift shows up as a figure that
+     * falls the longer the film runs.
+     */
+    if (pcm_src_frames && st.pcm_back_frames) {
+        u32 n = pcm_src_frames < st.pcm_back_frames ? pcm_src_frames
+                                                    : st.pcm_back_frames;
+        double sig = 0.0, err = 0.0;
+        u32 i;
+
+        for (i = 0; i < n * 2u; i++) {
+            double a = (double)pcm_src[i];
+            double b = (double)st.pcm_back[i];
+
+            sig += a * a;
+            err += (a - b) * (a - b);
+        }
+        /*
+         * The source's own level is printed beside the SNR on purpose. A
+         * stretch of silence encodes to silence and scores infinitely well,
+         * and an encoder that had been handed nothing would look identical to
+         * one that had been handed everything and got it right. The first
+         * twelve seconds of the intro ARE silence, so this is not hypothetical.
+         */
+        printf("  audio: %u frames in, %u back — source RMS %.1f, ",
+               pcm_src_frames, st.pcm_back_frames,
+               sqrt(sig / (double)(n * 2u)));
+        if (sig <= 0.0)
+            printf("silent (nothing to score)\n");
+        else if (err <= 0.0)
+            printf("reproduced exactly\n");
+        else
+            printf("SNR %.2f dB\n", 10.0 * log10(sig / err));
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* And now read back what was written, with the disc's own decoder.    */
+    /* ------------------------------------------------------------------ */
+    {
+        static q2_stx_frame a, b;
+        size_t ca = 0, cb = 0;
+        u32 back = 0, exact = 0, codes_ok = 0, cad_bad = 0, num_bad = 0;
+        u32 want_blocks = ((Q2_STX_WIDTH + 15u) / 16u) *
+                          ((Q2_STX_HEIGHT + 15u) / 16u) * 6u;
+
+        q2_stx_reset_stats();
+
+        while (q2_stx_frame_next(src.data, src.size, &ca, &a) &&
+               q2_stx_frame_next(st.flat, st.flat_used, &cb, &b)) {
+            u32 blocks = 0, bits = 0, words, half, codes;
+
+            back++;
+            if (back > w.frames)
+                break;
+
+            if (!q2_stx_frame_decode(&a, rgb_src, &blocks, &bits))
+                break;
+            if (!q2_stx_frame_decode(&b, rgb_back, &blocks, &bits) ||
+                blocks != want_blocks) {
+                printf("  frame %u came back short: %u of %u blocks\n",
+                       b.number, blocks, want_blocks);
+                rc = 1;
+                break;
+            }
+            exact++;
+
+            /*
+             * The frame's own DMA length, checked the way the disc's frames are
+             * checked: one word per block for the DC, one per pair and one per
+             * EOB, halved into longwords and padded to 32 of them. This is what
+             * makes the round trip a statement about the FORMAT rather than a
+             * statement about two programs agreeing with each other.
+             */
+            words = 2u * blocks + q2_stx_last_pairs;
+            half  = (words + 1u) / 2u;
+            codes = ((half + 31u) / 32u) * 32u;
+            if (codes == b.num_codes)
+                codes_ok++;
+            else
+                num_bad++;
+
+            /* 6, 5, 5, 5 — keyed to the frame number, as on the disc. */
+            {
+                u32 want_chunks = (((b.number - 1u) % 4u) == 0u) ? 6u : 5u;
+                u32 got = (b.size + Q2_STX_VIDEO_PAYLOAD - 1u) /
+                          Q2_STX_VIDEO_PAYLOAD;
+
+                if (got > want_chunks)
+                    cad_bad++;
+            }
+
+            {
+                double p = psnr_rgb(rgb_src, rgb_back,
+                                    Q2_STX_WIDTH * Q2_STX_HEIGHT * 3);
+
+                psnr_sum += p;
+                /*
+                 * Keep the WORST pair, not a sample of a good one. A mean is
+                 * easy to be pleased by; the frame the encoder handled least
+                 * well is the one worth looking at, and it is the one that
+                 * shows a structural mistake — a transposed block, a chroma
+                 * plane in the wrong place — if there is one to show.
+                 */
+                if (p < psnr_min) {
+                    psnr_min  = p;
+                    worst_num = b.number;
+                    memcpy(worst_src, rgb_src, sizeof(worst_src));
+                    memcpy(worst_enc, rgb_back, sizeof(worst_enc));
+                }
+            }
+        }
+
+        printf("  read back: %u frames, %u decoded exactly (%u blocks each)\n",
+               back, exact, want_blocks);
+        printf("  bs_num_codes agrees on %u of %u; %u disagree\n",
+               codes_ok, exact, num_bad);
+        printf("  frames over their sector budget: %u\n", cad_bad);
+        printf("  gave up: %u unmatched code, %u run overran 63, %u out of"
+               " bits\n", q2_stx_fail_unmatched, q2_stx_fail_overrun,
+               q2_stx_fail_dry);
+        if (exact)
+            printf("  PSNR against the source: %.2f dB mean, %.2f dB worst"
+                   " (frame %u)\n", psnr_sum / (double)exact, psnr_min,
+                   worst_num);
+
+        /* The worst pair, side by side on disc, for looking at. */
+        if (out && worst_num) {
+            char p[260];
+            int  k;
+
+            for (k = 0; k < 2; k++) {
+                FILE *fp;
+
+                snprintf(p, sizeof(p), "%s.%s.ppm", out,
+                         k ? "encoded" : "source");
+                fp = fopen(p, "wb");
+                if (!fp)
+                    continue;
+                fprintf(fp, "P6\n%u %u\n255\n", Q2_STX_WIDTH, Q2_STX_HEIGHT);
+                fwrite(k ? worst_enc : worst_src, 1,
+                       (size_t)Q2_STX_WIDTH * Q2_STX_HEIGHT * 3, fp);
+                fclose(fp);
+                printf("  %s\n", p);
+            }
+        }
+
+        if (exact != w.frames || num_bad || cad_bad ||
+            q2_stx_fail_unmatched || q2_stx_fail_overrun || q2_stx_fail_dry)
+            rc = 1;
+    }
+
+cleanup:
+    if (st.fp)
+        fclose(st.fp);
+    free(st.flat);
+    free(st.pcm_back);
+    free(pcm_src);
+    free(abuf);
+    q2_buf_free(&src);
+    return rc;
+}
+
 int main(int argc, char **argv)
 {
     disc *d = NULL;
@@ -5842,6 +6325,11 @@ int main(int argc, char **argv)
     } else if (strcmp(cmd, "movie") == 0) {
         if (argc >= 4 && strcmp(argv[3], "sweep") == 0)
             rc = cmd_movie_sweep(d);
+        else if (argc >= 4 && strcmp(argv[3], "encode") == 0)
+            rc = cmd_movie_encode(d, (argc >= 5) ? argv[4] : NULL,
+                                     (argc >= 6) ? argv[5] : NULL,
+                                     (argc >= 7)
+                                         ? (u32)strtoul(argv[6], NULL, 0) : 0u);
         else
             rc = cmd_movie(d, (argc >= 4) ? argv[3] : NULL,
                               (argc >= 5) ? argv[4] : NULL,

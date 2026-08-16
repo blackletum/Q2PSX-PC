@@ -253,3 +253,17 @@ target_link_libraries(test_movie PRIVATE
 )
 
 add_test(NAME movie_table COMMAND test_movie)
+
+# The encoder. Needs the audio library for the ADPCM half and the disc library
+# for the sector builder — which is the shape of the format: a film is a
+# picture, a soundtrack and a sector layout, and all three have to be right.
+add_executable(test_stxenc test_stxenc.c)
+
+target_link_libraries(test_stxenc PRIVATE
+    q2psx_common
+    q2psx_formats
+    q2psx_audio
+    q2psx_disc
+)
+
+add_test(NAME movie_encoder COMMAND test_stxenc)

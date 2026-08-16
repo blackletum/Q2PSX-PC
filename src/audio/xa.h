@@ -99,6 +99,40 @@ u32 q2_xa_decode_sector(q2_xa_decoder *dec, const u8 *adpcm, s16 *out, u32 out_c
 u32 q2_xa_validate_sector(const u8 *adpcm);
 
 /* ------------------------------------------------------------------------- */
+/* The other direction                                                        */
+/* ------------------------------------------------------------------------- */
+/*
+ * PCM to XA ADPCM, for writing a film's soundtrack (stxenc.h).
+ *
+ * The encoder carries the same two-sample history the decoder does and for the
+ * same reason — a block's prediction reaches back across the block boundary and
+ * across the SECTOR boundary — and it must feed that history the RECONSTRUCTED
+ * sample rather than the one it was aiming at, or the error compounds and the
+ * stream drifts away from the source over a few seconds. That is the one thing
+ * about ADPCM that is easy to get subtly wrong and hard to hear until it is
+ * badly wrong.
+ *
+ * Which filter and shift each block gets is the encoder's choice, not the
+ * format's: all four filters and all thirteen shifts decode, so this tries the
+ * plausible ones and keeps the pair with the least squared error.
+ */
+typedef struct q2_xa_encoder {
+    s32 prev1[XA_CHANNELS];
+    s32 prev2[XA_CHANNELS];
+} q2_xa_encoder;
+
+void q2_xa_encoder_reset(q2_xa_encoder *enc);
+
+/*
+ * Encode up to `frames` interleaved stereo frames into one sector's 2304 ADPCM
+ * bytes. Fewer than XA_FRAMES_PER_SECTOR pads the rest with silence — which is
+ * what the last sector of a film needs, since a sector is 53.333 ms and a film
+ * does not end on one.
+ */
+void q2_xa_encode_sector(q2_xa_encoder *enc, const s16 *pcm, u32 frames,
+                         u8 *adpcm);
+
+/* ------------------------------------------------------------------------- */
 /* Track access                                                               */
 /* ------------------------------------------------------------------------- */
 

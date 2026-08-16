@@ -2341,6 +2341,73 @@ sector's 2304 ADPCM bytes and drifts; they must be read per sector. Decoded, the
 length as the picture — 51.4 s against 51.3, 98.3 against 98.4 — except on `OUTRO1P`, where it runs 4 s
 longer, which is the tail §6.3 describes.
 
+### 6.5 How long a film is played, which is not how long it is
+
+The player is a function in the shared LevelBin module and it takes five arguments. Its second is stored
+(`module+0x7384`) and read once per frame at `0x80102A5C`, where it is compared against the STR frame
+header's own `frame_number` at `+0x08`:
+
+```
+80102A58  lw   v1, 8(a1)          ; StrFrameHeader.frame_number
+80102A5C  lw   v0, 0x7384(v0)     ; the argument
+80102A64  sltu v1, v1, v0         ; number < limit ?
+80102A68  bne  v1, zero, +16      ; ...keep going
+80102A78  sw   1, 0x7388(v1)      ; else: done
+```
+
+So it is a **stop point**, and the frame carrying that number is not shown. The three call sites:
+
+| Screen | Call site | Film | Argument | Frames on the disc | Played |
+| --- | --- | --- | --- | --- | --- |
+| `Intro FMV` | QFMV `0x80100958` | `TAKE1BP.STX` | 1281 | 1,283 | 1,280 |
+| `Extro FMV` | QFMV `0x801009CC` | `OUTRO1P.STX` | 1500 | 1,559 | **1,499** |
+| attract reel | QFRONT `0x8010D5F8` | `ROGUEINP.STX` | 2457 | 2,459 | 2,456 |
+
+The outro is cut by **59 frames — 2.4 seconds that are on the disc and are never seen.** The remaining
+three arguments are not timing: `0x10000` is the size in bytes of each of the two VLC buffers, allocated
+by name at `0x80102F0C` / `0x80102F28` (`"vlc buffer 0"`, `"vlc buffer 1"`) and defaulting to `0x20400`
+when zero; the `1` gates two engine calls; the `255` is pushed at `sp+16`.
+
+**Which map plays which.** Level table records 10 and 11 are `Intro FMV` and `Extro FMV` and **both**
+resolve to the directory `QFMV` — 45.5 KB, no geometry, no letterforms, no icon sheet. The module compares
+the display name the level was entered under against its own 36-byte records (§ *QENDMIS* in `levelbin.h`)
+and calls the player with whichever filename matches, which is why one directory can be two cinematics.
+
+`ROGUEINP.STX` is named by **no** movie-table record, and cannot be: the record's filename field is twelve
+bytes and `"ROGUEINP.STX"` needs thirteen with its terminator. It is a bare literal at QFRONT's
+`module+0xDC4`, reached when a store at `module+0x12D90` counts below zero — the title screen idling into
+the attract reel. That store is zero in the module image and the countdown at `0x80101CF4` is its only
+reader and only writer in all 118 KB, so **the threshold is not recoverable from this disc.**
+
+### 6.6 Writing one
+
+`src/formats/stxenc.[ch]` is the inverse, and it exists because a decoder can be wrong in ways no picture
+shows — a quantiser off by a constant, a zigzag transposed, the DC's scale folded into the transform. It
+inverts the decoder's own tables rather than carrying copies: forward DCT with the **transpose of the
+decoder's cosine matrix**, `dc = round(F[0] / quant[0])`, `level = round(F[nat] * 8 / (qscale * quant[nat]))`,
+zigzag, run-length, B.14, EOB `10`, escape `000001` + 6-bit run + 10-bit signed level, packed into 16-bit
+little-endian words most significant bit first.
+
+**The cadence is a bit budget.** 6, 5, 5, 5 keyed to `(frame_number - 1) % 4` is not a pattern the original
+encoder happened to produce, it is the constraint it worked under: audio takes slot 7 of every 8, which
+leaves 21 video sectors per 4 frames, and 6 sectors per frame off a 150-sector-per-second drive is exactly
+25.000 fps. So a frame must FIT its 5 or 6 sectors and the only free variable is the quantiser — which is
+why `bs_qscale` is per-frame and runs 1..20 across the disc. The encoder picks the lowest qscale that fits.
+
+**Verification.** Re-encoding 400 frames of `ROGUEINP.STX` and reading the result back with the same
+decoder: 400 of 400 decode exactly at 1,440 blocks, `bs_num_codes` agrees on 400 of 400, no frame overran
+its budget, zero unmatched codes / run overruns / exhausted readers, qscale 3..6, **45.4 dB mean PSNR** and
+40.1 dB at its worst frame. The audio round-trips **sample for sample** — which it should, since a signal
+that came out of an XA decoder already sits on the codec's own lattice, so the encoder's search finds the
+original's own choice; that checks the addressing and the parameter packing, not the rate–distortion
+behaviour, and a synthetic tone (`tests/test_stxenc.c`) checks that separately.
+
+**And the sectors are real ones.** `src/disc/cdxa.[ch]` builds Mode 2 Form 1 and Form 2 sectors with the
+sync pattern, the BCD address, both copies of the subheader, the CRC-32 EDC and — for Form 1 — the
+Reed-Solomon P and Q parity, computed with the address bytes zeroed as Mode 2 requires. The check is not the
+standard, it is the disc: recomputing all **7,712 sectors of `TAKE1BP.STX`**, 964 of them Form 2, gives back
+the four and 276 bytes already there in every one.
+
 ---
 
 ## 7. `.XAI` — CD-XA ADPCM music

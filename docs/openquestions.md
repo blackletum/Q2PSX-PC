@@ -3,8 +3,16 @@
 ## Where this stands
 
 **The game plays from the front end to the credits.** One run walks all five units and eleven levels, takes
-every unit boundary and its mission screen, and ends on `OUTRO1P.STX` playing all 1,559 of its frames (#121).
-Every conformance command the harness carries passes over the whole disc, and 28 of 28 tests pass.
+every unit boundary and its mission screen, and ends on `Extro FMV` — the level table's own name for the map
+`QFMV` — playing `OUTRO1P.STX` (#121, #124). Every conformance command the harness carries passes over the
+whole disc, and 29 of 29 tests pass.
+
+**And the cinematics are wired the way the disc wires them (#124, #125).** A new game opens on `Intro FMV`, which
+is the SAME map under its other name; the title screen idles into `ROGUEINP.STX`, the third film, which no
+movie-table record can name because its filename needs thirteen bytes and the field is twelve. All three run
+to the stop point their module passes the player — the outro is cut at frame **1,500 of 1,559** — and there
+is now an ENCODER, which is the strictest check a format reading can be put to: 400 re-encoded frames decode
+exactly, satisfy their own `bs_num_codes`, and rebuild the disc's own 7,712 sectors byte for byte.
 
 **No questions remain open.** The four that stood here have all fallen: #6's fixup encoding and #28's three
 clauses were solved in the code and never marked; #65 fell to noticing that the address it was hunting a
@@ -8075,3 +8083,90 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       Anchored on the two strings rather than on offsets, so a build that moves the pool still finds it.
       `q2psx-inspect menu <disc> pages QFRONT` prints the roll beside the pages, so "the words are on the
       disc and the layout is not" is a claim that can be checked rather than taken.
+- [x] 124. **The cinematics were decoded and were not WIRED, and the disc says where all three go — including
+      the one no table can name.**
+      `stx.h` had decoded all 5,301 frames of all three films and the campaign ended on the outro, and that
+      was the whole of it: `TAKE1BP.STX` never played, `ROGUEINP.STX` never played, and the outro was started
+      from `QENDMIS5` because that was the only place a film could be started from. Four things were sitting
+      unread.
+
+      **1. `QFMV` is the map that IS a cinematic.** The level table's records 10 and 11 are `Intro FMV` and
+      `Extro FMV` and BOTH resolve to the directory `QFMV` — 45.5 KB, no geometry, no letterforms, no icon
+      sheet. One directory, two cinematics, and what tells them apart is the DISPLAY NAME the level was
+      entered under, which is exactly what the module compares against its own movie table before calling
+      the player:
+
+          if (!strcmp(screen, "Intro FMV")) play("TAKE1BP.STX", 1281, 0x10000, 1, 255);   ; 0x80100958
+          if (!strcmp(screen, "Extro FMV")) play("OUTRO1P.STX", 1500, 0x10000, 1, 255);   ; 0x801009CC
+
+      The port had been reading the movie table off whatever map carried it and taking the Extro record,
+      which is why the only reachable film was the outro.
+
+      **2. The second argument is a STOP POINT, and every film is cut short by it.** It is stored at
+      `module+0x7384` and compared at `0x80102A5C` against the STR frame header's own `frame_number` at
+      `+0x08`, with `sltu` / `bne` / `sw 1, 0x7388` — so the frame carrying that number is not shown. The
+      disc holds 1,283, 1,559 and 2,459 frames; the console plays 1,280, **1,499** and 2,456. The outro's
+      last **59 frames — 2.4 seconds — are on the disc and have never been seen**, and this project had been
+      advertising "all 1,559 of its frames" as fidelity when it is 60 more than the console plays. The other
+      three arguments are not timing: `0x10000` is the byte size of each of the two VLC buffers, allocated
+      by name at `0x80102F0C` / `0x80102F28` and defaulting to `0x20400` when zero.
+
+      **3. `MISCOMPLETE` on the last unit goes to `Extro FMV`, not to `EndMission 5`.** `0x80018ED8` was
+      already read and recorded (#88) as loading `"Extro FMV"` on answer 5 — and the port then routed unit 5
+      to `EndMission 5` like every other unit, because `Extro FMV` was a name with nothing behind it. It has
+      something behind it now.
+
+      **4. `ROGUEINP.STX` is the attract reel, and it is named by no movie-table record because it CANNOT
+      be.** The record's filename field is twelve bytes and `"ROGUEINP.STX"` is twelve characters, so there
+      is nowhere for its terminator to go. It is a bare literal at QFRONT's `module+0xDC4`, played from a
+      per-frame state handler at `0x80101CD0` that counts a store down by the frame delta:
+
+          80101CF4  lhu  v0, 0x2D90(a0)     ; the idle store
+          80101D00  subu v0, v0, v1         ; ...minus the frame delta
+          80101D0C  bgez v0, +0x128         ; still counting: do nothing
+          80101D34  addiu a0, a0, 0xDC4     ; "ROGUEINP.STX"
+          80101D38  addiu a1, zero, 2457
+          80101D4C  jal   0x8010B2EC        ; play it
+
+      The title screen idling into the intro reel, which is what a PlayStation front end does. **The
+      THRESHOLD is not recoverable**: `module+0x12D90` is zero in the module image and those two instructions
+      are its only reader and its only writer in all 118 KB. The port picks thirty seconds and says so at the
+      constant; everything else about the reel is the module's.
+
+      Also found on the way: **QDUMMY and QMAGINTR carry a DIFFERENT, EARLIER build of the shared module** —
+      `TAKE1B.STX`, `ROGUEIN1.STX`, `OUTRO1.STX`, unsuffixed, and a third record where the shipped module has
+      two. The region letter is appended at mastering time (#30 lists "movie filename suffix" among the NTSC
+      build values), and the third record is the reel, which by the time the module shipped had outgrown the
+      field and moved to the front end as a literal.
+- [x] 125. **There is an encoder now, and it is the strictest check this format reading has been put to.**
+      A decoder can be wrong in ways no picture reveals — a quantiser off by a constant, a zigzag transposed,
+      the DC's scale folded into the inverse transform — and still produce something that looks like video.
+      Building the inverse and making the two meet in the middle catches all of those at once, and it is
+      what a port needs anyway to REPLACE a cinematic.
+
+      `src/formats/stxenc.[ch]` inverts the decoder's own tables rather than carrying copies of them
+      (`q2_stx_quant_table`, `q2_stx_zigzag_table`, `q2_stx_code_at` are exposed for exactly this reason: a
+      second transcription of a 64-entry table is a drift waiting to happen, and a drift here does not
+      crash, it just decodes slightly wrong). The forward DCT is the **transpose of the decoder's own cosine
+      matrix**, so any scale the decoder folded in is folded in here automatically.
+
+      **The 6,5,5,5 cadence turned out to be the encoder's CONSTRAINT.** It had been recorded as a property
+      of the data. It is not: audio takes slot 7 of every 8, which leaves 21 video sectors per 4 frames, and
+      6 sectors per frame off a 150-sector-per-second drive is exactly 25.000 fps. So a frame MUST fit its 5
+      or 6 sectors and the only free variable is the quantiser — which is why `bs_qscale` is per-frame and
+      runs 1..20 across the disc, and why an encoder for this format is a rate controller with a DCT
+      attached rather than the other way round.
+
+      **What it scores.** Re-encoding 400 frames of `ROGUEINP.STX` and reading the result back with the same
+      decoder: 400 of 400 decode exactly at 1,440 blocks, `bs_num_codes` agrees on 400 of 400, no frame over
+      its budget, zero unmatched codes, qscale 3..6, **45.4 dB mean PSNR** and 40.1 dB at its worst frame.
+      The audio round-trips sample for sample — which it should, and saying why matters: a signal that came
+      out of an XA decoder already sits on the codec's lattice, so the search finds the original's own
+      choice. That checks the addressing and the parameter packing and NOT the rate–distortion behaviour, so
+      a synthetic tone checks that separately (`tests/test_stxenc.c`, 59 dB and no drift over eight sectors).
+
+      **And the sectors are real ones.** `src/disc/cdxa.[ch]` builds Mode 2 Form 1 and Form 2 sectors with
+      the sync pattern, the BCD address, both subheader copies, the CRC-32 EDC and the Reed-Solomon P and Q
+      parity — computed with the address bytes zeroed, which is Mode 2's rule and not Mode 1's. The check is
+      not the specification, it is the disc: recomputing all **7,712 sectors of `TAKE1BP.STX`**, 964 of them
+      Form 2, returns the four and 276 bytes already there in every single one.

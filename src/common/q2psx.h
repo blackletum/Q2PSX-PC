@@ -57,6 +57,32 @@ Q2PSX_INLINE u32 q2_rd_u32(const void *p)
 Q2PSX_INLINE s16 q2_rd_s16(const void *p) { return (s16)q2_rd_u16(p); }
 Q2PSX_INLINE s32 q2_rd_s32(const void *p) { return (s32)q2_rd_u32(p); }
 
+/* ------------------------------------------------------------------------- */
+/* ...and the writers.                                                        */
+/* ------------------------------------------------------------------------- */
+/*
+ * These are new, and it is worth saying why a project that only ever READ the
+ * disc now has them: an encoder (stxenc.h) is the strictest test a format
+ * reading can be put to, because a decoder can be wrong in ways no picture
+ * shows and a round trip cannot. Unaligned and little-endian, to match the
+ * readers exactly — the console's own byte order.
+ */
+Q2PSX_INLINE void q2_wr_u16(void *p, u16 v)
+{
+    u8 *b = (u8 *)p;
+    b[0] = (u8)(v & 0xFF);
+    b[1] = (u8)((v >> 8) & 0xFF);
+}
+
+Q2PSX_INLINE void q2_wr_u32(void *p, u32 v)
+{
+    u8 *b = (u8 *)p;
+    b[0] = (u8)(v & 0xFF);
+    b[1] = (u8)((v >> 8) & 0xFF);
+    b[2] = (u8)((v >> 16) & 0xFF);
+    b[3] = (u8)((v >> 24) & 0xFF);
+}
+
 /* Big-endian — needed only for ISO9660's "both-endian" fields, where we read the
  * LE half, and for a couple of CD structures. */
 Q2PSX_INLINE u32 q2_rd_u32be(const void *p)
