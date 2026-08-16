@@ -192,6 +192,16 @@ void q2_creature_world_wake(q2_creature_world *w, const s32 player_origin[3]);
  */
 u32 q2_creature_world_tick(q2_creature_world *w, const s32 player_origin[3]);
 
+/*
+ * The player made a noise, and creatures may look for it.
+ *
+ * `weapon` true is a gunshot (the console's noise type < 2, which goes to
+ * `sound_entity`); false is the player's own — a footstep, a landing — which
+ * goes to `sound2_entity` and which an AMBUSH creature ignores. Without this
+ * two of FindTarget's three alert arms are dead. See the note on the definition.
+ */
+void q2_creature_world_player_noise(q2_creature_world *w, bool weapon);
+
 /* The model name for a live creature — the class table's name, which is also
  * the name its model carries in the map's CastList. NULL when unresolvable. */
 const char *q2_creature_world_model_name(const q2_creature_world *w,

@@ -335,6 +335,11 @@ q2_result q2_creature_world_load(q2_creature_world *w, const disc *d,
             memcpy(w->model_name[i], e->name, sizeof(e->name) < 13
                                               ? sizeof(e->name) : 13);
 
+        /* Kept before the spawn eats `class_id`: a module that shares one
+         * method table across several class bytes dispatches on the ROW, and
+         * the row is the only thing that says which variant this is. */
+        m->pop_class_id = (u8)pop_class;
+
         q2_creature_spawn(&w->mod[mi].bind, m, w->class_variant[pop_class]);
 
         if (e && e->health > 0) {
@@ -404,6 +409,41 @@ u32 q2_creature_world_tick(q2_creature_world *w, const s32 player_origin[3])
 
     sight_place(w, player_origin);
     return q2_monster_set_tick(&w->set);
+}
+
+/*
+ * PlayerNoise — 0x80062C74, and without it two of FindTarget's three alert arms
+ * can never fire.
+ *
+ * `q2_find_target` reads `sound_entity`/`sound_entity_framenum` (0x800E46EC and
+ * 0x800E46F0) and `sound2_entity`/`sound2_entity_framenum` (0x800E46F4, F8)
+ * exactly as the original does — and NOTHING in this port ever wrote them. The
+ * only alerting that worked was `sight_client`, which needs a creature to
+ * already be looking the right way. So a player could empty a magazine in a
+ * corridor and wake nobody: measured at 126 shots fired, 0 creatures hunting.
+ *
+ * The original spawns a noise ENTITY and keeps it; this port has one entity it
+ * can point at — the sight client, which already stands where the player is —
+ * so the pair is written with that. What matters to FindTarget is the position
+ * and the framenum, and both are right.
+ *
+ * 0x80062C80's own split: a noise type under 2 is WEAPON noise and goes to the
+ * first pair; anything else is the player's own and goes to the second. The
+ * second is additionally suppressed for an ambush creature, which is the whole
+ * reason the engine keeps them apart.
+ */
+void q2_creature_world_player_noise(q2_creature_world *w, bool weapon)
+{
+    if (!w || !w->ready)
+        return;
+
+    if (weapon) {
+        q2_level_state.sound_entity          = &w->sight;
+        q2_level_state.sound_entity_framenum = q2_level_state.framenum;
+    } else {
+        q2_level_state.sound2_entity          = &w->sight;
+        q2_level_state.sound2_entity_framenum = q2_level_state.framenum;
+    }
 }
 
 /* Case-insensitive substring, over a name that is not NUL-terminated in the

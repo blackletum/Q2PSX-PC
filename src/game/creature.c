@@ -935,24 +935,44 @@ u32 q2_creature_move_names(const q2_creature *c, const u8 *image, size_t size,
      * have to match the decoder's — which it does not, since the decoder finds
      * moves through whichever callback reached them first.
      */
+    /*
+     * THE RECORD IS {u16 first; u16 last; char name[16]}, and reading it the
+     * other way round named every move after the PREVIOUS record.
+     *
+     * The table starts immediately after the module's last instruction — for
+     * the Soldier that is 0x80102920, right past the `jr ra` at 0x80102918 and
+     * its delay slot — and the frame pair leads. Read as {name, first, last} it
+     * still "worked" in the sense that every record matched some move, because
+     * a record's name field is 16 bytes and the NEXT record's pair sits exactly
+     * where the misread expects its own: the scan simply paired each name with
+     * its successor's frames. The result was a full off-by-one-record shift,
+     * visible in the tool as 272-307 "Pain4" (it is Death1), 146-175 "Duck"
+     * (it is Stand1) and 465-474 "Death5" (it is Death6).
+     *
+     * That matters beyond a label: the death-frame picker in creworld.c selects
+     * a body's animation BY NAME, so every creature on the disc was dying to
+     * the wrong clip.
+     */
     for (off = 0; off + CRE_MOVE_NAME_STRIDE <= size; off += 4) {
         s32 first, last;
+        const u8 *name = image + off + 4;
 
-        if (!name_slot_ok(image + off, size - off))
+        if (!name_slot_ok(name, size - off - 4))
             continue;
 
         /*
-         * And a record may not BEGIN inside a printable run, or the scan takes
-         * the tail of a longer string for a field. Three consecutive printable
-         * bytes before the slot is the line — one or two out of an instruction
-         * word are not text. Same rule, same reason, as the LevelBin mission
-         * event scan (levelbin.c).
+         * And a record's NAME may not begin inside a printable run, or the scan
+         * takes the tail of a longer string for a field. Three consecutive
+         * printable bytes before the slot is the line — one or two out of an
+         * instruction word are not text. Same rule, same reason, as the LevelBin
+         * mission event scan (levelbin.c).
          */
         {
             size_t back = 0;
+            size_t at   = off + 4;
 
-            while (back < 3 && back < off) {
-                u8 ch = image[off - 1 - back];
+            while (back < 3 && back < at) {
+                u8 ch = image[at - 1 - back];
 
                 if (ch < 0x20 || ch > 0x7E)
                     break;
@@ -962,8 +982,8 @@ u32 q2_creature_move_names(const q2_creature *c, const u8 *image, size_t size,
                 continue;
         }
 
-        first = (s32)q2_rd_u16(image + off + 16);
-        last  = (s32)q2_rd_u16(image + off + 18);
+        first = (s32)q2_rd_u16(image + off);
+        last  = (s32)q2_rd_u16(image + off + 2);
 
         /*
          * A record names EVERY move whose range it matches, not just the first.
@@ -977,7 +997,7 @@ u32 q2_creature_move_names(const q2_creature *c, const u8 *image, size_t size,
                 continue;
             if (c->move[i].first_frame == first &&
                 c->move[i].last_frame  == last) {
-                out[i] = (const char *)image + off;
+                out[i] = (const char *)name;
                 found++;
             }
         }

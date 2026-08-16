@@ -5178,6 +5178,15 @@ static void client_input_simulated(client *c, float dt)
                 } else if (c->sim[0].combat.last_shot.fired) {
                     report = Q2_VW_FIRED;
                     c->shots_fired++;
+                    /*
+                     * AND THE NOISE IT MADE. PlayerNoise (0x80062C74) is what
+                     * puts a gunshot on the level's `sound_entity`, and
+                     * FindTarget's second arm looks for exactly that. Without
+                     * it the player could empty a magazine in a corridor and
+                     * wake nobody — measured at 126 shots, 0 hunting.
+                     */
+                    if (c->creatures_ready)
+                        q2_creature_world_player_noise(&c->creatures, true);
                 }
             }
 
@@ -6911,6 +6920,19 @@ static void client_entity_events(client *c)
                 ok = client_play_sound(c, name);
             else
                 ok = client_play_sound_at(c, name, ev->e[i].pos);
+
+            /*
+             * A footstep or a landing is the player's OWN noise, which is
+             * PlayerNoise's second pair (`sound2_entity`) — the one an AMBUSH
+             * creature is allowed to ignore. Keeping it apart from the weapon
+             * pair is the whole reason the engine has two.
+             */
+            if (c->creatures_ready &&
+                (ev->e[i].sound == Q2_SND_FOOTSTEP_A ||
+                 ev->e[i].sound == Q2_SND_FOOTSTEP_B ||
+                 ev->e[i].sound == Q2_SND_FOOTSTEP_WET ||
+                 ev->e[i].sound == Q2_SND_LAND))
+                q2_creature_world_player_noise(&c->creatures, false);
 
             if (!ok)
                 Q2_DEBUG("sound '%s' is not in %s's bank", name, c->map);

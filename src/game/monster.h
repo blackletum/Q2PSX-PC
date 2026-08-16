@@ -278,6 +278,21 @@ typedef struct q2_monster {
     u8  class_byte;         /* the local descriptor key, 64..94 for monsters */
 
     /*
+     * THE CLASS TABLE ROW this creature was placed from — 18, 19, 20 for the
+     * three Soldiers — kept because `class_id` does not survive the spawn.
+     *
+     * `q2_creature_spawn` overwrites `class_id` with the module's own local
+     * descriptor key (crebind.c), and a module that registers several class
+     * bytes against ONE shared method table then has no way back to the row.
+     * The Soldier is exactly that case: its spawn function dispatches on the
+     * class-table id at 0x80101604 — `lh v1, 0xD2(entity+0x24)`, branching on
+     * 19 / 18 / 20 — and each arm writes a different skinnum and health. Losing
+     * the row and reconstructing the variant from `class_byte` instead
+     * permuted all three: see soldier_skin.
+     */
+    u8  pop_class_id;
+
+    /*
      * WHICH POPULATION GROUP PLACED THIS CREATURE.
      *
      * A group is not spawned because it exists; it is spawned because a script

@@ -62,7 +62,14 @@
 #define SOL_WALK2     256     /* 256..265          */
 #define SOL_DEATH1    272     /* 272..307          */
 #define SOL_DEATH2    308     /* 308..342          */
-#define SOL_DEATH4    441     /* 441..464          */
+/*
+ * The module's four death moves are Death1, Death2, Death5 and Death6 — NOT
+ * 1/2/4/6. Death3 (343..387) and Death4 (388..440) exist in the table and no
+ * module code references either. The frames below were always right; the label
+ * on the third was not, because the move-name reader was pairing every name
+ * with the next record's frames (creature.c).
+ */
+#define SOL_DEATH5    441     /* 441..464          */
 #define SOL_DEATH6    465     /* 465..474          */
 
 /* Frames a think function jumps to by name. */
@@ -256,10 +263,38 @@ static void soldier_fire6(q2_monster *s) { soldier_fire(s, 5); }
 static void soldier_fire7(q2_monster *s) { soldier_fire(s, 6); }
 static void soldier_fire8(q2_monster *s) { soldier_fire(s, 7); }
 
-/* The variant, stored where the port can reach it. */
+/*
+ * The variant, and it comes from the CLASS TABLE ROW.
+ *
+ * The module registers all three class bytes — 87, 89, 88 — against ONE shared
+ * method table (0x801003C8, 0x801004F4, 0x80100510) and then dispatches inside
+ * its spawn function on the class-table id instead: 0x80101604 reads
+ * `lh v1, 0xD2(entity+0x24)` and branches on 19 / 18 / 20, writing
+ *
+ *     id 19 -> skinnum 0, health 20    (0x80102694, 0x80102698)   blaster
+ *     id 18 -> skinnum 2, health 30    (0x801027C4, 0x801027CC)   shotgun
+ *     id 20 -> skinnum 4, health 40    (0x801028F8, 0x801028FC)   machinegun
+ *
+ * and `q2psx-inspect classes` confirms rows 18/19/20 carry health 30/20/40.
+ *
+ * This used to reconstruct the variant from `class_byte` (87 -> 0, 88 -> 2,
+ * else -> 4), which the module never does — and because the loader maps a row
+ * to a class byte by ORDINAL, all three came out permuted: the 30-hp shotgun
+ * guard fired a blaster, the 20-hp light guard fired a machinegun and the 40-hp
+ * machinegun guard fired a shotgun. It also mis-steered soldier_attack and both
+ * refire pairs, which gate on `skinnum < 4` and `skinnum < 2`.
+ */
 static u8 soldier_skin(const q2_monster *m)
 {
-    return (u8)(m->class_byte == 87 ? 0 : (m->class_byte == 88 ? 2 : 4));
+    switch (m->pop_class_id) {
+    case 19: return 0;      /* blaster    */
+    case 18: return 2;      /* shotgun    */
+    case 20: return 4;      /* machinegun */
+    default: break;
+    }
+    /* A Soldier placed from a row this build does not know: the module's own
+     * fall-through is the last arm. */
+    return 4;
 }
 
 /*
@@ -464,7 +499,7 @@ static void soldier_die(q2_monster *self)
     else if (r < 16384)
         q2_cre_set_move(self, SOL_DEATH2);
     else if (r < 24576)
-        q2_cre_set_move(self, SOL_DEATH4);
+        q2_cre_set_move(self, SOL_DEATH5);
     else
         q2_cre_set_move(self, SOL_DEATH6);
 }
