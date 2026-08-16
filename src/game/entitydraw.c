@@ -45,13 +45,39 @@ bool q2_entity_resolve_model(q2_entity *e, const q2_model_bank *bank)
      * item with no clip named holds its rest pose.
      */
     e->clip_length = 0;
-    if (e->clip_count > 0) {
+    {
         q2_model m;
-        q2_model_anim clip;
 
-        if (q2_model_get(bank, (u32)index, &m) == Q2_OK &&
-            q2_model_anim_get(&m, e->clip[0], &clip))
-            e->clip_length = clip.frames;
+        if (q2_model_get(bank, (u32)index, &m) == Q2_OK) {
+            if (e->clip_count > 0) {
+                q2_model_anim clip;
+
+                if (q2_model_anim_get(&m, e->clip[0], &clip))
+                    e->clip_length = clip.frames;
+            }
+
+            /*
+             * AND THE MODEL'S OWN VERTICAL BIAS, which is why items sat in the
+             * floor.
+             *
+             * `model_offset` is `lh model[+0x1C]` — the header's ext2 — and the
+             * draw origin is the position lowered by 286 and raised again by
+             * it (FORMATS §5398, §5422, and the same expression item.c already
+             * writes). The parameter was threaded all the way through
+             * `q2_item_spawn` and both call sites passed ZERO, because neither
+             * has the model bank: the spawn runs before anything is resolved.
+             * So every item was drawn sunk by its own bias — a few units for a
+             * medkit, much more for a weapon, which is why the guns looked the
+             * worst. The pickup burst is spawned at the entity's draw origin
+             * too, so it came out under the floor with them.
+             *
+             * Here is where it belongs: this is the first point at which an
+             * entity and its model are both in hand. The origin is recomputed
+             * from `pos`, so it does not matter that the spawn already set one.
+             */
+            e->model_offset = m.hdr.ext2;
+            e->origin[1]    = e->pos[1] + Q2_EYE_BASE - e->model_offset;
+        }
     }
 
     return true;

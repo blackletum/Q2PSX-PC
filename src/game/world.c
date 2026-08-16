@@ -329,8 +329,23 @@ static u32 emit_subdivided(psx_ot *ot,
 
     gte_sxy grid_xy[V][V];
     u16     grid_z[V][V];
+    /*
+     * Which grid points PROJECTED. A point whose divide overflowed came back
+     * saturated at 0x1FFFF and is unusable — but only the CELLS that touch it
+     * are, so they are the only thing dropped. Failing the whole surface
+     * instead punches a hole in a wall you can see through, which is what
+     * dropping the quad wholesale did; and using the point anyway smears one
+     * enormous polygon across the screen, which is what the flat fallback did.
+     * Neither is the answer: the mesh exists precisely so that the near part of
+     * a surface can go while the rest of it stays.
+     */
+    bool    grid_ok[V][V];
     u32     emitted = 0;
     int     gx, gy, i;
+
+    for (gy = 0; gy < V; gy++)
+        for (gx = 0; gx < V; gx++)
+            grid_ok[gy][gx] = true;
 
     /*
      * The MapMod corners run around the perimeter, so p0-p1 and p3-p2 are the
@@ -360,8 +375,10 @@ static u32 emit_subdivided(psx_ot *ot,
                  * fault subdivision exists to avoid. Decline instead, and let
                  * the caller drop the quad.
                  */
-                if ((u32)cam->projection >= (u32)flat->depth[corner] * 2u)
-                    return 0;
+                if ((u32)cam->projection >= (u32)flat->depth[corner] * 2u) {
+                    grid_ok[gy][gx] = false;
+                    continue;
+                }
 
                 grid_xy[gy][gx] = flat->screen[corner];
                 grid_z[gy][gx]  = flat->depth[corner];
@@ -383,8 +400,10 @@ static u32 emit_subdivided(psx_ot *ot,
             gte->v[0].z = (s16)v[2];
             gte_rtps(gte, false);
 
-            if (gte->flag & GTE_FLAG_DIV_OVERFLOW)
-                return 0;
+            if (gte->flag & GTE_FLAG_DIV_OVERFLOW) {
+                grid_ok[gy][gx] = false;
+                continue;
+            }
 
             grid_xy[gy][gx] = gte->sxy[2];
             grid_z[gy][gx]  = gte->sz[3];
@@ -396,6 +415,11 @@ static u32 emit_subdivided(psx_ot *ot,
             world_quad sub = *flat;
             static const int dx[4] = { 0, 1, 1, 0 };
             static const int dy[4] = { 0, 0, 1, 1 };
+
+            /* A cell is drawable only if all four of its own corners are. */
+            if (!grid_ok[gy][gx]     || !grid_ok[gy][gx + 1] ||
+                !grid_ok[gy + 1][gx] || !grid_ok[gy + 1][gx + 1])
+                continue;
 
             for (i = 0; i < 4; i++) {
                 int cx = gx + dx[i];
