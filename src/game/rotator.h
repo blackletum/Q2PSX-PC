@@ -131,7 +131,46 @@ typedef struct q2_rotator {
     bool running;       /* a TARGET rotation is sweeping                      */
     u16  hold;          /* obj+0x4E: a SNAP's remaining hold, 0 = released    */
     u16  hold_reset;    /* what a press reloads `hold` with                   */
+
+    /*
+     * THE ONE MOVER FAMILY WITH A START / LOOP / STOP SOUND.
+     *
+     * A linear door plays one sound and nothing else — `pt1__strt`, once, at
+     * 0x80025960 and 0x80025A40. A ROTHATCH plays all three, and the disc's own
+     * cross-references say so plainly: of the three handles,
+     *
+     *   pt1__strt  0x800B27D8  read at 0x80025960, 0x80025A40 (linear door),
+     *                          0x8002B3C8 (this), 0x8002C5C0, 0x8002C6A0
+     *                          (PLATFORM's own handler 0x8002C2D4)
+     *   pt1__mid   0x800B27DC  read at 0x8002B3DC and NOWHERE ELSE
+     *   pt1__end   0x800B27E0  read at 0x8002B534 and NOWHERE ELSE
+     *
+     * — so the loop and the arrival belong to the rotating hatch alone, and the
+     * port played neither, because this module had no sound path at all. That is
+     * the residue behind "door sounds use platform sounds": the hatches that
+     * should open with a motor spinning up, running and stopping were silent,
+     * leaving only the linear door's single plat thud to be heard.
+     *
+     * `sound_pending` is drained by the owner, which is the only thing that
+     * knows where the rotator's node is and can therefore position the voice.
+     * `looping` says the drained sound is the MID one, which the caller must
+     * start as a loop and stop on arrival (0x8002B3DC goes through the looping
+     * entry point 0x80073734; 0x8002B534 stops it with 0x8007398C).
+     */
+    s8   sound_pending;
+    bool loop_running;  /* the MID loop has been started and not yet stopped */
 } q2_rotator;
+
+/* Which sound a rotator is asking for. Indices into q2_rot_sound_name. */
+typedef enum q2_rot_sound {
+    Q2_ROTSND_NONE = -1,
+    Q2_ROTSND_START = 0,   /* pt1__strt, 0x8002B3C8 — the turn begins       */
+    Q2_ROTSND_MID,         /* pt1__mid,  0x8002B3DC — looping while it runs */
+    Q2_ROTSND_END,         /* pt1__end,  0x8002B534 — it has arrived        */
+    Q2_ROTSND_COUNT
+} q2_rot_sound;
+
+extern const char *const q2_rot_sound_name[Q2_ROTSND_COUNT];
 
 typedef struct q2_rotator_set {
     q2_rotator *rotators;
@@ -162,6 +201,10 @@ typedef struct q2_rotator_set {
     const u8   *operand_base_b;   /* the chunk its operands live in      */
     u32         operand_b_size;
 } q2_rotator_set;
+
+/* Take the sound this rotator is asking for, or Q2_ROTSND_NONE. See the note on
+ * q2_rotator.sound_pending for why only this family has three. */
+s8 q2_rotator_take_sound(q2_rotator_set *set, u32 index);
 
 /*
  * Point a set's operand reads at a second chunk, as the engine does.

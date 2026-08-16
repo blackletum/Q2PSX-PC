@@ -775,6 +775,7 @@ typedef struct client {
     u32               mover_triggers;   /* items the script reached */
     u32               mover_moved;      /* ticks on which one moved */
     u32               mover_sounds;     /* transitions that made a noise */
+    u32               rot_sounds;       /* ...and the hatches' own       */
     u32               breakable_opened; /* doors opened by being shot   */
     bool              mission_after_map; /* the screen is holding a LOADMAP */
     /*
@@ -1134,6 +1135,25 @@ static void client_player_box(const client *c, s32 lo[3], s32 hi[3])
  * the player? The SWEPT box, not the current one — a door moving faster than
  * the player is wide would otherwise step straight over them.
  */
+/*
+ * The world-space centre of a Scene node, which is where a sound belonging to
+ * that node comes from. A node's bounding box is already in world space
+ * (scene.h), so this is its middle.
+ */
+static bool client_node_centre(const client *c, s32 node, s32 out[3])
+{
+    const q2_scene_node *n;
+    int k;
+
+    if (!c || node < 0 || (u32)node >= c->zone.scene.node_count)
+        return false;
+
+    n = &c->zone.scene.nodes[node];
+    for (k = 0; k < 3; k++)
+        out[k] = (n->bbox_min[k] + n->bbox_max[k]) / 2;
+    return true;
+}
+
 static bool client_mover_blocked(u32 index, s32 step, void *user)
 {
     client_mover_ctx *ctx = (client_mover_ctx *)user;
@@ -5500,6 +5520,40 @@ static void client_input_simulated(client *c, float dt)
             }
 
             /*
+             * AND THE ROTATING HATCHES, which had no sound path at all.
+             *
+             * pt1__mid and pt1__end have exactly ONE reader each in the whole
+             * image — 0x8002B3DC and 0x8002B534, both inside ROTHATCH's handler
+             * 0x8002B250 — so the start/loop/stop trio belongs to the rotating
+             * hatch alone, and this port played none of it. That is the residue
+             * behind "door sounds use platform sounds": the hatches that should
+             * open with a motor were silent, leaving only the linear door's
+             * single pt1__strt to be heard anywhere.
+             */
+            {
+                u32 ri;
+
+                for (ri = 0; ri < c->rotators.count; ri++) {
+                    s8  which = q2_rotator_take_sound(&c->rotators, ri);
+                    s32 at[3];
+
+                    if (which < 0 || which >= Q2_ROTSND_COUNT)
+                        continue;
+
+                    /* A rotator turns a Scene node, and that node is where the
+                     * sound is. An unbound one stays silent rather than falling
+                     * back to a listener-local play, which is the mistake the
+                     * movers above just had corrected. */
+                    if (!client_node_centre(c, c->rotators.rotators[ri].node,
+                                            at))
+                        continue;
+
+                    client_play_sound_at(c, q2_rot_sound_name[which], at);
+                    c->rot_sounds++;
+                }
+            }
+
+            /*
              * NO TOUCH PASS. `client_movers_touch` used to be called here, on
              * the reading that MOVER_A's +20 halfword is "also opens on touch".
              * It is not: 0x80025E98 tests it for > 0 and installs 0x8002F050 at
@@ -7507,9 +7561,10 @@ static void client_write_shot(client *c, bool numbered)
                 if (c->movers.movers[mi].sealed)                 sealed++;
             }
             Q2_INFO("  movers    %u built, %u triggered by the script, "
-                    "%u tick-moves, %u sounds, %u shot open",
+                    "%u tick-moves, %u sounds (%u hatch), %u shot open",
                     c->movers_ready ? c->movers.count : 0,
                     c->mover_triggers, c->mover_moved, c->mover_sounds,
+                    c->rot_sounds,
                     c->breakable_opened);
             Q2_INFO("  movers    %u part boxes solid, %u blocked now, "
                     "%u sealing their portal",

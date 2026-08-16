@@ -36,7 +36,35 @@ q2_rotator *q2_rotators_add(q2_rotator_set *set, q2_rot_kind kind,
     r->node  = node;
     r->axis  = (u8)(axis & 3u);
     r->speed = speed;
+    r->sound_pending = Q2_ROTSND_NONE;
     return r;
+}
+
+/* The three handles, registered by name alongside the linear mover's at
+ * 0x8002D644 / 0x8002D6D8 / 0x8002D76C. */
+const char *const q2_rot_sound_name[Q2_ROTSND_COUNT] = {
+    "pt1__strt",   /* 0x800B27D8 */
+    "pt1__mid",    /* 0x800B27DC */
+    "pt1__end"     /* 0x800B27E0 */
+};
+
+s8 q2_rotator_take_sound(q2_rotator_set *set, u32 index)
+{
+    s8 s;
+
+    if (!set || index >= set->count)
+        return Q2_ROTSND_NONE;
+    s = set->rotators[index].sound_pending;
+    set->rotators[index].sound_pending = Q2_ROTSND_NONE;
+
+    /* Track the loop across the drain, so the owner is told to start it once
+     * and stop it once. */
+    if (s == Q2_ROTSND_MID)
+        set->rotators[index].loop_running = true;
+    else if (s == Q2_ROTSND_END)
+        set->rotators[index].loop_running = false;
+
+    return s;
 }
 
 void q2_rotators_set_operand_source(q2_rotator_set *set, const u8 *base_a,
@@ -260,8 +288,12 @@ static void rotator_fire(q2_rotator *r)
 
     case Q2_ROT_TARGET:
         /* A hatch sweeps until it passes its target; re-triggering a moving one
-         * changes nothing. */
-        r->running = true;
+         * changes nothing — including its sound, which is why the raise is
+         * gated on the rotator not already running. 0x8002B3C8. */
+        if (!r->running) {
+            r->running        = true;
+            r->sound_pending  = Q2_ROTSND_START;
+        }
         break;
 
     case Q2_ROT_SNAP:
@@ -405,7 +437,26 @@ u32 q2_rotators_tick(q2_rotator_set *set, s32 dt)
                              : (r->angle < r->target)) {
                 r->angle   = r->target;
                 r->running = false;
+                /* 0x8002B534: arrival stops the loop and plays pt1__end. */
+                r->sound_pending = Q2_ROTSND_END;
             }
+            /*
+             * THE MID LOOP IS DECODED AND DELIBERATELY NOT RAISED YET.
+             *
+             * 0x8002B3DC plays pt1__mid through the LOOPING entry point
+             * 0x80073734 and 0x8002B534 stops it with 0x8007398C, so the motor
+             * runs for exactly as long as the hatch turns. This port can start
+             * such a voice — the VAG decoder honours the SPU's End|Repeat flag
+             * and pt1__mid is a 0.23 s loop body — but it has NO WAY TO STOP
+             * ONE: the mixer has no per-voice handle and `client_voices_stop`
+             * is all-or-nothing (vag.h says the same thing about scripted
+             * loops). Starting it would leave the motor running for the rest of
+             * the level, which is worse than the silence it replaces.
+             *
+             * So Q2_ROTSND_MID exists, is named and is wired through
+             * `q2_rotator_take_sound`, and nothing raises it until the mixer
+             * grows a stop. START and END are both correct and both play.
+             */
             moved++;
             break;
         }
