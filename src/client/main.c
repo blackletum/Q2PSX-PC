@@ -776,6 +776,10 @@ typedef struct client {
     u32               mover_moved;      /* ticks on which one moved */
     u32               mover_sounds;     /* transitions that made a noise */
     u32               rot_sounds;       /* ...and the hatches' own       */
+    /* Transitions whose voice did NOT start: no audio device, or the name is
+     * not in this map's bank. Counted apart so a headless run cannot be read
+     * as proof that anything was heard. */
+    u32               mover_sounds_missed;
     /* The module's own pain/die callbacks, which had no caller until they had
      * somewhere to be installed. `move_via_set` cannot see these: it only
      * counts the GENERIC fallback dispatcher, so a creature with a real
@@ -5553,8 +5557,18 @@ static void client_input_simulated(client *c, float dt)
                     if (!have)
                         continue;
 
-                    client_play_sound_at(c, q2_mover_sound_name[which], at);
-                    c->mover_sounds++;
+                    /*
+                     * COUNT THE VOICE, NOT THE TRANSITION. This used to
+                     * increment unconditionally, and `client_play_sound_at`
+                     * returns false whenever there is no audio device — which
+                     * is EVERY headless run. So "N sounds" was reporting
+                     * transitions reached, and a name missing from the map's
+                     * bank looked identical to one that played.
+                     */
+                    if (client_play_sound_at(c, q2_mover_sound_name[which], at))
+                        c->mover_sounds++;
+                    else
+                        c->mover_sounds_missed++;
                 }
             }
 
@@ -5587,8 +5601,10 @@ static void client_input_simulated(client *c, float dt)
                                             at))
                         continue;
 
-                    client_play_sound_at(c, q2_rot_sound_name[which], at);
-                    c->rot_sounds++;
+                    if (client_play_sound_at(c, q2_rot_sound_name[which], at))
+                        c->rot_sounds++;
+                    else
+                        c->mover_sounds_missed++;
                 }
             }
 
@@ -5639,7 +5655,25 @@ static void client_input_simulated(client *c, float dt)
              */
             if (!was && m->dead) {
                 if (m->die) {
+                    /*
+                     * AND THE FLAG IS THE MODULE'S TO SET, not ours.
+                     *
+                     * `soldier_die` opens with the console's own already-dead
+                     * guard — `if (self->dead) return;` — and
+                     * `q2_actor_to_monster` has just raised that very flag from
+                     * the health going negative. So the callback was installed,
+                     * was called, was COUNTED, and returned on its first
+                     * instruction every single time: no death sound, no skin
+                     * bit, no choice among the four death moves. The counter
+                     * saying "1 die" was counting the call, not the work.
+                     *
+                     * On the console the flag is written by the die function
+                     * itself (T_Damage only dispatches), so it is cleared for
+                     * the one call and the module puts it back.
+                     */
+                    m->dead = false;
                     m->die(m);
+                    m->dead = true;
                     c->cre_die_calls++;
                 }
             } else if (!m->dead && m->health < hp && m->pain) {
@@ -7639,10 +7673,10 @@ static void client_write_shot(client *c, bool numbered)
                 if (c->movers.movers[mi].sealed)                 sealed++;
             }
             Q2_INFO("  movers    %u built, %u triggered by the script, "
-                    "%u tick-moves, %u sounds (%u hatch), %u shot open",
+                    "%u tick-moves, %u sounds (%u hatch, %u not started), %u shot open",
                     c->movers_ready ? c->movers.count : 0,
                     c->mover_triggers, c->mover_moved, c->mover_sounds,
-                    c->rot_sounds,
+                    c->rot_sounds, c->mover_sounds_missed,
                     c->breakable_opened);
             Q2_INFO("  movers    %u part boxes solid, %u blocked now, "
                     "%u sealing their portal",

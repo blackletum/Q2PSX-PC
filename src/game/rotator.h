@@ -167,6 +167,9 @@ typedef enum q2_rot_sound {
     Q2_ROTSND_START = 0,   /* pt1__strt, 0x8002B3C8 — the turn begins       */
     Q2_ROTSND_MID,         /* pt1__mid,  0x8002B3DC — looping while it runs */
     Q2_ROTSND_END,         /* pt1__end,  0x8002B534 — it has arrived        */
+    /* ROTBUTTON's own, played on the press (0x8002BFB8, exec 0x8002BEB0)
+     * AND again on the release (0x8002C11C, handler 0x8002C020). */
+    Q2_ROTSND_BUTTON,      /* amb_butn2, 0x800B27E4                          */
     Q2_ROTSND_COUNT
 } q2_rot_sound;
 

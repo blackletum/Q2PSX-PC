@@ -45,7 +45,8 @@ q2_rotator *q2_rotators_add(q2_rotator_set *set, q2_rot_kind kind,
 const char *const q2_rot_sound_name[Q2_ROTSND_COUNT] = {
     "pt1__strt",   /* 0x800B27D8 */
     "pt1__mid",    /* 0x800B27DC */
-    "pt1__end"     /* 0x800B27E0 */
+    "pt1__end",    /* 0x800B27E0 */
+    "amb_butn2"    /* 0x800B27E4 */
 };
 
 s8 q2_rotator_take_sound(q2_rotator_set *set, u32 index)
@@ -300,6 +301,15 @@ static void rotator_fire(q2_rotator *r)
         /* 0x8002BFD8: pressed, the angle IS the target immediately. */
         r->angle = r->target;
         r->hold  = r->hold_reset;
+        /*
+         * AND IT CLICKS. 0x8002BFB8 loads amb_butn2 (0x800B27E4) and plays it
+         * through 0x80073704 at 0x8002BFCC, positioned at the midpoint of the
+         * object's two node bounds. This is the DOOR SWITCH, and the port
+         * raised nothing at all: 58 ROTBUTTON items on the disc against the 3
+         * BUTTON items that were its only source of this sound, so a player
+         * walked up to a switch, pressed it in silence, and then heard the door.
+         */
+        r->sound_pending = Q2_ROTSND_BUTTON;
         break;
     }
 }
@@ -472,6 +482,10 @@ u32 q2_rotators_tick(q2_rotator_set *set, s32 dt)
             } else {
                 r->hold  = 0;
                 r->angle = 0;
+                /* 0x8002C11C: the release plays amb_butn2 a second time, from
+                 * the handler 0x8002C020 that puts the angle back. A switch
+                 * clicks twice — down and up. */
+                r->sound_pending = Q2_ROTSND_BUTTON;
                 moved++;
             }
             break;

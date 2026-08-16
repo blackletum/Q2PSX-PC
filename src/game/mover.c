@@ -218,6 +218,32 @@ q2_result q2_movers_build(q2_mover_set *out, const q2_events *events,
                 speed      = (s16)abs(q2_rd_s16(p + 4));
                 portal     = q2_rd_s16(q + 6);
                 axis_field = q2_rd_s16(p + 8);
+
+                /*
+                 * THE AXIS FIELD ALSO FLIPS THE TRAVEL, and missing that is why
+                 * BASE1's first door opened with its two leaves swapped.
+                 *
+                 * 0x8002664C reads the FULL SIGNED halfword at item[+8] and
+                 * branches on it being non-zero:
+                 *
+                 *     8002664C  lh   v0, 8(s0)         ; the axis field
+                 *     80026654  beq  v0, zero, +0x14   ; zero: take it as-is
+                 *     8002665C  lhu  v0, 2(s0)
+                 *     80026664  subu v0, zero, v0      ; else NEGATE item[+2]
+                 *     80026670  sh   v0, 68(s1)        ; -> obj+0x44, the travel
+                 *
+                 * and leaf 1's copy is then negated again at
+                 * 0x80026690..0x8002669C, which is the part the port already
+                 * had. Taking `travel` unnegated for leaf 0 therefore reversed
+                 * BOTH panels on every door whose axis field is non-zero: each
+                 * leaf drove into the other's half of the doorway.
+                 *
+                 * Note the port reads the axis as `axis_field & 3` — the same
+                 * halfword serving two purposes, which is why its SIGN survives
+                 * to mean this.
+                 */
+                if (axis_field != 0)
+                    travel = (s16)-travel;
                 keys       = q2_rd_u16(p + 26);
                 delay      = p[28];
                 wait       = p[29];
