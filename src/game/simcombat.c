@@ -796,15 +796,15 @@ void q2_sim_combat_tick(q2_sim *sim)
          * arrived yet — which a short per-tick step makes the common case.
          */
         {
-            u32 k;
+            u32 hi;
             s64 dl = (s64)dir[0] * dir[0] + (s64)dir[1] * dir[1] +
                      (s64)dir[2] * dir[2];
 
             /* The square is enough to compare; the length is only printed. */
             q2_sim_proj_scan.seg_len = (s32)dl;
 
-            for (k = 0; k < hit_count; k++) {
-                q2_actor *t = hit_list[k];
+            for (hi = 0; hi < hit_count; hi++) {
+                q2_actor *t = hit_list[hi];
                 s64 along = 0, d2;
                 s64 reach;
 

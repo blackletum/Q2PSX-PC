@@ -302,7 +302,7 @@ bool q2_move_overlaps_any(const q2_move_world *w, const s32 pos[3])
 
 /* The stuck_test shape q2_move_checked wants, over the move world it is
  * already carrying. */
-bool q2_move_near_entity(const q2_move_ent *ent, void *user)
+bool q2_move_near_entity(const q2_move_ent *ent, const void *user)
 {
     const q2_move_world *w = (const q2_move_world *)user;
 
@@ -540,7 +540,7 @@ int q2_move(q2_collision *coll, q2_move_ent *ent, const s16 delta_in[3],
 /* ------------------------------------------------------------------------- */
 int q2_move_checked(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
                     s32 iterations, bool ground_mode, bool push_mode,
-                    q2_move_stuck_fn stuck_test, void *user,
+                    q2_move_stuck_fn stuck_test, const void *user,
                     const q2_move_world *world)
 {
     q2_move_ent saved;
@@ -624,7 +624,7 @@ bool q2_move_step(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
          * Table entry 0x800AE93C = {1, 1}.
          */
         q2_move_checked(coll, ent, delta, 3, true, true,
-                        q2_move_near_entity, (void *)world, world);
+                        q2_move_near_entity, world, world);
 
         /*
          * 0x80045CD0 — if that did not land but the running ground normal says
@@ -638,7 +638,7 @@ bool q2_move_step(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
 
             v[0] = 0; v[1] = 20; v[2] = 0;
             q2_move_checked(coll, ent, v, 0, true, false,
-                        q2_move_near_entity, (void *)world, world);
+                        q2_move_near_entity, world, world);
         }
 
         return (ent->flags & Q2_ENT_GROUNDED_MASK) != 0;
@@ -647,7 +647,7 @@ bool q2_move_step(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
     /* Up. -Y is up. Table entry 0x800AE930 = {0, 0}, zero further attempts. */
     v[0] = 0; v[1] = (s16)(-step); v[2] = 0;
     q2_move_checked(coll, ent, v, 0, false, false,
-                    q2_move_near_entity, (void *)world, world);
+                    q2_move_near_entity, world, world);
 
     /*
      * How far the LIFT actually got, measured before the slide runs.
@@ -664,7 +664,7 @@ bool q2_move_step(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
     /* Slide. 0x800AE934 = {0, 1}: nudge on, ground detection off, and three
      * further attempts — enough for a corner of two walls and a floor. */
     q2_move_checked(coll, ent, delta, 3, false, true,
-                    q2_move_near_entity, (void *)world, world);
+                    q2_move_near_entity, world, world);
 
     /*
      * 0x80045BC0..0x80045BD8 clears the ground normal before the down move, so
@@ -677,7 +677,7 @@ bool q2_move_step(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
      * this move, and only this move, may declare ground. */
     v[0] = 0; v[1] = (s16)(drop + step); v[2] = 0;
     q2_move_checked(coll, ent, v, 0, true, false,
-                        q2_move_near_entity, (void *)world, world);
+                        q2_move_near_entity, world, world);
 
     return (ent->flags & Q2_ENT_GROUNDED_MASK) != 0;
 }

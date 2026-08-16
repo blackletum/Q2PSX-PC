@@ -2477,18 +2477,18 @@ static int cmd_model(disc *d, const char *map, const char *want, int clip_index,
 
     /* Block D — the move table, and what the containment rule makes of it. */
     {
-        u32 moves = q2_model_move_count(&mdl), i;
+        u32 moves = q2_model_move_count(&mdl), mi;
         printf("  moves         : %u\n", moves);
-        for (i = 0; i < moves; i++) {
+        for (mi = 0; mi < moves; mi++) {
             q2_model_move mv, prev;
             int gap = -1;
-            if (!q2_model_move_get(&mdl, i, &mv))
+            if (!q2_model_move_get(&mdl, mi, &mv))
                 break;
-            if (i && q2_model_move_get(&mdl, i - 1, &prev))
+            if (mi && q2_model_move_get(&mdl, mi - 1, &prev))
                 gap = (int)mv.start - (int)prev.end;
             printf("    move %-3u  %-12s %5u..%-5u  span %4u  rest %5u%s"
                    "  one %u  gap %d\n",
-                   i, mv.name, mv.start, mv.end, mv.end - mv.start, mv.rest,
+                   mi, mv.name, mv.start, mv.end, mv.end - mv.start, mv.rest,
                    mv.rest == mv.start ? " (=start)" :
                    mv.rest == mv.end   ? " (=end)  " : " (?)     ",
                    mv.one, gap);

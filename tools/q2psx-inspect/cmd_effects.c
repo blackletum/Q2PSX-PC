@@ -680,13 +680,14 @@ static u32 check_glint_meshes(const disc *d)
             == Q2_OK) {
             if (q2_common_open(&common, &buf) == Q2_OK) {
                 const dat_chunk *lb = common.chunk[Q2_COMMON_LEVEL_BIN];
-                u32 i;
+                u32 off;
 
-                for (i = 0; lb && lb->data && i + 12 <= lb->size; i += 4) {
+                for (off = 0; lb && lb->data && off + 12 <= lb->size;
+                     off += 4) {
                     /* lw rX, 268(rY) ; lui rZ, 0x0400 ; or/and */
-                    u32 a = q2_rd_u32(lb->data + i);
-                    u32 b = q2_rd_u32(lb->data + i + 4);
-                    u32 c = q2_rd_u32(lb->data + i + 8);
+                    u32 a = q2_rd_u32(lb->data + off);
+                    u32 b = q2_rd_u32(lb->data + off + 4);
+                    u32 c = q2_rd_u32(lb->data + off + 8);
 
                     /* lw rX, 268(rY) — opcode 0x23, displacement 0x10C. */
                     if ((a >> 26) != 0x23u || (a & 0xFFFFu) != 268u)
@@ -699,10 +700,10 @@ static u32 check_glint_meshes(const disc *d)
 
                     if ((c & 0x3Fu) == 0x25u) {          /* or  = raise  */
                         raises++;
-                        printf("    LevelBin +0x%05X  raise\n", i);
+                        printf("    LevelBin +0x%05X  raise\n", off);
                     } else if ((c & 0x3Fu) == 0x24u) {   /* and = test   */
                         tests++;
-                        printf("    LevelBin +0x%05X  test\n", i);
+                        printf("    LevelBin +0x%05X  test\n", off);
                     }
                 }
                 q2_common_close(&common);
@@ -767,7 +768,7 @@ int cmd_effects(const disc *d, const char *out_ppm)
     q2_exe exe;
     q2_fx_tables t;
     q2_result r;
-    u32 bad;
+    u32 bad = 0;
 
     if (!d)
         return 1;
@@ -829,9 +830,19 @@ int cmd_effects(const disc *d, const char *out_ppm)
     }
 
     printf("\nStructural checks\n\n");
-    bad = q2_fx_tables_check(&t, &exe, report, NULL);
-    if (!bad)
-        printf("  all clear\n");
+    /*
+     * Accumulated, not assigned. The particle-image check above counts a
+     * missing palette into `bad`, and the assignment this used to be threw
+     * that away — a disc with no CLUT record reported OK. The "all clear"
+     * line still speaks only for the structural checks.
+     */
+    {
+        u32 structural = q2_fx_tables_check(&t, &exe, report, NULL);
+
+        if (!structural)
+            printf("  all clear\n");
+        bad += structural;
+    }
 
     bad += exercise(&t);
     bad += check_glint_meshes(d);

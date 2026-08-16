@@ -949,13 +949,13 @@ int cmd_zonescript(const disc *d, const char *only_map)
 
                         for (so = 0; so < 512; so += 4) {
                             u32 sl[32];
-                            u32 k, got = q2_levelbin_selected_slot(
+                            u32 si, got = q2_levelbin_selected_slot(
                                 lb->data, lb->size, so, sl, 32);
 
-                            for (k = 0; k < got && k < 32; k++) {
+                            for (si = 0; si < got && si < 32; si++) {
                                 char nm[13];
 
-                                memcpy(nm, lb->data + sl[k], 12);
+                                memcpy(nm, lb->data + sl[si], 12);
                                 nm[12] = 0;
 
                                 for (gi = 0; gi < pop.group_count; gi++) {
@@ -975,15 +975,15 @@ int cmd_zonescript(const disc *d, const char *only_map)
 
                     {
                         u32 sel[32];
-                        u32 k, got = q2_levelbin_selected(lb->data, lb->size,
+                        u32 si, got = q2_levelbin_selected(lb->data, lb->size,
                                                           sel, 32);
 
                         lb_sel_calls += got;
-                        for (k = 0; k < got && k < 32; k++) {
+                        for (si = 0; si < got && si < 32; si++) {
                             char nm[13];
                             bool matched = false;
 
-                            memcpy(nm, lb->data + sel[k], 12);
+                            memcpy(nm, lb->data + sel[si], 12);
                             nm[12] = 0;
 
                             for (gi = 0; gi < pop.group_count; gi++) {

@@ -270,14 +270,15 @@ bool q2_move_overlaps_any(const q2_move_world *w, const s32 pos[3]);
  * plain `q2_move` — and with no test ANYWHERE, which is how this shipped, the
  * entity sweep is dead code and no mover can block anything.
  */
-typedef bool (*q2_move_stuck_fn)(const q2_move_ent *ent, void *user);
+typedef bool (*q2_move_stuck_fn)(const q2_move_ent *ent, const void *user);
 
-/* The gate above, in that shape; `user` is the q2_move_world. */
-bool q2_move_near_entity(const q2_move_ent *ent, void *user);
+/* The gate above, in that shape; `user` is the q2_move_world. It is only read,
+ * hence const: the callers pass the same world they hand `q2_move_checked`. */
+bool q2_move_near_entity(const q2_move_ent *ent, const void *user);
 
 int q2_move_checked(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
                     s32 iterations, bool ground_mode, bool push_mode,
-                    q2_move_stuck_fn stuck_test, void *user,
+                    q2_move_stuck_fn stuck_test, const void *user,
                     const q2_move_world *world);
 
 /*

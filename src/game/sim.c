@@ -200,21 +200,24 @@ void q2_sim_scene_page(q2_sim *sim, bool title, bool visible)
 /*
  * Real time into the engine's 1/300 s units, CARRYING the fraction.
  *
- * `commit` consumes the remainder; a speculative caller (the mouse's
- * look-ahead, which asks what the next step would be without taking it) must
- * pass false or it steals time from the tick that follows.
+ * `carried` is the fraction left over from last time; `rest`, when given, takes
+ * the fraction this call leaves behind. A speculative caller (the mouse's
+ * look-ahead, which asks what the next step would be without taking it) passes
+ * NULL, or it steals time from the tick that follows. That is also why the
+ * carry comes in by value rather than as the sim: the speculative query holds
+ * a const one.
  */
-static s32 sim_whole_units(q2_sim *sim, double elapsed_seconds, bool commit)
+static s32 sim_whole_units(double carried, double elapsed_seconds, double *rest)
 {
-    double frac = sim->dt_frac + elapsed_seconds * (double)Q2_DT_HZ;
+    double frac = carried + elapsed_seconds * (double)Q2_DT_HZ;
     double whole;
 
     if (frac < 0.0)
         frac = 0.0;
     whole = (double)(s32)frac;      /* toward zero; frac is non-negative */
 
-    if (commit)
-        sim->dt_frac = frac - whole;
+    if (rest)
+        *rest = frac - whole;
 
     return (s32)whole;
 }
@@ -226,7 +229,8 @@ u32 q2_sim_scene_advance(q2_sim *sim, double elapsed_seconds)
     if (!sim || !sim->scene_ready || elapsed_seconds <= 0.0)
         return 0;
 
-    sim->dt_accum += sim_whole_units(sim, elapsed_seconds, true);
+    sim->dt_accum += sim_whole_units(sim->dt_frac, elapsed_seconds,
+                                     &sim->dt_frac);
     dt = sim->dt_accum;
     if (dt < Q2_DT_NOMINAL)
         return 0;
@@ -2630,7 +2634,8 @@ s32 q2_sim_next_dt(const q2_sim *sim, double elapsed_seconds)
 
     /* Real time -> the engine's 1/300 s units, with the sub-unit remainder
      * carried. PEEKED, not consumed: this is the speculative query. */
-    accum = sim->dt_accum + sim_whole_units(sim, elapsed_seconds, false);
+    accum = sim->dt_accum + sim_whole_units(sim->dt_frac, elapsed_seconds,
+                                            NULL);
 
     if (accum < Q2_DT_NOMINAL)
         return 0;
@@ -2647,7 +2652,8 @@ u32 q2_sim_advance(q2_sim *sim, const q2_input *input, double elapsed_seconds)
 
     dt = q2_sim_next_dt(sim, elapsed_seconds);
 
-    sim->dt_accum += sim_whole_units(sim, elapsed_seconds, true);
+    sim->dt_accum += sim_whole_units(sim->dt_frac, elapsed_seconds,
+                                     &sim->dt_frac);
 
     if (dt == 0)
         return 0;

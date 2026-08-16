@@ -338,8 +338,9 @@ static bool anim_span(const q2_model *m, u32 *begin, u32 *end)
 }
 
 /*
- * Block D runs from ofs_block_d to the end of the model. A record is 20 bytes
- * and a negative `first` ends the run, exactly as `0x8007EA08` reads it.
+ * Block D runs from ofs_block_d to the end of the model, in 20-byte records,
+ * exactly as `0x8007EA08` reads it. What ends the run is not a signed sentinel;
+ * `q2_model_move_get` below reads the terminator off the bytes.
  */
 static bool move_span(const q2_model *m, u32 *begin, u32 *end)
 {
@@ -357,7 +358,6 @@ bool q2_model_move_get(const q2_model *m, u32 index, q2_model_move *out)
 {
     u32 begin, end, at;
     const u8 *p;
-    s16 first;
 
     if (!out || !move_span(m, &begin, &end))
         return false;
