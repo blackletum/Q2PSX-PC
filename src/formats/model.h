@@ -254,6 +254,35 @@ typedef struct q2_model_face {
  * on this disc is opaque — and not one names a texture page the map does not
  * upload. The highest `texture` seen is 180 against a largest `clut4_count_b`
  * of 181, so the fit is tight rather than permissive.
+ *
+ * ---------------------------------------------------------------------------
+ * Verified instruction by instruction at 0x8006A3FC
+ * ---------------------------------------------------------------------------
+ * A creature rendering with a VIOLET patch where its face should be sent this
+ * whole path back for checking, and all four of it holds:
+ *
+ *   8006A3FC  lbu  v0, 1(a1)          face.texture
+ *   8006A404  lh   v1, 12012(...)     clut4_count_a, at 0x800B2EEC
+ *   8006A40C  addu v0, v0, v1         the sum, exactly as above
+ *   8006A418  sll  v0, v0, 1          halfword index into 0x800B2EDC
+ *   8006A428  sh   v0, 14(a3)         straight into the packet's clut field
+ *
+ *   8006A434  andi v1, v0, 0x1F       page, from face byte 0
+ *   8006A440  srl  v0, v0, 5          blend selector, same byte
+ *   8006A458  or   v1, v1, v0         tpage | blend, as written above
+ *   8006A47C  ori  v1, v1, 0x3C       code
+ *
+ * and the UVs are not assembled per corner at all: 0x8006A484..0x8006A4B8 is a
+ * WORD COPY LOOP, `lw`/`sw` sixteen bytes at a time out of a template into the
+ * packet, so a face's UV quad reaches the GPU verbatim in the order the file
+ * stores it. Reading `f->uv[i]` straight through, with no rotation, is what
+ * that is.
+ *
+ * So the CLUT index, the page, the blend selector and the UV order are each
+ * confirmed against the executable and the port matches all four. Whatever is
+ * left of that violet patch is NOT in this mapping — the remaining candidates
+ * are the CLUT's own contents as uploaded (vram.c) or the disc's texture being
+ * what it is. Do not "fix" the arithmetic above; it has been read.
  */
 Q2PSX_INLINE u32 q2_model_face_page(const q2_model_face *f)
 {
