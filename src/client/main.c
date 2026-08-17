@@ -8215,6 +8215,10 @@ static void client_draw_view(void *user, q2_screen *s, int p,
     c->cam.ofs_x      = s->view[p].ofs_x;
     c->cam.ofs_y      = s->view[p].ofs_y;
     c->cam.far_z      = s->view[p].far_z;
+    /* The clip extent the linkers test every projected corner against —
+     * 0x800B2C20's packed (clip_h << 16) | clip_w. */
+    c->cam.clip_w     = s->view[p].w;
+    c->cam.clip_h     = s->view[p].h;
 
     /*
      * In a split, each viewport is a different PLAYER, and until now every one

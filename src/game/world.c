@@ -888,6 +888,48 @@ u32 q2_world_build_ot(const q2_world_zone *z,
                 }
 
                 /*
+                 * THE 2D SCREEN-BOUNDS REJECT — the console's real answer to a
+                 * corner the GTE clamped, and the test this port never had.
+                 *
+                 * Variants 0 and 2 (0x800AF8DC-0x800AF968, 0x800AFB3C-0x800AFBC8)
+                 * reject only when all four corners are off the SAME edge. A
+                 * quad that STRADDLES the viewport survives, and that straddle
+                 * escape is precisely what lets a near quad with saturated
+                 * corners still be drawn — which is why the console needs no
+                 * near-plane rule and this port kept inventing one.
+                 *
+                 * Variant 1 (0x800AFDA0-0x800AFDEC) has no escape: it needs at
+                 * least one corner inside on each axis.
+                 */
+                if (cam->clip_w > 0 && cam->clip_h > 0) {
+                    int k, in_x = 0, in_y = 0;
+                    int lo_x = 0, hi_x = 0, lo_y = 0, hi_y = 0;
+
+                    for (k = 0; k < 4; k++) {
+                        s32 sx = screen[k].x, sy = screen[k].y;
+
+                        if (sx >= 0 && sx < cam->clip_w) in_x++;
+                        else if (sx < 0)                 lo_x++;
+                        else                             hi_x++;
+
+                        if (sy >= 0 && sy < cam->clip_h) in_y++;
+                        else if (sy < 0)                 lo_y++;
+                        else                             hi_y++;
+                    }
+
+                    if (variant == Q2_SURF_VARIANT_FLAT) {
+                        if (in_x == 0 || in_y == 0) {
+                            if (stats) stats->quads_rejected_bounds++;
+                            continue;
+                        }
+                    } else if (lo_x == 4 || hi_x == 4 ||
+                               lo_y == 4 || hi_y == 4) {
+                        if (stats) stats->quads_rejected_bounds++;
+                        continue;
+                    }
+                }
+
+                /*
                  * Draw variant 1's own rejection (0x800AFD20 / 0x800AFD34): if
                  * either of the two corners it looks up — vertex 1 and vertex 3,
                  * the packed byte pairs it extracts first — projected to depth

@@ -168,6 +168,21 @@ typedef struct q2_camera {
     s32 ext_w, ext_h;
 
     /*
+     * THE CLIP EXTENT, and it is the console's ONLY rejection for a quad that
+     * has gone off the side of the screen.
+     *
+     * 0x800B2C20 holds (clip_h << 16) | clip_w, written from view.w - shake_x
+     * (0x80076B24) and view.h - shake_y (0x80076B48). Every polygon linker
+     * compares its four projected corners against it. This port had no
+     * equivalent, which is why it kept reaching for an invented near-plane
+     * rule instead: without a screen test there was no faithful way to remove
+     * a quad whose corners the GTE had clamped to +/-1024.
+     *
+     * Zero on either means "do not test", for a caller with no viewport.
+     */
+    s32 clip_w, clip_h;
+
+    /*
      * The viewport's far distance — view+264, which the per-viewport draw parks
      * at 0x800B2CCC for the polygon emitter. It is 6400 for every layout except
      * the quad split, which uses 4000.
@@ -263,6 +278,10 @@ typedef struct q2_world_stats {
     u32 quads_semi;            /* clut & 3 non-zero: drawn with ABE       */
     u32 quads_rejected_flat;   /* variant 1's zero-depth corner rejection */
     u32 quads_subdivided;      /* replaced by a 4x4 mesh                  */
+    /* Off the side of the screen — the console's own 2D test at 0x800B2C20,
+     * counted apart from the near and backface rejections so the three can be
+     * told from one another. */
+    u32 quads_rejected_bounds;
 
     /*
      * The lens flare pass, which is otherwise invisible: a flare that never
