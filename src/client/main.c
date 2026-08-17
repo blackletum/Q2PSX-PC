@@ -3304,6 +3304,30 @@ static bool client_load_zone(client *c, const char *map, int index)
         c->cam.pos[2] = (wmin[2] + wmax[2]) / 2;
     }
 
+    /*
+     * The depth the ordering-table stand-in spreads over: this zone's own
+     * longest axis, not the subdivision distance.
+     *
+     * Dividing depth by `far_z` (6400, which is only ever the subdivision
+     * threshold) collapsed everything past 6400 units into the single last
+     * bucket, where the table can no longer separate it and distant surfaces
+     * paint over each other in add order. Sizing it from the geometry means a
+     * long room's far wall still gets buckets of its own.
+     */
+    {
+        s32 lo[3], hi[3], span = 0;
+        int k;
+
+        q2_world_bounds(&c->zone, lo, hi);
+        for (k = 0; k < 3; k++)
+            if (hi[k] - lo[k] > span)
+                span = hi[k] - lo[k];
+
+        c->cam.depth_range = span > 0 ? span : 0;
+        Q2_INFO("depth range: %d units (subdivision distance stays %d)",
+                (int)c->cam.depth_range, (int)c->cam.far_z);
+    }
+
     /* Upload this map's texture pages and palettes. Each map has its own bank,
      * so this must happen per zone load, not once at startup. */
     if (c->vram) {
@@ -8215,6 +8239,15 @@ static void client_draw_view(void *user, q2_screen *s, int p,
     c->cam.ofs_x      = s->view[p].ofs_x;
     c->cam.ofs_y      = s->view[p].ofs_y;
     c->cam.far_z      = s->view[p].far_z;
+    /*
+     * The clip extent the linkers compare every projected corner against —
+     * 0x800B2C20's packed (clip_h << 16) | clip_w, built from view.w - shake_x
+     * and view.h - shake_y. This is the console's ONLY rejection for a quad the
+     * GTE clamped off-screen, and the port had no equivalent, which is why it
+     * kept reaching for an invented near-plane rule instead.
+     */
+    c->cam.clip_w     = s->view[p].w;
+    c->cam.clip_h     = s->view[p].h;
 
     /*
      * In a split, each viewport is a different PLAYER, and until now every one
