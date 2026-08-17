@@ -125,12 +125,33 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
      * was; the three-angle form is taken only when a caller asks for it, which
      * today is the view weapon and its RotMatrix at 0x8004F464.
      */
+    /*
+     * AND THE YAW IS MIRRORED ON THE WAY IN, which is why every creature
+     * moonwalked and shot through its own back.
+     *
+     * `q2_rotation_yaw_pitch` builds Ry with m[0][2] = -sin and m[2][0] = +sin,
+     * which is Ry(-yaw) — the WORLD-TO-CAMERA form, and exactly right for the
+     * view basis above. Used unchanged as an instance's MODEL-TO-WORLD matrix it
+     * turns the mesh the wrong way, and the Soldier mesh is additionally
+     * authored facing -Z, so the two compose to `drawn = 2048 - yaw`.
+     *
+     * Measured through this very function with a fixed camera and the Soldier
+     * from BASE1's bank: yaw 0 renders the FRONT (should be the back), yaw 2048
+     * renders the BACK, and 1024 / 3072 happen to be right because they are
+     * their own mirror. Everything between was reflected, so a creature walked
+     * and fired along `angles[2]` — which is correct, AngleVectors at
+     * 0x8005BB58 builds forward from (sin yaw, cos yaw) and that is the vector
+     * M_walkmove uses — while its body pointed somewhere else entirely.
+     *
+     * `2048 - yaw` inverts both at once and leaves the view basis alone.
+     */
     if (inst->rot)
         memcpy(spin, inst->rot, sizeof(s16) * 9);
     else if (inst->pitch == 0 && inst->roll == 0)
-        q2_rotation_yaw_pitch(spin, inst->yaw, 0);
+        q2_rotation_yaw_pitch(spin, Q2_ANGLE_180 - inst->yaw, 0);
     else
-        q2_rotation_euler(spin, inst->pitch, inst->yaw, inst->roll);
+        q2_rotation_euler(spin, inst->pitch, Q2_ANGLE_180 - inst->yaw,
+                          inst->roll);
 
     /*
      * Uniform scale, applied to the instance's own matrix — which is where the
