@@ -8402,7 +8402,32 @@ static void client_draw_view(void *user, q2_screen *s, int p,
                          * something the disc never does, kept only because a
                          * decoded move without a name has nothing else to go on.
                          */
-                        const char *mname = client_move_name(m, mv);
+                        /*
+                         * THE KEY IS THE FRAME, NOT THE MOVE.
+                         *
+                         * The module's table indexes FRAME RANGES, and a move
+                         * can span several of them — the Soldier's attack1
+                         * (0-11) covers Fire 1 Ready/Aim/Shoot/Done and its
+                         * walk1 (215-247) covers Walk 1 Loop and Look. Asking
+                         * for "the name of this move" therefore came back empty
+                         * for exactly the moves a creature lives in, and the
+                         * draw fell through to a length match and then a raw
+                         * timeline walk: attack1 posed from "Death1", attack2
+                         * from "Pain3", walk1 from "Stand3" running into
+                         * "Death2".
+                         *
+                         * That is the moonwalk and the missing firing
+                         * animation — a patrolling Soldier slid down the
+                         * corridor with its legs locked in a standing pose, and
+                         * a shooting one played its own death.
+                         */
+                        s32 aiframe = mv->first_frame + (s32)into;
+                        const q2_cre_frame_name *rec =
+                            q2_creature_world_frame_name(&c->creatures, m,
+                                                         aiframe);
+                        const char *mname = rec ? rec->name
+                                                : client_move_name(m, mv);
+                        s32 base = rec ? rec->first : mv->first_frame;
                         u32 pos = 0;
                         bool pose_held = false;
 
@@ -8417,8 +8442,7 @@ static void client_draw_view(void *user, q2_screen *s, int p,
                          */
                         have_clip = false;
                         if (mname && !q2_model_position_for_move(
-                                mdl, mname, mv->first_frame + into,
-                                mv->first_frame, &pos))
+                                mdl, mname, aiframe, base, &pos))
                             /* The NAME is not in this model's block D. */
                             c->pose_name_absent++;
                         else if (mname)

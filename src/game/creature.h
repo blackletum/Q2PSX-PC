@@ -278,6 +278,40 @@ const char *q2_creature_sound_for_addr(const q2_cre_sound_bind *binds,
 u32 q2_creature_move_names(const q2_creature *c, const u8 *image, size_t size,
                            const char **out, u32 out_count);
 
+/*
+ * ONE RECORD OF THE MODULE'S NAME TABLE — {u16 first; u16 last; char name[16]}.
+ *
+ * `q2_creature_move_names` pairs these with MOVES, and a move is not the right
+ * key: the table indexes FRAME RANGES and a move can span several of them. The
+ * Soldier's attack1 (0-11) covers four records — Fire 1 Ready, Aim, Shoot,
+ * Done — and its walk1 (215-247) covers two. Asking for "the name of this
+ * move" therefore returns nothing for exactly the moves a creature spends most
+ * of its time in, and the draw then falls back to guessing a clip by length.
+ *
+ * The engine reaches an animation by NAME per FRAME (0x8006D330 from the frame,
+ * with 0x8007EA44 turning the record into a timeline position), so the draw
+ * wants this table whole and indexed by frame.
+ */
+typedef struct q2_cre_frame_name {
+    s32 first;
+    s32 last;
+    const char *name;       /* into the module image, which the caller owns */
+} q2_cre_frame_name;
+
+/*
+ * Read the module's name table straight through, one entry per record.
+ *
+ * Anchored rather than scanned: the table begins immediately past the module's
+ * last instruction and runs at a fixed 20-byte stride, so it is walked from
+ * there until a record fails validation. Returns the number written.
+ */
+u32 q2_creature_frame_names(const q2_creature *c, const u8 *image, size_t size,
+                            q2_cre_frame_name *out, u32 out_count);
+
+/* The record whose range contains `frame`, or NULL. */
+const q2_cre_frame_name *q2_creature_frame_name_at(const q2_cre_frame_name *tab,
+                                                   u32 count, s32 frame);
+
 /* True when a think index's function is `jr ra` immediately -- the disc saying
  * this frame does nothing, which is an answer rather than a failed decode. */
 bool q2_creature_think_is_empty(const q2_creature *c, const u8 *image,

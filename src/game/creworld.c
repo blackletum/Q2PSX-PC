@@ -122,6 +122,11 @@ static bool module_take(q2_creature_world *w, const u8 *bin, u32 boff, u32 bnext
     q2_creature_move_names(&m->cre, m->image, m->size, m->move_name,
                            Q2_CRE_MAX_MOVES);
     q2_creature_bind_move_names(&m->bind, m->move_name, m->cre.move_count);
+
+    /* And the whole table, frame-indexed — what the draw actually needs. */
+    m->frame_name_count = q2_creature_frame_names(&m->cre, m->image, m->size,
+                                                  m->frame_name,
+                                                  Q2_CRE_MAX_MOVES);
     if (!m->ready) {
         free(m->image);
         m->image = NULL;
@@ -467,6 +472,27 @@ static bool name_has_word(const char *name, const char *word)
     }
 
     return false;
+}
+
+/*
+ * The name record covering `frame` for this creature, out of its own module's
+ * table — which is how the engine reaches an animation, per frame rather than
+ * per move. NULL when the module names nothing there.
+ */
+const q2_cre_frame_name *q2_creature_world_frame_name(
+        const q2_creature_world *w, const q2_monster *m, s32 frame)
+{
+    s32 mi;
+
+    if (!w || !m)
+        return NULL;
+
+    mi = w->class_module[m->pop_class_id];
+    if (mi < 0 || (u32)mi >= Q2_CREWORLD_MAX_MODULES)
+        return NULL;
+
+    return q2_creature_frame_name_at(w->mod[mi].frame_name,
+                                     w->mod[mi].frame_name_count, frame);
 }
 
 const char *q2_creature_world_model_name(const q2_creature_world *w,

@@ -111,6 +111,17 @@ typedef struct q2_creature_module {
      */
     const char  *move_name[Q2_CRE_MAX_MOVES];
 
+    /*
+     * The same table read WHOLE and indexed by frame, which is how the engine
+     * actually reaches an animation. `move_name` above pairs records with
+     * moves, and a move can span several records — the Soldier's 12-frame
+     * attack covers four (Fire 1 Ready/Aim/Shoot/Done) — so the per-move view
+     * comes back empty for exactly the moves a creature lives in. See
+     * q2_cre_frame_name.
+     */
+    q2_cre_frame_name frame_name[Q2_CRE_MAX_MOVES];
+    u32               frame_name_count;
+
     bool         ready;
 } q2_creature_module;
 
@@ -206,6 +217,14 @@ void q2_creature_world_player_noise(q2_creature_world *w, bool weapon);
  * the name its model carries in the map's CastList. NULL when unresolvable. */
 const char *q2_creature_world_model_name(const q2_creature_world *w,
                                          const q2_monster *m);
+
+/*
+ * The name record covering `frame`, out of this creature's own module table.
+ * The draw wants this rather than the per-move name: a move can span several
+ * records, and the ones a creature spends its time in do.
+ */
+const q2_cre_frame_name *q2_creature_world_frame_name(
+        const q2_creature_world *w, const q2_monster *m, s32 frame);
 
 /*
  * The first frame of this creature's death move, or -1 when its module carries

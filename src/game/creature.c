@@ -917,11 +917,82 @@ const char *q2_creature_sound_for_addr(const q2_cre_sound_bind *binds,
     return NULL;
 }
 
+/*
+ * The whole name table, in order, one entry per record.
+ *
+ * ANCHORED, not scanned. `q2_creature_move_names` walks the image four bytes at
+ * a time looking for anything that validates, which is why six of the Soldier's
+ * records came back paired with the wrong name: a 20-byte record read at a
+ * 4-byte offset can validate against the tail of its predecessor. The table
+ * starts immediately past the module's last instruction — for the Soldier that
+ * is 0x80102920, right after the `jr ra` at 0x80102918 and its delay slot — so
+ * the first record that validates on a 4-aligned offset AND is followed by
+ * another at +20 is the base, and from there the stride is fixed.
+ */
+u32 q2_creature_frame_names(const q2_creature *c, const u8 *image, size_t size,
+                            q2_cre_frame_name *out, u32 out_count)
+{
+    size_t off, base = 0;
+    bool   found = false;
+    u32    n = 0;
+
+    if (!c || !image || !out || out_count == 0)
+        return 0;
+
+    /*
+     * Find the base: two consecutive valid records at the fixed stride. One
+     * alone can be a coincidence inside code; two in a row at +20 is the table.
+     */
+    for (off = 0; off + 2 * CRE_MOVE_NAME_STRIDE <= size; off += 4) {
+        if (name_slot_ok(image + off + 4, size - off - 4) &&
+            name_slot_ok(image + off + 4 + CRE_MOVE_NAME_STRIDE,
+                         size - off - 4 - CRE_MOVE_NAME_STRIDE)) {
+            base  = off;
+            found = true;
+            break;
+        }
+    }
+    if (!found)
+        return 0;
+
+    for (off = base; off + CRE_MOVE_NAME_STRIDE <= size && n < out_count;
+         off += CRE_MOVE_NAME_STRIDE) {
+        if (!name_slot_ok(image + off + 4, size - off - 4))
+            break;                      /* the table has ended */
+
+        out[n].first = (s32)q2_rd_u16(image + off);
+        out[n].last  = (s32)q2_rd_u16(image + off + 2);
+        out[n].name  = (const char *)(image + off + 4);
+
+        /* A record whose range runs backwards is not one. */
+        if (out[n].last < out[n].first)
+            break;
+        n++;
+    }
+
+    return n;
+}
+
+const q2_cre_frame_name *q2_creature_frame_name_at(const q2_cre_frame_name *tab,
+                                                   u32 count, s32 frame)
+{
+    u32 i;
+
+    if (!tab)
+        return NULL;
+
+    for (i = 0; i < count; i++)
+        if (frame >= tab[i].first && frame <= tab[i].last)
+            return &tab[i];
+
+    return NULL;
+}
+
 u32 q2_creature_move_names(const q2_creature *c, const u8 *image, size_t size,
                            const char **out, u32 out_count)
 {
-    size_t off;
-    u32 found = 0, i;
+    q2_cre_frame_name tab[Q2_CRE_MAX_MOVES];
+    u32 n, found = 0, i, k;
 
     if (!c || !image || !out || c->move_count == 0)
         return 0;
@@ -930,74 +1001,29 @@ u32 q2_creature_move_names(const q2_creature *c, const u8 *image, size_t size,
         out[i] = NULL;
 
     /*
-     * Every record in the image is offered to every move, and a move takes the
-     * one whose two frames are its own. That is why the table's order does not
-     * have to match the decoder's — which it does not, since the decoder finds
-     * moves through whichever callback reached them first.
-     */
-    /*
-     * THE RECORD IS {u16 first; u16 last; char name[16]}, and reading it the
-     * other way round named every move after the PREVIOUS record.
+     * Built on the ANCHORED table rather than on its own scan.
      *
-     * The table starts immediately after the module's last instruction — for
-     * the Soldier that is 0x80102920, right past the `jr ra` at 0x80102918 and
-     * its delay slot — and the frame pair leads. Read as {name, first, last} it
-     * still "worked" in the sense that every record matched some move, because
-     * a record's name field is 16 bytes and the NEXT record's pair sits exactly
-     * where the misread expects its own: the scan simply paired each name with
-     * its successor's frames. The result was a full off-by-one-record shift,
-     * visible in the tool as 272-307 "Pain4" (it is Death1), 146-175 "Duck"
-     * (it is Stand1) and 465-474 "Death5" (it is Death6).
+     * This used to walk the image four bytes at a time taking anything that
+     * validated, and a 20-byte record read at a 4-byte offset can validate
+     * against the tail of its predecessor — which is how six of the Soldier's
+     * records came back paired with the wrong name (0-0 "Run" is really
+     * "Fire 1 Ready", 30-31 "Death6" is "Fire 3 Aim", and so on). One reader,
+     * one table, one answer.
      *
-     * That matters beyond a label: the death-frame picker in creworld.c selects
-     * a body's animation BY NAME, so every creature on the disc was dying to
-     * the wrong clip.
+     * A record names EVERY move whose range it matches, not just the first: a
+     * module may list the same range in more than one callback slot — the
+     * Arachner has 16-24 twice — and stopping at the first left the rest
+     * unnamed.
      */
-    for (off = 0; off + CRE_MOVE_NAME_STRIDE <= size; off += 4) {
-        s32 first, last;
-        const u8 *name = image + off + 4;
+    n = q2_creature_frame_names(c, image, size, tab, Q2_CRE_MAX_MOVES);
 
-        if (!name_slot_ok(name, size - off - 4))
-            continue;
-
-        /*
-         * And a record's NAME may not begin inside a printable run, or the scan
-         * takes the tail of a longer string for a field. Three consecutive
-         * printable bytes before the slot is the line — one or two out of an
-         * instruction word are not text. Same rule, same reason, as the LevelBin
-         * mission event scan (levelbin.c).
-         */
-        {
-            size_t back = 0;
-            size_t at   = off + 4;
-
-            while (back < 3 && back < at) {
-                u8 ch = image[at - 1 - back];
-
-                if (ch < 0x20 || ch > 0x7E)
-                    break;
-                back++;
-            }
-            if (back >= 3)
-                continue;
-        }
-
-        first = (s32)q2_rd_u16(image + off);
-        last  = (s32)q2_rd_u16(image + off + 2);
-
-        /*
-         * A record names EVERY move whose range it matches, not just the first.
-         * A module may list the same range in more than one callback slot — the
-         * Arachner has 16-24 twice — and stopping at the first left the rest
-         * unnamed, which then read as "the disc does not name this move" when
-         * the name was right there.
-         */
+    for (k = 0; k < n; k++) {
         for (i = 0; i < c->move_count && i < out_count; i++) {
             if (out[i])
                 continue;
-            if (c->move[i].first_frame == first &&
-                c->move[i].last_frame  == last) {
-                out[i] = (const char *)name;
+            if (c->move[i].first_frame == tab[k].first &&
+                c->move[i].last_frame  == tab[k].last) {
+                out[i] = tab[k].name;
                 found++;
             }
         }
