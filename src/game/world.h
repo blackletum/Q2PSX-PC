@@ -168,31 +168,6 @@ typedef struct q2_camera {
     s32 ext_w, ext_h;
 
     /*
-     * THE CLIP EXTENT, which is the console's ONLY answer to an off-screen
-     * quad — and whose absence is why this port kept inventing near-plane
-     * rules as a substitute.
-     *
-     * 0x800B2C20 holds (clip_h << 16) | clip_w, written from view.w - shake_x
-     * (0x80076B24) and view.h - shake_y (0x80076B48). Every polygon linker
-     * compares its four projected corners against it, and that is what removes
-     * a quad the GTE clamped to +/-1024: not a depth test, a screen test.
-     *
-     * Zero means "do not test", for a caller with no viewport.
-     */
-    s32 clip_w, clip_h;
-
-    /*
-     * The depth the ordering-table stand-in spreads its buckets over.
-     *
-     * Deliberately NOT `far_z`: that is the subdivision distance (6400, view+264
-     * at 0x800B2CCC, read only by the three subdivision compares), and using it
-     * as a depth normaliser collapsed everything past 6400 units into one
-     * bucket. Zero falls back to far_z, which is what a caller with no zone
-     * bounds gets.
-     */
-    s32 depth_range;
-
-    /*
      * The viewport's far distance — view+264, which the per-viewport draw parks
      * at 0x800B2CCC for the polygon emitter. It is 6400 for every layout except
      * the quad split, which uses 4000.

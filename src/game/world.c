@@ -218,30 +218,7 @@ static psx_prim *emit_quad(psx_ot *ot,
     }
 
     span = psx_ot_bucket_span(ot);
-    /*
-     * THE DEPTH RANGE IS NOT far_z, AND USING IT WAS THE DISTANCE CULLING.
-     *
-     * `cam->far_z` is view+264 — 6400, set at 0x80077E58 and parked in
-     * 0x800B2CCC — and its only three readers in the whole image are the
-     * SUBDIVISION distance compares at 0x800AF974, 0x800AFBE4 and 0x800698A0.
-     * It is the distance at which a quad starts being subdivided. It is not a
-     * far plane and it has no business normalising depth.
-     *
-     * Dividing by it collapsed EVERYTHING beyond 6400 units into the single
-     * last bucket, where the ordering table can no longer separate it and the
-     * surfaces paint over each other in add order. That is what "geometry
-     * further away disappears" has been for five rounds, and it is why every
-     * fix aimed at the near plane relieved it briefly and then failed: none of
-     * them was anywhere near the mechanism.
-     *
-     * The console does not have this step at all — a node gets ONE ordering
-     * table entry and the bucket comes from the authored SortData stream. Until
-     * that is wired up (see q2_world_zone.sort), the stand-in at least has to
-     * span the depth actually on screen rather than the subdivision distance.
-     */
-    far  = cam->depth_range > 0 ? cam->depth_range
-                                : (cam->far_z > 0 ? cam->far_z
-                                                  : Q2_CAMERA_FAR_DEFAULT);
+    far  = cam->far_z > 0 ? cam->far_z : Q2_CAMERA_FAR_DEFAULT;
     if (span == 0)
         span = 1;
 
@@ -398,16 +375,7 @@ static u32 emit_subdivided(psx_ot *ot,
                  * fault subdivision exists to avoid. Decline instead, and let
                  * the caller drop the quad.
                  */
-                /*
-                 * SZ == 0 is the console's predicate — at or behind the eye —
-                 * not "the divide overflowed". 0x800B00AC..0x800B00C8 tests the
-                 * four corners for exactly that, and the alternate path's mask
-                 * builder at 0x800B0694..0x800B07C4 does the same per grid
-                 * point. Rejecting on the overflow instead hollowed out every
-                 * cell within 80 units of the eye, which is a great deal more
-                 * of a surface than the console ever removes.
-                 */
-                if (flat->depth[corner] == 0) {
+                if ((u32)cam->projection >= (u32)flat->depth[corner] * 2u) {
                     grid_ok[gy][gx] = false;
                     continue;
                 }
@@ -432,8 +400,7 @@ static u32 emit_subdivided(psx_ot *ot,
             gte->v[0].z = (s16)v[2];
             gte_rtps(gte, false);
 
-            /* Same predicate as the corners above: SZ == 0, not the flag. */
-            if (gte->sz[3] == 0) {
+            if (gte->flag & GTE_FLAG_DIV_OVERFLOW) {
                 grid_ok[gy][gx] = false;
                 continue;
             }
@@ -822,6 +789,10 @@ u32 q2_world_build_ot(const q2_world_zone *z,
                 world_quad q;
                 gte_sxy screen[4];
                 u16 depth[4];
+                /* Did any corner's divide overflow? Its screen position is then
+                 * a clamp rather than a projection, and two tests below must
+                 * not be asked about it. */
+                bool corner_over = false;
 
                 screen[0] = gte->sxy[0];
                 screen[1] = gte->sxy[1];
@@ -862,63 +833,45 @@ u32 q2_world_build_ot(const q2_world_zone *z,
                 depth[3]  = gte->sz[3];
 
                 /*
-                 * THE CONSOLE'S REJECTIONS, IN THE CONSOLE'S ORDER — and there
-                 * is no near-plane test among them.
+                 * A CORNER THAT OVERFLOWED THE DIVIDE HAS NO USABLE SCREEN
+                 * POSITION, and the quad is rejected unless SUBDIVISION is
+                 * going to rescue it.
                  *
-                 * Five separate near-plane rules were invented here across as
-                 * many attempts, every one of them reaching for the GTE's
-                 * divide-overflow flag. The transform at 0x800AED30 stores
-                 * {SXY, SZ} per vertex and NEVER READS FLAG; neither does any
-                 * of the three polygon linkers. The overflow is simply absorbed
-                 * by the GTE's own +/-1024 screen clamp, and what removes the
-                 * resulting off-screen quad is a 2D SCREEN-BOUNDS test — which
-                 * this port did not have, which is precisely why it kept
-                 * substituting a depth rule for it.
+                 * This is the near-plane rule, and getting it wrong in either
+                 * direction is visible. Rejecting whenever ANY corner overflows
+                 * — the sticky-flag test that used to be here — throws away a
+                 * quarter of an ordinary view, and near geometry projects to
+                 * the frame's border, so the holes appear at the outskirts.
+                 * Keeping such a quad instead is worse: `gte_divide` clamps to
+                 * 0x1FFFF on overflow, so that corner comes back SATURATED, and
+                 * the quad is emitted stretched across the screen where it
+                 * paints over everything behind it. That reads as "distant
+                 * geometry is being culled" and is the opposite — it is near
+                 * geometry being smeared over the distance.
                  *
-                 * Order, from the disassembly:
-                 *   1. BACKFACE, first, on every variant (0x800AF8A8 / 0x800AFB08
-                 *      / 0x800AFD6C).
-                 *   2. 2D bounds against (clip_h << 16) | clip_w at 0x800B2C20.
-                 *   3. variant 1 only: SZ == 0 on vertices 1 and 3.
-                 *   4. the subdivision distance compare — not a rejection.
+                 * The original resolves it by SUBDIVIDING (0x800AF7CC,
+                 * 0x800AFA2C): the 4x4 mesh's pieces each project sanely, so
+                 * there is nothing to reject. Where subdivision does not apply —
+                 * draw variant 1, which never subdivides, and variant 2's
+                 * untagged polygons — the quad really is undrawable and goes.
+                 * So the test is "any corner overflowed AND nothing is going to
+                 * subdivide this", which is the same predicate consulted below,
+                 * asked early.
                  */
-                if (!q2_world_quad_faces_camera(gte, screen)) {
-                    if (stats) stats->quads_rejected_back++;
-                    continue;
-                }
+                {
+                    u32 h = (u32)cam->projection;
 
-                /*
-                 * 2D BOUNDS. Variants 0 and 2 reject only when all four corners
-                 * are off the SAME edge (0x800AF8DC-0x800AF968): a quad that
-                 * STRADDLES the viewport survives, and that straddle escape is
-                 * what lets a near quad with clamped corners still be drawn.
-                 * Variant 1 has no escape — it needs a corner inside on each
-                 * axis (0x800AFDA0-0x800AFDEC).
-                 */
-                if (cam->clip_w > 0 && cam->clip_h > 0) {
-                    int k;
-                    int in_x = 0, in_y = 0;
-                    int lo_x = 0, hi_x = 0, lo_y = 0, hi_y = 0;
+                    corner_over = (h >= (u32)depth[0] * 2u) ||
+                                  (h >= (u32)depth[1] * 2u) ||
+                                  (h >= (u32)depth[2] * 2u) ||
+                                  (h >= (u32)depth[3] * 2u);
 
-                    for (k = 0; k < 4; k++) {
-                        s32 sx = screen[k].x, sy = screen[k].y;
-
-                        if (sx >= 0 && sx < cam->clip_w) in_x++;
-                        else if (sx < 0)                 lo_x++;
-                        else                             hi_x++;
-
-                        if (sy >= 0 && sy < cam->clip_h) in_y++;
-                        else if (sy < 0)                 lo_y++;
-                        else                             hi_y++;
-                    }
-
-                    if (variant == Q2_SURF_VARIANT_FLAT) {
-                        if (in_x == 0 || in_y == 0) {
-                            if (stats) stats->quads_rejected_near++;
-                            continue;
-                        }
-                    } else if (lo_x == 4 || hi_x == 4 ||
-                               lo_y == 4 || hi_y == 4) {
+                    if (corner_over &&
+                        !(render->subdiv_threshold > 0 &&
+                          q2_surf_should_subdivide(variant, poly.clut,
+                                                   (s32)depth[1] + (s32)depth[3],
+                                                   render->subdiv_threshold,
+                                                   render->pressure))) {
                         if (stats) stats->quads_rejected_near++;
                         continue;
                     }
@@ -935,6 +888,36 @@ u32 q2_world_build_ot(const q2_world_zone *z,
                 if (variant == Q2_SURF_VARIANT_FLAT &&
                     (depth[1] == 0 || depth[3] == 0)) {
                     if (stats) stats->quads_rejected_flat++;
+                    continue;
+                }
+
+                /*
+                 * Backface rejection, which the port did not have at all.
+                 *
+                 * The rule and its provenance are in world.h; what belongs here
+                 * is what it was costing. Levels are sealed by brushes whose
+                 * outward faces are never meant to be seen, and drawn without a
+                 * cull those faces land in front of the rooms they enclose and
+                 * black them out. It reads as a visibility fault — as if whole
+                 * areas were failing to stream in — when the geometry behind
+                 * them was being transformed and emitted correctly all along.
+                 */
+                /*
+                 * ...but NOT on saturated corners. The test is a cross product
+                 * of the PROJECTED corners, and a corner whose divide overflowed
+                 * came back clamped at 0x1FFFF — so its winding is whatever the
+                 * clamp happened to produce, and the answer is noise.
+                 *
+                 * Those quads never used to reach here: the blanket near reject
+                 * killed them first. Now that they survive to be subdivided,
+                 * feeding the flat quad's garbage winding to this test was
+                 * throwing away whole wall surfaces that the mesh would have
+                 * drawn correctly — up to 81% of a frame's quads on a BASE2
+                 * walk, which reads as distant geometry disappearing. The mesh's
+                 * own cells are the real geometry; let subdivision decide.
+                 */
+                if (!corner_over && !q2_world_quad_faces_camera(gte, screen)) {
+                    if (stats) stats->quads_rejected_back++;
                     continue;
                 }
 
