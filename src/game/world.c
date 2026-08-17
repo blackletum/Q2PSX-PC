@@ -789,6 +789,10 @@ u32 q2_world_build_ot(const q2_world_zone *z,
                 world_quad q;
                 gte_sxy screen[4];
                 u16 depth[4];
+                /* Did any corner's divide overflow? Its screen position is then
+                 * a clamp rather than a projection, and two tests below must
+                 * not be asked about it. */
+                bool corner_over = false;
 
                 screen[0] = gte->sxy[0];
                 screen[1] = gte->sxy[1];
@@ -856,12 +860,13 @@ u32 q2_world_build_ot(const q2_world_zone *z,
                  */
                 {
                     u32 h = (u32)cam->projection;
-                    bool over = (h >= (u32)depth[0] * 2u) ||
-                                (h >= (u32)depth[1] * 2u) ||
-                                (h >= (u32)depth[2] * 2u) ||
-                                (h >= (u32)depth[3] * 2u);
 
-                    if (over &&
+                    corner_over = (h >= (u32)depth[0] * 2u) ||
+                                  (h >= (u32)depth[1] * 2u) ||
+                                  (h >= (u32)depth[2] * 2u) ||
+                                  (h >= (u32)depth[3] * 2u);
+
+                    if (corner_over &&
                         !(render->subdiv_threshold > 0 &&
                           q2_surf_should_subdivide(variant, poly.clut,
                                                    (s32)depth[1] + (s32)depth[3],
@@ -897,7 +902,21 @@ u32 q2_world_build_ot(const q2_world_zone *z,
                  * areas were failing to stream in — when the geometry behind
                  * them was being transformed and emitted correctly all along.
                  */
-                if (!q2_world_quad_faces_camera(gte, screen)) {
+                /*
+                 * ...but NOT on saturated corners. The test is a cross product
+                 * of the PROJECTED corners, and a corner whose divide overflowed
+                 * came back clamped at 0x1FFFF — so its winding is whatever the
+                 * clamp happened to produce, and the answer is noise.
+                 *
+                 * Those quads never used to reach here: the blanket near reject
+                 * killed them first. Now that they survive to be subdivided,
+                 * feeding the flat quad's garbage winding to this test was
+                 * throwing away whole wall surfaces that the mesh would have
+                 * drawn correctly — up to 81% of a frame's quads on a BASE2
+                 * walk, which reads as distant geometry disappearing. The mesh's
+                 * own cells are the real geometry; let subdivision decide.
+                 */
+                if (!corner_over && !q2_world_quad_faces_camera(gte, screen)) {
                     if (stats) stats->quads_rejected_back++;
                     continue;
                 }
