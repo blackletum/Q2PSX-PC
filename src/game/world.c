@@ -955,20 +955,20 @@ u32 q2_world_build_ot(const q2_world_zone *z,
                  * them was being transformed and emitted correctly all along.
                  */
                 /*
-                 * ...but NOT on saturated corners. The test is a cross product
-                 * of the PROJECTED corners, and a corner whose divide overflowed
-                 * came back clamped at 0x1FFFF — so its winding is whatever the
-                 * clamp happened to produce, and the answer is noise.
+                 * UNCONDITIONALLY, which is what the console does — NCLIP runs
+                 * first on every variant (0x800AF8A8, 0x800AFB08, 0x800AFD6C).
                  *
-                 * Those quads never used to reach here: the blanket near reject
-                 * killed them first. Now that they survive to be subdivided,
-                 * feeding the flat quad's garbage winding to this test was
-                 * throwing away whole wall surfaces that the mesh would have
-                 * drawn correctly — up to 81% of a frame's quads on a BASE2
-                 * walk, which reads as distant geometry disappearing. The mesh's
-                 * own cells are the real geometry; let subdivision decide.
+                 * This was briefly skipped for quads with a saturated corner,
+                 * on the worry that a clamped corner makes the cross product
+                 * meaningless. The worry is unfounded: the console feeds NCLIP
+                 * exactly the same +/-1024-saturated SXY, because the vertex
+                 * array it reads is what the transform at 0x800AED30 wrote and
+                 * the GTE saturates before storing. Skipping it let backfaces
+                 * through, and now that the 2D bounds test above removes the
+                 * off-screen quads properly there is nothing left for the skip
+                 * to protect.
                  */
-                if (!corner_over && !q2_world_quad_faces_camera(gte, screen)) {
+                if (!q2_world_quad_faces_camera(gte, screen)) {
                     if (stats) stats->quads_rejected_back++;
                     continue;
                 }
