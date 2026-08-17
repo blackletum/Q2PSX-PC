@@ -375,7 +375,16 @@ static u32 emit_subdivided(psx_ot *ot,
                  * fault subdivision exists to avoid. Decline instead, and let
                  * the caller drop the quad.
                  */
-                if ((u32)cam->projection >= (u32)flat->depth[corner] * 2u) {
+                /*
+                 * SZ == 0 — at or behind the eye — is the console's predicate,
+                 * not "the divide overflowed". 0x800B00AC..0x800B00C8 tests the
+                 * four corners for exactly that, and the alternate path's mask
+                 * builder at 0x800B0694..0x800B07C4 does the same per grid
+                 * point. Rejecting on the overflow instead hollowed out every
+                 * cell within 80 units of the eye, which is a great deal more
+                 * of a surface than the console ever removes.
+                 */
+                if (flat->depth[corner] == 0) {
                     grid_ok[gy][gx] = false;
                     continue;
                 }
@@ -400,7 +409,8 @@ static u32 emit_subdivided(psx_ot *ot,
             gte->v[0].z = (s16)v[2];
             gte_rtps(gte, false);
 
-            if (gte->flag & GTE_FLAG_DIV_OVERFLOW) {
+            /* Same predicate as the reused corners above: SZ == 0. */
+            if (gte->sz[3] == 0) {
                 grid_ok[gy][gx] = false;
                 continue;
             }
