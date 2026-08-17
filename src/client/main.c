@@ -569,6 +569,11 @@ typedef struct client {
      */
     bool              carry_player;    /* set by the two transition paths */
     bool              carry_same_map;
+
+    /* The zone gate's own target name ('Zone1'), kept across the load so the
+     * spawn scan can meet it with 'InZone1'. Empty for anything that is not a
+     * gate. */
+    char              gate_name[24];
     q2_inventory      carry_inv;
     int               carry_weapon_id;
     int               carry_chaingun;
@@ -2092,6 +2097,36 @@ static void client_sync_parked_health(client *c)
  * reads the same offsets.
  */
 static bool client_load_zone(client *c, const char *map, int index);
+
+/*
+ * Compare two StartPos names ignoring case AND every space.
+ *
+ * The disc pads its 12-byte name fields with trailing spaces ('InZone1     '),
+ * and it is not consistent about interior ones either: JAIL2 carries both
+ * 'InZone1' and 'In Zone1', and its zone 2 is named 'In Zone2' with no
+ * space-free spelling at all. Comparing on the squeezed string is what makes
+ * one rule cover the disc.
+ */
+static int q2_name_eq_squeezed(const char *a, const char *b)
+{
+    for (;;) {
+        int ca, cb;
+
+        while (*a == ' ' || *a == '	') a++;
+        while (*b == ' ' || *b == '	') b++;
+
+        ca = (unsigned char)*a;
+        cb = (unsigned char)*b;
+        if (ca >= 'A' && ca <= 'Z') ca += 32;
+        if (cb >= 'A' && cb <= 'Z') cb += 32;
+
+        if (ca != cb)
+            return 1;
+        if (!ca)
+            return 0;
+        a++; b++;
+    }
+}
 /* Selects the loaded level's music. Defined beside the rest of the music code;
  * declared here because client_load_zone ends by calling it. */
 static void client_music_for_level(client *c, bool force);
@@ -3040,6 +3075,7 @@ static bool client_load_zone(client *c, const char *map, int index)
          */
         c->carry_player   = false;
         c->carry_same_map = false;
+        c->gate_name[0]   = ' ';
         return false;
     }
 
@@ -3151,6 +3187,77 @@ static bool client_load_zone(client *c, const char *map, int index)
                         } else {
                             Q2_WARN("deathmatch: %s zone %d has no MultiSpawn "
                                     "points — this is not an arena", map, index);
+                        }
+                    }
+
+                    /*
+                     * A ZONE GATE HAS A NAMED ENTRY POINT, and taking the
+                     * first StartPos instead is the reported teleport.
+                     *
+                     * The zones of a map share one coordinate space but occupy
+                     * DIFFERENT REGIONS of it — a position in zone 0 resolves
+                     * to no cell at all in zone 1 — so a gate really does have
+                     * to move the player. Where to is the question, and the
+                     * disc answers it by name: a gate to 'Zone1' is met by the
+                     * StartPos called 'InZone1', exactly as a fresh start on
+                     * zone 0 uses 'InZone0'.
+                     *
+                     * BASE1 is the case in the report. Its zone 1 carries
+                     * 'EndRoom', 'InZone1' and 'Base2Return' in that order, so
+                     * "the first StartPos whose zone matches" put a player
+                     * crossing from zone 0 into 'EndRoom' at (-331,-1387,4144)
+                     * — the far end of the level, and a room they had not
+                     * reached yet.
+                     *
+                     * The gate's own target name is preferred, so a map that
+                     * names its gates something other than 'ZoneN' still works;
+                     * 'InZone<index>' is the fallback, and the old first-match
+                     * behaviour remains for a fresh start.
+                     */
+                    if (c->carry_same_map) {
+                        char want[40];
+                        int  pass;
+
+                        /*
+                         * Three spellings, in order of how specific they are.
+                         * 'In' + the gate's own name covers BASE1/2/3 and
+                         * JAIL2 (whose 'In Zone1' squeezes to the same thing);
+                         * the gate name alone covers a zone whose entry point
+                         * is named for the place rather than the zone, which is
+                         * what LAB and SECURITY's zone 2 do; and 'InZone<N>' is
+                         * the positional fallback. Anything still unmatched
+                         * falls through to the first StartPos of the zone,
+                         * which is the behaviour this replaces.
+                         */
+                        for (pass = 0; !placed && pass < 3; pass++) {
+                            if (pass == 0 && c->gate_name[0])
+                                snprintf(want, sizeof(want), "In%s",
+                                         c->gate_name);
+                            else if (pass == 1 && c->gate_name[0])
+                                snprintf(want, sizeof(want), "%s",
+                                         c->gate_name);
+                            else
+                                snprintf(want, sizeof(want), "InZone%d", index);
+
+                            for (i = 0; i < spawns.count; i++) {
+                                q2_start_pos sp;
+
+                                if (!q2_start_pos_get(&spawns, i, &sp))
+                                    continue;
+                                if (sp.zone != index)
+                                    continue;
+                                if (q2_name_eq_squeezed(sp.name, want) != 0)
+                                    continue;
+
+                                c->cam.pos[0] = sp.x;
+                                c->cam.pos[1] = sp.y;
+                                c->cam.pos[2] = sp.z;
+                                c->cam.yaw    = sp.angle;
+                                placed = true;
+                                Q2_INFO("zone gate entered at '%s' (%d,%d,%d)",
+                                        sp.name, sp.x, sp.y, sp.z);
+                                break;
+                            }
                         }
                     }
 
@@ -3998,6 +4105,15 @@ static bool client_load_zone(client *c, const char *map, int index)
                     c->sim[0].combat.inv.health, c->sim[0].combat.inv.armour,
                     c->sim[0].combat.weapon_id, c->sim[0].combat.inv.weapons);
         }
+
+        /*
+         * ONE-SHOT, like `carry_player`, and for the same reason now that it
+         * decides POSITION as well as the clock. Left standing it would make
+         * the next load that does not set it explicitly keep a position from
+         * the wrong level. `client_change_map` already clears it on the way in,
+         * so this only closes the paths that do not.
+         */
+        c->carry_same_map = false;
 
         /*
          * The other players. Each gets its own sim, standing at its own
@@ -10328,6 +10444,10 @@ no_window:
                             c.sim[0].event_rt.pending_zone_name);
                     c.carry_player   = true;
                     c.carry_same_map = true;
+                    /* Carried across the load: the gate's name is what names
+                     * the entry point on the far side. */
+                    snprintf(c.gate_name, sizeof(c.gate_name), "%s",
+                             c.sim[0].event_rt.pending_zone_name);
                     client_load_zone(&c, c.map, (int)target);
                 }
             }
