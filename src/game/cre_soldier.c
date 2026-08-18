@@ -477,6 +477,24 @@ static void soldier_pain(q2_monster *self)
     s32 r;
 
     /*
+     * A CORPSE DOES NOT FLINCH, and this is the other half of the stuck death.
+     *
+     * The class routes damage to `die` or to `pain`, never to both, so the
+     * handler is simply never reached once a monster is dead. This port had no
+     * such guard, and with no debounce either (below) every further round that
+     * landed on a dying soldier re-entered the pain move at frame zero —
+     * interrupting the death animation partway and leaving the body frozen in
+     * whatever pose the fall had reached. A soldier killed by a burst, which is
+     * every soldier killed by a machinegun, was shot several more times on its
+     * way down.
+     *
+     * The debounce alone already stops most of it. This closes the case the
+     * debounce cannot: a hit that arrives after it has expired.
+     */
+    if (self->dead)
+        return;
+
+    /*
      * BLOODIED AT HALF HEALTH, and this is `skinnum |= 1` — not a state
      * change. The port wrote `attack_state = Q2_AS_STRAIGHT` here, which is a
      * different field entirely: it told the AI to charge straight at its enemy

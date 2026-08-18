@@ -582,6 +582,18 @@ q2_damage_result q2_sim_hurt_player(q2_sim *sim, q2_actor *attacker,
     if (!sim)
         return out;
 
+    /*
+     * A CAPTURE AID, off unless a harness asks for it: the player takes no
+     * damage. It exists because several things worth photographing — a
+     * creature's death animation, a corpse settling, a long fight — outlast
+     * the player in any engagement dense enough to produce them, and every
+     * frame captured of one was a death-cam view instead. Returning the empty
+     * result rather than clamping health keeps the whole chain quiet: no
+     * flinch, no kick, no blood, no death.
+     */
+    if (sim->invulnerable)
+        return out;
+
     /* Health and armour live in the inventory, everything else in the actor, so
      * the two are synchronised around the call rather than duplicated. */
     q2_actor_from_player(&sim->combat.self, &sim->combat.inv, sim->player[sim->cur_player].pos);

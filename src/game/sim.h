@@ -596,6 +596,9 @@ typedef struct q2_sim {
      */
     bool         autoswitch;
 
+    /* A capture aid: the player takes no damage. See q2_sim_hurt_player. */
+    bool         invulnerable;
+
     /* Set when a zone gate fires; the caller performs the load. */
     bool         zone_change_pending;
     u32          zone_change_target;

@@ -682,6 +682,7 @@ typedef struct client {
     bool              use_sort;     /* --sort-data: the authored draw order */
     /* --no-autoswitch: keep the disc's rule, which only leaves the blaster. */
     bool              no_autoswitch;
+    bool              god;          /* --god: capture aid, no damage  */
     s32               ot_range;     /* --ot-range: sweep the sort range    */
     s32               sort_cell;
 
@@ -3739,6 +3740,7 @@ static bool client_load_zone(client *c, const char *map, int index)
     /* Re-armed after every load, because the memset above clears it. */
     c->sim[0].trace_zone      = c->zone_trace;
     c->sim[0].autoswitch      = !c->no_autoswitch;
+    c->sim[0].invulnerable    = c->god;
     {
         s32 feet[3];
         feet[0] = c->cam.pos[0];
@@ -10203,6 +10205,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--zone-probe"))            zone_probe = true;
         else if (!strcmp(argv[i], "--sort-data"))             c.use_sort = true;
         else if (!strcmp(argv[i], "--no-autoswitch"))         c.no_autoswitch = true;
+        else if (!strcmp(argv[i], "--god"))                   c.god = true;
         else if (!strcmp(argv[i], "--ot-range") && i + 1 < argc) c.ot_range = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--zone-trace"))            c.zone_trace = true;
         else if (!strcmp(argv[i], "--fire-triggers")) {
