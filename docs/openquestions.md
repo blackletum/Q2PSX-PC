@@ -2521,9 +2521,23 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
       for view lights it never adds. Reverted rather than left in, because a dark flat gun is further from
       the capture than a slightly washed one.
 
-      **What this needs is the producer**: whatever fills `0x800E3ED8`. `q2_light_add_dynamic`
-      (`0x80075C34`) appends to the WORLD list at `0x800E3D18`; the view list's own append is a different
-      site and has not been found. Until it is, the flag cannot be honoured.
+      **AND THERE IS NO PRODUCER ON THE CONSOLE EITHER — the port's empty list is right.** The two lists
+      are appended through cursors: `gp+18624` for the world and `gp+18628` for the view, both reset
+      together at `0x80075DFC`/`0x80075E08`. Sweeping every gp-relative access to each:
+
+          world cursor 0x800B2EC0   thirteen sites, read and written, appended by 0x80075C34
+          view  cursor 0x800B2EC4   TWO sites, both writes, both resets — never read
+
+      Nothing can append to a list whose cursor is never loaded. So the console's view dynamic list is as
+      empty as the port's, and `dynamic_view` having no producer is a faithful reconstruction rather than
+      a missing caller. That closes the question this entry opened.
+
+      **What it leaves open is narrower and different**: with the view list empty, the console's gun is lit
+      by its glow floor alone — the `"000"` default, 48 per component — and yet a capture shows it lighter
+      and plainly purple where the port's view-space test render came out dark. So the remaining
+      difference is not in WHICH lights are gathered but in what the gather does with them: the modulate
+      path, the back colour, or the saturation at `q2_light_env_build`. That is a lighting question, not a
+      view-weapon one, and it should be chased there.
 
 - [x] 50a. **The view weapon queues something white and 128 units wide at its own position — and the
       gate it is behind is NEVER WRITTEN, so it never happens.** `0x8004F6CC` calls `0x8007012C` with the
