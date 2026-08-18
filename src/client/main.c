@@ -5726,6 +5726,17 @@ static void client_input_simulated(client *c, float dt)
                 }
             }
 
+            /*
+             * Is the quad up? The four fire sites read the deadline out of the
+             * player's own block (combat+172, which is `quad_until`) and
+             * compare it against the level clock at 0x800AEBAC — so the
+             * comparison is the console's and only the plumbing is this
+             * caller's. `q2_vw_advance` raises the sound off it.
+             */
+            c->vw.quad_active =
+                (c->sim[0].level_time <
+                 c->sim[0].combat.inv.quad_until);
+
             swapped = q2_vw_advance(&c->vw, ticks, in.attack, report);
         }
         if (swapped)
@@ -5766,6 +5777,18 @@ static void client_input_simulated(client *c, float dt)
                 if (wt->sound[snd][0])
                     client_play_sound(c, wt->sound[snd]);
             }
+
+            /*
+             * AND THE QUAD'S, which is a different table.
+             *
+             * The four fire sites all test the level clock against the deadline
+             * at combat+172 and, when it has not passed, play `[0x800B28B0]` —
+             * filled at 0x80037AA0 from `itm_damage3`. That is an ITEM sound,
+             * not one of the twenty-two the weapon table names, so it is played
+             * by name rather than by index.
+             */
+            if (q2_vw_take_quad_sound(&c->vw))
+                client_play_sound(c, "itm_damage3");
         }
 
         /*

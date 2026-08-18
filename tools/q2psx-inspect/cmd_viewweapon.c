@@ -221,7 +221,21 @@ static int render_view(disc *d, q2_vm_tables *tab, const char *map,
     }
 
     cam.pos[0] = feet[0];
-    cam.pos[1] = feet[1] + Q2_VW_EYE_BASE - 576;   /* the eye, §9.12 */
+    /*
+     * THE EYE IS `feet - viewOffset`, AND THIS HARNESS HAD IT 286 UNITS OUT.
+     *
+     * `feet + 286 - viewOffset` is the console's expression written against the
+     * ENTITY ORIGIN (entity+0x58, which sits 286 above the feet — 0x80038630).
+     * Handed the FEET instead, the 286 has nothing to cancel against, and the
+     * camera ends up 286 above the eye that `q2_vw_place` puts the weapon on.
+     * `q2_sim_eye` computes `feet - viewOffset` and says why; this did not, so
+     * the tool drew the weapon from a camera the weapon was not hung off.
+     *
+     * That is not a cosmetic difference in a picture nobody measures:
+     * openquestions #46 was raised on a capture from THIS path, and the entry's
+     * numbers are the ones this line produced.
+     */
+    cam.pos[1] = feet[1] - 576;
     cam.pos[2] = feet[2];
     aim[1] = (s16)cam.yaw;
 
@@ -281,6 +295,23 @@ static int render_view(disc *d, q2_vm_tables *tab, const char *map,
                        "  (viewport %dx%d)\n",
                        minx, maxx, miny, maxy, minz, maxz,
                        scr.view[0].w, scr.view[0].h);
+                /*
+                 * AND AS FRACTIONS OF THE PICTURE, which is the only form that
+                 * can be held against a capture.
+                 *
+                 * A screenshot of the running console is some arbitrary width
+                 * — 640 x 480 out of an emulator, 512 x 240 off the hardware —
+                 * so pixels compare to nothing. Fractions compare to anything,
+                 * and the display's own 4:3 stretch cancels because it applies
+                 * to both sides. openquestions #46 is an argument about these
+                 * four numbers and had to compute them by hand each time.
+                 */
+                printf("  as a fraction of the picture: x %.3f..%.3f"
+                       "  y %.3f..%.3f\n",
+                       (double)minx / scr.view[0].w,
+                       (double)maxx / scr.view[0].w,
+                       (double)miny / scr.view[0].h,
+                       (double)maxy / scr.view[0].h);
         }
         printf("  weapon    %u of %u faces, %u parts "
                "(near %u, bad %u, overflow %u)\n",
@@ -752,7 +783,10 @@ int cmd_viewweapon(disc *d, const char *weapon, const char *out,
              */
             s32 o0[3], o1[3], v0[3], v1[3];
             s16 y0[3] = { 0, 0, 0 }, y1[3] = { 0, 1024, 0 };
-            s32 eye_y = feet[1] + Q2_VW_EYE_BASE - 576;
+            /* `feet - viewOffset`, the same eye q2_sim_eye computes and the
+             * same one q2_vw_place hangs the weapon off — see the note at the
+             * camera in render_view for what writing the 286 in here costs. */
+            s32 eye_y = feet[1] - 576;
             s64 d0 = 0, d1 = 0;
             int i;
             bool moved, rigid;

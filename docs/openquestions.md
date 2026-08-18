@@ -2181,45 +2181,80 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
       `0x80089E18`. It is a zero rotated by a matrix, added to a position. Nothing to reproduce, and worth
       recording so it is not "found" again.
 
-      *One operand IS missing, and it is a rotation rather than a translation.* `0x8004F3E4…0x8004F3F8`
-      adds `[combat+70]` to the X component of the interpolated clip rotation immediately before
-      `RotMatrix`. `combat` is `[entity+12]`, the same block the weapon id (`+98`), the selection (`+102`)
-      and the switch countdown (`+222`) live in. **That halfword is read here and nowhere else in the
-      image**, and a sweep of every `sb`/`sh`/`sw` with an immediate of 68..72 finds no write to it on this
-      block, so it may simply be permanently zero. Not implemented, and named here rather than guessed.
+      *One operand looked missing and is provably zero.* `0x8004F3E4…0x8004F3F8` adds `[combat+70]` to the
+      X component of the interpolated clip rotation immediately before `RotMatrix`. `combat` is
+      `[entity+12]`, the same block the weapon id (`+98`), the selection (`+102`) and the switch countdown
+      (`+222`) live in. **That halfword is read here and nowhere else in the image, and nothing writes
+      it**: every `sb`/`sh`/`sw` with an immediate of 68..72 on any base is either a different struct (the
+      `0x8001xxxx` sprite block, whose `+64/+66/+70/+72` are its own), a stack slot, a materialised global
+      (`0x8003B424` writes `0x800C7CA6`), or library code above `0x80086000`. So the term is `x + 0`, and
+      the port's expression IS the console's expression. Not a gap — an operand that costs nothing, named
+      here so nobody re-derives it.
 
       *And the weapon was drawn from RAW VERTICES.* `q2_vw_build_ot` passed `pose = NULL`, so the one model
       in the frame that never got its rest transform was the one in the player's hands. That is now fixed
       and it MOVES the weapon: `Railgun G` shifts by its rest translation of −34 on Z, `Bfg G` by 53 on Y,
-      and `HandGren G` goes from a 105-unit lump to a 666-unit arm. Any re-take of the measurement above
-      has to be against the posed build.
+      and `HandGren G` goes from a 105-unit lump to a 666-unit arm.
+
+      **THE HARNESS THIS ENTRY WAS MEASURED WITH HAD THE CAMERA 286 UNITS OFF THE EYE.**
+      `cmd_viewweapon.c`'s `render_view` set `cam.pos.y = feet + 286 - viewOffset`, which is the console's
+      expression written against the ENTITY ORIGIN (`entity+0x58`, 286 above the feet — `0x80038630`).
+      Handed the FEET, the 286 has nothing to cancel against, so the camera sat 286 above the eye
+      `q2_vw_place` hangs the weapon off and the tool drew the weapon from a viewpoint the weapon was not
+      attached to — at one point out of the top of the frame. `q2_sim_eye` computes `feet - viewOffset`
+      and says why; this did not. Fixed, and the tool now prints the box as FRACTIONS as well as pixels,
+      because a capture is 640 x 480 or 512 x 240 and pixels compare to nothing.
+
+      **Re-measured against a real retail capture of the BASE0 opening.** The port, same map and spawn,
+      weapon box against a world-only render of the identical camera:
+
+          port    x 0.543..0.730   y 0.581..1.000
+          retail  x 0.550..0.820   y 0.579..1.000   (read off the capture by eye)
+
+      That is a different defect from the one this entry describes. **The left edge and the top edge
+      agree**; what is short is the RIGHT edge, by about 0.09 of the picture width — the port's weapon is
+      roughly seven tenths as wide as the console's while starting in the same place. "Sits too far left"
+      is withdrawn; "does not reach far enough right" replaces it.
+      The retail numbers above are eyeballed off a screenshot and are the weakest link in the argument.
+      **What this needs to close is the capture committed to the repo** so the box can be measured rather
+      than estimated, and the comparison pinned the way every other measurement here is.
 
 ---
 
-- [ ] 50a. **The view weapon queues something white and 128 units wide at its own position, every
-      frame, and it is not a light.** `0x8004F6CC` calls `0x8007012C` with the weapon's finished world
-      position, `128`, and the four bytes at `0x800AEA20` — which are `ff ff ff 00`, opaque white. The
-      whole call is gated on the halfword at `0x800B2A28`.
-      `0x8007012C` is an append to a bump list between `gp+18496` and `gp+18500`, twenty bytes a record:
-      three position words, the `128`, and the packed colour. It is NOT `q2_light_add_dynamic`
-      (`0x80075C34`, 28-byte records at `0x800E3D18`); the consumer at `0x8006EBB8` walks the list from
-      `0x800DEEA0`, subtracts the camera position at `0x800B28B4` from each record and builds 48-byte
-      primitives, so these are **billboards**, and the `128` is a size rather than a radius.
-      `0x80050B84` is the only other producer and queues one from a muzzle position with the colour at
-      `0x800AEA28`, likewise white — so the pair reads as the gun's own glow and its muzzle flash.
-      Not implemented: putting a white blob on the gun every frame on this reading alone would be worse
-      than leaving it off. **What is needed is what sets `0x800B2A28`** — five sites read it as a halfword
-      (`0x8002F48C`, `0x8002F920`, `0x8004F688`, `0x80050B84`, `0x80054AE4`) and no `gp`-relative store
-      writes it, so it is set through some other base and may well be off in ordinary play.
+- [x] 50a. **The view weapon queues something white and 128 units wide at its own position — and the
+      gate it is behind is NEVER WRITTEN, so it never happens.** `0x8004F6CC` calls `0x8007012C` with the
+      weapon's finished world position, `128`, and the four bytes at `0x800AEA20`, which are `ff ff ff 00`.
+      `0x8007012C` appends a twenty-byte record to a bump list between `gp+18496` and `gp+18500` — three
+      position words, the `128`, the packed colour. It is NOT `q2_light_add_dynamic` (`0x80075C34`,
+      28-byte records at `0x800E3D18`): the consumer at `0x8006EBB8` walks the list from `0x800DEEA0`,
+      subtracts the camera at `0x800B28B4` and builds 48-byte primitives, so these are **billboards** and
+      the `128` is a size. `0x80050B84` queues one from a muzzle position with the colour at `0x800AEA28`.
 
-- [ ] 50b. **The quad's firing sound, located and not wired.** Three sites — `0x8004FB9C` in the state
-      machine's fire arm, `0x80050004` in the machinegun's, `0x80050234` in the chaingun's and
-      `0x80050300` in the hyperblaster's — all do the same thing after a successful shot: if the level
-      clock at `0x800AEBAC` is still short of the deadline at `combat+172`, and `0x800739B8` says the
-      handle at `0x800B2B80` is not already playing, play `[0x800B28B0]` at the player's position through
-      `0x80073734`. That is a powerup changing the sound of every weapon, and `combat+172` is its
-      deadline. The port has no counterpart; the sim would have to expose "quad is up" to the weapon path
-      for it to be reachable.
+      **The whole thing is behind `0x800B2A28`, and nothing in the executable writes it.** Three sweeps
+      agree: no `gp`-relative store at its offset, no `lui`+`addiu`/`ori` materialising its address, and
+      no load/store through a register holding a base that lands on it — the last of these tracks
+      materialised pointers through `addiu`/`ori` and clobbers them at calls, so it catches the
+      `p = &block; sh x, k(p)` form the first two miss. Five sites read it as a halfword
+      (`0x8002F48C`, `0x8002F920`, `0x8004F688`, `0x80050B84`, `0x80054AE4`) and none writes it.
+      It sits at `0x800B2A28`, past the text segment's end at `0x800B2800`, so it is BSS: zero at boot and
+      zero for ever.
+      **So the port is already at parity by drawing neither**, which is a stronger answer than "not
+      implemented" and the same shape as the glint: a finished effect the shipped build never turns on.
+      What could still change it is a relocated level module writing through its own base; nothing in the
+      boot image can.
+
+- [x] 50b. **The quad's firing sound — WIRED, and the sound is `itm_damage3`.** Four sites do the same
+      thing after a shot that succeeded: `0x8004FB9C` in the state machine's own fire arm, and
+      `0x80050004`, `0x80050234` and `0x80050300` in the machinegun's, chaingun's and hyperblaster's.
+      Each tests the level clock at `0x800AEBAC` against the deadline at `combat+172`, asks `0x800739B8`
+      whether the handle at `0x800B2B80` is already sounding, and if not plays `[0x800B28B0]` at the
+      player's position through `0x80073734`.
+      `0x800B28B0` is filled at `0x80037AA0`, and the name loaded for that call is at `0x800AC2AC`:
+      **`itm_damage3`**. It is not one of the twenty-two `wep_*` sounds the weapon table holds, which is
+      why it needed its own signal rather than riding the existing one.
+      `combat+172` is `q2_inventory.quad_until` and the clock is `q2_sim.level_time`, both of which the
+      port already kept — so the comparison is the console's and only the plumbing was missing.
+      `q2_vw_take_quad_sound` raises it at all four sites and the client plays it by name.
 
 - [x] 49. **"The player cannot damage a creature" — RETRACTED the same day it was
       written. They can; the test could not see one.**

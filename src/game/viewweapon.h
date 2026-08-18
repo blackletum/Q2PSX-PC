@@ -288,6 +288,28 @@ typedef struct q2_viewweapon {
      */
     s16         hyper_ramp;      /* combat +152, 1.0.12                      */
 
+    /* ---------------------------------------------------------------------
+     * The powerup that changes what every weapon sounds like
+     * ------------------------------------------------------------------- */
+    /*
+     * Four sites do the same thing after a shot that succeeded — 0x8004FB9C in
+     * the state machine's own fire arm, and 0x80050004, 0x80050234 and
+     * 0x80050300 in the machinegun's, chaingun's and hyperblaster's. Each tests
+     * the level clock at 0x800AEBAC against the deadline at combat+172, asks
+     * 0x800739B8 whether the handle at 0x800B2B80 is already sounding, and if
+     * not plays [0x800B28B0] at the player's position.
+     *
+     * `0x800B28B0` is filled at 0x80037AA0 from the name at 0x800AC2AC:
+     * **`itm_damage3`**. It is not one of the twenty-two `wep_*` sounds, which
+     * is why it has its own signal rather than riding `frame_sound`.
+     *
+     * `combat+172` is `q2_inventory.quad_until` and the clock is
+     * `q2_combat.level_time`, both of which the port already keeps — so the
+     * caller sets `quad_active` each tick and drains `quad_sound` after.
+     */
+    bool        quad_active;     /* clock < combat+172, set by the caller     */
+    bool        quad_sound;      /* a shot wants itm_damage3; drained         */
+
     s16         anim_pos;        /* +256, the position on the model timeline */
     s16         anim_end;        /* the playing move's last position, -1 idle */
     u16         anim_flags;      /* +258: bit 1 playing, bit 0 has played     */
@@ -360,6 +382,11 @@ u32 q2_vw_take_frame_fires(q2_viewweapon *vw);
 
 /* The sound a frame boundary asked for, or -1. Drains it. */
 s16 q2_vw_take_frame_sound(q2_viewweapon *vw);
+
+/* The quad's own firing sound — `itm_damage3` — if a shot asked for one while
+ * `quad_active` was set. Drains it. The console gates a second one on the
+ * first still sounding (0x800739B8), which is the caller's mixer to answer. */
+bool q2_vw_take_quad_sound(q2_viewweapon *vw);
 
 /* ------------------------------------------------------------------------- */
 /* Lifecycle                                                                  */

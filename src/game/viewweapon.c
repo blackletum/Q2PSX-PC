@@ -267,6 +267,11 @@ static void q2_vw_idle_fire_check(q2_viewweapon *vw, bool fire_held,
      * rate is the clip: this arm only runs from the IDLE state, so the next
      * shot waits for the fire animation to finish, which is exactly what
      * weapon.h means by "one gate plus animation length". */
+    /* 0x8004FB9C sits between the successful shot and `state = FIRE`, so the
+     * quad's sound belongs to the shot rather than to the clip. */
+    if (vw->quad_active)
+        vw->quad_sound = true;
+
     vw->state           = Q2_VM_FIRE;
     vw->frame           = 0;
     vw->frame_sound     = -1;
@@ -324,6 +329,8 @@ static void fire_state_step(q2_viewweapon *vw, s32 step, bool fire_held)
                  * accumulator standing, so the next substep asks again. */
                 if (vw->frame != 2) {
                     vw->frame_fires++;
+                    if (vw->quad_active)      /* 0x80050004 */
+                        vw->quad_sound = true;
                     vw->spin_accum = 0;
                 }
             }
@@ -423,6 +430,8 @@ static void fire_state_step(q2_viewweapon *vw, s32 step, bool fire_held)
             if (n < 1)
                 n = 1;
             vw->frame_fires += (u32)n;
+            if (vw->quad_active)              /* 0x80050234 */
+                vw->quad_sound = true;
         }
         break;
     }
@@ -439,8 +448,11 @@ static void fire_state_step(q2_viewweapon *vw, s32 step, bool fire_held)
 
             vw->spin_accum += step;
             if (vw->spin_accum >= VW_SPIN_THRESHOLD) {
-                if (vw->frame != 6)
+                if (vw->frame != 6) {
                     vw->frame_fires++;
+                    if (vw->quad_active)      /* 0x80050300 */
+                        vw->quad_sound = true;
+                }
                 vw->spin_accum = 0;
             }
         } else if (!fire_held) {
@@ -671,6 +683,17 @@ u32 q2_vw_take_frame_fires(q2_viewweapon *vw)
     n = vw->frame_fires;
     vw->frame_fires = 0;
     return n;
+}
+
+bool q2_vw_take_quad_sound(q2_viewweapon *vw)
+{
+    bool q;
+
+    if (!vw)
+        return false;
+    q = vw->quad_sound;
+    vw->quad_sound = false;
+    return q;
 }
 
 s16 q2_vw_take_frame_sound(q2_viewweapon *vw)
