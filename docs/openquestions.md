@@ -2488,9 +2488,24 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
       Reverted, with the disproof recorded here so the next reader does not re-derive the residual and
       believe it.
 
-      **So the horizontal 0.051 remains unattributed**, with the projection centre, the field of view, the
-      spawn, the animation phase, the model, the near plane, the pose, the rotation order (fixed) and the
-      camera's row-0 scale all eliminated. `q2_rotation_view`'s own doc is known-stale as well: it
+      **Re-measured through the CLIENT, which is the renderer that matters, and the number is smaller and
+      the asymmetry sharper.** The tool renders at pitch 0 with a synthetic aim; the client runs the real
+      thing. Over 240 frames of BASE0 the client's emitter sits at
+
+          client   cx 0.5947   cy 0.6532      (stable across the whole idle)
+          tool     cx 0.5869..0.5996          (the client is inside the tool's range — they agree)
+          console  cx 0.6383   cy 0.6508
+
+      **Vertical agrees to 0.0024 — six tenths of a pixel in 248 — and horizontal is out by 0.0436**, or
+      22 pixels in 512. That asymmetry is the whole remaining problem, and it is a strong constraint: with
+      `H`, `OFX` and the depth all shared between the two axes, a term that moves x while leaving y alone
+      has to be `t.x` itself or the model's own x. `t` is `(140, 157, 44)` on every key of the blaster's
+      raise and idle, at key offset +6/+8/+10, which `0x8004F494`, `0x8004F508` and `0x8004F57C` confirm
+      and the tool's constant check pins.
+
+      So the horizontal remains unattributed, with the projection centre, the field of view, the spawn,
+      the animation phase, the model, the near plane, the pose, the rotation order (fixed), the camera's
+      row-0 scale, the camera composition and the identity residual all eliminated. `q2_rotation_view`'s own doc is known-stale as well: it
       justifies applying the roll outermost from `RotMatrix` composing `Rz * Ry * Rx`, which it does not.
 
       That is as far as measurement can take it. `t.x` is 140 on every key of the blaster's raise and idle,
