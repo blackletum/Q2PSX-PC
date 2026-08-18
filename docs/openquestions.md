@@ -2461,12 +2461,27 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
       has ever contradicted it. **The captures are not at zero pitch.** So the residual is a candidate for
       the 0.051 that the port's own harness structurally cannot see.
 
-      **What closing this takes** is a transcription rather than a discovery: build the camera as
-      `diag(1, vh/240, 1) * basis(view+12 angles)` with the rounding above, build the entity matrix as
-      `RotMatrix(aim+kick) * RotMatrix(clip)`, and delete the identity. Both matrices are written out
-      here. It is not done in this pass because it replaces the camera for the WORLD as well, and the case
-      for it rests on instructions with no measurement behind them — which is the same standing the 2/3
-      squash has. Both want one capture with a known camera, and both should be settled together.
+      **The camera is not a third composition — it is the port's own.** Searching every assignment of
+      (±yaw, ±pitch, ±roll) to the basis's three angles, `basis(-pitch, -yaw, +roll)` matches
+      `q2_rotation_view(yaw, pitch, roll)` with a total absolute error of **18 over 36 elements** on
+      values reaching 4096 — half a unit an element, which is the difference between truncating toward
+      zero and flooring and nothing else. `q2_rotation_view` is right, and the camera needed no change.
+
+      **The residual is real, and it is RULED OUT as the cause.** With the camera identified, the console's
+      `camera * RotMatrix(aim+kick)` can be evaluated directly. At pitch 0 it is the identity to a unit —
+      the grip lands at (140, 161, 43) against the port's (140, 161, 44) — so the port's assertion holds
+      exactly where every `viewweapon` render sits. It does NOT hold off zero: the grip's DEPTH collapses
+      from 44 to 13 at pitch 60 and grows to 98 at pitch −120, while x stays at 140. So the identity is
+      still the port's invention and still wrong away from level, which deserves its own fix.
+
+      But it cannot produce the measured 0.051. Applying the residual to the port's emitter at
+      (92, 89, 474) across pitch: the horizontal reaches the capture's 0.6383 only near pitch ±300, and at
+      those pitches the vertical lands at cy 1.6 — off the bottom of the frame — while the capture has the
+      weapon at 0.6508, which is the port's own value. **No single pitch reproduces both coordinates.**
+      The residual couples x and y; the discrepancy moves x alone.
+
+      So transcribing the composition would change behaviour off level on real evidence, and would NOT
+      close the 0.051. Those are two separate jobs and only the first has a case.
 
       **So the horizontal 0.051 remains unattributed**, with the projection centre, the field of view, the
       spawn, the animation phase, the model, the near plane, the pose, the rotation order (fixed) and the
