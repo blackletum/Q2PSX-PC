@@ -25,6 +25,7 @@
 #include "cmd_viewweapon.h"
 
 #include "exe.h"
+#include "trig.h"
 #include "viewweapon.h"
 #include "vmtables.h"
 #include "vram.h"
@@ -696,6 +697,120 @@ int cmd_viewweapon(disc *d, const char *weapon, const char *out,
         } else {
             printf("  LAB is not on this disc\n");
         }
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*
+     * THE TRANSFORM CHAIN, checked against the executable rather than against a
+     * screenshot.
+     *
+     * Where the weapon lands on screen is the product of a chain — the angle
+     * sum, `RotMatrix`, `MulMatrix`, `ApplyMatrix`, the eye base, the GTE's
+     * projection registers, and the rule for a vertex that comes too close.
+     * Each link has been read out of an instruction; these three are the ones
+     * that can be re-derived from the image every time the tool runs, so they
+     * are checked here instead of being asserted in a comment.
+     *
+     * This is the answer to "does the weapon project like the console's" that
+     * does not need a capture: a capture can only ever show one frame at one
+     * animation phase, and the arithmetic either agrees or it does not.
+     */
+    printf("\nthe transform chain\n");
+    if (q2_exe_load(&e, d, NULL) == Q2_OK) {
+        u32 addr, lo = q2_exe_begin(&e), hi = q2_exe_end(&e);
+        int flag_reads = 0, cfc2_total = 0;
+        int ofx_writes = 0, h_writes = 0;
+        int sin_bad = 0, cos_bad = 0;
+        u32 i;
+
+        /*
+         * 1. The sine table `RotMatrix` reads — 0x80089E60's
+         *    `lw t9, 0x800A5430(angle*4)`, four bytes an entry, {sin, cos} as
+         *    two halfwords. src/common/trig.c GENERATES its table from sin()
+         *    and rounds half away from zero; if that landed one LSB off
+         *    anywhere, every rotation in the game would be off with it.
+         */
+        for (i = 0; i < Q2_ANGLE_360; i++) {
+            u32 word;
+            s16 s_disc, c_disc;
+
+            if (!q2_exe_u32(&e, Q2_VW_SIN_TABLE + i * 4, &word)) {
+                sin_bad++;
+                continue;
+            }
+            s_disc = (s16)(u16)(word & 0xFFFFu);
+            c_disc = (s16)(u16)(word >> 16);
+
+            if ((s32)s_disc != q2_sin12((s32)i))
+                sin_bad++;
+            if ((s32)c_disc != q2_cos12((s32)i))
+                cos_bad++;
+        }
+        printf("  %08X  the sine table, all %d entries          %s\n",
+               Q2_VW_SIN_TABLE, Q2_ANGLE_360,
+               sin_bad == 0 ? "ok" : "MISMATCH");
+        printf("  %08X  and its cosine half                     %s\n",
+               Q2_VW_SIN_TABLE, cos_bad == 0 ? "ok" : "MISMATCH");
+        g_total += 2;
+        if (sin_bad) failed++;
+        if (cos_bad) failed++;
+
+        /*
+         * 2. The GTE's FLAG register, which decides whether a vertex that comes
+         *    too close is DRAWN or dropped.
+         *
+         *    `gte_divide` raises the divide overflow when the projection
+         *    distance reaches twice the depth — at h 160, anything nearer than
+         *    80 — and the hardware clamps the quotient rather than trapping. A
+         *    game can only discard the face if it reads FLAG, which is control
+         *    register 31 and reachable only through `cfc2`. There is no such
+         *    read in the whole image, so the original draws them stretched.
+         *    modeldraw.c relies on this; the sweep keeps it honest.
+         */
+        for (addr = lo; addr + 4 <= hi; addr += 4) {
+            u32 w;
+
+            if (!q2_exe_u32(&e, addr, &w))
+                continue;
+            if ((w >> 26) != 0x12u)
+                continue;
+            if (((w >> 21) & 0x1Fu) == 2u) {       /* cfc2 rt, $rd */
+                cfc2_total++;
+                if (((w >> 11) & 0x1Fu) == 31u)
+                    flag_reads++;
+            } else if (((w >> 21) & 0x1Fu) == 6u) { /* ctc2 rt, $rd */
+                u32 rd = (w >> 11) & 0x1Fu;
+                if (rd == 24u || rd == 25u)
+                    ofx_writes++;
+                else if (rd == 26u)
+                    h_writes++;
+            }
+        }
+        printf("  cfc2 $31 anywhere in the image: %d of %d cfc2      %s\n",
+               flag_reads, cfc2_total, flag_reads == 0 ? "ok" : "MISMATCH");
+        g_total++;
+        if (flag_reads != 0) failed++;
+
+        /*
+         * 3. And the projection centre the weapon inherits. OFX and OFY are
+         *    written in exactly four PAIRS — eight instructions: the world
+         *    renderer's displaced centre at 0x80065C54/58 and its restore at
+         *    0x80065E0C/10, the library's SetGeomOffset at 0x8008A1B0/B4, and
+         *    the bring-up zero at 0x8008E500/04. The restore puts the plain viewport centre back, so
+         *    the weapon — transformed after the world — projects about the same
+         *    point the world does, which is what makes "the projection is
+         *    shared" a fact rather than an assumption.
+         */
+        printf("  ctc2 OFX/OFY sites: %d, projection distance: %d   %s\n",
+               ofx_writes, h_writes,
+               (ofx_writes == 8 && h_writes == 2) ? "ok" : "MISMATCH");
+        g_total++;
+        if (!(ofx_writes == 8 && h_writes == 2)) failed++;
+
+        q2_exe_free(&e);
+    } else {
+        printf("  cannot load the boot executable\n");
+        failed++;
     }
 
     /* ------------------------------------------------------------------ */

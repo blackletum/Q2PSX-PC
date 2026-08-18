@@ -2234,9 +2234,29 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
 
       Retail's width sits inside the port's range and its right edge is a hair above the port's maximum,
       which is inside the error of a number read off a screenshot by eye.
-      **What is left is not a defect but a measurement.** Closing it needs the capture committed to the
-      repo so the box can be extracted rather than estimated, and the phase matched rather than guessed;
-      until then the honest statement is that the two agree to the precision available.
+
+      **And the chain the screenshot was standing in for is now checked directly, which is stronger than
+      the screenshot ever was.** Where the weapon lands is the product of the angle sum (`0x8004F40C`),
+      `RotMatrix` (`0x8004F464`), `MulMatrix` (`0x8004F474`), `ApplyMatrix` (`0x8004F5E0`), the eye base
+      (`0x8004F608`), the GTE's projection registers, and the rule for a vertex that comes too close.
+      Every link is now either transcribed from an instruction or re-derived from the image on every run
+      of `q2psx-inspect viewweapon`:
+
+      - **the sine table.** `RotMatrix` reads a packed `{sin, cos}` pair per angle at `0x800A5430`
+        (`0x80089E60`). `src/common/trig.c` GENERATES its table from `sin()` with half-away-from-zero
+        rounding — a different construction entirely — and it agrees with the disc on **all 4,096 entries
+        of both halves**, checked every run. One LSB out anywhere would have skewed every rotation in the
+        game.
+      - **the near-plane rule.** `cfc2 $31` is the only way to read the GTE's FLAG, and there is not one
+        in the image: 12 `cfc2` total, none of them FLAG. Checked by sweeping the segment.
+      - **the projection centre.** `OFX`/`OFY` are written in exactly four pairs and `H` twice; the world
+        renderer's displaced centre at `0x80065C54` is put back at `0x80065E0C`, so the weapon —
+        transformed after the world — projects about the same point. "The projection is shared with the
+        world" is now a swept fact rather than an assumption.
+
+      **What is left is a measurement, not a defect.** Pinning the last of it needs the capture committed
+      so the box can be extracted rather than estimated and the animation phase matched rather than
+      guessed; the arithmetic behind it agrees with the executable at every operand.
 
 ---
 

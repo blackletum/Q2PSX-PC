@@ -113,6 +113,14 @@
 #include "weapontables.h"   /* Q2_WSND_*: the chaingun arm names its own */
 #include "world.h"
 
+/*
+ * The packed {sine, cosine} table `RotMatrix` reads — 0x80089E60's
+ * `lw t9, 0x800A5430(angle*4)`, four bytes an entry. Named here because the
+ * weapon's rotation is the chain that starts at it, and because the tool checks
+ * `src/common/trig.c`'s generated table against it entry for entry.
+ */
+#define Q2_VW_SIN_TABLE  0x800A5430u
+
 /* 0x8004ECEC — the switch countdown the LOWER state waits on. */
 #define Q2_VW_SWITCH_TICKS  70
 
