@@ -2394,6 +2394,35 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
       it survives the idle sweep (the port's emitter ranges 0.5869..0.5996 against the console's 0.6383),
       and it is no longer attributable to anything read so far.
 
+      **THE CAMERA MATRIX IS NOT A PURE ROTATION, AND THAT IS WHERE THE REST OF IT IS.**
+      Following the GTE's rotation registers back: `0x800313DC` loads the world draw's matrix from
+      **view+160**, and `0x80037F44` builds it —
+
+          0x80055DE4(dst = view+160, src = view+192, vw = view+278, vh = view+280)
+
+      — scaling the source basis by **vw/320 on row 0** (`0x80055DFC`'s `0x66666667` with `sra 7`) and
+      **vh/240 on row 1** (`0x80055E8C`'s `0x88888889` with the add-then-`sra 7` form). The port's camera
+      is `q2_rotation_view`, a pure rotation, for both the world (`world.c:562`) and every model
+      (`modeldraw.c:120`). Whatever that scale is, the port does not have it.
+
+      Two readings of what it comes to, and they disagree — which is exactly what makes this the next
+      thing to settle rather than the next thing to change:
+
+      - **From the measurement.** The port's emitter offset times **1.6** lands on the console's within
+        **0.4 of a pixel in 512** against the first capture and 0.9 against the third. And 1.6 is
+        512/320 — the row-0 scale if `vw` were the viewport width.
+      - **From the executable.** view+278 and view+280 are written EXACTLY ONCE, at `0x800779BC` and
+        `0x800779C4`, and screen.c already reads those two stores as **320 and 160** and says of the first
+        "NOT the viewport size". No layout writes them again. On that reading the row-0 scale is 1.0 and
+        the row-1 scale is 160/240 = **2/3** — a vertical squash, which is the 1.5 anamorphic factor
+        FIDELITY §11 describes, but as a CAMERA term rather than a property of the display.
+
+      Both cannot be right. **What settles it is what `0x800779BC` actually stores and whether any layout
+      overwrites +278/+280 later** — and it must be settled before the camera is touched, because that
+      matrix carries the world as well as the weapon: a change that lands the gun and moves the canyon is
+      worse than the gap it closes. `q2_rotation_view`'s own doc is already known-stale — it justifies
+      applying the roll outermost from `RotMatrix` composing `Rz * Ry * Rx`, which it does not.
+
       That is as far as measurement can take it. `t.x` is 140 on every key of the blaster's raise and idle,
       `ApplyMatrix` is `(M·v) >> 12` with the shift at `0x8006FE08`, `view * R_place == I` is pinned by a
       test, and the block at `0x8004F644` that could have carried a lateral offset is a zero vector. The
