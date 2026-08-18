@@ -110,6 +110,9 @@ typedef enum sol_sound {
     SOL_SND_PAIN  = 2,      /* module+0x32A8  sol_pain1    */
     SOL_SND_DEATH = 5,      /* module+0x32B4  sol_deth1    */
     SOL_SND_COCK  = 9,      /* module+0x32C4  wep_shotgf1b */
+    /* The eleventh handle, and the only thing a Soldier ever uses it for is
+     * being blown apart -- see the gib arm in soldier_die. */
+    SOL_SND_UDEATH = 10,    /* module+0x32C8  msc_udeath   */
     SOL_SND_COUNT = 11
 } sol_sound_id;
 
@@ -540,10 +543,34 @@ static void soldier_die(q2_monster *self)
 {
     s32 r;
 
+    /*
+     * THE GIB ARM, which this had none of (0x80102310).
+     *
+     * Damage past `gib_health` destroys the body outright: it plays the
+     * shared `msc_udeath` — the eleventh of the module's own sound handles,
+     * and the only reason a Soldier registers a sound it otherwise never uses
+     * — and there is no death animation at all, because there is nothing left
+     * to animate. Without this arm a soldier hit by a rocket lay down and
+     * played a normal death like one shot with a pistol.
+     *
+     * Tested before the `dead` guard below, so a body already dead can still
+     * be blown apart by a later explosion, which is the order the class uses.
+     */
+    if (self->health <= self->gib_health) {
+        if (!self->gibbed) {
+            self->gibbed = true;
+            self->dead   = true;
+            sol_play(self, SOL_SND_UDEATH);
+        }
+        return;
+    }
+
     if (self->dead)
         return;
 
     self->dead = true;
+    /* The wounded skin, which a death sets whether or not pain ever did. */
+    self->hurt = true;
     sol_play(self, SOL_SND_DEATH);
 
     r = sol_rand();

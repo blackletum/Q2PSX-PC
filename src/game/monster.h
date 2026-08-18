@@ -417,6 +417,14 @@ typedef struct q2_monster {
     /* --- port bookkeeping ------------------------------------------------ */
     bool in_use;
     bool dead;
+
+    /*
+     * Blown apart rather than killed. Damage past `gib_health` destroys the
+     * body outright: no death animation, because there is nothing left to
+     * animate. Separate from `dead` because a body already dead can still be
+     * gibbed by a later explosion, and the two arms play different sounds.
+     */
+    bool gibbed;
     bool on_ground;
     s32  ground_height;     /* the floor the stand-in world puts under it    */
 } q2_monster;
