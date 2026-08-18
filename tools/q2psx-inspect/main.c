@@ -2315,15 +2315,19 @@ static int cmd_models(disc *d, const char *map)
         return 1;
     }
 
-    printf("%-4s %-13s %6s %6s %6s %6s  %s\n",
-           "idx", "name", "parts", "verts", "faces", "clips", "kind");
+    /* `ext2` is the model's own vertical bias — the draw origin is the entity
+     * position lowered by 286 and raised again by it (entitydraw.c). An item
+     * that sits in the floor is usually a model whose bias is not what the
+     * drawer thinks, so it is listed here beside the geometry. */
+    printf("%-4s %-13s %6s %6s %6s %6s %6s  %s\n",
+           "idx", "name", "parts", "verts", "faces", "clips", "ext2", "kind");
     for (i = 0; i < bank.count; i++) {
         q2_model m;
         if (q2_model_get(&bank, i, &m) != Q2_OK)
             continue;
-        printf("%-4u %-13s %6u %6u %6u %6u  %s\n", i, m.hdr.name,
+        printf("%-4u %-13s %6u %6u %6u %6u %6d  %s\n", i, m.hdr.name,
                m.hdr.num_parts, m.hdr.num_verts, m.hdr.num_faces,
-               q2_model_anim_count(&m),
+               q2_model_anim_count(&m), (int)m.hdr.ext2,
                q2_model_is_static(&m) ? "static" : "articulated");
     }
 

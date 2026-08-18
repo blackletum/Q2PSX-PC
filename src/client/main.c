@@ -3682,6 +3682,25 @@ static bool client_load_zone(client *c, const char *map, int index)
 
             if (ir == Q2_OK)
                 Q2_INFO("items: %u placed", c->sim[0].entities.count);
+                /*
+                 * Where each one ended up, because "the pickup is in the
+                 * floor" is a claim about three numbers — the position the
+                 * hull drop settled on, the model's own vertical bias, and the
+                 * draw origin built from the two — and no log carried any of
+                 * them.
+                 */
+                if (c->zone_trace) {
+                    u32 k;
+                    for (k = 0; k < c->sim[0].entities.count; k++) {
+                        const q2_entity *e = &c->sim[0].entities.ent[k];
+                        Q2_INFO("[item] %2u model %3d bias %4d  pos %d,%d,%d"
+                                "  origin y %d  feet y %d  cell %d",
+                                k, (int)e->model_index, (int)e->model_offset,
+                                e->pos[0], e->pos[1], e->pos[2],
+                                e->origin[1], e->pos[1] + Q2_SWEEP_HALF_EXTENT,
+                                (int)e->node);
+                    }
+                }
             else
                 Q2_WARN("%s places no items: %s", map, q2_result_str(ir));
 
