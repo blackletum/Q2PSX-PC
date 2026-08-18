@@ -869,6 +869,41 @@ q2_result q2_sim_attach_movers(q2_sim *sim, const q2_mover_set *set,
 
             mover_part_box(scene, m->node[p], base, base + 3);
 
+            /*
+             * A CAGE LIFT IS HOLLOW. Its constructor makes two slabs out of
+             * one box — a ceiling of `cage_top` and a floor of `cage_bottom`
+             * (mover.h) — and registering the Scene node's whole bounding box
+             * instead makes the cage solid through its middle, which is a lift
+             * the player cannot get into.
+             *
+             * The slab is cut from the part's own box rather than from the
+             * union of the group's, because the part IS the box the console
+             * would have been handed: BASE1's cage is nodes 215 and 216, and
+             * 216 is already the 239-unit ceiling while 215 spans the whole
+             * interior down to the floor. Cutting each to its own end gives a
+             * ceiling and a floor and leaves the ride open.
+             *
+             * Which end is which is decided by geometry, not by part order:
+             * +Y is down, so the part sitting higher (smaller min[1]) is the
+             * ceiling. A one-part cage keeps its floor, since that is the slab
+             * a rider stands on.
+             */
+            if ((m->cage_top || m->cage_bottom) && m->part_count > 0) {
+                s32 other[6];
+                bool is_ceiling = true;
+
+                if (m->part_count > 1) {
+                    u32 q = (p == 0) ? 1u : 0u;
+                    mover_part_box(scene, m->node[q], other, other + 3);
+                    is_ceiling = (base[1] <= other[1]);
+                }
+
+                if (is_ceiling && m->cage_top)
+                    base[4] = base[1] + (s32)m->cage_top;
+                else if (!is_ceiling && m->cage_bottom)
+                    base[1] = base[4] - (s32)m->cage_bottom;
+            }
+
             for (k = 0; k < 3; k++) {
                 t->min[k] = t->env_min[k] = base[k];
                 t->max[k] = t->env_max[k] = base[3 + k];

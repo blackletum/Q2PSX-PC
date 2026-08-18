@@ -182,6 +182,26 @@ typedef struct q2_mover {
     u8  touch_opens;
 
     /*
+     * A CAGE LIFT IS TWO SLABS, and this is what makes it one.
+     *
+     * CAGELIFT1's constructor at 0x80029794 calls the slot allocator TWICE
+     * (0x80029A78, 0x80029B1C) and chains the pair through +0x3C: a top slab
+     * whose max[1] is min[1] + item[+17], and a bottom slab whose min[1] is
+     * max[1] - item[+16]. It is a cage with a ceiling and a floor and nothing
+     * in between — you ride inside it.
+     *
+     * The port registered one box per Scene node instead, so the cage was
+     * solid through its middle and could not be entered. On BASE1 that is the
+     * lift out of zone 1: node 215's box is 1,239 units of air the static hull
+     * lets a player fall straight through, and the mover made it a wall.
+     *
+     * `cage_top` is item[+17] and `cage_bottom` item[+16]; both zero on
+     * anything that is not a cage.
+     */
+    u8  cage_top;
+    u8  cage_bottom;
+
+    /*
      * The portal node's visibility bit — `flags08` bit 15, written at
      * 0x80025C5C when the leaf settles fully closed and cleared otherwise,
      * with the write skipped while the partner leaf is still moving.

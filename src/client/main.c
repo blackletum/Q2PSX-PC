@@ -4130,6 +4130,49 @@ static bool client_load_zone(client *c, const char *map, int index)
                         c->sim[0].mover_count)
                         Q2_INFO("movers: %u part boxes in the collision world",
                                 c->sim[0].mover_count);
+
+                    /*
+                     * Every box the movement sweep can hit, because "there is
+                     * an invisible clip here" is a claim that one of them is
+                     * somewhere it should not be, and nothing listed them.
+                     *
+                     * The live box and the swept ENVELOPE are printed side by
+                     * side: the envelope only ever grows and covers a lift's
+                     * whole travel, so a clip the size of a shaft is what
+                     * confusing the two would look like (trace.h).
+                     */
+                    if (c->zone_trace && c->sim[0].volumes) {
+                        u32 t, mi, p, out = 0;
+
+                        for (mi = 0; mi < c->movers.count; mi++) {
+                            const q2_mover *m = &c->movers.movers[mi];
+                            for (p = 0; p < m->part_count &&
+                                        out < c->sim[0].mover_count;
+                                 p++, out++) {
+                                const q2_move_target *mt =
+                                    &c->sim[0].volumes[out];
+                                Q2_INFO("[clip] %2u  mover %2u part %u"
+                                        " node %d axis %u target %d speed %d"
+                                        "  box (%d..%d, %d..%d, %d..%d)",
+                                        out, mi, p, (int)m->node[p], m->axis,
+                                        (int)m->target, (int)m->speed,
+                                        mt->min[0], mt->max[0],
+                                        mt->min[1], mt->max[1],
+                                        mt->min[2], mt->max[2]);
+                            }
+                        }
+                        for (t = c->sim[0].mover_count;
+                             t < c->sim[0].mover_count +
+                                 c->sim[0].volume_count; t++) {
+                            const q2_move_target *mt = &c->sim[0].volumes[t];
+                            Q2_INFO("[clip] %2u  volume mask %04X %s"
+                                    "  box (%d..%d, %d..%d, %d..%d)",
+                                    t, mt->mask, mt->active ? "on " : "off",
+                                    mt->min[0], mt->max[0],
+                                    mt->min[1], mt->max[1],
+                                    mt->min[2], mt->max[2]);
+                        }
+                    }
                 }
 
                 if (q2_rotators_build(&c->rotators, &ev, &uf) == Q2_OK) {

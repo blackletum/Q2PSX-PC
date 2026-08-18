@@ -441,6 +441,14 @@ q2_result q2_movers_build_calls(q2_mover_set *out, const q2_events *events,
                 m->wait_timer  = (p[18] == 0xFF)
                                  ? Q2_MOVER_WAIT_NEVER
                                  : (u16)(p[18] * Q2_MOVER_TIMEBASE);
+                /*
+                 * The two slab thicknesses, which nothing read. 0x80029A78 and
+                 * 0x80029B1C build a ceiling of item[+17] and a floor of
+                 * item[+16] out of one box; without them the cage registers
+                 * solid and cannot be entered. See q2_mover.cage_top.
+                 */
+                m->cage_top    = p[17];
+                m->cage_bottom = p[16];
                 break;
 
             case Q2_UF_BUTTON: {
