@@ -141,8 +141,8 @@ int cmd_items(disc *d)
     }
 
     /* ------------------------------------------------------------------ */
-    printf("  %-4s %-14s %-4s %-22s %-13s %s\n",
-           "id", "model", "fx", "effect", "flags", "clips");
+    printf("  %-4s %-14s %-4s %-18s %-22s %-13s %s\n",
+           "id", "model", "fx", "caption", "effect", "flags", "clips");
     for (i = 0; i < table->count; i++) {
         const q2_item_def *e = &table->def[i];
         char flags[64], clips[32], what[32];
@@ -164,8 +164,16 @@ int cmd_items(disc *d)
         else
             snprintf(what, sizeof(what), "%s", q2_item_effect_name(e->effect));
 
-        printf("  %-4d %-14s %-4u %-22s %-22s %s\n",
-               e->place_id, e->model, e->effect, what, flags, clips);
+        /*
+         * The CAPTION column, which is the one thing a model name does not
+         * give you: `Sshotgun P` reads out on the HUD as "Super Shotgun", and
+         * `Medi P` as "Health". Straight out of the 57-pointer table at
+         * 0x800AC144, indexed by the same effect id as the icon rect.
+         */
+        printf("  %-4d %-14s %-4u %-18s %-22s %-22s %s\n",
+               e->place_id, e->model, e->effect,
+               q2_item_display_name(table, e->effect),
+               what, flags, clips);
     }
 
     /* ------------------------------------------------------------------ */

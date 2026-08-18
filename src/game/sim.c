@@ -2525,7 +2525,14 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
          */
         q2_entity_world_move_player(&sim->ent_world, sim->cur_player,
                                     sim->player[sim->cur_player].pos);
-        if (run_world) {
+        /*
+         * NOT WHILE SETTLING. The settle is the port's own drop-to-floor and
+         * runs up to 180 ticks before the player sees anything; an item within
+         * reach of the start position was collected inside it, with the sound,
+         * the burst and the caption all cleared before any of them could be
+         * drained. See `sim->settling`.
+         */
+        if (run_world && !sim->settling) {
             sim->ent_world.dt         = dt;
             sim->ent_world.deathmatch = sim->multiplayer;
             sim->ent_world.cheats     = sim->cheats;
@@ -2794,11 +2801,13 @@ void q2_sim_settle(q2_sim *sim)
      */
     memset(&in, 0, sizeof(in));
 
+    sim->settling = true;
     for (i = 0; i < Q2_SETTLE_STEPS; i++) {
         q2_sim_tick(sim, &in, Q2_DT_NOMINAL);
         if (p->on_ground)
             break;
     }
+    sim->settling = false;
 
     /*
      * However it ended, the player is not mid-fall: keeping the velocity and

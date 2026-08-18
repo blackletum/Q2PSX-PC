@@ -510,6 +510,32 @@ u32 q2_statusbar_build_ot(const q2_statusbar *b, u16 tpage, u16 clut,
                           Q2_SBAR_LOW_AMMO, false, true);
 
     /*
+     * The pickup caption's icon — field 16, from the fourth sub-draw at
+     * `0x800359C0`. The index is the effect the touch dispatch left behind and
+     * it selects the rect directly (statusbar.h); zero is the blank and the
+     * `beq a0, zero` at 0x80035A94 collapses the drawn size to 1x1 with it,
+     * which is what passing the index to q2_icon_draw_size_of reproduces.
+     *
+     * The CAPTION beside it is text, so it is not emitted here — see
+     * q2_hud_pickup_build_ot, and the note there on why the two halves of one
+     * sub-draw live in two modules.
+     */
+    if (b->pickup_icon != 0) {
+        const q2_icon_rect *r = q2_icon_rect_get(b->icons, b->pickup_icon);
+
+        if (r && !(r->w == 1 && r->h == 1)) {
+            const q2_sbar_field *fd = &q2_sbar_fields[Q2_SBAR_FIELD_UP_LEFT];
+            q2_icon_size is = q2_icon_draw_size_of(b->players, b->pickup_icon,
+                                                   r->w, r->h);
+
+            n += emit_cell(ot, bucket, tpage, pal_clut(b, r->id, clut),
+                           origin_x + b->anchor_x + fd->dx,
+                           origin_y + b->anchor_y + fd->dy,
+                           r->u, r->v, r->w, r->h, is.w, is.h);
+        }
+    }
+
+    /*
      * The weapon strip, last — two sprites at absolute positions, with the
      * console's own two guards: nothing for a zero index, and one sprite when
      * both slots name the same weapon (0x80036188 / 0x80036198).

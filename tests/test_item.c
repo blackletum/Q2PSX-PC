@@ -38,6 +38,16 @@ static void check_eq_i(s64 got, s64 want, const char *what)
     }
 }
 
+static void check_str(const char *got, const char *want, const char *what)
+{
+    g_checks++;
+    if (!got || strcmp(got, want) != 0) {
+        printf("  FAIL  %s: got \"%s\", want \"%s\"\n",
+               what, got ? got : "(null)", want);
+        g_failures++;
+    }
+}
+
 /* ------------------------------------------------------------------------- */
 static const q2_item_def *find(const char *model)
 {
@@ -616,6 +626,124 @@ static void test_touch_sweep(void)
     q2_entity_set_free(&set);
 }
 
+/*
+ * 0x8005998C — the two-instruction branch weapons-stay takes. It bursts and
+ * returns, so the gun is still standing there for the next player; the port
+ * used to hide it before the early-out and the rule did nothing but leave a
+ * live entity where a freed one belonged.
+ */
+static void test_weapons_stay(void)
+{
+    q2_entity_set set;
+    q2_entity_world w;
+    q2_inventory inv;
+    q2_pop_place place;
+    q2_entity *e;
+    s32 pos[3] = { 0, 0, 0 };
+
+    printf("\nweapons-stay keeps the gun VISIBLE (0x8005998C)\n");
+
+    memset(&set, 0, sizeof(set));
+    world_with_player(&w, &inv);
+    w.deathmatch   = true;
+    w.weapons_stay = true;
+
+    memset(&place, 0, sizeof(place));
+    place.id = 39;                       /* Shotgun P, effect 2 */
+    e = q2_item_spawn(&set, &place, NULL, 0, NULL);
+    check(e != NULL, "Shotgun P spawns");
+
+    q2_entity_world_move_player(&w, 0, pos);
+    e->think(e, &w);
+
+    check(q2_inventory_has_weapon(&inv, Q2_WEAPON_SHOTGUN), "the gun is taken");
+    check(e->in_use, "and the entity survives");
+    check(!e->hidden, "and is STILL VISIBLE — the point of the rule");
+    check(!e->taken[0], "and nothing marks it taken");
+    check_eq_i(e->respawn_at, 0, "and no respawn timer is armed");
+
+    /* Standing on it a second time gives nothing: give_weapon refuses, the
+     * dispatch returns 2, and the sweep moves on. */
+    inv.ammo[Q2_AMMO_SHELLS] = 100;
+    e->think(e, &w);
+    check(e->in_use && !e->hidden, "a second touch changes nothing");
+
+    /* Without weapons-stay the same pickup folds back to an ordinary one. */
+    memset(&set, 0, sizeof(set));
+    world_with_player(&w, &inv);
+    w.deathmatch   = true;
+    w.weapons_stay = false;
+    e = q2_item_spawn(&set, &place, NULL, 0, NULL);
+    q2_entity_world_move_player(&w, 0, pos);
+    e->think(e, &w);
+    check(e->hidden, "weapons-stay off hides it");
+    check(e->taken[0], "and marks it taken");
+}
+
+/*
+ * 0x800359C0's prologue and the 57-name table it indexes.
+ */
+static void test_pickup_caption(void)
+{
+    q2_entity_world w;
+    q2_inventory inv;
+    const char *name;
+    u8 icon;
+
+    printf("\nthe pickup caption (0x800359C0, names at 0x800AC144)\n");
+
+    /* The table itself: the caption is NOT the item record's model name. */
+    check_str(q2_item_display_name(NULL, 3), "Super Shotgun",
+              "effect 3 reads out as Super Shotgun, not Sshotgun P");
+    check_str(q2_item_display_name(NULL, 18), "Shells", "effect 18 is Shells");
+    check_str(q2_item_display_name(NULL, 34), "Health", "effect 34 is Health");
+    check_str(q2_item_display_name(NULL, 35), "Health",
+              "and so is 35 — one pointer, twice");
+    check_str(q2_item_display_name(NULL, 50), "Purple Pyramid Key",
+              "the longest name survives the field");
+    check_str(q2_item_display_name(NULL, 0), "", "effect 0 is the empty name");
+    check_str(q2_item_display_name(NULL, 999), "",
+              "and an index off the end is too");
+
+    world_with_player(&w, &inv);
+
+    /* Nothing collected: the sub-draw takes its early-out at 0x80035A28. */
+    icon = 0xFF;
+    name = NULL;
+    check(!q2_item_pickup_caption(&inv, w.level_time, NULL, &icon, &name),
+          "with nothing collected there is no caption");
+
+    /* Collect one. The touch writes both halves at 0x800372F0. */
+    q2_item_touch(18, &inv, w.player[0].pos, &w);
+    check_eq_i(inv.last_item, 18, "the touch records the effect");
+    check_eq_i(inv.item_name_until, w.level_time + Q2_ITEM_CAPTION_TICKS,
+               "and a 900-tick deadline");
+
+    check(q2_item_pickup_caption(&inv, w.level_time, NULL, &icon, &name),
+          "which the caption reads");
+    check_eq_i(icon, 18, "the icon is the effect id used as a rect index");
+    check_str(name, "Shells", "and the name is that effect's");
+
+    /* It survives the tick it expires ON — `sltu deadline, now`. */
+    check(q2_item_pickup_caption(&inv, inv.item_name_until, NULL, &icon, &name),
+          "it is still drawn on the deadline tick");
+    check_eq_i(icon, 18, "with its icon");
+
+    /* One tick later the expiry runs INSIDE the draw: cleared, then reloaded,
+     * so the frame it dies on still draws — blank rect, empty name. */
+    check(q2_item_pickup_caption(&inv, inv.item_name_until + 1, NULL,
+                                 &icon, &name),
+          "the frame it dies on still draws");
+    check_eq_i(icon, 0, "with the blank rect");
+    check_str(name, "", "and the empty name");
+    check_eq_i(inv.last_item, 0, "and last_item is cleared in place");
+
+    /* And the frame after that takes the early-out. */
+    check(!q2_item_pickup_caption(&inv, inv.item_name_until + 2, NULL,
+                                  &icon, &name),
+          "and the frame after draws nothing at all");
+}
+
 static void test_timed_removal(void)
 {
     q2_entity_set set;
@@ -823,6 +951,8 @@ int main(void)
     test_keys();
     test_spawn_and_think();
     test_touch_sweep();
+    test_weapons_stay();
+    test_pickup_caption();
     test_timed_removal();
     test_entity_set();
     test_zone_groups();

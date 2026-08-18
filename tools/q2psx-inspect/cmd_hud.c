@@ -255,8 +255,16 @@ static int dump_icons(const disc *d, const q2_build_id *id)
     }
     printf("  (the left-to-right order is from retail capture, not the code)\n");
 
-    printf("\nSTILL open: which rect is which item - the record's fifth byte is\n"
-           "an id whose value space is unidentified - and the field at +330.\n");
+    /*
+     * "which rect is which item" is ANSWERED, and not through the fifth byte.
+     * The pickup caption's sub-draw at 0x800359C0 indexes both the rect table
+     * and the 57-name table with the same `client+84` — the effect the touch
+     * dispatch stored — so for an item the rect index IS the effect id. The
+     * fifth byte remains a palette index (icontable.h).
+     */
+    printf("\nRect index == item effect id (0x80035A58 / 0x80035B10), so\n"
+           "`q2psx-inspect items` names every icon in its caption column.\n"
+           "STILL open: the frag field at +330 (0x80037CAC).\n");
 
     q2_icon_tables_free(&it);
     return (on_grid + blank == it.rect_count) ? 0 : 1;

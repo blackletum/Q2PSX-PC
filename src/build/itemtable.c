@@ -105,6 +105,76 @@ static const char *const k_sound_names[11] = {
     "itm_protect"    /* invulnerability                   */
 };
 
+/*
+ * 0x800AC144, chased through: 57 pointers, one per effect index, and the array
+ * the pickup caption's `%s` comes out of. Transcribed rather than derived from
+ * the model names, because they are not the same words — record `Sshotgun P`
+ * reads out as "Super Shotgun" and `Medi P` as "Health".
+ *
+ * Three effects share the string "Health" (34, 35 and the inert 36) and two
+ * share "Tesla" (16 and 25); in the executable those are the same pointer
+ * twice, so the duplication is the table's, not this transcription's.
+ */
+static const char *const k_names[Q2_ITEM_NAME_COUNT] = {
+    /*  0 */ "",
+    /*  1 */ "Blaster",
+    /*  2 */ "Shotgun",
+    /*  3 */ "Super Shotgun",
+    /*  4 */ "Machinegun",
+    /*  5 */ "Chaingun",
+    /*  6 */ "Grenades",
+    /*  7 */ "Grenade Launcher",
+    /*  8 */ "Rocket Launcher",
+    /*  9 */ "HyperBlaster",
+    /* 10 */ "Railgun",
+    /* 11 */ "BFG10K",
+    /* 12 */ "IonRipper",
+    /* 13 */ "Plasma Beam",
+    /* 14 */ "Discharger",
+    /* 15 */ "FlameGun",
+    /* 16 */ "Tesla",
+    /* 17 */ "A-M Bomb",
+    /* 18 */ "Shells",
+    /* 19 */ "Bullets",
+    /* 20 */ "Grenades",
+    /* 21 */ "Rockets",
+    /* 22 */ "Cells",
+    /* 23 */ "Slugs",
+    /* 24 */ "Fuel",
+    /* 25 */ "Tesla",
+    /* 26 */ "Body Armour",
+    /* 27 */ "Combat Armour",
+    /* 28 */ "Jacket Armour",
+    /* 29 */ "Armour Shard",
+    /* 30 */ "Power Shield",
+    /* 31 */ "Power Screen",
+    /* 32 */ "Mega Health",
+    /* 33 */ "Adrenaline",
+    /* 34 */ "Health",
+    /* 35 */ "Health",
+    /* 36 */ "Health",
+    /* 37 */ "Ammo Pack",
+    /* 38 */ "Bandolier",
+    /* 39 */ "Silencer",
+    /* 40 */ "Quad Damage",
+    /* 41 */ "Invulnerability",
+    /* 42 */ "Environment Suit",
+    /* 43 */ "Rebreather",
+    /* 44 */ "Blue Key",
+    /* 45 */ "Red Key",
+    /* 46 */ "Security Pass",
+    /* 47 */ "AntiMatter Core",
+    /* 48 */ "Commander's Head",
+    /* 49 */ "Power Cube",
+    /* 50 */ "Purple Pyramid Key",
+    /* 51 */ "Red Pyramid Key",
+    /* 52 */ "Data CD",
+    /* 53 */ "Data Spinner",
+    /* 54 */ "Green Key",
+    /* 55 */ "Yellow Key",
+    /* 56 */ "White Key"
+};
+
 /* ------------------------------------------------------------------------- */
 static void fill_builtin(q2_item_table *t)
 {
@@ -126,6 +196,11 @@ static void fill_builtin(q2_item_table *t)
     for (i = 0; i < 11; i++) {
         strncpy(t->sound[i], k_sound_names[i], Q2_ITEM_MODEL_LEN);
         t->sound[i][Q2_ITEM_MODEL_LEN] = '\0';
+    }
+
+    for (i = 0; i < Q2_ITEM_NAME_COUNT; i++) {
+        strncpy(t->name[i], k_names[i], Q2_ITEM_NAME_LEN);
+        t->name[i][Q2_ITEM_NAME_LEN] = '\0';
     }
 }
 
@@ -233,8 +308,42 @@ q2_result q2_item_table_load(q2_item_table *out, const disc *d,
         out->sound[i][Q2_ITEM_MODEL_LEN] = '\0';
     }
 
+    /*
+     * The display names — a table of POINTERS, so each one has to be chased.
+     * Unlike the sound names above there is no fixed stride to copy: the
+     * strings are ordinary NUL-terminated data scattered across two runs
+     * (0x800ABEB4… and 0x800AE818…), and several entries share a pointer.
+     */
+    for (i = 0; i < Q2_ITEM_NAME_COUNT; i++) {
+        u32 ptr = 0, k;
+
+        if (!q2_exe_u32(&exe, Q2_ITEM_NAMES_SLES01534 + i * 4, &ptr) || !ptr)
+            continue;
+
+        /* Byte at a time and bounded by the FIELD, so a pointer that lands
+         * outside the segment stops rather than walking off the image, and a
+         * build whose names grew truncates here and is caught by the diff. */
+        for (k = 0; k < Q2_ITEM_NAME_LEN; k++) {
+            const u8 *ch = q2_exe_ptr(&exe, ptr + k, 1);
+
+            if (!ch || *ch == 0)
+                break;
+            out->name[i][k] = (char)*ch;
+        }
+        out->name[i][k] = '\0';
+    }
+
     q2_exe_free(&exe);
     return Q2_OK;
+}
+
+const char *q2_item_display_name(const q2_item_table *t, u32 effect)
+{
+    if (effect >= Q2_ITEM_NAME_COUNT)
+        return "";
+    if (t && t->count)
+        return t->name[effect];
+    return k_names[effect];
 }
 
 const q2_item_def *q2_item_find(const q2_item_table *t, s32 place_id)
@@ -339,6 +448,17 @@ u32 q2_item_table_diff(const q2_item_table *a, const q2_item_table *b,
             if (report) {
                 snprintf(what, sizeof(what), "sound[%u] \"%s\" != \"%s\"",
                          i, a->sound[i], b->sound[i]);
+                report(user, what, 0, 0);
+            }
+        }
+    }
+
+    for (i = 0; i < Q2_ITEM_NAME_COUNT; i++) {
+        if (strncmp(a->name[i], b->name[i], Q2_ITEM_NAME_LEN) != 0) {
+            bad++;
+            if (report) {
+                snprintf(what, sizeof(what), "name[%u] \"%s\" != \"%s\"",
+                         i, a->name[i], b->name[i]);
                 report(user, what, 0, 0);
             }
         }

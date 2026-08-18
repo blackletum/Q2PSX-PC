@@ -247,6 +247,16 @@ typedef struct q2_hud {
     char centre[Q2_HUD_CENTRE_LEN];
     s32  centre_age;      /* ctx+0x28C; drawn while < 1200                   */
 
+    /*
+     * The pickup caption, already marked up. Empty means nothing to draw.
+     *
+     * NOT a notification and not aged here: the console formats this string
+     * fresh every frame inside the status bar's own sub-draw and hands it
+     * straight to the interpreter, so its life is the deadline the touch
+     * dispatch set and nothing else. See q2_hud_pickup.
+     */
+    char pickup[Q2_HUD_CENTRE_LEN];
+
     /* Crosshair. */
     bool crosshair;
     u8   crosshair_u, crosshair_v;    /* gp+796 / gp+797 — the style         */
@@ -286,9 +296,50 @@ void q2_hud_centre(q2_hud *hud, const q2_hud_tables *tab,
                    const q2_hud_ctx *ctx, const char *body);
 
 /* The messages the game itself raises. */
-void q2_hud_pickup(q2_hud *hud, const char *item_name);
 void q2_hud_weapon_selected(q2_hud *hud, const q2_hud_tables *tab, int weapon_id);
 void q2_hud_need_key(q2_hud *hud, const char *key_name);
+
+/* ------------------------------------------------------------------------- */
+/* The pickup caption                                                         */
+/* ------------------------------------------------------------------------- */
+/*
+ * `@03BB8^828282|0~8%s~4` — 0x800AC228, formatted at 0x80035B14 and drawn at
+ * 0x80035B20.
+ *
+ * ⚠ THIS USED TO BE A NOTIFICATION, AND IT IS NOT ONE. `q2_hud_pickup` pushed
+ * the formatted line into the four-slot ring, which gave it the ring's life
+ * (one line retiring every 60 ticks), the ring's stacking (a caption pushed
+ * the "Selected Blaster" line down) and the ring's position — none of which
+ * the console does. The position is not the ring's because it is IN THE
+ * STRING: `@03BB8` is x = 0x3B, y = 0xB8, which is the row just above the
+ * status bar, beside the bar's own upper-left icon field.
+ *
+ * What the console does is format it into a scratch buffer and hand it to the
+ * markup interpreter every frame the deadline holds, from the same
+ * per-viewport hook that draws the bar. `q2_hud_pickup` therefore SETS the
+ * caption rather than posting it, and a caller re-sets it each frame from
+ * `q2_item_pickup_caption`. NULL or an empty name clears it — which is not the
+ * same as an empty caption: the console still runs the interpreter over
+ * `@03BB8^828282|0~8~4` on the frame a caption expires, so pass the empty
+ * string for that frame and NULL when there is nothing at all.
+ */
+void q2_hud_pickup(q2_hud *hud, const char *item_name);
+
+/*
+ * Emit it. Separate from q2_hud_build_ot because it is not part of the
+ * overlay: `0x800359C0` is the bar's fourth sub-draw, so the caption belongs
+ * to the VIEWPORT's slice, at the viewport's own bucket, and in split screen
+ * there is one per player rather than one on the screen.
+ *
+ * Call it BEFORE q2_statusbar_build_ot. Within a bucket the ordering table
+ * draws last-in first, and the console emits this text before the field walk
+ * that draws every icon (`0x80035EA0`), so the text has to go in first to end
+ * up on top.
+ *
+ * Returns the number of glyph cells laid out; 0 when there is no caption.
+ */
+u32 q2_hud_pickup_build_ot(q2_hud *hud, const q2_hud_font *font,
+                           q2_hud_ctx *ctx, psx_ot *ot, u16 otz);
 
 /*
  * Feed the player's condition in. The first call only records a baseline; every

@@ -8313,3 +8313,55 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       countdown. **A dead function is indistinguishable from a live one until you ask who calls it** — the
       same shape as #65, where an address hunted for callers turned out to be a label, and #8, where a
       record read as an array of structs turned out to be two arrays.
+
+## The status bar's fourth sub-draw: the pickup caption, and the two fields nobody was filling
+
+`0x800337D0` runs five sub-draws and the port implemented three of them. The fourth is `0x800359C0`, and it
+is the reader for the two fields the touch dispatch has been writing since the item path was transcribed —
+`client+84` and `client+188`, the effect and its 900-tick deadline (`0x800372F0`). **With no reader, a
+player collected a shotgun and the screen said nothing.**
+
+What it does, in the order it does it:
+
+    80035A20  lbu  v0, 84(a3)          the effect; ZERO returns without drawing anything
+    80035A38  lw   v0, 16(a0)          a0 = client+172, so this is client+188, the deadline
+    80035A40  sltu v0, v0, v1          deadline < level_time
+    80035A4C  sb   zero, 84(a3)        expired -> cleared IN PLACE
+    80035A50  lbu  v1, 84(a3)          ...and reloaded, so the expiry frame draws index 0
+    80035A64  addu v1, a0, t0          &rect[effect]      -> the upper-left icon field
+    80035B10  lw   a2, 64(v0)          nameTable[effect]  -> the caption's %s
+    80035B14  jal  0x800894B8          sprintf(scratch, "@03BB8^828282|0~8%s~4", name)
+    80035B20  jal  0x80043518          ...straight to the markup interpreter
+
+Three findings came out of it, and the first is the one with reach beyond this section:
+
+- **The effect id and the icon rect index are one number.** The same `client+84` selects the rect
+  (`* 5 + 0x8009C478`) and the caption. That is the join FORMATS.md §11.1 asserted and `icontable.h`
+  retracted — both were half right. The *correspondence* is real; the *mechanism* is the index, not the
+  rect record's fifth byte, which is a palette. §11.1 is rewritten.
+- **The captions are a 57-pointer table at `0x800AC144`**, one per effect, and they are not the item
+  records' model names: `Sshotgun P` reads out as "Super Shotgun". Now in `itemtable.[ch]`, loaded from the
+  disc and diffed against the transcription by `q2psx-inspect items`.
+- **The caption is not a notification.** It is drawn every frame from the viewport's own hook while the
+  deadline holds, at a position carried in the string. The port had it pushed into the four-slot ring,
+  where it aged on the wrong clock, stacked under "Selected Blaster" and sat in the wrong corner.
+
+**Still not implemented, and read enough to say what it is:** the FIFTH sub-draw, `0x80035B38`, which fills
+the upper-RIGHT icon and the two digits beside it (fields 13, 14, 15). It walks the four powerup deadlines
+at `client+172/176/180/184` in order, takes the first still running, and shows the seconds left —
+`(deadline - now) / 300`, the divide by 300 done with the magic multiply `0x1B4E81B5 >> 37` — beside rect
+40, 41, 42 or 43, which are quad damage, invulnerability, the environment suit and the rebreather *by the
+same effect-id-is-rect-index rule above*. None active fills the field with rect 0 and draws nothing. It is a
+POWERUP TIMER rather than part of the pickup display, so it is left for its own pass rather than folded
+into this one.
+
+**And two item-path defects the same reading turned up:**
+
+- `0x8005998C`, the branch weapons-stay takes, is two instructions: the particle burst and a jump to the
+  epilogue. The port hid the entity before the early-out, so a gun left standing by weapons-stay vanished
+  for everyone — the rule accomplished nothing but leaving a live entity where a freed one belonged.
+- The port's own settle — 180 ticks of `q2_sim_tick` to drop a fresh spawn onto the floor, which the
+  console has no equivalent of — ran the entity sweep. A start position within 286 units of a pickup
+  therefore COLLECTED it before the first drawn frame, and since the event queue is cleared at the top of
+  the next tick, the sound, the burst and the caption went with it. The sweep is now held back while
+  settling, which puts the pickup on the first tick the player actually plays.

@@ -696,6 +696,26 @@ typedef struct q2_sim {
     q2_entity_world ent_world;
     bool            entities_ready;
 
+    /*
+     * Set while q2_sim_settle is driving the tick, and read by the tick to
+     * hold the ENTITY SWEEP back.
+     *
+     * The settle is the port's, not the console's — the engine drops a player
+     * onto the floor with no ticks at all — so anything the sweep does during
+     * it is a thing the game did before the player saw a frame. For items that
+     * is not a nuance: a start position within 286 units of a pickup had it
+     * COLLECTED during the settle, and because the event queue is cleared at
+     * the top of the next tick the sound, the particle burst and the caption
+     * were all thrown away with it. The item was simply gone on frame 0.
+     *
+     * Holding the sweep back for those ticks puts the pickup back on the first
+     * tick the player actually plays, which is where the console has it. It
+     * also costs the item thinks their settle ticks — the spin, the glow and
+     * the materialise ramp — which is the same argument: those ticks do not
+     * happen on the console either.
+     */
+    bool            settling;
+
     /* The entity set holds QFRONT's title-screen objects rather than a map's
      * items, so `q2_sim_scene_page` has something to address. See
      * q2_sim_attach_scene. */

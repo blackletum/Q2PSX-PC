@@ -3791,8 +3791,18 @@ static bool client_load_zone(client *c, const char *map, int index)
                 c->item_table_ready ? &c->item_table : NULL,
                 c->model_bank_ready ? &c->model_bank : NULL);
 
-            if (ir == Q2_OK)
+            /*
+             * BRACED, and it had to be: the `if (c->zone_trace)` below used to
+             * sit unbraced between the success arm and the `else`, so the
+             * `else` bound to IT instead. Every run without `--zone-trace`
+             * therefore printed "places no items: ok" over the line that had
+             * just said seventeen were placed — a warning about a failure that
+             * had not happened, on the one path a reader would go looking at
+             * when items were missing.
+             */
+            if (ir == Q2_OK) {
                 Q2_INFO("items: %u placed", c->sim[0].entities.count);
+
                 /*
                  * Where each one ended up, because "the pickup is in the
                  * floor" is a claim about three numbers — the position the
@@ -3812,8 +3822,9 @@ static bool client_load_zone(client *c, const char *map, int index)
                                 (int)e->node);
                     }
                 }
-            else
+            } else {
                 Q2_WARN("%s places no items: %s", map, q2_result_str(ir));
+            }
 
             /*
              * And the TITLE SCREEN's objects, which are items too but are not
@@ -9311,6 +9322,70 @@ static void client_draw_view(void *user, q2_screen *s, int p,
         c->sbar.cells       = inv->ammo[Q2_AMMO_CELLS];
         c->sbar.ticks       = (u32)c->sim[0].level_time;
         q2_statusbar_armour_state(&c->sbar, inv->flags);
+
+        /*
+         * WHAT WAS JUST PICKED UP, which nothing has ever drawn.
+         *
+         * The touch dispatch has written both halves of this since the item
+         * path was transcribed — the effect at `inv->last_item` and a
+         * 900-tick deadline at `inv->item_name_until`, exactly as 0x800372F0
+         * does — and no reader existed, so a player collected a shotgun and
+         * the screen said nothing. `0x800359C0` is the reader: the bar's
+         * fourth sub-draw, which fills the upper-left icon field from the
+         * effect and prints the name beside it.
+         *
+         * Both halves are set here and emitted below, in the console's own
+         * order: the TEXT first, because within a bucket the ordering table
+         * draws last-in first and the console emits the caption before the
+         * field walk that draws every icon.
+         *
+         * `q2_item_pickup_caption` mutates — the expiry clears `last_item` in
+         * place, which is where the console does it too. This port has ONE
+         * inventory behind every viewport, so in a split the first viewport
+         * drawn does that clearing and the others see it already done; that
+         * costs the caption a single frame in the other panes on the tick it
+         * dies, and is the same single-inventory limitation the counters above
+         * already have.
+         */
+        {
+            const char *pickup_name = NULL;
+            u8          pickup_icon = 0;
+
+            if (q2_item_pickup_caption(&c->sim[0].combat.inv,
+                                       c->sim[0].level_time,
+                                       c->item_table_ready ? &c->item_table
+                                                           : NULL,
+                                       &pickup_icon, &pickup_name))
+                q2_hud_pickup(&c->hud, pickup_name);
+            else
+                q2_hud_pickup(&c->hud, NULL);
+
+            c->sbar.pickup_icon = pickup_icon;
+
+            if (c->hud_font_ready) {
+                q2_hud_ctx pctx;
+
+                q2_hud_ctx_centre_in(&pctx, c->width, c->height);
+                /*
+                 * A DEPTH OF ZERO, not `q2_screen_view_otz`, and the two are
+                 * not interchangeable. The overlay's emitter links with
+                 * `psx_ot_add`, which takes a depth and inverts it inside the
+                 * window `q2_screen_view_begin` has installed for this
+                 * viewport; the status bar links with `psx_ot_add_bucket`,
+                 * which takes an absolute bucket. Handing the bucket to the
+                 * depth door made 416 clamp to the far end of the slice and
+                 * the caption was emitted BEHIND the world — six glyphs laid
+                 * out, none of them on screen.
+                 *
+                 * Zero is the near end of this viewport's own slice, which is
+                 * one bucket in front of the bar's — so the caption lands on
+                 * top of the icon beside it, exactly as the console's order
+                 * puts it (the text is printed before the field walk that
+                 * draws every icon, and a bucket is drawn newest-last).
+                 */
+                q2_hud_pickup_build_ot(&c->hud, &c->hud_font, &pctx, ot, 0);
+            }
+        }
 
         q2_statusbar_build_ot(&c->sbar, c->menu_font.tpage_icons,
                               c->menu_font.clut_text, ot,

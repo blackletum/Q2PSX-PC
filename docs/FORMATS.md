@@ -4033,11 +4033,9 @@ single player passes the record's own size through, which is what keeps numerals
 Implemented in `src/game/statusbar.[ch]` and `src/build/icontable.[ch]`; `q2psx-inspect hud` checks the
 tables against the disc.
 
-**The vocabulary — SOLVED.** The record's fifth byte is the item's **`effect` dispatch index** (§9.5), so
-joining the rect table against the item table names every icon.
-
-The proof is the weapon-to-ammo table at `0x800ABE9C` read as effect ids, because nothing in the decode
-arranged the result:
+**The vocabulary — the join is real, and it is by INDEX.** This section used to read "SOLVED — the record's
+fifth byte is the item's `effect` dispatch index", on the strength of the weapon-to-ammo table at
+`0x800ABE9C` reading as effect ids:
 
 | weapon | id | names |
 | --- | --- | --- |
@@ -4048,13 +4046,45 @@ arranged the result:
 | HyperBlaster, BFG | 22 | Cells P |
 | Railgun | 23 | Slugs P |
 
-Eleven weapons, eleven correct ammunitions. Read as rect **indices** instead, the same table gives the
-shotgun "Flame Fuel P" and the rocket launcher "Combat Armour" — so the alternative is ruled out rather
-than merely less likely. A second, independent confirmation: a weapon pickup's own effect is its 1-based
-weapon slot (Shotgun 2 … BFG 11), which §9.6 derived from the other direction.
+Eleven weapons, eleven correct ammunitions, and nothing in the decode arranged it. **The correspondence is
+genuine and the explanation offered for it was wrong**, which is why it took so long to unpick: the fifth
+byte is a *palette index* (the retraction is in `src/build/icontable.h`, and all three sub-draws index the
+rect table with `base + i * 5` and never compare a fifth byte to anything).
 
-Five rects carry an effect no item claims. That is not a decode failure — it is the same shape of finding
-as the eight inert pickup handlers: the sheet holds art the item table has no record for.
+**The pickup caption settles it.** `0x800359C0` — the bar's fourth sub-draw — uses ONE number twice:
+
+    80035A58  sll  v0, v1, 2         v1 = client[+84], the effect the touch stored
+    80035A5C  addu v0, v0, v1        v0 = effect * 5
+    80035A64  addu v1, a0, t0        &rect[effect]          <- the icon
+    80035B10  lw   a2, 64(v0)        nameTable[effect]      <- the caption
+
+So for an item **the effect id and the icon rect index are the same number**, and the ammo table above holds
+values that are correct read either way because the two spaces coincide. Nothing has to be scanned and
+nothing has to be joined through the fifth byte. Rects 2…11 are the eleven weapons, 18…23 the six ammo
+boxes, 26…30 the armour, 40…43 the four powerups — the effect numbering exactly.
+
+Five rects carry an index no item's effect claims. That is not a decode failure — it is the same shape of
+finding as the eight inert pickup handlers: the sheet holds art the item table has no record for.
+
+**The 57 captions — `0x800AC144`.** Fifty-seven `char *`, one per effect index, copied wholesale onto the
+sub-draw's stack and indexed by the same `client+84`. The result is the `%s` of `0x800AC228`:
+
+    "@03BB8^828282|0~8%s~4"
+
+which `0x80035B14` formats and `0x80035B20` hands to the markup interpreter — every frame, for as long as
+the 900-tick deadline at `client+188` holds. **It is not a notification**: it does not age on the ring's
+60-tick clock, does not stack under other messages, and carries its own position (x = 0x3B, y = 0xB8), the
+row just above the bar beside its own upper-left icon field. The port drew it as a notification for as long
+as it drew it at all; `q2_hud_pickup` / `q2_hud_pickup_build_ot` now do what the sub-draw does.
+
+The names are the item's, not the record's — `Sshotgun P` reads out as **Super Shotgun**, `Medi P` as
+**Health**, `Nuke P` as **A-M Bomb**. Fifty-seven is the rect table's length again, which is the third
+independent thing that had to agree. Read in `src/build/itemtable.[ch]`; `q2psx-inspect items` prints the
+caption column and diffs it against the disc.
+
+One frame of the expiry is visible and is reproduced: the sub-draw clears `client+84` and then *reloads* it,
+so the tick a caption dies still draws — rect 0, the blank, and entry 0, the empty string. Only the tick
+after that takes the early-out at `0x80035A28`.
 
 `q2_icon_name_for_id()` and `q2_icon_item_name()` name a rect without a disc, so the status bar's health and
 armour icons are named constants (`Q2_SBAR_ICON_MEDIKIT`, `_ARMOUR_JACKET`) rather than caller-supplied

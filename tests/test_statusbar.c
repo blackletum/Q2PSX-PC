@@ -421,6 +421,77 @@ static void test_armour_class_upkeep(void)
           "a shard after losing body armour draws the grey vest");
 }
 
+/*
+ * The pickup caption's icon — field 16, filled by the fourth sub-draw at
+ * `0x800359C0`.
+ *
+ * The thing to pin is which NUMBER selects it. The sub-draw does
+ * `index * 5 + 0x8009C478` on `client+84`, and `client+84` is where the touch
+ * dispatch stores the EFFECT (`sb s7, 84(s1)` at 0x800372F0) — so for an item
+ * the effect id and the icon rect index are one number, and the same number
+ * indexes the 57-name table the caption's `%s` comes from. Reading it as
+ * anything else puts somebody else's icon beside the right word.
+ */
+static void test_pickup_icon(void)
+{
+    q2_icon_tables icons;
+    q2_statusbar b;
+    psx_ot ot;
+    u32 with, without;
+
+    /*
+     * Built by hand rather than loaded: the rect table lives in the executable
+     * and the rest of this file is disc-free. Rect 0 is the 1x1 blank the real
+     * table opens with and rect 18 is a 32x24 cell, which is all the emit
+     * cares about.
+     */
+    memset(&icons, 0, sizeof(icons));
+    icons.rect_count = Q2_ICON_COUNT;
+    icons.rect[0].u = 255; icons.rect[0].v = 255;
+    icons.rect[0].w = 1;   icons.rect[0].h = 1;
+    icons.rect[18].u = 64; icons.rect[18].v = 48;
+    icons.rect[18].w = 32; icons.rect[18].h = 24;
+    icons.rect[18].id = 8;
+
+    if (psx_ot_init(&ot, 64, 256) != Q2_OK) {
+        CHECK(0, "an ordering table for the emit");
+        return;
+    }
+
+    q2_statusbar_init(&b, &icons, 1);
+    q2_statusbar_anchor(&b, 93, 201);
+    b.health = 0;            /* the counters draw nothing, so the count is */
+    b.armour = 0;            /* the pickup icon's alone                    */
+    b.ammo   = 0;
+    b.weapon = Q2_SBAR_WEAPON_NO_AMMO;
+
+    psx_ot_clear(&ot);
+    b.pickup_icon = 0;
+    without = q2_statusbar_build_ot(&b, 1, 0, &ot, 8, 0, 0);
+
+    psx_ot_clear(&ot);
+    b.pickup_icon = 18;      /* Shells, and rect 18 is the shells box */
+    with = q2_statusbar_build_ot(&b, 1, 0, &ot, 8, 0, 0);
+
+    CHECK(with == without + 1,
+          "a pickup icon adds exactly one sprite (%u vs %u)", with, without);
+
+    /* Rect 18 is a real cell rather than the 1x1 blank, which is what makes
+     * the count above mean anything. */
+    {
+        const q2_icon_rect *r = q2_icon_rect_get(&icons, 18);
+        CHECK(r && !(r->w == 1 && r->h == 1),
+              "rect 18 is a real cell, not the blank");
+    }
+
+    /* And it is the UPPER-LEFT field, not one of the counters'. */
+    CHECK(q2_sbar_fields[Q2_SBAR_FIELD_UP_LEFT].dx == -71 &&
+          q2_sbar_fields[Q2_SBAR_FIELD_UP_LEFT].dy == -25,
+          "field 16 sits at the anchor less 71, 25 above");
+
+    psx_ot_free(&ot);
+}
+
 int main(void)
 {
     test_field_groups();
@@ -434,6 +505,7 @@ int main(void)
     test_split_screen_sizes();
     test_armour_icon_select();
     test_armour_class_upkeep();
+    test_pickup_icon();
 
     if (g_fail) {
         printf("\n%d status-bar check%s failed\n", g_fail,

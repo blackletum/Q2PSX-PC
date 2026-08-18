@@ -591,17 +591,47 @@ void q2_hud_centre(q2_hud *hud, const q2_hud_tables *tab,
 
 void q2_hud_pickup(q2_hud *hud, const char *item_name)
 {
-    char buf[Q2_HUD_CENTRE_LEN];
-
-    if (!hud || !item_name)
+    if (!hud)
         return;
+
+    if (!item_name) {
+        hud->pickup[0] = '\0';
+        return;
+    }
+
     /*
-     * 0x80035B18 prints this straight, with the position already in the
-     * literal: x = 0x03B, y = 0xB8, colour 0x828282, palette 0, wide spaces
-     * around the name and tight ones after.
+     * 0x80035B14 formats it and 0x80035B20 draws it, with the position already
+     * in the literal: x = 0x03B, y = 0xB8, colour 0x828282, palette 0, wide
+     * spaces around the name and tight ones after.
+     *
+     * The empty name is a real case rather than a guard: the frame a caption
+     * expires still formats and draws `@03BB8^828282|0~8~4`, which lays out no
+     * glyphs but does leave the pen's palette at 72 and its space width at 4 —
+     * and that state persists into whatever draws next (hud.h).
      */
-    snprintf(buf, sizeof(buf), "@03BB8^828282|0~8%s~4", item_name);
-    q2_hud_message(hud, buf);
+    snprintf(hud->pickup, sizeof(hud->pickup), "@03BB8^828282|0~8%s~4",
+             item_name);
+}
+
+u32 q2_hud_pickup_build_ot(q2_hud *hud, const q2_hud_font *font,
+                           q2_hud_ctx *ctx, psx_ot *ot, u16 otz)
+{
+    if (!hud || !font || !font->resident || !ctx || !ot)
+        return 0;
+    if (!hud->pickup[0])
+        return 0;
+
+    /*
+     * No home, and no colour swap. The `@` sets the pen outright so `home_x` /
+     * `home_y` never come into it, and the (0x78,0x78,0x78) the notification
+     * layer forces at 0x80042B50 is that layer's alone — this string carries
+     * its own `^828282`.
+     *
+     * The pen is the HUD's own, not a fresh one, because it is $gp state in the
+     * original: the `|0` and the `~4` this string ends on are still in force
+     * for whatever is drawn after it.
+     */
+    return q2_hud_print(font, ctx, &hud->pen, ot, otz, hud->pickup);
 }
 
 void q2_hud_weapon_selected(q2_hud *hud, const q2_hud_tables *tab, int weapon_id)

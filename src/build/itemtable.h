@@ -90,11 +90,45 @@
 #define Q2_ITEM_DISPATCH_SLES01534    0x800AC30Cu   /* the 55-entry jump table */
 #define Q2_ITEM_SOUNDNAMES_SLES01534  0x800AC240u   /* 11 x 12-byte names */
 
+/*
+ * The DISPLAY names — 57 `char *`, one per effect index, and the one thing the
+ * HUD's pickup caption needs.
+ *
+ * `0x800359C0` — the status bar's fourth sub-draw — copies this whole array
+ * onto its stack, indexes it by the effect the touch left in `client+84`, and
+ * hands the result to the text printf as the `%s` of `0x800AC228`:
+ *
+ *     "@03BB8^828282|0~8%s~4"
+ *
+ * So the caption a player sees is `name[effect]`, not the item table's model
+ * name: the record whose model is `Sshotgun P` reads out as **Super Shotgun**.
+ *
+ * FIFTY-SEVEN, and that number is a second confirmation rather than a
+ * coincidence. It is the length of the icon rect table at `0x8009C478`, because
+ * the same sub-draw uses the same index for both: `index * 5 + 0x8009C478` is
+ * the icon, `nameTable[index]` is the caption. **For an item the effect id and
+ * the icon rect index are one number.** That is why joining the rect table
+ * against the item table looked so convincing in icontable.h — the join is
+ * real, it just runs through the INDEX and not through the fifth byte.
+ *
+ * Entry 0 is the empty string, which is what an expired caption formats with.
+ * Nine entries name effects the dispatch leaves inert (`IonRipper`,
+ * `Plasma Beam`, `Discharger`, `FlameGun`, `Tesla` twice, `Fuel`,
+ * `Power Screen`, and a third `Health`); they can never be shown, because an
+ * inert handler never reaches the store at `0x800372F0`. Kept as read.
+ */
+#define Q2_ITEM_NAMES_SLES01534   0x800AC144u   /* 57 char *              */
+#define Q2_ITEM_CAPTION_SLES01534 0x800AC228u   /* the format string      */
+
 /* The dispatch is indexed `effect - 2` and bounds-checked against 55, so this
  * is the whole usable range. Effect 0 is the table's own "no effect" value. */
 #define Q2_ITEM_EFFECT_FIRST  2
 #define Q2_ITEM_EFFECT_COUNT 55
 #define Q2_ITEM_EFFECT_LAST  (Q2_ITEM_EFFECT_FIRST + Q2_ITEM_EFFECT_COUNT - 1)
+
+/* One name per effect, effect 0 included — the array is indexed, not scanned. */
+#define Q2_ITEM_NAME_COUNT        (Q2_ITEM_EFFECT_LAST + 1)
+#define Q2_ITEM_NAME_LEN          18  /* "Purple Pyramid Key", the longest */
 
 /* ------------------------------------------------------------------------- */
 /* Flags — all bits observed on this disc are accounted for                    */
@@ -158,6 +192,9 @@ typedef struct q2_item_table {
 
     /* The eleven item sound names at 0x800AC240, in table order. */
     char sound[11][Q2_ITEM_MODEL_LEN + 1];
+
+    /* The 57 display names at 0x800AC144, indexed by effect. */
+    char name[Q2_ITEM_NAME_COUNT][Q2_ITEM_NAME_LEN + 1];
 } q2_item_table;
 
 q2_result q2_item_table_load(q2_item_table *out, const disc *d,
@@ -180,6 +217,15 @@ const q2_item_def *q2_item_find(const q2_item_table *t, s32 place_id);
 /* True when this effect index reaches a real handler. Reads the loaded
  * dispatch when one is present and falls back to the built-in list. */
 bool q2_item_effect_is_live(const q2_item_table *t, u32 effect);
+
+/*
+ * The caption an effect reads out as — `nameTable[effect]` at 0x80035B10.
+ *
+ * Never NULL: an index outside the table gives the empty string, which is the
+ * same thing entry 0 holds and what the expired caption formats with. Reads the
+ * loaded table when one is present, the built-in copy otherwise.
+ */
+const char *q2_item_display_name(const q2_item_table *t, u32 effect);
 
 /* Compare a loaded table against the built-in one, field by field. */
 typedef void (*q2_item_report_fn)(void *user, const char *what,

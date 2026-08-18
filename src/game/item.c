@@ -562,6 +562,38 @@ q2_touch_result q2_item_touch(u32 effect, q2_inventory *inv, const s32 pos[3],
 }
 
 /* ------------------------------------------------------------------------- */
+/* What the HUD shows for it — 0x800359C0                                     */
+/* ------------------------------------------------------------------------- */
+bool q2_item_pickup_caption(q2_inventory *inv, s32 level_time,
+                            const q2_item_table *table,
+                            u8 *icon, const char **name)
+{
+    if (!inv)
+        return false;
+
+    /* 0x80035A28: nothing collected since the last one expired, and the whole
+     * sub-draw returns without touching its field. */
+    if (inv->last_item == 0)
+        return false;
+
+    /*
+     * 0x80035A40: `sltu deadline, now`, so the caption survives the tick it
+     * expires ON and dies the tick after. Unsigned, as the console's is, which
+     * is also what keeps a wrapped clock from pinning it forever.
+     */
+    if ((u32)inv->item_name_until < (u32)level_time)
+        inv->last_item = 0;
+
+    /* 0x80035A50 reloads it, so the expiry frame draws index 0 — the blank
+     * rect and the empty name — rather than skipping. */
+    if (icon)
+        *icon = inv->last_item;
+    if (name)
+        *name = q2_item_display_name(table, inv->last_item);
+    return true;
+}
+
+/* ------------------------------------------------------------------------- */
 /* Spawning                                                                   */
 /* ------------------------------------------------------------------------- */
 q2_entity *q2_item_spawn(q2_entity_set *set, const q2_pop_place *place,
@@ -787,10 +819,22 @@ static void item_collected(q2_entity *e, q2_entity_world *w, u32 player,
     /* 0x8005B6C0: the pickup particle burst, in both branches. */
     q2_ent_burst_at(&w->events, e->origin, e->glow, e->model_index);
 
-    e->hidden = true;
-
+    /*
+     * THE KEPT BRANCH TOUCHES NOTHING ELSE. 0x8005998C is two instructions —
+     * the burst and a jump to the epilogue — so a weapon left standing by
+     * weapons-stay stays VISIBLE, which is the whole point of the rule: the
+     * next player has to be able to see the gun they are allowed to take.
+     *
+     * This used to hide it before the early-out, so the item vanished for
+     * everybody and the rule accomplished nothing but leaving a live entity
+     * where a freed one belonged. Nothing marks it taken either, and it does
+     * not need to: a second touch runs `give_weapon` again, is refused, and
+     * returns Q2_TOUCH_NOTHING.
+     */
     if (keep)
         return;
+
+    e->hidden = true;
 
     if (w->deathmatch && !(e->flags & Q2_ITEM_TIMED)) {
         /* 0x800598FC: mega health waits a great deal longer than anything

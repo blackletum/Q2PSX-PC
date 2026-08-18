@@ -275,6 +275,38 @@ q2_touch_result q2_item_touch(u32 effect, q2_inventory *inv, const s32 pos[3],
  * `cls` yields, and the class/value bookkeeping it does on the way. */
 s16 q2_item_armour_amount(q2_inventory *inv, u8 cls);
 
+/* ------------------------------------------------------------------------- */
+/* What the HUD shows for the last thing collected                            */
+/* ------------------------------------------------------------------------- */
+/*
+ * 0x800359C0's prologue — the status bar's fourth sub-draw, and the reader of
+ * the two fields `q2_item_touch` writes at 0x800372F0.
+ *
+ * The console draws a pickup caption from the SAME per-viewport hook that
+ * draws the bar (`0x800337D0`), every frame, for as long as the deadline
+ * holds: an icon in the bar's upper-left field and a line of text beside it.
+ * It is not a notification — it does not age, does not stack and does not take
+ * a slot in the four-line ring.
+ *
+ * Returns false when there is nothing to draw. Otherwise `*icon` is the ICON
+ * RECT INDEX, which for an item is the effect id itself (the sub-draw does
+ * `index * 5 + 0x8009C478` on `client+84`), and `*name` is that effect's entry
+ * in the 57-name table — never NULL.
+ *
+ * IT MUTATES, which is why it takes a writable inventory: the expiry test is
+ * inside the draw and clears `last_item` in place (`sb zero, 84(a3)` at
+ * 0x80035A4C). Call it once per drawn frame.
+ *
+ * ONE FRAME OF THE EXPIRY IS VISIBLE and is reproduced. The sub-draw reloads
+ * `last_item` AFTER clearing it and carries on with index 0 — rect 0, the 1x1
+ * blank, and the empty name — so the frame a caption dies still runs the draw
+ * with nothing in it. Only the frame after that takes the early-out at
+ * 0x80035A28 and returns without drawing at all.
+ */
+bool q2_item_pickup_caption(q2_inventory *inv, s32 level_time,
+                            const q2_item_table *table,
+                            u8 *icon, const char **name);
+
 /* True while the powerup is held at `level_time`. */
 bool q2_item_powerup_active(const q2_inventory *inv, q2_powerup_slot slot,
                             s32 level_time);

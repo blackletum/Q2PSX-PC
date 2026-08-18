@@ -421,6 +421,23 @@ typedef struct q2_statusbar {
     u8 armour_icon;
 
     /*
+     * The pickup caption's icon — field 16, the upper-left one, filled by the
+     * fourth sub-draw at `0x800359C0` from `client+84`.
+     *
+     * A RECT INDEX, and for an item that is the EFFECT ID itself: the sub-draw
+     * does `index * 5 + 0x8009C478` on the very byte the touch dispatch stores
+     * the effect into (`sb s7, 84(s1)` at 0x800372F0). So the same number picks
+     * the icon here and the caption out of the 57-name table, and that is the
+     * join icontable.h's retraction was circling: it is by INDEX, not by the
+     * rect record's fifth byte.
+     *
+     * Zero is rect 0, the 1x1 blank, and draws nothing — which is both "no
+     * pickup" and the frame a caption expires on. `q2_item_pickup_caption`
+     * computes it.
+     */
+    u8 pickup_icon;
+
+    /*
      * The armour field's other half. In the POWER state the counter shows the
      * CELLS count and is drawn unconditionally (`lhu a0, 116(v0)` at
      * 0x80035754, straight into the shared draw at 0x800359A8); in the regular
