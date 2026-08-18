@@ -597,9 +597,220 @@ static void test_camera_undoes_the_placement(void)
     }
 }
 
+/* ------------------------------------------------------------------------- */
+/* The per-weapon FIRE driver — 0x8004FEE8                                    */
+/* ------------------------------------------------------------------------- */
+/*
+ * The bank above has one key per state, which is enough for every transition
+ * test but useless for the frame driver: its four arms switch on the frame
+ * INDEX inside the fire clip, and a one-key clip only ever has frame 0. This
+ * second bank gives the four driven weapons a fire clip long enough to hold
+ * every band boundary the arms name, with keys long enough that a small step
+ * never crosses one — so a test can park the machine on a frame and ask what
+ * that frame does.
+ */
+#define DRV_KEY_TICKS 100
+
+static q2_vm_key    g_drv_keys[Q2_VM_SLOTS][Q2_VM_STATES][28];
+static q2_vm_tables g_drv;
+
+static void build_driver_bank(void)
+{
+    static const int fire_keys[Q2_VM_SLOTS] = {
+        [4] = 3,     /* machinegun:   the three-key cycle                */
+        [5] = 28,    /* chaingun:     spin-up 0..8, loop 9..17, down 18+ */
+        [6] = 3,     /* hand grenade: prime, hold, throw                 */
+        [9] = 8      /* hyperblaster: 1..5 loop, 6 the tail              */
+    };
+    int w, s, k;
+
+    memset(&g_drv, 0, sizeof(g_drv));
+    memset(g_drv_keys, 0, sizeof(g_drv_keys));
+
+    for (w = 0; w < Q2_VM_SLOTS; w++) {
+        for (s = 0; s < Q2_VM_STATES; s++) {
+            int n = (s == Q2_VM_FIRE && fire_keys[w]) ? fire_keys[w] : 1;
+
+            for (k = 0; k < n; k++) {
+                g_drv_keys[w][s][k].duration = DRV_KEY_TICKS;
+                g_drv_keys[w][s][k].event    = Q2_VM_EVENT_NONE;
+            }
+            g_drv.clip[w][s].count = (u32)n;
+            g_drv.clip[w][s].key   = g_drv_keys[w][s];
+            g_drv.clip[w][s].addr  = 0x8009E000u + (u32)(w * 4 + s) * 20u;
+        }
+        snprintf(g_drv.model_name[w], sizeof(g_drv.model_name[w]),
+                 "Weapon %d", w);
+    }
+}
+
+/* Park the machine in FIRE with `weapon` in hand, on `frame`, with the
+ * per-frame cache cleared so the next step is a NEW frame to the arm. */
+static void park_in_fire(q2_viewweapon *vw, int weapon, u32 frame)
+{
+    q2_vw_init(vw, &g_drv, weapon);
+    run_until(vw, Q2_VM_IDLE, false, 200);
+    q2_vw_advance(vw, 1, true, Q2_VW_FIRED);
+
+    vw->state           = Q2_VM_FIRE;
+    vw->frame           = frame;
+    vw->left            = DRV_KEY_TICKS;
+    vw->total           = DRV_KEY_TICKS;
+    vw->last_fire_frame = -1;
+    vw->spin_accum      = 0;
+    vw->fire_latch      = false;
+    (void)q2_vw_take_frame_fires(vw);
+    (void)q2_vw_take_frame_sound(vw);
+}
+
+/*
+ * 0x80050180 — the chaingun's rounds per animation frame, which is what
+ * openquestions #39c called residue and defaulted to one. Three bands, and the
+ * middle one asks the trigger.
+ */
+static void test_chaingun_bands(void)
+{
+    static const struct { u32 frame; bool held; u32 want; const char *why; } c[] = {
+        {  0, true, 0, "frame 0 is the spin-up boundary and fires nothing" },
+        {  3, true, 1, "the spin-up throws one round a frame" },
+        {  6, true, 2, "held, the second band throws two" },
+        {  6, false, 1, "released, the same band throws one" },
+        {  9, true, 0, "frame 9 opens the loop and fires nothing" },
+        { 12, true, 3, "the loop throws three" },
+        { 17, true, 0, "frame 17 closes the loop and fires nothing" },
+        { 20, true, 0, "the whole spin-down fires nothing" }
+    };
+    q2_viewweapon vw;
+    size_t i;
+
+    for (i = 0; i < sizeof(c) / sizeof(c[0]); i++) {
+        u32 got;
+
+        park_in_fire(&vw, 5, c[i].frame);
+        /* Frame 17 held wraps to 9 before the shot test, which is the loop
+         * itself; frame 9 released jumps to the spin-down. Both are checked
+         * separately below — here the wrap is what the arm is meant to do. */
+        q2_vw_advance(&vw, 5, c[i].held, Q2_VW_FIRE_NONE);
+        got = q2_vw_take_frame_fires(&vw);
+
+        CHECK(got == c[i].want,
+              "chaingun frame %u %s: %u rounds, want %u — %s",
+              c[i].frame, c[i].held ? "held" : "released", got, c[i].want,
+              c[i].why);
+    }
+}
+
+/* 0x80050084 and 0x8005009C: the loop holds while held and leaves when let go,
+ * and neither is a clip boundary — the arm rewrites the frame index. */
+static void test_chaingun_loop_and_spin_down(void)
+{
+    q2_viewweapon vw;
+
+    park_in_fire(&vw, 5, 17);
+    q2_vw_advance(&vw, 5, true, Q2_VW_FIRE_NONE);
+    CHECK(vw.frame == 9, "held at frame 17 wraps to 9, got %u", vw.frame);
+
+    park_in_fire(&vw, 5, 9);
+    q2_vw_advance(&vw, 5, false, Q2_VW_FIRE_NONE);
+    CHECK(vw.frame == 27, "released at frame 9 jumps to 27, got %u", vw.frame);
+
+    /* 0x800503C4. A dry gun leaves FIRE when the clip comes back to its first
+     * key, not at the clip's end — which is what stops an empty chaingun
+     * grinding through a whole spin-down before it will switch. */
+    park_in_fire(&vw, 5, 0);
+    vw.fire_latch = true;
+    q2_vw_advance(&vw, 5, true, Q2_VW_FIRE_NONE);
+    CHECK(vw.state == Q2_VM_IDLE,
+          "a dry chaingun leaves FIRE at frame 0, state %d", (int)vw.state);
+}
+
+/*
+ * 0x80050038's `sw zero, 52` — the accumulator is RESET after a shot, not
+ * reduced by the threshold. Taking `-= 30` in a loop instead banks a burst on
+ * any frame long enough to cover several thresholds, so a low frame rate fired
+ * faster than a high one.
+ */
+static void test_machinegun_accumulator_resets(void)
+{
+    q2_viewweapon vw;
+    u32 got;
+
+    park_in_fire(&vw, 4, 0);
+    q2_vw_advance(&vw, 90, true, Q2_VW_FIRE_NONE);   /* three thresholds */
+    got = q2_vw_take_frame_fires(&vw);
+    CHECK(got == 1, "90 ticks of machinegun is one round, got %u", got);
+
+    /* 0x8005003C: a release on the middle key jumps to the last one so the
+     * clip can end, instead of hanging where the wrap keeps returning it. */
+    park_in_fire(&vw, 4, 1);
+    q2_vw_advance(&vw, 5, false, Q2_VW_FIRE_NONE);
+    CHECK(vw.frame == 2, "released on key 1 jumps to key 2, got %u", vw.frame);
+
+    /* And held, the last key wraps back to the first — the cycle. */
+    park_in_fire(&vw, 4, 2);
+    q2_vw_advance(&vw, 5, true, Q2_VW_FIRE_NONE);
+    CHECK(vw.frame == 0, "held on key 2 wraps to key 0, got %u", vw.frame);
+}
+
+/* 0x80050298 and 0x800502C8: frames 1..5 are the loop and frame 6 is the tail,
+ * which the loop must not fire on. */
+static void test_hyperblaster_loop(void)
+{
+    q2_viewweapon vw;
+    u32 got;
+
+    park_in_fire(&vw, 9, 5);
+    q2_vw_advance(&vw, 40, true, Q2_VW_FIRE_NONE);
+    CHECK(vw.frame == 1, "held at frame 5 wraps to 1, got %u", vw.frame);
+
+    park_in_fire(&vw, 9, 6);
+    q2_vw_advance(&vw, 40, true, Q2_VW_FIRE_NONE);
+    got = q2_vw_take_frame_fires(&vw);
+    CHECK(got == 0, "frame 6 is the tail and fires nothing, got %u", got);
+}
+
+/*
+ * 0x800503F0 — the hand grenade will not prime until its MODEL's `Set` move has
+ * reached position 380, which is the gate this port had no counterpart for at
+ * all. Below it the fire clip runs on and the throw happens on time; at or
+ * above it the clip stops dead and the grenade is held.
+ */
+static void test_grenade_cook_waits_for_the_arm(void)
+{
+    q2_viewweapon vw;
+    s32 before;
+
+    park_in_fire(&vw, 6, 0);
+    vw.anim_pos = Q2_VW_COOK_POSITION - 1;
+    before = vw.left;
+    q2_vw_advance(&vw, 10, true, Q2_VW_FIRE_NONE);
+    CHECK(!vw.cook, "the grenade does not prime before the arm is up");
+    CHECK(vw.left < before,
+          "and its clip keeps running: left %d against %d", (int)vw.left,
+          (int)before);
+
+    park_in_fire(&vw, 6, 0);
+    vw.anim_pos = Q2_VW_COOK_POSITION;
+    before = vw.left;
+    q2_vw_advance(&vw, 10, true, Q2_VW_FIRE_NONE);
+    CHECK(vw.cook, "at 380 the grenade primes");
+    CHECK(vw.frame == 1, "the frame pins to 1, got %u", vw.frame);
+    CHECK(vw.left >= before,
+          "and the clock stops rather than running out: left %d against %d",
+          (int)vw.left, (int)before);
+    CHECK(vw.anim_pos == Q2_VW_COOK_POSITION,
+          "the arm holds where it is, at %d", (int)vw.anim_pos);
+
+    /* Letting go releases it, and the clip runs out from where it stopped. */
+    q2_vw_advance(&vw, 10, false, Q2_VW_FIRE_NONE);
+    CHECK(!vw.cook, "releasing the trigger throws it");
+}
+
+/* ------------------------------------------------------------------------- */
 int main(void)
 {
     build_bank();
+    build_driver_bank();
 
     test_raise_to_idle();
     test_fire();
@@ -612,6 +823,11 @@ int main(void)
     test_roll_reaches_the_offset();
     test_no_weapon();
     test_camera_undoes_the_placement();
+    test_chaingun_bands();
+    test_chaingun_loop_and_spin_down();
+    test_machinegun_accumulator_resets();
+    test_hyperblaster_loop();
+    test_grenade_cook_waits_for_the_arm();
 
     if (g_fail == 0)
         printf("test_viewweapon: all checks passed\n");

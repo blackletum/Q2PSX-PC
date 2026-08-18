@@ -78,15 +78,28 @@
  * because several clips carry a half-circle component.
  *
  * ---------------------------------------------------------------------------
- * What is NOT established
+ * Two more things the model does, and one thing it does not
  * ---------------------------------------------------------------------------
- * The angle sum at 0x8004F40C adds a triple at player+230 to the triple the
- * view-angle helper at 0x80038260 returns. One of those is the aim and the
- * other is the shot kick; which is which was not separated, because both are
- * three signed angles added to the same matrix and no call site distinguishes
- * them. This module therefore takes aim and kick as two inputs and adds them
- * the way the original adds them — if the attribution is ever swapped, nothing
- * here changes.
+ * The clip bank animates where the weapon IS; the MODEL animates the weapon.
+ * Six of the eleven view models carry a named move in their own block D, and
+ * 0x80050454 starts it off a key event — see `anim_pos` below. The weapon was
+ * drawn UNPOSED before that was wired, which is not "no animation" but "the raw
+ * vertex block": `HandGren G` came out as a fist-sized lump instead of an arm.
+ *
+ * The hyperblaster has a second, finer one: 0x8004FC78 runs only for weapon 9
+ * and drives a 1.0.12 ramp — 4096 in IDLE, then 4096/3296/2096/1296 minus forty
+ * per elapsed tick over fire frames 1..4, then `(left << 12) / duration` — into
+ * 0x8006D43C, which PATCHES one component of part 6's quaternion in the model's
+ * own key data. That is the barrel turning, and it is not reconstructed here:
+ * the patch mutates shared model bytes and the packing of the key word was not
+ * read out. The ramp arithmetic above is exact if anyone wants it.
+ *
+ * And the thing it does not do: 0x8004F644…0x8004F694 rotates a vector by the
+ * composed matrix and adds the result to the weapon's world position, which
+ * looks like a per-model offset and is DEAD. The vector is `sp+24`, and the
+ * only write to it in the whole function is the `memset(sp+24, 0, 6)` at
+ * 0x8004EE18. It is a zero rotated by a matrix, added to a position. Nothing
+ * here reproduces it because there is nothing to reproduce.
  */
 #ifndef Q2PSX_VIEWWEAPON_H
 #define Q2PSX_VIEWWEAPON_H
@@ -105,6 +118,19 @@
 
 /* FORMATS §9.12. The weapon hangs off the eye, so it uses the eye's own base. */
 #define Q2_VW_EYE_BASE     286
+
+/*
+ * 0x800503F8. The hand grenade will not prime until its model's `Set` move has
+ * reached this position — the arm has to have the grenade up before the hold
+ * can start. It is a position on the model timeline, so it is in the same
+ * units as `anim_pos`, and it sits inside `Set`'s own 0..470 span.
+ */
+#define Q2_VW_COOK_POSITION  380
+
+/* Parts in the biggest view model on the disc is 19 (`HandGren G`); the bound
+ * is the same one entitydraw.c uses, and a model past it draws unposed rather
+ * than not at all. */
+#define Q2_VW_POSE_MAX     64
 
 /*
  * The fire function's verdict, as the state machine consumes it. The original's
@@ -154,9 +180,31 @@ typedef struct q2_viewweapon {
     s32         total;           /* +48  */
     s32         left;            /* +80  */
 
-    /* Where the interpolation started — the value the previous key left. */
-    s16         from_t[3];       /* +224 / +226 / +228 */
-    s16         from_r[3];       /* +236 / +238 / +240 */
+    /*
+     * Where the interpolation started — the value the previous key left.
+     *
+     * THE TWO ADDRESSES USED TO BE THE WRONG WAY ROUND HERE, and it is worth
+     * saying which is which because the loop reads like the opposite. The six
+     * accumulators at 0x8004EF74…0x8004F1C0 pair the key's fields with the
+     * viewmodel's in this order:
+     *
+     *     key +0/+2/+4  (rotation)     -> viewmodel +224/+226/+228
+     *     key +6/+8/+10 (translation)  -> viewmodel +236/+238/+240
+     *
+     * so the ROTATION base is at +224 and the TRANSLATION base at +236. The
+     * field names here follow the key's own layout (vmtables.h has `r` at +0
+     * and `t` at +6), which is right; only the addresses in the comment were
+     * swapped. Reading the disc settles it either way — the blaster's fire keys
+     * hold (1623, 2116, 2348) in the first triple, a hair off a half circle,
+     * against (96, 73, 60) in the second, which is a hand's width of offset.
+     *
+     * There is only ONE such triple per field on the console: the loop
+     * accumulates into it in place, and the DISPLAY value is computed fresh
+     * after the loop into +230/+232/+234 without being written back
+     * (0x8004F2F8). `cur_t` / `cur_r` below are that display value.
+     */
+    s16         from_t[3];       /* +236 / +238 / +240 — the translation base */
+    s16         from_r[3];       /* +224 / +226 / +228 — the rotation base    */
 
     /* The interpolated present, which is what the transform uses. */
     s16         cur_t[3];
@@ -183,8 +231,51 @@ typedef struct q2_viewweapon {
     /* The model, resolved from the bank by name when the weapon is swapped. */
     const q2_model *model;
 
+    /* ---------------------------------------------------------------------
+     * The MODEL's own animation, which is a second clock — 0x80050454
+     * ------------------------------------------------------------------- */
+    /*
+     * The clip bank above animates where the weapon IS. It does not animate the
+     * weapon: six of the eleven view models carry a named move in their own
+     * block D, and the engine starts it from a key event.
+     *
+     * 0x80050454 runs on every substep beside the fire driver (0x8004EF38) and
+     * is a switch on the weapon id over exactly five weapons, each naming one
+     * move by a 12-byte string it hands to 0x8006D330:
+     *
+     *     3  Supershot G   "Fire"     0x800505EC
+     *     6  HandGren G    "Set"      0x800505AC
+     *     7  GrenLaunch G  "Spin"     0x800505CC
+     *     8  RockLaunch G  "Fire"     0x800505EC
+     *    11  Bfg G         "Fire"     0x800505EC
+     *
+     * and the model banks carry those names on exactly those models and on no
+     * others. The trigger is `key.event == 1` while the state is FIRE, and each
+     * of those five fire clips has exactly one key carrying it.
+     *
+     * `anim_pos` IS viewmodel+256, the halfword the pose selector at 0x8006B924
+     * consumes as an animation position. The move record reaches it unscaled and
+     * openquestions #51f found no load-time multiply anywhere in the image, so
+     * the five applied in `anim_step` is an inference — one the hand grenade's
+     * own cook threshold forces, because 380 does not fit inside a `Set` move
+     * that ends at 94. The argument is written out at the call site.
+     *
+     * At five the Supershot's `Fire` spans 90 position units and the position
+     * advances one per tick, so the break-open takes 0.3 s of a 354-tick clip.
+     *
+     * With no move playing the position is 0 (0x8004FA44 on the swap), which is
+     * the rest pose and NOT the raw vertices — the difference is dramatic on
+     * `HandGren G`, whose raw bounds are [-46 -41 -33]..[59 48 69] against a
+     * posed [-43 -82 -418]..[248 118 125]: unposed it is a fist-sized lump
+     * instead of an arm.
+     */
+    s16         anim_pos;        /* +256, the position on the model timeline */
+    s16         anim_end;        /* the playing move's last position, -1 idle */
+    u16         anim_flags;      /* +258: bit 1 playing, bit 0 has played     */
+
     /* Diagnostics: how many keys have been consumed since the last reset. */
     u32         keys_played;
+    u32         anims_started;   /* how many named moves have been started    */
 
     /*
      * And how many times the fire clip has been STARTED, which is the number a

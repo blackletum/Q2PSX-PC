@@ -388,9 +388,18 @@ Legend: `[ ]` open · `[~]` partially resolved · `[x]` resolved (move the item,
   - [ ] 39b. Residue: the grenade launcher's fuse. Its spawner stores 380 into the entity at `+0x4C`
         alongside a second timer and which of the two is the fuse was not established. The hand grenade's
         1650 IS read — it is argument 3 at `0x8004EC3C`.
-  - [ ] 39c. Residue: the chaingun's spin state. The bullet count per shot comes from the view model's
-        runtime object at `+0x2C` (`0x8004CAE0`), and the view model is not reconstructed, so the port takes
-        the count from its caller and defaults to one.
+  - [x] 39c. **Residue: the chaingun's spin state. — SOLVED. It is three bands off the animation frame.**
+        `+0x2C` is written by the FIRE-state driver at `0x800501C0`, and `0x80050180` is the table that
+        decides what to write: **frame < 5 -> 1, 5..8 -> 2 while the trigger is held and 1 when it is not,
+        frame >= 10 -> 3**, with frame 9 the one frame that writes nothing at all. `0x800501C8` then clamps
+        the count to the rounds left, reading the ammo type off `0x8009DC5C` and the count out of the
+        player's block. So a chaingun wound all the way up throws three rounds per animation frame and a
+        tapped one throws a single round — the port defaulted to one for every band.
+        Implemented in `src/game/viewweapon.c`; the clamp is the caller's, because each unit of
+        `frame_fires` becomes one call of the weapon's fire function and a fire function that runs out
+        reports dry. `tests/test_viewweapon.c::test_chaingun_bands` pins all eight cases.
+        Measured on COMMAND, 400 frames, `--shoot`: the chaingun asks for **778 shots against the
+        machinegun's 524** on the same clock, which is the bands doing their work.
 - [x] **Viewport handling and drawing. — SOLVED, and one silent inversion came out of it.**
       The screen's constants were already read; what was not read was the *drawing*. Now transcribed from
       `0x800780C0`, `0x80076A74`, `0x80076764`, `0x80077230` and `0x80076E88`, and implemented in
@@ -2159,7 +2168,58 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
       real divergence whenever the strafe lean is active, though it cannot explain a still frame at zero
       roll — so the measurement itself may also want re-taking against a fresh capture.
 
+      **The roll divergence is closed and two more operands have been read; the measurement still wants
+      re-taking.** `q2_vw_place` now builds the placement matrix with the camera's own
+      `q2_rotation_view(yaw, -pitch, roll)` and applies its transpose, so `view * R_place == I` holds by
+      construction and the roll is in it — `tests/test_viewweapon.c::test_camera_undoes_the_placement`
+      pins that. Two further things were read out of `0x8004EE0C` and neither is the quarter screen:
+
+      *The block that looks like a per-model offset is DEAD.* `0x8004F644…0x8004F694` calls `0x8006FC1C`
+      (a 3x3 matrix times an SVECTOR, result in `a2`) with the composed matrix, `sp+24`, and `sp+32`, then
+      adds `sp+32/34/36` to the weapon's world position. The only write to `sp+24` in the whole function is
+      the `memset(sp+24, 0, 6)` at `0x8004EE18` — `a0=sp+24, a1=0, a2=6`, through the A0(0x2B) thunk at
+      `0x80089E18`. It is a zero rotated by a matrix, added to a position. Nothing to reproduce, and worth
+      recording so it is not "found" again.
+
+      *One operand IS missing, and it is a rotation rather than a translation.* `0x8004F3E4…0x8004F3F8`
+      adds `[combat+70]` to the X component of the interpolated clip rotation immediately before
+      `RotMatrix`. `combat` is `[entity+12]`, the same block the weapon id (`+98`), the selection (`+102`)
+      and the switch countdown (`+222`) live in. **That halfword is read here and nowhere else in the
+      image**, and a sweep of every `sb`/`sh`/`sw` with an immediate of 68..72 finds no write to it on this
+      block, so it may simply be permanently zero. Not implemented, and named here rather than guessed.
+
+      *And the weapon was drawn from RAW VERTICES.* `q2_vw_build_ot` passed `pose = NULL`, so the one model
+      in the frame that never got its rest transform was the one in the player's hands. That is now fixed
+      and it MOVES the weapon: `Railgun G` shifts by its rest translation of −34 on Z, `Bfg G` by 53 on Y,
+      and `HandGren G` goes from a 105-unit lump to a 666-unit arm. Any re-take of the measurement above
+      has to be against the posed build.
+
 ---
+
+- [ ] 50a. **The view weapon queues something white and 128 units wide at its own position, every
+      frame, and it is not a light.** `0x8004F6CC` calls `0x8007012C` with the weapon's finished world
+      position, `128`, and the four bytes at `0x800AEA20` — which are `ff ff ff 00`, opaque white. The
+      whole call is gated on the halfword at `0x800B2A28`.
+      `0x8007012C` is an append to a bump list between `gp+18496` and `gp+18500`, twenty bytes a record:
+      three position words, the `128`, and the packed colour. It is NOT `q2_light_add_dynamic`
+      (`0x80075C34`, 28-byte records at `0x800E3D18`); the consumer at `0x8006EBB8` walks the list from
+      `0x800DEEA0`, subtracts the camera position at `0x800B28B4` from each record and builds 48-byte
+      primitives, so these are **billboards**, and the `128` is a size rather than a radius.
+      `0x80050B84` is the only other producer and queues one from a muzzle position with the colour at
+      `0x800AEA28`, likewise white — so the pair reads as the gun's own glow and its muzzle flash.
+      Not implemented: putting a white blob on the gun every frame on this reading alone would be worse
+      than leaving it off. **What is needed is what sets `0x800B2A28`** — five sites read it as a halfword
+      (`0x8002F48C`, `0x8002F920`, `0x8004F688`, `0x80050B84`, `0x80054AE4`) and no `gp`-relative store
+      writes it, so it is set through some other base and may well be off in ordinary play.
+
+- [ ] 50b. **The quad's firing sound, located and not wired.** Three sites — `0x8004FB9C` in the state
+      machine's fire arm, `0x80050004` in the machinegun's, `0x80050234` in the chaingun's and
+      `0x80050300` in the hyperblaster's — all do the same thing after a successful shot: if the level
+      clock at `0x800AEBAC` is still short of the deadline at `combat+172`, and `0x800739B8` says the
+      handle at `0x800B2B80` is not already playing, play `[0x800B28B0]` at the player's position through
+      `0x80073734`. That is a powerup changing the sound of every weapon, and `combat+172` is its
+      deadline. The port has no counterpart; the sim would have to expose "quad is up" to the weapon path
+      for it to be reachable.
 
 - [x] 49. **"The player cannot damage a creature" — RETRACTED the same day it was
       written. They can; the test could not see one.**
@@ -2855,6 +2915,29 @@ not think, and it does not walk.
       **51g — what units are block D's `start`/`end` in, given no scale factor exists, and why is every span
       even?** `0x80066954` is the place to resume: it builds records, and whatever feeds `a0+158` is the
       answer.
+
+- [~] 51h. **The scale between block D and the animation position is FIVE after all, and a
+      constant in the weapon code is what says so.** — *no loader found; the inference is forced.*
+      51f is not withdrawn: its sweep is right, there is no load-time multiply, and `0x8006D330` walks
+      block D itself (a 20-byte stride off `model+0x38`, names compared three words at a time), so the
+      `start` and `end` a caller gets are the disc's own numbers.
+      What 51f could not see is a caller that pins the two systems together. `0x80050454` is one:
+      it stores a move record's `+12` straight into **viewmodel+256**, which is `entity+0x100` — the
+      halfword the pose selector at `0x8006B924` consumes — and ends the move when the position walks
+      past `+14`. Five weapons reach it, each naming one move (`Fire`, `Set`, `Spin`), and the model
+      banks carry exactly those names on exactly those models.
+      Taken literally that makes the two unit systems the same, which contradicts 51d and 51g. **One
+      constant rules the literal reading out.** `0x800503F8` refuses to prime the hand grenade until
+      viewmodel+256 reaches **380**, and `HandGren G`'s `Set` move runs **0..94**. Unscaled the position
+      tops out at 94, the test can never pass, and a grenade can never be cooked — which the console
+      plainly does. The threshold must land inside the span, so the scale is at least 4.05; five is the
+      ratio 51d and 51g already established (two per frame against ten), and at five the span is 0..470
+      with the prime four fifths of the way through the arm coming up.
+      The port applies the five in `src/game/viewweapon.c::anim_step` and says at the call site that the
+      instruction for it has not been found. **What is still open is where the five happens on the
+      console** — a patch of the loaded block D, a scaled copy, or a second position field. `0x80066954`
+      writes a record's `+12`/`+14` on a 20-byte stride and is the nearest thing seen so far, but it
+      writes a creature's numbers, not a scale.
 
 - [x] 51g. **Two units per animation frame — and move `i` IS clip `i`.**
       Answered by comparison rather than by more disassembly. BASE1 model 15 carries 31 clips and 31 moves;

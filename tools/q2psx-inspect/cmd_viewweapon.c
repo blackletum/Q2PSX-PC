@@ -520,6 +520,143 @@ int cmd_viewweapon(disc *d, const char *weapon, const char *out,
     }
 
     /* ------------------------------------------------------------------ */
+    /*
+     * The MODEL's own named move — the second animation, and the one the port
+     * had no counterpart for.
+     *
+     * 0x80050454 is a switch on the weapon id over exactly five weapons, and
+     * each arm hands one 12-byte string to 0x8006D330. This asks the disc
+     * whether those five models really carry those five names, and whether the
+     * six other weapons carry none — because if the names did not line up the
+     * whole reading would be a coincidence rather than a mechanism.
+     *
+     * LAB is the map: it is the only one that ships all eleven view models, so
+     * it is the only place the negative half of the claim can be checked.
+     */
+    printf("\nthe model's own move (LAB)\n");
+    {
+        static const struct { int weapon; const char *move; u32 arm; } named[] = {
+            {  3, "Fire", 0x800505ECu },
+            {  6, "Set",  0x800505ACu },
+            {  7, "Spin", 0x800505CCu },
+            {  8, "Fire", 0x800505ECu },
+            { 11, "Fire", 0x800505ECu }
+        };
+        q2_common_file  common;
+        q2_buf          cbuf;
+        char            cpath[256];
+
+        snprintf(cpath, sizeof(cpath), "Q2DATA/LEVELS/%s/COMMON.DAT", "LAB");
+        if (disc_read_file(d, cpath, &cbuf) == Q2_OK) {
+            if (q2_common_open(&common, &cbuf) == Q2_OK) {
+                q2_model_bank bank;
+
+                if (q2_model_bank_from_common(&bank, &common) == Q2_OK) {
+                    size_t i;
+                    int wi;
+
+                    for (i = 0; i < sizeof(named) / sizeof(named[0]); i++) {
+                        q2_model       m;
+                        q2_model_move  mv;
+                        s32            idx;
+                        bool           got = false;
+
+                        idx = q2_model_bank_find(&bank, t.model_name[named[i].weapon]);
+                        if (idx >= 0 && q2_model_get(&bank, (u32)idx, &m) == Q2_OK)
+                            got = q2_model_move_by_name(&m, named[i].move, &mv);
+
+                        printf("  %08X  %-12.12s plays '%-4s'  %3u..%-3u"
+                               "  ->  %4d..%-4d  %s\n",
+                               named[i].arm, t.model_name[named[i].weapon],
+                               named[i].move,
+                               got ? mv.start : 0, got ? mv.end : 0,
+                               got ? (int)mv.start * 5 : 0,
+                               got ? (int)mv.end * 5 : 0,
+                               got ? "ok" : "NO MOVE");
+                        g_total++;
+                        if (!got)
+                            failed++;
+                    }
+
+                    /*
+                     * And the ones that reach no arm must carry no move at all,
+                     * which is what makes the mapping a mechanism rather than a
+                     * coincidence of five names.
+                     *
+                     * THE HYPERBLASTER IS THE ONE EXCEPTION and it is not a
+                     * hole in the argument: `HyperBlast G` carries a move called
+                     * `Move`, and weapon 9 is exactly the weapon 0x8004FC78
+                     * exists for — the only arm that drives a model by patching
+                     * a key rather than by starting a clip. It is skipped here
+                     * because it is animated by the other mechanism, not by
+                     * none.
+                     */
+                    {
+                        int extra = 0;
+
+                        for (wi = 1; wi < Q2_VM_SLOTS; wi++) {
+                            q2_model m;
+                            s32      idx;
+
+                            if (wi == 3 || wi == 6 || wi == 7 || wi == 8 ||
+                                wi == 11 || wi == 9)
+                                continue;
+                            idx = q2_model_bank_find(&bank, t.model_name[wi]);
+                            if (idx < 0 ||
+                                q2_model_get(&bank, (u32)idx, &m) != Q2_OK)
+                                continue;
+                            if (q2_model_move_count(&m) > 0)
+                                extra++;
+                        }
+                        printf("  and the rest carry no move (9 is 8004FC78's)"
+                               "    %s\n",
+                               extra == 0 ? "ok" : "MISMATCH");
+                        g_total++;
+                        if (extra != 0)
+                            failed++;
+                    }
+
+                    /*
+                     * The grenade's cook threshold has to land INSIDE its move,
+                     * which is the whole argument for the scale of five —
+                     * openquestions #51h. Unscaled it cannot.
+                     */
+                    {
+                        q2_model      m;
+                        q2_model_move mv;
+                        s32           idx = q2_model_bank_find(&bank,
+                                                               t.model_name[6]);
+                        bool inside = false, outside_unscaled = false;
+
+                        if (idx >= 0 && q2_model_get(&bank, (u32)idx, &m) == Q2_OK &&
+                            q2_model_move_by_name(&m, "Set", &mv)) {
+                            inside = ((s32)mv.start * 5 <= Q2_VW_COOK_POSITION &&
+                                      Q2_VW_COOK_POSITION <= (s32)mv.end * 5);
+                            outside_unscaled = (Q2_VW_COOK_POSITION > (s32)mv.end);
+                        }
+                        printf("  8004F3F8's 380 primes inside 'Set' at x5"
+                               "          %s\n", inside ? "ok" : "MISMATCH");
+                        g_total++;
+                        if (!inside)
+                            failed++;
+
+                        printf("  ...and could never be reached unscaled"
+                               "              %s\n",
+                               outside_unscaled ? "ok" : "MISMATCH");
+                        g_total++;
+                        if (!outside_unscaled)
+                            failed++;
+                    }
+                }
+                q2_common_close(&common);
+            }
+            q2_buf_free(&cbuf);
+        } else {
+            printf("  LAB is not on this disc\n");
+        }
+    }
+
+    /* ------------------------------------------------------------------ */
     /* Placement: the weapon must sit at the eye, and must move with it.   */
     printf("\nplacement\n");
     {

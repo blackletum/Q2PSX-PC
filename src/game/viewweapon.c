@@ -110,6 +110,7 @@ void q2_vw_init(q2_viewweapon *vw, const q2_vm_tables *tab, int weapon)
 
     memset(vw, 0, sizeof(*vw));
     vw->frame_sound = -1;
+    vw->anim_end    = -1;
     vw->tab     = tab;
     vw->weapon  = (weapon >= 0 && weapon < Q2_VM_SLOTS) ? weapon : 0;
     vw->pending = vw->weapon;
@@ -297,82 +298,192 @@ static void fire_state_step(q2_viewweapon *vw, s32 step, bool fire_held)
 
     switch (vw->weapon) {
     case VW_MACHINEGUN:
-        /* 0x8004FF98: a three-key cycle. Frame 2 wraps back to 0 while the
-         * trigger is down, so the clip repeats instead of ending. */
-        if (fire_held && vw->frame == 2)
-            vw->frame = 0;
+        /*
+         * 0x8004FF84. Held: frame 2 wraps back to 0 so the three-key cycle
+         * repeats, and the accumulator fires once each time it passes 30.
+         *
+         * The accumulator is RESET, not decremented (0x80050038's
+         * `sw zero, 52`), so a long substep cannot bank a burst — which is
+         * what taking `-= 30` in a loop did here, turning one host frame at a
+         * low frame rate into several rounds.
+         */
+        if (fire_held) {
+            if (vw->frame == 2)
+                vw->frame = 0;
 
-        vw->spin_accum += step;
-        while (vw->spin_accum >= VW_SPIN_THRESHOLD) {
-            vw->spin_accum -= VW_SPIN_THRESHOLD;
-            vw->frame_fires++;
+            vw->spin_accum += step;
+            if (vw->spin_accum >= VW_SPIN_THRESHOLD) {
+                /* 0x8004FFD0 skips the shot on the last key and leaves the
+                 * accumulator standing, so the next substep asks again. */
+                if (vw->frame != 2) {
+                    vw->frame_fires++;
+                    vw->spin_accum = 0;
+                }
+            }
+        } else {
+            /*
+             * 0x8005003C. Releasing clears the accumulator, and a release on
+             * the MIDDLE key jumps to the last one — so the clip can end
+             * instead of hanging on a key the wrap keeps returning to.
+             */
+            vw->spin_accum = 0;
+            if (vw->frame == 1)
+                vw->frame = 2;
         }
         break;
 
     case VW_CHAINGUN: {
         /*
-         * 0x8005007C. Three bands in one clip: spin-up 0..8, LOOP 9..17,
-         * spin-down 18..27.
+         * 0x80050058. Three bands in one 28-key clip: spin-up 0..8, LOOP
+         * 9..17, spin-down 18..27.
          *
-         *   held  and frame == 17 -> frame = 9      (stay in the loop)
-         *   released and frame == 9 -> frame = 27, rate = 2  (leave it)
+         *   held     and frame == 17 -> frame = 9   (stay in the loop)
+         *   released and frame ==  9 -> frame = 27
          *
-         * The rate at +44 is 1, 2 or 3 by band, and the gun fires once per NEW
-         * frame — the cache at +218 — except on 0, 9, 17 and anything from 18
-         * up, which are the band boundaries and the whole spin-down.
+         * A DRY chaingun skips the wrap entirely (0x80050074 jumps straight to
+         * the sounds), which is what lets the loop fall out into the spin-down
+         * instead of grinding on an empty gun.
          */
         if (fire_held) {
-            if (vw->frame == 17)
+            if (!vw->fire_latch && vw->frame == 17)
                 vw->frame = 9;
-        } else if (vw->frame == 9) {
-            vw->frame     = 27;
-            vw->spin_rate = 2;
+        } else {
+            vw->spin_accum = 0;
+            if (vw->frame == 9) {
+                /* 0x800500A0 stores the STATE into the rate field, which is 1
+                 * — not the 2 this used to write. Any frame that reaches the
+                 * band table below overwrites it anyway. */
+                vw->spin_rate = 1;
+                vw->frame     = 27;
+            }
         }
 
-        vw->spin_rate = (vw->frame < 9) ? 1 : (vw->frame < 18 ? 3 : 2);
+        /* Everything below is once per NEW frame — the cache at +218. */
+        if ((s32)vw->frame == vw->last_fire_frame)
+            break;
+        vw->last_fire_frame = (s32)vw->frame;
 
-        if ((s32)vw->frame != vw->last_fire_frame) {
-            vw->last_fire_frame = (s32)vw->frame;
+        /* The three band boundaries each play their own clip. */
+        if (vw->frame == 0)       vw->frame_sound = Q2_WSND_CHAINGUN_UP;
+        else if (vw->frame == 10) vw->frame_sound = Q2_WSND_CHAINGUN_LOOP;
+        else if (vw->frame == 18) vw->frame_sound = Q2_WSND_CHAINGUN_DOWN;
 
-            /* The three band boundaries each play their own clip. */
-            if (vw->frame == 0)       vw->frame_sound = Q2_WSND_CHAINGUN_UP;
-            else if (vw->frame == 10) vw->frame_sound = Q2_WSND_CHAINGUN_LOOP;
-            else if (vw->frame == 18) vw->frame_sound = Q2_WSND_CHAINGUN_DOWN;
+        if (vw->fire_latch) {
+            /* 0x800503C4: a dry gun leaves the FIRE state when the clip comes
+             * back round to its first key, rather than at the clip's end. */
+            if (vw->frame == 0) {
+                vw->state = Q2_VM_IDLE;
+                vw->frame = 0;
+            }
+            break;
+        }
 
-            if (vw->frame != 0 && vw->frame != 9 && vw->frame != 17 &&
-                vw->frame < 18)
-                vw->frame_fires++;
+        /* 0x8005015C: no shot on the band boundaries or the whole spin-down. */
+        if (vw->frame == 0 || vw->frame == 9 || vw->frame == 17 ||
+            vw->frame >= 18)
+            break;
+
+        /*
+         * THE BULLETS PER FRAME, which is openquestions #39c and was defaulted
+         * to one here. 0x80050180 reads three bands off the frame —
+         *
+         *     frame < 5           1
+         *     5 <= frame < 9      2 while the trigger is held, else 1
+         *     frame >= 10         3
+         *
+         * — so a chaingun wound all the way up throws three rounds per
+         * animation frame and a tapped one throws a single round. Frame 9 is
+         * filtered out above and is the one frame that writes no rate at all.
+         */
+        if (vw->frame < 5)
+            vw->spin_rate = 1;
+        else if (vw->frame < 9)
+            vw->spin_rate = fire_held ? 2 : 1;
+        else if (vw->frame >= 10)
+            vw->spin_rate = 3;
+
+        /*
+         * 0x800501C8 clamps that count to the rounds actually left, reading
+         * the ammo type off 0x8009DC5C and the count out of the player's own
+         * block. This module cannot see an inventory, and does not need to:
+         * the caller turns each unit of `frame_fires` into one call of the
+         * weapon's fire function, and a fire function that runs out reports
+         * dry and stops. Asking for three and getting two IS the clamp.
+         */
+        {
+            s32 n = vw->spin_rate;
+
+            if (n < 1)
+                n = 1;
+            vw->frame_fires += (u32)n;
         }
         break;
     }
 
     case VW_HYPERBLASTER:
-        /* 0x80050290: frames 1..5 are the loop and 6 is skipped, so a held
-         * trigger cycles 1-2-3-4-5-1 and never reaches the tail. */
-        if (fire_held && vw->frame == 5)
-            vw->frame = 1;
-        if (vw->frame == 6)
-            vw->frame = 7;
+        /*
+         * 0x8005026C. Frames 1..5 are the loop; a held trigger wraps 5 back to
+         * 1, and frame 6 is the tail the loop must not fire on. A dry gun goes
+         * straight to the sounds, which is what lets it reach frame 6 and stop.
+         */
+        if (fire_held && !vw->fire_latch) {
+            if (vw->frame == 5)
+                vw->frame = 1;
 
-        vw->spin_accum += step;
-        while (vw->spin_accum >= VW_SPIN_THRESHOLD) {
-            vw->spin_accum -= VW_SPIN_THRESHOLD;
-            vw->frame_fires++;
+            vw->spin_accum += step;
+            if (vw->spin_accum >= VW_SPIN_THRESHOLD) {
+                if (vw->frame != 6)
+                    vw->frame_fires++;
+                vw->spin_accum = 0;
+            }
+        } else if (!fire_held) {
+            vw->spin_accum = 0;
+        }
+
+        if ((s32)vw->frame == vw->last_fire_frame)
+            break;
+        vw->last_fire_frame = (s32)vw->frame;
+
+        /*
+         * AND IT LOOPS THE CHAINGUN'S SAMPLE. 0x80050378 loads `0x800B2B3C`,
+         * which `0x8004E248` fills from `wep_chngnl1a` — the same handle the
+         * chaingun's own loop plays. The hyperblaster's `wep_hyprbf1a` lives at
+         * `0x800B2B58` and belongs to the FIRE function, not to this arm. The
+         * name-to-slot order was read twice and agrees, so this is the retail
+         * build's behaviour rather than a mis-decode.
+         */
+        if (vw->frame == 0)
+            vw->frame_sound = Q2_WSND_CHAINGUN_LOOP;
+        else if (vw->frame == 6)
+            vw->frame_sound = Q2_WSND_HYPERBLAST_DOWN;
+
+        /* 0x800503C4 again, shared with the chaingun. */
+        if (vw->fire_latch && vw->frame == 0) {
+            vw->state = Q2_VM_IDLE;
+            vw->frame = 0;
         }
         break;
 
     case VW_HAND_GRENADE:
         /*
-         * 0x800503F0 — the COOK, and it is the one arm that does not fire.
-         * The frame is pinned at 1 and the key's remaining time GROWS by the
-         * step, so the clip cannot advance and the grenade is held primed for
-         * as long as the trigger is down. Releasing lets the clock run out and
-         * the throw plays.
+         * 0x800503DC — the COOK, and it is the one arm that does not fire.
+         *
+         * IT IS GATED ON THE MODEL'S OWN ANIMATION, which is the part that was
+         * missing: 0x800503F0 refuses to prime until viewmodel+256 has reached
+         * 380, and 380 sits inside the `Set` move's 0..470 span. So the arm has
+         * to finish bringing the grenade up out of the belt before the hold
+         * begins; until then the clip runs on and the throw happens on time
+         * whatever the trigger is doing.
+         *
+         * Once primed the position is PINNED at 380, the frame at 1, and the
+         * key's remaining time GROWS by the step, so the clip cannot advance
+         * and the grenade is held for as long as the trigger is down.
          */
-        if (fire_held) {
-            vw->frame = 1;
-            vw->left += step;
-            vw->cook  = true;
+        if (fire_held && vw->anim_pos >= Q2_VW_COOK_POSITION) {
+            vw->anim_pos = Q2_VW_COOK_POSITION;
+            vw->frame    = 1;
+            vw->left    += step;
+            vw->cook     = true;
         } else {
             vw->cook = false;
         }
@@ -381,6 +492,101 @@ static void fire_state_step(q2_viewweapon *vw, s32 step, bool fire_held)
     default:
         break;
     }
+}
+
+/* ------------------------------------------------------------------------- */
+/* The model's own named move — 0x80050454                                    */
+/* ------------------------------------------------------------------------- */
+/*
+ * The jump table at 0x800ACD34, indexed by `weapon - 3` over nine slots, with
+ * the outer test at 0x800504D4 admitting only 3, 6, 7, 8 and 11. The three arms
+ * it reaches load a 12-byte name and hand it to 0x8006D330, which is
+ * `q2_model_move_by_name` — the engine never indexes block D.
+ */
+static const char *anim_move_name(int weapon)
+{
+    switch (weapon) {
+    case 3:  return "Fire";     /* Supershot G   — 0x800505EC */
+    case 6:  return "Set";      /* HandGren G    — 0x800505AC */
+    case 7:  return "Spin";     /* GrenLaunch G  — 0x800505CC */
+    case 8:  return "Fire";     /* RockLaunch G  — 0x800505EC */
+    case 11: return "Fire";     /* Bfg G         — 0x800505EC */
+    default: return NULL;
+    }
+}
+
+/*
+ * 0x80050454's second half, run on every substep of the key loop.
+ *
+ * A move already playing advances by the step and ends when the position walks
+ * past the record's last (0x8005053C's `slt end, pos`); otherwise a key
+ * carrying event 1 in the FIRE state starts one. The state test is
+ * 0x80050508's `state != 1`, which is FIRE — an idle clip's event, if one ever
+ * carried this value, would not reach the lookup.
+ */
+static void anim_step(q2_viewweapon *vw, s32 step)
+{
+    const q2_vm_key *k;
+    const char      *name;
+    q2_model_move    mv;
+
+    if (vw->anim_end >= 0) {
+        s32 pos = (s32)vw->anim_pos + step;
+
+        if (pos > (s32)vw->anim_end) {
+            /* 0x80050548: the record is dropped, the position rewinds to the
+             * rest pose, and the two flag bits swap over. */
+            vw->anim_pos   = 0;
+            vw->anim_end   = -1;
+            vw->anim_flags = (u16)((vw->anim_flags | 1u) & ~2u);
+            return;
+        }
+        vw->anim_pos = (s16)pos;
+        return;
+    }
+
+    if (vw->state != Q2_VM_FIRE)
+        return;
+    if (vw->anim_flags & 2u)
+        return;
+
+    k = current_key(vw);
+    if (!k || k->event != 1)
+        return;
+
+    name = anim_move_name(vw->weapon);
+    if (!name || !vw->model)
+        return;
+    if (!q2_model_move_by_name(vw->model, name, &mv))
+        return;
+
+    /*
+     * BLOCK D TIMES FIVE, and the evidence is the GRENADE, not this call site.
+     *
+     * 0x80050530 stores the record's `+12` into viewmodel+256 with no scale of
+     * any kind, and openquestions #51f swept the whole image for a load-time
+     * multiply and found none — every `x5` shape is a 20-byte record stride. So
+     * the arithmetic here has no instruction behind it, and taking the numbers
+     * as written would be the defensible move if one constant did not rule it
+     * out.
+     *
+     * That constant is the 380 at 0x800503F8. The cook arm refuses to prime the
+     * hand grenade until viewmodel+256 has reached 380, and `HandGren G`'s `Set`
+     * move runs 0..94 on the disc. Unscaled the position tops out at 94 and the
+     * grenade could NEVER be cooked; the console cooks grenades. The threshold
+     * has to sit inside the move's span, which puts the scale at 4.05 or more,
+     * and five is the ratio the two documented unit systems already have — block
+     * D counts two per animation frame (#51g), the animation position counts ten
+     * (#51d). At five the span is 0..470 and 380 lands four fifths of the way
+     * through the arm coming up, which is where a prime belongs.
+     *
+     * So: the five is inferred, the inference is forced, and the thing that
+     * forces it is written down here so the next reader can attack it.
+     */
+    vw->anim_pos   = (s16)((s32)mv.start * 5);
+    vw->anim_end   = (s16)((s32)mv.end   * 5);
+    vw->anim_flags = (u16)((vw->anim_flags & ~1u) | 2u);
+    vw->anims_started++;
 }
 
 u32 q2_vw_take_frame_fires(q2_viewweapon *vw)
@@ -436,6 +642,15 @@ static bool machine_step(q2_viewweapon *vw, bool clip_done, bool fire_held,
         vw->frame      = 0;
         vw->fire_latch = false;
         swapped        = true;
+        /*
+         * 0x8004FA44. A new model in the hands starts at position 0 of its own
+         * timeline — the rest pose — with nothing playing. (0x8004FA3C is the
+         * hyperblaster's exception, and it stores the PLAYER INDEX times ten,
+         * which is zero for the only player this port draws a weapon for.)
+         */
+        vw->anim_pos   = 0;
+        vw->anim_end   = -1;
+        vw->anim_flags = 0;
         begin_key(vw);
         break;
 
@@ -526,8 +741,14 @@ bool q2_vw_advance(q2_viewweapon *vw, s32 dt, bool fire_held,
         vw->left -= step;
         dt       -= step;
 
-        /* Every substep, before the interpolation — 0x8004EF4C sits at the top
-         * of the loop body. This is what makes a chaingun spin. */
+        /*
+         * Two drivers per substep, in the original's order: the MODEL's own
+         * named move at 0x8004EF38, then the per-weapon frame driver at
+         * 0x8004EF4C. The order is load-bearing — the grenade's cook arm pins
+         * the animation position the move driver has just advanced, so running
+         * them the other way round un-pins it every substep.
+         */
+        anim_step(vw, step);
         fire_state_step(vw, step, fire_held);
 
         interpolate(vw);
@@ -737,6 +958,8 @@ u32 q2_vw_build_ot(const q2_viewweapon *vw,
                    q2_model_draw_stats *stats)
 {
     q2_model_instance inst;
+    q2_model_pose     pose[Q2_VW_POSE_MAX];
+    bool              posed = false;
     s32 origin[3];
     s32 angles[3];
     s32 angles_view[3];
@@ -759,8 +982,33 @@ u32 q2_vw_build_ot(const q2_viewweapon *vw,
     angles_view[2] =  ((aim ? aim[2] : 0) + (kick ? kick[2] : 0));
     (void)angles;
 
+    /*
+     * POSE IT, which nothing did — and an unposed model draws its vertices RAW.
+     *
+     * Every other model in the frame goes through this (entitydraw.c makes the
+     * argument at length: a part's rest transform is not the identity, and the
+     * medkits sat in the floor until it was applied). The weapon in the hands
+     * was the one model still drawn from the vertex block, so `HandGren G` —
+     * whose raw bounds are a 105-unit lump against a posed 666-unit arm — came
+     * out as a fist-sized blob under the crosshair, and `Railgun G` and `Bfg G`
+     * were short by their own rest translations.
+     *
+     * The position is the model's own timeline, held rather than failed off the
+     * end (`_held` is the engine's own behaviour: 0x8006B924 has no end test).
+     * With no named move playing it is zero, which is the rest pose.
+     */
+    if (vw->model->hdr.num_parts <= Q2_VW_POSE_MAX) {
+        q2_model_anim clip;
+        u32 within = 0;
+        u32 at = vw->anim_pos > 0 ? (u32)vw->anim_pos : 0u;
+
+        if (q2_model_anim_at_held(vw->model, at, &clip, &within, NULL) &&
+            q2_model_pose_at(vw->model, &clip, within, pose) == Q2_OK)
+            posed = true;
+    }
+
     inst.model     = vw->model;
-    inst.pose      = NULL;
+    inst.pose      = posed ? pose : NULL;
     inst.origin[0] = origin[0];
     inst.origin[1] = origin[1];
     inst.origin[2] = origin[2];
