@@ -1869,12 +1869,13 @@ static void client_creatures_tick(client *c, float dt, const s32 eye[3])
                 }
 
                 Q2_INFO("t%-4u move %-4d frame %-4d as %d flags %08X"
-                        "  pos %d,%d yaw %-5d ideal %-5d step %-4d drift %-5d"
+                        "  pos %d,%d,%d yaw %-5d ideal %-5d step %-4d drift %-5d"
                         "  %s%s%s",
                         c->trace_ticks,
                         m->currentmove ? m->currentmove->first_frame : -1,
                         m->frame, m->attack_state, m->aiflags,
-                        m->pos[0], m->pos[2], (int)m->angles[2],
+                        m->pos[0], m->pos[1], m->pos[2],
+                        (int)m->angles[2],
                         (int)m->ideal_yaw, step, drift,
                         m->enemy ? "enemy " : "no-enemy ",
                         m->dead ? "dead " : "",
