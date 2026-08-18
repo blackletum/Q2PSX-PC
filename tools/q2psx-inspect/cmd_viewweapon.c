@@ -549,6 +549,45 @@ static int render_view(disc *d, q2_vm_tables *tab, const char *map,
                        (int)cam.projection, lox, hix, loz, hiz,
                        vw.cur_t[0], vw.cur_t[1], vw.cur_t[2]);
 
+                /*
+                 * AND WHAT THAT PREDICTS ON SCREEN, against what the renderer
+                 * actually emitted.
+                 *
+                 * The walk above is this file's own model of the transform: the
+                 * clip's rotation applied to a vertex, the clip's translation
+                 * added, projected by hand with the console's `H` about the
+                 * viewport centre. The `screen` line is the bounding box of the
+                 * PRIMITIVES `q2_vw_build_ot` produced. Two independent routes
+                 * to the same number — and if they disagree, the renderer is not
+                 * doing what every argument in openquestions #46 assumes.
+                 */
+                {
+                    s32 pmin = 1 << 30, pmax = -(1 << 30);
+
+                    for (vi = 0; vi < nv; vi++) {
+                        q2_model_vertex mv;
+                        s32 p[3], vx, vz, sx;
+                        int rr;
+
+                        if (!q2_model_get_vertex(&model, vi, &mv))
+                            break;
+                        for (rr = 0; rr < 3; rr++)
+                            p[rr] = ((s32)rot[rr][0] * mv.x
+                                  + (s32)rot[rr][1] * mv.y
+                                  + (s32)rot[rr][2] * mv.z) >> Q2_FRAC_12;
+                        vx = vw.cur_t[0] + p[0];
+                        vz = vw.cur_t[2] + p[2];
+                        if (vz <= 0)
+                            continue;
+                        sx = (s32)scr.view[0].w / 2
+                           + vx * (s32)cam.projection / vz;
+                        if (sx < pmin) pmin = sx;
+                        if (sx > pmax) pmax = sx;
+                    }
+                    printf("  predicted screen x from those vertices: %d..%d\n",
+                           pmin, pmax);
+                }
+
                 if (probe_x0 < probe_x1) {
                     s32 sx0 = (s32)(probe_x0 * scr.view[0].w);
                     s32 sx1 = (s32)(probe_x1 * scr.view[0].w);

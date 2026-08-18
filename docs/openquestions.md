@@ -2514,9 +2514,24 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
       raise and idle, at key offset +6/+8/+10, which `0x8004F494`, `0x8004F508` and `0x8004F57C` confirm
       and the tool's constant check pins.
 
+      **And the renderer agrees with the model of it.** `viewweapon` now projects the weapon's vertices by
+      hand — clip rotation, clip translation, `H` about the viewport centre — and prints the box beside
+      the one taken from the primitives `q2_vw_build_ot` actually emitted. Two independent routes:
+
+          predicted from the vertices   292..1084
+          emitted by the renderer       292..665
+
+      The left edges are identical. The right differs only because the near vertices overflow the GTE's
+      divide and clamp, which is the hardware's own behaviour and not a disagreement. So the renderer does
+      what every argument here assumes it does, and the transform is not being mis-applied somewhere
+      between the model and the primitive.
+
       So the horizontal remains unattributed, with the projection centre, the field of view, the spawn,
       the animation phase, the model, the near plane, the pose, the rotation order (fixed), the camera's
-      row-0 scale, the camera composition and the identity residual all eliminated. `q2_rotation_view`'s own doc is known-stale as well: it
+      row-0 scale, the camera composition, the identity residual, the vertical camera scale (applied and
+      disproved) and the renderer's own fidelity to the transform all eliminated. **Thirteen candidates,
+      five of them applied and measured worse.** What is left has to be `t.x` or the model's own x, and
+      both are read straight off the disc. `q2_rotation_view`'s own doc is known-stale as well: it
       justifies applying the roll outermost from `RotMatrix` composing `Rz * Ry * Rx`, which it does not.
 
       That is as far as measurement can take it. `t.x` is 140 on every key of the blaster's raise and idle,
