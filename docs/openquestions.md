@@ -2435,11 +2435,38 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
       renderer draws, and the case for it rests on two immediates and no measurement. Measuring it wants a
       capture with a known camera — the same thing #46 wants — and it should be settled before, not after.
 
-      And the basis those scales multiply is built by `0x80055934` from the view's own angle triple at
-      view+12, with its own composition and its own ROUNDING: `bgez x; addiu x, x, 4095` before `sra 12`,
-      which truncates toward zero where `RotMatrix` and the port both floor. Two of its nine elements read
-      so far: `dst00 = c2*c1 - s2*s0*s1`, `dst01 = -s2*c0`. Whether it agrees with `q2_rotation_view` is
-      unread, and it is the last unexamined matrix in the chain.
+      And the basis those scales multiply, `0x80055934`, is now transcribed in full. It reads the view's
+      own angle triple at view+12 — call them 0, 1, 2 in store order — and builds
+
+          m00 = c2*c1 - s2*s0*s1     m01 = -s2*c0      m02 = c2*s1 + s2*s0*c1
+          m10 = s2*c1 + c2*s0*s1     m11 =  c2*c0      m12 = s2*s1 - c2*s0*c1
+          m20 = -c0*s1               m21 =  s0         m22 = c0*c1
+
+      with its own ROUNDING — `bgez x; addiu x, x, 4095` before `sra 12`, truncating toward zero where
+      `RotMatrix` and the port both floor. **It is orthonormal**, so there is no hidden horizontal term in
+      it, which closes the last place a scale could have been hiding.
+
+      **But it is a DIFFERENT COMPOSITION FROM `RotMatrix`, and that is the thing the port has assumed
+      away.** The console's weapon reaches the screen as
+
+          camera * entity  =  [diag(1, 2/3, 1) * basis(view angles)] * [RotMatrix(aim+kick) * clip]
+
+      The port instead makes `camera * R_place` the identity by construction and hands the model `clip`
+      alone — `test_camera_undoes_the_placement` pins exactly that. **The identity is the port's
+      invention.** Two different compositions of the same angles are not inverses of each other, so on the
+      console the product is a residual rotation, not `I`, and the weapon does not sit at view-space `t`.
+
+      At zero pitch and zero roll both collapse to a yaw about Y and the residual vanishes — which is why
+      `q2psx-inspect viewweapon` renders (pitch 0) show the identity working, and why nothing in the port
+      has ever contradicted it. **The captures are not at zero pitch.** So the residual is a candidate for
+      the 0.051 that the port's own harness structurally cannot see.
+
+      **What closing this takes** is a transcription rather than a discovery: build the camera as
+      `diag(1, vh/240, 1) * basis(view+12 angles)` with the rounding above, build the entity matrix as
+      `RotMatrix(aim+kick) * RotMatrix(clip)`, and delete the identity. Both matrices are written out
+      here. It is not done in this pass because it replaces the camera for the WORLD as well, and the case
+      for it rests on instructions with no measurement behind them — which is the same standing the 2/3
+      squash has. Both want one capture with a known camera, and both should be settled together.
 
       **So the horizontal 0.051 remains unattributed**, with the projection centre, the field of view, the
       spawn, the animation phase, the model, the near plane, the pose, the rotation order (fixed) and the
