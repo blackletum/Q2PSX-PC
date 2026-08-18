@@ -296,12 +296,53 @@ bool q2_sim_give_weapon(q2_sim *sim, int weapon_id)
     sim->combat.inv.weapons |= t->owned_bit[weapon_id];
 
     /*
-     * 0x80037E78: the pickup switches to the new weapon only when the blaster
-     * is the one in hand. Picking up a shotgun while holding a railgun does not
-     * take the railgun away.
+     * AUTOSWITCH, and it is a DEVIATION from the console rather than a fix to
+     * it — stated here so the next reader does not "correct" it back.
+     *
+     * 0x80037E78 switches to the weapon just picked up only when the BLASTER is
+     * the one in hand: take a shotgun while holding a railgun and the railgun
+     * stays. That is the disc's behaviour and it is what `autoswitch == false`
+     * still does, exactly.
+     *
+     * With it on — the default, at the owner's request — a pickup that ranks
+     * ABOVE the held weapon is taken up instead. The ranking is not invented:
+     * it is the console's own preference list at 0x8009DB7C, the same order
+     * `q2_weapon_autoselect` walks after a shot empties something, so the gun
+     * a pickup promotes you to is the gun the engine would have chosen for you
+     * anyway. Explosives are absent from that list by design (weapontables.c),
+     * which is what keeps a grenade pickup from arming a grenade in your hand.
+     *
+     * A weapon with no ammo does not win: `q2_weapon_usable` gates the walk, so
+     * picking up a railgun you cannot feed leaves you holding what you had.
      */
-    if (sim->combat.weapon_id == Q2_WID_BLASTER)
-        sim->combat.weapon_id = weapon_id;
+    if (!sim->autoswitch) {
+        if (sim->combat.weapon_id == Q2_WID_BLASTER)
+            sim->combat.weapon_id = weapon_id;
+        return true;
+    }
+
+    {
+        u32 i;
+        int rank_new = -1, rank_held = -1;
+
+        for (i = 0; i < t->autoswitch_count; i++) {
+            if (t->autoswitch[i] == weapon_id && rank_new < 0)
+                rank_new = (int)i;
+            if (t->autoswitch[i] == sim->combat.weapon_id && rank_held < 0)
+                rank_held = (int)i;
+        }
+
+        /* Off the list entirely — an explosive — is never promoted to. */
+        if (rank_new < 0)
+            return true;
+
+        /* Holding something the list does not rank (the blaster is on it, so
+         * this is an explosive in hand) means anything ranked wins. */
+        if (rank_held < 0 || rank_new < rank_held) {
+            if (q2_weapon_usable(&sim->combat.inv, weapon_id))
+                sim->combat.weapon_id = weapon_id;
+        }
+    }
 
     return true;
 }

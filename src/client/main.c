@@ -677,6 +677,8 @@ typedef struct client {
     q2_sortdata       sortdata;
     bool              sort_ready;
     bool              use_sort;     /* --sort-data: the authored draw order */
+    /* --no-autoswitch: keep the disc's rule, which only leaves the blaster. */
+    bool              no_autoswitch;
     s32               ot_range;     /* --ot-range: sweep the sort range    */
     s32               sort_cell;
 
@@ -3679,6 +3681,7 @@ static bool client_load_zone(client *c, const char *map, int index)
     c->sim[0].fire_from_input = false;
     /* Re-armed after every load, because the memset above clears it. */
     c->sim[0].trace_zone      = c->zone_trace;
+    c->sim[0].autoswitch      = !c->no_autoswitch;
     {
         s32 feet[3];
         feet[0] = c->cam.pos[0];
@@ -9239,6 +9242,7 @@ static void client_draw_view(void *user, q2_screen *s, int p,
         !c->credits_open && !c->mcard_open) {
         q2_model_instance proto;
         q2_model_draw_stats mstats;
+        q2_light_env vw_env;
         s16 aim[3], kick[3];
 
         q2_model_instance_init(&proto);
@@ -9267,6 +9271,38 @@ static void client_draw_view(void *user, q2_screen *s, int p,
          * landing on the same number.
          */
         proto.bucket_override = (s32)q2_screen_view_otz(s, p, 1);
+
+        /*
+         * AND THE WORLD LIGHTS IT, which nothing did.
+         *
+         * The gun in the hands is a model in the world's own table — that is
+         * the whole reason it is a model and not a blit — but it was the only
+         * one drawn with no light attached, so it kept `q2_model_instance`'s
+         * neutral 128 tint and came out flat: the same brightness in a dark
+         * corridor as under a lamp, while every creature and item beside it
+         * shaded. It is gathered exactly as a creature is, at the player's own
+         * position and in the cell the player stands in, so the gun and the
+         * monster three feet in front of it are lit by the same three lamps.
+         *
+         * The glow is the spawn default the entity path uses (0x80058944 stores
+         * "000", 0x30 a component), so an unlit vertex lands on a dim grey
+         * rather than pure black — the same floor creatures get.
+         */
+        if (c->lights_ready) {
+            static const u8 vw_glow[3] = { 0x30, 0x30, 0x30 };
+            q2_light_set set;
+            s32 at[3];
+
+            at[0] = c->sim[0].player[0].pos[0];
+            at[1] = q2_sim_origin_y(c->sim[0].player[0].pos[1]);
+            at[2] = c->sim[0].player[0].pos[2];
+
+            q2_light_gather(&set, &c->light_world, at,
+                            client_light_node(c, p), false);
+            q2_light_env_build(&vw_env, &set, Q2_LIGHT_ONE, Q2_LIGHT_ONE,
+                               vw_glow);
+            proto.light = &vw_env;
+        }
 
         aim[0]  = (s16)c->sim[0].player[0].pitch;
         aim[1]  = (s16)c->sim[0].player[0].yaw;
@@ -10107,6 +10143,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--watch"))                 c.watch = true;
         else if (!strcmp(argv[i], "--zone-probe"))            zone_probe = true;
         else if (!strcmp(argv[i], "--sort-data"))             c.use_sort = true;
+        else if (!strcmp(argv[i], "--no-autoswitch"))         c.no_autoswitch = true;
         else if (!strcmp(argv[i], "--ot-range") && i + 1 < argc) c.ot_range = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--zone-trace"))            c.zone_trace = true;
         else if (!strcmp(argv[i], "--fire-triggers")) {

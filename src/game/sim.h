@@ -586,6 +586,16 @@ typedef struct q2_sim {
 
     q2_move_world   move_world;
 
+    /*
+     * Take up a better weapon the moment it is picked up.
+     *
+     * ON by default and a deliberate deviation from the disc, which only
+     * switches out of the blaster (0x80037E78). False restores that rule
+     * exactly. See q2_sim_give_weapon for what "better" means — it is the
+     * console's own preference list at 0x8009DB7C, not a new one.
+     */
+    bool         autoswitch;
+
     /* Set when a zone gate fires; the caller performs the load. */
     bool         zone_change_pending;
     u32          zone_change_target;

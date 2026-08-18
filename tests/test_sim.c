@@ -1284,10 +1284,56 @@ static void test_melee_point(void)
                "a melee records who swung it");
 }
 
+/*
+ * Picking a weapon up. The disc leaves the blaster and nothing else
+ * (0x80037E78); autoswitch promotes to anything ranked higher on the console's
+ * own preference list at 0x8009DB7C, and to nothing that is not on it.
+ */
+static void test_autoswitch(void)
+{
+    q2_sim sim;
+
+    /* Off: the disc's rule, exactly. */
+    q2_sim_init(&sim, NULL, 30);
+    sim.autoswitch = false;
+    sim.combat.weapon_id = Q2_WID_BLASTER;
+    q2_sim_give_weapon(&sim, Q2_WID_SHOTGUN);
+    check_eq_i(sim.combat.weapon_id, Q2_WID_SHOTGUN,
+               "off: a pickup takes you out of the blaster");
+
+    q2_sim_init(&sim, NULL, 30);
+    sim.autoswitch = false;
+    sim.combat.weapon_id = Q2_WID_SUPER_SHOTGUN;
+    q2_sim_give_weapon(&sim, Q2_WID_SHOTGUN);
+    check_eq_i(sim.combat.weapon_id, Q2_WID_SUPER_SHOTGUN,
+               "off: holding anything else, the pickup is only stored");
+
+    /* On: a better gun is taken up, one it cannot feed is not. */
+    q2_sim_init(&sim, NULL, 30);
+    sim.combat.weapon_id = Q2_WID_BLASTER;
+    sim.combat.inv.ammo[Q2_AMMO_SHELLS] = 20;
+    q2_sim_give_weapon(&sim, Q2_WID_SHOTGUN);
+    check_eq_i(sim.combat.weapon_id, Q2_WID_SHOTGUN,
+               "on: the shotgun beats the blaster");
+
+    q2_sim_give_weapon(&sim, Q2_WID_SUPER_SHOTGUN);
+    check_eq_i(sim.combat.weapon_id, Q2_WID_SUPER_SHOTGUN,
+               "on: the super shotgun beats the shotgun on the same shells");
+
+    /* An explosive is off the list and must never be promoted to. */
+    q2_sim_init(&sim, NULL, 30);
+    sim.combat.weapon_id = Q2_WID_BLASTER;
+    sim.combat.inv.ammo[Q2_AMMO_GRENADES] = 5;
+    q2_sim_give_weapon(&sim, Q2_WID_HAND_GRENADE);
+    check_eq_i(sim.combat.weapon_id, Q2_WID_BLASTER,
+               "on: a grenade never arms itself in your hand");
+}
+
 int main(void)
 {
     printf("Q2PSX-PC simulation tests\n\n");
 
+    test_autoswitch();
     test_tick_rate();
     test_gravity();
     test_scene_lights();

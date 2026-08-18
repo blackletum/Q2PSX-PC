@@ -20,6 +20,8 @@ void q2_sim_init(q2_sim *sim, const q2_world_zone *zone, int tick_rate_hz)
     memset(sim, 0, sizeof(*sim));
     sim->zone         = zone;
     sim->current_node = -1;
+    /* On unless a caller turns it off — see the field. */
+    sim->autoswitch   = true;
     sim->player[sim->cur_player].ent.node = -1;
 
     /*
