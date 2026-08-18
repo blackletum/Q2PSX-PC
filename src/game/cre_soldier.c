@@ -611,6 +611,29 @@ const q2_cre_impl q2_cre_soldier = {
         NULL,               /*  2 search      — nor one of these         */
         soldier_walk,       /*  3 walk        */
         soldier_run,        /*  4 run         */
+        /*
+         * 5 dodge — A GAP, not a decision, and the only empty slot in this
+         * table that is one.
+         *
+         * Every other NULL here says why it is empty: the module installs no
+         * idle and no search, and a soldier has no melee. This one said
+         * nothing, which read as the same thing and is not. The header above
+         * records that the spawn function writes "exactly id's seven callbacks
+         * in id's order, with melee explicitly zeroed" — and id's seven are
+         * stand, walk, run, DODGE, attack, melee and sight. A soldier that
+         * cannot dodge is one of the seven behaviours short.
+         *
+         * What it owes: `soldier_dodge` rolls out on 3/4 of calls, adopts its
+         * attacker as an enemy if it has none, and then splits by skill — a
+         * skill-0 soldier only ducks, higher skills choose between ducking and
+         * attack3, and it sets `pausetime` from the incoming shot's eta. That
+         * needs the duck move, the attack3 move, a `pausetime` field and a
+         * caller: nothing currently invokes slot 5 at all, so installing the
+         * handler alone would change nothing.
+         *
+         * Left undone rather than half-done, and named so it is not mistaken
+         * for finished work.
+         */
         NULL,               /*  5 dodge       */
         soldier_attack,     /*  6 attack      */
         NULL,               /*  7 melee       — a soldier has none       */
