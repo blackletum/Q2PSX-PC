@@ -286,15 +286,22 @@ static void soldier_fire8(q2_monster *s) { soldier_fire(s, 7); }
  */
 static u8 soldier_skin(const q2_monster *m)
 {
+    u8 base;
+
     switch (m->pop_class_id) {
-    case 19: return 0;      /* blaster    */
-    case 18: return 2;      /* shotgun    */
-    case 20: return 4;      /* machinegun */
-    default: break;
+    case 19: base = 0; break;   /* blaster    */
+    case 18: base = 2; break;   /* shotgun    */
+    case 20: base = 4; break;   /* machinegun */
+    default:
+        /* A Soldier placed from a row this build does not know: the module's
+         * own fall-through is the last arm. */
+        base = 4;
+        break;
     }
-    /* A Soldier placed from a row this build does not know: the module's own
-     * fall-through is the last arm. */
-    return 4;
+
+    /* And the wounded half of the pair once the pain handler has set the low
+     * bit — see q2_monster.hurt. */
+    return m->hurt ? (u8)(base | 1u) : base;
 }
 
 /*
@@ -466,20 +473,66 @@ static void soldier_pain(q2_monster *self)
 {
     s32 r;
 
+    /*
+     * BLOODIED AT HALF HEALTH, and this is `skinnum |= 1` — not a state
+     * change. The port wrote `attack_state = Q2_AS_STRAIGHT` here, which is a
+     * different field entirely: it told the AI to charge straight at its enemy
+     * every time it was hurt, and left the skin clean for the rest of the
+     * creature's life. Soldiers that should have been backing off and turning
+     * bloody instead walked at you unmarked.
+     */
     if (self->health < self->max_health / 2)
-        self->attack_state = Q2_AS_STRAIGHT;   /* the module flips the skin */
+        self->hurt = true;
+
+    /*
+     * THE DEBOUNCE, which the port did not have at all.
+     *
+     * Three seconds on the class's own clock, 30 of the 10 Hz AI ticks. Every
+     * hit re-entered the flinch from its first frame without it, so a soldier
+     * held under automatic fire never advanced past pose one and never
+     * returned to running — it stood still being shot, which is most of "the
+     * soldier AI is broken".
+     *
+     * A hit taken WHILE the debounce is running is not simply ignored: one
+     * that throws the body upward hard enough promotes an ordinary flinch to
+     * PAIN4, the off-its-feet one. +Y is down here, so "upward" is a large
+     * NEGATIVE vertical velocity.
+     */
+    if (q2_level_state.time < self->pain_debounce) {
+        if (self->velocity[1] < -1200 && self->currentmove &&
+            (self->currentmove->first_frame == SOL_PAIN1 ||
+             self->currentmove->first_frame == SOL_PAIN2 ||
+             self->currentmove->first_frame == SOL_PAIN3))
+            q2_cre_set_move(self, SOL_PAIN4);
+        return;
+    }
+
+    self->pain_debounce = q2_level_state.time + 30;
 
     sol_play(self, SOL_SND_PAIN);
 
+    /*
+     * NO FLINCH ON THE HARDEST SKILL. The sound still plays and the skin still
+     * turns; the animation is what is skipped, which is what makes skill 3
+     * soldiers keep firing through damage instead of being staggered out of
+     * every attack.
+     */
+    if (g_skill == 3)
+        return;
+
+    /*
+     * A THREE-WAY SPLIT, not four. PAIN4 is reachable only through the
+     * promotion above — it is the knocked-off-its-feet animation and a plain
+     * hit never selects it. Splitting four ways gave it to a quarter of all
+     * hits, so soldiers were constantly being thrown about by rifle fire.
+     */
     r = sol_rand();
-    if (r < 8192)
+    if (r < 10813)
         q2_cre_set_move(self, SOL_PAIN1);
-    else if (r < 16384)
+    else if (r < 21626)
         q2_cre_set_move(self, SOL_PAIN2);
-    else if (r < 24576)
-        q2_cre_set_move(self, SOL_PAIN3);
     else
-        q2_cre_set_move(self, SOL_PAIN4);
+        q2_cre_set_move(self, SOL_PAIN3);
 }
 
 /* soldier_die — module+0x22F8 */

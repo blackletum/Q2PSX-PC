@@ -318,6 +318,26 @@ typedef struct q2_monster {
     /* --- animation ------------------------------------------------------- */
     s16 frame;              /* +0x38                                         */
     s32 next_think;         /* +0x90  on the 10 Hz AI clock                  */
+
+    /*
+     * The pain handler's own clock, on the same 10 Hz tick as `next_think`.
+     *
+     * A monster shot twice in a frame must not restart its flinch twice, and
+     * without this every hit of a burst re-entered the pain move from frame
+     * zero — a soldier under machinegun fire never advanced past the first
+     * pose and never got back to running. Three seconds is the interval the
+     * class uses, which is 30 of these ticks.
+     */
+    s32 pain_debounce;
+
+    /*
+     * BLOODIED. `skinnum |= 1` at half health: every class ships its skins in
+     * pairs, clean on the even index and wounded on the odd one, and the pain
+     * handler sets the low bit rather than choosing a skin. Kept as a flag
+     * because the base index is derived from the class row per creature
+     * (soldier_skin), so the two cannot be folded into one stored number.
+     */
+    bool hurt;
     void (*think)(struct q2_monster *m);   /* +0x94 — M_MoveFrame when awake */
 
     /* --- targeting ------------------------------------------------------- */
