@@ -2421,12 +2421,30 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
       the row-0 scale one would get by reading `vw` as the viewport width. It is not the viewport width.
       A number that good is worth writing down and worth not believing.
 
-      **What is still open**, then: 0.051 of the picture width, horizontal, with the camera's own scale
-      eliminated as the cause. Two threads left that have not been pulled — what `a2` is at
-      `0x800779C4` and whether the basis at view+192 that `0x80055934` builds is orthonormal, since a
-      non-orthonormal basis would carry a horizontal term the rotation analysis assumes away.
-      `q2_rotation_view`'s own doc is also known-stale: it justifies applying the roll outermost from
-      `RotMatrix` composing `Rz * Ry * Rx`, which it does not.
+      **Both scales are now settled from immediates.** `vw` is the 320 at `0x800779BC`, and `vh` is the
+      **160** at `0x80077948` — the same store the screen check already validates as "projection distance,
+      and the 2D height". So the console's camera is
+
+          diag(320/320, 160/240, 1) * basis  =  diag(1, 2/3, 1) * basis
+
+      — **no horizontal scale, and a two-thirds vertical squash the port does not have.** That is a proven
+      divergence in its own right and it is bigger than the weapon: it is the whole game's vertical field
+      of view. At `H` 160 over a 248-line viewport the port's vertical half-angle is `atan(124/160)`,
+      giving the 75.6° FIDERITY §11 quotes; with the squash it is `atan(124/160 / (2/3))`, giving 98.6°.
+      **It is recorded and NOT applied**, because the difference between those two is every frame the
+      renderer draws, and the case for it rests on two immediates and no measurement. Measuring it wants a
+      capture with a known camera — the same thing #46 wants — and it should be settled before, not after.
+
+      And the basis those scales multiply is built by `0x80055934` from the view's own angle triple at
+      view+12, with its own composition and its own ROUNDING: `bgez x; addiu x, x, 4095` before `sra 12`,
+      which truncates toward zero where `RotMatrix` and the port both floor. Two of its nine elements read
+      so far: `dst00 = c2*c1 - s2*s0*s1`, `dst01 = -s2*c0`. Whether it agrees with `q2_rotation_view` is
+      unread, and it is the last unexamined matrix in the chain.
+
+      **So the horizontal 0.051 remains unattributed**, with the projection centre, the field of view, the
+      spawn, the animation phase, the model, the near plane, the pose, the rotation order (fixed) and the
+      camera's row-0 scale all eliminated. `q2_rotation_view`'s own doc is known-stale as well: it
+      justifies applying the roll outermost from `RotMatrix` composing `Rz * Ry * Rx`, which it does not.
 
       That is as far as measurement can take it. `t.x` is 140 on every key of the blaster's raise and idle,
       `ApplyMatrix` is `(M·v) >> 12` with the shift at `0x8006FE08`, `view * R_place == I` is pinned by a
