@@ -6318,9 +6318,23 @@ static void client_input_simulated(client *c, float dt)
 
         c->cam.roll = (s16)(cur & 0xFFF);
     } else {
-        c->cam.yaw    = view[1];
-        c->cam.pitch  = view[0];
-        c->cam.roll   = view[2];
+        /*
+         * THE PLAIN ANGLES. The kick does NOT reach the camera.
+         *
+         * `screen.h` records why, from the other side: "the wobble is ANGULAR
+         * and it moves the VIEW WEAPON, not the camera — 0x80038260 has exactly
+         * one caller, 0x8004F404", which is the weapon's own angle sum. A
+         * function with one caller cannot also be shaking the view.
+         *
+         * This used to hand the camera `q2_sim_view_angles`, which is that same
+         * kick summed into the player's aim — so the port shook the WORLD where
+         * the console shakes the GUN. Firing moved the horizon; taking damage
+         * tilted the level. The weapon is given the kick instead, at the site
+         * that draws it.
+         */
+        c->cam.yaw    = c->sim[0].player[0].yaw;
+        c->cam.pitch  = c->sim[0].player[0].pitch;
+        c->cam.roll   = c->sim[0].player[0].roll;
     }
 
     /*
@@ -9493,12 +9507,34 @@ static void client_draw_view(void *user, q2_screen *s, int p,
             proto.light = &vw_env;
         }
 
-        aim[0]  = (s16)c->sim[0].player[0].pitch;
-        aim[1]  = (s16)c->sim[0].player[0].yaw;
-        aim[2]  = (s16)c->sim[0].player[0].roll;
-        kick[0] = c->sim[0].combat.kick[0];
-        kick[1] = c->sim[0].combat.kick[1];
-        kick[2] = c->sim[0].combat.kick[2];
+        /*
+         * THE KICK THE WEAPON GETS IS THE DECAYED ONE, and it was the raw
+         * amplitude.
+         *
+         * `0x8004F40C` sums the player's aim with what `0x80038260` RETURNS,
+         * and that function is three blocks each scaling a stored amplitude by
+         * how much of its own period is left — firing over 30 ticks, damage
+         * over 150, landing over 90. `q2_sim_view_angles` is that function
+         * transcribed. `combat.kick` is the STORED amplitude those blocks scale,
+         * not their result: feeding it here gave the weapon a kick that never
+         * decayed and was at full strength the moment it was set.
+         *
+         * So the kick is taken as the difference between the summed angles and
+         * the plain ones, which is exactly the three contributions and nothing
+         * else.
+         */
+        {
+            s32 summed[3];
+
+            q2_sim_view_angles(&c->sim[0], summed);
+
+            aim[0]  = (s16)c->sim[0].player[0].pitch;
+            aim[1]  = (s16)c->sim[0].player[0].yaw;
+            aim[2]  = (s16)c->sim[0].player[0].roll;
+            kick[0] = (s16)(summed[0] - c->sim[0].player[0].pitch);
+            kick[1] = (s16)(summed[1] - c->sim[0].player[0].yaw);
+            kick[2] = (s16)(summed[2] - c->sim[0].player[0].roll);
+        }
 
         q2_vw_build_ot(&c->vw, &proto,
                        c->sim[0].player[0].pos, c->sim[0].player[0].view_height,
