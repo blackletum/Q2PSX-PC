@@ -487,6 +487,9 @@ typedef struct client {
     double            ai_accum;       /* seconds owed to the 10 Hz AI clock    */
     u32               ai_thoughts;
     u32               cre_swings, cre_shots;   /* hook invocations */
+    /* Fire reports asked for; misses land in cre_sound_missing beside the
+     * creature voices. See client_cre_fire. */
+    u32               cre_fire_sounds;
     u32               cre_sounds;
     u32               cre_sound_missing;
     u32               cre_sound_unnamed;  /* the play site resolved to no name */
@@ -1692,6 +1695,59 @@ static void client_cre_fire(q2_monster *m, int flash, void *user)
      * the honest approximation, stated rather than hidden.
      */
     c->cre_shots++;
+
+    /*
+     * THE MUZZLE FLASH AND THE REPORT, neither of which a creature had.
+     *
+     * `soldier_fire` hands over a (table, flash) pair and this took the damage
+     * out of it and dropped everything else, so a guard shooting at you was
+     * silent and unlit — the only clue you were under fire was your own health
+     * falling. The player's shot raises both (simcombat.c); a creature's shot
+     * is the same event seen from the other end and raises the same two.
+     *
+     * The light is the ENGINE's muzzle flash, not one invented here:
+     * Q2_MUZZLE_LIGHT_* and the radii `q2_weapon_muzzle_light` rolls are what
+     * the player's own gun uses. It goes at the ENTITY ORIGIN — the console
+     * passes entity+0x54 for the player's, and `m->pos` already is that for a
+     * monster, which is the one place a creature does not need the feet-to-
+     * origin correction.
+     *
+     * The report is the module's own handle: index 9 `wep_shotgf1b` for a
+     * shotgun guard, 8 `wep_machgf1b` for a machinegun guard. The blaster
+     * guard gets neither, and that is not an omission — its module registers no
+     * fire sound at all, because the bolt it throws carries its own.
+     */
+    if (c->lights_ready) {
+        static const u8 flash[3] = { Q2_MUZZLE_LIGHT_R, Q2_MUZZLE_LIGHT_G,
+                                     Q2_MUZZLE_LIGHT_B };
+        s32 inner, outer;
+
+        q2_weapon_muzzle_light(q2_rng_next(&c->sim[0].combat.rng),
+                               &inner, &outer);
+        q2_light_add_dynamic(&c->light_world, m->pos, flash, inner, outer, 0, 0);
+    }
+
+    {
+        const char *report = (table == 1) ? q2_cre_soldier_sound_name(9)
+                           : (table == 2) ? q2_cre_soldier_sound_name(8)
+                           : NULL;
+        q2_vag vag;
+
+        /*
+         * Asked for by name and CHECKED, because "it plays a sound" is the
+         * easiest claim in this file to make falsely: client_play_sound_at
+         * returns false with no audio device, which is every headless run, so
+         * a bare call proves nothing. A name the bank does not carry is
+         * counted rather than swallowed.
+         */
+        if (report) {
+            if (client_find_sound(c, report, &vag))
+                client_play_sound_at(c, report, m->pos);
+            else
+                c->cre_sound_missing++;
+            c->cre_fire_sounds++;
+        }
+    }
 
     while (shots-- > 0) {
         if (!q2_visible(m, &c->creatures.sight))
@@ -8041,13 +8097,15 @@ static void client_write_shot(client *c, bool numbered)
         }
         Q2_INFO("  creatures %u live, %u hunting, %u drawn (%u faces), "
                 "nearest %d units, moved %ld, player %d hp, "
-                "%u swings %u shots, %u sounds (%u not in bank, %u unnamed), %u dead, "
+                "%u swings %u shots (%u fire reports), %u sounds (%u not in bank, "
+                "%u unnamed), %u dead, "
                 "%ld hp total, "
                 "player attacked %u, targets %u, bolts %u (%u faces, %u dropped "
                 "on a full pool), %u bodies, "
                 "rot %u steps %u moved %u turned, %u calls",
                 live, hunting, c->cre_drawn, c->cre_faces, near_d, moved,
                 c->sim[0].combat.inv.health, c->cre_swings, c->cre_shots,
+                c->cre_fire_sounds,
                 c->cre_sounds, c->cre_sound_missing, c->cre_sound_unnamed,
                 dead, hp,
                 c->player_attacks,
