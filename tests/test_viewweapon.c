@@ -806,6 +806,55 @@ static void test_grenade_cook_waits_for_the_arm(void)
     CHECK(!vw.cook, "releasing the trigger throws it");
 }
 
+
+/*
+ * `RotMatrix` is Ry * Rx * Rz — 0x80089E38, element by element.
+ *
+ * Five of its nine entries are a single product, which makes them unambiguous
+ * and worth pinning by their store address. Under the Rz * Ry * Rx this used to
+ * build, none of the five holds unless the roll is zero — and the view weapon's
+ * clip rotation carries all three angles at once, the blaster's idle being
+ * (2078, 2110, 1985). So this test fails on a revert, which is the point: the
+ * order was wrong for a year because the only caller at the time turned one
+ * axis at a time and could not see it.
+ */
+static void test_rotmatrix_order(void)
+{
+    static const s32 tri[][3] = {
+        { 2078, 2110, 1985 },   /* the blaster's idle, all three large */
+        {  700, 1300, 2900 },
+        { -512,  900, 3000 },
+        {    0, 1024,    0 }    /* one axis: every order agrees here */
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(tri) / sizeof(tri[0]); i++) {
+        s16 m[3][3];
+        s32 rx = tri[i][0], ry = tri[i][1], rz = tri[i][2];
+        s32 sx = q2_sin12(rx), cx = q2_cos12(rx);
+        s32 sy = q2_sin12(ry), cy = q2_cos12(ry);
+        s32 sz = q2_sin12(rz), cz = q2_cos12(rz);
+
+        q2_rotation_euler(m, rx, ry, rz);
+
+        CHECK(m[1][2] == (s16)(-sx),
+              "0x80089F0C m12 = -sin(x): got %d want %d (case %u)",
+              m[1][2], (int)(s16)(-sx), (unsigned)i);
+        CHECK(m[0][2] == (s16)((sy * cx) >> 12),
+              "0x80089F20 m02 = sy*cx: got %d want %d (case %u)",
+              m[0][2], (int)(s16)((sy * cx) >> 12), (unsigned)i);
+        CHECK(m[1][0] == (s16)((sz * cx) >> 12),
+              "0x80089FAC m10 = sz*cx: got %d want %d (case %u)",
+              m[1][0], (int)(s16)((sz * cx) >> 12), (unsigned)i);
+        CHECK(m[1][1] == (s16)((cz * cx) >> 12),
+              "0x80089FCC m11 = cz*cx: got %d want %d (case %u)",
+              m[1][1], (int)(s16)((cz * cx) >> 12), (unsigned)i);
+        CHECK(m[2][2] == (s16)((cy * cx) >> 12),
+              "0x80089F34 m22 = cy*cx: got %d want %d (case %u)",
+              m[2][2], (int)(s16)((cy * cx) >> 12), (unsigned)i);
+    }
+}
+
 /* ------------------------------------------------------------------------- */
 int main(void)
 {
@@ -828,6 +877,7 @@ int main(void)
     test_machinegun_accumulator_resets();
     test_hyperblaster_loop();
     test_grenade_cook_waits_for_the_arm();
+    test_rotmatrix_order();
 
     if (g_fail == 0)
         printf("test_viewweapon: all checks passed\n");

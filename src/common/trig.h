@@ -61,15 +61,25 @@ void q2_rotation_yaw_pitch(s16 m[3][3], s32 yaw, s32 pitch);
 
 /*
  * Three Euler angles to a 1.3.12 rotation matrix, in libgte `RotMatrix`'s form:
- * R = Rz(rz) * Ry(ry) * Rx(rx), angles on the 4096-step circle.
+ * **R = Ry(ry) * Rx(rx) * Rz(rz)**, angles on the 4096-step circle.
  *
  * This is what the zone draw builds from a rotating node's runtime object
- * (0x800678B8 calls RotMatrix at 0x80089E38 on the object's +0x0C triple).
+ * (0x800678B8 calls RotMatrix at 0x80089E38 on the object's +0x0C triple), and
+ * what the VIEW WEAPON builds its clip rotation with.
  *
- * The composition order is unobservable on this disc: the rotation integrator
- * at 0x8002F1A8 stores to obj[0x0C + 2*axis] and nothing ever clears the other
- * two slots, so exactly one angle is non-zero and the three orders agree. It is
- * spelled out here so the general case is defined rather than accidental.
+ * THE ORDER HERE WAS WRONG, and the reason it survived is worth keeping. This
+ * said `Rz * Ry * Rx` and justified not checking: "the composition order is
+ * unobservable on this disc — the rotation integrator at 0x8002F1A8 stores to
+ * obj[0x0C + 2*axis] and nothing ever clears the other two slots, so exactly
+ * one angle is non-zero and the three orders agree." That is true, for a
+ * ROTATING BRUSH. It stopped being true when the view weapon became a caller:
+ * a clip's rotation carries all three angles at once — the blaster's idle is
+ * (2078, 2110, 1985) — and the two orders agree only when the roll is zero.
+ * An argument that a difference cannot be seen is only as good as the list of
+ * things looking, and that list grew.
+ *
+ * 0x80089E38 is now transcribed element by element rather than inferred from
+ * two of its nine; trig.c names the store address of each.
  */
 void q2_rotation_euler(s16 m[3][3], s32 rx, s32 ry, s32 rz);
 

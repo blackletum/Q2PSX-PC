@@ -2363,6 +2363,37 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
       **about 120 view-space units**: the console places the grip near x 260 where the port places it at
       the 140 the disc's key holds.
 
+      **AND THE 120 UNITS WERE THE ROTATION ORDER.** `RotMatrix` at `0x80089E38`, transcribed element by
+      element rather than inferred from two of its nine, composes **Ry(y) · Rx(x) · Rz(z)**:
+
+          m00 =  cy*cz + sy*sx*sz   0x8008A014      m10 =  sz*cx   0x80089FAC
+          m01 = -cy*sz + sy*sx*cz   0x8008A044      m11 =  cz*cx   0x80089FCC
+          m02 =  sy*cx              0x80089F20      m12 = -sx      0x80089F0C
+          m20 = -sy*cz + cy*sx*sz   0x8008A0B8      m21 =  sy*sz + cy*sx*cz   0x8008A08C
+          m22 =  cy*cx              0x80089F34
+
+      `q2_rotation_euler` built **Rz · Ry · Rx**, and its own header said not to worry: "the composition
+      order is unobservable on this disc — the rotation integrator at `0x8002F1A8` stores to
+      `obj[0x0C + 2*axis]` and nothing ever clears the other two slots, so exactly one angle is non-zero
+      and the three orders agree." **That was true for a ROTATING BRUSH and stopped being true the moment
+      the view weapon became a caller.** A clip's rotation carries all three angles at once — the
+      blaster's idle is (2078, 2110, 1985), a half circle either side — and the two orders agree only when
+      the roll is zero. An argument that a difference cannot be seen is only as good as the list of things
+      looking, and that list grew without the argument being revisited.
+
+      Measured against the capture, before and after:
+
+          port before   cx 0.5605   offset/width 3.10
+          port after    cx 0.5869   offset/width 4.94
+          console       cx 0.6383   offset/width 5.21
+
+      `tests/test_viewweapon.c::test_rotmatrix_order` pins the five single-product entries by their store
+      addresses, so a revert fails.
+
+      **What is still open is the remaining 0.051 of the picture width.** It is a quarter of what it was,
+      it survives the idle sweep (the port's emitter ranges 0.5869..0.5996 against the console's 0.6383),
+      and it is no longer attributable to anything read so far.
+
       That is as far as measurement can take it. `t.x` is 140 on every key of the blaster's raise and idle,
       `ApplyMatrix` is `(M·v) >> 12` with the shift at `0x8006FE08`, `view * R_place == I` is pinned by a
       test, and the block at `0x8004F644` that could have carried a lateral offset is a zero vector. The

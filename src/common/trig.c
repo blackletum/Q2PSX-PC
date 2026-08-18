@@ -127,24 +127,48 @@ void q2_rotation_euler(s16 m[3][3], s32 rx, s32 ry, s32 rz)
     s32 sy = q2_sin12(ry), cy = q2_cos12(ry);
     s32 sz = q2_sin12(rz), cz = q2_cos12(rz);
 
-    /* R = Rz * Ry * Rx, expanded so each entry costs at most two 1.3.12
-     * products. Written out rather than composed from three matrices because
-     * the intermediate rounding of a composed form differs from the original's
-     * and this is meant to match it. */
-    s32 sxsy = ((s64)sx * sy) >> Q2_FRAC_12;
-    s32 cxsy = ((s64)cx * sy) >> Q2_FRAC_12;
+    /*
+     * R = Ry * Rx * Rz, WHICH IS NOT WHAT THIS USED TO BUILD.
+     *
+     * `RotMatrix` at 0x80089E38 was transcribed element by element and it
+     * composes Ry(y) * Rx(x) * Rz(z):
+     *
+     *     m00 =  cy*cz + sy*sx*sz     0x8008A014
+     *     m01 = -cy*sz + sy*sx*cz     0x8008A044
+     *     m02 =  sy*cx                0x80089F20
+     *     m10 =  sz*cx                0x80089FAC
+     *     m11 =  cz*cx                0x80089FCC
+     *     m12 = -sx                   0x80089F0C
+     *     m20 = -sy*cz + cy*sx*sz     0x8008A0B8
+     *     m21 =  sy*sz + cy*sx*cz     0x8008A08C
+     *     m22 =  cy*cx                0x80089F34
+     *
+     * This built Rz * Ry * Rx, and the note above it said the order was
+     * "unobservable on this disc" because the rotation integrator writes one
+     * axis and leaves the other two at zero. That was TRUE FOR ROTATING
+     * BRUSHES and false the moment the VIEW WEAPON started calling it: a clip's
+     * rotation has all three angles large — the blaster's idle is
+     * (2078, 2110, 1985), a half circle either side — and the two orders agree
+     * only when the roll is zero. Nobody re-checked when the caller changed.
+     *
+     * The intermediate `>> 12` roundings are the original's own: it forms
+     * `sy*sx` and `cy*sx` once each, shifts, and multiplies those by sz and cz
+     * — a two-step rounding a single fused product would not reproduce.
+     */
+    s32 sysx = (sy * sx) >> Q2_FRAC_12;      /* 0x80089FD8 */
+    s32 cysx = (cy * sx) >> Q2_FRAC_12;      /* 0x8008A050 */
 
-    m[0][0] = (s16)(((s64)cz * cy) >> Q2_FRAC_12);
-    m[0][1] = (s16)((((s64)cz * sxsy) >> Q2_FRAC_12) - (((s64)sz * cx) >> Q2_FRAC_12));
-    m[0][2] = (s16)((((s64)cz * cxsy) >> Q2_FRAC_12) + (((s64)sz * sx) >> Q2_FRAC_12));
+    m[0][0] = (s16)(((cy * cz) >> Q2_FRAC_12) + ((sysx * sz) >> Q2_FRAC_12));
+    m[0][1] = (s16)(((sysx * cz) >> Q2_FRAC_12) - ((cy * sz) >> Q2_FRAC_12));
+    m[0][2] = (s16)((sy * cx) >> Q2_FRAC_12);
 
-    m[1][0] = (s16)(((s64)sz * cy) >> Q2_FRAC_12);
-    m[1][1] = (s16)((((s64)sz * sxsy) >> Q2_FRAC_12) + (((s64)cz * cx) >> Q2_FRAC_12));
-    m[1][2] = (s16)((((s64)sz * cxsy) >> Q2_FRAC_12) - (((s64)cz * sx) >> Q2_FRAC_12));
+    m[1][0] = (s16)((sz * cx) >> Q2_FRAC_12);
+    m[1][1] = (s16)((cz * cx) >> Q2_FRAC_12);
+    m[1][2] = (s16)(-sx);
 
-    m[2][0] = (s16)(-sy);
-    m[2][1] = (s16)(((s64)cy * sx) >> Q2_FRAC_12);
-    m[2][2] = (s16)(((s64)cy * cx) >> Q2_FRAC_12);
+    m[2][0] = (s16)(((cysx * sz) >> Q2_FRAC_12) - ((sy * cz) >> Q2_FRAC_12));
+    m[2][1] = (s16)(((sy * sz) >> Q2_FRAC_12) + ((cysx * cz) >> Q2_FRAC_12));
+    m[2][2] = (s16)((cy * cx) >> Q2_FRAC_12);
 }
 
 void q2_quat_to_matrix(s16 m[3][3], const s16 q[4])
