@@ -2467,21 +2467,26 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
       values reaching 4096 — half a unit an element, which is the difference between truncating toward
       zero and flooring and nothing else. `q2_rotation_view` is right, and the camera needed no change.
 
-      **The residual is real, and it is RULED OUT as the cause.** With the camera identified, the console's
-      `camera * RotMatrix(aim+kick)` can be evaluated directly. At pitch 0 it is the identity to a unit —
-      the grip lands at (140, 161, 43) against the port's (140, 161, 44) — so the port's assertion holds
-      exactly where every `viewweapon` render sits. It does NOT hold off zero: the grip's DEPTH collapses
-      from 44 to 13 at pitch 60 and grows to 98 at pitch −120, while x stays at 140. So the identity is
-      still the port's invention and still wrong away from level, which deserves its own fix.
+      **THE IDENTITY IS THE CONSOLE'S AFTER ALL, and the way that was settled is worth more than the
+      answer.** Evaluating `camera * RotMatrix(aim+kick)` on the assumption that the camera's angle triple
+      is the weapon's produces a residual: the identity at pitch 0, and off it a grip whose DEPTH collapses
+      from 44 to 13 at pitch 60 and grows to 98 at pitch −120. That looked like a real divergence, so it
+      was IMPLEMENTED — `q2_vw_place` rewritten as `RotMatrix(ang)` applied forward, `q2_vw_build_ot` as
+      `MulMatrix(view, clip)` with no cancellation, both tests rewritten to match.
 
-      But it cannot produce the measured 0.051. Applying the residual to the port's emitter at
-      (92, 89, 474) across pitch: the horizontal reaches the capture's 0.6383 only near pitch ±300, and at
-      those pitches the vertical lands at cy 1.6 — off the bottom of the frame — while the capture has the
-      weapon at 0.6508, which is the port's own value. **No single pitch reproduces both coordinates.**
-      The residual couples x and y; the discrepancy moves x alone.
+      **The renderer falsified it in one frame.** Looking up, the arm stretches across the screen; looking
+      down, the weapon leaves the frame entirely. No version of this game does that. So
+      `camera * RotMatrix(view angles) == I` on the console, and the port's construction is right.
 
-      So transcribing the composition would change behaviour off level on real evidence, and would NOT
-      close the 0.051. Those are two separate jobs and only the first has a case.
+      The premise was the error. The mapping search found `basis(-pitch, -yaw, +roll)` matching
+      `q2_rotation_view(yaw, pitch, roll)` — **note the negated yaw and pitch**. The camera's triple at
+      view+12 is the INVERSE convention of the weapon's `aim + kick`, which is precisely what makes the
+      cancellation exact. Evaluating the product with the same signs on both sides was comparing a matrix
+      with itself rather than with its inverse.
+
+      So: the identity is confirmed rather than invented, it is not a divergence, and it is not the 0.051.
+      Reverted, with the disproof recorded here so the next reader does not re-derive the residual and
+      believe it.
 
       **So the horizontal 0.051 remains unattributed**, with the projection centre, the field of view, the
       spawn, the animation phase, the model, the near plane, the pose, the rotation order (fixed) and the
