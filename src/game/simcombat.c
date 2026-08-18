@@ -684,6 +684,45 @@ void q2_sim_combat_tick(q2_sim *sim)
                 q2_ent_light_at(&sim->ent_world.events, a->origin, energy,
                                 Q2_ENERGY_LIGHT_INNER, Q2_ENERGY_LIGHT_OUTER);
         }
+
+        /*
+         * AND THEN THE TIMER RUNS DOWN, which nothing did.
+         *
+         * `q2_mod_effect_timer` is a TIMER and its only writer sets it; no path
+         * anywhere decremented it. So the first energy hit an actor took left
+         * `effect[1]` at full strength for the rest of the level, and the green
+         * light raised above followed that actor from then on, permanently.
+         *
+         * On the player that is the reported fault. Soldiers fire energy bolts,
+         * so the player is hit within seconds of any fight, and from that moment
+         * a 1300-unit pure-green light (0,255,0) is parked on them. Creatures
+         * gather the dynamic list FIRST and rank by brightness, so any monster
+         * that walks near the player has its whole colour matrix replaced by
+         * that one light — measured, cell 128 handed a soldier `L0 0,3206,0`
+         * with nothing else active, which is a monster dyed green rather than
+         * tinted. The map itself carries no such lamp: of BASE1's 254 lights,
+         * 248 are mixed, six are pure red and NONE is pure green.
+         *
+         * Every slot is run down rather than just the one the light reads,
+         * because they are all the same kind of field — a per-modifier
+         * countdown at entity+0x2F0..0x2F4 — and leaving the others latched
+         * would only move the same bug to whichever one is read next.
+         */
+        {
+            u32 s;
+            for (s = 0; s < sizeof(sim->combat.self.effect); s++)
+                if (sim->combat.self.effect[s])
+                    sim->combat.self.effect[s]--;
+
+            for (t = 0; t < sim->world_target_count; t++) {
+                q2_actor *a = sim->world_targets ? sim->world_targets[t] : NULL;
+                if (!a)
+                    continue;
+                for (s = 0; s < sizeof(a->effect); s++)
+                    if (a->effect[s])
+                        a->effect[s]--;
+            }
+        }
     }
 
     for (i = 0; i < Q2_PROJ_MAX; i++) {

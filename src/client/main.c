@@ -3809,6 +3809,35 @@ static bool client_load_zone(client *c, const char *map, int index)
             c->lights_ready = true;
             Q2_INFO("lights: %u in the map, %u index entries",
                     c->lights.count, c->spacelights.count);
+
+            /*
+             * The colours the map actually ships, because a creature lit
+             * entirely green is either standing under a green lamp or being
+             * handed one that is not there. A histogram of pure single-channel
+             * records answers that without arguing about any one of them: real
+             * level lighting is tinted, and a chunk full of (0,255,0) is a
+             * decode fault wearing a lamp's clothes.
+             */
+            if (c->zone_trace) {
+                u32 li, pure_r = 0, pure_g = 0, pure_b = 0, grey = 0, mixed = 0;
+
+                for (li = 0; li < c->lights.count; li++) {
+                    q2_light lt;
+                    if (!q2_light_get(&c->lights, li, &lt))
+                        continue;
+                    if (!lt.r && lt.g && !lt.b)      pure_g++;
+                    else if (lt.r && !lt.g && !lt.b) pure_r++;
+                    else if (!lt.r && !lt.g && lt.b) pure_b++;
+                    else if (lt.r == lt.g && lt.g == lt.b) grey++;
+                    else                             mixed++;
+                    if (li < 8)
+                        Q2_INFO("[lamp] %2u rgb %3u,%3u,%3u type %u radius %u",
+                                li, lt.r, lt.g, lt.b, lt.type, lt.radius);
+                }
+                Q2_INFO("[lamp] %u pure red, %u pure GREEN, %u pure blue, "
+                        "%u grey, %u mixed, of %u",
+                        pure_r, pure_g, pure_b, grey, mixed, c->lights.count);
+            }
         }
 
         /*
@@ -7366,6 +7395,12 @@ static void client_entity_events(client *c)
              * inner to give, and the projectile's is the sane default. */
             s32 inner = ev->e[i].inner_radius ? ev->e[i].inner_radius
                                               : Q2_PROJ_LIGHT_INNER;
+
+            if (c->zone_trace)
+                Q2_INFO("[dyn] glow %3u,%3u,%3u at (%d,%d,%d) r %d/%d",
+                        ev->e[i].glow[0], ev->e[i].glow[1], ev->e[i].glow[2],
+                        ev->e[i].pos[0], ev->e[i].pos[1], ev->e[i].pos[2],
+                        inner, ev->e[i].radius);
 
             if (!c->lights_ready ||
                 !q2_light_add_dynamic(&c->light_world, ev->e[i].pos,
