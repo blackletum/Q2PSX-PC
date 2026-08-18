@@ -9007,6 +9007,24 @@ static void client_draw_view(void *user, q2_screen *s, int p,
                 q2_light_env_build(&cre_env, &set, Q2_LIGHT_ONE,
                                    Q2_LIGHT_ONE, cre_glow);
                 inst.light = &cre_env;
+
+                /*
+                 * The colour matrix a creature is actually lit by, because
+                 * "the monsters are green" is a claim about nine numbers and
+                 * none of them were ever printed. Column j is light j; rows are
+                 * red, green and blue.
+                 */
+                if (c->zone_trace && (c->frame_index % 60) == 0)
+                    Q2_INFO("[light] cre %u cell %d active %u"
+                            "  L0 %d,%d,%d  L1 %d,%d,%d  L2 %d,%d,%d"
+                            "  back %d,%d,%d", i, (int)cell, cre_env.active,
+                            cre_env.colour.m[0][0], cre_env.colour.m[1][0],
+                            cre_env.colour.m[2][0],
+                            cre_env.colour.m[0][1], cre_env.colour.m[1][1],
+                            cre_env.colour.m[2][1],
+                            cre_env.colour.m[0][2], cre_env.colour.m[1][2],
+                            cre_env.colour.m[2][2],
+                            cre_env.back[0], cre_env.back[1], cre_env.back[2]);
             }
             inst.origin[0]     = m->pos[0];
             /*
