@@ -5,6 +5,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* 1.0.12 one — the hyperblaster's barrel at rest, 0x8004FCD8. */
+#define VW_HYPER_RAMP_ONE  4096
+
+/* The part 0x8004FED0 hands 0x8006D43C, in its `a2`. */
+#define VW_HYPER_BARREL_PART 6
+
 /* ------------------------------------------------------------------------- */
 /* Keys                                                                       */
 /* ------------------------------------------------------------------------- */
@@ -111,6 +117,7 @@ void q2_vw_init(q2_viewweapon *vw, const q2_vm_tables *tab, int weapon)
     memset(vw, 0, sizeof(*vw));
     vw->frame_sound = -1;
     vw->anim_end    = -1;
+    vw->hyper_ramp  = VW_HYPER_RAMP_ONE;
     vw->tab     = tab;
     vw->weapon  = (weapon >= 0 && weapon < Q2_VM_SLOTS) ? weapon : 0;
     vw->pending = vw->weapon;
@@ -589,6 +596,72 @@ static void anim_step(q2_viewweapon *vw, s32 step)
     vw->anims_started++;
 }
 
+/* ------------------------------------------------------------------------- */
+/* The hyperblaster's barrel — 0x8004FC78                                     */
+/* ------------------------------------------------------------------------- */
+/*
+ * A third driver, called once per substep beside the other two (0x8004F270)
+ * and gated on weapon 9 and nothing else — 0x8004FCB8 returns immediately for
+ * every other weapon.
+ *
+ * The four fire-frame arms behind the jump table at 0x800ACD1C all compute the
+ * same shape, `base - 40 * (duration - left + 2)`, with a different base each:
+ * 4096, 3296, 2096, 1296 for frames 1, 2, 3 and 4. Frame 6 is a straight
+ * `(left << 12) / duration`, seeded to 4096 on the substep the key starts.
+ * Frames 0, 5 and everything from 7 write nothing, and neither does any state
+ * but FIRE and IDLE — so a raise or a lower holds whatever the last shot left
+ * the barrel at, which is what makes the spin carry across the clip boundary.
+ *
+ * `duration` here is the key's STORED duration (`lh 12(v0)` reads the key, not
+ * the viewmodel's clock), so a jittered key would divide by a different number
+ * than it counts down — no fire clip carries jitter, so it never arises.
+ */
+static void hyper_ramp_step(q2_viewweapon *vw)
+{
+    const q2_vm_key *k;
+    s32 dur, elapsed;
+
+    if (vw->weapon != VW_HYPERBLASTER)
+        return;
+
+    if (vw->state == Q2_VM_IDLE) {
+        vw->hyper_ramp = VW_HYPER_RAMP_ONE;      /* 0x8004FCD8 */
+        return;
+    }
+    if (vw->state != Q2_VM_FIRE)
+        return;                                   /* 0x8004FCD0 holds it */
+
+    k = current_key(vw);
+    if (!k)
+        return;
+
+    dur = k->duration;
+    if (dur <= 0)
+        return;
+
+    /* 0x8004FD3C…0x8004FD50: the elapsed term is `duration - left + 2`, and
+     * the two is the original's, not a rounding. */
+    elapsed = dur - vw->left + 2;
+
+    switch (vw->frame) {
+    case 1: vw->hyper_ramp = (s16)(4096 - 40 * elapsed); break;
+    case 2: vw->hyper_ramp = (s16)(3296 - 40 * elapsed); break;
+    case 3: vw->hyper_ramp = (s16)(2096 - 40 * elapsed); break;
+    case 4: vw->hyper_ramp = (s16)(1296 - 40 * elapsed); break;
+
+    case 6:
+        /* 0x8004FE44: the first substep of the key seeds it at one, and after
+         * that it is the key's own remaining fraction. */
+        if (vw->left == dur)
+            vw->hyper_ramp = VW_HYPER_RAMP_ONE;
+        vw->hyper_ramp = (s16)((vw->left << 12) / dur);
+        break;
+
+    default:
+        break;                                    /* 0, 5 and 7 upward hold */
+    }
+}
+
 u32 q2_vw_take_frame_fires(q2_viewweapon *vw)
 {
     u32 n;
@@ -750,6 +823,7 @@ bool q2_vw_advance(q2_viewweapon *vw, s32 dt, bool fire_held,
          */
         anim_step(vw, step);
         fire_state_step(vw, step, fire_held);
+        hyper_ramp_step(vw);
 
         interpolate(vw);
 
@@ -1005,6 +1079,31 @@ u32 q2_vw_build_ot(const q2_viewweapon *vw,
         if (q2_model_anim_at_held(vw->model, at, &clip, &within, NULL) &&
             q2_model_pose_at(vw->model, &clip, within, pose) == Q2_OK)
             posed = true;
+
+        /*
+         * AND THE HYPERBLASTER'S BARREL, which is the pose plus one patched
+         * field — 0x8006D43C.
+         *
+         * The console walks to part 6's key in the model's own animation and
+         * overwrites the low eleven bits of its packed rotation word with
+         * `(ramp & 0xFFF) >> 1`, leaving the other two Euler half-angles
+         * alone (its `a2` and `a3` arrive as -1 and the two `bltz` tests skip
+         * their stores). It can write there because the model is in RAM; here
+         * the word is read back out and re-decoded into this instance's own
+         * pose, which draws the same barrel without touching the bank.
+         */
+        if (posed && vw->weapon == VW_HYPERBLASTER &&
+            VW_HYPER_BARREL_PART < vw->model->hdr.num_parts) {
+            u32 rot;
+
+            if (q2_model_part_rotation_word(vw->model, &clip, within,
+                                            VW_HYPER_BARREL_PART, &rot)) {
+                u32 half = ((u32)(u16)vw->hyper_ramp & 0xFFFu) >> 1;
+
+                rot = (rot & ~0x7FFu) | half;
+                q2_model_key_rotation(rot, pose[VW_HYPER_BARREL_PART].q);
+            }
+        }
     }
 
     inst.model     = vw->model;

@@ -657,6 +657,61 @@ int cmd_viewweapon(disc *d, const char *weapon, const char *out,
     }
 
     /* ------------------------------------------------------------------ */
+    /*
+     * The hyperblaster's barrel — 0x8004FC78, the only animation on the disc
+     * driven by writing to key data rather than by choosing a frame.
+     *
+     * Driven against the disc's own clips, because the arithmetic is four
+     * constants and a divide and is not the interesting half. What is worth
+     * checking is that the frames those constants belong to are REACHED: the
+     * ramp only moves on fire frames 1..4 and 6, and if the clip never sat on
+     * one the barrel would stand still whatever the formula said.
+     */
+    printf("\nthe hyperblaster's barrel\n");
+    {
+        q2_viewweapon vw;
+        int  tick;
+        s16  lo = 4096, hi = 0;
+        int  moved = 0;
+        s16  prev;
+
+        q2_vw_init(&vw, &t, 9);
+        for (tick = 0; tick < 400 && vw.state != Q2_VM_IDLE; tick++)
+            q2_vw_advance(&vw, 12, false, Q2_VW_FIRED);
+
+        printf("  idle holds the barrel at one                  %5d  %s\n",
+               (int)vw.hyper_ramp,
+               vw.hyper_ramp == 4096 ? "ok" : "MISMATCH");
+        g_total++;
+        if (vw.hyper_ramp != 4096) failed++;
+
+        prev = vw.hyper_ramp;
+        for (tick = 0; tick < 300; tick++) {
+            q2_vw_advance(&vw, 6, true, Q2_VW_FIRED);
+            if (vw.state != Q2_VM_FIRE)
+                continue;
+            if (vw.hyper_ramp < lo) lo = vw.hyper_ramp;
+            if (vw.hyper_ramp > hi) hi = vw.hyper_ramp;
+            if (vw.hyper_ramp != prev) moved++;
+            prev = vw.hyper_ramp;
+        }
+
+        printf("  a held trigger turns it: %4d..%-4d over %3d steps  %s\n",
+               (int)lo, (int)hi, moved, moved > 0 ? "ok" : "NO");
+        g_total++;
+        if (moved == 0) failed++;
+
+        /* The four bases are 4096, 3296, 2096 and 1296 and the step is forty a
+         * tick, so a run that reaches the lower frames has to come down well
+         * past half — a ramp that only ever sits near one is a driver that is
+         * being called and never landing on a frame that writes. */
+        printf("  and reaches the lower bases                   %5d  %s\n",
+               (int)lo, lo < 2096 ? "ok" : "MISMATCH");
+        g_total++;
+        if (lo >= 2096) failed++;
+    }
+
+    /* ------------------------------------------------------------------ */
     /* Placement: the weapon must sit at the eye, and must move with it.   */
     printf("\nplacement\n");
     {

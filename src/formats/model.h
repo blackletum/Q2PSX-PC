@@ -705,6 +705,22 @@ bool q2_model_position_for_move(const q2_model *m, const char *move_name,
 #define Q2_MODEL_POS_PER_MOVE_FRAME 30
 
 /*
+ * Decode one packed rotation word into a quaternion — `0x800699E8`.
+ *
+ * Exposed because one caller has to CHANGE a field of the word before it is
+ * decoded rather than take the pose as authored; see
+ * `q2_model_part_rotation_word` and `src/game/viewweapon.c`.
+ */
+void q2_model_key_rotation(u32 r, s16 out[4]);
+
+/*
+ * The raw packed rotation word of one part at `tick`, for the same caller.
+ * Uniform clips only; false for a variable-rate clip, which has no single word.
+ */
+bool q2_model_part_rotation_word(const q2_model *m, const q2_model_anim *clip,
+                                 u32 tick, u32 part, u32 *out);
+
+/*
  * Decode every part's pose at `frame` of `clip` into `out`, which must hold
  * num_parts entries.
  *

@@ -269,6 +269,25 @@ typedef struct q2_viewweapon {
      * posed [-43 -82 -418]..[248 118 125]: unposed it is a fist-sized lump
      * instead of an arm.
      */
+    /*
+     * And the hyperblaster's own, which is a different mechanism again —
+     * 0x8004FC78, called once per substep and gated on weapon 9 alone.
+     *
+     * It drives a 1.0.12 ramp into combat+152 and hands it to 0x8006D43C, which
+     * walks to PART 6's key in the model's animation and overwrites the low
+     * eleven bits of its packed rotation word — the first Euler half-angle — in
+     * place. That is the barrel turning, and it is the only animation on the
+     * disc driven by patching key data rather than by choosing a frame.
+     *
+     * The ramp is exact: 4096 while IDLE, and over fire frames 1..4 it counts
+     * down from 4096, 3296, 2096 and 1296 by forty per elapsed tick
+     * (0x8004FD18 and its three siblings, each `(duration - left + 2) * 40`).
+     * Frame 6 is `(left << 12) / duration`, and frames 0, 5 and 7 upward leave
+     * it standing. Nothing but IDLE and those frames writes it, so a raise or a
+     * lower holds whatever the last shot left.
+     */
+    s16         hyper_ramp;      /* combat +152, 1.0.12                      */
+
     s16         anim_pos;        /* +256, the position on the model timeline */
     s16         anim_end;        /* the playing move's last position, -1 idle */
     u16         anim_flags;      /* +258: bit 1 playing, bit 0 has played     */

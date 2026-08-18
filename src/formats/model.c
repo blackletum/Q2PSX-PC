@@ -641,7 +641,7 @@ static void key_translation(u32 t, s16 out[3])
  * circle — which is why they only need to span half of it — and 0x800699E8
  * turns them into a quaternion with the textbook Euler products.
  */
-static void key_rotation(u32 r, s16 out[4])
+void q2_model_key_rotation(u32 r, s16 out[4])
 {
     s32 ha = (s32)(r & 0x7FF);
     s32 hb = (s32)((r >> 11) & 0x3FF) * 2;   /* stored at half resolution */
@@ -729,6 +729,51 @@ static bool rate_nibble(const q2_model *m, u32 rate, u32 end, u32 index, u32 *ou
     return true;
 }
 
+/*
+ * The raw packed rotation word of one part, which `q2_model_pose_at` would
+ * decode — for the one caller that has to change a field of it before it is
+ * decoded.
+ *
+ * That caller is the hyperblaster. `0x8006D43C` walks to the same key this
+ * function does and OVERWRITES bits of the packed word in place, then leaves
+ * the ordinary pose path to read it back; the engine can do that because the
+ * model lives in writable RAM. Nothing here writes to a loaded model, so the
+ * word is handed out instead and the caller re-decodes its own copy.
+ *
+ * UNIFORM CLIPS ONLY (`flags` bit 0 clear), which is what the one caller has:
+ * a variable-rate clip interpolates between two keys and there is no single
+ * word to hand back.
+ */
+bool q2_model_part_rotation_word(const q2_model *m, const q2_model_anim *clip,
+                                 u32 tick, u32 part, u32 *out)
+{
+    u32 begin, end, entry, keys, duration;
+
+    if (!m || !clip || !out || part >= m->hdr.num_parts)
+        return false;
+    if (clip->flags & 1)
+        return false;
+    if (!anim_span(m, &begin, &end))
+        return false;
+
+    duration = (u32)clip->frames * Q2_MODEL_TICKS_PER_FRAME;
+    if (duration < Q2_MODEL_TICKS_PER_FRAME)
+        return false;
+    if (tick > duration - Q2_MODEL_TICKS_PER_FRAME)
+        tick = duration - Q2_MODEL_TICKS_PER_FRAME;
+
+    entry = clip->offset + 8 + (tick / Q2_MODEL_TICKS_PER_FRAME) * 4;
+    if (entry + 4 > end)
+        return false;
+
+    keys = entry + q2_rd_u16(m->base + entry + 2);
+    if (keys + (size_t)m->hdr.num_parts * 8 > end)
+        return false;
+
+    *out = q2_rd_u32(m->base + keys + (size_t)part * 8 + 4);
+    return true;
+}
+
 q2_result q2_model_pose_at(const q2_model *m, const q2_model_anim *clip,
                            u32 tick, q2_model_pose *out)
 {
@@ -769,7 +814,7 @@ q2_result q2_model_pose_at(const q2_model *m, const q2_model_anim *clip,
         for (part = 0; part < m->hdr.num_parts; part++) {
             const u8 *k = m->base + keys + (size_t)part * 8;
             key_translation(q2_rd_u32(k), out[part].t);
-            key_rotation(q2_rd_u32(k + 4), out[part].q);
+            q2_model_key_rotation(q2_rd_u32(k + 4), out[part].q);
         }
         return Q2_OK;
     }
@@ -838,14 +883,14 @@ q2_result q2_model_pose_at(const q2_model *m, const q2_model_anim *clip,
 
         if (pos == span) {
             key_translation(q2_rd_u32(kb), out[part].t);
-            key_rotation(q2_rd_u32(kb + 4), out[part].q);
+            q2_model_key_rotation(q2_rd_u32(kb + 4), out[part].q);
             continue;
         }
 
         key_translation(q2_rd_u32(ka), t0);
-        key_rotation(q2_rd_u32(ka + 4), q0);
+        q2_model_key_rotation(q2_rd_u32(ka + 4), q0);
         key_translation(q2_rd_u32(kb), t1);
-        key_rotation(q2_rd_u32(kb + 4), q1);
+        q2_model_key_rotation(q2_rd_u32(kb + 4), q1);
 
         /* Rounded division, as the original's (pos*4096 + span/2) / span. */
         scale = (s32)((pos * (u32)Q2_ONE_12 + span / 2) / span);
