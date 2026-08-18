@@ -88,4 +88,15 @@ void psx_raster_ot(psx_framebuffer *fb,
  * what makes the geometry pipeline testable before there is a client. */
 q2_result psx_fb_write_ppm(const psx_framebuffer *fb, const char *path);
 
+
+/*
+ * The GPU drops a primitive whose vertices are further apart than this — 1023
+ * horizontally, 511 vertically. Named because it is a hardware rule with a
+ * visible consequence rather than a clamp of convenience: it is what stops a
+ * near-plane-clamped face, whose far vertex the GTE has saturated to the screen
+ * coordinate limit, from being smeared across the frame. See psx_raster_prim.
+ */
+#define PSX_PRIM_MAX_SPAN_X 1023
+#define PSX_PRIM_MAX_SPAN_Y 511
+
 #endif /* Q2PSX_RASTER_H */

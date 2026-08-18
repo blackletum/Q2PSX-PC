@@ -275,7 +275,40 @@ static void raster_triangle(psx_framebuffer *fb,
      * takes `> 0`. Applied AFTER the winding normalisation above, because the
      * swap changes which edge is which.
      */
+    /*
+     * THE UV RANGE THIS PRIMITIVE IS ALLOWED TO SAMPLE, and why it has to be
+     * bounded rather than cast.
+     *
+     * The interpolation below is `(w0*u0 + w1*u1 + w2*u2) / area` in integers.
+     * The barycentric weights are exact only on the vertices; everywhere else
+     * the truncating divide lands the result up to a texel outside the range the
+     * three corners span, and the result was then cast straight to `u8`.
+     *
+     * Both halves of that are visible. One texel over an edge samples whatever
+     * is packed NEXT TO this face's texture in the same 256x256 page, which is
+     * the stitching along every seam. And the cast WRAPS: a `tu` of 256 becomes
+     * 0 and a -1 becomes 255, so a face whose UVs sit against a page boundary
+     * jumps to the far side of the page and picks up an unrelated texture
+     * entirely. On the blaster that is the emitter's orange arriving as speckles
+     * across the body, which is how this was spotted.
+     *
+     * The hardware does neither. Its texture coordinate unit walks a fixed-point
+     * accumulator between the primitive's own endpoints — the artefacts it has
+     * are sub-texel swim and the affine warp above, not a jump into a different
+     * texture — so clamping to the corners' own range is the faithful bound as
+     * well as the correct one. Hoisted out of the pixel loop: it is a property
+     * of the triangle.
+     */
     {
+        int umin = a->u < b->u ? (a->u < c->u ? a->u : c->u)
+                               : (b->u < c->u ? b->u : c->u);
+        int umax = a->u > b->u ? (a->u > c->u ? a->u : c->u)
+                               : (b->u > c->u ? b->u : c->u);
+        int vmin = a->v < b->v ? (a->v < c->v ? a->v : c->v)
+                               : (b->v < c->v ? b->v : c->v);
+        int vmax = a->v > b->v ? (a->v > c->v ? a->v : c->v)
+                               : (b->v > c->v ? b->v : c->v);
+
         int bias0 = edge_is_top_left(b, c) ? 0 : -1;
         int bias1 = edge_is_top_left(c, a) ? 0 : -1;
         int bias2 = edge_is_top_left(a, b) ? 0 : -1;
@@ -305,6 +338,10 @@ static void raster_triangle(psx_framebuffer *fb,
                  * This is the warp, and it is intentional. */
                 tu = (w0 * a->u + w1 * b->u + w2 * c->u) / area;
                 tv = (w0 * a->v + w1 * b->v + w2 * c->v) / area;
+
+                /* Bounded by this primitive's own corners — see above. */
+                if (tu < umin) tu = umin; else if (tu > umax) tu = umax;
+                if (tv < vmin) tv = vmin; else if (tv > vmax) tv = vmax;
 
                 if (!sample_texture(vram, prim->tpage, prim->clut,
                                     (u8)tu, (u8)tv, &tr, &tg, &tb))
@@ -591,6 +628,56 @@ void psx_raster_prim(psx_framebuffer *fb,
          * where it belongs in the buffer. */
         v[i].x += opts->ofs_x;
         v[i].y += opts->ofs_y;
+    }
+
+    /*
+     * THE GPU'S OWN SIZE LIMIT, and it is what keeps a near-plane smear off the
+     * screen without anything having to test for one.
+     *
+     * The hardware does not draw a polygon whose vertices are more than 1023
+     * apart horizontally or 511 apart vertically — it drops the primitive
+     * silently. That is not an optimisation to skip: it is the rule that makes
+     * the console's picture clean while its GTE is clamping near vertices to the
+     * screen coordinate limits.
+     *
+     * `gte_divide` raises its overflow when the projection distance reaches twice
+     * the depth, returns the clamped 0x1FFFF, and `gte_push_sxy` saturates the
+     * result to +/-1024. A face with one vertex out there and the rest in frame
+     * spans the whole buffer, and drawing it paints a bright sliver with the
+     * texture smeared along it. On the view weapon — whose grip sits 44 units
+     * from the eye — that was a dashed orange bar above the blaster and orange
+     * streaks down its edges, the emitter's texels stretched across faces that
+     * should never have been rasterised.
+     *
+     * The port already got the first half of this right for the right reason:
+     * the executable contains no `cfc2 rX, $31`, so the game never tests the
+     * overflow and cannot be discarding these faces itself. It does not need to.
+     * The GPU discards them.
+     */
+    /*
+     * POLYGONS ONLY. A rectangle's extent is a width/height field in its packet,
+     * not a pair of independent vertices, so it cannot express a span past the
+     * limit and the rule has nothing to say about it — the drawing area clips it
+     * instead. Applying the span test to tiles as well drops a legitimately
+     * oversized one, which is exactly what test_screen builds to check that the
+     * viewport's clip rectangle holds.
+     */
+    if (prim->kind == PSX_PRIM_F3  || prim->kind == PSX_PRIM_FT3 ||
+        prim->kind == PSX_PRIM_G3  || prim->kind == PSX_PRIM_GT3 ||
+        prim->kind == PSX_PRIM_F4  || prim->kind == PSX_PRIM_FT4 ||
+        prim->kind == PSX_PRIM_G4  || prim->kind == PSX_PRIM_GT4) {
+        int lox = v[0].x, hix = v[0].x, loy = v[0].y, hiy = v[0].y;
+        int n = (prim->kind == PSX_PRIM_F3  || prim->kind == PSX_PRIM_FT3 ||
+                 prim->kind == PSX_PRIM_G3  || prim->kind == PSX_PRIM_GT3) ? 3 : 4;
+
+        for (i = 1; i < n; i++) {
+            if (v[i].x < lox) lox = v[i].x;
+            if (v[i].x > hix) hix = v[i].x;
+            if (v[i].y < loy) loy = v[i].y;
+            if (v[i].y > hiy) hiy = v[i].y;
+        }
+        if (hix - lox > PSX_PRIM_MAX_SPAN_X || hiy - loy > PSX_PRIM_MAX_SPAN_Y)
+            return;
     }
 
     switch (prim->kind) {
