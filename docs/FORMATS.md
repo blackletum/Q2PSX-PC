@@ -2361,7 +2361,12 @@ So it is a **stop point**, and the frame carrying that number is not shown. The 
 | --- | --- | --- | --- | --- | --- |
 | `Intro FMV` | QFMV `0x80100958` | `TAKE1BP.STX` | 1281 | 1,283 | 1,280 |
 | `Extro FMV` | QFMV `0x801009CC` | `OUTRO1P.STX` | 1500 | 1,559 | **1,499** |
-| attract reel | QFRONT `0x8010D5F8` | `ROGUEINP.STX` | 2457 | 2,459 | 2,456 |
+| opening reel | QFRONT `0x80101D4C` | `ROGUEINP.STX` | 2457 | 2,459 | 2,456 |
+
+**This table used to give the reel's call site as `0x8010D5F8`, and that address is dead code.** It is the
+same `play("ROGUEINP.STX", 2457, ...)` and nothing else, and it has zero references in all 118 KB of the
+module — an earlier build's entry point left in the image. The live call is inside `0x80101CD0`, which is
+the difference between a film that plays on the title screen and a film that plays when you start a game.
 
 The outro is cut by **59 frames — 2.4 seconds that are on the disc and are never seen.** The remaining
 three arguments are not timing: `0x10000` is the size in bytes of each of the two VLC buffers, allocated
@@ -2375,9 +2380,22 @@ and calls the player with whichever filename matches, which is why one directory
 
 `ROGUEINP.STX` is named by **no** movie-table record, and cannot be: the record's filename field is twelve
 bytes and `"ROGUEINP.STX"` needs thirteen with its terminator. It is a bare literal at QFRONT's
-`module+0xDC4`, reached when a store at `module+0x12D90` counts below zero — the title screen idling into
-the attract reel. That store is zero in the module image and the countdown at `0x80101CF4` is its only
-reader and only writer in all 118 KB, so **the threshold is not recoverable from this disc.**
+`module+0xDC4`, reached when the store at `module+0x12D90` counts below zero.
+
+**And that store is not an idle timer — it is armed by the difficulty menu.** `0x80101E4C` writes 150 into
+it *in a delay slot* eight instructions below its own `lui`, which is why a scan pairing a `lui` with a
+nearby load or store found only the reader and recorded the threshold as unrecoverable. Its callers are
+`0x8010D380`, `0x8010D3A8` and `0x8010D3D4` — the EASY, MEDIUM and HARD records at `module+0xEFE4`,
+`+0xEFFC` and `+0xF014`. Each stores its skill into `engine+0x366` and calls it; it arms the 150, hides the
+five title objects `module+0x12B20` names, and installs `0x80101CD0` as the page hook. 150 of the console's
+1/300 s units is **half a second**, so the reel is the opening of a new game with a short beat in front of
+it, and when the film ends the same function puts up `"STARTING"` / `"GAME"` and calls `engine+0x494(1)`.
+
+The **attract loop is a different store and plays no film at all.** `module+0x12DC0` is parked with 9000
+(thirty seconds) by the title page builder `0x8010CEE0` and counted down by the page hook `0x8010C6AC`,
+which resets it whenever `engine+0x2AC` reports a pad. At zero it calls `0x80101B08`, which hides the same
+five objects, puts up the one-row page `"DEMO OF GAME"` (`module+0xC`) and hands off — a demo of the game,
+not a cinematic.
 
 ### 6.6 Writing one
 

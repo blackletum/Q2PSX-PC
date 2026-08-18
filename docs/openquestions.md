@@ -7,9 +7,11 @@ every unit boundary and its mission screen, and ends on `Extro FMV` — the leve
 `QFMV` — playing `OUTRO1P.STX` (#121, #124). Every conformance command the harness carries passes over the
 whole disc, and 29 of 29 tests pass.
 
-**And the cinematics are wired the way the disc wires them (#124, #125).** A new game opens on `Intro FMV`, which
-is the SAME map under its other name; the title screen idles into `ROGUEINP.STX`, the third film, which no
-movie-table record can name because its filename needs thirteen bytes and the field is twelve. All three run
+**And the cinematics are wired the way the disc wires them (#124, #125, #126).** A new game opens on the front
+end's own reel, `ROGUEINP.STX` — half a second after a difficulty is confirmed, which is what #126 finally
+read out of a store whose writer sits in a delay slot — and then on `Intro FMV`, which is the SAME map under
+its other name. The third film is named by no movie-table record because its filename needs thirteen bytes
+and the field is twelve. All three run
 to the stop point their module passes the player — the outro is cut at frame **1,500 of 1,559** — and there
 is now an ENCODER, which is the strictest check a format reading can be put to: 400 re-encoded frames decode
 exactly, satisfy their own `bs_num_codes`, and rebuild the disc's own 7,712 sectors byte for byte.
@@ -2003,10 +2005,10 @@ item records at run time instead of transcribing a table, so there is nothing to
       neutral pair, which agrees with the engine only for entities at full size. It shows here because the
       logo's own think moves that field: shrunk onto a sub-page it is lit at a quarter.
 
-      *Still open on the front end:* the **attract loop**. `module+0xCEE0` parks 9000 (30 s at 1/300) in
+      *Read in full by #126:* the **attract loop**. `module+0xCEE0` parks 9000 (30 s at 1/300) in
       `module+0x12DC0` and installs `module+0xC6AC` as the page hook; any input resets it and zero calls
-      `0x80101B08`. That is what the `DEMO OF GAME` / `STARTING` pair in the string pool is for, and the
-      port does not have it.
+      `0x80101B08`, which puts up `DEMO OF GAME` and plays no film. The `STARTING` half of that string pair
+      belongs to the OTHER countdown — the one the difficulty menu arms, which is the opening reel.
 
       **The thread to pull is the module's engine vtable**, and it is worth writing down because every
       `LevelBin` reaches the engine the same way — `QMULTI.C` included. A module holds the block at its own
@@ -8116,10 +8118,10 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       to `EndMission 5` like every other unit, because `Extro FMV` was a name with nothing behind it. It has
       something behind it now.
 
-      **4. `ROGUEINP.STX` is the attract reel, and it is named by no movie-table record because it CANNOT
-      be.** The record's filename field is twelve bytes and `"ROGUEINP.STX"` is twelve characters, so there
-      is nowhere for its terminator to go. It is a bare literal at QFRONT's `module+0xDC4`, played from a
-      per-frame state handler at `0x80101CD0` that counts a store down by the frame delta:
+      **4. `ROGUEINP.STX` is named by no movie-table record because it CANNOT be.** The record's filename
+      field is twelve bytes and `"ROGUEINP.STX"` is twelve characters, so there is nowhere for its
+      terminator to go. It is a bare literal at QFRONT's `module+0xDC4`, played from a per-frame state
+      handler at `0x80101CD0` that counts a store down by the frame delta:
 
           80101CF4  lhu  v0, 0x2D90(a0)     ; the idle store
           80101D00  subu v0, v0, v1         ; ...minus the frame delta
@@ -8128,10 +8130,13 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
           80101D38  addiu a1, zero, 2457
           80101D4C  jal   0x8010B2EC        ; play it
 
-      The title screen idling into the intro reel, which is what a PlayStation front end does. **The
-      THRESHOLD is not recoverable**: `module+0x12D90` is zero in the module image and those two instructions
-      are its only reader and its only writer in all 118 KB. The port picks thirty seconds and says so at the
-      constant; everything else about the reel is the module's.
+      This entry then called that "the title screen idling into the intro reel, which is what a PlayStation
+      front end does", and declared **the THRESHOLD not recoverable**: *"`module+0x12D90` is zero in the
+      module image and those two instructions are its only reader and its only writer in all 118 KB."*
+      **BOTH CLAIMS ARE WRONG AND #126 IS WHERE THEY FALL.** The store has a writer — 150, in a delay slot —
+      and the writer is called from the three difficulty records, so the film is a new game's opening and the
+      threshold is half a second. The title screen's own idle is a different store entirely and reaches no
+      film at all.
 
       Also found on the way: **QDUMMY and QMAGINTR carry a DIFFERENT, EARLIER build of the shared module** —
       `TAKE1B.STX`, `ROGUEIN1.STX`, `OUTRO1.STX`, unsuffixed, and a third record where the shipped module has
@@ -8170,3 +8175,58 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       parity — computed with the address bytes zeroed, which is Mode 2's rule and not Mode 1's. The check is
       not the specification, it is the disc: recomputing all **7,712 sectors of `TAKE1BP.STX`**, 964 of them
       Form 2, returns the four and 276 bytes already there in every single one.
+
+- [x] 126. **The third film was never the attract reel, and the reason it looked like one is the whole
+      lesson: a store whose only visible instruction is its READER reads as a variable nobody sets.**
+
+      `ROGUEINP.STX` had been wired to a thirty-second idle on the title screen, with the threshold
+      recorded as unrecoverable because "`module+0x12D90` is zero in the module image and the countdown at
+      `0x80101CF4` is its only reader and only writer in all 118 KB" (#124). Both halves of that were wrong,
+      and each was wrong in a way the other hid.
+
+      **There is a writer, and it is in a DELAY SLOT** eight instructions below its own `lui`:
+
+          80101E50  lui   v0, 0x8011
+          80101E54  addiu v1, zero, 150
+          80101E6C  jal   0x80103414
+          80101E70  sh    v1, 11664(v0)      ; -> module+0x12D90, in the delay slot
+
+      A scan that pairs a `lui` with a nearby load or store finds the reader in `0x80101CD0` and stops. The
+      pairing is the bug: MIPS puts the store after the branch it belongs to, so the two can be arbitrarily
+      far apart in listing order and still be one statement.
+
+      **And the writer has callers.** `0x80101E4C` is called from `0x8010D380`, `0x8010D3A8` and
+      `0x8010D3D4` — the EASY, MEDIUM and HARD records at `module+0xEFE4`, `+0xEFFC` and `+0xF014`, whose
+      addresses were already written down in this file. Each stores its skill into `engine+0x366` and calls
+      it; it arms the 150, hides the five title objects `module+0x12B20` names, and installs the countdown
+      as the page hook. **150 of the console's 1/300 s units is half a second**, so the film is the opening
+      of a NEW GAME with a short beat in front of it — and when it ends, the same function puts up the
+      two-row page `"STARTING"` / `"GAME"` (`module+0x1C`, `module+0x28`) and calls `engine+0x494(1)`.
+
+      That hand-off is what the outer state machine turns into the intro FMV, two steps out:
+
+          8001863C  addiu v0, zero, 12       ; game state 12
+          80018650  sw    v0, 10836(at)      ; -> 0x800B2A54, "play the intro"
+          80018B00  jal   0x800417F8         ; writes "Intro FMV" / "Default" and state 6
+
+      **So a new game opens on TWO films**, the front end's reel and then QFMV's `TAKE1BP.STX`, and only
+      then on the first map. Measured end to end headless: skill confirmed, 2,456 frames of reel, the
+      hand-off, 1,280 frames of intro, then BASE0 with its ten creatures and its help-computer text.
+
+      **The attract loop was a DIFFERENT STORE all along, and it plays no film.** `module+0x12DC0` is parked
+      with 9000 by the title page builder `0x8010CEE0` and counted down by the page hook `0x8010C6AC`, which
+      resets it whenever `engine+0x2AC` reports a pad. At zero it calls `0x80101B08` — which hides the same
+      five objects, installs the one-row page `"DEMO OF GAME"` (`module+0xC`) and hands off. Thirty seconds
+      is real, the reset on input is real, and what waits at the end of it is a demo of the game, which this
+      port has no player for. Its countdown is therefore gone from the client rather than pointed at the
+      wrong film, and this replaces the *"still open on the front end"* note under #113.
+
+      **One more thing this cost, and it is the part worth carrying.** `docs/FORMATS.md` gave the reel's
+      call site as `0x8010D5F8`. That address is a four-instruction function that plays `ROGUEINP.STX` with
+      the same five arguments and **has zero references in the whole module** — an earlier build's entry
+      point, left in the image, sitting a few hundred bytes from the difficulty handlers. It was found by
+      searching for the filename and taking the first call site, and it agreed with the story already
+      believed, so nothing ever asked it for its callers. The live call is at `0x80101D4C`, inside the
+      countdown. **A dead function is indistinguishable from a live one until you ask who calls it** — the
+      same shape as #65, where an address hunted for callers turned out to be a label, and #8, where a
+      record read as an array of structs turned out to be two arrays.

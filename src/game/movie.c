@@ -112,9 +112,9 @@ u32 q2_movie_retail_length(const char *file)
      * row, and a film nobody's module names has no row at all.
      */
     static const struct { const char *file; u32 frames; } k_len[] = {
-        { "TAKE1BP.STX",  1281u },   /* QFMV,   "Intro FMV" */
-        { "OUTRO1P.STX",  1500u },   /* QFMV,   "Extro FMV" */
-        { "ROGUEINP.STX", 2457u }    /* QFRONT, the attract reel */
+        { "TAKE1BP.STX",  1281u },   /* QFMV,   "Intro FMV"      */
+        { "OUTRO1P.STX",  1500u },   /* QFMV,   "Extro FMV"      */
+        { "ROGUEINP.STX", 2457u }    /* QFRONT, the opening reel */
     };
     u32 i;
 

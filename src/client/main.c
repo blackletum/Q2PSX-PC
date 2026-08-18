@@ -755,38 +755,71 @@ typedef struct client {
      */
     char              film_screen[16];
     char              film_next_map[64];
-    bool              film_is_attract;  /* the title screen's own reel     */
+    bool              film_is_start;    /* the front end's own opening reel */
 
     /*
      * ---------------------------------------------------------------------
-     * The attract reel
+     * The opening reel — and the attract loop it is NOT
      * ---------------------------------------------------------------------
      * `ROGUEINP.STX` is the third film on the disc — 28.8 MB, 2,459 frames,
      * the fleet approaching the Strogg homeworld — and it is named by NO
      * movie-table record, because the table's filename field is twelve bytes
-     * and "ROGUEINP.STX" needs thirteen with its terminator. It is named
-     * directly, as a literal at QFRONT's module+0xDC4, by the front end:
+     * and "ROGUEINP.STX" needs thirteen with its terminator. It is a literal
+     * at QFRONT's module+0xDC4 and the front end plays it itself.
      *
-     *     80101CF4  lhu  v0, 0x2D90(a0)      ; the idle store
-     *     80101CF8  lhu  v1, 0(v1)           ; the frame delta
-     *     80101D00  subu v0, v0, v1
-     *     80101D0C  bgez v0, +0x128          ; still counting: do nothing
+     * THIS PORT PLAYED IT AS AN IDLE ATTRACT REEL. IT IS NOT ONE. The title
+     * screen does have an idle countdown, and it does not lead here: they are
+     * two different stores in the same module, and what separates them is
+     * following each one to its CALLER.
+     *
+     *   the title's idle   module+0x12DC0, parked with 9000 by the title page
+     *                      builder 0x8010CEE0 and counted down by the page
+     *                      hook 0x8010C6AC, which resets it to 9000 whenever
+     *                      engine+0x2AC says the pad moved. At zero it calls
+     *                      0x80101B08 — and that function plays NO FILM. It
+     *                      hides the five title objects, installs the one-row
+     *                      page `"DEMO OF GAME"` (module+0xC) and hands off.
+     *                      9000 of the console's 1/300 s units is the thirty
+     *                      seconds this port had, and what waits at the end of
+     *                      it is a DEMO OF THE GAME, which this port has no
+     *                      player for. So the countdown is gone rather than
+     *                      pointed at the wrong film.
+     *
+     *   the reel's beat    module+0x12D90, parked with 150 by 0x80101E4C and
+     *                      counted down by the page hook 0x80101CD0:
+     *
+     *     80101E54  addiu v1, zero, 150
+     *     80101E6C  jal   0x80103414
+     *     80101E70  sh    v1, 11664(v0)     ; -> module+0x12D90, delay slot
      *     ...
-     *     80101D34  addiu a0, a0, 0xDC4      ; "ROGUEINP.STX"
+     *     80101CF4  lhu   v0, 0x2D90(a0)    ; the beat
+     *     80101D00  subu  v0, v0, v1        ; ...minus the frame delta
+     *     80101D0C  bgez  v0, +0x128        ; still counting: do nothing
+     *     80101D34  addiu a0, a0, 0xDC4     ; "ROGUEINP.STX"
      *     80101D38  addiu a1, zero, 2457
-     *     80101D4C  jal   0x8010B2EC         ; play it
+     *     80101D4C  jal   0x8010B2EC        ; play it
      *
-     * — the title screen idling into the intro reel, which is what a PlayStation
-     * front end does. THE THRESHOLD IS NOT RECOVERABLE. The store at
-     * module+0x12D90 is zero in the module image and those two instructions are
-     * its only reader and its only writer anywhere in the 118 KB module, so the
-     * disc does not say how long the title screen waits. The count below is
-     * therefore THIS PORT'S, and is marked as such rather than presented as
-     * read; everything else about the reel — that it exists, which file, how
-     * many frames, and that a press cancels it — is the module's.
+     * The store hid its writer in a DELAY SLOT eight instructions below its own
+     * `lui`, which is why a scan that pairs a `lui` with a nearby load or store
+     * found only the reader and read the whole thing as an idle timeout with an
+     * unrecoverable threshold. It has a writer, and the writer has three
+     * callers: 0x8010D380, 0x8010D3A8 and 0x8010D3D4 — the EASY, MEDIUM and
+     * HARD records at module+0xEFE4 / +0xEFFC / +0xF014. Each stores its skill
+     * into engine+0x366 and calls 0x80101E4C, which arms 150, hides the same
+     * five title objects and installs the countdown as the page hook.
+     *
+     * So the reel is what plays WHEN A DIFFICULTY IS CONFIRMED, and 150 of the
+     * same 1/300 s units is HALF A SECOND — the beat between the title going
+     * away and the film starting. Nothing about it is this port's invention any
+     * more, threshold included.
+     *
+     * One more thing this cost, and it is worth recording. `0x8010D5F8` — a
+     * standalone `play("ROGUEINP.STX", 2457, ...)` and nothing else, which is
+     * what `docs/FORMATS.md` recorded as the attract reel's call site — has
+     * ZERO references in all 118 KB of the module. It is an earlier build's
+     * entry point left in, and it looks exactly like the live one.
      */
-    u32               attract_idle;     /* frames the title has sat idle   */
-    u32               attract_frames;   /* --attract N: override the wait  */
+    u32               start_beat;       /* frames left of the 150-unit beat */
 
     /* The map's own mission-event namespace, out of its LevelBin. */
     q2_levelbin_misevent misevent[32];
@@ -2276,43 +2309,15 @@ static void client_music_for_level(client *c, bool force);
 #define Q2_INTERMISSION_WINDOW   300
 
 /*
- * How long the title screen sits before the attract reel starts.
+ * The beat between a difficulty being confirmed and the opening reel starting.
  *
- * A PORT CONSTANT — and now known to be modelling the WRONG THING ENTIRELY.
- *
- * The note that used to sit here said the disc does not supply this number,
- * because "the store QFRONT's module counts down is zero in the image and
- * nothing writes it". There IS a writer, and the reason it was missed is that
- * it sits in a DELAY SLOT eight instructions after its own `lui`:
- *
- *     80101E50  lui   v0, 0x8011
- *     80101E54  addiu v1, zero, 150
- *     80101E6C  jal   0x80103414
- *     80101E70  sh    v1, 11664(v0)      ; -> 0x80112D90, in the delay slot
- *
- * so a scan that pairs a `lui` with a nearby load or store finds only the
- * reader and the decrement in 0x80101CD0.
- *
- * But 150 is NOT an idle timeout. 0x80101E4C is called from the three SKILL
- * handlers (0x8010D380 / 0x8010D3A8 / 0x8010D3D4, the EASY/MEDIUM/HARD menu
- * records at module+0xEFE0/+0xEFF8/+0xF010): each stores the skill into
- * engine+0x366 and then calls this, which arms the countdown, hides the five
- * title objects, and installs 0x80101CD0 as the frame hook. That hook
- * subtracts the per-tick dt and, when it goes negative, plays
- * ROGUEINP.STX. So the reel is what runs after you CONFIRM A DIFFICULTY, and
- * 150 is the short beat between the menu closing and the film starting —
- * well under two seconds on any reading of the clock, not thirty.
- *
- * Changing 900 to 150 on its own would therefore make things worse: it would
- * fire the reel a quarter of a second after the title screen appeared. The two
- * belong together and are left together, so this stays an idle timeout until
- * the reel is moved onto the skill handlers.
- *
- * Not applied in a headless run: a scripted capture that sat on the title
- * screen for thirty seconds would suddenly find itself inside a 98-second film,
- * which is a surprising thing for a shot of the front end to contain.
+ * 150 of the console's 1/300 s units, armed by 0x80101E4C in a delay slot and
+ * counted down by the frame delta in 0x80101CD0, which is half a second —
+ * fifteen of this port's 30 Hz frames. READ, not chosen: see `start_beat` for
+ * the writer, for its three callers, and for why the reel it arms was never
+ * the title screen's attract loop.
  */
-#define Q2_ATTRACT_IDLE_FRAMES   900
+#define Q2_START_BEAT_FRAMES      15
 
 /*
  * The last unit on this disc. A MISCOMPLETE here ends the GAME — the outer
@@ -6817,53 +6822,40 @@ static void client_menu_requests(client *c)
         break;
     /*
      * The front end's three leaves. SINGLE PLAYER is what turns the title
-     * screen into a game: the level table's own first playable map is loaded
-     * and the simulation takes over.
+     * screen into a game — but not at the moment the row is pressed, and not
+     * by loading a level.
      */
-    case Q2_MREQ_NEW_GAME: {
+    case Q2_MREQ_NEW_GAME:
         /*
-         * A new game does not open on a level. It opens on the INTRO FMV.
+         * CONFIRMING A DIFFICULTY IS WHAT ARMS THE OPENING REEL.
          *
-         * `Intro FMV` is record 10 of the level table and resolves to QFMV,
-         * whose module plays `TAKE1BP.STX` for exactly that screen name — so
-         * starting a game is loading that level and letting the film hand over
-         * to the first map when it ends (`film_next_map`). The port went
-         * straight to the first map because it had no decoder when this was
-         * written, and then kept doing it after it had one.
+         * The EASY, MEDIUM and HARD records all call 0x80101E4C, which stores
+         * the skill, hides the five title objects and arms the half-second
+         * countdown whose end plays `ROGUEINP.STX` (`start_beat`). NOTHING IS
+         * LOADED HERE: the console is still standing in QFRONT with its scene
+         * running and its page emptied, and that is what the beat looks like.
          *
-         * A disc with no such record, or a film that will not open, still
-         * starts the game: the cinematic is the opening, not the gate.
+         * Where the game itself comes from is `client_start_game`, which the
+         * reel hands over to — not this row.
          */
-        const q2_level_entry *fmv = c->level_table_ready
-            ? q2_level_find_display(&c->level_table, "Intro FMV") : NULL;
-
-        /* The difficulty is the AI's, and it is chosen before the level loads
-         * so the creatures spawned by that load already have it. */
+        /* The difficulty is the AI's, and it is chosen before anything loads so
+         * that the creatures spawned by that load already have it. */
         q2_cre_set_skill(c->menu.skill);
-        Q2_INFO("front end: new game on skill %d -> %s",
+        Q2_INFO("front end: skill %d confirmed — the reel, then %s",
                 c->menu.skill, c->first_map);
-        c->in_front_end   = false;
-        c->film_is_attract = false;
-        c->attract_idle    = 0;
         /* A new game carries nothing either. */
         c->carry_player   = false;
         c->carry_same_map = false;
         q2_menu_close(&c->menu);
-
-        if (fmv && !fmv->is_placeholder && fmv->directory[0]) {
-            snprintf(c->film_screen, sizeof(c->film_screen), "Intro FMV");
-            snprintf(c->film_next_map, sizeof(c->film_next_map), "%s",
-                     c->first_map);
-            if (client_load_zone(c, fmv->directory, 0) && c->film_open)
-                break;
-            /* It loaded and did not play, or did not load: go on without it
-             * rather than leaving the player on an empty container map. */
-            c->film_next_map[0] = '\0';
-            Q2_WARN("front end: no intro film — starting on %s", c->first_map);
-        }
-        client_load_zone(c, c->first_map, 0);
+        /*
+         * And the title goes with the page. 0x80101E4C sets bit 0x80 in four
+         * fields of each of the five objects `module+0x12B20` names before it
+         * arms the count, so the half second is a BLANK front end rather than a
+         * title screen with its rows taken away.
+         */
+        q2_sim_scene_page(&c->sim[0], false, false);
+        c->start_beat = Q2_START_BEAT_FRAMES;
         break;
-    }
     case Q2_MREQ_CREDITS: {
         /*
          * The credit roll, read out of the module the front end IS. It is not
@@ -8386,55 +8378,93 @@ static void client_film_tick(client *c, float dt)
 }
 
 /*
- * The title screen idling into the attract reel.
- *
- * QFRONT's module counts a store down by the frame delta and, when it goes
- * negative, plays `ROGUEINP.STX` — the third film, 28.8 MB and 2,459 frames of
- * the fleet arriving, which no movie-table record can even name because the
- * table's filename field is twelve bytes and that name needs thirteen. See
- * `attract_idle` for the disassembly and for what about this is read and what
- * is invented (the threshold, and only the threshold).
- *
- * Not in a headless run: a capture of the front end should be a capture of the
- * front end however many frames it is asked to hold for.
+ * The film the front end opens a new game with, named as a bare literal at
+ * QFRONT's module+0xDC4 because no movie-table record could hold the name.
  */
-#define Q2_ATTRACT_FILM "ROGUEINP.STX"
+#define Q2_START_REEL "ROGUEINP.STX"
 
-static void client_attract_tick(client *c)
+/*
+ * What the front end hands the game over to when the reel has run.
+ *
+ * On the console that hand-off is `engine+0x494(1)` at 0x80101E18, and what
+ * answers it is a LOAD OF THE INTRO FMV, two steps out:
+ *
+ *     8001863C  addiu v0, zero, 12          ; game state 12, which QFRONT set
+ *     80018650  sw    v0, 10836(at)         ; -> 0x800B2A54, "play the intro"
+ *     80018AF8  beq   v0, zero, +0x20       ; the dispatcher's test of it
+ *     80018B00  jal   0x800417F8            ; which writes "Intro FMV" into
+ *                                           ; the next-map buffer, entry
+ *                                           ; point "Default", state 6
+ *
+ * `Intro FMV` is record 10 of the level table and resolves to QFMV, whose
+ * module plays `TAKE1BP.STX` for exactly that screen name — so a new game opens
+ * on TWO films, the front end's reel and then QFMV's intro, and only then on
+ * the first map. The console draws its two-row page "STARTING" / "GAME"
+ * (module+0x1C and module+0x28) over the blank front end while that load runs;
+ * a load here is not a screen the player waits in front of, so there is nothing
+ * to put it on.
+ *
+ * A disc with no such record, or a film that will not open, still starts the
+ * game: a cinematic is the opening, not the gate.
+ */
+static void client_start_game(client *c)
 {
-    u32 wait = c->attract_frames ? c->attract_frames : Q2_ATTRACT_IDLE_FRAMES;
+    const q2_level_entry *fmv = c->level_table_ready
+        ? q2_level_find_display(&c->level_table, "Intro FMV") : NULL;
 
-    if (c->film_open || c->credits_open || c->mcard_open)
-        return;
-    /* Headless waits for ever unless a run has asked for a number, which is
-     * what makes the reel reachable from a script at all. */
-    if (c->headless && !c->attract_frames)
+    c->in_front_end  = false;
+    c->film_is_start = false;
+    c->start_beat    = 0;
+
+    if (fmv && !fmv->is_placeholder && fmv->directory[0]) {
+        snprintf(c->film_screen, sizeof(c->film_screen), "Intro FMV");
+        snprintf(c->film_next_map, sizeof(c->film_next_map), "%s",
+                 c->first_map);
+        if (client_load_zone(c, fmv->directory, 0) && c->film_open)
+            return;
+        /* It loaded and did not play, or did not load: go on without it rather
+         * than leaving the player on an empty container map. */
+        c->film_next_map[0] = '\0';
+        Q2_WARN("front end: no intro film — starting on %s", c->first_map);
+    }
+
+    client_load_zone(c, c->first_map, 0);
+}
+
+/*
+ * The half second between the difficulty and the reel.
+ *
+ * 0x80101CD0, which the three difficulty records installed as the page hook
+ * when they armed `module+0x12D90` with 150. It subtracts the frame delta and
+ * plays the reel the moment the store goes negative; nothing in it reads the
+ * pad, so the beat CANNOT BE CANCELLED — which is why this takes no input and
+ * why the reel is not skippable until it is actually running.
+ *
+ * See `start_beat` for the writer, its callers, and for the attract loop this
+ * is not.
+ */
+static void client_start_beat(client *c)
+{
+    if (!c->start_beat || c->film_open)
         return;
 
-    /*
-     * Any pad at all, or any page but the title, and the count starts over.
-     * The console's countdown is reset by the same things for the same reason:
-     * a player who is doing something is not idle.
-     */
-    if (client_menu_pad(c) != 0 || c->menu.page_id != Q2_PAGE_FRONT_TITLE) {
-        c->attract_idle = 0;
+    if (--c->start_beat)
+        return;
+
+    if (!client_film_start(c, Q2_START_REEL)) {
+        Q2_WARN("front end: no opening reel — starting the game without it");
+        client_start_game(c);
         return;
     }
 
-    if (++c->attract_idle < wait)
-        return;
-
-    c->attract_idle = 0;
-    if (!client_film_start(c, Q2_ATTRACT_FILM))
-        return;
-
     /*
-     * The reel OWNS the screen while it runs, so the title goes away — but the
-     * level stays loaded, because QFRONT is what the reel returns to.
+     * The reel OWNS the screen while it runs. QFRONT stays loaded underneath
+     * it, exactly as it does on the console — the front end never left the
+     * level, it only hid the objects and swapped its page hook — but nothing
+     * about it is drawn or ticked while the film has the screen.
      */
-    c->film_is_attract = true;
-    c->in_front_end    = false;
-    q2_menu_close(&c->menu);
+    c->film_is_start = true;
+    c->in_front_end  = false;
 }
 
 /*
@@ -9519,8 +9549,15 @@ static void client_frame(client *c)
      * camera's and it draws one thing at a time. The crosshair follows the
      * PLAYER page's setting, which is the one menu toggle the HUD reads
      * (0x80043A58).
+     *
+     * AND NEVER IN THE FRONT END, which is not the same test as "no menu is
+     * up". QFRONT is a screen and not a level — it carries no icon sheet
+     * because it draws no status bar — and it had been getting away with the
+     * menu's own suppression until the half second between a difficulty and
+     * the opening reel, which is a front end with the page closed. A crosshair
+     * appeared over the blank title screen for exactly those fifteen frames.
      */
-    if (c->hud_ready && c->hud_font_ready &&
+    if (c->hud_ready && c->hud_font_ready && !c->in_front_end &&
         !c->menu.open && !c->mission_open && !c->mcard_open &&
         !c->endmis_open && !c->credits_open) {
         q2_hud_ctx ctx;
@@ -9850,8 +9887,8 @@ static void usage(void)
     printf("  --demo        drive the pad from a fixed script rather than keys\n");
     printf("  --movie NAME  play a film from Q2DATA/MOVIES and nothing else\n"
            "                (TAKE1BP.STX, OUTRO1P.STX, ROGUEINP.STX)\n");
-    printf("  --new-game    press SINGLE PLAYER: the intro film, then level 1\n");
-    printf("  --attract N   idle frames on the title before the attract reel\n");
+    printf("  --new-game    confirm a difficulty: the opening reel, the intro\n"
+           "                film, then level 1 — 3,736 film frames\n");
     printf("  --frames N    stop after N frames\n");
     printf("  --shot P.ppm  write the console's own framebuffer to P.ppm\n");
     printf("  --shot-every N  ...and one every N frames, numbered\n");
@@ -10250,22 +10287,16 @@ int main(int argc, char **argv)
          * the title screen to OPTIONS and press X. */
         else if (!strcmp(argv[i], "--credits"))               c.show_credits = true;
         /*
-         * `--new-game`: press SINGLE PLAYER for the player.
+         * `--new-game`: confirm a difficulty for the player.
          *
-         * Same reason as `--credits`, and it is the only way to reach the INTRO
-         * FMV from a script: the intro is not a map you can ask for, it is what
-         * beginning a game does, and the demo pad deliberately steps in and out
-         * of the title page rather than committing to it.
+         * Same reason as `--credits`, and it is the only way to reach either
+         * OPENING FILM from a script: neither is a map you can ask for, both are
+         * what beginning a game does, and the demo pad deliberately steps in and
+         * out of the title page rather than committing to it. It costs what a
+         * player's start costs — the reel and then the intro, 2,456 frames and
+         * 1,280 — so a capture that wants a level should ask for the map.
          */
         else if (!strcmp(argv[i], "--new-game"))              c.start_new_game = true;
-        /*
-         * `--attract N`: how many idle frames on the title screen before the
-         * reel starts, instead of the default thirty seconds. Also what makes
-         * it reachable headless at all — a capture that sat through the default
-         * wait would be capturing a film it did not ask for.
-         */
-        else if (!strcmp(argv[i], "--attract") && i + 1 < argc)
-            c.attract_frames = (u32)strtoul(argv[++i], NULL, 10);
         /* `--keys`: hand the player every key. A scripted run cannot go and
          * find one, and the records behind `ONKEYDO` are otherwise unreachable
          * in a sweep — which is the gate working, and also why what is behind
@@ -10962,6 +10993,17 @@ no_window:
                     client_film_stop(&c);
                     continue;
                 }
+                /*
+                 * THE BEAT BEFORE IT TAKES NOTHING. 0x80101CD0 never reads the
+                 * pad, so the half second between the difficulty and the film
+                 * cannot be shortened, skipped or interrupted — and swallowing
+                 * the press is not cosmetic here: Escape would otherwise open
+                 * the pause menu over the blank front end, and the beat would
+                 * stall for good behind it, because it only counts down on the
+                 * frames no page owns.
+                 */
+                if (c.start_beat)
+                    continue;
                 /* Any key leaves the credits, back to the title. */
                 if (c.credits_open) {
                     c.credits_open = false;
@@ -11216,7 +11258,6 @@ no_window:
             if (c.in_front_end) {
                 q2_sim_scene_advance(&c.sim[0], (double)dt);
                 client_scene_lights(&c);
-                client_attract_tick(&c);
             } else if (c.menu.page_id == Q2_PAGE_DEATH) {
                 /*
                  * AND NEITHER IS THE DEATH PAGE A PAUSED WORLD.
@@ -11233,6 +11274,23 @@ no_window:
                  */
                 client_input_simulated(&c, dt);
             }
+        } else if (c.start_beat) {
+            /*
+             * THE BEAT BETWEEN A DIFFICULTY AND THE REEL, and it is not a
+             * frozen frame.
+             *
+             * The console never leaves the level to run it: 0x80101E4C hides
+             * the five title objects and swaps the page hook for the countdown,
+             * and QFRONT goes on running underneath. So the scene still steps
+             * and the lights still follow it — the same half of the tick the
+             * title screen gets, minus the menu that has just closed.
+             *
+             * The pad is nobody's for these fifteen frames, because 0x80101CD0
+             * does not read it.
+             */
+            q2_sim_scene_advance(&c.sim[0], (double)dt);
+            client_scene_lights(&c);
+            client_start_beat(&c);
         } else if (c.mission_open || c.briefing_open || c.endmis_open) {
             /*
              * AND THE INTERMISSION BOARDS FREEZE IT TOO. This was the bug that
@@ -11603,44 +11661,48 @@ no_window:
         /*
          * A film that has ended hands over to whatever it was in front of.
          *
-         * Three cases and they are not the same thing. A cinematic on the WAY
-         * somewhere — the intro, and the extro if a later disc ever carries one
-         * — resumes the journey. The attract reel goes back to the title screen
-         * it interrupted. And an end-of-mission film with nowhere to go leaves
-         * the placard up, which is what the campaign's last frame has been.
+         * Three cases and they are not the same thing. THE OPENING REEL hands
+         * the game over, which is a load of the intro FMV and then of the first
+         * map — it does not go back to the title, because on the console the
+         * title screen is already gone by the time it starts. A cinematic on the
+         * WAY somewhere — the intro itself, and the extro if a later disc ever
+         * carries one — resumes the journey. And an end-of-mission film with
+         * nowhere to go leaves the placard up, which is what the campaign's last
+         * frame has been.
          *
          * OUTSIDE the tick, on `film_done`, because a film does not only end by
          * running out: a press stops it, and that press is taken in the event
          * loop where there is no tick to notice. Handling this inside the tick
-         * meant a skipped attract reel left the front end with no title screen
-         * and no menu — a black QFRONT that took a restart to leave.
+         * meant a skipped film left the front end with no title screen and no
+         * menu — a black QFRONT that took a restart to leave.
+         *
+         * The reel is tested FIRST. It is the one case that sets no
+         * `film_next_map` — the destination is not a map name, it is the whole
+         * of `client_start_game` — and testing it first is what keeps a stale
+         * name from ever answering for it.
          */
         if (!c.film_open && c.film_done) {
             c.film_done = false;
 
-            if (c.film_next_map[0]) {
+            if (c.film_is_start) {
+                /*
+                 * `engine+0x494(1)`. The reel is what the front end plays before
+                 * it lets go, so what follows it is the game starting and not
+                 * the title screen coming back — which is the whole difference
+                 * between this and the attract loop it used to be mistaken for.
+                 */
+                Q2_INFO("movie: opening reel over — starting the game");
+                client_start_game(&c);
+            } else if (c.film_next_map[0]) {
                 char next[64];
 
                 snprintf(next, sizeof(next), "%s", c.film_next_map);
                 c.film_next_map[0] = '\0';
-                c.film_is_attract  = false;
                 c.endmission       = false;
                 c.endmis_open      = false;
                 Q2_INFO("movie: over — on to %s", next);
                 if (!client_load_zone(&c, next, 0))
                     Q2_WARN("movie: cannot load %s after the film", next);
-            } else if (c.film_is_attract) {
-                /*
-                 * Back to the title. The reel plays OVER the front end rather
-                 * than replacing it — QFRONT is still loaded underneath — so
-                 * there is nothing to reload, only a menu to re-open.
-                 */
-                c.film_is_attract = false;
-                c.in_front_end    = true;
-                c.attract_idle    = 0;
-                q2_menu_open(&c.menu);
-                q2_menu_goto(&c.menu, Q2_PAGE_FRONT_TITLE);
-                Q2_INFO("movie: attract reel over — back to the title screen");
             } else if (c.endmission && !c.endmis_open) {
                 char line[Q2_BRIEFING_FIELD_MAX];
 
@@ -11671,9 +11733,9 @@ no_window:
                  * both; which page it lands on is this port's choice and the
                  * title is the only one that is always there.
                  */
-                c.film_is_attract = false;
-                c.in_front_end    = true;
-                c.attract_idle    = 0;
+                c.film_is_start = false;
+                c.in_front_end  = true;
+                c.start_beat    = 0;
                 q2_menu_open(&c.menu);
                 q2_menu_goto(&c.menu, Q2_PAGE_FRONT_TITLE);
                 Q2_INFO("movie: over with no destination — back to the front end");

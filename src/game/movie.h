@@ -126,9 +126,17 @@ Q2PSX_INLINE bool q2_movie_finished(const q2_movie *m) { return m->finished; }
  *     play("TAKE1BP.STX", 1281, 0x10000, 1, 255)      ; module 0x80100958
  *     play("OUTRO1P.STX", 1500, 0x10000, 1, 255)      ; module 0x801009CC
  *
- * and QFRONT's attract state is
+ * and QFRONT's OPENING REEL — the film it plays half a second after a
+ * difficulty is confirmed, not the title screen's attract loop — is
  *
- *     play("ROGUEINP.STX", 2457, 0x10000, 1, 255)     ; module 0x8010D5F8
+ *     play("ROGUEINP.STX", 2457, 0x10000, 1, 255)     ; module 0x80101D4C
+ *
+ * That address matters, because there are two of it. `module+0xD5F8` is the
+ * same call with the same five arguments and it has NO CALLERS anywhere in the
+ * 118 KB module: an earlier build's entry point, left in the image, and the one
+ * this project recorded for years. The live call sits inside 0x80101CD0, the
+ * countdown the EASY, MEDIUM and HARD records arm — which is what makes this
+ * film the opening of a new game. See `start_beat` in the client for the chain.
  *
  * The second argument is stored (module+0x7384) and read in the frame handler
  * at 0x80102A5C, where it is compared against the STR frame header's own
@@ -143,7 +151,7 @@ Q2PSX_INLINE bool q2_movie_finished(const q2_movie *m) { return m->finished; }
  * — so it is a stop point, and the frame carrying that number is NOT shown.
  * The disc holds 1283, 1559 and 2459 frames, so the console plays 1,280 of the
  * intro, **1,499 of the 1,559 in the outro** — the last 2.4 seconds are on the
- * disc and are never seen — and 2,456 of the attract reel.
+ * disc and are never seen — and 2,456 of the opening reel.
  *
  * The other three arguments are read the same way and are not timing: 0x10000
  * is the size in bytes of each of the two VLC buffers, allocated by name at
