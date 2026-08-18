@@ -477,6 +477,69 @@ static int render_view(disc *d, q2_vm_tables *tab, const char *map,
         q2_vw_build_ot(&vw, &proto, feet, 576, aim, kick,
                        &cam, &ot, &gte, &ms);
 
+        /*
+         * WHERE EACH PART SITS IN VIEW SPACE, which is the only frame in which
+         * the weapon's placement can be argued about.
+         *
+         * `test_camera_undoes_the_placement` pins `view * R_place == I`, so a
+         * part's view-space position is the clip's translation plus the clip's
+         * rotation applied to the part's own posed origin — no camera in it at
+         * all. Projecting that by hand with the console's own `H` gives the
+         * column a capture can be held against, and identifies which part made
+         * a blob in the picture without needing to segment the picture.
+         */
+        {
+            q2_model_pose pose[64];
+            q2_model_anim clip;
+            u32 within = 0, part;
+            s16 rot[3][3];
+
+            if (model.hdr.num_parts <= 64 &&
+                q2_model_anim_at_held(&model, (u32)(vw.anim_pos > 0 ? vw.anim_pos : 0),
+                                      &clip, &within, NULL) &&
+                q2_model_pose_at(&model, &clip, within, pose) == Q2_OK) {
+                /*
+                 * The blaster's pose translations are all zero — a rigid model
+                 * carries its shape in the VERTICES, not in its part origins,
+                 * and every part of this one reports the same point. So the
+                 * frame worth printing is per-vertex: transform each by the
+                 * clip's rotation, add the clip's translation, and project by
+                 * hand with the console's own H. That turns a blob in a
+                 * photograph into a coordinate.
+                 */
+                u32 vi, nv = model.hdr.num_verts;
+                s32 lox = 1 << 30, hix = -(1 << 30);
+                s32 loz = 1 << 30, hiz = -(1 << 30);
+
+                (void)part;
+                q2_rotation_euler(rot, vw.cur_r[0], vw.cur_r[1], vw.cur_r[2]);
+                for (vi = 0; vi < nv; vi++) {
+                    q2_model_vertex mv;
+                    s32 p[3], vx, vz;
+                    int rr;
+
+                    if (!q2_model_get_vertex(&model, vi, &mv))
+                        break;
+                    for (rr = 0; rr < 3; rr++)
+                        p[rr] = ((s32)rot[rr][0] * mv.x
+                              + (s32)rot[rr][1] * mv.y
+                              + (s32)rot[rr][2] * mv.z) >> Q2_FRAC_12;
+                    vx = vw.cur_t[0] + p[0];
+                    vz = vw.cur_t[2] + p[2];
+                    if (vz <= 0)
+                        continue;
+                    if (vx < lox) lox = vx;
+                    if (vx > hix) hix = vx;
+                    if (vz < loz) loz = vz;
+                    if (vz > hiz) hiz = vz;
+                }
+                printf("  view space (H %d): x %d..%d   z %d..%d"
+                       "   grip at (%d %d %d)\n",
+                       (int)cam.projection, lox, hix, loz, hiz,
+                       vw.cur_t[0], vw.cur_t[1], vw.cur_t[2]);
+            }
+        }
+
         /* Where did they actually land? A face that projects is not yet a face
          * you can see. */
         {

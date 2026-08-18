@@ -2284,10 +2284,36 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
       - **the shape agrees.** Resampled into the same geometry the two silhouettes match — same body,
         same emitter block, same barrel, same arm — so the clip rotation and the model are right.
 
-      So what is left is horizontal placement and scale: solving the two measurements together puts the
-      port's emitter at 61% of the console's view-space x and 136% of its z. **That is the open question
-      now**, and it is a much narrower one than "sits too far left" — the chain is verified operand by
-      operand, so the discrepancy has to be in something the chain does not yet contain.
+      A fourth control, and the one that makes the horizontal number trustworthy: **the HUD**. It is drawn
+      at fixed framebuffer coordinates and goes through none of the 3D chain, so it measures the picture's
+      mapping directly. The health cross sits at x 0.2141 of the width in the capture against 0.2129 in
+      the port — so there is no overscan crop and no horizontal offset in the capture, and the reticle
+      being dead centre could not have told us that on its own (a symmetric crop keeps the centre and
+      expands everything around it). The cross's measured WIDTH does differ, 0.0453 against 0.0215, and
+      that is the capture's own blur: it is a video frame upscaled 1.25x horizontally, and a small bright
+      sprite bleeds. Which means the emitter's measured width is inflated too — so the console's true
+      offset-to-width ratio is HIGHER than 5.21, not lower, and the gap is if anything larger than
+      measured.
+
+      So what is left is horizontal placement: the port's emitter sits **0.078 of the picture width** to
+      the left of the console's, and that is a real displacement rather than a projection artefact.
+      `viewweapon` now prints the weapon's view-space geometry so the two frames can be reasoned about in
+      the same space:
+
+          blaster, BASE0 idle:  view x 73..207   z 41..526   grip at (140 161 44)
+          shotgun, BASE1 idle:  view x  6..287   z 160..564  grip at (216 245 256)
+
+      **What this is NOT.** Not the projection (`H`, `OFX`, `OFY` all swept and shared with the world),
+      not the field of view, not the spawn (the weapon is view-attached), not the animation phase (the
+      blaster's idle holds `t` constant and moves only the rotation), not the model, not the rotation (the
+      silhouettes match when resampled into the same geometry), not the near plane (fixed), and not the
+      pose (applied).
+
+      **What is needed to close it.** One landmark in one capture is one equation in two unknowns — a
+      weapon further away and further right projects to the same place as one nearer and less far right,
+      and the emitter's width would separate them if the capture were not blurred. A second measurable
+      landmark on the same weapon, or a capture at a known animation phase, pins it. Until then the
+      displacement is measured and its cause is not attributed, which is the honest state.
 
 ---
 
