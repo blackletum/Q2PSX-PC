@@ -2504,6 +2504,27 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
 
 ---
 
+- [ ] 50c. **The view weapon is a VIEW-SPACE entity for lighting, and the list that would light it has
+      no producer.** `0x8004F750` writes **1** to the viewmodel entity's `+0xF4` when it is created — and
+      that halfword is exactly the flag `q2_light_gather`'s `view_space` branch keys on (lighting.h §
+      "the branch the original takes on the entity's +0xF4"). So the console lights the gun from the VIEW
+      dynamic list at `0x800E3ED8` alone, skipping the world list and every static lamp. The client
+      gathers it as a creature instead — world list, static lights, the lot.
+
+      **Switching the flag alone makes it worse, and that is the finding.** Tried: the blaster goes dark
+      and flat, because `q2_light_world.dynamic_view` is READ (lighting.c:206) and CLEARED
+      (lighting.c:308) and **written by nothing**. It is a sixteen-slot list with no caller — the same
+      shape as the eleven multiplayer functions and the rotating brushes before them. The console's gun is
+      plainly lit in a capture, so the console's view list is not empty.
+
+      So the port is wrong in mechanism and closer in result: lighting the gun off the world compensates
+      for view lights it never adds. Reverted rather than left in, because a dark flat gun is further from
+      the capture than a slightly washed one.
+
+      **What this needs is the producer**: whatever fills `0x800E3ED8`. `q2_light_add_dynamic`
+      (`0x80075C34`) appends to the WORLD list at `0x800E3D18`; the view list's own append is a different
+      site and has not been found. Until it is, the flag cannot be honoured.
+
 - [x] 50a. **The view weapon queues something white and 128 units wide at its own position — and the
       gate it is behind is NEVER WRITTEN, so it never happens.** `0x8004F6CC` calls `0x8007012C` with the
       weapon's finished world position, `128`, and the four bytes at `0x800AEA20`, which are `ff ff ff 00`.
