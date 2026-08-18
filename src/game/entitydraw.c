@@ -137,11 +137,32 @@ u32 q2_entity_build_ot(q2_entity_set *set, const q2_entity_draw_ctx *ctx,
             continue;
         }
 
-        /* Pose it on the frame its think left, when it has an animation and the
-         * part count fits the engine's own buffer. */
-        if (m.hdr.num_parts <= POSE_MAX && e->clip_count > 0) {
+        /*
+         * Pose it on the frame its think left — AND POSE IT EVEN WHEN NOTHING
+         * ANIMATES IT, which is why the medkits were in the floor.
+         *
+         * This ran only when `clip_count > 0`, and an item's clip count is its
+         * table record's `extra_count`, which is zero for most of them. An
+         * unposed model draws its vertices RAW, and a part's rest transform is
+         * not the identity: on BASE1, `Large Medi P` reads Y 62..242 raw
+         * against −94..86 posed, a translation of −156, and `Medi P` reads
+         * 43..168 against −65..60, a translation of −108. Both are health
+         * pickups; `Shells P` and `Adrenal P` in the same bank translate by
+         * zero and looked right, which is what made this look like a health
+         * item problem rather than a posing one.
+         *
+         * Drawn raw, the large medkit's base lands 156 units below its own
+         * origin's floor and 24 units of a 180-unit box stick out. That is the
+         * report exactly.
+         *
+         * A model with no clip at all still cannot be posed and keeps the raw
+         * path; every model in the shipped banks carries at least one.
+         */
+        if (m.hdr.num_parts <= POSE_MAX) {
             q2_model_anim clip;
-            if (q2_model_anim_get(&m, e->clip[0], &clip)) {
+            u32 want = e->clip_count > 0 ? (u32)e->clip[0] : 0u;
+
+            if (q2_model_anim_get(&m, want, &clip)) {
                 s32 frame = clip.frames > 0 ? (e->frame % clip.frames) : 0;
                 if (q2_model_pose_at(&m, &clip, (u32)frame, pose) == Q2_OK)
                     posed = true;

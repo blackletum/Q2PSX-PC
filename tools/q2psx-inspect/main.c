@@ -2569,6 +2569,33 @@ static int cmd_model(disc *d, const char *map, const char *want, int clip_index,
                 extent = bmax[ax] - bmin[ax];
     }
 
+    /*
+     * The RAW bounds beside the posed ones. A single-part static model should
+     * read the same either way; where they differ, the pose is carrying a
+     * translation, and anything drawing the model UNPOSED puts it somewhere
+     * else — which is what an item sitting in the floor looks like.
+     */
+    {
+        s32 rmin[3] = { INT32_MAX, INT32_MAX, INT32_MAX };
+        s32 rmax[3] = { INT32_MIN, INT32_MIN, INT32_MIN };
+        u32 vi;
+
+        for (vi = 0; vi < mdl.hdr.num_verts; vi++) {
+            q2_model_vertex mv;
+            if (!q2_model_get_vertex(&mdl, vi, &mv))
+                break;
+            if (mv.x < rmin[0]) rmin[0] = mv.x;
+            if (mv.x > rmax[0]) rmax[0] = mv.x;
+            if (mv.y < rmin[1]) rmin[1] = mv.y;
+            if (mv.y > rmax[1]) rmax[1] = mv.y;
+            if (mv.z < rmin[2]) rmin[2] = mv.z;
+            if (mv.z > rmax[2]) rmax[2] = mv.z;
+        }
+        if (rmin[1] <= rmax[1])
+            printf("  raw bounds    : [%d %d %d] .. [%d %d %d]\n",
+                   rmin[0], rmin[1], rmin[2], rmax[0], rmax[1], rmax[2]);
+    }
+
     printf("  posed bounds  : [%d %d %d] .. [%d %d %d]  (ext2 %d, ext3 %d)\n",
            bmin[0], bmin[1], bmin[2], bmax[0], bmax[1], bmax[2],
            mdl.hdr.ext2, mdl.hdr.ext3);
