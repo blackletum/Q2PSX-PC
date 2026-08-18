@@ -359,9 +359,23 @@ bool q2_hud_track(q2_hud *hud, s16 health, s16 armour);
 void q2_hud_tick(q2_hud *hud, int ticks);
 
 /*
+ * How far BEHIND `otz` the crosshair goes, as a depth — larger is farther.
+ *
+ * The overlay screens that can be up while the crosshair is are all centred on
+ * it, and they compose at depths 2 (panel body), 1 (frame, and the prompt bar)
+ * and 0 (their text). Four puts the crosshair behind the lot with a slot spare
+ * for a screen that ever wants a third layer, and still leaves it in front of
+ * the world, which is drawn in the viewport slices far below the overlay's.
+ * See emit_crosshair for why sharing a bucket is not enough.
+ */
+#define Q2_HUD_CROSSHAIR_DEPTH 4
+
+/*
  * Emit the whole overlay into bucket `otz`: the flash tile first so it lands
  * behind everything, then the notifications, the centre line and the
- * crosshair. Decrements the flash the way the draw at 0x80076980 does, so this
+ * crosshair. The crosshair goes in Q2_HUD_CROSSHAIR_DEPTH behind `otz` rather
+ * than into it, so that anything the overlay puts over the middle of the screen
+ * covers it. Decrements the flash the way the draw at 0x80076980 does, so this
  * is once per drawn frame, not once per logic tick.
  */
 void q2_hud_build_ot(q2_hud *hud, const q2_hud_font *font, q2_hud_ctx *ctx,

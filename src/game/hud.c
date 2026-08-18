@@ -756,6 +756,27 @@ static void fade_box(char *s)
  * q2_screen_flash_set.
  */
 
+/*
+ * THE CROSSHAIR IS THE BACK OF THE OVERLAY, NOT THE FRONT.
+ *
+ * It is the one overlay element that sits at the middle of the screen, which is
+ * exactly where every framed screen this port draws puts its panel: the
+ * briefing, the end-of-mission placard and the objectives pop-up all compose
+ * through q2_briefing_build_ot at depths 2/1/0, and the centre line and the
+ * notifications of this very function land at the caller's own depth. Emitted
+ * at that same depth the crosshair won a bucket it should never win — within
+ * one bucket the LAST primitive added is drawn FIRST (gpu.h), so the crosshair,
+ * which goes in before any of them, came out in front of all of them, a grey
+ * cross sitting on top of the objectives board.
+ *
+ * So it is pushed back by Q2_HUD_CROSSHAIR_DEPTH. That is a depth, larger being
+ * farther, and it clears the deepest thing the overlay screens use (the panel
+ * body, at 2) with a slot to spare. It stays well inside the overlay slice —
+ * the depths that resolve in front of the overlay's own draw env run to dozens,
+ * not to four — so the crosshair is still in front of the world and of the
+ * status bar, which is where it belongs. What it is now behind is everything
+ * the overlay draws over it, which is what the pop-up needs.
+ */
 static void emit_crosshair(const q2_hud *hud, const q2_hud_font *font,
                            const q2_hud_ctx *ctx, psx_ot *ot, u16 otz)
 {
@@ -769,7 +790,8 @@ static void emit_crosshair(const q2_hud *hud, const q2_hud_font *font,
     x = ctx->width / 2 - 8 + hud->crosshair_dx;
     y = ctx->height / 2 - 8 + hud->crosshair_dy;
 
-    emit_sprite(ot, otz, font, ctx, x, y, 16, 16,
+    emit_sprite(ot, (u16)(otz + Q2_HUD_CROSSHAIR_DEPTH), font, ctx,
+                x, y, 16, 16,
                 hud->crosshair_u, hud->crosshair_v,
                 font->clut_font, hud->crosshair_rgb);
 }
