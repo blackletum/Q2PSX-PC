@@ -2411,10 +2411,21 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
       them — so that holds for every layout. Row 1 takes `vh` from the caller's `a2` at `0x800779C4`,
       which screen.c reads as 160, giving **2/3**.
 
-      So the console's camera squashes Y by two thirds and leaves X alone: the 1.5 anamorphic factor
-      FIDELITY §11 attributes to the display is, at least in part, a term inside the camera matrix. The
-      port has neither, and that is a real divergence worth its own entry — but it CANNOT be the
-      horizontal residual, because it does not touch X.
+      So the console's camera squashes Y by two thirds and leaves X alone. **It was applied, and it is
+      DISPROVED as a port change.** `q2_rotation_view_scaled` was added, wired into both camera sites
+      (`world.c` and `modeldraw.c`), built and measured on BASE0:
+
+          sky wedge width   port before 0.2988   with the scale 0.6953   console 0.2556
+          weapon emitter y  port before 0.6532   with the scale 0.6008   console 0.6508
+
+      The world's vertical field of view blows out — the wedge nearly triples where the console's is
+      NARROWER than the port's already — and the weapon's vertical goes from agreeing within 0.0024 to
+      missing by 0.05. Both worse, both measured, reverted.
+
+      So the reading of `0x80055DE4`'s effect is incomplete rather than the port being wrong: either the
+      basis at view+192 is already scaled to compensate, or the `vh` that reaches the world path is not
+      the 160 at `0x80077948`. **The term is real in the instructions and wrong as a naive camera scale**,
+      and it cannot be the horizontal residual either, because it does not touch X.
 
       Which also disposes of a tempting coincidence, recorded so it is not re-derived: the port's emitter
       offset times **1.6** lands within **0.4 of a pixel in 512** of the console's, and 1.6 is 512/320 —
