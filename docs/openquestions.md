@@ -2338,10 +2338,39 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
         signature seen here: HUD positions agree to a pixel and a half, the vertical agrees, and only the
         horizontal does not.
 
-      **What is needed to close it is a capture whose provenance is known** — ideally a direct framebuffer
-      grab rather than a video frame, from a player with no enhancements on. Until then the port's
-      arithmetic agrees with the executable at every operand that can be read, and the one number that
-      disagrees comes from a measurement that contradicts itself.
+      **A third capture, at native resolution, settles which of the three numbers to believe.** Its picture
+      is 583 x 252 inset in a 640 x 480 frame, so both axes need the active band; measured that way:
+
+          emitter   cx 0.6372   cy 0.6508      (the first capture gave cx 0.6383)
+          HUD cross cx 0.2127                  (the port's is 0.2129)
+
+      So **positions repeat across two independent captures and the HUD lands on the port's to two parts
+      in ten thousand**, while the widths do not repeat and do not agree between axes: the emitter measures
+      13.2 framebuffer pixels wide against 9.5 tall where the port's is 10.0 by 10.0, and the HUD cross
+      measures twice the port's width. That is video chroma subsampling smearing colour horizontally, and
+      it is why the width ratios were nonsense. **Centroids are the measurement; widths are not.**
+
+      Taking only centroids, the picture is clean and single-parameter:
+
+          horizontal   console 0.6372   port 0.5605    apart by 0.077 of the width
+          vertical     console 0.6508   port 0.6452    apart by 0.006
+          HUD          console 0.2127   port 0.2129    apart by 0.0002
+
+      Vertical agrees, so the DEPTH agrees — a weapon at a different distance would move vertically too.
+      The HUD agrees, so the mapping is 1:1 and the viewport really is 512 wide (a narrower buffer would
+      put the HUD's own fixed coordinates at a different fraction). What is left is a pure horizontal
+      displacement of `vx`, and with the emitter's depth known from the probe (vz ≈ 494) it is
+      **about 120 view-space units**: the console places the grip near x 260 where the port places it at
+      the 140 the disc's key holds.
+
+      That is as far as measurement can take it. `t.x` is 140 on every key of the blaster's raise and idle,
+      `ApplyMatrix` is `(M·v) >> 12` with the shift at `0x8006FE08`, `view * R_place == I` is pinned by a
+      test, and the block at `0x8004F644` that could have carried a lateral offset is a zero vector. The
+      120 units are not in any operand that has been read, so either a term reaches the transform from
+      somewhere not yet found, or the remaining captures still carry an enhancement. **The next capture
+      should be a DuckStation screenshot rather than a video frame** — PGXP off in all its forms, widescreen
+      hack off, resolution scale 1x, crop None, aspect 1:1 — which removes the chroma smear and lets the
+      silhouette, not one blob, carry the measurement.
 
 ---
 
