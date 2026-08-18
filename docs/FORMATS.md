@@ -4878,6 +4878,14 @@ compressed by exactly 1.5, and there is nothing anywhere that undoes it: the onl
 chain is the uniform `(768, 768, 768)` at `0x800AEB30` applied per column by `0x80055AF8` (an object scale of
 3), and the view weapon's chain has no scale call at all. The squeeze is the game's.
 
+**AND THERE IS AN ANAMORPHIC TERM AFTER ALL — `0x80055DE4`.** It builds the matrix the world draw loads from
+view+160 by scaling a basis ROW BY ROW: row 0 by `vw / 320`, row 1 by `vh / 240`, with `vw` the immediate 320
+at `0x800779BC` and `vh` the immediate 160 at `0x80077948`. The console's camera is therefore
+`diag(1, 2/3, 1)` and its effective projection is `(H, 2H/3)`. Measured against a native capture of the BASE0
+spawn the port was rendering `(160, 160)` where the console renders `(240, 160)` — vertical exact, horizontal
+one and a half times too wide. So the **horizontal** column below is the frustum before that term; with it the
+one-player row is **93.6°**, not 116.0°. See `q2_rotation_view_anamorphic` and openquestions #46.
+
 | layout | viewport | proj | horizontal | vertical | shown at | squeeze |
 | --- | --- | --- | --- | --- | --- | --- |
 | one | 512 × 248 | 160 | 116.0° | 75.6° | 1.376:1 | 1.50 |

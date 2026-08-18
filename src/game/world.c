@@ -559,7 +559,7 @@ u32 q2_world_build_ot(const q2_world_zone *z,
                        (cam->ofs_x || cam->ofs_y) ? cam->ofs_x : screen_w / 2,
                        (cam->ofs_x || cam->ofs_y) ? cam->ofs_y : screen_h / 2);
 
-    q2_rotation_view(rot.m, cam->yaw, cam->pitch, cam->roll);
+    q2_rotation_view_anamorphic(rot.m, cam->yaw, cam->pitch, cam->roll);
     gte_set_rotation(gte, &rot);
 
     /*

@@ -712,9 +712,25 @@ bool q2_screen_single_buffered(const q2_screen *s);
  *      vertical     2*atan(124/160) =  75.5 degrees
  *
  * The ratio of those tangents is 2.06, and the picture is shown at 1.376, so
- * the console's own image is horizontally compressed by a factor of 1.5. That
- * is not a defect in this reconstruction and it must not be "corrected": there
- * is no anamorphic term anywhere in the image to undo it. The only matrix scale
+ * the console's own image is horizontally compressed by a factor of 1.5.
+ *
+ * THERE IS AN ANAMORPHIC TERM, AND IT WAS FOUND. This used to say "it must not
+ * be corrected: there is no anamorphic term anywhere in the image to undo it".
+ * 0x80055DE4 is one: it builds the matrix the world draw loads from view+160
+ * (0x800313DC) by scaling a basis row by row — row 0 by vw/320 and row 1 by
+ * vh/240, with vw the immediate 320 at 0x800779BC and vh the immediate 160 at
+ * 0x80077948. So the console's camera is diag(1, 2/3, 1) and its effective
+ * projection is (H, 2H/3), not (H, H).
+ *
+ * Measured against a native capture of the BASE0 spawn, with the 2D briefing
+ * panel proving a shared framebuffer origin and width: the sky wedge above the
+ * panel is 136 px on the console against the port's 90, and the weapon's
+ * emitter sits at x 325..337 against 301..307, with the VERTICAL identical at
+ * y 157..166. Horizontal one and a half times out, vertical exact — which is
+ * (240, 160) against (160, 160). `q2_rotation_view_anamorphic` carries it now
+ * and closes both to within three pixels. The numbers below are the frustum in
+ * framebuffer pixels BEFORE that term; with it the one-player horizontal is
+ * 2*atan(256/240) = 93.6 degrees. The only matrix scale
  * on the world's transform chain is the uniform (768,768,768) at 0x800AEB30,
  * applied per COLUMN by 0x80055AF8 — an object scale of exactly 3, not a screen
  * one — and the projection distance reaches the GTE untouched from view+262.

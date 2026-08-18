@@ -2124,7 +2124,36 @@ the uniform `(768, 768, 768)` at `0x800AEB30`, applied per column by `0x80055AF8
 exactly 3 — and the view weapon's own chain (`RotMatrix` at `0x8004F464`, `MulMatrix` at `0x8004F474`) has no
 scale call at all. The squeeze is the game's, not the reconstruction's, and must not be "corrected".
 
-- [~] 46. **The view weapon sits too far left, and it is not the projection.** — *the pitched case is
+- [x] 46. **SOLVED — and it WAS the projection. The port's horizontal field of view was one and a half
+      times too wide, for the whole renderer.**
+      `0x80055DE4` builds the matrix the world draw loads from view+160 (`0x800313DC`) by scaling a
+      basis ROW BY ROW — row 0 by `vw/320`, row 1 by `vh/240` — with `vw` the immediate 320 at
+      `0x800779BC` and `vh` the immediate 160 at `0x80077948`. The console's camera is
+      `diag(1, 2/3, 1)` and its effective projection `(H, 2H/3)`; the port had `diag(1,1,1)` and
+      `H = 160`, rendering `(160, 160)`.
+
+      **What made it provable was a capture at the spawn, before the player moved**, at native
+      resolution. The 2D briefing panel is at x 86..441, y 26..137 in BOTH frames, which pins a shared
+      framebuffer origin and width and makes every other number a direct comparison:
+
+          sky wedge above the panel   console 136 px    before  90 px     after 135 px
+          weapon emitter x            console 325..337  before 301..307   after 322..333
+          weapon emitter y            console 157..166  before 157..166   after 157..167
+
+      Vertical was already exact and stays exact; the horizontal closes from 27 pixels to 3, and the
+      WORLD closes with it — which is what makes this the projection rather than the weapon. Every
+      earlier measurement in this entry was of a symptom.
+
+      Carried by `q2_rotation_view_anamorphic`. Which half holds the factor is ambiguous and is stated
+      there: the console reaches (240, 160) as `H = 240` with row 1 at two thirds, the port reaches it
+      as `H = 160` with row 0 at three halves, and the pictures are identical. The second form is used
+      because it leaves every layout's VERTICAL alone, and only the full-screen one has been measured.
+      `0x800781F0` would settle it by naming the distance but is reached only as a function pointer
+      (`0x80079CB4`), so a relocated module can set it.
+
+      *The original entry, and the thirteen things it eliminated, follow.*
+
+- [x] 46a. **The original entry: the view weapon sits too far left, and it is not the projection.** — *the pitched case is
       solved by #96; what is left is the still frame at rest.* Placed through
       `q2_vw_place` at the BASE0 spawn, the blaster's drawn geometry spans x 278…376 of the 512-wide
       viewport — 0.54…0.73 across. The capture has it running from about 0.79 to off the right edge, with

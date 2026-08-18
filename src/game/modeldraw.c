@@ -117,7 +117,7 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
 
     /* The same basis the world is drawn with, roll included — models and brush
      * geometry must lean together or the two separate as soon as you strafe. */
-    q2_rotation_view(view, cam->yaw, cam->pitch, cam->roll);
+    q2_rotation_view_anamorphic(view, cam->yaw, cam->pitch, cam->roll);
 
     /*
      * The instance's own facing, composed into the camera's rotation once

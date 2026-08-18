@@ -197,3 +197,15 @@ void q2_quat_to_matrix(s16 m[3][3], const s16 q[4])
     m[2][1] = (s16)(2 * (yz + wx));
     m[2][2] = (s16)(Q2_ONE_12 - 2 * (xx + yy));
 }
+
+void q2_rotation_view_anamorphic(s16 m[3][3], s32 yaw, s32 pitch, s32 roll)
+{
+    int c;
+
+    q2_rotation_view(m, yaw, pitch, roll);
+
+    /* 0x80055DE4's row scales, expressed on the horizontal so the vertical --
+     * which already matches the console to the pixel -- is left alone. */
+    for (c = 0; c < 3; c++)
+        m[0][c] = (s16)(((s32)m[0][c] * 3) / 2);
+}

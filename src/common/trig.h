@@ -97,6 +97,40 @@ void q2_rotation_euler(s16 m[3][3], s32 rx, s32 ry, s32 rz);
 void q2_rotation_view(s16 m[3][3], s32 yaw, s32 pitch, s32 roll);
 
 /*
+ * The camera, with the console's ANAMORPHIC term in it — 0x80055DE4.
+ *
+ * The world draw loads its matrix from view+160 (0x800313DC), and 0x80037F44
+ * builds that by scaling a basis ROW BY ROW: row 0 by `vw / 320` and row 1 by
+ * `vh / 240`, the divides at 0x80055DFC's 0x66666667 and 0x80055E8C's
+ * 0x88888889. `vw` is the immediate 320 at 0x800779BC and `vh` the immediate
+ * 160 at 0x80077948, so the console's camera is `diag(1, 2/3, 1) * basis` and
+ * its effective projection is (H, 2H/3).
+ *
+ * The port had `diag(1, 1, 1)` and H = 160, so it rendered (160, 160): the
+ * vertical right and **the horizontal one and a half times too wide**. Measured
+ * against a native-resolution capture of the BASE0 spawn, with the 2D briefing
+ * panel proving both frames share a framebuffer origin and width:
+ *
+ *     sky wedge above the panel   console 136 px   before 90 px   after 135 px
+ *     weapon emitter, x           console 325..337  before 301..307  after 322..333
+ *     weapon emitter, y           console 157..166  before 157..166  after 157..167
+ *
+ * The vertical was already exact and stays exact; the horizontal closes from
+ * 27 pixels of error to 3.
+ *
+ * WHICH HALF CARRIES IT IS AMBIGUOUS and the ambiguity is worth stating. The
+ * console reaches (240, 160) as H = 240 with row 1 at two thirds; this reaches
+ * the same place as H = 160 with row 0 at three halves. The pictures are
+ * identical. This form is used because it leaves every viewport's VERTICAL
+ * untouched — the split-screen layouts carry their own projection distances and
+ * none of them has been measured, so scaling their verticals on the strength of
+ * one full-screen capture would be the riskier half of the same guess.
+ * 0x800781F0, which would settle it by naming the distance, is reached only as
+ * a function pointer (0x80079CB4) and can be called by a relocated module.
+ */
+void q2_rotation_view_anamorphic(s16 m[3][3], s32 yaw, s32 pitch, s32 roll);
+
+/*
  * Rotation matrix for a quaternion, both in 1.3.12. `q` is x, y, z, w, which is
  * the order the model animation keys decode to. Row-major, and in the form the
  * GTE's rotation registers want.
