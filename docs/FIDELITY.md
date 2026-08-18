@@ -85,6 +85,29 @@ intrusive linked list and `psx_ot_walk()` iterates buckets from high index to
 low, matching both behaviours. When the primitive pool fills, geometry is dropped
 rather than the pool being grown — the original did the same, and reported it.
 
+**Where the port departs, and why it has to.** The console does not sort the
+world by depth at all: the draw order is authored in `SortData` and the table
+only carries it (see `src/formats/sortdata.h`). Which stream a viewport starts
+at is still unresolved, so the port sorts by depth instead — and a depth sort
+inherits a problem the authored order never had. A bucket is a depth SLAB, about
+a hundred units wide at `PSX_OT_SUBDIV` 8 and the default sort range, and the
+insertion rule above orders everything inside one slab by emission order, which
+for the world is node index. A light, a shootable button or any other detail
+surface mounted a few units off a wall shares that wall's slab, so the two were
+ordered by node index while the slab BOUNDARY between them followed depth; walk
+towards such a surface and the two rules disagree, and the surface swaps in and
+out. That is z-fighting produced by the port's own quantisation, not by anything
+the console does.
+
+`psx_ot_add_depth()` takes the depth the bucket quantised away and orders the
+slab by it, so the order inside a slab continues the order between slabs and
+there is no boundary left to swap across. The two console artifacts above are
+untouched: a primitive is still sorted by ONE depth for the whole of it, so long
+polygons still sort by their average and intersecting polygons still pop. Every
+emitter that sorts by depth supplies the key — world, models, effects, bolts —
+because they share a slice and a rule that only some of them follow is not one.
+`psx_ot_add()` and `psx_ot_add_bucket()` do not, and behave exactly as before.
+
 **Setting.** `r_psx_ot_sort` (default on). Off enables a depth buffer.
 
 ---
@@ -247,7 +270,9 @@ Claims here are testable, and should be tested rather than eyeballed:
 2. **Divide conformance.** `gte_divide()` is exposed specifically so it can be
    swept across its whole input domain and diffed against a reference.
 3. **OT ordering.** Assert that primitives added to one bucket emerge in reverse
-   insertion order, and that buckets emerge far-to-near.
+   insertion order, that buckets emerge far-to-near, and that a bucket whose
+   primitives carry a depth key emerges in key order with equal keys still
+   falling back on reverse insertion. `tests/test_gte.c`.
 4. **Frame comparison.** The end goal: capture the same scene from an emulator
    running the original and from this port, and diff. Any pixel difference is a
    bug in one of the above.

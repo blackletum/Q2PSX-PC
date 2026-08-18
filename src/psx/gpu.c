@@ -117,7 +117,7 @@ u32 psx_ot_depth_bucket(const psx_ot *ot, u32 otz)
 }
 
 /* The shared tail of both add paths, once the bucket is decided. */
-static psx_prim *ot_link(psx_ot *ot, u32 bucket, u16 otz)
+static psx_prim *ot_link(psx_ot *ot, u32 bucket, u16 otz, u32 key)
 {
     u32 idx;
     psx_prim *prim;
@@ -129,11 +129,39 @@ static psx_prim *ot_link(psx_ot *ot, u32 bucket, u16 otz)
     prim = &ot->prims[idx];
 
     memset(prim, 0, sizeof(*prim));
-    prim->otz = otz;
+    prim->otz      = otz;
+    prim->sort_key = key;
 
-    /* Prepend, matching the hardware's list construction. */
-    ot->next[idx]           = ot->bucket_head[bucket];
-    ot->bucket_head[bucket] = (s32)idx;
+    if (key == PSX_OT_KEY_NONE) {
+        /* Prepend, matching the hardware's list construction. */
+        ot->next[idx]           = ot->bucket_head[bucket];
+        ot->bucket_head[bucket] = (s32)idx;
+        return prim;
+    }
+
+    /*
+     * Keyed: hold the bucket's list in descending key order from the head, so
+     * the walk still draws the farthest thing in the bucket first. Equal keys
+     * put the newcomer at the FRONT of its run of equals, which is the prepend
+     * rule the hardware has and what every unkeyed caller keeps. A
+     * PSX_OT_KEY_NONE entry stops the search — see the header.
+     */
+    {
+        s32 prev = -1;
+        s32 cur  = ot->bucket_head[bucket];
+
+        while (cur >= 0 && ot->prims[cur].sort_key != PSX_OT_KEY_NONE &&
+               ot->prims[cur].sort_key > key) {
+            prev = cur;
+            cur  = ot->next[cur];
+        }
+
+        ot->next[idx] = cur;
+        if (prev < 0)
+            ot->bucket_head[bucket] = (s32)idx;
+        else
+            ot->next[prev] = (s32)idx;
+    }
 
     return prim;
 }
@@ -172,10 +200,15 @@ u32 q2_ot_bucket_for_depth(const psx_ot *ot, u32 depth, s32 far_z)
 
 psx_prim *psx_ot_add(psx_ot *ot, u16 otz)
 {
+    return psx_ot_add_depth(ot, otz, PSX_OT_KEY_NONE);
+}
+
+psx_prim *psx_ot_add_depth(psx_ot *ot, u16 otz, u32 key)
+{
     if (!ot || ot->prim_count >= ot->prim_capacity)
         return NULL;
 
-    return ot_link(ot, psx_ot_depth_bucket(ot, otz), otz);
+    return ot_link(ot, psx_ot_depth_bucket(ot, otz), otz, key);
 }
 
 psx_prim *psx_ot_add_bucket(psx_ot *ot, u32 bucket)
@@ -193,7 +226,7 @@ psx_prim *psx_ot_add_bucket(psx_ot *ot, u32 bucket)
      * already-resolved ones a second time, which sent the briefing's panel out
      * of its window and drew the world through it.
      */
-    return ot_link(ot, bucket, (u16)bucket);
+    return ot_link(ot, bucket, (u16)bucket, PSX_OT_KEY_NONE);
 }
 
 void psx_ot_walk(const psx_ot *ot, psx_ot_visit_fn fn, void *user)

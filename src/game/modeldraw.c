@@ -442,11 +442,20 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
                  */
                 prim = psx_ot_add_bucket(ot, (u32)inst->bucket_override);
             } else {
-                /* One link point per face, from its own mean depth. */
+                /*
+                 * One link point per face, from its own mean depth. That mean
+                 * is also handed over as the sort key, because a bucket is a
+                 * hundred-unit slab and a face that shared one with the wall
+                 * behind it would otherwise be ordered by which emitter ran
+                 * first. See psx_ot_add_depth.
+                 */
                 for (i = 0; i < 4; i++)
                     otz += window[f.v[i]].z;
-                otz = q2_ot_bucket_for_depth(ot, otz / 4, cam->sort_range);
-                prim = psx_ot_add(ot, (u16)otz);
+                otz /= 4;
+                prim = psx_ot_add_depth(
+                           ot, (u16)q2_ot_bucket_for_depth(ot, otz,
+                                                           cam->sort_range),
+                           otz);
             }
 
             if (!prim) {

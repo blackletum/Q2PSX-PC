@@ -410,8 +410,13 @@ u32 q2_projectiles_build_ot(const struct q2_projectiles *list,
             if (!good)
                 continue;
 
-            prim = psx_ot_add(ot, (u16)q2_ot_bucket_for_depth(ot, depth / 4u,
-                                                              cam->sort_range));
+            /* The mean depth as the key too, so a bolt and the geometry it
+             * shares a bucket with sort by depth rather than by which emitter
+             * ran first. See psx_ot_add_depth. */
+            prim = psx_ot_add_depth(ot,
+                                    (u16)q2_ot_bucket_for_depth(
+                                        ot, depth / 4u, cam->sort_range),
+                                    depth / 4u);
             if (!prim)
                 break;
 

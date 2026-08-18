@@ -12,6 +12,7 @@
 
 static u32 bucket_for(const psx_ot *ot, u32 depth_sum, u32 corners,
                       s32 far_z);
+static u32 sort_key_for(u32 depth_sum, u32 corners);
 
 /*
  * `(a * b) >> 12`, rounding toward zero.
@@ -1213,7 +1214,9 @@ u32 q2_fx_glint_build_ot(const q2_fx_glint_mesh *mesh,
         if (!good)
             continue;
 
-        prim = psx_ot_add(ot, (u16)bucket_for(ot, depth, 4, cam->sort_range));
+        prim = psx_ot_add_depth(ot,
+                                (u16)bucket_for(ot, depth, 4, cam->sort_range),
+                                sort_key_for(depth, 4));
         if (!prim)
             break;
 
@@ -1466,6 +1469,18 @@ static u32 bucket_for(const psx_ot *ot, u32 depth_sum, u32 corners, s32 far_z)
     return q2_ot_bucket_for_depth(ot, depth_sum / corners, far_z);
 }
 
+/*
+ * The same depth the bucket came from, kept at full resolution so an effect and
+ * the geometry it shares a bucket with are ordered by depth rather than by
+ * which of the two emitters ran first. See psx_ot_add_depth.
+ */
+static u32 sort_key_for(u32 depth_sum, u32 corners)
+{
+    if (corners == 0)
+        corners = 1;
+    return depth_sum / corners;
+}
+
 /* Split a table colour word into a psx_rgb and its ABE bit. */
 static void unpack_colour(u32 word, psx_rgb *rgb, bool *semi)
 {
@@ -1564,7 +1579,9 @@ static u32 draw_groups(q2_fx_world *w, const q2_camera *cam, u32 viewport,
                                    pt[2] - cam->pos[2], &xy, &z))
                 continue;
 
-            prim = psx_ot_add(ot, (u16)bucket_for(ot, z, 1, cam->sort_range));
+            prim = psx_ot_add_depth(ot,
+                                    (u16)bucket_for(ot, z, 1, cam->sort_range),
+                                    sort_key_for(z, 1));
             if (!prim) {
                 w->stats.ot_overflow++;
                 break;
@@ -1668,7 +1685,9 @@ static u32 draw_beam_ring(psx_ot *ot, gte_state *gte, const q2_camera *cam,
         if (!good)
             continue;
 
-        prim = psx_ot_add(ot, (u16)bucket_for(ot, depth, 4, cam->sort_range));
+        prim = psx_ot_add_depth(ot,
+                                (u16)bucket_for(ot, depth, 4, cam->sort_range),
+                                sort_key_for(depth, 4));
         if (!prim) {
             stats->ot_overflow++;
             break;

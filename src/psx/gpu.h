@@ -113,6 +113,13 @@ typedef struct psx_prim {
     bool     quad_zorder;
 
     u16      otz;          /* ordering-table bucket this landed in       */
+
+    /*
+     * The sub-bucket depth this primitive was ordered by, larger being farther,
+     * or PSX_OT_KEY_NONE for a packet whose place is structural. See
+     * psx_ot_add_depth.
+     */
+    u32      sort_key;
 } psx_prim;
 
 /* ------------------------------------------------------------------------- */
@@ -279,6 +286,43 @@ void      psx_ot_clear(psx_ot *ot);
 psx_prim *psx_ot_add(psx_ot *ot, u16 otz);
 
 /*
+ * WHY A BUCKET IS NOT ENOUGH, AND WHAT `key` IS FOR.
+ *
+ * A bucket is a depth SLAB — about 100 world units wide at PSX_OT_SUBDIV 8 and
+ * the default sort range — and everything inside one slab is ordered by
+ * insertion, which for the world means node index. Node index has nothing to do
+ * with depth, so a light panel, a shootable button or any other detail surface
+ * sitting a few units off the wall it is mounted on shares that wall's bucket
+ * and the two are ordered arbitrarily. That order holds while both stay in the
+ * slab and is overruled the moment a slab boundary happens to fall between
+ * them, so walking towards such a surface makes it swap in and out — the
+ * reported z-fighting. It is not a decal system misbehaving; it is the sort
+ * being flat inside a bucket and stepping between buckets.
+ *
+ * `key` carries the depth the bucket quantised away, so the order inside a slab
+ * continues the order between slabs instead of contradicting it. Larger is
+ * farther, matching `otz`; equal keys keep the hardware's prepend rule, so a
+ * caller that passes the same key for every primitive — or PSX_OT_KEY_NONE,
+ * which asks for a plain prepend and is what `psx_ot_add` and
+ * `psx_ot_add_bucket` use — behaves exactly as it did before this existed.
+ *
+ * A PSX_OT_KEY_NONE primitive is also a BARRIER: keyed primitives never sort
+ * past one. Structural packets live in reserved buckets of their own
+ * (PSX_OT_DEPTH_RESERVE) so this should not arise, but if one ever shares a
+ * bucket with geometry its position stays where the prepend rule put it rather
+ * than being decided by a depth it never supplied.
+ *
+ * This does not make the sort exact and is not meant to. A primitive is still
+ * ordered by ONE depth for the whole of it, so long polygons still sort by
+ * their average and can still incorrectly occlude, and intersecting polygons
+ * still pop. Those are the console's artifacts and they stay. What goes is the
+ * quantisation on top of them, which is the port's own.
+ */
+#define PSX_OT_KEY_NONE 0xFFFFFFFFu
+
+psx_prim *psx_ot_add_depth(psx_ot *ot, u16 otz, u32 key);
+
+/*
  * Add a primitive at an ABSOLUTE bucket index, ignoring the window and the
  * depth inversion. This is what a packet whose place in the table is structural
  * rather than depth-derived uses — the draw envs, the damage flash and the
@@ -290,8 +334,9 @@ psx_prim *psx_ot_add_bucket(psx_ot *ot, u32 bucket);
 u32 psx_ot_depth_bucket(const psx_ot *ot, u32 otz);
 
 /* Iterate the table in DrawOTag order: bucket 0 first, so far geometry is drawn
- * before near geometry, and within a bucket the most recently added primitive
- * first. `fn` is called once per primitive. */
+ * before near geometry, and within a bucket the farthest `sort_key` first,
+ * falling back to the most recently added where the keys are equal or absent.
+ * `fn` is called once per primitive. */
 typedef void (*psx_ot_visit_fn)(const psx_prim *prim, void *user);
 void psx_ot_walk(const psx_ot *ot, psx_ot_visit_fn fn, void *user);
 

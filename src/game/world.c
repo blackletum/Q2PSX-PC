@@ -230,7 +230,17 @@ static psx_prim *emit_quad(psx_ot *ot,
      * the port's stand-in for when no order is supplied.
      */
     if (forced_bucket >= 0) {
-        otz = (u32)forced_bucket;
+        /*
+         * A CONSOLE bucket, so it is scaled on the way in like every other
+         * console constant that names a bucket outright — q2_screen_view_otz,
+         * q2_screen_overlay_otz and the flash and water buckets in screen.c are
+         * the others, and psx_ot_add_bucket's own comment says the scaling
+         * belongs at each of those doors rather than at its. This one was
+         * missed: SortData's 0..45 went in as REAL bucket indices, so the whole
+         * authored world was packed into the far ninth of a 408-bucket slice
+         * while every entity sharing that slice spread across all of it.
+         */
+        otz = (u32)forced_bucket * PSX_OT_SUBDIV;
         if (otz >= span)
             otz = span - 1;
         prim = psx_ot_add_bucket(ot, ot->window_len ? ot->window_base + otz : otz);
@@ -243,8 +253,26 @@ static psx_prim *emit_quad(psx_ot *ot,
          * were ordered by two different rules. They are the same rule now, and
          * it is the one that also holds the slice's structural buckets back.
          */
-        otz  = q2_ot_bucket_for_depth(ot, otz, far);
-        prim = psx_ot_add(ot, (u16)otz);
+        /*
+         * The bucket is a depth SLAB about 100 units wide, and inside one slab
+         * the plain add falls back on insertion order — which, for the world,
+         * is node index. A light, a shootable button or any other detail
+         * surface sits a few units off the wall it is mounted on, so the two
+         * share a slab and are ordered by something that has nothing to do with
+         * depth; and because the slab boundary DOES follow depth, walking
+         * towards such a surface makes the two rules disagree and the surface
+         * swap in and out. Handing the quad's own depth over as the key keeps
+         * the order inside a slab continuous with the order between slabs, so
+         * there is no boundary left to swap across. See psx_ot_add_depth.
+         *
+         * The key is the same average `otz` the bucket comes from, not the
+         * nearest or farthest corner. Measured over a dozen zones a farthest-
+         * corner key scores about 2% better on mis-ordered pixels, and it is
+         * still the wrong choice: a key that ranks quads differently from the
+         * bucket reintroduces exactly the discontinuity this removes.
+         */
+        prim = psx_ot_add_depth(ot, (u16)q2_ot_bucket_for_depth(ot, otz, far),
+                                otz);
     }
     if (!prim) {
         if (stats) stats->ot_overflow++;

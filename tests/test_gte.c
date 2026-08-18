@@ -233,6 +233,15 @@ static void log_visit(const psx_prim *prim, void *user)
         log->order[log->count++] = prim->otz;
 }
 
+/* The same log, keyed on `clut` — the tag the intra-bucket tests label their
+ * primitives with, since those all share one otz. */
+static void log_clut(const psx_prim *prim, void *user)
+{
+    visit_log *log = (visit_log *)user;
+    if (log->count < 16)
+        log->order[log->count++] = prim->clut;
+}
+
 static void test_ordering_table(void)
 {
     psx_ot ot;
@@ -283,6 +292,57 @@ static void test_ordering_table(void)
                    "depth 5 counts back from the far end");
         first = &ot.prims[ot.bucket_head[bucket]];
         check_eq_i(first->clut, 3, "within a bucket, the last added draws first");
+    }
+
+    /*
+     * A KEYED add orders the bucket by depth instead, which is what stops a
+     * light or a button that shares a wall's bucket from being ordered by
+     * emission order and swapping the moment the bucket boundary moves. All
+     * three land in the same bucket; the farthest must come out first, and the
+     * insertion order is deliberately the reverse of the depth order so that a
+     * prepend cannot pass this by accident.
+     */
+    psx_ot_clear(&ot);
+    p = psx_ot_add_depth(&ot, 5, 100); p->clut = 1;   /* nearest  */
+    p = psx_ot_add_depth(&ot, 5, 900); p->clut = 2;   /* farthest */
+    p = psx_ot_add_depth(&ot, 5, 500); p->clut = 3;   /* middle   */
+
+    {
+        memset(&log, 0, sizeof(log));
+        psx_ot_walk(&ot, log_clut, &log);
+        check_eq_i(log.count, 3, "all three keyed primitives were visited");
+        check_eq_i(log.order[0], 2, "in one bucket the farthest key draws first");
+        check_eq_i(log.order[1], 3, "then the middle one");
+        check_eq_i(log.order[2], 1, "then the nearest");
+    }
+
+    /* Equal keys keep the hardware's rule, so a caller that keys everything the
+     * same is exactly where it was before keys existed. */
+    psx_ot_clear(&ot);
+    p = psx_ot_add_depth(&ot, 5, 500); p->clut = 1;
+    p = psx_ot_add_depth(&ot, 5, 500); p->clut = 2;
+    p = psx_ot_add_depth(&ot, 5, 500); p->clut = 3;
+
+    {
+        memset(&log, 0, sizeof(log));
+        psx_ot_walk(&ot, log_clut, &log);
+        check_eq_i(log.order[0], 3, "equal keys still draw last-added first");
+        check_eq_i(log.order[2], 1, "...and first-added last");
+    }
+
+    /* An unkeyed add is a barrier: it prepends, and a later keyed add does not
+     * sort past it however far away it claims to be. */
+    psx_ot_clear(&ot);
+    p = psx_ot_add_depth(&ot, 5, 100); p->clut = 1;
+    p = psx_ot_add_bucket(&ot, psx_ot_depth_bucket(&ot, 5)); p->clut = 2;
+    p = psx_ot_add_depth(&ot, 5, 900); p->clut = 3;
+
+    {
+        memset(&log, 0, sizeof(log));
+        psx_ot_walk(&ot, log_clut, &log);
+        check_eq_i(log.order[0], 3, "a keyed add stops at the unkeyed one");
+        check_eq_i(log.order[1], 2, "the unkeyed packet keeps its place");
+        check_eq_i(log.order[2], 1, "and what it was prepended over stays put");
     }
 
     psx_ot_free(&ot);
