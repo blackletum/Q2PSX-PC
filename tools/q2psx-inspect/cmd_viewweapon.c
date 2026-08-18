@@ -124,7 +124,7 @@ static void print_clip(const q2_vm_tables *t, int w, q2_vm_state s, bool verbose
  * answer to where the weapon goes.
  */
 static int render_view(disc *d, q2_vm_tables *tab, const char *map,
-                       int zone_index, int weapon, const char *out)
+                       int zone_index, int weapon, const char *out, int settle_ticks)
 {
     q2_world_zone zone;
     q2_screen scr;
@@ -213,10 +213,21 @@ static int render_view(disc *d, q2_vm_tables *tab, const char *map,
         }
     }
 
-    /* Let the weapon settle out of its raise so the pose is the resting one. */
+    /*
+     * Let the weapon settle out of its raise, then hold it for as long as the
+     * caller asked.
+     *
+     * The extra argument is not a convenience. The blaster's idle clip keeps
+     * its translation at (140, 157..165, 44) on all fourteen keys and moves the
+     * ROTATION instead, by up to about twelve degrees — so the weapon's drawn
+     * extent depends on where in a 1,230-tick loop the frame was taken, and a
+     * single sample cannot be held against a capture taken at an unknown phase.
+     * Sweeping this argument bounds it.
+     */
     if (have_model) {
-        int i;
-        for (i = 0; i < 60; i++)
+        int i, n = 60 + (settle_ticks > 0 ? settle_ticks / 12 : 0);
+
+        for (i = 0; i < n; i++)
             q2_vw_advance(&vw, 12, false, Q2_VW_FIRED);
     }
 
@@ -350,7 +361,7 @@ static int render_view(disc *d, q2_vm_tables *tab, const char *map,
 
 /* ------------------------------------------------------------------------- */
 int cmd_viewweapon(disc *d, const char *weapon, const char *out,
-                   const char *map, int zone_index)
+                   const char *map, int zone_index, int settle_ticks)
 {
     q2_exe e;
     q2_vm_tables t;
@@ -413,7 +424,7 @@ int cmd_viewweapon(disc *d, const char *weapon, const char *out,
      */
     if (out) {
         int rc = render_view(d, &t, map ? map : "BASE1", zone_index,
-                             (want >= 0) ? want : 1, out);
+                             (want >= 0) ? want : 1, out, settle_ticks);
         q2_vm_tables_free(&t);
         return rc;
     }

@@ -15,6 +15,6 @@
  * sort of claim you have to look at, and this needs no window.
  */
 int cmd_viewweapon(disc *d, const char *weapon, const char *out,
-                   const char *map, int zone_index);
+                   const char *map, int zone_index, int settle_ticks);
 
 #endif /* Q2PSX_INSPECT_CMD_VIEWWEAPON_H */

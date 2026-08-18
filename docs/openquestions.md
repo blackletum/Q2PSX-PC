@@ -2212,12 +2212,31 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
           retail  x 0.550..0.820   y 0.579..1.000   (read off the capture by eye)
 
       That is a different defect from the one this entry describes. **The left edge and the top edge
-      agree**; what is short is the RIGHT edge, by about 0.09 of the picture width — the port's weapon is
-      roughly seven tenths as wide as the console's while starting in the same place. "Sits too far left"
-      is withdrawn; "does not reach far enough right" replaces it.
-      The retail numbers above are eyeballed off a screenshot and are the weakest link in the argument.
-      **What this needs to close is the capture committed to the repo** so the box can be measured rather
-      than estimated, and the comparison pinned the way every other measurement here is.
+      agree**; what was short is the RIGHT edge. "Sits too far left" is withdrawn.
+
+      **And the short right edge was the near plane.** `q2_model_build_ot` marked a vertex invalid when
+      `gte_divide` raised `GTE_FLAG_DIV_OVERFLOW` and dropped every face touching it. That flag is raised
+      when the projection distance reaches twice the depth — at `h` 160, anything nearer than 80 — so it
+      fires on exactly the geometry closest to the eye, which on a view weapon is the grip and the
+      forearm. The hardware CLAMPS the quotient to `0x1FFFF` instead of trapping, and whether the game
+      then discards the face is a question about the game: **the executable contains no `cfc2 rX, $31`.**
+      Twelve `cfc2` in the whole image, not one reading FLAG, so nothing can branch on an overflow it
+      never loads. The original draws these faces stretched to the saturation limits. Fixed, and the
+      weapon's box widened from 0.188 of the picture to 0.225.
+
+      **Measured across the idle cycle, the port now brackets the capture.** The blaster's idle keeps its
+      translation at (140, 157..165, 44) on all fourteen keys and moves the ROTATION instead, by about
+      twelve degrees, so the drawn extent depends on the phase — which is why a single sample was never
+      going to settle this. `viewweapon` takes a hold in ticks now; sweeping it over the 1,230-tick loop:
+
+          port    left 0.521..0.543   right 0.693..0.803   width 0.162..0.281
+          retail  left 0.550          right 0.820          width 0.270
+
+      Retail's width sits inside the port's range and its right edge is a hair above the port's maximum,
+      which is inside the error of a number read off a screenshot by eye.
+      **What is left is not a defect but a measurement.** Closing it needs the capture committed to the
+      repo so the box can be extracted rather than estimated, and the phase matched rather than guessed;
+      until then the honest statement is that the two agree to the precision available.
 
 ---
 
