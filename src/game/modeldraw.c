@@ -131,26 +131,36 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
      *
      * `q2_rotation_yaw_pitch` builds Ry with m[0][2] = -sin and m[2][0] = +sin,
      * which is Ry(-yaw) — the WORLD-TO-CAMERA form, and exactly right for the
-     * view basis above. Used unchanged as an instance's MODEL-TO-WORLD matrix it
-     * turns the mesh the wrong way, and the Soldier mesh is additionally
-     * authored facing -Z, so the two compose to `drawn = 2048 - yaw`.
+     * view basis above. Used unchanged as an instance's MODEL-TO-WORLD matrix
+     * it turns the mesh the wrong way, so the yaw is mirrored on the way in.
      *
-     * Measured through this very function with a fixed camera and the Soldier
-     * from BASE1's bank: yaw 0 renders the FRONT (should be the back), yaw 2048
-     * renders the BACK, and 1024 / 3072 happen to be right because they are
-     * their own mirror. Everything between was reflected, so a creature walked
-     * and fired along `angles[2]` — which is correct, AngleVectors at
-     * 0x8005BB58 builds forward from (sin yaw, cos yaw) and that is the vector
-     * M_walkmove uses — while its body pointed somewhere else entirely.
+     * THAT MIRROR IS THE WHOLE CORRECTION. This used to add a half turn on top
+     * of it — `2048 - yaw` — on the grounds that the Soldier mesh is authored
+     * facing -Z, and that second half is what was still turning every creature
+     * round. It was measured through this very function, which is circular: the
+     * function's own convention was both the instrument and the thing under
+     * test.
      *
-     * `2048 - yaw` inverts both at once and leaves the view basis alone.
+     * The mesh decides it, and it says +Z. BASE1's Soldier poses to Z bounds
+     * -151..+266, asymmetric toward +Z by the length of the outstretched weapon
+     * arm, which is the part of a humanoid that points where it is facing. In
+     * the game the extra half turn shows plainly: a soldier that has the player
+     * down to 8 hp is drawn back-to-camera, and without it the same frame draws
+     * it facing the player with its gun across its body.
+     *
+     * The simulation was never the problem and is now measured rather than
+     * assumed — `--trace-cre` reports the angle between the direction a
+     * creature travels and the one it faces, and over a hunting soldier's run
+     * that angle is 0 on every walking tick. It reads 2048 only while the
+     * soldier is backing off under attack_state 1 and while a corpse slides,
+     * both of which are meant to be backwards.
      */
     if (inst->rot)
         memcpy(spin, inst->rot, sizeof(s16) * 9);
     else if (inst->pitch == 0 && inst->roll == 0)
-        q2_rotation_yaw_pitch(spin, Q2_ANGLE_180 - inst->yaw, 0);
+        q2_rotation_yaw_pitch(spin, -inst->yaw, 0);
     else
-        q2_rotation_euler(spin, inst->pitch, Q2_ANGLE_180 - inst->yaw,
+        q2_rotation_euler(spin, inst->pitch, -inst->yaw,
                           inst->roll);
 
     /*

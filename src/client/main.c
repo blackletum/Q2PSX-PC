@@ -915,6 +915,7 @@ typedef struct client {
     bool              mp_dead[Q2_MP_MAX_PLAYERS];
     int               trace_cre;      /* creature index to trace, -1 for none  */
     u32               trace_ticks;
+    s32               trace_prev[3];  /* the traced creature's last position */
 
     /* Where each player's viewport looks from. Player 0's is the sim's. */
     s32               mp_view_pos[Q2_MP_MAX_PLAYERS][3];
@@ -1831,13 +1832,56 @@ static void client_creatures_tick(client *c, float dt, const s32 eye[3])
             c->trace_ticks < 400) {
             const q2_monster *m = &c->creatures.set.monsters[c->trace_cre];
 
-            Q2_INFO("t%-4u move %-4d frame %-4d as %d flags %08X %s%s%s",
-                    c->trace_ticks,
-                    m->currentmove ? m->currentmove->first_frame : -1,
-                    m->frame, m->attack_state, m->aiflags,
-                    m->enemy ? "enemy " : "no-enemy ",
-                    m->dead ? "dead " : "",
-                    m->in_use ? "" : "gone");
+            /*
+             * Position and facing come with the frame, because "it moonwalks"
+             * is a claim that the two disagree: the walk clip advances while
+             * the body travels somewhere the model is not pointing. Neither
+             * number was in this line, so the claim could only be argued from
+             * the screen.
+             *
+             * `step` is the distance covered since the previous tick and
+             * `drift` the angle between the direction actually travelled and
+             * the direction faced, in the engine's 4096-step circle. A walking
+             * creature should hold drift near zero; a moonwalking one holds it
+             * near 2048.
+             */
+            {
+                s32 dx = m->pos[0] - c->trace_prev[0];
+                s32 dz = m->pos[2] - c->trace_prev[2];
+                s32 step = (s32)sqrt((double)dx * dx + (double)dz * dz);
+                s32 drift = -1;
+
+                if (step > 1) {
+                    /*
+                     * YAW ZERO IS +Z, and the circle turns toward +X. Measured
+                     * rather than assumed: a soldier walking due +z holds yaw
+                     * 0, one walking due -x holds 3072, and one walking the
+                     * +x+z diagonal holds 512. atan2(dz, dx) fits the diagonal
+                     * and misses both axes by a quarter turn; atan2(dx, dz)
+                     * fits all three.
+                     */
+                    double a = atan2((double)dx, (double)dz);
+                    s32 moved = (s32)(a * 4096.0 / (2.0 * 3.14159265358979));
+                    drift = (moved - (s32)m->angles[2]) & 4095;
+                    if (drift > 2048) drift -= 4096;
+                }
+
+                Q2_INFO("t%-4u move %-4d frame %-4d as %d flags %08X"
+                        "  pos %d,%d yaw %-5d ideal %-5d step %-4d drift %-5d"
+                        "  %s%s%s",
+                        c->trace_ticks,
+                        m->currentmove ? m->currentmove->first_frame : -1,
+                        m->frame, m->attack_state, m->aiflags,
+                        m->pos[0], m->pos[2], (int)m->angles[2],
+                        (int)m->ideal_yaw, step, drift,
+                        m->enemy ? "enemy " : "no-enemy ",
+                        m->dead ? "dead " : "",
+                        m->in_use ? "" : "gone");
+
+                c->trace_prev[0] = m->pos[0];
+                c->trace_prev[1] = m->pos[1];
+                c->trace_prev[2] = m->pos[2];
+            }
             c->trace_ticks++;
         }
     }
