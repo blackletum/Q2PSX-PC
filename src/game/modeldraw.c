@@ -10,7 +10,8 @@
 typedef struct scratch_vertex {
     gte_sxy xy;
     u16     z;
-    bool    valid;
+    bool    valid;      /* the slot was written at all — a decode question */
+    bool    overflow;   /* the GTE's divide clamped; counted, never rejected */
 
     /*
      * The lit colour of this slot. The original's window holds it in the same
@@ -328,7 +329,31 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
 
             window[slot].xy    = gte->sxy[2];
             window[slot].z     = gte->sz[3];
-            window[slot].valid = (gte->flag & GTE_FLAG_DIV_OVERFLOW) == 0;
+            /*
+             * THE DIVIDE OVERFLOWING IS NOT A REJECTION, and treating it as one
+             * cut the front off anything close to the eye.
+             *
+             * `gte_divide` sets this flag when the projection distance reaches
+             * twice the depth — at `h` 160 that is any vertex nearer than 80 —
+             * and the hardware CLAMPS the quotient to 0x1FFFF rather than
+             * trapping. `gte_push_sxy` has already saturated the coordinate to
+             * the hardware's own [-1024, 1023], so the slot holds exactly what
+             * the GTE would have left behind.
+             *
+             * Whether the game then throws the face away is a question about
+             * the GAME, and the answer is in the instruction census:
+             * **the executable contains no `cfc2 rX, $31` at all** — twelve
+             * `cfc2` in the whole image and not one of them reads FLAG. Nothing
+             * can branch on an overflow it never loads, so the original draws
+             * these faces, stretched to the saturation limits. That is the
+             * near-plane smear the hardware is known for, and FIDELITY.md's
+             * whole argument is that artefacts of the arithmetic are the point.
+             *
+             * `valid` therefore means "this slot was written" and nothing more.
+             * It is what separates a decode fault from geometry.
+             */
+            window[slot].valid    = true;
+            window[slot].overflow = (gte->flag & GTE_FLAG_DIV_OVERFLOW) != 0;
 
             /*
              * The normal through the same op the original uses. NCS is NCT's
@@ -378,19 +403,22 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
                 }
             }
             if (!ok) {
-                if (stats) {
-                    /* Distinguish "never written" from "behind the camera":
-                     * the first is a decode fault, the second is the original's
-                     * own near-plane behaviour. */
-                    if (f.v[0] < Q2_MODEL_SCRATCH_MAX &&
-                        f.v[1] < Q2_MODEL_SCRATCH_MAX &&
-                        f.v[2] < Q2_MODEL_SCRATCH_MAX &&
-                        f.v[3] < Q2_MODEL_SCRATCH_MAX)
-                        stats->faces_rejected_near++;
-                    else
-                        stats->faces_rejected_bad++;
-                }
+                /* A slot the decode never wrote, which is a fault rather than
+                 * geometry — the near case no longer reaches here. */
+                if (stats)
+                    stats->faces_rejected_bad++;
                 continue;
+            }
+
+            /* Counted so the smear stays visible in the numbers even though it
+             * no longer costs a face. */
+            if (stats) {
+                for (i = 0; i < 4; i++) {
+                    if (window[f.v[i]].overflow) {
+                        stats->faces_rejected_near++;
+                        break;
+                    }
+                }
             }
 
             /*
