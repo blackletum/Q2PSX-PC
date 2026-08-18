@@ -2532,12 +2532,24 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
       empty as the port's, and `dynamic_view` having no producer is a faithful reconstruction rather than
       a missing caller. That closes the question this entry opened.
 
-      **What it leaves open is narrower and different**: with the view list empty, the console's gun is lit
-      by its glow floor alone — the `"000"` default, 48 per component — and yet a capture shows it lighter
-      and plainly purple where the port's view-space test render came out dark. So the remaining
-      difference is not in WHICH lights are gathered but in what the gather does with them: the modulate
-      path, the back colour, or the saturation at `q2_light_env_build`. That is a lighting question, not a
-      view-weapon one, and it should be chased there.
+      **What it leaves open is narrower and different**, and three configurations have now been tried
+      against the same BASE0 capture:
+
+          world list + the player's node   too bright, washed pink   (what the port ships)
+          view space, the player's node    dark and flat
+          view space, no node (fallback)   dark and grey
+
+      The console's is a mid-tone purple with clearly separated face brightnesses — none of the three.
+      So the difference is not in WHICH lights are gathered: the gather has been tried three ways and the
+      answer is in what is done with the result. The candidates left are the modulate path, the back
+      colour, the glow the viewmodel is actually created with (the port hardcodes `0x30` a component from
+      the entity spawn default), and the two 1.12 intensities at `+0xFC`/`+0xFE` — which the client passes
+      as ONE and which `0x8004EE70` shows the viewmodel COPYING from the player entity. That last one is
+      the first thing to check and it has not been.
+
+      **This is a lighting question rather than a view-weapon one** and should be chased in
+      `q2_light_env_build`. Recorded here because the three negative results are worth more than the
+      hypothesis that generated them.
 
 - [x] 50a. **The view weapon queues something white and 128 units wide at its own position — and the
       gate it is behind is NEVER WRITTEN, so it never happens.** `0x8004F6CC` calls `0x8007012C` with the
