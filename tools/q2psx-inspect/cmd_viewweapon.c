@@ -46,6 +46,17 @@ typedef struct check {
 
 static int g_total;
 
+/*
+ * A screen box, in fractions of the picture, that the vertex walk reports on.
+ *
+ * This is how a blob measured in a photograph becomes a MODEL COORDINATE:
+ * measure a feature's box in the port's own frame, hand it back here, and the
+ * walk says which vertices made it and where they sit relative to the grip.
+ * That is the quantity that turns "the weapon is 0.078 of the picture too far
+ * left" into an equation with one unknown instead of two.
+ */
+static double probe_x0, probe_x1, probe_y0, probe_y1;
+
 static bool imm_at(const q2_exe *e, u32 addr, s32 *out)
 {
     u32 word;
@@ -537,6 +548,55 @@ static int render_view(disc *d, q2_vm_tables *tab, const char *map,
                        "   grip at (%d %d %d)\n",
                        (int)cam.projection, lox, hix, loz, hiz,
                        vw.cur_t[0], vw.cur_t[1], vw.cur_t[2]);
+
+                if (probe_x0 < probe_x1) {
+                    s32 sx0 = (s32)(probe_x0 * scr.view[0].w);
+                    s32 sx1 = (s32)(probe_x1 * scr.view[0].w);
+                    s32 sy0 = (s32)(probe_y0 * scr.view[0].h);
+                    s32 sy1 = (s32)(probe_y1 * scr.view[0].h);
+                    s32 axmin = 1 << 30, axmax = -(1 << 30);
+                    s32 azmin = 1 << 30, azmax = -(1 << 30);
+                    u32 hits = 0;
+
+                    for (vi = 0; vi < nv; vi++) {
+                        q2_model_vertex mv;
+                        s32 p[3], vx, vy, vz, spx, spy;
+                        int rr;
+
+                        if (!q2_model_get_vertex(&model, vi, &mv))
+                            break;
+                        for (rr = 0; rr < 3; rr++)
+                            p[rr] = ((s32)rot[rr][0] * mv.x
+                                  + (s32)rot[rr][1] * mv.y
+                                  + (s32)rot[rr][2] * mv.z) >> Q2_FRAC_12;
+                        vx = vw.cur_t[0] + p[0];
+                        vy = vw.cur_t[1] + p[1];
+                        vz = vw.cur_t[2] + p[2];
+                        if (vz <= 0)
+                            continue;
+                        spx = (s32)scr.view[0].w / 2
+                            + vx * (s32)cam.projection / vz;
+                        spy = (s32)scr.view[0].h / 2
+                            + vy * (s32)cam.projection / vz;
+                        if (spx < sx0 || spx > sx1 || spy < sy0 || spy > sy1)
+                            continue;
+                        hits++;
+                        if (vx < axmin) axmin = vx;
+                        if (vx > axmax) axmax = vx;
+                        if (vz < azmin) azmin = vz;
+                        if (vz > azmax) azmax = vz;
+                    }
+                    if (hits)
+                        printf("  probe %.3f..%.3f x %.3f..%.3f: %u verts,"
+                               " view x %d..%d z %d..%d,"
+                               " from the grip x %d..%d z %d..%d\n",
+                               probe_x0, probe_x1, probe_y0, probe_y1, hits,
+                               axmin, axmax, azmin, azmax,
+                               axmin - vw.cur_t[0], axmax - vw.cur_t[0],
+                               azmin - vw.cur_t[2], azmax - vw.cur_t[2]);
+                    else
+                        printf("  probe: no vertex lands in that box\n");
+                }
             }
         }
 
@@ -651,6 +711,16 @@ int cmd_viewweapon(disc *d, const char *weapon, const char *out,
                    const char *map, int zone_index, int settle_ticks,
                    const char *ref)
 {
+    /* The probe box comes from the environment rather than another
+     * positional argument: it is a diagnostic for one investigation, not
+     * part of the command's shape. Q2_VW_PROBE="x0,x1,y0,y1". */
+    {
+        const char *pb = getenv("Q2_VW_PROBE");
+        if (pb)
+            sscanf(pb, "%lf,%lf,%lf,%lf", &probe_x0, &probe_x1,
+                   &probe_y0, &probe_y1);
+    }
+
     q2_exe e;
     q2_vm_tables t;
     q2_build_id id;

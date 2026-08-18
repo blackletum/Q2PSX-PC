@@ -2309,11 +2309,39 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
       silhouettes match when resampled into the same geometry), not the near plane (fixed), and not the
       pose (applied).
 
-      **What is needed to close it.** One landmark in one capture is one equation in two unknowns — a
-      weapon further away and further right projects to the same place as one nearer and less far right,
-      and the emitter's width would separate them if the capture were not blurred. A second measurable
-      landmark on the same weapon, or a capture at a known animation phase, pins it. Until then the
-      displacement is measured and its cause is not attributed, which is the honest state.
+      **AND THE THREE LANDMARKS DISAGREE WITH EACH OTHER, WHICH IS THE REAL FINDING.**
+      `Q2_VW_PROBE="x0,x1,y0,y1"` makes the vertex walk report which vertices land in a screen box and
+      where they sit relative to the grip, so a blob measured in a picture becomes a model coordinate.
+      The emitter's box on the port resolves to vertices at **view x 73..146, z 393..526** — from the grip
+      x −67..+6, z +349..+482 — which pins the geometry the comparison needs. With that, three
+      independent ratios between the two pictures can be formed, and for a RIGID object under ONE
+      projection all three have to agree:
+
+          horizontal offset from centre   console / port = 2.29
+          emitter width                   console / port = 1.37
+          vertical extent above centre    console / port = 1.15
+
+      They do not. No placement of a rigid model, no field of view, and no depth produces those three
+      numbers together — a single scale about the projection centre would make all three equal, a single
+      depth change would make the first two equal, and a translation cannot make the vertical ratio
+      differ from one while the model is unchanged.
+
+      So the failing thing is the COMPARISON, not necessarily the port. Two candidates, and they are
+      distinguishable:
+
+      - **the landmarks are not the same faces.** The console's emitter blob is 167 px against the port's
+        44 — nearly four times the area where a 1.37 linear scale predicts 1.9. Blur adds a halo, but not
+        that much.
+      - **the capture's projection is not the console's.** Both captures are frames of an `.mp4`. If they
+        were recorded through an emulator with a widescreen or internal-resolution enhancement, the
+        horizontal field of view is altered while 2D HUD elements are left alone — which is exactly the
+        signature seen here: HUD positions agree to a pixel and a half, the vertical agrees, and only the
+        horizontal does not.
+
+      **What is needed to close it is a capture whose provenance is known** — ideally a direct framebuffer
+      grab rather than a video frame, from a player with no enhancements on. Until then the port's
+      arithmetic agrees with the executable at every operand that can be read, and the one number that
+      disagrees comes from a measurement that contradicts itself.
 
 ---
 
