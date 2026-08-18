@@ -196,11 +196,53 @@ typedef struct q2_camera {
      * the port sorts per quad, and this is the range it sorts across.
      */
     s32 far_z;
+
+    /*
+     * THE RANGE THE DEPTH SORT SPANS, which is NOT the same number as `far_z`
+     * even though the port spent a long time assuming it was.
+     *
+     * `far_z` is view+264 and the console reads it for exactly one thing: the
+     * distance below which a surface is SUBDIVIDED. Feeding it to the ordering
+     * table as well made a viewport's 51-entry slice cover 6,400 units, and a
+     * scene is much deeper than that — measured over the shipped maps, camera
+     * depths reach 22,841 on POWER2, 22,492 on SECURITY and 17,778 on BASE3. So
+     * roughly everything past 6,400 units saturated into the slice's last
+     * bucket and drew in reverse insertion order, which is the reported "far
+     * distance culling": distant geometry does not vanish, it is painted in an
+     * arbitrary order and the wrong surfaces win.
+     *
+     * Widening `far_z` to cover the scene is not the fix, because that number
+     * is load-bearing somewhere else — it is also `subdiv_threshold`, so moving
+     * it re-tunes subdivision across every surface on the map at the same time.
+     * That is what a previous attempt did, and the result was HUD z-fighting,
+     * the view weapon cutting into geometry and invisible monsters. The two
+     * uses are separated here so the sort range can be set on its own.
+     *
+     * Everything that shares the world's slice reads THIS field — world quads,
+     * models, effects, entity draws — so they stay in one ordering space. The
+     * packets whose bucket is structural rather than depth-derived (the draw
+     * envs, the water plane, the damage flash, the status bar, the view weapon)
+     * name theirs outright through psx_ot_add_bucket and are untouched.
+     */
+    s32 sort_range;
 } q2_camera;
 
 /* view+264 for the four layouts that use it (0x80077E58, 0x80077674,
  * 0x80077A20, 0x80077C20); the quad split's 4000 is at 0x80077818. */
 #define Q2_CAMERA_FAR_DEFAULT 6400
+
+/*
+ * How far the port's depth sort reaches, in world units.
+ *
+ * A port number rather than a console one, because the sort itself is the
+ * port's: the console orders the world from SortData and never computes a
+ * bucket from depth at all. It is chosen to CONTAIN the shipped maps rather
+ * than tuned — the deepest camera-space depth measured across them is 35,091
+ * (BASE0), so 36,864 clears every one with room to spare and nothing
+ * saturates. Overshooting costs depth resolution and undershooting collapses
+ * the far field, which is the fault this replaces.
+ */
+#define Q2_CAMERA_SORT_RANGE 36864
 
 /*
  * A camera for a buffer that is NOT a console viewport — an offline render, a

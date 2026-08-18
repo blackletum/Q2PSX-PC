@@ -390,7 +390,7 @@ u32 q2_projectiles_build_ot(const struct q2_projectiles *list,
                 continue;
 
             prim = psx_ot_add(ot, (u16)q2_ot_bucket_for_depth(ot, depth / 4u,
-                                                              cam->far_z));
+                                                              cam->sort_range));
             if (!prim)
                 break;
 

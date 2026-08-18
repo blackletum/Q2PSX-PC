@@ -223,6 +223,46 @@ u32  psx_ot_bucket_span(const psx_ot *ot);
  * of zero falls back to the old shift, which is what the offline tools that
  * build their own camera still get.
  */
+/*
+ * HOW MANY REAL BUCKETS ONE CONSOLE BUCKET IS WORTH.
+ *
+ * The console's table is the hardware's: 217 entries, a 51-entry slice per
+ * viewport, and everything in screen.h is that table's numbering. Nothing about
+ * those numbers is a rendering decision — they are an address space — and the
+ * port is not obliged to have exactly as many.
+ *
+ * It matters because the port DOES sort by depth where the console sorts from
+ * SortData, and 51 buckets is nowhere near enough to do that with. A slice
+ * spanning the deepest shipped view (35,091 units on BASE0) at 51 buckets is
+ * 700 units per bucket: a monster and the wall behind it fall in the same one
+ * and their order becomes arbitrary. Squeezing the range down to 6,400 instead
+ * — which is what the port did — buys near-field resolution by collapsing
+ * everything beyond into a single bucket, and that collapse is the reported far
+ * distance fault. Neither end of that trade is affordable at 51 buckets.
+ *
+ * So the table is subdivided. Every structural bucket index is multiplied by
+ * this on the way in — psx_ot_set_window and psx_ot_add_bucket are the only two
+ * doors, so callers keep naming the console's numbers and keep their relative
+ * order exactly — and the depth mapping gets the whole subdivided slice to
+ * spread across. At 8, a slice is 408 buckets and the full 36,864-unit range
+ * resolves to about 100 units per bucket, finer than the 128 the old collapsed
+ * mapping managed over its 6,400.
+ */
+#define PSX_OT_SUBDIV 8
+
+/*
+ * The ends of a slice belong to packets whose bucket is STRUCTURAL, and depth
+ * must not be allowed to reach them.
+ *
+ * A viewport slice is 51 entries with the draw env at 1, the water plane near
+ * 49 and the damage flash at 50 (screen.h). The depth mapping used to run over
+ * the whole slice, so a surface at depth 0 landed on the flash's bucket and one
+ * past the far distance landed on the env's — which is how widening the sort
+ * range put world geometry over the status bar. Two console buckets are held
+ * back at each end so the depth range and the structural range cannot meet.
+ */
+#define PSX_OT_DEPTH_RESERVE (2 * PSX_OT_SUBDIV)
+
 u32  q2_ot_bucket_for_depth(const psx_ot *ot, u32 depth, s32 far_z);
 
 q2_result psx_ot_init(psx_ot *ot, u32 bucket_count, u32 prim_capacity);

@@ -108,6 +108,7 @@ void q2_camera_default(q2_camera *cam, int screen_w, int screen_h)
      */
     cam->projection = (u16)screen_w;
     cam->far_z      = Q2_CAMERA_FAR_DEFAULT;
+    cam->sort_range = Q2_CAMERA_SORT_RANGE;
 }
 
 void q2_world_bounds(const q2_world_zone *z, s32 min_out[3], s32 max_out[3])
@@ -218,7 +219,7 @@ static psx_prim *emit_quad(psx_ot *ot,
     }
 
     span = psx_ot_bucket_span(ot);
-    far  = cam->far_z > 0 ? cam->far_z : Q2_CAMERA_FAR_DEFAULT;
+    far  = cam->sort_range > 0 ? cam->sort_range : Q2_CAMERA_SORT_RANGE;
     if (span == 0)
         span = 1;
 
@@ -234,9 +235,15 @@ static psx_prim *emit_quad(psx_ot *ot,
             otz = span - 1;
         prim = psx_ot_add_bucket(ot, ot->window_len ? ot->window_base + otz : otz);
     } else {
-        otz = (u32)(((u64)otz * span) / (u32)far);
-        if (otz >= span)
-            otz = span - 1;
+        /*
+         * ONE MAPPING for everything that shares the slice. The world used to
+         * scale depth itself while models, effects and entity draws went
+         * through q2_ot_bucket_for_depth, so the two disagreed about which
+         * bucket a given distance meant — and a monster and the wall behind it
+         * were ordered by two different rules. They are the same rule now, and
+         * it is the one that also holds the slice's structural buckets back.
+         */
+        otz  = q2_ot_bucket_for_depth(ot, otz, far);
         prim = psx_ot_add(ot, (u16)otz);
     }
     if (!prim) {

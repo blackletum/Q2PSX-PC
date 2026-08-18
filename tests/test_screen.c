@@ -113,26 +113,36 @@ static void test_ot_slices(void)
 {
     q2_screen s;
     int p;
-    int owner[Q2_SCREEN_OT_ENTRIES];
+    /*
+     * REAL buckets. The two otz helpers hand a caller something it passes
+     * straight to psx_ot_add_bucket, and the table is subdivided
+     * (PSX_OT_SUBDIV), so both they and the slice bounds below are in real
+     * buckets while screen.h's constants stay in the console's. Sized in
+     * console entries, this array was indexed with a real bucket by the overlay
+     * loop below and the test died on the read.
+     */
+    enum { OWNER_COUNT = Q2_SCREEN_OT_ENTRIES * PSX_OT_SUBDIV };
+    int owner[OWNER_COUNT];
     int i;
 
     q2_screen_init(&s, Q2_VIDEO_PAL);
     q2_screen_set_layout(&s, Q2_SCREEN_LAYOUT_QUAD, 4);
 
-    for (i = 0; i < Q2_SCREEN_OT_ENTRIES; i++)
+    for (i = 0; i < OWNER_COUNT; i++)
         owner[i] = -1;
 
     for (p = 0; p < 4; p++) {
-        u32 env = (u32)Q2_SCREEN_OT_VIEW_BASE + (u32)p * Q2_SCREEN_OT_VIEW_STRIDE
-                + Q2_SCREEN_OT_VIEW_ENV;
+        u32 env = ((u32)Q2_SCREEN_OT_VIEW_BASE
+                   + (u32)p * Q2_SCREEN_OT_VIEW_STRIDE
+                   + Q2_SCREEN_OT_VIEW_ENV) * PSX_OT_SUBDIV;
         u32 z;
 
         for (z = 0; z < 4096; z++) {
             u16 b = q2_screen_view_otz(&s, p, z);
 
-            CHECK(b < Q2_SCREEN_OT_ENTRIES, "view %d z %u -> bucket %u is off the table",
+            CHECK(b < OWNER_COUNT, "view %d z %u -> bucket %u is off the table",
                   p, z, b);
-            if (b >= Q2_SCREEN_OT_ENTRIES)
+            if (b >= OWNER_COUNT)
                 break;
             CHECK(b != env, "view %d z %u landed on its own draw env bucket", p, z);
             CHECK(owner[b] == -1 || owner[b] == p,
@@ -146,15 +156,18 @@ static void test_ot_slices(void)
         u32 z;
         for (z = 0; z < 4096; z++) {
             u16 b = q2_screen_overlay_otz(&s, z);
-            CHECK(b >= Q2_SCREEN_OT_OVERLAY &&
-                  b < Q2_SCREEN_OT_OVERLAY + Q2_SCREEN_OT_OVERLAY_LEN,
+            CHECK(b >= (u32)Q2_SCREEN_OT_OVERLAY * PSX_OT_SUBDIV &&
+                  b < ((u32)Q2_SCREEN_OT_OVERLAY + Q2_SCREEN_OT_OVERLAY_LEN)
+                          * PSX_OT_SUBDIV,
                   "overlay z %u -> bucket %u escapes the overlay slice", z, b);
+            if (b >= OWNER_COUNT)
+                break;
             CHECK(owner[b] == -1, "overlay bucket %u collides with view %d", b, owner[b]);
         }
     }
 
     /* Bucket 1 is the full-screen background env and belongs to nobody else. */
-    CHECK(owner[Q2_SCREEN_OT_BACKGROUND] == -1,
+    CHECK(owner[Q2_SCREEN_OT_BACKGROUND * PSX_OT_SUBDIV] == -1,
           "the background env bucket was claimed by a viewport");
 
     q2_screen_free(&s);
@@ -178,7 +191,8 @@ static void test_ot_window(void)
     for (p = 0; p < 2; p++) {
         u32 z;
         CHECK(q2_screen_view_begin(&s, p, &ot, NULL), "view %d should be live", p);
-        CHECK(psx_ot_bucket_span(&ot) == Q2_SCREEN_OT_VIEW_STRIDE - 2,
+        CHECK(psx_ot_bucket_span(&ot)
+                  == (Q2_SCREEN_OT_VIEW_STRIDE - 2) * PSX_OT_SUBDIV,
               "view %d span %u", p, psx_ot_bucket_span(&ot));
 
         /* Deliberately overshoot: an emitter that hands over a huge depth must
@@ -189,11 +203,13 @@ static void test_ot_window(void)
 
     CHECK(!q2_screen_view_begin(&s, 2, &ot, NULL), "view 2 is not live in a 2P layout");
 
-    for (b = 0; b < Q2_SCREEN_OT_ENTRIES; b++) {
+    for (b = 0; b < (u32)Q2_SCREEN_OT_ENTRIES * PSX_OT_SUBDIV; b++) {
         if (ot.bucket_head[b] < 0)
             continue;
-        CHECK(b >= (u32)Q2_SCREEN_OT_VIEW_BASE, "bucket %u is below the first slice", b);
-        CHECK(b < (u32)Q2_SCREEN_OT_VIEW_BASE + 2u * Q2_SCREEN_OT_VIEW_STRIDE,
+        CHECK(b >= (u32)Q2_SCREEN_OT_VIEW_BASE * PSX_OT_SUBDIV,
+              "bucket %u is below the first slice", b);
+        CHECK(b < ((u32)Q2_SCREEN_OT_VIEW_BASE + 2u * Q2_SCREEN_OT_VIEW_STRIDE)
+                      * PSX_OT_SUBDIV,
               "bucket %u is past the second slice", b);
     }
 
@@ -509,10 +525,12 @@ static void test_depth_direction(void)
 
         CHECK(near_b > far_b, "depth 0 (%u) should be nearer than 48 (%u)",
               near_b, far_b);
-        CHECK(far_b == Q2_SCREEN_OT_VIEW_BASE + Q2_SCREEN_OT_VIEW_ENV + 1,
+        CHECK(far_b == (Q2_SCREEN_OT_VIEW_BASE + Q2_SCREEN_OT_VIEW_ENV + 1)
+                           * PSX_OT_SUBDIV,
               "the farthest depth is the slice's first geometry bucket, got %u",
               far_b);
-        CHECK(near_b == Q2_SCREEN_OT_VIEW_BASE + Q2_SCREEN_OT_VIEW_STRIDE - 1,
+        CHECK(near_b == (Q2_SCREEN_OT_VIEW_BASE + Q2_SCREEN_OT_VIEW_STRIDE - 1)
+                            * PSX_OT_SUBDIV,
               "the nearest depth is the slice's last bucket, got %u", near_b);
         CHECK(clamp == far_b, "an over-range depth clamps to the far end");
     }
@@ -550,8 +568,8 @@ static void test_flash(void)
     q2_screen_frame_begin(&s, &ot);
     q2_screen_view_begin(&s, 1, &ot, NULL);
 
-    bucket = (u32)Q2_SCREEN_OT_VIEW_BASE + Q2_SCREEN_OT_VIEW_STRIDE
-           + Q2_SCREEN_OT_VIEW_FLASH;
+    bucket = ((u32)Q2_SCREEN_OT_VIEW_BASE + Q2_SCREEN_OT_VIEW_STRIDE
+              + Q2_SCREEN_OT_VIEW_FLASH) * PSX_OT_SUBDIV;
     head = ot.bucket_head[bucket];
     CHECK(head >= 0, "the flash should link at viewport 1's frontmost bucket");
     if (head >= 0) {
@@ -806,14 +824,15 @@ static void test_meter(void)
     /* Off by default — 0x800B2A64 is in the zeroed segment. */
     q2_screen_frame_begin(&s, &ot);
     q2_screen_build(&s, &ot, NULL, &hooks);
-    CHECK(ot.bucket_head[Q2_SCREEN_OT_METER] < 0,
+    CHECK(ot.bucket_head[Q2_SCREEN_OT_METER * PSX_OT_SUBDIV] < 0,
           "the meter drew while it was off");
 
     s.meter.enable = true;
     q2_screen_frame_begin(&s, &ot);
     q2_screen_build(&s, &ot, NULL, &hooks);
 
-    for (idx = ot.bucket_head[Q2_SCREEN_OT_METER]; idx >= 0; idx = ot.next[idx]) {
+    for (idx = ot.bucket_head[Q2_SCREEN_OT_METER * PSX_OT_SUBDIV]; idx >= 0;
+         idx = ot.next[idx]) {
         const psx_prim *p = &ot.prims[idx];
         CHECK(p->kind == PSX_PRIM_TILE, "a meter bar is a TILE");
         CHECK(p->xy[2].x - p->xy[0].x == Q2_SCREEN_METER_WIDTH,
@@ -833,7 +852,8 @@ static void test_meter(void)
     q2_screen_frame_begin(&s, &ot);
     q2_screen_build(&s, &ot, NULL, &hooks);
     found = 0;
-    for (idx = ot.bucket_head[Q2_SCREEN_OT_METER]; idx >= 0; idx = ot.next[idx])
+    for (idx = ot.bucket_head[Q2_SCREEN_OT_METER * PSX_OT_SUBDIV]; idx >= 0;
+         idx = ot.next[idx])
         found++;
     CHECK(found == Q2_SCREEN_METER_BARS - 1,
           "bar 6 should be skipped when it is zero, got %d bars", found);
@@ -970,7 +990,8 @@ static void test_water_strips(void)
     for (i = 0; i < 20; i++)
         water_frame(&s, &ot, 1);
 
-    b = (u32)Q2_SCREEN_OT_VIEW_BASE + Q2_SCREEN_OT_VIEW_WATER;
+    b = ((u32)Q2_SCREEN_OT_VIEW_BASE + Q2_SCREEN_OT_VIEW_WATER)
+        * PSX_OT_SUBDIV;
 
     for (idx = ot.bucket_head[b]; idx >= 0; idx = ot.next[idx]) {
         const psx_prim *p = &ot.prims[idx];
@@ -1049,8 +1070,9 @@ static void test_water_pool(void)
           s.water_moves);
 
     for (p = 0; p < 4; p++) {
-        u32 b = (u32)Q2_SCREEN_OT_VIEW_BASE
-              + (u32)p * Q2_SCREEN_OT_VIEW_STRIDE + Q2_SCREEN_OT_VIEW_WATER;
+        u32 b = ((u32)Q2_SCREEN_OT_VIEW_BASE
+                 + (u32)p * Q2_SCREEN_OT_VIEW_STRIDE
+                 + Q2_SCREEN_OT_VIEW_WATER) * PSX_OT_SUBDIV;
         s32 idx;
         bool any = false;
 

@@ -277,7 +277,10 @@ static void test_ordering_table(void)
         u32 bucket = psx_ot_depth_bucket(&ot, 5);
         const psx_prim *first;
 
-        check_eq_i((int)bucket, 64 - 1 - 5, "depth 5 counts back from the far end");
+        /* psx_ot_init counts in CONSOLE buckets and the table holds the
+         * subdivided ones, so 64 asked for is 64 * PSX_OT_SUBDIV held. */
+        check_eq_i((int)bucket, 64 * PSX_OT_SUBDIV - 1 - 5,
+                   "depth 5 counts back from the far end");
         first = &ot.prims[ot.bucket_head[bucket]];
         check_eq_i(first->clut, 3, "within a bucket, the last added draws first");
     }

@@ -834,9 +834,9 @@ static void flash_emit(q2_screen_view *v, int p, psx_ot *ot)
         break;      /* mode 0 leaves the tile holding last frame's colour */
     }
 
-    prim = psx_ot_add_bucket(ot, (u32)Q2_SCREEN_OT_VIEW_BASE
-                                 + (u32)p * Q2_SCREEN_OT_VIEW_STRIDE
-                                 + Q2_SCREEN_OT_VIEW_FLASH);
+    prim = psx_ot_add_bucket(ot, ((u32)Q2_SCREEN_OT_VIEW_BASE
+                                  + (u32)p * Q2_SCREEN_OT_VIEW_STRIDE
+                                  + Q2_SCREEN_OT_VIEW_FLASH) * PSX_OT_SUBDIV);
     if (prim) {
         /* 0x80076950: the tile is viewport-local (0,0) and takes the viewport's
          * UNSHAKEN size — the shake is already in the draw env's offset. */
@@ -1128,9 +1128,9 @@ static void water_update(q2_screen *s, q2_screen_view *v, int p, psx_ot *ot)
     if (!ot)
         return;
 
-    bucket = (u32)Q2_SCREEN_OT_VIEW_BASE
-           + (u32)p * Q2_SCREEN_OT_VIEW_STRIDE
-           + Q2_SCREEN_OT_VIEW_WATER;
+    bucket = ((u32)Q2_SCREEN_OT_VIEW_BASE
+              + (u32)p * Q2_SCREEN_OT_VIEW_STRIDE
+              + Q2_SCREEN_OT_VIEW_WATER) * PSX_OT_SUBDIV;
 
     /*
      * Columns, then rows, then the tint — and the tint is drawn even when the
@@ -1173,7 +1173,7 @@ static void meter_emit(q2_screen *s, psx_ot *ot)
          * way the compiler's `srl 31; addu; sra 1` sequence does. */
         h = s->meter.value[i] / 2;
 
-        prim = psx_ot_add_bucket(ot, Q2_SCREEN_OT_METER);
+        prim = psx_ot_add_bucket(ot, (u32)Q2_SCREEN_OT_METER * PSX_OT_SUBDIV);
         if (!prim)
             break;
 
@@ -1418,8 +1418,11 @@ u16 q2_screen_view_otz(const q2_screen *s, int p, u32 z)
     if (z >= usable)
         z = usable - 1;
 
-    return (u16)(Q2_SCREEN_OT_VIEW_BASE + (u32)p * Q2_SCREEN_OT_VIEW_STRIDE
-                 + Q2_SCREEN_OT_VIEW_ENV + 1 + (usable - 1 - z));
+    /* Real buckets out: a caller hands this straight to psx_ot_add_bucket,
+     * which no longer scales. See PSX_OT_SUBDIV. */
+    return (u16)((Q2_SCREEN_OT_VIEW_BASE + (u32)p * Q2_SCREEN_OT_VIEW_STRIDE
+                  + Q2_SCREEN_OT_VIEW_ENV + 1 + (usable - 1 - z))
+                 * PSX_OT_SUBDIV);
 }
 
 u16 q2_screen_overlay_otz(const q2_screen *s, u32 z)
@@ -1430,7 +1433,8 @@ u16 q2_screen_overlay_otz(const q2_screen *s, u32 z)
     if (z >= usable)
         z = usable - 1;
 
-    return (u16)(Q2_SCREEN_OT_OVERLAY + Q2_SCREEN_OT_VIEW_ENV + 1 + z);
+    return (u16)((Q2_SCREEN_OT_OVERLAY + Q2_SCREEN_OT_VIEW_ENV + 1 + z)
+                 * PSX_OT_SUBDIV);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1532,9 +1536,15 @@ void q2_screen_compose(q2_screen *s, const psx_ot *ot,
     local.clip_x = local.clip_y = local.clip_w = local.clip_h = 0;
     local.ofs_x  = local.ofs_y  = 0;
 
+    /*
+     * The table is subdivided (PSX_OT_SUBDIV), so the console's 217 entries are
+     * 217 GROUPS of real buckets and the walk covers all of them. Clamping to
+     * the console count here drew only the first group and left the screen
+     * black — the structural packets and the geometry both live past it.
+     */
     buckets = ot->bucket_count;
-    if (buckets > Q2_SCREEN_OT_ENTRIES)
-        buckets = Q2_SCREEN_OT_ENTRIES;
+    if (buckets > (u32)Q2_SCREEN_OT_ENTRIES * PSX_OT_SUBDIV)
+        buckets = (u32)Q2_SCREEN_OT_ENTRIES * PSX_OT_SUBDIV;
 
     for (b = 0; b < buckets; b++) {
         s32 idx;
@@ -1546,7 +1556,8 @@ void q2_screen_compose(q2_screen *s, const psx_ot *ot,
          * draws first. Applying them here is that rule, not an approximation
          * of it.
          */
-        if (b == Q2_SCREEN_OT_BACKGROUND && s->background_armed) {
+        if (b == (u32)Q2_SCREEN_OT_BACKGROUND * PSX_OT_SUBDIV &&
+            s->background_armed) {
             screen_env e;
             e.x = 0;
             e.y = 0;
@@ -1560,9 +1571,9 @@ void q2_screen_compose(q2_screen *s, const psx_ot *ot,
         }
 
         for (p = 0; p < s->view_count; p++) {
-            u32 env_bucket = Q2_SCREEN_OT_VIEW_BASE
-                           + (u32)p * Q2_SCREEN_OT_VIEW_STRIDE
-                           + Q2_SCREEN_OT_VIEW_ENV;
+            u32 env_bucket = ((u32)Q2_SCREEN_OT_VIEW_BASE
+                              + (u32)p * Q2_SCREEN_OT_VIEW_STRIDE
+                              + Q2_SCREEN_OT_VIEW_ENV) * PSX_OT_SUBDIV;
             if (b == env_bucket && s->env_linked[p]) {
                 screen_env e;
                 env_from_view(&s->view[p], &e);
@@ -1570,7 +1581,8 @@ void q2_screen_compose(q2_screen *s, const psx_ot *ot,
             }
         }
 
-        if (b == Q2_SCREEN_OT_OVERLAY + Q2_SCREEN_OT_VIEW_ENV && s->overlay_armed) {
+        if (b == ((u32)Q2_SCREEN_OT_OVERLAY + Q2_SCREEN_OT_VIEW_ENV)
+                     * PSX_OT_SUBDIV && s->overlay_armed) {
             screen_env e;
             env_from_overlay(s, &e);
             env_apply(fb, &e, &local);

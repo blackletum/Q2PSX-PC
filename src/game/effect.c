@@ -1213,7 +1213,7 @@ u32 q2_fx_glint_build_ot(const q2_fx_glint_mesh *mesh,
         if (!good)
             continue;
 
-        prim = psx_ot_add(ot, (u16)bucket_for(ot, depth, 4, cam->far_z));
+        prim = psx_ot_add(ot, (u16)bucket_for(ot, depth, 4, cam->sort_range));
         if (!prim)
             break;
 
@@ -1564,7 +1564,7 @@ static u32 draw_groups(q2_fx_world *w, const q2_camera *cam, u32 viewport,
                                    pt[2] - cam->pos[2], &xy, &z))
                 continue;
 
-            prim = psx_ot_add(ot, (u16)bucket_for(ot, z, 1, cam->far_z));
+            prim = psx_ot_add(ot, (u16)bucket_for(ot, z, 1, cam->sort_range));
             if (!prim) {
                 w->stats.ot_overflow++;
                 break;
@@ -1668,7 +1668,7 @@ static u32 draw_beam_ring(psx_ot *ot, gte_state *gte, const q2_camera *cam,
         if (!good)
             continue;
 
-        prim = psx_ot_add(ot, (u16)bucket_for(ot, depth, 4, cam->far_z));
+        prim = psx_ot_add(ot, (u16)bucket_for(ot, depth, 4, cam->sort_range));
         if (!prim) {
             stats->ot_overflow++;
             break;

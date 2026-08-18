@@ -419,7 +419,7 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
             } else {
                 for (i = 0; i < 4; i++)
                     otz += window[f.v[i]].z;
-                otz = q2_ot_bucket_for_depth(ot, otz / 4, cam->far_z);
+                otz = q2_ot_bucket_for_depth(ot, otz / 4, cam->sort_range);
             }
 
             prim = psx_ot_add(ot, (u16)otz);

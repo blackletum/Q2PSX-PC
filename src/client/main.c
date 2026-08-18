@@ -147,6 +147,7 @@
 #include "save.h"
 #include "saveui.h"
 #include "screen.h"
+#include "sortdata.h"
 #include "pad.h"
 #include "sim.h"
 #include "statusbar.h"
@@ -668,6 +669,17 @@ typedef struct client {
      * something that does not know it is a teleport — a collision push-out, a
      * mover carrying them, a spawn that ran twice.
      */
+    /*
+     * The zone's authored draw order, parsed once per load and indexed per
+     * frame by the camera's PrimaryColl cell. `sort_cell` is the previous
+     * frame's answer, kept as the search hint.
+     */
+    q2_sortdata       sortdata;
+    bool              sort_ready;
+    bool              use_sort;     /* --sort-data: the authored draw order */
+    s32               ot_range;     /* --ot-range: sweep the sort range    */
+    s32               sort_cell;
+
     bool              zone_trace;
     const char       *move_reason;    /* set by a deliberate relocation      */
     s32               last_pos[3];    /* the player's position last tick     */
@@ -3146,6 +3158,19 @@ static bool client_load_zone(client *c, const char *map, int index)
 
     q2_world_free_zone(&c->zone);
     c->zone = loaded;
+
+    /*
+     * The zone's draw order. Borrowed from the zone file, so it is taken after
+     * the move above and dropped whenever the zone is replaced; the cell hint
+     * restarts because the hull it indexes has just been replaced too.
+     */
+    c->sort_ready = (q2_sortdata_parse(&c->sortdata, &c->zone.zone) == Q2_OK &&
+                     c->sortdata.data && c->sortdata.size > 0);
+    c->sort_cell  = -1;
+    c->zone.sort  = NULL;
+    if (c->sort_ready)
+        Q2_INFO("sort order: %u bytes, %u streams",
+                c->sortdata.size, q2_sortdata_enumerate(&c->sortdata, NULL, 0));
     c->zone_index = index;
     snprintf(c->map, sizeof(c->map), "%s", map);
 
@@ -7734,13 +7759,17 @@ static void client_write_shot(client *c, bool numbered)
     c->shots_written++;
     Q2_INFO("frame %ld -> %s", c->frame_index, path);
     Q2_INFO("  eye %d %d %d  yaw %d pitch %d roll %d  cell %d  "
-            "%u/%u quads, %u nodes, near %u back %u ot %u",
+            "%u/%u quads, %u nodes, near %u back %u bounds %u flat %u"
+            " depth %u..%u ot %u",
             c->cam.pos[0], c->cam.pos[1], c->cam.pos[2],
             c->cam.yaw, c->cam.pitch, c->cam.roll, c->sim[0].current_node,
             c->shot_stats.quads_emitted, c->shot_stats.quads_total,
             c->shot_stats.nodes_visited,
             c->shot_stats.quads_rejected_near,
             c->shot_stats.quads_rejected_back,
+            c->shot_stats.quads_rejected_bounds,
+            c->shot_stats.quads_rejected_flat,
+            c->shot_stats.depth_min, c->shot_stats.depth_max,
             c->shot_stats.ot_overflow);
 
     /*
@@ -8451,6 +8480,47 @@ static s32 client_light_node(const client *c, int p)
 }
 
 /*
+ * Which SortData stream this viewport reads — the camera's PrimaryColl cell.
+ *
+ * `current_node` cannot serve: it is the SECONDARY hull's cell, the movement
+ * one, and the two hulls have different node counts in every zone (BASE1 zone 1
+ * is 290 against 191). The stream count matches the PRIMARY hull exactly, so
+ * the primary is what indexes the chunk.
+ *
+ * Resolved from the eye rather than kept on the player, because the free-fly
+ * camera has no player and still has to draw the world in some order. The
+ * previous frame's answer is the search hint, which is what makes this a
+ * portal-neighbour step rather than a sweep of the whole hull each frame.
+ */
+static s32 client_sort_cell(client *c, int p)
+{
+    s32 at[3];
+
+    if (c->in_front_end || !c->sim[0].coll_primary_ready)
+        return -1;
+
+    if (c->mp_enabled && p > 0 && p < Q2_MP_MAX_PLAYERS && c->sim_ready[p]) {
+        const q2_player *pl = &c->sim[0].player[p];
+        at[0] = pl->pos[0];
+        at[1] = q2_sim_origin_y(pl->pos[1]);
+        at[2] = pl->pos[2];
+    } else if (c->sim_enabled) {
+        const q2_player *pl = &c->sim[0].player[0];
+        at[0] = pl->pos[0];
+        at[1] = q2_sim_origin_y(pl->pos[1]);
+        at[2] = pl->pos[2];
+    } else {
+        at[0] = c->cam.pos[0];
+        at[1] = c->cam.pos[1];
+        at[2] = c->cam.pos[2];
+    }
+
+    c->sort_cell = q2_coll_find_node(&c->sim[0].coll_primary, at,
+                                     c->sort_cell, true);
+    return c->sort_cell;
+}
+
+/*
  * The world draw, in the place 0x80066858 occupies: called from inside the
  * viewport's own draw, after its state is published and under its own gate.
  */
@@ -8479,6 +8549,9 @@ static void client_draw_view(void *user, q2_screen *s, int p,
     c->cam.ofs_x      = s->view[p].ofs_x;
     c->cam.ofs_y      = s->view[p].ofs_y;
     c->cam.far_z      = s->view[p].far_z;
+    /* The sort range is the port's and does not come off the view record; see
+     * q2_camera.sort_range for why the two must not be the same number. */
+    c->cam.sort_range = c->ot_range > 0 ? c->ot_range : Q2_CAMERA_SORT_RANGE;
     /* The clip extent the linkers test every projected corner against —
      * 0x800B2C20's packed (clip_h << 16) | clip_w. */
     c->cam.clip_w     = s->view[p].w;
@@ -8531,6 +8604,42 @@ static void client_draw_view(void *user, q2_screen *s, int p,
      */
     c->zone.lights     = c->lights_ready ? &c->light_world : NULL;
     c->zone.light_node = client_light_node(c, p);
+
+    /*
+     * THE WORLD'S DRAW ORDER, which is authored rather than computed, and which
+     * this port has been deriving from depth because nothing ever assigned it.
+     *
+     * `q2_world_zone.sort` has been read by the renderer since SortData was
+     * decoded and written by NOBODY, so `forced_bucket` was -1 on every quad of
+     * every frame and the fallback ran always: bucket = depth * span / 6400,
+     * against a 51-entry viewport slice. Measured, a scene's depths run to
+     * 22,492 on SECURITY and 17,778 on BASE3 — so roughly everything past 6,400
+     * units landed in the slice's last bucket together, drawn in reverse link
+     * order with no relation to distance. That is the reported "far distance
+     * culling": geometry does not vanish, it is painted in an arbitrary order
+     * and the wrong surfaces win.
+     *
+     * WHICH STREAM a viewport uses was open question 7a. It is the camera's
+     * cell — view+146, read at 0x80066AD4 — and the hull is PrimaryColl, which
+     * the disc settles outright: across BASE1, BASE2, BASE3, LAB, SECURITY,
+     * POWER2 and JAIL5, every zone carrying a SortData chunk holds EXACTLY as
+     * many streams as that zone's PrimaryColl has cells. Twenty of twenty, no
+     * near misses. `--zone-probe` prints the two counts side by side.
+     *
+     * A zone with no chunk keeps the depth fallback; several zone 0s ship an
+     * empty one.
+     */
+    {
+        s32 cell = client_sort_cell(c, p);
+
+        if (c->sort_ready && c->use_sort && cell >= 0 &&
+            q2_sortdata_stream_offset(&c->sortdata, (u32)cell,
+                                      &c->zone.sort_offset)) {
+            c->zone.sort = &c->sortdata;
+        } else {
+            c->zone.sort = NULL;
+        }
+    }
 
     q2_world_build_ot(&c->zone, &c->cam, s->view[p].w, s->view[p].h,
                       ot, gte, &c->render, &stats);
@@ -9489,6 +9598,10 @@ static void usage(void)
            "                jump in the player's position while you play\n");
     printf("  --zone-probe  ...and, without playing, where each of this map's\n"
            "                zone gates leads and whether it lands anywhere\n");
+    printf("  --ot-range N  how far the depth sort reaches, in world units\n"
+           "                (default %d)\n", Q2_CAMERA_SORT_RANGE);
+    printf("  --sort-data   order the world from the zone's authored SortData\n"
+           "                stream instead of from depth (experimental)\n");
 }
 
 /* ------------------------------------------------------------------------- */
@@ -9725,7 +9838,32 @@ static void client_zone_probe(client *c, const char *map)
                 gates[g].node_in_dest = n;
         }
 
-        printf("  --- zone %d ---\n", z);
+        /*
+         * The SortData stream count against the two things that could be
+         * indexing it. The console picks a viewport's stream from the camera's
+         * CELL (view+146, 0x80066AD4), so if the count matches the collision
+         * hull's node count the mapping is settled and the chunk stops being
+         * opt-in — see open question 7a.
+         */
+        {
+            q2_sortdata sd;
+            u32         streams = 0;
+            q2_result   sr;
+
+            memset(&sd, 0, sizeof(sd));
+            sr = q2_sortdata_parse(&sd, &c->zone.zone);
+            if (sr == Q2_OK)
+                streams = q2_sortdata_enumerate(&sd, NULL, 0);
+
+            printf("  --- zone %d: %u sort streams (%s, %u bytes) |"
+                   " coll(sec) %u cells |"
+                   " coll(pri) %u cells | %u scene nodes ---\n",
+                   z, streams, q2_result_str(sr), sd.size,
+                   c->sim[0].coll_ready ? c->sim[0].coll.node_count : 0,
+                   c->sim[0].coll_primary_ready
+                       ? c->sim[0].coll_primary.node_count : 0,
+                   c->zone.scene.node_count);
+        }
         if (q2_start_pos_parse(&spawns, &c->common) == Q2_OK) {
             for (i = 0; i < spawns.count; i++) {
                 q2_start_pos sp;
@@ -9801,6 +9939,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--demo"))                  c.demo = true;
         else if (!strcmp(argv[i], "--watch"))                 c.watch = true;
         else if (!strcmp(argv[i], "--zone-probe"))            zone_probe = true;
+        else if (!strcmp(argv[i], "--sort-data"))             c.use_sort = true;
+        else if (!strcmp(argv[i], "--ot-range") && i + 1 < argc) c.ot_range = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--zone-trace"))            c.zone_trace = true;
         else if (!strcmp(argv[i], "--fire-triggers")) {
             /* An optional frame to fire ON, so a test can let the player take

@@ -19,6 +19,10 @@ q2_result psx_ot_init(psx_ot *ot, u32 bucket_count, u32 prim_capacity)
     if (!ot || bucket_count == 0 || prim_capacity == 0)
         return Q2_ERR_INVALID_ARG;
 
+    /* The caller counts in the console's buckets; the table holds the
+     * subdivided ones. See PSX_OT_SUBDIV. */
+    bucket_count *= PSX_OT_SUBDIV;
+
     memset(ot, 0, sizeof(*ot));
 
     ot->prims       = (psx_prim *)calloc(prim_capacity, sizeof(psx_prim));
@@ -64,6 +68,11 @@ void psx_ot_set_window(psx_ot *ot, u32 base, u32 len)
 {
     if (!ot)
         return;
+
+    /* Console buckets in, real buckets out — the whole subdivided extent of the
+     * named range, so a window still covers exactly what it named. */
+    base *= PSX_OT_SUBDIV;
+    len  *= PSX_OT_SUBDIV;
 
     if (base >= ot->bucket_count) {
         ot->window_base = 0;
@@ -132,19 +141,32 @@ static psx_prim *ot_link(psx_ot *ot, u32 bucket, u16 otz)
 u32 q2_ot_bucket_for_depth(const psx_ot *ot, u32 depth, s32 far_z)
 {
     u32 span = psx_ot_bucket_span(ot);
-    u32 b;
+    u32 lo, hi, b;
 
     if (span == 0)
         span = 1;
 
-    if (far_z > 0) {
-        b = (u32)(((u64)depth * (span - 1)) / (u32)far_z);
+    /*
+     * The depth-addressable part of the slice. A slice too small to hold the
+     * reserve on both sides and still have somewhere to put geometry is a test
+     * table rather than a viewport, and gets the whole thing.
+     */
+    if (span > PSX_OT_DEPTH_RESERVE * 2u + 1u) {
+        lo = PSX_OT_DEPTH_RESERVE;
+        hi = span - 1u - PSX_OT_DEPTH_RESERVE;
     } else {
-        b = depth >> 2;
+        lo = 0;
+        hi = span - 1u;
     }
 
-    if (b >= span)
-        b = span - 1;
+    if (far_z > 0) {
+        b = lo + (u32)(((u64)depth * (hi - lo)) / (u32)far_z);
+    } else {
+        b = lo + (depth >> 2);
+    }
+
+    if (b > hi)
+        b = hi;
     return b;
 }
 
@@ -161,6 +183,16 @@ psx_prim *psx_ot_add_bucket(psx_ot *ot, u32 bucket)
     if (!ot || ot->prim_count >= ot->prim_capacity || ot->bucket_count == 0)
         return NULL;
 
+    /*
+     * REAL buckets, not console ones. Some callers name a console constant and
+     * some hand back a bucket `psx_ot_depth_bucket` has already resolved, and
+     * there is no way to tell the two apart here — so the scaling belongs where
+     * a console constant is turned into a bucket (q2_screen_view_otz,
+     * q2_screen_overlay_otz, and the flash and water buckets in screen.c)
+     * rather than at this door. Scaling here instead multiplied the
+     * already-resolved ones a second time, which sent the briefing's panel out
+     * of its window and drew the world through it.
+     */
     return ot_link(ot, bucket, (u16)bucket);
 }
 

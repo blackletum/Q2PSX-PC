@@ -751,6 +751,10 @@ static void test_build_ot(void)
     memset(&cam, 0, sizeof(cam));
     cam.projection = 256;
     cam.far_z      = Q2_CAMERA_FAR_DEFAULT;
+    /* The sort range is a separate field from the subdivision distance now, and
+     * leaving it zero puts the mapping back on the fixed shift. See
+     * q2_camera.sort_range. */
+    cam.sort_range = Q2_CAMERA_SORT_RANGE;
 
     q2_fx_world_init(&w, &g_tab);
     q2_rng_seed(&rng, 2024);
@@ -1067,6 +1071,10 @@ static void test_glint_two_paths(void)
     memset(&cam, 0, sizeof(cam));
     cam.projection = 256;
     cam.far_z      = Q2_CAMERA_FAR_DEFAULT;
+    /* The sort range is a separate field from the subdivision distance now, and
+     * leaving it zero puts the mapping back on the fixed shift. See
+     * q2_camera.sort_range. */
+    cam.sort_range = Q2_CAMERA_SORT_RANGE;
 
     memset(&g, 0, sizeof(g));
     g.ready           = true;
@@ -1312,6 +1320,10 @@ static void test_glint_mesh(void)
     memset(&cam, 0, sizeof(cam));
     cam.projection = 256;
     cam.far_z      = Q2_CAMERA_FAR_DEFAULT;
+    /* The sort range is a separate field from the subdivision distance now, and
+     * leaving it zero puts the mapping back on the fixed shift. See
+     * q2_camera.sort_range. */
+    cam.sort_range = Q2_CAMERA_SORT_RANGE;
 
     mesh.vert       = vert;
     mesh.vert_count = 10;
@@ -1469,6 +1481,10 @@ static void test_effect_sorts_with_the_world(void)
     memset(&cam, 0, sizeof(cam));
     cam.projection = 256;
     cam.far_z      = Q2_CAMERA_FAR_DEFAULT;
+    /* The sort range is a separate field from the subdivision distance now, and
+     * leaving it zero puts the mapping back on the fixed shift. See
+     * q2_camera.sort_range. */
+    cam.sort_range = Q2_CAMERA_SORT_RANGE;
 
     q2_fx_world_init(&w, &g_tab);
     q2_rng_seed(&rng, 7);
@@ -1494,7 +1510,9 @@ static void test_effect_sorts_with_the_world(void)
      * rather than off the primitive — `psx_prim.otz` keeps the DEPTH it was
      * offered, and the whole question here is what that depth became.
      */
-    for (i = 0; i < (u32)Q2_TEST_OT_ENTRIES; i++) {
+    /* The table holds PSX_OT_SUBDIV real buckets per console entry, so the
+     * scan covers all of them or it finds an empty table. */
+    for (i = 0; i < (u32)Q2_TEST_OT_ENTRIES * PSX_OT_SUBDIV; i++) {
         s32 head = ot.bucket_head[i];
 
         if (head < 0)
@@ -1507,19 +1525,20 @@ static void test_effect_sorts_with_the_world(void)
     check(got_near && got_far, "both beams landed somewhere");
 
     /*
-     * The world's own answer for those two depths, computed the way world.c
-     * computes it: scale by far_z into the span, then let psx_ot_add invert.
+     * The world's own answer for those two depths, asked of the world's own
+     * mapping rather than restated here.
+     *
+     * This used to restate it — scale by far_z into the span, then let
+     * psx_ot_add invert — and that copy is exactly what made the test unable to
+     * notice that the world and the effects were on two different mappings.
+     * There is one now (q2_ot_bucket_for_depth), and `sort_range` is the range
+     * it spans; far_z is the subdivision distance and no longer sorts anything.
      */
     {
-        u32 span = psx_ot_bucket_span(&ot);
-        u32 wn = (u32)(((u64)700  * span) / (u32)cam.far_z);
-        u32 wf = (u32)(((u64)5200 * span) / (u32)cam.far_z);
-
-        if (wn >= span) wn = span - 1;
-        if (wf >= span) wf = span - 1;
-
-        s32 wall_near = (s32)psx_ot_depth_bucket(&ot, (u16)wn);
-        s32 wall_far  = (s32)psx_ot_depth_bucket(&ot, (u16)wf);
+        s32 wall_near = (s32)psx_ot_depth_bucket(
+            &ot, (u16)q2_ot_bucket_for_depth(&ot, 700, cam.sort_range));
+        s32 wall_far  = (s32)psx_ot_depth_bucket(
+            &ot, (u16)q2_ot_bucket_for_depth(&ot, 5200, cam.sort_range));
 
         /*
          * Within a bucket, not exactly on one: a beam's depth is the mean of
