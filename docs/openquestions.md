@@ -2405,23 +2405,28 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
       is `q2_rotation_view`, a pure rotation, for both the world (`world.c:562`) and every model
       (`modeldraw.c:120`). Whatever that scale is, the port does not have it.
 
-      Two readings of what it comes to, and they disagree — which is exactly what makes this the next
-      thing to settle rather than the next thing to change:
+      **The scale is VERTICAL ONLY, which rules it out as the horizontal residual.** `0x800779BC` loads
+      the immediate **320** and `0x800779C0` stores it to view+278, so `vw` is a constant and row 0's
+      scale is 320/320 = **1**. view+278 and +280 are written exactly once each — no layout overwrites
+      them — so that holds for every layout. Row 1 takes `vh` from the caller's `a2` at `0x800779C4`,
+      which screen.c reads as 160, giving **2/3**.
 
-      - **From the measurement.** The port's emitter offset times **1.6** lands on the console's within
-        **0.4 of a pixel in 512** against the first capture and 0.9 against the third. And 1.6 is
-        512/320 — the row-0 scale if `vw` were the viewport width.
-      - **From the executable.** view+278 and view+280 are written EXACTLY ONCE, at `0x800779BC` and
-        `0x800779C4`, and screen.c already reads those two stores as **320 and 160** and says of the first
-        "NOT the viewport size". No layout writes them again. On that reading the row-0 scale is 1.0 and
-        the row-1 scale is 160/240 = **2/3** — a vertical squash, which is the 1.5 anamorphic factor
-        FIDELITY §11 describes, but as a CAMERA term rather than a property of the display.
+      So the console's camera squashes Y by two thirds and leaves X alone: the 1.5 anamorphic factor
+      FIDELITY §11 attributes to the display is, at least in part, a term inside the camera matrix. The
+      port has neither, and that is a real divergence worth its own entry — but it CANNOT be the
+      horizontal residual, because it does not touch X.
 
-      Both cannot be right. **What settles it is what `0x800779BC` actually stores and whether any layout
-      overwrites +278/+280 later** — and it must be settled before the camera is touched, because that
-      matrix carries the world as well as the weapon: a change that lands the gun and moves the canyon is
-      worse than the gap it closes. `q2_rotation_view`'s own doc is already known-stale — it justifies
-      applying the roll outermost from `RotMatrix` composing `Rz * Ry * Rx`, which it does not.
+      Which also disposes of a tempting coincidence, recorded so it is not re-derived: the port's emitter
+      offset times **1.6** lands within **0.4 of a pixel in 512** of the console's, and 1.6 is 512/320 —
+      the row-0 scale one would get by reading `vw` as the viewport width. It is not the viewport width.
+      A number that good is worth writing down and worth not believing.
+
+      **What is still open**, then: 0.051 of the picture width, horizontal, with the camera's own scale
+      eliminated as the cause. Two threads left that have not been pulled — what `a2` is at
+      `0x800779C4` and whether the basis at view+192 that `0x80055934` builds is orthonormal, since a
+      non-orthonormal basis would carry a horizontal term the rotation analysis assumes away.
+      `q2_rotation_view`'s own doc is also known-stale: it justifies applying the roll outermost from
+      `RotMatrix` composing `Rz * Ry * Rx`, which it does not.
 
       That is as far as measurement can take it. `t.x` is 140 on every key of the blaster's raise and idle,
       `ApplyMatrix` is `(M·v) >> 12` with the shift at `0x8006FE08`, `view * R_place == I` is pinned by a
