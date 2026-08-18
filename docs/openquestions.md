@@ -2254,9 +2254,40 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
         transformed after the world — projects about the same point. "The projection is shared with the
         world" is now a swept fact rather than an assumption.
 
-      **What is left is a measurement, not a defect.** Pinning the last of it needs the capture committed
-      so the box can be extracted rather than estimated and the animation phase matched rather than
-      guessed; the arithmetic behind it agrees with the executable at every operand.
+      **MEASURED PROPERLY AGAINST TWO CAPTURES, AND THE WEAPON IS GENUINELY IN THE WRONG PLACE.**
+      `ref/` is gitignored, so the comparison is a tool command rather than a committed frame:
+
+          q2psx-inspect viewweapon <disc> 1 out.ppm BASE0 0 0 ref/captures/base0_blaster.ppm
+
+      It reads a P6 capture, strips the letterbox (both captures are 640 x 480 holding a 640 x 432
+      picture — measuring against 480 puts every vertical fraction out by a tenth), finds the blaster's
+      EMITTER as the largest strongly-saturated warm blob in the lower right, and reports the box in both.
+      The emitter is the landmark because segmenting a whole weapon out of a dark canyon is guesswork
+      while that block is unambiguous, belongs to the model rather than the HUD, and is small enough that
+      its box is a position and a size.
+
+          console  640x480  band y 22..453  167 px   cx 0.6383  w 0.0266  offset/width 5.21
+          port     512x248                   44 px   cx 0.5605  w 0.0195  offset/width 3.10
+
+      **The last column is the argument.** The offset from the projection centre goes as `vx * H / vz` and
+      the emitter's width as `s * H / vz`, so their ratio is `vx / s` and the projection cancels out of it
+      entirely. 5.21 against 3.10 cannot be explained by a field of view, a viewport, or a display aspect,
+      and it cannot be explained by the spawn either — the weapon is attached to the VIEW, so where it
+      lands does not depend on where the player stands or which way they face.
+
+      Three things the same measurement clears:
+
+      - **the projection centre agrees.** The reticle in the capture sits at x 0.5023 of the width against
+        the port's 0.5000 — a pixel and a half on a 640-wide picture.
+      - **the vertical agrees** once the letterbox is off: the emitter's centre is 0.6516 of the active
+        band against the port's 0.6452, and its height 0.0417 against 0.0403.
+      - **the shape agrees.** Resampled into the same geometry the two silhouettes match — same body,
+        same emitter block, same barrel, same arm — so the clip rotation and the model are right.
+
+      So what is left is horizontal placement and scale: solving the two measurements together puts the
+      port's emitter at 61% of the console's view-space x and 136% of its z. **That is the open question
+      now**, and it is a much narrower one than "sits too far left" — the chain is verified operand by
+      operand, so the discrepancy has to be in something the chain does not yet contain.
 
 ---
 

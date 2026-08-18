@@ -183,7 +183,7 @@ static void usage(void)
     puts("  save    <disc> [map] [out]   the save system, round-tripped against a map");
     puts("  multi   <disc> [map]        the multiplayer runtime, checked against the disc");
     puts("  screen  <disc>              display, viewports and the OT, checked");
-    puts("  viewweapon <disc> [weapon] [out.ppm] [map] [zone] [hold-ticks]");
+    puts("  viewweapon <disc> [weapon] [out.ppm] [map] [zone] [hold] [ref.ppm]");
     puts("                              the weapon in hand, checked against the executable");
     puts("  pmove   <disc> [map] [zone] player movement: styles, jump, view, volumes");
     puts("  screen  <disc> out.ppm [layout] [map] [zone]  compose one frame");
@@ -6381,7 +6381,8 @@ int main(int argc, char **argv)
                                (argc >= 5) ? argv[4] : NULL,
                                (argc >= 6) ? argv[5] : NULL,
                                (argc >= 7) ? atoi(argv[6]) : 0,
-                               (argc >= 8) ? atoi(argv[7]) : 0);
+                               (argc >= 8) ? atoi(argv[7]) : 0,
+                               (argc >= 9) ? argv[8] : NULL);
     } else if (strcmp(cmd, "screen") == 0) {
         rc = cmd_screen(d, (argc >= 4) ? argv[3] : NULL,
                            (argc >= 5) ? argv[4] : NULL,

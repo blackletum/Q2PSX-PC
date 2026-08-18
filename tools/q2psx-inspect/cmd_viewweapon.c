@@ -117,6 +117,199 @@ static void print_clip(const q2_vm_tables *t, int w, q2_vm_state s, bool verbose
 
 
 /* ------------------------------------------------------------------------- */
+/* Measuring a frame against a capture of the real thing                      */
+/* ------------------------------------------------------------------------- */
+/*
+ * `ref/` is not in the repository — the disc is not, and neither is a
+ * screenshot of the console — so this reads a capture from a path the caller
+ * gives it and measures rather than describing. That is the difference between
+ * "the weapon looks about right" and a number openquestions #46 can be argued
+ * with.
+ *
+ * WHAT IT MEASURES, and why that landmark. Segmenting a whole weapon out of a
+ * frame means separating it from a wall it is drawn against, and on BASE0 the
+ * canyon and the blaster are both dark. The blaster's EMITTER is not: it is the
+ * only strongly saturated warm block in the lower half of either picture, it
+ * belongs to the model rather than to the HUD, and it is small enough that its
+ * box is a position and a size rather than a silhouette. Two numbers off one
+ * landmark beat four numbers off a guess.
+ *
+ * The ratio of its offset from the projection centre to its own width is worth
+ * more than either: the offset goes as `vx * H / vz` and the width as
+ * `s * H / vz`, so the ratio is `vx / s` — the projection cancels out of it
+ * entirely. If the two pictures disagree on that, they disagree about where the
+ * weapon IS, and no amount of field-of-view argument can explain it away.
+ */
+typedef struct ppm_image {
+    u8 *rgb;
+    int w, h;
+} ppm_image;
+
+static void ppm_free(ppm_image *im)
+{
+    free(im->rgb);
+    im->rgb = NULL;
+    im->w = im->h = 0;
+}
+
+/* P6 only, maxval 255, with the usual comment lines. */
+static bool ppm_load(const char *path, ppm_image *out)
+{
+    FILE *f = fopen(path, "rb");
+    int vals[3], got = 0;
+    size_t n;
+
+    if (!f)
+        return false;
+    if (fgetc(f) != 'P' || fgetc(f) != '6') {
+        fclose(f);
+        return false;
+    }
+    while (got < 3) {
+        int c = fgetc(f);
+
+        if (c == EOF) { fclose(f); return false; }
+        if (c == '#') { while (c != '\n' && c != EOF) c = fgetc(f); continue; }
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') continue;
+        ungetc(c, f);
+        if (fscanf(f, "%d", &vals[got]) != 1) { fclose(f); return false; }
+        got++;
+    }
+    fgetc(f);                       /* the single whitespace after maxval */
+    if (vals[0] <= 0 || vals[1] <= 0 || vals[2] != 255) { fclose(f); return false; }
+
+    out->w = vals[0];
+    out->h = vals[1];
+    n = (size_t)out->w * (size_t)out->h * 3u;
+    out->rgb = (u8 *)malloc(n);
+    if (!out->rgb) { fclose(f); return false; }
+    if (fread(out->rgb, 1, n, f) != n) { free(out->rgb); out->rgb = NULL; fclose(f); return false; }
+    fclose(f);
+    return true;
+}
+
+/*
+ * A capture off a video frame carries black bands where the console's picture
+ * does not reach — 640 x 480 holding a 640 x 432 picture on the two here. Left
+ * in, every vertical fraction is wrong by a tenth; the horizontal fractions are
+ * unaffected, which is why the horizontal argument survived measuring it wrong.
+ */
+static void ppm_active_band(const ppm_image *im, int *y0, int *y1)
+{
+    int y, x;
+
+    *y0 = 0;
+    *y1 = im->h - 1;
+    for (y = 0; y < im->h; y++) {
+        for (x = 0; x < im->w; x++) {
+            const u8 *p = im->rgb + ((size_t)y * im->w + x) * 3;
+            if (p[0] > 12 || p[1] > 12 || p[2] > 12) { *y0 = y; y = im->h; break; }
+        }
+    }
+    for (y = im->h - 1; y >= 0; y--) {
+        for (x = 0; x < im->w; x++) {
+            const u8 *p = im->rgb + ((size_t)y * im->w + x) * 3;
+            if (p[0] > 12 || p[1] > 12 || p[2] > 12) { *y1 = y; y = -1; break; }
+        }
+    }
+}
+
+/* The largest connected run of strongly saturated warm pixels in the lower
+ * right, which on both pictures is the blaster's emitter and nothing else. */
+static bool ppm_emitter(const ppm_image *im, int y0, int y1,
+                        int *bx0, int *bx1, int *by0, int *by1, int *area)
+{
+    int x, y, best = 0;
+    int *stack, sp = 0;
+    u8 *seen;
+    bool found = false;
+
+    seen  = (u8 *)calloc((size_t)im->w * im->h, 1);
+    stack = (int *)malloc(sizeof(int) * (size_t)im->w * im->h);
+    if (!seen || !stack) { free(seen); free(stack); return false; }
+
+#define WARM(px, py)                                                          \
+    ((py) >= y0 && (py) <= y1 && (px) >= im->w / 2 && (px) < im->w &&          \
+     im->rgb[(((size_t)(py) * im->w + (px)) * 3) + 0] >= 120 &&                \
+     im->rgb[(((size_t)(py) * im->w + (px)) * 3) + 0] >                        \
+         2 * im->rgb[(((size_t)(py) * im->w + (px)) * 3) + 1] &&               \
+     im->rgb[(((size_t)(py) * im->w + (px)) * 3) + 0] >                        \
+         2 * im->rgb[(((size_t)(py) * im->w + (px)) * 3) + 2])
+
+    for (y = (y0 + y1) / 2; y <= y1; y++) {
+        for (x = im->w / 2; x < im->w; x++) {
+            int cx0 = x, cx1 = x, cy0 = y, cy1 = y, n = 0;
+
+            if (!WARM(x, y) || seen[(size_t)y * im->w + x])
+                continue;
+            sp = 0;
+            stack[sp++] = y * im->w + x;
+            seen[(size_t)y * im->w + x] = 1;
+            while (sp > 0) {
+                int idx = stack[--sp], px = idx % im->w, py = idx / im->w;
+                int d;
+                static const int dx[8] = { 1, -1, 0, 0, 1, -1, 1, -1 };
+                static const int dy[8] = { 0, 0, 1, -1, 1, -1, -1, 1 };
+
+                n++;
+                if (px < cx0) cx0 = px;
+                if (px > cx1) cx1 = px;
+                if (py < cy0) cy0 = py;
+                if (py > cy1) cy1 = py;
+                for (d = 0; d < 8; d++) {
+                    int nx = px + dx[d], ny = py + dy[d];
+                    if (WARM(nx, ny) && !seen[(size_t)ny * im->w + nx]) {
+                        seen[(size_t)ny * im->w + nx] = 1;
+                        stack[sp++] = ny * im->w + nx;
+                    }
+                }
+            }
+            if (n > best) {
+                best = n;
+                *bx0 = cx0; *bx1 = cx1; *by0 = cy0; *by1 = cy1; *area = n;
+                found = true;
+            }
+        }
+    }
+#undef WARM
+    free(seen);
+    free(stack);
+    return found;
+}
+
+/* Report one picture's emitter, and return its offset-to-width ratio. */
+static bool emitter_report(const char *path, const char *label, double *ratio)
+{
+    ppm_image im;
+    int y0, y1, x0, x1, ey0, ey1, area;
+    double cx, w;
+
+    if (!ppm_load(path, &im)) {
+        printf("  %-8s cannot read %s\n", label, path);
+        return false;
+    }
+    ppm_active_band(&im, &y0, &y1);
+    if (!ppm_emitter(&im, y0, y1, &x0, &x1, &ey0, &ey1, &area)) {
+        printf("  %-8s %dx%d, active y %d..%d — no emitter found\n",
+               label, im.w, im.h, y0, y1);
+        ppm_free(&im);
+        return false;
+    }
+
+    cx = ((double)x0 + x1 + 1) / 2.0 / im.w;
+    w  = (double)(x1 - x0 + 1) / im.w;
+
+    printf("  %-8s %4dx%-4d band y %3d..%-3d  emitter %4d px  "
+           "cx %.4f  w %.4f  offset/width %5.2f\n",
+           label, im.w, im.h, y0, y1, area, cx, w,
+           w > 0.0 ? (cx - 0.5) / w : 0.0);
+
+    *ratio = (w > 0.0) ? (cx - 0.5) / w : 0.0;
+    ppm_free(&im);
+    return true;
+}
+
+/* ------------------------------------------------------------------------- */
 /*
  * One first-person frame, composed the way the console composes one: the world
  * into the viewport's slice of the ordering table, then the weapon into the
@@ -125,7 +318,8 @@ static void print_clip(const q2_vm_tables *t, int w, q2_vm_state s, bool verbose
  * answer to where the weapon goes.
  */
 static int render_view(disc *d, q2_vm_tables *tab, const char *map,
-                       int zone_index, int weapon, const char *out, int settle_ticks)
+                       int zone_index, int weapon, const char *out, int settle_ticks,
+                       const char *ref)
 {
     q2_world_zone zone;
     q2_screen scr;
@@ -302,7 +496,7 @@ static int render_view(disc *d, q2_vm_tables *tab, const char *map,
                     if (pr->xy[k].y > maxy) maxy = pr->xy[k].y;
                 }
             }
-            if (ot.prim_count > before)
+            if (ot.prim_count > before) {
                 printf("  screen    x %d..%d  y %d..%d   otz %u..%u"
                        "  (viewport %dx%d)\n",
                        minx, maxx, miny, maxy, minz, maxz,
@@ -324,6 +518,7 @@ static int render_view(disc *d, q2_vm_tables *tab, const char *map,
                        (double)maxx / scr.view[0].w,
                        (double)miny / scr.view[0].h,
                        (double)maxy / scr.view[0].h);
+            }
         }
         printf("  weapon    %u of %u faces, %u parts "
                "(near %u, bad %u, overflow %u)\n",
@@ -347,6 +542,34 @@ static int render_view(disc *d, q2_vm_tables *tab, const char *map,
     if (r == Q2_OK) {
         printf("  wrote %s (%u x %u)\n", out, scr.disp.width, scr.disp.height);
         rc = 0;
+
+        /*
+         * And, if the caller pointed at a capture of the console, measure both.
+         *
+         * The weapon is attached to the VIEW, so where it lands on screen does
+         * not depend on where the player is standing or which way they are
+         * facing — the spawn cannot confound this comparison even when the two
+         * pictures are taken from different places. The projection could, which
+         * is what the offset-to-width ratio is for: it cancels out of that.
+         */
+        if (ref && *ref) {
+            double r_ref = 0.0, r_port = 0.0;
+            bool got_ref, got_port;
+
+            printf("\n  against a capture of the console\n");
+            got_ref  = emitter_report(ref, "console", &r_ref);
+            got_port = emitter_report(out, "port",    &r_port);
+            if (got_ref && got_port) {
+                double gap = r_ref - r_port;
+
+                if (gap < 0.0)
+                    gap = -gap;
+                printf("           the ratio is projection-independent: "
+                       "console %.2f against port %.2f\n", r_ref, r_port);
+                printf("           so the two %s about where the weapon is\n",
+                       gap < 0.5 ? "AGREE" : "DISAGREE");
+            }
+        }
     } else {
         fprintf(stderr, "cannot write %s: %s\n", out, q2_result_str(r));
     }
@@ -362,7 +585,8 @@ static int render_view(disc *d, q2_vm_tables *tab, const char *map,
 
 /* ------------------------------------------------------------------------- */
 int cmd_viewweapon(disc *d, const char *weapon, const char *out,
-                   const char *map, int zone_index, int settle_ticks)
+                   const char *map, int zone_index, int settle_ticks,
+                   const char *ref)
 {
     q2_exe e;
     q2_vm_tables t;
@@ -425,7 +649,7 @@ int cmd_viewweapon(disc *d, const char *weapon, const char *out,
      */
     if (out) {
         int rc = render_view(d, &t, map ? map : "BASE1", zone_index,
-                             (want >= 0) ? want : 1, out, settle_ticks);
+                             (want >= 0) ? want : 1, out, settle_ticks, ref);
         q2_vm_tables_free(&t);
         return rc;
     }
@@ -768,18 +992,18 @@ int cmd_viewweapon(disc *d, const char *weapon, const char *out,
          *    modeldraw.c relies on this; the sweep keeps it honest.
          */
         for (addr = lo; addr + 4 <= hi; addr += 4) {
-            u32 w;
+            u32 insn;
 
-            if (!q2_exe_u32(&e, addr, &w))
+            if (!q2_exe_u32(&e, addr, &insn))
                 continue;
-            if ((w >> 26) != 0x12u)
+            if ((insn >> 26) != 0x12u)
                 continue;
-            if (((w >> 21) & 0x1Fu) == 2u) {       /* cfc2 rt, $rd */
+            if (((insn >> 21) & 0x1Fu) == 2u) {       /* cfc2 rt, $rd */
                 cfc2_total++;
-                if (((w >> 11) & 0x1Fu) == 31u)
+                if (((insn >> 11) & 0x1Fu) == 31u)
                     flag_reads++;
-            } else if (((w >> 21) & 0x1Fu) == 6u) { /* ctc2 rt, $rd */
-                u32 rd = (w >> 11) & 0x1Fu;
+            } else if (((insn >> 21) & 0x1Fu) == 6u) { /* ctc2 rt, $rd */
+                u32 rd = (insn >> 11) & 0x1Fu;
                 if (rd == 24u || rd == 25u)
                     ofx_writes++;
                 else if (rd == 26u)
