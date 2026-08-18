@@ -661,6 +661,21 @@ static void update_triggers(q2_sim *sim)
                 continue;
             if (trig.event_offset == Q2_TRIGGER_NO_EVENT)
                 continue;
+
+            if (sim->trace_zone) {
+                u32 k;
+                sim->trace_last_trigger = i;
+                for (k = 0; k < 3; k++) {
+                    sim->trace_last_box[k]     = trig.min[k];
+                    sim->trace_last_box[3 + k] = trig.max[k];
+                }
+                Q2_INFO("[zone] trigger %u entered at (%d,%d,%d)"
+                        "  box (%d..%d, %d..%d, %d..%d)  event @%u",
+                        i, at[0], at[1], at[2],
+                        trig.min[0], trig.max[0], trig.min[1], trig.max[1],
+                        trig.min[2], trig.max[2], trig.event_offset);
+            }
+
             q2_event_rt_trigger(&sim->event_rt, trig.event_offset);
         }
     }
@@ -669,6 +684,13 @@ static void update_triggers(q2_sim *sim)
         sim->zone_change_pending = true;
         sim->zone_change_target  = sim->event_rt.pending_zone;
         sim->event_rt.has_zone_change = false;
+
+        if (sim->trace_zone)
+            Q2_WARN("[zone] ZONEGATE raised by trigger %u"
+                    " -> '%s' (zone %u); player origin (%d,%d,%d)",
+                    sim->trace_last_trigger,
+                    sim->event_rt.pending_zone_name,
+                    sim->event_rt.pending_zone, at[0], at[1], at[2]);
     }
 }
 

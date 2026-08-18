@@ -590,6 +590,16 @@ typedef struct q2_sim {
     bool         zone_change_pending;
     u32          zone_change_target;
 
+    /*
+     * `--zone-trace`. Names the trigger volume the player crossed, because the
+     * client can see that a gate fired but not WHERE from, and "the gate is
+     * being raised by the wrong volume" and "the gate is being answered in the
+     * wrong place" are two different faults with one symptom.
+     */
+    bool         trace_zone;
+    u32          trace_last_trigger;   /* the last volume entered            */
+    s32          trace_last_box[6];    /* its min[3] then max[3]             */
+
     s32  dt_accum;      /* leftover dt units not yet consumed by a tick       */
 
     /*

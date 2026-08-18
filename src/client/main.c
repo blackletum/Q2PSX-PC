@@ -570,14 +570,30 @@ typedef struct client {
     bool              carry_player;    /* set by the two transition paths */
     bool              carry_same_map;
 
-    /* The zone gate's own target name ('Zone1'), kept across the load so the
-     * spawn scan can meet it with 'InZone1'. Empty for anything that is not a
-     * gate. */
+    /* The zone gate's own target name ('Zone1'), kept across the load for the
+     * log. Empty for anything that is not a gate. */
     char              gate_name[24];
     q2_inventory      carry_inv;
     int               carry_weapon_id;
     int               carry_chaingun;
     s32               carry_level_time;
+
+    /*
+     * WHERE THE PLAYER WAS STANDING, taken off the sim before the load frees
+     * it, because a zone gate does not move them and the new sim has to be
+     * spawned exactly where the old one left off.
+     *
+     * `cam.pos` cannot serve: during play it holds the EYE, which is the feet
+     * plus the view height, so spawning at it would lift the player by 576
+     * units at every gate.
+     */
+    s32               carry_pos[3];
+    s32               carry_vel[3];
+    s32               carry_yaw;
+    s32               carry_pitch;
+    s32               carry_ground_y;
+    bool              carry_on_ground;
+    bool              carry_pos_valid;
 
     /*
      * THE MISSION SCREEN'S TWO COUNTERS, which mission.h names as the reason
@@ -635,6 +651,29 @@ typedef struct client {
      */
     q2_start_pos      pending_teleport;
     bool              pending_teleport_have;
+
+    /*
+     * `--zone-trace`: the instrumentation asked for after "it still happens".
+     *
+     * The first fix named the zone gate as the culprit on circumstantial
+     * evidence and did not cure the report, which means either the gate is not
+     * the only thing that moves a player without being asked to, or it is being
+     * fired when it should not be. So rather than guess a second time, EVERY
+     * path that can relocate the player announces itself, and a watchdog catches
+     * any displacement that no path claimed.
+     *
+     * `move_reason` is set by whichever path is about to move the player and is
+     * consumed by the watchdog on the next tick. A jump the watchdog finds with
+     * no reason pending is the interesting one: it means the player was moved by
+     * something that does not know it is a teleport — a collision push-out, a
+     * mover carrying them, a spawn that ran twice.
+     */
+    bool              zone_trace;
+    const char       *move_reason;    /* set by a deliberate relocation      */
+    s32               last_pos[3];    /* the player's position last tick     */
+    bool              last_pos_valid;
+    u32               trace_frame;
+    u32               jumps_seen;
 
     /*
      * The doors and lifts.
@@ -2098,35 +2137,6 @@ static void client_sync_parked_health(client *c)
  */
 static bool client_load_zone(client *c, const char *map, int index);
 
-/*
- * Compare two StartPos names ignoring case AND every space.
- *
- * The disc pads its 12-byte name fields with trailing spaces ('InZone1     '),
- * and it is not consistent about interior ones either: JAIL2 carries both
- * 'InZone1' and 'In Zone1', and its zone 2 is named 'In Zone2' with no
- * space-free spelling at all. Comparing on the squeezed string is what makes
- * one rule cover the disc.
- */
-static int q2_name_eq_squeezed(const char *a, const char *b)
-{
-    for (;;) {
-        int ca, cb;
-
-        while (*a == ' ' || *a == '	') a++;
-        while (*b == ' ' || *b == '	') b++;
-
-        ca = (unsigned char)*a;
-        cb = (unsigned char)*b;
-        if (ca >= 'A' && ca <= 'Z') ca += 32;
-        if (cb >= 'A' && cb <= 'Z') cb += 32;
-
-        if (ca != cb)
-            return 1;
-        if (!ca)
-            return 0;
-        a++; b++;
-    }
-}
 /* Selects the loaded level's music. Defined beside the rest of the music code;
  * declared here because client_load_zone ends by calling it. */
 static void client_music_for_level(client *c, bool force);
@@ -2334,7 +2344,9 @@ static bool client_change_map(client *c, const char *map, const char *start)
      * carrying; the clock is a new level's, so the powerup deadlines are
      * rebased rather than kept. See `carry_player`. */
     c->carry_player   = true;
-    c->carry_same_map = false;
+    c->carry_same_map = false;   /* a new coordinate space: do NOT carry the
+                                  * position — this level has its own arrival */
+    c->move_reason    = "LOADMAP (level change)";
 
     if (!client_load_zone(c, map, zone)) {
         Q2_WARN("LOADMAP: %s zone %d would not load", map, zone);
@@ -3054,6 +3066,20 @@ static bool client_load_zone(client *c, const char *map, int index)
     s32 wmin[3], wmax[3];
     bool placed = false;
 
+    /*
+     * EVERY load announces itself, because a load is the only thing that can
+     * move a player without the sim knowing, and "which call was it" is the
+     * question the report comes down to. `move_reason` is whatever the caller
+     * set on the way in; an empty one is a load nothing claimed.
+     */
+    if (c->zone_trace)
+        Q2_INFO("[zone] f%-6u LOAD %s zone %d  (was %s zone %d)  carry=%d/%d"
+                "  caller: %s",
+                c->trace_frame, map, index,
+                c->map[0] ? c->map : "(none)", c->zone_index,
+                (int)c->carry_player, (int)c->carry_same_map,
+                c->move_reason ? c->move_reason : "(unclaimed)");
+
     /* Nothing of this level is on screen yet — see the field's note. */
     c->level_frames_drawn = false;
 
@@ -3077,6 +3103,45 @@ static bool client_load_zone(client *c, const char *map, int index)
         c->carry_same_map = false;
         c->gate_name[0]   = ' ';
         return false;
+    }
+
+    /*
+     * Take the player's own state off the sim FIRST, while the outgoing zone's
+     * sim is still standing. Before the placement block, not after it: the
+     * placement is the code that has to decide whether to move the player, and
+     * it cannot decide that against a position it has not been handed yet. Read
+     * late, `carry_pos_valid` was still false on the first gate of a session —
+     * so the carry lost every time and the player was dropped at the zone's
+     * first StartPos, which is the reported teleport surviving its own fix.
+     */
+    if (c->carry_player) {
+        const q2_player *pl = &c->sim[0].player[0];
+
+        c->carry_inv        = c->sim[0].combat.inv;
+        c->carry_weapon_id  = c->sim[0].combat.weapon_id;
+        c->carry_chaingun   = c->sim[0].combat.chaingun_bullets;
+        c->carry_level_time = c->sim[0].level_time;
+
+        /*
+         * Position only within one coordinate space; a level change starts
+         * somewhere else entirely and has its own arrival point.
+         *
+         * The motion comes with it. A doorway can be crossed at a run or in
+         * mid-jump, and a transition that kept the position but zeroed the
+         * velocity would stop the player dead on the threshold — the same
+         * discontinuity as the teleport, one frame long instead of permanent.
+         */
+        c->carry_pos[0]     = pl->pos[0];
+        c->carry_pos[1]     = pl->pos[1];
+        c->carry_pos[2]     = pl->pos[2];
+        c->carry_vel[0]     = pl->vel[0];
+        c->carry_vel[1]     = pl->vel[1];
+        c->carry_vel[2]     = pl->vel[2];
+        c->carry_yaw        = pl->yaw;
+        c->carry_pitch      = pl->pitch;
+        c->carry_ground_y   = pl->ground_y;
+        c->carry_on_ground  = pl->on_ground;
+        c->carry_pos_valid  = c->carry_same_map;
     }
 
     q2_world_free_zone(&c->zone);
@@ -3191,74 +3256,49 @@ static bool client_load_zone(client *c, const char *map, int index)
                     }
 
                     /*
-                     * A ZONE GATE HAS A NAMED ENTRY POINT, and taking the
-                     * first StartPos instead is the reported teleport.
+                     * A ZONE GATE DOES NOT MOVE THE PLAYER AT ALL.
                      *
-                     * The zones of a map share one coordinate space but occupy
-                     * DIFFERENT REGIONS of it — a position in zone 0 resolves
-                     * to no cell at all in zone 1 — so a gate really does have
-                     * to move the player. Where to is the question, and the
-                     * disc answers it by name: a gate to 'Zone1' is met by the
-                     * StartPos called 'InZone1', exactly as a fresh start on
-                     * zone 0 uses 'InZone0'.
+                     * This is the reported teleport, and both previous answers
+                     * to it were wrong in the same way: they placed the player
+                     * somewhere. First at the zone's first StartPos, then — on
+                     * the theory that a gate "really does have to move the
+                     * player" because zones occupy different regions of one
+                     * coordinate space — at a named 'InZone<N>' entry point.
+                     * Neither cured it, because the premise was never tested.
                      *
-                     * BASE1 is the case in the report. Its zone 1 carries
-                     * 'EndRoom', 'InZone1' and 'Base2Return' in that order, so
-                     * "the first StartPos whose zone matches" put a player
-                     * crossing from zone 0 into 'EndRoom' at (-331,-1387,4144)
-                     * — the far end of the level, and a room they had not
-                     * reached yet.
+                     * It is false. `--zone-probe` takes every trigger volume
+                     * whose script reaches a ZONEGATE, takes the volume's own
+                     * centre, and asks the DESTINATION zone's movement hull
+                     * which cell holds it. Across BASE1, BASE2, BASE3, LAB,
+                     * SECURITY, POWER1, POWER2, JAIL2, JAIL5 and BIGGUN, all
+                     * ONE HUNDRED gates land in a real cell of the zone they
+                     * name, and most land in a real cell of BOTH zones at once
+                     * — BASE1's trigger 4, for one, resolves in zone 0 and in
+                     * zone 1's cell 216.
                      *
-                     * The gate's own target name is preferred, so a map that
-                     * names its gates something other than 'ZoneN' still works;
-                     * 'InZone<index>' is the fallback, and the old first-match
-                     * behaviour remains for a fresh start.
+                     * A gate is a DOORWAY. The volume straddles the seam
+                     * between two adjacent regions of one space, and crossing
+                     * it streams the next zone in around a player who has not
+                     * moved and does not stop walking. The evidence for the old
+                     * premise was a single measurement of BASE1's zone-0 SPAWN
+                     * point against zone 1 — the START of zone 0, twenty-seven
+                     * thousand units from any gate, which of course resolves
+                     * nowhere and never meant anything.
+                     *
+                     * So the position carries. It is taken off the sim before
+                     * the load frees it (see `carry_pos`) rather than from
+                     * `cam.pos`, which holds the eye rather than the feet.
                      */
-                    if (c->carry_same_map) {
-                        char want[40];
-                        int  pass;
-
-                        /*
-                         * Three spellings, in order of how specific they are.
-                         * 'In' + the gate's own name covers BASE1/2/3 and
-                         * JAIL2 (whose 'In Zone1' squeezes to the same thing);
-                         * the gate name alone covers a zone whose entry point
-                         * is named for the place rather than the zone, which is
-                         * what LAB and SECURITY's zone 2 do; and 'InZone<N>' is
-                         * the positional fallback. Anything still unmatched
-                         * falls through to the first StartPos of the zone,
-                         * which is the behaviour this replaces.
-                         */
-                        for (pass = 0; !placed && pass < 3; pass++) {
-                            if (pass == 0 && c->gate_name[0])
-                                snprintf(want, sizeof(want), "In%s",
-                                         c->gate_name);
-                            else if (pass == 1 && c->gate_name[0])
-                                snprintf(want, sizeof(want), "%s",
-                                         c->gate_name);
-                            else
-                                snprintf(want, sizeof(want), "InZone%d", index);
-
-                            for (i = 0; i < spawns.count; i++) {
-                                q2_start_pos sp;
-
-                                if (!q2_start_pos_get(&spawns, i, &sp))
-                                    continue;
-                                if (sp.zone != index)
-                                    continue;
-                                if (q2_name_eq_squeezed(sp.name, want) != 0)
-                                    continue;
-
-                                c->cam.pos[0] = sp.x;
-                                c->cam.pos[1] = sp.y;
-                                c->cam.pos[2] = sp.z;
-                                c->cam.yaw    = sp.angle;
-                                placed = true;
-                                Q2_INFO("zone gate entered at '%s' (%d,%d,%d)",
-                                        sp.name, sp.x, sp.y, sp.z);
-                                break;
-                            }
-                        }
+                    if (c->carry_same_map && c->carry_pos_valid) {
+                        c->cam.pos[0] = c->carry_pos[0];
+                        c->cam.pos[1] = c->carry_pos[1];
+                        c->cam.pos[2] = c->carry_pos[2];
+                        c->cam.yaw    = c->carry_yaw;
+                        c->cam.pitch  = c->carry_pitch;
+                        placed        = true;
+                        Q2_INFO("zone gate: carried through at (%d,%d,%d)",
+                                c->carry_pos[0], c->carry_pos[1],
+                                c->carry_pos[2]);
                     }
 
                     for (i = 0; !placed && i < spawns.count; i++) {
@@ -3275,6 +3315,19 @@ static bool client_load_zone(client *c, const char *map, int index)
                         placed = true;
                         Q2_INFO("spawned at '%s' (%d,%d,%d)",
                                 sp.name, sp.x, sp.y, sp.z);
+                        /*
+                         * FIRST-MATCH IS THE FRESH-START PATH. Reaching it on
+                         * a same-map transition means the carried position was
+                         * missing, and the player has just been dropped at
+                         * whichever StartPos the file happens to list first —
+                         * which is the reported teleport exactly.
+                         */
+                        if (c->zone_trace && c->carry_same_map)
+                            Q2_WARN("[zone]        *** NO CARRIED POSITION for"
+                                    " gate '%s' into zone %d - dropped at the"
+                                    " FIRST StartPos, '%s'",
+                                    c->gate_name[0] ? c->gate_name : "(unnamed)",
+                                    index, sp.name);
                         break;
                     }
                 }
@@ -3286,8 +3339,14 @@ static bool client_load_zone(client *c, const char *map, int index)
                  * is standing there and everything downstream — visibility,
                  * the zone's own script, the creatures' interest — is the
                  * game's, not a floating camera's.
+                 *
+                 * It applies to the FIRST load only. Re-applying it after a
+                 * zone gate would put the player back on the mark every time
+                 * they crossed one, which makes the transition itself
+                 * untestable — the thing being measured is exactly where the
+                 * gate leaves them.
                  */
-                if (c->at_given) {
+                if (c->at_given && !c->carry_same_map) {
                     c->cam.pos[0] = c->at[0];
                     c->cam.pos[1] = c->at[1];
                     c->cam.pos[2] = c->at[2];
@@ -3541,15 +3600,6 @@ static bool client_load_zone(client *c, const char *map, int index)
 
     client_item_sounds_resolve(c);
 
-    /* Take the player's own state off the sim before it goes, if this is a
-     * transition rather than a fresh start. See `carry_player`. */
-    if (c->carry_player) {
-        c->carry_inv        = c->sim[0].combat.inv;
-        c->carry_weapon_id  = c->sim[0].combat.weapon_id;
-        c->carry_chaingun   = c->sim[0].combat.chaingun_bullets;
-        c->carry_level_time = c->sim[0].level_time;
-    }
-
     /* q2_sim_init memsets the struct, so the previous zone's trigger bitmap and
      * event runtime have to be released first or they leak on every zone
      * change -- and zone changes are exactly what the gates now cause. */
@@ -3558,6 +3608,8 @@ static bool client_load_zone(client *c, const char *map, int index)
     /* The client owns a view-weapon machine, so the machine decides when a
      * shot happens — the tick must not also fire from the raw trigger. */
     c->sim[0].fire_from_input = false;
+    /* Re-armed after every load, because the memset above clears it. */
+    c->sim[0].trace_zone      = c->zone_trace;
     {
         s32 feet[3];
         feet[0] = c->cam.pos[0];
@@ -4059,10 +4111,106 @@ static bool client_load_zone(client *c, const char *map, int index)
 
         q2_sim_spawn(&c->sim[0], feet, c->cam.yaw);
         c->sim[0].player[0].ground_y = feet[1];
-        /* A start position is not a standing position — drop onto the floor
-         * before the first frame rather than showing the fall (sim.c). */
-        q2_sim_settle(&c->sim[0]);
+
+        /*
+         * SETTLE IS FOR A START POSITION, NOT FOR A DOORWAY.
+         *
+         * A StartPos is an authored mark rather than a standing position, so a
+         * fresh spawn drops onto the floor before the first frame rather than
+         * showing the fall (sim.c). A player crossing a zone gate is ALREADY
+         * standing — settling them would search downward for a floor and, if
+         * they crossed at a jump or over a drop, plant them somewhere they were
+         * not. The whole point of the carry is that nothing moves.
+         */
+        if (!c->carry_pos_valid)
+            q2_sim_settle(&c->sim[0]);
         c->sim[0].combat.self.owner  = 0;
+
+        /*
+         * The rest of what a carried player was doing. `q2_sim_spawn` takes a
+         * position and a yaw and resets everything else, so the pitch, the
+         * motion and the footing are restored on top of it — walking through a
+         * doorway must not straighten your neck or stop you dead.
+         */
+        if (c->carry_pos_valid) {
+            q2_player *pl = &c->sim[0].player[0];
+
+            pl->pitch     = c->carry_pitch;
+            pl->vel[0]    = c->carry_vel[0];
+            pl->vel[1]    = c->carry_vel[1];
+            pl->vel[2]    = c->carry_vel[2];
+            pl->ground_y  = c->carry_ground_y;
+            pl->on_ground = c->carry_on_ground;
+
+            c->carry_pos_valid = false;          /* one-shot, like the rest */
+
+            {
+                s32 origin[3];
+                s32 cell;
+
+                origin[0] = pl->pos[0];
+                origin[1] = q2_sim_origin_y(pl->pos[1]);
+                origin[2] = pl->pos[2];
+                cell = q2_coll_find_node(&c->sim[0].coll, origin, -1, true);
+
+                if (c->zone_trace)
+                    Q2_INFO("[zone]        arrived in zone %d at (%d,%d,%d),"
+                            " cell %d%s", index,
+                            pl->pos[0], pl->pos[1], pl->pos[2], (int)cell,
+                            cell < 0 ? "   *** NO CELL HOLDS THIS POINT ***"
+                                     : "");
+
+                /*
+                 * A NET UNDER THE CARRY, and one that should never take weight.
+                 *
+                 * Every gate on the disc is a doorway a player walks through,
+                 * so the position they walk in with is by construction inside
+                 * the zone they walk into — measured, 100 of 100. But a gate is
+                 * an event, and an event can in principle be raised by a script
+                 * rather than by the volume, from anywhere on the map. Carried
+                 * blind, that leaves the player in a coordinate no cell holds:
+                 * no floor, no collision, nothing drawn, and no way out.
+                 *
+                 * So the arrival is checked, and only a FAILED one is placed —
+                 * loudly, because reaching this means a gate fired somewhere it
+                 * has no doorway and that is worth knowing about on its own.
+                 */
+                if (cell < 0) {
+                    q2_start_pos_list rescue;
+
+                    Q2_WARN("zone gate carried the player to (%d,%d,%d), which"
+                            " no cell of zone %d holds — the gate fired away"
+                            " from its doorway",
+                            pl->pos[0], pl->pos[1], pl->pos[2], index);
+
+                    if (q2_start_pos_parse(&rescue, &c->common) == Q2_OK) {
+                        u32 k;
+
+                        for (k = 0; k < rescue.count; k++) {
+                            q2_start_pos sp;
+                            s32 to[3];
+
+                            if (!q2_start_pos_get(&rescue, k, &sp))
+                                continue;
+                            if (sp.zone != index)
+                                continue;
+
+                            to[0] = sp.x; to[1] = sp.y; to[2] = sp.z;
+                            q2_sim_spawn(&c->sim[0], to, sp.angle);
+                            q2_sim_settle(&c->sim[0]);
+                            c->cam.pos[0] = sp.x;
+                            c->cam.pos[1] = sp.y;
+                            c->cam.pos[2] = sp.z;
+                            c->cam.yaw    = sp.angle;
+                            c->move_reason = "zone gate rescue (no cell)";
+                            Q2_WARN("...placed at '%s' (%d,%d,%d) instead",
+                                    sp.name, sp.x, sp.y, sp.z);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
 
         /*
          * And give the player back what they walked in with. After the spawn,
@@ -9337,6 +9485,288 @@ static void usage(void)
     printf("  --at X,Y,Z    stand here instead of at the zone's spawn point\n");
     printf("  --yaw N       ...facing this way (the engine's 0..4095)\n");
     printf("  --pitch N     ...and looking this far up or down\n");
+    printf("  --zone-trace  log every zone gate, teleport and unexplained\n"
+           "                jump in the player's position while you play\n");
+    printf("  --zone-probe  ...and, without playing, where each of this map's\n"
+           "                zone gates leads and whether it lands anywhere\n");
+}
+
+/* ------------------------------------------------------------------------- */
+/* Zone instrumentation                                                       */
+/* ------------------------------------------------------------------------- */
+/*
+ * The watchdog behind `--zone-trace`.
+ *
+ * A player walks; a player does not jump 2,000 units in a thirtieth of a
+ * second. Anything that does is a relocation, and the only question worth
+ * asking about it is whether something MEANT to do it. Every deliberate path —
+ * the zone gate, the TELEPORT primitive, a spawn, a map change, the number-key
+ * zone hotkeys — leaves its name in `move_reason` on the way past, so a jump
+ * that arrives with the field empty was nobody's decision and is the fault.
+ *
+ * The threshold is the console's own scale: Q2_VIEW_STAND is 576, so 2,000 is
+ * a bit over three standing heights and no run, fall or lift covers it in one
+ * frame. The cell the player lands in is reported with it, because a relocation
+ * INTO a valid cell and one into no cell at all are different bugs.
+ */
+#define ZONE_TRACE_JUMP 2000
+
+static void client_zone_watch(client *c)
+{
+    const q2_player *p;
+    s32    now[3];
+    s64    dx, dy, dz;
+    double dist;
+
+    if (!c->zone_trace)
+        return;
+
+    c->trace_frame++;
+    p = &c->sim[0].player[c->sim[0].cur_player];
+    now[0] = p->pos[0];
+    now[1] = p->pos[1];
+    now[2] = p->pos[2];
+
+    if (!c->last_pos_valid) {
+        c->last_pos[0]    = now[0];
+        c->last_pos[1]    = now[1];
+        c->last_pos[2]    = now[2];
+        c->last_pos_valid = true;
+        Q2_INFO("[zone] f%-6u start  zone %d  pos (%d,%d,%d)  cell %d",
+                c->trace_frame, c->zone_index, now[0], now[1], now[2],
+                (int)c->sim[0].current_node);
+        return;
+    }
+
+    dx   = (s64)now[0] - c->last_pos[0];
+    dy   = (s64)now[1] - c->last_pos[1];
+    dz   = (s64)now[2] - c->last_pos[2];
+    dist = sqrt((double)(dx * dx + dy * dy + dz * dz));
+
+    if (dist >= ZONE_TRACE_JUMP) {
+        c->jumps_seen++;
+        Q2_WARN("[zone] f%-6u JUMP %.0f units  (%d,%d,%d) -> (%d,%d,%d)"
+                "  zone %d  cell %d  reason: %s",
+                c->trace_frame, dist,
+                c->last_pos[0], c->last_pos[1], c->last_pos[2],
+                now[0], now[1], now[2],
+                c->zone_index, (int)c->sim[0].current_node,
+                c->move_reason ? c->move_reason
+                               : "*** NONE - NOTHING ASKED FOR THIS ***");
+    }
+
+    c->move_reason = NULL;
+    c->last_pos[0] = now[0];
+    c->last_pos[1] = now[1];
+    c->last_pos[2] = now[2];
+}
+
+/*
+ * `--zone-probe` — where does a zone gate actually LEAVE you?
+ *
+ * The reported fault is "suddenly teleporting you to a different part of the
+ * map when you reach the end of a zone", and the first answer to it assumed a
+ * gate must move the player, on the strength of one measurement: BASE1's zone-0
+ * SPAWN point resolves to no cell in zone 1. That measurement proves nothing.
+ * The spawn point is the START of zone 0; a gate fires at its END, tens of
+ * thousands of units away. The question was never whether the zone-0 spawn is
+ * inside zone 1 — of course it is not — but whether the GATE's own doorway is.
+ *
+ * So this asks that. For every trigger volume whose script reaches a ZONEGATE,
+ * it takes the volume's centre and asks the DESTINATION zone's movement hull
+ * which cell holds it. A gate that lands in a real cell of the zone it names is
+ * a doorway between two adjacent regions of one coordinate space, and the
+ * console has nothing to do on arrival but keep walking. A gate that lands
+ * nowhere needs an arrival point, and that arrival point has to be found.
+ *
+ * The destination's StartPos points are resolved in the same hull, so the two
+ * answers can be read against each other rather than argued.
+ */
+enum { PROBE_MAX_GATES = 128, PROBE_MAX_ZONES = 12 };
+
+typedef struct probe_gate {
+    u32  trig;
+    s32  centre[3];
+    s32  min[3], max[3];
+    char dest_name[16];
+    int  dest;
+    s32  node_in_dest;
+    u32  zones_holding;      /* bitmask of zones whose hull holds the centre */
+} probe_gate;
+
+static void client_zone_probe(client *c, const char *map)
+{
+    static probe_gate gates[PROBE_MAX_GATES];
+    u32 gate_count = 0;
+    int zone_count = 0;
+    int z, g;
+
+    printf("=== zone probe: %s ===\n", map);
+
+    /*
+     * Zone 0 first, because the trigger and event chunks live in the map's
+     * COMMON file and one load is enough to read every gate on the map.
+     */
+    if (!client_load_zone(c, map, 0)) {
+        printf("  %s: no zone 0\n", map);
+        return;
+    }
+
+    if (c->sim[0].triggers_ready && c->sim[0].events_ready) {
+        const q2_events *ev = &c->sim[0].event_rt.events;
+        u32 i;
+
+        for (i = 0; i < c->sim[0].triggers.count &&
+                    gate_count < PROBE_MAX_GATES; i++) {
+            q2_trigger t;
+            u32        visit[24];
+            u32        n_visit = 0, vi;
+
+            if (!q2_trigger_get(&c->sim[0].triggers, i, &t))
+                continue;
+            if (t.event_offset == Q2_TRIGGER_NO_EVENT)
+                continue;
+
+            visit[n_visit++] = t.event_offset;
+
+            /*
+             * A trigger's own record may only TRIGGER others, so the gate can
+             * sit one or two lists down. Followed breadth-first with a visited
+             * set, because event lists are allowed to name each other.
+             */
+            for (vi = 0; vi < n_visit && gate_count < PROBE_MAX_GATES; vi++) {
+                q2_event_record rec;
+                u32             item_i;
+
+                if (!q2_events_record_at(ev, visit[vi], &rec))
+                    continue;
+
+                for (item_i = 0; item_i < rec.n_items; item_i++) {
+                    q2_event_item it;
+
+                    if (!q2_events_get_item(ev, &rec, item_i, &it))
+                        break;
+
+                    if (it.opcode == Q2_EVOP_TRIGGER) {
+                        u32       n = 0, k;
+                        const u8 *offs = NULL;
+
+                        if (q2_events_get_list(&it, &n, &offs)) {
+                            for (k = 0; k < n && n_visit < 24; k++) {
+                                u32 off = q2_events_list_entry(offs, k);
+                                u32 s;
+                                for (s = 0; s < n_visit; s++)
+                                    if (visit[s] == off) break;
+                                if (s == n_visit)
+                                    visit[n_visit++] = off;
+                            }
+                        }
+                        continue;
+                    }
+
+                    if (it.opcode != Q2_EVOP_ZONEGATE || !it.payload)
+                        continue;
+
+                    {
+                        probe_gate *pg = &gates[gate_count++];
+                        u32 k;
+                        int val = 0, digits = 0;
+
+                        memset(pg, 0, sizeof(*pg));
+                        pg->trig = i;
+                        for (k = 0; k < 3; k++) {
+                            pg->min[k]    = t.min[k];
+                            pg->max[k]    = t.max[k];
+                            pg->centre[k] = (t.min[k] + t.max[k]) / 2;
+                        }
+                        for (k = 0; k < 12 && it.payload[k]; k++)
+                            pg->dest_name[k] = (char)it.payload[k];
+
+                        for (k = 0; pg->dest_name[k]; k++) {
+                            char ch = pg->dest_name[k];
+                            if (ch >= '0' && ch <= '9') {
+                                val = val * 10 + (ch - '0');
+                                digits++;
+                            } else if (digits) {
+                                digits = 0; val = 0;
+                            }
+                        }
+                        pg->dest         = digits ? val : -1;
+                        pg->node_in_dest = -1;
+                    }
+                }
+            }
+        }
+    }
+
+    printf("  gates found: %u\n", gate_count);
+
+    /*
+     * Now walk every zone with the hull loaded and ask it about each gate's
+     * doorway — every zone's answer, not just the destination's, because a
+     * doorway that resolves in BOTH the zone it leaves and the zone it names is
+     * a shared threshold and settles the question outright.
+     */
+    for (z = 0; z < PROBE_MAX_ZONES; z++) {
+        q2_start_pos_list spawns;
+        u32 i;
+
+        if (z != 0 && !client_load_zone(c, map, z))
+            break;
+        zone_count = z + 1;
+
+        for (g = 0; g < (int)gate_count; g++) {
+            s32 n = q2_coll_find_node(&c->sim[0].coll, gates[g].centre, -1,
+                                      true);
+
+            if (n >= 0)
+                gates[g].zones_holding |= 1u << z;
+            if (gates[g].dest == z)
+                gates[g].node_in_dest = n;
+        }
+
+        printf("  --- zone %d ---\n", z);
+        if (q2_start_pos_parse(&spawns, &c->common) == Q2_OK) {
+            for (i = 0; i < spawns.count; i++) {
+                q2_start_pos sp;
+                s32 at[3], n;
+
+                if (!q2_start_pos_get(&spawns, i, &sp) || sp.zone != z)
+                    continue;
+                at[0] = sp.x;
+                at[1] = q2_sim_origin_y(sp.y);
+                at[2] = sp.z;
+                n = q2_coll_find_node(&c->sim[0].coll, at, -1, true);
+                printf("      StartPos '%-14s' (%7d,%6d,%7d) yaw %5d  cell %d\n",
+                       sp.name, sp.x, sp.y, sp.z, sp.angle, (int)n);
+            }
+        }
+    }
+
+    printf("  --- gates (%d zones on this map) ---\n", zone_count);
+    for (g = 0; g < (int)gate_count; g++) {
+        char held[64];
+        int  k, o = 0;
+
+        held[0] = '\0';
+        for (k = 0; k < zone_count && o < 50; k++)
+            if (gates[g].zones_holding & (1u << k))
+                o += snprintf(held + o, sizeof(held) - (size_t)o, "%d ", k);
+
+        printf("      trig %3u -> '%s' (zone %d)  box (%d..%d, %d..%d, %d..%d)\n",
+               gates[g].trig, gates[g].dest_name, gates[g].dest,
+               gates[g].min[0], gates[g].max[0],
+               gates[g].min[1], gates[g].max[1],
+               gates[g].min[2], gates[g].max[2]);
+        printf("               centre (%d,%d,%d) resolves in zones [%s]"
+               " ; cell in DEST %d = %d%s\n",
+               gates[g].centre[0], gates[g].centre[1], gates[g].centre[2],
+               held[0] ? held : "none",
+               gates[g].dest, (int)gates[g].node_in_dest,
+               gates[g].node_in_dest >= 0
+                   ? "   <-- DOORWAY IS INSIDE THE DESTINATION"
+                   : "");
+    }
 }
 
 int main(int argc, char **argv)
@@ -9345,6 +9775,7 @@ int main(int argc, char **argv)
     const char *disc_path = NULL;
     const char *map = "BASE0";
     bool map_given = false;
+    bool zone_probe = false;
     int zone_index = 0;
     int scale = 3;
     int i;
@@ -9369,6 +9800,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--headless"))              c.headless = true;
         else if (!strcmp(argv[i], "--demo"))                  c.demo = true;
         else if (!strcmp(argv[i], "--watch"))                 c.watch = true;
+        else if (!strcmp(argv[i], "--zone-probe"))            zone_probe = true;
+        else if (!strcmp(argv[i], "--zone-trace"))            c.zone_trace = true;
         else if (!strcmp(argv[i], "--fire-triggers")) {
             /* An optional frame to fire ON, so a test can let the player take
              * damage or collect something first and then walk through the
@@ -9980,6 +10413,12 @@ no_window:
         }
     }
 
+    /* A static question about the map, asked and answered without playing it. */
+    if (zone_probe) {
+        client_zone_probe(&c, map);
+        goto done;
+    }
+
     if (!client_load_zone(&c, map, zone_index)) {
         fprintf(stderr, "cannot load %s zone %d\n", map, zone_index);
         goto done;
@@ -10266,6 +10705,16 @@ no_window:
                     if (!c.menu.open &&
                         ev.key.key >= SDLK_0 && ev.key.key <= SDLK_9) {
                         int z = (int)(ev.key.key - SDLK_0);
+                        /*
+                         * A DEBUG HOTKEY THAT LOOKS EXACTLY LIKE THE REPORTED
+                         * FAULT. 0-9 loads that zone and respawns you in it,
+                         * and nothing about the binding says so — so a stray
+                         * number key during play is indistinguishable, from the
+                         * player's chair, from a gate misfiring. Named in the
+                         * log for that reason.
+                         */
+                        Q2_INFO("hotkey %d: load zone %d", z, z);
+                        c.move_reason = "number-key zone hotkey";
                         client_load_zone(&c, c.map, z);
                     }
                     break;
@@ -10424,6 +10873,13 @@ no_window:
         c.mouse_left_prev  = c.mouse_left;
         c.mouse_right_prev = c.mouse_right;
 
+        /*
+         * Sampled here — after the tick that moves the player and before the
+         * transitions that relocate them — so one frame's walking and one
+         * frame's teleporting are never averaged into the same displacement.
+         */
+        client_zone_watch(&c);
+
         /* A zone gate fired somewhere in the script: another zone of the same
          * map. Deferred to here because the gate fires inside the tick, and
          * the load frees the triggers the runtime is standing in. */
@@ -10439,9 +10895,24 @@ no_window:
                  */
                 if ((int)target == c.zone_index) {
                     Q2_DEBUG("zone gate names the zone we are in (%u)", target);
+                    if (c.zone_trace)
+                        Q2_INFO("[zone] f%-6u gate to the resident zone %u"
+                                " ('%s') IGNORED", c.trace_frame, target,
+                                c.sim[0].event_rt.pending_zone_name);
                 } else {
                     Q2_INFO("zone gate -> zone %u ('%s')", target,
                             c.sim[0].event_rt.pending_zone_name);
+                    if (c.zone_trace) {
+                        const q2_player *pl =
+                            &c.sim[0].player[c.sim[0].cur_player];
+                        Q2_WARN("[zone] f%-6u GATE FIRED  zone %d -> %u"
+                                " ('%s')  standing at (%d,%d,%d) cell %d",
+                                c.trace_frame, c.zone_index, target,
+                                c.sim[0].event_rt.pending_zone_name,
+                                pl->pos[0], pl->pos[1], pl->pos[2],
+                                (int)c.sim[0].current_node);
+                    }
+                    c.move_reason    = "zone gate";
                     c.carry_player   = true;
                     c.carry_same_map = true;
                     /* Carried across the load: the gate's name is what names
@@ -10462,6 +10933,15 @@ no_window:
             s32 to[3];
 
             c.pending_teleport_have = false;
+            c.move_reason           = "TELEPORT primitive";
+
+            if (c.zone_trace) {
+                const q2_player *pl = &c.sim[0].player[c.sim[0].cur_player];
+                Q2_WARN("[zone] f%-6u TELEPORT  '%s' zone %d -> (%d,%d,%d)"
+                        "  from (%d,%d,%d) in zone %d",
+                        c.trace_frame, sp.name, (int)sp.zone, sp.x, sp.y, sp.z,
+                        pl->pos[0], pl->pos[1], pl->pos[2], c.zone_index);
+            }
 
             if (sp.zone != c.zone_index) {
                 c.carry_player   = true;
