@@ -2378,6 +2378,27 @@ resolve to the directory `QFMV` — 45.5 KB, no geometry, no letterforms, no ico
 the display name the level was entered under against its own 36-byte records (§ *QENDMIS* in `levelbin.h`)
 and calls the player with whichever filename matches, which is why one directory can be two cinematics.
 
+**And who asks for the intro is the BOOT CHAIN, before the front end has ever been loaded.** The boot
+initialiser at `0x80018DA4` writes 1 into `0x800B2A88`, the dispatcher answers that with `0x80041748`
+(`"QLogos2"`), and from there each logo screen names the next by writing the game-state word through
+`engine+0x3AC`:
+
+| Screen | Directory | Images | Ends with | Which asks for |
+| --- | --- | --- | --- | --- |
+| logos 1 | `QLOGOS2` | `Legal.lbm`, `HamLogo.lbm` | `0x80101FA0` writes **14** | `0x800B2A5C` -> `QLogos` |
+| logos 2 | `QLOGOS` | `IdLogo.lbm`, `ActLogo.lbm` | `0x801021D0` writes **12** | `0x800B2A54` -> `Intro FMV` |
+
+QFMV then plays `TAKE1BP.STX` and asks for state 6, no request flag is left standing, and the
+dispatcher's fall-through at `0x80018B54` loads `QFront`. **So the intro is a pre-menu cinematic**: the
+retail order is Legal, Hammerhead, id, Activision, `TAKE1BP.STX`, and only then the title screen.
+
+Each screen is two full-screen 8bpp images out of its map's `SNDVRAM.DAT`, **cross-faded** — the second
+begins its fade in on the frame the first begins its fade out. Both handlers use the same shape, eight
+frames up in steps of 16 to 128 (the GPU's neutral modulation value), a hold, eight frames down:
+`Legal.lbm` holds to 258 and `HamLogo.lbm` for 83 more, hand-off at 353; `IdLogo.lbm` and `ActLogo.lbm`
+hold 83 each, hand-off at 176. **Neither module reads the pad anywhere in its 30 KB**, so on the console
+none of it is skippable.
+
 `ROGUEINP.STX` is named by **no** movie-table record, and cannot be: the record's filename field is twelve
 bytes and `"ROGUEINP.STX"` needs thirteen with its terminator. It is a bare literal at QFRONT's
 `module+0xDC4`, reached when the store at `module+0x12D90` counts below zero.
@@ -2389,7 +2410,12 @@ nearby load or store found only the reader and recorded the threshold as unrecov
 `+0xEFFC` and `+0xF014`. Each stores its skill into `engine+0x366` and calls it; it arms the 150, hides the
 five title objects `module+0x12B20` names, and installs `0x80101CD0` as the page hook. 150 of the console's
 1/300 s units is **half a second**, so the reel is the opening of a new game with a short beat in front of
-it, and when the film ends the same function puts up `"STARTING"` / `"GAME"` and calls `engine+0x494(1)`.
+it. When the film ends the same function puts up `"STARTING"` / `"GAME"`, saves the Game Config with the
+new skill in it (`engine+0x494(1)` is `0x80080CF0`, which is that file's loader), and arms
+`engine+0x2C0 = 12` / `engine+0x2C2 = 1` — a **twelve-frame countdown and the state it enters**, read by
+`0x8001F964`, which the same tail installs as the page hook. State 1 is the game. It is NOT state 12: the
+pair is a delay and a destination, not two states, and reading it as one is what put the intro FMV after
+the reel for a round (#126, #127).
 
 The **attract loop is a different store and plays no film at all.** `module+0x12DC0` is parked with 9000
 (thirty seconds) by the title page builder `0x8010CEE0` and counted down by the page hook `0x8010C6AC`,

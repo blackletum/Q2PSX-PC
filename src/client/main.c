@@ -756,6 +756,58 @@ typedef struct client {
     char              film_screen[16];
     char              film_next_map[64];
     bool              film_is_start;    /* the front end's own opening reel */
+    bool              film_to_front;    /* ...and the intro, which opens on
+                                         * the title screen rather than a map */
+
+    /*
+     * ---------------------------------------------------------------------
+     * THE BOOT CHAIN — what runs before the menu
+     * ---------------------------------------------------------------------
+     * The port booted straight into QFRONT. The console does not: it boots
+     * into two SCREENS and a film, and the menu is the fourth thing you see.
+     *
+     *   0x80018DA4  sw v0, 10888(at)    ; -> 0x800B2A88 = 1, at boot
+     *
+     * and the dispatcher's flag chain answers that with `0x80041748`, which
+     * writes `"QLogos2"` into the next-map buffer. From there each screen names
+     * the next by writing the game-state word through `engine+0x3AC`:
+     *
+     *   QLOGOS2  0x80101FA0  sh 14      -> 0x800B2A5C -> `QLogos`
+     *   QLOGOS   0x801021D0  sh 12      -> 0x800B2A54 -> `Intro FMV`
+     *
+     * `Intro FMV` is QFMV, which plays `TAKE1BP.STX`; QFMV's own handler then
+     * asks for state 6, no request flag is left standing, and the dispatcher's
+     * fall-through at `0x80018B54` loads `QFront`. So the retail order is
+     *
+     *     Legal -> Hammerhead -> id -> Activision -> TAKE1BP.STX -> the menu
+     *
+     * and the intro cinematic is a PRE-MENU cinematic. (The port had it after
+     * the difficulty, which is the reel's slot, not the intro's.)
+     *
+     * Each screen is two full-screen 8bpp images out of its map's SNDVRAM,
+     * CROSS-FADED: the second begins its fade in on the frame the first begins
+     * its fade out. The numbers are the modules' own, and both handlers use the
+     * same shape — eight frames up in steps of 16 to 128, a hold, eight frames
+     * down. See `k_boot_screens`.
+     *
+     * NOT SKIPPABLE ON THE CONSOLE. Neither logo module reads the pad anywhere
+     * — `engine+0x2AC`, the word QFRONT's title hook tests, is never loaded in
+     * all 30 KB of it — so the twelve seconds are twelve seconds. A press ends
+     * the current screen here anyway, because that is what was asked for and a
+     * legal screen you cannot dismiss is a worse thing to reproduce than an
+     * exact one.
+     */
+    q2_vram_section   boot_vram;       /* the screen's SNDVRAM, while it runs */
+    bool              boot_vram_open;
+    u8               *boot_rgb[2];     /* its two images, decoded             */
+    u16               boot_w[2], boot_h[2];
+    u32               boot_index;      /* which screen of the chain           */
+    u32               boot_frame;      /* frames it has been up               */
+    double            boot_carry;      /* ...and the fraction of the next     */
+    bool              boot_open;
+    bool              boot_chain;      /* this run walks it                   */
+    bool              no_boot;         /* --no-boot: and this one will not    */
+    bool              boot_skip;       /* a press, taken on the next frame    */
 
     /*
      * ---------------------------------------------------------------------
@@ -819,7 +871,7 @@ typedef struct client {
      * ZERO references in all 118 KB of the module. It is an earlier build's
      * entry point left in, and it looks exactly like the live one.
      */
-    u32               start_beat;       /* frames left of the 150-unit beat */
+    double            start_beat;      /* 1/300 s units left of the beat  */
 
     /* The map's own mission-event namespace, out of its LevelBin. */
     q2_levelbin_misevent misevent[32];
@@ -2311,13 +2363,17 @@ static void client_music_for_level(client *c, bool force);
 /*
  * The beat between a difficulty being confirmed and the opening reel starting.
  *
- * 150 of the console's 1/300 s units, armed by 0x80101E4C in a delay slot and
- * counted down by the frame delta in 0x80101CD0, which is half a second —
- * fifteen of this port's 30 Hz frames. READ, not chosen: see `start_beat` for
- * the writer, for its three callers, and for why the reel it arms was never
- * the title screen's attract loop.
+ * 150, in the console's own 1/300 s units — armed by 0x80101E4C in a delay slot
+ * and counted down by 0x80101CD0, which subtracts the FRAME DELTA rather than
+ * one. That is what makes it half a second of real time whatever the frame rate
+ * is, and why it is kept in those units and drained with `Q2_DT_HZ` rather than
+ * turned into a frame count: a frame count would be 0.3 s at the PAL field rate
+ * and 0.25 s at the NTSC one, for a number the disc states exactly.
+ *
+ * READ, not chosen: see `start_beat` for the writer, for its three callers, and
+ * for why the reel it arms was never the title screen's attract loop.
  */
-#define Q2_START_BEAT_FRAMES      15
+#define Q2_START_BEAT_UNITS      150
 
 /*
  * The last unit on this disc. A MISCOMPLETE here ends the GAME — the outer
@@ -6790,7 +6846,7 @@ static bool client_ui_open(const client *c)
 {
     return c->menu.open || c->mcard_open || c->mission_open ||
            c->briefing_open || c->credits_open || c->film_open ||
-           c->popup.visible;
+           c->boot_open || c->popup.visible;
 }
 
 static void client_update_grab(client *c)
@@ -6902,7 +6958,7 @@ static void client_menu_requests(client *c)
          * title screen with its rows taken away.
          */
         q2_sim_scene_page(&c->sim[0], false, false);
-        c->start_beat = Q2_START_BEAT_FRAMES;
+        c->start_beat = (double)Q2_START_BEAT_UNITS;
         break;
     case Q2_MREQ_CREDITS: {
         /*
@@ -8431,50 +8487,455 @@ static void client_film_tick(client *c, float dt)
  */
 #define Q2_START_REEL "ROGUEINP.STX"
 
+/* ------------------------------------------------------------------------- */
+/* The boot chain                                                             */
+/* ------------------------------------------------------------------------- */
 /*
- * What the front end hands the game over to when the reel has run.
+ * The two logo screens, transcribed.
  *
- * On the console that hand-off is `engine+0x494(1)` at 0x80101E18, and what
- * answers it is a LOAD OF THE INTRO FMV, two steps out:
+ * Each is a level directory whose module does nothing but hold two full-screen
+ * images and cross-fade between them, and each names the next thing by writing
+ * the game state word. What is here is those two handlers' arithmetic:
  *
- *     8001863C  addiu v0, zero, 12          ; game state 12, which QFRONT set
- *     80018650  sw    v0, 10836(at)         ; -> 0x800B2A54, "play the intro"
- *     80018AF8  beq   v0, zero, +0x20       ; the dispatcher's test of it
- *     80018B00  jal   0x800417F8            ; which writes "Intro FMV" into
- *                                           ; the next-map buffer, entry
- *                                           ; point "Default", state 6
+ *   QLOGOS2, 0x80101D88          QLOGOS, 0x80101FB8
+ *     Legal.lbm                    IdLogo.lbm
+ *       t < 8      t << 4            t < 8      t << 4
+ *       t < 258    128               t < 83     128
+ *       t < 266    128-((t-257)<<4)  t < 91     128-((t-82)<<4)
+ *     HamLogo.lbm, from t = 258    ActLogo.lbm, from t = 83
+ *       d < 8      d << 4            d < 8      d << 4
+ *       d < 83     128               d < 83     128
+ *       d < 91     128-((d-83)<<4)   d < 91     128-((d-83)<<4)
+ *     hand off at d = 95           hand off at d = 93
  *
- * `Intro FMV` is record 10 of the level table and resolves to QFMV, whose
- * module plays `TAKE1BP.STX` for exactly that screen name — so a new game opens
- * on TWO films, the front end's reel and then QFMV's intro, and only then on
- * the first map. The console draws its two-row page "STARTING" / "GAME"
- * (module+0x1C and module+0x28) over the blank front end while that load runs;
- * a load here is not a screen the player waits in front of, so there is nothing
- * to put it on.
+ * The off-by-one on each screen's FIRST image is in the module and is kept:
+ * the first image reads the raw counter and the second a rebased copy, and the
+ * rebase costs a frame. 128 is the GPU's neutral modulation value, so a fade is
+ * eight steps of 16 rather than of 32 — half brightness at the midpoint.
  *
- * A disc with no such record, or a film that will not open, still starts the
- * game: a cinematic is the opening, not the gate.
+ * The images are 8bpp with a 256-entry CLUT apiece, 512 bytes wide and 240
+ * rows, which is the whole active picture: these are not overlays on a scene,
+ * they ARE the screen.
  */
-static void client_start_game(client *c)
-{
-    const q2_level_entry *fmv = c->level_table_ready
-        ? q2_level_find_display(&c->level_table, "Intro FMV") : NULL;
+typedef struct {
+    const char *image;      /* the .lbm in this screen's SNDVRAM            */
+    u32         start;      /* the frame its own clock starts on           */
+    u32         hold_end;   /* full brightness until here, then eight down */
+    u32         out_base;   /* the subtrahend the module's fade-out uses   */
+} q2_boot_image;
 
-    c->in_front_end  = false;
+typedef struct {
+    const char    *map;         /* the level directory carrying them */
+    q2_boot_image  image[2];
+    u32            length;      /* frames before it hands over       */
+} q2_boot_screen;
+
+static const q2_boot_screen k_boot_screens[] = {
+    { "QLOGOS2", { { "Legal.lbm",   0,   258, 257 },
+                   { "HamLogo.lbm", 258,  83,  83 } }, 353 },
+    { "QLOGOS",  { { "IdLogo.lbm",  0,    83,  82 },
+                   { "ActLogo.lbm", 83,   83,  83 } }, 176 }
+};
+
+#define Q2_BOOT_SCREENS  (sizeof(k_boot_screens) / sizeof(k_boot_screens[0]))
+
+/* The brightness one image is drawn at on frame `t` of its own clock. */
+static int client_boot_fade(const q2_boot_image *im, u32 frame)
+{
+    u32 t;
+
+    if (frame < im->start)
+        return 0;
+    t = frame - im->start;
+
+    if (t < 8)
+        return (int)(t << 4);
+    if (t < im->hold_end)
+        return 128;
+    if (t < im->hold_end + 8)
+        return 128 - (int)((t - im->out_base) << 4);
+    return 0;
+}
+
+static void client_boot_free(client *c)
+{
+    u32 i;
+
+    for (i = 0; i < 2; i++) {
+        free(c->boot_rgb[i]);
+        c->boot_rgb[i] = NULL;
+        c->boot_w[i]   = 0;
+        c->boot_h[i]   = 0;
+    }
+    if (c->boot_vram_open) {
+        q2_vram_free(&c->boot_vram);
+        c->boot_vram_open = false;
+    }
+}
+
+/*
+ * Decode one screen's images out of its map's SNDVRAM.
+ *
+ * The SECTION only, not the map: a logo screen has no world, no player and no
+ * scene to run — the console loads the whole directory because loading a
+ * directory is the only thing its engine knows how to do, and what it then
+ * shows is two rectangles. Reading just the images is the same picture without
+ * a 100 KB level load behind it.
+ */
+static bool client_boot_load(client *c, const q2_boot_screen *s)
+{
+    u32 i, loaded = 0;
+
+    client_boot_free(c);
+
+    if (q2_vram_load(&c->boot_vram, c->disc, s->map) != Q2_OK) {
+        Q2_WARN("boot: %s carries no image bank", s->map);
+        return false;
+    }
+    c->boot_vram_open = true;
+
+    for (i = 0; i < 2; i++) {
+        const q2_vram_image *img;
+        u16 clut[Q2_VRAM_CLUT8_ENTRIES];
+        u8 *px, *rgb;
+        size_t need, got = 0;
+        u32 index, x, y;
+
+        if (!s->image[i].image)
+            continue;
+        if (!q2_vram_find_by_name(&c->boot_vram, s->image[i].image, &index))
+            continue;
+
+        img  = &c->boot_vram.images[index];
+        need = q2_vram_decoded_size(&c->boot_vram, index);
+        /* One byte per texel is what makes this 8bpp; a record whose payload
+         * is not width*height is a texture page or a 4bpp sheet. */
+        if (!need || need != (size_t)img->width * img->height)
+            continue;
+        if (index < c->boot_vram.texpage_count ||
+            !q2_vram_get_clut8(&c->boot_vram,
+                               index - c->boot_vram.texpage_count, clut))
+            continue;
+
+        px  = (u8 *)malloc(need);
+        rgb = (u8 *)malloc(need * 3);
+        if (!px || !rgb) {
+            free(px);
+            free(rgb);
+            continue;
+        }
+        if (q2_vram_decode(&c->boot_vram, index, px, need, &got) != Q2_OK ||
+            got != need) {
+            free(px);
+            free(rgb);
+            continue;
+        }
+
+        /* Out of the CLUT's 1.5.5.5 and into bytes, once, so the per-frame
+         * blit is a multiply and a shift rather than a palette lookup. */
+        for (y = 0; y < img->height; y++)
+            for (x = 0; x < img->width; x++) {
+                u16 e = clut[px[(size_t)y * img->width + x]];
+                u8 *o = rgb + ((size_t)y * img->width + x) * 3;
+
+                o[0] = (u8)((e         & 0x1Fu) << 3);
+                o[1] = (u8)(((e >>  5) & 0x1Fu) << 3);
+                o[2] = (u8)(((e >> 10) & 0x1Fu) << 3);
+            }
+
+        free(px);
+        c->boot_rgb[i] = rgb;
+        c->boot_w[i]   = img->width;
+        c->boot_h[i]   = img->height;
+        loaded++;
+    }
+
+    if (!loaded) {
+        Q2_WARN("boot: %s has none of its images", s->map);
+        client_boot_free(c);
+        return false;
+    }
+    return true;
+}
+
+/*
+ * Open the title screen, loading QFRONT if this run is not already standing in
+ * it.
+ *
+ * The reload is what the boot chain needs: the intro film replaced QFRONT with
+ * QFMV to play, so coming out of it there is no front end to open a page over.
+ * The console's is the same load — `0x80018B54` writes `"QFront"` into the
+ * next-map buffer and the dispatcher loads it like any other level.
+ */
+static void client_enter_front_end(client *c)
+{
+    c->in_front_end  = true;
+    c->film_to_front = false;
     c->film_is_start = false;
-    c->start_beat    = 0;
+    c->start_beat    = 0.0;
+
+    if (!client_name_eq(c->map, "QFRONT") &&
+        !client_load_zone(c, "QFRONT", 0)) {
+        Q2_ERROR("front end: cannot load QFRONT");
+        c->in_front_end = false;
+        return;
+    }
+
+    /*
+     * The camera is the WORLD ORIGIN, looking down +z with no rotation, and it
+     * is not the spawn point. `engine+0x170` — which QFRONT's `init` calls with
+     * 0 before anything else — is `0x80077D0C`, and its first act is
+     * `memset(0x800D5C30, 0, 3920)`: the whole five-viewport array zeroed,
+     * position and rotation included. Only then does `engine+0x174(0, 160,
+     * 4000)` put the projection and far plane back.
+     *
+     * So the front end deliberately throws the level's `StartPos` away, and
+     * this port had been leaving the camera where the spawn settle dropped it
+     * — 54 units below the origin, which at z = 1700 and proj 160 is five
+     * pixels of vertical error on the logo.
+     */
+    c->cam.pos[0] = 0;
+    c->cam.pos[1] = 0;
+    c->cam.pos[2] = 0;
+    c->cam.yaw    = 0;
+    c->cam.pitch  = 0;
+    c->cam.roll   = 0;
+
+    /*
+     * And the front end's own far plane, on the VIEWPORT rather than the
+     * camera — the camera reloads `view[p].far_z` every frame (see the viewport
+     * note in client_frame), so writing the camera here would last exactly one
+     * frame.
+     *
+     * This is `engine+0x174(0, 160, 4000)`, `init`'s second act, and it is a
+     * straight overwrite of what `engine+0x170` — which is `0x80077D0C`, the
+     * ONE layout `q2_screen_set_layout` already reproduces — had just
+     * installed. Same proj, far 4000 where a session layout uses 6400.
+     */
+    if (c->screen.view_count > 0)
+        c->screen.view[0].far_z = 4000;
+
+    /* The title screen is the menu's page 46 over the QFRONT scene. It is
+     * opened rather than drawn, so it navigates with the same engine, the same
+     * selection bar and the same font as every other page. */
+    q2_menu_open(&c->menu);
+    q2_menu_goto(&c->menu, Q2_PAGE_FRONT_TITLE);
+}
+
+/*
+ * Start the boot chain, or the screen after the one that just ended.
+ *
+ * When it runs out, the INTRO FMV — which is what QLOGOS asks for by writing
+ * state 12, and what the dispatcher answers with a load of `Intro FMV`, the
+ * level table's tenth record and the map QFMV. The film hands over to the
+ * front end when it ends, because by then no request flag is left standing and
+ * `0x80018B54` falls through to `QFront`.
+ */
+static void client_boot_advance(client *c)
+{
+    const q2_level_entry *fmv;
+
+    while (c->boot_index < Q2_BOOT_SCREENS) {
+        const q2_boot_screen *s = &k_boot_screens[c->boot_index++];
+
+        if (!client_boot_load(c, s))
+            continue;                    /* a disc without it just skips it */
+        c->boot_frame = 0;
+        c->boot_carry = 0.0;
+        c->boot_open  = true;
+        c->boot_skip  = false;
+        Q2_INFO("boot: %s — %s, %s", s->map, s->image[0].image,
+                s->image[1].image ? s->image[1].image : "(one image)");
+        return;
+    }
+
+    /* Out of screens. The film, then the menu. */
+    client_boot_free(c);
+    c->boot_open = false;
+
+    fmv = c->level_table_ready
+        ? q2_level_find_display(&c->level_table, "Intro FMV") : NULL;
 
     if (fmv && !fmv->is_placeholder && fmv->directory[0]) {
         snprintf(c->film_screen, sizeof(c->film_screen), "Intro FMV");
-        snprintf(c->film_next_map, sizeof(c->film_next_map), "%s",
-                 c->first_map);
+        c->film_to_front = true;
         if (client_load_zone(c, fmv->directory, 0) && c->film_open)
             return;
-        /* It loaded and did not play, or did not load: go on without it rather
-         * than leaving the player on an empty container map. */
-        c->film_next_map[0] = '\0';
-        Q2_WARN("front end: no intro film — starting on %s", c->first_map);
+        c->film_to_front = false;
+        Q2_WARN("boot: no intro film — straight to the front end");
     }
+
+    client_enter_front_end(c);
+}
+
+static void client_boot_start(client *c)
+{
+    c->boot_index = 0;
+    client_boot_advance(c);
+}
+
+/*
+ * A press ends the screen that is up.
+ *
+ * THE CONSOLE HAS NO SUCH THING — neither logo module reads `engine+0x2AC` or
+ * any other pad word anywhere in its 30 KB — so this is the port's, and it is
+ * the whole of the port's: what a screen is, how long it holds and what follows
+ * it are the modules'.
+ *
+ * Recorded rather than acted on, because acting on it can load a map (the last
+ * screen hands over to the intro film, and the film to QFRONT) and the press
+ * arrives inside the event poll, with more events behind it that would then be
+ * dispatched against a state two loads newer than the one they were queued for.
+ * Every other screen-ending press in this loop stops something; this one starts
+ * something, which is why it is the one that has to wait for the frame.
+ */
+static void client_boot_skip(client *c)
+{
+    if (c->boot_open)
+        c->boot_skip = true;
+}
+
+/*
+ * ON THE CONSOLE'S CLOCK, NOT THE WINDOW'S.
+ *
+ * `module+0x526C` and `module+0x5278` are incremented BY ONE per call of a page
+ * hook the engine runs once per displayed frame — unlike the reel's beat, which
+ * subtracts the frame delta and is therefore a duration. So every number in
+ * `k_boot_screens` is in field-rate frames, and counting rendered frames instead
+ * ties them to whatever panel is in front of the player: at vsync on a 60 Hz
+ * display the logos went by half again too fast, and on a 144 Hz one the legal
+ * screen would be up for four seconds instead of ten.
+ *
+ * So the accumulator every other clock in this port uses, carrying its
+ * remainder, at the BUILD's rate — 50 on this PAL disc, which puts the two
+ * screens at 7.1 s and 3.5 s.
+ */
+static void client_boot_tick(client *c, float dt)
+{
+    const q2_boot_screen *s;
+    double rate = (double)q2_build_tick_rate(&c->build);
+
+    if (!c->boot_open)
+        return;
+
+    if (c->boot_skip) {
+        c->boot_skip = false;
+        Q2_INFO("boot: skipped at frame %u", c->boot_frame);
+        client_boot_advance(c);
+        return;
+    }
+
+    if (rate <= 0.0)
+        rate = 30.0;
+
+    s = &k_boot_screens[c->boot_index - 1];
+    c->boot_carry += (double)dt * rate;
+    while (c->boot_carry >= 1.0) {
+        c->boot_carry -= 1.0;
+        if (++c->boot_frame >= s->length) {
+            client_boot_advance(c);
+            return;
+        }
+    }
+}
+
+/*
+ * Put the screen on the display.
+ *
+ * Straight into the finished buffer and after the ordering table has been
+ * walked, for the same reason the film is (`client_film_blit`): this is a
+ * rectangle DMA'd to the frame buffer, not a primitive that sorts against
+ * anything. Both images are drawn every frame — the second is fading in over
+ * the first's fade out, and adding them is what makes that a cross-fade rather
+ * than a cut through black.
+ */
+static void client_boot_blit(client *c)
+{
+    psx_framebuffer *fb = q2_screen_back(&c->screen);
+    const q2_boot_screen *s;
+    u32 i;
+
+    if (!fb || !fb->px || !c->boot_open)
+        return;
+
+    s = &k_boot_screens[c->boot_index - 1];
+    psx_fb_clear(fb, 0);
+
+    for (i = 0; i < 2; i++) {
+        int bright = client_boot_fade(&s->image[i], c->boot_frame);
+        int oy, y, step;
+
+        if (!c->boot_rgb[i] || bright <= 0)
+            continue;
+
+        oy = (fb->height - (int)c->boot_h[i]) / 2;
+        if (oy < 0) oy = 0;
+        step = (int)(((u32)c->boot_w[i] << 16) /
+                     (u32)(fb->width > 0 ? fb->width : 1));
+
+        for (y = 0; y < (int)c->boot_h[i]; y++) {
+            const u8 *src = c->boot_rgb[i] + (size_t)y * c->boot_w[i] * 3;
+            u16 *dst;
+            int bx, u = 0;
+
+            if (oy + y >= fb->height)
+                break;
+            dst = fb->px + (size_t)(oy + y) * fb->width;
+            for (bx = 0; bx < fb->width; bx++, u += step) {
+                int x = u >> 16;
+                u32 r, g, b, o;
+
+                if (x >= (int)c->boot_w[i])
+                    x = (int)c->boot_w[i] - 1;
+
+                /* 128 is neutral, so this is the GPU's own modulation. The
+                 * add is the cross-fade; both halves are already scaled. */
+                r = ((u32)src[x * 3 + 0] * (u32)bright) >> 10;
+                g = ((u32)src[x * 3 + 1] * (u32)bright) >> 10;
+                b = ((u32)src[x * 3 + 2] * (u32)bright) >> 10;
+                if (r > 31) r = 31;
+                if (g > 31) g = 31;
+                if (b > 31) b = 31;
+
+                o = dst[bx];
+                r += o & 0x1Fu;
+                g += (o >> 5) & 0x1Fu;
+                b += (o >> 10) & 0x1Fu;
+                if (r > 31) r = 31;
+                if (g > 31) g = 31;
+                if (b > 31) b = 31;
+
+                dst[bx] = (u16)(r | (g << 5) | (b << 10));
+            }
+        }
+    }
+}
+
+/*
+ * What the front end hands the game over to when the reel has run.
+ *
+ * THE FIRST MAP, and nothing in between. The reel's own tail arms the engine's
+ * delayed state change —
+ *
+ *     80101DE4  sh 1,  706(v1)     ; engine+0x2C2, the state to enter
+ *     80101DF0  sh 12, 704(v1)     ; engine+0x2C0, twelve frames from now
+ *     80101E04  sw ...   0x290     ; and 0x8001F964 is what counts it
+ *
+ * — and `0x8001F964` is a countdown that writes `engine+0x2C2` into the game
+ * state word when it runs out, which is how "STARTING" / "GAME" stays up for
+ * twelve frames. The state it enters is ONE, the game. Not twelve.
+ *
+ * That distinction is the whole of the previous round's mistake. Twelve is the
+ * state that asks for the intro FMV, and QLOGOS is what sets it — at boot,
+ * before the menu exists (`boot_open`). The intro is a PRE-MENU cinematic and
+ * has already played by the time anyone confirms a difficulty.
+ */
+static void client_start_game(client *c)
+{
+    c->in_front_end  = false;
+    c->film_is_start = false;
+    c->film_to_front = false;
+    c->start_beat    = 0.0;
 
     client_load_zone(c, c->first_map, 0);
 }
@@ -8491,13 +8952,17 @@ static void client_start_game(client *c)
  * See `start_beat` for the writer, its callers, and for the attract loop this
  * is not.
  */
-static void client_start_beat(client *c)
+static void client_start_beat(client *c, float dt)
 {
-    if (!c->start_beat || c->film_open)
+    if (c->start_beat <= 0.0 || c->film_open)
         return;
 
-    if (--c->start_beat)
+    /* `subu v0, v0, v1` at 0x80101D00, with v1 the frame delta read through
+     * `*(engine+0xD4)`. Draining it in the same units is the whole of it. */
+    c->start_beat -= (double)dt * (double)Q2_DT_HZ;
+    if (c->start_beat > 0.0)
         return;
+    c->start_beat = 0.0;
 
     if (!client_film_start(c, Q2_START_REEL)) {
         Q2_WARN("front end: no opening reel — starting the game without it");
@@ -9912,6 +10377,10 @@ static void client_frame(client *c)
         client_film_blit(c);
     }
 
+    /* And so does a boot screen, for the same reason and by the same route. */
+    if (c->boot_open)
+        client_boot_blit(c);
+
     q2_screen_present(&c->screen);
     front = q2_screen_front(&c->screen);
 
@@ -10021,8 +10490,9 @@ static void usage(void)
     printf("  --demo        drive the pad from a fixed script rather than keys\n");
     printf("  --movie NAME  play a film from Q2DATA/MOVIES and nothing else\n"
            "                (TAKE1BP.STX, OUTRO1P.STX, ROGUEINP.STX)\n");
-    printf("  --new-game    confirm a difficulty: the opening reel, the intro\n"
-           "                film, then level 1 — 3,736 film frames\n");
+    printf("  --new-game    confirm a difficulty: the opening reel, then level 1\n");
+    printf("  --boot        the logo screens and intro film before the menu\n");
+    printf("  --no-boot     ...and skip them in a run that would show them\n");
     printf("  --frames N    stop after N frames\n");
     printf("  --shot P.ppm  write the console's own framebuffer to P.ppm\n");
     printf("  --shot-every N  ...and one every N frames, numbered\n");
@@ -10431,6 +10901,14 @@ int main(int argc, char **argv)
          * 1,280 — so a capture that wants a level should ask for the map.
          */
         else if (!strcmp(argv[i], "--new-game"))              c.start_new_game = true;
+        /*
+         * `--boot` / `--no-boot`: whether this run walks the logo screens and
+         * the intro film in front of the menu. A windowed run does by default
+         * and a headless one does not; both flags exist so a capture can have
+         * it either way. See the boot note beside `in_front_end`'s assignment.
+         */
+        else if (!strcmp(argv[i], "--boot"))                  c.boot_chain = true;
+        else if (!strcmp(argv[i], "--no-boot"))               c.no_boot = true;
         /* `--keys`: hand the player every key. A scripted run cannot go and
          * find one, and the records behind `ONKEYDO` are otherwise unreachable
          * in a sweep — which is the gate working, and also why what is behind
@@ -10874,12 +11352,20 @@ no_window:
         Q2_WARN("no effect tables for this build — nothing will spark");
 
     /*
-     * Boot into the FRONT END, which is what the console does: `q2_menu_open`
-     * special-cases page 46 (0x8001A40C) and the level it draws over is record
-     * 0 of the level table, `QFront` -> `LEVELS/QFRONT/`.
+     * Boot into the FRONT END, which is what the console arrives at: the level
+     * it draws over is record 0 of the level table, `QFront` -> `LEVELS/QFRONT/`,
+     * and `q2_menu_open` special-cases page 46 (0x8001A40C).
      *
-     * `--map` overrides it, because going straight to a level is what every
-     * capture and every check in this project wants; without one, the game
+     * It is not what the console STARTS at. Ahead of the front end sit two logo
+     * screens and the intro film (`boot_open`), and `boot_chain` is whether this
+     * run walks them. A windowed run does, because that is what a player gets. A
+     * headless one does not unless it asks: ten seconds of logos and fifty-one
+     * of film in front of every scripted front-end capture would be 1,850 frames
+     * of something the capture did not ask for, which is the same argument the
+     * old attract reel's headless guard made and the same answer.
+     *
+     * `--map` overrides all of it, because going straight to a level is what
+     * every capture and every check in this project wants; without one, the game
      * starts where a player starts it.
      */
     snprintf(c.first_map, sizeof(c.first_map), "%s", map);
@@ -10887,6 +11373,8 @@ no_window:
         c.in_front_end = true;
         map = "QFRONT";
         zone_index = 0;
+        if (!c.headless && !c.no_boot)
+            c.boot_chain = true;
     }
 
     /*
@@ -11005,47 +11493,15 @@ no_window:
      */
     c.sim_enabled = true;
 
-    /* The title screen is the menu's page 46 over the QFRONT scene. It is
-     * opened rather than drawn, so it navigates with the same engine, the same
-     * selection bar and the same font as every other page. */
-    if (c.in_front_end) {
-        /*
-         * The camera is the WORLD ORIGIN, looking down +z with no rotation, and
-         * it is not the spawn point. `engine+0x170` — which QFRONT's `init`
-         * calls with 0 before anything else — is `0x80077D0C`, and its first
-         * act is `memset(0x800D5C30, 0, 3920)`: the whole five-viewport array
-         * zeroed, position and rotation included. Only then does
-         * `engine+0x174(0, 160, 4000)` put the projection and far plane back.
-         *
-         * So the front end deliberately throws the level's `StartPos` away, and
-         * this port had been leaving the camera where the spawn settle dropped
-         * it — 54 units below the origin, which at z = 1700 and proj 160 is
-         * five pixels of vertical error on the logo.
-         */
-        c.cam.pos[0] = 0;
-        c.cam.pos[1] = 0;
-        c.cam.pos[2] = 0;
-        c.cam.yaw    = 0;
-        c.cam.pitch  = 0;
-        c.cam.roll   = 0;
-        /*
-         * And the front end's own far plane, on the VIEWPORT rather than the
-         * camera — the camera reloads `view[p].far_z` every frame (see the
-         * viewport note in client_frame), so writing the camera here would last
-         * exactly one frame.
-         *
-         * This is `engine+0x174(0, 160, 4000)`, `init`'s second act, and it is
-         * a straight overwrite of what `engine+0x170` — which is
-         * `0x80077D0C`, the ONE layout `q2_screen_set_layout` already
-         * reproduces — had just installed. Same proj, far 4000 where a session
-         * layout uses 6400.
-         */
-        if (c.screen.view_count > 0)
-            c.screen.view[0].far_z = 4000;
-
-        q2_menu_open(&c.menu);
-        q2_menu_goto(&c.menu, Q2_PAGE_FRONT_TITLE);
-    }
+    /*
+     * The title screen — or, if this run walks the boot chain, the first logo
+     * screen, with the title screen four steps away at the end of it.
+     * `client_boot_advance` finishes by calling exactly the function below.
+     */
+    if (c.boot_chain && c.in_front_end)
+        client_boot_start(&c);
+    else if (c.in_front_end)
+        client_enter_front_end(&c);
 
     /* `--movie NAME`: play a film over whatever was loaded, and close the
      * front end so nothing is drawn on top of it. */
@@ -11067,7 +11523,7 @@ no_window:
      * down — the skill, the carry flags, the intro film and the hand-off to
      * the first map, in that order.
      */
-    if (c.start_new_game && !c.film_arg) {
+    if (c.start_new_game && !c.film_arg && !c.boot_open) {
         c.menu.request = Q2_MREQ_NEW_GAME;
         client_menu_requests(&c);
     }
@@ -11127,6 +11583,12 @@ no_window:
                     client_film_stop(&c);
                     continue;
                 }
+                /* A boot screen goes the same way, and see `client_boot_skip`
+                 * for why that is the port's decision and not the disc's. */
+                if (c.boot_open) {
+                    client_boot_skip(&c);
+                    continue;
+                }
                 /*
                  * THE BEAT BEFORE IT TAKES NOTHING. 0x80101CD0 never reads the
                  * pad, so the half second between the difficulty and the film
@@ -11136,7 +11598,7 @@ no_window:
                  * stall for good behind it, because it only counts down on the
                  * frames no page owns.
                  */
-                if (c.start_beat)
+                if (c.start_beat > 0.0)
                     continue;
                 /* Any key leaves the credits, back to the title. */
                 if (c.credits_open) {
@@ -11342,6 +11804,8 @@ no_window:
                  */
                 if (down && c.film_open) {
                     client_film_stop(&c);
+                } else if (down && c.boot_open) {
+                    client_boot_skip(&c);
                 } else if (down && c.credits_open) {
                     c.credits_open = false;
                     q2_menu_open(&c.menu);
@@ -11372,7 +11836,16 @@ no_window:
         client_apply_input(&c);
         client_update_grab(&c);
 
-        if (c.mcard_open) {
+        if (c.boot_open) {
+            /*
+             * A BOOT SCREEN IS IN FRONT OF EVERYTHING AND HAS NOTHING BEHIND
+             * IT. No map is loaded while one is up — the console loads a
+             * directory because that is the only way its engine gets to a
+             * screen, and what the screen then shows is two rectangles — so
+             * there is no world to tick and no page to take the pad.
+             */
+            client_boot_tick(&c, dt);
+        } else if (c.mcard_open) {
             /*
              * The card front end sits in front of everything: it is a separate
              * engine with its own state and its own release rule, not a page,
@@ -11408,7 +11881,7 @@ no_window:
                  */
                 client_input_simulated(&c, dt);
             }
-        } else if (c.start_beat) {
+        } else if (c.start_beat > 0.0) {
             /*
              * THE BEAT BETWEEN A DIFFICULTY AND THE REEL, and it is not a
              * frozen frame.
@@ -11424,7 +11897,7 @@ no_window:
              */
             q2_sim_scene_advance(&c.sim[0], (double)dt);
             client_scene_lights(&c);
-            client_start_beat(&c);
+            client_start_beat(&c, dt);
         } else if (c.mission_open || c.briefing_open || c.endmis_open) {
             /*
              * AND THE INTERMISSION BOARDS FREEZE IT TOO. This was the bug that
@@ -11818,12 +12291,23 @@ no_window:
         if (!c.film_open && c.film_done) {
             c.film_done = false;
 
-            if (c.film_is_start) {
+            if (c.film_to_front) {
                 /*
-                 * `engine+0x494(1)`. The reel is what the front end plays before
-                 * it lets go, so what follows it is the game starting and not
-                 * the title screen coming back — which is the whole difference
-                 * between this and the attract loop it used to be mistaken for.
+                 * THE INTRO, WHICH IS A PRE-MENU CINEMATIC. QLOGOS asked for it
+                 * by writing state 12 before the front end had ever been
+                 * loaded, so what follows it is the front end's first
+                 * appearance — the dispatcher's fall-through at `0x80018B54`,
+                 * which loads `QFront` because no request flag is left
+                 * standing.
+                 */
+                Q2_INFO("movie: intro over — the front end");
+                client_enter_front_end(&c);
+            } else if (c.film_is_start) {
+                /*
+                 * The reel is what the front end plays before it lets go, so
+                 * what follows it is the game starting and not the title screen
+                 * coming back — which is the whole difference between this and
+                 * the attract loop it used to be mistaken for.
                  */
                 Q2_INFO("movie: opening reel over — starting the game");
                 client_start_game(&c);
@@ -11867,12 +12351,8 @@ no_window:
                  * both; which page it lands on is this port's choice and the
                  * title is the only one that is always there.
                  */
-                c.film_is_start = false;
-                c.in_front_end  = true;
-                c.start_beat    = 0;
-                q2_menu_open(&c.menu);
-                q2_menu_goto(&c.menu, Q2_PAGE_FRONT_TITLE);
                 Q2_INFO("movie: over with no destination — back to the front end");
+                client_enter_front_end(&c);
             }
         }
 
@@ -11916,6 +12396,7 @@ no_window:
     }
 
 done:
+    client_boot_free(&c);
     if (c.hud_tables_ready)
         q2_hud_tables_free(&c.hud_tables);
     if (c.sfx_ready)

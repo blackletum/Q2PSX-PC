@@ -7,11 +7,13 @@ every unit boundary and its mission screen, and ends on `Extro FMV` — the leve
 `QFMV` — playing `OUTRO1P.STX` (#121, #124). Every conformance command the harness carries passes over the
 whole disc, and 29 of 29 tests pass.
 
-**And the cinematics are wired the way the disc wires them (#124, #125, #126).** A new game opens on the front
-end's own reel, `ROGUEINP.STX` — half a second after a difficulty is confirmed, which is what #126 finally
-read out of a store whose writer sits in a delay slot — and then on `Intro FMV`, which is the SAME map under
-its other name. The third film is named by no movie-table record because its filename needs thirteen bytes
-and the field is twelve. All three run
+**And the cinematics are wired the way the disc wires them (#124, #125, #126, #127).** The BOOT CHAIN opens
+the game: two logo screens, four cross-faded full-screen images, and then `Intro FMV` — which #127 found is
+asked for by QLOGOS writing game state 12, before the front end has ever been loaded, so `TAKE1BP.STX` plays
+in front of the menu rather than behind it. A new game then opens on the front end's own reel,
+`ROGUEINP.STX`, half a second after a difficulty is confirmed, which is what #126 read out of a store whose
+writer sits in a delay slot. The third film is named by no movie-table record because its filename needs
+thirteen bytes and the field is twelve. All three run
 to the stop point their module passes the player — the outro is cut at frame **1,500 of 1,559** — and there
 is now an ENCODER, which is the strictest check a format reading can be put to: 400 re-encoded frames decode
 exactly, satisfy their own `bs_num_codes`, and rebuild the disc's own 7,712 sectors byte for byte.
@@ -8721,15 +8723,18 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       of a NEW GAME with a short beat in front of it — and when it ends, the same function puts up the
       two-row page `"STARTING"` / `"GAME"` (`module+0x1C`, `module+0x28`) and calls `engine+0x494(1)`.
 
-      That hand-off is what the outer state machine turns into the intro FMV, two steps out:
+      **WRONG FROM HERE TO THE NEXT HEADING, AND #127 IS WHERE IT FALLS.** This entry then read the
+      pair as a state and routed the reel's hand-off through the intro FMV:
 
           8001863C  addiu v0, zero, 12       ; game state 12
           80018650  sw    v0, 10836(at)      ; -> 0x800B2A54, "play the intro"
           80018B00  jal   0x800417F8         ; writes "Intro FMV" / "Default" and state 6
 
-      **So a new game opens on TWO films**, the front end's reel and then QFMV's `TAKE1BP.STX`, and only
-      then on the first map. Measured end to end headless: skill confirmed, 2,456 frames of reel, the
-      hand-off, 1,280 frames of intro, then BASE0 with its ten creatures and its help-computer text.
+      That chain is real and QFRONT is not on it. `engine+0x2C0` is a twelve-frame COUNTDOWN and
+      `engine+0x2C2` is the state it enters when the count runs out — `0x8001F964`, the hook the same tail
+      installs, is what reads them — so the reel hands over to state **1**, the game, and the twelve is
+      how long "STARTING" / "GAME" stays up. The 12 that means state 12 is QLOGOS's, at boot. The intro is
+      a pre-menu cinematic and a new game plays one film, not two.
 
       **The attract loop was a DIFFERENT STORE all along, and it plays no film.** `module+0x12DC0` is parked
       with 9000 by the title page builder `0x8010CEE0` and counted down by the page hook `0x8010C6AC`, which
@@ -8800,3 +8805,73 @@ into this one.
   therefore COLLECTED it before the first drawn frame, and since the event queue is cleared at the top of
   the next tick, the sound, the burst and the caption went with it. The sweep is now held back while
   settling, which puts the pickup on the first tick the player actually plays.
+
+- [x] 127. **The intro cinematic is a PRE-MENU cinematic, and finding that out took being told the port
+      was still wrong. The boot chain in full: two logo screens, four images and a film, all of it in
+      front of the title screen the port had been booting straight into.**
+
+      #126 moved `ROGUEINP.STX` off the title screen's idle and onto the difficulty menu, which is where
+      it belongs, and then routed the reel's hand-off through `Intro FMV` on the strength of one link:
+      game state **12** is the only thing that sets `0x800B2A54`, the request the dispatcher answers with
+      a load of `Intro FMV`. That link is real. **The assumption stacked on it was that QFRONT was what
+      wrote the 12**, and it never does — there is no store through `engine+0x3AC` anywhere in its 118 KB.
+
+      What QFRONT's tails write is a DELAYED state change, and reading `engine+0x2C0` as a state was the
+      error:
+
+          80101DE4  sh 1,  706(v1)      ; engine+0x2C2
+          80101DF0  sh 12, 704(v1)      ; engine+0x2C0
+          80101E04  sw ...,  656(v1)    ; engine+0x290 = engine+0x27C = 0x8001F964
+
+          8001F978  lh   v0, 704(a1)    ; and 0x8001F964 is the countdown
+          8001F980  blez v0, +0x10      ;   not yet: decrement and return
+          8001F990  lhu  v0, 706(a1)
+          8001F99C  sh   v0, 11816(at)  ;   -> 0x800B2E28, the game state
+
+      So 12 is **twelve frames** and 1 is the state. That is also what keeps "STARTING" / "GAME" on the
+      screen for twelve frames before the game loads, and what keeps "DEMO OF GAME" up for twelve before
+      state 10 — one mechanism, two callers, and both of them were sitting in #126's own transcript.
+
+      **The 12 that means state 12 belongs to QLOGOS.** Tracing the boot initialiser instead:
+
+          80018DA4  sw v0, 10888(at)     ; 0x800B2A88 = 1, at boot
+          80041748                       ; the dispatcher's answer: "QLogos2"
+          80101FA0  sh 14, 0(v1)         ; QLOGOS2 ends -> 0x800B2A5C -> "QLogos"
+          801021D0  sh 12, 0(v1)         ; QLOGOS  ends -> 0x800B2A54 -> "Intro FMV"
+
+      and QFMV asks for state 6 when the film is over, which leaves no request flag standing, which makes
+      the dispatcher fall through at `0x80018B54` to **`QFront`**. The retail order is therefore
+
+          Legal -> Hammerhead -> id -> Activision -> TAKE1BP.STX -> the title screen
+
+      and a new game is difficulty -> half a second -> `ROGUEINP.STX` -> the first map, with no second
+      film in it. Both halves of #126's hand-off were wrong in the same direction.
+
+      **The screens themselves.** `QLOGOS2` and `QLOGOS` carry byte-identical 100 KB `COMMON.DAT`s and the
+      same 29,988-byte shared module; what differs is `SNDVRAM.DAT`, 432 KB against 84 KB, and what is in
+      it: `Legal.lbm` + `HamLogo.lbm` against `IdLogo.lbm` + `ActLogo.lbm`. All four are 512x240 8bpp with
+      a 256-entry CLUT apiece — the whole active picture, not overlays on a scene. Each handler runs one
+      counter and derives two brightnesses from it, so the second image fades in ACROSS the first's fade
+      out; 128 is the GPU's neutral modulation value and a fade is eight steps of 16.
+
+          QLOGOS2  0x80101D88            QLOGOS  0x80101FB8
+            t < 8     t << 4               t < 8    t << 4
+            t < 258   128                  t < 83   128
+            t < 266   128-((t-257)<<4)     t < 91   128-((t-82)<<4)
+            d = t-258, same shape          d = t-83, same shape
+            hand off at d = 95             hand off at d = 93
+
+      The off-by-one on each screen's first image is the module's: the first reads the raw counter and
+      the second a rebased copy, and the rebase costs a frame.
+
+      **Nothing in either module reads the pad.** `engine+0x2AC`, the word QFRONT's title hook tests for
+      input, is never loaded in all 30 KB — so on the console the twelve seconds of logos are twelve
+      seconds. The port makes a press end the current screen anyway, which is the only thing here that is
+      not the disc's, and it is marked as such at the function.
+
+      **What this cost, and it is the same lesson as #126 one level up.** #126's whole point was that a
+      negative result about a wrongly-typed premise looks like a discovery — and then it typed
+      `engine+0x2C0` as a state word because a 12 appeared next to a 1, without asking who READS it. The
+      answer was four instructions away in a function the same session had already disassembled for a
+      different reason. Reading a field is not the same as reading its consumer, and only the consumer
+      says what the field is.
