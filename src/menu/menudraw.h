@@ -53,13 +53,21 @@
 #include "gpu.h"
 #include "raster.h"
 
-/* The two absolute buckets the overlay path uses, derived from the OT shape in
- * screen.h: base 10984, so (11828 - 10984)/4 and (11836 - 10984)/4. */
-#define Q2_MENU_OT_BUCKET       211
-#define Q2_MENU_OT_BUCKET_ITEM  213
+/*
+ * The two absolute buckets the overlay path uses, derived from the OT shape in
+ * screen.h: base 10984, so (11828 - 10984)/4 and (11836 - 10984)/4.
+ *
+ * SCALED, because these are the CONSOLE's indices and the table holds
+ * PSX_OT_SUBDIV real buckets per one (gpu.h). Handed to psx_ot_add_bucket
+ * unscaled they no longer name the overlay slice at all — real bucket 211 sits
+ * inside viewport 0's own range, which put the whole menu underneath the world
+ * and let the title screen's logo draw straight through START and OPTIONS.
+ */
+#define Q2_MENU_OT_BUCKET       (211 * PSX_OT_SUBDIV)
+#define Q2_MENU_OT_BUCKET_ITEM  (213 * PSX_OT_SUBDIV)
 
 /* Viewport p's frontmost bucket, for a three- or four-way split. */
-#define Q2_MENU_OT_BUCKET_VIEW(p)  (2 + 51 * (p) + 50)
+#define Q2_MENU_OT_BUCKET_VIEW(p)  ((2 + 51 * (p) + 50) * PSX_OT_SUBDIV)
 
 /* ------------------------------------------------------------------------- */
 /* The selection bar — 0x8001A7A8                                             */

@@ -423,16 +423,32 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
             }
 
             if (inst->bucket_override >= 0) {
-                /* One link point for the whole model, as the original has —
-                 * see q2_model_instance.bucket_override. */
-                otz = inst->bucket_override;
+                /*
+                 * AN ABSOLUTE BUCKET, not a depth.
+                 *
+                 * It used to be a depth, and 0 meant "the frontmost bucket of
+                 * whichever window is installed". That was the same bucket the
+                 * status bar names for as long as a viewport slice was 51
+                 * entries — and when the table was subdivided the two came
+                 * apart: the depth path reaches the very top of the subdivided
+                 * window (real bucket 423 of viewport 0) while the status bar's
+                 * own helper lands on 416, so the gun started drawing over the
+                 * HUD.
+                 *
+                 * Naming the bucket outright is what a packet whose place is
+                 * structural is supposed to do (gpu.h), and it lets the caller
+                 * express the gun's position RELATIVE to the bar rather than
+                 * hoping the two arithmetics agree.
+                 */
+                prim = psx_ot_add_bucket(ot, (u32)inst->bucket_override);
             } else {
+                /* One link point per face, from its own mean depth. */
                 for (i = 0; i < 4; i++)
                     otz += window[f.v[i]].z;
                 otz = q2_ot_bucket_for_depth(ot, otz / 4, cam->sort_range);
+                prim = psx_ot_add(ot, (u16)otz);
             }
 
-            prim = psx_ot_add(ot, (u16)otz);
             if (!prim) {
                 if (stats)
                     stats->ot_overflow++;

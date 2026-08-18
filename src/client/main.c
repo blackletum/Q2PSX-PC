@@ -9254,11 +9254,19 @@ static void client_draw_view(void *user, q2_screen *s, int p,
          * the weapon in hand that point is ahead of the geometry: it is drawn
          * over the view, not into it.
          *
-         * Zero is the NEAREST depth — `psx_ot_depth_bucket` counts down from
-         * the far end, so an otz of 0 lands in the frontmost bucket of
-         * whichever viewport window is installed.
+         * AND ONE BUCKET BEHIND THE STATUS BAR, named through the bar's own
+         * helper rather than derived separately.
+         *
+         * This used to ask for depth 0, "the frontmost bucket of whichever
+         * window is installed", which happened to be the bar's bucket while a
+         * viewport slice was 51 entries. Subdividing the table pulled the two
+         * apart — the depth path reaches the top of the subdivided window while
+         * the bar lands where its console index scales to — and the gun began
+         * drawing over the HUD. Asking for layer 1 where the bar asks for layer
+         * 0 states the relationship instead of relying on two arithmetics
+         * landing on the same number.
          */
-        proto.bucket_override = 0;
+        proto.bucket_override = (s32)q2_screen_view_otz(s, p, 1);
 
         aim[0]  = (s16)c->sim[0].player[0].pitch;
         aim[1]  = (s16)c->sim[0].player[0].yaw;
