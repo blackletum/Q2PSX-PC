@@ -519,12 +519,8 @@ bool q2_model_get_face(const q2_model *m, u32 index, q2_model_face *out);
  * (`swl t1, 2(t6)` / `addu v0, t6, zero`), so the FIRST face in a stream is
  * drawn LAST and therefore on top. A stream runs near to far.
  *
- * Eight of them, one per view direction. WHICH one a given frame picks is not
- * settled here — the selector is read through a pointer this port has not
- * traced (`s7` at 0x8006BC94, whose +4 and +6 are the two halfwords above) —
- * so `q2_model_draw_order_for_yaw` quantises the model's facing into eight
- * sectors, which is what eight of anything indexed by direction means and what
- * reproduces the capture. See modeldraw.c.
+ * Eight of them, one per view direction, and which one a frame takes is decided
+ * by `q2_model_draw_order_pick` below.
  */
 #define Q2_MODEL_DRAW_ORDERS      8
 #define Q2_MODEL_DRAW_ORDER_TABLE 64   /* bytes of {start, offset} records */
@@ -544,8 +540,38 @@ bool q2_model_get_draw_order(const q2_model *m, u32 index,
  */
 u32 q2_model_draw_sequence(const q2_model *m, u32 index, u16 *out, u32 max);
 
-/* Which of the eight a model facing `yaw` (0..4095) should use. */
-u32 q2_model_draw_order_for_yaw(s32 yaw);
+/*
+ * WHICH of the eight, and why the start face is the key.
+ *
+ * Each entry begins on a different face — 52, 53, 66, 34, 43, 44, 39, 35 on
+ * `Blaster G` — and the first face of a stream is the one drawn LAST, on top.
+ * An order authored for a given direction therefore starts on the face that is
+ * frontmost from it, which makes `start` the entry's own direction key and
+ * makes the choice "take the entry whose start face is nearest".
+ *
+ * That is measured, not assumed. Scoring all eight orders against the pairs
+ * that can actually paint over each other — faces whose screen boxes overlap,
+ * where the order is right when the nearer face is drawn later — over 396
+ * decisive samples of a Soldier seen from 24 camera placements:
+ *
+ *     best possible (per-sample oracle)   78.0%
+ *     nearest start face                  71.4%
+ *     file order, i.e. ignoring block A   50.3%
+ *
+ * Scoring EVERY adjacent pair instead of the overlapping ones buries this:
+ * most consecutive faces never overlap, so they contribute coin flips and drag
+ * every order to 50%. That is what made an earlier pass here conclude block A
+ * was not a draw order at all.
+ *
+ * WHAT IS NOT ESTABLISHED is the console's own selector. It reads the chosen
+ * entry's two halfwords out of a draw record (`s7+4` and `s7+6` at 0x8006BC94)
+ * and this port has not traced who fills them. The rule below fits the geometry
+ * and needs no table; a fitted eight-way lookup on the model's facing in view
+ * space does marginally better (74.7%) and is not used, because eight numbers
+ * fitted to this port's own measurements are not a reading of the original.
+ */
+u32 q2_model_draw_order_pick(const q2_model *m, const u16 *face_depth,
+                             const u8 *face_valid, u32 face_count);
 
 
 /*

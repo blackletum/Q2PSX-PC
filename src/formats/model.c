@@ -344,16 +344,38 @@ u32 q2_model_draw_sequence(const q2_model *m, u32 index, u16 *out, u32 max)
 }
 
 /*
- * Eight orders, one per view sector. The engine reads its index through a
- * pointer this port has not traced, so this is the reading that eight-of-a-
- * thing-indexed-by-direction forces: 4096 units to the turn, eight sectors of
- * 512, rounded so a sector is centred on its direction rather than starting at
- * it.
+ * Pick one of the eight — see the note in model.h for the measurement.
+ *
+ * Each entry starts on the face that is frontmost from the direction it was
+ * authored for, and the first face of a stream is the one drawn last, so the
+ * entry to take is the one whose start face is nearest. Entries whose start
+ * face was never transformed this frame are skipped rather than counted as
+ * infinitely near.
  */
-u32 q2_model_draw_order_for_yaw(s32 yaw)
+u32 q2_model_draw_order_pick(const q2_model *m, const u16 *face_depth,
+                             const u8 *face_valid, u32 face_count)
 {
-    u32 y = (u32)((yaw + 256) & 0xFFF);
-    return (y >> 9) & (Q2_MODEL_DRAW_ORDERS - 1u);
+    q2_model_draw_order ord;
+    u32 e, best = 0;
+    u16 best_depth = 0;
+    bool found = false;
+
+    if (!m || !face_depth || !face_valid)
+        return 0;
+
+    for (e = 0; e < Q2_MODEL_DRAW_ORDERS; e++) {
+        if (!q2_model_get_draw_order(m, e, &ord))
+            continue;
+        if (ord.start >= face_count || !face_valid[ord.start])
+            continue;
+        if (!found || face_depth[ord.start] < best_depth) {
+            best_depth = face_depth[ord.start];
+            best  = e;
+            found = true;
+        }
+    }
+
+    return best;
 }
 
 bool q2_model_is_static(const q2_model *m)

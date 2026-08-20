@@ -114,9 +114,15 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
     u8  tint[3];
     u32 part, face_index = 0, emitted = 0, vertex_cursor = 0;
 
-    /* One slot per face: the primitive built for it. The DEPTH is not per face
-     * — see the link point below — so there is only one of those. */
+    /*
+     * One slot per face: the primitive built for it, its own mean depth and
+     * whether it was transformed at all. The depth is NOT what buckets the
+     * model — that is one link point from the origin, below — it is what picks
+     * which of block A's eight orders to draw in (model.h).
+     */
     psx_prim *built[Q2_MODEL_MAX_FACES];
+    u16       face_z[Q2_MODEL_MAX_FACES];
+    u8        face_ok[Q2_MODEL_MAX_FACES];
     u16       order[Q2_MODEL_MAX_FACES];
     u32       built_count = 0;
     u32       bucket = 0;
@@ -132,6 +138,7 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
 
     memset(window, 0, sizeof(window));
     memset(built, 0, sizeof(built));
+    memset(face_ok, 0, sizeof(face_ok));
 
     reorder = (m->hdr.num_faces <= Q2_MODEL_MAX_FACES);
 
@@ -516,6 +523,17 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
                 }
             }
 
+            /* Its own mean depth, kept for the order pick below. A face the
+             * backface test is about to drop still counts: `start` names an
+             * order whether or not that face is drawn. */
+            if (face_index < Q2_MODEL_MAX_FACES) {
+                u32 fz = 0;
+                for (i = 0; i < 4; i++)
+                    fz += window[f.v[i]].z;
+                face_z[face_index]  = (u16)(fz / 4);
+                face_ok[face_index] = 1;
+            }
+
             /*
              * The linker's own NCLIP pair, before anything is allocated. An
              * ordering table has no depth buffer, so a face that has been
@@ -638,8 +656,11 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
      * every model before block A was read correctly.
      */
     if (reorder) {
-        u32 n = q2_model_draw_sequence(m, q2_model_draw_order_for_yaw(inst->yaw),
-                                       order, Q2_MODEL_MAX_FACES);
+        u32 n = q2_model_draw_sequence(
+                    m,
+                    q2_model_draw_order_pick(m, face_z, face_ok,
+                                             Q2_MODEL_MAX_FACES),
+                    order, Q2_MODEL_MAX_FACES);
         u32 k;
 
         if (n == 0) {
