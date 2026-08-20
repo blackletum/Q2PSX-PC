@@ -177,24 +177,28 @@ typedef struct q2_model_instance {
     const q2_tpage_table *tpage;
 
     /*
-     * ONE BUCKET FOR THE WHOLE MODEL, or < 0 to sort each face on its own
-     * depth.
+     * NAME THE BUCKET OUTRIGHT, or < 0 to take it from the model's own origin.
      *
-     * The original never sorts a model's faces against each other. Its vertex
-     * loop (0x800B23A0) stores SXY and RGB and no SZ at all, so no per-face
-     * depth exists to sort by; the face loop appends packet pointers to a flat
-     * array at 0x800DDDCC, and the tail chains every one of them into a SINGLE
-     * ordering-table link point taken from the entity's own projected origin
-     * (0x8006BF34 stores SZ3 of the origin at record+84). A model is one thing
-     * in the table, not N.
+     * A model is ONE THING in the ordering table, not N, and that is not a
+     * simplification: the console's vertex loop (0x800B23A0) stores SXY and RGB
+     * and no SZ at all, so no per-face depth exists on the console to sort by.
+     * The face loop appends packet pointers to a flat array at 0x800DDDCC and
+     * the tail chains every one of them into a SINGLE link point taken from the
+     * entity's projected origin — `rtps` then `swc2 SZ3` at 0x8006BF34, floored
+     * to 1 at 0x8006BF40. Which ORDER they go in is the model's own; see block
+     * A in model.h.
      *
-     * This port buckets per face, which for most models is invisible — they are
-     * small and land in one bucket anyway — but the VIEW WEAPON spans a large
-     * part of the near range, so its 62 faces landed in three different buckets
-     * and any wall polygon whose own depth fell between them was painted over
-     * the gun. That is the "view weapon clips into world geometry" report:
-     * measured at 9-17% of the weapon's pixels eaten, concentrated on the
-     * muzzle.
+     * This port used to bucket per face, and the cost was not subtle. A model
+     * spans a range of depths, so its faces scattered across buckets and any
+     * world polygon whose depth fell between them drew after part of the model
+     * and over it — no depth buffer, so the wall wins. Standing directly in
+     * front of BASE1's first Soldier drew the wall and no Soldier; the menu's
+     * logo did not appear at all.
+     *
+     * The override remains for a packet whose place is STRUCTURAL rather than a
+     * depth. The view weapon is the one: it belongs in front of the world and
+     * behind the status bar, and naming that bucket is what stops the gun's
+     * arithmetic and the bar's from disagreeing (gpu.h).
      */
     s32                  bucket_override;
 } q2_model_instance;

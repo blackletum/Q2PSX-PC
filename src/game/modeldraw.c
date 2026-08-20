@@ -85,16 +85,9 @@ static void matrix_apply_t(const s16 m[3][3], const s32 v[3], s32 out[3])
  * the tail of the chain and draws last — which is the console's own chaining
  * direction (`swl t1, 2(t6)` at 0x800B2620).
  */
-static void link_face(psx_ot *ot, psx_prim *prim,
-                      const q2_model_instance *inst,
-                      const q2_camera *cam, u16 otz)
+static void link_face(psx_ot *ot, psx_prim *prim, u32 bucket)
 {
-    if (inst->bucket_override >= 0)
-        psx_ot_link_prim(ot, prim, (u32)inst->bucket_override, PSX_OT_KEY_NONE);
-    else
-        psx_ot_link_prim(ot, prim,
-                         q2_ot_bucket_for_depth(ot, otz, cam->sort_range),
-                         PSX_OT_KEY_NONE);
+    psx_ot_link_prim(ot, prim, bucket, PSX_OT_KEY_NONE);
 }
 
 void q2_model_instance_init(q2_model_instance *inst)
@@ -121,12 +114,12 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
     u8  tint[3];
     u32 part, face_index = 0, emitted = 0, vertex_cursor = 0;
 
-    /* One slot per face: the primitive built for it, and its own mean depth.
-     * Both are consumed by the linking pass at the end. */
+    /* One slot per face: the primitive built for it. The DEPTH is not per face
+     * — see the link point below — so there is only one of those. */
     psx_prim *built[Q2_MODEL_MAX_FACES];
-    u16       built_otz[Q2_MODEL_MAX_FACES];
     u16       order[Q2_MODEL_MAX_FACES];
     u32       built_count = 0;
+    u32       bucket = 0;
     bool      reorder;
 
     if (!inst || !inst->model || !cam || !ot || !gte)
@@ -154,6 +147,73 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
     /* The same basis the world is drawn with, roll included — models and brush
      * geometry must lean together or the two separate as soon as you strafe. */
     q2_rotation_view_anamorphic(view, cam->yaw, cam->pitch, cam->roll);
+
+    /*
+     * A MODEL IS ONE THING IN THE TABLE, and this port used to make it N.
+     *
+     * The console gives an entity a SINGLE ordering-table link point taken from
+     * its own projected origin — `rtps` on the origin and `swc2 SZ3` at
+     * 0x8006BF34, floored to 1 at 0x8006BF40 — and chains every one of the
+     * model's packets into that one point (0x800B25E0). Its vertex loop stores
+     * SXY and RGB and no SZ at all (0x800B23A0), so there is no per-face depth
+     * on the console to sort by even in principle.
+     *
+     * Bucketing per face instead is what put monsters UNDER the world. A
+     * creature spans a range of depths, so its faces landed in a spread of
+     * buckets, and any wall polygon whose own depth fell between them was drawn
+     * after part of the creature and over it — which on a table with no depth
+     * buffer means the wall wins. Standing directly in front of BASE1's first
+     * Soldier drew the wall behind it and no Soldier at all.
+     *
+     * So: one bucket, from the origin, for the whole model. The origin is run
+     * through the GTE exactly as a vertex is — camera-space translation, a zero
+     * vector, RTPS — so its depth comes back in the same units every other
+     * caller of q2_ot_bucket_for_depth uses, rather than in a second arithmetic
+     * that has to be kept in step with the first.
+     */
+    if (inst->bucket_override >= 0) {
+        /*
+         * ...unless the caller names the bucket outright. The view weapon's
+         * place is structural — it belongs in front of the world and behind the
+         * status bar, not at a depth — and naming it is what stops the two
+         * arithmetics disagreeing (gpu.h).
+         */
+        bucket = (u32)inst->bucket_override;
+    } else {
+        s32 offset[3], camera_space[3];
+        u16 otz;
+
+        offset[0] = inst->origin[0] - cam->pos[0];
+        offset[1] = inst->origin[1] - cam->pos[1];
+        offset[2] = inst->origin[2] - cam->pos[2];
+        matrix_apply(view, offset, camera_space);
+
+        gte_set_translation(gte, camera_space[0], camera_space[1],
+                            camera_space[2]);
+        gte->v[0].x = 0;
+        gte->v[0].y = 0;
+        gte->v[0].z = 0;
+        gte_rtps(gte, false);
+
+        otz = gte->sz[3];
+        if (otz == 0)
+            otz = 1;              /* the console's own floor, 0x8006BF40 */
+
+        /*
+         * TWO STEPS, and collapsing them is what drew a creature behind the
+         * wall it stood in front of.
+         *
+         * `q2_ot_bucket_for_depth` does not return a bucket despite its name —
+         * it maps a depth onto the table's own OTZ scale, where LARGER is
+         * nearer. `psx_ot_depth_bucket` is what turns that into a bucket, and
+         * it INVERTS: the walk draws bucket 0 first, so the farthest primitive
+         * has to sit in the lowest bucket. Handing the first function's result
+         * straight to the linker put near models in low buckets and let the
+         * whole world paint over them.
+         */
+        bucket = psx_ot_depth_bucket(
+                     ot, q2_ot_bucket_for_depth(ot, otz, cam->sort_range));
+    }
 
     /*
      * The instance's own facing, composed into the camera's rotation once
@@ -422,7 +482,6 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
         for (v = 0; v < p.num_faces; v++, face_index++) {
             q2_model_face f;
             psx_prim *prim;
-            u32 otz = 0;
             bool ok = true;
             int i;
 
@@ -505,19 +564,14 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
                 continue;
             }
 
-            for (i = 0; i < 4; i++)
-                otz += window[f.v[i]].z;
-            otz /= 4;
-
             if (reorder) {
-                built[face_index]     = prim;
-                built_otz[face_index] = (u16)otz;
+                built[face_index] = prim;
                 if (face_index >= built_count)
                     built_count = face_index + 1;
             } else {
                 /* Too many faces to hold: link now, in file order, which is
                  * what this did before block A was read. */
-                link_face(ot, prim, inst, cam, (u16)otz);
+                link_face(ot, prim, bucket);
             }
 
             prim->kind = PSX_PRIM_GT4;
@@ -604,7 +658,7 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
             if (!p)
                 continue;
 
-            link_face(ot, p, inst, cam, built_otz[face]);
+            link_face(ot, p, bucket);
         }
     }
 
