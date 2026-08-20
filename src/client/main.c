@@ -119,6 +119,7 @@
 #define Q2_CLIENT_ITEM_SOUNDS 11
 
 #include "multiplayer.h"
+#include "playerdeath.h"
 #include "userfuncs.h"
 #include "disc.h"
 #include "entity.h"
@@ -229,6 +230,14 @@ typedef struct client {
     q2_world_zone    zone;
     q2_common_file   common;
     char             map[64];
+    /*
+     * The same level under the name the level table shows it by, which is what
+     * `0x800E46B4` holds — the loader copies record `+0` there at
+     * `0x8007C6C8`, not the directory at `+0x0C`. A `LOADMAP` names a DISPLAY
+     * name, and the guard that makes one naming the loaded level a no-op
+     * compares against this rather than against the folder.
+     */
+    char             map_display[64];
     int              zone_index;
 
     /* Streamed music. The XA decoder carries per-channel history across
@@ -949,6 +958,18 @@ typedef struct client {
 
     q2_mover_set      movers;
     bool              movers_ready;
+
+    /*
+     * The train's two extra voices, drained rather than played.
+     *
+     * PLATFORM asks for id 13 while it moves and id 14 when it arrives, both
+     * through 0x80040800's numeric SPU-parameter table rather than through the
+     * bank (mover.h). There is nothing here that can play one, so the request
+     * is TAKEN and counted: a latch nobody clears would sit at 14 for the rest
+     * of the level and read as "the train is arriving" forever.
+     */
+    u32               train_move_calls;
+    u32               train_stop_calls;
     u32               mover_triggers;   /* items the script reached */
     u32               mover_moved;      /* ticks on which one moved */
     u32               mover_sounds;     /* transitions that made a noise */
@@ -1077,6 +1098,33 @@ typedef struct client {
     u32               mp_shots[Q2_MP_MAX_PLAYERS];
     u32               mp_dry[Q2_MP_MAX_PLAYERS];
     bool              mp_dead[Q2_MP_MAX_PLAYERS];
+
+    /*
+     * THE BODY, which `mp_dead` above is not: that is the scoring latch and
+     * nothing else. This is the chain 0x800396AC starts — the death move, the
+     * corpse's five seconds, the fade, and the two different ends single player
+     * and deathmatch give it. See playerdeath.h.
+     */
+    q2_player_death   death[Q2_MP_MAX_PLAYERS];
+    /* 0x800B2A10: armed by a single-player death, and when it runs out the
+     * console loads QFRONT by itself. */
+    s32               death_abandon;
+    u32               death_bodies;   /* bodies that reached the fade          */
+    u32               death_gibs;
+    u32               death_respawns;
+    /* The zone's MultiSpawn points, kept past the load so a respawn has
+     * somewhere to put the player back. */
+    q2_mp_spawn       mp_spawns[Q2_MP_MAX_SPAWNS];
+    /* The level start's loadout, kept so a respawn can hand it back: the
+     * console builds a whole new player entity (0x8003B250) and clears the
+     * client record (0x8003B040), and this is the port's side of that. */
+    q2_inventory      mp_start_inv;
+    int               mp_start_weapon;
+    bool              mp_start_valid;
+    /* 0x800B335D, the byte the death page's middle row greys itself on and
+     * the only thing 0x8001FF0C ever writes. It is BSS on the console, so it
+     * starts at zero and the row starts greyed; `--continues N` seeds it. */
+    int               continues;
     int               trace_cre;      /* creature index to trace, -1 for none  */
     u32               trace_ticks;
     s32               trace_prev[3];  /* the traced creature's last position */
@@ -1491,6 +1539,7 @@ static void client_cre_melee(q2_monster *m, const s32 aim[3], s32 damage,
                              s32 kick, void *user);
 static void client_cre_sound(q2_monster *m, int which, void *user);
 static void client_cre_fire(q2_monster *m, int flash, void *user);
+static void client_cre_shot(q2_monster *m, const q2_cre_shot *shot, void *user);
 
 /* ------------------------------------------------------------------------- */
 /*
@@ -1714,6 +1763,7 @@ static void client_load_creatures(client *c, const s32 eye[3])
     q2_cre_set_melee_hook(client_cre_melee, c);
     q2_cre_set_sound_hook(client_cre_sound, c);
     q2_cre_set_fire_hook(client_cre_fire, c);
+    q2_cre_set_shot_hook(client_cre_shot, c);
 
     /*
      * Hold back the batches before waking anything.
@@ -1958,6 +2008,73 @@ static void client_cre_fire(q2_monster *m, int flash, void *user)
             break;
         q2_sim_hurt_player(&c->sim[0], NULL, damage,
                            table == 0 ? Q2_MOD_ENERGY_BOLT : Q2_MOD_BULLET,
+                           c->creatures.sight.pos);
+    }
+}
+
+/*
+ * A CREATURE'S SHOT, WITH ITS OWN FIGURES — the hook that replaces the one
+ * above for everything that has been transcribed.
+ *
+ * `client_cre_fire` takes an int and can therefore only serve the Soldier,
+ * whose three weapons the client hardcodes. Every other creature reached it
+ * naming an import slot and was declined; six of the seven modules could hunt
+ * you down and never hurt you. `q2_cre_shot` carries what the module passes to
+ * the engine's spawner, and all of it is read (crebind.h).
+ *
+ * What this does NOT reproduce, stated rather than hidden: the projectile
+ * spawners really do spawn an entity that flies, and this resolves the shot
+ * immediately along the line of sight instead. A rocket's travel time and its
+ * splash are the difference, and both belong to the projectile system rather
+ * than here. Damage, kick, spread and pellet count are the module's.
+ */
+static void client_cre_shot(q2_monster *m, const q2_cre_shot *shot, void *user)
+{
+    client *c = (client *)user;
+    s32 shots;
+    int mod;
+
+    if (!c || !c->creatures_ready || !m || !shot)
+        return;
+    if (m->enemy != &c->creatures.sight)
+        return;
+
+    /*
+     * A shot with no damage read is declined rather than guessed — the same
+     * rule the sound hook follows for a name the module does not carry.
+     */
+    if (shot->damage <= 0) {
+        c->cre_fire_no_figures++;
+        return;
+    }
+
+    c->cre_shots++;
+
+    /* The muzzle flash is the engine's own, exactly as the Soldier's is. */
+    if (c->lights_ready) {
+        static const u8 flash[3] = { Q2_MUZZLE_LIGHT_R, Q2_MUZZLE_LIGHT_G,
+                                     Q2_MUZZLE_LIGHT_B };
+        s32 inner, outer;
+
+        q2_weapon_muzzle_light(q2_rng_next(&c->sim[0].combat.rng),
+                               &inner, &outer);
+        q2_light_add_dynamic(&c->light_world, m->pos, flash, inner, outer, 0, 0);
+    }
+
+    switch (shot->slot) {
+    case Q2_IMP_FIRE_BLASTER: mod = Q2_MOD_ENERGY_BOLT; break;
+    case Q2_IMP_FIRE_RAILGUN: mod = Q2_MOD_RAIL;        break;
+    case Q2_IMP_FIRE_ROCKET:  mod = Q2_MOD_ROCKET;      break;
+    case Q2_IMP_FIRE_GRENADE: mod = Q2_MOD_GRENADE;     break;
+    default:                  mod = Q2_MOD_BULLET;      break;
+    }
+
+    shots = shot->count > 0 ? shot->count : 1;
+
+    while (shots-- > 0) {
+        if (!q2_visible(m, &c->creatures.sight))
+            break;
+        q2_sim_hurt_player(&c->sim[0], NULL, (s16)shot->damage, mod,
                            c->creatures.sight.pos);
     }
 }
@@ -2445,6 +2562,101 @@ static void client_sync_parked_health(client *c)
     }
 }
 
+/* ------------------------------------------------------------------------- */
+/* The player death chain                                                     */
+/* ------------------------------------------------------------------------- */
+static void client_enter_front_end(client *c);
+
+/*
+ * Put a dead player back — 0x8003DDF8, which is the ONLY thing on the console
+ * that respawns anybody, and which the engine itself never calls: its one
+ * caller is 0x8003DECC, the mode gate `q2_mp_may_respawn` already carries, and
+ * QMULTI.C reaches that through slot 12 of the engine block. The engine's own
+ * death chain animates the body, waits its 1500 and dissolves it, and stops.
+ *
+ * 0x8003DDF8 picks a MultiSpawn through 0x80071004, builds a new player entity
+ * at it (0x8003B250: health 100, entity+222 at the "not a player" sentinel),
+ * clears the client record and installs the Stand move. The pad and menu gates
+ * the engine also applies (0x8001FC50, 0x800AE8B4) belong to the caller.
+ */
+static bool client_mp_respawn(client *c, int pi)
+{
+    q2_mp_player_view pv[Q2_MP_MAX_PLAYERS];
+    s32               feet[3];
+    int               pick, i, players;
+
+    if (!c->mp_enabled || !c->mp_spawn_count || !c->mp_start_valid)
+        return false;
+    if (pi < 0 || pi >= Q2_MP_MAX_PLAYERS)
+        return false;
+
+    /* The selector takes the spawn FARTHEST from everybody already standing
+     * somewhere, so a respawn arrives away from the fight rather than in it. */
+    memset(pv, 0, sizeof(pv));
+    players = c->mp.player_count;
+    if (players < 1)
+        players = 1;
+    for (i = 0; i < players && i < Q2_MP_MAX_PLAYERS; i++) {
+        if (i == pi || c->death[i].stage != Q2_PDEATH_ALIVE)
+            continue;
+        pv[i].alive  = true;
+        pv[i].pos[0] = c->sim[0].player[i].pos[0];
+        pv[i].pos[1] = c->sim[0].player[i].pos[1];
+        pv[i].pos[2] = c->sim[0].player[i].pos[2];
+    }
+
+    pick = q2_mp_select_spawn(c->mp_spawns, pv, (u32)players,
+                              client_mp_rng, c);
+    if (pick < 0)
+        return false;
+
+    feet[0] = c->mp_spawns[pick].pos[0];
+    feet[1] = c->mp_spawns[pick].pos[1];
+    feet[2] = c->mp_spawns[pick].pos[2];
+
+    c->mp_view_pos[pi][0] = feet[0];
+    c->mp_view_pos[pi][1] = feet[1];
+    c->mp_view_pos[pi][2] = feet[2];
+    c->mp_view_yaw[pi]    = c->mp_spawns[pick].angle;
+    c->mp_view_valid[pi]  = true;
+
+    /*
+     * The loadout goes back BEFORE the spawn, because `q2_sim_spawn` seeds the
+     * pain diff from the inventory it finds: spawn first and the new life
+     * starts with `prev_health` at whatever the corpse had, so the first tick
+     * reads a hundred-point rise and the one after reads a drop as damage.
+     */
+    {
+        int saved = c->sim[0].cur_player;
+
+        c->sim[0].cur_player = pi;
+        if (pi == 0) {
+            c->sim[0].combat.inv       = c->mp_start_inv;
+            c->sim[0].combat.weapon_id = c->mp_start_weapon;
+            c->sim[0].combat.next_fire = 0;
+        }
+        q2_sim_spawn(&c->sim[0], feet, c->mp_view_yaw[pi]);
+        c->sim[0].player[pi].ground_y = feet[1];
+        c->sim[0].cur_player = saved;
+    }
+
+    if (pi > 0) {
+        q2_sim_player_reset_combat(&c->sim[0], pi);
+        c->sim[0].pcombat[pi].self.owner = (s8)pi;
+    } else {
+        q2_actor_from_player(&c->sim[0].combat.self, &c->sim[0].combat.inv,
+                             c->sim[0].player[0].pos);
+        c->sim[0].combat.self.owner = 0;
+        c->cam.roll = 0;      /* and the death cam's tilt goes with the body */
+    }
+
+    q2_player_death_init(&c->death[pi]);
+    c->mp_dead[pi] = false;
+    c->death_respawns++;
+    Q2_INFO("multiplayer: player %d respawned at MultiSpawn %d", pi, pick);
+    return true;
+}
+
 /*
  * A script CALL reached a rotation primitive: ask that node's rotator to take
  * one step.
@@ -2640,6 +2852,18 @@ static void client_mission_update(client *c)
  * When the name resolves to nothing the load still happens, at the target's
  * zone 0, because losing a level transition is a worse failure than arriving
  * in the wrong doorway — and the warning says which.
+ *
+ * **The map name is a DISPLAY name and is resolved through the level table**,
+ * which is what `0x8007C54C` does with the twelve bytes the outer state machine
+ * hands it: walk the 56-byte records comparing `+0` and take `+0x0C` as the
+ * directory. The port used to use the operand as a directory outright, which
+ * happens to work for every single-player transition on this disc — all
+ * thirteen name a map whose display name is its directory in a different case
+ * — and would silently fail on any record where the two differ, of which the
+ * table has plenty (`COLD STORAGE` is `MATRIX6`). It is also what the console
+ * would do: a name the table does not carry reaches `0x8007C684`, an
+ * unconditional branch to itself. This warns and tries the name as a directory
+ * instead, because hanging is not a behaviour worth reproducing.
  */
 static bool client_change_map(client *c, const char *map, const char *start)
 {
@@ -2648,6 +2872,21 @@ static bool client_change_map(client *c, const char *map, const char *start)
     q2_start_pos arrival;
 
     memset(&arrival, 0, sizeof(arrival));
+
+    if (c->level_table_ready && map && map[0]) {
+        const q2_level_entry *e = q2_level_find_display(&c->level_table, map);
+
+        /* A name that is already a directory is a caller's shorthand rather
+         * than a fault — `--map` takes one, and so does a save. */
+        if (!e)
+            e = q2_level_find(&c->level_table, map);
+
+        if (e && !e->is_placeholder && e->directory[0])
+            map = e->directory;
+        else if (!e)
+            Q2_WARN("LOADMAP: '%s' is in no level table record; taking it as a "
+                    "directory", map);
+    }
 
     if (start && start[0]) {
         char   path[256];
@@ -2740,12 +2979,16 @@ static void client_change_map_and_brief(client *c)
      * raises the panel on arrival, which is where a module would. Stated
      * because it is a stand-in and not a read.
      *
-     * Only on a level change: a zone gate stays inside one level and has no
-     * new orders to give.
+     * Only on a level change, and only into a LEVEL: a zone gate stays inside
+     * one level and has no new orders to give, and an `EndMission` map or a
+     * film has no orders at all — raising the panel over one would put a
+     * briefing on a screen that is already saying something else.
      */
-    c->briefing_open   = true;
-    c->briefing_frames = 0;
-    q2_prompt_show(&c->prompts, Q2_PROMPT_BACK, 216);
+    if (!c->endmission && !c->film_open) {
+        c->briefing_open   = true;
+        c->briefing_frames = 0;
+        q2_prompt_show(&c->prompts, Q2_PROMPT_BACK, 216);
+    }
 
     /* Re-arm, so one `--fire-triggers` walks the game rather than one level.
      * Without this a scripted run stops at the first boundary, having proved
@@ -3111,8 +3354,15 @@ static void client_event_call(void *user, const q2_event_item *item,
                             c->unit_next_map, c->unit_next_start);
                 }
 
-                snprintf(c->pending_map, sizeof(c->pending_map), "%s",
-                         e->directory);
+                /*
+                 * The DISPLAY name, not the directory: `0x80018ED8` writes
+                 * `"EndMission N"` into `0x800E46C0`, which is the same buffer
+                 * a LOADMAP writes and the same one `0x8007C54C` resolves. The
+                 * table lookup above is the existence check, not the
+                 * resolution — doing it here as well would put a directory in
+                 * a field that holds display names.
+                 */
+                snprintf(c->pending_map, sizeof(c->pending_map), "%s", want);
                 snprintf(c->pending_start, sizeof(c->pending_start),
                          "Default");
                 c->map_change_pending = true;
@@ -3405,7 +3655,13 @@ static void client_event_call(void *user, const q2_event_item *item,
             char map[Q2_UF_NAME_LEN + 1];
             char start[Q2_UF_NAME_LEN + 1];
 
+            /* Against the DISPLAY name, because that is what `0x800E46B4`
+             * holds and what the operand is. `client_name_eq` is
+             * case-insensitive because the two spellings of a single-player
+             * map differ only in case; a map whose display name is nothing
+             * like its directory would compare wrong against the folder. */
             if (q2_uf_operand_name(&call, 0, map) && map[0] &&
+                !client_name_eq(map, c->map_display) &&
                 !client_name_eq(map, c->map)) {
                 if (!q2_uf_operand_name(&call, 1, start))
                     start[0] = '\0';
@@ -3623,6 +3879,16 @@ static bool client_load_zone(client *c, const char *map, int index)
     c->zone_index = index;
     snprintf(c->map, sizeof(c->map), "%s", map);
 
+    /* And the name the table shows it by — 0x800E46B4's copy. A directory with
+     * no record keeps its own name, which is what the compare then has. */
+    snprintf(c->map_display, sizeof(c->map_display), "%s", map);
+    if (c->level_table_ready) {
+        const q2_level_entry *e = q2_level_find(&c->level_table, map);
+
+        if (e && e->display[0])
+            snprintf(c->map_display, sizeof(c->map_display), "%s", e->display);
+    }
+
     /*
      * Prefer a real spawn point in this zone. StartPos records carry the zone
      * they belong to, so a map's spawns are not all valid here — filtering by
@@ -3675,6 +3941,9 @@ static bool client_load_zone(client *c, const char *map, int index)
                         }
 
                         c->mp_spawn_count = n;
+                        /* Kept, because a respawn needs somewhere to put the
+                         * player back and `ms` is a local. */
+                        memcpy(c->mp_spawns, ms, sizeof(c->mp_spawns));
                         if (n) {
                             q2_mp_player_view pv[Q2_MP_MAX_PLAYERS];
                             int players = c->mp.player_count;
@@ -4995,6 +5264,25 @@ static bool client_load_zone(client *c, const char *map, int index)
             q2_sim_eye(&c->sim[0], eye);
             client_load_creatures(c, eye);
         }
+    }
+
+    /*
+     * EVERYBODY IS ALIVE AGAIN, and this is what a life starts with.
+     *
+     * 0x8003B250 is the console's player spawn: a new entity at 100 health
+     * with entity+222 at the "not a player" sentinel and the Stand move
+     * installed. A zone load is that for all four, and a respawn hands the
+     * loadout captured here back out.
+     */
+    {
+        int pi;
+
+        for (pi = 0; pi < Q2_MP_MAX_PLAYERS; pi++)
+            q2_player_death_init(&c->death[pi]);
+        c->death_abandon   = 0;
+        c->mp_start_inv    = c->sim[0].combat.inv;
+        c->mp_start_weapon = c->sim[0].combat.weapon_id;
+        c->mp_start_valid  = true;
     }
 
     Q2_INFO("%s: %u nodes, %u vertices",
@@ -6622,6 +6910,25 @@ static void client_input_simulated(client *c, float dt)
             }
 
             /*
+             * AND THE TRAIN'S TWO, which are not bank keys and cannot go
+             * through the call above. Taken here so the field cannot latch,
+             * and counted so a future mixer has a number to check itself
+             * against.
+             */
+            {
+                u32 mi;
+
+                for (mi = 0; mi < c->movers.count; mi++) {
+                    u8 id = q2_mover_take_travel_sound(&c->movers, mi);
+
+                    if (id == Q2_MOVER_TRAVEL_MOVE_ID)
+                        c->train_move_calls++;
+                    else if (id == Q2_MOVER_TRAVEL_STOP_ID)
+                        c->train_stop_calls++;
+                }
+            }
+
+            /*
              * AND THE ROTATING HATCHES, which had no sound path at all.
              *
              * pt1__mid and pt1__end have exactly ONE reader each in the whole
@@ -6773,45 +7080,143 @@ static void client_input_simulated(client *c, float dt)
     }
 
     /*
-     * DEATH. Page 41 has been transcribed since the menu was reconstructed —
-     * RESTART LEVEL, the resupply line with its own greying rule, QUIT GAME —
-     * and nothing had ever opened it, so the player's health simply ran
-     * negative and the game carried on. Measured before this: a Soldier took
-     * the player to -353 and the run continued as if nothing had happened.
+     * DEATH — the whole chain now, not only the frame it starts on.
      *
-     * It is raised here rather than inside the sim because the sim has no menu
-     * and the page IS the death sequence on this console: the world stays
-     * frozen behind it, which is what `client_menu_frame` already does for
-     * every other page.
+     * What used to be here was the first tick of it: health crossed zero, page
+     * 41 opened, and that was the end of the subject. The console has four more
+     * functions after the handler and they are what a body actually does — the
+     * death move, the five seconds it lies there, the fade, and the two
+     * different endings single player and deathmatch give it. playerdeath.h
+     * carries the addresses; this is where they are driven from.
+     *
+     * It is driven from the client and not the sim for the reason it always
+     * was: the sim has no menu, and in single player the page IS the death
+     * sequence on this console.
+     *
+     * THE SCORING IS NOT HERE ANY MORE. `client_score_deaths` above already
+     * walks all four players and attributes each death from that player's own
+     * `last_attacker`, so doing it again here was scoring a local player's
+     * death TWICE — once correctly and once with a hard-coded killer of -1,
+     * which also charged the victim a suicide frag for being shot.
      */
-    if (c->sim[0].combat.inv.health <= 0 && !c->menu.open && !c->mcard_open) {
-        /*
-         * In a match the death goes to the scoring first. The engine's hook at
-         * 0x800396AC hands the module a killer and a victim, taken from the
-         * entity's own bytes at +222 and +223; the port's single local player
-         * is victim 0, and a creature or the world killed them, which the
-         * attribution turns into the world's -1. The runtime's own first act is
-         * then to blame the victim for it.
-         */
-        if (c->mp_enabled && c->mp.end == Q2_MP_RUNNING) {
-            int killer = q2_mp_attribute_kill(-1, c->sim[0].combat.self.last_mod);
+    {
+        const s32 tick = (step > 0) ? step : 0;
+        int       pi;
 
-            q2_mp_player_killed(&c->mp, killer, 0);
-            c->mp_deaths++;
-            Q2_INFO("multiplayer: player 0 killed by %d, frags now %d %d %d %d",
-                    killer, c->mp.frags[0], c->mp.frags[1], c->mp.frags[2],
-                    c->mp.frags[3]);
+        for (pi = 0; pi < Q2_MP_MAX_PLAYERS; pi++) {
+            q2_player_death *d = &c->death[pi];
+            q2_player       *p = &c->sim[0].player[pi];
+            const bool       local = (pi == c->sim[0].cur_player);
+            const q2_actor  *a = local ? &c->sim[0].combat.self
+                                       : &c->sim[0].pcombat[pi].self;
+            const s16 health = local ? c->sim[0].combat.inv.health
+                                     : c->sim[0].pcombat[pi].inv.health;
+
+            if (pi > 0 && (!c->mp_enabled || !c->sim_ready[pi]))
+                continue;
+
+            /*
+             * The engine's gate, 0x8003ADB8, against the chain's OWN copy of
+             * entity+0x10C — which is where the corpse think raises the DEAD
+             * bit. The sim keeps a second copy of the same bit for its movement
+             * gates and raises it a tick earlier (see update_pain); testing
+             * that one here would shut the gate before it ever opened.
+             *
+             * The STAGE is in front of it because the bit alone is not enough
+             * on this side. The original's one-shot is the think swap: the
+             * player think that runs the gate is replaced by the corpse think,
+             * so it cannot run a second time whatever the bit says. Here the
+             * loop is the same loop every tick, and the bit is not raised until
+             * the body's first tick — which the `continue` below skips. Without
+             * the stage the gate re-opened every frame: measured on POWER2, one
+             * Berserk produced 300 deaths in 900 frames.
+             */
+            if (d->stage == Q2_PDEATH_ALIVE) {
+                q2_player_death_event ev;
+
+                if (!q2_player_should_die(health, d->ent2))
+                    continue;
+
+                q2_player_die(d, a->last_attacker, a->last_mod, pi,
+                              c->mp_enabled,
+                              (p->ent.flags & Q2_ENT_UNDERWATER) != 0, &ev);
+
+                Q2_INFO("player %d died: killer %d, means %d, %s", pi,
+                        (int)d->killer, (int)d->mod,
+                        ev.cried_out ? (ev.drowned ? "drowned" : "cried out")
+                                     : "silently");
+
+                if (ev.death_page && !c->menu.open && !c->mcard_open) {
+                    /* 0x8001D774 writes the middle row from the continues
+                     * count on the way in, so it has to be there first. */
+                    q2_menu_set_resupplies(&c->menu, c->continues);
+                    q2_menu_open(&c->menu);
+                    q2_menu_goto(&c->menu, Q2_PAGE_DEATH);
+                }
+                if (ev.abandon_armed)
+                    c->death_abandon = Q2_PDEATH_ABANDON_TICKS;
+
+                /*
+                 * 0x8003DF90 raises "the move ran past its end" when the frame
+                 * cursor walks past it, and 0x80039618 waits for that before it
+                 * lets the body settle. THIS PORT DRAWS NO PLAYER MODEL, so
+                 * there is no cursor to walk and nothing would ever raise it —
+                 * the body would hold its first dying tick for ever. It is
+                 * raised here instead, which makes the deathmatch body settle
+                 * on the next tick rather than at the end of its death move.
+                 * STATED as the port's approximation: when a player model is
+                 * drawn, this call belongs on the animation advance.
+                 */
+                q2_player_death_anim_ended(d);
+                continue;          /* the killing tick is not a body tick */
+            }
+
+            {
+                const q2_pdeath_stage was = d->stage;
+
+                q2_player_death_tick(d, health, tick, c->mp_enabled,
+                                     client_mp_rng(c));
+
+                /* The sim keeps its own copy for the movement and camera
+                 * gates; this is the chain handing it the bit. */
+                p->ent2_flags |= (d->ent2 & Q2_ENT2_DEAD);
+
+                if (was != d->stage && d->stage == Q2_PDEATH_FADING)
+                    c->death_bodies++;
+                if (was != d->stage && d->stage == Q2_PDEATH_GIBBED)
+                    c->death_gibs++;
+            }
+
+            /*
+             * And back in. Every mode but VERSUS lets a dead player return
+             * (0x8003DEB4); the engine wants the fire button on a FRESH press
+             * (0x8001FC50) and the menu closed (0x800AE8B4) as well, and those
+             * two are the client's. The body has to have finished falling
+             * first, which is the same test the corpse think makes.
+             */
+            if (c->mp_enabled && d->stage != Q2_PDEATH_DYING &&
+                q2_mp_may_respawn(&c->mp) && !c->menu.open && !c->mcard_open) {
+                bool ask = (pi != 0);   /* the parked players do not press it */
+
+                if (pi == 0)
+                    ask = (pad.buttons & ~pad.prev & (u16)bind.fire) != 0;
+                if (ask)
+                    client_mp_respawn(c, pi);
+            }
         }
 
-        Q2_INFO("player died");
-
-        /* Every mode but VERSUS lets a dead player back in (0x8003DEB4). The
-         * pad and menu gates the engine also applies belong to the client. */
-        if (c->mp_enabled && q2_mp_may_respawn(&c->mp))
-            Q2_INFO("multiplayer: respawn is allowed in this mode");
-
-        q2_menu_open(&c->menu);
-        q2_menu_goto(&c->menu, Q2_PAGE_DEATH);
+        /*
+         * 0x800B2A10, spent by 0x80041D30: a single-player death that is never
+         * answered raises game-state 8, which is 0x8004149C — "load
+         * MagazineExtrQFront". The console walks back to the front end on its
+         * own after 1200, and nothing in this port had ever done so.
+         */
+        if (q2_player_abandon_tick(&c->death_abandon, tick)) {
+            Q2_INFO("death: unanswered for %d ticks — back to the front end",
+                    Q2_PDEATH_ABANDON_TICKS);
+            q2_menu_close(&c->menu);
+            client_enter_front_end(c);
+        }
     }
 
     c->cam.pos[0] = eye[0];
@@ -7300,6 +7705,11 @@ static void client_apply_input(client *c)
     for (i = 0; i < Q2_SIM_MAX_PLAYERS; i++)
         c->sim[0].player[i].look_scheme = style;
 
+    /* 0x800B3342. The AUTOCENTRE row has been on this page since the menu was
+     * transcribed and had nothing on the other end of it; the sim reads it now.
+     * See the timer at 0x8003A4AC. */
+    c->sim[0].autocentre_setting = c->settings.v[Q2_SET_AUTOCENTRE] != 0;
+
     /* A scripted run has no mouse to grab, and its pad script is STANDARD A's. */
     c->mouse_look = want_mouse && !c->headless && !c->demo;
 }
@@ -7371,8 +7781,22 @@ static void client_menu_requests(client *c)
     switch (q2_menu_take_request(&c->menu)) {
     case Q2_MREQ_RESUME:
         break;
-    case Q2_MREQ_RESTART:
     case Q2_MREQ_RESUPPLY:
+        /*
+         * A RESUPPLY SPENDS A CONTINUE, which nothing here had ever done: the
+         * two rows did exactly the same thing, so the count on the page never
+         * moved and the middle row could be taken for ever. 0x8001FF0C is
+         * `*(u8*)0x800B335D -= 1` and it is the only write to that byte in the
+         * executable — the page's own greying rule (0x8001D774) is what stops
+         * it going below zero, by taking the row out of the navigation.
+         */
+        if (!q2_player_spend_resupply(&c->continues))
+            Q2_WARN("resupply: none left — the row should have been greyed");
+        q2_menu_set_resupplies(&c->menu, c->continues);
+        Q2_INFO("resupply: %d left", c->continues);
+        /* fall through: what it does after spending one is restart the level */
+        /* FALLTHROUGH */
+    case Q2_MREQ_RESTART:
         Q2_INFO("restarting %s zone %d", c->map, c->zone_index);
         /*
          * A RESTART IS NOT A TRANSITION, and the carry flags must be down
@@ -7929,6 +8353,8 @@ static const char *client_ent_sound_name(const client *c, u32 which)
     case Q2_SND_DROWN:        return "pla_drown1";   /* 0x800B28E8 */
     case Q2_SND_JUMP:         return "pla_jump1";    /* 0x800B2900 */
     case Q2_SND_LAND_SOFT:    return "pla_land1";    /* 0x800B2904 */
+    case Q2_SND_WATER_IN:     return "pla_watr_in";  /* 0x800B2938 */
+    case Q2_SND_WATER_OUT:    return "pla_watr_out"; /* 0x800B293C */
     default: break;
     }
 
@@ -8065,6 +8491,8 @@ static void client_entity_events(client *c)
                 ev->e[i].sound == Q2_SND_LAND ||
                 ev->e[i].sound == Q2_SND_LAND_SOFT ||
                 ev->e[i].sound == Q2_SND_JUMP ||
+                ev->e[i].sound == Q2_SND_WATER_IN ||
+                ev->e[i].sound == Q2_SND_WATER_OUT ||
                 ev->e[i].sound == Q2_SND_PAIN_25 ||
                 ev->e[i].sound == Q2_SND_PAIN_50 ||
                 ev->e[i].sound == Q2_SND_PAIN_75 ||
@@ -8096,7 +8524,10 @@ static void client_entity_events(client *c)
              * Expect this to read as a regression at first: creatures stop
              * noticing you walk. They did not notice on the console either.
              */
-            if (c->creatures_ready && ev->e[i].sound == Q2_SND_JUMP)
+            if (c->creatures_ready &&
+                (ev->e[i].sound == Q2_SND_JUMP ||
+                 ev->e[i].sound == Q2_SND_WATER_IN ||
+                 ev->e[i].sound == Q2_SND_WATER_OUT))
                 q2_creature_world_player_noise(&c->creatures, true);
 
             if (!ok)
@@ -8185,6 +8616,16 @@ static bool client_apply_save(client *c, const q2_save *s)
     client_apply_settings(c);
 
     q2_save_apply_mission(s, &c->mission);
+    /*
+     * ...and find this level's row again in the table that just replaced the
+     * one it was registered into. The load runs the map first, so the row this
+     * client is holding is an index into the table the save has now
+     * overwritten — pointing, on a save made in a later level, at somebody
+     * else's counters. Re-registering resolves it by name, which is the only
+     * key the table has.
+     */
+    if (c->map_unit > 0)
+        client_mission_enter(c);
     if (c->movers_ready)
         q2_save_apply_movers(s, &c->movers);
     if (c->creatures_ready)
@@ -8718,6 +9159,12 @@ static void client_write_shot(client *c, bool numbered)
                 c->glass_calls, c->glass_pieces,
                 c->sim[0].breakable_count, c->sim[0].breakable_hits,
                 c->sim[0].breakable_pieces, c->sim[0].breakable_fired);
+        Q2_INFO("  explosive %u groups, %u shootable parts; %u destroyed"
+                " (%u by script), %u detonated, %u node show/hide",
+                c->explosives_ready ? c->explosives.count : 0u,
+                c->explosive_boxes, c->sim[0].explosive_destroyed,
+                c->explosive_scripted, c->sim[0].explosive_blasts,
+                c->explosive_vis);
         Q2_INFO("  script    %u strings, %u sounds, %u gated by ONKEYDO, "
                 "%u nodes hidden, %u summoned, %u teleports, %u timers, %u resumed,"
                 " %u records retired",
@@ -8770,13 +9217,14 @@ static void client_write_shot(client *c, bool numbered)
                     client_node_centre(c, m->node[0], home);
                 Q2_INFO("  train     %u part%s (node %d%s) from (%d,%d,%d), "
                         "path (%d,%d,%d) len %d, speed %d, "
-                        "at %d/%d -> (%d,%d,%d)",
+                        "at %d/%d -> (%d,%d,%d), %u running voices, %u stops",
                         m->part_count, m->part_count == 1 ? "" : "s",
                         m->part_count ? m->node[0] : -1,
                         m->part_count > 1 ? ", +more" : "",
                         home[0], home[1], home[2],
                         m->dir[0], m->dir[1], m->dir[2], m->target,
-                        m->speed, m->offset, m->target, d[0], d[1], d[2]);
+                        m->speed, m->offset, m->target, d[0], d[1], d[2],
+                        c->train_move_calls, c->train_stop_calls);
             }
         }
         {
@@ -11377,6 +11825,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--sort-data"))             c.use_sort = true;
         else if (!strcmp(argv[i], "--no-autoswitch"))         c.no_autoswitch = true;
         else if (!strcmp(argv[i], "--god"))                   c.god = true;
+        else if (!strcmp(argv[i], "--continues") && i + 1 < argc)
+            c.continues = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--ot-range") && i + 1 < argc) c.ot_range = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--zone-trace"))            c.zone_trace = true;
         else if (!strcmp(argv[i], "--fire-triggers")) {
@@ -12602,7 +13052,24 @@ no_window:
             c.mission_open      = true;
             c.mission_after_map = true;
             c.mission_frames    = 0;
+            /* The arrival briefing belongs to the level that is ending, and
+             * its own release calls `q2_prompt_hide_all` — which would take
+             * the board's prompt down with it if the player reached the exit
+             * while it was still up. */
+            c.briefing_open     = false;
             q2_menu_close(&c.menu);
+            {
+                int rs = 0, rst = 0, rk = 0, rkt = 0, rw, rows = 0;
+
+                q2_mission_totals(&c.mission, &rs, &rst, &rk, &rkt);
+                for (rw = 0; rw < Q2_MISSION_ROWS; rw++)
+                    if (c.mission.row[rw].name[0])
+                        rows++;
+                Q2_INFO("tally: mission %d complete — %d level%s, "
+                        "secrets %d/%d, kills %d/%d",
+                        c.mission.unit, rows, rows == 1 ? "" : "s",
+                        rs, rst, rk, rkt);
+            }
             /*
              * AND SAY THAT IT CAN BE DISMISSED. The console's tally spins on a
              * pad press with no timeout at all (0x80018214 latches the edge
@@ -12616,14 +13083,12 @@ no_window:
         }
 
         /*
-         * Leaving it. A press dismisses the screen (the ESCAPE handler below),
-         * and dismissing it with a destination waiting is what performs the
-         * load. Headless has no one to press anything, so it holds the screen
-         * for a fixed count and then goes on — otherwise every scripted run
-         * would stop at the first level boundary, which is precisely where the
-         * interesting part starts.
+         * The three screens a transition puts up, each released the same way:
+         * a press dismisses it (the ESCAPE handler below), and headless — which
+         * has nobody to press anything — holds it for a fixed count and goes
+         * on, because otherwise every scripted run would stop at the first
+         * boundary, which is precisely where the interesting part starts.
          */
-        /* The briefing, released the same way and for the same reason. */
         if (c.briefing_open) {
             c.briefing_frames++;
             if (c.briefing_frames >= (c.headless ? Q2_INTERMISSION_HEADLESS
@@ -12633,16 +13098,7 @@ no_window:
             }
         }
 
-        /*
-         * The END-OF-MISSION placard, dismissed — and on to the level the
-         * unit's last LOADMAP named. See `unit_next_map` for why the port has
-         * to carry it and the console does not.
-         */
-        /*
-         * Headless has nobody to press BACK with, and the placard would
-         * otherwise stop a scripted run at the first unit boundary — the same
-         * reason the tally board has a headless release and the same count.
-         */
+        /* The end-of-mission placard, on the same release. */
         if (c.endmis_open) {
             c.endmis_frames++;
             if (c.headless && c.endmis_frames >= Q2_INTERMISSION_HEADLESS) {
@@ -12653,6 +13109,11 @@ no_window:
             c.endmis_frames = 0;
         }
 
+        /*
+         * The placard dismissed — and on to the level the unit's last LOADMAP
+         * named. See `unit_next_map` for why the port has to carry it across
+         * and the console does not.
+         */
         if (c.endmis_await && !c.endmis_open) {
             c.endmis_await = false;
             if (c.unit_next_map[0]) {
