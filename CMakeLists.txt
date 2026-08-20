@@ -106,6 +106,7 @@ add_subdirectory(tests)
 
 if(Q2PSX_BUILD_TOOLS)
     add_subdirectory(tools/q2psx-inspect)
+    add_subdirectory(tools/stx2avi)
 endif()
 
 # ---------------------------------------------------------------------------
