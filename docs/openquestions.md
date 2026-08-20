@@ -9235,3 +9235,69 @@ into this one.
       visited exactly six levels, so that board is full — and unit 3's shows the same six under a
       different title. A board that lists a unit's own levels looks more like a feature and is a screen
       the console does not draw.
+
+
+## The gun's lighting is not the gather, and the split that says so
+
+`fa11948` recorded three gathers tried and three missed, and left the next step as
+the two 1.12 intensities at `+0xFC`/`+0xFE`. Both are now answered, and neither is it.
+
+**The measurement.** The client's own BASE0 spawn against `ref/captures/base0_blaster.ppm`,
+with an EXACT weapon mask: render the frame twice, once with every one of the 73 weapon
+faces suppressed, and the difference is the weapon — 7,324 pixels, no colour guessing.
+Split by material (the violet body against the flesh forearm), eroded twice so an
+alignment error cannot reach outside either shape, and normalised by three world patches
+so the capture's own level and gamma cancel.
+
+**Placement and hue are already right**, which is what makes the rest measurable:
+
+    emitter cx   retail 0.6383   port 0.6396    0.13% of the picture width
+    emitter cy   retail 0.6516   port 0.6573    0.57% of the band height
+    emitter h    retail 0.0394   port 0.0403    2%  (h escapes the capture's 1.25x
+                                                    horizontal upscale; w does not)
+    top edge     within 0.5% of picture height over the front two thirds
+
+**What is wrong is the BALANCE between the gathered lights and the ambient floor**, and
+the body and the arm prove it by being wrong in OPPOSITE directions — body too bright,
+arm too dark. Nothing that scales the whole result can do that.
+
+    arm / body luminance     port unlit (texture only)   0.650
+                             port lit                    0.810
+                             retail                      1.191
+
+So the console SEPARATES the two parts far more than this port does: taking the port's
+own textures as the baseline, retail's arm is lit at ~0.98 and its body at ~0.53, while
+the port lights them at 0.70 and 0.56. The port's view-weapon shading is too flat, and
+it is too flat because there is too much back colour under too little directional light.
+
+**Swept, and every one ruled out** (cost = the two material errors in quadrature):
+
+    world list + player's node, ONE/ONE, glow 0x30   body +14.9%  arm -15.7%  <- ships
+    view-space list, with node                       -52.6% luma
+    view-space list, no node                         -52.6% luma
+    world list, no node                              +21.2% luma
+    gather at the WEAPON's origin, not the player's  body +18.8%  arm -11.2%  (no gain)
+    intensity_a below 4096                           strictly worse: 0x8006B468 scales
+                                                     the BACK COLOUR by the same product,
+                                                     so the two intensities cannot
+                                                     separate lights from ambient at all
+    glow swept 0 -> 0x60                             monotonic; 0x30 is the minimum cost
+
+That last row is the answer to `fa11948`'s question. `+0xFC`/`+0xFE` are not the knob:
+`q2_light_env_build` scales the light directions by `intensity_a * intensity_b >> 11`
+AND the back colour by the same product `>> 24`, which is the executable's own shape, so
+moving them moves both together. Confirmed by sweep — every value below 4096 makes both
+materials darker at once.
+
+**What does move it the right way** is the ambient floor alone: dropping the glow raises
+arm/body from 0.810 at 0x30 to 1.074 at 0, and scaling the gathered light COLOURS alone
+by 2x with glow near 0x10-0x18 brings both materials inside ~10%. That is two free
+parameters fitted to one screenshot, which is why it is NOT checked in — the same
+`q2_light_env_build` lights every creature and item in the game, and a 2x on the light
+colours is a change to all of them made on the strength of one gun.
+
+**So the question is now specific**: what scales the entity light colours between the
+gather and the GTE's colour matrix, and is the port's factor short by about two? That is
+a read of `0x8006B184..0x8006B4B8` against `q2_light_set_add`'s `rgb`, not another
+gather experiment. The gather is exonerated; three ways of doing it were already tried
+and a fourth (the weapon's own origin) is tried above.
