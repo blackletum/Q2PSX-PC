@@ -10,6 +10,9 @@
  */
 #include "playerdeath.h"
 
+#include "pad.h"   /* Q2_PAD_FULL */
+#include "sim.h"
+
 #include <stdio.h>
 #include <string.h>
 
@@ -426,6 +429,97 @@ static void test_resupply_is_spent(void)
     CHECK(n == 0, "an empty resupply wrapped to %d", n);
 }
 
+
+/* ------------------------------------------------------------------------- */
+/* Nobody is driving                                                          */
+/* ------------------------------------------------------------------------- */
+/*
+ * The two things a corpse must not do, and both of them come out of ONE fact:
+ * `player_die` overwrites `entity+0x3C` with the corpse think (0x80039818), so
+ * the player think at 0x8003A1C8 is not installed any more.
+ *
+ * 0x8003A4A4 is the pad read's only call site and 0x8003AD98 is the view
+ * weapon driver's only call site, and BOTH are inside that function. So a
+ * corpse is not steered and does not hold a gun, without either being a rule
+ * anybody wrote down.
+ */
+
+static void test_a_corpse_is_not_driven_by_the_pad(void)
+{
+    q2_sim   driven, still;
+    q2_input full, none;
+    s16      yaw;
+    int      i;
+
+    memset(&none, 0, sizeof(none));
+    full          = none;
+    full.forward  = Q2_PAD_FULL;
+    full.yaw      = Q2_PAD_FULL;
+    full.buttons  = Q2_BTN_MOVING;
+
+    /* Alive, that input turns the player — otherwise the rest of this test
+     * would pass on a sim that ignored input altogether. */
+    q2_sim_init(&driven, NULL, 50);
+    yaw = (s16)driven.player[0].yaw;
+    for (i = 0; i < 20; i++)
+        q2_sim_tick(&driven, &full, 12);
+    CHECK(driven.player[0].yaw != yaw, "a live player did not turn");
+
+    /*
+     * Dead, it changes nothing at all. Asserted by DIFFERENCE rather than by
+     * an absolute position, because the body is still falling: two identical
+     * corpses, one handed the stick at full deflection and one handed nothing,
+     * must end the same twenty ticks in exactly the same state. Any difference
+     * is input reaching a player who has none.
+     */
+    q2_sim_init(&driven, NULL, 50);
+    q2_sim_init(&still,  NULL, 50);
+    driven.player[0].ent2_flags |= Q2_ENT2_DEAD;
+    still.player[0].ent2_flags  |= Q2_ENT2_DEAD;
+
+    for (i = 0; i < 20; i++) {
+        q2_sim_tick(&driven, &full, 12);
+        q2_sim_tick(&still,  &none, 12);
+    }
+
+    CHECK(driven.player[0].yaw == still.player[0].yaw,
+          "the stick turned a corpse: %d against %d",
+          (int)driven.player[0].yaw, (int)still.player[0].yaw);
+    CHECK(driven.player[0].pos[0] == still.player[0].pos[0] &&
+          driven.player[0].pos[2] == still.player[0].pos[2],
+          "the stick walked a corpse: (%d,%d) against (%d,%d)",
+          (int)driven.player[0].pos[0], (int)driven.player[0].pos[2],
+          (int)still.player[0].pos[0],  (int)still.player[0].pos[2]);
+    CHECK(driven.player[0].wish[0] == 0 && driven.player[0].wish[2] == 0,
+          "a corpse still had a wish velocity");
+    CHECK(driven.player[0].jump_hold == 0, "a corpse was holding a jump");
+}
+
+static void test_the_view_weapon_is_freed_with_the_player(void)
+{
+    q2_player_death d;
+
+    /*
+     * `entity+0x44` is a pointer to the view weapon ENTITY — 0x8004EE0C opens
+     * `s6 = self->[68]; s7 = s6->[12]`. 0x800397F8 hands it to 0x8006D280,
+     * which pushes it back onto the free stack at 0x800B2BAC, and then the
+     * same word becomes -40. So "there is a gun" and "the gib threshold" are
+     * the same field either side of the death.
+     */
+    q2_player_death_init(&d);
+    CHECK(d.linked_weapon, "a live player holds one");
+    CHECK(d.gib_health == 0, "and the field is not a threshold yet");
+
+    q2_player_die(&d, 1, 18, 0, false, false, NULL);
+    CHECK(!d.linked_weapon, "the view weapon was not freed");
+    CHECK(d.gib_health == Q2_PDEATH_GIB_HEALTH,
+          "the same word did not become -40, it is %d", (int)d.gib_health);
+
+    /* And a respawn hands one back, because 0x8003B250 builds a new entity. */
+    q2_player_death_init(&d);
+    CHECK(d.linked_weapon, "a respawned player has no gun");
+}
+
 /* ------------------------------------------------------------------------- */
 
 int main(void)
@@ -449,6 +543,8 @@ int main(void)
     test_the_corpse_slows_down();
     test_the_walk_back_to_the_front_end();
     test_resupply_is_spent();
+    test_a_corpse_is_not_driven_by_the_pad();
+    test_the_view_weapon_is_freed_with_the_player();
 
     if (g_fail) {
         printf("\n%d player-death check%s failed\n", g_fail,

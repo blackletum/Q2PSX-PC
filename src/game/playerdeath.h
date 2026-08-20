@@ -36,6 +36,29 @@
  * and 0x8003CE14 `player_anim` chooses which move plays.
  *
  * ---------------------------------------------------------------------------
+ * Nobody drives a corpse, and that is not a rule anybody wrote
+ * ---------------------------------------------------------------------------
+ * It falls out of the think swap, and it is the single most important
+ * consequence of it. Two things live inside the player think and nowhere else:
+ *
+ *     0x8003A4A4   the pad read (0x80019154's ONLY call site)
+ *     0x8003AD98   the view weapon driver 0x8004EE0C's ONLY call site
+ *
+ * So the moment `player_die` writes the corpse think over `entity+0x3C`, the
+ * pad stops being read and the gun stops being driven — without either being
+ * tested for anywhere. There is no `if (dead)` in front of the movement code
+ * because there does not need to be one. What still moves the body is
+ * `corpse_think`'s own physics: gravity, the ground plane, and the dt * 5
+ * friction below.
+ *
+ * A port with one tick function and no think pointer has to say it out loud.
+ * `sim.c` does, at the top of `q2_sim_tick`: a dead player is ticked with a
+ * neutral pad AND with the input-derived accumulators cleared, because a
+ * neutral pad alone only stops `yaw_rate` and `wish` from growing — a body
+ * that died mid-turn would keep turning. `vel` is left alone; that is momentum
+ * and the corpse is supposed to keep it.
+ *
+ * ---------------------------------------------------------------------------
  * player_die, 0x800396AC, in order
  * ---------------------------------------------------------------------------
  *   1. `if ((unsigned)(mod - 9) < 2) killer = -1` (0x800396CC). Means 9 and 10
@@ -78,10 +101,14 @@
  *          0x800D5C30 + i*784 keeps a back-pointer to its entity at +0x120
  *          (written at 0x8003B474), and dying clears it: the player no longer
  *          has a body
- *        - the linked weapon model at +0x44 is released if there is one, and
- *          the SAME field becomes the gib threshold, -40. One word, two lives:
- *          a model pointer while alive, `gib_health` once dead, which is how
- *          corpse_think can compare it against health
+ *        - the VIEW WEAPON at +0x44 is freed, and the SAME field becomes the
+ *          gib threshold, -40. It is not "a model pointer" — 0x8004EE0C opens
+ *          `s6 = self->[68]` and then `s7 = s6->[12]`, so entity+0x44 holds a
+ *          whole second ENTITY with a client block of its own, and 0x8006D280
+ *          detaches it, unlinks it and pushes it back onto the free stack at
+ *          0x800B2BAC. One word, two lives: the gun you are holding while
+ *          alive, `gib_health` once dead, which is how corpse_think compares
+ *          it against health
  *        - the corpse timer at +0xF4 is set to 1500
  *        - +0x3C becomes corpse_think
  *        - and if the game state at 0x800B2AA8 is 1 or 2 it becomes 3, with a

@@ -10972,9 +10972,26 @@ static void client_draw_view(void *user, q2_screen *s, int p,
      * expression (FORMATS §9.12) — so it crouches when the view crouches without
      * anything here having to know that.
      */
-    /* Off on the overlay-camera screens, for the reason the status bar is —
-     * the gun was being drawn over the level tally. */
-    if (c->vw_model_ready && !c->mission_open && !c->endmis_open &&
+    /*
+     * Off on the overlay-camera screens, for the reason the status bar is —
+     * the gun was being drawn over the level tally.
+     *
+     * AND OFF WHEN THERE IS NOBODY HOLDING IT. The view weapon is not a
+     * drawing mode on this console, it is an ENTITY: 0x8004EE0C opens with
+     * `s6 = self->[68]` and then `s7 = s6->[12]`, so `entity+0x44` is a
+     * pointer to a whole second entity with a client block of its own. The
+     * death handler FREES it — 0x800397F8 passes that pointer to 0x8006D280,
+     * which detaches it, unlinks it and pushes it back onto the free stack at
+     * 0x800B2BAC — and then writes -40 over the same word, which is where
+     * `gib_health` comes from. One field, two lives, and the transition is the
+     * gun disappearing.
+     *
+     * It is doubly gone, because 0x8004EE0C's ONE caller is 0x8003AD98 inside
+     * the player think, and `player_die` has just uninstalled that too.
+     * The port had neither, so a dead player kept a floating blaster.
+     */
+    if (c->vw_model_ready && c->death[0].linked_weapon &&
+        !c->mission_open && !c->endmis_open &&
         !c->credits_open && !c->mcard_open) {
         q2_model_instance proto;
         q2_model_draw_stats mstats;
@@ -11902,6 +11919,14 @@ int main(int argc, char **argv)
     q2_mp_mode mp_mode    = Q2_MP_DEATHMATCH;
 
     c.trace_cre = -1;
+    /* Alive, and holding a gun, before anything has loaded: `memset` leaves
+     * `linked_weapon` false, and the view weapon draw now asks for it. */
+    {
+        int pi;
+
+        for (pi = 0; pi < Q2_MP_MAX_PLAYERS; pi++)
+            q2_player_death_init(&c.death[pi]);
+    }
     /* The same switch the inspect tool honours, and for the same reason:
      * several load-time decisions -- which movers a zone drops, which object
      * slots resolve -- are only ever reported at Q2_LOG_DEBUG, and the client

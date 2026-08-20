@@ -182,6 +182,28 @@ int cmd_death(const disc *d)
     }
     printf("\n");
 
+    printf("nobody is driving a corpse, and neither fact is a rule\n");
+    /*
+     * Both come out of the ONE thing player_die does last: it overwrites
+     * entity+0x3C. The pad read and the view weapon driver are both inside the
+     * player think, and the player think is no longer installed.
+     */
+    check_word(&exe, 0x8003AD94u, 0x8E640044u,
+               "the view weapon is entity+0x44 ...");
+    check_word(&exe, 0x8003AD98u, 0x0C013B83u,
+               "... driven from 0x8003AD98, its ONLY call site");
+    check_word(&exe, 0x8004EE48u, 0x8E760044u,
+               "0x8004EE0C reads that same field ...");
+    check_word(&exe, 0x8004EE50u, 0x8ED7000Cu,
+               "... and then its +0x0C, so it is an ENTITY");
+    check_word(&exe, 0x800397F8u, 0x8E040044u,
+               "the handler takes it ...");
+    check_word(&exe, 0x80039808u, 0x0C01B4A0u,
+               "... and hands it to 0x8006D280 ...");
+    check_word(&exe, 0x8006D2D4u, 0xAC70FFFCu,
+               "... which pushes it onto the free stack");
+    printf("\n");
+
     printf("the spawn, 0x8003B250 and 0x8003DDF8\n");
     check_word(&exe, 0x8003B284u, 0x240600E0u, "the client stride is 224 ...");
     check_word(&exe, 0x8003B298u, 0x24637C60u, "... based at 0x800C7C60 ...");

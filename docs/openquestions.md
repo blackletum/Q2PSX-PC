@@ -9158,8 +9158,12 @@ into this one.
       never replaced by anything, and a pain move holds until it has played out unless the request is
       DEATH.
 
-      **`entity+0x44` has two lives.** While a player is alive it is a model pointer — the handler
-      releases it if it is not NULL, which is id's "remove linked weapon model" — and the same word is
+      **`entity+0x44` has two lives, and the first one is the gun in your hands.** The first version of
+      this entry called it "a model pointer, which is id's remove linked weapon model" — reasoning from
+      the analogy rather than from the code. It is more specific than that: `0x8004EE0C` opens
+      `s6 = self->[68]` and then `s7 = s6->[12]`, so the field holds a whole second ENTITY with a client
+      block of its own, and `0x8006D280` detaches it, unlinks it and pushes it back onto the free stack
+      at `0x800B2BAC`. **The view weapon is an entity and the death handler frees it.** The same word is
       then written with **-40** and read by `corpse_think` and `respawn_think` as the gib threshold. And
       `client->[0]->[288] = 0` is the 784-byte player record at `0x800D5C30 + i*784` forgetting its
       entity, the back-pointer `0x8003B474` wrote at spawn.
@@ -9449,3 +9453,43 @@ candidate the Soldier's violet patch was narrowed to — "the CLUT's own content
 question rather than two. Nothing in the gather, the intensities, the glow, the normals (all
 unit, 4095.3 mean over every part of `Blaster G`) or the GTE reaches it.
 
+- [x] 131. **Nobody drives a corpse, and #130 shipped without it.** Reported from play against the death
+      chain #130 built: *"players can move around on death and still show view weapon"*. Both are real and
+      both are the same omission — the port reproduced the death handler's data and not the one thing it
+      does with a pointer.
+
+      `player_die` ends by writing the corpse think over `entity+0x3C` (0x80039818), and **two things live
+      inside the player think and nowhere else**:
+
+          0x8003A4A4   the pad read     — 0x80019154's ONLY call site
+          0x8003AD98   0x8004EE0C       — the view weapon driver's ONLY call site
+
+      So a corpse stops being steered and stops holding a gun the instant the think is swapped, and
+      **neither is tested for anywhere**. There is no `if (dead)` in front of the movement code because
+      the console does not need one. `xrefs` gives exactly one caller at each step, which is what makes
+      this a reading rather than an inference; the seven DEAD-bit tests that DO exist in the executable
+      (0x80038654 and 0x80038794 the camera roll, 0x8003A8B4 the jump, 0x8003AB08 the strafe roll,
+      0x8003ADC4 the gate, 0x8003D260 the splash, 0x80045978 the mover) are every one of them about
+      something else.
+
+      **The gun is an entity.** `0x8004EE0C` opens `s6 = self->[68]; s7 = s6->[12]` — `entity+0x44` is a
+      pointer to a second entity with a client block, not a model handle — and `0x800397F8` hands it to
+      `0x8006D280`, which detaches it (0x8007F12C), unlinks it (0x8006A1C4) and pushes the pointer back
+      onto the free stack at `0x800B2BAC`. The port now stops drawing it on the same condition, and #130's
+      "a model pointer, which is id's remove linked weapon model" is corrected above: the analogy was
+      right about the effect and wrong about the thing.
+
+      **What the port had to say out loud.** One tick function, no think pointer to swap: `q2_sim_tick`
+      substitutes a neutral pad for a dead player. That alone was not enough and the test caught it — a
+      neutral pad only stops `yaw_rate` and `wish` GROWING, and a body that died mid-turn went on turning
+      for a second after it fell, because `integrate_look` (0x8003A990) integrates the rate and the rate is
+      state. The accumulators the think would have been writing are cleared with it: the two look rates,
+      the wish, `recentring`, `autocentre` and `jump_hold`. `vel` is deliberately left alone — that is
+      momentum, and `corpse_think` is supposed to inherit it and take it down with its own `dt * 5`.
+
+      Measured on JAIL2: before, a dead player walked the level with a blaster in front of the death
+      screen; after, the eye holds `2816 -1216 23831` for the whole 1200-tick countdown, the roll eases to
+      `3736` (the death cam's -384), and the gun is gone on the tick the handler frees it. The test asserts
+      it by DIFFERENCE rather than by an absolute position — two identical corpses, one handed the stick at
+      full deflection and one handed nothing, must end twenty ticks in the same state — because the body is
+      still falling and an absolute assertion would have been asserting the mover, not the input.

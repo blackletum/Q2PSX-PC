@@ -2424,6 +2424,7 @@ void q2_sim_trace(q2_sim *sim, const s32 start[3], const s32 end[3],
 void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
 {
     q2_player *p;
+    q2_input   corpse;
     bool run_world;
     bool was_underwater;
     bool moving;
@@ -2450,6 +2451,58 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
     sim->cur_dt = dt;
 
     p = &sim->player[sim->cur_player];
+
+    /*
+     * A CORPSE'S PAD IS NEVER READ, and that is not a rule the engine states —
+     * it is what the death handler's LAST act makes true.
+     *
+     * 0x8003A4A4 is the only caller of the pad read (0x80019154), and it is
+     * instruction 54 of the player think at 0x8003A1C8. `player_die` ends by
+     * overwriting `entity+0x3C` with the corpse think (0x80039818), so the
+     * player think is not installed any more and NOTHING in it runs again: not
+     * the pad, not the wish, not the look integration, not the jump, and not
+     * the view weapon driver at 0x8004EE0C, whose one and only call site is
+     * 0x8003AD98 in the same function. What still moves the body is
+     * `corpse_think`'s own physics — gravity, the ground plane and the dt * 5
+     * friction — which is a different and much smaller integrator.
+     *
+     * This port has one tick function and no think pointer to swap, so the
+     * substitution is made here: a dead player is ticked with a NEUTRAL pad.
+     * The body still falls, slides and settles, because the mover still runs;
+     * it just has nobody driving it. Without this a corpse walked, turned,
+     * jumped and fired — reported from play, and the reason the death page had
+     * a live player standing behind it.
+     *
+     * The three individual gates further down (the jump at 0x8003A8B0, the
+     * strafe roll at 0x8003AB08, the splash at 0x8003D260) are kept as they
+     * are: each is a real test in the executable, and they are what a dead
+     * player would still hit if some other path ever ticked one with input.
+     */
+    if (p->ent2_flags & Q2_ENT2_DEAD) {
+        memset(&corpse, 0, sizeof(corpse));
+        input = &corpse;
+
+        /*
+         * And the accumulators the think would have been writing, because a
+         * neutral pad only stops them GROWING. `yaw_rate` and `pitch_rate` are
+         * eased toward the stick and then integrated at 0x8003A990, so a body
+         * that died mid-turn went on turning for a second after it fell; the
+         * wish is the same thing for the walk, and `recentring` would have
+         * walked the corpse's pitch back to level.
+         *
+         * `vel` is deliberately NOT cleared. That is momentum, and the body is
+         * supposed to keep it: on the console `corpse_think` inherits whatever
+         * the last move left and takes it down with `approach(v, 0, dt * 5)`.
+         */
+        p->yaw_rate   = 0;
+        p->pitch_rate = 0;
+        p->wish[0]    = 0;
+        p->wish[1]    = 0;
+        p->wish[2]    = 0;
+        p->recentring = false;
+        p->autocentre = 0;
+        p->jump_hold  = 0;
+    }
 
     /*
      * The WORLD half of a tick runs once per frame, not once per player.
