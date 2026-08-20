@@ -82,6 +82,7 @@
 #include "effect.h"
 #include "entity.h"
 #include "events_rt.h"
+#include "explosive.h"
 #include "item.h"
 #include "mover.h"
 #include "projectile.h"
@@ -606,6 +607,20 @@ typedef struct q2_sim {
 
     u32          explosive_destroyed;  /* groups that came apart      */
     u32          explosive_blasts;     /* ...of those, ones that blew */
+
+    /*
+     * WHERE each detonation happened, so the owner can place `wep_grenlx1a`.
+     *
+     * 0x8002695C plays it through the by-handle path at 0x80073704 with the
+     * node's box centre as the position — the same argument the explosion
+     * itself is given. Queued rather than played, exactly as a mover's
+     * transition sound is (mover.h): the sim knows where the blast was and the
+     * client owns the mixer and the map's sound bank.
+     *
+     * Four, because one item has at most four intact parts and each detonates.
+     */
+    s32          blast_at[Q2_EXPLOSIVE_MAX_PARTS][3];
+    u32          blast_count;
     /* The scene the panes' nodes belong to, kept so the hitscan path can throw
      * their debris without every shot carrying a scene pointer. */
     const struct q2_scene *breakable_scene;
@@ -1021,6 +1036,14 @@ bool q2_sim_explosive_trigger_item(q2_sim *sim, u32 item_offset);
  * empty. `hidden` is 1 to stop drawing the node and 0 to resume.
  */
 bool q2_sim_next_node_vis(q2_sim *sim, s16 *node, u8 *hidden);
+
+/*
+ * Take the next queued detonation position, or false when the queue is empty.
+ *
+ * The caller plays Q2_EXPLOSIVE_SOUND there — `wep_grenlx1a`, the handle at
+ * 0x800B27F8, which 0x8002695C is the ONLY reader of in the whole executable.
+ */
+bool q2_sim_next_blast(q2_sim *sim, s32 out[3]);
 
 /*
  * Where the sim fires effects from, so a reader does not have to find them:

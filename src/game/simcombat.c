@@ -1159,6 +1159,7 @@ u32 q2_sim_attach_breakables(q2_sim *sim, const q2_scene *scene,
      * zone left pointing at it is stale. */
     sim->explosives           = NULL;
     sim->node_vis_count       = 0;
+    sim->blast_count          = 0;
     sim->explosive_destroyed  = 0;
     sim->explosive_blasts     = 0;
 
@@ -1389,6 +1390,27 @@ bool q2_sim_next_node_vis(q2_sim *sim, s16 *node, u8 *hidden)
     return true;
 }
 
+bool q2_sim_next_blast(q2_sim *sim, s32 out[3])
+{
+    u32 i;
+
+    if (!sim || !sim->blast_count)
+        return false;
+
+    if (out) {
+        out[0] = sim->blast_at[0][0];
+        out[1] = sim->blast_at[0][1];
+        out[2] = sim->blast_at[0][2];
+    }
+    for (i = 1; i < sim->blast_count; i++) {
+        sim->blast_at[i - 1][0] = sim->blast_at[i][0];
+        sim->blast_at[i - 1][1] = sim->blast_at[i][1];
+        sim->blast_at[i - 1][2] = sim->blast_at[i][2];
+    }
+    sim->blast_count--;
+    return true;
+}
+
 /*
  * Turn one destruction into effects and visibility changes.
  *
@@ -1407,6 +1429,17 @@ static void explosive_apply(q2_sim *sim, const q2_explosive_result *res)
         if (b->explode) {
             fx_at(sim, Q2_FX_EXPLOSION, b->at);
             sim->explosive_blasts++;
+
+            /* And the report, at the same point (0x8002695C). Queued for the
+             * owner, which is the half that has a mixer and a sound bank. */
+            if (sim->blast_count <
+                    sizeof(sim->blast_at) / sizeof(sim->blast_at[0])) {
+                int k;
+
+                for (k = 0; k < 3; k++)
+                    sim->blast_at[sim->blast_count][k] = b->at[k];
+                sim->blast_count++;
+            }
         }
 
         /* The origin argument is zero at 0x80026970, so the pieces scatter

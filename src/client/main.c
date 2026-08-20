@@ -999,10 +999,10 @@ typedef struct client {
     u32               explosive_boxes;     /* shootable parts registered  */
     u32               explosive_scripted;  /* groups a script blew up     */
     u32               explosive_vis;       /* node show/hide changes made */
-    /* Detonation reports that started a voice, and ones that did not — no
-     * audio device, or the name is not in this map's bank. Counted apart for
-     * the same reason `mover_sounds_missed` is: a headless run must not read
-     * as proof that anything was heard. */
+    /* Detonations whose report this map's bank CARRIES, and ones it does not.
+     * Deliberately not "played": a headless run has no audio device and would
+     * report every one of them as missing — the mistake the creature sound
+     * counter already made and now documents. */
     u32               explosive_sounds;
     u32               explosive_sounds_missed;
     bool              mission_after_map; /* the screen is holding a LOADMAP */
@@ -6868,10 +6868,25 @@ static void client_input_simulated(client *c, float dt)
             s32 at[3];
 
             while (q2_sim_next_blast(&c->sim[0], at)) {
-                if (client_play_sound_at(c, Q2_EXPLOSIVE_SOUND, at))
+                q2_vag vag;
+
+                /*
+                 * COUNTED ON WHETHER THE BANK HAS IT, not on whether a voice
+                 * started — the same trap the creature sounds fell into above.
+                 * `client_play_sound_at` returns false when `c->audio` is NULL,
+                 * which is every headless run, so counting its return would
+                 * report the absence of an audio device as a missing sound.
+                 *
+                 * BASE0 carries `wep_grenlx1a22K` and the key is the truncated
+                 * twelve `wep_grenlx1a`, which is exactly the prefix rule
+                 * client_find_sound documents.
+                 */
+                if (client_find_sound(c, Q2_EXPLOSIVE_SOUND, &vag))
                     c->explosive_sounds++;
                 else
                     c->explosive_sounds_missed++;
+
+                client_play_sound_at(c, Q2_EXPLOSIVE_SOUND, at);
             }
         }
 
@@ -9205,7 +9220,7 @@ static void client_write_shot(client *c, bool numbered)
                 c->sim[0].breakable_pieces, c->sim[0].breakable_fired);
         Q2_INFO("  explosive %u groups, %u shootable parts; %u destroyed"
                 " (%u by script), %u detonated, %u node show/hide,"
-                " %u reports played (%u not in bank)",
+                " %u reports the bank carries (%u it does not)",
                 c->explosives_ready ? c->explosives.count : 0u,
                 c->explosive_boxes, c->sim[0].explosive_destroyed,
                 c->explosive_scripted, c->sim[0].explosive_blasts,

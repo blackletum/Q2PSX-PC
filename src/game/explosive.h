@@ -30,7 +30,7 @@
  * And it detonates. `0x80026950` calls `0x8005A778` — the same spawner the
  * creature import table calls `spawn_explosion` (creature.h +0x120) — which
  * allocates an entity, binds the model named "Explosion", and gives it the
- * think at `0x8005A5F8`. Then `0x8002695C` plays `wep_grenlx1`, the grenade
+ * think at `0x8005A5F8`. Then `0x8002695C` plays `wep_grenlx1a`, the grenade
  * report, through the by-handle path at `0x80073704`.
  *
  * ---------------------------------------------------------------------------
@@ -111,7 +111,7 @@
  *                 if (destroy < 0) {
  *                     spawn_explosion(centre(n), scene[n].unk0E & 0x7F,
  *                                     4096, 0);     // 0x80026950
- *                     sound(wep_grenlx1, centre(n));// 0x8002695C
+ *                     sound(wep_grenlx1a, centre(n));// 0x8002695C
  *                 }
  *                 debris(n, destroy < 0 ? ~destroy : destroy, NULL);
  *             }
@@ -179,8 +179,21 @@
 #define Q2_EXPLOSIVE_BLAST_RADIUS 4096
 #define Q2_EXPLOSIVE_BLAST_KIND   0      /* 0 = "Explosion", 1 = "Hexplosion" */
 
-/* `wep_grenlx1`, the handle at 0x800B27F8, played at 0x8002695C. */
-#define Q2_EXPLOSIVE_SOUND "wep_grenlx1"
+/*
+ * The detonation report: the handle at 0x800B27F8, played at 0x8002695C, which
+ * is that handle's ONLY reader in the whole executable.
+ *
+ * TWELVE CHARACTERS AND NO TERMINATOR. The name is registered from
+ * 0x800ABCBC and the next name, `amb_brkglas`, starts at 0x800ABCC8 — twelve
+ * bytes later — so the field is full and a disassembler listing it as a C
+ * string runs the two together as `wep_grenlx1aamb_brkglas`. Reading it as
+ * `wep_grenlx1` and stopping at the `a` looks right and finds nothing: the
+ * bank's entry is `wep_grenlx1a` and the port reported "1 not in bank" on
+ * every detonation until the last character was put back.
+ *
+ * This is the same 12-byte-no-strcmp rule userfuncs.h states for MISEVENT.
+ */
+#define Q2_EXPLOSIVE_SOUND "wep_grenlx1a"
 
 typedef struct q2_explosive {
     s16 node[Q2_EXPLOSIVE_MAX_PARTS];    /* item +6:  intact   */
@@ -227,7 +240,7 @@ typedef struct q2_explosive_burst {
     s16  node;          /* the intact node this came out of      */
     s32  at[3];         /* the centre of its box — 0x80026898 on */
     u8   pieces;        /* debris count, already sign-decoded    */
-    u8   explode;       /* spawn_explosion + wep_grenlx1         */
+    u8   explode;       /* spawn_explosion + wep_grenlx1a         */
     u16  scale;         /* scene[node].unk0E & 0x7F, spawn_explosion's second */
 } q2_explosive_burst;
 
