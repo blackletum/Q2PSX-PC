@@ -211,6 +211,78 @@ psx_prim *psx_ot_add_depth(psx_ot *ot, u16 otz, u32 key)
     return ot_link(ot, psx_ot_depth_bucket(ot, otz), otz, key);
 }
 
+/*
+ * ALLOCATE WITHOUT LINKING, and why the model path needs it.
+ *
+ * A model's faces are BUILT in file order — the scratch window holds one part's
+ * transformed vertices at a time, so a face can only be resolved while its own
+ * part is current — but they are DRAWN in an order the model carries with it
+ * (model.h, block A). The console keeps the two apart by parking packet
+ * pointers in a flat array as it builds (0x800DDDCC) and chaining them into the
+ * ordering table afterwards, walking that array in the stored order.
+ *
+ * This is that split. `psx_ot_alloc` takes a primitive out of the pool and
+ * leaves it unlinked; `psx_ot_link_prim` puts it in a bucket later. A primitive
+ * that is allocated and never linked simply never draws, which is what a culled
+ * face wants.
+ */
+psx_prim *psx_ot_alloc(psx_ot *ot)
+{
+    u32 idx;
+    psx_prim *prim;
+
+    if (!ot || ot->prim_count >= ot->prim_capacity)
+        return NULL;
+
+    idx  = ot->prim_count++;
+    prim = &ot->prims[idx];
+    memset(prim, 0, sizeof(*prim));
+    ot->next[idx] = -1;
+    return prim;
+}
+
+bool psx_ot_link_prim(psx_ot *ot, psx_prim *prim, u32 bucket, u32 key)
+{
+    u32 idx;
+
+    if (!ot || !prim || ot->bucket_count == 0)
+        return false;
+    if (prim < ot->prims || prim >= ot->prims + ot->prim_count)
+        return false;
+
+    idx = (u32)(prim - ot->prims);
+
+    if (bucket >= ot->bucket_count)
+        bucket = ot->bucket_count - 1;
+
+    prim->otz      = (u16)bucket;
+    prim->sort_key = key;
+
+    if (key == PSX_OT_KEY_NONE) {
+        ot->next[idx]           = ot->bucket_head[bucket];
+        ot->bucket_head[bucket] = (s32)idx;
+        return true;
+    }
+
+    {
+        s32 prev = -1;
+        s32 cur  = ot->bucket_head[bucket];
+
+        while (cur >= 0 && ot->prims[cur].sort_key != PSX_OT_KEY_NONE &&
+               ot->prims[cur].sort_key > key) {
+            prev = cur;
+            cur  = ot->next[cur];
+        }
+
+        ot->next[idx] = cur;
+        if (prev < 0)
+            ot->bucket_head[bucket] = (s32)idx;
+        else
+            ot->next[prev] = (s32)idx;
+    }
+    return true;
+}
+
 psx_prim *psx_ot_add_bucket(psx_ot *ot, u32 bucket)
 {
     if (!ot || ot->prim_count >= ot->prim_capacity || ot->bucket_count == 0)

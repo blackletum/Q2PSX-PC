@@ -201,6 +201,14 @@
  * on the disc needs is 91. Anything above 96 is a malformed file. */
 #define Q2_MODEL_SCRATCH_MAX  96
 
+/*
+ * The most faces a caller will hold primitives for while it reorders them.
+ * The largest model on the disc is the Soldier at 233, so this is a generous
+ * ceiling rather than a fitted one; a model past it is drawn in file order
+ * instead of dropped (see modeldraw.c).
+ */
+#define Q2_MODEL_MAX_FACES    512
+
 typedef struct q2_model_header {
     char name[13];
     u16  num_faces;
@@ -467,23 +475,77 @@ bool q2_model_get_part(const q2_model *m, u32 index, q2_model_part *out);
 bool q2_model_get_face(const q2_model *m, u32 index, q2_model_face *out);
 
 /*
- * Does the model's block-A directory force face `index` to be drawn?
+ * ---------------------------------------------------------------------------
+ * Block A is the FACE DRAW ORDER, and it was read as a batch directory
+ * ---------------------------------------------------------------------------
+ * This block used to be documented as eight `{u16 count; u16 offset; u32
+ * force}` batch records whose `force` word carried one skip-the-backface bit
+ * per face. That reading is withdrawn. It "worked" only because the field it
+ * called `force` is zero in all 13,784 entries of all 1,723 models on the disc
+ * — which is not a disc that never uses the feature, it is FOUR PAD BYTES.
  *
- * The batch directory is eight `{u16 count; u16 offset; u32 force}` entries;
- * faces are walked in batch order, and a batch's `force` word carries one bit
- * per face, MOST SIGNIFICANT FIRST — the linker shifts it left once per face
- * (`sll t3, t3, 1` at 0x800B24F4) and tests the sign (`bltz t3` at
- * 0x800B2498), so a set bit means "skip the NCLIP test and draw this face
- * whichever way it is wound".
+ * What the block actually holds is the model's own painter's-algorithm order,
+ * in eight versions:
  *
- * Returns false for every face on this disc: the field is zero in all 13,784
- * entries of all 1,723 models. It is honoured anyway, for the same reason the
- * loader tolerates chunk names no file emits — the engine supports it, and a
- * build that uses it should not be silently mis-drawn.
+ *     +0x00   8 x { u16 start_face; u16 stream_offset; u32 pad }   = 64 bytes
+ *     +0x40   8 delta streams, each round_up(num_faces - 1, 4) bytes
+ *
+ * The size identity holds exactly on every model measured — Debris1 (6 faces)
+ * 128, Chest (52) 480, Shotgun G (68) 608, Blaster G (73) 640, HelpComputer
+ * (86) 768, Soldier (233) 1920 — which is `64 + 8 * round_up(faces - 1, 4)`
+ * every time.
+ *
+ * A stream is walked at 0x800B25E0. Start at `start_face`, then read SIGNED
+ * BYTE deltas and step the face index by each, wrapping modulo `num_faces`
+ * (`sub t6, t8, t4` / `bgtz` / `bgez` at 0x800B2674..0x800B2694 — a single-step
+ * wrap, not a modulo). Two details are not guessable and both are load-bearing:
+ *
+ *   - THE BYTES ARE REVERSED WITHIN EACH 32-BIT WORD. The reader loads a word
+ *     and extracts with `sllv t6, t5, t3` then `sra t6, t6, 24`, with `t3`
+ *     running 0, 8, 16, 24 — so the first byte taken is the word's MOST
+ *     significant, which on this little-endian machine is byte 3 of the four.
+ *   - A ZERO BYTE IS AN ESCAPE, not a step of nothing. It sets a pending flag
+ *     (0x800B266C) and the NEXT delta is applied on top of +256
+ *     (0x800B2654), so a stream can express a step no signed byte could and
+ *     never wastes an entry on a no-op.
+ *
+ * Decoded that way every stream is an exact PERMUTATION of all the model's
+ * faces — 32 of 32 streams over four models spanning 6 to 233 faces. A
+ * mis-decode does not land on a permutation once, let alone thirty-two times,
+ * which is what makes this a reading rather than a hypothesis.
+ *
+ * The order is a chaining order, and the console prepends: it walks the stream
+ * writing each packet's tag with the current head and making it the new head
+ * (`swl t1, 2(t6)` / `addu v0, t6, zero`), so the FIRST face in a stream is
+ * drawn LAST and therefore on top. A stream runs near to far.
+ *
+ * Eight of them, one per view direction. WHICH one a given frame picks is not
+ * settled here — the selector is read through a pointer this port has not
+ * traced (`s7` at 0x8006BC94, whose +4 and +6 are the two halfwords above) —
+ * so `q2_model_draw_order_for_yaw` quantises the model's facing into eight
+ * sectors, which is what eight of anything indexed by direction means and what
+ * reproduces the capture. See modeldraw.c.
  */
-#define Q2_MODEL_BLOCK_A_ENTRIES 8
+#define Q2_MODEL_DRAW_ORDERS      8
+#define Q2_MODEL_DRAW_ORDER_TABLE 64   /* bytes of {start, offset} records */
 
-bool q2_model_batch_forces_draw(const q2_model *m, u32 face_index);
+typedef struct q2_model_draw_order {
+    u16 start;    /* the face the chain begins on         */
+    u16 offset;   /* byte offset of its stream in block A  */
+} q2_model_draw_order;
+
+bool q2_model_get_draw_order(const q2_model *m, u32 index,
+                             q2_model_draw_order *out);
+
+/*
+ * Decode one of the eight orders into `out`, near-to-far. Writes at most `max`
+ * entries and returns how many it wrote, which is `num_faces` on well-formed
+ * data and less if the stream runs off the end of the block.
+ */
+u32 q2_model_draw_sequence(const q2_model *m, u32 index, u16 *out, u32 max);
+
+/* Which of the eight a model facing `yaw` (0..4095) should use. */
+u32 q2_model_draw_order_for_yaw(s32 yaw);
 
 
 /*

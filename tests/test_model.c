@@ -217,6 +217,126 @@ static void test_anim_at_holds_the_last_frame(void)
     check_eq(within, 4, "at the same frame — a hold does not drift");
 }
 
+/* ------------------------------------------------------------------------- */
+/* Block A: the face draw order                                               */
+/* ------------------------------------------------------------------------- */
+/*
+ * The two rules a reader will get wrong, pinned on a hand-built block.
+ *
+ *   - the bytes of each 32-bit word are consumed MOST SIGNIFICANT FIRST, which
+ *     on this little-endian machine means byte 3 of the four comes first;
+ *   - a ZERO byte is an escape, not a step of nothing: it makes the NEXT delta
+ *     land on top of +256.
+ *
+ * Both come from 0x800B25E0; see the block-A note in model.h. What makes them
+ * checkable without a disc is that a correct decode of retail data always lands
+ * on a PERMUTATION of the model's faces, so the test builds a stream whose
+ * answer is known and asserts the sequence exactly.
+ */
+#define BLOCK_A 64        /* where the fixture parks the block */
+static u8 g_blocka[512];
+
+static void build_block_a(q2_model *m, u32 faces, u16 start,
+                          const s8 *deltas, u32 n)
+{
+    u32 i;
+
+    memset(g_blocka, 0, sizeof(g_blocka));
+    memset(m, 0, sizeof(*m));
+
+    /* One record is { u16 start; u16 offset; u32 pad }; entry 0's stream sits
+     * straight after the 64-byte table, which is where a real one starts. */
+    /* Block A never sits at offset 0 on real data — the header occupies the
+     * first 64 bytes — and a zero offset is how the parser spells "absent", so
+     * the fixture puts it somewhere a real one could be. */
+    g_blocka[BLOCK_A + 0] = (u8)(start & 0xFF);
+    g_blocka[BLOCK_A + 1] = (u8)(start >> 8);
+    g_blocka[BLOCK_A + 2] = 64;
+    g_blocka[BLOCK_A + 3] = 0;
+
+    /* Written most-significant-byte-first within each word, which is the order
+     * the reader takes them in. */
+    for (i = 0; i < n; i++) {
+        u32 word = (i >> 2) << 2;
+        u32 lane = 3u - (i & 3u);
+        g_blocka[BLOCK_A + 64 + word + lane] = (u8)deltas[i];
+    }
+
+    m->base             = g_blocka;
+    m->size             = sizeof(g_blocka);
+    m->hdr.num_faces    = (u16)faces;
+    m->hdr.ofs_block_a  = BLOCK_A;
+}
+
+static void test_draw_order_walks_the_stream(void)
+{
+    q2_model m;
+    q2_model_draw_order ord;
+    u16 out[16];
+    /* from 3: +2 -> 5, -4 -> 1, +6 -> 7, wrap +3 -> 0, -1 -> 7 */
+    static const s8 d[5] = { 2, -4, 6, 3, -1 };
+    u32 n;
+
+    build_block_a(&m, 8, 3, d, 5);
+
+    check_eq(q2_model_get_draw_order(&m, 0, &ord), 1, "entry 0 reads");
+    check_eq(ord.start, 3, "its start face");
+    check_eq(ord.offset, 64, "and its stream offset");
+
+    n = q2_model_draw_sequence(&m, 0, out, 16);
+    check_eq(n, 6, "six faces walked: the start plus five deltas");
+    check_eq(out[0], 3, "starts on the start face");
+    check_eq(out[1], 5, "+2");
+    check_eq(out[2], 1, "-4");
+    check_eq(out[3], 7, "+6");
+    check_eq(out[4], 2, "+3 wraps 10 back to 2");
+    check_eq(out[5], 1, "-1");
+}
+
+/*
+ * The escape only means anything on a model with more faces than a signed byte
+ * can step over, so this one is 300 faces: 0 then 5 is +261, not +5 and not a
+ * step of nothing. The rest of the stream is filled with +1 so the walk still
+ * terminates on a full-length sequence rather than running off the fixture.
+ */
+static void test_zero_byte_is_an_escape(void)
+{
+    q2_model m;
+    u16 out[300];
+    s8  d[299];
+    u32 n, i;
+
+    d[0] = 0;
+    d[1] = 5;
+    d[2] = -6;
+    for (i = 3; i < 299; i++)
+        d[i] = 1;
+
+    build_block_a(&m, 300, 0, d, 299);
+
+    n = q2_model_draw_sequence(&m, 0, out, 300);
+    check_eq(n, 300, "a full-length sequence, one entry per face");
+    check_eq(out[0], 0, "the start");
+    check_eq(out[1], 261, "0 then 5 is +256+5, not +5 and not a no-op");
+    check_eq(out[2], 255, "and the step after it is an ordinary one");
+    check_eq(out[3], 256, "and the one after that");
+}
+
+static void test_draw_order_rejects_a_bad_block(void)
+{
+    q2_model m;
+    u16 out[16];
+    static const s8 d[3] = { 1, 1, 1 };
+
+    build_block_a(&m, 8, 99, d, 3);      /* start past the last face */
+    check_eq(q2_model_draw_sequence(&m, 0, out, 16), 0,
+             "a start outside the model is refused, not clamped");
+
+    build_block_a(&m, 8, 0, d, 3);
+    check_eq(q2_model_draw_sequence(&m, 8, out, 16), 0,
+             "and so is an entry past the eighth");
+}
+
 int main(void)
 {
     puts("block D: the move table");
@@ -227,6 +347,14 @@ int main(void)
     test_moves_tile_without_gaps();
     test_position_formula();
     test_anim_at_holds_the_last_frame();
+
+    puts("");
+    puts("block A: the face draw order");
+    puts("============================");
+
+    test_draw_order_walks_the_stream();
+    test_zero_byte_is_an_escape();
+    test_draw_order_rejects_a_bad_block();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;

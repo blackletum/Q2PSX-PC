@@ -72,6 +72,31 @@ static void matrix_apply_t(const s16 m[3][3], const s32 v[3], s32 out[3])
     }
 }
 
+/*
+ * Put one built primitive in its bucket.
+ *
+ * `bucket_override` names an ABSOLUTE bucket, not a depth: the view weapon's
+ * place relative to the status bar is structural, and naming it outright is
+ * what stops the two arithmetics disagreeing (gpu.h). Everything else buckets
+ * by its own mean depth so it can interleave with the geometry it stands among.
+ *
+ * Neither passes a sort key. An unkeyed link PREPENDS, and the caller walks the
+ * model's draw order front to back, so the first face of the order ends up at
+ * the tail of the chain and draws last — which is the console's own chaining
+ * direction (`swl t1, 2(t6)` at 0x800B2620).
+ */
+static void link_face(psx_ot *ot, psx_prim *prim,
+                      const q2_model_instance *inst,
+                      const q2_camera *cam, u16 otz)
+{
+    if (inst->bucket_override >= 0)
+        psx_ot_link_prim(ot, prim, (u32)inst->bucket_override, PSX_OT_KEY_NONE);
+    else
+        psx_ot_link_prim(ot, prim,
+                         q2_ot_bucket_for_depth(ot, otz, cam->sort_range),
+                         PSX_OT_KEY_NONE);
+}
+
 void q2_model_instance_init(q2_model_instance *inst)
 {
     if (!inst)
@@ -96,6 +121,14 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
     u8  tint[3];
     u32 part, face_index = 0, emitted = 0, vertex_cursor = 0;
 
+    /* One slot per face: the primitive built for it, and its own mean depth.
+     * Both are consumed by the linking pass at the end. */
+    psx_prim *built[Q2_MODEL_MAX_FACES];
+    u16       built_otz[Q2_MODEL_MAX_FACES];
+    u16       order[Q2_MODEL_MAX_FACES];
+    u32       built_count = 0;
+    bool      reorder;
+
     if (!inst || !inst->model || !cam || !ot || !gte)
         return 0;
 
@@ -105,6 +138,9 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
         memset(stats, 0, sizeof(*stats));
 
     memset(window, 0, sizeof(window));
+    memset(built, 0, sizeof(built));
+
+    reorder = (m->hdr.num_faces <= Q2_MODEL_MAX_FACES);
 
     /* Share the world's table when the caller has one; otherwise a private copy
      * at ABR 0, which is what a page starts at before any opaque world polygon
@@ -433,63 +469,55 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
                 for (i = 0; i < 4; i++)
                     screen[i] = window[f.v[i]].xy;
                 /*
-                 * ...unless the model's own block-A batch directory FORCES the
-                 * face. `bltz t3` at 0x800B2498 skips the test outright, `t3`
-                 * being the batch's `force` word shifted one bit per face. It
-                 * is zero in all 13,784 entries of all 1,723 models on this
-                 * disc, so this never fires here — it is honoured for the same
-                 * reason the loader tolerates chunk names no file emits (#33):
-                 * the engine supports it, and a build that uses it should not
-                 * be silently mis-drawn.
+                 * The linker's escape at `bltz t3` (0x800B2498) is NOT fed from
+                 * block A. That block is the face DRAW ORDER (model.h), and
+                 * what this code used to read as its per-face `force` bits were
+                 * the four pad bytes of each order record — which is exactly
+                 * why they were zero in all 13,784 entries of all 1,723 models.
+                 * Whatever does feed `t3` is still unread, so the test applies
+                 * unconditionally.
                  */
-                if (!q2_model_batch_forces_draw(m, face_index) &&
-                    !q2_model_quad_faces_camera(gte, screen)) {
+                if (!q2_model_quad_faces_camera(gte, screen)) {
                     if (stats)
                         stats->faces_rejected_back++;
                     continue;
                 }
             }
 
-            if (inst->bucket_override >= 0) {
-                /*
-                 * AN ABSOLUTE BUCKET, not a depth.
-                 *
-                 * It used to be a depth, and 0 meant "the frontmost bucket of
-                 * whichever window is installed". That was the same bucket the
-                 * status bar names for as long as a viewport slice was 51
-                 * entries — and when the table was subdivided the two came
-                 * apart: the depth path reaches the very top of the subdivided
-                 * window (real bucket 423 of viewport 0) while the status bar's
-                 * own helper lands on 416, so the gun started drawing over the
-                 * HUD.
-                 *
-                 * Naming the bucket outright is what a packet whose place is
-                 * structural is supposed to do (gpu.h), and it lets the caller
-                 * express the gun's position RELATIVE to the bar rather than
-                 * hoping the two arithmetics agree.
-                 */
-                prim = psx_ot_add_bucket(ot, (u32)inst->bucket_override);
-            } else {
-                /*
-                 * One link point per face, from its own mean depth. That mean
-                 * is also handed over as the sort key, because a bucket is a
-                 * hundred-unit slab and a face that shared one with the wall
-                 * behind it would otherwise be ordered by which emitter ran
-                 * first. See psx_ot_add_depth.
-                 */
-                for (i = 0; i < 4; i++)
-                    otz += window[f.v[i]].z;
-                otz /= 4;
-                prim = psx_ot_add_depth(
-                           ot, (u16)q2_ot_bucket_for_depth(ot, otz,
-                                                           cam->sort_range),
-                           otz);
-            }
+            /*
+             * ALLOCATED HERE, LINKED LATER.
+             *
+             * A face can only be resolved while its own part owns the scratch
+             * window, but the order a model DRAWS in is not this loop's order:
+             * it comes from block A, which carries eight painter's orders and
+             * is the thing this port used to read as a batch directory
+             * (model.h). The console keeps the two apart the same way — it
+             * parks packet pointers in a flat array at 0x800DDDCC as it builds
+             * and chains that array afterwards, walking it in the stored order
+             * (0x800B25E0) — so the primitive is taken out of the pool now and
+             * put in a bucket at the end of this function.
+             */
+            prim = psx_ot_alloc(ot);
 
             if (!prim) {
                 if (stats)
                     stats->ot_overflow++;
                 continue;
+            }
+
+            for (i = 0; i < 4; i++)
+                otz += window[f.v[i]].z;
+            otz /= 4;
+
+            if (reorder) {
+                built[face_index]     = prim;
+                built_otz[face_index] = (u16)otz;
+                if (face_index >= built_count)
+                    built_count = face_index + 1;
+            } else {
+                /* Too many faces to hold: link now, in file order, which is
+                 * what this did before block A was read. */
+                link_face(ot, prim, inst, cam, (u16)otz);
             }
 
             prim->kind = PSX_PRIM_GT4;
@@ -536,6 +564,47 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
             emitted++;
             if (stats)
                 stats->faces_emitted++;
+        }
+    }
+
+    /*
+     * AND NOW THE ORDER, which is the model's own and not this loop's.
+     *
+     * Block A holds eight painter's orders, each an exact permutation of every
+     * face, near to far (model.h). The console chains them by PREPENDING, so
+     * the first face of a stream ends up drawn last and therefore on top; this
+     * links in the same direction for the same reason.
+     *
+     * Without it a model draws in file order, and on the view weapon that is
+     * visible: the body slab paints over the raised blocks on the gun's spine,
+     * which the console's own frame shows.
+     *
+     * A model with no usable order — a malformed block, or more faces than the
+     * table can hold — falls back to file order, which is what this did for
+     * every model before block A was read correctly.
+     */
+    if (reorder) {
+        u32 n = q2_model_draw_sequence(m, q2_model_draw_order_for_yaw(inst->yaw),
+                                       order, Q2_MODEL_MAX_FACES);
+        u32 k;
+
+        if (n == 0) {
+            for (k = 0; k < built_count; k++)
+                order[k] = (u16)k;
+            n = built_count;
+        }
+
+        for (k = 0; k < n; k++) {
+            u32 face = order[k];
+            psx_prim *p;
+
+            if (face >= built_count)
+                continue;
+            p = built[face];
+            if (!p)
+                continue;
+
+            link_face(ot, p, inst, cam, built_otz[face]);
         }
     }
 

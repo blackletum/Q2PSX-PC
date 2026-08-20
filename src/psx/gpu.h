@@ -333,6 +333,18 @@ psx_prim *psx_ot_add_depth(psx_ot *ot, u16 otz, u32 key);
  */
 psx_prim *psx_ot_add_bucket(psx_ot *ot, u32 bucket);
 
+/*
+ * Allocation and linking, split apart — for a caller that must BUILD its
+ * primitives in one order and DRAW them in another. The model path is the one
+ * that needs it: a face can only be resolved while its own part owns the
+ * scratch window, but the order it draws in comes from the model's own table
+ * (model.h, block A). See psx_ot_alloc in gpu.c.
+ *
+ * A primitive allocated and never linked never draws.
+ */
+psx_prim *psx_ot_alloc(psx_ot *ot);
+bool      psx_ot_link_prim(psx_ot *ot, psx_prim *prim, u32 bucket, u32 key);
+
 /* Map a depth to the absolute bucket `psx_ot_add` would choose. */
 u32 psx_ot_depth_bucket(const psx_ot *ot, u32 otz);
 

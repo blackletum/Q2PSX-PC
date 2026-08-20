@@ -255,46 +255,105 @@ bool q2_model_get_face(const q2_model *m, u32 index, q2_model_face *out)
     return true;
 }
 
-/*
- * The block-A force-draw mask — see model.h.
- *
- * Faces are walked in batch order, so face `index` belongs to the first batch
- * whose running total passes it, and its bit is that batch's `force` word
- * counted from the TOP: the linker shifts left once per face and tests the
- * sign, which makes face 0 of a batch bit 31.
- */
-bool q2_model_batch_forces_draw(const q2_model *m, u32 face_index)
+/* ------------------------------------------------------------------------- */
+/* Block A — the face draw order                                              */
+/* ------------------------------------------------------------------------- */
+bool q2_model_get_draw_order(const q2_model *m, u32 index,
+                             q2_model_draw_order *out)
 {
-    u32 base = 0, k;
+    const u8 *e;
 
-    if (!m || face_index >= m->hdr.num_faces || !m->hdr.ofs_block_a)
+    if (!m || !out || index >= Q2_MODEL_DRAW_ORDERS || !m->hdr.ofs_block_a)
+        return false;
+    if (m->hdr.ofs_block_a + Q2_MODEL_DRAW_ORDER_TABLE > m->size)
         return false;
 
-    for (k = 0; k < Q2_MODEL_BLOCK_A_ENTRIES; k++) {
-        const u8 *e = m->base + m->hdr.ofs_block_a + (size_t)k * 8;
-        u32 count, force, within;
+    e = m->base + m->hdr.ofs_block_a + (size_t)index * 8;
+    out->start  = q2_rd_u16(e + 0);
+    out->offset = q2_rd_u16(e + 2);
+    return true;
+}
 
-        if (m->hdr.ofs_block_a + (k + 1) * 8 > m->size)
-            return false;
+/*
+ * Walk one stream — see the block-A note in model.h for where every rule here
+ * comes from. In brief: signed byte deltas, taken MOST SIGNIFICANT FIRST out of
+ * each 32-bit word, a zero byte meaning "the next step is +256 on top of its
+ * own delta", and a single-step wrap rather than a modulo.
+ */
+u32 q2_model_draw_sequence(const q2_model *m, u32 index, u16 *out, u32 max)
+{
+    q2_model_draw_order ord;
+    const u8 *stream;
+    u32 n, limit, written = 0, read = 0;
+    s32 cur;
+    bool pending = false;
 
-        count = q2_rd_u16(e);
-        if (count == 0)
-            continue;
-        if (face_index >= base + count) {
-            base += count;
+    if (!m || !out || max == 0)
+        return 0;
+    if (!q2_model_get_draw_order(m, index, &ord))
+        return 0;
+
+    n = m->hdr.num_faces;
+    if (n == 0)
+        return 0;
+
+    if (ord.start >= n)
+        return 0;
+
+    /* The stream may not leave the model's own image. */
+    if (m->hdr.ofs_block_a + ord.offset >= m->size)
+        return 0;
+    stream = m->base + m->hdr.ofs_block_a + ord.offset;
+    limit  = m->size - (m->hdr.ofs_block_a + ord.offset);
+
+    cur = (s32)ord.start;
+    out[written++] = (u16)cur;
+
+    while (written < n && written < max) {
+        u32 word = (read >> 2) << 2;
+        u32 lane = 3u - (read & 3u);
+        s32 d;
+
+        if (word + lane >= limit)
+            break;                      /* malformed: stop rather than guess */
+
+        d = (s32)(s8)stream[word + lane];
+        read++;
+
+        if (pending) {
+            cur += 256;
+            pending = false;
+        } else if (d == 0) {
+            pending = true;
             continue;
         }
 
-        force  = q2_rd_u32(e + 4);
-        within = face_index - base;
-        /* MSB first, and a batch longer than 32 faces has no bit for the
-         * rest — the shift runs off the top and the sign is then zero. */
-        if (within >= 32)
-            return false;
-        return ((force << within) & 0x80000000u) != 0;
+        cur += d;
+        if (cur >= (s32)n)
+            cur -= (s32)n;
+        else if (cur < 0)
+            cur += (s32)n;
+
+        if (cur < 0 || cur >= (s32)n)
+            break;                      /* a step no single wrap can bring back */
+
+        out[written++] = (u16)cur;
     }
 
-    return false;
+    return written;
+}
+
+/*
+ * Eight orders, one per view sector. The engine reads its index through a
+ * pointer this port has not traced, so this is the reading that eight-of-a-
+ * thing-indexed-by-direction forces: 4096 units to the turn, eight sectors of
+ * 512, rounded so a sector is centred on its direction rather than starting at
+ * it.
+ */
+u32 q2_model_draw_order_for_yaw(s32 yaw)
+{
+    u32 y = (u32)((yaw + 256) & 0xFFF);
+    return (y >> 9) & (Q2_MODEL_DRAW_ORDERS - 1u);
 }
 
 bool q2_model_is_static(const q2_model *m)
