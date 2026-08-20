@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "aiworld.h"
 #include "levelbin.h"
 #include "sim.h"
 #include "trig.h"
@@ -32,6 +33,24 @@ static void check_eq_i(s64 got, s64 want, const char *what)
                what, (long long)got, (long long)want);
         g_failures++;
     }
+}
+
+/*
+ * Did the tick just past put this sound on the queue? The queue is cleared at
+ * the top of every world tick, so this only ever answers for the most recent
+ * one — which is what the callers want.
+ */
+static bool sound_raised(const q2_sim *sim, q2_ent_sound which)
+{
+    const q2_ent_events *ev = q2_sim_entity_events(sim);
+    u32 i;
+
+    if (!ev)
+        return false;
+    for (i = 0; i < ev->count; i++)
+        if (ev->e[i].kind == Q2_ENT_EVENT_SOUND && ev->e[i].sound == which)
+            return true;
+    return false;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -470,6 +489,15 @@ static void test_jump(void)
     check(!sim.player[0].on_ground, "and the ground flag is dropped");
     check_eq_i(sim.player[0].jump_hold, Q2_JUMP_HOLD, "the hold timer is armed");
 
+    /*
+     * AND IT MAKES A NOISE. 0x8003E210 loads the handle at 0x800B2900 —
+     * registered from "pla_jump1" at 0x800AC488 — and 0x8003E214 plays it at
+     * the entity, on the success path only. The port raised no event at all,
+     * which with the soft landing also missing (see test_fall_damage) meant an
+     * ordinary hop was silent at both ends of it.
+     */
+    check(sound_raised(&sim, Q2_SND_JUMP), "and the jump raises pla_jump1");
+
     /* Holding the button must not produce a second jump while rising. */
     q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
     check(sim.player[0].jump_hold != Q2_JUMP_HOLD,
@@ -735,6 +763,31 @@ static void test_fall_damage(void)
         q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
     check_eq_i(sim.combat.self.health, health_before,
                "a short drop does no damage");
+
+    /*
+     * ...but it is NOT silent, which is the half of 0x80039D50 the port had
+     * backwards. `slti v0, s0, 31` / `bne v0, zero, 0x80039DBC` takes the
+     * BELOW-31 band to a play of 0x800B2904 ("pla_land1"), so the quiet band is
+     * the one with a sound of its own and 31 chooses between two sounds rather
+     * than gating one. A drop this short is exactly the landing at the end of an
+     * ordinary jump.
+     */
+    {
+        int    tick;
+        bool   heard = false;
+
+        q2_sim_init(&sim, NULL, 50);
+        q2_sim_spawn(&sim, spawn, 0);
+        sim.player[0].ground_y = 900;
+
+        for (tick = 0; tick < 60 && !heard; tick++) {
+            q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
+            heard = sound_raised(&sim, Q2_SND_LAND_SOFT);
+        }
+        check(heard, "and a landing under the damage threshold raises pla_land1");
+        check_eq_i(sim.combat.self.health, 100,
+                   "without costing any health");
+    }
 
     /* A long one must, and must leave a view kick behind. */
     q2_sim_init(&sim, NULL, 50);
@@ -1457,6 +1510,131 @@ static void test_train(void)
           "a lift still moves on its axis alone");
 }
 
+/* ------------------------------------------------------------------------- */
+/*
+ * A DOOR IS SOLID TO MORE THAN THE PLAYER'S FEET.
+ *
+ * The mover boxes had exactly one reader — the player's own step sweep — so a
+ * closed door stopped you walking and stopped nothing else. Shots went through
+ * it, rockets went through it, and creatures saw and shot through it, because
+ * every one of those queries is answered out of the collision HULL and a mover
+ * is a runtime entity that no hull contains.
+ *
+ * Both halves are checked here because they are one fix: `q2_sim_trace` gained
+ * the entity pass and the AI binding gained the same pass over the same boxes.
+ */
+static void test_movers_block_sight_and_shots(void)
+{
+    q2_sim sim;
+    q2_ai_world_bind bind;
+    q2_move_target door[2];
+    q2_trace tr;
+    s32 from[3] = { 2000, 300, 500 };
+    s32 to[3]   = { 2000, 300, 3500 };
+
+    printf("doors are solid to shots and to sight\n");
+
+    q2_sim_init(&sim, NULL, 50);
+    if (!open_box_hull(&sim.coll)) {
+        check(false, "the synthetic hull parses");
+        return;
+    }
+    sim.coll_ready = true;
+
+    /* The room is open along Z, so the hull alone lets the whole shot through:
+     * this is the arm that used to return before the entity pass ever ran. */
+    q2_sim_trace(&sim, from, to, &tr);
+    check(!tr.hit, "with no door, the shot crosses the room");
+    check_eq_i(tr.fraction, 4096, "for its whole length");
+    check_eq_i(tr.ent, -1, "and names no mover");
+
+    /* A door across it, and a trigger volume in front of the door. */
+    memset(door, 0, sizeof(door));
+    door[0].min[0] = 0;       door[0].min[1] = 0;       door[0].min[2] = 2000;
+    door[0].max[0] = HULL_SX; door[0].max[1] = HULL_SY; door[0].max[2] = 2200;
+    door[0].kind   = Q2_MOVE_KIND_ENTITY;
+    door[0].id     = 4;
+    door[0].active = true;
+
+    door[1] = door[0];
+    door[1].min[2] = 1000; door[1].max[2] = 1200;
+    door[1].kind   = Q2_MOVE_KIND_VOLUME;
+    door[1].mask   = 0x2000;
+    door[1].id     = 6;
+
+    sim.volumes      = NULL;    /* not owned; q2_sim_free must not free it */
+    sim.volume_count = 2;
+    sim.mover_count  = 1;
+    memset(&sim.move_world, 0, sizeof(sim.move_world));
+    sim.move_world.half_extent = Q2_SWEEP_HALF_EXTENT;
+    sim.move_world.targets     = door;
+    sim.move_world.count       = 2;
+
+    q2_sim_trace(&sim, from, to, &tr);
+    check(tr.hit, "with the door shut, the shot is stopped");
+    check_eq_i(tr.end[2], 2000, "at the door's near face");
+    check_eq_i(tr.ent, 4, "naming the mover it hit");
+    check_eq_i(tr.fraction, (2000 - 500) * 4096 / (3500 - 500),
+               "half way down the room, which is where the door is");
+    check(tr.end[2] > door[1].max[2],
+          "and the trigger volume in front of it stopped nothing");
+
+    /* Opened — the box moves out of the way, exactly as q2_sim_movers_update
+     * slides it — and the shot goes through again. */
+    door[0].min[2] = 100000; door[0].max[2] = 100200;
+    q2_sim_trace(&sim, from, to, &tr);
+    check(!tr.hit, "with the door open the shot crosses again");
+    door[0].min[2] = 2000; door[0].max[2] = 2200;
+
+    /*
+     * A shot that stops on the HULL before it reaches the door keeps the
+     * hull's answer: the pass takes the nearer of the two, and it is the door
+     * that is further here.
+     */
+    {
+        s32 wall_to[3] = { 2000, 300, HULL_SZ + 5000 };
+
+        door[0].min[2] = HULL_SZ + 1000;
+        door[0].max[2] = HULL_SZ + 1200;
+        q2_sim_trace(&sim, from, wall_to, &tr);
+        check(tr.hit, "a shot at the far wall is stopped");
+        check_eq_i(tr.ent, -1, "by the hull, not by the door behind it");
+        check_eq_i(tr.end[2], HULL_SZ, "at the wall");
+        door[0].min[2] = 2000; door[0].max[2] = 2200;
+    }
+
+    /*
+     * AND THE SIGHT LINE, over the same boxes. This is the one that makes
+     * creatures stop attacking through a shut door: every fire hook gates each
+     * shot on `q2_visible`, which ends in this call.
+     */
+    q2_ai_world_bind_init(&bind, &sim.coll, NULL);
+    check(bind.world.line_of_sight(bind.world.user, from, to),
+          "with no doors bound, the creature can see across the room");
+
+    q2_ai_world_bind_entities(&bind, &sim.move_world);
+    check(!bind.world.line_of_sight(bind.world.user, from, to),
+          "with the door bound, it cannot");
+    check_eq_i(bind.stats.los_blocked_ent, 1,
+               "and the block is recorded as a door rather than as geometry");
+
+    /* Sight along the room but not across the door is still clear, so the clip
+     * is the door and not the binding refusing everything. */
+    {
+        s32 near_to[3] = { 2000, 300, 1500 };
+
+        check(bind.world.line_of_sight(bind.world.user, from, near_to),
+              "a creature on this side of the door still sees this side");
+    }
+
+    door[0].min[2] = 100000; door[0].max[2] = 100200;
+    check(bind.world.line_of_sight(bind.world.user, from, to),
+          "and once the door opens, sight is restored");
+
+    q2_ai_set_world(NULL);
+}
+
+/* ------------------------------------------------------------------------- */
 int main(void)
 {
     printf("Q2PSX-PC simulation tests\n\n");
@@ -1479,6 +1657,7 @@ int main(void)
     test_four_players();
     test_melee_point();
     test_train();
+    test_movers_block_sight_and_shots();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     printf("%s\n", g_failures == 0 ? "PASS" : "FAIL");

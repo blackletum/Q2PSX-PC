@@ -74,14 +74,15 @@ static void bound_trace(void *user, const s32 start[3], const s16 mins[3],
     s32 node = -1;
 
     /*
-     * `ignore` and `mask` are still dropped, and that is a real gap rather
-     * than an oversight: when `mask & 0x02000000` — and SV_movestep always
-     * passes 0x02020003, at 0x8005FE7C and 0x80060014 — the original clips the
-     * same sweep against the entity list at 0x800544EC and reports what it hit
-     * in the result's +52/+56. This port has no entity list to clip against
-     * here, so creatures walk through movers, bodies and each other.
+     * `ignore` is still dropped, and CREATURES AND BODIES still do not clip:
+     * the port has no per-creature box list to hand this. `mask` is now read
+     * for the one bit that matters — 0x02000000, which SV_movestep sets
+     * (0x02020003 at 0x8005FE7C and 0x80060014) and which is what turns the
+     * entity clip at 0x800544EC on. The entity list it clips against here is
+     * the mover set: the doors and lifts, which are the entities a walker
+     * actually has to be stopped by.
      */
-    (void)ignore; (void)mask;
+    (void)ignore;
 
     memset(out, 0, sizeof(*out));
 
@@ -144,6 +145,40 @@ static void bound_trace(void *user, const s32 start[3], const s16 mins[3],
         }
     }
 
+    /*
+     * AND THE DOORS — the entity arm of the same sweep.
+     *
+     * Clipped from the START to wherever the hull left the move, so the nearer
+     * of the two wins with no fractions to compare. The creature's own box
+     * inflates the mover boxes, which is the Minkowski sum that makes a swept
+     * point stand for a swept body: without it a Gunner's centre would stop
+     * flush against a door and half the Gunner would be inside it.
+     *
+     * The mask gate is the console's: a query that does not ask for entities
+     * does not get them.
+     */
+    if (b->ents && (mask & Q2_MASK_ENTITY_BIT)) {
+        q2_move_seg_hit mh;
+        s32 body[3];
+        int k;
+
+        for (k = 0; k < 3; k++) {
+            s32 lo = mins ? (s32)mins[k] : 0;
+            s32 hi = maxs ? (s32)maxs[k] : 0;
+
+            if (lo < 0) lo = -lo;
+            if (hi < 0) hi = -hi;
+            body[k] = lo > hi ? lo : hi;
+        }
+
+        if (q2_move_clip_segment(b->ents, start, pos, body, &mh)) {
+            pos[0] = mh.pos[0];
+            pos[1] = mh.pos[1];
+            pos[2] = mh.pos[2];
+            b->stats.trace_blocked_ent++;
+        }
+    }
+
     out->endpos[0] = pos[0];
     out->endpos[1] = pos[1];
     out->endpos[2] = pos[2];
@@ -171,10 +206,34 @@ static bool bound_los(void *user, const s32 a[3], const s32 b3[3])
 
     /* Sight is all-or-nothing in the original: `visible` tests the fraction
      * against 1.0 and takes anything less as blocked. */
-    if (pos[0] == b3[0] && pos[1] == b3[1] && pos[2] == b3[2])
-        return true;
-    b->stats.los_blocked++;
-    return false;
+    if (pos[0] != b3[0] || pos[1] != b3[1] || pos[2] != b3[2]) {
+        b->stats.los_blocked++;
+        return false;
+    }
+
+    /*
+     * AND THE DOORS. `visible` (0x8005B950) runs its sweep through the entity
+     * list too, and a closed door is an entity — so a creature that could see
+     * you through one was not being generous, it was asking the hull a
+     * question the hull cannot answer.
+     *
+     * This is the line that fixes "creatures attack through doors": every
+     * creature's fire hook gates each shot on `q2_visible`, so a sight line
+     * that stops at the door stops the shooting with it. A POINT, not a box:
+     * sight is the query the original hands a zero box, which is what sends it
+     * to PrimaryColl in the first place.
+     */
+    if (b->ents) {
+        q2_move_seg_hit mh;
+
+        if (q2_move_clip_segment(b->ents, a, b3, NULL, &mh)) {
+            b->stats.los_blocked++;
+            b->stats.los_blocked_ent++;
+            return false;
+        }
+    }
+
+    return true;
 }
 
 /*
@@ -252,6 +311,26 @@ static bool bound_bottom(void *user, const q2_monster *m)
             continue;                   /* stopped short: this corner has ground */
         }
 
+        /*
+         * THE CORNER THAT REACHED THE END, and this is the approximation the
+         * block above used to call out as unfixable.
+         *
+         * 0x8005FB24 does not fail on it either: it hands the completed sweep
+         * to 0x80053974, the ENTITY clip, and only that finding nothing makes
+         * it a ledge. The entity list the port can supply is the mover set, so
+         * a creature standing on a LIFT — or in a doorway whose floor is the
+         * door itself — is now standing on something instead of being told it
+         * is at the edge of the world and refusing to walk.
+         */
+        if (b->ents) {
+            q2_move_seg_hit mh;
+
+            if (q2_move_clip_segment(b->ents, start, end, NULL, &mh)) {
+                b->stats.bottom_on_ent++;
+                continue;
+            }
+        }
+
         b->stats.bottom_fail++;
         return false;                   /* ran the whole way: a drop */
     }
@@ -275,6 +354,21 @@ void q2_ai_world_bind_init(q2_ai_world_bind *bind, q2_collision *coll,
     bind->world.trace         = bound_trace;
     bind->world.line_of_sight = bound_los;
     bind->world.check_bottom  = bound_bottom;
+}
+
+void q2_ai_world_bind_entities(q2_ai_world_bind *bind,
+                               const q2_move_world *ents)
+{
+    if (!bind)
+        return;
+
+    /*
+     * Stored as handed over, not tested for emptiness: `q2_sim_attach_movers`
+     * REALLOCATES the target array and rewrites the count, so a binding that
+     * decided at this moment that the world was empty would stay empty for the
+     * rest of the level. The clip copes with a count of zero on its own.
+     */
+    bind->ents = ents;
 }
 
 void q2_ai_world_bind_install(q2_ai_world_bind *bind)

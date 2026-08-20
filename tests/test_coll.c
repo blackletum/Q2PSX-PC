@@ -434,11 +434,22 @@ static void test_step_move(void)
           "with nothing under it, nothing is touched");
 
     /*
-     * Grounded, and the sequence's net vertical effect is a STEP DOWN of one
-     * step height per frame: it lifts by `step`, slides, then drops by `step`
-     * plus however far the lift actually got. That is what carries an entity
-     * smoothly off a ledge instead of dropping it, and it means one frame from
-     * the middle of a tall cell does not reach the floor.
+     * Grounded, and NOTHING within a step below — which is the case the step
+     * sequence is wrong for, and which 0x80045C68 exists to undo.
+     *
+     * This used to assert a net step down of one whole step height per frame,
+     * on the reasoning that "one frame from the middle of a tall cell does not
+     * reach the floor". That was the port keeping whatever the drop produced.
+     * The original checks the ground flags at 0x80045C18 and, finding them
+     * clear with `ground_normal[1]` still zero — the drop touched nothing at
+     * all — rewinds to the post-slide position and falls by the LIFT amount
+     * alone (s4 at 0x80045C7C, not `drop + step`).
+     *
+     * So the lift is undone and no more, and the frame's net vertical effect
+     * over open space is ZERO. Anything below that is gravity's to supply.
+     * With the old behaviour, walking in mid-air teleported the entity 216
+     * units downward every tick, which is what made every kerb and stair edge
+     * snap.
      */
     memset(&ent, 0, sizeof(ent));
     ent.pos[0] = 500; ent.pos[1] = 500; ent.pos[2] = 500;
@@ -450,8 +461,8 @@ static void test_step_move(void)
     q2_move_step(&c, &ent, delta, NULL);
 
     check_eq_i(ent.pos[0], 800, "walking moves the full distance when nothing is in the way");
-    check_eq_i(ent.pos[1], 500 + Q2_STEP_HEIGHT,
-               "and the frame steps down by exactly one step height");
+    check_eq_i(ent.pos[1], 500,
+               "and over open space the frame's net vertical effect is nothing");
     check(!(ent.flags & Q2_ENT_ON_GROUND),
           "with nothing under it, the drop finds no ground");
 
@@ -659,6 +670,144 @@ static void test_world_sweep(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * The second pass every non-movement query was missing: a segment against the
+ * ENTITY boxes. Before this existed, doors were solid to the player's feet and
+ * to nothing else — shots, rockets and sight lines all went through them.
+ */
+static void test_clip_segment(void)
+{
+    q2_move_target targets[4];
+    q2_move_world w;
+    q2_move_seg_hit hit;
+    s32 from[3] = { 0, 0, 0 };
+    s32 to[3]   = { 0, 0, 10000 };
+
+    printf("clipping a segment against the entity boxes\n");
+
+    memset(targets, 0, sizeof(targets));
+
+    /* A door across the line at z = 2000..2200. */
+    targets[0].min[0] = -1000; targets[0].min[1] = -1000; targets[0].min[2] = 2000;
+    targets[0].max[0] =  1000; targets[0].max[1] =  1000; targets[0].max[2] = 2200;
+    targets[0].kind   = Q2_MOVE_KIND_ENTITY;
+    targets[0].id     = 3;
+    targets[0].active = true;
+
+    /* A second door FURTHER along: the nearest has to win, which is the one
+     * thing q2_move_sweep_world does not do. */
+    targets[1] = targets[0];
+    targets[1].min[2] = 4000; targets[1].max[2] = 4200;
+    targets[1].id     = 5;
+
+    /* An inactive slot nearer than either. */
+    targets[2] = targets[0];
+    targets[2].min[2] = 500; targets[2].max[2] = 700;
+    targets[2].id     = 8;
+    targets[2].active = false;
+
+    /* A trigger VOLUME nearer still. A shot does not stop in one. */
+    targets[3] = targets[0];
+    targets[3].min[2] = 200; targets[3].max[2] = 400;
+    targets[3].kind   = Q2_MOVE_KIND_VOLUME;
+    targets[3].mask   = 0x2000;
+    targets[3].id     = 12;
+
+    memset(&w, 0, sizeof(w));
+    w.targets     = targets;
+    w.count       = 4;
+    w.half_extent = Q2_SWEEP_HALF_EXTENT;
+
+    check(q2_move_clip_segment(&w, from, to, NULL, &hit),
+          "a shot down the corridor is stopped");
+    check_eq_i(hit.id, 3, "by the NEAREST door, not the last one tested");
+    check_eq_i(hit.pos[2], 2000, "at its near face");
+    check_eq_i(hit.frac, 2000 * 4096 / 10000,
+               "and the fraction is where along the shot that is");
+    check_eq_i(hit.normal[2], 4096,
+               "the contact normal points along the ray, into the surface");
+    check_eq_i(hit.normal[0], 0, "and is zero off the entry axis");
+
+    /*
+     * The two skips, checked by removing the door and seeing the segment run
+     * clear past both the inactive slot and the volume — which sit in front of
+     * where the door was.
+     */
+    targets[0].active = false;
+    targets[1].active = false;
+    check(!q2_move_clip_segment(&w, from, to, NULL, &hit),
+          "an inactive door and a trigger volume stop nothing");
+    check_eq_i(hit.frac, Q2_TRACE_SEG_ONE, "the whole segment survives");
+    check(!hit.hit, "with no contact recorded");
+    targets[0].active = true;
+    targets[1].active = true;
+
+    /* A segment that stops short of the door. */
+    to[2] = 1500;
+    check(!q2_move_clip_segment(&w, from, to, NULL, &hit),
+          "a shot that ends before the door reaches its end");
+    to[2] = 10000;
+
+    /* Missing it sideways. */
+    from[0] = 5000; to[0] = 5000;
+    check(!q2_move_clip_segment(&w, from, to, NULL, &hit),
+          "a shot down a parallel corridor misses");
+    from[0] = 0; to[0] = 0;
+
+    /*
+     * THE BODY. A creature is a box, and inflating the door by its own
+     * half-extents is what stops the creature's CENTRE early enough that the
+     * creature itself does not end up inside the door.
+     */
+    {
+        s32 body[3] = { 286, 572, 286 };
+
+        check(q2_move_clip_segment(&w, from, to, body, &hit),
+              "a creature walking at the door is stopped");
+        check_eq_i(hit.pos[2], 2000 - 286,
+                   "one half-extent short of the face, not flush against it");
+    }
+
+    /*
+     * Starting INSIDE a box. There is no entry face, so there is no normal and
+     * the fraction is zero — which for a sight line means blind and for a shot
+     * means it goes nowhere. Both are the honest answer.
+     */
+    {
+        s32 inside[3] = { 0, 0, 2100 };
+
+        check(q2_move_clip_segment(&w, inside, to, NULL, &hit),
+              "a segment starting inside a door is blocked");
+        check_eq_i(hit.frac, 0, "at zero distance");
+        check_eq_i(hit.normal[2], 0, "with no entry face to name");
+    }
+
+    /*
+     * A near-parallel ray over a long distance. The slab quotient here is
+     * numerator 10,000 << 12 over a denominator of 1, which is 40.96 million —
+     * fine — but the same shape with a longer segment overflows a 32-bit
+     * intermediate and turns a clean miss into a hit at a wrapped fraction.
+     * The test is that a ray that grazes past the door's side reports a miss.
+     */
+    {
+        s32 graze_from[3] = { 1001, 0, 0 };
+        s32 graze_to[3]   = { 1002, 0, 1000000 };
+
+        check(!q2_move_clip_segment(&w, graze_from, graze_to, NULL, &hit),
+              "a near-parallel ray just outside the door misses over a "
+              "million units");
+    }
+
+    /* No world at all, and an empty one: both are misses rather than crashes,
+     * which is what a zone with no movers hands the AI binding. */
+    check(!q2_move_clip_segment(NULL, from, to, NULL, &hit),
+          "a null world blocks nothing");
+    w.count = 0;
+    check(!q2_move_clip_segment(&w, from, to, NULL, &hit),
+          "and neither does an empty one");
+}
+
+/* ------------------------------------------------------------------------- */
 static void test_contents(void)
 {
     q2_move_target vols[2];
@@ -728,6 +877,7 @@ int main(void)
     test_step_move();
     test_box_sweep();
     test_world_sweep();
+    test_clip_segment();
     test_contents();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);

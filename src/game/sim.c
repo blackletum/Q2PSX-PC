@@ -1516,9 +1516,14 @@ static void update_look(q2_sim *sim, const q2_input *in, s32 dt)
 /*
  * 0x8003A780 — the view recentre.
  *
- * The AUTOCENTRE row on the player page does not do this; it feeds a separate
- * timer (`autocentre`, client+0x26). What actually pulls the view level is a
- * CHORD: hold both look buttons together and the pitch walks back to zero.
+ * TWO things arm this, and the note here used to claim only one did.
+ *
+ * The first is a CHORD: hold both look buttons together and the pitch walks
+ * back to zero. The second is the AUTOCENTRE row on the player page, which
+ * this said "does not do this" — it does, through the timer at client+0x26.
+ * 0x8003A4AC counts dt while the forward axis is deflected and 0x8003A984 sets
+ * the same `recentring` flag once that reaches 200, i.e. two thirds of a second
+ * of walking, on the ground, in single player. Both arms end here.
  *
  * The arming is a three-tick shift register rather than a flag, and the exact
  * sequence matters. Frame one of the chord sets history bit 0, `(hist & 7)` is
@@ -1710,7 +1715,6 @@ static bool player_jump(q2_sim *sim, bool pressed, s32 dt)
 static void wish_to_world(q2_sim *sim, bool moving, s32 dt)
 {
     q2_player *p = &sim->player[sim->cur_player];
-
 
     /* 0x8006EFDC / 0x8006F11C both rotate by the basis matrix RotMatrix built
      * from the view angles, and both negate the Y row because +Y is down. The
@@ -2068,9 +2072,20 @@ static void clip_velocity(q2_sim *sim)
     d = dot_term(n[0], p->vel[0]) + dot_term(n[1], p->vel[1]) +
         dot_term(n[2], p->vel[2]);
 
-    /* 0x80039B50: captured from the velocity BEFORE the clip, and floored at
-     * zero so a rising entity keeps nothing. */
-    keep = (p->vel[1] >= 0) ? (s16)p->vel[1] : 0;
+    /*
+     * 0x80039B48..0x80039B58 — captured from the velocity BEFORE the clip, and
+     * CAPPED at zero, not floored at it. This had the sense inverted:
+     *
+     *     80039B48  addu  a1, zero, zero   ; keep = 0
+     *     80039B50  bgez  a2, 0x80039B5C   ; vel.y >= 0 -> keep STAYS zero
+     *     80039B54  addu  v1, a0, v0       ; delay slot, just the dot sum
+     *     80039B58  addu  a1, a2, zero     ; reached only when vel.y < 0
+     *
+     * +Y is down, so `vel.y < 0` is RISING. Retail preserves a rising entity's
+     * climb rate and gives a FALLING one nothing; this kept the fall rate and
+     * gave a riser nothing, which is the opposite entity in both arms.
+     */
+    keep = ((s16)p->vel[1] < 0) ? (s16)p->vel[1] : 0;
 
     p->vel[0] = (s16)(p->vel[0] - scale_term(n[0], d));
     p->vel[1] = (s16)(p->vel[1] - scale_term(n[1], d));
@@ -2232,6 +2247,76 @@ static void update_footsteps(q2_sim *sim)
  * decays against, which is why the two cannot be separated: 210 ticks of
  * silence, 150 ticks of kick, one deadline.
  */
+/*
+ * 0x8003D254 — the water transitions, reached from 0x8003B00C, which is the
+ * LAST call the player's frame makes.
+ *
+ * The port had no counterpart, so wading into a pool, going under and climbing
+ * back out were all completely silent. The shape is three edges over two
+ * counters:
+ *
+ *     8003D27C  and   v0, v0, 0x80000    ; dead -> nothing at all
+ *     8003D290  srl   v0, flags, 8       ; UNDERWATER?
+ *     8003D2A8  bne   air, zero, ...     ; already under -> the breathing loop
+ *                 PlayerNoise(type 0), then pla_watr_in if the splash
+ *                 cooldown at client+0xD8 has expired
+ *     8003D450  beq   air, zero, ...     ; was under, is not -> pla_watr_out
+ *     8003D474  sw    zero, 132(s0)      ; air = 0
+ *     8003D480  srl   v0, flags, 2       ; INWATER (shallow)?
+ *     8003D498  bne   wade, zero, ...    ; only on the FIRST tick of a wade
+ *                 pla_watr_in again, cooldown = level_time + 100, splash effect
+ *     8003D4D8  wade++      /  8003D4E0  wade = 0
+ *
+ * Both the entry and the wade play `pla_watr_in`; only the exit is its own
+ * sound. The cooldown is SET by the wade and READ by the submerge, which is
+ * what stops a dive from playing the splash twice as you pass through the
+ * surface.
+ *
+ * NOT IMPLEMENTED, and deliberately: the arm at 0x8003D300..0x8003D448 that
+ * accumulates breath into the same field, plays `pla_watr_un` and
+ * `pla_u_brea~2` on a 300/750-tick cycle, gasps and then drowns you. That is a
+ * life-support subsystem with its own damage path, not a movement one, and
+ * half-implementing it would drown people. `water_air` is a plain latch here.
+ */
+static void world_effects(q2_sim *sim)
+{
+    q2_player *p = &sim->player[sim->cur_player];
+
+    /* 0x8003D27C — a corpse makes no splash. */
+    if (p->ent2_flags & Q2_ENT2_DEAD)
+        return;
+
+    if (p->ent.flags & Q2_ENT_UNDERWATER) {
+        /* 0x8003D2A8: the submerge EDGE. */
+        if (p->water_air == 0) {
+            /* 0x8003D2D0: `sltu`, so the sound is skipped while the wade's own
+             * cooldown is still running. */
+            if ((u32)p->splash_time < (u32)sim->level_time)
+                q2_ent_sound_at(&sim->ent_world.events, Q2_SND_WATER_IN,
+                                p->pos);
+            p->water_air = 1;
+        }
+        return;
+    }
+
+    /* 0x8003D450: the surface EDGE, taken only if we were under. */
+    if (p->water_air != 0)
+        q2_ent_sound_at(&sim->ent_world.events, Q2_SND_WATER_OUT, p->pos);
+
+    p->water_air = 0;
+
+    /* 0x8003D480: shallow water, and only the tick you step into it. */
+    if (p->ent.flags & Q2_ENT_INWATER) {
+        if (p->wade == 0) {
+            q2_ent_sound_at(&sim->ent_world.events, Q2_SND_WATER_IN, p->pos);
+            p->splash_time = sim->level_time + 100;
+        }
+        p->wade++;
+    } else {
+        p->wade = 0;
+    }
+}
+
 static void update_pain(q2_sim *sim)
 {
     q2_player *p = &sim->player[sim->cur_player];
@@ -2336,6 +2421,44 @@ static void update_pain(q2_sim *sim)
  * int16 delta by it, so any fraction here is the port's convenience and can be
  * one unit out on a long move. Do not feed it back into the geometry.
  */
+/*
+ * THE SECOND PASS — the doors.
+ *
+ * A mover is an entity, not hull (trace.h), so the walk above answers as if
+ * every door in the level were open. The console's own bullet path traces the
+ * hull and then re-traces against the entity list, and this is that: the
+ * segment is clipped against the mover boxes from the ORIGINAL start to
+ * wherever the hull left it, so whichever of the two is nearer wins without
+ * needing the fractions compared.
+ *
+ * `ent` names the mover, which is what makes a contact actionable: a shot that
+ * stops on a door can say WHICH door, and a shoot-to-open leaf is exactly that
+ * question asked once more.
+ */
+static void trace_clip_movers(q2_sim *sim, const s32 start[3], q2_trace *out)
+{
+    q2_move_seg_hit mh;
+    int k;
+
+    if (!sim->mover_count || !sim->move_world.count)
+        return;
+
+    if (!q2_move_clip_segment(&sim->move_world, start, out->end, NULL, &mh))
+        return;
+
+    /* The fraction is along start..out->end, which is itself a fraction of the
+     * caller's segment; composing them keeps the answer on the ORIGINAL scale
+     * the caller is going to multiply its direction by. */
+    out->fraction = (s32)(((s64)out->fraction * mh.frac) >> Q2_FRAC_12);
+    for (k = 0; k < 3; k++) {
+        out->end[k]    = mh.pos[k];
+        out->normal[k] = mh.normal[k];
+    }
+    out->hit      = true;
+    out->ent      = mh.id;
+    out->contents = 0;
+}
+
 void q2_sim_trace(q2_sim *sim, const s32 start[3], const s32 end[3],
                   q2_trace *out)
 {
@@ -2350,6 +2473,7 @@ void q2_sim_trace(q2_sim *sim, const s32 start[3], const s32 end[3],
     memset(out, 0, sizeof(*out));
     out->fraction = Q2_ONE_12;
     out->node     = -1;
+    out->ent      = -1;
 
     if (!sim || !start || !end)
         return;
@@ -2376,8 +2500,14 @@ void q2_sim_trace(q2_sim *sim, const s32 start[3], const s32 end[3],
             out->contents = n.contents;
     }
 
-    if (complete)
+    if (complete) {
+        /* A segment the hull let through can still meet a door, and this is
+         * the arm that used to return before the second pass ran — i.e. the
+         * common case: a corridor with a closed door across it is open hull
+         * for the whole of the shot's length. */
+        trace_clip_movers(sim, start, out);
         return;
+    }
 
     out->hit = true;
 
@@ -2416,6 +2546,8 @@ void q2_sim_trace(q2_sim *sim, const s32 start[3], const s32 end[3],
             out->fraction = Q2_ONE_12;
         }
     }
+
+    trace_clip_movers(sim, start, out);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -2557,6 +2689,30 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
     was_underwater = (p->ent.flags & Q2_ENT_UNDERWATER) != 0;
     update_env_flags(sim);
 
+    /*
+     * 0x8003A29C — the SCRIPT half of the same dispatcher call, and it belongs
+     * here beside the flag half rather than after the move.
+     *
+     * `xrefs 0x80027E64` gives exactly one call site, at instruction 54 of the
+     * player frame: before the pad, before the wish, before the jump and before
+     * the move. One call re-runs the events of every volume the entity is
+     * inside, and the environment primitives are simply the events that do
+     * nothing but OR a bit. The port had split it in two and left this half at
+     * the very end of the tick.
+     *
+     * The point being tested does not change — `update_triggers` already
+     * samples the origin. What moving it buys is that whatever a trigger does
+     * reaches the move and the entity sweep on the SAME tick the console would,
+     * instead of a tick later. A door told to open now opens against the frame
+     * you are walking into it on.
+     *
+     * Safe with respect to the two things a trigger can do that would be
+     * alarming here: a TELEPORT and a zone change are both queued rather than
+     * applied (`pending_teleport`, `q2_sim_take_zone_change`), so neither can
+     * relocate the player into the middle of this tick's move.
+     */
+    update_triggers(sim);
+
     /* The mover's frame: the entity origin, Q2_EYE_BASE above the feet. */
     p->ent.pos[0] = p->pos[0];
     p->ent.pos[1] = q2_sim_origin_y(p->pos[1]);
@@ -2565,6 +2721,32 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
     /* 0x8003A4A4 — the pad. 0x8003A4EC may add a jump the player did not ask
      * for, so the button word is taken by value from here on. */
     buttons = input->buttons;
+
+    /*
+     * 0x8003A4AC — the AUTOCENTRE timer, and it goes here because it reads the
+     * button word the pad JUST returned, before the water-exit jump writes a
+     * synthesised bit into it (0x8003A55C). So `input->buttons` and not
+     * `buttons`.
+     *
+     *     8003A4AC  lw    v0, 40(sp)          ; the button word
+     *     8003A4B4  bgez  v0, 0x8003A4E8      ; bit 31 clear -> clear the timer
+     *     8003A4BC  lh    v0, 13122(v0)       ; 0x800B3342, the setting
+     *     8003A4C4  beq   v0, zero, 0x8003A4E8
+     *     8003A4CC  lhu   v0, 38(s1)          ; UNSIGNED load
+     *     8003A4DC  addu  v0, v0, v1          ; += dt
+     *     8003A4E4  sh    v0, 38(s1)
+     *
+     * `bgez` on the whole word tests bit 31, which is Q2_BTN_MOVING — so the
+     * timer counts only while the forward axis is deflected and resets the
+     * moment it is not. The add is UNSIGNED and the threshold test below is
+     * SIGNED, so the counter is allowed to wrap; that is retail behaviour on an
+     * airborne player and is not something to saturate away.
+     */
+    if ((input->buttons & Q2_BTN_MOVING) && sim->autocentre_setting)
+        p->autocentre = (s16)((u16)p->autocentre + (u16)dt);
+    else
+        p->autocentre = 0;
+
     water_exit_jump(sim, was_underwater, &buttons);
 
     /* 0x8003A584 — the wish velocity. */
@@ -2601,6 +2783,34 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
         !(p->ent.flags & (Q2_ENT_UNDERWATER | Q2_ENT_INCROUCH |
                           Q2_ENT_INLOWCROUCH)))
         player_jump(sim, (buttons & Q2_BTN_JUMP) != 0, dt);
+
+    /*
+     * 0x8003A938 — and the AUTOCENTRE timer's other half, which arms the same
+     * recentre the look-button chord arms.
+     *
+     *     8003A93C  lw    v0, 0x800AEBCC   ; deathmatch
+     *     8003A944  bne   v0, zero, ...    ; multiplayer never recentres
+     *     8003A954  srl   v1, v0, 5        ; ON_GROUND
+     *     8003A95C  srl   v0, v0, 6        ; ON_ENTITY
+     *     8003A968  beq   v1, zero, ...    ; airborne never recentres
+     *     8003A978  slti  v0, v0, 200      ; SIGNED, against the timer
+     *     8003A984  sh    v0, 38(s1)       ; clamp AT 200
+     *     8003A98C  sb    v0, 37(s1)       ; recentring = true
+     *
+     * This sits at 0x8003A938, which is where 0x8003A8F4, 0x8003A908,
+     * 0x8003A924 and 0x8003A92C all branch to — so it runs whether or not the
+     * jump above was gated out, and must stay outside that `if`.
+     *
+     * The clamp is not a bound on an airborne timer (it cannot be — it is
+     * inside the grounded arm). It holds the counter AT the threshold so the
+     * flag re-asserts on every later grounded frame until you stop walking.
+     */
+    if (!sim->multiplayer &&
+        (p->ent.flags & (Q2_ENT_ON_GROUND | Q2_ENT_ON_ENTITY)) &&
+        p->autocentre >= 200) {
+        p->autocentre = 200;
+        p->recentring = true;
+    }
 
     /* 0x8003A990 — integrate the angles from the rates. */
     integrate_look(sim, dt);
@@ -2704,9 +2914,6 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
 
     /* 0x80039CB4 — fall damage, from how much the landing changed vel.y. */
     fall_damage(sim, vy_before);
-
-    /* After movement, so a trigger sees where the player actually ended up. */
-    update_triggers(sim);
 
     /*
      * The level clock the weapons gate on is this same dt counter: 300 units to
@@ -2831,6 +3038,10 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
      * and take this tick's copy of the two figures. After the item sweep,
      * because a medkit collected this tick counts as healing. */
     update_pain(sim);
+
+    /* 0x8003B00C — and then the water transitions, which really are the last
+     * thing the frame does. See world_effects. */
+    world_effects(sim);
 
     /* And drop the armour class bits if the armour they describe is gone —
      * 0x80035580, which the console does from inside the status bar. Here

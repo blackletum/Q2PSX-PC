@@ -300,6 +300,158 @@ bool q2_move_overlaps_any(const q2_move_world *w, const s32 pos[3])
     return false;
 }
 
+/* ------------------------------------------------------------------------- */
+/* Segment against the entity boxes                                           */
+/* ------------------------------------------------------------------------- */
+/*
+ * The slab test, in the 1.0.12 the rest of the port parametrises segments in.
+ *
+ * `t0` and `t1` stay 64-bit all the way through. A near-axis-parallel ray
+ * makes the quotient enormous — the numerator is a world distance shifted up
+ * twelve and the denominator can be one unit — and truncating it to 32 bits
+ * turns a miss into a hit at a wrapped fraction. The range check at the end is
+ * what discards those, so it has to see the real number.
+ *
+ * `axis` stays -1 when the START is inside the box: nothing ever raised `t0`
+ * off zero, so there is no entry face and no normal to report. The caller gets
+ * a fraction of 0, which is the honest answer for a shot fired from inside a
+ * crusher.
+ *
+ * `plane` is the entry face's own coordinate, and it is reported because the
+ * fraction cannot reconstruct it: 1.0.12 truncates, so recomputing the contact
+ * from the fraction lands up to a unit short of the face. 0x80052C70 has the
+ * same split — `out_pos[a] = plane` exactly, the other two from the ratio — so
+ * this is the original's arrangement rather than a repair of the port's.
+ */
+static bool seg_hits_box(const s32 from[3], const s32 to[3],
+                         const s32 bmin[3], const s32 bmax[3],
+                         const s32 inflate[3],
+                         s32 *out_frac, int *out_axis, int *out_sign,
+                         s32 *out_plane)
+{
+    s64 t0 = 0, t1 = Q2_TRACE_SEG_ONE;
+    int axis = -1, sign = 0;
+    s32 plane = 0;
+    int k;
+
+    for (k = 0; k < 3; k++) {
+        s32 grow = inflate ? inflate[k] : 0;
+        s32 lo = bmin[k] - grow;
+        s32 hi = bmax[k] + grow;
+        s32 d  = to[k] - from[k];
+        s64 a, b, near_t, far_t;
+
+        if (d == 0) {
+            /* Parallel to this pair of faces: either always between them or
+             * never. */
+            if (from[k] < lo || from[k] > hi)
+                return false;
+            continue;
+        }
+
+        a = (((s64)lo - from[k]) << 12) / d;
+        b = (((s64)hi - from[k]) << 12) / d;
+        near_t = a < b ? a : b;
+        far_t  = a < b ? b : a;
+
+        if (near_t > t0) {
+            t0    = near_t;
+            axis  = k;
+            sign  = (d > 0) ? 1 : -1;
+            plane = (d > 0) ? lo : hi;
+        }
+        if (far_t < t1)
+            t1 = far_t;
+        if (t0 > t1)
+            return false;
+    }
+
+    if (t0 < 0 || t0 > Q2_TRACE_SEG_ONE)
+        return false;
+
+    *out_frac  = (s32)t0;
+    *out_axis  = axis;
+    *out_sign  = sign;
+    *out_plane = plane;
+    return true;
+}
+
+bool q2_move_clip_segment(const q2_move_world *w, const s32 from[3],
+                          const s32 to[3], const s32 inflate[3],
+                          q2_move_seg_hit *out)
+{
+    s32 best_frac  = Q2_TRACE_SEG_ONE;
+    int best_axis  = -1, best_sign = 0;
+    s32 best_plane = 0;
+    s32 best_id    = -1;
+    bool found     = false;
+    u32 i;
+    int k;
+
+    if (out) {
+        memset(out, 0, sizeof(*out));
+        out->frac = Q2_TRACE_SEG_ONE;
+        out->id   = -1;
+        if (from) {
+            out->pos[0] = from[0];
+            out->pos[1] = from[1];
+            out->pos[2] = from[2];
+        }
+    }
+
+    if (!w || !w->targets || !from || !to)
+        return false;
+
+    for (i = 0; i < w->count; i++) {
+        const q2_move_target *t = &w->targets[i];
+        s32 frac, plane;
+        int axis, sign;
+
+        if (!t->active)
+            continue;
+        /* Entities only: see the header. A volume is not solid. */
+        if (t->kind != Q2_MOVE_KIND_ENTITY)
+            continue;
+
+        if (!seg_hits_box(from, to, t->min, t->max, inflate,
+                          &frac, &axis, &sign, &plane))
+            continue;
+
+        /* The NEAREST wins, unlike the move sweep, which keeps the last. */
+        if (found && frac >= best_frac)
+            continue;
+
+        found      = true;
+        best_frac  = frac;
+        best_axis  = axis;
+        best_sign  = sign;
+        best_plane = plane;
+        best_id    = t->id;
+
+        if (frac == 0)
+            break;          /* nothing can be nearer than the start */
+    }
+
+    if (!found)
+        return false;
+
+    if (out) {
+        out->hit  = true;
+        out->frac = best_frac;
+        out->id   = best_id;
+        for (k = 0; k < 3; k++)
+            out->pos[k] = from[k] +
+                (s32)((((s64)to[k] - from[k]) * best_frac) >> 12);
+        if (best_axis >= 0) {
+            /* Exactly on the face, not the truncated fraction's idea of it. */
+            out->pos[best_axis]    = best_plane;
+            out->normal[best_axis] = (s16)(best_sign > 0 ? 4096 : -4096);
+        }
+    }
+
+    return true;
+}
+
 /* The stuck_test shape q2_move_checked wants, over the move world it is
  * already carrying. */
 bool q2_move_near_entity(const q2_move_ent *ent, const void *user)
@@ -424,22 +576,24 @@ int q2_move(q2_collision *coll, q2_move_ent *ent, const s16 delta_in[3],
 
                 result = 0;
 
-                /* 0x80045244: the same flattest-floor rule as the world half. */
+                /* 0x80045244: the same flattest-floor rule as the world half,
+                 * and the same nesting — 0x80045248's `beq` carries the ground
+                 * block with it. See the note in the world half below. */
                 if (ent->ground_normal[1] < hit.normal[1]) {
                     ent->ground_normal[0] = hit.normal[0];
                     ent->ground_normal[1] = hit.normal[1];
                     ent->ground_normal[2] = hit.normal[2];
-                }
 
-                /* 0x800452A4: standing on an entity is its own flag, with the
-                 * thing being stood on named in bits 18..23. */
-                if (mode->ground_mode && ent->max_slope_ny < hit.normal[1]) {
-                    if (hit.kind == Q2_MOVE_KIND_ENTITY) {
-                        ent->flags |= Q2_ENT_ON_ENTITY;
-                        ent->flags &= ~Q2_ENT_STANDON_MASK;
-                        ent->flags |= ((u32)hit.id & 0x3Fu) << Q2_ENT_STANDON_SHIFT;
-                    } else {
-                        ent->flags |= Q2_ENT_ON_GROUND;
+                    /* 0x800452A4: standing on an entity is its own flag, with
+                     * the thing being stood on named in bits 18..23. */
+                    if (mode->ground_mode && ent->max_slope_ny < hit.normal[1]) {
+                        if (hit.kind == Q2_MOVE_KIND_ENTITY) {
+                            ent->flags |= Q2_ENT_ON_ENTITY;
+                            ent->flags &= ~Q2_ENT_STANDON_MASK;
+                            ent->flags |= ((u32)hit.id & 0x3Fu) << Q2_ENT_STANDON_SHIFT;
+                        } else {
+                            ent->flags |= Q2_ENT_ON_GROUND;
+                        }
                     }
                 }
             }
@@ -457,17 +611,28 @@ int q2_move(q2_collision *coll, q2_move_ent *ent, const s16 delta_in[3],
                 normal[2] = pl.nz;
                 have_normal = true;
 
-                /* 0x80045318: keep the flattest floor seen this frame. +Y is
-                 * down, so "flattest floor" is the LARGEST ny. */
+                /*
+                 * 0x80045318: keep the flattest floor seen this frame. +Y is
+                 * down, so "flattest floor" is the LARGEST ny.
+                 *
+                 * And the ground flag is INSIDE this, not beside it —
+                 * 0x8004531C's `beq` skips the whole block, the ground-mode
+                 * test at 0x8004533C included. A contact steeper than one
+                 * already seen this frame cannot declare ground even if it
+                 * would pass the slope limit on its own. Written as siblings, a
+                 * second, worse contact in the same frame could set the flag
+                 * against a ground_normal describing a different surface, and
+                 * the drop's own verdict is what the jump reads.
+                 */
                 if (ent->ground_normal[1] < pl.ny) {
                     ent->ground_normal[0] = pl.nx;
                     ent->ground_normal[1] = pl.ny;
                     ent->ground_normal[2] = pl.nz;
-                }
 
-                /* 0x8004534C: and only the ground-mode move may declare it. */
-                if (mode->ground_mode && ent->max_slope_ny < pl.ny)
-                    ent->flags |= Q2_ENT_ON_GROUND;
+                    /* 0x8004534C: and only the ground-mode move may declare it. */
+                    if (mode->ground_mode && ent->max_slope_ny < pl.ny)
+                        ent->flags |= Q2_ENT_ON_GROUND;
+                }
             }
         }
 
@@ -591,12 +756,29 @@ bool q2_move_step(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
     s32 drop;
     s16 v[3];
     bool grounded;
+    s32 pre_pos[3],  pre_node;
+    s32 post_pos[3], post_node;
 
     if (!coll || !ent || !delta)
         return false;
 
     step    = q2_move_step_height(ent->flags);
     saved_y = ent->pos[1];
+
+    /*
+     * 0x80045A98/0x80045AA0 — the PRE-LIFT snapshot, taken here because that is
+     * where the original takes it: above the flags read at 0x80045AD4 that
+     * chooses between the stepped and the airborne path, so both can rewind to
+     * it. See the fallback after the drop.
+     */
+    pre_node   = ent->node;
+    pre_pos[0] = ent->pos[0];
+    pre_pos[1] = ent->pos[1];
+    pre_pos[2] = ent->pos[2];
+    post_node  = pre_node;
+    post_pos[0] = pre_pos[0];
+    post_pos[1] = pre_pos[1];
+    post_pos[2] = pre_pos[2];
 
     /*
      * 0x80045ADC — the step sequence is for an entity that is ALREADY STANDING
@@ -666,6 +848,13 @@ bool q2_move_step(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
     q2_move_checked(coll, ent, delta, 3, false, true,
                     q2_move_near_entity, world, world);
 
+    /* 0x80045BA4..0x80045BBC — the POST-SLIDE snapshot, which is the other
+     * place the fallback below can rewind to. */
+    post_node  = ent->node;
+    post_pos[0] = ent->pos[0];
+    post_pos[1] = ent->pos[1];
+    post_pos[2] = ent->pos[2];
+
     /*
      * 0x80045BC0..0x80045BD8 clears the ground normal before the down move, so
      * the value the drop leaves is this frame's and never last frame's. The
@@ -678,6 +867,62 @@ bool q2_move_step(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
     v[0] = 0; v[1] = (s16)(drop + step); v[2] = 0;
     q2_move_checked(coll, ent, v, 0, true, false,
                         q2_move_near_entity, world, world);
+
+    /*
+     * -----------------------------------------------------------------------
+     * 0x80045C0C — WHAT HAPPENS WHEN THE STEP-DOWN DOES NOT FIND A FLOOR
+     * -----------------------------------------------------------------------
+     * The port stopped at the drop and kept whatever it produced. The original
+     * does not: 0x80045C18 tests the ground flags, and when they are clear it
+     * UNDOES the step sequence and moves a different way instead. Two arms,
+     * chosen at 0x80045C28 on whether the drop touched anything at all.
+     *
+     * Without this, walking off any ledge shorter than a step height committed
+     * the whole 216-unit drop in one tick — the player was teleported to the
+     * bottom of the step-down instead of walking off the edge and falling, so
+     * every kerb, stair edge and doorway lip produced a visible snap and a
+     * vertical velocity the fall-damage delta then measured against nothing.
+     */
+    if (!(ent->flags & Q2_ENT_GROUNDED_MASK)) {
+        if (ent->ground_normal[1] == 0) {
+            /*
+             * 0x80045C68 — arm B. The drop hit NOTHING: there is no floor
+             * within a step below, so the step-down was the wrong move
+             * entirely. Put the entity back where the slide left it and fall
+             * only by however far the LIFT rose — s4 at 0x80045C7C is `drop`
+             * alone, not `drop + step`, so the lift is undone and no more.
+             * Anything beyond that is this frame's gravity to supply.
+             */
+            ent->pos[0] = post_pos[0];
+            ent->pos[1] = post_pos[1];
+            ent->pos[2] = post_pos[2];
+            ent->node   = post_node;
+
+            v[0] = 0; v[1] = (s16)drop; v[2] = 0;
+            q2_move_checked(coll, ent, v, 0, true, false,
+                            q2_move_near_entity, world, world);
+        } else {
+            /*
+             * 0x80045C30 — arm A. Something WAS touched and it was too steep to
+             * stand on. The whole lift-slide-drop is discarded: rewind to the
+             * pre-lift snapshot and re-run the frame's own delta as an ordinary
+             * slide, mode {1, 1} with three further attempts (0x80045C64), so
+             * the entity slides along the steep face rather than being stepped
+             * onto it.
+             *
+             * `ground_normal` is deliberately NOT restored — 0x80045C44 writes
+             * only the node and 0x80045C54 only the position. The steep normal
+             * the drop just found is what this re-slide runs against.
+             */
+            ent->pos[0] = pre_pos[0];
+            ent->pos[1] = pre_pos[1];
+            ent->pos[2] = pre_pos[2];
+            ent->node   = pre_node;
+
+            q2_move_checked(coll, ent, delta, 3, true, true,
+                            q2_move_near_entity, world, world);
+        }
+    }
 
     return (ent->flags & Q2_ENT_GROUNDED_MASK) != 0;
 }

@@ -55,6 +55,7 @@
 #include "ai.h"
 #include "collision.h"
 #include "q2psx.h"
+#include "trace.h"
 
 /*
  * What the binding did, so a creature that will not move is a measurement
@@ -75,6 +76,9 @@ typedef struct q2_ai_world_stats {
     u32 bottom_fail;
     u32 los_calls;
     u32 los_blocked;
+    u32 los_blocked_ent;    /* by a DOOR rather than by the hull          */
+    u32 trace_blocked_ent;  /* a step trace a mover cut short             */
+    u32 bottom_on_ent;      /* a corner whose ground was a lift, not floor*/
 } q2_ai_world_stats;
 
 typedef struct q2_ai_world_bind {
@@ -89,6 +93,25 @@ typedef struct q2_ai_world_bind {
      */
     q2_collision *coll;
     q2_collision *move_hull;
+
+    /*
+     * THE DOORS, and neither hull contains them.
+     *
+     * PrimaryColl and SecondaryCol are the map's static geometry; a door or a
+     * lift is a Scene node bound to a runtime object whose box lives in the
+     * entity table (trace.h). Without this the three questions are all
+     * answered as though every door in the level were open — a creature sees
+     * you through a shut one, shoots you through it, and walks into it.
+     *
+     * The original does not have this gap because it never separated the two:
+     * `visible` clips its sight line against the entity list, and SV_movestep
+     * passes MASK_MONSTERSOLID (0x02020003), whose 0x02000000 bit is what
+     * turns the entity clip on at 0x800544EC.
+     *
+     * Borrowed and may be NULL, in which case the binding behaves as it did
+     * before and the `*_ent` counters stay at zero.
+     */
+    const q2_move_world *ents;
 
     /* How far below a creature ground may be and still count. The step height,
      * because a creature that can climb a step can also stand off one. */
@@ -109,6 +132,20 @@ typedef struct q2_ai_world_bind {
  */
 void q2_ai_world_bind_init(q2_ai_world_bind *bind, q2_collision *coll,
                            q2_collision *move_hull);
+
+/*
+ * Give the binding the sim's move world, so sight, movement and the ground
+ * probe all stop at a closed door.
+ *
+ * Separate from `_init` because the two are established at different times: the
+ * hulls come with the zone and the mover boxes come after the event script has
+ * been walked and the movers built. Pass the sim's `&sim->move_world`, whose
+ * address is stable across the reallocation `q2_sim_attach_movers` does to the
+ * target array itself.
+ */
+void q2_ai_world_bind_entities(q2_ai_world_bind *bind,
+                               const q2_move_world *ents);
+
 void q2_ai_world_bind_install(q2_ai_world_bind *bind);
 
 #endif /* Q2PSX_AIWORLD_H */

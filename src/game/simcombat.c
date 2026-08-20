@@ -854,7 +854,15 @@ void q2_sim_combat_tick(q2_sim *sim)
 
             for (t = 0; t < sim->combat.target_count; t++) {
                 const q2_actor *a = sim->combat.targets[t];
-                if (!a || a->health <= 0)
+                /*
+                 * THE ONE PLACE THE CONSOLE READS `takedamage` OUTSIDE
+                 * T_Damage, so this filter can be the original's rather than a
+                 * stand-in: the beam maintainer at 0x80049B9C does
+                 * `lw v0, 748(a1)` / `lw v0, 28(v0)` / `and 0xC0000000` /
+                 * `beq v0, zero` at 0x80049CBC..0x80049CD8. It asks whether the
+                 * thing can be hurt, not whether it is alive.
+                 */
+                if (!a || !a->takedamage)
                     continue;
 
                 q2_fx_beam_timed(&sim->fx, (s32)i, (s32)t,
@@ -902,7 +910,10 @@ void q2_sim_combat_tick(q2_sim *sim)
                 s64 along = 0, d2;
                 s64 reach;
 
-                if (!t || t == attacker_for(sim, p->owner) || t->health <= 0)
+                /* Same rule as the sweep in combat.c: a corpse is a target
+                 * until its `takedamage` says otherwise, which is what lets a
+                 * rocket finish the job on a body already down. */
+                if (!t || t == attacker_for(sim, p->owner) || !t->takedamage)
                     continue;
 
                 d2 = q2_combat_ray_dist_sq(step.from, dir, t->origin, &along);
@@ -979,6 +990,28 @@ void q2_sim_combat_tick(q2_sim *sim)
             complete = q2_coll_move(phull, step.from, step.to, node,
                                     end, &node);
             p->node = node;
+
+            /*
+             * AND THE DOORS. A mover is an entity, not hull, so the walk above
+             * flies a rocket through a shut door exactly as it used to fly a
+             * bullet through one. Clipped from the step's start to wherever
+             * the hull left it, so the nearer of the two wins; `complete` goes
+             * false because a bolt that met a door has met something, and the
+             * impact arm below is what turns that into a burst.
+             */
+            if (sim->mover_count && sim->move_world.count) {
+                q2_move_seg_hit mh;
+                const s32 *stop = complete ? step.to : end;
+
+                if (q2_move_clip_segment(&sim->move_world, step.from, stop,
+                                         NULL, &mh)) {
+                    end[0]   = mh.pos[0];
+                    end[1]   = mh.pos[1];
+                    end[2]   = mh.pos[2];
+                    complete = false;
+                    q2_sim_proj_scan.stopped_on_mover++;
+                }
+            }
 
             /*
              * A pane in the way, tested over the step the projectile just took.

@@ -1274,6 +1274,16 @@ typedef struct q2_sim_proj_stats {
      * because the alternative — the shot vanishing after the ammo is spent —
      * is invisible, and was for as long as it was happening every tick. */
     u32 dropped_full;
+
+    /*
+     * Bolts and rockets a DOOR stopped, as against the hull. Separately
+     * counted because "a rocket goes through a closed door" and "a rocket goes
+     * through a wall" look the same from the far side and are different
+     * faults: the second is a hull that does not describe the map, the first
+     * is a hull that describes it correctly and an entity the sweep never
+     * asked about.
+     */
+    u32 stopped_on_mover;
 } q2_sim_proj_stats;
 
 extern q2_sim_proj_stats q2_sim_proj_scan;
@@ -1342,9 +1352,23 @@ typedef struct q2_trace {
     s32  normal[3];     /* 1.3.12 unit normal, valid when hit          */
     s32  node;          /* the cell the trace ended in, -1 if none     */
     s32  contents;      /* that cell's contents id                     */
+    /*
+     * WHICH MOVER stopped it, or -1 for the world. A door is an entity and
+     * not part of either hull (trace.h), so a trace that ends on one ends on
+     * nothing the `node`/`contents` pair can describe — they are cell fields
+     * and there is no cell. This is the other half of the answer.
+     */
+    s32  ent;
     bool hit;
 } q2_trace;
 
+/*
+ * Clipped against the zone's HULL and then against its DOORS AND LIFTS, in
+ * that order, nearest wins. The second pass is not an extra: the hull is the
+ * map's static geometry and a mover is a runtime entity, so without it every
+ * query answers as though the level's doors were all open — which is what a
+ * bullet through a shut door looks like.
+ */
 void q2_sim_trace(q2_sim *sim, const s32 start[3], const s32 end[3],
                   q2_trace *out);
 

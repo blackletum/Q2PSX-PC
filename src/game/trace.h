@@ -274,6 +274,66 @@ int q2_move(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
  */
 bool q2_move_overlaps_any(const q2_move_world *w, const s32 pos[3]);
 
+/* ------------------------------------------------------------------------- */
+/* Segment against the entity boxes — the pass every non-movement query was   */
+/* missing                                                                    */
+/* ------------------------------------------------------------------------- */
+/*
+ * A DOOR IS AN ENTITY, AND THE HULL DOES NOT CONTAIN IT.
+ *
+ * PrimaryColl and SecondaryCol are the map's static geometry. A door, a lift,
+ * a crusher and a train are Scene nodes bound to runtime objects, and their
+ * boxes live in the 48-slot entity table this file's `q2_move_world` stands
+ * for. So a query answered out of the hull alone is answered as if every door
+ * in the level were open, and the console does not do that: `0x8004874C` runs
+ * the bullet through the hull and then RE-TRACES against the entity list
+ * (`0x800544EC`), `visible` clips its sight line the same way, and
+ * `M_CheckBottom` passes a corner that reached the end of its drop to
+ * `0x80053974` before calling it a ledge.
+ *
+ * This is that second pass, in one place, because it had to be added to five
+ * callers at once and five copies of a slab test is how they drift apart.
+ *
+ * NOT `q2_move_sweep_world`, and the reason is arithmetic rather than taste:
+ * that one is the MOVE sweep, its delta goes through `sub16` and therefore
+ * wraps at 16 bits, and it keeps the LAST contact rather than the nearest.
+ * Both are right for a player's 30-unit step and both are wrong for a shot
+ * whose range is tens of thousands of units and which must stop at the FIRST
+ * thing it meets.
+ *
+ * VOLUMES ARE SKIPPED. The trigger half of the target list is not solid — a
+ * shot does not stop in a water brush and a creature can see across one — and
+ * the entity half is solid to everything, which is the same split
+ * `q2_move_sweep_world` makes when it puts the mask test inside the volume
+ * arm only.
+ */
+/* 1.0 as a 1.0.12 fraction, the scale every segment in the port is
+ * parametrised in (Q2_ONE_12 in fixed.h, restated here so this header keeps
+ * the two includes it has). */
+#define Q2_TRACE_SEG_ONE 4096
+
+typedef struct q2_move_seg_hit {
+    s32  frac;        /* 1.0.12 along from..to; 0 means the start was inside */
+    s32  pos[3];      /* the crossing point                                  */
+    s16  normal[3];   /* the face's axis normal, 1.3.12, pointing along the
+                       * ray as every other contact normal here does         */
+    s32  id;          /* the target's own handle: the MOVER's index          */
+    bool hit;
+} q2_move_seg_hit;
+
+/*
+ * The nearest ENTITY box the segment `from`..`to` crosses, or false.
+ *
+ * `inflate` is the Minkowski sum a caller with a body of its own needs: each
+ * box grows by `inflate[k]` on both faces of axis k, so the swept POINT is the
+ * swept box. NULL is a bare point, which is what a shot and a sight line are.
+ * Per axis rather than one scalar because a creature is taller than it is
+ * wide, and one scalar taken from its height would make it that wide too.
+ */
+bool q2_move_clip_segment(const q2_move_world *w, const s32 from[3],
+                          const s32 to[3], const s32 inflate[3],
+                          q2_move_seg_hit *out);
+
 /*
  * 0x800456B0 — move, and if the entity ends up somewhere it may not be, put it
  * back and try again with entity sweeping enabled.
