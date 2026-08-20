@@ -11,6 +11,7 @@
 #include "cmd_coll.h"
 #include "creworld.h"
 #include "cmd_effects.h"
+#include "cmd_explosive.h"
 #include "cmd_exe.h"
 #include "cmd_export.h"
 #include "cmd_hud.h"
@@ -170,6 +171,7 @@ static void usage(void)
     puts("  lit     <disc> [map]        gather the lights where the player starts");
     puts("  weapons <disc>              the weapon, armour and sound tables, checked");
     puts("  effects <disc>              the particle, beam and laser tables, checked");
+    puts("  explosives <disc> [map]     opcode 0x08: the destroyable brush groups");
     puts("  ai      <disc>              the creature AI, checked against the executable");
     puts("  creatures <disc>            decode every creature module and report coverage");
     puts("  ai      <disc>              the creature AI, checked against the executable");
@@ -6345,6 +6347,8 @@ int main(int argc, char **argv)
         rc = cmd_weapons(d);
     } else if (strcmp(cmd, "effects") == 0) {
         rc = cmd_effects(d, (argc >= 4) ? argv[3] : NULL);
+    } else if (strcmp(cmd, "explosives") == 0) {
+        rc = cmd_explosive(d, (argc >= 4) ? argv[3] : NULL);
     } else if (strcmp(cmd, "ai") == 0) {
         rc = cmd_ai(d);
     } else if (strcmp(cmd, "creatures") == 0) {

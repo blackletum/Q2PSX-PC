@@ -229,6 +229,22 @@ typedef struct q2_player {
     s32  fall_time;     /* client+0xD4, a level-clock deadline                */
 
     /*
+     * Water. The three fields 0x8003D254 keeps, which is the LAST call the
+     * player's frame makes (0x8003B00C) and which this port had no counterpart
+     * to at all — so entering and leaving water was silent.
+     *
+     * `wade` counts consecutive ticks in shallow water and exists only so the
+     * splash fires on the FIRST one; `water_air` is non-zero while submerged
+     * and is what makes leaving water an edge rather than a level. Retail also
+     * accumulates breath into `water_air` and drowns you on it (0x8003D300..
+     * 0x8003D448) — that half is a life-support subsystem rather than a
+     * movement one and is not implemented here, so this holds a plain latch.
+     */
+    s32  wade;          /* client+0x80                                       */
+    s32  water_air;     /* client+0x84                                       */
+    s32  splash_time;   /* client+0xD8, a level-clock deadline                */
+
+    /*
      * The other two view kicks 0x80038260 composes, kept here because it reads
      * all three out of the client record:
      *
@@ -396,7 +412,23 @@ typedef enum q2_breakable_kind {
      * name, are NOT shootable: neither constructor allocates a box or installs
      * a +0x24 callback. A shot correctly does nothing to those.
      */
-    Q2_BREAKABLE_MOVER
+    Q2_BREAKABLE_MOVER,
+
+    /*
+     * OPCODE 0x08 — the `func_explosive`, and the biggest of the four families
+     * by a long way: 224 items in the disc's zone scripts against GLASS's ten
+     * calls.
+     *
+     * Neither a CALL nor a mover. Its constructor at 0x80026A20 allocates a box
+     * PER INTACT NODE — up to four, all naming the same item — so one authored
+     * group registers as several entries here and `part` says which. Whichever
+     * of them takes the fatal shot destroys the whole group, because the hit
+     * points live in the ITEM and not in the box.
+     *
+     * The state, the geometry swap and the effects live in explosive.h; this
+     * array owns only the box the shot trace tests.
+     */
+    Q2_BREAKABLE_FXGROUP
 } q2_breakable_kind;
 
 typedef struct q2_breakable {
@@ -407,6 +439,11 @@ typedef struct q2_breakable {
     u8  count_a;        /* GLASS item[+10]: pieces per hit, from the point   */
     u8  count_b;        /* GLASS item[+12]: pieces on shattering, box-wide   */
     u8  kind;           /* q2_breakable_kind                                 */
+    /* FXGROUP: which of the item's four intact nodes this box is, and which
+     * entry of the explosive set owns it. The set is the caller's, so the
+     * index is only meaningful while that set is attached. */
+    u8  part;
+    s16 owner;
     u32 record_offset;  /* SHOOTTHEN: the record to run — obj+0x40           */
     /* MOVER: the event item the leaf was built from, which is the identity
      * q2_movers_trigger_item keys on. */
@@ -544,6 +581,31 @@ typedef struct q2_sim {
      */
     u32          breakable_open[8];
     u32          breakable_open_count;
+
+    /*
+     * THE `func_explosive` SET, borrowed the way the mover set is.
+     *
+     * It is the caller's because destroying a group changes which Scene nodes
+     * DRAW, and the hide array belongs to the client (world.h). The sim holds
+     * the pointer so that `q2_sim_breakable_shot` — which is five frames deep
+     * in the weapon path and cannot grow an argument — can reach it.
+     */
+    struct q2_explosive_set *explosives;
+
+    /*
+     * Nodes whose visibility changed this tick, drained by the owner into its
+     * hide array. Hide and show both, because a destroyed group swaps one
+     * group of nodes for another.
+     *
+     * Queued rather than written for the reason mover.h gives about `sealed`:
+     * the hide array has a second writer already — the script's OBJDRAWOFF —
+     * and an unconditional per-tick write from here would undo it.
+     */
+    struct { s16 node; u8 hidden; } node_vis[32];
+    u32          node_vis_count;
+
+    u32          explosive_destroyed;  /* groups that came apart      */
+    u32          explosive_blasts;     /* ...of those, ones that blew */
     /* The scene the panes' nodes belong to, kept so the hitscan path can throw
      * their debris without every shot carrying a scene pointer. */
     const struct q2_scene *breakable_scene;
@@ -671,6 +733,16 @@ typedef struct q2_sim {
 
     /* 0x800B29EC & 0x40 — when set, fall damage is suppressed. */
     bool no_fall_damage;
+
+    /*
+     * 0x800B3342 — the AUTOCENTRE row on the player page, and until now the one
+     * shipped setting with nothing on the other end of it.
+     *
+     * It gates the timer at 0x8003A4BC that pulls the view level while you walk
+     * (see `q2_player.autocentre`). Single player only: 0x8003A93C skips the arm
+     * outright in deathmatch.
+     */
+    bool autocentre_setting;
 
     /*
      * 0x800B29EC itself, the GAME VARIABLES word the pause menu writes (see
@@ -915,6 +987,40 @@ u32 q2_sim_attach_breakables(q2_sim *sim, const q2_scene *scene,
  */
 u32 q2_sim_breakable_shot(q2_sim *sim, const s32 from[3], const s32 to[3],
                           s16 damage);
+
+/*
+ * Put a zone's `func_explosive` groups into the same registry.
+ *
+ * One box per INTACT node, which is what 0x80026A20 allocates: a four-part
+ * group is four boxes naming one item, and a shot through any of them counts
+ * against the group's shared hit points.
+ *
+ * A group whose authored health is zero is registered but NOT damageable — the
+ * constructor's 0x80026C8C arm installs no callback — so its box is skipped
+ * here rather than made shootable. Such a group is destroyed only by a script
+ * running its item, through `q2_sim_explosive_trigger_item`.
+ *
+ * `set` is borrowed and must outlive the sim's use of it. Call after
+ * `q2_sim_attach_breakables`, which resets the registry. Returns how many boxes
+ * were added.
+ */
+u32 q2_sim_attach_explosives(q2_sim *sim, struct q2_explosive_set *set,
+                             const q2_scene *scene);
+
+/*
+ * Destroy the group the item at `item_offset` built — a script reaching an
+ * opcode-0x08 item, which the console does with damage zero.
+ *
+ * Spawns the effects and queues the visibility change, exactly as a fatal shot
+ * does. Returns true when something was destroyed.
+ */
+bool q2_sim_explosive_trigger_item(q2_sim *sim, u32 item_offset);
+
+/*
+ * Take the next queued node visibility change, or false when the queue is
+ * empty. `hidden` is 1 to stop drawing the node and 0 to resume.
+ */
+bool q2_sim_next_node_vis(q2_sim *sim, s16 *node, u8 *hidden);
 
 /*
  * Where the sim fires effects from, so a reader does not have to find them:

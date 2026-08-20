@@ -97,6 +97,25 @@ typedef struct q2_event_rt {
     void  *on_mover_user;
 
     /*
+     * An FXGROUP opcode — a `func_explosive` a script has reached, which the
+     * console destroys on the spot.
+     *
+     * 0x800276B0 dispatches the item with a2 zero, and 0x80026808 makes a zero
+     * damage argument skip the hit-point subtract and fall straight into the
+     * destruction. So a record naming one of these blows it up, the same way a
+     * record naming GLASS shatters it.
+     *
+     * Reported rather than interpreted, for the third time and the same reason:
+     * the item's identity is its chunk offset and the SET that maps it belongs
+     * to the owner (explosive.h). Without this the opcode was counted as
+     * "recognised but not implemented" and 224 destroyable groups stood intact.
+     */
+    void (*on_explosive)(void *user, const q2_event_item *item);
+    void  *on_explosive_user;
+
+    u32   explosive_count;   /* FXGROUP items the runtime has reached */
+
+    /*
      * ABORT THE REST OF THIS RECORD — the engine's own `gp[0x423C]`.
      *
      * `ONKEYDO` is a predicate: it tests the player's key bits and, when they

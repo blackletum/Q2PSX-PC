@@ -277,3 +277,12 @@ target_link_libraries(test_stxenc PRIVATE
 )
 
 add_test(NAME movie_encoder COMMAND test_stxenc)
+
+add_executable(test_explosive test_explosive.c)
+
+target_link_libraries(test_explosive PRIVATE
+    q2psx_common
+    q2psx_game
+)
+
+add_test(NAME explosive COMMAND test_explosive)

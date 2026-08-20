@@ -244,10 +244,25 @@ static q2_event_outcome run_item(q2_event_rt *rt, const q2_event_item *item)
         return Q2_EVENT_OK;
     }
 
+    case Q2_EVOP_FXGROUP:
+        /*
+         * A `func_explosive`. Reported, not interpreted — the same split as a
+         * CALL and a MOVER, and for the same reason: the set that maps an item
+         * offset to a destroyable group belongs to the owner.
+         *
+         * The console reaches this arm with damage zero (0x800276B4 sets a2 to
+         * zero itself), which its handler treats as "destroy now".
+         */
+        if (rt->on_explosive) {
+            rt->on_explosive(rt->on_explosive_user, item);
+            rt->explosive_count++;
+        }
+        return Q2_EVENT_OK;
+
     default:
-        /* FX, WAIT, FXGROUP and anything else: recognised but not yet
-         * implemented. Counting them separately from movers would imply more
-         * certainty about them than we have. */
+        /* FX, WAIT and anything else: recognised but not yet implemented.
+         * Counting them separately from movers would imply more certainty
+         * about them than we have. */
         return Q2_EVENT_OK;
     }
 }

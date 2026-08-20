@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "sim.h"
+#include "explosive.h"
 #include "trig.h"
 
 /* ------------------------------------------------------------------------- */
@@ -1154,6 +1155,13 @@ u32 q2_sim_attach_breakables(q2_sim *sim, const q2_scene *scene,
     sim->breakable_fired  = 0;
     sim->breakable_scene  = scene;
 
+    /* The explosive set is rebuilt per zone by the owner, so anything the last
+     * zone left pointing at it is stale. */
+    sim->explosives           = NULL;
+    sim->node_vis_count       = 0;
+    sim->explosive_destroyed  = 0;
+    sim->explosive_blasts     = 0;
+
     if (!scene || !sim->events_ready || !sim->userfuncs_ready)
         return 0;
 
@@ -1285,6 +1293,168 @@ u32 q2_sim_attach_breakables(q2_sim *sim, const q2_scene *scene,
     return sim->breakable_count;
 }
 
+/* ------------------------------------------------------------------------- */
+/* The `func_explosive` groups — opcode 0x08                                  */
+/* ------------------------------------------------------------------------- */
+u32 q2_sim_attach_explosives(q2_sim *sim, q2_explosive_set *set,
+                             const q2_scene *scene)
+{
+    u32 i, added = 0;
+
+    if (!sim)
+        return 0;
+
+    sim->explosives = set;
+    if (!set || !scene)
+        return 0;
+
+    if (!sim->breakable_scene)
+        sim->breakable_scene = scene;
+
+    for (i = 0; i < set->count; i++) {
+        const q2_explosive *e = &set->items[i];
+        int k;
+
+        /*
+         * A group with no hit points has no damage callback — 0x80026B10
+         * branches past the arm that installs one — so a shot must find no box
+         * to hit. Registering it anyway would make every scripted explosive
+         * shootable, which is exactly the distinction the constructor draws.
+         */
+        if (!e->damageable)
+            continue;
+
+        for (k = 0; k < Q2_EXPLOSIVE_MAX_PARTS; k++) {
+            q2_scene_node node;
+            q2_breakable *b;
+            int c;
+
+            if (e->node[k] < 0)
+                continue;
+            if (sim->breakable_count >= Q2_SIM_MAX_BREAKABLES)
+                return added;
+            if (!q2_scene_get_node(scene, (u32)e->node[k], &node))
+                continue;
+
+            b = &sim->breakable[sim->breakable_count];
+            memset(b, 0, sizeof(*b));
+            b->scene_node = e->node[k];
+            for (c = 0; c < 3; c++) {
+                /* 0x800555D8 copies the node record's own six s32 from +16, so
+                 * NOT q2_scene_node_bounds, which inflates for culling. */
+                b->bmin[c] = node.bbox_min[c];
+                b->bmax[c] = node.bbox_max[c];
+            }
+            b->health       = e->health;
+            b->kind         = (u8)Q2_BREAKABLE_FXGROUP;
+            b->part         = (u8)k;
+            b->owner        = (s16)i;
+            b->item_offset  = e->item_offset;
+            b->record_offset = e->record_offset;
+            sim->breakable_count++;
+            added++;
+        }
+    }
+
+    return added;
+}
+
+static void node_vis_push(q2_sim *sim, s16 node, u8 hidden)
+{
+    u32 cap = sizeof(sim->node_vis) / sizeof(sim->node_vis[0]);
+
+    if (node < 0 || sim->node_vis_count >= cap)
+        return;
+    sim->node_vis[sim->node_vis_count].node   = node;
+    sim->node_vis[sim->node_vis_count].hidden = hidden;
+    sim->node_vis_count++;
+}
+
+bool q2_sim_next_node_vis(q2_sim *sim, s16 *node, u8 *hidden)
+{
+    u32 i;
+
+    if (!sim || !sim->node_vis_count)
+        return false;
+
+    if (node)   *node   = sim->node_vis[0].node;
+    if (hidden) *hidden = sim->node_vis[0].hidden;
+
+    /* A queue rather than a stack: the console applies the hide and the show in
+     * the order the handler emits them, and a group that reveals the node it
+     * also hides would otherwise settle the wrong way. */
+    for (i = 1; i < sim->node_vis_count; i++)
+        sim->node_vis[i - 1] = sim->node_vis[i];
+    sim->node_vis_count--;
+    return true;
+}
+
+/*
+ * Turn one destruction into effects and visibility changes.
+ *
+ * The port's stand-in for `0x8005A778` is the PARTICLE explosion — see
+ * explosive.h for why, and for what changes here when the model-entity
+ * explosion exists.
+ */
+static void explosive_apply(q2_sim *sim, const q2_explosive_result *res)
+{
+    u32 i;
+
+    for (i = 0; i < res->burst_count; i++) {
+        const q2_explosive_burst *b = &res->burst[i];
+        q2_scene_node node;
+
+        if (b->explode) {
+            fx_at(sim, Q2_FX_EXPLOSION, b->at);
+            sim->explosive_blasts++;
+        }
+
+        /* The origin argument is zero at 0x80026970, so the pieces scatter
+         * through the node's whole box rather than out of a point. */
+        if (sim->breakable_scene && b->pieces &&
+            q2_scene_get_node(sim->breakable_scene, (u32)b->node, &node))
+            sim->breakable_pieces +=
+                q2_sim_debris_burst(sim, node.bbox_min, node.bbox_max, NULL,
+                                    b->pieces, 0);
+    }
+
+    for (i = 0; i < res->hide_count; i++)
+        node_vis_push(sim, res->hide[i], 1);
+    for (i = 0; i < res->show_count; i++)
+        node_vis_push(sim, res->show[i], 0);
+
+    if (res->destroyed)
+        sim->explosive_destroyed++;
+}
+
+/* Mark every registered box of a destroyed group dead, so a second shot finds
+ * nothing — 0x80068818 frees each node's box as it hides it. */
+static void explosive_free_boxes(q2_sim *sim, u32 item_offset)
+{
+    u32 i;
+
+    for (i = 0; i < sim->breakable_count; i++)
+        if (sim->breakable[i].kind == Q2_BREAKABLE_FXGROUP &&
+            sim->breakable[i].item_offset == item_offset)
+            sim->breakable[i].broken = true;
+}
+
+bool q2_sim_explosive_trigger_item(q2_sim *sim, u32 item_offset)
+{
+    q2_explosive_result res;
+
+    if (!sim || !sim->explosives)
+        return false;
+
+    if (!q2_explosive_trigger_item(sim->explosives, item_offset, false,
+                                   sim->breakable_scene, &res))
+        return false;
+
+    explosive_apply(sim, &res);
+    explosive_free_boxes(sim, item_offset);
+    return true;
+}
+
 /*
  * Segment against an axis-aligned box: the standard slab test, in the fixed
  * point everything here is in.
@@ -1412,6 +1582,51 @@ u32 q2_sim_breakable_shot(q2_sim *sim, const s32 from[3], const s32 to[3],
                 sim->breakable_open[sim->breakable_open_count++] =
                     b->item_offset;
             return 0;
+        }
+
+        /*
+         * A `func_explosive`. The router (0x8002EF1C) hands the callback the
+         * ITEM, the node whose box was hit and the amount, and everything the
+         * exec does with them lives in explosive.c — including the hit burst,
+         * which comes out of the node's whole box rather than the impact point
+         * the way GLASS's does.
+         */
+        if (b->kind == Q2_BREAKABLE_FXGROUP) {
+            q2_explosive_result res;
+            q2_scene_node hit;
+
+            if (!sim->explosives || b->owner < 0)
+                return 0;
+
+            sim->breakable_hits++;
+
+            if (!q2_explosive_damage(sim->explosives, (u32)b->owner,
+                                     (int)b->part, damage, false,
+                                     sim->breakable_scene, &res)) {
+                /* Survived. The per-hit burst still ran — 0x80026820 precedes
+                 * the survival test. */
+                if (res.hit_pieces && res.hit_node >= 0 &&
+                    sim->breakable_scene &&
+                    q2_scene_get_node(sim->breakable_scene,
+                                      (u32)res.hit_node, &hit))
+                    made += q2_sim_debris_burst(sim, hit.bbox_min, hit.bbox_max,
+                                                NULL, res.hit_pieces, 0);
+                b->health = sim->explosives->items[b->owner].health;
+                sim->breakable_pieces += made;
+                return made;
+            }
+
+            if (res.hit_pieces && res.hit_node >= 0 &&
+                sim->breakable_scene &&
+                q2_scene_get_node(sim->breakable_scene,
+                                  (u32)res.hit_node, &hit))
+                made += q2_sim_debris_burst(sim, hit.bbox_min, hit.bbox_max,
+                                            NULL, res.hit_pieces, 0);
+
+            explosive_apply(sim, &res);
+            explosive_free_boxes(sim, b->item_offset);
+            sim->breakable_pieces += made;
+            return made;
         }
 
         if (b->kind == Q2_BREAKABLE_SHOOTTHEN) {

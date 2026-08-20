@@ -97,7 +97,7 @@
  * rebasing.
  *
  * ---------------------------------------------------------------------------
- * Opcode 0x08 is NOT a mover
+ * Opcode 0x08 is NOT a mover — it is the `func_explosive`
  * ---------------------------------------------------------------------------
  * An earlier pass grouped it with 0x03/0x04/0x05. Its handler at 0x800267C4
  * contains no x300 scaling, no reference to the runtime object array, and no
@@ -106,6 +106,27 @@
  * a Scene flag. Byte +24 is a parameter, not a speed, and byte +25 is SIGNED.
  * The zone diff corroborates: across the 53 differing zone copies, 0x08 differs
  * at +6..+21 and +26 and never at +24 or +25.
+ *
+ * SOLVED, and the whole of it now lives in `src/game/explosive.h`. It is a
+ * DESTROYABLE BRUSH GROUP: the first array is the intact geometry, given a
+ * damageable box each and hidden when the group's hit points run out, and the
+ * second is the wreckage, hidden at load and shown in its place. `+25`'s sign
+ * selects a detonation — `0x8005A778`, the same spawner the creature import
+ * table calls `spawn_explosion` — and its one's complement is the debris count.
+ *
+ * The old name `FXGROUP` survives below because 224 items on the disc and every
+ * report this port has ever printed use it, but it is a misnomer: the effects
+ * are the smaller half of what the opcode does.
+ *
+ * WHY IT LOOKED LIKE A MOVER, which is worth writing down because the
+ * resemblance is not a coincidence. Bytes +2..+5 are read by NEITHER handler —
+ * there is no load at those offsets anywhere in 0x800267C4 or 0x80026A20 — yet
+ * they are non-zero on all 288 items on the disc and take only seven distinct
+ * values, every one of which decodes as two small s16. That is exactly
+ * MOVER_A's `travel` at +2 and `speed` at +4. The opcode shares the movers'
+ * header shape and ignores the two fields, which is precisely the sort of thing
+ * that makes a census group it with them. `q2psx-inspect explosives` prints the
+ * seven values.
  *
  * ---------------------------------------------------------------------------
  * What is still open
@@ -116,9 +137,14 @@
  * namespaces, and the three record category bits 0x08/0x10/0x20.
  *
  * Consequence for the port: the trigger, arm and disarm graph, zone gates,
- * level progression and teleports are all usable now. DOORS AND LIFTS ARE NOT,
+ * level progression and teleports are all usable now.
+ *
+ * STALE TEXT REMOVED. This paragraph used to end "DOORS AND LIFTS ARE NOT,
  * because the link from a script slot to a moving object is manufactured at
- * load time by code that has not been decoded.
+ * load time by code that has not been decoded." Both halves stopped being true:
+ * mover.h decodes the link and declines to reproduce the rewrite on purpose,
+ * and explosive.h does the same for opcode 0x08's constructor. What remains
+ * undecoded is the list above it, not the movers.
  */
 #ifndef Q2PSX_EVENTS_H
 #define Q2PSX_EVENTS_H
