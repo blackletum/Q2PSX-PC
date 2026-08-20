@@ -10800,8 +10800,48 @@ static void client_draw_view(void *user, q2_screen *s, int p,
                         mdl, (u32)frame * Q2_CRE_TICKS_PER_FRAME,
                         &clip, &within);
 
+                /*
+                 * AND `within` IS IN FRAMES WHERE `q2_model_pose_at` WANTS
+                 * TENTHS. Passing it straight through ran every creature's
+                 * animation at a TENTH of its extent.
+                 *
+                 * `q2_model_anim_at` and `_at_held` walk the clip chain in
+                 * whole model frames and hand back the offset in the same unit
+                 * (model.c: `if (tick < out->frames) *within = tick`). The
+                 * position that reaches them has already been divided by ten
+                 * above, for exactly that reason. `q2_model_pose_at` is the
+                 * other unit: it computes `duration = clip->frames * 10`,
+                 * clamps to `duration - 10`, and indexes `clip->offset + 8 +
+                 * (tick / 10) * 4`. The console agrees — 0x8006B520 clamps the
+                 * incoming position to `clip[0] - 10`, and the uniform path at
+                 * 0x8006BA70 is a magic divide by ten before a 4-byte index.
+                 * Ten position units are one model frame on both sides.
+                 *
+                 * So the Soldier's Death6 was asking for `within` 0, 3, 6 … 27
+                 * across its ten AI frames and being posed at model frames
+                 * 0, 0, 0, 0, 1, 1, 1, 2, 2, 2 — 2.7 of the clip's thirty. The
+                 * move still took exactly one second, which is why the AI trace
+                 * looked correct; what was wrong was how far through the
+                 * animation that second got. A body barely left its first pose
+                 * before the move ended and it froze there.
+                 *
+                 * NOT a death bug. The Soldier's Walk is a 21-frame clip over
+                 * seven AI frames and was getting 1.8 of them, so every
+                 * creature on the disc was near-frozen in every animation.
+                 *
+                 * This is the console's own arithmetic rather than a scale
+                 * factor: the console computes `within` in tenths directly, and
+                 * `(pos/10 - sum(frames)) * 10` equals `pos - 10*sum(frames)`
+                 * whenever `pos` is a multiple of ten — which it always is here,
+                 * because `pos = start*5 + 30*into` and every block-D start is
+                 * even. The port's own inspector has had it right all along
+                 * (tools/q2psx-inspect/main.c multiplies by
+                 * Q2_MODEL_TICKS_PER_FRAME), which is what made the two
+                 * disagree about the same model.
+                 */
                 if (have_clip)
-                    posed = (q2_model_pose_at(mdl, &clip, within,
+                    posed = (q2_model_pose_at(mdl, &clip,
+                                              within * Q2_MODEL_TICKS_PER_FRAME,
                                               pose) == Q2_OK);
             }
 
