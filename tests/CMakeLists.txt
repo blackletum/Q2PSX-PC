@@ -152,6 +152,15 @@ target_link_libraries(test_multiplayer PRIVATE
 
 add_test(NAME multiplayer COMMAND test_multiplayer)
 
+add_executable(test_playerdeath test_playerdeath.c)
+
+target_link_libraries(test_playerdeath PRIVATE
+    q2psx_common
+    q2psx_game
+)
+
+add_test(NAME player_death COMMAND test_playerdeath)
+
 add_executable(test_effect test_effect.c)
 
 target_link_libraries(test_effect PRIVATE

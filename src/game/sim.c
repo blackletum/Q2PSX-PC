@@ -6,6 +6,7 @@
 #include "entitydraw.h"   /* q2_entity_resolve_model */
 #include "levelbin.h"     /* q2_levelbin_scene — the title screen's objects */
 #include "pad.h"          /* the default control style */
+#include "playerdeath.h" /* the death voice's own rule */
 #include "reloc.h"        /* q2_level_module_load */
 #include "trig.h"
 
@@ -2250,11 +2251,33 @@ static void update_pain(q2_sim *sim)
      */
     if (health <= 0) {
         if (p->prev_health > 0) {
-            q2_ent_sound_at(&sim->ent_world.events,
-                            (p->ent.flags & Q2_ENT_UNDERWATER)
-                                ? Q2_SND_DROWN : Q2_SND_DEATH,
-                            p->pos);
-            /* The camera builder's own gate — see Q2_ENT2_DEAD. */
+            /*
+             * AND NOT EVERY DEATH IS AUDIBLE. The voice belongs to the death
+             * handler rather than to this function, and 0x80039728 skips it
+             * outright unless entity+222 is -1 — so only a death nobody is
+             * credited with cries out. A player shot by somebody dies in
+             * silence, and the port had been raising pla_death4 for all of
+             * them because this is where it first noticed the crossing.
+             *
+             * `q2_player_death_cries_out` is that test, including 0x800396CC's
+             * correction: acid and lava erase the attacker first, so dying in
+             * the level's own hazards IS audible however you came to be
+             * standing in them.
+             */
+            if (q2_player_death_cries_out(sim->combat.self.last_attacker,
+                                          sim->combat.self.last_mod))
+                q2_ent_sound_at(&sim->ent_world.events,
+                                (p->ent.flags & Q2_ENT_UNDERWATER)
+                                    ? Q2_SND_DROWN : Q2_SND_DEATH,
+                                p->pos);
+            /*
+             * The camera builder's own gate — see Q2_ENT2_DEAD. The console
+             * raises this bit in the CORPSE think (0x80039640/0x80039694) and
+             * not here; the sim keeps its own copy a tick early because its
+             * movement gates need one whether or not a client is driving the
+             * death chain. `playerdeath.c` owns the other copy and the client
+             * ORs the two together.
+             */
             p->ent2_flags |= Q2_ENT2_DEAD;
         }
     } else if (hurt && sim->level_time > p->pain_time) {

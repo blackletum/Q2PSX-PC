@@ -9059,3 +9059,79 @@ into this one.
 
       It also takes about 900 frames to arrive, so a short run reads as "it did not fire" when what
       happened is that the record it sits in is deferred.
+
+- [x] 130. **The player's death was one frame long, and the console gives it five functions.** What the
+      port had was `if (health <= 0) { score it; open page 41; }` — the first tick of a death and nothing
+      after it. `0x800396AC` is not the end of the subject, it is the start of a chain, and the chain is
+      handed along through the entity's think pointer at `+0x3C`:
+
+          0x8003A1C8  the player think   the gate at 0x8003ADB8, and the handler's only caller
+          0x800396AC  player_die         runs ONCE, because it overwrites +0x3C with the next one
+          0x80039550  corpse_think       the body, every tick
+          0x8003E238  respawn_think      the corpse timer, deathmatch only
+          0x8005B358  body_fade          the body shrinking out of the world
+          0x8003CE14  player_anim        which of the player's ten moves plays
+
+      Six things in it are behaviour the port did not have, and four of them are visible.
+
+      **Not every death makes a sound.** `0x80039728` is `bne s1, -1` around the sound call, and `s1` is
+      the killer byte at `entity+222` — so the death cry is raised only for a death **nobody is credited
+      with**. A player shot by another player dies silently. The port had been raising `pla_death4` from
+      `update_pain` for every death, because `update_pain` is where it first noticed a health crossing,
+      and on the console `update_pain` is never even reached on the killing tick: the gate's arm ends
+      `j 0x8003B014` and skips the rest of the think. The rule composes with `0x800396CC`'s correction —
+      acid and lava erase the attacker first — so dying in the level's own hazards IS audible however you
+      came to be standing in them, and being clawed by a Berserk is too, because a creature is not a
+      player either.
+
+      **A single-player death walks back to the front end by itself.** The handler's last block is
+      `if (state == 1 || state == 2) { state = 3; deadline = clock + 1200; }`. `0x80041D30` spends that
+      deadline every frame and only pushes it out again while the state is *not* 3 — so setting 3 is what
+      arms it rather than what disarms it. When it expires it writes game-state request **8**, and 8 is
+      `0x8004149C`, which stores `"MagazineExtrQFront"` as the next module. Leave the death screen alone
+      and the console goes back to the title on its own. Nothing in the port did.
+
+      **The engine never respawns anybody.** `corpse_think` in deathmatch waits for the death animation to
+      finish (`entity+0x102`, whose bit 0 `0x8003DF90` raises when the frame cursor walks past the move's
+      end), flattens the body's collision box to 143 on Y, and hands it to `respawn_think` — which counts
+      the 1500 at `+0xF4` away and then installs `body_fade`, and `body_fade` takes `dt << 4` off the
+      scale at `+0xFC` until the model is released. That is the whole of it: the body animates, lies
+      there for five seconds and dissolves. `0x8003DDF8` is the only thing on the disc that puts a player
+      back, and it has **one caller** — `0x8003DECC`, the mode gate this port already carries as
+      `q2_mp_may_respawn` — plus one materialised constant, slot 12 of the engine block, which is
+      QMULTI.C's. Respawning is the map module's decision and the engine's death chain has no opinion.
+
+      **The player has an animation set, and it is not a creature's.** Ten names, looked up in order at
+      `0x8003C5F8..0x8003CBFC` and living twelve bytes apart from `0x800AC554`: `Stand`, `Run`, `Attak`,
+      `Death 1`, `Death 2`, `Death 3`, `Jump`, `Pain 1`, `Pain 2`, `Pain 3`. The six ids the code passes
+      map onto them as 0 STAND, 1 RUN, 2 JUMP, 3 PAIN (`rand() % 3`), 4 DEATH (`rand() % 3`), 5 ATTACK —
+      note that the ids and the pool are in different orders, which is why the table has to be keyed by
+      name. Two rules are stated twice each in the function and both matter to a death: a death move is
+      never replaced by anything, and a pain move holds until it has played out unless the request is
+      DEATH.
+
+      **`entity+0x44` has two lives.** While a player is alive it is a model pointer — the handler
+      releases it if it is not NULL, which is id's "remove linked weapon model" — and the same word is
+      then written with **-40** and read by `corpse_think` and `respawn_think` as the gib threshold. And
+      `client->[0]->[288] = 0` is the 784-byte player record at `0x800D5C30 + i*784` forgetting its
+      entity, the back-pointer `0x8003B474` wrote at spawn.
+
+      **RESUPPLY was a second RESTART.** `0x8001FF0C` is `*(u8*)0x800B335D -= 1` and it is the only write
+      to that byte in the executable; the byte is the "Continues" count the death page's middle row greys
+      itself on (`0x8001D774`, and the debug line the handler prints is literally `"Continues %d
+"`).
+      The port had both rows calling `client_load_zone` and nothing else, so the count never moved. It is
+      BSS on the console, so it starts at zero and the row starts greyed — which is why the decrement can
+      never underflow there, and why the port clamps rather than wrapping a byte to 255. `--continues N`
+      seeds it so the path is reachable.
+
+      **And one defect the rework removed rather than added.** `client_score_deaths` already walked all
+      four players and attributed each death from that player's own `last_attacker`; the inline death
+      block then scored player 0 **again**, with a hard-coded killer of `-1`. In a deathmatch a local
+      player who was shot therefore lost a frag to a fabricated suicide on top of the correct award to
+      their killer. The scoring now happens in one place.
+
+      `q2psx-inspect death` checks the reconstruction against the disc's own executable — every constant
+      compared as an encoded instruction word, not as a disassembly — and `tests/test_playerdeath.c` pins
+      the behaviour: which deaths cry out, that the handler is a one-shot, that a single-player body lies
+      where it fell for ever while a deathmatch one dissolves on schedule, and that -40 exactly gibs.

@@ -21,6 +21,7 @@
 #include "cmd_menu.h"
 #include "cmd_pmove.h"
 #include "cmd_save.h"
+#include "cmd_death.h"
 #include "cmd_multi.h"
 #include "cmd_ai.h"
 #include "cmd_creatures.h"
@@ -184,6 +185,7 @@ static void usage(void)
     puts("  menu    <disc> [page] [out.ppm] [WxH]  the menu, checked against the executable");
     puts("  save    <disc> [map] [out]   the save system, round-tripped against a map");
     puts("  multi   <disc> [map]        the multiplayer runtime, checked against the disc");
+    puts("  death   <disc>              the player death chain, checked against the executable");
     puts("  screen  <disc>              display, viewports and the OT, checked");
     puts("  viewweapon <disc> [weapon] [out.ppm] [map] [zone] [hold] [ref.ppm]");
     puts("                              the weapon in hand, checked against the executable");
@@ -6355,6 +6357,8 @@ int main(int argc, char **argv)
         rc = cmd_creatures(d);
     } else if (strcmp(cmd, "multi") == 0) {
         rc = cmd_multi(d, (argc >= 4) ? argv[3] : NULL);
+    } else if (strcmp(cmd, "death") == 0) {
+        rc = cmd_death(d);
     } else if (strcmp(cmd, "text") == 0) {
         rc = cmd_text(d, (argc >= 4) ? argv[3] : NULL,
                       (argc >= 5) ? argv[4] : NULL);

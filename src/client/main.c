@@ -999,6 +999,12 @@ typedef struct client {
     u32               explosive_boxes;     /* shootable parts registered  */
     u32               explosive_scripted;  /* groups a script blew up     */
     u32               explosive_vis;       /* node show/hide changes made */
+    /* Detonation reports that started a voice, and ones that did not — no
+     * audio device, or the name is not in this map's bank. Counted apart for
+     * the same reason `mover_sounds_missed` is: a headless run must not read
+     * as proof that anything was heard. */
+    u32               explosive_sounds;
+    u32               explosive_sounds_missed;
     bool              mission_after_map; /* the screen is holding a LOADMAP */
     /*
      * Has this level put a frame on the screen yet? Cleared by every zone load
@@ -1109,6 +1115,7 @@ typedef struct client {
     /* 0x800B2A10: armed by a single-player death, and when it runs out the
      * console loads QFRONT by itself. */
     s32               death_abandon;
+    bool              death_abandoned; /* it ran out; the main loop acts    */
     u32               death_bodies;   /* bodies that reached the fade          */
     u32               death_gibs;
     u32               death_respawns;
@@ -2565,8 +2572,6 @@ static void client_sync_parked_health(client *c)
 /* ------------------------------------------------------------------------- */
 /* The player death chain                                                     */
 /* ------------------------------------------------------------------------- */
-static void client_enter_front_end(client *c);
-
 /*
  * Put a dead player back — 0x8003DDF8, which is the ONLY thing on the console
  * that respawns anybody, and which the engine itself never calls: its one
@@ -2673,22 +2678,31 @@ static bool client_load_zone(client *c, const char *map, int index);
 static void client_music_for_level(client *c, bool force);
 
 /*
- * How long a headless run holds the MISSION screen before going on. Long
- * enough that a `--shot` lands on it, short enough that a scripted run through
- * several levels does not spend its whole frame budget on intermissions.
+ * How long a headless run holds each of the three screens a transition puts up
+ * — the arrival briefing, the unit tally and the end-of-mission placard —
+ * before going on. Long enough that a `--shot` lands on one, short enough that
+ * a scripted run through several levels does not spend its whole frame budget
+ * on intermissions. Windowed, only the briefing releases itself; the other two
+ * wait for the press their prompt asks for, as the console does.
  */
 #define Q2_INTERMISSION_HEADLESS 45
 
 /*
- * And how long one stays up in a WINDOW before releasing itself.
+ * And how long the ARRIVAL BRIEFING stays up in a window before releasing
+ * itself. Not the tally, which has no timeout here or on the console: it is
+ * dismissed by a press latched inside `0x80018ED8`'s spin loop (0x80018214),
+ * and this port draws the prompt that says so.
  *
- * A PORT CONSTANT. The console's tally is dismissed by a pad press latched
- * inside its own spin loop (0x80018214) and has no timeout at all — but it
- * also draws a prompt telling you to press something, which this port does not
- * reconstruct for the tally. Ten seconds at 30 fps, so a player who does not
- * press anything is not stranded, and a player who does leaves at once.
+ * READ, not chosen. The panel is raised by `0x800213B0`, and every raise in the
+ * executable passes 15 as its second argument — `0x80021380` inside the setter
+ * `0x80021250`, and `0x800203AC` from the pause menu's MISSION row. Its own
+ * tick at `0x80021818` counts that deadline down by the frame delta and calls
+ * `0x800213B0(0, ...)` when it reaches zero. So fifteen seconds is the panel's,
+ * which is what `briefing.h` already carries as Q2_BRIEFING_SECONDS; the ten
+ * this used to be was invented for the tally and inherited by the briefing when
+ * the two shared a release.
  */
-#define Q2_INTERMISSION_WINDOW   300
+#define Q2_INTERMISSION_WINDOW   (Q2_BRIEFING_SECONDS * 30)
 
 /*
  * The beat between a difficulty being confirmed and the opening reel starting.
@@ -6844,6 +6858,23 @@ static void client_input_simulated(client *c, float dt)
             }
         }
 
+        /*
+         * AND WHAT A DETONATION SOUNDS LIKE. `wep_grenlx1` at the box centre —
+         * 0x8002695C, whose handle at 0x800B27F8 this is the only reader of in
+         * the whole executable. Positioned rather than flat, because the
+         * console passes the same point it passes the explosion.
+         */
+        {
+            s32 at[3];
+
+            while (q2_sim_next_blast(&c->sim[0], at)) {
+                if (client_play_sound_at(c, Q2_EXPLOSIVE_SOUND, at))
+                    c->explosive_sounds++;
+                else
+                    c->explosive_sounds_missed++;
+            }
+        }
+
         if (c->movers_ready) {
 
             /*
@@ -7194,12 +7225,22 @@ static void client_input_simulated(client *c, float dt)
              * two are the client's. The body has to have finished falling
              * first, which is the same test the corpse think makes.
              */
-            if (c->mp_enabled && d->stage != Q2_PDEATH_DYING &&
+            if (c->mp_enabled && c->mp.end == Q2_MP_RUNNING &&
+                d->stage != Q2_PDEATH_DYING &&
                 q2_mp_may_respawn(&c->mp) && !c->menu.open && !c->mcard_open) {
-                bool ask = (pi != 0);   /* the parked players do not press it */
+                /*
+                 * The local player answers with the button. The parked ones
+                 * have nobody to press it, so they wait for their own body —
+                 * the 1500 the corpse think installs — and come back when it
+                 * has dissolved. STATED as the port's choice: on the console
+                 * the module decides, and the module is driven by a pad.
+                 */
+                bool ask = (pi == 0)
+                               ? (pad.buttons & ~pad.prev & (u16)bind.fire) != 0
+                               : (d->stage == Q2_PDEATH_FADING ||
+                                  d->stage == Q2_PDEATH_GONE ||
+                                  d->stage == Q2_PDEATH_GIBBED);
 
-                if (pi == 0)
-                    ask = (pad.buttons & ~pad.prev & (u16)bind.fire) != 0;
                 if (ask)
                     client_mp_respawn(c, pi);
             }
@@ -7214,8 +7255,11 @@ static void client_input_simulated(client *c, float dt)
         if (q2_player_abandon_tick(&c->death_abandon, tick)) {
             Q2_INFO("death: unanswered for %d ticks — back to the front end",
                     Q2_PDEATH_ABANDON_TICKS);
-            q2_menu_close(&c->menu);
-            client_enter_front_end(c);
+            /* RAISED, NOT ACTED ON. Going to the front end loads a map, and
+             * the load frees the zone this function is still standing in —
+             * the same reason the zone gate is deferred. The main loop takes
+             * it beside the other transitions. */
+            c->death_abandoned = true;
         }
     }
 
@@ -9160,11 +9204,13 @@ static void client_write_shot(client *c, bool numbered)
                 c->sim[0].breakable_count, c->sim[0].breakable_hits,
                 c->sim[0].breakable_pieces, c->sim[0].breakable_fired);
         Q2_INFO("  explosive %u groups, %u shootable parts; %u destroyed"
-                " (%u by script), %u detonated, %u node show/hide",
+                " (%u by script), %u detonated, %u node show/hide,"
+                " %u reports played (%u not in bank)",
                 c->explosives_ready ? c->explosives.count : 0u,
                 c->explosive_boxes, c->sim[0].explosive_destroyed,
                 c->explosive_scripted, c->sim[0].explosive_blasts,
-                c->explosive_vis);
+                c->explosive_vis, c->explosive_sounds,
+                c->explosive_sounds_missed);
         Q2_INFO("  script    %u strings, %u sounds, %u gated by ONKEYDO, "
                 "%u nodes hidden, %u summoned, %u teleports, %u timers, %u resumed,"
                 " %u records retired",
@@ -12936,6 +12982,16 @@ no_window:
          * frame's teleporting are never averaged into the same displacement.
          */
         client_zone_watch(&c);
+
+        /* The death screen was never answered — 0x800B2A10 ran out and the
+         * console asked for game state 8, which loads QFRONT. Here rather than
+         * in the frame for the same reason the zone gate is. */
+        if (c.death_abandoned) {
+            c.death_abandoned = false;
+            c.death_abandon   = 0;
+            q2_menu_close(&c.menu);
+            client_enter_front_end(&c);
+        }
 
         /* A zone gate fired somewhere in the script: another zone of the same
          * map. Deferred to here because the gate fires inside the tick, and
