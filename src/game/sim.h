@@ -594,6 +594,14 @@ typedef struct q2_sim {
     struct q2_explosive_set *explosives;
 
     /*
+     * The map's CastList, so a detonation can bind the `Explosion` MODEL
+     * ENTITY (modelent.h). Borrowed, and set by whichever attach was given
+     * one; NULL simply means no effect model, which is what a map with no such
+     * entry gets anyway.
+     */
+    const struct q2_model_bank *model_bank;
+
+    /*
      * Nodes whose visibility changed this tick, drained by the owner into its
      * hide array. Hide and show both, because a destroyed group swaps one
      * group of nodes for another.
@@ -607,6 +615,7 @@ typedef struct q2_sim {
 
     u32          explosive_destroyed;  /* groups that came apart      */
     u32          explosive_blasts;     /* ...of those, ones that blew */
+    u32          explosive_models;     /* ...and ones that spawned a model */
 
     /*
      * WHERE each detonation happened, so the owner can place `wep_grenlx1a`.

@@ -103,6 +103,10 @@ q2_result q2_sim_attach_items(q2_sim *sim, const q2_common_file *common,
     q2_entity_world_init(&sim->ent_world);
     sim->entities_ready = false;
 
+    /* Kept so a detonation can bind the `Explosion` model entity without the
+     * bank having to reach five frames down the weapon path (modelent.h). */
+    sim->model_bank = bank;
+
     /*
      * The world's view of the session. `multiplayer` is 0x800AEBCC, which is
      * the same flag the item handlers read to double an ammo box and the same

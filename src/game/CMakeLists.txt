@@ -48,6 +48,8 @@ add_library(q2psx_game STATIC
     monster.h
     modeldraw.c
     modeldraw.h
+    modelent.c
+    modelent.h
     briefing.c
     briefing.h
     mission.c

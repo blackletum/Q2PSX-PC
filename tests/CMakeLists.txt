@@ -295,3 +295,12 @@ target_link_libraries(test_explosive PRIVATE
 )
 
 add_test(NAME explosive COMMAND test_explosive)
+
+add_executable(test_modelent test_modelent.c)
+
+target_link_libraries(test_modelent PRIVATE
+    q2psx_common
+    q2psx_game
+)
+
+add_test(NAME modelent COMMAND test_modelent)

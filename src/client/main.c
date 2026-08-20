@@ -1006,6 +1006,9 @@ typedef struct client {
      * Deliberately not "played": a headless run has no audio device and would
      * report every one of them as missing — the mistake the creature sound
      * counter already made and now documents. */
+    u32               ent_drawn;      /* entity draws the OT accepted   */
+    u32               ent_no_model;   /* ...and ones the bank could not resolve */
+    u32               ent_faces;
     u32               explosive_sounds;
     u32               explosive_sounds_missed;
     bool              mission_after_map; /* the screen is holding a LOADMAP */
@@ -9236,12 +9239,16 @@ static void client_write_shot(client *c, bool numbered)
                 c->sim[0].breakable_pieces, c->sim[0].breakable_fired);
         Q2_INFO("  explosive %u groups, %u shootable parts; %u destroyed"
                 " (%u by script), %u detonated, %u node show/hide,"
-                " %u reports the bank carries (%u it does not)",
+                " %u reports the bank carries (%u it does not),"
+                " %u Explosion models spawned",
                 c->explosives_ready ? c->explosives.count : 0u,
                 c->explosive_boxes, c->sim[0].explosive_destroyed,
                 c->explosive_scripted, c->sim[0].explosive_blasts,
                 c->explosive_vis, c->explosive_sounds,
-                c->explosive_sounds_missed);
+                c->explosive_sounds_missed,
+                c->sim[0].explosive_models);
+        Q2_INFO("  entities  %u drawn (%u faces), %u could not resolve a model",
+                c->ent_drawn, c->ent_faces, c->ent_no_model);
         Q2_INFO("  script    %u strings, %u sounds, %u gated by ONKEYDO, "
                 "%u nodes hidden, %u summoned, %u teleports, %u timers, %u resumed,"
                 " %u records retired",
@@ -10501,6 +10508,12 @@ static void client_draw_view(void *user, q2_screen *s, int p,
         ectx.coll          = c->sim[0].coll_ready ? &c->sim[0].coll : NULL;
 
         q2_entity_build_ot(&c->sim[0].entities, &ectx, &c->cam, ot, gte, &estats);
+        /* Model entities are drawn through the same walk items are, so the
+         * only way to tell a spawned Explosion from a silently-dropped one
+         * is to count what the walk actually emitted. */
+        c->ent_drawn    += estats.drawn;
+        c->ent_no_model += estats.no_model;
+        c->ent_faces    += estats.faces_emitted;
     }
 
     /*

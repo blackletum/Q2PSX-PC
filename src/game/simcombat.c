@@ -19,6 +19,7 @@
 
 #include "sim.h"
 #include "explosive.h"
+#include "modelent.h"
 #include "trig.h"
 
 /* ------------------------------------------------------------------------- */
@@ -1427,6 +1428,23 @@ static void explosive_apply(q2_sim *sim, const q2_explosive_result *res)
         q2_scene_node node;
 
         if (b->explode) {
+            /*
+             * THE MODEL ENTITY, which is what 0x80026950 actually spawns —
+             * `0x8005A778`, the creature import table's `spawn_explosion`. This
+             * used to be the particle burst alone and explosive.h said so out
+             * loud; the burst stays because the console throws debris here too,
+             * but the flash is now the `Explosion` model animating and shrinking
+             * over its own 400-unit life (modelent.h).
+             *
+             * A map whose CastList carries no `Explosion` gets no entity, which
+             * is the console's own behaviour: 0x8005A894 abandons the spawn.
+             */
+            if (sim->entities_ready &&
+                q2_model_ent_spawn(&sim->entities, sim->model_bank,
+                                   Q2_MODEL_ENT_EXPLOSION, b->at,
+                                   (u8)b->scale))
+                sim->explosive_models++;
+
             fx_at(sim, Q2_FX_EXPLOSION, b->at);
             sim->explosive_blasts++;
 

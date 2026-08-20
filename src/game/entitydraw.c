@@ -38,9 +38,20 @@ bool q2_entity_resolve_model(q2_entity *e, const q2_model_bank *bank)
     e->model_bank  = bank;
 
     /*
-     * The clip length the think wraps the frame against. The engine reads it
-     * from the CastList node (`lh model[+2]` at 0x80059404), which is the
-     * duration of the clip the entity is playing. The item table names up to two
+     * The clip length the think wraps the frame against.
+     *
+     * CORRECTION — this used to say the engine's `lh model[+2]` (0x80059404) is
+     * "the duration of the clip the entity is playing". It is not. Compared
+     * across all 1,723 models on the disc, +2 equals the first clip's length on
+     * 1,496 and those 1,496 are exactly the single-clip models; against the SUM
+     * of every clip's frames it agrees 1,723 of 1,723. Soldier reads 1302 there
+     * against a first clip of 108. `q2psx-inspect modelents` runs that
+     * comparison.
+     *
+     * So +2 is the model's TOTAL animation length. What an ITEM wants is still
+     * the clip it is playing, which is what this resolves — the two coincide on
+     * every item on the disc because every item model has one clip, and saying
+     * so is cheaper than discovering it again. The item table names up to two
      * clips in its `extra` list; the first is what a spawned item plays, and an
      * item with no clip named holds its rest pose.
      */
@@ -76,7 +87,18 @@ bool q2_entity_resolve_model(q2_entity *e, const q2_model_bank *bank)
              * from `pos`, so it does not matter that the spawn already set one.
              */
             e->model_offset = m.hdr.ext2;
-            e->origin[1]    = e->pos[1] + Q2_EYE_BASE - e->model_offset;
+
+            /*
+             * ...AND ONLY FOR AN ITEM. A transient MODEL ENTITY is placed by
+             * its spawner, not by a Population record: 0x8005A8C0 and
+             * 0x8005A8D8 write the SAME argument into ent+0xA4 and ent+0x54,
+             * so its draw origin IS its position with no eye base and no bias
+             * subtracted. Recomputing it here dropped the `Explosion` model
+             * `Q2_EYE_BASE - 370` below the crate it came out of, which put it
+             * through the floor — see modelent.h.
+             */
+            if (!(e->render_flags & Q2_RF_TRANSIENT))
+                e->origin[1] = e->pos[1] + Q2_EYE_BASE - e->model_offset;
         }
     }
 
@@ -117,8 +139,12 @@ u32 q2_entity_build_ot(q2_entity_set *set, const q2_entity_draw_ctx *ctx,
 
         /* A materialising item at zero scale collapses to a point. The engine
          * still draws the degenerate quads; skipping them costs nothing visible
-         * and keeps the ordering table for primitives that cover a pixel. */
-        if (e->scale <= 0) {
+         * and keeps the ordering table for primitives that cover a pixel.
+         *
+         * BOTH scales, because the engine multiplies them (0x8006B298) and a
+         * transient effect drives the second one to zero as it dies. Testing
+         * only `scale` would keep drawing a finished explosion at a point. */
+        if (e->scale <= 0 || e->fade <= 0) {
             if (stats)
                 stats->invisible++;
             continue;
@@ -178,7 +204,20 @@ u32 q2_entity_build_ot(q2_entity_set *set, const q2_entity_draw_ctx *ctx,
         inst.origin[1]     = e->origin[1];
         inst.origin[2]     = e->origin[2];
         inst.yaw           = e->angles[1];
-        inst.scale         = e->scale;
+        /*
+         * THE PRODUCT OF THE TWO, which is what the engine hands the matrix:
+         *
+         *     8006B2A4  mult v1, v0      ; +0xFC * +0xFE
+         *     8006B2BC  sra  a1, v1, 11
+         *
+         * Folded here as `>> 12` rather than `>> 11` so that the pair the
+         * allocator initialises — 4096 and 4096 — is exactly Q2_ONE_12 and
+         * every entity that predates `fade` looks the way it always did. The
+         * console's shift normalises the same product further downstream; what
+         * matters is that the default is the identity and that a `fade` of half
+         * is half the size, which both readings agree on.
+         */
+        inst.scale         = (s32)(((s64)e->scale * (s64)e->fade) >> 12);
         inst.clut4_count_a = ctx->clut4_count_a;
         inst.tpage         = ctx->tpage;
 

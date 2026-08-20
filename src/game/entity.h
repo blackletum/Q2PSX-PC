@@ -110,9 +110,34 @@ struct q2_entity_world;
  * `0x800B2C2C` of them. */
 #define Q2_MAX_PLAYERS 4
 
+/*
+ * `render_flags` bit 0x01000000 — what makes an entity EVICTABLE.
+ *
+ * The allocator at 0x8006C0F0 recycles an entity that carries this AND a
+ * non-zero +0xF4 when the pool runs dry. Both marks together, which is why a
+ * spawned item (timed respawn, no bit) is not a candidate and a transient
+ * effect is.
+ *
+ * It is also what tells the draw that an entity was PLACED BY ITS SPAWNER
+ * rather than by a Population record, so the item vertical bias does not apply
+ * to it — see entitydraw.c and modelent.h.
+ */
+#define Q2_RF_TRANSIENT 0x01000000u
+
 /* entity+0xD2. 46 is what the item spawner writes (0x80059A60); other values
  * belong to entity kinds this module does not own yet. */
 #define Q2_ENT_KIND_ITEM 46
+
+/*
+ * A transient MODEL ENTITY — an effect model with a think and no pickup.
+ *
+ * Not a value read out of the executable: 0x8005A778 never writes +0xD2 at all,
+ * so the console leaves it at the allocator's zero and tells the two apart by
+ * the evictable marks instead (modelent.h). This port needs a name for "not an
+ * item" in the same field, and picks one outside the item table's range rather
+ * than inventing a console value that is not there.
+ */
+#define Q2_ENT_KIND_MODEL 0x1000
 
 /* ------------------------------------------------------------------------- */
 /* An entity                                                                  */
@@ -139,6 +164,26 @@ typedef struct q2_entity {
     u16  place_id;              /* +0xDA */
 
     s16  scale;                 /* +0xFC */
+
+    /*
+     * THE SECOND SCALE — +0xFE, and the draw multiplies it by the first.
+     *
+     *     8006B298  lh   v1, 252(s2)      ; +0xFC, `scale`
+     *     8006B29C  lh   v0, 254(s2)      ; +0xFE, this
+     *     8006B2A4  mult v1, v0           ; ...and the product scales the
+     *     8006B2BC  sra  a1, v1, 11       ;    instance matrix's three rows
+     *
+     * The allocator initialises both to 4096 (0x8006C1B8), so the identity is
+     * the PAIR and not either one alone. `q2_entity_init` therefore sets this
+     * to Q2_ONE_12 as well; an entity that leaves it at the memset's zero
+     * draws nothing at all.
+     *
+     * `scale` is what an item's materialise ramp drives. This is what a
+     * transient effect's does — see modelent.h, where the explosion runs it
+     * from full down to nothing over the back 61% of its life.
+     */
+    s16  fade;                  /* +0xFE */
+
     s16  model_offset;          /* +0xF8 */
     s32  frame;                 /* +0x100 */
     s16  health;                /* +0x108 */
@@ -146,6 +191,26 @@ typedef struct q2_entity {
     /* +0x4E — the cell the placement drop ended in, which q2_move_ent calls
      * `node` at the same offset (trace.h). -1 when nothing placed it. */
     s32  node;
+
+    /*
+     * The surface byte the spawner is handed — +0x9E, `sb s4, 158(s1)` at
+     * 0x8005AA40. Opcode 0x08 passes the Scene node's `unk0E & 0x7F`, whose low
+     * seven bits index the 64-byte table at 0x800D8D78 on the deferred draw
+     * path (scene.h). Carried because the spawner carries it; no reader in this
+     * port yet.
+     */
+    u8   surface;               /* +0x9E */
+
+    /* +0x90, written with 128 at 0x8005A9D8. No decoded reader. */
+    s16  field90;
+
+    /*
+     * The translucent quad's size operand, which the explosion think computes
+     * every tick and hands to the primitive emitter at 0x80075C34. Nothing in
+     * this port consumes it — see modelent.h for why the quad is decoded and
+     * not drawn.
+     */
+    s32  flash;
 
     s32  remove_in;             /* +0xF4 */
     s32  respawn_at;            /* +0x4C */
