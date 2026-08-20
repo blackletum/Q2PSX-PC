@@ -49,21 +49,32 @@
  * straight down through the floor by the length of a journey it should have
  * made mostly sideways.
  *
- * Two more things the lift model got wrong about it:
+ * Four more things the lift model got wrong about it:
  *
  *   - PLATFORM has FOUR object slots at +20/+22/+24/+26, not one. BIGGUN's
  *     names three (Scene nodes 31, 32 and 30) and the port read only the first.
  *     The direction and the length come from slot 0 alone; the rest just ride.
+ *   - `obj+0x44` is stored with `sh` and read with `lh`, so a path longer than
+ *     32,767 units arrives NEGATIVE and the per-frame `abs()` is what makes it
+ *     usable again. BIGGUN's 33,020 becomes 32,516. The endpoint survives — the
+ *     scale is exactly one at `progress == target` whatever the target is — so
+ *     this is invisible except as duration, and a clamp to 32,767 gets that
+ *     wrong in the opposite direction.
  *   - Blocked, it does not wait sixteen ticks and try again. It BACKS OFF —
  *     `0x8002CAE0` loads `obj+0x4E` with `progress -/+ speed * 150` and state 4
  *     runs `0x8006FEB8`, a clamped move-toward, until it gets there. Only then
  *     does it resume the state it was interrupted in (`obj+0x56`).
+ *   - It does not REVERSE when re-triggered on the way back. MOVER_A's exec
+ *     tests the state for 3 and branches to a reversal (`0x8002757C` ->
+ *     `0x80027630`); PLATFORM's exec at `0x8002E8C4` has no such test.
  *
  * BIGGUN calls its own script entry point `PLATFORM` and carries a LevelBin
  * mission event called `STOPPLATFORM`, so the level author's name for the thing
  * agrees with the primitive's.
  *
- * CORRECTION — that is true of these three and NOT of the engine.
+ * ---------------------------------------------------------------------------
+ * CORRECTION — "no rotation" is true of the three above and NOT of the engine
+ * ---------------------------------------------------------------------------
  *
  * This file used to say "there is no rotation anywhere in the engine". The zone
  * draw refutes it: at 0x800678B4 it calls `RotMatrix` on three s16 Euler angles

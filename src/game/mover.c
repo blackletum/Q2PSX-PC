@@ -768,7 +768,15 @@ void q2_mover_trigger(q2_mover_set *set, u32 index)
      * that was instant. That is the "movers don't feel like retail" report:
      * the first trigger in a level behaves and none of the rest do.
      */
-    if (m->state == Q2_MV_CLOSING) {
+    /*
+     * A TRAIN DOES NOT REVERSE, and that arm belongs to MOVER_A rather than to
+     * movers in general. 0x8002757C tests the state for 3 and branches to the
+     * reversal at 0x80027630; PLATFORM's own exec at 0x8002E8C4 has no such
+     * test — it sets the trigger bit, and if the state is anything but 0 it
+     * returns. Re-triggering a platform on its way back does nothing until it
+     * has finished getting there.
+     */
+    if (m->state == Q2_MV_CLOSING && !m->is_path) {
         m->state = Q2_MV_OPENING;
     } else if (m->state == Q2_MV_IDLE) {
         m->delay_timer = m->delay_reset;
