@@ -298,6 +298,36 @@ static void raster_triangle(psx_framebuffer *fb,
      * texture — so clamping to the corners' own range is the faithful bound as
      * well as the correct one. Hoisted out of the pixel loop: it is a property
      * of the triangle.
+     *
+     * WHAT THIS BOUND CANNOT DO, and what had to be fixed instead: it clamps u
+     * and v SEPARATELY, so it is an axis-aligned box round the corners. A UV
+     * quad that is not axis-aligned has a footprint smaller than its own box,
+     * and a sample can walk off a DIAGONAL edge while staying inside the box —
+     * which is precisely what the truncating divide did.
+     *
+     * Measured on `Blaster G` part 7 face 56, the strip along the top of the
+     * gun in BASE0:
+     *
+     *     screen (370,157) (348,151) (326,151) (341,158)
+     *     uv     (161,128) (119,128) (108,139) (148,139)
+     *
+     * Its top edge runs (119,128) to (108,139), so that edge lies on the
+     * anti-diagonal u + v == 247 and the whole quad sits at u + v >= 247. The
+     * truncating divide walked the top row of pixels along u + v == 246 — one
+     * texel outside the primitive, for all eleven of them — and that row of the
+     * real texture is the emitter's orange grille. The gun grew a dashed orange
+     * line along its top edge; the console's own frame has no such line, and
+     * `test_raster` pins that with the same numbers.
+     *
+     * Rounding the interpolant to nearest rather than toward zero is what
+     * removes it. The truncation is a systematic bias of up to a whole texel in
+     * one direction; rounding halves the worst case and centres it, so a sample
+     * on an edge stays on the edge instead of stepping off it. This is the one
+     * place the backend departs from "reproduce the integer arithmetic" on a
+     * judgement rather than a read instruction: no capture settles what the
+     * GPU's texture unit rounds. What settles it here is that the old behaviour
+     * demonstrably left the primitive and the console demonstrably does not
+     * draw the result.
      */
     {
         int umin = a->u < b->u ? (a->u < c->u ? a->u : c->u)
@@ -336,8 +366,8 @@ static void raster_triangle(psx_framebuffer *fb,
 
                 /* Affine: the UVs interpolate in screen space with no 1/w term.
                  * This is the warp, and it is intentional. */
-                tu = (w0 * a->u + w1 * b->u + w2 * c->u) / area;
-                tv = (w0 * a->v + w1 * b->v + w2 * c->v) / area;
+                tu = (w0 * a->u + w1 * b->u + w2 * c->u + area / 2) / area;
+                tv = (w0 * a->v + w1 * b->v + w2 * c->v + area / 2) / area;
 
                 /* Bounded by this primitive's own corners — see above. */
                 if (tu < umin) tu = umin; else if (tu > umax) tu = umax;

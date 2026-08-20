@@ -283,6 +283,107 @@ static void test_zorder_unchanged(void)
     psx_fb_free(&zorder);
 }
 
+/* ------------------------------------------------------------------------- */
+/* 4. A sample must not step off the primitive's own UV edge                  */
+/* ------------------------------------------------------------------------- */
+/*
+ * The blaster's top strip, taken verbatim out of a BASE0 frame: part 7 face 56
+ * of `Blaster G`, whose UV quad is a SLANTED parallelogram —
+ *
+ *     screen (370,157) (348,151) (326,151) (341,158)
+ *     uv     (161,128) (119,128) (108,139) (148,139)
+ *
+ * Its top edge runs from (119,128) to (108,139), so in texture space that edge
+ * lies on the anti-diagonal u + v == 247, and the whole quad sits at u + v >=
+ * 247. Interpolating the corners with a TRUNCATING divide walked the top row of
+ * pixels along u + v == 246 instead — one texel outside the primitive, every
+ * pixel of it — and on the real texture that row is the emitter's orange
+ * grille, so the gun grew a dashed orange line along its top edge that the
+ * console does not draw.
+ *
+ * The existing clamp cannot catch this: it bounds u and v to the corners'
+ * ranges SEPARATELY, which is an axis-aligned box, and every escaping sample
+ * here is inside that box. What was wrong is the rounding, not the bound.
+ *
+ * So: poison the anti-diagonal just outside the edge and assert nothing samples
+ * it. This fails on the truncating interpolation and passes on the rounded one.
+ */
+static void test_sample_stays_inside_uv(void)
+{
+    psx_framebuffer fb;
+    psx_raster_opts opts;
+    psx_vram       *vram;
+    psx_prim        prim;
+    const u16       POISON = psx_rgb555(248, 96, 8);    /* the emitter orange */
+    const u16       BODY   = psx_rgb555(64, 64, 72);    /* anything else      */
+    int u, v, x, y, poisoned = 0;
+
+    puts("\na sample stays inside the primitive's own UV quad");
+
+    vram = (psx_vram *)calloc(1, sizeof(*vram));
+    if (!vram || psx_fb_init(&fb, 512, 248) != Q2_OK) {
+        printf("  FAIL  out of memory\n");
+        g_failures++;
+        free(vram);
+        return;
+    }
+    psx_fb_clear(&fb, 0);
+    opts_exact(&opts);
+
+    /* A 16-bit page, so a texel is just vram[v][u] and no CLUT is involved. */
+    for (v = 100; v < 160; v++) {
+        for (u = 90; u < 180; u++)
+            vram->px[v][u] = (u + v <= 246) ? POISON : BODY;
+    }
+
+    memset(&prim, 0, sizeof(prim));
+    prim.kind  = PSX_PRIM_GT4;
+    prim.tpage = 2 << 7;
+
+    prim.xy[0].x = 370; prim.xy[0].y = 157;
+    prim.xy[1].x = 348; prim.xy[1].y = 151;
+    prim.xy[2].x = 326; prim.xy[2].y = 151;
+    prim.xy[3].x = 341; prim.xy[3].y = 158;
+
+    prim.uv[0].u = 161; prim.uv[0].v = 128;
+    prim.uv[1].u = 119; prim.uv[1].v = 128;
+    prim.uv[2].u = 108; prim.uv[2].v = 139;
+    prim.uv[3].u = 148; prim.uv[3].v = 139;
+
+    for (x = 0; x < 4; x++) {
+        prim.rgb[x].r = prim.rgb[x].g = prim.rgb[x].b = 128;
+    }
+    prim.textured_blend = true;
+
+    psx_raster_prim(&fb, &prim, vram, &opts);
+
+    for (y = 145; y < 165; y++) {
+        for (x = 320; x < 375; x++) {
+            if (pixel_at(&fb, x, y) == POISON)
+                poisoned++;
+        }
+    }
+    check(poisoned == 0, "no pixel samples the texel row outside the top edge");
+    if (poisoned)
+        printf("        %d pixels sampled u+v <= 246\n", poisoned);
+
+    /* ...and the strip is still drawn, so "nothing poisoned" is not "nothing
+     * drawn at all". */
+    {
+        int drawn = 0;
+        for (y = 145; y < 165; y++) {
+            for (x = 320; x < 375; x++) {
+                if (pixel_at(&fb, x, y) != 0)
+                    drawn++;
+            }
+        }
+        check(drawn > 100, "and the strip is still rasterised");
+    }
+
+    psx_fb_free(&fb);
+    free(vram);
+}
+
 int main(void)
 {
     puts("quad split");
@@ -291,6 +392,7 @@ int main(void)
     test_uv_diagonal();
     test_folded_quad_coverage();
     test_zorder_unchanged();
+    test_sample_stays_inside_uv();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;
