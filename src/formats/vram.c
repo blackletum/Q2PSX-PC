@@ -596,10 +596,32 @@ q2_result q2_vram_upload(const q2_vram_section *section, struct psx_vram *vram)
         if (y >= PSX_VRAM_HEIGHT)
             break;
 
+        /*
+         * The loader's own fix-up, which this path was missing while
+         * `q2_vram_get_clut4` above applied it — two functions decoding the same
+         * palettes and disagreeing about them.
+         *
+         * 0x800762B4 walks all `(clut4_count_a + clut4_count_b) * 16` entries
+         * with `a3 = 0x8000` and does `beq v0, zero, skip` / `or v0, v1, a3`:
+         * every NON-ZERO entry gets the STP bit, and a zero entry stays zero so
+         * that fully transparent texels keep working.
+         *
+         * It changes no pixel today — the backend reads bits 0..14 for colour
+         * and tests `texel == 0` for transparency, and every model face on the
+         * disc is opaque so per-texel STP never arms — but the VRAM the console
+         * holds after a load has these bits set, and this is the function that
+         * is supposed to reproduce it.
+         */
         for (e = 0; e < Q2_VRAM_CLUT4_ENTRIES; e++) {
+            u16 entry;
+
             if (x + e >= PSX_VRAM_WIDTH)
                 break;
-            v->px[y][x + e] = q2_rd_u16(entries + e * 2);
+
+            entry = q2_rd_u16(entries + e * 2);
+            if (entry != 0)
+                entry |= Q2_VRAM_STP_BIT;
+            v->px[y][x + e] = entry;
         }
     }
 
