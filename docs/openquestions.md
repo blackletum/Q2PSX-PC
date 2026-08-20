@@ -9291,6 +9291,19 @@ and the arm's HUE is exact: forearm B-G is +3.9 in both. So the arm renders the 
 28% too dark, in a frame where the body beside it is correct, through a lighting path that
 has just been verified instruction by instruction.
 
+**Two more things were swept and are now positive results rather than assumptions.**
+
+- **The normal component order is confirmed a second, independent way.** All six
+  permutations and all eight sign combinations — 48 variants — were rendered and scored on
+  the arm/body ratio against the capture. The port's `(s4,s5,s3)` reading wins outright
+  (0.819; the best rival is `(s5,s4,s3)` at 0.917, and no sign flip improves on any of
+  them). That order was previously established by geometric correlation alone at +0.75;
+  it now also wins on a criterion that has nothing to do with face normals.
+- **A global CLUT-index offset is not the fault.** Swept -2..+2: every non-zero delta
+  brightens the arm and darkens the body together (delta +1 puts the arm at 62.3 against
+  the capture's 61.9, but the body at 28.6 against 50.5). Whatever is wrong is not a
+  uniform shift of the model CLUT base.
+
 That is a texture or palette question, not a lighting one. The arm is `Blaster G` part 0,
 page 1, `face.texture` 23, which with BASE0's `clut4_count_a` of 68 is **CLUT index 91** —
 and the CLUT word the port binds, 0x4583, decodes to VRAM (48, 278), which is exactly what
