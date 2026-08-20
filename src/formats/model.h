@@ -272,13 +272,43 @@ typedef struct q2_model_face {
  *   8006A458  or   v1, v1, v0         tpage | blend, as written above
  *   8006A47C  ori  v1, v1, 0x3C       code
  *
- * and the UVs are not assembled per corner at all: 0x8006A484..0x8006A4B8 is a
- * WORD COPY LOOP, `lw`/`sw` sixteen bytes at a time out of a template into the
- * packet, so a face's UV quad reaches the GPU verbatim in the order the file
- * stores it. Reading `f->uv[i]` straight through, with no rotation, is what
- * that is.
+ * ---------------------------------------------------------------------------
+ * The UV order, corrected — the corners are NOT copied wholesale
+ * ---------------------------------------------------------------------------
+ * This comment used to claim that 0x8006A484..0x8006A4B8 was a word copy loop
+ * dropping the file's UV quad into the packet verbatim, so that no per-corner
+ * assembly happened at all. That is a misreading of the loop, and it disagreed
+ * with docs/openquestions.md and modeldraw.h, which had it right.
  *
- * So the CLUT index, the page, the blend selector and the UV order are each
+ * The UVs ARE assembled one corner at a time, immediately above it, and corners
+ * 2 and 3 are EXCHANGED on the way in:
+ *
+ *   8006A3CC  lhu  v0, -8(a1)  ; file uv0    8006A3D4  sh v0, 12(a3)  POLY uv0
+ *   8006A3D8  lhu  v0, -6(a1)  ; file uv1    8006A3E0  sh v0, 24(a3)  POLY uv1
+ *   8006A3E4  lhu  v0, -2(a1)  ; file uv3    8006A3EC  sh v0, 36(a3)  POLY uv2
+ *   8006A3F0  lhu  v0, -4(a1)  ; file uv2    8006A3F8  sh v0, 48(a3)  POLY uv3
+ *
+ * 12/24/36/48 are a POLY_GT4's four UV halfwords, and the packet stride is 52
+ * (`addiu a3, a3, 52` at 0x8006A4BC) — a POLY_GT4 exactly.
+ *
+ * What 0x8006A484..0x8006A4B8 actually does is copy the FINISHED PACKET into
+ * the other frame's buffer: `a0` is set to `a3` (0x8006A454) and `a2` to `t2`
+ * (0x8006A430), the two packet arrays based at 0x800B6A7C and 0x800BE914, and
+ * the loop runs 16 bytes at a time to `a3 + 48` and then copies one trailing
+ * word — 52 bytes, one packet. It is the double buffer, not a UV template.
+ *
+ * READING `f->uv[i]` STRAIGHT THROUGH IS STILL WHAT THIS PORT WANTS, and the
+ * reason matters because it is not "there is no swap". The swap is the
+ * file-perimeter to hardware-Z conversion, and the linker applies the identical
+ * one to the CORNERS in the same breath (0x800B2410: SXY2 <= file v3, SXY3 <=
+ * file v2). Vertices and UVs move together, so the pairing survives it. This
+ * port keeps both in the file's perimeter order instead of converting, so
+ * `f->v[i]` pairs with `f->uv[i]` exactly as the console pairs its converted
+ * corners. What the port must NOT then do is split the quad the way a fan
+ * would: the hardware's own diagonal, expressed in perimeter indices, is 1—3.
+ * See the split in render/raster.c.
+ *
+ * So the CLUT index, the page, the blend selector and the UV pairing are each
  * confirmed against the executable and the port matches all four. Whatever is
  * left of that violet patch is NOT in this mapping — the remaining candidates
  * are the CLUT's own contents as uploaded (vram.c) or the disc's texture being

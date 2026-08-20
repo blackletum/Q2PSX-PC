@@ -216,6 +216,16 @@ target_link_libraries(test_panel PRIVATE
 
 add_test(NAME panel COMMAND test_panel)
 
+add_executable(test_raster test_raster.c)
+
+target_link_libraries(test_raster PRIVATE
+    q2psx_common
+    q2psx_psx
+    q2psx_render
+)
+
+add_test(NAME raster_quads COMMAND test_raster)
+
 add_executable(test_world test_world.c)
 
 target_link_libraries(test_world PRIVATE

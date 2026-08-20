@@ -98,10 +98,13 @@ typedef struct psx_prim {
     /*
      * Which corner order this quad's four slots are in.
      *
-     * false — PERIMETER, the default and what MapMod stores: the four corners
-     *         walk round the quad, so it fans as (0,1,2)+(0,2,3).
+     * false — PERIMETER, the default, and what both MapMod and the model bank
+     *         store: the four corners walk round the quad. The console converts
+     *         that to Z order by exchanging corners 2 and 3 on the way into the
+     *         packet, so the hardware's split expressed in THESE indices is
+     *         (0,1,3)+(1,2,3) — see the diagonal note in render/raster.c.
      * true  — libgpu Z ORDER, which is what the hardware's own POLY_x4 packets
-     *         use: 0 1 / 2 3 across two rows, fanning as (0,1,2)+(1,3,2).
+     *         use: 0 1 / 2 3 across two rows, splitting (0,1,2)+(1,3,2).
      *
      * The flare pass builds real console packets and therefore hands over Z
      * order; splitting those on the perimeter rule drew half of every sector as

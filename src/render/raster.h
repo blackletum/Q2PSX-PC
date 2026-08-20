@@ -20,11 +20,23 @@
  *     matrix before truncation.
  *   - Four blend modes, no arbitrary alpha.
  *
- * Quads are drawn as two triangles by fanning the corners: (0,1,2) and (0,2,3).
- * That is NOT the libgpu POLY_GT4 rule — a hardware packet's corners are a "Z"
- * and split (0,1,2) and (1,3,2) — but the corners reaching this backend come
- * from MapMod, which winds them around the perimeter (scene.h). Splitting a
- * perimeter quad the "Z" way drops a triangular quarter out of every surface.
+ * Quads are drawn as two triangles, and WHICH DIAGONAL they are cut along is a
+ * fidelity rule rather than a free choice: UVs interpolate affinely per
+ * triangle, so the diagonal decides which way the texture warps.
+ *
+ * A hardware packet's corners are a "Z" and the GPU splits them (0,1,2) and
+ * (1,3,2) — sharing the edge between its second and third corners. The corners
+ * reaching this backend are NOT in that order: they come from MapMod and from
+ * the model bank in PERIMETER order, and both of the console's linkers convert
+ * perimeter to Z on the way into the packet by exchanging corners 2 and 3
+ * (0x800B2410 for models, 0x800AF844 for the world; the model emitter does the
+ * same to the UVs at 0x8006A3E4). Undoing that mapping, the hardware's shared
+ * edge in PERIMETER indices is 1—3, so a perimeter quad splits (0,1,3) and
+ * (1,2,3). Fanning it (0,1,2)+(0,2,3) covers the same area but creases it along
+ * the other diagonal, and every textured quad then warps the wrong way.
+ *
+ * Reading perimeter corners as though they were already "Z" is a third,
+ * outright broken option: it drops a triangular quarter out of every surface.
  *
  * Both windings are rasterised. Backface rejection belongs to the game, which
  * does it with NCLIP before a primitive ever gets here (see world.c), exactly

@@ -261,8 +261,8 @@ static void raster_triangle(psx_framebuffer *fb,
      * lying exactly on an edge SHARED by two triangles was rasterised twice.
      * For opaque geometry the second write lays down the same colour and
      * nothing shows, which is why this survived; for a semi-transparent one the
-     * blend runs twice and the pixel comes out at B + 2F. Every quad is fanned
-     * as (0,1,2)+(0,2,3), so its own diagonal is a shared edge; neighbouring
+     * blend runs twice and the pixel comes out at B + 2F. Every quad is split
+     * into two triangles, so its own diagonal is a shared edge; neighbouring
      * quads share their borders; and a subdivided near quad has 24 of them. The
      * result was the tessellation drawn onto every transparent surface as a
      * bright grid with a diagonal through each cell.
@@ -693,25 +693,55 @@ void psx_raster_prim(psx_framebuffer *fb,
     case PSX_PRIM_G4:
     case PSX_PRIM_GT4:
         /*
-         * MapMod quad corners run around the PERIMETER, so the split is a fan:
-         * (0,1,2) and (0,2,3).
+         * WHICH DIAGONAL A QUAD IS SPLIT ALONG, and why the fan is not it.
          *
-         * A libgpu POLY_GT4 packet uses Z order, and assuming this data matched
-         * it produces a bowtie per quad — walls come out as a regular lattice of
-         * diamond holes that reads like a clipping bug rather than an index-order
-         * one. See the correction in scene.h.
+         * The GPU draws a four-point polygon as two triangles sharing the edge
+         * between its SECOND and THIRD corners: (0,1,2) and (1,3,2). That much
+         * was already right here. What was missing is that the corners reaching
+         * this backend are NOT in the order the hardware would have seen them.
          *
-         * `quad_zorder` says this particular packet really is in the hardware's
-         * order — the flares are built as console packets — and then the split
-         * is (0,1,2) and (1,3,2), which is the other diagonal. Getting that
-         * second triangle's corner order wrong blacks out half of every quad,
-         * which is exactly the symptom the flag exists to cure.
+         * Both linkers convert the file's perimeter order into the hardware's Z
+         * order on the way into the packet, and they do it by exchanging corners
+         * 2 and 3 — vertices and UVs together, so the pairing survives:
+         *
+         *   model linker  0x800B2410  SXY0,SXY1,SXY2 <= file v0,v1,v3, then
+         *                             SXY0 <= file v2 for the second NCLIP;
+         *                             stored at packet +8,+20,+32,+44, so
+         *                             x2y2 <= v3 and x3y3 <= v2. The four shift
+         *                             counts on the packed index word are
+         *                             3, 5, 21, 13 — 0, 1, 3, 2.
+         *   world linker  0x800AF844  the identical four shifts, same order.
+         *   model emitter 0x8006A3CC..0x8006A3F8
+         *                             POLY uv0,uv1,uv2,uv3 <= file uv0,uv1,uv3,
+         *                             uv2 (stores to +12,+24,+36,+48).
+         *
+         * So the hardware's shared edge, expressed in the PERIMETER indices this
+         * backend actually holds, is 1—3 — and its two triangles are (0,1,3) and
+         * (1,2,3). Fanning (0,1,2)+(0,2,3) covers the same quad but creases it
+         * along the OTHER diagonal, 0—2.
+         *
+         * That is not cosmetic. UVs interpolate affinely per triangle, so the
+         * diagonal is what decides which way the texture warps: the same quad
+         * split the two ways bends in visibly different directions. A port whose
+         * whole point is reproducing the console's affine warp cannot have that
+         * backwards.
+         *
+         * `quad_zorder` says this particular packet is ALREADY in the hardware's
+         * order — the flares are built as console packets — so it takes the
+         * literal (0,1,2)+(1,3,2) instead.
+         *
+         * Reading perimeter data as Z-ordered produces a bowtie per quad
+         * instead: walls come out as a regular lattice of diamond holes that
+         * reads like a clipping bug rather than an index-order one. See the
+         * correction in scene.h.
          */
-        raster_triangle(fb, &v[0], &v[1], &v[2], prim, vram, opts);
-        if (prim->quad_zorder)
+        if (prim->quad_zorder) {
+            raster_triangle(fb, &v[0], &v[1], &v[2], prim, vram, opts);
             raster_triangle(fb, &v[1], &v[3], &v[2], prim, vram, opts);
-        else
-            raster_triangle(fb, &v[0], &v[2], &v[3], prim, vram, opts);
+        } else {
+            raster_triangle(fb, &v[0], &v[1], &v[3], prim, vram, opts);
+            raster_triangle(fb, &v[1], &v[2], &v[3], prim, vram, opts);
+        }
         break;
 
     case PSX_PRIM_SPRT:
