@@ -123,6 +123,21 @@ static void test_frame_distance(void)
 
     m.aiflags &= ~(u32)Q2_AI_HOLD_FRAME;
     check(q2_monster_frame_dist(&m, &f) != 0, "and releases it again");
+
+    /*
+     * AND A DEAD CREATURE NEVER TRANSLATES. The console's corpse handler
+     * (0x8007F71C) makes no position write at all, and this port's swept step
+     * was lifting a body a full step height it then had no way to come down
+     * from: measured on BASE2, a Soldier corpse stranded 215 units up over
+     * ground the sight hull reports flat. Wider than the console's own scope
+     * and labelled as such at the site.
+     */
+    m.dead = true;
+    check_eq_i(q2_monster_frame_dist(&m, &f), 0, "a dead creature does not move");
+    m.dead   = false;
+    m.corpse = true;
+    check_eq_i(q2_monster_frame_dist(&m, &f), 0, "nor does a detached corpse");
+    m.corpse = false;
 }
 
 /* ------------------------------------------------------------------------- */

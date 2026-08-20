@@ -85,6 +85,45 @@ s32 q2_monster_frame_dist(const q2_monster *m, const q2_mframe *frame)
     if (m->aiflags & Q2_AI_HOLD_FRAME)
         return 0;
 
+    /*
+     * AND A CORPSE NEVER TRANSLATES. This is the whole of "bodies hang in the
+     * air", and it is faithful rather than a hedge.
+     *
+     * The console's corpse handler (0x8007F71C) advances the animation through
+     * 0x8005B880 and makes NO POSITION WRITE of any kind. It cannot: the
+     * detach at 0x8007F098 freed the edict, so there is nothing left for a
+     * movement verb to steer. This port keeps one structure for both halves
+     * and so kept reaching `ai_move`, which runs the swept step — and that
+     * step's LIFT raises the body a full Q2_STEPSIZE before it moves
+     * horizontally. Where the movement hull disagrees with the visible floor
+     * the drop that should undo the lift returns almost at once. Measured on
+     * BASE2: a Soldier corpse left 215 units up over ground `PrimaryColl`
+     * reports flat, with the drop trace returning 9 of 4096.
+     *
+     * A LIVING creature takes the identical lift and recovers by stepping
+     * again onto correctly registered ground — about twelve steps to walk back
+     * down. A corpse has no next step: the death moves' frame distances fall to
+     * zero within a few frames, so it keeps whatever the last one gave it.
+     * Suppressing the translation alone, with the hull untouched and the
+     * animation still playing out in full, leaves the body on the floor for
+     * the whole run — necessary and sufficient, established by counterfactual.
+     *
+     * THE SCOPE IS WIDER THAN THE CONSOLE'S, and that is the departure.
+     * `m->corpse` is only raised once the module's own `*_dead` has run, which
+     * is the END of the death move — and the lift happens on the FIRST dead
+     * tick. The console's dying body is still an edict and does still step; it
+     * gets away with it because it does not have this port's hull
+     * disagreement. So the rule here is "dead", not "detached", and what it
+     * costs is the small forward lurch the death frames carry (115 units on
+     * the Soldier's first, then zero within four frames). That is the trade:
+     * a lurch, against bodies stranded 215 units up with no way down.
+     *
+     * The hull disagreement is a real second defect with its own victim (that
+     * twelve-step hop) and is deliberately NOT fixed here.
+     */
+    if (m->corpse || m->dead)
+        return 0;
+
     return ((s32)frame->dist * (s32)m->speed_scale * 12) / 10;
 }
 
