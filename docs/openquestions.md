@@ -9188,7 +9188,7 @@ into this one.
       the behaviour: which deaths cry out, that the handler is a one-shot, that a single-player body lies
       where it fell for ever while a deathmatch one dissolves on schedule, and that -40 exactly gibs.
 
-- [x] 130. **The three things #129 left open, closed — and two of them were port inventions rather than
+- [x] 132. **The three things #129 left open, closed — and two of them were port inventions rather than
       gaps.** That entry ended with a list: what raises the arrival briefing, what the tally board is drawn
       over, and what clears the six rows between units. All three are readable.
 
@@ -9493,3 +9493,52 @@ unit, 4095.3 mean over every part of `Blaster G`) or the GTE reaches it.
       it by DIFFERENCE rather than by an absolute position — two identical corpses, one handed the stick at
       full deflection and one handed nothing, must end twenty ticks in the same state — because the body is
       still falling and an absolute assertion would have been asserting the mover, not the input.
+
+- [x] 133. **Skipping the intro film with the jump key made the player jump when the level started, and
+      the hole was in the pad's ROLL rather than in the level start.** Reported from play: the press that
+      dismisses one screen was still being read as a press by whatever came next.
+
+      **The console has no gap to have this bug in.** Its pad record is a pair — `0x800D5EDC + p*0x310`,
+      `+0x0C` what is down now and `+0x10` what was down last frame — and the tail of `0x80019154` derives
+      every edge from the two as it finds them:
+
+          80019A08  lw   v0, 12(t1)        ; current
+          80019A10  and  v0, v0, mask
+          80019A14  beq  v0, zero, ...     ; not down at all -> no edge
+          80019A1C  lw   v0, 16(t1)        ; previous
+          80019A28  sltiu a2, v0, 1        ; edge = down now AND not down before
+
+      The pair is rolled by the frame, not by the world, so it keeps rolling while a film or a board or
+      the front end owns the screen. A button carried across a boundary is therefore already `was` by the
+      time anything looks at it, and raises nothing. The port rolls the pair inside its input function,
+      and that function is one arm of the main loop's dispatch — so every other arm is a gap, and the
+      first tick back read `prev` from before the gap against `buttons` from after it. Jump is the loudest
+      case because bit 22 exists solely as an edge and is consumed solely inside the tick, but fire and
+      both weapon cycles had the same hole.
+
+      **What the console does have is the same idea one button at a time**, which is worth recording
+      because it is what a page does when the press that worked it must not be seen twice:
+
+          0x80021920   closing a page masks CROSS (0x4000) out of the live pad word at +0x0C and +0x04
+          0x800214C0   raising the objectives panel clears +0x0C, +0x10 and +0x04 outright
+
+      Neither is a level-start mechanism and there is no level-start mechanism: `0x8003B040`, which builds
+      a fresh player, sets the loadout and touches no input state.
+
+      So the port grows `q2_pad_roll` and `q2_pad_roll_resume`. The resume seeds the PREVIOUS word with
+      what is physically held, which is exactly "nothing carried in counts as a press" — and only that: a
+      button tapped and released during the gap is in the accumulated word but not in the held one, so it
+      still edges, and a button that is merely held still reads as held, which matters because swim-up is
+      the same button as jump and holding it has to work from the first tick.
+
+      **The flag has to be STICKY and that is the part worth writing down.** The input function runs every
+      frame but the roll only happens on the frames that TICK, which above 25 Hz is a minority of them
+      (#the roll's own note). A gap noticed on a non-ticking frame is forgotten before any roll can act on
+      it, and the next frame looks contiguous — so the defect would survive on every boundary that
+      happened to land off a tick. Raised on detection, cleared only where it is consumed.
+
+      Measured: `--map BASE2 --keys --fire-triggers` reports `pad: 2 resumes`, one for the tally board and
+      one for the end-of-mission placard; `--new-game`, which is the reel and then level one, reports
+      `pad: 1 resume` — the boundary the report was about. `tests/test_pad.c` pins the behaviour from both
+      sides, including a case that reproduces the defect: an ordinary roll on a fresh pair DOES jump, and
+      that is what the level start used to do.

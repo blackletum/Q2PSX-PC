@@ -571,9 +571,90 @@ static void test_next_dt(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * The roll, and the step that is not an ordinary roll.
+ *
+ * The bug this pins: skipping the intro film with the jump key made the player
+ * jump on the level's first tick, because the pad pair only rolls while the
+ * world is being simulated and every other screen leaves a gap in it. The
+ * console has no gap — its pair rolls every frame whatever is on screen — so a
+ * button carried across a boundary is `was` before anything looks at it.
+ */
+static void test_roll_and_resume(void)
+{
+    q2_pad_bindings bind;
+    u32 JUMP, FIRE;
+    q2_pad_state pad;
+    q2_input in;
+    q2_pad_config cfg;
+
+    printf("\nthe roll, and resuming after another screen owned the frame\n");
+    q2_pad_config_default(&cfg);
+    cfg.style = Q2_PAD_STYLE_STANDARD_A;
+
+    /* The masks are the style's own, not this test's guess at them. */
+    if (!q2_pad_style_bindings(cfg.style, &bind)) {
+        check(false, "standard A has bindings");
+        return;
+    }
+    JUMP = bind.jump;
+    FIRE = bind.fire;
+
+    /* An ordinary roll still edges on the frame of the press and not after. */
+    memset(&pad, 0, sizeof(pad));
+    q2_pad_roll(&pad, JUMP);
+    q2_pad_read(&pad, &cfg, &in);
+    check((in.buttons & Q2_BTN_JUMP) != 0, "a fresh press jumps");
+    q2_pad_roll(&pad, JUMP);
+    q2_pad_read(&pad, &cfg, &in);
+    check((in.buttons & Q2_BTN_JUMP) == 0, "holding it does not jump again");
+
+    /*
+     * THE LEVEL START. The key that skipped the film is still down, and the
+     * pair has not been rolled since before the film — so an ordinary roll
+     * sees `now && !was` and fires.
+     */
+    memset(&pad, 0, sizeof(pad));
+    q2_pad_roll(&pad, JUMP);
+    q2_pad_read(&pad, &cfg, &in);
+    check((in.buttons & Q2_BTN_JUMP) != 0,
+          "...which is exactly what the defect looked like");
+
+    memset(&pad, 0, sizeof(pad));
+    q2_pad_roll_resume(&pad, JUMP, JUMP);
+    q2_pad_read(&pad, &cfg, &in);
+    check((in.buttons & Q2_BTN_JUMP) == 0,
+          "a button carried into the level raises no press edge");
+    /* And it is still HELD, because swim-up is the same button and holding it
+     * has to keep working from the first tick. */
+    check((in.buttons & Q2_BTN_SWIM_UP) != 0,
+          "...but it still reads as held, so swim-up is not lost");
+
+    /* Released and pressed again after arriving: an ordinary press. */
+    q2_pad_roll(&pad, 0);
+    q2_pad_roll(&pad, JUMP);
+    q2_pad_read(&pad, &cfg, &in);
+    check((in.buttons & Q2_BTN_JUMP) != 0,
+          "pressing it again after arriving does jump");
+
+    /*
+     * A button TAPPED during the gap is in the accumulated word but not held,
+     * so it still edges — the suppression is of what is carried in, not of
+     * everything the gap saw.
+     */
+    memset(&pad, 0, sizeof(pad));
+    q2_pad_roll_resume(&pad, JUMP | FIRE, JUMP);
+    q2_pad_read(&pad, &cfg, &in);
+    check((in.buttons & Q2_BTN_JUMP) == 0 &&
+          (in.buttons & Q2_BTN_ATTACK_PRESS) != 0,
+          "a tap during the gap survives while the held button is swallowed");
+}
+
+/* ------------------------------------------------------------------------- */
 int main(void)
 {
     printf("Q2PSX-PC pad and view tests\n\n");
+    test_roll_and_resume();
 
     test_bindings();
     test_look_source();

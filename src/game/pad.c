@@ -249,6 +249,28 @@ static u32 derive(u32 out, u32 cur, u32 prev, u32 mask,
 }
 
 /* ------------------------------------------------------------------------- */
+void q2_pad_roll(q2_pad_state *pad, u32 buttons)
+{
+    if (!pad)
+        return;
+    pad->prev    = pad->buttons;
+    pad->buttons = buttons;
+}
+
+void q2_pad_roll_resume(q2_pad_state *pad, u32 buttons, u32 held)
+{
+    if (!pad)
+        return;
+    /*
+     * The previous word is what is DOWN, not what was seen: `derive` raises a
+     * press edge on `now && !was`, so seeding `was` with the held set is
+     * exactly "nothing carried in counts as a press". Everything else about
+     * the step is ordinary.
+     */
+    pad->prev    = held;
+    pad->buttons = buttons;
+}
+
 void q2_pad_read(const q2_pad_state *pad, const q2_pad_config *cfg,
                  q2_input *out)
 {

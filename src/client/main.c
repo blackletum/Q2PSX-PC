@@ -331,6 +331,23 @@ typedef struct client {
     q2_sim           sim[Q2_MP_MAX_PLAYERS];
     bool             sim_ready[Q2_MP_MAX_PLAYERS];
     q2_pad_state     mp_pad[Q2_MP_MAX_PLAYERS];
+
+    /*
+     * PLAYER 0'S PAD, and it lives here rather than as a static inside the
+     * input function because two things outside that function's roll need it:
+     * the death page's respawn button, and the resume detection below.
+     *
+     * `pad_pend` is the raw pad accumulated between ticks (see the roll), and
+     * `pad_frame` is the last frame on which the input function ran. When that
+     * is not the frame before this one, something else owned the frame in
+     * between and the pair is RESEEDED rather than rolled — the level start,
+     * the film ending, a board closing. See q2_pad_roll_resume.
+     */
+    q2_pad_state     pad;
+    u16              pad_pend;
+    long             pad_frame;
+    bool             pad_resume;    /* a gap is outstanding, awaiting a tick   */
+    u32              pad_resumes;   /* gaps the roll had to be reseeded across */
     bool             sim_enabled;
 
     /* World render state. It lives here rather than in the draw because the
@@ -5916,9 +5933,29 @@ static void client_input_simulated(client *c, float dt)
     s32 eye[3], view[3];
     bool ticked;
 
-    static q2_pad_state pad;
-    static u16          pend;      /* pad bits seen since the last TICK */
+    q2_pad_state       *pad  = &c->pad;
+    u16                *pend = &c->pad_pend;  /* bits seen since the last TICK */
+    /*
+     * Did something else own the previous frame?
+     *
+     * STICKY, and that is not fussiness. This function runs on every frame but
+     * the roll below only happens on the frames that TICK, which above 25 Hz
+     * is a minority of them. A gap noticed on a non-ticking frame would be
+     * forgotten before any roll could act on it, and the very next frame would
+     * look contiguous again — leaving the defect exactly where it was, one
+     * frame later and only on the boundaries that happen to land off a tick.
+     *
+     * So it is raised here and cleared only where it is consumed. A headless
+     * run of BASE2 across the tally board and the end-of-mission placard
+     * reports `pad: 2 resumes`, which is one per screen and is the count that
+     * says the detection reaches them at all.
+     */
+    bool                resumed;
     q2_pad_config       cfg;
+
+    if (c->pad_frame != c->frame_index - 1)
+        c->pad_resume = true;
+    resumed = c->pad_resume;
     q2_pad_bindings     bind;
     u16                 raw;
     s32                 step;
@@ -5970,14 +6007,44 @@ static void client_input_simulated(client *c, float dt)
         else if (notch < 0) raw |= (u16)bind.weapon_prev;
     }
 
-    pend |= raw;
+    *pend |= raw;
 
     if (step > 0) {
-        pad.prev    = pad.buttons;
-        pad.buttons = pend;
-        pend        = 0;
+        /*
+         * AND THE FIRST TICK BACK IS NOT AN ORDINARY ONE.
+         *
+         * The roll above stalls whenever something else owns the frame — a
+         * film, the menu, an intermission board, the front end — because those
+         * branches do not call this function at all. The console has no such
+         * gap: its pad pair rolls every frame whatever is on screen, so a
+         * button held from one screen into the next is already `was` by the
+         * time anything looks at it and raises no press edge.
+         *
+         * Without this the port manufactured one. Skipping the intro film with
+         * the jump key left `prev` holding whatever was down before the film
+         * and `buttons` holding the jump, and the level's first tick read that
+         * pair as a fresh press: the player jumped on arrival. Bit 22 is the
+         * loudest case because it exists solely as an edge, but every press
+         * edge the pad derives had the same hole — fire, and both weapon
+         * cycles.
+         */
+        if (resumed) {
+            /* Said out loud when it actually swallows something, because "the
+             * player jumped on arrival" and "the player did not" look the same
+             * in a log otherwise. */
+            if (raw)
+                Q2_INFO("pad: resumed with %04X held — no press edges from it",
+                        (unsigned)raw);
+            c->pad_resumes++;
+            c->pad_resume = false;
+            q2_pad_roll_resume(pad, *pend, raw);
+        } else {
+            q2_pad_roll(pad, *pend);
+        }
+        *pend = 0;
     }
-    pad.lx = pad.ly = pad.rx = pad.ry = 0;
+    c->pad_frame = c->frame_index;
+    pad->lx = pad->ly = pad->rx = pad->ry = 0;
 
     q2_pad_config_default(&cfg);
     cfg.style       = style;
@@ -6048,11 +6115,11 @@ static void client_input_simulated(client *c, float dt)
         if (ly >  Q2_PAD_FULL) ly =  Q2_PAD_FULL;
         if (ly < -Q2_PAD_FULL) ly = -Q2_PAD_FULL;
 
-        pad.lx = (s8)lx;
-        pad.ly = (s8)ly;
+        pad->lx = (s8)lx;
+        pad->ly = (s8)ly;
     }
 
-    q2_pad_read(&pad, &cfg, &in);
+    q2_pad_read(pad, &cfg, &in);
 
     /*
      * `--shoot`: hold fire. The same kind of scripted stand-in as `--demo` and
@@ -6342,9 +6409,16 @@ static void client_input_simulated(client *c, float dt)
                  * four sims produce four walks rather than one reflected. */
                 q2_pad_config pcfg;
 
-                c->mp_pad[pi].prev    = c->mp_pad[pi].buttons;
-                c->mp_pad[pi].buttons =
-                    client_demo_pad((long)c->frame_index + (long)pi * 37);
+                u32 dpad = client_demo_pad((long)c->frame_index +
+                                           (long)pi * 37);
+
+                /* The same gap and the same rule: a scripted pad that was not
+                 * rolled while a screen was up would raise an edge for every
+                 * button its word happens to hold on the frame play resumes. */
+                if (resumed)
+                    q2_pad_roll_resume(&c->mp_pad[pi], dpad, dpad);
+                else
+                    q2_pad_roll(&c->mp_pad[pi], dpad);
 
                 q2_pad_config_default(&pcfg);
                 /* Player `pi` lives in sim[0] now; `sim[pi]` has been an
@@ -7270,7 +7344,7 @@ static void client_input_simulated(client *c, float dt)
                  * the module decides, and the module is driven by a pad.
                  */
                 bool ask = (pi == 0)
-                               ? (pad.buttons & ~pad.prev & (u16)bind.fire) != 0
+                               ? (pad->buttons & ~pad->prev & (u16)bind.fire) != 0
                                : (d->stage == Q2_PDEATH_FADING ||
                                   d->stage == Q2_PDEATH_GONE ||
                                   d->stage == Q2_PDEATH_GIBBED);
@@ -9101,6 +9175,11 @@ static void client_write_shot(client *c, bool numbered)
         Q2_INFO("  view weapon: %u fire clips, %u shots, %u dry, %u keys",
                 c->vw.fires_started, c->shots_fired, c->shots_dry,
                 c->vw.keys_played);
+
+    /* How many times a screen owned the frame and the pad pair had to be
+     * reseeded instead of rolled. Zero would mean the detection never fired. */
+    Q2_INFO("  pad: %u resume%s", c->pad_resumes,
+            c->pad_resumes == 1 ? "" : "s");
 
     if (c->mp_enabled) {
             int pi;
@@ -12357,6 +12436,9 @@ no_window:
      * kills and secrets are tallied it honestly reads zero. */
     q2_mission_init(&c.mission);
     c.mission_row = -1;
+    /* Two frames back, so the very first tick of a session is a resume: a key
+     * held while the window opens must not be a press. */
+    c.pad_frame   = -2;
     q2_briefing_init(&c.briefing);
     q2_prompt_init(&c.prompts);
     /* ONCE per session, not per level: the two strings are global on the

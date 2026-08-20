@@ -141,20 +141,31 @@
  *    therefore already wreckage when the player arrives, silently.
  *
  * ---------------------------------------------------------------------------
- * Where this port diverges, stated rather than hidden
+ * WHAT A DETONATION SPAWNS, AND WHAT IT DOES NOT
  * ---------------------------------------------------------------------------
- * `0x8005A778` spawns a MODEL ENTITY — it allocates out of the entity pool at
- * `0x8006C098`, looks up "Explosion" (or "Hexplosion" when its fourth argument
- * is 1; opcode 0x08 always passes 0), and installs a think. This port has no
- * such subsystem: `effect.c` models the console's PARTICLE bursts, and
- * `Q2_FX_EXPLOSION` is the burst at 0x800486EC that a rocket throws, not this.
+ * `0x800267C4` makes exactly FIVE calls and this is all of them:
  *
- * So `q2_explosive_burst.explode` is reported as the request it is, with the
- * two operands the console passes, and the sim spawns the particle explosion at
- * the same point as a stand-in. That is a deliberate substitution and the
- * fidelity note belongs here rather than in a commit message: when the entity
- * explosion exists, this is the call site to change and `scale`/`radius` are
- * the arguments already waiting for it.
+ *     0x80064558   the hit burst          (0x80026820)
+ *     0x8005A778   the Explosion MODEL    (0x80026950)
+ *     0x80073704   the report             (0x8002695C)
+ *     0x80064558   the destruction debris (0x80026970)
+ *     0x80068818   hide the node          (0x80026988)
+ *
+ * A PARTICLE BURST IS NOT AMONG THEM. `Q2_FX_EXPLOSION` is the burst at
+ * 0x800486EC that a rocket or a grenade throws, reached from a different site
+ * entirely, and nothing in this handler goes near it.
+ *
+ * This block used to describe spawning one anyway. When the port had no model
+ * entities, `fx_at(sim, Q2_FX_EXPLOSION, ...)` ran here as a deliberate,
+ * documented stand-in — and then it SURVIVED the arrival of the real thing, so
+ * a detonation drew a bright cyan particle ball the console never puts there,
+ * on top of the model it does. A stand-in is only honest while the thing it
+ * stands in for is missing; this one outlived that and became a lie about what
+ * the engine does.
+ *
+ * The model is `modelent.h`. `q2_explosive_burst` still carries `scale` — the
+ * Scene node's `unk0E & 0x7F`, which the spawner writes to ent+0x9E — because
+ * that is the operand the console passes and this is where it comes from.
  */
 #ifndef Q2PSX_EXPLOSIVE_H
 #define Q2PSX_EXPLOSIVE_H

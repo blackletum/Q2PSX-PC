@@ -1429,15 +1429,24 @@ static void explosive_apply(q2_sim *sim, const q2_explosive_result *res)
 
         if (b->explode) {
             /*
-             * THE MODEL ENTITY, which is what 0x80026950 actually spawns —
-             * `0x8005A778`, the creature import table's `spawn_explosion`. This
-             * used to be the particle burst alone and explosive.h said so out
-             * loud; the burst stays because the console throws debris here too,
-             * but the flash is now the `Explosion` model animating and shrinking
-             * over its own 400-unit life (modelent.h).
+             * THE MODEL ENTITY, AND NOTHING ELSE.
              *
-             * A map whose CastList carries no `Explosion` gets no entity, which
-             * is the console's own behaviour: 0x8005A894 abandons the spawn.
+             * 0x800267C4 makes exactly five calls and this is the whole list:
+             * 0x80064558 twice (the hit burst and the destruction debris),
+             * 0x8005A778 once, 0x80073704 for the report, and 0x80068818 to
+             * hide the node. A PARTICLE BURST IS NOT AMONG THEM.
+             *
+             * `fx_at(sim, Q2_FX_EXPLOSION, ...)` used to run here. It was a
+             * deliberate stand-in from when this port had no model entities and
+             * explosive.h said so out loud — and then it survived the arrival
+             * of the real thing, so a detonation drew the ROCKET's burst
+             * (0x800486EC, a different site entirely) on top of the model the
+             * console actually spawns. That is a bright cyan ball the console
+             * never puts there, and it swamped the fireball behind it.
+             *
+             * A map whose CastList carries no `Explosion` gets no entity and no
+             * substitute, which is the console's own behaviour: 0x8005A894
+             * abandons the spawn.
              */
             if (sim->entities_ready &&
                 q2_model_ent_spawn(&sim->entities, sim->model_bank,
@@ -1445,7 +1454,6 @@ static void explosive_apply(q2_sim *sim, const q2_explosive_result *res)
                                    (u8)b->scale))
                 sim->explosive_models++;
 
-            fx_at(sim, Q2_FX_EXPLOSION, b->at);
             sim->explosive_blasts++;
 
             /* And the report, at the same point (0x8002695C). Queued for the

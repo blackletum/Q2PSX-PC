@@ -181,6 +181,39 @@ typedef struct q2_pad_config {
 void q2_pad_read(const q2_pad_state *pad, const q2_pad_config *cfg,
                  q2_input *out);
 
+/* ------------------------------------------------------------------------- */
+/* Rolling it                                                                 */
+/* ------------------------------------------------------------------------- */
+/*
+ * Advance the pair by one step: what was current becomes previous.
+ *
+ * On the console there is no such function because there is no such moment —
+ * the pad record is polled by the frame, `+0x0C` and `+0x10` roll every frame
+ * whatever screen is up, and `0x80019154`'s tail derives its edges from the two
+ * words as it finds them. A port that only rolls the pair while the world is
+ * being simulated has a gap wherever a screen owns the frame, and that gap is
+ * what `q2_pad_roll_resume` is for.
+ */
+void q2_pad_roll(q2_pad_state *pad, u32 buttons);
+
+/*
+ * THE FIRST STEP AFTER SOMETHING ELSE OWNED THE FRAME — a level starting, a
+ * film ending, a menu or an intermission board closing.
+ *
+ * `held` is what is physically down right now, and it becomes the PREVIOUS
+ * word, so every one of those buttons reads as already-down and none of them
+ * produces a press edge. A button pressed and released during the gap is in
+ * `buttons` but not in `held`, so it still edges: the suppression is of things
+ * carried IN, not of everything.
+ *
+ * The console needs no equivalent because it never stops rolling; what it does
+ * have is the same idea applied one button at a time. `0x80021920` masks CROSS
+ * (0x4000) out of the live pad word when a page closes, and `0x800214C0` clears
+ * the whole pair when the objectives panel is raised — both so the press that
+ * worked the screen is not seen again by what comes next.
+ */
+void q2_pad_roll_resume(q2_pad_state *pad, u32 buttons, u32 held);
+
 /*
  * The default configuration, from 0x8001BDA8: STANDARD A, no swap, speed 64.
  */
