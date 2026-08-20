@@ -23,6 +23,20 @@ static void mover_sound(q2_mover *m, s8 which)
 }
 
 /*
+ * The train's running sound, 0x8002C778 — asked for on EVERY tick the platform
+ * is in a moving state, blocked included, because the call sits at the top of
+ * the shared motion path and not behind the step.
+ *
+ * The arrival sound wins when both land on one tick: the console makes the
+ * arrival call second (0x8002C8D8) and this field holds one id.
+ */
+static void mover_running(q2_mover *m)
+{
+    if (m->is_path)
+        m->travel_sound = Q2_MOVER_TRAVEL_MOVE_ID;
+}
+
+/*
  * Snapshot the authored timers, once the build has finished decoding them.
  *
  * Run at the end of a build rather than beside each of the fourteen places
@@ -48,6 +62,17 @@ s8 q2_mover_take_sound(q2_mover_set *set, u32 index)
         return Q2_MVSND_NONE;
     s = set->movers[index].sound_pending;
     set->movers[index].sound_pending = Q2_MVSND_NONE;
+    return s;
+}
+
+u8 q2_mover_take_travel_sound(q2_mover_set *set, u32 index)
+{
+    u8 s;
+
+    if (!set || index >= set->count)
+        return 0;
+    s = set->movers[index].travel_sound;
+    set->movers[index].travel_sound = 0;
     return s;
 }
 
@@ -305,8 +330,8 @@ static u32 info_len(q2_uf_prim prim)
 }
 
 /*
- * PLATFORM's target: the distance from the node's BOX CENTRE to the `origin`
- * operand, which is where the script says the platform ends up.
+ * PLATFORM's PATH: the vector from the group's first node to the `origin`
+ * operand, and its length.
  *
  * `0x8002CC98`..`0x8002CCE8` reads the node record's `+16/+28`, `+20/+32` and
  * `+24/+36` — the two bbox corners — halves each pair, subtracts it from the
@@ -315,44 +340,141 @@ static u32 info_len(q2_uf_prim prim)
  * (`sll s4, v0, 1`). `isqrt(n/4) * 2` is `isqrt(n)`: the halving is to keep the
  * intermediate in range, not part of the answer.
  *
- * The magnitude is what the console stores — `sh s4, 68(s0)` with s4 positive —
- * so the DIRECTION is not in this operand and is transcribed literally rather
- * than guessed at. A positive target moves +Y, which is down in this engine.
+ * THE THREE DIFFERENCES ARE KEPT, and that is the whole of what a train is.
+ * They are not intermediates the console throws away after squaring them —
+ * `0x8002CDD0`, `0x8002CDDC` and `0x8002CDEC` write all three to obj+0x00,
+ * +0x04 and +0x08 as full 32-bit words, and the per-frame handler divides them
+ * by the length at `0x8002C930` to get a displacement on every axis.
+ *
+ * This function used to return the length alone, under a comment reasoning that
+ * "the DIRECTION is not in this operand" and that a positive target must
+ * therefore mean +Y. It is in this operand; it is the part of it that was being
+ * discarded three instructions before the answer.
  */
-static s16 platform_target(const q2_scene *scene, s16 node, const u8 *item)
+static s32 platform_isqrt(s32 x)
+{
+    /* 0x80055CBC, bit by bit. Negative cannot reach here — the caller does the
+     * console's own `bgez` first. */
+    u32 v = (u32)x, r = 0, bit = 1u << 30;
+
+    if (x <= 0)
+        return 0;
+    while (bit > v)
+        bit >>= 2;
+    while (bit) {
+        if (v >= r + bit) {
+            v -= r + bit;
+            r = (r >> 1) + bit;
+        } else {
+            r >>= 1;
+        }
+        bit >>= 2;
+    }
+    return (s32)r;
+}
+
+static void platform_path(const q2_scene *scene, s16 node, const u8 *item,
+                          s32 dir_out[3], s16 *len_out)
 {
     q2_scene_node n;
-    s64 sum = 0;
+    u32 sum = 0;
+    s32 root;
     int k;
 
+    for (k = 0; k < 3; k++)
+        dir_out[k] = 0;
+    *len_out = 0;
+
     if (!scene || node < 0 || !q2_scene_get_node(scene, (u32)node, &n))
-        return 0;
+        return;
 
     for (k = 0; k < 3; k++) {
-        s64 centre = ((s64)n.bbox_min[k] + n.bbox_max[k]) / 2;
-        s64 d      = (s64)q2_rd_s32(item + 4 + 4 * k) - centre;
+        s32 centre = (s32)(((s64)n.bbox_min[k] + n.bbox_max[k]) / 2);
+        s32 d      = q2_rd_s32(item + 4 + 4 * k) - centre;
 
-        sum += d * d;
+        dir_out[k] = d;
+        /* 32-bit, wrapping, because the console's `mult`/`mflo` pair is: the
+         * squares and their sum are single registers and a long enough path
+         * carries out of one. */
+        sum += (u32)d * (u32)d;
     }
 
+    /*
+     * `isqrt(n / 4) * 2`, and the division is the compiler's signed one —
+     * `bgez; addiu 3; sra 2` at 0x8002CCEC. The halving keeps the intermediate
+     * inside a 32-bit `mult` and the doubling puts it back; it is not part of
+     * the answer.
+     */
     {
-        /* isqrt, by the same Newton step the console's is. */
-        s64 x = sum, r = 0, bit = (s64)1 << 62;
+        s32 quarter = (s32)sum;
 
-        while (bit > x)
-            bit >>= 2;
-        while (bit) {
-            if (x >= r + bit) {
-                x -= r + bit;
-                r = (r >> 1) + bit;
-            } else {
-                r >>= 1;
-            }
-            bit >>= 2;
-        }
-        if (r > 32767)
-            r = 32767;
-        return (s16)r;
+        quarter = (quarter < 0 ? quarter + 3 : quarter) >> 2;
+        root = platform_isqrt(quarter) * 2;
+    }
+
+    /*
+     * AND THEN IT IS TRUNCATED TO SIXTEEN BITS, which is not a detail.
+     *
+     * `sh s4, 68(s0)` (0x8002CDB4) drops the top half, and the handler reads it
+     * back with `lh` and takes `abs()` of it on every single frame
+     * (0x8002C794..0x8002C7A0) — which only makes sense for a field that is
+     * expected to arrive negative. BIGGUN's path is 33,020 units long; stored
+     * as a halfword that is -32,516, and the platform runs against a target of
+     * 32,516.
+     *
+     * The endpoint is unharmed, because the displacement divides by the same
+     * number it counts up to: at `progress == target` the scale is exactly one
+     * whatever the target is. What it changes is the DURATION — the ride is
+     * 1.5% shorter than its own geometry — and a port that clamped to 32,767
+     * instead, as this one did, got that wrong in the other direction.
+     */
+    root = (s16)(u16)((u32)root & 0xFFFFu);
+    if (root < 0)
+        root = -root;
+    if (root > 32767)
+        root = 32767;   /* only 0x8000 reaches here; the console leaves it
+                         * negative, which is a train that never arrives. */
+
+    *len_out = (s16)root;
+}
+
+/*
+ * Where a mover has displaced its parts to, on all three axes.
+ *
+ * An axis mover puts `offset` on `axis`, which is the s16 the console keeps at
+ * obj+0x12 + 2*axis. A train scales its direction vector by how far along it
+ * is, which is `0x8002C914`..`0x8002C9F0`: three `mult` / `div` pairs against
+ * obj+0x44, each truncated to s16 by the `sh` that stores it.
+ *
+ * The 32-bit truncation between the multiply and the divide is deliberate. The
+ * console's `mflo` takes the low word of a 32x32 product and hands it to a
+ * 32-bit `div`, so a long enough path wraps — reproduced here rather than
+ * widened, because a divergence that only appears on one map is worse than a
+ * wrap that appears on both.
+ */
+void q2_mover_displacement(const q2_mover *m, s32 out[3])
+{
+    int k;
+
+    if (!out)
+        return;
+
+    out[0] = out[1] = out[2] = 0;
+    if (!m)
+        return;
+
+    if (!m->is_path) {
+        out[m->axis < 3u ? m->axis : 1u] = m->offset;
+        return;
+    }
+
+    if (m->target == 0)
+        return;
+
+    for (k = 0; k < 3; k++) {
+        s32 prod = (s32)(u32)((u64)(s64)m->dir[k] * (u64)(s64)m->offset);
+
+        out[k] = (s16)(prod / m->target);
     }
 }
 
@@ -472,19 +594,36 @@ q2_result q2_movers_build_calls(q2_mover_set *out, const q2_events *events,
                 break;
             }
 
-            case Q2_UF_PLATFORM:
-                /* Speed at +18 and the target computed from the node's own
-                 * position — see platform_target and the correction in
-                 * userfuncs.c. */
-                m->node[0]     = q2_rd_s16(p + 20);
-                m->part_count  = (m->node[0] >= 0) ? 1 : 0;
-                m->target      = platform_target(scene, m->node[0], p);
+            case Q2_UF_PLATFORM: {
+                /*
+                 * THE TRAIN. Four object slots at +20 like every other group
+                 * primitive — the constructor's loop at 0x8002CD3C runs `s1`
+                 * from 0 to 3 and steps its slot cursor by two each time — and
+                 * the path taken from the FIRST of them, which is the node
+                 * 0x8002CC24 reads before that loop starts.
+                 *
+                 * Reading one slot cost BIGGUN's platform two of its three
+                 * parts: the item names Scene nodes 31, 32 and 30, and 32 and
+                 * 30 were left standing while 31 rode off without them.
+                 */
+                s32 dir[3];
+                s16 len;
+
+                collect_nodes(m, p, 20);
+                platform_path(scene, m->part_count ? m->node[0] : (s16)-1,
+                              p, dir, &len);
+                m->dir[0] = dir[0];
+                m->dir[1] = dir[1];
+                m->dir[2] = dir[2];
+                m->target = len;
+                m->is_path = 1;
                 m->speed       = (s16)abs(q2_rd_s16(p + 18));
                 m->delay_timer = p[28];          /* UNSCALED, per the table */
                 m->wait_timer  = (p[29] == 0xFF)
                                  ? Q2_MOVER_WAIT_NEVER
                                  : (u16)(p[29] * Q2_MOVER_TIMEBASE);
                 break;
+            }
 
             case Q2_UF_DISH:
                 /* Neither DISH's constructor (0x8002A880) nor PISTON's
@@ -667,6 +806,58 @@ static s32 mover_step(const q2_mover *m, s32 dt, int dir)
     return to - m->offset;
 }
 
+/*
+ * The same step as a world-space displacement, which is what the sweep needs.
+ *
+ * An axis mover's is the scalar on its own axis and nothing on the other two.
+ * A train's is the difference between where its parts are now and where the
+ * step would put them — all three components, and NOT `step` projected onto an
+ * axis, because a train has no axis to project onto.
+ */
+static void mover_step_vec(const q2_mover *m, s32 step, s32 out[3])
+{
+    out[0] = out[1] = out[2] = 0;
+
+    if (!m->is_path) {
+        out[m->axis < 3u ? m->axis : 1u] = step;
+        return;
+    }
+
+    {
+        q2_mover after = *m;
+        s32 now[3], then[3];
+        int k;
+
+        after.offset = m->offset + step;
+        q2_mover_displacement(m, now);
+        q2_mover_displacement(&after, then);
+        for (k = 0; k < 3; k++)
+            out[k] = then[k] - now[k];
+    }
+}
+
+/*
+ * A TRAIN'S BACK-OFF GOAL — 0x8002CAE0 (opening) and 0x8002CB34 (closing).
+ *
+ * `progress -/+ speed * 150`, clamped into [0, target]. The console's clamp is
+ * an UNSIGNED compare against the target, which catches both ends with one
+ * test: a goal that went below zero wraps past the target and lands on the
+ * `= 0` arm, one that ran past the target lands on the `= target` arm.
+ */
+static void mover_path_block(q2_mover *m)
+{
+    s32 back = (s32)m->speed * Q2_MOVER_PATH_BACKOFF;
+    s32 goal = (m->saved_state == Q2_MV_CLOSING) ? m->offset + back
+                                                 : m->offset - back;
+
+    if (goal < 0)
+        goal = 0;
+    if (goal > m->target)
+        goal = m->target;
+
+    m->wait_timer = (u16)goal;
+}
+
 static void mover_move(q2_mover_set *set, q2_mover *m, s32 dt, int dir)
 {
     s32 old = m->offset;
@@ -678,6 +869,10 @@ static void mover_move(q2_mover_set *set, q2_mover *m, s32 dt, int dir)
             if (m->offset > m->target) {
                 m->offset = m->target;
                 m->state  = Q2_MV_ARRIVED;
+                /* 0x8002C8D8: the train's arrival, louder than its running
+                 * sound and the only time it plays. */
+                if (m->is_path)
+                    m->travel_sound = Q2_MOVER_TRAVEL_STOP_ID;
             }
         } else {
             m->offset -= m->speed * dt;
@@ -765,20 +960,27 @@ u32 q2_movers_tick(q2_mover_set *set, s32 dt, u16 player_keys)
 static bool mover_obstructed(q2_mover_set *set, u32 index, q2_mover *m,
                              s32 step, q2_mover_blocked_fn blocked, void *user)
 {
-    u8 exempt;
+    u8  exempt;
+    s32 sweep[3];
 
     if (!blocked || step == 0)
         return false;
-    if (!blocked(index, step, user))
+
+    mover_step_vec(m, step, sweep);
+    if (!sweep[0] && !sweep[1] && !sweep[2])
+        return false;
+    if (!blocked(index, sweep, user))
         return false;
 
     exempt = (m->state == Q2_MV_CLOSING ||
               (m->state == Q2_MV_BLOCKED && m->saved_state == Q2_MV_CLOSING))
            ? Q2_MV_BLK_IGNORE_CLOSING : Q2_MV_BLK_IGNORE_OPENING;
 
-    /* 0x80025D08 reloads the timer on BOTH arms; only the flag decides whether
-     * the state changes with it. */
-    m->block_timer = Q2_MOVER_BLOCK_TICKS;
+    if (!m->is_path) {
+        /* 0x80025D08 reloads the timer on BOTH arms; only the flag decides
+         * whether the state changes with it. */
+        m->block_timer = Q2_MOVER_BLOCK_TICKS;
+    }
 
     if (m->block_flags & exempt)
         return false;               /* a crusher does not care */
@@ -786,6 +988,14 @@ static bool mover_obstructed(q2_mover_set *set, u32 index, q2_mover *m,
     if (m->state != Q2_MV_BLOCKED) {
         m->saved_state = m->state;
         m->state       = Q2_MV_BLOCKED;
+        /*
+         * A train picks its retreat here and never revises it. Blocked again
+         * while retreating, 0x8002CB8C writes the entry state — 4 — straight
+         * back over itself and changes nothing else, so the goal it is already
+         * heading for stands.
+         */
+        if (m->is_path)
+            mover_path_block(m);
     }
     (void)set;
     return true;
@@ -864,12 +1074,14 @@ u32 q2_movers_tick_blocked(q2_mover_set *set, s32 dt, u16 player_keys,
         }
 
         case Q2_MV_OPENING:
+            mover_running(m);
             if (!mover_obstructed(set, i, m, mover_step(m, dt, 1),
                                   blocked, user))
                 mover_move(set, m, dt, 1);
             break;
 
         case Q2_MV_CLOSING:
+            mover_running(m);
             if (!mover_obstructed(set, i, m, mover_step(m, dt, 0),
                                   blocked, user))
                 mover_move(set, m, dt, 0);
@@ -879,6 +1091,36 @@ u32 q2_movers_tick_blocked(q2_mover_set *set, s32 dt, u16 player_keys,
             /* A door blocked while closing reverses; one blocked opening
              * carries on in the direction it was already going. */
             int dir = m->saved_state == Q2_MV_CLOSING;
+
+            mover_running(m);
+
+            /*
+             * A TRAIN'S STATE 4 IS NOT A PAUSE. 0x8002C7A8 sends it to
+             * 0x8006FEB8, a clamped move-toward the goal `mover_path_block`
+             * chose, and it resumes the state it was interrupted in only once
+             * it gets there — obj+0x56, restored at 0x8002C7EC.
+             *
+             * Blocked again on the way, nothing commits: the entry state is
+             * written back over the restore at 0x8002CB8C and the retreat picks
+             * up where it left off next tick.
+             */
+            if (m->is_path) {
+                s32 goal = (s32)m->wait_timer;
+                s32 span = m->speed * dt;
+                s32 step;
+
+                if (m->offset < goal)
+                    step = (m->offset + span > goal) ? goal - m->offset : span;
+                else
+                    step = (m->offset - span < goal) ? goal - m->offset : -span;
+
+                if (!mover_obstructed(set, i, m, step, blocked, user)) {
+                    m->offset += step;
+                    if (m->offset == goal)
+                        m->state = m->saved_state;
+                }
+                break;
+            }
 
             if (!mover_obstructed(set, i, m, mover_step(m, dt, dir),
                                   blocked, user))
@@ -919,9 +1161,19 @@ void q2_movers_node_offset(const q2_mover_set *set, u32 scene_node, s32 out[3])
             continue;
 
         for (k = 0; k < m->part_count; k++) {
+            s32 d[3];
+            int c;
+
             if ((u32)m->node[k] != scene_node)
                 continue;
-            out[m->axis] += m->offset;
+
+            /* Three components, because a train has three. This used to add
+             * `offset` to `out[axis]`, which is right for every other family
+             * and sends a platform down its own Y by the length of a diagonal
+             * journey. */
+            q2_mover_displacement(m, d);
+            for (c = 0; c < 3; c++)
+                out[c] += d[c];
             break;
         }
     }

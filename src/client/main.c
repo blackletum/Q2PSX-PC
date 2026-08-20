@@ -137,6 +137,7 @@
 #include "briefing.h"
 #include "leveltext.h"
 #include "mover.h"
+#include "explosive.h"
 #include <stdlib.h>
 #include "mission.h"
 #include "movie.h"
@@ -494,6 +495,14 @@ typedef struct client {
     u32               cre_sound_missing;
     u32               cre_sound_unnamed;  /* the play site resolved to no name */
 
+    /*
+     * A shot that reached the hook naming an IMPORT SLOT rather than one of the
+     * Soldier's flash tables — a decoded creature's, whose damage and speed are
+     * arguments its module supplies and this port has not read. Counted rather
+     * than fired, and counted rather than silently returned. See client_cre_fire.
+     */
+    u32               cre_fire_no_figures;
+
     /* The music countdown, in 50 Hz ticks — 0x800B2710 and 0x800B2708. */
     s32               music_total;
     s32               music_left;
@@ -548,6 +557,21 @@ typedef struct client {
      * are fired.
      */
     long              fire_interval;
+
+    /*
+     * ONE named script entry point, rather than every trigger volume on the
+     * map.
+     *
+     * `--fire-triggers` fires the lot, which on most maps includes a TELEPORT
+     * and a LOADMAP, so the thing under test gets about four seconds before the
+     * level ends underneath it. That is fine for proving a transition works and
+     * useless for watching a mover run. Every Events chunk carries a named
+     * directory (events.h) and the level authors name the interesting ones —
+     * BIGGUN's platform record is literally called `PLATFORM` — so naming one
+     * is both possible and the natural way to ask for it.
+     */
+    const char       *fire_event;
+    bool              fire_event_done;
 
     /*
      * WHAT THE PLAYER TAKES THROUGH A DOOR.
@@ -620,7 +644,13 @@ typedef struct client {
     u32               secrets_found;
     u32               secret_seen[64];   /* item offsets already counted */
     u32               secret_seen_count;
-    int               mission_row_next;  /* which of the six rows to fill */
+    /*
+     * Which of the six mission-table rows this level holds, or -1 when it has
+     * none — a level outside a unit, or a seventh distinct one. Claimed on
+     * ARRIVAL by name, not on departure in visit order: see
+     * `client_mission_enter`.
+     */
+    int               mission_row;
     char              map_title[64];     /* the level's own name, `MapTitle` */
     char              secret_message[64];/* `FoundASecret`, the map's words  */
     int               map_unit;          /* from `Unit<N>Miss1`              */
@@ -934,6 +964,20 @@ typedef struct client {
     u32               cre_pain_calls;
     u32               cre_die_calls;
     u32               breakable_opened; /* doors opened by being shot   */
+
+    /*
+     * The map's `func_explosive` groups — opcode 0x08, explosive.h.
+     *
+     * The SET lives here rather than in the sim for the same reason the mover
+     * set does: destroying a group changes which Scene nodes DRAW, and the hide
+     * array is this side's. The sim borrows the pointer so a shot can reach it,
+     * and hands back visibility changes through `q2_sim_next_node_vis`.
+     */
+    q2_explosive_set  explosives;
+    bool              explosives_ready;
+    u32               explosive_boxes;     /* shootable parts registered  */
+    u32               explosive_scripted;  /* groups a script blew up     */
+    u32               explosive_vis;       /* node show/hide changes made */
     bool              mission_after_map; /* the screen is holding a LOADMAP */
     /*
      * Has this level put a frame on the screen yet? Cleared by every zone load
@@ -945,7 +989,7 @@ typedef struct client {
 
     /*
      * How many creatures this ZONE placed, fixed when the map loads. The kill
-     * tally's denominator — see client_mission_record for why it cannot be
+     * tally's denominator — see client_level_tally for why it cannot be
      * recomputed from the live set.
      */
     u32               cre_in_zone;
@@ -962,6 +1006,35 @@ typedef struct client {
     bool              map_change_pending;
     char              pending_map[Q2_UF_NAME_LEN + 1];
     char              pending_start[Q2_UF_NAME_LEN + 1];
+
+    /*
+     * Which primitive queued it, because they do not leave by the same door.
+     *
+     * A LOADMAP is state 2 and nothing else happens: the outer state machine
+     * loads what the primitive named (screen.h). A MISCOMPLETE is state 7,
+     * which holds the tally board first and only then writes a destination of
+     * its own. `unit_over` is that difference.
+     */
+    bool              unit_over;
+
+    /*
+     * Where the unit's last level was ALSO pointing, kept across the
+     * end-of-mission screen.
+     *
+     * A unit's last level carries both primitives, and on the console the
+     * MISCOMPLETE simply overwrites the LOADMAP's destination with
+     * `EndMission N` — the next unit's first level is then `QENDMIS<N>`'s own
+     * module's business, and this port does not run that module. Rather than
+     * end the campaign at every unit boundary, the port carries the LOADMAP's
+     * destination here and continues to it when the placard is dismissed.
+     * STATED as the port's choice: nothing read from the executable says the
+     * console gets there this way, only that it gets there.
+     */
+    char              unit_next_map[Q2_UF_NAME_LEN + 1];
+    char              unit_next_start[Q2_UF_NAME_LEN + 1];
+    bool              endmis_await;   /* a placard with somewhere to go */
+    u32               endmis_frames;  /* headless release, as the board has */
+
     u32               map_changes;    /* how many the session has made */
     u32               vw_events;
     s16               vw_last_event;
@@ -1300,19 +1373,34 @@ static void client_player_box(const client *c, s32 lo[3], s32 hi[3])
  */
 static bool client_node_centre(const client *c, s32 node, s32 out[3])
 {
-    const q2_scene_node *n;
+    q2_scene_node n;
     int k;
 
     if (!c || node < 0 || (u32)node >= c->zone.scene.node_count)
         return false;
 
-    n = &c->zone.scene.nodes[node];
+    /*
+     * `scene.nodes` IS NOT AN ARRAY OF `q2_scene_node`. It is the borrowed
+     * chunk — 52 raw bytes a record, decoded by `q2_scene_get_node` (scene.h)
+     * — and this used to index it as a struct array, which compiles with a
+     * warning and reads whatever the stride mismatch lands on. Node 31 of
+     * BIGGUN's zone 2 came back as (-5240449, 715263, -77568).
+     *
+     * The only consumer until now was the rotator sound, so every turning
+     * hatch on the disc has been playing from a position several thousand
+     * screens away — silently correct-looking, because `client_play_sound_at`
+     * attenuates it to nothing and a missing sound is what a rotator with no
+     * bound node is supposed to do anyway.
+     */
+    if (!q2_scene_get_node(&c->zone.scene, (u32)node, &n))
+        return false;
+
     for (k = 0; k < 3; k++)
-        out[k] = (n->bbox_min[k] + n->bbox_max[k]) / 2;
+        out[k] = (n.bbox_min[k] + n.bbox_max[k]) / 2;
     return true;
 }
 
-static bool client_mover_blocked(u32 index, s32 step, void *user)
+static bool client_mover_blocked(u32 index, const s32 step[3], void *user)
 {
     client_mover_ctx *ctx = (client_mover_ctx *)user;
     client *c = ctx->c;
@@ -1329,22 +1417,24 @@ static bool client_mover_blocked(u32 index, s32 step, void *user)
     for (t = 0; t < c->sim[0].mover_count; t++) {
         const q2_move_target *mt = &c->sim[0].volumes[t];
         s32 lo[3], hi[3];
-        u32 axis;
         int k;
 
         if (!mt->active || mt->id != (s32)index)
             continue;
 
-        axis = c->movers.movers[index].axis;
-        if (axis > 2u)
-            axis = 1u;
-
+        /*
+         * The box the mover is about to sweep through, grown along EVERY axis
+         * it is moving on. A door or a lift fills one component of `step` and
+         * this is the axis-aligned grow it always was; a train (mover.h) fills
+         * three, and taking only one of them tested a corridor the platform
+         * never travels down.
+         */
         for (k = 0; k < 3; k++) {
             lo[k] = mt->min[k];
             hi[k] = mt->max[k];
+            if (step[k] > 0) hi[k] += step[k];
+            else             lo[k] += step[k];
         }
-        if (step > 0) hi[axis] += step;
-        else          lo[axis] += step;
 
         if (!q2_move_box_overlap(plo, phi, lo, hi))
             continue;
@@ -1764,6 +1854,34 @@ static void client_cre_fire(q2_monster *m, int flash, void *user)
         return;
     if (m->enemy != &c->creatures.sight)
         return;
+
+    /*
+     * TWO CALLERS, TWO ENCODINGS, AND ONE OF THEM WAS BEING THROWN AWAY.
+     *
+     * A TRANSCRIBED creature hands over `weapon_table * 8 + flash_number`,
+     * which for the Soldier's three tables is 0..23. A DECODED one has no such
+     * table and hands over the IMPORT SLOT its think function called, which is
+     * 0x80..0x9C — the eight projectile spawners (creature.h).
+     *
+     * The ranges do not overlap, so the two are told apart on sight. They were
+     * not: this began `table = flash >> 3` and switched on 0, 1 and 2, so every
+     * decoded creature's shot arrived as table 16..19 and hit `default: return`.
+     * The action layer counted it as `fire_sent` and it went nowhere — six of
+     * the disc's seven creatures firing into a `return` while the counter said
+     * the shot had been delivered.
+     *
+     * It still does not fire, and now it says so. What a decoded creature's
+     * shot DOES is not the port's to guess: `monster_fire_rocket` (0x8006210C)
+     * scales the aim by 3/2 and passes its caller's `a1` and `a3` straight
+     * through to 0x8004AF28 without touching them, so the damage and the speed
+     * are the MODULE's arguments, not the engine's constants. Reading them is
+     * per-creature transcription. Until a creature's table is read, its shot is
+     * counted here rather than invented — the same rule the sound hook follows.
+     */
+    if (flash >= Q2_IMP_FIRE_BLASTER && flash <= Q2_IMP_FIRE_LASER) {
+        c->cre_fire_no_figures++;
+        return;
+    }
 
     switch (table) {
     case 0:  damage = 5; shots = 1;  break;   /* blaster    */
@@ -2382,18 +2500,6 @@ static void client_music_for_level(client *c, bool force);
 #define Q2_LAST_UNIT             5
 
 /*
- * Write the level that is ending into the mission table.
- *
- * One row per level of the unit, six of them, and a row whose name is empty is
- * skipped rather than drawn blank (mission.h) — so filling them in visit order
- * is what makes a unit of three levels draw three rows.
- *
- * Kills come from the creature world rather than from a counter the client
- * keeps, because the world already knows both halves: how many creatures the
- * map placed and how many of them are dead. Counting deaths as they happen
- * would drift the moment a creature is removed for any other reason.
- */
-/*
  * The pause page's status row. The same two pairs the level tally shows, so a
  * player can ask mid-level how they are doing — which is what the row is for.
  */
@@ -2413,62 +2519,111 @@ static void client_menu_fill_stats(client *c)
                       (int)c->secrets_found, (int)c->secrets_total);
 }
 
-static void client_mission_record(client *c)
+/*
+ * How this level is doing, as the two pairs the tally shows.
+ *
+ * Kills come from the creature world rather than from a counter the client
+ * keeps, because the world already knows both halves: how many creatures the
+ * map placed and how many of them are dead. Counting deaths as they happen
+ * would drift the moment a creature is removed for any other reason.
+ *
+ * The DENOMINATOR is the count this zone placed, taken at load — not the number
+ * that happen to be live now. A creature held back for a CREBATCH has `in_use`
+ * clear exactly as an out-of-zone one does, so counting live bodies made the
+ * total grow as the player sprang each ambush: "3/3 kills" on a level with
+ * nine.
+ */
+static void client_level_tally(const client *c, u32 *dead, u32 *placed)
 {
-    u32 i, placed = 0, dead = 0;
+    u32 i, d = 0;
 
-    if (c->creatures_ready) {
-        for (i = 0; i < c->creatures.set.count; i++) {
-            const q2_monster *m = &c->creatures.set.monsters[i];
+    if (c->creatures_ready)
+        for (i = 0; i < c->creatures.set.count; i++)
+            if (c->creatures.set.monsters[i].dead)
+                d++;
 
-            if (m->dead)
-                dead++;
-        }
-        /*
-         * The DENOMINATOR is the count this zone placed, taken at load — not
-         * the number that happen to be live now. A creature held back for a
-         * CREBATCH has `in_use` clear exactly as an out-of-zone one does, so
-         * counting live bodies here made the total grow as the player sprang
-         * each ambush: "3/3 kills" on a level with nine.
-         */
-        placed = c->cre_in_zone;
+    *dead   = d;
+    *placed = c->creatures_ready ? c->cre_in_zone : 0;
+}
+
+/*
+ * ENTERING a level: take this level's row in the mission table.
+ *
+ * The row is claimed on ARRIVAL, not on departure, and it is keyed by the
+ * level's name rather than by visit order — both because that is what the
+ * console does. Every map's `LevelBin` init looks its `MapTitle` up and hands
+ * the string straight to the engine export at `+0x474`, which is
+ * `0x800222B8`: find the row of six whose name matches, else take the first
+ * whose name is empty, and stamp the live counters into it. BASE1's module
+ * does it in five instructions at `80100434`..`80100448`.
+ *
+ * Registering on arrival is what makes re-entering a level keep its row rather
+ * than take a second one, and it is what lets the counters be written into the
+ * row as they move — which is the other half of the console's model
+ * (`0x800223A8` for a secret, `0x80022420` for a kill).
+ *
+ * A UNIT's table, not a session's, and **this clear is the port's**. Six rows
+ * and nothing in the executable that empties them means a seventh distinct
+ * level registers nothing; the engine's own would-be clear at `0x80022498` is
+ * a loop with no body. The `EndMission` modules are the only candidate and
+ * this port does not run them, so the table is cleared when the unit changes.
+ * The unit is the map's own, from `Unit<N>Miss1`, and the disc's maps group by
+ * it exactly as the game does: Base 1, Jail and Security 2, Power and Waste 3,
+ * Lab/Command/BigGun 4, the bosses 5.
+ */
+static void client_mission_enter(client *c)
+{
+    /* The level's OWN name, not its directory: `MapTitle` says "Outer Base"
+     * where the folder says BASE1, and the console's Location column is the
+     * former — it is the same string the module registers. Falling back to the
+     * directory keeps a map with no Strings chunk from drawing a blank row,
+     * which would be skipped. */
+    const char *name = c->map_title[0] ? c->map_title : c->map;
+
+    if (c->map_unit > 0 && c->map_unit != c->mission.unit) {
+        q2_mission_init(&c->mission);
+        c->mission.unit = c->map_unit;
+    } else if (c->map_unit > 0) {
+        c->mission.unit = c->map_unit;
     }
+
+    c->mission_row = q2_mission_register(&c->mission, name);
+    if (c->mission_row < 0)
+        Q2_WARN("mission: no free row for %s — the unit's six are taken", name);
+    else
+        Q2_INFO("mission: %s takes row %d of unit %d",
+                name, c->mission_row, c->mission.unit);
 
     /*
-     * A UNIT's table, not a session's. The screen says "Mission N - Complete"
-     * and lists that unit's levels in its six rows, so crossing into a new unit
-     * starts a new table rather than pushing the previous unit's levels off the
-     * bottom. The unit is the map's own, from `Unit<N>Miss1`, and the disc's
-     * maps group by it exactly as the game does: Base 1, Jail and Security 2,
-     * Power and Waste 3, Lab/Command/BigGun 4, the bosses 5.
+     * And the board's two centred body lines, which used to draw blank because
+     * what fed them had not been read. `0x80021FD8` builds `"Unit%dMiss1"` with
+     * the unit at `0x800B2E20` and hands the lookup to the wrapper — the same
+     * key this map's briefing already reads as its Mission Objective.
      */
-    if (c->map_unit > 0 && c->map_unit != c->mission.unit &&
-        c->mission_row_next > 0) {
-        q2_mission_init(&c->mission);
-        c->mission_row_next = 0;
-    }
+    q2_mission_set_objective(&c->mission, c->briefing.objective);
+}
 
-    if (c->mission_row_next < Q2_MISSION_ROWS) {
-        /* The level's OWN name, not its directory: `MapTitle` says "Outer
-         * Base" where the folder says BASE1, and the console's Location column
-         * is the former. Falling back to the directory keeps a map with no
-         * Strings chunk from drawing a blank row, which would be skipped. */
-        const char *name = c->map_title[0] ? c->map_title : c->map;
+/*
+ * The live half: put this level's counters into the row it holds.
+ *
+ * The console writes them at the moment they move — `INSECRET`'s exec calls
+ * `0x800223A8` and a creature's death calls `0x80022420`, each stamping the
+ * one counter it changed. Doing it once a frame is the same table with fewer
+ * hooks, and it matters that it is live rather than deferred to the level's
+ * end: a save taken mid-level carries the mission table, so a row that is only
+ * written on the way out would save as zeroes.
+ */
+static void client_mission_update(client *c)
+{
+    u32 dead, placed;
 
-        q2_mission_set_row(&c->mission, c->mission_row_next, name,
-                           (int)c->secrets_found, (int)c->secrets_total,
-                           (int)dead, (int)placed);
-        c->mission_row_next++;
-    }
+    if (!c || c->mission_row < 0)
+        return;
 
-    /* "Mission %d - Complete" wants the unit, and the map tells us which it is
-     * through the `Unit<N>Miss1` key it carries. */
-    if (c->map_unit > 0)
-        c->mission.unit = c->map_unit;
-
-    Q2_INFO("mission: %s (unit %d) — secrets %u/%u, kills %u/%u",
-            c->map_title[0] ? c->map_title : c->map, c->mission.unit,
-            c->secrets_found, c->secrets_total, dead, placed);
+    client_level_tally(c, &dead, &placed);
+    q2_mission_set_counts(&c->mission, c->mission_row,
+                          (int)c->secrets_found, (int)c->secrets_total,
+                          (int)dead, (int)placed);
 }
 
 /*
@@ -2564,6 +2719,44 @@ static bool client_change_map(client *c, const char *map, const char *start)
 }
 
 /*
+ * Perform the queued transition, and everything that goes with arriving.
+ *
+ * Three callers reach it — a plain LOADMAP, the tally board being dismissed,
+ * and the end-of-mission placard being dismissed — and they must not differ in
+ * what happens on the far side, which is why it is one function.
+ */
+static void client_change_map_and_brief(client *c)
+{
+    if (!client_change_map(c, c->pending_map, c->pending_start))
+        return;
+
+    /*
+     * The ARRIVAL briefing: the new level's orders.
+     *
+     * On the console this is the level's own doing rather than the
+     * transition's — `0x80021250` is an engine export (`+0x3D8`) and what
+     * raises the panel is a `HELPCOMPUTER` or the map module's own init, not
+     * anything in the state machine. This port does not run the modules, so it
+     * raises the panel on arrival, which is where a module would. Stated
+     * because it is a stand-in and not a read.
+     *
+     * Only on a level change: a zone gate stays inside one level and has no
+     * new orders to give.
+     */
+    c->briefing_open   = true;
+    c->briefing_frames = 0;
+    q2_prompt_show(&c->prompts, Q2_PROMPT_BACK, 216);
+
+    /* Re-arm, so one `--fire-triggers` walks the game rather than one level.
+     * Without this a scripted run stops at the first boundary, having proved
+     * only that the first boundary works. */
+    if (c->fire_interval > 0) {
+        c->fire_triggers = true;
+        c->fire_at_frame = (long)c->frame_index + c->fire_interval;
+    }
+}
+
+/*
  * Case-insensitive name compare. Map names reach this from two places that do
  * not agree on case — the executable's level table, which LOADMAP names, and
  * the ISO directory the loader walks — so comparing them exactly would make
@@ -2598,6 +2791,56 @@ static void client_event_mover(void *user, const q2_event_item *item)
         return;
 
     c->mover_triggers += q2_movers_trigger_item(&c->movers, item->offset);
+}
+
+/*
+ * Apply a set of node visibility changes to the zone's hide array.
+ *
+ * `node_hidden` is this side's because the array has a second writer — the
+ * script's OBJDRAWOFF — so the sim and the explosives hand back lists and this
+ * is the one place that turns them into bytes. Scene.flags08 bit 15 is what the
+ * console writes; world.c honours the array in the same place it honours the
+ * bit.
+ */
+static void client_apply_node_vis(client *c, const q2_explosive_result *vis)
+{
+    u32 i;
+
+    if (!c || !vis || !c->node_hidden)
+        return;
+
+    for (i = 0; i < vis->hide_count; i++) {
+        s16 n = vis->hide[i];
+
+        if (n >= 0 && (u32)n < c->node_hidden_count && !c->node_hidden[n]) {
+            c->node_hidden[n] = 1;
+            c->explosive_vis++;
+        }
+    }
+    for (i = 0; i < vis->show_count; i++) {
+        s16 n = vis->show[i];
+
+        if (n >= 0 && (u32)n < c->node_hidden_count && c->node_hidden[n]) {
+            c->node_hidden[n] = 0;
+            c->explosive_vis++;
+        }
+    }
+}
+
+/*
+ * A script reaching a `func_explosive`. The console destroys it on the spot —
+ * the dispatch arm passes damage zero and the handler's first branch falls
+ * straight through to the destruction (explosive.h).
+ */
+static void client_event_explosive(void *user, const q2_event_item *item)
+{
+    client *c = (client *)user;
+
+    if (!c || !c->explosives_ready || !item)
+        return;
+
+    if (q2_sim_explosive_trigger_item(&c->sim[0], item->offset))
+        c->explosive_scripted++;
 }
 
 static void client_event_call(void *user, const q2_event_item *item,
@@ -2838,24 +3081,42 @@ static void client_event_call(void *user, const q2_event_item *item,
             if (ending)
                 snprintf(c->film_screen, sizeof(c->film_screen), "%s", want);
 
-            if (c->map_change_pending) {
+            if (e && !e->is_placeholder && e->directory[0]) {
                 /*
-                 * A LOADMAP already queued this frame wins.
+                 * A MISCOMPLETE OVERWRITES a LOADMAP queued the same frame,
+                 * and this is the console's order rather than a tie-break.
+                 * `0x80018ED8` runs the tally board and only THEN writes
+                 * `"EndMission N"` over `0x800E46C0` and `"Default"` over
+                 * `0x800C8CD0` — whatever `0x8002DCE0` had put there. The port
+                 * used to let the LOADMAP win, which is why every scripted run
+                 * walked past the unit boundaries without ever seeing one.
                  *
                  * A unit's last level carries BOTH — BASE2 has three LOADMAPs
-                 * and the unit-1 MISCOMPLETE — and a player fires one of them,
+                 * and the unit-1 MISCOMPLETE — and a player fires one of them
                  * by walking into one volume. `--fire-triggers` fires every
-                 * volume at once, so within that one artificial batch the
-                 * ordering means nothing and a later item must not clobber an
-                 * earlier decision. First writer wins.
+                 * volume at once, so within that artificial batch the order
+                 * means nothing; the unit end is the one that must survive it.
+                 *
+                 * The LOADMAP's destination is not thrown away: it is where
+                 * this unit's last level was going, and it is what the port
+                 * continues to once the end-of-mission screen is dismissed.
                  */
-                Q2_INFO("MISCOMPLETE: a level change is already queued");
-            } else if (e && !e->is_placeholder && e->directory[0]) {
+                if (c->map_change_pending && c->pending_map[0]) {
+                    snprintf(c->unit_next_map, sizeof(c->unit_next_map), "%s",
+                             c->pending_map);
+                    snprintf(c->unit_next_start, sizeof(c->unit_next_start),
+                             "%s", c->pending_start);
+                    Q2_INFO("MISCOMPLETE: holding %s '%s' for after the "
+                            "end-of-mission screen",
+                            c->unit_next_map, c->unit_next_start);
+                }
+
                 snprintf(c->pending_map, sizeof(c->pending_map), "%s",
                          e->directory);
                 snprintf(c->pending_start, sizeof(c->pending_start),
                          "Default");
                 c->map_change_pending = true;
+                c->unit_over          = true;
                 c->script_units++;
                 Q2_INFO("MISCOMPLETE: unit %d over -> %s (%s)",
                         c->map_unit, want, e->directory);
@@ -3149,10 +3410,26 @@ static void client_event_call(void *user, const q2_event_item *item,
                 if (!q2_uf_operand_name(&call, 1, start))
                     start[0] = '\0';
 
-                snprintf(c->pending_map, sizeof(c->pending_map), "%s", map);
-                snprintf(c->pending_start, sizeof(c->pending_start), "%s",
-                         start);
-                c->map_change_pending = true;
+                if (c->unit_over) {
+                    /*
+                     * A MISCOMPLETE has already claimed this frame. On the
+                     * console the two are in different volumes and a player
+                     * fires one; `--fire-triggers` fires both, and a unit end
+                     * that a sweep walks straight past would be worth nothing.
+                     * So the destination is remembered as the continuation
+                     * rather than taken — the same slot the MISCOMPLETE arm
+                     * fills when the order is the other way round.
+                     */
+                    snprintf(c->unit_next_map, sizeof(c->unit_next_map), "%s",
+                             map);
+                    snprintf(c->unit_next_start, sizeof(c->unit_next_start),
+                             "%s", start);
+                } else {
+                    snprintf(c->pending_map, sizeof(c->pending_map), "%s", map);
+                    snprintf(c->pending_start, sizeof(c->pending_start), "%s",
+                             start);
+                    c->map_change_pending = true;
+                }
             }
         }
     }
@@ -3259,6 +3536,13 @@ static bool client_load_zone(client *c, const char *map, int index)
 
     /* Nothing of this level is on screen yet — see the field's note. */
     c->level_frames_drawn = false;
+
+    /*
+     * And no mission row until this map claims one. A map with no unit of its
+     * own — QENDMIS, QFMV, the front end — must not keep writing the counters
+     * of the level it came from into that level's row.
+     */
+    c->mission_row = -1;
 
     if (q2_world_load_zone(&loaded, c->disc, map, index) != Q2_OK) {
         /* The client counts a map's zones by probing until one is absent, so
@@ -3620,28 +3904,48 @@ static bool client_load_zone(client *c, const char *map, int index)
                          * carries `Unit<N>Miss1` for its own unit and no other
                          * — so it is recorded rather than discarded.
                          */
-                        for (unit = 1; unit <= 9; unit++) {
-                            q2_leveltext_key_objective(key, unit);
-                            s2 = q2_leveltext_find(&tx, key);
-                            if (s2) {
-                                q2_briefing_set_objective(&c->briefing, s2);
-                                c->map_unit = unit;
-                                break;
-                            }
-                        }
-                        for (unit = 1; unit <= 9; unit++) {
-                            bool got = false;
-                            for (step = 0; step <= 15; step++) {
-                                q2_leveltext_key_orders(key, unit, step);
+                        {
+                            bool own_unit = false;
+
+                            for (unit = 1; unit <= 9; unit++) {
+                                q2_leveltext_key_objective(key, unit);
                                 s2 = q2_leveltext_find(&tx, key);
                                 if (s2) {
-                                    q2_briefing_set_orders(&c->briefing, s2);
-                                    got = true;
+                                    q2_briefing_set_objective(&c->briefing, s2);
+                                    c->map_unit = unit;
+                                    own_unit    = true;
                                     break;
                                 }
                             }
-                            if (got)
-                                break;
+                            for (unit = 1; unit <= 9; unit++) {
+                                bool got = false;
+                                for (step = 0; step <= 15; step++) {
+                                    q2_leveltext_key_orders(key, unit, step);
+                                    s2 = q2_leveltext_find(&tx, key);
+                                    if (s2) {
+                                        q2_briefing_set_orders(&c->briefing, s2);
+                                        got = true;
+                                        break;
+                                    }
+                                }
+                                if (got)
+                                    break;
+                            }
+
+                            /*
+                             * AND TAKE THIS LEVEL'S ROW IN THE MISSION TABLE,
+                             * here, because this is where the level's own name
+                             * and its unit are known — which is exactly the
+                             * point at which the console's LevelBin init does
+                             * it (`client_mission_enter`).
+                             *
+                             * Only a map that carries its own `Unit<N>Miss1`.
+                             * `QENDMIS<N>`, `QFMV` and the front end have no
+                             * unit of their own and must not take a row from
+                             * the one they are sitting between.
+                             */
+                            if (own_unit)
+                                client_mission_enter(c);
                         }
                     }
                 }
@@ -3989,6 +4293,14 @@ static bool client_load_zone(client *c, const char *map, int index)
         c->zone.node_hidden  = NULL;
         c->zone.node_hidden_count = 0;
 
+        /* The explosive set names Scene nodes of the zone being replaced, and
+         * the sim borrows the pointer — drop both before either goes stale. */
+        if (c->explosives_ready) {
+            q2_explosives_free(&c->explosives);
+            c->explosives_ready = false;
+        }
+        c->sim[0].explosives = NULL;
+
         if (c->movers_ready) {
             q2_movers_free(&c->movers);
             c->movers_ready = false;
@@ -4041,6 +4353,34 @@ static bool client_load_zone(client *c, const char *map, int index)
                                 b->bmax[0], b->bmax[1], b->bmax[2]);
                     }
                 }
+
+                /*
+                 * The `func_explosive` groups — opcode 0x08, and the biggest
+                 * family of destroyable geometry on the disc by a wide margin.
+                 *
+                 * Built from the same COMMON chunk with the same rebase, for
+                 * the same reason: the eight node slots and the reveal node are
+                 * OBJSLOTs and read -1 out of COMMON's own copy.
+                 *
+                 * The initial visibility has to be applied here and not left to
+                 * the first destruction: the constructor HIDES every wreckage
+                 * node at load (0x80026C60), so a map whose author put rubble
+                 * behind a wall would otherwise show both at once.
+                 */
+                if (c->explosives_ready) {
+                    q2_explosives_free(&c->explosives);
+                    c->explosives_ready = false;
+                }
+                c->explosive_boxes = 0;
+                if (q2_explosives_build(&c->explosives, &ev, &c->ev_operands,
+                                        &c->zone.scene) == Q2_OK) {
+                    c->explosives_ready = true;
+                    c->explosive_boxes =
+                        q2_sim_attach_explosives(&c->sim[0], &c->explosives,
+                                                 &c->zone.scene);
+                }
+                /* The initial visibility is applied further down, once the hide
+                 * array exists — see the `node_hidden` allocation. */
 
                 /*
                  * How many secrets this map HAS: every INSECRET call item in
@@ -4107,6 +4447,35 @@ static bool client_load_zone(client *c, const char *map, int index)
                 if (c->node_hidden) {
                     c->zone.node_hidden       = c->node_hidden;
                     c->zone.node_hidden_count = c->node_hidden_count;
+                }
+
+                /*
+                 * THE EXPLOSIVES' LOAD-TIME VISIBILITY, and it has to be here
+                 * rather than where they are built: the constructor at
+                 * 0x80026A20 hides every wreckage node and the `reveal` node
+                 * (0x80026ACC, 0x80026C60) and shows the intact ones, and the
+                 * array it writes into is the one allocated three lines up.
+                 *
+                 * Applied before the first frame, so a map whose author stacked
+                 * the intact geometry and its rubble in the same place never
+                 * shows both at once.
+                 */
+                c->explosive_vis = 0;
+                if (c->explosives_ready) {
+                    u32 ei;
+
+                    for (ei = 0; ei < c->explosives.count; ei++) {
+                        q2_explosive_result vis;
+
+                        q2_explosive_initial_vis(&c->explosives, ei, &vis);
+                        client_apply_node_vis(c, &vis);
+                    }
+
+                    if (c->explosives.count)
+                        Q2_INFO("explosives: %u groups, %u shootable parts,"
+                                " %u nodes hidden at load",
+                                c->explosives.count, c->explosive_boxes,
+                                c->explosive_vis);
                 }
 
                 /*
@@ -4257,6 +4626,10 @@ static bool client_load_zone(client *c, const char *map, int index)
                             q2_endmission_set(&c->endmis, line, body);
 
                             c->endmis_open     = true;
+                            /* Dismissing it is what continues the campaign,
+                             * when the MISCOMPLETE that got here had a LOADMAP
+                             * beside it to carry — see `unit_next_map`. */
+                            c->endmis_await    = (c->unit_next_map[0] != '\0');
                             c->briefing_open   = false;
                             c->leveltext_ready = false;
                             q2_prompt_show(&c->prompts, Q2_PROMPT_BACK, 216);
@@ -4402,6 +4775,8 @@ static bool client_load_zone(client *c, const char *map, int index)
         c->sim[0].event_rt.on_call_user  = c;
         c->sim[0].event_rt.on_mover      = client_event_mover;
         c->sim[0].event_rt.on_mover_user = c;
+        c->sim[0].event_rt.on_explosive      = client_event_explosive;
+        c->sim[0].event_rt.on_explosive_user = c;
 
         q2_sim_spawn(&c->sim[0], feet, c->cam.yaw);
         c->sim[0].player[0].ground_y = feet[1];
@@ -5221,29 +5596,72 @@ static void client_input_simulated(client *c, float dt)
     bool ticked;
 
     static q2_pad_state pad;
+    static u16          pend;      /* pad bits seen since the last TICK */
     q2_pad_config       cfg;
     q2_pad_bindings     bind;
+    u16                 raw;
+    s32                 step;
     int                 style = c->sim[0].player[0].look_scheme;
 
     if (!q2_pad_style_bindings(style, &bind))
         memset(&bind, 0, sizeof(bind));
 
-    pad.prev    = pad.buttons;
-    pad.buttons = client_pad_mask(c, &bind);
+    /*
+     * -----------------------------------------------------------------------
+     * THE PAD ROLLS ONCE PER TICK, NOT ONCE PER RENDERED FRAME
+     * -----------------------------------------------------------------------
+     * The console has no distinction to make: 0x80019154 has exactly one
+     * caller, 0x8003A4A4 inside the player's own frame, and 0x800184D8 runs
+     * that frame once per screen frame with no gate on dt at all. So a press
+     * EDGE is produced and consumed in the same call, always.
+     *
+     * The port splits them. `q2_sim_advance` only runs a tick once the
+     * accumulator reaches Q2_DT_NOMINAL, which at any frame rate above 25 Hz
+     * is a minority of frames — and this rolled `prev` on EVERY frame, so an
+     * edge raised on a non-ticking frame was destroyed before any tick could
+     * see it. Bit 22, the jump, is the only control in the game that exists
+     * solely as a single-frame edge and is consumed solely inside the tick, so
+     * it is the one that broke: measured against this exact accumulator
+     * arithmetic, 48 of 200 presses survived at 60 Hz and 33 at 144 Hz.
+     * Holding the key longer did not help — `derive` clears the bit from the
+     * second frame on, because `was` is true by then.
+     *
+     * So the roll is deferred to the frames that tick, and the raw pad is
+     * accumulated into `pend` in between. The OR is an addition the console
+     * does not have and needs a name: it catches a tap that begins and ends
+     * inside one 40 ms tick interval, which retail never had to because its
+     * tick rate WAS its frame rate. Without it a fast tap on a 240 Hz display
+     * would still be dropped. Do not "correct" it back out.
+     *
+     * Everything below this that is a LEVEL rather than an edge — the look
+     * axis, the mouse accumulator — stays unconditional.
+     */
+    step = q2_sim_next_dt(&c->sim[0], (double)dt);
+
+    raw = client_pad_mask(c, &bind);
+
+    /* The wheel, onto the same two masks the weapon keys use, and into `raw`
+     * so a notch is latched by the same accumulator as a key. */
+    {
+        int notch = client_wheel_notch(c);
+
+        if (notch > 0)      raw |= (u16)bind.weapon_next;
+        else if (notch < 0) raw |= (u16)bind.weapon_prev;
+    }
+
+    pend |= raw;
+
+    if (step > 0) {
+        pad.prev    = pad.buttons;
+        pad.buttons = pend;
+        pend        = 0;
+    }
     pad.lx = pad.ly = pad.rx = pad.ry = 0;
 
     q2_pad_config_default(&cfg);
     cfg.style       = style;
     cfg.swap_y      = c->settings.v[Q2_SET_SWAP_Y];
     cfg.mouse_speed = c->settings.v[Q2_SET_MOUSE_SPEED];
-
-    /* The wheel, onto the same two masks the weapon keys use. */
-    {
-        int notch = client_wheel_notch(c);
-
-        if (notch > 0)      pad.buttons |= (u16)bind.weapon_next;
-        else if (notch < 0) pad.buttons |= (u16)bind.weapon_prev;
-    }
 
     /*
      * The look axis, on the styles that have one. Two sources land in the same
@@ -5256,8 +5674,7 @@ static void client_input_simulated(client *c, float dt)
      *                regression this whole arrangement exists to avoid
      */
     if (q2_pad_style_look(style) == Q2_PAD_LOOK_MOUSE) {
-        s32 step  = q2_sim_next_dt(&c->sim[0], (double)dt);
-        int scale = (cfg.mouse_speed + 32) >> 4;
+        int scale = (cfg.mouse_speed + 32) >> 4;   /* `step` is the pad roll's */
         int lx = 0, ly = 0;
 
         if (scale < 1)
@@ -5418,8 +5835,20 @@ static void client_input_simulated(client *c, float dt)
         }
     }
 
-    if (in.buttons & Q2_BTN_WEAP_NEXT) q2_sim_cycle_weapon(&c->sim[0], +1);
-    if (in.buttons & Q2_BTN_WEAP_PREV) q2_sim_cycle_weapon(&c->sim[0], -1);
+    /*
+     * The weapon edges, under the SAME gate the pad roll is under, and this is
+     * not optional: with `prev` frozen between ticks, `derive` recomputes the
+     * same press edge on every non-ticking frame, so a consumer that runs at
+     * render rate fires two or three times for one notch at 60 Hz.
+     *
+     * And `else if`, because 0x8004ECE0 branches to 0x8004ED00 rather than
+     * falling into it — bit 26 suppresses bit 27 on a frame that somehow
+     * carries both, which the wheel's own gap flag makes possible.
+     */
+    if (step > 0) {
+        if (in.buttons & Q2_BTN_WEAP_NEXT)      q2_sim_cycle_weapon(&c->sim[0], +1);
+        else if (in.buttons & Q2_BTN_WEAP_PREV) q2_sim_cycle_weapon(&c->sim[0], -1);
+    }
 
     /*
      * The creatures, published to combat as actors before the tick that may
@@ -5561,10 +5990,26 @@ static void client_input_simulated(client *c, float dt)
      * players would walk in lockstep and a split screen would show one man
      * reflected four times, which proves nothing about four sims running.
      */
+    /*
+     * ONE CLOCK, FOUR PLAYERS — 0x80033030 loops 0x800323EC over s0 = 0..3 and
+     * every one of them reads the single dt global at 0x800B2DB4. There is no
+     * per-player step.
+     *
+     * This recomputed a step from the RENDER frame's own dt and floored it at
+     * 1, so on a frame where player 0's accumulator had not filled, players
+     * 1..3 were stepped anyway on a 1-to-4 unit tick that player 0 never saw:
+     * they ran ahead of the world they share, and — being the other half of
+     * the bug above — they received every press edge while player 0 lost two
+     * in three. Now they ride the tick player 0 actually took.
+     *
+     * `cur_dt` has to be captured BEFORE the loop: `q2_sim_advance_player`
+     * calls `q2_sim_tick`, which overwrites it on the first iteration.
+     */
     {
         int pi;
+        s32 step_dt = c->sim[0].cur_dt;
 
-        for (pi = 1; pi < Q2_MP_MAX_PLAYERS; pi++) {
+        for (pi = 1; ticked && pi < Q2_MP_MAX_PLAYERS; pi++) {
             q2_input pin;
 
             if (!c->sim_ready[pi])
@@ -5588,12 +6033,8 @@ static void client_input_simulated(client *c, float dt)
             }
 
             {
-                s32 ticks = (s32)((double)dt * 300.0 + 0.5);
+                s32 ticks = step_dt;      /* the step player 0 just took */
 
-                if (ticks < 1)
-                    ticks = 1;
-                if (ticks > 30)
-                    ticks = 30;      /* the same clamp q2_sim_advance applies */
                 if (c->mp_stage) {
                     pin.attack   = true;
                     pin.buttons |= Q2_BTN_ATTACK_PRESS;
@@ -6089,6 +6530,33 @@ static void client_input_simulated(client *c, float dt)
                 }
                 c->sim[0].breakable_open_count = 0;
             }
+        }
+
+        /*
+         * A `func_explosive` that came apart this tick, wherever it came from —
+         * a shot, or a script item. The sim spawns the debris and the blast
+         * itself; the geometry swap has to land here, because the hide array is
+         * this side's.
+         *
+         * Outside the `movers_ready` arm above on purpose: an explosive has
+         * nothing to do with a mover, and a zone with no doors still has these.
+         */
+        {
+            s16 node;
+            u8  hidden;
+
+            while (q2_sim_next_node_vis(&c->sim[0], &node, &hidden)) {
+                if (!c->node_hidden || node < 0 ||
+                    (u32)node >= c->node_hidden_count)
+                    continue;
+                if (c->node_hidden[node] != hidden) {
+                    c->node_hidden[node] = hidden;
+                    c->explosive_vis++;
+                }
+            }
+        }
+
+        if (c->movers_ready) {
 
             /*
              * AND WHAT THE TRANSITIONS SOUND LIKE. The mover set asks; this is
@@ -6227,39 +6695,41 @@ static void client_input_simulated(client *c, float dt)
              * T_Damage ends by calling the entity's own `pain` (+0xA0) or `die`
              * (+0xA4) — 0x80062A9C for the latter — and this port had neither
              * installed, so `soldier_pain` and `soldier_die` were dead code and
-             * damage only ever moved a number. Now that crebind installs them,
-             * this is the site that calls them: it is the one place that can
-             * see the health CROSS a threshold.
+             * damage only ever moved a number. This is the site that sees the
+             * health CROSS a threshold, and it used to dispatch the two hooks
+             * from here directly.
+             *
+             * IT NO LONGER DOES, because dispatching them was only half of what
+             * the original does between the subtraction and the return.
+             * `q2_monster_damage_reaction` is the whole of that tail —
+             * M_ReactToDamage, the AI_DUCKED gate, the nightmare pain debounce,
+             * the death-use pass, the kill counter and the no-knockback bit —
+             * transcribed in monster.c. What is left here is deciding WHEN to
+             * call it and with what.
              *
              * The attacker is the sight client, which is where the player is;
              * the port has no inflictor entity to hand over.
+             *
+             * One honest approximation, stated: the original calls the tail on
+             * every hit, INCLUDING one that armour or godmode reduced to zero —
+             * and still reacts to it, because being shot at and unhurt is still
+             * being shot at. The actor sync reports health, not the shot, so a
+             * hit that took nothing is indistinguishable here from no hit at
+             * all. The gate is therefore "the health moved", which is a subset
+             * of the original's occasions and never a superset.
              */
-            if (!was && m->dead) {
-                if (m->die) {
-                    /*
-                     * AND THE FLAG IS THE MODULE'S TO SET, not ours.
-                     *
-                     * `soldier_die` opens with the console's own already-dead
-                     * guard — `if (self->dead) return;` — and
-                     * `q2_actor_to_monster` has just raised that very flag from
-                     * the health going negative. So the callback was installed,
-                     * was called, was COUNTED, and returned on its first
-                     * instruction every single time: no death sound, no skin
-                     * bit, no choice among the four death moves. The counter
-                     * saying "1 die" was counting the call, not the work.
-                     *
-                     * On the console the flag is written by the die function
-                     * itself (T_Damage only dispatches), so it is cleared for
-                     * the one call and the module puts it back.
-                     */
-                    m->dead = false;
-                    m->die(m);
-                    m->dead = true;
+            if (m->health != hp || (!was && m->health <= 0)) {
+                s16 took = (s16)(hp - m->health);
+
+                if (took < 0)
+                    took = 0;
+
+                q2_monster_damage_reaction(m, &c->creatures.sight, took);
+
+                if (!was && m->dead)
                     c->cre_die_calls++;
-                }
-            } else if (!m->dead && m->health < hp && m->pain) {
-                m->pain(m);
-                c->cre_pain_calls++;
+                else if (!m->dead && took > 0)
+                    c->cre_pain_calls++;
             }
 
             /*
@@ -7457,6 +7927,8 @@ static const char *client_ent_sound_name(const client *c, u32 which)
     case Q2_SND_PAIN_100:     return "mal_pn100_1";  /* 0x800B2958 */
     case Q2_SND_DEATH:        return "pla_death4";   /* 0x800B28E4 */
     case Q2_SND_DROWN:        return "pla_drown1";   /* 0x800B28E8 */
+    case Q2_SND_JUMP:         return "pla_jump1";    /* 0x800B2900 */
+    case Q2_SND_LAND_SOFT:    return "pla_land1";    /* 0x800B2904 */
     default: break;
     }
 
@@ -7591,6 +8063,8 @@ static void client_entity_events(client *c)
                 ev->e[i].sound == Q2_SND_FOOTSTEP_B ||
                 ev->e[i].sound == Q2_SND_FOOTSTEP_WET ||
                 ev->e[i].sound == Q2_SND_LAND ||
+                ev->e[i].sound == Q2_SND_LAND_SOFT ||
+                ev->e[i].sound == Q2_SND_JUMP ||
                 ev->e[i].sound == Q2_SND_PAIN_25 ||
                 ev->e[i].sound == Q2_SND_PAIN_50 ||
                 ev->e[i].sound == Q2_SND_PAIN_75 ||
@@ -7600,17 +8074,30 @@ static void client_entity_events(client *c)
                 ok = client_play_sound_at(c, name, ev->e[i].pos);
 
             /*
-             * A footstep or a landing is the player's OWN noise, which is
-             * PlayerNoise's second pair (`sound2_entity`) — the one an AMBUSH
-             * creature is allowed to ignore. Keeping it apart from the weapon
-             * pair is the whole reason the engine has two.
+             * WHICH PLAYER EVENTS RAISE AI NOISE, and this was backwards in
+             * both directions.
+             *
+             * `xrefs 0x80062B80` gives PlayerNoise fourteen callers. Ten are
+             * weapons. The other four are water entry (0x8003D2B8), the breath
+             * (0x8003D3FC), water exit (0x8003D460) and the JUMP (0x8003E208).
+             * The footstep block at 0x8003AA3C..0x8003AB04 contains no `jal`
+             * except its own sound play, and the fall handler makes only
+             * 0x8007270C and 0x80057D54. So retail raises no noise for walking
+             * or landing at all, and raises one for the jump — the exact
+             * opposite of what was here.
+             *
+             * And the pair was wrong too. All four player-body callers pass
+             * type 0, and 0x80062C68's `sltiu v0, s4, 2` sends anything below 2
+             * to level.sound_entity at 0x800E46EC. That is the `true` branch of
+             * this helper. `false` writes sound2_entity, which an ambush
+             * creature ignores — so even the noise that was being raised went
+             * to the pair least likely to be heard.
+             *
+             * Expect this to read as a regression at first: creatures stop
+             * noticing you walk. They did not notice on the console either.
              */
-            if (c->creatures_ready &&
-                (ev->e[i].sound == Q2_SND_FOOTSTEP_A ||
-                 ev->e[i].sound == Q2_SND_FOOTSTEP_B ||
-                 ev->e[i].sound == Q2_SND_FOOTSTEP_WET ||
-                 ev->e[i].sound == Q2_SND_LAND))
-                q2_creature_world_player_noise(&c->creatures, false);
+            if (c->creatures_ready && ev->e[i].sound == Q2_SND_JUMP)
+                q2_creature_world_player_noise(&c->creatures, true);
 
             if (!ok)
                 Q2_DEBUG("sound '%s' is not in %s's bank", name, c->map);
@@ -8195,17 +8682,18 @@ static void client_write_shot(client *c, bool numbered)
         }
         Q2_INFO("  creatures %u live, %u hunting, %u drawn (%u faces), "
                 "nearest %d units, moved %ld, player %d hp, "
-                "%u swings %u shots (%u fire reports), %u sounds (%u not in bank, "
-                "%u unnamed), %u dead, "
+                "%u swings %u shots (%u fire reports, %u with no figures read), "
+                "%u sounds (%u not in bank, "
+                "%u unnamed), %u dead of %d, "
                 "%ld hp total, "
                 "player attacked %u, targets %u, bolts %u (%u faces, %u dropped "
                 "on a full pool), %u bodies, "
                 "rot %u steps %u moved %u turned, %u calls",
                 live, hunting, c->cre_drawn, c->cre_faces, near_d, moved,
                 c->sim[0].combat.inv.health, c->cre_swings, c->cre_shots,
-                c->cre_fire_sounds,
+                c->cre_fire_sounds, c->cre_fire_no_figures,
                 c->cre_sounds, c->cre_sound_missing, c->cre_sound_unnamed,
-                dead, hp,
+                dead, q2_level_state.total_monsters, hp,
                 c->player_attacks,
                 c->sim[0].combat.target_count,
                 c->sim[0].combat.projectiles.live,
@@ -8258,6 +8746,38 @@ static void client_write_shot(client *c, bool numbered)
             }
             if (at)
                 Q2_INFO("  movers    built from: %s", kinds);
+        }
+        {
+            /*
+             * The trains, one line each. A PLATFORM is rare enough — one on
+             * the disc — that a count would say nothing, and its path is the
+             * one mover operand a reader cannot infer from the payload: the
+             * direction comes from a Scene node's box centre, so it exists only
+             * after the build has had the zone's Scene in hand.
+             */
+            u32 mi;
+
+            for (mi = 0; c->movers_ready && mi < c->movers.count; mi++) {
+                const q2_mover *m = &c->movers.movers[mi];
+                s32 d[3];
+
+                s32 home[3] = { 0, 0, 0 };
+
+                if (!m->is_path)
+                    continue;
+                q2_mover_displacement(m, d);
+                if (m->part_count)
+                    client_node_centre(c, m->node[0], home);
+                Q2_INFO("  train     %u part%s (node %d%s) from (%d,%d,%d), "
+                        "path (%d,%d,%d) len %d, speed %d, "
+                        "at %d/%d -> (%d,%d,%d)",
+                        m->part_count, m->part_count == 1 ? "" : "s",
+                        m->part_count ? m->node[0] : -1,
+                        m->part_count > 1 ? ", +more" : "",
+                        home[0], home[1], home[2],
+                        m->dir[0], m->dir[1], m->dir[2], m->target,
+                        m->speed, m->offset, m->target, d[0], d[1], d[2]);
+            }
         }
         {
             u32 mi, blocked = 0, sealed = 0;
@@ -10496,6 +11016,10 @@ static void usage(void)
     printf("  --frames N    stop after N frames\n");
     printf("  --shot P.ppm  write the console's own framebuffer to P.ppm\n");
     printf("  --shot-every N  ...and one every N frames, numbered\n");
+    printf("  --fire-event NAME [F]  queue ONE named Events entry point at\n"
+           "                frame F, instead of every trigger volume on the\n"
+           "                map. Level authors name the interesting ones\n"
+           "                (BIGGUN: PLATFORM, DestroyGlass, GravTeleport)\n");
     printf("  --at X,Y,Z    stand here instead of at the zone's spawn point\n");
     printf("  --yaw N       ...facing this way (the engine's 0..4095)\n");
     printf("  --pitch N     ...and looking this far up or down\n");
@@ -10830,6 +11354,12 @@ int main(int argc, char **argv)
     q2_mp_mode mp_mode    = Q2_MP_DEATHMATCH;
 
     c.trace_cre = -1;
+    /* The same switch the inspect tool honours, and for the same reason:
+     * several load-time decisions -- which movers a zone drops, which object
+     * slots resolve -- are only ever reported at Q2_LOG_DEBUG, and the client
+     * had no way to ask for them. */
+    if (getenv("Q2PSX_VERBOSE"))
+        q2_log_set_level(Q2_LOG_DEBUG);
     int        mp_players = 2;
     s16        mp_frags   = -2;
     s16        mp_minutes = -2;
@@ -10857,6 +11387,11 @@ int main(int argc, char **argv)
             if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9')
                 c.fire_at_frame = strtol(argv[++i], NULL, 10);
             c.fire_interval = c.fire_at_frame > 0 ? c.fire_at_frame : 60;
+        }
+        else if (!strcmp(argv[i], "--fire-event") && i + 1 < argc) {
+            c.fire_event = argv[++i];
+            if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9')
+                c.fire_at_frame = strtol(argv[++i], NULL, 10);
         }
         else if (!strcmp(argv[i], "--at") && i + 1 < argc) {
             int x = 0, y = 0, z = 0;
@@ -11246,6 +11781,7 @@ no_window:
     /* The level-completion screen. Its counters are the sim's to fill; until
      * kills and secrets are tallied it honestly reads zero. */
     q2_mission_init(&c.mission);
+    c.mission_row = -1;
     q2_briefing_init(&c.briefing);
     q2_prompt_init(&c.prompts);
     /* ONCE per session, not per level: the two strings are global on the
@@ -12029,20 +12565,40 @@ no_window:
             Q2_INFO("teleported to '%s' in zone %d", sp.name, (int)sp.zone);
         }
 
+        /* The mission row is the LEVEL's and is written as its two counters
+         * move, not when it ends — see `client_mission_update`. */
+        client_mission_update(&c);
+
         /*
-         * And a LOADMAP: the same deferral, one level up — but the level that
-         * is ending gets its MISSION screen first.
+         * And a LOADMAP: the same deferral, one level up.
          *
-         * `mission.h` says the screen is "the one the game shows when a level
-         * ends", and main.c's briefing key used to carry the note that what
-         * triggers it "is not established". LOADMAP is what triggers it: it is
-         * the level ending. The destination waits behind the screen, which is
-         * what makes this an intermission rather than a flash.
+         * **NO TALLY BOARD HERE, and that is the correction.** This port used
+         * to raise the MISSION screen at every level boundary on the reading
+         * that it is "the one the game shows when a level ends". It is not,
+         * and the call graph has exactly one edge at each step: the board's
+         * draw at `0x80021ADC` is reached only from `0x80018944`, which is
+         * only in the tally frame `0x80018868`, which is only spun by
+         * `0x80018ED8`, which is only reached by game state 7, which is only
+         * written by `0x8002DCB4` — MISCOMPLETE's exec. A LOADMAP writes 2 at
+         * `0x8002DD80` and the outer state machine just loads the map.
+         *
+         * So a level change is the load and nothing else, and the six-row
+         * board with "Mission %d - Complete" over it is what a UNIT ends on.
          */
-        if (c.map_change_pending) {
+        if (c.map_change_pending && !c.unit_over) {
+            c.map_change_pending = false;
+            client_change_map_and_brief(&c);
+        }
+
+        /*
+         * A MISCOMPLETE, which is the one that does hold a screen. The tally
+         * board goes up with the destination waiting behind it, exactly as
+         * `0x80018ED8` shows the board before it writes `EndMission N`.
+         */
+        if (c.map_change_pending && c.unit_over) {
             c.map_change_pending = false;
 
-            client_mission_record(&c);
+            client_mission_update(&c);
             c.mission_open      = true;
             c.mission_after_map = true;
             c.mission_frames    = 0;
@@ -12077,6 +12633,43 @@ no_window:
             }
         }
 
+        /*
+         * The END-OF-MISSION placard, dismissed — and on to the level the
+         * unit's last LOADMAP named. See `unit_next_map` for why the port has
+         * to carry it and the console does not.
+         */
+        /*
+         * Headless has nobody to press BACK with, and the placard would
+         * otherwise stop a scripted run at the first unit boundary — the same
+         * reason the tally board has a headless release and the same count.
+         */
+        if (c.endmis_open) {
+            c.endmis_frames++;
+            if (c.headless && c.endmis_frames >= Q2_INTERMISSION_HEADLESS) {
+                c.endmis_open = false;
+                q2_prompt_hide_all(&c.prompts);
+            }
+        } else {
+            c.endmis_frames = 0;
+        }
+
+        if (c.endmis_await && !c.endmis_open) {
+            c.endmis_await = false;
+            if (c.unit_next_map[0]) {
+                char next[Q2_UF_NAME_LEN + 1], start[Q2_UF_NAME_LEN + 1];
+
+                snprintf(next, sizeof(next), "%s", c.unit_next_map);
+                snprintf(start, sizeof(start), "%s", c.unit_next_start);
+                c.unit_next_map[0]   = '\0';
+                c.unit_next_start[0] = '\0';
+                c.endmission         = false;
+                snprintf(c.pending_map, sizeof(c.pending_map), "%s", next);
+                snprintf(c.pending_start, sizeof(c.pending_start), "%s", start);
+                Q2_INFO("end of mission over -> %s '%s'", next, start);
+                client_change_map_and_brief(&c);
+            }
+        }
+
         if (c.mission_after_map) {
             c.mission_frames++;
             /*
@@ -12100,31 +12693,13 @@ no_window:
 
             if (!c.mission_open) {
                 c.mission_after_map = false;
-                if (client_change_map(&c, c.pending_map, c.pending_start)) {
-                    /*
-                     * And the ARRIVAL half of the intermission: the briefing,
-                     * which is the new level's orders. `main.c` used to say of
-                     * it that "on the console it is shown between levels by the
-                     * outer state machine; what triggers it is not established"
-                     * — a LOADMAP that has just completed is that trigger, and
-                     * it is the other side of the boundary from the MISSION
-                     * screen the level being left raises.
-                     *
-                     * Only on a level change: a zone gate stays inside one
-                     * level and has no new orders to give.
-                     */
-                    c.briefing_open   = true;
-                    c.briefing_frames = 0;
-                    q2_prompt_show(&c.prompts, Q2_PROMPT_BACK, 216);
-                }
-
-                /* Re-arm, so one `--fire-triggers` walks the game rather than
-                 * one level. Without this a scripted run stops at the first
-                 * boundary, having proved only that the first boundary works. */
-                if (c.fire_interval > 0) {
-                    c.fire_triggers = true;
-                    c.fire_at_frame = (long)c.frame_index + c.fire_interval;
-                }
+                c.unit_over         = false;
+                /*
+                 * The destination the board was holding: `EndMission N`, or
+                 * `Extro FMV` on the last unit. `0x80018ED8` writes it after
+                 * the spin, which is exactly here.
+                 */
+                client_change_map_and_brief(&c);
             }
         }
 
@@ -12142,6 +12717,18 @@ no_window:
          * is the level's triggers to be loaded, which is the thing the loop
          * below walks.
          */
+        /* `--fire-event NAME`: one named record, once, and say whether the
+         * map has it — a name that resolves nowhere is a typo and should not
+         * look like a feature that did nothing. */
+        if (c.fire_event && !c.fire_event_done && c.sim[0].event_rt.record_count &&
+            (long)c.frame_index >= c.fire_at_frame) {
+            c.fire_event_done = true;
+            if (q2_event_rt_trigger_named(&c.sim[0].event_rt, c.fire_event))
+                Q2_INFO("--fire-event: '%s' queued", c.fire_event);
+            else
+                Q2_WARN("--fire-event: this map names no '%s'", c.fire_event);
+        }
+
         if (c.fire_triggers && c.sim[0].triggers.count &&
             (long)c.frame_index >= c.fire_at_frame) {
             u32 i, fired = 0;

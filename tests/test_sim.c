@@ -1329,6 +1329,134 @@ static void test_autoswitch(void)
                "on: a grenade never arms itself in your hand");
 }
 
+
+/* ------------------------------------------------------------------------- */
+/* Every step is in the way. */
+static bool train_always_blocked(u32 index, const s32 step[3], void *user)
+{
+    (void)index; (void)step; (void)user;
+    return true;
+}
+
+/*
+ * THE TRAIN -- PLATFORM, the one mover in this engine that is not axis-aligned.
+ *
+ * The numbers are BIGGUN's, the only PLATFORM on the disc: Events+476 names the
+ * destination (-55731, 11143, 289), speed -4 and Scene nodes 31, 32 and 30, and
+ * node 31's box centre in that zone is (-23727, 3012, 287). Everything below
+ * follows from those and from mover.h's reading of 0x8002C2D4.
+ */
+static void test_train(void)
+{
+    q2_mover      m;
+    q2_mover_set  set;
+    s32           d[3];
+    u32           ticks;
+
+    printf("train\n");
+
+    memset(&m, 0, sizeof(m));
+    m.is_path     = 1;
+    m.part_count  = 3;
+    m.node[0]     = 31;
+    m.node[1]     = 32;
+    m.node[2]     = 30;
+    m.dir[0]      = -32004;   /* origin - node 31's box centre */
+    m.dir[1]      = 8131;
+    m.dir[2]      = 2;
+    m.target      = 32516;    /* isqrt of the above, TRUNCATED to s16 */
+    m.speed       = 4;
+    m.axis        = 1;
+    m.wait_timer  = Q2_MOVER_WAIT_NEVER;
+    m.wait_reset  = Q2_MOVER_WAIT_NEVER;
+    m.sound_pending = Q2_MVSND_NONE;
+    m.partner     = -1;
+    m.portal_node = -1;
+
+    set.movers   = &m;
+    set.count    = 1;
+    set.capacity = 1;
+
+    /* At rest it displaces nothing, and at the far end it displaces exactly the
+     * authored vector -- the division cancels whatever the target is. */
+    m.offset = 0;
+    q2_mover_displacement(&m, d);
+    check(d[0] == 0 && d[1] == 0 && d[2] == 0, "train: at rest, no offset");
+
+    m.offset = m.target;
+    q2_mover_displacement(&m, d);
+    check_eq_i(d[0], -32004, "train: arrives on the authored X");
+    check_eq_i(d[1], 8131,   "train: arrives on the authored Y");
+    check_eq_i(d[2], 2,      "train: arrives on the authored Z");
+
+    /* Halfway is halfway on every axis, not on one of them. */
+    m.offset = m.target / 2;
+    q2_mover_displacement(&m, d);
+    check(d[0] < -15900 && d[0] > -16100, "train: half the X at half the path");
+    check(d[1] >  4000  && d[1] <  4100,  "train: half the Y at half the path");
+
+    /* Every part reads the same displacement, and a node it does not own reads
+     * none. This is the write down the +0x30 chain. */
+    q2_movers_node_offset(&set, 32, d);
+    check(d[0] < -15900 && d[0] > -16100, "train: part 2 moves with part 1");
+    q2_movers_node_offset(&set, 30, d);
+    check(d[0] < -15900 && d[0] > -16100, "train: part 3 moves with part 1");
+    q2_movers_node_offset(&set, 99, d);
+    check(d[0] == 0 && d[1] == 0 && d[2] == 0,
+          "train: a node it does not own stays put");
+
+    /* Triggered from rest it takes one tick to leave IDLE, one to spend a zero
+     * delay, and then target/(speed*dt) to arrive. */
+    m.offset      = 0;
+    m.state       = Q2_MV_IDLE;
+    m.delay_timer = 0;
+    m.delay_reset = 0;
+    q2_mover_trigger(&set, 0);
+    for (ticks = 0; ticks < 2000 && m.state != Q2_MV_OPEN; ticks++)
+        q2_movers_tick(&set, 20, 0);
+    check_eq_i(m.offset, m.target, "train: it arrives exactly on the target");
+    check(ticks < 2000, "train: and gets there in finite time");
+
+    /* Blocked while opening it BACKS OFF speed*150 and heads for that, rather
+     * than waiting out a sixteen-tick retry (0x8002CAE0). */
+    m.offset      = 20000;
+    m.state       = Q2_MV_OPENING;
+    m.saved_state = Q2_MV_OPENING;
+    m.wait_timer  = Q2_MOVER_WAIT_NEVER;
+    q2_movers_tick_blocked(&set, 20, 0, train_always_blocked, NULL);
+    check_eq_i(m.state, Q2_MV_BLOCKED, "train: an obstruction blocks it");
+    check_eq_i(m.wait_timer, 20000 - 4 * Q2_MOVER_PATH_BACKOFF,
+               "train: and it heads back 150 ticks' worth of travel");
+
+    /* Clamped at the near end rather than wrapping: the console's test is an
+     * unsigned compare against the target, which catches both ends. */
+    m.offset      = 100;
+    m.state       = Q2_MV_OPENING;
+    m.saved_state = Q2_MV_OPENING;
+    q2_movers_tick_blocked(&set, 20, 0, train_always_blocked, NULL);
+    check_eq_i(m.wait_timer, 0, "train: the back-off stops at the start");
+
+    /* And left alone, it walks back to that goal and resumes what it was
+     * doing. */
+    m.offset      = 20000;
+    m.state       = Q2_MV_BLOCKED;
+    m.saved_state = Q2_MV_OPENING;
+    m.wait_timer  = 19000;
+    for (ticks = 0; ticks < 200 && m.state == Q2_MV_BLOCKED; ticks++)
+        q2_movers_tick(&set, 20, 0);
+    check_eq_i(m.offset, 19000, "train: the retreat lands on its goal");
+    check_eq_i(m.state, Q2_MV_OPENING, "train: and then carries on opening");
+
+    /* A door is untouched by all of this: one axis, and the other two zero. */
+    memset(&m, 0, sizeof(m));
+    m.axis    = 1;
+    m.offset  = 512;
+    m.target  = 512;
+    q2_mover_displacement(&m, d);
+    check(d[0] == 0 && d[1] == 512 && d[2] == 0,
+          "a lift still moves on its axis alone");
+}
+
 int main(void)
 {
     printf("Q2PSX-PC simulation tests\n\n");
@@ -1350,6 +1478,7 @@ int main(void)
     test_variable_dt();
     test_four_players();
     test_melee_point();
+    test_train();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     printf("%s\n", g_failures == 0 ? "PASS" : "FAIL");

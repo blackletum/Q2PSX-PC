@@ -216,16 +216,33 @@ static const q2_uf_prim_info uf_table[Q2_UF_PRIM_COUNT] = {
  * and `s4` is a DISTANCE: three squared deltas summed and passed through
  * `0x80055CBC`, between the `origin` operand and the object's own position. So
  * a platform's travel is not authored as a length, it is the gap between where
- * the node is and where the script says it should end up. That is why this
- * port does not build one yet — the target needs the node's position, which
- * the mover builder does not have.
+ * the node is and where the script says it should end up.
+ *
+ * IT IS ALSO A DIRECTION, and the paragraph above used to stop one instruction
+ * short of saying so. The three deltas are not intermediates: `0x8002CDD0`,
+ * `0x8002CDDC` and `0x8002CDEC` write all three to obj+0x00, +0x04 and +0x08
+ * as full words, and PLATFORM's own per-frame handler at `0x8002C2D4` scales
+ * them by progress/length to displace the group on every axis. This is the
+ * engine's `func_train` and the only mover in it that is not axis-aligned; see
+ * mover.h, which carries the derivation.
+ *
+ * `objects` IS AN ARRAY OF FOUR. The constructor's loop at `0x8002CD3C` runs
+ * `s1` from 0 to 3 stepping its slot cursor by two, exactly as LIFT1's does,
+ * and stamps -1 into all four of the working copy's slots at `0x8002CD18`
+ * beforehand. The direction and the length are taken from the FIRST slot only
+ * (`0x8002CC24`, before the loop); the rest are carried along. BIGGUN's names
+ * three — Scene nodes 31, 32 and 30, a deck and its two side walls — and a
+ * table that described one slot cost the other two.
  */
 {Q2_UF_PLATFORM, "PLATFORM", 32, true, true, 5, {
     {4,  1, Q2_UF_OP_VEC3_S32, "origin",
-     "the far END of the travel; the target is |origin - node| (0x8002CCE8)"},
+     "the far END of the travel. The three signed deltas from the first "
+     "object's box centre ARE the direction (obj+0x00..0x08); their length "
+     "is the target (0x8002CCE8), truncated to s16 on the way into obj+0x44"},
     {18, 1, Q2_UF_OP_S16,      "speed",  "abs() into obj+0x3A (0x8002CDC4)"},
-    {20, 1, Q2_UF_OP_OBJSLOT,  "object",
-     "at +20, NOT +4 — a census that read +4 was reading origin's first word"},
+    {20, 4, Q2_UF_OP_OBJSLOT,  "objects",
+     "FOUR of them, at +20/+22/+24/+26 — the ctor loop at 0x8002CD3C. At +20 "
+     "and NOT +4: a census that read +4 was reading origin's first word"},
     {28, 1, Q2_UF_OP_U8,       "time_a", "written to obj+0x4C UNSCALED"},
     {29, 1, Q2_UF_OP_U8,       "time_b", "* 300; 0xFF => never"}}},
 

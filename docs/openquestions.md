@@ -8875,3 +8875,82 @@ into this one.
       answer was four instructions away in a function the same session had already disassembled for a
       different reason. Reading a field is not the same as reading its consumer, and only the consumer
       says what the field is.
+
+- [x] 128. **`func_train` exists, it is called `PLATFORM`, and this port had it modelled as a lift.**
+
+      The question was which primitive is retail Quake II's `func_train`. It is `PLATFORM`, and the proof is
+      in what its constructor keeps rather than in its name. `0x8002CBB0` subtracts the first object's
+      bounding-box centre from the item's absolute VEC3 at `+4` and stores **all three signed differences**
+      as full words at `obj+0x00/+0x04/+0x08` (`0x8002CDD0`, `0x8002CDDC`, `0x8002CDEC`), alongside their
+      length at `obj+0x44`. Its own per-frame handler — `0x8002C2D4`, installed at `0x8002CD80`, and not the
+      `0x80025658` every other family installs — then divides that vector by the length and scales it by
+      progress:
+
+          8002C914  lw   v0, 0(s0)      ; dir[k]
+          8002C920  mult v0, v1         ; * progress   (obj+0x20)
+          8002C930  div  t4, v0         ; / length     (obj+0x44)
+          8002C960  sh   a1, 40(sp)     ; -> one s16 per axis, all THREE of them
+
+      so the displacement written down the `+0x30` chain has an x, a y and a z. It is the only mover in the
+      engine that is not axis-aligned. #82 and #84 read the same constructor twice and stopped one
+      instruction short both times, recording the length and throwing the direction away — #84 even wrote
+      "the DIRECTION is not in this operand", which is exactly wrong: the direction is the part of the
+      operand that was being discarded three instructions before the answer.
+
+      **What the lift model cost, measured on the one PLATFORM the disc ships.** BIGGUN, `Events+476`,
+      resident in zone 2. Its payload reads `origin (-55731, 11143, 289) speed -4 nodes 31, 32, 30, -1
+      delay 0 wait 2`, and node 31's box centre in that zone is `(-23727, 3012, 287)`:
+
+          modelled as    one part, node 31, axis Y, target 32767
+          actually       three parts, path (-32004, 8131, 2), length 32516
+
+      Nodes 32 and 30 are the carriage's two side walls and were left standing; node 31 was driven straight
+      down through the floor by the length of a journey that is 97% sideways. On screen the deck vanished
+      four seconds after the trigger and the track it runs on — chevron-marked, unmistakable once the deck
+      is off it — was bare for the rest of the level.
+
+      **Three details that are not roundable.**
+
+      *The target is truncated to a halfword and then `abs()`-ed every frame.* The path is 33,020 units;
+      `sh s4, 68(s0)` at `0x8002CDB4` makes that -32,516 and `0x8002C794` makes it 32,516. The ENDPOINT
+      survives — the scale is exactly 1 at `progress == target` whatever the target is — so this is
+      invisible except as duration, and the port's old clamp to 32,767 had it wrong in the other direction.
+      The `abs()` per frame is the tell: nothing does that to a field it expects to be positive.
+
+      *Four object slots, at +20/+22/+24/+26.* The ctor loop at `0x8002CD3C` runs `s1` from 0 to 3 stepping
+      the slot cursor by two, exactly as LIFT1's does, and stamps -1 into all four beforehand at
+      `0x8002CD18`. The path is taken from slot 0 only, before the loop.
+
+      *Blocked, it backs off; it does not wait.* `0x8002CAE0` (opening) and `0x8002CB34` (closing) save the
+      state to `obj+0x56`, load `obj+0x4E` with `progress -/+ speed * 150` clamped into `[0, target]` by an
+      unsigned compare that catches both ends with one test, and enter state 4 — which does nothing but run
+      `0x8006FEB8`, a clamped move-toward, until it arrives, then restores the state. Blocked again
+      mid-retreat, `0x8002CB8C` writes the entry state back over the restore and nothing commits. Note
+      `obj+0x56` is the SAVED STATE here and a retry counter in the linear handler; the two families
+      disagree about that field.
+
+      **Two sounds the family docs said it did not have.** mover.h asserted PLATFORM "happens to play the
+      identical set" as the linear movers. It plays those three AND two more, through a different call
+      entirely: `0x8002C778` asks for id 13 at volume 1024 on every moving tick and `0x8002C8D8` for id 14
+      at volume 3072 on arrival, both `0x80040800(4, id, volume, &pos, 2048, 4096)`. That function walks the
+      entity array at `0x800D5C30`, rejects past the outer radius, attenuates linearly between the two
+      (`vol * (far - d) / (far - near)`, dropped under 513) and resolves `id` against a 16-record table of
+      SPU parameter pairs at `0x8009D420` — `{ const void *a; const void *b; u16 flags; u16 id; }`, ids 1
+      through 0x10. There is no mixer in this port, so `travel_sound` records which of the two a tick asked
+      for and nothing consumes it.
+
+      **A rider is carried DOWN and not ALONG, on the console too.** The obvious next worry is that a
+      player on a train that moves sideways is left behind, and they are — but that is the engine's answer,
+      not a gap here. `0x80053E34` hands `0x80052C70` a pointer to `box+0x30`, the s16 displacement
+      `0x80051EC0` accumulates on all three axes, and the sweep loads `lh v0, 2(t4)` and nothing else:
+      element [1], used twice (`0x80052E28`, `0x80052E3C`). Elements [0] and [2] are never read.
+      `trace.h` gave the reason for the vertical-only relative motion as "movers travel on one axis and it
+      is always this one", which PLATFORM refutes; the real reason is that the console reads one element of
+      the triple it is handed.
+
+      **And a bug found on the way.** `client_node_centre` indexed `scene.nodes` — the borrowed chunk, 52
+      raw bytes a record — as an array of `q2_scene_node`. It compiles with a warning and returns whatever
+      the stride mismatch lands on; node 31 came back as `(-5240449, 715263, -77568)`. Its only consumer
+      until now was the rotator sound, so every turning hatch on the disc has been playing from a position
+      several thousand screens away, which attenuates to silence and therefore looked like a rotator with
+      no bound node.

@@ -105,9 +105,23 @@ typedef struct q2_move_mode {
  * per-pair at runtime because the other entity moves.
  *
  * `other_dy` is the target's own vertical displacement this frame, subtracted
- * from the mover's before the test. Only the vertical axis is made relative,
- * which is exactly enough to ride a lift: movers travel on one axis and it is
- * always this one.
+ * from the mover's before the test. Only the vertical axis is made relative --
+ * and that is the CONSOLE'S choice, not a simplification here.
+ *
+ * This file used to give the reason as "movers travel on one axis and it is
+ * always this one", which is false: PLATFORM travels on all three (mover.h).
+ * The real reason is that the console is handed the whole triple and reads one
+ * of it. `0x80053E34` passes `&box + 0x30` -- the s16 displacement 0x80051EC0
+ * accumulates on every axis -- as the sixth argument, and 0x80052C70 touches
+ * exactly two instructions of it:
+ *
+ *     80052E20  lh   v0, 2(t4)      ; element [1] and no other
+ *     80052E28  subu a0, v1, v0     ; delta[1] -= other[1]
+ *     80052E3C  addu v1, v0, v1     ; pos[1]   += other[1]
+ *
+ * Elements [0] and [2] are never loaded. So a player standing on the disc's one
+ * train is carried DOWN with it and not ALONG with it, on the console as here;
+ * a port that fixed that would be diverging, not completing.
  *
  * The six faces are tested in the order +Y, -Y, +Z, -Z, +X, -X and the FIRST
  * one that passes wins — not the earliest impact. +Y is down, so the floor of

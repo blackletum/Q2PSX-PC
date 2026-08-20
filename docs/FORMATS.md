@@ -832,6 +832,8 @@ object's `s16` triple at `+0x12` (plus a second at `+0x18`) and adds it to the n
 
 ```
 runtime object, 92 bytes, 48 of them at 0x800D6BB0
+  +0x00  s32[3]  PLATFORM only: the path vector, destination minus the first
+                 node's box centre. Unused by every other family.
   +0x12  s16[3]  displacement, ADDED AT DRAW TIME
   +0x18  s16[3]  second draw-time offset
   +0x28  ptr     obstruction test target; 0x80051EC0 vetoes a move that would crush
@@ -841,7 +843,9 @@ runtime object, 92 bytes, 48 of them at 0x800D6BB0
   +0x3A  s16     speed, absolute value taken every frame
   +0x3C  s16     the sound/trigger id announced when it starts
   +0x42  s16     primary Scene node; bit 15 of its flags08 is the "at rest" bit
-  +0x44  s16     target displacement -- the sign is the direction
+  +0x20  s32     PLATFORM only: progress along the path, 0..+0x44
+  +0x44  s16     target displacement -- the sign is the direction, except on
+                 PLATFORM where it is a LENGTH and is abs()-ed every frame
   +0x4A  s16     partner object index
   +0x4C  u16     delay countdown   (state 5)
   +0x4E  u16     wait countdown    (state 6); 0xFFFF never auto-closes
@@ -869,6 +873,44 @@ The integration is `pos += speed * dt` against the global tick delta at `0x800B2
 signed by it, and the resulting delta is applied to every object down the `+0x30` chain. Sounds are
 positional: the handler takes the node's bounding-box centre and calls `0x80073704` with one of three ids
 from `gp+0x41CC`, `gp+0x41D0` and `gp+0x41D8`.
+
+### 2.9.2 `PLATFORM` -- the same object, driven along a path
+
+`0x80025658` is installed by four constructors and drives an axis-aligned slide. `PLATFORM` installs its own,
+`0x8002C2D4` (at `0x8002CD80`), and it is the engine's `func_train`: the payload names an absolute
+destination rather than a displacement, and the group travels the straight line to it.
+
+The constructor `0x8002CBB0` keeps the three signed differences between that destination and the first
+node's box centre -- `0x8002CDD0`, `0x8002CDDC`, `0x8002CDEC` write them to `+0x00`, `+0x04`, `+0x08` -- and
+their length, `isqrt` at `0x80055CBC`, to `+0x44`. The handler then scales the vector by progress:
+
+```
+8002C914  lw   v0, 0(s0)      ; dir[k]
+8002C920  mult v0, v1         ; * progress   (+0x20)
+8002C930  div  t4, v0         ; / length     (+0x44)
+8002C960  sh   a1, 40(sp)     ; -> one s16 per axis, all three of them
+```
+
+Three consequences a port has to reproduce rather than approximate:
+
+- **`+0x44` is truncated to a halfword on the way in and `abs()`-ed on the way out.** BIGGUN's path is
+  33,020 units; `sh` makes that -32,516 and `0x8002C794` makes it 32,516. The endpoint is unaffected -- the
+  scale is exactly one at `progress == target` whatever the target is -- but the ride is 1.5% shorter than
+  its geometry.
+- **Four object slots at +20/+22/+24/+26**, the ctor loop at `0x8002CD3C`. The path comes from slot 0 alone.
+- **Blocked, it backs off rather than waiting.** `0x8002CAE0` / `0x8002CB34` load `+0x4E` with
+  `progress -/+ speed * 150` clamped into `[0, target]`, save the state to `+0x56` and enter state 4, which
+  runs `0x8006FEB8` (a clamped move-toward) until it gets there. Note `+0x56` is the SAVED STATE here; the
+  linear handler uses it as a retry counter and keeps its saved state at `+0x57`.
+
+It also plays two sounds nothing else in the family plays, and not through `0x80073704`: `0x8002C778` asks
+for id 13 at volume 1024 on every moving tick and `0x8002C8D8` for id 14 at volume 3072 on arrival, both via
+`0x80040800(4, id, volume, &pos, 2048, 4096)` -- a positional call that attenuates linearly between the two
+radii and resolves `id` against a 16-record table of SPU parameter pairs at `0x8009D420`.
+
+One PLATFORM ships on the disc: BIGGUN, `Events+476`, resident in zone 2, Scene nodes 31, 32 and 30 -- a
+deck and its two side walls. The map's own script entry point for it is named `PLATFORM` and its LevelBin
+carries a mission event called `STOPPLATFORM`.
 
 This corroborates the port's mover model, which was derived independently from the on-disc payloads: same
 seven states, same single axis-aligned translation, same absolute-valued speed, same blocked-retry. What it

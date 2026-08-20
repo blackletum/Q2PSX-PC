@@ -425,6 +425,24 @@ static u32 record_env_mask(const q2_events *ev, const q2_userfuncs *uf,
          */
         case Q2_UF_DONTJUMP:     mask |= Q2_ENV_DONTJUMP;    break;
 
+        /*
+         * The two hazard volumes that are also ENVIRONMENT volumes. 0x8002E4E4
+         * and 0x8002E558 both `ori v0, v0, 0x1100` on entity+0x98 before
+         * calling the damage function — so being in deep acid or deep lava is
+         * being UNDERWATER, with everything that follows from it: the
+         * weightless integrator arm, the swim wish rates, swimming up, and the
+         * water-exit jump that gets you back out.
+         *
+         * Only 0x100 is asserted here. 0x1000 is deliberately left alone: it is
+         * absent from the clear list at 0x8003A260, so it LATCHES, and a
+         * level-triggered function that re-asserts every tick is the wrong
+         * owner for a bit that is meant to stick.
+         *
+         * Live on WASTE3 and WASTE4. UNDERLAVA is bound but declared by no map.
+         */
+        case Q2_UF_UNDERACID:
+        case Q2_UF_UNDERLAVA:    mask |= Q2_ENV_UNDERWATER;  break;
+
         default: break;
         }
     }
@@ -910,6 +928,10 @@ q2_result q2_sim_attach_movers(q2_sim *sim, const q2_mover_set *set,
                 t->min[k] = t->env_min[k] = base[k];
                 t->max[k] = t->env_max[k] = base[3 + k];
             }
+            Q2_DEBUG("mover %u part %u node %d box (%d,%d,%d)..(%d,%d,%d)",
+                     i, p, m->node[p], base[0], base[1], base[2],
+                     base[3], base[4], base[5]);
+
             t->kind   = Q2_MOVE_KIND_ENTITY;
             /* The MOVER's index, not the part's: a contact has to name a door,
              * and a door with two leaves is still one door to open. */
@@ -918,7 +940,17 @@ q2_result q2_sim_attach_movers(q2_sim *sim, const q2_mover_set *set,
             t->dy     = 0;
             t->active = true;
 
-            sim->mover_last_off[out] = m->offset;
+            {
+                /* Seeded with the SAME quantity `q2_sim_movers_update`
+                 * differences: the Y displacement, which is `offset` on a
+                 * vertical mover and zero on any other. */
+                s32 disp[3];
+
+                q2_mover_displacement(m, disp);
+                sim->mover_last_off[out] =
+                    (m->is_path || (m->axis < 3u ? m->axis : 1u) == 1u)
+                    ? disp[1] : 0;
+            }
             out++;
         }
     }
@@ -945,22 +977,28 @@ void q2_sim_movers_update(q2_sim *sim, const q2_mover_set *set)
             q2_move_target *t    = &sim->volumes[out];
             const s32      *base = &sim->mover_base[out * 6u];
             u32 axis = m->axis < 3u ? m->axis : 1u;
+            s32 disp[3];
             int k;
 
             /*
              * THE LIVE BOX translates — both corners by the same amount
              * (0x80051F08-0x80051F7C). Derived from the pristine box and the
-             * mover's own accumulated offset rather than integrated, because
-             * the zone draw adds that same `m->offset` to the same node and
-             * the hull is not allowed to disagree with what is on screen by
-             * so much as a unit.
+             * mover's own accumulated displacement rather than integrated,
+             * because the zone draw adds that same displacement to the same
+             * node and the hull is not allowed to disagree with what is on
+             * screen by so much as a unit.
+             *
+             * Three components rather than one, because a train has three
+             * (mover.h). This used to add `m->offset` to `axis` alone, so the
+             * one platform on the disc had a hull sunk into the floor under a
+             * body that was somewhere else entirely.
              */
+            q2_mover_displacement(m, disp);
+
             for (k = 0; k < 3; k++) {
-                t->min[k] = base[k];
-                t->max[k] = base[3 + k];
+                t->min[k] = base[k] + disp[k];
+                t->max[k] = base[3 + k] + disp[k];
             }
-            t->min[axis] += m->offset;
-            t->max[axis] += m->offset;
 
             /*
              * THE ENVELOPE only ever grows — 0x80051FBC onward adds the delta
@@ -979,10 +1017,20 @@ void q2_sim_movers_update(q2_sim *sim, const q2_mover_set *set)
              * And the frame's vertical motion, which q2_move_sweep_box takes as
              * `other_dy`. This is what lets a player ride a lift instead of
              * being left standing in the air as it goes up.
+             *
+             * A train has a vertical component whenever its path does, so it is
+             * measured off the Y displacement rather than off `offset` — which
+             * for a train is a distance along a diagonal and not a height. The
+             * `mover_last_off` slot holds that displacement for it; for
+             * everything else the two are the same number.
              */
-            t->dy = (axis == 1u)
-                  ? (s16)(m->offset - sim->mover_last_off[out]) : (s16)0;
-            sim->mover_last_off[out] = m->offset;
+            {
+                s32 dy_now = m->is_path ? disp[1]
+                                        : ((axis == 1u) ? m->offset : 0);
+
+                t->dy = (s16)(dy_now - sim->mover_last_off[out]);
+                sim->mover_last_off[out] = dy_now;
+            }
         }
     }
 }
@@ -1176,10 +1224,30 @@ static void update_contents(q2_sim *sim)
     else
         p->ent.flags &= ~Q2_ENT_LIQUID_SINK;
 
-    /* 0x80045920: 0x2000 — buoyant, and boosted when already on the ground. */
+    /*
+     * 0x80045920: 0x2000 — buoyant, and boosted when already on the ground.
+     *
+     * The boost is POSTED, not written:
+     *
+     *     80045940  lhu   v0, 762(s0)        ; the impulse's Y, loaded
+     *     80045948  addiu v0, v0, -9216      ; accumulated onto
+     *     8004594C  ori   v1, v1, 0x4000     ; and the accumulator armed
+     *     80045950  sh    v0, 762(s0)
+     *
+     * `lhu` then `addiu` means it ADDS to whatever the jump already posted, and
+     * going through the accumulator is what subjects it to the -3072 ceiling at
+     * 0x80046148. Written straight into velocity, as it was here, it bypassed
+     * that clamp entirely and launched the player out of shallow water at three
+     * times the height a jump can reach. It also has to stay after the jump in
+     * the frame — the jump ASSIGNS (0x8003E1EC, no load), so -3072 then -9216
+     * sums to -12288 and is then clamped back to -3072, which is why standing
+     * in water and jumping is not a super jump on the console.
+     */
     if (contents & 0x2000u) {
-        if (p->ent.flags & Q2_ENT_GROUNDED_MASK)
-            p->vel[1] += Q2_LIQUID_BOOST;
+        if (p->ent.flags & Q2_ENT_GROUNDED_MASK) {
+            p->impulse[1]    = (s16)(p->impulse[1] + Q2_LIQUID_BOOST);
+            p->impulse_armed = true;
+        }
         p->ent.flags |= Q2_ENT_LIQUID_FLOAT;
     } else {
         p->ent.flags &= ~Q2_ENT_LIQUID_FLOAT;
@@ -1235,6 +1303,29 @@ static void update_env_flags(q2_sim *sim)
 {
     u32 env = sim->env_flags;
     u32 i;
+    s32 at[3];
+
+    /*
+     * THE ORIGIN, NOT THE FEET — 0x80027F0C.
+     *
+     * The dispatcher at 0x80027E64 has exactly one caller and it passes
+     * `entity+0x54`, the entity origin, into the point-in-box test at
+     * 0x80044098. This queried `p->pos`, which is the FEET, 286 units lower.
+     *
+     * `update_triggers` had already been corrected to sample the origin (see
+     * the note there: of the volumes measured, most do not contain the feet at
+     * all), and this was the other half of the same query left behind. It is why
+     * water volumes mostly failed to assert INWATER/UNDERWATER, which in turn
+     * left the underwater wish rates, swimming up, the water-exit jump and the
+     * weightless integrator arm all dormant.
+     *
+     * Built from `p->pos` rather than `p->ent.pos` deliberately: this runs
+     * before the tick refreshes `p->ent.pos` from `p->pos`, and the
+     * no-collision fallback advances `p->pos` while leaving `p->ent.pos` stale.
+     */
+    at[0] = sim->player[sim->cur_player].pos[0];
+    at[1] = q2_sim_origin_y(sim->player[sim->cur_player].pos[1]);
+    at[2] = sim->player[sim->cur_player].pos[2];
 
     /*
      * Level-triggered, not edge-triggered, and that is the whole point: these
@@ -1252,8 +1343,7 @@ static void update_env_flags(q2_sim *sim)
 
             if (!sim->volume_env[i] && !hazard)
                 continue;
-            if (!q2_trigger_contains(&sim->triggers, i,
-                                     sim->player[sim->cur_player].pos))
+            if (!q2_trigger_contains(&sim->triggers, i, at))
                 continue;
 
             env |= sim->volume_env[i];
@@ -1577,6 +1667,25 @@ static bool player_jump(q2_sim *sim, bool pressed, s32 dt)
     p->impulse[1]     = Q2_JUMP_IMPULSE;
     p->jump_hold      = Q2_JUMP_HOLD;
     p->impulse_armed  = true;
+
+    /*
+     * 0x8003E208 and 0x8003E214 — the two things the jump does after arming the
+     * impulse, and the port did neither.
+     *
+     * The noise first: 0x80062B80 is PlayerNoise, and the jump passes type 0,
+     * which 0x80062C68's `sltiu v0, s4, 2` routes into the FIRST pair —
+     * level.sound_entity at 0x800E46EC, the one FindTarget honours even for an
+     * ambush creature. Then the sound, 0x800B2900, at the entity.
+     *
+     * Both sit past every rejecting branch: 0x8003E198, 0x8003E1BC and the
+     * hold arms all jump to 0x8003E224, which returns zero without reaching
+     * here. So a gated jump stays silent, which is what makes the sound a
+     * usable signal that the press was actually taken.
+     *
+     * The queue carries the sound; the client's drain raises the noise beside
+     * it, because the creature world is the client's to reach.
+     */
+    q2_ent_sound_at(&sim->ent_world.events, Q2_SND_JUMP, p->pos);
     return true;
 }
 
@@ -1604,17 +1713,48 @@ static void wish_to_world(q2_sim *sim, bool moving, s32 dt)
     if ((p->ent.flags & Q2_ENT_WALL_CONTACT) ||
         sim->full_basis_movement ||
         ((p->ent.flags & Q2_ENT_UNDERWATER) && moving)) {
-        s32 sy = q2_sin12(p->yaw),   cy = q2_cos12(p->yaw);
-        s32 sp = q2_sin12(p->pitch), cp = q2_cos12(p->pitch);
         s32 fwd = p->wish[2], side = p->wish[0];
+        s16 m[3][3];
+        s32 vx, vy, vz;
 
         /*
-         * The pitched forward axis. The basis is built from the view angles, so
-         * a pitched view tilts movement — that is the whole point of this path.
+         * THE BASIS IS THE ROLLED ONE, and this used to drop the roll.
+         *
+         *     8003AB38  sh    v0, 234(s3)        ; roll -> entity+0xEA
+         *     8003AB40  addiu a0, s3, 230        ; a0 = &entity.angles
+         *     8003AB60  jal   0x80089E38         ; RotMatrix
+         *     8003AB64  addiu a1, s3, 704        ; -> entity+0x2C0
+         *
+         * The strafe roll is stored into the angle triple immediately before
+         * RotMatrix reads it (angle.z at 0x80089F08), and the matrix it leaves
+         * at entity+0x2C0 is the one 0x8006EFDC and 0x8006F11C rotate the wish
+         * by. So the roll is in the movement basis, not only in the camera —
+         * strafing tips the ladder and swimming axes very slightly, which the
+         * hand-rolled yaw/pitch block here could not express at all.
+         *
+         * ON THE PITCH SIGN, which an audit flagged and which is NOT a bug:
+         * retail's RotMatrix puts -sin(pitch) in m12 and 0x8006F220 then negates
+         * the summed middle row, so retail's forward carries +sin(pitch_retail).
+         * This port's pitch runs the other way throughout — the camera's own
+         * forward axis is `q2_rotation_yaw_pitch`'s row 2, whose Y is -sin, and
+         * `q2_sim_aim` is -sin to match. Movement, camera and aim therefore all
+         * agree with each other, which is the only invariant that matters:
+         * forward goes where you are looking. Flipping the sign here alone would
+         * send you DOWN a ladder while looking up. So the port's angle is
+         * negated into retail's convention on the way in and the whole retail
+         * form is used from there, which reduces exactly to the old expression
+         * when roll is zero.
          */
-        s32 vx = (cy * side + ((sy * cp) >> Q2_FRAC_12) * fwd) >> Q2_FRAC_12;
-        s32 vz = (((cy * cp) >> Q2_FRAC_12) * fwd - sy * side) >> Q2_FRAC_12;
-        s32 vy = -((sp * fwd) >> Q2_FRAC_12);
+        q2_rotation_euler(m, -(s32)p->pitch, p->yaw, p->roll);
+
+        /* 0x8006F200/0x8006F220: each row is summed, shifted, and only then is
+         * the middle one negated — one LSB from negating the product instead. */
+        vx =  ((s32)m[0][0] * side + (s32)m[0][1] * p->wish[1] +
+               (s32)m[0][2] * fwd) >> Q2_FRAC_12;
+        vy = -(((s32)m[1][0] * side + (s32)m[1][1] * p->wish[1] +
+                (s32)m[1][2] * fwd) >> Q2_FRAC_12);
+        vz =  ((s32)m[2][0] * side + (s32)m[2][1] * p->wish[1] +
+               (s32)m[2][2] * fwd) >> Q2_FRAC_12;
 
         if (p->ent.flags & Q2_ENT_WALL_CONTACT) {
             /* 0x8006F0E4: the normal is added at >>5, i.e. 128 units at full
@@ -1791,8 +1931,19 @@ static void integrate_vertical(q2_sim *sim, s32 dt, s16 out_delta[3])
         p->vel[1] = (s16)(p->vel[1] + p->impulse[1]);
         p->vel[2] = (s16)(p->vel[2] + p->impulse[2]);
 
+        /*
+         * The three halfwords are zeroed at 0x80045F44..0x80045F4C, and the arm
+         * bit is NOT. The whole weightless arm, 0x80045F14..0x80045FA0, contains
+         * exactly one word store — 0x80045F68 to entity+0x98 — and never touches
+         * entity+0x10C; the 0x4000 bit's only clear site in the function is
+         * 0x80046118, down in the gravity arm.
+         *
+         * Clearing it here disarmed the accumulator a frame early, so an impulse
+         * posted while weightless — a jump off a ladder, the buoyancy kick on
+         * leaving water — never reached 0x80046094's block on the following
+         * frame and the entity kept its ground flags and its ceiling clamp.
+         */
         p->impulse[0] = p->impulse[1] = p->impulse[2] = 0;
-        p->impulse_armed = false;
         return;
     }
 
@@ -1987,12 +2138,27 @@ static void fall_damage(q2_sim *sim, s32 vy_before)
     p->fall_time = sim->level_time + Q2_FALL_KICK_TIME;
 
     /*
-     * 0x80039D50. Below 31 there is no sound at all — only the view kick above.
-     * The landing thump and the damage share one threshold, which is why a drop
-     * you can feel in the camera is silent until it is a drop that hurts.
+     * 0x80039D50 — and this branch was read the wrong way round.
+     *
+     *     80039D50  slti  v0, s0, 31
+     *     80039D54  bne   v0, zero, 0x80039DBC
+     *     ...
+     *     80039DBC  lw    a0, 17156(gp)      ; 0x800B2904 = pla_land1
+     *     80039DC0  jal   0x8007270C
+     *
+     * The taken arm is `sev < 31`, and it PLAYS something — the soft landing.
+     * The note here used to say the band below 31 was silent and that the thump
+     * and the damage shared one threshold. They do not: 31 chooses BETWEEN two
+     * sounds. Every ordinary hop landed in the quiet band, so between this and
+     * the missing jump sound a jump made no noise at either end.
+     *
+     * The soft arm also has no alive gate — the `blez` at 0x80039D64 sits only
+     * on the loud arm below — so a landing that kills you still makes this one.
      */
-    if (sev < Q2_FALL_SOFT)
+    if (sev < Q2_FALL_SOFT) {
+        q2_ent_sound_at(&sim->ent_world.events, Q2_SND_LAND_SOFT, p->pos);
         return;
+    }
 
     /* 0x80039D5C: the sound is gated on being alive, so a killing fall lands
      * silently and the death sound has the frame to itself. */
@@ -2340,7 +2506,18 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
      * means the hold timer does not tick down either — walk into a crouch zone
      * mid-jump and the timer freezes.
      */
-    if (!(p->ent2_flags & Q2_ENT2_FLY) &&
+    /*
+     * And the OUTERMOST of the three gates, which was missing: 0x8003A8B0 tests
+     * entity+0x10C bit 19 and 0x8003A8BC branches past the weapon think, the
+     * weapon switch AND the jump when it is set. That bit is Q2_ENT2_DEAD, set
+     * at 0x80039640/0x80039694 and mirrored here at the death check below, so a
+     * corpse could still press jump and hop.
+     *
+     * Folded into the same `if` because retail's branch skips the whole call:
+     * `jump_hold` does not decay while any of these gates hold, which is the
+     * behaviour the hold timer's comment describes.
+     */
+    if (!(p->ent2_flags & (Q2_ENT2_DEAD | Q2_ENT2_FLY)) &&
         !(p->ent.flags & (Q2_ENT_UNDERWATER | Q2_ENT_INCROUCH |
                           Q2_ENT_INLOWCROUCH)))
         player_jump(sim, (buttons & Q2_BTN_JUMP) != 0, dt);
