@@ -69,6 +69,133 @@ void q2_mission_set_row(q2_mission *m, int index, const char *name,
     r->kills_total   = clamp_count(kills_total);
 }
 
+/*
+ * 0x800222B8. The search is two compares a row: the name we want, then the
+ * empty string at 0x800AE768 — so "already registered" wins over "first free"
+ * and a level that is re-entered keeps the row it had rather than taking a
+ * second one.
+ */
+int q2_mission_register(q2_mission *m, const char *name)
+{
+    int i, found;
+
+    if (!m || !name || !name[0])
+        return -1;
+
+    found = q2_mission_find(m, name);
+    if (found >= 0)
+        return found;
+
+    for (i = 0; i < Q2_MISSION_ROWS; i++) {
+        if (m->row[i].name[0] == '\0') {
+            /* The counters go in with the name: the console stamps whatever is
+             * live at that moment, which at a level start is the four zeroes
+             * 0x80070874 has just written. */
+            q2_mission_set_row(m, i, name, 0, 0, 0, 0);
+            return i;
+        }
+    }
+
+    /* All six taken by other levels. The console's search falls off the end the
+     * same way and registers nothing; see the header. */
+    return -1;
+}
+
+int q2_mission_find(const q2_mission *m, const char *name)
+{
+    int i;
+
+    if (!m || !name || !name[0])
+        return -1;
+
+    for (i = 0; i < Q2_MISSION_ROWS; i++)
+        if (strncmp(m->row[i].name, name, Q2_MISSION_NAME_LEN) == 0)
+            return i;
+
+    return -1;
+}
+
+void q2_mission_set_counts(q2_mission *m, int index,
+                           int secrets, int secrets_total,
+                           int kills, int kills_total)
+{
+    q2_mission_row *r;
+
+    if (!m || index < 0 || index >= Q2_MISSION_ROWS)
+        return;
+
+    r = &m->row[index];
+    r->secrets       = clamp_count(secrets);
+    r->secrets_total = clamp_count(secrets_total);
+    r->kills         = clamp_count(kills);
+    r->kills_total   = clamp_count(kills_total);
+}
+
+/* 0x800220C8's two constants: the length that forces a wrap, and the size of
+ * each of the two buffers it writes. */
+#define MISSION_WRAP_AT   36
+#define MISSION_LINE_CAP  42
+
+void q2_mission_set_objective(q2_mission *m, const char *text)
+{
+    char scratch[Q2_MISSION_LINE_MAX * 4];
+    size_t n, cut;
+
+    if (!m)
+        return;
+
+    memset(m->subtitle, 0, sizeof(m->subtitle));
+    memset(m->footer,   0, sizeof(m->footer));
+
+    if (!text || !text[0])
+        return;
+
+    n = strlen(text);
+    if (n < MISSION_WRAP_AT) {
+        /* One line, and the second stays empty — 0x8002215C. */
+        strncpy(m->subtitle, text, MISSION_LINE_CAP - 1);
+        m->subtitle[MISSION_LINE_CAP - 1] = '\0';
+        return;
+    }
+
+    /*
+     * The cut loop at 0x80022180: copy, then keep truncating at the LAST space
+     * until what is left is under 36. `cut` is the index that space sat at,
+     * which is why line two begins with it (0x800221E4 passes `src + cut`).
+     */
+    if (n >= sizeof(scratch))
+        n = sizeof(scratch) - 1;
+    memcpy(scratch, text, n);
+    scratch[n] = '\0';
+
+    cut = n;
+    for (;;) {
+        char *space = strrchr(scratch, ' ');
+
+        if (!space)
+            break;              /* no space to cut at: line one takes it all */
+        cut = (size_t)(space - scratch);
+        *space = '\0';
+        if (cut < MISSION_WRAP_AT)
+            break;
+    }
+
+    if (cut >= MISSION_LINE_CAP)
+        cut = MISSION_LINE_CAP - 1;
+
+    memcpy(m->subtitle, text, cut);
+    m->subtitle[cut] = '\0';
+
+    {
+        size_t rest = strlen(text) - cut;
+
+        if (rest >= MISSION_LINE_CAP)
+            rest = MISSION_LINE_CAP - 1;
+        memcpy(m->footer, text + cut, rest);
+        m->footer[rest] = '\0';
+    }
+}
+
 void q2_mission_totals(const q2_mission *m, int *secrets, int *secrets_total,
                        int *kills, int *kills_total)
 {

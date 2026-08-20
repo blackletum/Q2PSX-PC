@@ -507,20 +507,56 @@ const char *q2_screen_layout_name(q2_screen_layout l);
  * it: it is the thing that decides what is on screen next.
  *
  * The names come from what each dispatch arm calls. Values with no arm of their
- * own (2, 3, 4, 9) are returned to the outer state machine at 0x80018868 and
- * are NOT identified here rather than guessed at.
+ * own (3, 4, 9) are returned to the outer state machine at 0x80018A10 and are
+ * NOT identified here rather than guessed at.
+ *
+ * ---------------------------------------------------------------------------
+ * 2 IS THE LEVEL CHANGE, and it is the one single player runs on
+ * ---------------------------------------------------------------------------
+ * This note used to list 2 among the unidentified. It is `LOADMAP`: the
+ * primitive's exec at `0x8002DCE0` compares the item's 12-byte map name at
+ * `+4` against the current map at `0x800E46B4`, and when they differ copies it
+ * to `0x800E46C0`, copies the start-position name at `+16` to `0x800C8CD0`,
+ * and writes **2** at `0x8002DD80`. A name equal to the map already loaded
+ * falls straight out, which is why several maps carry a LOADMAP naming
+ * themselves.
+ *
+ * There is no dispatch arm because it needs none. The in-game loop returns,
+ * and the outer state machine's tail at `0x80018BB8`..`0x80018C70` — reached
+ * whenever none of the four request flags is standing — reads the twelve bytes
+ * at `0x800E46C0` back out and calls the level selector `0x8007C54C` with
+ * them. **The transition IS the loop going round again.** Three globals are
+ * the whole of the interface:
+ *
+ *     0x800E46B4   the map now loaded, 12 bytes
+ *     0x800E46C0   the map to load next, 12 bytes — a level table DISPLAY name
+ *     0x800C8CD0   the start position to arrive at, 12 bytes
+ *
+ * 7 is the other exit a single-player session takes, and it is `MISCOMPLETE`
+ * rather than anything to do with a level: `0x8002DC68` writes "Default" into
+ * the start-position buffer and 7 into the state word. Its arm `0x80018ED8`
+ * holds the level-tally board (mission.h) until a press, and then writes the
+ * destination itself — `"EndMission "` with the unit digit added into the
+ * twelfth byte at `0x80019028`, or `"Extro FMV"` when the unit is 5 — and
+ * drops to 2, which is how a unit end becomes an ordinary level change.
+ *
+ * `0x800B271C` (gp+16668) carries the exit code ACROSS the transition: the
+ * outer loop stores it at `0x80018C84` just before re-entering the level, and
+ * `0x8003E730` is the only reader.
  */
 typedef enum q2_screen_exit {
     Q2_SCREEN_EXIT_NONE       = 0,   /* keep running                          */
     Q2_SCREEN_EXIT_LEVEL_DONE = 1,   /* 0x80041548 when the session is mode 2 */
+    Q2_SCREEN_EXIT_CHANGE_MAP = 2,   /* LOADMAP, 0x8002DD80 - see above       */
     Q2_SCREEN_EXIT_5          = 5,   /* 0x800411C8                            */
     Q2_SCREEN_EXIT_FRONTEND   = 6,   /* 0x8007CCE0(0)                         */
-    Q2_SCREEN_EXIT_7          = 7,   /* 0x80018ED8                            */
+    Q2_SCREEN_EXIT_MISCOMPLETE = 7,  /* MISCOMPLETE, 0x8002DCB4 -> 0x80018ED8 */
     Q2_SCREEN_EXIT_8          = 8,   /* 0x8004149C                            */
     Q2_SCREEN_EXIT_10         = 10,  /* 0x80041300; also forced at boot       */
     Q2_SCREEN_EXIT_11         = 11,  /* 0x800415F4                            */
     Q2_SCREEN_EXIT_FLAG_12    = 12,  /* sets 0x800B2A54                       */
-    Q2_SCREEN_EXIT_FLAG_13    = 13,  /* sets 0x800B2A50                       */
+    Q2_SCREEN_EXIT_FLAG_13    = 13,  /* sets 0x800B2A50; a unit-5 MISCOMPLETE
+                                      * falls into this arm at 0x80018F78     */
     Q2_SCREEN_EXIT_FLAG_14    = 14,  /* sets 0x800B2A5C                       */
     Q2_SCREEN_EXIT_FLAG_15    = 15,  /* sets 0x800B2A88                       */
     Q2_SCREEN_EXIT_16         = 16,  /* 0x80041974                            */

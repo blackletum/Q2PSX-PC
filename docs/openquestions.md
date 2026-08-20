@@ -8954,3 +8954,108 @@ into this one.
       until now was the rotator sound, so every turning hatch on the disc has been playing from a position
       several thousand screens away, which attenuates to silence and therefore looked like a rotator with
       no bound node.
+
+- [x] 129. **The MISSION board is not a level-end screen, and the port showed it at every door.** Three
+      call edges settle it and each of them is the only one there is:
+
+          0x80021ADC  the tally draw       <- called ONLY from 0x80018944
+          0x80018868  one tally frame      <- called ONLY from 0x80018F08
+          0x80018ED8  game state 7's arm   <- state 7 written ONLY at 0x8002DCB4
+          0x8002DC68  MISCOMPLETE's exec   (UserFuncs binding-table index 31)
+
+      `xrefs` returns exactly one caller at every step, so the board can be reached by nothing but a
+      `MISCOMPLETE` — the end of a UNIT. #69 had reasoned from the other end ("LOADMAP is what shows it:
+      the screen is the level ending") and that reading is wrong; six rows, a totals line and a title that
+      reads `Mission %d - Complete` are what a unit's tally looks like, and this is why.
+
+      **What a LOADMAP does instead, which also names state 2.** `screen.h` listed 2 among the values
+      "returned to the outer state machine and NOT identified here". It is the level change.
+      `0x8002DCE0` compares the item's map name at `+4` against the loaded map at `0x800E46B4`, and when
+      they differ writes the name to `0x800E46C0`, the start-position name at `+16` to `0x800C8CD0`, and
+      **2** to the state word. There is no dispatch arm because none is needed: the in-game loop returns,
+      and the outer state machine at `0x80018A10` falls through its four request flags to `0x80018BB8`,
+      reads the twelve bytes at `0x800E46C0` straight back out, and hands them to the level selector
+      `0x8007C54C`. **The transition is the loop going round again**, and a level change is the load and
+      nothing else.
+
+      The port now raises no board on a LOADMAP. What it does raise is on a MISCOMPLETE, and the order is
+      `0x80018ED8`'s: spin the board until a press, THEN write `EndMission` with the unit digit added into
+      byte 11 (`lbu`/`addu`/`sb` at `0x8001900C`..`0x80019028`) or `Extro FMV` on unit 5, and drop to
+      state 2.
+
+      **The rows are keyed by NAME and claimed on ARRIVAL.** Filling them in visit order as the level ends
+      was the other half of the same misreading. Four functions share the 150-byte array at `0x8009B550`
+      and all four match by name:
+
+          0x800222B8(name)  find, else take the first free row; stamp the live counters in
+          0x80022210(name)  the reverse, on a save restore
+          0x800223A8(name)  write the live secrets_found into the row   (INSECRET's exec)
+          0x80022420(name)  write the live kills_found into the row     (a creature death)
+
+      And every map claims its own. `0x800222B8` is an engine export at `+0x474`, and BASE1's LevelBin
+      `init` — a 1176-byte stub that does almost nothing else — looks up the key `MapTitle` through
+      `+0x124` and hands the result straight to it:
+
+          80100434  lw   v1, 8(s0)          ; the engine block
+          8010043C  lw   v1, 1140(v1)       ; +0x474
+          80100444  jalr v1
+          80100448  addu a0, v0, zero       ; the MapTitle string
+
+      So a row exists from the moment a level is entered and the counters are written into it as they
+      move. That is not cosmetic: `q2_save_capture_mission` carries the table, and a row only written on
+      the way out saves as zeroes for the level you are standing in.
+
+      **The clear is the port's and is stated as such.** Six rows and nothing in the executable empties
+      them — `0x80022498`, sitting in the MISCOMPLETE arm exactly where a clear belongs, is a six-iteration
+      loop with no body, and `0x8003DDB8`'s `memset(0x8009B550, 0, 150)` is on the new-game path only. A
+      seventh distinct level therefore registers nothing on the console. The `EndMission` modules are the
+      only candidate for clearing it between units and this port does not run them, so the port clears on a
+      unit change and `q2_mission_register` returns -1 for the overflow rather than pretending.
+
+      **And the board's empty band is filled.** `mission.h` called the two centred lines under the title
+      "the remaining gap", because what fed them was a `0x800701B4` lookup whose key had not been read.
+      `0x80021FD8` builds it: `sprintf(buf, "Unit%dMiss1", *0x800B2E20)` — the same key `leveltext.h`
+      already calls the objective and the briefing already shows as "Mission Objective". Its caller
+      `0x80022094` hands the string to the wrapper at `0x800220C8`, whose rule is a cut and not a column
+      count: under 36 characters the whole string is line one; at or over, the LAST space is cut
+      repeatedly until the head fits, and the remainder — leading space and all, since `0x800221E4`
+      passes `src + len` — is line two.
+
+      **The campaign now goes through the unit boundaries instead of past them.** #88 had a unit's last
+      level carrying both primitives and let the LOADMAP win, "otherwise the unit end clobbers the level
+      exit and a scripted run stops at BASE2". The console's order is the opposite — the MISCOMPLETE arm
+      writes its destination over whatever the LOADMAP left — and the reason a run used to stop is that
+      `QENDMIS<N>` is drawn by its own module, which this port reads and does not run. So the port lets
+      the MISCOMPLETE win, as the console does, and **carries the LOADMAP's destination across the
+      end-of-mission screen** to continue to when it is dismissed. That last step is the port's and is
+      labelled at the site: nothing read says the console gets there this way, only that it gets there.
+
+      One `--keys --fire-triggers` run from BASE0, which is a player who has every key and steps into
+      every trigger volume on every map, makes fourteen transitions and four unit boundaries:
+
+          Strogg Outpost -> Outer Base -> Installation
+              tally: mission 1 complete, 3 levels, secrets 7/8 -> EndMission 1 -> Detention Centre
+          Detention Centre -> Security Complex -> Grid Control
+              tally: mission 2 complete, 3 levels, secrets 5/5 -> EndMission 2 -> Powerplant
+          Powerplant -> The Reactor
+              tally: mission 3 complete, 2 levels, secrets 4/4 -> EndMission 3 -> Defence Command
+          Defence Command
+              tally: mission 4 complete, 1 level,  secrets 1/1 -> EndMission 4 -> Inner Chamber
+          Inner Chamber -> Final Showdown
+
+      Ten level changes with no board and four unit ends with one, where the same route used to put a
+      board at all ten and reach an `EndMission` screen at none of them. The rows accumulate per unit and
+      reset with it: three, three, two, one, matching the levels the sweep's own route actually visited.
+
+      The FIFTH boundary is not in that run and the reason is the sweep's, not the transition's. BOSS2's
+      MISCOMPLETE is in zone 2, and firing every volume of zone 0 at once takes the zone gate first — the
+      re-arm is per map change, so zone 2's volumes are never queued. Fired where it lives it is the whole
+      ending:
+
+          q2psx --map BOSS2 --zone 2 --keys --fire-triggers 60 --frames 1200
+          MISCOMPLETE: unit 5 over -> Extro FMV (QFMV)
+          tally: mission 5 complete
+          movie: playing OUTRO1P.STX, 1499 frames
+
+      It also takes about 900 frames to arrive, so a short run reads as "it did not fire" when what
+      happened is that the record it sits in is deferred.

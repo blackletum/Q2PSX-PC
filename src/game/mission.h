@@ -98,6 +98,75 @@
  *
  * Both counters are **u8 in the record**, so each is capped at 255 per level on
  * the console; the port clamps rather than wrapping, and says so at the site.
+ *
+ * ---------------------------------------------------------------------------
+ * WHEN IT IS SHOWN, and it is NOT at the end of a level
+ * ---------------------------------------------------------------------------
+ * This header used to say the screen is "the one the game shows when a level
+ * ends". It is not, and the call graph settles it in three steps, each of
+ * which has exactly one edge:
+ *
+ *     0x80021ADC  the draw below      <- called ONLY from 0x80018944
+ *     0x80018868  one tally frame     <- called ONLY from 0x80018F08
+ *     0x80018ED8  game state 7        <- state 7 written ONLY by 0x8002DCB4
+ *     0x8002DC68  MISCOMPLETE's exec  (UserFuncs binding-table index 31)
+ *
+ * So the board can only be reached by a `MISCOMPLETE` — the end of a UNIT. A
+ * `LOADMAP`, which is the end of a LEVEL, writes state 2 at `0x8002DCB4`'s
+ * sibling `0x8002DD80` and never touches this screen: the outer state machine
+ * simply loads the map the primitive named. That is why the board has six rows
+ * and a "Mission %d - Complete" title — it lists a unit's levels, once, when
+ * the unit is over.
+ *
+ * `0x80018ED8` spins `while (0x80018868() == 0);`, and the frame function
+ * returns the draw's own answer, so the board holds until the pad edge latched
+ * at `0x80018214` arrives. There is no timeout.
+ *
+ * ---------------------------------------------------------------------------
+ * The rows are keyed by NAME, and every level registers its own
+ * ---------------------------------------------------------------------------
+ * Filling the six rows in visit order is the obvious model and it is not the
+ * console's. Four functions share the array and all four match by name:
+ *
+ *     0x800222B8(name)  find-or-take-first-free; stamps the live counters in.
+ *                       Exported to the level modules at engine+0x474.
+ *     0x80022210(name)  the reverse: load the row's four counters back into
+ *                       the live globals. Called from the save restore.
+ *     0x800223A8(name)  stamp the live secrets_found into the row  (INSECRET)
+ *     0x80022420(name)  stamp the live kills_found into the row    (a death)
+ *
+ * And **every map registers itself**: BASE1's LevelBin `init` looks up the key
+ * `MapTitle` through engine+0x124 and hands the result straight to
+ * engine+0x474 (`80100434`..`80100448` in the relocated module). So a row
+ * exists from the moment a level is entered, and the two counters are written
+ * into it as they move rather than totted up when the level ends.
+ *
+ * The whole 150-byte array (6 x 25) is cleared by `0x8003DDB8`'s `memset` on a
+ * new game and restored from the save block by the six-record copy loop just
+ * above it, which is what makes it a campaign-long table rather than a
+ * session-long one.
+ *
+ * ---------------------------------------------------------------------------
+ * The two centred body lines ARE the unit objective, wrapped
+ * ---------------------------------------------------------------------------
+ * This header used to call them "the remaining gap" because what fed them was
+ * a `0x800701B4` lookup whose key had not been read. It has:
+ * `0x80021FD8` builds `"Unit%dMiss1"` (`0x800AB9D0`) with the unit at
+ * `0x800B2E20`, looks it up, and its caller `0x80022094` hands the result to
+ * the wrapper at `0x800220C8`. That is the same key `leveltext.h` already
+ * calls the objective — the briefing's "Mission Objective" field — so the
+ * board repeats the unit's objective under its title.
+ *
+ * The wrap is `0x800220C8`'s own and is not a column count:
+ *
+ *     strlen < 36            -> the whole string is line one, line two empty
+ *     otherwise              -> cut at the LAST space, repeatedly, until the
+ *                               head is under 36; line one is that head and
+ *                               line two is the remainder, leading space and
+ *                               all (`a1 = src + len` at `0x800221E4`).
+ *
+ * Both buffers are 42 bytes and are zeroed first, so a cut that lands exactly
+ * on the boundary cannot run off the end.
  */
 #ifndef Q2PSX_MISSION_H
 #define Q2PSX_MISSION_H
@@ -214,6 +283,45 @@ void q2_mission_init(q2_mission *m);
 void q2_mission_set_row(q2_mission *m, int index, const char *name,
                         int secrets, int secrets_total,
                         int kills, int kills_total);
+
+/*
+ * 0x800222B8 — register a level in the table and return its row.
+ *
+ * Finds the row whose name matches, or takes the first whose name is empty and
+ * stamps the four counters into it. Returns the row index, or -1 when the name
+ * is empty or all six rows are taken by other levels.
+ *
+ * **-1 is a real answer and the console has it too.** Six rows and no clear
+ * between units means a seventh distinct level registers nothing, and the
+ * engine's own would-be clear at `0x80022498` is an empty loop the compiler
+ * left behind. Who clears the table between units on the console is not
+ * settled — the `EndMission` modules are the only candidate and this port does
+ * not run them — so a caller that wants a unit's six rows to be that unit's
+ * has to clear it itself. `q2_mission_init` is that clear.
+ */
+int q2_mission_register(q2_mission *m, const char *name);
+
+/* The row whose name matches, or -1. Case-sensitive, as `0x80089D48` is. */
+int q2_mission_find(const q2_mission *m, const char *name);
+
+/*
+ * The live half of `0x800223A8` and `0x80022420`: put today's counters into a
+ * row that already exists. Does nothing for an index that names no row, which
+ * is what the console's name search does when it falls off the sixth record.
+ */
+void q2_mission_set_counts(q2_mission *m, int index,
+                           int secrets, int secrets_total,
+                           int kills, int kills_total);
+
+/*
+ * 0x800220C8 — the two centred body lines, from one string.
+ *
+ * Word-wrapped into `subtitle` and `footer` exactly as the console wraps it:
+ * under 36 characters the whole string is line one; at or over, the last space
+ * is cut repeatedly until the head fits, and the remainder — leading space
+ * included — becomes line two. A NULL or empty string clears both.
+ */
+void q2_mission_set_objective(q2_mission *m, const char *text);
 
 /* The column totals, summed across every row exactly as the four accumulators
  * at 0x80021E58…0x80021E80 do. */

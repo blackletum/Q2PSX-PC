@@ -166,6 +166,87 @@ static void test_counters_are_inputs(void)
     CHECK(s == 0 && st == 0 && k == 0 && kt == 0, "nothing counted, nothing shown");
 }
 
+/*
+ * 0x800222B8 — the rows are claimed BY NAME, not in visit order.
+ *
+ * The distinction is the whole of the console's model and it is invisible
+ * until a level is re-entered: registering by order gives that level a second
+ * row and two half-filled tallies for one place, which is what this fails on.
+ */
+static void test_register_is_by_name(void)
+{
+    q2_mission m;
+    int a, b, cc, again;
+
+    q2_mission_init(&m);
+    a  = q2_mission_register(&m, "Strogg Outpost");
+    b  = q2_mission_register(&m, "Outer Base");
+    cc = q2_mission_register(&m, "Installation");
+    CHECK(a == 0 && b == 1 && cc == 2, "three levels take rows 0, 1, 2");
+
+    /* Walking back into a level it has already seen. */
+    again = q2_mission_register(&m, "Outer Base");
+    CHECK(again == 1, "a level already in the table keeps its row");
+    CHECK(m.row[3].name[0] == 0, "...and does not take a fourth");
+
+    /* The counters live in the row, and re-registering must not wipe them —
+     * the console's find arm returns before it touches anything. */
+    q2_mission_set_counts(&m, 1, 2, 2, 5, 8);
+    CHECK(q2_mission_register(&m, "Outer Base") == 1, "found again");
+    CHECK(m.row[1].secrets == 2 && m.row[1].kills == 5,
+          "re-registering keeps the counters");
+
+    CHECK(q2_mission_find(&m, "Installation") == 2, "find by name");
+    CHECK(q2_mission_find(&m, "Nowhere") < 0, "a name not in the table");
+}
+
+/* Six rows, and the seventh distinct level gets none — the console's search
+ * falls off the end of the sixth record the same way. */
+static void test_seventh_level_gets_no_row(void)
+{
+    q2_mission m;
+    const char *name[7] = { "L1", "L2", "L3", "L4", "L5", "L6", "L7" };
+    int i;
+
+    q2_mission_init(&m);
+    for (i = 0; i < 6; i++)
+        CHECK(q2_mission_register(&m, name[i]) == i, "the six fill in order");
+    CHECK(q2_mission_register(&m, name[6]) < 0, "the seventh gets no row");
+    /* And it must not have overwritten anybody. */
+    CHECK(strcmp(m.row[5].name, "L6") == 0, "the sixth row is still L6");
+}
+
+/*
+ * 0x800220C8's wrap, which is a cut at the last space and not a column count.
+ */
+static void test_objective_wrap(void)
+{
+    q2_mission m;
+    const char *shortish = "Locate unit exit.";
+    const char *longish  =
+        "Locate the unit exit and kill all resistance on the way to it.";
+    size_t cut;
+
+    q2_mission_init(&m);
+    q2_mission_set_objective(&m, shortish);
+    CHECK(strcmp(m.subtitle, shortish) == 0, "under 36 goes on one line");
+    CHECK(m.footer[0] == 0, "...and the second line stays empty");
+
+    q2_mission_set_objective(&m, longish);
+    CHECK(m.subtitle[0] != 0 && m.footer[0] != 0, "over 36 uses both lines");
+    CHECK(strlen(m.subtitle) < 36, "line one is under the wrap length");
+    /* The break is AT a space and the space goes with line two — the console
+     * passes `src + len`, where len is the index the space sat at. */
+    CHECK(m.footer[0] == ' ', "line two begins with the space it broke on");
+    cut = strlen(m.subtitle);
+    CHECK(longish[cut] == ' ', "the cut landed on a space");
+    CHECK(strncmp(m.subtitle, longish, cut) == 0, "line one is the head");
+    CHECK(strcmp(m.footer, longish + cut) == 0, "line two is the rest");
+
+    q2_mission_set_objective(&m, NULL);
+    CHECK(m.subtitle[0] == 0 && m.footer[0] == 0, "no objective, no lines");
+}
+
 int main(void)
 {
     test_title();
@@ -176,6 +257,9 @@ int main(void)
     test_counts_clamp();
     test_colours();
     test_counters_are_inputs();
+    test_register_is_by_name();
+    test_seventh_level_gets_no_row();
+    test_objective_wrap();
 
     if (g_fail) {
         printf("\n%d mission check%s failed\n", g_fail, g_fail == 1 ? "" : "s");
