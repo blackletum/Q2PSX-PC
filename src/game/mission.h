@@ -291,13 +291,20 @@ void q2_mission_set_row(q2_mission *m, int index, const char *name,
  * stamps the four counters into it. Returns the row index, or -1 when the name
  * is empty or all six rows are taken by other levels.
  *
- * **-1 is a real answer and the console has it too.** Six rows and no clear
- * between units means a seventh distinct level registers nothing, and the
- * engine's own would-be clear at `0x80022498` is an empty loop the compiler
- * left behind. Who clears the table between units on the console is not
- * settled — the `EndMission` modules are the only candidate and this port does
- * not run them — so a caller that wants a unit's six rows to be that unit's
- * has to clear it itself. `q2_mission_init` is that clear.
+ * **-1 is a real answer and the console has it too.** The table is a
+ * CAMPAIGN's six rows, not a unit's: the only clear in the executable is
+ * `0x8003DDB8`'s `memset(0x8009B550, 0, 150)`, and it is the `else` arm of
+ * `0x8003D62C`'s restore — taken when the lookup of `"PlayerSave"` through
+ * `0x8007FBEC` finds no block, i.e. on a new game. Nothing empties it at a
+ * unit boundary: `0x80022498`, which sits in the MISCOMPLETE arm between the
+ * board's setup and its spin, is a six-iteration loop with no body, and no
+ * engine export hands a level module the array's address.
+ *
+ * So a seventh distinct level registers nothing, and since a player reaches
+ * unit 2's board having visited exactly six levels, that board is full and
+ * unit 3's shows the same six. That is the original's, not a simplification
+ * here. `q2_mission_init` is the new-game clear and the only one a caller
+ * should make.
  */
 int q2_mission_register(q2_mission *m, const char *name);
 

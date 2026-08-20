@@ -368,12 +368,15 @@ typedef struct client {
     /*
      * THE OBJECTIVES POP-UP — the state machine around the same screen.
      *
-     * `briefing_open` is the between-levels arrival briefing, raised by the
-     * zone load. This is the in-level one: HELPCOMPUTER raises it from a
-     * trigger volume and the pause menu's MISSION row raises it on demand, it
-     * holds the world while it is up, and it closes on its own deadline or on
-     * CROSS. See briefing.h — the composer was already here and everything
-     * around it was not.
+     * THIS IS THE ONLY ONE THE CONSOLE HAS. `briefing_open` above is a debug
+     * key's screen; it used to be raised by the zone load as well, on the
+     * reading that a level change shows a briefing. Nothing in the transition
+     * path raises either field, and both draw through the same composer, so
+     * that second state machine was a duplicate of this one. HELPCOMPUTER
+     * raises this from a trigger volume and the pause menu's MISSION row
+     * raises it on demand, it holds the world while it is up, and it closes on
+     * its own deadline or on CROSS. See briefing.h — the composer was already
+     * here and everything around it was not.
      *
      * The two strings live on the pop-up rather than on `briefing` because
      * they are GLOBAL on the console: two writers, one reader, never reset per
@@ -2688,21 +2691,15 @@ static void client_music_for_level(client *c, bool force);
 #define Q2_INTERMISSION_HEADLESS 45
 
 /*
- * And how long the ARRIVAL BRIEFING stays up in a window before releasing
- * itself. Not the tally, which has no timeout here or on the console: it is
- * dismissed by a press latched inside `0x80018ED8`'s spin loop (0x80018214),
- * and this port draws the prompt that says so.
- *
- * READ, not chosen. The panel is raised by `0x800213B0`, and every raise in the
- * executable passes 15 as its second argument — `0x80021380` inside the setter
- * `0x80021250`, and `0x800203AC` from the pause menu's MISSION row. Its own
- * tick at `0x80021818` counts that deadline down by the frame delta and calls
- * `0x800213B0(0, ...)` when it reaches zero. So fifteen seconds is the panel's,
- * which is what `briefing.h` already carries as Q2_BRIEFING_SECONDS; the ten
- * this used to be was invented for the tally and inherited by the briefing when
- * the two shared a release.
+ * `Q2_INTERMISSION_WINDOW` used to sit here — ten seconds, a port constant,
+ * invented so a player who pressed nothing was not stranded on the tally board
+ * and inherited by the arrival briefing when the two shared a release. Both
+ * reasons are gone. The tally waits for the press its prompt asks for, as
+ * `0x80018ED8` does, and there IS no arrival briefing: the panel is the
+ * script's pop-up, on the fifteen seconds `0x800213B0` is passed at every
+ * raise in the executable and that `briefing.h` already carries as
+ * Q2_BRIEFING_SECONDS.
  */
-#define Q2_INTERMISSION_WINDOW   (Q2_BRIEFING_SECONDS * 30)
 
 /*
  * The beat between a difficulty being confirmed and the opening reel starting.
@@ -2788,14 +2785,34 @@ static void client_level_tally(const client *c, u32 *dead, u32 *placed)
  * row as they move — which is the other half of the console's model
  * (`0x800223A8` for a secret, `0x80022420` for a kill).
  *
- * A UNIT's table, not a session's, and **this clear is the port's**. Six rows
- * and nothing in the executable that empties them means a seventh distinct
- * level registers nothing; the engine's own would-be clear at `0x80022498` is
- * a loop with no body. The `EndMission` modules are the only candidate and
- * this port does not run them, so the table is cleared when the unit changes.
- * The unit is the map's own, from `Unit<N>Miss1`, and the disc's maps group by
- * it exactly as the game does: Base 1, Jail and Security 2, Power and Waste 3,
- * Lab/Command/BigGun 4, the bosses 5.
+ * **NOTHING CLEARS IT BETWEEN UNITS, and this used to.** The table is a
+ * CAMPAIGN's six rows, not a unit's, and the clear the port invented for the
+ * unit boundary was the last guess left in this screen. Where the only clear
+ * in the executable actually is:
+ *
+ *     0x8003D62C(player, 0)  looks up a block by the key "PlayerSave"
+ *                            (0x8007FBEC) and, when it finds one, copies six
+ *                            25-byte records out of it at +0xD4 into
+ *                            0x8009B550 and hands the loaded level's counters
+ *                            back with 0x80022210.
+ *     0x8003DDB8             the `else` of that: memset(0x8009B550, 0, 150).
+ *
+ * So the six rows are cleared when there is no player block to restore — a new
+ * game — and at no other time. The one place a per-unit clear belongs,
+ * `0x80022498` in the MISCOMPLETE arm between the board's setup and its spin,
+ * is a six-iteration loop with no body; and no engine export hands a level
+ * module the array's address, so a module cannot clear it either.
+ *
+ * The consequence is the console's and the port now reproduces it: six rows,
+ * first six distinct levels, and a seventh registers nothing. A player reaches
+ * unit 2's board having visited exactly six levels, so that board is full, and
+ * unit 3's shows the same six. That is a defect in the original rather than a
+ * design, and it is transcribed here rather than tidied because a board that
+ * lists a unit's own levels is a screen the console does not draw.
+ *
+ * The unit still tracks the map, from `Unit<N>Miss1`, because the title needs
+ * it: the disc's maps group by it exactly as the game does — Base 1, Jail and
+ * Security 2, Power and Waste 3, Lab/Command/BigGun 4, the bosses 5.
  */
 static void client_mission_enter(client *c)
 {
@@ -2806,16 +2823,13 @@ static void client_mission_enter(client *c)
      * which would be skipped. */
     const char *name = c->map_title[0] ? c->map_title : c->map;
 
-    if (c->map_unit > 0 && c->map_unit != c->mission.unit) {
-        q2_mission_init(&c->mission);
+    if (c->map_unit > 0)
         c->mission.unit = c->map_unit;
-    } else if (c->map_unit > 0) {
-        c->mission.unit = c->map_unit;
-    }
 
     c->mission_row = q2_mission_register(&c->mission, name);
     if (c->mission_row < 0)
-        Q2_WARN("mission: no free row for %s — the unit's six are taken", name);
+        Q2_WARN("mission: no row for %s — the campaign's six are taken, which "
+                "is what the console does too", name);
     else
         Q2_INFO("mission: %s takes row %d of unit %d",
                 name, c->mission_row, c->mission.unit);
@@ -2984,25 +2998,27 @@ static void client_change_map_and_brief(client *c)
         return;
 
     /*
-     * The ARRIVAL briefing: the new level's orders.
+     * AND NO ARRIVAL BRIEFING, which this used to raise here.
      *
-     * On the console this is the level's own doing rather than the
-     * transition's — `0x80021250` is an engine export (`+0x3D8`) and what
-     * raises the panel is a `HELPCOMPUTER` or the map module's own init, not
-     * anything in the state machine. This port does not run the modules, so it
-     * raises the panel on arrival, which is where a module would. Stated
-     * because it is a stand-in and not a read.
+     * There is no such screen. The port had two state machines around one
+     * console screen: `briefing_open`, raised by the transition, and `popup`,
+     * raised by the script — and both draw through `q2_briefing_build_ot`
+     * because they are the same panel. The console has only the second.
+     * `0x80021250` sets the two fields and `0x800213B0` raises them, and every
+     * caller of either is a script primitive (`0x80023894`, `0x8002BBF4`) or
+     * the pause menu's MISSION row (`0x800203AC`). Nothing in the transition
+     * path touches them: what the outer state machine does run on a new
+     * level's first frame is `0x800203C4`, and that installs two overlay
+     * tables through `0x800B2FE4+512` rather than raising a panel.
      *
-     * Only on a level change, and only into a LEVEL: a zone gate stays inside
-     * one level and has no new orders to give, and an `EndMission` map or a
-     * film has no orders at all — raising the panel over one would put a
-     * briefing on a screen that is already saying something else.
+     * So the panel a player sees just after arriving is a trigger volume near
+     * the spawn calling HELPCOMPUTER, and on a map that has none it does not
+     * appear — the two fields are global (`0x800B27A4`/`0x800B27A8`,
+     * "deliberately not per level"), so the orders simply stand until
+     * something changes them. Measured across ten maps with no trigger fired:
+     * BASE0, POWER1 and LAB raise it at level start on their own and the other
+     * seven do not.
      */
-    if (!c->endmission && !c->film_open) {
-        c->briefing_open   = true;
-        c->briefing_frames = 0;
-        q2_prompt_show(&c->prompts, Q2_PROMPT_BACK, 216);
-    }
 
     /* Re-arm, so one `--fire-triggers` walks the game rather than one level.
      * Without this a scripted run stops at the first boundary, having proved
@@ -9966,6 +9982,16 @@ static void client_start_game(client *c)
     c->film_to_front = false;
     c->start_beat    = 0.0;
 
+    /*
+     * A NEW GAME is the one thing that empties the mission table, and it is
+     * the only thing that does on the console either: `0x8003D62C`'s restore
+     * finds no "PlayerSave" block and takes the `memset(0x8009B550, 0, 150)`
+     * at `0x8003DDB8`. See `client_mission_enter` for why there is no clear at
+     * a unit boundary.
+     */
+    q2_mission_init(&c->mission);
+    c->mission_row = -1;
+
     client_load_zone(c, c->first_map, 0);
 }
 
@@ -13154,22 +13180,17 @@ no_window:
         }
 
         /*
-         * The three screens a transition puts up, each released the same way:
-         * a press dismisses it (the ESCAPE handler below), and headless — which
-         * has nobody to press anything — holds it for a fixed count and goes
-         * on, because otherwise every scripted run would stop at the first
-         * boundary, which is precisely where the interesting part starts.
+         * A transition puts up two screens and both wait for the press their
+         * prompt asks for, as the console's do. Headless has nobody to press
+         * anything, so it holds each for a fixed count and goes on — otherwise
+         * every scripted run would stop at the first boundary, which is
+         * precisely where the interesting part starts.
+         *
+         * `briefing_open` is NOT one of them any more: it is the debug key's
+         * screen now, and the panel a level actually shows is the pop-up the
+         * script raises, on its own fifteen-second deadline.
          */
-        if (c.briefing_open) {
-            c.briefing_frames++;
-            if (c.briefing_frames >= (c.headless ? Q2_INTERMISSION_HEADLESS
-                                                 : Q2_INTERMISSION_WINDOW)) {
-                c.briefing_open = false;
-                q2_prompt_hide_all(&c.prompts);
-            }
-        }
-
-        /* The end-of-mission placard, on the same release. */
+        /* The end-of-mission placard. */
         if (c.endmis_open) {
             c.endmis_frames++;
             if (c.headless && c.endmis_frames >= Q2_INTERMISSION_HEADLESS) {

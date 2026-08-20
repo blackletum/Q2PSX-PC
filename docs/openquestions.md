@@ -9135,3 +9135,55 @@ into this one.
       compared as an encoded instruction word, not as a disassembly — and `tests/test_playerdeath.c` pins
       the behaviour: which deaths cry out, that the handler is a one-shot, that a single-player body lies
       where it fell for ever while a deathmatch one dissolves on schedule, and that -40 exactly gibs.
+
+- [x] 130. **The three things #129 left open, closed — and two of them were port inventions rather than
+      gaps.** That entry ended with a list: what raises the arrival briefing, what the tally board is drawn
+      over, and what clears the six rows between units. All three are readable.
+
+      **There is no arrival briefing.** The port had TWO state machines around ONE console screen —
+      `briefing_open`, raised by the zone load, and `popup`, raised by the script — and both draw through
+      `q2_briefing_build_ot`, because they are the same panel. The console has only the second.
+      `0x80021250` sets the two fields, `0x800213B0` raises them, and every caller of either is a script
+      primitive (`0x80023894`, `0x8002BBF4`) or the pause menu's MISSION row (`0x800203AC`). Nothing in
+      the transition path touches them.
+
+      What the outer state machine DOES run on a new level's first frame was the thing worth chasing, and
+      it is not this. `0x8003E730` reads the exit code the transition carried in `0x800B271C`, and on 2 or
+      4 — a level change — calls `0x800203C4`, which installs two sixteen-entry tables at `0x8009B3B4`
+      and `0x8009B3E4` through the overlay's own function pointer at `0x800B2FE4+512`. That is the
+      notification layer being re-seeded, not a panel being raised.
+
+      So the panel a player sees just after arriving is a trigger volume near the spawn calling
+      HELPCOMPUTER, and a map with none shows nothing — which is coherent, because the two fields are
+      global (`0x800B27A4`/`0x800B27A8`, "deliberately not per level" already) and the orders stand until
+      something changes them. Measured, with no trigger fired and 400 frames each: **BASE0, POWER1 and LAB
+      raise it at level start on their own; BASE1, BASE2, JAIL2, JAIL3, SECURITY, COMMAND and BOSS1 do
+      not.** The port raised one on all ten.
+
+      `Q2_INTERMISSION_WINDOW` goes with it. It was ten seconds, a port constant invented so a player who
+      pressed nothing was not stranded on the tally, and inherited by the briefing when the two shared a
+      release. The tally waits for its press as `0x80018ED8` does, and the pop-up has the fifteen seconds
+      every `0x800213B0` call in the executable passes it.
+
+      **The board is drawn over the world, and the port already had that right.** `0x80018868` does not
+      call the viewport walk itself, which is what made it look like a cleared screen — but its tail
+      `0x8003915C` calls `0x800780C0`, the screen build `screen.h` documents as the thing that "decides
+      before anything is drawn" whether to clear, and the polygon emitters at `0x80064F10`/`0x800651D4`
+      with it. It is an ordinary frame with the board on top and the frame delta zeroed at `0x80018928`,
+      which is exactly what `client_intermission_frame` does.
+
+      **Nothing clears the six rows between units, and the port's clear was the last guess in this
+      screen.** The only clear in the executable is `0x8003DDB8`'s `memset(0x8009B550, 0, 150)`, and it is
+      the `else` arm of `0x8003D62C`: that function looks up a block by the key `"PlayerSave"`
+      (`0x8007FBEC`) and, when it finds one, copies six 25-byte records out of it at `+0xD4` into the
+      table and hands the loaded level's counters back through `0x80022210`. No block, no restore, and the
+      table is emptied. So it is cleared on a NEW GAME and at no other time. The one place a per-unit
+      clear belongs — `0x80022498`, in the MISCOMPLETE arm between the board's setup and its spin — is a
+      six-iteration loop with no body, and no engine export hands a level module the array's address, so a
+      module cannot do it either.
+
+      The consequence is the original's and the port now reproduces it rather than tidying it: six rows,
+      first six distinct levels, and a seventh registers nothing. A player reaches unit 2's board having
+      visited exactly six levels, so that board is full — and unit 3's shows the same six under a
+      different title. A board that lists a unit's own levels looks more like a feature and is a screen
+      the console does not draw.
