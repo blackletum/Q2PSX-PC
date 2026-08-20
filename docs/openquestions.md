@@ -9349,6 +9349,39 @@ Nothing else can close a factor the ceiling forbids. Distinguishing the two need
 own texture or its own light list; a capture of the finished frame cannot separate them,
 because a brighter lamp and a brighter texel produce the identical pixel.
 
+**THE ARM'S OWN DATA IS NOW LOOKED AT DIRECTLY, AND IT IS RIGHT.**
+
+- **The UVs land on the arm.** Dumping VRAM page `tpage 0x0032` decoded through CLUT 91 as
+  a 256x256 image and drawing the two big arm faces' UV footprint on it (u 53..114,
+  v 64..98) puts the box squarely on the forearm-and-fist in the atlas. The mapping is not
+  sampling the wrong part of the sheet.
+- **CLUT 91 is a clean ramp, and it is TAN.** Sixteen entries, monotonic, luma 85.4 down to
+  8.0, no corruption and no stray hue: `A14D 9D2C 9D2B 990B 94EA 94E9 90C8 90C8 8CA7 8CA6
+  8C86 8C85 8C85 8C64 8C63 8421`. The right PINK arm comes out of that tan under the violet
+  lamp, which is why the lit hue matches the capture to a tenth.
+- **The light direction's sign is right.** Negating it collapses the weapon onto the back
+  colour (body -34.5%, arm -65.9%), so the port is not shading it inside out.
+- **The node is not wrong, and cannot be.** Swept 0..300: node 5 is the ONLY one whose lamp
+  is within range of this spawn at all; every other node leaves the weapon on the back
+  colour. There is one lamp near the BASE0 start and the port has it.
+
+**Which exhausts the search.** The record layout (28 bytes), the attenuation function
+(`0x80076040`, instruction for instruction including the shift of 6, the scale of 64 and the
+`den == 0 -> 4096` exit), the per-light colour, the colour matrix, both GTE stages, the
+normal decode, the UVs, the palette and the node are each verified. The port's arithmetic
+and the port's data handling are the console's.
+
+What remains is a bare inequality: with one lamp of (1163, 581, 1328) and a back colour of
+0x30, the arm cannot exceed R x0.943 of its texture, and the capture shows R x1.132. That
+gap cannot be closed by anything in mesh handling, UV mapping, rasterisation or the lighting
+code, because none of them can produce a value above the ceiling those two numbers set.
+
+So either the console has more light energy at this spawn than the disc's SpaceLights yield
+through a decode that is now verified correct, or the capture is not of the state this frame
+reproduces — a possibility that has NOT been excluded and should be, before more is spent on
+the renderer. The frame matches on geometry, position, size, silhouette, palette and hue;
+it is short only on how much light is in the room.
+
 One inconsistency found on the way and worth fixing on its own terms, though it is inert
 today: `q2_vram_get_clut4` applies the loader's STP fix-up from `0x800762B4` (every non-zero
 CLUT entry gets bit 15) and `q2_vram_upload` — the one that actually fills the VRAM the
