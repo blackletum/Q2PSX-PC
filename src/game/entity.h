@@ -240,6 +240,34 @@ typedef enum q2_ent_sound {
     Q2_SND_DEATH       = 20,  /* 0x800B28E4, pla_death4                     */
     Q2_SND_DROWN       = 21,  /* 0x800B28E8, pla_drown1 — drowned instead   */
 
+    /*
+     * The jump's own sound, and the SOFT landing — the two the player makes
+     * most often and the two this port made none of.
+     *
+     * `Q2_SND_JUMP` is 0x800B2900, played at 0x8003E214 on the jump's success
+     * path only. `Q2_SND_LAND_SOFT` is 0x800B2904, played at 0x80039DBC —
+     * which is the arm `0x80039D50 slti v0, s0, 31` branches to, i.e. the band
+     * BELOW the damage threshold. This file used to record that a landing
+     * softer than 31 was silent; it is the opposite, and it is why an ordinary
+     * hop had no audio at either end of it.
+     *
+     * Both names come out of the run of find_sound / sw pairs at 0x8003BA00,
+     * where the compiler hoists the NEXT name's setup above the current store —
+     * so 0x800B2900 takes 0x800AC488 "pla_jump1" and 0x800B2904 takes
+     * 0x800AC494 "pla_land1", one slot earlier than the addresses suggest.
+     */
+    Q2_SND_JUMP        = 22,  /* 0x800B2900, 0x8003E214 — pla_jump1         */
+    Q2_SND_LAND_SOFT   = 23,  /* 0x800B2904, 0x80039DBC — pla_land1         */
+
+    /*
+     * The water transitions, 0x8003D254. Both the submerge at 0x8003D2DC and
+     * the shallow wade at 0x8003D4A0 play the SAME sound; only leaving the
+     * water has its own. Same hoisting trap as above — 0x800B2938 takes the
+     * name at 0x800AC4D0 and 0x800B293C the one at 0x800AC4DC.
+     */
+    Q2_SND_WATER_IN    = 24,  /* 0x800B2938 — pla_watr_in                   */
+    Q2_SND_WATER_OUT   = 25,  /* 0x800B293C — pla_watr_out                  */
+
     Q2_SND_COUNT
 } q2_ent_sound;
 

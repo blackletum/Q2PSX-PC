@@ -9,6 +9,8 @@ add_library(q2psx_game STATIC
     effect.h
     events_rt.c
     events_rt.h
+    explosive.c
+    explosive.h
     flare.c
     flare.h
     hud.c
@@ -72,6 +74,8 @@ add_library(q2psx_game STATIC
     saveui.h
     pad.c
     pad.h
+    playerdeath.c
+    playerdeath.h
     sim.c
     sim.h
     simcombat.c
