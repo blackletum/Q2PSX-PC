@@ -9304,6 +9304,57 @@ has just been verified instruction by instruction.
   the capture's 61.9, but the body at 28.6 against 50.5). Whatever is wrong is not a
   uniform shift of the model CLUT base.
 
+**AND THE DEFICIT IS NOW BOUNDED BY ARITHMETIC, WHICH SETTLES WHERE IT CANNOT BE.**
+
+At the BASE0 'Default' spawn the gather reaches exactly ONE light — `lit` reports
+`node 5, reach 1, kept 1` — with slot colour (1163, 581, 1328). With the back colour at
+0x30 that fixes a hard CEILING on what any vertex of the weapon can come out as:
+
+    rgb[c]_max = 48 + colour[c]/16   ->  (120.7, 84.3, 131.0)
+    modulate   = rgb/128             ->  R x0.943   G x0.659   B x1.023
+
+Rendering the weapon UNLIT gives its texture directly (tint 128 is unity), so the factor
+each material actually needs is measurable:
+
+                  texture        port lit      factor      retail       needs
+      body    (94.8 94.8 94.8)  (63.2 47.6 67.8)  R 0.667  (57.9 44.9 60.3)  R 0.611
+      arm     (78.9 58.6 42.4)  (67.5 34.2 38.9)  R 0.856  (89.3 49.4 54.2)  R 1.132
+
+**The arm needs R x1.132 and the port's ceiling is R x0.943.** The console's arm is brighter
+than the port's maximum possible output at this spawn — not mis-oriented, not mis-shaded,
+unreachable. The port's arm is already at ~90% of its own ceiling and the body at ~72%, so
+neither is badly lit; there is simply not enough light in the room.
+
+**The hue is exact on both materials**, which is what makes this precise rather than
+suggestive: the arm's B-G is +4.7 in the port against +4.8 in the capture, and the lit hue
+comes out right from a TAN texture under a violet light. So the light's COLOUR balance is
+right and only its total is short, by about 1.24x.
+
+**Everything between the light record and the pixel is now verified and cannot supply it:**
+the per-light colour at `0x8006AE30`, the attenuation scale `a2 = 64` at `0x8006AE14`, the
+verbatim colour-matrix copy at `0x8006B1E0`, both GTE stages, the normal decode (48 variants
+swept), and the light node itself (swept — every node either reaches the same single light or
+none). Two fixes made this session moved the arm/body ratio the right way and neither caused
+it: 0.730 with the old fan and truncated UVs, 0.764 with the diagonal fixed, 0.819 with the
+rounding fixed, against the capture's 1.224.
+
+**So the remaining deficit is in DATA, not code, and it is one of exactly two things:**
+
+1. the SpaceLights the gather reaches at this spawn — the console has more light energy here
+   than one attenuated lamp of (1163, 581, 1328), or
+2. the arm's texture as decoded — `Blaster G` part 0, page 1, CLUT 91 — being about 20%
+   darker than the console's.
+
+Nothing else can close a factor the ceiling forbids. Distinguishing the two needs the console's
+own texture or its own light list; a capture of the finished frame cannot separate them,
+because a brighter lamp and a brighter texel produce the identical pixel.
+
+One inconsistency found on the way and worth fixing on its own terms, though it is inert
+today: `q2_vram_get_clut4` applies the loader's STP fix-up from `0x800762B4` (every non-zero
+CLUT entry gets bit 15) and `q2_vram_upload` — the one that actually fills the VRAM the
+renderer samples — does not. It changes nothing while the port ignores per-texel STP and
+every model face is opaque, but the two functions disagree about the same data.
+
 That is a texture or palette question, not a lighting one. The arm is `Blaster G` part 0,
 page 1, `face.texture` 23, which with BASE0's `clut4_count_a` of 68 is **CLUT index 91** —
 and the CLUT word the port binds, 0x4583, decodes to VRAM (48, 278), which is exactly what
