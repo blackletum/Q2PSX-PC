@@ -9387,9 +9387,19 @@ No position reproduces the capture.
 The model has exactly three degrees of freedom — the light's DIRECTION, its SCALE, and the
 ambient floor — and all three are swept:
 
-    direction   15 directions over a sphere      arm peaks at 53.3   (capture 61.9)
+    direction   40 directions over the sphere   arm/body peaks at 1.0216 (capture 1.2240)
     scale       x1.5 .. x5 on the light colours  no pair reaches both materials
     ambient     0 .. 0x60                        monotonic; trades body against arm
+
+The direction row is the load-bearing one and is a BOUND rather than a sample. Forty
+directions on a sin-weighted spherical grid put the achievable arm/body ratio at most
+1.0216 against the capture's 1.2240. The bound extends to any NUMBER of lights: each
+light's contribution has its own ratio, a sum of contributions has a ratio between the
+smallest and largest of them, so three lights cannot exceed what one best direction gives.
+
+And it is not the UV corner order either. All seven orderings of a face's four UV corners —
+identity, mirror in U, mirror in V, 180, and the three rotations — leave the arm between
+42.2 and 46.1 against the capture's 61.9. The arm samples the region it samples.
 
 The best of the whole space leaves body +15.8% and arm -8.1%, worse on the body than
 shipping today (+7.9%), and the arm NEVER exceeds 53.3 against the capture's 61.9 under any
