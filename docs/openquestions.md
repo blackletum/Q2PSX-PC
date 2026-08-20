@@ -9376,10 +9376,16 @@ What remains is a bare inequality: with one lamp of (1163, 581, 1328) and a back
 gap cannot be closed by anything in mesh handling, UV mapping, rasterisation or the lighting
 code, because none of them can produce a value above the ceiling those two numbers set.
 
-So either the console has more light energy at this spawn than the disc's SpaceLights yield
-through a decode that is now verified correct, or the capture is not of the state this frame
-reproduces — a possibility that has NOT been excluded and should be, before more is spent on
-the renderer. The frame matches on geometry, position, size, silhouette, palette and hue;
+**And the player's position is excluded as well.** The capture shows no objectives board, so
+it is taken after the level start and the player need not be exactly on the spawn. Walking
+the player up to 1200 units straight at the lamp moves the arm from 44.7 to 45.9 against the
+capture's 61.9 — it barely responds, because it is already at ~90% of the ceiling and the
+attenuation is near its maximum. The body meanwhile climbs from 54.5 to 58.1 and overshoots.
+No position reproduces the capture.
+
+So the console has more light energy at this spawn than the disc's SpaceLights yield through
+a decode that is now verified correct at every step, and nothing about where the player
+stands, which node is consulted, which lamp is chosen or how it is applied accounts for it. The frame matches on geometry, position, size, silhouette, palette and hue;
 it is short only on how much light is in the room.
 
 One inconsistency found on the way and worth fixing on its own terms, though it is inert
