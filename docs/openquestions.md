@@ -9397,6 +9397,13 @@ directions on a sin-weighted spherical grid put the achievable arm/body ratio at
 light's contribution has its own ratio, a sum of contributions has a ratio between the
 smallest and largest of them, so three lights cannot exceed what one best direction gives.
 
+**Overdraw is ruled out too**, which was the last way the inputs could all be right and the
+output still wrong. Rendering the weapon with ONLY its two big arm faces (part 0, faces 11
+and 13) and diffing against a no-face plate gives the exact pixels those faces own — 706
+after eroding twice. Their luminance is 49.69 whether the other 72 faces are drawn or not,
+bit for bit, so nothing is painting over the arm. On those same 706 pixels the capture reads
+67.62. The arm faces themselves are 26% dark.
+
 And it is not the UV corner order either. All seven orderings of a face's four UV corners —
 identity, mirror in U, mirror in V, 180, and the three rotations — leave the arm between
 42.2 and 46.1 against the capture's 61.9. The arm samples the region it samples.
