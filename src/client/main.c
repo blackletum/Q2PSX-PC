@@ -1771,6 +1771,24 @@ static void client_load_creatures(client *c, const s32 eye[3])
                           c->sim[0].coll_primary_ready ? &c->sim[0].coll_primary
                                                     : NULL,
                           c->sim[0].coll_ready ? &c->sim[0].coll : NULL);
+
+    /*
+     * AND THE DOORS, which are in NEITHER hull.
+     *
+     * A mover is a runtime entity whose box lives in the sim's move world, and
+     * until this line that world had exactly one reader: the player's own step
+     * sweep. So a door stopped the player and nothing else — a guard behind a
+     * shut one could see you through it, shoot you through it (every fire hook
+     * gates each shot on `q2_visible`), and walk into it.
+     *
+     * After `q2_ai_world_bind_init`, which memsets the binding, and before the
+     * install. The address handed over is the sim's `move_world` itself rather
+     * than its target array, because `q2_sim_attach_movers` reallocates that
+     * array — this load already has, further up `client_load_zone`, and the
+     * next zone will again.
+     */
+    q2_ai_world_bind_entities(&c->ai_world, &c->sim[0].move_world);
+
     q2_ai_world_bind_install(&c->ai_world);
 
     /*
@@ -9464,6 +9482,23 @@ static void client_write_shot(client *c, bool numbered)
                 c->ai_world.stats.trace_clear, c->ai_world.stats.bottom_calls,
                 c->ai_world.stats.bottom_fail, c->ai_world.stats.los_calls,
                 c->ai_world.stats.los_blocked);
+
+        /*
+         * And how much of that was the DOORS, reported separately because
+         * "creatures see through walls" and "creatures see through doors" are
+         * different faults with the same symptom: the first is a hull that
+         * does not describe the map, the second is a hull that describes it
+         * correctly and a mover nobody asked. A run on a map with movers whose
+         * `by a door` figures are all zero is the entity pass not being
+         * reached.
+         */
+        Q2_INFO("  ai doors  %u sight lines blocked by a door, "
+                "%u steps stopped by one, %u corners standing on one; "
+                "%u projectiles stopped by one",
+                c->ai_world.stats.los_blocked_ent,
+                c->ai_world.stats.trace_blocked_ent,
+                c->ai_world.stats.bottom_on_ent,
+                q2_sim_proj_scan.stopped_on_mover);
     }
 }
 
@@ -10838,8 +10873,54 @@ static void client_draw_view(void *user, q2_screen *s, int p,
              * the floor the drop sweep found. Nothing else moves: the hit
              * sphere, the AI and the collision all key off `m->pos`.
              */
-            inst.origin[1]     = m->pos[1] + Q2_EYE_BASE
-                                 - c->cre_model[i].hdr.ext2;
+            /*
+             * ...AND A CORPSE IS PLACED BY ITS OWN POSE, which is the
+             * difference between a body that lies on the floor and one that
+             * hangs over it.
+             *
+             * `ext2` is the model's SOLE HEIGHT and it is exact for the pose it
+             * was measured on. Reading every one of the Soldier's thirty-one
+             * clips, each standing, walking and firing pose has its lowest
+             * vertex at exactly 251 — which IS ext2, so the formula above
+             * stands those on the floor to the unit. The death clips do not
+             * share it: clip 8 runs 164, 36, 61, 134, 216, 249, 312, 255 over
+             * its thirty frames as the body is thrown up and comes down. Drawn
+             * against a fixed 251 that same body floats by 190 at frame 9 and
+             * sinks by 61 at frame 25, and whichever frame it stops on is the
+             * one it keeps.
+             *
+             * A DEPARTURE, and stated as one: the console draws every pose
+             * against the one constant (0x800588F0 subtracts the copy at
+             * obj+0xF8, which 0x80058868 fills once from `lh model[+0x1C]` and
+             * nothing ever updates), so a console body rests wherever its last
+             * death frame happens to put it too. This port is asked for corpses
+             * that lie on the ground, so it measures the pose.
+             *
+             * Narrow on purpose — only once the body has come to REST. While
+             * the death animation is playing the console formula is used
+             * unchanged, because the arc of a body being thrown backwards is
+             * the animation and pinning its lowest vertex to the floor would
+             * flatten it. `frame == last_frame` on a dead creature is exactly
+             * "the death has played out".
+             *
+             * It also degenerates: on any pose whose lowest vertex is already
+             * `ext2` this computes the same number the line below it would.
+             */
+            {
+                s32 low = c->cre_model[i].hdr.ext2;
+
+                if (m->dead && posed && m->currentmove
+                    && m->frame == m->currentmove->last_frame) {
+                    s32 pose_low;
+
+                    if (q2_model_pose_low_y(&c->cre_model[i], pose,
+                                            Q2PSX_ARRAY_COUNT(pose),
+                                            &pose_low))
+                        low = pose_low;
+                }
+
+                inst.origin[1] = m->pos[1] + Q2_EYE_BASE - low;
+            }
             inst.origin[2]     = m->pos[2];
             inst.yaw           = m->angles[2];
             inst.clut4_count_a = c->clut4_count_a;

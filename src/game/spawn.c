@@ -227,7 +227,44 @@ u32 q2_monster_set_tick(q2_monster_set *set)
          * finished death animation holds its last frame rather than looping.
          */
         if (m->dead) {
-            if (m->currentmove) {
+            /*
+             * ...AND IT STOPS WHEN THE MODULE SAYS SO. This used to drive the
+             * frame regardless of `next_think`, which meant a body could never
+             * be told to stop.
+             *
+             * Both `*_dead` and every gib arm end with `next_think = 0` — the
+             * Soldier's at module+0x2344, and the console's frame loop then
+             * skips the think outright (`blez v1, ...` at 0x8007EE88 on
+             * entity+0x90). That zero IS the stop signal, and it is most of
+             * what "gibbed" even means on this disc: the Soldier's gib arm
+             * plays no sound and throws no pieces, it sets deadflag,
+             * MOVETYPE_TOSS, SVF_DEADMONSTER and this.
+             *
+             * `q2_M_MoveFrame` re-arms `next_think` on entry, so a corpse still
+             * animates its death through to the end; the zero only takes effect
+             * once something writes it after the driver has run.
+             */
+            /*
+             * AND ONCE THE MODULE RAISES SVF_DEADMONSTER THE BODY DETACHES,
+             * which is the console's own corpse path and which this port had
+             * no step for at all.
+             *
+             * Every `*_dead` sets that bit, and on the console `0x8007EC28`
+             * answers it by calling `0x8007F098`: the edict is freed, the
+             * collision volume is rescaled, the class becomes 47 and the
+             * actor's per-tick handler is swapped for the corpse one. See
+             * `q2_monster_corpse_detach` for the whole of it.
+             */
+            if ((m->svflags & Q2_SVF_DEADMONSTER) && !m->corpse)
+                q2_monster_corpse_detach(m);
+
+            if (m->corpse) {
+                q2_monster_corpse_tick(m);
+                ran++;
+                continue;
+            }
+
+            if (m->currentmove && m->next_think != 0) {
                 q2_M_MoveFrame(m);
                 ran++;
             }

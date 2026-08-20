@@ -91,6 +91,14 @@ void q2_actor_from_monster(q2_actor *a, const q2_monster *m)
     a->has_client = false;
     a->is_monster = (m->svflags & Q2_SVF_MONSTER) != 0;
     a->has_enemy  = (m->enemy != NULL);
+
+    /*
+     * AND WHETHER IT CAN BE HURT AT ALL, which never crossed this boundary.
+     * `q2_monster.takedamage` is written by `monster_start` and by every
+     * module's `die`; without it here the combat side had only `health` to
+     * judge by, and health is the wrong question (see `nearest_hit`).
+     */
+    a->takedamage = m->takedamage;
 }
 
 void q2_actor_to_monster(const q2_actor *a, q2_monster *m)
@@ -161,6 +169,16 @@ void q2_actor_from_player(q2_actor *a, const q2_inventory *inv,
         a->origin[2] = pos[2];
     }
     a->has_client = true;
+
+    /*
+     * A PLAYER IS DAMAGEABLE, and once the sweep honours `takedamage` that has
+     * to be said out loud rather than assumed from a non-zero health. id's
+     * `PutClientInServer` sets `takedamage = DAMAGE_AIM`; the console's client
+     * arm of the damage router reaches T_Damage through the same gate every
+     * other entity does.
+     */
+    a->takedamage = Q2_DAMAGE_AIM;
+
     if (!inv)
         return;
     a->health       = inv->health;
@@ -447,14 +465,31 @@ q2_damage_result q2_combat_damage(q2_actor *attacker, q2_actor *target,
     target->health = (s16)(target->health - amount);
     out.taken = (s16)amount;
 
-    if (was_alive && target->health <= 0) {
-        out.killed = true;
+    if (target->health <= 0) {
+        /*
+         * `killed` is the TRANSITION and stays behind `was_alive`; the other
+         * two are properties of the hit and were wrongly behind it.
+         *
+         * THE FLOOR RUNS ON EVERY health<=0 OUTCOME, not only the first.
+         * 0x800629B4 sits after the subtraction with no already-dead test in
+         * front of it, and leaving it inside the transition let a corpse's s16
+         * run down without limit: measured, 100 rockets at 300 points take a
+         * body to -30040 and 110 take it to **+32496** — the field wraps and
+         * the creature is alive again. The console cannot reach that.
+         *
+         * `gibbed` likewise. The module's own `die` does the real test — the
+         * Soldier's at module+0x2324, before its already-dead guard — but this
+         * flag is what the client and the effects read, so it has to be true
+         * on the hit that takes an already-dead body past `gib_health` and not
+         * only on the hit that killed it.
+         */
+        if (was_alive)
+            out.killed = true;
+
         out.gibbed = target->health <= target->gib_health;
 
-        /* 0x800629B4: a corpse's health floors at -9999, so a rocket into an
-         * already-dead body cannot run it down forever. */
         if (target->health < Q2_HEALTH_FLOOR)
-            target->health = Q2_HEALTH_FLOOR;
+            target->health = (s16)Q2_HEALTH_FLOOR;
     }
 
     {
@@ -592,7 +627,33 @@ static s32 nearest_hit(const s32 origin[3], const s32 dir[3],
             SCAN_BUMP(skipped);
             continue;
         }
-        if (t->health <= 0) {
+        /*
+         * NOT `health <= 0`. HEALTH IS NOT HOW THE CONSOLE DECIDES WHAT CAN BE
+         * SHOT — `takedamage` is, and that is the whole reason a corpse can be
+         * blown apart.
+         *
+         * The console's own entity sweep (0x800544EC, called from the hitscan
+         * at 0x8004891C) filters on identity, bbox overlap, being ahead, the
+         * perpendicular radius, the fraction band and the vertical slab — and
+         * on NOTHING else. No health, no svflags, no solid. `findradius`
+         * (0x8005FA28) filters on solid and inuse, again not health. What
+         * rejects a shot is T_Damage's own first test, five instructions in:
+         * `lw v1, 28(targ)` / `and v1, 0xC0000000` / `beq v1, zero, epilogue`
+         * at 0x80062838..0x80062848.
+         *
+         * And a creature is DAMAGE_AIM from `monster_start` (0x80061A94) and
+         * downgraded to DAMAGE_YES by every module's own `die` on its normal
+         * death arm — the Soldier at module+0x23B4, the Gunner at
+         * module+0x1780 — which is exactly so that the body stays shootable.
+         * Filtering on health here threw that away and made the corpse
+         * untouchable, which is why nothing could ever be gibbed.
+         *
+         * Filtering the sweep on `takedamage` is the two rules composed: the
+         * console's sweep has no filter and its T_Damage rejects on this bit,
+         * so rejecting here reaches the same set without calling damage on a
+         * target that would refuse it.
+         */
+        if (!t->takedamage) {
             SCAN_BUMP(dead);
             continue;
         }
@@ -707,7 +768,8 @@ u32 q2_combat_fire_rail(q2_actor *attacker, const s32 origin[3],
         s32 point[3];
         int k;
 
-        if (!t || t->health <= 0)
+        /* The same rule as `nearest_hit` above, and for the same reason. */
+        if (!t || !t->takedamage)
             continue;
 
         d2 = q2_combat_ray_dist_sq(origin, dir, t->origin, &along);

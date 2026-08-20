@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "combat.h"
+#include "monster.h"
 #include "multiplayer.h"
 #include "projectile.h"
 #include "trig.h"
@@ -49,6 +50,25 @@ static void place(q2_actor *a, s32 x, s32 y, s32 z, s16 hp)
     a->origin[0] = x; a->origin[1] = y; a->origin[2] = z;
     a->health = hp;
     a->gib_health = -60;
+
+    /*
+     * AND IT CAN BE HURT. The sweep filters on `takedamage`, not on health —
+     * that is T_Damage's own first test at 0x80062848 and it is what lets a
+     * corpse still be blown apart. A fixture that leaves it zero is building an
+     * entity the engine would refuse to damage at all, which is a real state
+     * (`monster_start` is what sets it) but not the one these tests mean.
+     */
+    a->takedamage = Q2_DAMAGE_AIM;
+}
+
+/*
+ * A target that has NOT been through monster_start, i.e. the one case the
+ * console really does refuse to damage.
+ */
+static void place_untouchable(q2_actor *a, s32 x, s32 y, s32 z, s16 hp)
+{
+    place(a, x, y, z, hp);
+    a->takedamage = Q2_DAMAGE_NO;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -476,6 +496,28 @@ static void test_hitscan(void)
     check_eq_i(idx, 1, "a bullet stops at the nearer target");
     check_eq_i(a[1].health, 92, "which takes the damage");
     check_eq_i(a[0].health, 100, "and the far one is shielded");
+
+    /*
+     * THE SWEEP FILTERS ON `takedamage`, NOT ON HEALTH — which is the whole
+     * reason a corpse can be gibbed. A body at negative health is still a
+     * target; one whose `takedamage` is clear is not, and the bullet passes
+     * through it to whatever is behind.
+     */
+    place(&a[0], 0, 0, 8000, 100);
+    place(&a[1], 0, 0, 4000, -50);        /* a corpse, and still shootable */
+    a[0].radius = a[1].radius = 100;
+    idx = q2_combat_fire_bullet(&shooter, origin, dir, 8, 4096, 100,
+                                list, 2, &rules, &r);
+    check_eq_i(idx, 1, "a corpse is still a target");
+    check_eq_i(a[1].health, -58, "and takes the hit");
+
+    place(&a[0], 0, 0, 8000, 100);
+    place_untouchable(&a[1], 0, 0, 4000, 100);
+    a[0].radius = a[1].radius = 100;
+    idx = q2_combat_fire_bullet(&shooter, origin, dir, 8, 4096, 100,
+                                list, 2, &rules, &r);
+    check_eq_i(idx, 0, "a target with takedamage clear is passed through");
+    check_eq_i(a[1].health, 100, "and is untouched");
 
     /* The rail does not stop. */
     place(&a[0], 0, 0, 8000, 200);

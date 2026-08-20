@@ -848,4 +848,29 @@ bool q2_model_part_rotation_word(const q2_model *m, const q2_model_anim *clip,
 q2_result q2_model_pose_at(const q2_model *m, const q2_model_anim *clip,
                            u32 frame, q2_model_pose *out);
 
+/*
+ * THE LOWEST POINT OF A POSE, which is not the same as the model's own.
+ *
+ * The header's `ext2` is the model's sole height — the distance from the model
+ * origin down to its lowest vertex — and every drawing path places a model by
+ * subtracting it (`draw_y = origin_y + Q2_EYE_BASE - ext2`, which is what
+ * 0x800588F0 does with the copy it keeps at obj+0xF8). That is exact for the
+ * pose ext2 was measured on and for nothing else.
+ *
+ * Measured over the Soldier's thirty-one clips: every standing, walking and
+ * firing pose has its lowest vertex at exactly 251, which IS `ext2`. The death
+ * clips do not — clip 8 runs 164, 36, 61, 134, 216, 249, 312, 255 across its
+ * thirty frames as the body is thrown up and comes down. Drawn against a fixed
+ * 251 the same body floats by 190 at frame 9 and sinks by 61 at frame 25.
+ *
+ * This returns the pose's OWN lowest vertex in model space, so a caller that
+ * wants a body to rest on the floor can use it in place of `ext2`. Returns
+ * false when the model has no vertices to measure.
+ *
+ * `pose` is the per-part transform `q2_model_pose_at` produced, and must have
+ * one entry per part.
+ */
+bool q2_model_pose_low_y(const q2_model *m, const q2_model_pose *pose,
+                         u32 pose_count, s32 *out_low_y);
+
 #endif /* Q2PSX_MODEL_H */

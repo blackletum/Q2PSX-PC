@@ -252,6 +252,28 @@ typedef struct q2_actor {
     bool is_monster;        /* svflags & SVF_MONSTER, entity+0x40 bit 2      */
     bool has_enemy;         /* entity+0xBC != NULL                           */
 
+    /*
+     * entity+0x1C bits 30..31, and it is what decides whether a thing can be
+     * hurt AT ALL — the fifth instruction of T_Damage is
+     * `lw v1, 28(targ)` / `and v1, 0xC0000000` / `beq v1, zero, epilogue`
+     * (0x80062838..0x80062848), before health, knockback, pain or die.
+     *
+     * A creature is DAMAGE_AIM from `monster_start` (0x80061A94) and every
+     * module's own `die` downgrades it to DAMAGE_YES on the normal death arm,
+     * which is precisely what keeps a body shootable so it can still be blown
+     * apart. This side had no field for it and filtered on health instead,
+     * which is why nothing on this disc could ever be gibbed.
+     *
+     * A PRECISE NEGATIVE on the two values: the whole executable holds exactly
+     * two readers of these bits — 0x80062844 in T_Damage and 0x80049CD4 in the
+     * BFG beam sweep — and both only test nonzero. There is no `srl 30` and no
+     * sign test anywhere. So on THIS disc DAMAGE_YES and DAMAGE_AIM are
+     * behaviourally identical; id's "auto targeting recognises this" has no
+     * reader here, and the distinction is carried because the modules write it,
+     * not because anything acts on it.
+     */
+    u8   takedamage;
+
     /* entity+0x20. Only the two bits the damage function tests are modelled. */
     bool no_knockback;      /* FL_NO_KNOCKBACK, 0x800: knockback forced to 0 */
     bool godmode;           /* FL_GODMODE, 0x10: damage forced to 0          */

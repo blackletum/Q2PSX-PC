@@ -280,6 +280,16 @@ typedef enum q2_attack_state {
 #define Q2_MASK_PLAYERSOLID   0x02010003u   /* ai_run corner peek 0x8005E808 */
 #define Q2_MASK_MONSTERSOLID  0x02020003u   /* SV_movestep        0x8005FE7C */
 
+/*
+ * The bit both of them share, and the only one the port reads: it is what
+ * turns the ENTITY clip on. A trace whose mask carries it is clipped against
+ * the entity list at 0x800544EC after the hull walk, which is how a creature
+ * is stopped by a door rather than walking through it. Both AI masks set it,
+ * so in practice every AI trace asks for entities — the gate exists so a
+ * caller that does not is still answered correctly.
+ */
+#define Q2_MASK_ENTITY_BIT    0x02000000u
+
 /* ------------------------------------------------------------------------- */
 /* Range bands                                                                */
 /* ------------------------------------------------------------------------- */
@@ -316,6 +326,13 @@ typedef enum q2_attack_state {
  *
  * Named here are only the bytes some engine path actually tests for.
  */
+/*
+ * 47 IS THE CORPSE. `0x8007F0F0` writes it into the actor's class field
+ * (+0xD2) at detach and saves the creature's own class to +0xDA, so a body has
+ * its own class for the rest of its life and can be told from the thing it was.
+ */
+#define Q2_CLASS_CORPSE          47
+
 #define Q2_CLASS_JORG            82   /* health 3000 — id's monster_jorg      */
 #define Q2_CLASS_RIDER           83   /* health 3000 — id's monster_makron    */
 #define Q2_CLASS_MEDIC           84   /* health  310 — id's monster_medic     */
@@ -564,6 +581,14 @@ typedef struct q2_monster {
      * gibbed by a later explosion, and the two arms play different sounds.
      */
     bool gibbed;
+
+    /*
+     * DETACHED — the body is a corpse and no longer a creature. See
+     * `q2_monster_corpse_detach`.
+     */
+    bool corpse;
+    u8   corpse_was_class;      /* actor+0xDA: what it was before */
+
     bool on_ground;
     s32  ground_height;     /* the floor the stand-in world puts under it    */
 } q2_monster;
@@ -667,6 +692,54 @@ void q2_monster_damage_reaction(q2_monster *targ, q2_monster *attacker,
  * creature's own `die`.
  */
 void q2_monster_death_use(q2_monster *self);
+
+/* ------------------------------------------------------------------------- */
+/* Corpses — the detach at 0x8007F098 and the handler at 0x8007F71C           */
+/* ------------------------------------------------------------------------- */
+/*
+ * A BODY STOPS BEING A CREATURE, and this port had no such step at all.
+ *
+ * The console keeps two linked structures: the ACTOR (health at +0x108,
+ * gib_health at +0x44, collision volume at +0x54, per-tick handler at +0x3C,
+ * entity at +0x2EC) and the ENTITY. When a creature's own `*_dead` raises
+ * SVF_DEADMONSTER, `0x8007EC28` calls `0x8007F098` and the two come apart:
+ *
+ *     0x8007F0A8/B0  gib_health  is copied from entity+0x52 onto actor+0x44
+ *     0x8007F0B4/BC  max_health  is copied from entity+0x50 onto actor+0x48
+ *     0x8007F0C8     entity+0x24 = 0            — the entity loses its actor
+ *     0x8007F0D0     entity+0x1C &= 0xDFFFFFFF  — bit 29, the edict is FREED
+ *     0x8007F0DC     actor+0x2EC = 0            — the actor loses its entity
+ *     0x8007F0E4     actor+0x3C  = 0x8007F71C   — the per-tick handler becomes
+ *                                                 the CORPSE handler
+ *     0x8007F0E0     the collision volume is rescaled (below)
+ *     0x8007F0F4     actor+0xD2 = 47, with the old class saved to +0xDA
+ *
+ * From that tick on there is no edict, which is why `movetype` is written on
+ * death by every module and read by nothing: there is nothing left to read it
+ * off. A console corpse does not fall because a console corpse is not an
+ * entity any more.
+ *
+ * THE VOLUME RESCALE, 0x8007F77C, is two divides on the actor's own box:
+ * `+0x96 /= 4` (0x8007F794, an arithmetic shift with the usual +3 bias) and
+ * `+0x94 = (3 * +0x94) / 2` (0x8007F79C..0x8007F7B4). So a body becomes half as
+ * tall again as it is wide and a quarter as tall as it was — id's
+ * `self->maxs[2] = -8` generalised. That is what stops a corpse blocking a
+ * doorway at head height.
+ *
+ * THE HANDLER, 0x8007F71C, does four things in order: honour a queued clip
+ * transition (0x8005B2A8, and returns if it took one), advance the animation
+ * (0x8005B880), append to the draw list (0x800552B4), and then
+ * `if (health <= gib_health)` hand the body to the destruction dispatcher
+ * (0x8007CEB4). So a settled corpse is still checked for gibbing every tick,
+ * against the threshold it copied at detach.
+ */
+void q2_monster_corpse_detach(q2_monster *m);
+
+/*
+ * One tick of a corpse — 0x8007F71C. Returns true when the body was destroyed
+ * this tick, which is the caller's cue to stop drawing it.
+ */
+bool q2_monster_corpse_tick(q2_monster *m);
 
 /* ------------------------------------------------------------------------- */
 /* The class method table                                                     */

@@ -711,9 +711,15 @@ static void infantry_pain(q2_monster *self, s16 damage)
  * deadflag to DEAD_DEAD and movetype to MOVETYPE_TOSS in one store at
  * 0x801016D8, raises SVF_DEADMONSTER at 0x801016E4, and returns — with no sound
  * and no animation at all. It does not zero `nextthink` either, which the
- * Gunner's and the Berserk's gib arms both do. That is the one place this
- * creature differs audibly from the Soldier, which plays `msc_udeath` here:
- * the Infantry registers no such name, so the silence is the disc's.
+ * Gunner's and the Berserk's gib arms both do — and that IS a difference worth
+ * naming, because `next_think = 0` is what stops a body on this build.
+ *
+ * A CORRECTION: this used to say the Soldier "plays `msc_udeath` here". It does
+ * not. The Soldier's gib arm is module+0x2330..+0x2370 and contains no `jal` at
+ * all; its `msc_udeath` handle at module+0x32C8 is registered and never loaded,
+ * which `cre_soldier.c` already records. The creature that does play it there is
+ * the GUNNER, at module+0x16D4 / +0x16E4. So the Infantry's silence is the
+ * disc's, and so is the Soldier's.
  *
  * `gibbed` IS THE PORT'S FIELD, NOT THE MODULE'S. The module's gib arm makes
  * exactly two stores — entity+0x20 at 0x801016D8 and entity+0x40 at

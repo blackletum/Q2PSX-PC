@@ -218,6 +218,119 @@ void q2_monster_death_use(q2_monster *self)
 }
 
 /* ------------------------------------------------------------------------- */
+/* Corpses — 0x8007F098 (detach), 0x8007F77C (volume), 0x8007F71C (handler)   */
+/* ------------------------------------------------------------------------- */
+/*
+ * The rescale's two constants, kept as the divides the console writes rather
+ * than as a single scale factor, because they are not the same divide: the
+ * height is `>> 2` with the +3 bias an arithmetic shift needs on a negative,
+ * and the width is `(3 * w) / 2`.
+ */
+static s16 corpse_shorter(s16 v)
+{
+    s32 t = v;
+    if (t < 0)
+        t += 3;                 /* 0x8007F78C */
+    return (s16)(t >> 2);       /* 0x8007F794 */
+}
+
+static s16 corpse_wider(s16 v)
+{
+    s32 t = (s32)v * 3;         /* 0x8007F79C..0x8007F7A0 */
+    t = (s16)t;                 /* the console truncates to a halfword here */
+    return (s16)(t / 2);        /* 0x8007F7AC..0x8007F7B4, toward zero */
+}
+
+void q2_monster_corpse_detach(q2_monster *m)
+{
+    int ax;
+
+    if (!m || m->corpse)
+        return;
+
+    m->corpse = true;
+
+    /*
+     * The class becomes 47 and the old one is kept — 0x8007F0F0..0x8007F100.
+     * Keeping it is not decoration: it is how anything downstream can still
+     * say what the body used to be, and the console keeps it for the same
+     * reason.
+     */
+    m->corpse_was_class = m->class_id;
+    m->class_id         = Q2_CLASS_CORPSE;
+
+    /*
+     * The volume, half again as wide and a quarter as tall. The port's box is
+     * symmetric about the origin on all three axes, so the height divide lands
+     * on the Y pair and the width multiply on the other two — which is the
+     * same box the console builds, expressed in this port's own frame.
+     */
+    for (ax = 0; ax < 3; ax++) {
+        if (ax == 1) {
+            m->mins[ax] = corpse_shorter(m->mins[ax]);
+            m->maxs[ax] = corpse_shorter(m->maxs[ax]);
+        } else {
+            m->mins[ax] = corpse_wider(m->mins[ax]);
+            m->maxs[ax] = corpse_wider(m->maxs[ax]);
+        }
+    }
+
+    /*
+     * The console frees the edict here (`entity+0x1C &= 0xDFFFFFFF`) and nulls
+     * both cross-links. This port keeps one structure for both halves, so what
+     * it can reproduce is the CONSEQUENCE: nothing about the body is a creature
+     * any more. The AI callbacks go, the enemy link goes, and the think stops
+     * — the corpse is driven by `q2_monster_corpse_tick` from here on.
+     *
+     * `in_use` deliberately stays set. On the console the actor outlives the
+     * edict and is still drawn; dropping it here would make the body vanish,
+     * which is the bug this whole path exists to prevent.
+     */
+    m->think       = NULL;
+    m->stand = m->idle = m->search = m->walk = m->run = NULL;
+    m->attack = m->melee = NULL;
+    m->dodge       = NULL;
+    m->sight       = NULL;
+    m->checkattack = NULL;
+    m->bigturn     = NULL;
+    m->enemy       = NULL;
+    m->oldenemy    = NULL;
+    m->goalentity  = NULL;
+    m->movetarget  = NULL;
+    m->svflags    &= ~(u32)Q2_SVF_MONSTER;
+}
+
+bool q2_monster_corpse_tick(q2_monster *m)
+{
+    if (!m || !m->corpse)
+        return false;
+
+    /*
+     * The handler advances the animation and appends the body to the draw
+     * list before it tests anything (0x8007F738 and 0x8007F740). This port's
+     * draw walks the creature set itself, so the append has no analogue; the
+     * animation does, and a corpse whose death move has not run out still
+     * plays it.
+     */
+    if (m->currentmove)
+        q2_M_MoveFrame(m);
+
+    /*
+     * AND A SETTLED BODY IS STILL CHECKED FOR GIBBING, every tick, against the
+     * threshold copied at detach — `lh v1, 264(s0)` / `lw v0, 68(s0)` /
+     * `slt v0, v0, v1` / `bne` at 0x8007F748..0x8007F758, falling through to
+     * the destruction dispatcher at 0x8007F764. `gib_health < health` keeps
+     * the body, so the boundary is inclusive.
+     */
+    if (m->health <= m->gib_health && !m->gibbed) {
+        m->gibbed = true;
+        return true;
+    }
+
+    return false;
+}
+
+/* ------------------------------------------------------------------------- */
 /* The tail of T_Damage — 0x80062940..0x80062B54                              */
 /* ------------------------------------------------------------------------- */
 /*
@@ -328,11 +441,32 @@ void q2_monster_damage_reaction(q2_monster *targ, q2_monster *attacker,
         q2_monster_death_use(targ);
 
     /*
-     * And the flag is the module's to set. The creature's own `die` opens with
-     * its already-dead guard and raises the flag itself, so it is left clear
-     * for the call — see the same dance in every transcribed `*_die`.
+     * AND THE DIE CALL IS NOT GUARDED, which is the whole of "a corpse cannot
+     * be gibbed".
+     *
+     * This used to read `if (!was_dead && targ->die)`. The console has NO such
+     * guard — and not merely no dead test: it has no NULL test either. Once
+     * 0x80062978 is entered, every branch between there and `jalr v0` at
+     * 0x80062A9C converges on the call. The three tests along the way —
+     * movetype in {0,2,3} at 0x80062A44/0x80062A4C, `!SVF_MONSTER` at
+     * 0x80062A60, `deadflag == DEAD_DEAD` at 0x80062A70 — skip only
+     * `touch = NULL` and `monster_death_use`, which is why those two keep
+     * their `was_dead` guard above and this does not. Compare the PAIN call at
+     * 0x80062B34, which IS null-guarded: the asymmetry is the original saying
+     * that anything reaching here has a die handler.
+     *
+     * A guard here defeated the module's own gib arm, which is written to be
+     * re-entered: the Soldier's `die` tests `health <= gib_health` at
+     * module+0x2324 and its already-dead guard is twelve instructions further
+     * on, INSIDE the other branch (module+0x237C). The same shape on the Gunner
+     * (+0x16C8 vs +0x1738) and the Infantry (+0x16A0 vs +0x16F0). So a body
+     * already down is meant to be destroyable by a later explosion, and this
+     * port was returning before the test that decides it.
+     *
+     * The NULL check stays, because unlike the console this port can be built
+     * with a creature whose module installs no die at all.
      */
-    if (!was_dead && targ->die)
+    if (targ->die)
         targ->die(targ, damage);
 
     /* A creature whose module installs no `die` still stops — and the two

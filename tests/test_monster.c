@@ -384,10 +384,19 @@ static void test_damage_reaction(void)
     check((targ.flags & Q2_FL_NO_KNOCKBACK) != 0,
           "a body takes no more knockback");
 
+    /*
+     * SHOOTING THE BODY AGAIN CALLS `die` AGAIN, and that is the point: it is
+     * the only route to a module's gib arm, which tests `health <= gib_health`
+     * BEFORE its own already-dead guard. The console's T_Damage has no guard on
+     * that call at all — every path from 0x80062978 reaches `jalr v0` at
+     * 0x80062A9C. What the second hit must NOT do is count a second kill or run
+     * `monster_death_use` again; those are what 0x800629E8 and 0x80062A70 skip.
+     */
     targ.health = -200;
     q2_monster_damage_reaction(&targ, &player, 190);
-    check_eq_i(g_die_calls, 1, "shooting the body again does not kill it twice");
-    check_eq_i(q2_level_state.killed_monsters, 1, "nor count it twice");
+    check_eq_i(g_die_calls, 2, "shooting the body again re-enters die");
+    check_eq_i(g_die_damage, 190, "with the new hit's damage");
+    check_eq_i(q2_level_state.killed_monsters, 1, "but the kill is not counted twice");
 
     /* The floor, 0x800629B4. */
     q2_level_reset();
@@ -420,6 +429,14 @@ static void test_damage_reaction(void)
     check((targ.flags & (Q2_FL_FLY | Q2_FL_SWIM)) == 0,
           "a dead flyer stops flying");
 
+    /* And it does NOT run a second time on a body already down — 0x80062A70
+     * skips exactly this and the die call below it. */
+    targ.aiflags |= Q2_AI_STAND_GROUND;
+    targ.health   = -400;
+    q2_monster_damage_reaction(&targ, &player, 395);
+    check_eq_i(targ.aiflags, Q2_AI_GOOD_GUY | Q2_AI_STAND_GROUND,
+               "a second hit does not re-run monster_death_use");
+
     /* The nightmare debounce, 0x80062B20: five seconds rather than the pain
      * handler's own three. */
     q2_level_reset();
@@ -431,6 +448,65 @@ static void test_damage_reaction(void)
     check_eq_i(targ.pain_debounce, Q2_AI_SECONDS(5),
                "skill 3 pushes the pain debounce out to five seconds");
     q2_cre_set_skill(1);
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * Corpses — the detach at 0x8007F098, the volume rescale at 0x8007F77C and the
+ * handler at 0x8007F71C. None of this existed on this side, which is why a body
+ * stayed a full-height creature that the AI still owned.
+ */
+static void test_corpse(void)
+{
+    q2_monster targ, player;
+
+    printf("corpses\n");
+
+    q2_level_reset();
+    make_monster(&targ, 87, 100);
+    make_player(&player);
+    targ.health = -10;
+    q2_monster_damage_reaction(&targ, &player, 110);
+
+    check(!targ.corpse, "a body is not a corpse until its module says so");
+
+    /* Every `*_dead` raises this; it is the detach's own trigger. */
+    targ.svflags |= Q2_SVF_DEADMONSTER;
+    q2_monster_corpse_detach(&targ);
+
+    check(targ.corpse, "SVF_DEADMONSTER detaches the body");
+    check_eq_i(targ.class_id, Q2_CLASS_CORPSE, "and it becomes class 47");
+    check_eq_i(targ.corpse_was_class, 87, "with what it was kept");
+    check(targ.think == NULL, "the think is gone");
+    check(targ.enemy == NULL && targ.run == NULL,
+          "and so is everything that made it a creature");
+    check((targ.svflags & Q2_SVF_MONSTER) == 0, "it is no longer a monster");
+    check(targ.in_use, "but it is still in the world");
+
+    /*
+     * The volume: a quarter as tall and half again as wide, from a ±286 cube.
+     * 286/4 = 71 and (286*3)/2 = 429, with the console's own rounding.
+     */
+    check_eq_i(targ.maxs[1], 71,  "a corpse is a quarter as tall");
+    check_eq_i(targ.mins[1], -71, "on both sides");
+    check_eq_i(targ.maxs[0], 429, "and half again as wide");
+    check_eq_i(targ.maxs[2], 429, "on both horizontal axes");
+
+    /* Detaching twice must not rescale twice. */
+    q2_monster_corpse_detach(&targ);
+    check_eq_i(targ.maxs[1], 71, "detaching again changes nothing");
+    check_eq_i(targ.corpse_was_class, 87, "and does not lose the old class");
+
+    /* The handler gibs when health passes the threshold it kept. */
+    check(!q2_monster_corpse_tick(&targ), "an intact corpse is not destroyed");
+    check(!targ.gibbed, "and is not marked gibbed");
+
+    targ.health = targ.gib_health;
+    check(q2_monster_corpse_tick(&targ),
+          "a corpse at exactly gib_health is destroyed — the boundary is "
+          "inclusive, because the console keeps the body on gib < health");
+    check(targ.gibbed, "and is marked gibbed");
+    check(!q2_monster_corpse_tick(&targ), "and is destroyed only once");
 }
 
 /* ------------------------------------------------------------------------- */
@@ -456,6 +532,7 @@ int main(void)
     test_damage();
     test_react_to_damage();
     test_damage_reaction();
+    test_corpse();
     test_time_base();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);

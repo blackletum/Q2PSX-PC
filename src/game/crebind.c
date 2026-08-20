@@ -269,6 +269,19 @@ void q2_creature_spawn(q2_cre_bind *b, q2_monster *m, u32 class_index)
      * "kills 3/9" is two numbers the original keeps rather than two scans of a
      * live array.
      */
+    /*
+     * AND IT CAN BE HURT, which nothing in this port had ever said.
+     *
+     * `monster_start` writes DAMAGE_AIM into entity+0x1C bits 30..31 at
+     * 0x80061A94 (`and 0x3FFFFFFF` / `or 0x80000000`), beside `svflags |= 4`
+     * and `nextthink = level.time + 1`. Only the die and duck handlers were
+     * writing the field on this side, so a LIVE creature carried zero — and
+     * once the combat sweep started honouring it, as T_Damage does, every
+     * living creature on the disc became invulnerable. `tests/test_combat.c`
+     * caught it on the first run.
+     */
+    m->takedamage = Q2_DAMAGE_AIM;
+
     if (!(m->aiflags & Q2_AI_GOOD_GUY))
         q2_level_state.total_monsters++;
 

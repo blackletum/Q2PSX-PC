@@ -1048,3 +1048,61 @@ q2_result q2_model_bake_indices(const q2_model *m, u16 *out)
 
     return (fi == m->hdr.num_faces) ? Q2_OK : Q2_ERR_BAD_FORMAT;
 }
+
+/* ------------------------------------------------------------------------- */
+/* The lowest point of a POSE, as opposed to the model's own — see model.h    */
+/* ------------------------------------------------------------------------- */
+bool q2_model_pose_low_y(const q2_model *m, const q2_model_pose *pose,
+                         u32 pose_count, s32 *out_low_y)
+{
+    u32 part, cursor = 0;
+    s32 low = -(1 << 30);
+    bool any = false;
+
+    if (!m || !out_low_y)
+        return false;
+
+    for (part = 0; part < m->hdr.num_parts; part++) {
+        q2_model_part p;
+        s16 rot[3][3];
+        bool posed = pose && part < pose_count;
+        u32 v;
+
+        if (q2_model_get_part(m, part, &p) != Q2_OK)
+            break;
+
+        if (posed)
+            q2_quat_to_matrix(rot, pose[part].q);
+
+        for (v = 0; v < p.num_verts; v++) {
+            q2_model_vertex mv;
+            s32 y;
+
+            if (!q2_model_get_vertex(m, cursor + v, &mv))
+                break;
+
+            /*
+             * Only the Y row is needed, so only the Y row is multiplied. The
+             * bounds walk in `q2psx-inspect model` does all three because it
+             * frames a camera; this places a body on a floor.
+             */
+            if (posed)
+                y = (((s32)rot[1][0] * mv.x +
+                      (s32)rot[1][1] * mv.y +
+                      (s32)rot[1][2] * mv.z) >> 12) + pose[part].t[1];
+            else
+                y = mv.y;
+
+            if (y > low)        /* Y points DOWN: the largest is the lowest */
+                low = y;
+            any = true;
+        }
+        cursor += p.num_verts;
+    }
+
+    if (!any)
+        return false;
+
+    *out_low_y = low;
+    return true;
+}
