@@ -9383,9 +9383,35 @@ capture's 61.9 — it barely responds, because it is already at ~90% of the ceil
 attenuation is near its maximum. The body meanwhile climbs from 54.5 to 58.1 and overshoots.
 No position reproduces the capture.
 
-So the console has more light energy at this spawn than the disc's SpaceLights yield through
-a decode that is now verified correct at every step, and nothing about where the player
-stands, which node is consulted, which lamp is chosen or how it is applied accounts for it. The frame matches on geometry, position, size, silhouette, palette and hue;
+**AND THE SEARCH IS NOW EXHAUSTIVE OVER THE WHOLE LIGHTING MODEL, NOT JUST ITS INPUTS.**
+The model has exactly three degrees of freedom — the light's DIRECTION, its SCALE, and the
+ambient floor — and all three are swept:
+
+    direction   15 directions over a sphere      arm peaks at 53.3   (capture 61.9)
+    scale       x1.5 .. x5 on the light colours  no pair reaches both materials
+    ambient     0 .. 0x60                        monotonic; trades body against arm
+
+The best of the whole space leaves body +15.8% and arm -8.1%, worse on the body than
+shipping today (+7.9%), and the arm NEVER exceeds 53.3 against the capture's 61.9 under any
+direction whatsoever. So the deficit is not reachable by lighting at all — not by the right
+lighting and not by a fitted one.
+
+Which forces the conclusion the other way round: **with this port's textures and normals,
+retail's arm brightness cannot be produced by any illumination.** The arm/body ratio the port
+can reach is bounded near 1.0 (0.819 today) and the capture is 1.224. A ratio is a property
+of the two materials, and no light acting on both can push it past what their texels allow.
+
+So the arm's TEXEL VALUES on the console must be brighter than this port decodes from the
+same disc — even though `q2psx-inspect textures` decodes all 553 images with zero failures
+to exactly their expected sizes, the page renders as a coherent atlas with a recognisable
+forearm exactly under the arm's UV box, and CLUT 91 is the only tan ramp in its
+neighbourhood with a clean monotonic fall from (104, 80, 64).
+
+That is the contradiction the next reader inherits, and it is a sharp one: every input is
+verified and the output is still 24% short. Settling it needs the console's own VRAM after a
+BASE0 load — an emulator dump of page 0x0032 and CLUT 91 — against which this port's decode
+can be diffed texel for texel. A capture of the finished frame cannot do it, and five passes
+over the renderer have now established that nothing in the renderer can either. The frame matches on geometry, position, size, silhouette, palette and hue;
 it is short only on how much light is in the room.
 
 One inconsistency found on the way and worth fixing on its own terms, though it is inert
