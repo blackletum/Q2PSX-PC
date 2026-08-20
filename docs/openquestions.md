@@ -110,11 +110,26 @@ the projectile entity list at `0x800C91C0` whose per-frame sweep settles what a 
 mean. Full detail in FORMATS.md §13; `q2psx-inspect weapons` checks the data half against the disc, and
 `tests/test_weapon.c` and `tests/test_combat.c` check the behaviour half.
 
-Two negative results from that pass are load-bearing. The damage function **never kills** — there is no die
+~~Two negative results from that pass are load-bearing. The damage function **never kills** — there is no die
 or pain callback, health simply goes negative and the entity's own think notices later — and for a creature
-with an AI brain it does not even subtract health: it posts the amount to the module. So per-creature health,
-pain and death behaviour sit behind #6 rather than behind anything in the executable, which raises #6's
-priority again.
+with an AI brain it does not even subtract health: it posts the amount to the module.~~ **BOTH WRONG, and
+the mistake was one function deep.** `0x80057D54` is the OUTER damage function — armour, the mod table, the
+twenty-one call sites — and it has exactly one interesting callee: at `0x800584B4` it calls **`0x800627F8`**,
+which is id's `T_Damage` itself and which has that one caller and no other. Everything the negative results
+said was missing is inside it:
+
+    0x80062958   health -= damage       into (entity+0x24)+0x108
+    0x800629B4   the floor, -9999
+    0x80062A9C   the `die` callback at entity+0xA4
+    0x80062AF4   the `pain` callback at entity+0xA0, with entity+0xA8 as its debounce
+    0x80062AC0   M_ReactToDamage, which is the only writer of `oldenemy` in the image
+
+So per-creature health, pain and death behaviour were never behind #6; they were behind reading one more
+`jal`. The tail of that function is transcribed in `monster.c` as `q2_monster_damage_reaction` and
+`q2_monster_death_use`, `M_ReactToDamage` in `ai.c`, and `q2psx-inspect ai` checks both against the disc.
+One caution survives and is worth keeping: the call at `0x800584B4` passes `s2+0x2EC` as the target rather
+than the entity its caller was handed, so which entity reaches T_Damage on which path is a separate
+question from what T_Damage does with it.
 
 **Player movement followed, and it is the pass that most changed what the port does rather than what it
 knows.** §9.12 had the constants and the vertical integrator and said so; the player's own frame —
@@ -618,6 +633,17 @@ The residues of the resolved blockers keep their parents' numbers.
       transcribed in `src/game/cre_soldier.c`: all fourteen think indices, all eight callbacks, all
       eighteen moves. Its constants are id's (`random() < 0.8` as 26214/32767, and so on).
 
+      **AND ALL SEVEN ARE NOW TRANSCRIBED.** This entry used to open the next paragraph with "reading 37
+      MIPS functions one at a time was not going to happen"; it happened. `cre_tankcomm.c`,
+      `cre_gunner.c`, `cre_infantry.c`, `cre_arachner.c`, `cre_berserk.c` and the new `cre_insane.c` join
+      `cre_soldier.c`, and `q2psx-inspect creatures` reports **every callback of every module written by
+      hand**. The paragraph below is kept because the decoded-action path is still what a creature this
+      port does not know would run on, and because the decoder is the CHECK on the transcriptions: where
+      the two disagree, one of them is wrong, and on this pass it was twice the decoder — a `rand() % 6`
+      reported as `% 3` because the multiply-back reconstruction stopped one shift short of the doubling,
+      and a think walked past its own `jr ra` into the next function because that function was an export
+      and therefore not in the decoder's entry set.
+
       **The other six creatures' think functions are decoded rather than transcribed.** Reading 37 MIPS
       functions one at a time was not going to happen, and writing them from the Soldier's pattern would
       have been invention. So the same trick that recovered the move tables was pushed one level down: a
@@ -630,11 +656,33 @@ The residues of the resolved blockers keep their parents' numbers.
       What remains approximate is branch conditions: a step behind a branch is marked and handled by two
       stated rules rather than modelled. FORMATS.md §14.14.
 
-      Also still open is where a specific creature's health subtraction, pain threshold and per-attack
-      damage live. The damage function does not subtract a creature's health — it posts the
-      amount to the module through `0x800627F8` and returns — so those numbers are in the modules and
-      nowhere else in the image. Combat against creatures is complete on the player's side and hollow on
-      theirs until *that* falls. What IS known from the executable, and is implemented, is which mod each
+      ~~Also still open is where a specific creature's health subtraction, pain threshold and per-attack
+      damage live.~~ **CLOSED, and the three lived in three different places.**
+
+      * **The health subtraction is in the executable**, at `0x80062958`, inside `0x800627F8` — which is
+        not something the damage function "posts to" but `T_Damage` itself, reached from `0x80057D54` at
+        `0x800584B4` and from nowhere else. See §14.15.
+      * **The pain threshold is per creature and is an ARGUMENT**, not a table: `T_Damage` hands the
+        amount to the module's `pain` at entity+0xA0, and four of the seven branch on it — the Tank
+        Commander at `damage <= 10` / `<= 30` / `<= 60`, the Gunner at `<= 10` / `<= 25`, the Berserk at
+        `< 20`, and the Berserk's `die` at `>= 50` for the long death. This port's callback carried no
+        damage argument at all, so every one of those took one arm forever.
+      * **The attack figures are immediates in each module**, passed to the contiguous `monster_fire_*`
+        family at import `+0x80`…`+0x9C`. All of them read, and all of them id's:
+
+            Tankcomm  blaster 16/800   rocket 50/550   bullet 20, kick 4, spread 300/500
+            Gunner    grenade 50/600                   bullet  3, kick 4, spread 300/500
+            Infantry                                   bullet  3, kick 4, spread 300/500
+            Arachner  railgun 50, kick 100
+            Soldier   blaster  5/600   shotgun 2, kick 1, spread 1000/500, 12 pellets
+
+        `DEFAULT_BULLET_HSPREAD` 300 and `VSPREAD` 500 recurring across four unrelated modules is what
+        says the argument positions are right rather than merely consistent.
+
+      Combat against creatures was "complete on the player's side and hollow on theirs" and now is not:
+      six of the seven could hunt the player down and never hurt them, because the port's fire hook took
+      a single `int` and the client declined anything that was not one of the Soldier's three flash
+      tables. It carries the figures now. What IS known from the executable, and is implemented, is which mod each
       creature attack carries: a contact hit is mod 7 (`0x800612F0`), a thrown grenade is the launcher's own
       spawner at speed 600 rather than 900 (`0x80061724`), and a creature rocket is `0x8004AF28` with the
       aim scaled by 3/2 (`0x80062164`).

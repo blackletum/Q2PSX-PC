@@ -295,6 +295,130 @@ int cmd_ai(const disc *d)
     check_split(&e, 0x8007DD20, 0x8007DD24, 0x80061DE4, true,
                 "import +0x118 registers a class method");
 
+    /* --------------------------------------------------------------------- */
+    /*
+     * The eight projectile spawners, +0x80..+0x9C, contiguous and in the
+     * loader's own order. This is what turns a decoded think function's
+     * `call(+98)` into a rocket instead of an unclassified number, so it is
+     * worth pinning: if any one of them moves, a creature fires the wrong gun.
+     */
+    printf("\nthe projectile spawners (import +0x80..+0x9C)\n");
+    check_split(&e, 0x8007DB54, 0x8007DB58, 0x80062000, true,
+                "import +0x80 is monster_fire_blaster");
+    check_split(&e, 0x8007DB60, 0x8007DB64, 0x80061DFC, true,
+                "import +0x84 is monster_fire_bullet");
+    check_split(&e, 0x8007DB6C, 0x8007DB70, 0x80061ED0, true,
+                "import +0x88 is monster_fire_shotgun");
+    check_split(&e, 0x8007DB78, 0x8007DB7C, 0x8006217C, true,
+                "import +0x8C is monster_fire_railgun");
+    check_split(&e, 0x8007DB84, 0x8007DB88, 0x800621BC, true,
+                "import +0x90 is monster_fire_bfg");
+    check_split(&e, 0x8007DB94, 0x8007DB98, 0x800614D4, true,
+                "import +0x94 is monster_fire_grenade");
+    check_split(&e, 0x8007DBA0, 0x8007DBA4, 0x8006210C, true,
+                "import +0x98 is monster_fire_rocket");
+    check_split(&e, 0x8007DBAC, 0x8007DBB0, 0x800621F8, true,
+                "import +0x9C is monster_fire_laser");
+    check_imm(&e, 0x8007DB54, (s32)(s16)0x8006, "the family is one lui apart");
+
+    /* --------------------------------------------------------------------- */
+    /*
+     * +0xFC IS NOT A SHOT, and the port used to think it was.
+     *
+     * The three below each write a different `think` and then call ONE shared
+     * function, 0x800619E0; two of them set a flags bit first, and the bits are
+     * FL_FLY and FL_SWIM. That is id's walkmonster_start / flymonster_start /
+     * swimmonster_start, and 0x800619E0 is monster_start.
+     */
+    printf("\nthe three monster_start wrappers (import +0xFC..+0x104)\n");
+    check_split(&e, 0x8007DCCC, 0x8007DCD0, 0x80062240, true,
+                "import +0xFC is walkmonster_start");
+    check_split(&e, 0x8007DCD8, 0x8007DCDC, 0x8006229C, true,
+                "import +0x100 is flymonster_start");
+    check_split(&e, 0x8007DCE4, 0x8007DCE8, 0x80062268, true,
+                "import +0x104 is swimmonster_start");
+    check_word(&e, 0x80062250, 0x0C018678, "walk calls monster_start");
+    check_word(&e, 0x800622B8, 0x0C018678, "fly calls the same one");
+    check_word(&e, 0x80062284, 0x0C018678, "and so does swim");
+    check_immu(&e, 0x800622B4, Q2_FL_FLY,  "fly sets FL_FLY first");
+    check_immu(&e, 0x80062280, Q2_FL_SWIM, "swim sets FL_SWIM first");
+    check_imm(&e, 0x80061A64, 0x24, "monster_start counts level.total_monsters");
+    check_immu(&e, 0x80061A50, Q2_AI_GOOD_GUY, "...unless it is a good guy");
+
+    /* --------------------------------------------------------------------- */
+    printf("\nthe rest of the import table a creature reaches\n");
+    check_split(&e, 0x8007DBDC, 0x8007DBE0, 0x8005D104, true,
+                "import +0xAC is FoundTarget");
+    check_split(&e, 0x8007DBF4, 0x8007DBF8, 0x8005EF84, true,
+                "import +0xB4 is range");
+    check_split(&e, 0x8007DC84, 0x8007DC88, 0x8005B950, true,
+                "import +0xE4 is visible");
+    check_split(&e, 0x8007DC90, 0x8007DC94, 0x8005D8C8, true,
+                "import +0xE8 is M_CheckAttack");
+    check_split(&e, 0x8007DC9C, 0x8007DCA0, 0x80061118, true,
+                "import +0xEC is fire_hit");
+    check_split(&e, 0x8007DCA8, 0x8007DCAC, 0x80057D54, true,
+                "import +0xF0 is T_Damage");
+
+    /* --------------------------------------------------------------------- */
+    printf("\nT_Damage and Killed (0x800627F8)\n");
+    check_immu(&e, 0x800628B8, 1, "the surprise bonus needs !DAMAGE_RADIUS");
+    check_immu(&e, 0x800628CC, Q2_SVF_MONSTER, "...and SVF_MONSTER");
+    check_immu(&e, 0x8006291C, Q2_FL_NO_KNOCKBACK,
+               "FL_NO_KNOCKBACK zeroes the knockback");
+    check_immu(&e, 0x80062924, Q2_FL_GODMODE, "FL_GODMODE zeroes the damage");
+    check_immu(&e, 0x80062930, 0x20, "...unless DAMAGE_NO_PROTECTION is set");
+    check_word(&e, 0x80062958, 0x00501023, "health -= damage");
+    check_imm(&e, 0x80062950, 0x108, "health lives at object+0x108");
+    check_immu(&e, 0x8006299C, Q2_FL_NO_KNOCKBACK,
+               "a body is given FL_NO_KNOCKBACK");
+    check_imm(&e, 0x800629B4, -9999, "and its health floors at -9999");
+    check_immu(&e, 0x800629F8, Q2_AI_GOOD_GUY,
+               "a good guy is left out of the kill count");
+    check_split(&e, 0x80062A00, 0x80062A04, 0x800E46D8, true,
+                "the counter is in level_locals");
+    check_imm(&e, 0x80062A08, 0x28, "level.killed_monsters is +0x28");
+    check_imm(&e, 0x80062A1C, Q2_CLASS_MEDIC,
+               "a medic that kills something owns the body");
+    check_immu(&e, 0x80062AD0, Q2_AI_DUCKED, "a ducked creature does not flinch");
+    check_imm(&e, 0x80062B20, Q2_AI_SECONDS(5),
+              "skill 3 pushes the pain debounce to five seconds");
+
+    /* --------------------------------------------------------------------- */
+    printf("\nM_ReactToDamage (0x80062654)\n");
+    check_immu(&e, 0x80062680, Q2_SVF_MONSTER,
+               "only a client or a creature is worth reacting to");
+    check_immu(&e, 0x800626AC, Q2_AI_GOOD_GUY,
+               "a good guy does not get angry at a player");
+    check_word(&e, 0x800626F4, 0x0C016E54,
+               "it asks whether it can still see the one it is fighting");
+    check_immu(&e, 0x80062730, Q2_FL_FLY | Q2_FL_SWIM,
+               "the same base type means fly and swim together");
+    check_imm(&e, 0x80062750, Q2_CLASS_TANKCOMM, "it forgives the Tankcomm");
+    check_imm(&e, 0x80062758, Q2_CLASS_BOSS1,    "and Boss1");
+    check_imm(&e, 0x80062760, Q2_CLASS_RIDER,    "and Rider");
+    check_imm(&e, 0x80062768, Q2_CLASS_JORG,     "and Jorg");
+    check_immu(&e, 0x800627CC, Q2_AI_DUCKED,
+               "a ducked creature does not break out to charge");
+    check_word(&e, 0x800627DC, 0x0C017441, "and otherwise it hunts");
+
+    /* --------------------------------------------------------------------- */
+    printf("\nmonster_death_use (0x800622E8)\n");
+    check_immu(&e, 0x800622F8, (u32)(u16)~(Q2_FL_FLY | Q2_FL_SWIM),
+               "a dead flyer stops flying");
+    check_immu(&e, 0x80062308, Q2_AI_GOOD_GUY,
+               "and keeps no ai flag but AI_GOOD_GUY");
+
+    /* --------------------------------------------------------------------- */
+    /*
+     * The class byte, which is a third numbering and had no home until the
+     * loader was read: the descriptor record carries it at +0x20 and this is
+     * where it becomes entity+0x23.
+     */
+    printf("\nthe class byte (0x8007E660)\n");
+    check_imm(&e, 0x8007E660, 0x20, "read from the class record's +0x20");
+    check_imm(&e, 0x8007E668, 0x23, "written to the entity's +0x23");
+
     printf("\n%d checks, %d mismatches\n", g_checks, g_bad);
     printf("%s\n", g_bad == 0 ? "the port's AI matches the disc"
                               : "the port's AI does NOT match the disc");

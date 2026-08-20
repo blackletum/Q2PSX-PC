@@ -28,6 +28,7 @@ add_library(q2psx_game STATIC
     cre_berserk.c
     cre_gunner.c
     cre_infantry.c
+    cre_insane.c
     cre_soldier.c
     cre_tankcomm.c
     cre_generic.c

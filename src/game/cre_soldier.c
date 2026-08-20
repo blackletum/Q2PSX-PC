@@ -12,13 +12,36 @@
  * Every function decoded lands on id's own source, and several of them do so
  * on constants that were not tuned to produce the match:
  *
- *   soldier_stand         module+0x19A0   `random() < 0.8`  as 26214/32767
- *   soldier_idle          module+0x1A0C   `random() > 0.8`  as 26215/32767
- *   soldier_walk1_random  module+0x1AA0   `random() > 0.1`  as  3278/32767
- *   soldier_fire          module+0x1120   three flash tables chosen by skinnum
+ *   soldier_stand          module+0x19A0  `random() < 0.8`  as 26214/32768
+ *   soldier_idle           module+0x1A0C  `random() > 0.8`  as 26215/32768
+ *   soldier_walk1_random   module+0x1AA0  `random() > 0.1`  as  3278/32768
+ *   soldier_fire           module+0x1120  three flash tables chosen by skinnum
+ *   soldier_duck_down      module+0x1E64  `pausetime = level.time + 1 s`
+ *   soldier_attack3_refire module+0x1F6C  `level.time + 0.4 < pausetime`
+ *   soldier_dead           module+0x20F0  movetype TOSS, SVF_DEADMONSTER
+ *   soldier_pain           module+0x1028  `velocity[2] > 100` as < -1200
+ *   soldier_die            module+0x2318  `health <= gib_health`, gib_health -30
  *
- * The spawn function writes exactly id's seven callbacks in id's order, with
- * `melee` explicitly zeroed because a soldier has none, and sets `mass = 100`.
+ * The spawn function (module+0x1604, export 0) writes exactly id's SET of
+ * callbacks — pain +0xA0, die +0xA4, stand +0xE0, walk +0xEC, run +0xF0,
+ * dodge +0xF4, sight +0x100, attack +0xF8, listed in the order the module
+ * stores them rather than the order id's source assigns them — with
+ * `melee` (+0xFC) explicitly zeroed because a soldier has none; sets `mass = 100`
+ * (entity+0x4E) and the animation speed scale to 12 (entity+0x13B);
+ * packs `solid = SOLID_BBOX` and
+ * `movetype = MOVETYPE_STEP` into entity+0x20; links the entity twice through
+ * import +0x1C; calls its own stand callback; calls walkmonster_start
+ * (import +0xFC); and only then writes the variant's `skinnum` — +0x1754,
+ * +0x1860 or +0x1960, one per arm — followed by the tail all three arms share,
+ * `health` at module+0x1968 and `gib_health = -30` at +0x1974.
+ *
+ * `soldier_spawn` at the bottom of this file is everything in that list the
+ * framework does not already do, and it exists because `q2_creature_spawn`
+ * CALLS `impl->spawn` now. It did not when this file was written, and the
+ * sentence that used to stand here — "so this file installs no `spawn` hook" —
+ * is withdrawn. The callbacks, the speed scale and the two links stay the
+ * framework's; mass, solid, movetype, skinnum, health and the stand call are
+ * the module's own stores and are made there.
  *
  * ---------------------------------------------------------------------------
  * The three soldiers are one creature with three skins
@@ -30,7 +53,98 @@
  *     skinnum 2..3   shotgun      class 18, health 30   (shotgun guard)
  *     skinnum 4+     machinegun   class 20, health 40   (machinegun guard)
  *
- * Those are PC Quake II's own figures, creature for creature.
+ * Those are PC Quake II's own figures, creature for creature. A row the module
+ * does not know is not a fourth variant: module+0x1654 falls through to
+ * `printf("Unknown soldier type\r\n")` at module+0x2B4 and installs NOTHING —
+ * no callbacks, no health. See `soldier_skin` for what this port does instead.
+ *
+ * ---------------------------------------------------------------------------
+ * THE DODGE IS EMPTY, and two whole animations fall off the disc with it
+ * ---------------------------------------------------------------------------
+ * The spawn function does install a dodge — module+0x22F0 into entity+0xF4 at
+ * module+0x16C0 — and module+0x22F0 is two instructions, `jr ra` and a
+ * delay-slot nop. So this is not a gap in the port: the console's Soldier
+ * cannot dodge, because its module ships a handler that returns.
+ *
+ * That one cut explains everything else the census flags as unreachable. id's
+ * `soldier_dodge` is the only thing that installs `soldier_move_duck` and
+ * `soldier_move_attack3`, so on this disc:
+ *
+ *   Duck 45-49 (module+0x2F68) — a real mmove with real frames and
+ *   `soldier_run` as its endfunc, which nothing installs. Its thinks 12, 19
+ *   and 13 are duck_down / duck_hold / duck_up.
+ *
+ *   Attack3 30-38 (module+0x2EE8) — likewise a real mmove, and part of the
+ *   answer to the census's "module names 6 ranges no decoded move claims":
+ *   THREE of those six lie inside it, namely 30-31 (labelled "Death6"),
+ *   32-35 "Fire 3 Aim" and 36-38 "Fire 3 Shoot". The other three — 0-0 "Run",
+ *   12-14 "Fire 1 Done" and 215-224 "Fire 2 Done" — are not Attack3's and are
+ *   still unexplained. Nine frames of ai_charge 0 with thinks 14, 15, 13 at
+ *   frames 32, 35 and 36, endfunc `soldier_run` — id's `soldier_move_attack3`
+ *   frame for frame. Read out of the record itself: module+0x2EE8 is
+ *   {30, 38, frames module+0x2ECC, endfunc module+0x1ADC} and the 27 bytes at
+ *   module+0x2ECC are nine {ai 4, dist 0, think} triples with 14, 15 and 13 in
+ *   slots 2, 5 and 6. The model still carries "Fire 3 Aim" and
+ *   "Fire 3 Shoot" for it; nothing plays them.
+ *
+ * All five of those think functions are transcribed below anyway, and
+ * registered in the method table, because the module registers them: it builds
+ * 23 methods at module+0x32E8 and hands the whole table to all three class
+ * bytes. A table with holes where the module has entries would say the port
+ * failed to read them.
+ *
+ * ---------------------------------------------------------------------------
+ * Sounds — thirteen handles, and the module names every one
+ * ---------------------------------------------------------------------------
+ * The module carries two tables sharing one index: thirteen resolved handles
+ * at `module+0x32A0` on a 4-byte stride, and thirteen 12-byte NAME fields at
+ * `module+0x1D0`. The handles are zero on disc because the engine fills them
+ * at load; the names are on the disc, and each registration call was followed
+ * from the bytes it packs to the slot it stores:
+ *
+ *     +0x32A0  sol_idle1     +0x32B8  sol_deth1    +0x32C8  msc_udeath
+ *     +0x32A4  sol_sght1     +0x32BC  sol_deth2    +0x32CC  wep_machgf1b
+ *     +0x32A8  sol_sght1     +0x32C0  sol_deth3    +0x32D0  wep_shotgf1b
+ *     +0x32AC  sol_pain1     +0x32C4  wep_shotgr1b / wep_sshotr1b
+ *     +0x32B0  sol_pain2
+ *     +0x32B4  sol_pain3
+ *
+ * +0x32A8 really is `sol_sght1` a second time: the calls at module+0x690 and
+ * module+0x6F8 pack the same twelve bytes of module+0x1DC, the second one out
+ * of registers the first spilled to the stack. id has `sound_sight1` =
+ * solsght1 and `sound_sight2` = solsrch1, and this disc ships no search sound,
+ * so the second slot gets the first's name.
+ *
+ * AND THE HANDLES FALL BACK ON EACH OTHER. module+0xE50..+0xF28 runs the same
+ * shape twice, once over the pain trio and once over the death trio:
+ *
+ *     h = pain2 ? pain2 : (pain1 ? pain1 : pain3);
+ *     if (!pain1) pain1 = h;  if (!pain2) pain2 = h;  if (!pain3) pain3 = h;
+ *
+ * import +0x24 returns 0 for a name the map's bank does not carry, so a map
+ * shipping only one of the three plays that one for all three. module+0xD9C is
+ * the same idea in one step: register `wep_shotgr1b`, and only if that comes
+ * back zero register `wep_sshotr1b` into the same slot.
+ *
+ * WHAT THE MODULE ACTUALLY PLAYS is four of the thirteen, all unconditional —
+ * the PSX dropped id's skinnum-selected pain and death voices:
+ *
+ *     module+0x1A44  think 2   +0x32A0  sol_idle1
+ *     module+0x1A78  think 3   +0x32C4  wep_shotgr1b   (the cock)
+ *     module+0x2250  sight     +0x32A4  sol_sght1
+ *     module+0x1078  pain      +0x32B4  sol_pain3
+ *     module+0x23D0  die       +0x32C0  sol_deth3
+ *
+ * plus +0x32D0 and +0x32CC inside `soldier_fire`. `msc_udeath` is registered
+ * and NO instruction loads it, so a Soldier's gib is silent as far as its own
+ * module is concerned; the sound belongs to whatever the engine runs on the
+ * corpse (import +0x11C).
+ *
+ * THE INDEX BELOW IS THE PORT'S, NOT THE MODULE'S. `q2_cre_soldier_sound_name`
+ * is called from `client/main.c` with a literal 8 and 9 for the two fire
+ * sounds, so slots 0..10 are frozen where they were and the two names that
+ * were missing are appended at 11 and 12. The module's own slot is written
+ * beside every entry.
  *
  * ---------------------------------------------------------------------------
  * Frame numbers are the animation's identity
@@ -46,22 +160,24 @@
 /* ------------------------------------------------------------------------- */
 /* The move set, by first frame                                               */
 /* ------------------------------------------------------------------------- */
-#define SOL_ATTACK1     0     /*   0..11   attak1  */
-#define SOL_ATTACK2    12     /*  12..29   attak2  */
-#define SOL_ATTACK4    39     /*  39..44   attak4  */
-#define SOL_PAIN1      50     /*  50..54           */
-#define SOL_PAIN2      55     /*  55..61           */
-#define SOL_PAIN3      62     /*  62..79           */
-#define SOL_PAIN4      80     /*  80..96           */
-#define SOL_START_RUN  97     /*  97..98           */
-#define SOL_RUN        99     /*  99..104          */
-#define SOL_ATTACK6   109     /* 109..122  runs    */
-#define SOL_STAND1    146     /* 146..175          */
-#define SOL_STAND3    176     /* 176..214          */
-#define SOL_WALK1     215     /* 215..247          */
-#define SOL_WALK2     256     /* 256..265          */
-#define SOL_DEATH1    272     /* 272..307          */
-#define SOL_DEATH2    308     /* 308..342          */
+#define SOL_ATTACK1     0     /*   0..11   attak1   module+0x2E74 */
+#define SOL_ATTACK2    12     /*  12..29   attak2   module+0x2EBC */
+#define SOL_ATTACK3    30     /*  30..38   attak3   module+0x2EE8 — unreachable */
+#define SOL_ATTACK4    39     /*  39..44   attak4   module+0x2F0C */
+#define SOL_DUCK       45     /*  45..49   duck     module+0x2F68 — unreachable */
+#define SOL_PAIN1      50     /*  50..54           module+0x2D8C */
+#define SOL_PAIN2      55     /*  55..61           module+0x2DB4 */
+#define SOL_PAIN3      62     /*  62..79           module+0x2DFC */
+#define SOL_PAIN4      80     /*  80..96           module+0x2E40 */
+#define SOL_START_RUN  97     /*  97..98           module+0x2D48 */
+#define SOL_RUN        99     /*  99..104          module+0x2D6C */
+#define SOL_ATTACK6   109     /* 109..122  runs    module+0x2F48 */
+#define SOL_STAND1    146     /* 146..175          module+0x2C04 */
+#define SOL_STAND3    176     /* 176..214          module+0x2C8C */
+#define SOL_WALK1     215     /* 215..247          module+0x2D00 */
+#define SOL_WALK2     256     /* 256..265          module+0x2D30 */
+#define SOL_DEATH1    272     /* 272..307          module+0x2FE4 */
+#define SOL_DEATH2    308     /* 308..342          module+0x3060 */
 /*
  * The module's four death moves are Death1, Death2, Death5 and Death6 — NOT
  * 1/2/4/6. Death3 (343..387) and Death4 (388..440) exist in the table and no
@@ -69,58 +185,56 @@
  * on the third was not, because the move-name reader was pairing every name
  * with the next record's frames (creature.c).
  */
-#define SOL_DEATH5    441     /* 441..464          */
-#define SOL_DEATH6    465     /* 465..474          */
+#define SOL_DEATH5    441     /* 441..464          module+0x3200 */
+#define SOL_DEATH6    465     /* 465..474          module+0x3230 */
 
 /* Frames a think function jumps to by name. */
 #define FRAME_attak102     1
 #define FRAME_attak110     9
 #define FRAME_attak204    15
 #define FRAME_attak216    27
+#define FRAME_attak303    32
 #define FRAME_runs03      111
 #define FRAME_walk101     215
 
 /* ------------------------------------------------------------------------- */
+/* Sounds                                                                     */
+/* ------------------------------------------------------------------------- */
 /*
- * Sounds — and the module names them itself.
- *
- * This used to be five ids numbered 0..4 with addresses recorded for the first
- * three and the last two simply following on. Two of them were wrong, and the
- * module says so: it carries **two parallel tables**, eleven resolved handles
- * at `module+0x32A0` on a 4-byte stride and eleven 12-byte NAME fields at
- * `module+0x1D0`, sharing one index. The handles are zero on disc because the
- * engine fills them at load; the names are on the disc and read straight out:
- *
- *     0  sol_idle1     4  sol_pain3     8  wep_machgf1b
- *     1  sol_sght1     5  sol_deth1     9  wep_shotgf1b
- *     2  sol_pain1     6  sol_deth2    10  msc_udeath
- *     3  sol_pain2     7  sol_deth3
- *
- * That confirms the three ids the enum already had — `SOL_SND_COCK` at
- * `+0x32C4` is index 9, `wep_shotgf1b`, which is a shotgun guard's own fire
- * sound — and corrects the two it had guessed: pain is index 2 and death is
- * index 5, not 3 and 4, which were `sol_pain2` and `sol_pain3`.
- *
- * `q2_cre_soldier_sound_name` hands the host the name so it can be matched in
- * the map's bank, where the same eleven exist.
+ * Port index -> module handle slot. The header above has the whole thirteen
+ * and how each was read; these six are the ones code below asks for.
  */
 typedef enum sol_sound {
-    SOL_SND_IDLE  = 0,      /* module+0x32A0  sol_idle1    */
-    SOL_SND_SIGHT = 1,      /* module+0x32A4  sol_sght1    */
-    SOL_SND_PAIN  = 2,      /* module+0x32A8  sol_pain1    */
-    SOL_SND_DEATH = 5,      /* module+0x32B4  sol_deth1    */
-    SOL_SND_COCK  = 9,      /* module+0x32C4  wep_shotgf1b */
-    /* The eleventh handle, and the only thing a Soldier ever uses it for is
-     * being blown apart -- see the gib arm in soldier_die. */
-    SOL_SND_UDEATH = 10,    /* module+0x32C8  msc_udeath   */
-    SOL_SND_COUNT = 11
+    SOL_SND_IDLE   = 0,     /* +0x32A0  sol_idle1     think 2, module+0x1A44 */
+    SOL_SND_SIGHT  = 1,     /* +0x32A4  sol_sght1     sight,   module+0x2250 */
+    SOL_SND_PAIN   = 4,     /* +0x32B4  sol_pain3     pain,    module+0x1078 */
+    SOL_SND_DEATH  = 7,     /* +0x32C0  sol_deth3     die,     module+0x23D0 */
+    /* Registered at module+0xCF8 and loaded by nothing — see the header. Kept
+     * so the name is still reachable for the bank, not because this plays it. */
+    SOL_SND_UDEATH = 10,    /* +0x32C8  msc_udeath                           */
+    SOL_SND_COCK   = 11,    /* +0x32C4  wep_shotgr1b  think 3, module+0x1A78 */
+    SOL_SND_COUNT  = 13
 } sol_sound_id;
 
-/* The eleven names, in the module's own order. */
+/*
+ * The thirteen names. Indices 0..10 are frozen by `client/main.c`, which asks
+ * for 8 and 9 by literal; 11 and 12 are the two the module registers into
+ * +0x32C4 and that this list used to be missing entirely.
+ */
 static const char *const k_sol_sound_names[SOL_SND_COUNT] = {
-    "sol_idle1", "sol_sght1", "sol_pain1", "sol_pain2", "sol_pain3",
-    "sol_deth1", "sol_deth2", "sol_deth3",
-    "wep_machgf1b", "wep_shotgf1b", "msc_udeath"
+    /*  0  +0x32A0 */ "sol_idle1",
+    /*  1  +0x32A4 */ "sol_sght1",
+    /*  2  +0x32AC */ "sol_pain1",
+    /*  3  +0x32B0 */ "sol_pain2",
+    /*  4  +0x32B4 */ "sol_pain3",
+    /*  5  +0x32B8 */ "sol_deth1",
+    /*  6  +0x32BC */ "sol_deth2",
+    /*  7  +0x32C0 */ "sol_deth3",
+    /*  8  +0x32CC */ "wep_machgf1b",
+    /*  9  +0x32D0 */ "wep_shotgf1b",
+    /* 10  +0x32C8 */ "msc_udeath",
+    /* 11  +0x32C4 */ "wep_shotgr1b",
+    /* 12  +0x32C4 */ "wep_sshotr1b"   /* only when the bank has no shotgr1b */
 };
 
 const char *q2_cre_soldier_sound_name(int which)
@@ -168,11 +282,21 @@ static s32 sol_rand(void)
     return (s32)(rand() & 0x7FFF);
 }
 
-/* The module's literal thresholds, kept as the integers they are. */
-#define SOL_R_0_8   26214       /* `random() < 0.8`  at module+0x19D8 */
-#define SOL_R_0_8b  26215       /* `random() > 0.8`  at module+0x1A34 */
-#define SOL_R_0_1    3278       /* `random() > 0.1`  at module+0x1ABC */
-#define SOL_R_0_5   16383
+/*
+ * The module's literal thresholds, kept as the integers they are.
+ *
+ * The compiler emits `slti rX, rY, K` for both `random() < f` and
+ * `random() > f`, so the two differ by one and BOTH are here rather than one
+ * standing in for the other. The pairs that appear: 26214/26215 for 0.8, and
+ * 16384/16385 for 0.5. This used to carry 16383 for every 0.5 test, which is
+ * off by one against the module in five places.
+ */
+#define SOL_R_0_8   26214       /* `random() < 0.8`  module+0x19D8 */
+#define SOL_R_0_8b  26215       /* `random() > 0.8`  module+0x1A34 */
+#define SOL_R_0_1    3278       /* `random() > 0.1`  module+0x1ABC */
+#define SOL_R_0_5   16384       /* `random() < 0.5`  six sites: module+0x1BD8,
+                                 * +0x1C94, +0x1D6C, +0x1E28, +0x219C, +0x2200 */
+#define SOL_R_0_5b  16385       /* `random() > 0.5`  module+0x22C8 */
 
 /* ------------------------------------------------------------------------- */
 /* Skill, which several think functions gate on                               */
@@ -190,6 +314,24 @@ s32  q2_cre_skill(void)          { return g_skill; }
 /* Shared with cre_actions.c, the same way the sound and melee hooks are: a
  * decoded creature reaches the engine's spawners through the same one callback
  * a transcribed one does. */
+/*
+ * AND THIS IS THE OLD ONE-INT HOOK, ON PURPOSE.
+ *
+ * `crebind.h` now carries `q2_cre_shot`, which names the damage, the speed,
+ * the kick, the spread and the pellet count, and every other transcribed
+ * creature should use it. The Soldier does not, because it is the one creature
+ * whose shot is already delivered: `client/main.c` reads the packed
+ * `table * 8 + flash` this sends and holds the three muzzle-flash tables that
+ * module+0x1150..+0x1188 selects between, and that path works today. Moving it
+ * would mean editing the client, which this file does not own.
+ *
+ * A DEPARTURE, then, and the only one this pass leaves standing. It is named
+ * rather than fixed because fixing it is a two-file change and this file owns
+ * one of them: the Soldier's damage, spread and pellet count were read out of
+ * the three arms of module+0x1120 and they live in `client_cre_fire`
+ * (client/main.c), which is the consumer of this hook and the one place they
+ * would have to move from.
+ */
 void (*q2_cre_fire_fn)(q2_monster *m, int flash_index, void *user);
 void  *q2_cre_fire_user;
 
@@ -205,10 +347,31 @@ void q2_cre_set_fire_hook(void (*fn)(q2_monster *, int, void *), void *user)
 /*
  * soldier_fire — module+0x1120.
  *
- * Three muzzle-flash tables, chosen by skinnum, indexed by the caller's flash
- * number. The tables are at module+0x3240, +0x3260 and +0x3280 and are what
- * decide whether the shot is a blaster bolt, a shotgun spread or a machinegun
- * burst; the flash index they yield is passed straight through.
+ * Three muzzle-flash tables, chosen by skinnum at module+0x1150..+0x1188:
+ * `< 2` takes module+0x3240, `< 4` takes +0x3260, otherwise +0x3280. The
+ * caller's flash number indexes the chosen table by word (module+0x118C), and
+ * the entry is what decides whether the shot is a blaster bolt, a shotgun
+ * spread or a machinegun burst.
+ *
+ * The weapon itself is picked a second time at module+0x1430, on the same two
+ * thresholds: `skinnum < 2` calls import +0x80 (blaster, damage 5 in a3 and
+ * speed 600 at sp+16, module+0x144C/+0x1450), `< 4` calls import +0x88
+ * (shotgun, damage 2, kick 1, hspread 1000, vspread 500, 12 pellets,
+ * module+0x14B0..+0x14D0) and the rest call import +0x84 (bullet, damage 2,
+ * kick 4, hspread 300, vspread 500, module+0x1574..+0x158C). 300 and 500 are
+ * id's DEFAULT_BULLET_HSPREAD and DEFAULT_BULLET_VSPREAD and 12 is its
+ * DEFAULT_SHOTGUN_COUNT, unchanged. Those figures are not repeated here — they
+ * live in `client_cre_fire`, which is this hook's consumer; see the departure
+ * named above the hook.
+ *
+ * A GAP, AND IT IS THIS FUNCTION'S: the machinegun arm also writes
+ * `pausetime = level.time + 3 + rand() % 8` when `AI_HOLD_FRAME` is clear —
+ * module+0x14E8 tests entity+0xDC against 0x80 and module+0x1540 stores to
+ * entity+0x10C. The port drops it, because `soldier_fire` here is a pure
+ * hand-off to the host and the write is monster state the host never sees.
+ * Not transcribed rather than not found: `ai_stand` reads `pausetime`, so
+ * writing it would change how long a machinegun guard holds its ground, and
+ * that is a behaviour change this pass has no capture to check against.
  */
 /* Which of the three flash tables this soldier's skin selects. */
 static u8 soldier_skin(const q2_monster *m);
@@ -238,7 +401,9 @@ static void soldier_idle(q2_monster *self)
         sol_play(self, SOL_SND_IDLE);
 }
 
-/* [3] soldier_cock — module+0x1A68 */
+/* [3] soldier_cock — module+0x1A68. Four instructions around one play of
+ * module+0x32C4, which is `wep_shotgr1b` — the shotgun RELOAD, not its fire
+ * sound. It is on frame 7 of attak1 and frame 24 of attak2. */
 static void soldier_cock(q2_monster *self)
 {
     sol_play(self, SOL_SND_COCK);
@@ -258,7 +423,12 @@ static void soldier_walk1_random(q2_monster *self)
         self->nextframe = FRAME_walk101;
 }
 
-/* [6] [9] [16] [17] [20] [21] — the six firing frames, module+0x1B3C onward */
+/* [6] [9] [16] [17] [20] [21] — six of the seven firing frames, each a
+ * three-line wrapper around module+0x1120 with the flash number in a1:
+ * +0x1B3C=0, +0x1CD0=1, +0x1F9C=3, +0x1FBC=7, +0x20B0=5, +0x20D0=6. The
+ * seventh, [14] at +0x1EF0 with a1=2, is NOT a bare wrapper — it inlines
+ * soldier_duck_down ahead of the call, and is written out separately below.
+ * Flash 4 has no wrapper and no frame that would want it. */
 static void soldier_fire1(q2_monster *s) { soldier_fire(s, 0); }
 static void soldier_fire2(q2_monster *s) { soldier_fire(s, 1); }
 static void soldier_fire4(q2_monster *s) { soldier_fire(s, 3); }
@@ -270,13 +440,14 @@ static void soldier_fire8(q2_monster *s) { soldier_fire(s, 7); }
  * The variant, and it comes from the CLASS TABLE ROW.
  *
  * The module registers all three class bytes — 87, 89, 88 — against ONE shared
- * method table (0x801003C8, 0x801004F4, 0x80100510) and then dispatches inside
- * its spawn function on the class-table id instead: 0x80101604 reads
- * `lh v1, 0xD2(entity+0x24)` and branches on 19 / 18 / 20, writing
+ * method table (module+0x3C8, +0x4F4, +0x510 hand module+0x32E8 to each) and
+ * then dispatches inside its spawn function on the class-table id instead:
+ * module+0x1604 reads `lh v1, 0xD2(entity+0x24)` and branches on 19 / 18 / 20,
+ * writing
  *
- *     id 19 -> skinnum 0, health 20    (0x80102694, 0x80102698)   blaster
- *     id 18 -> skinnum 2, health 30    (0x801027C4, 0x801027CC)   shotgun
- *     id 20 -> skinnum 4, health 40    (0x801028F8, 0x801028FC)   machinegun
+ *     id 19 -> skinnum 0, health 20    (module+0x1860, +0x1858)   blaster
+ *     id 18 -> skinnum 2, health 30    (module+0x1754, +0x175C)   shotgun
+ *     id 20 -> skinnum 4, health 40    (module+0x1960, +0x1964)   machinegun
  *
  * and `q2psx-inspect classes` confirms rows 18/19/20 carry health 30/20/40.
  *
@@ -286,8 +457,16 @@ static void soldier_fire8(q2_monster *s) { soldier_fire(s, 7); }
  * guard fired a blaster, the 20-hp light guard fired a machinegun and the 40-hp
  * machinegun guard fired a shotgun. It also mis-steered soldier_attack and both
  * refire pairs, which gate on `skinnum < 4` and `skinnum < 2`.
+ *
+ * SPLIT IN TWO now that `q2_monster.skinnum` is a real field and `soldier_spawn`
+ * runs: `soldier_base_skin` is the module's own dispatch and is what the spawn
+ * hook stores into entity+0x3A, and `soldier_skin` is that base with the pain
+ * handler's low bit on top. Both read the class row, so the stored field and
+ * this function cannot come apart — and this one still answers for a creature
+ * that reached the AI without the hook, which a bare `m->skinnum` read would
+ * silently call a blaster guard.
  */
-static u8 soldier_skin(const q2_monster *m)
+static u8 soldier_base_skin(const q2_monster *m)
 {
     u8 base;
 
@@ -296,14 +475,31 @@ static u8 soldier_skin(const q2_monster *m)
     case 18: base = 2; break;   /* shotgun    */
     case 20: base = 4; break;   /* machinegun */
     default:
-        /* A Soldier placed from a row this build does not know: the module's
-         * own fall-through is the last arm. */
+        /*
+         * NOT the module's own fall-through, and this comment used to claim it
+         * was. module+0x1640 and module+0x1654 answer an unknown row by
+         * printing "Unknown soldier type" (module+0x2B4) through import +0x18 and returning with
+         * nothing installed — no callbacks, no skinnum, no health. That is not
+         * reproducible here: this function is only ever reached from a creature
+         * the binder already spawned, so by the time it runs the refusal has
+         * been missed. The machinegun arm is chosen because it is the one that
+         * needs no ammunition-specific handling, and it is a CHOICE.
+         */
         base = 4;
         break;
     }
 
-    /* And the wounded half of the pair once the pain handler has set the low
-     * bit — see q2_monster.hurt. */
+    return base;
+}
+
+static u8 soldier_skin(const q2_monster *m)
+{
+    /* The wounded half of the pair once the pain handler has set the low bit —
+     * see q2_monster.hurt. `soldier_pain` and `soldier_die` now set the same
+     * bit in `m->skinnum` itself, which is the store the module makes; this
+     * stays the derived form so the two agree by construction. */
+    u8 base = soldier_base_skin(m);
+
     return m->hurt ? (u8)(base | 1u) : base;
 }
 
@@ -314,6 +510,19 @@ static u8 soldier_skin(const q2_monster *m)
  * The two halves of one rule, split by weapon: a blaster soldier re-aims and
  * fires again, a shotgun or machinegun soldier only does so at the highest
  * skill or in melee range. `skinnum < 2` is the blaster.
+ *
+ * The module's short-circuit is the same as C's: module+0x1BDC jumps straight
+ * to the frame store when the skill-3 roll hits, so `range` is never called on
+ * that path.
+ *
+ * `!self->enemy` IS A PORT ADDITION, in these two, in the attack-2 pair, in
+ * `soldier_attack6_refire` and in `soldier_sight`. The module does not test
+ * it: module+0x1B84 loads entity+0xBC and module+0x1B8C dereferences it for
+ * the object pointer with nothing in between, and id's `soldier_attack1_refire1`
+ * is the same — `if (self->enemy->health <= 0) return;` with no guard. Both
+ * rely on the caller only reaching these frames from an attack move, which is
+ * only entered with an enemy. Kept because a NULL here faults the host rather
+ * than reading a stale entity, and named rather than left to look transcribed.
  */
 static void soldier_attack1_refire1(q2_monster *self)
 {
@@ -373,6 +582,117 @@ static void soldier_attack2_refire2(q2_monster *self)
         self->nextframe = FRAME_attak204;
 }
 
+/* ------------------------------------------------------------------------- */
+/* Ducking — the three handlers the empty dodge orphaned                      */
+/* ------------------------------------------------------------------------- */
+/*
+ * entity+0x1C is packed, and its top two bits are `takedamage`.
+ *
+ * duck_down writes 1 there and duck_up writes 2, which is id's DAMAGE_YES and
+ * DAMAGE_AIM in that exact order — the pair is what identifies the field, and
+ * `cre_berserk.c` reads the same two bits out of its own die handler.
+ *
+ * BOTH ARE WRITTEN NOW. This note used to end "so it is NOT written here",
+ * because nothing on the reconstructed side had a `takedamage`; `monster.h`
+ * has one (entity+0x1C bits 30..31, the enum values id's) and the two handlers
+ * below store into it. `soldier_die` writes the third store, DAMAGE_YES on the
+ * corpse.
+ *
+ * id's duck_down and duck_up also move `maxs[2]` by 32 and re-link the entity.
+ * The module does neither — a ducking Soldier keeps its full box — and that is
+ * a real console-versus-PC difference rather than an omission here.
+ */
+
+/*
+ * [12] soldier_duck_down — module+0x1E64.
+ *
+ *     if (aiflags & AI_DUCKED) return;          ; +0x1E70, bit 0x800
+ *     aiflags |= AI_DUCKED;                     ; +0x1E88
+ *     takedamage = DAMAGE_YES;                  ; +0x1E98, entity+0x1C
+ *     pausetime = level.time + 10;              ; +0x1EB4, entity+0x10C
+ *
+ * The 10 is one second on the 10 Hz AI clock, which is id's
+ * `pausetime = level.time + 1` unchanged. The early return on an already-set
+ * flag is id's too, and it is what stops a re-entered duck resetting the timer.
+ */
+static void soldier_duck_down(q2_monster *self)
+{
+    if (self->aiflags & Q2_AI_DUCKED)
+        return;
+
+    self->aiflags |= Q2_AI_DUCKED;
+    self->takedamage = Q2_DAMAGE_YES;
+    self->pausetime = q2_level_state.time + Q2_AI_SECONDS(1);
+}
+
+/*
+ * [13] soldier_duck_up — module+0x1EC0, and it is straight-line: no guard.
+ *
+ *     takedamage = DAMAGE_AIM;                  ; +0x1EE0, entity+0x1C
+ *     aiflags &= ~AI_DUCKED;                    ; +0x1EE4, mask -2049
+ *
+ * Also the seventh frame of the unreachable Attack3, which is why id's
+ * `soldier_move_attack3` ends a burst standing up.
+ */
+static void soldier_duck_up(q2_monster *self)
+{
+    self->takedamage = Q2_DAMAGE_AIM;
+    self->aiflags &= ~(u32)Q2_AI_DUCKED;
+}
+
+/*
+ * [19] soldier_duck_hold — module+0x2068. id's `monster_duck_hold` exactly:
+ *
+ *     if (level.time >= pausetime) aiflags &= ~AI_HOLD_FRAME;   ; +0x2090
+ *     else                         aiflags |=  AI_HOLD_FRAME;   ; +0x20A4
+ *
+ * AI_HOLD_FRAME is what freezes the animation, so the crouch is held for the
+ * second `soldier_duck_down` bought and then released.
+ */
+static void soldier_duck_hold(q2_monster *self)
+{
+    if (q2_level_state.time >= self->pausetime)
+        self->aiflags &= ~(u32)Q2_AI_HOLD_FRAME;
+    else
+        self->aiflags |= Q2_AI_HOLD_FRAME;
+}
+
+/*
+ * [14] soldier_fire3 — module+0x1EF0.
+ *
+ * id's two-liner: `soldier_duck_down(self); soldier_fire(self, 2);`. The
+ * module INLINES the duck — module+0x1EFC..+0x1F4C is module+0x1E68..+0x1EB4
+ * instruction for instruction, same loads, same 0x800 test, same
+ * 0x3FFFFFFF/0x40000000 takedamage rewrite, same level.time + 10 — and then
+ * falls into `jal 0x80101120` with a1 = 2. NOT byte-identical, and this
+ * comment used to say it was: the guard branch at +0x1F08 targets +0x1F54
+ * where +0x1E74 targets +0x1EB8, and the delay slots differ (+0x1F0C is
+ * `addu a0, a1, zero`, +0x1E78 is `lui a0, 0x3FFF`). Written as the call it
+ * was in the source, since the two are the same function.
+ *
+ * Frame 32 of Attack3, which nothing installs.
+ */
+static void soldier_fire3(q2_monster *self)
+{
+    soldier_duck_down(self);
+    soldier_fire(self, 2);
+}
+
+/*
+ * [15] soldier_attack3_refire — module+0x1F6C.
+ *
+ *     if (level.time + 4 < pausetime) nextframe = 32;
+ *
+ * id's `if ((level.time + 0.4) < self->monsterinfo.pausetime) self->s.frame =
+ * FRAME_attak303;` — 0.4 s is 4 ticks, and attak301 is frame 30 so attak303 is
+ * 32. Frame 35 of Attack3, which nothing installs.
+ */
+static void soldier_attack3_refire(q2_monster *self)
+{
+    if (q2_level_state.time + 4 < self->pausetime)
+        self->nextframe = FRAME_attak303;
+}
+
 /*
  * [18] soldier_attack6_refire — module+0x1FDC.
  *
@@ -387,6 +707,36 @@ static void soldier_attack6_refire(q2_monster *self)
         return;
     if (g_skill == 3)
         self->nextframe = FRAME_runs03;
+}
+
+/*
+ * [22] soldier_dead — module+0x20F0, the end callback on all four death moves.
+ *
+ *     nextthink = 0;                    ; +0x2100, entity+0x90
+ *     movetype  = MOVETYPE_TOSS;        ; +0x2110, entity+0x20 bits 18..21 = 7
+ *     svflags  |= SVF_DEADMONSTER;      ; +0x211C, entity+0x40 |= 2
+ *
+ * Three of id's six: it also shrinks the box to (-16,-16,-24)..(16,16,-8) and
+ * re-links. MOVETYPE_TOSS is 7 in id's enum and SVF_DEADMONSTER is 2, and both
+ * land exactly, which is what identifies the two packed fields at entity+0x20.
+ *
+ * ALL THREE STORES LAND NOW. This used to write the svflag as a bare 2 because
+ * monster.h named only Q2_SVF_MONSTER, and to leave entity+0x20 bits 18..21
+ * unwritten because the port had no `movetype`. It has both — Q2_SVF_DEADMONSTER
+ * and Q2_MOVETYPE_TOSS — and the shrink and the re-link are still the two of
+ * id's six this module does not do. It does not touch `deadflag`: `soldier_die`
+ * raised that before installing the move.
+ *
+ * This slot used to be NULL, which mattered more than it looks: the binder
+ * resolves a move's endfunc by finding its address among the callbacks and the
+ * methods, so with method 22 empty every death move's endfunc resolved to
+ * nothing and the corpse re-ran its own death animation for ever.
+ */
+static void soldier_dead(q2_monster *self)
+{
+    self->next_think = 0;
+    self->movetype   = Q2_MOVETYPE_TOSS;
+    self->svflags   |= Q2_SVF_DEADMONSTER;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -421,6 +771,10 @@ static void soldier_walk(q2_monster *self)
  * was walking breaks into the run only after a two-frame start; anything else
  * plays that start first. That is what stops it snapping from a walk cycle
  * straight into a sprint.
+ *
+ * It is also the endfunc on almost every move the Soldier has — attack1,
+ * attack2, attack3, attack4, attack6, all four pains and the duck — so it is
+ * where the creature comes back from anything that is not dying.
  */
 static void soldier_run(q2_monster *self)
 {
@@ -453,10 +807,37 @@ static void soldier_attack(q2_monster *self)
 }
 
 /*
+ * soldier_dodge — module+0x22F0, installed into entity+0xF4 by the spawn
+ * function at module+0x16C0, module+0x17C8 and module+0x18CC (once per
+ * variant arm).
+ *
+ * TWO INSTRUCTIONS: `jr ra` and a delay-slot nop. Not a stub this port left
+ * behind — the module's own dodge does nothing, and every consequence follows
+ * from that: the Duck move (45-49) and the Attack3 move (30-38) are both live
+ * mmove records that nothing on the disc installs, and thinks 12, 13, 14, 15
+ * and 19 are registered handlers that never run. id's `soldier_dodge` is the
+ * only caller of either move.
+ *
+ * Written out rather than left NULL so the table below says "the disc has a
+ * handler here and it does nothing" instead of "not transcribed" — the same
+ * distinction `cre_berserk.c` draws for `berserk_strike`.
+ *
+ * `crebind.c` already installs slot 5 into `q2_monster.dodge` and already
+ * records that nothing calls it, so there is no plumbing left owing.
+ */
+static void soldier_dodge(q2_monster *self, q2_monster *other, s32 eta)
+{
+    (void)self;
+    (void)other;
+    (void)eta;
+}
+
+/*
  * soldier_sight — module+0x2240.
  *
  * Plays the sight sound, and above the lowest skill a soldier that spots you
- * from a distance opens with the running shot rather than closing first.
+ * from a distance opens with the running shot rather than closing first. The
+ * module reads only a0; `other` arrives in a1 and is never touched.
  */
 static void soldier_sight(q2_monster *self, q2_monster *other)
 {
@@ -466,61 +847,95 @@ static void soldier_sight(q2_monster *self, q2_monster *other)
 
     if (g_skill > 0 && self->enemy
         && q2_range(self, self->enemy) >= Q2_RANGE_MID) {
-        if (sol_rand() > SOL_R_0_5)
+        if (sol_rand() >= SOL_R_0_5b)
             q2_cre_set_move(self, SOL_ATTACK6);
     }
 }
 
+/*
+ * The velocity that promotes a flinch to PAIN4 — module+0x1028 and again at
+ * module+0x1090, both `slti v0, v0, -1200` on entity+0x6C.
+ *
+ * id tests `self->velocity[2] > 100`. Index 1 is the vertical axis here and it
+ * points DOWN, and the AI's world scale is 12: 100 * 12 = 1200, with the sign
+ * flipped. Two independent conversions landing on one immediate is what says
+ * entity+0x6C is velocity[1] rather than something else three words in.
+ */
+#define SOL_PAIN4_VELOCITY (-1200)
+
 /* soldier_pain — module+0xFA8 */
-static void soldier_pain(q2_monster *self)
+static void soldier_pain(q2_monster *self, s16 damage)
 {
     s32 r;
+
+    /*
+     * THE DAMAGE IS PASSED NOW AND THIS HANDLER DOES NOT READ IT.
+     *
+     * `pain` is called as (self, other, kick, damage), so the amount arrives in
+     * a3 — and module+0xFA8..+0x1118 never touches a1, a2 or a3 at all: a0 is
+     * copied to s0 at module+0xFB0, every load after that is off s0 or off the
+     * import table, and a1's first appearance is the WRITE at module+0x107C
+     * setting up the sound call. Nothing in it gates on how hard the hit was.
+     *
+     * A result, not an omission. The Berserk's pain reads a3 at module+0x1264
+     * and the Tank Commander's splits three ways on it, so the argument is
+     * plainly reachable in this ABI and the tools show it where it is read; the
+     * Soldier's chooses on velocity, skill and a roll instead. id's
+     * `soldier_pain` takes `int damage` and ignores it too — the promotion to
+     * PAIN4 below is on `velocity[2] > 100`, which is the console's
+     * substitute for a damage threshold and is where a harder hit shows up.
+     */
+    (void)damage;
 
     /*
      * A CORPSE DOES NOT FLINCH, and this is the other half of the stuck death.
      *
      * The class routes damage to `die` or to `pain`, never to both, so the
-     * handler is simply never reached once a monster is dead. This port had no
-     * such guard, and with no debounce either (below) every further round that
-     * landed on a dying soldier re-entered the pain move at frame zero —
-     * interrupting the death animation partway and leaving the body frozen in
-     * whatever pose the fall had reached. A soldier killed by a burst, which is
-     * every soldier killed by a machinegun, was shot several more times on its
-     * way down.
+     * handler is simply never reached once a monster is dead — the module has
+     * no such guard because it does not need one. This port had none either,
+     * and with no debounce (below) every further round that landed on a dying
+     * soldier re-entered the pain move at frame zero, interrupting the death
+     * animation partway and leaving the body frozen in whatever pose the fall
+     * had reached. A soldier killed by a burst, which is every soldier killed
+     * by a machinegun, was shot several more times on its way down.
      *
-     * The debounce alone already stops most of it. This closes the case the
-     * debounce cannot: a hit that arrives after it has expired.
+     * A port addition, then, and named as one: the debounce alone stops most
+     * of it, and this closes the case the debounce cannot.
      */
     if (self->dead)
         return;
 
     /*
-     * BLOODIED AT HALF HEALTH, and this is `skinnum |= 1` — not a state
-     * change. The port wrote `attack_state = Q2_AS_STRAIGHT` here, which is a
-     * different field entirely: it told the AI to charge straight at its enemy
-     * every time it was hurt, and left the skin clean for the rest of the
-     * creature's life. Soldiers that should have been backing off and turning
-     * bloody instead walked at you unmarked.
+     * BLOODIED AT HALF HEALTH — module+0xFBC..+0xFF4, `skinnum |= 1` on the
+     * halfword at entity+0x3A. Not a state change: the port wrote
+     * `attack_state = Q2_AS_STRAIGHT` here, which is a different field
+     * entirely, so soldiers charged straight at you whenever they were hurt
+     * and stayed unmarked for the rest of their lives.
+     *
+     * `skinnum` is a field now, so the module's actual store is made rather
+     * than only its port-side flag: the two are set together and `soldier_skin`
+     * derives the same value, so nothing can end up half-bloodied.
      */
-    if (self->health < self->max_health / 2)
+    if (self->health < self->max_health / 2) {
         self->hurt = true;
+        self->skinnum |= 1u;
+    }
 
     /*
-     * THE DEBOUNCE, which the port did not have at all.
+     * THE DEBOUNCE — module+0x1000..+0x1070, entity+0xA8 against level.time.
      *
      * Three seconds on the class's own clock, 30 of the 10 Hz AI ticks. Every
      * hit re-entered the flinch from its first frame without it, so a soldier
      * held under automatic fire never advanced past pose one and never
-     * returned to running — it stood still being shot, which is most of "the
-     * soldier AI is broken".
+     * returned to running.
      *
      * A hit taken WHILE the debounce is running is not simply ignored: one
      * that throws the body upward hard enough promotes an ordinary flinch to
-     * PAIN4, the off-its-feet one. +Y is down here, so "upward" is a large
-     * NEGATIVE vertical velocity.
+     * PAIN4, the off-its-feet one. The three-way move test at module+0x1034 is
+     * on this arm ONLY.
      */
     if (q2_level_state.time < self->pain_debounce) {
-        if (self->velocity[1] < -1200 && self->currentmove &&
+        if (self->velocity[1] < SOL_PAIN4_VELOCITY && self->currentmove &&
             (self->currentmove->first_frame == SOL_PAIN1 ||
              self->currentmove->first_frame == SOL_PAIN2 ||
              self->currentmove->first_frame == SOL_PAIN3))
@@ -528,24 +943,45 @@ static void soldier_pain(q2_monster *self)
         return;
     }
 
-    self->pain_debounce = q2_level_state.time + 30;
+    self->pain_debounce = q2_level_state.time + Q2_AI_SECONDS(3);
 
     sol_play(self, SOL_SND_PAIN);
 
     /*
-     * NO FLINCH ON THE HARDEST SKILL. The sound still plays and the skin still
-     * turns; the animation is what is skipped, which is what makes skill 3
-     * soldiers keep firing through damage instead of being staggered out of
-     * every attack.
+     * THE SECOND VELOCITY TEST, module+0x1088, which this file was missing
+     * altogether — so a soldier launched by a rocket or a grenade played an
+     * ordinary flinch instead of being knocked off its feet, and PAIN4 was
+     * only ever reachable from the debounce arm above.
+     *
+     * Unguarded by the current move, unlike the one above: any hit hard enough
+     * takes it, whatever the soldier was doing.
+     *
+     * AND IT COMES BEFORE THE SKILL TEST — module+0x1088 then module+0x10A4 —
+     * which is ALSO id's order, not a departure from it: id's `soldier_pain`
+     * puts `if (self->velocity[2] > 100)` between the pain sound and the
+     * `if (skill->value == 3) return;` labelled "no pain anims in nightmare".
+     * So on skill 3 a Soldier still gets thrown off its feet even though
+     * nothing else can stagger it, on the PC as well as here. (This comment
+     * previously claimed the module had reordered the two against id. It has
+     * not; the claim was invented and is withdrawn.)
+     */
+    if (self->velocity[1] < SOL_PAIN4_VELOCITY) {
+        q2_cre_set_move(self, SOL_PAIN4);
+        return;
+    }
+
+    /*
+     * NO FLINCH ON THE HARDEST SKILL — module+0x10A4..+0x10BC, reading
+     * `skill->value` out of cvar[0] of the table at import +0x4C. The sound
+     * still plays and the skin still turns; the animation is what is skipped.
      */
     if (g_skill == 3)
         return;
 
     /*
-     * A THREE-WAY SPLIT, not four. PAIN4 is reachable only through the
-     * promotion above — it is the knocked-off-its-feet animation and a plain
-     * hit never selects it. Splitting four ways gave it to a quarter of all
-     * hits, so soldiers were constantly being thrown about by rifle fire.
+     * A THREE-WAY SPLIT, not four. PAIN4 is reachable only through the two
+     * promotions above — it is the knocked-off-its-feet animation and a plain
+     * hit never selects it. 10813 and 21626 are id's 0.33 and 0.66 of 32768.
      */
     r = sol_rand();
     if (r < 10813)
@@ -557,49 +993,199 @@ static void soldier_pain(q2_monster *self)
 }
 
 /* soldier_die — module+0x22F8 */
-static void soldier_die(q2_monster *self)
+static void soldier_die(q2_monster *self, s16 damage)
 {
-    s32 r;
+    /*
+     * AND THE DIE HANDLER IGNORES THE DAMAGE TOO, read the same way as in
+     * `soldier_pain`: module+0x22F8..+0x246C never touches a1, a2 or a3 — a0
+     * goes to s1 at module+0x2300 and a1's first appearance is the write at
+     * module+0x23B8. id's `soldier_die` takes `int damage` and does not use it
+     * either. Neither of this creature's two damage callbacks reads the
+     * argument the plumbing now carries, and that is the whole finding.
+     *
+     * The gib arm below is not a damage test in disguise: it compares the
+     * health that is LEFT against `gib_health`, which is the halfword at
+     * entity+0x52 and not the amount of the hit.
+     */
+    (void)damage;
 
     /*
-     * THE GIB ARM, which this had none of (0x80102310).
+     * THE GIB ARM — module+0x2310..+0x2370, and it is tested FIRST and without
+     * a dead guard, comparing the halfword at object+0x108 against the one at
+     * entity+0x52 so the boundary is inclusive. Every store in it is
+     * idempotent, so a body already dead can still be blown apart by a later
+     * explosion, which is the order the module uses.
      *
-     * Damage past `gib_health` destroys the body outright: it plays the
-     * shared `msc_udeath` — the eleventh of the module's own sound handles,
-     * and the only reason a Soldier registers a sound it otherwise never uses
-     * — and there is no death animation at all, because there is nothing left
-     * to animate. Without this arm a soldier hit by a rocket lay down and
-     * played a normal death like one shot with a pistol.
+     * What it does: deadflag = DEAD_DEAD, nextthink = 0, movetype =
+     * MOVETYPE_TOSS, svflags |= SVF_DEADMONSTER — the two packed ones land in
+     * one store at module+0x2364. That is `soldier_dead`'s body plus the
+     * deadflag, and NOTHING else — no sound, no move, no gibs. The body simply
+     * becomes a toss-corpse where it stands.
      *
-     * Tested before the `dead` guard below, so a body already dead can still
-     * be blown apart by a later explosion, which is the order the class uses.
+     * All four are written now; the first pass could only reach two of them.
+     *
+     * `self->gibbed` below has NO counterpart in the module. It is the port's
+     * own bookkeeping flag (monster.h), set here because this is the arm the
+     * module reaches past `gib_health` and the reconstructed side has nothing
+     * else that records which of the two deaths happened. A port addition, and
+     * so is `self->dead`, which is the same fact as the deadflag kept in the
+     * bool everything else reads — the two are set together and cannot drift.
+     *
+     * NO SOUND, which this file used to play. `msc_udeath` is registered into
+     * module+0x32C8 at module+0xCF8 and no instruction anywhere in the module
+     * loads it, so the udeath belongs to whatever the engine runs on a corpse
+     * (import +0x11C) and not to the Soldier. Registering it is how the name
+     * gets resident in the map's bank.
      */
     if (self->health <= self->gib_health) {
-        if (!self->gibbed) {
-            self->gibbed = true;
-            self->dead   = true;
-            sol_play(self, SOL_SND_UDEATH);
-        }
+        self->gibbed     = true;
+        self->dead       = true;
+        self->deadflag   = Q2_DEAD_DEAD;   /* +0x2350, bits 22..23 = 2 */
+        self->next_think = 0;              /* +0x2344                  */
+        self->movetype   = Q2_MOVETYPE_TOSS; /* +0x2360, bits 18..21 = 7 */
+        self->svflags   |= Q2_SVF_DEADMONSTER;
         return;
     }
 
+    /* `deadflag == DEAD_DEAD` — module+0x237C..+0x2384, the 2-bit field at
+     * entity+0x20 bits 22..23. `dead` stays the guard, because that is the one
+     * bool `q2_monster_damage_reaction` and the frame driver both read; the
+     * field is written beside it so the two say the same thing rather than
+     * one of them going stale. */
     if (self->dead)
         return;
 
-    self->dead = true;
-    /* The wounded skin, which a death sets whether or not pain ever did. */
+    self->dead     = true;
+    self->deadflag = Q2_DEAD_DEAD;      /* module+0x2398, +0x23A4 */
+
+    /* A corpse still takes damage, so it can still be blown apart by the arm
+     * above — module+0x23BC..+0x23C4 masks entity+0x1C with 0x3FFFFFFF, ORs
+     * 0x40000000 and stores it back, which is takedamage = 1 in bits 30..31.
+     * This used to be a note saying the port had no takedamage. */
+    self->takedamage = Q2_DAMAGE_YES;
+
+    /* The wounded skin, which a death sets whether or not pain ever did —
+     * module+0x23CC..+0x23D8, `skinnum |= 1` on the halfword at entity+0x3A. */
     self->hurt = true;
+    self->skinnum |= 1u;
     sol_play(self, SOL_SND_DEATH);
 
-    r = sol_rand();
-    if (r < 8192)
-        q2_cre_set_move(self, SOL_DEATH1);
-    else if (r < 16384)
-        q2_cre_set_move(self, SOL_DEATH2);
-    else if (r < 24576)
-        q2_cre_set_move(self, SOL_DEATH5);
-    else
-        q2_cre_set_move(self, SOL_DEATH6);
+    /*
+     * FOUR WAYS BY MODULO, not by quartile thresholds.
+     *
+     * module+0x2400..+0x2414 is the compiler's signed `% 4`: a bias of 3 for
+     * negatives, an arithmetic shift by 2, then subtract. rand() is 0..32767
+     * so the sign arm never runs and this is `rand() & 3`, but it is written
+     * as the modulo the module computes. Distribution is identical to the
+     * thresholds this used to carry — 32768 divides by 4 exactly — and the
+     * arithmetic is not, which is the point.
+     */
+    switch (sol_rand() % 4) {
+    case 0:  q2_cre_set_move(self, SOL_DEATH1); break;
+    case 1:  q2_cre_set_move(self, SOL_DEATH2); break;
+    case 2:  q2_cre_set_move(self, SOL_DEATH5); break;
+    default: q2_cre_set_move(self, SOL_DEATH6); break;
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* The spawn function                                                         */
+/* ------------------------------------------------------------------------- */
+/*
+ * soldier_spawn — everything module+0x1604 (export 0) does that the framework
+ * does not, and it has a caller now: `q2_creature_spawn` runs `impl->spawn`
+ * last, after the class byte, the scale and the thirteen callbacks.
+ *
+ * The module has three arms, one per class-table row, and they are IDENTICAL
+ * instruction for instruction except for the two figures at the tail —
+ * module+0x165C (row 18), +0x1760 (row 19) and +0x1864 (row 20) are the same
+ * forty stores three times over. What each arm writes:
+ *
+ *     speed_scale = 12          ; +0x1670  entity+0x13B — the framework's,
+ *                                          from the creature record's scale
+ *     mass        = 100         ; +0x1678  entity+0x4E
+ *     the eight callbacks       ; +0x1684..+0x16E0, melee zeroed at +0x16EC
+ *     movetype    = STEP        ; +0x16F4  entity+0x20 bits 18..21 = 5
+ *     solid       = BBOX        ; +0x1700  entity+0x20 bits 16..17 = 2
+ *     link, link                ; +0x1710, +0x1724  import 2 with 5 and 133
+ *     self->stand(self)         ; +0x1734  through entity+0xE0
+ *     walkmonster_start         ; +0x1744  import 58
+ *     skinnum, health           ; +0x1754/+0x175C per arm, stored at +0x1968
+ *     gib_health  = -30         ; +0x196C, +0x1974  entity+0x52
+ *
+ * AND THE TAIL IS AFTER walkmonster_start FOR A REASON. Import 58 is
+ * 0x80062240, which parks a think on entity+0x94 (0x8006241C) and `jal`s
+ * `monster_start` at 0x800619E0. That function ZEROES skinnum — `sh zero,
+ * 58(s0)` at 0x80061AFC — and takes `max_health` from whatever health the
+ * entity carries at that moment (0x80061B00). So the module writes its skinnum
+ * and its health afterwards deliberately, and `max_health` ends up the row's
+ * rather than the module's. The port's `q2_creature_spawn` stands in for
+ * `monster_start` and runs before this hook, so the same order holds.
+ *
+ * MASS, MOVETYPE AND SOLID were dropped by the first pass because the port had
+ * nowhere to put them. It has all three now (monster.h), and `mass` is written
+ * HERE rather than left to the framework: `q2_creature` decodes it per module
+ * and `q2_creature_spawn` still does not copy it onto the entity, so this is
+ * the only store that reaches the field.
+ *
+ * HEALTH is the loader's figure and the module's, and they agree row for row —
+ * the class table carries 30/20/40 and -30 for rows 18/19/20 and `creworld.c`
+ * applies them before this runs, which is the loader's own order (0x8007E68C
+ * and 0x8007E698 write health, 0x8007E6AC then calls export 0). So these
+ * stores change nothing today. They are made anyway because the module makes
+ * them, and because the order means a module that disagreed with its row would
+ * win. `max_health` (entity+0x50) is NOT among them: no arm writes it, the
+ * loader's pass is what sets it, and `soldier_pain` reads it back at
+ * module+0xFBC.
+ *
+ * THE UNKNOWN ROW writes nothing at all — module+0x1978 prints "Unknown
+ * soldier type" and returns, no callbacks, no health, no skinnum. That refusal
+ * cannot be reproduced from here for the reason `soldier_skin` gives: the
+ * binder has already spawned the creature by the time this runs. The shared
+ * stores are made for it and `health` is left as the class row gave it, which
+ * is the nearest thing to "the module declined to have an opinion".
+ */
+static void soldier_spawn(q2_monster *m)
+{
+    m->mass     = 100;
+    m->movetype = Q2_MOVETYPE_STEP;
+    m->solid    = Q2_SOLID_BBOX;
+
+    /* entity+0x3A, the base index the module's own dispatch picks. The pain
+     * and death handlers OR the low bit onto it later. */
+    m->skinnum = soldier_base_skin(m);
+
+    /*
+     * The tail all three arms share, module+0x1968..+0x1974: the arm's own
+     * health into object+0x108 and gib_health -30 into entity+0x52. The
+     * unknown-row arm branches past it, so a row this port had to accept and
+     * the module would not keeps whatever the class table gave it.
+     */
+    switch (m->pop_class_id) {
+    case 18: m->health = 30; m->gib_health = -30; break;  /* +0x175C shotgun */
+    case 19: m->health = 20; m->gib_health = -30; break;  /* +0x1858 blaster */
+    case 20: m->health = 40; m->gib_health = -30; break;  /* +0x1964 machgun */
+    default: break;
+    }
+
+    /*
+     * AND THE STAND CALL — module+0x172C..+0x1738, an indirect jalr on
+     * entity+0xE0 with a0 = self, before walkmonster_start rather than after.
+     * It is what gives a placed Soldier a `currentmove`: without it the
+     * creature stands with a NULL move until some AI callback happens to
+     * install one, which is the same hole `crebind.c` describes for the
+     * Arachner. `q2_creature_spawn` has already installed the callback by the
+     * time this runs, so this is the module's call and not a substitute for it.
+     *
+     * IT IS MADE LAST HERE AND THE MODULE MAKES IT FIRST — a stated reorder,
+     * because the module's stand call sits at +0x1734 ahead of the skinnum and
+     * health tail and this one sits behind it. `soldier_stand` reads neither
+     * field: it picks between Stand1 and Stand3 on `currentmove` and one roll,
+     * so the two orders cannot differ. Written this way so the skinnum a
+     * think function would read is already in place before anything runs.
+     */
+    if (m->stand)
+        m->stand(m);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -612,59 +1198,58 @@ const q2_cre_impl q2_cre_soldier = {
         soldier_walk,       /*  3 walk        */
         soldier_run,        /*  4 run         */
         /*
-         * 5 dodge — A GAP, not a decision, and the only empty slot in this
-         * table that is one.
-         *
-         * Every other NULL here says why it is empty: the module installs no
-         * idle and no search, and a soldier has no melee. This one said
-         * nothing, which read as the same thing and is not. The header above
-         * records that the spawn function writes "exactly id's seven callbacks
-         * in id's order, with melee explicitly zeroed" — and id's seven are
-         * stand, walk, run, DODGE, attack, melee and sight. A soldier that
-         * cannot dodge is one of the seven behaviours short.
-         *
-         * What it owes: `soldier_dodge` rolls out on 3/4 of calls, adopts its
-         * attacker as an enemy if it has none, and then splits by skill — a
-         * skill-0 soldier only ducks, higher skills choose between ducking and
-         * attack3, and it sets `pausetime` from the incoming shot's eta. That
-         * needs the duck move, the attack3 move, a `pausetime` field and a
-         * caller: nothing currently invokes slot 5 at all, so installing the
-         * handler alone would change nothing.
-         *
-         * Left undone rather than half-done, and named so it is not mistaken
-         * for finished work.
+         * 5 dodge — NOT a gap, and no longer a NULL. module+0x22F0 is `jr ra`
+         * and a nop, so the disc's Soldier has a dodge handler that does
+         * nothing. See soldier_dodge for what that costs the creature.
          */
-        NULL,               /*  5 dodge       */
+        (q2_class_method)(void *)soldier_dodge,  /* 5 dodge */
         soldier_attack,     /*  6 attack      */
         NULL,               /*  7 melee       — a soldier has none       */
         (q2_class_method)(void *)soldier_sight,  /* 8 sight */
-        NULL,               /*  9 checkattack */
-        NULL,               /* 10 bigturn     */
-        soldier_pain,       /* 11 pain        */
-        soldier_die         /* 12 die         */
+        NULL,               /*  9 checkattack — the module installs none */
+        NULL,               /* 10 bigturn     — nor one of these         */
+        /*
+         * 11 and 12 take the damage now — `void (*)(q2_monster *, s16)` on
+         * entity+0xA0 and +0xA4 — so they are cast in like dodge and sight
+         * rather than fitting `q2_class_method` directly. Neither reads the
+         * argument: see the note at the head of each.
+         */
+        (q2_class_method)(void *)soldier_pain,   /* 11 pain */
+        (q2_class_method)(void *)soldier_die     /* 12 die  */
     },
     {
-        NULL,                       /*  0 — never referenced by a frame */
-        soldier_stand,              /*  1 */
-        soldier_idle,               /*  2 */
-        soldier_cock,               /*  3 */
-        soldier_walk1_random,       /*  4 */
-        soldier_run,                /*  5 */
-        soldier_fire1,              /*  6 */
-        soldier_attack1_refire1,    /*  7 */
-        soldier_attack1_refire2,    /*  8 */
-        soldier_fire2,              /*  9 */
-        soldier_attack2_refire1,    /* 10 */
-        soldier_attack2_refire2,    /* 11 */
-        NULL, NULL, NULL, NULL,     /* 12..15 — present but unreferenced */
-        soldier_fire4,              /* 16 */
-        soldier_fire8,              /* 17 */
-        soldier_attack6_refire,     /* 18 */
-        NULL,                       /* 19 */
-        soldier_fire6,              /* 20 */
-        soldier_fire7,              /* 21 */
-        NULL,                       /* 22 */
+        /* 23 slots, which is exactly what module+0x3D0..+0x4F0 builds at
+         * module+0x32E8 before handing the table to class bytes 87, 89 and 88.
+         * Slot 0 is the module's own NULL. */
+        NULL,                       /*  0 — the module stores zero      */
+        soldier_stand,              /*  1 module+0x19A0 */
+        soldier_idle,               /*  2 module+0x1A0C */
+        soldier_cock,               /*  3 module+0x1A68 */
+        soldier_walk1_random,       /*  4 module+0x1AA0 */
+        soldier_run,                /*  5 module+0x1ADC */
+        soldier_fire1,              /*  6 module+0x1B3C */
+        soldier_attack1_refire1,    /*  7 module+0x1B5C */
+        soldier_attack1_refire2,    /*  8 module+0x1C18 */
+        soldier_fire2,              /*  9 module+0x1CD0 */
+        soldier_attack2_refire1,    /* 10 module+0x1CF0 */
+        soldier_attack2_refire2,    /* 11 module+0x1DAC */
+        soldier_duck_down,          /* 12 module+0x1E64 — Duck 45, unreached */
+        soldier_duck_up,            /* 13 module+0x1EC0 — Duck 48, Attack3 36 */
+        soldier_fire3,              /* 14 module+0x1EF0 — Attack3 32, unreached */
+        soldier_attack3_refire,     /* 15 module+0x1F6C — Attack3 35, unreached */
+        soldier_fire4,              /* 16 module+0x1F9C */
+        soldier_fire8,              /* 17 module+0x1FBC */
+        soldier_attack6_refire,     /* 18 module+0x1FDC */
+        soldier_duck_hold,          /* 19 module+0x2068 — Duck 46, unreached */
+        soldier_fire6,              /* 20 module+0x20B0 */
+        soldier_fire7,              /* 21 module+0x20D0 */
+        soldier_dead,               /* 22 module+0x20F0 — the death endfunc */
+        /* 23..31 — the module registers none, so these are the shared inert
+         * handler on the console and NULL here. */
         NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
     },
-    NULL
+    /* module+0x1604, export 0 — mass, solid, movetype, skinnum, health,
+     * gib_health and the stand call. The scale, the links and
+     * walkmonster_start stay the framework's. */
+    soldier_spawn
 };

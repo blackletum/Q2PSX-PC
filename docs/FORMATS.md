@@ -5411,8 +5411,31 @@ a turn-in-place animation rather than pivoting.
 
 ### 14.11 The module interface — `0x8007D990`
 
-The loader builds a **304-byte, version 1** import record at the module's base and fills 60 function
-pointers and several data pointers into it. The AI-relevant ones:
+The loader builds a **304-byte, version 1** import record at the module's base and fills **71** slots —
+function pointers and a few data pointers — into it. The size and the version are the loader's own first
+two stores, `sh v0, 16(s0)` = 304 and `sh v0, 18(s0)` = 1 at `0x8007DA14` and `0x8007DA1C`.
+
+**All 71 are now named**, one target address at a time; the full table lives in `src/game/creature.h`. The
+loader writes 69 of them as `sw v0, N(s0)` two instructions after materialising the address, which is why a
+dump keyed on that pattern reproduces them, and exactly one differently — `0x8007DB8C` is `sw s6, 24(s0)`
+with `s6` loaded once at the top of the function, and its value is `0x8008A4D8`, the BIOS `printf` stub
+A(3Fh).
+
+Three results fell out of naming the whole thing rather than the parts:
+
+* **The projectile spawners are eight and contiguous.** `+0x80`…`+0x9C` is blaster, bullet, shotgun,
+  railgun, bfg, grenade, rocket, laser. Four of the eight had been falling through a decoder switch as
+  unclassified, so a Gunner's grenade and an Arachner's rail were unnamed calls.
+* **`+0xFC` is not a shot.** It, `+0x100` and `+0x104` each write a different `think` and then call one
+  shared function `0x800619E0`; the second and third set `FL_FLY` and `FL_SWIM` first. Those are id's
+  `walkmonster_start`, `flymonster_start` and `swimmonster_start`, and `0x800619E0` is `monster_start` —
+  where `level.total_monsters` is incremented at `0x80061A64`. The port had `+0xFC` in its fire list, so a
+  creature was credited with firing a weapon for waking itself up.
+* **The Soldier's fire think contains no fire call.** Its eight calls are AngleVectors, the attachment
+  offset, the SVECTOR rotate, vectoangles, AngleVectors again and three VectorMAs — all of it aiming
+  arithmetic. The shot is reached through a fresh `lui` the action decoder does not follow.
+
+The AI-relevant ones:
 
 | offset | address | what |
 |---|---|---|
@@ -5422,7 +5445,10 @@ pointers and several data pointers into it. The AI-relevant ones:
 | +0xCC | `0x8005F8E8` | `vectoyaw` |
 | +0xE4 | `0x8005B950` | `visible` |
 | +0xEC | `0x80061118` | `fire_hit` — the melee attack, mod 7 at `0x800612F0` |
-| +0xF0 | `0x80057D54` | the damage function |
+| +0xE8 | `0x8005D8C8` | `M_CheckAttack` |
+| +0xF0 | `0x80057D54` | the OUTER damage function — armour and the mod table; it calls `0x800627F8`, which is `T_Damage` itself, at `0x800584B4` and from nowhere else |
+| +0xFC / +0x100 / +0x104 | `0x80062240` / `0x8006229C` / `0x80062268` | `walkmonster_start` / `flymonster_start` / `swimmonster_start` |
+| +0x80…+0x9C | `0x80062000` … `0x800621F8` | the eight `monster_fire_*` spawners, in id's order |
 | +0x118 | `0x80061DE4` | register a class method |
 
 `fire_hit` is id's verbatim, including the bbox range adjustment, the `MASK_SHOT` re-trace and the special
@@ -5497,11 +5523,26 @@ Two field identifications came out of it: **`skinnum` is entity+0x3A**, and it s
 the variant. The class table's three Soldier rows carry the health that goes with each — 20 for the blaster
 light guard, 30 for the shotgun guard, 40 for the machinegun guard — which are PC Quake II's own figures.
 
-### 14.14 The other six — decoded rather than transcribed
+### 14.14 The decoded-action path — the check on the transcriptions
 
-Six modules and 37 think functions is too many to read one at a time, and writing them from the *pattern* of
-the Soldier's would be invention. So they are decoded the same way the move tables were: by following what
-each function actually does.
+This started as the answer to "six modules and 37 think functions is too many to read one at a time". They
+have since all been read — every callback of every module on the disc is transcribed by hand — and the
+decoder is kept for two reasons that are better than the original one: it is what a creature this port does
+not know would run on, and it is the **independent check** on the transcriptions. Where the two disagree,
+one of them is wrong, and it is worth recording that on the transcription pass it was **twice the decoder**:
+
+* a `rand() % 6` reported as `% 3`, because the multiply-back reconstruction stopped at the shift-and-add
+  (`3q`) and missed the doubling that follows it (`6q`). Both Berserk attacks divide by six, and id's
+  berserker uses `rand() % 6` in both, so the short read disagreed with the one outside check there is.
+* a think walked past its own `jr ra` into the next function. `walk_end` bounds a walk at the next address
+  KNOWN to start a function, and that set is the callbacks, the methods and the endfuncs — a function in
+  none of the three is invisible to it. The Infantry's spawn function is exactly that: it sits immediately
+  after think 11's return and is reachable only as export 0, so four of its steps were attributed to
+  `infantry_smack` and the census printed a melee ending in `walkmonster_start`. The fix is narrow — a
+  `jr ra` whose *second* following word is `addiu sp, sp, -N` is a prologue and nothing else — and it has to
+  keep the delay slot, because `soldier_duck_up` puts the whole point of the function in it.
+
+The decode itself follows what each function actually does, the same way the move tables were read.
 
 A think function is short and stereotyped. It reaches the engine through the module's import table, and the
 arguments it passes are constants the compiler materialised — which the register tracker already recovers.
@@ -5551,7 +5592,84 @@ whose condition is not modelled. Two rules apply, both chosen to fail safely:
 
 Implemented in `q2_creature_decode_thinks` (`src/game/creature.c`) and `src/game/cre_actions.c`.
 
-### 14.13 Negative results worth keeping
+### 14.15 `T_Damage`'s monster half — `0x800627F8` — **CONFIRMED**
+
+`0x80057D54` is the outer damage function: armour, the mod table, twenty-one call sites. At `0x800584B4` it
+calls `0x800627F8` and nothing else does. That function is id's `T_Damage` and it is where every
+per-creature reaction lives — which is why the old note that "the damage function never kills, there is no
+die or pain callback, and for a creature with an AI brain it does not even subtract health" was wrong. It
+was reading the wrapper.
+
+| address | what | id |
+|---|---|---|
+| `0x80062838` | `takedamage` gate, `spawnflags & 0xC0000000` | `if (!targ->takedamage) return;` |
+| `0x80062854` | skill 0 and not deathmatch and a client: damage halved, minimum 1 | id's easy-mode halving |
+| `0x800628F8` | ×2 when `!DAMAGE_RADIUS && SVF_MONSTER && attacker->client && !targ->enemy && health > 0` | "bonus damage for surprising a monster", verbatim |
+| `0x8006291C` | `FL_NO_KNOCKBACK` (0x800) zeroes knockback | ✓ |
+| `0x80062924` | `FL_GODMODE` (0x10) zeroes damage unless `DAMAGE_NO_PROTECTION` (0x20) | ✓ |
+| `0x80062958` | `health -= damage`, into `(entity+0x24)+0x108` | ✓ |
+| `0x80062994` | dead: `flags |= FL_NO_KNOCKBACK` for a monster or a client | ✓ |
+| `0x800629B4` | `health` floors at **−9999** | id floors at −999 |
+| `0x800629D4` | `enemy = attacker` | ✓ |
+| `0x80062A10` | `level.killed_monsters++` at `0x800E4700`, unless `AI_GOOD_GUY` | ✓ |
+| `0x80062A18` | attacker class byte **84** — the Medic — takes ownership of the body | id's "medics won't heal monsters that they kill themselves" |
+| `0x80062A34` | `movetype` in `PUSH`/`STOP`/`NONE` skips `monster_death_use` | ✓ |
+| `0x80062A9C` | `die` at entity+0xA4 | ✓ |
+| `0x80062AC0` | `M_ReactToDamage` | ✓ |
+| `0x80062AD0` | `AI_DUCKED` suppresses the flinch | ✓ |
+| `0x80062AF4` | `pain` at entity+0xA0 | ✓ |
+| `0x80062B20` | skill 3: `pain_debounce = level.time + 50` — five seconds at 10 Hz | id's `+ 5` |
+
+`monster_death_use` (`0x800622E8`) clears `FL_FLY|FL_SWIM` and every ai flag but `AI_GOOD_GUY`.
+
+**`M_ReactToDamage` — `0x80062654`** is the only writer of `oldenemy` (entity+0xC0) in the whole image, so
+`ai_run`'s fall-back to it could never fire before this was transcribed. Its four "do not take offence"
+class bytes are `91`, `90`, `83`, `82`; the class descriptor table at `0x800A3518` carries the class byte at
+`+0x20` of each 48-byte record, and reading that column gives **Tankcomm, Boss1, Rider, Jorg** — with health
+750, 1500, 3000 and 3000. Those are id's tank, supertank, makron and jorg, the same four its `strcmp` list
+names, with id's own health values.
+
+One departure, and it is the disc's: id guards the help-our-buddy arm with `attacker->enemy &&
+attacker->enemy != targ`. `0x800627C4` does not test at all, so a creature caught in another's crossfire can
+end with a NULL enemy and still be sent to `FoundTarget`.
+
+Transcribed in `src/game/monster.c` (`q2_monster_damage_reaction`, `q2_monster_death_use`) and
+`src/game/ai.c` (`q2_m_react_to_damage`). `q2psx-inspect ai` reads 130 constants back out of the executable
+and all 130 agree.
+
+### 14.16 The class byte — a third numbering — **CONFIRMED**
+
+`entity+0x23` is neither the class-table row id (18, 19, 20 for the three Soldiers) nor the module name. It
+is the index into `classMethods[256]`, and it is stored at **`+0x20` of each 48-byte class descriptor
+record**; the module loader copies it with `lbu v0, 0x20(s4)` / `sb v0, 0x23(s0)` at `0x8007E660`.
+
+The column checks against code rather than against itself: it gives Arachner 64, Berserk 70, Gunner 79,
+Infantry 81, Soldier 87/88/89, Tankcomm 91, Insane 94 — exactly the bytes the disc's seven CreAI modules
+register for themselves through import `+0x118`.
+
+The same pass renamed `+0x28` of that record. It was called `offset` — negative, scaling with size, which is
+what a model's vertical offset would look like — and it is **`gib_health`**: Soldier −30, Infantry −40,
+Parasite −50, Berserk −60, Gunner −70, Hover −100, Medic −130, Gladiator −175, Boss2 −200, Boss1 −500,
+Jorg −2000, Rider −2000, Flipper −30. Thirteen of the fifteen are id's own `self->gib_health`. Two are not
+and are stated rather than smoothed: Ironmaiden reads −30 where id's chick is −70, and Flyer reads 0 where
+id's flyer is −50.
+
+### 14.17 `dodge` is written and never read — **a negative result**
+
+Three of the seven modules install a `dodge` handler at entity+0xF4 — the Soldier writes `module+0x22F0`
+there in all three of its variant arms (`0x801016C0`, `0x801017C8`, `0x801018CC`) — and **nothing in
+`SLES_015.34` ever reads it**. A sweep of all 632,832 bytes for a word load off `+0xF4` finds zero on any
+base but `sp`, and zero `addiu rX, rY, 0xF4` that could reach it indirectly.
+
+Every neighbouring monsterinfo slot has readers and they are easy to find: `stand` +0xE0 has eleven, `run`
++0xF0 five, `attack` +0xF8 two (both inside `M_CheckAttack`), `melee` +0xFC seven, `sight` +0x100 one,
+`checkattack` +0x104 two. id calls `dodge` from `check_dodge`, which the weapon fire path invokes when a
+shot is aimed at a monster. That call site does not exist on this build.
+
+So a creature on this disc cannot dodge, and the port installs the handler — because the module writes it —
+and deliberately gives it no caller.
+
+### 14.18 Negative results worth keeping
 
 * **There is no turn verb.** Slot 0 of the shared table is written as literal zero (`0x80061D9C`) and slots
   6 and 7 hold the do-nothing handler. The PC lineage has `ai_turn`; this build does not.

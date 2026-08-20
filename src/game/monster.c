@@ -185,6 +185,164 @@ bool q2_monster_damage(q2_monster *m, s16 amount)
 }
 
 /* ------------------------------------------------------------------------- */
+/* monster_death_use — 0x800622E8                                             */
+/* ------------------------------------------------------------------------- */
+/*
+ * Twenty-six instructions, and two of them change how a body behaves.
+ *
+ *   `flags &= 0xFFFC`      (0x800622F8)  clears FL_FLY and FL_SWIM together, so
+ *                                        a dead flyer stops flying and falls.
+ *   `aiflags &= 0x100`     (0x80062308)  clears EVERY ai flag but AI_GOOD_GUY —
+ *                                        stand-ground, ducked, hold-frame, the
+ *                                        three pursuit bits, all of it. A body
+ *                                        that died mid-duck is not still ducked.
+ *
+ * Two more things it does are read and NOT modelled here, named rather than
+ * quietly dropped:
+ *   - entity+0xD4 is cleared when it is non-zero. In id's monster_death_use the
+ *     field in that position is `self->item`, the thing the corpse drops, and
+ *     the port has no drop-on-death path for it to feed.
+ *   - if the link object at entity+0x24 has bit 8 of its halfword at +0xF2 set,
+ *     it calls 0x80020D60, which walks four 88-byte slots from 0x800C6D70
+ *     looking for a free one. That shape is an entity allocator and is
+ *     consistent with id's `Drop_Item`, but "consistent with" is not "is", so
+ *     it is left as an address.
+ */
+void q2_monster_death_use(q2_monster *self)
+{
+    if (!self)
+        return;
+
+    self->flags  &= (u16)~(Q2_FL_FLY | Q2_FL_SWIM);
+    self->aiflags &= Q2_AI_GOOD_GUY;
+}
+
+/* ------------------------------------------------------------------------- */
+/* The tail of T_Damage — 0x80062940..0x80062B54                              */
+/* ------------------------------------------------------------------------- */
+/*
+ * A corpse's health floors here rather than in the arithmetic: 0x800629B4
+ * clamps to -9999 AFTER the subtraction, so a rocket into a body that is
+ * already down cannot drive it arbitrarily negative and out of gib range.
+ */
+#define Q2_MONSTER_HEALTH_FLOOR (-9999)
+
+/* Nightmare skill: five seconds on the 10 Hz clock, 0x80062B20. */
+#define Q2_PAIN_DEBOUNCE_SKILL3 Q2_AI_SECONDS(5)
+
+void q2_monster_damage_reaction(q2_monster *targ, q2_monster *attacker,
+                                s16 damage)
+{
+    bool was_dead;
+
+    if (!targ)
+        return;
+
+    /* ---------------------------------------------------------------- */
+    /* Still standing — the pain path, 0x80062AAC                        */
+    /* ---------------------------------------------------------------- */
+    if (targ->health > 0) {
+        if (targ->svflags & Q2_SVF_MONSTER) {
+            /*
+             * REACT FIRST, FLINCH SECOND, and the order matters: the creature
+             * has already turned on its attacker by the time its own pain
+             * handler runs, so a Soldier shot in the back is facing you before
+             * it picks a flinch animation.
+             */
+            q2_m_react_to_damage(targ, attacker);
+
+            /* A creature part-way through a duck absorbs the hit without
+             * flinching at all. 0x80062AD0. */
+            if (targ->aiflags & Q2_AI_DUCKED)
+                return;
+
+            if (damage == 0)
+                return;
+
+            if (targ->pain)
+                targ->pain(targ, damage);
+
+            /*
+             * NIGHTMARE MONSTERS DO NOT GO INTO PAIN FRAMES OFTEN — the pain
+             * handler has just armed its own three-second debounce, and this
+             * overwrites it with five. 0x80062B10 tests the same global the
+             * skill is read from everywhere else.
+             */
+            if (q2_cre_skill() == 3)
+                targ->pain_debounce =
+                    q2_level_state.time + Q2_PAIN_DEBOUNCE_SKILL3;
+            return;
+        }
+
+        /* Anything that is not a creature — a player, a breakable — gets the
+         * flinch and none of the AI. 0x80062B2C. */
+        if (damage != 0 && targ->pain)
+            targ->pain(targ, damage);
+        return;
+    }
+
+    /* ---------------------------------------------------------------- */
+    /* Killed — 0x80062978 onward                                        */
+    /* ---------------------------------------------------------------- */
+    /*
+     * `was_dead` is the console's `deadflag == DEAD_DEAD` (entity+0x20 bits
+     * 22..23), which the creature's own `die` raises. `deadflag` is now a real
+     * field, because the modules write it and the transcriptions read it — but
+     * the guard here stays on `dead`, and the two are kept in step at the
+     * bottom rather than being allowed to drift. Two fields for one fact is
+     * how a body ends up half dead.
+     */
+    was_dead = targ->dead || targ->deadflag == Q2_DEAD_DEAD;
+
+    /* A body takes no more knockback. 0x80062994. */
+    if ((targ->svflags & Q2_SVF_MONSTER) || targ->client)
+        targ->flags |= Q2_FL_NO_KNOCKBACK;
+
+    if (targ->health < Q2_MONSTER_HEALTH_FLOOR)
+        targ->health = (s16)Q2_MONSTER_HEALTH_FLOOR;
+
+    if (targ->svflags & Q2_SVF_MONSTER) {
+        /* Even in death it blames whoever did it — this is what `ai_run`'s
+         * corpse handling and the trail both read afterwards. 0x800629D4. */
+        targ->enemy = attacker;
+
+        if (!was_dead && !(targ->aiflags & Q2_AI_GOOD_GUY)) {
+            q2_level_state.killed_monsters++;
+
+            /* See q2_monster.owner: id's medic exclusion, unreachable on this
+             * disc because no Medic module ships. 0x80062A18. */
+            if (attacker && attacker->class_id == Q2_CLASS_MEDIC)
+                targ->owner = attacker;
+        }
+    }
+
+    /*
+     * The movetype gate at 0x80062A2C — bits 18..21 of entity+0x20 — sends
+     * MOVETYPE_NONE, _PUSH and _STOP straight to `die` without the death-use
+     * pass. Those are doors, platforms and triggers; every creature on the disc
+     * is MOVETYPE_STEP, so the arm this structure can reach is the other one.
+     * Stated rather than implemented, because `q2_monster` models creatures and
+     * inventing a movetype field for it would be a field nothing sets.
+     */
+    if (!was_dead && (targ->svflags & Q2_SVF_MONSTER))
+        q2_monster_death_use(targ);
+
+    /*
+     * And the flag is the module's to set. The creature's own `die` opens with
+     * its already-dead guard and raises the flag itself, so it is left clear
+     * for the call — see the same dance in every transcribed `*_die`.
+     */
+    if (!was_dead && targ->die)
+        targ->die(targ, damage);
+
+    /* A creature whose module installs no `die` still stops — and the two
+     * spellings of "dead" end the call agreeing, whichever of them the
+     * module's own handler happened to set. */
+    targ->dead     = true;
+    targ->deadflag = Q2_DEAD_DEAD;
+}
+
+/* ------------------------------------------------------------------------- */
 /* The class method table                                                     */
 /* ------------------------------------------------------------------------- */
 /*
@@ -277,7 +435,7 @@ void q2_M_MoveFrame(q2_monster *m)
 
                 /* The callback may have freed the entity — 0x800617F8 tests
                  * bit 1 of the svflags word and bails. */
-                if (m->svflags & 0x2)
+                if (m->svflags & Q2_SVF_DEADMONSTER)
                     return;
 
                 move = m->currentmove;
@@ -303,7 +461,7 @@ void q2_M_MoveFrame(q2_monster *m)
                  * identify without binding the address: the creature is dead
                  * and its move has run out.
                  */
-                m->svflags |= 0x2;
+                m->svflags |= Q2_SVF_DEADMONSTER;
                 return;
             }
         }

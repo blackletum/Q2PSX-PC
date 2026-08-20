@@ -1497,7 +1497,26 @@ typedef struct think_dec {
      * 0x66666667 serves both five and ten, and an earlier version of this
      * reported the Arachner's `rand() % 5` as `% 10` for exactly that reason.
      */
+    /*
+     * AND THE RECONSTRUCTION DOES NOT ALWAYS STOP AT THE ADD.
+     *
+     * For a divisor with a factor of two the compiler builds the odd part with
+     * the shift-and-add and then doubles it, so a divide by SIX comes back as
+     *
+     *     sll  v1, a0, 1      ; 2q
+     *     addu v1, v1, a0     ; 3q      <- the pair this used to stop on
+     *     sll  v1, v1, 1      ; 6q
+     *     subu v0, v0, v1     ; x - 6q
+     *
+     * Reading only the pair reported the Berserk's two attacks as `rand() % 3`
+     * where the module says `% 6` — and id's berserker uses `rand() % 6` in
+     * both, so the short read disagreed with the one independent check there
+     * is. `mb_dest` is the register the add left the product in; a shift that
+     * immediately consumes it is part of the same multiply.
+     */
     s32  mul_back;
+    u32  mb_dest;
+    bool mb_dest_known;
     u32  pend_shift_reg;
     s32  pend_shift_k;
     bool pend_shift;
@@ -1580,6 +1599,7 @@ static void decode_one_think(const q2_creature *c, think_dec *t, u32 entry,
     memset(t->last_add_known, 0, sizeof(t->last_add_known));
     memset(t->flag_known, 0, sizeof(t->flag_known));
     t->mul_back = 0;
+    t->mb_dest_known = false;
     t->pend_shift = false;
 
     decode_body(c, t, entry, th, 0);
@@ -1617,6 +1637,46 @@ static void decode_body(const q2_creature *c, think_dec *t, u32 entry,
         op = OP(w);
         rt = RT(w);
         rs = RS(w);
+
+        /*
+         * A RETURN FOLLOWED BY A PROLOGUE IS THE NEXT FUNCTION.
+         *
+         * `walk_end` deliberately does not stop at the first `jr ra` — these
+         * functions have several, one per early return, and stopping at the
+         * first found one move out of five when the decoder was young. What it
+         * stops at instead is the next address KNOWN to start a function, and
+         * that set is the callbacks, the methods and the endfuncs. A function
+         * in none of those three is invisible to it.
+         *
+         * The Infantry's spawn function is exactly that. It sits at
+         * module+0x13F0, immediately after think 11's `jr ra` at +0x13EC, and
+         * is reachable only as export 0 — so the walk ran straight through the
+         * return and attributed four of the SPAWN function's steps to
+         * `infantry_smack`. That is why the census printed a melee ending in
+         * `walkstart(+FC)`: a creature was credited with waking itself up in
+         * the middle of a punch.
+         *
+         * `jr ra` in a delay-slot pair followed by `addiu sp, sp, -N` is a
+         * prologue and nothing else — a mid-function epilogue is followed by
+         * more body, never by a stack frame being opened. So this cannot
+         * truncate the multi-return case the comment above protects.
+         */
+        /*
+         * And the DELAY SLOT is still part of this function, which is where
+         * the first version of this test went wrong: `soldier_duck_up`
+         * (module+0x1EC0) puts the whole point of the function — the store
+         * that clears AI_DUCKED — in the delay slot of its own `jr ra`.
+         * Breaking on sight of the return dropped it, and the census lost
+         * three of the disc's duck helpers to a fix meant to remove one
+         * over-read. So the end is moved to just past the pair rather than
+         * taken immediately.
+         */
+        if (w == 0x03E00008u && in_image(&t->d, addr + 8, 4)) {
+            u32 next = word_at(&t->d, addr + 8);
+
+            if ((next & 0xFFFF8000u) == 0x27BD8000u)    /* addiu sp, sp, -N */
+                end = addr + 8;
+        }
 
         /* A branch means everything after it may be conditional. */
         if (op == 0x04 || op == 0x05 || op == 0x06 || op == 0x07
@@ -1665,9 +1725,20 @@ static void decode_body(const q2_creature *c, think_dec *t, u32 entry,
          * (1<<k)+1 or (1<<k)-1 — the multiply-back after a magic divide.
          */
         if (op == 0 && (w & 0x3F) == 0x00 && rt != 0) {      /* sll */
+            s32 k = (s32)((w >> 6) & 0x1F);
+
+            /* The doubling that finishes an even divisor — see mb_dest. */
+            if (t->mb_dest_known && rt == t->mb_dest && t->mul_back >= 2
+                && k > 0 && k < 8) {
+                t->mul_back <<= k;
+                t->mb_dest    = (w >> 11) & 0x1F;
+            } else {
+                t->mb_dest_known = false;
+            }
+
             t->pend_shift_reg = rt;
-            t->pend_shift_k   = (s32)((w >> 6) & 0x1F);
-            t->pend_shift     = t->pend_shift_k > 0 && t->pend_shift_k < 12;
+            t->pend_shift_k   = k;
+            t->pend_shift     = k > 0 && k < 12;
         } else if (op == 0 && ((w & 0x3F) == 0x21 || (w & 0x3F) == 0x23)
                    && t->pend_shift) {
             /* addu/subu rd, rs, rt with one operand the shifted value */
@@ -1676,8 +1747,11 @@ static void decode_body(const q2_creature *c, think_dec *t, u32 entry,
                 s32 got = ((w & 0x3F) == 0x21) ? f + 1 : f - 1;
                 /* A multiply-back of one is not a modulo; it is a shift pair
                  * that happened to look like one. */
-                if (got >= 2)
-                    t->mul_back = got;
+                if (got >= 2) {
+                    t->mul_back      = got;
+                    t->mb_dest       = (w >> 11) & 0x1F;
+                    t->mb_dest_known = true;
+                }
             }
             t->pend_shift = false;
         } else if (op != 0 || (w & 0x3F) != 0x00) {

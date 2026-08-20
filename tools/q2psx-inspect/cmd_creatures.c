@@ -38,6 +38,74 @@ static size_t g_img_size;
 static bool g_last_full;
 static int g_named;
 static int g_unnamed;
+
+/*
+ * The engine function behind an import slot.
+ *
+ * All 71 are named in creature.h, read one target at a time out of the loader
+ * at 0x8007DA00. Only the ones a think function is actually seen to call are
+ * listed here — the rest would be noise in a census — and anything not listed
+ * prints as `call`, which is the old behaviour and is still honest.
+ */
+static const char *cre_import_name(u32 slot)
+{
+    switch (slot) {
+    case 0x14:  return "rand";
+    case 0x1C:  return "link";
+    case 0x20:  return "sound";
+    case 0x28:  return "local2wld";
+    case 0x2C:  return "muzzleofs";
+    case 0x30:  return "poseat";
+    case 0x34:  return "poseblend";
+    case 0x38:  return "muzzlepoint";
+    case 0x54:  return "ai_run";
+    case 0x58:  return "ai_walk";
+    case 0x5C:  return "ai_stand";
+    case 0x60:  return "ai_move";
+    case 0x64:  return "ai_charge";
+    case 0x70:  return "radiusdamage";
+    case 0x74:  return "findmove";
+    case 0x7C:  return "beam";
+    case 0x80:  return "FIRE.blaster";
+    case 0x84:  return "FIRE.bullet";
+    case 0x88:  return "FIRE.shotgun";
+    case 0x8C:  return "FIRE.railgun";
+    case 0x90:  return "FIRE.bfg";
+    case 0x94:  return "FIRE.grenade";
+    case 0x98:  return "FIRE.rocket";
+    case 0x9C:  return "FIRE.laser";
+    case 0xA0:  return "flashlight";
+    case 0xA4:  return "findradius";
+    case 0xAC:  return "foundtarget";
+    case 0xB0:  return "hunttarget";
+    case 0xB4:  return "range";
+    case 0xB8:  return "veclen";
+    case 0xBC:  return "veclensq";
+    case 0xC0:  return "vectorma";
+    case 0xC4:  return "vecnorm";
+    case 0xC8:  return "vectoangles";
+    case 0xCC:  return "vectoyaw";
+    case 0xD0:  return "infront";
+    case 0xD4:  return "anglemod";
+    case 0xD8:  return "anglevectors";
+    case 0xDC:  return "projectsrc";
+    case 0xE4:  return "visible";
+    case 0xE8:  return "checkattack";
+    case 0xEC:  return "fire_hit";
+    case 0xF0:  return "T_Damage";
+    case 0xF4:  return "trace";
+    case 0xFC:  return "walkstart";
+    case 0x100: return "flystart";
+    case 0x104: return "swimstart";
+    case 0x108: return "maxs.x";
+    case 0x10C: return "maxs.y";
+    case 0x110: return "mins.y";
+    case 0x114: return "mins.x";
+    case 0x120: return "explosion";
+    case 0x12C: return "proximity";
+    default:    return "call";
+    }
+}
 static int g_unclaimed;
 static int g_moves;
 
@@ -163,7 +231,7 @@ static void report(const q2_creature *c, const q2_cre_impl *impl)
         printf("    sounds    : %u named", ns);
         for (z = 0; z < ns && z < 12; z++)
             if (sn[z])
-                printf(" [%u]%.11s", z, sn[z]);
+                printf(" [%u]%.12s", z, sn[z]);
         printf("%s\n", ns > 12 ? " ..." : "");
     }
 
@@ -182,7 +250,7 @@ static void report(const q2_creature *c, const q2_cre_impl *impl)
         nb = q2_creature_sound_bindings(g_img, g_img_size, CRE_BASE, sb, 32);
         printf("    registers : %u", nb);
         for (z = 0; z < nb && z < 12; z++)
-            printf(" %08X=%.11s", sb[z].addr, sb[z].name);
+            printf(" %08X=%.12s", sb[z].addr, sb[z].name);
         printf("%s\n", nb > 12 ? " ..." : "");
     }
 
@@ -337,8 +405,15 @@ static void report(const q2_creature *c, const q2_cre_impl *impl)
                            st->flag_clear & 0xFFFFu, st->gated ? "?" : "");
                     break;
                 case Q2_CRE_OP_CALL:
-                    printf(" call(+%02X)%s", st->import_ofs,
-                           st->gated ? "?" : "");
+                    /*
+                     * Named where the import loader names it. The census used
+                     * to print `call(+C0)?` and leave the reader to go and look
+                     * the slot up, which is exactly the state that let three of
+                     * the eight projectile spawners sit unclassified and let
+                     * `walkmonster_start` be counted as a shot.
+                     */
+                    printf(" %s(+%02X)%s", cre_import_name(st->import_ofs),
+                           st->import_ofs, st->gated ? "?" : "");
                     break;
                 default:
                     break;

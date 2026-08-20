@@ -345,13 +345,28 @@ q2_result q2_creature_world_load(q2_creature_world *w, const disc *d,
          * the row is the only thing that says which variant this is. */
         m->pop_class_id = (u8)pop_class;
 
-        q2_creature_spawn(&w->mod[mi].bind, m, w->class_variant[pop_class]);
-
+        /*
+         * THE CLASS ROW FIRST, THE MODULE SECOND — which is the order the
+         * loader uses and the reverse of what this did.
+         *
+         * 0x8007E68C and 0x8007E698 write health and gib_health out of the
+         * class descriptor record, and only THEN does 0x8007E6AC call the
+         * module's export 0. So a module whose spawn function sets its own
+         * health overrides the row, not the other way round.
+         *
+         * It did not matter while `q2_cre_impl.spawn` had no caller. It does
+         * now: the hook runs inside `q2_creature_spawn`, so leaving the row
+         * assignment below it would let the table quietly overwrite whatever
+         * the module had just decided.
+         */
         if (e && e->health > 0) {
             m->health     = e->health;
             m->max_health = e->health;
-            m->gib_health = (s16)(e->offset ? e->offset : -e->health / 2);
+            m->gib_health = (s16)(e->gib_health ? e->gib_health
+                                                : -e->health / 2);
         }
+
+        q2_creature_spawn(&w->mod[mi].bind, m, w->class_variant[pop_class]);
     }
 
     w->ready = true;

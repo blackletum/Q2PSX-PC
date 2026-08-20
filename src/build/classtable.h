@@ -19,8 +19,9 @@
  *     0x00  u32       class_id
  *     0x04  char[12]  name        matches a CastList model name
  *     0x14  u32       fn_a        non-zero only on the player classes
+ *     0x20  u8        class_byte  the index into classMethods[256]
  *     0x24  u32       fn_b        likewise
- *     0x28  s16       offset      negative, scales with the creature's size
+ *     0x28  s16       gib_health  negative; below it the body is destroyed
  *     0x2A  s16       health
  *     0x2C  u32       zero
  *
@@ -31,9 +32,44 @@
  * records at 30, 20 and 40 — the shotgun, light and machinegun guards — plus
  * Infantry 100, Flyer 50, Gladiator 400, Jorg 3000. Nothing about the decode
  * was tuned to produce that; it is the field landing on values a different
- * version of the same game published. The three Soldiers also share one
- * `offset` of −30 while differing in health, which is what a skin family looks
- * like and what a mis-parse does not.
+ * version of the same game published.
+ *
+ * ---------------------------------------------------------------------------
+ * And +0x28 is GIB HEALTH, which this used to call `offset`
+ * ---------------------------------------------------------------------------
+ * The old name came from the shape of the column — negative, and scaling with
+ * the creature's size — which is exactly what a model's vertical offset would
+ * look like too. The values settle it: they are id's own `self->gib_health`,
+ * creature for creature.
+ *
+ *     Soldier −30   Infantry −40   Parasite −50   Berserk −60   Gunner −70
+ *     Hover −100    Medic −130     Gladiator −175 Boss2 −200    Boss1 −500
+ *     Jorg −2000    Rider −2000    Flipper −30
+ *
+ * Thirteen of the table's own numbers landing on a different version of the
+ * same game's, from a field nothing in the decode was tuned against. Two do
+ * not — Ironmaiden reads −30 where id's chick is −70, and Flyer reads 0 where
+ * id's flyer is −50 — and those are stated rather than smoothed over: this
+ * disc's numbers are this disc's.
+ *
+ * `creworld.c` was already USING it as gib health, so the code was right and
+ * only the name was wrong. The three Soldiers sharing one value while differing
+ * in health is still what makes it a skin family; it is just a shared gib
+ * threshold rather than a shared model offset.
+ *
+ * ---------------------------------------------------------------------------
+ * The class byte at +0x20, which had no home at all
+ * ---------------------------------------------------------------------------
+ * A third numbering, distinct from `class_id` and from the module name: it is
+ * the index into the engine's 256-entry `classMethods` table, and the module
+ * loader copies it straight into the entity at 0x8007E660 (`lbu v0, 0x20(s4)` /
+ * `sb v0, 0x23(s0)`). Reading the column out gives Arachner 64, Berserk 70,
+ * Gunner 79, Infantry 81, Soldier 87/88/89, Tankcomm 91, Insane 94 — which is
+ * exactly the set the disc's seven CreAI modules register for themselves, so
+ * the column is checkable against code rather than merely plausible.
+ *
+ * It is what `M_ReactToDamage` compares when it refuses to take offence at the
+ * four big monsters (ai.c), and the only way to name those four.
  *
  * The class ids are 1…37 for creatures and 39…44 for the deathmatch player
  * skins, so the range Population uses is covered exactly.
@@ -58,7 +94,8 @@ typedef struct q2_class_entry {
     char name[Q2_CLASS_NAME_LEN + 1];
     u32  fn_a;
     u32  fn_b;
-    s16  offset;
+    s16  gib_health;
+    u8   class_byte;     /* +0x20: the index into classMethods[256] */
     s16  health;
     bool is_player;      /* the deathmatch skins carry both function pointers */
 } q2_class_entry;

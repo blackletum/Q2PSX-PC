@@ -207,6 +207,37 @@ void q2_creature_spawn(q2_cre_bind *b, q2_monster *m, u32 class_index)
 
     /* dodge, sight and checkattack take extra arguments, so they are wired
      * through their own signatures rather than the flat table. */
+    /*
+     * DODGE — slot 5, and the reason it was never installed is not an
+     * oversight in this port. It is an oversight in the ORIGINAL.
+     *
+     * `cre_soldier.c` used to carry a comment calling the empty slot "A GAP,
+     * not a decision", which was the right instinct applied to the wrong side
+     * of the boundary. Three of the disc's seven modules install a dodge
+     * handler — the Soldier writes `module+0x22F0` to entity+0xF4 in all three
+     * of its variant arms (0x801016C0, 0x801017C8, 0x801018CC), and the Gunner
+     * and Infantry do the same — so the slot is plainly meant to be live.
+     *
+     * It is not. Sweeping all 632,832 bytes of `SLES_015.34` for a word load
+     * off entity+0xF4 finds **zero** on any base but `sp`, and zero
+     * `addiu rX, rY, 0xF4` that could reach it indirectly. Every neighbouring
+     * monsterinfo slot has readers and they are easy to find — stand +0xE0 has
+     * eleven (0x8005D228, 0x80061BFC, …), run +0xF0 has five, attack +0xF8 has
+     * two (0x8005DB64 and 0x8005E298, both inside `M_CheckAttack`), melee +0xFC
+     * has seven, sight +0x100 one, checkattack +0x104 two. Dodge has none.
+     * id calls it from `check_dodge`, which the weapon fire path invokes when a
+     * shot is aimed at a monster; that call site does not exist on this build.
+     *
+     * So the handler is installed here because the module writes it and a
+     * faithful entity carries what the module wrote — and it is deliberately
+     * given no caller, because the console has none. A creature on this disc
+     * cannot dodge, and that is the disc's behaviour rather than this port's
+     * shortfall.
+     */
+    if (b->impl->callback[5] && c->callback[5])
+        m->dodge = (void (*)(q2_monster *, q2_monster *, s32))
+                   (void *)b->impl->callback[5];
+
     if (b->impl->callback[8] && c->callback[8])
         m->sight = (void (*)(q2_monster *, q2_monster *))
                    (void *)b->impl->callback[8];
@@ -220,13 +251,48 @@ void q2_creature_spawn(q2_cre_bind *b, q2_monster *m, u32 class_index)
      * 0x80101690), and they take extra arguments like sight does.
      */
     if (b->impl->callback[11] && c->callback[11])
-        m->pain = (void (*)(q2_monster *))(void *)b->impl->callback[11];
+        m->pain = (void (*)(q2_monster *, s16))(void *)b->impl->callback[11];
     if (b->impl->callback[12] && c->callback[12])
-        m->die = (void (*)(q2_monster *))(void *)b->impl->callback[12];
+        m->die = (void (*)(q2_monster *, s16))(void *)b->impl->callback[12];
 
     m->in_use      = true;
     m->spawnflags |= Q2_SVFLAG_INUSE;
     m->svflags    |= Q2_SVF_MONSTER;
+
+    /*
+     * THE DENOMINATOR, and it is the console's own rather than a headcount.
+     *
+     * `monster_start` increments `level.total_monsters` at 0x80061A64 for every
+     * creature it starts that is not a good guy — the same exclusion `Killed`
+     * applies to the kill counter — and this is the port's monster_start: the
+     * one place an entity becomes a creature. The pair now moves together, so
+     * "kills 3/9" is two numbers the original keeps rather than two scans of a
+     * live array.
+     */
+    if (!(m->aiflags & Q2_AI_GOOD_GUY))
+        q2_level_state.total_monsters++;
+
+    /*
+     * AND THE MODULE'S OWN SPAWN FUNCTION, WHICH HAD NO CALLER AT ALL.
+     *
+     * `q2_cre_impl.spawn` has been declared in crebind.h since the binder was
+     * written, with a comment saying it is "for anything the module's spawn
+     * function does beyond the callbacks". Nothing ever ran it —
+     * `grep -rn 'impl->spawn' src/` returned nothing — and four of the seven
+     * transcriptions now supply one.
+     *
+     * The Arachner's is the one that shows: its module ends export 0 by
+     * writing `currentmove = Stand`, and without that a placed Arachner starts
+     * with a NULL currentmove, which `q2_M_MoveFrame` returns on immediately.
+     * It stood inert until an AI callback happened to install something.
+     *
+     * Run LAST, after the class byte, the scale, the mass and the callbacks,
+     * because that is the order the loader uses: 0x8007E68C and 0x8007E698
+     * write health and gib_health from the class row and only then does
+     * 0x8007E6AC call the module's export 0, which is free to overwrite them.
+     */
+    if (b->impl && b->impl->spawn)
+        b->impl->spawn(m);
 }
 
 const q2_mmove *q2_cre_find_move(const q2_monster *m, s32 first_frame)
@@ -269,6 +335,91 @@ bool q2_cre_set_move(q2_monster *m, s32 first_frame)
     return true;
 }
 
+/*
+ * By module address, for the two creatures whose first frames collide.
+ *
+ * `q2_cre_bind` keeps its runtime moves parallel to the decoded ones, so the
+ * decoded record's `image_offset` — which is the module-relative address the
+ * callback's `lui`/`addiu` pair materialised — identifies a move exactly where
+ * a frame number cannot. See the note in crebind.h for which two.
+ */
+const q2_mmove *q2_cre_find_move_at(const q2_monster *m, u32 module_addr)
+{
+    q2_cre_bind *b = q2_cre_bind_for(m);
+    u32 i;
+
+    if (!b || !b->cre)
+        return NULL;
+
+    for (i = 0; i < b->move_count && i < b->cre->move_count; i++) {
+        /*
+         * Clip pieces are skipped for the same reason `q2_cre_find_move`
+         * skips them: a piece is a copy of its parent record and carries the
+         * parent's address, so installing one freezes the creature on a
+         * fragment of its own animation.
+         */
+        if (b->cre->move[i].clip_piece)
+            continue;
+        if (b->cre->move[i].addr == module_addr)
+            return &b->move[i];
+    }
+
+    return NULL;
+}
+
+bool q2_cre_set_move_at(q2_monster *m, u32 module_addr)
+{
+    const q2_mmove *mv = q2_cre_find_move_at(m, module_addr);
+
+    if (!mv || !m)
+        return false;
+
+    m->currentmove = mv;
+    return true;
+}
+
+/* ------------------------------------------------------------------------- */
+/* The shot hook — see q2_cre_shot in crebind.h                               */
+/* ------------------------------------------------------------------------- */
+static void (*g_shot_fn)(q2_monster *m, const q2_cre_shot *shot, void *user);
+static void  *g_shot_user;
+
+void q2_cre_set_shot_hook(void (*fn)(q2_monster *m, const q2_cre_shot *shot,
+                                     void *user),
+                          void *user)
+{
+    g_shot_fn   = fn;
+    g_shot_user = user;
+}
+
+void q2_cre_fire_shot(q2_monster *m, const q2_cre_shot *shot)
+{
+    if (!m || !shot)
+        return;
+
+    q2_cre_actions.fire_calls++;
+
+    if (!g_shot_fn) {
+        q2_cre_actions.fire_no_hook++;
+        return;
+    }
+    /*
+     * The two guards are the ones every refire function on the disc opens
+     * with, and they are checked here rather than in seven creature files.
+     */
+    if (!m->enemy) {
+        q2_cre_actions.fire_no_enemy++;
+        return;
+    }
+    if (m->enemy->health <= 0) {
+        q2_cre_actions.fire_dead_enemy++;
+        return;
+    }
+
+    q2_cre_actions.fire_sent++;
+    g_shot_fn(m, shot, g_shot_user);
+}
+
 /* ------------------------------------------------------------------------- */
 /* The registry of built-in implementations                                   */
 /* ------------------------------------------------------------------------- */
@@ -278,6 +429,7 @@ extern const q2_cre_impl q2_cre_gunner;
 extern const q2_cre_impl q2_cre_infantry;
 extern const q2_cre_impl q2_cre_arachner;
 extern const q2_cre_impl q2_cre_berserk;
+extern const q2_cre_impl q2_cre_insane;
 
 static const q2_cre_impl *const g_impls[] = {
     &q2_cre_soldier,
@@ -286,6 +438,7 @@ static const q2_cre_impl *const g_impls[] = {
     &q2_cre_infantry,
     &q2_cre_arachner,
     &q2_cre_berserk,
+    &q2_cre_insane,
     NULL
 };
 

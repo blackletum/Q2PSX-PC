@@ -395,26 +395,107 @@ typedef enum q2_cre_op {
  * The method checks out on the slot that was already known: `+0x28` resolves to
  * `0x8006FC1C`, the SVECTOR rotate, which is exactly `Q2_IMP_LOCAL2WLD`.
  *
- * Named this way so far, beyond the four below:
+ * ---------------------------------------------------------------------------
+ * THE WHOLE TABLE, read out one target at a time
+ * ---------------------------------------------------------------------------
+ * All 71 slots are now named. A `?` marks one whose identification rests on
+ * shape rather than on something decisive; everything else was settled by what
+ * the target actually does — the constants it uses, the entity offsets it
+ * touches, the tables it indexes.
  *
- *     +0xC0  0x8005C460   a scaled vector add, `out = a + (s * d) >> 12`,
- *                         per component — so the three consecutive `call(+C0)`
- *                         at the end of every Soldier fire think are MUZZLE
- *                         ARITHMETIC and not three shots
- *     +0xC4  0x8005C634
- *     +0xC8  0x8005F934   `vectoangles` — ratan2 through 0x8008A358, the
- *                         horizontal length through 0x8008A7E8, and three
- *                         angles written out; 3072 and 1024 are the quarter
- *                         turns it returns looking straight down and up
- *     +0xD8  0x8005BB58   angles to vectors — three angles masked to 0xFFF,
- *                         each indexing the packed {sin, cos} table at
- *                         0x800A5430
- *     +0xEC  0x80061118   `fire_hit`, the melee — Q2_IMP_FIRE_HIT below
+ *     +0x14  0x80089E28  rand
+ *     +0x18  0x8008A4D8  bios_printf
+ *     +0x1C  0x8005C8C8  link_entity
+ *     +0x20  0x8007270C  play_sound
+ *     +0x24  0x80073518  sound_index_by_name
+ *     +0x28  0x8006FC1C  local_to_world_svector
+ *     +0x2C  0x8006C6C8  attachment_local_offset
+ *     +0x30  0x8006D608  pose_at_position
+ *     +0x34  0x8006CA2C  pose_blend_two_positions
+ *     +0x38  0x8006CC44  attachment_world_point
+ *     +0x3C  0x80073AA4  sound_request_clone
+ *     +0x40  0x800739E4  sound_voice_still_playing
+ *     +0x44  0x80073A34  sound_request_set_params
+ *     +0x48  0x800E46D8  DATA: level_locals
+ *     +0x4C  0x800AECF8  DATA: cvar pointer table {skill, deathmatch, ?}
+ *     +0x50  0x800CBA28  DATA: the object array
+ *     +0x54  0x8005E350  ai_run
+ *     +0x58  0x8005ED6C  ai_walk
+ *     +0x5C  0x8005CDA8  ai_stand
+ *     +0x60  0x8005ED44  ai_move
+ *     +0x64  0x8005EE84  ai_charge
+ *     +0x68  0x800565C4  spawn_entity_from_placement
+ *     +0x6C  0x8006D280  free_object
+ *     +0x70  0x80055400  radius_damage_at_attachment   ?
+ *     +0x74  0x8006D330  find_move_by_name
+ *     +0x78  0x8002F238  blur_trail_start
+ *     +0x7C  0x8004E998  beam_attach
+ *     +0x80  0x80062000  monster_fire_blaster
+ *     +0x84  0x80061DFC  monster_fire_bullet
+ *     +0x88  0x80061ED0  monster_fire_shotgun
+ *     +0x8C  0x8006217C  monster_fire_railgun
+ *     +0x90  0x800621BC  monster_fire_bfg
+ *     +0x94  0x800614D4  monster_fire_grenade
+ *     +0x98  0x8006210C  monster_fire_rocket
+ *     +0x9C  0x800621F8  monster_fire_laser
+ *     +0xA0  0x80031094  muzzle_flash_light
+ *     +0xA4  0x8005FA28  findradius
+ *     +0xA8  0x80068A1C  zone_unoccupied
+ *     +0xAC  0x8005D104  FoundTarget
+ *     +0xB0  0x8005F048  HuntTarget
+ *     +0xB4  0x8005EF84  range
+ *     +0xB8  0x8005C4E8  VectorLength
+ *     +0xBC  0x8005C59C  VectorLengthSquared
+ *     +0xC0  0x8005C460  VectorMA
+ *     +0xC4  0x8005C634  VectorNormalize
+ *     +0xC8  0x8005F934  vectoangles
+ *     +0xCC  0x8005F8E8  vectoyaw
+ *     +0xD0  0x8005F104  infront
+ *     +0xD4  0x8005C7B8  anglemod
+ *     +0xD8  0x8005BB58  AngleVectors
+ *     +0xDC  0x8005F5FC  G_ProjectSource
+ *     +0xE0  0x8005CB00  entity_absolute_bounds
+ *     +0xE4  0x8005B950  visible
+ *     +0xE8  0x8005D8C8  M_CheckAttack
+ *     +0xEC  0x80061118  fire_hit
+ *     +0xF0  0x80057D54  T_Damage
+ *     +0xF4  0x8005BD3C  trace
+ *     +0xF8  0x800D501C  DATA: the global trace result
+ *     +0xFC  0x80062240  walkmonster_start
+ *     +0x100 0x8006229C  flymonster_start
+ *     +0x104 0x80062268  swimmonster_start
+ *     +0x108 0x8005CC58  entity_maxs_x
+ *     +0x10C 0x8005CC8C  entity_maxs_y
+ *     +0x110 0x8005CBF0  entity_mins_y
+ *     +0x114 0x8005CBBC  entity_mins_x
+ *     +0x118 0x80061DE4  register_class_method
+ *     +0x11C 0x8007F71C  corpse_think   ?
+ *     +0x120 0x8005A778  spawn_explosion
+ *     +0x124 0x8008A108  swap_stack_pointer
+ *     +0x128 0x800B28D4  DATA: the saved stack pointer for +0x124
+ *     +0x12C 0x80040800  player_proximity_effect
  *
- * Which settles something about the Soldier's SHOT by elimination: its fire
- * think calls +0xD8, +0x2C, +0x28, +0xC8, +0xD8, +0xC0 x3, and every one of
- * those is now read and every one is AIMING ARITHMETIC. There is no fire call
- * in it at all.
+ * ---------------------------------------------------------------------------
+ * Three things the full read settled that a partial one could not
+ * ---------------------------------------------------------------------------
+ * **The fire family is eight, not three, and it is contiguous.** +0x80..+0x9C
+ * is blaster, bullet, shotgun, railgun, bfg, grenade, rocket, laser — so a
+ * think function's `call(+98)` is a ROCKET rather than an unknown, which is
+ * what the Tank Commander's third attack has been waiting on.
+ *
+ * **The Soldier's fire think contains no fire call.** It calls +0xD8, +0x2C,
+ * +0x28, +0xC8, +0xD8 and +0xC0 three times, and every one of those is now
+ * read: AngleVectors, the attachment offset, the SVECTOR rotate, vectoangles,
+ * AngleVectors again and three VectorMAs. All of it is AIMING ARITHMETIC. The
+ * shot is reached through a fresh `lui` the action decoder does not follow.
+ *
+ * **One slot the loader writes differently, which is why a pattern dump misses
+ * it.** 69 of the 71 stores are `sw v0, N(s0)` two instructions after the
+ * address is materialised. 0x8007DB8C is `sw s6, 24(s0)`, and s6 was loaded
+ * once at the top of the function — 0x8008A4D8, the BIOS printf stub A(3Fh).
+ * The other two non-`sw v0` stores are the header the loader writes first:
+ * `sh v0, 16(s0)` = 304, the record size, and `sh v0, 18(s0)` = 1, the version.
+ * That is FORMATS §14.11's "304-byte, version 1" confirmed from the other side.
  */
 #define Q2_IMP_RAND      0x14
 #define Q2_IMP_SOUND     0x20
@@ -422,6 +503,27 @@ typedef enum q2_cre_op {
 #define Q2_IMP_MUZZLE    0x2C
 #define Q2_IMP_RANGE     0xB4
 #define Q2_IMP_FIRE_HIT  0xEC
+
+/*
+ * The projectile spawners, +0x80..+0x9C — contiguous, in the order the loader
+ * writes them, and the reason a decoded think function's `call(+98)` can now be
+ * routed instead of counted as unclassified.
+ */
+#define Q2_IMP_FIRE_BLASTER  0x80
+#define Q2_IMP_FIRE_BULLET   0x84
+#define Q2_IMP_FIRE_SHOTGUN  0x88
+#define Q2_IMP_FIRE_RAILGUN  0x8C
+#define Q2_IMP_FIRE_BFG      0x90
+#define Q2_IMP_FIRE_GRENADE  0x94
+#define Q2_IMP_FIRE_ROCKET   0x98
+#define Q2_IMP_FIRE_LASER    0x9C
+
+/* True for the eight spawners above and nothing else. */
+static inline bool q2_imp_is_fire(u32 slot)
+{
+    return slot >= Q2_IMP_FIRE_BLASTER && slot <= Q2_IMP_FIRE_LASER
+           && ((slot & 3u) == 0);
+}
 
 #define Q2_CRE_MAX_STEPS 8
 

@@ -47,6 +47,22 @@
  * implement it yet" — which is a visible gap, not a crash: the frame driver
  * skips a NULL method and the AI skips a NULL callback.
  */
+/*
+ * FOUR OF THE THIRTEEN SLOTS DO NOT HAVE THIS SIGNATURE, and the table stores
+ * them anyway.
+ *
+ *     5  dodge        void (*)(q2_monster *, q2_monster *other, s32 eta)
+ *     8  sight        void (*)(q2_monster *, q2_monster *other)
+ *     9  checkattack  bool (*)(q2_monster *)
+ *    11  pain         void (*)(q2_monster *, s16 damage)
+ *    12  die          void (*)(q2_monster *, s16 damage)
+ *
+ * `q2_creature_spawn` installs each of those through its own signature rather
+ * than through the flat table, so the entry here must be written with an
+ * explicit cast — `(q2_class_method)(void *)soldier_pain`. Writing the bare
+ * function name is a compile error, which is the right outcome: the alternative
+ * is five separate tables for thirteen slots.
+ */
 typedef struct q2_cre_impl {
     const char *name;                       /* the module name it matches */
     q2_class_method callback[13];
@@ -123,6 +139,24 @@ const q2_mmove *q2_cre_find_move(const q2_monster *m, s32 first_frame);
 /* Install that move on `m`. Returns false when the disc has no such move. */
 bool q2_cre_set_move(q2_monster *m, s32 first_frame);
 
+/*
+ * The same, keyed on the move record's own MODULE ADDRESS.
+ *
+ * A first frame is the right key almost everywhere and it is not unique: the
+ * Arachner's walk (module+0x17DC) and run (module+0x1808) both cover frames
+ * 16-24 and differ only in the per-frame AI verb, and the Tank Commander's
+ * walk (module+0x1BC0) and run (module+0x1C3C) both cover 34-49. Asking for
+ * frame 16 gets whichever the decoder found first, so an Arachner told to run
+ * would walk.
+ *
+ * Both transcriptions had grown a private copy of this before it was shared;
+ * this is that copy, once. Use it only where the frame range is genuinely
+ * ambiguous — `q2_cre_set_move` stays the readable form, and a module address
+ * in a callback is a constant only the disassembly can justify.
+ */
+const q2_mmove *q2_cre_find_move_at(const q2_monster *m, u32 module_addr);
+bool q2_cre_set_move_at(q2_monster *m, u32 module_addr);
+
 /* Which bind a live creature belongs to, by its class byte. */
 q2_cre_bind *q2_cre_bind_for(const q2_monster *m);
 void         q2_cre_bind_reset(void);
@@ -143,6 +177,51 @@ void q2_cre_set_sound_hook(void (*fn)(q2_monster *m, int which, void *user),
                            void *user);
 void q2_cre_set_fire_hook(void (*fn)(q2_monster *m, int flash, void *user),
                           void *user);
+
+/* ------------------------------------------------------------------------- */
+/*
+ * A CREATURE'S SHOT, with the figures its own module carries.
+ *
+ * The old hook took a single `int`, which is why every creature but the
+ * Soldier fired into nothing: it could name the spawner and not the shot. The
+ * arguments the modules pass are now read for all seven, and every one of them
+ * is id's own number —
+ *
+ *     Tankcomm  rocket   damage 50, speed 550     blaster damage 16, speed 800
+ *               bullet   damage 20, kick 4, spread 300/500
+ *     Gunner    grenade  damage 50, speed 600
+ *               bullet   damage  3, kick 4, spread 300/500
+ *     Infantry  bullet   damage  3, kick 4, spread 300/500
+ *     Arachner  railgun  damage 50, kick 100
+ *     Soldier   blaster  damage  5, speed 600
+ *               shotgun  damage  2, kick 1, spread 1000/500, 12 pellets
+ *               bullet   damage  2, kick 4, spread 300/500
+ *
+ * — `DEFAULT_BULLET_HSPREAD` 300 and `VSPREAD` 500 recurring across four
+ * unrelated modules is the check that says the argument positions are right.
+ *
+ * `slot` is one of the `Q2_IMP_FIRE_*` offsets, so the host can tell a rocket
+ * from a rail without the creature having to. A field a given weapon does not
+ * use is zero, and a hook that finds `damage == 0` should decline rather than
+ * invent: that is the state a creature whose figures are not read would be in.
+ */
+typedef struct q2_cre_shot {
+    u32 slot;           /* Q2_IMP_FIRE_* — which engine spawner            */
+    s32 flash;          /* the muzzle-flash index the module passes        */
+    s32 damage;
+    s32 speed;          /* projectiles: the bolt's, grenade's or rocket's  */
+    s32 kick;
+    s32 hspread;        /* hitscan spread, id's DEFAULT_* where it matches */
+    s32 vspread;
+    s32 count;          /* pellets; 1 for anything that is not a shotgun   */
+} q2_cre_shot;
+
+void q2_cre_set_shot_hook(void (*fn)(q2_monster *m, const q2_cre_shot *shot,
+                                     void *user),
+                          void *user);
+
+/* Fire one, from a transcribed creature. Does nothing without a hook. */
+void q2_cre_fire_shot(q2_monster *m, const q2_cre_shot *shot);
 
 /* The melee hook the decoded creatures reach: `fire_hit` with the module's own
  * aim vector, damage and kick. */

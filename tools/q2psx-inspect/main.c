@@ -2881,14 +2881,15 @@ static int cmd_classes(disc *d)
     }
 
     printf("Entity class table: %u records\n\n", tbl.count);
-    printf("  %-4s %-14s %8s %8s  %s\n", "id", "name", "health", "offset",
-           "kind");
+    printf("  %-4s %-14s %8s %8s %6s  %s\n", "id", "name", "health", "gib",
+           "class", "kind");
     for (i = 0; i < tbl.count; i++) {
         const q2_class_entry *e = &tbl.entries[i];
         if (!e->name[0])
             continue;
-        printf("  %-4u %-14s %8d %8d  %s\n", e->id, e->name, e->health,
-               e->offset, e->is_player ? "player skin" : "creature");
+        printf("  %-4u %-14s %8d %8d %6u  %s\n", e->id, e->name, e->health,
+               e->gib_health, (unsigned)e->class_byte,
+               e->is_player ? "player skin" : "creature");
     }
 
     for (f = 0; f < n; f++) {

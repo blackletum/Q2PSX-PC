@@ -8,6 +8,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "ai.h"
+#include "crebind.h"
 #include "monster.h"
 #include "trig.h"
 
@@ -182,6 +184,256 @@ static void test_damage(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * M_ReactToDamage (0x80062654) and the tail of T_Damage (0x80062940..0x80062B54).
+ *
+ * These are behavioural rather than arithmetic, and every one of them pins a
+ * thing that was silently not happening before: `oldenemy` had no writer at all
+ * in the whole tree, the kill counter did not exist, and a creature shot from
+ * behind never turned round.
+ */
+static int g_pain_calls;
+static int g_die_calls;
+
+static s16 g_pain_damage;
+static void stub_pain(q2_monster *m, s16 damage)
+{
+    (void)m;
+    g_pain_damage = damage;
+    g_pain_calls++;
+}
+static s16 g_die_damage;
+static void stub_die(q2_monster *m, s16 damage)
+{
+    g_die_damage = damage;
+    g_die_calls++;
+    m->dead = true;
+}
+
+static void make_monster(q2_monster *m, u8 class_byte, s16 health)
+{
+    q2_monster_init(m);
+    m->in_use      = true;
+    m->spawnflags |= Q2_SVFLAG_INUSE;
+    m->svflags    |= Q2_SVF_MONSTER;
+    m->class_id    = class_byte;
+    m->health      = health;
+    m->max_health  = health;
+    m->gib_health  = (s16)(-health);
+    m->pain        = stub_pain;
+    m->die         = stub_die;
+}
+
+static void make_player(q2_monster *m)
+{
+    q2_monster_init(m);
+    m->in_use      = true;
+    m->spawnflags |= Q2_SVFLAG_INUSE;
+    m->client      = true;
+    m->health      = 100;
+    m->max_health  = 100;
+}
+
+static void test_react_to_damage(void)
+{
+    q2_monster targ, player, other, ally;
+
+    printf("M_ReactToDamage\n");
+
+    /* A player shooting a creature that has no enemy becomes its enemy. */
+    q2_level_reset();
+    make_monster(&targ, 87, 100);
+    make_player(&player);
+    q2_m_react_to_damage(&targ, &player);
+    check(targ.enemy == &player, "an unengaged creature turns on its attacker");
+
+    /* Shot by the thing it is already fighting: nothing is remembered. */
+    q2_level_reset();
+    make_monster(&targ, 87, 100);
+    make_player(&player);
+    targ.enemy    = &player;
+    targ.oldenemy = NULL;
+    q2_m_react_to_damage(&targ, &player);
+    check(targ.oldenemy == NULL,
+          "the current enemy shooting again changes nothing");
+
+    /*
+     * Hit by a DIFFERENT kind of creature that moves the same way: fight back.
+     * 0x80062728 — same base type, different class byte, and not one of the
+     * four the original refuses to take offence at.
+     */
+    q2_level_reset();
+    make_monster(&targ, 87, 100);            /* Soldier */
+    make_monster(&other, 79, 100);           /* Gunner  */
+    q2_m_react_to_damage(&targ, &other);
+    check(targ.enemy == &other,
+          "a creature fights back at another kind of creature");
+
+    /* Its own kind does not start a fight — id's classname test, and here it is
+     * a class-byte equality. It takes up that one's target instead. */
+    q2_level_reset();
+    make_monster(&targ, 87, 100);
+    make_monster(&other, 87, 100);
+    make_player(&player);
+    other.enemy = &player;
+    q2_m_react_to_damage(&targ, &other);
+    check(targ.enemy == &player,
+          "hit by its own kind, it takes up that one's enemy instead");
+
+    /*
+     * THE FOUR EXCLUSIONS, from the class-byte column of the descriptor table
+     * at 0x800A3518: Tankcomm 91, Boss1 90, Rider 83, Jorg 82 — id's tank,
+     * supertank, makron and jorg. Splash from one of these makes a creature
+     * take up ITS target rather than turn on it.
+     */
+    {
+        const u8 excluded[4] = {
+            Q2_CLASS_TANKCOMM, Q2_CLASS_BOSS1, Q2_CLASS_RIDER, Q2_CLASS_JORG
+        };
+        int i;
+
+        for (i = 0; i < 4; i++) {
+            q2_level_reset();
+            make_monster(&targ, 87, 100);
+            make_monster(&other, excluded[i], 100);
+            make_player(&player);
+            other.enemy = &player;
+            q2_m_react_to_damage(&targ, &other);
+            check(targ.enemy == &player,
+                  "a big monster's crossfire does not start a fight");
+        }
+    }
+
+    /* A good guy does not get angry at a player. */
+    q2_level_reset();
+    make_monster(&targ, 87, 100);
+    make_player(&player);
+    targ.aiflags |= Q2_AI_GOOD_GUY;
+    q2_m_react_to_damage(&targ, &player);
+    check(targ.enemy == NULL, "a good guy ignores a player's fire");
+
+    /* Nor at another good guy. */
+    q2_level_reset();
+    make_monster(&targ, 87, 100);
+    make_monster(&ally, 79, 100);
+    targ.aiflags |= Q2_AI_GOOD_GUY;
+    ally.aiflags |= Q2_AI_GOOD_GUY;
+    q2_m_react_to_damage(&targ, &ally);
+    check(targ.enemy == NULL, "a good guy ignores another good guy");
+
+    /*
+     * Already fighting a VISIBLE player: it remembers the new attacker rather
+     * than switching to them. The stand-in world has no obstruction, so
+     * `q2_visible` is true and this takes the first arm. 0x800626F4.
+     */
+    q2_level_reset();
+    make_monster(&targ, 87, 100);
+    make_player(&player);
+    make_player(&other);
+    other.pos[0] = 4000;
+    targ.enemy = &player;
+    q2_m_react_to_damage(&targ, &other);
+    check(targ.enemy == &player, "it keeps the player it can see");
+    check(targ.oldenemy == &other, "and remembers the one that shot it");
+}
+
+/* ------------------------------------------------------------------------- */
+static void test_damage_reaction(void)
+{
+    q2_monster targ, player;
+
+    printf("T_Damage tail\n");
+
+    /* A survivable hit flinches, and turns the creature on the shooter first. */
+    q2_level_reset();
+    g_pain_calls = 0;
+    g_die_calls  = 0;
+    make_monster(&targ, 87, 100);
+    make_player(&player);
+    targ.health = 60;
+    q2_monster_damage_reaction(&targ, &player, 40);
+    check_eq_i(g_pain_calls, 1, "a survivable hit calls pain once");
+    check_eq_i(g_pain_damage, 40, "and it is told how much landed");
+    check_eq_i(g_die_calls, 0, "and does not call die");
+    check(targ.enemy == &player, "and the creature has turned on the shooter");
+
+    /* A creature mid-duck absorbs the hit without flinching — 0x80062AD0. */
+    q2_level_reset();
+    g_pain_calls = 0;
+    make_monster(&targ, 87, 100);
+    make_player(&player);
+    targ.health   = 60;
+    targ.aiflags |= Q2_AI_DUCKED;
+    q2_monster_damage_reaction(&targ, &player, 40);
+    check_eq_i(g_pain_calls, 0, "a ducked creature does not flinch");
+
+    /* The lethal hit calls die exactly once. */
+    q2_level_reset();
+    g_pain_calls = 0;
+    g_die_calls  = 0;
+    make_monster(&targ, 87, 100);
+    make_player(&player);
+    targ.health = -10;
+    q2_monster_damage_reaction(&targ, &player, 110);
+    check_eq_i(g_die_calls, 1, "the lethal hit calls die");
+    check_eq_i(g_die_damage, 110, "and it is told how much landed");
+    check(targ.dead, "and the creature is dead");
+    check_eq_i(targ.deadflag, Q2_DEAD_DEAD,
+               "with deadflag and dead agreeing");
+    check_eq_i(q2_level_state.killed_monsters, 1, "the kill is counted");
+    check((targ.flags & Q2_FL_NO_KNOCKBACK) != 0,
+          "a body takes no more knockback");
+
+    targ.health = -200;
+    q2_monster_damage_reaction(&targ, &player, 190);
+    check_eq_i(g_die_calls, 1, "shooting the body again does not kill it twice");
+    check_eq_i(q2_level_state.killed_monsters, 1, "nor count it twice");
+
+    /* The floor, 0x800629B4. */
+    q2_level_reset();
+    make_monster(&targ, 87, 100);
+    make_player(&player);
+    targ.health = -30000;
+    q2_monster_damage_reaction(&targ, &player, 30100);
+    check_eq_i(targ.health, -9999, "health floors at -9999");
+
+    /* A good guy's death is not on the scoreboard. 0x800629F8. */
+    q2_level_reset();
+    make_monster(&targ, 87, 100);
+    make_player(&player);
+    targ.aiflags |= Q2_AI_GOOD_GUY;
+    targ.health   = -5;
+    q2_monster_damage_reaction(&targ, &player, 105);
+    check_eq_i(q2_level_state.killed_monsters, 0, "a good guy is not counted");
+
+    /* monster_death_use, 0x800622E8. */
+    q2_level_reset();
+    make_monster(&targ, 87, 100);
+    make_player(&player);
+    targ.flags   |= Q2_FL_FLY | Q2_FL_SWIM;
+    targ.aiflags |= Q2_AI_GOOD_GUY | Q2_AI_STAND_GROUND | Q2_AI_DUCKED
+                  | Q2_AI_HOLD_FRAME;
+    targ.health   = -5;
+    q2_monster_damage_reaction(&targ, &player, 105);
+    check_eq_i(targ.aiflags, Q2_AI_GOOD_GUY,
+               "death clears every ai flag but AI_GOOD_GUY");
+    check((targ.flags & (Q2_FL_FLY | Q2_FL_SWIM)) == 0,
+          "a dead flyer stops flying");
+
+    /* The nightmare debounce, 0x80062B20: five seconds rather than the pain
+     * handler's own three. */
+    q2_level_reset();
+    make_monster(&targ, 87, 100);
+    make_player(&player);
+    targ.health = 60;
+    q2_cre_set_skill(3);
+    q2_monster_damage_reaction(&targ, &player, 40);
+    check_eq_i(targ.pain_debounce, Q2_AI_SECONDS(5),
+               "skill 3 pushes the pain debounce out to five seconds");
+    q2_cre_set_skill(1);
+}
+
+/* ------------------------------------------------------------------------- */
 static void test_time_base(void)
 {
     printf("AI clock\n");
@@ -202,6 +454,8 @@ int main(void)
     test_frame_distance();
     test_infront();
     test_damage();
+    test_react_to_damage();
+    test_damage_reaction();
     test_time_base();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);

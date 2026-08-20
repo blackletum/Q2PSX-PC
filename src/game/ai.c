@@ -529,6 +529,125 @@ void q2_found_target(q2_monster *self)
 }
 
 /* ------------------------------------------------------------------------- */
+/* M_ReactToDamage — 0x80062654                                               */
+/* ------------------------------------------------------------------------- */
+/*
+ * WHO A HURT CREATURE TURNS ON, and until now nothing on this side answered it.
+ *
+ * `oldenemy` (entity+0xC0) was read in `ai_run` — a creature that loses its
+ * target falls back to it — and was WRITTEN nowhere in the whole tree. This is
+ * the function that writes it, and it is the only one that does: T_Damage calls
+ * it at 0x80062AC0, before the pain handler and only for something with
+ * SVF_MONSTER set. Without it a creature shot from behind never turned round;
+ * it acquired you through `FindTarget`'s sight cone or not at all, which is why
+ * shooting one in the back was free.
+ *
+ * ---------------------------------------------------------------------------
+ * The four class bytes it refuses to take offence at
+ * ---------------------------------------------------------------------------
+ * id's version excludes four monsters by `strcmp` on the classname — tank,
+ * supertank, makron and jorg, "they spread out too much". The console has no
+ * classnames at this point; it compares the class byte at entity+0x23 against
+ * 91, 90, 83 and 82 (0x80062750..0x8006276C). Those four are not a guess: the
+ * class descriptor table at 0x800A3518 carries the class byte in each 48-byte
+ * record at +0x20, and reading that column out gives
+ *
+ *     91  Tankcomm     health  750     id's monster_tank
+ *     90  Boss1        health 1500     id's monster_supertank
+ *     83  Rider        health 3000     id's monster_makron
+ *     82  Jorg         health 3000     id's monster_jorg
+ *
+ * — id's own four, in id's own role, and their health columns are id's numbers
+ * as well. Nothing in the decode was arranged to produce that.
+ *
+ * ---------------------------------------------------------------------------
+ * One departure from id, and it is the disc's
+ * ---------------------------------------------------------------------------
+ * id guards the help-our-buddy arm with `attacker->enemy && attacker->enemy !=
+ * targ`. The console does not: 0x800627C4 loads `attacker->enemy` and stores it
+ * into `targ->enemy` with no test at all, so a creature caught in another's
+ * crossfire can end up with a NULL enemy and still be sent to FoundTarget.
+ * Reproduced as written — `q2_found_target` returns on a null enemy, which is
+ * what the original's own null deref would not have done, and is the one place
+ * this is deliberately safer than the console.
+ */
+/* The four class bytes are Q2_CLASS_TANKCOMM / BOSS1 / RIDER / JORG, named in
+ * monster.h with the descriptor-table column they come from. */
+
+/* FL_FLY | FL_SWIM — the "same base type" test at 0x80062730. */
+#define Q2_FL_BASE_TYPE (Q2_FL_FLY | Q2_FL_SWIM)
+
+static bool reacts_by_class(const q2_monster *attacker)
+{
+    switch (attacker->class_id) {
+    case Q2_CLASS_TANKCOMM:
+    case Q2_CLASS_BOSS1:
+    case Q2_CLASS_RIDER:
+    case Q2_CLASS_JORG:
+        return false;
+    default:
+        return true;
+    }
+}
+
+void q2_m_react_to_damage(q2_monster *targ, q2_monster *attacker)
+{
+    if (!targ || !attacker)
+        return;
+
+    /* Only a player or another creature is worth reacting to — a rocket is
+     * not. 0x80062668. */
+    if (!attacker->client && !(attacker->svflags & Q2_SVF_MONSTER))
+        return;
+
+    if (attacker == targ || attacker == targ->enemy)
+        return;
+
+    /* A good guy does not get angry at a player or at another good guy.
+     * 0x800626A4. */
+    if (targ->aiflags & Q2_AI_GOOD_GUY) {
+        if (attacker->client || (attacker->aiflags & Q2_AI_GOOD_GUY))
+            return;
+    }
+
+    if (attacker->client) {
+        /*
+         * Already hunting a player and can still SEE them: remember the new
+         * attacker for later and carry on with the one in front. Only when the
+         * old target has gone out of sight does the new one take over.
+         * 0x800626DC.
+         */
+        if (targ->enemy && targ->enemy->client) {
+            if (q2_visible(targ, targ->enemy)) {
+                targ->oldenemy = attacker;
+                return;
+            }
+            targ->oldenemy = targ->enemy;
+        }
+        targ->enemy = attacker;
+    } else if ((targ->flags & Q2_FL_BASE_TYPE)
+                   == (attacker->flags & Q2_FL_BASE_TYPE)
+               && targ->class_id != attacker->class_id
+               && reacts_by_class(attacker)) {
+        /* Hit by a different kind of creature that moves the same way it does:
+         * fight back. 0x80062728. */
+        if (targ->enemy && targ->enemy->client)
+            targ->oldenemy = targ->enemy;
+        targ->enemy = attacker;
+    } else {
+        /* Otherwise take up whatever the attacker is angry at. 0x800627A0. */
+        if (targ->enemy && targ->enemy->client)
+            targ->oldenemy = targ->enemy;
+        targ->enemy = attacker->enemy;
+    }
+
+    /* A creature part-way through a duck does not break out of it to charge.
+     * 0x800627D4. */
+    if (!(targ->aiflags & Q2_AI_DUCKED))
+        q2_found_target(targ);
+}
+
+/* ------------------------------------------------------------------------- */
 /* FindTarget — 0x8005D334                                                    */
 /* ------------------------------------------------------------------------- */
 /* The class id of the noise entity a player's own footsteps spawn. Read as the

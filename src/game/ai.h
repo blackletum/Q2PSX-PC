@@ -137,6 +137,15 @@ bool q2_find_target(q2_monster *self);
 void q2_found_target(q2_monster *self);     /* 0x8005D104 */
 void q2_hunt_target(q2_monster *self);      /* inline in FoundTarget */
 
+/*
+ * Who a hurt creature turns on — 0x80062654, called from T_Damage at
+ * 0x80062AC0 for anything with SVF_MONSTER set, before the pain handler.
+ *
+ * This is the ONLY writer of `oldenemy` in the whole original, which is why
+ * `ai_run`'s fall-back to it never fired here: nothing had ever set it.
+ */
+void q2_m_react_to_damage(q2_monster *targ, q2_monster *attacker);
+
 /* self->attack_finished = level.time + t. 0x800622D0. */
 void q2_attack_finished(q2_monster *self, s32 t);
 

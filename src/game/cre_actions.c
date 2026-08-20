@@ -128,9 +128,33 @@ static void run_step(q2_monster *m, const q2_cre_step *s)
          * what it does know and the client decides. That is a stated shortfall,
          * not a reconstruction.
          */
+        /*
+         * A CORRECTION TO THE LIST ABOVE, and it removes a member rather than
+         * adding one.
+         *
+         * `+0xFC` was in it, on the reading "three calls to one spawner
+         * (0x800619E0), which is the shape of a spread". There are not three
+         * calls to 0x800619E0 in that function; there is ONE, and the three are
+         * three DIFFERENT functions that each make it:
+         *
+         *     +0xFC  0x80062240   think = 0x8006241C;             monster_start
+         *     +0x100 0x8006229C   think = 0x800624BC; flags |= 1; monster_start
+         *     +0x104 0x80062268   think = 0x8006255C; flags |= 2; monster_start
+         *
+         * Flags 1 and 2 are FL_FLY and FL_SWIM, so those are id's
+         * `walkmonster_start`, `flymonster_start` and `swimmonster_start` to
+         * the line — and 0x800619E0 is `monster_start` itself, which is where
+         * `level.total_monsters` is incremented (0x80061A64). None of the three
+         * is a shot. A creature whose think reached +0xFC was being credited
+         * with firing a weapon for waking itself up.
+         *
+         * What replaces it is the rest of the family, which is contiguous and
+         * is now named end to end: +0x80..+0x9C is blaster, bullet, shotgun,
+         * railgun, bfg, grenade, rocket, laser (creature.h). Four of the eight
+         * were previously falling through to `unclassified`.
+         */
         q2_cre_actions.calls_seen++;
-        switch (s->import_ofs) {
-        case 0x84: case 0x98: case 0x8C: case 0x80: case 0xFC:
+        if (q2_imp_is_fire(s->import_ofs)) {
             q2_cre_actions.fire_calls++;
             if (!q2_cre_fire_fn)
                 q2_cre_actions.fire_no_hook++;
@@ -142,10 +166,8 @@ static void run_step(q2_monster *m, const q2_cre_step *s)
                 q2_cre_actions.fire_sent++;
                 q2_cre_fire_fn(m, (int)s->import_ofs, q2_cre_fire_user);
             }
-            break;
-        default:
+        } else {
             q2_cre_actions.calls_unclassified++;
-            break;
         }
         break;
 

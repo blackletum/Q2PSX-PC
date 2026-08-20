@@ -69,7 +69,8 @@ q2_result q2_class_table_load(q2_class_table *out, const disc *d,
         e->name[Q2_CLASS_NAME_LEN] = '\0';
         e->fn_a   = q2_rd_u32(rec + 0x14);
         e->fn_b   = q2_rd_u32(rec + 0x24);
-        e->offset = q2_rd_s16(rec + 0x28);
+        e->gib_health = q2_rd_s16(rec + 0x28);
+        e->class_byte = rec[0x20];
         e->health = q2_rd_s16(rec + 0x2A);
         e->is_player = (e->fn_a != 0 && e->fn_b != 0);
     }

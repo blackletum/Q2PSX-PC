@@ -98,8 +98,21 @@ void q2_actor_to_monster(const q2_actor *a, q2_monster *m)
     if (!a || !m)
         return;
     m->health = a->health;
-    if (m->health <= 0)
-        m->dead = true;
+
+    /*
+     * IT NO LONGER RAISES `dead` ITSELF, and that is a fix rather than a
+     * removal.
+     *
+     * The console raises the flag inside the creature's own `die`, and every
+     * transcribed `*_die` opens with `if (self->dead) return;` — so a sync that
+     * set it here handed the die handler a creature that was already dead and
+     * the handler returned on its first instruction. The port worked around
+     * that by clearing the flag around the call at the one call site, which is
+     * a workaround for a bug that only exists because of this line.
+     *
+     * `q2_monster_damage_reaction` (monster.c) is now the only thing that sets
+     * it, which is where T_Damage's own dispatch sets it too.
+     */
 }
 
 void q2_actor_from_player(q2_actor *a, const q2_inventory *inv,

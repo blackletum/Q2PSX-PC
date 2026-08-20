@@ -197,7 +197,15 @@ enum {
     Q2_FL_NOTARGET       = 0x0020,  /* FindTarget 0x8005D50C */
     Q2_FL_IMMUNE_SLIME   = 0x0040,
     Q2_FL_IMMUNE_LAVA    = 0x0080,
-    Q2_FL_PARTIALGROUND  = 0x0100   /* SV_NewChaseDir 0x800607C8 */
+    Q2_FL_PARTIALGROUND  = 0x0100,  /* SV_NewChaseDir 0x800607C8 */
+    /*
+     * Both of these are read out of T_Damage rather than assumed from id's
+     * header, and both land on id's own bit anyway: 0x8006291C tests 0x800 and
+     * forces knockback to zero, and 0x80062994 SETS it on anything that dies
+     * with SVF_MONSTER or a client block. 0x200 and 0x400 sit between and have
+     * no reader found, so they stay unnamed.
+     */
+    Q2_FL_NO_KNOCKBACK   = 0x0800   /* T_Damage 0x8006291C, 0x80062994 */
 };
 
 /* spawnflags — entity+0x1C. Only the two the AI reads are named. */
@@ -205,7 +213,58 @@ enum {
 #define Q2_SVFLAG_INUSE      0x20000000   /* bit 29, tested everywhere      */
 
 /* svflags — entity+0x40. */
+/*
+ * Bit 1 is id's SVF_DEADMONSTER, and it went unnamed here for as long as
+ * nothing wrote it. Five of the seven transcribed modules do — every `*_dead`
+ * and every gib arm sets it, and `q2_M_MoveFrame` was already TESTING the bare
+ * literal 2. A body with it set stops being solid to other monsters, which is
+ * how a corpse in a doorway does not block the creature behind it.
+ */
+#define Q2_SVF_DEADMONSTER   0x00000002
 #define Q2_SVF_MONSTER       0x00000004   /* FindTarget 0x8005D4D0 */
+
+/* ------------------------------------------------------------------------- */
+/*
+ * entity+0x20 IS A PACKED WORD, not a `u16 flags`
+ * ------------------------------------------------------------------------- *
+ * Every one of the seven creature modules writes it as a bitfield, and the
+ * layout came out the same from seven independent reads:
+ *
+ *     bits  0..15   flags       FL_* — what this header already names
+ *     bits 16..17   solid       SOLID_BBOX 2 at spawn
+ *     bits 18..21   movetype    MOVETYPE_STEP 5 at spawn, MOVETYPE_TOSS 7 dead
+ *     bits 22..23   deadflag    DEAD_DEAD 2, which every `die` tests to refuse
+ *                               a second entry
+ *
+ * and entity+0x1C carries one more above the SVFLAG_INUSE bit this header
+ * already names:
+ *
+ *     bits 30..31   takedamage  DAMAGE_YES 1, DAMAGE_AIM 2
+ *
+ * Six values, and all six are id's own enumerants — SOLID_BBOX 2,
+ * MOVETYPE_STEP 5, MOVETYPE_TOSS 7, DEAD_DEAD 2, DAMAGE_YES 1, DAMAGE_AIM 2.
+ * Nothing in the reads was arranged to produce that; the bit POSITIONS were
+ * found first, from the shift-and-mask each module uses, and the values fell
+ * out afterwards. `T_Damage` reads two of them independently (0x800629D8 for
+ * deadflag, 0x80062A34 for movetype) and agrees.
+ */
+#define Q2_SOLID_SHIFT       16
+#define Q2_SOLID_MASK        0x3u
+#define Q2_MOVETYPE_SHIFT    18
+#define Q2_MOVETYPE_MASK     0xFu
+#define Q2_DEADFLAG_SHIFT    22
+#define Q2_DEADFLAG_MASK     0x3u
+#define Q2_TAKEDAMAGE_SHIFT  30
+#define Q2_TAKEDAMAGE_MASK   0x3u
+
+enum { Q2_SOLID_NOT = 0, Q2_SOLID_TRIGGER = 1, Q2_SOLID_BBOX = 2,
+       Q2_SOLID_BSP = 3 };
+enum { Q2_MOVETYPE_NONE = 0, Q2_MOVETYPE_NOCLIP = 1, Q2_MOVETYPE_PUSH = 2,
+       Q2_MOVETYPE_STOP = 3, Q2_MOVETYPE_WALK = 4, Q2_MOVETYPE_STEP = 5,
+       Q2_MOVETYPE_FLY = 6, Q2_MOVETYPE_TOSS = 7 };
+enum { Q2_DEAD_NO = 0, Q2_DEAD_DYING = 1, Q2_DEAD_DEAD = 2,
+       Q2_DEAD_RESPAWNABLE = 3 };
+enum { Q2_DAMAGE_NO = 0, Q2_DAMAGE_YES = 1, Q2_DAMAGE_AIM = 2 };
 
 /* attack_state, using the PC enum's values. Stored as a 3-bit field at bits
  * 18..20 of the word at entity+0x138 (0x8005E254). */
@@ -237,6 +296,31 @@ typedef enum q2_attack_state {
 /* The one class that gets the doubled melee reach. Read as an equality against
  * the class id byte at entity+0x23. */
 #define Q2_CLASS_LONG_MELEE      68
+
+/* ------------------------------------------------------------------------- */
+/* Class bytes — entity+0x23                                                  */
+/* ------------------------------------------------------------------------- */
+/*
+ * The class byte is a THIRD numbering, distinct from the class-table row id
+ * (18, 19, 20 for the three Soldiers) and from the module's own name. It is the
+ * index into `classMethods[256]`, and it is what the engine compares when it
+ * wants to know which creature it is holding.
+ *
+ * Where it comes from was not written down anywhere until now: each 48-byte
+ * record of the class descriptor table at **0x800A3518** carries it at **+0x20**,
+ * and the module loader copies it into the entity with `lbu v0, 0x20(s4)` /
+ * `sb v0, 0x23(s0)` at 0x8007E660. Reading that column out gives the whole map,
+ * and the seven bytes the disc's own modules register — Arachner 64, Berserk 70,
+ * Gunner 79, Infantry 81, Soldier 87/88/89, Tankcomm 91, Insane 94 — all land on
+ * it exactly, which is the check that says the column is the right one.
+ *
+ * Named here are only the bytes some engine path actually tests for.
+ */
+#define Q2_CLASS_JORG            82   /* health 3000 — id's monster_jorg      */
+#define Q2_CLASS_RIDER           83   /* health 3000 — id's monster_makron    */
+#define Q2_CLASS_MEDIC           84   /* health  310 — id's monster_medic     */
+#define Q2_CLASS_BOSS1           90   /* health 1500 — id's monster_supertank */
+#define Q2_CLASS_TANKCOMM        91   /* health  750 — id's monster_tank      */
 
 typedef enum q2_range_band {
     Q2_RANGE_MELEE = 0,
@@ -273,7 +357,39 @@ typedef struct q2_monster {
 
     /* --- identity -------------------------------------------------------- */
     u32 spawnflags;         /* +0x1C  bit 18 ambush, bit 29 in use           */
-    u16 flags;              /* +0x20  FL_*                                   */
+    u16 flags;              /* +0x20  FL_*, the low half of the packed word  */
+
+    /*
+     * The other three fields of that same word, and the one above spawnflags.
+     * Kept as separate members rather than packed back into one, because the
+     * port has no reason to reproduce the packing and every reason to make a
+     * `movetype` read like a movetype. See the layout note above for where
+     * each one lives on the console and why the values are id's.
+     *
+     * `deadflag` is the field the console's `die` handlers test to refuse a
+     * second entry; this port's `dead` bool is the same guard and the two are
+     * kept in step by `q2_monster_damage_reaction`.
+     */
+    u8  solid;              /* +0x20 bits 16..17 */
+    u8  movetype;           /* +0x20 bits 18..21 */
+    u8  deadflag;           /* +0x20 bits 22..23 */
+    u8  takedamage;         /* +0x1C bits 30..31 */
+
+    /*
+     * +0x4E, and it was decoded per creature and then dropped on the floor.
+     * `q2_creature` has carried `mass` since the module decoder was written —
+     * Soldier 100, Infantry 200, Gunner 200, Berserk 250, Arachner 400,
+     * Tankcomm 500, all id's own numbers — and there was nowhere on the live
+     * entity to put it.
+     */
+    s16 mass;               /* +0x4E */
+
+    /*
+     * +0x3A. `hurt` is only its LOW BIT (the wounded half of a skin pair); the
+     * base index is per creature, and a module can set the whole field —
+     * the Tank Commander's second class byte spawns with `skinnum = 2`.
+     */
+    u8  skinnum;            /* +0x3A */
     u8  class_id;           /* +0x23  indexes the class method table         */
     u8  class_byte;         /* the local descriptor key, 64..94 for monsters */
 
@@ -345,6 +461,17 @@ typedef struct q2_monster {
     struct q2_monster *oldenemy;     /* +0xC0                                */
     struct q2_monster *goalentity;   /* +0x84                                */
     struct q2_monster *movetarget;   /* +0x88                                */
+
+    /*
+     * +0x48, and the ONE thing that writes it on a creature is the kill
+     * bookkeeping: `Killed` sets `targ->owner = attacker` when the attacker's
+     * class byte is 84 (0x80062A18), which is id's "medics won't heal monsters
+     * that they kill themselves". Unreachable on this disc — the Medic has a
+     * class-table row and no CreAI module ships for it — and transcribed
+     * anyway, because a branch that cannot fire here is still the branch the
+     * original has.
+     */
+    struct q2_monster *owner;        /* +0x48                                */
     s32 show_hostile;                /* +0xB0                                */
     s32 teleport_time;               /* +0xD0                                */
     s16 targetname;                  /* +0x18  script name id, 0 when none   */
@@ -382,14 +509,26 @@ typedef struct q2_monster {
      * random choice among the death moves.
      *
      * The original passes T_Damage's attacker, inflictor, damage and point to
-     * both. This port's implementations take only the entity — the same
-     * convention every other callback here uses — because nothing on the
-     * reconstructed side reads the rest yet. Stated rather than silently
-     * dropped: a `soldier_pain` that wanted the damage to pick pain4 would
-     * need the argument added here first.
+     * both.
+     *
+     * AND THE DAMAGE IS NOW PASSED, because four of the seven transcriptions
+     * cannot work without it. This used to say "a `soldier_pain` that wanted
+     * the damage to pick pain4 would need the argument added here first", and
+     * that turned out to understate it:
+     *
+     *     Tankcomm  pain   `damage <= 10` returns outright, `damage <= 30`
+     *                      adds a roll, and 30 / 60 pick among three moves
+     *     Gunner    pain   three flinch animations split at 10 and 25
+     *     Berserk   pain   `damage < 20 || random() < 0.5` gates the flinch
+     *     Berserk   die    `damage >= 50` picks the long death
+     *
+     * Every one of those was reaching a sentinel and taking one arm forever.
+     * The attacker, the inflictor and the point are still dropped: nothing
+     * reconstructed reads them, and adding a parameter nothing consumes is how
+     * a signature stops meaning anything.
      */
-    void (*pain)(struct q2_monster *m);                        /* +0xA0 */
-    void (*die)(struct q2_monster *m);                         /* +0xA4 */
+    void (*pain)(struct q2_monster *m, s16 damage);            /* +0xA0 */
+    void (*die)(struct q2_monster *m, s16 damage);             /* +0xA4 */
     /*
      * +0x108, with its threshold at +0x140. Not in the PC lineage: M_ChangeYaw
      * and SV_StepDirection both call it INSTEAD of turning when the turn they
@@ -450,6 +589,26 @@ typedef struct q2_level {
     s32 sound_entity_framenum;      /* 0x800E46F0 */
     q2_monster *sound2_entity;      /* 0x800E46F4 */
     s32 sound2_entity_framenum;     /* 0x800E46F8 */
+
+    /*
+     * 0x800E46FC — `level.total_monsters`, and it is the counter's other half:
+     * `monster_start` increments it for every creature it spawns that is not
+     * AI_GOOD_GUY, which is the same exclusion `Killed` applies to the kill
+     * count below. id keeps the pair in exactly this order.
+     */
+    s32 total_monsters;
+
+    /*
+     * 0x800E4700 — `level.killed_monsters`, incremented by `Killed` at
+     * 0x80062A10 for any creature that is not a good guy.
+     *
+     * The MISSION screen's kill column used to be a scan for bodies with the
+     * `dead` flag set, which is a reconstruction of the effect rather than of
+     * the counter: it counts a good guy, it counts a creature killed twice
+     * differently from the console, and it cannot count one that has been
+     * removed. This is the number the original keeps.
+     */
+    s32 killed_monsters;
 } q2_level;
 
 extern q2_level q2_level_state;
@@ -478,6 +637,36 @@ bool q2_infront(const q2_monster *self, const q2_monster *other);
 
 /* Apply damage. Returns true when this killed the creature. */
 bool q2_monster_damage(q2_monster *m, s16 amount);
+
+/*
+ * Skill, which the pain path gates on. Defined in cre_soldier.c and declared
+ * again here because the damage reaction needs it and `crebind.h` — where it
+ * otherwise lives — sits ABOVE this header and cannot be included from it.
+ */
+s32 q2_cre_skill(void);
+
+/*
+ * The tail of T_Damage, 0x80062940..0x80062B54 — everything the original does
+ * AFTER the health subtraction, which is where a creature's reaction lives.
+ *
+ * `combat.c` already carries the arithmetic half (the takedamage gate, the
+ * friendly-fire halving, the surprise bonus, godmode and the knockback
+ * suppression). What had no port at all was this half: which handler is called,
+ * with what guards, and what the world records about the death. Call it once
+ * per creature per frame in which its health changed, with the health already
+ * applied and `dead` not yet raised.
+ *
+ * `damage` is the amount that actually landed — zero is meaningful, because
+ * the original still runs M_ReactToDamage for it and then skips the flinch.
+ */
+void q2_monster_damage_reaction(q2_monster *targ, q2_monster *attacker,
+                                s16 damage);
+
+/*
+ * monster_death_use — 0x800622E8. Run once, from the kill path, before the
+ * creature's own `die`.
+ */
+void q2_monster_death_use(q2_monster *self);
 
 /* ------------------------------------------------------------------------- */
 /* The class method table                                                     */
