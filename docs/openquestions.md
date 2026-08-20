@@ -9237,67 +9237,69 @@ into this one.
       the console does not draw.
 
 
-## The gun's lighting is not the gather, and the split that says so
+## RETRACTION and replacement: the gun's residual is the ARM, and it is not the lighting
 
-`fa11948` recorded three gathers tried and three missed, and left the next step as
-the two 1.12 intensities at `+0xFC`/`+0xFE`. Both are now answered, and neither is it.
+An earlier version of this section concluded that the view weapon's remaining error was a
+BALANCE between the gathered lights and the ambient floor — "too much back colour under too
+little directional light". That conclusion is withdrawn. It was drawn from one level, and a
+second level disproves it.
 
-**The measurement.** The client's own BASE0 spawn against `ref/captures/base0_blaster.ppm`,
-with an EXACT weapon mask: render the frame twice, once with every one of the 73 weapon
-faces suppressed, and the difference is the weapon — 7,324 pixels, no colour guessing.
-Split by material (the violet body against the flesh forearm), eroded twice so an
-alignment error cannot reach outside either shape, and normalised by three world patches
-so the capture's own level and gamma cancel.
+**What still stands, and is checked in:**
 
-**Placement and hue are already right**, which is what makes the rest measurable:
+- **`fa11948`'s next step is answered and is a dead end.** `+0xFC`/`+0xFE` cannot separate
+  lights from ambient, because `q2_light_env_build` scales the light directions by
+  `intensity_a * intensity_b >> 11` AND the back colour by the same product `>> 24`
+  (`0x8006B468`). Swept: every value below 4096 darkens both materials at once.
+- **The gather is exonerated four ways over.** view-space list with a node, view-space with
+  none, world list with no node, and gathering at the WEAPON's origin rather than the
+  player's — all measured, none better than what ships.
+- **The whole lighting chain now verifies against the executable, step by step:**
 
-    emitter cx   retail 0.6383   port 0.6396    0.13% of the picture width
-    emitter cy   retail 0.6516   port 0.6573    0.57% of the band height
-    emitter h    retail 0.0394   port 0.0403    2%  (h escapes the capture's 1.25x
-                                                    horizontal upscale; w does not)
-    top edge     within 0.5% of picture height over the front two thirds
+      colour per light   0x8006AE30..0x8006AEDC   (rgb_byte * atten) >> 8, truncating
+                                                  toward zero, then clamped to 4096 —
+                                                  `q2_light_set_add` character for character
+      attenuation scale  0x8006AE14               `a2 = 64`, which is Q2_LIGHT_ATTEN_SCALE
+      colour matrix      0x8006B1E0 onward        light rgb copied VERBATIM from the record
+                                                  at 0x800DDC60 + i*16, halfwords +2/+4/+6;
+                                                  nothing scales it on the way in
+      GTE stage 1        light matrix . normal, >> 12, IR clamped at 0 (lm = 1)
+      GTE stage 2        (BK << 12) + colour . IR, >> 12   — the hardware's own shape
 
-**What is wrong is the BALANCE between the gathered lights and the ambient floor**, and
-the body and the arm prove it by being wrong in OPPOSITE directions — body too bright,
-arm too dark. Nothing that scales the whole result can do that.
+  There is no missing factor in any of it. The port's arithmetic is the console's.
 
-    arm / body luminance     port unlit (texture only)   0.650
-                             port lit                    0.810
-                             retail                      1.191
+**What replaces the conclusion.** Render the BASE0 spawn twice, once with every model face
+suppressed, and the difference is an exact weapon mask; split it into the flesh forearm and
+the metal body, erode twice so an alignment error cannot reach outside either shape, and the
+ratio between the two materials is:
 
-So the console SEPARATES the two parts far more than this port does: taking the port's
-own textures as the baseline, retail's arm is lit at ~0.98 and its body at ~0.53, while
-the port lights them at 0.70 and 0.56. The port's view-weapon shading is too flat, and
-it is too flat because there is too much back colour under too little directional light.
+                       port arm/body     retail arm/body
+      BASE0                 0.819             1.224          (matched location)
+      BASE1                 0.647             1.147          (different room, different gun)
 
-**Swept, and every one ruled out** (cost = the two material errors in quadrature):
+**Retail's ratio is nearly light-INVARIANT** — 1.224 in an outdoor canyon under a violet sky
+and 1.147 in a dark industrial room, two environments with nothing in common. A ratio set by
+the lighting cannot do that. It is set by the MATERIALS, and the port's is wrong by a
+consistent ~0.6 in both.
 
-    world list + player's node, ONE/ONE, glow 0x30   body +14.9%  arm -15.7%  <- ships
-    view-space list, with node                       -52.6% luma
-    view-space list, no node                         -52.6% luma
-    world list, no node                              +21.2% luma
-    gather at the WEAPON's origin, not the player's  body +18.8%  arm -11.2%  (no gain)
-    intensity_a below 4096                           strictly worse: 0x8006B468 scales
-                                                     the BACK COLOUR by the same product,
-                                                     so the two intensities cannot
-                                                     separate lights from ambient at all
-    glow swept 0 -> 0x60                             monotonic; 0x30 is the minimum cost
+**The error is localised to the ARM.** At BASE0, the one place the port and the capture stand
+in the same spot:
 
-That last row is the answer to `fa11948`'s question. `+0xFC`/`+0xFE` are not the knob:
-`q2_light_env_build` scales the light directions by `intensity_a * intensity_b >> 11`
-AND the back colour by the same product `>> 24`, which is the executable's own shape, so
-moving them moves both together. Confirmed by sweep — every value below 4096 makes both
-materials darker at once.
+      body   port 54.5   retail 50.5    +8%   — right
+      arm    port 44.7   retail 61.9   -28%   — wrong
 
-**What does move it the right way** is the ambient floor alone: dropping the glow raises
-arm/body from 0.810 at 0x30 to 1.074 at 0, and scaling the gathered light COLOURS alone
-by 2x with glow near 0x10-0x18 brings both materials inside ~10%. That is two free
-parameters fitted to one screenshot, which is why it is NOT checked in — the same
-`q2_light_env_build` lights every creature and item in the game, and a 2x on the light
-colours is a change to all of them made on the strength of one gun.
+and the arm's HUE is exact: forearm B-G is +3.9 in both. So the arm renders the right colour
+28% too dark, in a frame where the body beside it is correct, through a lighting path that
+has just been verified instruction by instruction.
 
-**So the question is now specific**: what scales the entity light colours between the
-gather and the GTE's colour matrix, and is the port's factor short by about two? That is
-a read of `0x8006B184..0x8006B4B8` against `q2_light_set_add`'s `rgb`, not another
-gather experiment. The gather is exonerated; three ways of doing it were already tried
-and a fourth (the weapon's own origin) is tried above.
+That is a texture or palette question, not a lighting one. The arm is `Blaster G` part 0,
+page 1, `face.texture` 23, which with BASE0's `clut4_count_a` of 68 is **CLUT index 91** —
+and the CLUT word the port binds, 0x4583, decodes to VRAM (48, 278), which is exactly what
+`q2_vram_clut_word(91)` should give, so the INDEX is not the fault either.
+
+**So the open question is now: does CLUT 91 as UPLOADED (vram.c) match the disc, and is the
+arm's page-1 texel data being decoded at the right brightness?** That is the same remaining
+candidate the Soldier's violet patch was narrowed to — "the CLUT's own contents as uploaded
+(vram.c) or the disc's texture being what it is" — and these two should now be treated as one
+question rather than two. Nothing in the gather, the intensities, the glow, the normals (all
+unit, 4095.3 mean over every part of `Blaster G`) or the GTE reaches it.
+
