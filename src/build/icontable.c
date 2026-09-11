@@ -1,5 +1,7 @@
 #include "icontable.h"
 
+#include "exe.h"
+
 #include "itemtable.h"
 
 #include <stdlib.h>
@@ -27,6 +29,8 @@ q2_result q2_icon_tables_load(q2_icon_tables *out, const disc *d,
                               const q2_build_id *id)
 {
     q2_result r;
+    q2_exe x;
+    u32 rects, ammo_icon, ammo_kind;
     const u8 *p;
     u32 i;
 
@@ -40,19 +44,25 @@ q2_result q2_icon_tables_load(q2_icon_tables *out, const disc *d,
      * the HUD tables are: a rect table read at the wrong offset does not fail,
      * it yields plausible-looking rectangles that sample the wrong pixels.
      */
-    if (strcmp(id->serial, "SLES-01534") != 0) {
-        Q2_WARN("status-bar table locations are unknown for build %s",
-                id->serial[0] ? id->serial : "(unidentified)");
-        return Q2_ERR_UNSUPPORTED;
-    }
     if (!id->exe_name[0])
         return Q2_ERR_NOT_FOUND;
 
-    r = disc_read_file(d, id->exe_name, &out->exe);
+    r = q2_exe_load(&x, d, id->exe_name);
     if (r != Q2_OK)
         return r;
+    if (!q2_exe_has_layout(&x)) {
+        Q2_WARN("status-bar table locations are unknown for build %s",
+                id->serial[0] ? id->serial : "(unidentified)");
+        q2_exe_free(&x);
+        return Q2_ERR_UNSUPPORTED;
+    }
+    /* SLES-01534's addresses, translated into this build's (exe.h). */
+    rects     = q2_exe_addr(&x, Q2_ICON_ADDR_RECTS);
+    ammo_icon = q2_exe_addr(&x, Q2_ICON_ADDR_AMMO_ICON);
+    ammo_kind = q2_exe_addr(&x, Q2_ICON_ADDR_AMMO_KIND);
+    out->exe  = x.file;             /* ownership moves; nothing else to free */
 
-    p = at(&out->exe, Q2_ICON_ADDR_RECTS, Q2_ICON_COUNT * Q2_ICON_RECORD);
+    p = at(&out->exe, rects, Q2_ICON_COUNT * Q2_ICON_RECORD);
     if (!p)
         goto bad;
     for (i = 0; i < Q2_ICON_COUNT; i++) {
@@ -64,12 +74,12 @@ q2_result q2_icon_tables_load(q2_icon_tables *out, const disc *d,
     }
     out->rect_count = Q2_ICON_COUNT;
 
-    p = at(&out->exe, Q2_ICON_ADDR_AMMO_ICON, Q2_ICON_WEAPONS);
+    p = at(&out->exe, ammo_icon, Q2_ICON_WEAPONS);
     if (!p)
         goto bad;
     memcpy(out->ammo_icon, p, Q2_ICON_WEAPONS);
 
-    p = at(&out->exe, Q2_ICON_ADDR_AMMO_KIND, Q2_ICON_WEAPONS);
+    p = at(&out->exe, ammo_kind, Q2_ICON_WEAPONS);
     if (!p)
         goto bad;
     memcpy(out->ammo_kind, p, Q2_ICON_WEAPONS);

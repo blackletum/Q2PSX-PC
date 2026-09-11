@@ -138,6 +138,9 @@ int cmd_items(disc *d)
         return 1;
     }
 
+    /* Compared against the transcription as this disc's build spells it. */
+    builtin = q2_item_table_builtin_for(id.region);
+
     if (q2_item_table_load(&disc_side, d, &id) != Q2_OK) {
         fprintf(stderr, "no item table for build %s -- using the built-in\n",
                 id.serial[0] ? id.serial : "(unidentified)");

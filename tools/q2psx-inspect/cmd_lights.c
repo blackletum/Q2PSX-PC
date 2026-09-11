@@ -164,7 +164,8 @@ static int check_flare_tables(const q2_exe *exe)
         u32 e = 0;
 
         for (;; e++) {
-            u32 addr = k[s].addr + e * 8;
+            /* SLES-01534's table, where this disc's build keeps it (exe.h). */
+            u32 addr = q2_exe_addr(exe, k[s].addr) + e * 8;
             s16 kind, size, pos, colour;
 
             if (!q2_exe_s16(exe, addr + 0, &kind))
@@ -230,10 +231,10 @@ static int check_sincos(const q2_exe *exe)
         s16 disc_sin, disc_cos;
         s32 ours_sin, ours_cos, d;
 
-        if (!q2_exe_s16(exe, Q2_TRIG_TABLE_ADDR + i * Q2_TRIG_TABLE_STRIDE + 0,
-                        &disc_sin) ||
-            !q2_exe_s16(exe, Q2_TRIG_TABLE_ADDR + i * Q2_TRIG_TABLE_STRIDE + 2,
-                        &disc_cos))
+        if (!q2_exe_s16(exe, q2_exe_addr(exe, Q2_TRIG_TABLE_ADDR) +
+                             i * Q2_TRIG_TABLE_STRIDE + 0, &disc_sin) ||
+            !q2_exe_s16(exe, q2_exe_addr(exe, Q2_TRIG_TABLE_ADDR) +
+                             i * Q2_TRIG_TABLE_STRIDE + 2, &disc_cos))
             return -1;
 
         ours_sin = q2_sin12((s32)i);
@@ -249,7 +250,7 @@ static int check_sincos(const q2_exe *exe)
 
         {
             s16 quarter;
-            u32 at = Q2_TRIG_TABLE_ADDR
+            u32 at = q2_exe_addr(exe, Q2_TRIG_TABLE_ADDR)
                    + ((i + Q2_ANGLE_90) % Q2_TRIG_TABLE_ENTRIES)
                      * Q2_TRIG_TABLE_STRIDE;
 
@@ -292,6 +293,7 @@ static u32 insn_lui_ori(const q2_exe *exe, u32 lui_at, bool *ok)
 {
     u32 hi = 0, lo = 0;
 
+    lui_at = q2_exe_addr(exe, lui_at);
     if (!q2_exe_u32(exe, lui_at, &hi) || !q2_exe_u32(exe, lui_at + 4, &lo) ||
         (hi >> 26) != 0x0Fu || (lo >> 26) != 0x0Du) {
         *ok = false;
@@ -304,7 +306,8 @@ static int insn_sra_amount(const q2_exe *exe, u32 at, bool *ok)
 {
     u32 w = 0;
 
-    if (!q2_exe_u32(exe, at, &w) || (w & 0xFC00003Fu) != 0x00000003u) {
+    if (!q2_exe_u32(exe, q2_exe_addr(exe, at), &w) ||
+        (w & 0xFC00003Fu) != 0x00000003u) {
         *ok = false;
         return 0;
     }
@@ -387,7 +390,7 @@ static int check_rsqrt(const q2_exe *exe)
         s16 ours = q2_light_rsqrt_table(i);
         s32 diff;
 
-        if (!q2_exe_s16(exe, ADDR_RSQRT + i * 2, &disc_side))
+        if (!q2_exe_s16(exe, q2_exe_addr(exe, ADDR_RSQRT) + i * 2, &disc_side))
             return -1;
 
         diff = (s32)ours - disc_side;
@@ -414,13 +417,13 @@ static int check_fallback(const q2_exe *exe)
     int i;
 
     for (i = 0; i < 3; i++) {
-        if (!q2_exe_u8(exe, ADDR_FALLBACK + 12 + (u32)i, &rgb[i]))
+        if (!q2_exe_u8(exe, q2_exe_addr(exe, ADDR_FALLBACK) + 12 + (u32)i, &rgb[i]))
             return -1;
     }
-    if (!q2_exe_u8 (exe, ADDR_FALLBACK + 17, &type)   ||
-        !q2_exe_u16(exe, ADDR_FALLBACK + 18, &radius) ||
-        !q2_exe_u32(exe, ADDR_FALLBACK + 20, &inner)  ||
-        !q2_exe_u32(exe, ADDR_FALLBACK + 24, &outer))
+    if (!q2_exe_u8 (exe, q2_exe_addr(exe, ADDR_FALLBACK) + 17, &type)   ||
+        !q2_exe_u16(exe, q2_exe_addr(exe, ADDR_FALLBACK) + 18, &radius) ||
+        !q2_exe_u32(exe, q2_exe_addr(exe, ADDR_FALLBACK) + 20, &inner)  ||
+        !q2_exe_u32(exe, q2_exe_addr(exe, ADDR_FALLBACK) + 24, &outer))
         return -1;
 
     printf("\nThe no-node fallback light at 0x%08X:\n", ADDR_FALLBACK);

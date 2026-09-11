@@ -1,5 +1,7 @@
 #include "leveltable.h"
 
+#include "exe.h"
+
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
@@ -46,7 +48,8 @@ q2_result q2_level_table_load(q2_level_table *out, const disc *d,
                               const q2_build_id *id)
 {
     q2_result r;
-    u32 offset, count, i;
+    q2_exe x;
+    u32 offset, count, i, vaddr;
 
     if (!out || !d || !id)
         return Q2_ERR_INVALID_ARG;
@@ -58,21 +61,31 @@ q2_result q2_level_table_load(q2_level_table *out, const disc *d,
      * point: a localised release moves this table, and reading the PAL offset
      * out of a different executable would yield names that look almost right.
      */
-    if (strcmp(id->serial, "SLES-01534") != 0) {
-        Q2_WARN("level table location is unknown for build %s",
-                id->serial[0] ? id->serial : "(unidentified)");
-        return Q2_ERR_UNSUPPORTED;
-    }
-
-    offset = Q2_LEVELTABLE_OFFSET_SLES01534;
-    count  = Q2_LEVELTABLE_COUNT_SLES01534;
+    count = Q2_LEVELTABLE_COUNT_SLES01534;
 
     if (!id->exe_name[0])
         return Q2_ERR_NOT_FOUND;
 
-    r = disc_read_file(d, id->exe_name, &out->exe);
+    r = q2_exe_load(&x, d, id->exe_name);
     if (r != Q2_OK)
         return r;
+    if (!q2_exe_has_layout(&x)) {
+        Q2_WARN("level table location is unknown for build %s",
+                id->serial[0] ? id->serial : "(unidentified)");
+        q2_exe_free(&x);
+        return Q2_ERR_UNSUPPORTED;
+    }
+
+    /* SLES-01534's documented file offset is a virtual address in disguise:
+     * translate that, then turn it back into this image's file offset. */
+    vaddr  = q2_exe_addr(&x, Q2_LEVELTABLE_OFFSET_SLES01534 + x.text_addr -
+                             Q2_EXE_HEADER_SIZE);
+    offset = vaddr ? vaddr - x.text_addr + Q2_EXE_HEADER_SIZE : 0;
+    out->exe = x.file;              /* ownership moves; nothing else to free */
+    if (!vaddr) {
+        q2_buf_free(&out->exe);
+        return Q2_ERR_BAD_FORMAT;
+    }
 
     if ((size_t)offset + (size_t)count * Q2_LEVEL_RECORD_SIZE > out->exe.size) {
         q2_buf_free(&out->exe);

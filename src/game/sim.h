@@ -728,6 +728,14 @@ typedef struct q2_sim {
     s32  dt_per_field;  /* 6 on PAL, 5 on NTSC — the build's field rate       */
 
     /*
+     * The build's own frame, VSync(2) of those fields: 12 on PAL and 10 on
+     * NTSC. The smallest step the world takes — the accumulator waits for this
+     * much before ticking. Fixed at init from the video standard alone, so the
+     * GAME SPEED variable, which rewrites dt_per_field, does not move it.
+     */
+    s32  frame_dt;
+
+    /*
      * Downward acceleration. A constant in the original *until* the GAME
      * VARIABLES menu exists: 0x8001C6D0 recomputes the global at 0x800AE924
      * as (slider + 64) >> 2 whenever the variables are enabled, and writes

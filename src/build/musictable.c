@@ -19,17 +19,17 @@ q2_result q2_music_table_load(q2_music_table *out, const disc *d,
 
     memset(out, 0, sizeof(*out));
 
-    if (strcmp(id->serial, "SLES-01534") != 0) {
-        Q2_WARN("music table location is unknown for build %s",
-                id->serial[0] ? id->serial : "(unidentified)");
-        return Q2_ERR_UNSUPPORTED;
-    }
-
     r = q2_exe_load(&exe, d, id->exe_name[0] ? id->exe_name : NULL);
     if (r != Q2_OK)
         return r;
+    if (!q2_exe_has_layout(&exe)) {
+        Q2_WARN("music table location is unknown for build %s",
+                id->serial[0] ? id->serial : "(unidentified)");
+        q2_exe_free(&exe);
+        return Q2_ERR_UNSUPPORTED;
+    }
 
-    rec = q2_exe_ptr(&exe, Q2_MUSICTABLE_ADDR_SLES01534,
+    rec = q2_exe_ptr(&exe, q2_exe_addr(&exe, Q2_MUSICTABLE_ADDR_SLES01534),
                      Q2_MUSIC_COUNT * Q2_MUSIC_RECORD_SIZE);
     if (!rec) {
         q2_exe_free(&exe);

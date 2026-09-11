@@ -5726,9 +5726,14 @@ static bool client_music_play_id(client *c, int id)
      * each for its table duration and moves on, which is why the one entry that
      * measures 1.0 s LONGER than its table value is not an error — the last
      * second is simply never heard.
+     *
+     * The five is PAL's. The NTSC build multiplies by SIX at the same place
+     * (0x800719E4 in SLUS-00757) and counts the result at 60 Hz, so a track
+     * lasts the same seconds and its 64-tick fades are a fifth quicker.
      */
     c->music_id     = id;
-    c->music_total  = (e->tenths ? e->tenths : Q2_MUSIC_FALLBACK_TENTHS) * 5;
+    c->music_total  = (e->tenths ? e->tenths : Q2_MUSIC_FALLBACK_TENTHS) *
+                      q2_video_fields_per_tenth(c->build.video);
     c->music_left   = c->music_total;
     c->music_clock  = 0.0;
 
@@ -5834,7 +5839,8 @@ static void client_music_advance(client *c)
  * ticks and `0x80071980` by `elapsed / 64` while the elapsed count is — so a
  * track fades in over its first 64 ticks and out over its last 64. At 50 Hz
  * that is 1.28 seconds each way, and it is the reason the durations are restart
- * points rather than lengths.
+ * points rather than lengths. The NTSC build keeps the 64 and ticks at 60 Hz:
+ * 1.07 seconds.
  */
 static s32 client_music_volume(const client *c)
 {
@@ -8014,6 +8020,14 @@ static u16 client_menu_pad(const client *c)
  * because the DRAW does the same arithmetic, and a pointer that disagrees with
  * the picture by a few pixels is a menu whose rows are hit slightly above
  * themselves.
+ *
+ * On a 240-line NTSC buffer the block lands four lines up, and that is not an
+ * approximation: it is what SLUS-00757 did to its own tables. Its page rows
+ * are PAL's less four, in its executable and in its QFRONT, and so is the
+ * pause screen's status line; the title follows the framebuffer height in both
+ * builds, and (240 - 188) / 2 + 10 is PAL's 40 less four too. The one table it
+ * left alone, the memory card's SAVE FILE screen, is put back down inside the
+ * block (q2_menu_item_y).
  */
 static void client_menu_origin(const client *c, int *ox, int *oy)
 {
@@ -8046,13 +8060,14 @@ static bool client_menu_pointer_pos(const client *c, int *mx, int *my)
         return false;
 
     sx = (double)c->settings.v[Q2_SET_SCREEN_X];
-    sy = (double)(c->settings.v[Q2_SET_SCREEN_Y] - 24);
+    sy = (double)(c->settings.v[Q2_SET_SCREEN_Y] -
+                  q2_menu_screen_y_default(c->screen.disp.height));
 
     fx = ((double)c->pointer_x -
           ((double)px + sx * (double)pw / (double)Q2_SCREEN_PAL_WIDTH)) *
          (double)c->width / (double)pw;
     fy = ((double)c->pointer_y -
-          ((double)py + sy * (double)ph / (double)Q2_SCREEN_PAL_HEIGHT)) *
+          ((double)py + sy * (double)ph / (double)c->screen.disp.height)) *
          (double)c->height / (double)ph;
 
     client_menu_origin(c, &ox, &oy);
@@ -10323,12 +10338,6 @@ static void client_film_tick(client *c, float dt)
         client_film_stop(c);
 }
 
-/*
- * The film the front end opens a new game with, named as a bare literal at
- * QFRONT's module+0xDC4 because no movie-table record could hold the name.
- */
-#define Q2_START_REEL "ROGUEINP.STX"
-
 /* ------------------------------------------------------------------------- */
 /* The boot chain                                                             */
 /* ------------------------------------------------------------------------- */
@@ -10379,7 +10388,28 @@ static const q2_boot_screen k_boot_screens[] = {
                    { "ActLogo.lbm", 83,   83,  83 } }, 176 }
 };
 
+/*
+ * The same two handlers in the NTSC disc's module, which is the same module
+ * with eighteen immediates changed and nothing else: every HOLD is re-counted
+ * for 60 Hz (258 -> 308, 83 -> 98, and the hand-offs 95 -> 110 and 93 -> 108)
+ * and every FADE is left at eight frames. So the screens are up for the same
+ * seconds on both standards, give or take a frame, and the fades are a fifth
+ * quicker on NTSC. Read at module+0x1E4C..0x21B4 of SLUS-00757's QLOGOS.
+ */
+static const q2_boot_screen k_boot_screens_ntsc[] = {
+    { "QLOGOS2", { { "Legal.lbm",   0,   308, 307 },
+                   { "HamLogo.lbm", 308,  98,  98 } }, 418 },
+    { "QLOGOS",  { { "IdLogo.lbm",  0,    98,  97 },
+                   { "ActLogo.lbm", 98,   98,  98 } }, 206 }
+};
+
 #define Q2_BOOT_SCREENS  (sizeof(k_boot_screens) / sizeof(k_boot_screens[0]))
+
+static const q2_boot_screen *client_boot_screen(const client *c, u32 index)
+{
+    return c->build.video == Q2_VIDEO_PAL ? &k_boot_screens[index]
+                                          : &k_boot_screens_ntsc[index];
+}
 
 /* The brightness one image is drawn at on frame `t` of its own clock. */
 static int client_boot_fade(const q2_boot_image *im, u32 frame)
@@ -10582,7 +10612,7 @@ static void client_boot_advance(client *c)
     const q2_level_entry *fmv;
 
     while (c->boot_index < Q2_BOOT_SCREENS) {
-        const q2_boot_screen *s = &k_boot_screens[c->boot_index++];
+        const q2_boot_screen *s = client_boot_screen(c, c->boot_index++);
 
         if (!client_boot_load(c, s))
             continue;                    /* a disc without it just skips it */
@@ -10653,8 +10683,9 @@ static void client_boot_skip(client *c)
  * screen would be up for four seconds instead of ten.
  *
  * So the accumulator every other clock in this port uses, carrying its
- * remainder, at the BUILD's rate — 50 on this PAL disc, which puts the two
- * screens at 7.1 s and 3.5 s.
+ * remainder, at the BUILD's rate — 50 on the PAL disc, which puts the two
+ * screens at 7.1 s and 3.5 s, and 60 on the NTSC one, whose own counts put
+ * them at 7.0 s and 3.4 s.
  */
 static void client_boot_tick(client *c, float dt)
 {
@@ -10674,7 +10705,7 @@ static void client_boot_tick(client *c, float dt)
     if (rate <= 0.0)
         rate = 30.0;
 
-    s = &k_boot_screens[c->boot_index - 1];
+    s = client_boot_screen(c, c->boot_index - 1);
     c->boot_carry += (double)dt * rate;
     while (c->boot_carry >= 1.0) {
         c->boot_carry -= 1.0;
@@ -10704,7 +10735,7 @@ static void client_boot_blit(client *c)
     if (!fb || !fb->px || !c->boot_open)
         return;
 
-    s = &k_boot_screens[c->boot_index - 1];
+    s = client_boot_screen(c, c->boot_index - 1);
     psx_fb_clear(fb, 0);
 
     for (i = 0; i < 2; i++) {
@@ -10820,7 +10851,10 @@ static void client_start_beat(client *c, float dt)
         return;
     c->start_beat = 0.0;
 
-    if (!client_film_start(c, Q2_START_REEL)) {
+    /* The film the front end opens a new game with, a bare literal at QFRONT's
+     * module+0xDC4 because no movie-table record could hold the name:
+     * `ROGUEINP.STX` on the PAL disc, `ROGUEIN1.STX` on the NTSC one. */
+    if (!client_film_start(c, q2_movie_start_reel(c->disc))) {
         Q2_WARN("front end: no opening reel — starting the game without it");
         client_start_game(c);
         return;
@@ -12550,7 +12584,8 @@ static void client_frame(client *c)
         int out_w = 0, out_h = 0;
         int px = 0, py = 0, pw = 0, ph = 0;
         float sx = (float)c->settings.v[Q2_SET_SCREEN_X];
-        float sy = (float)(c->settings.v[Q2_SET_SCREEN_Y] - 24);
+        float sy = (float)(c->settings.v[Q2_SET_SCREEN_Y] -
+                           q2_menu_screen_y_default(c->screen.disp.height));
 
         SDL_GetCurrentRenderOutputSize(c->renderer, &out_w, &out_h);
         q2_screen_fit_rect(&c->screen, c->fit, out_w, out_h,
@@ -12563,7 +12598,7 @@ static void client_frame(client *c)
          * of the window is border.
          */
         dst.x = (float)px + sx * (float)pw / (float)Q2_SCREEN_PAL_WIDTH;
-        dst.y = (float)py + sy * (float)ph / (float)Q2_SCREEN_PAL_HEIGHT;
+        dst.y = (float)py + sy * (float)ph / (float)c->screen.disp.height;
         dst.w = (float)pw;
         dst.h = (float)ph;
 
@@ -12593,7 +12628,8 @@ static void usage(void)
     printf("  --headless    no window, no audio; a fixed 1/30 s step\n");
     printf("  --demo        drive the pad from a fixed script rather than keys\n");
     printf("  --movie NAME  play a film from Q2DATA/MOVIES and nothing else\n"
-           "                (TAKE1BP.STX, OUTRO1P.STX, ROGUEINP.STX)\n");
+           "                (TAKE1BP.STX, OUTRO1P.STX, ROGUEINP.STX on PAL;\n"
+           "                 TAKE1B.STX, OUTRO1.STX, ROGUEIN1.STX on NTSC)\n");
     printf("  --new-game    confirm a difficulty: the opening reel, then level 1\n");
     printf("  --boot        the logo screens and intro film before the menu\n");
     printf("  --no-boot     ...and skip them in a run that would show them\n");
@@ -13171,9 +13207,13 @@ int main(int argc, char **argv)
            c.build.desc ? c.build.desc->name : "uncatalogued build",
            c.build.serial, q2_video_std_str(c.build.video));
 
+    /* The North American build's string lookup asks for `<key>US` before
+     * `<key>`, and the shared level data answers it (leveltext.h). */
+    q2_leveltext_set_variant(q2_region_string_suffix(c.build.region));
+
     /*
      * The console's own framebuffer, brought up the way 0x800764DC brings it
-     * up: 512 x 248 on PAL, read out of the executable rather than assumed.
+     * up: 512 x 248 on PAL, 512 x 240 on NTSC, read out of each executable.
      * Everything is rendered here and upscaled; the dither and the vertex
      * snapping are defined in these pixels, so rendering at a higher resolution
      * would change the look.
@@ -13187,9 +13227,8 @@ int main(int argc, char **argv)
         disc_close(c.disc);
         return 1;
     }
-    if (c.screen.disp.height_is_inferred)
-        Q2_WARN("no NTSC framebuffer has been read out of an NTSC build; "
-                "using PAL's 512x248");
+    Q2_INFO("screen: %ux%u, %u Hz fields", c.screen.disp.width,
+            c.screen.disp.height, c.screen.disp.field_hz);
 
     c.width  = c.screen.disp.width;
     c.height = c.screen.disp.height;
@@ -13374,6 +13413,7 @@ no_window:
     q2_screen_set_layout(&c.screen, Q2_SCREEN_LAYOUT_ONE, 1);
 
     q2_menu_settings_defaults(&c.settings);
+    q2_menu_reset_video_for(&c.settings, c.screen.disp.height);
 
     /*
      * USE MOUSE, on — and only for a run with a window and a player at it.
@@ -13397,7 +13437,9 @@ no_window:
     c.menu_click_part  = Q2_MENU_HIT_NONE;
 
     q2_menu_init(&c.menu, &c.settings, Q2_MENU_SCREEN_H);
+    q2_menu_set_fb_height(&c.menu, c.screen.disp.height);
     q2_menu_set_multiplayer(&c.menu, false);
+    q2_menu_set_us_english(&c.menu, c.build.region == Q2_REGION_NTSC_U);
 
     /* The level-completion screen. Its counters are the sim's to fill; until
      * kills and secrets are tallied it honestly reads zero. */
@@ -13429,6 +13471,8 @@ no_window:
      * settings block so a screen with a widget on it would work, though none
      * of the nine has one. */
     q2_menu_init(&c.card_menu, &c.settings, Q2_MENU_SCREEN_H);
+    q2_menu_set_fb_height(&c.card_menu, c.screen.disp.height);
+    q2_menu_set_us_english(&c.card_menu, c.build.region == Q2_REGION_NTSC_U);
 
     Q2_INFO("saves: %s", q2_save_dir());
 
@@ -14428,13 +14472,13 @@ no_window:
             }
         }
         /*
-         * The music countdown, on the console's own 50 Hz. At zero the engine
-         * moves to the next playlist entry (0x80071A58) rather than waiting for
-         * the stream to run out, which is what makes a duration a restart point
-         * and not a length.
+         * The music countdown, on the console's own field rate — 50 Hz on PAL,
+         * 60 on NTSC. At zero the engine moves to the next playlist entry
+         * (0x80071A58) rather than waiting for the stream to run out, which is
+         * what makes a duration a restart point and not a length.
          */
         if (c.music_open && c.music_total > 0) {
-            c.music_clock += dt * 50.0;
+            c.music_clock += dt * (double)q2_build_tick_rate(&c.build);
             while (c.music_clock >= 1.0) {
                 c.music_clock -= 1.0;
                 if (c.music_left > 0)

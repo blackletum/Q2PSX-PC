@@ -20,18 +20,18 @@ change; see [`docs/RELEASING.md`](docs/RELEASING.md).
 ## [Unreleased]
 
 ### Reconstruction
-- _Nothing yet._
+- **The North American disc plays.** `Quake II (USA)`, `SLUS-00757`, is catalogued by the hash of its executable, and that executable turns out to be the PAL one linked again: 158,097 of PAL's 158,208 words find a partner in nine runs of constant displacement, so the port carries those runs and reads every table in it by PAL's documented address. Before this the disc ran with no menu, HUD, weapon, effects, music or creatures, because every table refused an unknown build. The disc also ships the linker's own symbol table, and it names what this project had identified by address — `T_Damage`, `M_CheckAttack`, `PrimaryQuakePlayer`, `ProcessLensFlares` — every one of them right. [`docs/FORMATS.md`](docs/FORMATS.md) §9.13 lists everything NTSC changes, and there is not much of it.
 
 ### Client
-- _Nothing yet._
-
-### Rendering and audio
-- _Nothing yet._
+- On the USA disc the game is the NTSC one: a 512 × 240 screen at 60 Hz fields, a world that steps 10 of the console's 1/300 s units a frame instead of 12, films at their own 30 fps and cut where the NTSC modules cut them, logo screens and music timed in 60 Hz fields, menus four lines higher on the shorter screen (except the memory card's SAVE FILE page, which NTSC left alone), and the four-player split in NTSC's own 119-line quadrants.
+- American English where the USA build has it. Its string lookup asks for `<key>US` before `<key>`, and the level data — the same on both discs — already carries sixteen answers, so the briefing says *Comm Center*, *Defense Command* and *Detention Center*. The executable's own words follow it: `AUTOCENTER`, *Body Armor*, the `COLISEUM` arena.
 
 ### Tools
-- _Nothing yet._
+- Every check `q2psx-inspect` makes against the executable now runs on either disc, and passes on both: 174 screen constants, 130 AI constants, 37 menu pages, 35 view-weapon checks, the death chain, the lights, the multiplayer tables, the landmarks. A constant that is an address — a `jal`, a global's `%lo` — agrees when it is the same address in the other build.
+- `stx2avi` knows both discs' films and hands ffmpeg each one's own rate — 25 fps for PAL's, 30 for the USA's.
 
 ### Fixes
+- The performance meter hung from the wrong halfword: it read 20, which is `ScreenXOff`, where the instruction loads `ScreenYOff` two bytes on — 16 on PAL (8 on NTSC). The names are the USA disc's symbol table's.
 - Armour did nothing but the weakest thing it could. The projection that hands the player to the damage function wrote a literal 0 into the armour class, and 0 is jacket — so combat and body armour both absorbed 0.30 of an ordinary hit instead of 0.60 and 0.80, and neither absorbed anything at all from an energy weapon, where jacket's column is genuinely zero. Because that projection is rebuilt on *every* damage attempt there was no window in which the field could hold anything else, and no save or pickup could get a real class past it. The power shield was worse off still: the two bits the damage path tests live in the inventory's flag word, which the projection never copied, so `q2_combat_power_armour_absorb` returned at its first guard, spent no cells and saved nothing. A player wearing body armour now takes 19 of a 100-point hit rather than 69.
 - Quad damage multiplied nothing. Every fire function on the disc picks one of two immediates by comparing the level clock against the player's own expiry word, and the sim called them with that comparison hardcoded to false. The powerup was picked up, drawn on the HUD, counted down and played its firing sound for thirty seconds while the shotgun kept doing 6 a pellet.
 - The difficulty never reached the damage function. `skill` sat at the default 1 for the whole run because only the clock was refreshed in the combat rules, so easy was exactly as dangerous as medium: the rule that halves what a monster does to you at skill 0 could not fire. It now comes from the same global the creature AI already reads, so the two cannot disagree.

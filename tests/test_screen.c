@@ -40,7 +40,8 @@ static void test_bringup(void)
           "framebuffer %ux%u", s.disp.width, s.disp.height);
     CHECK(s.disp.video_mode == 1, "video mode %u", s.disp.video_mode);
     CHECK(s.disp.field_hz == 50 && s.disp.vsync_divisor == 2, "frame lock");
-    CHECK(!s.disp.height_is_inferred, "PAL height should be read, not inferred");
+    CHECK(s.dt == 12, "a PAL frame is 12 of 1/300 s, got %d", (int)s.dt);
+    CHECK(s.meter.base_y == 16, "ScreenYOff is 16 on PAL, got %d", s.meter.base_y);
 
     /* Boot is the front end's single-buffered full-screen state. */
     CHECK(s.layout == Q2_SCREEN_LAYOUT_FULL_SINGLE, "boot layout %d", (int)s.layout);
@@ -53,14 +54,32 @@ static void test_bringup(void)
     q2_screen_free(&s);
 
     /*
-     * An NTSC build's framebuffer has not been read out of an NTSC executable,
-     * and PAL's 248 already refuted the widely repeated 256 — so asking for one
-     * must yield the PAL geometry *and say so*, never a guess presented as a
-     * fact.
+     * NTSC, as SLUS-00757 brings it up: SetVideoMode(0), 512 x 240 and 60 Hz
+     * fields, so a frame is 10 of the same 1/300 s units — and ScreenYOff is 8.
      */
     CHECK(q2_screen_init(&s, Q2_VIDEO_NTSC) == Q2_OK, "ntsc init failed");
-    CHECK(s.disp.height_is_inferred, "an NTSC screen must admit it is inferred");
-    CHECK(s.disp.height == 248, "and must not invent a height");
+    CHECK(s.disp.width == 512 && s.disp.height == 240,
+          "NTSC framebuffer %ux%u", s.disp.width, s.disp.height);
+    CHECK(s.disp.video_mode == 0, "NTSC video mode %u", s.disp.video_mode);
+    CHECK(s.disp.field_hz == 60 && s.disp.vsync_divisor == 2, "NTSC frame lock");
+    CHECK(s.dt == 10, "an NTSC frame is 10 of 1/300 s, got %d", (int)s.dt);
+    CHECK(s.meter.base_y == 8, "ScreenYOff is 8 on NTSC, got %d", s.meter.base_y);
+    CHECK(s.buf[0].width == 512 && s.buf[0].height == 240, "NTSC buffer geometry");
+
+    /* The 2x2 split carries its own literals in each build (0x8007779C /
+     * 0x800778D8 in SLES-01534): 123 and 124 there, 119 and 120 here. */
+    q2_screen_set_layout(&s, Q2_SCREEN_LAYOUT_QUAD, 4);
+    CHECK(s.view[0].h == 119 && s.view[2].y == 120,
+          "NTSC quad %d high, bottom row at %d", s.view[0].h, s.view[2].y);
+    /* ...while the stacked two-player split is derived from the height. */
+    q2_screen_set_layout(&s, Q2_SCREEN_LAYOUT_TWO_H, 2);
+    CHECK(s.view[0].h == 119, "NTSC two-high split is %d high", s.view[0].h);
+    q2_screen_free(&s);
+
+    CHECK(q2_screen_init(&s, Q2_VIDEO_PAL) == Q2_OK, "init failed");
+    q2_screen_set_layout(&s, Q2_SCREEN_LAYOUT_QUAD, 4);
+    CHECK(s.view[0].h == 123 && s.view[2].y == 124,
+          "PAL quad %d high, bottom row at %d", s.view[0].h, s.view[2].y);
     q2_screen_free(&s);
 }
 

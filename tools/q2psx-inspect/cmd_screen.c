@@ -29,6 +29,7 @@
 
 #include "entity.h"
 #include "exe.h"
+#include "ident.h"
 #include "hud.h"          /* the flash's own colours and mode — hud.h owns the
                            * raise, screen.h owns the tile */
 #include "screen.h"
@@ -46,13 +47,28 @@ typedef struct check {
     const char *what;
 } check;
 
-/* The immediate of an I-type instruction, sign-extended as the hardware does. */
+/*
+ * The immediate of an I-type instruction, sign-extended as the hardware does.
+ *
+ * Every address in the tables below is SLES-01534's and is read wherever the
+ * disc's own build keeps that instruction (exe.h), so the same tables check a
+ * PAL and an NTSC executable. The handful of values the two builds disagree
+ * on are taken from the port's screen for this disc rather than written in.
+ */
 static bool imm_at(const q2_exe *e, u32 addr, s32 *out)
 {
     u32 word;
 
-    if (!q2_exe_u32(e, addr, &word))
+    if (!q2_exe_u32(e, q2_exe_addr(e, addr), &word))
         return false;
+
+    /* `li rd, 0` is not always an `addiu`: SLUS-00757 passes SetVideoMode's
+     * zero as `addu a0, zero, zero`, and the constant that materialises is 0. */
+    if ((word >> 26) == 0 && ((word & 0x3Fu) == 0x21u || (word & 0x3Fu) == 0x25u) &&
+        ((word >> 21) & 31u) == 0 && ((word >> 16) & 31u) == 0) {
+        *out = 0;
+        return true;
+    }
 
     *out = (s32)(s16)(u16)(word & 0xFFFFu);
     return true;
@@ -82,6 +98,9 @@ static int run_checks(const q2_exe *e, const char *title,
         if (got == list[i].expect) {
             printf("  %08X  %-44s  %6d  ok\n",
                    list[i].addr, list[i].what, got);
+        } else if (q2_exe_lo_relocates(e, list[i].expect, got)) {
+            printf("  %08X  %-44s  %6d  ok (the %%lo of %d, relocated)\n",
+                   list[i].addr, list[i].what, got, list[i].expect);
         } else {
             printf("  %08X  %-44s  %6d  MISMATCH (port says %d)\n",
                    list[i].addr, list[i].what, got, list[i].expect);
@@ -105,7 +124,7 @@ static bool sa_at(const q2_exe *e, u32 addr, s32 *out)
 {
     u32 word;
 
-    if (!q2_exe_u32(e, addr, &word))
+    if (!q2_exe_u32(e, q2_exe_addr(e, addr), &word))
         return false;
     if ((word >> 26) != 0)                  /* SPECIAL */
         return false;
@@ -124,12 +143,13 @@ static bool jal_targets(const q2_exe *e, u32 addr, u32 target)
 {
     u32 word;
 
-    if (!q2_exe_u32(e, addr, &word))
+    if (!q2_exe_u32(e, q2_exe_addr(e, addr), &word))
         return false;
     if ((word >> 26) != 0x03u)          /* jal */
         return false;
 
-    return ((word & 0x03FFFFFFu) << 2) == (q2_exe_norm(target) & 0x0FFFFFFFu);
+    return ((word & 0x03FFFFFFu) << 2) ==
+           (q2_exe_norm(q2_exe_addr(e, target)) & 0x0FFFFFFFu);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -401,8 +421,9 @@ int cmd_screen(disc *d, const char *out, const char *layout_name,
     int failed = 0;
     q2_result r;
 
-    static const check display[] = {
-        { 0x800764E0u,   1, "SetVideoMode argument (1 == MODE_PAL)"      },
+    /* Not const: the mode and the height are this disc's, filled in below. */
+    check display[] = {
+        { 0x800764E0u,   1, "SetVideoMode argument (1 PAL, 0 NTSC)"      },
         { 0x800764F0u, 512, "framebuffer width -> 0x800B2DA0"            },
         { 0x800764FCu, 248, "framebuffer height -> 0x800B2DA2"           },
         { 0x800765E0u, 14128, "double-buffer block base (0x800B3730)"    },
@@ -468,7 +489,8 @@ int cmd_screen(disc *d, const char *out, const char *layout_name,
         { 0x80077CECu,  256, "second viewport x"                          },
     };
 
-    static const check l_quad[] = {
+    /* Not const either: SLUS-00757 carries its own height and bottom row. */
+    check l_quad[] = {
         { 0x8007776Cu,    4, "viewports"                                  },
         { 0x80077794u,  256, "viewport width"                             },
         { 0x8007779Cu,  123, "viewport height"                            },
@@ -619,9 +641,31 @@ int cmd_screen(disc *d, const char *out, const char *layout_name,
         { 0x800380ACu,     7, "a live view sets flags bits 0-2"           },
     };
 
-    if (q2_screen_init(&s, Q2_VIDEO_PAL) != Q2_OK) {
-        fprintf(stderr, "cannot bring the screen up\n");
-        return 1;
+    {
+        q2_build_id id;
+        q2_video_std video = Q2_VIDEO_PAL;
+
+        if (q2_identify(d, &id) == Q2_OK)
+            video = id.video;
+        if (q2_screen_init(&s, video) != Q2_OK) {
+            fprintf(stderr, "cannot bring the screen up\n");
+            return 1;
+        }
+    }
+
+    /* What the port's screen says for this disc's standard — the values the
+     * two builds carry differently, so the checks compare like with like. */
+    display[0].expect = (s32)s.disp.video_mode;
+    display[2].expect = (s32)s.disp.height;
+    {
+        q2_screen q;
+
+        if (q2_screen_init(&q, s.video) == Q2_OK) {
+            q2_screen_set_layout(&q, Q2_SCREEN_LAYOUT_QUAD, 4);
+            l_quad[2].expect = q.view[0].h;
+            l_quad[8].expect = q.view[2].y;
+            q2_screen_free(&q);
+        }
     }
 
     /* The rendering mode does not need the executable — it needs a level. */

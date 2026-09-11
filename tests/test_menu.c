@@ -721,6 +721,61 @@ static void test_text_length(void)
 static void test_title_y(void)
 {
     CHECK(q2_menu_title_y(248) == 40, "PAL title y is %d", q2_menu_title_y(248));
+    /* The NTSC build derives it from its own 240 lines: PAL's less four, which
+     * is exactly where centring the 248-line block puts PAL's 40. */
+    CHECK(q2_menu_title_y(240) == 36, "NTSC title y is %d", q2_menu_title_y(240));
+}
+
+/*
+ * The NTSC build moved every row of its page tables up four lines — except the
+ * memory card's SAVE FILE screen (0x8009B114), which it left where PAL had it.
+ * Centring the block does the four for every page, so that page's rows are put
+ * back down by the same four in block coordinates. And two words are spelt the
+ * North American way.
+ */
+static void test_ntsc(void)
+{
+    q2_menu m;
+    q2_menu_settings set;
+    u32 count, k;
+    const q2_menu_page *mc = q2_mcard_pages(&count);
+    const q2_menu_page *save_file = NULL;
+
+    for (k = 0; k < count; k++)
+        if (mc[k].addr == 0x8009B114u)
+            save_file = &mc[k];
+    CHECK(save_file != NULL, "the SAVE FILE screen is transcribed");
+    if (!save_file)
+        return;
+
+    q2_menu_settings_defaults(&set);
+    q2_menu_init(&m, &set, Q2_MENU_SCREEN_H);
+
+    m.page = save_file;
+    CHECK(q2_menu_item_y(&m, 0) == 40, "PAL: SAVE FILE heading at its table's 40");
+    q2_menu_set_fb_height(&m, 240);
+    CHECK(q2_menu_item_y(&m, 0) == 44,
+          "NTSC: +4 in the block, so 40 on the screen once centred, got %d",
+          q2_menu_item_y(&m, 0));
+
+    m.page = q2_menu_page_find(Q2_PAGE_OPTIONS);
+    CHECK(m.page && q2_menu_item_y(&m, 0) == m.page->items[0].y,
+          "every other page keeps its table's y inside the block");
+
+    CHECK(strcmp(q2_menu_word("AUTOCENTRE", true), "AUTOCENTER") == 0, "AUTOCENTER");
+    CHECK(strcmp(q2_menu_word("COLOSSEUM", true), "COLISEUM") == 0, "COLISEUM");
+    CHECK(strcmp(q2_menu_word("AUTOCENTRE", false), "AUTOCENTRE") == 0,
+          "PAL keeps its own spelling");
+    CHECK(strcmp(q2_menu_word("SOUND", true), "SOUND") == 0,
+          "and nothing else is respelt");
+
+    /* SCREEN POSITION: 24 lines down PAL's raster, 0 on NTSC's. */
+    CHECK(q2_menu_screen_y_default(248) == 24 && q2_menu_screen_y_default(240) == 0,
+          "screen Y defaults");
+    q2_menu_reset_video_for(&set, 240);
+    CHECK(set.v[Q2_SET_SCREEN_Y] == 0, "NTSC reset leaves Y at %d", set.v[Q2_SET_SCREEN_Y]);
+    q2_menu_reset_video(&set);
+    CHECK(set.v[Q2_SET_SCREEN_Y] == 24, "PAL reset puts Y at %d", set.v[Q2_SET_SCREEN_Y]);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1359,6 +1414,7 @@ int main(void)
     test_front_multiplayer_setup();
     test_text_length();
     test_title_y();
+    test_ntsc();
     test_font_metrics();
     test_font_coverage();
     test_icons_variant();

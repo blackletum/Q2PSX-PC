@@ -214,6 +214,10 @@ q2_result q2_item_table_load(q2_item_table *out, const disc *d,
  * compare the two and keep both honest. */
 const q2_item_table *q2_item_table_builtin(void);
 
+/* ...and as the North American build has it, which spells four captions
+ * `Armor` (itemtable.c). Any other region gets the builtin above. */
+const q2_item_table *q2_item_table_builtin_for(q2_region region);
+
 /*
  * The record a place id selects, or NULL.
  *

@@ -1,5 +1,6 @@
 #include "hudtables.h"
 
+#include "exe.h"
 #include "gpu.h"
 
 #include <stdlib.h>
@@ -88,11 +89,11 @@ int q2_hud_icon_escape(char letter, u8 out[Q2_HUD_ICON_ESCAPE_MAX])
  * after each record and resets to 248 with x += 16 once y reaches 255. Row 255
  * belongs to the 256-entry palette.
  */
-static q2_result load_palettes(q2_hud_tables *t)
+static q2_result load_palettes(q2_hud_tables *t, u32 palettes)
 {
     const u8 *rec;
     u32 k;
-    const u8 *p0 = at(&t->exe, Q2_HUD_ADDR_PALETTES, 8);
+    const u8 *p0 = at(&t->exe, palettes, 8);
 
     if (!p0)
         return Q2_ERR_BAD_FORMAT;
@@ -120,7 +121,7 @@ static q2_result load_palettes(q2_hud_tables *t)
         int col = (int)((k - 1) / 7);
         int row = (int)((k - 1) % 7);
 
-        rec = at(&t->exe, Q2_HUD_ADDR_PALETTES + k * 8, 8);
+        rec = at(&t->exe, palettes + k * 8, 8);
         if (!rec)
             return Q2_ERR_BAD_FORMAT;
 
@@ -168,6 +169,9 @@ q2_result q2_hud_tables_load(q2_hud_tables *out, const disc *d,
                              const q2_build_id *id)
 {
     q2_result r;
+    q2_exe x;
+    u32 palettes, glyph_uv, icon, box_uv, box_rgb, msg_lines;
+    u32 weapon_glyph, weapon_name;
     const u8 *p;
     u32 i;
 
@@ -176,26 +180,40 @@ q2_result q2_hud_tables_load(q2_hud_tables *out, const disc *d,
 
     memset(out, 0, sizeof(*out));
 
-    if (strcmp(id->serial, "SLES-01534") != 0) {
-        Q2_WARN("HUD table locations are unknown for build %s",
-                id->serial[0] ? id->serial : "(unidentified)");
-        return Q2_ERR_UNSUPPORTED;
-    }
     if (!id->exe_name[0])
         return Q2_ERR_NOT_FOUND;
 
-    r = disc_read_file(d, id->exe_name, &out->exe);
+    r = q2_exe_load(&x, d, id->exe_name);
     if (r != Q2_OK)
         return r;
+    if (!q2_exe_has_layout(&x)) {
+        Q2_WARN("HUD table locations are unknown for build %s",
+                id->serial[0] ? id->serial : "(unidentified)");
+        q2_exe_free(&x);
+        return Q2_ERR_UNSUPPORTED;
+    }
 
-    p = at(&out->exe, Q2_HUD_ADDR_GLYPH_UV, Q2_HUD_GLYPH_COUNT * 2);
+    /* The addresses are SLES-01534's, translated into this build's (exe.h).
+     * The image itself is kept, and the palette pointers inside it are this
+     * build's own and are followed as they stand. */
+    palettes     = q2_exe_addr(&x, Q2_HUD_ADDR_PALETTES);
+    glyph_uv     = q2_exe_addr(&x, Q2_HUD_ADDR_GLYPH_UV);
+    icon         = q2_exe_addr(&x, Q2_HUD_ADDR_ICON);
+    box_uv       = q2_exe_addr(&x, Q2_HUD_ADDR_BOX_UV);
+    box_rgb      = q2_exe_addr(&x, Q2_HUD_ADDR_BOX_RGB);
+    msg_lines    = q2_exe_addr(&x, Q2_HUD_ADDR_MSG_LINES);
+    weapon_glyph = q2_exe_addr(&x, Q2_HUD_ADDR_WEAPON_GLYPH);
+    weapon_name  = q2_exe_addr(&x, Q2_HUD_ADDR_WEAPON_NAME);
+    out->exe = x.file;              /* ownership moves; nothing else to free */
+
+    p = at(&out->exe, glyph_uv, Q2_HUD_GLYPH_COUNT * 2);
     if (!p) goto bad;
     for (i = 0; i < Q2_HUD_GLYPH_COUNT; i++) {
         out->glyph[i].u = p[i * 2 + 0];
         out->glyph[i].v = p[i * 2 + 1];
     }
 
-    p = at(&out->exe, Q2_HUD_ADDR_ICON, Q2_HUD_ICON_COUNT * 4);
+    p = at(&out->exe, icon, Q2_HUD_ICON_COUNT * 4);
     if (!p) goto bad;
     for (i = 0; i < Q2_HUD_ICON_COUNT; i++) {
         out->icon[i].u = p[i * 4 + 0];
@@ -204,14 +222,14 @@ q2_result q2_hud_tables_load(q2_hud_tables *out, const disc *d,
         out->icon[i].h = p[i * 4 + 3];
     }
 
-    p = at(&out->exe, Q2_HUD_ADDR_BOX_UV, Q2_HUD_BOX_LEVELS * 2);
+    p = at(&out->exe, box_uv, Q2_HUD_BOX_LEVELS * 2);
     if (!p) goto bad;
     for (i = 0; i < Q2_HUD_BOX_LEVELS; i++) {
         out->box[i].u = p[i * 2 + 0];
         out->box[i].v = p[i * 2 + 1];
     }
 
-    p = at(&out->exe, Q2_HUD_ADDR_BOX_RGB, Q2_HUD_BOX_LEVELS * 4);
+    p = at(&out->exe, box_rgb, Q2_HUD_BOX_LEVELS * 4);
     if (!p) goto bad;
     for (i = 0; i < Q2_HUD_BOX_LEVELS; i++) {
         out->box_rgb[i][0] = p[i * 4 + 0];
@@ -219,12 +237,12 @@ q2_result q2_hud_tables_load(q2_hud_tables *out, const disc *d,
         out->box_rgb[i][2] = p[i * 4 + 2];
     }
 
-    p = at(&out->exe, Q2_HUD_ADDR_MSG_LINES, Q2_HUD_MSG_TIERS * 2);
+    p = at(&out->exe, msg_lines, Q2_HUD_MSG_TIERS * 2);
     if (!p) goto bad;
     for (i = 0; i < Q2_HUD_MSG_TIERS; i++)
         out->message_lines[i] = (u8)q2_rd_u16(p + i * 2);
 
-    p = at(&out->exe, Q2_HUD_ADDR_WEAPON_GLYPH, Q2_HUD_WEAPON_SLOTS * 3);
+    p = at(&out->exe, weapon_glyph, Q2_HUD_WEAPON_SLOTS * 3);
     if (!p) goto bad;
     for (i = 0; i < Q2_HUD_WEAPON_SLOTS; i++) {
         out->weapon_glyph[i][0] = (char)p[i * 3 + 0];
@@ -233,7 +251,7 @@ q2_result q2_hud_tables_load(q2_hud_tables *out, const disc *d,
         out->weapon_glyph[i][3] = '\0';
     }
 
-    p = at(&out->exe, Q2_HUD_ADDR_WEAPON_NAME, (Q2_HUD_WEAPON_SLOTS - 1) * 12);
+    p = at(&out->exe, weapon_name, (Q2_HUD_WEAPON_SLOTS - 1) * 12);
     if (!p) goto bad;
     out->weapon_name[0][0] = 0;
     for (i = 1; i < Q2_HUD_WEAPON_SLOTS; i++) {
@@ -241,7 +259,7 @@ q2_result q2_hud_tables_load(q2_hud_tables *out, const disc *d,
         out->weapon_name[i][12] = 0;
     }
 
-    r = load_palettes(out);
+    r = load_palettes(out, palettes);
     if (r != Q2_OK) {
         q2_hud_tables_free(out);
         return r;

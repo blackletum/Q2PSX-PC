@@ -1,5 +1,8 @@
 #include "exe.h"
 
+#include "ident.h"
+#include "sha256.h"
+
 #include <stdio.h>
 #include <string.h>
 
@@ -114,7 +117,122 @@ q2_result q2_exe_load(q2_exe *out, const disc *d, const char *exe_name)
     if (out->gp0 == 0)
         out->gp0 = derive_gp(out);
 
+    {
+        u8   digest[SHA256_DIGEST_SIZE];
+        char hex[SHA256_HEX_SIZE];
+
+        sha256_buffer(out->file.data, out->file.size, digest);
+        sha256_hex(digest, hex);
+        out->build       = q2_build_by_hash(hex);
+        out->build_exact = out->build != NULL;
+
+        /*
+         * An executable the catalogue does not know by hash but DOES know by
+         * name — a revision, a patched copy — is read with that release's
+         * layout, which is what the table loaders did when they keyed on the
+         * serial alone. q2_identify still reports it as uncatalogued.
+         */
+        if (!out->build)
+            out->build = q2_build_by_exe_name(out->name);
+    }
+
     return Q2_OK;
+}
+
+bool q2_exe_has_layout(const q2_exe *e)
+{
+    return e && q2_build_has_layout(e->build);
+}
+
+u32 q2_exe_addr(const q2_exe *e, u32 pal)
+{
+    const q2_build_desc *b;
+    u32 i, a;
+
+    if (!q2_exe_has_layout(e))
+        return 0;
+    b = e->build;
+    if (b->layout_runs == 0)
+        return pal;
+
+    /* Runs are in SLES-01534 address order and do not overlap; the segment
+     * selector is kept, so KSEG0 in means KSEG0 out. */
+    a = q2_exe_norm(pal) | 0x80000000u;
+    for (i = 0; i < b->layout_runs; i++) {
+        const q2_addr_run *r = &b->layout[i];
+        if (a >= r->begin && a < r->end)
+            return (u32)((s64)pal + r->delta);
+    }
+    return 0;
+}
+
+bool q2_exe_lo_relocates(const q2_exe *e, s32 pal_lo, s32 got)
+{
+    u32 hi;
+
+    /* The image and its data and BSS span these segments; a %lo pairs with
+     * one of them. */
+    for (hi = 0x8001u; hi <= 0x800Fu; hi++) {
+        u32 pal = (hi << 16) + (u32)pal_lo;     /* pal_lo is sign-extended */
+        u32 at  = q2_exe_addr(e, pal);
+
+        if (at && at != pal && (s32)(s16)(u16)(at & 0xFFFFu) == got)
+            return true;
+    }
+    return false;
+}
+
+bool q2_exe_word_relocates(const q2_exe *e, u32 pal_word, u32 got)
+{
+    u32 op = pal_word >> 26;
+
+    if (pal_word == got)
+        return true;
+    if (!q2_exe_has_layout(e))
+        return false;
+
+    /* A pointer stored as data. */
+    if (q2_exe_addr(e, pal_word) == got)
+        return true;
+
+    if ((got >> 26) != op)
+        return false;
+
+    if (op == 0x02 || op == 0x03) {                     /* j, jal */
+        u32 tp = 0x80000000u | ((pal_word & 0x03FFFFFFu) << 2);
+        u32 tg = 0x80000000u | ((got & 0x03FFFFFFu) << 2);
+        return q2_exe_addr(e, tp) == tg;
+    }
+
+    /* Same opcode, rs and rt, and an immediate that is a %lo that moved.
+     * A `lui` whose high half changed is not accepted: a move of a few
+     * hundred bytes changes one only across a 64 KB boundary, and a check
+     * that meets one should say so rather than be waved through. */
+    if (op == 0x0F || (pal_word & 0xFFFF0000u) != (got & 0xFFFF0000u))
+        return false;
+    return q2_exe_lo_relocates(e, (s32)(s16)(u16)(pal_word & 0xFFFFu),
+                               (s32)(s16)(u16)(got & 0xFFFFu));
+}
+
+u32 q2_exe_pal(const q2_exe *e, u32 addr)
+{
+    const q2_build_desc *b;
+    u32 i, a;
+
+    if (!q2_exe_has_layout(e))
+        return 0;
+    b = e->build;
+    if (b->layout_runs == 0)
+        return addr;
+
+    a = q2_exe_norm(addr) | 0x80000000u;
+    for (i = 0; i < b->layout_runs; i++) {
+        const q2_addr_run *r = &b->layout[i];
+        s64 lo = (s64)r->begin + r->delta, hi = (s64)r->end + r->delta;
+        if ((s64)a >= lo && (s64)a < hi)
+            return (u32)((s64)addr - r->delta);
+    }
+    return 0;
 }
 
 void q2_exe_free(q2_exe *e)

@@ -101,6 +101,15 @@ static const char *page_name(int id)
     }
 }
 
+/*
+ * The build the check is run against. The tables below are SLES-01534's and are
+ * read wherever the disc's own executable keeps them (exe.h); these two are the
+ * ways the NTSC build's rows legitimately differ from the transcription — its
+ * screen is 240 lines, so its rows sit four higher, and it says AUTOCENTER.
+ */
+static int  g_fb_h = Q2_MENU_SCREEN_H;
+static bool g_us_english;
+
 /* Records in the table at `addr`; the loader stops at a null label. */
 static u32 table_length(const q2_exe *e, u32 addr)
 {
@@ -108,6 +117,7 @@ static u32 table_length(const q2_exe *e, u32 addr)
 
     if (!addr)
         return 0;
+    addr = q2_exe_addr(e, addr);
     for (i = 0; i < 64; i++) {
         u32 lbl;
         if (!q2_exe_u32(e, addr + i * REC, &lbl))
@@ -169,11 +179,13 @@ static int check_page(const q2_exe *e, const q2_menu_page *p, bool verbose)
                p->count, p->count == 1 ? "" : "s");
 
     for (i = 0; i < p->count; i++) {
-        u32 base = record_addr(p, i);
+        u32 base = q2_exe_addr(e, record_addr(p, i));
         u32 lbl, act, tog, sld, rel;
         s16 x, y;
         const q2_menu_item *it = &p->items[i];
         const char *want_widget;
+        const char *want_label = q2_menu_word(it->label, g_us_english);
+        int want_y;
 
         if (!q2_exe_u32(e, base + 0x00, &lbl) ||
             !q2_exe_s16(e, base + 0x04, &x) ||
@@ -193,14 +205,25 @@ static int check_page(const q2_exe *e, const q2_menu_page *p, bool verbose)
             continue;
         }
 
-        if (strcmp(label, it->label) != 0) {
+        if (strcmp(label, want_label) != 0) {
             printf("    ! item %u: label \"%s\" on disc, \"%s\" in the port\n",
-                   i, label, it->label);
+                   i, label, want_label);
             bad++;
         }
-        if (x != it->x || y != it->y) {
+
+        /* Where the port puts the row on this disc's screen: the block centred
+         * in the framebuffer, and the row placed in the block (menu.h). */
+        {
+            q2_menu m;
+
+            q2_menu_init(&m, NULL, Q2_MENU_SCREEN_H);
+            q2_menu_set_fb_height(&m, g_fb_h);
+            m.page = p;
+            want_y = (g_fb_h - Q2_MENU_SCREEN_H) / 2 + q2_menu_item_y(&m, (int)i);
+        }
+        if (x != it->x || y != want_y) {
             printf("    ! item %u (%s): (%d,%d) on disc, (%d,%d) in the port\n",
-                   i, label, x, y, it->x, it->y);
+                   i, label, x, y, it->x, want_y);
             bad++;
         }
         if ((rel & 1u) != (u32)it->on_release) {
@@ -222,6 +245,9 @@ static int check_page(const q2_exe *e, const q2_menu_page *p, bool verbose)
          * port models it as no action, correctly, so the comparison has to know
          * the stub rather than count pointers.
          */
+        /* Which handler, in SLES-01534's addresses (exe.h). */
+        if (act)
+            act = q2_exe_pal(e, act);
         if (act == Q2_MENU_ACTION_NOP)
             act = 0;
 
@@ -399,7 +425,8 @@ static int dump_page_image(const psx_vram *vram, int vram_x, int vram_y,
 static int shoot_page(const disc *d, const q2_menu_page *p, int cheat_level,
                       const char *out, const char *map)
 {
-    const int W = Q2_MENU_SCREEN_W, H = Q2_MENU_SCREEN_H;
+    const int W = Q2_MENU_SCREEN_W;
+    int H;
     q2_build_id id;
     q2_hud_tables tab;
     q2_vram_section vs;
@@ -418,6 +445,9 @@ static int shoot_page(const disc *d, const q2_menu_page *p, int cheat_level,
         fprintf(stderr, "cannot identify this disc\n");
         return 1;
     }
+    /* The disc's own screen: 248 lines on PAL, 240 on NTSC, with the menu's
+     * 248-line block centred in it the way the client centres it. */
+    H = q2_video_fb_height(id.video);
     if (q2_hud_tables_load(&tab, d, &id) != Q2_OK) {
         fprintf(stderr, "cannot read the font tables out of %s\n", id.exe_name);
         return 1;
@@ -466,6 +496,8 @@ static int shoot_page(const disc *d, const q2_menu_page *p, int cheat_level,
 
     q2_menu_settings_defaults(&set);
     q2_menu_init(&m, &set, Q2_MENU_SCREEN_H);
+    q2_menu_set_fb_height(&m, H);
+    q2_menu_set_us_english(&m, id.region == Q2_REGION_NTSC_U);
     m.cheat_level = cheat_level;
     m.open        = true;
     q2_menu_goto(&m, p->id);
@@ -504,6 +536,7 @@ static int shoot_page(const disc *d, const q2_menu_page *p, int cheat_level,
     }
 
     q2_menu_draw_opts_default(&opts, &font);
+    opts.origin_y = (H - Q2_MENU_SCREEN_H) / 2;
     /* Nothing behind it here, so give the page something to sit on. The
      * console has the frozen world there instead. */
     psx_fb_clear(&fb, psx_rgb555(16, 16, 40));
@@ -736,7 +769,17 @@ int cmd_menu(const disc *d, const char *want, const char *out, const char *map)
         return 1;
     }
 
-    printf("\nchecking the transcription against %s\n", exe.name);
+    {
+        q2_build_id id;
+
+        if (q2_identify(d, &id) == Q2_OK) {
+            g_fb_h       = q2_video_fb_height(id.video);
+            g_us_english = id.region == Q2_REGION_NTSC_U;
+        }
+    }
+
+    printf("\nchecking the transcription against %s (a %d-line screen%s)\n",
+           exe.name, g_fb_h, g_us_english ? ", American spellings" : "");
 
     for (i = 0; i < count; i++) {
         bad += check_page(&exe, &pages[i], false);

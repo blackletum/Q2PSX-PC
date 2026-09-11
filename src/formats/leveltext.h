@@ -73,8 +73,34 @@ q2_result q2_leveltext_parse(q2_leveltext *out, const u8 *data, u32 size);
 /* The same, straight from an open COMMON.DAT. */
 q2_result q2_leveltext_open(q2_leveltext *out, const q2_common_file *f);
 
-/* NULL when the key is absent — which is normal; not every map has every key. */
+/*
+ * NULL when the key is absent — which is normal; not every map has every key.
+ *
+ * With a variant set, the variant's key is asked for first, the way the NTSC
+ * executable asks. Its lookup (0x8006FA28 in SLUS-00757, 136 instructions
+ * where SLES-01534's 0x800701B4 has 59) copies the key into a twelve-byte
+ * field, appends `U` if there is room and then `S` if there is still room, and
+ * looks that up before the key itself. So `MapTitle` becomes `MapTitleUS`, an
+ * eleven-character key gets only the `U`, and `FoundASecret`, which fills the
+ * field, is looked up as it is. The discs share their level data, and 16 of
+ * its entries are American variants that only that lookup ever reaches:
+ *
+ *     BASE3    MapTitle     "Comm Centre"        MapTitleUS   "Comm Center"
+ *     COMMAND  MapTitle     "Defence Command"    MapTitleUS   "Defense Command"
+ *     JAIL2    MapTitle     "Detention Centre"   MapTitleUS   "Detention Center"
+ *
+ * and thirteen objective lines like them.
+ */
 const char *q2_leveltext_find(const q2_leveltext *t, const char *name);
+
+/*
+ * The variant every lookup in this process tries first: "US" for the North
+ * American build (ident.h, q2_region_string_suffix), "" or NULL for none. A
+ * property of the executable in hand rather than of any one table — which is
+ * why it is set once, by whoever identified the disc, and not per chunk.
+ */
+void q2_leveltext_set_variant(const char *suffix);
+const char *q2_leveltext_variant(void);
 
 /*
  * The three briefing keys, built the way the executable builds them.

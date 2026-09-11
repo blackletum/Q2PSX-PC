@@ -81,17 +81,56 @@ q2_result q2_leveltext_open(q2_leveltext *out, const q2_common_file *f)
     return q2_leveltext_parse(out, c->data, c->size);
 }
 
-const char *q2_leveltext_find(const q2_leveltext *t, const char *name)
+static char g_variant[4];
+
+void q2_leveltext_set_variant(const char *suffix)
+{
+    memset(g_variant, 0, sizeof(g_variant));
+    if (suffix)
+        strncpy(g_variant, suffix, sizeof(g_variant) - 1);
+}
+
+const char *q2_leveltext_variant(void)
+{
+    return g_variant;
+}
+
+static const char *find_exact(const q2_leveltext *t, const char *name)
 {
     u32 i;
-
-    if (!t || !name)
-        return NULL;
 
     for (i = 0; i < t->count; i++)
         if (strcmp(t->entry[i].name, name) == 0)
             return t->entry[i].text;
     return NULL;
+}
+
+const char *q2_leveltext_find(const q2_leveltext *t, const char *name)
+{
+    if (!t || !name)
+        return NULL;
+
+    if (g_variant[0]) {
+        /*
+         * The key as SLUS-00757 builds it: the name, then as much of the
+         * suffix as still fits the twelve-byte field. A name that already
+         * fills it is its own variant, and is simply looked up once.
+         */
+        char key[Q2_LEVELTEXT_NAME_LEN + 1];
+        size_t n = strlen(name), k;
+        const char *hit;
+
+        if (n > Q2_LEVELTEXT_NAME_LEN)
+            n = Q2_LEVELTEXT_NAME_LEN;
+        memcpy(key, name, n);
+        for (k = 0; g_variant[k] && n < Q2_LEVELTEXT_NAME_LEN; k++)
+            key[n++] = g_variant[k];
+        key[n] = '\0';
+
+        if (strcmp(key, name) != 0 && (hit = find_exact(t, key)) != NULL)
+            return hit;
+    }
+    return find_exact(t, name);
 }
 
 void q2_leveltext_key_objective(char *out, int unit)

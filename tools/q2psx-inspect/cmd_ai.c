@@ -42,11 +42,15 @@ static void bad(const char *what, u32 addr, long want, long got)
            what, addr, want, got);
 }
 
-/* The 16-bit immediate of an I-format instruction, sign-extended. */
+/*
+ * The 16-bit immediate of an I-format instruction, sign-extended. Every
+ * address here is SLES-01534's and is read where the disc's own build keeps
+ * that instruction (exe.h).
+ */
 static bool imm_at(const q2_exe *e, u32 addr, s32 *out)
 {
     u32 w;
-    if (!q2_exe_u32(e, addr, &w))
+    if (!q2_exe_u32(e, q2_exe_addr(e, addr), &w))
         return false;
     *out = (s32)(s16)(w & 0xFFFF);
     return true;
@@ -55,17 +59,18 @@ static bool imm_at(const q2_exe *e, u32 addr, s32 *out)
 static bool immu_at(const q2_exe *e, u32 addr, u32 *out)
 {
     u32 w;
-    if (!q2_exe_u32(e, addr, &w))
+    if (!q2_exe_u32(e, q2_exe_addr(e, addr), &w))
         return false;
     *out = w & 0xFFFF;
     return true;
 }
 
+/* A word that holds an address agrees when it holds that address translated. */
 static void check_word(const q2_exe *e, u32 addr, u32 want, const char *what)
 {
     u32 got;
-    if (!q2_exe_u32(e, addr, &got)) { bad(what, addr, (long)want, -1); return; }
-    if (got != want) bad(what, addr, (long)want, (long)got);
+    if (!q2_exe_u32(e, q2_exe_addr(e, addr), &got)) { bad(what, addr, (long)want, -1); return; }
+    if (!q2_exe_word_relocates(e, want, got)) bad(what, addr, (long)want, (long)got);
     else             ok(what);
 }
 
@@ -73,7 +78,7 @@ static void check_imm(const q2_exe *e, u32 addr, s32 want, const char *what)
 {
     s32 got;
     if (!imm_at(e, addr, &got)) { bad(what, addr, want, -1); return; }
-    if (got != want) bad(what, addr, want, got);
+    if (got != want && !q2_exe_lo_relocates(e, want, got)) bad(what, addr, want, got);
     else             ok(what);
 }
 
@@ -99,8 +104,12 @@ static void check_split(const q2_exe *e, u32 hi_addr, u32 lo_addr, u32 want,
     got = signed_lo ? (u32)((hi << 16) + (s32)(s16)lo)
                     : ((hi << 16) | lo);
 
-    if (got != want) bad(what, hi_addr, (long)want, (long)got);
-    else             ok(what);
+    /* Most of these pairs build a function's address, which on another
+     * build is that function where the build keeps it. */
+    if (got != want && q2_exe_addr(e, want) != got)
+        bad(what, hi_addr, (long)want, (long)got);
+    else
+        ok(what);
 }
 
 int cmd_ai(const disc *d)

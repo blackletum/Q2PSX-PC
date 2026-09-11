@@ -3,6 +3,7 @@
  */
 #include "movie.h"
 
+#include <stdio.h>
 #include <string.h>
 
 /* ------------------------------------------------------------------------- */
@@ -72,6 +73,46 @@ static bool movie_window_load(q2_movie *m, u32 sector)
     return m->window_have > 0;
 }
 
+/*
+ * The picture rate, read off the film rather than assumed.
+ *
+ * The drive delivers 150 sectors a second whichever disc it is, and what the
+ * encoder chose is how many of them a frame takes: six on the PAL disc, which
+ * is 25 fps, and five on the NTSC one, which is 30 — the same films, the same
+ * sector counts and running times, re-encoded to the other standard's rate.
+ * So the distance between the first sectors of successive frames, averaged
+ * across the window, is the whole answer.
+ */
+static double movie_measure_fps(const q2_movie *m)
+{
+    u32 i, first_s = 0, last_s = 0, first_f = 0, last_f = 0, spf;
+    bool have = false;
+
+    for (i = 0; i < m->window_have; i++) {
+        q2_stx_header h;
+
+        if (q2_stx_sector_is_audio(m->window_base + i))
+            continue;
+        if (!q2_stx_header_read(m->window + (size_t)i * Q2_STX_SECTOR_SIZE, &h) ||
+            h.chunk_index != 0)
+            continue;
+        if (!have) {
+            first_s = last_s = i;
+            first_f = last_f = h.frame_number;
+            have = true;
+        } else if (h.frame_number > last_f) {
+            last_s = i;
+            last_f = h.frame_number;
+        }
+    }
+
+    if (!have || last_f == first_f)
+        return Q2_MOVIE_FPS;
+
+    spf = (u32)((double)(last_s - first_s) / (double)(last_f - first_f) + 0.5);
+    return spf ? Q2_MOVIE_SECTORS_PER_SECOND / (double)spf : Q2_MOVIE_FPS;
+}
+
 /* ------------------------------------------------------------------------- */
 bool q2_movie_open(q2_movie *m, const disc *d, const char *path)
 {
@@ -100,6 +141,7 @@ bool q2_movie_open(q2_movie *m, const disc *d, const char *path)
             return false;
     }
 
+    m->fps = movie_measure_fps(m);
     return true;
 }
 
@@ -110,11 +152,21 @@ u32 q2_movie_retail_length(const char *file)
      * into the player because these are the MODULES' numbers and not this
      * port's: a disc whose modules said something else would want a different
      * row, and a film nobody's module names has no row at all.
+     *
+     * And the NTSC disc's modules DO say something else. Its films are named
+     * without the P and run at 30 fps, and QLOGOS's `li a1` (module+0x960 and
+     * +0x9D4) and QFRONT's (+0x1D38, and the dead copy at +0xD608) carry the
+     * frame counts over again: the cut lands within half a second of the same
+     * point on both — 51.2 s into the intro, 60.0 s (PAL) and 60.4 s (NTSC)
+     * into the outro, 98.3 s into the reel.
      */
     static const struct { const char *file; u32 frames; } k_len[] = {
         { "TAKE1BP.STX",  1281u },   /* QFMV,   "Intro FMV"      */
         { "OUTRO1P.STX",  1500u },   /* QFMV,   "Extro FMV"      */
-        { "ROGUEINP.STX", 2457u }    /* QFRONT, the opening reel */
+        { "ROGUEINP.STX", 2457u },   /* QFRONT, the opening reel */
+        { "TAKE1B.STX",   1538u },   /* ...and SLUS-00757's      */
+        { "OUTRO1.STX",   1811u },
+        { "ROGUEIN1.STX", 2949u }
     };
     u32 i;
 
@@ -138,6 +190,26 @@ u32 q2_movie_retail_length(const char *file)
     return 0;
 }
 
+const char *q2_movie_start_reel(const disc *d)
+{
+    /*
+     * QFRONT's literal at module+0xDC4, in each build: SLES-01534 names the
+     * PAL film and SLUS-00757 `ROGUEIN1.STX`. The module is loaded after the
+     * reel is chosen here, so the disc is asked which of the two it carries.
+     */
+    static const char *const k_reel[] = { "ROGUEINP.STX", "ROGUEIN1.STX" };
+    size_t i;
+
+    for (i = 0; d && i < sizeof(k_reel) / sizeof(k_reel[0]); i++) {
+        char path[64];
+
+        snprintf(path, sizeof(path), "Q2DATA/MOVIES/%s", k_reel[i]);
+        if (disc_find(d, path))
+            return k_reel[i];
+    }
+    return k_reel[0];
+}
+
 bool q2_movie_advance(q2_movie *m, double dt, u8 *rgb)
 {
     double due;
@@ -146,7 +218,7 @@ bool q2_movie_advance(q2_movie *m, double dt, u8 *rgb)
         return false;
 
     m->clock += dt;
-    due = (double)m->frames_shown / Q2_MOVIE_FPS;
+    due = (double)m->frames_shown / (m->fps > 0.0 ? m->fps : Q2_MOVIE_FPS);
     if (m->frames_shown && m->clock < due)
         return false;
 
