@@ -256,11 +256,25 @@ static bool bound_los(void *user, const s32 a[3], const s32 b3[3])
  * origin. That 502 is independent proof of the origin convention, since it
  * only lands on the floor if the origin is 286 above the feet.
  *
- * APPROXIMATION, stated as one: in the original a corner whose sweep COMPLETES
- * is then passed to 0x80053974, which clips it against the entity list, and
- * only that failing fails the function. This port has no entity list to give
- * it, so a completed corner is taken as no ground. That is stricter than the
- * console, not looser, and it is not the console's rule.
+ * A corner whose sweep COMPLETES is not yet a ledge. 0x8005FC28 sends it to
+ * 0x8005FC34 `jal 0x80053974` (a2 = 0 in the delay slot), the clip against the
+ * 48-slot entity-box table at 0x800CAE10, which returns 0 when a box stops the
+ * segment; 0x8005FC3C `bne v0, zero` then returns 0 — a ledge — only when no
+ * box did. The port's table is `b->ents`, the sim's `move_world`, and its
+ * entity half (q2_move_clip_segment skips the trigger volumes) holds the two
+ * families the port registers: every mover part (q2_sim_attach_movers) and
+ * every intact GLASS pane (q2_sim_attach_breakables, which inserts the pane's
+ * box after the mover prefix and disables it in the fatal-hit call). So a
+ * creature on a lift, in a doorway floored by the door, or on a window is
+ * standing on something, as on the console.
+ *
+ * What is still missing is the rest of that table, not a rule: the allocator
+ * 0x800555D8 has fourteen call sites and the port registers the boxes of those
+ * two families only. A creature standing on any other box-owning primitive
+ * reads as a ledge here where the console finds ground. Creatures, corpses and
+ * items are NOT in the console's table either — a slot is a copy of the box
+ * its caller hands 0x800555D8, a Scene node record + 16 — so a creature
+ * standing on another creature is at a ledge on both.
  */
 #define AI_BOTTOM_CORNER  (Q2_EYE_BASE / 2)             /* 143 */
 
@@ -312,15 +326,15 @@ static bool bound_bottom(void *user, const q2_monster *m)
         }
 
         /*
-         * THE CORNER THAT REACHED THE END, and this is the approximation the
-         * block above used to call out as unfixable.
+         * THE CORNER THAT REACHED THE END.
          *
          * 0x8005FB24 does not fail on it either: it hands the completed sweep
          * to 0x80053974, the ENTITY clip, and only that finding nothing makes
-         * it a ledge. The entity list the port can supply is the mover set, so
-         * a creature standing on a LIFT — or in a doorway whose floor is the
-         * door itself — is now standing on something instead of being told it
-         * is at the edge of the world and refusing to walk.
+         * it a ledge. The entity list here is the sim's entity boxes — mover
+         * parts and intact glass, see the block above — so a creature standing
+         * on a LIFT, in a doorway whose floor is the door itself, or on a pane
+         * is standing on something instead of being told it is at the edge of
+         * the world and refusing to walk.
          */
         if (b->ents) {
             q2_move_seg_hit mh;

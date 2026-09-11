@@ -176,9 +176,8 @@ static void usage(void)
     puts("  explosives <disc> [map]     opcode 0x08: the destroyable brush groups");
     puts("  modelents <disc>            the effect models a model entity can bind");
     puts("  ai      <disc>              the creature AI, checked against the executable");
-    puts("  creatures <disc>            decode every creature module and report coverage");
-    puts("  ai      <disc>              the creature AI, checked against the executable");
-    puts("  creatures <disc>            decode every creature module and report coverage");
+    puts("  creatures <disc>            decode every creature module and report coverage,");
+    puts("                              then wake every placed one and census its eye");
     puts("  mob     <disc> <map> [zone] [n] [out.ppm]  stand in front of a creature");
     puts("  models  <disc> <map>        list a map's model bank");
     puts("  model   <disc> <map> <name|idx> [clip] [frame] [out.ppm] [yaw]  render one model");
@@ -4737,6 +4736,17 @@ static int cmd_events(disc *d)
                 q2_event_record rec;
                 u32 k;
 
+                /*
+                 * A zone's script runs while THAT zone is resident, so tell
+                 * the runtime which one it is: "ZONE3.DAT" -> 3. With it the
+                 * ZONEGATE handler makes both of the console's decisions — a
+                 * gate naming the resident zone is refused (0x800791E0), and
+                 * an accepted one stops its record (0x8002783C). events_rt.c
+                 * applies the abort only once current_zone is known, and
+                 * q2_event_rt_init resets it to -1, so this follows the init.
+                 */
+                rt.current_zone = atoi(base + 4);
+
                 /* Census every item before running anything. */
                 if (q2_events_first_record(&ev, &rec)) {
                     do {
@@ -4915,7 +4925,8 @@ static int cmd_events(disc *d)
     printf("  named entries     : %u\n", named);
     printf("  records executed  : %u\n", ran);
     printf("  movers skipped    : %u  (link not decoded)\n", movers);
-    printf("  zone gates fired  : %u\n", zone_changes);
+    printf("  zone gates fired  : %u  (each script runs as its own zone's)\n",
+           zone_changes);
     printf("  movers built      : %u  (%u with no nodes)\n", movers_built, movers_empty);
     printf("  mover tick-moves  : %u\n", movers_moved);
     printf("  movers displaced  : %u  after 400 ticks\n", movers_open);

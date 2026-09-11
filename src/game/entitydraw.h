@@ -113,6 +113,34 @@ u32 q2_entity_build_ot(q2_entity_set *set, const q2_entity_draw_ctx *ctx,
  */
 bool q2_entity_resolve_model(q2_entity *e, const q2_model_bank *bank);
 
+/*
+ * THE MATRIX A TRANSIENT MODEL ENTITY IS DRAWN WITH, which for a gib is all
+ * three of its angles and not the yaw alone.
+ *
+ * The console draws every entity through the matrix at entity+0x2C0 — nine
+ * `lhu` at 0x8006BB28..0x8006BB8C, composed with the camera at 0x8006BB94 —
+ * and a gib rebuilds that matrix as RotMatrix of the whole +0xE6 SVECTOR:
+ * 0x8005A31C at its spawn, 0x80046CA8 / 0x80046CBC on every toss, the pitch
+ * and roll its tumble turns included. Drawing only +0xE8 kept each chunk's
+ * heading and dropped the tumble.
+ *
+ * A Q2_RF_TRANSIENT entity therefore gets q2_rotation_euler(+0xE6, +0xE8,
+ * +0xEA), which is RotMatrix element for element (trig.c), and this returns
+ * true with it in `out`. Everything else returns false, leaves `out` alone and
+ * keeps the instance's yaw-only path exactly as it was. The explosion family
+ * is the other transient: the port's never turns (every angle stays at the
+ * allocator's zero), and at zero both forms are the identity, so its draw does
+ * not change either.
+ *
+ * NOT through q2_model_instance's own pitch/roll fields. That path builds
+ * q2_rotation_euler(pitch, -yaw, roll) (modeldraw.c, instance_spin): the yaw
+ * negated as q2_rotation_yaw_pitch needs it to come out as RotMatrix(0, yaw,
+ * 0), which q2_rotation_euler does not, so a chunk drawn through it would
+ * have its heading turned the wrong way. The explicit matrix is RotMatrix's
+ * own sense, the one the yaw-only path already reproduces.
+ */
+bool q2_entity_draw_rotation(const q2_entity *e, s16 out[3][3]);
+
 /* ------------------------------------------------------------------------- */
 /* Projectiles in flight                                                      */
 /* ------------------------------------------------------------------------- */

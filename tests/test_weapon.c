@@ -392,6 +392,8 @@ static void test_projectiles(void)
         q2_actor_init(&near_by);
         near_by.origin[0] = 0; near_by.origin[1] = 0; near_by.origin[2] = 5200;
         near_by.health = 500;
+        /* Spawned creatures all have this; 0x80062848 refuses one without. */
+        near_by.takedamage = Q2_DAMAGE_YES;
         q2_actor_init(&shooter);
         shooter.health = 100;
         targets[0] = &near_by;

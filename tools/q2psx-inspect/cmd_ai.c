@@ -428,6 +428,129 @@ int cmd_ai(const disc *d)
     check_imm(&e, 0x8007E660, 0x20, "read from the class record's +0x20");
     check_imm(&e, 0x8007E668, 0x23, "written to the entity's +0x23");
 
+    /* --------------------------------------------------------------------- */
+    /*
+     * The death drop. monster_death_use tests the Population record's flag
+     * halfword on the link object and hands a flagged creature to 0x80020D60
+     * (`jal` at 0x8006233C), which only RECORDS it into a four-slot queue. The
+     * once-a-frame flush 0x80020E24 (`jal` from 0x80038FE0) hands each used
+     * slot to 0x80020680 (`jal` at 0x80020E5C), which picks an item through a
+     * jump table indexed on the population class row. monster.h, above
+     * q2_monster_drop_item_for_class, carries the chain instruction by
+     * instruction.
+     */
+    printf("\nthe death drop (0x800622E8 -> 0x80020D60, 0x80020680)\n");
+    /* 0x80062328 `lhu v0, 242(a0)` / 0x80062330 `andi v0, v0, 0x100`. The
+     * port's Q2_SPAWNFLAG_DROP_ITEM is that same record bit seen through the
+     * spawnflags republish at 0x8007E618 — `(obj[0xF2] & 0x1FF) << 18`. */
+    check_immu(&e, 0x80062330, Q2_SPAWNFLAG_DROP_ITEM >> 18,
+               "only record flag 0x100 leaves a drop");
+    {
+        /*
+         * The port's queue depth, MEASURED through its own API rather than
+         * restated here: record more deaths than it can hold and count what
+         * stayed. 0x80020D6C `addiu v1, a1, 352` is the end of the console's
+         * queue at 0x800C6D70, and its slots are 88 bytes, so the two agree
+         * only if the port also refuses the fifth death.
+         */
+        q2_monster probe;
+        u32 k, slots;
+
+        memset(&probe, 0, sizeof(probe));
+        q2_monster_drop_reset();
+        for (k = 0; k < 8; k++)
+            q2_monster_drop_record(&probe);
+        slots = q2_monster_drop_pending();
+        q2_monster_drop_reset();
+
+        check_imm(&e, 0x80020D6C, (s32)(slots * 88u),
+                  "the queue holds four 88-byte slots ...");
+    }
+    check_imm(&e, 0x80020D8C, 88, "... walked 88 bytes at a time");
+    /* 0x800206DC `addiu v0, v0, -5`, 0x800206E8 `sltiu v0, v1, 30`: class
+     * rows 5..34, and anything else falls to 0x800207D0 with nothing. */
+    check_imm(&e, 0x800206DC, -5, "the pick table starts at class row 5 ...");
+    check_imm(&e, 0x800206E8, 30, "... and has 30 rows");
+    check_split(&e, 0x800206F0, 0x800206F4, 0x800AB79C, true,
+                "the pick is the jump table at 0x800AB79C");
+    /* 0x80020820 `jal 0x80089E28` (rand) / 0x8002082C `andi a1, v0, 0xFFF`:
+     * the drop's TOSS heading, not a facing. */
+    check_immu(&e, 0x8002082C, 0xFFF,
+               "a dropped item is tossed on a 12-bit heading");
+
+    /* The Tank Commander's arm: an inline of an otherwise unreachable ammo
+     * picker, whose every path ends at 23 (monster.c, drop_tankcomm). */
+    printf("\nthe Tank Commander's drop (0x80020754)\n");
+    check_imm(&e, 0x80020758, 11,
+              "it switches on the 11 one-based weapon ids");
+    /* In the `beq`'s delay slot, so it happens on both paths. */
+    check_immu(&e, 0x80020760, 0x91,
+               "masking the owned bits to blaster, chaingun, RL");
+    check_split(&e, 0x80020764, 0x80020768, 0x800AB814, true,
+                "through its own table at 0x800AB814");
+
+    /* --------------------------------------------------------------------- */
+    /*
+     * The three go-routines, and which one each start wrapper parks.
+     *
+     * The port is DRIVEN here rather than restated: a blank creature goes
+     * through the port's wrapper and then q2_monster_start_go, which dispatches
+     * on the go-routine the wrapper chose, and what that leaves in yaw_speed
+     * and view_height is compared with the immediates of the go-routine the
+     * console's wrapper parks at +0x94 (the three splits at the end of this
+     * block). Health 0 makes monster_start_go_body return at once, so the only
+     * stores that happen are the two under test. `xrefs 0x80061BA4` gives
+     * exactly three JALs, 0x80062454 / 0x800624F4 / 0x8006258C, one per
+     * go-routine, so these three are the only way in.
+     */
+    printf("\nthe three go-routines (0x8006241C, 0x800624BC, 0x8006255C)\n");
+    {
+        q2_monster walk, fly, swim;
+
+        memset(&walk, 0, sizeof(walk));
+        memset(&fly, 0, sizeof(fly));
+        memset(&swim, 0, sizeof(swim));
+
+        q2_monster_walk_start(&walk);
+        walk.model_ext2 = 251;              /* the Soldier's, off BASE0 */
+        q2_monster_start_go(&walk);
+        q2_monster_fly_start(&fly);
+        q2_monster_start_go(&fly);
+        q2_monster_swim_start(&swim);
+        q2_monster_start_go(&swim);
+
+        /* 0x80062448 `lhu v0, 248(v0)` then `nor v0, zero, v0`: the eye is
+         * the COMPLEMENT of the model's ext2, so 251 gives -252, not -251. */
+        check_word(&e, 0x80062450, 0x00021027,
+                   "a walker's eye is ~ext2 (nor v0, zero, v0)");
+        printf("  port: walker with ext2 251 -> eye %d, turn %d\n",
+               walk.view_height, walk.yaw_speed);
+        /* id's `if (!self->yaw_speed)`. The walker's 228 sits in the delay
+         * slot of the `bne v0, zero` at 0x80062434, so only its store is
+         * conditional; the flyer's and swimmer's 114 are on the fall-through
+         * of theirs (0x800624E0, 0x80062574). */
+        check_imm(&e, 0x80062438, walk.yaw_speed,
+                  "a walker turns 228 a tick (id's 20)");
+        check_imm(&e, 0x800624E8, fly.yaw_speed,
+                  "a flyer turns 114 (id's 10)");
+        check_imm(&e, 0x8006257C, swim.yaw_speed,
+                  "and so does a swimmer");
+        check_imm(&e, 0x800624F0, fly.view_height,
+                  "a flyer's eye is a flat -250");
+        /* 0x80062578 loads -100 in the branch's delay slot and 0x80062584
+         * again on the fall-through; this is the second. */
+        check_imm(&e, 0x80062584, swim.view_height,
+                  "a swimmer's a flat -100");
+    }
+    check_split(&e, 0x80062244, 0x80062248, 0x8006241C, true,
+                "walkmonster_start parks walkmonster_go");
+    /* The fly wrapper's pair is not adjacent: 0x800622A4/0x800622A8 sit
+     * between, and 0x800622B0 is the `sw` to +0x94. */
+    check_split(&e, 0x800622A0, 0x800622AC, 0x800624BC, true,
+                "flymonster_start parks flymonster_go");
+    check_split(&e, 0x8006226C, 0x80062278, 0x8006255C, true,
+                "swimmonster_start parks swimmonster_go");
+
     printf("\n%d checks, %d mismatches\n", g_checks, g_bad);
     printf("%s\n", g_bad == 0 ? "the port's AI matches the disc"
                               : "the port's AI does NOT match the disc");

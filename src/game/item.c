@@ -1,11 +1,24 @@
 #include "item.h"
 
 #include "crebind.h"
+#include "effect.h"       /* q2_fx_item_materialise — 0x800596B0 */
+#include "entitydraw.h"   /* q2_entity_resolve_model — the drop's 0x8006D008 */
 #include "levelbin.h"
 #include "trig.h"
 #include "weapontables.h"
 
 #include <string.h>
+
+/* See q2_item_env in item.h: console globals, so module-wide here too. */
+static q2_item_env g_env;
+
+void q2_item_bind_env(const q2_item_env *env)
+{
+    if (env)
+        g_env = *env;
+    else
+        memset(&g_env, 0, sizeof(g_env));
+}
 
 /* ------------------------------------------------------------------------- */
 /* The dispatch, transcribed                                                  */
@@ -1034,10 +1047,25 @@ void q2_item_think(q2_entity *e, q2_entity_world *w)
                 e->glow[0] = e->glow[1] = e->glow[2] = 127;
             }
 
-            /* 0x80059608: fifteen offsets from the engine's own rand, drawn
-             * whether or not anything consumes them, because drawing them is
-             * what advances the shared generator. */
-            {
+            /*
+             * 0x80059608..0x800596B0: fifteen `(rand() - 16384) >> 9` triples
+             * into the block at 0x800D4B24, then ONE group of them spawned at
+             * the draw origin (`addiu a0, s2, 164`), in the ramp the glow bits
+             * pick out of the flags word `s3` (0x80059648), on the area byte
+             * +0x9E (`lbu v0, 158(s2)` at 0x800596A8). effect.h has the rest.
+             *
+             * The draws come off the item world's own generator in the order
+             * they always did — 45, x/y/z per sparkle — so the stream every
+             * later draw sees is unchanged by the burst now being SPAWNED rather
+             * than thrown away. With no pool bound the same 45 are still drawn
+             * and discarded: q2_fx_item_materialise refuses a NULL pool before
+             * its first draw, and the stream must not depend on whether a
+             * caller happens to have a presentation layer.
+             */
+            if (g_env.fx) {
+                (void)q2_fx_item_materialise(g_env.fx, &w->rng, e->origin,
+                                             e->surface, flags);
+            } else {
                 int i;
                 for (i = 0; i < Q2_ITEM_SPARKLES * 3; i++)
                     (void)q2_rng_next(&w->rng);
@@ -1104,4 +1132,492 @@ touch_sweep:
         item_collected(e, w, p, keep);
         return;
     }
+}
+
+/* ------------------------------------------------------------------------- */
+/* A creature's death drop — 0x8002085C and 0x80020C48                        */
+/* ------------------------------------------------------------------------- */
+/*
+ * The flight state the console keeps at +0xE0..+0xE4, which q2_entity has no
+ * field for (see Q2_ITEM_TOSS_MAX). Keyed by the set and the SLOT, because
+ * q2_entity_alloc may move the whole array and never moves an index.
+ */
+typedef struct item_toss {
+    const q2_entity_set *set;
+    u32                  slot;
+    s16                  vel[3];      /* +0xE0 x, +0xE2 y, +0xE4 z */
+    bool                 used;
+} item_toss;
+
+static item_toss g_toss[Q2_ITEM_TOSS_MAX];
+
+static bool toss_is(const item_toss *t, const q2_entity *e)
+{
+    return t->used && t->set && t->set->ent && t->slot < t->set->count &&
+           &t->set->ent[t->slot] == e;
+}
+
+static item_toss *toss_find(const q2_entity *e)
+{
+    u32 i;
+
+    if (!e)
+        return NULL;
+    for (i = 0; i < Q2_ITEM_TOSS_MAX; i++)
+        if (toss_is(&g_toss[i], e))
+            return &g_toss[i];
+    return NULL;
+}
+
+/*
+ * A record for (set, slot): the one that slot already had, else a free one,
+ * else one whose entity is no longer an in-flight drop — its slot was freed or
+ * reused by something that is not flying. NULL only when every record belongs
+ * to a drop that really is in the air.
+ */
+static item_toss *toss_claim(const q2_entity_set *set, u32 slot)
+{
+    item_toss *free_rec = NULL;
+    u32 i;
+
+    for (i = 0; i < Q2_ITEM_TOSS_MAX; i++) {
+        item_toss *t = &g_toss[i];
+
+        if (t->used && t->set == set && t->slot == slot)
+            return t;
+        if (!free_rec && !t->used)
+            free_rec = t;
+    }
+    if (free_rec)
+        return free_rec;
+
+    for (i = 0; i < Q2_ITEM_TOSS_MAX; i++) {
+        item_toss *t = &g_toss[i];
+        const q2_entity *owner;
+
+        if (!t->set || !t->set->ent || t->slot >= t->set->count)
+            return t;
+        owner = &t->set->ent[t->slot];
+        if (!owner->in_use || owner->think != q2_item_drop_think)
+            return t;
+    }
+    return NULL;
+}
+
+void q2_item_drop_reset(void)
+{
+    memset(g_toss, 0, sizeof(g_toss));
+}
+
+u32 q2_item_drop_in_flight(void)
+{
+    u32 i, n = 0;
+
+    for (i = 0; i < Q2_ITEM_TOSS_MAX; i++) {
+        const item_toss *t = &g_toss[i];
+
+        if (t->used && t->set && t->set->ent && t->slot < t->set->count &&
+            t->set->ent[t->slot].in_use &&
+            t->set->ent[t->slot].think == q2_item_drop_think)
+            n++;
+    }
+    return n;
+}
+
+bool q2_item_drop_velocity(const q2_entity *e, s16 out[3])
+{
+    const item_toss *t = toss_find(e);
+
+    if (!t || !out)
+        return false;
+    out[0] = t->vel[0];
+    out[1] = t->vel[1];
+    out[2] = t->vel[2];
+    return true;
+}
+
+/* The draw origin every frame after the first: +0xA4 = +0x54, y lowered by
+ * 286 and raised by the bias (0x80020CC0..0x80020CF0, and the identical tail
+ * at 0x80020D20..0x80020D4C). */
+static void drop_origin(q2_entity *e)
+{
+    e->origin[0] = e->pos[0];
+    e->origin[1] = e->pos[1] + Q2_EYE_BASE - e->model_offset;
+    e->origin[2] = e->pos[2];
+}
+
+q2_entity *q2_item_drop_spawn(q2_entity_set *set, const q2_item_table *table,
+                              const struct q2_model_bank *const *banks,
+                              u32 bank_count, u8 item_id, u16 heading,
+                              const s32 pos[3], s32 cell, int (*rand15)(void))
+{
+    const q2_item_def *def;
+    item_toss *t;
+    q2_entity *e;
+    u32 i, slot;
+    s32 r, speed, kick;
+    s16 ext2;
+    s32 c, s;
+
+    if (!set || !pos || !rand15)
+        return NULL;
+
+    if (!table)
+        table = q2_item_table_builtin();
+
+    /* 0x80020888 `jal 0x8005B5D8` — the same place-id scan the placed spawner
+     * uses — and 0x80020894 `beq s2, zero`: no record, nothing spawns. */
+    def = q2_item_find(table, (s32)item_id);
+    if (!def)
+        return NULL;
+
+    /*
+     * The port's one refusal, taken BEFORE the allocation so it costs no
+     * entity and no random number: nowhere to keep the velocity. See
+     * Q2_ITEM_TOSS_MAX. The claim is by slot, which is only known after the
+     * allocation, so this asks whether ANY record could be had.
+     */
+    if (!toss_claim(NULL, (u32)-1))
+        return NULL;
+
+    /* 0x8002089C `jal 0x8006C098` with a0 = 1, and 0x800208A8: out of
+     * entities, nothing spawns. */
+    e = q2_entity_alloc(set);
+    if (!e)
+        return NULL;
+    slot = (u32)(e - set->ent);
+
+    /*
+     * 0x8006C098 clears the record (0x8006C18C `jal 0x80089E18`, 768 bytes)
+     * and writes nothing into +0x10C, and this spawner does not either. So the
+     * placed spawner's 0x08000001 (0x800587C0), which q2_entity_init stands
+     * for, is not a drop's: no floor shadow and no shadow link (0x80046B4C).
+     */
+    e->render_flags = 0;
+
+    e->think = q2_item_drop_think;          /* 0x800208B8: 0x80020C48        */
+    e->kind  = Q2_ENT_KIND_ITEM;            /* 0x800208C4: 46                */
+    e->def   = def;
+
+    memcpy(e->model, def->model, sizeof(e->model));
+    /* 0x80020954 `sw v1, 4(v0)` — the record's +16 list becomes the model
+     * wrapper's shadow vertices, as the placed spawner does at 0x80059AC0. */
+    for (i = 0; i < Q2_ITEM_SHADOW_VERTEX_MAX; i++)
+        e->shadow_vertex[i] = def->shadow_vertex[i];
+    e->shadow_vertex_count = def->shadow_vertex_count;
+
+    /*
+     * 0x80020944 `jal 0x8006D008` looks the name up; 0x80020960 `bne v0,
+     * zero` — found, carry on; otherwise 0x80020968 frees the entity and
+     * nothing spawns. The resolve also supplies the bias 0x8006D100 reads
+     * (`lh model[+0x1C]`, stored at +0xF8 by 0x80020980) and the clip length
+     * the item think will wrap the frame against.
+     */
+    if (bank_count && banks) {
+        bool found = false;
+
+        for (i = 0; i < bank_count && !found; i++)
+            found = q2_entity_resolve_model(e, banks[i]);
+        if (!found) {
+            q2_entity_remove(e);
+            return NULL;
+        }
+    }
+    ext2 = e->model_offset;
+
+    /*
+     * THE POSITION IS THE RECORD'S, EXACTLY. +0xA4 at 0x80020984..0x80020998
+     * and +0x54 at 0x800209B8..0x800209CC, both straight from the three words
+     * the queue copied off the creature. No lift, no sweep.
+     *
+     * And the SPAWN-FRAME draw origin: `addiu v0, v0, -286` (0x800209A4) then
+     * `subu v0, v0, v1` with v1 the bias (0x800209AC). +Y is down, so this is
+     * 286 + bias ABOVE the position, where the think's every later write is
+     * 286 below it. Reproduced as read.
+     */
+    for (i = 0; i < 3; i++) {
+        e->pos[i]    = pos[i];
+        e->origin[i] = pos[i];
+    }
+    e->origin[1] = pos[1] - Q2_EYE_BASE - ext2;
+
+    /* 0x800209D0..0x800209FC: both ambient triplets from 0x800AE718, "@@@" —
+     * 0x40 each, the allocator's own value written again. */
+    e->glow[0] = e->glow[1] = e->glow[2] = 0x40;
+
+    /*
+     * THE TOSS. 0x80020A00 draws the speed and 0x80020A58 the kick, in that
+     * order. `r * 3 << 8` and `>> 15` is `r * 768 / 32768`, whose `bgez`
+     * rounding arm is never taken for a BIOS rand(); `-r * 3 << 9` then
+     * `+32767` and `>> 15` IS taken, and truncates toward zero.
+     */
+    r     = rand15() & 0x7FFF;
+    speed = Q2_ITEM_DROP_SPEED_BASE + (r * Q2_ITEM_DROP_SPEED_SPAN) / 32768;
+
+    /*
+     * 0x80020A24..0x80020A38: the entry at 0x800A5430 + (heading & 0xFFF) * 4
+     * is {sine, cosine}, and the SECOND halfword (`lh v0, 2(s3)`) goes to
+     * +0xE0, x; the first (`lh v0, 0(s3)`, 0x80020A9C) to +0xE4, z. Each is
+     * `* speed` then the compiler's truncating divide by 4096 (the `bgez` /
+     * `+4095` / `sra 12` triple). trig.h is that table, 4096 of 4096.
+     */
+    c = q2_cos12((s32)(heading & 0xFFFu));
+    s = q2_sin12((s32)(heading & 0xFFFu));
+
+    r    = rand15() & 0x7FFF;
+    kick = Q2_ITEM_DROP_KICK_BASE - (r * Q2_ITEM_DROP_KICK_SPAN) / 32768;
+
+    t = toss_claim(set, slot);
+    if (!t) {
+        /* Cannot happen: a record was available above and nothing between
+         * the check and here claims one. Belt and braces. */
+        q2_entity_remove(e);
+        return NULL;
+    }
+    memset(t, 0, sizeof(*t));
+    t->used   = true;
+    t->set    = set;
+    t->slot   = slot;
+    t->vel[0] = (s16)((c * speed) / 4096);
+    /* 0x80020A84..0x80020A94: the kick is taken as a halfword (`sll 16` /
+     * `sra 16`) and HALVED by the signed divide (`srl 31` / `addu` / `sra 1`),
+     * so -3072..-4607 becomes -1536..-2303: upward. */
+    t->vel[1] = (s16)((s32)(s16)kick / 2);
+    t->vel[2] = (s16)((s * speed) / 4096);
+
+    /* 0x80020AC8 `jal 0x80089E18` (a2 = 6) — the angles, zeroed, and the
+     * matrix built from them at 0x80020AD4. The item never faces anywhere. */
+    e->angles[0] = e->angles[1] = e->angles[2] = 0;
+
+    e->remove_in = Q2_ITEM_DROP_TOSS_LIFE;  /* 0x80020AE0 */
+
+    /*
+     * 0x80020AE8 `sh s4, 162(s1)` — the cell — and 0x80020AF4 +0xA0 = -1.
+     * Then +0x9E is that cell's byte +32 in SecondaryCol's node table
+     * (0x800C8FEC, `lbu 32` at 0x80020B0C). The console indexes with whatever
+     * the cell is; the port reads it only for a real one.
+     */
+    e->node = cell;
+    if (cell >= 0 && g_env.hull) {
+        q2_coll_node cn;
+
+        if (q2_collision_get_node(g_env.hull, (u32)cell, &cn))
+            e->surface = cn.contents;
+    }
+
+    /*
+     * 0x80020B18..0x80020B44: item 21 keeps the record's word (`lh`), every
+     * other id takes it with Q2_ITEM_TIMED (`lhu`, `ori 4`, sign-extended).
+     * The flags fit in fifteen bits, so the sign never shows.
+     */
+    if (item_id == Q2_ITEM_DROP_KEEPS_FLAGS)
+        e->flags = (u32)(s32)(s16)def->flags;
+    else
+        e->flags = (u32)(s32)(s16)(def->flags | Q2_ITEM_TIMED);
+
+    /* 0x80020B50 +0x50 = 0, which the allocator already did; 0x80020B54 the
+     * touch-dispatch index. */
+    e->effect = def->effect;
+
+    /*
+     * 0x80020B4C..0x80020C1C: mins (-256, ext2 - 512, -256) and maxs (256,
+     * ext2, 256), each built as a halfword triple on the stack, and the
+     * absolute box +0x78..+0x8C = position + each. Set here and nowhere else.
+     */
+    e->bounds_min[0] = pos[0] - Q2_ITEM_DROP_BOX_HALF;
+    e->bounds_min[1] = pos[1] + (s16)(ext2 - Q2_ITEM_DROP_BOX_DEPTH);
+    e->bounds_min[2] = pos[2] - Q2_ITEM_DROP_BOX_HALF;
+    e->bounds_max[0] = pos[0] + Q2_ITEM_DROP_BOX_HALF;
+    e->bounds_max[1] = pos[1] + ext2;
+    e->bounds_max[2] = pos[2] + Q2_ITEM_DROP_BOX_HALF;
+
+    e->field90 = Q2_ITEM_DROP_FIELD90;      /* 0x80020BB8 */
+
+    return e;
+}
+
+/*
+ * 0x800463E8 as 0x80046DDC calls it — SecondaryCol, the +0xA2 cell, and every
+ * argument zero: no out-pointer, no rebound, no trigger flag. Returns whether
+ * anything was touched, the mover's `s3`.
+ *
+ * What is NOT here, and why each is unobservable for a drop:
+ *   - the two contact-normal slots at +0x60 / +0x66 and the ground bit
+ *     +0x98 & 0x20. Their one reader on this path is the shadow link at
+ *     0x80046B60, which a drop never reaches (render flags 0; see the spawn);
+ *   - the per-player copy of +0x9E into +0x119 + 100n (0x80046B28): the port
+ *     keeps no per-player block on an entity;
+ *   - the rebound (0x800466C0..0x80046A5C): with a2 = 0 its speed term is
+ *     zero, so the reflected, normalised direction it computes is multiplied
+ *     by nothing and the velocity comes out (0, 0, 0). That product is kept.
+ */
+static bool toss_move(q2_entity *e, s16 vel[3], s32 dt)
+{
+    s32 start[3], dest[3], end[3];
+    s16 delta[3];
+    s16 normal[3] = { 0, 0, 0 };
+    s32 gravity = g_env.gravity ? *g_env.gravity : Q2_GRAVITY;
+    bool contact = false, have_normal = false;
+    int k;
+
+    for (k = 0; k < 3; k++)
+        start[k] = e->pos[k];
+
+    /* 0x80046450..0x800464A0: `lhu`, add `[0x800AE924] * [0x800B2DB4]`, `sh`
+     * — a halfword add — then `slti 8193` on the sign-extended result. */
+    if (!(e->render_flags & Q2_ITEM_TOSS_NO_GRAVITY)) {
+        s16 vy = (s16)(u16)((u32)(u16)vel[1] + (u32)(gravity * dt));
+
+        if (vy > Q2_ITEM_TOSS_TERMINAL)
+            vy = Q2_ITEM_TOSS_TERMINAL;
+        vel[1] = vy;
+    }
+
+    /* 0x800464D4..0x800465B8: the step, truncated, stored as a halfword and
+     * added back sign-extended. */
+    for (k = 0; k < 3; k++) {
+        delta[k] = (s16)(((s32)vel[k] * dt) / Q2_ITEM_TOSS_STEP_DIV);
+        dest[k]  = start[k] + delta[k];
+    }
+
+    /*
+     * 0x800465BC `jal 0x80053974` — the ENTITY boxes first, a bare point
+     * against every active one, nearest hit kept (it shrinks the segment as it
+     * goes). A hit is kind 2 (0x80053AEC), which is a contact (0x800465E4),
+     * and the destination it wrote back is then pulled back by the whole step
+     * (0x80046650..0x8004667C `subu`). Both as read.
+     */
+    if (g_env.ents) {
+        q2_move_seg_hit hit;
+
+        if (q2_move_clip_segment(g_env.ents, start, dest, NULL, &hit)) {
+            contact     = true;
+            have_normal = true;
+            for (k = 0; k < 3; k++) {
+                normal[k] = hit.normal[k];
+                dest[k]   = hit.pos[k] - delta[k];
+            }
+        }
+    }
+
+    /* 0x80046694 `jal 0x80044C44` through SecondaryCol from the +0xA2 cell. A
+     * stop is a contact, and its plane's normal replaces the entity's
+     * (0x800466A4..0x800466B4). */
+    for (k = 0; k < 3; k++)
+        end[k] = dest[k];
+    if (g_env.hull) {
+        s32 node = e->node;
+
+        if (!q2_coll_move(g_env.hull, start, dest, e->node, end, &node)) {
+            q2_coll_plane pl;
+
+            contact = true;
+            if (g_env.hull->hit_plane_index >= 0 &&
+                q2_collision_get_plane(g_env.hull,
+                                       (u32)g_env.hull->hit_plane_index,
+                                       &pl)) {
+                normal[0]   = pl.nx;
+                normal[1]   = pl.ny;
+                normal[2]   = pl.nz;
+                have_normal = true;
+            }
+        }
+
+        /* 0x80046ACC: +0xA2 takes the move's last cell, and 0x80046AF8 +0x9E
+         * that cell's byte +32 — contact or not. */
+        e->node = node;
+        if (node >= 0) {
+            q2_coll_node cn;
+
+            if (q2_collision_get_node(g_env.hull, (u32)node, &cn))
+                e->surface = cn.contents;
+        }
+    }
+
+    if (!contact) {
+        /* 0x80046AB4: the destination, as the trace left it. */
+        for (k = 0; k < 3; k++)
+            e->pos[k] = dest[k];
+        return false;
+    }
+
+    /* 0x8004670C `jal 0x8005625C` — one unit back along the dominant axis of
+     * the contact normal, subtracted from where the trace stopped
+     * (0x800467D8..0x80046820), which becomes +0x54 at 0x800469D8. */
+    if (have_normal) {
+        s16 push[3];
+
+        q2_move_push_vector(normal, push);
+        for (k = 0; k < 3; k++)
+            end[k] -= push[k];
+    }
+    for (k = 0; k < 3; k++)
+        e->pos[k] = end[k];
+
+    /* 0x80046A24..0x80046A64: `(unit * ((speed * 0) >> 12)) >> 12` per axis. */
+    vel[0] = vel[1] = vel[2] = 0;
+    return true;
+}
+
+/* 0x80020CB8..0x80020D1C — it has come to rest. */
+static void drop_land(q2_entity *e)
+{
+    /* +0x50 = 1 (0x80020CBC): no field on the port's record, and nothing on
+     * the item think's path reads it. Named rather than dropped silently. */
+    drop_origin(e);
+
+    /* 0x80020CF4 `andi v0, a0, 0x8`: an OBJECTIVE item keeps its word; any
+     * other takes TIMED (again — the spawn already gave it to all but 21). */
+    if (!(e->flags & Q2_ITEM_OBJECTIVE))
+        e->flags |= Q2_ITEM_TIMED;
+
+    /* 0x80020CFC: 8700 sits in the branch's DELAY SLOT, so both arms store
+     * it at 0x80020D0C. */
+    e->remove_in = Q2_ITEM_DROP_LANDED_LIFE;
+
+    /* 0x80020D10..0x80020D1C: from now on it is an ordinary item — spin,
+     * glow, the TIMED countdown and the touch sweep. */
+    e->think = q2_item_think;
+}
+
+void q2_item_drop_think(q2_entity *e, q2_entity_world *w)
+{
+    item_toss *t;
+    bool contact;
+
+    if (!e || !w)
+        return;
+
+    /*
+     * No record: the flight state was forgotten under a live drop (a reset
+     * that did not free the set). There is no velocity to fly with, so it
+     * rests where it is — the one outcome that cannot strand it in the air.
+     */
+    t = toss_find(e);
+    if (!t) {
+        drop_land(e);
+        return;
+    }
+
+    /* 0x80020C64 `jal 0x80046DDC`, a1..a3 and the fifth argument all zero. */
+    contact = toss_move(e, t->vel, w->dt);
+
+    /*
+     * 0x80020C6C `beq v0, zero` and 0x80020C74..0x80020CB4: a contact, and
+     * the squared speed at most 0xC34FF, lands it. The squares are `mult` /
+     * `mflo` and the sum `addu`, 32 bits with wrap, compared SIGNED (`slt`).
+     */
+    if (contact) {
+        u32 v2 = (u32)((s32)t->vel[0] * t->vel[0]) +
+                 (u32)((s32)t->vel[1] * t->vel[1]) +
+                 (u32)((s32)t->vel[2] * t->vel[2]);
+
+        if (!((s32)Q2_ITEM_DROP_REST_SPEED2 < (s32)v2)) {
+            t->used = false;
+            drop_land(e);
+            return;
+        }
+    }
+
+    drop_origin(e);                         /* 0x80020D20..0x80020D4C */
 }

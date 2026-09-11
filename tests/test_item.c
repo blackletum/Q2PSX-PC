@@ -10,14 +10,19 @@
  * from, so a failure can be taken straight back to the disassembly.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "crebind.h"
+#include "effect.h"
 #include "entity.h"
+#include "entitydraw.h"
 #include "item.h"
 #include "itemtable.h"
 #include "levelbin.h"
 #include "modeldraw.h"
+#include "modelent.h"     /* Q2_GIB_RENDER_FLAGS, what 0x8005A1A4 writes */
+#include "trig.h"
 
 static int g_failures;
 static int g_checks;
@@ -1226,6 +1231,580 @@ static void test_place_difficulty_flags(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/* 0x8006CC44 / 0x8006D6AC — a posed vertex in the world                      */
+/* ------------------------------------------------------------------------- */
+/*
+ * Here and not in test_model.c, which links only the formats library:
+ * modeldraw.c is in the game library, and this suite links that.
+ *
+ * Two parts so the GLOBAL index walk is exercised: part 0 owns storage
+ * vertices 0 and 1, part 1 owns vertex 2, and only part 1's pose moves it. A
+ * half turn is used for the rotation because Ry(180) is diag(-1, 1, -1) under
+ * either sign convention, so the expectation does not borrow the one under
+ * test.
+ */
+static void test_world_vertex(void)
+{
+    u8 image[64];
+    q2_model model;
+    q2_model_pose pose[2];
+    q2_model_instance inst;
+    s32 v[3];
+    static const s16 swap_xz[3][3] = {
+        {     0, 0, 4096 },
+        {     0, 4096, 0 },
+        { -4096, 0,    0 }
+    };
+
+    printf("\nthe world vertex (0x8006CC44) and the vertex total (0x8006D6AC)\n");
+
+    memset(image, 0, sizeof(image));
+    memset(&model, 0, sizeof(model));
+    memset(pose, 0, sizeof(pose));
+
+    put_vertex(image + 0,  -20,  0, -30);
+    put_vertex(image + 12,  40,  0,  50);
+    put_vertex(image + 24, 100, -7,   5);
+    /* Part 1's scratch-window base overlaps part 0's, as real models' do: the
+     * STORAGE index is what 0x8006CC80 walks, and the window base must not
+     * enter into it. */
+    image[48 + 2] = 0;  image[48 + 3] = 2;    /* part 0: slots 0..1, 2 verts */
+    image[56 + 2] = 0;  image[56 + 3] = 1;    /* part 1: slot 0, 1 vert      */
+
+    model.base          = image;
+    model.size          = sizeof(image);
+    model.hdr.num_parts = 2;
+    model.hdr.num_verts = 3;
+    model.hdr.ofs_verts = 0;
+    model.hdr.ofs_parts = 48;
+    model.scratch_size  = 3;
+
+    pose[0].q[3] = Q2_ONE_12;
+    pose[1].q[3] = Q2_ONE_12;
+    pose[1].t[0] = 10;
+    pose[1].t[1] = 20;
+    pose[1].t[2] = -5;
+
+    check_eq_i(q2_model_total_verts(&model), 3,
+               "the total is the SUM of each part's +3 (2 + 1)");
+    check_eq_i(q2_model_total_verts(NULL), 0,
+               "a model-less entity has none (0x8006D6AC beq a0, zero)");
+
+    q2_model_instance_init(&inst);
+    inst.model     = &model;
+    inst.pose      = pose;
+    inst.origin[0] = 1000;
+    inst.origin[1] = 2000;
+    inst.origin[2] = 3000;
+
+    check(q2_model_world_vertex(&inst, -1, v), "a negative index answers");
+    check(v[0] == 1000 && v[1] == 2000 && v[2] == 3000,
+          "with the origin itself (0x8006CC64 bltz -> +0xA4)");
+
+    check(q2_model_world_vertex(&inst, 0, v), "vertex 0 answers");
+    check(v[0] == 980 && v[1] == 2000 && v[2] == 2970,
+          "part 0's vertex is its own position plus the origin");
+
+    check(q2_model_world_vertex(&inst, 2, v), "vertex 2 answers");
+    check(v[0] == 1110 && v[1] == 2013 && v[2] == 3000,
+          "the GLOBAL index finds part 1, whose pose moves it by (10,20,-5)");
+
+    check(!q2_model_world_vertex(&inst, 3, v), "past the last vertex refuses");
+
+    inst.yaw = 2048;
+    check(q2_model_world_vertex(&inst, 2, v), "vertex 2 at a half turn");
+    check(v[0] == 890 && v[1] == 2013 && v[2] == 3000,
+          "is x and z negated about the origin, y untouched");
+
+    inst.yaw = 0;
+    inst.rot = swap_xz;
+    check(q2_model_world_vertex(&inst, 2, v), "vertex 2 under an explicit rot");
+    check(v[0] == 1000 && v[1] == 2013 && v[2] == 3000 - 110,
+          "rot overrides the angles, row by row: (z, y, -x)");
+
+    inst.rot  = NULL;
+    inst.pose = NULL;
+    check(q2_model_world_vertex(&inst, 2, v), "an unposed instance answers");
+    check(v[0] == 1100 && v[1] == 1993 && v[2] == 3005,
+          "with the stored vertex, as the unposed draw does");
+}
+
+/* ------------------------------------------------------------------------- */
+/* A gib is drawn through all three of its angles (+0xE6 -> +0x2C0)           */
+/* ------------------------------------------------------------------------- */
+/*
+ * The console draws an entity through the matrix at +0x2C0 (0x8006BB28), and
+ * a gib rebuilds it as RotMatrix(+0xE6) at its spawn and on every toss
+ * (0x8005A31C, 0x80046CA8). The entity draw used to hand the model only +0xE8,
+ * so a chunk kept its heading and lost its tumble.
+ *
+ * The first expectation is worked from RotMatrix's own element list
+ * (0x80089E38, transcribed in trig.c) at quarter turns, where every sine and
+ * cosine is exactly 0 or 4096, so it does not borrow the function the draw
+ * calls. The second pins the heading's SENSE against the yaw-only path every
+ * other entity is drawn with (modeldraw.c's instance_spin builds it as
+ * q2_rotation_yaw_pitch(-yaw, 0)): a chunk that turned the other way from the
+ * item beside it would be the mirrored-yaw mistake the instance's own
+ * pitch/roll fields make. The third is the promise that nothing else changes.
+ */
+static void mat_fill(s16 m[3][3], s16 v)
+{
+    int r, c;
+
+    for (r = 0; r < 3; r++)
+        for (c = 0; c < 3; c++)
+            m[r][c] = v;
+}
+
+static bool mat_same(const s16 a[3][3], const s16 b[3][3])
+{
+    int r, c;
+
+    for (r = 0; r < 3; r++)
+        for (c = 0; c < 3; c++)
+            if (a[r][c] != b[r][c])
+                return false;
+    return true;
+}
+
+static void test_gib_draw_rotation(void)
+{
+    static const s16 pitch_roll[3][3] = {
+        /*
+         * sx = sz = 4096, cx = cz = 0, sy = 0, cy = 4096:
+         *   m00 =  cy*cz + sy*sx*sz = 0      m01 = -cy*sz + sy*sx*cz = -4096
+         *   m02 =  sy*cx            = 0      m10 =  sz*cx            = 0
+         *   m11 =  cz*cx            = 0      m12 = -sx               = -4096
+         *   m20 = -sy*cz + cy*sx*sz = 4096   m21 =  sy*sz + cy*sx*cz = 0
+         *   m22 =  cy*cx            = 0
+         */
+        {    0, -4096,     0 },
+        {    0,     0, -4096 },
+        { 4096,     0,     0 }
+    };
+    q2_entity e;
+    s16 m[3][3], yaw_only[3][3], untouched[3][3];
+    s32 yaw;
+    u32 drawn = 0, agree = 0;
+
+    printf("\na gib's tumble reaches the draw (RotMatrix(+0xE6) -> +0x2C0)\n");
+
+    /* A chunk as 0x8005A0AC leaves it: the flags 0x8005A1A4 writes, and a
+     * quarter turn of pitch (+0xE6) and of roll (+0xEA). */
+    q2_entity_init(&e);
+    e.render_flags = Q2_GIB_RENDER_FLAGS;
+    e.angles[0]    = 1024;
+    e.angles[1]    = 0;
+    e.angles[2]    = 1024;
+    mat_fill(m, 0x5555);
+    check(q2_entity_draw_rotation(&e, m),
+          "a gib is drawn through its own matrix, not the yaw alone");
+    check(mat_same((const s16 (*)[3])m, pitch_roll),
+          "which is RotMatrix of all three angles: rows (0,-1,0) (0,0,-1) "
+          "(1,0,0) for a quarter turn of pitch and of roll");
+
+    /* Every heading, with no pitch or roll: the chunk turns exactly as the
+     * yaw-only path turns everything else. */
+    e.angles[0] = 0;
+    e.angles[2] = 0;
+    for (yaw = 0; yaw < 4096; yaw++) {
+        e.angles[1] = yaw;
+        if (!q2_entity_draw_rotation(&e, m))
+            continue;
+        drawn++;
+        q2_rotation_yaw_pitch(yaw_only, -yaw, 0);
+        if (mat_same((const s16 (*)[3])m, (const s16 (*)[3])yaw_only))
+            agree++;
+    }
+    check_eq_i(drawn, 4096, "a gib takes its own matrix at every heading");
+    check_eq_i(agree, 4096,
+               "and its heading turns the same way, to the unit, as the yaw "
+               "path every other entity is drawn with");
+
+    /* An item (q2_entity_init's 0x08000001, no transient bit) keeps the yaw
+     * path however its angles read, and the matrix it was handed is left as
+     * it was. */
+    q2_entity_init(&e);
+    e.angles[0] = 1024;
+    e.angles[1] = 1000;
+    e.angles[2] = 1024;
+    mat_fill(m, 0x5555);
+    mat_fill(untouched, 0x5555);
+    check(!q2_entity_draw_rotation(&e, m),
+          "an item is not a transient and keeps the yaw-only draw");
+    check(mat_same((const s16 (*)[3])m, (const s16 (*)[3])untouched),
+          "and the matrix it was handed is not written");
+}
+
+/* ------------------------------------------------------------------------- */
+/* 0x800596B0 — the materialise burst, spawned without moving the stream      */
+/* ------------------------------------------------------------------------- */
+static q2_fx_tables g_fx_tab;
+
+static void build_fx_tables(void)
+{
+    u32 i, c;
+
+    memset(&g_fx_tab, 0, sizeof(g_fx_tab));
+    g_fx_tab.loaded = true;
+    for (i = 0; i < Q2_FX_RAMP_COUNT; i++) {
+        g_fx_tab.ramp_id_to_index[i] = (u8)i;
+        for (c = 0; c < Q2_FX_RAMP_COLOURS; c++)
+            g_fx_tab.ramp[i].colour[c] = (u32)i << 8;   /* g = the ramp */
+    }
+    g_fx_tab.ramp_index_is_permutation = true;
+}
+
+static u32 fx_live_groups(const q2_fx_world *fx, const q2_fx_group **last)
+{
+    u32 i, n = 0;
+
+    for (i = 0; i < fx->group_count; i++) {
+        if (fx->group[i].life) {
+            n++;
+            if (last)
+                *last = &fx->group[i];
+        }
+    }
+    return n;
+}
+
+static void test_materialise_burst(void)
+{
+    q2_entity_set set_a, set_b;
+    q2_entity_world wa, wb;
+    q2_inventory inva, invb;
+    q2_pop_place place;
+    q2_entity *a, *b;
+    q2_rng ref;
+    q2_fx_world *fx;
+    q2_item_env env;
+    const q2_fx_group *g = NULL;
+    s32 away[3] = { 100000, 0, 0 };
+    int i;
+
+    printf("\nthe materialise burst (0x80059608 / 0x800596B0)\n");
+
+    fx = (q2_fx_world *)calloc(1, sizeof(*fx));
+    if (!fx) {
+        check(false, "the test allocates an effect world");
+        return;
+    }
+    build_fx_tables();
+    q2_fx_world_init(fx, &g_fx_tab);
+
+    memset(&set_a, 0, sizeof(set_a));
+    memset(&set_b, 0, sizeof(set_b));
+    world_with_player(&wa, &inva);
+    world_with_player(&wb, &invb);
+    q2_entity_world_move_player(&wa, 0, away);
+    q2_entity_world_move_player(&wb, 0, away);
+    q2_rng_seed(&wa.rng, 0x1234);
+    q2_rng_seed(&wb.rng, 0x1234);
+    q2_rng_seed(&ref, 0x1234);
+
+    memset(&place, 0, sizeof(place));
+    place.id = 45;                       /* Bluekey P: MATERIALISE, glow B */
+
+    /* A: no pool bound, which is how the port ran before. */
+    q2_item_bind_env(NULL);
+    a = q2_item_spawn(&set_a, &place, NULL, 0, NULL);
+    check(a != NULL, "Bluekey P spawns");
+    a->surface = 0x21;
+    wa.dt = 12;
+    a->think(a, &wa);
+
+    /* B: the pool bound, which is what the client now does. */
+    memset(&env, 0, sizeof(env));
+    env.fx = fx;
+    q2_item_bind_env(&env);
+    b = q2_item_spawn(&set_b, &place, NULL, 0, NULL);
+    b->surface = 0x21;
+    wb.dt = 12;
+    b->think(b, &wb);
+
+    for (i = 0; i < Q2_ITEM_SPARKLES * 3; i++)
+        (void)q2_rng_next(&ref);
+
+    check_eq_i(wb.rng.state, wa.rng.state,
+               "binding the pool leaves the generator where it was");
+    check_eq_i(wb.rng.state, ref.state,
+               "and both consumed exactly the 45 draws 0x80059608 makes");
+
+    check_eq_i(fx_live_groups(fx, &g), 1,
+               "and ONE group is now spawned where none was");
+    if (g) {
+        check_eq_i(g->count, 15, "of fifteen quads (0x80059690)");
+        check_eq_i(g->life, 10, "life 10 (0x80059698)");
+        check_eq_i(g->area, 0x21, "on the item's +0x9E (0x800596A8)");
+        check(g->ramp[0] == q2_fx_ramp_at(&g_fx_tab, 0),
+              "in ramp 0, which a GLOW_B item picks (0x80059670)");
+        check_eq_i(g->origin[1], b->origin[1],
+                   "at the draw origin (addiu a0, s2, 164)");
+    }
+
+    /* The next tick of a materialising item draws 45 more, burst and all. */
+    b->think(b, &wb);
+    for (i = 0; i < Q2_ITEM_SPARKLES * 3; i++)
+        (void)q2_rng_next(&ref);
+    check_eq_i(wb.rng.state, ref.state, "and 45 more on the next tick");
+
+    q2_item_bind_env(NULL);
+    q2_entity_set_free(&set_a);
+    q2_entity_set_free(&set_b);
+    free(fx);
+}
+
+/* ------------------------------------------------------------------------- */
+/* 0x8002085C / 0x80020C48 — a creature's death drop                          */
+/* ------------------------------------------------------------------------- */
+static int g_rand_script[8];
+static int g_rand_next;
+static int g_rand_calls;
+
+static int scripted_rand(void)
+{
+    g_rand_calls++;
+    if (g_rand_next < (int)(sizeof(g_rand_script) / sizeof(g_rand_script[0])))
+        return g_rand_script[g_rand_next++];
+    return 0;
+}
+
+static void script_rand(int r1, int r2)
+{
+    g_rand_script[0] = r1;
+    g_rand_script[1] = r2;
+    g_rand_next      = 0;
+    g_rand_calls     = 0;
+}
+
+static void test_drop_spawn(void)
+{
+    q2_entity_set set;
+    q2_entity *e;
+    const q2_item_def *def;
+    q2_model_bank empty;
+    const q2_model_bank *banks[1];
+    s32 pos[3] = { 1000, -2000, 3000 };
+    s16 vel[3];
+    u32 before;
+
+    printf("\na creature's drop (0x8002085C)\n");
+
+    q2_item_drop_reset();
+    q2_item_bind_env(NULL);
+    memset(&set, 0, sizeof(set));
+
+    def = q2_item_find(q2_item_table_builtin(), 27);
+    check(def != NULL, "place id 27 is Shells P");
+
+    script_rand(32767, 32767);
+    e = q2_item_drop_spawn(&set, NULL, NULL, 0, 27, 0, pos, -1, scripted_rand);
+    check(e != NULL, "a Soldier's Shells drop spawns");
+    if (!e)
+        return;
+    check(e->think == q2_item_drop_think, "with the toss think 0x80020C48");
+    check_eq_i(e->kind, Q2_ENT_KIND_ITEM, "as item kind 46 (0x800208C4)");
+    check_eq_i(g_rand_calls, 2, "drawing exactly two rand()s");
+
+    check(e->pos[0] == 1000 && e->pos[1] == -2000 && e->pos[2] == 3000,
+          "at the recorded origin EXACTLY: no 316 lift, no floor sweep");
+    check_eq_i(e->origin[1], -2000 - 286,
+               "the spawn frame draws 286 + bias ABOVE it (0x800209A4)");
+    check_eq_i(e->flags, (u32)(def->flags | Q2_ITEM_TIMED),
+               "the record's flags with TIMED ORed in (0x80020B38)");
+    check_eq_i(e->effect, def->effect, "and its touch index");
+    check_eq_i(e->remove_in, 96, "+0xF4 is 96 while it flies (0x80020ADC)");
+    check_eq_i(e->field90, 128, "+0x90 is 128 (0x80020BB4)");
+    check_eq_i(e->render_flags, 0,
+               "render flags stay the allocator's zero: no shadow");
+    check_eq_i(e->glow[0], 0x40, "ambient 0x40 from 0x800AE718");
+    check(e->angles[0] == 0 && e->angles[1] == 0 && e->angles[2] == 0,
+          "angles zeroed (0x80020AC8)");
+    check_eq_i(e->node, -1, "the cell handed in");
+    check(e->bounds_min[0] == 1000 - 256 && e->bounds_max[0] == 1000 + 256 &&
+          e->bounds_min[1] == -2000 - 512 && e->bounds_max[1] == -2000 &&
+          e->bounds_min[2] == 3000 - 256 && e->bounds_max[2] == 3000 + 256,
+          "the drop's own box, (-256, ext2-512, -256)..(256, ext2, 256)");
+
+    check(q2_item_drop_velocity(e, vel), "it has a velocity");
+    check_eq_i(vel[0], 1023,
+               "heading 0 puts the whole speed on x: 256 + (32767*768 >> 15)");
+    check_eq_i(vel[2], 0, "and none on z");
+    check_eq_i(vel[1], -2303,
+               "the kick (-3072 - 1535) halved toward zero: up, +Y being down");
+
+    /* The other end of both ranges, heading a quarter turn round. */
+    script_rand(0, 0);
+    e = q2_item_drop_spawn(&set, NULL, NULL, 0, 27, 1024, pos, -1,
+                           scripted_rand);
+    check(e != NULL && q2_item_drop_velocity(e, vel), "a second drop");
+    check(vel[0] == 0 && vel[2] == 256,
+          "heading 1024 puts the base 256 on z (the FIRST halfword)");
+    check_eq_i(vel[1], -1536, "and the least kick is -3072 / 2");
+
+    /* A negative component that does not divide: truncated, not floored. */
+    {
+        s32 c = q2_cos12(2560);
+        s32 want = -((-c * 257) / 4096);
+
+        check(c < 0 && ((-c * 257) % 4096) != 0,
+              "precondition: heading 2560's cosine is negative and inexact");
+        script_rand(43, 0);            /* 43 * 768 >> 15 == 1: speed 257 */
+        e = q2_item_drop_spawn(&set, NULL, NULL, 0, 27, 2560, pos, -1,
+                               scripted_rand);
+        check(e != NULL && q2_item_drop_velocity(e, vel), "a third drop");
+        check_eq_i(vel[0], want,
+                   "x rounds toward zero (the bgez/+4095 arm), not down");
+    }
+
+    /* Item 21 keeps its record's word (0x80020B1C). */
+    def = q2_item_find(q2_item_table_builtin(), 21);
+    script_rand(0, 0);
+    e = q2_item_drop_spawn(&set, NULL, NULL, 0, 21, 0, pos, -1,
+                           scripted_rand);
+    check(def != NULL && e != NULL, "the Nuke drops");
+    if (def && e)
+        check_eq_i(e->flags, def->flags,
+                   "item 21 keeps the record's flags: no TIMED");
+
+    /* No record: nothing, and no random number (0x80020894). */
+    before = set.count;
+    script_rand(0, 0);
+    check(q2_item_drop_spawn(&set, NULL, NULL, 0, 22, 0, pos, -1,
+                             scripted_rand) == NULL,
+          "an id no record names spawns nothing");
+    check_eq_i(g_rand_calls, 0, "and draws nothing");
+    check_eq_i(set.count, before, "and allocates nothing");
+
+    /* A bank that does not carry the model: freed, no random number
+     * (0x80020968 jal 0x8006D280, before 0x80020A00). */
+    memset(&empty, 0, sizeof(empty));
+    banks[0] = &empty;
+    script_rand(0, 0);
+    e = q2_item_drop_spawn(&set, NULL, banks, 1, 27, 0, pos, -1,
+                           scripted_rand);
+    check(e == NULL, "a model no bank carries spawns nothing");
+    check_eq_i(g_rand_calls, 0, "and draws nothing");
+
+    q2_item_drop_reset();
+    q2_entity_set_free(&set);
+}
+
+static void test_drop_flight(void)
+{
+    q2_entity_set set;
+    q2_entity_world w;
+    q2_inventory inv;
+    q2_entity *e, *nuke;
+    q2_item_env env;
+    q2_move_target floor_box;
+    q2_move_world floor_world;
+    s32 gravity = Q2_GRAVITY;
+    s32 pos[3] = { 1000, -2000, 3000 };
+    s32 away[3] = { 100000, 0, 0 };
+    s16 vel[3];
+    int i;
+
+    printf("\na drop's flight (0x80020C48 through 0x800463E8)\n");
+
+    q2_item_drop_reset();
+    memset(&set, 0, sizeof(set));
+    world_with_player(&w, &inv);
+    q2_entity_world_move_player(&w, 0, away);
+
+    memset(&env, 0, sizeof(env));
+    env.gravity = &gravity;
+    q2_item_bind_env(&env);
+
+    script_rand(0, 0);
+    e = q2_item_drop_spawn(&set, NULL, NULL, 0, 27, 1024, pos, -1,
+                           scripted_rand);
+    check(e != NULL, "a drop to fly");
+    if (!e)
+        return;
+
+    /*
+     * One tick at dt 12: vel.y -1536 + 32 * 12 = -1152, and the step is
+     * vel * 12 / 320 truncated — (0, -43, 9). -43.2 truncates to -43; a floor
+     * would say -44.
+     */
+    w.dt = 12;
+    e->think(e, &w);
+    check(q2_item_drop_velocity(e, vel), "still flying after one tick");
+    check_eq_i(vel[1], -1152, "gravity is [0x800AE924] * dt on vel.y");
+    check(e->pos[0] == 1000 && e->pos[1] == -2000 - 43 && e->pos[2] == 3009,
+          "the step is vel * dt / 320, truncated toward zero");
+    check_eq_i(e->origin[1], e->pos[1] + 286,
+               "and the draw origin is 286 BELOW it from now on (0x80020CE4)");
+    check(e->think == q2_item_drop_think, "it keeps the toss think");
+
+    /* Free fall runs into the terminal velocity (0x80046490). */
+    for (i = 0; i < 60; i++)
+        e->think(e, &w);
+    check(q2_item_drop_velocity(e, vel), "a long fall is still a flight");
+    check_eq_i(vel[1], 8192, "capped at 8192, slti 8193");
+
+    /*
+     * Landing, on an ENTITY box — the hull half needs a SecondaryCol this
+     * suite does not carry, and 0x80053974 is a contact all the same.
+     */
+    q2_item_drop_reset();
+    memset(&floor_box, 0, sizeof(floor_box));
+    floor_box.min[0] = -100000; floor_box.max[0] = 100000;
+    floor_box.min[1] = -1000;   floor_box.max[1] = 1000;
+    floor_box.min[2] = -100000; floor_box.max[2] = 100000;
+    floor_box.kind   = Q2_MOVE_KIND_ENTITY;
+    floor_box.active = true;
+    memset(&floor_world, 0, sizeof(floor_world));
+    floor_world.targets = &floor_box;
+    floor_world.count   = 1;
+    env.ents = &floor_world;
+    q2_item_bind_env(&env);
+
+    script_rand(0, 0);
+    e = q2_item_drop_spawn(&set, NULL, NULL, 0, 27, 1024, pos, -1,
+                           scripted_rand);
+    script_rand(0, 0);
+    nuke = q2_item_drop_spawn(&set, NULL, NULL, 0, 21, 1024, pos, -1,
+                              scripted_rand);
+    check(e != NULL && nuke != NULL, "two drops over a floor");
+    if (!e || !nuke)
+        return;
+    check_eq_i(q2_item_drop_in_flight(), 2, "both in the air");
+
+    for (i = 0; i < 200 && e->think == q2_item_drop_think; i++)
+        e->think(e, &w);
+    check(e->think == q2_item_think,
+          "a contact at rest hands over to the item think (0x80020D1C)");
+    check(i > 1, "and not on its first tick: it rises before it falls");
+    check_eq_i(e->remove_in, 8700, "with an 8700-tick life (0x80020CFC)");
+    check((e->flags & Q2_ITEM_TIMED) != 0, "and TIMED set");
+    check(!q2_item_drop_velocity(e, vel), "and no flight record left");
+    check(e->pos[1] < -1000, "resting on the box, not inside it");
+    check_eq_i(e->origin[1], e->pos[1] + 286, "drawn 286 below its position");
+    check(e->bounds_min[1] == -2000 - 512 && e->bounds_max[1] == -2000,
+          "the touch box never followed it (nothing writes +0x78)");
+
+    for (i = 0; i < 200 && nuke->think == q2_item_drop_think; i++)
+        nuke->think(nuke, &w);
+    check(nuke->think == q2_item_think, "the Nuke lands too");
+    check(!(nuke->flags & Q2_ITEM_TIMED),
+          "and stays untimed: OBJECTIVE skips the ori (0x80020CF4)");
+    check_eq_i(q2_item_drop_in_flight(), 0, "nothing left in the air");
+
+    /* Once landed it is an ordinary item: a TIMED one counts 8700 down. */
+    w.dt = 300;
+    for (i = 0; i < 40 && e->think == q2_item_think; i++)
+        e->think(e, &w);
+    check_eq_i(i, 29, "8700 / 300 = 29 ticks, then the shrink");
+
+    q2_item_bind_env(NULL);
+    q2_item_drop_reset();
+    q2_entity_set_free(&set);
+}
+
+/* ------------------------------------------------------------------------- */
 int main(void)
 {
     /* Unbuffered, so a crash mid-suite still shows which section reached the
@@ -1251,6 +1830,11 @@ int main(void)
     test_entity_set();
     test_zone_groups();
     test_place_difficulty_flags();
+    test_world_vertex();
+    test_gib_draw_rotation();
+    test_materialise_burst();
+    test_drop_spawn();
+    test_drop_flight();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;

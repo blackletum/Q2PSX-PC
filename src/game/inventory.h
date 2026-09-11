@@ -213,10 +213,29 @@ bool q2_inventory_can_fire(const q2_inventory *inv);
 /* Consume one shot's ammo. Returns false when it could not. */
 bool q2_inventory_consume(q2_inventory *inv, s16 amount);
 
-/* Health and armour. Armour absorbs a share of incoming damage, as in the
- * original lineage; returns the damage actually applied to health. */
+/* Heal, clamped to the cap — or to twice it for a mega-health style pickup.
+ * Returns how much was actually taken. */
 s16 q2_inventory_add_health(q2_inventory *inv, s16 amount, bool allow_overheal);
-s16 q2_inventory_apply_damage(q2_inventory *inv, s16 damage);
+
+/*
+ * Spend `damage` of means `mod` on this inventory the way the damage function's
+ * CLIENT arm does, 0x80058354..0x800583F8: power armour (0x80057A9C), then
+ * armour (0x80057BE4) at `(bias + protection * damage) >> 12` with the bias
+ * chosen by `rules->skill` (0x80057C10), both skipped for mod 8 (0x80058358),
+ * and whatever is left subtracted from health. Returns that remainder.
+ *
+ * It is a thin wrapper over the two stages in combat.c, which are the ones the
+ * sim really runs; nothing here restates their arithmetic. `rules` may be NULL
+ * (the round-to-nearest bias, as `q2_combat_rules_default`'s skill 1 gives).
+ *
+ * What it deliberately leaves to `q2_combat_damage`: who did it, knockback,
+ * invulnerability, the acid and lava arms, the skill-0 halving, ONE SHOT KILL
+ * and the hit sound. This is the inventory's arithmetic, not a second copy of
+ * the damage function.
+ */
+struct q2_combat_rules;
+s16 q2_inventory_apply_damage(q2_inventory *inv, s16 damage, s16 mod,
+                              const struct q2_combat_rules *rules);
 
 /* Keys are bits, not items, and they share a word with the armour class and the
  * power items — so giving one ORs into `flags` and the script only ever sees the

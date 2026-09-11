@@ -62,7 +62,9 @@ static const char *preset_name(q2_fx_preset_id id)
     case Q2_FX_EXPLOSION: return "explosion";
     case Q2_FX_BLOOD:     return "blood";
     case Q2_FX_BFG_BURST: return "bfg burst";
-    case Q2_FX_GIB:       return "gib";
+    /* 0x800596B0 is the ITEM materialise burst, not a gib — the row this
+     * printed as "gib" until the preset was renamed (effect.h). */
+    case Q2_FX_ITEM_MATERIALISE: return "item materialise";
     case Q2_FX_SCRIPTED:  return "scripted";
     case Q2_FX_SPARK:     return "spark";
     case Q2_FX_LASER_END: return "laser end";
@@ -211,7 +213,8 @@ static u32 exercise(const q2_fx_tables *t)
            q2_fx_budget(w.group_count, 1), q2_fx_budget(w.group_count, 2),
            q2_fx_budget(w.group_count, 4));
 
-    printf("\n  preset      count  life   size  shift  ramps   spawned"
+    /* The name column is 16 wide so "item materialise" fits it. */
+    printf("\n  preset            count  life   size  shift  ramps   spawned"
            "  spread after 8 ticks\n");
 
     for (i = 0; i < Q2_FX_PRESET_COUNT; i++) {
@@ -226,7 +229,7 @@ static u32 exercise(const q2_fx_tables *t)
         slot = q2_fx_spawn(&w, &rng, (q2_fx_preset_id)i, at, 0);
 
         if (slot < 0) {
-            printf("  %-10s  FAILED TO SPAWN\n", preset_name((q2_fx_preset_id)i));
+            printf("  %-16s  FAILED TO SPAWN\n", preset_name((q2_fx_preset_id)i));
             bad++;
             continue;
         }
@@ -246,7 +249,7 @@ static u32 exercise(const q2_fx_tables *t)
             }
         }
 
-        printf("  %-10s  %5u  %4u  %5d  %5u  %2u,%-2u  %7d  %d x %d x %d\n",
+        printf("  %-16s  %5u  %4u  %5d  %5u  %2u,%-2u  %7d  %d x %d x %d\n",
                preset_name((q2_fx_preset_id)i), p->count,
                w.group[slot].life + 8, w.group[slot].size, p->spread_shift,
                p->ramp0, p->ramp1, slot,

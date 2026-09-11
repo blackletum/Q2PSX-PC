@@ -419,8 +419,50 @@ bool q2_mp_may_respawn(const q2_mp_session *s);
 #define Q2_MP_MOD_SELF_FIRST 9   /* Q2_MOD_ACID */
 #define Q2_MP_MOD_SELF_LAST  10  /* Q2_MOD_LAVA */
 
-/* The killer id the frag hook is called with, given the entity's own two
- * bytes. Returns -1 for a world kill. */
+/*
+ * What entity+222 holds when whatever hurt you was not a player: the four
+ * projectile spawners store it for an owner with no client block (0x8004A208,
+ * 0x8004ABF4, 0x8004B1C4, 0x8004BF80), 0x8003DDF8 places every player with it
+ * (0x8003DE24 loads it, 0x8003DE34 stores it), and 0x80057E5C tests for it
+ * before printing "Multiplayer, can't determine which player hit other player".
+ * combat.h carries the same guarded definition.
+ */
+#ifndef Q2_MP_NOT_A_PLAYER
+#define Q2_MP_NOT_A_PLAYER 4
+#endif
+
+/*
+ * The byte the death handler actually reads, 0x800396C4..0x800396EC:
+ *
+ *     800396C4  lbu   v0, 223(s0)       ; the mod, as an UNSIGNED byte
+ *     800396CC  addiu v0, v0, -9
+ *     800396D0  sltiu v0, v0, 2
+ *     800396D4  beq   v0, zero, 0x800396E0
+ *     800396D8  addiu v0, zero, -1      ; delay slot
+ *     800396DC  sb    v0, 222(s0)       ; acid and lava only
+ *     800396EC  lb    s1, 222(s0)       ; then the byte, SIGNED, untouched
+ *
+ * So this is the override and nothing else: -1 for mods 9 and 10, and the
+ * caller's byte, as the `sb`/`lb` pair leaves it, for every other mod. It is
+ * what both of the handler's gates test — the death voice at 0x80039728
+ * (`bne s1, -1`) and the frag hook at 0x80039774 (`slti s1, 4`, signed) — and
+ * neither of them tests anything narrower. A 4 stays a 4 here, and 4 is not -1
+ * and is not below 4, so it gets neither the voice nor the hook.
+ */
+s8 q2_mp_killer_field(int killer_field, int means_of_death);
+
+/*
+ * The same byte folded for SCORING: -1 for mods 9 and 10 AND for anything
+ * outside [0, Q2_MP_MAX_PLAYERS), otherwise the player's id.
+ *
+ * This is not the handler's gate, and it is not what the frag hook is called
+ * with. The handler calls the hook with the raw byte and only when that byte
+ * is below 4 (0x80039774); this maps 4 to -1, and `q2_mp_player_killed`
+ * charges a -1 to the victim as a suicide, where the console, handed a 4,
+ * calls nothing at all. Kept, with that behaviour, for its one production
+ * caller in the client's scoring pass; the death chain reads
+ * `q2_mp_killer_field` instead.
+ */
 int q2_mp_attribute_kill(int killer_field, int means_of_death);
 
 /*

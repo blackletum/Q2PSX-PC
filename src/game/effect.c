@@ -1,5 +1,6 @@
 #include "effect.h"
 
+#include "combat.h"   /* q2_actor: the presentation pass ticks its effect[] slots */
 #include "fixed.h"
 #include "hud.h"
 #include "trig.h"
@@ -56,7 +57,7 @@ static const q2_fx_preset k_preset[Q2_FX_PRESET_COUNT] = {
     { 15,    15,  8192,  9,    9,    9,    2,  0,  0x800486ECu },  /* EXPLOSION */
     { 15,    15,  6144,  10,   2,    3,    2,  2,  0x80048C08u },  /* BLOOD     */
     { 15,    15,  20000, 9,    11,   11,   3,  0,  0x8004BDC4u },  /* BFG_BURST */
-    { 15,    10,  10000, 9,    1,    1,    1,  0,  0x800596B0u },  /* GIB       */
+    { 15,    10,  10000, 9,    1,    1,    1,  0,  0x800596B0u },  /* ITEM_MAT. */
     { 15,     0,  0,     9,    1,    0,    1,  0,  0x80028DC8u },  /* SCRIPTED  */
     { 15,    25,  3072,  9,    0,    0,    4,  4,  0x8003E0C0u },  /* SPARK     */
     { 15,    15,  6144,  10,   1,    1,    1,  2,  0x80049074u }   /* LASER_END */
@@ -70,31 +71,35 @@ const q2_fx_preset *q2_fx_preset_at(q2_fx_preset_id id)
 }
 
 /*
- * Gib colour, 0x80059648.
+ * The materialise ramp, 0x80059648.
  *
- * The burst's ramp is chosen from three bits of the creature's flag word, in
- * this order, and the chain has NO final else: a creature with none of the
- * three bits set reaches 0x80059680 with the register still holding whatever
- * the function last left in it. That is the same class of defect as the
- * uninitialised fifth argument documented for T_Damage in userfuncs.h, and it
- * is handled the same way — the port picks a defined value and says so, because
- * mirroring an uninitialised register is not reproducible.
+ * The three bits belong to the ITEM, not to a creature: `s3` is `lw 68(s2)`,
+ * entity+0x44, and the instruction after the spawn (0x800596B8 `andi v0, s3,
+ * 0x70`) is the glow-light test item.c already models as Q2_ITEM_GLOW_*. There
+ * is no creature blood table on the disc; see the block in effect.h.
+ *
+ * The chain has NO final else: an item with none of the three bits set reaches
+ * 0x80059680 with the register still holding whatever the function last left in
+ * it. That is the same class of defect as the uninitialised fifth argument
+ * documented for T_Damage in userfuncs.h, and it is handled the same way — the
+ * port picks a defined value and says so, because mirroring an uninitialised
+ * register is not reproducible.
  */
-u8 q2_fx_gib_ramp(u32 creature_flags)
+u8 q2_fx_item_glow_ramp(u32 item_flags)
 {
-    if (creature_flags & Q2_FX_BLOOD_RED)
+    if (item_flags & Q2_FX_ITEM_GLOW_R)
         return 1;    /* 0x8009BAE4 */
-    if (creature_flags & Q2_FX_BLOOD_GREEN)
+    if (item_flags & Q2_FX_ITEM_GLOW_G)
         return 11;   /* 0x8009C00C */
-    if (creature_flags & Q2_FX_BLOOD_BLUE)
+    if (item_flags & Q2_FX_ITEM_GLOW_B)
         return 0;    /* 0x8009BA60 */
     return 1;        /* DIVERGENCE: the original leaves this undefined. */
 }
 
-s32 q2_fx_gib(q2_fx_world *w, q2_rng *rng, const s32 at[3], u8 area,
-              u32 creature_flags)
+s32 q2_fx_item_materialise(q2_fx_world *w, q2_rng *rng, const s32 at[3],
+                           u8 area, u32 item_flags)
 {
-    const q2_fx_preset *p = q2_fx_preset_at(Q2_FX_GIB);
+    const q2_fx_preset *p = q2_fx_preset_at(Q2_FX_ITEM_MATERIALISE);
     const q2_fx_ramp *r;
     s16 vel[Q2_FX_GROUP_QUADS][3];
     u32 i;
@@ -108,7 +113,7 @@ s32 q2_fx_gib(q2_fx_world *w, q2_rng *rng, const s32 at[3], u8 area,
         vel[i][2] = (s16)draw(rng, p->spread_shift);
     }
 
-    r = q2_fx_ramp_at(w->tab, q2_fx_gib_ramp(creature_flags));
+    r = q2_fx_ramp_at(w->tab, q2_fx_item_glow_ramp(item_flags));
     return q2_fx_group_spawn(w, at, vel, p->count, r, r,
                              p->life, p->size, area);
 }
@@ -371,6 +376,621 @@ s32 q2_fx_bullet_puff(q2_fx_world *w, q2_rng *rng, const s32 at[3], u8 area)
                                      Q2_FX_BULLET_PUFF_COUNT, r0, r1,
                                      Q2_FX_BULLET_PUFF_LIFE,
                                      Q2_FX_BULLET_PUFF_SIZE, area);
+}
+
+/* ------------------------------------------------------------------------- */
+/* The THIRD spawner — 0x8002FDFC                                             */
+/* ------------------------------------------------------------------------- */
+s32 q2_fx_group_spawn_points(q2_fx_world *w,
+                             const s32 (*pts)[3], const s16 (*vel)[3],
+                             u32 count,
+                             const q2_fx_ramp *ramp0, const q2_fx_ramp *ramp1,
+                             u32 life, s32 size, u8 area)
+{
+    q2_fx_group *g;
+    s32 slot;
+    u32 i;
+
+    if (!w || !pts || !vel || count == 0)
+        return -1;
+
+    /*
+     * Everything but the offsets is 0x80030284 instruction for instruction —
+     * the free-slot scan at 0x8002FE08, particle 0's three words at 0x8002FE88
+     * (which is `pts[0]`, so it doubles as the origin), the six-byte velocity
+     * copy at 0x8002FEB8, the relative velocities at 0x8002FF84, the accel
+     * memset at 0x8002FFC4, the size divide at 0x8002FFE4 and the view_mask
+     * clear at 0x80030000. So this layers on the first spawner the same way
+     * q2_fx_group_spawn_offsets does rather than duplicating it.
+     *
+     * One difference the layering hides: 0x8002FDFC never clears the offset
+     * block — its only memset, 0x8002FFC4, is the six bytes of accel — so the
+     * followers past count-1 keep whatever the slot's last occupant left. The
+     * zeroes the port writes there instead are unobservable, because the
+     * integrator and the renderer both stop at `count`.
+     */
+    slot = q2_fx_group_spawn(w, pts[0], vel, count, ramp0, ramp1,
+                             life, size, area);
+    if (slot < 0)
+        return slot;
+
+    if (count > Q2_FX_GROUP_QUADS)
+        count = Q2_FX_GROUP_QUADS;
+    g = &w->group[slot];
+
+    /*
+     * 0x8002FF38..0x8002FF70. THE SHIFT IS ABSENT, and that is the whole point
+     * of this spawner:
+     *
+     *     8002FF44  subu v0, v0, v1     ; and 0x80030174, in the SECOND
+     *     8002FF48  sh   v0, 12(a0)     ; spawner, is `sll 16 / sra 20`
+     *
+     * so the follower's offset is the raw 16-bit difference between two world
+     * points, not that difference divided by sixteen. The mesh drawers below
+     * hand it points sampled off a posed model at world scale; putting the >>4
+     * back would shrink a soldier's crackle to a sixteenth of the body.
+     *
+     * The original works in halfwords throughout — `lhu` both, `subu`, `sh` —
+     * so the difference is taken modulo 2^16, which the cast reproduces.
+     */
+    for (i = 1; i < count && i <= Q2_FX_GROUP_FOLLOWERS; i++) {
+        int k;
+        for (k = 0; k < 3; k++)
+            g->offset[i - 1][k] = (s16)(pts[i][k] - pts[0][k]);
+    }
+
+    return slot;
+}
+
+/* ------------------------------------------------------------------------- */
+/* The mesh drawers                                                           */
+/* ------------------------------------------------------------------------- */
+/*
+ * The view-mask nibble, 0x800590D8..0x80059128 and its three clones.
+ *
+ * The word at group+0xC4 is masked with 0xFFFFFF0F and OR-ed with
+ * `((1 << p) & 0xF) << 4`, where p is the player index the original derives by
+ * dividing (client - 0x800C7C60) by 224. The port is handed the index instead,
+ * because it has one and does not have to recover it from a pointer.
+ *
+ * `sllv` takes the shift modulo 32, so a nonsense index cannot be undefined on
+ * the console; masking with 31 here keeps that true in C, where `1u << 40` is
+ * not. The `& 0xF` afterwards is the original's own clamp to four viewports.
+ */
+static void fx_view_skip(q2_fx_group *g, s32 player)
+{
+    if (!g || player < 0)
+        return;
+    g->view_mask = (u8)((g->view_mask & 0x0Fu) |
+                        (((1u << ((u32)player & 31u)) & 0xFu) << 4));
+}
+
+u32 q2_fx_mesh_crackle(q2_fx_world *w, const q2_fx_mesh_src *src,
+                       u32 frame, u8 area, s32 viewport_skip,
+                       u8 ramp, u8 life)
+{
+    s32 pts[Q2_FX_GROUP_QUADS][3];
+    s16 vel[Q2_FX_GROUP_QUADS][3];
+    const q2_fx_ramp *r;
+    s32 remaining, index;
+    u32 groups = 0;
+
+    if (!w || !src || !src->vertex)
+        return 0;
+
+    /* 0x80058FF8: fifteen memsets of six bytes. Every crackle quad sits still
+     * on the body it was sampled from. */
+    memset(vel, 0, sizeof(vel));
+
+    /*
+     * 0x8005901C `andi s4, [0x800B2DE4], 1` then 0x80059020 `subu s3, s3, s4`.
+     * The parity is the STARTING VERTEX, not a frame skip: on even ticks the
+     * walk takes 0, 2, 4... and on odd ticks 1, 3, 5..., so the two halves of
+     * the mesh alternate and the effect crawls over the whole body.
+     */
+    index     = (s32)(frame & 1u);
+    remaining = (s32)src->total - index;
+
+    r = q2_fx_ramp_at(w->tab, ramp);
+
+    /*
+     * 0x80059024 `slti v0, s3, 2` guards the loop and 0x80059130 branches back
+     * to it, so this runs until fewer than two vertices are left rather than
+     * once: a sixty-vertex model spawns two groups a tick.
+     */
+    while (remaining >= 2) {
+        s32 batch = (remaining < 30) ? (remaining >> 1) : Q2_FX_GROUP_QUADS;
+        s32 slot, i;
+
+        /* 0x80059040..0x80059044: s3 -= 2 * s2, BEFORE the sampling loop. */
+        remaining -= batch * Q2_FX_CRACKLE_STEP;
+
+        for (i = 0; i < batch; i++) {
+            src->vertex(src->ctx, index, pts[i]);
+            index += Q2_FX_CRACKLE_STEP;   /* 0x80059068 addiu s4, s4, 2 */
+        }
+
+        slot = q2_fx_group_spawn_points(w, (const s32 (*)[3])pts,
+                                        (const s16 (*)[3])vel,
+                                        (u32)batch, r, r,
+                                        life, Q2_FX_CRACKLE_SIZE, area);
+        if (slot >= 0) {
+            groups++;
+            fx_view_skip(&w->group[slot], viewport_skip);
+        }
+        /* A full pool is NOT an exit: 0x800590B8 skips only the mask write and
+         * falls into the same loop test. */
+    }
+
+    return groups;
+}
+
+s32 q2_fx_spark_scale(s32 t)
+{
+    /*
+     * 0x80058A4C `mult v1, s6` / 0x80058A5C `mfhi t1` / 0x80058A60 `sra v0,
+     * t1, 8` / 0x80058A64 `subu v0, v0, v1` where v1 was `sra t, 31`.
+     *
+     * mfhi followed by `sra 8` is the 64-bit product shifted right by 40, and
+     * the trailing subtraction of the sign is the round-toward-zero correction:
+     * the compiler's complete signed magic-division sequence.
+     *
+     * The divisor is 12000. 0x057619F1 == 91625969 == ceil(2^40 / 12000), and
+     * the product overshoots 2^40 by 224, which is exactly the residue that
+     * magic is supposed to carry. Transcribed as the multiply rather than as
+     * `t / 12000` because the multiply is what the instructions do; the two were
+     * measured equal on every t in +/-300000, which covers the whole range this
+     * site can reach (a 1.3.12 sine times a magnitude of at most 55).
+     */
+    s64 prod = (s64)t * (s64)Q2_FX_MESH_SPARK_RECIP;
+    return (s32)(prod >> 40) + (t < 0 ? 1 : 0);
+}
+
+s32 q2_fx_spark_mag(s32 b)
+{
+    /*
+     * 0x80058A18 `addiu v0, v0, -16384`, then 0x80058A1C..0x80058A24
+     * `sll s0, v0, 1 / addu s0, s0, v0 / sll s0, s0, 2` — that is 2x + x = 3x,
+     * then 3x * 4 = 12x, not 3x — and 0x80058A28 `sra s0, s0, 13`, arithmetic,
+     * so a negative draw floors. 0x80058A38 adds the 32 in a delay slot.
+     */
+    return Q2_FX_MESH_SPARK_MAG +
+           ((Q2_FX_MESH_SPARK_MAG_MUL * (b - 16384)) >>
+            Q2_FX_MESH_SPARK_MAG_SHIFT);
+}
+
+u32 q2_fx_mesh_spark(q2_fx_world *w, q2_rng *rng, const q2_fx_mesh_src *src,
+                     u32 frame, u8 area, s32 viewport_skip,
+                     const q2_fx_ramp *ramp0, const q2_fx_ramp *ramp1,
+                     s32 size, u8 life)
+{
+    s32 pts[Q2_FX_GROUP_QUADS][3];
+    s16 vel[Q2_FX_GROUP_QUADS][3];
+    s32 remaining, index;
+    u32 groups = 0;
+    u32 i;
+
+    /*
+     * 0x800589D8 loads entity+0x10 and 0x800589E0 returns on a null model —
+     * BEFORE the velocity loop, so an entity with no model costs no draws at
+     * all. A model that merely has no vertices is a different case: the draws
+     * happen and the walk then finds nothing, which is what falling through
+     * with total == 0 reproduces.
+     */
+    if (!w || !rng || !src || !src->vertex)
+        return 0;
+
+    /*
+     * 0x80058A08..0x80058AB4. Fifteen quads, THREE draws each in the order
+     * A, B, C — 45 for the burst, and the order is behaviour because the
+     * generator is shared with the weapons.
+     */
+    for (i = 0; i < Q2_FX_GROUP_QUADS; i++) {
+        s32 a = q2_rng_next(rng);
+        s32 b = q2_rng_next(rng);
+        s32 angle, mag, c;
+
+        /* 0x80058A14 is in the JAL's delay slot, so it masks A, not B. */
+        angle = a & 0xFFF;
+
+        /* 0x80058A1C `sll 1; addu; sll 2` is *12, not *3, and 0x80058A28's
+         * `sra 13` is arithmetic. 32 +/- 24, so mag lands in [8, 55]. */
+        mag = q2_fx_spark_mag(b);
+
+        /* `lh 0(tab)` is the SINE column and `lh 2(tab)` the cosine, of the
+         * same 4096-step entry — the table trig.h reproduces. */
+        vel[i][0] = (s16)q2_fx_spark_scale(q2_sin12(angle) * mag);
+
+        c = q2_rng_next(rng);
+        vel[i][1] = (s16)((c - 16384) >> Q2_FX_MESH_SPARK_Y_SHIFT);
+
+        vel[i][2] = (s16)q2_fx_spark_scale(q2_cos12(angle) * mag);
+    }
+
+    /* 0x80058AC4 `andi s2, [0x800B2DE4], 7`: eight phases, so the sampled
+     * eighth of the mesh rotates once every eight ticks. */
+    index     = (s32)(frame & 7u);
+    remaining = (s32)src->total - index;
+
+    while (remaining >= Q2_FX_MESH_SPARK_STEP) {
+        /* 0x80058AD8 `slti v0, s5, 120` — 120 is 8 * 15. */
+        s32 batch = (remaining < 120) ? (remaining >> 3) : Q2_FX_GROUP_QUADS;
+        s32 slot, k;
+
+        remaining -= batch * Q2_FX_MESH_SPARK_STEP;
+
+        for (k = 0; k < batch; k++) {
+            src->vertex(src->ctx, index, pts[k]);
+            index += Q2_FX_MESH_SPARK_STEP;   /* 0x80058B10 */
+        }
+
+        slot = q2_fx_group_spawn_points(w, (const s32 (*)[3])pts,
+                                        (const s16 (*)[3])vel,
+                                        (u32)batch, ramp0, ramp1,
+                                        life, size, area);
+        if (slot >= 0) {
+            groups++;
+            fx_view_skip(&w->group[slot], viewport_skip);
+        }
+    }
+
+    return groups;
+}
+
+u32 q2_fx_mesh_blood(q2_fx_world *w, q2_rng *rng, const q2_fx_mesh_src *src,
+                     u8 area, const q2_fx_ramp *ramp0, const q2_fx_ramp *ramp1,
+                     s32 size, s32 mode)
+{
+    s32 pts[Q2_FX_GROUP_QUADS][3];
+    s16 vel[Q2_FX_GROUP_QUADS][3];
+    s32 batches, index = 0;
+    u32 groups = 0;
+    u32 i;
+    u8  life;
+
+    if (!w || !rng)
+        return 0;
+
+    /*
+     * 0x8005ABBC: `total / 15`, the compiler's signed divide by fifteen with
+     * magic 0x88888889. Fifteen is the same fifteen as the batch, so this is
+     * "one group per fifteen vertices, covering the mesh in order".
+     *
+     * A NULL `src` is the model-less entity, and it is NOT an early exit here:
+     * 0x8005ABAC loads entity+0x10 and hands it straight to 0x8006D6AC, which
+     * returns zero for a null model, and nothing in this function tests the
+     * pointer. So the total is zero, the batch count is zero, and the draws
+     * below still happen.
+     */
+    batches = (src && src->vertex)
+            ? (s32)src->total / Q2_FX_MESH_BLOOD_BATCH : 0;
+
+    /*
+     * The velocities are drawn ONCE and reused by every group — 0x8005ABE4 and
+     * 0x8005AC38 both sit outside the group loop — which is why a spray looks
+     * like one gesture rather than fifteen independent puffs. And they are
+     * drawn BEFORE the emptiness test at 0x8005ACCC, so a model-less entity
+     * still costs 45 draws here where the spark costs none.
+     */
+    if (mode) {
+        life = Q2_FX_MESH_BLOOD_LIFE;                /* 0x8005ABE0 */
+        for (i = 0; i < Q2_FX_GROUP_QUADS; i++) {
+            vel[i][0] = (s16)draw(rng, 10);          /* 0x8005ABF8 sra 10 */
+            vel[i][1] = (s16)draw(rng, 10);
+            vel[i][2] = (s16)draw(rng, 10);
+        }
+    } else {
+        life = Q2_FX_MESH_BLOOD_ALT_LIFE;            /* 0x8005AC34 */
+        for (i = 0; i < Q2_FX_GROUP_QUADS; i++) {
+            int k;
+            for (k = 0; k < 3; k++) {
+                /*
+                 * 0x8005AC4C `sll 1; addu` is *3, then the round-toward-zero
+                 * divide by 16384:
+                 *
+                 *     8005AC58  bgez  v1, 0x8005AC64
+                 *     8005AC60  addiu v1, v1, 16383   ; NEGATIVE values only
+                 *     8005AC64  sra   v0, v1, 14
+                 *
+                 * The bias is added when the product is BELOW zero — the branch
+                 * skips it for everything else. Adding it to the other half is
+                 * the easy misreading of `bgez`, and it rounds every positive
+                 * component up and every negative one down, throwing the whole
+                 * spray up to a unit further out on each axis than the console.
+                 */
+                s32 v = 3 * (q2_rng_next(rng) - 16384);
+                if (v < 0)
+                    v += 16383;
+                vel[i][k] = (s16)(v >> 14);
+            }
+        }
+    }
+
+    while (batches-- > 0) {
+        s32 slot;
+
+        /* 0x8005ACE0: consecutive vertices, and s4 is never reset between
+         * batches, so the groups tile the mesh rather than overlapping. */
+        for (i = 0; i < Q2_FX_GROUP_QUADS; i++) {
+            src->vertex(src->ctx, index, pts[i]);
+            index++;
+        }
+
+        slot = q2_fx_group_spawn_points(w, (const s32 (*)[3])pts,
+                                        (const s16 (*)[3])vel,
+                                        Q2_FX_GROUP_QUADS, ramp0, ramp1,
+                                        life, size, area);
+        if (slot >= 0) {
+            groups++;
+            /* 0x8005AD38..0x8005AD48: only the mode != 0 arm, and only when
+             * the spawner returned a slot. accel[1] = 3 — the spray sags. */
+            if (mode)
+                w->group[slot].accel[1] = Q2_FX_MESH_BLOOD_ACCEL_Y;
+        }
+    }
+
+    return groups;
+}
+
+u32 q2_fx_gib_spray(q2_fx_world *w, q2_rng *rng, const q2_fx_mesh_src *src,
+                    u8 area)
+{
+    const q2_fx_ramp *r0, *r1;
+
+    if (!w)
+        return 0;
+
+    /* 0x8005B320: a1 = 0x8009BB68 (ramp 2), a2 = 0x8009BBEC (ramp 3),
+     * a3 = 6144, and a fifth argument of 1 at sp+16 — the MODE, not a life. */
+    r0 = q2_fx_ramp_at(w->tab, Q2_FX_MESH_BLOOD_RAMP0);
+    r1 = q2_fx_ramp_at(w->tab, Q2_FX_MESH_BLOOD_RAMP1);
+    return q2_fx_mesh_blood(w, rng, src, area, r0, r1,
+                            Q2_FX_MESH_BLOOD_SIZE, 1);
+}
+
+/* ------------------------------------------------------------------------- */
+/* The gib's blood trail — the particle half of 0x80059DE0                    */
+/* ------------------------------------------------------------------------- */
+s32 q2_fx_gib_trail(q2_fx_world *w, q2_rng *rng, const s32 at[3],
+                    const s16 vel[3], u8 area)
+{
+    s16 base[3], step[3];
+    s16 offs[Q2_FX_GIB_TRAIL_COUNT][3];
+    s16 v[Q2_FX_GIB_TRAIL_COUNT][3];
+    const q2_fx_ramp *r0, *r1;
+    u32 i;
+    int k;
+
+    if (!w || !rng || !at || !vel)
+        return -1;
+
+    /*
+     * 0x80059E9C..0x80059ED4: `lhu` the velocity, `sll 2`, `addiu -8192`,
+     * `sh` — so the bias is stored as a halfword and read back with `lh` at
+     * 0x80059EE4. -8192 is a QUARTER of the draw's range, not half of it, so
+     * with the gib at rest every component still averages (16383 - 8192) >>
+     * 11, about +4: the trail is not centred on the gib's own motion. That is
+     * what the immediate says (0x2442E000), transcribed rather than corrected.
+     */
+    for (k = 0; k < 3; k++)
+        base[k] = (s16)((s32)vel[k] * 4 + Q2_FX_GIB_TRAIL_BIAS);
+
+    /*
+     * 0x80059EDC..0x80059F44: fifteen triples, x then y then z, each
+     * `(rand() + base) >> 11` with an ARITHMETIC shift. 45 draws per gib per
+     * tick, in this order.
+     */
+    for (i = 0; i < Q2_FX_GIB_TRAIL_COUNT; i++) {
+        for (k = 0; k < 3; k++)
+            v[i][k] = (s16)((q2_rng_next(rng) + base[k]) >>
+                            Q2_FX_GIB_TRAIL_SHIFT);
+    }
+
+    /*
+     * 0x80059F4C..0x80059FE0: `vel / 15` per axis — magic 0x88888889, the
+     * add-back of the dividend, `sra 3`, then the sign subtracted, which is the
+     * compiler's signed divide by fifteen and therefore TRUNCATES toward zero.
+     * C's `/` is the same operation.
+     */
+    for (k = 0; k < 3; k++)
+        step[k] = (s16)(vel[k] / Q2_FX_GIB_TRAIL_DIV);
+
+    /*
+     * 0x80059FE4 zeroes offs[0] and 0x80059FF4..0x8005A038 builds the rest as
+     * a running sum, `offs[i] = offs[i - 1] + step` in halfwords — a straight
+     * line of fifteen points along the gib's own motion for this frame.
+     */
+    memset(offs[0], 0, sizeof(offs[0]));
+    for (i = 1; i < Q2_FX_GIB_TRAIL_COUNT; i++) {
+        for (k = 0; k < 3; k++)
+            offs[i][k] = (s16)(offs[i - 1][k] + step[k]);
+    }
+
+    /*
+     * 0x8005A07C: the SECOND spawner (0x8003004C), a0 = entity+0xA4, a1 = the
+     * offsets, a2 = the velocities, a3 = 0x8009BB68 (ramp 2), sp+16 =
+     * 0x8009BBEC (ramp 3), count 15, life 3, size 6144, area entity+0x9E. That
+     * spawner shifts each offset right by four as it stores it, so the line
+     * the gib drew is laid down at a sixteenth of its length.
+     */
+    r0 = q2_fx_ramp_at(w->tab, Q2_FX_GIB_TRAIL_RAMP0);
+    r1 = q2_fx_ramp_at(w->tab, Q2_FX_GIB_TRAIL_RAMP1);
+    return q2_fx_group_spawn_offsets(w, at, (const s16 (*)[3])offs,
+                                     (const s16 (*)[3])v,
+                                     Q2_FX_GIB_TRAIL_COUNT, r0, r1,
+                                     Q2_FX_GIB_TRAIL_LIFE,
+                                     Q2_FX_GIB_TRAIL_SIZE, area);
+}
+
+/* ------------------------------------------------------------------------- */
+/* 0x80058638 — the effect[1] dispatcher, which also OWNS the countdown       */
+/* ------------------------------------------------------------------------- */
+void q2_fx_actor_damage_effect(q2_fx_world *w, struct q2_actor *a,
+                               const q2_fx_mesh_src *src,
+                               u32 frame, u8 area, s32 viewport_skip,
+                               u8 dt, q2_fx_present_report *out)
+{
+    u8 armed;
+
+    if (out)
+        memset(out, 0, sizeof(*out));
+    if (!w || !a)
+        return;
+
+    /* 0x80058650 / 0x80058658: a slot at zero leaves through the exit that
+     * SKIPS the subtraction, so the byte never underflows from rest. */
+    armed = a->effect[1];
+    if (armed == 0)
+        return;
+
+    if (armed < 3) {                     /* 0x80058660 sltiu v0, v0, 3 */
+        u32 g = q2_fx_mesh_crackle(w, src, frame, area, viewport_skip,
+                                   Q2_FX_CRACKLE_DAMAGE_RAMP,
+                                   Q2_FX_CRACKLE_DAMAGE_LIFE);
+        if (out)
+            out->groups += g;
+
+        /*
+         * 0x80058700 RE-READS entity+0x2F1 and 0x80058708 branches away unless
+         * it is exactly 2, so the `< 3` arm is not silent: at 2 it raises a
+         * light through 0x80075D14, which is a DIFFERENT function from the
+         * `>= 3` arm's 0x80075C34 and takes a fourth argument of 4
+         * (0x80058718). The re-read is the same value here because the drawer
+         * cannot touch the byte.
+         */
+        if (armed == 2 && out)
+            out->energy_pulse = true;
+    } else {
+        u32 g = q2_fx_mesh_crackle(w, src, frame, area, viewport_skip,
+                                   Q2_FX_CRACKLE_ENERGY_RAMP,
+                                   Q2_FX_CRACKLE_ENERGY_LIFE);
+        if (out) {
+            out->groups += g;
+            /* 0x800586D0: 0x80075C34 with 0x800AEAAC's colour and the radii at
+             * 0x800AEAB0 / 0x800AEAB4 — combat.h's Q2_ENERGY_LIGHT_*. */
+            out->energy_light = true;
+            /* 0x800586E8: the light's own four bytes are copied into
+             * entity+0x2AC, so the actor is tinted by it for this tick. */
+            out->set_ambient  = true;
+        }
+    }
+
+    /*
+     * 0x80058760..0x8005876C. THIS is where effect[1] runs down — not in the
+     * combat step, and not by a fixed 1: by the caller's second argument. Both
+     * drivers pass 1. The subtraction is a plain byte `subu`/`sb` with no
+     * clamp, so a dt larger than the slot wraps, exactly as the console does.
+     */
+    a->effect[1] = (u8)(armed - dt);
+}
+
+/* ------------------------------------------------------------------------- */
+/* 0x8005B880 — the per-actor presentation chain                              */
+/* ------------------------------------------------------------------------- */
+/*
+ * One ticker. 0x8005B708..0x8005B72C and its three clones:
+ *
+ *     if (slot) { emit(); slot -= dt; }
+ *
+ * The emit does NOT depend on dt, so a slot ticked with dt 0 emits for as long
+ * as its entity is presented. On the console that is bounded from OUTSIDE this
+ * chain: a corpse think's gate 0x8005B2A8 hands a body with effect[0] or
+ * effect[2] armed to a dissolve handler that frees it (effect.h).
+ */
+static u32 fx_tick_spark(q2_fx_world *w, q2_rng *rng, const q2_fx_mesh_src *src,
+                         u32 frame, u8 area, s32 viewport_skip,
+                         u8 *slot, u8 dt)
+{
+    const q2_fx_ramp *r;
+    u32 g;
+
+    if (*slot == 0)
+        return 0;
+
+    /* 0x8005B624 / 0x8005B658 / 0x8005B68C are byte-identical: one ramp
+     * pointer passed twice, size 32767, life 4. */
+    r = q2_fx_ramp_at(w->tab, Q2_FX_MESH_SPARK_RAMP);
+    g = q2_fx_mesh_spark(w, rng, src, frame, area, viewport_skip, r, r,
+                         Q2_FX_MESH_SPARK_SIZE, Q2_FX_MESH_SPARK_LIFE);
+
+    *slot = (u8)(*slot - dt);
+    return g;
+}
+
+void q2_fx_actor_present(q2_fx_world *w, q2_rng *rng, struct q2_actor *a,
+                         const q2_fx_mesh_src *src,
+                         u32 frame, u8 area, s32 viewport_skip,
+                         s32 level_time, s32 quad_until,
+                         q2_fx_present_report *out)
+{
+    q2_fx_present_report local;
+    u8 dt_alive;
+
+    if (!out)
+        out = &local;
+    memset(out, 0, sizeof(*out));
+    if (!w || !a)
+        return;
+
+    /*
+     * 0x8005B8A0 `lh s1, 264(s0)` then 0x8005B8AC `slt s1, zero, s1`: dt for
+     * slots 0 and 2 is (health > 0). Slots 4 and 5 get a literal 1
+     * (0x8005B8D0, 0x8005B8E4), so they run down on a corpse and those two do
+     * not. Giving all four the health gate latches effect[4] and effect[5] on
+     * for as long as the corpse lasts: the corpse gate 0x8005B2A8 only
+     * releases a body for effect[2] or effect[0] (effect.h).
+     */
+    dt_alive = (a->health > 0) ? 1u : 0u;
+
+    /* 0x8005B8A8, and it zeroes `out`. */
+    q2_fx_actor_damage_effect(w, a, src, frame, area, viewport_skip, 1, out);
+
+    /* 0x8005B8B4 — effect[0], armed with 15 by Q2_MOD_2. */
+    out->groups += fx_tick_spark(w, rng, src, frame, area, viewport_skip,
+                                 &a->effect[0], dt_alive);
+
+    /* 0x8005B8C0 — effect[2], armed with 30 by Q2_MOD_4. */
+    out->groups += fx_tick_spark(w, rng, src, frame, area, viewport_skip,
+                                 &a->effect[2], dt_alive);
+
+    /* 0x8005B8CC — effect[4], armed with 5 by Q2_MOD_5, dt a constant 1. */
+    out->groups += fx_tick_spark(w, rng, src, frame, area, viewport_skip,
+                                 &a->effect[4], 1);
+
+    /*
+     * 0x8005B7E4, FOURTH in the chain. Five instructions:
+     *
+     *     8005B7EC  lw   v0, 12(a0)    ; the client — no client, no shell,
+     *     8005B7F4  beq  v0, zero      ; whatever the inventory says
+     *     8005B7FC  lw   v1, 172(v0)   ; client+0xAC, the deadline
+     *     8005B804  lw   v0, [0x800AEBAC]
+     *     8005B80C  sltu v0, v0, v1    ; UNSIGNED, and strict
+     *
+     * The compare being unsigned is not decorative: a deadline that has been
+     * left negative reads as an enormous positive one and the shell stays on.
+     * Strict means `level_time == quad_until` is already expired.
+     */
+    if (a->has_client && (u32)level_time < (u32)quad_until)
+        out->groups += q2_fx_mesh_crackle(w, src, frame, area, viewport_skip,
+                                          Q2_FX_QUAD_SHELL_RAMP,
+                                          Q2_FX_QUAD_SHELL_LIFE);
+
+    /*
+     * 0x8005B830 — effect[5] at entity+0x2F5, dt a constant 1. Its emitter
+     * 0x80059168 is a clone of the CRACKLE (step 2, zero velocities), not of
+     * the random-velocity spark, and its ramp is 0.
+     */
+    if (a->effect[5]) {
+        out->groups += q2_fx_mesh_crackle(w, src, frame, area, viewport_skip,
+                                          Q2_FX_CRACKLE_SLOT5_RAMP,
+                                          Q2_FX_CRACKLE_SLOT5_LIFE);
+        a->effect[5] = (u8)(a->effect[5] - 1u);
+    }
+
+    /* effect[3] is deliberately absent: 0x8005B880 never touches +0x2F3, and
+     * `q2psx-inspect access 0x2F3` finds no immediate-offset load or store of
+     * it in the main executable (the tool does not scan the relocated
+     * modules). So neither does this. */
 }
 
 void q2_fx_group_point(const q2_fx_group *g, u32 i, s32 out[3])
@@ -1531,9 +2151,21 @@ static u32 draw_groups(q2_fx_world *w, const q2_camera *cam, u32 viewport,
         if (g->life == 0)
             continue;
 
-        /* 0x8003061C: the high nibble of the flags byte disables a group in
-         * one viewport without touching the others. */
-        if (viewport < 4 && (g->view_mask & (1u << viewport)))
+        /*
+         * 0x80030614..0x80030628: the HIGH nibble of the flags byte disables a
+         * group in one viewport without touching the others —
+         *
+         *     80030614  lbu  v0, -2(s3)      ; group+0xC4
+         *     8003061C  srl  v0, v0, 4
+         *     80030620  srav v0, v0, t2      ; t2 = the viewport
+         *     80030624  andi v0, v0, 0x1
+         *
+         * so viewport n tests bit 4 + n. This used to test bit n, the LOW
+         * nibble, which nothing writes: the spawners clear the whole byte and
+         * the mesh drawers (fx_view_skip) set bits 4..7, so the skip a drawer
+         * asked for was never honoured and a player saw their own crackle.
+         */
+        if (viewport < 4 && ((g->view_mask >> 4) & (1u << viewport)))
             continue;
 
         /* Particle groups live on retail's area +12 batch list. A stale area

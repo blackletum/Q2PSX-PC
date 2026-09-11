@@ -142,6 +142,7 @@
 #include "explosive.h"
 #include <stdlib.h>
 #include "mission.h"
+#include "modelent.h"
 #include "movie.h"
 #include "panel.h"
 #include "prompt.h"
@@ -244,6 +245,30 @@ typedef struct client_player_anim {
     bool            stamped;
     bool            attack_latched;
 } client_player_anim;
+
+/*
+ * A creature's mesh AS IT WAS LAST DRAWN, for the damage-effect drawers.
+ *
+ * 0x8006CC44 poses a vertex on the entity's current frame whenever an effect
+ * asks. The port poses a creature in the draw (client_draw_view), from a
+ * render-clock cursor that must advance exactly once per display frame, so
+ * posing it a second time from the combat tick would either move that cursor
+ * or need a second copy of the pose selection. Instead the draw leaves its
+ * result here and the hook (client_fx_mesh) hands it over: the mesh the player
+ * saw on the last frame, at most one frame behind the tick that asks — which
+ * is the presentation pass's own timing divergence (effect.h), not a new one.
+ *
+ * `inst.pose` points at `pose` below, or is NULL for an unposed draw. The
+ * light and page-table pointers are cleared: they point into the draw's frame
+ * and nothing that asks for a vertex needs them.
+ */
+#define CLIENT_FX_POSE_MAX 64   /* the creature draw's own pose[] bound */
+
+typedef struct client_fx_pose {
+    q2_model_instance inst;
+    q2_model_pose     pose[CLIENT_FX_POSE_MAX];
+    bool              valid;    /* a draw has posed it since the load */
+} client_fx_pose;
 
 typedef struct client {
     disc            *disc;
@@ -452,6 +477,16 @@ typedef struct client {
     q2_statusbar     sbar[Q2_MP_MAX_PLAYERS];
 
     /*
+     * The carousel's writes (client_sbar_write_slots): one count per event
+     * this side calls the writer at, and how often the draw's latch found a
+     * mark of an event it could not see (q2_statusbar_weapon_slots_track).
+     * Recomputing every drawn frame would put one write per bar per frame
+     * here; the console writes at the events alone.
+     */
+    u32              slots_written[3];
+    u32              slots_inferred;
+
+    /*
      * The memory-card front end. Its screens and its release-gated state
      * machine are the console's (memcard.h); the card operations behind them
      * are `libmcrd` talking to hardware this port does not have, so what sits
@@ -536,6 +571,7 @@ typedef struct client {
     client_model_anim *cre_anim;
     q2_actor         *cre_actor;      /* what combat shoots at                 */
     q2_actor        **cre_target;
+    client_fx_pose   *cre_fx;         /* the last drawn pose, for 0x8006CC44   */
     /*
      * The world the AI asks its three questions of — line of sight, a box
      * move, and whether there is ground under a creature's feet. Without this
@@ -562,6 +598,35 @@ typedef struct client {
      * than fired, and counted rather than silently returned. See client_cre_fire.
      */
     u32               cre_fire_no_figures;
+
+    /*
+     * The death drops (client_cre_drop): requests the queue flushed to us,
+     * items actually spawned, and requests 0x8002085C itself turned down —
+     * no record, no model, no entity. Counted apart so "no creature dropped
+     * anything" can be told from "the spawner refused".
+     */
+    u32               cre_drop_requests;
+    u32               cre_drops;
+    u32               cre_drops_declined;
+
+    /* The mesh hook (client_fx_mesh): how often combat asked for an actor's
+     * mesh, and how often a creature's posed mesh was there to give. */
+    u32               fx_mesh_asked;
+    u32               fx_mesh_given;
+    u32               fx_mesh_armed;   /* ...while an effect byte was running */
+
+    /*
+     * The gib dispatcher's (client_gib_describe): the posed mesh handed to
+     * 0x8005B320's spray for a creature coming apart — held here because the
+     * parent points at it for the length of the dispatch, after the describe
+     * callback has returned — and how many creature bodies were handed one.
+     * That counts the describe, not the spray: the boss-ring arms and ARM_NONE
+     * are handed a mesh and spray nothing (modelent.c). `gib_pushed` counts the
+     * bodies whose +0x2F8 knockback reached the throw non-zero.
+     */
+    q2_fx_mesh_src    gib_mesh;
+    u32               gib_mesh_posed;
+    u32               gib_pushed;
 
     /* The music countdown, in 50 Hz ticks — 0x800B2710 and 0x800B2708. */
     s32               music_total;
@@ -695,6 +760,15 @@ typedef struct client {
     q2_player         carry_motion;
     s32               carry_next_fire;
     s16               carry_fire_kick[3];
+
+    /*
+     * COMMON's script latches across a zone change (events_rt.h,
+     * q2_event_carry): every record's flags byte and every item's latched
+     * bit 7, which the console never reloads between zones of one map.
+     * Taken off the outgoing runtime and put back on the new one within one
+     * client_load_zone; `size` is 0 whenever nothing is being carried.
+     */
+    q2_event_carry    carry_events;
 
     /*
      * THE MISSION SCREEN'S TWO COUNTERS, which mission.h names as the reason
@@ -1196,8 +1270,11 @@ typedef struct client {
      * somewhere to put the player back. */
     q2_mp_spawn       mp_spawns[Q2_MP_MAX_SPAWNS];
     /* The level start's loadout, kept so a respawn can hand it back: the
-     * console builds a whole new player entity (0x8003B250) and clears the
-     * client record (0x8003B040), and this is the port's side of that. */
+     * console builds a whole new player entity (0x8003B250), which clears the
+     * client record (0x8003B2BC, 224 bytes) and runs the spawn loadout
+     * (0x8003D4FC), and this is the port's side of that. 0x8003B040, which
+     * the respawn also calls (0x8003DE38), is the ALL WEAPONS grant: 0x8003B070
+     * branches to its epilogue unless bit 0x20 of 0x800B29EC is up. */
     q2_inventory      mp_start_inv;
     int               mp_start_weapon;
     bool              mp_start_valid;
@@ -1641,6 +1718,9 @@ static void client_cre_melee(q2_monster *m, const s32 aim[3], s32 damage,
 static void client_cre_sound(q2_monster *m, int which, void *user);
 static void client_cre_fire(q2_monster *m, int flash, void *user);
 static void client_cre_shot(q2_monster *m, const q2_cre_shot *shot, void *user);
+static void client_cre_drop(const q2_monster_drop_request *req, void *user);
+static bool client_cre_bank_has(const char *name, void *user);
+static bool client_fx_mesh(void *user, const q2_actor *a, q2_fx_mesh_src *out);
 
 /* ------------------------------------------------------------------------- */
 /*
@@ -1658,12 +1738,14 @@ static void client_free_creatures(client *c)
     free(c->cre_actor);
     free(c->cre_target);
     free(c->cre_home);
+    free(c->cre_fx);
     c->cre_home     = NULL;
     c->cre_model    = NULL;
     c->cre_model_ok = NULL;
     c->cre_anim     = NULL;
     c->cre_actor    = NULL;
     c->cre_target   = NULL;
+    c->cre_fx       = NULL;
 
     if (c->creatures_ready) {
         q2_sim_set_targets(&c->sim[0], NULL, 0);
@@ -1704,10 +1786,12 @@ static void client_load_creatures(client *c, const s32 eye[3])
                                              sizeof(*c->cre_actor));
         c->cre_target   = (q2_actor **)calloc(c->creatures.set.count,
                                               sizeof(*c->cre_target));
+        c->cre_fx       = (client_fx_pose *)calloc(c->creatures.set.count,
+                                                   sizeof(*c->cre_fx));
     }
 
     if (!c->cre_model || !c->cre_model_ok || !c->cre_anim ||
-        !c->cre_actor || !c->cre_target) {
+        !c->cre_actor || !c->cre_target || !c->cre_fx) {
         if (c->creatures.set.count)
             Q2_WARN("no memory for %u creatures", c->creatures.set.count);
         client_free_creatures(c);
@@ -1802,12 +1886,27 @@ static void client_load_creatures(client *c, const s32 eye[3])
         if (!name)
             continue;
 
+        /*
+         * AND THE MODEL'S BIAS INTO THE CREATURE, which is where its eye
+         * height comes from. The loader stores `lh model[+0x1C]` into the link
+         * object's +0xF8 (0x80056700 `jal 0x8006D100`, 0x80056710 `sh v0,
+         * 248(s0)`) and walkmonster_go complements it into the view height
+         * (0x80062448/0x80062450 `nor`). Nothing filled `model_ext2`, so every
+         * walker kept the -290 stand-in and only its turn rate changed.
+         *
+         * Here because this is the one place the creature and its model are
+         * both in hand, and before q2_creature_world_wake below, which runs
+         * the go-routines that read it. `m` is const in this loop, so the set
+         * is indexed instead.
+         */
         if (c->model_bank_ready) {
             idx = q2_model_bank_find(&c->model_bank, name);
             if (idx >= 0 &&
                 q2_model_get(&c->model_bank, (u32)idx,
                              &c->cre_model[i]) == Q2_OK) {
                 c->cre_model_ok[i] = true;
+                c->creatures.set.monsters[i].model_ext2 =
+                    c->cre_model[i].hdr.ext2;
                 resolved++;
                 continue;
             }
@@ -1818,12 +1917,25 @@ static void client_load_creatures(client *c, const s32 eye[3])
                 q2_model_get(&c->zone_bank, (u32)idx,
                              &c->cre_model[i]) == Q2_OK) {
                 c->cre_model_ok[i] = true;
+                c->creatures.set.monsters[i].model_ext2 =
+                    c->cre_model[i].hdr.ext2;
                 resolved++;
             }
         }
     }
 
     q2_sim_set_targets(&c->sim[0], c->cre_target, c->creatures.set.count);
+
+    /*
+     * NO WORLD LIST IN SINGLE PLAYER, because it would be this one. Every
+     * reader of `world_targets` — the projectile hit list, the three detonation
+     * sites and the per-actor presentation pass (0x8005B880,
+     * q2_fx_actor_present), all in simcombat.c — takes `world_targets ?
+     * world_targets : combat.targets`, and the zone load's q2_sim_init leaves
+     * it NULL. Publishing cre_target here as well is what used to get a
+     * single-player creature presented at all; that pass has the fallback now.
+     * Deathmatch builds its own list per frame (client_targets_for).
+     */
 
     /*
      * The world the AI asks its three questions of — and it is BOTH hulls,
@@ -1890,6 +2002,18 @@ static void client_load_creatures(client *c, const s32 eye[3])
     q2_cre_set_shot_hook(client_cre_shot, c);
 
     /*
+     * WHERE A FLAGGED CREATURE'S DROP GOES. monster_death_use records the
+     * death (0x8006233C -> 0x80020D60) and the once-a-frame flush below turns
+     * it into a request; this is the spawner at the end of that chain,
+     * 0x8002085C. The queue has no clear on the disc other than the flush, so
+     * emptying it here — and in client_load_zone, beside the set it would have
+     * spawned into — is the port's choice: a death in the frame a zone changed
+     * must not drop an item into the next zone.
+     */
+    q2_monster_drop_reset();
+    q2_monster_set_drop_hook(client_cre_drop, c);
+
+    /*
      * Hold back the batches before waking anything.
      *
      * The console spawns nothing at load — every group's flags word is zero on
@@ -1920,10 +2044,45 @@ static void client_load_creatures(client *c, const s32 eye[3])
     c->ai_accum = 0.0;
 
     {
-        u32 live = 0;
-        for (i = 0; i < c->creatures.set.count; i++)
+        u32 live = 0, droppers = 0;
+        for (i = 0; i < c->creatures.set.count; i++) {
             if (c->creatures.set.monsters[i].in_use)
                 live++;
+            /* 0x80062330: record flag 0x100, the one monster_death_use tests
+             * before it queues a drop. Counted over every record the map
+             * placed — held batches and other zones' included — so this is
+             * the map's figure, not the zone's. */
+            if (c->creatures.set.monsters[i].spawnflags &
+                Q2_SPAWNFLAG_DROP_ITEM)
+                droppers++;
+        }
+        if (droppers)
+            Q2_INFO("creatures: %u carry the drop flag (0x80062330)",
+                    droppers);
+
+        /* The eyes the go-routines just installed, for the ones that woke:
+         * a walker's is ~ext2 (0x80062450), so a Soldier's 251 reads -252. A
+         * -290 here is the q2_monster_init stand-in, i.e. no bias reached it. */
+        {
+            u32 own = 0, woke = 0;
+            s32 first = 0;
+
+            for (i = 0; i < c->creatures.set.count; i++) {
+                const q2_monster *m = &c->creatures.set.monsters[i];
+
+                if (!m->in_use || m->model_ext2 == 0)
+                    continue;
+                woke++;
+                if (m->view_height != -290) {
+                    if (!own)
+                        first = m->view_height;
+                    own++;
+                }
+            }
+            if (woke)
+                Q2_INFO("creatures: %u of %u with a model bias see from "
+                        "their own eye (first %d)", own, woke, (int)first);
+        }
 
         Q2_INFO("creatures: %u live in this zone, %u of %u spawn records "
                 "placed, %u with a model%s",
@@ -1946,6 +2105,23 @@ static void client_load_creatures(client *c, const s32 eye[3])
  * module reaches the engine through its import table in the original, and
  * keeping that shape stops every creature having to know about combat.
  */
+/*
+ * The combat actor that stands for a creature. The monster and its actor are
+ * parallel arrays, so the index is the pointer difference; a monster outside
+ * the set, or a client with no actors yet, has none. One lookup for the three
+ * attack hooks, so the claw and the two kinds of shot cannot disagree about
+ * who hit you.
+ */
+static q2_actor *client_cre_actor(client *c, const q2_monster *m)
+{
+    size_t idx;
+
+    if (!c || !c->cre_actor || !m || m < c->creatures.set.monsters)
+        return NULL;
+    idx = (size_t)(m - c->creatures.set.monsters);
+    return idx < c->creatures.set.count ? &c->cre_actor[idx] : NULL;
+}
+
 static void client_cre_melee(q2_monster *m, const s32 aim[3], s32 damage,
                              s32 kick, void *user)
 {
@@ -1986,17 +2162,8 @@ static void client_cre_melee(q2_monster *m, const s32 aim[3], s32 damage,
      * MOD 7 is `0x800612F0`, a creature's contact hit (combat.h) — armour
      * applies, which is what makes it different from the environment's.
      */
-    {
-        q2_actor *attacker = NULL;
-        size_t    idx      = (size_t)(m - c->creatures.set.monsters);
-
-        if (c->cre_actor && m >= c->creatures.set.monsters &&
-            idx < c->creatures.set.count)
-            attacker = &c->cre_actor[idx];
-
-        q2_sim_hurt_player(&c->sim[0], attacker, (s16)damage, Q2_MOD_MELEE,
-                           c->creatures.sight.pos);
-    }
+    q2_sim_hurt_player(&c->sim[0], client_cre_actor(c, m), (s16)damage,
+                       Q2_MOD_MELEE, c->creatures.sight.pos);
 }
 
 /*
@@ -2023,6 +2190,7 @@ static void client_cre_fire(q2_monster *m, int flash, void *user)
     int table = flash >> 3;
     s16 damage;
     int shots;
+    q2_actor *attacker;
 
     if (!c || !c->creatures_ready)
         return;
@@ -2129,10 +2297,23 @@ static void client_cre_fire(q2_monster *m, int flash, void *user)
         }
     }
 
+    /*
+     * The shooter, not NULL. 0x800582C8 is the skill-0 rule that a monster
+     * hitting a player does half, rounded up, and it keys on the ATTACKER:
+     * 0x800582E0 loads attacker+0x2EC and 0x800582F0 tests the attacker's
+     * client block, so with no attacker there is nothing to test and the
+     * rule cannot fire. Handing the damage path NULL made every creature
+     * shot land at full strength on easy. The melee hook above already
+     * resolves its actor this way; the point stays the sight position,
+     * because a hitscan's point is where the shot arrives, not where the
+     * shooter stands.
+     */
+    attacker = client_cre_actor(c, m);
+
     while (shots-- > 0) {
         if (!q2_visible(m, &c->creatures.sight))
             break;
-        q2_sim_hurt_player(&c->sim[0], NULL, damage,
+        q2_sim_hurt_player(&c->sim[0], attacker, damage,
                            table == 0 ? Q2_MOD_ENERGY_BOLT : Q2_MOD_BULLET,
                            c->creatures.sight.pos);
     }
@@ -2159,11 +2340,23 @@ static void client_cre_shot(q2_monster *m, const q2_cre_shot *shot, void *user)
     client *c = (client *)user;
     s32 shots;
     int mod;
+    q2_actor *attacker;
 
     if (!c || !c->creatures_ready || !m || !shot)
         return;
-    if (m->enemy != &c->creatures.sight)
-        return;
+
+    /*
+     * NO ENEMY GATE HERE, and there used to be one: `m->enemy != sight`
+     * returned before anything else, so every shot fired with no enemy or at
+     * a dead one vanished — flash, report and count with it. The engine does
+     * not refuse those (TankMachineGun, module+0xF90: `beq a3, zero` and no
+     * load of the enemy's +0x108; crebind.c no longer refuses them either),
+     * so the flash and the count happen for EVERY shot the module fires. What
+     * stays gated is who it can hurt: this port has one target for a creature,
+     * the player, and a shot is only aimed at the player when the player is
+     * its enemy. The dead-enemy half of the old refusal never fired against
+     * the player anyway — sight.health is pinned at 100 (creworld.c).
+     */
 
     /*
      * A shot with no damage read is declined rather than guessed — the same
@@ -2195,12 +2388,16 @@ static void client_cre_shot(q2_monster *m, const q2_cre_shot *shot, void *user)
     default:                  mod = Q2_MOD_BULLET;      break;
     }
 
-    shots = shot->count > 0 ? shot->count : 1;
+    shots    = shot->count > 0 ? shot->count : 1;
+    attacker = client_cre_actor(c, m);   /* 0x800582C8: see client_cre_fire */
+
+    if (m->enemy != &c->creatures.sight)
+        return;                          /* fired, but not at the player */
 
     while (shots-- > 0) {
         if (!q2_visible(m, &c->creatures.sight))
             break;
-        q2_sim_hurt_player(&c->sim[0], NULL, (s16)shot->damage, mod,
+        q2_sim_hurt_player(&c->sim[0], attacker, (s16)shot->damage, mod,
                            c->creatures.sight.pos);
     }
 }
@@ -2289,19 +2486,277 @@ static void client_cre_sound(q2_monster *m, int which, void *user)
         q2_vag vag;
 
         /*
-         * A name the bank does not carry is SILENCE, and on this disc that is
-         * usually correct rather than a gap: `ara_idle1`, `ara_srch1`,
-         * `ber_idle1`, `ber_srch1` and `tnk_idle1` are registered by their
-         * modules and appear in NO map's bank anywhere on the disc. The
-         * console's loader returns a null handle for those and playing one does
-         * nothing. See openquestions #61.
+         * WHAT THE SLOT ACTUALLY HOLDS, which is not always what it was
+         * registered with. Two modules overwrite a handle their map's bank
+         * cannot fill with one it can, in their own spawn code: the Soldier's
+         * pain and death trios (module+0xE50..+0xF28) and the Tank Commander's
+         * idle, which becomes its footstep (module+0x808..+0x820). Every fill
+         * store is guarded by a `bne` on the destination, so a handle that
+         * resolved is never replaced. q2_cre_sound_resolve is that whole rule
+         * (crebind.h); a name in no group comes back as it went in.
          */
-        if (!client_find_sound(c, name, &vag))
+        const char *plays = q2_cre_sound_resolve(m, name, client_cre_bank_has,
+                                                 c);
+
+        /*
+         * A slot that resolves to nothing — no fallback the bank carries — is
+         * the console's NULL handle and plays nothing, as is a name the bank
+         * does not have. Both are SILENCE and counted as missing, never as
+         * unnamed: the site did name a sound.
+         *
+         * On this disc that silence is usually correct rather than a gap:
+         * `ara_idle1`, `ara_srch1`, `ber_idle1` and `ber_srch1` are registered
+         * by their modules, appear in NO map's bank anywhere on the disc, and
+         * have no fallback. (`tnk_idle1` used to be on this list; it is the one
+         * the Tank Commander's own code replaces, with `tnk_step`.) See
+         * openquestions #61.
+         */
+        if (!plays || !client_find_sound(c, plays, &vag))
             c->cre_sound_missing++;
         else
-            client_play_sound_at(c, name, m->pos);
+            client_play_sound_at(c, plays, m->pos);
     } else {
         c->cre_sound_unnamed++;
+    }
+}
+
+/* "Does this map's SNDVRAM bank carry it" — q2_cre_sound_resolve's question,
+ * answered the way the play site already asks it. */
+static bool client_cre_bank_has(const char *name, void *user)
+{
+    q2_vag vag;
+
+    return client_find_sound((client *)user, name, &vag);
+}
+
+/* BIOS rand(), 0x80089E28: the creature layer's convention (ai.c, aimove.c,
+ * monster.c's drop heading) is the C library's rand() in its fifteen bits. */
+static int client_bios_rand(void)
+{
+    return rand() & 0x7FFF;
+}
+
+/*
+ * 0x8002085C — ONE CREATURE'S DROP, handed over by q2_monster_drop_flush.
+ *
+ * The spawner itself is item.c's (q2_item_drop_spawn, with the think
+ * 0x80020C48): the position is the request's EXACTLY — no Q2_ITEM_SPAWN_LIFT
+ * and no floor sweep, which is why this does not go through q2_item_spawn
+ * with a synthesised place record — and the flight is the toss mover's. What
+ * this side supplies is what only it has: the entity set, the item table off
+ * the disc, the CastLists the model is looked up in, and the cell.
+ *
+ * THE CELL. The console hands the spawner the creature's own SecondaryCol cell
+ * (`lh 78(a3)` at 0x80020838, obj+0xA2). q2_monster keeps none, so it is
+ * found for the recorded position — the same point, in the same hull.
+ */
+static void client_cre_drop(const q2_monster_drop_request *req, void *user)
+{
+    client *c = (client *)user;
+    const q2_model_bank *banks[2];
+    u32 nbanks = 0;
+    s32 cell = -1;
+    q2_entity *e;
+
+    if (!c || !req)
+        return;
+
+    c->cre_drop_requests++;
+
+    if (!c->sim[0].entities_ready) {
+        c->cre_drops_declined++;
+        return;
+    }
+
+    /* The map's CastList first — it is the one the entity draw resolves items
+     * against — then the zone's, as the creature models are searched. */
+    if (c->model_bank_ready)
+        banks[nbanks++] = &c->model_bank;
+    if (c->zone_bank_ready)
+        banks[nbanks++] = &c->zone_bank;
+
+    if (c->sim[0].coll_ready)
+        cell = q2_coll_find_node(&c->sim[0].coll, req->pos, -1, true);
+
+    e = q2_item_drop_spawn(&c->sim[0].entities,
+                           c->item_table_ready ? &c->item_table : NULL,
+                           banks, nbanks, req->item_id, req->heading,
+                           req->pos, cell, client_bios_rand);
+    if (e) {
+        c->cre_drops++;
+        Q2_INFO("drop: f%ld item %u '%s' at (%d,%d,%d) cell %d",
+                c->frame_index, (unsigned)req->item_id, e->model,
+                req->pos[0], req->pos[1], req->pos[2], (int)cell);
+    } else {
+        c->cre_drops_declined++;
+        Q2_INFO("drop: f%ld item %u declined by the spawner", c->frame_index,
+                (unsigned)req->item_id);
+    }
+}
+
+/*
+ * THE MESH HOOK (sim.h `fx_mesh`) — which posed mesh a combat actor's damage
+ * effects spawn on, as 0x8006CC44 answers it for the effect drawers.
+ *
+ * Creatures only. The local player's own actor has no body in first person, so
+ * it answers false and its effects keep their timers without drawing quads.
+ * Other players' bodies are drawn too, but their poses are not kept past the
+ * draw; they answer false as well and are a followup.
+ *
+ * The vertex callback reads the LAST DRAWN pose of that creature
+ * (client_fx_pose, above the client struct), whose storage is the client's and
+ * lives for the zone — so the context outlives the q2_sim_combat_tick that
+ * asks for it, as the hook's contract requires.
+ */
+static void client_fx_vertex(void *ctx, s32 index, s32 out[3])
+{
+    const q2_model_instance *inst = (const q2_model_instance *)ctx;
+
+    /* Every index a drawer asks for is below the total the source reported,
+     * so this only refuses on a model that failed to decode; the origin is
+     * then the one place that is certainly on the creature. */
+    if (!q2_model_world_vertex(inst, index, out))
+        (void)q2_model_world_vertex(inst, -1, out);
+}
+
+static bool client_fx_mesh(void *user, const q2_actor *a, q2_fx_mesh_src *out)
+{
+    client *c = (client *)user;
+    size_t idx;
+
+    if (!c || !a || !out)
+        return false;
+
+    c->fx_mesh_asked++;
+
+    if (!c->creatures_ready || !c->cre_actor || !c->cre_fx ||
+        a < c->cre_actor)
+        return false;
+    idx = (size_t)(a - c->cre_actor);
+    if (idx >= c->creatures.set.count)
+        return false;
+
+    /* Removed from play, never drawn since the load, or no model: no mesh to
+     * sample, which the drawers treat as the console treats a model-less
+     * entity. */
+    if (!c->creatures.set.monsters[idx].in_use || !c->cre_model_ok[idx] ||
+        !c->cre_fx[idx].valid)
+        return false;
+
+    out->vertex = client_fx_vertex;
+    out->ctx    = &c->cre_fx[idx].inst;
+    out->total  = q2_model_total_verts(c->cre_fx[idx].inst.model);
+    c->fx_mesh_given++;
+
+    /* A mesh handed over while one of the damage effects is running — the
+     * calls on which a drawer actually samples it. effect[3] has no reader
+     * on the disc and is left out (combat.h). */
+    if (a->effect[0] || a->effect[1] || a->effect[2] || a->effect[4] ||
+        a->effect[5])
+        c->fx_mesh_armed++;
+    return true;
+}
+
+/*
+ * THE GIB DISPATCHER'S QUESTIONS (modelent.h, q2_gib_describe_fn): what a
+ * dying record does not carry and this side does.
+ *
+ * A CREATURE is already placed by its own `pos`. What is added here is the
+ * actor's knockback (+0x2F8, which the dispatcher reads as halfwords and adds
+ * to +0xE0 for the throw — 0x8007D100..0x8007D134 in the default Chest arm,
+ * the same `lhu` pair in the others), the posed mesh 0x8005B320's blood spray
+ * walks, and the area byte the spray's groups carry (+0x9E):
+ *
+ *   - The mesh comes through client_fx_mesh, the hook the damage effects use,
+ *     so the spray samples the same last-drawn pose the crackle does. It is
+ *     asked while the record is still in play — q2_monster_corpse_tick clears
+ *     `in_use` only after the dispatch returns. This is not one of combat's
+ *     asks, so the hook's three counters are put back and `gib_mesh_posed`
+ *     counts it instead.
+ *   - The area is the SecondaryCol cell byte at `pos`: the lookup this
+ *     client's creature draw makes for the same body's sort area, so the spray
+ *     sorts with the body it came out of. Which hull the console's own
+ *     creature +0x9E comes from is not traced — INFERRED.
+ *
+ * A PLAYER is placed only here: +0x54 is the ORIGIN frame, Q2_EYE_BASE above
+ * the feet (sim.h), `vel` is +0xE0 in the same raw units (per dt before the
+ * mover's Q2_VEL_DIV), and `impulse` is the +0x2F8 accumulator itself. The
+ * death record's own `velocity` (playerdeath.h, "+0xE0") is never handed the
+ * body's in this port — its init zeroes it and only the corpse friction
+ * touches it after — so the sim's is used. +0xA4 is taken as the same
+ * point — INFERRED; the player's draw origin is not reconstructed.
+ */
+static void client_gib_describe(void *user, q2_gib_victim kind,
+                                const void *who, q2_gib_parent *p)
+{
+    client *c = (client *)user;
+    q2_coll_node cn;
+    s32 node;
+    int k;
+
+    if (!c || !who || !p)
+        return;
+
+    if (kind == Q2_GIB_VICTIM_MONSTER) {
+        const q2_monster *m = (const q2_monster *)who;
+        size_t i;
+
+        if (!c->creatures_ready || m < c->creatures.set.monsters)
+            return;
+        i = (size_t)(m - c->creatures.set.monsters);
+        if (i >= c->creatures.set.count)
+            return;
+
+        if (c->cre_actor) {
+            const u32 asked = c->fx_mesh_asked;
+            const u32 given = c->fx_mesh_given;
+            const u32 armed = c->fx_mesh_armed;
+
+            for (k = 0; k < 3; k++)
+                p->knockback[k] = (s16)c->cre_actor[i].knockback[k];
+            if (p->knockback[0] || p->knockback[1] || p->knockback[2])
+                c->gib_pushed++;
+            if (client_fx_mesh(c, &c->cre_actor[i], &c->gib_mesh)) {
+                p->mesh = &c->gib_mesh;
+                c->gib_mesh_posed++;
+            }
+            c->fx_mesh_asked = asked;
+            c->fx_mesh_given = given;
+            c->fx_mesh_armed = armed;
+        }
+        if (c->sim[0].coll_ready) {
+            node = q2_coll_find_node(&c->sim[0].coll, m->pos, -1, true);
+            if (node >= 0 &&
+                q2_collision_get_node(&c->sim[0].coll, (u32)node, &cn))
+                p->area = cn.contents;
+        }
+        return;
+    }
+
+    {
+        const q2_player_death *d = (const q2_player_death *)who;
+        const q2_player *pl;
+        size_t pi;
+
+        if (d < c->death)
+            return;
+        pi = (size_t)(d - c->death);
+        if (pi >= Q2_MP_MAX_PLAYERS)
+            return;
+        pl = &c->sim[0].player[pi];
+
+        p->placed = true;
+        p->pos[0] = pl->pos[0];
+        p->pos[1] = q2_sim_origin_y(pl->pos[1]);
+        p->pos[2] = pl->pos[2];
+        for (k = 0; k < 3; k++) {
+            p->origin[k]    = p->pos[k];
+            p->velocity[k]  = (s16)pl->vel[k];
+            p->knockback[k] = pl->impulse[k];
+        }
+        if (c->sim[0].coll_ready && pl->ent.node >= 0 &&
+            q2_collision_get_node(&c->sim[0].coll, (u32)pl->ent.node, &cn))
+            p->area = cn.contents;
     }
 }
 
@@ -2763,9 +3218,9 @@ static u32 client_targets_for(client *c, int who)
  *
  * This is the engine's own hook at 0x800396AC — `(*module)->[4](killer,
  * victim)` — with the killer taken from the actor's `last_attacker`, which is
- * the byte the original keeps at entity+222. `q2_mp_attribute_kill` decides
- * whether it counts: a world kill and the level's own hazards are nobody's
- * frag, however the victim came to be standing in them.
+ * the byte the original keeps at entity+222. `q2_mp_killer_field` is that byte
+ * as the handler reads it, and whether it counts is the hook's own gate: a
+ * creature's kill (4) is nobody's frag and costs the victim nothing.
  */
 static void client_score_deaths(client *c)
 {
@@ -2790,7 +3245,19 @@ static void client_score_deaths(client *c)
 
         c->mp_dead[i] = true;
         {
-            int killer = q2_mp_attribute_kill(a->last_attacker, a->last_mod);
+            /*
+             * THE BYTE THE HANDLER READS, not the scoring fold. 0x800396EC
+             * `lb s1, 222(s0)` after the acid/lava override, and the frag hook
+             * is called only when it is below 4 (0x80039774 `slti s1, 4`).
+             * q2_mp_attribute_kill folded a 4 — a creature's hit, or the spawn
+             * sentinel — into -1, which q2_mp_player_killed charges to the
+             * victim as a suicide; the console, handed a 4, calls nothing.
+             * q2_mp_player_killed's own `killer >= Q2_MP_MAX_PLAYERS` return is
+             * that `slti`, and its `killer < 0 -> victim` covers the -1 the
+             * override writes. The log below now shows the raw byte (4, 23 or
+             * an index) where it showed -1.
+             */
+            int killer = q2_mp_killer_field(a->last_attacker, a->last_mod);
 
             q2_mp_player_killed(&c->mp, killer, i);
             c->mp_deaths++;
@@ -2818,6 +3285,48 @@ static void client_sync_parked_health(client *c)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * THE CAROUSEL'S WRITE AT AN EVENT THIS SIDE SEES — statusbar.h, `strip`.
+ *
+ * Three of the six writers are things the client does itself, and each makes
+ * the pair of 0x80050758 calls whatever it changed:
+ *
+ *   the select       0x8004ED3C's delay slot sets a2 = 1 on both arms, and
+ *                    0x8004ED8C tests only a2, so the pair is written at
+ *                    0x8004EDB4/0x8004EDBC even when the step found nothing;
+ *   the auto-select  0x8004FB60 calls 0x800506C4 and falls straight into the
+ *                    pair (0x8004FB8C/0x8004FB98), picked or not;
+ *   the spawn        0x8003D4FC's tail (0x8003D610/0x8003D614), reached from
+ *                    0x8003B250 when a player entity is built.
+ *
+ * The draw's latch (q2_statusbar_weapon_slots_track) reads events off their
+ * marks, and those three can leave none — the same weapon, the same owned set,
+ * no pool higher — so the writer is called here, for player `pi`'s own bar
+ * with that player's inventory and weapon, the way the draw picks them.
+ */
+enum { CLIENT_SLOTS_SELECT, CLIENT_SLOTS_AUTOSELECT, CLIENT_SLOTS_SPAWN };
+
+static void client_sbar_write_slots(client *c, int pi, int why)
+{
+    const q2_inventory *inv;
+    int weapon;
+
+    if (!c || pi < 0 || pi >= Q2_MP_MAX_PLAYERS)
+        return;
+
+    if (pi == c->sim[0].cur_player) {
+        inv    = &c->sim[0].combat.inv;
+        weapon = c->sim[0].combat.weapon_id;
+    } else {
+        inv    = &c->sim[0].pcombat[pi].inv;
+        weapon = c->sim[0].pcombat[pi].weapon_id;
+    }
+    q2_statusbar_weapon_slots(&c->sbar[pi], inv, weapon);
+    if (why >= 0 && why < 3)
+        c->slots_written[why]++;
+}
+
+/* ------------------------------------------------------------------------- */
 /* The player death chain                                                     */
 /* ------------------------------------------------------------------------- */
 /*
@@ -2828,8 +3337,9 @@ static void client_sync_parked_health(client *c)
  * death chain animates the body, waits its 1500 and dissolves it, and stops.
  *
  * 0x8003DDF8 picks a MultiSpawn through 0x80071004, builds a new player entity
- * at it (0x8003B250: health 100, entity+222 at the "not a player" sentinel),
- * clears the client record and installs the Stand move. The pad and menu gates
+ * at it (0x8003B250: health 100, the client record cleared at 0x8003B2BC and
+ * the spawn loadout 0x8003D4FC run; then 0x8003DE34 puts entity+222 at the
+ * "not a player" sentinel) and installs the Stand move. The pad and menu gates
  * the engine also applies (0x8001FC50, 0x800AE8B4) belong to the caller.
  */
 static bool client_mp_respawn(client *c, int pi)
@@ -2897,11 +3407,24 @@ static bool client_mp_respawn(client *c, int pi)
         q2_sim_player_reset_combat(&c->sim[0], pi);
         c->sim[0].pcombat[pi].self.owner = (s8)pi;
     } else {
+        /*
+         * A FRESH ENTITY, not the corpse refreshed. 0x8003DE14 calls
+         * 0x8003B250, which allocates through 0x8006C098 — 768 bytes cleared
+         * (0x8006C164/0x8006C18C) — and then 0x8003DE34 stores 4 at +222.
+         * q2_actor_from_player carries the killer byte, the mod and the
+         * damage-effect timers across its refresh (combat.c), so without the
+         * init the new life kept the last one's killer and effects.
+         */
+        q2_actor_init(&c->sim[0].combat.self);
         q2_actor_from_player(&c->sim[0].combat.self, &c->sim[0].combat.inv,
                              c->sim[0].player[0].pos);
         c->sim[0].combat.self.owner = 0;
         c->cam.roll = 0;      /* and the death cam's tilt goes with the body */
     }
+
+    /* And the carousel, from the loadout just handed back: 0x8003B250 runs
+     * the spawn loadout 0x8003D4FC, whose tail writes the pair. */
+    client_sbar_write_slots(c, pi, CLIENT_SLOTS_SPAWN);
 
     q2_player_death_init(&c->death[pi]);
     c->mp_dead[pi] = false;
@@ -3357,6 +3880,35 @@ static void client_event_explosive(void *user, const q2_event_item *item)
     if (!c || !c->explosives_ready || !item)
         return;
 
+    /*
+     * THE EVE_ REPLAY DESTROYS IT IN SILENCE. The exec tests gp+16948 at
+     * 0x80026924 and, while the replay has it up, branches past the Explosion
+     * (0x8005A778), the report (0x80073704) and the debris (0x80064558 at
+     * 0x80026970) to the swap — 0x80068818 hides each intact node and frees
+     * its box, and the loop after it shows the rubble. So a group the script
+     * had already blown up comes back blown up, not blowing up again. The
+     * sim's entry has no such input; the set's own does (`suppress`,
+     * explosive.h), and the swap and the dead boxes are applied here the way
+     * q2_sim_explosive_trigger_item applies them.
+     */
+    if (c->sim[0].event_rt.initial_pass && c->sim[0].explosives) {
+        q2_explosive_result res;
+        u32 i;
+
+        if (!q2_explosive_trigger_item(c->sim[0].explosives, item->offset,
+                                       true, c->sim[0].breakable_scene,
+                                       &res))
+            return;
+        client_apply_node_vis(c, &res);
+        for (i = 0; i < c->sim[0].breakable_count; i++)
+            if (c->sim[0].breakable[i].kind == Q2_BREAKABLE_FXGROUP &&
+                c->sim[0].breakable[i].item_offset == item->offset)
+                c->sim[0].breakable[i].broken = true;
+        c->sim[0].explosive_destroyed++;
+        c->explosive_scripted++;
+        return;
+    }
+
     if (q2_sim_explosive_trigger_item(&c->sim[0], item->offset))
         c->explosive_scripted++;
 }
@@ -3368,6 +3920,31 @@ static void client_event_call(void *user, const q2_event_item *item,
 
     if (!c || !c->sim[0].userfuncs_ready)
         return;
+
+    /*
+     * gp+16948 (events_rt.h, `initial_pass`), up while the EVE_ replay runs:
+     * these five primitives test it before anything else and return at once
+     * — STRING 0x8002B880, INSECRET 0x80028EC4, HELPCOMPUTER 0x8002BAEC and
+     * SIMPLESOUND 0x8002D318 as their first instruction, CREBATCH 0x8002B96C
+     * after its length check (userfuncs.h, "Two engine-wide pass flags"). A
+     * replayed batch does not spawn twice and a replayed secret is not found
+     * twice. Keyed on the primitive, as the console's gate is on the handler.
+     *
+     * GLASS reads the flag too, at 0x8002A3C4 — after its hit burst
+     * (0x8002A384), so a replayed pane still puffs once but skips the
+     * shatter and the sound. That gate lives in q2_sim_breakable_call
+     * (simcombat.c), which reads the same flag off the runtime; the client
+     * plays no sound for a scripted GLASS, so there is nothing to gate here.
+     * Six spendable records on the disc carry a GLASS call.
+     */
+    if (c->sim[0].event_rt.initial_pass) {
+        q2_uf_prim prim = q2_userfuncs_prim(&c->sim[0].userfuncs, call_index);
+
+        if (prim == Q2_UF_STRING || prim == Q2_UF_CREBATCH ||
+            prim == Q2_UF_HELPCOMPUTER || prim == Q2_UF_SIMPLESOUND ||
+            prim == Q2_UF_INSECRET)
+            return;
+    }
 
     if (c->rotators_ready)
         c->rot_steps += q2_rotators_call(&c->rotators,
@@ -3578,7 +4155,17 @@ static void client_event_call(void *user, const q2_event_item *item,
      * record (index 11) resolving to QFMV, QFMV plays the film its module names
      * for that screen, and so the campaign now ends the way 0x80018ED8 ends it.
      */
-    {
+    /*
+     * ONCE A UNIT IS OVER, a second MISCOMPLETE has nothing to add. The exec
+     * only writes "Default" at 0x800C8CD0 and 7 at 0x800B2E28
+     * (0x8002DC68..0x8002DCB4), so running it twice is the same as running it
+     * once — and this arm was not: it took the destination it had queued
+     * itself as the LOADMAP to continue to, and the unit ended on its own
+     * EndMission forever. The EVE_ replay re-runs a spent MISCOMPLETE record
+     * after a zone gate that lands in the frame the unit ended (a trigger
+     * sweep reaches both), which is how it showed.
+     */
+    if (!c->unit_over) {
         q2_uf_call call;
 
         if (q2_uf_decode_call(&call, &c->sim[0].userfuncs, item) == Q2_OK &&
@@ -4158,6 +4745,38 @@ static bool client_load_zone(client *c, const char *map, int index)
         c->carry_fire_kick[2] = c->sim[0].combat.kick[2];
     }
 
+    /*
+     * And the script's latches, for a gate inside one map. Taken HERE, not
+     * where the sim is freed: COMMON is re-read below and the old copy closed
+     * (q2_common_close), and the outgoing runtime borrows its Events chunk.
+     * The console never reloads that chunk on a zone change — gp+372 is
+     * stored only by the level load (0x8007AD54) — and its zone-change
+     * callback writes the spent bits out (0x80029078) before the load and
+     * replays them after (0x8002936C); events_rt.h, q2_event_carry.
+     */
+    c->carry_events.size = 0;
+    if (same_map_transition && c->sim[0].events_ready) {
+        q2_event_rt_carry_out(&c->sim[0].event_rt, &c->carry_events);
+
+        /* The doors on this side of the seam, for the arrival line to be read
+         * against: everything the outgoing zone's script had set moving. */
+        if (c->zone_trace && c->movers_ready) {
+            u32 mi;
+
+            for (mi = 0; mi < c->movers.count; mi++) {
+                const q2_mover *m = &c->movers.movers[mi];
+
+                if (m->offset == 0 && m->state == Q2_MV_IDLE)
+                    continue;
+                Q2_INFO("[zone]        leaving: mover %u (item +0x%x, %u "
+                        "part%s): state %u, offset %d of %d", mi,
+                        m->item_offset, m->part_count,
+                        m->part_count == 1 ? "" : "s", m->state, m->offset,
+                        m->target);
+            }
+        }
+    }
+
     /* MOVE, never assign: q2_zone_file.chunk points into the archive directory
      * stored inline in `loaded`. A struct copy leaves every pointer aimed at
      * this function's stack frame and made later chunk reads (including
@@ -4672,10 +5291,26 @@ static bool client_load_zone(client *c, const char *map, int index)
         client_item_sounds_resolve(c);
     }
 
+    /*
+     * The gib bodies name the sim's entity set by address (modelent.h), and
+     * the free below takes that set away: forgotten first, as q2_gib_attach
+     * asks. Re-attaching the same address would keep them — the set pointer
+     * does not change between zones — so this is the only thing that does.
+     * The attach further down this load binds the new set.
+     */
+    q2_gib_attach(NULL);
     /* q2_sim_init memsets the struct, so the previous zone's trigger bitmap and
      * event runtime have to be released first or they leak on every zone
      * change -- and zone changes are exactly what the gates now cause. */
     q2_sim_free(&c->sim[0]);
+    /*
+     * The set every in-flight drop and every queued death belonged to has just
+     * been freed, so their records go with it: a drop's flight record names
+     * its set and slot (item.h), and a queued death would spawn into the next
+     * zone's set at the last zone's coordinates.
+     */
+    q2_item_drop_reset();
+    q2_monster_drop_reset();
     q2_sim_init(&c->sim[0], &c->zone, q2_build_tick_rate(&c->build));
     /* The client owns a view-weapon machine, so the machine decides when a
      * shot happens — the tick must not also fire from the raw trigger. */
@@ -4684,12 +5319,39 @@ static bool client_load_zone(client *c, const char *map, int index)
     c->sim[0].trace_zone      = c->zone_trace;
     c->sim[0].autoswitch      = !c->no_autoswitch;
     c->sim[0].invulnerable    = c->god;
+    /*
+     * And the damage effects' mesh (sim.h, `fx_mesh`): the crackle, the
+     * sparks and the quad shell spawn on a creature's own posed vertices
+     * (0x8006CC44), which only this side can supply because it owns the
+     * models. HERE, beside the other re-arms, because q2_sim_init clears it:
+     * client_load_creatures, where it used to be installed, returns before
+     * its end when a map's creatures will not load. The hook refuses any
+     * actor that is not a live, drawn creature, so installing it before the
+     * creatures exist is safe.
+     */
+    c->sim[0].fx_mesh      = client_fx_mesh;
+    c->sim[0].fx_mesh_user = c;
     {
         s32 feet[3];
         feet[0] = c->cam.pos[0];
         feet[1] = c->cam.pos[1];
         feet[2] = c->cam.pos[2];
         q2_sim_attach_gameplay(&c->sim[0], &c->common);
+
+        /*
+         * WHICH ZONE THE RUNTIME IS RESIDENT IN — the name 0x80079178 compares
+         * a ZONEGATE's target against (0x800E465C) before it accepts one, and
+         * the switch for the handler's record abort at 0x8002783C. The owner
+         * has to say it after EVERY attach, because q2_event_rt_init resets it
+         * to -1 ("unknown", the old accept-and-carry-on behaviour; events_rt.h).
+         * c->zone_index was assigned at the top of this load.
+         */
+        c->sim[0].event_rt.current_zone = c->zone_index;
+
+        /* The latches, back on the fresh runtime before anything can run it.
+         * They only restore state; the replay after the hooks and the movers
+         * are in place is what runs script (q2_event_rt_replay). */
+        q2_event_rt_carry_in(&c->sim[0].event_rt, &c->carry_events);
 
         /*
          * The map's model bank, and the view weapon that draws out of it. The
@@ -4832,6 +5494,57 @@ static bool client_load_zone(client *c, const char *map, int index)
              * has one. A map without it simply has no glint.
              */
             q2_sim_attach_glint(&c->sim[0], &c->common);
+        }
+
+        /*
+         * WHAT THE ITEM THINKS REACH THAT THEIR WORLD DOES NOT CARRY (item.h,
+         * q2_item_env): the one particle pool the materialise burst spawns
+         * into (0x800596B0), and for a creature's dropped item the toss
+         * mover's hull, entity list and gravity word (0x80046DDC, 0x80053974,
+         * [0x800AE924]). Console globals, bound once a load.
+         *
+         * `move_world` by ADDRESS for the reason the AI binds it that way:
+         * q2_sim_attach_movers reallocates its target array later in this
+         * load, and the struct itself is what stays put. The gravity is the
+         * sim's own word, read live, so the GAME VARIABLES menu reaches a drop
+         * in flight the way it reaches the player.
+         */
+        {
+            q2_item_env ienv;
+
+            memset(&ienv, 0, sizeof(ienv));
+            ienv.fx      = c->sim[0].fx_ready ? &c->sim[0].fx : NULL;
+            ienv.hull    = c->sim[0].coll_ready ? &c->sim[0].coll : NULL;
+            ienv.ents    = &c->sim[0].move_world;
+            ienv.gravity = &c->sim[0].gravity;
+            q2_item_bind_env(&ienv);
+        }
+
+        /*
+         * THE GIB WORLD (modelent.h, q2_gib_world): what 0x8007CEB4 and its
+         * throwers reach as console globals — the entity pool, the CastList,
+         * the particle pool, rand(), the PRIMARY hull a gib moves in
+         * (0x80046CE0) and the door list its mover tries first (0x80053974)
+         * — bound once a load, so the creature corpse tick and the player's
+         * gib test can throw. Without it both sites dispatch into nothing and
+         * no body ever comes apart. Gravity is the sim's word, read live;
+         * `move_world` by address for the reason the item env gives above.
+         */
+        {
+            q2_gib_world gw;
+
+            memset(&gw, 0, sizeof(gw));
+            gw.set      = &c->sim[0].entities;
+            gw.bank     = c->sim[0].model_bank;
+            gw.fx       = c->sim[0].fx_ready ? &c->sim[0].fx : NULL;
+            gw.rng      = &c->sim[0].fx_rng;
+            gw.coll     = c->sim[0].coll_primary_ready
+                              ? &c->sim[0].coll_primary : NULL;
+            gw.ents     = &c->sim[0].move_world;
+            gw.gravity  = &c->sim[0].gravity;
+            gw.describe = client_gib_describe;
+            gw.user     = c;
+            q2_gib_attach(&gw);
         }
         /*
          * The zone's lights: COMMON.DAT's `Lights` array and the zone's own
@@ -5386,6 +6099,82 @@ static bool client_load_zone(client *c, const char *map, int index)
         c->sim[0].event_rt.on_explosive      = client_event_explosive;
         c->sim[0].event_rt.on_explosive_user = c;
 
+        /*
+         * THE EVE_ REPLAY, for a gate inside one map (events_rt.h,
+         * q2_event_rt_replay): every spent record and spent one-shot item the
+         * carry kept is dispatched again, so a door, a lift or a hidden node
+         * the script had changed comes back as the script left it rather than
+         * rebuilt at rest. Without it the carry alone would be worse than no
+         * carry: the record stays spent and its door stays shut for good.
+         * 0x80079128 runs it only outside deathmatch (`bne` on 0x800AEBCC),
+         * after the zone load (0x80079114) and before the player moves.
+         *
+         * THEN THE SEVEN PASSES, 0x800296D4..0x8002974C: each stores 30000 in
+         * the dt global 0x800B2DB4 and calls the think at +44 of each of the
+         * 48 runtime objects at 0x800D6BB0 — here the movers and the rotators
+         * — so a replayed door ARRIVES open rather than starting to. The
+         * port's arithmetic survives dt = 30000 and gives the console's
+         * answer. The delay and wait arms are `lhu`/`subu`/`sll 16`/`blez`
+         * there (0x800258C8..0x800258E0, 0x80025978..0x8002599C) and
+         * `(s16)(timer - dt) > 0` in mover.c; the travel is a 32-bit `mult` by
+         * the `lw` dt (0x80025AA4..0x80025AB8), clamped to the target, in
+         * both; the rotators read dt with `lw` (0x8002B468, 0x8002C058,
+         * 0x8002F1C8) as rotator.c takes it. One state step per pass, as on
+         * the console, so a door with wait 0xFF is open after the seven and
+         * one whose wait is under 30000 ticks has opened and shut again inside
+         * them. The pusher each mover think calls (0x80051EC0) is
+         * q2_sim_movers_update, once a pass; nothing is swept against the
+         * player, who is placed below. The movers' start sounds stay pending
+         * and play on the first tick — 0x80025A5C does not read the pass flag.
+         *
+         * NOT REPRODUCED: each pass also adds 30000 to the level clock
+         * 0x800AEBAC (0x800296F8/0x80029700). The carried clock is put back
+         * below as it stood, because what of that advance survives into the
+         * next frame is not traced: 0x800183D4..0x8001841C reloads the clock
+         * from 0x800B29D4 while 0x800B2E0C is up, and the zone loader sets
+         * that word at 0x8007B588.
+         */
+        if (c->carry_events.size && !c->mp_enabled) {
+            const q2_event_rt *rt = &c->sim[0].event_rt;
+            const u16 keys = (u16)(c->carry_inv.flags & 0x0FFFu);
+            const u8  spent_bits = (u8)(Q2_EVREC_DISABLED | Q2_EVREC_HASRUN);
+            u32 moved = 0, spent = 0, mi;
+            int k;
+
+            q2_event_rt_replay(&c->sim[0].event_rt, &c->carry_events);
+            for (k = 0; k < 7; k++) {
+                if (c->movers_ready) {
+                    q2_movers_tick(&c->movers, 30000, keys);
+                    q2_sim_movers_update(&c->sim[0], &c->movers);
+                }
+                if (c->rotators_ready)
+                    q2_rotators_tick(&c->rotators, 30000);
+            }
+
+            /* What 0x80029078 would write a bit for: (flags & 0x81) == 0x81. */
+            for (mi = 0; rt->flags && mi < rt->record_count; mi++)
+                if ((rt->flags[mi] & spent_bits) == spent_bits)
+                    spent++;
+
+            for (mi = 0; c->movers_ready && mi < c->movers.count; mi++) {
+                const q2_mover *m = &c->movers.movers[mi];
+
+                if (m->offset == 0)
+                    continue;
+                moved++;
+                if (c->zone_trace)
+                    Q2_INFO("[zone]        replayed mover %u (item +0x%x, "
+                            "%u part%s): state %u, offset %d of %d",
+                            mi, m->item_offset, m->part_count,
+                            m->part_count == 1 ? "" : "s", m->state,
+                            m->offset, m->target);
+            }
+            Q2_INFO("zone change: %u spent records carried, %u script items "
+                    "replayed; %u doors and lifts stand displaced after the "
+                    "seven passes", spent, rt->replayed_count, moved);
+        }
+        c->carry_events.size = 0;
+
         q2_sim_spawn(&c->sim[0], feet, c->cam.yaw);
         c->sim[0].player[0].ground_y = feet[1];
 
@@ -5627,6 +6416,21 @@ static bool client_load_zone(client *c, const char *map, int index)
         c->mp_start_inv    = c->sim[0].combat.inv;
         c->mp_start_weapon = c->sim[0].combat.weapon_id;
         c->mp_start_valid  = true;
+
+        /*
+         * And each player's carousel, from the loadout they now hold:
+         * 0x8003B250 ends in the spawn loadout 0x8003D4FC, whose tail writes
+         * the pair (0x8003D610/0x8003D614). Not at a gate inside one map, where
+         * this block does not run either: the player object survives a retail
+         * zone stream (the carry above), and client+96/+100 are in it. Whether
+         * the console's level change restores the pair with the rest of the
+         * carried record is not traced; the write here, with the carried
+         * inventory already in place, is INFERRED.
+         */
+        client_sbar_write_slots(c, 0, CLIENT_SLOTS_SPAWN);
+        for (pi = 1; c->mp_enabled && pi < Q2_MP_MAX_PLAYERS; pi++)
+            if (c->sim_ready[pi])
+                client_sbar_write_slots(c, pi, CLIENT_SLOTS_SPAWN);
     }
 
     Q2_INFO("%s: %u nodes, %u vertices",
@@ -6547,8 +7351,17 @@ static void client_input_simulated(client *c, float dt)
      * carries both, which the wheel's own gap flag makes possible.
      */
     if (step > 0) {
+        bool selected = true;
+
         if (in.buttons & Q2_BTN_WEAP_NEXT)      q2_sim_cycle_weapon(&c->sim[0], +1);
         else if (in.buttons & Q2_BTN_WEAP_PREV) q2_sim_cycle_weapon(&c->sim[0], -1);
+        else                                    selected = false;
+
+        /* The carousel, whatever the step returned: 0x8004ED3C's delay slot
+         * sets a2 = 1 on both arms (client_sbar_write_slots). */
+        if (selected)
+            client_sbar_write_slots(c, c->sim[0].cur_player,
+                                    CLIENT_SLOTS_SELECT);
     }
 
     /*
@@ -6564,9 +7377,49 @@ static void client_input_simulated(client *c, float dt)
      */
     if (c->creatures_ready && c->cre_actor) {
         u32 i;
-        for (i = 0; i < c->creatures.set.count; i++)
-            q2_actor_from_monster(&c->cre_actor[i],
-                                  &c->creatures.set.monsters[i]);
+        for (i = 0; i < c->creatures.set.count; i++) {
+            const q2_monster *m = &c->creatures.set.monsters[i];
+            s32 push[3];
+
+            /*
+             * The damage-effect timers (entity+0x2F0..0x2F5) and the killer
+             * byte (+222) outlive this rebuild inside q2_actor_from_monster
+             * itself (combat.c), so this side no longer saves and restores
+             * effect[] around the call.
+             *
+             * A BODY'S KNOCKBACK outlives it too, and that one is this side's
+             * to keep, because q2_actor_init zeroes +0x2F8 and nothing on a
+             * corpse ever does. T_Damage accumulates the push into a living
+             * target and OVERWRITES a dead one's (0x80058188 `lh v0,264(s2)` /
+             * `blez` to the stores at 0x800581E0..0x80058200). `q2psx-inspect
+             * access 0x2F8` over the main executable (it does not scan the
+             * relocated creature modules) finds `sh zero,760` only at
+             * 0x80045F4C and 0x800461CC, inside the mover 0x8004583C, which
+             * the live creature think calls (0x8007EE00, 0x8007EFD0) and the
+             * corpse handler 0x8007F71C does not. So the gib dispatcher reads,
+             * at 0x8007D104 and its twins, the last hit's push. Zeroed here
+             * every frame it reached the throw only when the gibbing hit and
+             * the 10 Hz corpse tick fell in the same frame. A living
+             * creature's is still dropped: the port has no creature mover to
+             * spend it, and the rebuild stands in for the consume.
+             */
+            memcpy(push, c->cre_actor[i].knockback, sizeof(push));
+            q2_actor_from_monster(&c->cre_actor[i], m);
+            if (m->health <= 0)
+                memcpy(c->cre_actor[i].knockback, push, sizeof(push));
+            /*
+             * A FREED body — gibbed, or dissolved by 0x8005B2A8's handler —
+             * has no think once 0x8006D280 has released it, so 0x8005B880
+             * never presents it again, and the pool clears the record on its
+             * next allocation (0x8006C18C, 768 bytes). The actor outlives the
+             * monster here, so its effect bytes are cleared instead: an armed
+             * effect[1] would otherwise raise its energy light where the body
+             * used to be.
+             */
+            if (!m->in_use)
+                memset(c->cre_actor[i].effect, 0,
+                       sizeof(c->cre_actor[i].effect));
+        }
     }
 
     if (in.attack) c->player_attacks++;
@@ -7082,8 +7935,13 @@ static void client_input_simulated(client *c, float dt)
          * q2_weapon_autoselect — the correct transcription — was already in the
          * tree with no production caller at all.
          */
-        if (q2_vw_take_refire(&c->vw))
+        if (q2_vw_take_refire(&c->vw)) {
             q2_sim_autoselect_weapon(&c->sim[0]);
+            /* ...and the pair after it, picked or not (0x8004FB68..0x8004FB98;
+             * client_sbar_write_slots). */
+            client_sbar_write_slots(c, c->sim[0].cur_player,
+                                    CLIENT_SLOTS_AUTOSELECT);
+        }
 
         /*
          * The animation's own per-key event. Drained and RECORDED rather than
@@ -7594,6 +8452,26 @@ static void client_input_simulated(client *c, float dt)
     }
 
     /*
+     * THIS FRAME'S DEATH DROPS — 0x80020E24, which the frame routine calls
+     * once a frame (0x80038FE0). Here because it is below every site a
+     * creature can die at this frame: the sim tick, the actor sync above where
+     * q2_monster_damage_reaction runs the death-use pass that records them, and
+     * the AI tick. Four deaths between two flushes is the queue's whole
+     * capacity (0x80020D6C), so the cadence is part of the behaviour.
+     *
+     * The picker reads the player's weapon (0x8002069C `lh` client+0x66,
+     * 0x800206A0 `lw` client+0x68). The port's `combat.weapon_id` IS the
+     * console's selected weapon, 1-based — the HUD reads it as client+102 —
+     * and the bitmask is already `1 << (id - 1)`. NOT `inv.current_weapon + 1`:
+     * that byte is the inventory's zero-based record, which the carousel
+     * (q2_sim_cycle_weapon) never writes, so after one weapon change it names
+     * the wrong gun and the Gunner's arm (0x80020730) would test it.
+     */
+    q2_monster_set_player_weapon((s16)c->sim[0].combat.weapon_id,
+                                 (u32)c->sim[0].combat.inv.weapons);
+    q2_monster_drop_flush();
+
+    /*
      * DEATH — the whole chain now, not only the frame it starts on.
      *
      * What used to be here was the first tick of it: health crossed zero, page
@@ -7681,8 +8559,10 @@ static void client_input_simulated(client *c, float dt)
             {
                 const q2_pdeath_stage was = d->stage;
 
-                q2_player_death_tick(d, health, tick, c->mp_enabled,
-                                     client_mp_rng(c));
+                /* The body's effect bytes, for the dissolve gate respawn_think
+                 * runs first (0x8003E244 jal 0x8005B2A8; playerdeath.h). */
+                q2_player_death_tick_fx(d, health, tick, c->mp_enabled,
+                                        client_mp_rng(c), a->effect);
 
                 /* The sim keeps its own copy for the movement and camera
                  * gates; this is the chain handing it the bit. */
@@ -8180,6 +9060,21 @@ static void client_apply_settings(client *c)
                             q2_build_tick_rate(&c->build), &rules);
 
     c->sim[0].gravity = rules.gravity;
+
+    /*
+     * The cheat word, which until now never left the menu: `rules.cheats` was
+     * computed and dropped, and the only writer of `sim.cheats` was the save
+     * loader, so every GAME VARIABLES toggle was a row that changed nothing.
+     * 0x8001C698 is the one place the console folds the four toggles into the
+     * halfword at 0x800B29EC, and it writes that halfword on BOTH arms: the
+     * enabled arm clears it at 0x8001C6CC before ORing the toggles in, and the
+     * disabled arm stores zero at 0x8001C7FC. So single player is zeroed here
+     * exactly as it is on the disc, beside the gravity and tick rate that the
+     * same function resets. NO FALL DAMAGE is bit 0x40 of the word
+     * (0x8001C704); the sim keeps it as a flag of its own.
+     */
+    c->sim[0].cheats         = rules.cheats;
+    c->sim[0].no_fall_damage = (rules.cheats & Q2_CHEAT_NO_FALL_DAMAGE) != 0;
     if (rules.tick_rate > 0)
         c->sim[0].dt_per_field = 300 / rules.tick_rate;
     if (c->sim[0].dt_per_field <= 0)
@@ -9836,6 +10731,15 @@ static void client_write_shot(client *c, bool numbered)
     Q2_INFO("  pad: %u resume%s", c->pad_resumes,
             c->pad_resumes == 1 ? "" : "s");
 
+    /* The carousel's writes (client_sbar_write_slots, and the draw's latch).
+     * A bar recomputed every drawn frame, which is what it used to be, would
+     * be one write per bar per frame; the console writes at events alone. */
+    Q2_INFO("  carousel  %u writes at a select, %u at an auto-select, "
+            "%u at a spawn; %u inferred by the latch",
+            c->slots_written[CLIENT_SLOTS_SELECT],
+            c->slots_written[CLIENT_SLOTS_AUTOSELECT],
+            c->slots_written[CLIENT_SLOTS_SPAWN], c->slots_inferred);
+
     if (c->mp_enabled) {
             int pi;
 
@@ -9954,6 +10858,28 @@ static void client_write_shot(client *c, bool numbered)
                 c->cre_bodies, c->rot_steps,
                 c->rot_moved, client_rot_turned(c),
                 c->sim[0].event_rt.call_count);
+        /* The death drops and the damage effects' mesh — see client_cre_drop
+         * and client_fx_mesh. "requested" is what the queue flushed; the
+         * spawner can still decline one (no record, model or entity). */
+        Q2_INFO("  drops     %u requested, %u spawned, %u declined, %u in flight;"
+                " fx mesh %u asked, %u posed, %u with an effect running",
+                c->cre_drop_requests, c->cre_drops, c->cre_drops_declined,
+                q2_item_drop_in_flight(), c->fx_mesh_asked, c->fx_mesh_given,
+                c->fx_mesh_armed);
+        Q2_INFO("  gibs      %u bodies, %u chunks (%u unbound, %u refused),"
+                " %u trail groups, %u landed; creatures handed %u posed"
+                " meshes, %u a push",
+                q2_gib_counters.destroyed, q2_gib_counters.chunks,
+                q2_gib_counters.unbound, q2_gib_counters.refused,
+                q2_gib_counters.trails, q2_gib_counters.landed,
+                c->gib_mesh_posed, c->gib_pushed);
+        /* Radius damage's occlusion (sim.h, q2_sim_proj_stats): candidates
+         * asked, hidden by a wall or a solid box, and waved through from a
+         * blast point in no cell — the port-only state splash_clear counts. */
+        Q2_INFO("  splash    %u asked, %u occluded, %u from no cell",
+                q2_sim_proj_scan.splash_asked,
+                q2_sim_proj_scan.splash_occluded,
+                q2_sim_proj_scan.splash_unplaced);
         /* The mixer, because "sounds are broken" needs a number to argue with.
          * `dropped` is voices that found all 24 busy — a steady stream of those
          * means something is raising more than the SPU could ever have played. */
@@ -10109,12 +11035,17 @@ static void client_write_shot(client *c, bool numbered)
             Q2_INFO("  think hit%s", buf[0] ? buf : " (none)");
         }
 
+        /* The refusals are the decoded path's alone and partition the fire
+         * calls with `sent` (crebind.h); the transcribed shots that went out
+         * at nothing or at a corpse are counted inside `sent`. */
         Q2_INFO("  decoded   %u thinks (%u unbound), %u calls (%u unclassified), "
-                "%u fire calls: %u sent, %u no enemy, %u dead enemy",
+                "%u fire calls: %u sent, %u no enemy, %u dead enemy; "
+                "%u shots at no enemy, %u at a corpse",
                 q2_cre_actions.thinks_run, q2_cre_actions.thinks_unbound,
                 q2_cre_actions.calls_seen, q2_cre_actions.calls_unclassified,
                 q2_cre_actions.fire_calls, q2_cre_actions.fire_sent,
-                q2_cre_actions.fire_no_enemy, q2_cre_actions.fire_dead_enemy);
+                q2_cre_actions.fire_no_enemy, q2_cre_actions.fire_dead_enemy,
+                q2_cre_actions.shot_no_enemy, q2_cre_actions.shot_dead_enemy);
 
         Q2_INFO("  ai world  %u traces (%u unplaced, %u clear), "
                 "%u bottom (%u fail), %u los (%u blocked)",
@@ -11673,6 +12604,30 @@ static void client_draw_view(void *user, q2_screen *s, int p,
              * but does not carry this frame's promotions. */
             inst.tpage         = &c->render.tpage;
 
+            /*
+             * And keep it, for the damage effects (client_fx_pose): the next
+             * combat tick's crackle and sparks sample THIS mesh through
+             * 0x8006CC44. Copied rather than pointed at, because `pose` and the
+             * light live in this loop's frame. Every viewport writes the same
+             * pose — the cursor advances once per display frame — so a split
+             * screen keeps the last one, which is the same one.
+             */
+            if (c->cre_fx) {
+                client_fx_pose *fp = &c->cre_fx[i];
+                u32 parts = c->cre_model[i].hdr.num_parts;
+
+                fp->inst       = inst;
+                fp->inst.light = NULL;
+                fp->inst.tpage = NULL;
+                fp->inst.pose  = NULL;
+                if (posed && parts <= CLIENT_FX_POSE_MAX &&
+                    parts <= Q2PSX_ARRAY_COUNT(pose)) {
+                    memcpy(fp->pose, pose, parts * sizeof(pose[0]));
+                    fp->inst.pose = fp->pose;
+                }
+                fp->valid = true;
+            }
+
             q2_model_build_ot(&inst, &c->cam, ot, gte, &st);
             if (st.faces_emitted) {
                 c->cre_drawn++;
@@ -11825,7 +12780,7 @@ static void client_draw_view(void *user, q2_screen *s, int p,
         q2_inventory *inv;
         q2_sbar_layout bar_layout;
         int weapon;
-        int ammo = 0;
+        int ammo;
 
         /* Multiplayer parks every non-current player's combat half in its own
          * slot. The old bar always read the live slot, so every viewport showed
@@ -11838,11 +12793,14 @@ static void client_draw_view(void *user, q2_screen *s, int p,
             weapon = c->sim[0].pcombat[p].weapon_id;
         }
 
-        if (weapon > 0 && weapon < Q2_WEAPON_COUNT) {
-            s8 kind = q2_weapon_ammo[weapon];
-            if (kind >= 0 && kind < Q2_AMMO_COUNT)
-                ammo = inv->ammo[kind];
-        }
+        /*
+         * 0x80035424..0x80035438: `ammo[ammoIdx[weapon]]` with the ONE-based
+         * id in hand. This used to index the inventory's zero-based
+         * q2_weapon_ammo with that one-based id — every gun's counter read its
+         * neighbour's pool. q2_sbar_ammo_for_weapon reads the same table the
+         * carousel gates on (statusbar.h).
+         */
+        ammo = q2_sbar_ammo_for_weapon(inv, weapon);
 
         switch (s->layout) {
         case Q2_SCREEN_LAYOUT_TWO_H: bar_layout = Q2_SBAR_LAYOUT_TWO_H; break;
@@ -11862,30 +12820,24 @@ static void client_draw_view(void *user, q2_screen *s, int p,
         bar->weapon  = weapon;
 
         /*
-         * The weapon strip's two slots. The console reads them out of a record
-         * whose writer has not been traced, so what goes in is derived here:
-         * the weapon before and the weapon after the one in hand, walking the
-         * owned bitmask in slot order and wrapping. With only the blaster both
-         * come out the same and the bar's own guard collapses them to one
-         * icon, which is what capture shows.
+         * The carousel's two slots, as 0x80037ECC writes them: +100 is
+         * 0x80050758 walked forward from the SELECTED weapon (client+102) and
+         * +96 walked back, with the owned bit and one shot's ammo as its gates
+         * and 0 for a walk that comes back to the gun in hand.
+         *
+         * THE PAIR IS A LATCH, NOT A FORMULA. Six functions write it
+         * (statusbar.h, `strip`) and nothing else does, so between their
+         * events it holds what the last one saw: a pool that falls — a shot,
+         * or the power armour spending cells (0x80057BC8) — writes nothing,
+         * and the hyperblaster at 49 cells keeps the BFG in its slot until the
+         * next event. So this is the latch's per-frame front, which writes
+         * only on a mark of an event it cannot see (a pickup, inside the sim);
+         * the select, the auto-select and the spawn call the writer where they
+         * happen (client_sbar_write_slots). It stays after bar->weapon is set,
+         * so field 12 and the two slots are read from the same id.
          */
-        {
-            int cur = weapon, prev = weapon, next = weapon, k;
-
-            for (k = 1; k < Q2_HUD_WEAPON_SLOTS; k++) {
-                int lo = cur - k, hi = cur + k;
-
-                while (lo < 1) lo += Q2_HUD_WEAPON_SLOTS - 1;
-                while (hi >= Q2_HUD_WEAPON_SLOTS) hi -= Q2_HUD_WEAPON_SLOTS - 1;
-
-                if (prev == cur && (inv->weapons & (1u << lo)))
-                    prev = lo;
-                if (next == cur && (inv->weapons & (1u << hi)))
-                    next = hi;
-            }
-            bar->strip[0] = (u8)(prev > 0 ? prev : 0);
-            bar->strip[1] = (u8)(next > 0 ? next : 0);
-        }
+        if (q2_statusbar_weapon_slots_track(bar, inv, weapon))
+            c->slots_inferred++;
 
         /*
          * The health icon IS hard-coded — offset 170 into a five-byte record,
@@ -11930,8 +12882,18 @@ static void client_draw_view(void *user, q2_screen *s, int p,
          * `q2_item_pickup_caption` mutates — the expiry clears `last_item` in
          * place, which is where the console does it too. Only the one-player
          * hook calls this sub-draw; all three split hooks omit it.
+         *
+         * AND A DEAD PLAYER'S BAR SKIPS IT. 0x80033C68 branches the one-player
+         * hook around 0x800359C0 once health is at or below zero, and that one
+         * sub-draw both prints the caption (0x80035B20) and expires it
+         * (0x80035A4C) — so a dead player sees no caption, and only the expiry
+         * CHECK waits: the deadline is absolute against the level clock
+         * (0x80035A34..0x80035A40), so one that passed during death is cleared
+         * by the first live frame (statusbar.h, q2_statusbar_stripped). The
+         * else below clears the icon and the HUD's line. The bar's layout and
+         * health are already set above.
          */
-        if (bar_layout == Q2_SBAR_LAYOUT_ONE) {
+        if (bar_layout == Q2_SBAR_LAYOUT_ONE && !q2_statusbar_stripped(bar)) {
             const char *pickup_name = NULL;
             u8          pickup_icon = 0;
 
@@ -14102,11 +15064,21 @@ no_window:
             u32 target;
             if (q2_sim_take_zone_change(&c.sim[0], &target)) {
                 /*
-                 * A GATE TO THE ZONE WE ARE ALREADY IN IS NOT A GATE.
-                 * 0x80079178 makes the same test before it stores the request,
-                 * and without it a volume in the middle of zone 0 that names
-                 * "Zone0" reloads the zone every time the player walks through
-                 * it — which reads as the level restarting under you.
+                 * A GATE TO THE ZONE WE ARE ALREADY IN IS NOT A GATE — and
+                 * this is no longer where that is decided. 0x80079178 refuses
+                 * a same-zone gate BEFORE it stores the request (0x800791E0 /
+                 * 0x800791E8), and events_rt.c now makes that test at that
+                 * point, against `event_rt.current_zone`, which
+                 * client_load_zone sets after every attach. So a same-zone gate
+                 * never reaches here: it does not abort its record either, and
+                 * the door behind it opens.
+                 *
+                 * Kept as a belt-and-braces guard, because the one thing it
+                 * prevents is a volume in the middle of zone 0 that names
+                 * "Zone0" reloading the zone every time the player walks
+                 * through it — which reads as the level restarting under you —
+                 * and that must stay impossible even if the runtime is ever
+                 * attached without the resident zone being set.
                  */
                 if ((int)target == c.zone_index) {
                     Q2_DEBUG("zone gate names the zone we are in (%u)", target);
@@ -14626,6 +15598,7 @@ done:
         q2_level_table_free(&c.level_table);
     q2_save_ui_free(&c.save_ui);
     q2_save_free(&c.snapshot);
+    q2_gib_attach(NULL);            /* before the set it names goes */
     q2_sim_free(&c.sim[0]);
     q2_common_close(&c.common);
     q2_world_free_zone(&c.zone);

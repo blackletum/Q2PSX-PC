@@ -10,7 +10,8 @@
  */
 #include "playerdeath.h"
 
-#include "pad.h"   /* Q2_PAD_FULL */
+#include "monster.h"   /* q2_corpse_dissolve: the gate 0x8005B2A8 */
+#include "pad.h"       /* Q2_PAD_FULL */
 #include "sim.h"
 
 #include <stdio.h>
@@ -148,7 +149,10 @@ static void test_only_a_death_with_no_killer_cries_out(void)
                   0, true, false, &ev);
     CHECK(!ev.cried_out, "a death with a killer cried out");
 
-    /* Killed by the world: the voice is raised. */
+    /* A raw -1 raises the voice. The world does not leave one — the damage
+     * function writes 4, 23 or the victim's own index — and the only store of
+     * -1 in the byte is 0x800396DC's own, for acid and lava; this hands the
+     * handler the byte as that store would leave it. */
     q2_player_death_init(&d);
     q2_player_die(&d, -1, 0, 0, true, false, &ev);
     CHECK(ev.cried_out, "a world kill did not cry out");
@@ -182,6 +186,74 @@ static void test_lava_erases_the_killer_on_the_entity(void)
           (int)d.killer);
 }
 
+/*
+ * BOTH GATES READ THE RAW BYTE, and only 0x800396CC edits it first.
+ *
+ *     800396DC  sb    -1, 222(s0)     ; mods 9 and 10 only
+ *     800396EC  lb    s1, 222(s0)
+ *     80039728  bne   s1, -1          ; the voice
+ *     80039774  slti  v0, s1, 4       ; the frag hook, signed
+ *
+ * The handler used to fold the byte through `q2_mp_attribute_kill`, whose
+ * [0, 4) bound maps everything else to -1 too. The damage function records 4
+ * for a creature's hit and 23 for a single-player world hit (combat.h,
+ * `last_attacker`) — so every one of those deaths cried out, and in deathmatch
+ * called the hook as a world kill, where the console does neither.
+ *
+ * Every CHECK below fails against that fold. The acid and lava halves are
+ * paired with the same byte under an ordinary mod so that each CHECK also fails
+ * an implementation that forgot 0x800396CC.
+ */
+static void test_the_gates_read_the_raw_byte(void)
+{
+    q2_player_death       d;
+    q2_player_death_event ev;
+    bool acid_cry, lava_cry, crush_cry, acid_frag, crush_frag;
+    int  acid_killer;
+
+    /* The voice, on its own: equality with -1 and nothing wider. */
+    CHECK(!q2_player_death_cries_out((s8)Q2_MP_NOT_A_PLAYER, Q2_MOD_MELEE),
+          "a creature's claw (byte 4) cried out");
+    CHECK(!q2_player_death_cries_out(23, Q2_MOD_CRUSH),
+          "a single-player crusher (byte 23, 0x80057EB8) cried out");
+
+    acid_cry  = q2_player_death_cries_out((s8)Q2_MP_NOT_A_PLAYER, Q2_MOD_ACID);
+    lava_cry  = q2_player_death_cries_out((s8)Q2_MP_NOT_A_PLAYER, Q2_MOD_LAVA);
+    crush_cry = q2_player_death_cries_out((s8)Q2_MP_NOT_A_PLAYER, Q2_MOD_CRUSH);
+    CHECK(acid_cry && lava_cry && !crush_cry,
+          "byte 4 cries for acid %d, lava %d, crush %d — want 1 1 0",
+          (int)acid_cry, (int)lava_cry, (int)crush_cry);
+
+    /* Through the handler, in deathmatch, victim 1. The byte-4 death first. */
+    q2_player_death_init(&d);
+    q2_player_die(&d, (s8)Q2_MP_NOT_A_PLAYER, Q2_MOD_CRUSH, 1, true, false,
+                  &ev);
+    crush_cry  = ev.cried_out;
+    crush_frag = ev.frag_hook;
+    CHECK(d.killer == Q2_MP_NOT_A_PLAYER,
+          "byte 4 became %d on the entity", (int)d.killer);
+    CHECK(!crush_cry, "a deathmatch death credited to byte 4 cried out");
+    CHECK(ev.body_recorded && !crush_frag,
+          "a deathmatch death credited to byte 4 should push its body "
+          "(0x8003976C, %d) and call no hook, but called it with %d",
+          (int)ev.body_recorded, ev.frag_killer);
+
+    /* The same byte under acid: 0x800396DC makes it -1, which passes. */
+    q2_player_death_init(&d);
+    q2_player_die(&d, (s8)Q2_MP_NOT_A_PLAYER, Q2_MOD_ACID, 1, true, false,
+                  &ev);
+    acid_cry    = ev.cried_out;
+    acid_frag   = ev.frag_hook;
+    acid_killer = ev.frag_killer;
+    CHECK(acid_cry && !crush_cry,
+          "acid should cry and the crusher not: acid %d, crush %d",
+          (int)acid_cry, (int)crush_cry);
+    CHECK(acid_frag && acid_killer == -1 && !crush_frag,
+          "acid should reach the hook with -1 and the crusher not at all: "
+          "acid %d (killer %d), crush %d",
+          (int)acid_frag, acid_killer, (int)crush_frag);
+}
+
 static void test_a_fresh_spawn_owes_nobody_a_frag(void)
 {
     q2_player_death       d;
@@ -194,10 +266,99 @@ static void test_a_fresh_spawn_owes_nobody_a_frag(void)
     CHECK(d.killer == Q2_PDEATH_NO_KILLER, "a fresh spawn starts at %d",
           (int)d.killer);
 
+    /*
+     * THE TWO BELOW REPLACE THREE THAT ASSERTED THE OPPOSITE OF THE COMMENT
+     * ABOVE: that the 4 came back as -1 and reached the hook, with player 0 as
+     * its victim. It did, because the handler folded
+     * its byte through `q2_mp_attribute_kill`'s [0, 4) bound. The console does
+     * not: 0x800396EC loads the byte with `lb` and 0x80039774 tests it with
+     * `slti s1, 4`, so a raw 4 is kept, fails the bound and calls nothing.
+     * 0x8003976C's body record is ahead of that test and still happens.
+     */
     q2_player_die(&d, (s8)Q2_PDEATH_NO_KILLER, 0, 0, true, false, &ev);
-    CHECK(d.killer == -1, "the sentinel should attribute to nobody");
-    CHECK(ev.frag_hook, "a world kill still reaches the hook");
-    CHECK(ev.frag_victim == 0, "the victim is the player who died");
+    CHECK(d.killer == Q2_PDEATH_NO_KILLER,
+          "the handler keeps the raw byte, got %d", (int)d.killer);
+    CHECK(ev.body_recorded && !ev.frag_hook,
+          "the body is recorded (%d) ahead of the bound, which the sentinel "
+          "then fails — but it reached the frag hook with %d",
+          (int)ev.body_recorded, ev.frag_killer);
+}
+
+/*
+ * THE SAME 4 FROM THE ACTOR THE CLIENT ACTUALLY HANDS OVER. The test above
+ * passes Q2_PDEATH_NO_KILLER by hand; production passes the damage actor's
+ * `last_attacker` and `last_mod`, and those used to come out of
+ * q2_actor_init — and out of every q2_actor_from_player refresh — as -1 and 0:
+ * a death that cried out and, in deathmatch, reached the hook as a suicide.
+ */
+static void test_a_fresh_actor_owes_nobody_a_frag(void)
+{
+    q2_actor              a;
+    q2_inventory          inv;
+    q2_player_death       d;
+    q2_player_death_event ev;
+
+    q2_inventory_init(&inv);
+    q2_actor_init(&a);                       /* a new body, as 0x8003DDF8 */
+    q2_actor_from_player(&a, &inv, NULL);    /* and the refresh on top    */
+
+    q2_player_death_init(&d);
+    q2_player_die(&d, a.last_attacker, a.last_mod, 0, true, false, &ev);
+    CHECK(!ev.cried_out && !ev.frag_hook,
+          "a fresh actor's byte %d cried out (%d) or reached the hook (%d, "
+          "killer %d)", (int)a.last_attacker, (int)ev.cried_out,
+          (int)ev.frag_hook, ev.frag_killer);
+}
+
+static bool death_sound_raised(const q2_sim *sim)
+{
+    const q2_ent_events *ev = q2_sim_entity_events(sim);
+    u32 i;
+
+    if (!ev)
+        return false;
+    for (i = 0; i < ev->count; i++)
+        if (ev->e[i].kind == Q2_ENT_EVENT_SOUND &&
+            ev->e[i].sound == Q2_SND_DEATH)
+            return true;
+    return false;
+}
+
+/*
+ * END TO END: a refresh between the killing hit and the tick that notices it.
+ *
+ * A creature's shot kills the player (byte 4 in single player). Before the
+ * sim's next tick, something refreshes the damage actor without hitting it —
+ * q2_sim_fire does on every shot, and the owner's splash on every detonation
+ * of the player's own projectile, near or far. update_pain then asks
+ * q2_player_death_cries_out about the byte the refresh left. It used to leave
+ * q2_actor_init's -1, and the player cried out where 0x80039728 is silent.
+ */
+static void test_a_refresh_does_not_give_the_player_a_voice(void)
+{
+    q2_sim   sim;
+    q2_input in;
+    q2_actor soldier;
+    s32      spawn[3] = { 0, 0, 0 };
+
+    memset(&in, 0, sizeof(in));
+    q2_sim_init(&sim, NULL, 50);
+    q2_sim_spawn(&sim, spawn, 0);
+    q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
+    sim.combat.inv.armour = 0;
+
+    q2_actor_init(&soldier);                 /* no client, owner -1 */
+    soldier.health = 100;
+    q2_sim_hurt_player(&sim, &soldier, 200, Q2_MOD_BULLET, NULL);
+
+    q2_actor_from_player(&sim.combat.self, &sim.combat.inv,
+                         sim.player[sim.cur_player].pos);
+    q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
+
+    CHECK(sim.combat.inv.health <= 0 && !death_sound_raised(&sim),
+          "a creature's kill cried out after a refresh: health %d, byte %d, "
+          "mod %d", (int)sim.combat.inv.health,
+          (int)sim.combat.self.last_attacker, (int)sim.combat.self.last_mod);
 }
 
 static void test_the_handler_runs_once(void)
@@ -374,6 +535,175 @@ static void test_a_body_can_still_be_gibbed(void)
           (int)d.stage);
 }
 
+/* ------------------------------------------------------------------------- */
+/* The dissolve gate, 0x8005B2A8, from respawn_think (0x8003E244)             */
+/* ------------------------------------------------------------------------- */
+
+/* A deathmatch body that has finished falling: respawn_think owns it. */
+static void body_down(q2_player_death *d)
+{
+    q2_player_death_init(d);
+    q2_player_die(d, 1, 18, 0, true, false, NULL);
+    q2_player_death_anim_ended(d);
+    q2_player_death_tick(d, -10, DT, true, 0);
+}
+
+static void test_a_marked_body_dissolves(void)
+{
+    static const u8 fx0[6] = { 15, 0, 0, 0, 0, 0 };   /* Q2_MOD_2's timer */
+    q2_player_death d;
+    int             i;
+    int             gone = -1;
+    bool            alive;
+
+    body_down(&d);
+
+    /*
+     * The gate's tick. The body is handed to 0x8005B39C with 4096 in +0xF4,
+     * and 0x8003E24C's jump lands on the shared tail, so this tick's dt comes
+     * off that 4096 at once: the corpse timer IS the dissolve level.
+     */
+    alive = q2_player_death_tick_fx(&d, -10, DT, true, 0, fx0);
+    CHECK(alive && d.stage == Q2_PDEATH_DISSOLVING,
+          "effect[0]: the gate's tick left stage %d (alive %d)",
+          (int)d.stage, (int)alive);
+    CHECK(d.dissolve_arm == Q2_CORPSE_DISSOLVE_FX0,
+          "effect[0] did not install 0x8005B39C, arm %d", (int)d.dissolve_arm);
+    CHECK(d.corpse_ticks == Q2_CORPSE_DISSOLVE_LEVEL - DT,
+          "the tail did not take dt off the gate's 4096: %d",
+          (int)d.corpse_ticks);
+
+    /* 4086 at dt << 6 = 640 a tick: gone on the seventh run. */
+    for (i = 1; i <= 20; i++) {
+        if (!q2_player_death_tick_fx(&d, -10, DT, true, 0, fx0)) {
+            gone = i;
+            break;
+        }
+        CHECK(d.stage == Q2_PDEATH_DISSOLVING,
+              "the dissolving body changed stage to %d on run %d",
+              (int)d.stage, i);
+    }
+    CHECK(gone == 7, "the body was freed on run %d, expected 7", gone);
+    CHECK(d.stage == Q2_PDEATH_GONE && d.scale == Q2_PDEATH_SCALE_ONE,
+          "stage %d, scale %d: the dissolved body should be GONE without "
+          "darkening, since only body_fade touches +0xFC",
+          (int)d.stage, (int)d.scale);
+    CHECK(!q2_player_death_tick_fx(&d, -10, DT, true, 0, fx0),
+          "a freed body came back");
+
+    /*
+     * THE CONSOLE'S FRAME COUNT at the nominal dt of 12 (Q2_DT_NOMINAL):
+     * 4096 - 12 on the gate's tick, then 768 a run, so the sixth run frees
+     * the body. That is effect.h's "six frames".
+     */
+    body_down(&d);
+    q2_player_death_tick_fx(&d, -10, 12, true, 0, fx0);
+    gone = -1;
+    for (i = 1; i <= 20; i++) {
+        if (!q2_player_death_tick_fx(&d, -10, 12, true, 0, fx0)) {
+            gone = i;
+            break;
+        }
+    }
+    CHECK(gone == 6 && d.stage == Q2_PDEATH_GONE,
+          "at dt 12 the body was freed on run %d (stage %d), expected 6",
+          gone, (int)d.stage);
+}
+
+static void test_an_unmarked_body_waits_as_before(void)
+{
+    /* effect[1], [3], [4] and [5] do not open the gate: it reads +0x2F2 and
+     * +0x2F0 only. */
+    static const u8 others[6] = { 0, 3, 0, 9, 5, 7 };
+    q2_player_death d;
+    int             i;
+    int             fade_started = -1;
+
+    body_down(&d);
+    for (i = 1; i <= Q2_PDEATH_CORPSE_TICKS / DT + 5; i++) {
+        q2_player_death_tick_fx(&d, -10, DT, true, 0, others);
+        if (d.stage != Q2_PDEATH_DOWN) {
+            fade_started = i;
+            break;
+        }
+    }
+    CHECK(d.dissolve_arm == Q2_CORPSE_DISSOLVE_NONE,
+          "effect[1]/[3]/[4]/[5] opened the gate, arm %d",
+          (int)d.dissolve_arm);
+    CHECK(d.stage == Q2_PDEATH_FADING,
+          "an unmarked body went to stage %d, not body_fade", (int)d.stage);
+    CHECK(fade_started == Q2_PDEATH_CORPSE_TICKS / DT,
+          "it waited %d ticks, not the 1500's %d", fade_started,
+          Q2_PDEATH_CORPSE_TICKS / DT);
+}
+
+static void test_effect2_takes_the_gate_first(void)
+{
+    static const u8 fx2[6]  = { 0, 0, 30, 0, 0, 0 };  /* Q2_MOD_4's timer */
+    static const u8 both[6] = { 15, 0, 30, 0, 0, 0 };
+    q2_player_death d;
+
+    /* 0x8005B2B4 reads +0x2F2 before 0x8005B2D4 reads +0x2F0. */
+    body_down(&d);
+    q2_player_death_tick_fx(&d, -10, DT, true, 0, fx2);
+    CHECK(d.dissolve_arm == Q2_CORPSE_DISSOLVE_FX2,
+          "effect[2] did not install 0x8005B444, arm %d", (int)d.dissolve_arm);
+
+    body_down(&d);
+    q2_player_death_tick_fx(&d, -10, DT, true, 0, both);
+    CHECK(d.dissolve_arm == Q2_CORPSE_DISSOLVE_FX2,
+          "with both set the arm is %d, not effect[2]'s", (int)d.dissolve_arm);
+    CHECK(d.stage == Q2_PDEATH_DISSOLVING, "stage is %d", (int)d.stage);
+}
+
+static void test_the_gate_comes_before_the_gib_test(void)
+{
+    static const u8 fx0[6] = { 15, 0, 0, 0, 0, 0 };
+    q2_player_death d;
+    int             i;
+    bool            alive = true;
+
+    /* 0x8003E24C jumps past the gib test at 0x8003E270, and the handler has
+     * none: a body past -40 with effect[0] set dissolves, it is not thrown. */
+    body_down(&d);
+    CHECK(q2_player_death_tick_fx(&d, Q2_PDEATH_GIB_HEALTH - 20, DT, true, 0,
+                                  fx0),
+          "a marked body past -40 was gibbed on the gate's tick");
+    CHECK(d.stage == Q2_PDEATH_DISSOLVING, "stage is %d", (int)d.stage);
+
+    for (i = 0; i < 20 && alive; i++)
+        alive = q2_player_death_tick_fx(&d, Q2_PDEATH_GIB_HEALTH - 20, DT, true,
+                                        0, fx0);
+    CHECK(!alive && d.stage == Q2_PDEATH_GONE,
+          "the dissolving body ended as stage %d, not GONE", (int)d.stage);
+}
+
+static void test_a_falling_body_never_dissolves(void)
+{
+    static const u8 fx0[6] = { 15, 0, 0, 0, 0, 0 };
+    q2_player_death d;
+    int             i;
+
+    /* corpse_think (0x80039550) makes no 0x8005B2A8 call, so the gate is
+     * never asked while the body is still falling... */
+    q2_player_death_init(&d);
+    q2_player_die(&d, 1, 18, 0, true, false, NULL);
+    for (i = 0; i < 50; i++)
+        q2_player_death_tick_fx(&d, -10, DT, true, 0, fx0);
+    CHECK(d.stage == Q2_PDEATH_DYING &&
+          d.dissolve_arm == Q2_CORPSE_DISSOLVE_NONE,
+          "a falling body left DYING for stage %d", (int)d.stage);
+
+    /* ...and a single-player body never reaches respawn_think at all. */
+    q2_player_death_init(&d);
+    q2_player_die(&d, -1, 0, 0, false, false, NULL);
+    for (i = 0; i < 1000; i++)
+        q2_player_death_tick_fx(&d, -10, DT, false, 0, fx0);
+    CHECK(d.stage == Q2_PDEATH_DYING &&
+          d.dissolve_arm == Q2_CORPSE_DISSOLVE_NONE,
+          "a single-player body left DYING for stage %d", (int)d.stage);
+}
+
 static void test_the_corpse_slows_down(void)
 {
     q2_player_death d;
@@ -532,7 +862,10 @@ int main(void)
     test_the_gate();
     test_only_a_death_with_no_killer_cries_out();
     test_lava_erases_the_killer_on_the_entity();
+    test_the_gates_read_the_raw_byte();
     test_a_fresh_spawn_owes_nobody_a_frag();
+    test_a_fresh_actor_owes_nobody_a_frag();
+    test_a_refresh_does_not_give_the_player_a_voice();
     test_the_handler_runs_once();
     test_single_player_opens_the_page_and_arms_the_walk_back();
     test_the_handler_reuses_the_weapon_model_field();
@@ -540,6 +873,11 @@ int main(void)
     test_the_dead_bit_waits_for_the_animation_in_deathmatch();
     test_the_body_dissolves_after_its_five_seconds();
     test_a_body_can_still_be_gibbed();
+    test_a_marked_body_dissolves();
+    test_an_unmarked_body_waits_as_before();
+    test_effect2_takes_the_gate_first();
+    test_the_gate_comes_before_the_gib_test();
+    test_a_falling_body_never_dissolves();
     test_the_corpse_slows_down();
     test_the_walk_back_to_the_front_end();
     test_resupply_is_spent();

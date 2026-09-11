@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "exe.h"
 #include "hud.h"
 #include "hudtables.h"
 #include "icontable.h"
@@ -12,6 +13,7 @@
 #include "ident.h"
 #include "raster.h"
 #include "vram.h"
+#include "weapontables.h"
 
 /* The atlas rows the tables address, named by what is drawn on them. Used only
  * to make the dump readable. */
@@ -122,6 +124,256 @@ static void dump_tables(const q2_hud_tables *t)
 
 /* ------------------------------------------------------------------------- */
 /*
+ * The weapon carousel, and the check that pins it.
+ *
+ * Three cells on the one-player row: strip slot A, field 12, strip slot B.
+ * The strip's positions have a table of their own at 0x8009C658, four s16
+ * pairs, one player then a split viewport (statusbar.h, over q2_sbar_strip);
+ * field 12 is an ordinary field at the anchor plus 330. The slots are written
+ * by SIX functions (statusbar.h, over `strip`), each with the pair of calls
+ * 0x80037ECC shows most plainly: `lh a1, 102(s0)` is the SELECTED weapon,
+ * 0x80050758 is called forward (a2 = 1) and then back (a2 = 0), the forward
+ * answer is stored to client+100 from the second jal's delay slot
+ * (0x80037EF8) and the backward one to client+96 after it returns
+ * (0x80037EFC).
+ *
+ * Checked, not restated. The port's q2_sbar_strip and q2_sbar_strip_2p must be
+ * the disc's eight halfwords, and the three cells must tile left to right
+ * without touching. The second holds only because the table's x is a LEFT
+ * edge — 0x80033448..0x80033458 ADD the drawn w to it — which is what the port
+ * used to get wrong by subtracting a width, and which put slot A on top of the
+ * armour icon. And the six writers are FOUND, over the whole image, rather
+ * than listed — see check_slot_writers.
+ */
+#define CAROUSEL_STRIP_TABLE 0x8009C658u
+#define CAROUSEL_ANCHOR_X    0x80077E60u   /* addiu v0, zero, 93 (layout ONE) */
+#define CAROUSEL_ANCHOR_SH   0x80077E68u   /* sh v0, 304(s0), view+304        */
+
+/*
+ * The writers of client+96 / client+100, found by their shape.
+ *
+ * statusbar.h used to name four and names six. Every one ends the same way:
+ * `jal 0x80050758` (the walk back) with `sh v0, 100(b)` in its delay slot —
+ * the walk FORWARD's answer, stored as the second walk starts — and
+ * `sh v0, 96(b)` on the same base within the next three instructions. So
+ * scan every word of the image for that shape and hold the result against
+ * the header's six. Any seventh, or a missing one, fails the check.
+ *
+ * The count of `jal 0x80050758` is printed beside it: thirteen, which is the
+ * six pairs and the select's own step at 0x8004ED20.
+ */
+#define SLOT_WALK_JAL 0x0C0141D6u        /* jal 0x80050758 */
+#define SLOT_WRITERS  6
+
+static bool is_sh_v0(u32 w, u32 disp, u32 *base)
+{
+    /* sh is opcode 0x29; rt is bits 16..20 and v0 is register 2. */
+    if ((w >> 26) != 0x29u || ((w >> 16) & 31u) != 2u || (w & 0xFFFFu) != disp)
+        return false;
+    *base = (w >> 21) & 31u;
+    return true;
+}
+
+static int check_slot_writers(const q2_exe *e)
+{
+    static const struct { u32 at; const char *what; } named[SLOT_WRITERS] = {
+        { 0x80037EB0u, "0x80037E28  a weapon pickup"          },
+        { 0x80037EF8u, "0x80037ECC  an ammo pickup"           },
+        { 0x8003B220u, "0x8003B040  the ALL WEAPONS variable" },
+        { 0x8003D610u, "0x8003D4FC  the spawn loadout"        },
+        { 0x8004EDB4u, "0x8004ECB4  weapon next / previous"   },
+        { 0x8004FB8Cu, "0x8004F87C  the refire auto-select"   },
+    };
+    u32 a, jals = 0;
+    u32 found[SLOT_WRITERS + 4];
+    int nfound = 0, bad = 0, i, j;
+
+    for (a = q2_exe_begin(e); a + 20u <= q2_exe_end(e); a += 4u) {
+        u32 w = 0, d = 0, base = 0, k;
+
+        if (!q2_exe_u32(e, a, &w) || w != SLOT_WALK_JAL)
+            continue;
+        jals++;
+        if (!q2_exe_u32(e, a + 4u, &d) || !is_sh_v0(d, 100u, &base))
+            continue;
+        for (k = 2; k <= 4; k++) {
+            u32 w2 = 0, b2 = 0;
+
+            if (q2_exe_u32(e, a + 4u * k, &w2) && is_sh_v0(w2, 96u, &b2) &&
+                b2 == base) {
+                if (nfound < (int)(sizeof(found) / sizeof(found[0])))
+                    found[nfound] = a + 4u;
+                nfound++;
+                break;
+            }
+        }
+    }
+
+    printf("  the slots' writers, over the whole image (%u x jal 0x80050758):\n",
+           jals);
+    for (i = 0; i < SLOT_WRITERS; i++) {
+        bool seen = false;
+
+        for (j = 0; j < nfound && j < (int)(sizeof(found) / sizeof(found[0]));
+             j++)
+            if (found[j] == named[i].at)
+                seen = true;
+        printf("    %08X  %s%s\n", named[i].at, named[i].what,
+               seen ? "" : "   MISSING");
+        if (!seen)
+            bad++;
+    }
+    if (nfound != SLOT_WRITERS) {
+        printf("  MISMATCH  %d writers have the shape, statusbar.h names %d\n",
+               nfound, SLOT_WRITERS);
+        bad++;
+    }
+    if (jals != 2u * SLOT_WRITERS + 1u) {
+        printf("  MISMATCH  %u calls to 0x80050758, where six pairs and the"
+               " select's step make %d\n", jals, 2 * SLOT_WRITERS + 1);
+        bad++;
+    }
+    return bad;
+}
+
+static int check_carousel(const disc *d, const q2_build_id *id)
+{
+    q2_exe e;
+    u32 k, w_anchor = 0, w_store = 0;
+    int bad = 0, anchor, a, f, b;
+    const int cell = Q2_ICON_CELL_W;    /* a weapon rect is a full grid cell */
+
+    memset(&e, 0, sizeof(e));
+    if (q2_exe_load(&e, d, id->exe_name) != Q2_OK) {
+        printf("\nThe weapon carousel: cannot load %s\n", id->exe_name);
+        return 1;
+    }
+
+    printf("\nThe weapon carousel (0x80035EA0), the one-player row\n");
+
+    /* The position table, pair by pair. */
+    for (k = 0; k < 2u * Q2_SBAR_STRIP_SLOTS; k++) {
+        const q2_sbar_strip_pos *p = k < (u32)Q2_SBAR_STRIP_SLOTS
+            ? &q2_sbar_strip[k]
+            : &q2_sbar_strip_2p[k - (u32)Q2_SBAR_STRIP_SLOTS];
+        s16 x = 0, y = 0;
+        bool have = q2_exe_s16(&e, CAROUSEL_STRIP_TABLE + 4u * k, &x) &&
+                    q2_exe_s16(&e, CAROUSEL_STRIP_TABLE + 4u * k + 2u, &y);
+
+        if (!have || x != p->x || y != p->y) {
+            printf("  MISMATCH  strip pair %u: port (%d,%d), disc (%d,%d)\n",
+                   k, p->x, p->y, x, y);
+            bad++;
+        }
+    }
+
+    /*
+     * The anchor the fields hang off. The port keeps it as a literal in
+     * screen.c's layout_one, so it is read here from the instruction that
+     * writes it: 0x80077E60 `addiu v0, zero, 93`, stored to view+304 by
+     * 0x80077E68. Anything else at either address fails the check rather
+     * than silently supplying a different number.
+     */
+    if (!q2_exe_u32(&e, CAROUSEL_ANCHOR_X, &w_anchor) ||
+        !q2_exe_u32(&e, CAROUSEL_ANCHOR_SH, &w_store) ||
+        (w_anchor >> 16) != 0x2402u || w_store != 0xA6020130u) {
+        printf("  MISMATCH  the one-player anchor is not `addiu v0, zero, n`"
+               " at 0x%08X stored by 0x%08X\n",
+               CAROUSEL_ANCHOR_X, CAROUSEL_ANCHOR_SH);
+        q2_exe_free(&e);
+        return 1;
+    }
+    anchor = (s16)(w_anchor & 0xFFFFu);
+
+    a = q2_sbar_strip[0].x;
+    f = anchor + q2_sbar_fields[Q2_SBAR_FIELD_AUX_ICON].dx;
+    b = q2_sbar_strip[1].x;
+
+    printf("  %3d..%-3d  client+96   the previous weapon  (0x80037EFC)\n",
+           a, a + cell);
+    printf("  %3d..%-3d  field 12    the SELECTED weapon  (anchor %d + %d)\n",
+           f, f + cell, anchor, q2_sbar_fields[Q2_SBAR_FIELD_AUX_ICON].dx);
+    printf("  %3d..%-3d  client+100  the next weapon      (0x80037EF8)\n",
+           b, b + cell);
+    printf("  each strip icon is two semi-transparent packets: an ADDITIVE\n"
+           "  icon (SetSemiTrans at 0x80033670, ABR 1) over a SUBTRACTIVE\n"
+           "  shadow through palette %d (ABR 2 at 0x80033798, CLUT read at\n"
+           "  0x800337A4), and the shadow is drawn first\n",
+           Q2_SBAR_PAL_STRIP_SHADOW);
+
+    if (!(a + cell < f && f + cell < b)) {
+        printf("  MISMATCH  the three cells overlap: %d+%d < %d and %d+%d < %d"
+               " should both hold\n", a, cell, f, f, cell, b);
+        bad++;
+    }
+
+    bad += check_slot_writers(&e);
+
+    printf("  0x%08X: %s\n", CAROUSEL_STRIP_TABLE,
+           bad ? "DOES NOT MATCH the port, the cells overlap, or the writers"
+                 " are not the six"
+               : "the port's strip table, the three cells tile, and the"
+                 " slots have exactly the six writers");
+
+    q2_exe_free(&e);
+    return bad ? 1 : 0;
+}
+
+/*
+ * Which ammo pool the counter reads, checked against the disc's own table.
+ *
+ * 0x80035424..0x80035438 index the twelve bytes at 0x800ABEA8 (copied to
+ * sp+40) with the weapon id and read that pool's halfword. The port reads
+ * q2_weapon_tables_builtin()->ammo_type[] instead, its transcription of
+ * 0x8009DC5C, on the grounds that the two are byte for byte the same table
+ * (statusbar.h, over q2_sbar_ammo_for_weapon). So: the two tables must agree
+ * slot for slot, and the port's reader, driven with a different count in
+ * every pool, must return the pool 0x800ABEA8 names for every weapon id.
+ */
+static int check_ammo_kind(const q2_icon_tables *it)
+{
+    const q2_weapon_tables *wt = q2_weapon_tables_builtin();
+    q2_inventory inv;
+    int i, bad = 0;
+
+    memset(&inv, 0, sizeof(inv));
+    for (i = 0; i < Q2_AMMO_COUNT; i++)
+        inv.ammo[i] = (s16)(100 + 11 * i);
+
+    printf("\nAmmo pool per weapon id (0x%08X):", Q2_ICON_ADDR_AMMO_KIND);
+    for (i = 0; i < Q2_ICON_WEAPONS; i++)
+        printf(" %u", it->ammo_kind[i]);
+    printf("\n");
+
+    for (i = 0; i < Q2_ICON_WEAPONS; i++) {
+        if (!wt || it->ammo_kind[i] != (u8)wt->ammo_type[i]) {
+            printf("  MISMATCH  weapon %2d: 0x800ABEA8 says pool %u,"
+                   " 0x8009DC5C (weapontables) says %d\n",
+                   i, it->ammo_kind[i], wt ? (int)wt->ammo_type[i] : -1);
+            bad++;
+        }
+    }
+    /* From id 0: 0x80035424 has no zero test in front of it, so client+98 = 0
+     * reads byte 0 like any other id (statusbar.h). */
+    for (i = 0; i < Q2_ICON_WEAPONS; i++) {
+        s16 want = (s16)(it->ammo_kind[i] < Q2_AMMO_COUNT
+                             ? inv.ammo[it->ammo_kind[i]] : 0);
+        s16 got  = q2_sbar_ammo_for_weapon(&inv, i);
+
+        if (got != want) {
+            printf("  MISMATCH  weapon %2d: the bar reads %d, pool %u holds"
+                   " %d\n", i, got, it->ammo_kind[i], want);
+            bad++;
+        }
+    }
+    printf("  %s\n", bad ? "the counter does NOT read the pool the disc names"
+                         : "it matches 0x8009DC5C, and the counter reads the"
+                           " pool it names for ids 0..11");
+    return bad ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/*
  * The status bar's data, and the check that it is a grid.
  *
  * This exists because §11.1 of FORMATS.md said for a long time that there was
@@ -135,6 +387,7 @@ static int dump_icons(const disc *d, const q2_build_id *id)
     u32 i, on_grid = 0, blank = 0;
     int rows_seen[16];
     int nrows = 0;
+    int rc;
 
     if (q2_icon_tables_load(&it, d, id) != Q2_OK) {
         printf("\nstatus-bar tables: not catalogued for this build\n");
@@ -232,6 +485,18 @@ static int dump_icons(const disc *d, const q2_build_id *id)
            q2_icon_draw_size(1, 1).w, q2_icon_draw_size(1, 1).h,
            q2_icon_draw_size(2, 1).w, q2_icon_draw_size(2, 1).h,
            q2_icon_draw_size(4, 1).w, q2_icon_draw_size(4, 1).h);
+    /*
+     * That line is the ICON clamp (0x800353B0). The numerals have one of their
+     * own at 0x80035054, in the same shape off the same two globals —
+     * 0x800AEBCC, then `lh 0x800B3356` compared with 2 — which is how the two
+     * were conflated: 0x80035074 `addiu v1, zero, 13` in a delay slot,
+     * 0x80035078 18 and 0x80035080 20 for two players, 0x80035084 12 for three
+     * or four. Two players is TALLER than wide.
+     */
+    printf("Numerals (0x80035054): 1P %ux%u 2P %ux%u 3P+ %ux%u\n",
+           q2_sbar_digit_size(1).w, q2_sbar_digit_size(1).h,
+           q2_sbar_digit_size(2).w, q2_sbar_digit_size(2).h,
+           q2_sbar_digit_size(4).w, q2_sbar_digit_size(4).h);
 
     printf("\nThe numerals (0x%08X): %d digits, then minus and blank;"
            " %dx%d at v=%d, u = %d * digit\n",
@@ -282,12 +547,28 @@ static int dump_icons(const disc *d, const q2_build_id *id)
      * fifth byte remains a palette index (icontable.h).
      */
     printf("\nRect index == item effect id (0x80035A58 / 0x80035B10), so\n"
-           "`q2psx-inspect items` names every icon in its caption column.\n"
-           "STILL open: the one-player auxiliary icon at +330"
-           " (0x80037CAC).\n");
+           "`q2psx-inspect items` names every icon in its caption column.\n");
+
+    /*
+     * The +330 icon is ANSWERED. Its sub-draw 0x80037CAC reads the player
+     * record's `lh 102` at 0x80037CE8 — the SELECTED weapon; the ammo counter
+     * reads +98 instead (statusbar.h) — and multiplies it by the five-byte
+     * rect stride at 0x80037CF0, so the weapon id IS the rect index.
+     */
+    printf("Field 12 at +330 is the SELECTED weapon's icon, rect index ="
+           " client+102\n(0x80037CAC / 0x80037CF0).\n");
+
+    /*
+     * rc is decided BEFORE the free. q2_icon_tables_free memsets the struct,
+     * so this used to compare against a zeroed rect_count and fail every run
+     * — `hud <disc>` exited 1 whatever the tables said.
+     */
+    rc = (on_grid + blank == it.rect_count) ? 0 : 1;
+    rc |= check_carousel(d, id);
+    rc |= check_ammo_kind(&it);
 
     q2_icon_tables_free(&it);
-    return (on_grid + blank == it.rect_count) ? 0 : 1;
+    return rc;
 }
 
 /* ------------------------------------------------------------------------- */

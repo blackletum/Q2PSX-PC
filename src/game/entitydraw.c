@@ -2,6 +2,7 @@
 
 #include "fxtables.h"     /* Q2_FX_ABR_ADD, the blend the bolt draws in */
 #include "projectile.h"
+#include "trig.h"         /* q2_rotation_euler, RotMatrix's composition */
 #include "weapontables.h"
 
 #include <string.h>
@@ -102,6 +103,28 @@ bool q2_entity_resolve_model(q2_entity *e, const q2_model_bank *bank)
     return true;
 }
 
+bool q2_entity_draw_rotation(const q2_entity *e, s16 out[3][3])
+{
+    if (!e || !out || !(e->render_flags & Q2_RF_TRANSIENT))
+        return false;
+
+    /*
+     * RotMatrix(+0xE6, +0x2C0): 0x80089E38 is handed `addiu a0, s0, 230` and
+     * `addiu a1, s0, 704` at both chunk spawners (0x8005A30C/0x8005A310,
+     * 0x8005AFD0/0x8005AFD4) and on both arms of the toss (0x80046CA4/
+     * 0x80046CAC moving, 0x80046CB8/0x80046CC0 at rest). The angles are the
+     * halfwords the tumble keeps (`lhu`/`addiu`/`sh`, 0x80046BE0..0x80046CA0);
+     * q2_sin12 wraps them onto the 4096 circle as the table index does.
+     *
+     * One unit is not reproduced: the rest test's `+1` to +0xE6
+     * (0x80046D5C..0x80046D70) lands after that toss's RotMatrix, so the
+     * console draws it a tick late. This reads the angles as they stand — a
+     * 4096th of a turn, for one tick.
+     */
+    q2_rotation_euler(out, e->angles[0], e->angles[1], e->angles[2]);
+    return true;
+}
+
 u32 q2_entity_build_ot(q2_entity_set *set, const q2_entity_draw_ctx *ctx,
                        const q2_camera *cam, psx_ot *ot, gte_state *gte,
                        q2_entity_draw_stats *stats)
@@ -121,6 +144,7 @@ u32 q2_entity_build_ot(q2_entity_set *set, const q2_entity_draw_ctx *ctx,
         q2_model_instance inst;
         q2_model_draw_stats ms;
         q2_coll_node cell;
+        s16 tumble[3][3];
         s32 coll_node;
         s32 sort_area = -1;
         bool posed = false;
@@ -191,6 +215,10 @@ u32 q2_entity_build_ot(q2_entity_set *set, const q2_entity_draw_ctx *ctx,
         inst.origin[1]     = e->origin[1];
         inst.origin[2]     = e->origin[2];
         inst.yaw           = e->angles[1];
+        /* A gib's tumble: all three angles, not the yaw alone — see
+         * q2_entity_draw_rotation. Everything else keeps the yaw path. */
+        if (q2_entity_draw_rotation(e, tumble))
+            inst.rot = (const s16 (*)[3])tumble;
         /*
          * +0xFC/+0xFE DO NOT SCALE GEOMETRY.
          *

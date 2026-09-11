@@ -14,7 +14,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "combat.h"      /* q2_actor: the presentation pass ticks its slots */
 #include "effect.h"
+#include "itemtable.h"   /* Q2_ITEM_GLOW_*: the materialise burst's colours */
+#include "trig.h"        /* the spark's reference velocities                */
 
 static int g_failures;
 static int g_checks;
@@ -318,9 +321,11 @@ static void test_presets(void)
     p = q2_fx_preset_at(Q2_FX_BFG_BURST);
     check_eq_i(p->size, 20000, "the BFG's size is 20000 (0x8004BDBC)");
 
-    p = q2_fx_preset_at(Q2_FX_GIB);
-    check_eq_i(p->life, 10, "a gib puff lives 10 ticks (0x80059698)");
+    p = q2_fx_preset_at(Q2_FX_ITEM_MATERIALISE);
+    check_eq_i(p->life, 10, "a materialise burst lives 10 ticks (0x80059698)");
     check_eq_i(p->size, 10000, "and is 10000 across (0x800596A0)");
+    check_eq_i(p->site, 0x800596B0u,
+               "and its site is inside the ITEM think 0x80059330");
 
     p = q2_fx_preset_at(Q2_FX_SPARK);
     check_eq_i(p->ramp0, 0, "a spark is the blue ramp (0x8003E040)");
@@ -343,8 +348,8 @@ static void test_presets(void)
                "the BFG spawns three times (0x8004BDD0)");
     check_eq_i(q2_fx_preset_at(Q2_FX_SPARK)->repeat, 4,
                "the spark spawns four times (0x8003E0DC)");
-    check_eq_i(q2_fx_preset_at(Q2_FX_GIB)->repeat, 1,
-               "the gib site has no outer loop");
+    check_eq_i(q2_fx_preset_at(Q2_FX_ITEM_MATERIALISE)->repeat, 1,
+               "the materialise site has no outer loop");
     /* Not 4: q2_fx_laser spawns its own four groups and never comes through
      * q2_fx_spawn, so a 4 here would be sixteen. */
     check_eq_i(q2_fx_preset_at(Q2_FX_LASER_END)->repeat, 1,
@@ -435,6 +440,87 @@ static void test_spawn_offsets_and_puff(void)
             scattered++;
     }
     check(scattered > 0, "the puff is pre-scattered at spawn");
+}
+
+/*
+ * The THIRD spawner, 0x8002FDFC: absolute world points in, raw differences
+ * stored. The one instruction that separates it from 0x8003004C is the missing
+ * shift, so every offset check below uses a difference whose >> 4 is a
+ * different number.
+ */
+static void test_spawn_points(void)
+{
+    q2_fx_world w;
+    s32 pts[4][3] = {
+        { 1000, 2000, 3000 },
+        { 1010, 1980, 3030 },
+        { 1020, 1960, 3060 },
+        { 1030, 1940, 3090 }
+    };
+    s16 vel[4][3] = {
+        { 3, -4,  5 }, { 7, -4,  1 }, { 3,  6,  5 }, { 0,  0,  0 }
+    };
+    s32 slot, slot2;
+
+    printf("group: the point-taking spawner stores raw differences\n");
+
+    q2_fx_world_init(&w, &g_tab);
+    slot = q2_fx_group_spawn_points(&w, (const s32 (*)[3])pts,
+                                    (const s16 (*)[3])vel, 4,
+                                    &g_tab.ramp[18], &g_tab.ramp[18],
+                                    4, 32767, 9);
+    check(slot >= 0, "the point spawn took a slot");
+
+    /* 0x8002FE88: pts[0]'s three words ARE the origin. */
+    check(w.group[slot].origin[0] == 1000 && w.group[slot].origin[1] == 2000 &&
+          w.group[slot].origin[2] == 3000, "origin is pts[0]");
+
+    /* 0x8002FF44 `subu` / 0x8002FF48 `sh`: no shift. Through 0x8003004C's
+     * `sll 16 / sra 20` these would be 0, -2 and 1. */
+    check_eq_i(w.group[slot].offset[0][0],  10, "offset[0].x is pts[1]-pts[0]");
+    check_eq_i(w.group[slot].offset[0][1], -20, "offset[0].y, unshifted");
+    check_eq_i(w.group[slot].offset[0][2],  30, "offset[0].z, unshifted");
+    check_eq_i(w.group[slot].offset[2][0],  30, "offset[2].x is pts[3]-pts[0]");
+    check_eq_i(w.group[slot].offset[2][1], -60, "offset[2].y");
+    check_eq_i(w.group[slot].offset[3][0],   0, "nothing past count-1");
+
+    /* 0x8002FEB8 / 0x8002FF84: the velocities are the usual absolute-then-
+     * relative pair. */
+    check_eq_i(w.group[slot].vel[0], 3, "vel[0] is absolute");
+    check_eq_i(w.group[slot].rel_vel[0][0], 4, "vel[1] - vel[0]");
+    check_eq_i(w.group[slot].rel_vel[1][1], 10, "vel[2] - vel[0]");
+
+    check_eq_i(w.group[slot].count, 4, "count 4");
+    check_eq_i(w.group[slot].life, 4, "life 4");
+    check_eq_i(w.group[slot].area, 9, "the area byte as passed");
+    check_eq_i(w.group[slot].size, 32767, "32767 at unity scale");
+    check_eq_i(w.group[slot].view_mask, 0,
+               "the flags byte is cleared (0x80030000)");
+
+    /* The difference is taken in halfwords, so it wraps rather than clamps. */
+    pts[1][0] = pts[0][0] + 70000;
+    slot2 = q2_fx_group_spawn_points(&w, (const s32 (*)[3])pts,
+                                     (const s16 (*)[3])vel, 2,
+                                     &g_tab.ramp[0], NULL, 4, 32767, 0);
+    check_eq_i(w.group[slot2].offset[0][0], 70000 - 65536,   /* 70000 mod 2^16 */
+               "a difference beyond 16 bits wraps modulo 2^16");
+
+    /* One point is a group with no followers. */
+    q2_fx_world_clear(&w);
+    slot = q2_fx_group_spawn_points(&w, (const s32 (*)[3])pts,
+                                    (const s16 (*)[3])vel, 1,
+                                    &g_tab.ramp[0], NULL, 4, 32767, 0);
+    check_eq_i(w.group[slot].count, 1, "count 1 spawns");
+    check(w.group[slot].offset[0][0] == 0 && w.group[slot].offset[0][1] == 0 &&
+          w.group[slot].offset[0][2] == 0, "and writes no offset");
+
+    /* 0x8002FFE4: the same size rule as the first spawner, toward zero. */
+    q2_fx_world_clear(&w);
+    w.size_scale = 256;
+    slot = q2_fx_group_spawn_points(&w, (const s32 (*)[3])pts,
+                                    (const s16 (*)[3])vel, 1,
+                                    &g_tab.ramp[0], NULL, 4, -3, 0);
+    check_eq_i(w.group[slot].size, -1, "a negative size rounds toward zero");
 }
 
 static void test_spawn_preset_separates(void)
@@ -619,42 +705,765 @@ static void test_laser(void)
 }
 
 /* ------------------------------------------------------------------------- */
-/* Debris                                                                     */
+/* 0x800596B0 — the ITEM materialise burst, which this file called a gib      */
 /* ------------------------------------------------------------------------- */
-static void test_gib_blood_colour(void)
+static void test_item_materialise(void)
 {
     q2_fx_world w;
-    q2_rng rng;
-    s32 at[3] = { 0, 0, 0 };
+    q2_rng rng, ref;
+    s32 at[3] = { 300, -40, 900 };
+    s16 want[Q2_FX_GROUP_QUADS][3];
     s32 slot;
+    int i, k, bad = 0;
 
-    printf("gib: blood colour comes from the creature, not the effect\n");
+    printf("item: 0x800596B0 is the materialise burst, keyed by the ITEM's glow\n");
 
-    /* 0x80059648 tests the three bits in this order and takes the first. */
-    check_eq_i(q2_fx_gib_ramp(Q2_FX_BLOOD_RED),    1, "red bleeds ramp 1");
-    check_eq_i(q2_fx_gib_ramp(Q2_FX_BLOOD_GREEN), 11, "green bleeds ramp 11");
-    check_eq_i(q2_fx_gib_ramp(Q2_FX_BLOOD_BLUE),   0, "blue bleeds ramp 0");
+    /*
+     * The three bits are the item table's own glow channels — the word
+     * 0x800596B8 `andi v0, s3, 0x70` tests one instruction after the spawn —
+     * and not a creature's blood colour. Pinned against itemtable.h so the two
+     * names cannot drift apart.
+     */
+    check_eq_i(Q2_FX_ITEM_GLOW_R, Q2_ITEM_GLOW_R, "glow R is the item's 0x10");
+    check_eq_i(Q2_FX_ITEM_GLOW_G, Q2_ITEM_GLOW_G, "glow G is the item's 0x20");
+    check_eq_i(Q2_FX_ITEM_GLOW_B, Q2_ITEM_GLOW_B, "glow B is the item's 0x40");
 
-    /* The order, not just the mapping: red wins over green wins over blue. */
-    check_eq_i(q2_fx_gib_ramp(Q2_FX_BLOOD_RED | Q2_FX_BLOOD_GREEN |
-                              Q2_FX_BLOOD_BLUE),
-               1, "red is tested first");
-    check_eq_i(q2_fx_gib_ramp(Q2_FX_BLOOD_GREEN | Q2_FX_BLOOD_BLUE),
-               11, "then green");
-
-    /* No bits set leaves the original's register undefined; the port picks. */
-    check_eq_i(q2_fx_gib_ramp(0), 1, "no flags takes the port's defined value");
+    /* 0x80059648 / 0x8005965C / 0x80059670, tested in that order. */
+    check_eq_i(q2_fx_item_glow_ramp(Q2_FX_ITEM_GLOW_R),  1, "R picks ramp 1");
+    check_eq_i(q2_fx_item_glow_ramp(Q2_FX_ITEM_GLOW_G), 11,
+               "G picks ramp 11 (0x8009C00C), not 1");
+    check_eq_i(q2_fx_item_glow_ramp(Q2_FX_ITEM_GLOW_B),  0, "B picks ramp 0");
+    check_eq_i(q2_fx_item_glow_ramp(Q2_ITEM_GLOW), 1, "R is tested first");
+    check_eq_i(q2_fx_item_glow_ramp(Q2_FX_ITEM_GLOW_G | Q2_FX_ITEM_GLOW_B), 11,
+               "then G");
+    /* The materialise bit itself (0x2) is set on every item that gets here,
+     * and it must not disturb the chain. */
+    check_eq_i(q2_fx_item_glow_ramp(Q2_ITEM_MATERIALISE | Q2_FX_ITEM_GLOW_B), 0,
+               "the materialise bit is not a colour");
+    /* No glow bit leaves the original's s4 holding the caller's value. */
+    check_eq_i(q2_fx_item_glow_ramp(Q2_ITEM_MATERIALISE), 1,
+               "no glow bit takes the port's defined fallback");
 
     q2_fx_world_init(&w, &g_tab);
     q2_rng_seed(&rng, 7);
+    ref = rng;
 
-    slot = q2_fx_gib(&w, &rng, at, 0, Q2_FX_BLOOD_GREEN);
-    check(slot >= 0, "a gib burst spawned");
-    /* The synthetic table puts the ramp index in the green channel. */
+    /* 0x80059608..0x80059644: fifteen triples of (rand() - 16384) >> 9. */
+    for (i = 0; i < Q2_FX_GROUP_QUADS; i++)
+        for (k = 0; k < 3; k++)
+            want[i][k] = (s16)((q2_rng_next(&ref) - 16384) >> 9);
+
+    slot = q2_fx_item_materialise(&w, &rng, at, 5,
+                                  Q2_ITEM_MATERIALISE | Q2_FX_ITEM_GLOW_G);
+    check(slot >= 0, "the materialise burst spawned");
+    check(rng.state == ref.state, "and consumed exactly 45 draws");
     check_eq_i(q2_fx_colour_g(q2_fx_group_colour(&w.group[slot], 0)), 11,
-               "and it used the green ramp");
-    check_eq_i(w.group[slot].life, 10, "with the gib lifetime");
+               "on the green glow's ramp");
+    check_eq_i(w.group[slot].life, 10, "life 10 (0x80059698)");
+    check_eq_i(w.group[slot].count, 15, "fifteen quads (0x80059690)");
+    check_eq_i(w.group[slot].area, 5, "the item's own area byte");
+    check(w.group[slot].origin[0] == at[0] && w.group[slot].origin[1] == at[1] &&
+          w.group[slot].origin[2] == at[2],
+          "at the item's origin, entity+0xA4 (0x80059680)");
+
+    check_eq_i(w.group[slot].vel[0], want[0][0], "vel[0].x is the first draw");
+    for (i = 1; i < Q2_FX_GROUP_QUADS; i++)
+        for (k = 0; k < 3; k++)
+            if (w.group[slot].rel_vel[i - 1][k] !=
+                (s16)(want[i][k] - want[0][k]))
+                bad++;
+    check_eq_i(bad, 0, "every velocity is the triple drawn in x, y, z order");
 }
+
+/* ------------------------------------------------------------------------- */
+/* The mesh drawers                                                           */
+/*                                                                            */
+/* A stub stands in for 0x8006CC44: it records every index it is asked for     */
+/* and answers with a point that is a known function of the index, so both the */
+/* walk and the offsets it produces are checkable exactly.                     */
+/* ------------------------------------------------------------------------- */
+#define STUB_LOG 512
+
+typedef struct stub_mesh {
+    u32 calls;
+    s32 index[STUB_LOG];
+    s32 base[3];
+} stub_mesh;
+
+static void stub_vertex(void *ctx, s32 index, s32 out[3])
+{
+    stub_mesh *m = (stub_mesh *)ctx;
+
+    if (m->calls < STUB_LOG)
+        m->index[m->calls] = index;
+    m->calls++;
+    out[0] = m->base[0] + index * 10;
+    out[1] = m->base[1] - index * 20;
+    out[2] = m->base[2] + index * 30;
+}
+
+static q2_fx_mesh_src stub_src(stub_mesh *m, u32 total)
+{
+    q2_fx_mesh_src s;
+
+    memset(m, 0, sizeof(*m));
+    m->base[0] = 100;
+    m->base[1] = 200;
+    m->base[2] = 4000;
+    s.vertex = stub_vertex;
+    s.ctx    = m;
+    s.total  = total;
+    return s;
+}
+
+/* How many live groups use ramp `r` with life `life`. */
+static u32 count_groups(const q2_fx_world *w, u32 r, u32 life)
+{
+    u32 i, n = 0;
+
+    for (i = 0; i < w->group_count; i++) {
+        if (w->group[i].life == life && w->group[i].ramp[0] == &g_tab.ramp[r])
+            n++;
+    }
+    return n;
+}
+
+static void test_mesh_crackle(void)
+{
+    q2_fx_world w;
+    stub_mesh m;
+    q2_fx_mesh_src src;
+    u32 groups, i;
+    int bad = 0;
+
+    printf("mesh: the crackle walks half the mesh, alternating by frame\n");
+
+    /*
+     * 60 vertices, frame 0: s3 = 60, `slti s3, 30` fails so s2 = 15, s3 = 30;
+     * still not below 30, s2 = 15, s3 = 0; the loop at 0x80059130 leaves.
+     * Two full groups, vertices 0, 2, ... 58 — a single-batch reading would
+     * stop at 28.
+     */
+    q2_fx_world_init(&w, &g_tab);
+    src = stub_src(&m, 60);
+    groups = q2_fx_mesh_crackle(&w, &src, 0, 3, -1,
+                                Q2_FX_CRACKLE_DAMAGE_RAMP,
+                                Q2_FX_CRACKLE_DAMAGE_LIFE);
+    check_eq_i(groups, 2, "60 vertices on an even frame: two groups");
+    check_eq_i(m.calls, 30, "sampling thirty vertices");
+    for (i = 0; i < m.calls && i < STUB_LOG; i++)
+        if (m.index[i] != (s32)(2 * i))
+            bad++;
+    check_eq_i(bad, 0, "and they are 0, 2, 4 ... 58");
+    check_eq_i(w.group[0].count, 15, "first batch 15");
+    check_eq_i(w.group[1].count, 15, "second batch 15");
+
+    /* The group is built from the samples: origin is the first point, the
+     * followers are raw differences, and nothing moves. */
+    check(w.group[0].origin[0] == 100 && w.group[0].origin[1] == 200 &&
+          w.group[0].origin[2] == 4000, "origin is vertex 0's world point");
+    check_eq_i(w.group[0].offset[0][0], 20, "follower 1 is vertex 2, +20 in x");
+    check_eq_i(w.group[0].offset[0][1], -40, "and -40 in y, unshifted");
+    check_eq_i(w.group[0].offset[13][2], 840, "follower 14 is vertex 28");
+    check_eq_i(w.group[1].origin[0], 100 + 30 * 10,
+               "the second group starts at vertex 30");
+    bad = 0;
+    for (i = 0; i < Q2_FX_GROUP_FOLLOWERS; i++)
+        if (w.group[0].rel_vel[i][0] || w.group[0].rel_vel[i][1] ||
+            w.group[0].rel_vel[i][2])
+            bad++;
+    check(bad == 0 && w.group[0].vel[0] == 0 && w.group[0].vel[1] == 0 &&
+          w.group[0].vel[2] == 0,
+          "every velocity is zero (0x80058FF8's fifteen memsets)");
+    check_eq_i(w.group[0].life, 4, "damage crackle life 4");
+    check(w.group[0].ramp[0] == &g_tab.ramp[18] &&
+          w.group[0].ramp[1] == &g_tab.ramp[18], "on ramp 18, passed twice");
+    check_eq_i(w.group[0].size, 32767, "size 32767");
+    check_eq_i(w.group[0].area, 3, "the entity's area byte");
+    check_eq_i(w.group[0].view_mask, 0, "no client, no skip");
+
+    /* Frame 1: s3 = 59 -> 15 (29 left) -> 14 (1 left). The other half. */
+    q2_fx_world_clear(&w);
+    src = stub_src(&m, 60);
+    groups = q2_fx_mesh_crackle(&w, &src, 1, 3, -1, 18, 4);
+    check_eq_i(groups, 2, "60 vertices on an odd frame: two groups");
+    check_eq_i(w.group[1].count, 14, "the second one of fourteen");
+    bad = 0;
+    for (i = 0; i < m.calls && i < STUB_LOG; i++)
+        if (m.index[i] != (s32)(2 * i + 1))
+            bad++;
+    check_eq_i(bad, 0, "starting at vertex 1: the phase is a start, not a skip");
+    check_eq_i(m.calls, 29, "vertices 1, 3 ... 57");
+
+    /* 33 vertices, frame 0: 15 (3 left), then 3 >> 1 = 1 (1 left). */
+    q2_fx_world_clear(&w);
+    src = stub_src(&m, 33);
+    check_eq_i(q2_fx_mesh_crackle(&w, &src, 0, 0, -1, 18, 4), 2,
+               "33 vertices: two groups");
+    check_eq_i(w.group[1].count, 1, "the tail group holds one quad");
+    check_eq_i(m.index[15], 30, "and it is vertex 30");
+
+    /* The player index lands in the HIGH nibble (0x8005911C..0x80059128). */
+    q2_fx_world_clear(&w);
+    src = stub_src(&m, 4);
+    q2_fx_mesh_crackle(&w, &src, 0, 0, 2, 18, 4);
+    check_eq_i(w.group[0].view_mask, 0x40, "player 2 hides it from viewport 2");
+
+    /* Model-less: 0x8006D6AC is zero, `0 - parity` is below two, leave. */
+    q2_fx_world_clear(&w);
+    check_eq_i(q2_fx_mesh_crackle(&w, NULL, 0, 0, -1, 18, 4), 0,
+               "a model-less entity spawns nothing");
+    check_eq_i(w.group[0].life, 0, "and the pool is untouched");
+    src = stub_src(&m, 2);
+    check_eq_i(q2_fx_mesh_crackle(&w, &src, 1, 0, -1, 18, 4), 0,
+               "two vertices on an odd frame leave one, which is too few");
+}
+
+/*
+ * The renderer honours the nibble the drawers write. With the low-nibble test
+ * this replaced, a crackle marked for player 1 was drawn in viewport 1 too.
+ */
+static void test_view_mask_skips_one_viewport(void)
+{
+    q2_fx_world w;
+    q2_camera cam;
+    psx_ot ot;
+    gte_state gte;
+    stub_mesh m;
+    q2_fx_mesh_src src;
+
+    printf("draw: a crackle is hidden in its own player's viewport only\n");
+
+    if (psx_ot_init(&ot, 256, 4096) != Q2_OK) {
+        printf("  FAIL  could not allocate an ordering table\n");
+        g_failures++;
+        return;
+    }
+    gte_init(&gte);
+    gte_set_projection(&gte, 256, 256, 124);
+    memset(&cam, 0, sizeof(cam));
+    cam.projection = 256;
+    cam.far_z      = Q2_CAMERA_FAR_DEFAULT;
+    cam.sort_range = Q2_CAMERA_SORT_RANGE;
+
+    q2_fx_world_init(&w, &g_tab);
+    q2_fx_world_resize(&w, 0, 4);
+    src = stub_src(&m, 4);
+    check_eq_i(q2_fx_mesh_crackle(&w, &src, 0, 0, 1, 18, 4), 1,
+               "one crackle group in front of the camera");
+    check_eq_i(w.group[0].view_mask, 0x20, "marked for player 1");
+
+    psx_ot_clear(&ot);
+    check(q2_fx_build_ot(&w, &cam, 0, &ot, &gte) > 0, "viewport 0 draws it");
+    psx_ot_clear(&ot);
+    check_eq_i(q2_fx_build_ot(&w, &cam, 1, &ot, &gte), 0,
+               "viewport 1 skips it (bit 4 + 1, 0x80030620)");
+    psx_ot_clear(&ot);
+    check(q2_fx_build_ot(&w, &cam, 2, &ot, &gte) > 0, "viewport 2 draws it");
+
+    psx_ot_free(&ot);
+}
+
+static void test_mesh_spark(void)
+{
+    q2_fx_world w;
+    q2_rng rng, ref;
+    stub_mesh m;
+    q2_fx_mesh_src src;
+    s16 want[Q2_FX_GROUP_QUADS][3];
+    s32 t;
+    u32 i;
+    int k, bad = 0;
+
+    printf("mesh: the spark draws 45 velocities and walks every eighth vertex\n");
+
+    /* 0x80058A1C..0x80058A38: 32 + (12x >> 13). */
+    check_eq_i(q2_fx_spark_mag(0), 8, "the slowest spark is 8");
+    check_eq_i(q2_fx_spark_mag(32767), 55, "the fastest is 55");
+    check_eq_i(q2_fx_spark_mag(16384), 32, "a centred draw is 32");
+    check_eq_i(q2_fx_spark_mag(16383), 31, "and the shift floors below it");
+
+    /* f(t) is the signed magic divide by 12000. */
+    check_eq_i(q2_fx_spark_scale(4096 * 55), 18, "f(+4096*55) = 18");
+    check_eq_i(q2_fx_spark_scale(-4096 * 55), -18, "f(-4096*55) = -18");
+    check_eq_i(q2_fx_spark_scale(11999), 0, "11999 is below one step");
+    check_eq_i(q2_fx_spark_scale(12000), 1, "12000 is exactly one");
+    check_eq_i(q2_fx_spark_scale(-11999), 0, "and it truncates toward zero");
+    check_eq_i(q2_fx_spark_scale(-12000), -1, "-12000 is exactly minus one");
+    for (t = -230000; t <= 230000; t++)
+        if (q2_fx_spark_scale(t) != t / 12000)
+            bad++;
+    check_eq_i(bad, 0, "f(t) == t / 12000 over the site's whole reach");
+
+    /*
+     * 40 vertices, frame 3: s5 = 37, `slti s5, 120` holds so s1 = 37 >> 3 = 4,
+     * s5 = 5, below eight, done. One group of FOUR: 3, 11, 19, 27. Vertex 35
+     * would need s5 >= 8 on the second pass.
+     */
+    q2_fx_world_init(&w, &g_tab);
+    q2_rng_seed(&rng, 99);
+    ref = rng;
+    for (i = 0; i < Q2_FX_GROUP_QUADS; i++) {
+        s32 a = q2_rng_next(&ref);
+        s32 b = q2_rng_next(&ref);
+        s32 angle = a & 0xFFF;          /* A, not B: the delay slot */
+        s32 mag = 32 + ((12 * (b - 16384)) >> 13);
+        s32 c;
+
+        want[i][0] = (s16)((q2_sin12(angle) * mag) / 12000);
+        c = q2_rng_next(&ref);
+        want[i][1] = (s16)((c - 16384) >> 10);
+        want[i][2] = (s16)((q2_cos12(angle) * mag) / 12000);
+    }
+
+    src = stub_src(&m, 40);
+    check_eq_i(q2_fx_mesh_spark(&w, &rng, &src, 3, 0, 0,
+                                &g_tab.ramp[14], &g_tab.ramp[14],
+                                Q2_FX_MESH_SPARK_SIZE, Q2_FX_MESH_SPARK_LIFE),
+               1, "40 vertices at frame 3: one group");
+    check(rng.state == ref.state, "exactly 45 draws, A B C per quad");
+    check_eq_i(w.group[0].count, 4, "of four quads, not five");
+    check(m.calls == 4 && m.index[0] == 3 && m.index[1] == 11 &&
+          m.index[2] == 19 && m.index[3] == 27, "vertices 3, 11, 19, 27");
+    check_eq_i(w.group[0].offset[0][0], 80, "follower 1 is vertex 11, +80");
+    check_eq_i(w.group[0].life, 4, "life 4 — the wrappers' fifth argument");
+    check_eq_i(w.group[0].view_mask, 0x10, "player 0 hides it from viewport 0");
+
+    bad = 0;
+    for (k = 0; k < 3; k++)
+        if (w.group[0].vel[k] != want[0][k])
+            bad++;
+    for (i = 1; i < 4; i++)
+        for (k = 0; k < 3; k++)
+            if (w.group[0].rel_vel[i - 1][k] != (s16)(want[i][k] - want[0][k]))
+                bad++;
+    check_eq_i(bad, 0,
+               "velocities: sine into x, the third draw into y, cosine into z");
+
+    /* 200 vertices at frame 0: 15 (80 left), then 80 >> 3 = 10. */
+    q2_fx_world_clear(&w);
+    src = stub_src(&m, 200);
+    check_eq_i(q2_fx_mesh_spark(&w, &rng, &src, 0, 0, -1,
+                                &g_tab.ramp[14], NULL, 32767, 4), 2,
+               "200 vertices: two groups");
+    check_eq_i(w.group[1].count, 10, "the second of ten");
+    check_eq_i(m.index[15], 120, "and it starts at vertex 120");
+
+    /* 0x800589E0 leaves on a null model BEFORE the velocity loop. */
+    ref = rng;
+    q2_fx_world_clear(&w);
+    check_eq_i(q2_fx_mesh_spark(&w, &rng, NULL, 0, 0, -1,
+                                &g_tab.ramp[14], NULL, 32767, 4), 0,
+               "a model-less entity spawns nothing");
+    check(rng.state == ref.state, "and costs no draws at all");
+
+    /* A model with too few vertices is NOT that case: the draws happen. */
+    src = stub_src(&m, 7);
+    check_eq_i(q2_fx_mesh_spark(&w, &rng, &src, 0, 0, -1,
+                                &g_tab.ramp[14], NULL, 32767, 4), 0,
+               "seven vertices are fewer than one step");
+    for (i = 0; i < 45; i++)
+        (void)q2_rng_next(&ref);
+    check(rng.state == ref.state, "but the 45 draws were still made");
+}
+
+static void test_mesh_blood(void)
+{
+    q2_fx_world w;
+    q2_rng rng, ref;
+    stub_mesh m;
+    q2_fx_mesh_src src;
+    s16 want[Q2_FX_GROUP_QUADS][3];
+    u32 i;
+    int k, bad = 0, negative = 0, positive = 0;
+
+    printf("mesh: the blood spray tiles the mesh and rounds toward zero\n");
+
+    /*
+     * Mode 0 (0x8005B6C0's): 3 * (rand() - 16384), then 0x8005AC58's
+     * `bgez; addiu 16383; sra 14` — the bias only for a NEGATIVE product.
+     * C's `/` is that operation.
+     */
+    q2_fx_world_init(&w, &g_tab);
+    q2_rng_seed(&rng, 31337);
+    ref = rng;
+    for (i = 0; i < Q2_FX_GROUP_QUADS; i++)
+        for (k = 0; k < 3; k++) {
+            s32 v = 3 * (q2_rng_next(&ref) - 16384);
+            want[i][k] = (s16)(v / 16384);
+            if (v < 0 && v % 16384) negative++;
+            if (v > 0 && v % 16384) positive++;
+        }
+    check(negative > 0 && positive > 0,
+          "the seed exercises both signs off a multiple of 16384");
+
+    src = stub_src(&m, 31);
+    check_eq_i(q2_fx_mesh_blood(&w, &rng, &src, 6,
+                                &g_tab.ramp[10], &g_tab.ramp[0], 6144, 0), 2,
+               "31 vertices: 31 / 15 = two groups");
+    check(rng.state == ref.state, "one set of 45 draws for the whole spray");
+    check_eq_i(m.calls, 30, "sampling vertices 0..29");
+    check(m.index[0] == 0 && m.index[14] == 14 && m.index[15] == 15 &&
+          m.index[29] == 29, "consecutively, the second group from 15");
+    check_eq_i(w.group[0].life, 32, "mode 0 lives 32 (0x8005AC34)");
+    check_eq_i(w.group[0].accel[1], 0, "and does not sag");
+    check(w.group[0].ramp[0] == &g_tab.ramp[10] &&
+          w.group[0].ramp[1] == &g_tab.ramp[0], "ramps as passed");
+
+    for (i = 0; i < 2; i++) {
+        const q2_fx_group *g = &w.group[i];
+        u32 q;
+        for (k = 0; k < 3; k++)
+            if (g->vel[k] != want[0][k])
+                bad++;
+        for (q = 1; q < Q2_FX_GROUP_QUADS; q++)
+            for (k = 0; k < 3; k++)
+                if (g->rel_vel[q - 1][k] != (s16)(want[q][k] - want[0][k]))
+                    bad++;
+    }
+    check_eq_i(bad, 0, "both groups carry the same toward-zero velocities");
+
+    /* Mode 1 is the gib spray: 0x8005B320, life 10, >> 10, accel 3. */
+    q2_fx_world_clear(&w);
+    ref = rng;
+    for (i = 0; i < Q2_FX_GROUP_QUADS; i++)
+        for (k = 0; k < 3; k++)
+            want[i][k] = (s16)((q2_rng_next(&ref) - 16384) >> 10);
+    src = stub_src(&m, 15);
+    check_eq_i(q2_fx_gib_spray(&w, &rng, &src, 4), 1,
+               "the gib spray over 15 vertices is one group");
+    check(rng.state == ref.state, "45 draws");
+    check_eq_i(w.group[0].life, 10, "mode 1 lives 10, not 1 (0x8005ABE0)");
+    check_eq_i(w.group[0].accel[1], 3, "and sags at 3 (0x8005AD48)");
+    check(w.group[0].ramp[0] == &g_tab.ramp[2] &&
+          w.group[0].ramp[1] == &g_tab.ramp[3], "on the blood ramps 2 and 3");
+    check_eq_i(w.group[0].size, 6144, "size 6144");
+    check_eq_i(w.group[0].area, 4, "the entity's area");
+    check_eq_i(w.group[0].vel[1], want[0][1], "vel.y is the second draw >> 10");
+    check_eq_i(w.group[0].view_mask, 0, "no view mask: visible to its owner");
+
+    /*
+     * A NULL model is not an exit: 0x8006D6AC returns zero, the batch count is
+     * zero, and the fifteen triples are drawn anyway (0x8005ABE4, before the
+     * test at 0x8005ACCC).
+     */
+    q2_fx_world_clear(&w);
+    ref = rng;
+    check_eq_i(q2_fx_gib_spray(&w, &rng, NULL, 0), 0,
+               "a model-less spray spawns nothing");
+    for (i = 0; i < 45; i++)
+        (void)q2_rng_next(&ref);
+    check(rng.state == ref.state, "but still costs its 45 draws");
+}
+
+/*
+ * The five countdowns, as 0x8005B880 runs them. Only slots 0 and 2 are gated
+ * on the entity being alive; 4 and 5 get a literal 1; effect[1] ticks itself.
+ */
+static void test_actor_present_tickers(void)
+{
+    q2_fx_world w;
+    q2_rng rng;
+    q2_actor a;
+    stub_mesh m;
+    q2_fx_mesh_src src;
+    q2_fx_present_report rep;
+    u32 fired, i;
+
+    printf("present: the tickers' clocks and gates\n");
+
+    q2_fx_world_init(&w, &g_tab);
+    q2_rng_seed(&rng, 5);
+    src = stub_src(&m, 16);
+
+    /* A CORPSE with effect[0] armed: dt is (health > 0) = 0, so it sparks
+     * every present and never runs down. */
+    q2_actor_init(&a);
+    a.health = 0;
+    a.effect[0] = 15;
+    for (fired = 0, i = 0; i < 20; i++) {
+        q2_fx_world_clear(&w);
+        q2_fx_actor_present(&w, &rng, &a, &src, i, 0, -1, 0, 0, &rep);
+        fired += count_groups(&w, Q2_FX_MESH_SPARK_RAMP, Q2_FX_MESH_SPARK_LIFE);
+    }
+    check_eq_i(fired, 20, "a dead body's effect[0] sparks every present");
+    check_eq_i(a.effect[0], 15, "and never counts down (0x8005B8AC)");
+
+    /* 0x8005B624/58/8C pass ONE ramp pointer twice, so the renderer's
+     * three-quad swap (0x80030A14) has nothing to alternate. */
+    check(w.group[0].ramp[0] == &g_tab.ramp[Q2_FX_MESH_SPARK_RAMP] &&
+          w.group[0].ramp[1] == w.group[0].ramp[0],
+          "the spark's two ramps are the same record, ramp 14");
+    check_eq_i(w.group[0].size, Q2_FX_MESH_SPARK_SIZE, "size 32767");
+
+    /* Alive: fifteen sparks, then silence. */
+    a.health = 10;
+    for (fired = 0, i = 0; i < 20; i++) {
+        q2_fx_world_clear(&w);
+        q2_fx_actor_present(&w, &rng, &a, &src, i, 0, -1, 0, 0, &rep);
+        fired += count_groups(&w, Q2_FX_MESH_SPARK_RAMP, Q2_FX_MESH_SPARK_LIFE);
+        if (i == 14)
+            check_eq_i(a.effect[0], 0, "alive, it reaches 0 on the 15th");
+    }
+    check_eq_i(fired, 15, "alive, effect[0] sparks fifteen times");
+
+    /* effect[2] is gated the same way. */
+    q2_actor_init(&a);
+    a.health = 0;
+    a.effect[2] = 30;
+    q2_fx_actor_present(&w, &rng, &a, &src, 0, 0, -1, 0, 0, &rep);
+    check_eq_i(a.effect[2], 30, "a dead body holds effect[2] too");
+
+    /* effect[4] is NOT: both drivers pass `addiu a1, zero, 1` (0x8005B3EC,
+     * 0x8005B8D0), so it runs down on a corpse. */
+    q2_actor_init(&a);
+    a.health = 0;
+    a.effect[4] = 5;
+    for (fired = 0, i = 0; i < 8; i++) {
+        q2_fx_world_clear(&w);
+        q2_fx_actor_present(&w, &rng, &a, &src, i, 0, -1, 0, 0, &rep);
+        fired += count_groups(&w, Q2_FX_MESH_SPARK_RAMP, Q2_FX_MESH_SPARK_LIFE);
+    }
+    check_eq_i(fired, 5, "effect[4] sparks five times on a corpse");
+    check_eq_i(a.effect[4], 0, "and runs out");
+
+    /* effect[5]: the crackle on ramp 0, life 4, also a literal 1. */
+    q2_actor_init(&a);
+    a.health = 0;
+    a.effect[5] = 3;
+    for (fired = 0, i = 0; i < 6; i++) {
+        q2_fx_world_clear(&w);
+        q2_fx_actor_present(&w, &rng, &a, &src, i, 0, -1, 0, 0, &rep);
+        fired += count_groups(&w, Q2_FX_CRACKLE_SLOT5_RAMP,
+                              Q2_FX_CRACKLE_SLOT5_LIFE);
+    }
+    check_eq_i(fired, 3, "effect[5] crackles on ramp 0 three times");
+    check_eq_i(a.effect[5], 0, "and runs out on a corpse");
+
+    /* effect[3] has no reader and no writer on the disc. */
+    q2_actor_init(&a);
+    a.health = 10;
+    a.effect[3] = 7;
+    for (i = 0; i < 4; i++)
+        q2_fx_actor_present(&w, &rng, &a, &src, i, 0, -1, 0, 0, &rep);
+    check_eq_i(a.effect[3], 7, "effect[3] is never touched");
+
+    /* The spark's cost is the generator's: 45 draws per firing with a model,
+     * none without one. */
+    {
+        q2_rng ref;
+
+        q2_actor_init(&a);
+        a.health = 10;
+        a.effect[0] = 2;
+        ref = rng;
+        q2_fx_world_clear(&w);
+        q2_fx_actor_present(&w, &rng, &a, NULL, 0, 0, -1, 0, 0, &rep);
+        check(rng.state == ref.state, "no model: no draws");
+        check_eq_i(a.effect[0], 1, "but the timer still runs");
+        q2_fx_actor_present(&w, &rng, &a, &src, 0, 0, -1, 0, 0, &rep);
+        for (i = 0; i < 45; i++)
+            (void)q2_rng_next(&ref);
+        check(rng.state == ref.state, "a model: 45 draws for the one spark");
+    }
+}
+
+/*
+ * 0x80058638. An energy hit armed at 3 plays out over three presents, and the
+ * `< 3` arm has a light of its own at exactly 2.
+ */
+static void test_actor_damage_effect(void)
+{
+    q2_fx_world w;
+    q2_rng rng;
+    q2_actor a;
+    stub_mesh m;
+    q2_fx_mesh_src src;
+    q2_fx_present_report rep;
+
+    printf("present: effect[1] ticks itself and has two lights\n");
+
+    q2_fx_world_init(&w, &g_tab);
+    q2_rng_seed(&rng, 11);
+    src = stub_src(&m, 4);
+    q2_actor_init(&a);
+    a.health = 100;
+    a.effect[1] = 3;
+
+    q2_fx_actor_present(&w, &rng, &a, &src, 0, 0, -1, 0, 0, &rep);
+    check_eq_i(count_groups(&w, Q2_FX_CRACKLE_ENERGY_RAMP,
+                            Q2_FX_CRACKLE_ENERGY_LIFE), 1,
+               "tick 1: the energy burst, ramp 17 life 1");
+    check(rep.energy_light && rep.set_ambient && !rep.energy_pulse,
+          "tick 1: the persistent light and the ambient override");
+    check_eq_i(a.effect[1], 2, "tick 1 leaves 2");
+    q2_fx_tick(&w);
+    check_eq_i(w.group[0].life, 0,
+               "a life-1 burst is gone after one integrator tick");
+
+    q2_fx_world_clear(&w);
+    q2_fx_actor_present(&w, &rng, &a, &src, 1, 0, -1, 0, 0, &rep);
+    check_eq_i(count_groups(&w, Q2_FX_CRACKLE_DAMAGE_RAMP,
+                            Q2_FX_CRACKLE_DAMAGE_LIFE), 1,
+               "tick 2: the damage crackle, ramp 18 life 4");
+    check(rep.energy_pulse && !rep.energy_light && !rep.set_ambient,
+          "tick 2: the OTHER light, 0x80075D14, and only it");
+    check_eq_i(a.effect[1], 1, "tick 2 leaves 1");
+
+    q2_fx_world_clear(&w);
+    q2_fx_actor_present(&w, &rng, &a, &src, 2, 0, -1, 0, 0, &rep);
+    check_eq_i(count_groups(&w, Q2_FX_CRACKLE_DAMAGE_RAMP,
+                            Q2_FX_CRACKLE_DAMAGE_LIFE), 1,
+               "tick 3: the crackle again");
+    check(!rep.energy_pulse && !rep.energy_light, "tick 3: no light");
+    check_eq_i(a.effect[1], 0, "tick 3 leaves 0");
+
+    q2_fx_world_clear(&w);
+    q2_fx_actor_present(&w, &rng, &a, &src, 3, 0, -1, 0, 0, &rep);
+    check_eq_i(rep.groups, 0, "tick 4: nothing");
+    check_eq_i(a.effect[1], 0, "and the byte does not wrap to 255");
+
+    /* The driver passes a literal 1 here too, so a corpse's slot runs down. */
+    a.health = 0;
+    a.effect[1] = 2;
+    q2_fx_actor_present(&w, &rng, &a, NULL, 0, 0, -1, 0, 0, &rep);
+    check_eq_i(a.effect[1], 1, "effect[1] counts down on a corpse");
+    check(rep.energy_pulse, "and reports its pulse with no model");
+
+    /* The dispatcher on its own takes the caller's dt, unclamped. */
+    a.effect[1] = 2;
+    q2_fx_actor_damage_effect(&w, &a, NULL, 0, 0, -1, 3, &rep);
+    check_eq_i(a.effect[1], 255, "a dt past the slot wraps, as `sb` does");
+}
+
+/*
+ * 0x8005B7E4 and 0x80058C18. Client-gated, an unsigned strict compare, and a
+ * one-tick shell on ramp 15.
+ */
+static void test_quad_shell(void)
+{
+    q2_fx_world w;
+    q2_rng rng;
+    q2_actor a;
+    stub_mesh m;
+    q2_fx_mesh_src src;
+    q2_fx_present_report rep;
+    u32 i;
+    int even = 0, odd = 0;
+
+    printf("present: the quad shell\n");
+
+    q2_fx_world_init(&w, &g_tab);
+    q2_rng_seed(&rng, 3);
+    q2_actor_init(&a);
+    a.health = 100;
+    a.has_client = true;
+
+    /* 21 vertices: frame 0 walks 0..18 (21 >> 1 = 10, one left over) and
+     * frame 1 walks 1..19 (20 >> 1 = 10). */
+    src = stub_src(&m, 21);
+    q2_fx_actor_present(&w, &rng, &a, &src, 0, 0, 0, 99, 100, &rep);
+    check_eq_i(count_groups(&w, Q2_FX_QUAD_SHELL_RAMP, Q2_FX_QUAD_SHELL_LIFE),
+               1, "one tick before the deadline: a ramp-15, life-1 shell");
+    for (i = 0; i < m.calls; i++) {
+        if (m.index[i] & 1)
+            odd++;
+        else
+            even++;
+    }
+    check(even == 10 && odd == 0, "frame 0 samples the even half");
+
+    /* The next frame takes the other half, and the old shell is gone after
+     * one integrator tick because its life is 1. */
+    q2_fx_tick(&w);
+    check_eq_i(count_groups(&w, Q2_FX_QUAD_SHELL_RAMP, Q2_FX_QUAD_SHELL_LIFE),
+               0, "a tick later the shell has expired");
+    src = stub_src(&m, 21);
+    even = odd = 0;
+    q2_fx_actor_present(&w, &rng, &a, &src, 1, 0, 0, 99, 100, &rep);
+    for (i = 0; i < m.calls; i++) {
+        if (m.index[i] & 1)
+            odd++;
+        else
+            even++;
+    }
+    check(odd == 10 && even == 0, "frame 1 samples the odd half");
+
+    q2_fx_world_clear(&w);
+    q2_fx_actor_present(&w, &rng, &a, &src, 0, 0, 0, 100, 100, &rep);
+    check_eq_i(rep.groups, 0, "at the deadline it is already over (strict)");
+
+    /* `sltu`: a deadline stored negative reads as huge and the shell holds. */
+    q2_fx_actor_present(&w, &rng, &a, &src, 0, 0, 0, 10, -5, &rep);
+    check_eq_i(rep.groups, 1, "the compare is unsigned (0x8005B80C)");
+
+    /* No client, no shell, whatever the inventory says. */
+    a.has_client = false;
+    q2_fx_world_clear(&w);
+    q2_fx_actor_present(&w, &rng, &a, &src, 0, 0, 0, 0, 100, &rep);
+    check_eq_i(rep.groups, 0, "an actor with no client never gets a shell");
+}
+
+/* The particle half of the gib think, 0x80059DE0. */
+static void test_gib_trail(void)
+{
+    q2_fx_world w;
+    q2_rng rng, ref;
+    s32 at[3] = { -500, 60, 7000 };
+    s16 vel[3] = { 150, -301, 75 };
+    s16 want[Q2_FX_GIB_TRAIL_COUNT][3];
+    s32 slot;
+    u32 i;
+    int k, bad = 0;
+
+    printf("gib: the blood trail is a line along the gib's own motion\n");
+
+    q2_fx_world_init(&w, &g_tab);
+    q2_rng_seed(&rng, 2718);
+    ref = rng;
+    for (i = 0; i < Q2_FX_GIB_TRAIL_COUNT; i++)
+        for (k = 0; k < 3; k++)
+            want[i][k] = (s16)((q2_rng_next(&ref) + (4 * vel[k] - 8192)) >> 11);
+
+    slot = q2_fx_gib_trail(&w, &rng, at, vel, 12);
+    check(slot >= 0, "the trail spawned");
+    check(rng.state == ref.state, "45 draws per gib per tick");
+    check_eq_i(w.group[slot].count, 15, "fifteen quads");
+    check_eq_i(w.group[slot].life, 3, "life 3 (0x8005A060)");
+    check_eq_i(w.group[slot].size, 6144, "size 6144");
+    check_eq_i(w.group[slot].area, 12, "the gib's area");
+    check(w.group[slot].ramp[0] == &g_tab.ramp[2] &&
+          w.group[slot].ramp[1] == &g_tab.ramp[3], "ramps 2 and 3");
+    check(w.group[slot].origin[0] == at[0] && w.group[slot].origin[2] == at[2],
+          "at the gib");
+
+    /*
+     * The step is vel / 15, TRUNCATED: -301 / 15 is -20, where a floor would
+     * give -21. The line is offs[i] = i * step and the second spawner stores
+     * offs[i] >> 4, arithmetic.
+     */
+    check_eq_i(w.group[slot].offset[0][0], 10 >> 4, "offs[1].x = 10, >> 4");
+    check_eq_i(w.group[slot].offset[0][1], -20 >> 4, "offs[1].y = -20, >> 4");
+    check_eq_i(w.group[slot].offset[7][0], 80 >> 4, "offs[8].x = 80, >> 4");
+    check_eq_i(w.group[slot].offset[13][0], 140 >> 4, "offs[14].x = 140 >> 4");
+    check_eq_i(w.group[slot].offset[13][1], -18,
+               "offs[14].y = -280 >> 4 — a floored step would give -19");
+    check_eq_i(w.group[slot].offset[13][2], 70 >> 4, "offs[14].z = 70 >> 4");
+
+    for (k = 0; k < 3; k++)
+        if (w.group[slot].vel[k] != want[0][k])
+            bad++;
+    for (i = 1; i < Q2_FX_GIB_TRAIL_COUNT; i++)
+        for (k = 0; k < 3; k++)
+            if (w.group[slot].rel_vel[i - 1][k] !=
+                (s16)(want[i][k] - want[0][k]))
+                bad++;
+    check_eq_i(bad, 0, "velocities are (rand() + 4*vel - 8192) >> 11");
+}
+
+/* ------------------------------------------------------------------------- */
+/* Debris                                                                     */
+/* ------------------------------------------------------------------------- */
 
 static void test_debris(void)
 {
@@ -1607,12 +2416,21 @@ int main(void)
     test_budget();
     test_presets();
     test_spawn_offsets_and_puff();
+    test_spawn_points();
     test_spawn_preset_separates();
     test_beam_pool();
     test_beam_hull();
     test_beam_hull_vertical();
     test_laser();
-    test_gib_blood_colour();
+    test_item_materialise();
+    test_mesh_crackle();
+    test_view_mask_skips_one_viewport();
+    test_mesh_spark();
+    test_mesh_blood();
+    test_actor_present_tickers();
+    test_actor_damage_effect();
+    test_quad_shell();
+    test_gib_trail();
     test_debris();
     test_build_ot();
     test_effect_sorts_with_the_world();

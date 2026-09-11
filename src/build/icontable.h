@@ -15,9 +15,12 @@
  * every reader of the font table, exhaustively and correctly, and concluded
  * that nothing formats a player statistic. That is still true. The bar does not
  * format anything: it draws **pre-rendered sprites** — icons and numerals — out
- * of the sheet in VRAM slot 14 through the quad emitter at `0x80033320`, which
+ * of the sheet in VRAM slot 14 through the field emitter at `0x80035EA0`, which
  * takes a rect and a position and touches neither the font nor a format string.
- * An enumeration of text sites is structurally unable to see it.
+ * (This used to name `0x80033320`, which is the weapon strip's emitter: both of
+ * its JAL callers, 0x80036250 and 0x80036310, are the strip slots in
+ * 0x80035EA0's tail.) An enumeration of text sites is structurally unable to
+ * see it.
  *
  * ---------------------------------------------------------------------------
  * What IS read, and what is not
@@ -164,21 +167,29 @@
 #define Q2_ICON_SLOT       14
 
 /*
- * How big an icon is drawn, by player count (0x800353C8…0x800353E4). This is
- * the only part of split screen the bar expresses, and it is a size change
- * rather than a layout change.
+ * How big an icon is drawn, by player count (0x800353C8…0x800353E4).
+ *
+ * This used to call itself "the only part of split screen the bar expresses,
+ * and a size change rather than a layout change". Neither holds: the four
+ * viewport hooks build four different field layouts (statusbar.h, "FOUR
+ * LAYOUTS"), and the numerals have a split-screen size of their own.
  */
 typedef struct q2_icon_size { u8 w, h; } q2_icon_size;
 
 /*
- * The drawn size of a cell whose own rect is `src_w` x `src_h`.
+ * The drawn size of an ICON whose own rect is `src_w` x `src_h`.
  *
- * Single player keeps the record's own dimensions — which matters because the
- * sheet is not uniform: icons are 32 x 24 but the numerals are 24 x 24, and
- * forcing everything to the icon size stretches every digit by a third. Two
- * players force 24 x 18 and three or more 16 x 12 REGARDLESS of the source, so
- * the reduction is a clamp rather than a scale, and a numeral and an icon end
- * up the same size in split screen.
+ * Single player keeps the record's own dimensions. Two players force 24 x 18
+ * and three or more 16 x 12 REGARDLESS of the source, so the reduction is a
+ * clamp rather than a scale.
+ *
+ * NOT FOR NUMERALS, and this used to say it was — that "a numeral and an icon
+ * end up the same size in split screen". They do not. The numeral row
+ * 0x80034F90 carries its own clamp at 0x80035054, off the same two globals in
+ * the same shape, with different numbers: 18 x 20 for two players (0x80035078,
+ * and 20 in the `j`'s delay slot at 0x80035080) and 13 x 12 for three or four
+ * (13 in the `bne`'s delay slot at 0x80035074, 12 at 0x80035084). The icon
+ * clamp is 0x800353B0, in the ammo sub-draw. See q2_sbar_digit_size.
  *
  * A weapon id of 0 collapses to the 1 x 1 blank.
  */

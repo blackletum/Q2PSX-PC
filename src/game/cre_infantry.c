@@ -343,14 +343,14 @@ static s32 inf_rand(void)
  * it at the call would be dead code pretending to be a transcription. That is
  * the one thing this file still needs from outside itself.
  *
- * ONE DEPARTURE, and it belongs to the shared helper rather than to this file.
- * The module fires from the death animation with NO enemy check at all — the
- * enemy is loaded only on the `frame == 194` arm (0x80100F9C), and the death
- * burst at 0x80101038 never touches it. `q2_cre_fire_shot` opens with the
- * enemy-alive guards that every refire function on the disc carries, so an
- * Infantry dying with no live enemy will not empty its magazine the way the
- * console's does. The guards are right for every other shot on the disc and
- * wrong for this one arm, and they live in crebind.c, not here.
+ * NO DEPARTURE NOW. The module fires from the death animation with NO enemy
+ * check at all — the enemy is loaded only on the `frame == 194` arm
+ * (0x80100F9C), the death burst at 0x80101038 never touches it, and nothing in
+ * the think loads the enemy's health. `q2_cre_fire_shot` used to refuse shots
+ * with no live enemy, which cut this burst short; that test belongs to the
+ * refire callbacks, and crebind.c now only counts such shots. So a dying
+ * Infantry's whole burst reaches the shot hook, as the console's does; what
+ * each round then does is the host's call (`client_cre_shot`).
  */
 static const q2_cre_shot k_infantry_machinegun = {
     Q2_IMP_FIRE_BULLET,   /* import +0x84, loaded at 0x801010BC            */

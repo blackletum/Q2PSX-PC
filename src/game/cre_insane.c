@@ -171,8 +171,9 @@
  *     literal signed halfword. What a non-zero value MEANS for this creature
  *     is not established — see insane_walk — but its observed 0xFFFF sentinel
  *     stays -1 rather than being silently rewritten to zero.
- *   - link_entity and the walkmonster_start / flymonster_start pair have no
- *     port equivalent; both are named at the spawn hook.
+ *   - link_entity has no port equivalent; it is named at the spawn hook. The
+ *     walkmonster_start / flymonster_start pair does now — see the fork in
+ *     insane_spawn.
  *
  * And three things in the image that are owed nothing, listed so a later
  * reader does not go looking for their callers: 0x80101104 (the prone
@@ -796,17 +797,21 @@ static void insane_moan(q2_monster *self)
  * readings are right.
  *
  * Read and dropped, with the offset named for each — and the list is down to
- * three, because solid, movetype, mass and skinnum have fields now:
+ * two, because solid, movetype, mass and skinnum have fields now and the start
+ * call has a port equivalent:
  *
  *   0x80100914  link_entity(self, 1) then link_entity(self, 0x81) — copy the
  *               origin into the render position, then again with bit 7 set so
  *               the linked position is left alone. The port links elsewhere.
  *   0x80100978  sb 10, 0x13B(self)   speed_scale = 10, which
  *               `q2_creature_spawn` already reads out of the decoded module.
- *   0x801009AC / 0x80100994  walkmonster_start (import +0xFC) or
- *               flymonster_start (import +0x100), chosen on the prone bit. The
- *               port's equivalent is `q2_monster_start_go`, which the creature
- *               world already runs, and it has no flying variant.
+ *
+ * The start call is NOT in that list any more. 0x801009AC / 0x80100994 call
+ * walkmonster_start (import +0xFC) or flymonster_start (import +0x100) on the
+ * prone bit, and both are now `q2_monster_walk_start` / `q2_monster_fly_start`
+ * (monster.c) — the wrapper's flag and parked go-routine, and monster_start's
+ * random start frame with the one draw it costs, with `q2_monster_start_go`
+ * running the matching go-routine when the creature world wakes it.
  */
 static void insane_spawn(q2_monster *m)
 {
@@ -845,14 +850,17 @@ static void insane_spawn(q2_monster *m)
      * is what BOTH of the module's start calls reach — import +0xFC
      * `walkmonster_start` for an upright Insane and import +0x100
      * `flymonster_start` for a prone one — so it runs whichever arm the
-     * spawnflag takes. This port has no monster_start, so the pair is
-     * kept consistent here — said out loud rather than left to look like the
-     * module's own write.
+     * spawnflag takes. Neither of this port's stand-ins for monster_start —
+     * q2_creature_spawn, and the wrappers' start-frame pick in monster.c —
+     * copies health into max_health, so the pair is kept consistent here —
+     * said out loud rather than left to look like the module's own write.
      */
     m->max_health = 100;
 
     /* 0x80100904: id's `aiflags |= AI_GOOD_GUY`, and it is the whole reason
-     * the Insane is not counted in the level's monster total. */
+     * the Insane is not counted in the level's monster total — set here,
+     * before the start call whose monster_start tests it, which is why
+     * q2_creature_spawn takes the count after this hook returns. */
     m->aiflags |= Q2_AI_GOOD_GUY;
 
     sf = insane_flags(m);
@@ -873,22 +881,57 @@ static void insane_spawn(q2_monster *m)
      */
     if (sf & INS_SF_CRAWL) {
         /* 0x80100984, `lhu +0x20; ori 0x800; sh`: the prone variant takes no
-         * knockback. Its `flymonster_start` sets FL_FLY as well; the port's
-         * start does not, so only the bit the module writes explicitly is set
-         * here. Then it jumps to 0x801009EC, skipping the skin entirely. */
+         * knockback. */
         m->flags |= Q2_FL_NO_KNOCKBACK;
+
+        /*
+         * 0x8010098C `lw v0, 256(s1)` / 0x80100994 `jalr v0` — import +0x100,
+         * which the loader fills with flymonster_start (0x8007DCE0 stores
+         * 0x8006229C). The WRAPPER raises FL_FLY (0x800622B4) and parks the fly
+         * go-routine, so a prone Insane is a flyer from this instruction to its
+         * death: -250 eye, 114 turn rate and aimove.c's non-stepping movement,
+         * all three from the one call. It used to get only the knockback bit.
+         *
+         * AND THE CALL ITSELF DRAWS FROM THE RNG. Both wrappers end in `jal
+         * 0x800619E0`, monster_start (0x800622B8 here, 0x80062250 for the
+         * walk one), and monster_start's last act is a random start frame
+         * whenever currentmove is set: 0x80061B24 tests it, 0x80061B2C `jal
+         * 0x80089E28` draws, 0x80061B8C stores `first + r % span` into the
+         * frame. currentmove IS set — Stand N, `sw v0, 216(s0)` at 0x80100960,
+         * before the fork — and 0x80089E28 is the same BIOS rand() as this
+         * module's import +0x14 (0x8007DA24/0x8007DA28). Then 0x8010099C `j
+         * 0x801009EC` skips the skin.
+         *
+         * So this arm draws ONCE (the start frame) and the upright arm TWICE
+         * (its start frame, then the skin), in that order.
+         * q2_monster_fly_start and q2_monster_walk_start make the start-frame
+         * draw where the wrapper makes it (monster.c, monster_start_frame), so
+         * the stream every later threshold in this file reads is the
+         * console's. The crucified override below then replaces the frame, as
+         * the module does, but not the draw.
+         */
+        q2_monster_fly_start(m);
     } else {
+        /* 0x801009A4 `lw v0, 252(s1)` / 0x801009AC `jalr v0` — import +0xFC,
+         * walkmonster_start, BEFORE the skin draw: its start-frame draw is the
+         * first of this arm's two. */
+        q2_monster_walk_start(m);
+
         /*
          * 0x801009B4..0x801009E8: one draw through import +0x14, divided by
          * three with the 0x55555556 magic multiply, remainder stored as a
-         * halfword at entity+0x3A. id's `self->skinnum = rand() % 3`.
+         * halfword at entity+0x3A. id's `self->skinnum = rand() % 3`. On the
+         * console it has to come after walkmonster_start: monster_start zeroes
+         * this very field (0x80061AFC `sh zero, 58(s0)`), so a skin written
+         * before the call would not survive it. (The port's stand-in does not
+         * zero it — only the start-frame draw is modelled there.)
          *
-         * The draw is in this arm ALONE, so the two variants do not consume
-         * the same amount of the RNG stream — which is the sort of thing every
-         * threshold in this file is downstream of. And note it is one of THREE
-         * whole skins rather than a clean/wounded pair, which is why
-         * insane_pain does not set the port's `hurt`; `hurt` is the low bit of
-         * exactly this field.
+         * The skin draw is in this arm ALONE, so the two variants do not
+         * consume the same amount of the RNG stream — one draw prone, two
+         * upright — which is the sort of thing every threshold in this file is
+         * downstream of. And note it is one of THREE whole skins rather than a
+         * clean/wounded pair, which is why insane_pain does not set the port's
+         * `hurt`; `hurt` is the low bit of exactly this field.
          */
         m->skinnum = (u8)(ins_rand() % 3);
     }

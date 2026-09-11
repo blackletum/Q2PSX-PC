@@ -18,10 +18,11 @@
  *
  * Both of those look for statistics rendered as CHARACTERS. The bar does not
  * use characters: it draws pre-rendered numeral sprites out of the icon sheet
- * in VRAM slot 14 (`qk_menu.lbm`) through the quad emitter at 0x80033320,
- * touching neither the font table nor a format string. An enumeration of
- * printf sites cannot see it. See FORMATS.md §11.1 for the full retraction and
- * openquestions #20c for what remains.
+ * in VRAM slot 14 (`qk_menu.lbm`) through the field emitter at 0x80035EA0 —
+ * not 0x80033320, which this used to name and which draws only the weapon
+ * strip — touching neither the font table nor a format string. An
+ * enumeration of printf sites cannot see it. See FORMATS.md §11.1 for the full
+ * retraction and openquestions #20c for what remains.
  *
  * **This module is the OVERLAY, which is a different subsystem and is correct
  * as written**: the notification ring, the centre line, the crosshair and the

@@ -867,7 +867,8 @@ static void test_rejects_pre_batch_v4(void)
 
     printf("pre-batch version 4\n");
 
-    check_eq_i(Q2_SAVE_VERSION, 5, "the incompatible format is version 5");
+    check_eq_i(Q2_SAVE_VERSION_OLDEST, 5,
+               "the oldest format read is version 5, the one ITEM arrived in");
     build_state(&sim, &inv);
     check_eq_i(q2_save_capture(&saved, &sim, &inv,
                                "SLES-01534", "BASE1", 0), Q2_OK,
@@ -890,6 +891,303 @@ static void test_rejects_pre_batch_v4(void)
 
     q2_save_free(&saved);
     q2_sim_free(&sim);
+    remove(path);
+}
+
+/* ------------------------------------------------------------------------- */
+/* A save image built by hand, byte by byte, the way an older build wrote it. */
+/* Nothing here goes through q2_save_write, so the test cannot agree with the  */
+/* writer by construction.                                                     */
+/* ------------------------------------------------------------------------- */
+typedef struct save_image {
+    u8  b[512];
+    u32 len;
+} save_image;
+
+static void img_u8(save_image *m, u8 v)
+{
+    if (m->len < sizeof(m->b))
+        m->b[m->len++] = v;
+}
+
+static void img_u32(save_image *m, u32 v)
+{
+    img_u8(m, (u8)v);
+    img_u8(m, (u8)(v >> 8));
+    img_u8(m, (u8)(v >> 16));
+    img_u8(m, (u8)(v >> 24));
+}
+
+static void img_str(save_image *m, const char *s, u32 width)
+{
+    u32 i, n = (u32)strlen(s);
+
+    for (i = 0; i < width; i++)
+        img_u8(m, i < n && i + 1 < width ? (u8)s[i] : 0u);
+}
+
+/* tag, size, then the payload the caller writes; returns where size sits. */
+static u32 img_chunk_begin(save_image *m, const char *tag)
+{
+    u32 at;
+
+    img_u8(m, (u8)tag[0]);
+    img_u8(m, (u8)tag[1]);
+    img_u8(m, (u8)tag[2]);
+    img_u8(m, (u8)tag[3]);
+    at = m->len;
+    img_u32(m, 0);
+    return at;
+}
+
+static void img_chunk_end(save_image *m, u32 at)
+{
+    u32 size = m->len - (at + 4);
+
+    m->b[at + 0] = (u8)size;
+    m->b[at + 1] = (u8)(size >> 8);
+    m->b[at + 2] = (u8)(size >> 16);
+    m->b[at + 3] = (u8)(size >> 24);
+}
+
+/* The standard reflected CRC-32 — the file header's checksum. */
+static u32 img_crc32(const u8 *p, u32 n)
+{
+    u32 crc = 0xFFFFFFFFu, i;
+    int k;
+
+    for (i = 0; i < n; i++) {
+        crc ^= p[i];
+        for (k = 0; k < 8; k++)
+            crc = (crc & 1u) ? (crc >> 1) ^ 0xEDB88320u : crc >> 1;
+    }
+    return ~crc;
+}
+
+/* HEAD for BASE1 on this disc, then EVNT carrying `flags`. */
+static void img_body(save_image *m, const u8 *flags, u32 count)
+{
+    u32 at, i;
+
+    memset(m, 0, sizeof(*m));
+
+    at = img_chunk_begin(m, "HEAD");
+    img_str(m, "SLES-01534", Q2_SAVE_SERIAL_LEN);
+    img_str(m, "BASE1", Q2_SAVE_MAP_LEN);
+    img_u32(m, 0);                          /* zone      */
+    img_str(m, "OLD SAVE", Q2_SAVE_LABEL_LEN);
+    img_u32(m, 0);                          /* timestamp */
+    img_chunk_end(m, at);
+
+    at = img_chunk_begin(m, "EVNT");
+    img_u32(m, count);
+    for (i = 0; i < count; i++)
+        img_u8(m, flags[i]);
+    img_chunk_end(m, at);
+}
+
+static bool img_write(const char *path, u32 version, const save_image *body)
+{
+    u8 head[16];
+    u32 crc = img_crc32(body->b, body->len);
+    FILE *f;
+    bool ok;
+
+    memcpy(head, "Q2PS", 4);
+    head[4]  = (u8)version;
+    head[5]  = (u8)(version >> 8);
+    head[6]  = (u8)(version >> 16);
+    head[7]  = (u8)(version >> 24);
+    head[8]  = (u8)body->len;
+    head[9]  = (u8)(body->len >> 8);
+    head[10] = (u8)(body->len >> 16);
+    head[11] = (u8)(body->len >> 24);
+    head[12] = (u8)crc;
+    head[13] = (u8)(crc >> 8);
+    head[14] = (u8)(crc >> 16);
+    head[15] = (u8)(crc >> 24);
+
+    f = fopen(path, "wb");
+    if (!f)
+        return false;
+    ok = fwrite(head, 1, sizeof(head), f) == sizeof(head) &&
+         fwrite(body->b, 1, body->len, f) == body->len;
+    fclose(f);
+    return ok;
+}
+
+/*
+ * A two-record Events chunk to apply a save to:
+ *
+ *   +8   CAT_A|ONESHOT      [CALL 1]
+ *   +24  CAT_B              [CALL|ONESHOT 2]
+ *
+ * after the u32 count at +0 and the directory terminator at +4.
+ */
+#define SAVE_EV_ONESHOT_RECORD 8
+#define SAVE_EV_MIXED_RECORD   24
+#define SAVE_EV_MIXED_ITEM     28
+
+static void save_events_chunk(u8 *raw, q2_events *ev)
+{
+    memset(raw, 0, 40);
+    raw[0] = 2;                                          /* record count */
+
+    raw[8]  = 16; raw[10] = 1;
+    raw[11] = (u8)(Q2_EVREC_CAT_A | Q2_EVREC_ONESHOT);
+    raw[12] = Q2_EVOP_CALL;                raw[13] = 12; raw[14] = 1;
+
+    raw[24] = 16; raw[26] = 1;
+    raw[27] = Q2_EVREC_CAT_B;
+    raw[28] = (u8)(Q2_EVOP_CALL | Q2_EVOP_ONESHOT); raw[29] = 12; raw[30] = 2;
+
+    memset(ev, 0, sizeof(*ev));
+    ev->data         = raw;
+    ev->size         = 40;
+    ev->record_count = 2;
+    ev->dir_offset   = 4;
+    ev->first_record = 8;
+}
+
+static bool save_events_attach(q2_sim *sim)
+{
+    if (q2_event_rt_init(&sim->event_rt, &sim->events) != Q2_OK)
+        return false;
+    sim->events_ready = true;
+    return true;
+}
+
+/*
+ * VERSION 5 IS MIGRATED. The runtime that wrote version 5 refused a record on
+ * ONESHOT && HASRUN and never set DISABLED for it, so a spent one-shot record
+ * is 0x49 in a v5 file. Today's gate is DISABLED alone (0x8002799C) — loaded
+ * as-is, that record would fire again. The reader gives it its DISABLED bit.
+ */
+static void test_migrates_v5_spent_oneshots(void)
+{
+    /*
+     * 0x49 CAT_A|ONESHOT|HASRUN      spent under v5         -> 0xC9
+     * 0xC9 ... |DISABLED             already disabled       -> 0xC9
+     * 0x48 CAT_A|ONESHOT             never ran              -> 0x48
+     * 0x19 CAT_A|CAT_B|HASRUN        repeatable, has run    -> 0x19
+     * 0x51 CAT_B|ONESHOT|HASRUN      spent                  -> 0xD1
+     * 0x5D ONESHOT|CAT_B|CAT_A|RT2|HASRUN, contact bit too  -> 0xDD
+     */
+    static const u8 old_bytes[6] = { 0x49, 0xC9, 0x48, 0x19, 0x51, 0x5D };
+    static const u8 migrated[6]  = { 0xC9, 0xC9, 0x48, 0x19, 0xD1, 0xDD };
+    save_image body;
+    q2_save loaded;
+    const char *path = tmp_path();
+
+    printf("version 5 event flags\n");
+
+    img_body(&body, old_bytes, 6);
+
+    check(img_write(path, 5, &body) &&
+              q2_save_read(&loaded, path) == Q2_OK &&
+              loaded.event_count == 6 && loaded.event_flags &&
+              memcmp(loaded.event_flags, migrated, 6) == 0,
+          "a v5 file reads with every spent one-shot record disabled, "
+          "and nothing else touched");
+    q2_save_free(&loaded);
+
+    /* The same bytes in a version-6 file mean what they say: 0x49 there is a
+     * one-shot record an ENABLE re-armed (0x800278B0 clears bit 7 only), and
+     * the reader must leave it armed. */
+    check(img_write(path, Q2_SAVE_VERSION, &body) &&
+              q2_save_read(&loaded, path) == Q2_OK &&
+              loaded.event_count == 6 && loaded.event_flags &&
+              memcmp(loaded.event_flags, old_bytes, 6) == 0,
+          "a v6 file's 0x49 stays 0x49: re-armed, not spent");
+    q2_save_free(&loaded);
+
+    remove(path);
+}
+
+/*
+ * And the point of the migration, end to end: an old save of a level where a
+ * one-shot record has fired, loaded into today's runtime, must not fire it
+ * again.
+ */
+static void test_v5_spent_record_stays_spent(void)
+{
+    static const u8 old_bytes[2] = {
+        (u8)(Q2_EVREC_CAT_A | Q2_EVREC_ONESHOT | Q2_EVREC_HASRUN),   /* 0x49 */
+        (u8)(Q2_EVREC_CAT_B | Q2_EVREC_HASRUN)                       /* 0x11 */
+    };
+    u8 raw[40];
+    save_image body;
+    q2_save loaded;
+    q2_sim sim;
+    const char *path = tmp_path();
+
+    printf("a spent record in a v5 save stays spent\n");
+
+    img_body(&body, old_bytes, 2);
+    q2_sim_init(&sim, NULL, 50);
+    save_events_chunk(raw, &sim.events);
+
+    check(img_write(path, 5, &body) &&
+              q2_save_read(&loaded, path) == Q2_OK &&
+              save_events_attach(&sim) &&
+              q2_save_apply(&loaded, &sim, NULL, "SLES-01534", "BASE1")
+                  == Q2_OK &&
+              q2_event_rt_trigger(&sim.event_rt, SAVE_EV_ONESHOT_RECORD),
+          "a hand-built v5 save applies to a runtime over the same script");
+
+    q2_event_rt_update(&sim.event_rt);
+    check_eq_i(sim.event_rt.call_count, 0,
+               "the one-shot record it saved as spent refuses to run");
+
+    q2_save_free(&loaded);
+    q2_sim_free(&sim);
+    remove(path);
+}
+
+/* EVIT: a one-shot ITEM spent before the save stays spent after the load. */
+static void test_item_latches_round_trip(void)
+{
+    u8 raw[40];
+    q2_sim source, restored;
+    q2_inventory inv;
+    q2_save saved, loaded;
+    const char *path = tmp_path();
+
+    printf("event item latches\n");
+
+    q2_sim_init(&source, NULL, 50);
+    save_events_chunk(raw, &source.events);
+    check(save_events_attach(&source), "the source runtime starts");
+    q2_event_rt_trigger(&source.event_rt, SAVE_EV_MIXED_RECORD);
+    q2_event_rt_update(&source.event_rt);
+    q2_inventory_init(&inv);
+
+    check(q2_save_capture(&saved, &source, &inv, "SLES-01534", "BASE1", 0)
+              == Q2_OK &&
+              saved.event_item_count == 40 && saved.event_item_flags &&
+              saved.event_item_flags[SAVE_EV_MIXED_ITEM] == Q2_EVOP_DISABLED,
+          "capture takes the one-shot item's latch");
+
+    q2_sim_init(&restored, NULL, 50);
+    save_events_chunk(raw, &restored.events);
+    check(q2_save_write(&saved, path) == Q2_OK &&
+              q2_save_read(&loaded, path) == Q2_OK &&
+              save_events_attach(&restored) &&
+              q2_save_apply(&loaded, &restored, NULL, "SLES-01534", "BASE1")
+                  == Q2_OK &&
+              q2_event_rt_item_flags(&restored.event_rt, SAVE_EV_MIXED_ITEM)
+                  == Q2_EVOP_DISABLED,
+          "the latch survives the file and the apply");
+
+    q2_event_rt_trigger(&restored.event_rt, SAVE_EV_MIXED_RECORD);
+    q2_event_rt_update(&restored.event_rt);
+    check_eq_i(restored.event_rt.call_count, 0,
+               "so the repeatable record runs without its spent item");
+
+    q2_save_free(&saved);
+    q2_save_free(&loaded);
+    q2_sim_free(&source);
+    q2_sim_free(&restored);
     remove(path);
 }
 
@@ -1344,6 +1642,9 @@ int main(void)
     test_apply_rejects_mismatched_map();
     test_rejects_bad_files();
     test_rejects_pre_batch_v4();
+    test_migrates_v5_spent_oneshots();
+    test_v5_spent_record_stays_spent();
+    test_item_latches_round_trip();
     test_detects_corruption();
     test_mission_and_settings();
     test_slots();

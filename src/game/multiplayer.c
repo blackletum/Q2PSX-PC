@@ -403,6 +403,21 @@ bool q2_mp_may_respawn(const q2_mp_session *s)
 /* Attribution                                                                */
 /* ------------------------------------------------------------------------- */
 
+s8 q2_mp_killer_field(int killer_field, int means_of_death)
+{
+    /* 0x800396C4 reads the mod with `lbu`, so the test is on its low byte;
+     * 0x800396CC/0x800396D0 are `(unsigned)(mod - 9) < 2`, and the `sb` at
+     * 0x800396DC is the only store of a literal -1 to entity+222 anywhere in
+     * the image. */
+    if ((u32)(((u32)means_of_death & 0xFFu) - Q2_MP_MOD_SELF_FIRST) <
+        (u32)(Q2_MP_MOD_SELF_LAST - Q2_MP_MOD_SELF_FIRST + 1))
+        return (s8)-1;
+
+    /* 0x800396EC `lb s1, 222(s0)`: whatever the byte holds, sign-extended.
+     * Nothing between the store and this load narrows it. */
+    return (s8)killer_field;
+}
+
 int q2_mp_attribute_kill(int killer_field, int means_of_death)
 {
     /* `(unsigned)(mod - 9) < 2`, at 0x800396CC. */
@@ -410,9 +425,13 @@ int q2_mp_attribute_kill(int killer_field, int means_of_death)
         (u32)(Q2_MP_MOD_SELF_LAST - Q2_MP_MOD_SELF_FIRST + 1))
         return -1;
 
-    /* The field is read with `lb`, so 0xFF is already -1 by the time the death
-     * handler sees it; anything at or past the player count is the engine's
-     * "not a player" sentinel and the hook's own bound rejects it. */
+    /* The SCORING fold, not the handler's gate (multiplayer.h). The field is
+     * read with `lb`, so 0xFF is already -1 by the time the death handler sees
+     * it; anything at or past the player count — the "not a player" 4 among
+     * them — is folded to -1 here as well, which q2_mp_player_killed charges
+     * to the victim as a suicide. The console does not: its hook bound,
+     * 0x80039774 `slti s1, 4`, rejects such a byte and calls nothing. That is
+     * q2_mp_killer_field's reading, and the death chain uses it. */
     if (killer_field < 0 || killer_field >= Q2_MP_MAX_PLAYERS)
         return -1;
 

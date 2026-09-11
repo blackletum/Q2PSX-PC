@@ -917,6 +917,149 @@ const char *q2_creature_sound_for_addr(const q2_cre_sound_bind *binds,
     return NULL;
 }
 
+/* ------------------------------------------------------------------------- */
+/* The fallback groups — see the block in creature.h for every address        */
+/* ------------------------------------------------------------------------- */
+/*
+ * Keyed by module NAME rather than declared in cre_soldier.c / cre_tankcomm.c,
+ * because the resolver is reached from the sound path (creworld.c) and not from
+ * the transcription, and a table it can consult without linking against seven
+ * creature files is the smaller join. The slot the module plays is unchanged —
+ * cre_soldier.c's SOL_SND_PAIN is still +0x32B4, which is what the module
+ * passes; the substitution is not the play site's business.
+ *
+ * The names are the registrations `q2psx-inspect creatures` prints for the two
+ * modules — 801032AC=sol_pain1 .. 801032C0=sol_deth3, 80102100=tnk_idle1,
+ * 80102110=tnk_step — and the Soldier's six agree with its transcribed name
+ * table (cre_soldier.c, indices 2..7).
+ */
+static const q2_cre_sound_fallback k_sound_fallbacks[] = {
+    /* Soldier pain: module+0xE50, preference pain2 -> pain1 -> pain3. */
+    { "Soldier",  0x32AC, { 0x32B0, 0x32AC, 0x32B4 },
+      "sol_pain1", { "sol_pain2", "sol_pain1", "sol_pain3" } },
+    { "Soldier",  0x32B0, { 0x32B0, 0x32AC, 0x32B4 },
+      "sol_pain2", { "sol_pain2", "sol_pain1", "sol_pain3" } },
+    { "Soldier",  0x32B4, { 0x32B0, 0x32AC, 0x32B4 },
+      "sol_pain3", { "sol_pain2", "sol_pain1", "sol_pain3" } },
+    /* Soldier death: module+0xEB8, preference deth2 -> deth1 -> deth3. */
+    { "Soldier",  0x32B8, { 0x32BC, 0x32B8, 0x32C0 },
+      "sol_deth1", { "sol_deth2", "sol_deth1", "sol_deth3" } },
+    { "Soldier",  0x32BC, { 0x32BC, 0x32B8, 0x32C0 },
+      "sol_deth2", { "sol_deth2", "sol_deth1", "sol_deth3" } },
+    { "Soldier",  0x32C0, { 0x32BC, 0x32B8, 0x32C0 },
+      "sol_deth3", { "sol_deth2", "sol_deth1", "sol_deth3" } },
+    /* Tankcomm idle: module+0x808, tnk_idle1 or else tnk_step. */
+    { "Tankcomm", 0x2100, { 0x2100, 0x2110, 0 },
+      "tnk_idle1", { "tnk_idle1", "tnk_step", NULL } }
+};
+
+const q2_cre_sound_fallback *q2_creature_sound_fallbacks(u32 *count)
+{
+    if (count)
+        *count = (u32)(sizeof(k_sound_fallbacks) /
+                       sizeof(k_sound_fallbacks[0]));
+    return k_sound_fallbacks;
+}
+
+const char *q2_creature_sound_resolve(const char *module_name,
+                                      const q2_cre_sound_bind *binds,
+                                      u32 count, u32 load_base, u32 addr,
+                                      bool (*bank_has)(const char *name,
+                                                       void *user),
+                                      void *user)
+{
+    const char *own = q2_creature_sound_for_addr(binds, count, addr);
+    u32 i;
+
+    if (!module_name)
+        return own;
+
+    for (i = 0; i < sizeof(k_sound_fallbacks) / sizeof(k_sound_fallbacks[0]);
+         i++) {
+        const q2_cre_sound_fallback *g = &k_sound_fallbacks[i];
+        u32 j;
+
+        if (strcmp(g->module, module_name) != 0)
+            continue;
+        if (load_base + g->slot_off != addr)
+            continue;
+
+        /*
+         * THE SLOT'S OWN NAME WINS WHEN THE BANK CARRIES IT, and it wins even
+         * over a higher preference. Every store in the fill pass is guarded by
+         * a `bne v0, zero` on the DESTINATION — 0x80100EAC for +0x32B4,
+         * 0x80100E7C for +0x32AC, 0x80100810 for the Tankcomm's +0x2100 — so a
+         * handle that resolved is never overwritten. The preference order only
+         * decides what a NULL slot is filled with.
+         */
+        if (own && own[0] && (!bank_has || bank_has(own, user)))
+            return own;
+
+        for (j = 0; j < 3; j++) {
+            const char *name;
+
+            if (g->pref_off[j] == 0)
+                break;
+
+            name = q2_creature_sound_for_addr(binds, count,
+                                              load_base + g->pref_off[j]);
+            if (!name || !name[0])
+                continue;
+            if (!bank_has || bank_has(name, user))
+                return name;
+        }
+
+        /*
+         * Nothing in the group resolved: on the console the handle stays zero
+         * and playing it does nothing. Return NULL rather than the registered
+         * name, so a caller counting misses counts a real silence.
+         */
+        return NULL;
+    }
+
+    return own;
+}
+
+const char *q2_creature_sound_fallback(const char *module_name,
+                                       const char *registered,
+                                       bool (*bank_has)(const char *name,
+                                                        void *user),
+                                       void *user)
+{
+    u32 i;
+
+    if (!module_name || !registered || !registered[0])
+        return registered;
+
+    for (i = 0; i < sizeof(k_sound_fallbacks) / sizeof(k_sound_fallbacks[0]);
+         i++) {
+        const q2_cre_sound_fallback *g = &k_sound_fallbacks[i];
+        u32 j;
+
+        if (strcmp(g->module, module_name) != 0)
+            continue;
+        if (strcmp(g->slot_name, registered) != 0)
+            continue;
+
+        /* The same two steps as the address form above, for the same reasons:
+         * a resolved slot is never overwritten, and a NULL one takes the first
+         * handle in the module's order that resolved. */
+        if (!bank_has || bank_has(registered, user))
+            return registered;
+
+        for (j = 0; j < 3; j++) {
+            if (!g->pref_name[j])
+                break;
+            if (bank_has(g->pref_name[j], user))
+                return g->pref_name[j];
+        }
+
+        return NULL;
+    }
+
+    return registered;
+}
+
 /*
  * The whole name table, in order, one entry per record.
  *

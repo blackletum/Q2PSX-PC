@@ -33,6 +33,7 @@
 #define TAG_CMBT TAG('C', 'M', 'B', 'T')   /* weapon gate and the generators  */
 #define TAG_PROJ TAG('P', 'R', 'O', 'J')   /* projectiles in flight           */
 #define TAG_EVNT TAG('E', 'V', 'N', 'T')   /* script flags                    */
+#define TAG_EVIT TAG('E', 'V', 'I', 'T')   /* script item latches (v6)        */
 #define TAG_TRIG TAG('T', 'R', 'I', 'G')   /* trigger residency               */
 #define TAG_ENTS TAG('E', 'N', 'T', 'S')   /* per-entity mutable state        */
 #define TAG_ITEM TAG('I', 'T', 'E', 'M')   /* group order and stable item keys */
@@ -277,6 +278,7 @@ void q2_save_free(q2_save *s)
     if (!s)
         return;
     free(s->event_flags);
+    free(s->event_item_flags);
     free(s->trigger_inside);
     free(s->entities);
     free(s->item_group_order);
@@ -380,6 +382,26 @@ q2_result q2_save_capture(q2_save *out, const q2_sim *sim,
 
         memcpy(out->event_flags, sim->event_rt.flags, n);
         out->event_count = n;
+    }
+
+    /*
+     * And the ITEM latches, which are as much "what has fired" as the record
+     * bytes are: a one-shot item retires itself (0x80027498) inside a record
+     * that may run again. Without them a record an ENABLE re-armed before the
+     * save — LAB 0x6d4, three one-shot items — replays all three on load.
+     */
+    if (sim->events_ready && sim->event_rt.item_flags &&
+        sim->event_rt.item_flags_size > 0) {
+        u32 n = sim->event_rt.item_flags_size;
+
+        out->event_item_flags = (u8 *)malloc(n);
+        if (!out->event_item_flags) {
+            q2_save_free(out);
+            return Q2_ERR_NO_MEMORY;
+        }
+
+        memcpy(out->event_item_flags, sim->event_rt.item_flags, n);
+        out->event_item_count = n;
     }
 
     /*
@@ -524,8 +546,8 @@ static q2_result rebuild_saved_item_roster(const q2_save *s, q2_sim *sim)
          * valid because they have no such history to preserve. */
         if (sim->item_population_ready &&
             sim->item_population.group_count > 0) {
-            Q2_ERROR("version-%d save for a Population map has no ITEM chunk",
-                     Q2_SAVE_VERSION);
+            Q2_ERROR("a version-%d+ save for a Population map has no ITEM "
+                     "chunk", Q2_SAVE_VERSION_OLDEST);
             return Q2_ERR_BAD_FORMAT;
         }
         return Q2_OK;
@@ -835,6 +857,18 @@ q2_result q2_save_apply(const q2_save *s, q2_sim *sim, q2_inventory *inv,
         if (n > sim->event_rt.record_count)
             n = sim->event_rt.record_count;
         memcpy(sim->event_rt.flags, s->event_flags, n);
+    }
+
+    /* Item latches: replaced whole, so a latch the file does not hold is
+     * clear rather than left over from whatever the runtime last ran. A file
+     * with no EVIT (version 5) leaves the runtime's own, which on the fresh
+     * load this is applied to are clear too. */
+    if (s->event_item_flags && sim->events_ready && sim->event_rt.item_flags) {
+        u32 n = s->event_item_count;
+        if (n > sim->event_rt.item_flags_size)
+            n = sim->event_rt.item_flags_size;
+        memset(sim->event_rt.item_flags, 0, sim->event_rt.item_flags_size);
+        memcpy(sim->event_rt.item_flags, s->event_item_flags, n);
     }
 
     /* --- trigger residency -------------------------------------------------- */
@@ -1873,6 +1907,7 @@ static q2_result build_body(const q2_save *s, wbuf *w)
     write_combat(w, s);
     write_projectiles(w, s);
     write_bytes_chunk(w, TAG_EVNT, s->event_flags, s->event_count);
+    write_bytes_chunk(w, TAG_EVIT, s->event_item_flags, s->event_item_count);
     write_bytes_chunk(w, TAG_TRIG, s->trigger_inside, s->trigger_count);
     write_entities(w, s);
     write_item_state(w, s);
@@ -1996,9 +2031,9 @@ static q2_result open_body(const u8 *data, size_t size, u32 *out_version,
     if (out_version)
         *out_version = version;
 
-    if (version != Q2_SAVE_VERSION) {
-        Q2_ERROR("save is version %u, this build reads version %d",
-                 version, Q2_SAVE_VERSION);
+    if (version < Q2_SAVE_VERSION_OLDEST || version > Q2_SAVE_VERSION) {
+        Q2_ERROR("save is version %u, this build reads versions %d to %d",
+                 version, Q2_SAVE_VERSION_OLDEST, Q2_SAVE_VERSION);
         return Q2_ERR_UNSUPPORTED;
     }
 
@@ -2057,6 +2092,12 @@ static q2_result read_body(q2_save *out, const u8 *body, size_t body_size)
                 return Q2_ERR_BAD_FORMAT;
             break;
 
+        case TAG_EVIT:
+            if (!read_bytes_chunk(&c, &out->event_item_flags,
+                                  &out->event_item_count, SAVE_MAX_EVENTS))
+                return Q2_ERR_BAD_FORMAT;
+            break;
+
         case TAG_TRIG:
             if (!read_bytes_chunk(&c, &out->trigger_inside,
                                   &out->trigger_count, SAVE_MAX_TRIGGERS))
@@ -2106,12 +2147,30 @@ static q2_result read_body(q2_save *out, const u8 *body, size_t body_size)
     return Q2_OK;
 }
 
+/*
+ * Version 5 to 6: a spent one-shot record, stored as the runtime that wrote
+ * it left it (ONESHOT|HASRUN, 0x49 for a CAT_A record), gets the DISABLED bit
+ * the current latch would have given it (0x800279A8..0x800279BC), or it loads
+ * armed. Exact for every v5 byte — see the note on version 6 in save.h.
+ */
+static void migrate_v5_event_flags(u8 *flags, u32 count)
+{
+    const u8 spent = (u8)(Q2_EVREC_ONESHOT | Q2_EVREC_HASRUN);
+    u32 i;
+
+    for (i = 0; flags && i < count; i++) {
+        if ((flags[i] & spent) == spent)
+            flags[i] |= Q2_EVREC_DISABLED;
+    }
+}
+
 q2_result q2_save_read(q2_save *out, const char *path)
 {
     u8 *data = NULL;
     size_t size = 0;
     const u8 *body;
     size_t body_size;
+    u32 version = 0;
     q2_result rc;
 
     if (!out || !path)
@@ -2123,7 +2182,7 @@ q2_result q2_save_read(q2_save *out, const char *path)
     if (rc != Q2_OK)
         return rc;
 
-    rc = open_body(data, size, NULL, &body, &body_size);
+    rc = open_body(data, size, &version, &body, &body_size);
     if (rc != Q2_OK) {
         free(data);
         return rc;
@@ -2134,6 +2193,8 @@ q2_result q2_save_read(q2_save *out, const char *path)
 
     if (rc != Q2_OK)
         q2_save_free(out);
+    else if (version < 6)       /* the version EVNT changed meaning at */
+        migrate_v5_event_flags(out->event_flags, out->event_count);
 
     return rc;
 }

@@ -106,20 +106,19 @@
  *    seventh argument, `8` = id's EF_BLASTER, which selects the bolt's trail.
  *    Both are recorded at their think functions and neither is invented.
  *
- *  - THE CHAINGUN NO LONGER FIRES WITHOUT A TARGET. `TankMachineGun` is the one
- *    fire think on this creature that tolerates `enemy == NULL` — the module
- *    flattens the pitch and shoots anyway — and the shared `q2_cre_fire_shot`
- *    guards `enemy` for every creature. The last frames of a burst whose target
- *    died are dropped rather than sprayed. Counted in `fire_no_enemy`.
- *
- *  - AND NONE OF THE THREE STOPS FOR A DEAD ONE. `q2_cre_fire_shot` also
- *    declines when `enemy->health <= 0`, and no fire think in this module reads
- *    the enemy's health at all — module+0xC4C, +0xDE0 and +0xF90 load
- *    entity+0xBC for the aim and never touch obj+0x108. The health test belongs
- *    to the two refire callbacks (module+0x136C and +0x144C) and to
- *    `tank_attack`'s `health < 0`, not to the shot. So an enemy that dies
- *    part-way through a burst or a blaster volley takes the remaining shots on
- *    the console and none here. Counted in `fire_dead_enemy`.
+ *  - (No longer owed.) The chaingun fires without a target and all three guns
+ *    fire at a dead one, as the module does. `TankMachineGun` tolerates `enemy
+ *    == NULL` — the module flattens the pitch and shoots anyway — and no fire
+ *    think in this module reads the enemy's health at all: module+0xC4C, +0xDE0
+ *    and +0xF90 load entity+0xBC for the aim and never touch obj+0x108. The
+ *    health test belongs to the two refire callbacks (the `lh v0, 264(v0)` /
+ *    `blez` at module+0x136C inside tank_refire_rocket and at module+0x144C
+ *    inside tank_reattack_blaster) and to `tank_attack`'s `health < 0`. The
+ *    shared `q2_cre_fire_shot` used to refuse both cases for every creature;
+ *    it now only COUNTS them (`shot_no_enemy`, `shot_dead_enemy`), so a burst
+ *    that has started finishes, and the refire decides whether another starts.
+ *    Whether the shot then HURTS anything is the host's business — see
+ *    `client_cre_shot`.
  *
  *  - THE FOOTSTEP'S RUMBLE IS NOT ROUTED. `tank_footstep` calls import +0x12C,
  *    the player proximity effect, with effect 14 at magnitude 4096 over radii
@@ -127,12 +126,14 @@
  *    played. Named here because "the footstep is transcribed" would otherwise
  *    imply the shake is too.
  *
- *  - THE IDLE HANDLE'S SUBSTITUTION IS NOT ROUTED EITHER. module+0x2100 is
- *    registered as `tnk_idle1` and then overwritten with the `tnk_step` handle
- *    because no bank on the disc carries `tnk_idle1` (see below). The port
- *    resolves the handle by its REGISTERED name, so `tankcomm_think_idle` and
- *    the death move's frame 249 are silent where the console thuds. The fix is
- *    in the resolver, not here.
+ *  - THE IDLE HANDLE'S SUBSTITUTION IS DECLARED BUT NOT YET CALLED BY THE
+ *    HOST. module+0x2100 is registered as `tnk_idle1` and then overwritten with
+ *    the `tnk_step` handle because no bank on the disc carries `tnk_idle1` (see
+ *    below). That move is now the Tankcomm entry of the fallback table in
+ *    creature.c (`q2_cre_sound_fallback`), reached through
+ *    `q2_cre_sound_resolve`; until `client_cre_sound` calls it, the host still
+ *    resolves the handle by its REGISTERED name and `tankcomm_think_idle` and
+ *    the death move's frame 249 stay silent where the console thuds.
  *
  *  - THE SECOND VARIANT CANNOT BE PLACED. The spawn function's last two
  *    instructions are `if (class_id == 92) skinnum = 2`, and 92 is a class byte
@@ -163,13 +164,14 @@
  * handle is a real index, so on the console both readers of module+0x2100 —
  * think 14 and the death move's frame 249 — play `tnk_step`.
  *
- * THIS PORT DOES NOT REPRODUCE THAT SUBSTITUTION, and cannot from inside this
- * file. `client_cre_sound` resolves a handle ADDRESS against the module's own
- * registrations, so module+0x2100 comes back as the name it was REGISTERED
- * with, `tnk_idle1`, which no bank carries; it is counted as missing and
- * nothing is played. Reproducing the console needs the handle→name resolver to
- * apply the module's own post-registration fixups, which lives in creature.c.
- * Listed with the other things this transcription owes, above.
+ * THE SUBSTITUTION LIVES IN THE RESOLVER, not in this file, because it is a
+ * handle-to-handle move that no registration shows. `client_cre_sound`
+ * resolves a handle ADDRESS against the module's own registrations, so
+ * module+0x2100 comes back as the name it was REGISTERED with, `tnk_idle1`,
+ * which no bank carries. The module's own fixup — module+0x808 `lw a0,
+ * 8448(s4)`, +0x810 `bne a0, zero`, +0x818 `lw v0, 8464(s6)`, +0x820 `sw v0,
+ * 8448(s4)` — is the entry `{ "Tankcomm", 0x2100, { 0x2100, 0x2110 } }` in
+ * creature.c, applied by `q2_cre_sound_resolve` to the registered name.
  *
  * The second oddity is a genuine hole in the ORIGINAL. The handle table is nine
  * words at module+0x2100..+0x2120 and only EIGHT are ever written;
@@ -237,7 +239,9 @@
                                          * module+0x808 finds zero here and
                                          * module+0x820 copies the tnk_step
                                          * handle over it. On the console this
-                                         * word holds the STEP sound.        */
+                                         * word holds the STEP sound; the port
+                                         * gets there through the fallback
+                                         * table in creature.c.              */
 #define TANK_SND_PAIN      0x80102104u  /* tnk_pain                          */
 #define TANK_SND_MI_IDLE   0x80102108u  /* NOTHING EVER WRITES THIS. The idle
                                          * callback plays it anyway; see the
@@ -247,8 +251,9 @@
 #define TANK_SND_SIGHT     0x80102114u  /* tnk_sight1                        */
 #define TANK_SND_WINDUP    0x80102118u  /* pt1__strt. Cloned at module+0x82C
                                          * through import +0x3C and given
-                                         * volume 60 through import +0x44, so
-                                         * the handle here is the CLONE's.    */
+                                         * PITCH modifier 60 (over 32) through
+                                         * import +0x44, so the handle here is
+                                         * the CLONE's.                       */
 #define TANK_SND_STRIKE    0x8010211Cu  /* tnk_atck1                         */
 /*
  * module+0x2120 is `msc_udeath`. It is registered and no instruction in the
@@ -796,10 +801,15 @@ static void tankcomm_footstep(q2_monster *self)
  */
 static void tankcomm_blaster(q2_monster *self)
 {
-    /* The module dereferences `enemy` without a test to build the aim, so the
-     * NULL guard `q2_cre_fire_shot` makes for every creature costs this shot
-     * nothing. Its enemy-ALIVE guard is NOT the module's — no fire think here
-     * reads the enemy's health — and that one is a departure; see the header. */
+    /*
+     * No enemy guard, because the module has none: it dereferences `enemy`
+     * without a test to build the aim and never reads the enemy's health. A
+     * volley at a target that died on frame 64 still sends frames 67 and 70;
+     * tank_reattack_blaster's `health > 0` (module+0x144C) is what then stops
+     * a second volley. With a NULL enemy the console would build its aim out
+     * of whatever sits at address zero — nothing the port can reproduce — so
+     * the shot is handed over as it stands and the host decides.
+     */
     q2_cre_fire_shot(self, &tank_shot_blaster);
 }
 
@@ -854,9 +864,15 @@ static void tankcomm_rocket(q2_monster *self)
  * `tank_windup` plays `sound_windup` in the same place.
  *
  * This is the one sound the module post-processes: module+0x82C clones the
- * handle through import +0x3C and sets the clone's volume to 60 through import
- * +0x44, leaving pan and pitch at their sentinels. So the wind-up is quieter
- * than everything else the creature plays, deliberately.
+ * handle through import +0x3C and passes (clone, 60, 128, -1) to import +0x44.
+ * That import is 0x80073A34, three guarded byte stores into the 12-byte sound
+ * request record — byte +1 unless the argument is 0, byte +2 unless it is 128,
+ * byte +3 unless it is -1 — so only byte +1 changes, and byte +1 is the PITCH
+ * modifier over 32 (src/audio/vag.h; 0x8007293C carries it to the voice).
+ * Byte +2, the volume, is left alone. So the wind-up plays at 60/32 of the
+ * sample's rate against the default 35/32 — higher, not quieter. The sound
+ * hook carries no pitch, so the port plays it at the default; that delivery
+ * is a separate item and not this file's.
  */
 static void tankcomm_windup(q2_monster *self)
 {
@@ -931,11 +947,13 @@ static void tankcomm_poststrike(q2_monster *self)
  * read is right rather than merely self-consistent — and 300/500 recur in three
  * other modules, which is the same check made a second way.
  *
- * A DEPARTURE, and it is this creature's alone. The module tolerates a NULL
- * enemy here and fires anyway with a flat pitch; `q2_cre_fire_shot` guards
- * `enemy` for every creature and declines the shot instead. So a Tank Commander
- * that loses its target mid-burst stops shooting where the console would spray
- * the last ten frames level. It is counted in `fire_no_enemy`, so it shows.
+ * NO LONGER A DEPARTURE. The module tolerates a NULL enemy here and fires
+ * anyway with a flat pitch, and `q2_cre_fire_shot` no longer refuses it — it
+ * used to guard `enemy` for every creature, so a Tank Commander that lost its
+ * target mid-burst stopped shooting where the console sprays the last frames
+ * level. The shot now goes out and is counted in `shot_no_enemy`, as an
+ * observation. The burst has no refire to stop it: its move (168..196) ends
+ * back in the run callback.
  */
 static void tankcomm_machinegun(q2_monster *self)
 {
@@ -949,9 +967,10 @@ static void tankcomm_machinegun(q2_monster *self)
  * This is the WRITTEN handle, unlike the monsterinfo `idle` callback's, which
  * nothing ever stores to. But it is not `tnk_idle1` at run time: that name is
  * in no bank on the disc, so module+0x820 has already copied the `tnk_step`
- * handle over this word and the console plays a footfall here. The port
- * resolves the address to its registered name and finds no sample; see the
- * header. Frame 249 of the death move carries this same think — the console
+ * handle over this word and the console plays a footfall here. The port's
+ * address lookup gives the registered name, and `q2_cre_sound_resolve` turns it
+ * into `tnk_step` on any bank without `tnk_idle1`; see the header. Frame 249 of
+ * the death move carries this same think — the console
  * plays a footfall twenty-seven frames into the fall, which is a body hitting
  * the floor. Whether the console MEANT the substitution to land there or only
  * tolerated it is not established; the module has one fallback and both readers

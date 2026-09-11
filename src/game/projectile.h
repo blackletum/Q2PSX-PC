@@ -294,6 +294,23 @@ bool q2_projectile_impact(q2_projectiles *list, u32 index,
                           q2_actor **targets, u32 target_count,
                           const q2_combat_rules *rules);
 
+/*
+ * The same, with the blast OCCLUDED. Every splash call site stores its
+ * candidates through 0x80050810, and that function asks the world, per
+ * candidate, whether the blast can see it (0x80050A24 and 0x80050A3C) before
+ * it hurts it — so retail's rocket does not go through a wall. This module has
+ * no world, so the question is a callback: `clear` is handed straight to
+ * `q2_combat_radius_damage_traced` (combat.h), and NULL is "everything is
+ * visible", which is exactly what the untraced entry points above and below
+ * pass. The sim supplies a real one.
+ */
+bool q2_projectile_impact_traced(q2_projectiles *list, u32 index,
+                                 const s32 point[3], const s32 normal[3],
+                                 q2_actor *attacker, q2_actor *hit,
+                                 q2_actor **targets, u32 target_count,
+                                 const q2_combat_rules *rules,
+                                 q2_combat_clear_fn clear, void *clear_ctx);
+
 /* How much of its speed a grenade keeps when it bounces. MODELLED. */
 #define Q2_GRENADE_BOUNCE_NUM 1
 #define Q2_GRENADE_BOUNCE_DEN 2
@@ -303,6 +320,13 @@ bool q2_projectile_impact(q2_projectiles *list, u32 index,
 u32 q2_projectile_detonate(q2_projectiles *list, u32 index,
                            q2_actor *attacker, q2_actor **targets, u32 count,
                            const q2_combat_rules *rules);
+
+/* The same, occluded through `clear` exactly as q2_projectile_impact_traced
+ * is; NULL keeps q2_projectile_detonate's distance-only sweep. */
+u32 q2_projectile_detonate_traced(q2_projectiles *list, u32 index,
+                                  q2_actor *attacker, q2_actor **targets,
+                                  u32 count, const q2_combat_rules *rules,
+                                  q2_combat_clear_fn clear, void *clear_ctx);
 
 /*
  * Remove a projectile whose safety lifetime elapsed, without applying splash

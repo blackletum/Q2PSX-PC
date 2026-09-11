@@ -203,6 +203,14 @@
 /*
  * Port index -> module handle slot. The header above has the whole thirteen
  * and how each was read; these six are the ones code below asks for.
+ *
+ * PAIN AND DEATH NAME THE SLOT THE MODULE PLAYS, NOT THE SAMPLE THE CONSOLE
+ * HEARS. module+0xE50..+0xF28 fills a null pain or death handle from its trio
+ * — pain2, then pain1, then pain3; deth2, then deth1, then deth3 — and
+ * sol_pain3 is in no bank on the disc, so on the console +0x32B4 always holds
+ * a fallback. That is the Soldier entries of the table in creature.c, applied
+ * to the name below by q2_cre_sound_resolve (crebind.h); the index stays 4
+ * because 4 is what soldier_pain plays (module+0x1078, `lw a0, 12980(v1)`).
  */
 typedef enum sol_sound {
     SOL_SND_IDLE   = 0,     /* +0x32A0  sol_idle1     think 2, module+0x1A44 */
@@ -1120,7 +1128,11 @@ static void soldier_die(q2_monster *self, s16 damage)
  * entity carries at that moment (0x80061B00). So the module writes its skinnum
  * and its health afterwards deliberately, and `max_health` ends up the row's
  * rather than the module's. The port's `q2_creature_spawn` stands in for
- * `monster_start` and runs before this hook, so the same order holds.
+ * `monster_start` and runs before this hook, so the same order holds — all
+ * but its level count, which comes after because it reads AI_GOOD_GUY, and
+ * its random start frame (0x80061B2C), which this hook does not reproduce: it
+ * does not call q2_monster_walk_start, so the draw the console takes for it
+ * is not taken here (monster.h, over the start wrappers).
  *
  * MASS, MOVETYPE AND SOLID were dropped by the first pass because the port had
  * nowhere to put them. It has all three now (monster.h), and `mass` is written

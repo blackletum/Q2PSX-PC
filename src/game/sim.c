@@ -736,6 +736,24 @@ q2_result q2_sim_attach_gameplay(q2_sim *sim, const q2_common_file *common)
             sim->events_ready = true;
             sim->event_rt.on_fx = event_fx;
             sim->event_rt.on_fx_user = sim;
+
+            /*
+             * WHAT A CAT_C LEAVE EDGE PUSHES, read rather than assumed. The
+             * leave pass at 0x8002808C takes `lh v1, 26(s6)` from the trigger
+             * cursor the ENTER loop left one record past the last volume —
+             * the TrigBounds SENTINEL, trigger[count] — so the offset it
+             * queues is the sentinel's event_offset (events_rt.c has the whole
+             * reading). init leaves 0, which is what all 49 maps store there;
+             * this makes a map that stored something else behave as it would
+             * on the console. `q2_trigger_get` accepts index == count for
+             * exactly this kind of read.
+             */
+            if (sim->triggers_ready) {
+                q2_trigger sent;
+
+                if (q2_trigger_get(&sim->triggers, sim->triggers.count, &sent))
+                    sim->event_rt.catc_leave_offset = sent.event_offset;
+            }
         }
     }
 
@@ -762,6 +780,77 @@ bool q2_sim_take_zone_change(q2_sim *sim, u32 *out_zone)
 }
 
 /*
+ * The player's AREA — entity+0x9E, the byte the dispatcher's id gate reads.
+ *
+ * The player's move ends in the link at 0x80045E24, `jal 0x80054DD4` with
+ * a1 = 1, and that arm (0x80054E44..0x80054E90) loads the SecondaryCol cell
+ * index from entity+0xA2, indexes the node array at [0x800C8FEC] (the
+ * SecondaryCol context 0x800C8FE8, +4) with the 36-byte stride, and stores the
+ * node's byte +32 into entity+0x9E. So it is the contents id of the movement
+ * cell the ORIGIN is in, refreshed on every move.
+ *
+ * The port finds that cell for the same origin the volume test samples,
+ * starting from the entity's own cached cell exactly as the move would. -1
+ * when there is no hull or the origin is in no cell, which the gate below
+ * treats as "no area to refuse on" — a port-side answer for a state the
+ * console's player never reaches, chosen so a hull-less harness keeps every
+ * volume it had.
+ */
+static s32 player_area(const q2_sim *sim, const s32 at[3])
+{
+    const q2_player *p = &sim->player[sim->cur_player];
+    q2_coll_node n;
+    s32 node;
+
+    if (!sim->coll_ready || !at)
+        return -1;
+
+    node = q2_coll_find_node(&sim->coll, at, p->ent.node, true);
+    if (node < 0 || !q2_collision_get_node(&sim->coll, (u32)node, &n))
+        return -1;
+    return (s32)n.contents;
+}
+
+/*
+ * 0x80027E64's two gates, which run BEFORE the point test and so decide
+ * whether a volume is looked at at all. s4 is the trigger + 26 (0x80027EC8):
+ *
+ *   0x80027ECC  lh   v0, 8(s4)    trigger+0x22, `flags`
+ *   0x80027ED8  and  v0, a3, v0   a3 is the caller's a1 — 1, from 0x8003A258,
+ *   0x80027EDC  beq  v0, zero     the only call site — so bit 0 or nothing
+ *   0x80027EE4  lb   v0, 6(s4)    trigger+0x20, the id's LOW byte, signed
+ *   0x80027EEC  beq  v0, -1       0xFF is "no id": straight to the point test
+ *   0x80027EF4  lbu  v0, 158(fp)  the player's area, entity+0x9E
+ *   0x80027EFC  bne  v0, a0       any other id must equal it
+ *
+ * The id is the collision-cell contents numbering: a volume named for an area
+ * only fires while the player stands in that area. Checked before it was
+ * switched on, with a scratch pass over all 49 maps that sampled a 25^3 grid in
+ * every event-linked volume against each zone's SecondaryCol: 457 volumes carry
+ * an id, 453 have a sample point in a movement cell, and ALL 453 find their id
+ * among those cells (99.4% of the sampled points sit in a matching cell; the
+ * rest are boundary cells of the neighbouring area). None has an id its cells
+ * never hold. The flag gate refuses exactly one event-linked volume on the
+ * disc, WASTE3 47 (flags 0x4, id 255, event 0x344).
+ *
+ * Both halves of the port's dispatcher — the script contacts here and the
+ * environment/hazard pass in update_env_flags — are one call on the console,
+ * so both take these gates.
+ */
+static bool volume_dispatchable(const q2_trigger *t, s32 area)
+{
+    u8 id;
+
+    if (!(t->flags & 1u))
+        return false;
+
+    id = (u8)(t->id & 0xFFu);
+    if (id == 0xFFu || area < 0)
+        return true;
+    return id == (u8)area;
+}
+
+/*
  * Feed the player's trigger contacts to the Events record categories.
  *
  * This used to make every volume edge-triggered. Retail does not: record flag
@@ -774,6 +863,7 @@ bool q2_sim_take_zone_change(q2_sim *sim, u32 *out_zone)
 static void update_triggers(q2_sim *sim)
 {
     s32 at[3];
+    s32 area;
     u32 i;
 
     if (!sim->events_ready)
@@ -807,10 +897,23 @@ static void update_triggers(q2_sim *sim)
     at[1] = q2_sim_origin_y(sim->player[sim->cur_player].pos[1]);
     at[2] = sim->player[sim->cur_player].pos[2];
 
+    area = player_area(sim, at);
+
     for (i = 0; sim->triggers_ready &&
                 i < sim->triggers.count && i < sim->trigger_capacity; i++) {
-        bool inside = q2_trigger_contains(&sim->triggers, i, at);
-        bool was    = sim->trigger_inside[i] != 0;
+        q2_trigger trig;
+        bool was = sim->trigger_inside[i] != 0;
+        bool inside;
+
+        /*
+         * The gates first, then the point: 0x80027EDC and 0x80027EFC both
+         * branch to the next volume before 0x80027F10 ever tests the origin,
+         * so a refused volume is not "inside" for any purpose — no contact,
+         * no category bit, and no entry edge in `trigger_inside`.
+         */
+        inside = q2_trigger_get(&sim->triggers, i, &trig) &&
+                 volume_dispatchable(&trig, area) &&
+                 q2_trigger_contains(&sim->triggers, i, at);
 
         sim->trigger_inside[i] = inside ? 1u : 0u;
 
@@ -818,9 +921,6 @@ static void update_triggers(q2_sim *sim)
             continue;
 
         {
-            q2_trigger trig;
-            if (!q2_trigger_get(&sim->triggers, i, &trig))
-                continue;
             if (trig.event_offset == Q2_TRIGGER_NO_EVENT)
                 continue;
 
@@ -843,6 +943,16 @@ static void update_triggers(q2_sim *sim)
     }
 
     q2_event_rt_contacts_end(&sim->event_rt);
+
+    /*
+     * 0x800AEBCC, handed to the ZONEGATE refusal. 0x80079178 reads the same
+     * deathmatch word the sim already keeps as `multiplayer` (0x8007917C) and
+     * answers "no gate" in deathmatch, so an arena never loads a zone. The
+     * runtime cannot read the global itself and init leaves it false, so it is
+     * refreshed here, every update, rather than once at attach — `multiplayer`
+     * is set by the owner after the attach on every path that sets it.
+     */
+    sim->event_rt.multiplayer = sim->multiplayer;
 
     if (q2_event_rt_update(&sim->event_rt) == Q2_EVENT_ZONE_CHANGE) {
         sim->zone_change_pending = true;
@@ -1605,10 +1715,19 @@ static void update_env_flags(q2_sim *sim)
      * of a crouch zone takes one tick to stand up.
      */
     if (sim->volume_env && sim->triggers_ready) {
+        s32 area = player_area(sim, at);
+
         for (i = 0; i < sim->triggers.count; i++) {
             bool hazard = sim->volume_damage && sim->volume_damage[i] != 0;
+            q2_trigger t;
 
             if (!sim->volume_env[i] && !hazard)
+                continue;
+            /* The same dispatcher, so the same two gates ahead of the point
+             * test — see volume_dispatchable. A crouch or lava volume named
+             * for another area does not reach a player standing outside it. */
+            if (!q2_trigger_get(&sim->triggers, i, &t) ||
+                !volume_dispatchable(&t, area))
                 continue;
             if (!q2_trigger_contains(&sim->triggers, i, at))
                 continue;
@@ -2660,16 +2779,20 @@ static void update_pain(q2_sim *sim)
         if (p->prev_health > 0) {
             /*
              * AND NOT EVERY DEATH IS AUDIBLE. The voice belongs to the death
-             * handler rather than to this function, and 0x80039728 skips it
-             * outright unless entity+222 is -1 — so only a death nobody is
-             * credited with cries out. A player shot by somebody dies in
-             * silence, and the port had been raising pla_death4 for all of
-             * them because this is where it first noticed the crossing.
+             * handler rather than to this function, and 0x80039728 `bne s1,
+             * -1` skips it outright unless the RAW byte at entity+222 (`lb` at
+             * 0x800396EC) is -1 — and the only instruction that ever stores -1
+             * there is 0x800396DC, which does so for mods 9 and 10 (acid and
+             * lava; `addiu -9` / `sltiu 2` at 0x800396CC/0x800396D0). So only a
+             * raw -1 cries out. Nothing else is folded into it: the "not a
+             * player" 4 and the index byte the single-player arm computes at
+             * 0x80057E88 even for a NULL attacker (a crusher, 0x80051E74) both
+             * die in silence, as does a player shot by somebody. The port had
+             * been raising pla_death4 for all of them because this is where it
+             * first noticed the crossing.
              *
-             * `q2_player_death_cries_out` is that test, including 0x800396CC's
-             * correction: acid and lava erase the attacker first, so dying in
-             * the level's own hazards IS audible however you came to be
-             * standing in them.
+             * `q2_player_death_cries_out` is that test, so dying in the level's
+             * own hazards IS audible however you came to be standing in them.
              */
             if (q2_player_death_cries_out(sim->combat.self.last_attacker,
                                           sim->combat.self.last_mod))
@@ -2987,6 +3110,18 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
      */
     if (run_world)
         q2_ent_events_clear(&sim->ent_world.events);
+
+    /*
+     * The frame counter [0x800B2DE4], counted HERE, before anything in the
+     * tick reads it. The console's frame function 0x80070490 stores the new
+     * value at 0x80070610 and only then does 0x80038D4C call 0x8006A4F0, the
+     * loop that runs every entity's think, and the thinks are what present an
+     * actor (0x8005B880). Counting it at the end of the tick, as this used to,
+     * handed every presentation the previous frame's number, one vertex phase
+     * behind the console's. Once a frame, not once a player; see sim.h.
+     */
+    if (run_world)
+        sim->tick_count++;
 
     /*
      * 0x8003A41C — the fly bit, mirrored out of the GAME VARIABLES word before
@@ -3365,9 +3500,6 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
      * 0x80035580, which the console does from inside the status bar. Here
      * because a headless run has no bar and the state is the inventory's. */
     q2_inventory_armour_upkeep(&sim->combat.inv);
-
-    if (run_world)
-        sim->tick_count++;
 }
 
 /*
@@ -3465,7 +3597,20 @@ void q2_sim_player_reset_combat(q2_sim *sim, int index)
      * the inventory — which is what has to happen for a player hit while parked
      * — would write 0 over a full one, and three of four players ended a
      * capture dead without anything having shot them.
+     *
+     * FROM A FRESH ACTOR, because this is a placement and the refresh carries
+     * what the slot held: the killer byte, the mod, the effect bytes and
+     * env_next (combat.h). At level start the slot is still zeroed, and a 0 in
+     * the killer byte is player 0's index; on a deathmatch respawn it is the
+     * dead body, so the new one inherited its last killer. 0x8003DDF8 places a
+     * player on a new entity: 0x8003B250 allocates it through 0x8006C098,
+     * which clears all 768 bytes (0x8006C18C), clears the 224-byte client
+     * record too (0x8003B2BC `jal 0x80089E18`, a1 = 0, a2 = 224, so client+0x94
+     * goes to 0), and 0x8003DE34 then stores 4 in +222. q2_actor_init is that
+     * state. It also sets `owner` to -1; both client callers name the player
+     * straight afterwards.
      */
+    q2_actor_init(&sim->combat.self);
     q2_actor_from_player(&sim->combat.self, &sim->combat.inv,
                          sim->player[index].pos);
     combat_swap_to(sim, saved);

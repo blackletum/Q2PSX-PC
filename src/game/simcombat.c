@@ -158,8 +158,24 @@ static void fx_hitscan_impact(q2_sim *sim, const s32 origin[3],
          * flash also distinguishes. */
         if (!dr || dr->taken > 0)
             fx_at(sim, Q2_FX_BLOOD, at);
-        if (dr && dr->killed)
-            q2_fx_gib(&sim->fx, &sim->fx_rng, at, 0, Q2_FX_BLOOD_RED);
+        /*
+         * THE SECOND BURST IS GONE, and that is a correction rather than a trim.
+         *
+         * 0x800596B0 is not a gib burst. It lives inside the ITEM think
+         * 0x80059330 — 0x800595AC advances the materialise scale, 0x800595C8
+         * clamps it at 4096 — and its ramp is chosen from the ITEM's glow bits
+         * at entity+0x44, which is the same word 0x800596B8 tests for the glow
+         * light one instruction later. Raising it on a killing blow painted an
+         * item's ramp-1 glow at the victim's feet.
+         *
+         * A kill raises nothing of its own. What the console raises when a
+         * body COMES APART is the destruction dispatcher 0x8007CEB4, whose
+         * default arm calls ThrowGibs 0x8005A3D4 (0x8007D138), which opens with
+         * 0x8005B320 (0x8005A440): the MESH blood spray on ramps 2 and 3 at
+         * size 6144, q2_fx_gib_spray in effect.h. That needs the victim's posed
+         * model, which this file has no access to. Nothing extra is raised
+         * here rather than raising the wrong thing.
+         */
         return;
     }
 
@@ -254,6 +270,23 @@ void q2_sim_combat_init(q2_sim *sim)
     sim->combat.chaingun_bullets = 1;
 
     q2_actor_from_player(&sim->combat.self, &sim->combat.inv, sim->player[sim->cur_player].pos);
+
+    /*
+     * THE KILLER BYTE A PLAYER IS PLACED WITH. 0x8003DDF8 builds the body on a
+     * freshly cleared entity (0x8006C18C's 768-byte memset) and then stores 4:
+     * 0x8003DE24 `addiu v0, zero, 4` / 0x8003DE34 `sb v0, 222(s1)`. The memset
+     * above leaves 0, which is player 0's index, and the refresh carries the
+     * byte rather than re-seeding it (combat.h), so without this a deathmatch
+     * kill by a creature nobody has hurt (the 0x80057E5C arm, no store) was
+     * scored as player 0's suicide.
+     *
+     * Seeded here rather than through q2_actor_init, which would also move
+     * `owner` from the memset's 0 to -1 and leave player 0 unnamed for every
+     * caller that does not set it. The other fields the refresh carries (+223,
+     * the effect bytes, client+0x94) are already the memset's 0, which is what
+     * the cleared entity and the cleared client record (0x8003B2BC) hold.
+     */
+    sim->combat.self.last_attacker = (s8)Q2_MP_NOT_A_PLAYER;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -411,22 +444,36 @@ bool q2_sim_autoselect_weapon(q2_sim *sim)
  *   - `skill` never left 1, so 0x800582C8's "a monster hits you at skill 0 for
  *     half" never fired, even though the front end already knows the skill and
  *     hands it to the creature AI through `q2_cre_set_skill`. Easy was as
- *     dangerous as medium.
+ *     dangerous as medium. Armour's rounding bias hangs off the same halfword
+ *     (0x80057C10 `lh 0x800B334A`, then 0x80057C18 `bne v0, zero` to the 2048
+ *     in its delay slot), so easy's 4095 was never used either.
  *   - `deathmatch` never left false, so the railgun's 150 (0x8004D5D8) was
- *     unreachable, armour always used the 4095 single-player bias instead of
- *     2048, and the -3072 rocket-jump ceiling was applied inside deathmatch,
- *     where 0x800580E8 does not apply it.
+ *     unreachable and the -3072 rocket-jump ceiling was applied inside
+ *     deathmatch, where 0x800580E8 does not apply it. The armour bias does not
+ *     read it: the deathmatch word 0x800AEBCC is loaded at 0x80057DA8 for the
+ *     killer byte and at 0x800580D0 for that ceiling (tested at 0x800580E0),
+ *     while the bias's own load, 0x80057C10, is the skill halfword above.
  *
  * Both are read from where the rest of the port already keeps them rather than
  * from a new copy: the skill from the AI's own global, deathmatch from the
  * `sim->multiplayer` flag that `sim->ent_world.deathmatch` is already taken
  * from, so the item half and the combat half of deathmatch cannot disagree.
+ *
+ * And the third frozen field was `cheats`. The damage function reads the GAME
+ * VARIABLES word straight out of its global — 0x80058398 `lhu` of 0x800B29EC —
+ * for ONE SHOT KILL, and `q2_combat_rules_default` zeroes it. The client
+ * already writes the menu's word into `sim->cheats` (0x8001C698's hand-off),
+ * so without this line the cheat reached the sim and stopped one struct short
+ * of the only instruction that reads it: a zero word, forever. Copied from the
+ * same field the item dispatch already reads bit 0 of, so there is still one
+ * 0x800B29EC in the port.
  */
 static void sync_rules(q2_sim *sim)
 {
     sim->combat.rules.level_time = sim->level_time;
     sim->combat.rules.skill      = (s16)q2_cre_skill();
     sim->combat.rules.deathmatch = sim->multiplayer;
+    sim->combat.rules.cheats     = sim->cheats;   /* 0x80058398 lhu 0x800B29EC */
 }
 
 static s32 world_fraction_for(q2_sim *sim, const s32 origin[3],
@@ -444,6 +491,91 @@ static s32 world_fraction_for(q2_sim *sim, const s32 origin[3],
 
     q2_sim_trace(sim, origin, end, &tr);
     return tr.hit ? tr.fraction : 4096;
+}
+
+/*
+ * Is the SIM'S OWN PLAYER behind this origin pointer? combat.c hands the clear
+ * test `t->origin` itself (q2_combat_radius_damage_traced), so a pointer
+ * compare against the sim's player actors is exact, and a creature — whose
+ * actor the client owns — can never compare equal.
+ */
+static bool is_player_origin(const q2_sim *sim, const s32 *origin)
+{
+    int k;
+
+    if (origin == sim->combat.self.origin)
+        return true;
+    for (k = 0; k < Q2_SIM_MAX_PLAYERS; k++)
+        if (origin == sim->pcombat[k].self.origin)
+            return true;
+    return false;
+}
+
+/*
+ * "Can the blast see this candidate?" — 0x80050810's two gates, which sit
+ * between the falloff and the damage call and skip the candidate on a zero:
+ *
+ *   0x80050A24  jal 0x80044C44   a0 = 0x800C8E90 (PrimaryColl), a1 = the
+ *                                blast, a2 = candidate+0x54, a3 = the
+ *                                projectile's own cell (the caller's 2nd arg)
+ *   0x80050A3C  jal 0x80053974   a0 = the blast, a1 = candidate+0x54, a2 = 0
+ *
+ * 0x80044C44 is the hull's swept move — collision.h names it q2_coll_move —
+ * and 0x80053974 is the 48-slot entity-box clip at 0x800CAE10, which returns
+ * 0 when a box stops the segment. So the pair is "the hull lets the segment
+ * through, and then no door, lift or intact pane does", which is exactly the
+ * two passes q2_sim_trace makes, in the same order, through the same hull.
+ *
+ * THE ZONE/NODE QUERY IS STILL NOT MODELLED AS A SEPARATE GATE. combat.h
+ * describes 0x80050A24 as a zone/node visibility query and leaves it out;
+ * nothing here adds one. Read at the call, that `jal` is the same swept move
+ * this trace already runs, so modelling it again would trace the hull twice.
+ * The one argument q2_sim_trace does not pass is the cell HINT in a3: it
+ * starts from -1, a brute-force sweep (0x80044C74). That only changes which
+ * cell a boundary point is placed in, and q2_coll_point_in_node is inclusive,
+ * so a blast sitting on the face it struck is still inside that cell.
+ *
+ * Two port-side adjustments, both because the port's inputs differ from the
+ * console's rather than because the rule does:
+ *
+ *   - A PLAYER'S actor carries the FEET in `origin` (q2_actor_from_player is
+ *     handed `player.pos`), where retail's candidate+0x54 is the entity
+ *     origin, Q2_EYE_BASE above them. The segment is aimed at the origin, so
+ *     a floor lip between a blast and a player's feet hides nothing the
+ *     console's segment would not also meet.
+ *   - A blast point in NO CELL (tr.node < 0) is let through. The console's
+ *     blast is where its projectile's own move left it, always inside a cell;
+ *     the port detonates a direct hit at the step's unclipped end, which can
+ *     lie inside a wall behind the victim. There the question has no console
+ *     answer, so it keeps the distance-only one it had before occlusion, and
+ *     `q2_sim_proj_scan.splash_unplaced` counts every such blast.
+ *
+ * Behind `coll_ready`, exactly as world_fraction_for is: no movement hull, no
+ * world, and everything is visible.
+ */
+static bool splash_clear(void *ctx, const s32 from[3], const s32 to[3])
+{
+    q2_sim *sim = (q2_sim *)ctx;
+    q2_trace tr;
+    s32 aim[3];
+
+    if (!sim || !sim->coll_ready || !from || !to)
+        return true;
+
+    aim[0] = to[0];
+    aim[1] = is_player_origin(sim, to) ? q2_sim_origin_y(to[1]) : to[1];
+    aim[2] = to[2];
+
+    q2_sim_proj_scan.splash_asked++;
+    q2_sim_trace(sim, from, aim, &tr);
+
+    if (tr.hit && tr.node < 0) {
+        q2_sim_proj_scan.splash_unplaced++;
+        return true;
+    }
+    if (tr.hit)
+        q2_sim_proj_scan.splash_occluded++;
+    return !tr.hit;
 }
 
 q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
@@ -784,10 +916,14 @@ static void projectile_owner_splash(q2_sim *sim, const q2_projectile *p,
         q2_actor_from_player(owner, &sim->combat.inv,
                              sim->player[sim->cur_player].pos);
 
+    /* The owner is one more candidate of the same 0x80050810 sweep, so it is
+     * occluded by the same trace: a rocket that bursts on the far side of a
+     * wall does not reach the player who fired it. */
     one[0] = owner;
-    q2_combat_radius_damage(owner, NULL, point ? point : p->pos, p->damage,
-                            p->splash_radius, p->mod, one, 1,
-                            &sim->combat.rules);
+    q2_combat_radius_damage_traced(owner, NULL, point ? point : p->pos,
+                                   p->damage, p->splash_radius, p->mod,
+                                   one, 1, &sim->combat.rules,
+                                   splash_clear, sim);
 
     if (owner == &sim->combat.self)
         q2_actor_to_player(owner, &sim->combat.inv);
@@ -827,9 +963,10 @@ q2_hand_grenade_update q2_sim_hand_grenade_update(
 
         memcpy(where, p->pos, sizeof(where));
         projectile_owner_splash(sim, p, where, targets, count);
-        q2_projectile_detonate(&sim->combat.projectiles, (u32)index,
-                               attacker_for(sim, p->owner), targets, count,
-                               &sim->combat.rules);
+        q2_projectile_detonate_traced(&sim->combat.projectiles, (u32)index,
+                                      attacker_for(sim, p->owner), targets,
+                                      count, &sim->combat.rules,
+                                      splash_clear, sim);
         fx_at(sim, Q2_FX_EXPLOSION, where);
         return Q2_HAND_GRENADE_EXPIRED;
     }
@@ -865,6 +1002,121 @@ q2_hand_grenade_update q2_sim_hand_grenade_update(
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * THE CLIENT HALF OF ONE PRESENTATION: which viewport the actor's bursts hide
+ * from, and whose quad deadline its shell reads.
+ *
+ * The console takes both off the entity it is presenting. Every drawer writes
+ * the view nibble for ANY entity whose +0x0C client is non-null (0x800590C0
+ * `lw v1, 12(s5)` / 0x800590C8 `beq`, and the same at 0x80058B70, 0x80058D38,
+ * 0x80058EFC and 0x80059288), from that client's own index; and the shell
+ * reads that entity's own client+0xAC (0x8005B7EC, 0x8005B7FC). So the live
+ * player is not special. A PARKED deathmatch player in the world list is a
+ * client entity too, and it gets its own index and its own deadline; only an
+ * actor with no client gets -1 and 0.
+ *
+ * This used to pass -1 and 0 for everything in the world list and -1 for the
+ * live player. Once a mesh arrives that would have drawn a parked player's
+ * crackle in that player's own viewport, which the console hides, and would
+ * never have shown a quad shell on anyone but the live player.
+ *
+ * The client is found by POINTER, because the sim owns every player actor it
+ * can name: `combat.self` is the live player's, `pcombat[k].self` player k's
+ * while it is parked. An actor that claims a client but is none of those has
+ * no client block this sim can read, so it keeps -1 and 0 (no nibble, no
+ * shell). `has_client` gates both, as the console's client pointer does.
+ */
+static void present_client_of(const q2_sim *sim, const q2_actor *a,
+                              s32 *view_skip, s32 *quad_until)
+{
+    int k;
+
+    *view_skip  = -1;
+    *quad_until = 0;
+    if (!a->has_client)
+        return;
+
+    if (a == &sim->combat.self) {
+        *view_skip  = sim->cur_player;
+        *quad_until = sim->combat.inv.quad_until;
+        return;
+    }
+    for (k = 0; k < Q2_SIM_MAX_PLAYERS; k++) {
+        if (k != sim->cur_player && a == &sim->pcombat[k].self) {
+            *view_skip  = k;
+            *quad_until = sim->pcombat[k].inv.quad_until;
+            return;
+        }
+    }
+}
+
+/*
+ * One actor through 0x8005B880, and the energy light it reports.
+ *
+ * THE MESH COMES FROM THE OWNER'S HOOK. This file has no posed model for an
+ * actor; the client does, so it installs `sim->fx_mesh` and the hook hands back
+ * a q2_fx_mesh_src whose vertex callback yields the WORLD-space posed vertex
+ * 0x8006CC44 returns. With no hook, or a hook that answers false (the local
+ * player's own actor, which has no body in first person), the source is NULL
+ * and the drawers take the console's model-less path: 0x8006D6AC returns zero
+ * for a null model, every walk finds fewer vertices than it needs and leaves,
+ * and the spark leaves at 0x800589E0 before its 45 velocity draws. That last
+ * part is exact only for an entity that really has no model. A MODELLED
+ * creature the hook cannot pose costs the console those 45 draws per spark
+ * firing and the port none (effect.h). The timers and the light reports are
+ * exact either way. The hook decides only what `src` is, never whether the
+ * call happens, so it cannot make a countdown run twice.
+ *
+ * The source is built immediately before the call and dies after it, so
+ * whatever `ctx` the hook fills in only has to outlive this function, which is
+ * the lifetime the hook's contract promises.
+ *
+ * `frame` is `tick_count`, the port's [0x800B2DE4]: a FRAME COUNTER, +1 a
+ * world tick (0x800705C4 `addiu a1, a1, 1`, stored at 0x80070610), and counted
+ * before this pass runs, as the console counts it before its thinks (sim.h).
+ * It picks which vertices a drawer samples: the crackle starts on vertex
+ * `frame & 1`, so the two halves of the mesh alternate, and the spark on
+ * `frame & 7`. level_time used to stand in for it. The clock steps by dt, 12 a
+ * tick at the nominal rate, so at any even dt its low bit never changed, the
+ * crackle sampled the same half of the body forever, and the spark reached two
+ * of its eight phases.
+ *
+ * The energy light, one per lit actor: 0x80058638 raises it on effect[1] >= 3
+ * with the colour and radii at 0x800AEAAC and 0x800AEAB0 (combat.h). It follows
+ * the report rather than a re-read of the slot, which puts it on the right side
+ * of the decrement: 0x800586D0 raises it from the value the tick STARTED with,
+ * and the subtraction at 0x80058768 comes afterwards. `q2_actor_energy_lit`
+ * still states the same predicate for anyone who wants it without running a
+ * presentation pass; combat.c owns it.
+ *
+ * NOT RAISED HERE: `rep.energy_pulse`, the `effect[1] == 2` arm's own light
+ * at 0x80058758. It goes through 0x80075D14, a different function from the
+ * `>= 3` arm's 0x80075C34, and which list entry that appends is lighting.c's
+ * to name (effect.h). It is reported so it stops being invisible, and not
+ * raised on a guess.
+ */
+static void present_actor(q2_sim *sim, q2_actor *a)
+{
+    static const u8 energy[3] = { Q2_ENERGY_LIGHT_R, Q2_ENERGY_LIGHT_G,
+                                  Q2_ENERGY_LIGHT_B };
+    q2_fx_present_report rep;
+    q2_fx_mesh_src src;
+    const q2_fx_mesh_src *sp;
+    s32 view_skip, quad_until;
+
+    sp = (sim->fx_mesh && sim->fx_mesh(sim->fx_mesh_user, a, &src))
+             ? &src : NULL;
+    present_client_of(sim, a, &view_skip, &quad_until);
+
+    q2_fx_actor_present(&sim->fx, &sim->fx_rng, a, sp, sim->tick_count, 0,
+                        view_skip, sim->level_time, quad_until, &rep);
+
+    if (rep.energy_light)
+        q2_ent_light_at(&sim->ent_world.events, a->origin, energy,
+                        Q2_ENERGY_LIGHT_INNER, Q2_ENERGY_LIGHT_OUTER);
+}
+
+/* ------------------------------------------------------------------------- */
 void q2_sim_combat_tick(q2_sim *sim)
 {
     u32 i;
@@ -885,65 +1137,79 @@ void q2_sim_combat_tick(q2_sim *sim)
         return;
 
     /*
-     * The energy-bolt effect's green light, one per lit actor. 0x80058638 gates
-     * it on effect[1] >= 3 and reads its colour and radii from 0x800AEAAC and
-     * 0x800AEAB0 — see combat.h. Raised here rather than at the damage site so
-     * it lasts as long as the effect does rather than for the tick that armed it.
+     * THE PER-ACTOR PRESENTATION PASS, 0x8005B880, once per actor per world
+     * tick: the live player first, then every other actor in the world.
+     *
+     * THE COUNTDOWN IS NO LONGER THIS LOOP'S, AND THE GATES WERE WRONG.
+     *
+     * What used to sit here was `for every slot: if (slot) slot--`, over all
+     * six bytes, for self and every world target, once per world tick. Its
+     * comment said "nothing did", which was true and was the right thing to
+     * notice — the first energy hit an actor took left `effect[1]` at full
+     * strength for the rest of the level and parked a 1300-unit pure-green
+     * light on them, which is the fault it was written to fix.
+     *
+     * But it decremented the wrong things on the wrong clock:
+     *
+     *   - effect[1] is run down INSIDE 0x80058638 (0x80058768), by the
+     *     caller's dt, and only when it was non-zero on entry.
+     *   - effect[0] and effect[2] are run down by (health > 0) (0x8005B8AC
+     *     feeds `slt s1, zero, s1` to those two tickers alone), so on a
+     *     corpse they hold and keep emitting. What ends that on the console
+     *     is the corpse think's gate 0x8005B2A8, which swaps such a body to a
+     *     dissolve handler that frees it a few frames later (effect.h). That
+     *     gate is the corpse owner's to model, not this pass's.
+     *   - effect[4] and effect[5] are run down by a literal 1 whatever the
+     *     health (0x8005B8D0, 0x8005B8E4).
+     *   - effect[3]: 0x8005B880 never touches +0x2F3, and `q2psx-inspect
+     *     access 0x2F3` finds no immediate-offset load or store of it in the
+     *     main executable (it does not scan the relocated modules), so
+     *     decrementing it was inventing a rule.
+     *
+     * All five countdowns belong to the presentation pass, which is now
+     * q2_fx_actor_present (effect.h). Calling it from here keeps the fix and
+     * takes the rules from the executable.
+     *
+     * WHO IS PRESENTED. The console presents every entity every frame: the
+     * creature think calls 0x8005B880 at 0x8007EC0C for every monster, alive
+     * or dead (0x8007EBEC..0x8007EC08 only sets a flag when health <= 0), and
+     * the player think calls it at 0x8003B004. Here that is `combat.self`
+     * and then the world's list — `world_targets`, or `combat.targets` when
+     * nobody published one, the same fallback every projectile path below
+     * takes. This pass used to walk `world_targets` alone, so a caller that
+     * registered its creatures only through q2_sim_set_targets had none of
+     * them presented: the effect[1] = 3 an energy bolt armed on a monster was
+     * never counted down by this pass and never raised its light. The client
+     * now also publishes its single-player creature list as the world list
+     * (main.c, after its q2_sim_set_targets); for this pass that call is
+     * redundant, since both lists are the same one. The pass no longer
+     * depends on what the caller publishes.
+     *
+     * ONCE PER ACTOR. The live player was presented first, and it can appear in
+     * the list under two names, both skipped: `&combat.self`, which a
+     * deathmatch world list names for the player who was live when it was
+     * built (main.c client_targets_for); and `pcombat[cur_player].self`, that
+     * player's PARKED slot. It is stale while the player is live, and
+     * combat_swap_to overwrites it on the next swap. Presenting either would
+     * run every countdown in effect[] twice a tick. A list is taken to name
+     * each other actor once, as both of the client's lists do.
      */
     {
-        static const u8 energy[3] = { Q2_ENERGY_LIGHT_R, Q2_ENERGY_LIGHT_G,
-                                      Q2_ENERGY_LIGHT_B };
+        q2_actor **list  = sim->world_targets ? sim->world_targets
+                                              : sim->combat.targets;
+        u32        count = sim->world_targets ? sim->world_target_count
+                                              : sim->combat.target_count;
+        const q2_actor *parked_self = &sim->pcombat[sim->cur_player].self;
         u32 t;
 
-        if (q2_actor_energy_lit(&sim->combat.self))
-            q2_ent_light_at(&sim->ent_world.events, sim->combat.self.origin,
-                            energy, Q2_ENERGY_LIGHT_INNER,
-                            Q2_ENERGY_LIGHT_OUTER);
+        present_actor(sim, &sim->combat.self);
 
-        for (t = 0; t < sim->world_target_count; t++) {
-            const q2_actor *a = sim->world_targets ? sim->world_targets[t] : NULL;
-            if (a && q2_actor_energy_lit(a))
-                q2_ent_light_at(&sim->ent_world.events, a->origin, energy,
-                                Q2_ENERGY_LIGHT_INNER, Q2_ENERGY_LIGHT_OUTER);
-        }
+        for (t = 0; t < count; t++) {
+            q2_actor *a = list ? list[t] : NULL;
 
-        /*
-         * AND THEN THE TIMER RUNS DOWN, which nothing did.
-         *
-         * `q2_mod_effect_timer` is a TIMER and its only writer sets it; no path
-         * anywhere decremented it. So the first energy hit an actor took left
-         * `effect[1]` at full strength for the rest of the level, and the green
-         * light raised above followed that actor from then on, permanently.
-         *
-         * On the player that is the reported fault. Soldiers fire energy bolts,
-         * so the player is hit within seconds of any fight, and from that moment
-         * a 1300-unit pure-green light (0,255,0) is parked on them. Creatures
-         * gather the dynamic list FIRST and rank by brightness, so any monster
-         * that walks near the player has its whole colour matrix replaced by
-         * that one light — measured, cell 128 handed a soldier `L0 0,3206,0`
-         * with nothing else active, which is a monster dyed green rather than
-         * tinted. The map itself carries no such lamp: of BASE1's 254 lights,
-         * 248 are mixed, six are pure red and NONE is pure green.
-         *
-         * Every slot is run down rather than just the one the light reads,
-         * because they are all the same kind of field — a per-modifier
-         * countdown at entity+0x2F0..0x2F4 — and leaving the others latched
-         * would only move the same bug to whichever one is read next.
-         */
-        {
-            u32 s;
-            for (s = 0; s < sizeof(sim->combat.self.effect); s++)
-                if (sim->combat.self.effect[s])
-                    sim->combat.self.effect[s]--;
-
-            for (t = 0; t < sim->world_target_count; t++) {
-                q2_actor *a = sim->world_targets ? sim->world_targets[t] : NULL;
-                if (!a)
-                    continue;
-                for (s = 0; s < sizeof(a->effect); s++)
-                    if (a->effect[s])
-                        a->effect[s]--;
-            }
+            if (!a || a == &sim->combat.self || a == parked_self)
+                continue;
+            present_actor(sim, a);
         }
     }
 
@@ -1013,10 +1279,11 @@ void q2_sim_combat_tick(q2_sim *sim)
 
                 memcpy(where, p->pos, sizeof(where));
                 projectile_owner_splash(sim, p, where, targets, count);
-                q2_projectile_detonate(&sim->combat.projectiles, i,
-                                       attacker_for(sim, p->owner),
-                                       targets, count,
-                                       &sim->combat.rules);
+                q2_projectile_detonate_traced(&sim->combat.projectiles, i,
+                                              attacker_for(sim, p->owner),
+                                              targets, count,
+                                              &sim->combat.rules,
+                                              splash_clear, sim);
                 fx_at(sim, fx, where);
             } else {
                 q2_projectile_expire(&sim->combat.projectiles, i);
@@ -1131,29 +1398,26 @@ void q2_sim_combat_tick(q2_sim *sim)
 
             q2_sim_proj_scan.hit++;
             q2_fx_preset_id fx = fx_for_projectile(p->kind);
-            bool was_alive = victim && victim->health > 0;
 
             projectile_owner_splash(sim, p, step.to, hit_list, hit_count);
-            q2_projectile_impact(&sim->combat.projectiles, i, step.to, NULL,
-                                 attacker_for(sim, p->owner), victim,
-                                 hit_list, hit_count,
-                                 &sim->combat.rules);
+            q2_projectile_impact_traced(&sim->combat.projectiles, i, step.to,
+                                        NULL, attacker_for(sim, p->owner),
+                                        victim, hit_list, hit_count,
+                                        &sim->combat.rules,
+                                        splash_clear, sim);
 
             /*
-             * Three bursts can come out of one impact and they are separate
-             * effects in the original too: the projectile's own, the victim's
-             * blood, and the gib puff if that was the killing blow. The gib
-             * takes the creature's blood colour, which is a class property
-             * rather than an effect parameter (effect.h).
+             * Two bursts, not three. The projectile's own and the victim's
+             * blood are both real sites; the third used to be 0x800596B0 on the
+             * killing blow, and that address is the ITEM MATERIALISE burst, not
+             * a gib — see the note at fx_hitscan_impact and effect.h. What the
+             * console raises when a body comes apart is the mesh blood spray
+             * (q2_fx_gib_spray) at the head of ThrowGibs, behind 0x8007CEB4,
+             * and that needs a posed model this file does not carry.
              */
             fx_at(sim, fx, step.to);
-            if (victim) {
+            if (victim)
                 fx_at(sim, Q2_FX_BLOOD, step.to);
-                if (was_alive && victim->health <= 0 && sim->fx_ready) {
-                    q2_fx_gib(&sim->fx, &sim->fx_rng, step.to, 0,
-                              Q2_FX_BLOOD_RED);
-                }
-            }
             continue;
         }
 
@@ -1234,11 +1498,10 @@ void q2_sim_combat_tick(q2_sim *sim)
                                                : sim->combat.target_count;
 
                 projectile_owner_splash(sim, p, end, targets, count);
-                consumed = q2_projectile_impact(&sim->combat.projectiles, i,
-                                                end, NULL,
-                                                attacker_for(sim, p->owner),
-                                                NULL, targets, count,
-                                                &sim->combat.rules);
+                consumed = q2_projectile_impact_traced(
+                    &sim->combat.projectiles, i, end, NULL,
+                    attacker_for(sim, p->owner), NULL, targets, count,
+                    &sim->combat.rules, splash_clear, sim);
                 /* A grenade that only bounced has not gone off, so it must not
                  * leave a fireball behind. */
                 if (consumed)
@@ -1358,8 +1621,18 @@ u32 q2_sim_breakable_call(q2_sim *sim, const q2_scene *scene,
 
         made += q2_sim_debris_burst(sim, node.bbox_min, node.bbox_max,
                                     centre, count_a, 0);
-        made += q2_sim_debris_burst(sim, node.bbox_min, node.bbox_max,
-                                    NULL, count_b, 0);
+
+        /*
+         * 0x8002A3C4 `lh v0, 16948(gp)` / 0x8002A3CC `bne` to 0x8002A4AC: while
+         * the EVE_ replay runs, the shatter and the sound are skipped. The hit
+         * burst above is not — it is 0x8002A384, before the test — so a spent
+         * pane replayed across a zone seam puffs once and does not come apart
+         * a second time. The console's flag is the global gp+16948; the port's
+         * is the runtime's own copy of it (events_rt.h, `initial_pass`).
+         */
+        if (!sim->event_rt.initial_pass)
+            made += q2_sim_debris_burst(sim, node.bbox_min, node.bbox_max,
+                                        NULL, count_b, 0);
     }
 
     return made;

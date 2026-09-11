@@ -1116,10 +1116,15 @@ The residues of the resolved blockers keep their parents' numbers.
       of the face list fold back through the beam's own axis. "Correcting" that ordering into a clean
       hexagonal prism produces geometry that looks nothing like the original at the same polygon cost.
 
-      **Blood colour is a creature property.** `0x80059648` tests three flag bits — `0x10` red, `0x20` green,
-      `0x40` blue — in that order and takes the first set. The chain has **no final else**, so a creature
-      with none of them reaches the spawn with an uninitialised register: the same defect class as the
-      `T_Damage` fifth argument, and handled the same way (the port picks a defined value and says so).
+      **The `0x80059648` colour is an item's glow, not a creature's blood.** This paragraph used to call it
+      blood colour, and the burst it tints a gib. It sits in the item think `0x80059330` and tests three bits
+      of the ITEM's own flag word (entity+0x44, loaded at `0x800593E4`) — `0x10`, `0x20`, `0x40`, giving
+      ramps 1, 11 and 0 — in that order, for the materialise burst at `0x800596B0`. They are the item glow
+      bits, and `0x800596B8` tests the same three for the glow light. The chain has **no final else**, so an
+      item with none of them reaches the spawn with an uninitialised register: the same defect class as the
+      `T_Damage` fifth argument, and handled the same way (the port picks a defined value and says so). A
+      gib's blood is the mesh spray `0x8005B320` on ramps 2 and 3; there is no creature blood colour on the
+      disc.
 
       All of it is checked by `q2psx-inspect effects` against the disc and by `tests/test_effect` without
       one. Full write-up in FORMATS.md §18.
@@ -6669,7 +6674,7 @@ request are all still owed. What exists now is that the level ENDS and the next 
       choice**: nothing in the executable has been read that settles what this console does, and a
       deadline that survives a clock reset unrebased is the one shape that is definitely wrong.
 
-## The weapon strip is drawn, and two of its three numbers are measurements rather than reads
+## The weapon strip is drawn, and all three of its numbers are reads — ANSWERED
 
 `0x80035EA0`'s two extra sprites are now on screen. What is READ: the two guards (`0x80036188` skips a zero
 index, `0x80036198` collapses slot A when both slots name the same weapon), the `index * 5` rect stride, and the
@@ -6677,18 +6682,30 @@ position table at `0x8009C658` — four `s16` pairs, **(388, 201) / (458, 201)**
 (419, 95) for a split, absolute rather than anchor-relative. That table is the head of the structure
 icontable.h had recorded as unidentified.
 
-Two things are NOT read, and are flagged in the code:
+The two things this entry used to flag as NOT read are both read now:
 
-- **What fills the slots.** The console takes them from +96 and +100 of a 224-byte record in the array at
-  `0x800C7C60` (`s7` is built at `0x80035F08`), and nothing traced so far writes them — `0x800506C4` and
-  `0x80050758`, the next/previous-weapon helpers, write +102 and +214 of a different struct. The port derives
-  prev/next by walking the owned bitmask and uses the weapon id directly as a rect index. That mapping is
-  supported by the sheet — rects 1..11 land on the eleven weapon cells, with slot 6 (hand grenades) sitting off
-  the gun row the way an authoring pass would put it — and it produces the blaster icon capture shows. It is
-  still an inference.
-- **The anchoring.** Drawn with the table's x as the left edge, the icon lands exactly one icon-width right of
-  retail: capture puts it at framebuffer columns 427..451 and the table says 458, so 458 is the RIGHT edge. The
-  emitter's XY setup at `0x80033320` was not followed far enough to say whether it subtracts the width itself.
+- **What fills the slots — ANSWERED.** They are +96 and +100 of a 224-byte record in the array at `0x800C7C60`
+  (`s7` is built at `0x80035F08`), and they are written by `0x80037ECC` and by the identical tails of
+  `0x80037E28`, `0x8003D4FC` and `0x8003B040`: +100 = `0x80050758(+102, forward)` and +96 =
+  `0x80050758(+102, back)`, both walked from +102, the SELECTED weapon. `0x80050758` writes nothing; it returns
+  an id. It walks the ids with wrap, and a candidate must pass two gates: the owned bit from `0x8009DC2C`, which
+  is `1 << (id - 1)`, and `ammo[ammoType[id]] >= minAmmo[id]`, from `0x8009DC5C` / `0x8009DB4C` at
+  `0x800507C0`..`0x800507E8`. A walk that comes back to the current weapon returns 0 (`0x800507F0`), which the
+  zero-index guard then skips. The rect index is the weapon id, as this entry had inferred; the port's own walk
+  over the owned bitmask had neither the ammo gate nor the zero, and `q2_statusbar_weapon_slots` (statusbar.c)
+  is now the transcription. This entry used to say that `0x800506C4` and `0x80050758` "write +102 and +214 of a
+  different struct". It is the same client record, and of the two only `0x800506C4` writes: it stores the
+  first weapon in the list at `0x8009DB7C` that is owned and has ammo into +102 (`0x80050744`) and into +214
+  of the view-weapon entity (`0x8005074C`).
+- **The anchoring — ANSWERED.** `0x80033448`..`0x80033458` add the rect's width to the table x for the
+  right-hand vertices, so x is the LEFT edge: slot A covers 388..420 and slot B 458..490. The capture's icon at
+  framebuffer columns 427..451 (centre 439) was never slot B drawn one icon-width out. It is field 12, the
+  selected weapon's own icon at anchor + 330 (`0x80037CAC`), whose cell is 423..455.
+
+**The strip is also semi-transparent.** `0x80033670` calls SetSemiTrans (`0x8008A148`) with 1 on the icon
+packet, whose tpage is ORed to ABR 1, additive (`0x8003363C`). The packet is then copied into a SUBTRACTIVE
+shadow — ABR 2 at `0x80033798`, a bright edge of 62, and the palette-73 CLUT loaded at `0x800337A4` — and since
+AddPrim (`0x800B0EE0`) prepends, the shadow is drawn first and the icon adds over it.
 
 Also fixed: the overlay's top line carried a hardcoded `"Quake II"` posted once at startup — a placeholder from
 before the overlay had anything real to say. It now names the weapon on a change, and the string is the weapon's
@@ -9642,3 +9659,69 @@ unit, 4095.3 mean over every part of `Blaster G`) or the GTE reaches it.
       `+28`; event category bits 08/10/20 are enter/stay/leave; and BASE2 CAGELIFT1 reads its delay/wait at
       item +18/+19. Its actual
       0/0xFF pair means drop to 1491 and remain there, not return immediately.
+
+- [x] 135. **More than half the game's functions were still uncited, five clusters of them were behaviour a
+      player meets, and the triage that pointed at them was wrong often enough to be re-derived every time.**
+
+      **The frontier, measured.** A scan of the executable finds 1,125 function entries. The 304 above
+      `0x80088000` are the runtime and BIOS library, not the game: `0x80089E28` is the BIOS `rand` (`jr` to
+      `0xA0` with function `0x2F`), `0x8008A148` is SetSemiTrans and `0x800B0EE0` AddPrim. Of the 821 below
+      it, **461 were cited nowhere in the port**. This round worked five clusters at that frontier, uncited
+      functions and the half-read ones around them: the status bar, combat attribution, the event runtime,
+      the monster start and death paths, and the damage-effect presentation.
+
+      **What was reconstructed, where a player would notice it:**
+
+          0x800352C0  the ammo number is ammo[ammoType[id]] on the 1-based id; the BFG read 0
+          0x80037CAC  field 12, the selected gun's icon at (423, 201), which the port never drew
+          0x80037ECC  the strip is previous / next from 0x80050758's owned-and-ammo walk, left-edged
+          0x80035178  health is signed and floors at -99; 0x80033C68 strips a dead one-player bar
+          0x80027468  a ONESHOT item runs once: BASE2's EndOfUnit CALL, 20 runs to 1 on an in/out/in walk
+          0x80027950  the record latch is the DISABLED bit, so an ENABLE (0x800278B0) really re-arms
+          0x80039728  only a raw -1 cries out, and only acid and lava write one (0x800396DC)
+          0x80039774  `slti s1, 4` is the frag gate; a deathmatch kill with no attacker is a suicide
+          0x80062448  a walker's eye is ~ext2, a flyer's -250, a swimmer's -100; turn rates 228 and 114
+          0x80020D60  a creature with the drop flag queues a drop, picked at 0x80020680 from 0x800AB79C
+          0x8002085C  ...and the host throws it from the body's own origin; SECURITY: 6 asked, 6 landed
+          0x8005A3D4  ThrowGibs: a spray laid on the posed mesh, a ring of chunks trailing blood (0x80059DE0)
+          0x8005B880  the damage crackle, sparks and quad shell draw over the actor's posed vertices
+          0x8005B2A8  a corpse with effect[0] or [2] dissolves and is freed instead of lingering
+          0x80058230  the Environment Suit stops acid (mod 9) only; the port had made it god mode
+          0x80050A24  radius damage sweeps blast-to-target (0x80044C44), so splash stops at walls
+          0x8002936C  a same-map zone change keeps the script's latches and replays the spent ones
+
+      Most of these reach the screen only through a call from the host (`src/client/main.c`, `sim.c`),
+      and those calls are made: the crackle's quads draw over the vertex `0x8006CC44` names, which
+      modeldraw.c now exposes to the sim through a mesh hook; a dead creature's drop is thrown by the
+      client as `0x8002085C` throws it; and the zone loader carries the event runtime's bytes across a
+      seam and runs the EVE_ replay with its seven 30000-tick settle passes (`0x800296D4..0x8002974C`),
+      honouring the pass flag at all nine of its readers (xrefs `0x800B2834`) — a replayed pane puffs
+      once and does not shatter again (`0x8002A3C4`). Two things came out rather than in: the kill-time
+      `0x800596B0` burst, which is the ITEM materialise (#12a's "blood colour" is corrected above), and
+      `q2_cre_fire_shot`'s enemy guards, which belong to the refire callbacks — the Tank's machine gun
+      fires with no enemy at all (`0x8010107C` in its relocated module).
+
+      **The lesson worth carrying.** No cluster built from its triage as written. Three readings were refuted
+      outright: the Tank and Arachner "volume" clone is PITCH, a misread argument order for import +0x44
+      (`0x80073A34`); the "three TIMER CALL items" census is eighteen; and effect.h's `0x8004E9F4` was never
+      inside `0x8004E920`, which is a separate, complete function. Twenty-seven of the sixty-three specified
+      items needed a correction in verification — building the damage-effect tickers as written would have
+      latched effect[4] and effect[5] on every corpse for as long as the corpse lasted — and implementation found
+      more: the spark's divide magic is `0x057619F1`, not the value handed down; the strip's ABR bit is not
+      inert; the spec's death-voice test was wrong, because `0x80039728` cries on a raw -1 whatever the mod;
+      and the "before" binary everyone shared had been linked after the edit it was meant to predate. So
+      every cluster re-derived its items from the disassembly before writing code, and every cluster ran a
+      negative control: its new tests, built against the old code, fail there. A wrongly typed premise
+      looks exactly like a discovery until someone reads the instructions again.
+
+      **And review found what the tests could not.** Every cluster passed its own tests and still carried
+      a fault that only showed where it met another. Single player presented no creature at all, because
+      the pass walked a list only deathmatch fills; a creature's effect bytes were wiped by the per-frame
+      rebuild, so a hit's crackle lived one tick; `q2_actor_init` still seeded the killer byte with -1 and
+      every refresh put it back, which defeated the very gate `0x80039728` this round built; a hit that
+      armour absorbed whole returned before ONE SHOT KILL, where `0x80058390` falls straight through; the
+      carousel's latch was written and never called; and the gib throw read a push the rebuild had zeroed
+      the frame before. Wiring the replay then walked the whole game and looped it on QENDMIS1, because
+      a gate landing on the frame a unit ended replayed LOADMAP and MISCOMPLETE. None of these is visible
+      in a unit test of the part it lives in. Each was found by a second agent told to refute the first,
+      re-reading the instructions rather than the report.

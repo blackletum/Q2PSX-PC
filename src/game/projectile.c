@@ -338,6 +338,15 @@ u32 q2_projectile_detonate(q2_projectiles *list, u32 index,
                            q2_actor *attacker, q2_actor **targets, u32 count,
                            const q2_combat_rules *rules)
 {
+    return q2_projectile_detonate_traced(list, index, attacker, targets, count,
+                                         rules, NULL, NULL);
+}
+
+u32 q2_projectile_detonate_traced(q2_projectiles *list, u32 index,
+                                  q2_actor *attacker, q2_actor **targets,
+                                  u32 count, const q2_combat_rules *rules,
+                                  q2_combat_clear_fn clear, void *clear_ctx)
+{
     q2_projectile *p;
     u32 hurt = 0;
 
@@ -347,10 +356,13 @@ u32 q2_projectile_detonate(q2_projectiles *list, u32 index,
     if (!p->in_use)
         return 0;
 
+    /* Every splash site in the header's table calls 0x80050810, so the fuse's
+     * blast takes the same per-candidate occlusion as a contact blast. */
     if (p->splash_radius > 0 && p->damage > 0)
-        hurt = q2_combat_radius_damage(attacker, NULL, p->pos, p->damage,
-                                       p->splash_radius, p->mod,
-                                       targets, count, rules);
+        hurt = q2_combat_radius_damage_traced(attacker, NULL, p->pos,
+                                              p->damage, p->splash_radius,
+                                              p->mod, targets, count, rules,
+                                              clear, clear_ctx);
 
     release(list, index);
     return hurt;
@@ -361,6 +373,18 @@ bool q2_projectile_impact(q2_projectiles *list, u32 index,
                           q2_actor *attacker, q2_actor *hit,
                           q2_actor **targets, u32 target_count,
                           const q2_combat_rules *rules)
+{
+    return q2_projectile_impact_traced(list, index, point, normal, attacker,
+                                       hit, targets, target_count, rules,
+                                       NULL, NULL);
+}
+
+bool q2_projectile_impact_traced(q2_projectiles *list, u32 index,
+                                 const s32 point[3], const s32 normal[3],
+                                 q2_actor *attacker, q2_actor *hit,
+                                 q2_actor **targets, u32 target_count,
+                                 const q2_combat_rules *rules,
+                                 q2_combat_clear_fn clear, void *clear_ctx)
 {
     q2_projectile *p;
 
@@ -402,10 +426,13 @@ bool q2_projectile_impact(q2_projectiles *list, u32 index,
     if (hit && p->damage > 0)
         q2_combat_damage(attacker, hit, p->damage, p->mod, point, rules);
 
+    /* The contact blast is the same 0x80050810 as the fuse's (the header's
+     * table), so it is occluded the same way. */
     if (p->splash_radius > 0 && p->damage > 0)
-        q2_combat_radius_damage(attacker, hit, p->pos, p->damage,
-                                p->splash_radius, p->mod,
-                                targets, target_count, rules);
+        q2_combat_radius_damage_traced(attacker, hit, p->pos, p->damage,
+                                       p->splash_radius, p->mod,
+                                       targets, target_count, rules,
+                                       clear, clear_ctx);
 
     release(list, index);
     return true;

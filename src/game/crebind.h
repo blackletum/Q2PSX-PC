@@ -178,6 +178,26 @@ void q2_cre_set_sound_hook(void (*fn)(q2_monster *m, int which, void *user),
 void q2_cre_set_fire_hook(void (*fn)(q2_monster *m, int flash, void *user),
                           void *user);
 
+/*
+ * WHAT A CREATURE'S SOUND ACTUALLY PLAYS, given the name its slot was
+ * REGISTERED with and what this map's bank carries.
+ *
+ * The sound hook hands the host either a module address (every decoded and
+ * most transcribed creatures) or, for the Soldier, an index into its own name
+ * table; either way the host turns it into the registered name first. Two
+ * modules then substitute one handle for another in their own spawn code —
+ * the Soldier's pain and death trios and the Tank Commander's idle handle, see
+ * `q2_cre_sound_fallback` in creature.h — and that is this. It finds `m`'s
+ * module through its bind and applies q2_creature_sound_fallback.
+ *
+ * `bank_has(name, user)` answers "does this map's SNDVRAM bank carry it". A
+ * name outside every group comes back unchanged, so the call is safe to make
+ * on every sound.
+ */
+const char *q2_cre_sound_resolve(const q2_monster *m, const char *registered,
+                                 bool (*bank_has)(const char *name, void *user),
+                                 void *user);
+
 /* ------------------------------------------------------------------------- */
 /*
  * A CREATURE'S SHOT, with the figures its own module carries.
@@ -239,11 +259,31 @@ typedef struct q2_cre_action_stats {
     u32 thinks_unbound;      /* no decoded think for that index               */
     u32 calls_seen;          /* CALL steps reached                            */
     u32 calls_unclassified;  /* an import slot with no meaning yet            */
-    u32 fire_calls;          /* CALL steps that named a projectile spawner    */
+    u32 fire_calls;          /* CALL steps that named a projectile spawner,
+                              * and q2_cre_fire_shot calls                    */
     u32 fire_sent;           /* ...and reached the hook                       */
     u32 fire_no_hook;
+
+    /*
+     * REFUSALS, and only the decoded action path makes them: the CALL arm of
+     * cre_actions.c's run_step declines a shot with no enemy or a dead one
+     * before its one-int hook. So `fire_sent + fire_no_hook + fire_no_enemy +
+     * fire_dead_enemy == fire_calls`, and the census line that prints them
+     * side by side can be read as a partition.
+     */
     u32 fire_no_enemy;
     u32 fire_dead_enemy;
+
+    /*
+     * OBSERVATIONS, NOT GATES, for a shot that went through q2_cre_fire_shot.
+     * A transcribed fire think fires with no enemy and at a dead one — that is
+     * what the modules do (see the block in q2_cre_fire_shot) — so these count
+     * how often it happened. Every shot counted here is ALSO in `fire_sent`;
+     * they are kept apart from the two refusal counters above so that a shot
+     * is never counted both as sent and as refused.
+     */
+    u32 shot_no_enemy;
+    u32 shot_dead_enemy;
 
     /*
      * Which callback slots the generic implementation could and could not find

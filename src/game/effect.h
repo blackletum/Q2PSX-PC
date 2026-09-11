@@ -93,13 +93,27 @@
  *     0x8003004C   6 call sites   velocities AND a fifteen-entry OFFSET array,
  *                                 stored as offset[i-1] = offs[i] >> 4, so the
  *                                 burst starts already scattered
- *     0x8002FDFC   6 call sites   a second array of stride 12, not 6 — a third
- *                                 signature reading an interleaved record, and
- *                                 a separate transcription job
+ *     0x8002FDFC   6 call sites   an array of ABSOLUTE WORLD POINTS at stride
+ *                                 12 instead of one origin — the caller hands
+ *                                 it a point per quad and it turns points
+ *                                 1..count-1 into offsets itself
  *
- * Only the first was modelled. The bullet's world impact is a 0x8003004C site
+ * All three are modelled now. The bullet's world impact is a 0x8003004C site
  * (0x80048AC4) and its absence is why a bullet hitting a wall used to raise the
  * PLAYER-STATE spark — ramp 0, pure blue — instead of a grey smoke puff.
+ *
+ * THE THIRD ONE'S DISTINGUISHING FEATURE is not "an interleaved record", which
+ * is what this header used to guess. It is that the CALLER supplies absolute
+ * world points, which is what lets the five mesh drawers below sample vertices
+ * off a posed model and hand the results straight in. And the difference from
+ * 0x8003004C is one instruction wide and load-bearing:
+ *
+ *     0x8002FF44  subu v0, v0, v1     0x80030174  sll 16 / sra 20
+ *     0x8002FF48  sh   v0, 12(a0)
+ *
+ * — the third spawner stores the raw 16-bit difference with NO >>4, so a mesh
+ * sampled at world scale keeps its shape. Shifting here would collapse a
+ * soldier's crackle into a point.
  *
  * ---------------------------------------------------------------------------
  * Two ramps, alternating in threes
@@ -196,9 +210,18 @@
  *
  * It also corrects the claim that beam styles 3 and 4 are unreachable. They are
  * not reached from the laser dispatcher; they are reached from here. Style 4 —
- * the opaque red one — is filled by `0x8004E9F4` inside `0x8004E920`, behind the
- * same visibility test; which weapon or creature drives that one is not yet
- * attributed.
+ * the opaque red one — is filled at `0x8004E9F4` (`addiu t1, v0, -9644`, the
+ * style-4 record 0x8009DA54), behind the same visibility test (0x8004E9D4); which
+ * weapon or creature drives that one is not yet attributed.
+ *
+ * 0x8004E9F4 is 0x5C into `0x8004E998`, a separate function whose only
+ * reference is its address materialised at 0x8007DB4C. It is NOT inside
+ * `0x8004E920`, which this note used to say: 0x8004E920 is a small complete
+ * function that ends at 0x8004E994 (`jr ra`), and it is the point-clip-and-area
+ * helper — `*area = 0x80055054(pos, entity+0x54, entity+0xA2)`, then the clipped
+ * point back from [0x800C8EB8] and the area from [0x800C8EAA] — that both gib
+ * throwers use to place a chunk (0x8005A504, 0x8005B1E8). It constructs no
+ * effect.
  */
 #define Q2_FX_TIMED_BEAMS_MAX    12   /* 0x800CABC0..0x800CAD10, 28 each  */
 #define Q2_FX_TIMED_BEAM_LIFE    45   /* 0x80049DC0                       */
@@ -701,6 +724,56 @@ s32 q2_fx_group_spawn_offsets(q2_fx_world *w,
                               u32 life, s32 size, u8 area);
 
 /* ------------------------------------------------------------------------- */
+/* The THIRD spawner — 0x8002FDFC, an array of absolute world points          */
+/* ------------------------------------------------------------------------- */
+/*
+ * Six call sites, and every one of them is a MESH DRAWER in this file:
+ * 0x80058B5C, 0x80058D24, 0x80058EE8, 0x800590AC, 0x80059274 and 0x8005AD30.
+ *
+ * Instruction for instruction it is 0x80030284 with one difference. The free
+ * slot scan is the same (0x8002FE08 `lh [0x800B285C]` for the count, `lw
+ * [0x800B2860]` for the base, stride 288, first slot whose +0xC5 life is zero);
+ * particle 0's three WORDS come from `pts[0]` at 0x8002FE88; the velocity block
+ * at +0x66 comes from `vel[0]` as six bytes at 0x8002FEB8; the accel memset
+ * (0x8002FFC4), the size divide (0x8002FFE4, `mult` by [0x800D5D46] then
+ * `bgez; addiu 511; sra 9`) and the view_mask clear (0x80030000, the low byte
+ * knocked out as two nibble masks so +0xC5..+0xC7 survive) are all identical.
+ *
+ * The difference is the offset loop at 0x8002FF38:
+ *
+ *     8002FF38  lhu  v0, 0(a1)        ; a1 walks pts + 12*i
+ *     8002FF3C  lhu  v1, 16(sp)       ; sp+16..24 hold pts[0]'s three words
+ *     8002FF44  subu v0, v0, v1
+ *     8002FF48  sh   v0, 12(a0)
+ *
+ * `offset[i-1][k] = (s16)(pts[i][k] - pts[0][k])` — a truncated 16-bit
+ * difference with NO SHIFT, where 0x8003004C's equivalent (0x80030174) is
+ * `sll 16 / sra 20`, an arithmetic >>4. That is the whole reason this spawner
+ * exists: a mesh sampled in world units would lose fifteen sixteenths of its
+ * extent through the other one. The velocities are relative the usual way
+ * (0x8002FF84 `sh v0, 102(a3)`).
+ *
+ * `pts` must have `count` entries and `vel` must have `count` entries.
+ *
+ * AREA. 0x8002FED0 calls 0x800686C4 with the caller's area byte and the point
+ * array, and that helper is `if (a0) return a0; else return the area record for
+ * whichever cell the point is in` (0x800686D0 `bne a0, zero` -> return; else
+ * 0x80044F54 against 0x800C8E90 and `lbu 32(v0)`). The port's spawners take a
+ * u8 area and store it, exactly as the non-zero arm does. Every call site in
+ * this cluster passes entity+0x9E, which is non-zero in practice, so the
+ * auto-resolve arm is a pre-existing divergence rather than a new one; plumbing
+ * a world query into this module to reach it would be a bigger change than the
+ * behaviour is worth. Recorded here rather than papered over.
+ *
+ * Returns the slot, or -1 when the pool is full.
+ */
+s32 q2_fx_group_spawn_points(q2_fx_world *w,
+                             const s32 (*pts)[3], const s16 (*vel)[3],
+                             u32 count,
+                             const q2_fx_ramp *ramp0, const q2_fx_ramp *ramp1,
+                             u32 life, s32 size, u8 area);
+
+/* ------------------------------------------------------------------------- */
 /* The bullet's world impact — 0x800489D8, spawning through 0x8003004C        */
 /* ------------------------------------------------------------------------- */
 /*
@@ -726,6 +799,500 @@ s32 q2_fx_group_spawn_offsets(q2_fx_world *w,
 #define Q2_FX_BULLET_PUFF_VEL_SHIFT  11   /* sra 11 at the same site     */
 
 s32 q2_fx_bullet_puff(q2_fx_world *w, q2_rng *rng, const s32 at[3], u8 area);
+
+/* ------------------------------------------------------------------------- */
+/* THE MESH DRAWERS — five effects that sample an actor's own posed vertices  */
+/* ------------------------------------------------------------------------- */
+/*
+ * 0x80058C18, 0x80058DDC, 0x80058FA0, 0x80059168 and 0x8005899C/0x8005AB70.
+ * None of them existed in this port; nothing drew a damage effect at all.
+ *
+ * They all work the same way. Take the entity's model, ask 0x8006D6AC how many
+ * vertices it has in total, walk them with a STEP and a PHASE taken from the
+ * engine's tick counter [0x800B2DE4], turn each sampled index into a world
+ * point through 0x8006CC44, and hand a batch of at most fifteen points to
+ * q2_fx_group_spawn_points. The phase is what makes the effect crawl: on
+ * successive frames a different subset of the mesh lights up.
+ *
+ * THE PHASE IS NOT A SKIP. Reading `s4 = tick & 1` as "every other frame it
+ * skips one" loses the effect: the walk STARTS at vertex (tick & 1) and steps
+ * by two, so the two halves of the mesh alternate frame by frame and the
+ * result is a crawl over the whole body. Same for the spark's `tick & 7`.
+ *
+ * THE LOOP DOES NOT STOP AT ONE BATCH. 0x80059130 branches back to 0x80059034
+ * while two or more vertices remain, so a sixty-vertex soldier spawns TWO
+ * groups per tick, not one. A model big enough spends several pool slots a
+ * frame out of a pool of 32 (INFERRED, from the arithmetic rather than seen:
+ * a crowded scene will run the pool dry and drop later bursts whole).
+ *
+ * VELOCITIES. The four "crackle" drawers zero all fifteen velocity triples
+ * (0x80058FF8: fifteen memsets of six bytes) so the quads sit still on the
+ * body. The spark draws random ones; see q2_fx_mesh_spark.
+ *
+ * THE VIEW MASK IS A SKIP MASK. 0x800590D8 reads the word at group+0xC4, clears
+ * bits 4..7 with 0xFFFFFF0F and ORs in `((1 << p) & 0xF) << 4` where
+ * `p = (client - 0x800C7C60) / 224` (0x800590E4..0x80059110 is the exact-divide
+ * idiom: multiply by 0xB6DB6DB7, which is inv(7) mod 2^32, then `sra 5` — the
+ * same divide by 224 playerdeath.h already uses). So the burst is hidden in the
+ * viewport of the player it belongs to and visible in everyone else's: you do
+ * not see your own damage crackle, you see the other player's. Pass the player
+ * index as `viewport_skip`, or -1 for an actor with no client.
+ *
+ * The renderer's side is 0x80030614..0x80030628: `lbu +0xC4`, `srl 4`, `srav`
+ * by the viewport, `andi 1` — bit 4 + n hides a group in viewport n, which is
+ * exactly the nibble written here.
+ */
+
+/*
+ * Where a world point comes from.
+ *
+ * 0x8006CC44(entity, s16 index, s32 out[3]) is the posed WORLD vertex: it walks
+ * the model's 8-byte part records at obj+0x28 to find which part owns the index,
+ * applies that part's live pose through 0x8006C6C8, rotates the result by the
+ * ENTITY's own matrix (0x8006FC1C on entity+0x2C0) and adds entity+0xA4. A
+ * negative index short-circuits to the entity origin (0x8006CC64 `bltz`). The
+ * part walk only picks the POSE — the vertex itself is fetched by the original
+ * global index (0x8006CCA4 uses the pre-walk value), not by the residue.
+ *
+ * THIS PORT HAS NO SUCH FUNCTION and cannot grow one here. src/formats/model.c's
+ * q2_model_get_vertex returns the RAW STORAGE vertex in model-local space, and
+ * src/game/modeldraw.c's `shadow_pose_vertex` does the part walk and the pose
+ * but stops in MODEL space and is static — neither applies the entity rotation
+ * or its origin, so neither is what 0x8006CC44 returns. Writing a third copy of
+ * the pose walk inside effect.c would be worse than asking for one, so the
+ * drawers take the lookup as a callback and the presentation layer supplies it.
+ * The intended body is a public world-vertex helper in modeldraw.c layered on
+ * the existing static one: pose (0x8006C6C8), rotate by the instance's own
+ * matrix (0x8006FC1C), add the origin (0x8006CD58..0x8006CD94).
+ *
+ * Until something supplies it, every caller passes `src == NULL` and every
+ * drawer takes the console's model-less path, documented at each one. The
+ * timers and the lights are exact either way; the quads are missing, and so
+ * are some GENERATOR DRAWS. `src == NULL` is exact only for an entity that
+ * genuinely has no model. The spark's one early exit is a null model pointer
+ * (0x800589D8 `lw a0, 16(s7)` / 0x800589E0 `beq a0, zero`), so on an actor
+ * that HAS a model the console draws its 45 velocities (0x80058A08..
+ * 0x80058AB4) on every firing, whether or not the vertex walk then finds
+ * anything; handed no mesh, the port draws none. So while the mesh source is
+ * missing, each effect[0], effect[2] or effect[4] firing on a modelled actor
+ * leaves the port's stream 45 draws behind the console's.
+ *
+ * `total` is 0x8006D6AC: the SUM of each part's `lbu +3` over the `lh 22(obj)`
+ * records at `lw 40(obj)`, not the model header's own vertex count — the
+ * original sums rather than trusting the header and the two are not guaranteed
+ * equal. A NULL model gives zero (0x8006D6AC returns 0 for a null argument),
+ * and every drawer below then does exactly what the console does with a
+ * model-less entity, which is documented at each one.
+ */
+typedef void (*q2_fx_vertex_fn)(void *ctx, s32 index, s32 out[3]);
+
+typedef struct q2_fx_mesh_src {
+    q2_fx_vertex_fn vertex;   /* 0x8006CC44 */
+    void           *ctx;      /* the entity it belongs to */
+    u32             total;    /* 0x8006D6AC */
+} q2_fx_mesh_src;
+
+/* Every crackle site passes 32767 (0x80058FBC and 0x80059184 load it into fp
+ * up front; 0x80058D04 and 0x80058EC8 load it into t0 beside the call) and
+ * steps the vertex index by two (0x80059068). */
+#define Q2_FX_CRACKLE_SIZE   32767
+#define Q2_FX_CRACKLE_STEP   2
+
+/*
+ * The four crackle sites, as (ramp, life) pairs. They are the SAME FUNCTION
+ * four times over — the compiler emitted one copy per call site and only two
+ * immediates differ, the ramp pointer and the life. Every other instruction,
+ * including the batch rule and the view-mask nibble, is identical.
+ *
+ * Because `colour = ramp[32 - life]`, the life decides where in the ramp the
+ * burst starts, so these two numbers together are the whole visual. The
+ * renderer reads it at 0x80030798..0x800307B4 (`addiu a0, zero, 32`, `lbu
+ * -1(s3)` for the +0xC5 life, `subu`, `sll 2`, `lwl/lwr 7/4(v1)`), i.e. the
+ * word at ramp + 4 + 4 * (32 - life), and the integrator only decrements the
+ * life at the tail of the same draw. So a burst of life L shows entries 32 - L
+ * through 31 and nothing earlier. The colours below are those entries, read
+ * from the ramp bytes at their records, in R, G, B order:
+ *
+ *   0x80058FA0  ramp 18  life 4   the damage crackle, effect[1] == 1 or 2.
+ *                                 Entries 28..31 (0x8009C41C..0x8009C428) are
+ *                                 (0,255,0), (0,191,0), (0,127,0), (0,63,0):
+ *                                 it starts at FULL green and fades out over
+ *                                 its four ticks.
+ *   0x80058DDC  ramp 17  life 1   the energy-bolt hit, effect[1] >= 3. Every
+ *                                 entry of ramp 17 is (0,255,0), and life 1
+ *                                 reads entry 31 alone: one tick of undimmed
+ *                                 green, re-spawned every frame while the
+ *                                 timer holds.
+ *   0x80058C18  ramp 15  life 1   the QUAD DAMAGE shell. Life 1 reads ONLY
+ *                                 entry 31 (0x8009C29C), which is (0,0,63),
+ *                                 the dimmest value in the ramp; the
+ *                                 (0,0,255) of entries 0..28 is never shown.
+ *                                 So the shell is a single tick of dim blue,
+ *                                 one frame deep, and exists only because the
+ *                                 gate re-spawns it every frame.
+ *   0x80059168  ramp  0  life 4   effect[5]'s crackle. Ramp 0 opens at
+ *                                 (64,64,255), but life 4 shows entries 28..31
+ *                                 (0x8009BAD4..0x8009BAE0), (8,8,31) fading
+ *                                 to (2,2,7): a faint blue.
+ *
+ * The ramp indices come from the pointer immediates: 0x8009C3A8, 0x8009C324,
+ * 0x8009C21C and 0x8009BA60, minus the table base 0x8009BA60, over 132 bytes
+ * a record, gives 18, 17, 15 and 0.
+ */
+#define Q2_FX_CRACKLE_DAMAGE_RAMP  18   /* 0x80058FB4 */
+#define Q2_FX_CRACKLE_DAMAGE_LIFE   4   /* 0x80059090 */
+#define Q2_FX_CRACKLE_ENERGY_RAMP  17   /* 0x80058DF0 */
+#define Q2_FX_CRACKLE_ENERGY_LIFE   1   /* 0x80058E68 */
+#define Q2_FX_QUAD_SHELL_RAMP      15   /* 0x80058C2C */
+#define Q2_FX_QUAD_SHELL_LIFE       1   /* 0x80058CA4 */
+#define Q2_FX_CRACKLE_SLOT5_RAMP    0   /* 0x8005917C */
+#define Q2_FX_CRACKLE_SLOT5_LIFE    4   /* 0x80059258 */
+
+/*
+ * One crackle pass. Returns how many groups it spawned.
+ *
+ * `frame` is the engine's tick counter [0x800B2DE4]; only its low bit is used.
+ * A NULL or empty `src` returns 0 without touching the pool or the generator,
+ * which is what the console does too: 0x8006D6AC hands back zero for a
+ * model-less entity, `s3 = 0 - parity` is below two, and 0x80059028 leaves.
+ */
+u32 q2_fx_mesh_crackle(q2_fx_world *w, const q2_fx_mesh_src *src,
+                       u32 frame, u8 area, s32 viewport_skip,
+                       u8 ramp, u8 life);
+
+/* ------------------------------------------------------------------------- */
+/* The mesh spark — 0x8005899C, ramp 14, every EIGHTH vertex                  */
+/* ------------------------------------------------------------------------- */
+/*
+ * Three byte-identical wrappers reach it — 0x8005B624, 0x8005B658 and
+ * 0x8005B68C — and they exist only because the compiler emitted one per call
+ * site. All three pass a1 = a2 = 0x8009C198 (ramp 14), a3 = 32767 and a fifth
+ * argument of 4.
+ *
+ * Ramp 14 opens at (255,255,125) and passes through orange, but the colour a
+ * burst shows is ramp[32 - life] (see the crackle table above), and at life 4
+ * that is entries 28..31, 0x8009C20C..0x8009C218: (96,16,16), (76,16,16),
+ * (56,16,16) and (36,16,16). So the spark is a DARK-RED ember that dims over
+ * four ticks. The yellow and orange part of the ramp is never reached.
+ *
+ * THAT 4 IS THE LIFE, NOT A QUAD COUNT. It lands at the wrapper's sp+16, which
+ * 0x80058B2C reads back as sp+0x170 and 0x80058B4C forwards to 0x8002FDFC's
+ * sp+20, which 0x8003001C stores at +0xC5. The burst is up to FIFTEEN quads
+ * sourced from the mesh, not four. Every downstream reading of "a four-particle
+ * burst" inherits the same misread.
+ *
+ * Both ramp arguments are the SAME pointer, which matters: the renderer swaps
+ * its two ramps every three quads (0x80030A14), so a site that wanted stripes
+ * would pass two. This one deliberately does not.
+ *
+ * THE VELOCITY DRAW is the expensive part and the part that has to be exact,
+ * because the generator is shared. Fifteen quads, THREE draws each, 45 per
+ * burst, in this order (0x80058A08..0x80058AB4):
+ *
+ *     A = rand()                     ; the delay slot at 0x80058A14 uses A
+ *     B = rand()
+ *     angle = A & 0xFFF              ; 4096-step circle
+ *     mag   = 32 + ((12 * (B - 16384)) >> 13)      ; ARITHMETIC shift, floor
+ *     vel.x = f(sin12(angle) * mag)
+ *     C = rand()
+ *     vel.y = (C - 16384) >> 10                    ; arithmetic, -16..15
+ *     vel.z = f(cos12(angle) * mag)
+ *
+ * `mag` is 32 +/- 24, giving [8, 55]. `sll 1; addu; sll 2; sra 13` is
+ * (x*12)>>13 — dropping the final `sll 2` and reading it as (x*3)>>13 gives
+ * [26, 37], a burst with a quarter of the console's spread in speed.
+ *
+ * f(t) is 0x80058A4C..0x80058A64: `mult t, 0x057619F1 / mfhi / sra 8 / subu
+ * (t>>31)`, i.e. the top half of a 64-bit product shifted a further eight, then
+ * the sign correction — the compiler's whole signed magic-division sequence.
+ *
+ * IT IS A DIVIDE BY 12000, and this had to be re-derived because an earlier
+ * reading of the constant was wrong. 0x057619F1 is 91625969 decimal, and
+ * ceil(2^40 / 12000) is 91625969 exactly; 91625969 * 12000 overshoots 2^40 by
+ * 224, which is the residue a magic for 12000 at shift 40 is supposed to have.
+ * The misread value, 91760113, would have implied a divisor of 11982.457 and
+ * no integer at all — and "no integer divisor fits" was then taken as proof of
+ * a hand-rolled fixed-point scale. The bytes at 0x800589FC (`lui s6, 0x576`)
+ * and 0x80058A00 (`ori s6, s6, 0x19F1`) settle it.
+ *
+ * `t / 12000` in C, truncating toward zero, was measured against the multiply
+ * over every t in +/-300000 (the site's own reach is +/-225280, from a 1.3.12
+ * sine times a magnitude of at most 55) and agrees on all 600001 of them. It is
+ * still written as the multiply below, because that is the instruction sequence
+ * and the equivalence is a measurement rather than a definition.
+ *
+ * These are VELOCITIES, not offsets: they go into 0x8002FDFC's a1 array, which
+ * is the velocity block. The POINTS all come from the mesh.
+ */
+#define Q2_FX_MESH_SPARK_RAMP    14      /* 0x8005B698, 0x8009C198          */
+#define Q2_FX_MESH_SPARK_SIZE 32767      /* 0x8005B6A0                      */
+#define Q2_FX_MESH_SPARK_LIFE     4      /* 0x8005B690, the fifth argument  */
+#define Q2_FX_MESH_SPARK_STEP     8      /* 0x80058B10                      */
+#define Q2_FX_MESH_SPARK_MAG      32     /* 0x80058A38                      */
+#define Q2_FX_MESH_SPARK_MAG_MUL  12     /* 0x80058A1C..0x80058A24          */
+#define Q2_FX_MESH_SPARK_MAG_SHIFT 13    /* 0x80058A28                      */
+#define Q2_FX_MESH_SPARK_Y_SHIFT  10     /* 0x80058A74                      */
+#define Q2_FX_MESH_SPARK_RECIP 0x057619F1 /* 0x800589FC/0x80058A00, ceil(2^40/12000) */
+#define Q2_FX_MESH_SPARK_DIV      12000   /* what that magic divides by      */
+
+/* The scale f(t) above, exposed so a test can measure it rather than restate
+ * it: `(t * 0x057619F1) >> 40` with the round-toward-zero correction. */
+s32 q2_fx_spark_scale(s32 t);
+
+/* The magnitude `mag` above for a raw draw `b` in 0..32767, exposed for the
+ * same reason. [8, 55]; the *3 misreading would give [26, 37]. */
+s32 q2_fx_spark_mag(s32 b);
+
+/*
+ * One spark pass. Returns how many groups it spawned.
+ *
+ * A model-less entity returns 0 AND DRAWS NOTHING FROM `rng`: 0x800589E0 tests
+ * entity+0x10 and leaves before the velocity loop. That ordering is why this
+ * takes the mesh before the generator.
+ */
+u32 q2_fx_mesh_spark(q2_fx_world *w, q2_rng *rng, const q2_fx_mesh_src *src,
+                     u32 frame, u8 area, s32 viewport_skip,
+                     const q2_fx_ramp *ramp0, const q2_fx_ramp *ramp1,
+                     s32 size, u8 life);
+
+/* ------------------------------------------------------------------------- */
+/* The mesh blood spray — 0x8005AB70, and its two wrappers                    */
+/* ------------------------------------------------------------------------- */
+/*
+ * The odd one out of the family: it walks EVERY vertex in order, fifteen at a
+ * time, `total / 15` groups' worth (0x8005ABBC, the signed divide by 15 with
+ * magic 0x88888889), and it draws its fifteen velocities ONCE up front and
+ * reuses them for every group.
+ *
+ * Its fifth argument picks between two whole personalities:
+ *
+ *   mode != 0   life 10, velocities `(rand() - 16384) >> 10`, and the returned
+ *               group gets accel[1] = 3 written on top (0x8005AD48 `sh 3,
+ *               98(v1)`) — so the spray SAGS, the same way the four sites named
+ *               at the top of this header do.
+ *   mode == 0   life 32, velocities `3 * (rand() - 16384)` rounded TOWARD ZERO
+ *               by 16384 (0x8005AC58 `bgez; addiu 16383; sra 14`), no accel.
+ *
+ * Its two callers are 0x8005B320 — ramps 2 and 3 (the blood pair), size 6144,
+ * mode 1, and the first thing a gib throw does (0x8005A440) — and 0x8005B6C0 —
+ * ramps 10 and 0, size 6144, mode 0, called twice from inside the item think
+ * 0x80059330 (0x800598CC, 0x8005998C) after its live-player bounds test at
+ * 0x8005984C. The FIFTH argument of 0x8005B320 is that `1` at sp+16, the
+ * mode: reading it as a life gives a one-tick spray where the console's lives
+ * ten ticks and sags.
+ *
+ * A MODEL-LESS ENTITY STILL COSTS 45 DRAWS HERE, unlike the spark: 0x8005ABB4
+ * calls 0x8006D6AC, gets zero, computes `s3 = 0/15 = 0`, draws the fifteen
+ * velocity triples anyway, decrements s3 to -1 and only then finds the loop
+ * already over. Reproduced, because the generator is shared and a divergence
+ * here moves every later draw.
+ *
+ * Unlike the crackle and the spark this one writes NO view mask — there is no
+ * nibble block in 0x8005AB70 at all — so a blood spray is visible in every
+ * viewport including its own.
+ */
+#define Q2_FX_MESH_BLOOD_RAMP0     2    /* 0x8005B330, 0x8009BB68 */
+#define Q2_FX_MESH_BLOOD_RAMP1     3    /* 0x8005B334, 0x8009BBEC */
+#define Q2_FX_MESH_BLOOD_SIZE   6144    /* 0x8005B338             */
+#define Q2_FX_MESH_BLOOD_LIFE     10    /* 0x8005ABE0, mode != 0  */
+#define Q2_FX_MESH_BLOOD_ACCEL_Y   3    /* 0x8005AD44             */
+#define Q2_FX_MESH_BLOOD_ALT_LIFE 32    /* 0x8005AC34, mode == 0  */
+#define Q2_FX_MESH_BLOOD_BATCH    15    /* 0x8005ACFC             */
+
+u32 q2_fx_mesh_blood(q2_fx_world *w, q2_rng *rng, const q2_fx_mesh_src *src,
+                     u8 area, const q2_fx_ramp *ramp0, const q2_fx_ramp *ramp1,
+                     s32 size, s32 mode);
+
+/*
+ * 0x8005B320, the gib throw's opening spray: q2_fx_mesh_blood on ramps 2 and 3,
+ * size 6144, mode 1. `area` is the entity's +0x9E byte, which 0x8005AD28 reads
+ * for every group. ThrowGibs (0x8005A3D4) calls it once, at 0x8005A440, after
+ * its starting-yaw draw and its `4096 / count` and before the first chunk.
+ */
+u32 q2_fx_gib_spray(q2_fx_world *w, q2_rng *rng, const q2_fx_mesh_src *src,
+                    u8 area);
+
+/* ------------------------------------------------------------------------- */
+/* The gib's blood trail — the particle half of the gib think 0x80059DE0      */
+/* ------------------------------------------------------------------------- */
+/*
+ * A thrown gib (0x8005A0AC and 0x8005AD8C both install 0x80059DE0 at +0x3C)
+ * lays a line of blood behind itself every tick. The think is an entity's and
+ * belongs beside the other thrown models; the burst it raises is a particle
+ * group like every other in this file, so it lives here and the think calls it
+ * with the gib's position (entity+0xA4, just refreshed from +0x54 at
+ * 0x80059E78) and velocity (+0xE0..+0xE4).
+ *
+ *   velocity   base[k] = (s16)(4 * vel[k] - 8192), then fifteen triples of
+ *              `(rand() + base[k]) >> 11`, x/y/z in that order — 45 draws per
+ *              gib per tick, so a sixteen-piece boss burst costs 720 a tick
+ *   offsets    step[k] = vel[k] / 15 (truncating); offs[0] = 0 and
+ *              offs[i] = offs[i-1] + step — the gib's own path for the frame
+ *   spawn      0x8003004C, which stores each offset >> 4
+ *
+ * The think skips all of this when bit 0x20 of entity+0x98 is set (0x80059E8C)
+ * and moves the gib afterwards (0x8005A088, 0x80054DD4); both are the caller's.
+ * Returns the slot, or -1 when the pool is full.
+ */
+#define Q2_FX_GIB_TRAIL_RAMP0     2      /* 0x8005A078, 0x8009BB68 */
+#define Q2_FX_GIB_TRAIL_RAMP1     3      /* 0x8005A050, 0x8009BBEC */
+#define Q2_FX_GIB_TRAIL_COUNT    15      /* 0x8005A058             */
+#define Q2_FX_GIB_TRAIL_LIFE      3      /* 0x8005A060             */
+#define Q2_FX_GIB_TRAIL_SIZE   6144      /* 0x8005A068             */
+#define Q2_FX_GIB_TRAIL_BIAS  (-8192)    /* 0x80059EA8             */
+#define Q2_FX_GIB_TRAIL_SHIFT    11      /* 0x80059EF0             */
+#define Q2_FX_GIB_TRAIL_DIV      15      /* 0x80059F4C, 0x88888889 */
+
+s32 q2_fx_gib_trail(q2_fx_world *w, q2_rng *rng, const s32 at[3],
+                    const s16 vel[3], u8 area);
+
+/* ------------------------------------------------------------------------- */
+/* The per-actor presentation pass — 0x8005B880                               */
+/* ------------------------------------------------------------------------- */
+/*
+ * Six calls in a fixed order, and the order and the second arguments are the
+ * behaviour:
+ *
+ *     8005B894  jal 0x80075E14(entity, 7)     ; the ambient fade, lighting.c
+ *     8005B8A0  lh  s1, 264(s0)               ; entity+0x108, health
+ *     8005B8A8  jal 0x80058638(entity, 1)     ; effect[1], and it ticks ITSELF
+ *     8005B8AC  slt s1, zero, s1              ; (delay slot) dt_alive, taken
+ *                                             ; BEFORE 0x80058638 runs
+ *     8005B8B4  jal 0x8005B6F4(entity, s1)    ; effect[0] -> mesh spark
+ *     8005B8C0  jal 0x8005B744(entity, s1)    ; effect[2] -> mesh spark
+ *     8005B8CC  jal 0x8005B794(entity, 1)     ; effect[4] -> mesh spark
+ *     8005B8D4  jal 0x8005B7E4(entity)        ; the quad shell
+ *     8005B8E0  jal 0x8005B830(entity, 1)     ; effect[5] -> crackle ramp 0
+ *
+ * EACH TICKER IS `if (slot) { emit(); slot -= dt; }` (0x8005B708..0x8005B72C
+ * and its three clones). The emit is unconditional on the timer being non-zero
+ * and the decrement uses the CALLER's dt, so:
+ *
+ *   - slots 0 and 2 get dt = (health > 0). On a DEAD body zero is subtracted
+ *     every tick, so an armed effect[0] or effect[2] does not run down at all:
+ *     the spark keeps firing for as long as the body is presented.
+ *   - slots 4 and 5 get a literal 1 (0x8005B8D0, 0x8005B8E4 — and the same in
+ *     the dissolve handlers at 0x8005B3EC/0x8005B400 and 0x8005B494/
+ *     0x8005B4A8), so they run down whether the entity is alive or not.
+ *
+ * WHAT ENDS A SPARKING CORPSE is not this chain; it is the corpse think's gate
+ * 0x8005B2A8. Both corpse thinks call it BEFORE they would call 0x8005B880 —
+ * the player's 0x8003E238 at 0x8003E244, the creature's 0x8007F71C at
+ * 0x8007F728 — and skip the chain when it returns non-zero:
+ *
+ *     8005B2B4  lbu  v0, 754(a0)     ; effect[2] set -> think = 0x8005B444
+ *     8005B2D4  lbu  v0, 752(a0)     ; else effect[0] set -> think = 0x8005B39C
+ *     8005B2EC  sw   v0, 60(a0)      ; (either arm) install it at +0x3C,
+ *     8005B2F4  sh   v0, 244(a0)     ; +0xF4 = 4096 (0x8005B2F0 addiu),
+ *     8005B304  jal  0x8007F288      ; on the +0x2EC record, and return 1
+ *
+ * (0x8007F288 zeroes that record's +0x24 and clears bit 0x20000000 of its
+ * +0x1C.) The two handlers are byte-for-byte the same code. Each runs the
+ * whole chain above, dt_alive included, and then drains +0xF4 by
+ * `[0x800B2DB4] << 6` a frame (0x8005B408..0x8005B418, 0x8005B4B0..
+ * 0x8005B4C0), freeing the entity through 0x8006D280 once the halfword is no
+ * longer positive (0x8005B420 `bgtz`, 0x8005B428). So on the console a corpse
+ * with effect[0] or effect[2] armed sparks for ceil(4096 / (64 * dt)) more
+ * frames, six at the nominal dt of 12, and is then GONE. It does not spark
+ * for the rest of the level. effect[1], [4] and [5] do not trigger the swap;
+ * they run down on their own.
+ *
+ * This function is the chain only. The gate, the swap and the free belong to
+ * the corpse's owner, and are modelled there: q2_monster_corpse_tick
+ * (0x8007F728) and q2_player_death_tick_fx (0x8003E244) run 0x8005B2A8 on
+ * the body's own effect bytes before anything else.
+ *
+ * Reading the health gate as applying to all four is still a real mistake:
+ * it would latch effect[4] and effect[5] on a dying body, where the console
+ * runs them down.
+ *
+ * effect[3] (+0x2F3): `q2psx-inspect access 0x2F3` finds no load or store
+ * whose immediate is 0x2F3 anywhere in SLES_015.34, so nothing here reads or
+ * decrements it. That is a measurement of the MAIN EXECUTABLE's immediate-
+ * offset accesses only: the tool does not scan the relocated creature and
+ * level modules, and it cannot see base+index addressing. No module is known
+ * to touch the byte, and 0x8005B880 certainly does not, which is all this
+ * function needs. effect[5] (+0x2F5) IS real: 0x8005B844 reads it and
+ * 0x8005B868 writes it back.
+ *
+ * THE QUAD SHELL'S GATE (0x8005B7E4) is five instructions: entity+0x0C must be
+ * non-null (0x8005B7EC, so an actor with NO CLIENT never gets a shell however
+ * its inventory reads), then client+0xAC against the level clock at
+ * [0x800AEBAC] with `sltu` (0x8005B80C) — an UNSIGNED compare, and strict, so
+ * `level_time == quad_until` is already over.
+ *
+ * WHAT THIS DOES NOT DO. The two lights and the ambient write that 0x80058638
+ * raises belong to lighting.c, so they are REPORTED rather than raised: fill in
+ * a q2_fx_present_report and let the driver act on it. That keeps effect.c
+ * presentation-only, which is the shape the rest of this module already has.
+ */
+typedef struct q2_fx_present_report {
+    /*
+     * 0x800586D0 — 0x80075C34 with colour 0x800AEAAC and the radii at
+     * 0x800AEAB0/0x800AEAB4. combat.h already names it Q2_ENERGY_LIGHT_*.
+     * Raised on the effect[1] >= 3 arm only.
+     */
+    bool energy_light;
+
+    /*
+     * 0x80058758 — a DIFFERENT function, 0x80075D14, with the same colour, the
+     * radii at 0x800AEAB0 and a fourth argument of 4. Raised only when
+     * effect[1] is EXACTLY 2. This arm was missed entirely by the port's
+     * `effect[1] >= 3` reading, which treated the `< 3` branch as silent.
+     * Which light 0x80075D14 appends is lighting.c's to name; this only reports
+     * that the site fired.
+     */
+    bool energy_pulse;
+
+    /*
+     * 0x800586E8 — the four bytes at 0x800AEAAC copied into entity+0x2AC, so
+     * the actor's own ambient colour becomes the light's colour for that tick.
+     * Only on the >= 3 arm.
+     */
+    bool set_ambient;
+
+    u32  groups;    /* how many pool slots the whole pass took */
+} q2_fx_present_report;
+
+struct q2_actor;
+
+/*
+ * 0x80058638. Runs the effect[1] three-way gate, spawns whichever crackle the
+ * arm calls for, reports the lights, and — this is the part the port did not
+ * have anywhere — DECREMENTS effect[1] BY `dt` ITSELF, but only when the slot
+ * was non-zero on entry (0x80058658 leaves through the exit that skips the
+ * subtraction).
+ *
+ * `a` is a q2_actor; combat.h owns it and this only touches `effect[1]`.
+ */
+void q2_fx_actor_damage_effect(q2_fx_world *w, struct q2_actor *a,
+                               const q2_fx_mesh_src *src,
+                               u32 frame, u8 area, s32 viewport_skip,
+                               u8 dt, q2_fx_present_report *out);
+
+/*
+ * The whole 0x8005B880 chain. `src` may be NULL for an actor with no model, in
+ * which case every drawer takes the console's own model-less path (see each
+ * one). `out` may be NULL.
+ *
+ * `frame` is the frame counter [0x800B2DE4], +1 a frame, never the level
+ * clock. `viewport_skip` and `quad_until` are the actor's CLIENT's, and the
+ * console reads both off the entity it is presenting, whoever that is. Every
+ * drawer writes the view nibble for any entity whose +0x0C client is non-null
+ * (0x800590C0 `lw v1, 12(s5)` / 0x800590C8 `beq`), from that client's own
+ * index (0x800590D0..0x80059110, the divide of client - 0x800C7C60 by 224).
+ * The shell reads the same entity's client+0xAC (0x8005B7EC, 0x8005B7FC). So a
+ * player, live OR parked, passes its own player index and its own inventory's
+ * deadline, and only an actor with no client passes -1 and 0.
+ *
+ * The ambient fade at 0x80075E14 is NOT run here — lighting.c already owns it
+ * and it is the driver's to call in the same place.
+ */
+void q2_fx_actor_present(q2_fx_world *w, q2_rng *rng, struct q2_actor *a,
+                         const q2_fx_mesh_src *src,
+                         u32 frame, u8 area, s32 viewport_skip,
+                         s32 level_time, s32 quad_until,
+                         q2_fx_present_report *out);
 
 /*
  * One tick of the integrator, exactly as the tail of 0x800304A8 runs it:
@@ -1019,7 +1586,7 @@ typedef enum q2_fx_preset_id {
     Q2_FX_EXPLOSION = 0,   /* 0x800486EC — grenades, rockets, dying monsters */
     Q2_FX_BLOOD,           /* 0x80048C08 — the only two-ramp effect          */
     Q2_FX_BFG_BURST,       /* 0x8004BDC4 — the biggest quads in the game     */
-    Q2_FX_GIB,             /* 0x800596B0 — thrown when a body comes apart    */
+    Q2_FX_ITEM_MATERIALISE,/* 0x800596B0 — an ITEM fading in, not a gib      */
     Q2_FX_SCRIPTED,        /* 0x80028DC8 — the UserFuncs effect primitive    */
     Q2_FX_SPARK,           /* 0x8003E0C0 — a surface being struck            */
     Q2_FX_LASER_END,       /* 0x80049074 — both ends of a laser beam         */
@@ -1047,7 +1614,7 @@ typedef struct q2_fx_preset {
      *     0x80048C24  slti v0, s2, 2   blood      2
      *     0x8004BDD0  slti v0, s3, 3   BFG        3
      *     0x8003E0DC  slti v0, s2, 4   spark      4
-     *     0x800596B0                   gib        1 (falls through, no loop)
+     *     0x800596B0                   item mat.  1 (falls through, no loop)
      *
      * LASER_END is 1 here on purpose even though its two sites (0x80049090 and
      * 0x8004913C) both loop four times: q2_fx_laser spawns its four groups
@@ -1085,30 +1652,56 @@ s32 q2_fx_spawn(q2_fx_world *w, q2_rng *rng, q2_fx_preset_id id,
  */
 
 /* ------------------------------------------------------------------------- */
-/* Blood colour                                                               */
+/* 0x800596B0 is the ITEM MATERIALISE burst, and its ramp is an ITEM's glow    */
 /* ------------------------------------------------------------------------- */
 /*
- * A gib burst's ramp comes from the creature, not from the effect: 0x80059648
- * tests three bits of the flag word in this order and takes the first that is
- * set. So the game has red, green and blue blood, and which one a monster
- * bleeds is a property of its class.
+ * THIS ROW WAS NAMED WRONG, and the wrong name carried a wrong story with it.
  *
- * The chain has no final else. A creature with none of the three bits reaches
- * the spawn with the ramp register still holding whatever it last held, which
- * is an engine defect of the same kind as the uninitialised T_Damage argument
- * in userfuncs.h. `q2_fx_gib_ramp` returns red in that case and says so; the
- * alternative is not reproducible.
+ * 0x800596B0 sits inside 0x80059330, which is unambiguously the item think:
+ * 0x800595AC advances entity+0xFC by 2*[0x800B2DB4] and 0x800595C8 clamps it at
+ * 4096, which is the materialise SCALE ramp item.c already models; 0x800595DC
+ * writes 127 into entity+0x2AC..0x2AE the moment it reaches full size. The
+ * fifteen velocity triples at 0x80059608 are `(rand() - 16384) >> 9` into the
+ * fixed block at 0x800D4B24, and the spawn at 0x800596B0 hands them over with
+ * count 15, life 10, size 10000 and area entity+0x9E. The numbers in the table
+ * were right; only the name and the ramp rule were wrong.
+ *
+ * The ramp comes from bits of `s3`, and `s3` is `lw 68(s2)` — entity+0x44, the
+ * ITEM's own flag word. The instruction immediately after the spawn,
+ * 0x800596B8 `andi v0, s3, 0x70`, is the glow-light test that item.c already
+ * cites at its own glow block, and 0x10/0x20/0x40 are Q2_ITEM_GLOW_R/G/B in
+ * src/build/itemtable.h. So this is an item's glow colour, not a creature's
+ * blood colour, and there is no creature blood table on the disc at all.
+ *
+ * WHERE THE REAL GIB BLOOD IS: 0x8005A3D4 opens a gib throw with 0x8005B320,
+ * which is the MESH blood spray on ramps 2 and 3 at size 6144 — see
+ * q2_fx_mesh_blood above — and the gib entity's own per-tick trail is
+ * 0x8003004C on the same two ramps. Neither is a point burst, so nothing was
+ * lost by renaming this one: `xrefs 0x80030284` gives eight sites and every
+ * other one is already a named preset here.
+ *
+ * The selection chain has no final else (0x80059648 / 0x8005965C / 0x80059670
+ * each `beq` forward to the next test, and the last falls through to the spawn
+ * with s4 untouched). An item with none of the three bits reaches the spawn
+ * with the ramp register still holding whatever it last held, which is an
+ * engine defect of the same kind as the uninitialised T_Damage argument in
+ * userfuncs.h. `q2_fx_item_glow_ramp` returns ramp 1 in that case and says so;
+ * the alternative is not reproducible.
  */
-#define Q2_FX_BLOOD_RED    0x10u
-#define Q2_FX_BLOOD_GREEN  0x20u
-#define Q2_FX_BLOOD_BLUE   0x40u
+#define Q2_FX_ITEM_GLOW_R  0x10u   /* 0x80059648 -> ramp 1  (0x8009BAE4) */
+#define Q2_FX_ITEM_GLOW_G  0x20u   /* 0x8005965C -> ramp 11 (0x8009C00C) */
+#define Q2_FX_ITEM_GLOW_B  0x40u   /* 0x80059670 -> ramp 0  (0x8009BA60) */
 
-/* Which ramp a creature with these flags bleeds. */
-u8 q2_fx_gib_ramp(u32 creature_flags);
+/* Which ramp an item with these glow bits materialises in. */
+u8 q2_fx_item_glow_ramp(u32 item_flags);
 
-/* The gib burst, with the creature's blood colour applied. */
-s32 q2_fx_gib(q2_fx_world *w, q2_rng *rng, const s32 at[3], u8 area,
-              u32 creature_flags);
+/*
+ * The materialise burst. `item_flags` is the item's entity+0x44 word; only bits
+ * 0x10/0x20/0x40 are read. Consumes 45 draws whatever it returns, because
+ * 0x80059608 runs before the ramp is chosen.
+ */
+s32 q2_fx_item_materialise(q2_fx_world *w, q2_rng *rng, const s32 at[3],
+                           u8 area, u32 item_flags);
 
 /* ------------------------------------------------------------------------- */
 /* The laser                                                                  */

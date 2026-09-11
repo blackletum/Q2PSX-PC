@@ -8,6 +8,7 @@
 
 #include "ai.h"
 #include "aimove.h"
+#include "modelent.h"      /* q2_gib_monster_corpse: the corpse tick's dispatch */
 #include "trig.h"
 
 const char *const q2_ai_verb_names[Q2_AI_VERB_COUNT] = {
@@ -30,7 +31,21 @@ void q2_monster_init(q2_monster *m)
 
     m->class_id    = 0;
     m->speed_scale = 10;      /* neutral: the frame scale is /10 */
-    m->yaw_speed   = 200;     /* a shade under 18 degrees a tick */
+
+    /*
+     * YAW_SPEED STARTS UNSET, and that is the whole point of the `bne`.
+     *
+     * It used to be 200 for every creature. The console has no such default:
+     * the field is zero on a fresh entity and each go-routine installs id's own
+     * number only IF IT IS STILL ZERO — 228 for a walker (0x80062434, and the
+     * 228 is in the delay slot so only the store is conditional), 114 for a
+     * flyer (0x800624E0) and 114 for a swimmer (0x80062574). A module that set
+     * its own before waking would keep it, which is what the test is for.
+     *
+     * So this is now only what a creature carries BEFORE its go-routine runs,
+     * and q2_monster_start_go is where the real value arrives.
+     */
+    m->yaw_speed   = 0;
 
     /*
      * The movement box, in the ORIGIN frame — a 572 cube centred on the entity.
@@ -62,10 +77,14 @@ void q2_monster_init(q2_monster *m)
      *
      * -290 puts a creature's eye exactly where a player's is: the player's
      * origin is feet - Q2_EYE_BASE and the player's eye is feet -
-     * Q2_VIEW_STAND, so the offset between them is 290. A STAND-IN, because
-     * the console's figure is per entity and this port has nowhere to keep it
-     * — walkmonster_start (0x80062448) computes `nor v0, zero, *(u16*)(obj +
-     * 0xF8)`, flymonster (0x800624F0) stores -250 and swimmonster -100.
+     * Q2_VIEW_STAND, so the offset between them is 290.
+     *
+     * IT IS NOW ONLY THE PRE-START DEFAULT. walkmonster_go (0x80062448)
+     * computes `nor v0, zero, *(u16*)(obj + 0xF8)` from the creature's own
+     * model, flymonster_go (0x800624F0) stores -250 and swimmonster_go
+     * (0x80062584) -100, and q2_monster_start_go installs whichever applies as
+     * soon as the creature wakes. This value survives only for a creature that
+     * has not woken, or one whose `model_ext2` nothing filled in.
      *
      * It was -400, which was chosen when `pos` was the FEET and put the eye
      * 400 above them. Left at -400 after the origin lift it becomes 686 above
@@ -90,13 +109,15 @@ s32 q2_monster_frame_dist(const q2_monster *m, const q2_mframe *frame)
      * AND A CORPSE NEVER TRANSLATES. This is the whole of "bodies hang in the
      * air", and it is faithful rather than a hedge.
      *
-     * The console's corpse handler (0x8007F71C) advances the animation through
-     * 0x8005B880 and makes NO POSITION WRITE of any kind. It cannot: the
-     * detach at 0x8007F098 freed the edict, so there is nothing left for a
-     * movement verb to steer. This port keeps one structure for both halves
-     * and so kept reaching `ai_move`, which runs the swept step — and that
-     * step's LIFT raises the body a full Q2_STEPSIZE before it moves
-     * horizontally. Where the movement hull disagrees with the visible floor
+     * The console's corpse handler (0x8007F71C) makes four calls — the
+     * dissolve gate 0x8005B2A8, the presentation chain 0x8005B880, the actor
+     * list append 0x800552B4 and the destruction dispatcher 0x8007CEB4 — and
+     * NO POSITION WRITE of any kind. It cannot: the detach at 0x8007F098 freed
+     * the edict, so there is nothing left for a movement verb to steer. This
+     * port keeps one structure for both halves and so kept reaching
+     * `ai_move`, which runs the swept step — and that step's LIFT raises the
+     * body a full Q2_STEPSIZE before it moves horizontally. Where the
+     * movement hull disagrees with the visible floor
      * the drop that should undo the lift returns almost at once. Measured on
      * BASE2: a Soldier corpse left 215 units up over ground `PrimaryColl`
      * reports flat, with the drop trace returning 9 of 4096.
@@ -225,6 +246,305 @@ bool q2_monster_damage(q2_monster *m, s16 amount)
 }
 
 /* ------------------------------------------------------------------------- */
+/* The death drop — the table at 0x800AB79C, read from 0x80020680             */
+/* ------------------------------------------------------------------------- */
+/*
+ * gp+276 = 0x800AE714 — A STATIC, and the Tank Commander's drop comes out of
+ * it rather than out of the weapon table it appears to consult.
+ *
+ * `xrefs 0x800AE714` gives exactly four sites: the store/load pair at
+ * 0x80020798/0x8002079C below, and a second pair at 0x80020F24/0x80020F28
+ * inside the ammo-picker at 0x80020E88 — and `xrefs 0x80020E88` returns ZERO
+ * calls. That picker sits immediately after the `jr ra` of 0x80020E24 and
+ * nothing jumps to it or JALs it, so it is unreachable code on this build. In
+ * single player the only writer of this word that can ever run is 0x80020798,
+ * and the only value it writes is 23. The variable is faithfully reproduced,
+ * quirk and all, because the shape is what was read — but the observable
+ * result of the Tankcomm arm is invariably Bullets.
+ */
+static s32 g_last_ammo_pick;
+
+/*
+ * The Tank Commander arm, 0x80020754 — a specialised inline of that same
+ * unreachable ammo-picker.
+ *
+ *   0x80020754 `v1 = weapon_id - 1`; 0x80020758 `sltiu v0, v1, 11` bounds it;
+ *   a0 is PRE-MASKED `andi a0, a0, 0x91` in the branch's DELAY SLOT at
+ *   0x80020760 — 0x01 Blaster | 0x10 Chaingun | 0x80 Rocket Launcher.
+ *   The 11-entry jump table at 0x800AB814, dumped byte for byte:
+ *     ids 1,2,3,6,7,9,10,11 -> 0x8002079C   (straight to the load)
+ *     ids 4,5               -> 0x80020784   `andi v0, a0, 0x18`, and
+ *                                            0x18 & 0x91 == 0x10, the Chaingun
+ *     id  8                 -> 0x8002078C   `andi v0, a0, 0x80`, the RL
+ *   0x80020790 if that is nonzero, 0x80020798 `sw 23, 276(gp)`.
+ *   0x8002079C `lw s0, 276(gp)`; 0x800207A4 spawns it if nonzero, else
+ *   0x800207B0 sets s0 = 23.
+ *
+ * Ten of the eleven table entries reach the same two instructions and the one
+ * distinguishing arm writes the same 23, so this is NOT a weapon-indexed drop
+ * with variety in it. Class rows 25 (Tankcomm) and 26 (no row on the disc) both
+ * come here.
+ */
+static s8 drop_tankcomm(s16 weapon_id, u32 weapon_bits)
+{
+    u32 masked = weapon_bits & 0x91u;   /* 0x80020760, in the delay slot */
+    s32 hit    = 0;
+
+    if ((u32)(weapon_id - 1) < 11u) {
+        if (weapon_id == 4 || weapon_id == 5)
+            hit = (s32)(masked & 0x18u);    /* 0x80020788 -> the Chaingun bit */
+        else if (weapon_id == 8)
+            hit = (s32)(masked & 0x80u);    /* 0x8002078C -> the RL bit       */
+    }
+
+    if (hit != 0)
+        g_last_ammo_pick = 23;              /* 0x80020798 */
+
+    if (g_last_ammo_pick != 0)              /* 0x800207A4 */
+        return (s8)g_last_ammo_pick;
+
+    return 23;                              /* 0x800207B0 */
+}
+
+s32 q2_monster_drop_ammo_static(void)
+{
+    return g_last_ammo_pick;
+}
+
+/*
+ * The Gunner arm, 0x80020730. Delay slots decide this one.
+ *
+ *   0x80020730 `andi v0, a0, 0x40`      the Grenade Launcher bit (weapon id 7)
+ *   0x80020734 `beq v0, zero, 0x800207D0`
+ *   0x80020738 `addiu s0, zero, 23`     IN THE DELAY SLOT — unconditional
+ *   0x8002073C `addiu v0, a1, -4`       the player's CURRENT weapon
+ *   0x80020740 `sltiu v0, v0, 2`        Machinegun 4 or Chaingun 5
+ *   0x80020744 `bne v0, zero, 0x800207D0`   ...and it stays 23
+ *   0x8002074C `j 0x800207D0` / 0x80020750 `addiu s0, zero, 25`
+ *
+ * So it is "Bullets unless you own a Grenade Launcher AND are not currently
+ * holding a bullet weapon"; the current-weapon test is easy to miss and the
+ * unconditional 23 easier still.
+ */
+static s8 drop_gunner(s16 weapon_id, u32 weapon_bits)
+{
+    if ((weapon_bits & 0x40u) == 0)
+        return 23;                          /* Bullets */
+    if ((u32)(weapon_id - 4) < 2u)
+        return 23;                          /* Bullets */
+    return 25;                              /* Grenades */
+}
+
+s8 q2_monster_drop_item_for_class(u8 pop_class, s16 weapon_id, u32 weapon_bits)
+{
+    /*
+     * `v1 = (s16)(slot[+2] - 5)` at 0x800206DC..0x800206E4 and
+     * `sltiu v0, v1, 30` at 0x800206E8, so the window is class rows 5..34 and
+     * anything outside it falls to 0x800207D0 with s0 == 0 — and 0x800207D0
+     * `beq s0, zero, 0x80020848` means NOTHING SPAWNS.
+     *
+     * The 30 words at 0x800AB79C were dumped and decoded one at a time; each
+     * row below carries its table index and the class name from
+     * `q2psx-inspect classes`. The three Soldier rows landing on Shells, Cells
+     * and Bullets — matching the shotgun, blaster and machinegun variants — is
+     * the cross-check that says the read is right.
+     */
+    s32 idx = (s16)((s16)pop_class - 5);
+
+    if ((u32)idx >= 30u)
+        return 0;
+
+    switch (idx) {
+    case  0: return 26;   /*  5 Ironmaiden           -> Rockets   0x80020718 */
+    case  1: return  0;   /*  6 Flipper              -> nothing   0x800207D0 */
+    case  2: return  0;   /*  7 (no class row)       -> nothing              */
+    case  3: return 24;   /*  8 Flyer                -> Cells     0x80020720 */
+    case  4: return 28;   /*  9 Gladiator            -> Slugs     0x80020728 */
+    case  5: return drop_gunner(weapon_id, weapon_bits);
+                          /* 10 Gunner                            0x80020730 */
+    case  6: return 24;   /* 11 Hover                -> Cells                */
+    case  7: return 23;   /* 12 Infantry             -> Bullets   0x800207AC */
+    case  8: return  0;   /* 13 Jorg                 -> nothing              */
+    case  9: return  0;   /* 14 Rider                -> nothing              */
+    case 10: return 24;   /* 15 Medic                -> Cells                */
+    case 11: return  0;   /* 16 (no class row)       -> nothing              */
+    case 12: return  0;   /* 17 Parasite             -> nothing              */
+    case 13: return 27;   /* 18 Soldier shotgun,30hp -> Shells    0x80020710 */
+    case 14: return 24;   /* 19 Soldier blaster,20hp -> Cells                */
+    case 15: return 23;   /* 20 Soldier machgun,40hp -> Bullets              */
+    case 16: return  0;   /* 21 (no class row)       -> nothing              */
+    case 17: return  0;   /* 22 (no class row)       -> nothing              */
+    case 18: return  0;   /* 23 (no class row)       -> nothing              */
+    case 19: return 38;   /* 24 Boss1                -> Rocket Launcher      */
+    case 20: return drop_tankcomm(weapon_id, weapon_bits);
+                          /* 25 Tankcomm                          0x80020754 */
+    case 21: return drop_tankcomm(weapon_id, weapon_bits);
+                          /* 26 (no class row) same arm                      */
+    case 22: return  0;   /* 27 DeadComm             -> nothing              */
+    case 23: return 24;   /* 28 Arachner             -> Cells                */
+    case 24: return 26;   /* 29 Blitz                -> Rockets              */
+    case 25: return 25;   /* 30 (no class row)       -> Grenades  0x8002074C */
+    case 26: return 29;   /* 31 Flamer               -> Fuel      0x800207B4 */
+    case 27: return 21;   /* 32 Strider              -> A-M Bomb  0x800207BC */
+    case 28: return  0;   /* 33 (no class row)       -> nothing              */
+    case 29: return  9;   /* 34 Insane               -> Health    0x800207C4 */
+    default: break;
+    }
+
+    return 0;
+}
+
+/*
+ * THE FOUR-SLOT QUEUE, 0x800C6D70..0x800C6ED0.
+ *
+ * The port keeps the two fields the picker reads — the class row from
+ * slot[+2] and the position, which is the first three words of the 80 bytes
+ * copied out of obj+0x54 (0x8002085C reads them back at 0x80020984 and writes
+ * them to the new item's +0xA4 and +0x54).
+ *
+ * slot[+4] is the multiplayer arm only: 0x80020DC4 tests 0x800AEBCC and, when
+ * it is set, stores `lh (obj+0x0C)+0x66` — the client index — which 0x800206B8
+ * then uses to index a byte table at 0x8009B510 instead of the class table.
+ * Single player leaves it 0 and this port is single player, so the field is
+ * named here and not carried.
+ */
+#define Q2_MONSTER_DROP_SLOTS 4
+
+typedef struct q2_monster_drop_slot {
+    bool used;              /* slot[+0], 0x80020DB0 writes 1               */
+    u8   pop_class;         /* slot[+2], 0x80020DB4 `lhu obj+0xD2`         */
+    s32  pos[3];            /* the head of the 80 bytes from obj+0x54      */
+} q2_monster_drop_slot;
+
+static q2_monster_drop_slot g_drop_queue[Q2_MONSTER_DROP_SLOTS];
+
+static void (*g_drop_fn)(const q2_monster_drop_request *req, void *user);
+static void  *g_drop_user;
+
+/* 0x8002069C `lh a1, 102(v0)` and 0x800206A0 `lw a0, 104(v0)` off 0x800C7C60,
+ * so 0x800C7CC6 and 0x800C7CC8. The bitmask reading is confirmed at 0x80037E38,
+ * a weapon pickup's have-test: `lw v1, 104(s0)` / `and v0, v1, a1`. */
+static s16 g_player_weapon_id;
+static u32 g_player_weapon_bits;
+
+void q2_monster_set_player_weapon(s16 weapon_id, u32 weapon_bits)
+{
+    g_player_weapon_id   = weapon_id;
+    g_player_weapon_bits = weapon_bits;
+}
+
+void q2_monster_set_drop_hook(void (*fn)(const q2_monster_drop_request *req,
+                                         void *user),
+                              void *user)
+{
+    g_drop_fn   = fn;
+    g_drop_user = user;
+}
+
+void q2_monster_drop_reset(void)
+{
+    memset(g_drop_queue, 0, sizeof(g_drop_queue));
+
+    /*
+     * The static is NOT reset with the queue. 0x800AE714 is gp-relative
+     * INITIALISED data inside the loaded image, not BSS — the text segment
+     * runs 0x80018000..0x800B2800 — and the image stores 0 there (`bytes
+     * 0x800AE710`: 44 00 00 00 | 00 00 00 00). The four gp-relative sites
+     * `xrefs 0x800AE714` lists are the two store/load pairs named above, and
+     * neither store writes 0: 0x80020798 writes 23, and 0x80020F24 (27, 23 or
+     * 24) is in the picker nothing calls. (A bulk clear over the gp area would
+     * not show up in xrefs; none is known.) Reproducing that means a
+     * Tank Commander killed on one map leaves the 23 standing for the next —
+     * which, since 23 is also the fallback, cannot be told apart from a fresh
+     * zero. Named because it is a real difference in shape even where it is
+     * not one in behaviour.
+     */
+}
+
+u32 q2_monster_drop_pending(void)
+{
+    u32 i, n = 0;
+
+    for (i = 0; i < Q2_MONSTER_DROP_SLOTS; i++)
+        if (g_drop_queue[i].used)
+            n++;
+
+    return n;
+}
+
+void q2_monster_drop_record(const q2_monster *self)
+{
+    u32 i;
+
+    if (!self)
+        return;
+
+    for (i = 0; i < Q2_MONSTER_DROP_SLOTS; i++) {
+        if (g_drop_queue[i].used)
+            continue;
+
+        g_drop_queue[i].used      = true;              /* 0x80020DB0 */
+        g_drop_queue[i].pop_class = self->pop_class_id; /* 0x80020DB4 */
+        g_drop_queue[i].pos[0]    = self->pos[0];
+        g_drop_queue[i].pos[1]    = self->pos[1];
+        g_drop_queue[i].pos[2]    = self->pos[2];
+        return;
+    }
+
+    /* No free slot: 0x80020D74 and 0x80020DA4 both branch to the `jr ra` at
+     * 0x80020E1C, so the fifth death in one frame drops nothing at all. */
+}
+
+void q2_monster_drop_flush(void)
+{
+    u32 i;
+
+    /* 0x80020E24: slot 0 to slot 3, in address order, each used one handed to
+     * 0x80020680 at 0x80020E5C. */
+    for (i = 0; i < Q2_MONSTER_DROP_SLOTS; i++) {
+        q2_monster_drop_request req;
+        s8 item;
+
+        if (!g_drop_queue[i].used)
+            continue;
+
+        g_drop_queue[i].used = false;       /* 0x800206B4, before the pick */
+
+        item = q2_monster_drop_item_for_class(g_drop_queue[i].pop_class,
+                                              g_player_weapon_id,
+                                              g_player_weapon_bits);
+
+        /*
+         * 0x800207D0 `beq s0, zero, 0x80020848` — a zero id spawns nothing, and
+         * it jumps straight to the epilogue, PAST the rand() at 0x80020820. So
+         * a flagged Parasite consumes no random number, and the stream every
+         * later draw sees depends on which creatures died, not merely on how
+         * many.
+         */
+        if (item == 0)
+            continue;
+
+        memset(&req, 0, sizeof(req));
+        req.item_id = (u8)item;
+
+        /*
+         * 0x80020820 `jal 0x80089E28` — BIOS rand() — and 0x8002082C `andi a1,
+         * v0, 0xFFF`. The creature layer draws its BIOS rand() from the C
+         * library's, as aimove.c and every cre_*.c do, so the one stream the
+         * console shares between them is at least one stream here.
+         */
+        req.heading = (u16)(rand() & 0xFFF);
+
+        req.pos[0] = g_drop_queue[i].pos[0];
+        req.pos[1] = g_drop_queue[i].pos[1];
+        req.pos[2] = g_drop_queue[i].pos[2];
+
+        if (g_drop_fn)
+            g_drop_fn(&req, g_drop_user);
+    }
+}
+
+/* ------------------------------------------------------------------------- */
 /* monster_death_use — 0x800622E8                                             */
 /* ------------------------------------------------------------------------- */
 /*
@@ -237,16 +557,20 @@ bool q2_monster_damage(q2_monster *m, s16 amount)
  *                                        three pursuit bits, all of it. A body
  *                                        that died mid-duck is not still ducked.
  *
- * Two more things it does are read and NOT modelled here, named rather than
- * quietly dropped:
- *   - entity+0xD4 is cleared when it is non-zero. In id's monster_death_use the
- *     field in that position is `self->item`, the thing the corpse drops, and
- *     the port has no drop-on-death path for it to feed.
- *   - if the link object at entity+0x24 has bit 8 of its halfword at +0xF2 set,
- *     it calls 0x80020D60, which walks four 88-byte slots from 0x800C6D70
- *     looking for a free one. That shape is an entity allocator and is
- *     consistent with id's `Drop_Item`, but "consistent with" is not "is", so
- *     it is left as an address.
+ * AND THE THIRD THING IS THE DROP, which used to be left as an address here.
+ * 0x80062328 `lhu v0, 242(a0)` / 0x80062330 `andi v0, v0, 0x100` / 0x8006233C
+ * `jal 0x80020D60` — a flagged creature records itself in the four-slot queue
+ * above, and the once-a-frame flush turns that into an item. The block in
+ * monster.h over q2_monster_drop_item_for_class has the whole chain. It does
+ * the job of id's `Drop_Item` by a different route, and the route matters,
+ * because it is indexed on the class row rather than on a per-entity `item`.
+ *
+ * The one thing it does that is still NOT modelled, named rather than quietly
+ * dropped: entity+0xD4 is cleared at 0x80062314 when it is non-zero. In id that
+ * field is `self->item`. The drop path does not read it — 0x80020D60 takes the
+ * LINK OBJECT (a0 after 0x80062318) and reads its +0x0C, +0xD2 and
+ * +0x54..+0xA3, nothing on the edict — so there is no second drop route
+ * hiding behind it.
  */
 void q2_monster_death_use(q2_monster *self)
 {
@@ -255,6 +579,9 @@ void q2_monster_death_use(q2_monster *self)
 
     self->flags  = (u16)(self->flags & ~(unsigned)(Q2_FL_FLY | Q2_FL_SWIM));
     self->aiflags &= Q2_AI_GOOD_GUY;
+
+    if (self->spawnflags & Q2_SPAWNFLAG_DROP_ITEM)
+        q2_monster_drop_record(self);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -340,17 +667,101 @@ void q2_monster_corpse_detach(q2_monster *m)
     m->svflags    &= ~(u32)Q2_SVF_MONSTER;
 }
 
+/* ------------------------------------------------------------------------- */
+/* The dissolve gate 0x8005B2A8 and its two handlers (monster.h)              */
+/* ------------------------------------------------------------------------- */
+q2_corpse_dissolve q2_corpse_dissolve_pick(const u8 *effect)
+{
+    if (!effect)
+        return Q2_CORPSE_DISSOLVE_NONE;
+
+    /* 0x8005B2B4 `lbu v0, 754(a0)` comes first, so effect[2] wins when both
+     * are set; only on a zero does 0x8005B2D4 `lbu v0, 752(a0)` look at
+     * effect[0]. A zero there branches to 0x8005B2F8 past both stores. */
+    if (effect[2])
+        return Q2_CORPSE_DISSOLVE_FX2;     /* 0x8005B2D0: 0x8005B444 */
+    if (effect[0])
+        return Q2_CORPSE_DISSOLVE_FX0;     /* 0x8005B2E8: 0x8005B39C */
+    return Q2_CORPSE_DISSOLVE_NONE;
+}
+
+s16 q2_corpse_dissolve_drain(s16 level, s32 dt)
+{
+    /*
+     * 0x8005B404 `lw v1, [0x800B2DB4]`, 0x8005B410 `sll v1, v1, 6`,
+     * 0x8005B40C `lhu v0, 244(s1)`, 0x8005B414 `subu`, 0x8005B418 `sh`: a
+     * halfword minus the whole shifted dt, kept to sixteen bits. The shift is
+     * done on the unsigned word, as `sll` does it.
+     */
+    return (s16)(u16)((u32)(u16)level -
+                      ((u32)dt << Q2_CORPSE_DISSOLVE_SHIFT));
+}
+
+/* The record's version of 0x8006D280, shared by both ways a corpse ends. */
+static void corpse_free(q2_monster *m)
+{
+    m->in_use     = false;
+    m->takedamage = Q2_DAMAGE_NO;
+}
+
 bool q2_monster_corpse_tick(q2_monster *m)
 {
-    if (!m || !m->corpse)
+    q2_corpse_dissolve arm;
+
+    /* A freed record is not ticked: 0x8006D280 has pushed the slot back onto
+     * the free stack at 0x800B2BAC and zeroed its +0xF4 (0x8006D2D8). */
+    if (!m || !m->corpse || !m->in_use)
         return false;
 
     /*
-     * The handler advances the animation and appends the body to the draw
-     * list before it tests anything (0x8007F738 and 0x8007F740). This port's
-     * draw walks the creature set itself, so the append has no analogue; the
-     * animation does, and a corpse whose death move has not run out still
-     * plays it.
+     * THE DISSOLVE HANDLER, 0x8005B39C or 0x8005B444, once the gate below has
+     * put it in +0x3C. Its presentation chain is simcombat.c's pass here
+     * (monster.h), so what is left is the drain and the free. It makes no
+     * actor-list append and no gib test, so there is no gib test here either,
+     * and no frame driver: nothing in the handler advances one.
+     *
+     * The console drains by its frame dt; this tick runs on the AI clock and
+     * drains by what one of its ticks is worth, Q2_AI_TICK_DT. So the body
+     * goes on the third tick after the gate's, 0.3 s where the console's
+     * six frames at the nominal 12 take 0.24 s.
+     */
+    if (m->dissolve_arm != Q2_CORPSE_DISSOLVE_NONE) {
+        m->dissolve = q2_corpse_dissolve_drain(m->dissolve, Q2_AI_TICK_DT);
+        if (m->dissolve > 0)                /* 0x8005B420 `bgtz` */
+            return false;
+        corpse_free(m);                     /* 0x8005B428 -> 0x8006D280 */
+        return true;
+    }
+
+    /*
+     * THE GATE, 0x8007F728 `jal 0x8005B2A8`, before anything else — and when
+     * it fires, 0x8007F730 returns: no chain, no append, no gib test on that
+     * tick. So a body at or past gib_health whose effect[0] or [2] is set
+     * dissolves and is never thrown.
+     *
+     * What it leaves behind, as this record has it: the handler in +0x3C,
+     * the level in +0xF4, and a body no sweep can find from the next frame,
+     * because the handler never calls 0x800552B4 to put it back on the actor
+     * list. The port's sweeps skip on `takedamage`, not on list membership
+     * (combat.c, nearest_hit), and q2_actor_from_monster carries it across.
+     * 0x8007F288 on the +0x2EC record has nothing to act on: a creature
+     * corpse's link was nulled at the detach (monster.h).
+     */
+    arm = q2_corpse_dissolve_pick(m->effect);
+    if (arm != Q2_CORPSE_DISSOLVE_NONE) {
+        m->dissolve_arm = (u8)arm;                     /* 0x8005B2EC */
+        m->dissolve     = Q2_CORPSE_DISSOLVE_LEVEL;    /* 0x8005B2F4 */
+        m->takedamage   = Q2_DAMAGE_NO;
+        return false;
+    }
+
+    /*
+     * The handler's other three calls advance no animation: 0x8007F738 is the
+     * presentation chain (simcombat.c's pass here) and 0x8007F740 appends the
+     * body to the actor list, which this port's fixed target list stands for.
+     * The frame driver below is the port's own, kept from before, so that a
+     * corpse whose move has not run out still plays it. Where the console
+     * advances a detached body's frame, if anywhere, is not traced here.
      */
     if (m->currentmove)
         q2_M_MoveFrame(m);
@@ -361,9 +772,21 @@ bool q2_monster_corpse_tick(q2_monster *m)
      * `slt v0, v0, v1` / `bne` at 0x8007F748..0x8007F758, falling through to
      * the destruction dispatcher at 0x8007F764. `gib_health < health` keeps
      * the body, so the boundary is inclusive.
+     *
+     * AND THE DISPATCHER RUNS — which is where every gib on the disc comes
+     * from (modelent.h). It is no longer gated on `gibbed`: each module's gib
+     * arm raises that flag itself when the killing hit lands (cre_soldier.c,
+     * cre_arachner.c) and throws nothing, so a creature killed straight past
+     * gib_health reached here already "gibbed" and never came apart. What
+     * makes 0x8007F764 fire once on the console is the dispatcher's own tail,
+     * 0x8007D140 `jal 0x8006D280(self)`: the actor is FREED, so nothing ticks
+     * it, draws it or can hit it again. `in_use` and `takedamage` are this
+     * record's version of that free.
      */
-    if (m->health <= m->gib_health && !m->gibbed) {
+    if (m->health <= m->gib_health && m->in_use) {
         m->gibbed = true;
+        q2_gib_monster_corpse(m);           /* 0x8007F764 -> 0x8007CEB4 */
+        corpse_free(m);                     /* 0x8007D140 -> 0x8006D280 */
         return true;
     }
 
@@ -717,7 +1140,12 @@ q2_monster *q2_pick_target(s16 targetname)
     return g_pick_target(targetname, g_pick_target_user);
 }
 
-void q2_monster_start_go(q2_monster *m)
+/*
+ * monster_start_go proper, 0x80061BA4 — the shared tail all three go-routines
+ * fall into. Kept as its own body so the three can be reproduced above it in
+ * the shape the disc has them.
+ */
+static void monster_start_go_body(q2_monster *m)
 {
     if (!m || m->health <= 0)
         return;
@@ -766,6 +1194,217 @@ void q2_monster_start_go(q2_monster *m)
 
     m->think      = q2_M_MoveFrame;
     m->next_think = q2_level_state.time + 1;
+}
+
+/* ------------------------------------------------------------------------- */
+/* The three go-routines — see the block above the declarations in monster.h  */
+/* ------------------------------------------------------------------------- */
+/*
+ * Two things all three do that are NOT reproduced here, named so nobody takes
+ * these for complete transcriptions:
+ *
+ *  - flymonster_go opens with `jal 0x800607F8`, M_walkmove(self, 0, 0), at
+ *    0x800624D0 — id's `if (!M_walkmove (self, 0, 0)) gi.dprintf ("in
+ *    solid")`. A zero-length move leaves the origin where it is, so its only
+ *    products are a relink and a trigger touch. INFERRED harmless, not read
+ *    through: the port's step has no dprintf and the spawn drop already
+ *    placed the creature.
+ *  - each ends, after the jal to 0x80061BA4, with `if ((spawnflags >> 18) &
+ *    2)` (0x8006245C..0x8006246C, and the same at 0x800624FC and 0x80062594):
+ *    use = 0x800623DC, nextthink = 0, solid and movetype cleared, svflags |= 1
+ *    — id's monster_triggered_start for a record carrying map flag 2. That is
+ *    a different finding from the eye and the turn rate and it is left for it.
+ */
+void q2_monster_walk_start_go(q2_monster *m, s16 model_ext2)
+{
+    if (!m)
+        return;
+
+    /* 0x80062434 — conditional STORE, unconditional 228. 20.04 deg/tick. */
+    if (m->yaw_speed == 0)
+        m->yaw_speed = 228;
+
+    /*
+     * 0x80062450 `nor v0, zero, v0` on the halfword at obj+0xF8, stored back
+     * through an `sh` at 0x80062458 — so the eye is ~ext2 truncated to 16 bits.
+     * ext2 251 gives -252, not -251, and ext2 0 gives -1, not 0.
+     */
+    m->view_height = (s16)(u16)~(u16)model_ext2;
+
+    monster_start_go_body(m);
+}
+
+void q2_monster_fly_start_go(q2_monster *m)
+{
+    if (!m)
+        return;
+
+    if (m->yaw_speed == 0)
+        m->yaw_speed = 114;         /* 0x800624E8 — 10.02 deg/tick */
+
+    m->view_height = -250;          /* 0x800624F0 — flat, no model read */
+
+    monster_start_go_body(m);
+}
+
+void q2_monster_swim_start_go(q2_monster *m)
+{
+    if (!m)
+        return;
+
+    if (m->yaw_speed == 0)
+        m->yaw_speed = 114;         /* 0x8006257C */
+
+    /* -100 on BOTH paths: 0x80062578 loads it in the delay slot of the yaw
+     * branch and 0x80062584 loads it again on the fall-through, and the single
+     * store is at 0x80062590. */
+    m->view_height = -100;
+
+    monster_start_go_body(m);
+}
+
+/* ------------------------------------------------------------------------- */
+/* The three start wrappers — see the block above the declarations            */
+/* ------------------------------------------------------------------------- */
+/*
+ * THE FLAG IS THE WRAPPER'S, NOT THE GO-ROUTINE'S.
+ *
+ *   0x800622A8  lhu v1, 32(a0)          \  flymonster_start, 0x8006229C
+ *   0x800622B0  sw 0x800624BC, 148(a0)   |  parks the fly go-routine
+ *   0x800622B4  ori v1, v1, 0x1          |  FL_FLY
+ *   0x800622BC  sh v1, 32(a0)           /   in the jal 0x800619E0's delay slot
+ *
+ * and 0x80062280 `ori 0x2` with think 0x8006255C for the swim one. The think
+ * and the flag are written in the same four instructions, so they always
+ * arrive together and they arrive at SPAWN — which is why the prone Insane is a
+ * FLYER for its whole life and not merely a creature with a low eye: aimove.c
+ * selects the non-stepping movement path off exactly this bit, and the place
+ * that takes it away again is monster_death_use (0x800622F8 `andi 0xFFFC`).
+ *
+ * The walk wrapper writes the think and nothing else.
+ *
+ * ALL THREE THEN `jal 0x800619E0` (0x80062250, 0x80062284, 0x800622B8), and
+ * monster_start's last act draws from the RNG — see monster_start_frame.
+ */
+
+/*
+ * monster_start's START-FRAME PICK, 0x80061B1C..0x80061B8C — the one part of
+ * monster_start that runs here, inside the wrapper, rather than in
+ * q2_creature_spawn.
+ *
+ *   0x80061B1C  lw v0, 216(s0)              currentmove
+ *   0x80061B24  beq v0, zero, 0x80061B90    no move: no draw, no frame write
+ *   0x80061B2C  jal 0x80089E28              BIOS rand(), A0:2F
+ *   0x80061B48  subu v1, v1, a0 / addiu 1   span = last - first + 1
+ *   0x80061B50  div v0, v1  (mfhi)          rand() % span
+ *   0x80061B7C  lhu v0, 0(a1)               the first frame's low halfword
+ *   0x80061B8C  sh v0, 56(s0)               frame = first + remainder
+ *
+ * That is id's "randomize what frame they start on". 0x80089E28 is the same
+ * routine a module's import +0x14 reaches (the loader stores it there at
+ * 0x8007DA24/0x8007DA28), so this draw is taken from the one stream the
+ * module's own random() draws come from, and it lands INSIDE the wrapper call:
+ * after anything the module drew before calling it, before anything it draws
+ * after. cre_insane.c's skin draw is the case that shows it.
+ *
+ * It reads what the module installed, which is why it cannot run in
+ * q2_creature_spawn ahead of the module's spawn hook, where most of what this
+ * port models of monster_start runs. The `sh` sits in the delay slot of `jal
+ * 0x8007F474`, which hands the new frame to the render object; the port has no
+ * render object, so that call has no counterpart here.
+ */
+static void monster_start_frame(q2_monster *m)
+{
+    const q2_mmove *mv = m->currentmove;
+    s32 r, span;
+
+    if (!mv)
+        return;
+
+    r    = (s32)(rand() & 0x7FFF);
+    span = mv->last_frame - mv->first_frame + 1;
+
+    /*
+     * A PORT GUARD: a zero divisor traps on the console (0x80061B5C `break
+     * 0x1C00`). The decoder refuses a move with last < first, so a real one
+     * never reaches it; the draw has been taken either way, as it has on the
+     * console by then. C's `%` truncates toward zero as MIPS `div` does, and r
+     * is never negative, so every other span gives the console's remainder.
+     */
+    if (span == 0)
+        return;
+
+    m->frame = (s16)(u16)((u32)(u16)mv->first_frame + (u32)(r % span));
+}
+
+void q2_monster_walk_start(q2_monster *m)
+{
+    if (!m)
+        return;
+    m->start_kind = Q2_CRE_START_WALK;              /* 0x80062254 */
+    monster_start_frame(m);                         /* 0x80062250 -> 0x80061B2C */
+}
+
+void q2_monster_fly_start(q2_monster *m)
+{
+    if (!m)
+        return;
+    m->start_kind = Q2_CRE_START_FLY;               /* 0x800622B0 */
+    m->flags      = (u16)(m->flags | Q2_FL_FLY);    /* 0x800622B4 */
+    monster_start_frame(m);                         /* 0x800622B8 -> 0x80061B2C */
+}
+
+void q2_monster_swim_start(q2_monster *m)
+{
+    if (!m)
+        return;
+    m->start_kind = Q2_CRE_START_SWIM;              /* 0x8006227C */
+    m->flags      = (u16)(m->flags | Q2_FL_SWIM);   /* 0x80062280 */
+    monster_start_frame(m);                         /* 0x80062284 -> 0x80061B2C */
+}
+
+void q2_monster_start_go(q2_monster *m)
+{
+    if (!m)
+        return;
+
+    /*
+     * Whichever go-routine the wrapper parked at entity+0x94. None of the
+     * three writes the flags word — that was the wrapper's, at spawn.
+     */
+    switch (m->start_kind) {
+    case Q2_CRE_START_FLY:
+        q2_monster_fly_start_go(m);
+        return;
+    case Q2_CRE_START_SWIM:
+        q2_monster_swim_start_go(m);
+        return;
+    default:
+        break;
+    }
+
+    /*
+     * A PORT GUARD, NOT THE DISC'S: with `model_ext2` still zero the console's
+     * arithmetic would put the eye at -1, one unit below the origin, and a
+     * creature whose model nobody resolved would go blind. The disc always has
+     * the halfword because the loader writes it at spawn (0x80056710); this
+     * port fills it from `q2_model_ent_height` only where a model bank is in
+     * hand. So an unfilled creature keeps the -290 stand-in from
+     * q2_monster_init and only the yaw_speed half applies.
+     *
+     * INFERRED that no creature model on the disc genuinely has ext2 0 — the
+     * five measured are 251, 507, 217, 380 and 304, and the only 0 found with
+     * `q2psx-inspect models` was on an ITEM (Adrenal P on BASE0), which never
+     * reaches a go-routine.
+     */
+    if (m->model_ext2 == 0) {
+        if (m->yaw_speed == 0)
+            m->yaw_speed = 228;
+        monster_start_go_body(m);
+        return;
+    }
+
+    q2_monster_walk_start_go(m, m->model_ext2);
 }
 
 /* ------------------------------------------------------------------------- */

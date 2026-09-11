@@ -94,6 +94,30 @@
 #define Q2_SAVE_MAGIC      "Q2PS"
 
 /*
+ * 6 — an EVNT byte changed meaning, and the item latches joined the file.
+ *
+ * The event runtime used to refuse a record on ONESHOT && HASRUN, so a spent
+ * one-shot CAT_A record was saved as 0x49. It now refuses on DISABLED alone,
+ * as 0x8002799C does, and the latch at 0x800279A8..0x800279BC writes
+ * DISABLED := ONESHOT — the same record spent is 0xC9. Loaded as-is, a
+ * version-5 byte of 0x49 would come back ARMED, and every spent one-shot
+ * record in the level — CREBATCH spawns, STRING messages, doors — would fire
+ * again. The bump is needed as well as the fix, because 0x49 is still a legal
+ * byte now: it is what ENABLE (0x800278B0, bit 7 only) leaves on a re-armed
+ * one-shot record, so a v5 byte and a v6 byte cannot be told apart otherwise.
+ *
+ * VERSION 5 IS MIGRATED, NOT REFUSED: on read, every EVNT byte with ONESHOT
+ * and HASRUN both set gets DISABLED. That is exact, not a guess — the runtime
+ * that wrote version 5 refused every record with both bits set and never
+ * cleared HASRUN (its ENABLE cleared bit 7 alone), so in a v5 file that pair
+ * always meant spent. A v5 file has no EVIT chunk, so its item latches come
+ * back clear: the state that runtime had, since it never set one.
+ *
+ * EVIT is the event runtime's per-item latch shadow (events_rt.h,
+ * `item_flags`): bit 7 of each item's op byte, written by 0x80027498. The
+ * console keeps those bits beside the record bits in its own `EVE_<map>`
+ * block (0x80029078, 0x80029214..0x80029254).
+ *
  * 5 — deferred Population history joined the file in ITEM, and projectile
  * velocity/timer values acquired the retail per-kind stepping semantics.
  * Version 4 cannot be migrated honestly: it has no activation order for a
@@ -115,7 +139,10 @@
  *
  * Version 1 was a flat format that stored a raw `q2_inventory`.
  */
-#define Q2_SAVE_VERSION    5
+#define Q2_SAVE_VERSION    6
+
+/* The oldest version read, with the migration above. Older is refused. */
+#define Q2_SAVE_VERSION_OLDEST 5
 
 #define Q2_SAVE_MAP_LEN    16
 #define Q2_SAVE_SERIAL_LEN 16
@@ -311,6 +338,11 @@ typedef struct q2_save {
     u8  *event_flags;
     u32  event_count;
 
+    /* The item latches, one byte per Events chunk byte, indexed by item offset
+     * as the runtime's `item_flags` is. Version 6; absent from a v5 file. */
+    u8  *event_item_flags;
+    u32  event_item_count;
+
     /* One byte per trigger volume: was the player inside it last tick. */
     u8  *trigger_inside;
     u32  trigger_count;
@@ -329,7 +361,7 @@ typedef struct q2_save {
      * Compatibility decision: a version-4 file cannot reconstruct a deferred
      * roster whose history it never recorded, and old PROJ bytes now have
      * different per-kind stepping semantics. The header therefore advances to
-     * version 5 and rejects v4. Within v5, ITEM is mandatory when the loaded
+     * version 5 and rejects v4. From v5 on, ITEM is mandatory when the loaded
      * map has Population groups; no-Population utility snapshots may omit it.
      */
     bool              item_state_present;

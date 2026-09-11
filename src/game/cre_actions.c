@@ -111,8 +111,11 @@ static void run_step(q2_monster *m, const q2_cre_step *s)
          *                      records as being called from this address
          *   +0x8C  0x8006217C  the rail: 0x800621A4 calls 0x8004917C, named in
          *                      combat.h as the rail
-         *   +0x80  0x80062000  a bolt with a visual — it calls 0x8004E920,
-         *                      which effect.h names as an effect constructor
+         *   +0x80  0x80062000  a bolt: 0x80062098 calls 0x8004E920, the
+         *                      point-clip-and-area helper (effect.h; it
+         *                      builds no effect), for the muzzle point and
+         *                      its area, and 0x800620EC hands both to
+         *                      0x8004D70C, the bolt spawner
          *   +0xFC  0x80062240  three calls to one spawner (0x800619E0), which
          *                      is the shape of a spread
          *

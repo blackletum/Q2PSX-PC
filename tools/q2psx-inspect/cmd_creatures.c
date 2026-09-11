@@ -6,9 +6,14 @@
 
 #include "crebind.h"
 #include "creature.h"
+#include "creworld.h"
 #include "dat.h"
+#include "ident.h"
 #include "level.h"
+#include "model.h"
+#include "monster.h"
 #include "reloc.h"
+#include "vag.h"
 
 /* Where a module image is relocated for inspection. Any address works; this
  * one is far from the executable's own so a stray pointer is obvious. */
@@ -458,6 +463,416 @@ static void report(const q2_creature *c, const q2_cre_impl *impl)
     }
 }
 
+/* ------------------------------------------------------------------------- */
+/*
+ * THE WAKE CENSUS — every creature every map places, woken the way the client
+ * wakes it, and what its eye and turn rate came out as.
+ *
+ * The decode above says what each module IS. This says what the port DOES with
+ * it once a map is loaded. q2_creature_world_load spawns the records and runs
+ * each module's spawn hook, which is where the Insane picks the fly or the
+ * walk wrapper on its prone bit (module+0x974). Each creature's `model_ext2` is
+ * then filled from its own CastList model — the halfword the console's loader
+ * writes to obj+0xF8 at 0x80056710, and what the client's creature model loop
+ * has to copy from the q2_model it resolves, before it wakes the world — and
+ * q2_creature_world_wake runs q2_monster_start_go, which dispatches to the
+ * go-routine the wrapper parked. Leave the fill out and every walker below
+ * comes out at the stand-in, which is the check this census exists to make.
+ *
+ * What that must give, off the three go-routines (`ai` pins the immediates): a
+ * walker's eye is ~ext2 (0x80062450 `nor`) and it turns 228 (0x80062438); a
+ * flyer's eye is a flat -250 (0x800624F0) and a swimmer's -100 (0x80062584),
+ * and both turn 114 (0x800624E8, 0x8006257C). A creature whose model could not
+ * be found keeps the port's -290 stand-in (monster.c, q2_monster_start_go) and
+ * is counted rather than hidden.
+ *
+ * Then the two sound substitutions modules make in their own spawn code
+ * (creature.c, k_sound_fallbacks): the Soldier's pain trio (module+0xE50) and
+ * the Tank Commander's idle, overwritten with its footstep (module+0x808). On
+ * every map that places one, what the host plays must be a name that map's
+ * SNDVRAM bank carries.
+ */
+#define CENSUS_KINDS  40
+#define CENSUS_SHAPES 6
+
+typedef struct census_kind {
+    char name[13];
+    u32  maps, placed;
+    int  last_map;
+    struct { s16 eye, turn; bool fly, swim; u32 n; } shape[CENSUS_SHAPES];
+    u32  shapes, overflow;
+} census_kind;
+
+/* Expectations measured off the disc: ext2 251, 507, 217, 380 and 304 re-read
+ * with `q2psx-inspect models`, so ~ext2 is -252, -508, -218, -381 and -305. */
+typedef struct census_expect {
+    const char *map, *kind;
+    s16         eye, turn;
+    bool        fly;
+    u32         hit, total;
+} census_expect;
+
+static bool census_name_ieq(const char *a, const char *b)
+{
+    while (*a && *b) {
+        int ca = (*a >= 'A' && *a <= 'Z') ? *a + 32 : *a;
+        int cb = (*b >= 'A' && *b <= 'Z') ? *b + 32 : *b;
+        if (ca != cb)
+            return false;
+        a++;
+        b++;
+    }
+    return *a == *b;
+}
+
+/*
+ * "Does this map's bank carry it", exactly and without case — the client's
+ * first pass (client_find_sound). Its second, prefix pass only applies to a key
+ * that fills a twelve-byte table field, and every name asked about here is
+ * shorter than that.
+ */
+static bool census_bank_has(const char *name, void *user)
+{
+    const q2_sound_bank *bank = (const q2_sound_bank *)user;
+    q2_vag v;
+    u32 i;
+
+    if (!bank || !name || !name[0])
+        return false;
+    for (i = 0; i < bank->count; i++)
+        if (q2_sound_bank_get(bank, i, &v) && census_name_ieq(v.name, name))
+            return true;
+    return false;
+}
+
+static census_kind *census_kind_for(census_kind *k, u32 *n, const char *name)
+{
+    u32 i;
+
+    for (i = 0; i < *n; i++)
+        if (strcmp(k[i].name, name) == 0)
+            return &k[i];
+    if (*n >= CENSUS_KINDS)
+        return NULL;
+    memset(&k[*n], 0, sizeof(k[*n]));
+    snprintf(k[*n].name, sizeof(k[*n].name), "%s", name);
+    k[*n].last_map = -1;
+    return &k[(*n)++];
+}
+
+static int census_wake(const disc *d)
+{
+    static census_kind kinds[CENSUS_KINDS];
+    census_expect expect[] = {
+        { "BASE0",    "Soldier",  -252, 228, false, 0, 0 },
+        { "BASE1",    "Soldier",  -252, 228, false, 0, 0 },
+        { "COMMAND",  "Tankcomm", -508, 228, false, 0, 0 },
+        { "POWER1",   "Arachner", -218, 228, false, 0, 0 },
+        { "POWER1",   "Gunner",   -381, 228, false, 0, 0 },
+        { "LAB",      "Insane",   -250, 114, true,  0, 0 },   /* prone   */
+        { "LAB",      "Insane",   -305, 228, false, 0, 0 },   /* upright */
+    };
+    const u32 n_expect = (u32)(sizeof(expect) / sizeof(expect[0]));
+    q2_build_id id;
+    q2_creature_world *w;
+    u32 nkinds = 0, total = 0, unresolved = 0, maps_with = 0, odd = 0;
+    u32 sol_maps = 0, sol_ok = 0, tnk_maps = 0, tnk_ok = 0;
+    u32 sol_names[3] = { 0, 0, 0 };
+    u32 st_records = 0, st_nomod = 0;
+    int i, n = disc_file_count(d), map_ord = 0, bad = 0;
+    u32 k;
+    s16 stand_in;
+
+    if (q2_identify(d, &id) != Q2_OK) {
+        printf("\n  wake census: cannot identify this disc\n");
+        return 1;
+    }
+    {
+        q2_monster fresh;
+
+        q2_monster_init(&fresh);
+        stand_in = fresh.view_height;
+    }
+    w = (q2_creature_world *)calloc(1, sizeof(*w));
+    if (!w)
+        return 1;
+
+    /*
+     * Every record is woken here, the held batches too: the client holds a
+     * script's groups dormant and CREBATCH later wakes them through the same
+     * q2_monster_start_go (creworld.c, q2_creature_world_summon), so what they
+     * wake up as is the same either way.
+     */
+    printf("\nWake census: every placed creature, woken as the client wakes"
+           " it\n");
+
+    for (i = 0; i < n; i++) {
+        const disc_file *f = disc_file_at(d, i);
+        const char *p = f->path, *rest, *slash;
+        char map[32], path[160];
+        q2_buf buf;
+        q2_common_file cf;
+        q2_model_bank cbank;
+        bool have_cbank;
+        q2_buf zbuf[8];
+        q2_zone_file zf[8];
+        q2_model_bank zbank[8];
+        bool zopen[8];
+        q2_sound_bank sb, *sbp;
+        bool have_sb;
+        bool sol_done = false, tnk_done = false;
+        s32 origin[3] = { 0, 0, 0 };
+        u32 m, z;
+
+        if (*p == '/')
+            p++;
+        if (strncmp(p, "Q2DATA/LEVELS/", 14) != 0)
+            continue;
+        rest  = p + 14;
+        slash = strchr(rest, '/');
+        if (!slash || strcmp(slash + 1, "COMMON.DAT") != 0 ||
+            (size_t)(slash - rest) >= sizeof(map))
+            continue;
+        memcpy(map, rest, (size_t)(slash - rest));
+        map[slash - rest] = '\0';
+
+        snprintf(path, sizeof(path), "Q2DATA/LEVELS/%s/COMMON.DAT", map);
+        if (disc_read_file(d, path, &buf) != Q2_OK)
+            continue;
+        if (q2_common_open(&cf, &buf) != Q2_OK) {
+            q2_buf_free(&buf);
+            continue;
+        }
+        if (q2_creature_world_load(w, d, &id, &cf, NULL) != Q2_OK ||
+            w->set.count == 0) {
+            q2_creature_world_free(w);
+            q2_common_close(&cf);
+            continue;
+        }
+        map_ord++;
+        maps_with++;
+        st_records += w->stats.records;
+        st_nomod   += w->stats.no_module;
+
+        /* The models: COMMON's bank, then every zone's, which is where most
+         * creature models live (see `mob`). */
+        have_cbank = (q2_model_bank_from_common(&cbank, &cf) == Q2_OK);
+        for (z = 0; z < 8; z++) {
+            char zpath[160];
+
+            zopen[z] = false;
+            snprintf(zpath, sizeof(zpath), "Q2DATA/LEVELS/%s/ZONE%u.DAT",
+                     map, z);
+            if (disc_read_file(d, zpath, &zbuf[z]) != Q2_OK)
+                continue;
+            if (q2_zone_open(&zf[z], &zbuf[z]) != Q2_OK) {
+                q2_buf_free(&zbuf[z]);
+                continue;
+            }
+            zopen[z] = (q2_model_bank_from_zone(&zbank[z], &zf[z]) == Q2_OK);
+            if (!zopen[z])
+                q2_zone_close(&zf[z]);
+        }
+
+        for (m = 0; m < w->set.count; m++) {
+            q2_monster *mo = &w->set.monsters[m];
+            const char *name = q2_creature_world_model_name(w, mo);
+            q2_model mdl;
+            s32 idx = -1;
+            bool got = false;
+
+            memset(&mdl, 0, sizeof(mdl));  /* `got` guards it; MSVC C4701 */
+            if (!mo->in_use || !name)
+                continue;
+            if (have_cbank) {
+                idx = q2_model_bank_find(&cbank, name);
+                got = idx >= 0 && q2_model_get(&cbank, (u32)idx, &mdl) == Q2_OK;
+            }
+            for (z = 0; z < 8 && !got; z++) {
+                if (!zopen[z])
+                    continue;
+                idx = q2_model_bank_find(&zbank[z], name);
+                got = idx >= 0 &&
+                      q2_model_get(&zbank[z], (u32)idx, &mdl) == Q2_OK;
+            }
+            if (got)
+                mo->model_ext2 = mdl.hdr.ext2;   /* obj+0xF8, 0x80056710 */
+        }
+
+        q2_creature_world_wake(w, origin);
+
+        have_sb = (q2_sound_bank_load(&sb, d, map) == Q2_OK);
+        sbp     = have_sb ? &sb : NULL;
+
+        for (m = 0; m < w->set.count; m++) {
+            const q2_monster *mo = &w->set.monsters[m];
+            const char *name = q2_creature_world_model_name(w, mo);
+            census_kind *ck;
+            bool fly  = (mo->flags & Q2_FL_FLY) != 0;
+            bool swim = (mo->flags & Q2_FL_SWIM) != 0;
+            s16 want_eye, want_turn;
+            u32 s;
+
+            if (!mo->in_use || !name)
+                continue;
+            total++;
+
+            /* What the go-routine that was parked must have left. */
+            if (fly) {
+                want_eye = -250;  want_turn = 114;
+            } else if (swim) {
+                want_eye = -100;  want_turn = 114;
+            } else if (mo->model_ext2 != 0) {
+                want_eye = (s16)(u16)~(u16)mo->model_ext2;  want_turn = 228;
+            } else {
+                /* No model, so nobody filled ext2: the port's guard keeps
+                 * q2_monster_init's stand-in (monster.c). */
+                want_eye = stand_in;  want_turn = 228;
+                unresolved++;
+            }
+            if (mo->view_height != want_eye || mo->yaw_speed != want_turn) {
+                printf("  MISMATCH  %s %s: eye %d turn %d, want %d/%d\n",
+                       map, name, mo->view_height, mo->yaw_speed,
+                       want_eye, want_turn);
+                odd++;
+            }
+
+            ck = census_kind_for(kinds, &nkinds, name);
+            if (ck) {
+                if (ck->last_map != map_ord) {
+                    ck->last_map = map_ord;
+                    ck->maps++;
+                }
+                ck->placed++;
+                for (s = 0; s < ck->shapes; s++)
+                    if (ck->shape[s].eye == mo->view_height &&
+                        ck->shape[s].turn == mo->yaw_speed &&
+                        ck->shape[s].fly == fly && ck->shape[s].swim == swim)
+                        break;
+                if (s == ck->shapes && s < CENSUS_SHAPES) {
+                    ck->shape[s].eye  = mo->view_height;
+                    ck->shape[s].turn = mo->yaw_speed;
+                    ck->shape[s].fly  = fly;
+                    ck->shape[s].swim = swim;
+                    ck->shape[s].n    = 0;
+                    ck->shapes++;
+                }
+                if (s < ck->shapes)
+                    ck->shape[s].n++;
+                else
+                    ck->overflow++;
+            }
+
+            for (k = 0; k < n_expect; k++) {
+                if (strcmp(expect[k].map, map) != 0 ||
+                    strcmp(expect[k].kind, name) != 0)
+                    continue;
+                expect[k].total++;
+                if (mo->view_height == expect[k].eye &&
+                    mo->yaw_speed == expect[k].turn && fly == expect[k].fly)
+                    expect[k].hit++;
+            }
+
+            /* The sound substitutions, once per map per module. */
+            if (!sol_done && strcmp(name, "Soldier") == 0) {
+                const char *r = q2_cre_sound_resolve(mo, "sol_pain3",
+                                                     census_bank_has, sbp);
+                sol_done = true;
+                sol_maps++;
+                if (r && census_bank_has(r, sbp)) {
+                    sol_ok++;
+                    if (strcmp(r, "sol_pain2") == 0)      sol_names[0]++;
+                    else if (strcmp(r, "sol_pain1") == 0) sol_names[1]++;
+                    else if (strcmp(r, "sol_pain3") == 0) sol_names[2]++;
+                } else {
+                    printf("  MISMATCH  %s: the Soldier's sol_pain3 plays %s,"
+                           " which the bank does not carry\n",
+                           map, r ? r : "(nothing)");
+                }
+            }
+            if (!tnk_done && strcmp(name, "Tankcomm") == 0) {
+                const char *r = q2_cre_sound_resolve(mo, "tnk_idle1",
+                                                     census_bank_has, sbp);
+                tnk_done = true;
+                tnk_maps++;
+                if (r && strcmp(r, "tnk_step") == 0 &&
+                    census_bank_has(r, sbp)) {
+                    tnk_ok++;
+                } else {
+                    printf("  MISMATCH  %s: the Tank Commander's tnk_idle1"
+                           " plays %s, not a carried tnk_step\n",
+                           map, r ? r : "(nothing)");
+                }
+            }
+        }
+
+        if (have_sb)
+            q2_sound_bank_free(&sb);
+        for (z = 0; z < 8; z++)
+            if (zopen[z])
+                q2_zone_close(&zf[z]);
+        q2_creature_world_free(w);
+        q2_common_close(&cf);
+    }
+    free(w);
+
+    printf("  creature    maps  placed  eye/turn after q2_monster_start_go\n");
+    for (k = 0; k < nkinds; k++) {
+        u32 s;
+
+        printf("  %-10s  %4u  %6u ", kinds[k].name, kinds[k].maps,
+               kinds[k].placed);
+        for (s = 0; s < kinds[k].shapes; s++)
+            printf(" %d/%d%s x%u", kinds[k].shape[s].eye,
+                   kinds[k].shape[s].turn,
+                   kinds[k].shape[s].fly ? " FLY"
+                                         : (kinds[k].shape[s].swim ? " SWIM"
+                                                                   : ""),
+                   kinds[k].shape[s].n);
+        if (kinds[k].overflow)
+            printf("  (+%u more)", kinds[k].overflow);
+        printf("\n");
+    }
+    printf("  %u creatures on %u maps, from %u spawn records (%u name a class"
+           " with no module)\n", total, maps_with, st_records, st_nomod);
+    printf("  %u found no model to read ext2 from and kept the %d stand-in\n",
+           unresolved, stand_in);
+    printf("  flyer -250/114, swimmer -100/114, walker ~ext2/228: %s\n",
+           odd ? "MISMATCHES above" : "every creature");
+    if (odd)
+        bad++;
+
+    for (k = 0; k < n_expect; k++) {
+        const census_expect *e = &expect[k];
+        /* Every one of that kind on that map must fall under one of its
+         * expectations, and every expectation must be met at least once. */
+        u32 j, covered = 0;
+        bool ok;
+
+        for (j = 0; j < n_expect; j++)
+            if (strcmp(expect[j].map, e->map) == 0 &&
+                strcmp(expect[j].kind, e->kind) == 0)
+                covered += expect[j].hit;
+        ok = e->hit > 0 && covered == e->total;
+        printf("  %-8s %-9s %d/%d%s  %u of %u  %s\n", e->map, e->kind, e->eye,
+               e->turn, e->fly ? " FLY" : "    ", e->hit, e->total,
+               ok ? "ok" : "MISMATCH");
+        if (!ok)
+            bad++;
+    }
+
+    printf("  sol_pain3 plays a carried name on %u of %u Soldier maps"
+           " (sol_pain2 %u, sol_pain1 %u, sol_pain3 %u)\n",
+           sol_ok, sol_maps, sol_names[0], sol_names[1], sol_names[2]);
+    printf("  tnk_idle1 plays tnk_step on %u of %u Tank Commander maps\n",
+           tnk_ok, tnk_maps);
+    if (sol_maps == 0 || sol_ok != sol_maps || tnk_maps == 0 ||
+        tnk_ok != tnk_maps)
+        bad++;
+
+    return bad ? 1 : 0;
+}
+
 int cmd_creatures(const disc *d)
 {
     int mi;
@@ -559,5 +974,10 @@ int cmd_creatures(const disc *d)
     printf("  a * marks an index with no hand transcription — it runs from the"
            " decoded action instead\n");
 
-    return g_reloc_fail ? 1 : 0;
+    {
+        int rc = g_reloc_fail ? 1 : 0;
+
+        rc |= census_wake(d);
+        return rc;
+    }
 }

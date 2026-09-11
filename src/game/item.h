@@ -64,6 +64,10 @@
 #include "itemtable.h"
 #include "population.h"
 #include "q2psx.h"
+#include "trace.h"      /* q2_move_world — the entity list a dropped item hits */
+
+struct q2_fx_world;
+struct q2_model_bank;
 
 /* ------------------------------------------------------------------------- */
 /* Durations, all on the 300 Hz level clock                                   */
@@ -271,6 +275,158 @@ void q2_item_shrink_think(q2_entity *e, q2_entity_world *w);
  * trig.h — so this is a reproduction of the arithmetic, not of the table.
  */
 s32 q2_item_glow_pulse(s32 level_time);
+
+/* ------------------------------------------------------------------------- */
+/* The engine state an item think reaches that q2_entity_world does not carry */
+/* ------------------------------------------------------------------------- */
+/*
+ * Two item thinks reach console GLOBALS rather than anything on the entity or
+ * its world: the materialise burst spawns into the one particle pool
+ * (0x800596B0 -> 0x80030284, whose pool is a fixed block at 0x800D4B24 and a
+ * group list the whole engine shares), and a creature's dropped item moves
+ * through the shared toss mover, which installs SecondaryCol (0x800C8FE8) and
+ * walks the 48-slot entity table (0x800CAE10) and the gravity word at
+ * [0x800AE924]. None of those is per-entity on the console, so the binding is
+ * module-wide here too, and the host installs it once per zone load.
+ *
+ * Every field may be NULL. With no `fx` the materialise burst still draws its
+ * 45 numbers (so the generator stream is the same with or without a pool) and
+ * spawns nothing. With no `hull` a dropped item is traced against the entity
+ * list alone; with no `ents` against the hull alone; with neither it flies
+ * until something else stops it. With no `gravity` it falls at Q2_GRAVITY.
+ */
+typedef struct q2_item_env {
+    struct q2_fx_world         *fx;       /* the pool 0x80030284 spawns into */
+    q2_collision               *hull;     /* SecondaryCol: 0x80046DE8        */
+    const q2_move_world        *ents;     /* what 0x80053974 clips against   */
+    const s32                  *gravity;  /* [0x800AE924], read live         */
+} q2_item_env;
+
+/* Copy `env` into the module; NULL clears every field. */
+void q2_item_bind_env(const q2_item_env *env);
+
+/* ------------------------------------------------------------------------- */
+/* A creature's death drop — the spawner 0x8002085C and its think 0x80020C48  */
+/* ------------------------------------------------------------------------- */
+/*
+ * The last two links of the chain monster.h documents over
+ * q2_monster_drop_item_for_class: the four-slot queue hands each resolved drop
+ * to 0x8002085C, which has exactly one caller (0x80020840). It is NOT the
+ * placed-item spawner and it shares almost nothing with it:
+ *
+ *   - no placement routine, so NO 286+30 LIFT and NO FLOOR SWEEP — the
+ *     recorded origin goes straight into +0x54 (0x800209C4) and +0xA4
+ *     (0x80020990), because it is already a live entity's origin;
+ *   - the draw origin on the SPAWN FRAME is that position raised by 286 AND by
+ *     the model bias (0x800209A4 `addiu -286`, 0x800209AC `subu ext2`), where
+ *     every later frame lowers it by 286 instead (0x80020CE4 `addiu +286`).
+ *     One frame, 572 units apart; both are the console's;
+ *   - angles are ZEROED (0x80020AC8, six bytes) and the twelve random bits the
+ *     queue drew become the heading of a TOSS: `{sin, cos}` at 0x800A5430
+ *     indexed `heading & 0xFFF` (0x80020A2C), speed from one rand() and an
+ *     upward kick from a second;
+ *   - the flags word is the record's with Q2_ITEM_TIMED ORed in (0x80020B38),
+ *     except for item 21, which keeps the record's word (0x80020B1C);
+ *   - its OWN box, (-256, ext2-512, -256)..(256, ext2, 256) about the position
+ *     (0x80020B4C..0x80020C1C), set once. `access 0x78` finds word stores to
+ *     +0x78 in five functions — this spawner, the player spawn 0x8003D4FC,
+ *     the model-entity spawner 0x8005A778, 0x80079818 and 0x8007D990 — and
+ *     neither the toss mover 0x800463E8 nor the item think 0x80059330 is one
+ *     of them. So the touch box stays where the creature died while the item
+ *     flies and after it lands; the console's, reproduced;
+ *   - render flags +0x10C are never written, and the allocator 0x8006C098
+ *     clears them, so a drop carries NONE: no floor shadow, and the mover's
+ *     tail skips the shadow link at 0x80046B4C. The placed spawner's
+ *     0x08000001 (0x800587C0) is not this spawner's.
+ *
+ * `rand15` stands for BIOS rand() (0..32767) and is called EXACTLY TWICE, and
+ * only once the item record, the entity and the model have all been found —
+ * 0x80020A00 and 0x80020A58 are both past the three early-outs at 0x80020894,
+ * 0x800208A8 and 0x80020970. So a drop that fails spends no random numbers.
+ * The creature layer's rand() is the host's C library one (monster.c draws the
+ * heading from it); pass the same, masked to fifteen bits.
+ *
+ * `banks` is where 0x8006D008 looks the model name up. A drop whose model no
+ * bank carries is freed and nothing spawns (0x80020968 `jal 0x8006D280`).
+ * `bank_count` 0 means the caller has no CastList at all — a test or a census —
+ * and skips the lookup, leaving the bias at zero, as q2_item_spawn does for a
+ * caller without a bank.
+ *
+ * `cell` is the creature's own SecondaryCol cell, the spawner's fifth argument
+ * (`lh 78(a3)` at 0x80020838 -> +0xA2). The port keeps none on a creature, so
+ * the host finds it for `pos`; -1 is "not found". The surface byte +0x9E is
+ * that cell's byte +32 in the bound hull (0x80020AF8..0x80020B14).
+ *
+ * Returns the entity, or NULL when nothing spawned — no record, no memory, no
+ * model, or the port's in-flight table full (see Q2_ITEM_TOSS_MAX).
+ */
+#define Q2_ITEM_DROP_KEEPS_FLAGS     21    /* 0x80020B18: `addiu v0, zero, 21`  */
+#define Q2_ITEM_DROP_TOSS_LIFE       96    /* 0x80020ADC: +0xF4 while it flies  */
+#define Q2_ITEM_DROP_LANDED_LIFE   8700    /* 0x80020CFC: +0xF4 once it rests   */
+#define Q2_ITEM_DROP_FIELD90        128    /* 0x80020BB4: +0x90                 */
+#define Q2_ITEM_DROP_BOX_HALF       256    /* 0x80020B4C / 0x80020B64           */
+#define Q2_ITEM_DROP_BOX_DEPTH      512    /* 0x80020B68: mins.y = ext2 - 512   */
+#define Q2_ITEM_DROP_SPEED_BASE     256    /* 0x80020A3C: 256 + (r*768 >> 15)   */
+#define Q2_ITEM_DROP_SPEED_SPAN     768    /* 0x80020A08..0x80020A10: r*3 << 8  */
+#define Q2_ITEM_DROP_KICK_BASE    (-3072)  /* 0x80020A80                        */
+#define Q2_ITEM_DROP_KICK_SPAN     1536    /* 0x80020A64..0x80020A6C: r*3 << 9  */
+
+/*
+ * 0x80020CA0 `ori v1, v1, 0x34FF` on `lui 0xC`: a contact lands the item only
+ * when vx^2 + vy^2 + vz^2 is at most this (`slt` at 0x80020CB0, so equal lands).
+ * The toss mover is called with a rebound of ZERO (0x80020C58, a2 = 0), which
+ * zeroes the velocity on any contact at all (0x800466FC `mult v0, s6`), so in
+ * practice the first contact always lands it — floor or wall. Kept as the test
+ * it is rather than as the shortcut it amounts to.
+ */
+#define Q2_ITEM_DROP_REST_SPEED2  0xC34FF
+
+/*
+ * The shared toss mover's own figures (0x800463E8), for the flight. The step
+ * is `vel * dt / 320` per axis, truncated, stored as a halfword — the compiler's
+ * divide by 320 is the `0x66666667` / `sra 7` pair at 0x800464EC..0x80046514;
+ * gravity is `[0x800AE924] * dt` added to vel.y as a HALFWORD (`lhu`/`sh`) and
+ * capped at 8192 (`slti 8193`, 0x80046490) unless +0x10C carries 0x2000.
+ */
+#define Q2_ITEM_TOSS_STEP_DIV       320
+#define Q2_ITEM_TOSS_TERMINAL      8192
+#define Q2_ITEM_TOSS_NO_GRAVITY  0x2000u
+
+/*
+ * THE PORT'S ONE LIMIT HERE. The velocity lives at +0xE0..+0xE4 on the
+ * console's entity and q2_entity has no field for it, so an in-flight drop's
+ * velocity is kept in a side table keyed by (set, slot). A slot is stable
+ * across the set's growth (entity.c reuses and never moves indices), where a
+ * pointer would not be. Sixty-four is far more than the four drops a frame the
+ * queue can produce times the second or so a drop is in the air; a spawn that
+ * finds it full is refused rather than launched with no velocity.
+ */
+#define Q2_ITEM_TOSS_MAX 64
+
+q2_entity *q2_item_drop_spawn(q2_entity_set *set, const q2_item_table *table,
+                              const struct q2_model_bank *const *banks,
+                              u32 bank_count, u8 item_id, u16 heading,
+                              const s32 pos[3], s32 cell, int (*rand15)(void));
+
+/*
+ * 0x80020C48 — one tick of a dropped item's flight: the toss mover
+ * (0x80046DDC, whose only caller this is), then either the landing — +0x50 = 1,
+ * Q2_ITEM_TIMED unless Q2_ITEM_OBJECTIVE, an 8700-tick life, and the ordinary
+ * item think 0x80059330 from the next tick — or the draw origin re-derived from
+ * the new position. Installed by q2_item_drop_spawn.
+ */
+void q2_item_drop_think(q2_entity *e, q2_entity_world *w);
+
+/* The velocity an in-flight drop carries (+0xE0..+0xE4); false when `e` is not
+ * one. For the test and the census. */
+bool q2_item_drop_velocity(const q2_entity *e, s16 out[3]);
+
+/* How many drops are in the air. */
+u32 q2_item_drop_in_flight(void);
+
+/* Forget every in-flight drop. The host calls it whenever it frees the set its
+ * drops live in, so no record outlives its entity. */
+void q2_item_drop_reset(void);
 
 /* ------------------------------------------------------------------------- */
 /* The touch                                                                  */

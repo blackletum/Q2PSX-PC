@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "combat.h"      /* the rules and mods the armour stage takes */
 #include "inventory.h"
 
 static int g_failures;
@@ -153,20 +154,100 @@ static void test_health_and_damage(void)
     check_eq_i(q2_inventory_add_health(&inv, 100, true), 100, "overheal is allowed");
     check_eq_i(inv.health, 200, "up to twice the cap");
 
-    /* Armour absorbs and is consumed. */
-    q2_inventory_init(&inv);
-    inv.armour = 100;
+    /*
+     * ARMOUR ABSORBS BY THE TABLE, NOT A THIRD. These used to assert only that
+     * "part" was absorbed, because the split was a `damage / 3` placeholder.
+     * It is 0x80057C7C's `(bias + protection * damage) >> 12` over the records
+     * at 0x8009C5EC, and every case below disagrees with a third.
+     */
     {
-        s16 to_health = q2_inventory_apply_damage(&inv, 30);
-        check(to_health < 30, "armour absorbs part of the damage");
-        check(inv.armour < 100, "and is consumed doing so");
-        check_eq_i(inv.health, (s16)(100 - to_health), "health drops by the remainder");
+        q2_combat_rules rules, easy;
+        s16 to_health, easy_hit, normal_hit;
+
+        q2_combat_rules_default(&rules);      /* skill 1: the 2048 bias */
+        easy       = rules;
+        easy.skill = 0;                       /* 0x80057C20: the 4095 bias */
+
+        q2_inventory_init(&inv);
+        inv.armour       = 100;
+        inv.armour_class = Q2_ARMOUR_BODY;
+        to_health = q2_inventory_apply_damage(&inv, 100, Q2_MOD_BULLET, &rules);
+        check_eq_i(inv.armour, 100 - ((2048 + 3277 * 100) >> 12),
+                   "body armour spends (2048 + 3277*100) >> 12 = 80, not 33");
+        check_eq_i(to_health, 20, "so 20 of 100 reach health");
+        check_eq_i(inv.health, 80, "and health falls by exactly that");
+
+        /* Jacket's energy column (+4) is zero, so a bolt goes straight in. */
+        q2_inventory_init(&inv);
+        inv.armour       = 100;
+        inv.armour_class = Q2_ARMOUR_JACKET;
+        to_health = q2_inventory_apply_damage(&inv, 30, Q2_MOD_ENERGY_BOLT,
+                                              &rules);
+        check_eq_i(inv.armour, 100, "jacket spends nothing on energy");
+        check_eq_i(to_health, 30, "so the whole bolt reaches health");
+
+        /* 0x80058358: mod 8 jumps past both stages. */
+        q2_inventory_init(&inv);
+        inv.armour       = 100;
+        inv.armour_class = Q2_ARMOUR_BODY;
+        to_health = q2_inventory_apply_damage(&inv, 30, Q2_MOD_NO_ARMOUR,
+                                              &rules);
+        check_eq_i(inv.armour, 100, "mod 8 leaves body armour untouched");
+        check_eq_i(to_health, 30, "and takes all of it from health");
+
+        /* The bias is the SKILL's (0x80057C10): jacket's 1229/4096 of one
+         * point rounds up to a whole point on Easy and to nothing above it. */
+        q2_inventory_init(&inv);
+        inv.armour       = 100;
+        inv.armour_class = Q2_ARMOUR_JACKET;
+        easy_hit = q2_inventory_apply_damage(&inv, 1, Q2_MOD_BULLET, &easy);
+        q2_inventory_init(&inv);
+        inv.armour       = 100;
+        inv.armour_class = Q2_ARMOUR_JACKET;
+        normal_hit = q2_inventory_apply_damage(&inv, 1, Q2_MOD_BULLET, &rules);
+        check(easy_hit == 0 && normal_hit == 1,
+              "a 1-point jacket hit is saved at skill 0 and not at skill 1");
+
+        /* Power armour runs first (0x80058364) and armour sees what is left. */
+        q2_inventory_init(&inv);
+        inv.flags               = Q2_INV_POWER_SHIELD;
+        inv.ammo[Q2_AMMO_CELLS] = 100;
+        to_health = q2_inventory_apply_damage(&inv, 30, Q2_MOD_BULLET, &rules);
+        check_eq_i(to_health, 10, "the power shield takes two thirds first");
+        check_eq_i(inv.ammo[Q2_AMMO_CELLS], 90,
+                   "spending one cell per two points it saved");
     }
 
-    /* Health floors at zero rather than going negative. */
+    /*
+     * AND HEALTH IS NOT FLOORED. This asserted a clamp at zero; the client arm
+     * stores the plain difference (0x800583EC..0x800583F8), which is what lets
+     * a player's health reach corpse_think's -40 gib test at all.
+     */
     q2_inventory_init(&inv);
-    q2_inventory_apply_damage(&inv, 9999);
-    check_eq_i(inv.health, 0, "health floors at zero");
+    q2_inventory_apply_damage(&inv, 9999, Q2_MOD_BULLET, NULL);
+    check_eq_i(inv.health, 100 - 9999, "health goes as far below zero as the hit");
+
+    /*
+     * AND THE DAMAGE FUNCTION'S CLIENT ARM STORES THE SAME. -9999 is
+     * 0x800629B4's floor, inside T_Damage, and 0x800582C8 never lets a client
+     * target reach T_Damage. q2_combat_damage applied it to a player anyway,
+     * so the two disagreed for any hit that took a player past -9999.
+     */
+    {
+        q2_actor     a;
+        q2_inventory twin;
+
+        q2_inventory_init(&inv);
+        q2_inventory_apply_damage(&inv, 20000, Q2_MOD_BULLET, NULL);
+
+        q2_inventory_init(&twin);
+        q2_actor_init(&a);
+        q2_actor_from_player(&a, &twin, NULL);
+        q2_combat_damage(NULL, &a, 20000, Q2_MOD_BULLET, NULL, NULL);
+        q2_actor_to_player(&a, &twin);
+        check_eq_i(twin.health, inv.health,
+                   "the damage function's client arm has no floor either");
+    }
 }
 
 /* ------------------------------------------------------------------------- */

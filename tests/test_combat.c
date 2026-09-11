@@ -104,14 +104,100 @@ static void test_player_powerup_sync(void)
     check(hit.blocked, "invulnerability blocks a hit before its deadline");
     check_eq_i(player.health, 100, "the blocked hit changes no health");
 
-    /* The comparison in 0x80058244 is strict: the expiry tick itself hurts. */
+    /* The comparison in 0x80058230 is strict: the expiry tick itself hurts.
+     * It has to be an ACID hit, because that is the one arm that reads the
+     * suit's deadline at all. */
     inv.invuln_until = 0;
     inv.enviro_until = 300;
     q2_actor_from_player(&player, &inv, pos);
     rules.level_time = 300;
-    hit = q2_combat_damage(NULL, &player, 40, Q2_MOD_LAVA, pos, &rules);
+    hit = q2_combat_damage(NULL, &player, 40, Q2_MOD_ACID, pos, &rules);
     check(!hit.blocked, "the protection expiry tick is no longer protected");
     check(player.health < 100, "damage resumes on the expiry tick");
+
+    /*
+     * THE ENVIRONMENT SUIT IS NOT GENERAL PROTECTION. The damage function
+     * reads client+0xB4 at exactly one instruction, 0x80058230, inside the
+     * mod-9 arm; the general test at 0x80058304 reads client+0xB0 and nothing
+     * else. (The status bar reads the word too, at 0x80035CB0, to draw the
+     * suit's countdown; that refuses nothing.) The port used to OR the two
+     * together for every mod, so wearing the suit made a rocket, a rail, a
+     * bullet, melee, crush and falling all harmless — god mode with a green
+     * tint.
+     */
+    q2_inventory_init(&inv);
+    inv.health       = 100;
+    inv.invuln_until = 0;      /* expired */
+    inv.enviro_until = 5000;   /* worn */
+    rules.level_time = 1000;
+
+    q2_actor_from_player(&player, &inv, pos);
+    hit = q2_combat_damage(NULL, &player, 30, Q2_MOD_ROCKET, pos, &rules);
+    check(!hit.blocked, "the suit does not block a rocket");
+    check_eq_i(player.health, 70, "which takes its health in full");
+
+    q2_actor_from_player(&player, &inv, pos);
+    hit = q2_combat_damage(NULL, &player, 30, Q2_MOD_ACID, pos, &rules);
+    check(hit.blocked, "the suit blocks acid, which is all it blocks");
+    check_eq_i(player.health, 100, "and acid changes no health");
+
+    q2_actor_from_player(&player, &inv, pos);
+    player.env_next = 0;
+    hit = q2_combat_damage(NULL, &player, 30, Q2_MOD_LAVA, pos, &rules);
+    check(!hit.blocked,
+          "and it does not block lava — 0x8005828C reads neither timer");
+    check_eq_i(player.health, 70, "so lava burns through the suit");
+
+    /* Invulnerability, 0x80058304, is the one that stops all three. The suit
+     * is off here so nothing else can be doing the blocking. */
+    inv.invuln_until = 5000;
+    inv.enviro_until = 0;
+    q2_actor_from_player(&player, &inv, pos);
+    check(q2_combat_damage(NULL, &player, 30, Q2_MOD_ROCKET, pos, &rules).blocked,
+          "invulnerability blocks the rocket");
+    q2_actor_from_player(&player, &inv, pos);
+    player.env_next = 0;
+    check(q2_combat_damage(NULL, &player, 30, Q2_MOD_ACID, pos, &rules).blocked,
+          "and the acid");
+    check_eq_i(player.env_next, 0,
+               "acid leaves the throttle alone while you are invulnerable");
+    q2_actor_from_player(&player, &inv, pos);
+    player.env_next = 0;
+    hit = q2_combat_damage(NULL, &player, 30, Q2_MOD_LAVA, pos, &rules);
+    check(hit.blocked, "and the lava");
+    /*
+     * And the two arms differ in ORDER, which the port's single test could not
+     * express: mod 9 checks both timers BEFORE the throttle (0x80058230 and
+     * 0x80058244 precede 0x80058258), so acid leaves client+148 alone while you
+     * are invulnerable, while mod 10 stores its deadline at 0x800582BC first
+     * and only then meets 0x80058304's refusal.
+     */
+    check_eq_i(player.env_next, 1000 + Q2_ENV_THROTTLE_LAVA,
+               "lava re-arms the throttle even on a hit invulnerability refuses");
+
+    /*
+     * The throttle's comparison is 0x80058260/0x800582A4 `sltu env_next,
+     * level_time` with the branch-on-zero refusing, so the hit is allowed only
+     * STRICTLY after the deadline. The tick on which the two are equal is
+     * refused — the port used to write `level_time < env_next`, which allows
+     * it, a one-tick divergence.
+     */
+    q2_inventory_init(&inv);
+    inv.health = 100;
+    rules.level_time = 1000;
+
+    q2_actor_from_player(&player, &inv, pos);
+    player.env_next = 1000;
+    hit = q2_combat_damage(NULL, &player, 30, Q2_MOD_LAVA, pos, &rules);
+    check(hit.blocked, "env_next == level_time is still throttled");
+    check_eq_i(player.health, 100, "and takes nothing");
+
+    q2_actor_from_player(&player, &inv, pos);
+    player.env_next = 999;
+    hit = q2_combat_damage(NULL, &player, 30, Q2_MOD_LAVA, pos, &rules);
+    check(!hit.blocked, "one tick earlier it is not");
+    check_eq_i(player.env_next, 1000 + Q2_ENV_THROTTLE_LAVA,
+               "and 0x800582AC re-arms it 100 ticks out");
 
     /*
      * WHICH ARMOUR THE PLAYER IS WEARING, which this projection used to drop:
@@ -127,14 +213,17 @@ static void test_player_powerup_sync(void)
     check_eq_i(player.armour_class, Q2_ARMOUR_BODY,
                "the armour class reaches the damage actor");
 
+    /* `q2_combat_rules_default` leaves skill 1, so the bias is 2048 — see
+     * test_armour_absorption for why that is the skill halfword's business and
+     * not deathmatch's. */
     rules.level_time = 0;
     hit = q2_combat_damage(NULL, &player, 100, Q2_MOD_BULLET, pos, &rules);
-    check_eq_i(hit.absorbed_armour, 81,
-               "body armour saves (4095 + 3277*100) >> 12, not jacket's 31");
+    check_eq_i(hit.absorbed_armour, (2048 + 3277 * 100) >> 12,
+               "body armour saves (2048 + 3277*100) >> 12, not jacket's 30");
 
     q2_actor_from_player(&player, &inv, pos);
     hit = q2_combat_damage(NULL, &player, 100, Q2_MOD_ENERGY_BOLT, pos, &rules);
-    check_eq_i(hit.absorbed_armour, 61,
+    check_eq_i(hit.absorbed_armour, (2048 + 2458 * 100) >> 12,
                "and 2458/4096 against energy, where jacket's column is zero");
 
     /*
@@ -196,9 +285,10 @@ static void test_armour_absorption(void)
 
     printf("armour\n");
     q2_combat_rules_default(&rules);
+    rules.skill = 0;    /* 0x80057C20's arm: the 4095 bias */
 
-    /* Jacket armour, 0.30 normal protection, with the single-player bias of
-     * 4095 that rounds every non-zero fraction up. */
+    /* Jacket armour, 0.30 normal protection, with the EASY bias of 4095 that
+     * rounds every non-zero fraction up. */
     place(&a, 0, 0, 0, 100);
     a.has_client   = true;
     a.armour       = 50;
@@ -233,26 +323,60 @@ static void test_armour_absorption(void)
     check_eq_i(save, 5, "cannot absorb more than the armour held");
     check_eq_i(a.armour, 0, "and is emptied");
 
-    /* Deathmatch swaps the bias to 2048, which rounds to nearest instead of
-     * up — very slightly weaker armour against small hits. */
+    /*
+     * WHICH GLOBAL PICKS THE BIAS. 0x80057C10 is `lh v0, 0x800B334A` — the
+     * skill halfword, the same one 0x800582D0 reads for the damage halving —
+     * and 0x80057C18's `bne` sends skill != 0 to the 2048 in the delay slot.
+     * This used to be driven by `rules.deathmatch`, which reads 0x800AEBCC and
+     * has nothing to do with it. Skill is what these three cases turn on, and
+     * deathmatch on its own must move nothing.
+     */
     {
-        q2_combat_rules dm;
-        q2_combat_rules_default(&dm);
-        dm.deathmatch = true;
+        q2_combat_rules easy, medium, hard, dm;
+
+        q2_combat_rules_default(&easy);   easy.skill = 0;
+        q2_combat_rules_default(&medium); medium.skill = 1;
+        q2_combat_rules_default(&hard);   hard.skill = 2;
+        q2_combat_rules_default(&dm);     dm.skill = 1; dm.deathmatch = true;
 
         place(&a, 0, 0, 0, 100);
-        a.has_client = true;
-        a.armour = 100;
-        a.armour_class = 0;
-        save = q2_combat_armour_absorb(&a, 1, false, false, &dm);
-        check_eq_i(save, (2048 + 1229) >> 12, "deathmatch bias rounds down");
+        a.has_client = true; a.armour = 100; a.armour_class = 0;
+        check_eq_i(q2_combat_armour_absorb(&a, 1, false, false, &easy),
+                   (4095 + 1229) >> 12, "skill 0 rounds a 1-point jacket hit up");
 
         place(&a, 0, 0, 0, 100);
-        a.has_client = true;
-        a.armour = 100;
-        a.armour_class = 0;
-        save = q2_combat_armour_absorb(&a, 1, false, false, &rules);
-        check_eq_i(save, 1, "single-player bias rounds a 1-point hit up");
+        a.has_client = true; a.armour = 100; a.armour_class = 0;
+        check_eq_i(q2_combat_armour_absorb(&a, 1, false, false, &medium),
+                   (2048 + 1229) >> 12, "skill 1 rounds it away");
+
+        place(&a, 0, 0, 0, 100);
+        a.has_client = true; a.armour = 100; a.armour_class = 0;
+        check_eq_i(q2_combat_armour_absorb(&a, 1, false, false, &hard),
+                   (2048 + 1229) >> 12, "and so does skill 2");
+
+        /* Deathmatch alone changes neither, which is the whole correction. */
+        place(&a, 0, 0, 0, 100);
+        a.has_client = true; a.armour = 100; a.armour_class = 0;
+        check_eq_i(q2_combat_armour_absorb(&a, 1, false, false, &dm),
+                   (2048 + 1229) >> 12, "deathmatch at skill 1 is skill 1");
+
+        dm.skill = 0;
+        place(&a, 0, 0, 0, 100);
+        a.has_client = true; a.armour = 100; a.armour_class = 0;
+        check_eq_i(q2_combat_armour_absorb(&a, 1, false, false, &dm),
+                   (4095 + 1229) >> 12, "and deathmatch at skill 0 is skill 0");
+
+        /* The eight-point body-armour case, where the two biases differ by a
+         * whole point rather than by rounding a zero. */
+        place(&a, 0, 0, 0, 100);
+        a.has_client = true; a.armour = 200; a.armour_class = 2;
+        check_eq_i(q2_combat_armour_absorb(&a, 8, false, false, &easy), 7,
+                   "8 points against body armour saves 7 at skill 0");
+
+        place(&a, 0, 0, 0, 100);
+        a.has_client = true; a.armour = 200; a.armour_class = 2;
+        check_eq_i(q2_combat_armour_absorb(&a, 8, false, false, &medium), 6,
+                   "and 6 at skill 1");
     }
 
     /* No client means no armour at all: a creature never has any. */
@@ -363,6 +487,34 @@ static void test_damage(void)
         attacker.has_client = true;           /* now a player hurt a player */
         q2_combat_damage(&attacker, &target, 31, Q2_MOD_BULLET, NULL, &easy);
         check_eq_i(target.health, 100 - 31, "but not player-on-player");
+
+        /*
+         * AND AN ABSENT ATTACKER IS NOT A MONSTER. 0x800582E0 requires the
+         * attacker's entity back-pointer and 0x800582F0 its client block, so a
+         * NULL attacker cannot take the halving arm at all — it takes FULL
+         * damage. A REGRESSION PIN of combat.c as it already stood (commit
+         * 8952fe9 transcribed the rounding): both of these pass before and
+         * after this round. What they guard is the difference a caller makes
+         * by passing NULL for a creature's shot: on Easy it lands at about
+         * double what the console does. The client's creature hooks no longer
+         * pass NULL. main.c's client_cre_melee, client_cre_fire and
+         * client_cre_shot resolve the shooter's actor with client_cre_actor(),
+         * which is NULL only for a monster outside the creature set or before
+         * the actors exist. main.c is not linked here, so this pins the rule
+         * those hooks rely on, not the hooks.
+         */
+        place(&target, 0, 0, 0, 100);
+        target.has_client = true;
+        place(&attacker, 0, 0, -1000, 100);   /* a creature: no client */
+        q2_combat_damage(&attacker, &target, 25, Q2_MOD_BULLET, NULL, &easy);
+        check_eq_i(target.health, 100 - 13,
+                   "a creature's shot on Easy lands at 13 of 25");
+
+        place(&target, 0, 0, 0, 100);
+        target.has_client = true;
+        q2_combat_damage(NULL, &target, 25, Q2_MOD_BULLET, NULL, &easy);
+        check_eq_i(target.health, 100 - 25,
+                   "and the same shot with no attacker lands at all 25");
     }
 
     /*
@@ -408,6 +560,27 @@ static void test_damage(void)
         r = q2_combat_damage(NULL, &god, 40, Q2_MOD_BULLET, NULL, &rules);
         check_eq_i(god.health, 100, "godmode takes nothing");
         check_eq_i(r.taken, 0, "and reports nothing taken");
+
+        /* T_Damage's zero sends it to 0x80062AAC and its epilogue, not out of
+         * the outer function, which still reaches the effect tail. */
+        place(&god, 0, 0, 0, 100);
+        god.godmode = true;
+        q2_combat_damage(NULL, &god, 40, Q2_MOD_ENERGY_BOLT, NULL, &rules);
+        check(god.health == 100 && god.effect[1] == 3,
+              "a godmode body takes nothing and still has the bolt's +0x2F1");
+
+        /*
+         * And the test is T_DAMAGE's (0x80062924 on the word 0x80062914
+         * loads), and 0x800582C8 keeps every client target out of T_Damage,
+         * so the damage function never consults a player's godmode bit — the
+         * client arm stores at 0x800583F8.
+         */
+        place(&god, 0, 0, 0, 100);
+        god.has_client = true;
+        god.godmode    = true;
+        q2_combat_damage(NULL, &god, 40, Q2_MOD_BULLET, NULL, &rules);
+        check_eq_i(god.health, 60,
+                   "a client target's godmode bit does not stop the hit");
     }
 
     /*
@@ -428,12 +601,33 @@ static void test_damage(void)
         check_eq_i(q2_mp_attribute_kill(victim.last_attacker, victim.last_mod),
                    2, "and attribution gives that player the frag");
 
-        /* World damage leaves -1, and attribution keeps it that way. */
+        /*
+         * WORLD DAMAGE DOES NOT LEAVE -1, and this test used to assert a
+         * fiction. `access 0xDE` finds one store of a literal -1 to entity+222
+         * in the whole image, 0x800396DC, and it is in the death handler and
+         * only for mods 9 and 10 — the damage function never writes it. What
+         * 0x80057E88..0x80057EB8 stores for a NULL attacker is 23 (I evaluated
+         * the ×0x55555555 / negate / `sra 8` chain rather than assuming it), and
+         * what the projectile spawners store for a non-player owner is the
+         * literal 4 (0x8004A208, 0x8004ABF4, 0x8004B1C4, 0x8004BF80). Both are
+         * non-negative and both are outside the frag table; the port carries
+         * the spawners' 4. (Single player: `rules` here is not deathmatch.)
+         */
         place(&victim, 0, 0, 0, 100);
         q2_combat_damage(NULL, &victim, 30, Q2_MOD_BULLET, NULL, &rules);
-        check_eq_i(victim.last_attacker, -1, "world damage has no attacker");
+        check_eq_i(victim.last_attacker, Q2_MP_NOT_A_PLAYER,
+                   "world damage records a non-player, not -1");
         check_eq_i(q2_mp_attribute_kill(victim.last_attacker, victim.last_mod),
                    -1, "and stays nobody's frag");
+
+        /* A creature is not a player either: `owner` is -1 for anything that
+         * is not one, and that must not become the killer byte. */
+        place(&victim, 0, 0, 0, 100);
+        place(&shooter, 0, 0, 0, 100);
+        q2_combat_damage(&shooter, &victim, 30, Q2_MOD_BULLET, NULL, &rules);
+        check_eq_i(victim.last_attacker, Q2_MP_NOT_A_PLAYER,
+                   "a creature's hit records a non-player too");
+        shooter.owner = 2;
 
         /* A hazard is nobody's frag even when a player last touched you. */
         place(&victim, 0, 0, 0, 100);
@@ -442,11 +636,505 @@ static void test_damage(void)
                    -1, "lava is nobody's frag");
     }
 
+    /*
+     * DEATHMATCH CREDITS THE WORLD'S HIT TO THE PLAYER IT HURT.
+     *
+     * 0x80057DB8 `bne s5, zero` falls through only for a NULL attacker,
+     * 0x80057DC0 `beq s0, zero, 0x80057EBC` then needs the TARGET's client
+     * block, and 0x80057DC8..0x80057E00 divide that block's offset from
+     * 0x800C7C60 by 224 — the victim's own index, stored at 0x80057EB8. So a
+     * crusher (0x80051E74, a0 = 0) that kills in deathmatch reaches the frag
+     * hook as a suicide and does not cry out. Recording the stand-in 4 there
+     * lost the hook altogether once the death handler began testing the raw
+     * byte, as 0x80039774 does.
+     */
+    {
+        q2_combat_rules       dm = rules;
+        q2_actor              victim, mob, creature;
+        q2_player_death       d;
+        q2_player_death_event ev;
+        s8 dm_world, sp_world, dm_creature, dm_mob;
+
+        dm.deathmatch = true;
+
+        place(&victim, 0, 0, 0, 100);
+        victim.has_client = true;
+        victim.owner      = 1;
+        q2_combat_damage(NULL, &victim, 200, Q2_MOD_CRUSH, NULL, &dm);
+        dm_world = victim.last_attacker;
+        check_eq_i(dm_world, 1,
+                   "a deathmatch world hit is credited to its victim");
+
+        q2_player_death_init(&d);
+        q2_player_die(&d, victim.last_attacker, victim.last_mod, victim.owner,
+                      true, false, &ev);
+        check(ev.frag_hook && ev.frag_killer == 1 && ev.frag_victim == 1 &&
+              !ev.cried_out,
+              "so the crusher's kill reaches the hook as a silent suicide");
+
+        /* Only that arm: the same hit in single player records the stand-in,
+         * and a deathmatch hit by a creature nobody has hurt (its own byte 4,
+         * 0x80057E6C) or by the world on a client-less target (0x80057DC0)
+         * stores nothing, leaving each target at q2_actor_init's 4. */
+        place(&victim, 0, 0, 0, 100);
+        victim.has_client = true;
+        victim.owner      = 1;
+        q2_combat_damage(NULL, &victim, 30, Q2_MOD_CRUSH, NULL, &rules);
+        sp_world = victim.last_attacker;
+
+        place(&creature, 0, 0, 0, 100);        /* owner -1, no client */
+        place(&victim, 0, 0, 0, 100);
+        victim.has_client = true;
+        victim.owner      = 1;
+        q2_combat_damage(&creature, &victim, 30, Q2_MOD_BULLET, NULL, &dm);
+        dm_creature = victim.last_attacker;
+
+        place(&mob, 0, 0, 0, 100);
+        q2_combat_damage(NULL, &mob, 30, Q2_MOD_CRUSH, NULL, &dm);
+        dm_mob = mob.last_attacker;
+
+        check(dm_world == 1 && sp_world == Q2_MP_NOT_A_PLAYER &&
+              dm_creature == Q2_MP_NOT_A_PLAYER &&
+              dm_mob == Q2_MP_NOT_A_PLAYER,
+              "the victim's own index belongs to deathmatch's NULL-attacker "
+              "arm and nothing else");
+    }
+
     /* A corpse floors at -9999 however hard it is hit. */
     place(&target, 0, 0, 0, 10);
     r = q2_combat_damage(NULL, &target, 30000, Q2_MOD_BULLET, NULL, &rules);
     check(r.killed, "a big hit kills");
     check_eq_i(target.health, Q2_HEALTH_FLOOR, "and health floors at -9999");
+
+    /*
+     * A PLAYER DOES NOT. The floor is 0x800629B4, inside T_Damage, and
+     * 0x800582C8 sends a client target past T_Damage to the client arm's own
+     * store, 0x800583EC `lhu` / 0x800583F4 `subu` / 0x800583F8 `sh`, which
+     * nothing bounds from below. q2_inventory_apply_damage stores it the same.
+     */
+    place(&target, 0, 0, 0, 10);
+    target.has_client = true;
+    q2_combat_damage(NULL, &target, 30000, Q2_MOD_BULLET, NULL, &rules);
+    check_eq_i(target.health, 10 - 30000, "a player's health has no floor");
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * T_DAMAGE'S `takedamage` GATE, 0x80062838, which this side never consulted.
+ *
+ * The field was carried and documented and honoured in exactly two places —
+ * `nearest_hit` and the rail sweep — so a blast, a claw or a direct projectile
+ * hit went straight past it. It is the FIFTH instruction of T_Damage, before
+ * health, knockback, pain and die, and its one caller is 0x800584B4.
+ */
+static void test_takedamage_gate(void)
+{
+    q2_actor target, attacker;
+    q2_combat_rules rules;
+    q2_damage_result r;
+    s32 point[3] = { 0, 0, -100 };
+
+    printf("takedamage gate\n");
+    q2_combat_rules_default(&rules);
+    rules.knockback_mass = 64;
+
+    place(&attacker, 0, 0, -1000, 100);
+
+    place_untouchable(&target, 0, 0, 0, 100);
+    r = q2_combat_damage(&attacker, &target, 50, Q2_MOD_ROCKET, point, &rules);
+    check_eq_i(target.health, 100, "a takedamage-clear target takes nothing");
+    check_eq_i(r.taken, 0, "and reports nothing taken");
+    check(!r.blocked,
+          "0x80062B54 is the bare epilogue, not the invulnerability refusal");
+
+    /*
+     * AND THE IMPULSE IS STILL RECORDED, which is why the gate goes after the
+     * knockback block and not at the top of the function: retail's knockback is
+     * 0x80057EC0..0x80058204 in the OUTER function and T_Damage is only reached
+     * from 0x800584B4, long afterwards.
+     */
+    check(target.knockback[2] != 0,
+          "but the outer function has already recorded the impulse");
+
+    /*
+     * AND THE EFFECT TAIL STILL RUNS AFTER IT. T_Damage's epilogue returns to
+     * 0x800584BC `j 0x800584D4`, whose client test sends a client-less target
+     * on to 0x800585A4, so a bolt stores +0x2F1 = 3 (0x800585E8) on a target
+     * T_Damage refused. The gate used to return from the whole function.
+     */
+    place_untouchable(&target, 0, 0, 0, 100);
+    q2_combat_damage(&attacker, &target, 50, Q2_MOD_ENERGY_BOLT, NULL, &rules);
+    check(target.health == 100 && target.effect[1] == 3,
+          "a bolt hurts a takedamage-clear target not at all, and lights it");
+
+    /* The blast and the claw reach the same gate, through the same function. */
+    {
+        q2_actor *list[1];
+
+        place_untouchable(&target, 0, 0, 0, 100);
+        target.radius = 0;
+        list[0] = &target;
+        /*
+         * The return still moves, and that is retail: 0x80050A60 `addiu s3,
+         * zero, 1` is in the delay slot of the `jal 0x80057D54` at 0x80050A5C,
+         * so the sweep records "a candidate was reached" before the damage
+         * function has decided anything. Retail's s3 is a FLAG, returned by
+         * 0x80050A78, where the port returns a count; with one candidate the
+         * two are the same 1. What must not move is the health.
+         */
+        check_eq_i(q2_combat_radius_damage(&attacker, NULL, point, 200, 1300,
+                                           Q2_MOD_ROCKET, list, 1, &rules),
+                   1, "the blast still reaches the candidate");
+        check_eq_i(target.health, 100, "but hurts nothing that cannot be hurt");
+
+        place_untouchable(&target, 0, 0, 0, 100);
+        q2_combat_melee(&attacker, &target, 30, &rules);
+        check_eq_i(target.health, 100, "nor does a claw");
+    }
+
+    /*
+     * A PLAYER IS NEVER GATED ON IT. 0x800582C8 `beq s0, zero, 0x8005842C`
+     * diverts every client target away from T_Damage, so the bit is not
+     * consulted for one — and applying it there would have made a player with a
+     * zero byte invincible.
+     */
+    place_untouchable(&target, 0, 0, 0, 100);
+    target.has_client = true;
+    r = q2_combat_damage(&attacker, &target, 50, Q2_MOD_BULLET, NULL, &rules);
+    check_eq_i(r.taken, 50, "a client target takes damage whatever the bit says");
+    check_eq_i(target.health, 50, "and loses the health");
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * ONE SHOT KILL, 0x80058394. The GAME VARIABLES bit that the sim has never
+ * been able to reach: `q2_combat_rules` had no field for 0x800B29EC at all.
+ */
+static void test_one_shot_kill(void)
+{
+    q2_actor player, mob;
+    q2_combat_rules rules;
+    q2_damage_result r;
+
+    printf("one shot kill\n");
+    q2_combat_rules_default(&rules);
+    rules.cheats = Q2_CHEAT_ONE_SHOT_KILL;
+
+    place(&player, 0, 0, 0, 100);
+    player.has_client = true;
+    r = q2_combat_damage(NULL, &player, 7, Q2_MOD_BULLET, NULL, &rules);
+    check_eq_i(player.health, -7, "0x800583E0 stores minus the damage");
+    check_eq_i(r.taken, 7, "and the hit is still worth what it was worth");
+    check(r.killed, "which kills");
+
+    /*
+     * A HIT THE ARMOUR SOAKS WHOLE STILL KILLS. 0x80058390 `subu s1, s1, v0`
+     * runs straight into 0x80058394's cheat test with no branch on s1, and the
+     * `bgtz` at 0x800583DC stores -0 over a living player. Body armour at
+     * skill 1 saves (2048 + 3277*1) >> 12 = 1 of a 1-point bullet: all of it.
+     * The port used to return before the store, leaving 100 health and the
+     * bullet's hit sound, where 0x800584FC's `blez` on the stored 0 is silent.
+     */
+    place(&player, 0, 0, 0, 100);
+    player.has_client   = true;
+    player.armour       = 200;
+    player.armour_class = Q2_ARMOUR_BODY;
+    r = q2_combat_damage(NULL, &player, 1, Q2_MOD_BULLET, NULL, &rules);
+    check(r.absorbed_armour == 1 && player.health == 0,
+          "armour soaks the whole point and the cheat still stores -0");
+    check(r.killed, "which kills");
+    check_eq_i(r.hit_sound_id, 0, "and the hit that stored 0 is silent");
+
+    /* The five mods 0x800583AC..0x800583CC exclude, one at a time. */
+    {
+        static const s16 excluded[] = {
+            Q2_MOD_NONE, Q2_MOD_NO_ARMOUR, Q2_MOD_19, Q2_MOD_LAVA, Q2_MOD_ACID
+        };
+        static const char *why[] = {
+            "mod 0 is excluded",  "mod 8 is excluded",  "mod 19 is excluded",
+            "lava is excluded",   "acid is excluded"
+        };
+        unsigned k;
+
+        /* A clock past the throttle's deadline, so 9 and 10 get in. It was a
+         * deadline of -1 against a clock of 0, which only a SIGNED compare
+         * lets through; 0x80058260/0x800582A4 are `sltu`, and nothing is
+         * below 0 unsigned. */
+        rules.level_time = 1000;
+        for (k = 0; k < sizeof(excluded) / sizeof(excluded[0]); k++) {
+            place(&player, 0, 0, 0, 100);
+            player.has_client = true;
+            player.env_next   = 0;
+            q2_combat_damage(NULL, &player, 7, excluded[k], NULL, &rules);
+            check_eq_i(player.health, 93, why[k]);
+        }
+    }
+
+    /*
+     * IT ONLY EVER HURTS THE PLAYER. The block sits past 0x800582C8's
+     * `beq s0, zero`, so a client-less target never reaches it — the cheat does
+     * not make your shots fatal to anything else.
+     */
+    place(&mob, 0, 0, 0, 100);
+    q2_combat_damage(NULL, &mob, 7, Q2_MOD_BULLET, NULL, &rules);
+    check_eq_i(mob.health, 93, "a creature takes the ordinary subtract");
+
+    /* 0x800583DC is `bgtz` on the health BEFORE the store, so an already-dead
+     * body takes the ordinary subtract too. */
+    place(&player, 0, 0, 0, 100);
+    player.has_client = true;
+    player.health = -5;
+    q2_combat_damage(NULL, &player, 7, Q2_MOD_BULLET, NULL, &rules);
+    check_eq_i(player.health, -12, "an already-dead client is just subtracted");
+
+    /* And with the bit clear nothing changes. */
+    rules.cheats = 0;
+    place(&player, 0, 0, 0, 100);
+    player.has_client = true;
+    q2_combat_damage(NULL, &player, 7, Q2_MOD_BULLET, NULL, &rules);
+    check_eq_i(player.health, 93, "with the bit clear it is an ordinary hit");
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * The per-mod hit sound, 0x800ACE5C. Twenty-one words, dumped and decoded.
+ */
+static void test_hit_sound(void)
+{
+    q2_actor player, mob;
+    q2_combat_rules rules;
+    q2_damage_result r;
+    s16 vol;
+    int m;
+
+    printf("hit sound\n");
+    q2_combat_rules_default(&rules);
+
+    check_eq_i(q2_mod_hit_sound(1, &vol), 13, "mod 1 plays id 13");
+    check_eq_i(vol, 4096, "at full volume");
+
+    {
+        static const s16 loud[] = { 3, 7, 19, 20, 21 };
+        int k;
+        for (k = 0; k < 5; k++) {
+            check_eq_i(q2_mod_hit_sound(loud[k], &vol), 15,
+                       "0x80058544's arm is id 15");
+            check_eq_i(vol, 4096, "at 4096");
+        }
+    }
+
+    {
+        static const s16 quiet[] = { 5, 6, 18 };
+        int k;
+        for (k = 0; k < 3; k++) {
+            check_eq_i(q2_mod_hit_sound(quiet[k], &vol), 16,
+                       "0x80058538's arm is id 16");
+            check_eq_i(vol, 2048, "at half volume");
+        }
+    }
+
+    for (m = 0; m <= 22; m++) {
+        bool sounds = (m == 1) || (m == 3) || (m == 5) || (m == 6) ||
+                      (m == 7) || (m == 18) || (m == 19) || (m == 20) ||
+                      (m == 21);
+        if (!sounds)
+            check_eq_i(q2_mod_hit_sound((s16)m, NULL), 0,
+                       "every other mod is silent");
+    }
+
+    /* And through the damage function, under 0x800584D4's two guards. */
+    place(&player, 0, 0, 0, 100);
+    player.has_client = true;
+    r = q2_combat_damage(NULL, &player, 20, Q2_MOD_BULLET, NULL, &rules);
+    check_eq_i(r.hit_sound_id, 16, "a surviving player reports the bullet's id");
+    check_eq_i(r.hit_sound_vol, 2048, "and its volume");
+
+    /* 0x800584FC's `blez` reads the health AFTER the store: this is the sound
+     * of surviving a hit, so the hit that kills is silent. */
+    place(&player, 0, 0, 0, 20);
+    player.has_client = true;
+    r = q2_combat_damage(NULL, &player, 20, Q2_MOD_BULLET, NULL, &rules);
+    check_eq_i(r.hit_sound_id, 0, "the hit that takes health to zero is silent");
+
+    /* 0x800584D4 wants a client block. */
+    place(&mob, 0, 0, 0, 100);
+    r = q2_combat_damage(NULL, &mob, 20, Q2_MOD_BULLET, NULL, &rules);
+    check_eq_i(r.hit_sound_id, 0, "and a creature makes none of it");
+
+    /* A silent mod through a surviving player stays silent. */
+    place(&player, 0, 0, 0, 100);
+    player.has_client = true;
+    r = q2_combat_damage(NULL, &player, 20, Q2_MOD_GRENADE, NULL, &rules);
+    check_eq_i(r.hit_sound_id, 0, "mod 13's table entry is the silent arm");
+
+    /*
+     * A hit the armour soaks whole goes on to the sound AND the effect tail:
+     * nothing between 0x80058390 and 0x800585A4 branches on the amount. Body
+     * armour's energy column saves (2048 + 2458) >> 12 = 1 of a 1-point bolt.
+     * The port's old early return played the sound and never lit the player.
+     */
+    place(&player, 0, 0, 0, 100);
+    player.has_client   = true;
+    player.armour       = 200;
+    player.armour_class = Q2_ARMOUR_BODY;
+    r = q2_combat_damage(NULL, &player, 1, Q2_MOD_ENERGY_BOLT, NULL, &rules);
+    check(r.taken == 0 && r.hit_sound_id == 13 && player.effect[1] == 3,
+          "a bolt the armour soaks is heard, and lights the player (+0x2F1)");
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * EVERY DEADLINE IS COMPARED UNSIGNED. The five tests are `sltu`:
+ * 0x80058238 (the suit, acid only), 0x8005824C (invulnerability, acid),
+ * 0x80058260 and 0x800582A4 (the two throttles) and 0x80058314 (the general
+ * invulnerability test). A signed `<` agrees with them only while both words
+ * are below 0x80000000; each case below sits on the far side of that.
+ */
+static void test_deadlines_are_unsigned(void)
+{
+    q2_actor player;
+    q2_combat_rules rules;
+    q2_damage_result r;
+
+    printf("unsigned deadlines\n");
+    q2_combat_rules_default(&rules);
+    rules.level_time = 1000;
+
+    /* 0x80058314: a deadline of 0xFFFFFFFF is still ahead of the clock. */
+    place(&player, 0, 0, 0, 100);
+    player.has_client   = true;
+    player.invuln_until = -1;
+    r = q2_combat_damage(NULL, &player, 30, Q2_MOD_ROCKET, NULL, &rules);
+    check(r.blocked && player.health == 100,
+          "invulnerability until 0xFFFFFFFF refuses the rocket");
+
+    /* 0x80058238: the suit's deadline, the same way. */
+    place(&player, 0, 0, 0, 100);
+    player.has_client    = true;
+    player.protect_until = -1;
+    r = q2_combat_damage(NULL, &player, 30, Q2_MOD_ACID, NULL, &rules);
+    check(r.blocked && player.health == 100,
+          "the suit until 0xFFFFFFFF refuses the acid");
+
+    /* 0x80058260 and 0x800582A4: a throttle of 0xFFFFFFFF is not below the
+     * clock, so both arms refuse. */
+    place(&player, 0, 0, 0, 100);
+    player.has_client = true;
+    player.env_next   = -1;
+    r = q2_combat_damage(NULL, &player, 30, Q2_MOD_ACID, NULL, &rules);
+    check(r.blocked && player.health == 100,
+          "acid's throttle at 0xFFFFFFFF refuses");
+
+    place(&player, 0, 0, 0, 100);
+    player.has_client = true;
+    player.env_next   = -1;
+    r = q2_combat_damage(NULL, &player, 30, Q2_MOD_LAVA, NULL, &rules);
+    check(r.blocked && player.health == 100,
+          "and so does lava's");
+
+    /* And the clock itself: at 0xFFFFFFFF it is past a deadline of 1000. */
+    rules.level_time = -1;
+    place(&player, 0, 0, 0, 100);
+    player.has_client   = true;
+    player.invuln_until = 1000;
+    r = q2_combat_damage(NULL, &player, 30, Q2_MOD_ROCKET, NULL, &rules);
+    check(!r.blocked && player.health == 70,
+          "a clock of 0xFFFFFFFF is past invulnerability until 1000");
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * ENTITY+222 OUTLIVES THE REFRESH, and deathmatch's two "no store" arms mean
+ * what the console means by them.
+ *
+ * q2_actor_init used to seed -1 — the one value the death voice cries for —
+ * and both refreshes re-ran it, so a raw -1 came back on every refresh that was
+ * not followed by a hit (q2_sim_fire's, the owner's own splash). The seed is
+ * now 0x8003DE34's 4, and the byte, the mod and the effect timers are carried.
+ */
+static void test_killer_byte_survives(void)
+{
+    q2_actor player, creature, mob, victim, shooter;
+    q2_inventory inv;
+    q2_monster m;
+    q2_combat_rules rules, dm;
+    s32 pos[3] = { 0, 0, 0 };
+
+    printf("killer byte\n");
+    q2_combat_rules_default(&rules);
+    dm = rules;
+    dm.deathmatch = true;
+
+    /* 0x8003DE24 `addiu v0, zero, 4` / 0x8003DE34 `sb v0, 222(s1)`. */
+    q2_actor_init(&player);
+    check_eq_i(player.last_attacker, Q2_MP_NOT_A_PLAYER,
+               "a fresh actor starts at 4, as 0x8003DE34 places a player");
+
+    /*
+     * A Soldier's bolt kills the player: byte 4 (single player, an attacker
+     * with no client), mod 1, +0x2F1 = 3. Then the sim refreshes the actor for
+     * something that is not a hit — what q2_sim_fire does on every shot.
+     */
+    q2_inventory_init(&inv);
+    inv.health = 10;
+    q2_actor_from_player(&player, &inv, pos);
+    place(&creature, 0, 0, -1000, 100);           /* owner -1, no client */
+    q2_combat_damage(&creature, &player, 30, Q2_MOD_ENERGY_BOLT, NULL, &rules);
+    q2_actor_to_player(&player, &inv);
+    q2_actor_from_player(&player, &inv, pos);
+
+    check_eq_i(player.last_attacker, Q2_MP_NOT_A_PLAYER,
+               "the player refresh keeps +222");
+    check_eq_i(player.last_mod, Q2_MOD_ENERGY_BOLT,
+               "and +223, which the death handler reads at 0x800396C4");
+    check_eq_i(player.effect[1], 3,
+               "and the effect timer the hit armed");
+    check(!q2_player_death_cries_out(player.last_attacker, player.last_mod),
+          "so the Soldier's kill still dies in silence (0x80039728)");
+
+    /*
+     * The creature refresh keeps the same two things. Player 2 shoots a
+     * creature in deathmatch (0x80057E04 writes 2 into the creature), and the
+     * next frame rebuilds its actor from the monster.
+     */
+    q2_monster_init(&m);
+    m.health     = 100;
+    m.takedamage = Q2_DAMAGE_AIM;
+    q2_actor_init(&mob);
+    q2_actor_from_monster(&mob, &m);
+    place(&shooter, 0, 0, -1000, 100);
+    shooter.has_client = true;
+    shooter.owner      = 2;
+    q2_combat_damage(&shooter, &mob, 10, Q2_MOD_ENERGY_BOLT, NULL, &dm);
+    q2_actor_from_monster(&mob, &m);
+
+    check_eq_i(mob.effect[1], 3,
+               "a creature's damage effect outlives the frame it was armed in");
+    check_eq_i(mob.last_attacker, 2, "and so does who last hurt it");
+
+    /*
+     * 0x80057E54..0x80057E68: the creature hands its own byte on. It kills
+     * player 1 after player 2 shot it, and player 2 is credited.
+     */
+    place(&victim, 0, 0, 0, 100);
+    victim.has_client = true;
+    victim.owner      = 1;
+    q2_combat_damage(&mob, &victim, 30, Q2_MOD_BULLET, NULL, &dm);
+    check_eq_i(victim.last_attacker, 2,
+               "a creature's hit in deathmatch credits whoever last hurt it");
+
+    /* 0x80057E5C..0x80057E84: a creature whose own byte is 4 prints and
+     * stores nothing, so the victim keeps what the last hit left. */
+    victim.last_attacker = 3;
+    place(&creature, 0, 0, -1000, 100);
+    q2_combat_damage(&creature, &victim, 5, Q2_MOD_BULLET, NULL, &dm);
+    check_eq_i(victim.last_attacker, 3,
+               "a creature nobody has hurt leaves the victim's byte alone");
+
+    /* 0x80057DC0: the world's hit on a client-less target stores nothing. */
+    q2_combat_damage(NULL, &mob, 5, Q2_MOD_CRUSH, NULL, &dm);
+    check_eq_i(mob.last_attacker, 2,
+               "a deathmatch world hit leaves a creature's byte alone");
 }
 
 static void test_knockback(void)
@@ -475,6 +1163,20 @@ static void test_knockback(void)
     place(&target, 0, 0, 0, 100);
     q2_combat_damage(&attacker, &target, 100, Q2_MOD_LAVA, point, &rules);
     check_eq_i(target.knockback[2], 0, "lava imparts nothing");
+
+    /*
+     * FL_NO_KNOCKBACK GATES NOTHING ON THIS DISC. The outer function's impulse
+     * block, 0x80057EC0..0x80058204, reads no flags word at all — its only
+     * guards are `beq s4, zero` (zero damage) and `beq s6, zero` (no point).
+     * The bit's one reader is 0x8006291C, inside T_Damage, and it zeroes
+     * T_Damage's own `knockback` argument, which its single caller passes as
+     * zero at 0x80058468. This side used to apply it to the outer impulse.
+     */
+    place(&target, 0, 0, 0, 100);
+    target.no_knockback = true;
+    q2_combat_damage(&attacker, &target, 100, Q2_MOD_ROCKET, point, &rules);
+    check(target.knockback[2] > 0,
+          "FL_NO_KNOCKBACK does not stop the outer impulse");
 
     /*
      * Self-damage is 3.2 times as strong: the rocket jump. Measured on a
@@ -520,6 +1222,14 @@ static void test_knockback(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/* A stand-in for the pair of gates, 0x80044C44's swept move and 0x80053974's
+ * entity-box clip: the blast cannot see anything above it. */
+static bool block_positive_z(void *ctx, const s32 from[3], const s32 to[3])
+{
+    (void)ctx;
+    return to[2] <= from[2];
+}
+
 static void test_splash(void)
 {
     q2_actor a[3];
@@ -560,6 +1270,88 @@ static void test_splash(void)
     hurt = q2_combat_radius_damage(NULL, NULL, centre, 200, 1300,
                                    Q2_MOD_ROCKET, list, 1, &rules);
     check_eq_i(hurt, 1, "a body-sized one at the same place is caught");
+
+    /*
+     * THE OWNER TAKES HALF, 0x80050A0C. `bne a2, s4` at 0x80050A04 compares the
+     * candidate against the owner the caller passed in a0, and the `sra` is on
+     * the owner's arm only; 0x80050A08's subtraction is in the delay slot and
+     * therefore runs either way. All six projectile call sites store zero in
+     * the exclude-owner slot, so the owner IS swept — the halving is the whole
+     * of what makes self-splash different, and this side had none of it.
+     */
+    {
+        q2_actor owner, bystander;
+        q2_actor *pair[2];
+        s16 full;
+
+        place(&owner, 0, 0, 400, 500);
+        place(&bystander, 0, 0, -400, 500);
+        owner.radius = bystander.radius = 0;
+        pair[0] = &owner;
+        pair[1] = &bystander;
+
+        full = q2_combat_splash_at(200, 400);
+        hurt = q2_combat_radius_damage(&owner, NULL, centre, 200, 1300,
+                                       Q2_MOD_ROCKET, pair, 2, &rules);
+        check_eq_i(hurt, 2, "both are inside the blast");
+        check_eq_i(500 - owner.health, full >> 1,
+                   "the blast's own owner takes half");
+        check_eq_i(500 - bystander.health, full,
+                   "and an equidistant bystander takes all of it");
+
+        /*
+         * The shift is BEFORE 0x80050A10's `blez`, not after, so a self-hit
+         * that falls off to exactly one point halves to zero and is rejected
+         * outright — the owner is not even counted.
+         */
+        {
+            s32 far_dist = 0;
+            s16 pts;
+
+            /* Find the distance at which the falloff leaves exactly 1. */
+            for (far_dist = 0; far_dist < 40000; far_dist++) {
+                pts = q2_combat_splash_at(200, far_dist);
+                if (pts == 1)
+                    break;
+            }
+            check_eq_i(q2_combat_splash_at(200, far_dist), 1,
+                       "a distance exists where the falloff leaves 1 point");
+
+            place(&owner, 0, 0, far_dist, 500);
+            place(&bystander, 0, 0, -far_dist, 500);
+            owner.radius = bystander.radius = 0;
+            hurt = q2_combat_radius_damage(&owner, NULL, centre, 200,
+                                           (s16)(far_dist + 1), Q2_MOD_ROCKET,
+                                           pair, 2, &rules);
+            check_eq_i(hurt, 1, "the owner's 1-point self-hit is rejected");
+            check_eq_i(owner.health, 500, "and takes nothing at all");
+            check_eq_i(bystander.health, 499, "while the bystander takes its 1");
+        }
+    }
+
+    /*
+     * OCCLUSION, 0x80050A24 and 0x80050A3C. Retail runs the swept move
+     * 0x80044C44 through the hull and then clips the same segment against the
+     * entity boxes (0x80053974) between the falloff and the damage call, and a
+     * zero from either skips the candidate. `q2_combat_radius_damage` has no
+     * world, so the pair is injected; the plain entry point passes NULL and
+     * keeps its old distance-only behaviour for headless callers.
+     */
+    {
+        q2_actor near_pair[2];
+        q2_actor *pair[2] = { &near_pair[0], &near_pair[1] };
+
+        place(&near_pair[0], 0, 0, 400, 500);
+        place(&near_pair[1], 0, 0, -400, 500);
+        near_pair[0].radius = near_pair[1].radius = 0;
+
+        hurt = q2_combat_radius_damage_traced(NULL, NULL, centre, 200, 1300,
+                                              Q2_MOD_ROCKET, pair, 2, &rules,
+                                              block_positive_z, NULL);
+        check_eq_i(hurt, 1, "an occluded candidate is not counted");
+        check_eq_i(near_pair[0].health, 500, "and takes nothing through a wall");
+        check(near_pair[1].health < 500, "while the visible one is hurt");
+    }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -833,6 +1625,11 @@ int main(void)
     test_armour_absorption();
     test_power_armour();
     test_damage();
+    test_takedamage_gate();
+    test_one_shot_kill();
+    test_hit_sound();
+    test_deadlines_are_unsigned();
+    test_killer_byte_survives();
     test_knockback();
     test_splash();
     test_hitscan();

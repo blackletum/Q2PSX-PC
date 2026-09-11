@@ -274,6 +274,111 @@ u32 q2_creature_sound_bindings(const u8 *image, size_t size, u32 load_base,
 const char *q2_creature_sound_for_addr(const q2_cre_sound_bind *binds,
                                        u32 count, u32 addr);
 
+/* ------------------------------------------------------------------------- */
+/* SOUND FALLBACK GROUPS — a module substituting one handle for another       */
+/* ------------------------------------------------------------------------- */
+/*
+ * A REGISTRATION IS NOT ALWAYS WHAT PLAYS, and no decoder that reads
+ * registrations can see the difference, because the substitution is a
+ * handle-to-handle MOVE in the module's own spawn code.
+ *
+ * Two of them are on this disc, both confirmed with `moddisasm` and both
+ * firing on every map that carries the creature:
+ *
+ *  SOLDIER, module+0xE50..+0xF28. Two identical fill-if-zero passes over a trio
+ *  of handles. The pain trio is +0x32AC/+0x32B0/+0x32B4 (sol_pain1/2/3) and its
+ *  preference order is read straight off the loads: 0x80100E50 `v1 =
+ *  [+0x32B0]`; if zero 0x80100E60 `v1 = [+0x32AC]`; if that is zero 0x80100E70
+ *  `v1 = [+0x32B4]` — so pain2, then pain1, then pain3. Then three
+ *  fill-if-zero stores at 0x80100E84, 0x80100E9C and 0x80100EB4 write that one
+ *  handle into whichever of the three is still null. The death trio is
+ *  +0x32B8/+0x32BC/+0x32C0 with preference deth2, deth1, deth3 (0x80100EB8
+ *  onward, stores at 0x80100EF4/0x80100F0C/0x80100F24).
+ *
+ *  A handle is null exactly when the map's bank does not carry the name, so the
+ *  whole mechanism is "play the best one this map actually has".
+ *
+ *  It matters because soldier_pain plays +0x32B4 — `moddisasm BASE0 0x80101078`
+ *  opens `lw a0, 12980(v1)`, and 12980 is 0x32B4 — and sol_pain3 IS IN NO BANK
+ *  ON THE DISC. Counted over all 49 exported banks: sol_pain3 0, sol_pain1 11
+ *  (BASE0-2, COMMAND, JAIL4, JAIL5, SECURITY, WASTE1-4), sol_pain2 11 (BASE0-3,
+ *  JAIL4, MAGDEMO, SECURITY, WASTE1-4). So EVERY Soldier's pain cry on the
+ *  console is a fallback, and without this every Soldier in the port is silent
+ *  when hurt, on every map that places one. The die handler plays +0x32C0
+ *  (sol_deth3), which is in 12 banks; the death fallback therefore fires on
+ *  exactly one map, COMMAND, where it lands on sol_deth2.
+ *
+ *  TANK COMMANDER, module+0x808..+0x820. One entry wide and not a trio:
+ *  0x80100808 `lw a0, 8448(s4)` — [+0x2100], tnk_idle1 — 0x80100810 `bne a0,
+ *  zero` skips if it resolved, else 0x80100818 `lw v0, 8464(s6)` — [+0x2110],
+ *  tnk_step — and 0x80100820 `sw v0, 8448(s4)` overwrites the idle handle with
+ *  it. tnk_idle1 is in ZERO banks and tnk_step in 13, and those 13 are exactly
+ *  the maps that carry tnk_pain, tnk_death and tnk_sight1 — every Tank
+ *  Commander map. So the word at +0x2100 holds the STEP sound for the
+ *  creature's whole life, which is why the console's Tank Commander thuds
+ *  rather than growls both when idling and on the death move's frame 249: the
+ *  two play sites read the same overwritten word.
+ *
+ * The four names that really ARE silent by design — ara_idle1, ara_srch1,
+ * ber_idle1, ber_srch1 — have no group and must keep resolving to nothing.
+ */
+typedef struct q2_cre_sound_fallback {
+    const char *module;     /* the module header name, e.g. "Soldier"        */
+    u32         slot_off;   /* module-relative slot the play site reads       */
+    u32         pref_off[3];/* the module's own preference order; 0 ends it   */
+
+    /*
+     * The names the module registers into `slot_off` and into each `pref_off`,
+     * as `q2psx-inspect creatures` prints them (801032B4=sol_pain3 and so on).
+     * Carried beside the offsets because a play site does not always reach
+     * the host as an ADDRESS: the Soldier's transcription names its sounds by
+     * an index into its own name table (cre_soldier.c), so the host holds a
+     * registered NAME and no address. Each name is registered into exactly one
+     * slot of its group, so the name identifies the slot.
+     */
+    const char *slot_name;
+    const char *pref_name[3];
+} q2_cre_sound_fallback;
+
+/* The table above, for the tool and the test. */
+const q2_cre_sound_fallback *q2_creature_sound_fallbacks(u32 *count);
+
+/*
+ * WHICH NAME A PLAY SITE ACTUALLY REACHES, given what the map's bank carries.
+ *
+ * `bank_has` answers "is this name in this map's bank"; pass NULL to say the
+ * bank carries everything, which reduces this to q2_creature_sound_for_addr.
+ * `load_base` is where the module image was relocated, because the groups are
+ * declared module-relative and `binds` hold absolute addresses.
+ *
+ * For an address in no group this is q2_creature_sound_for_addr. For one in a
+ * group: the slot's OWN name if the bank carries it (a resolved handle is never
+ * overwritten — every fill store is guarded by a `bne` on the destination),
+ * else the first of the module's preferences the bank carries, else NULL —
+ * which is the console's null handle, i.e. silence.
+ */
+const char *q2_creature_sound_resolve(const char *module_name,
+                                      const q2_cre_sound_bind *binds,
+                                      u32 count, u32 load_base, u32 addr,
+                                      bool (*bank_has)(const char *name,
+                                                       void *user),
+                                      void *user);
+
+/*
+ * THE SAME RESOLUTION, KEYED ON THE REGISTERED NAME instead of the address.
+ *
+ * `registered` is the name the slot was registered with — what
+ * q2_creature_sound_for_addr, or the Soldier's own name table, already gave the
+ * caller. A name in no group comes back unchanged (and NULL stays NULL); a
+ * grouped one follows the same rule as above — itself if the bank carries it,
+ * else the module's first preference the bank carries, else NULL.
+ */
+const char *q2_creature_sound_fallback(const char *module_name,
+                                       const char *registered,
+                                       bool (*bank_has)(const char *name,
+                                                        void *user),
+                                       void *user);
+
 
 u32 q2_creature_move_names(const q2_creature *c, const u8 *image, size_t size,
                            const char **out, u32 out_count);

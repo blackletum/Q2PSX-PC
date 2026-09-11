@@ -260,16 +260,6 @@ void q2_creature_spawn(q2_cre_bind *b, q2_monster *m, u32 class_index)
     m->svflags    |= Q2_SVF_MONSTER;
 
     /*
-     * THE DENOMINATOR, and it is the console's own rather than a headcount.
-     *
-     * `monster_start` increments `level.total_monsters` at 0x80061A64 for every
-     * creature it starts that is not a good guy — the same exclusion `Killed`
-     * applies to the kill counter — and this is the port's monster_start: the
-     * one place an entity becomes a creature. The pair now moves together, so
-     * "kills 3/9" is two numbers the original keeps rather than two scans of a
-     * live array.
-     */
-    /*
      * AND IT CAN BE HURT, which nothing in this port had ever said.
      *
      * `monster_start` writes DAMAGE_AIM into entity+0x1C bits 30..31 at
@@ -281,9 +271,6 @@ void q2_creature_spawn(q2_cre_bind *b, q2_monster *m, u32 class_index)
      * caught it on the first run.
      */
     m->takedamage = Q2_DAMAGE_AIM;
-
-    if (!(m->aiflags & Q2_AI_GOOD_GUY))
-        q2_level_state.total_monsters++;
 
     /*
      * AND THE MODULE'S OWN SPAWN FUNCTION, WHICH HAD NO CALLER AT ALL.
@@ -299,13 +286,37 @@ void q2_creature_spawn(q2_cre_bind *b, q2_monster *m, u32 class_index)
      * with a NULL currentmove, which `q2_M_MoveFrame` returns on immediately.
      * It stood inert until an AI callback happened to install something.
      *
-     * Run LAST, after the class byte, the scale, the mass and the callbacks,
+     * Run after the class byte, the scale, the mass and the callbacks,
      * because that is the order the loader uses: 0x8007E68C and 0x8007E698
      * write health and gib_health from the class row and only then does
      * 0x8007E6AC call the module's export 0, which is free to overwrite them.
      */
     if (b->impl && b->impl->spawn)
         b->impl->spawn(m);
+
+    /*
+     * THE DENOMINATOR, and it is the console's own rather than a headcount.
+     *
+     * `monster_start` increments `level.total_monsters` at 0x80061A64 for every
+     * creature it starts that is not a good guy — the same exclusion `Killed`
+     * applies to the kill counter. The pair moves together, so "kills 3/9" is
+     * two numbers the original keeps rather than two scans of a live array.
+     *
+     * AFTER THE MODULE'S SPAWN, not before it, because the test reads a bit the
+     * module writes. monster_start is reached through the start wrapper the
+     * module's spawn calls (monster.h), so its 0x80061A48 `lw v0, 220(s0)` /
+     * 0x80061A50 `andi v0, v0, 0x100` / 0x80061A54 `bne` sees aiflags as the
+     * module has left them at that call. The Insane raises AI_GOOD_GUY at
+     * 0x80100904 (`ori v1, v1, 0x100`, stored at 0x80100908) and only then
+     * calls its wrapper, at 0x80100994 or 0x801009AC — so on the console an
+     * Insane is never counted. Counted before the hook, every Insane on LAB
+     * was. Counting after the whole hook rather than at the wrapper call
+     * differs only for a module that changes AI_GOOD_GUY after that call; the
+     * Insane does not (its tail is the crucified override, 0x801009EC on), and
+     * the other six were not read for it — INFERRED.
+     */
+    if (!(m->aiflags & Q2_AI_GOOD_GUY))
+        q2_level_state.total_monsters++;
 }
 
 const q2_mmove *q2_cre_find_move(const q2_monster *m, s32 first_frame)
@@ -392,6 +403,27 @@ bool q2_cre_set_move_at(q2_monster *m, u32 module_addr)
 }
 
 /* ------------------------------------------------------------------------- */
+/* Sound fallbacks — see q2_cre_sound_resolve in crebind.h                    */
+/* ------------------------------------------------------------------------- */
+const char *q2_cre_sound_resolve(const q2_monster *m, const char *registered,
+                                 bool (*bank_has)(const char *name, void *user),
+                                 void *user)
+{
+    const q2_cre_bind *b = q2_cre_bind_for(m);
+    const char *module = NULL;
+
+    /* The decoded header name is the module's own; the implementation's name
+     * is what q2_cre_impl_find matched it with, so the two agree whenever a
+     * transcription is bound. */
+    if (b && b->cre && b->cre->name[0])
+        module = b->cre->name;
+    else if (b && b->impl)
+        module = b->impl->name;
+
+    return q2_creature_sound_fallback(module, registered, bank_has, user);
+}
+
+/* ------------------------------------------------------------------------- */
 /* The shot hook — see q2_cre_shot in crebind.h                               */
 /* ------------------------------------------------------------------------- */
 static void (*g_shot_fn)(q2_monster *m, const q2_cre_shot *shot, void *user);
@@ -417,17 +449,49 @@ void q2_cre_fire_shot(q2_monster *m, const q2_cre_shot *shot)
         return;
     }
     /*
-     * The two guards are the ones every refire function on the disc opens
-     * with, and they are checked here rather than in seven creature files.
+     * THE ENEMY-ALIVE GUARDS BELONG TO THE REFIRE CALLBACKS, NOT TO THE SHOT,
+     * and putting them here made every creature decline shots the console
+     * takes.
+     *
+     * Read off the Tank Commander's machine gun, `moddisasm COMMAND 0x80100F90`
+     * then 0x80101074: the fire think loads the enemy at 0x80101074 `lw a3,
+     * 188(s2)` and 0x8010107C `beq a3, zero, 0x801010F4` jumps to a branch that
+     * writes a literal zero into sp+32 — the PITCH — and then falls straight
+     * through to the yaw computation at 0x801010F8 and the fire call at
+     * 0x80101160. It fires with no enemy, aimed flat. Nowhere in the think is
+     * obj+0x108, the health, loaded at all; the only enemy field it reads
+     * besides the origin is +0x4C, the view height, at 0x801010C0.
+     *
+     * The health test lives one level up, in the refire callbacks:
+     * `moddisasm COMMAND 0x8010136C` opens `lh v0, 264(v0)` — 0x108 — then
+     * `blez v0, 0x801013BC`, the arm that ENDS the burst, and 0x8010144C is the
+     * same. So the console's rule is "finish the burst you started, and decide
+     * at the refire whether to start another", not "check before every round".
+     *
+     * The two cases are still counted, as OBSERVATIONS rather than as gates,
+     * so the census can say how many shots went out at nothing — in
+     * `shot_no_enemy` and `shot_dead_enemy`, NOT in `fire_no_enemy` and
+     * `fire_dead_enemy`. Those two stay the decoded path's REFUSALS
+     * (cre_actions.c), which with `fire_sent` and `fire_no_hook` partition
+     * `fire_calls`; a shot sent from here counted in them as well would be
+     * counted twice by any line that adds them up.
+     *
+     * This is not a Tank fix. The port's own files had recorded the same
+     * departure for two more creatures — cre_infantry.c above
+     * k_infantry_machinegun, whose death burst at module 0x80101038 never
+     * touches the enemy, and cre_gunner.c above gunner_grenade — and both now
+     * record that it is gone. Where a module's refire really does have the
+     * guard the port already transcribes it: tankcomm_refire_rocket and
+     * tankcomm_reattack_blaster (cre_tankcomm.c) for the two callbacks above,
+     * and soldier_attack1_refire1, soldier_attack1_refire2,
+     * soldier_attack2_refire1, soldier_attack2_refire2 and
+     * soldier_attack6_refire (cre_soldier.c, module+0x1B5C, +0x1C18, +0x1CF0,
+     * +0x1DAC and +0x1FDC).
      */
-    if (!m->enemy) {
-        q2_cre_actions.fire_no_enemy++;
-        return;
-    }
-    if (m->enemy->health <= 0) {
-        q2_cre_actions.fire_dead_enemy++;
-        return;
-    }
+    if (!m->enemy)
+        q2_cre_actions.shot_no_enemy++;
+    else if (m->enemy->health <= 0)
+        q2_cre_actions.shot_dead_enemy++;
 
     q2_cre_actions.fire_sent++;
     g_shot_fn(m, shot, g_shot_user);

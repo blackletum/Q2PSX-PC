@@ -31,9 +31,11 @@
  *                                      reached again
  *     0x80039550  corpse_think       — the body, every tick
  *     0x8003E238  respawn_think      — the corpse timer, in deathmatch
- *     0x8005B358  body_fade          — the body shrinking out of the world
+ *     0x8005B358  body_fade          — the body darkening out of the world
  *
- * and 0x8003CE14 `player_anim` chooses which move plays.
+ * and 0x8003CE14 `player_anim` chooses which move plays. respawn_think can
+ * also hand the body to a sixth: one of the two dissolve handlers 0x8005B39C
+ * and 0x8005B444, which the gate 0x8005B2A8 installs over it (below).
  *
  * ---------------------------------------------------------------------------
  * Nobody drives a corpse, and that is not a rule anybody wrote
@@ -64,17 +66,24 @@
  *   1. `if ((unsigned)(mod - 9) < 2) killer = -1` (0x800396CC). Means 9 and 10
  *      are `Q2_MOD_ACID` and `Q2_MOD_LAVA`, so the level's own hazards erase
  *      the attacker on the ENTITY, not just in the scoring — everything
- *      downstream reads the corrected byte. `q2_mp_attribute_kill` already
- *      carries this rule and is what this module calls.
+ *      downstream reads the corrected byte, with `lb` at 0x800396EC, and reads
+ *      it RAW. `q2_mp_killer_field` is that override and nothing more.
+ *      `q2_mp_attribute_kill` is NOT: it also folds every byte outside [0, 4)
+ *      to -1, which is a scoring convenience, and routing the two gates below
+ *      through it made the 4 the damage function records for a non-player
+ *      both cry out and score.
  *
  *   2. The victim's player number is `(entity->client - 0x800C7C60) / 224`
  *      (0x800396E0..0x80039720, a divide-by-224 written as a multiply by the
  *      modular inverse of 7 and a shift of 5). 224 is the client stride, which
  *      0x8003B288 confirms from the other side.
  *
- *   3. **The death cry is only raised for a death with no killer**
+ *   3. **The death cry is only raised when the byte is -1**
  *      (`bne s1, -1` at 0x80039728 skips it). A player shot by somebody makes
- *      no sound here at all. Which of the two voices depends on `client+0x84`.
+ *      no sound here at all, and neither does one killed by anything else the
+ *      damage function credits: it never writes -1 (see combat.h,
+ *      `last_attacker`), so in practice this is acid and lava. Which of the two
+ *      voices depends on `client+0x84`.
  *      This is not what the port had: `update_pain` (0x8003AE10) was raising
  *      `pla_death4` for every death, because that is where the port first
  *      noticed a health crossing.
@@ -84,9 +93,10 @@
  *      DEATHMATCH  pushes a body record through 0x80020D60 — four 88-byte slots
  *                  from 0x800C6D70, taking the entity's kind, the client's
  *                  halfword at +102 and 80 bytes of pose from +84 — and then,
- *                  guarded by `killer < 4 && victim < 4` (SIGNED, so a world
- *                  kill at -1 passes), calls the map module's export 1. That is
- *                  `q2_mp_player_killed`.
+ *                  guarded by `killer < 4 && victim < 4` (`slti` at 0x80039774
+ *                  and 0x8003977C, SIGNED, so acid's and lava's -1 passes and
+ *                  the "not a player" 4 fails), calls the map module's export 1
+ *                  with the raw byte in a0. That is `q2_mp_player_killed`.
  *
  *      SINGLE      opens menu page 41 and arms its 600-tick countdown
  *                  (0x8002059C -> 0x8001D738, 0x800205B0), then debug-prints
@@ -122,7 +132,7 @@
  * corpse_think, 0x80039550
  * ---------------------------------------------------------------------------
  *     if (health <= gib_health) { gib(self); return; }        0x8003956C
- *     physics(self);                                          0x800552B4
+ *     list_append(self);                                      0x800552B4
  *     approach(&vel[i], 0, dt * 5)  for i in 0..2             0x8006FE3C
  *     clip_velocity(self);                                    0x80039AA4
  *     if (!deathmatch)   { ent2 |= DEAD; return; }            0x80039610
@@ -150,14 +160,19 @@
  * ends. Either way it is corpse_think that raises it and NOT the death handler,
  * which is what makes the handler's own gate a one-shot.
  *
+ * `list_append` puts the body on the ACTOR LIST, the per-frame buffer that the
+ * hit sweeps and radius damage walk (monster.h, over the corpse handler). It
+ * is what keeps a body shootable. It is not physics and not a draw list.
+ * corpse_think makes no 0x8005B880 call: a falling body is not presented.
+ *
  * ---------------------------------------------------------------------------
  * respawn_think, 0x8003E238, and the body's end
  * ---------------------------------------------------------------------------
- *     if (!effect_fade(self)) {                               0x8005B2A8
- *         0x8005B880(self); physics(self);
+ *     if (!dissolve_gate(self)) {                             0x8005B2A8
+ *         0x8005B880(self); list_append(self);
  *         if (health <= gib_health) { gib(self); return; }
  *     }
- *     clip_velocity(self);
+ *     clip_velocity(self);                                    0x80039AA4
  *     corpse_ticks -= dt;
  *     if (corpse_ticks <= 0) { corpse_ticks = 1; think = body_fade; }
  *
@@ -166,11 +181,37 @@
  * that +0xFC is a lighting intensity, not a geometric scale: the body darkens
  * away over 256 dt — under a second — after its five-second wait.
  *
+ * THE DISSOLVE GATE is 0x8005B2A8, the creature corpse handler's own
+ * (monster.h has the whole of it). If effect[2] (+0x2F2) or else effect[0]
+ * (+0x2F0) is set, it puts 0x8005B444 or 0x8005B39C into +0x3C, stores 4096
+ * in +0xF4 and answers 1. On the player that +0xF4 is `corpse_ticks`, so the
+ * gate REUSES THE CORPSE TIMER as the dissolve level. A zero answer from the
+ * `bne v0, zero, 0x8003E2B4` at 0x8003E24C falls through to the chain. A
+ * non-zero one does not return; it jumps to 0x8003E2B4, the tail both arms
+ * share. So on the gate's tick the body still moves, and `corpse_ticks -= dt`
+ * still runs, on the 4096 the gate has just stored. The tail's own swap to
+ * body_fade (0x8003E2EC) would overwrite the handler only if dt reached 4096,
+ * and Q2_DT_MAX is 30. The jump also skips the gib test, so a body past -40
+ * with effect[0] or [2] set dissolves instead of coming apart.
+ *
+ * From then on the dissolve handler runs instead of respawn_think. It
+ * presents the body, takes `dt << 6` off +0xF4 and frees the entity through
+ * 0x8006D280 when that is no longer positive. It has no list_append, no gib
+ * test and no clip_velocity: the body stops moving and cannot be hit. It is
+ * gone once the 4096 has drained at 64 a dt, which is six more frames at the
+ * nominal 12. Its +0xFC is never touched, so it does not darken first.
+ * 0x8007F288 frees the record at the player's +0x2EC; this port's player has
+ * no such record.
+ *
+ * Only respawn_think calls the gate. corpse_think does not, so a body that is
+ * still falling, and every single-player body, never dissolves.
+ *
  * **Nothing in this chain respawns the player.** The corpse animates, waits its
- * 1500 and dissolves; putting a player back is 0x8003DDF8, and 0x8003DDF8 has
- * exactly one caller (0x8003DECC, the mode gate this port already carries as
- * `q2_mp_may_respawn`) and one other reference — slot 12 of the engine block,
- * which is QMULTI.C's. The map module decides when you come back, and the
+ * 1500 and fades (or dissolves early, above); putting a player back is
+ * 0x8003DDF8, and 0x8003DDF8 has exactly one caller (0x8003DECC, the mode
+ * gate this port already carries as `q2_mp_may_respawn`) and one other
+ * reference — slot 12 of the engine block, which is QMULTI.C's. The map
+ * module decides when you come back, and the
  * engine only ever decides that you are gone.
  *
  * ---------------------------------------------------------------------------
@@ -199,7 +240,7 @@
 #ifndef Q2PSX_GAME_PLAYERDEATH_H
 #define Q2PSX_GAME_PLAYERDEATH_H
 
-#include "multiplayer.h"   /* q2_mp_attribute_kill — the mod-9/10 rule */
+#include "multiplayer.h"   /* q2_mp_killer_field — the mod-9/10 rule */
 #include "q2psx.h"
 
 /* ------------------------------------------------------------------------- */
@@ -311,6 +352,8 @@ typedef enum q2_pdeath_stage {
     Q2_PDEATH_DYING,      /* corpse_think, animation still running      */
     Q2_PDEATH_DOWN,       /* respawn_think, the 1500 counting away      */
     Q2_PDEATH_FADING,     /* body_fade, the scale counting away         */
+    Q2_PDEATH_DISSOLVING, /* 0x8005B39C or 0x8005B444, the 4096 the gate
+                           * stored in +0xF4 counting away at dt << 6   */
     Q2_PDEATH_GIBBED,     /* health fell past -40; there is no body     */
     Q2_PDEATH_GONE        /* the model was released                     */
 } q2_pdeath_stage;
@@ -325,7 +368,8 @@ typedef struct q2_player_death {
     int  victim;          /* (client - 0x800C7C60) / 224                */
 
     s16  gib_health;      /* entity+0x44                                */
-    s16  corpse_ticks;    /* entity+0xF4                                */
+    s16  corpse_ticks;    /* entity+0xF4, and the dissolve level after
+                           * the gate: the same halfword                */
     s16  box_y;           /* entity+0x6E, flattened to 143 when down    */
     s16  scale;           /* entity+0xFC light intensity (retained name) */
     s16  velocity[3];     /* entity+0xE0..0xE4                          */
@@ -337,6 +381,10 @@ typedef struct q2_player_death {
 
     bool linked_weapon;   /* was there a model in +0x44 to release      */
     bool has_body;        /* the player record's +0x120 back-pointer    */
+
+    /* Which dissolve handler 0x8005B2A8 put into +0x3C — a
+     * q2_corpse_dissolve (monster.h), NONE until the gate fires. */
+    u8   dissolve_arm;
 } q2_player_death;
 
 /*
@@ -371,9 +419,12 @@ bool q2_player_should_die(s16 health, u32 ent2_flags);
  * Does this death raise the death voice?
  *
  * 0x80039728 skips the sound outright unless entity+222 is -1, and 0x800396CC
- * has just forced it to -1 for acid and lava. So the answer is "only a death
- * nobody is credited with" — the world's kills and the level's hazards — and a
- * player shot by somebody dies silently.
+ * has just forced it to -1 for acid and lava. The test is equality with -1 on
+ * the raw byte and nothing wider, and 0x800396DC is the only instruction in the
+ * image that stores a -1 there — so the answer is "acid and lava". A player
+ * shot by somebody dies silently, and so does one killed by a creature, a
+ * crusher or a scripted hit: the damage function leaves a player's index, the
+ * "not a player" 4 or single player's actor index behind, and none is -1.
  *
  * Split out because the sound is raised inside the sim, where the rest of this
  * chain is not.
@@ -398,9 +449,23 @@ void q2_player_die(q2_player_death *d, s8 killer_field, s16 means_of_death,
  * `roll` is the `rand() % 3` for a death move that has not been chosen yet.
  *
  * Returns true while the body is still in the world.
+ *
+ * This is a body with no damage effect set: respawn_think's gate never fires.
+ * q2_player_death_tick_fx is the same tick with the body's effect bytes.
  */
 bool q2_player_death_tick(q2_player_death *d, s16 health, s32 dt,
                           bool deathmatch, u32 roll);
+
+/*
+ * The same tick, handed the body's damage-effect bytes, entity+0x2F0..0x2F5 —
+ * the port keeps them on the combat actor as `q2_actor.effect` (combat.h).
+ * respawn_think's gate 0x8005B2A8 reads [2] and [0] and, on either, hands the
+ * body to a dissolve handler (Q2_PDEATH_DISSOLVING), which frees it
+ * (Q2_PDEATH_GONE) once the 4096 has drained at `dt << 6`. `effect` may be
+ * NULL, which is q2_player_death_tick.
+ */
+bool q2_player_death_tick_fx(q2_player_death *d, s16 health, s32 dt,
+                             bool deathmatch, u32 roll, const u8 *effect);
 
 /*
  * The frame cursor walking past the end of the death move — 0x8003DF90's

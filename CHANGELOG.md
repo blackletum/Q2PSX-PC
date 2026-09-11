@@ -20,16 +20,24 @@ change; see [`docs/RELEASING.md`](docs/RELEASING.md).
 ## [Unreleased]
 
 ### Reconstruction
-- _Nothing yet._
+- Creatures drop what they carried. A creature whose spawn record carries the drop flag now leaves an item when it dies: `monster_death_use` queues it in the console's four-slot queue (`0x80020D60`), the frame drains it through the 30-row pick table at `0x800AB79C` (`0x80020680`), and the item is thrown from the body's own origin with the console's toss and lands before it becomes a pickup (`0x8002085C`, `0x80020C48`). A scripted firefight on SECURITY asks for six drops and all six land. Nothing had ever called any of it, so every creature on the disc died empty-handed.
+- Gibs. A body taken past its gib threshold comes apart as it does on the console: a blood spray laid over its posed mesh (`0x8005B320`), then a ring of tumbling chunks thrown along the killing hit's push (`0x8005A3D4`, `0x8005A0AC`), each trailing blood until it lands (`0x80059DE0`). Before, a Soldier hit by a rocket played an ordinary death.
+- Damage shows on the body. An energy hit crackles across a creature's posed mesh, the other damage timers throw sparks off it, and a player under quad damage wears the blue shell — the five hooks of `0x8005B880`, drawn through the third particle spawner (`0x8002FDFC`, absolute world points) and a posed world-vertex lookup (`0x8006CC44`) the port did not have. A corpse carrying one of the two lingering effects dissolves and is freed rather than sparking on (`0x8005B2A8`).
+- Each creature sees from its own eye and turns at its own rate: a walker from its model's height — a Soldier at -252, a Tank Commander at -508 — a flyer at -250 and a swimmer at -100, turning 228 or 114 a tick where every creature had turned 200 (`0x80062448`..`0x80062584`). A prone Insane is a flyer for its whole life.
+- Event scripts run once when they say once. A one-shot item retires itself before it dispatches (`0x80027468`) — BASE2's end-of-unit call drops from twenty runs to one on an in-out-in walk — a record's one-shot is its DISABLED bit, so an ENABLE genuinely re-arms it (`0x80027950`); opcode `0x09` WAIT is live (`0x800276C4`); an accepted zone gate abandons the rest of its record (`0x80027784`); and a trigger volume must have its enable bit set and its id match the player's cell (`0x80027E64`), a gate checked against every event volume on the disc before it was switched on.
+- Crossing a zone boundary inside a map keeps the level's script state. The console carries every record's and item's latch across a same-map zone change and replays the spent ones with seven settling passes (`0x8002936C`, `0x800296D4`..`0x8002974C`), so a door a script opened arrives open and a one-shot batch, message or secret does not happen twice. The port had been re-arming the whole script at every seam.
+- The status bar is the console's. The ammo counter reads the pool the weapon fires — the rocket launcher showed 200 where it holds 50, and the BFG showed 0 — the selected weapon is drawn in the centre slot the port never had (`0x80037CAC`), the previous and next weapons sit either side at their true left edges, faded away from the centre and drawn as the console draws them, an additive icon over a subtractive shadow; health goes negative, to -99; every field draws at the console's 1.5x brightness; split screen gets its own numeral size; and a dead one-player bar strips back to health and the gun (`0x80033C68`).
 
 ### Client
 - _Nothing yet._
 
 ### Rendering and audio
-- _Nothing yet._
+- Split screen: a particle group's per-viewport skip tested the wrong bit, so nothing marked as one player's own was ever hidden from the others (`0x80030614`).
 
 ### Tools
-- _Nothing yet._
+- `q2psx-inspect ai` checks 149 constants against the executable, up from 130, all passing: the death-drop chain, the go-routines' eye heights and turn rates, and the start wrappers.
+- `q2psx-inspect hud` no longer always exits 1 — it read a count after freeing the struct that held it — and now checks the weapon strip's table and the per-weapon ammo pools against the executable.
+- `q2psx-inspect creatures` prints a census of every placed creature's eye height and turn rate, and `events` shows the zone-gate aborts.
 
 ### Fixes
 - Armour did nothing but the weakest thing it could. The projection that hands the player to the damage function wrote a literal 0 into the armour class, and 0 is jacket — so combat and body armour both absorbed 0.30 of an ordinary hit instead of 0.60 and 0.80, and neither absorbed anything at all from an energy weapon, where jacket's column is genuinely zero. Because that projection is rebuilt on *every* damage attempt there was no window in which the field could hold anything else, and no save or pickup could get a real class past it. The power shield was worse off still: the two bits the damage path tests live in the inventory's flag word, which the projection never copied, so `q2_combat_power_armour_absorb` returned at its first guard, spent no cells and saved nothing. A player wearing body armour now takes 19 of a 100-point hit rather than 69.
@@ -39,13 +47,22 @@ change; see [`docs/RELEASING.md`](docs/RELEASING.md).
 - The player carried two different gib thresholds. The damage path used -100 and the death chain used -40, which is the one the disc writes at `0x800397FC`; there is now one copy. The corpse health floor was likewise spelled out twice under two names, so the two clamps could drift apart while both looked cited.
 - Warnings-as-errors had never passed on any compiler, so CI had been red since 20 August and nothing it said could be trusted. Every one is fixed rather than switched off: 33 on GCC and Clang, and another 20 behind them on MSVC, which stops at the first and so had never reported the rest. Six were real — two undefined behaviour (`gte_sxy` read through a `psx_xy` in the glint and bolt draws), a computation left dead by an earlier fix, an always-true bound on a `u8`, a POSIX function reached through a platform `#ifdef` that bought nothing, and a nested struct zeroed with too few braces. Thirteen were formats that really could truncate a path or a menu label and now say what they cut to. Two MSVC warnings are turned off, both with a reason: C4100 is the unreferenced parameter this project already ignores on GCC and Clang, and C4127 fires on every `CHECK(SOME_TRANSCRIBED_CONSTANT == 36, ...)` in the test suites, which is what those suites are for.
 - A solid collision node did not hold nothing. `q2_coll_point_in_node` carried its own copy of the solid-bit mask instead of asking `q2_collision_node_is_solid`, and on one MSVC build the copy did not fire while the accessor did — so a node marked impassable let a point sit inside it. There is now one place that decides what solid means. Found only because MSVC had never been able to build the project in CI, so its tests had never run there.
+- The Environment Suit was god mode. The port refused every hit while it ran; the console's only test of it sits inside the acid arm of the damage function (`0x80058230`), so it stops acid and nothing else.
+- Splash damage went through walls. Radius damage now sweeps from the blast to each candidate and clips against the entity boxes before it hurts anything (`0x80050A24`, `0x80050A3C`), and the blast's own owner takes half (`0x80050A0C`).
+- The GAME VARIABLES page changed nothing. The menu computed the cheat word and dropped it, so ONE SHOT KILL, NO FALL DAMAGE and the rest remembered a choice and acted on none (`0x8001C698`). ONE SHOT KILL also now fires on a hit that armour absorbs whole, where the console falls straight through (`0x80058390`).
+- On Easy, creature shots landed at full strength. The client handed every shot to the damage function with no attacker, so the rule that a monster does half to you at skill 0, rounded up (`0x800582C8`), could only ever fire for a claw.
+- The player cried out at every world death, and in deathmatch a creature's kill could still cost the victim a frag. The death voice fires only on a raw -1 in the killer byte, which only acid and lava write (`0x80039728`, `0x800396DC`); the frag gate is that raw byte, signed, below 4 (`0x80039774`); and a deathmatch hazard that kills with no attacker is the victim's own suicide (`0x80057DC8`).
+- Armour's rounding bias follows the difficulty, not deathmatch (`0x80057C10`), and the inventory's own damage helper no longer absorbs a flat third of every hit.
+- Soldiers were silent when hurt, and a Tank Commander's idle played nothing. Their sound slots now fall back to the names the map's bank carries, as the modules do when they load (Soldier `+0xE50`, Tank Commander `+0x808`); a scripted firefight on SECURITY goes from eight creature sounds missing from the bank to none. The Tank Commander's machine gun also fires with no enemy, as the console's does.
+- The weapon strip's left icon was drawn on top of the armour icon. The strip table holds left edges, and the port had subtracted a width (`0x80033448`).
+- Saves are version 6. This round changed what a saved event flag means, so a version-5 save's spent script records are migrated on load and stay spent.
 
 ### Build and packaging
 - The repository is licensed: GPL-2.0, in `LICENSE`, and it ships in the release archives as that licence requires.
 - Five megabytes of rendered frames — a title screen, a HUD test, two model renders, two level renders and an accidental screenshot of a terminal window — were tracked at the repository root while the README said the repository contains no game assets. They are gone, `.gitignore` covers them, and `scripts/check_paths.py` now fails the build on any tracked file that is an image, a sound or a film — by extension *or* by magic number, because the screenshot was a PNG named `C`.
 
 ### Documentation
-- _Nothing yet._
+- `docs/openquestions.md` #135 records this round: the frontier measured (461 of the 821 game functions were cited nowhere in the port), what was reconstructed, and what review caught that no unit test could.
 
 ## [0.1.0] - 2026-08-28
 

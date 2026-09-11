@@ -1,5 +1,6 @@
 #include "inventory.h"
 
+#include "combat.h"        /* the two absorption stages, 0x80057A9C/0x80057BE4 */
 #include "weapontables.h"
 
 #include <string.h>
@@ -184,31 +185,63 @@ s16 q2_inventory_add_health(q2_inventory *inv, s16 amount, bool allow_overheal)
     return (s16)(inv->health - before);
 }
 
-s16 q2_inventory_apply_damage(q2_inventory *inv, s16 damage)
+s16 q2_inventory_apply_damage(q2_inventory *inv, s16 damage, s16 mod,
+                              const struct q2_combat_rules *rules)
 {
-    s16 absorbed;
+    q2_actor a;
+    s32 amount = damage;
 
     if (!inv || damage <= 0)
         return 0;
 
     /*
-     * Armour takes a share and is consumed by it. The exact split is a tuning
-     * value this port has not yet read out of the executable, so a third is
-     * used as a placeholder — deliberately simple, and marked so it is not
-     * mistaken for a recovered constant.
+     * THE SPLIT IS READ, NOT A THIRD. This used to take `damage / 3` as a
+     * placeholder "until the value is read out of the executable"; it has been
+     * read, and it is not one value. 0x80057BE4 indexes the three six-byte
+     * records at 0x8009C5EC by the class byte at client+76, takes the +2
+     * (normal) or +4 (energy) column by 0x80058320's selector, and computes
+     * 0x80057C7C..0x80057C84 `mflo` / `addu bias` / `srl 12`, clamped to what
+     * is held. Body armour against 100 ordinary points saves 80, not 33, and
+     * jacket saves nothing at all from energy.
+     *
+     * Both stages are combat.c's, called through the same player projection
+     * the sim uses, so the absorption cannot drift from what the damage
+     * function does. The store below is the client arm's too, and so is its
+     * lack of a floor: -9999 is 0x800629B4's, inside T_Damage, which a client
+     * target never reaches (0x800582C8). `q2_actor_init` first because
+     * `q2_actor_from_player` carries the entity's own fields (the killer, the
+     * mod, the effect timers, `owner` and the throttle) across from whatever
+     * the actor held, and this local held nothing.
      */
-    absorbed = (s16)(damage / 3);
-    if (absorbed > inv->armour)
-        absorbed = inv->armour;
+    q2_actor_init(&a);
+    q2_actor_from_player(&a, inv, NULL);
 
-    inv->armour = (s16)(inv->armour - absorbed);
-    damage      = (s16)(damage - absorbed);
+    /* 0x80058354 `addiu s4, zero, 8` / 0x80058358 `xor v0, s3, s4` /
+     * 0x8005835C `beq v0, zero, 0x80058394`: mod 8 jumps past both stages. */
+    if (mod != Q2_MOD_NO_ARMOUR) {
+        s16 power = q2_combat_power_armour_absorb(&a, (s16)amount);
 
-    inv->health = (s16)(inv->health - damage);
-    if (inv->health < 0)
-        inv->health = 0;
+        /* 0x8005836C..0x80058374: power armour's save comes off first, and
+         * 0x80058380 hands armour what is left. */
+        amount -= power;
+        amount -= q2_combat_armour_absorb(&a, (s16)amount,
+                                          q2_mod_is_energy(mod), power != 0,
+                                          rules);
+    }
 
-    return damage;
+    /* Armour points and cells, as the two stages left them. */
+    q2_actor_to_player(&a, inv);
+
+    /*
+     * 0x800583EC..0x800583F8 `lhu` / `subu` / `sh` — the plain difference, and
+     * NO FLOOR. This clamped at zero, which no instruction does: the death gate
+     * at 0x8003ADC0 is `bgtz` and corpse_think's gib test at 0x8003956C compares
+     * against -40 (playerdeath.h), so a health that could not go below zero
+     * could never be gibbed.
+     */
+    inv->health = (s16)(inv->health - amount);
+
+    return (s16)amount;
 }
 
 void q2_inventory_armour_upkeep(q2_inventory *inv)

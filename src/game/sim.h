@@ -724,6 +724,32 @@ typedef struct q2_sim {
      * exists to remove.
      */
     double dt_frac;
+
+    /*
+     * The frame counter, the port's [0x800B2DE4]: +1 per WORLD tick whatever
+     * the tick's dt (0x800705C4 `addiu a1, a1, 1`, stored at 0x80070610). It
+     * is NOT the level clock, which moves by dt. The damage-effect drawers key
+     * their vertex phase on it (`& 1`, `& 7`; effect.h), so a clock standing in
+     * for it holds one phase forever at an even dt.
+     *
+     * Zero from q2_sim_init. `xrefs 0x800B2DE4` finds three zeroing stores in
+     * the main executable besides the increment: 0x800708C0 (in 0x80070748,
+     * beside the entity counters 0x800B2D04/0x800B2D08; called from 0x8006E09C
+     * and at 0x80070E6C, immediately before 0x80070E74 calls 0x80070C94),
+     * 0x8007C9F0 (in 0x8007C938, called from 0x80070C94) and 0x8007CA94, the
+     * last two beside the frame-delta accumulator 0x800B2E24. That these are
+     * the level start is INFERRED from the company they keep. The counter's
+     * address is also exported at 0x80079AAC, so a relocated module could
+     * write it as well; none is known to. q2_sim_settle's ticks advance it
+     * too, and the console has no settle, so the absolute phase after a spawn
+     * is the port's own. Only the step matters to the look.
+     *
+     * Incremented at the TOP of the world half of q2_sim_tick, because that is
+     * where the console's frame counts it: 0x80070490 (called at 0x80038D44)
+     * stores the new value before 0x8006A4F0 (called at 0x80038D4C) runs the
+     * entity thinks that present each actor. So a tick presents with the
+     * count that includes itself, as a console frame does.
+     */
     u32  tick_count;
     s32  dt_per_field;  /* 6 on PAL, 5 on NTSC — the build's field rate       */
 
@@ -863,6 +889,13 @@ typedef struct q2_sim {
     q2_fx_world  fx;
     q2_rng       fx_rng;
     bool         fx_ready;
+
+    /* Where an actor's posed mesh comes from, for the damage-effect drawers
+     * (effect.h, 0x8005B880). NULL, or a hook that returns false, draws no
+     * crackle — the timers still tick. Installed by the client, which owns
+     * the models. */
+    bool (*fx_mesh)(void *user, const struct q2_actor *a, q2_fx_mesh_src *out);
+    void  *fx_mesh_user;
 
     /* The map's glint — its `GlintMod` mesh and the band state a level script
      * would fill. Points into `common`'s bytes. */
@@ -1094,9 +1127,20 @@ bool q2_sim_next_blast(q2_sim *sim, s32 out[3]);
  *                                       second spawner 0x8003004C
  *   a creature taking damage         -> blood       (0x80048C08), x2
  *   the player taking damage         -> blood
- *   a creature reaching zero health  -> gib         (0x800596B0)
+ *   every actor, once a world tick   -> its damage effects, 0x8005B880
+ *                                       (q2_fx_actor_present): the crackles,
+ *                                       the mesh spark, the quad shell and
+ *                                       the energy light
  *
- * Both stale claims this block used to make are gone. "A bolt striking
+ * A KILL RAISES NOTHING OF ITS OWN. This block used to list "a creature
+ * reaching zero health -> gib (0x800596B0)". 0x800596B0 is inside the ITEM
+ * think 0x80059330 and is the item materialise burst (Q2_FX_ITEM_MATERIALISE
+ * in effect.h), not a gib; simcombat.c no longer fires it on a kill. What the
+ * console raises when a body comes apart is ThrowGibs' mesh blood spray
+ * (0x8005A3D4 -> 0x8005B320, q2_fx_gib_spray), which needs the posed model and
+ * so is the gib owner's to raise, not the combat step's.
+ *
+ * Two older stale claims are gone as well. "A bolt striking
  * anything -> spark (0x8003E0C0)" was wrong: the spark's only reachable caller
  * in the executable is in the player's per-frame state think, which this port
  * does not model, and the address the mapping rested on is an entity
@@ -1303,7 +1347,11 @@ s32 q2_sim_next_dt(const q2_sim *sim, double elapsed_seconds);
 void q2_sim_advance_player(q2_sim *sim, int index, const q2_input *input,
                            s32 dt);
 
-/* Give an extra player a level start's inventory and weapon. */
+/*
+ * Give an extra player a level start's inventory and weapon, on a fresh actor
+ * (killer byte 4, as 0x8003DE34 places a player). The actor's `owner` comes
+ * back -1: the caller names the player afterwards.
+ */
 void q2_sim_player_reset_combat(q2_sim *sim, int index);
 
 /* Where the projectiles in flight got to — launched, stepped, expired, hit. */
@@ -1345,6 +1393,17 @@ typedef struct q2_sim_proj_stats {
      * the first is an entity the sweep never asked about.
      */
     u32 stopped_on_entity;
+
+    /*
+     * RADIUS DAMAGE'S OCCLUSION, asked once per candidate that survived the
+     * falloff (0x80050A24 then 0x80050A3C): how many were asked, how many a
+     * wall or a solid entity box hid from the blast, and how many were waved
+     * through because the blast point sat in no cell at all — a state only the
+     * port reaches (see splash_clear in simcombat.c), counted so it cannot hide.
+     */
+    u32 splash_asked;
+    u32 splash_occluded;
+    u32 splash_unplaced;
 } q2_sim_proj_stats;
 
 extern q2_sim_proj_stats q2_sim_proj_scan;
@@ -1361,6 +1420,13 @@ extern q2_sim_proj_stats q2_sim_proj_scan;
  *
  * The owner is skipped by pointer at impact instead, which is what makes a
  * world-wide list safe.
+ *
+ * Every reader takes `world_targets ? world_targets : combat.targets`, the
+ * per-actor presentation pass (0x8005B880, in q2_sim_combat_tick) included.
+ * So a single-player caller that only registers its creatures with
+ * q2_sim_set_targets still has them presented every world tick, and one that
+ * publishes the same list here as well gets each creature presented once, not
+ * twice.
  */
 void q2_sim_set_world_targets(q2_sim *sim, q2_actor **targets, u32 count);
 

@@ -10,10 +10,28 @@
  *     damage(attacker, target, amount, mod, point)
  *
  * and it does, in this order: record who hit what; apply knockback for the four
- * means-of-death that carry it; halve the amount if a monster hit a player at
- * the lowest skill; refuse everything while the target is invulnerable; take
- * what power armour absorbs; take what armour absorbs; subtract the rest from
- * health; set the damage-effect timer the mod implies.
+ * means-of-death that carry it; run the ACID and LAVA arms; halve the amount if
+ * a monster hit a player at the lowest skill; refuse everything while the
+ * target is invulnerable; take what power armour absorbs; take what armour
+ * absorbs; subtract the rest from health; play the mod's hit sound if the
+ * target survived; set the damage-effect timer the mod implies.
+ *
+ * THE ENVIRONMENT SUIT IS NOT PART OF THAT REFUSAL. The damage function reads
+ * client+0xB4 at exactly one instruction — 0x80058230, inside the mod-9 arm —
+ * and the general test at 0x80058304 reads only client+0xB0. (The word is read
+ * elsewhere in the image: the status bar's powerup walk draws its countdown
+ * from it at 0x80035CB0. That reader refuses nothing.) The suit stops acid and
+ * nothing else, not even lava: 0x8005828C's arm is the throttle alone and
+ * reads neither timer. Both throttles compare STRICTLY and UNSIGNED
+ * (`sltu env_next, level_time`), so the tick on which the deadline is reached
+ * is still refused; the protection tests are `sltu` as well.
+ *
+ * WHO MEETS WHAT. 0x800582C8 `beq s0, zero, 0x8005842C` splits the function in
+ * two. A target WITH a client block stays in 0x80057D54 for the skill halving,
+ * invulnerability, armour, the ONE SHOT KILL rewrite (0x80058394) and the
+ * health store. A target WITHOUT one leaves for T_Damage at 0x800584B4, whose
+ * first real test is the `takedamage` gate at 0x80062838 — so that bit gates
+ * creatures and never gates a player.
  *
  * Two things it does NOT do, and both matter for a port:
  *
@@ -36,12 +54,21 @@
  *
  * **Armour** (0x80057BE4) then takes `(bias + protection * damage) >> 12`,
  * capped at what is left, where `protection` comes from the three-record table
- * described in weapontables.h and the bias is 4095 outside deathmatch and 2048
- * inside it. That bias is a rounding rule, not a fudge: 4095 rounds every
- * non-zero fraction UP, so single-point hits are still absorbed, while 2048
- * rounds to nearest. Deathmatch armour is therefore very slightly weaker
- * against small hits, which is exactly the sort of thing that would never be
- * guessed and has to be read.
+ * described in weapontables.h and the bias is chosen by the SKILL halfword:
+ *
+ *     80057C0C  lui   v0, 0x800B
+ *     80057C10  lh    v0, 0x800B334A       ; skill, NOT 0x800AEBCC
+ *     80057C18  bne   v0, zero, 0x80057C24
+ *     80057C1C  addiu a0, zero, 2048       ; delay slot: skill != 0
+ *     80057C20  addiu a0, zero, 4095       ; skill == 0
+ *
+ * That bias is a rounding rule, not a fudge: 4095 rounds every non-zero
+ * fraction UP, so single-point hits are still absorbed, while 2048 rounds to
+ * nearest. So armour on EASY is very slightly stronger against small hits, and
+ * Medium and Hard share the weaker bias. This used to be written here and in
+ * the code as a deathmatch split, which reads the wrong global — 0x800AEBCC is
+ * the deathmatch word and the same function reads it at 0x80057DA8 and
+ * 0x800580E0, nowhere near the bias.
  *
  * Mod 8 skips both stages entirely — the only damage class in the game that
  * ignores armour outright.
@@ -49,7 +76,10 @@
  * ---------------------------------------------------------------------------
  * Knockback
  * ---------------------------------------------------------------------------
- * Only four means of death push: rail, grenade, rocket and bullet. The impulse
+ * Only four means of death push: rail, grenade, rocket and bullet. The block
+ * is 0x80057EC0..0x80058204 and it reads NO flags word: its only two guards are
+ * 0x80057EC0 `beq s4, zero` (the original damage is zero) and 0x80057EC8
+ * `beq s6, zero` (no point was supplied), then the four mod tests. The impulse
  * is `unit(target - point) * scale * damage / 2400 >> 4`, where the scale is
  * about 1.95 per unit of a global at 0x800B3358 plus 64 — except when a player
  * hits themselves, where it is about 6.25 instead. That asymmetry is the rocket
@@ -69,6 +99,28 @@
  * loses half a point per unit, which at this world scale would be 0.05 per unit
  * against the console's 0.0415.
  *
+ * Three things happen between that falloff and the damage call, and none of
+ * them is distance:
+ *
+ *   - 0x80050A04 `bne a2, s4` / 0x80050A0C `sra s0, s0, 1` — the blast's OWN
+ *     owner takes half. The subtraction at 0x80050A08 is in the delay slot and
+ *     therefore unconditional; the shift is not, and both precede the
+ *     `blez s0` reject at 0x80050A10.
+ *   - 0x80050A24 `jal 0x80044C44` — the SWEPT MOVE through the hull
+ *     (collision.h's q2_coll_move), from the blast (a1) to the candidate's
+ *     origin (a2 = candidate+0x54) through the collision context at
+ *     0x800C8E90, with the caller's cell as the starting hint (a3; entity+0xA0,
+ *     `lh a1, 160(ent)` at the grenade and rocket sites). It is a trace, not a
+ *     separate zone or node query.
+ *   - 0x80050A3C `jal 0x80053974` — the clip of the same segment against the
+ *     48-slot entity-box table at 0x800CAE10; 0x80050A44 `beq v0, zero`
+ *     skips the candidate when a box stops it.
+ *
+ * A zero from either gate skips the candidate outright, so retail's blast does
+ * not go through a wall. `q2_combat_radius_damage` is a pure function with no
+ * world, so the pair is injected as one callback: see
+ * `q2_combat_radius_damage_traced`.
+ *
  * ---------------------------------------------------------------------------
  * Hitscan
  * ---------------------------------------------------------------------------
@@ -83,6 +135,7 @@
 #ifndef Q2PSX_COMBAT_H
 #define Q2PSX_COMBAT_H
 
+#include "gamevars.h"      /* Q2_CHEAT_*: 0x800B29EC reaches the damage path */
 #include "inventory.h"
 #include "monster.h"
 #include "q2psx.h"
@@ -162,15 +215,38 @@ bool q2_mod_knocks_back(s16 mod);
  * value as the result (0x800585A4..0x80058604). */
 s16 q2_mod_effect_timer(s16 mod, int *slot);
 
+/*
+ * The hit sound a mod plays through 0x80040800, or 0 for silence.
+ *
+ * 0x80058504 `sltiu v0, v1, 21` indexes the twenty-one-word jump table at
+ * 0x800ACE5C by mod-1; the four arms it lands on are 0x8005852C (id 13, volume
+ * 4096), 0x80058538 (id 16, 2048), 0x80058544 (id 15, 4096) and 0x80058550
+ * (silent). `volume` may be NULL.
+ *
+ * 0x80040800 is the SPU voice emitter, not pad rumble: 0x800409E0 drops any
+ * request below volume 513 and it allocates from the entity's four voice slots
+ * at entity+732. The damage call passes a3 = 0, so unlike the movers' call it
+ * is NON-POSITIONAL — no attenuation and no distance reject.
+ */
+u8 q2_mod_hit_sound(s16 mod, s16 *volume);
+
 
 /* ------------------------------------------------------------------------- */
 /* Rules that live in globals rather than in the damage function              */
 /* ------------------------------------------------------------------------- */
 typedef struct q2_combat_rules {
     bool deathmatch;      /* 0x800AEBCC                                      */
-    s16  skill;           /* 0x800B334A; 0 halves what monsters do to you    */
+    s16  skill;           /* 0x800B334A; 0 halves what monsters do to you,
+                           * and picks armour's rounding bias (0x80057C10)   */
     s16  knockback_mass;  /* 0x800B3358; the impulse scale's input           */
     s32  level_time;      /* 0x800AEBAC, in ticks                            */
+    /*
+     * The GAME VARIABLES cheat halfword at 0x800B29EC, built once by
+     * 0x8001C698 and read straight out of the global by the damage function at
+     * 0x80058398. See common/gamevars.h for the four bits. Only
+     * Q2_CHEAT_ONE_SHOT_KILL is read here.
+     */
+    u32  cheats;
 } q2_combat_rules;
 
 void q2_combat_rules_default(q2_combat_rules *r);
@@ -190,9 +266,15 @@ void q2_combat_rules_default(q2_combat_rules *r);
 /* Bits of the powerup word that enable it (0x80057AC4). */
 #define Q2_POWERUP_POWER_ARMOUR 0x00018000u
 
-/* Armour's rounding bias, 0x80057C1C / 0x80057C20. */
-#define Q2_ARMOUR_BIAS_SP 4095
-#define Q2_ARMOUR_BIAS_DM 2048
+/*
+ * Armour's rounding bias, 0x80057C1C / 0x80057C20, selected by 0x80057C10's
+ * `lh 0x800B334A` and 0x80057C18's `bne v0, zero` — the SKILL halfword, the
+ * same one the skill-0 damage halving reads at 0x800582D0. It is not the
+ * deathmatch word: these constants used to be named _SP and _DM and were
+ * driven by `rules->deathmatch`, which no instruction supports.
+ */
+#define Q2_ARMOUR_BIAS_EASY   4095   /* skill == 0: every fraction rounds up */
+#define Q2_ARMOUR_BIAS_NORMAL 2048   /* skill 1 and 2: round to nearest      */
 
 /*
  * Environmental throttles, 0x80058268 and 0x800582AC. The level clock runs at
@@ -209,6 +291,33 @@ void q2_combat_rules_default(q2_combat_rules *r);
 
 /* 0x800629B4: how far below zero a corpse's health is allowed to run. */
 #define Q2_HEALTH_FLOOR (-9999)
+
+/*
+ * What entity+222 holds when whatever hurt you was not a player.
+ *
+ * The four projectile spawners write the firing client's index, or this
+ * literal when the owner has no client block: 0x8004A208 (grenade),
+ * 0x8004ABF4, 0x8004B1C4 (rocket) and 0x8004BF80. 0x8003DDF8 places every
+ * player with it (0x8003DE24 loads it, 0x8003DE34 stores it). It is also the
+ * value 0x80057E5C tests before printing "Multiplayer, can't determine which
+ * player hit other player".
+ *
+ * Four is deliberately OUT of range of the frag table (Q2_MP_MAX_PLAYERS is 4)
+ * and, being non-negative, it also fails 0x80039728's `bne s1, -1` — so both
+ * observables, the death voice and the frag, are off, provided the death
+ * handler tests the byte RAW as the console does (`q2_mp_killer_field`). In
+ * single player it also stands in for the pool slot 0x80057E88 computes (23
+ * for a NULL attacker), which the death handler cannot tell from it. In
+ * deathmatch it stands in for nothing: every arm there is modelled, including
+ * the two that store nothing (see `last_attacker` below). And it is what
+ * `q2_actor_init` seeds, so an actor nobody has hit owes nobody a frag.
+ *
+ * multiplayer.h carries the same guarded definition, so either header may be
+ * included first.
+ */
+#ifndef Q2_MP_NOT_A_PLAYER
+#define Q2_MP_NOT_A_PLAYER 4
+#endif
 
 /* ------------------------------------------------------------------------- */
 /* An actor: anything that can be hurt                                        */
@@ -285,7 +394,21 @@ typedef struct q2_actor {
     u8   takedamage;
 
     /* entity+0x20. Only the two bits the damage function tests are modelled. */
-    bool no_knockback;      /* FL_NO_KNOCKBACK, 0x800: knockback forced to 0 */
+    /*
+     * FL_NO_KNOCKBACK, 0x800. IT GATES NOTHING ON THIS DISC, and this side used
+     * to apply it to the wrong impulse. The bit has exactly one reader,
+     * 0x80062914 `lhu v1, 32(s1)` / 0x8006291C `andi v0, v1, 0x800` /
+     * 0x80062928 `addu s3, zero, zero`, and s3 is T_Damage's own `knockback`
+     * ARGUMENT — its eighth, at caller 28(sp). T_Damage has one caller,
+     * 0x800584B4, and 0x80058464 `sw zero, 28(sp)` passes that argument as
+     * zero every time. So the bit zeroes a value that is already zero.
+     *
+     * The OUTER function's impulse (0x80057EC0..0x80058204) reads no flags word
+     * at all, so gating it on this bit was an invented rule. The field is kept
+     * because the creature modules do write entity+0x20, not because anything
+     * on this disc acts on it.
+     */
+    bool no_knockback;
     bool godmode;           /* FL_GODMODE, 0x10: damage forced to 0          */
 
     /*
@@ -299,11 +422,54 @@ typedef struct q2_actor {
     s8   owner;
 
     /* Written by the damage function. */
-    s8   last_attacker;     /* entity+222: who last hurt this, -1 for world  */
+    /*
+     * entity+222, the credited killer. NOT "-1 for the world": the damage
+     * function never writes -1 into this byte in either mode.
+     *
+     *   - deathmatch, attacker with a client: 0x80057E04 stores the attacker's
+     *     client index;
+     *   - deathmatch, attacker without one: 0x80057E68 copies the ATTACKER's
+     *     own +222 byte — whoever last hurt it — unless that byte is 4, when
+     *     0x80057E5C prints "Multiplayer, can't determine which player hit
+     *     other player" (0x800ACD9C) and nothing is stored;
+     *   - deathmatch, NO attacker, target with a client: 0x80057DC8..0x80057E00
+     *     store the TARGET's own client index, so the world's kill is the
+     *     victim's suicide — it passes the frag hook's `slti s1, 4` and does
+     *     not cry out. This port writes `owner` there;
+     *   - deathmatch, NO attacker, target without a client: 0x80057DC0 stores
+     *     nothing;
+     *   - single player: 0x80057E88..0x80057EB8 stores
+     *     `(attacker - 0x800CBA28) / 768`, the actor-array index. With a NULL
+     *     attacker that chain evaluates to -2797289, whose low byte is 0x17, so
+     *     the `sb` at 0x80057EB8 leaves **23**. This port records the
+     *     attacker's `owner`, or 4.
+     *
+     * The one place in the image that stores a literal -1 here is 0x800396DC,
+     * inside the death handler, and only for mods 9 and 10.
+     *
+     * `q2_actor_init` seeds 4 (0x8003DE34 places a player with it), and both
+     * refreshes below CARRY the byte, because "nothing stored" has to mean
+     * "what the last hit left" and not "whatever the refresh reset it to".
+     */
+    s8   last_attacker;
     s32  knockback[3];      /* entity+0x2F8..0x2FC                           */
     bool knocked;           /* entity+0x10C bit 0x4000                       */
     s16  last_mod;          /* entity+0xDF                                   */
-    u8   effect[6];         /* entity+0x2F0..0x2F4                           */
+    /*
+     * Six damage-effect timer bytes, entity+0x2F0..0x2F5. The last slot is
+     * real: the ticker 0x8005B830 reads +0x2F5 at 0x8005B844 and decrements it
+     * at 0x8005B868, so the range ends at 0x2F5, not 0x2F4 as this line used to
+     * say. effect[3] (+0x2F3): `q2psx-inspect access 0x2F3` finds no load or
+     * store whose immediate offset is 0x2F3 in SLES_015.34, so nothing in the
+     * main executable arms, reads or ticks it that way. That is all it
+     * measures: the tool does not scan the relocated modules, skips $gp and
+     * $sp bases, and cannot see an address formed by arithmetic. Which ticker
+     * owns which slot is in effect.h, at q2_fx_actor_present (0x8005B880).
+     *
+     * Armed on the hit and run down on LATER ticks, so both refreshes below
+     * carry them: neither q2_monster nor q2_inventory has a copy.
+     */
+    u8   effect[6];         /* entity+0x2F0..0x2F5                           */
 } q2_actor;
 
 /* True while an actor's energy-bolt effect is at full strength (effect[1] >= 3),
@@ -341,7 +507,16 @@ extern q2_combat_scan_stats q2_combat_scan;
 
 void q2_actor_init(q2_actor *a);
 
-/* Move state between the port's existing structures and an actor. */
+/*
+ * Move state between the port's existing structures and an actor.
+ *
+ * The two `from` refreshes rebuild the actor from its source every time they
+ * run, EXCEPT for the entity state the source has no copy of, which they
+ * carry: `effect[]` and `last_attacker` from both, plus `owner`, `env_next`
+ * and `last_mod` from a player. A caller that means a NEW body — a respawn,
+ * which 0x8003DDF8 builds from a freshly cleared entity — calls
+ * `q2_actor_init` first.
+ */
 void q2_actor_from_monster(q2_actor *a, const q2_monster *m);
 void q2_actor_to_monster(const q2_actor *a, q2_monster *m);
 void q2_actor_from_player(q2_actor *a, const q2_inventory *inv,
@@ -359,6 +534,14 @@ typedef struct q2_damage_result {
     bool killed;            /* health crossed zero on this hit                */
     bool gibbed;            /* and went below gib_health                      */
     bool surprised;         /* the ×2 bonus applied — 0x800628F8              */
+
+    /*
+     * The per-mod hit sound, 0x800584D4..0x800585A0. These are the emitter's
+     * own operands rather than a name invented for them, following the
+     * precedent mover.h:236-244 set for the other 0x80040800 ids.
+     */
+    u8   hit_sound_id;      /* 0x800ACE5C's entry; 0 when the mod is silent   */
+    s16  hit_sound_vol;     /* 4096 or 2048                                   */
 } q2_damage_result;
 
 /*
@@ -382,12 +565,56 @@ s16 q2_combat_armour_absorb(q2_actor *a, s16 damage, bool energy,
  * Radius damage, 0x80050810.
  *
  * Applies to every actor in `targets` except `ignore`. Returns how many were
- * hurt. `attacker` is credited with the damage.
+ * handed to the damage function. (Retail returns a FLAG: 0x80050A60 `addiu s3,
+ * zero, 1` in the delay slot of the damage call, returned by 0x80050A78 — the
+ * same answer for none or one, and "at least one" beyond that.) `attacker` is
+ * credited with the damage — and, when it is itself in the list, takes HALF:
+ * 0x80050A0C `sra s0, s0, 1` on the owner arm, before the `blez` reject at
+ * 0x80050A10 rather than after it.
+ *
+ * `ignore` is the caller's own exclusion and is NOT the engine's owner skip:
+ * 0x800508BC/0x800508C4 only skip the owner when the caller's tenth argument is
+ * set, and all six projectile call sites store zero there (0x8004A048,
+ * 0x8004A944, 0x8004A9DC, 0x8004AE48, 0x8004BBCC, 0x8004BC84). Only the generic
+ * helper at 0x80050CC4 passes a non-zero flag.
+ *
+ * This entry point sweeps distance only, which is what it always did — retail
+ * also occludes. Callers that have a world should use the traced form below.
  */
 u32 q2_combat_radius_damage(q2_actor *attacker, q2_actor *ignore,
                             const s32 point[3], s16 damage, s16 radius,
                             s16 mod, q2_actor **targets, u32 count,
                             const q2_combat_rules *rules);
+
+/*
+ * "Can the blast see this candidate?", asked once per surviving candidate.
+ * `from` is the blast point and `to` the candidate's origin, matching
+ * 0x80050A1C/0x80050A20's arguments.
+ */
+typedef bool (*q2_combat_clear_fn)(void *ctx, const s32 from[3],
+                                   const s32 to[3]);
+
+/*
+ * The same sweep with the two line-of-sight gates injected.
+ *
+ * `clear` runs between the falloff and the damage call, exactly where
+ * 0x80050A24 and 0x80050A3C run, and a false result skips the candidate
+ * without counting it. A NULL `clear` means "everything is visible", which is
+ * what `q2_combat_radius_damage` passes.
+ *
+ * ONE CALLBACK ANSWERS FOR BOTH GATES, in their order: 0x80050A24's
+ * 0x80044C44 is the swept move through the hull (q2_coll_move), and
+ * 0x80050A3C's 0x80053974 is the clip against the entity boxes at 0x800CAE10.
+ * simcombat.c's `splash_clear` supplies exactly that pair through
+ * q2_sim_trace. The one input it does not pass is 0x80050A24's a3, the
+ * caller's cell: q2_sim_trace starts from -1 and finds the first cell by brute
+ * force (0x80044C74).
+ */
+u32 q2_combat_radius_damage_traced(q2_actor *attacker, q2_actor *ignore,
+                                   const s32 point[3], s16 damage, s16 radius,
+                                   s16 mod, q2_actor **targets, u32 count,
+                                   const q2_combat_rules *rules,
+                                   q2_combat_clear_fn clear, void *ctx);
 
 /* The falloff on its own: what `damage` becomes at `dist` world units. */
 s16 q2_combat_splash_at(s16 damage, s32 dist);

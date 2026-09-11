@@ -4230,7 +4230,7 @@ rows**:
 | main | health digits, icon | −71, −47, −23, icon +0 | +1, +0 |
 | main | ammo digits, icon | +64, +88, +112, icon +135 | +1, +0 |
 | main | armour digits, icon | +179, +203, +227, icon +250 | +1, +0 |
-| main | auxiliary icon filled by `0x80037CAC` | +330 | +0 |
+| main | the selected weapon's icon (client+102, rect index = id), filled by `0x80037CAC` | +330 | +0 |
 | upper | an icon | −71 | −25 |
 | upper | two digits, icon | +256, +280, icon +330 | −24, −25 |
 
@@ -4257,10 +4257,13 @@ not rectangles. Its geometry is a 32 x 24 grid, eight per row, seven rows — **
 row is 31 wide, not 32**, because `u` is 224 there and 224 + 32 wraps to zero in the u8 a primitive carries.
 Six records look like errors and are the opposite.
 
-**Split screen is a clamp, not a scale.** `0x800353B0` forces 24 x 18 for two players and 16 x 12 for three
-or more *regardless of the source rect*, so a 24-wide numeral and a 32-wide icon come out the same size;
-single player passes the record's own size through, which is what keeps numerals unstretched. A weapon id of
-0 collapses to the 1 x 1 blank.
+**Split screen is two clamps, not a scale, and they are not the same clamp.** Icons go through `0x800353B0`,
+which forces 24 x 18 for two players and 16 x 12 for three or four *regardless of the source rect*; inside it a
+weapon id of 0 collapses to the 1 x 1 blank (`0x800353E8`). Numerals go through their own clamp at
+`0x80035054`: 18 x 20 for two players and 13 x 12 for three or four. Single player skips both and passes the
+record's own size through — 24 x 24 for a numeral. And the field emitter **crops rather than scales**: it takes
+the UV span from the drawn size (`0x80035FD8`), so a clamped sprite shows the top-left of its cell, not a
+shrunken copy of the whole of it.
 
 Implemented in `src/game/statusbar.[ch]` and `src/build/icontable.[ch]`; `q2psx-inspect hud` checks the
 tables against the disc.
@@ -5292,10 +5295,11 @@ Three six-byte records, immediately after the ammo-capacity tiers: `{u8 base, u8
 | body | 100 | 200 | 3277/4096 = 0.800 | 2458/4096 = 0.600 |
 
 All six protection values and all six counts are PC Quake II's exactly. Absorption is
-`(bias + protection * damage) >> 12`, capped at what is held, where the bias is **4095 outside deathmatch and
-2048 inside it** (`0x80057C0C`) — 4095 rounds every non-zero fraction up, so single-point hits are still
-absorbed, while 2048 rounds to nearest. Deathmatch armour is very slightly weaker against small hits, which
-is not the sort of thing that would ever be guessed.
+`(bias + protection * damage) >> 12`, capped at what is held, where the bias is **4095 at skill 0 and 2048
+above it** — `0x80057C10` loads the skill halfword `0x800B334A`, the same one the skill-0 halving reads at
+`0x800582D0`, and not the deathmatch word `0x800AEBCC` this line once named. 4095 rounds every non-zero
+fraction up, so single-point hits are still absorbed, while 2048 rounds to nearest. Armour on Easy is very
+slightly stronger against small hits, which is not the sort of thing that would ever be guessed.
 
 **Power armour** (`0x80057A9C`) runs first when the powerup word has bits `0x18000` and cells remain: it
 absorbs `damage*2/3`, capped at twice the cells, and spends one cell per two points absorbed.
@@ -5305,7 +5309,10 @@ absorbs `damage*2/3`, capped at twice the cells, and spends one cell per two poi
 ### 13.5 Means of death — 1…21
 
 Read from the `a3` immediate at each call site, and from the two tables they index: a 16-entry
-armour-column selector at `0x800ACE1C` (mod−1) and a 21-entry pad-rumble table at `0x800ACE5C`.
+armour-column selector at `0x800ACE1C` (mod−1) and a 21-entry **hit-sound** jump table at `0x800ACE5C` (mod−1,
+`0x80058504`). It is not pad rumble: its arms load a sound id and a volume for `0x80040800`, the SPU voice
+emitter — id 13 at 4096 for mod 1; 15 at 4096 for 3, 7, 19, 20 and 21; 16 at 2048 for 5, 6 and 18; the rest
+silent — and the call is reached only for a client target still alive after the health store (`0x800584FC`).
 
 | mod | what | evidence |
 |---|---|---|
@@ -5352,6 +5359,20 @@ Radius damage is `0x80050810`: sweep a box of the blast radius, reject anything 
 PC Quake II loses half a point per unit, which at this scale would be 0.05 against the console's 0.0415.
 Radii read from the seven call sites: **grenade 1000 with mod 13, rocket 1300 with mod 15, BFG 1300 with
 mod 1**. A rocket's direct hit is applied first at full damage, so a direct hit is damage *plus* splash.
+
+**Radius damage is not distance-only.** Three steps sit between the falloff and the damage call. The blast's
+**owner takes half**: `0x80050A04 bne a2, s4` skips `0x80050A0C sra s0, s0, 1` for everyone else, and the
+halving comes before the `blez` reject at `0x80050A10` (the owner is skipped outright only when the caller's
+last argument says so, `0x800508C4`, and only the call at `0x80050CC4` does). Then two line-of-sight gates,
+either of which skips the candidate, so a blast does not go through a wall. `0x80050A24` runs the swept move
+`0x80044C44` from the blast to the candidate's origin through the collision context at `0x800C8E90`, seeded
+with the caller's cell for the blast point (entity+0xA0 at the grenade and rocket sites); `0x80050A3C` then
+clips the same segment against the 48-slot entity-box table at `0x800CAE10` with `0x80053974`. The first gate
+is not a separate zone or node query: it is a trace through the hull, and the second a clip against the boxes.
+The port has the halving, and takes both gates as one injected callback (`q2_combat_radius_damage_traced`). The
+swept move is `q2_coll_move`, and `q2_sim_trace` runs it and then clips against the entity boxes the sim has
+registered, so a callback built on it makes the same two passes in the same order. What it does not pass is the
+caller's cell: its swept move starts from `-1` and finds the first cell by brute force (`0x80044C74`).
 
 ### 13.7 Projectiles
 
@@ -6212,10 +6233,15 @@ if ((unsigned)mode < 2) {               /* only DM and TEAM DM have a frag limit
 ```
 
 **Who the killer is.** The engine carries it on the entity: the signed byte at `+222` is the killer's id and
-`+223` the means of death, both written by the damage function at `0x80057D54` — derived from the attacker's
-entity index when there is an attacking entity, and copied through from the attacker's own `+222` when there
-is not, which is how a rocket's owner survives the rocket. 4 is its "not a player" sentinel, and reaching the
-hook with it is what prints *"Multiplayer, can't determine which player hit other player"*.
+`+223` the means of death, both written by the damage function at `0x80057D54`. In a match (`0x800AEBCC`,
+read at `0x80057DA8`) an attacker with a CLIENT is credited by its client index (`0x80057E04..0x80057E48`);
+one without a client has its own `+222` copied through (`0x80057E68`), which is how a rocket's owner survives
+the rocket. 4 is the "not a player" sentinel — the placement routine stores it on every player entity
+(`0x8003DE34`), and the projectile spawners on a projectile with no client owner — and an attacker whose own
+byte is 4 is what prints *"Multiplayer, can't determine which player hit other player"*: the damage function
+tests it at `0x80057E5C`, prints, and writes only `+223`, leaving `+222` as it was. With no attacker at all
+(`0x80057DB8`), a client target is credited with its OWN index (`0x80057DC8`), so a crusher or a scripted
+hazard that kills in a match is a suicide, and a client-less target is left unwritten (`0x80057DC0`).
 
 The death handler applies one correction before it calls the hook, and it is the only place a means of death
 changes the scoring: `if ((unsigned)(mod - 9) < 2) killer = -1`. Means 9 and 10 are `Q2_MOD_ACID` and
@@ -6705,7 +6731,7 @@ scripted effect's colour by one.
 | explosion | `0x800486EC` | 15 | 15 | 8192 | 9 | 9, 9 (orange) |
 | blood | `0x80048C08` | 15 | 15 | 6144 | 10 | 2, 3 (dark red + subtractive cyan) |
 | BFG burst | `0x8004BDC4` | 15 | 15 | 20000 | 9 | 11, 11 (green) |
-| gib | `0x800596B0` | 15 | 10 | 10000 | 9 | by blood colour, see below |
+| item materialise | `0x800596B0` | 15 | 10 | 10000 | 9 | 1, 11 or 0 by the item's glow bit, see below |
 | scripted | `0x80028DC8` | 15 | `(rand()+24)&15` | `(rand()&0x2047)+12000` | 9 | 1, 0 |
 | spark | `0x8003E0C0` | 15 | 25 | 3072 | 9 | 0, 0 (blue) |
 | laser end | `0x80049074` | 15 | 15 | 6144 | 10 | the kind's |
@@ -6713,11 +6739,18 @@ scripted effect's colour by one.
 `shift` is applied to `rand() - 16384` per component, so a *smaller* shift is a wider burst: 9 gives
 components in -32..31 and 10 gives -16..15.
 
-**Blood has three colours and it is a property of the creature.** `0x80059648` tests three bits of the
-creature's flag word in order — `0x10` red, `0x20` green, `0x40` blue — and takes the first that is set. The
-chain has **no final else**: a creature with none of the three reaches the spawn with the ramp register still
-holding whatever it last held. That is the same class of defect as the uninitialised fifth argument to
-`T_Damage` (§ UserFuncs), and the port handles it the same way — it picks a defined value and says so.
+**The `0x800596B0` row is an item materialising, and its colour is the item's glow, not a creature's
+blood.** This row used to be called "gib", with a blood-colour rule. It sits inside the item think `0x80059330`,
+which grows entity+0xFC toward the full 4096 scale at `0x800595AC`..`0x800595C8` and fills the fifteen velocity
+triples at `0x80059608` before the spawn. `0x80059648` tests three bits of `s3` in order — `0x10` ramp 1,
+`0x20` ramp 11, `0x40` ramp 0 — and takes the first that is set. `s3` is `lw 68(s2)` at `0x800593E4`, the
+ITEM's own flag word at entity+0x44, and the three bits are the item glow bits (`Q2_ITEM_GLOW_R/G/B` in
+`src/build/itemtable.h`); `0x800596B8`, straight after the spawn, tests the same three for the glow light.
+There is no creature blood colour on the disc: a gib's blood is the mesh spray `0x8005B320` on ramps 2 and 3,
+called from the gib thrower at `0x8005A440`. The chain has **no final else**: an item with none of the three
+bits reaches the spawn with the ramp register still holding whatever it last held. That is the same class of
+defect as the uninitialised fifth argument to `T_Damage` (§ UserFuncs), and the port handles it the same way
+— it picks a defined value (ramp 1) and says so.
 
 ### 18.5 A beam is a chain of 640-unit segments — `0x80063650`
 

@@ -148,13 +148,13 @@
  *   * Nothing calls `dodge`. Slot 5 is installed — `crebind.c` wires it — and
  *     the executable has no reader for entity+0xF4 at all, which crebind.c
  *     records at length. The handler is here because the module writes it.
- *   * `q2_cre_fire_shot` declines a shot with no enemy or a dead one. That
- *     matches `GunnerFire`, which reads `enemy->origin` and would fault
- *     without one, and it is a GUARD THE GRENADE DOES NOT HAVE: the module's
- *     `GunnerGrenade` aims down `self->angles` and never looks at the enemy,
- *     so a Gunner that would have lobbed one at nothing now holds its fire.
- *     The one path that can reach it enemyless is `gunner_duck_down`, which
- *     nothing calls either.
+ *   * (No longer owed.) `q2_cre_fire_shot` used to refuse a shot with no
+ *     enemy or a dead one; it only counts them now, so every grenade frame
+ *     reaches the hook. That is the module's shape: `GunnerGrenade` never
+ *     loads the enemy, `GunnerFire` reads its origin with no null test
+ *     (module+0xA8C..+0xA94), and neither loads its health. The health test is
+ *     the refire's, module+0x11E8 (`lh v0, 264(v0)` at +0x120C, `blez` at
+ *     +0x1214): whether the chain fires again, not whether this round leaves.
  */
 #include <stdlib.h>
 
@@ -319,8 +319,8 @@ static const q2_cre_shot gun_shot_bullet = {
  *
  * The damage and the speed reach the host now, in `gun_shot_grenade` above.
  * The muzzle arithmetic is still left to the host, for the same reason
- * `soldier_fire` leaves it, and `q2_cre_fire_shot`'s enemy guard is stricter
- * than this think — see the header.
+ * `soldier_fire` leaves it. `q2_cre_fire_shot` no longer refuses a shot on
+ * the enemy's account, so all four frames reach the hook — see the header.
  */
 static void gunner_grenade(q2_monster *self)
 {

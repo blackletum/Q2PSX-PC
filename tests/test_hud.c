@@ -16,6 +16,9 @@
 #include <string.h>
 
 #include "hud.h"
+#include "statusbar.h"      /* the bar's two readers of the weapon tables */
+#include "weapon.h"         /* Q2_WID_BLASTER                              */
+#include "weapontables.h"   /* the disc ammo-type / owned-bit columns     */
 
 static int g_failures;
 static int g_checks;
@@ -361,6 +364,71 @@ static void test_weapon_glyphs(void)
                "a non-weapon model maps to the blank slot");
 }
 
+/* ------------------------------------------------------------------------- */
+/* The bar reads the DISC's weapon tables, 1-based                            */
+/* ------------------------------------------------------------------------- */
+/*
+ * The status bar's ammo counter indexes a twelve-BYTE table at 0x800ABEA8,
+ * copied to the stack with lwl/lwr at 0x8003532C and read at 0x80035428. The
+ * weapon cycler's ammo gate indexes a twelve-WORD table at 0x8009DC5C
+ * (0x800507C0). They hold the same twelve values, so the port reads only the
+ * second — q2_weapon_tables_builtin()->ammo_type — and q2_sbar_ammo_for_weapon
+ * uses it for both jobs.
+ *
+ * The bytes below are the disc's, transcribed so the check runs without a
+ * disc. It is asserted THROUGH the bar's two readers rather than on the table:
+ * the table was right all along, and what was wrong was the client indexing
+ * the port's 0-based q2_weapon_ammo[] with a 1-based id and testing ownership
+ * with `1u << id`. Checking the table alone would pass either way.
+ */
+static void test_bar_reads_disc_tables(void)
+{
+    /* 0x800ABEA8: 00 00 00 00 01 01 02 02 03 04 05 04 */
+    static const u8 disc_800ABEA8[12] = { 0,0,0,0,1,1,2,2,3,4,5,4 };
+    /* 0x8009DB4C: shots' worth per id, 0x7FFF for the unused id 0. */
+    static const s16 disc_8009DB4C[12] = { 0x7FFF,0,1,2,1,1,1,1,1,1,1,50 };
+    const q2_weapon_tables *t = q2_weapon_tables_builtin();
+    q2_inventory inv;
+    int i;
+
+    printf("the bar's weapon tables\n");
+
+    check(t != NULL, "the built-in weapon tables are present");
+    if (!t)
+        return;
+
+    /*
+     * The counter. Six pools, six distinct values, so reading the wrong pool
+     * cannot land on the right number by accident. Id 11 is the one the old
+     * lookup could not reach at all (11 < Q2_WEAPON_COUNT is false).
+     */
+    memset(&inv, 0, sizeof(inv));
+    for (i = 0; i < Q2_AMMO_COUNT; i++)
+        inv.ammo[i] = (s16)(11 * (i + 1));
+    for (i = 1; i <= 11; i++)
+        check_eq_i(q2_sbar_ammo_for_weapon(&inv, i),
+                   inv.ammo[disc_800ABEA8[i]],
+                   "the counter shows ammo[0x800ABEA8[id]] for the 1-based id");
+
+    /*
+     * The carousel. Own the blaster and exactly one other gun, with one
+     * shot's worth for it: whichever way the walk goes it must find THAT gun,
+     * named by the owned bit 1 << (id-1) from 0x8009DC2C. The old loop tested
+     * `1u << id` and so found each gun's neighbour instead.
+     */
+    for (i = 2; i <= 11; i++) {
+        q2_statusbar b;
+
+        memset(&inv, 0, sizeof(inv));
+        memset(&b, 0, sizeof(b));
+        inv.weapons = (u16)(t->owned_bit[Q2_WID_BLASTER] | t->owned_bit[i]);
+        inv.ammo[disc_800ABEA8[i]] = disc_8009DB4C[i];
+        q2_statusbar_weapon_slots(&b, &inv, Q2_WID_BLASTER);
+        check_eq_i(b.strip[1], i, "next from the blaster is the one other gun");
+        check_eq_i(b.strip[0], i, "and so is previous");
+    }
+}
+
 static void test_measure_and_flash(void)
 {
     q2_hud hud;
@@ -471,6 +539,7 @@ int main(void)
     test_backdrop();
     test_messages();
     test_weapon_glyphs();
+    test_bar_reads_disc_tables();
     test_measure_and_flash();
     test_layout();
 

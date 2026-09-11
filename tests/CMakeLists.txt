@@ -322,3 +322,12 @@ target_link_libraries(test_modelent PRIVATE
 )
 
 add_test(NAME modelent COMMAND test_modelent)
+
+add_executable(test_events test_events.c)
+
+target_link_libraries(test_events PRIVATE
+    q2psx_common
+    q2psx_game
+)
+
+add_test(NAME event_runtime COMMAND test_events)

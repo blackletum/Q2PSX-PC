@@ -6,11 +6,13 @@
  * fact that everything stays integer.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "aiworld.h"
 #include "crebind.h"   /* q2_cre_set_skill — the global sync_rules reads */
 #include "levelbin.h"
+#include "playerdeath.h"   /* q2_player_die — where the killer byte is read */
 #include "sim.h"
 #include "trig.h"
 
@@ -240,7 +242,7 @@ static void test_script_fx_damage(void)
           "a retail-form FX item reaches the player damage path");
     check_eq_i(sim.combat.inv.health, health - 65,
                "WASTE3's FX takes its complete 65 health points");
-    check_eq_i(sim.combat.self.last_attacker, -1,
+    check_eq_i(sim.combat.self.last_attacker, Q2_MP_NOT_A_PLAYER,
                "script FX is a world hit, never credited to a player");
 
     item.len = 4;
@@ -250,34 +252,107 @@ static void test_script_fx_damage(void)
                "the rejected FX leaves health unchanged");
 }
 
+/*
+ * THE DEATH VOICE, END TO END. 0x80039728 `bne s1, -1` cries only for a raw -1
+ * on entity+222, and the one instruction that ever stores -1 there is
+ * 0x800396DC, for mods 9 and 10.
+ *
+ * update_pain raises Q2_SND_DEATH off `q2_player_death_cries_out`, which used
+ * to fold the byte through the frag table's [0, 4) bound first — so the "not a
+ * player" 4 the damage function records for a crusher folded to -1 and the
+ * player cried out, where the console is silent. This drives the sim's own
+ * damage path rather than the predicate, so a regression anywhere between
+ * combat.c and update_pain shows here.
+ */
+static void test_death_voice(void)
+{
+    q2_sim   sim;
+    q2_input in;
+    s32      spawn[3] = { 0, 0, 0 };
+    bool     crush_cry, lava_cry;
+    s16      crush_health;
+
+    printf("death voice\n");
+    memset(&in, 0, sizeof(in));
+
+    /* A crusher, 0x80051E74, which passes no attacker. */
+    q2_sim_init(&sim, NULL, 50);
+    q2_sim_spawn(&sim, spawn, 0);
+    q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
+    sim.combat.inv.armour = 0;
+    q2_sim_hurt_player(&sim, NULL, 200, Q2_MOD_CRUSH, NULL);
+    q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
+    crush_health = sim.combat.inv.health;
+    crush_cry    = sound_raised(&sim, Q2_SND_DEATH);
+
+    /* Lava, 0x8002E524, which passes no attacker either. The tick first puts
+     * the level clock past the throttle's zero deadline (0x800582A4 is a
+     * strict `sltu`). */
+    q2_sim_init(&sim, NULL, 50);
+    q2_sim_spawn(&sim, spawn, 0);
+    q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
+    sim.combat.inv.armour = 0;
+    q2_sim_hurt_player(&sim, NULL, 200, Q2_MOD_LAVA, NULL);
+    q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
+    lava_cry = sound_raised(&sim, Q2_SND_DEATH);
+
+    printf("  crusher: health %d, cried %d; lava: health %d, cried %d\n",
+           (int)crush_health, (int)crush_cry, (int)sim.combat.inv.health,
+           (int)lava_cry);
+    check(crush_health <= 0 && sim.combat.inv.health <= 0 &&
+          lava_cry && !crush_cry,
+          "both kill, and only the lava death cries out");
+}
+
 /* ------------------------------------------------------------------------- */
-/* 0x80027E64: record categories are enter/stay/leave, not three unknown bits
- * flattened into one edge-triggered volume rule. */
+/*
+ * 0x80027E64: record categories are enter/stay/leave, not three unknown bits
+ * flattened into one edge-triggered volume rule.
+ *
+ * THE CHUNK IS THE DISC'S SHAPE, and that is what makes the leave frame mean
+ * anything. An Events chunk opens with its u32 record count at offset 0, then
+ * the directory and the u32 zero that ends it, and only then the records — so
+ * chunk offset 0 is never a record. The CAT_C leave edge queues the TrigBounds
+ * sentinel's event_offset (0x8002808C reads it through the enter loop's spent
+ * cursor), which is 0 on every map, and so on the console it runs NOTHING.
+ *
+ * This fixture used to put its CAT_A record at chunk offset 0. The leave
+ * frame's queued 0 then landed on that record and ran it, so "the leave
+ * category ran" passed by coincidence, counting the wrong record. Parsed
+ * through the real chunk reader now, with the records from offset 8.
+ */
 static void test_event_contact_categories(void)
 {
     static const u8 raw[] = {
-        4, 0, 0, Q2_EVREC_CAT_A,
-        4, 0, 0, Q2_EVREC_CAT_B,
-        4, 0, 0, Q2_EVREC_CAT_C
+        3, 0, 0, 0,                  /* u32 record count                     */
+        0, 0, 0, 0,                  /* the directory's terminating zero      */
+        4, 0, 0, Q2_EVREC_CAT_A,     /* @ 8  enter                            */
+        4, 0, 0, Q2_EVREC_CAT_B,     /* @ 12 stay                             */
+        4, 0, 0, Q2_EVREC_CAT_C      /* @ 16 leave                            */
     };
+    dat_chunk chunk;
+    q2_common_file common;
     q2_events events;
     q2_event_rt rt;
 
     printf("event contact categories\n");
 
-    memset(&events, 0, sizeof(events));
-    events.data         = raw;
-    events.size         = sizeof(raw);
-    events.record_count = 3;
-    events.first_record = 0;
+    memset(&chunk, 0, sizeof(chunk));
+    chunk.data = raw;
+    chunk.size = sizeof(raw);
+    memset(&common, 0, sizeof(common));
+    common.chunk[Q2_COMMON_EVENTS] = &chunk;
 
+    check(q2_events_parse_common(&events, &common) == Q2_OK &&
+          events.record_count == 3 && events.first_record == 8,
+          "the disc-shaped chunk parses with its records from offset 8");
     check(q2_event_rt_init(&rt, &events) == Q2_OK,
           "three category records start a runtime");
 
     q2_event_rt_contacts_begin(&rt);
-    check(q2_event_rt_contact(&rt, 0), "enter record accepts contact");
-    check(q2_event_rt_contact(&rt, 4), "stay record accepts contact");
-    check(q2_event_rt_contact(&rt, 8), "leave record accepts contact");
+    check(q2_event_rt_contact(&rt, 8),  "enter record accepts contact");
+    check(q2_event_rt_contact(&rt, 12), "stay record accepts contact");
+    check(q2_event_rt_contact(&rt, 16), "leave record accepts contact");
     q2_event_rt_contacts_end(&rt);
     q2_event_rt_update(&rt);
     check_eq_i(rt.ran_count, 2,
@@ -285,10 +360,10 @@ static void test_event_contact_categories(void)
 
     q2_event_rt_contacts_begin(&rt);
     /* Two volumes may name one record; it still runs only once this tick. */
-    q2_event_rt_contact(&rt, 0);
-    q2_event_rt_contact(&rt, 4);
-    q2_event_rt_contact(&rt, 4);
     q2_event_rt_contact(&rt, 8);
+    q2_event_rt_contact(&rt, 12);
+    q2_event_rt_contact(&rt, 12);
+    q2_event_rt_contact(&rt, 16);
     q2_event_rt_contacts_end(&rt);
     q2_event_rt_update(&rt);
     check_eq_i(rt.ran_count, 3,
@@ -297,14 +372,16 @@ static void test_event_contact_categories(void)
     q2_event_rt_contacts_begin(&rt);
     q2_event_rt_contacts_end(&rt);
     q2_event_rt_update(&rt);
-    check_eq_i(rt.ran_count, 4,
-               "first outside frame runs the leave category");
+    check_eq_i(rt.catc_leave_edges, 1,
+               "first outside frame detects the CAT_C leave edge");
+    check_eq_i(rt.ran_count, 3,
+               "and the offset it queues, chunk offset 0, starts no record");
 
     q2_event_rt_contacts_begin(&rt);
     q2_event_rt_contacts_end(&rt);
     q2_event_rt_update(&rt);
-    check_eq_i(rt.ran_count, 4,
-               "remaining outside does not repeat leave");
+    check(rt.ran_count == 3 && rt.catc_leave_edges == 1,
+          "remaining outside neither repeats the edge nor runs anything");
 
     q2_event_rt_free(&rt);
 }
@@ -1969,7 +2046,8 @@ static void test_session_reaches_the_shot(void)
     check_eq_i(r.shot[0].damage, 6, "the comparison is strict, as 0x8004C1FC is");
 
     /* Deathmatch, which nothing ever told the sim about: the railgun's second
-     * immediate at 0x8004D5D8 and the armour bias both hang off it. */
+     * immediate at 0x8004D5D8 hangs off it. The armour bias does not:
+     * 0x80057C10 reads the skill halfword, which reaches the rules below. */
     q2_sim_init(&sim, NULL, 30);
     q2_sim_spawn(&sim, spawn, 0);
     q2_sim_give_weapon(&sim, Q2_WID_RAILGUN);
@@ -2494,12 +2572,1218 @@ static void test_glass_solidity_lifetime(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * ONE SHOT KILL REACHES THE DAMAGE FUNCTION. 0x80058398 reads the GAME
+ * VARIABLES halfword at 0x800B29EC straight out of its global; the port's copy
+ * of that global is `sim->cheats`, and the rules the damage function is handed
+ * must carry it. With armour off, a 30-point bullet leaves health at -30
+ * rather than 70 (0x800583E0 stores the negated amount).
+ */
+static void test_one_shot_kill(void)
+{
+    q2_sim sim;
+    s32 spawn[3] = { 0, 0, 0 };
+    s16 plain, cheat;
+
+    printf("one shot kill\n");
+
+    q2_sim_init(&sim, NULL, 50);
+    q2_sim_spawn(&sim, spawn, 0);
+    sim.combat.inv.armour = 0;
+    sim.combat.inv.health = 100;
+    q2_sim_hurt_player(&sim, NULL, 30, Q2_MOD_BULLET, NULL);
+    plain = sim.combat.inv.health;
+    q2_sim_free(&sim);
+
+    q2_sim_init(&sim, NULL, 50);
+    q2_sim_spawn(&sim, spawn, 0);
+    sim.combat.inv.armour = 0;
+    sim.combat.inv.health = 100;
+    sim.cheats = Q2_CHEAT_ONE_SHOT_KILL;
+    q2_sim_hurt_player(&sim, NULL, 30, Q2_MOD_BULLET, NULL);
+    cheat = sim.combat.inv.health;
+    q2_sim_free(&sim);
+
+    printf("  30-point bullet: plain %d, one shot kill %d\n",
+           (int)plain, (int)cheat);
+    check_eq_i(plain, 70, "without the cheat a 30-point bullet leaves 70");
+    check_eq_i(cheat, -30,
+               "sim->cheats reaches 0x80058398: the same bullet leaves -30");
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * TWO ROOMS AND A WALL. Two open boxes side by side along X with NO portal
+ * between them, so everything from x = ROOM_A_X1 to ROOM_B_X0 is solid. Each
+ * cell carries its own byte +32, which is the area the trigger dispatcher's id
+ * gate compares against (the player's link 0x80054DD4 stores it at +0x9E).
+ * The boxes bound the ORIGIN, exactly as open_box_hull's does.
+ */
+#define ROOM_A_X0    0
+#define ROOM_A_X1 1000
+#define ROOM_B_X0 1200
+#define ROOM_B_X1 2200
+#define ROOM_SY    600
+#define ROOM_SZ   1000
+
+static u8 g_rooms[4 + 3 * Q2_COLL_NODE_SIZE + 12 * Q2_COLL_PLANE_SIZE];
+
+static bool two_room_hull(q2_collision *out, u8 area_a, u8 area_b)
+{
+    /* Outward normals, -X +X -Y +Y -Z +Z, as open_box_hull. */
+    static const s16 n[6][3] = {
+        {-4096, 0, 0}, {4096, 0, 0},
+        {0, -4096, 0}, {0, 4096, 0},
+        {0, 0, -4096}, {0, 0, 4096}
+    };
+    const s32 x0[2]  = { ROOM_A_X0, ROOM_B_X0 };
+    const s32 x1[2]  = { ROOM_A_X1, ROOM_B_X1 };
+    const u8  area[2] = { area_a, area_b };
+    u8 *nodes, *planes;
+    dat_chunk chunk;
+    q2_zone_file zf;
+    int r, i, k;
+
+    memset(g_rooms, 0, sizeof(g_rooms));
+    hwr16(g_rooms + 0, 2);      /* two nodes          */
+    hwr16(g_rooms + 2, 12);     /* six planes apiece  */
+
+    nodes  = g_rooms + 4;
+    planes = nodes + 3 * Q2_COLL_NODE_SIZE;
+
+    for (r = 0; r < 2; r++) {
+        u8 *nd = nodes + r * Q2_COLL_NODE_SIZE;
+        s32 ext[3];
+
+        ext[0] = x1[r] - x0[r];
+        ext[1] = ROOM_SY;
+        ext[2] = ROOM_SZ;
+
+        hwr32(nd + 0,  (u32)x0[r]); hwr32(nd + 4,  0); hwr32(nd + 8,  0);
+        hwr32(nd + 12, (u32)x1[r]); hwr32(nd + 16, ROOM_SY);
+        hwr32(nd + 20, ROOM_SZ);
+        hwr16(nd + 24, (u32)(6 * r));   /* first plane                       */
+        hwr16(nd + 26, 0);              /* no links: the wall has no portal  */
+        nd[32] = area[r];               /* the contents id — the area        */
+
+        /* Plane points are relative to the node's own bbox_min, so the far
+         * faces sit at the room's extent whichever room it is. */
+        for (i = 0; i < 6; i++) {
+            u8 *pl = planes + (size_t)(6 * r + i) * Q2_COLL_PLANE_SIZE;
+            s32 pt[3] = { 0, 0, 0 };
+
+            if (i == 1) pt[0] = ext[0];
+            if (i == 3) pt[1] = ext[1];
+            if (i == 5) pt[2] = ext[2];
+            for (k = 0; k < 3; k++)
+                hwr16(pl + k * 2, (u32)pt[k]);
+            for (k = 0; k < 3; k++)
+                hwr16(pl + 6 + k * 2, (u32)(u16)n[i][k]);
+        }
+    }
+
+    /* The sentinel closes both runs: 12 planes, no links. */
+    hwr16(nodes + 2 * Q2_COLL_NODE_SIZE + 24, 12);
+    hwr16(nodes + 2 * Q2_COLL_NODE_SIZE + 26, 0);
+
+    memset(&chunk, 0, sizeof(chunk));
+    chunk.data = g_rooms;
+    chunk.size = (u32)sizeof(g_rooms);
+
+    memset(&zf, 0, sizeof(zf));
+    zf.chunk[Q2_ZONE_SECONDARY_COL] = &chunk;
+
+    return q2_collision_parse(out, &zf, Q2_COLL_SECONDARY) == Q2_OK;
+}
+
+/* One grenade whose fuse has already run out at `at`, stepped once by the
+ * world's combat tick — the fuse arm that detonates through 0x80050810. */
+static void splash_once(q2_sim *sim, s32 owner, const s32 at[3],
+                        q2_actor **targets, u32 count)
+{
+    q2_projectile *p;
+
+    q2_projectiles_init(&sim->combat.projectiles);
+    p = &sim->combat.projectiles.p[0];
+    p->in_use        = true;
+    p->kind          = Q2_PROJ_GRENADE;
+    p->pos[0]        = at[0];
+    p->pos[1]        = at[1];
+    p->pos[2]        = at[2];
+    p->damage        = 120;
+    p->mod           = Q2_MOD_GRENADE;
+    p->splash_radius = Q2_SPLASH_RADIUS_GRENADE;
+    p->owner         = owner;
+    p->expires       = 1;
+    p->node          = Q2_PROJ_NODE_UNKNOWN;
+    sim->combat.projectiles.live = 1;
+
+    sim->level_time = 10;
+    q2_sim_set_world_targets(sim, targets, count);
+    q2_sim_combat_tick(sim);
+    q2_sim_set_world_targets(sim, NULL, 0);
+}
+
+static void splash_victim(q2_actor *a, s32 x)
+{
+    q2_actor_init(a);
+    a->origin[0]  = x;
+    a->origin[1]  = 300;
+    a->origin[2]  = 500;
+    a->health     = 100;
+    a->takedamage = Q2_DAMAGE_YES;
+}
+
+/*
+ * RADIUS DAMAGE IS OCCLUDED. 0x80050810 asks the world, per candidate that
+ * survived the falloff, whether the blast can see it — 0x80050A24 (the hull's
+ * swept move, 0x80044C44) and 0x80050A3C (the entity-box clip, 0x80053974) —
+ * and skips it on a zero. So a grenade that goes off on one side of a solid
+ * wall does not reach a creature 400 units away on the other, although it is
+ * well inside the 1000-unit radius; the same creature at the same distance in
+ * the same room is hurt; and without a hull the port has nothing to ask and
+ * falls back to distance, which is what it did everywhere before.
+ *
+ * And the OWNER, who is swept by the same function: a blast in the next room
+ * does not reach the player who threw it. The player's actor carries its feet,
+ * so the same-room case also proves the segment is aimed at the entity origin
+ * (candidate+0x54) — traced to the feet it would end on the floor face.
+ */
+static void test_splash_occlusion(void)
+{
+    q2_sim sim;
+    q2_actor victim;
+    q2_actor *list[1];
+    const s32 blast_a[3] = { 900, 300, 500 };   /* room A, by the wall */
+    const s32 blast_b[3] = { 1300, 300, 500 };  /* room B, by the wall */
+    const s32 blast_w[3] = { 1100, 300, 500 };  /* inside the wall     */
+    s32 feet[3];
+    s16 far_room, same_room, no_hull, in_wall, owner_same, owner_far;
+    u32 occluded, unplaced;
+
+    printf("radius damage occlusion\n");
+
+    q2_sim_init(&sim, NULL, 50);
+    check(two_room_hull(&sim.coll, 12, 34), "the two-room hull parses");
+    sim.coll_ready = true;
+    sim.combat.inv.armour = 0;
+    list[0] = &victim;
+
+    /* A creature in room B, 400 units through the wall from the blast. */
+    memset(&q2_sim_proj_scan, 0, sizeof(q2_sim_proj_scan));
+    splash_victim(&victim, 1300);
+    splash_once(&sim, -1, blast_a, list, 1);
+    far_room = victim.health;
+    occluded = q2_sim_proj_scan.splash_occluded;
+
+    /* The same distance, the same room. */
+    splash_victim(&victim, 500);
+    splash_once(&sim, -1, blast_a, list, 1);
+    same_room = victim.health;
+
+    /* No hull: nothing to ask. */
+    sim.coll_ready = false;
+    splash_victim(&victim, 1300);
+    splash_once(&sim, -1, blast_a, list, 1);
+    no_hull = victim.health;
+    sim.coll_ready = true;
+
+    /* A blast INSIDE the wall, which no cell holds — where the port puts a
+     * direct hit's blast when the step overshoots, and the console never
+     * does. It keeps the distance-only answer, and is counted. */
+    memset(&q2_sim_proj_scan, 0, sizeof(q2_sim_proj_scan));
+    splash_victim(&victim, 700);
+    splash_once(&sim, -1, blast_w, list, 1);
+    in_wall  = victim.health;
+    unplaced = q2_sim_proj_scan.splash_unplaced;
+
+    printf("  creature 400 units away: through the wall %d, same room %d, "
+           "no hull %d (occluded %u); blast inside the wall %d (unplaced %u)\n",
+           (int)far_room, (int)same_room, (int)no_hull, occluded,
+           (int)in_wall, unplaced);
+    check(far_room == 100 && occluded == 1,
+          "a blast behind a wall does not reach a creature inside its radius");
+    check(same_room < 100 && no_hull < 100 && in_wall < 100 && unplaced == 1,
+          "the same creature in the blast's room, with no hull, or near a "
+          "blast no cell holds, is hurt");
+
+    /* The thrower, standing in room A: feet one origin-height below the
+     * room's floor face, as the eroded movement hull puts them. */
+    feet[0] = 500;
+    feet[1] = q2_sim_feet_y(ROOM_SY);
+    feet[2] = 500;
+    sim.player[0].pos[0] = feet[0];
+    sim.player[0].pos[1] = feet[1];
+    sim.player[0].pos[2] = feet[2];
+
+    sim.combat.inv.health = 100;
+    splash_once(&sim, 0, blast_a, NULL, 0);
+    owner_same = sim.combat.inv.health;
+
+    sim.combat.inv.health = 100;
+    splash_once(&sim, 0, blast_b, NULL, 0);
+    owner_far = sim.combat.inv.health;
+
+    printf("  thrower: same-room blast leaves %d, next-room blast %d\n",
+           (int)owner_same, (int)owner_far);
+    check(owner_same < 100 && owner_far == 100,
+          "the thrower's own blast is occluded too, aimed at the origin");
+
+    q2_sim_free(&sim);
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * THE DISPATCHER'S GATES, END TO END. 0x80027E64 skips a volume unless
+ * `flags & 1` (0x80027ED8, the caller's a1 = 1) and, when its id's low byte is
+ * not 0xFF, unless that byte equals the player's area, entity+0x9E
+ * (0x80027EFC) — both before the point test. Five volumes over the two rooms,
+ * each naming its own CAT_B record:
+ *
+ *   vol 0  room A only   id 255    flags 1     an ordinary volume
+ *   vol 1  both rooms    id 12     flags 1     room A's area
+ *   vol 2  both rooms    id 34     flags 1     room B's area
+ *   vol 3  room A only   id 255    flags 4     bit 0 clear — WASTE3 47's shape
+ *   vol 4  both rooms    id 0x10C  flags 1     only the LOW byte is compared
+ *
+ * The sentinel's event_offset is set to vol 0's record, so the attach can be
+ * seen to read it into the CAT_C leave offset (0x8002808C) rather than keep
+ * the runtime's default.
+ *
+ * The environment half of the same dispatcher takes the same gates: vol 3
+ * asserts INCROUCH and vol 2 INLOWCROUCH.
+ */
+static u8 g_gate_trig[4 + 6 * Q2_TRIGGER_SIZE];
+static u8 g_gate_events[8 + 5 * 4];
+
+static void gate_put_trigger(u8 *rec, s32 x0, s32 x1, u16 event, u16 id,
+                             u16 flags)
+{
+    memset(rec, 0, Q2_TRIGGER_SIZE);
+    hwr32(rec + 0x00, (u32)x0);  hwr32(rec + 0x04, 0);  hwr32(rec + 0x08, 0);
+    hwr32(rec + 0x0C, (u32)x1);  hwr32(rec + 0x10, ROOM_SY);
+    hwr32(rec + 0x14, ROOM_SZ);
+    hwr16(rec + 0x18, 0);        /* plane_start: every volume is a plain box */
+    hwr16(rec + 0x1A, event);
+    hwr16(rec + 0x20, id);
+    hwr16(rec + 0x22, flags);
+}
+
+static u32 gate_contacts(const q2_sim *sim)
+{
+    u32 i, mask = 0;
+
+    for (i = 0; i < 5; i++)
+        if (q2_event_rt_flags(&sim->event_rt, 8u + 4u * i) & Q2_EVREC_RT2)
+            mask |= 1u << i;
+    return mask;
+}
+
+static void test_dispatcher_gates(void)
+{
+    dat_chunk trig_chunk, ev_chunk;
+    q2_common_file common;
+    q2_sim sim;
+    q2_input in;
+    s32 feet_a[3], feet_b[3];
+    u32 in_a, in_b, no_hull, env_a, env_b;
+    u32 i;
+
+    printf("trigger dispatcher gates\n");
+
+    memset(g_gate_trig, 0, sizeof(g_gate_trig));
+    hwr16(g_gate_trig + 0, 5);          /* five volumes */
+    hwr16(g_gate_trig + 2, 0);          /* no planes    */
+    gate_put_trigger(g_gate_trig + 4 + 0 * Q2_TRIGGER_SIZE,
+                     ROOM_A_X0, ROOM_A_X1, 8,  255,   1);
+    gate_put_trigger(g_gate_trig + 4 + 1 * Q2_TRIGGER_SIZE,
+                     ROOM_A_X0, ROOM_B_X1, 12, 12,    1);
+    gate_put_trigger(g_gate_trig + 4 + 2 * Q2_TRIGGER_SIZE,
+                     ROOM_A_X0, ROOM_B_X1, 16, 34,    1);
+    gate_put_trigger(g_gate_trig + 4 + 3 * Q2_TRIGGER_SIZE,
+                     ROOM_A_X0, ROOM_A_X1, 20, 255,   4);
+    gate_put_trigger(g_gate_trig + 4 + 4 * Q2_TRIGGER_SIZE,
+                     ROOM_A_X0, ROOM_B_X1, 24, 0x10C, 1);
+    /* The sentinel: plane_start = the pool size, event_offset = vol 0's. */
+    hwr16(g_gate_trig + 4 + 5 * Q2_TRIGGER_SIZE + 0x18, 0);
+    hwr16(g_gate_trig + 4 + 5 * Q2_TRIGGER_SIZE + 0x1A, 8);
+
+    memset(g_gate_events, 0, sizeof(g_gate_events));
+    hwr32(g_gate_events + 0, 5);        /* five records, no directory */
+    for (i = 0; i < 5; i++) {
+        u8 *rec = g_gate_events + 8 + 4 * i;
+
+        rec[0] = 4;                     /* u16 size */
+        rec[2] = 0;                     /* no items */
+        rec[3] = Q2_EVREC_CAT_B;        /* every frame inside */
+    }
+
+    memset(&trig_chunk, 0, sizeof(trig_chunk));
+    trig_chunk.data = g_gate_trig;
+    trig_chunk.size = sizeof(g_gate_trig);
+    memset(&ev_chunk, 0, sizeof(ev_chunk));
+    ev_chunk.data = g_gate_events;
+    ev_chunk.size = sizeof(g_gate_events);
+    memset(&common, 0, sizeof(common));
+    common.chunk[Q2_COMMON_TRIG_BOUNDS] = &trig_chunk;
+    common.chunk[Q2_COMMON_EVENTS]      = &ev_chunk;
+
+    memset(&in, 0, sizeof(in));
+    feet_a[0] = 500;  feet_a[1] = q2_sim_feet_y(300); feet_a[2] = 500;
+    feet_b[0] = 1700; feet_b[1] = q2_sim_feet_y(300); feet_b[2] = 500;
+
+    /* Room A, then room B, over the two-room hull. */
+    q2_sim_init(&sim, NULL, 50);
+    check(two_room_hull(&sim.coll, 12, 34), "the gate test's hull parses");
+    sim.coll_ready = true;
+    check(q2_sim_attach_gameplay(&sim, &common) == Q2_OK &&
+          sim.triggers_ready && sim.events_ready,
+          "five volumes and five records attach");
+    check_eq_i(sim.event_rt.catc_leave_offset, 8,
+               "the CAT_C leave offset is read from the TrigBounds sentinel");
+
+    sim.volume_env = (u32 *)calloc(sim.triggers.count, sizeof(u32));
+    if (sim.volume_env) {
+        sim.volume_env[3] = Q2_ENV_INCROUCH;
+        sim.volume_env[2] = Q2_ENV_INLOWCROUCH;
+    }
+
+    q2_sim_spawn(&sim, feet_a, 0);
+    q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
+    in_a  = gate_contacts(&sim);
+    env_a = sim.player[0].ent.flags & (Q2_ENT_INCROUCH | Q2_ENT_INLOWCROUCH);
+
+    q2_sim_spawn(&sim, feet_b, 0);
+    q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
+    in_b  = gate_contacts(&sim);
+    env_b = sim.player[0].ent.flags & (Q2_ENT_INCROUCH | Q2_ENT_INLOWCROUCH);
+    q2_sim_free(&sim);
+
+    /* No hull: the area is unknown, so only the flag gate can refuse. */
+    q2_sim_init(&sim, NULL, 50);
+    (void)q2_sim_attach_gameplay(&sim, &common);
+    q2_sim_spawn(&sim, feet_a, 0);
+    q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
+    no_hull = gate_contacts(&sim);
+    q2_sim_free(&sim);
+
+    printf("  contacts (bit = volume): room A 0x%02x, room B 0x%02x, "
+           "no hull 0x%02x; env room A 0x%x, room B 0x%x\n",
+           in_a, in_b, no_hull, env_a, env_b);
+    check_eq_i(in_a, 0x13,
+               "room A: the plain volume, area 12's, and id 0x10C's low byte");
+    check_eq_i(in_b, 0x04, "room B: only area 34's volume");
+    check_eq_i(no_hull, 0x17,
+               "without a hull the id gate stands aside; bit 0 still refuses");
+    check(env_a == 0 && env_b == Q2_ENT_INLOWCROUCH,
+          "the environment half takes the same two gates");
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * NO ZONE GATE IN DEATHMATCH. 0x80079178 reads the deathmatch word 0x800AEBCC
+ * (0x8007917C) and answers "no gate" in an arena; the runtime's copy of that
+ * word is filled from `sim->multiplayer` on every update. One volume naming
+ * one CAT_B record whose single item is a 16-byte ZONEGATE to "Zone1": the
+ * single-player sim raises the request, the deathmatch sim does not.
+ */
+static u8 g_zg_trig[4 + 2 * Q2_TRIGGER_SIZE];
+static u8 g_zg_events[8 + 20];
+
+static bool zonegate_raised(bool deathmatch)
+{
+    dat_chunk trig_chunk, ev_chunk;
+    q2_common_file common;
+    q2_sim sim;
+    q2_input in;
+    s32 feet[3];
+    bool raised;
+
+    memset(g_zg_trig, 0, sizeof(g_zg_trig));
+    hwr16(g_zg_trig + 0, 1);
+    hwr16(g_zg_trig + 2, 0);
+    gate_put_trigger(g_zg_trig + 4, ROOM_A_X0, ROOM_A_X1, 8, 255, 1);
+
+    memset(g_zg_events, 0, sizeof(g_zg_events));
+    hwr32(g_zg_events + 0, 1);              /* one record, no directory */
+    g_zg_events[8]  = 20;                   /* record size              */
+    g_zg_events[10] = 1;                    /* one item                 */
+    g_zg_events[11] = Q2_EVREC_CAT_B;
+    g_zg_events[12] = Q2_EVOP_ZONEGATE;
+    g_zg_events[13] = 16;                   /* 0x80027788: exactly 16   */
+    memcpy(g_zg_events + 14, "Zone1", 5);   /* the NAME12 operand       */
+
+    memset(&trig_chunk, 0, sizeof(trig_chunk));
+    trig_chunk.data = g_zg_trig;
+    trig_chunk.size = sizeof(g_zg_trig);
+    memset(&ev_chunk, 0, sizeof(ev_chunk));
+    ev_chunk.data = g_zg_events;
+    ev_chunk.size = sizeof(g_zg_events);
+    memset(&common, 0, sizeof(common));
+    common.chunk[Q2_COMMON_TRIG_BOUNDS] = &trig_chunk;
+    common.chunk[Q2_COMMON_EVENTS]      = &ev_chunk;
+
+    memset(&in, 0, sizeof(in));
+    feet[0] = 500;
+    feet[1] = q2_sim_feet_y(300);
+    feet[2] = 500;
+
+    q2_sim_init(&sim, NULL, 50);
+    (void)q2_sim_attach_gameplay(&sim, &common);
+    sim.multiplayer = deathmatch;
+    q2_sim_spawn(&sim, feet, 0);
+    q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
+    raised = q2_sim_take_zone_change(&sim, NULL);
+    q2_sim_free(&sim);
+    return raised;
+}
+
+static void test_zonegate_deathmatch(void)
+{
+    bool sp, dm;
+
+    printf("zone gate in deathmatch\n");
+
+    sp = zonegate_raised(false);
+    dm = zonegate_raised(true);
+    printf("  single player raised %d, deathmatch raised %d\n", (int)sp,
+           (int)dm);
+    check(sp && !dm,
+          "0x800AEBCC reaches 0x8007917C: a deathmatch sim loads no zone");
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * THE MESH HOOK (effect.h, 0x8005B880). The world's combat tick presents each
+ * actor once and asks `sim->fx_mesh` for its posed mesh as it does; a hook
+ * that answers false — the local player's own actor, which has no body in
+ * first person — gets the model-less path and its countdowns still run.
+ *
+ * The world list is built the way the client's deathmatch list is, with the
+ * live player's `combat.self` in it, so this also pins that the player is
+ * presented once rather than twice: effect[5] runs down by a literal 1 per
+ * presentation (0x8005B830), so a second call shows as a second decrement.
+ */
+typedef struct mesh_probe {
+    const q2_actor *self;
+    u32 asked;          /* hook calls                                 */
+    u32 asked_self;     /* ...for the local player's actor            */
+    u32 sampled;        /* posed vertices the drawers asked for       */
+    s32 first;          /* the first vertex index a pass asked for    */
+} mesh_probe;
+
+static void probe_vertex(void *ctx, s32 index, s32 out[3])
+{
+    mesh_probe *mp = (mesh_probe *)ctx;
+
+    if (mp->first < 0)
+        mp->first = index;
+    mp->sampled++;
+    out[0] = index * 10;
+    out[1] = 300;
+    out[2] = 500;
+}
+
+static bool probe_mesh(void *user, const struct q2_actor *a,
+                       q2_fx_mesh_src *out)
+{
+    mesh_probe *mp = (mesh_probe *)user;
+
+    mp->asked++;
+    if (a == mp->self) {
+        mp->asked_self++;
+        return false;
+    }
+    out->vertex = probe_vertex;
+    out->ctx    = mp;
+    out->total  = 30;
+    return true;
+}
+
+static void test_fx_mesh_hook(void)
+{
+    q2_sim sim;
+    q2_actor creature;
+    q2_actor *list[2];
+    mesh_probe mp;
+    s32 first_even, first_odd;
+
+    printf("damage-effect mesh hook\n");
+
+    q2_sim_init(&sim, NULL, 50);
+    memset(&mp, 0, sizeof(mp));
+    mp.self  = &sim.combat.self;
+    mp.first = -1;
+
+    q2_actor_init(&creature);
+    creature.health    = 100;
+    creature.effect[5] = 2;
+    sim.combat.self.effect[5] = 2;
+
+    list[0] = &creature;
+    list[1] = &sim.combat.self;
+    sim.fx_mesh      = probe_mesh;
+    sim.fx_mesh_user = &mp;
+
+    q2_sim_set_world_targets(&sim, list, 2);
+    sim.level_time = 12;
+    sim.tick_count = 4;
+    q2_sim_combat_tick(&sim);
+    first_even = mp.first;
+
+    printf("  hook asked %u (%u for the player), %u vertices sampled; "
+           "effect[5] player %u, creature %u\n", mp.asked, mp.asked_self,
+           mp.sampled, (unsigned)sim.combat.self.effect[5],
+           (unsigned)creature.effect[5]);
+    check(mp.asked == 2 && mp.asked_self == 1,
+          "the hook is asked once per actor, the player included");
+    check_eq_i(mp.sampled, 15,
+               "the creature's crackle walks the hook's mesh: 30 verts, step 2");
+    check(sim.combat.self.effect[5] == 1 && creature.effect[5] == 1,
+          "and each countdown ran once, the player's included");
+
+    /*
+     * The NEXT world tick, the clock having moved by a PAL dt of 6 and so kept
+     * its parity. The crackle's start vertex is [0x800B2DE4] & 1, a frame
+     * counter (0x800705C4 adds 1), so it must move to the other half of the
+     * mesh; driven by the level clock it would sample the same half forever.
+     */
+    mp.first = -1;
+    sim.level_time = 18;
+    sim.tick_count = 5;
+    q2_sim_combat_tick(&sim);
+    first_odd = mp.first;
+    q2_sim_set_world_targets(&sim, NULL, 0);
+
+    printf("  first vertex sampled: tick 4 -> %d, tick 5 -> %d\n",
+           (int)first_even, (int)first_odd);
+    check(first_even == 0 && first_odd == 1,
+          "the crackle alternates halves by frame count, not by the clock");
+
+    q2_sim_free(&sim);
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * THE PRESENTATION PASS THROUGH THE SIM (simcombat.c, 0x8005B880).
+ *
+ * The console presents every entity every frame: the creature think calls
+ * 0x8005B880 at 0x8007EC0C for every monster, alive or dead, and the player
+ * think at 0x8003B004. These pin the port's pass against that, through
+ * q2_sim_tick and q2_sim_combat_tick rather than q2_fx_actor_present alone.
+ */
+
+/* Every ramp present, so a burst spawns and can be told apart by the ramp
+ * record it points at. */
+static q2_fx_tables g_present_tab;
+
+/* The energy-bolt light (combat.h's Q2_ENERGY_LIGHT_*, 0x800586D0) in this
+ * tick's event list at `at`. */
+static u32 energy_lights_at(const q2_sim *sim, const s32 at[3])
+{
+    u32 i, n = 0;
+
+    for (i = 0; i < sim->ent_world.events.count; i++) {
+        const q2_ent_event *e = &sim->ent_world.events.e[i];
+
+        if (e->kind == Q2_ENT_EVENT_LIGHT &&
+            e->glow[0] == Q2_ENERGY_LIGHT_R &&
+            e->glow[1] == Q2_ENERGY_LIGHT_G &&
+            e->glow[2] == Q2_ENERGY_LIGHT_B &&
+            e->inner_radius == Q2_ENERGY_LIGHT_INNER &&
+            e->radius == Q2_ENERGY_LIGHT_OUTER &&
+            e->pos[0] == at[0] && e->pos[1] == at[1] && e->pos[2] == at[2])
+            n++;
+    }
+    return n;
+}
+
+/*
+ * SINGLE PLAYER PRESENTS ITS CREATURES. This caller registers its creatures
+ * with q2_sim_set_targets and publishes no world list (the client now
+ * publishes the same list as both, which this does not rely on). The bolt
+ * still lands, because the projectile step falls back to `combat.targets`,
+ * and the damage function arms effect[1] = 3. The presentation pass walked
+ * `world_targets` alone, so the effect it armed never lit and never ran down.
+ * On the console the next frame raises the green light (0x800586D0, effect[1]
+ * >= 3) and 0x80058638 then runs the slot down 3 -> 2 -> 1 -> 0 by its dt of 1
+ * (0x80058768).
+ */
+static void test_sp_creature_presented(void)
+{
+    q2_sim sim;
+    q2_actor cre;
+    q2_actor *list[1];
+    q2_input in;
+    s32 spawn[3] = { 0, 0, 0 };
+    s32 eye[3];
+    s16 aim[3];
+    u8  slot[4];
+    u32 lit[3];
+    int k, flew;
+
+    printf("single player presents its creatures\n");
+
+    q2_sim_init(&sim, NULL, 50);
+    q2_sim_spawn(&sim, spawn, 0);
+    sim.fire_from_input = false;
+
+    /* A creature 3000 units down the aim, which is where the blaster sends
+     * its bolt. Health enough to live through it: this is about the effect,
+     * not the kill. */
+    q2_sim_eye(&sim, eye);
+    q2_sim_aim(&sim, aim);
+    q2_actor_init(&cre);
+    for (k = 0; k < 3; k++)
+        cre.origin[k] = eye[k] + (s32)(((s64)aim[k] * 3000) / 4096);
+    cre.health     = 1000;
+    cre.takedamage = Q2_DAMAGE_AIM;
+    cre.is_monster = true;
+    list[0] = &cre;
+    q2_sim_set_targets(&sim, list, 1);     /* and NOT the world list */
+
+    memset(&in, 0, sizeof(in));
+    (void)q2_sim_fire(&sim);
+    for (flew = 0; flew < 40 && cre.effect[1] == 0; flew++)
+        q2_sim_tick(&sim, &in, 12);
+
+    slot[0] = cre.effect[1];
+    for (k = 0; k < 3; k++) {
+        q2_sim_tick(&sim, &in, 12);
+        slot[k + 1] = cre.effect[1];
+        lit[k] = energy_lights_at(&sim, cre.origin);
+    }
+
+    printf("  bolt landed after %d ticks; effect[1] %u -> %u -> %u -> %u; "
+           "energy lights %u, %u, %u\n", flew, (unsigned)slot[0],
+           (unsigned)slot[1], (unsigned)slot[2], (unsigned)slot[3],
+           lit[0], lit[1], lit[2]);
+    check(slot[0] == 3 && slot[1] == 2 && slot[2] == 1 && slot[3] == 0,
+          "a single-player creature's energy effect runs down 3, 2, 1, 0 "
+          "through the sim (0x80058638 per frame)");
+    check(lit[0] == 1 && lit[1] == 0 && lit[2] == 0,
+          "and raises the green light on the first presented tick only "
+          "(0x800586D0, effect[1] >= 3)");
+
+    q2_sim_free(&sim);
+}
+
+/* A hook that hands EVERY actor, the live player included, a 30-vertex mesh,
+ * and counts the asks for one actor of interest. */
+typedef struct any_mesh {
+    mesh_probe      probe;
+    const q2_actor *watch;
+    u32             asked_watch;
+} any_mesh;
+
+static bool any_mesh_hook(void *user, const struct q2_actor *a,
+                          q2_fx_mesh_src *out)
+{
+    any_mesh *am = (any_mesh *)user;
+
+    am->probe.asked++;
+    if (a == am->watch)
+        am->asked_watch++;
+    out->vertex = probe_vertex;
+    out->ctx    = &am->probe;
+    out->total  = 30;
+    return true;
+}
+
+/*
+ * ONCE PER ACTOR PER FRAME, whatever the caller published.
+ *
+ * A creature on the shooter's list alone is presented once: effect[5] runs
+ * down by a literal 1 per presentation (0x8005B830, 0x8005B8E0), so zero
+ * presentations leave it where it was and two take off two.
+ *
+ * And the live player is presented once, as `combat.self`. Its PARKED slot,
+ * `pcombat[cur_player].self`, is a stale copy while it is live, which the next
+ * combat_swap_to overwrites. A list that names it (the shooter's list built
+ * for another player names player 0 by that slot) must not present player 0 a
+ * second time. Published here as the world list, which the pass has always
+ * walked, so only the skip is under test.
+ */
+static void test_present_once_per_actor(void)
+{
+    q2_sim sim;
+    q2_actor cre;
+    q2_actor *list[3];
+    any_mesh am;
+
+    printf("each actor presented once a frame\n");
+
+    q2_sim_init(&sim, NULL, 50);
+    q2_actor_init(&cre);
+    cre.health    = 100;
+    cre.effect[5] = 2;
+    list[0] = &cre;
+    q2_sim_set_targets(&sim, list, 1);
+    q2_sim_combat_tick(&sim);
+    printf("  shooter's list only: creature effect[5] 2 -> %u\n",
+           (unsigned)cre.effect[5]);
+    check_eq_i(cre.effect[5], 1,
+               "a creature on the shooter's list alone is presented, once");
+    q2_sim_free(&sim);
+
+    q2_sim_init(&sim, NULL, 50);
+    memset(&am, 0, sizeof(am));
+    am.probe.first = -1;
+    am.watch       = &sim.pcombat[0].self;
+    sim.fx_mesh      = any_mesh_hook;
+    sim.fx_mesh_user = &am;
+
+    sim.combat.self.effect[5] = 3;
+    sim.pcombat[0].self       = sim.combat.self;   /* the stale parked copy */
+    q2_actor_init(&cre);
+    cre.health = 100;
+    list[0] = &sim.combat.self;
+    list[1] = &sim.pcombat[0].self;
+    list[2] = &cre;
+    q2_sim_set_world_targets(&sim, list, 3);
+    q2_sim_combat_tick(&sim);
+    q2_sim_set_world_targets(&sim, NULL, 0);
+
+    printf("  live player effect[5] 3 -> %u, parked copy 3 -> %u, hook asked "
+           "for the parked copy %u times\n",
+           (unsigned)sim.combat.self.effect[5],
+           (unsigned)sim.pcombat[0].self.effect[5], am.asked_watch);
+    check(sim.combat.self.effect[5] == 2 &&
+          sim.pcombat[0].self.effect[5] == 3 && am.asked_watch == 0,
+          "the live player is presented once: its parked slot is not a "
+          "second copy of it");
+    q2_sim_free(&sim);
+}
+
+/*
+ * A PLAYER IS A CLIENT ENTITY, LIVE OR PARKED. Every drawer writes the view
+ * nibble for any entity whose +0x0C client is non-null, from that client's own
+ * index (0x800590C0..0x80059128; the renderer's 0x80030614 hides bit 4 + n in
+ * viewport n), and the quad shell reads that entity's own client+0xAC
+ * (0x8005B7EC, 0x8005B7FC). So player 1, parked in the deathmatch world list,
+ * raises its OWN shell from its own inventory's deadline, hidden in viewport 1
+ * only, and the live player's crackle is hidden in viewport 0.
+ */
+static void test_present_clients(void)
+{
+    q2_sim sim;
+    q2_actor *list[2];
+    any_mesh am;
+    s32 spawn[3] = { 0, 0, 0 };
+    const q2_fx_ramp *shell_ramp, *slot5_ramp;
+    u32 shell_p1 = 0, shell_other = 0, slot5_p0 = 0, slot5_other = 0;
+    u32 g;
+
+    printf("players present as clients\n");
+
+    memset(&g_present_tab, 0, sizeof(g_present_tab));
+    g_present_tab.loaded = true;
+
+    q2_sim_init(&sim, NULL, 50);
+    q2_sim_attach_effects(&sim, &g_present_tab, 1);
+    q2_sim_spawn(&sim, spawn, 0);
+    q2_sim_player_reset_combat(&sim, 1);
+
+    memset(&am, 0, sizeof(am));
+    am.probe.first   = -1;
+    sim.fx_mesh      = any_mesh_hook;
+    sim.fx_mesh_user = &am;
+
+    sim.combat.inv.quad_until       = 0;                      /* no quad   */
+    sim.pcombat[1].inv.quad_until   = sim.level_time + 9000;  /* quad on   */
+    sim.combat.self.effect[5]       = 1;    /* a crackle on the live player */
+    list[0] = &sim.combat.self;
+    list[1] = &sim.pcombat[1].self;
+    q2_sim_set_world_targets(&sim, list, 2);
+    q2_sim_combat_tick(&sim);
+    q2_sim_set_world_targets(&sim, NULL, 0);
+
+    shell_ramp = q2_fx_ramp_at(&g_present_tab, Q2_FX_QUAD_SHELL_RAMP);
+    slot5_ramp = q2_fx_ramp_at(&g_present_tab, Q2_FX_CRACKLE_SLOT5_RAMP);
+    for (g = 0; g < sim.fx.group_count; g++) {
+        const q2_fx_group *grp = &sim.fx.group[g];
+
+        if (grp->life == 0)
+            continue;
+        if (grp->ramp[0] == shell_ramp) {
+            if ((grp->view_mask & 0xF0u) == 0x20u)
+                shell_p1++;
+            else
+                shell_other++;
+        } else if (grp->ramp[0] == slot5_ramp) {
+            if ((grp->view_mask & 0xF0u) == 0x10u)
+                slot5_p0++;
+            else
+                slot5_other++;
+        }
+    }
+
+    printf("  quad shells: %u hidden in viewport 1, %u otherwise; the live "
+           "player's crackle: %u hidden in viewport 0, %u otherwise\n",
+           shell_p1, shell_other, slot5_p0, slot5_other);
+    check(shell_p1 == 1 && shell_other == 0,
+          "a parked player raises its own quad shell from its own deadline, "
+          "hidden in its own viewport (bit 4 + 1)");
+    check(slot5_p0 == 1 && slot5_other == 0,
+          "the live player's burst is hidden in its own viewport (bit 4 + 0)");
+
+    q2_sim_free(&sim);
+}
+
+/*
+ * THE FRAME COUNTER IS COUNTED BEFORE THE THINKS. 0x80070490 stores the new
+ * [0x800B2DE4] at 0x80070610, and only then does 0x80038D4C call the entity
+ * loop 0x8006A4F0 whose thinks present each actor. So the first world tick
+ * after init presents as frame 1 and the next as frame 2: the crackle starts
+ * on vertex frame & 1 (0x8005901C) and the spark on frame & 7 (0x80058AC4).
+ * The creature is on the WORLD list here, which the pass has always walked, so
+ * only the counter is under test.
+ */
+static void test_present_frame_counter(void)
+{
+    q2_sim sim;
+    q2_actor cre;
+    q2_actor *list[1];
+    q2_input in;
+    mesh_probe mp;
+    s32 spawn[3] = { 0, 0, 0 };
+    s32 crackle[2], spark[3];
+    int k;
+
+    printf("the frame counter the drawers read\n");
+
+    memset(&in, 0, sizeof(in));
+
+    q2_sim_init(&sim, NULL, 50);
+    q2_sim_spawn(&sim, spawn, 0);
+    memset(&mp, 0, sizeof(mp));
+    mp.self = &sim.combat.self;
+    sim.fx_mesh      = probe_mesh;
+    sim.fx_mesh_user = &mp;
+    q2_actor_init(&cre);
+    cre.health    = 100;
+    cre.effect[5] = 5;          /* the crackle, step 2 */
+    list[0] = &cre;
+    q2_sim_set_world_targets(&sim, list, 1);
+    for (k = 0; k < 2; k++) {
+        mp.first = -1;
+        q2_sim_tick(&sim, &in, 12);
+        crackle[k] = mp.first;
+    }
+    q2_sim_set_world_targets(&sim, NULL, 0);
+    q2_sim_free(&sim);
+
+    q2_sim_init(&sim, NULL, 50);
+    q2_sim_spawn(&sim, spawn, 0);
+    memset(&mp, 0, sizeof(mp));
+    mp.self = &sim.combat.self;
+    sim.fx_mesh      = probe_mesh;
+    sim.fx_mesh_user = &mp;
+    q2_actor_init(&cre);
+    cre.health    = 100;
+    cre.effect[4] = 5;          /* the spark, step 8, dt 1 */
+    list[0] = &cre;
+    q2_sim_set_world_targets(&sim, list, 1);
+    for (k = 0; k < 3; k++) {
+        mp.first = -1;
+        q2_sim_tick(&sim, &in, 12);
+        spark[k] = mp.first;
+    }
+    q2_sim_set_world_targets(&sim, NULL, 0);
+    q2_sim_free(&sim);
+
+    printf("  first vertex: crackle %d, %d; spark %d, %d, %d\n",
+           (int)crackle[0], (int)crackle[1],
+           (int)spark[0], (int)spark[1], (int)spark[2]);
+    check(crackle[0] == 1 && crackle[1] == 0,
+          "the first two ticks present as frames 1 and 2: the crackle "
+          "starts on vertex 1, then 0");
+    check(spark[0] == 1 && spark[1] == 2 && spark[2] == 3,
+          "and the spark's phase steps one vertex a tick, frame & 7 on a "
+          "+1 counter rather than on the dt clock");
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * A PLACED PLAYER OWES NOBODY A FRAG.
+ *
+ * 0x8003DDF8 builds a player on a freshly cleared entity: 0x8003B250 takes it
+ * from 0x8006C098, which clears all 768 bytes (0x8006C18C `jal 0x80089E18`,
+ * the BIOS memset, with a1 = 0 and a2 = 768), and clears the 224-byte client
+ * record as well (0x8003B2BC, a0 = the client, a1 = 0, a2 = 224). Then
+ * 0x8003DE24 `addiu v0, zero, 4` / 0x8003DE34 `sb v0, 222(s1)` writes the
+ * killer byte. So a new body holds 4 in +222, 0 in +223 and in the six effect
+ * bytes, and 0 in client+0x94.
+ *
+ * The 4 is what keeps a deathmatch kill by a creature nobody has hurt from
+ * being scored. That creature's own byte is 4 too, so the damage function
+ * takes the "can't determine" arm (0x80057E5C) and stores nothing, and the
+ * victim's byte is still the one it was placed with. A 4 fails the frag hook's
+ * `slti s1, 4`. A 0 is player 0's index: the same kill reaches the hook as
+ * player 0's suicide.
+ *
+ * q2_sim_combat_init memsets the combat state and then refreshes the actor,
+ * and the refresh carries +222 (combat.h), so until it seeded the byte itself
+ * it placed player 0 with the memset's 0.
+ */
+static void test_placed_player_killer_byte(void)
+{
+    q2_sim                sim;
+    q2_actor              creature;
+    q2_player_death       d;
+    q2_player_death_event ev;
+    s32                   spawn[3] = { 0, 0, 0 };
+    s8                    placed;
+
+    printf("a placed player owes nobody a frag\n");
+
+    q2_sim_init(&sim, NULL, 50);
+    q2_sim_spawn(&sim, spawn, 0);
+    placed = sim.combat.self.last_attacker;
+
+    sim.multiplayer       = true;
+    sim.combat.inv.armour = 0;
+    q2_actor_init(&creature);          /* owner -1, no client, its byte 4 */
+    creature.health = 100;
+    q2_sim_hurt_player(&sim, &creature, 200, Q2_MOD_BULLET, creature.origin);
+
+    q2_player_death_init(&d);
+    memset(&ev, 0, sizeof(ev));
+    q2_player_die(&d, sim.combat.self.last_attacker, sim.combat.self.last_mod,
+                  sim.combat.self.owner, true, false, &ev);
+
+    printf("  placed with %d; after an unhurt creature's kill %d, frag hook "
+           "%d (killer %d)\n", (int)placed,
+           (int)sim.combat.self.last_attacker, (int)ev.frag_hook,
+           ev.frag_killer);
+    /* `owner` rides along: seeding the byte through q2_actor_init would have
+     * made player 0 nobody (-1). */
+    check(placed == Q2_MP_NOT_A_PLAYER && sim.combat.self.owner == 0,
+          "level start places player 0 as player 0 with 4 in +222 "
+          "(0x8003DE34), not the memset's 0");
+    check(sim.combat.inv.health <= 0 && !ev.frag_hook,
+          "so a deathmatch kill by a creature nobody has hurt is nobody's "
+          "frag");
+
+    q2_sim_free(&sim);
+}
+
+/*
+ * AND SO DOES A RESPAWNED ONE. q2_sim_player_reset_combat places the extra
+ * players: the client calls it at level start and again for every deathmatch
+ * respawn, then names the player through `owner`. It refreshed whatever actor
+ * was parked in the slot. At level start that was the memset's 0, player 0's
+ * index; on a respawn it was the dead body, whose killer, mod, effect bytes and
+ * acid/lava deadline the refresh carries. A respawn is the fresh entity and
+ * the cleared client described above.
+ */
+static void test_respawned_player_killer_byte(void)
+{
+    q2_sim                sim;
+    q2_actor              creature;
+    q2_actor             *p1;
+    q2_combat_rules       dm;
+    q2_player_death       d;
+    q2_player_death_event ev;
+    s32                   spawn[3] = { 0, 0, 0 };
+    s8                    fresh, killer;
+    s16                   mod;
+    s32                   env;
+    bool                  effects_clear;
+    int                   k;
+
+    printf("a respawned player owes nobody a frag\n");
+
+    q2_sim_init(&sim, NULL, 50);
+    q2_sim_spawn(&sim, spawn, 0);
+    sim.cur_player = 1;
+    q2_sim_spawn(&sim, spawn, 0);
+    sim.cur_player = 0;
+    p1 = &sim.pcombat[1].self;
+
+    /* Level start: nothing has been parked in the slot yet. */
+    q2_sim_player_reset_combat(&sim, 1);
+    p1->owner = 1;                       /* what the client does next */
+    fresh = p1->last_attacker;
+
+    /* The life before: player 2 killed them with a rocket, a bolt had armed
+     * the energy effect, and acid had armed the throttle. */
+    p1->last_attacker = 2;
+    p1->last_mod      = Q2_MOD_ROCKET;
+    p1->effect[1]     = 3;
+    p1->env_next      = sim.level_time + Q2_ENV_THROTTLE_ACID;
+    q2_sim_player_reset_combat(&sim, 1);
+    p1->owner = 1;
+
+    killer = p1->last_attacker;
+    mod    = p1->last_mod;
+    env    = p1->env_next;
+    effects_clear = true;
+    for (k = 0; k < 6; k++)
+        if (p1->effect[k] != 0)
+            effects_clear = false;
+
+    /* The kill that byte decides, on the respawned body. */
+    q2_combat_rules_default(&dm);
+    dm.deathmatch = true;
+    q2_actor_init(&creature);
+    creature.health = 100;
+    q2_combat_damage(&creature, p1, 200, Q2_MOD_BULLET, NULL, &dm);
+    q2_player_death_init(&d);
+    memset(&ev, 0, sizeof(ev));
+    q2_player_die(&d, p1->last_attacker, p1->last_mod, p1->owner, true, false,
+                  &ev);
+
+    printf("  level-start slot %d; respawned +222 %d, +223 %d, effects %s, "
+           "env_next %d; an unhurt creature's kill: frag hook %d (killer %d)\n",
+           (int)fresh, (int)killer, (int)mod,
+           effects_clear ? "clear" : "carried", (int)env, (int)ev.frag_hook,
+           ev.frag_killer);
+    check_eq_i(fresh, Q2_MP_NOT_A_PLAYER,
+               "an extra player is placed with 4, not player 0's index");
+    check(killer == Q2_MP_NOT_A_PLAYER && mod == 0 && effects_clear,
+          "a respawn is a fresh entity: 4 in +222, 0 in +223 and in the "
+          "effect bytes, whatever the life before left");
+    check_eq_i(env, 0,
+               "and a cleared client: 0 in client+0x94 (0x8003B2BC)");
+    check(p1->health <= 0 && !ev.frag_hook,
+          "so a respawned player killed by a creature nobody has hurt is "
+          "nobody's frag, not the last killer's");
+
+    q2_sim_free(&sim);
+}
+
+/*
+ * A KILL RAISES NO BURST OF ITS OWN.
+ *
+ * The hitscan impact and the projectile impact both used to throw a second
+ * group on the killing blow: fifteen quads, ramp 1 in both slots, life 10,
+ * size 10000, which is the preset read out of 0x800596B0. That site is in the
+ * ITEM think 0x80059330 (0x800595AC advances the materialise scale and
+ * 0x800595C8 clamps it at 4096), and its ramp comes from the item's glow bits
+ * at entity+0x44. It is not a gib. What a body coming apart raises is
+ * ThrowGibs' mesh spray, which needs the posed model this sim does not have
+ * (simcombat.c, fx_hitscan_impact).
+ *
+ * The tables are all zero with `loaded` set, so every ramp record is a
+ * distinct address and a group can be told apart by the record it points at.
+ * The blood the hit does raise (0x80048C08, ramps 2 and 3) is the control:
+ * without it, "no ramp-1 group" would also pass if the impact never ran.
+ */
+static q2_fx_tables g_kill_tab;
+
+/* Live groups on ramp `r0` then `r1` with at most `max_life` ticks left. */
+static u32 groups_on(const q2_sim *sim, u32 r0, u32 r1, u32 max_life)
+{
+    const q2_fx_ramp *a = q2_fx_ramp_at(&g_kill_tab, r0);
+    const q2_fx_ramp *b = q2_fx_ramp_at(&g_kill_tab, r1);
+    u32 g, n = 0;
+
+    for (g = 0; g < sim->fx.group_count; g++) {
+        const q2_fx_group *grp = &sim->fx.group[g];
+
+        if (grp->life > 0 && grp->life <= max_life &&
+            grp->ramp[0] == a && grp->ramp[1] == b)
+            n++;
+    }
+    return n;
+}
+
+/* A creature `dist` units down the aim, wide enough that a shot with spread
+ * still lands, and one hit from dead. */
+static void kill_target(q2_sim *sim, q2_actor *cre, s32 dist)
+{
+    s32 eye[3];
+    s16 aim[3];
+    int k;
+
+    q2_sim_eye(sim, eye);
+    q2_sim_aim(sim, aim);
+    q2_actor_init(cre);
+    for (k = 0; k < 3; k++)
+        cre->origin[k] = eye[k] + (s32)(((s64)aim[k] * dist) / 4096);
+    cre->radius     = 1500;
+    cre->health     = 5;
+    cre->takedamage = Q2_DAMAGE_AIM;
+    cre->is_monster = true;
+}
+
+static void test_kill_raises_no_burst(void)
+{
+    q2_sim            sim;
+    q2_actor          cre;
+    q2_actor         *list[1];
+    q2_input          in;
+    q2_fire_result_v2 r;
+    s32               spawn[3] = { 0, 0, 0 };
+    u32               hs_mat, hs_blood, pr_mat, pr_blood;
+    int               flew;
+
+    printf("a kill raises no burst of its own\n");
+
+    memset(&g_kill_tab, 0, sizeof(g_kill_tab));
+    g_kill_tab.loaded = true;
+    memset(&in, 0, sizeof(in));
+
+    /* Hitscan: one machinegun bullet, counted before any tick ages it, so the
+     * old burst would still read life 10. */
+    q2_sim_init(&sim, NULL, 50);
+    q2_sim_attach_effects(&sim, &g_kill_tab, 1);
+    q2_sim_spawn(&sim, spawn, 0);
+    q2_sim_give_weapon(&sim, Q2_WID_MACHINEGUN);
+    sim.combat.weapon_id = Q2_WID_MACHINEGUN;
+    sim.combat.inv.ammo[Q2_AMMO_BULLETS] = 50;
+    kill_target(&sim, &cre, 4000);
+    list[0] = &cre;
+    q2_sim_set_targets(&sim, list, 1);
+
+    r = q2_sim_fire(&sim);
+    hs_mat   = groups_on(&sim, 1, 1, 10);
+    hs_blood = groups_on(&sim, 2, 3, 15);
+    printf("  hitscan: fired %d, kind %d, creature health %d; ramp-1 groups "
+           "%u, blood groups %u\n", (int)r.fired, (int)r.kind,
+           (int)cre.health, hs_mat, hs_blood);
+    check(r.fired && r.kind == Q2_FK_BULLET && cre.health <= 0 &&
+          hs_blood > 0 && hs_mat == 0,
+          "a machinegun kill bleeds the creature and raises no ramp-1, "
+          "life-10 group: 0x800596B0 is the item think's materialise, not "
+          "a gib");
+    q2_sim_free(&sim);
+
+    /* Projectile: a blaster bolt, counted on the tick it lands. The combat
+     * tick runs before the effect tick (sim.c), so the old burst would read
+     * life 9 here, which the range of lives allows for. */
+    q2_sim_init(&sim, NULL, 50);
+    q2_sim_attach_effects(&sim, &g_kill_tab, 1);
+    q2_sim_spawn(&sim, spawn, 0);
+    sim.fire_from_input = false;
+    kill_target(&sim, &cre, 3000);
+    list[0] = &cre;
+    q2_sim_set_targets(&sim, list, 1);
+
+    r = q2_sim_fire(&sim);
+    for (flew = 0; flew < 40 && cre.health > 0; flew++)
+        q2_sim_tick(&sim, &in, 12);
+    pr_mat   = groups_on(&sim, 1, 1, 10);
+    pr_blood = groups_on(&sim, 2, 3, 15);
+    printf("  projectile: fired %d, landed after %d ticks, creature health "
+           "%d; ramp-1 groups %u, blood groups %u\n", (int)r.fired, flew,
+           (int)cre.health, pr_mat, pr_blood);
+    check(r.fired && r.kind == Q2_FK_BOLT && cre.health <= 0 &&
+          pr_blood > 0 && pr_mat == 0,
+          "a blaster bolt's kill bleeds the creature and raises no ramp-1 "
+          "burst either");
+    q2_sim_free(&sim);
+}
+
+/* ------------------------------------------------------------------------- */
 int main(void)
 {
     printf("Q2PSX-PC simulation tests\n\n");
 
     test_item_group_selection();
     test_script_fx_damage();
+    test_death_voice();
     test_event_contact_categories();
     test_underwater_air();
     test_autoswitch();
@@ -2528,6 +3812,18 @@ int main(void)
     test_train();
     test_movers_block_sight_and_shots();
     test_glass_solidity_lifetime();
+    test_one_shot_kill();
+    test_splash_occlusion();
+    test_dispatcher_gates();
+    test_zonegate_deathmatch();
+    test_fx_mesh_hook();
+    test_sp_creature_presented();
+    test_present_once_per_actor();
+    test_present_clients();
+    test_present_frame_counter();
+    test_placed_player_killer_byte();
+    test_respawned_player_killer_byte();
+    test_kill_raises_no_burst();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     printf("%s\n", g_failures == 0 ? "PASS" : "FAIL");

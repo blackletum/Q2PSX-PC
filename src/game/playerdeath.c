@@ -4,6 +4,10 @@
  */
 #include "playerdeath.h"
 
+#include "modelent.h"      /* q2_gib_player_body: 0x80039578 / 0x8003E2A4 */
+#include "monster.h"       /* the dissolve gate 0x8005B2A8, shared with the
+                            * creature corpse handler */
+
 #include <string.h>
 
 /* ------------------------------------------------------------------------- */
@@ -151,6 +155,7 @@ void q2_player_death_init(q2_player_death *d)
     d->ent2          = 1u;               /* 0x8003B428 writes exactly 1    */
     d->linked_weapon = true;
     d->has_body      = true;             /* 0x8003B474 writes the entity   */
+    d->dissolve_arm  = Q2_CORPSE_DISSOLVE_NONE;
 }
 
 bool q2_player_should_die(s16 health, u32 ent2_flags)
@@ -162,7 +167,16 @@ bool q2_player_should_die(s16 health, u32 ent2_flags)
 
 bool q2_player_death_cries_out(s8 killer_field, s16 means_of_death)
 {
-    return q2_mp_attribute_kill((int)killer_field, (int)means_of_death) < 0;
+    /*
+     * 0x80039724 `addiu v0, zero, -1` / 0x80039728 `bne s1, v0, 0x80039758`,
+     * with s1 the RAW byte 0x800396EC loaded. Equality with -1 and nothing
+     * wider: this used to be `q2_mp_attribute_kill(...) < 0`, which folds every
+     * byte outside [0, 4) to -1 as well — so the 4 the damage function records
+     * when no player did it (a creature's claw, a single-player crusher, a
+     * scripted hit) cried out, and on this disc it does not. The only -1 the
+     * byte can hold is 0x800396DC's own, so the voice belongs to acid and lava.
+     */
+    return q2_mp_killer_field((int)killer_field, (int)means_of_death) == -1;
 }
 
 void q2_player_die(q2_player_death *d, s8 killer_field, s16 means_of_death,
@@ -185,14 +199,20 @@ void q2_player_die(q2_player_death *d, s8 killer_field, s16 means_of_death,
      * 0x800396CC, on the entity rather than in the scoring: acid and lava erase
      * the attacker outright, so everything that reads +222 afterwards — the
      * sound choice below included — sees a death with no killer.
+     *
+     * And THAT IS THE ONLY CORRECTION. 0x800396EC then reads the byte back with
+     * `lb` and both gates below test it as it stands. This went through
+     * `q2_mp_attribute_kill`, whose [0, 4) bound folded a 4 to -1 as well, so a
+     * death the damage function credited to "not a player" cried out and, in
+     * deathmatch, called the hook as a world kill. Retail's 4 does neither.
      */
-    d->killer = (s8)q2_mp_attribute_kill((int)killer_field, (int)means_of_death);
+    d->killer = q2_mp_killer_field((int)killer_field, (int)means_of_death);
 
     /*
-     * 0x80039728. Only a death with NO killer cries out, and `client+0x84`
-     * picks which voice. A player shot by somebody dies silently here; what the
-     * port used to do — raise pla_death4 from `update_pain` for every death —
-     * made every death audible and both of them the same.
+     * 0x80039728. Only a raw -1 cries out, and `client+0x84` picks which voice.
+     * A player shot by somebody dies silently here; what the port used to do —
+     * raise pla_death4 from `update_pain` for every death — made every death
+     * audible and both of them the same.
      */
     if (d->killer == -1) {
         ev->cried_out = true;
@@ -200,8 +220,11 @@ void q2_player_die(q2_player_death *d, s8 killer_field, s16 means_of_death,
     }
 
     if (deathmatch) {
-        /* 0x8003976C, then the SIGNED `killer < 4 && victim < 4` at 0x80039774
-         * — a world kill at -1 passes it and reaches the module. */
+        /* 0x8003976C, then the SIGNED `slti s1, 4` / `slti s2, 4` at
+         * 0x80039774/0x8003977C on the raw killer and the victim — a -1 from
+         * acid or lava passes it and reaches the module, which charges the
+         * victim; a 4 fails it and reaches nothing. `d->killer` is an s8, so
+         * the comparison below is signed exactly as `slti` is. */
         ev->body_recorded = true;
         if (d->killer < Q2_MP_MAX_PLAYERS && victim < Q2_MP_MAX_PLAYERS) {
             ev->frag_hook   = true;
@@ -243,6 +266,16 @@ static bool gibbed(const q2_player_death *d, s16 health)
 
 static void go_gibbed(q2_player_death *d, q2_player_death_event *ev)
 {
+    /*
+     * Both tests end in `jal 0x8007CEB4` — 0x80039578 and 0x8003E2A4 — and a
+     * player's +0xD2 is 39 (0x8003B2B0), the dispatcher's default arm: five
+     * `Gib meat` and a `Chest` (modelent.h). The stage below is the port's
+     * record of that arm's last act, 0x8006D280 freeing the body, so the
+     * throw comes first as it does there. Where the body IS belongs to the
+     * sim; the gib world's `describe` supplies it.
+     */
+    q2_gib_player_body(d);
+
     d->stage = Q2_PDEATH_GIBBED;
     d->scale = 0;
     if (ev)
@@ -251,6 +284,12 @@ static void go_gibbed(q2_player_death *d, q2_player_death_event *ev)
 
 bool q2_player_death_tick(q2_player_death *d, s16 health, s32 dt,
                           bool deathmatch, u32 roll)
+{
+    return q2_player_death_tick_fx(d, health, dt, deathmatch, roll, NULL);
+}
+
+bool q2_player_death_tick_fx(q2_player_death *d, s16 health, s32 dt,
+                             bool deathmatch, u32 roll, const u8 *effect)
 {
     if (!d)
         return false;
@@ -305,10 +344,23 @@ bool q2_player_death_tick(q2_player_death *d, s16 health, s32 dt,
         return true;
     }
 
-    case Q2_PDEATH_DOWN:
-        /* 0x8003E270: the same gib test, so a rocket into a body that is
-         * already down still takes it apart. */
-        if (gibbed(d, health)) {
+    case Q2_PDEATH_DOWN: {
+        /*
+         * 0x8003E244: the dissolve gate first. When it fires, 0x8003E24C
+         * `bne v0, zero, 0x8003E2B4` jumps over the chain, the list append
+         * and the gib test to the tail below. It does not return, so this
+         * tick's dt still comes off the 4096 the gate has just put in +0xF4,
+         * which is `corpse_ticks`.
+         */
+        const q2_corpse_dissolve arm = q2_corpse_dissolve_pick(effect);
+
+        if (arm != Q2_CORPSE_DISSOLVE_NONE) {
+            d->dissolve_arm = (u8)arm;                     /* 0x8005B2EC */
+            d->corpse_ticks = Q2_CORPSE_DISSOLVE_LEVEL;    /* 0x8005B2F4 */
+            d->stage        = Q2_PDEATH_DISSOLVING;
+        } else if (gibbed(d, health)) {
+            /* 0x8003E270: the same gib test, so a rocket into a body that is
+             * already down still takes it apart. */
             go_gibbed(d, NULL);
             return false;
         }
@@ -317,8 +369,29 @@ bool q2_player_death_tick(q2_player_death *d, s16 health, s32 dt,
          * result sign-extended, so it expires at or below zero. */
         d->corpse_ticks = (s16)(d->corpse_ticks - dt);
         if (d->corpse_ticks <= 0) {
-            d->corpse_ticks = 1;      /* 0x8003E2E0 */
+            /* 0x8003E2E0 and 0x8003E2EC. Written over +0x3C whatever is in it,
+             * so this would replace a dissolve handler installed on this same
+             * tick as well. That takes a dt of 4096, and Q2_DT_MAX is 30. */
+            d->corpse_ticks = 1;
             d->stage        = Q2_PDEATH_FADING;
+        }
+        return true;
+    }
+
+    case Q2_PDEATH_DISSOLVING:
+        /*
+         * 0x8005B39C / 0x8005B444. The chain it runs first is the sim's
+         * presentation pass here. Then the drain and the free (0x8005B404..
+         * 0x8005B428). No gib test, no clip_velocity, and no list append, so
+         * on the console no sweep finds the body any more. Here the player's
+         * actor stays DAMAGE_AIM (combat.c q2_actor_from_player), and keeping
+         * a dissolving body out of the sweeps is the caller's job. `scale`
+         * (+0xFC) is left alone: this body does not darken, it goes.
+         */
+        d->corpse_ticks = q2_corpse_dissolve_drain(d->corpse_ticks, dt);
+        if (d->corpse_ticks <= 0) {
+            d->stage = Q2_PDEATH_GONE;                     /* 0x8006D280 */
+            return false;
         }
         return true;
 

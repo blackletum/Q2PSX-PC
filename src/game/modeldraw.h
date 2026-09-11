@@ -276,4 +276,48 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
                       gte_state *gte,
                       q2_model_draw_stats *stats);
 
+/*
+ * ONE POSED VERTEX OF AN INSTANCE, IN THE WORLD — 0x8006CC44.
+ *
+ * The damage-effect drawers (effect.h, 0x8005B880's chain) spawn their quads on
+ * an entity's own mesh, and they reach it through this one routine, ten JAL
+ * sites of it. Its body is:
+ *
+ *     8006CC64  bltz a1, 0x8006CD98   a NEGATIVE index is the origin, +0xA4
+ *     8006CC80  the part walk          `a1 -= lbu 3(part)` until it goes
+ *                                      negative: the part owning the GLOBAL
+ *                                      storage index, not a scratch slot
+ *     8006CCA4  vertex = +36 + 12*i    the model's STORAGE order, a 12-byte
+ *                                      record (`sll 1; addu; sll 2`)
+ *     8006CD40  jal 0x8006C6C8         pose it on the entity's frame
+ *     8006CD50  jal 0x8006FC1C         rotate by the entity matrix at +0x2C0,
+ *                                      a CPU multiply stored as a halfword
+ *                                      triple (`sra 12`, then `sh`)
+ *     8006CD58  add +0xA4               then translate by the origin
+ *
+ * The pose and the part walk are exactly what the item shadow already asks of
+ * 0x8006D608 / 0x8006C6C8 (`shadow_pose_vertex` in modeldraw.c), so this is the
+ * same walk with the instance's transform on the end of it.
+ *
+ * The matrix is the one q2_model_build_ot draws the instance with — `rot` when
+ * set, otherwise the three angles — so the crackle lands on the mesh the player
+ * is actually looking at rather than on a second reading of the angles that
+ * could disagree with it. That includes the port-side `scale`, which is
+ * Q2_ONE_12 (a no-op) for every live entity.
+ *
+ * Returns false when the index is past the model's last vertex or the model
+ * does not decode; `out` is then untouched. A negative index succeeds with the
+ * origin whatever the model is, as the console's early-out does.
+ */
+bool q2_model_world_vertex(const q2_model_instance *inst, s32 index,
+                           s32 out[3]);
+
+/*
+ * 0x8006D6AC — how many storage vertices a model's parts hold: the SUM of each
+ * 8-byte part record's `lbu +3` over the `lh 22(obj)` of them at `lw 40(obj)`.
+ * It sums rather than reading the header's own count, and the damage drawers
+ * size their walk by this. NULL is zero (0x8006D6AC's `beq a0, zero`).
+ */
+u32 q2_model_total_verts(const q2_model *m);
+
 #endif /* Q2PSX_MODELDRAW_H */

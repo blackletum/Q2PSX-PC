@@ -168,12 +168,13 @@
  *     damage, kick and flash, so the 50 / 100 / 0 the module hands
  *     monster_fire_railgun now reaches the host, which resolves the rail along
  *     the line of sight instead of from the barrel.
- *   - The QUIET pain cry, which is the one thing here that is read and still
- *     undeliverable. module+0x19A4 is not a second sample: the module's init
- *     CLONES module+0x19A0 through import +0x3C and drops the clone's volume to
- *     50 through import +0x44. The sound hook carries a handle and no volume,
- *     so both of the Arachner's pain cries come out at full. See
- *     ARA_SND_PAIN2_QUIET and `ara_play`.
+ *   - The PITCHED-UP pain cry, which is the one thing here that is read and
+ *     still undeliverable. module+0x19A4 is not a second sample: the module's
+ *     init CLONES module+0x19A0 through import +0x3C and sets the clone's
+ *     PITCH modifier to 50 through import +0x44 — byte +1 of the sound request
+ *     record, over 32, against the default 35 (src/audio/vag.h). The sound hook
+ *     carries a handle and no pitch, so both of the Arachner's pain cries come
+ *     out at the default pitch. See ARA_SND_PAIN2_QUIET and `ara_play`.
  *   - `export 1` at module+0xAAC, which is a render-time hook rather than an
  *     AI one: while the object's animation position lies inside the model's
  *     "Melee" clip it starts two blur trails through import +0x78, over
@@ -238,7 +239,8 @@
  * unchanged sentinel, but this call does not pass it.
  * So the Arachner's two pain sounds are one sample at the same volume and
  * priority, played at the default 35/32 pitch or the clone's 50/32 pitch; the
- * coin in `arachner_pain` chooses the pitch, not the sample or volume.
+ * coin in `arachner_pain` chooses the pitch, not the sample or volume. (The
+ * `_QUIET` in the name is left from the volume reading this replaced.)
  */
 #define ARA_SND_PAIN2_QUIET (Q2_CREWORLD_BASE + 0x19A4u)
 #define ARA_SND_DEATH       (Q2_CREWORLD_BASE + 0x19A8u)  /* ara_deth1      */
@@ -261,9 +263,9 @@
  *
  * The FIRE hook is no longer among them. It took a single packed int, which
  * could name the spawner and not the shot; `q2_cre_fire_shot` takes the
- * module's own figures and does the enemy-alive guards itself, so the rail
- * goes through that instead and this file no longer reaches for
- * `q2_cre_fire_fn`. See `ara_rail_fire`.
+ * module's own figures (and only counts, rather than refuses, a shot with no
+ * enemy or a dead one), so the rail goes through that instead and this file no
+ * longer reaches for `q2_cre_fire_fn`. See `ara_rail_fire`.
  */
 extern void (*q2_cre_sound_fn)(q2_monster *m, int which, void *user);
 extern void  *q2_cre_sound_user;
@@ -274,19 +276,21 @@ extern void  *q2_cre_melee_user;
 static void ara_play(q2_monster *m, u32 handle_addr)
 {
     /*
-     * The quiet pain handle is asked for by the address of the sample it was
+     * The cloned pain handle is asked for by the address of the sample it was
      * cloned from, because that is the one the module registered a NAME for
      * (`q2_creature_world_sound_for_addr` resolves an address against the
      * registrations, creworld.c) and because the port's sound hook carries no
-     * volume argument. The consequence is audible and is stated rather than
-     * hidden: half the Arachner's pain cries should be quiet and all of them
-     * come out loud.
+     * pitch argument. The consequence is audible and is stated rather than
+     * hidden: half the Arachner's pain cries should be pitched up and all of
+     * them come out at the default pitch.
      *
-     * HOW quiet is not established. The module asks for 50 (module+0x87C) and
-     * the neighbouring pan argument is 128, which import +0x44 treats as its
-     * centre sentinel — so the fields are bytes and 50 is somewhere near a
-     * fifth of a 255 full scale. Nothing read here fixes the top of the volume
-     * range, so "a fifth" would be an inference and is not asserted.
+     * What the clone changes IS established. The module passes (clone, 50,
+     * 128, -1) to import +0x44 at module+0x87C..+0x890, and import +0x44 is
+     * 0x80073A34 (the loader stores it at 0x8007DAAC): three guarded byte
+     * stores into the 12-byte request record — byte +1 unless the argument is
+     * 0, byte +2 unless it is 128, byte +3 unless it is -1. So 128 and -1
+     * leave the volume and priority alone and only byte +1 changes, which is
+     * the pitch modifier: 50/32 of the sample's rate against the default 35/32.
      */
     if (handle_addr == ARA_SND_PAIN2_QUIET)
         handle_addr = ARA_SND_PAIN2;
@@ -477,13 +481,13 @@ static void arachner_bite2(q2_monster *self) { ara_bite(self); }  /* [8] */
  * stay zero because the module passes nothing for them; the rail is one trace
  * and not a spread of pellets, and main.c reads a zero count as one shot.
  *
- * ONE DEPARTURE, and it is the shared helper's rather than this file's:
- * `q2_cre_fire_shot` declines a shot with no enemy or a dead one, and neither
- * module site checks. Both fire at `blind_target`, which is a SNAPSHOT and
- * outlives the enemy that made it, so on the console the second barrel of a
- * burst still discharges into where a target just died. The sound is played
- * first here exactly as the module plays it first (module+0xCC4 before
- * module+0xCF8), so the shot being declined does not silence the gun.
+ * NO ENEMY GUARD, because neither module site has one. Both fire at
+ * `blind_target`, which is a SNAPSHOT and outlives the enemy that made it, so
+ * on the console the second barrel of a burst still discharges into where a
+ * target just died. `q2_cre_fire_shot` used to decline that shot for every
+ * creature; it now only counts it (crebind.c), so the second barrel fires here
+ * too. The sound is played first exactly as the module plays it first
+ * (module+0xCC4 before module+0xCF8).
  */
 static void ara_rail_fire(q2_monster *self)
 {
@@ -721,7 +725,7 @@ static void arachner_attack(q2_monster *self)
  *      the second word of import +0x48.
  *
  *   3. `if (rand() & 4)` play module+0x19A0 else play module+0x19A4 — one
- *      sample at two volumes; see ARA_SND_PAIN2_QUIET. Bit 2 of a 15-bit
+ *      sample at two pitches; see ARA_SND_PAIN2_QUIET. Bit 2 of a 15-bit
  *      random is a fair coin, so this is a coin and not a weighted roll.
  *
  *   4. `if (skill == 3) return;` — module+0x14A4..+0x14BC, reading

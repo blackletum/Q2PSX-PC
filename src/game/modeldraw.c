@@ -137,6 +137,115 @@ static bool shadow_pose_vertex(const q2_model *m, const q2_model_pose *pose,
     return false;
 }
 
+/*
+ * The instance's own model-to-world rotation, UNSCALED: the explicit matrix
+ * when a caller hands one over, the yaw-only form everything placed in the
+ * world uses, or the three-angle form the view weapon asks for. The yaw is
+ * mirrored on the way in; q2_model_build_ot carries the reason at its call.
+ *
+ * One function so the draw and q2_model_world_vertex cannot disagree about
+ * where a vertex is — a crackle spawned on a mesh rotated one way while the
+ * mesh is drawn rotated the other would float beside the creature.
+ */
+static void instance_spin(const q2_model_instance *inst, s16 spin[3][3])
+{
+    if (inst->rot)
+        memcpy(spin, inst->rot, sizeof(s16) * 9);
+    else if (inst->pitch == 0 && inst->roll == 0)
+        q2_rotation_yaw_pitch(spin, -inst->yaw, 0);
+    else
+        q2_rotation_euler(spin, inst->pitch, -inst->yaw,
+                          inst->roll);
+}
+
+/* The port-side uniform scale on top of it; a no-op at Q2_ONE_12. See the
+ * note in q2_model_build_ot on why it is not entity+0xFC. */
+static void instance_scale(const q2_model_instance *inst, s16 spin[3][3])
+{
+    if (inst->scale != Q2_ONE_12) {
+        s32 s = inst->scale;
+        int r, c;
+
+        if (s < 0)
+            s = 0;
+        if (s > 8 * Q2_ONE_12)
+            s = 8 * Q2_ONE_12;
+
+        for (r = 0; r < 3; r++)
+            for (c = 0; c < 3; c++)
+                spin[r][c] = (s16)(((s32)spin[r][c] * s) >> Q2_FRAC_12);
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* 0x8006CC44 / 0x8006D6AC — a posed vertex in the world, and the count       */
+/* ------------------------------------------------------------------------- */
+u32 q2_model_total_verts(const q2_model *m)
+{
+    u32 part, total = 0;
+
+    /* 0x8006D6AC `beq a0, zero` — a model-less entity has none. */
+    if (!m)
+        return 0;
+
+    /* `lh 22(obj)` records at `lw 40(obj)`, summing `lbu +3` of each. A part
+     * that does not decode ends the walk; on retail data none fails. */
+    for (part = 0; part < m->hdr.num_parts; part++) {
+        q2_model_part p;
+
+        if (!q2_model_get_part(m, part, &p))
+            break;
+        total += p.num_verts;
+    }
+    return total;
+}
+
+bool q2_model_world_vertex(const q2_model_instance *inst, s32 index,
+                           s32 out[3])
+{
+    s16 spin[3][3];
+    s32 posed[3];
+    int r;
+
+    if (!inst || !out)
+        return false;
+
+    /* 0x8006CC64 `bltz a1` -> 0x8006CD98: the three words at +0xA4. */
+    if (index < 0) {
+        out[0] = inst->origin[0];
+        out[1] = inst->origin[1];
+        out[2] = inst->origin[2];
+        return true;
+    }
+
+    /* 0x8006CC80's part walk and 0x8006C6C8's pose, by GLOBAL storage index
+     * — the pair the item shadow already uses. */
+    if (!shadow_pose_vertex(inst->model, inst->pose, (u32)index, posed))
+        return false;
+
+    instance_spin(inst, spin);
+    instance_scale(inst, spin);
+
+    /*
+     * 0x8006FC1C, read rather than assumed to be the GTE: three `mult`/`mflo`
+     * pairs summed in 32 bits per row, `sra 12`, and each row STORED AS A
+     * HALFWORD (0x8006FD14 `sh`) before 0x8006CD58 reloads it with `lh` and
+     * adds the origin. So the rotated offset wraps at sixteen bits rather than
+     * saturating. No model on the disc reaches that; the cast is the store.
+     */
+    for (r = 0; r < 3; r++) {
+        /* Formed wide and brought back to 32 bits by conversion, which is the
+         * `mflo`/`addu` wrap without signed overflow in C. */
+        s64 wide = (s64)spin[r][0] * posed[0] +
+                   (s64)spin[r][1] * posed[1] +
+                   (s64)spin[r][2] * posed[2];
+        s32 sum  = (s32)(u32)(u64)wide;
+
+        out[r] = inst->origin[r] + (s32)(s16)(sum >> Q2_FRAC_12);
+    }
+    return true;
+}
+
 /* 0x800784CC — one modulated, subtractive POLY_FT4 under a model. */
 static bool emit_shadow(const q2_model_instance *inst, const q2_camera *cam,
                         psx_ot *ot, gte_state *gte, const s16 view[3][3],
@@ -461,13 +570,7 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
      * soldier is backing off under attack_state 1 and while a corpse slides,
      * both of which are meant to be backwards.
      */
-    if (inst->rot)
-        memcpy(spin, inst->rot, sizeof(s16) * 9);
-    else if (inst->pitch == 0 && inst->roll == 0)
-        q2_rotation_yaw_pitch(spin, -inst->yaw, 0);
-    else
-        q2_rotation_euler(spin, inst->pitch, -inst->yaw,
-                          inst->roll);
+    instance_spin(inst, spin);
 
     /*
      * Optional port-side uniform transform. Retail does not derive this from
@@ -485,19 +588,7 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
      */
     memcpy(spin_unscaled, spin, sizeof(spin_unscaled));
 
-    if (inst->scale != Q2_ONE_12) {
-        s32 s = inst->scale;
-        int r, c;
-
-        if (s < 0)
-            s = 0;
-        if (s > 8 * Q2_ONE_12)
-            s = 8 * Q2_ONE_12;
-
-        for (r = 0; r < 3; r++)
-            for (c = 0; c < 3; c++)
-                spin[r][c] = (s16)(((s32)spin[r][c] * s) >> Q2_FRAC_12);
-    }
+    instance_scale(inst, spin);
 
     matrix_mul(world, view, spin);
 

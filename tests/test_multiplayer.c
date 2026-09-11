@@ -498,6 +498,54 @@ static void test_attribution(void)
     CHECK(q2_mp_attribute_kill(-1, 0) == -1, "and so is -1");
 }
 
+/*
+ * The byte the death handler reads is NOT the scoring fold above.
+ *
+ * 0x800396DC is the handler's only edit — -1 for mods 9 and 10 — and
+ * 0x800396EC reads the byte back with `lb` for both gates. So a 4 stays a 4,
+ * and 0x80039774's `slti s1, 4` refuses it: the hook is never called. Folding
+ * it to -1 first, as `q2_mp_attribute_kill` does, sends the module a world
+ * kill it then charges to the victim. The two readings are asserted side by
+ * side, through the module, so the difference is a frag and not a number.
+ */
+static void test_the_handler_reads_the_raw_byte(void)
+{
+    q2_mp_session raw, folded;
+
+    /* 0x800396CC: the override is the only edit, so the SAME byte 4 comes back
+     * as -1 under mods 9 and 10 and as 4 under their neighbours. */
+    CHECK(q2_mp_killer_field(Q2_MP_NOT_A_PLAYER, 9) == -1 &&
+          q2_mp_killer_field(Q2_MP_NOT_A_PLAYER, 10) == -1 &&
+          q2_mp_killer_field(Q2_MP_NOT_A_PLAYER, 8) == Q2_MP_NOT_A_PLAYER &&
+          q2_mp_killer_field(Q2_MP_NOT_A_PLAYER, 11) == Q2_MP_NOT_A_PLAYER,
+          "byte 4 should read -1 for mods 9 and 10 and 4 for 8 and 11");
+    CHECK(q2_mp_killer_field(2, 9 + 256) == -1,
+          "0x800396C4 reads the mod with lbu, so 265 is acid");
+
+    /* 0x800396EC: everything else comes back as the byte, 4 and 23 included,
+     * which is where this and the fold part company. */
+    CHECK(q2_mp_killer_field(Q2_MP_NOT_A_PLAYER, 0) == Q2_MP_NOT_A_PLAYER &&
+          q2_mp_attribute_kill(Q2_MP_NOT_A_PLAYER, 0) == -1,
+          "the raw byte keeps a 4 that the scoring fold makes -1");
+    CHECK(q2_mp_killer_field(23, 20) == 23,
+          "single player's NULL-attacker byte comes back as 23");
+
+    /*
+     * Fed to the module: the raw 4 fails `killer >= Q2_MP_MAX_PLAYERS` inside
+     * `q2_mp_player_killed` exactly as it fails 0x80039774, so nobody's score
+     * moves; the folded -1 costs player 3 a frag for a death the console
+     * never scores.
+     */
+    q2_mp_session_init(&raw, Q2_MP_DEATHMATCH, 4);
+    q2_mp_session_init(&folded, Q2_MP_DEATHMATCH, 4);
+    q2_mp_player_killed(&raw, q2_mp_killer_field(Q2_MP_NOT_A_PLAYER, 0), 3);
+    q2_mp_player_killed(&folded, q2_mp_attribute_kill(Q2_MP_NOT_A_PLAYER, 0),
+                        3);
+    CHECK(raw.frags[3] == 0 && folded.frags[3] == -1,
+          "a byte-4 death: raw scores %d, folded scores %d — want 0 and -1",
+          raw.frags[3], folded.frags[3]);
+}
+
 static void test_hud_set(void)
 {
     CHECK(strcmp(q2_mp_hud_image(false, 1), "qk_menu.lbm") == 0, "single player");
@@ -616,6 +664,7 @@ int main(void)
     test_batches();
     test_modes();
     test_attribution();
+    test_the_handler_reads_the_raw_byte();
     test_hud_set();
     test_defaults();
     test_scoreboard();
