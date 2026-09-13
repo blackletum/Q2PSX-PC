@@ -1897,6 +1897,9 @@ item records at run time instead of transcribing a table, so there is nothing to
       second call installs nothing at all at that moment. What `0x80079364` sets up is therefore the front
       end's **loading screen**, shown while `LEVELS/QFRONT/` streams in — which fits: it is the first thing
       `q2_menu_open`'s special case does, before the level that the title screen is drawn over exists.
+      **#135 narrows that: it is not the front end's, it is EVERY level's.** `0x80079364` is the tail of
+      `0x80079178`, which the transition opcodes call with the name of whatever is being loaded, and the
+      front end arriving is one caller of it among many.
       **And the front end's own code is not in the executable at all — it is `QFRONT`'s `LevelBin`.**
       That is why every sweep for START and OPTIONS failed, and why the item records are "filled at run
       time": the thing filling them is a relocatable module, exactly as `QMULTI.C` is for deathmatch. This
@@ -9725,3 +9728,95 @@ unit, 4095.3 mean over every part of `Blaster G`) or the GTE reaches it.
       a gate landing on the frame a unit ended replayed LOADMAP and MISCOMPLETE. None of these is visible
       in a unit test of the part it lives in. Each was found by a second agent told to refute the first,
       re-reading the instructions rather than the report.
+
+- [x] 136. **The loading screen — there is one, #44 read half of it, and the other half is a level directory
+      nobody had accounted for.**
+
+      #44 found `0x800A3314` — `{ "LOADING", 256, 124 }`, page 46's first record — and called it *"the front
+      end's loading screen, shown while `LEVELS/QFRONT/` streams in"*. It is not the front end's. It is
+      **every level's**, and the function that puts it up is `0x80079178`, called from the event script's
+      transition opcodes with the twelve-byte name of the level being loaded:
+
+          8007917C  lw   v0, 0x800AEBCC          ; suppressed while this is set
+          8007919C  bne  v0, zero, 0x800791F4    ;   ...return 0, no screen
+          800791E0  jal  0x8006DBC0              ; the name against 0x800E465C
+          800791EC  bne  v0, zero, 0x800791FC    ;   already there: return 0
+          80079360  sw   0x8007901C, 0x800B2D90  ; the DEFERRED load, one shot
+          80079364  jal  0x8001A384 ; li a0, 46  ; enter page 46
+          80079374  jal  0x8001A474 ; li a1, 16  ; 0x800A3314, at size 16
+          80079384  jal  0x8001A474 ; li a1, 16  ; 0x800A3344 — all zeros
+          80079398  sh   1, 0x800C3638           ; drawable 0's +0x48: highlight
+
+      Three things fall out that the record alone does not say. The second install is a **NULL record**, so
+      nothing on the page is navigable and the selection bar — which #44's own capture shows behind START —
+      is not drawn: this is a pure-text page in the same sense RESTARTING is. `0x800C3638` is drawable 0's
+      `+0x48`, the highlight flag, so the word is in palette 70 rather than 68. And **the load is deferred**:
+      `0x8007901C` is a one-shot hook that clears its own slot at `0x8007916C`, so the frame carrying the
+      word goes out first and the read happens after it. Nothing is drawn during a synchronous read, which
+      makes the console's loading screen exactly one frame held for as long as the disc takes.
+
+      `0x800AEBCC` is the arming flag, written by the level selector at `0x8007C7C8` / `0x8007C7E8` from the
+      level record's `+0x20` — "always 1 on a real level" — so the screen is on for every level and off only
+      for a record that is not one.
+
+      **And the logo beside it is a SPRITE STRIP, not a model.** This entry said `LEVELS/QDUMMY/` draws
+      behind the word, on the strength of that directory holding one model (`Q2LOGO`), one named image
+      (`FrontEnd.lbm`, the menu font atlas) and an 840-byte zone with no world in it — "the letterforms this
+      screen writes with and the model it turns, and nothing else". **That is wrong, and a retail capture is
+      what says so.** The logo in the capture is HOLLOW, and `Q2LOGO` is solid.
+
+      The correction is in the sheet the screen was already writing its word out of. Rows 144..203 of
+      `frontend.lbm` hold a **23-cell rotation of the logo on a 32 x 20 grid**, eight across and three down,
+      with `RETRY` in the twenty-fourth slot. The cell widths on that grid run
+
+          17 16 14 13 11 9 7 5 4 5 7 9 11 13 14 16 18 19 19 21 22 22 22
+
+      — a smooth narrowing to one minimum and out again, which is |cos|, and every cell is the full 20 rows
+      tall, which is what a rotation about the vertical axis looks like and what a tumble does not. The grid
+      is checkable two more ways: the row-density profile dips to 18 lit texels at row 164 and 8 at row 184,
+      the two boundaries; and a broadside cell of 22 x 20 is an aspect of 0.71 once the frame buffer's 2:3
+      pixel is accounted for, against the logo's own 1452:1997 = 0.73, where the 30-row reading gives 0.47.
+
+      Two things follow that no model gives. An **in-level** load can show the logo at all, because
+      `frontend.lbm` is in every playable map's `SNDVRAM.DAT` and no model of the logo is. And it is
+      32 x 20 drawn 1:1.
+
+      **Two things are measured, not read**, because nothing found so far binds a CLUT for this quad or
+      counts its index. The first is which END of the strip the animation starts at. The screen is up for
+      half a second and the strip runs at a cell every 22 ticks, so about seven of the twenty-three are ever
+      seen; read forwards the widths open at 17 of a 4..22 range and reach edge-on inside that half second,
+      read backwards they open at 22 — broadside — and turn away. The capture's logo is a wide one, so the
+      port walks it backwards.
+
+      **And the palette.** Nothing found so far binds a CLUT for this quad, so the strip
+      is data with no reader. The capture shows the logo GREY, and the bank has one palette for that:
+      built-in id 4, `000000 080808 181818 ... D8D8D8 E8E8E8`. The strip is authored against 68 — its sixty
+      rows use exactly 68's sixteen entries, a blue ramp — so 4 is the same image in the same index order
+      with the colour taken out. 75 is that ramp stopped at 0x78 and too dark, 76 runs bright-to-dark and
+      inverts the art, 73 is flat white, and 70 (the white-only mask) has four live levels out of sixteen
+      and stipples it. 70 is right for a GLYPH, whose art sits in that band.
+
+      **Two wrong answers, and why.** The first was `Q2LOGO` from QDUMMY; the second, after the capture ruled
+      that out on shape, was `q2logowire` — QFRONT's outlined twin of the same mesh, identical part for part
+      (6 parts, 306 vertices, 281 faces) and differing only in the texture id its faces name, 4 against 0.
+      Right shape, wrong colour, and in the one directory an in-level load cannot borrow from. Both were
+      models because the title screen's logo is a model. Neither pass opened the atlas.
+
+      **What is NOT settled.** The rate the strip runs at: a cell index is a number some code counts and that
+      code has not been found. The port sets it to the one rate the disc does give for this logo — the front
+      end's own `yaw -= 4 * dt`, 1024 ticks a revolution — which over 23 cells of a half turn is 22 ticks a
+      cell. And the `"Dummy"` string is still reachable from QDUMMY's module and from **nothing in the
+      executable** (`xrefs 0x800AC820` comes back empty), so what asked the console for that directory is
+      still open; the port opens its `SNDVRAM.DAT` only because at 21 KB it is the smallest carrier of
+      `frontend.lbm` on the disc.
+
+      **`STARTING` / `GAME` came out of the same capture.** `0x80101E4C`, the handler all three difficulty
+      records call, opens with `module+0x3414(NULL, 19)` — module page 19, built by the ordinary front-end
+      page builder — and its records are `module+0x0EBF4` `STARTING` (256, 111) and `module+0x0EC0C` `GAME`
+      (256, 137). A third page at `module+0x0EBC4` is one row, `DEMO OF GAME` at (256, 111), and belongs to
+      the attract loop. Those two rows are also the ruler the logo's corner was measured with: they are the
+      only things in the capture whose frame-buffer coordinates are known.
+
+      FORMATS §11.13; `src/game/loading.[ch]`; the page is in `src/menu/pages.c` where
+      `q2psx-inspect menu <disc>` checks it against the executable record by record, and
+      `tests/test_loading.c` pins the behaviour the tables cannot express.

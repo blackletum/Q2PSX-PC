@@ -189,6 +189,19 @@ static const q2_menu_item k_quitting[] = {
     { "GAME",     256, 137, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
 };
 
+/*
+ * The loading screen — 0x800A3314, with 0x800A3344 as its empty second table.
+ *
+ * Installed by 0x80079178 at size 16 and with the highlight flag set
+ * (0x80079398 writes 1 into drawable 0's +0x48), so the one line is drawn in
+ * palette 70 — the bright one. It is a terminal page in the same sense
+ * RESTARTING is: the second call installs a NULL record, nothing is navigable,
+ * and no selection bar is drawn. See loading.h.
+ */
+static const q2_menu_item k_loading[] = {
+    { "LOADING", 256, 124, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+};
+
 static const q2_menu_item k_no_controller[] = {
     { "PLEASE INSERT",      256,  98, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
     { "CONTROLLER INTO",    256, 124, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
@@ -231,6 +244,23 @@ static const q2_menu_item k_death[] = {
  */
 
 /* module+0x0EC3C — over the QFRONT scene, below the Q2LOGO model */
+/*
+ * module+0x0EBF4 — what the front end shows for the half second between a
+ * difficulty being confirmed and the opening reel starting.
+ *
+ * Two rows, and they are the module's own bytes: `STARTING` at (256, 111) and
+ * `GAME` at (256, 137), which is RESTARTING / LEVEL's shape exactly. Neither
+ * carries an action, so the page is pure text and no selection bar is drawn.
+ *
+ * The module has a third of these at module+0x0EBC4 — one row, `DEMO OF GAME`,
+ * at (256, 111) — which belongs to the attract loop this port does not run. It
+ * is not transcribed because nothing would install it.
+ */
+static const q2_menu_item k_starting[] = {
+    { "STARTING", 256, 111, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "GAME",     256, 137, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+};
+
 static const q2_menu_item k_front_title[] = {
     { "START",   256, 151, Q2_ACT_PAGE_FRONT_START,   Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
     { "OPTIONS", 256, 177, Q2_ACT_PAGE_FRONT_OPTIONS, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
@@ -376,6 +406,7 @@ static const q2_menu_page k_pages[] = {
     { Q2_PAGE_DEATH,            NULL,         k_death,            N(k_death),            0,                  Q2_ACT_NONE,         0x8009AB74u, 0 },
     { Q2_PAGE_VARIABLES,        "PAUSED",     k_vars_none,        N(k_vars_none),        0,                  Q2_ACT_BACK,         0x8009A6C4u, 0 },
     { Q2_PAGE_PAUSE_MP,         "PAUSED",     k_pause_mp,         N(k_pause_mp),         0,                  Q2_ACT_NONE,         0x8009A964u, 0 },
+    { Q2_PAGE_LOADING,          NULL,         k_loading,          N(k_loading),          N(k_loading),       Q2_ACT_NONE,         0x800A3314u, 0x800A3344u },
 
     /*
      * The front end.
@@ -392,6 +423,7 @@ static const q2_menu_page k_pages[] = {
      * sub-page's first row.
      */
     { Q2_PAGE_FRONT_TITLE,      NULL,            k_front_title,      N(k_front_title),      0,                  Q2_ACT_NONE,         0x8010EC3Cu, 0 },
+    { Q2_PAGE_STARTING,         NULL,            k_starting,         N(k_starting),         N(k_starting),      Q2_ACT_NONE,         0x8010EBF4u, 0 },
     { Q2_PAGE_FRONT_START,      "START",         k_front_start,      N(k_front_start),      0,                  Q2_ACT_BACK,         0x8010EC84u, 0 },
     { Q2_PAGE_FRONT_OPTIONS,    "OPTIONS",       k_front_options,    N(k_front_options),    0,                  Q2_ACT_BACK,         0x8010ED44u, 0 },
     { Q2_PAGE_FRONT_NEWLOAD,    "SINGLE PLAYER", k_front_newload,    N(k_front_newload),    0,                  Q2_ACT_BACK,         0x8010EF9Cu, 0 },

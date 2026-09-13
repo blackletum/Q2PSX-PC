@@ -263,7 +263,32 @@ typedef enum q2_menu_page_id {
     Q2_PAGE_FRONT_SKILL      = 203,   /* EASY / MEDIUM / HARD             */
     Q2_PAGE_FRONT_MULTI      = 204,   /* the five multiplayer rows        */
     Q2_PAGE_FRONT_DMSETUP    = 205,   /* mode-specific match setup        */
-    Q2_PAGE_FRONT_VARIABLES  = 206    /* QFRONT's GAME VARIABLES layouts */
+    Q2_PAGE_FRONT_VARIABLES  = 206,   /* QFRONT's GAME VARIABLES layouts */
+
+    /*
+     * THE LOADING SCREEN, and the console's own id for it is 46.
+     *
+     * `0x80079178` — the level transition's first act — enters page 46 and
+     * installs `0x800A3314`, one record reading `{ "LOADING", 256, 124 }`, then
+     * `0x800A3344`, which is all zeros and installs nothing. That is the page:
+     * one line of text with nothing navigable under it. See loading.h for the
+     * whole function and for where the logo behind it comes from.
+     *
+     * It cannot BE 46 here, because 46 is what this port gave the title screen
+     * — the engine's page 46 is "the front end" as a whole and the title screen
+     * needed a number. So this is the port's own numbering, above every id the
+     * executable uses, exactly as the six front-end pages are.
+     */
+    Q2_PAGE_LOADING          = 207,
+
+    /*
+     * The front end's own version of it, and the module has no id for this one
+     * either. `module+0x0EBF4` installs `STARTING` at (256, 111) and `GAME` at
+     * (256, 137) — two rows on the same 26-pixel pitch every other front-end
+     * page uses, and the same shape as RESTARTING / LEVEL. It is what the half
+     * second between a confirmed difficulty and the opening reel looks like.
+     */
+    Q2_PAGE_STARTING         = 208
 } q2_menu_page_id;
 
 /*

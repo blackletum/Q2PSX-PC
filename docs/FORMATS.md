@@ -4722,6 +4722,128 @@ than off an instruction - the one inference on this screen.
 Reconstructed in `src/game/briefing.[ch]`; `q2psx-inspect text <map>` prints the briefing every map would
 show, and the client draws it on F12.
 
+### 11.13 The loading screen — `0x80079178` — **SOLVED**
+
+There is one, and it is a menu page. A level transition does not go straight to the loader: the event
+script's transition opcodes call `0x80079178` with the twelve-byte name of the level they want, and that
+function puts the screen up and defers the load by a frame.
+
+```
+8007917C  lw   v0, 0x800AEBCC          ; suppressed while this is set
+8007919C  bne  v0, zero, 0x800791F4    ;   ...return 0, no screen at all
+800791E0  jal  0x8006DBC0              ; the wanted name against 0x800E465C
+800791EC  bne  v0, zero, 0x800791FC    ;   already showing it: return 0
+   ...    the name -> 0x800E465C and -> 0x800E4674
+80079360  sw   0x8007901C, 0x800B2D90  ; the DEFERRED load, one shot
+80079364  jal  0x8001A384 ; li a0, 46  ; enter page 46
+80079374  jal  0x8001A474 ; li a1, 16  ; install 0x800A3314 at size 16
+80079384  jal  0x8001A474 ; li a1, 16  ; ...then 0x800A3344
+80079398  sh   1, 0x800C3638           ; drawable 0's +0x48: highlight
+```
+
+`0x800A3314` is `{ "LOADING", 256, 124 }` and `0x800A3344` is a NULL record, so this is a **pure-text page**
+in exactly the sense §10's `first` means: the last install leaves nothing navigable, so no selection bar is
+drawn. `0x800C35F0` is drawable 0 and `0x800C3638` is its `+0x48`, which §11 records as the highlight flag —
+at size 16 that selects palette 70. This is openquestions #44's second record, read there as "the front
+end's loading screen"; it is every level's.
+
+**The load is deferred, and that is the mechanism.** `0x8007901C` is installed as a one-shot per-frame hook
+and clears its own slot at `0x8007916C` once it has run, so the frame that goes out carries the word LOADING
+and the read happens after it. Nothing is drawn during a synchronous read, so the console's loading screen is
+that one frame, frozen for as long as the disc takes.
+
+`0x800AEBCC` is written by the level selector at `0x8007C7C8` / `0x8007C7E8` from the level record's `+0x20`,
+which §9 records as "always 1 on a real level" — so the screen is armed for every level and disarmed only for
+a record that is not one.
+
+**Where the picture comes from: it is a SPRITE STRIP, not a model.** The word is the executable's and so is
+the logo turning beside it — both are cut from `frontend.lbm`, the atlas §11.2 already reads the menu's
+letterforms out of. Rows 144..203 of that sheet, under the 16-pixel face and above the panel art, hold a
+**23-cell rotation of the Quake II logo on a 32 x 20 grid**, eight cells across and three rows down, with
+`RETRY` in the twenty-fourth slot.
+
+The cell widths are what prove the grid and what the strip is. Read on it they run
+
+```
+17 16 14 13 11 9 7 5 4 5 7 9 11 13 14 16 18 19 19 21 22 22 22
+```
+
+— a smooth narrowing to a single minimum and out again, which is |cos| and is a rotation about the vertical
+axis; every cell is the full 20 rows tall, because a thing turning that way does not change height. Read
+instead as two rows of 30 the same sixty rows give `17 16 14 13 12 13 14 16 / 18 19 19 21 22 22 22`, which is
+lumpy, puts its minimum in the wrong place, and makes a broadside cell 22 x 30 — an aspect of 0.47 once the
+frame buffer's 2:3 pixel is accounted for, against the logo's own 1452:1997 = 0.73. On the 20-row grid a
+broadside cell is 22 x 20, which is 0.71. The row-density profile agrees: it dips to 18 lit texels at row 164
+and to 8 at row 184, exactly the two boundaries.
+
+Two things follow that a model cannot give. An **in-level** load can show the logo at all, because
+`frontend.lbm` is in every playable map's `SNDVRAM.DAT` and no model of the logo is. And it is **32 x 20
+drawn 1:1**, like every other thing cut from this sheet.
+
+**Two things here are measured rather than read**, because the strip is data with no located reader: which
+palette it is drawn through, and which end of it the animation starts at. The screen is up for half a second
+and the strip runs at a cell every 22 ticks, so a player sees about seven of the twenty-three — which end
+those seven come from is most of what the rotation ever is. Read forwards the widths open at 17 of a 4..22
+range and are edge-on within the half second; read backwards they open at 22, broadside, and turn away. The
+capture's logo is a wide one, so the port walks the strip backwards.
+
+**The palette**, likewise, because the strip is data with no
+located reader — nothing found so far binds a CLUT for this quad. A capture shows the logo GREY, and the
+bank has exactly one palette for that: built-in id 4, `000000 080808 181818 ... D8D8D8 E8E8E8`, a monotonic
+sixteen-step grey ramp. The strip is authored against palette 68, whose sixteen entries are a blue ramp in
+the same index order — the sixty rows of the strip use exactly those sixteen colours — so 4 is the same
+image with the colour taken out, at the same weight and with its anti-aliasing intact. The other greys in
+the bank are not it: 75 is the same ramp stopped at 0x78 and comes out too dark, 76 runs bright-to-dark and
+inverts the art, 73 is a flat white, and 70 — which §11 calls the white-only mask — has four live levels
+out of sixteen and leaves a stippled fragment rather than an outline. 70 is right for a GLYPH, whose art
+sits in that band, and that is what it is there for.
+
+**What that retracts, and what survives it.** An earlier pass here argued the picture comes from
+`LEVELS/QDUMMY/` — level table record 3, `Dummy` — on the strength of what that directory holds:
+
+| file | size | what is in it |
+|---|---|---|
+| `COMMON.DAT` | 39,804 | **one** model: `Q2LOGO` |
+| `SNDVRAM.DAT` | 21,332 | **one** named image: `FrontEnd.lbm` |
+| `ZONE0.DAT` | 840 | a header — there is no world in it |
+
+A retail capture of the front end's `STARTING` / `GAME` screen shows the logo **hollow**, so the solid
+`Q2LOGO` was wrong; a second pass reached for `q2logowire`, QFRONT's outlined twin of the same mesh (6 parts,
+306 vertices, 281 faces, differing only in the texture id its faces name — 4 against 0), which is the right
+shape, the wrong colour, and in the one directory an in-level load cannot borrow from. Both readings were
+models because the title screen's logo is a model, and neither looked at the sheet the same screen was
+already writing its word out of.
+
+What survives is the observation and not the argument. QDUMMY's shape is still striking, its `LevelBin` still
+compares the level name against `"Dummy"` at `module+0x96C` and installs `module+0x2E1C` — four instructions
+that ask for the next state once four frames have gone by — and the `Dummy` record is still reachable from
+that module and from nothing in the executable. What the directory is FOR is not settled here.
+
+Reconstructed in `src/game/loading.[ch]`, with the page in `src/menu/pages.c` where
+`q2psx-inspect menu <disc>` checks it against `0x800A3314` record by record. The port opens QDUMMY's
+`SNDVRAM.DAT` once and holds its VRAM image for the run — not because that directory is special, but because
+at 21 KB it is the smallest thing on the disc carrying `frontend.lbm`, and a screen that is up *while a map's
+pages are being replaced* cannot draw out of the live image.
+
+### 11.13.1 `STARTING` / `GAME`, and the third page — **SOLVED**
+
+The same furniture carries the front end's own version, and it is what a capture of the half second between a
+confirmed difficulty and the opening reel shows. `0x80101E4C` — the handler all three difficulty records call
+— opens with `module+0x3414(NULL, 19)`, so the screen is **module page 19** built by the ordinary front-end
+page builder with no banner, and the records are at `module+0x0EBF4`:
+
+| record | text | x | y |
+|---|---|---|---|
+| `module+0x0EBF4` | `STARTING` | 256 | 111 |
+| `module+0x0EC0C` | `GAME` | 256 | 137 |
+
+— two rows on the 26-pixel pitch, the same shape as RESTARTING / LEVEL. A third page at `module+0x0EBC4` is
+one row reading `DEMO OF GAME` at (256, 111) and belongs to the attract loop.
+
+Those two rows are also the RULER the logo's corner was measured with: they are the only things in the
+capture whose frame-buffer coordinates are known, so the distance between them fixes the scale of the
+picture and everything else in it can be read off in the console's own 512 x 248 pixels.
+
 ## 12. The screen — **CONFIRMED**
 
 Everything between "the game has decided what to draw" and "a field is on the television": the display and
