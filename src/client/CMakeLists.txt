@@ -24,6 +24,22 @@ if(WIN32)
                 $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:q2psx>
             VERBATIM)
     endif()
+
+    # Always refresh the local launch directory, even when q2psx is up to date.
+    # Copy only build-owned files; disc images, saves and settings stay in place.
+    set(q2psx_stage_files
+        $<TARGET_FILE:q2psx>
+        "${PROJECT_SOURCE_DIR}/scripts/Play.cmd"
+        "${PROJECT_SOURCE_DIR}/LICENSE")
+    if(q2psx_sdl_type STREQUAL "SHARED_LIBRARY")
+        list(APPEND q2psx_stage_files $<TARGET_FILE:SDL3::SDL3>)
+    endif()
+    add_custom_target(stage-local ALL
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${PROJECT_SOURCE_DIR}/.install"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${q2psx_stage_files} "${PROJECT_SOURCE_DIR}/.install"
+        DEPENDS q2psx
+        VERBATIM)
 endif()
 
 # A release archive puts the client and a fetched libSDL3 in the same directory,

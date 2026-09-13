@@ -85,6 +85,7 @@ change; see [`docs/RELEASING.md`](docs/RELEASING.md).
 - Saves are version 6. This round changed what a saved event flag means, so a version-5 save's spent script records are migrated on load and stay spent.
 
 ### Build and packaging
+- Windows client builds now refresh `.install/` with the executable, SDL3 runtime and a local launcher, while preserving disc data and configuration already there.
 - Windows builds copy an imported SDL3 runtime beside the client, so the executable and client regression tests can start. The split-client suite exercises SDL virtual controllers without opening a window; disc-backed checks cover every arena, all eleven view weapons, both regions and complete matches.
 - The full Windows client builds with MSVC warnings treated as errors: creature-shot damage types use the damage function's 16-bit representation, and the menu pointer's hit record starts initialized.
 - The repository is licensed: GPL-2.0, in `LICENSE`, and it ships in the release archives as that licence requires.

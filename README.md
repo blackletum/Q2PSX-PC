@@ -228,6 +228,21 @@ preserves wins across arena reloads and ends at the round limit (`--dm-rounds N`
 for captures). Results freeze the arena and wait for every player to press fire.
 The short automatic respawn used by `--demo --dm-stage` is a capture script.
 
+On Windows, client builds also refresh `.install/` with `q2psx.exe`, SDL3 and
+`Play.cmd`. To refresh it explicitly from the existing MSVC build:
+
+```powershell
+cmake -S . -B build-msvc -DCMAKE_BUILD_TYPE=Release
+cmake --build build-msvc --config Release --target stage-local --parallel
+.\.install\q2psx.exe --version
+```
+
+Launch with `.\.install\q2psx.exe --disc "path\to\your\disc.cue"`, or put a copy
+of your CUE at `.install/disc/game.cue` with its referenced BIN tracks alongside
+it and double-click `.install/Play.cmd`. The launcher forwards additional command
+line options, including `--disc` to override that default. Builds preserve disc
+data, saves and configuration in `.install/`; the directory is ignored by Git.
+
 `tests/check_split_support.py` accepts the same `--client`, `--disc` and `--output`
 arguments. It checks four live spawns on all thirteen arenas and complete
 Deathmatch, Team Deathmatch and Versus matches. CTest's `split_client` additionally

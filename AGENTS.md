@@ -2,6 +2,31 @@
 
 Instructions for AI agents working in this repository.
 
+## Leave a runnable local build after every turn
+
+- Before completing **every turn**, ensure `<repo>/.install/q2psx.exe` is built
+  from the current source and copied into place with its required runtime DLLs.
+  This is a standing user requirement, including turns that only change docs.
+- Use the existing configured Windows client build (currently `build-msvc`).
+  Reconfigure to refresh the embedded Git version, then build the `stage-local`
+  target, which also refreshes the executable when no recompilation is needed:
+
+  ```powershell
+  cmake -S . -B build-msvc -DCMAKE_BUILD_TYPE=Release
+  cmake --build build-msvc --config Release --target stage-local --parallel
+  .\.install\q2psx.exe --version
+  ```
+
+- `stage-local` copies the client, SDL3 runtime, licence and `Play.cmd`. It also
+  runs as part of a normal Windows client build. Verify the staged executable
+  starts; for gameplay changes, run appropriate tests and a headless smoke test
+  from `.install/` using the user's disc.
+- Preserve existing `.install/disc/`, saves and local configuration. The optional
+  `Play.cmd` launcher reads `.install/disc/game.cue` with its referenced tracks;
+  an explicit `--disc` argument can select another disc. Never commit `.install/`.
+- If a build or copy is blocked, report the blocker and whether `.install/`
+  still contains an older build; do not describe stale output as current.
+
 ## Show the work visually
 
 This project is a visual recreation — the output of most changes is something you can
