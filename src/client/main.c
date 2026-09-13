@@ -1436,6 +1436,9 @@ typedef struct client {
     bool             headless;
     bool             demo;               /* drive the pad from a script     */
     bool             watch;              /* frame the nearest live creature  */
+    u32              watch_hold;         /* ...and stay on a kill this long   */
+    u32              watch_slot;         /* framed creature + 1; 0 is none    */
+    u32              watch_hold_left;    /* frames of that hold still to run  */
     q2_world_stats   shot_stats;         /* what the last viewport drew     */
     long             frame_index;
     long             frames_total;       /* 0 = run until the window closes */
@@ -7044,6 +7047,59 @@ static bool client_key_down(const client *c, SDL_Scancode a, SDL_Scancode b)
  */
 #define CLIENT_MOUSE_DIV 4
 
+/*
+ * `--watch`'s choice of creature, shared by the aim before the tick and the
+ * framing after it so the two cannot disagree.
+ *
+ * Normally the nearest live one with a model. With `--watch-hold N` a
+ * creature that dies while framed stays framed for N more frames — long
+ * enough to see what a death leaves behind, a drop landing or gibs
+ * scattering, which the plain `--watch` cut away from on the frame it
+ * happened. `*holding` says the creature is dead, so the caller stops
+ * steering the player at it. `advance` is true at exactly one call a
+ * frame, which is the one that spends the hold. A harness, not gameplay.
+ */
+static const q2_monster *client_watch_pick(client *c, const s32 eye[3],
+                                           bool advance, bool *holding)
+{
+    const q2_monster *best = NULL;
+    s64 best_d = 0;
+    u32 i, best_i = 0;
+
+    *holding = false;
+
+    if (c->watch_slot && c->watch_slot <= c->creatures.set.count) {
+        const q2_monster *m = &c->creatures.set.monsters[c->watch_slot - 1];
+
+        if ((m->dead || !m->in_use) && c->watch_hold_left) {
+            if (advance)
+                c->watch_hold_left--;
+            *holding = true;
+            return m;
+        }
+    }
+
+    for (i = 0; i < c->creatures.set.count; i++) {
+        const q2_monster *m = &c->creatures.set.monsters[i];
+        s64 dx, dy, dz, d;
+
+        if (!m->in_use || m->dead || !c->cre_model_ok[i])
+            continue;
+
+        dx = m->pos[0] - eye[0];
+        dy = m->pos[1] - eye[1];
+        dz = m->pos[2] - eye[2];
+        d  = dx * dx + dy * dy + dz * dz;
+        if (!best || d < best_d) { best = m; best_d = d; best_i = i; }
+    }
+
+    if (advance) {
+        c->watch_slot      = best ? best_i + 1 : 0;
+        c->watch_hold_left = c->watch_hold;
+    }
+    return best;
+}
+
 static void client_input_simulated(client *c, float dt)
 {
     q2_input in;
@@ -7284,28 +7340,16 @@ static void client_input_simulated(client *c, float dt)
      * the frame after the one that fired.
      */
     if (c->watch && c->creatures_ready) {
-        const q2_monster *best = NULL;
-        s64 best_d = 0;
+        const q2_monster *best;
+        bool holding;
         s32 eye0[3];
-        u32 i;
 
         q2_sim_eye(&c->sim[0], eye0);
+        best = client_watch_pick(c, eye0, true, &holding);
 
-        for (i = 0; i < c->creatures.set.count; i++) {
-            const q2_monster *m = &c->creatures.set.monsters[i];
-            s64 dx, dy, dz, d;
-
-            if (!m->in_use || m->dead || !c->cre_model_ok[i])
-                continue;
-
-            dx = m->pos[0] - eye0[0];
-            dy = m->pos[1] - eye0[1];
-            dz = m->pos[2] - eye0[2];
-            d  = dx * dx + dy * dy + dz * dz;
-            if (!best || d < best_d) { best = m; best_d = d; }
-        }
-
-        if (best) {
+        /* A held kill is watched, not shot at: leave the player where the
+         * last live frame put them. */
+        if (best && !holding) {
             s32 to[3];
             double horiz, p;
 
@@ -8679,23 +8723,8 @@ static void client_input_simulated(client *c, float dt)
      * buffer, a creature behind a wall is emitted and then painted over.
      */
     if (c->watch && c->creatures_ready) {
-        const q2_monster *best = NULL;
-        s64 best_d = 0;
-        u32 i;
-
-        for (i = 0; i < c->creatures.set.count; i++) {
-            const q2_monster *m = &c->creatures.set.monsters[i];
-            s64 dx, dy, dz, d;
-
-            if (!m->in_use || m->dead || !c->cre_model_ok[i])
-                continue;
-
-            dx = m->pos[0] - eye[0];
-            dy = m->pos[1] - eye[1];
-            dz = m->pos[2] - eye[2];
-            d  = dx * dx + dy * dy + dz * dz;
-            if (!best || d < best_d) { best = m; best_d = d; }
-        }
+        bool holding;
+        const q2_monster *best = client_watch_pick(c, eye, false, &holding);
 
         if (best) {
             s32 to[3];
@@ -13941,6 +13970,10 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--headless"))              c.headless = true;
         else if (!strcmp(argv[i], "--demo"))                  c.demo = true;
         else if (!strcmp(argv[i], "--watch"))                 c.watch = true;
+        else if (!strcmp(argv[i], "--watch-hold") && i + 1 < argc) {
+            c.watch      = true;
+            c.watch_hold = (u32)atoi(argv[++i]);
+        }
         else if (!strcmp(argv[i], "--zone-probe"))            zone_probe = true;
         else if (!strcmp(argv[i], "--sort-data"))             c.use_sort = true;
         else if (!strcmp(argv[i], "--depth-sort"))            c.use_sort = false;

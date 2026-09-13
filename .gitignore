@@ -51,6 +51,9 @@ compile_commands.json
 # output, not sources, and they are attached to a GitHub release instead.
 /dist/
 
+# Agent build logs, captures and temporary test profiles.
+/.agents/tmp/
+
 # Python bytecode, from the release tooling in scripts/ and tools/.
 __pycache__/
 *.pyc
