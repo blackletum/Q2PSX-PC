@@ -6598,11 +6598,25 @@ for one player, `qk2_menu.lbm` for two and `qkm_menu.lbm` for three or four.
 ### 16.11 The scoreboard, as a second witness
 
 `MPResults` is an ordinary map whose `LevelBin` is the 29,988-byte front-end-style module the other non-level
-screens share. It is not reconstructed here, but it is worth recording what it reads, because it corroborates
+screens share. Its score text and readiness loop corroborate
 the layout above from a consumer QMULTI.C never talks to: `+882` (player count), `+880` (mode), `+1204`
 (`frags[]`) and `+1212` (`team_frags[]`) — and **not** `+1220`, which is the second half of the evidence that
 the kill matrix is write-only. Its own strings are the six scoreboard titles, the four team colours,
 `"%s TEAM SCORED %d"`, and `"ALL PLAYERS PRESS"` / `"FIRE TO CONTINUE"`.
+
+The readiness loop is `0x80101580`. It reads the player count from engine `+882`, calls the
+per-player fire-edge predicate through engine `+344` (`0x801015E0..0x801015EC`), and latches one byte
+per player at module `+0x5250`. A ready row gains the literal `READY` (`0x80101608..0x80101648`).
+While any player is unready, module `+0x5254` is reset to **150** (`0x801016E8`). After all are ready,
+the frame's dt at engine `+0xD4` is subtracted; `bgez` at `0x801016CC` waits at zero too, and only a
+negative result writes request **18** through engine `+0x3AC` (`0x801016D8..0x801016E0`).
+`q2_mp_results_tick` carries this latch and strict deadline. The engine handles 18 at `0x800187D0`
+by calling `0x8007CCE0(2)`; the port's return to multiplayer setup is an explicit flow adapter.
+
+Request **19** reloads the arena, so module-owned round state is fresh while engine-owned scores,
+limits and the kill matrix survive. `q2_mp_round_start` resets that transient state, and the client
+performs the load outside the active simulation frame. Real respawns require the owning player's
+fresh fire edge; the staged headless demo's automatic respawn is a capture fixture.
 
 ### 16.12 What is not reconstructed
 

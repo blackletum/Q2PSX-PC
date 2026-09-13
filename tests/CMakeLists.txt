@@ -53,6 +53,14 @@ target_link_libraries(test_sim PRIVATE
 
 add_test(NAME sim_behaviour COMMAND test_sim)
 
+if(TARGET q2psx)
+    add_executable(test_client_split test_client_split.c ../src/client/gamepad.c)
+    get_target_property(split_client_libraries q2psx LINK_LIBRARIES)
+    target_link_libraries(test_client_split PRIVATE ${split_client_libraries})
+    add_dependencies(test_client_split q2psx)
+    add_test(NAME split_client COMMAND test_client_split)
+endif()
+
 add_executable(test_pad test_pad.c)
 
 target_link_libraries(test_pad PRIVATE

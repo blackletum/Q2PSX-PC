@@ -1,4 +1,4 @@
-add_executable(q2psx main.c)
+add_executable(q2psx main.c gamepad.c)
 
 target_link_libraries(q2psx PRIVATE
     q2psx_common
@@ -13,6 +13,18 @@ target_link_libraries(q2psx PRIVATE
     q2psx_game
     SDL3::SDL3
 )
+
+# Imported SDL builds need the same runtime placement as fetched SDL builds.
+# Otherwise a successful MSVC link produces an executable that cannot start.
+if(WIN32)
+    get_target_property(q2psx_sdl_type SDL3::SDL3 TYPE)
+    if(q2psx_sdl_type STREQUAL "SHARED_LIBRARY")
+        add_custom_command(TARGET q2psx POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:q2psx>
+            VERBATIM)
+    endif()
+endif()
 
 # A release archive puts the client and a fetched libSDL3 in the same directory,
 # so the loader has to look there. CMake appends this to the rpath it computes

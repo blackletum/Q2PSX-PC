@@ -154,6 +154,7 @@
 #include "screen.h"
 #include "sortdata.h"
 #include "pad.h"
+#include "gamepad.h"
 #include "sim.h"
 #include "statusbar.h"
 #include "trig.h"
@@ -378,6 +379,17 @@ typedef struct client {
     q2_sim           sim[Q2_MP_MAX_PLAYERS];
     bool             sim_ready[Q2_MP_MAX_PLAYERS];
     q2_pad_state     mp_pad[Q2_MP_MAX_PLAYERS];
+    u16             mp_pad_pend[Q2_MP_MAX_PLAYERS];
+    bool            mp_pad_resume[Q2_MP_MAX_PLAYERS];
+    q2_input        mp_input[Q2_MP_MAX_PLAYERS];
+    s32             mp_camera_angles[Q2_MP_MAX_PLAYERS][3];
+    q2_gamepads     gamepads;
+    bool            gamepad_player_one;
+    q2_mp_results   mp_results;
+    double          mp_results_dt_frac;
+    u32             mp_results_prev[Q2_MP_MAX_PLAYERS];
+    bool            mp_results_entered;
+    u32             mp_rounds_restarted;
 
     /*
      * PLAYER 0'S PAD, and it lives here rather than as a static inside the
@@ -833,8 +845,8 @@ typedef struct client {
      * and the LOADMAP, and for the same reason: the CALL that raised it runs
      * inside the script a zone load would free.
      */
-    q2_start_pos      pending_teleport;
-    bool              pending_teleport_have;
+    q2_start_pos      pending_teleport[Q2_MP_MAX_PLAYERS];
+    bool              pending_teleport_have[Q2_MP_MAX_PLAYERS];
 
     /*
      * `--zone-trace`: the instrumentation asked for after "it still happens".
@@ -3110,17 +3122,16 @@ static u32 client_mp_rng(void *user)
  * `level_time > minutes * 18000`, and 18000 units is sixty seconds at 300 to
  * the second.
  */
-static void client_mp_tick(client *c, float dt)
+static void client_mp_tick(client *c, s32 ticks)
 {
-    s32 ticks = (s32)((double)dt * 300.0 + 0.5);
     q2_mp_request req;
 
     if (!c->mp_enabled || c->mp_last_request != Q2_MP_REQ_NONE)
         return;                     /* the match is over and asked for a screen */
 
-    if (ticks < 1)
-        ticks = 1;
-    c->mp_level_time += ticks;
+    if (ticks <= 0)
+        return;
+    c->mp_level_time = c->sim[0].level_time;
 
     req = q2_mp_frame(&c->mp, c->mp_level_time, ticks);
 
@@ -3140,17 +3151,8 @@ static void client_mp_tick(client *c, float dt)
     if (req == Q2_MP_REQ_NONE)
         return;
 
-    /*
-     * The banner has run out and the runtime wants a game state: 11 loads the
-     * scoreboard, 19 restarts the round. Both are the engine's own ids, and
-     * this port has neither screen, so the request is recorded and reported
-     * rather than acted on — which is the honest half of the pair.
-     *
-     * Taking it also stops the session: on the console the request CHANGES THE
-     * GAME STATE, so the level hook stops running. Leaving it ticking here made
-     * the runtime re-ask on every frame, which is what the first run of this
-     * code did — sixty-odd identical requests for one match that ended once.
-     */
+    /* The main loop consumes round reloads after this frame releases the
+     * current level; results take ownership of subsequent input frames. */
     c->mp_last_request = q2_mp_take_request(&c->mp);
 
     /* State 11 is "load MPResults". The port shows the scoreboard rather than
@@ -3186,6 +3188,15 @@ static void client_mp_tick(client *c, float dt)
  * Nothing registered players before this: `combat.targets` held creatures only,
  * so in a deathmatch every shot passed straight through everybody.
  */
+/* The fade and dissolve thinks (0x8005B358 / 0x8005B39C) no longer append
+ * to the damage sweep. DYING and DOWN corpses still do, so they can be gibbed. */
+static bool client_player_targetable(const client *c, int pi)
+{
+    q2_pdeath_stage stage = c->death[pi].stage;
+    return stage == Q2_PDEATH_ALIVE || stage == Q2_PDEATH_DYING ||
+           stage == Q2_PDEATH_DOWN;
+}
+
 static u32 client_targets_for(client *c, int who)
 {
     u32 n = 0, i;
@@ -3196,7 +3207,8 @@ static u32 client_targets_for(client *c, int who)
 
     if (c->mp_enabled)
         for (i = 0; i < Q2_MP_MAX_PLAYERS && n < Q2_CLIENT_MAX_TARGETS; i++) {
-            if ((int)i == who || !c->sim_ready[i])
+            if ((int)i == who || (i > 0 && !c->sim_ready[i]) ||
+                !client_player_targetable(c, (int)i))
                 continue;
             /*
              * ALWAYS the parked slot, never `combat.self`.
@@ -3233,9 +3245,12 @@ static u32 client_targets_for(client *c, int who)
         for (k = 0; k < Q2_MP_MAX_PLAYERS && w < Q2_CLIENT_MAX_TARGETS; k++) {
             if (k > 0 && !c->sim_ready[k])
                 continue;
-            c->mp_world_target[w++] = (k == (u32)c->sim[0].cur_player)
-                                          ? &c->sim[0].combat.self
-                                          : &c->sim[0].pcombat[k].self;
+            q2_actor *actor = k == (u32)c->sim[0].cur_player
+                                  ? &c->sim[0].combat.self
+                                  : &c->sim[0].pcombat[k].self;
+            actor->takedamage = client_player_targetable(c, (int)k)
+                                   ? Q2_DAMAGE_AIM : Q2_DAMAGE_NO;
+            if (actor->takedamage) c->mp_world_target[w++] = actor;
         }
 
         q2_sim_set_world_targets(&c->sim[0], c->mp_world_target, w);
@@ -3253,11 +3268,6 @@ static u32 client_targets_for(client *c, int who)
     return n;
 }
 
-/*
- * A parked player takes damage on their ACTOR; their inventory is a separate
- * field and only the live player's pair is synchronised. Copy it back so a hit
- * landed while they were parked is still there when their frame runs.
- */
 /*
  * Any player whose health has crossed zero scores a frag for whoever did it.
  *
@@ -3281,7 +3291,10 @@ static void client_score_deaths(client *c)
 
         if (i > 0 && !c->sim_ready[i])
             continue;
-        if (a->health > 0) {
+        const q2_inventory *inv = i == c->sim[0].cur_player
+                                      ? &c->sim[0].combat.inv
+                                      : &c->sim[0].pcombat[i].inv;
+        if (inv->health > 0) {
             c->mp_dead[i] = false;
             continue;
         }
@@ -3311,22 +3324,17 @@ static void client_score_deaths(client *c)
                     c->mp.frags[2], c->mp.frags[3]);
         }
     }
-}
-
-static void client_sync_parked_health(client *c)
-{
-    int i;
-
-    if (!c->mp_enabled)
-        return;
-
-    for (i = 0; i < Q2_MP_MAX_PLAYERS; i++) {
-        if (i == c->sim[0].cur_player || !c->sim_ready[i])
-            continue;
-        if (c->sim[0].pcombat[i].self.health != c->sim[0].pcombat[i].inv.health)
-            c->sim[0].pcombat[i].inv.health =
-                c->sim[0].pcombat[i].self.health;
+    if (c->mp.mode == Q2_MP_VERSUS) {
+        q2_mp_player_view players[Q2_MP_MAX_PLAYERS] = {0};
+        for (i = 0; i < c->mp.player_count; i++) {
+            const q2_inventory *inv = i == c->sim[0].cur_player
+                                          ? &c->sim[0].combat.inv
+                                          : &c->sim[0].pcombat[i].inv;
+            players[i].alive = (i == 0 || c->sim_ready[i]) && inv->health > 0;
+        }
+        q2_mp_versus_check(&c->mp, players, (u32)c->mp.player_count);
     }
+
 }
 
 /* ------------------------------------------------------------------------- */
@@ -3428,43 +3436,15 @@ static bool client_mp_respawn(client *c, int pi)
     c->mp_view_yaw[pi]    = c->mp_spawns[pick].angle;
     c->mp_view_valid[pi]  = true;
 
-    /*
-     * The loadout goes back BEFORE the spawn, because `q2_sim_spawn` seeds the
-     * pain diff from the inventory it finds: spawn first and the new life
-     * starts with `prev_health` at whatever the corpse had, so the first tick
-     * reads a hundred-point rise and the one after reads a drop as damage.
-     */
     {
         int saved = c->sim[0].cur_player;
-
-        c->sim[0].cur_player = pi;
-        if (pi == 0) {
-            c->sim[0].combat.inv       = c->mp_start_inv;
-            c->sim[0].combat.weapon_id = c->mp_start_weapon;
-            c->sim[0].combat.next_fire = 0;
-        }
+        q2_sim_select_player(&c->sim[0], pi);
+        c->sim[0].combat.inv = c->mp_start_inv;
         q2_sim_spawn(&c->sim[0], feet, c->mp_view_yaw[pi]);
-        c->sim[0].player[pi].ground_y = feet[1];
-        c->sim[0].cur_player = saved;
-    }
-
-    if (pi > 0) {
-        q2_sim_player_reset_combat(&c->sim[0], pi);
-        c->sim[0].pcombat[pi].self.owner = (s8)pi;
-    } else {
-        /*
-         * A FRESH ENTITY, not the corpse refreshed. 0x8003DE14 calls
-         * 0x8003B250, which allocates through 0x8006C098 — 768 bytes cleared
-         * (0x8006C164/0x8006C18C) — and then 0x8003DE34 stores 4 at +222.
-         * q2_actor_from_player carries the killer byte, the mod and the
-         * damage-effect timers across its refresh (combat.c), so without the
-         * init the new life kept the last one's killer and effects.
-         */
-        q2_actor_init(&c->sim[0].combat.self);
-        q2_actor_from_player(&c->sim[0].combat.self, &c->sim[0].combat.inv,
-                             c->sim[0].player[0].pos);
-        c->sim[0].combat.self.owner = 0;
-        c->cam.roll = 0;      /* and the death cam's tilt goes with the body */
+        q2_sim_player_loadout(&c->sim[0], pi, &c->mp_start_inv,
+                              c->mp_start_weapon);
+        q2_sim_select_player(&c->sim[0], saved);
+        if (pi == 0) c->cam.roll = 0;
     }
 
     /* And the carousel, from the loadout just handed back: 0x8003B250 runs
@@ -3489,6 +3469,15 @@ static bool client_mp_respawn(client *c, int pi)
  * reads the same offsets.
  */
 static bool client_load_zone(client *c, const char *map, int index);
+
+/* Deferred script work must retain the entity passed to the CALL dispatcher.
+ * Several players can enter different teleport volumes on the same frame. */
+static void client_queue_teleport(client *c, const q2_start_pos *sp)
+{
+    int pi = c->sim[0].cur_player;
+    c->pending_teleport[pi] = *sp;
+    c->pending_teleport_have[pi] = true;
+}
 
 /* Selects the loaded level's music. Defined beside the rest of the music code;
  * declared here because client_load_zone ends by calling it. */
@@ -4042,11 +4031,8 @@ static void client_event_call(void *user, const q2_event_item *item,
      * TELEPORT, SETWIBBLE and HELPCOMPUTER — three more the histogram named.
      *
      * TELEPORT's `start_pos` resolves 28 of 28 disc-wide against the map's own
-     * spawns. The console "switches zone first if the target is in another
-     * one, then sets entity position"; the zone switch is not done here and is
-     * stated rather than hidden — a target in the resident zone moves the
-     * player, one elsewhere is refused and logged, so the two cases cannot be
-     * confused with each other.
+     * spawns. Placement and any zone switch are deferred until the frame has
+     * finished reading the current zone, with the triggering player retained.
      *
      * SETWIBBLE writes the low four bits of its operand into `flags08` bits
      * 10..13, and bits 10-11 are the DRAW VARIANT: variant 3 links nothing,
@@ -4080,8 +4066,7 @@ static void client_event_call(void *user, const q2_event_item *item,
                      * for the reason every other transition is: this CALL is
                      * running inside the script a zone load would free.
                      */
-                    c->pending_teleport      = sp;
-                    c->pending_teleport_have = true;
+                    client_queue_teleport(c, &sp);
                     c->script_teleports++;
                     Q2_INFO("TELEPORT to '%s' (zone %d)", sp.name,
                             (int)sp.zone);
@@ -6406,18 +6391,8 @@ static bool client_load_zone(client *c, const char *map, int index)
          */
         c->carry_same_map = false;
 
-        /*
-         * The other players. Each gets its own sim, standing at its own
-         * MultiSpawn, and from here on each moves under its own pad — so a
-         * split-screen viewport shows a player walking rather than a fixed
-         * camera parked at a spawn point.
-         *
-         * Their world halves run and are ignored: each instance spawns its own
-         * copy of the map's items and runs its own script, and nothing reads or
-         * draws any of it. That is the cost of the player living inside q2_sim,
-         * and it is a cost rather than a bug — the duplicate worlds are
-         * invisible and self-consistent. Question 53 is the fix.
-         */
+        /* Extra players share this world's items, script and clock. Each
+         * starts at its own MultiSpawn with a separate inventory and pad. */
         if (c->mp_enabled) {
             int pi;
 
@@ -6449,11 +6424,12 @@ static bool client_load_zone(client *c, const char *map, int index)
                      * four ended a capture at y 64847.
                      */
                     int saved = c->sim[0].cur_player;
-
-                    c->sim[0].cur_player = pi;
+                    q2_inventory start = c->sim[0].combat.inv;
+                    q2_sim_select_player(&c->sim[0], pi);
+                    c->sim[0].combat.inv = start;
                     q2_sim_spawn(&c->sim[0], pfeet, c->mp_view_yaw[pi]);
                     c->sim[0].player[pi].ground_y = pfeet[1];
-                    c->sim[0].cur_player = saved;
+                    q2_sim_select_player(&c->sim[0], saved);
                 }
                 q2_sim_player_reset_combat(&c->sim[0], pi);
                 c->sim[0].pcombat[pi].self.owner = (s8)pi;
@@ -7030,6 +7006,8 @@ static u16 client_pad_mask(const client *c, const q2_pad_bindings *b)
 
     if (c->demo)
         return client_demo_pad(c->frame_index);
+    if (c->headless)
+        return 0;
 
     keys = SDL_GetKeyboardState(NULL);
     if (!keys)
@@ -7491,6 +7469,67 @@ static void client_advance_view_weapon(client *c, bool attack, float dt)
 
 }
 
+static void client_extra_input(client *c, int pi, s32 step, bool resumed,
+                                q2_input *out)
+{
+    q2_pad_state *pad = &c->mp_pad[pi];
+    q2_pad_config cfg;
+    u32 raw;
+    if (c->gamepads.changed[pi]) {
+        memset(pad, 0, sizeof(*pad));
+        c->mp_pad_pend[pi] = 0;
+        c->mp_pad_resume[pi] = true;
+        c->gamepads.changed[pi] = false;
+    }
+    pad->lx = pad->ly = pad->rx = pad->ry = 0;
+    q2_pad_config_default(&cfg);
+    cfg.style = c->sim[0].player[pi].look_scheme;
+    cfg.swap_y = c->settings.v[Q2_SET_SWAP_Y];
+    raw = c->demo ? client_demo_pad((long)c->frame_index + (long)pi * 37)
+                  : q2_gamepads_read(&c->gamepads, pi, cfg.style, pad);
+    c->gamepads.pressed[pi] = 0;
+    c->mp_pad_resume[pi] |= resumed;
+    c->mp_pad_pend[pi] |= (u16)raw;
+    if (step > 0) {
+        if (c->mp_pad_resume[pi])
+            q2_pad_roll_resume(pad, c->mp_pad_pend[pi], raw);
+        else
+            q2_pad_roll(pad, c->mp_pad_pend[pi]);
+        c->mp_pad_pend[pi] = 0;
+        c->mp_pad_resume[pi] = false;
+    }
+    q2_pad_read(pad, &cfg, out);
+}
+
+static void client_cycle_input(client *c, int pi, const q2_input *in)
+{
+    int saved = c->sim[0].cur_player;
+    if (c->sim[0].player[pi].ent2_flags & Q2_ENT2_DEAD) return;
+    if (!(in->buttons & (Q2_BTN_WEAP_NEXT | Q2_BTN_WEAP_PREV))) return;
+    q2_sim_select_player(&c->sim[0], pi);
+    q2_sim_cycle_weapon(&c->sim[0],
+                        in->buttons & Q2_BTN_WEAP_NEXT ? 1 : -1);
+    client_sbar_write_slots(c, pi, CLIENT_SLOTS_SELECT);
+    q2_sim_select_player(&c->sim[0], saved);
+}
+
+static void client_extra_camera(client *c, int pi)
+{
+    const q2_player *pl = &c->sim[0].player[pi];
+    s32 *angles = c->mp_camera_angles[pi];
+    if (pl->ent2_flags & Q2_ENT2_DEAD) {
+        s32 cur = angles[2] & 4095;
+        s32 d = ((-384 & 4095) - cur) & 4095;
+        if (!(d & 2048)) cur += (d * 100 + 2047) >> 11;
+        else cur -= ((4096 - d) * 100 + 2047) >> 11;
+        angles[2] = cur & 4095;
+    } else {
+        angles[0] = pl->pitch;
+        angles[1] = pl->yaw;
+        angles[2] = pl->roll;
+    }
+}
+
 static void client_input_simulated(client *c, float dt)
 {
     q2_input in;
@@ -7561,7 +7600,17 @@ static void client_input_simulated(client *c, float dt)
      */
     step = q2_sim_next_dt(&c->sim[0], (double)dt);
 
+    pad->lx = pad->ly = pad->rx = pad->ry = 0;
+    if (c->gamepads.changed[0]) {
+        *pend = 0;
+        memset(pad, 0, sizeof(*pad));
+        c->pad_resume = resumed = true;
+        c->gamepads.changed[0] = false;
+    }
     raw = client_pad_mask(c, &bind);
+    if (!c->demo)
+        raw |= (u16)q2_gamepads_read(&c->gamepads, 0, style, pad);
+    c->gamepads.pressed[0] = 0;
 
     /* The wheel, onto the same two masks the weapon keys use, and into `raw`
      * so a notch is latched by the same accumulator as a key. */
@@ -7609,7 +7658,6 @@ static void client_input_simulated(client *c, float dt)
         *pend = 0;
     }
     c->pad_frame = c->frame_index;
-    pad->lx = pad->ly = pad->rx = pad->ry = 0;
 
     q2_pad_config_default(&cfg);
     cfg.style       = style;
@@ -7659,7 +7707,7 @@ static void client_input_simulated(client *c, float dt)
          * of this one, so dividing it out lands on the same turn.
          */
         {
-            const bool *keys = c->demo ? NULL : SDL_GetKeyboardState(NULL);
+            const bool *keys = (c->demo || c->headless) ? NULL : SDL_GetKeyboardState(NULL);
             int key_full = Q2_PAD_FULL / scale;
 
             if (key_full < 1)
@@ -7786,19 +7834,8 @@ static void client_input_simulated(client *c, float dt)
      * falling into it — bit 26 suppresses bit 27 on a frame that somehow
      * carries both, which the wheel's own gap flag makes possible.
      */
-    if (step > 0) {
-        bool selected = true;
-
-        if (in.buttons & Q2_BTN_WEAP_NEXT)      q2_sim_cycle_weapon(&c->sim[0], +1);
-        else if (in.buttons & Q2_BTN_WEAP_PREV) q2_sim_cycle_weapon(&c->sim[0], -1);
-        else                                    selected = false;
-
-        /* The carousel, whatever the step returned: 0x8004ED3C's delay slot
-         * sets a2 = 1 on both arms (client_sbar_write_slots). */
-        if (selected)
-            client_sbar_write_slots(c, c->sim[0].cur_player,
-                                    CLIENT_SLOTS_SELECT);
-    }
+    if (step > 0)
+        client_cycle_input(c, 0, &in);
 
     /*
      * The creatures, published to combat as actors before the tick that may
@@ -8001,16 +8038,16 @@ static void client_input_simulated(client *c, float dt)
     if (q2_sim_next_dt(&c->sim[0], (double)dt) != 0)
         q2_event_rt_trigger_named(&c->sim[0].event_rt, "ALWAYS");
 
+    c->mp_input[0] = in;
     ticked = (q2_sim_advance(&c->sim[0], &in, (double)dt) != 0);
     q2_combat_scan_who = Q2_COMBAT_SCAN_OTHER;
-    client_sync_parked_health(c);
     client_score_deaths(c);
 
     /*
      * The other players, each on its own pad. In a headless demo run there is
      * one script, so each is given a rotated slice of it — otherwise four
      * players would walk in lockstep and a split screen would show one man
-     * reflected four times, which proves nothing about four sims running.
+     * reflected four times, which would hide input-routing faults.
      */
     /*
      * ONE CLOCK, FOUR PLAYERS — 0x80033030 loops 0x800323EC over s0 = 0..3 and
@@ -8039,29 +8076,9 @@ static void client_input_simulated(client *c, float dt)
             if (!c->sim_ready[pi])
                 continue;
 
-            pin = in;
-            if (c->demo) {
-                /* Each player reads the same script at a different phase, so
-                 * four sims produce four walks rather than one reflected. */
-                q2_pad_config pcfg;
-
-                u32 dpad = client_demo_pad((long)c->frame_index +
-                                           (long)pi * 37);
-
-                /* The same gap and the same rule: a scripted pad that was not
-                 * rolled while a screen was up would raise an edge for every
-                 * button its word happens to hold on the frame play resumes. */
-                if (resumed)
-                    q2_pad_roll_resume(&c->mp_pad[pi], dpad, dpad);
-                else
-                    q2_pad_roll(&c->mp_pad[pi], dpad);
-
-                q2_pad_config_default(&pcfg);
-                /* Player `pi` lives in sim[0] now; `sim[pi]` has been an
-                 * uninitialised struct since they moved there. */
-                pcfg.style = c->sim[0].player[pi].look_scheme;
-                q2_pad_read(&c->mp_pad[pi], &pcfg, &pin);
-            }
+            client_extra_input(c, pi, step, resumed, &pin);
+            c->mp_input[pi] = pin;
+            if (ticked) client_cycle_input(c, pi, &pin);
 
             view_attack[pi] = c->mp_stage || pin.attack;
             if (!ticked)
@@ -8089,7 +8106,6 @@ static void client_input_simulated(client *c, float dt)
                 q2_sim_advance_player(&c->sim[0], pi, &pin, ticks);
                 q2_combat_scan_who = Q2_COMBAT_SCAN_OTHER;
 
-                client_sync_parked_health(c);
                 client_score_deaths(c);
             }
         }
@@ -8149,9 +8165,6 @@ static void client_input_simulated(client *c, float dt)
                 client_targets_for(c, pi);
             q2_combat_scan_who = c->mp_enabled ? pi : Q2_COMBAT_SCAN_OTHER;
             client_advance_view_weapon(c, view_attack[pi], dt);
-            /* Hits on parked actors must reach their inventories before the
-             * next select loads them into the live combat block. */
-            client_sync_parked_health(c);
             client_score_deaths(c);
         }
         q2_sim_select_player(&c->sim[0], saved);
@@ -8208,7 +8221,7 @@ static void client_input_simulated(client *c, float dt)
         q2_trail_add(eye, (s16)c->sim[0].player[0].yaw);
 
     /* The multiplayer session's own frame, on the same clock. */
-    client_mp_tick(c, dt);
+    if (ticked) client_mp_tick(c, c->sim[0].cur_dt);
 
     /*
      * The level's own beams, re-queued because the transient pool empties every
@@ -8735,18 +8748,12 @@ static void client_input_simulated(client *c, float dt)
             if (c->mp_enabled && c->mp.end == Q2_MP_RUNNING &&
                 d->stage != Q2_PDEATH_DYING &&
                 q2_mp_may_respawn(&c->mp) && !c->menu.open && !c->mcard_open) {
-                /*
-                 * The local player answers with the button. The parked ones
-                 * have nobody to press it, so they wait for their own body —
-                 * the 1500 the corpse think installs — and come back when it
-                 * has dissolved. STATED as the port's choice: on the console
-                 * the module decides, and the module is driven by a pad.
-                 */
-                bool ask = (pi == 0)
-                               ? (pad->buttons & ~pad->prev & (u16)bind.fire) != 0
-                               : (d->stage == Q2_PDEATH_FADING ||
-                                  d->stage == Q2_PDEATH_GONE ||
-                                  d->stage == Q2_PDEATH_GIBBED);
+                bool ask = ticked &&
+                    (c->mp_input[pi].buttons & Q2_BTN_ATTACK_PRESS) != 0;
+                if (c->demo && c->mp_stage && pi > 0)
+                    ask |= d->stage == Q2_PDEATH_FADING ||
+                           d->stage == Q2_PDEATH_GONE ||
+                           d->stage == Q2_PDEATH_GIBBED;
 
                 if (ask)
                     client_mp_respawn(c, pi);
@@ -8770,6 +8777,11 @@ static void client_input_simulated(client *c, float dt)
         }
     }
 
+    if (c->mp_enabled) {
+        int pi;
+        for (pi = 1; pi < c->mp.player_count; pi++)
+            client_extra_camera(c, pi);
+    }
     c->cam.pos[0] = eye[0];
     c->cam.pos[1] = eye[1];
     c->cam.pos[2] = eye[2];
@@ -8995,9 +9007,15 @@ static u16 client_menu_pad(const client *c)
         return Q2_PAD_CROSS;
     }
 
+    if (c) {
+        int pi;
+        for (pi = 0; pi < Q2_MP_MAX_PLAYERS; pi++)
+            pad |= (u16)c->gamepads.held[pi];
+        if (c->headless) return pad;
+    }
     k = SDL_GetKeyboardState(NULL);
     if (!k)
-        return 0;
+        return pad;
 
     if (k[SDL_SCANCODE_UP])        pad |= Q2_PAD_UP;
     if (k[SDL_SCANCODE_DOWN])      pad |= Q2_PAD_DOWN;
@@ -9236,20 +9254,26 @@ static void client_apply_settings(client *c)
  * picks [0,3) for a mouse, [3,6) for an analogue pad and [6,9) otherwise, from
  * the CONTROLLER THAT IS CONNECTED. On a PC with USE MOUSE on, the mouse is the
  * connected controller — so the toggle drives the class, and the page offers
- * RIGHT MOUSE / RIGHT MOUSE 2 / HUNTER MOUSE instead of three schemes there is
- * no stick to drive. The analogue class is never selected because this port has
- * no gamepad path at all: styles 3..5 are unreachable rather than broken.
+ * RIGHT MOUSE / RIGHT MOUSE 2 / HUNTER MOUSE. A gamepad assigned to player one
+ * selects the analogue class and exposes styles 3..5. Extra controllers use
+ * RIGHT STICK until the front end has per-player controller settings.
  *
  * Cheap enough to run every frame, which is what makes the toggle take effect
  * the moment it is flipped rather than at the next page change.
  */
 static void client_apply_input(client *c)
 {
-    bool want_mouse = c->settings.v[Q2_SET_USE_MOUSE] != 0;
+    bool have_pad = c->gamepads.id[0] != 0 && !c->demo;
+    bool want_mouse = !have_pad && c->settings.v[Q2_SET_USE_MOUSE] != 0;
     int  style;
     int  i;
 
-    if (want_mouse) {
+    if (have_pad) {
+        c->settings.v[Q2_SET_PAD_CLASS] = 1;
+        if (c->settings.v[Q2_SET_PAD_STYLE] < Q2_PAD_STYLE_RIGHT_STICK ||
+            c->settings.v[Q2_SET_PAD_STYLE] > Q2_PAD_STYLE_BOTH_STICKS)
+            c->settings.v[Q2_SET_PAD_STYLE] = Q2_PAD_STYLE_RIGHT_STICK;
+    } else if (want_mouse) {
         c->settings.v[Q2_SET_PAD_CLASS] = 0;
         if (c->settings.v[Q2_SET_PAD_STYLE] < 0 ||
             c->settings.v[Q2_SET_PAD_STYLE] >= Q2_PAD_STYLE_RIGHT_STICK)
@@ -9263,7 +9287,8 @@ static void client_apply_input(client *c)
 
     style = c->settings.v[Q2_SET_PAD_STYLE];
     for (i = 0; i < Q2_SIM_MAX_PLAYERS; i++)
-        c->sim[0].player[i].look_scheme = style;
+        c->sim[0].player[i].look_scheme = i == 0 || c->demo ? style
+                                                       : Q2_PAD_STYLE_RIGHT_STICK;
 
     /* 0x800B3342. The AUTOCENTRE row has been on this page since the menu was
      * transcribed and had nothing on the other end of it; the sim reads it now.
@@ -9411,6 +9436,13 @@ static void client_mp_configure(client *c, q2_mp_mode mode, int players,
     c->mp_targets_logged = false;
     memset(c->sim_ready,     0, sizeof(c->sim_ready));
     memset(c->mp_pad,        0, sizeof(c->mp_pad));
+    memset(c->mp_pad_pend,   0, sizeof(c->mp_pad_pend));
+    memset(c->mp_pad_resume, 0, sizeof(c->mp_pad_resume));
+    memset(c->mp_input,      0, sizeof(c->mp_input));
+    q2_mp_results_init(&c->mp_results);
+    c->mp_results_dt_frac = 0;
+    c->mp_results_entered = false;
+    c->mp_rounds_restarted = 0;
     memset(c->mp_spawns,     0, sizeof(c->mp_spawns));
     memset(c->mp_view_pos,   0, sizeof(c->mp_view_pos));
     memset(c->mp_view_yaw,   0, sizeof(c->mp_view_yaw));
@@ -9436,6 +9468,122 @@ static void client_mp_configure(client *c, q2_mp_mode mode, int players,
             c->mp.frag_limit, c->mp.time_limit, c->mp.round_limit,
             q2_mp_mode_selectable(mode) ? ""
                 : "  (this mode is CUT — the front end cannot select it)");
+}
+
+/* Apply queued teleports after the frame, when a zone load cannot free an
+ * active script. Same-zone placements preserve each owner's inventory and
+ * immediately publish the new body, eye and item-touch position. */
+static bool client_apply_teleports(client *c)
+{
+    int pi;
+    for (pi = 0; pi < Q2_MP_MAX_PLAYERS; pi++) {
+        q2_start_pos sp;
+        q2_sim *sim = &c->sim[0];
+        s32 to[3];
+        int saved;
+        if (!c->pending_teleport_have[pi]) continue;
+        sp = c->pending_teleport[pi];
+        c->pending_teleport_have[pi] = false;
+        if (pi > 0 && (!c->mp_enabled || !c->sim_ready[pi])) continue;
+        if (pi == 0) c->move_reason = "TELEPORT primitive";
+        if (c->zone_trace) {
+            const q2_player *pl = &sim->player[pi];
+            Q2_WARN("[zone] f%-6u TELEPORT player %d '%s' zone %d -> (%d,%d,%d)"
+                    " from (%d,%d,%d) in zone %d", c->trace_frame, pi, sp.name,
+                    (int)sp.zone, sp.x, sp.y, sp.z,
+                    pl->pos[0], pl->pos[1], pl->pos[2], c->zone_index);
+        }
+        if (sp.zone != c->zone_index) {
+            char map[sizeof(c->map)];
+            memcpy(map, c->map, sizeof(map));
+            c->carry_player = true;
+            c->carry_same_map = true;
+            if (!client_load_zone(c, map, sp.zone)) return false;
+        }
+        saved = sim->cur_player;
+        q2_sim_select_player(sim, pi);
+        to[0] = sp.x; to[1] = sp.y; to[2] = sp.z;
+        q2_sim_spawn(sim, to, sp.angle);
+        q2_entity_world_move_player(&sim->ent_world, pi, to);
+        sim->combat.self.origin[0] = to[0];
+        sim->combat.self.origin[1] = q2_sim_origin_y(to[1]);
+        sim->combat.self.origin[2] = to[2];
+        c->mp_camera_angles[pi][0] = sim->player[pi].pitch;
+        c->mp_camera_angles[pi][1] = sim->player[pi].yaw;
+        c->mp_camera_angles[pi][2] = sim->player[pi].roll;
+        if (pi == 0) {
+            q2_sim_player_eye(sim, pi, c->cam.pos);
+            c->cam.pitch = sim->player[pi].pitch;
+            c->cam.yaw = sim->player[pi].yaw;
+            c->cam.roll = sim->player[pi].roll;
+        }
+        q2_sim_select_player(sim, saved);
+        Q2_INFO("teleported player %d to '%s' in zone %d", pi, sp.name, (int)sp.zone);
+    }
+    return true;
+}
+
+/* A round reload happens outside the simulation frame: loading frees its
+ * entity/trigger arrays. Scores and settings are engine globals on retail and
+ * survive QMULTI being reloaded, while every body, item and projectile is new. */
+static bool client_mp_restart_round(client *c)
+{
+    char arena[sizeof(c->map)];
+    if (c->mp_last_request != Q2_MP_REQ_RESTART_ROUND) return true;
+    memcpy(arena, c->map, sizeof(arena));
+    c->carry_player = false;
+    c->carry_same_map = false;
+    if (!client_load_zone(c, arena, c->zone_index)) return false;
+    q2_mp_round_start(&c->mp);
+    c->mp_last_request = Q2_MP_REQ_NONE;
+    c->mp_level_time = c->sim[0].level_time;
+    c->mp_reported = false;
+    memset(c->mp_dead, 0, sizeof(c->mp_dead));
+    c->pad_resume = true;
+    memset(c->mp_pad_resume, 1, sizeof(c->mp_pad_resume));
+    c->mp_rounds_restarted++;
+    Q2_INFO("multiplayer: round restarted %u; wins %d %d %d %d",
+            c->mp_rounds_restarted, c->mp.team_frags[0], c->mp.team_frags[1],
+            c->mp.team_frags[2], c->mp.team_frags[3]);
+    return true;
+}
+
+/* The scoreboard owns input and freezes the arena. QMRESULT +0x1580 reads
+ * every player's fire edge, latches READY and waits 150 ticks after all agree.
+ * The port then returns to its multiplayer setup screen for the next match. */
+static bool client_mp_results_input(client *c, float dt)
+{
+    u32 pressed = 0;
+    double elapsed = c->mp_results_dt_frac + (double)dt * 300.0;
+    s32 ticks = (s32)elapsed;
+    int pi;
+    c->mp_results_dt_frac = elapsed - ticks;
+    if (ticks > Q2_DT_MAX) ticks = Q2_DT_MAX;
+    for (pi = 0; pi < c->mp.player_count; pi++) {
+        q2_pad_bindings bind;
+        q2_pad_state axes = {0};
+        int style = c->sim[0].player[pi].look_scheme;
+        u32 raw;
+        q2_pad_style_bindings(style, &bind);
+        if (c->demo)
+            raw = (c->frame_index % 30) < 3 ? bind.fire : 0;
+        else {
+            raw = q2_gamepads_read(&c->gamepads, pi, style, &axes);
+            if (pi == 0) raw |= client_pad_mask(c, &bind);
+        }
+        if (c->mp_results_entered &&
+            (raw & ~c->mp_results_prev[pi] & bind.fire)) pressed |= 1u << pi;
+        c->mp_results_prev[pi] = raw;
+        c->gamepads.pressed[pi] = 0;
+    }
+    if (!c->mp_results_entered) {
+        q2_mp_results_init(&c->mp_results);
+        c->mp_results_entered = true;
+    }
+    if (pressed)
+        Q2_INFO("multiplayer: results ready mask %X",
+                (unsigned)(c->mp_results.ready | pressed));
+    return q2_mp_results_tick(&c->mp_results, c->mp.player_count, pressed, ticks);
 }
 
 static bool client_mp_start_from_menu(client *c)
@@ -11275,6 +11423,9 @@ static void client_reset_view_model(client *c, int pi)
     u32 serial = pi == sim->cur_player ? sim->combat.shot_serial
                                       : sim->pcombat[pi].shot_serial;
 
+    c->mp_camera_angles[pi][0] = sim->player[pi].pitch;
+    c->mp_camera_angles[pi][1] = sim->player[pi].yaw;
+    c->mp_camera_angles[pi][2] = sim->player[pi].roll;
     if (c->hud_ready) {
         q2_hud_init(&c->hud[pi], &c->hud_tables,
                     c->mp_enabled ? c->mp.player_count : 1);
@@ -12223,7 +12374,8 @@ static s32 client_light_node(const client *c, int p)
     if (c->in_front_end)
         return 0;
 
-    if (c->mp_enabled && p > 0 && p < Q2_MP_MAX_PLAYERS && c->sim_ready[p])
+    if (c->mp_enabled && p >= 0 && p < Q2_MP_MAX_PLAYERS &&
+        (p == 0 || c->sim_ready[p]))
         return c->sim[0].player[p].ent.node;
 
     return c->sim[0].current_node;
@@ -12323,12 +12475,10 @@ static void client_draw_view(void *user, q2_screen *s, int p,
     /* Extra views use their owner's eased eye and plain camera angles.
      * Recoil is added to that owner's weapon below, not to the world camera. */
     if (c->mp_enabled && p > 0 && p < Q2_MP_MAX_PLAYERS && c->sim_ready[p]) {
-        const q2_player *pl = &c->sim[0].player[p];
-
         q2_sim_player_eye(&c->sim[0], p, c->cam.pos);
-        c->cam.yaw   = pl->yaw;
-        c->cam.pitch = pl->pitch;
-        c->cam.roll  = pl->roll;
+        c->cam.pitch = c->mp_camera_angles[p][0];
+        c->cam.yaw   = c->mp_camera_angles[p][1];
+        c->cam.roll  = c->mp_camera_angles[p][2];
     }
 
     /* The viewport's far distance is also the subdivision threshold: the same
@@ -12419,7 +12569,7 @@ static void client_draw_view(void *user, q2_screen *s, int p,
         memset(&ectx, 0, sizeof(ectx));
         ectx.bank          = c->model_bank_ready ? &c->model_bank : NULL;
         ectx.clut4_count_a = c->clut4_count_a;
-        ectx.player        = 0;
+        ectx.player        = (u32)owner;
         ectx.tpage         = &c->render.tpage;
 
         /*
@@ -13588,6 +13738,12 @@ static void client_frame(client *c)
 
         q2_hud_ctx_centre_in(&ctx, c->width, c->height);
         q2_hud_pen_default(&pen);
+        for (li = 0; li < (u32)c->mp.player_count; li++) {
+            if (c->mp_results.ready & (1u << li)) {
+                size_t len = strlen(lines[li + 1]);
+                snprintf(lines[li + 1] + len, Q2_MP_SCORE_LINE - len, "  READY");
+            }
+        }
 
         /*
          * A line's position is the CONTEXT's home, not the pen's x and y —
@@ -13812,7 +13968,10 @@ static void usage(void)
     printf("\n  running without a player:\n");
     printf("  --headless    no window, no audio; a fixed 1/30 s step\n");
     printf("  --demo        drive the pad from a fixed script rather than keys\n");
+    printf("  --dm --dm-players N  start a split-screen arena match (1..4)\n");
     printf("  --dm-split horizontal|vertical  choose the two-player split\n");
+    printf("  --dm-rounds N  rounds needed to win Versus (1..32767)\n");
+    printf("  --gamepad-player-one  assign four pads starting with player one\n");
     printf("  --crosshair / --no-crosshair  override the crosshair setting\n");
     printf("  --watch       frame and aim at the nearest live creature\n");
     printf("  --watch-hold N  ...and keep a killed creature framed for N frames\n");
@@ -14173,6 +14332,7 @@ int main(int argc, char **argv)
     c.use_sort = true;
     /* Deathmatch settings, applied after the map loads. -1 keeps the
      * shipped default the session initialiser installs. */
+    s16 mp_rounds = q2_mp_round_options[Q2_MP_ROUND_OPTION_DEFAULT];
     q2_mp_mode mp_mode    = Q2_MP_DEATHMATCH;
 
     c.trace_cre = -1;
@@ -14374,12 +14534,23 @@ int main(int argc, char **argv)
                 return 2;
             }
         }
+        else if (!strcmp(argv[i], "--gamepad-player-one"))
+            c.gamepad_player_one = true;
         else if (!strcmp(argv[i], "--dm-stage"))
             c.mp_stage = true;
         else if (!strcmp(argv[i], "--trace-cre") && i + 1 < argc)
             c.trace_cre = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--dm-frags") && i + 1 < argc)
             mp_frags = (s16)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--dm-rounds") && i + 1 < argc) {
+            char *end;
+            long value = strtol(argv[++i], &end, 10);
+            if (*end || value < 1 || value > 32767) {
+                fprintf(stderr, "--dm-rounds wants an integer from 1 to 32767\n");
+                return 2;
+            }
+            mp_rounds = (s16)value;
+        }
         else if (!strcmp(argv[i], "--dm-minutes") && i + 1 < argc)
             mp_minutes = (s16)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--aspect") && i + 1 < argc) {
@@ -14457,11 +14628,13 @@ int main(int argc, char **argv)
         goto no_window;
     }
 
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD)) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         disc_close(c.disc);
         return 1;
     }
+
+    q2_gamepads_open(&c.gamepads, c.gamepad_player_one ? 0 : 1);
 
     /* Declare the stream at the console's own 37800 Hz and let SDL resample to
      * whatever the device wants. */
@@ -14830,8 +15003,7 @@ no_window:
 
         if (mp_horizontal_split >= 0)
             c.settings.v[Q2_SET_HORIZONTAL_SPLIT] = mp_horizontal_split;
-        client_mp_configure(&c, mp_mode, mp_players, frag, time,
-                            q2_mp_round_options[Q2_MP_ROUND_OPTION_DEFAULT]);
+        client_mp_configure(&c, mp_mode, mp_players, frag, time, mp_rounds);
     }
 
     /*
@@ -14987,6 +15159,19 @@ no_window:
         }
 
         while (!c.headless && SDL_PollEvent(&ev)) {
+            int gp = q2_gamepads_event(&c.gamepads, &ev);
+            if (gp >= 0 && (ev.type == SDL_EVENT_GAMEPAD_ADDED ||
+                            ev.type == SDL_EVENT_GAMEPAD_REMOVED))
+                Q2_INFO("controller: player %d %s", gp + 1,
+                        c.gamepads.id[gp] ? "connected" : "disconnected");
+            if (gp >= 0 && ev.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN &&
+                ev.gbutton.button == SDL_GAMEPAD_BUTTON_START &&
+                !c.in_front_end && !c.mp_scoreboard && !c.film_open &&
+                !c.boot_open && !c.mcard_open && !c.mission_open &&
+                !c.briefing_open && !c.endmis_open && !c.credits_open) {
+                if (c.menu.open) client_menu_close(&c);
+                else q2_menu_open(&c.menu);
+            }
             if (ev.type == SDL_EVENT_QUIT) {
                 c.running = false;
             } else if (ev.type == SDL_EVENT_KEY_DOWN) {
@@ -15024,6 +15209,7 @@ no_window:
                     q2_menu_goto(&c.menu, Q2_PAGE_FRONT_TITLE);
                     continue;
                 }
+                if (c.mp_scoreboard) continue;
                 switch (ev.key.key) {
                 case SDLK_ESCAPE:
                     /* START on the console: it opens the pause menu, and
@@ -15366,6 +15552,12 @@ no_window:
              * down and CROSS can still dismiss it.
              */
             client_popup_frame(&c, dt);
+        } else if (c.mp_scoreboard) {
+            if (client_mp_results_input(&c, dt)) {
+                Q2_INFO("multiplayer: all players ready; returning to setup");
+                client_enter_front_end(&c);
+                q2_menu_goto(&c.menu, Q2_PAGE_FRONT_DMSETUP);
+            }
         } else if (c.sim_enabled) {
             client_input_simulated(&c, dt);
         } else {
@@ -15376,6 +15568,11 @@ no_window:
          * everything that reads them. */
         c.mouse_left_prev  = c.mouse_left;
         c.mouse_right_prev = c.mouse_right;
+        {
+            int pi;
+            for (pi = 0; pi < Q2_MP_MAX_PLAYERS; pi++)
+                c.gamepads.pressed[pi] = 0;
+        }
 
         /*
          * Sampled here — after the tick that moves the player and before the
@@ -15392,6 +15589,11 @@ no_window:
             c.death_abandon   = 0;
             client_menu_close(&c);
             client_enter_front_end(&c);
+        }
+
+        if (!client_mp_restart_round(&c)) {
+            Q2_ERROR("multiplayer: failed to reload the next round");
+            c.running = false;
         }
 
         /* A zone gate fired somewhere in the script: another zone of the same
@@ -15448,38 +15650,9 @@ no_window:
             }
         }
 
-        /*
-         * A queued TELEPORT: switch zone first when the target is in another
-         * one, then place — which is the order userfuncs.c records.
-         */
-        if (c.pending_teleport_have) {
-            q2_start_pos sp = c.pending_teleport;
-            s32 to[3];
-
-            c.pending_teleport_have = false;
-            c.move_reason           = "TELEPORT primitive";
-
-            if (c.zone_trace) {
-                const q2_player *pl = &c.sim[0].player[c.sim[0].cur_player];
-                Q2_WARN("[zone] f%-6u TELEPORT  '%s' zone %d -> (%d,%d,%d)"
-                        "  from (%d,%d,%d) in zone %d",
-                        c.trace_frame, sp.name, (int)sp.zone, sp.x, sp.y, sp.z,
-                        pl->pos[0], pl->pos[1], pl->pos[2], c.zone_index);
-            }
-
-            if (sp.zone != c.zone_index) {
-                c.carry_player   = true;
-                c.carry_same_map = true;
-                client_load_zone(&c, c.map, sp.zone);
-            }
-
-            to[0] = sp.x; to[1] = sp.y; to[2] = sp.z;
-            q2_sim_spawn(&c.sim[0], to, sp.angle);
-            c.cam.pos[0] = sp.x;
-            c.cam.pos[1] = sp.y;
-            c.cam.pos[2] = sp.z;
-            c.cam.yaw    = sp.angle;
-            Q2_INFO("teleported to '%s' in zone %d", sp.name, (int)sp.zone);
+        if (!client_apply_teleports(&c)) {
+            Q2_ERROR("failed to load the teleport destination");
+            c.running = false;
         }
 
         /* The mission row is the LEVEL's and is written as its two counters
@@ -15958,6 +16131,7 @@ done:
     if (c.texture)  SDL_DestroyTexture(c.texture);
     if (c.renderer) SDL_DestroyRenderer(c.renderer);
     if (c.window)   SDL_DestroyWindow(c.window);
+    q2_gamepads_close(&c.gamepads);
     SDL_Quit();
     disc_close(c.disc);
     return 0;

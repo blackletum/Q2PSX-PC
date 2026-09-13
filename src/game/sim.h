@@ -1364,9 +1364,16 @@ void q2_sim_select_player(q2_sim *sim, int index);
 /*
  * Give an extra player a level start's inventory and weapon, on a fresh actor
  * (killer byte 4, as 0x8003DE34 places a player). The actor's `owner` comes
- * back -1: the caller names the player afterwards.
+ * back as the player index. Registers the owner for shared item touches.
  */
 void q2_sim_player_reset_combat(q2_sim *sim, int index);
+
+/* A fresh client record from an explicit spawn loadout. Unlike the convenience
+ * reset above this never borrows another player's current health or weapon.
+ * Position the player with q2_sim_spawn first; this seeds the pain baseline,
+ * clears weapon cadence and registers an inventory that follows combat swaps. */
+void q2_sim_player_loadout(q2_sim *sim, int index,
+                            const q2_inventory *inv, int weapon);
 
 /* Where the projectiles in flight got to — launched, stepped, expired, hit. */
 typedef struct q2_sim_proj_stats {

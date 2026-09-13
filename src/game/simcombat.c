@@ -578,6 +578,58 @@ static bool splash_clear(void *ctx, const s32 from[3], const s32 to[3])
     return !tr.hit;
 }
 
+/* Player inventories own pickups and ammunition; actors own damage during a
+ * trace. Synchronise at the damage boundary, before another owner can be
+ * selected or an item can mutate an inventory. Health-only write-back loses
+ * armour and shield cells, and waiting until after a swap loses hits on player 0.
+ * Preserve actor effects/attribution rather than reinitialising a target. */
+static void player_damage_begin(q2_sim *sim)
+{
+    int pi;
+    for (pi = 0; pi < sim->player_count && pi < Q2_SIM_MAX_PLAYERS; pi++) {
+        q2_actor *a = pi == sim->cur_player ? &sim->combat.self
+                                           : &sim->pcombat[pi].self;
+        const q2_inventory *inv = pi == sim->cur_player ? &sim->combat.inv
+                                                       : &sim->pcombat[pi].inv;
+        a->health = inv->health;
+        a->armour = inv->armour;
+        a->armour_class = inv->armour_class;
+        a->cells = inv->ammo[Q2_AMMO_CELLS];
+        a->powerups = inv->flags;
+        a->invuln_until = inv->invuln_until;
+        a->protect_until = inv->enviro_until;
+        a->origin[0] = sim->player[pi].pos[0];
+        a->origin[1] = q2_sim_origin_y(sim->player[pi].pos[1]);
+        a->origin[2] = sim->player[pi].pos[2];
+    }
+}
+
+static void player_damage_impulse(q2_sim *sim, int pi, q2_actor *actor)
+{
+    int axis;
+    if (!actor->knocked) return;
+    for (axis = 0; axis < 3; axis++) {
+        sim->player[pi].impulse[axis] =
+            (s16)(sim->player[pi].impulse[axis] + actor->knockback[axis]);
+        actor->knockback[axis] = 0;
+    }
+    sim->player[pi].impulse_armed = true;
+    actor->knocked = false;
+}
+
+static void player_damage_end(q2_sim *sim)
+{
+    int pi;
+    for (pi = 0; pi < sim->player_count && pi < Q2_SIM_MAX_PLAYERS; pi++) {
+        q2_actor *a = pi == sim->cur_player ? &sim->combat.self
+                                          : &sim->pcombat[pi].self;
+        q2_inventory *inv = pi == sim->cur_player ? &sim->combat.inv
+                                                 : &sim->pcombat[pi].inv;
+        q2_actor_to_player(a, inv);
+        player_damage_impulse(sim, pi, a);
+    }
+}
+
 q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
 {
     q2_fire_result_v2 r;
@@ -680,6 +732,7 @@ q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
     sim->player[sim->cur_player].kick[2]  = r.kick[2];
     sim->player[sim->cur_player].kick_time = sim->level_time + Q2_VIEW_KICK_FIRE;
 
+    player_damage_begin(sim); /* after the fire function spends ammunition */
     switch (r.kind) {
     case Q2_FK_BULLET:
         /* Every pellet is its own trace, which is why a shotgun can catch two
@@ -763,6 +816,10 @@ q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
         break;
     }
 
+    /* Projectile allocation failure may refund cells; no trace has run on
+     * that arm, so keep its inventory as the source. */
+    if (r.kind == Q2_FK_BULLET || r.kind == Q2_FK_RAIL)
+        player_damage_end(sim);
     return r;
 }
 
@@ -818,6 +875,7 @@ q2_damage_result q2_sim_hurt_player(q2_sim *sim, q2_actor *attacker,
     }
 
     q2_actor_to_player(&sim->combat.self, &sim->combat.inv);
+    player_damage_impulse(sim, sim->cur_player, &sim->combat.self);
 
     /* Blood only when flesh actually took some of it: armour absorbing the
      * whole hit is the case the HUD's damage flash also distinguishes. */
@@ -909,12 +967,9 @@ static void projectile_owner_splash(q2_sim *sim, const q2_projectile *p,
         if (targets && targets[i] == owner)
             return;
 
-    if (owner == &sim->combat.self && sim->invulnerable)
+    if (!owner->takedamage ||
+        (owner == &sim->combat.self && sim->invulnerable))
         return;
-
-    if (owner == &sim->combat.self)
-        q2_actor_from_player(owner, &sim->combat.inv,
-                             sim->player[sim->cur_player].pos);
 
     /* The owner is one more candidate of the same 0x80050810 sweep, so it is
      * occluded by the same trace: a rocket that bursts on the far side of a
@@ -961,6 +1016,7 @@ q2_hand_grenade_update q2_sim_hand_grenade_update(
                                        : sim->combat.target_count;
         s32 where[3];
 
+        player_damage_begin(sim);
         memcpy(where, p->pos, sizeof(where));
         projectile_owner_splash(sim, p, where, targets, count);
         q2_projectile_detonate_traced(&sim->combat.projectiles, (u32)index,
@@ -968,6 +1024,7 @@ q2_hand_grenade_update q2_sim_hand_grenade_update(
                                       count, &sim->combat.rules,
                                       splash_clear, sim);
         fx_at(sim, Q2_FX_EXPLOSION, where);
+        player_damage_end(sim);
         return Q2_HAND_GRENADE_EXPIRED;
     }
 
@@ -1135,6 +1192,8 @@ void q2_sim_combat_tick(q2_sim *sim)
      */
     if (sim->cur_player != 0)
         return;
+
+    player_damage_begin(sim);
 
     /*
      * THE PER-ACTOR PRESENTATION PASS, 0x8005B880, once per actor per world
@@ -1549,6 +1608,7 @@ void q2_sim_combat_tick(q2_sim *sim)
 
         q2_fx_debris_commit(&sim->fx, i, step.to);
     }
+    player_damage_end(sim);
 }
 
 /* ------------------------------------------------------------------------- */

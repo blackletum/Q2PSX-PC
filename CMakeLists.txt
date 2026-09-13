@@ -157,7 +157,7 @@ add_subdirectory(src/screen)
 add_subdirectory(src/game)
 
 enable_testing()
-add_subdirectory(tests)
+# Tests are added after optional client/SDL discovery below.
 
 if(Q2PSX_BUILD_TOOLS)
     add_subdirectory(tools/q2psx-inspect)
@@ -203,3 +203,5 @@ message(STATUS "  build type : ${CMAKE_BUILD_TYPE}")
 message(STATUS "  compiler   : ${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION}")
 message(STATUS "  tools      : ${Q2PSX_BUILD_TOOLS}")
 message(STATUS "")
+
+add_subdirectory(tests)

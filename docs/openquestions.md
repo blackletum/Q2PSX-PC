@@ -9853,8 +9853,7 @@ unit, 4095.3 mean over every part of `Blaster G`) or the GTE reaches it.
       overlays emitted inside each viewport's draw environment. The water-effect feed also reads
       that view's own underwater flag. Pixel comparisons with crosshairs toggled prove their
       positions and isolation in all four layouts; the fight records damage flashes on the injured
-      player. Independent physical-controller bindings remain a separate gap: outside the
-      built-in demo, the extra players still receive the local player's input.
+      player. The independent-input and shared-gameplay gaps found here are closed in #138.
 
       Verification uses the real headless client: both two-player splits, three and four players,
       all eleven weapon selections, repeated captures, and staged fights that exercise independent
@@ -9863,3 +9862,43 @@ unit, 4095.3 mean over every part of `Blaster G`) or the GTE reaches it.
       pointer and full-viewport area instructions. The weapon sweep also exposed and fixed the
       capture option's off-by-one: `--weapon 11` had silently excluded the BFG. Re-run through
       `tests/check_split_screen.py`; FORMATS §11.1.1 and §19.4 describe the rendering evidence.
+
+- [x] 138. **Split-screen play needed independent devices and complete match transitions.**
+      The client no longer copies player zero's pad to the extra players. SDL gamepads occupy stable
+      player slots, keep short presses until a simulation tick and clear held input on disconnect.
+      The host's default is keyboard/mouse plus three pads; `--gamepad-player-one` starts controller
+      assignment at player zero. The retail RIGHT STICK mapping drives extra players; mirroring the
+      otherwise unused left stick onto its D-pad is a host convenience. Player one's controller page
+      offers the analog styles when a pad is assigned there. Independent per-player settings pages
+      remain outside this input adapter.
+
+      The shared world now registers every player's inventory for item touches. A combat-owner swap
+      rebinds the borrowed inventory pointers, and every damage transaction writes health, armour and
+      shield cells back before another swap or pickup. Player zero is included in the other players'
+      hitscan lists (the readiness array describes only extra slots). Damage impulses reach the target's
+      movement. Each respawn installs the canonical match-start inventory and a fresh actor, clearing
+      attribution, damage effects, shot cadence and view-weapon state. Real players respawn only from
+      their own fresh fire press; automatic extra-player respawning belongs only to the staged demo.
+
+      Every viewport now uses its owner's collision cell for light gathering and its own frozen
+      death-camera angles. Fading and dissolving corpses leave the damage lists, as the thinks at
+      `0x8005B358` and `0x8005B39C` stop appending them; DYING and DOWN bodies remain hittable for gibs.
+      Queued TELEPORT calls retain the triggering player and can place three different players in one
+      frame without moving player zero. The trigger record flags themselves remain shared: the
+      dispatcher at `0x80027E64` reads and writes the common Events records through `0x800AE774`.
+
+      Versus checks living players, handles request 19 by reloading the arena and resets only QMULTI's
+      transient state; engine-owned wins and limits survive. Both the match clock and banner use the
+      simulation's actual tick. QMRESULT `+0x1580` reads the fire predicate at engine `+0x158`, latches
+      each READY byte at module `+0x5250`, and resets `+0x5254` to 150 while anyone is unready. Once all
+      agree it subtracts dt and raises request 18 only below zero (`0x801016CC..0x801016E0`). The port
+      reproduces that readiness/timing and returns to its multiplayer setup; its frozen-arena score
+      layout and that destination remain port adapters rather than a reconstruction of QMRESULT's art.
+
+      Regression coverage includes real SDL virtual-controller events and hotplug, 60/144/240 Hz input
+      taps, all owners' pickups and damage, own-button respawning, simultaneous teleports, lighting
+      ownership, body retirement and results. The headless disc harness checks all thirteen arenas and
+      complete Deathmatch, Team Deathmatch and multi-round Versus matches. The existing HUD/view-weapon
+      harness covers both two-player axes, three/four players, crosshair isolation, all eleven weapons
+      and unchanged single-player baseline pixels on PAL and USA. Physical controllers still require
+      a hands-on play session; these checks neither read nor control the user's keyboard or mouse.

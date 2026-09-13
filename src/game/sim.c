@@ -42,6 +42,7 @@ void q2_sim_init(q2_sim *sim, const q2_world_zone *zone, int tick_rate_hz)
         return;
 
     memset(sim, 0, sizeof(*sim));
+    sim->player_count = 1;
     sim->zone         = zone;
     sim->current_node = -1;
     /* On unless a caller turns it off — see the field. */
@@ -3551,7 +3552,10 @@ void q2_sim_select_player(q2_sim *sim, int index)
     sim->combat.last_shot        = to->last_shot;
     sim->combat.shot_serial      = to->shot_serial;
 
+    sim->ent_world.player[sim->cur_player].inv = &from->inv;
+    sim->ent_world.player[index].inv = &sim->combat.inv;
     sim->cur_player = index;
+    sim->current_node = sim->player[index].ent.node;
 }
 
 void q2_sim_advance_player(q2_sim *sim, int index, const q2_input *input,
@@ -3574,54 +3578,44 @@ void q2_sim_advance_player(q2_sim *sim, int index, const q2_input *input,
  * Give player `index` the inventory and weapon a level start hands out, and
  * park it. Called once per extra player, after `q2_sim_spawn` has placed them.
  */
-void q2_sim_player_reset_combat(q2_sim *sim, int index)
+void q2_sim_player_loadout(q2_sim *sim, int index,
+                            const q2_inventory *inv, int weapon)
 {
+    q2_inventory start;
     int saved;
 
-    if (!sim || index <= 0 || index >= Q2_SIM_MAX_PLAYERS)
+    if (!sim || !inv || index < 0 || index >= Q2_SIM_MAX_PLAYERS)
         return;
-
+    start = *inv; /* The caller may pass the live inventory. */
     saved = sim->cur_player;
-
-    /*
-     * What player 0 has, because a deathmatch starts everybody the same way and
-     * player 0 has already been through the level's own start. A bare
-     * `q2_inventory_init` leaves `weapon_id` at 0 — no weapon — so the extra
-     * players spawned holding nothing and could not fire a shot between them.
-     */
-    {
-        q2_inventory     start_inv = sim->combat.inv;
-        int              start_wep = sim->combat.weapon_id;
-
-        q2_sim_select_player(sim, index);
-        sim->combat.inv       = start_inv;
-        sim->combat.weapon_id = start_wep;
-    }
+    q2_sim_select_player(sim, index);
+    sim->combat.inv = start;
+    sim->combat.weapon_id = weapon;
     sim->combat.next_fire = 0;
-
-    /*
-     * And the actor, from the inventory, so the pair starts IN STEP. Leaving it
-     * zeroed is not harmless: a caller that copies the actor's health back into
-     * the inventory — which is what has to happen for a player hit while parked
-     * — would write 0 over a full one, and three of four players ended a
-     * capture dead without anything having shot them.
-     *
-     * FROM A FRESH ACTOR, because this is a placement and the refresh carries
-     * what the slot held: the killer byte, the mod, the effect bytes and
-     * env_next (combat.h). At level start the slot is still zeroed, and a 0 in
-     * the killer byte is player 0's index; on a deathmatch respawn it is the
-     * dead body, so the new one inherited its last killer. 0x8003DDF8 places a
-     * player on a new entity: 0x8003B250 allocates it through 0x8006C098,
-     * which clears all 768 bytes (0x8006C18C), clears the 224-byte client
-     * record too (0x8003B2BC `jal 0x80089E18`, a1 = 0, a2 = 224, so client+0x94
-     * goes to 0), and 0x8003DE34 then stores 4 in +222. q2_actor_init is that
-     * state. It also sets `owner` to -1; both client callers name the player
-     * straight afterwards.
-     */
+    memset(sim->combat.kick, 0, sizeof(sim->combat.kick));
+    sim->combat.chaingun_bullets = 1;
+    memset(&sim->combat.last_shot, 0, sizeof(sim->combat.last_shot));
+    sim->combat.last_shot.sound = -1;
+    sim->combat.shot_serial = 0;
     q2_actor_init(&sim->combat.self);
     q2_actor_from_player(&sim->combat.self, &sim->combat.inv,
                          sim->player[index].pos);
+    sim->combat.self.origin[1] = q2_sim_origin_y(sim->player[index].pos[1]);
+    sim->combat.self.owner = (s8)index;
+    sim->player[index].prev_health = start.health;
+    sim->player[index].prev_armour = start.armour;
+    q2_entity_world_add_player(&sim->ent_world, (u32)index,
+                               &sim->combat.inv, sim->player[index].pos);
+    if (sim->player_count <= index)
+        sim->player_count = index + 1;
     q2_sim_select_player(sim, saved);
+}
+
+void q2_sim_player_reset_combat(q2_sim *sim, int index)
+{
+    if (!sim || index <= 0 || index >= Q2_SIM_MAX_PLAYERS)
+        return;
+    q2_sim_player_loadout(sim, index, &sim->combat.inv, sim->combat.weapon_id);
 }
 
 /* ------------------------------------------------------------------------- */

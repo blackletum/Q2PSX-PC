@@ -316,6 +316,20 @@ typedef struct q2_mp_session {
  */
 void q2_mp_session_init(q2_mp_session *s, q2_mp_mode mode, int players);
 
+/* Reloading QMULTI resets its module state, preserving engine-owned scores,
+ * team assignments and limits between Versus rounds. */
+void q2_mp_round_start(q2_mp_session *s);
+
+/* QMRESULT +0x1580: each player's fire edge latches READY. Once all are ready,
+ * a 150-tick countdown must pass below zero before request 18 is raised. */
+typedef struct q2_mp_results {
+    u32 ready;
+    s32 countdown;
+} q2_mp_results;
+void q2_mp_results_init(q2_mp_results *results);
+bool q2_mp_results_tick(q2_mp_results *results, int players,
+                         u32 fire_pressed, s32 dt);
+
 /*
  * A kill — the reconstruction of the module's export 1, at +0x0BF4, which the
  * engine calls from `0x800396AC` with the killer's id and the victim's.

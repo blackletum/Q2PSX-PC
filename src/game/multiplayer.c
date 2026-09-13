@@ -232,6 +232,39 @@ void q2_mp_session_init(q2_mp_session *s, q2_mp_mode mode, int players)
     s->request      = Q2_MP_REQ_NONE;
 }
 
+void q2_mp_round_start(q2_mp_session *s)
+{
+    if (!s) return;
+    s->end = Q2_MP_RUNNING;
+    s->last_alive = 0;
+    s->banner_armed = false;
+    s->banner_ticks = Q2_MP_BANNER_TICKS;
+    s->request = Q2_MP_REQ_NONE;
+}
+
+void q2_mp_results_init(q2_mp_results *results)
+{
+    if (!results) return;
+    results->ready = 0;
+    results->countdown = 150;
+}
+
+bool q2_mp_results_tick(q2_mp_results *results, int players,
+                         u32 fire_pressed, s32 dt)
+{
+    u32 all;
+    if (!results || players < 1 || players > Q2_MP_MAX_PLAYERS || dt < 0)
+        return false;
+    all = (1u << players) - 1;
+    results->ready = (results->ready | fire_pressed) & all;
+    if (results->ready == all) {
+        results->countdown -= dt;
+        return results->countdown < 0;
+    }
+    results->countdown = 150;
+    return false;
+}
+
 void q2_mp_player_killed(q2_mp_session *s, int killer, int victim)
 {
     s16 score;
