@@ -216,6 +216,36 @@ const q2_item_table *q2_item_table_builtin(void)
     return &t;
 }
 
+const q2_item_table *q2_item_table_builtin_for(q2_region region)
+{
+    /*
+     * SLUS-00757's captions are SLES-01534's except for four, respelt: its
+     * strings at 0x800AC1F4.. read `Body Armor`, `Combat Armor`, `Jacket Armor`
+     * and `Armor Shard` where PAL's at 0x800ABF9C.. say Armour. Everything else
+     * in the table — all 64 records, the dispatch, the sounds — is identical.
+     */
+    static q2_item_table us;
+    static bool built = false;
+
+    if (region != Q2_REGION_NTSC_U)
+        return q2_item_table_builtin();
+    if (!built) {
+        static const struct { u32 effect; const char *name; } k_us[] = {
+            { 26, "Body Armor" }, { 27, "Combat Armor" },
+            { 28, "Jacket Armor" }, { 29, "Armor Shard" },
+        };
+        size_t i;
+
+        fill_builtin(&us);
+        for (i = 0; i < sizeof(k_us) / sizeof(k_us[0]); i++) {
+            strncpy(us.name[k_us[i].effect], k_us[i].name, Q2_ITEM_NAME_LEN);
+            us.name[k_us[i].effect][Q2_ITEM_NAME_LEN] = '\0';
+        }
+        built = true;
+    }
+    return &us;
+}
+
 q2_result q2_item_table_load(q2_item_table *out, const disc *d,
                              const q2_build_id *id)
 {
@@ -228,17 +258,19 @@ q2_result q2_item_table_load(q2_item_table *out, const disc *d,
 
     memset(out, 0, sizeof(*out));
 
-    if (strcmp(id->serial, "SLES-01534") != 0) {
-        Q2_WARN("item table location is unknown for build %s",
-                id->serial[0] ? id->serial : "(unidentified)");
-        return Q2_ERR_UNSUPPORTED;
-    }
-
     r = q2_exe_load(&exe, d, id->exe_name);
     if (r != Q2_OK)
         return r;
 
-    addr = Q2_ITEMTABLE_ADDR_SLES01534;
+    /* The SLES-01534 addresses, translated into this build's (exe.h). */
+    if (!q2_exe_has_layout(&exe)) {
+        Q2_WARN("item table location is unknown for build %s",
+                id->serial[0] ? id->serial : "(unidentified)");
+        q2_exe_free(&exe);
+        return Q2_ERR_UNSUPPORTED;
+    }
+
+    addr = q2_exe_addr(&exe, Q2_ITEMTABLE_ADDR_SLES01534);
 
     /* Walk to the terminator exactly as the spawner does rather than trusting a
      * record count: a build whose table grew would then read long instead of
@@ -277,7 +309,7 @@ q2_result q2_item_table_load(q2_item_table *out, const disc *d,
 
     /* The dispatch, so "inert" is read rather than asserted. */
     {
-        u32 base = Q2_ITEM_DISPATCH_SLES01534;
+        u32 base = q2_exe_addr(&exe, Q2_ITEM_DISPATCH_SLES01534);
         u32 counts[Q2_ITEM_EFFECT_COUNT], best = 0, best_n = 0, n;
 
         memset(counts, 0, sizeof(counts));
@@ -285,7 +317,9 @@ q2_result q2_item_table_load(q2_item_table *out, const disc *d,
             u32 v = 0;
             if (!q2_exe_u32(&exe, base + i * 4, &v))
                 v = 0;
-            out->dispatch[i] = v;
+            /* Which handler, in SLES-01534's addresses, so the failure exit
+             * compares against the transcription on any build. */
+            out->dispatch[i] = v ? q2_exe_pal(&exe, v) : 0;
         }
         /* The failure exit is whichever target the most slots share — twelve of
          * them against one apiece for the real handlers. */
@@ -301,7 +335,8 @@ q2_result q2_item_table_load(q2_item_table *out, const disc *d,
     }
 
     for (i = 0; i < 11; i++) {
-        const u8 *p = q2_exe_ptr(&exe, Q2_ITEM_SOUNDNAMES_SLES01534 + i * 12, 12);
+        const u8 *p = q2_exe_ptr(&exe, q2_exe_addr(&exe, Q2_ITEM_SOUNDNAMES_SLES01534)
+                                       + i * 12, 12);
         if (!p)
             break;
         memcpy(out->sound[i], p, 12);
@@ -317,7 +352,8 @@ q2_result q2_item_table_load(q2_item_table *out, const disc *d,
     for (i = 0; i < Q2_ITEM_NAME_COUNT; i++) {
         u32 ptr = 0, k;
 
-        if (!q2_exe_u32(&exe, Q2_ITEM_NAMES_SLES01534 + i * 4, &ptr) || !ptr)
+        if (!q2_exe_u32(&exe, q2_exe_addr(&exe, Q2_ITEM_NAMES_SLES01534) + i * 4,
+                        &ptr) || !ptr)
             continue;
 
         /* Byte at a time and bounded by the FIELD, so a pointer that lands

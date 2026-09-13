@@ -3099,9 +3099,14 @@ typedef struct {
     int16_t  buf_x[2], buf_y[2];/* CONFIRMED: {0,512} / {0,0}. A runtime {s16 x,
                                  * s16 y} table with stride 4, indexed by buffer
                                  * number and cross-paired between draw and display. */
-    uint32_t video_mode;        /* CONFIRMED: 1 == PAL                               */
+    uint32_t video_mode;        /* CONFIRMED: 1 == PAL, 0 == NTSC (SLUS-00757)       */
 } q2psx_display_state_t;
 ```
+
+**NTSC, read rather than guessed.** SLUS-00757's copy of this function is the same function with two stores
+changed: `SetVideoMode(0)` — compiled as `addu a0, zero, zero`, so a checker looking for an `addiu` sees an
+R-type — and a height of **240**. That is the figure this section once refused to take on trust, now with an
+address behind it (§9.13).
 
 **Region is set explicitly in code.** `SetVideoMode(mode)` writes a libgpu global; it has **exactly one call
 site in the entire executable**, four instructions before the framebuffer stores, with the literal argument
@@ -3119,8 +3124,8 @@ and CLUTs.
 typedef struct {
     uint16_t field_hz;          /* CONFIRMED: 50 (established by SetVideoMode(1))    */
     uint16_t vsync_divisor;     /* CONFIRMED: 2 (the literal VSync argument)         */
-    uint16_t native_logic_hz;   /* CONFIRMED: 25 on PAL. NTSC 30 is INFERRED — the
-                                 * same divisor over 60 Hz — pending an NTSC EXE.    */
+    uint16_t native_logic_hz;   /* CONFIRMED: 25 on PAL, 30 on NTSC — the same
+                                 * VSync(2) over 60 Hz fields in SLUS-00757 (§9.13). */
 } q2psx_timing_t;
 ```
 
@@ -3157,10 +3162,13 @@ The build descriptor a port should carry per release: serial, boot filename, reg
 **`fb_width` / `fb_height`**, **`vsync_divisor`**, the VRAM buffer origins, the movie filename suffix, and the
 expected level-directory count (49).
 
-> **NTSC values are unknown and must not be guessed.** Do not hardcode a 512 × 240 NTSC framebuffer: PAL
-> turned out to be 248 rather than the widely assumed 256, so the folklore figure is *less* trustworthy now,
-> not more. Locate the NTSC build's equivalent of the `SetVideoMode` + width/height store and read the
-> literals.
+> **The NTSC row, read out of SLUS-00757** (§9.13): boot file `SLUS_007.57`, 636,928 bytes, SHA-256
+> `b07204f7de3864f3d000a1e945573fbc242e65c841f15693942b1a458ced5638`, `pc0` `0x800861A4`, `t_size`
+> `0x9B000`; PVD created `1999-09-23 17:17:17` (GMT+9), 151,478 sectors; `video_mode_const` **0**, framebuffer
+> **512 × 240**, `vsync_divisor` 2, the same VRAM origins; films named **without** the `P` — `TAKE1B.STX`,
+> `OUTRO1.STX`, `ROGUEIN1.STX` — at 30 fps. The serial is **SLUS-00757**; the port's catalogue had carried
+> an unchecked SLUS-00658. A port reading its tables by address needs one thing more than this row, and it is
+> the relocation in §9.13.
 
 ### 9.11 Filenames are assembled at runtime
 
@@ -3797,9 +3805,11 @@ There is no sub-stepping loop anywhere in the image. A port that runs several no
 slow frame is not merely more accurate, it is a different game: every rate here is `k*dt` through a clamped
 approach, and two 12-unit steps overshoot more than one 24-unit step.
 
-> **NTSC.** Every time-derived figure here depends on `VSync(2)` at 50 Hz giving `1 dt == 1/300 s`. The world
-> scale is a pure length ratio and is unaffected, but gravity, terminal velocity and step timing must be
-> re-read from an NTSC executable.
+> **NTSC.** Every figure here is in `dt`, and `dt` is 1/300 s on both builds: the vertical blank adds 6 on
+> PAL and **5** on NTSC (`main` at `0x80018DB8` and `VBlank` at `0x800190F0` are the only two changes to
+> timing in SLUS-00757, §9.13). Gravity, terminal velocity and every rate here are therefore the same
+> numbers; what differs is the step — a frame is 12 of them on PAL and 10 on NTSC — and, because nothing
+> sub-steps, the arithmetic of a clamped approach taken in 10s rather than 12s.
 
 #### 9.12.13 Negative results worth keeping
 
@@ -3857,6 +3867,128 @@ the halved 108-unit step height that come with it are reachable in two places in
 at `0x8003A25C` clears `0x4`, `0x8`, `0x100`, `0x200`, `0x400`, `0x4000` and `0x20000`, and `INLAVA`'s
 `0x1000` is not among them — a bit the frame does not clear is not a per-tick environment, it latches, and
 something else owns its lifetime. Both also deal damage, which is not the dispatcher's job to reproduce.
+
+### 9.13 `SLUS_007.57` — the North American build, and everything it changes
+
+Everything above was read out of SLES-01534. A dump of the North American release, **SLUS-00757**, turns
+out to be the same source built a second time with the video standard switched — and a handful of
+deliberate changes on top — so almost none of this document needs a second copy. What it does need is the
+list of what differs, and a way for a port that reads tables **by address** to find them in the other
+image. This section is both.
+
+**Identity.** Boot file `SLUS_007.57`, 636,928 bytes (2 KB more than PAL's), SHA-256
+`b07204f7…d5638`, `pc0` `0x800861A4`, `$gp` `0x800AE870`, licence string *"for North America area"*. The
+volume is dated `1999-09-23 17:17:17` (GMT+9) — the day after PAL's — and is 151,478 sectors: 137,603 of data
+track and a CD-DA track of 32,634,000 bytes against PAL's 32,104,800. The root file PAL calls `SILENCE3.WAV`
+is `SILENCE.WAV` here.
+
+**The disc ships its own symbol table.** `/MAIN.SYM` is the Psy-Q linker's `MND` v1 output, 3.3 MB: 1,037
+functions with their source files (82 of them — `QPLAYER.C`, `G_COMBAT.C`, `QFR_SING.C`, `MEMCARD.C`…), 2,892
+symbols and 125,865 type and local-variable records. Its `__SN_GP_BASE` is `0x800AE870`, this executable's
+`$gp`, so it describes this build exactly. Through the relocation below it names what this document had
+identified by address, and every one checked agrees:
+
+| SLES-01534 | what this document calls it | MAIN.SYM |
+|---|---|---|
+| `0x800627F8` | id's `T_Damage` | `T_Damage` (`G_COMBAT.C`) |
+| `0x80057D54` | the outer damage function | `DoDamage` (`QUAKECRE.C`) |
+| `0x8005D8C8` | `M_CheckAttack` | `M_CheckAttack` (`G_AI.C`) |
+| `0x8003A1C8` | the player's think | `PrimaryQuakePlayer` (`QPLAYER.C`) |
+| `0x8006FE3C` | the clamped approach | `Seek` (`MISC.C`) |
+| `0x80019154` | the pad read | `MapPadInputToCommands` (`QFR_SING.C`) |
+| `0x80038260` | the view kicks | `CalcPlayerCameraModifications` (`QCAMERA.C`) |
+| `0x800759F0` | the lens flares | `ProcessLensFlares` (`LIGHTS.C`) |
+| `0x800337D0` / `0x800359C0` | status bar / pickup caption | `ProcessQuakePanel1by1` / `Display_Pickup` (`QPANEL.C`) |
+| `0x80044F54` | the collision node search | `Find3dSpaceIndxLink` (`COL3D.C`) |
+| `0x800701B4` | the `Strings` lookup | `GetStringFromStringtable` (`MISC.C`) |
+| `0x800AEC4C` | "the meter's base y" | `ScreenYOff` — see below |
+
+**The relocation.** The two images aligned word for word, with every word that can hold an address masked
+first — a `j`/`jal` target, a `lui` and its `%lo`, a `$gp` offset, a pointer in data — match on
+**158,097 of SLES-01534's 158,208 words**, in nine runs of constant displacement:
+
+```
+SLES-01534 range              moves by   SLES-01534 range              moves by
+0x80018000..0x8001FA30          0        0x800718BC..0x80082620        +0x134
+0x8001FA40..0x8006FA2C         -0x4      0x800826A4..0x800ABFA4        +0x254
+0x8006FA2C..0x800701B4        +0x21C     0x800ABFD8..0x800AC2C4        +0x250
+0x800702A0..0x800718B4        +0x130     0x800AC2C4..0x800AD93C        +0x254
+                                         0x800AD93C..  (and the BSS)   +0x270
+```
+
+The gaps between runs are the code that changed, and there are five: `FrontEndResetVideoDefaults`, one
+instruction shorter; `GetStringFromStringtable`, rewritten from 59 instructions to 136 and **moved** ahead of
+the code it used to follow (its entry point is the one address inside it that still translates, to
+`0x8006FA28`); two words of `SeekAndPlay`; the tail of `MemoryCardUpdate2`; and the armour captions. The BSS
+starts `0x270` later and is exactly as long, `0x3C048` bytes. As a check that owes nothing to the alignment:
+of the 1,104 distinct `jal` targets in SLES-01534's game code, **1,057 translate onto the start of a named
+NTSC function**, and the other 47 are private routines inside the Psy-Q libraries, which the symbol table
+does not name. The port carries these runs as data (`src/build/ident.c`) and `q2_exe_addr` applies them
+(`exe.h`), so every table loader and every one of `q2psx-inspect`'s executable checks runs unchanged on
+either disc.
+
+**What actually differs.** 167 words that relocation does not explain, and the modules beside them:
+
+* **Time.** The vertical blank adds **5** to `dt` instead of 6 (`main` `0x80018DB8`, `VBlank` `0x800190F0`),
+  so `dt` is 1/300 s on both builds and a frame — `VSync(2)` — is 10 of them instead of 12. `SeekAndPlay`
+  turns a track's tenths into fields with **×6** instead of ×5. Nothing else in the timing changes: every rate
+  in §9.12 is the same number, and the 64-field music fade is simply shorter.
+* **Picture.** `SetVideoMode(0)` and **240** lines (§9.9), and `Config_InstallVideo`'s display height with
+  them. `ScreenYOff` (`gp+1612`) is **8** instead of 16 — and 16 is right: the port had carried 20, which is
+  the halfword before it, `ScreenXOff`. SCREEN POSITION defaults to a Y of **0** instead of 24, because
+  that setting is the display env's `screen.y` and 240 lines fill the NTSC raster. What is laid out about the
+  centre moves up by half the difference, four lines: **105 of the 111 rows** in the executable's 39 page
+  tables (the memory card's SAVE FILE screen, `0x8009B114`, keeps all five of its rows, and the unused
+  `FET_PAUSED_TITLE` its one), the pause screen's status line (204 → 200), the 2×2 split (123 high with its
+  bottom row at 124, → 119 and 120), and `QM4PosY`, the four-player status bars (110 → 106). The one-player
+  status bar and the button prompts are **not** moved — they sit four lines lower on an NTSC television.
+* **Text.** The North American build is American English. Its string lookup copies the key into the
+  twelve-byte field, appends `U` if there is room and then `S` if there still is, and asks for **that**
+  first. The level data is the same on both discs and already carries the answers — sixteen of them, which
+  only this lookup reaches: `Comm Center`, `Defense Command`, `Detention Center` for three `MapTitle`s, and
+  `Center`/`Defense` in thirteen objective lines. The executable's own strings are respelt: `AUTOCENTER`,
+  the four armour captions as `Armor`, and the level table's record 16 as `COLISEUM` for `COLOSSEUM`.
+* **Memory card.** Saves are named under `BASLUS-00757` rather than `BESLES-01534`, and overwriting a save
+  **deletes the old file first** (`MemCardDeleteFile`, and a six-arm dispatch on its result) — 105 new words
+  in `MemoryCardUpdate2`.
+* **The front end** (`QFRONT`, 118,216 → 118,240 bytes): `AUTOCENTER`; the reel is `ROGUEIN1.STX` with a
+  stop point of **2949** (and the dead copy at `+0xD608` likewise); after the reel it writes 1 through the
+  engine block's pointer at `+0x3DC`, which is `DoSnapShot`, a one-shot flag `NewPadRead` consumes over the
+  four pads — five words at `+0x1D68`, after which the module's data is `0x14` further on; all 53 rows of
+  the page tables transcribed here move up four, as do two drawn elements (117 → 113, 150 → 146); and the
+  memory-card screens' text rows move up **two**.
+* **The shared cinematic module** (`QLOGOS`, `QLOGOS2`, `QFMV`, `QENDMIS1`–`5`, `QMRESULT`): the films'
+  names lose the `P`, their stop points are 1538 and 1811 for PAL's 1281 and 1500, a centred text block is
+  placed at `(244 − 11n)/2` for `(252 − 11n)/2`, and the two logo screens' eighteen timing immediates are
+  re-counted for 60 Hz: every **hold** grows by about a fifth (258 → 308, 83 → 98, hand-offs 95 → 110 and
+  93 → 108) and every **fade** stays eight frames. The screens stay up for the same seconds.
+* **The multiplayer module** (`QMULTI`): the four centred banners at 124 → 120.
+* **Three level modules** grow — `BASE3` by 448 bytes, `JAIL2` 312, `WASTE2` 300 — entirely inside a
+  `0xFFFF`-terminated halfword table after the last function, which neither the module's code nor its
+  relocations reference; the code differs only in the `%lo` of what follows it. Forty-eight `CreAIBin`s,
+  eight `PrimaryRemap`s, three `AreaConx`s and seven `SortData`s differ by one to five bytes, all padding.
+* **Films.** The same three films in the same number of sectors, re-encoded at **30 fps**: five sectors a
+  frame (cadence 5,4,4,4) against six, so 1,540, 1,993 and 2,951 frames against 1,283, 1,559 and 2,459, and
+  every one decodes. The stop points land within half a second of PAL's on the film's own clock.
+* **Music.** The executable's duration table is PAL's byte for byte, and four of the five `.XAI` files carry
+  the same audio (padded to equal channel lengths). `QUAKE_A` does not: its first channel is PAL's third, its
+  third and fourth are copies of `QUAKE_B`'s second and third, and its second is a track the PAL disc does
+  not have — while PAL's `QUAKE_A` 0, 1 and 3 are on no NTSC disc. Since the table was not updated, the NTSC
+  console moves on from those four at PAL's durations.
+
+**What the port does with it.** Identifies the build by hash and reads every table through the relocation;
+brings the screen up 512 × 240 at 60 Hz with a 10-unit frame and steps the world at that frame; counts music
+at ×6 and 60 Hz; measures each film's rate from the film and stops it where the NTSC module says; runs the
+logo screens on NTSC's counts; asks for `<key>US` first and spells `AUTOCENTER` and `COLISEUM`; uses NTSC's
+split and four-player bar positions and its SCREEN POSITION default. The menu block is centred in the
+framebuffer, which on a 240-line one **is** NTSC's four-line shift for every row the NTSC build moved; the
+SAVE FILE screen's five, which it did not move, are put back down — and `q2psx-inspect menu` checks all 37
+pages against the tables of whichever disc it is given, with no mismatch on either. **Not reproduced**, on
+either build, because the port does not
+draw or perform them at all: the memory card's delete-before-write (saves are host files), `DoSnapShot`'s
+pad pass, the unreferenced table in the three level modules, the cinematic module's centred text block,
+QFRONT's two drawn elements and its memory-card text rows, the file-window frame (`CHECK_FOR_MCFILEWINDOW`)
+and page 11's hard-coded prompt (`DrawBottomPoly`).
 
 ## 10. The menu system — **CONFIRMED**
 
@@ -7459,8 +7591,9 @@ numbers so that nothing downstream needs renumbering.
     their sum, yet the build tool stores them separately (`0x800B2EEC` and `0x800B2EE8`) and the split is
     systematic, not noise — `0x0E` is 17 for every front-end and cutscene map and 17…86 otherwise, `0x0F`
     ranges 1…181.
-30. NTSC build values: framebuffer height, `video_mode_const`, movie filename suffix, EXE hash, PVD fields.
-    All must be **read**, never inferred from the PAL build.
+30. ~~NTSC build values~~ **READ** from a dump of SLUS-00757 — framebuffer 512 × 240, `video_mode_const`
+    0, films without the `P` at 30 fps, the hash and PVD fields — together with everything else that build
+    changes (§9.13).
 31. Locate the `.DAT` chunk-name literal pool's real xrefs, which would settle its true extent and whether a
     required-vs-optional flag exists per chunk. Blocked on a working disassembler session.
 32. Why `ModelNames` is present in all 49 `COMMON.DAT` files yet the string appears **zero** times in the

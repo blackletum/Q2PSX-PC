@@ -139,11 +139,54 @@ static void test_rejects_bad(void)
     CHECK(q2_leveltext_parse(&tx, NULL, 0) != Q2_OK, "NULL data");
 }
 
+/*
+ * The North American build's lookup: `<key>US` first, as much of the suffix as
+ * fits the twelve-byte field, then `<key>`. BASE3's own pair is the fixture.
+ */
+static void test_variant(void)
+{
+    q2_leveltext tx;
+    u32 t = 0xA0;
+
+    memset(g_chunk, 0, sizeof(g_chunk));
+    put_record(0, "MapTitle",     t); t = put_text(t, "Comm Centre");
+    put_record(1, "MapTitleUS",   t); t = put_text(t, "Comm Center");
+    put_record(2, "FoundASecret", t); t = put_text(t, "You have found a secret.");
+    put_record(3, "Unit2CurrA",   t); t = put_text(t, "orders");
+    put_record(4, "Unit2CurrAUS", t); t = put_text(t, "American orders");
+    put_record(5, "Unit1Curr2AU", t); t = put_text(t, "only a U fits");
+    put_record(6, "Unit1Curr2A",  t); t = put_text(t, "the key itself");
+    g_size = t;
+
+    CHECK(q2_leveltext_parse(&tx, g_chunk, g_size) == Q2_OK, "it parses");
+
+    q2_leveltext_set_variant(NULL);
+    CHECK(strcmp(q2_leveltext_find(&tx, "MapTitle"), "Comm Centre") == 0,
+          "no variant: the key itself");
+
+    q2_leveltext_set_variant("US");
+    CHECK(strcmp(q2_leveltext_find(&tx, "MapTitle"), "Comm Center") == 0,
+          "US: MapTitleUS wins");
+    CHECK(strcmp(q2_leveltext_find(&tx, "Unit2CurrA"), "American orders") == 0,
+          "a ten-character key takes the whole suffix");
+    CHECK(strcmp(q2_leveltext_find(&tx, "Unit1Curr2A"), "only a U fits") == 0,
+          "an eleven-character key takes only the U");
+    CHECK(strcmp(q2_leveltext_find(&tx, "FoundASecret"),
+                 "You have found a secret.") == 0,
+          "a full-width key is its own variant");
+    CHECK(q2_leveltext_find(&tx, "Default") == NULL, "a missing key is still NULL");
+
+    q2_leveltext_set_variant("");
+    CHECK(strcmp(q2_leveltext_find(&tx, "MapTitle"), "Comm Centre") == 0,
+          "and clearing the variant restores the key itself");
+}
+
 int main(void)
 {
     test_parse();
     test_keys();
     test_rejects_bad();
+    test_variant();
 
     if (g_fail) {
         printf("\n%d leveltext check%s failed\n", g_fail, g_fail == 1 ? "" : "s");

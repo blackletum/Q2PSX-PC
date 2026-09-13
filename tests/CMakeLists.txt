@@ -16,6 +16,15 @@ target_link_libraries(test_disc PRIVATE
 
 add_test(NAME disc_cue_layout COMMAND test_disc)
 
+add_executable(test_build test_build.c)
+
+target_link_libraries(test_build PRIVATE
+    q2psx_common
+    q2psx_build
+)
+
+add_test(NAME build_catalogue COMMAND test_build)
+
 add_executable(test_light test_light.c)
 
 target_link_libraries(test_light PRIVATE

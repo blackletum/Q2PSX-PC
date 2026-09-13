@@ -20,6 +20,11 @@
  * the game's tick, which is 30 Hz — driving one from the other would drop or
  * double every fifth frame.
  *
+ * The NTSC disc's films are the same length in sectors and in seconds and are
+ * packed five sectors to a frame instead of six (cadence 5,4,4,4), which the
+ * same arithmetic makes exactly 30.000 fps. `q2_movie_open` measures which a
+ * file is rather than being told.
+ *
  * ---------------------------------------------------------------------------
  * What the audio needs that the music path does not
  * ---------------------------------------------------------------------------
@@ -49,8 +54,12 @@
 extern "C" {
 #endif
 
-/* Exactly 25.000 fps, forced by the interleave — see the header comment. */
+/* Exactly 25.000 fps, forced by the interleave — see the header comment. The
+ * PAL films' rate, and the fallback for a file too short to measure. */
 #define Q2_MOVIE_FPS 25.0
+
+/* What the drive delivers at double speed: 75 sectors a second, twice. */
+#define Q2_MOVIE_SECTORS_PER_SECOND 150.0
 
 /* How many sectors the reader holds at once. One frame is at most 6 video
  * sectors and they can straddle an audio slot, so 32 is several frames of
@@ -80,6 +89,7 @@ typedef struct q2_movie {
     u32   frame_limit;
 
     double clock;             /* seconds of film presented so far           */
+    double fps;               /* measured at open: 25 on PAL, 30 on NTSC    */
     bool   finished;
 
     /* Audio: the same decoder the music uses, over a different multiplex. */
@@ -160,6 +170,12 @@ Q2PSX_INLINE bool q2_movie_finished(const q2_movie *m) { return m->finished; }
  * None of them changes what a port that is not managing the MDEC's DMA does.
  */
 u32 q2_movie_retail_length(const char *file);
+
+/*
+ * The opening reel's file name on this disc: `ROGUEINP.STX` on SLES-01534 and
+ * `ROGUEIN1.STX` on SLUS-00757, each its own QFRONT's literal at module+0xDC4.
+ */
+const char *q2_movie_start_reel(const disc *d);
 
 /*
  * Pull up to `max_samples` of interleaved stereo PCM16 out of the audio slots,

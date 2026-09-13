@@ -78,6 +78,10 @@ void q2_sim_init(q2_sim *sim, const q2_world_zone *zone, int tick_rate_hz)
     if (sim->dt_per_field <= 0)
         sim->dt_per_field = Q2_DT_PER_FIELD;
 
+    /* Two fields a frame on either standard — the swap's VSync(2) — so 12 on
+     * PAL, the Q2_DT_NOMINAL this used to be, and 10 on NTSC. */
+    sim->frame_dt = 2 * sim->dt_per_field;
+
     /* Default ON: a caller with a view-weapon machine turns it off, and every
      * other caller — the harness, the tests — keeps the old behaviour. */
     sim->fire_from_input    = true;
@@ -367,7 +371,7 @@ u32 q2_sim_scene_advance(q2_sim *sim, double elapsed_seconds)
     sim->dt_accum += sim_whole_units(sim->dt_frac, elapsed_seconds,
                                      &sim->dt_frac);
     dt = sim->dt_accum;
-    if (dt < Q2_DT_NOMINAL)
+    if (dt < (sim->frame_dt > 0 ? sim->frame_dt : Q2_DT_NOMINAL))
         return 0;
     if (dt > Q2_DT_MAX)
         dt = Q2_DT_MAX;
@@ -3645,7 +3649,8 @@ s32 q2_sim_next_dt(const q2_sim *sim, double elapsed_seconds)
     accum = sim->dt_accum + sim_whole_units(sim->dt_frac, elapsed_seconds,
                                             NULL);
 
-    if (accum < Q2_DT_NOMINAL)
+    /* The build's frame: 12 on PAL, 10 on NTSC (sim.h). */
+    if (accum < (sim->frame_dt > 0 ? sim->frame_dt : Q2_DT_NOMINAL))
         return 0;
 
     return accum > Q2_DT_MAX ? Q2_DT_MAX : accum;

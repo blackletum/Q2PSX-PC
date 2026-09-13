@@ -289,6 +289,7 @@ u32 q2_menu_build_ot(const q2_menu *m, psx_ot *ot,
     /* Items first, then their furniture, so the furniture ends up behind. */
     for (i = 0; i < (int)m->page->count; i++) {
         const q2_menu_item *it = &m->page->items[i];
+        const int y = q2_menu_item_y(m, i);
         char line[80];
         const char *label;
         bool selected, greyed;
@@ -304,7 +305,7 @@ u32 q2_menu_build_ot(const q2_menu *m, psx_ot *ot,
         q2_menu_item_display(m, i, line, (u32)sizeof(line));
 
         n += q2_menu_font_print(opts->font, ot, opts->bucket,
-                                Q2_MENU_FACE_ITEM, it->x, it->y,
+                                Q2_MENU_FACE_ITEM, it->x, y,
                                 selected, opts->origin_x, opts->origin_y,
                                 line);
 
@@ -313,7 +314,7 @@ u32 q2_menu_build_ot(const q2_menu *m, psx_ot *ot,
             /* The bar begins where the label ends. The label is centred on
              * it->x, so its right edge is half its printable width further on. */
             int bar_x = it->x + q2_menu_font_width(Q2_MENU_FACE_ITEM, line) / 2;
-            int bar_y = it->y - (item_face ? item_face->cell_h : 11) / 2;
+            int bar_y = y - (item_face ? item_face->cell_h : 11) / 2;
 
             if (m->set && it->setting > Q2_SET_NONE &&
                 it->setting < Q2_SET_COUNT)
@@ -336,7 +337,7 @@ u32 q2_menu_build_ot(const q2_menu *m, psx_ot *ot,
          */
         if (selected && opts->bar_colour != Q2_MENU_BAR_NONE && line[0]) {
             emit_select_bar(ot, opts->bucket, opts->bar_colour,
-                            opts->view_x, opts->view_w, it->y,
+                            opts->view_x, opts->view_w, y,
                             item_face ? item_face->cell_h : 11,
                             opts->origin_x, opts->origin_y);
             n += 2;

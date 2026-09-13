@@ -58,6 +58,28 @@ int q2_menu_title_y(int screen_h)
     return (screen_h - 188) / 2 + 10;
 }
 
+void q2_menu_set_fb_height(q2_menu *m, int fb_h)
+{
+    if (m)
+        m->fb_h = fb_h > 0 ? fb_h : Q2_MENU_SCREEN_H;
+}
+
+/* FET_LOADSAVE_CHOOSEFILE: the table whose rows are the same in both builds.
+ * (FET_PAUSED_TITLE, at 0x8009AAE4, is the other, and no page here uses it.) */
+#define Q2_MENU_TABLE_SAVE_FILE 0x8009B114u
+
+int q2_menu_item_y(const q2_menu *m, int index)
+{
+    int y;
+
+    if (!m || !m->page || index < 0 || index >= (int)m->page->count)
+        return 0;
+    y = m->page->items[index].y;
+    if (m->page->addr == Q2_MENU_TABLE_SAVE_FILE && m->fb_h > 0)
+        y += (Q2_MENU_SCREEN_H - m->fb_h) / 2;
+    return y;
+}
+
 const char *q2_menu_sound_name(q2_menu_sound s)
 {
     switch (s) {
@@ -75,10 +97,20 @@ const char *q2_menu_sound_name(q2_menu_sound s)
 
 void q2_menu_reset_video(q2_menu_settings *s)          /* 0x8001FA18 */
 {
+    q2_menu_reset_video_for(s, Q2_MENU_SCREEN_H);
+}
+
+int q2_menu_screen_y_default(int screen_h)
+{
+    return screen_h == Q2_MENU_SCREEN_H ? 24 : 0;
+}
+
+void q2_menu_reset_video_for(q2_menu_settings *s, int screen_h)
+{
     if (!s) return;
     s->v[Q2_SET_HORIZONTAL_SPLIT] = 1;
     s->v[Q2_SET_SCREEN_X]         = 0;
-    s->v[Q2_SET_SCREEN_Y]         = 24;
+    s->v[Q2_SET_SCREEN_Y]         = (s16)q2_menu_screen_y_default(screen_h);
 }
 
 void q2_menu_reset_sound(q2_menu_settings *s)          /* 0x8001FA50 */
@@ -155,13 +187,37 @@ void q2_menu_apply_variables(const q2_menu_settings *s, bool enabled,
 /* ------------------------------------------------------------------------- */
 /* Items */
 
+/* The tables hold SLES-01534's words; this is where SLUS-00757's replace them
+ * (q2_menu_set_us_english). */
+const char *q2_menu_word(const char *s, bool us_english)
+{
+    static const struct { const char *pal, *us; } k_us[] = {
+        { "AUTOCENTRE", "AUTOCENTER" },
+        { "COLOSSEUM",  "COLISEUM"   },
+    };
+    size_t i;
+
+    if (!us_english || !s)
+        return s;
+    for (i = 0; i < sizeof(k_us) / sizeof(k_us[0]); i++)
+        if (strcmp(s, k_us[i].pal) == 0)
+            return k_us[i].us;
+    return s;
+}
+
+static const char *menu_word(const q2_menu *m, const char *s)
+{
+    return q2_menu_word(s, m && m->us_english);
+}
+
 const char *q2_menu_item_text(const q2_menu *m, int index)
 {
     if (!m || !m->page || index < 0 || index >= (int)m->page->count)
         return "";
     if (index < Q2_MENU_MAX_ITEMS && m->text[index][0])
         return m->text[index];
-    return m->page->items[index].label ? m->page->items[index].label : "";
+    return m->page->items[index].label ? menu_word(m, m->page->items[index].label)
+                                       : "";
 }
 
 /*
@@ -454,6 +510,7 @@ void q2_menu_init(q2_menu *m, q2_menu_settings *settings, int screen_h)
     memset(m, 0, sizeof(*m));
     m->set      = settings;
     m->screen_h = screen_h > 0 ? screen_h : Q2_MENU_SCREEN_H;
+    m->fb_h     = m->screen_h;
     m->page_id  = Q2_PAGE_NONE;
     m->controller_count       = Q2_MENU_MP_MAX_PLAYERS;
     m->mp_setup.mode          = Q2_MENU_MP_DEATHMATCH;
@@ -465,6 +522,7 @@ void q2_menu_init(q2_menu *m, q2_menu_settings *settings, int screen_h)
 }
 
 void q2_menu_set_multiplayer(q2_menu *m, bool on)  { if (m) m->multiplayer = on; }
+void q2_menu_set_us_english(q2_menu *m, bool on)   { if (m) m->us_english = on; }
 void q2_menu_set_controller_count(q2_menu *m, int count)
 {
     if (!m)
@@ -648,7 +706,7 @@ static void run_action(q2_menu *m, int action)
 
     case Q2_ACT_BACK:            pop(m);                            break;
 
-    case Q2_ACT_RESET_VIDEO:     q2_menu_reset_video(m->set);       break;
+    case Q2_ACT_RESET_VIDEO:     q2_menu_reset_video_for(m->set, m->screen_h); break;
     case Q2_ACT_RESET_SOUND:     q2_menu_reset_sound(m->set);       break;
     case Q2_ACT_RESET_PLAYER:    q2_menu_reset_player(m->set);      break;
     case Q2_ACT_RESET_VARIABLES: q2_menu_reset_variables(m->set);   break;
@@ -777,7 +835,7 @@ static void front_setup_refresh(q2_menu *m)
     snprintf(m->text[0], Q2_MENU_TEXT_MAX, "%d PLAYERS",
              (int)m->mp_setup.players);
     snprintf(m->text[1], Q2_MENU_TEXT_MAX, "%s",
-             q2_menu_mp_arena_name(m->mp_setup.arena));
+             menu_word(m, q2_menu_mp_arena_name(m->mp_setup.arena)));
 
     if (m->mp_setup.mode == Q2_MENU_MP_VERSUS) {
         v = k_front_round_options[m->mp_setup.round_option];

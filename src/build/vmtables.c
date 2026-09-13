@@ -6,35 +6,16 @@
 #include <string.h>
 
 /* ------------------------------------------------------------------------- */
-/* Addresses, per catalogued build                                            */
+/* Addresses                                                                  */
 /* ------------------------------------------------------------------------- */
 /*
- * Only SLES-01534 is catalogued. An NTSC executable will move all three, and
- * reading a moved address does not fail — it produces a bank of plausible
- * nonsense — so an uncatalogued build is refused rather than guessed at.
+ * SLES-01534's, translated into whichever build is on the disc (exe.h). Reading
+ * a moved address does not fail — it produces a bank of plausible nonsense —
+ * so an executable whose layout is not catalogued is refused rather than
+ * guessed at.
  */
-typedef struct vm_addrs {
-    const char *serial;
-    u32 clip_index;    /* the 12-entry pointer table                         */
-    u32 name_table;    /* the 1-based 12-byte model names                    */
-} vm_addrs;
-
-static const vm_addrs k_builds[] = {
-    { "SLES-01534", 0x8009F59Cu, 0x8009DB9Cu },
-};
-
-static const vm_addrs *addrs_for(const q2_build_id *id)
-{
-    size_t i;
-
-    if (!id)
-        return NULL;
-    for (i = 0; i < sizeof(k_builds) / sizeof(k_builds[0]); i++) {
-        if (strcmp(k_builds[i].serial, id->serial) == 0)
-            return &k_builds[i];
-    }
-    return NULL;
-}
+#define VM_ADDR_CLIP_INDEX 0x8009F59Cu  /* the 12-entry pointer table        */
+#define VM_ADDR_NAME_TABLE 0x8009DB9Cu  /* the 1-based 12-byte model names   */
 
 const char *q2_vm_state_name(q2_vm_state s)
 {
@@ -68,9 +49,9 @@ static bool read_key(const q2_exe *e, u32 addr, q2_vm_key *k)
 q2_result q2_vm_tables_load(q2_vm_tables *out, const disc *d,
                             const q2_build_id *id)
 {
-    const vm_addrs *a = addrs_for(id);
     q2_exe e;
     q2_result r;
+    u32 clip_index, name_table;
     u32 block[Q2_VM_SLOTS][Q2_VM_STATES + 1];
     u32 total = 0;
     u32 cursor = 0;
@@ -78,14 +59,18 @@ q2_result q2_vm_tables_load(q2_vm_tables *out, const disc *d,
 
     if (!out || !d)
         return Q2_ERR_INVALID_ARG;
-    if (!a)
-        return Q2_ERR_UNSUPPORTED;
 
     memset(out, 0, sizeof(*out));
 
-    r = q2_exe_load(&e, d, NULL);
+    r = q2_exe_load(&e, d, id && id->exe_name[0] ? id->exe_name : NULL);
     if (r != Q2_OK)
         return r;
+    if (!q2_exe_has_layout(&e)) {
+        q2_exe_free(&e);
+        return Q2_ERR_UNSUPPORTED;
+    }
+    clip_index = q2_exe_addr(&e, VM_ADDR_CLIP_INDEX);
+    name_table = q2_exe_addr(&e, VM_ADDR_NAME_TABLE);
 
     /*
      * Two passes. The first reads every clip's bounds and totals the keys so
@@ -97,7 +82,7 @@ q2_result q2_vm_tables_load(q2_vm_tables *out, const disc *d,
     for (w = 0; w < Q2_VM_SLOTS; w++) {
         u32 blockaddr;
 
-        if (!q2_exe_u32(&e, a->clip_index + (u32)w * 4u, &blockaddr)) {
+        if (!q2_exe_u32(&e, clip_index + (u32)w * 4u, &blockaddr)) {
             q2_exe_free(&e);
             return Q2_ERR_BAD_FORMAT;
         }
@@ -155,7 +140,7 @@ q2_result q2_vm_tables_load(q2_vm_tables *out, const disc *d,
         /* The model name, width-limited rather than NUL-terminated: two of the
          * twelve fill all twelve bytes. */
         {
-            u32 base = a->name_table + (u32)w * 12u;
+            u32 base = name_table + (u32)w * 12u;
             int i;
             for (i = 0; i < 12; i++) {
                 u8 ch = 0;

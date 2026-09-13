@@ -31,18 +31,20 @@ q2_result q2_class_table_load(q2_class_table *out, const disc *d,
 
     memset(out, 0, sizeof(*out));
 
-    if (strcmp(id->serial, "SLES-01534") != 0) {
-        Q2_WARN("class table location is unknown for build %s",
-                id->serial[0] ? id->serial : "(unidentified)");
-        return Q2_ERR_UNSUPPORTED;
-    }
-
     r = q2_exe_load(&exe, d, id->exe_name);
     if (r != Q2_OK)
         return r;
 
-    addr = Q2_CLASSTABLE_ADDR_SLES01534;
-    end  = Q2_CLASSTABLE_END_SLES01534;
+    /* SLES-01534's bounds, translated into this build's (exe.h). */
+    if (!q2_exe_has_layout(&exe)) {
+        Q2_WARN("class table location is unknown for build %s",
+                id->serial[0] ? id->serial : "(unidentified)");
+        q2_exe_free(&exe);
+        return Q2_ERR_UNSUPPORTED;
+    }
+
+    addr = q2_exe_addr(&exe, Q2_CLASSTABLE_ADDR_SLES01534);
+    end  = addr + (Q2_CLASSTABLE_END_SLES01534 - Q2_CLASSTABLE_ADDR_SLES01534);
 
     if (!q2_exe_contains(&exe, addr, end - addr)) {
         q2_exe_free(&exe);
@@ -67,8 +69,11 @@ q2_result q2_class_table_load(q2_class_table *out, const disc *d,
         e->id = q2_rd_u32(rec + 0x00);
         memcpy(e->name, rec + 0x04, Q2_CLASS_NAME_LEN);
         e->name[Q2_CLASS_NAME_LEN] = '\0';
+        /* Which functions, kept in SLES-01534's addresses. */
         e->fn_a   = q2_rd_u32(rec + 0x14);
         e->fn_b   = q2_rd_u32(rec + 0x24);
+        if (e->fn_a) e->fn_a = q2_exe_pal(&exe, e->fn_a);
+        if (e->fn_b) e->fn_b = q2_exe_pal(&exe, e->fn_b);
         e->gib_health = q2_rd_s16(rec + 0x28);
         e->class_byte = rec[0x20];
         e->health = q2_rd_s16(rec + 0x2A);

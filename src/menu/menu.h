@@ -118,6 +118,17 @@ typedef struct q2_menu_settings {
  * `q2_menu_settings_defaults` runs all four. */
 void q2_menu_settings_defaults(q2_menu_settings *s);
 void q2_menu_reset_video(q2_menu_settings *s);
+
+/*
+ * SCREEN POSITION's default Y, which is the display env's `screen.y` itself
+ * (Config_InstallVideo, 0x8001C29C): 24 lines down PAL's taller raster, and 0
+ * on NTSC, whose 240 lines fill its own — FrontEndResetVideoDefaults stores
+ * zero in SLUS-00757 where SLES-01534 stores 24. It is the picture's neutral
+ * position, so it is also what an offset is measured from. `screen_h` is the
+ * framebuffer's height, which is what tells the two builds apart here.
+ */
+int  q2_menu_screen_y_default(int screen_h);
+void q2_menu_reset_video_for(q2_menu_settings *s, int screen_h);
 void q2_menu_reset_sound(q2_menu_settings *s);
 void q2_menu_reset_player(q2_menu_settings *s);
 void q2_menu_reset_variables(q2_menu_settings *s);
@@ -452,9 +463,19 @@ typedef struct q2_menu {
 
     bool                open;
     bool                multiplayer;  /* 0x800AEBCC — picks page 43 over 26  */
+    bool                us_english;   /* the North American build's spellings */
     int                 cheat_level;  /* 0x800B335C                          */
     int                 resupplies;   /* 0x800B335D                          */
     int                 screen_h;     /* 0x800B2DA2 — the title's y follows  */
+
+    /*
+     * The framebuffer this menu's 512 x 248 block is centred in: 248 on PAL,
+     * 240 on NTSC, where the block lands four lines up. That IS the NTSC
+     * build's layout: 105 of the 111 rows in its executable's page tables and
+     * all 53 of QFRONT's that are transcribed here are PAL's less four — see
+     * q2_menu_item_y for the table it did not move.
+     */
+    int                 fb_h;
 
     /* The death screen is inert until its countdown expires (0x8002052C). */
     /*
@@ -522,6 +543,18 @@ bool q2_menu_set_slider(q2_menu *m, int index, int value);
 
 /* Context the pages read. Set these before opening. */
 void q2_menu_set_multiplayer(q2_menu *m, bool on);
+
+/*
+ * Spell the menu's words the North American build's way. Two of them differ,
+ * and both are strings in the executable rather than in the level data:
+ * AUTOCENTRE is AUTOCENTER (0x800AB014 in SLES-01534 terms, and QFRONT's own
+ * copy at module+0xD4 likewise), and the level table's COLOSSEUM, which the
+ * arena list shows, is COLISEUM in SLUS-00757's record.
+ */
+void q2_menu_set_us_english(q2_menu *m, bool on);
+
+/* A table's word as the build in hand spells it. */
+const char *q2_menu_word(const char *word, bool us_english);
 void q2_menu_set_controller_count(q2_menu *m, int count);
 void q2_menu_set_cheat_level(q2_menu *m, int level);
 void q2_menu_set_resupplies(q2_menu *m, int n);
@@ -552,5 +585,17 @@ bool q2_menu_item_selectable(const q2_menu *m, int index);
 /* The title's y, which the original derives from the framebuffer height:
  * (h - 188) / 2 + 10  (0x8001CF74). */
 int  q2_menu_title_y(int screen_h);
+
+/* The framebuffer the block is centred in (q2_menu.fb_h). */
+void q2_menu_set_fb_height(q2_menu *m, int fb_h);
+
+/*
+ * Where row `index` of the current page is drawn, in block coordinates: the
+ * table's y, except on the one table SLUS-00757 left where PAL had it while
+ * it moved every other row up four — FET_LOADSAVE_CHOOSEFILE, the memory
+ * card's SAVE FILE screen (0x8009B114). Centring the block would lift those
+ * five rows too, so on a shorter framebuffer they are put back down.
+ */
+int  q2_menu_item_y(const q2_menu *m, int index);
 
 #endif /* Q2PSX_MENU_H */

@@ -5,6 +5,50 @@
 #include <string.h>
 
 /* ------------------------------------------------------------------------- */
+/* SLUS-00757 against SLES-01534                                              */
+/* ------------------------------------------------------------------------- */
+/*
+ * The two executables aligned word for word, with every word that can hold an
+ * address — a jump target, a `lui`/`%lo` pair, a $gp offset, a pointer in data
+ * — masked before comparing. 158,097 of SLES-01534's 158,208 words find a
+ * partner, and they fall into these runs. What the gaps are is the NTSC build's
+ * actual difference:
+ *
+ *   0x8001FA30  4 words   FrontEndResetVideoDefaults drops the PAL screen Y of
+ *                         24 and stores zero instead — one instruction shorter
+ *   0x800701B4  59 words  GetStringFromStringtable, rewritten at 136 words to
+ *                         try `<key>US` first; and MOVED, to 0x8006FA28, ahead
+ *                         of the code it used to follow. Its entry point is
+ *                         the one address inside it that still translates.
+ *   0x800718B4  2 words   SeekAndPlay: tenths x5 becomes tenths x6
+ *   0x80082620  33 words  MemoryCardUpdate2: NTSC deletes the old save before
+ *                         writing the new one (MemCardDeleteFile, 105 words)
+ *   0x800ABFA4  13 words  the armour captions, respelt Armor
+ *
+ * The final run carries on past the image into the BSS and the heap. The NTSC
+ * BSS starts 0x270 later and is exactly as long (0x3C048 bytes in both), which
+ * is what a relinked image with the same globals looks like.
+ *
+ * Checked against the NTSC disc's own symbol table (MAIN.SYM, which ships on
+ * it): of the 1,104 distinct call targets in SLES-01534's game code, 1,057
+ * translate onto the start of a named NTSC function, and the other 47 are
+ * private routines inside the Psy-Q libraries, which the symbol table does not
+ * name.
+ */
+static const q2_addr_run k_layout_slus00757[] = {
+    { 0x80018000u, 0x8001FA30u,      0x0  },
+    { 0x8001FA40u, 0x8006FA2Cu,     -0x4  },
+    { 0x8006FA2Cu, 0x800701B4u,   +0x21C  },
+    { 0x800701B4u, 0x800701B8u,   -0x78C  },   /* GetStringFromStringtable */
+    { 0x800702A0u, 0x800718B4u,   +0x130  },
+    { 0x800718BCu, 0x80082620u,   +0x134  },
+    { 0x800826A4u, 0x800ABFA4u,   +0x254  },
+    { 0x800ABFD8u, 0x800AC2C4u,   +0x250  },
+    { 0x800AC2C4u, 0x800AD93Cu,   +0x254  },
+    { 0x800AD93Cu, 0x80200000u,   +0x270  },   /* ...and the BSS and heap  */
+};
+
+/* ------------------------------------------------------------------------- */
 /* Catalogue                                                                  */
 /*                                                                            */
 /* Entries are added as discs are verified. An entry with an empty hash still  */
@@ -22,18 +66,24 @@ static const q2_build_desc g_catalogue[] = {
         Q2_REGION_PAL,
         Q2_VIDEO_PAL,
         "English",
-        "Activision / Hammerhead. ISO volume dated 1999-09-22."
+        "Activision / Hammerhead. ISO volume dated 1999-09-22.",
+        NULL, 0
     },
     {
         "Quake II (USA)",
-        "SLUS-00658",
-        "SLUS_006.58",
-        "",
-        0,
+        "SLUS-00757",
+        "SLUS_007.57",
+        /* Verified against a dump on 2026-09-11. The catalogue had carried
+         * SLUS-00658 here, a serial nobody had checked; the disc says 757. */
+        "b07204f7de3864f3d000a1e945573fbc242e65c841f15693942b1a458ced5638",
+        636928,
         Q2_REGION_NTSC_U,
         Q2_VIDEO_NTSC,
-        "English",
-        "Serial unverified against a dump; matched by serial only."
+        "English (American)",
+        "Activision / Hammerhead. ISO volume dated 1999-09-23. Ships the "
+        "linker's symbol table as MAIN.SYM.",
+        k_layout_slus00757,
+        (u32)Q2PSX_ARRAY_COUNT(k_layout_slus00757)
     },
 };
 
@@ -64,7 +114,86 @@ int q2_build_tick_rate(const q2_build_id *id)
 {
     if (!id)
         return 60;
-    return id->video == Q2_VIDEO_PAL ? 50 : 60;
+    return q2_video_field_hz(id->video);
+}
+
+const q2_build_desc *q2_build_by_hash(const char *sha256_hex)
+{
+    size_t i;
+
+    if (!sha256_hex || !sha256_hex[0])
+        return NULL;
+    for (i = 0; i < Q2PSX_ARRAY_COUNT(g_catalogue); i++) {
+        const q2_build_desc *b = &g_catalogue[i];
+        if (b->exe_sha256_hex[0] && strcmp(b->exe_sha256_hex, sha256_hex) == 0)
+            return b;
+    }
+    return NULL;
+}
+
+const q2_build_desc *q2_build_by_exe_name(const char *exe_name)
+{
+    size_t i;
+
+    if (!exe_name || !exe_name[0])
+        return NULL;
+    for (i = 0; i < Q2PSX_ARRAY_COUNT(g_catalogue); i++) {
+        const char *a = g_catalogue[i].exe_name, *b = exe_name;
+
+        while (*a && *b && toupper((unsigned char)*a) == toupper((unsigned char)*b)) {
+            a++;
+            b++;
+        }
+        if (!*a && !*b)
+            return &g_catalogue[i];
+    }
+    return NULL;
+}
+
+bool q2_build_has_layout(const q2_build_desc *b)
+{
+    if (!b)
+        return false;
+    /* SLES-01534 is the address space; everything else needs its runs. */
+    return b->layout_runs > 0 || strcmp(b->serial, "SLES-01534") == 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* What the video standard changes                                            */
+/* ------------------------------------------------------------------------- */
+int q2_video_field_hz(q2_video_std v)
+{
+    return v == Q2_VIDEO_PAL ? 50 : 60;
+}
+
+int q2_video_dt_per_field(q2_video_std v)
+{
+    return v == Q2_VIDEO_PAL ? Q2_PAL_DT_PER_FIELD : Q2_NTSC_DT_PER_FIELD;
+}
+
+int q2_video_fields_per_tenth(q2_video_std v)
+{
+    return v == Q2_VIDEO_PAL ? 5 : 6;
+}
+
+int q2_video_fb_height(q2_video_std v)
+{
+    return v == Q2_VIDEO_PAL ? Q2_PAL_FB_HEIGHT : Q2_NTSC_FB_HEIGHT;
+}
+
+int q2_video_mode(q2_video_std v)
+{
+    return v == Q2_VIDEO_PAL ? 1 : 0;   /* MODE_PAL / MODE_NTSC */
+}
+
+int q2_video_centre_shift(q2_video_std v)
+{
+    return (q2_video_fb_height(v) - Q2_PAL_FB_HEIGHT) / 2;
+}
+
+const char *q2_region_string_suffix(q2_region r)
+{
+    return r == Q2_REGION_NTSC_U ? "US" : "";
 }
 
 /* ------------------------------------------------------------------------- */

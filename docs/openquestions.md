@@ -43,9 +43,10 @@ empty and were recorded as a finding twice. The address was never a function: it
 discovery, and the only defence is to check the premise — here, "is this an entry point?" — before believing
 the search.
 
-A further four are **terminal**: they cannot be answered from this disc, and are marked `[!]` rather than
-left looking like work outstanding. #30 needs an NTSC disc, #35 is unverifiable at N = 1, #36 is a field that
-is zero in 100% of samples, and #38 is a standing security caution rather than a question at all.
+A further three are **terminal**: they cannot be answered from this disc, and are marked `[!]` rather than
+left looking like work outstanding. #35 is unverifiable at N = 1, #36 is a field that is zero in 100% of
+samples, and #38 is a standing security caution rather than a question at all. There used to be a fourth —
+#30, which needed an NTSC disc — and it fell the way the entry said it would: the disc supplied its own row.
 
 ---
 
@@ -1648,15 +1649,20 @@ The residues of the resolved blockers keep their parents' numbers.
 
 ## Tier 5 — Archival / other-build / process
 
-- [!] 30. **TERMINAL WITHOUT THE DISC — and what is needed is small and listed.** Every value here is a
-      property of a release this project does not have a copy of, so no amount of work on the PAL disc
-      produces one. What makes it terminal rather than open is that the port is already structured for the
-      answer: builds are identified by EXECUTABLE HASH rather than by region (`src/build/`), so an NTSC
-      disc supplies its own row and nothing else has to change. The list below is that row.
+- [x] 30. **READ, from a dump of SLUS-00757.** Framebuffer **512 × 240** and `video_mode_const` **0**
+      (`SetVideoMode(0)`, compiled as `addu a0, zero, zero`); films named **without** the `P` —
+      `TAKE1B.STX`, `OUTRO1.STX`, `ROGUEIN1.STX` — and encoded at 30 fps; executable `SLUS_007.57`,
+      636,928 bytes, SHA-256 `b07204f7…d5638`; PVD created `1999-09-23 17:17:17` GMT+9, 151,478 sectors. The
+      serial is **757**: the catalogue had carried an unchecked `SLUS-00658`. So the folklore 240 was right
+      this time, and it is now a number with an address rather than a number with a reputation.
 
-      **NTSC build values:** framebuffer height, `video_mode_const`, movie filename suffix, EXE hash,
-      PVD fields. All must be **read**, never guessed — PAL turned out to be 512 × **248**, not the widely
-      assumed 256, so the folklore 512 × 240 NTSC figure is *less* trustworthy now, not more.
+      Two things the entry did not foresee. The row was not quite "nothing else has to change": the NTSC
+      executable moves every table, so a port reading by address needs the RELOCATION as well — nine runs of
+      constant displacement, 158,097 of 158,208 words, checked against the disc's own `MAIN.SYM` (the linker's
+      symbol table, which ships on it). And the NTSC build is more than a region flag: a frame is 10 `dt`
+      rather than 12, music counts ×6, the menus sit four lines higher, the logo holds are re-counted for
+      60 Hz, and its string lookup asks for `<key>US` first — which the shared level data answers sixteen
+      times. FORMATS.md §9.13 is the whole census, and the port follows all of it.
 - [~] 31. Real xrefs to the `.DAT` chunk-name literal pool at `0x800AD414` — **found, and the pool is not
       indexed.** The zone loader at `0x8007B3F8` names each chunk by materialising its 12-byte literal
       directly (`0x8007BA78` for `MapMod`, `0x8007BB74` for `Points`, and so on), copying it to the stack and

@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include "entity.h"
+#include "ident.h"
 #include "level.h"
 #include "multiplayer.h"
 #include "reloc.h"
@@ -45,6 +46,21 @@
 #define QFRONT_FRAG_INDEX  0xEBBEu
 #define QFRONT_ROUND_INDEX 0xEBC0u
 #define QFRONT_TIME_INDEX  0xEBC2u
+
+/*
+ * ...as SLES-01534's QFRONT has them. SLUS-00757's is the same module with
+ * five words added to the opening reel's page hook at +0x1D68 — the pad
+ * re-latch after the film (FORMATS.md §9.13) — so the data block these sit in
+ * is 0x14 further on there, and the tables themselves are unchanged.
+ */
+static u32 qfront_shift(const disc *d)
+{
+    q2_build_id id;
+
+    if (q2_identify(d, &id) == Q2_OK && strcmp(id.serial, "SLUS-00757") == 0)
+        return 0x14u;
+    return 0;
+}
 
 typedef struct map_info {
     char name[64];
@@ -300,21 +316,24 @@ int cmd_multi(const disc *d, const char *map)
             if (q2_common_open(&cf, &file) == Q2_OK) {
                 if (q2_level_module_load(&front, &cf, MOD_BASE) == Q2_OK &&
                     !front.empty) {
-                    printf("\nLimit tables, from QFRONT's LevelBin\n");
-                    check_option_table(&front, "TIME (min)", QFRONT_TIME_TABLE,
+                    const u32 sh = qfront_shift(d);
+
+                    printf("\nLimit tables, from QFRONT's LevelBin%s\n",
+                           sh ? " (0x14 on, as this build's module has them)" : "");
+                    check_option_table(&front, "TIME (min)", QFRONT_TIME_TABLE + sh,
                                        q2_mp_time_options,
                                        Q2_MP_TIME_OPTION_COUNT,
-                                       QFRONT_TIME_INDEX,
+                                       QFRONT_TIME_INDEX + sh,
                                        Q2_MP_TIME_OPTION_DEFAULT, &fail);
-                    check_option_table(&front, "FRAG", QFRONT_FRAG_TABLE,
+                    check_option_table(&front, "FRAG", QFRONT_FRAG_TABLE + sh,
                                        q2_mp_frag_options,
                                        Q2_MP_FRAG_OPTION_COUNT,
-                                       QFRONT_FRAG_INDEX,
+                                       QFRONT_FRAG_INDEX + sh,
                                        Q2_MP_FRAG_OPTION_DEFAULT, &fail);
-                    check_option_table(&front, "ROUND", QFRONT_ROUND_TABLE,
+                    check_option_table(&front, "ROUND", QFRONT_ROUND_TABLE + sh,
                                        q2_mp_round_options,
                                        Q2_MP_ROUND_OPTION_COUNT,
-                                       QFRONT_ROUND_INDEX,
+                                       QFRONT_ROUND_INDEX + sh,
                                        Q2_MP_ROUND_OPTION_DEFAULT, &fail);
                     q2_ai_module_free(&front);
                 } else {

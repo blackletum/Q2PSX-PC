@@ -133,8 +133,8 @@ bool q2_menu_item_rect(const q2_menu *m, int index,
      * y - cell_h/2 - 2 to y - cell_h/2 + cell_h + 1. The band that lights up
      * is the row, so that is what can be hit.
      */
-    if (y0) *y0 = it->y - cell_h / 2 - 2;
-    if (y1) *y1 = it->y - cell_h / 2 + cell_h + 1;
+    if (y0) *y0 = q2_menu_item_y(m, index) - cell_h / 2 - 2;
+    if (y1) *y1 = q2_menu_item_y(m, index) - cell_h / 2 + cell_h + 1;
 
     return true;
 }

@@ -88,12 +88,22 @@ q2_result q2_fx_tables_load(q2_fx_tables *out, const q2_exe *exe)
 
     memset(out, 0, sizeof(*out));
 
+    /*
+     * Every table address below is SLES-01534's and is translated into this
+     * build's before it is read; the pointers found INSIDE the tables are
+     * translated back, so what is kept — which ramp record, which laser arm —
+     * is in the one address space the transcription is written in.
+     */
+    if (!q2_exe_has_layout(exe))
+        return Q2_ERR_UNSUPPORTED;
+
     /* --- ramps ---------------------------------------------------------- */
     for (i = 0; i < Q2_FX_RAMP_COUNT; i++) {
-        u32 base = Q2_FXT_ADDR_RAMPS + i * Q2_FX_RAMP_STRIDE;
+        u32 pal  = Q2_FXT_ADDR_RAMPS + i * Q2_FX_RAMP_STRIDE;
+        u32 base = q2_exe_addr(exe, pal);
         u32 c;
 
-        out->ramp_addr[i] = base;
+        out->ramp_addr[i] = pal;
 
         if (!q2_exe_u16(exe, base + 0u, &out->ramp[i].abr) ||
             !q2_exe_u16(exe, base + 2u, &out->ramp[i].reserved))
@@ -115,8 +125,10 @@ q2_result q2_fx_tables_load(q2_fx_tables *out, const q2_exe *exe)
         for (i = 0; i < Q2_FX_RAMP_COUNT; i++) {
             u32 ptr, off;
 
-            if (!q2_exe_u32(exe, Q2_FXT_ADDR_RAMP_INDEX + 4u * i, &ptr))
+            if (!q2_exe_u32(exe, q2_exe_addr(exe, Q2_FXT_ADDR_RAMP_INDEX) + 4u * i,
+                            &ptr))
                 return Q2_ERR_RANGE;
+            ptr = q2_exe_pal(exe, ptr);
 
             /* A pointer that is not on a record boundary is the signature of a
              * wrong stride or base, so it is recorded rather than rounded. */
@@ -147,7 +159,8 @@ q2_result q2_fx_tables_load(q2_fx_tables *out, const q2_exe *exe)
 
     /* --- beam styles ---------------------------------------------------- */
     for (i = 0; i < Q2_FX_BEAM_STYLE_COUNT; i++) {
-        u32 base = Q2_FXT_ADDR_BEAM_STYLES + i * Q2_FX_BEAM_STYLE_STRIDE;
+        u32 base = q2_exe_addr(exe, Q2_FXT_ADDR_BEAM_STYLES) +
+                   i * Q2_FX_BEAM_STYLE_STRIDE;
 
         for (k = 0; k < Q2_FX_BEAM_TUBE_FACES; k++) {
             if (!read_face(exe, base + 20u * k, &out->beam[i].tube[k]))
@@ -169,9 +182,10 @@ q2_result q2_fx_tables_load(q2_fx_tables *out, const q2_exe *exe)
 
     /* --- the laser dispatch --------------------------------------------- */
     for (i = 0; i < Q2_FX_LASER_KIND_COUNT; i++) {
-        if (!q2_exe_u32(exe, Q2_FXT_ADDR_LASER_JUMP + 4u * i,
+        if (!q2_exe_u32(exe, q2_exe_addr(exe, Q2_FXT_ADDR_LASER_JUMP) + 4u * i,
                         &out->laser_jump[i]))
             return Q2_ERR_RANGE;
+        out->laser_jump[i] = q2_exe_pal(exe, out->laser_jump[i]);
         out->laser[i] = k_laser[i];
     }
 
@@ -196,17 +210,18 @@ q2_result q2_fx_tables_load_disc(q2_fx_tables *out, const disc *d,
 
     memset(out, 0, sizeof(*out));
 
-    if (strcmp(id->serial, "SLES-01534") != 0) {
-        Q2_WARN("effect table locations are unknown for build %s",
-                id->serial[0] ? id->serial : "(unidentified)");
-        return Q2_ERR_UNSUPPORTED;
-    }
     if (!id->exe_name[0])
         return Q2_ERR_NOT_FOUND;
 
     r = q2_exe_load(&exe, d, id->exe_name);
     if (r != Q2_OK)
         return r;
+    if (!q2_exe_has_layout(&exe)) {
+        Q2_WARN("effect table locations are unknown for build %s",
+                id->serial[0] ? id->serial : "(unidentified)");
+        q2_exe_free(&exe);
+        return Q2_ERR_UNSUPPORTED;
+    }
 
     /* The tables are copied out whole, so the image can go straight back. */
     r = q2_fx_tables_load(out, &exe);
@@ -369,7 +384,7 @@ u32 q2_fx_tables_check(const q2_fx_tables *t, const q2_exe *exe,
             note(report, user, &bad, what,
                  (s64)t->laser_jump[i], (s64)k_laser_arm[i]);
         }
-        if (exe && !q2_exe_contains(exe, t->laser_jump[i], 4)) {
+        if (exe && !q2_exe_contains(exe, q2_exe_addr(exe, t->laser_jump[i]), 4)) {
             snprintf(what, sizeof(what), "laser jump[%u] inside the segment", i);
             note(report, user, &bad, what, 0, 1);
         }
@@ -389,7 +404,7 @@ u32 q2_fx_tables_check(const q2_fx_tables *t, const q2_exe *exe,
      * transcription above claims their contents. */
     if (exe) {
         for (i = 0; i < 3; i++) {
-            if (!q2_exe_contains(exe, k_laser_body[i], 4)) {
+            if (!q2_exe_contains(exe, q2_exe_addr(exe, k_laser_body[i]), 4)) {
                 snprintf(what, sizeof(what), "laser body %u mapped", i);
                 note(report, user, &bad, what, 0, 1);
             }

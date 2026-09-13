@@ -224,12 +224,21 @@ int cmd_exe(const disc *d, const char *save_path)
                exe.bss_addr, exe.bss_addr + exe.bss_size, exe.bss_size);
     printf("stack        : 0x%08X (%u bytes)\n", exe.sp_base, exe.sp_size);
 
-    printf("\nlandmarks (documented in FORMATS.md):\n");
+    /*
+     * The documented addresses are SLES-01534's. On another catalogued build
+     * each is looked up where that build keeps it, and printed there — the
+     * column is this image's address, so it can be fed straight back to
+     * `disasm` or `bytes` for the disc in hand.
+     */
+    printf("\nlandmarks (documented in FORMATS.md%s):\n",
+           q2_exe_addr(&exe, marks[0].addr) != marks[0].addr
+               ? ", found where this build keeps them" : "");
     for (i = 0; i < (int)(sizeof(marks) / sizeof(marks[0])); i++) {
         const landmark *m = &marks[i];
         q2_mips_insn in;
-        u32 word;
-        bool mapped = q2_exe_u32(&exe, m->addr, &word);
+        u32 word = 0;
+        u32 at = q2_exe_has_layout(&exe) ? q2_exe_addr(&exe, m->addr) : m->addr;
+        bool mapped = at && q2_exe_u32(&exe, at, &word);
         bool match;
 
         if (!mapped) {
@@ -238,9 +247,9 @@ int cmd_exe(const disc *d, const char *save_path)
             continue;
         }
 
-        q2_mips_decode(word, m->addr, &in);
+        q2_mips_decode(word, at, &in);
         match = !m->expect || strcmp(in.mnemonic, m->expect) == 0;
-        printf("  %08X  %-28s %s%s\n", m->addr, in.text, m->what,
+        printf("  %08X  %-28s %s%s\n", at, in.text, m->what,
                match ? "" : "   << MISMATCH");
         if (match)
             ok++;

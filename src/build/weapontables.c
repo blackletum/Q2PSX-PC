@@ -115,11 +115,6 @@ q2_result q2_weapon_tables_load(q2_weapon_tables *out, const disc *d,
 
     memset(out, 0, sizeof(*out));
 
-    if (strcmp(id->serial, "SLES-01534") != 0) {
-        Q2_WARN("weapon table locations are unknown for build %s",
-                id->serial[0] ? id->serial : "(unidentified)");
-        return Q2_ERR_UNSUPPORTED;
-    }
     if (!id->exe_name[0])
         return Q2_ERR_NOT_FOUND;
 
@@ -127,29 +122,40 @@ q2_result q2_weapon_tables_load(q2_weapon_tables *out, const disc *d,
     if (r != Q2_OK)
         return r;
 
+    /* Every address below is SLES-01534's; A() is where this build keeps it. */
+    if (!q2_exe_has_layout(&out->exe)) {
+        Q2_WARN("weapon table locations are unknown for build %s",
+                id->serial[0] ? id->serial : "(unidentified)");
+        q2_exe_free(&out->exe);
+        return Q2_ERR_UNSUPPORTED;
+    }
+#define A(pal) q2_exe_addr(&out->exe, (pal))
+
     /* The five parallel arrays. Each is materialised as base-minus-one in the
      * code, so element `i` sits at base + 4*i and slot 0 is real storage the
      * engine can and does read. */
     for (i = 0; i < Q2_WT_SLOTS; i++) {
         u32 w;
 
-        if (!q2_exe_u32(&out->exe, Q2_WT_ADDR_AMMO_PER_SHOT + 4 * i, &w))
+        if (!q2_exe_u32(&out->exe, A(Q2_WT_ADDR_AMMO_PER_SHOT) + 4 * i, &w))
             goto bad;
         out->ammo_per_shot[i] = (s32)w;
 
-        if (!q2_exe_u32(&out->exe, Q2_WT_ADDR_AMMO_TYPE + 4 * i, &w))
+        if (!q2_exe_u32(&out->exe, A(Q2_WT_ADDR_AMMO_TYPE) + 4 * i, &w))
             goto bad;
         out->ammo_type[i] = (s32)w;
 
-        if (!q2_exe_u32(&out->exe, Q2_WT_ADDR_OWNED_BIT + 4 * i, &w))
+        if (!q2_exe_u32(&out->exe, A(Q2_WT_ADDR_OWNED_BIT) + 4 * i, &w))
             goto bad;
         out->owned_bit[i] = w;
 
-        if (!q2_exe_u32(&out->exe, Q2_WT_ADDR_FIRE_FN + 4 * i, &w))
+        if (!q2_exe_u32(&out->exe, A(Q2_WT_ADDR_FIRE_FN) + 4 * i, &w))
             goto bad;
-        out->fire_fn[i] = w;
+        /* Which function, not where: kept in SLES-01534's addresses so it
+         * compares against the transcription on any build. */
+        out->fire_fn[i] = w ? q2_exe_pal(&out->exe, w) : 0;
 
-        p = q2_exe_ptr(&out->exe, Q2_WT_ADDR_NAMES + Q2_WT_NAME_LEN * i,
+        p = q2_exe_ptr(&out->exe, A(Q2_WT_ADDR_NAMES) + Q2_WT_NAME_LEN * i,
                        Q2_WT_NAME_LEN);
         if (!p) goto bad;
         copy_name(out->name[i], p, Q2_WT_NAME_LEN);
@@ -166,7 +172,7 @@ q2_result q2_weapon_tables_load(q2_weapon_tables *out, const disc *d,
     out->autoswitch_count = 0;
     for (i = 0; i < Q2_WT_AUTOSWITCH_MAX; i++) {
         u32 w;
-        if (!q2_exe_u32(&out->exe, Q2_WT_ADDR_AUTOSWITCH + 4 * i, &w))
+        if (!q2_exe_u32(&out->exe, A(Q2_WT_ADDR_AUTOSWITCH) + 4 * i, &w))
             goto bad;
         if (w == 0)
             break;
@@ -190,7 +196,7 @@ q2_result q2_weapon_tables_load(q2_weapon_tables *out, const disc *d,
             if (!k_muzzle_addr[i])
                 continue;
             for (k = 0; k < 3; k++)
-                if (!q2_exe_s16(&out->exe, k_muzzle_addr[i] + 2 * (u32)k, &v[k]))
+                if (!q2_exe_s16(&out->exe, A(k_muzzle_addr[i]) + 2 * (u32)k, &v[k]))
                     goto bad;
 
             /* Stored exactly as the disc holds them: (right, DOWN, forward).
@@ -204,7 +210,7 @@ q2_result q2_weapon_tables_load(q2_weapon_tables *out, const disc *d,
     }
 
     for (i = 0; i < Q2_WT_ARMOUR_CLASSES; i++) {
-        u32 base = Q2_WT_ADDR_ARMOUR + 6 * i;
+        u32 base = A(Q2_WT_ADDR_ARMOUR) + 6 * i;
         u8  b, m;
         s16 n, e;
 
@@ -221,7 +227,7 @@ q2_result q2_weapon_tables_load(q2_weapon_tables *out, const disc *d,
     }
 
     for (i = 0; i < Q2_WT_SOUND_COUNT; i++) {
-        p = q2_exe_ptr(&out->exe, Q2_WT_ADDR_SOUNDS + Q2_WT_NAME_LEN * i,
+        p = q2_exe_ptr(&out->exe, A(Q2_WT_ADDR_SOUNDS) + Q2_WT_NAME_LEN * i,
                        Q2_WT_NAME_LEN);
         if (!p) goto bad;
         copy_name(out->sound[i], p, Q2_WT_NAME_LEN);
@@ -231,7 +237,7 @@ q2_result q2_weapon_tables_load(q2_weapon_tables *out, const disc *d,
         int k;
         for (k = 0; k < 3; k++)
             if (!q2_exe_s16(&out->exe,
-                            Q2_WT_ADDR_BOLT_SHAPE + 6 * i + 2 * (u32)k,
+                            A(Q2_WT_ADDR_BOLT_SHAPE) + 6 * i + 2 * (u32)k,
                             &out->bolt_shape[i][k]))
                 goto bad;
     }
@@ -241,6 +247,7 @@ q2_result q2_weapon_tables_load(q2_weapon_tables *out, const disc *d,
 bad:
     q2_weapon_tables_free(out);
     return Q2_ERR_BAD_FORMAT;
+#undef A
 }
 
 void q2_weapon_tables_free(q2_weapon_tables *t)

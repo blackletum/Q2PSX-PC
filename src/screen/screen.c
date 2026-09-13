@@ -82,10 +82,14 @@ const u8 q2_screen_meter_rgb[Q2_SCREEN_METER_BARS][3] = {
 };
 
 /*
- * Bars 0 and 1 hang from a negative origin — `-(gp+1612) - 3`, so -23 with the
- * default 20 — while the rest sit at `22 - (gp+1612)`. That is not a
+ * Bars 0 and 1 hang from a negative origin — `-(gp+1612) - 3`, so -19 with
+ * PAL's 16 — while the rest sit at `22 - (gp+1612)`. That is not a
  * transcription slip: the first two are differences between a start and an end
- * stamp and only become visible once they exceed 23 halved units.
+ * stamp and only become visible once they exceed 19 halved units.
+ *
+ * gp+1612 is `ScreenYOff` in the NTSC build's symbol table, and it holds 16 on
+ * PAL and 8 on NTSC. This used to say 20, which is the halfword BEFORE it —
+ * gp+1610, `ScreenXOff` — read two bytes early.
  */
 static s16 meter_bar_y(const q2_screen_meter *m, int bar)
 {
@@ -294,12 +298,16 @@ static void layout_two_v(q2_screen *s)
 /*
  * 0x8007771C — the 2x2 split, used for both three and four players. Note the
  * one-pixel inset: the quadrants start at 1 and 257 / 1 and 124, not at 0.
+ *
+ * Literals, not derived from the framebuffer: SLUS-00757 carries its own, a
+ * height of 119 and a bottom row at 120 (0x800778D0 and 0x80077A0C there).
  */
 static void layout_quad(q2_screen *s)
 {
     int i;
-    static const s16 qx[4] = { 1, 257, 1, 257 };
-    static const s16 qy[4] = { 1, 1, 124, 124 };
+    const s16 row = (s16)(s->video == Q2_VIDEO_PAL ? 124 : 120);
+    const s16 qx[4] = { 1, 257, 1, 257 };
+    const s16 qy[4] = { 1, 1, row, row };
 
     memset(s->view, 0, sizeof(s->view));
 
@@ -309,7 +317,7 @@ static void layout_quad(q2_screen *s)
     for (i = 0; i < 4; i++) {
         q2_screen_view *v = &s->view[i];
         v->w = 256;                     /* 0x80077794 */
-        v->h = 123;                     /* 0x8007779C */
+        v->h = (s16)(row - 1);          /* 0x8007779C: 123, or NTSC's 119 */
         v->vw = v->w; v->vh = v->h;
         v->kick_scale = 6144;          /* 0x8007786C */
         v->proj  = 160;                 /* 0x80077810 */
@@ -396,17 +404,17 @@ q2_result q2_screen_init(q2_screen *s, q2_video_std video)
     memset(s, 0, sizeof(*s));
 
     /*
-     * 0x800764DC. SetVideoMode(1) then 512 and 248 into 0x800B2DA0/DA2. An NTSC
-     * build's equivalents have not been read, and PAL's 248 already refuted the
-     * commonly repeated 256 — so rather than substitute one folklore number for
-     * another, an NTSC request gets the PAL geometry and says so.
+     * 0x800764DC. SetVideoMode(1) then 512 and 248 into 0x800B2DA0/DA2 — or,
+     * in SLUS-00757, SetVideoMode(0) then 512 and 240. Those two stores and the
+     * mode are the whole of the difference in this function.
      */
     s->disp.width         = Q2_SCREEN_PAL_WIDTH;
-    s->disp.height        = Q2_SCREEN_PAL_HEIGHT;
-    s->disp.video_mode    = 1;
-    s->disp.field_hz      = 50;
+    s->disp.height        = (u16)q2_video_fb_height(video);
+    s->disp.video_mode    = (u32)q2_video_mode(video);
+    s->disp.field_hz      = (u16)q2_video_field_hz(video);
     s->disp.vsync_divisor = 2;
-    s->disp.height_is_inferred = (video != Q2_VIDEO_PAL);
+    s->disp.y_off         = (s16)(video == Q2_VIDEO_PAL ? 16 : 8);
+    s->video              = video;
 
     /* 0x8007657C..0x80076590: the draw/display indices and the three-slot
      * rotation the swap advances alongside them. */
@@ -434,7 +442,7 @@ q2_result q2_screen_init(q2_screen *s, q2_video_std video)
      * layout uses, not the 320 the boot layout will overwrite it with.
      */
     s->meter.enable = false;
-    s->meter.base_y = Q2_SCREEN_METER_BASE_Y;
+    s->meter.base_y = s->disp.y_off;
 
     /* Neither clear flag is set at boot: 0x800B2D94 and gp+18712 are both in
      * the zeroed segment, so until something arms them each viewport clears its
@@ -455,7 +463,7 @@ q2_result q2_screen_init(q2_screen *s, q2_video_std video)
     q2_screen_set_layout(s, Q2_SCREEN_LAYOUT_FULL_SINGLE, 1);
 
     s->exit_code = Q2_SCREEN_EXIT_NONE;
-    s->dt        = Q2_SCREEN_DT_NOMINAL;
+    s->dt        = (s32)(s->disp.vsync_divisor * q2_video_dt_per_field(video));
 
     /* The single-player size of the "Water Moves" pool. A multiplayer session
      * doubles it (0x80062CF8) and is the only thing that changes it. */

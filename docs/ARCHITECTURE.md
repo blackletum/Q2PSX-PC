@@ -70,6 +70,17 @@ executable. A localised or revised release moves them. Keying data-table offsets
 off "PAL" would break the first time a German disc appears; keying them off the
 exact executable cannot.
 
+And a second catalogued build does not need a second copy of every address. The
+project's address space is SLES-01534's — every address in its documents and
+table loaders is one of those — and each other build carries a *layout*: the runs
+of constant displacement that map PAL's addresses into its image. `q2_exe` finds
+its own build from its own hash, `q2_exe_addr` translates a documented address,
+and `q2_exe_pal` translates a pointer read out of the image back, so what a loader
+keeps (which handler, which record) is in the one space the transcription is
+written in. The USA disc, SLUS-00757, is nine runs (FORMATS.md §9.13). What an
+NTSC build changes beyond addresses — the display, the frame, the text variant —
+is a property of the video standard or the region, and `ident.h` states each.
+
 An uncatalogued disc is *not* rejected. It reports as unknown and runs in generic
 mode, because refusing to boot on a regional release nobody has dumped for us
 would break the project's central promise.

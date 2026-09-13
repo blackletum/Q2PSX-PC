@@ -80,13 +80,14 @@
  * is the only call site in the image, which is what makes the video standard a
  * property the executable states rather than one a port infers from a serial.
  *
- * NTSC values are NOT known and must not be guessed — PAL turned out to be 248
- * lines rather than the widely repeated 256, so the folklore 240 is less
- * trustworthy now, not more. Asking for an NTSC screen yields the PAL geometry
- * with `height_is_inferred` set, so a caller can tell.
+ * NTSC is READ, not guessed. The same function in SLUS-00757 (0x80076610 there)
+ * passes `SetVideoMode(0)` and stores 512 and 240 — which happens to be the
+ * folklore figure this comment used to refuse to trust, now with an address
+ * behind it. Nothing else in the bring-up differs.
  */
 #define Q2_SCREEN_PAL_WIDTH   512   /* 0x800B2DA0, stored at 0x800764F0 */
 #define Q2_SCREEN_PAL_HEIGHT  248   /* 0x800B2DA2, stored at 0x800764FC */
+#define Q2_SCREEN_NTSC_HEIGHT 240   /* SLUS-00757, stored at 0x80076630 */
 
 /*
  * The projection distance the bring-up installs before any layout exists:
@@ -110,8 +111,8 @@ typedef struct q2_screen_buf_origin {
 
 typedef struct q2_screen_display {
     u16 width, height;          /* 0x800B2DA0 / 0x800B2DA2                    */
-    u32 video_mode;             /* 0x800A9E70 — 1 == MODE_PAL                 */
-    u16 field_hz;               /* 50 on PAL, from SetVideoMode(1)            */
+    u32 video_mode;             /* 0x800A9E70 — 1 == MODE_PAL, 0 == MODE_NTSC */
+    u16 field_hz;               /* 50 on PAL, 60 on NTSC                      */
     u16 vsync_divisor;          /* the literal 2 at 0x80018974                */
 
     q2_screen_buf_origin buf[2];/* 0x800B2EF4, stride 4                       */
@@ -135,7 +136,11 @@ typedef struct q2_screen_display {
     u8  bg_rgb[3];              /* gp+1604 (0x800AEC44) — the clear colour    */
     u8  bg_enable;              /* gp+18732 (0x800B2F2C) — the clear's isbg   */
 
-    bool height_is_inferred;    /* true when asked for a build we cannot read */
+    /*
+     * `ScreenYOff`, gp+1612 (0x800AEC4C): 16 on PAL and 8 on NTSC. The name is
+     * the NTSC symbol table's. Only the performance meter reads it.
+     */
+    s16 y_off;
 } q2_screen_display;
 
 /* ------------------------------------------------------------------------- */
@@ -574,7 +579,9 @@ typedef enum q2_screen_exit {
 /*
  * `dt` is in 1/300 s units and is clamped, not averaged: `slti 31` at
  * 0x800184B8 with 30 in the delay slot. VSync(2) at 50 Hz is 12 units, so the
- * clamp bites at two and a half dropped fields.
+ * clamp bites at two and a half dropped fields. At 60 Hz it is 10 — the same
+ * clamp is three whole dropped frames — and a screen brought up for NTSC
+ * starts from that instead.
  */
 #define Q2_SCREEN_DT_NOMINAL   12
 #define Q2_SCREEN_DT_MAX       30
@@ -593,7 +600,8 @@ typedef enum q2_screen_exit {
  * shape — which bar is which colour, where it sits, and which ones reset.
  */
 #define Q2_SCREEN_METER_BARS   9
-#define Q2_SCREEN_METER_BASE_Y 20   /* gp+1612 (0x800AEC4C)                  */
+#define Q2_SCREEN_METER_BASE_Y 16   /* gp+1612 (0x800AEC4C), ScreenYOff; the
+                                     * screen takes 8 from it on NTSC        */
 #define Q2_SCREEN_METER_WIDTH   2   /* the literal at 0x80076ED0             */
 
 typedef struct q2_screen_meter {
@@ -611,6 +619,10 @@ extern const u8  q2_screen_meter_rgb[Q2_SCREEN_METER_BARS][3];
 /* ------------------------------------------------------------------------- */
 typedef struct q2_screen {
     q2_screen_display disp;
+
+    /* The standard it was brought up for. The framebuffer follows from it,
+     * and so do the few layout literals each build carries its own copy of. */
+    q2_video_std      video;
 
     q2_screen_view    view[Q2_SCREEN_MAX_VIEWS];
     int               view_count;      /* 0x800B2C2C                         */

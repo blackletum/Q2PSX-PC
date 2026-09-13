@@ -22,6 +22,10 @@
  * play() is a frame limit and all three films are cut short by it, so the disc
  * holds more picture than anyone playing it has seen. Without it the whole
  * video region is converted, which is what an archive of the disc wants.
+ *
+ * Either disc: the PAL films are 25 fps and named with a P, the NTSC ones 30 fps
+ * and named without. The rate is the film's own, measured by `q2_movie_open`,
+ * and it is what `video` hands ffmpeg — `info` prints it.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,9 +48,12 @@
 #define PCM_CHUNK (XA_FRAMES_PER_SECTOR * 2u * 8u)
 
 static const char *const k_film[] = {
-    "Q2DATA/MOVIES/TAKE1BP.STX",
+    "Q2DATA/MOVIES/TAKE1BP.STX",     /* SLES-01534 */
     "Q2DATA/MOVIES/OUTRO1P.STX",
-    "Q2DATA/MOVIES/ROGUEINP.STX"
+    "Q2DATA/MOVIES/ROGUEINP.STX",
+    "Q2DATA/MOVIES/TAKE1B.STX",      /* SLUS-00757 */
+    "Q2DATA/MOVIES/OUTRO1.STX",
+    "Q2DATA/MOVIES/ROGUEIN1.STX"
 };
 #define FILM_COUNT (sizeof(k_film) / sizeof(k_film[0]))
 
@@ -133,28 +140,30 @@ static int cmd_info(const disc *d)
     static u8 rgb[RGB_BYTES];
     size_t i;
 
-    printf("%-14s %10s %8s %8s %8s\n",
-           "film", "bytes", "sectors", "frames", "retail");
+    printf("%-14s %10s %8s %8s %8s %5s\n",
+           "film", "bytes", "sectors", "frames", "retail", "fps");
 
+    /* Each disc carries one of the two sets; the other is simply not listed. */
     for (i = 0; i < FILM_COUNT; i++) {
         const disc_file *f = disc_find(d, k_film[i]);
         const char *base   = film_base(k_film[i]);
         u32 frames = 0;
+        double fps = 0.0;
 
-        if (!f) {
-            printf("%-14s %10s\n", base, "absent");
+        if (!f)
             continue;
+
+        if (q2_movie_open(&m, d, k_film[i])) {
+            fps = m.fps;
+            while (!q2_movie_finished(&m))
+                if (q2_movie_advance(&m, 1.0 / m.fps, rgb))
+                    frames++;
         }
 
-        if (q2_movie_open(&m, d, k_film[i]))
-            while (!q2_movie_finished(&m))
-                if (q2_movie_advance(&m, 1.0 / Q2_MOVIE_FPS, rgb))
-                    frames++;
-
-        printf("%-14s %10u %8u %8u %8u\n", base, f->size,
+        printf("%-14s %10u %8u %8u %8u %5.1f\n", base, f->size,
                (unsigned)((f->size + Q2_STX_SECTOR_SIZE - 1) /
                           Q2_STX_SECTOR_SIZE),
-               frames, q2_movie_retail_length(base));
+               frames, q2_movie_retail_length(base), fps);
     }
 
     return 0;
@@ -173,8 +182,10 @@ static int cmd_video(const disc *d, const char *path, bool retail)
     if (retail)
         m.frame_limit = q2_movie_retail_length(film_base(path));
 
+    fprintf(stderr, "stx2avi: %s at %.0f fps\n", film_base(path), m.fps);
+
     while (!q2_movie_finished(&m)) {
-        if (!q2_movie_advance(&m, 1.0 / Q2_MOVIE_FPS, rgb))
+        if (!q2_movie_advance(&m, 1.0 / m.fps, rgb))
             continue;
         if (fwrite(rgb, 1, RGB_BYTES, stdout) != RGB_BYTES) {
             fprintf(stderr, "stx2avi: short write on frame %u\n", frames);
@@ -208,13 +219,13 @@ static int cmd_audio(const disc *d, const char *path, const char *out,
      * Under --retail the picture stops early, so the sound must too, or the
      * .avi carries seconds of audio over a film that has ended. The cut is the
      * limit's own duration: the limit is a frame NUMBER and the frame carrying
-     * it is not shown, so the film is (limit - 1) frames at 25 fps.
+     * it is not shown, so the film is (limit - 1) frames at its own rate.
      */
     if (retail) {
         u32 limit = q2_movie_retail_length(film_base(path));
 
         if (limit)
-            cap = (u64)((double)(limit - 1u) / Q2_MOVIE_FPS *
+            cap = (u64)((double)(limit - 1u) / m.fps *
                         XA_SAMPLE_RATE) * XA_CHANNELS;
     }
 
@@ -275,7 +286,8 @@ static void usage(void)
             "       stx2avi <disc> audio <FILM.STX> <out.wav> [--retail]\n"
             "\n"
             "<disc> is a .cue, .bin, .iso or an extracted Q2DATA directory.\n"
-            "video writes RGB24 %ux%u at %u fps to stdout, for ffmpeg.\n",
+            "video writes RGB24 %ux%u to stdout, for ffmpeg, at the film's\n"
+            "own rate: %u fps on the PAL disc, 30 on the NTSC one (info says).\n",
             Q2_STX_WIDTH, Q2_STX_HEIGHT, Q2_STX_FPS);
 }
 

@@ -61,6 +61,19 @@ See [`docs/FIDELITY.md`](docs/FIDELITY.md) for the full rendering conformance sp
 Regions and revisions are detected per *build*, not per region, because localised
 releases move the executable's data tables. See [`docs/FORMATS.md`](docs/FORMATS.md).
 
+| Release | Serial | Status |
+|---|---|---|
+| Quake II (Europe) | `SLES-01534` | supported — the build this project was read out of |
+| Quake II (USA) | `SLUS-00757` | supported — its own 512 × 240 60 Hz display, 30 fps films, American English |
+
+The USA executable is PAL's source linked again: 99.93% of it is PAL's in nine runs of constant displacement,
+and the port reads it through that relocation, so every table and every one of `q2psx-inspect`'s checks
+against the executable works on either disc. What NTSC actually changes is a short list, and all of it is
+followed — the frame is 10 of the console's 1/300 s units instead of 12, the menus sit four lines higher on
+the shorter screen, the logo screens and the music count 60 Hz fields, and the text is asked for as its
+`<key>US` variant first, which is why BASE3 is the *Comm Center* on one disc and the *Comm Centre* on the
+other. [`docs/FORMATS.md`](docs/FORMATS.md) §9.13 is the census.
+
 ## Status
 
 **The game finishes.** One run walks all five units — Strogg Outpost through Final Showdown, eleven
@@ -78,9 +91,10 @@ module passes the player rather than to the end of the file: the outro is cut at
 so the last 2.4 seconds are on the disc and were never seen.
 
 **And the format is fully read.** [`docs/openquestions.md`](docs/openquestions.md) has **no open
-questions**: 157 resolved, 18 partial where a residue is stated, and 4 marked terminal because this disc
-cannot answer them — an NTSC release nobody here owns, a file with N = 1, a field that is zero in every
-sample, and a standing security caution. The last two to fall, `AreaConx`'s link payload and the model
+questions**: 158 resolved, 18 partial where a residue is stated, and 3 marked terminal because this disc
+cannot answer them — a file with N = 1, a field that is zero in every sample, and a standing security
+caution. (The fourth used to be the NTSC build's values, which wanted a disc nobody here owned. There is one
+now.) The last two to fall, `AreaConx`'s link payload and the model
 force-draw mask, were the same mistake three entries apart: each stood on a premise nobody had tested — *this
 address is a function*, *this record is an array of structs* — and every search that followed was sound,
 exhaustive, and answering the wrong question.
@@ -94,7 +108,7 @@ not been read out of the executable yet.
 | Area | State |
 |---|---|
 | Disc access | cue/bin, iso, bare images; ISO9660; CD-XA Form 1 and 2 |
-| Build identification | by executable hash, not by region |
+| Build identification | by executable hash, not by region — both releases catalogued, and the USA executable read through its relocation to PAL's addresses |
 | Level data | container, scene graph, geometry, collision, spawns, lights, triggers |
 | Collision | the portal-walking hull trace, sliding, stepping and the entity sweep — transcribed from the executable, 47 of 47 maps walkable |
 | Rendering | software rasteriser with the PSX's rules; world and models, textured |
@@ -136,7 +150,7 @@ not been read out of the executable yet.
 | HUD | the overlay — notifications, centre line, crosshair, damage flash — its markup language and its own font; the MISSION screen, whose format strings turn out to be markup the game assembles at run time; and the **status bar**, which this project once proved did not exist. It does: health, ammo and armour in 24x24 numerals beside their icons, drawn by the per-viewport hook at `0x800337D0` and anchored to the viewport's own `view+304`. The earlier negative result came of enumerating format strings, and the bar draws sprites. And what you just picked up is on it: the bar's fourth sub-draw (`0x800359C0`) reads the two fields the touch dispatch has always written and turns them into an icon in the upper-left field and the caption beside it — `Super Shotgun`, not `Sshotgun P`, out of the 57-name table at `0x800AC144` that the same effect id indexes. **The effect id and the icon rect index are one number**, which is the join §11.1 asserted and `icontable.h` retracted; both were half right, and this sub-draw is where the mechanism is written down |
 | Effects | all five machines, nothing modelled: the fifteen-quad particle groups and their nineteen colour ramps, the one-frame beam pool and its folded hexagonal hull, the debris burst with the hull it slides in and the mover's own gravity and terminal velocity, and the `GlintMod` glint's two draw paths — which the port turns on by READING the level script that raises them, no interpreter needed. Spawned by the simulation, drawn into the same ordering table as the world. The weapon trail is the BFG's: a persistent green beam held on every target the ball can see, refreshed each tick and lingering 45 units after it passes |
 
-Checked against the PAL disc: 164 level files, 461,852 vertices, 274,936 quads,
+Checked against the PAL disc, and every executable check against the USA disc as well: 164 level files, 461,852 vertices, 274,936 quads,
 139,240 collision planes, 94,642 collision portals, 1,723 models, 2,036,080
 animation keys, 2,475 sounds, zero failures. The remaining gaps are tracked in
 [`docs/openquestions.md`](docs/openquestions.md).

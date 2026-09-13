@@ -80,11 +80,12 @@ static bool name_ieq(const char *a, const char *b, size_t n)
     return true;
 }
 
+/* At SLES-01534's address, read wherever this disc's build keeps it (exe.h). */
 static bool imm_at(const q2_exe *e, u32 addr, s32 *out)
 {
     u32 word;
 
-    if (!q2_exe_u32(e, addr, &word))
+    if (!q2_exe_u32(e, q2_exe_addr(e, addr), &word))
         return false;
     *out = (s32)(s16)(u16)(word & 0xFFFFu);
     return true;
@@ -108,6 +109,9 @@ static void run_checks(const q2_exe *e, const char *title,
         }
         if (got == list[i].expect) {
             printf("  %08X  %-46s  %6d  ok\n", list[i].addr, list[i].what, got);
+        } else if (q2_exe_lo_relocates(e, list[i].expect, got)) {
+            printf("  %08X  %-46s  %6d  ok (the %%lo of %d, relocated)\n",
+                   list[i].addr, list[i].what, got, list[i].expect);
         } else {
             printf("  %08X  %-46s  %6d  MISMATCH (port says %d)\n",
                    list[i].addr, list[i].what, got, list[i].expect);
@@ -1149,7 +1153,7 @@ int cmd_viewweapon(disc *d, const char *weapon, const char *out,
             u32 word;
             s16 s_disc, c_disc;
 
-            if (!q2_exe_u32(&e, Q2_VW_SIN_TABLE + i * 4, &word)) {
+            if (!q2_exe_u32(&e, q2_exe_addr(&e, Q2_VW_SIN_TABLE) + i * 4, &word)) {
                 sin_bad++;
                 continue;
             }

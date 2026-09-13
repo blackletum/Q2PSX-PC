@@ -1661,7 +1661,9 @@ static int cmd_anims(disc *d)
                 s16 stored;
                 s32 mine, diff;
 
-                if (!q2_exe_s16(&exe, 0x8009FC44 + idx * 2, &stored))
+                /* SLES-01534's table, where this build keeps it (exe.h). */
+                if (!q2_exe_s16(&exe, q2_exe_addr(&exe, 0x8009FC44) + idx * 2,
+                                &stored))
                     break;
 
                 /* The table is indexed by cos/2 + 2048. */

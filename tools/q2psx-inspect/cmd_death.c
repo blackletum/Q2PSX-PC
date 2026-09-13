@@ -26,16 +26,21 @@ static int g_fail;
 
 /* ------------------------------------------------------------------------- */
 
+/*
+ * The addresses below are SLES-01534's and each word is read where the disc's
+ * own build keeps it (exe.h); a word that holds an address — a `jal`, a `%lo` —
+ * agrees when it holds the same address translated.
+ */
 static void check_word(const q2_exe *e, u32 addr, u32 want, const char *what)
 {
     u32 got = 0;
 
-    if (!q2_exe_u32(e, addr, &got)) {
+    if (!q2_exe_u32(e, q2_exe_addr(e, addr), &got)) {
         printf("  %-46s %08X  NOT IN THE SEGMENT\n", what, addr);
         g_fail++;
         return;
     }
-    if (got != want) {
+    if (!q2_exe_word_relocates(e, want, got)) {
         printf("  %-46s %08X  %08X, expected %08X  MISMATCH\n",
                what, addr, got, want);
         g_fail++;
@@ -47,7 +52,8 @@ static void check_word(const q2_exe *e, u32 addr, u32 want, const char *what)
 static void check_string(const q2_exe *e, u32 addr, const char *want,
                          const char *what)
 {
-    const u8 *p = (const u8 *)q2_exe_ptr(e, addr, (u32)strlen(want) + 1);
+    const u8 *p = (const u8 *)q2_exe_ptr(e, q2_exe_addr(e, addr),
+                                         (u32)strlen(want) + 1);
 
     if (!p) {
         printf("  %-46s %08X  NOT IN THE SEGMENT\n", what, addr);
@@ -93,7 +99,7 @@ int cmd_death(const disc *d)
 
     g_fail = 0;
 
-    printf("The player death chain, checked against SLES_015.34\n\n");
+    printf("The player death chain, checked against %s\n\n", exe.name);
 
     printf("the five functions, and who installs whom\n");
     printf("  0x8003A1C8  the player think, installed at spawn (0x8003B3EC)\n");

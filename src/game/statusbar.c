@@ -1028,6 +1028,17 @@ u32 q2_statusbar_build_ot(const q2_statusbar *b, u16 tpage, u16 clut,
         break;
     case Q2_SBAR_LAYOUT_QUAD:
         q2_sbar_quad_fields(b->view_index, b->frags, scratch);
+        /*
+         * `QM4PosY` (0x800AE808) is {110,110,1,1} in SLES-01534 and
+         * {106,106,1,1} in SLUS-00757: the two upper views' bars ride the foot
+         * of a quadrant that is four lines shorter on the 240-line screen
+         * (screen.c's layout_quad). The lower two start at the top either way.
+         */
+        if (b->view_index < 2 && b->screen_h > 0 && b->screen_h != 248) {
+            int k;
+            for (k = 0; k < Q2_SBAR_FIELDS_QUAD; k++)
+                scratch[k].dy = (s16)(scratch[k].dy + (b->screen_h - 248) / 2);
+        }
         fields = scratch;
         frag_fields = quad_frag_fields;
         show_armour = false;

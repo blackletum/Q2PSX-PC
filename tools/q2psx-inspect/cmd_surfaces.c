@@ -85,7 +85,8 @@ static int check_tables(const disc *d, int *failures)
     for (i = 0; i < Q2_SURF_SELECTOR_COUNT; i++) {
         u8 got = 0;
 
-        if (!q2_exe_u8(&exe, 0x800AE614u + (u32)i, &got)) {
+        /* SLES-01534's address, where this build keeps it (exe.h). */
+        if (!q2_exe_u8(&exe, q2_exe_addr(&exe, 0x800AE614u) + (u32)i, &got)) {
             printf("[unmapped] ");
             (*failures)++;
             continue;
