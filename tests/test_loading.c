@@ -13,6 +13,7 @@
 #include "loading.h"
 
 #include <stdio.h>
+#include <math.h>
 #include <string.h>
 
 static int g_fail;
@@ -137,6 +138,26 @@ static void test_hold_is_a_floor_at_any_rate(void)
               "more than one frame", step[i], shown);
         CHECK(frames > 0, "at %.5f s a frame the screen never drew", step[i]);
     }
+}
+
+static void test_hold_roundoff(void)
+{
+    q2_loading l;
+
+    armed(&l);
+    q2_loading_raise(&l);
+    /* ARM may fuse the last subtraction and leave a positive fraction of
+     * a clock unit where separate multiply/subtract instructions yield zero. */
+    l.hold = fma(-1.0 / 30.0, 300.0, 10.0);
+    CHECK(l.hold > 0.0, "the fused countdown must exercise positive roundoff");
+    CHECK(!q2_loading_step(&l, 1.0 / 30.0),
+          "roundoff must not buy another loading frame");
+    CHECK(!l.open, "the exhausted screen must close");
+
+    q2_loading_raise(&l);
+    l.hold = 1e-6;
+    CHECK(q2_loading_step(&l, 1.0 / 30.0),
+          "a real remaining interval still owns its final frame");
 }
 
 static void test_raise_restarts_rather_than_accumulating(void)
@@ -337,6 +358,7 @@ int main(void)
 {
     test_page();
     test_hold_is_half_a_second();
+    test_hold_roundoff();
     test_hold_is_a_floor_at_any_rate();
     test_raise_restarts_rather_than_accumulating();
     test_never_raised_without_assets();

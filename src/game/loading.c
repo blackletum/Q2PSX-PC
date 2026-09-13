@@ -134,7 +134,10 @@ bool q2_loading_step(q2_loading *l, double dt)
      * keeps `open` in step with what this returns, which matters because the
      * frame loop reads the return and `client_frame` reads the flag.
      */
-    if (l->timed && l->hold <= 0.0) {
+    /* A fused multiply/subtract (notably on ARM) can leave a few positive
+     * ulps after an exact frame count. Do not turn that residue into a whole
+     * extra frame. This clock-unit tolerance is under four picoseconds. */
+    if (l->timed && l->hold <= 1e-9) {
         q2_loading_hide(l);
         return false;
     }
