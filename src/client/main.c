@@ -354,8 +354,8 @@ typedef struct client {
      * other with nothing. The view model runs first, so sharing would give a
      * firing weapon a fire clip and no sound.
      */
-    u32              shot_serial_heard;   /* the sound has been played  */
-    u32              shot_serial_shown;   /* the view model has been told */
+    u32              shot_serial_heard[Q2_MP_MAX_PLAYERS];   /* the sound has been played  */
+    u32              shot_serial_shown[Q2_MP_MAX_PLAYERS];   /* the view model has been told */
 
     /*
      * The bed the voices are mixed into: one decoded sector of music or film,
@@ -460,7 +460,8 @@ typedef struct client {
      * this is the call, and it is now fed the player's real condition every
      * tick, so the flash reacts to damage the way the console's does.
      */
-    q2_hud           hud;
+    q2_hud           hud[Q2_MP_MAX_PLAYERS];
+    u32              hud_flashes[Q2_MP_MAX_PLAYERS];
     bool             hud_ready;
 
     /* The map's own sound bank, for the menu's five effects. Per zone load, as
@@ -534,12 +535,13 @@ typedef struct client {
      */
     q2_vm_tables     vm_tables;
     bool             vm_ready;
-    q2_viewweapon    vw;
+    q2_viewweapon    vw[Q2_MP_MAX_PLAYERS];
     q2_model_bank    model_bank;
     bool             model_bank_ready;
-    q2_model         vw_model;
-    bool             vw_model_ready;
-    int              vw_last_weapon;
+    q2_model         vw_model[Q2_MP_MAX_PLAYERS];
+    bool             vw_model_ready[Q2_MP_MAX_PLAYERS];
+    int              vw_last_weapon[Q2_MP_MAX_PLAYERS];
+    u32              vw_drawn[Q2_MP_MAX_PLAYERS];
 
     /* Multiplayer bodies. Male2 owns the ten animation clips; the three
      * colour variants carry matching geometry/palettes and consume its
@@ -1486,7 +1488,8 @@ typedef struct client {
     long             shots_written;
 } client;
 
-static void client_bind_view_model(client *c);
+static void client_bind_view_model(client *c, int pi);
+static void client_reset_view_model(client *c, int pi);
 static void client_bind_player_models(client *c);
 
 /* Defined with the movie player, and called from the zone load that finds a
@@ -3469,6 +3472,7 @@ static bool client_mp_respawn(client *c, int pi)
     client_sbar_write_slots(c, pi, CLIENT_SLOTS_SPAWN);
 
     q2_player_death_init(&c->death[pi]);
+    client_reset_view_model(c, pi);
     c->mp_dead[pi] = false;
     c->death_respawns++;
     Q2_INFO("multiplayer: player %d respawned at MultiSpawn %d", pi, pick);
@@ -3787,7 +3791,7 @@ static bool client_change_map(client *c, const char *map, const char *start)
      * the first capture of the arrival briefing showed.
      */
     if (c->hud_ready)
-        q2_hud_init(&c->hud, &c->hud_tables, 1);
+        q2_hud_init(&c->hud[0], &c->hud_tables, 1);
 
     c->map_changes++;
     Q2_INFO("LOADMAP -> %s zone %d%s%s", map, zone,
@@ -4436,7 +4440,7 @@ static void client_event_call(void *user, const q2_event_item *item,
                 const char *text = q2_leveltext_find(&c->leveltext, key);
 
                 if (text) {
-                    q2_hud_message(&c->hud, text);
+                    q2_hud_message(&c->hud[0], text);
                     c->script_strings++;
                     Q2_INFO("script says: \"%s\"", text);
                 }
@@ -4538,7 +4542,7 @@ static void client_event_call(void *user, const q2_event_item *item,
                 /* The map's own words, on the overlay — which is what makes
                  * "counter++" a thing the player can see happen. */
                 if (c->secret_message[0])
-                    q2_hud_message(&c->hud, c->secret_message);
+                    q2_hud_message(&c->hud[0], c->secret_message);
 
                 Q2_INFO("secret found: %u of %u — \"%s\"", c->secrets_found,
                         c->secrets_total,
@@ -5538,12 +5542,10 @@ static bool client_load_zone(client *c, const char *map, int index)
              * takes the init arm. Save restore applies its selected weapon and
              * initialises once more after the save body is read, below.
              */
-            if (!c->carry_player) {
-                q2_vw_init(&c->vw, &c->vm_tables,
-                           c->sim[0].combat.weapon_id);
-                c->vw_last_weapon = c->sim[0].combat.weapon_id;
-            }
-            client_bind_view_model(c);
+            if (!c->carry_player)
+                client_reset_view_model(c, 0);
+            else
+                client_bind_view_model(c, 0);
         }
         /* The zone number seeds the effect generator, so re-entering a zone
          * looks the same twice and two zones do not share a sequence. */
@@ -6457,6 +6459,7 @@ static bool client_load_zone(client *c, const char *map, int index)
                 c->sim[0].pcombat[pi].self.owner = (s8)pi;
                 c->sim[0].player_count = pi + 1;
                 c->sim_ready[pi] = true;
+                client_reset_view_model(c, pi);
             }
         }
 
@@ -7186,9 +7189,312 @@ static const q2_monster *client_watch_pick(client *c, const s32 eye[3],
     return best;
 }
 
+/* Each view-weapon entity owns its animation, selection and shot cursors.
+ * The caller selects the same owner's combat block before entering here. */
+static void client_advance_view_weapon(client *c, bool attack, float dt)
+{
+    int pi = c->sim[0].cur_player;
+
+    if (!c->death[pi].linked_weapon || c->sim[0].combat.inv.health <= 0)
+        return;
+
+    if (c->vm_ready) {
+        s32 ticks = (s32)((double)dt * 300.0 + 0.5);
+        bool swapped;
+
+        if (ticks < 1) ticks = 1;
+        if (ticks > Q2_SCREEN_DT_MAX) ticks = Q2_SCREEN_DT_MAX;
+
+        if (c->sim[0].combat.weapon_id != c->vw_last_weapon[pi]) {
+            q2_vw_select(&c->vw[pi], c->sim[0].combat.weapon_id);
+            c->vw_last_weapon[pi] = c->sim[0].combat.weapon_id;
+
+            /*
+             * Name the weapon, which is what that line of the overlay is FOR.
+             *
+             * The string is the weapon's GLYPH, not its name: `weapon_glyph[]`
+             * at 0x8009DC8C holds "&B", "&S", "&U" and the markup layer expands
+             * an escape into a pre-rendered word out of chars.lbm's icon table
+             * (hudtables.h). So "Shotgun" on screen is one sprite, not seven
+             * characters, which is why hunting for the string never found it.
+             *
+             * This line used to carry a hardcoded "Quake II" posted once at
+             * startup — a placeholder from before the overlay had anything real
+             * to say, which then sat there for the whole session because
+             * nothing ever replaced it.
+             */
+            if (c->hud_ready && c->hud_tables_ready) {
+                int w = c->sim[0].combat.weapon_id;
+
+                if (w > 0 && w < Q2_HUD_WEAPON_SLOTS)
+                    q2_hud_message(&c->hud[pi], c->hud_tables.weapon_glyph[w]);
+            }
+        }
+
+        /*
+         * WHAT THE SIM'S SHOT ACTUALLY DID.
+         *
+         * This used to report Q2_VW_FIRED whenever the trigger was down and the
+         * weapon was not dry — which is every frame of a held trigger, refire
+         * gate or no refire gate. So the fire clip played for shots that never
+         * happened, and it played at RENDER rate: q2_vw_advance runs every
+         * frame while the sim ticks every second frame in the headless step.
+         *
+         * The three outcomes are distinct and only one of them is a shot:
+         *
+         *     dry     -> Q2_VW_FIRE_DENIED, the empty-gun pass that makes the
+         *                machine switch you off the weapon
+         *     fired   -> Q2_VW_FIRED
+         *     neither -> the refire gate said no; the machine must not be told
+         *                anything, or the clip restarts on a tick that did not
+         *                fire
+         *
+         * THE SERIAL IS WHAT MAKES IT AN EVENT, and this used to gate on `ticks`
+         * instead — which is clamped to a minimum of 1 fifty lines above and is
+         * therefore always true. It gated nothing. `last_shot` is a latch that
+         * holds the last ATTEMPT, so on the frames between ticks it still reads
+         * `fired`, and the third outcome above was unreachable from here: a held
+         * trigger re-reported one shot on every rendered frame, and the clip
+         * restarted as fast as the machine's latch could clear. That is the very
+         * defect the comment above claimed the gate was preventing, and it is
+         * the same one the sound below had.
+         *
+         * `shot_serial` is bumped once per fire attempt (sim.h), so a value this
+         * client has not seen means a NEW attempt and nothing else does. The
+         * trigger drops out of the condition with it: the sim only attempts a
+         * shot on a tick whose input had `attack` set, so a fresh serial already
+         * says the trigger was down when it mattered — which is not the same
+         * question as whether it is still down on this frame.
+         *
+         * `attack` is still passed to the machine, because that argument is
+         * the TRIGGER, not the report.
+         */
+        {
+            q2_vw_fire_result report = Q2_VW_FIRE_NONE;
+
+            /*
+             * THE MACHINE OWNS THE TRIGGER. `q2_vw_wants_fire` is this port's
+             * name for the console's own condition — IDLE with the dry latch
+             * clear — and it sat here with no caller anywhere for as long as
+             * the sim fired on its own tick.
+             *
+             * With the invented 30-tick gate gone (weapon.c), the rate of fire
+             * is the fire CLIP, which is what the console does: its IDLE arm
+             * calls the fire function and then enters FIRE. The three weapons
+             * that need to be faster get it from their own frame driver, which
+             * is drained just below.
+             */
+            if (ticks > 0 && attack && q2_vw_wants_fire(&c->vw[pi]))
+                q2_sim_fire(&c->sim[0]);
+
+            if (c->sim[0].combat.shot_serial != c->shot_serial_shown[pi]) {
+                c->shot_serial_shown[pi] = c->sim[0].combat.shot_serial;
+
+                if (c->sim[0].combat.last_shot.dry) {
+                    report = Q2_VW_FIRE_DENIED;
+                    if (pi == 0) c->shots_dry++;
+                    c->mp_dry[pi]++;
+                } else if (c->sim[0].combat.last_shot.fired) {
+                    report = Q2_VW_FIRED;
+                    if (pi == 0) c->shots_fired++;
+                    c->mp_shots[pi]++;
+                    /*
+                     * AND THE NOISE IT MADE. PlayerNoise (0x80062C74) is what
+                     * puts a gunshot on the level's `sound_entity`, and
+                     * FindTarget's second arm looks for exactly that. Without
+                     * it the player could empty a magazine in a corridor and
+                     * wake nobody — measured at 126 shots, 0 hunting.
+                     */
+                    if (pi == 0 && c->creatures_ready)
+                        q2_creature_world_player_noise(&c->creatures, true);
+                }
+            }
+
+            /*
+             * Is the quad up? The four fire sites read the deadline out of the
+             * player's own block (combat+172, which is `quad_until`) and
+             * compare it against the level clock at 0x800AEBAC — so the
+             * comparison is the console's and only the plumbing is this
+             * caller's. `q2_vw_advance` raises the sound off it.
+             */
+            c->vw[pi].quad_active =
+                (c->sim[0].level_time <
+                 c->sim[0].combat.inv.quad_until);
+
+            swapped = q2_vw_advance(&c->vw[pi], ticks, attack, report);
+        }
+        if (swapped)
+            client_bind_view_model(c, pi);
+
+        /* Grenade3 is a hidden entity attached to the view weapon until the
+         * model timeline crosses 411. Retail copies viewmodel+0xA4 every think
+         * (0x8004A414), charges only while position 380 is pinned, and lets an
+         * elapsed fuse force fire frame 2. Feed that entity after advancing the
+         * model so both the attachment and its crossing are from this frame. */
+        if (c->vw[pi].weapon == Q2_WID_HAND_GRENADE ||
+            q2_projectile_hand_held_index(&c->sim[0].combat.projectiles, pi) >= 0) {
+            s16 aim[3], kick[3];
+            s32 summed[3], attached[3];
+            s32 cook_ticks = q2_vw_take_hand_grenade_cook(&c->vw[pi]);
+            bool release = q2_vw_take_hand_grenade_release(&c->vw[pi]);
+            q2_hand_grenade_update state;
+
+            q2_sim_view_angles(&c->sim[0], summed);
+            aim[0]  = (s16)c->sim[0].player[pi].pitch;
+            aim[1]  = (s16)c->sim[0].player[pi].yaw;
+            aim[2]  = (s16)c->sim[0].player[pi].roll;
+            kick[0] = (s16)(summed[0] - c->sim[0].player[pi].pitch);
+            kick[1] = (s16)(summed[1] - c->sim[0].player[pi].yaw);
+            kick[2] = (s16)(summed[2] - c->sim[0].player[pi].roll);
+
+            q2_vw_place(&c->vw[pi], c->sim[0].player[pi].pos,
+                        c->sim[0].player[pi].view_height,
+                        aim, kick, attached, NULL);
+            state = q2_sim_hand_grenade_update(&c->sim[0], attached,
+                                                cook_ticks, release);
+            if (state == Q2_HAND_GRENADE_EXPIRED)
+                q2_vw_hand_grenade_expired(&c->vw[pi]);
+        }
+
+        /*
+         * AND THE SHOTS THE FIRE-STATE DRIVER ASKED FOR.
+         *
+         * The four per-weapon arms of 0x8004FEE8 call the weapon's fire
+         * function themselves, once per animation frame or once per 30 units
+         * of accumulated step depending on the weapon — that is what makes a
+         * held chaingun a stream rather than one shot. They are drained here
+         * and turned into real shots against the sim.
+         *
+         * The sim's own refire gate still applies. For the four weapons that
+         * have an arm the console has no gate but the animation, so the two
+         * agree as long as the clip is slower than 30 ticks; where they do not,
+         * the gate wins and the shot is skipped, which is the conservative
+         * half. Weapon 6 raises no frame fire: its arm feeds the held entity
+         * above, and its model-timeline crossing at 411 performs the throw.
+         */
+        {
+            u32 n = q2_vw_take_frame_fires(&c->vw[pi]);
+            s16 snd;
+
+            while (n--) {
+                q2_sim_fire(&c->sim[0]);
+                c->player_attacks++;
+            }
+
+            /* And the clip's own sound at a band boundary — the chaingun's
+             * spin-up, loop and spin-down, three of the eleven weapon sounds
+             * the table names and nothing had ever played. */
+            snd = q2_vw_take_frame_sound(&c->vw[pi]);
+            if (snd >= 0 && (u32)snd < Q2_WT_SOUND_COUNT) {
+                const q2_weapon_tables *wt = q2_weapon_tables_builtin();
+
+                if (wt->sound[snd][0])
+                    client_play_sound(c, wt->sound[snd]);
+            }
+
+            /*
+             * AND THE QUAD'S, which is a different table.
+             *
+             * The four fire sites all test the level clock against the deadline
+             * at combat+172 and, when it has not passed, play `[0x800B28B0]` —
+             * filled at 0x80037AA0 from `itm_damage3`. That is an ITEM sound,
+             * not one of the twenty-two the weapon table names, so it is played
+             * by name rather than by index.
+             */
+            if (q2_vw_take_quad_sound(&c->vw[pi]))
+                client_play_sound(c, "itm_damage3");
+        }
+
+        /*
+         * The machine's two outputs, neither of which anything had ever
+         * drained. `q2_vw_take_refire`, `q2_vw_take_event` and
+         * `q2_vw_wants_fire` were all declared, implemented and never called.
+         *
+         * THE REFIRE PASS IS A SELECTION, NOT A CYCLE. It used to call
+         * q2_sim_cycle_weapon(+1). The console's refire pass calls 0x800506C4
+         * (`jal` at 0x8004FB60), which walks the fixed auto-switch preference
+         * list at 0x8009DB7C and takes the first entry that is both OWNED and
+         * FED, writing it to player+0x66 and the view model's +214. That is
+         * idempotent: holding the best affordable weapon, it picks the same one
+         * and nothing changes.
+         *
+         * q2_weapon_cycle is the transcription of the OTHER function,
+         * 0x80050758 — the +/-1 neighbour scan the console calls twice at
+         * 0x8004FB70 and 0x8004FB88 only to refill the next/previous caches at
+         * player+0x64 and +0x60. It never sets the held weapon. Calling it here
+         * meant every shot walked the player one step forward through the
+         * carousel; invisible on BASE1, where the blaster is the only weapon
+         * owned and the cycle returns "no change".
+         *
+         * q2_weapon_autoselect — the correct transcription — was already in the
+         * tree with no production caller at all.
+         */
+        if (q2_vw_take_refire(&c->vw[pi])) {
+            q2_sim_autoselect_weapon(&c->sim[0]);
+            /* ...and the pair after it, picked or not (0x8004FB68..0x8004FB98;
+             * client_sbar_write_slots). */
+            client_sbar_write_slots(c, c->sim[0].cur_player,
+                                    CLIENT_SLOTS_AUTOSELECT);
+        }
+
+        /*
+         * The animation's own per-key event. Drained and RECORDED rather than
+         * acted on, and deliberately so: the original's consumer is 0x80050454,
+         * a multi-way dispatch on the id with an arm for 2 and a shared arm for
+         * {3,6,7,8,11}, reading state+0x114/+0x116 and calling 0x800739B8 and
+         * 0x8007270C. Nothing read so far says which id is a muzzle flash and
+         * which is a shell eject, and hanging an invented meaning on a decoded
+         * id is exactly the mistake this project keeps paying for. Counted so
+         * the ids that actually occur can be seen; see openquestions.
+         */
+        {
+            s16 ev;
+            if (q2_vw_take_event(&c->vw[pi], &ev)) {
+                c->vw_events++;
+                c->vw_last_event = ev;
+            }
+        }
+
+        /*
+         * AND THE SHOT'S SOUND, which every one of the eleven fire functions
+         * computes into `res.sound` and nothing has ever played. Firing any
+         * weapon was silent, and a dry trigger did not click.
+         *
+         * IT IS CONSUMED, not sampled. `last_shot` is a latch that is written
+         * on a trigger pull and never cleared, so `fired` stays true after the
+         * trigger is released — and this read used to be gated on `ticks`,
+         * which is clamped to a minimum of 1 just above and is therefore
+         * always true. Every rendered frame replayed the same shot: one pull,
+         * and then that shot for as long as the player stood there. Between
+         * ticks it also fired several times per shot while the trigger WAS
+         * held, because a fire attempt happens on a tick and this runs on a
+         * frame.
+         *
+         * The serial is what makes it an event: it is bumped once per attempt
+         * (sim.h), so a shot is heard exactly once no matter how many frames
+         * pass before the next one.
+         */
+        if (c->sim[0].combat.shot_serial != c->shot_serial_heard[pi]) {
+            const q2_fire_result_v2 *shot = &c->sim[0].combat.last_shot;
+
+            c->shot_serial_heard[pi] = c->sim[0].combat.shot_serial;
+
+            if ((shot->fired || shot->dry) && shot->sound >= 0) {
+                const q2_weapon_tables *wt = q2_weapon_tables_builtin();
+
+                if ((u32)shot->sound < Q2_WT_SOUND_COUNT &&
+                    wt->sound[shot->sound][0])
+                    client_play_sound(c, wt->sound[shot->sound]);
+            }
+        }
+    }
+
+}
+
 static void client_input_simulated(client *c, float dt)
 {
     q2_input in;
+    bool view_attack[Q2_MP_MAX_PLAYERS] = { false };
     s32 eye[3], view[3];
     bool ticked;
 
@@ -7725,7 +8031,9 @@ static void client_input_simulated(client *c, float dt)
         int pi;
         s32 step_dt = c->sim[0].cur_dt;
 
-        for (pi = 1; ticked && pi < Q2_MP_MAX_PLAYERS; pi++) {
+        view_attack[0] = in.attack;
+
+        for (pi = 1; pi < Q2_MP_MAX_PLAYERS; pi++) {
             q2_input pin;
 
             if (!c->sim_ready[pi])
@@ -7755,6 +8063,10 @@ static void client_input_simulated(client *c, float dt)
                 q2_pad_read(&c->mp_pad[pi], &pcfg, &pin);
             }
 
+            view_attack[pi] = c->mp_stage || pin.attack;
+            if (!ticked)
+                continue;
+
             {
                 s32 ticks = step_dt;      /* the step player 0 just took */
 
@@ -7777,17 +8089,6 @@ static void client_input_simulated(client *c, float dt)
                 q2_sim_advance_player(&c->sim[0], pi, &pin, ticks);
                 q2_combat_scan_who = Q2_COMBAT_SCAN_OTHER;
 
-                /*
-                 * Did that player's frame actually take a shot? `last_shot` is
-                 * part of the swapped half, so after the tick it is parked in
-                 * that player's slot. Counting it is what tells "the shot
-                 * missed" apart from "no shot was ever fired", and those want
-                 * very different fixes.
-                 */
-                if (c->sim[0].pcombat[pi].last_shot.fired)
-                    c->mp_shots[pi]++;
-                else if (c->sim[0].pcombat[pi].last_shot.dry)
-                    c->mp_dry[pi]++;
                 client_sync_parked_health(c);
                 client_score_deaths(c);
             }
@@ -7836,329 +8137,49 @@ static void client_input_simulated(client *c, float dt)
      * changes — it happens when the lower clip has run and the 70-tick countdown
      * has expired, which is the machine's job, not this caller's.
      */
-    if (c->vm_ready) {
-        s32 ticks = (s32)((double)dt * 300.0 + 0.5);
-        bool swapped;
+    {
+        int pi;
+        int saved = c->sim[0].cur_player;
 
-        if (ticks < 1) ticks = 1;
-        if (ticks > Q2_SCREEN_DT_MAX) ticks = Q2_SCREEN_DT_MAX;
-
-        if (c->sim[0].combat.weapon_id != c->vw_last_weapon) {
-            q2_vw_select(&c->vw, c->sim[0].combat.weapon_id);
-            c->vw_last_weapon = c->sim[0].combat.weapon_id;
-
-            /*
-             * Name the weapon, which is what that line of the overlay is FOR.
-             *
-             * The string is the weapon's GLYPH, not its name: `weapon_glyph[]`
-             * at 0x8009DC8C holds "&B", "&S", "&U" and the markup layer expands
-             * an escape into a pre-rendered word out of chars.lbm's icon table
-             * (hudtables.h). So "Shotgun" on screen is one sprite, not seven
-             * characters, which is why hunting for the string never found it.
-             *
-             * This line used to carry a hardcoded "Quake II" posted once at
-             * startup — a placeholder from before the overlay had anything real
-             * to say, which then sat there for the whole session because
-             * nothing ever replaced it.
-             */
-            if (c->hud_ready && c->hud_tables_ready) {
-                int w = c->sim[0].combat.weapon_id;
-
-                if (w > 0 && w < Q2_HUD_WEAPON_SLOTS)
-                    q2_hud_message(&c->hud, c->hud_tables.weapon_glyph[w]);
-            }
+        for (pi = 0; pi < Q2_MP_MAX_PLAYERS; pi++) {
+            if (pi > 0 && (!c->mp_enabled || !c->sim_ready[pi]))
+                continue;
+            q2_sim_select_player(&c->sim[0], pi);
+            if (c->mp_enabled)
+                client_targets_for(c, pi);
+            q2_combat_scan_who = c->mp_enabled ? pi : Q2_COMBAT_SCAN_OTHER;
+            client_advance_view_weapon(c, view_attack[pi], dt);
+            /* Hits on parked actors must reach their inventories before the
+             * next select loads them into the live combat block. */
+            client_sync_parked_health(c);
+            client_score_deaths(c);
         }
-
-        /*
-         * WHAT THE SIM'S SHOT ACTUALLY DID.
-         *
-         * This used to report Q2_VW_FIRED whenever the trigger was down and the
-         * weapon was not dry — which is every frame of a held trigger, refire
-         * gate or no refire gate. So the fire clip played for shots that never
-         * happened, and it played at RENDER rate: q2_vw_advance runs every
-         * frame while the sim ticks every second frame in the headless step.
-         *
-         * The three outcomes are distinct and only one of them is a shot:
-         *
-         *     dry     -> Q2_VW_FIRE_DENIED, the empty-gun pass that makes the
-         *                machine switch you off the weapon
-         *     fired   -> Q2_VW_FIRED
-         *     neither -> the refire gate said no; the machine must not be told
-         *                anything, or the clip restarts on a tick that did not
-         *                fire
-         *
-         * THE SERIAL IS WHAT MAKES IT AN EVENT, and this used to gate on `ticks`
-         * instead — which is clamped to a minimum of 1 fifty lines above and is
-         * therefore always true. It gated nothing. `last_shot` is a latch that
-         * holds the last ATTEMPT, so on the frames between ticks it still reads
-         * `fired`, and the third outcome above was unreachable from here: a held
-         * trigger re-reported one shot on every rendered frame, and the clip
-         * restarted as fast as the machine's latch could clear. That is the very
-         * defect the comment above claimed the gate was preventing, and it is
-         * the same one the sound below had.
-         *
-         * `shot_serial` is bumped once per fire attempt (sim.h), so a value this
-         * client has not seen means a NEW attempt and nothing else does. The
-         * trigger drops out of the condition with it: the sim only attempts a
-         * shot on a tick whose input had `attack` set, so a fresh serial already
-         * says the trigger was down when it mattered — which is not the same
-         * question as whether it is still down on this frame.
-         *
-         * `in.attack` is still passed to the machine, because that argument is
-         * the TRIGGER, not the report.
-         */
-        {
-            q2_vw_fire_result report = Q2_VW_FIRE_NONE;
-
-            /*
-             * THE MACHINE OWNS THE TRIGGER. `q2_vw_wants_fire` is this port's
-             * name for the console's own condition — IDLE with the dry latch
-             * clear — and it sat here with no caller anywhere for as long as
-             * the sim fired on its own tick.
-             *
-             * With the invented 30-tick gate gone (weapon.c), the rate of fire
-             * is the fire CLIP, which is what the console does: its IDLE arm
-             * calls the fire function and then enters FIRE. The three weapons
-             * that need to be faster get it from their own frame driver, which
-             * is drained just below.
-             */
-            if (ticks > 0 && in.attack && q2_vw_wants_fire(&c->vw))
-                q2_sim_fire(&c->sim[0]);
-
-            if (c->sim[0].combat.shot_serial != c->shot_serial_shown) {
-                c->shot_serial_shown = c->sim[0].combat.shot_serial;
-
-                if (c->sim[0].combat.last_shot.dry) {
-                    report = Q2_VW_FIRE_DENIED;
-                    c->shots_dry++;
-                } else if (c->sim[0].combat.last_shot.fired) {
-                    report = Q2_VW_FIRED;
-                    c->shots_fired++;
-                    /*
-                     * AND THE NOISE IT MADE. PlayerNoise (0x80062C74) is what
-                     * puts a gunshot on the level's `sound_entity`, and
-                     * FindTarget's second arm looks for exactly that. Without
-                     * it the player could empty a magazine in a corridor and
-                     * wake nobody — measured at 126 shots, 0 hunting.
-                     */
-                    if (c->creatures_ready)
-                        q2_creature_world_player_noise(&c->creatures, true);
-                }
-            }
-
-            /*
-             * Is the quad up? The four fire sites read the deadline out of the
-             * player's own block (combat+172, which is `quad_until`) and
-             * compare it against the level clock at 0x800AEBAC — so the
-             * comparison is the console's and only the plumbing is this
-             * caller's. `q2_vw_advance` raises the sound off it.
-             */
-            c->vw.quad_active =
-                (c->sim[0].level_time <
-                 c->sim[0].combat.inv.quad_until);
-
-            swapped = q2_vw_advance(&c->vw, ticks, in.attack, report);
-        }
-        if (swapped)
-            client_bind_view_model(c);
-
-        /* Grenade3 is a hidden entity attached to the view weapon until the
-         * model timeline crosses 411. Retail copies viewmodel+0xA4 every think
-         * (0x8004A414), charges only while position 380 is pinned, and lets an
-         * elapsed fuse force fire frame 2. Feed that entity after advancing the
-         * model so both the attachment and its crossing are from this frame. */
-        if (c->vw.weapon == Q2_WID_HAND_GRENADE ||
-            q2_projectile_hand_held_index(&c->sim[0].combat.projectiles, 0) >= 0) {
-            s16 aim[3], kick[3];
-            s32 summed[3], attached[3];
-            s32 cook_ticks = q2_vw_take_hand_grenade_cook(&c->vw);
-            bool release = q2_vw_take_hand_grenade_release(&c->vw);
-            q2_hand_grenade_update state;
-
-            q2_sim_view_angles(&c->sim[0], summed);
-            aim[0]  = (s16)c->sim[0].player[0].pitch;
-            aim[1]  = (s16)c->sim[0].player[0].yaw;
-            aim[2]  = (s16)c->sim[0].player[0].roll;
-            kick[0] = (s16)(summed[0] - c->sim[0].player[0].pitch);
-            kick[1] = (s16)(summed[1] - c->sim[0].player[0].yaw);
-            kick[2] = (s16)(summed[2] - c->sim[0].player[0].roll);
-
-            q2_vw_place(&c->vw, c->sim[0].player[0].pos,
-                        c->sim[0].player[0].view_height,
-                        aim, kick, attached, NULL);
-            state = q2_sim_hand_grenade_update(&c->sim[0], attached,
-                                                cook_ticks, release);
-            if (state == Q2_HAND_GRENADE_EXPIRED)
-                q2_vw_hand_grenade_expired(&c->vw);
-        }
-
-        /*
-         * AND THE SHOTS THE FIRE-STATE DRIVER ASKED FOR.
-         *
-         * The four per-weapon arms of 0x8004FEE8 call the weapon's fire
-         * function themselves, once per animation frame or once per 30 units
-         * of accumulated step depending on the weapon — that is what makes a
-         * held chaingun a stream rather than one shot. They are drained here
-         * and turned into real shots against the sim.
-         *
-         * The sim's own refire gate still applies. For the four weapons that
-         * have an arm the console has no gate but the animation, so the two
-         * agree as long as the clip is slower than 30 ticks; where they do not,
-         * the gate wins and the shot is skipped, which is the conservative
-         * half. Weapon 6 raises no frame fire: its arm feeds the held entity
-         * above, and its model-timeline crossing at 411 performs the throw.
-         */
-        {
-            u32 n = q2_vw_take_frame_fires(&c->vw);
-            s16 snd;
-
-            while (n--) {
-                q2_sim_fire(&c->sim[0]);
-                c->player_attacks++;
-            }
-
-            /* And the clip's own sound at a band boundary — the chaingun's
-             * spin-up, loop and spin-down, three of the eleven weapon sounds
-             * the table names and nothing had ever played. */
-            snd = q2_vw_take_frame_sound(&c->vw);
-            if (snd >= 0 && (u32)snd < Q2_WT_SOUND_COUNT) {
-                const q2_weapon_tables *wt = q2_weapon_tables_builtin();
-
-                if (wt->sound[snd][0])
-                    client_play_sound(c, wt->sound[snd]);
-            }
-
-            /*
-             * AND THE QUAD'S, which is a different table.
-             *
-             * The four fire sites all test the level clock against the deadline
-             * at combat+172 and, when it has not passed, play `[0x800B28B0]` —
-             * filled at 0x80037AA0 from `itm_damage3`. That is an ITEM sound,
-             * not one of the twenty-two the weapon table names, so it is played
-             * by name rather than by index.
-             */
-            if (q2_vw_take_quad_sound(&c->vw))
-                client_play_sound(c, "itm_damage3");
-        }
-
-        /*
-         * The machine's two outputs, neither of which anything had ever
-         * drained. `q2_vw_take_refire`, `q2_vw_take_event` and
-         * `q2_vw_wants_fire` were all declared, implemented and never called.
-         *
-         * THE REFIRE PASS IS A SELECTION, NOT A CYCLE. It used to call
-         * q2_sim_cycle_weapon(+1). The console's refire pass calls 0x800506C4
-         * (`jal` at 0x8004FB60), which walks the fixed auto-switch preference
-         * list at 0x8009DB7C and takes the first entry that is both OWNED and
-         * FED, writing it to player+0x66 and the view model's +214. That is
-         * idempotent: holding the best affordable weapon, it picks the same one
-         * and nothing changes.
-         *
-         * q2_weapon_cycle is the transcription of the OTHER function,
-         * 0x80050758 — the +/-1 neighbour scan the console calls twice at
-         * 0x8004FB70 and 0x8004FB88 only to refill the next/previous caches at
-         * player+0x64 and +0x60. It never sets the held weapon. Calling it here
-         * meant every shot walked the player one step forward through the
-         * carousel; invisible on BASE1, where the blaster is the only weapon
-         * owned and the cycle returns "no change".
-         *
-         * q2_weapon_autoselect — the correct transcription — was already in the
-         * tree with no production caller at all.
-         */
-        if (q2_vw_take_refire(&c->vw)) {
-            q2_sim_autoselect_weapon(&c->sim[0]);
-            /* ...and the pair after it, picked or not (0x8004FB68..0x8004FB98;
-             * client_sbar_write_slots). */
-            client_sbar_write_slots(c, c->sim[0].cur_player,
-                                    CLIENT_SLOTS_AUTOSELECT);
-        }
-
-        /*
-         * The animation's own per-key event. Drained and RECORDED rather than
-         * acted on, and deliberately so: the original's consumer is 0x80050454,
-         * a multi-way dispatch on the id with an arm for 2 and a shared arm for
-         * {3,6,7,8,11}, reading state+0x114/+0x116 and calling 0x800739B8 and
-         * 0x8007270C. Nothing read so far says which id is a muzzle flash and
-         * which is a shell eject, and hanging an invented meaning on a decoded
-         * id is exactly the mistake this project keeps paying for. Counted so
-         * the ids that actually occur can be seen; see openquestions.
-         */
-        {
-            s16 ev;
-            if (q2_vw_take_event(&c->vw, &ev)) {
-                c->vw_events++;
-                c->vw_last_event = ev;
-            }
-        }
-
-        /*
-         * AND THE SHOT'S SOUND, which every one of the eleven fire functions
-         * computes into `res.sound` and nothing has ever played. Firing any
-         * weapon was silent, and a dry trigger did not click.
-         *
-         * IT IS CONSUMED, not sampled. `last_shot` is a latch that is written
-         * on a trigger pull and never cleared, so `fired` stays true after the
-         * trigger is released — and this read used to be gated on `ticks`,
-         * which is clamped to a minimum of 1 just above and is therefore
-         * always true. Every rendered frame replayed the same shot: one pull,
-         * and then that shot for as long as the player stood there. Between
-         * ticks it also fired several times per shot while the trigger WAS
-         * held, because a fire attempt happens on a tick and this runs on a
-         * frame.
-         *
-         * The serial is what makes it an event: it is bumped once per attempt
-         * (sim.h), so a shot is heard exactly once no matter how many frames
-         * pass before the next one.
-         */
-        if (c->sim[0].combat.shot_serial != c->shot_serial_heard) {
-            const q2_fire_result_v2 *shot = &c->sim[0].combat.last_shot;
-
-            c->shot_serial_heard = c->sim[0].combat.shot_serial;
-
-            if ((shot->fired || shot->dry) && shot->sound >= 0) {
-                const q2_weapon_tables *wt = q2_weapon_tables_builtin();
-
-                if ((u32)shot->sound < Q2_WT_SOUND_COUNT &&
-                    wt->sound[shot->sound][0])
-                    client_play_sound(c, wt->sound[shot->sound]);
-            }
-        }
+        q2_sim_select_player(&c->sim[0], saved);
+        if (c->mp_enabled)
+            client_targets_for(c, saved);
+        q2_combat_scan_who = Q2_COMBAT_SCAN_OTHER;
     }
 
-    /* The overlay ages on logic ticks, not on drawn frames — one notification
-     * retires every 60 (hud.h). The flash is the other way round and is
-     * decremented inside q2_hud_build_ot. */
+    /* Damage tracking is per player, like the viewport's flash tile
+     * (0x8003AE10 writes the same view+672 that 0x80076764 draws). */
     if (c->hud_ready) {
-        q2_hud_tick(&c->hud, 1);
+        int pi;
 
-        /*
-         * The damage flash, fed the player's real condition. `q2_hud_track`
-         * raises it when either figure FALLS, with armour taking precedence
-         * exactly as the original's branch order does — grey for a hit the
-         * armour took, red for one that reached flesh, and the asymmetric
-         * strength arithmetic that gives an armour graze a fainter flash than
-         * a solid hit (hud.h).
-         *
-         * This is the last thing the overlay was missing: it was built, it was
-         * drawn, and nothing had ever told it how the player was doing.
-         *
-         * And raising it is only half of it. The overlay owns the arithmetic;
-         * the TILE is the screen's, sized to the viewport and linked into that
-         * viewport's own slice (screen.h), because on the console the two are
-         * one record — the raise at 0x8003AE10 writes `ctx+0x2A0` and the draw
-         * at 0x80076764 reads `view+672`, which are the same halfwords. Here
-         * they are two structs, so the frame the flash is raised is the frame
-         * it has to be handed over; after that the screen owns the countdown
-         * and the overlay must not touch it.
-         *
-         * Viewport 0 because there is one player. A split-screen session would
-         * hand each player's flash to its own viewport, which is exactly what
-         * the shared record does for free on the console.
-         */
-        if (q2_hud_track(&c->hud, c->sim[0].combat.inv.health,
-                         c->sim[0].combat.inv.armour))
-            q2_screen_flash_set(&c->screen, 0, c->hud.flash.rgb,
-                                c->hud.flash.strength, c->hud.flash.mode);
+        for (pi = 0; pi < Q2_MP_MAX_PLAYERS; pi++) {
+            q2_hud *hud = &c->hud[pi];
+            const q2_inventory *inv;
+
+            if (pi > 0 && (!c->mp_enabled || !c->sim_ready[pi]))
+                continue;
+            inv = pi == c->sim[0].cur_player ? &c->sim[0].combat.inv
+                                            : &c->sim[0].pcombat[pi].inv;
+            q2_hud_tick(hud, 1);
+            if (q2_hud_track(hud, inv->health, inv->armour)) {
+                q2_screen_flash_set(&c->screen, pi, hud->flash.rgb,
+                                    hud->flash.strength, hud->flash.mode);
+                c->hud_flashes[pi]++;
+            }
+        }
     }
 
     /*
@@ -10347,9 +10368,7 @@ static bool client_apply_save(client *c, const q2_save *s)
      * player holds whatever the fresh spawn gave them while the simulation
      * thinks they are holding the railgun. */
     if (c->vm_ready) {
-        q2_vw_init(&c->vw, &c->vm_tables, c->sim[0].combat.weapon_id);
-        c->vw_last_weapon = c->sim[0].combat.weapon_id;
-        client_bind_view_model(c);
+        client_reset_view_model(c, 0);
     }
 
     /* A restored game is a played game, so it resumes under the simulation
@@ -10373,7 +10392,7 @@ static void client_notify(client *c, const char *text)
 {
     Q2_INFO("%s", text);
     if (c->hud_ready)
-        q2_hud_message(&c->hud, text);
+        q2_hud_message(&c->hud[0], text);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -10856,8 +10875,8 @@ static void client_write_shot(client *c, bool numbered)
      */
     if (c->vm_ready)
         Q2_INFO("  view weapon: %u fire clips, %u shots, %u dry, %u keys",
-                c->vw.fires_started, c->shots_fired, c->shots_dry,
-                c->vw.keys_played);
+                c->vw[0].fires_started, c->shots_fired, c->shots_dry,
+                c->vw[0].keys_played);
 
     /* How many times a screen owned the frame and the pad pair had to be
      * reseeded instead of rolled. Zero would mean the detection never fired. */
@@ -10886,6 +10905,10 @@ static void client_write_shot(client *c, bool numbered)
                             " %u off axis, %u hit",
                             sc0->tested, sc0->behind, sc0->beyond_world,
                             sc0->off_axis, sc0->hit);
+                Q2_INFO("  player %d view weapon %d, %u prims, %u fire clips, linked %d",
+                        pi, c->vw[pi].weapon, c->vw_drawn[pi],
+                        c->vw[pi].fires_started, (int)c->death[pi].linked_weapon);
+                Q2_INFO("  player %d damage flashes %u", pi, c->hud_flashes[pi]);
                 Q2_INFO("  player %d shots %u, dry %u", pi,
                         c->mp_shots[pi], c->mp_dry[pi]);
                 if (pi == 1)
@@ -11215,18 +11238,18 @@ static void client_write_shot(client *c, bool numbered)
  * whenever the state machine finishes a swap. A weapon whose model this map
  * does not ship simply draws nothing rather than drawing the wrong thing.
  */
-static void client_bind_view_model(client *c)
+static void client_bind_view_model(client *c, int pi)
 {
     const char *name;
     s32 index;
 
-    c->vw_model_ready = false;
-    q2_vw_set_model(&c->vw, NULL);
+    c->vw_model_ready[pi] = false;
+    q2_vw_set_model(&c->vw[pi], NULL);
 
     if (!c->vm_ready || !c->model_bank_ready)
         return;
 
-    name = q2_vw_model_name(&c->vw);
+    name = q2_vw_model_name(&c->vw[pi]);
     if (!name || !name[0])
         return;
 
@@ -11236,12 +11259,34 @@ static void client_bind_view_model(client *c)
         return;
     }
 
-    if (q2_model_get(&c->model_bank, (u32)index, &c->vw_model) != Q2_OK)
+    if (q2_model_get(&c->model_bank, (u32)index, &c->vw_model[pi]) != Q2_OK)
         return;
 
-    c->vw_model_ready = true;
-    q2_vw_set_model(&c->vw, &c->vw_model);
-    Q2_INFO("view weapon: %s", name);
+    c->vw_model_ready[pi] = true;
+    q2_vw_set_model(&c->vw[pi], &c->vw_model[pi]);
+    Q2_INFO("view weapon: player %d %s", pi, name);
+}
+
+static void client_reset_view_model(client *c, int pi)
+{
+    const q2_sim *sim = &c->sim[0];
+    int weapon = pi == sim->cur_player ? sim->combat.weapon_id
+                                      : sim->pcombat[pi].weapon_id;
+    u32 serial = pi == sim->cur_player ? sim->combat.shot_serial
+                                      : sim->pcombat[pi].shot_serial;
+
+    if (c->hud_ready) {
+        q2_hud_init(&c->hud[pi], &c->hud_tables,
+                    c->mp_enabled ? c->mp.player_count : 1);
+        q2_screen_flash_set(&c->screen, pi, c->hud[pi].flash.rgb, 0, 0);
+    }
+    if (!c->vm_ready)
+        return;
+    q2_vw_init(&c->vw[pi], &c->vm_tables, weapon);
+    c->vw_last_weapon[pi] = weapon;
+    c->shot_serial_shown[pi] = serial;
+    c->shot_serial_heard[pi] = serial;
+    client_bind_view_model(c, pi);
 }
 
 static void client_bind_player_models(client *c)
@@ -12246,6 +12291,7 @@ static void client_draw_view(void *user, q2_screen *s, int p,
 {
     client *c = (client *)user;
     q2_world_stats stats;
+    int owner = c->mp_enabled ? p : 0;
 
     /*
      * The viewport owns the field of view: SetGeomScreen(view+262) at
@@ -12274,30 +12320,15 @@ static void client_draw_view(void *user, q2_screen *s, int p,
     c->cam.clip_w     = s->ctx.clip_w;
     c->cam.clip_h     = s->ctx.clip_h;
 
-    /*
-     * In a split, each viewport is a different PLAYER, and until now every one
-     * of them showed the same camera — the screen work was right and there was
-     * only ever one thing to look at.
-     *
-     * Viewport 0 is player 0 and keeps the camera the frame built; the others
-     * follow their OWN sim's eye and view angles. Each of players 1..3 has a
-     * q2_sim of its own, spawned at its own MultiSpawn and advanced on its own
-     * pad every frame, so a split shows four people walking about rather than
-     * one camera reflected.
-     *
-     * What is still shared and should not be is the WORLD: each instance owns a
-     * copy of the map's items and its own script runtime, and only player 0's
-     * is read or drawn. See openquestions #53 — the fix is pulling the player
-     * out of q2_sim, which is a change to sim.c rather than to this caller.
-     */
+    /* Extra views use their owner's eased eye and plain camera angles.
+     * Recoil is added to that owner's weapon below, not to the world camera. */
     if (c->mp_enabled && p > 0 && p < Q2_MP_MAX_PLAYERS && c->sim_ready[p]) {
         const q2_player *pl = &c->sim[0].player[p];
 
-        c->cam.pos[0] = pl->pos[0];
-        c->cam.pos[1] = pl->pos[1] - Q2_EYE_BASE;
-        c->cam.pos[2] = pl->pos[2];
-        c->cam.yaw    = pl->yaw;
-        c->cam.pitch  = pl->pitch;
+        q2_sim_player_eye(&c->sim[0], p, c->cam.pos);
+        c->cam.yaw   = pl->yaw;
+        c->cam.pitch = pl->pitch;
+        c->cam.roll  = pl->roll;
     }
 
     /* The viewport's far distance is also the subdivision threshold: the same
@@ -13071,9 +13102,9 @@ static void client_draw_view(void *user, q2_screen *s, int p,
                                        c->item_table_ready ? &c->item_table
                                                            : NULL,
                                        &pickup_icon, &pickup_name))
-                q2_hud_pickup(&c->hud, pickup_name);
+                q2_hud_pickup(&c->hud[0], pickup_name);
             else
-                q2_hud_pickup(&c->hud, NULL);
+                q2_hud_pickup(&c->hud[0], NULL);
 
             bar->pickup_icon = pickup_icon;
 
@@ -13098,11 +13129,11 @@ static void client_draw_view(void *user, q2_screen *s, int p,
                  * puts it (the text is printed before the field walk that
                  * draws every icon, and a bucket is drawn newest-last).
                  */
-                q2_hud_pickup_build_ot(&c->hud, &c->hud_font, &pctx, ot, 0);
+                q2_hud_pickup_build_ot(&c->hud[0], &c->hud_font, &pctx, ot, 0);
             }
         } else {
             bar->pickup_icon = 0;
-            q2_hud_pickup(&c->hud, NULL);
+            q2_hud_pickup(&c->hud[0], NULL);
         }
 
         q2_statusbar_build_ot(bar, c->menu_font.tpage_icons,
@@ -13138,7 +13169,8 @@ static void client_draw_view(void *user, q2_screen *s, int p,
      * the player think, and `player_die` has just uninstalled that too.
      * The port had neither, so a dead player kept a floating blaster.
      */
-    if (c->vw_model_ready && c->death[0].linked_weapon &&
+    c->vw_drawn[p] = 0;
+    if (c->vw_model_ready[owner] && c->death[owner].linked_weapon &&
         !c->mission_open && !c->endmis_open &&
         !c->credits_open && !c->mcard_open) {
         q2_model_instance proto;
@@ -13190,14 +13222,14 @@ static void client_draw_view(void *user, q2_screen *s, int p,
             q2_light_set set;
             s32 at[3];
 
-            at[0] = c->sim[0].player[0].pos[0];
-            at[1] = q2_sim_origin_y(c->sim[0].player[0].pos[1]);
-            at[2] = c->sim[0].player[0].pos[2];
+            at[0] = c->sim[0].player[owner].pos[0];
+            at[1] = q2_sim_origin_y(c->sim[0].player[owner].pos[1]);
+            at[2] = c->sim[0].player[owner].pos[2];
 
             q2_light_gather(&set, &c->light_world, at,
-                            client_light_node(c, p), c->vw.light_selector);
-            q2_light_env_build(&vw_env, &set, c->vw.scale, c->vw.fade,
-                               c->vw.glow);
+                            client_light_node(c, p), c->vw[owner].light_selector);
+            q2_light_env_build(&vw_env, &set, c->vw[owner].scale, c->vw[owner].fade,
+                               c->vw[owner].glow);
             proto.light = &vw_env;
         }
 
@@ -13220,18 +13252,18 @@ static void client_draw_view(void *user, q2_screen *s, int p,
         {
             s32 summed[3];
 
-            q2_sim_view_angles(&c->sim[0], summed);
+            q2_sim_player_view_angles(&c->sim[0], owner, summed);
 
-            aim[0]  = (s16)c->sim[0].player[0].pitch;
-            aim[1]  = (s16)c->sim[0].player[0].yaw;
-            aim[2]  = (s16)c->sim[0].player[0].roll;
-            kick[0] = (s16)(summed[0] - c->sim[0].player[0].pitch);
-            kick[1] = (s16)(summed[1] - c->sim[0].player[0].yaw);
-            kick[2] = (s16)(summed[2] - c->sim[0].player[0].roll);
+            aim[0]  = (s16)c->sim[0].player[owner].pitch;
+            aim[1]  = (s16)c->sim[0].player[owner].yaw;
+            aim[2]  = (s16)c->sim[0].player[owner].roll;
+            kick[0] = (s16)(summed[0] - c->sim[0].player[owner].pitch);
+            kick[1] = (s16)(summed[1] - c->sim[0].player[owner].yaw);
+            kick[2] = (s16)(summed[2] - c->sim[0].player[owner].roll);
         }
 
-        q2_vw_build_ot(&c->vw, &proto,
-                       c->sim[0].player[0].pos, c->sim[0].player[0].view_height,
+        c->vw_drawn[p] = q2_vw_build_ot(&c->vw[owner], &proto,
+                       c->sim[0].player[owner].pos, c->sim[0].player[owner].view_height,
                        aim, kick, &c->cam, ot, gte, &mstats);
     }
 
@@ -13273,6 +13305,20 @@ static void client_draw_view(void *user, q2_screen *s, int p,
                                  Q2_FX_GLINT_LIGHT_OUTER,
                                  Q2_FX_GLINT_LIGHT_STYLE,
                                  Q2_FX_GLINT_LIGHT_SHIFT);
+    }
+
+    /* The crosshair and messages use this viewport's dimensions and draw
+     * environment. A single full-screen overlay put the crosshair in the
+     * gutter and let one player's notifications cross into another view. */
+    if (c->mp_enabled && c->hud_ready && c->hud_font_ready &&
+        !c->in_front_end && !c->menu.open && !c->mission_open &&
+        !c->mcard_open && !c->endmis_open && !c->credits_open) {
+        q2_hud_ctx ctx;
+        q2_hud *hud = &c->hud[owner];
+
+        hud->crosshair = (c->settings.v[Q2_SET_CROSSHAIR] != 0);
+        q2_hud_ctx_default(&ctx, s->view[p].w, s->view[p].h);
+        q2_hud_build_ot(hud, &c->hud_font, &ctx, ot, 0);
     }
 }
 
@@ -13433,29 +13479,27 @@ static void client_frame(client *c)
     c->screen.disp.bg_enable = 1;
     c->screen.background_enable = true;
 
-    /*
-     * What the water effect reads off view+288, published before the build
-     * because the effect writes the shake and the build's draw envs read it.
-     *
-     * On the console this is not a publication at all: the viewport holds a
-     * pointer to its player's entity and reads bit 0x100 of the flag word
-     * itself. The port has no such pointer to hand the screen, so the one bit
-     * it wants is handed over instead. Every viewport gets the same answer for
-     * the same reason they all get the same camera — there is one player.
-     */
+    /* Each viewport reads its owner's submerged bit (view+288). */
     {
-        bool submerged =
-            (c->sim[0].player[0].ent.flags & Q2_ENT_UNDERWATER) != 0;
         int p;
 
-        for (p = 0; p < c->screen.view_count; p++)
+        for (p = 0; p < c->screen.view_count; p++) {
+            int owner = c->mp_enabled ? p : 0;
+            bool submerged =
+                (c->sim[0].player[owner].ent.flags & Q2_ENT_UNDERWATER) != 0;
             q2_screen_water_set(&c->screen, p, true, submerged);
+        }
     }
 
     memset(&hooks, 0, sizeof(hooks));
     hooks.view = client_draw_view;
     hooks.user = c;
-    q2_screen_build(&c->screen, &c->ot, &c->gte, &hooks);
+    {
+        q2_camera saved_cam = c->cam;
+        q2_screen_build(&c->screen, &c->ot, &c->gte, &hooks);
+        /* A paused frame must start from player zero's camera again. */
+        c->cam = saved_cam;
+    }
 
     /* Every viewport has now drawn from the beam queue, so it can go. This is
      * the tail of 0x80064F10, moved out to where "the last viewport" is a
@@ -13515,14 +13559,14 @@ static void client_frame(client *c)
      * the opening reel, which is a front end with the page closed. A crosshair
      * appeared over the blank title screen for exactly those fifteen frames.
      */
-    if (c->hud_ready && c->hud_font_ready && !c->in_front_end &&
+    if (!c->mp_enabled && c->hud_ready && c->hud_font_ready && !c->in_front_end &&
         !c->menu.open && !c->mission_open && !c->mcard_open &&
         !c->endmis_open && !c->credits_open) {
         q2_hud_ctx ctx;
 
-        c->hud.crosshair = (c->settings.v[Q2_SET_CROSSHAIR] != 0);
+        c->hud[0].crosshair = (c->settings.v[Q2_SET_CROSSHAIR] != 0);
         q2_hud_ctx_centre_in(&ctx, c->width, c->height);
-        q2_hud_build_ot(&c->hud, &c->hud_font, &ctx, &c->ot, 0);
+        q2_hud_build_ot(&c->hud[0], &c->hud_font, &ctx, &c->ot, 0);
     }
 
     /*
@@ -13768,6 +13812,8 @@ static void usage(void)
     printf("\n  running without a player:\n");
     printf("  --headless    no window, no audio; a fixed 1/30 s step\n");
     printf("  --demo        drive the pad from a fixed script rather than keys\n");
+    printf("  --dm-split horizontal|vertical  choose the two-player split\n");
+    printf("  --crosshair / --no-crosshair  override the crosshair setting\n");
     printf("  --watch       frame and aim at the nearest live creature\n");
     printf("  --watch-hold N  ...and keep a killed creature framed for N frames\n");
     printf("  --movie NAME  play a film from Q2DATA/MOVIES and nothing else\n"
@@ -14146,6 +14192,8 @@ int main(int argc, char **argv)
     if (getenv("Q2PSX_VERBOSE"))
         q2_log_set_level(Q2_LOG_DEBUG);
     int        mp_players = 2;
+    s16        mp_horizontal_split = -1;
+    s16        force_crosshair = -1;
     s16        mp_frags   = -2;
     s16        mp_minutes = -2;
 
@@ -14157,6 +14205,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--headless"))              c.headless = true;
         else if (!strcmp(argv[i], "--demo"))                  c.demo = true;
+        else if (!strcmp(argv[i], "--crosshair"))             force_crosshair = 1;
+        else if (!strcmp(argv[i], "--no-crosshair"))          force_crosshair = 0;
         else if (!strcmp(argv[i], "--watch"))                 c.watch = true;
         else if (!strcmp(argv[i], "--watch-hold") && i + 1 < argc) {
             c.watch      = true;
@@ -14315,6 +14365,15 @@ int main(int argc, char **argv)
             mp_mode = (q2_mp_mode)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--dm-players") && i + 1 < argc)
             mp_players = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--dm-split") && i + 1 < argc) {
+            const char *split = argv[++i];
+            if (!strcmp(split, "horizontal"))      mp_horizontal_split = 1;
+            else if (!strcmp(split, "vertical"))   mp_horizontal_split = 0;
+            else {
+                fprintf(stderr, "--dm-split wants horizontal|vertical\n");
+                return 2;
+            }
+        }
         else if (!strcmp(argv[i], "--dm-stage"))
             c.mp_stage = true;
         else if (!strcmp(argv[i], "--trace-cre") && i + 1 < argc)
@@ -14679,8 +14738,8 @@ no_window:
     if (c.hud_tables_ready) {
         /* One player, so four notification lines — the table at 0x8009D648
          * indexed by player count (hudtables.h). */
-        q2_hud_init(&c.hud, &c.hud_tables, 1);
-        c.hud.crosshair = (c.settings.v[Q2_SET_CROSSHAIR] != 0);
+        q2_hud_init(&c.hud[0], &c.hud_tables, 1);
+        c.hud[0].crosshair = (c.settings.v[Q2_SET_CROSSHAIR] != 0);
         c.hud_ready = true;
     }
 
@@ -14756,6 +14815,9 @@ no_window:
      * of those entry points had a caller anywhere in the game. The rules ran in
      * the test suite and nowhere else.
      */
+    if (force_crosshair >= 0)
+        c.settings.v[Q2_SET_CROSSHAIR] = force_crosshair;
+
     if (c.mp_enabled) {
         s16 frag = (mp_frags != -2)
                        ? mp_frags
@@ -14766,6 +14828,8 @@ no_window:
                               ? Q2_MP_NO_LIMIT
                               : q2_mp_time_options[Q2_MP_TIME_OPTION_DEFAULT]);
 
+        if (mp_horizontal_split >= 0)
+            c.settings.v[Q2_SET_HORIZONTAL_SPLIT] = mp_horizontal_split;
         client_mp_configure(&c, mp_mode, mp_players, frag, time,
                             q2_mp_round_options[Q2_MP_ROUND_OPTION_DEFAULT]);
     }
@@ -15664,12 +15728,12 @@ no_window:
         /* `--weapon N`: same treatment. The ammo is topped up every frame
          * rather than given once, so a long run does not quietly turn into a
          * test of the dry-trigger path halfway through. */
-        if (c.give_weapon > 0 && c.give_weapon < Q2_WEAPON_COUNT) {
+        if (c.give_weapon > 0 && c.give_weapon <= Q2_WID_COUNT) {
             q2_inventory *inv = &c.sim[0].combat.inv;
             const q2_weapon_tables *wt = q2_weapon_tables_builtin();
             int a;
 
-            for (a = 1; a < Q2_WEAPON_COUNT; a++)
+            for (a = 1; a <= Q2_WID_COUNT; a++)
                 inv->weapons |= wt->owned_bit[a];
             for (a = 0; a < Q2_AMMO_COUNT; a++)
                 inv->ammo[a] = q2_inventory_ammo_max(inv, (q2_ammo)a);
@@ -15677,8 +15741,8 @@ no_window:
             if (c.sim[0].combat.weapon_id != c.give_weapon) {
                 c.sim[0].combat.weapon_id = c.give_weapon;
                 if (c.vm_ready) {
-                    q2_vw_select(&c.vw, c.give_weapon);
-                    client_bind_view_model(&c);
+                    q2_vw_select(&c.vw[0], c.give_weapon);
+                    client_bind_view_model(&c, 0);
                 }
             }
         }

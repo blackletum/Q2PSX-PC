@@ -321,6 +321,91 @@ static int check_carousel(const disc *d, const q2_build_id *id)
     return bad ? 1 : 0;
 }
 
+/* The field packet has one size for XY and UV. Check the instructions that
+ * consume it, the numeral clamps that write it, and both regional quad tables.
+ * Otherwise a correct-looking constant can coexist with a scaled tiny HUD. */
+static int check_split_fields(const disc *d, const q2_build_id *id)
+{
+    static const struct { u32 at, word; } spans[] = {
+        { 0x80035FD8u, 0x9202FFFCu }, /* u */
+        { 0x80035FDCu, 0x9203FFFEu }, /* width */
+        { 0x80035FE8u, 0x00431021u }, /* u + width */
+        { 0x80035FECu, 0xA0820014u }, /* packet u1 */
+        { 0x80036018u, 0x9202FFFDu }, /* v */
+        { 0x8003601Cu, 0x9203FFFFu }, /* height */
+        { 0x80036028u, 0x00431021u }, /* v + height */
+        { 0x8003602Cu, 0xA082001Du }, /* packet v2 */
+        { 0x80036080u, 0x9203FFFEu }, /* same width */
+        { 0x8003608Cu, 0x00431021u }, /* x + width */
+        { 0x80036090u, 0xA4820010u }, /* packet x1 */
+        { 0x800360ACu, 0x9203FFFFu }, /* same height */
+        { 0x800360B8u, 0x00431021u }, /* y + height */
+        { 0x800360BCu, 0xA482001Au }  /* packet y2 */
+    };
+    q2_icon_size two = q2_sbar_digit_size(2), quad = q2_sbar_digit_size(4);
+    const struct { u32 at, word; } clamps[] = {
+        { 0x80035074u, 0x24030000u | quad.w },
+        { 0x80035078u, 0x24030000u | two.w },
+        { 0x80035080u, 0x24020000u | two.h },
+        { 0x80035084u, 0x24020000u | quad.h }
+    };
+    q2_exe e;
+    unsigned i, checks = 0, bad = 0;
+
+    memset(&e, 0, sizeof(e));
+    if (q2_exe_load(&e, d, id->exe_name) != Q2_OK)
+        return 1;
+    for (i = 0; i < sizeof(spans) / sizeof(spans[0]); i++) {
+        u32 got = 0;
+        checks++;
+        if (!q2_exe_u32(&e, q2_exe_addr(&e, spans[i].at), &got) ||
+            got != spans[i].word) {
+            printf("  MISMATCH  field XY/UV span at PAL %08X: %08X, want %08X\n",
+                   spans[i].at, got, spans[i].word);
+            bad++;
+        }
+    }
+    for (i = 0; i < sizeof(clamps) / sizeof(clamps[0]); i++) {
+        u32 got = 0;
+        checks++;
+        if (!q2_exe_u32(&e, q2_exe_addr(&e, clamps[i].at), &got) ||
+            got != clamps[i].word) {
+            printf("  MISMATCH  numeral clamp at PAL %08X: %08X, want %08X\n",
+                   clamps[i].at, got, clamps[i].word);
+            bad++;
+        }
+    }
+    for (i = 0; i < Q2_SBAR_QUAD_VIEWS; i++) {
+        unsigned f;
+        s16 y = 0;
+        int want_y = q2_sbar_fields_quad[i][0].dy;
+
+        if (id->video == Q2_VIDEO_NTSC && i < 2)
+            want_y -= 4;
+        checks++;
+        if (!q2_exe_s16(&e, q2_exe_addr(&e, 0x800AE808u + 2u * i), &y) ||
+            y != want_y) {
+            printf("  MISMATCH  quad view %u: y %d, want %d\n", i, y, want_y);
+            bad++;
+        }
+        for (f = 0; f < Q2_SBAR_FIELDS_QUAD; f++) {
+            s16 x = 0;
+            u32 at = 0x8009C600u + 2u * (i * Q2_SBAR_FIELDS_QUAD + f);
+            checks++;
+            if (!q2_exe_s16(&e, q2_exe_addr(&e, at), &x) ||
+                x != q2_sbar_fields_quad[i][f].dx) {
+                printf("  MISMATCH  quad view %u field %u: x %d, want %d\n",
+                       i, f, x, q2_sbar_fields_quad[i][f].dx);
+                bad++;
+            }
+        }
+    }
+    printf("\nSplit HUD: %u checks, %u mismatches (shared XY/UV extents,"
+           " numeral clamps, regional quad positions)\n", checks, bad);
+    q2_exe_free(&e);
+    return bad ? 1 : 0;
+}
+
 /*
  * Which ammo pool the counter reads, checked against the disc's own table.
  *
@@ -567,6 +652,7 @@ static int dump_icons(const disc *d, const q2_build_id *id)
      */
     rc = (on_grid + blank == it.rect_count) ? 0 : 1;
     rc |= check_carousel(d, id);
+    rc |= check_split_fields(d, id);
     rc |= check_ammo_kind(&it);
 
     q2_icon_tables_free(&it);

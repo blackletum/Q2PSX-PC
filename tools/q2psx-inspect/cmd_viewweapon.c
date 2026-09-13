@@ -796,13 +796,17 @@ int cmd_viewweapon(disc *d, const char *weapon, const char *out,
     int w, s;
 
     static const check consts[] = {
+        { 0x8004EE48u,  68, "weapon's owning player pointer"              },
+        { 0x8004EE50u,  12, "owner's client block pointer"                 },
+        { 0x8004EE5Cu,   1, "weapon selects the full viewport area"        },
+        { 0x8004EE64u, 158, "entity screen-area byte"                      },
         { 0x8004ECECu,  70, "the weapon-switch countdown, in ticks"        },
         { 0x8004F250u,  12, "key duration, offset within the key"          },
         { 0x8004F1F8u,  14, "key jitter flag, offset within the key"       },
         { 0x8004EF34u,  16, "key event, offset within the key"             },
-        { 0x8004F494u,   6, "key rotation, offset within the key"          },
-        { 0x8004F508u,   8, "key rotation y"                               },
-        { 0x8004F57Cu,  10, "key rotation z"                               },
+        { 0x8004F494u,   6, "key translation, offset within the key"       },
+        { 0x8004F508u,   8, "key translation y"                            },
+        { 0x8004F57Cu,  10, "key translation z"                            },
         { 0x8004F608u, 286, "the eye base the weapon hangs off"            },
     };
 

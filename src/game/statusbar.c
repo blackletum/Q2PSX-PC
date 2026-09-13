@@ -561,21 +561,19 @@ void q2_statusbar_powerup_state(q2_statusbar *b, const q2_inventory *inv)
 /* blank and a zero size cannot be emitted — but the console's rule is spelled */
 /* out here so it stays true if a caller changes.                             */
 /*                                                                            */
-/* NOT MODELLED, and read rather than assumed: retail's packet takes its UV   */
-/* SPAN from the same two bytes as its screen span (0x80035FD8/0x80036030 add */
-/* field byte 6 to u, 0x80036018/0x80036048 add byte 7 to v), so a split-      */
-/* screen field CROPS its sprite instead of scaling it. The port keeps source  */
-/* and destination sizes separate and scales. Changing that moves every        */
-/* split-screen sprite, so it is recorded here for its own round rather than   */
-/* folded into this one.                                                       */
+/* UV and screen spans come from the SAME two field bytes: 0x80035FDC and    */
+/* 0x80036080 read byte 6 for u+w and x+w; 0x8003601C and 0x800360AC read    */
+/* byte 7 for v+h and y+h. The multiplayer sheets already contain smaller     */
+/* sprites at the same cell origins. Crop those authored sprites; scaling a   */
+/* full single-player cell shrinks them a second time and samples its padding. */
 /* ------------------------------------------------------------------------- */
 static psx_prim *emit_cell_prim(psx_ot *ot, u32 bucket, u16 tpage, u16 clut,
                                 int x, int y, u8 u, u8 v,
-                                u8 sw, u8 sh, u8 dw, u8 dh)
+                                u8 w, u8 h)
 {
     psx_prim *p;
 
-    if (sw == 0 || sh == 0 || dw == 1 || dh == 1 || dw == 0 || dh == 0)
+    if (w <= 1 || h <= 1)
         return NULL;
 
     p = psx_ot_add_bucket(ot, bucket);
@@ -593,23 +591,23 @@ static psx_prim *emit_cell_prim(psx_ot *ot, u32 bucket, u16 tpage, u16 clut,
      * GPU's own fill rule now, so the console's numbers go through as they
      * are. */
     p->xy[0].x = (s16)x;              p->xy[0].y = (s16)y;
-    p->xy[1].x = (s16)(x + dw);       p->xy[1].y = (s16)y;
-    p->xy[2].x = (s16)(x + dw);       p->xy[2].y = (s16)(y + dh);
-    p->xy[3].x = (s16)x;              p->xy[3].y = (s16)(y + dh);
+    p->xy[1].x = (s16)(x + w);        p->xy[1].y = (s16)y;
+    p->xy[2].x = (s16)(x + w);        p->xy[2].y = (s16)(y + h);
+    p->xy[3].x = (s16)x;              p->xy[3].y = (s16)(y + h);
 
     p->uv[0].u = u;                   p->uv[0].v = v;
-    p->uv[1].u = (u8)(u + sw);        p->uv[1].v = v;
-    p->uv[2].u = (u8)(u + sw);        p->uv[2].v = (u8)(v + sh);
-    p->uv[3].u = u;                   p->uv[3].v = (u8)(v + sh);
+    p->uv[1].u = (u8)(u + w);         p->uv[1].v = v;
+    p->uv[2].u = (u8)(u + w);         p->uv[2].v = (u8)(v + h);
+    p->uv[3].u = u;                   p->uv[3].v = (u8)(v + h);
 
     return p;
 }
 
 static u32 emit_cell(psx_ot *ot, u32 bucket, u16 tpage, u16 clut,
-                     int x, int y, u8 u, u8 v, u8 sw, u8 sh, u8 dw, u8 dh)
+                     int x, int y, u8 u, u8 v, u8 w, u8 h)
 {
     psx_prim *p = emit_cell_prim(ot, bucket, tpage, clut,
-                                 x, y, u, v, sw, sh, dw, dh);
+                                 x, y, u, v, w, h);
     int i;
 
     if (!p)
@@ -703,7 +701,7 @@ static u32 emit_strip_cell(psx_ot *ot, u32 bucket,
 {
     psx_prim *p = emit_cell_prim(ot, bucket,
                                  (u16)(tpage | (PSX_BLEND_ADD << 5)), clut,
-                                 x, y, u, v, w, h, w, h);
+                                 x, y, u, v, w, h);
     psx_prim *s;
 
     if (!p)
@@ -713,7 +711,7 @@ static u32 emit_strip_cell(psx_ot *ot, u32 bucket,
     strip_edges(p, dark_on_left, Q2_SBAR_STRIP_MOD);
 
     s = emit_cell_prim(ot, bucket, (u16)(tpage | (PSX_BLEND_SUB << 5)),
-                       shadow_clut, x, y, u, v, w, h, w, h);
+                       shadow_clut, x, y, u, v, w, h);
     if (!s)
         return 1;
     s->kind = PSX_PRIM_GT4;
@@ -809,7 +807,7 @@ static u32 emit_glyph_row(const q2_statusbar *b, const q2_sbar_field *fields,
         emitted += emit_cell(ot, bucket, tpage, clut,
                              ox + b->anchor_x + fd->dx,
                              oy + b->anchor_y + fd->dy,
-                             u, v, Q2_SBAR_DIGIT_W, Q2_SBAR_DIGIT_H,
+                             u, v,
                              (u8)(size.w ? size.w : Q2_SBAR_DIGIT_W),
                              (u8)(size.h ? size.h : Q2_SBAR_DIGIT_H));
     }
@@ -888,7 +886,6 @@ static u32 emit_counter(const q2_statusbar *b, const q2_sbar_field *fields,
                              oy + b->anchor_y + fd->dy,
                              (u8)(digits[i] * Q2_SBAR_DIGIT_PITCH),
                              Q2_SBAR_DIGIT_V,
-                             Q2_SBAR_DIGIT_W, Q2_SBAR_DIGIT_H,
                              (u8)(size.w ? size.w : Q2_SBAR_DIGIT_W),
                              (u8)(size.h ? size.h : Q2_SBAR_DIGIT_H));
     }
@@ -911,7 +908,7 @@ static u32 emit_counter(const q2_statusbar *b, const q2_sbar_field *fields,
                                  pal_clut(b, r->id, clut),
                                  ox + b->anchor_x + fd->dx,
                                  oy + b->anchor_y + fd->dy,
-                                 r->u, r->v, r->w, r->h, is.w, is.h);
+                                 r->u, r->v, is.w, is.h);
         }
     }
 
@@ -959,7 +956,7 @@ static u32 emit_powerup_timer(const q2_statusbar *b, u16 tpage, u16 clut,
     emitted += emit_cell(ot, bucket, tpage, pal_clut(b, r->id, clut),
                          ox + b->anchor_x + fi->dx,
                          oy + b->anchor_y + fi->dy,
-                         r->u, r->v, r->w, r->h, is.w, is.h);
+                         r->u, r->v, is.w, is.h);
 
     /* The console's pickup duration is thirty seconds and the UI owns two
      * numeral fields. A value below ten therefore occupies only the units
@@ -981,7 +978,6 @@ static u32 emit_powerup_timer(const q2_statusbar *b, u16 tpage, u16 clut,
                              oy + b->anchor_y + fd->dy,
                              (u8)(value * Q2_SBAR_DIGIT_PITCH),
                              Q2_SBAR_DIGIT_V,
-                             Q2_SBAR_DIGIT_W, Q2_SBAR_DIGIT_H,
                              (u8)(ds.w ? ds.w : Q2_SBAR_DIGIT_W),
                              (u8)(ds.h ? ds.h : Q2_SBAR_DIGIT_H));
     }
@@ -1084,7 +1080,7 @@ u32 q2_statusbar_build_ot(const q2_statusbar *b, u16 tpage, u16 clut,
             n += emit_cell(ot, bucket, tpage, pal_clut(b, r->id, clut),
                            origin_x + b->anchor_x + fd->dx,
                            origin_y + b->anchor_y + fd->dy,
-                           r->u, r->v, r->w, r->h, is.w, is.h);
+                           r->u, r->v, is.w, is.h);
         }
     }
 
@@ -1220,7 +1216,7 @@ u32 q2_statusbar_build_ot(const q2_statusbar *b, u16 tpage, u16 clut,
             n += emit_cell(ot, bucket, tpage, pal_clut(b, r->id, clut),
                            origin_x + b->anchor_x + fd->dx,
                            origin_y + b->anchor_y + fd->dy,
-                           r->u, r->v, r->w, r->h, is.w, is.h);
+                           r->u, r->v, is.w, is.h);
         }
     }
 

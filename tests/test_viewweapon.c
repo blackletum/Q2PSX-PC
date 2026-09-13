@@ -913,7 +913,7 @@ static void test_rotmatrix_order(void)
 
 /*
  * Retail does not restore a full projection after every regional emitter.
- * Instead the weapon entity owns area 1 (0x8004EE58), and model draw selects
+ * Instead the weapon entity owns area 1 (0x8004EE64), and model draw selects
  * that area at 0x8006BEB0.  A negative selector is a no-op, so retaining the
  * prototype's default -1 would leave the last projectile's portal offset in
  * force for the gun.

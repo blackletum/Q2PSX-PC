@@ -4353,8 +4353,9 @@ rather than the screen, and its cells shrink when the viewport does.
 literal offset from that point, so a layout places the whole bar by writing two halfwords.
 
 **The fields.** Seventeen 10-byte records are built on the stack at `0x800337EC`…`0x80033B60`, each
-`{s16 x, s16 y, u8 u, u8 v, u8 w, u8 h, u8 dst_w, u8 dst_h}` — a source rect plus a destination size,
-initialised to the 1 x 1 blank and filled in by the sub-draws. Sorted by position they fall into **two
+`{s16 x, s16 y, u8 u, u8 v, u8 w, u8 h, u8 palette, u8 tpage}`. Width and height supply both the
+screen and UV spans; the last two bytes select palette and texture-page table entries (`0x80036108`,
+`0x80036128`). The rectangle starts as the 1 x 1 blank and is filled by the sub-draws. Sorted by position they fall into **two
 rows**:
 
 | row | field | x | y |
@@ -4395,10 +4396,23 @@ weapon id of 0 collapses to the 1 x 1 blank (`0x800353E8`). Numerals go through 
 `0x80035054`: 18 x 20 for two players and 13 x 12 for three or four. Single player skips both and passes the
 record's own size through — 24 x 24 for a numeral. And the field emitter **crops rather than scales**: it takes
 the UV span from the drawn size (`0x80035FD8`), so a clamped sprite shows the top-left of its cell, not a
-shrunken copy of the whole of it.
+shrunken copy of the whole of it. The `qk2_menu.lbm` and `qkm_menu.lbm` atlases already contain the
+smaller multiplayer art at those cell origins. Scaling a 24 x 24 numeral into its multiplayer size
+shrinks that small art a second time and samples its padding. The port now uses the shared UV/XY
+extents; the earlier implementation kept separate sizes despite the crop documented here.
 
 Implemented in `src/game/statusbar.[ch]` and `src/build/icontable.[ch]`; `q2psx-inspect hud` checks the
-tables against the disc.
+tables against the disc. Its split-field checks compare 66 instructions and table entries on both
+PAL and USA, including the regional quad row positions. Raster tests also check that every player's
+health, icon and signed frag glyph retain their edge texels in all split layouts.
+
+The remaining HUD layers also belong to a viewport. The crosshair centres its 16 x 16 sprite
+on that view's width and height (`0x80043A98`), and the damage tracker writes the flash drawn
+by the same view (§12.6.1). The client keeps each player's notification ring and damage history
+separately, emits split overlays inside their own draw environments, and supplies each view's
+own underwater flag. The capture harness toggles crosshairs and checks that only the sixteen-pixel
+boxes at the respective viewport centres change; a staged fight checks that the injured player's
+damage tracker actually raises flashes.
 
 **The vocabulary — the join is real, and it is by INDEX.** This section used to read "SOLVED — the record's
 fifth byte is the item's `effect` dispatch index", on the strength of the weapon-to-ammo table at
@@ -7395,6 +7409,20 @@ pos.z = player.z + offset.z
 ```
 (`0x8004F5E8`…`0x8004F640`.) The `286 − view_offset` is the **camera's own expression** (§9.12), so the
 weapon rises and falls with a crouch for free.
+
+The owner is explicit: `0x8004EE48` loads the weapon's player pointer from `entity+68`, and
+`0x8004EE50` follows that player's client block. Each split viewport therefore needs its own weapon
+machine and model handle, with the owner's selection, animation, recoil, eye and death state.
+The client previously reused player zero's machine and world position for every viewport, while
+players 1..3 had no animation driver to fire their weapons. It now advances and draws each owner's
+machine against the shared world. The extra cameras also use `feet - view_height`; subtracting the
+286-unit entity-origin conversion had left those cameras below their standing eyes.
+
+The viewport's own projection and draw rectangle still govern the model. The weapon selects
+screen area 1 (`0x8004EE64`) to restore that viewport's full area after portal-local draws, and sorts
+one layer behind its status bar. `q2psx-inspect viewweapon` checks the owner and area instructions;
+`tests/check_split_screen.py` exercises both two-player splits, three/four players, independent
+weapons, firing and death through headless client captures on either disc.
 
 `offset` is the key's translation rotated by `RotMatrix(aim + kick)` with **x negated** at the sum
 (`0x8004F41C`). The clip's own rotation is *not* in that matrix — it reaches the model through the separate

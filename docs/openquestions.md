@@ -9826,3 +9826,40 @@ unit, 4095.3 mean over every part of `Blaster G`) or the GTE reaches it.
       FORMATS §11.13; `src/game/loading.[ch]`; the page is in `src/menu/pages.c` where
       `q2psx-inspect menu <disc>` checks it against the executable record by record, and
       `tests/test_loading.c` pins the behaviour the tables cannot express.
+
+- [x] 137. **Split HUD sprites were shrinking twice, and the extra views borrowed player zero's gun.**
+
+      The multiplayer sheets already contain smaller glyphs and icons at the same cell origins.
+      The field emitter reads the same width for `u+w` and `x+w` (`0x80035FDC`, `0x80036080`),
+      and the same height for `v+h` and `y+h` (`0x8003601C`, `0x800360AC`). The port instead
+      sampled a full single-player cell into a smaller destination. That shrank the authored art
+      again and lost its edge texels. The emitter now uses one size for both spans. All four
+      layouts retain their own field positions and numeral/icon clamps; PAL and USA retain their
+      different quad row positions. The HUD inspector checks 66 instructions and table entries
+      on each disc, and raster tests check glyph edges in every player slot at both heights.
+
+      The weapon driver follows an owner pointer at `0x8004EE48` and that owner's client at
+      `0x8004EE50`. The client had one animation machine, model handle and pair of shot cursors,
+      then placed that gun at player zero's coordinates in every viewport. Players 1..3 also had
+      no animation driver to fire their weapons, because the shared sim's raw-trigger path was
+      disabled. Each player now advances their own machine with their combat block selected;
+      inventory, selection, recoil, lighting and death state all come from that owner. A respawn
+      resets that player's machine and cursors. The extra cameras use their owner's eased
+      `feet - view_height` eye, and drawing them no longer leaves the last camera in player zero's
+      slot for the next paused frame.
+
+      The same ownership gap affected the rest of the HUD: one full-screen crosshair, one
+      notification ring, and only player zero's damage history. Those now live per player, with
+      overlays emitted inside each viewport's draw environment. The water-effect feed also reads
+      that view's own underwater flag. Pixel comparisons with crosshairs toggled prove their
+      positions and isolation in all four layouts; the fight records damage flashes on the injured
+      player. Independent physical-controller bindings remain a separate gap: outside the
+      built-in demo, the extra players still receive the local player's input.
+
+      Verification uses the real headless client: both two-player splits, three and four players,
+      all eleven weapon selections, repeated captures, and staged fights that exercise independent
+      firing, death and respawn. PAL and USA single-player captures remain byte-identical to the
+      baseline. The view-weapon inspector passes 39 checks on each disc, including the owner
+      pointer and full-viewport area instructions. The weapon sweep also exposed and fixed the
+      capture option's off-by-one: `--weapon 11` had silently excluded the BFG. Re-run through
+      `tests/check_split_screen.py`; FORMATS §11.1.1 and §19.4 describe the rendering evidence.

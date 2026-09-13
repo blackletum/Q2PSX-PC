@@ -43,11 +43,15 @@ change; see [`docs/RELEASING.md`](docs/RELEASING.md).
 - American English where the USA build has it. Its string lookup asks for `<key>US` before `<key>`, and the level data — the same on both discs — already carries sixteen answers, so the briefing says *Comm Center*, *Defense Command* and *Detention Center*. The executable's own words follow it: `AUTOCENTER`, *Body Armor*, the `COLISEUM` arena.
 
 ### Rendering and audio
+- Split-screen HUD digits and icons now use the multiplayer atlases at their authored size. Health, ammo, armour and frag counts no longer shrink twice or lose their edge pixels.
+- Crosshairs, notifications and damage flashes belong to each player's viewport. Crosshairs no longer sit in the split-screen gutter, and one player's underwater effect no longer warps everybody's view.
+- Each split-screen player now has their own view weapon, animation, firing, recoil and lighting. Death removes only that player's gun, respawn rebuilds it, and the extra views follow their owner's standing or crouched eye height.
 - Split screen: a particle group's per-viewport skip tested the wrong bit, so nothing marked as one player's own was ever hidden from the others (`0x80030614`).
 - ...and `--boot` gets the same silence. The hold was armed beside one of the two places `boot_chain` is set, and `--boot` sets the other one while the arguments are still being read — so a run that asked for the logo screens explicitly still played the menu track over them. It is armed where the chain's own condition is decided now, so the two cannot drift.
 - The menu music no longer plays over the startup screens. On the console the boot chain is three levels — QLOGOS2, QLOGOS and QFMV — and none of the three has a playlist, so the legal screen, the two logo pairs and the intro film are scored by the film's own audio and nothing else. This port loads QFRONT before the chain so the front end has something to stand on when the film ends, and that load was taking QFRONT's looping menu track with it. The music now starts where the console's does: when the title screen is actually up.
 
 ### Tools
+- `--dm-split horizontal|vertical` selects either two-player layout for headless captures, and `--crosshair` / `--no-crosshair` override its crosshair setting. The split-screen regression harness covers both disc regions and all eleven weapons; `--weapon 11` now includes the BFG. The HUD and view-weapon inspectors also verify the retail crop and owner instructions.
 - `--watch-hold N` keeps the capture camera on a killed creature for N more frames, making drops and gibs visible before it picks the next live target.
 - The HUD carousel verifier translates its table, instructions and weapon-slot writers for the USA executable. Executable relocation checks also reject unmapped addresses instead of treating zero padding as a matching instruction.
 - `q2psx-inspect ai` checks 149 constants against the executable, up from 130, all passing: the death-drop chain, the go-routines' eye heights and turn rates, and the start wrappers.

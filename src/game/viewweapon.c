@@ -1202,7 +1202,7 @@ u32 q2_vw_build_ot(const q2_viewweapon *vw,
     inst.scale = Q2_ONE_12;
     /*
      * The view-weapon entity is permanently assigned screen area 1 at
-     * 0x8004EE58 (`sb 1, entity+0x9E`).  It later reaches the ordinary model
+     * 0x8004EE64 (`sb 1, entity+0x9E`).  It later reaches the ordinary model
      * renderer, whose 0x8006BEB0 call selects that area before projecting it.
      *
      * This is observable because 0x80065684 is stateful: its negative selector

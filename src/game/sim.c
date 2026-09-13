@@ -3517,10 +3517,14 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
  * not touched.
  */
 /* Park the live player's combat half and load another's. */
-static void combat_swap_to(q2_sim *sim, int index)
+void q2_sim_select_player(q2_sim *sim, int index)
 {
-    q2_player_combat *from = &sim->pcombat[sim->cur_player];
-    q2_player_combat *to   = &sim->pcombat[index];
+    q2_player_combat *from, *to;
+
+    if (!sim || index < 0 || index >= Q2_SIM_MAX_PLAYERS)
+        return;
+    from = &sim->pcombat[sim->cur_player];
+    to   = &sim->pcombat[index];
 
     if (index == sim->cur_player)
         return;
@@ -3561,9 +3565,9 @@ void q2_sim_advance_player(q2_sim *sim, int index, const q2_input *input,
         return;
 
     saved = sim->cur_player;
-    combat_swap_to(sim, index);
+    q2_sim_select_player(sim, index);
     q2_sim_tick(sim, input, dt);
-    combat_swap_to(sim, saved);
+    q2_sim_select_player(sim, saved);
 }
 
 /*
@@ -3589,7 +3593,7 @@ void q2_sim_player_reset_combat(q2_sim *sim, int index)
         q2_inventory     start_inv = sim->combat.inv;
         int              start_wep = sim->combat.weapon_id;
 
-        combat_swap_to(sim, index);
+        q2_sim_select_player(sim, index);
         sim->combat.inv       = start_inv;
         sim->combat.weapon_id = start_wep;
     }
@@ -3617,7 +3621,7 @@ void q2_sim_player_reset_combat(q2_sim *sim, int index)
     q2_actor_init(&sim->combat.self);
     q2_actor_from_player(&sim->combat.self, &sim->combat.inv,
                          sim->player[index].pos);
-    combat_swap_to(sim, saved);
+    q2_sim_select_player(sim, saved);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -3764,10 +3768,16 @@ void q2_sim_settle(q2_sim *sim)
 /* ------------------------------------------------------------------------- */
 void q2_sim_eye(const q2_sim *sim, s32 out_pos[3])
 {
-    if (!sim || !out_pos)
+    if (sim)
+        q2_sim_player_eye(sim, sim->cur_player, out_pos);
+}
+
+void q2_sim_player_eye(const q2_sim *sim, int index, s32 out_pos[3])
+{
+    if (!sim || !out_pos || index < 0 || index >= Q2_SIM_MAX_PLAYERS)
         return;
 
-    out_pos[0] = sim->player[sim->cur_player].pos[0];
+    out_pos[0] = sim->player[index].pos[0];
     /*
      * `feet - viewOffset`, which IS the console's `origin + 286 - viewOffset`.
      *
@@ -3800,9 +3810,8 @@ void q2_sim_eye(const q2_sim *sim, s32 out_pos[3])
      * get there by this function — see the note in q2_vw_place, which converts
      * the other way for the same reason.
      */
-    out_pos[1] = sim->player[sim->cur_player].pos[1]
-               - sim->player[sim->cur_player].view_height;
-    out_pos[2] = sim->player[sim->cur_player].pos[2];
+    out_pos[1] = sim->player[index].pos[1] - sim->player[index].view_height;
+    out_pos[2] = sim->player[index].pos[2];
 }
 
 /* ------------------------------------------------------------------------- */
@@ -3832,6 +3841,11 @@ static s32 kick_scale(s32 deadline, s32 now, s32 period)
 
 void q2_sim_view_angles(const q2_sim *sim, s32 out[3])
 {
+    q2_sim_player_view_angles(sim, sim ? sim->cur_player : 0, out);
+}
+
+void q2_sim_player_view_angles(const q2_sim *sim, int index, s32 out[3])
+{
     const q2_player *p;
     s32 s;
 
@@ -3840,10 +3854,10 @@ void q2_sim_view_angles(const q2_sim *sim, s32 out[3])
 
     out[0] = out[1] = out[2] = 0;
 
-    if (!sim)
+    if (!sim || index < 0 || index >= Q2_SIM_MAX_PLAYERS)
         return;
 
-    p = &sim->player[sim->cur_player];
+    p = &sim->player[index];
 
     out[0] = p->pitch;
     out[1] = p->yaw;

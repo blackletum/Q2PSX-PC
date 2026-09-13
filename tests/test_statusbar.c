@@ -1394,6 +1394,118 @@ static int grey_at(const psx_framebuffer *fb, int x, int y)
     return (fb->px[y * fb->width + x] & 0x1F) << 3;   /* red channel */
 }
 
+/* Multiplayer sheets keep the cell origins but author smaller sprites in
+ * them. A coloured last row/column makes sampling the surrounding padding
+ * observable: scaling the single-player cell loses those border texels. */
+static void paint_test_cell(psx_vram *vram, int u, int v, int w, int h)
+{
+    int x, y;
+
+    for (y = 0; y < h; y++) {
+        for (x = 0; x < w; x++) {
+            int index = y == h - 1 ? 3 : (x == w - 1 ? 2 : 1);
+            int shift = ((u + x) & 3) * 4;
+            u16 *word = &vram->px[v + y][64 + (u + x) / 4];
+            *word = (u16)((*word & ~(0xFu << shift)) | (index << shift));
+        }
+    }
+}
+
+static void test_split_sprite_texels(void)
+{
+    static const struct { q2_sbar_layout layout; int players; } cases[] = {
+        { Q2_SBAR_LAYOUT_TWO_H, 2 }, { Q2_SBAR_LAYOUT_TWO_V, 2 },
+        { Q2_SBAR_LAYOUT_QUAD, 3 }, { Q2_SBAR_LAYOUT_QUAD, 4 }
+    };
+    psx_vram *vram = (psx_vram *)calloc(1, sizeof(*vram));
+    psx_framebuffer fb;
+    psx_ot ot;
+    psx_raster_opts opts;
+    unsigned c;
+    int height, view;
+
+    if (!vram) { CHECK(0, "VRAM for split-screen sprite test"); return; }
+    if (psx_ot_init(&ot, 64, 256) != Q2_OK) {
+        CHECK(0, "ordering table for split-screen sprite test");
+        free(vram);
+        return;
+    }
+    if (psx_fb_init(&fb, SCREEN_W, SCREEN_H) != Q2_OK) {
+        CHECK(0, "framebuffer for split-screen sprite test");
+        psx_ot_free(&ot);
+        free(vram);
+        return;
+    }
+    psx_raster_opts_default(&opts);
+    opts.dither = false;
+
+    for (c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        int dw = cases[c].players == 2 ? 18 : 13;
+        int dh = cases[c].players == 2 ? 20 : 12;
+        int iw = cases[c].players == 2 ? 24 : 16;
+        int ih = cases[c].players == 2 ? 18 : 12;
+
+        for (height = 240; height <= 248; height += 8) {
+            for (view = 0; view < cases[c].players; view++) {
+                q2_icon_tables icons;
+                q2_statusbar b;
+                u32 i;
+                int painted = 0;
+
+                memset(vram, 0, sizeof(*vram));
+                vram->px[0][1] = psx_rgb555(64, 64, 64);
+                vram->px[0][2] = psx_rgb555(64, 0, 0);
+                vram->px[0][3] = psx_rgb555(0, 64, 0);
+                paint_test_cell(vram, 7 * 24, 168, dw, dh);
+                paint_test_cell(vram, 0, 24, iw, ih);
+                build_icons(&icons);
+                icons.rect[34].u = 0; icons.rect[34].v = 24;
+                q2_statusbar_init(&b, &icons, cases[c].players);
+                q2_statusbar_layout(&b, cases[c].layout, view, height);
+                q2_statusbar_anchor(&b, 0,
+                    cases[c].layout == Q2_SBAR_LAYOUT_QUAD ? 0 :
+                    (s16)(cases[c].layout == Q2_SBAR_LAYOUT_TWO_H
+                              ? (height / 2 - 29) : height - 32));
+                b.health = 7;
+                b.health_icon = 34;
+                b.weapon = Q2_SBAR_WEAPON_NO_AMMO;
+                b.frags = -7;
+                psx_fb_clear(&fb, 0);
+                psx_ot_clear(&ot);
+                q2_statusbar_build_ot(&b, 1, 0, &ot, 8, 0, 0);
+                psx_raster_ot(&fb, &ot, vram, &opts);
+
+                for (i = 0; i < ot.prim_count; i++) {
+                    const psx_prim *p = &ot.prims[i];
+                    int x = p->xy[0].x, y = p->xy[0].y;
+                    int w = p->xy[1].x - x, h = p->xy[3].y - y;
+
+                    CHECK((u8)(p->uv[1].u - p->uv[0].u) == w &&
+                          (u8)(p->uv[3].v - p->uv[0].v) == h,
+                          "layout %u, view %d, %d lines: UVs are texel-for-pixel",
+                          c, view, height);
+                    if ((p->uv[0].u == 7 * 24 && p->uv[0].v == 168) ||
+                        (p->uv[0].u == 0 && p->uv[0].v == 24)) {
+                        CHECK(fb.px[(y + h / 2) * fb.width + x + w - 1] ==
+                              psx_rgb555(96, 0, 0),
+                              "layout %u, view %d: sprite's right border survives",
+                              c, view);
+                        CHECK(fb.px[(y + h - 1) * fb.width + x + w / 2] ==
+                              psx_rgb555(0, 96, 0),
+                              "layout %u, view %d: sprite's bottom border survives",
+                              c, view);
+                        painted++;
+                    }
+                }
+                CHECK(painted == 3, "health, icon and signed frag digit drawn");
+            }
+        }
+    }
+    psx_fb_free(&fb);
+    psx_ot_free(&ot);
+    free(vram);
+}
+
 static void test_bar_on_screen(void)
 {
     q2_icon_tables icons;
@@ -1787,6 +1899,7 @@ int main(void)
     test_strip_geometry();
     test_field_modulation();
     test_bar_on_screen();
+    test_split_sprite_texels();
     test_signed_health();
     test_dead_strips_the_bar();
 

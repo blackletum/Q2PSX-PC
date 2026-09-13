@@ -1355,6 +1355,12 @@ s32 q2_sim_next_dt(const q2_sim *sim, double elapsed_seconds);
 void q2_sim_advance_player(q2_sim *sim, int index, const q2_input *input,
                            s32 dt);
 
+/* Select whose combat state is live without advancing the world. Animation
+ * driven shots use this after movement. Restore the previous cur_player after
+ * processing the owner; shared projectiles, targets and clocks stay in place.
+ * Invalid indices are ignored. */
+void q2_sim_select_player(q2_sim *sim, int index);
+
 /*
  * Give an extra player a level start's inventory and weapon, on a fresh actor
  * (killer byte 4, as 0x8003DE34 places a player). The actor's `owner` comes
@@ -1443,13 +1449,15 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt);
 
 /* The eye position to render from, accounting for view height. */
 void q2_sim_eye(const q2_sim *sim, s32 out_pos[3]);
+/* Read a viewport owner's eye without changing the live combat player. */
+void q2_sim_player_eye(const q2_sim *sim, int index, s32 out_pos[3]);
 
 /*
- * 0x80038260 — the view angles to render from: pitch, yaw and roll in the
+ * 0x80038260 — the weapon's view angles: pitch, yaw and roll in the
  * 4096-step circle, with every kick the player is carrying folded in.
  *
- * `sim->player.pitch/yaw/roll` are the AIM. They are not what the camera uses,
- * and the difference is three decaying offsets rather than one:
+ * The camera uses the player's plain aim. This function's sole retail caller
+ * (0x8004F404) adds three decaying offsets to the weapon instead:
  *
  *     kick        30 ticks   what firing posts; pitch, yaw and roll
  *     hurt_kick  150 ticks   what taking damage posts; pitch and roll
@@ -1460,10 +1468,12 @@ void q2_sim_eye(const q2_sim *sim, s32 out_pos[3]);
  * which is a real consequence of `pain_time` being 210 while the hurt kick
  * decays over 150 and not something to clamp away.
  *
- * The camera negates the pitch (0x8004F41C); this returns the entity's own
+ * The weapon's placement negates the pitch (0x8004F41C); this returns the entity's own
  * sign, because that is what the aim and the weapon both use.
  */
 void q2_sim_view_angles(const q2_sim *sim, s32 out[3]);
+/* Includes this player's decaying firing, damage and landing kicks. */
+void q2_sim_player_view_angles(const q2_sim *sim, int index, s32 out[3]);
 
 /*
  * Post a view kick — what a weapon's recoil and a damage hit do. `period` picks

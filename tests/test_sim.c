@@ -1885,6 +1885,78 @@ static void test_variable_dt(void)
  * however many players there are, while everything a player owns is theirs.
  * Both halves of that are checked here.
  */
+static void test_player_weapon_context(void)
+{
+    q2_sim sim;
+    s32 at[3] = { 0, 0, 0 };
+    int pi;
+
+    printf("view weapons keep their owner's combat and camera state\n");
+    q2_sim_init(&sim, NULL, 50);
+    sim.fire_from_input = false;
+    sim.player_count = Q2_SIM_MAX_PLAYERS;
+    for (pi = 0; pi < Q2_SIM_MAX_PLAYERS; pi++) {
+        q2_fire_result_v2 shot;
+
+        q2_sim_select_player(&sim, pi);
+        at[0] = pi * 2000;
+        q2_sim_spawn(&sim, at, pi * 1024);
+        q2_inventory_init(&sim.combat.inv);
+        sim.combat.weapon_id = 1;
+        sim.combat.inv.health = (s16)(90 - pi);
+        shot = q2_sim_fire(&sim);
+        check(shot.fired, "each owner's animation can fire its own blaster");
+        check_eq_i(sim.combat.shot_serial, 1,
+                   "shot serial starts independently for each owner");
+    }
+    q2_sim_select_player(&sim, 0);
+    check_eq_i(sim.level_time, 0, "weapon context changes do not tick the world");
+    check_eq_i(sim.tick_count, 0, "weapon context changes do not run movement");
+
+    for (pi = 0; pi < Q2_SIM_MAX_PLAYERS; pi++) {
+        q2_player *p = &sim.player[pi];
+        s32 eye[3], view[3];
+
+        /* A different eye, crouch amount, aim and kick in every viewport. */
+        p->pos[1] = 1000 + pi * 100;
+        p->pos[2] = pi * -1000;
+        p->view_height = 576 - pi * 96;
+        p->pitch = 10 + pi;
+        p->yaw = 20 + pi;
+        p->roll = 30 + pi;
+        p->kick[0] = 80;
+        p->kick[1] = p->kick[2] = 0;
+        p->kick_time = 15;
+        p->hurt_kick[0] = 40;
+        p->hurt_kick[1] = 60;
+        p->pain_time = 75;
+        p->fall_value = 8;
+        p->fall_time = 45;
+        q2_sim_player_eye(&sim, pi, eye);
+        q2_sim_player_view_angles(&sim, pi, view);
+        check_eq_i(eye[0], pi * 2000, "eye uses viewport owner's X");
+        check_eq_i(eye[1], 424 + pi * 196, "eye follows owner's eased crouch");
+        check_eq_i(eye[2], pi * -1000, "eye uses viewport owner's Z");
+        check_eq_i(view[0], 74 + pi, "owner's three decaying pitch kicks compose");
+        check_eq_i(view[1], 20 + pi, "view uses owner's yaw");
+        check_eq_i(view[2], 60 + pi, "view uses owner's damage roll");
+        check_eq_i(sim.cur_player, 0, "render reads leave live combat untouched");
+    }
+
+    for (pi = 0; pi < Q2_SIM_MAX_PLAYERS; pi++) {
+        q2_sim_select_player(&sim, pi);
+        check_eq_i(sim.combat.inv.health, 90 - pi,
+                   "selecting a weapon owner restores that owner's inventory");
+        check_eq_i(sim.combat.shot_serial, 1,
+                   "other weapons never consume this owner's shot cursor");
+    }
+    q2_sim_select_player(&sim, 0);
+    q2_sim_select_player(&sim, -1);
+    q2_sim_select_player(&sim, Q2_SIM_MAX_PLAYERS);
+    check_eq_i(sim.cur_player, 0, "invalid owner cannot corrupt combat context");
+    q2_sim_free(&sim);
+}
+
 static void test_four_players(void)
 {
     q2_sim sim;
@@ -3808,6 +3880,7 @@ int main(void)
     test_ease_boundary();
     test_variable_dt();
     test_four_players();
+    test_player_weapon_context();
     test_melee_point();
     test_train();
     test_movers_block_sight_and_shots();

@@ -198,6 +198,21 @@ build-client/bin/q2psx --disc "Quake II (Europe).cue" --headless --demo \
 build-client/bin/q2psx --disc "Quake II (Europe).cue" --movie OUTRO1P.STX
 ```
 
+Split-screen captures use `--dm --dm-players 2` with `--dm-split horizontal` or
+`--dm-split vertical`. Three and four players use the quad layout. For a repeatable
+HUD and view-weapon check, including all eleven weapons:
+
+```bash
+python tests/check_split_screen.py --client build-client/bin/q2psx \
+    --disc "Quake II (Europe).cue" --output .agents/tmp/split-screen/PAL --weapon-sweep
+```
+
+The check writes engine framebuffer captures and logs under the chosen output
+directory. It checks crosshair pixels at each viewport centre and damage flashes
+on the injured player. `--baseline /path/to/previous/q2psx` also compares
+single-player pixels. The client accepts `--crosshair` and `--no-crosshair` to
+override that menu setting during a capture.
+
 The cinematics are reachable the way the game reaches them. A windowed run walks the
 BOOT CHAIN — the two logo screens and then `TAKE1BP.STX` — before the menu, and any key
 or click ends the screen that is up. A headless one goes straight to the title, because
