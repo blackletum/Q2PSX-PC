@@ -222,6 +222,10 @@ is playing whatever move its AI put it in. It exists because a face count says n
 about what you can see: with an ordering table and no depth buffer, a monster behind a
 wall is emitted and then painted over.
 
+`--watch-hold N` also enables that camera and holds a killed creature in view
+for N more frames, so a headless capture can show its drops and gibs before
+the camera moves to the next live creature.
+
 That is not a convenience. `q2psx-inspect` composes its own frames, so it cannot
 catch anything that goes wrong *between* the client's systems — a table loaded after
 the thing that reads it, a model never bound, a screen never fed. The first run of

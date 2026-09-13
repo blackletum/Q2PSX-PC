@@ -185,14 +185,17 @@ bool q2_exe_lo_relocates(const q2_exe *e, s32 pal_lo, s32 got)
 bool q2_exe_word_relocates(const q2_exe *e, u32 pal_word, u32 got)
 {
     u32 op = pal_word >> 26;
+    u32 relocated;
 
     if (pal_word == got)
         return true;
     if (!q2_exe_has_layout(e))
         return false;
 
-    /* A pointer stored as data. */
-    if (q2_exe_addr(e, pal_word) == got)
+    /* A pointer stored as data. Zero means no mapping, not a null pointer
+     * that can match padding while scanning an executable. */
+    relocated = q2_exe_addr(e, pal_word);
+    if (relocated && relocated == got)
         return true;
 
     if ((got >> 26) != op)

@@ -191,7 +191,8 @@ static int check_slot_writers(const q2_exe *e)
     for (a = q2_exe_begin(e); a + 20u <= q2_exe_end(e); a += 4u) {
         u32 w = 0, d = 0, base = 0, k;
 
-        if (!q2_exe_u32(e, a, &w) || w != SLOT_WALK_JAL)
+        if (!q2_exe_u32(e, a, &w) ||
+            !q2_exe_word_relocates(e, SLOT_WALK_JAL, w))
             continue;
         jals++;
         if (!q2_exe_u32(e, a + 4u, &d) || !is_sh_v0(d, 100u, &base))
@@ -216,9 +217,9 @@ static int check_slot_writers(const q2_exe *e)
 
         for (j = 0; j < nfound && j < (int)(sizeof(found) / sizeof(found[0]));
              j++)
-            if (found[j] == named[i].at)
+            if (found[j] == q2_exe_addr(e, named[i].at))
                 seen = true;
-        printf("    %08X  %s%s\n", named[i].at, named[i].what,
+        printf("    %08X  %s%s\n", q2_exe_addr(e, named[i].at), named[i].what,
                seen ? "" : "   MISSING");
         if (!seen)
             bad++;
@@ -257,8 +258,9 @@ static int check_carousel(const disc *d, const q2_build_id *id)
             ? &q2_sbar_strip[k]
             : &q2_sbar_strip_2p[k - (u32)Q2_SBAR_STRIP_SLOTS];
         s16 x = 0, y = 0;
-        bool have = q2_exe_s16(&e, CAROUSEL_STRIP_TABLE + 4u * k, &x) &&
-                    q2_exe_s16(&e, CAROUSEL_STRIP_TABLE + 4u * k + 2u, &y);
+        u32 at = q2_exe_addr(&e, CAROUSEL_STRIP_TABLE + 4u * k);
+        bool have = q2_exe_s16(&e, at, &x) &&
+                    q2_exe_s16(&e, at + 2u, &y);
 
         if (!have || x != p->x || y != p->y) {
             printf("  MISMATCH  strip pair %u: port (%d,%d), disc (%d,%d)\n",
@@ -274,8 +276,8 @@ static int check_carousel(const disc *d, const q2_build_id *id)
      * 0x80077E68. Anything else at either address fails the check rather
      * than silently supplying a different number.
      */
-    if (!q2_exe_u32(&e, CAROUSEL_ANCHOR_X, &w_anchor) ||
-        !q2_exe_u32(&e, CAROUSEL_ANCHOR_SH, &w_store) ||
+    if (!q2_exe_u32(&e, q2_exe_addr(&e, CAROUSEL_ANCHOR_X), &w_anchor) ||
+        !q2_exe_u32(&e, q2_exe_addr(&e, CAROUSEL_ANCHOR_SH), &w_store) ||
         (w_anchor >> 16) != 0x2402u || w_store != 0xA6020130u) {
         printf("  MISMATCH  the one-player anchor is not `addiu v0, zero, n`"
                " at 0x%08X stored by 0x%08X\n",

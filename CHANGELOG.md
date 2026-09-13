@@ -48,6 +48,8 @@ change; see [`docs/RELEASING.md`](docs/RELEASING.md).
 - The menu music no longer plays over the startup screens. On the console the boot chain is three levels — QLOGOS2, QLOGOS and QFMV — and none of the three has a playlist, so the legal screen, the two logo pairs and the intro film are scored by the film's own audio and nothing else. This port loads QFRONT before the chain so the front end has something to stand on when the film ends, and that load was taking QFRONT's looping menu track with it. The music now starts where the console's does: when the title screen is actually up.
 
 ### Tools
+- `--watch-hold N` keeps the capture camera on a killed creature for N more frames, making drops and gibs visible before it picks the next live target.
+- The HUD carousel verifier translates its table, instructions and weapon-slot writers for the USA executable. Executable relocation checks also reject unmapped addresses instead of treating zero padding as a matching instruction.
 - `q2psx-inspect ai` checks 149 constants against the executable, up from 130, all passing: the death-drop chain, the go-routines' eye heights and turn rates, and the start wrappers.
 - `q2psx-inspect hud` no longer always exits 1 — it read a count after freeing the struct that held it — and now checks the weapon strip's table and the per-weapon ammo pools against the executable.
 - `q2psx-inspect creatures` prints a census of every placed creature's eye height and turn rate, and `events` shows the zone-gate aborts.
@@ -74,6 +76,7 @@ change; see [`docs/RELEASING.md`](docs/RELEASING.md).
 - Saves are version 6. This round changed what a saved event flag means, so a version-5 save's spent script records are migrated on load and stay spent.
 
 ### Build and packaging
+- The full Windows client builds with MSVC warnings treated as errors: creature-shot damage types use the damage function's 16-bit representation, and the menu pointer's hit record starts initialized.
 - The repository is licensed: GPL-2.0, in `LICENSE`, and it ships in the release archives as that licence requires.
 - Five megabytes of rendered frames — a title screen, a HUD test, two model renders, two level renders and an accidental screenshot of a terminal window — were tracked at the repository root while the README said the repository contains no game assets. They are gone, `.gitignore` covers them, and `scripts/check_paths.py` now fails the build on any tracked file that is an image, a sound or a film — by extension *or* by magic number, because the screenshot was a PNG named `C`.
 

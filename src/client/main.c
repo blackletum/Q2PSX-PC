@@ -2439,7 +2439,7 @@ static void client_cre_shot(q2_monster *m, const q2_cre_shot *shot, void *user)
     while (shots-- > 0) {
         if (!q2_visible(m, &c->creatures.sight))
             break;
-        q2_sim_hurt_player(&c->sim[0], attacker, (s16)shot->damage, mod,
+        q2_sim_hurt_player(&c->sim[0], attacker, (s16)shot->damage, (s16)mod,
                            c->creatures.sight.pos);
     }
 }
@@ -9078,7 +9078,7 @@ static bool client_menu_pointer_pos(const client *c, int *mx, int *my)
  */
 static u16 client_menu_pointer(client *c, q2_menu *m)
 {
-    q2_menu_hit hit;
+    q2_menu_hit hit = {0};
     int  mx = 0, my = 0;
     bool have_pos, have_hit, pressed;
     u16  pad = 0;
@@ -13768,6 +13768,8 @@ static void usage(void)
     printf("\n  running without a player:\n");
     printf("  --headless    no window, no audio; a fixed 1/30 s step\n");
     printf("  --demo        drive the pad from a fixed script rather than keys\n");
+    printf("  --watch       frame and aim at the nearest live creature\n");
+    printf("  --watch-hold N  ...and keep a killed creature framed for N frames\n");
     printf("  --movie NAME  play a film from Q2DATA/MOVIES and nothing else\n"
            "                (TAKE1BP.STX, OUTRO1P.STX, ROGUEINP.STX on PAL;\n"
            "                 TAKE1B.STX, OUTRO1.STX, ROGUEIN1.STX on NTSC)\n");

@@ -143,6 +143,11 @@ static void test_word_checks(void)
     /* `jal 0x800396AC` (player_die) is `jal 0x800396A8` on NTSC. */
     CHECK(q2_exe_word_relocates(&u, 0x0C00E5ABu, 0x0C00E5AAu), "a moved jal");
     CHECK(!q2_exe_word_relocates(&u, 0x0C00E5ABu, 0x0C00E5ACu), "a wrong jal");
+    CHECK(!q2_exe_word_relocates(&u, 0x0C0141D6u, 0),
+          "zero padding is not a relocated weapon-walk jal");
+    CHECK(!q2_exe_word_relocates(&u, 0x800701B8u, 0),
+          "an unmapped pointer is not a null relocation");
+    CHECK(q2_exe_word_relocates(&u, 0, 0), "an unchanged zero still matches");
     /* A pointer in data, and an unrelated constant. */
     CHECK(q2_exe_word_relocates(&u, 0x8005CDA8u, 0x8005CDA4u), "a moved pointer");
     CHECK(!q2_exe_word_relocates(&u, 0x00000010u, 0x00000008u),
