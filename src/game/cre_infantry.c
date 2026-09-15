@@ -484,9 +484,7 @@ static const s32 k_infantry_smack_aim[3] = { Q2_MELEE_DISTANCE, 0, 0 };
 
 static void infantry_smack(q2_monster *self)
 {
-    if (q2_cre_melee_fn)
-        q2_cre_melee_fn(self, k_infantry_smack_aim,
-                        5 + (inf_rand() % 5), 50, q2_cre_melee_user);
+    q2_cre_fire_hit(self, k_infantry_smack_aim, 5 + (inf_rand() % 5), 50);
 }
 
 /*

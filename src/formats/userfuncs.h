@@ -492,6 +492,29 @@ enum {
  * twenty-one along with what each one does to armour and to knockback. They
  * are deliberately not redeclared here, so the two cannot drift apart. */
 
+/*
+ * WHAT A SECRET SOUNDS LIKE.
+ *
+ * INSECRET's exec at 0x80028EC4 does three things once the map's `FoundASecret`
+ * Strings key resolves at 0x80028F78: the text (0x80028F90), then the sound —
+ * 0x80028F98 `lw a0, 16884(gp)` and 0x80028F9C `jal 0x80073704` with
+ * `a1 = s2 + 84`, the triggering entity's FEET (entity.h names +0x54 `pos`).
+ * The counter bump at 0x8002903C sits past the join and runs either way.
+ *
+ * gp+16884 is 0x800B27F4, and it has exactly one writer in the image:
+ * 0x8002DA50 stores the handle 0x80073518 returned for the twelve-byte name at
+ * 0x800ABCB0, `msc_secret`. That registration sits in the same
+ * 0x8002D468..0x8002DA50 run that fills the mover and rotator handles, which is
+ * why this key reads like one of theirs; it is declared here rather than beside
+ * them because INSECRET, not a mover, is the only thing that plays it.
+ *
+ * Present in thirty of the disc's forty-nine SNDVRAM banks: every single-player
+ * level, and none of the thirteen deathmatch arenas or six menu/utility banks,
+ * none of which carries an INSECRET call either. A caller must therefore still
+ * cope with the key being absent, the way the explosive report does.
+ */
+#define Q2_SECRET_SOUND "msc_secret"
+
 /* Scaling the movers apply to authoring units: obj+0x4C and obj+0x4E are set
  * from a u8 operand times 300, with 0xFF meaning 0xFFFF ("never"). DISH and
  * B3ROCKS instead set obj+0x4E to (global clock at 0x800AEBAC) + 300, which is

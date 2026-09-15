@@ -208,6 +208,24 @@ static const u8 k_pan[CLIENT_PAN_STEPS] = {
 
 typedef struct client_voice {
     bool         active;
+    /*
+     * WHICH SOUND THIS SLOT IS, so a caller can hold on to one.
+     *
+     * The console's play-and-keep entry point 0x80073734 writes a four-byte
+     * handle: the voice index at +0 and, at +2, the halfword the SPU driver
+     * keeps at voice_record+52 — a tag it bumps every time the slot is taken.
+     * 0x800739E4 ("is it still playing") and 0x80073924 (the stop behind
+     * 0x8007398C) both bounds-check the index against 24 and then compare that
+     * tag, returning 0 when it has moved on. That is what makes an owner's
+     * handle safe after its sound has ended and the slot has been reused.
+     *
+     * This port needs the same guard for the same reason and cannot get it from
+     * a bare `client_voice *`: client_play_sound memsets the slot before
+     * reusing it, so `active` alone would report an unrelated later sound as
+     * the one the caller started. `serial` is this port's tag; it is assigned
+     * after the memset, never zero, and never repeats.
+     */
+    u32          serial;
     q2_spu_voice dec;
     s16          buf[CLIENT_VOICE_BUF];  /* decoded, not yet stepped over */
     u32          have;                   /* samples in `buf`              */
@@ -364,6 +382,19 @@ typedef struct client {
     u32              voice_dropped;   /* all 24 busy, as the SPU would be */
 
     /*
+     * The quad's firing sound, on both sides of its gate: how many shots asked
+     * for one and how many of those 0x8004FBB0 would have thrown away because
+     * the previous copy was still sounding.
+     *
+     * `quad_gated` can only be non-zero when a voice actually started, so a
+     * headless run — which has no device and therefore no voice — reads it as
+     * zero however hard the trigger is held. That is a property of the counter,
+     * not of the gate; `quad_raises` is the reproducible half.
+     */
+    u32              quad_raises;
+    u32              quad_gated;
+
+    /*
      * The shot this client has already been told about, against the sim's own
      * counter — see the reads in `client_input_simulated`.
      *
@@ -479,6 +510,19 @@ typedef struct client {
     q2_briefing_popup popup;
     bool             popup_cross_prev;
     client_voice    *voice_last;   /* the voice client_play_sound just took */
+    u32              voice_last_serial;  /* and its tag — the pair is the handle */
+    u32              voice_serial_next;  /* the tag source; 0 is "no handle"  */
+
+    /*
+     * THE QUAD'S ONE VOICE SLOT.
+     *
+     * All four of the console's quad-fire sites share a single handle at
+     * 0x800B2B80 — a gp-relative global, not a per-player field — so one pair
+     * here is the parity-correct shape even in split screen. See the drain in
+     * client_advance_view_weapon.
+     */
+    client_voice    *quad_voice;
+    u32              quad_voice_serial;
     u32              popup_raises;
     u32              popup_opens;
     s32              popup_at_frame;   /* --objectives N; 0 is off */
@@ -863,6 +907,12 @@ typedef struct client {
     u32               zone_dead[Q2_SAVE_LEVEL_ZONES];
     u32               zone_placed[Q2_SAVE_LEVEL_ZONES];
     /*
+     * How many of those secrets had `msc_secret` in the level's bank to chime
+     * with (0x80028F98). Bank presence, not voices started, so it means the
+     * same thing headless as it does with a device — see the call site.
+     */
+    u32               secret_sounds;
+    /*
      * Which of the six mission-table rows this level holds, or -1 when it has
      * none — a level outside a unit, or a seventh distinct one. Claimed on
      * ARRIVAL by name, not on departure in visit order: see
@@ -1239,6 +1289,14 @@ typedef struct client {
     u32               conveyor_steps;   /* BASE0 DOCRATES object writes */
     u32               mover_sounds;     /* transitions that made a noise */
     u32               rot_sounds;       /* ...and the hatches' own       */
+    /*
+     * The motor loop, on both ends. A START is counted when the bank carries
+     * `pt1__mid` — not when a voice starts, which is never true headless — and
+     * a STOP every time one is drained, so the two must balance once every
+     * hatch has arrived. 0x8002B3DC and 0x8002B568.
+     */
+    u32               rot_loop_starts;
+    u32               rot_loop_stops;
     /* Transitions whose voice did NOT start: no audio device, or the name is
      * not in this map's bank. Counted apart so a headless run cannot be read
      * as proof that anything was heard. */
@@ -1370,6 +1428,9 @@ typedef struct client {
 
     u32               mp_deaths;      /* kills fed to the session              */
     bool              mp_scoreboard;  /* QMRESULT is up                        */
+    /* Frames the end-of-match banner was drawn on. It is the one number that
+     * says the words reached the screen rather than the log. */
+    u32               mp_banner_frames;
 
     /* Creatures plus the other players, rebuilt per player. */
     q2_actor         *mp_target[Q2_CLIENT_MAX_TARGETS];
@@ -1859,6 +1920,9 @@ static bool client_mover_blocked(u32 index, const s32 step[3], void *user)
 static bool client_play_sound(client *c, const char *want);
 static bool client_play_sound_at(client *c, const char *want, const s32 at[3]);
 static bool client_find_sound(client *c, const char *want, q2_vag *out);
+/* The console's 0x800739B8 / 0x8007398C, on a (slot, tag) handle. */
+static bool client_voice_playing(const client_voice *v, u32 serial);
+static void client_voice_stop(client_voice *v, u32 serial);
 
 /* Defined with the mixer. The zone load calls this before it frees the bank a
  * playing voice is reading out of. */
@@ -2328,6 +2392,10 @@ static void client_cre_melee(q2_monster *m, const s32 aim[3], s32 damage,
     if (m->enemy != &c->creatures.sight)
         return;
 
+    /*
+     * OUT OF REACH never reaches this hook at all: `fire_hit`'s own range test
+     * (0x80061198) is q2_cre_fire_hit's, in crebind.c, where the import lives.
+     */
     c->cre_swings++;
 
     /*
@@ -2353,6 +2421,44 @@ static void client_cre_melee(q2_monster *m, const s32 aim[3], s32 damage,
 }
 
 /*
+ * HOW MANY PELLETS A CREATURE'S SHOTGUN THROWS, and it is not the number the
+ * module passes.
+ *
+ * `monster_fire_shotgun` (import +0x88, 0x80061ED0) ignores every argument
+ * past a3. It reads a0 (the module), a1 (the start point), a2 (the aim) and a3
+ * (the damage), and then loops on its OWN constant:
+ *
+ *     80061F6C  addu  s0, zero, zero     ; pellet = 0
+ *     80061F78  jal   0x80089E28         ; rand(), the horizontal jitter
+ *     80061F7C  addiu s0, s0, 1
+ *     ...
+ *     80061FCC  jal   0x8004874C         ; deliver one traced pellet
+ *     80061FD4  slti  v0, s0, 5          ; five, and the module cannot say
+ *     80061FD8  bne   v0, zero, 0x80061F78
+ *
+ * — five. The Soldier's module passes twelve (crebind.h) and 1000/500 of
+ * spread, and the engine reads neither: its `lhu s1, 112(sp)` is the only
+ * stack argument 0x80061ED0 or 0x8004874C ever touches, and that is the
+ * trace's cell hint, not the module's. So a shotgun guard's blast is at most
+ * 5 x 2 = 10 points on the console, where this port was delivering 12 x 2 =
+ * 24 — two and a half times the damage, at every range.
+ *
+ * WHAT IS STILL MISSING, stated rather than hidden: the jitter. Each pellet
+ * adds `((rand() - 16384) << 10) >> 14` to components 0 and 1 of the aim
+ * (0x80061F80..0x80061FC4), which is applied to a direction the routine has
+ * already scaled `<< 2` — so it is +/- 1/16 of a unit vector, the same
+ * shift-on-`rand() - 16384` scheme this console uses for the player's own
+ * spread (weapon.c) rather than id's `crandom() * hspread`. Reproducing it
+ * needs a per-pellet trace against the player's hull, which this hook does not
+ * have; until then every pellet that has line of sight still lands, and the
+ * count is the half of it that is a transcribed figure.
+ *
+ * `monster_fire_bullet` (+0x84, 0x80061DFC) has no jitter at all — one trace,
+ * no `rand()` — so a machinegun guard's single exact shot is already right.
+ */
+#define Q2_CRE_SHOTGUN_PELLETS 5   /* 0x80061FD4 */
+
+/*
  * A creature's shot, with the figures read out of its own module.
  *
  * `soldier_fire` hands over `table * 8 + flash`, and the table is chosen by
@@ -2363,6 +2469,9 @@ static void client_cre_melee(q2_monster *m, const s32 aim[3], s32 damage,
  *     table 0  import +0x80  0x80062000  blaster   dmg 5, speed 600
  *     table 1  import +0x88  0x80061ED0  shotgun   dmg 2, kick 1,
  *                                                  spread 1000/500, 12 pellets
+ *                                                  (the engine reads none
+ *                                                   of those three; see
+ *                                                   the block above)
  *     table 2  import +0x84  0x80061DFC  bullet    dmg 2, kick 4,
  *                                                  spread 300/500
  *
@@ -2413,18 +2522,17 @@ static void client_cre_fire(q2_monster *m, int flash, void *user)
 
     switch (table) {
     case 0:  damage = 5; shots = 1;  break;   /* blaster    */
-    case 1:  damage = 2; shots = 12; break;   /* shotgun    */
+    case 1:  damage = 2; shots = Q2_CRE_SHOTGUN_PELLETS; break;
     case 2:  damage = 2; shots = 1;  break;   /* machinegun */
     default: return;
     }
 
     /*
-     * The spread is not modelled here, so a shotgun's twelve pellets would all
-     * hit and make a guard four times deadlier than the console's. Halving the
-     * count is not a figure from anywhere, so instead the trace is run once per
-     * shot through the sim's own line of sight and only the shots that reach
-     * land — which for a single-pellet weapon is exact and for the shotgun is
-     * the honest approximation, stated rather than hidden.
+     * The delivery is still one line-of-sight test per shot, which for a
+     * single-pellet weapon is exact and for the shotgun is an approximation
+     * — but it is now an approximation of the RIGHT NUMBER of pellets. See
+     * Q2_CRE_SHOTGUN_PELLETS above for the read, and for what the engine does
+     * with the spread the module passes: nothing.
      */
     c->cre_shots++;
 
@@ -2574,7 +2682,16 @@ static void client_cre_shot(q2_monster *m, const q2_cre_shot *shot, void *user)
     default:                  mod = Q2_MOD_BULLET;      break;
     }
 
-    shots    = shot->count > 0 ? shot->count : 1;
+    /*
+     * The pellet count is the ENGINE's, not the module's: 0x80061FD4 loops
+     * five times whatever the module passed (Q2_CRE_SHOTGUN_PELLETS above).
+     * Every other slot fires once — the module's `count` is carried because it
+     * is what the module passes, and it is read here only to keep a figure of
+     * zero from firing nothing.
+     */
+    shots    = shot->slot == Q2_IMP_FIRE_SHOTGUN ? Q2_CRE_SHOTGUN_PELLETS
+             : shot->count > 0                   ? shot->count
+                                                 : 1;
     attacker = client_cre_actor(c, m);   /* 0x800582C8: see client_cre_fire */
 
     if (m->enemy != &c->creatures.sight)
@@ -4801,14 +4918,49 @@ static void client_event_call(void *user, const q2_event_item *item,
                     c->secret_seen[c->secret_seen_count++] = off;
                 c->secrets_found++;
 
-                /* The map's own words, on the overlay — which is what makes
-                 * "counter++" a thing the player can see happen. */
-                if (c->secret_message[0])
+                /*
+                 * The map's own words, on the overlay — which is what makes
+                 * "counter++" a thing the player can see happen — AND THE
+                 * CHIME, which it never did.
+                 *
+                 * Both live inside this guard because 0x80028F80's
+                 * `beq v0, zero, 0x80028FA8` jumps over the text at 0x80028F90
+                 * AND the sound at 0x80028F98-0x80028FA0 together: a map whose
+                 * `FoundASecret` key does not resolve gets neither. Only the
+                 * counter is past the join, which is why it stays outside.
+                 *
+                 * POSITION. 0x80028FA0 passes `s2 + 84`, the handler entity's
+                 * feet. The port's on_call hook carries no entity, so the
+                 * player's feet are used — not the eye, which sits 576 above
+                 * them. Both are within a body's width of the volume that
+                 * fired, so the pan and attenuation come out the same.
+                 *
+                 * INHERITED DEVIATION: the dedup above is the port's, not the
+                 * console's. Re-entering a secret volume chimes again on the
+                 * disc; here it will stay silent, for the same reason the
+                 * counter stays put.
+                 *
+                 * COUNTED ON BANK PRESENCE, not on a voice starting, because
+                 * client_play_sound_at returns false whenever `c->audio` is
+                 * NULL — every headless run — and a counter on that would be
+                 * measuring the absence of an audio device. Same trap, and the
+                 * same answer, as the explosive report.
+                 */
+                if (c->secret_message[0]) {
+                    q2_vag vag;
+
                     q2_hud_message(&c->hud[0], c->secret_message);
 
-                Q2_INFO("secret found: %u of %u — \"%s\"", c->secrets_found,
-                        c->secrets_total,
-                        c->secret_message[0] ? c->secret_message : "(no text)");
+                    if (client_find_sound(c, Q2_SECRET_SOUND, &vag))
+                        c->secret_sounds++;
+                    client_play_sound_at(c, Q2_SECRET_SOUND,
+                                         c->sim[0].player[0].pos);
+                }
+
+                Q2_INFO("secret found: %u of %u — \"%s\" (%u chimed)",
+                        c->secrets_found, c->secrets_total,
+                        c->secret_message[0] ? c->secret_message : "(no text)",
+                        c->secret_sounds);
             }
         }
     }
@@ -5813,10 +5965,35 @@ static bool client_load_zone(client *c, const char *map, int index)
          * this one. What that can and cannot decide is q2_item_spawn_zone's.
          */
         {
-            q2_result ir = q2_sim_attach_items(
+            /*
+             * AND IN AN ARENA, THE MODE PICKS THE BATCHES.
+             *
+             * QMULTI.C's init at 0x80100140 spawns the map's item batches by
+             * name — "Weapons", then "Health"/"Armour"/"Ammo" unless the mode
+             * is VERSUS, then "Specials" — where a single-player level lets its
+             * own LevelBin say. The arena module's code names all five whatever
+             * the mode, so the scan the attach does by default selected the lot
+             * and VERSUS played as a deathmatch that does not respawn: the
+             * front end's own rules page says "THERE ARE NO AMMO OR HEALTH
+             * POWER-UPS IN THE LEVEL", and MATRIX5 placed seventeen items in
+             * every mode instead of seventeen and seven.
+             *
+             * It is decided here, not inside the sim, because `sim.multiplayer`
+             * is only written once a frame from the tick (see the note on
+             * `q2_sim.multiplayer` below) and is therefore still false at every
+             * zone load, this one included. `mp_enabled` and `mp.mode` are set
+             * by client_mp_configure, which runs before every load that can
+             * reach an arena — the CLI's, the front end's PROCEED and the
+             * round restart alike.
+             */
+            const char *batch[Q2_MP_MAX_BATCHES];
+            u32 batch_count = c->mp_enabled
+                                  ? q2_mp_batches(c->mp.mode, batch) : 0;
+            q2_result ir = q2_sim_attach_item_batches(
                 &c->sim[0], &c->common, index,
                 c->item_table_ready ? &c->item_table : NULL,
-                c->model_bank_ready ? &c->model_bank : NULL);
+                c->model_bank_ready ? &c->model_bank : NULL,
+                batch_count ? batch : NULL, batch_count);
 
             /*
              * BRACED, and it had to be: the `if (c->zone_trace)` below used to
@@ -5828,7 +6005,20 @@ static bool client_load_zone(client *c, const char *map, int index)
              * when items were missing.
              */
             if (ir == Q2_OK) {
-                Q2_INFO("items: %u placed", c->sim[0].entities.count);
+                if (batch_count) {
+                    u32 bi;
+                    char names[128];
+                    int  at = 0;
+
+                    for (bi = 0; bi < batch_count; bi++)
+                        at += snprintf(names + at, sizeof(names) - (size_t)at,
+                                       "%s%s", bi ? " " : "", batch[bi]);
+                    Q2_INFO("items: %u placed (%s batches: %s)",
+                            c->sim[0].entities.count,
+                            q2_mp_mode_name(c->mp.mode), names);
+                } else {
+                    Q2_INFO("items: %u placed", c->sim[0].entities.count);
+                }
 
                 /*
                  * Where each one ended up, because "the pickup is in the
@@ -6191,6 +6381,7 @@ static bool client_load_zone(client *c, const char *map, int index)
                      * before it, and a level change must. See `zone_dead`. */
                     memset(c->zone_dead,   0, sizeof(c->zone_dead));
                     memset(c->zone_placed, 0, sizeof(c->zone_placed));
+                    c->secret_sounds     = 0;
                 }
                 {
                     q2_event_record rec;
@@ -7413,6 +7604,17 @@ static void client_voices_stop(client *c)
 
     for (i = 0; i < CLIENT_VOICES; i++)
         c->voice[i].active = false;
+
+    /*
+     * And drop every handle into those voices. The serial test would already
+     * refuse a stale one, but a handle left pointing at a silenced slot on the
+     * way into a new level is a gate that nothing can clear — the quad would be
+     * suppressed until that slot happened to be reused.
+     */
+    c->voice_last         = NULL;
+    c->voice_last_serial  = 0;
+    c->quad_voice         = NULL;
+    c->quad_voice_serial  = 0;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -7849,10 +8051,37 @@ static void client_advance_view_weapon(client *c, bool attack, float dt)
              * at combat+172 and, when it has not passed, play `[0x800B28B0]` —
              * filled at 0x80037AA0 from `itm_damage3`. That is an ITEM sound,
              * not one of the twenty-two the weapon table names, so it is played
-             * by name rather than by index.
+             * through the item table's own key rather than by weapon index.
+             *
+             * AND ONLY IF THE LAST ONE HAS FINISHED, which this did not ask.
+             *
+             * 0x8004FBA4 loads the shared handle at gp+17792 (0x800B2B80),
+             * 0x8004FBA8 asks 0x800739B8 whether it is still sounding and
+             * 0x8004FBB0 `bne v0, zero` throws the request away when it is;
+             * only an idle handle reaches 0x8004FBC4's play, which writes the
+             * new handle back to the same slot (a2 = gp+17792). All four sites
+             * do this, against that one global.
+             *
+             * `itm_damage3` is 25340 frames at 22050 Hz, 1.05 s once the 35/32
+             * pitch is applied, and the fastest thing that can ask for it is a
+             * spinning machinegun or hyperblaster at the 30-unit spin threshold
+             * — 10 Hz. Ungated that is ten copies of one sample in phase with
+             * itself; even a blaster at 2.5 shots/s stacks three. The console
+             * is never more than one.
+             *
+             * The drain runs FIRST and unconditionally: 0x8004FBB0 discards the
+             * request, it does not defer it, so a flag left raised here would
+             * simply fire on the next frame instead.
              */
-            if (q2_vw_take_quad_sound(&c->vw[pi]))
-                client_play_sound(c, "itm_damage3");
+            if (q2_vw_take_quad_sound(&c->vw[pi])) {
+                c->quad_raises++;
+                if (client_voice_playing(c->quad_voice, c->quad_voice_serial)) {
+                    c->quad_gated++;
+                } else if (client_play_sound(c, c->item_sound[Q2_SND_QUAD])) {
+                    c->quad_voice        = c->voice_last;
+                    c->quad_voice_serial = c->voice_last_serial;
+                }
+            }
         }
 
         /*
@@ -9029,18 +9258,73 @@ static void client_input_simulated(client *c, float dt)
                 u32 ri;
 
                 for (ri = 0; ri < c->rotators.count; ri++) {
-                    s8  which = q2_rotator_take_sound(&c->rotators, ri);
-                    s32 at[3];
-
-                    if (which < 0 || which >= Q2_ROTSND_COUNT)
-                        continue;
+                    q2_rotator *r     = &c->rotators.rotators[ri];
+                    s8          which = q2_rotator_take_sound(&c->rotators, ri);
+                    s8          loop;
+                    s32         at[3];
+                    bool        have_at;
 
                     /* A rotator turns a Scene node, and that node is where the
                      * sound is. An unbound one stays silent rather than falling
                      * back to a listener-local play, which is the mistake the
                      * movers above just had corrected. */
-                    if (!client_node_centre(c, c->rotators.rotators[ri].node,
-                                            at))
+                    have_at = client_node_centre(c, r->node, at);
+
+                    /*
+                     * AND THE MOTOR, WHICH USED TO BE LEFT OUT ON PURPOSE.
+                     *
+                     * The reason was honest and is now gone: this mixer had no
+                     * way to stop one voice, so a started `pt1__mid` would have
+                     * run for the rest of the level and the silence was the
+                     * lesser wrong. It has one now — client_voice_stop, the
+                     * port's 0x8007398C — guarded by the same tag the console's
+                     * is, so a handle whose slot has since been taken over
+                     * stops nothing rather than cutting a stranger's sound.
+                     *
+                     * 0x8002B3DC's a2 is `s1 + 52`, a field on the rotator
+                     * object itself, so the handle is kept there here too.
+                     *
+                     * The two arms are exclusive in practice — arrival clears
+                     * `running` and only a stopped rotator can be re-triggered
+                     * — so the order of this else-if is not load-bearing.
+                     */
+                    while ((loop = q2_rotator_take_loop(&c->rotators, ri))
+                           != Q2_ROTLOOP_NONE) {
+                        if (loop == Q2_ROTLOOP_STOP) {
+                            client_voice_stop((client_voice *)r->loop_voice,
+                                              r->loop_serial);
+                            r->loop_voice  = NULL;
+                            r->loop_serial = 0;
+                            c->rot_loop_stops++;
+                            continue;
+                        }
+                        if (!have_at)
+                            continue;
+                        {
+                            q2_vag vag;
+
+                            /* Counted on the bank having it, not on a voice
+                             * starting: client_play_sound_at is false for every
+                             * headless run, and a counter on that would report
+                             * the absence of an audio device as a missing
+                             * motor. The same trap, and the same answer, as the
+                             * explosive report above. */
+                            if (client_find_sound(
+                                    c, q2_rot_sound_name[Q2_ROTSND_MID], &vag))
+                                c->rot_loop_starts++;
+                            else
+                                c->mover_sounds_missed++;
+
+                            if (client_play_sound_at(
+                                    c, q2_rot_sound_name[Q2_ROTSND_MID], at)) {
+                                r->loop_voice  = c->voice_last;
+                                r->loop_serial = c->voice_last_serial;
+                                c->rot_sounds++;
+                            }
+                        }
+                    }
+
+                    if (which < 0 || which >= Q2_ROTSND_COUNT || !have_at)
                         continue;
 
                     if (client_play_sound_at(c, q2_rot_sound_name[which], at))
@@ -10500,6 +10784,9 @@ static bool client_play_sound(client *c, const char *want)
         rate = 22050;
 
     memset(v, 0, sizeof(*v));
+    /* AFTER the memset, or it is wiped: this is the slot's new tag, the port's
+     * equivalent of the halfword 0x80073734 reads back from voice_record+52. */
+    v->serial = ++c->voice_serial_next;
     q2_spu_voice_start(&v->dec, vag.body, vag.data_size);
     /* Listener-local until a caller says otherwise; client_voices_update
      * recomputes both the moment it has a position. */
@@ -10524,9 +10811,36 @@ static bool client_play_sound(client *c, const char *want)
     v->vol    = vol;
     v->active = true;
     c->voice_started++;
-    c->voice_last = v;
+    c->voice_last        = v;
+    c->voice_last_serial = v->serial;
 
     return true;
+}
+
+/*
+ * IS THE VOICE A CALLER STARTED STILL THE ONE IN THAT SLOT, AND STILL RUNNING?
+ *
+ * 0x800739E4, behind 0x800739B8. The console checks the index against 24 and
+ * compares the handle's tag with the slot's own; a mismatch means the slot has
+ * been taken over since and the answer is no. `serial` is that tag here, and a
+ * zero serial is a handle that was never filled.
+ */
+static bool client_voice_playing(const client_voice *v, u32 serial)
+{
+    return v && serial != 0 && v->active && v->serial == serial;
+}
+
+/*
+ * And stop it — 0x80073924, behind 0x8007398C.
+ *
+ * The same tag test, then the stop; a stale handle silences nothing rather than
+ * cutting whatever sound happens to be in that slot now. That guard is the
+ * whole reason the rotator's motor loop can be started at all (rotator.c).
+ */
+static void client_voice_stop(client_voice *v, u32 serial)
+{
+    if (client_voice_playing(v, serial))
+        v->active = false;
 }
 
 /*
@@ -11874,6 +12188,9 @@ static void client_write_shot(client *c, bool numbered)
                 "%d bytes queued",
                 c->voice_started, c->voice_dropped,
                 c->audio ? SDL_GetAudioStreamQueued(c->audio) : 0);
+        Q2_INFO("            quad %u shots asked for itm_damage3, "
+                "%u refused because the last was still sounding",
+                c->quad_raises, c->quad_gated);
         Q2_INFO("  pose      %u by name, %u named but no position, %u unnamed",
                 c->pose_by_name, c->pose_name_no_pos, c->pose_no_name);
         Q2_INFO("            %u held the timeline's last frame; of the misses "
@@ -14527,6 +14844,69 @@ static void client_frame(client *c)
     }
 
     /*
+     * THE END-OF-MATCH BANNER, which was composed and only ever logged.
+     *
+     * A match or a VERSUS round ends, the port kept rendering the arena for a
+     * second and a half and then the scoreboard appeared. The player never saw
+     * "TIME UP", "GAME OVER", "ROUND OVER" or "ROUND DRAWN", and never saw who
+     * had won: q2_mp_banner, q2_mp_find_winner and q2_mp_winner_text were all
+     * called, and all three only inside a Q2_INFO.
+     *
+     * What the console does, out of QMULTI.C's per-frame hook at 0x80100F24:
+     *
+     *   0x80100F54..0x80100F98  pick one of four one-item tables by end state —
+     *                           module+0x1518 TIME UP, +0x1548 GAME OVER,
+     *                           +0x1578 ROUND OVER, +0x15A8 ROUND DRAWN. Each
+     *                           record is { text, x = 256, y = 124 }.
+     *   0x80100FD8              engine+484, enter page 45
+     *   0x80100FF4              engine+512 with module+0x14E8 and a1 = 16 —
+     *                           the WINNER row, { "", x = 256, y = 20 }
+     *   0x80101010              0x8010098C composes the winner line into it,
+     *                           SKIPPED when the end state is 5 (ROUND DRAWN,
+     *                           0x80101008's `beq`)
+     *   0x801010BC              engine+512 with the banner table and a1 = 32
+     *   0x80101114              engine+524, the menu tick, every frame until
+     *                           module+0x15DC counts past zero
+     *
+     * So the winner line is ABOVE the banner, at the top of the screen, not
+     * under it: y = 20 against y = 124. The port draws both at those two rows
+     * with the overlay's own emitter rather than through a menu page, for the
+     * same reason the scoreboard above does — what the engine's page 45 puts
+     * around them is furniture whose offsets have not been read, and the world
+     * must keep running and keep taking no input while they are up, which a
+     * real menu page here would not do.
+     */
+    if (c->mp_enabled && c->hud_font_ready && !c->mp_scoreboard &&
+        c->mp.end != Q2_MP_RUNNING && c->mp_last_request == Q2_MP_REQ_NONE) {
+        const char *banner = q2_mp_banner(&c->mp);
+
+        if (banner) {
+            q2_hud_ctx ctx;
+            q2_hud_pen pen;
+
+            q2_hud_ctx_centre_in(&ctx, c->width, c->height);
+            q2_hud_pen_default(&pen);
+
+            if (c->mp.end != Q2_MP_END_ROUND_DRAWN) {
+                char who[64];
+                int  w = q2_mp_find_winner(&c->mp);
+
+                q2_mp_winner_text(&c->mp, w, NULL, who, sizeof(who));
+                ctx.home_x = (s16)(ctx.width / 2 -
+                                   q2_hud_measure(who) * 8 / 2);
+                ctx.home_y = (s16)((s32)ctx.height * 20 / 240);
+                q2_hud_print(&c->hud_font, &ctx, &pen, &c->ot, 0, who);
+            }
+
+            ctx.home_x = (s16)(ctx.width / 2 -
+                               q2_hud_measure(banner) * 8 / 2);
+            ctx.home_y = (s16)((s32)ctx.height * 124 / 240);
+            q2_hud_print(&c->hud_font, &ctx, &pen, &c->ot, 0, banner);
+            c->mp_banner_frames++;
+        }
+    }
+
+    /*
      * VIEW CREDITS: the module's roll, scrolling up the middle of the screen.
      *
      * The scroll rate and the spacing are this port's, not a reading — the
@@ -15109,6 +15489,7 @@ static void client_report(const client *c)
         REPORT("level.kills_found",  kdead);
         REPORT("level.kills_total",  kplaced);
     }
+    REPORT("level.secret_sounds",   c->secret_sounds);
 
     /* Where they ended up. Three integers rather than a vector, because the
      * consumer is a script and a script wants numbers it can subtract. */
@@ -15120,6 +15501,9 @@ static void client_report(const client *c)
     REPORT("player.armour",         s->combat.inv.armour);
     REPORT("player.weapon",         s->combat.weapon_id);
     REPORT("player.attacks",        c->player_attacks);
+    REPORT("match.banner_frames", c->mp_banner_frames);
+    REPORT("audio.quad_raises",     c->quad_raises);
+    REPORT("audio.quad_gated",      c->quad_gated);
     REPORT("player.shots",          c->shots_fired);
     REPORT("player.shots_dry",      c->shots_dry);
     REPORT("player.weapon_lines",   c->weapon_lines);
@@ -15139,6 +15523,10 @@ static void client_report(const client *c)
     REPORT("creatures.moved",       cre_moved);
     REPORT("creatures.thoughts",    c->ai_thoughts);
     REPORT("creatures.swings",      c->cre_swings);
+    /* Swings `fire_hit`'s own reach test threw away (0x80061198, crebind.c).
+     * A run where these climb is one where the player broke contact during
+     * the wind-up — exactly the swing that used to land from any distance. */
+    REPORT("creatures.swings_short", q2_cre_actions.melee_short);
     REPORT("creatures.shots",       c->cre_shots);
     REPORT("creatures.sounds",      c->cre_sounds);
     REPORT("creatures.drops",       c->cre_drops);
@@ -15159,6 +15547,8 @@ static void client_report(const client *c)
     REPORT("world.mover_boxes",     s->mover_count);
     REPORT("world.rot_steps",       c->rot_steps);
     REPORT("world.rot_moved",       c->rot_moved);
+    REPORT("world.rot_loop_starts", c->rot_loop_starts);
+    REPORT("world.rot_loop_stops",  c->rot_loop_stops);
     REPORT("world.breakable_hits",  s->breakable_hits);
     REPORT("world.explosive_blasts", s->explosive_destroyed);
     REPORT("world.triggers",        s->triggers.count);

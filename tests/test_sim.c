@@ -12,6 +12,7 @@
 #include "aiworld.h"
 #include "crebind.h"   /* q2_cre_set_skill — the global sync_rules reads */
 #include "levelbin.h"
+#include "multiplayer.h"  /* q2_mp_batches — what an arena spawns */
 #include "playerdeath.h"   /* q2_player_die — where the killer byte is read */
 #include "sim.h"
 #include "trig.h"
@@ -151,6 +152,93 @@ static void test_item_group_selection(void)
     check_eq_i(sim.entities.count, 3,
                "repeated CREBATCH cannot duplicate the deferred item");
 
+    q2_sim_free(&sim);
+}
+
+/*
+ * AN ARENA'S BATCHES COME FROM THE MODE, NOT FROM THE MODULE.
+ *
+ * QMULTI.C's init at 0x80100140 spawns the map's item batches by name and
+ * chooses them by mode: "Weapons", then "Health"/"Armour"/"Ammo" unless
+ * `lh v1, 880(engine)` is 5, then "Specials". The arena's own LevelBin names
+ * every batch in its code, so the module scan that is right for a single-player
+ * level selects all of them whatever the mode — which is why VERSUS shipped
+ * with the health, armour and ammo the mode is defined by not having.
+ *
+ * The synthetic map below is the same shape: a module that selects both
+ * "Weapons" and "Ammo", so the scan would spawn two and only the batch list can
+ * spawn one.
+ */
+static void test_mode_picks_the_batches(void)
+{
+    enum { WEAPON_PLACES = 80,
+           AMMO_PLACES = WEAPON_PLACES + Q2_POP_PLACE_SIZE + 4,
+           POP_SIZE = AMMO_PLACES + Q2_POP_PLACE_SIZE + 4 };
+    u8 population[POP_SIZE];
+    u8 levelbin[64];
+    dat_chunk pop_chunk, levelbin_chunk;
+    q2_common_file common;
+    q2_sim sim;
+    const char *batch[Q2_MP_MAX_BATCHES];
+    u32 n;
+
+    printf("an arena's batches come from the mode\n");
+
+    memset(population, 0, sizeof(population));
+    /* Ammo is declared FIRST, so a spawner walking Population order would place
+     * it before Weapons; the console places Weapons first. */
+    item_put_group(population, 0,  "Ammo", AMMO_PLACES);
+    item_put_group(population, 24, "Weapons", WEAPON_PLACES);
+    item_put_u32(population + 48, 0);
+    item_put_place(population, WEAPON_PLACES, 27); /* Shells P */
+    item_put_place(population, AMMO_PLACES, 27);
+
+    memset(levelbin, 0, sizeof(levelbin));
+    item_put_select(levelbin, 48, "Ammo");
+
+    memset(&pop_chunk, 0, sizeof(pop_chunk));
+    pop_chunk.data = population;
+    pop_chunk.size = sizeof(population);
+    memset(&levelbin_chunk, 0, sizeof(levelbin_chunk));
+    levelbin_chunk.data = levelbin;
+    levelbin_chunk.size = sizeof(levelbin);
+
+    memset(&common, 0, sizeof(common));
+    common.chunk[Q2_COMMON_POPULATION] = &pop_chunk;
+    common.chunk[Q2_COMMON_LEVEL_BIN]  = &levelbin_chunk;
+
+    /* What the scan does on its own: the module named Ammo, so Ammo spawns. */
+    q2_sim_init(&sim, NULL, 50);
+    check_eq_i(q2_sim_attach_items(&sim, &common, 0, NULL, NULL), Q2_OK,
+               "the module scan still accepts the map");
+    check_eq_i(sim.entities.count, 1, "and spawns the batch the module named");
+    q2_sim_free(&sim);
+
+    /* VERSUS: Weapons and Specials. This map has no Specials group, so one. */
+    n = q2_mp_batches(Q2_MP_VERSUS, batch);
+    check_eq_i((int)n, 2, "VERSUS asks for Weapons and Specials only");
+    q2_sim_init(&sim, NULL, 50);
+    check_eq_i(q2_sim_attach_item_batches(&sim, &common, 0, NULL, NULL,
+                                          batch, n), Q2_OK,
+               "the batch list is accepted");
+    check_eq_i(sim.entities.count, 1,
+               "VERSUS spawns Weapons and NOT the ammo the module named");
+    check_eq_i(sim.item_group_order_count, 1, "one group ran");
+    check_eq_i(sim.item_group_order[0], 1, "and it is Weapons, not Ammo");
+    q2_sim_free(&sim);
+
+    /* DEATHMATCH: all five names, of which this map has two. */
+    n = q2_mp_batches(Q2_MP_DEATHMATCH, batch);
+    check_eq_i((int)n, 5, "deathmatch asks for all five");
+    q2_sim_init(&sim, NULL, 50);
+    check_eq_i(q2_sim_attach_item_batches(&sim, &common, 0, NULL, NULL,
+                                          batch, n), Q2_OK,
+               "the deathmatch list is accepted");
+    check_eq_i(sim.entities.count, 2, "deathmatch spawns both");
+    check_eq_i(sim.item_group_order_count, 2, "both groups ran");
+    check_eq_i(sim.item_group_order[0], 1,
+               "0x80100140 spawns Weapons FIRST, before Population order");
+    check_eq_i(sim.item_group_order[1], 0, "and Ammo after it");
     q2_sim_free(&sim);
 }
 
@@ -2096,6 +2184,111 @@ static void test_melee_point(void)
                "a melee records who swung it");
 }
 
+/* ------------------------------------------------------------------------- */
+/*
+ * AND A CREATURE'S SHOT ARRIVES FROM SOMEWHERE TOO.
+ *
+ * The creature hooks hand the damage path the sight client's position, and the
+ * sight client is pinned to the player, so the "hit point" of every creature
+ * bullet, rail, rocket and grenade was the player's own origin. Those four mods
+ * ARE in the knockback set (0x80057ED0..0x80057EE8), and `apply_knockback`
+ * forms `target->origin - point`: with the player's actor carrying the FEET and
+ * the point 286 above them, the direction came out (0, +286, 0) — straight
+ * down, +Y being down — on every hit. So every shot shoved the player into the
+ * floor, none of them pushed away from the shooter, and the flinch's roll had
+ * the same sign whichever side the shot came from.
+ *
+ * `q2_sim_hurt_player` now rebuilds the point the way the console's swept
+ * hitscan produces it (0x8004874C hands T_Damage the trace's own endpoint):
+ * on the player, displaced one hull half-extent back along the shot.
+ */
+static void test_shot_point(void)
+{
+    q2_sim   sim;
+    q2_actor left, right;
+    s32      sight_point[3];
+    s16      roll_left, roll_right;
+    s16      push_left, push_right, push_down;
+
+    printf("a creature's shot\n");
+
+    q2_sim_init(&sim, NULL, 50);
+    sim.player[0].yaw = 0;
+
+    /* What the client passes: the sight client, which `sight_place` puts at
+     * the player's x/z and the player's feet minus Q2_EYE_BASE. */
+    sight_point[0] = sim.player[0].pos[0];
+    sight_point[1] = q2_sim_origin_y(sim.player[0].pos[1]);
+    sight_point[2] = sim.player[0].pos[2];
+
+    q2_actor_init(&left);
+    left.health    = 100;
+    left.owner     = -1;
+    left.origin[0] = sim.player[0].pos[0] - 2000;
+    left.origin[1] = sim.player[0].pos[1];
+    left.origin[2] = sim.player[0].pos[2];
+
+    right = left;
+    right.origin[0] = sim.player[0].pos[0] + 2000;
+
+    q2_sim_hurt_player(&sim, &left, 20, Q2_MOD_BULLET, sight_point);
+    roll_left = sim.player[0].hurt_kick[1];
+    push_left = sim.player[0].impulse[0];
+    push_down = sim.player[0].impulse[1];
+
+    q2_sim_init(&sim, NULL, 50);
+    sim.player[0].yaw = 0;
+    q2_sim_hurt_player(&sim, &right, 20, Q2_MOD_BULLET, sight_point);
+    roll_right = sim.player[0].hurt_kick[1];
+    push_right = sim.player[0].impulse[0];
+
+    check(roll_left != 0 && roll_right != 0, "a bullet that lands rolls the view");
+    check((roll_left > 0) != (roll_right > 0),
+          "and the two sides roll it opposite ways");
+
+    /*
+     * The impulse, not the knockback: `player_damage_impulse` drains
+     * `knockback[]` into `player.impulse[]` and zeroes it inside the same call.
+     */
+    check(push_left != 0 && push_right != 0,
+          "and it shoves the player horizontally");
+    check((push_left > 0) != (push_right > 0),
+          "away from the shooter, whichever side it stood on");
+    check_eq_i((int)push_down, 0,
+               "and no longer straight down, which used to be the whole of it");
+    printf("  roll %d/%d, shove %d/%d, vertical %d\n",
+           (int)roll_left, (int)roll_right, (int)push_left, (int)push_right,
+           (int)push_down);
+
+    /*
+     * The control, and the reason the rebuild is conditional: a caller that
+     * computed a real impact point keeps it. A point off to one side is left
+     * exactly where it was, so the player's own splash and any traced shot are
+     * untouched.
+     */
+    {
+        s32 real_point[3];
+
+        real_point[0] = sim.player[0].pos[0] + 143;
+        real_point[1] = q2_sim_origin_y(sim.player[0].pos[1]);
+        real_point[2] = sim.player[0].pos[2];
+
+        q2_sim_init(&sim, NULL, 50);
+        sim.player[0].yaw = 0;
+        q2_sim_hurt_player(&sim, &left, 20, Q2_MOD_BULLET, real_point);
+        check(sim.player[0].impulse[0] < 0,
+              "a point the caller really computed is used as given");
+    }
+
+    /* And with no attacker there is no direction to take, so nothing changes:
+     * that is the lava and crusher path. */
+    q2_sim_init(&sim, NULL, 50);
+    sim.player[0].yaw = 0;
+    q2_sim_hurt_player(&sim, NULL, 20, Q2_MOD_BULLET, sight_point);
+    check_eq_i((int)sim.player[0].impulse[0], 0,
+               "with no attacker the caller's point stands");
+}
+
 /*
  * WHAT THE SHOT KNOWS ABOUT THE SESSION.
  *
@@ -2801,6 +2994,52 @@ static void test_one_shot_kill(void)
     check_eq_i(plain, 70, "without the cheat a 30-point bullet leaves 70");
     check_eq_i(cheat, -30,
                "sim->cheats reaches 0x80058398: the same bullet leaves -30");
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * WEAPON STAY REACHES THE TOUCH SWEEP.
+ *
+ * 0x800B3360 is a halfword of its own, not part of the cheat word at
+ * 0x800B29EC: the GAME VARIABLES row writes it directly and 0x80037E60 and
+ * 0x8005988C read it directly. Both readers live in the entity world, so the
+ * session's copy has to arrive there — and until now nothing anywhere in the
+ * tree assigned `q2_entity_world.weapons_stay`, which left the two decoded
+ * consumers behind a flag that was false in every match.
+ *
+ * This is the plumbing half; tests/test_item.c's `test_weapons_stay` already
+ * covers what the flag does once it is there.
+ */
+static void test_weapon_stay_reaches_the_world(void)
+{
+    q2_sim sim;
+    q2_input in;
+    s32 spawn[3] = { 0, 0, 0 };
+
+    printf("weapon stay reaches the entity world\n");
+
+    memset(&in, 0, sizeof(in));
+    q2_sim_init(&sim, NULL, 50);
+    q2_sim_spawn(&sim, spawn, 0);
+    sim.entities_ready = true;
+    sim.multiplayer    = true;
+
+    q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
+    check(!sim.ent_world.weapons_stay,
+          "off by default, as 0x800204B4 leaves the halfword");
+
+    sim.weapons_stay = true;
+    q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
+    check(sim.ent_world.weapons_stay,
+          "and the session's copy reaches 0x80037E60's flag");
+
+    /* It is refreshed every tick, like the cheat word beside it, because the
+     * console re-reads the global rather than latching it. */
+    sim.weapons_stay = false;
+    q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
+    check(!sim.ent_world.weapons_stay, "and it follows the row back off");
+
+    q2_sim_free(&sim);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -4188,6 +4427,7 @@ int main(void)
     printf("Q2PSX-PC simulation tests\n\n");
 
     test_item_group_selection();
+    test_mode_picks_the_batches();
     test_script_fx_damage();
     test_death_voice();
     test_event_contact_categories();
@@ -4217,10 +4457,12 @@ int main(void)
     test_four_players();
     test_player_weapon_context();
     test_melee_point();
+    test_shot_point();
     test_train();
     test_movers_block_sight_and_shots();
     test_glass_solidity_lifetime();
     test_one_shot_kill();
+    test_weapon_stay_reaches_the_world();
     test_splash_occlusion();
     test_dispatcher_gates();
     test_zonegate_deathmatch();

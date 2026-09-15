@@ -965,9 +965,13 @@ q2_result q2_save_apply(const q2_save *s, q2_sim *sim, q2_inventory *inv,
     /* One clock: the entity world reads the same level time the sim runs, so
      * it is put back in step rather than left where the rebuild left it. */
     if (sim->entities_ready) {
-        sim->ent_world.level_time = sim->level_time;
-        sim->ent_world.cheats     = sim->cheats;
-        sim->ent_world.deathmatch = sim->multiplayer;
+        sim->ent_world.level_time   = sim->level_time;
+        sim->ent_world.cheats       = sim->cheats;
+        sim->ent_world.deathmatch   = sim->multiplayer;
+        /* Same reason the cheat word is put back here: a restored deathmatch
+         * would otherwise run one frame's worth of touches with WEAPON STAY
+         * off before the client's per-frame apply catches up. */
+        sim->ent_world.weapons_stay = sim->weapons_stay;
         q2_entity_world_move_player(&sim->ent_world, 0, sim->player[0].pos);
     }
 

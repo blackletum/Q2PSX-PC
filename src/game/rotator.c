@@ -37,6 +37,7 @@ q2_rotator *q2_rotators_add(q2_rotator_set *set, q2_rot_kind kind,
     r->axis  = (u8)(axis & 3u);
     r->speed = speed;
     r->sound_pending = Q2_ROTSND_NONE;
+    r->loop_pending  = 0;
     return r;
 }
 
@@ -58,14 +59,49 @@ s8 q2_rotator_take_sound(q2_rotator_set *set, u32 index)
     s = set->rotators[index].sound_pending;
     set->rotators[index].sound_pending = Q2_ROTSND_NONE;
 
-    /* Track the loop across the drain, so the owner is told to start it once
-     * and stop it once. */
-    if (s == Q2_ROTSND_MID)
-        set->rotators[index].loop_running = true;
-    else if (s == Q2_ROTSND_END)
-        set->rotators[index].loop_running = false;
-
     return s;
+}
+
+/*
+ * The motor channel. 0x8002B3DC starts it, 0x8002B568 stops it, and nothing
+ * else on the disc reads pt1__mid at all.
+ *
+ * `loop_running` is maintained here rather than by the owner so that a caller
+ * which drops a START on the floor — no node to position it at, no such sound
+ * in the bank — still leaves the pair balanced: it is the record of what THIS
+ * module asked for. The STOP is raised unconditionally on arrival, exactly as
+ * 0x8002B568 runs unconditionally after 0x8002B534.
+ */
+s8 q2_rotator_take_loop(q2_rotator_set *set, u32 index)
+{
+    q2_rotator *r;
+
+    if (!set || index >= set->count)
+        return Q2_ROTLOOP_NONE;
+    r = &set->rotators[index];
+
+    /*
+     * START BEFORE STOP, AND BOTH IF BOTH ARE UP.
+     *
+     * A hatch whose whole travel fits in one tick — BASE3 and MAGDEMO each have
+     * one, `rot_moved 1` — raises the turn and the arrival between two drains.
+     * The console still plays both: 0x8002B3C8/0x8002B3DC run in the trigger's
+     * own arm and 0x8002B534/0x8002B568 in a later call of the same handler, so
+     * the motor starts and is stopped a tick later. A single-slot request would
+     * have thrown the start away and left the counters unbalanced, so the two
+     * are separate bits and the owner drains until this returns NONE.
+     */
+    if (r->loop_pending & Q2_ROTLOOP_WANT_START) {
+        r->loop_pending &= (s8)~Q2_ROTLOOP_WANT_START;
+        r->loop_running  = true;
+        return Q2_ROTLOOP_START;
+    }
+    if (r->loop_pending & Q2_ROTLOOP_WANT_STOP) {
+        r->loop_pending &= (s8)~Q2_ROTLOOP_WANT_STOP;
+        r->loop_running  = false;
+        return Q2_ROTLOOP_STOP;
+    }
+    return Q2_ROTLOOP_NONE;
 }
 
 void q2_rotators_set_operand_source(q2_rotator_set *set, const u8 *base_a,
@@ -362,6 +398,11 @@ static void rotator_fire(q2_rotator *r)
         if (!r->running) {
             r->running        = true;
             r->sound_pending  = Q2_ROTSND_START;
+            /* 0x8002B3C8 and 0x8002B3DC are consecutive in one basic block:
+             * the thud and the motor go up together on the tick the turn
+             * begins, which is why the motor is a channel of its own and not a
+             * third value of `sound_pending`. */
+            r->loop_pending  |= Q2_ROTLOOP_WANT_START;
         }
         break;
 
@@ -515,26 +556,14 @@ u32 q2_rotators_tick(q2_rotator_set *set, s32 dt)
                              : (r->angle < r->target)) {
                 r->angle   = r->target;
                 r->running = false;
-                /* 0x8002B534: arrival stops the loop and plays pt1__end. */
+                /*
+                 * 0x8002B534 plays pt1__end and 0x8002B568, on the same path
+                 * and unconditionally, hands object+52 to 0x8007398C. Both
+                 * channels are raised here for that reason.
+                 */
                 r->sound_pending = Q2_ROTSND_END;
+                r->loop_pending |= Q2_ROTLOOP_WANT_STOP;
             }
-            /*
-             * THE MID LOOP IS DECODED AND DELIBERATELY NOT RAISED YET.
-             *
-             * 0x8002B3DC plays pt1__mid through the LOOPING entry point
-             * 0x80073734 and 0x8002B534 stops it with 0x8007398C, so the motor
-             * runs for exactly as long as the hatch turns. This port can start
-             * such a voice — the VAG decoder honours the SPU's End|Repeat flag
-             * and pt1__mid is a 0.23 s loop body — but it has NO WAY TO STOP
-             * ONE: the mixer has no per-voice handle and `client_voices_stop`
-             * is all-or-nothing (vag.h says the same thing about scripted
-             * loops). Starting it would leave the motor running for the rest of
-             * the level, which is worse than the silence it replaces.
-             *
-             * So Q2_ROTSND_MID exists, is named and is wired through
-             * `q2_rotator_take_sound`, and nothing raises it until the mixer
-             * grows a stop. START and END are both correct and both play.
-             */
             moved++;
             break;
         }

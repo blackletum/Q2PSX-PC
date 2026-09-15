@@ -1570,9 +1570,28 @@ q2_damage_result q2_combat_melee(q2_actor *attacker, q2_actor *target,
     if (!attacker || !target)
         return out;
 
-    /* 0x800612F0 passes the attacker's own origin as the damage point, so a
+    /*
+     * 0x800612F0 passes the attacker's own origin as the damage point, so a
      * melee hit lands with mod 7 — which is not in the knockback set, and so
-     * a creature's claws move nothing. */
+     * T_Damage moves nothing on this path.
+     *
+     * THAT IS NOT THE SAME AS "a claw moves nothing", and this comment used to
+     * say so. `fire_hit` applies the module's kick ITSELF, after T_Damage
+     * returns and outside it entirely:
+     *
+     *     800613B0  jal   0x8005C634        ; VectorNormalize(hit -> centre)
+     *     800613B8  lui   a0, 0x800A
+     *     800613BC  addiu a0, a0, -1052     ; 0x8009FBE4, a vec3 of zeroes
+     *     800613C8  lw    a1, 204(sp)       ; the module's kick
+     *     800613CC  jal   0x8005C460        ; VectorMA
+     *     800613D0  addiu a3, a3, 104       ; -> enemy+0x68, the velocity
+     *
+     * — so a Berserk's 400-kick SETS the victim's velocity to `kick * unit`,
+     * with none of apply_knockback's mass scaling and no accumulation. The
+     * port has no path that writes a player's velocity like that, so the
+     * shove is missing; it is missing because nobody has reconstructed it, not
+     * because mod 7 is outside the knockback set.
+     */
     return q2_combat_damage(attacker, target, damage, Q2_MOD_MELEE,
                             attacker->origin, rules);
 }

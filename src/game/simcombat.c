@@ -710,6 +710,26 @@ static void player_damage_begin(q2_sim *sim)
     }
 }
 
+/*
+ * Integer square root, for the one place in this file that has to turn a
+ * separation into a unit direction (the hit point q2_sim_hurt_player rebuilds).
+ * combat.c keeps its own for apply_knockback's normalise; this is the same
+ * binary search rather than a second formula, and it truncates the same way.
+ */
+static s32 hurt_isqrt(s64 v)
+{
+    s64 lo = 0, hi = 0x7FFFFFFF, best = 0;
+
+    if (v <= 0)
+        return 0;
+    while (lo <= hi) {
+        s64 mid = lo + (hi - lo) / 2;
+        if (mid * mid <= v) { best = mid; lo = mid + 1; }
+        else hi = mid - 1;
+    }
+    return (s32)best;
+}
+
 static void player_damage_impulse(q2_sim *sim, int pi, q2_actor *actor)
 {
     int axis;
@@ -936,6 +956,10 @@ q2_damage_result q2_sim_hurt_player(q2_sim *sim, q2_actor *attacker,
                                     s16 damage, s16 mod, const s32 point[3])
 {
     q2_damage_result out;
+    /* The rebuilt hit point, when the shot arm below has to rebuild one.
+     * It outlives that block because `point` is read again for the blood
+     * and the flinch, so it lives here rather than inside the branch. */
+    s32 aimed[3] = { 0, 0, 0 };
 
     memset(&out, 0, sizeof(out));
     if (!sim)
@@ -979,8 +1003,75 @@ q2_damage_result q2_sim_hurt_player(q2_sim *sim, q2_actor *attacker,
                                 &sim->combat.rules);
         point = attacker->origin;
     } else {
-        out = q2_combat_damage(attacker, &sim->combat.self, damage, mod, point,
-                               &sim->combat.rules);
+        /*
+         * A SHOT ALSO ARRIVES FROM SOMEWHERE, and the creature hooks hand this
+         * the SIGHT CLIENT's position — which `sight_place` pins to the player
+         * every tick, so the "hit point" of every creature bullet, rail, rocket
+         * and grenade was the player's own origin. That is the failure the melee
+         * override above exists to stop, one mod family along, and unlike a claw
+         * these four ARE in the knockback set (0x80057ED0..0x80057EE8: mods 3,
+         * 13, 15 and 18).
+         *
+         * What that did was not "no knockback". `apply_knockback` forms
+         * `target->origin - point`; the player's actor carries the FEET in
+         * `origin` and the supplied point is the entity origin 286 above them,
+         * so the difference was (0, +286, 0) on every hit — straight DOWN, since
+         * +Y is down. Every creature bullet shoved the player into the floor
+         * and, through `player_damage_impulse` into 0x800460A4, cleared
+         * ON_GROUND and the ground normal with it.
+         *
+         * The console's point is where the trace landed on the victim:
+         * 0x8004874C sweeps the ray (0x8004891C `jal 0x800544EC`) and hands
+         * T_Damage the swept endpoint at sp+24 (0x80048974, with `sw s0,
+         * 16(sp)`), which is on the target's own hull facing the shooter. That
+         * is the same point this port's OWN hitscan already computes for the
+         * player's guns (q2_combat_fire_bullet, combat.c), so rebuild it in that
+         * shape rather than invent a third convention: keep the point ON the
+         * player and displace it one hull half-extent (Q2_EYE_BASE, 286) back
+         * along the shot's own direction.
+         *
+         * NOT `point = attacker->origin`: that is mod 7's rule and mod 7's only
+         * (0x800612F0), and moving a hitscan's point onto the shooter would put
+         * the blood on the creature at `fx_at` below.
+         *
+         * Only when the caller's point really is horizontally coincident with
+         * the player, so a caller that computed a real impact point — the
+         * player's own splash, a traced shot — keeps the one it computed.
+         */
+        s32  dx = 0, dz = 0, len = 0;
+        bool blind = attacker && attacker != &sim->combat.self && point &&
+                     point[0] == sim->combat.self.origin[0] &&
+                     point[2] == sim->combat.self.origin[2];
+
+        if (blind) {
+            dx  = point[0] - attacker->origin[0];
+            dz  = point[2] - attacker->origin[2];
+            len = hurt_isqrt((s64)dx * dx + (s64)dz * dz);
+        }
+
+        if (len > 0) {
+            aimed[0] = point[0] - (s32)(((s64)dx * Q2_EYE_BASE) / len);
+            aimed[2] = point[2] - (s32)(((s64)dz * Q2_EYE_BASE) / len);
+            /*
+             * THE VERTICAL IS THE PORT'S, and it is a deviation worth naming.
+             * `q2_actor_from_player` puts the FEET in the actor's origin where
+             * the console's entity+0x54 is mid-body, so a knockback point left
+             * at the console's impact height would leave the 286-unit
+             * feet-to-origin offset inside `target - point` and keep half of the
+             * old downward shove. The damage call therefore gets the actor's own
+             * Y, which makes that difference purely horizontal — what the
+             * console computes for a level shot — while the blood and the flinch
+             * below keep the impact height they already had.
+             */
+            aimed[1] = sim->combat.self.origin[1];
+            out = q2_combat_damage(attacker, &sim->combat.self, damage, mod,
+                                   aimed, &sim->combat.rules);
+            aimed[1] = point[1];
+            point    = aimed;
+        } else {
+            out = q2_combat_damage(attacker, &sim->combat.self, damage, mod,
+                                   point, &sim->combat.rules);
+        }
     }
 
     q2_actor_to_player(&sim->combat.self, &sim->combat.inv);

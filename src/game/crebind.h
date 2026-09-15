@@ -220,6 +220,16 @@ const char *q2_cre_sound_resolve(const q2_monster *m, const char *registered,
  * — `DEFAULT_BULLET_HSPREAD` 300 and `VSPREAD` 500 recurring across four
  * unrelated modules is the check that says the argument positions are right.
  *
+ * THE ENGINE READS ONLY THE FIRST FOUR OF THEM. `monster_fire_bullet`
+ * (0x80061DFC) and `monster_fire_shotgun` (0x80061ED0) take the module, the
+ * start point, the aim and the damage in a0..a3 and touch no stack argument
+ * of their own, so `kick`, `hspread`, `vspread` and `count` go no further
+ * than this struct: the shotgun's pellet count is the engine's own 5
+ * (0x80061FD4) and its spread is a fixed shift on `rand()`. They are carried
+ * here because they are what the MODULE passes, which is what a
+ * transcription records; a host should not expect them to mean anything on
+ * the hitscan slots.
+ *
  * `slot` is one of the `Q2_IMP_FIRE_*` offsets, so the host can tell a rocket
  * from a rail without the creature having to. A field a given weapon does not
  * use is zero, and a hook that finds `damage == 0` should decline rather than
@@ -242,6 +252,43 @@ void q2_cre_set_shot_hook(void (*fn)(q2_monster *m, const q2_cre_shot *shot,
 
 /* Fire one, from a transcribed creature. Does nothing without a hook. */
 void q2_cre_fire_shot(q2_monster *m, const q2_cre_shot *shot);
+
+/*
+ * `fire_hit` — import +0xEC, 0x80061118 — the ONE thing a melee frame calls,
+ * and the reason a melee swing goes through the engine rather than straight to
+ * the host's hook.
+ *
+ * It opens with a range test, and the range test is the whole of what a module
+ * cannot do for itself: 0x80061144..0x80061184 builds `enemy->origin -
+ * self->origin`, 0x80061188 is `jal 0x8005C4E8` (VectorLength), and then
+ *
+ *     80061190  lw   v1, 188(sp)      ; a1, the aim's reach
+ *     80061198  slt  v1, v1, s4       ; reach < range ?
+ *     8006119C  bne  v1, zero, 0x800614B4
+ *     800611A0  addu v0, zero, zero   ; delay slot: return FALSE
+ *
+ * — 0x800614B4 being the epilogue, so a claw whose target has moved beyond
+ * `aim[0]` returns having done nothing at all. The comparison is STRICT, so
+ * `range == aim[0]` still lands, and it is the raw origin-to-origin distance:
+ * the mins/maxs work at 0x800611A4..0x80061220 runs AFTER the gate and only
+ * shapes the hit point, so folding a hull into the test would move the reach.
+ *
+ * This matters because the AI's decision and the blow are not the same frame.
+ * `M_CheckAttack` commits to melee at Q2_RANGE_MELEE, and the swing think runs
+ * two or three 10 Hz frames later; a player who backs off in between is out of
+ * reach by the time the claw resolves.
+ *
+ * The module draws its damage roll BEFORE the call (`5 + rand() % 6`), so a
+ * swing that misses still consumes the draw — keep the roll in the argument
+ * list at the call site rather than moving it in here.
+ *
+ * WHAT THIS DOES NOT DO, stated rather than hidden: the console's fire_hit also
+ * applies the module's KICK itself, after T_Damage and outside it
+ * (0x800613CC `VectorMA(zero_vec3, kick, unit_dir, &enemy->velocity)`, so the
+ * victim's velocity is SET to `kick * unit`). No path in this port writes a
+ * player's velocity that way, so `kick` still reaches the hook unused.
+ */
+void q2_cre_fire_hit(q2_monster *m, const s32 aim[3], s32 damage, s32 kick);
 
 /* The melee hook the decoded creatures reach: `fire_hit` with the module's own
  * aim vector, damage and kick. */
@@ -284,6 +331,20 @@ typedef struct q2_cre_action_stats {
      */
     u32 shot_no_enemy;
     u32 shot_dead_enemy;
+
+    /*
+     * The melee swings, partitioned the way the fire counters are:
+     * `melee_sent + melee_no_hook + melee_no_enemy + melee_short ==
+     * melee_calls`. `melee_short` is the one the console itself refuses — the
+     * range test at 0x80061198 — and it is worth a counter of its own because
+     * it is the difference between a claw that can reach you and one that
+     * cannot.
+     */
+    u32 melee_calls;
+    u32 melee_sent;
+    u32 melee_no_hook;
+    u32 melee_no_enemy;
+    u32 melee_short;
 
     /*
      * Which callback slots the generic implementation could and could not find

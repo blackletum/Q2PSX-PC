@@ -1366,6 +1366,25 @@ q2_result q2_sim_attach_items(q2_sim *sim, const q2_common_file *common,
                               const struct q2_model_bank *bank);
 
 /*
+ * The same attach, but told WHICH batches to spawn instead of asking the map.
+ *
+ * `batch` NULL is exactly q2_sim_attach_items: the module's own slot-36 call
+ * sites decide, which is right for every single-player level.
+ *
+ * A multiplayer arena is the exception, and the reason this entry point exists.
+ * QMULTI.C's init (0x80100140) does not consult the map at all — it spawns the
+ * batches by NAME from a list the MODE picks, and the arena module names every
+ * batch in its code whatever the mode, so a scan cannot tell VERSUS from
+ * deathmatch. Pass q2_mp_batches' output here and the mode decides, as it does
+ * on the disc. The names are spawned in the order given, which is the order the
+ * console's allocator saw them in.
+ */
+q2_result q2_sim_attach_item_batches(q2_sim *sim, const q2_common_file *common,
+                                     int zone, const q2_item_table *table,
+                                     const struct q2_model_bank *bank,
+                                     const char *const *batch, u32 batch_count);
+
+/*
  * Run one named Population place group, as a CREBATCH CALL does. Returns the
  * number of newly spawned entities. The group's retail bit-1 latch is shared
  * with q2_sim_attach_items, so a startup group or a batch already activated

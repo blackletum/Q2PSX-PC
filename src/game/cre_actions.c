@@ -61,8 +61,7 @@ static void run_step(q2_monster *m, const q2_cre_step *s)
         s32 damage = s->damage_base;
         if (s->damage_rand > 1)
             damage += rand() % s->damage_rand;
-        if (q2_cre_melee_fn)
-            q2_cre_melee_fn(m, s->aim, damage, s->kick, q2_cre_melee_user);
+        q2_cre_fire_hit(m, s->aim, damage, s->kick);
         break;
     }
 

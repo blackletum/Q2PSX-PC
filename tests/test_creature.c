@@ -582,16 +582,66 @@ static void test_actions(void)
     q2_cre_set_sound_hook(spy_sound, NULL);
     q2_cre_set_melee_hook(spy_melee, NULL);
     g_snd_calls = g_mel_calls = 0;
+    memset(&q2_cre_actions, 0, sizeof(q2_cre_actions));
 
-    q2_cre_run_think(&m, 6);
-    check_eq_i(g_snd_calls, 1, "a decoded sound step plays a sound");
-    check_eq_i(g_snd_last, (int)0x80101758,
-               "identified by the module address of its handle");
-    check_eq_i(g_mel_calls, 1, "and a decoded melee step swings");
-    check_eq_i(g_mel_aim0, 1020, "with the module's own aim distance");
-    check_eq_i(g_mel_kick, 400, "and its own kick");
-    check(g_mel_dmg >= 5 && g_mel_dmg < 8,
-          "and damage in the module's own base-plus-spread range");
+    /*
+     * SOMETHING TO SWING AT, in reach. `fire_hit` (0x80061118) measures
+     * `enemy->origin - self->origin` before it does anything else, so a melee
+     * step with no enemy or one past `aim[0]` is refused — which is what the
+     * two arms below pin.
+     */
+    {
+        static q2_monster victim;
+
+        q2_monster_init(&victim);
+        victim.health = 100;
+        victim.pos[0] = m.pos[0];
+        victim.pos[1] = m.pos[1];
+        victim.pos[2] = m.pos[2] + 900;    /* inside the 1020 reach */
+        m.enemy = &victim;
+
+        q2_cre_run_think(&m, 6);
+        check_eq_i(g_snd_calls, 1, "a decoded sound step plays a sound");
+        check_eq_i(g_snd_last, (int)0x80101758,
+                   "identified by the module address of its handle");
+        check_eq_i(g_mel_calls, 1, "and a decoded melee step swings");
+        check_eq_i(g_mel_aim0, 1020, "with the module's own aim distance");
+        check_eq_i(g_mel_kick, 400, "and its own kick");
+        check(g_mel_dmg >= 5 && g_mel_dmg < 8,
+              "and damage in the module's own base-plus-spread range");
+
+        /*
+         * 0x80061198 `slt v1, aim[0], range` and the jump to the epilogue at
+         * 0x800614B4: past the reach, the swing does nothing. This is the
+         * player who backs off during the wind-up, which used to be clubbed
+         * from any distance at all.
+         */
+        victim.pos[2] = m.pos[2] + 5000;
+        q2_cre_run_think(&m, 6);
+        check_eq_i(g_mel_calls, 1, "a swing past the aim's reach lands nothing");
+        check_eq_i((int)q2_cre_actions.melee_short, 1,
+                   "and is counted as short rather than lost");
+
+        /*
+         * STRICTLY greater: `range == aim[0]` still hits, because the console
+         * compares `aim[0] < range` and not `<=`.
+         */
+        victim.pos[2] = m.pos[2] + 1020;
+        q2_cre_run_think(&m, 6);
+        check_eq_i(g_mel_calls, 2, "a swing at exactly the reach still lands");
+
+        /* And the four counters partition the calls. */
+        check_eq_i((int)q2_cre_actions.melee_calls,
+                   (int)(q2_cre_actions.melee_sent +
+                         q2_cre_actions.melee_no_hook +
+                         q2_cre_actions.melee_no_enemy +
+                         q2_cre_actions.melee_short),
+                   "and every swing is counted exactly once");
+
+        m.enemy = NULL;
+        q2_cre_run_think(&m, 6);
+        check_eq_i(g_mel_calls, 2, "a swing with no enemy swings at nothing");
+    }
 
     /*
      * A gated refire must not fire at a corpse. Every refire on the disc opens

@@ -393,8 +393,20 @@ q2_mp_request q2_mp_frame(q2_mp_session *s, s32 level_time, s32 dt);
 /* Take the pending request, clearing it. */
 q2_mp_request q2_mp_take_request(q2_mp_session *s);
 
-/* The banner for the current end state — "TIME UP", "GAME OVER", "ROUND OVER"
- * or "ROUND DRAWN". NULL while the match is running. */
+/*
+ * The banner for the current end state — "TIME UP", "GAME OVER", "ROUND OVER"
+ * or "ROUND DRAWN". NULL while the match is running.
+ *
+ * WHERE IT GOES, because a caller has to put it somewhere: each of the four
+ * one-item tables is { text, x = 256, y = 124 }, and the winner line beside it
+ * is a SEPARATE row at { "", x = 256, y = 20 } — module+0x14E8, loaded into
+ * item slot 16 at 0x80100FF4 and filled by 0x8010098C, while the banner goes
+ * into slot 32 at 0x801010BC. So the winner line sits at the TOP of the screen
+ * and the banner across the middle; they are not stacked.
+ *
+ * 0x80101008 skips the winner row entirely when the end state is 5,
+ * Q2_MP_END_ROUND_DRAWN — a drawn round shows the banner alone.
+ */
 const char *q2_mp_banner(const q2_mp_session *s);
 
 /*

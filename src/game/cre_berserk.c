@@ -313,9 +313,8 @@ static void berserk_attack_spike(q2_monster *self)
     aim[1] = Q2_AI_UNITS(24);           /*  288, module+0x1748 */
     aim[2] = 0;                         /*    0, module+0x174C */
 
-    if (q2_cre_melee_fn)
-        q2_cre_melee_fn(self, aim, 15 + (ber_rand() % BER_MELEE_SPREAD),
-                        BER_MELEE_KICK, q2_cre_melee_user);
+    q2_cre_fire_hit(self, aim, 15 + (ber_rand() % BER_MELEE_SPREAD),
+                    BER_MELEE_KICK);
 }
 
 /*
@@ -346,9 +345,8 @@ static void berserk_attack_club(q2_monster *self)
     aim[1] = Q2_AI_UNITS(4);            /*   48, module+0xF88 */
     aim[2] = (s32)self->mins[0];        /* import +0x114      */
 
-    if (q2_cre_melee_fn)
-        q2_cre_melee_fn(self, aim, 5 + (ber_rand() % BER_MELEE_SPREAD),
-                        BER_MELEE_KICK, q2_cre_melee_user);
+    q2_cre_fire_hit(self, aim, 5 + (ber_rand() % BER_MELEE_SPREAD),
+                    BER_MELEE_KICK);
 }
 
 /*

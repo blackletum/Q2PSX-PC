@@ -1,5 +1,7 @@
 #include "crebind.h"
 
+#include "ai.h"           /* q2_vector_length, import +0xB8 / 0x8005C4E8 */
+
 #include <string.h>
 
 /* One bind per class byte, which is how the engine's own table is indexed. */
@@ -435,6 +437,53 @@ void q2_cre_set_shot_hook(void (*fn)(q2_monster *m, const q2_cre_shot *shot,
 {
     g_shot_fn   = fn;
     g_shot_user = user;
+}
+
+/*
+ * The melee hook itself lives beside the sound hook in cre_soldier.c, which is
+ * where the first transcribed creature put it; this is the engine side of it.
+ */
+extern void (*q2_cre_melee_fn)(q2_monster *m, const s32 aim[3],
+                               s32 damage, s32 kick, void *user);
+extern void  *q2_cre_melee_user;
+
+void q2_cre_fire_hit(q2_monster *m, const s32 aim[3], s32 damage, s32 kick)
+{
+    s32 reach[3];
+
+    if (!m || !aim)
+        return;
+
+    q2_cre_actions.melee_calls++;
+
+    if (!q2_cre_melee_fn) {
+        q2_cre_actions.melee_no_hook++;
+        return;
+    }
+
+    /*
+     * No enemy, no swing. The console would fault here rather than decline —
+     * 0x80061144 is `lw v0, 188(s3)` followed by `lw v0, 0(v0)` with no test —
+     * so this is a port guard, not a transcribed one; the modules only reach a
+     * melee frame with an enemy. Counted rather than silent so that a module
+     * which does get here without one is visible instead of merely harmless.
+     */
+    if (!m->enemy) {
+        q2_cre_actions.melee_no_enemy++;
+        return;
+    }
+
+    /* 0x80061144..0x8006119C. See the header for the four instructions. */
+    reach[0] = m->enemy->pos[0] - m->pos[0];
+    reach[1] = m->enemy->pos[1] - m->pos[1];
+    reach[2] = m->enemy->pos[2] - m->pos[2];
+    if (q2_vector_length(reach) > aim[0]) {
+        q2_cre_actions.melee_short++;
+        return;
+    }
+
+    q2_cre_actions.melee_sent++;
+    q2_cre_melee_fn(m, aim, damage, kick, q2_cre_melee_user);
 }
 
 void q2_cre_fire_shot(q2_monster *m, const q2_cre_shot *shot)

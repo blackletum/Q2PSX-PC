@@ -167,12 +167,33 @@ typedef struct q2_rotator {
      *
      * `sound_pending` is drained by the owner, which is the only thing that
      * knows where the rotator's node is and can therefore position the voice.
-     * `looping` says the drained sound is the MID one, which the caller must
-     * start as a loop and stop on arrival (0x8002B3DC goes through the looping
-     * entry point 0x80073734; 0x8002B534 stops it with 0x8007398C).
+     *
+     * THE MOTOR IS A SECOND CHANNEL, not a third value of `sound_pending`,
+     * because the console asks for two sounds on the same tick: 0x8002B3C8
+     * plays `pt1__strt` through the fire-and-forget entry point 0x80073704 and
+     * 0x8002B3DC plays `pt1__mid` through 0x80073734 — the same play, except
+     * that it writes a four-byte handle to `a2`, which here is `s1 + 52`, the
+     * rotator object's own field. Arrival reverses it: 0x8002B534 plays
+     * `pt1__end`, then 0x8002B568 hands `s1 + 52` straight to 0x8007398C.
+     *
+     * (0x80073734 is NOT a "looping" entry point, as this header used to say.
+     * Its only difference from 0x80073704 is the handle it stores at 0x80073778
+     * and 0x80073794. Whether the voice loops is the VAG's own End|Repeat flag,
+     * and `pt1__mid`'s is set.)
      */
     s8   sound_pending;
+    s8   loop_pending;  /* Q2_ROTLOOP_WANT_* bits, drained one at a time */
     bool loop_running;  /* the MID loop has been started and not yet stopped */
+
+    /*
+     * The object+52 handle, carried but never interpreted.
+     *
+     * The owner's mixer decides what four bytes mean; this module only has to
+     * hold them from the start to the stop, exactly as the console holds them
+     * on the object. A client pairs a voice with the tag that validates it.
+     */
+    void *loop_voice;
+    u32   loop_serial;
 } q2_rotator;
 
 /* Which sound a rotator is asking for. Indices into q2_rot_sound_name. */
@@ -188,6 +209,21 @@ typedef enum q2_rot_sound {
 } q2_rot_sound;
 
 extern const char *const q2_rot_sound_name[Q2_ROTSND_COUNT];
+
+/* What the motor channel is asking for this tick. */
+typedef enum q2_rot_loop {
+    Q2_ROTLOOP_NONE = -1,
+    Q2_ROTLOOP_START = 0,  /* 0x8002B3DC — start pt1__mid, keep the handle */
+    Q2_ROTLOOP_STOP        /* 0x8002B568 — hand it back to 0x8007398C      */
+} q2_rot_loop;
+
+/*
+ * The request bits behind it. Two, not one value, because a hatch that reaches
+ * its target on the first moving tick raises both between two drains and the
+ * console plays both — see q2_rotator_take_loop.
+ */
+#define Q2_ROTLOOP_WANT_START 0x1
+#define Q2_ROTLOOP_WANT_STOP  0x2
 
 typedef struct q2_rotator_set {
     q2_rotator *rotators;
@@ -222,6 +258,19 @@ typedef struct q2_rotator_set {
 /* Take the sound this rotator is asking for, or Q2_ROTSND_NONE. See the note on
  * q2_rotator.sound_pending for why only this family has three. */
 s8 q2_rotator_take_sound(q2_rotator_set *set, u32 index);
+
+/*
+ * And the motor, which rides alongside it rather than through it because the
+ * turn's first tick asks for `pt1__strt` AND `pt1__mid` together.
+ *
+ * Returns Q2_ROTLOOP_START once when the hatch begins to turn and
+ * Q2_ROTLOOP_STOP once when it arrives, and keeps `loop_running` in step. An
+ * owner that takes a START must store its handle in `loop_voice`/`loop_serial`;
+ * the STOP hands those back.
+ *
+ * CALL IT UNTIL IT RETURNS NONE: both can be waiting at once.
+ */
+s8 q2_rotator_take_loop(q2_rotator_set *set, u32 index);
 
 /*
  * Point a set's operand reads at a second chunk, as the engine does.

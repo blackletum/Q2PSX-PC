@@ -444,11 +444,10 @@ static void ara_bite(q2_monster *self)
     aim[1] = -Q2_AI_UNITS(4);           /*  -48, module+0xF00 */
     aim[2] = 0;                         /*    0, module+0xF0C */
 
-    if (q2_cre_melee_fn)
-        q2_cre_melee_fn(self, aim,
-                        ARA_MELEE_DAMAGE_BASE +
-                            (ara_rand() % ARA_MELEE_DAMAGE_SPAN),
-                        ARA_MELEE_KICK, q2_cre_melee_user);
+    q2_cre_fire_hit(self, aim,
+                    ARA_MELEE_DAMAGE_BASE +
+                        (ara_rand() % ARA_MELEE_DAMAGE_SPAN),
+                    ARA_MELEE_KICK);
 }
 
 static void arachner_bite1(q2_monster *self) { ara_bite(self); }  /* [2] */

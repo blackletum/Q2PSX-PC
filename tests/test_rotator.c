@@ -420,6 +420,84 @@ static void test_target_sweep(void)
 }
 
 /*
+ * The motor loop, which used to be decoded and never raised.
+ *
+ * 0x8002B3C8 and 0x8002B3DC start `pt1__strt` and `pt1__mid` in one basic
+ * block; 0x8002B534 plays `pt1__end` and 0x8002B568, on the same path, hands
+ * object+52 back to 0x8007398C. So a turn owes exactly one START and one STOP,
+ * and a hatch that finishes in a single tick still owes both.
+ */
+static void test_motor_loop(void)
+{
+    q2_rotator_set set;
+    q2_rotator *r;
+
+    puts("ROTHATCH raises pt1__mid on the turn and stops it on arrival");
+
+    memset(&set, 0, sizeof(set));
+    r = q2_rotators_add(&set, Q2_ROT_TARGET, 3, 1, 64);
+    r->target = 1024;
+
+    check_eq(q2_rotator_take_loop(&set, 0), Q2_ROTLOOP_NONE,
+             "an untriggered hatch asks for no motor");
+
+    q2_rotator_trigger(&set, 0);
+    check_eq(q2_rotator_take_sound(&set, 0), Q2_ROTSND_START,
+             "the trigger still asks for pt1__strt");
+    check_eq(q2_rotator_take_loop(&set, 0), Q2_ROTLOOP_START,
+             "and for the motor alongside it, on the same tick");
+    check(set.rotators[0].loop_running, "which is then recorded as running");
+    check_eq(q2_rotator_take_loop(&set, 0), Q2_ROTLOOP_NONE,
+             "and asked for once, not once per tick");
+
+    /* Mid-travel: silence on both channels. */
+    q2_rotators_tick(&set, 8);
+    check_eq(q2_rotator_take_sound(&set, 0), Q2_ROTSND_NONE,
+             "a turning hatch asks for nothing more");
+    check_eq(q2_rotator_take_loop(&set, 0), Q2_ROTLOOP_NONE,
+             "and the motor is already running");
+
+    {
+        int guard = 0;
+        while (set.rotators[0].running && guard++ < 1000)
+            q2_rotators_tick(&set, 8);
+        check(guard < 1000, "the sweep terminates");
+    }
+
+    check_eq(q2_rotator_take_sound(&set, 0), Q2_ROTSND_END,
+             "arrival asks for pt1__end (0x8002B534)");
+    check_eq(q2_rotator_take_loop(&set, 0), Q2_ROTLOOP_STOP,
+             "and stops the motor (0x8002B568)");
+    check(!set.rotators[0].loop_running, "the loop is no longer running");
+    check_eq(q2_rotator_take_loop(&set, 0), Q2_ROTLOOP_NONE,
+             "and stopping it twice is not asked for");
+
+    q2_rotators_free(&set);
+
+    /*
+     * THE ONE-TICK TURN. BASE3 and MAGDEMO each hold a hatch whose whole travel
+     * fits in a single tick, and both requests are then waiting at the same
+     * drain. The console plays both — the start comes out of the trigger's own
+     * arm before the motion arm ever runs — so the drain must hand over both,
+     * in that order, rather than letting the arrival overwrite the start.
+     */
+    memset(&set, 0, sizeof(set));
+    r = q2_rotators_add(&set, Q2_ROT_TARGET, 3, 1, 64);
+    r->target = 8;
+    q2_rotator_trigger(&set, 0);
+    q2_rotators_tick(&set, 8);
+    check(!set.rotators[0].running, "the hatch arrives on its first tick");
+    check_eq(q2_rotator_take_loop(&set, 0), Q2_ROTLOOP_START,
+             "the start is still delivered first");
+    check_eq(q2_rotator_take_loop(&set, 0), Q2_ROTLOOP_STOP,
+             "and the stop right behind it, so the pair balances");
+    check_eq(q2_rotator_take_loop(&set, 0), Q2_ROTLOOP_NONE,
+             "and nothing is left over");
+
+    q2_rotators_free(&set);
+}
+
+/*
  * ROTBUTTON: pressed, the angle IS 2048 immediately; the hold counts down and
  * the angle snaps back to 0. It never sweeps.
  */
@@ -529,6 +607,7 @@ int main(void)
 
     test_one_step_per_request();
     test_target_sweep();
+    test_motor_loop();
     test_snap_button();
     test_angle_wrap();
     test_constructor_pivots();

@@ -171,6 +171,14 @@ q2_result q2_sim_attach_items(q2_sim *sim, const q2_common_file *common,
                               int zone, const q2_item_table *table,
                               const struct q2_model_bank *bank)
 {
+    return q2_sim_attach_item_batches(sim, common, zone, table, bank, NULL, 0);
+}
+
+q2_result q2_sim_attach_item_batches(q2_sim *sim, const q2_common_file *common,
+                                     int zone, const q2_item_table *table,
+                                     const struct q2_model_bank *bank,
+                                     const char *const *batch, u32 batch_count)
+{
     const dat_chunk *levelbin;
     q2_population pop;
     q2_result r;
@@ -232,6 +240,38 @@ q2_result q2_sim_attach_items(q2_sim *sim, const q2_common_file *common,
     sim->item_population = pop;
     sim->item_table      = table;
     sim->item_bank       = bank;
+
+    /*
+     * A CALLER-GIVEN BATCH LIST WINS OVER THE MODULE SCAN.
+     *
+     * Which groups a map starts with is normally a question about the map's own
+     * LevelBin, and the scan below answers it. A multiplayer arena is the one
+     * case where it is not: QMULTI.C's init at 0x80100140 spawns the batches BY
+     * NAME and chooses them from the MODE — "Weapons", then "Health",
+     * "Armour", "Ammo" unless `lh v1, 880(engine)` equals 5 (VERSUS, where
+     * 0x8010022C branches straight past all three), then "Specials". The
+     * module's own code names every one of them, so a scan of its call sites
+     * selects the whole set whatever the mode, and VERSUS came out with the
+     * health, armour and ammo the mode is defined by not having.
+     *
+     * Spawning them here in the module's order rather than in Population
+     * declaration order is deliberate: it is the order the console's allocator
+     * saw, so the entity slots come out in the same sequence.
+     *
+     * DEVIATION, stated: the by-name spawn does NOT apply the resident-zone
+     * rule the scan path applies, because the console's by-name call does not
+     * either — it is the same engine entry point CREBATCH uses. No arena names
+     * a Zone<N> group, so nothing on the disc can tell the difference.
+     */
+    if (batch) {
+        u32 bi;
+
+        sim->entities_ready        = true;
+        sim->item_population_ready = true;
+        for (bi = 0; bi < batch_count; bi++)
+            (void)q2_sim_activate_item_group(sim, batch[bi]);
+        return Q2_OK;
+    }
 
     /* Which Population groups exist at level start is code in LevelBin, not a
      * property of the place lists. The selector decoder recovers those calls
@@ -3691,13 +3731,12 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
          * drained. See `sim->settling`.
          */
         if (run_world && !sim->settling) {
-            sim->ent_world.dt         = dt;
-            sim->ent_world.deathmatch = sim->multiplayer;
-            sim->ent_world.cheats     = sim->cheats;
-            /* 0x800B3360, refreshed beside the other two because the pause menu
-             * can change it between ticks. Only player 0's tick runs the sweep,
-             * so sim[0] is the only sim that needs it — if the sweep is ever
-             * broadcast, this has to be broadcast with it. */
+            sim->ent_world.dt           = dt;
+            sim->ent_world.deathmatch   = sim->multiplayer;
+            sim->ent_world.cheats       = sim->cheats;
+            /* 0x800B3360 is a global the two item readers load fresh every
+             * time, so it is refreshed here beside the cheat word rather than
+             * latched at attach. */
             sim->ent_world.weapons_stay = sim->weapons_stay;
             q2_entity_run(&sim->entities, &sim->ent_world);
         }
