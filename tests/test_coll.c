@@ -1051,6 +1051,238 @@ static void test_separate(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * 0x80045D54 - THE END-OF-FRAME VALIDITY GATE.
+ *
+ * The last thing 0x8004583C does before the integrator, and the thing the port
+ * had no counterpart for at all: monster.h names 0x80045C54, 0x80045C90 and
+ * 0x80045E14 as the three stores to entity+0x54 inside that routine, and only
+ * the first two were reproduced. 0x80045E14 is this rewind.
+ */
+static void test_step_gate(void)
+{
+    q2_collision   c;
+    q2_move_ent    ent;
+    q2_move_target targets[1];
+    q2_move_world  w;
+    s16            delta[3];
+    s32            probe[3];
+
+    printf("the end-of-frame validity gate\n");
+    open_hull(&c, false);
+
+    /*
+     * The two arms of 0x80050CE0, side by side. A mover that has travelled
+     * from x = 2000 to x = 2400 has a live box at its CURRENT position and an
+     * envelope covering the whole trip (sim.c's mover box update only ever
+     * grows the second), so a point clear of the live box can still be inside
+     * the envelope. That gap is the whole reason there are two calls: the
+     * envelope arms the entity sweep, the live box decides whether the frame
+     * may be kept.
+     */
+    memset(targets, 0, sizeof(targets));
+    targets[0].min[0] = 2000; targets[0].max[0] = 2400;
+    targets[0].min[1] = 0;    targets[0].max[1] = 1000;
+    targets[0].min[2] = 0;    targets[0].max[2] = 1000;
+    targets[0].env_min[0] = 2000; targets[0].env_max[0] = 3000;
+    targets[0].env_min[1] = 0;    targets[0].env_max[1] = 1000;
+    targets[0].env_min[2] = 0;    targets[0].env_max[2] = 1000;
+    targets[0].kind   = Q2_MOVE_KIND_ENTITY;
+    targets[0].id     = 4;
+    targets[0].active = true;
+
+    memset(&w, 0, sizeof(w));
+    w.targets     = targets;
+    w.count       = 1;
+    w.half_extent = Q2_SWEEP_HALF_EXTENT;
+    w.mask        = 0;
+
+    probe[0] = 2700; probe[1] = 500; probe[2] = 500;
+    check(q2_move_overlaps_any(&w, probe),
+          "the envelope arm sees the travel the mover has already made");
+    check(!q2_move_overlaps_any_live(&w, probe),
+          "the live arm sees only where the mover is NOW");
+
+    probe[0] = 2200;
+    check(q2_move_overlaps_any_live(&w, probe),
+          "and it does see the mover's own box");
+
+    /* An inactive slot is skipped by both, as 0x80050D7C's byte +50 skips it. */
+    targets[0].active = false;
+    check(!q2_move_overlaps_any_live(&w, probe), "an inactive slot is skipped");
+    targets[0].active = true;
+
+    /*
+     * A FRAME THAT ENDS INSIDE A MOVER IS THROWN AWAY.
+     *
+     * This is the state a closing door or a descending crusher leaves: the
+     * mover's box arrived around a player who did not walk into it, so no
+     * sweep this frame can push them out of it - 0x80053C58 clipping a move
+     * that STARTS inside a box stops it where it is. 0x80045D78 asks the
+     * question anyway, after all three moves, and 0x80045E04 discards the
+     * frame when the answer is yes.
+     *
+     * The box here fills node 0, so the lift, the slide and the drop all begin
+     * inside it and none of them can get out.
+     */
+    memset(targets, 0, sizeof(targets));
+    targets[0].min[0] = 0;    targets[0].max[0] = 1000;
+    targets[0].min[1] = 0;    targets[0].max[1] = 1000;
+    targets[0].min[2] = 0;    targets[0].max[2] = 1000;
+    memcpy(targets[0].env_min, targets[0].min, sizeof(targets[0].min));
+    memcpy(targets[0].env_max, targets[0].max, sizeof(targets[0].max));
+    targets[0].kind   = Q2_MOVE_KIND_ENTITY;
+    targets[0].id     = 4;
+    targets[0].active = true;
+
+    memset(&ent, 0, sizeof(ent));
+    ent.pos[0] = 500; ent.pos[1] = 900; ent.pos[2] = 500;
+    ent.node = 0;
+    ent.max_slope_ny = 2048;
+    ent.flags = Q2_ENT_ON_GROUND;
+
+    q2_move_step_scan.rewound_overlap = 0;
+
+    delta[0] = 300; delta[1] = 0; delta[2] = 0;
+    q2_move_step(&c, &ent, delta, &w, NULL, -1, NULL, NULL, NULL);
+
+    check_eq_i((s32)q2_move_step_scan.rewound_overlap, 1,
+               "the gate refused a frame that ended inside a live entity box");
+    check_eq_i(ent.pos[0], 500, "and put the entity back where the frame started");
+    check_eq_i(ent.pos[1], 900, "on every axis");
+    check_eq_i(ent.pos[2], 500, "including the one nothing touched");
+    check_eq_i(ent.node, 0, "with its cached cell restored too");
+
+    /*
+     * ON_ENTITY DOES NOT SAVE IT HERE, and that is not a contradiction of
+     * 0x80045D70's `a3 = !ON_ENTITY` skip. The skip protects a rider whose
+     * frame went through cleanly; this frame did not. Two things clear the
+     * flag before the gate ever reads it - 0x80045B14 at the top of the
+     * stepped arm, and 0x8004577C when the per-move envelope gate forces the
+     * move to be re-run with entity sweeping on - so by the time the gate asks,
+     * ON_ENTITY says "the DROP just landed me on a mover", not "I boarded one
+     * some frames ago". Setting it going in changes nothing.
+     */
+    memset(&ent, 0, sizeof(ent));
+    ent.pos[0] = 500; ent.pos[1] = 900; ent.pos[2] = 500;
+    ent.node = 0;
+    ent.max_slope_ny = 2048;
+    ent.flags = Q2_ENT_ON_GROUND | Q2_ENT_ON_ENTITY;
+
+    q2_move_step_scan.rewound_overlap = 0;
+
+    delta[0] = 300; delta[1] = 0; delta[2] = 0;
+    q2_move_step(&c, &ent, delta, &w, NULL, -1, NULL, NULL, NULL);
+
+    check_eq_i((s32)q2_move_step_scan.rewound_overlap, 1,
+               "ON_ENTITY carried in from last frame does not exempt this one");
+    check_eq_i(ent.pos[0], 500, "so the frame is discarded just the same");
+
+    /*
+     * THE VOLUME HALF, and the detail that makes it a separate question from
+     * the sweep's: 0x8005553C is handed ent+0x54 and reads 68(a0) - ent+0x98,
+     * the entity's own flags - so the mask this query uses is the ENTITY's,
+     * not `world->mask`. The sweep at 0x80053C58 filters on the world's, which
+     * sim.c leaves at 0 because which entities set flag bit 0 was never traced.
+     *
+     * So a volume can be invisible to every move in the frame and still be
+     * solid to the gate. That is the port's live divergence (sim.c's note
+     * beside q2_move_world.mask), set up here exactly as it stands: w.mask = 0
+     * and the entity carrying bit 0.
+     */
+    memset(targets, 0, sizeof(targets));
+    targets[0].min[0] = 700;  targets[0].max[0] = 900;
+    targets[0].min[1] = 0;    targets[0].max[1] = 2000;
+    targets[0].min[2] = 0;    targets[0].max[2] = 1000;
+    memcpy(targets[0].env_min, targets[0].min, sizeof(targets[0].min));
+    memcpy(targets[0].env_max, targets[0].max, sizeof(targets[0].max));
+    targets[0].kind   = Q2_MOVE_KIND_VOLUME;
+    targets[0].mask   = 0x0800;
+    targets[0].id     = 6;
+    targets[0].active = true;
+    w.mask = 0;
+
+    memset(&ent, 0, sizeof(ent));
+    ent.pos[0] = 500; ent.pos[1] = 900; ent.pos[2] = 500;
+    ent.node = 0;
+    ent.max_slope_ny = 2048;
+    ent.flags = Q2_ENT_ON_GROUND;
+
+    q2_move_step_scan.rewound_overlap = 0;
+
+    delta[0] = 300; delta[1] = 0; delta[2] = 0;
+    q2_move_step(&c, &ent, delta, &w, NULL, -1, NULL, NULL, NULL);
+
+    check_eq_i((s32)q2_move_step_scan.rewound_overlap, 0,
+               "without flag bit 0 the mask is 0 and the volume is not asked about");
+    check_eq_i(ent.pos[0], 800, "so the walk stands");
+
+    memset(&ent, 0, sizeof(ent));
+    ent.pos[0] = 500; ent.pos[1] = 900; ent.pos[2] = 500;
+    ent.node = 0;
+    ent.max_slope_ny = 2048;
+    ent.flags = Q2_ENT_ON_GROUND | 1u;
+
+    q2_move_step_scan.rewound_overlap = 0;
+
+    delta[0] = 300; delta[1] = 0; delta[2] = 0;
+    q2_move_step(&c, &ent, delta, &w, NULL, -1, NULL, NULL, NULL);
+
+    check_eq_i((s32)q2_move_step_scan.rewound_overlap, 1,
+               "with it, the same volume makes the frame invalid");
+    check_eq_i(ent.pos[0], 500, "and the frame is rewound");
+
+    /*
+     * THE NODE ARM, and the case that makes the 0x800447C0 approximation
+     * survivable. 0x800447F4's `bgez a2` accepts a NEGATIVE cell index
+     * outright, and the port reaches node = -1 as a real state - an entity
+     * whose position no cell holds yet. Treating that as "no cell will have
+     * me" would rewind it to its pre-lift position every single tick and it
+     * would never move again, which is a far worse fault than the one this
+     * gate fixes.
+     */
+    memset(&ent, 0, sizeof(ent));
+    ent.pos[0] = 500; ent.pos[1] = 900; ent.pos[2] = 500;
+    ent.node = -1;
+    ent.max_slope_ny = 2048;
+    ent.flags = Q2_ENT_ON_GROUND;
+
+    q2_move_step_scan.rewound_overlap  = 0;
+    q2_move_step_scan.rewound_unplaced = 0;
+
+    delta[0] = 300; delta[1] = 0; delta[2] = 0;
+    q2_move_step(&c, &ent, delta, NULL, NULL, -1, NULL, NULL, NULL);
+
+    check_eq_i((s32)q2_move_step_scan.rewound_unplaced, 0,
+               "an entity with no cached cell is not rewound for having none");
+    check(ent.pos[0] > 500, "it moves");
+
+    /*
+     * And the gate does not interfere with an ordinary walk: the cell is
+     * re-located from where the frame ended (0x80045D98) and STORED
+     * (0x80045DB4), which is how an entity that crossed a portal ends the
+     * frame holding the cell it is now in.
+     */
+    memset(&ent, 0, sizeof(ent));
+    ent.pos[0] = 900; ent.pos[1] = 900; ent.pos[2] = 500;
+    ent.node = 0;
+    ent.max_slope_ny = 2048;
+    ent.flags = Q2_ENT_ON_GROUND;
+
+    q2_move_step_scan.rewound_overlap  = 0;
+    q2_move_step_scan.rewound_unplaced = 0;
+
+    delta[0] = 300; delta[1] = 0; delta[2] = 0;
+    q2_move_step(&c, &ent, delta, NULL, NULL, -1, NULL, NULL, NULL);
+
+    check_eq_i(ent.pos[0], 1200, "a walk across the portal is not rewound");
+    check_eq_i(ent.node, 1, "and the frame ends holding the cell it arrived in");
+    check_eq_i((s32)(q2_move_step_scan.rewound_overlap +
+                     q2_move_step_scan.rewound_unplaced),
+               0, "with the gate silent");
+}
+
+/* ------------------------------------------------------------------------- */
 int main(void)
 {
     printf("collision model\n\n");
@@ -1069,6 +1301,7 @@ int main(void)
     test_clip_segment();
     test_contents();
     test_separate();
+    test_step_gate();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;

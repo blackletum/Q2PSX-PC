@@ -377,6 +377,32 @@ def bodies_blocked_something(report, out, shot):
         raise Failure("no creature moved from where it spawned")
 
 
+def clock_runs_once_a_frame(report, out, shot):
+    """
+    ONE WORLD, ONE CLOCK, whatever the player count.
+
+    `q2_sim_tick` runs once per player against one world and the world half is
+    gated on being player 0. `sim->level_time += dt` was not, so a two-player
+    match aged the world twice as fast and a four-player one four times — every
+    powerup's duration, every scripted mover wait, the pickup caption, Mega
+    Health's decay, the hazard throttle and the drowning deadline all read that
+    clock.
+
+    Asserted as a RATE rather than against a number, because the number depends
+    on how the accumulator lands: a tick consumes at least the build's frame
+    (12 units on PAL, 10 on NTSC) and at most a capped step. Twenty-five is
+    comfortably above the honest ceiling and far below the 77 per tick a
+    four-player match was running at.
+    """
+    ticks = report.get("run.ticks", 0)
+    clock = report.get("run.level_time", 0)
+    if ticks < 1:
+        raise Failure("the world never stepped")
+    if clock > ticks * 25:
+        raise Failure(f"the level clock ran at {clock / ticks:.1f} units a tick,"
+                      " which is more than one player's worth")
+
+
 def script_did_something(report, out, shot):
     """
     The counters belong to the level the run ENDED in, not to the one it
@@ -505,14 +531,16 @@ def build_cases(quick, ntsc):
         cases.append(Case(f"split-{players}p",
                           ["--map", "MATRIX5", "--dm",
                            "--dm-players", str(players)],
-                          frames=120,
-                          checks=[no_errors, ticked, rendered]))
+                          frames=300,
+                          checks=[no_errors, ticked, rendered,
+                                  clock_runs_once_a_frame]))
     for layout in ("horizontal", "vertical"):
         cases.append(Case(f"split-2p-{layout}",
                           ["--map", "MATRIX5", "--dm", "--dm-players", "2",
                            "--dm-split", layout],
-                          frames=120,
-                          checks=[no_errors, ticked, rendered]))
+                          frames=300,
+                          checks=[no_errors, ticked, rendered,
+                                  clock_runs_once_a_frame]))
 
     # THE HUD, one case per thing that changes it. None of these asserts what
     # the overlay LOOKS like — that is what the inspectors are for — but a run

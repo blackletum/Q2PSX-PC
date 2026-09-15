@@ -1990,12 +1990,29 @@ static void test_four_players(void)
      * players 1..3 must not tick it again.
      */
     ticks_after_one = sim.tick_count;
-    q2_sim_advance_player(&sim, 1, &in, 12);
-    q2_sim_advance_player(&sim, 2, &in, 12);
-    q2_sim_advance_player(&sim, 3, &in, 12);
-    ticks_after_three = sim.tick_count;
-    check_eq_i((int)(ticks_after_three - ticks_after_one), 0,
-               "three more players do not advance the world clock");
+    {
+        /*
+         * AND THE LEVEL CLOCK, which is the one that was wrong.
+         *
+         * This check was named for the world clock and asserted
+         * `tick_count`, which is guarded at the top of the tick and was
+         * never at fault. `level_time` is the counter every powerup,
+         * every scripted wait, the pickup caption, Mega Health's decay,
+         * the hazard throttle and the drowning deadline read, and it was
+         * advanced once per PLAYER — so a two-player match aged the world
+         * twice as fast and a four-player one four times.
+         */
+        s32 level_after_one = sim.level_time;
+
+        q2_sim_advance_player(&sim, 1, &in, 12);
+        q2_sim_advance_player(&sim, 2, &in, 12);
+        q2_sim_advance_player(&sim, 3, &in, 12);
+        ticks_after_three = sim.tick_count;
+        check_eq_i((int)(ticks_after_three - ticks_after_one), 0,
+                   "three more players do not advance the world clock");
+        check_eq_i((int)(sim.level_time - level_after_one), 0,
+                   "three more players do not advance the LEVEL clock");
+    }
 
     /* A weapon is a player's, not the world's. */
     sim.combat.weapon_id = 5;

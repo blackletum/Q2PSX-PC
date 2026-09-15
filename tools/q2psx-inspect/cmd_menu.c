@@ -501,15 +501,15 @@ static int shoot_page(const disc *d, const q2_menu_page *p, int cheat_level,
     q2_menu_set_us_english(&m, id.region == Q2_REGION_NTSC_U);
     m.cheat_level = cheat_level;
     m.open        = true;
+    /* Both of these are composed by the page's own entry hook, the way
+     * 0x8001D774 and 0x8001D638 compose them as part of installing the page —
+     * so the numbers have to be in before the page is entered, not after. */
+    q2_menu_set_resupplies(&m, 2);
+    q2_menu_set_stats(&m, 12, 40, 1, 3);
     q2_menu_goto(&m, p->id);
     m.page = p;                    /* honour the variant the caller picked */
-    if (p->id == Q2_PAGE_DEATH) {
-        q2_menu_set_resupplies(&m, 2);
-        q2_menu_goto(&m, Q2_PAGE_DEATH);
+    if (p->id == Q2_PAGE_DEATH)
         m.arm_ticks = 0;
-    }
-    if (p->id == Q2_PAGE_PAUSE_SP)
-        q2_menu_set_stats(&m, 12, 40, 1, 3);
 
     /*
      * The pages as VRAM holds them. `.item` and `.title` carry the face grid,

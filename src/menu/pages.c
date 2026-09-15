@@ -230,6 +230,7 @@ static const q2_menu_item k_death[] = {
  * between a page's static text and its navigable part.
  */
 #define EMPTY 0x8009B30Cu   /* the terminator table every text-only page uses */
+#define EMPTY_FRONT 0x8010FADCu  /* QFRONT's own, installed by module+0x49A0 */
 
 /*
  * The front end, transcribed from QFRONT's `LevelBin` rather than from the
@@ -388,6 +389,110 @@ static const q2_menu_item k_front_options[] = {
     { "VIEW CREDITS",   256, 163, Q2_ACT_CREDITS,     Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
 };
 
+/*
+ * CONTROLLER, QFRONT's own — module+0x0FA4C, installed by module+0x39D8.
+ *
+ * Five records at exactly k_controller's coordinates, with four of the labels
+ * abbreviated: VIBRATE, SWAP Y and MOUSE for the executable's VIBRATION, SWAP Y
+ * AXIS and USE MOUSE. The bindings are k_controller's because the reasoning
+ * behind them is unchanged — the records carry none in either image, and the
+ * page's hook is what reads the pad and writes the per-player block.
+ *
+ * `q2psx-inspect menu <disc> pages QFRONT` shows four rows, not five: the
+ * module-page reader drops any record whose x is not 256 (src/game/levelbin.c),
+ * which hides every slider. MOUSE SPEED is really there — module+0x0FAAC is
+ * { module+0x006FC "MOUSE SPEED", 168, 170 }, read out of the image by hand.
+ */
+static const q2_menu_item k_front_controller[] = {
+    { "STYLE A",     256,  78, Q2_ACT_NONE, Q2_SET_PAD_STYLE,   Q2_WIDGET_CHOICE, 0 },
+    { "VIBRATE",     256, 101, Q2_ACT_NONE, Q2_SET_VIBRATION,   Q2_WIDGET_TOGGLE, 0 },
+    { "SWAP Y",      256, 124, Q2_ACT_NONE, Q2_SET_SWAP_Y,      Q2_WIDGET_TOGGLE, 0 },
+    { "MOUSE",       256, 147, Q2_ACT_NONE, Q2_SET_USE_MOUSE,   Q2_WIDGET_TOGGLE, 0 },
+    { "MOUSE SPEED", 168, 170, Q2_ACT_NONE, Q2_SET_MOUSE_SPEED, Q2_WIDGET_SLIDER, 0 },
+};
+
+/*
+ * THE SIX RULES PAGES — module+0x0F434, +0x0F4DC, +0x0F59C, +0x0F68C, +0x0F734
+ * and +0x0F824, in the order module+0x4868's jump table (module+0x11C4) puts
+ * them: DEATHMATCH, TEAM DEATHMATCH, CAPTURE THE FLAG, TAG, TEAM TAG, VERSUS.
+ *
+ * Only three of the six can be reached: QFRONT's MULTIPLAYER page offers
+ * DEATHMATCH, TEAM DEATHMATCH and VERSUS, and its hook writes only 0, 1 and 5.
+ * The other three are transcribed because the opener indexes by mode and a
+ * six-entry table is what it indexes — leaving gaps in it would be a lookup
+ * that only happens to work.
+ *
+ * Every page is pure text: each arm installs the rules table and then the
+ * all-zero table at module+0x0FADC, so `first` equals `count` and nothing takes
+ * a cursor or a select bar. Three of them are NINE rows, and the module-page
+ * reader shows eight — it caps a page at `q2_lb_menu_row row[8]` — so the last
+ * line of CAPTURE THE FLAG, TEAM TAG and VERSUS was read out of the image
+ * directly (module+0x0F65C, +0x0F7F4, +0x0F8E4, all at 256, 196).
+ */
+static const q2_menu_item k_front_rules_dm[] = {
+    { "RULES",                       256,  79, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "THE ONE AND ONLY! KILL YOUR", 256,  97, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "FRIENDS AS MANY TIMES AS",    256, 115, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "YOU CAN. ONE FRAG POINT PER", 256, 133, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "KILL. THE PLAYER WITH THE",   256, 151, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "MOST FRAGS WINS.",            256, 169, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+};
+
+static const q2_menu_item k_front_rules_team[] = {
+    { "RULES",                       256,  70, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "KILL THE MEMBERS OF THE",     256,  88, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "OTHER TEAM AS MANY TIMES AS", 256, 106, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "YOU CAN. ONE FRAG POINT PER", 256, 124, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "KILL, A FRAG IS LOST FOR",    256, 142, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "KILLING TEAMMATES. THE TEAM", 256, 160, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "WITH THE MOST FRAGS WINS.",   256, 178, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+};
+
+static const q2_menu_item k_front_rules_ctf[] = {
+    { "RULES",                       256,  52, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "TOUCH THE OTHER TEAM'S FLAG", 256,  70, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "TO TAKE IT. BRING IT TO",     256,  88, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "YOUR FLAG AT HOME BASE TO",   256, 106, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "SCORE A CAPTURE. TOUCH YOUR", 256, 124, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "OWN FLAG TO RETURN IT TO",    256, 142, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "YOUR BASE. THE TEAM OR",      256, 160, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "PLAYER WITH THE MOST FLAG",   256, 178, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "CAPTURES WINS.",              256, 196, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+};
+
+static const q2_menu_item k_front_rules_tag[] = {
+    { "RULES",                       256,  79, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "TOUCH THE RED FLAG TO TAKE",  256,  97, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "IT. KILL ANYBODY WHO HAS",    256, 115, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "THE RED FLAG. THE PLAYER",    256, 133, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "THAT HOLDS THE FLAG FOR THE", 256, 151, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "LONGEST TIME WINS.",          256, 169, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+};
+
+static const q2_menu_item k_front_rules_teamtag[] = {
+    { "RULES",                        256,  52, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "TOUCH THE RED FLAG TO TAKE",   256,  70, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "IT. WHEN YOU TAKE THE FLAG",   256,  88, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "YOU WILL LOSE YOUR WEAPONS",   256, 106, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "AND HAVE TO RELY ON YOUR",     256, 124, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "TEAMMATES TO DEFEND YOU. YOU", 256, 142, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "CANNOT HURT YOUR TEAMMATES.",  256, 160, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "THE TEAM THAT HOLDS THE",      256, 178, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "FLAG THE LONGEST WINS.",       256, 196, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+};
+
+static const q2_menu_item k_front_rules_versus[] = {
+    { "RULES",                       256,  52, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "THERE ARE NO AMMO OR",        256,  70, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "HEALTH POWER-UPS IN THE",     256,  88, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "LEVEL. WHEN YOU DIE, YOU",    256, 106, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "ARE OUT FOR THE ROUND. IF",   256, 124, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "YOU ARE THE LAST ONE ALIVE",  256, 142, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "IN THE ROUND, YOU GET A",     256, 160, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "POINT. THE FIRST PLAYER TO",  256, 178, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+    { "REACH SCORE LIMIT WINS.",     256, 196, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+};
+
 static const q2_menu_page k_pages[] = {
     { Q2_PAGE_SCREEN_POSITION,  "POSITION",   k_position,         N(k_position),         N(k_position),      Q2_ACT_PAGE_VIDEO,   0x8009AF4Cu, EMPTY },
     { Q2_PAGE_PAUSE_SP,         "PAUSED",     k_pause_sp,         N(k_pause_sp),         0,                  Q2_ACT_NONE,         0x8009AA0Cu, 0 },
@@ -430,6 +535,7 @@ static const q2_menu_page k_pages[] = {
     { Q2_PAGE_FRONT_SKILL,      "DIFFICULTY",    k_front_skill,      N(k_front_skill),      0,                  Q2_ACT_BACK,         0x8010EFE4u, 0 },
     { Q2_PAGE_FRONT_MULTI,      "MULTIPLAYER",   k_front_multi,      N(k_front_multi),      0,                  Q2_ACT_BACK,         0x8010F104u, 0 },
     { Q2_PAGE_FRONT_DMSETUP,    "DEATHMATCH",   k_front_dmsetup,    N(k_front_dmsetup),    0,                  Q2_ACT_BACK,         0x8010F914u, 0 },
+    { Q2_PAGE_FRONT_RULES,      "DEATHMATCH",    k_front_rules_dm,   N(k_front_rules_dm),   N(k_front_rules_dm), Q2_ACT_BACK,        0x8010F434u, EMPTY_FRONT },
 };
 
 /* Variants, kept out of the main list so `q2_menu_pages` stays one page per
@@ -443,6 +549,28 @@ static const q2_menu_page k_vars_pages[4] = {
     { Q2_PAGE_VARIABLES, "PAUSED", k_vars_bronze, N(k_vars_bronze), 0, Q2_ACT_BACK, 0x8009A724u, 0 },
     { Q2_PAGE_VARIABLES, "PAUSED", k_vars_silver, N(k_vars_silver), 0, Q2_ACT_BACK, 0x8009A7B4u, 0 },
     { Q2_PAGE_VARIABLES, "PAUSED", k_vars_gold,   N(k_vars_gold),   0, Q2_ACT_BACK, 0x8009A874u, 0 },
+};
+
+static const q2_menu_page k_front_controller_page = {
+    Q2_PAGE_CONTROLLER, "CONTROLLER", k_front_controller, N(k_front_controller),
+    0, Q2_ACT_BACK, 0x8010FA4Cu, 0
+};
+
+/*
+ * Keyed on the mode, in the order module+0x11C4 lists the arms. The last entry
+ * is the `sltiu v0, v1, 6` fall-through at module+0x4990: it installs the empty
+ * table and nothing else, so the page is a banner over an empty screen. Nothing
+ * in this port can produce a mode outside 0..5, so it stands for the shape of
+ * the routine rather than for anything a player can reach.
+ */
+static const q2_menu_page k_front_rules_pages[7] = {
+    { Q2_PAGE_FRONT_RULES, "DEATHMATCH",       k_front_rules_dm,      N(k_front_rules_dm),      N(k_front_rules_dm),      Q2_ACT_BACK, 0x8010F434u, EMPTY_FRONT },
+    { Q2_PAGE_FRONT_RULES, "TEAM DEATHMATCH",  k_front_rules_team,    N(k_front_rules_team),    N(k_front_rules_team),    Q2_ACT_BACK, 0x8010F4DCu, EMPTY_FRONT },
+    { Q2_PAGE_FRONT_RULES, "CAPTURE THE FLAG", k_front_rules_ctf,     N(k_front_rules_ctf),     N(k_front_rules_ctf),     Q2_ACT_BACK, 0x8010F59Cu, EMPTY_FRONT },
+    { Q2_PAGE_FRONT_RULES, "TAG",              k_front_rules_tag,     N(k_front_rules_tag),     N(k_front_rules_tag),     Q2_ACT_BACK, 0x8010F68Cu, EMPTY_FRONT },
+    { Q2_PAGE_FRONT_RULES, "TEAM TAG",         k_front_rules_teamtag, N(k_front_rules_teamtag), N(k_front_rules_teamtag), Q2_ACT_BACK, 0x8010F734u, EMPTY_FRONT },
+    { Q2_PAGE_FRONT_RULES, "VERSUS",           k_front_rules_versus,  N(k_front_rules_versus),  N(k_front_rules_versus),  Q2_ACT_BACK, 0x8010F824u, EMPTY_FRONT },
+    { Q2_PAGE_FRONT_RULES, NULL,               NULL,                  0,                        0,                        Q2_ACT_BACK, EMPTY_FRONT, 0 },
 };
 
 static const q2_menu_page k_front_setup_pages[3] = {
@@ -506,6 +634,19 @@ const q2_menu_page *q2_menu_variables_page(int cheat_level)
 const q2_menu_page *q2_menu_video_page(bool multiplayer)
 {
     return multiplayer ? &k_video_mp_page : q2_menu_page_find(Q2_PAGE_VIDEO);
+}
+
+const q2_menu_page *q2_menu_controller_page(bool front_end)
+{
+    return front_end ? &k_front_controller_page
+                     : q2_menu_page_find(Q2_PAGE_CONTROLLER);
+}
+
+const q2_menu_page *q2_menu_front_rules_page(int mode)
+{
+    if (mode < 0 || mode > 5)
+        return &k_front_rules_pages[6];
+    return &k_front_rules_pages[mode];
 }
 
 const q2_menu_page *q2_menu_front_setup_page(int mode)

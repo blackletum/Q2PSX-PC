@@ -299,7 +299,24 @@ typedef enum q2_menu_page_id {
      * page uses, and the same shape as RESTARTING / LEVEL. It is what the half
      * second between a confirmed difficulty and the opening reel looks like.
      */
-    Q2_PAGE_STARTING         = 208
+    Q2_PAGE_STARTING         = 208,
+
+    /*
+     * THE MULTIPLAYER RULES PAGE, which the module calls page 14.
+     *
+     * SQUARE on one of the MULTIPLAYER page's three mode rows runs
+     * `module+0x4868`: it reads the mode it wrote into `engine+0x370` from the
+     * cursor row (`module+0x45F8`, `0x4604`, `0x460C` store 0, 1 and 5), indexes
+     * the six-entry jump table at `module+0x11C4`, and installs that mode's
+     * banner and rules table through `module+0x3414(banner, 14)`. Every arm
+     * then installs the empty table at `module+0x0FADC` as the second one, so
+     * nothing on the page is navigable, and sets `engine+0x28C` to the
+     * MULTIPLAYER page's own builder, so TRIANGLE comes straight back.
+     *
+     * 14 collides with nothing here only because this port numbers the front
+     * end from 200, as the note above explains.
+     */
+    Q2_PAGE_FRONT_RULES      = 209
 } q2_menu_page_id;
 
 /*
@@ -332,7 +349,22 @@ const q2_menu_page *q2_menu_page_find(int id);
 /* Pages whose installed table depends on live state. */
 const q2_menu_page *q2_menu_variables_page(int cheat_level); /* 0x8001D510 */
 const q2_menu_page *q2_menu_video_page(bool multiplayer);    /* 0x800202B0 */
+/*
+ * CONTROLLER is the same page in both images with four of its five labels
+ * abbreviated: the executable's table (0x8009AFDC) reads VIBRATION / SWAP Y
+ * AXIS / USE MOUSE, QFRONT's own (module+0x0FA4C, installed by module+0x39D8)
+ * reads VIBRATE / SWAP Y / MOUSE. Same coordinates, same five records.
+ */
+const q2_menu_page *q2_menu_controller_page(bool front_end); /* QFRONT+39D8 */
 const q2_menu_page *q2_menu_front_setup_page(int mode);       /* QFRONT+4AD8 */
+/*
+ * The rules page for one game mode, keyed on the Q2_MENU_MP_* value the way
+ * `module+0x4868` keys its jump table. Six arms: 0 DEATHMATCH, 1 TEAM
+ * DEATHMATCH, 2 CAPTURE THE FLAG, 3 TAG, 4 TEAM TAG, 5 VERSUS; anything else
+ * gets the empty table at module+0x0FADC, which is a page with a banner and
+ * nothing on it.
+ */
+const q2_menu_page *q2_menu_front_rules_page(int mode);       /* QFRONT+4868 */
 const q2_menu_page *q2_menu_front_variables_page(int cheat_level); /* +49F8 */
 
 /* QFRONT's twelve selectable arenas, level-table records 13..24. */
@@ -440,9 +472,21 @@ typedef struct q2_menu {
      * without touching its label (0x8001CA28 does this to SWAP Y AXIS). */
     u8                  disabled[Q2_MENU_MAX_ITEMS];
 
-    /* The single-player pause menu's status line, placed at (256, 204) by
-     * 0x8001D6B4 and formatted with "KILLS %d/%d    %d/%d SECRETS". */
+    /*
+     * The single-player pause menu's status line, placed at (256, 204) by
+     * 0x8001D6B4 and formatted with "KILLS %d/%d    %d/%d SECRETS".
+     *
+     * It belongs to page 26's own install, so it is composed in `page_entered`
+     * and wiped by every other page entry, exactly as 0x8001D614's arm is the
+     * only one that writes the object at 0x800C3818. The four numbers below are
+     * what a caller pushes in; they outlive a page change so that re-entering
+     * the pause page re-composes the row without the caller being asked again.
+     */
     char                status[48];
+    int                 stat_kills;          /* 0x800B29E8 */
+    int                 stat_total_kills;    /* 0x800B29E4 */
+    int                 stat_secrets;        /* 0x800B29FC */
+    int                 stat_total_secrets;  /* 0x800B29F8 */
 
     /* The engine keeps the cursor per page, so returning to a page puts you
      * back where you were (0x8001A3B0 saves it into 0x800C68A0). */
@@ -463,6 +507,16 @@ typedef struct q2_menu {
 
     bool                open;
     bool                multiplayer;  /* 0x800AEBCC — picks page 43 over 26  */
+    /*
+     * Whether the pages come from QFRONT rather than from the executable.
+     *
+     * On the console this is not a flag at all: the front end is a different
+     * image, so `module+0xCC0C` installs QFRONT's own VIDEO table and
+     * `module+0x39D8` its own CONTROLLER table, and neither can be reached
+     * while the executable's menu is up. This port keeps one page array for
+     * both, so the two pages that actually differ are resolved through this.
+     */
+    bool                front_end;
     bool                us_english;   /* the North American build's spellings */
     int                 cheat_level;  /* 0x800B335C                          */
     int                 resupplies;   /* 0x800B335D                          */
@@ -544,6 +598,10 @@ bool q2_menu_set_slider(q2_menu *m, int index, int value);
 /* Context the pages read. Set these before opening. */
 void q2_menu_set_multiplayer(q2_menu *m, bool on);
 
+/* Serve QFRONT's tables where they differ from the executable's. See
+ * q2_menu.front_end for why this is a flag here and nothing at all there. */
+void q2_menu_set_front_end(q2_menu *m, bool on);
+
 /*
  * Spell the menu's words the North American build's way. Two of them differ,
  * and both are strings in the executable rather than in the level data:
@@ -581,6 +639,14 @@ const char *q2_menu_item_display(const q2_menu *m, int index,
 /* Navigable? Grey labels, disabled items and the static group are skipped —
  * the rule at 0x80019CC4. */
 bool q2_menu_item_selectable(const q2_menu *m, int index);
+
+/*
+ * Is the cursor on one of the MULTIPLAYER page's three mode rows? That is the
+ * one predicate module+0x4630 computes and then uses twice — to raise the
+ * RULES prompt and to decide whether SQUARE opens the rules page — so the
+ * prompt bar and the engine ask the same question here too.
+ */
+bool q2_menu_front_rules_row(const q2_menu *m);
 
 /* The title's y, which the original derives from the framebuffer height:
  * (h - 188) / 2 + 10  (0x8001CF74). */

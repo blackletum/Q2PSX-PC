@@ -1864,6 +1864,14 @@ item records at run time instead of transcribing a table, so there is nothing to
       module+`0x459C` adds RULES at y 220 for the first three MULTIPLAYER mode rows and parks it on the two
       settings rows. `q2_prompt_sync_menu` and the client now apply and render those rules. *Still open
       outside the ordinary menu:* the retail drawer's page-11 BACK special case at (230,114).
+      **RULES now opens something.** The caption and the button are one routine: `module+0x4630` computes
+      `cursor - first < 3` and raises the prompt, then `module+0x4654` tests the SQUARE bit in the
+      just-pressed word at `engine+0x2BC` and calls `module+0x4868`, which indexes the six-entry jump table
+      at `module+0x11C4` with the mode the same hook wrote into `engine+0x370` (0, 1 or 5 from
+      `module+0x45F8`/`0x4604`/`0x460C`) and installs that mode's banner and rules table, plus the empty
+      table at `module+0x0FADC` so nothing on the page is navigable, with the MULTIPLAYER builder as its
+      back handler. All six tables are transcribed in `src/menu/pages.c`; `q2_menu_front_rules_row` is the
+      shared predicate and `q2_menu_advance` the SQUARE branch.
 
 - [x] 43. **The briefing screen — SOLVED.** `0x800215A0`. It is a sibling of the MISSION screen only in that
       it hands one markup string to the same printf: MISSION positions every run with an explicit `@XXXYY`
@@ -1887,6 +1895,15 @@ item records at run time instead of transcribing a table, so there is nothing to
       the choice widget really does render its live value bright with the alternatives dim.
       The front end reuses the same font, bar, slider, toggle and choice, so **only its tables are missing**
       — everything that draws them is already reconstructed.
+      **Two of the OPTIONS sub-pages are QFRONT's own and are not the executable's.** `module+0xCC0C`
+      installs `module+0x0EEF4`, the module's only video table, and it is the three-row one (HORIZONTAL
+      SPLIT 256,98 / SCREEN POSITION 256,124 / RESET TO DEFAULTS 256,150) — row for row the executable's
+      *multiplayer* table at `0x8009AEEC`, so the front end offers HORIZONTAL SPLIT unconditionally.
+      `module+0x39D8` installs `module+0x0FA4C`, five records at the executable's coordinates with four
+      abbreviated labels: VIBRATE, SWAP Y, MOUSE (the fifth, MOUSE SPEED at `module+0x0FAAC`, is at
+      x = 168 and so is invisible to `menu pages`, which drops any record whose x is not 256). PLAYER
+      (`module+0x0EE04`), SOUND (`module+0x0EE74`) and SCREEN POSITION (`module+0x0EF54`) genuinely do
+      match the executable's and are shared.
       **What this pass added.** The front end is page **46**, entered at `0x80079364`, and it is special-cased
       inside `q2_menu_open` itself (`0x8001A40C`). Its own screens are a **level**: the level table's record 0
       is `QFront` -> `LEVELS/QFRONT/`, which is on the disc and whose `ModelNames` are `Q2LOGO`, `q2title`,

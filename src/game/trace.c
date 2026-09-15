@@ -260,21 +260,18 @@ int q2_move_sweep_world(const q2_move_world *w, const s32 pos[3],
 /* 0x80050CE0 — which volume is the entity in                                 */
 /* ------------------------------------------------------------------------- */
 /*
- * 0x80050CE0's OTHER arm — a2 = 1, the one 0x8004576C calls before deciding
- * whether a move needs the entity sweep at all.
+ * 0x80050CE0's ENTITY HALF — the 48-slot walk at 0x80050D7C, which runs before
+ * the volume walk q2_move_contents reproduces and is skipped whole when a3 is
+ * zero.
  *
- * Same box as the contents query (286 / 285 / 286 half-extents), but tested
- * against the ENTITY slots' swept ENVELOPE rather than against volumes' live
- * boxes: 0x80050D94 reads slot+0x20, which is the +0x18..+0x2C pair. So the
- * question it answers is "could a mover's travel reach me this frame", not
- * "am I inside one now".
- *
- * This function had no counterpart in the port, which is why q2_move_checked's
- * retry — and therefore q2_move_sweep_world itself — was unreachable: all five
- * callers passed a NULL stuck_test, and a NULL test returns before the arm
- * that turns entity sweeping on.
+ * Same box as the contents query (286 / 285 / 286 half-extents); `envelope` is
+ * the caller's a2, and it chooses which of the slot's TWO boxes is tested —
+ * 0x80050D94 reads slot+0x20, the +0x18..+0x2C swept envelope, and 0x80050E04
+ * reads slot+0x00, the live box. The two public entry points below are the
+ * game's two call sites, and neither is the other's optimisation: see trace.h.
  */
-bool q2_move_overlaps_any(const q2_move_world *w, const s32 pos[3])
+static bool overlaps_entity_slots(const q2_move_world *w, const s32 pos[3],
+                                  bool envelope)
 {
     s32 lo[3], hi[3];
     u32 i;
@@ -292,13 +289,39 @@ bool q2_move_overlaps_any(const q2_move_world *w, const s32 pos[3])
     for (i = 0; i < w->count; i++) {
         const q2_move_target *t = &w->targets[i];
 
+        /* 0x80050D7C's `lbu v0, 50(a0)` on a 64-byte slot: the table is walked
+         * whole and the inactive slots are skipped, not compacted away. */
         if (!t->active || t->kind != Q2_MOVE_KIND_ENTITY)
             continue;
-        if (q2_move_box_overlap(lo, hi, t->env_min, t->env_max))
+        if (q2_move_box_overlap(lo, hi,
+                                envelope ? t->env_min : t->min,
+                                envelope ? t->env_max : t->max))
             return true;
     }
 
     return false;
+}
+
+/*
+ * a2 = 1 — 0x8004576C's gate, asked before deciding whether a move needs the
+ * entity sweep at all. "Could a mover's travel reach me this frame", not "am I
+ * inside one now".
+ *
+ * This had no counterpart in the port, which is why q2_move_checked's retry —
+ * and therefore q2_move_sweep_world itself — was unreachable: all five callers
+ * passed a NULL stuck_test, and a NULL test returns before the arm that turns
+ * entity sweeping on.
+ */
+bool q2_move_overlaps_any(const q2_move_world *w, const s32 pos[3])
+{
+    return overlaps_entity_slots(w, pos, true);
+}
+
+/* a2 = 0 — 0x80045D78's end-of-frame gate: slot+0x00..+0x14, where the entity
+ * IS, not where it is going. */
+bool q2_move_overlaps_any_live(const q2_move_world *w, const s32 pos[3])
+{
+    return overlaps_entity_slots(w, pos, false);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -892,6 +915,135 @@ u32 q2_move_separate(const q2_move_bodies *w, s32 self_id, const s32 pos[3],
 }
 
 /* ------------------------------------------------------------------------- */
+/* 0x80045D54 — the end-of-frame validity gate                                */
+/* ------------------------------------------------------------------------- */
+q2_move_step_stats q2_move_step_scan;
+
+/*
+ * WHERE THE FRAME ENDED HAS TO BE SOMEWHERE THE ENTITY MAY BE.
+ *
+ * 0x8004583C's arms all converge here — 0x80045C18 from the stepped arm, and
+ * 0x80045CDC and 0x80045CF4 from the airborne one — and the last thing the
+ * routine does before the integrator is ask two questions about the position
+ * it has arrived at. If either answer is wrong the whole lift/slide/drop is
+ * thrown away and the entity is put back at the pre-lift snapshot.
+ *
+ * This is retail's last-resort guard, and it is the one that stops a player
+ * from ending a tick inside a door, a lift or a crusher: the moves themselves
+ * sweep the entity boxes, but an entity that MOVED THIS TICK can close on a
+ * stationary player, and nothing in the slide sequence would notice. It is
+ * also what keeps an entity that has left the hull from keeping an off-hull
+ * position — the drop can put a box through a gap the cell graph has no cell
+ * behind.
+ *
+ *   80045D58  jal 0x8005553C          ; the mask, from the ENTITY's flags
+ *   80045D78  jal 0x80050CE0          ; a2 = 0 (live box), a3 = !ON_ENTITY
+ *   80045D80  bne v0, zero, 0x80045E04    ; -> rewind
+ *   80045D98  jal 0x80044F54          ; find_node(pos, hint = +0xA2, brute=0)
+ *   80045DA8  beq v1, v0, 0x80045DB8  ; -1 -> the second chance
+ *   80045DB4  sh  v1, 162(s0)         ; else STORE the new cell and commit
+ *   80045DC0  jal 0x800447C0          ; (ctx, pos, the OLD cell)
+ *   80045DC8  beq v0, zero, 0x80045E04    ; it refuses too -> rewind
+ *   80045E04  sh  s7, 162(s0)         ; REWIND: the cell, then +0x54..+0x5C
+ *
+ * NOT reproduced: 0x80045DD0-0x80045E00's commit also copies the position into
+ * entity+0xA4..+0xAC and then rewrites +0xA8 as `pos.y - (s16)ent[+0xF8] +
+ * 286`. The port models no such origin field at all, so there is nothing to
+ * write it to; that is a separate gap and not one this gate can close.
+ */
+static void move_step_gate(q2_collision *coll, q2_move_ent *ent,
+                           const q2_move_world *world,
+                           const s32 pre_pos[3], s32 pre_node)
+{
+    u16  mask;
+    bool bad;
+    s32  found;
+
+    q2_move_step_scan.gates++;
+
+    /*
+     * 0x8005553C is handed ent+0x54, the position, and reads 68(a0) — which is
+     * ent+0x98, the flags word — so the mask this query sweeps volumes with is
+     * the ENTITY's own, not `world->mask`. Bit 0 set means 0x810, else 0.
+     *
+     * Which entities set bit 0 was never traced (see sim.c's note beside
+     * q2_move_world.mask), so for the player as the port builds it this is 0
+     * and q2_move_contents returns 0 without looking at anything. Written as
+     * the whole call anyway: the day that bit is understood, the volume half
+     * of the gate starts working with no further change here.
+     */
+    mask = (ent->flags & 1u) ? 0x810u : 0u;
+
+    /*
+     * 0x80050CE0 walks the 48 entity slots first and the volumes after, and
+     * a3 = ((flags >> 6) & 1) ^ 1 skips the entity walk entirely when the
+     * entity is standing ON an entity. That skip is not an optimisation:
+     * resting on a lift's top face puts the 285-half-height box through the
+     * lift's own live box every tick, and without it a player riding a lift
+     * would be rewound to where it boarded, every frame, forever.
+     */
+    bad = !(ent->flags & Q2_ENT_ON_ENTITY) &&
+          q2_move_overlaps_any_live(world, ent->pos);
+    if (!bad)
+        bad = q2_move_contents(world, ent->pos, mask) != 0;
+
+    if (bad) {
+        q2_move_step_scan.rewound_overlap++;
+        ent->node   = pre_node;
+        ent->pos[0] = pre_pos[0];
+        ent->pos[1] = pre_pos[1];
+        ent->pos[2] = pre_pos[2];
+        return;
+    }
+
+    /*
+     * 0x80045D98 — re-locate the cell from where the frame actually ended,
+     * with the cached one as the hint and NO brute-force sweep. On success the
+     * cell is stored (0x80045DB4) as part of committing, which is how an
+     * entity that stepped through a portal ends the frame holding the cell it
+     * is now in rather than the one it left.
+     */
+    found = q2_coll_find_node(coll, ent->pos, ent->node, false);
+    if (found != -1) {
+        q2_move_step_scan.relocated++;
+        ent->node = found;
+        return;
+    }
+
+    /*
+     * 0x800447C0's second chance, approximated. The original asks a fuller
+     * question than the port can put to it — its head is
+     *
+     *     800447F4  bgez a2, 0x80044828     ; a negative cell index...
+     *     800447FC  j    0x80044C18
+     *     80044800  addiu v0, zero, 1       ; ...is ACCEPTED outright
+     *
+     * and the >= 0 path walks the cell's box and planes with a slack and a
+     * neighbour fallback that is not transcribed yet. q2_coll_point_in_node
+     * (0x80044098) is the strict half of that walk, so the port is STRICTER
+     * here than retail: a position the console would wave through on the
+     * marginal-plane path can still be rewound. It is the safe direction to
+     * be wrong in — a rewind loses a frame of motion, a false accept leaves
+     * the entity outside the hull — and it is flagged rather than hidden.
+     *
+     * The `node < 0 -> accept` case is NOT optional. The port reaches node =
+     * -1 as a real state (sim.c's player_area), and without it an entity with
+     * no cached cell would be rewound to its pre-lift position every single
+     * tick and never move again.
+     */
+    if (ent->node < 0)
+        return;
+    if (q2_coll_point_in_node(coll, (u32)ent->node, ent->pos))
+        return;
+
+    q2_move_step_scan.rewound_unplaced++;
+    ent->node   = pre_node;
+    ent->pos[0] = pre_pos[0];
+    ent->pos[1] = pre_pos[1];
+    ent->pos[2] = pre_pos[2];
+}
+
+/* ------------------------------------------------------------------------- */
 /* 0x8004583C — the stepped frame move                                        */
 /* ------------------------------------------------------------------------- */
 bool q2_move_step(q2_collision *coll, q2_move_ent *ent, const s16 delta_in[3],
@@ -989,6 +1141,15 @@ bool q2_move_step(q2_collision *coll, q2_move_ent *ent, const s16 delta_in[3],
             q2_move_checked(coll, ent, v, 0, true, false,
                         q2_move_near_entity, world, world);
         }
+
+        /*
+         * 0x80045CDC and 0x80045CF4 both branch to 0x80045D54, and the 20-unit
+         * probe above falls into it — the airborne arm has no exit of its own.
+         * This is the arm a player falling onto a lift or caught by a
+         * descending crusher is actually on, so the gate matters more here
+         * than on the stepped arm.
+         */
+        move_step_gate(coll, ent, world, pre_pos, pre_node);
 
         return (ent->flags & Q2_ENT_GROUNDED_MASK) != 0;
     }
@@ -1111,6 +1272,12 @@ bool q2_move_step(q2_collision *coll, q2_move_ent *ent, const s16 delta_in[3],
                             q2_move_near_entity, world, world);
         }
     }
+
+    /* 0x80045C18 falls through to the gate when the drop found ground, and
+     * both fallback arms above jump back into it (0x80045C60 -> 0x80045D44,
+     * 0x80045C9C -> 0x80045D4C), so every path through the stepped arm is
+     * gated too. */
+    move_step_gate(coll, ent, world, pre_pos, pre_node);
 
     return (ent->flags & Q2_ENT_GROUNDED_MASK) != 0;
 }

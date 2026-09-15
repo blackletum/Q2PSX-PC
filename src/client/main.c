@@ -157,6 +157,7 @@
 #include "gamepad.h"
 #include "sim.h"
 #include "statusbar.h"
+#include "trace.h"
 #include "trig.h"
 #include "vag.h"
 #include "version.h"
@@ -12236,6 +12237,9 @@ static void client_enter_front_end(client *c)
     c->mp_scoreboard = false;
     q2_loading_hide(&c->loading);
     q2_menu_set_multiplayer(&c->menu, false);
+    /* The pages are QFRONT's from here on, and two of them differ from the
+     * executable's — see q2_menu.front_end. */
+    q2_menu_set_front_end(&c->menu, true);
     q2_screen_set_layout(&c->screen, Q2_SCREEN_LAYOUT_ONE, 1);
 
     if (!client_name_eq(c->map, "QFRONT") &&
@@ -12756,6 +12760,11 @@ static void client_menu_frame(client *c)
     c->menu.frame_dt = q2_build_tick_rate(&c->build) > 0
                            ? (s32)(Q2_DT_HZ / q2_build_tick_rate(&c->build))
                            : Q2_DT_NOMINAL;
+
+    /* Which image the pages come from, refreshed here rather than at each of
+     * the nine places `in_front_end` is assigned: this is the last point before
+     * a button can change the page, so it cannot be stale when one does. */
+    q2_menu_set_front_end(&c->menu, c->in_front_end);
 
     q2_menu_advance(&c->menu, pad);
 
@@ -14837,6 +14846,14 @@ static void client_report(const client *c)
     REPORT("player.shots_dry",      c->shots_dry);
     REPORT("player.weapon_lines",   c->weapon_lines);
 
+    /* 0x80045D54's verdicts. `gate_rewinds` counts the frames retail threw
+     * away because they ended inside a live entity box; `gate_unplaced` the
+     * ones that ended in no collision cell. Both climbing steadily on a map
+     * with no movers means the gate is misfiring, not that the map is bad. */
+    REPORT("player.gate_relocated", (s32)q2_move_step_scan.relocated);
+    REPORT("player.gate_rewinds",   (s32)q2_move_step_scan.rewound_overlap);
+    REPORT("player.gate_unplaced",  (s32)q2_move_step_scan.rewound_unplaced);
+
     REPORT("creatures.placed",      c->creatures_ready ? c->creatures.set.count : 0);
     REPORT("creatures.live",        cre_live);
     REPORT("creatures.hunting",     cre_hunting);
@@ -15748,8 +15765,15 @@ no_window:
                 !c.in_front_end && !c.mp_scoreboard && !c.film_open &&
                 !c.boot_open && !c.mcard_open && !c.mission_open &&
                 !c.briefing_open && !c.endmis_open && !c.credits_open) {
-                if (c.menu.open) client_menu_close(&c);
-                else q2_menu_open(&c.menu);
+                if (c.menu.open) {
+                    client_menu_close(&c);
+                } else {
+                    /* Same as the Escape path below: page 26's install is what
+                     * composes the KILLS/SECRETS row, so the numbers have to be
+                     * in the menu before it opens. */
+                    client_menu_fill_stats(&c);
+                    q2_menu_open(&c.menu);
+                }
             }
             if (ev.type == SDL_EVENT_QUIT) {
                 c.running = false;
@@ -15802,12 +15826,11 @@ no_window:
                         c.mission_open = false;
                     else if (!c.menu.open) {
                         /*
-                         * The pause page's KILLS/SECRETS row, which was dead
-                         * code: `q2_menu_set_stats` implements the disc's own
-                         * format string at 0x800AB30C and had no caller
-                         * anywhere in src/, so `m->status` was always empty and
-                         * menudraw's `if (m->status[0])` never fired. The
-                         * numbers are the ones the level tally already keeps.
+                         * The pause page's KILLS/SECRETS row. The numbers are
+                         * the ones the level tally already keeps; the line
+                         * itself is composed by page 26's own entry hook, the
+                         * way 0x8001D638 composes it as part of installing the
+                         * page, so filling them in before opening is correct.
                          */
                         client_menu_fill_stats(&c);
                         q2_menu_open(&c.menu);

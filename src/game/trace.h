@@ -280,15 +280,31 @@ int q2_move(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
             const q2_move_mode *mode);
 
 /*
- * 0x80050CE0 with a2 = 1 — does a 286/285/286 box around `pos` overlap the
- * swept ENVELOPE of any active ENTITY target?
+ * 0x80050CE0 HAS TWO ARMS, AND THE GAME CALLS BOTH.
  *
- * This is 0x8004576C's gate: the answer decides whether the move is worth
- * re-running with entity sweeping on. Testing the envelope rather than the
- * live box is what makes it arm for a player a moving door is about to reach,
- * as opposed to one already inside it.
+ * The routine answers one question about a 286/285/286 box around `pos`: does
+ * it overlap any of the 48 entity slots (skipped entirely when a3 = 0), or any
+ * volume whose flags intersect `mask`? a2 chooses WHICH entity box is tested —
+ * 0x80050D8C `beq a2, zero` picks slot+0x00, the LIVE box, over slot+0x20, the
+ * swept envelope.
+ *
+ *   a2 = 1, a3 = 1   0x8004576C's gate: is this move worth re-running with
+ *                    entity sweeping on? The ENVELOPE, so it arms for a player
+ *                    a moving door is about to reach rather than only for one
+ *                    already inside it.        -> q2_move_overlaps_any
+ *
+ *   a2 = 0, a3 =     0x80045D78's end-of-frame validity gate, at the common
+ *   !ON_ENTITY       tail of 0x8004583C. The LIVE box, because the question
+ *                    there is "am I inside something now", and the entity half
+ *                    is skipped when the entity is standing ON an entity —
+ *                    resting on a lift's top face reads as an overlap and
+ *                    would rewind every tick.  -> q2_move_overlaps_any_live
+ *
+ * Both walk the same list in the same order (entities first, then volumes);
+ * only the box and the skip differ.
  */
 bool q2_move_overlaps_any(const q2_move_world *w, const s32 pos[3]);
+bool q2_move_overlaps_any_live(const q2_move_world *w, const s32 pos[3]);
 
 /* ------------------------------------------------------------------------- */
 /* Segment against the entity boxes — the pass every non-movement query was   */
@@ -488,6 +504,11 @@ u32 q2_move_separate(const q2_move_bodies *w, s32 self_id, const s32 pos[3],
  * / `mins` / `maxs` describe the mover inside it. NULL is a world with no other
  * bodies in it, which is what every caller had before the pass existed.
  *
+ * Every arm converges on the validity gate at 0x80045D54 before the function
+ * returns: a frame that ends inside a live entity box, inside a volume the
+ * entity's own mask makes solid, or in no collision cell at all is DISCARDED
+ * and the entity is put back where the frame started. See q2_move_step_stats.
+ *
  * Returns true when the entity finished the frame on the ground.
  */
 bool q2_move_step(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
@@ -497,5 +518,26 @@ bool q2_move_step(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
 
 /* 0x80045880: 216 unless the entity's flags carry 0x600, then 108. */
 s32 q2_move_step_height(u32 flags);
+
+/*
+ * WHAT THE 0x80045D54 GATE DID, counted.
+ *
+ * The console has no counters here; these exist because a rewind is silent
+ * from the outside — the entity simply does not move — and "the mover is
+ * broken" and "the gate is refusing every frame" look identical from a
+ * screenshot. A run in which `rewound_unplaced` climbs every tick is the
+ * find_node approximation misbehaving, not a collision bug.
+ *
+ * Diagnostic only. Nothing in the simulation reads them, and they are not
+ * saved, so they do not enter the reproducibility of a headless run.
+ */
+typedef struct q2_move_step_stats {
+    u32 gates;             /* frames that reached 0x80045D54                */
+    u32 rewound_overlap;   /* 0x80045D80: the live-box query said yes       */
+    u32 rewound_unplaced;  /* 0x80045DC8: no cell holds the new position    */
+    u32 relocated;         /* 0x80045DB4: find_node produced a new cell     */
+} q2_move_step_stats;
+
+extern q2_move_step_stats q2_move_step_scan;
 
 #endif /* Q2PSX_TRACE_H */

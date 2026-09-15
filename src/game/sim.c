@@ -3542,8 +3542,26 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
      * The level clock the weapons gate on is this same dt counter: 300 units to
      * the second, which is what makes the universal 30-tick refire a tenth of a
      * second and what the mover scripting's own time unit is (userfuncs.h).
+     *
+     * ONCE A FRAME, NOT ONCE A PLAYER, and this is the world half of the tick
+     * whichever side of the function it is written on. `run_world` is the gate
+     * the frame counter above it already carries, for the reason sim.h gives:
+     * split screen runs this function once per player against ONE world, so an
+     * ungated `+= dt` aged that world by the player count. Measured on MATRIX5,
+     * 300 headless frames, only `--dm-players` changing: level_time 3108 alone,
+     * 6072 at two players, 12072 at four.
+     *
+     * What that was worth in play: every powerup's remaining time, the pickup
+     * caption's three seconds, Mega Health's decay, the hazard-volume throttle,
+     * the drowning deadline, every mover's scripted wait and the item glow all
+     * read this clock, so a two-player Quad lasted fifteen seconds and a
+     * four-player one seven and a half.
+     *
+     * tests/test_sim.c had a check named for this and it asserted `tick_count`,
+     * which is guarded three lines up and was never the counter at fault.
      */
-    sim->level_time += dt;
+    if (run_world)
+        sim->level_time += dt;
 
     /* `sim->cur_dt` is set at the TOP of this function — see the note there.
      * The world half of the tick and the projectile sweep (0x80047D40, which

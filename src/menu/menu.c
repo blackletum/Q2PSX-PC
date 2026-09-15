@@ -343,10 +343,22 @@ static const q2_menu_page *resolve(const q2_menu *m, int id)
 {
     if (id == Q2_PAGE_VARIABLES)
         return q2_menu_variables_page(m->cheat_level);
+    /*
+     * QFRONT's video table (module+0x0EEF4, installed by module+0xCC0C) is
+     * row-for-row the executable's MULTIPLAYER one, HORIZONTAL SPLIT included,
+     * and it is the module's only video table — so the front end offers the
+     * three-row page whether or not a match is running. Serving the two-row
+     * single-player table there had made HORIZONTAL SPLIT unreachable from the
+     * one screen that can set it before a split-screen match starts.
+     */
     if (id == Q2_PAGE_VIDEO)
-        return q2_menu_video_page(m->multiplayer);
+        return q2_menu_video_page(m->multiplayer || m->front_end);
+    if (id == Q2_PAGE_CONTROLLER)
+        return q2_menu_controller_page(m->front_end);
     if (id == Q2_PAGE_FRONT_DMSETUP)
         return q2_menu_front_setup_page(m->mp_setup.mode);
+    if (id == Q2_PAGE_FRONT_RULES)
+        return q2_menu_front_rules_page(m->mp_setup.mode);
     if (id == Q2_PAGE_FRONT_VARIABLES)
         return q2_menu_front_variables_page(m->cheat_level);
     return q2_menu_page_find(id);
@@ -458,6 +470,21 @@ static void go_back(q2_menu *m)
 static void page_entered(q2_menu *m)
 {
     switch (m->page_id) {
+    case Q2_PAGE_PAUSE_SP:
+        /*
+         * 0x8001D638: the single-player pause page's install sprintf's
+         * "KILLS %d/%d    %d/%d SECRETS" (0x800AB30C) from the four counters at
+         * 0x800B29E4..0x800B29FC, copies it into the object at 0x800C3818 and
+         * places it at (256, 204) — all in the same breath as the `count -= 1`
+         * at 0x8001D6F4 that hides the table's empty sixth record. The
+         * multiplayer arm at 0x8001D5D8 does none of it, so page 43 gets no row.
+         */
+        snprintf(m->status, sizeof(m->status),
+                 "KILLS %d/%d    %d/%d SECRETS",
+                 m->stat_kills, m->stat_total_kills,
+                 m->stat_secrets, m->stat_total_secrets);
+        break;
+
     case Q2_PAGE_DEATH:
         /* 0x8001D774: the middle line is written with the resupply count and
          * greyed out when there are none, which also stops the cursor landing
@@ -522,6 +549,7 @@ void q2_menu_init(q2_menu *m, q2_menu_settings *settings, int screen_h)
 }
 
 void q2_menu_set_multiplayer(q2_menu *m, bool on)  { if (m) m->multiplayer = on; }
+void q2_menu_set_front_end(q2_menu *m, bool on)    { if (m) m->front_end = on; }
 void q2_menu_set_us_english(q2_menu *m, bool on)   { if (m) m->us_english = on; }
 void q2_menu_set_controller_count(q2_menu *m, int count)
 {
@@ -545,9 +573,17 @@ void q2_menu_set_stats(q2_menu *m, int kills, int total_kills,
 {
     if (!m)
         return;
-    /* "KILLS %d/%d    %d/%d SECRETS" — 0x800AB30C. */
-    snprintf(m->status, sizeof(m->status), "KILLS %d/%d    %d/%d SECRETS",
-             kills, total_kills, secrets, total_secrets);
+    /*
+     * Store, do not format. The row is placed by page 26's own install
+     * (0x8001D638) and `q2_menu_goto` clears `status` on the way into every
+     * page, so a line composed here would be wiped by the very page entry that
+     * is supposed to show it — which is what used to happen, because the only
+     * caller fills the numbers in and then opens the menu.
+     */
+    m->stat_kills         = kills;
+    m->stat_total_kills   = total_kills;
+    m->stat_secrets       = secrets;
+    m->stat_total_secrets = total_secrets;
 }
 
 void q2_menu_open(q2_menu *m)
@@ -595,6 +631,37 @@ q2_menu_request q2_menu_take_request(q2_menu *m)
     r = m->request;
     m->request = Q2_MREQ_NONE;
     return r;
+}
+
+/* ------------------------------------------------------------------------- */
+/* The MULTIPLAYER page's three mode rows */
+
+/*
+ * Which mode the cursor is standing on, as QMULTI numbers them.
+ *
+ * module+0x45B4 takes `cursor - first` and stores 0, 1 or 5 into engine+0x370
+ * for rows 0, 1 and 2; rows 3 and 4 (LOAD/SAVE SETTINGS) fall past the test and
+ * leave the word alone. The rows below it never ask, so leaving DEATHMATCH as
+ * the answer for them costs nothing.
+ */
+static int front_multi_mode(const q2_menu *m)
+{
+    int row = m->cursor - (int)m->page->first;
+
+    if (row == 1) return Q2_MENU_MP_TEAM_DEATHMATCH;
+    if (row == 2) return Q2_MENU_MP_VERSUS;
+    return Q2_MENU_MP_DEATHMATCH;
+}
+
+bool q2_menu_front_rules_row(const q2_menu *m)
+{
+    /* module+0x4630: `cursor - first < 3`, and the page has to be the
+     * MULTIPLAYER one because the hook that runs the test is installed only by
+     * that page's builder (module+0xCFC4 writes it into engine+0x290). */
+    if (!m || !m->open || !m->page || m->page_id != Q2_PAGE_FRONT_MULTI)
+        return false;
+    return m->cursor >= (int)m->page->first &&
+           m->cursor - (int)m->page->first < 3;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -664,9 +731,7 @@ static void run_action(q2_menu *m, int action)
     /* Picking a mode opens the setup, which is the page the capture shows
      * next: a player count, a map, the two limits, the variables and PROCEED. */
     case Q2_ACT_DM_MODE:
-        m->mp_setup.mode = (m->cursor == 1) ? Q2_MENU_MP_TEAM_DEATHMATCH
-                         : (m->cursor == 2) ? Q2_MENU_MP_VERSUS
-                                            : Q2_MENU_MP_DEATHMATCH;
+        m->mp_setup.mode = (s16)front_multi_mode(m);
         push(m, Q2_PAGE_FRONT_DMSETUP);
         break;
 
@@ -706,7 +771,23 @@ static void run_action(q2_menu *m, int action)
 
     case Q2_ACT_BACK:            pop(m);                            break;
 
-    case Q2_ACT_RESET_VIDEO:     q2_menu_reset_video_for(m->set, m->screen_h); break;
+    /*
+     * RESET TO DEFAULTS stores the display env's OWN neutral y: 24 in
+     * SLES-01534, zero in SLUS-00757, where 240 lines fill the raster
+     * (0x8001FA18, and q2_menu_screen_y_default). The number that tells the two
+     * apart is the FRAMEBUFFER height, which is `fb_h` — `screen_h` is the
+     * 248-tall block the title is measured against and is 248 on every build,
+     * so passing it wrote 24 on NTSC and dropped the picture ten per cent of a
+     * raster. `fb_h` is never zero: `q2_menu_init` seeds it from `screen_h` and
+     * `q2_menu_set_fb_height` rejects a non-positive argument.
+     *
+     * One q2_menu never learns the real height — `q2_loading`'s, built at
+     * src/game/loading.c with the constant and never given a framebuffer. That
+     * screen runs no actions (it never calls q2_menu_advance), so this case is
+     * unreachable from it; it is left alone rather than widening
+     * q2_loading_open's signature for a path that cannot be taken.
+     */
+    case Q2_ACT_RESET_VIDEO:     q2_menu_reset_video_for(m->set, m->fb_h); break;
     case Q2_ACT_RESET_SOUND:     q2_menu_reset_sound(m->set);       break;
     case Q2_ACT_RESET_PLAYER:    q2_menu_reset_player(m->set);      break;
     case Q2_ACT_RESET_VARIABLES: q2_menu_reset_variables(m->set);   break;
@@ -1091,6 +1172,30 @@ void q2_menu_advance(q2_menu *m, u16 buttons)
         case Q2_WIDGET_CHOICE: update_choice(m, m->cursor); break;
         default: break;
         }
+    }
+
+    /*
+     * SQUARE — QFRONT module+0x4654, and it has to be tested before TRIANGLE
+     * because that branch returns.
+     *
+     * The MULTIPLAYER page's per-frame hook (module+0x459C) does three things
+     * in a row: it writes the cursor row's mode into engine+0x370 as 0, 1 or 5
+     * (module+0x45F8 / 0x4604 / 0x460C), raises the RULES prompt at y = 220
+     * while that row is one of the first three (module+0x4644), and then reads
+     * the just-pressed word at engine+0x2BC for the SQUARE bit and calls the
+     * rules opener at module+0x4868. So the prompt and the opener share one
+     * predicate, which is why this asks q2_prompt_rules_row for it rather than
+     * spelling the row test out a second time.
+     *
+     * The press plays a sound: module+0x46E4 looks up "msc_menu1" (the twelve
+     * bytes at module+0x1190) through engine+0x130 and plays it through
+     * engine+0x150 — the same select sound CROSS gets.
+     */
+    if ((m->pad_new & Q2_PAD_SQUARE) && q2_menu_front_rules_row(m)) {
+        m->mp_setup.mode = (s16)front_multi_mode(m);
+        m->sound = Q2_MSND_SELECT;
+        push(m, Q2_PAGE_FRONT_RULES);
+        return;
     }
 
     /* TRIANGLE — 0x8001A06C. */

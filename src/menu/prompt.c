@@ -111,10 +111,10 @@ void q2_prompt_sync_menu(q2_prompt_bar *b, const q2_menu *m, bool front_end)
                    m->page->back != Q2_ACT_NONE ? y : 260);
 
     /* QFRONT module+0x4618..0x4738: RULES belongs to the three game-mode
-     * rows, not LOAD SETTINGS or SAVE SETTINGS, and has its own y = 220. */
-    rules = front_end && m->page_id == Q2_PAGE_FRONT_MULTI &&
-            m->cursor >= (int)m->page->first &&
-            m->cursor - (int)m->page->first < 3;
+     * rows, not LOAD SETTINGS or SAVE SETTINGS, and has its own y = 220. The
+     * row test is the engine's own, so that the caption and the button that
+     * answers it can never disagree. */
+    rules = front_end && q2_menu_front_rules_row(m);
     q2_prompt_show(b, Q2_PROMPT_RULES, rules ? 220 : 260);
 }
 

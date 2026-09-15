@@ -550,6 +550,219 @@ static void test_video_variant(void)
           "multiplayer item 0 is %s", mp->items[0].label);
 }
 
+/*
+ * 0x8001D638: the single-player pause page composes its KILLS/SECRETS row as
+ * part of its own install, so the row has to survive the page entry that
+ * follows a caller filling the numbers in — and has to be absent everywhere
+ * else, because the placement at (256, 204) belongs to page 26 alone.
+ */
+static void test_pause_status_line(void)
+{
+    q2_menu_settings s;
+    q2_menu m;
+
+    q2_menu_settings_defaults(&s);
+    q2_menu_init(&m, &s, Q2_MENU_SCREEN_H);
+    q2_menu_set_stats(&m, 3, 10, 1, 4);
+    q2_menu_open(&m);
+
+    CHECK(m.page_id == Q2_PAGE_PAUSE_SP, "opened on page %d", m.page_id);
+    CHECK(strcmp(m.status, "KILLS 3/10    1/4 SECRETS") == 0,
+          "pause status reads [%s]", m.status);
+
+    /* Every sub-page clears it: the console never places the row on one. */
+    q2_menu_goto(&m, Q2_PAGE_OPTIONS);
+    CHECK(m.status[0] == '\0', "OPTIONS carries [%s]", m.status);
+    q2_menu_goto(&m, Q2_PAGE_VIDEO);
+    CHECK(m.status[0] == '\0', "VIDEO carries [%s]", m.status);
+
+    /* Coming back re-composes it from the numbers still held. */
+    q2_menu_goto(&m, Q2_PAGE_PAUSE_SP);
+    CHECK(strcmp(m.status, "KILLS 3/10    1/4 SECRETS") == 0,
+          "returning to PAUSED reads [%s]", m.status);
+
+    /* 0x8001D5D8, the multiplayer arm, does none of it. */
+    q2_menu_close(&m);
+    q2_menu_set_multiplayer(&m, true);
+    q2_menu_open(&m);
+    CHECK(m.page_id == Q2_PAGE_PAUSE_MP, "multiplayer opens page %d", m.page_id);
+    CHECK(m.status[0] == '\0', "the multiplayer pause page carries [%s]",
+          m.status);
+}
+
+/*
+ * RESET TO DEFAULTS stores the FRAMEBUFFER's neutral y, not the block's
+ * reference height: zero on a 240-line raster, 24 on a 248-line one
+ * (0x8001FA18). The helper was always right; the menu action fed it 248 on
+ * every build, which put SLUS-00757's picture 24 lines down.
+ */
+static void test_reset_video_uses_the_framebuffer(void)
+{
+    q2_menu_settings set;
+    q2_menu m;
+    int i, reset = -1;
+
+    q2_menu_settings_defaults(&set);
+    q2_menu_init(&m, &set, Q2_MENU_SCREEN_H);
+    q2_menu_set_fb_height(&m, 240);
+    q2_menu_reset_video_for(&set, 240);
+    q2_menu_open(&m);
+    q2_menu_advance(&m, 0);             /* the settle frame q2_menu_open asks for */
+    q2_menu_goto(&m, Q2_PAGE_VIDEO);
+
+    for (i = 0; i < (int)m.page->count; i++)
+        if (strcmp(m.page->items[i].label, "RESET TO DEFAULTS") == 0)
+            reset = i;
+    CHECK(reset >= 0, "the VIDEO page has a RESET TO DEFAULTS row");
+    if (reset < 0)
+        return;
+
+    q2_menu_point_at(&m, reset);
+    tap(&m, Q2_PAD_CROSS);
+    CHECK(set.v[Q2_SET_SCREEN_Y] == 0,
+          "NTSC RESET leaves SCREEN_Y at %d", set.v[Q2_SET_SCREEN_Y]);
+
+    /* The 248-line build still gets its 24. */
+    q2_menu_init(&m, &set, Q2_MENU_SCREEN_H);
+    q2_menu_open(&m);
+    q2_menu_advance(&m, 0);
+    q2_menu_goto(&m, Q2_PAGE_VIDEO);
+    q2_menu_point_at(&m, reset);
+    tap(&m, Q2_PAD_CROSS);
+    CHECK(set.v[Q2_SET_SCREEN_Y] == 24,
+          "PAL RESET leaves SCREEN_Y at %d", set.v[Q2_SET_SCREEN_Y]);
+}
+
+/*
+ * The front end runs QFRONT's tables, and two of them are not the
+ * executable's: VIDEO is the three-row one (module+0x0EEF4, the only video
+ * table in the module) and CONTROLLER abbreviates four of its five labels
+ * (module+0x0FA4C).
+ */
+static void test_front_end_tables(void)
+{
+    q2_menu_settings s;
+    q2_menu m;
+
+    q2_menu_settings_defaults(&s);
+    q2_menu_init(&m, &s, Q2_MENU_SCREEN_H);
+    q2_menu_set_front_end(&m, true);
+    q2_menu_open(&m);
+    q2_menu_goto(&m, Q2_PAGE_FRONT_OPTIONS);
+    q2_menu_advance(&m, 0);             /* the settle frame q2_menu_open asks for */
+
+    CHECK(q2_menu_point_at(&m, 2), "the front-end OPTIONS page has a third row");
+    CHECK(strcmp(m.page->items[2].label, "VIDEO OPTIONS") == 0,
+          "row 2 is %s", m.page->items[2].label);
+    tap(&m, Q2_PAD_CROSS);
+    CHECK(m.page_id == Q2_PAGE_VIDEO, "VIDEO OPTIONS landed on page %d",
+          m.page_id);
+    CHECK(m.page->count == 3, "the front-end VIDEO page has %u rows",
+          m.page->count);
+    CHECK(strcmp(m.page->items[0].label, "HORIZONTAL SPLIT") == 0,
+          "its first row is %s", m.page->items[0].label);
+
+    /* SCREEN POSITION's back action names the VIDEO page rather than popping,
+     * so the page it lands on must still be the front end's three-row one.
+     * CROSS is what leaves that page (0x8001CD64 hands the d-pad to the offset
+     * and only the select button calls the back handler). */
+    q2_menu_goto(&m, Q2_PAGE_SCREEN_POSITION);
+    tap(&m, Q2_PAD_CROSS);
+    CHECK(m.page_id == Q2_PAGE_VIDEO && m.page->count == 3,
+          "backing out of SCREEN POSITION gives page %d with %u rows",
+          m.page_id, m.page ? m.page->count : 0);
+
+    q2_menu_goto(&m, Q2_PAGE_CONTROLLER);
+    CHECK(m.page->count == 5, "the front-end CONTROLLER page has %u rows",
+          m.page->count);
+    CHECK(strcmp(m.page->items[1].label, "VIBRATE") == 0 &&
+          strcmp(m.page->items[2].label, "SWAP Y") == 0 &&
+          strcmp(m.page->items[3].label, "MOUSE") == 0 &&
+          strcmp(m.page->items[4].label, "MOUSE SPEED") == 0,
+          "QFRONT's controller labels");
+
+    /* In game it is the executable's table, with the long words. */
+    q2_menu_set_front_end(&m, false);
+    q2_menu_goto(&m, Q2_PAGE_CONTROLLER);
+    CHECK(strcmp(m.page->items[1].label, "VIBRATION") == 0,
+          "the in-game controller row 1 is %s", m.page->items[1].label);
+    q2_menu_goto(&m, Q2_PAGE_VIDEO);
+    CHECK(m.page->count == 2, "the in-game single-player VIDEO page has %u rows",
+          m.page->count);
+}
+
+/*
+ * SQUARE on a mode row opens that mode's rules page — QFRONT module+0x4654
+ * reads the bit and module+0x4868 installs the page the mode's jump-table arm
+ * names. The page is pure text with the MULTIPLAYER page as its back handler.
+ */
+static void test_front_rules_pages(void)
+{
+    q2_menu_settings s;
+    q2_menu m;
+    const q2_menu_page *p;
+
+    q2_menu_settings_defaults(&s);
+    q2_menu_init(&m, &s, Q2_MENU_SCREEN_H);
+    q2_menu_set_front_end(&m, true);
+    q2_menu_open(&m);
+    q2_menu_goto(&m, Q2_PAGE_FRONT_MULTI);
+    q2_menu_advance(&m, 0);
+
+    /* Row 1 is TEAM DEATHMATCH, mode 1, page module+0x0F4DC. */
+    q2_menu_point_at(&m, (int)m.page->first + 1);
+    CHECK(q2_menu_front_rules_row(&m), "row 1 advertises RULES");
+    tap(&m, Q2_PAD_SQUARE);
+    CHECK(m.page_id == Q2_PAGE_FRONT_RULES, "SQUARE landed on page %d",
+          m.page_id);
+    CHECK(m.page && m.page->title && strcmp(m.page->title, "TEAM DEATHMATCH") == 0,
+          "its banner is %s", m.page && m.page->title ? m.page->title : "(none)");
+    CHECK(m.page && m.page->count == 7 &&
+          strcmp(m.page->items[0].label, "RULES") == 0,
+          "it has %u rows starting %s", m.page ? m.page->count : 0,
+          m.page && m.page->count ? m.page->items[0].label : "");
+    CHECK(m.page && m.page->first == m.page->count,
+          "nothing on it is navigable");
+
+    /* TRIANGLE comes straight back, as engine+0x28C being the MULTIPLAYER
+     * builder says it does. */
+    tap(&m, Q2_PAD_TRIANGLE);
+    CHECK(m.page_id == Q2_PAGE_FRONT_MULTI, "TRIANGLE landed on page %d",
+          m.page_id);
+
+    /* The settings rows carry no RULES prompt and no rules page. */
+    q2_menu_point_at(&m, (int)m.page->first + 3);
+    CHECK(!q2_menu_front_rules_row(&m), "LOAD SETTINGS advertises RULES");
+    tap(&m, Q2_PAD_SQUARE);
+    CHECK(m.page_id == Q2_PAGE_FRONT_MULTI, "SQUARE moved off page %d",
+          m.page_id);
+
+    /* All six arms of module+0x4868, in its own order. Three of them are nine
+     * rows, which the module-page reader's eight-row cap hides. */
+    p = q2_menu_front_rules_page(Q2_MENU_MP_DEATHMATCH);
+    CHECK(p->count == 6 && p->addr == 0x8010F434u, "DEATHMATCH rules");
+    p = q2_menu_front_rules_page(Q2_MENU_MP_TEAM_DEATHMATCH);
+    CHECK(p->count == 7 && p->addr == 0x8010F4DCu, "TEAM DEATHMATCH rules");
+    p = q2_menu_front_rules_page(2);
+    CHECK(p->count == 9 && p->addr == 0x8010F59Cu &&
+          strcmp(p->items[8].label, "CAPTURES WINS.") == 0,
+          "CAPTURE THE FLAG rules end on %s", p->items[p->count - 1].label);
+    p = q2_menu_front_rules_page(3);
+    CHECK(p->count == 6 && p->addr == 0x8010F68Cu, "TAG rules");
+    p = q2_menu_front_rules_page(4);
+    CHECK(p->count == 9 && p->addr == 0x8010F734u &&
+          strcmp(p->items[8].label, "FLAG THE LONGEST WINS.") == 0,
+          "TEAM TAG rules end on %s", p->items[p->count - 1].label);
+    p = q2_menu_front_rules_page(Q2_MENU_MP_VERSUS);
+    CHECK(p->count == 9 && p->addr == 0x8010F824u &&
+          strcmp(p->items[8].label, "REACH SCORE LIMIT WINS.") == 0,
+          "VERSUS rules end on %s", p->items[p->count - 1].label);
+
+    /* module+0x4990: a mode the table does not cover installs the empty one. */
+    p = q2_menu_front_rules_page(6);
+    CHECK(p->count == 0, "the fall-through page has %u rows", p->count);
+}
+
 /* QFRONT+0x4AD8/+0x50D0/+0x49F8: the complete local-match front end. */
 static void test_front_multiplayer_setup(void)
 {
@@ -1411,6 +1624,10 @@ int main(void)
     test_screen_position();
     test_variables_pages();
     test_video_variant();
+    test_pause_status_line();
+    test_reset_video_uses_the_framebuffer();
+    test_front_end_tables();
+    test_front_rules_pages();
     test_front_multiplayer_setup();
     test_text_length();
     test_title_y();
