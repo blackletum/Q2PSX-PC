@@ -166,6 +166,18 @@ void q2_menu_apply_variables(const q2_menu_settings *s, bool enabled,
     if (!out)
         return;
 
+    /*
+     * BLAST FORCE is carried on both arms, unlike the three below it.
+     * 0x8001C7E4 stores constants into 0x800AE924 / 0x800B2DD8 / 0x800B29EC
+     * and has no store to 0x800B3358 at all — `xrefs 0x800B3358` finds only
+     * the reset at 0x80020498, the slider's own store at 0x8001BE38 and the
+     * read at 0x80057F84. So in single player the halfword simply keeps what
+     * the slider last wrote; forcing 64 on the "off" arm would invent a reset
+     * the disc does not perform. 64 is still the value a session that never
+     * touched the row has, because q2_menu_reset_variables seeds it there.
+     */
+    out->blast_force = s ? (s32)s->v[Q2_SET_BLAST_FORCE] : 64;
+
     if (!s || !enabled) {
         /* 0x8001C7E4 — the "off" path writes the same constants. */
         out->gravity   = 32;

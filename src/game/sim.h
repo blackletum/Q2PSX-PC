@@ -275,6 +275,26 @@ typedef struct q2_player {
      */
     s16  prev_health, prev_armour;
 
+    /*
+     * THE PLAYER'S FLINCH, published for whoever poses the body.
+     *
+     * 0x8003A1C8 builds one animation id in s5 and hands it to `player_anim`
+     * (0x8003CE14) at 0x8003AFC8. Every other request is conditional — STAND at
+     * 0x8003A2F0, RUN at 0x8003AB5C, ATTACK only over STAND at 0x8003ADAC — but
+     * 0x8003AE08 `addiu s5, zero, 3` is not: whenever the damage byte at
+     * entity+0xDF is non-zero (`lb v0, 223(s3)` at 0x8003ADF8) the request is
+     * PAIN, outranking all of them, and the byte is cleared at 0x8003AE0C so it
+     * asks once per hit. The killing tick never reaches that read, because the
+     * death arm at 0x8003ADB8 returns first.
+     *
+     * The port carries it as a SERIAL rather than a flag, the way `shot_serial`
+     * already reaches the view weapon: the pose runs on the display clock and
+     * may ask several times for one tick, so a flag it had to clear would be
+     * consumed by whichever viewport asked first. Refreshed by update_pain from
+     * `q2_actor.damage_serial`, and only while the player is alive.
+     */
+    u32  pain_serial;
+
     s32  footstep_time; /* client+0x8C                                        */
     int  foot;          /* client+0x90, which of the two sounds is next       */
 
@@ -794,6 +814,20 @@ typedef struct q2_sim {
      * that never opens the menu sees exactly the previous behaviour.
      */
     s32  gravity;
+
+    /*
+     * BLAST FORCE, the impulse scale's input, 0x800B3358. The damage function
+     * reads it raw — `lh 0x800B3358` at 0x80057F84, then 125*(v+64)>>6 for an
+     * ordinary hit and 25*(v+64)>>2 when a player hurt themselves — so unlike
+     * GRAVITY and GAME SPEED it is NOT transformed by 0x8001C698; the menu's
+     * store at 0x8001BE38 puts the slider's own value in the halfword.
+     *
+     * Initialised to 64, which is what the reset routine writes (0x80020494
+     * `addiu v1, zero, 64` / 0x80020498 `sh v1, 884(v0)`), so a caller that
+     * never opens the menu gets the disc's scale of 250 / 800 rather than the
+     * 125 / 400 a zeroed struct would give.
+     */
+    s32  blast_force;
 
     /*
      * Environment flags asserted by the CALLER, OR'd in alongside whatever the

@@ -1146,6 +1146,42 @@ static void test_knockback(void)
     printf("knockback\n");
     q2_combat_rules_default(&rules);
 
+    /*
+     * BLAST FORCE's reset value, 0x80020494/0x80020498. A memset struct gives
+     * mass 0, and the scale is 125*(mass+64)>>6 — 125 instead of 250 — so every
+     * impulse in the game was exactly half the disc's until this was seeded.
+     * The tests below set 64 by hand and so never saw it.
+     */
+    check_eq_i(rules.knockback_mass, 64,
+               "q2_combat_rules_default seeds BLAST FORCE with 0x80020498's 64");
+
+    /*
+     * And the halving is measurable: the two scales are 125*(0+64)>>6 = 125
+     * and 125*(64+64)>>6 = 250, so the same hit pushes exactly twice as far.
+     * Measured on Z, which has no ceiling at either skill, and at 48 points of
+     * damage, which divides the 2400 so neither answer is truncated.
+     */
+    {
+        q2_actor half, full;
+        q2_combat_rules zero = rules;
+        q2_actor from;
+        s32 p[3] = { 0, 0, -100 };
+
+        zero.knockback_mass = 0;
+        place(&from, 0, 0, -1000, 100);
+
+        place(&half, 0, 0, 0, 100);
+        q2_combat_damage(&from, &half, 48, Q2_MOD_ROCKET, p, &zero);
+        place(&full, 0, 0, 0, 100);
+        q2_combat_damage(&from, &full, 48, Q2_MOD_ROCKET, p, &rules);
+
+        printf("  mass 0 -> %d, mass 64 -> %d\n",
+               (int)half.knockback[2], (int)full.knockback[2]);
+        check(half.knockback[2] == 640 && full.knockback[2] == 1280,
+              "mass 64 pushes exactly twice as hard as the zero the rules "
+              "used to carry");
+    }
+
     check(q2_mod_knocks_back(Q2_MOD_ROCKET), "the rocket pushes");
     check(q2_mod_knocks_back(Q2_MOD_BULLET), "so does a bullet");
     check(!q2_mod_knocks_back(Q2_MOD_LAVA), "lava does not");

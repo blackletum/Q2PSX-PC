@@ -247,6 +247,23 @@ typedef struct client_player_anim {
     u32             shot_serial;
     bool            stamped;
     bool            attack_latched;
+    /*
+     * The sim's flinch serial as this record last saw it, and the latch it
+     * raises. Same shape as `shot_serial`/`attack_latched` above and for the
+     * same reason: the pose runs on the display clock and several viewports
+     * may ask for it in one frame, so the request cannot be a flag the first
+     * asker clears. Dropped when the pain clip wraps.
+     */
+    u32             pain_serial;
+    bool            pain_latched;
+    /*
+     * Whether the move now playing has run past its end at least once --
+     * bit 0 of entity+0x102, raised by 0x8003DF90 and read by the chooser at
+     * 0x8003D008 and 0x8003D1D0. Without it `q2_player_anim_pick`'s rule that
+     * a pain move holds until it wraps degenerates and the next tick's
+     * RUN/STAND cuts the flinch off after a single frame.
+     */
+    bool            wrapped;
 } client_player_anim;
 
 /*
@@ -3023,6 +3040,9 @@ static q2_player_move client_player_visual_move(client *c, int pi)
     const q2_player_death *d = &c->death[pi];
     u32 serial = pi == 0 ? c->sim[0].combat.shot_serial
                          : c->sim[0].pcombat[pi].shot_serial;
+    u32 pain = c->sim[0].player[pi].pain_serial;
+    q2_player_anim want;
+    q2_player_move pick;
 
     if (d->stage != Q2_PDEATH_ALIVE)
         return d->move != Q2_PMOVE_NONE ? d->move : Q2_PMOVE_DEATH1;
@@ -3031,13 +3051,52 @@ static q2_player_move client_player_visual_move(client *c, int pi)
         a->shot_serial    = serial;
         a->attack_latched = true;
     }
-    if (a->attack_latched)
-        return Q2_PMOVE_ATTAK;
-    if (!p->on_ground)
-        return Q2_PMOVE_JUMP;
-    if (abs(p->vel[0]) + abs(p->vel[2]) > 8)
-        return Q2_PMOVE_RUN;
-    return Q2_PMOVE_STAND;
+    if (pain != a->pain_serial) {
+        a->pain_serial  = pain;
+        a->pain_latched = true;
+    }
+
+    /*
+     * WHICH ANIMATION IS WANTED, as one id, exactly as 0x8003A1C8 builds one
+     * in s5 before handing it to `player_anim` at 0x8003AFC8. PAIN outranks
+     * everything: 0x8003AE08 `addiu s5, zero, 3` is unconditional once the
+     * damage byte is set, where every other request is a branch.
+     *
+     * The three below it keep the order this function already had.
+     * DEVIATION, called out rather than quietly fixed: the console lets
+     * ATTACK replace only STAND (0x8003ADAC `bne s5, zero`), so a console
+     * player who fires while running keeps running; this latch puts ATTAK
+     * ahead of JUMP and RUN. Changing that is a separate reading of
+     * 0x8003A930/0x8003AB5C and is not made here.
+     */
+    if (a->pain_latched)          want = Q2_PANIM_PAIN;
+    else if (a->attack_latched)   want = Q2_PANIM_ATTACK;
+    else if (!p->on_ground)       want = Q2_PANIM_JUMP;
+    else if (abs(p->vel[0]) + abs(p->vel[2]) > 8)
+                                  want = Q2_PANIM_RUN;
+    else                          want = Q2_PANIM_STAND;
+
+    /*
+     * And 0x8003CE14 itself decides what that becomes. This used to be four
+     * `return`s of the port's own, so `q2_player_anim_pick` was reconstructed
+     * -- the PAIN arm at 0x8003CF74, the hold rule at 0x8003D188 -- and asked
+     * for nothing but DEATH, and Male2's Pain 1/2/3 were never played.
+     *
+     * THE ROLL IS THE PORT'S. 0x8003CF74 picks the clip with `rand() % 3`
+     * inside the game think; this call is on the DISPLAY path, where drawing
+     * from the sim's generator would move a stream the shot spread and the
+     * creature AI share. The flinch serial is used instead, so consecutive
+     * hits still walk the three clips and a headless run stays reproducible.
+     */
+    pick = q2_player_anim_pick(want, a->move,
+                               a->wrapped ? Q2_PDEATH_ANIM_WRAPPED : 0u,
+                               a->pain_serial);
+    if (pick != Q2_PMOVE_NONE)
+        return pick;
+
+    /* 0x8003D1F8 returns without installing anything: the move already
+     * playing keeps playing. */
+    return a->move != Q2_PMOVE_NONE ? a->move : Q2_PMOVE_STAND;
 }
 
 /* Build a player pose from Male2's ten named retail moves. The coloured body
@@ -3069,6 +3128,7 @@ static bool client_player_pose(client *c, int pi, q2_model_pose *pose)
         q2_model_cursor_reset(&a->cursor, first);
         a->move    = move;
         rebased    = true;
+        a->wrapped = false;   /* a freshly installed move has not wrapped */
     }
 
     /* Installing a retail runtime move exposes its first key for one display
@@ -3092,6 +3152,12 @@ static bool client_player_pose(client *c, int pi, q2_model_pose *pose)
                 a->cursor.target   = a->cursor.position;
                 if (move == Q2_PMOVE_ATTAK)
                     a->attack_latched = false;
+                /* 0x8003DF90 raises bit 0 of entity+0x102 when a move runs
+                 * past its end; the chooser reads it to know a pain clip
+                 * has played out and may now be replaced. */
+                if (q2_player_move_is_pain(move))
+                    a->pain_latched = false;
+                a->wrapped = true;
             }
         } else {
             a->cursor.position = next;
@@ -9544,6 +9610,17 @@ static void client_apply_settings(client *c)
                             q2_build_tick_rate(&c->build), &rules);
 
     c->sim[0].gravity = rules.gravity;
+
+    /*
+     * BLAST FORCE, which until now stopped at the menu: the slider on four
+     * pages wrote a setting nothing read, and `q2_combat_rules.knockback_mass`
+     * -- the port's name for 0x800B3358 -- was never written by anything, so
+     * every impulse in the game used the scale for mass 0, exactly half the
+     * disc's. Unlike gravity and the tick rate this value is not transformed
+     * on the way in: 0x80057F84 reads the halfword the slider stored, and
+     * 0x8001C7E4 has no store to it at all, so it carries on both arms.
+     */
+    c->sim[0].blast_force = rules.blast_force;
 
     /*
      * The cheat word, which until now never left the menu: `rules.cheats` was

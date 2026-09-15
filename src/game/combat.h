@@ -151,7 +151,11 @@
 /* ------------------------------------------------------------------------- */
 enum {
     Q2_MOD_NONE         =  0,
-    Q2_MOD_ENERGY_BOLT  =  1,   /* 0x80049E34 blaster bolt, 0x8004BC48 BFG   */
+    /* The two sites whose `a3` is the immediate 1: 0x80049E34, the BFG's beam
+     * pass, and 0x8004BC48, the ball's contact hit. NOT the blaster bolt —
+     * 0x80047F08 takes its mod from `lh a3, -38(s3)`, a field, so which mod a
+     * bolt carries is the spawner's choice and not this constant. */
+    Q2_MOD_ENERGY_BOLT  =  1,   /* 0x80049E34 BFG beam, 0x8004BC48 BFG contact */
     Q2_MOD_2            =  2,   /* raises the +0x2F0 effect timer to 15      */
     Q2_MOD_RAIL         =  3,   /* 0x80049330                                */
     Q2_MOD_4            =  4,   /* raises the +0x2F2 effect timer to 30      */
@@ -455,6 +459,22 @@ typedef struct q2_actor {
     s32  knockback[3];      /* entity+0x2F8..0x2FC                           */
     bool knocked;           /* entity+0x10C bit 0x4000                       */
     s16  last_mod;          /* entity+0xDF                                   */
+    /*
+     * HOW MANY TIMES entity+0xDF HAS BEEN WRITTEN. The console has no such
+     * counter: the byte itself is the flag, and the live player's think reads
+     * it at 0x8003ADF8 and clears it at 0x8003AE0C, which is what makes PAIN a
+     * one-shot animation request.
+     *
+     * DEVIATION, and here is why. In the port `last_mod` has readers the
+     * console's control flow never lets meet that clear — the killing tick's
+     * death build (client main.c) and `q2_player_death_cries_out`, both of
+     * which the console reaches through the death arm at 0x8003ADB8, which
+     * returns (`j 0x8003b014`) before the pain read. Rather than reorder those,
+     * the port splits the byte in two: `last_mod` keeps WHICH mod, and this
+     * counts the writes so the pain read still has an edge to consume. Bumped
+     * wherever the console stores the byte (0x80057E84, 0x80057EBC).
+     */
+    u32  damage_serial;
     /*
      * Six damage-effect timer bytes, entity+0x2F0..0x2F5. The last slot is
      * real: the ticker 0x8005B830 reads +0x2F5 at 0x8005B844 and decrements it

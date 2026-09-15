@@ -3900,6 +3900,135 @@ static void kill_target(q2_sim *sim, q2_actor *cre, s32 dist)
     cre->is_monster = true;
 }
 
+/* ------------------------------------------------------------------------- */
+/*
+ * THE BFG'S BEAMS HURT WHAT THEY TOUCH — 0x80049B9C's second half.
+ *
+ * The maintainer the ball calls every tick (0x8004BD04) does two things to each
+ * candidate that clears its filters: it refreshes a timed beam AND it damages,
+ * 10 points in single player (0x80049E28) or 5 in deathmatch (0x80049E10),
+ * throttled by the halfword at ball+0x4C. The port had only the beam, so the
+ * green lattice was decoration and the BFG was worth its contact hit plus one
+ * blast. It also had no visibility gate despite describing one, and no distance
+ * filter at all.
+ */
+static void bfg_ball_at(q2_sim *sim, const s32 pos[3], s32 owner)
+{
+    q2_projectile *p = &sim->combat.projectiles.p[0];
+    int k;
+
+    memset(p, 0, sizeof(*p));
+    p->in_use = true;
+    p->kind   = Q2_PROJ_BFG;
+    for (k = 0; k < 3; k++)
+        p->pos[k] = pos[k];
+    p->damage = 200;
+    p->mod    = Q2_MOD_ENERGY_BOLT;
+    p->owner  = owner;
+    p->node   = Q2_PROJ_NODE_UNKNOWN;
+    sim->combat.projectiles.live = 1;
+}
+
+/*
+ * Ten world ticks with one ball parked where it is, reporting how many of them
+ * the beams landed on. That is not all ten: 0x80049E00 refuses below 30 and
+ * 0x8004BD14 drains 30 only at 31 or more, so at the PAL delta of 12 the pass
+ * fires on three ticks in five.
+ */
+static int bfg_beam_ticks(q2_sim *sim, const s32 ball[3], s32 owner,
+                          q2_actor **list, const q2_actor *victim)
+{
+    int t, hits = 0;
+
+    q2_sim_set_world_targets(sim, list, 1);
+    bfg_ball_at(sim, ball, owner);
+    for (t = 0; t < 10; t++) {
+        s16 before = victim->health;
+
+        sim->cur_dt = 12;
+        q2_sim_combat_tick(sim);
+        if (victim->health != before)
+            hits++;
+    }
+    q2_sim_set_world_targets(sim, NULL, 0);
+    return hits;
+}
+
+static void test_bfg_beams_damage(void)
+{
+    q2_sim    sim;
+    q2_actor  cre;
+    q2_actor *list[1];
+    s32       spawn[3]  = { 0, 0, 0 };
+    const s32 room_a[3] = { 900, 300, 500 };
+    int       near_hits, far_hits, blind_hits, own_hits;
+    s16       near_health, far_health, blind_health, own_health;
+
+    printf("the BFG's beams damage what they can see\n");
+
+    q2_sim_init(&sim, NULL, 50);
+    q2_sim_spawn(&sim, spawn, 0);
+    list[0] = &cre;
+
+    /* NEAR, no hull: 400 units from the ball, well inside the 3072 sphere. */
+    splash_victim(&cre, 1300);
+    near_hits   = bfg_beam_ticks(&sim, room_a, -1, list, &cre);
+    near_health = cre.health;
+
+    /* FAR: 4000 units out, past the squared reject at 0x80049CA4's 0x900000. */
+    splash_victim(&cre, 900 + 4000);
+    far_hits   = bfg_beam_ticks(&sim, room_a, -1, list, &cre);
+    far_health = cre.health;
+
+    printf("  ten ticks: near landed %d times (health %d), far %d "
+           "(health %d)\n", near_hits, (int)near_health, far_hits,
+           (int)far_health);
+    check(near_hits > 0 && near_health == (s16)(100 - 10 * near_hits),
+          "the beams hurt a visible target for ten a time while the ball "
+          "flies (0x80049E34, 0x80049E28)");
+    check(far_hits == 0 && far_health == 100,
+          "and nothing past 3072 units, the sphere at 0x80049CA4");
+
+    /*
+     * BLIND. The two-room hull the splash test uses: the ball in room A, the
+     * creature 400 units through the wall in room B. 0x80049CE0's visibility
+     * test branches past BOTH the beam and the damage.
+     */
+    check(two_room_hull(&sim.coll, 12, 34), "the two-room hull parses");
+    sim.coll_ready = true;
+    splash_victim(&cre, 1300);
+    blind_hits   = bfg_beam_ticks(&sim, room_a, -1, list, &cre);
+    blind_health = cre.health;
+    sim.coll_ready = false;
+
+    printf("  through a wall: landed %d times, health %d\n",
+           blind_hits, (int)blind_health);
+    check(blind_hits == 0 && blind_health == 100,
+          "a target the ball cannot see takes nothing (0x80051874)");
+
+    /*
+     * THE OWNER IS SKIPPED: 0x80049C54 `beq a1, s3`. A world list names the
+     * live player, so without that branch a BFG shot would scythe its own
+     * shooter for the length of its flight.
+     */
+    sim.combat.self.takedamage = Q2_DAMAGE_YES;
+    sim.combat.inv.health      = 100;
+    sim.combat.self.origin[0]  = 1300;
+    sim.combat.self.origin[1]  = 300;
+    sim.combat.self.origin[2]  = 500;
+    list[0]    = &sim.combat.self;
+    own_hits   = bfg_beam_ticks(&sim, room_a, 0, list, &sim.combat.self);
+    own_health = sim.combat.inv.health;
+
+    printf("  the shooter himself: landed %d times, health %d\n",
+           own_hits, (int)own_health);
+    check(own_hits == 0 && own_health == 100,
+          "the ball never beams or hurts its own owner");
+
+    q2_sim_free(&sim);
+}
+
+/* ------------------------------------------------------------------------- */
 static void test_kill_raises_no_burst(void)
 {
     q2_sim            sim;
@@ -4017,6 +4146,7 @@ int main(void)
     test_present_frame_counter();
     test_placed_player_killer_byte();
     test_respawned_player_killer_byte();
+    test_bfg_beams_damage();
     test_kill_raises_no_burst();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);

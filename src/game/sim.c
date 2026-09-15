@@ -87,6 +87,10 @@ void q2_sim_init(q2_sim *sim, const q2_world_zone *zone, int tick_rate_hz)
      * other caller — the harness, the tests — keeps the old behaviour. */
     sim->fire_from_input    = true;
     sim->gravity            = Q2_GRAVITY;
+    /* 0x80020498's reset value. sync_rules copies this into the combat rules
+     * every damage pass, so without it here a fresh sim would overwrite the 64
+     * q2_combat_rules_default seeds with a zero and halve every impulse. */
+    sim->blast_force        = 64;
     sim->player[sim->cur_player].view_height = Q2_VIEW_STAND;
 
     /*
@@ -2966,18 +2970,30 @@ static void update_pain(q2_sim *sim)
              */
             p->ent2_flags |= Q2_ENT2_DEAD;
         }
-    } else if (hurt && sim->level_time > p->pain_time) {
-        q2_ent_sound which;
+    } else {
+        if (hurt && sim->level_time > p->pain_time) {
+            q2_ent_sound which;
 
-        /* 0x8003AF54: four brackets on the health that is LEFT, so the voice
-         * gets worse as the player does. */
-        if (health < 25)      which = Q2_SND_PAIN_25;
-        else if (health < 50) which = Q2_SND_PAIN_50;
-        else if (health < 75) which = Q2_SND_PAIN_75;
-        else                  which = Q2_SND_PAIN_100;
+            /* 0x8003AF54: four brackets on the health that is LEFT, so the
+             * voice gets worse as the player does. */
+            if (health < 25)      which = Q2_SND_PAIN_25;
+            else if (health < 50) which = Q2_SND_PAIN_50;
+            else if (health < 75) which = Q2_SND_PAIN_75;
+            else                  which = Q2_SND_PAIN_100;
 
-        p->pain_time = sim->level_time + 210;
-        q2_ent_sound_at(&sim->ent_world.events, which, p->pos);
+            p->pain_time = sim->level_time + 210;
+            q2_ent_sound_at(&sim->ent_world.events, which, p->pos);
+        }
+
+        /*
+         * 0x8003ADF8..0x8003AE0C: the FLINCH, which is not the same edge as
+         * the voice above. The console reads the damage byte at entity+0xDF,
+         * so a recorded hit that took nothing off either bar still asks for
+         * the pain move, where `hurt` — a health/armour diff, 0x8003AE10 —
+         * would miss it. Only the living ask: the death arm at 0x8003ADB8
+         * returns before this read, which is why it sits in the `else`.
+         */
+        p->pain_serial = sim->combat.self.damage_serial;
     }
 
     /* 0x8003AFA8: unconditionally, at the very end of the frame. */

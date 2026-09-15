@@ -146,6 +146,13 @@ typedef struct q2_menu_rules {
     s32 gravity;    /* (GRAVITY + 64) >> 2 — 32 when the variables are off   */
     s32 tick_rate;  /* base * (GAME_SPEED + 64) >> 7                          */
     u16 cheats;     /* the mask above                                         */
+    /*
+     * BLAST FORCE, untransformed. The other three rows are recomputed by
+     * 0x8001C698 and reset by 0x8001C7E4; this one is not — the slider's own
+     * store at 0x8001BE38 is the only writer besides the reset routine, and the
+     * damage function reads the halfword raw. So it carries on BOTH arms.
+     */
+    s32 blast_force;
 } q2_menu_rules;
 
 void q2_menu_apply_variables(const q2_menu_settings *s, bool enabled,

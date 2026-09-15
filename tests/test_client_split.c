@@ -352,6 +352,64 @@ static void test_damage(void)
     release_fixture(c);
 }
 
+/*
+ * THE PLAYER FLINCHES. 0x8003ADF8..0x8003AE08 makes PAIN the live player's
+ * animation request whenever the damage byte at entity+0xDF is set, and
+ * 0x8003AFC8 hands it to the chooser; the port reconstructed the chooser's PAIN
+ * arm (0x8003CF74) and its hold rule (0x8003D188) and then asked it for nothing
+ * but DEATH, so Male2's Pain 1/2/3 were unreachable.
+ */
+static void test_pain_animation(void)
+{
+    client *c = fixture(2);
+    q2_sim *sim = &c->sim[0];
+    q2_input neutral = {0};
+    client_player_anim *a = &c->player_anim[0];
+    q2_player_move hurt_move, held, after_wrap;
+    int step;
+
+    /* Player 1 rails player 0, who is standing still. */
+    sim->player[0].pos[0] = 0;
+    sim->player[0].pos[2] = 0;
+    sim->player[1].pos[0] = 0;
+    sim->player[1].pos[2] = 1300;
+    q2_sim_select_player(sim, 1);
+    sim->combat.inv.ammo[Q2_AMMO_SLUGS] = 10;
+    sim->combat.weapon_id = Q2_WID_RAILGUN;
+    sim->combat.inv.weapons |=
+        (u16)q2_weapon_tables_builtin()->owned_bit[Q2_WID_RAILGUN];
+    sim->combat.next_fire = 0;
+    client_targets_for(c, 1);
+    CHECK(q2_sim_fire(sim).fired);
+
+    /* update_pain runs inside the victim's own tick, which is where the
+     * console's player think reads the byte. */
+    q2_sim_select_player(sim, 0);
+    client_targets_for(c, 0);
+    for (step = 0; step < 2; step++)
+        q2_sim_tick(sim, &neutral, 12);
+    CHECK(sim->combat.inv.health < 100);
+    CHECK(sim->player[0].pain_serial != 0);
+
+    hurt_move = client_player_visual_move(c, 0);
+    CHECK(q2_player_move_is_pain(hurt_move));
+
+    /* Installed, as client_player_pose installs it. The clip has not wrapped,
+     * so nothing displaces it -- 0x8003D188's rule. */
+    a->move = hurt_move;
+    held = client_player_visual_move(c, 0);
+    CHECK(held == hurt_move);
+
+    /* And once it has run past its end (0x8003DF90 raises bit 0 of +0x102) the
+     * standing player goes back to Stand. */
+    a->pain_latched = false;
+    a->wrapped      = true;
+    after_wrap = client_player_visual_move(c, 0);
+    CHECK(after_wrap == Q2_PMOVE_STAND);
+
+    release_fixture(c);
+}
+
 static void test_rounds_and_cameras(void)
 {
     client *c = fixture(4);

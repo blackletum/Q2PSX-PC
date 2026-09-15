@@ -126,6 +126,15 @@ void q2_combat_rules_default(q2_combat_rules *r)
         return;
     memset(r, 0, sizeof(*r));
     r->skill = 1;     /* not the lowest, so monster damage is not halved */
+    /*
+     * BLAST FORCE's own reset value, 0x80020494/0x80020498 `addiu v1, zero, 64`
+     * / `sh v1, 884(v0)`. Zero is not a neutral default here: the scale is
+     * 125*(mass+64)>>6, so a memset struct pushes everything exactly half as
+     * hard as the disc does. The halfword is never transformed on the way in —
+     * `xrefs 0x800B3358` finds only this reset, the menu's store at 0x8001BE38
+     * and the single read at 0x80057F84 — so the slider's value IS the field.
+     */
+    r->knockback_mass = 64;
     /* `cheats` is left at zero by the memset: 0x8001C6CC clears 0x800B29EC
      * before folding the four menu toggles in, so an unconfigured session has
      * no cheat bits set. */
@@ -332,6 +341,10 @@ void q2_actor_from_player(q2_actor *a, const q2_inventory *inv,
         s32 env     = a->env_next;
         s8  killer  = a->last_attacker;
         s16 mod     = a->last_mod;
+        /* Carried for the same reason the mod is: the refresh runs on every
+         * damage attempt, and a counter that restarted there would look like a
+         * fresh hit to the pain read on the next tick. */
+        u32 serial  = a->damage_serial;
         u8  effect[sizeof(a->effect)];
 
         memcpy(effect, a->effect, sizeof(effect));
@@ -339,6 +352,7 @@ void q2_actor_from_player(q2_actor *a, const q2_inventory *inv,
         a->env_next      = env;
         a->last_attacker = killer;
         a->last_mod      = mod;
+        a->damage_serial = serial;
         memcpy(a->effect, effect, sizeof(effect));
     }
     a->owner = owner;
@@ -589,6 +603,10 @@ q2_damage_result q2_combat_damage(q2_actor *attacker, q2_actor *target,
 
     was_alive = target->health > 0;
     target->last_mod = mod;
+    /* The same store, counted: 0x80057E84 and 0x80057EBC write entity+0xDF on
+     * every path through here, and the live player's think consumes it as its
+     * PAIN animation request. See the note on the field. */
+    target->damage_serial++;
 
     /*
      * Who did it, so a scoring hook has a killer as well as a victim.

@@ -212,6 +212,17 @@ typedef struct q2_projectile {
      * the owner and not participating in movement or collision.
      */
     s32  node;
+
+    /*
+     * The BFG ball's beam-damage accumulator, entity+0x4C. 0x8004BCF0 adds the
+     * frame delta at 0x800B2DB4 into it as an unsigned halfword and stores it
+     * back in the `jal 0x80049B9C` delay slot; the maintainer damages only once
+     * it has reached 30 (0x80049E00/0x80049E1C `slti v0, v0, 30`, read with
+     * `lh`), and 0x8004BD14..0x8004BD3C drains 30 at a time while it is at
+     * least 31. A halfword, not an s32, because the console's wrap is part of
+     * the arithmetic for a long-lived ball.
+     */
+    u16  beam_time;
 } q2_projectile;
 
 #define Q2_PROJ_NODE_UNKNOWN (-1)

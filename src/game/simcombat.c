@@ -482,6 +482,14 @@ bool q2_sim_autoselect_weapon(q2_sim *sim)
  * of the only instruction that reads it: a zero word, forever. Copied from the
  * same field the item dispatch already reads bit 0 of, so there is still one
  * 0x800B29EC in the port.
+ *
+ * And the fourth was `knockback_mass`, BLAST FORCE. 0x80057F84 reads
+ * 0x800B3358 on every hit and scales the impulse by 125*(v+64)>>6, or
+ * 25*(v+64)>>2 when a player hurt themselves, so a zero there is not a
+ * disabled rule but a halved one: every rocket, grenade, rail slug and bullet
+ * pushed at half the disc's severity, and gibs were thrown half as far.
+ * Carried from `sim->blast_force`, which q2_sim_init seeds with the reset
+ * routine's 64 and the menu overwrites with the slider.
  */
 static void sync_rules(q2_sim *sim)
 {
@@ -489,6 +497,7 @@ static void sync_rules(q2_sim *sim)
     sim->combat.rules.skill      = (s16)q2_cre_skill();
     sim->combat.rules.deathmatch = sim->multiplayer;
     sim->combat.rules.cheats     = sim->cheats;   /* 0x80058398 lhu 0x800B29EC */
+    sim->combat.rules.knockback_mass = (s16)sim->blast_force;  /* 0x800B3358 */
 }
 
 static s32 world_fraction_for(q2_sim *sim, const s32 origin[3],
@@ -1211,6 +1220,16 @@ void q2_sim_combat_tick(q2_sim *sim)
     player_damage_begin(sim);
 
     /*
+     * This tick contains damage sites of its own — the detonations below and,
+     * now, the BFG's beam pass — and the console reads the rule globals AT each
+     * site rather than from a copy. `sim->combat.rules` was last refreshed by
+     * whichever fire or hurt ran most recently, which for a projectile that has
+     * been in the air for a second is a long time ago, so refresh it here for
+     * the same reason q2_sim_fire and q2_sim_hurt_player do.
+     */
+    sync_rules(sim);
+
+    /*
      * THE PER-ACTOR PRESENTATION PASS, 0x8005B880, once per actor per world
      * tick: the live player first, then every other actor in the world.
      *
@@ -1366,7 +1385,7 @@ void q2_sim_combat_tick(q2_sim *sim)
         }
 
         /*
-         * The BFG's beams — the game's weapon trail.
+         * The BFG's beams — the game's weapon trail, and MOST OF ITS DAMAGE.
          *
          * 0x8004BD04 calls the beam maintainer every tick while the ball flies,
          * and it holds a green beam on every target it can see, refreshing each
@@ -1374,15 +1393,91 @@ void q2_sim_combat_tick(q2_sim *sim)
          * ball's passage by their own timer, which is what makes the BFG leave
          * a lattice behind it rather than a single line.
          *
+         * THE SAME PASS HURTS WHAT IT BEAMS, and that half was missing: this
+         * arm was one q2_fx_beam_timed call, so the lattice was decoration and
+         * the weapon was worth its contact hit plus one 1300-radius blast. On
+         * the disc a candidate that clears the filters takes 10 points (5 in
+         * deathmatch) every tenth of a second while the ball is in the air —
+         * 0x80049DE4..0x80049E38, `a3 = 1` so mod 1, `sw zero, 16(sp)` so no
+         * point and therefore no knockback.
+         *
+         * The beam and the damage are SEPARATELY gated: 0x80049DBC `beq v1,
+         * zero` falls through to the damage when the 12-slot beam table is
+         * full, so the damage cannot live under `fx_ready` the way the beam
+         * does.
+         *
          * The port's visibility test is the same segment sweep the projectile
          * itself uses, because it has no separate line-of-sight query; the
-         * original calls 0x80051874. Called out as the one substitution.
+         * original calls 0x80051874 at 0x80049CE0, and failing it branches past
+         * BOTH halves. Called out as the one substitution — and until now the
+         * test was only described here, never performed, so beams were held
+         * through walls.
          */
-        if (p->kind == Q2_PROJ_BFG && sim->fx_ready) {
-            u32 t;
+        if (p->kind == Q2_PROJ_BFG) {
+            q2_actor **list  = sim->world_targets ? sim->world_targets
+                                                  : sim->combat.targets;
+            u32        count = sim->world_targets ? sim->world_target_count
+                                                  : sim->combat.target_count;
+            const q2_actor *parked_self = &sim->pcombat[sim->cur_player].self;
+            q2_actor *owner = attacker_for(sim, p->owner);
+            /* 0x80049DE8 `lw 0x800AEBCC` then 0x80049E10 `addiu a2, zero, 5`
+             * against 0x80049E28's 10 — read from the port's own stand-in for
+             * that global rather than from the rules copy, as the console reads
+             * the word itself at the site. */
+            s16  beam_damage = sim->multiplayer ? 5 : 10;
+            bool hurt;
+            u32  t;
 
-            for (t = 0; t < sim->combat.target_count; t++) {
-                const q2_actor *a = sim->combat.targets[t];
+            /*
+             * 0x8004BCF0..0x8004BD08: the frame delta at 0x800B2DB4 is added
+             * into the ball's halfword at +0x4C and stored back in the
+             * maintainer's own delay slot, so the pass below already sees this
+             * tick's dt in it.
+             */
+            p->beam_time = (u16)(p->beam_time + (u16)sim->cur_dt);
+
+            /* 0x80049E00 / 0x80049E1C `slti v0, v0, 30` on the SIGNED halfword:
+             * below 30 the branch skips the damage but not the beam. */
+            hurt = (s16)p->beam_time >= 30;
+
+            for (t = 0; t < count; t++) {
+                q2_actor *a = list ? list[t] : NULL;
+                s64 dx, dy, dz;
+
+                /* 0x80049C54 `beq a1, s3, 0x80049E3C`: the ball never beams or
+                 * hurts its own owner. The world list names the live player in
+                 * deathmatch, so without this the shooter would scythe himself
+                 * for the length of his own shot. */
+                if (!a || a == owner)
+                    continue;
+
+                /*
+                 * The live player can appear in a world list under two names,
+                 * and the parked `pcombat[cur_player].self` is the stale one:
+                 * player_damage_end maps the current player to `combat.self`,
+                 * so damage landed on the parked copy is never written back,
+                 * and damage landed on both is applied twice. The presentation
+                 * pass above skips the same pair for the same reason.
+                 */
+                if (a == parked_self)
+                    continue;
+
+                /*
+                 * 0x80049C5C..0x80049CB4: squared origin distance against
+                 * `lui v0, 0x90` = 0x900000 = 3072^2. The console ALSO box-
+                 * tests the candidate's own bounds first (0x80049C3C, the
+                 * 0x800552D8 overlap against entity+0x78) against a +/-3072 box
+                 * around the ball; port actors carry no bounds, so only the
+                 * sphere is reproduced. It is the tighter of the two for a
+                 * point, which is what an actor here is. In s64 because the sum
+                 * of three squared world spans does not fit an s32.
+                 */
+                dx = (s64)p->pos[0] - a->origin[0];
+                dy = (s64)p->pos[1] - a->origin[1];
+                dz = (s64)p->pos[2] - a->origin[2];
+                if (dx * dx + dy * dy + dz * dz > (s64)3072 * 3072)
+                    continue;
+
                 /*
                  * THE ONE PLACE THE CONSOLE READS `takedamage` OUTSIDE
                  * T_Damage, so this filter can be the original's rather than a
@@ -1391,15 +1486,38 @@ void q2_sim_combat_tick(q2_sim *sim)
                  * `beq v0, zero` at 0x80049CBC..0x80049CD8. It asks whether the
                  * thing can be hurt, not whether it is alive.
                  */
-                if (!a || !a->takedamage)
+                if (!a->takedamage)
                     continue;
 
-                q2_fx_beam_timed(&sim->fx, (s32)i, (s32)t,
-                                 p->pos, a->origin,
-                                 Q2_FX_TIMED_BEAM_RADIUS,
-                                 Q2_FX_TIMED_BEAM_STYLE,
-                                 Q2_FX_TIMED_BEAM_LIFE);
+                /* 0x80049CE0 `jal 0x80051874`, the visibility test. */
+                if (!splash_clear(sim, p->pos, a->origin))
+                    continue;
+
+                if (sim->fx_ready)
+                    q2_fx_beam_timed(&sim->fx, (s32)i, (s32)t,
+                                     p->pos, a->origin,
+                                     Q2_FX_TIMED_BEAM_RADIUS,
+                                     Q2_FX_TIMED_BEAM_STYLE,
+                                     Q2_FX_TIMED_BEAM_LIFE);
+
+                if (hurt)
+                    q2_combat_damage(owner, a, beam_damage,
+                                     Q2_MOD_ENERGY_BOLT, NULL,
+                                     &sim->combat.rules);
             }
+
+            /*
+             * 0x8004BD0C..0x8004BD3C. Two things the obvious reading gets
+             * wrong: the drain is a LOOP (0x8004BD3C branches back to
+             * 0x8004BD20), and its threshold is 31, ONE MORE than the damage
+             * gate's 30. So an accumulator that lands exactly on 30 is not
+             * drained and fires again on the very next tick before resetting,
+             * which makes the beams hurt somewhat oftener than once per 30
+             * ticks — at the PAL frame delta of 12, three ticks in every five.
+             * That is the disc's arithmetic, not a rounding choice here.
+             */
+            while ((s16)p->beam_time >= 31)
+                p->beam_time = (u16)(p->beam_time - 30);
         }
 
         /* A creature in the way takes it before the world does. */
