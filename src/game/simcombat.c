@@ -20,6 +20,7 @@
 
 #include "sim.h"
 #include "explosive.h"
+#include "lighting.h"     /* q2_light_glow_fade — 0x80075E14 */
 #include "modelent.h"
 #include "trig.h"
 
@@ -105,12 +106,74 @@ bool q2_sim_attach_glint(q2_sim *sim, const q2_common_file *common)
     return true;
 }
 
-/* A spawn that costs nothing when no tables are attached. */
-static void fx_at(q2_sim *sim, q2_fx_preset_id id, const s32 at[3])
+/*
+ * WHICH AREA A BURST BELONGS TO — 0x800686C4, transcribed.
+ *
+ *     800686D0  bne  a0, zero, 0x80068720   ; a non-zero byte is taken as is
+ *     800686E8  jal  0x80044F54             ; else find the cell for the point
+ *     80068710  lbu  v0, 32(v0)             ;   in PrimaryColl (0x800C8E90)
+ *
+ * The third group spawner (0x8002FDFC) runs this on its own area argument at
+ * 0x8002FED0, which is why the console's own call sites can pass a literal 0
+ * and still land in a live area chain. The other two spawners rely on their
+ * CALLERS supplying a resolved byte — the hitscan's is the trace's own area
+ * record, `lbu s1, 32(v1)` at 0x80048854.
+ *
+ * The port stores whatever byte it is given (effect.c) and the group draw culls
+ * a group whose area has no screen-change record to drain (effect.c, the
+ * `psx_ot_area_bucket` test). Since no collision cell on the disc carries area
+ * 0 — `q2psx-inspect coll` reports contents != 0 on 22767 of 22773 nodes —
+ * every burst this file raised with a literal 0 was culled in every zone that
+ * ships a SortData stream, which is most of them. So the resolve arm lives
+ * here, at the call sites, rather than inside effect.c: that module has no
+ * collision dependency and the console only runs the arm in one of its three
+ * spawners.
+ *
+ * PrimaryColl, as 0x800686D8 loads, and not the movement hull.
+ */
+static u8 fx_area_resolve(q2_sim *sim, u8 area, const s32 at[3])
+{
+    q2_collision *hull;
+    q2_coll_node  cell;
+    s32           node;
+
+    if (area)                       /* 0x800686D0 */
+        return area;
+    if (!sim || !at)
+        return 0;
+
+    hull = sim->coll_primary_ready ? &sim->coll_primary
+         : (sim->coll_ready ? &sim->coll : NULL);
+    if (!hull)
+        return 0;
+
+    node = q2_coll_find_node(hull, at, -1, true);
+    if (node < 0 || !q2_collision_get_node(hull, (u32)node, &cell))
+        /* 0x800686F8 branches to 0x8006871C, which returns zero: a point in no
+         * cell has no area record, and the caller is left with the byte the
+         * draw culls. There is no better answer to invent. */
+        return 0;
+    /* The console returns the raw byte (0x80068710); the mask is the port's,
+     * applied here rather than at every reader, and matches what world.c and
+     * the entity draws register. */
+    return (u8)(cell.contents & 0x7F);
+}
+
+/* A spawn that costs nothing when no tables are attached. `area` is the byte
+ * the console's caller would have had in hand; 0 asks for the 0x800686C4
+ * lookup above. */
+static void fx_at_area(q2_sim *sim, q2_fx_preset_id id, const s32 at[3],
+                       u8 area)
 {
     if (!sim->fx_ready || !at)
         return;
-    q2_fx_spawn(&sim->fx, &sim->fx_rng, id, at, 0);
+    q2_fx_spawn(&sim->fx, &sim->fx_rng, id, at,
+                fx_area_resolve(sim, area, at));
+}
+
+static void fx_at(q2_sim *sim, q2_fx_preset_id id, const s32 at[3])
+{
+    fx_at_area(sim, id, at, 0);
 }
 
 /*
@@ -141,7 +204,7 @@ static void fx_at(q2_sim *sim, q2_fx_preset_id id, const s32 at[3])
  * uses — not the bullet's.
  */
 static void fx_hitscan_impact(q2_sim *sim, const s32 origin[3],
-                              const s32 dir[3], s32 frac, s32 victim,
+                              const s32 dir[3], s32 frac, u8 area, s32 victim,
                               const q2_damage_result *dr, s16 damage)
 {
     s32 at[3];
@@ -157,7 +220,7 @@ static void fx_hitscan_impact(q2_sim *sim, const s32 origin[3],
         /* Flesh only: armour taking the whole hit is the case the HUD's damage
          * flash also distinguishes. */
         if (!dr || dr->taken > 0)
-            fx_at(sim, Q2_FX_BLOOD, at);
+            fx_at_area(sim, Q2_FX_BLOOD, at, area);
         /*
          * THE SECOND BURST IS GONE, and that is a correction rather than a trim.
          *
@@ -181,14 +244,18 @@ static void fx_hitscan_impact(q2_sim *sim, const s32 origin[3],
 
     if (frac < 4096) {
         /*
-         * The area byte the console forwards here (`lbu s1, 32(v1)` at
-         * 0x80048854, the trace's own area record) has no counterpart in this
-         * port yet — nothing maps a contact point to an area key, and the
-         * group draw has no visibility test to spend it on either. Zero, and
-         * said so, rather than a fabricated key.
+         * The area byte the console forwards here is `lbu s1, 32(v1)` at
+         * 0x80048854 — the TRACE's own area record, not a fresh lookup of the
+         * contact point. `world_fraction_for` already ran that trace and now
+         * hands the byte back with the fraction, so this is the console's own
+         * value at no extra hull cost. A trace that ended on a door or an
+         * intact pane has no cell and therefore no area record (q2_trace.node
+         * is -1 there); `fx_area_resolve` falls back to the contact point's own
+         * cell in that case rather than storing a 0 the group draw would cull.
          */
         if (sim->fx_ready)
-            q2_fx_bullet_puff(&sim->fx, &sim->fx_rng, at, 0);
+            q2_fx_bullet_puff(&sim->fx, &sim->fx_rng, at,
+                              fx_area_resolve(sim, area, at));
 
         /*
          * And the BREAKABLE, tested along the whole shot rather than at its
@@ -500,13 +567,26 @@ static void sync_rules(q2_sim *sim)
     sim->combat.rules.knockback_mass = (s16)sim->blast_force;  /* 0x800B3358 */
 }
 
+/*
+ * How far the world let the shot go, and WHICH AREA it stopped in.
+ *
+ * The console's hitscan keeps both: 0x80048854 `lbu s1, 32(v1)` reads the
+ * area record straight off the trace's own cell and carries it into the
+ * impact burst. The port formed the same trace and threw the cell away, so the
+ * puff and the blood had nothing to pass but a literal 0 — which the group
+ * draw culls. `area` is optional; it is 0 when the trace ended on a runtime
+ * entity box (a door or an intact pane, q2_trace.node == -1), which is not a
+ * cell and has no area record at all.
+ */
 static s32 world_fraction_for(q2_sim *sim, const s32 origin[3],
-                              const s32 dir[3])
+                              const s32 dir[3], u8 *area)
 {
     q2_trace tr;
     s32 end[3];
     int k;
 
+    if (area)
+        *area = 0;
     if (!sim->coll_ready)
         return 4096;
 
@@ -514,6 +594,8 @@ static s32 world_fraction_for(q2_sim *sim, const s32 origin[3],
         end[k] = origin[k] + dir[k];
 
     q2_sim_trace(sim, origin, end, &tr);
+    if (area && tr.node >= 0)
+        *area = (u8)(tr.contents & 0x7F);
     return tr.hit ? tr.fraction : 4096;
 }
 
@@ -763,7 +845,9 @@ q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
          * creatures and a machinegun cannot. */
         for (i = 0; i < r.shot_count; i++) {
             const q2_shot *s = &r.shot[i];
-            s32 frac = world_fraction_for(sim, s->origin, s->dir);
+            u8  frac_area;
+            s32 frac = world_fraction_for(sim, s->origin, s->dir,
+                                          &frac_area);
             q2_damage_result dr;
             s32 victim;
 
@@ -773,14 +857,15 @@ q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
                                            sim->combat.targets,
                                            sim->combat.target_count,
                                            &sim->combat.rules, &dr);
-            fx_hitscan_impact(sim, s->origin, s->dir, frac, victim, &dr,
-                              s->damage);
+            fx_hitscan_impact(sim, s->origin, s->dir, frac, frac_area,
+                              victim, &dr, s->damage);
         }
         break;
 
     case Q2_FK_RAIL: {
         const q2_shot *s = &r.shot[0];
-        s32 frac = world_fraction_for(sim, s->origin, s->dir);
+        u8  frac_area;
+        s32 frac = world_fraction_for(sim, s->origin, s->dir, &frac_area);
         u32 hits = q2_combat_fire_rail(&sim->combat.self, s->origin, s->dir,
                                        s->damage, frac, Q2_HITSCAN_RADIUS,
                                        sim->combat.targets,
@@ -790,7 +875,7 @@ q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
         /* The rail does not stop at the first target, so it always marks the
          * world where the beam ends and blood is left to the per-target pass
          * this port does not get back from `fire_rail`. */
-        fx_hitscan_impact(sim, s->origin, s->dir, frac, -1, NULL,
+        fx_hitscan_impact(sim, s->origin, s->dir, frac, frac_area, -1, NULL,
                           s->damage);
         (void)hits;
         break;
@@ -1180,6 +1265,9 @@ static void present_actor(q2_sim *sim, q2_actor *a)
 {
     static const u8 energy[3] = { Q2_ENERGY_LIGHT_R, Q2_ENERGY_LIGHT_G,
                                   Q2_ENERGY_LIGHT_B };
+    static const u8 ambient_target[3] = { Q2_ACTOR_AMBIENT_DEFAULT,
+                                          Q2_ACTOR_AMBIENT_DEFAULT,
+                                          Q2_ACTOR_AMBIENT_DEFAULT };
     q2_fx_present_report rep;
     q2_fx_mesh_src src;
     const q2_fx_mesh_src *sp;
@@ -1189,12 +1277,55 @@ static void present_actor(q2_sim *sim, q2_actor *a)
              ? &src : NULL;
     present_client_of(sim, a, &view_skip, &quad_until);
 
-    q2_fx_actor_present(&sim->fx, &sim->fx_rng, a, sp, sim->tick_count, 0,
+    /*
+     * FIRST IN THE CHAIN, before anything this pass spawns: 0x8005B88C loads 7
+     * and 0x8005B894 jumps to the ambient fade 0x80075E14, which walks
+     * entity+0x2AC one seventh of the way toward +0x2B0 per call. lighting.c
+     * has owned that routine since it was reconstructed and nothing called it,
+     * so an actor's own back colour never moved; the creature and body draws
+     * fed q2_light_env_build a literal instead.
+     *
+     * DEVIATION, stated: the target is the port's own 0x30 rather than the
+     * entity's +0x2B0, which nothing in the image is known to write after a
+     * spawn (combat.h, q2_actor.ambient). Seeded equal, so this changes only
+     * what happens AFTER a hit.
+     */
+    q2_light_glow_fade(a->ambient, ambient_target, Q2_ACTOR_AMBIENT_STEPS);
+
+    /*
+     * THE AREA EVERY GROUP IN THIS CHAIN IS FILED UNDER. The console passes
+     * entity+0x9E — the byte movement caches on the entity from the cell it
+     * occupies, `lbu` of the collision record's +32 at 0x80046B08. Nothing in
+     * this port caches a cell on an actor (q2_actor has no such field, and
+     * q2_actor_from_monster rebuilds the struct every frame), so the byte is
+     * resolved from the actor's origin here instead. DEVIATION, stated: the
+     * console reads a cached byte and this does one hull descent per actor per
+     * world tick. The value is the same cell movement would have recorded; what
+     * differs is when it is looked up, and the previous 0 put the whole chain —
+     * the damage crackle, the two sparks and the quad shell — into an area the
+     * draw always culls.
+     */
+    q2_fx_actor_present(&sim->fx, &sim->fx_rng, a, sp, sim->tick_count,
+                        fx_area_resolve(sim, 0, a->origin),
                         view_skip, sim->level_time, quad_until, &rep);
 
     if (rep.energy_light)
         q2_ent_light_at(&sim->ent_world.events, a->origin, energy,
                         Q2_ENERGY_LIGHT_INNER, Q2_ENERGY_LIGHT_OUTER);
+
+    /*
+     * And the ambient write the report has been carrying with no reader:
+     * 0x800586E8 copies the four bytes at 0x800AEAAC into entity+0x2AC on the
+     * same effect[1] >= 3 arm that raises the light, so the body itself takes
+     * the energy colour for that tick and the fade above eases it back out over
+     * the following ones. The green is the light's own preset, which is why it
+     * is the same triplet.
+     */
+    if (rep.set_ambient) {
+        a->ambient[0] = Q2_ENERGY_LIGHT_R;
+        a->ambient[1] = Q2_ENERGY_LIGHT_G;
+        a->ambient[2] = Q2_ENERGY_LIGHT_B;
+    }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1493,13 +1624,23 @@ void q2_sim_combat_tick(q2_sim *sim)
                 if (!splash_clear(sim, p->pos, a->origin))
                     continue;
 
+                /*
+                 * The area comes from the BALL, which is what 0x80048D24
+                 * resolves on the console: the point-clip helper 0x8004E920
+                 * runs the owner entity's position through PrimaryColl and
+                 * hands the cell's area record to the beam queue as its fourth
+                 * argument. Resolved from the ball's position here, on each
+                 * refresh, rather than per submit — see q2_fx_timed_beam.area.
+                 */
                 if (sim->fx_ready)
                     q2_fx_beam_timed(&sim->fx, (s32)i, (s32)t,
                                      p->pos, a->origin,
                                      Q2_FX_TIMED_BEAM_RADIUS,
                                      Q2_FX_TIMED_BEAM_STYLE,
-                                     Q2_FX_TIMED_BEAM_LIFE);
+                                     Q2_FX_TIMED_BEAM_LIFE,
+                                     fx_area_resolve(sim, 0, p->pos));
 
+                /* 0x80049E34, the damage the beam does when it lands. */
                 if (hurt)
                     q2_combat_damage(owner, a, beam_damage,
                                      Q2_MOD_ENERGY_BOLT, NULL,

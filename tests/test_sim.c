@@ -3483,6 +3483,72 @@ static bool any_mesh_hook(void *user, const struct q2_actor *a,
 }
 
 /*
+ * THE BODY'S OWN AMBIENT — entity+0x2AC, the fade at 0x80075E14 and the write
+ * at 0x800586E8.
+ *
+ * 0x8005B880 opens with `jal 0x80075E14(entity, 7)` (0x8005B88C, 0x8005B894),
+ * and the effect[1] >= 3 arm inside 0x80058638 copies the energy preset at
+ * 0x800AEAAC into +0x2AC. Neither had a caller in this port: q2_light_glow_fade
+ * was reconstructed and never invoked, and the report's `set_ambient` was
+ * written and never read, so every body drew with a hardcoded 0x30 triplet.
+ *
+ * The asymmetry is the point of the routine and is what this pins: the fade's
+ * compare is SIGNED (`slt v0, v1, a1` at 0x80075E38), so a component FALLING
+ * toward the target arrives in one call while one rising eases in by diff / 7.
+ */
+static void test_actor_ambient_fade(void)
+{
+    q2_sim sim;
+    q2_actor cre;
+    q2_actor *list[1];
+
+    printf("the actor ambient takes the energy colour and eases back\n");
+
+    q2_sim_init(&sim, NULL, 50);
+    q2_actor_init(&cre);
+    cre.health = 100;
+    check(cre.ambient[0] == Q2_ACTOR_AMBIENT_DEFAULT &&
+          cre.ambient[1] == Q2_ACTOR_AMBIENT_DEFAULT &&
+          cre.ambient[2] == Q2_ACTOR_AMBIENT_DEFAULT,
+          "an actor starts at its own fade target");
+
+    list[0] = &cre;
+    q2_sim_set_targets(&sim, list, 1);
+
+    /* A steady actor does not drift: fading a value that is already the target
+     * is a no-op, which is what keeps this change invisible until a hit. */
+    q2_sim_combat_tick(&sim);
+    check_eq_i(cre.ambient[1], Q2_ACTOR_AMBIENT_DEFAULT,
+               "an unhit actor holds its ambient");
+
+    /* An energy hit stores 3 in effect[1] (0x8005859C). The tick that sees it
+     * raises the light AND writes the colour. */
+    cre.effect[1] = 3;
+    q2_sim_combat_tick(&sim);
+    check(cre.ambient[0] == Q2_ENERGY_LIGHT_R &&
+          cre.ambient[1] == Q2_ENERGY_LIGHT_G &&
+          cre.ambient[2] == Q2_ENERGY_LIGHT_B,
+          "the >= 3 arm puts the energy colour on the body");
+
+    /*
+     * The next tick fades FIRST, and the two directions are not symmetric:
+     * green is 0x30 - 255 = -207, below the step count, and lands outright,
+     * while red and blue climb by 48 / 7 = 6.
+     */
+    q2_sim_combat_tick(&sim);
+    check_eq_i(cre.ambient[1], Q2_ACTOR_AMBIENT_DEFAULT,
+               "green falls to the target in one call (signed compare)");
+    check_eq_i(cre.ambient[0], 6, "red eases up by diff / 7");
+    check_eq_i(cre.ambient[2], 6, "and so does blue");
+
+    q2_sim_combat_tick(&sim);
+    check_eq_i(cre.ambient[0], 12, "and again from where it got to");
+
+    q2_sim_set_targets(&sim, NULL, 0);
+    q2_sim_free(&sim);
+}
+
+/*
  * ONCE PER ACTOR PER FRAME, whatever the caller published.
  *
  * A creature on the shooter's list alone is presented once: effect[5] runs
@@ -4142,6 +4208,7 @@ int main(void)
     test_fx_mesh_hook();
     test_sp_creature_presented();
     test_present_once_per_actor();
+    test_actor_ambient_fade();
     test_present_clients();
     test_present_frame_counter();
     test_placed_player_killer_byte();

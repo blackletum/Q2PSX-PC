@@ -3609,10 +3609,16 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
     q2_sim_combat_tick(sim);
 
     /*
-     * The effects, after the combat that spawns them, so a burst created this
-     * tick does not also integrate this tick. The console runs the integrator
-     * inside the draw, once per frame rather than once per viewport, which puts
-     * it after everything gameplay did — the same place.
+     * The effects, after the combat that spawns them. The console runs the
+     * integrator inside the draw, once per frame rather than once per viewport,
+     * which puts it after everything gameplay did — the same place.
+     *
+     * Running it HERE, ahead of the client's draw, is not the same place, and
+     * the comment that used to sit here claimed the ordering alone kept a burst
+     * created this tick from also integrating this tick. It did not: this call
+     * is downstream of q2_sim_combat_tick's spawns. What makes the claim true
+     * is the one-tick reprieve q2_fx_group_spawn arms and q2_fx_tick spends
+     * (effect.h, q2_fx_group.fresh).
      */
     /* Once per frame, not once per player: the comment below already said
      * "once per tick, not once per viewport", and a second player is a second

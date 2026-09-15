@@ -181,4 +181,35 @@ u32 q2_projectiles_build_ot(const struct q2_projectiles *list,
                             const q2_collision *coll,
                             const q2_camera *cam, psx_ot *ot, gte_state *gte);
 
+/* ------------------------------------------------------------------------- */
+/* Debris — the pieces a shattered pane or a destroyed brush group throws      */
+/* ------------------------------------------------------------------------- */
+/*
+ * Every live piece of `fx`'s debris pool, appended to `ot`.
+ *
+ * These are real entities on the console — 0x80064558 spawns them through
+ * 0x80064398 and 0x80064124 thinks them — with a model taken from the 32-slot
+ * registration list at 0x800D56B0, so they are drawn by the ordinary entity
+ * pass. This port stepped, bounced and expired them and drew none of them:
+ * q2_fx_build_ot emits groups and beams and nothing else, and the client's
+ * entity pass does not know the pool exists. `q2psx-inspect explosives` counts
+ * 94 bursts and 1,597 pieces across the disc, so it is every crate on eighteen
+ * maps as well as the ten GLASS panes.
+ *
+ * `bank` resolves `q2_fx_debris.model`, which is an index into it —
+ * q2_fx_debris_register stores indices where the console's list stores model
+ * pointers. `coll` and `lights` may be NULL; a piece then sorts on the area
+ * byte it was spawned with and draws unlit.
+ *
+ * Returns the number of faces emitted.
+ */
+struct q2_fx_world;
+
+u32 q2_fx_debris_build_ot(const struct q2_fx_world *fx,
+                          const q2_model_bank *bank,
+                          const q2_collision *coll,
+                          const q2_light_world *lights,
+                          const q2_tpage_table *tpage, u32 clut4_count_a,
+                          const q2_camera *cam, psx_ot *ot, gte_state *gte);
+
 #endif /* Q2PSX_ENTITYDRAW_H */

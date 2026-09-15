@@ -166,6 +166,9 @@ void q2_actor_init(q2_actor *a)
     for (k = 0; k < 3; k++) {
         a->mins[k] = -286;
         a->maxs[k] =  286;
+        /* entity+0x2AC seeded at its own fade target, so a body nobody has hit
+         * draws at the ambient the draws used to hardcode. */
+        a->ambient[k] = Q2_ACTOR_AMBIENT_DEFAULT;
     }
 }
 
@@ -174,6 +177,7 @@ void q2_actor_from_monster(q2_actor *a, const q2_monster *m)
     s32 radius;
     int k;
     u8  effect[sizeof(a->effect)];
+    u8  ambient[sizeof(a->ambient)];
     s8  killer;
 
     if (!a || !m)
@@ -199,9 +203,14 @@ void q2_actor_from_monster(q2_actor *a, const q2_monster *m)
      * creature" has to outlive the frame it was written in.
      */
     memcpy(effect, a->effect, sizeof(effect));
+    memcpy(ambient, a->ambient, sizeof(ambient));
     killer = a->last_attacker;
     q2_actor_init(a);
     memcpy(a->effect, effect, sizeof(effect));
+    /* And entity+0x2AC, for the same reason: the fade (0x80075E14) walks it a
+     * seventh of the way per tick, so it is meaningless unless it outlives the
+     * frame it was written in. */
+    memcpy(a->ambient, ambient, sizeof(ambient));
     a->last_attacker = killer;
 
     a->origin[0] = m->pos[0];
@@ -346,14 +355,18 @@ void q2_actor_from_player(q2_actor *a, const q2_inventory *inv,
          * fresh hit to the pain read on the next tick. */
         u32 serial  = a->damage_serial;
         u8  effect[sizeof(a->effect)];
+        u8  ambient[sizeof(a->ambient)];
 
         memcpy(effect, a->effect, sizeof(effect));
+        memcpy(ambient, a->ambient, sizeof(ambient));
         q2_actor_init(a);
         a->env_next      = env;
         a->last_attacker = killer;
         a->last_mod      = mod;
         a->damage_serial = serial;
         memcpy(a->effect, effect, sizeof(effect));
+        /* entity+0x2AC — see q2_actor_from_monster. */
+        memcpy(a->ambient, ambient, sizeof(ambient));
     }
     a->owner = owner;
     if (pos) {

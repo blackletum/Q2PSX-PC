@@ -233,6 +233,25 @@ typedef struct q2_fx_timed_beam {
     s16 radius;                   /* +0x06 */
 
     /*
+     * WHICH AREA THE RE-SUBMITTED BEAM IS FILED UNDER, and the record has no
+     * console counterpart because the console does not store it — it resolves
+     * it afresh on every submit. 0x80048D24 calls the point-clip-and-area
+     * helper 0x8004E920 with the record's OWNER (record+0x08) and a scratch
+     * halfword, and 0x80048D50 `lh a3, 64(sp)` hands that halfword to the beam
+     * queue 0x80064E64 as its area argument. The helper's answer is the area
+     * record PrimaryColl leaves at 0x800C8EAA after clipping the owner's
+     * position — a live cell byte, never 0.
+     *
+     * The port used to pass a literal 0 at submit and the beam draw culls an
+     * area with no screen-change record, so the BFG's whole trail was invisible
+     * in any zone with a SortData stream. DEVIATION: this is resolved once per
+     * refresh, by the caller, rather than once per submit from the owner
+     * entity, so a beam that outlives its ball keeps the area it was last
+     * refreshed in instead of following an owner that no longer exists.
+     */
+    s16 area;
+
+    /*
      * The original keys a record on the two POINTERS it stores at +0x08 and
      * +0x0C and refreshes the matching one rather than allocating a second.
      * The port keys on a caller-supplied pair of ids for the same reason: a
@@ -502,6 +521,24 @@ typedef struct q2_fx_group {
     u8  count;                                  /* +0xC6 */
     u8  area;                                   /* +0xC7 */
     const q2_fx_ramp *ramp[2];                  /* +0xC8, +0xCC */
+    /*
+     * NO CONSOLE COUNTERPART, and it exists because the port splits one console
+     * routine in two.
+     *
+     * 0x800304A8 draws every group and THEN, at its own tail (0x80030B1C
+     * onward), decrements each life and integrates each position — one
+     * function, draw first, integrate second. This port draws from the client
+     * (q2_fx_build_ot) and integrates from the sim tick (q2_fx_tick), and the
+     * sim tick runs first, so a burst raised by the gameplay code this tick was
+     * aged before anything could draw it: a life-1 group (the quad shell and
+     * the energy crackle, both re-spawned every tick) never appeared at all,
+     * and every other burst lost its first ramp entry.
+     *
+     * Set by the spawners and cleared by the first q2_fx_tick that sees it,
+     * which skips that group's integration exactly once. The net per-frame
+     * order is then the console's.
+     */
+    bool fresh;
 } q2_fx_group;
 
 /* ------------------------------------------------------------------------- */
@@ -1355,9 +1392,14 @@ void q2_fx_beams_reset(q2_fx_world *w);
  * Q2_FX_TIMED_BEAM_LIFE for the BFG's own 45. Returns false when the list is
  * full of live beams, which the original also just tolerates.
  */
+/*
+ * `area` is the byte 0x80048D24's helper would have produced for the owner —
+ * the cell the beam's origin sits in. It is stored on the record and spent on
+ * every submit; see q2_fx_timed_beam.area.
+ */
 bool q2_fx_beam_timed(q2_fx_world *w, s32 owner, s32 target,
                       const s32 from[3], const s32 to[3],
-                      s16 radius, u32 style, s16 life);
+                      s16 radius, u32 style, s16 life, u8 area);
 
 /*
  * Age the timed list by one frame's worth. 0x80048CE8 subtracts the frame delta

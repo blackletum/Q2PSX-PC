@@ -215,6 +215,16 @@ bool q2_mod_knocks_back(s16 mod);
 #define Q2_ENERGY_LIGHT_INNER  800
 #define Q2_ENERGY_LIGHT_OUTER 1300
 
+/*
+ * The fade this port walks q2_actor.ambient back toward, and how many steps
+ * 0x8005B88C asks for. The seven is the console's; the 0x30 is the literal the
+ * creature and player-body draws already fed q2_light_env_build, kept so that
+ * an actor nothing has hit is lit exactly as before. See q2_actor.ambient for
+ * why the entity's real +0x2B0 is not available to read.
+ */
+#define Q2_ACTOR_AMBIENT_DEFAULT 0x30
+#define Q2_ACTOR_AMBIENT_STEPS      7
+
 /* The damage-effect timer a mod arms, or 0. Returns the slot in `slot` and the
  * value as the result (0x800585A4..0x80058604). */
 s16 q2_mod_effect_timer(s16 mod, int *slot);
@@ -490,6 +500,31 @@ typedef struct q2_actor {
      * carry them: neither q2_monster nor q2_inventory has a copy.
      */
     u8   effect[6];         /* entity+0x2F0..0x2F5                           */
+
+    /*
+     * entity+0x2AC — THE BODY'S OWN AMBIENT, the triplet that becomes the GTE
+     * back colour when this actor is drawn (q2_light_env_build, 0x8006B468).
+     *
+     * 0x8005B880 opens by calling the fade 0x80075E14 with `steps` 7
+     * (0x8005B88C `addiu a1, zero, 7` / 0x8005B894 `jal`), which walks +0x2AC a
+     * seventh of the way toward +0x2B0 per call; and the effect[1] >= 3 arm at
+     * 0x800586E8 copies the four bytes at 0x800AEAAC — the energy light's own
+     * 0/255/0 — straight into +0x2AC, so an energy hit turns the body green for
+     * a tick and it eases back out over the following ones.
+     *
+     * Carried across both refreshes below for the same reason effect[] is:
+     * neither q2_monster nor q2_inventory holds a copy, and the fade only
+     * means anything if the value survives the frame it was written in.
+     *
+     * WHAT +0x2B0 HOLDS FOR A CREATURE IS NOT ESTABLISHED. The pool allocator
+     * (0x8006C1D8..0x8006C1FC, entity.c) seeds both bytes to 0x40 and the ITEM
+     * spawner 0x80058944 writes 0x30 into both (item.c); nothing found writes
+     * +0x2B0 after a spawn, so it is a per-entity constant this port cannot yet
+     * read. The fade target is therefore the 0x30 the creature and body draws
+     * were already using as a literal, seeded equal so an actor that is never
+     * hit draws exactly as it did before.
+     */
+    u8   ambient[3];        /* entity+0x2AC                                  */
 } q2_actor;
 
 /* True while an actor's energy-bolt effect is at full strength (effect[1] >= 3),

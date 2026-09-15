@@ -301,6 +301,10 @@ s32 q2_fx_group_spawn(q2_fx_world *w,
     g->life    = (u8)(life > 255 ? 255 : life);
     g->count   = (u8)count;
     g->area    = area;
+    /* The console's integrator is the tail of the draw, so a group spawned
+     * between two draws is drawn before it is aged. This port's integrator runs
+     * ahead of the draw; the flag buys back that one tick (effect.h). */
+    g->fresh   = true;
     g->ramp[0] = ramp0;
     g->ramp[1] = ramp1 ? ramp1 : ramp0;
 
@@ -1040,6 +1044,25 @@ void q2_fx_tick(q2_fx_world *w)
             continue;
 
         /*
+         * A GROUP RAISED SINCE THE LAST DRAW IS NOT AGED YET.
+         *
+         * On the console this pass is the tail of the draw itself — 0x80030B1C
+         * reads the life, 0x80030B24 branches out when it is zero and
+         * 0x80030B28/0x80030B30 write it back one lower — so a burst the
+         * gameplay code raised during the frame is DRAWN at its full life and
+         * only then stepped. The port runs this from the sim tick, ahead of the
+         * client's draw, which aged a burst before any frame could show it: a
+         * life-1 group (the quad shell, the energy crackle) died unseen and
+         * every other burst started one ramp entry down. Skipping the group the
+         * one time restores the console's net order (effect.h, q2_fx_group).
+         */
+        if (g->fresh) {
+            g->fresh = false;
+            w->stats.groups_live++;
+            continue;
+        }
+
+        /*
          * The order is the original's, at 0x80030B28 onward, and it matters:
          * the position advances by the velocity BEFORE the acceleration is
          * folded in, so a group is one tick behind a naive integrator. Life is
@@ -1204,7 +1227,7 @@ void q2_fx_beams_reset(q2_fx_world *w)
 /* ------------------------------------------------------------------------- */
 bool q2_fx_beam_timed(q2_fx_world *w, s32 owner, s32 target,
                       const s32 from[3], const s32 to[3],
-                      s16 radius, u32 style, s16 life)
+                      s16 radius, u32 style, s16 life, u8 area)
 {
     const q2_fx_beam_style *s;
     q2_fx_timed_beam *slot = NULL;
@@ -1250,6 +1273,10 @@ bool q2_fx_beam_timed(q2_fx_world *w, s32 owner, s32 target,
     slot->target = target;
     slot->timer  = life;
     slot->radius = radius;
+    /* The area the submit will spend, resolved by the caller from the owner's
+     * own cell — 0x80048D24's helper does it from the owner entity on every
+     * submit instead (effect.h, q2_fx_timed_beam.area). */
+    slot->area   = (s16)(area & 0x7Fu);
     vec_copy(slot->from, from);
     vec_copy(slot->to, to);
     slot->tube     = s->tube;
@@ -2452,7 +2479,10 @@ static void submit_timed(q2_fx_world *w)
         if (t->timer <= 0 || !t->tube)
             continue;
 
-        q2_fx_beam_add(w, t->from, t->to, t->radius, 0,
+        /* 0x80048D50 `lh a3, 64(sp)` — the area 0x8004E920 resolved for the
+         * owner, not a zero. A zero has no screen-change record to drain and
+         * draw_beams culls it, which is why the trail never appeared. */
+        q2_fx_beam_add(w, t->from, t->to, t->radius, (u8)t->area,
                        t->tube, t->cap_near, t->cap_far);
     }
 }

@@ -1,5 +1,6 @@
 #include "entitydraw.h"
 
+#include "effect.h"      /* the debris pool this file now draws */
 #include "fxtables.h"     /* Q2_FX_ABR_ADD, the blend the bolt draws in */
 #include "projectile.h"
 #include "trig.h"         /* q2_rotation_euler, RotMatrix's composition */
@@ -606,6 +607,105 @@ u32 q2_projectiles_build_ot(const struct q2_projectiles *list,
 
             emitted++;
         }
+    }
+
+    return emitted;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Debris                                                                     */
+/* ------------------------------------------------------------------------- */
+u32 q2_fx_debris_build_ot(const struct q2_fx_world *fx,
+                          const q2_model_bank *bank,
+                          const q2_collision *coll,
+                          const q2_light_world *lights,
+                          const q2_tpage_table *tpage, u32 clut4_count_a,
+                          const q2_camera *cam, psx_ot *ot, gte_state *gte)
+{
+    u32 i, emitted = 0;
+
+    if (!fx || !bank || !cam || !ot || !gte)
+        return 0;
+
+    for (i = 0; i < Q2_FX_DEBRIS_MAX; i++) {
+        const q2_fx_debris *d = &fx->debris[i];
+        q2_model  mdl;
+        q2_model_instance inst;
+        q2_model_draw_stats st;
+        q2_light_env env;
+        s16 spin[3][3];
+        s32 node;
+        int k;
+
+        /* A level that registered no Debris model spawns pieces with model -1
+         * — the console's own answer on the 30 banks that carry none — and
+         * those really do draw nothing. */
+        if (!d->in_use || d->model < 0)
+            continue;
+        if (q2_model_get(bank, (u32)d->model, &mdl) != Q2_OK)
+            continue;
+
+        q2_model_instance_init(&inst);
+        inst.model     = &mdl;
+        inst.origin[0] = d->pos[0];
+        inst.origin[1] = d->pos[1];
+        inst.origin[2] = d->pos[2];
+
+        /*
+         * THE ATTITUDE, THROUGH `rot` AND NOT THE ANGLE FIELDS.
+         *
+         * A piece's `spin[3]` is entity+0xE6, the same SVECTOR a gib tumbles
+         * with, and both chunk spawners hand it straight to RotMatrix
+         * (0x8005A30C, 0x8005AFD0). The instance's pitch/yaw/roll path is
+         * `q2_rotation_euler(pitch, -yaw, roll)` (modeldraw.c, instance_spin),
+         * which negates the middle angle for the world's yaw convention — so a
+         * chunk sent through it would be turned the wrong way (entitydraw.h).
+         * Build the matrix directly, exactly as a Q2_RF_TRANSIENT entity does
+         * above.
+         */
+        q2_rotation_euler(spin, d->spin[0], d->spin[1], d->spin[2]);
+        inst.rot   = (const s16 (*)[3])spin;
+        inst.scale = Q2_ONE_12;
+        inst.clut4_count_a = clut4_count_a;
+        inst.tpage         = tpage;
+
+        /*
+         * Where it sorts. The physics loop already keeps `node` current
+         * (simcombat.c commits it on every step), so this costs a hull search
+         * only for a piece whose cell is not known yet — and `area` is
+         * entity+0x9E, the byte the burst was raised with, which is the
+         * fallback when there is no cell at all.
+         */
+        node = d->node;
+        if (coll && node < 0)
+            node = q2_coll_find_node(coll, d->pos, -1, true);
+        inst.sort_area = (s32)(d->area & 0x7F);
+        if (coll && node >= 0) {
+            q2_coll_node cell;
+
+            if (q2_collision_get_node(coll, (u32)node, &cell))
+                inst.sort_area = cell.contents & 0x7F;
+        }
+        for (k = 0; k < 3; k++) {
+            inst.sort_bounds_min[k] = d->pos[k] - Q2_SWEEP_HALF_EXTENT;
+            inst.sort_bounds_max[k] = d->pos[k] + Q2_SWEEP_HALF_EXTENT;
+        }
+        inst.sort_bounds_valid = true;
+
+        if (lights) {
+            q2_light_set set;
+            /* A chunk is an ordinary entity: the pool allocator seeds
+             * entity+0x2AC at 0x40 (0x8006C1D8) and nothing on this path
+             * replaces it, so that is what its back colour is. */
+            static const u8 glow[3] = { 0x40, 0x40, 0x40 };
+
+            q2_light_gather(&set, lights, d->pos, node, 0);
+            q2_light_env_build(&env, &set, Q2_LIGHT_ONE, Q2_LIGHT_ONE, glow);
+            inst.light = &env;
+        }
+
+        q2_model_build_ot(&inst, cam, ot, gte, &st);
+        emitted += st.faces_emitted;
     }
 
     return emitted;

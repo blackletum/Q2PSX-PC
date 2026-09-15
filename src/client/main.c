@@ -684,6 +684,16 @@ typedef struct client {
     /* Faces the projectile bodies put in the table. Counted because "bolts N"
      * says how many are alive, not whether any of them reached the screen. */
     u32               proj_prims;
+    /* Primitives the effect pool put in the table, for the same reason: the
+     * pool's "N live" figure says nothing about whether the area routing let
+     * any of them through. q2_fx_build_ot's return was discarded, so a whole
+     * class of bursts could be culled in every frame with no counter moving. */
+    u32               fx_prims;
+    /* Debris models this map's bank yielded (0..3) and faces the live pieces
+     * put in the table. Both are zero on the 30 banks with no Debris model,
+     * which is the console's own answer there. */
+    u32               debris_models;
+    u32               debris_faces;
     u32               player_attacks;
     u32               rot_moved;
     u32               rot_steps;   /* step requests the script has made */
@@ -1645,9 +1655,37 @@ static void client_pickup_burst(client *c, const s32 pos[3], s32 model_index)
         }
     }
 
-    q2_fx_group_spawn(&c->sim[0].fx, pos, vel, count,
-                      q2_fx_ramp_at(&c->fx_tables, 10),
-                      q2_fx_ramp_at(&c->fx_tables, 0), 32, 6144, 0);
+    /*
+     * THE AREA, which used to be a literal 0 here and is what kept every
+     * pickup burst off the screen in any zone with a SortData stream.
+     *
+     * 0x8005AB70 passes entity+0x9E — `lbu v0, 158(s6)` at 0x8005AD28 — into
+     * the THIRD spawner, and that spawner resolves it: 0x8002FED0 calls
+     * 0x800686C4, which returns the argument when it is non-zero and otherwise
+     * looks the point up in PrimaryColl and takes the cell's byte +32
+     * (`lbu v0, 32(v0)` at 0x80068710), storing the answer into group+0xC7 at
+     * 0x8002FEDE. This function has no entity to read +0x9E off, so it does
+     * what the else-arm does, against the same hull. Without it the group draw
+     * culls the burst outright: no collision cell on the disc carries area 0.
+     */
+    {
+        q2_coll_node cell;
+        s32 node = -1;
+        u8  area = 0;
+        q2_collision *hull = c->sim[0].coll_primary_ready
+                                 ? &c->sim[0].coll_primary
+                                 : (c->sim[0].coll_ready ? &c->sim[0].coll
+                                                         : NULL);
+
+        if (hull)
+            node = q2_coll_find_node(hull, pos, -1, true);
+        if (node >= 0 && q2_collision_get_node(hull, (u32)node, &cell))
+            area = (u8)(cell.contents & 0x7F);
+
+        q2_fx_group_spawn(&c->sim[0].fx, pos, vel, count,
+                          q2_fx_ramp_at(&c->fx_tables, 10),
+                          q2_fx_ramp_at(&c->fx_tables, 0), 32, 6144, area);
+    }
     c->ent_bursts++;
 }
 
@@ -5862,6 +5900,49 @@ static bool client_load_zone(client *c, const char *map, int index)
              * has one. A map without it simply has no glint.
              */
             q2_sim_attach_glint(&c->sim[0], &c->common);
+
+            /*
+             * THE DEBRIS MODELS, which nothing has ever registered.
+             *
+             * 0x80064F70 appends a model to the 32-slot list at 0x800D56B0
+             * (`sw a0, 0(v1)` at 0x80064F9C, capped by the `slti a1, 32` at
+             * 0x80064F80) and the burst picks from it uniformly — 0x80064748
+             * loads the chosen word and hands it to the piece spawner
+             * 0x80064398 as its model. A level fills the list from its own
+             * class table, where "Debris1", "Debris2" and "Debris3" all
+             * register through that function.
+             *
+             * This port's q2_fx_debris_register had no caller at all, so
+             * `debris_model_count` was zero for the whole of every run and
+             * every piece took the `model = -1` arm: a shattered pane threw
+             * twenty-one chunks that moved, bounced and expired invisibly.
+             *
+             * BY NAME, never by bank index. Only 19 of the disc's 49 banks
+             * carry the three models, and on five of those Debris1 is not at
+             * index 0 — it is 19 on LAB and POWER2, 2 on SECURITY, 25 on
+             * WASTE1, 20 on WASTE3, and POWER2's index 0 is `BFGBlast`. A map
+             * with no Debris model registers nothing and keeps the -1 arm,
+             * which is the right answer on those 30 banks.
+             *
+             * It has to sit after q2_sim_attach_effects: that calls
+             * q2_fx_world_init, which memsets the world and would wipe the
+             * list.
+             */
+            if (c->model_bank_ready) {
+                static const char *const debris_names[] = {
+                    "Debris1", "Debris2", "Debris3"
+                };
+                u32 dn;
+
+                for (dn = 0; dn < Q2PSX_ARRAY_COUNT(debris_names); dn++) {
+                    s32 mi = q2_model_bank_find(&c->model_bank,
+                                                debris_names[dn]);
+
+                    if (mi >= 0 &&
+                        q2_fx_debris_register(&c->sim[0].fx, (s16)mi))
+                        c->debris_models++;
+                }
+            }
         }
 
         /*
@@ -13374,14 +13455,26 @@ static void client_draw_view(void *user, q2_screen *s, int p,
                  * The ambient the entity carries, which used to be NULL — so a
                  * vertex none of the three gathered lights reached came out
                  * pure black rather than dim, and a creature in an unlit
-                 * corridor was a silhouette. 0x80058944 stores "000" as the
-                 * spawn default, i.e. 0x30 per component.
+                 * corridor was a silhouette.
+                 *
+                 * AND IT IS THE ENTITY'S OWN BYTES NOW, not a literal. This
+                 * was a static 0x30 triplet, so a creature struck by an energy
+                 * weapon never took the colour 0x800586E8 writes into
+                 * entity+0x2AC and the fade 0x8005B894 runs on it had nothing
+                 * to show. The actor keeps the triplet (combat.h,
+                 * q2_actor.ambient) and the presentation pass moves it; an
+                 * actor that cannot be resolved falls back to the literal,
+                 * which is also what the seed is.
                  */
-                static const u8 cre_glow[3] = { 0x30, 0x30, 0x30 };
+                static const u8 cre_glow[3] = { Q2_ACTOR_AMBIENT_DEFAULT,
+                                                Q2_ACTOR_AMBIENT_DEFAULT,
+                                                Q2_ACTOR_AMBIENT_DEFAULT };
+                const q2_actor *ga = client_cre_actor(c, m);
 
                 q2_light_gather(&set, &c->light_world, m->pos, cell, 0);
                 q2_light_env_build(&cre_env, &set, Q2_LIGHT_ONE,
-                                   Q2_LIGHT_ONE, cre_glow);
+                                   Q2_LIGHT_ONE,
+                                   ga ? ga->ambient : cre_glow);
                 inst.light = &cre_env;
 
                 /*
@@ -13584,13 +13677,23 @@ static void client_draw_view(void *user, q2_screen *s, int p,
 
             if (c->lights_ready) {
                 q2_light_set set;
-                static const u8 glow[3] = { 0x30, 0x30, 0x30 };
+                /* The other body draw, and the console runs the same chain for
+                 * a player: the player think calls 0x8005B880 at 0x8003B004,
+                 * so this ambient moves exactly as a creature's does. The live
+                 * player's actor is `combat.self`; a parked one's is its own
+                 * `pcombat[pi].self` (combat.h, q2_actor.ambient). */
+                static const u8 glow[3] = { Q2_ACTOR_AMBIENT_DEFAULT,
+                                            Q2_ACTOR_AMBIENT_DEFAULT,
+                                            Q2_ACTOR_AMBIENT_DEFAULT };
+                const q2_actor *ga = (pi == c->sim[0].cur_player)
+                                         ? &c->sim[0].combat.self
+                                         : &c->sim[0].pcombat[pi].self;
 
                 q2_light_gather(&set, &c->light_world, at, cell, 0);
                 q2_light_env_build(&env, &set,
                                    death->stage == Q2_PDEATH_FADING
                                        ? death->scale : Q2_LIGHT_ONE,
-                                   Q2_LIGHT_ONE, glow);
+                                   Q2_LIGHT_ONE, ga ? ga->ambient : glow);
                 inst.light = &env;
             }
 
@@ -13612,7 +13715,7 @@ static void client_draw_view(void *user, q2_screen *s, int p,
      * the reset per view would make split screen lose the beams in every
      * viewport but the first.
      */
-    q2_fx_build_ot(&c->sim[0].fx, &c->cam, (u32)p, ot, gte);
+    c->fx_prims += q2_fx_build_ot(&c->sim[0].fx, &c->cam, (u32)p, ot, gte);
 
     /*
      * And the projectiles themselves, which nothing has ever drawn. Until now
@@ -13624,6 +13727,22 @@ static void client_draw_view(void *user, q2_screen *s, int p,
      * See entitydraw.h for where the geometry comes from and which part of it
      * is inference rather than transcription.
      */
+    /*
+     * And the debris, for the same reason and from the same pool the physics
+     * loop has been stepping all along — see entitydraw.h. The bank is the
+     * map's own, because the pieces' model indices were registered out of it.
+     */
+    if (c->model_bank_ready)
+        c->debris_faces +=
+            q2_fx_debris_build_ot(&c->sim[0].fx, &c->model_bank,
+                                  c->sim[0].coll_primary_ready
+                                      ? &c->sim[0].coll_primary
+                                      : (c->sim[0].coll_ready
+                                          ? &c->sim[0].coll : NULL),
+                                  c->lights_ready ? &c->light_world : NULL,
+                                  &c->render.tpage, c->clut4_count_a,
+                                  &c->cam, ot, gte);
+
     c->proj_prims += q2_projectiles_build_ot(&c->sim[0].combat.projectiles,
                                              c->sim[0].coll_primary_ready
                                                  ? &c->sim[0].coll_primary
@@ -14946,6 +15065,13 @@ static void client_report(const client *c)
     REPORT("creatures.traces",      c->ai_world.stats.traces);
     REPORT("creatures.blocked_door", c->ai_world.stats.trace_blocked_ent);
     REPORT("creatures.blocked_body", c->ai_world.stats.trace_blocked_body);
+
+    /* Not "how many bursts were raised" — how many primitives reached the
+     * ordering table. The two differ by exactly the area cull. */
+    REPORT("fx.prims",              c->fx_prims);
+    REPORT("fx.bursts",             c->ent_bursts);
+    REPORT("fx.debris_models",      c->debris_models);
+    REPORT("fx.debris_faces",       c->debris_faces);
 
     REPORT("world.movers",          c->movers_ready ? c->movers.count : 0);
     REPORT("world.mover_boxes",     s->mover_count);

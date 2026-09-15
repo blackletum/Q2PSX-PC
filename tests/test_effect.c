@@ -183,6 +183,17 @@ static void test_integrator_order(void)
     q2_fx_group_spawn(&w, at, vel, 2, &g_tab.ramp[0], NULL, 5, 4096, 0);
     w.group[0].accel[0] = 4;
 
+    /*
+     * THE REPRIEVE FIRST. The console integrates at the tail of the draw
+     * (0x80030B1C onward), so a group raised between two draws is drawn before
+     * it is ever stepped; this port integrates from the sim tick, ahead of the
+     * draw, and gives a freshly spawned group one tick's grace to stand in for
+     * that (effect.h, q2_fx_group.fresh).
+     */
+    q2_fx_tick(&w);
+    check_eq_i(w.group[0].origin[0], 0, "the spawn tick does not integrate");
+    check_eq_i(w.group[0].life,      5, "nor age it");
+
     q2_fx_tick(&w);
 
     /* 0x80030B34 adds the velocity, THEN 0x80030B74 adds the acceleration. */
@@ -209,8 +220,14 @@ static void test_life_zero_frees_the_slot(void)
     q2_fx_group_spawn(&w, at, vel, 1, &g_tab.ramp[0], NULL, 1, 4096, 0);
     check_eq_i(w.group[0].life, 1, "spawned with life 1");
 
+    /* The spawn tick is the reprieve — this is the tick the console spends
+     * DRAWING the group, and a life-1 burst (the quad shell, the energy
+     * crackle) exists only for it. */
     q2_fx_tick(&w);
-    check_eq_i(w.group[0].life, 0, "one tick retires it");
+    check_eq_i(w.group[0].life, 1, "the spawn tick leaves it drawable");
+
+    q2_fx_tick(&w);
+    check_eq_i(w.group[0].life, 0, "the next tick retires it");
 
     /* And the next spawn reuses the slot, because 0x800302E8 takes the first
      * record whose life is zero. */
@@ -268,7 +285,12 @@ static void test_ramp_is_indexed_by_age(void)
 
     q2_fx_tick(&w);
     c = q2_fx_group_colour(&w.group[0], 0);
-    check_eq_i(q2_fx_colour_r(c), 32 - 14, "a tick advances the entry");
+    check_eq_i(q2_fx_colour_r(c), 32 - 15,
+               "the spawn tick holds the first entry");
+
+    q2_fx_tick(&w);
+    c = q2_fx_group_colour(&w.group[0], 0);
+    check_eq_i(q2_fx_colour_r(c), 32 - 14, "the next tick advances it");
 
     /* The clamp: nothing on the disc spawns above 32, but a save could. */
     check_eq_i(q2_fx_ramp_index_for_life(40), 0, "life above 32 clamps to 0");
@@ -1300,8 +1322,11 @@ static void test_actor_damage_effect(void)
           "tick 1: the persistent light and the ambient override");
     check_eq_i(a.effect[1], 2, "tick 1 leaves 2");
     q2_fx_tick(&w);
+    check_eq_i(w.group[0].life, 1,
+               "the spawn tick leaves the life-1 burst drawable");
+    q2_fx_tick(&w);
     check_eq_i(w.group[0].life, 0,
-               "a life-1 burst is gone after one integrator tick");
+               "and the next integrator tick retires it");
 
     q2_fx_world_clear(&w);
     q2_fx_actor_present(&w, &rng, &a, &src, 1, 0, -1, 0, 0, &rep);
@@ -1377,6 +1402,9 @@ static void test_quad_shell(void)
 
     /* The next frame takes the other half, and the old shell is gone after
      * one integrator tick because its life is 1. */
+    q2_fx_tick(&w);
+    check_eq_i(count_groups(&w, Q2_FX_QUAD_SHELL_RAMP, Q2_FX_QUAD_SHELL_LIFE),
+               1, "the spawn tick leaves the shell standing to be drawn");
     q2_fx_tick(&w);
     check_eq_i(count_groups(&w, Q2_FX_QUAD_SHELL_RAMP, Q2_FX_QUAD_SHELL_LIFE),
                0, "a tick later the shell has expired");
@@ -1506,9 +1534,29 @@ static void test_debris(void)
         check(d->vel[1] >= -3072 && d->vel[1] <= -1,
               "the Y draw is biased entirely upward");
         check_eq_i(d->life, 2100, "a fresh piece has 2100 of life");
+        /*
+         * AND IT HAS A MODEL. 0x8006473C picks uniformly from the registration
+         * list and hands the word to the piece spawner, so a level that filled
+         * the list throws visible chunks. Nothing in this port ever filled it,
+         * so every piece took the `model = -1` arm and a shattered pane threw
+         * twenty-one invisible ones; the client now registers the bank's
+         * Debris1..3 by name at zone load.
+         */
+        check(d->model >= 0, "and a model out of the registration list");
     }
     check_eq_i(up, 20, "every piece leaps");
     check_eq_i(in_box, 20, "every piece started inside the box");
+
+    /* A list nothing registered into is still the console's answer, and it is
+     * the right one on the 30 of 49 banks that carry no Debris model. */
+    {
+        q2_fx_world bare;
+
+        q2_fx_world_init(&bare, &g_tab);
+        q2_fx_debris_burst(&bare, &rng, bmin, bmax, NULL, 2, 5);
+        check_eq_i(bare.debris[0].model, -1,
+                   "with nothing registered a piece has no model");
+    }
 
     /* A fixed point overrides the box, which is how a scripted break puts
      * every shard at one place. */
@@ -1752,7 +1800,8 @@ static void test_timed_beams(void)
     q2_fx_world_init(&w, &g_tab);
 
     check(q2_fx_beam_timed(&w, 1, 7, a, b, Q2_FX_TIMED_BEAM_RADIUS,
-                           Q2_FX_TIMED_BEAM_STYLE, Q2_FX_TIMED_BEAM_LIFE),
+                           Q2_FX_TIMED_BEAM_STYLE, Q2_FX_TIMED_BEAM_LIFE,
+                           5),
           "a timed beam is held");
     check_eq_i(q2_fx_timed_live(&w), 1, "one is alive");
 
@@ -1765,24 +1814,26 @@ static void test_timed_beams(void)
     for (i = 0; i < 40; i++) {
         b[0] += 10;
         q2_fx_beam_timed(&w, 1, 7, a, b, Q2_FX_TIMED_BEAM_RADIUS,
-                         Q2_FX_TIMED_BEAM_STYLE, Q2_FX_TIMED_BEAM_LIFE);
+                         Q2_FX_TIMED_BEAM_STYLE, Q2_FX_TIMED_BEAM_LIFE,
+                         5);
     }
     check_eq_i(q2_fx_timed_live(&w), 1, "refreshing does not allocate a second");
     check_eq_i(w.timed[0].to[0], b[0], "and it moved with its target");
 
     /* A different target does get its own. */
-    q2_fx_beam_timed(&w, 1, 8, a, b, 64, Q2_FX_TIMED_BEAM_STYLE, 45);
+    q2_fx_beam_timed(&w, 1, 8, a, b, 64, Q2_FX_TIMED_BEAM_STYLE, 45, 5);
     check_eq_i(q2_fx_timed_live(&w), 2, "a second target takes a second slot");
 
     /* Twelve is the ceiling, and a full list is tolerated rather than fatal. */
     for (i = 0; i < 40; i++)
-        q2_fx_beam_timed(&w, 2, (s32)i, a, b, 64, Q2_FX_TIMED_BEAM_STYLE, 45);
+        q2_fx_beam_timed(&w, 2, (s32)i, a, b, 64, Q2_FX_TIMED_BEAM_STYLE,
+                         45, 5);
     check_eq_i(q2_fx_timed_live(&w), Q2_FX_TIMED_BEAMS_MAX,
                "the list holds twelve");
 
     /* 0x80048CE8 subtracts the frame delta and clamps, without freeing. */
     q2_fx_world_clear(&w);
-    q2_fx_beam_timed(&w, 1, 7, a, b, 64, Q2_FX_TIMED_BEAM_STYLE, 45);
+    q2_fx_beam_timed(&w, 1, 7, a, b, 64, Q2_FX_TIMED_BEAM_STYLE, 45, 5);
     q2_fx_timed_tick(&w, 20);
     check_eq_i(w.timed[0].timer, 25, "the timer takes the frame delta");
     q2_fx_timed_tick(&w, 100);
@@ -1798,7 +1849,7 @@ static void test_timed_beams(void)
         cam.far_z      = Q2_CAMERA_FAR_DEFAULT;
 
         q2_fx_world_clear(&w);
-        q2_fx_beam_timed(&w, 1, 7, a, b, 64, Q2_FX_TIMED_BEAM_STYLE, 45);
+        q2_fx_beam_timed(&w, 1, 7, a, b, 64, Q2_FX_TIMED_BEAM_STYLE, 45, 5);
 
         psx_ot_clear(&ot);
         check(q2_fx_build_ot(&w, &cam, 0, &ot, &gte) > 0,
@@ -1810,8 +1861,92 @@ static void test_timed_beams(void)
         check(q2_fx_build_ot(&w, &cam, 0, &ot, &gte) > 0,
               "and again the next frame");
 
+        /*
+         * AND IT SURVIVES THE AREA ROUTING, which it did not before.
+         *
+         * submit_timed used to re-queue every record with a literal area 0 and
+         * draw_beams culls an area with no screen-change record, so the BFG's
+         * whole trail was dropped in any zone that ships a SortData stream —
+         * which is nearly all of them, since no collision cell on the disc
+         * carries area 0. The console resolves the owner's own area on every
+         * submit: 0x80048D24 runs the point-clip helper 0x8004E920 and
+         * 0x80048D50 `lh a3, 64(sp)` passes its answer to the beam queue.
+         */
+        q2_fx_beams_reset(&w);
+        psx_ot_clear(&ot);
+        psx_ot_area_register(&ot, 3, 43);
+        check_eq_i(q2_fx_build_ot(&w, &cam, 0, &ot, &gte), 0,
+                   "a timed beam in a stale area is culled");
+
+        q2_fx_beams_reset(&w);
+        psx_ot_clear(&ot);
+        psx_ot_area_register(&ot, 5, 43);
+        check(q2_fx_build_ot(&w, &cam, 0, &ot, &gte) > 0,
+              "and draws once its own area is the registered one");
+
         psx_ot_free(&ot);
     }
+}
+
+/*
+ * THE SPAWN TICK IS A DRAW TICK.
+ *
+ * 0x800304A8 draws every group and only then, from 0x80030B1C, ages them, so a
+ * burst the gameplay code raised during the frame reaches the screen at its
+ * full life. This port spawns in the sim tick, ages in the sim tick and draws
+ * afterwards from the client, which killed a life-1 group outright — the quad
+ * damage shell and the energy-bolt crackle are both life 1 and both re-spawned
+ * every tick, so neither was ever visible.
+ */
+static void test_spawn_tick_is_drawable(void)
+{
+    q2_fx_world w;
+    q2_camera cam;
+    psx_ot ot;
+    gte_state gte;
+    s16 vel[1][3] = { { 0, 0, 0 } };
+    s32 at[3] = { 0, 0, 4000 };
+
+    printf("group: a burst spawned this tick still draws this frame\n");
+
+    q2_fx_world_init(&w, &g_tab);
+    if (psx_ot_init(&ot, 256, 4096) != Q2_OK)
+        return;
+
+    gte_init(&gte);
+    gte_set_projection(&gte, 256, 256, 124);
+    memset(&cam, 0, sizeof(cam));
+    cam.projection = 256;
+    cam.far_z      = Q2_CAMERA_FAR_DEFAULT;
+
+    /* Life 1, the quad shell's own, and the port's frame order: spawn, tick,
+     * draw. */
+    q2_fx_group_spawn(&w, at, vel, Q2_FX_GROUP_QUADS, &g_tab.ramp[0], NULL,
+                      1, 4096, 0);
+    q2_fx_tick(&w);
+    psx_ot_clear(&ot);
+    check_eq_i(q2_fx_build_ot(&w, &cam, 0, &ot, &gte), Q2_FX_GROUP_QUADS,
+               "a life-1 burst draws its fifteen quads");
+
+    /* And the frame after that it is gone, as 0x80030B24's zero test leaves
+     * it. */
+    q2_fx_tick(&w);
+    psx_ot_clear(&ot);
+    check_eq_i(q2_fx_build_ot(&w, &cam, 0, &ot, &gte), 0,
+               "and is gone the next frame");
+
+    /*
+     * The first entry a longer burst shows is the console's 32 - L, not
+     * 32 - (L - 1): 0x80030798 forms `32 - life` and reads the ramp word at
+     * +4 + 4 * that.
+     */
+    q2_fx_world_clear(&w);
+    q2_fx_group_spawn(&w, at, vel, 1, &g_tab.ramp[3], NULL, 20, 4096, 0);
+    q2_fx_tick(&w);
+    check_eq_i(q2_fx_colour_r(q2_fx_group_colour(&w.group[0], 0)), 32 - 20,
+               "the first drawn entry is 32 - life");
+
+    psx_ot_free(&ot);
 }
 
 static void test_glint_script_scan(void)
@@ -2572,6 +2707,7 @@ int main(void)
     test_effect_sorts_with_the_world();
     test_texture_survives_clear();
     test_timed_beams();
+    test_spawn_tick_is_drawable();
     test_glint_script_scan();
     test_glint_two_paths();
     test_debris_gravity();
