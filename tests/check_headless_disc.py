@@ -113,7 +113,7 @@ def frame_is_lit(path, threshold=2.0):
 
 class Case:
     def __init__(self, name, args, checks=(), frames=90, shot=True,
-                 timeout=180, wants_report=True):
+                 timeout=180, wants_report=True, needs_gate=None):
         self.name = name
         self.args = list(args)
         self.checks = list(checks)
@@ -123,6 +123,52 @@ class Case:
         # `--zone-probe` answers a static question and leaves before the frame
         # loop, so it has no run to report on. Its verdict is its own output.
         self.wants_report = wants_report
+        # A map name: probe it first and stand the player in a gate's doorway.
+        self.needs_gate = needs_gate
+        self.expect_zone = None
+        self.start_zone = 0
+        self.log = ""
+
+
+GATE_RE = re.compile(
+    r"-> '\w+' \(zone (-?\d+)\).*?"
+    r"centre \((-?\d+),(-?\d+),(-?\d+)\)"
+    r" resolves in zones \[([^\]]*)\]", re.S)
+
+
+def first_gate(client, disc, map_name):
+    """
+    Find a zone gate this map can actually be walked through, and say which
+    zone to start in to do it.
+
+    A gate is a trigger volume whose event record carries a ZONEGATE, and
+    neither the volume nor the record says so from the outside — the probe is
+    the only thing that knows. It also prints which zones' hulls hold each
+    doorway, which is what makes the choice possible: a gate whose doorway is
+    only in zone 1 cannot be stood in from zone 0, and a gate in zone 0 that
+    NAMES zone 0 is refused by the runtime before it reaches the loader
+    (0x800791E0 compares the name against the resident one).
+
+    Returns (start_zone, "x,y,z", dest_zone), or None for a map with no gates.
+    """
+    proc = subprocess.run(
+        [str(client), "--disc", str(disc), "--headless", "--zone-probe",
+         "--map", map_name],
+        cwd=ROOT, capture_output=True, timeout=900)
+    log = proc.stdout.decode("utf-8", errors="replace")
+    best = None
+    for dest, x, y, z, holding in GATE_RE.findall(log):
+        dest = int(dest)
+        zones = [int(v) for v in holding.split()]
+        # Stand in a zone that holds the doorway and is not the destination.
+        for start in zones:
+            if start != dest:
+                cand = (start, f"{x},{y},{z}", dest)
+                # Prefer starting in zone 0: the fewest moving parts.
+                if best is None or (cand[0] == 0 and best[0] != 0):
+                    best = cand
+                break
+    return best
 
 
 def run_case(case, client, disc, output):
@@ -131,6 +177,16 @@ def run_case(case, client, disc, output):
     shot = out / "frame.ppm"
     if shot.exists():
         shot.unlink()
+
+    if case.needs_gate:
+        gate = first_gate(client, disc, case.needs_gate)
+        if not gate:
+            # Not a failure: PODCITY and THEVAT have two zones and no gate
+            # between them — the second is reached some other way.
+            return case.name, True, [], {"skipped": 1}
+        case.args += ["--zone", str(gate[0]), "--at", gate[1]]
+        case.expect_zone = gate[2]
+        case.start_zone = gate[0]
 
     argv = [str(client), "--disc", str(disc), "--headless", "--report",
             "--frames", str(case.frames),
@@ -170,6 +226,7 @@ def run_case(case, client, disc, output):
             except Failure as exc:
                 problems.append(str(exc))
 
+    case.log = log
     for check in case.checks:
         try:
             check(report if case.wants_report else log, out, shot)
@@ -215,6 +272,58 @@ def no_loading_screen(report, out, shot):
     if report.get("level.loading_screens", 0):
         raise Failure(f"{report['level.loading_screens']} loading screens in a"
                       " run that never changed zone")
+
+
+def screens_only_for_zone_gates(report, out, shot):
+    """
+    A LEVEL change raises no loading screen. `--fire-triggers` fires every
+    volume on the map, so a map with no gates at all does several loads and
+    must still show none; a map with gates shows at most one per gate.
+    """
+    screens = report.get("level.loading_screens", 0)
+    loads = report.get("level.loads", 0)
+    if screens > loads:
+        raise Failure(f"{screens} loading screens for {loads} loads")
+
+
+def crossed_one_gate(case):
+    """
+    A real zone gate, walked through, is exactly one loading screen.
+
+    The console puts page 46 up for a zone change inside one map and for
+    nothing else — `xrefs 0x800A3314` finds the LOADING record materialised by
+    one instruction, inside 0x80079178, and `xrefs 0x80079178` finds two
+    callers, the ZONEGATE opcode and the TELEPORT primitive. So the count is
+    the thing to assert: one screen for one gate, and the level change that may
+    follow it adds none.
+    """
+    def check(report, out, shot):
+        gates = len(re.findall(r"zone gate -> zone \d+", case.log))
+        if gates < 1:
+            raise Failure("the player never crossed a zone gate")
+        screens = report.get("level.loading_screens", 0)
+        if screens != gates:
+            raise Failure(f"{gates} zone gates but {screens} loading screens")
+        if report.get("level.loads", 0) < 1 + gates:
+            raise Failure("a gate fired without a load behind it")
+    return check
+
+
+def bodies_blocked_something(report, out, shot):
+    """
+    Creatures are solid. `bound_trace`'s actor arm (0x8005BF4C) is what stops a
+    creature's step against the player or another creature, and before it
+    existed this counter could only ever be zero.
+    """
+    if report.get("creatures.traces", 0) < 1:
+        raise Failure("no creature ever traced a step")
+    if report.get("creatures.blocked_body", 0) < 1:
+        raise Failure("not one creature step was stopped by another body")
+    # ...and the clip must not be so eager that nothing can walk any more. A
+    # creature already overlapping a body has every step refused, which is the
+    # console's behaviour too; a creature that never moves at all is not.
+    if report.get("creatures.moved", 0) < 1:
+        raise Failure("no creature moved from where it spawned")
 
 
 def script_did_something(report, out, shot):
@@ -307,7 +416,8 @@ def build_cases(quick):
                       checks=[no_errors, ticked, rendered,
                               expect("creatures.live", at_least=1),
                               expect("creatures.thoughts", at_least=1),
-                              expect("player.shots", at_least=1)],
+                              expect("player.shots", at_least=1),
+                              bodies_blocked_something],
                       timeout=300))
     cases.append(Case("fight-BASE1",
                       ["--map", "BASE1", "--demo", "--shoot", "--god",
@@ -325,8 +435,19 @@ def build_cases(quick):
         cases.append(Case(f"script-{name}",
                           ["--map", name, "--fire-triggers"],
                           frames=300,
-                          checks=[no_errors, script_did_something],
+                          checks=[no_errors, script_did_something,
+                                  screens_only_for_zone_gates],
                           timeout=600))
+
+    # WALKING THROUGH A ZONE GATE, on every map that has one. The probe says
+    # where a doorway is and the case stands the player in it; what is asserted
+    # is that the crossing happened and that it raised exactly one screen.
+    for name in CAMPAIGN:
+        if ZONES[name] > 1:
+            case = Case(f"cross-{name}", ["--map", name],
+                        frames=90, needs_gate=name, timeout=900)
+            case.checks = [no_errors, crossed_one_gate(case)]
+            cases.append(case)
 
     # Split screen, both layouts and every player count.
     for players in (2, 3, 4):

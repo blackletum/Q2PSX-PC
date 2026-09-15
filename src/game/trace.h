@@ -438,8 +438,22 @@ typedef struct q2_move_body {
     s32  pos[3];      /* +0x54: the body's ORIGIN, not its feet   */
     s16  mins[3];     /* +0x6C                                    */
     s16  maxs[3];     /* +0x72                                    */
+    /*
+     * TWO RADII, AND THEY ARE DIFFERENT FIELDS.
+     *
+     * `radius` is entity+0x90, the separation pass's (0x80051428 `lh v1,
+     * 144(a1)`) — a constant 128 written by both relink sites and by nothing
+     * else. `sweep_radius` is entity+0x94, which is what the SWEEP at
+     * 0x800544EC reads (0x800545F4 `lh a0, 64(a2)` with a2 = entity+84) and is
+     * 286 for a player. `height` is entity+0x96, the Y slab that goes with it.
+     *
+     * Kept on one record because they describe one body, and named apart
+     * because reading the wrong one is a silent 158-unit error.
+     */
     s16  radius;      /* +0x90; Q2_BODY_RADIUS unless a caller
                        * has a reason                             */
+    s32  sweep_radius; /* +0x94                                   */
+    s16  height;       /* +0x96                                   */
     s32  id;          /* the caller's handle; -1 is never a body  */
     bool solid;       /* !(flags & 0x8000)                        */
 } q2_move_body;

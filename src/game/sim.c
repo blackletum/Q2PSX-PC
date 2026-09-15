@@ -1157,9 +1157,13 @@ static void sim_bodies_rebuild(q2_sim *sim)
             b->mins[k] = q2_player_body_mins[k];
             b->maxs[k] = q2_player_body_maxs[k];
         }
-        b->radius = Q2_BODY_RADIUS;
-        b->id     = sim_body_id_for_player(i);
-        b->solid  = true;
+        b->radius       = Q2_BODY_RADIUS;
+        /* entity+0x94 and +0x96 for a live player, the pair combat.c already
+         * writes into the player's actor: 286 and 572, origin -286..+286. */
+        b->sweep_radius = Q2_SWEEP_HALF_EXTENT;
+        b->height       = (s16)(Q2_SWEEP_HALF_EXTENT * 2);
+        b->id           = sim_body_id_for_player(i);
+        b->solid        = true;
     }
 
     if (sim->extra_bodies && sim->extra_body_count) {

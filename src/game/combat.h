@@ -663,6 +663,28 @@ s64 q2_combat_ray_dist_sq(const s32 origin[3], const s32 dir[3],
                           const s32 point[3], s64 *out_along);
 
 /*
+ * 0x800544EC's narrow phase, with the entity unpacked — a vertical cylinder of
+ * `radius` around `centre`, intersected with the Y slab that runs from
+ * `centre.y + 286` upward by `height` (0x80054834..0x8005483C builds exactly
+ * those two endpoints). `out_enter` and `out_exit` come back as 1.0.12
+ * fractions along `origin`..`origin + dir`.
+ *
+ * Exposed because the shot path is not the only caller of 0x800544EC: the AI's
+ * own trace helper runs it too (0x8005BF4C, behind the caller's 0x02000000 mask
+ * bit) to stop a creature's step against another body. Sharing the arithmetic
+ * rather than writing it twice is trace.h's rule about five copies of a slab
+ * test being how they drift apart.
+ *
+ * `q2_combat_centre_is_ahead` is the sweep's other gate, 0x800546B4's dot
+ * product: a candidate behind the ray is not a candidate.
+ */
+bool q2_combat_cylinder_interval(const s32 origin[3], const s32 dir[3],
+                                 const s32 centre[3], s32 radius, s16 height,
+                                 s64 *out_enter, s64 *out_exit);
+bool q2_combat_centre_is_ahead(const s32 origin[3], const s32 dir[3],
+                               const s32 centre[3]);
+
+/*
  * Fallback horizontal radius for callers which project an actor without a
  * usable entity radius. Normal actors carry their own radius and Y slab, just
  * as 0x800544EC reads entity+0x94/+0x96; this value is not added to that hull.

@@ -8048,6 +8048,14 @@ static void client_input_simulated(client *c, float dt)
                     b->maxs[k] = m->maxs[k];
                 }
                 b->radius = Q2_BODY_RADIUS;
+                /*
+                 * The SWEEP's own pair, entity+0x94 and +0x96, taken from the
+                 * actor rebuilt beside it: `q2_actor_from_monster` derives them
+                 * from the creature's hull exactly as 0x800544EC reads them,
+                 * and a corpse's are already the wider, shorter ones.
+                 */
+                b->sweep_radius = c->cre_actor[i].radius;
+                b->height       = c->cre_actor[i].height;
                 b->id     = (s32)i;
                 b->solid  = m->in_use && !m->dead;
             }

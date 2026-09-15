@@ -1245,12 +1245,18 @@ static s64 trace_root_from_long_double(long double v)
 static bool actor_centre_is_ahead(const s32 origin[3], const s32 dir[3],
                                   const q2_actor *t)
 {
+    return q2_combat_centre_is_ahead(origin, dir, t->origin);
+}
+
+bool q2_combat_centre_is_ahead(const s32 origin[3], const s32 dir[3],
+                               const s32 centre[3])
+{
     s64 rel[3];
     int k;
     bool exact = true;
 
     for (k = 0; k < 3; k++) {
-        rel[k] = (s64)t->origin[k] - origin[k];
+        rel[k] = (s64)centre[k] - origin[k];
         if (!trace_term_is_exact(rel[k]) || !trace_term_is_exact(dir[k]))
             exact = false;
     }
@@ -1272,9 +1278,46 @@ static bool actor_centre_is_ahead(const s32 origin[3], const s32 dir[3],
  * interval, and the function intersects the two. That distinction is visible
  * at a box corner and after the corpse volume is made wider and shorter.
  */
+/*
+ * The same narrow phase with the actor unpacked, so a caller that is clipping a
+ * MOVE rather than a shot can share it — see `q2_combat_cylinder_interval` in
+ * combat.h. trace.h's rule about five copies of a slab test being how they
+ * drift apart applies here exactly.
+ */
+static bool cylinder_interval(const s32 origin[3], const s32 dir[3],
+                              const s32 centre[3], s32 radius_in, s16 height,
+                              s64 *out_enter, s64 *out_exit);
+
+bool q2_combat_cylinder_interval(const s32 origin[3], const s32 dir[3],
+                                 const s32 centre[3], s32 radius, s16 height,
+                                 s64 *out_enter, s64 *out_exit)
+{
+    return cylinder_interval(origin, dir, centre, radius, height,
+                             out_enter, out_exit);
+}
+
 static bool actor_cylinder_interval(const s32 origin[3], const s32 dir[3],
                                     const q2_actor *t, s32 fallback_radius,
                                     s64 *out_enter, s64 *out_exit)
+{
+    s16 height;
+
+    if (!origin || !dir || !t)
+        return false;
+
+    /* The Y slab's height is entity+0x96, and an actor built from a box rather
+     * than from a live entity has it as the box instead. Resolved here so the
+     * unpacked primitive below takes one number. */
+    height = t->height > 0 ? t->height : (s16)(t->maxs[1] - t->mins[1]);
+
+    return cylinder_interval(origin, dir, t->origin,
+                             t->radius > 0 ? t->radius : fallback_radius,
+                             height, out_enter, out_exit);
+}
+
+static bool cylinder_interval(const s32 origin[3], const s32 dir[3],
+                              const s32 centre[3], s32 radius_in, s16 height,
+                              s64 *out_enter, s64 *out_exit)
 {
     /* `disc` would shadow the disc type; this is a quadratic discriminant. */
     s64 ox, oz, a, b, discriminant;
@@ -1282,10 +1325,10 @@ static bool actor_cylinder_interval(const s32 origin[3], const s32 dir[3],
     s64 radius;
     s64 ymin, ymax;
 
-    if (!origin || !dir || !t)
+    if (!origin || !dir || !centre)
         return false;
 
-    radius = t->radius > 0 ? t->radius : fallback_radius;
+    radius = radius_in;
     if (radius <= 0)
         return false;
 
@@ -1303,15 +1346,15 @@ static bool actor_cylinder_interval(const s32 origin[3], const s32 dir[3],
         xmax = origin[0] > end[0] ? origin[0] : end[0];
         zmin = origin[2] < end[2] ? origin[2] : end[2];
         zmax = origin[2] > end[2] ? origin[2] : end[2];
-        if (xmax < (s64)t->origin[0] - radius ||
-            xmin > (s64)t->origin[0] + radius ||
-            zmax < (s64)t->origin[2] - radius ||
-            zmin > (s64)t->origin[2] + radius)
+        if (xmax < (s64)centre[0] - radius ||
+            xmin > (s64)centre[0] + radius ||
+            zmax < (s64)centre[2] - radius ||
+            zmin > (s64)centre[2] + radius)
             return false;
     }
 
-    ox = (s64)origin[0] - t->origin[0];
-    oz = (s64)origin[2] - t->origin[2];
+    ox = (s64)origin[0] - centre[0];
+    oz = (s64)origin[2] - centre[2];
 
     if (dir[0] == 0 && dir[2] == 0) {
         /* The retail solver explicitly returns 0..4096 here. The broad box
@@ -1374,10 +1417,8 @@ static bool actor_cylinder_interval(const s32 origin[3], const s32 dir[3],
 
     /* 0x80054834..0x8005483C builds exactly these two endpoints: the lower
      * face is always origin.y + 286, and entity+0x96 reaches upward from it. */
-    ymax = (s64)t->origin[1] + 286;
-    ymin = ymax - (t->height > 0
-                       ? t->height
-                       : (s32)t->maxs[1] - t->mins[1]);
+    ymax = (s64)centre[1] + 286;
+    ymin = ymax - height;
 
     if (dir[1] > 0) {
         v_enter = ((ymin - origin[1]) * 4096) / dir[1];
