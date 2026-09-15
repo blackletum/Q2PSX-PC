@@ -119,7 +119,8 @@ def frame_is_lit(path, threshold=2.0):
 
 class Case:
     def __init__(self, name, args, checks=(), frames=90, shot=True,
-                 timeout=180, wants_report=True, needs_gate=None):
+                 timeout=180, wants_report=True, needs_gate=None,
+                 twice=False):
         self.name = name
         self.args = list(args)
         self.checks = list(checks)
@@ -134,6 +135,7 @@ class Case:
         self.expect_zone = None
         self.start_zone = 0
         self.log = ""
+        self.twice = twice
 
 
 GATE_RE = re.compile(
@@ -247,6 +249,33 @@ def run_case(case, client, disc, output):
                     problems.append(f"capture is {w}x{h}")
             except Failure as exc:
                 problems.append(str(exc))
+
+    if case.twice:
+        # SAME RUN, TWICE. `--headless` exists so that a scripted run is
+        # reproducible — a fixed 1/30 s step instead of the wall clock — and
+        # AGENTS.md leans on that for every number this project quotes. Nothing
+        # asserted it. Three identical `--frames 500` captures of BASE3 gave
+        # 497, 497 and 4567 projectile lights before it existed.
+        # The first capture has to be taken aside BEFORE the second run, which
+        # writes over it.
+        first_bytes = shot.read_bytes() if (case.shot and shot.is_file()) else None
+        second = subprocess.run(argv, cwd=ROOT, capture_output=True,
+                                timeout=case.timeout)
+        log2 = (second.stdout + second.stderr).decode("utf-8", errors="replace")
+        (out / "run2.log").write_text(log2, encoding="utf-8")
+        report2 = parse_report(log2)
+        drift = {k: (v, report2.get(k)) for k, v in report.items()
+                 if report2.get(k) != v}
+        if drift:
+            problems.append("counters differ between two identical runs: "
+                            + ", ".join(f"{k} {a} vs {b}"
+                                        for k, (a, b) in sorted(drift.items())))
+        if first_bytes is not None:
+            if not shot.is_file():
+                problems.append("the second run wrote no capture")
+            elif shot.read_bytes() != first_bytes:
+                (out / "frame1.ppm").write_bytes(first_bytes)
+                problems.append("the two captures differ")
 
     case.log = log
     for check in case.checks:
@@ -484,6 +513,16 @@ def build_cases(quick, ntsc):
                            "--dm-split", layout],
                           frames=120,
                           checks=[no_errors, ticked, rendered]))
+
+    # THE SAME RUN, TWICE. See the note in run_case: this is the only case that
+    # tests what --headless is for.
+    for name, extra in (("BASE1", ["--demo", "--shoot"]),
+                        ("SECURITY", ["--demo", "--shoot", "--god"]),
+                        ("BASE3", ["--demo"])):
+        cases.append(Case(f"repeat-{name}", ["--map", name] + extra,
+                          frames=300, twice=True,
+                          checks=[no_errors, ticked, rendered],
+                          timeout=600))
 
     # A quick save taken mid-level and restored. It is a LOAD, and it must not
     # raise the transition screen: a memory-card restore is the outer state
