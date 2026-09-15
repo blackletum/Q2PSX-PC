@@ -12,11 +12,17 @@ advances on the wall clock, `dt` varies per frame, and every cumulative number
 below is unreproducible; with it the step is a fixed 1/30 s and two runs of the
 same case agree exactly.
 
+Both discs are covered and the suite adapts: it asks the client which release
+it identified and picks the film names to match, since the three films are
+under different names on SLUS-00757.
+
 Run from the repository root:
 
     python tests/check_headless_disc.py --disc .install/disc/game.cue
+    python tests/check_headless_disc.py --disc "<...>/Quake II (USA).cue"
 
   --client PATH   which binary (default: the staged .install one, else build-msvc)
+  --disc PATH     which disc (default: .install/disc/game.cue)
   --output DIR    where logs and captures go (default: .agents/tmp/headless)
   --jobs N        how many runs at once (default: half the CPUs)
   --only PATTERN  run just the cases whose name contains this
@@ -169,6 +175,22 @@ def first_gate(client, disc, map_name):
                     best = cand
                 break
     return best
+
+
+def disc_is_ntsc(client, disc):
+    """
+    Which disc this is, asked of the client rather than of the filename.
+
+    It matters for more than the banner: the USA build has its own 512x240
+    display, its own frame rate and its own names for the three films. The
+    client prints the release it identified as its last line.
+    """
+    proc = subprocess.run(
+        [str(client), "--disc", str(disc), "--headless", "--frames", "1",
+         "--map", "QDUMMY"],
+        cwd=ROOT, capture_output=True, timeout=300)
+    log = (proc.stdout + proc.stderr).decode("utf-8", errors="replace")
+    return "NTSC" in log or "SLUS" in log
 
 
 def run_case(case, client, disc, output):
@@ -384,7 +406,7 @@ def expect(key, at_least=None, exactly=None):
     return check
 
 
-def build_cases(quick):
+def build_cases(quick, ntsc):
     cases = []
     base = [no_errors, ticked, rendered, loaded_once, no_loading_screen]
 
@@ -463,6 +485,17 @@ def build_cases(quick):
                           frames=120,
                           checks=[no_errors, ticked, rendered]))
 
+    # A quick save taken mid-level and restored. It is a LOAD, and it must not
+    # raise the transition screen: a memory-card restore is the outer state
+    # machine's, not 0x80079178's.
+    cases.append(Case("save-load", ["--map", "BASE1", "--save-load", "40"],
+                      frames=120,
+                      checks=[no_errors, ticked, rendered,
+                              no_loading_screen,
+                              expect("level.loads", exactly=2),
+                              expect("level.loads_failed", exactly=0)],
+                      timeout=300))
+
     # The screens, which are not levels: they have no world and must not be
     # asked for one, but they must still compose a frame and exit clean.
     cases.append(Case("front-end", ["--map", "QFRONT"], frames=120,
@@ -475,8 +508,13 @@ def build_cases(quick):
         cases.append(Case(f"endmis-{unit}", ["--map", f"QENDMIS{unit}"],
                           frames=90, checks=[no_errors]))
 
-    # The films.
-    for film in ("TAKE1BP.STX", "OUTRO1P.STX", "ROGUEINP.STX"):
+    # The films, whose names are different on the two discs: the NTSC modules
+    # cut them in different places and the disc carries them under their own
+    # names. `--movie` with a name this disc does not have exits 1, which is
+    # what makes running the wrong set a real failure rather than a warning.
+    films = (("TAKE1BP.STX", "OUTRO1P.STX", "ROGUEINP.STX") if ntsc is False
+             else ("TAKE1B.STX", "OUTRO1.STX", "ROGUEIN1.STX"))
+    for film in films:
         cases.append(Case(f"movie-{film.split('.')[0]}", ["--movie", film],
                           frames=200, checks=[no_errors], timeout=300))
 
@@ -517,7 +555,9 @@ def main():
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
 
-    cases = build_cases(args.quick)
+    ntsc = disc_is_ntsc(client, disc)
+    print(f"disc is {'NTSC (SLUS-00757)' if ntsc else 'PAL (SLES-01534)'}")
+    cases = build_cases(args.quick, ntsc)
     if args.only:
         cases = [c for c in cases if args.only in c.name]
     if not cases:
