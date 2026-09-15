@@ -1282,6 +1282,25 @@ void q2_ai_set_pick_target(q2_monster *(*fn)(s16 targetname, void *user),
                            void *user);
 q2_monster *q2_pick_target(s16 targetname);
 
+/*
+ * The class byte the allocator at 0x8005F848 stamps on a path corner
+ * (`addiu v1, zero, 114` / `sb v1, 35(v0)` at 0x8005F870/0x8005F874), read
+ * back as the equality at 0x80061C10 and again at 0x8005F580.
+ *
+ * It is in the SECOND class namespace — the 256-entry entity class byte at
+ * entity+0x23 — not the 0..37 Population class that indexes class_module[].
+ * A path corner never goes in a q2_monster_set for exactly that reason.
+ */
+#define Q2_CLASS_PATH_CORNER 114
+
+/*
+ * The dead-monster pause, 0x3B9ACA00 at 0x8005F338 and again in
+ * monster_start_go. It is 1e9 ticks rather than id's 1e8 because the clock is
+ * ten times faster; not "forever" in either engine, just longer than any level
+ * lasts, and reproducing the number matters for a save that round-trips.
+ */
+#define Q2_PAUSE_FOREVER 1000000000
+
 /* Decode a move and a frame out of a relocated module image. `offset` is
  * module-relative. Returns false when out of range. */
 bool q2_mmove_read(const u8 *image, size_t size, u32 offset, q2_mmove *out);

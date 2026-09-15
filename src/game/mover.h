@@ -388,6 +388,23 @@ typedef struct q2_mover {
     s8  sound_pending;
 
     /*
+     * THE KEY THIS TICK REFUSED, or 0.
+     *
+     * The refusal arm does not only make a noise. 0x80025870 calls 0x800254EC
+     * with the door's own mask in a0, which switches it onto one of eleven key
+     * names, formats "You need the %s" (0x800ABBF8) and puts the result on the
+     * CENTRE line through 0x80043570 -> 0x80042E14. The port played
+     * msc_keytry and said nothing, so a player standing at a locked door was
+     * told there was a lock but never which key opened it.
+     *
+     * Raised beside `sound_pending` and drained the same way, because mover.c
+     * cannot see the HUD and the console's own call sits behind the same
+     * once-only latch (obj+0x50 bit 0x02000000, tested at 0x800257C4 and set
+     * at 0x80025874) that `announced` already models.
+     */
+    u16 key_pending;
+
+    /*
      * The AUTHORED values of the two timers, snapshotted once the build has
      * decoded them.
      *
@@ -536,6 +553,15 @@ s8 q2_mover_take_sound(q2_mover_set *set, u32 index);
 
 /* And the train's, from the other table — Q2_MOVER_TRAVEL_*_ID or 0. */
 u8 q2_mover_take_travel_sound(q2_mover_set *set, u32 index);
+
+/*
+ * Take the key mask a locked door refused on this tick, or 0.
+ *
+ * The owner turns it into the console's centre line — 0x800254EC names the
+ * key and 0x80043570 puts the sentence on screen — because naming a key is a
+ * HUD job and this module has no HUD.
+ */
+u16 q2_mover_take_key_request(q2_mover_set *set, u32 index);
 
 /*
  * The displacement this mover is currently applying, on all three axes.

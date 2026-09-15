@@ -4,6 +4,9 @@
 
 #include "levelbin.h"
 
+#include "ai.h"        /* q2_vectoyaw — path_corner_touch turns the creature */
+#include "aimove.h"    /* the step hooks: q2_link_entity, the touch stage    */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -274,6 +277,230 @@ static void classes_bind(q2_creature_world *w)
 }
 
 /* ------------------------------------------------------------------------- */
+/* Path corners — the spawner at 0x8007F390 and the two routines that use them */
+/* ------------------------------------------------------------------------- */
+/*
+ * 0x8007F390 walks the PathCorner group's 24-byte records and turns each into
+ * an entity. Its only caller is 0x800575A4, reached from 0x80057588 where the
+ * literal "PathCorner" at 0x800ACD90 selects the group by NAME — the same test
+ * q2_pop_group_is_path makes here.
+ *
+ * The one thing to get right is that the origin is copied VERBATIM
+ * (0x8007F404-0x8007F418 are three plain `lw`/`sw` pairs). A creature record
+ * gets the Q2_EYE_BASE lift, the 30-unit nudge and the drop-to-floor sweep; a
+ * corner gets none of them, and applying them would move the point the
+ * creature walks to and the yaw it turns to when it starts.
+ */
+static q2_result corners_spawn(q2_creature_world *w, const q2_population *pop)
+{
+    u32 gi, slot, n = 0;
+
+    /* Counted first so the array is allocated once: q2_pick_target hands out
+     * pointers into it and monster_start_go keeps them across ticks. */
+    for (gi = 0; gi < pop->group_count; gi++) {
+        q2_pop_group g;
+        q2_pop_path  node;
+
+        if (!q2_pop_get_group(pop, gi, &g) || !q2_pop_group_is_path(&g))
+            continue;
+        for (slot = 0; q2_pop_get_path(pop, &g, slot, &node); slot++)
+            n++;
+    }
+
+    if (!n)
+        return Q2_OK;
+
+    w->corner = (q2_monster *)calloc(n, sizeof(q2_monster));
+    if (!w->corner)
+        return Q2_ERR_NO_MEMORY;
+
+    for (gi = 0; gi < pop->group_count; gi++) {
+        q2_pop_group g;
+        q2_pop_path  node;
+
+        if (!q2_pop_get_group(pop, gi, &g) || !q2_pop_group_is_path(&g))
+            continue;
+
+        for (slot = 0; q2_pop_get_path(pop, &g, slot, &node); slot++) {
+            q2_monster *c = &w->corner[w->corner_count++];
+
+            q2_monster_init(c);
+
+            c->pos[0] = node.x;
+            c->pos[1] = node.y;
+            c->pos[2] = node.z;
+
+            c->class_id   = Q2_CLASS_PATH_CORNER;   /* 0x8005F870 */
+            c->targetname = (s16)node.targetname;   /* 0x8007F3E8 */
+            c->target     = (s16)node.target;       /* 0x8007F3F4 */
+
+            /* The two flag writes into entity+0x1C, in the order the spawner
+             * makes them: byte 0 is the corner's wait (0x8007F400), bits
+             * 18..26 the map's nine authored bits (0x8007F430-0x8007F448). */
+            c->spawnflags = (c->spawnflags & ~0xFFu) | (node.wait & 0xFFu);
+            c->spawnflags = (c->spawnflags & 0xF803FFFFu)
+                          | (((u32)node.flags & Q2_POP_SPAWN_FLAGS_MASK)
+                             << Q2_POP_SPAWN_FLAGS_SHIFT);
+
+            /* 0x8005F884 raises the in-use bit the resolver tests at
+             * 0x8005F74C. The port's own latch goes up with it. */
+            c->spawnflags |= Q2_SVFLAG_INUSE;
+            c->in_use      = true;
+        }
+    }
+
+    return Q2_OK;
+}
+
+/*
+ * G_PickTarget — 0x8005F708. Walks the entity list (here: the corner array),
+ * requires the 0x20000000 in-use bit at +0x1C, matches entity+0x18 against the
+ * wanted value, collects at most eight (0x8005F77C-0x8005F78C) and picks one
+ * at random (0x8005F79C `jal` rand, then `div` by the count).
+ *
+ * `blez s1` at 0x8005F724 is the `targetname <= 0` guard, which q2_pick_target
+ * already makes. The `a1 = 4` the two call sites pass is never read.
+ *
+ * The rand() draw is made even for a single match, because the original makes
+ * it — `rand() % 1` is zero but the draw still moves the sequence, and every
+ * other consumer of that sequence is reproduced tick for tick.
+ */
+static q2_monster *creworld_pick_target(s16 targetname, void *user)
+{
+    q2_creature_world *w = (q2_creature_world *)user;
+    q2_monster *found[8];
+    u32 n = 0, i;
+
+    if (!w)
+        return NULL;
+
+    for (i = 0; i < w->corner_count && n < 8; i++) {
+        q2_monster *c = &w->corner[i];
+
+        if (q2_ent_inuse(c) && c->targetname == targetname)
+            found[n++] = c;
+    }
+
+    if (!n)
+        return NULL;
+
+    return found[(u32)rand() % n];
+}
+
+/*
+ * path_corner_touch — 0x8005F1F8, reached from G_TouchTriggers (0x8005F4A8) at
+ * 0x8005F598. The dispatch is a SPECIAL CASE, not a touch pointer: 0x8005F584
+ * compares the touched entity's class byte against 114 and calls this
+ * directly, which is why 0x8007F390 never installs one.
+ */
+static void corner_touch(q2_monster *m, q2_monster *corner)
+{
+    q2_monster *next;
+    s32 wait;
+
+    if (m->movetarget != corner)        /* 0x8005F218 */
+        return;
+    if (m->enemy)                       /* 0x8005F228 */
+        return;
+
+    next = corner->target ? q2_pick_target(corner->target) : NULL;
+
+    /*
+     * A corner carrying the map's first authored flag bit TELEPORTS the
+     * creature to the next one and then hands it the one after that —
+     * 0x8005F254 (`srl 18; andi 1`) through 0x8005F2E8.
+     *
+     * The Y correction is 0x8005CBF0, which returns the entity's hull mins.y
+     * and a constant -96 for a path corner (0x8005CC14), so the creature lands
+     * with its own hull where the corner's notional one is.
+     *
+     * Transcribed rather than observed: whether any corner on this disc sets
+     * the bit has not been measured, so this arm may never run here.
+     */
+    if (next && ((next->spawnflags >> Q2_POP_SPAWN_FLAGS_SHIFT) & 1)) {
+        const s32 corner_mins_y = -96;          /* 0x8005CC14 */
+
+        m->pos[0] = next->pos[0];
+        m->pos[1] = next->pos[1] - corner_mins_y + m->mins[1];
+        m->pos[2] = next->pos[2];
+
+        next = next->target ? q2_pick_target(next->target) : NULL;
+        q2_link_entity(m, 1);                   /* 0x8005F2E4 */
+    }
+
+    m->movetarget = next;               /* 0x8005F2EC */
+    m->goalentity = next;               /* 0x8005F2F0 */
+
+    /* The corner's own wait, byte 0 of its spawnflags word — 0x8005F2F4. */
+    wait = (s32)(corner->spawnflags & 0xFFu);
+
+    if (wait) {
+        m->pausetime = q2_level_state.time + wait;
+        if (m->stand)
+            m->stand(m);
+    } else if (!m->movetarget) {
+        /* The chain ends here: stand for longer than the level lasts. */
+        m->pausetime = q2_level_state.time + Q2_PAUSE_FOREVER;
+        if (m->stand)
+            m->stand(m);
+    } else {
+        s32 v[3];
+
+        /*
+         * 0x8005F360 calls 0x8005C980 here, which is link_entity's INVERSE —
+         * it copies the render object's position back onto the entity. This
+         * port has no separate render object (the draw reads the monster), so
+         * there is nothing to copy back and the call has no counterpart.
+         */
+        v[0] = m->goalentity->pos[0] - m->pos[0];
+        v[1] = m->goalentity->pos[1] - m->pos[1];
+        v[2] = m->goalentity->pos[2] - m->pos[2];
+        m->ideal_yaw = (s16)q2_vectoyaw(v);  /* 0x8005F3AC */
+    }
+}
+
+/*
+ * G_TouchTriggers — 0x8005F4A8, called from SV_movestep at 0x80060300 and from
+ * SV_NewChaseDir at 0x80060508/0x80060520, which is why this is installed as
+ * the step's touch hook rather than run once a tick: a creature that reaches a
+ * corner picks up the next one on the same step, not on the next one.
+ *
+ * DEVIATION: the original asks the area tree for the AREA_TRIGGERS entities
+ * the mover's box overlaps (0x8005F554, a3 = 2). This port has no area tree,
+ * so the corner array is scanned instead. A corner is a POINT — 0x8007F390
+ * never gives it a hull and never links it, so its absmin and absmax are its
+ * origin — which makes the overlap test "is the corner inside the creature's
+ * box", and there are at most a couple of dozen corners in a map.
+ */
+static void creworld_touch(q2_monster *m, void *user)
+{
+    q2_creature_world *w = (q2_creature_world *)user;
+    u32 i;
+
+    if (!w || !m || !m->movetarget || m->enemy)
+        return;
+
+    for (i = 0; i < w->corner_count; i++) {
+        q2_monster *c = &w->corner[i];
+        int axis;
+
+        if (!q2_ent_inuse(c) || c->class_id != Q2_CLASS_PATH_CORNER)
+            continue;
+
+        for (axis = 0; axis < 3; axis++) {
+            if (c->pos[axis] < m->pos[axis] + m->mins[axis]
+                || c->pos[axis] > m->pos[axis] + m->maxs[axis])
+                break;
+        }
+        if (axis != 3)
+            continue;
+
+        corner_touch(m, c);
+        return;                         /* the touch has changed movetarget */
+    }
+}
+
+/* ------------------------------------------------------------------------- */
 q2_result q2_creature_world_load(q2_creature_world *w, const disc *d,
                                  const q2_build_id *id,
                                  const q2_common_file *common,
@@ -313,6 +540,34 @@ q2_result q2_creature_world_load(q2_creature_world *w, const disc *d,
 
     if (q2_spawn_from_population(&w->set, &pop, coll, &w->stats) != Q2_OK)
         return Q2_ERR_NO_MEMORY;
+
+    /*
+     * THE PATROL ROUTES, AND THE RESOLVER THAT REACHES THEM.
+     *
+     * monster_start_go (0x80061BA4) calls G_PickTarget on the creature's
+     * `target` and walks it at whatever comes back if that is a path corner.
+     * Nothing in this tree had ever installed a resolver, so every lookup
+     * failed and the `if (!t)` arm ran instead: target cleared, pausetime set
+     * to forever, stand(). 174 of the disc's 651 placed creature records name
+     * a corner, so about a quarter of the game's creatures stood where they
+     * were dropped until they saw the player.
+     *
+     * The two land together on purpose: without the corners the resolver has
+     * nothing to find, and without the resolver the corners are unreachable.
+     */
+    if (corners_spawn(w, &pop) != Q2_OK)
+        return Q2_ERR_NO_MEMORY;
+
+    q2_ai_set_pick_target(creworld_pick_target, w);
+
+    /*
+     * And the step's touch stage, which is what advances a creature from one
+     * corner to the next. Nothing in this port installs a LINK hook — the
+     * renderer reads the monster directly and q2_link_entity is a no-op — so
+     * passing NULL there costs nothing today; a future link hook has to be
+     * installed through this same call.
+     */
+    q2_ai_set_link_hooks(NULL, creworld_touch, w);
 
     /*
      * Now that the set exists, give every creature its module: the class byte,
@@ -464,6 +719,25 @@ void q2_creature_world_player_noise(q2_creature_world *w, bool weapon)
         q2_level_state.sound2_entity          = &w->sight;
         q2_level_state.sound2_entity_framenum = q2_level_state.framenum;
     }
+
+    /*
+     * AND THE STAMP THAT KEEPS THE NOISE ALIVE. 0x80062CC8 loads level.time
+     * from 0x800E46DC and 0x80062CD4 `sw v0, 208(a0)` writes it to the noise
+     * entity's +0xD0 — teleport_time. ai_checkattack's AI_SOUND_TARGET arm
+     * (src/game/ai.c) measures staleness against exactly that stamp.
+     *
+     * Nothing in this tree had ever written the field, so from level.time 51
+     * onward `time - teleport_time > 50` was true on the creature's very first
+     * check and the sound target was dropped before the investigate behaviour
+     * — walk to the noise, stop and look at 768 units, hold fire — could run
+     * for even one tick. A creature that heard a shot opened fire instead.
+     *
+     * DEVIATION: the original stamps the noise entity it spawned; this port
+     * points both noise slots at the sight stand-in, so the stamp lands there.
+     * The stand-in is the only thing FindTarget is ever handed as a noise, so
+     * the window it produces is the same.
+     */
+    w->sight.teleport_time = q2_level_state.time;
 }
 
 /* Case-insensitive substring, over a name that is not NUL-terminated in the
@@ -796,6 +1070,16 @@ void q2_creature_world_free(q2_creature_world *w)
 
     free(w->model_name);
     w->model_name = NULL;
+
+    /* The resolver and the touch stage both point into this world; drop them
+     * before the storage goes, or monster_start_go on the NEXT level resolves
+     * into freed memory. */
+    q2_ai_set_pick_target(NULL, NULL);
+    q2_ai_set_link_hooks(NULL, NULL, NULL);
+
+    free(w->corner);
+    w->corner       = NULL;
+    w->corner_count = 0;
 
     q2_monster_set_free(&w->set);
 

@@ -65,6 +65,17 @@ s8 q2_mover_take_sound(q2_mover_set *set, u32 index)
     return s;
 }
 
+u16 q2_mover_take_key_request(q2_mover_set *set, u32 index)
+{
+    u16 k;
+
+    if (!set || index >= set->count)
+        return 0;
+    k = set->movers[index].key_pending;
+    set->movers[index].key_pending = 0;
+    return k;
+}
+
 u8 q2_mover_take_travel_sound(q2_mover_set *set, u32 index)
 {
     u8 s;
@@ -933,6 +944,39 @@ static void mover_move(q2_mover_set *set, q2_mover *m, s32 dt, int dir)
             }
         }
 
+        /*
+         * THE BLOCKED COUNTDOWN BELONGS TO THIS ARM ALONE — 0x80025AF8.
+         *
+         * 0x80025A8C splits the motion on s1, which 0x800258A8 sets to
+         * `saved_state == 3` for a blocked mover: a door blocked while CLOSING
+         * reverses and counts down here, and a door blocked while OPENING takes
+         * the other arm (0x80025B30-0x80025B9C), which has no countdown and no
+         * state-4 test in it at all — it retreats until the offset reaches zero
+         * and writes state 0 at 0x80025B98. Only the first ever retries.
+         *
+         * The `16` at 0x80025D08 is loaded on both, but it sits in the
+         * OBSTRUCTION handler at 0x80025CBC (reached from 0x80025BE4), not in
+         * either motion arm, so it says nothing about where the decrement runs.
+         * Reading it as one was what put this test outside the direction split,
+         * and a lift caught on the way up then drove back into the obstruction
+         * every sixteen ticks instead of settling shut.
+         *
+         * AFTER the clamp above, not before: 0x80025AE8 writes state 2 first
+         * and 0x80025B00 guards the countdown on `state == 4`, so a mover that
+         * reopens the whole way to `target` arrives and abandons the countdown
+         * rather than restoring CLOSING on the tick it lands.
+         *
+         * The zero guard is the port's. 0x80025B10 decrements obj+0x56 bare,
+         * but the obstruction handler always loads it with 16 on entry to state
+         * 4, so the guard is unreachable and the two agree tick for tick.
+         */
+        if (m->state == Q2_MV_BLOCKED) {
+            if (m->block_timer)
+                m->block_timer--;
+            if (m->block_timer == 0)
+                m->state = m->saved_state;
+        }
+
     } else {
         if (m->target > 0) {
             m->offset -= m->speed * dt;
@@ -949,22 +993,6 @@ static void mover_move(q2_mover_set *set, q2_mover *m, s32 dt, int dir)
                 m->state  = Q2_MV_IDLE;
             }
         }
-    }
-
-    /*
-     * The BLOCKED countdown, out of the `if (dir)` arm it used to sit in.
-     *
-     * 0x80025D08 reloads obj+0x56 with 16 on both arms and the decrement is
-     * outside the direction test, so a door blocked while closing counted down
-     * and one blocked while opening did not. And the decrement was `--` on a
-     * u8 with no guard: unreachable while nothing ever assigned Q2_MV_BLOCKED,
-     * and a 255-tick freeze the moment something did.
-     */
-    if (m->state == Q2_MV_BLOCKED) {
-        if (m->block_timer)
-            m->block_timer--;
-        if (m->block_timer == 0)
-            m->state = m->saved_state;
     }
 
     /*
@@ -1084,8 +1112,14 @@ u32 q2_movers_tick_blocked(q2_mover_set *set, s32 dt, u16 player_keys,
             /* Locked doors complain once, not every tick — 0x8002585C is
              * behind the same latch, so the refusal sound is once too. */
             if (m->key_mask && !(player_keys & m->key_mask)) {
-                if (!m->announced)
+                if (!m->announced) {
                     mover_sound(m, Q2_MVSND_KEY_TRY);
+                    /* AND THE SENTENCE. 0x80025870 passes obj+0x3C — the
+                     * door's own mask — to 0x800254EC, which names the key on
+                     * the centre line. It is inside the same latch as the
+                     * sound, so the player is told once. */
+                    m->key_pending = m->key_mask;
+                }
                 m->announced = 1;
                 break;
             }
@@ -1147,8 +1181,16 @@ u32 q2_movers_tick_blocked(q2_mover_set *set, s32 dt, u16 player_keys,
             break;
 
         case Q2_MV_BLOCKED: {
-            /* A door blocked while closing reverses; one blocked opening
-             * carries on in the direction it was already going. */
+            /*
+             * BOTH DIRECTIONS REVERSE. 0x800258A8 is `s1 = (saved_state == 3)`
+             * and 0x80025A8C picks the motion arm from it, so a door blocked
+             * while closing drives back open and one blocked while opening
+             * drives back shut; what differs is that only the first of those
+             * counts down and retries (see mover_move). The line below has
+             * always been right — the comment that used to sit here was not,
+             * and it was the comment that would have tempted the next reader
+             * into "fixing" the code.
+             */
             int dir = m->saved_state == Q2_MV_CLOSING;
 
             mover_running(m);

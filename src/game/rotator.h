@@ -118,6 +118,7 @@ typedef enum q2_rot_kind {
      * at 0x800ABDA0, the same shape as the linear mover's.
      *   angle = (angle + (speed * dt) / 8) & 0xFFF     rounded TOWARD ZERO
      * and it runs until it passes `target`, then arrives. No accumulator.
+     * See q2_rot_state for the other six states, which the port used to skip.
      */
     Q2_ROT_TARGET,
 
@@ -128,6 +129,31 @@ typedef enum q2_rot_kind {
      */
     Q2_ROT_SNAP
 } q2_rot_kind;
+
+/*
+ * ROTHATCH'S SEVEN STATES — obj+0x52, dispatched through the jump table at
+ * 0x800ABDA0, which reads
+ *
+ *   {0x8002B2BC, 0x8002B2F0, 0x8002B2D0, 0x8002B2E8,
+ *    0x8002B43C, 0x8002B2F8, 0x8002B3F0}
+ *
+ * and is indexed after `sltiu v0, a1, 7` at 0x8002B290. The port implemented
+ * exactly one of them — the forward sweep — so every hatch on the disc opened
+ * on the instant it was called and froze at its target for the rest of the
+ * level. Six of the seventeen author a finite hold and three author a delay.
+ *
+ * State 4's slot points straight at the shared sweep entry and NOTHING in the
+ * handler or its exec ever writes 4 to obj+0x52, so it is dead on the console
+ * and has no entry here.
+ */
+typedef enum q2_rot_state {
+    Q2_ROTST_IDLE    = 0,  /* 0x8002B2BC: shut. A trigger arms the delay.    */
+    Q2_ROTST_OPENING = 1,  /* 0x8002B2F0 -> the forward sweep, a0 = 1        */
+    Q2_ROTST_OPEN    = 2,  /* 0x8002B2D0: arrived. hold 0 stays open for good*/
+    Q2_ROTST_CLOSING = 3,  /* 0x8002B2E8 -> the reverse sweep, a0 = 0        */
+    Q2_ROTST_DELAY   = 5,  /* 0x8002B2F8: counting obj+0x4C down             */
+    Q2_ROTST_HOLD    = 6   /* 0x8002B3F0: counting obj+0x4E down             */
+} q2_rot_state;
 
 typedef struct q2_rotator {
     q2_rot_kind kind;
@@ -141,10 +167,32 @@ typedef struct q2_rotator {
     s16  angle;         /* obj+0x0C + 2*axis, a 4096-step angle               */
     s16  pivot[3];      /* obj+0x18, RELATIVE to the node's origin            */
 
-    bool step_pending;  /* obj+0x50 bit 24                                    */
-    bool running;       /* a TARGET rotation is sweeping                      */
-    u16  hold;          /* obj+0x4E: a SNAP's remaining hold, 0 = released    */
-    u16  hold_reset;    /* what a press reloads `hold` with                   */
+    /*
+     * obj+0x50 bit 24. A PER-FRAME FLAG, NOT A LATCH: both handlers read it
+     * into a register and clear it from the object on entry — 0x8002F1B8 for
+     * SIMROT, 0x8002B270-0x8002B284 for ROTHATCH — so it means "the script
+     * called me this frame", which is what keeps a hatch open while the player
+     * stands in the volume (see Q2_ROTST_HOLD).
+     */
+    bool step_pending;
+
+    u8   state;         /* obj+0x52, a q2_rot_state; TARGET only              */
+
+    /*
+     * obj+0x4C and obj+0x4E — the delay before a hatch starts turning and the
+     * hold before it turns back. NOT written by the constructor: 0x8002B634
+     * zeroes 92 bytes and never touches either. The EXEC does, at 0x8002DE1C
+     * and 0x8002DE54, `item[16] * 300` and `item[17] == 0xFF ? 0xFFFF : * 300`
+     * — and only when obj+0x52 is still 0 (0x8002DDF8), so re-triggering a
+     * hatch that is delaying, sweeping or holding changes neither.
+     *
+     * `hold` is also ROTBUTTON's press timer, which is the same field on the
+     * same object and counts down the same way (0x8002C054).
+     */
+    u16  delay;
+    u16  delay_reset;
+    u16  hold;          /* obj+0x4E; Q2_UF_TIME_NEVER = 0xFFFF, never close  */
+    u16  hold_reset;    /* what a trigger (or a press) reloads `hold` with    */
 
     /*
      * THE ONE MOVER FAMILY WITH A START / LOOP / STOP SOUND.
@@ -295,7 +343,13 @@ void q2_rotators_set_operand_source(q2_rotator_set *set,
  *     item+6   s16  target       -> obj+0x44
  *     item+8   u8   axis & 3     -> obj+0x50 bits 14-15   (a BYTE, unlike SIMROT)
  *     item+10  s16[3] hinge adjustment -> obj+0x18 after the node-centre rule
+ *     item+16  u8   time_a * 300      -> obj+0x4C, the delay before it turns
+ *     item+17  u8   time_b * 300      -> obj+0x4E, the hold; 0xFF => never
  *     item+18  s16  object
+ *
+ * The two times are decoded here into `delay_reset` / `hold_reset` because
+ * that is the port's idiom (mover.c does the same), but on the console they
+ * are written by the EXEC and not by the constructor — see q2_rotator.delay.
  *
  *   ROTBUTTON          0x8002C150
  *     item+6   s16  hold time    -> obj+0x4E, *300; -1 means never release

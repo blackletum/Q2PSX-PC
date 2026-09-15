@@ -178,12 +178,14 @@ bool q2_pop_get_path(const q2_population *p, const q2_pop_group *g,
         return false;
 
     /* xyz sits at +0x00 here, unlike a spawn record where it is at +0x04. */
-    out->x     = q2_rd_s32(rec + 0x00);
-    out->y     = q2_rd_s32(rec + 0x04);
-    out->z     = q2_rd_s32(rec + 0x08);
-    out->unk0  = q2_rd_u16(rec + 0x0C);
-    out->link0 = q2_rd_u32(rec + 0x10);
-    out->link1 = q2_rd_u32(rec + 0x14);
+    out->x          = q2_rd_s32(rec + 0x00);
+    out->y          = q2_rd_s32(rec + 0x04);
+    out->z          = q2_rd_s32(rec + 0x08);
+    out->flags      = q2_rd_u16(rec + 0x0C);
+    out->wait       = q2_rd_u16(rec + 0x0E);
+    /* Halfwords, not words: 0x8007F3E0 and 0x8007F3EC are both `lhu`. */
+    out->targetname = q2_rd_u16(rec + 0x10);
+    out->target     = q2_rd_u16(rec + 0x14);
 
     return true;
 }

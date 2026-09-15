@@ -154,17 +154,30 @@ void q2_attack_finished(q2_monster *self, s32 t);
 /* ------------------------------------------------------------------------- */
 #define Q2_TRAIL_LENGTH 8
 
+/*
+ * One 20-byte slot of the ring at 0x800D50DC, reached through the pointer
+ * array at 0x800D517C. PlayerTrail_Init (0x80060F20) zeroes all eight, so
+ * there is no "written yet" byte to carry: an unvisited slot IS a crumb at the
+ * world origin with timestamp 0.
+ */
 typedef struct q2_trail_spot {
     s32 origin[3];
     s32 timestamp;      /* +0x0C */
-    s16 yaw;            /* +0x10 */
-    bool valid;
+    s16 yaw;            /* +0x10, the direction of travel between crumbs */
 } q2_trail_spot;
 
 void q2_trail_init(void);
-void q2_trail_add(const s32 origin[3], s16 yaw);
+
+/* 0x80060A70. The yaw is derived here, from the step since the previous
+ * crumb, and is not the caller's view angle. */
+void q2_trail_add(const s32 origin[3]);
 const q2_trail_spot *q2_trail_pick_first(q2_monster *self);   /* 0x80060BBC */
 const q2_trail_spot *q2_trail_pick_next(q2_monster *self);    /* 0x80060F90 */
+const q2_trail_spot *q2_trail_last_spot(void);                /* 0x80060FFC */
+
+/* The gate PlayerTrail_Add's caller applies at 0x8007E2D8: false while the
+ * player can still see the previous crumb. `eye` is the player's eye. */
+bool q2_trail_needs_spot(const s32 eye[3]);
 
 /* ------------------------------------------------------------------------- */
 /* The five shared verbs. `dist` is the frame's advance, already scaled.       */
@@ -197,6 +210,16 @@ typedef struct q2_ai_decision_stats {
     u32 checkattack_yes;      /* ...and said yes                              */
     u32 attack_called;        /* the attack callback ran                      */
     u32 attack_missing;       /* the state said attack and there was none     */
+    /*
+     * And why a lost-you pursuit did or did not move along. A creature that
+     * reaches its waypoint raises AI_PURSUE_NEXT and asks the breadcrumb ring
+     * for another; if the ring keeps answering with the same spot, or the spot
+     * is in a different coordinate frame from the creature so the arrival test
+     * can never fire, the search never leaves its first waypoint and this pair
+     * stays near zero.
+     */
+    u32 pursue_arrived;       /* ai_run reached its waypoint                  */
+    u32 pursue_marker;        /* ...and a breadcrumb answered with the next   */
 } q2_ai_decision_stats;
 
 extern q2_ai_decision_stats q2_ai_stats;

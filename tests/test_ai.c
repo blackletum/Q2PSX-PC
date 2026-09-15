@@ -857,6 +857,75 @@ static void test_checkattack(void)
     check_eq_i(g_attack_calls, 0, "facing away, nothing fires");
     check(m.angles[2] != Q2_ANGLE_180, "but the creature turns toward");
 
+    /*
+     * THE POST-SHOT RELOAD IS TWENTY TICKS. 0x8005DC50..0x8005DC58 build
+     * `rand()*5*4` and 0x8005DC5C divides by 32767, so the cooldown stored at
+     * 0x8005DC88 is `random() * 20` ticks — up to two seconds on the ten-Hz
+     * clock, not the 0.2 s a seconds-valued multiplier gives.
+     */
+    reset_spies();
+    place(&m, 0, 0, 0);
+    hook_up(&m);
+    m.checkattack = NULL;            /* let the shared M_CheckAttack decide */
+    make_player(&player, 0, 3000);
+    player.health = 100;
+    m.enemy = &player;
+    m.goalentity = &player;
+    q2_ai_checkattack(&m, 0);        /* publishes range and visibility */
+    {
+        s32 lo = 1 << 30, hi = -1, fired = 0, k;
+
+        srand(20250915);
+        for (k = 0; k < 20000; k++) {
+            m.attack_finished = 0;
+            m.attack_state    = Q2_AS_STRAIGHT;
+            q2_level_state.time = 1000;
+
+            if (q2_M_CheckAttack(&m) && m.attack_state == Q2_AS_MISSILE) {
+                s32 d = m.attack_finished - q2_level_state.time;
+                if (d < lo) lo = d;
+                if (d > hi) hi = d;
+                fired++;
+            }
+        }
+        check(fired > 0, "the missile branch is reached");
+        check(lo >= 0 && hi <= Q2_AI_SECONDS(2),
+              "the reload never exceeds two seconds");
+        check(hi > 2, "and is drawn over twenty ticks, not two");
+    }
+
+    /*
+     * THE SOUND TARGET LIVES FOR FIVE SECONDS. PlayerNoise stamps the noise's
+     * teleport_time at 0x80062CD4 and this arm measures staleness against it;
+     * with nothing ever writing the field the flag was dropped on the first
+     * check and the investigate behaviour never ran.
+     */
+    reset_spies();
+    place(&m, 0, 0, 0);
+    hook_up(&m);
+    q2_level_state.time     = 400;
+    q2_level_state.framenum = 400;
+    make_player(&player, 0, 3000);
+    player.health        = 100;
+    player.teleport_time = q2_level_state.time;
+    m.enemy       = &player;
+    m.goalentity  = &player;
+    m.aiflags    |= Q2_AI_SOUND_TARGET;
+
+    check(!q2_ai_checkattack(&m, 0), "a fresh noise holds fire");
+    check((m.aiflags & Q2_AI_SOUND_TARGET) != 0,
+          "and the creature stays on the noise");
+    check_eq_i(g_attack_calls, 0, "nothing is fired at a noise");
+
+    q2_level_state.time = 400 + 50;
+    check(!q2_ai_checkattack(&m, 0), "still investigating at five seconds");
+    check((m.aiflags & Q2_AI_SOUND_TARGET) != 0, "the flag is still up");
+
+    q2_level_state.time = 400 + 51;
+    q2_ai_checkattack(&m, 0);
+    check((m.aiflags & Q2_AI_SOUND_TARGET) == 0,
+          "one tick past five seconds the noise goes stale");
+
     q2_ai_set_world(NULL);
 }
 
@@ -1423,39 +1492,118 @@ static void test_lost_sight(void)
           "arriving at the waypoint asks for the next one");
     g_wall_on = false;
 
-    /* The trail: laying spots and picking them back up. */
+    /*
+     * The trail: laying spots and picking them back up.
+     *
+     * PlayerTrail_Add (0x80060A70) writes AT the head and advances afterwards
+     * (0x80060B04 stores, 0x80060B88..0x80060BA4 bumps), so once a lap is done
+     * the head names the OLDEST slot and PickFirst's scan — which starts there,
+     * 0x80060BF4 — walks the crumbs in the order they were laid.
+     */
     q2_trail_init();
     check(q2_trail_pick_first(&m) == NULL, "an empty trail has no first spot");
 
-    for (i = 0; i < 4; i++) {
+    for (i = 0; i < Q2_TRAIL_LENGTH; i++) {
         s32 p[3];
-        p[0] = 0; p[1] = 0; p[2] = 1000 * (i + 1);
+        p[0] = 100 * i; p[1] = 0; p[2] = 0;
         q2_level_state.time = 200 + i;
-        q2_trail_add(p, (s16)0);
+        q2_trail_add(p);
     }
     q2_level_state.time = 300;
 
     place(&m, 0, 0, 0);
-    m.trail_time = 0;
+    m.trail_time = 200;                /* already sent to the first crumb */
     {
         const q2_trail_spot *s = q2_trail_pick_first(&m);
         check(s != NULL, "a laid trail yields a spot");
-        if (s)
-            check(s->timestamp >= 200, "and it is one that was actually laid");
+        if (s) {
+            check_eq_i(s->origin[0], 100,
+                       "the OLDEST crumb not yet visited, not the newest");
+            check_eq_i(s->timestamp, 201, "whose timestamp says the same");
+            /* The crumb remembers the direction of travel between crumbs
+             * (0x80060B3C..0x80060B80), a straight +X step here. */
+            check_eq_i(s->yaw, Q2_ANGLE_90,
+                       "and the heading the player was walking");
+        }
     }
 
     /*
      * A creature already past every spot wraps back to the head rather than
      * being told the trail is exhausted — the original only answers NULL when
-     * no trail has been laid at all.
+     * no trail has been laid at all. After a full lap the head is slot 0
+     * again, which now holds the OLDEST crumb.
      */
     m.trail_time = 100000;
     {
         const q2_trail_spot *s = q2_trail_pick_next(&m);
         check(s != NULL, "a creature past the whole trail wraps to the head");
         if (s)
-            check_eq_i(s->origin[2], 4000, "which is the newest spot laid");
+            check_eq_i(s->origin[0], 0, "which is the oldest spot laid");
     }
+
+    /*
+     * And the search ADVANCES. ai_run stamps trail_time with the crumb it took
+     * (0x8005E6D8) and asks again on the next waypoint; with the head on the
+     * newest slot both picks answered the same crumb for ever, so a creature
+     * that lost you walked to where you had just been and stopped.
+     */
+    {
+        const q2_trail_spot *a, *b;
+
+        m.trail_time = 0;
+        a = q2_trail_pick_first(&m);
+        check(a != NULL, "the pursuit's first waypoint");
+        if (a) {
+            m.trail_time = a->timestamp;
+            b = q2_trail_pick_next(&m);
+            check(b != NULL && b->timestamp > a->timestamp,
+                  "and consuming it advances to a LATER crumb");
+        }
+    }
+
+    /*
+     * THE CRUMB HAS TO BE IN THE CREATURE'S OWN FRAME. ai_run's arrival test is
+     * `dist*dist >= |pos - last_sighting|^2` with `dist` one frame's step. A
+     * crumb recorded at the player's EYE rather than its entity origin carries
+     * a constant Q2_VIEW_STAND - Q2_EYE_BASE = 290 in Y, and 290^2 = 84100 is
+     * already past the square of any creature's run step — so the waypoint can
+     * never be reached and the search never asks for the next one.
+     */
+    reset_spies();
+    place(&m, 0, 0, 0);
+    hook_up(&m);
+    m.yaw_speed = 4096;
+    g_wall_on = true;
+    g_wall_z  = 1000;                  /* the player stays out of sight */
+    make_player(&player, 0, 3000);
+    player.health = 100;
+    m.enemy      = &player;
+    m.goalentity = &player;
+    m.aiflags   |= Q2_AI_LOST_SIGHT;
+    m.last_sighting[0] = 0;
+    m.last_sighting[1] = 290;          /* the eye-frame offset, in Y */
+    m.last_sighting[2] = 10;
+    /* 230 is about a Soldier's run-frame step: 20 * 12 / 10 per frame at the
+     * neutral speed scale, taken over the frames one AI tick covers. */
+    q2_ai_run(&m, 230);
+    check((m.aiflags & Q2_AI_PURSUE_NEXT) == 0,
+          "a waypoint 290 units out in Y is never arrived at");
+
+    /* The same waypoint in the creature's own frame IS arrived at. */
+    reset_spies();
+    place(&m, 0, 0, 0);
+    hook_up(&m);
+    m.yaw_speed  = 4096;
+    m.enemy      = &player;
+    m.goalentity = &player;
+    m.aiflags   |= Q2_AI_LOST_SIGHT;
+    m.last_sighting[0] = 0;
+    m.last_sighting[1] = 0;
+    m.last_sighting[2] = 10;
+    q2_ai_run(&m, 230);
+    check((m.aiflags & Q2_AI_PURSUE_NEXT) != 0,
+          "and the same one recorded as an origin is");
+    g_wall_on = false;
 
     /* Corner peeking: with the straight line blocked, ai_run picks a sidestep
      * waypoint and flags it as temporary. */
@@ -1652,6 +1800,18 @@ static void test_frame_distance(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/* One path corner and the resolver that finds it — G_PickTarget, 0x8005F708,
+ * which requires the in-use bit and matches entity+0x18. */
+static q2_monster g_corner;
+
+static q2_monster *corner_pick_target(s16 targetname, void *user)
+{
+    (void)user;
+    if (q2_ent_inuse(&g_corner) && g_corner.targetname == targetname)
+        return &g_corner;
+    return NULL;
+}
+
 static void test_start_go(void)
 {
     q2_monster m;
@@ -1682,6 +1842,53 @@ static void test_start_go(void)
     q2_monster_start_go(&m);
     check(m.think == NULL, "a dead creature is not woken");
     check_eq_i(g_stand_calls, 0, "and nothing is called on it");
+
+    /*
+     * AND THE ARM THAT HAD NEVER BEEN REACHED. 0x80061BDC resolves the
+     * record's target with G_PickTarget and 0x80061C0C..0x80061C14 tests the
+     * resolved entity's class byte against 114; when it matches, 0x80061C6C
+     * turns the creature at it and 0x80061C88 calls its walk handler. With no
+     * resolver installed the lookup always failed and every creature that
+     * names a path corner — 174 of the disc's 651 — stood still instead.
+     */
+    reset_spies();
+    q2_level_reset();
+    q2_ai_set_pick_target(corner_pick_target, NULL);
+
+    q2_monster_init(&g_corner);
+    g_corner.pos[0]     = 0;
+    g_corner.pos[1]     = 0;
+    g_corner.pos[2]     = 4000;      /* straight ahead on +Z, yaw 0 */
+    g_corner.class_id   = Q2_CLASS_PATH_CORNER;
+    g_corner.targetname = 7;
+    g_corner.in_use     = true;
+    g_corner.spawnflags |= Q2_SVFLAG_INUSE;
+
+    place(&m, 0, 0, 0);
+    hook_up(&m);
+    m.health    = 100;
+    m.angles[2] = Q2_ANGLE_180;
+    m.target    = 7;
+    q2_monster_start_go(&m);
+
+    check(m.movetarget == &g_corner, "the record's target resolves to a corner");
+    check(m.goalentity == &g_corner, "and becomes the creature's goal");
+    check_eq_i(g_walk_calls, 1, "which sets it WALKING, not standing");
+    check_eq_i(g_stand_calls, 0, "and it does not stand");
+    check_eq_i(m.ideal_yaw, 0, "turned to face the corner");
+    check_eq_i(m.target, 0, "with the record's target consumed");
+
+    /* A target nothing answers still stands, exactly as it did before. */
+    reset_spies();
+    place(&m, 0, 0, 0);
+    hook_up(&m);
+    m.health = 100;
+    m.target = 99;
+    q2_monster_start_go(&m);
+    check(m.movetarget == NULL, "an unresolvable target resolves to nothing");
+    check_eq_i(g_stand_calls, 1, "and the creature stands");
+
+    q2_ai_set_pick_target(NULL, NULL);
 }
 
 /* ------------------------------------------------------------------------- */

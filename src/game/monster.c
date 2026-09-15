@@ -1110,17 +1110,8 @@ void q2_M_MoveFrame(q2_monster *m)
 /* ------------------------------------------------------------------------- */
 /* monster_start_go — 0x80061BA4                                              */
 /* ------------------------------------------------------------------------- */
-/*
- * The dead-monster pause is 1e9 ticks rather than id's 1e8, because the clock
- * is ten times faster. It is not "forever" in either engine, just longer than
- * any level lasts, and reproducing the exact number matters for a save that
- * round-trips.
- */
-#define Q2_PAUSE_FOREVER 1000000000
-
-/* The class id the loader gives a path corner. Read as the equality at
- * 0x80061C10. */
-#define Q2_CLASS_PATH_CORNER 114
+/* Q2_PAUSE_FOREVER and Q2_CLASS_PATH_CORNER are in monster.h: path_corner_touch
+ * needs both and it lives with the corners, not here. */
 
 /* Resolved by targetname; the port hands the resolver in rather than owning a
  * script namespace. */

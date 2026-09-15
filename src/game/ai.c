@@ -317,23 +317,53 @@ void q2_trail_init(void)
     g_trail_active = false;
 }
 
-void q2_trail_add(const s32 origin[3], s16 yaw)
+/*
+ * 0x80060A70 — lay one crumb.
+ *
+ * THE HEAD NAMES THE SLOT ABOUT TO BE OVERWRITTEN, NOT THE NEWEST ONE.
+ * 0x80060AEC loads the head and 0x80060B04/0x80060B14/0x80060B24/0x80060B38
+ * write origin and timestamp straight into that slot; only afterwards, at
+ * 0x80060B88..0x80060BA4, does it reload the head, `addiu a0, a0, 1`,
+ * `andi a0, a0, 7` and store it back. PlayerTrail_LastSpot (0x80060FFC)
+ * confirms the convention from the other side: the most recent crumb is
+ * `trail[(head - 1) & 7]`.
+ *
+ * This had been written the other way round — advance, then write — which put
+ * the head on the NEWEST crumb. PickFirst's scan starts at the head, so it
+ * started at the end of the age order instead of the beginning and always
+ * handed back the crumb the player had just dropped. A creature that lost you
+ * walked at where you are now rather than along where you had been.
+ *
+ * THE STORED YAW IS THE DIRECTION OF TRAVEL, NOT THE PLAYER'S VIEW.
+ * 0x80060B34 forms `&trail[(head - 1) & 7]`, 0x80060B3C..0x80060B7C subtract
+ * that previous crumb's origin from the new spot and 0x80060B80 hands the
+ * difference to vectoyaw (0x8005F8E8); 0x80060BA8 puts the result in the slot
+ * just written. So a crumb remembers which way the player was going when it
+ * was laid, which is what ai_run snaps the creature's facing to.
+ */
+void q2_trail_add(const s32 origin[3])
 {
     q2_trail_spot *s;
+    const q2_trail_spot *prev;
+    s32 v[3];
 
     if (!origin)
         return;
 
-    g_trail_head = TRAIL_NEXT(g_trail_head);
-    s = &g_trail[g_trail_head];
+    s    = &g_trail[g_trail_head];
+    prev = &g_trail[TRAIL_PREV(g_trail_head)];
+
+    v[0] = origin[0] - prev->origin[0];
+    v[1] = origin[1] - prev->origin[1];
+    v[2] = origin[2] - prev->origin[2];
 
     s->origin[0] = origin[0];
     s->origin[1] = origin[1];
     s->origin[2] = origin[2];
     s->timestamp = q2_level_state.time;
-    s->yaw       = yaw;
-    s->valid     = true;
+    s->yaw       = q2_vectoyaw(v);
 
+    g_trail_head   = TRAIL_NEXT(g_trail_head);
     g_trail_active = true;
 }
 
@@ -345,6 +375,14 @@ void q2_trail_add(const s32 origin[3], s16 yaw)
  * it can see that instead, and falls back to the first either way. The
  * fallback is not a mistake: a creature that can see neither still needs
  * somewhere to walk.
+ *
+ * There is no "is this slot written yet" test, and there was not one on the
+ * disc either: PlayerTrail_Init (0x80060F20) memsets all eight 20-byte slots
+ * to zero and 0x80060F84 raises the active flag, so an unvisited slot reads as
+ * a crumb at the world origin with timestamp 0. The scan walks past those on
+ * timestamp alone, exactly as it walks past stale ones; guarding on a `valid`
+ * byte instead made pick_next answer NULL where the original answers a stale
+ * spot, which is a different behaviour, not a safer one.
  */
 const q2_trail_spot *q2_trail_pick_first(q2_monster *self)
 {
@@ -370,17 +408,57 @@ const q2_trail_spot *q2_trail_pick_first(q2_monster *self)
         eye[1] = self->pos[1] + self->view_height;
         eye[2] = self->pos[2];
 
-        if (g_trail[marker].valid
-            && g_world.line_of_sight(g_world.user, eye, g_trail[marker].origin))
+        if (g_world.line_of_sight(g_world.user, eye, g_trail[marker].origin))
             return &g_trail[marker];
 
         prev = TRAIL_PREV(marker);
-        if (g_trail[prev].valid
-            && g_world.line_of_sight(g_world.user, eye, g_trail[prev].origin))
+        if (g_world.line_of_sight(g_world.user, eye, g_trail[prev].origin))
             return &g_trail[prev];
     }
 
-    return g_trail[marker].valid ? &g_trail[marker] : NULL;
+    return &g_trail[marker];
+}
+
+/*
+ * 0x80060FFC — PlayerTrail_LastSpot, the most recent crumb, which under the
+ * write-then-advance convention is the slot BEFORE the head: `addiu v0,v0,-1;
+ * andi v0,v0,7` at 0x80061008/0x8006100C.
+ */
+const q2_trail_spot *q2_trail_last_spot(void)
+{
+    return &g_trail[TRAIL_PREV(g_trail_head)];
+}
+
+/*
+ * THE CONSOLE DOES NOT LAY A CRUMB ON A TIMER.
+ *
+ * PlayerTrail_Add's only caller (0x8007E32C, in the per-client frame loop)
+ * first calls PlayerTrail_LastSpot at 0x8007E2C4 and `visible` (0x8005B950) at
+ * 0x8007E2D0, and at 0x8007E2D8 `bne v0, zero, 0x8007E334` SKIPS the add when
+ * the player can still see the previous crumb. Crumbs are corner markers, so
+ * eight of them span a whole route; dropping one on a fixed cadence instead
+ * makes them dense samples of the last few seconds and a creature following
+ * them never rounds a corner.
+ *
+ * The test lives on this side of the API rather than at the client call site
+ * only because the sight hook does. `visible` adds the view height for an
+ * argument inside the entity array and not for one outside it
+ * (0x8005BA4C..0x8005BA9C), and a trail slot is outside it — so the player end
+ * is the EYE and the crumb end is the raw stored point, which is what this
+ * passes.
+ */
+bool q2_trail_needs_spot(const s32 eye[3])
+{
+    if (!eye)
+        return false;
+
+    /* No sight hook bound: lay the crumb rather than silently keeping an
+     * empty trail. The console always has one. */
+    if (!g_world.line_of_sight)
+        return true;
+
+    return !g_world.line_of_sight(g_world.user, eye,
+                                  g_trail[TRAIL_PREV(g_trail_head)].origin);
 }
 
 /*
@@ -404,9 +482,6 @@ const q2_trail_spot *q2_trail_pick_next(q2_monster *self)
         else
             break;
     }
-
-    if (!g_trail[marker].valid)
-        return NULL;
 
     return &g_trail[marker];
 }
@@ -1105,7 +1180,23 @@ static bool checkattack_decide(q2_monster *m)
 
     if ((rand() & 0xFFF) < chance) {
         m->attack_state = Q2_AS_MISSILE;
-        m->attack_finished = q2_level_state.time + 2 * (rand() & 0x7FFF) / 32767;
+        /*
+         * THE RELOAD IS TWO SECONDS, WHICH IS TWENTY TICKS.
+         *
+         * 0x8005DC4C draws `rand() & 0x7FFF`, 0x8005DC50..0x8005DC58 build
+         * `v0*5*4` — twenty — and 0x8005DC5C..0x8005DC7C divide that by 32767
+         * with the 0x80010003 magic-number sequence before 0x8005DC80 adds
+         * level.time and 0x8005DC88 stores it to entity+0x110. So the draw is
+         * `random() * 20` TICKS.
+         *
+         * This one literal had been left at id's seconds value on the ten-Hz
+         * clock, which capped the cooldown at 0.2 s and let every gun-carrying
+         * creature fire on the AI tick after the one it fired on. Everything
+         * else in this file already goes through Q2_AI_SECONDS — HuntTarget's
+         * `addiu a1, zero, 10` at 0x8005D2F0 is the same conversion.
+         */
+        m->attack_finished = q2_level_state.time
+                           + Q2_AI_SECONDS(2) * (rand() & 0x7FFF) / 32767;
         return true;
     }
 
@@ -1371,6 +1462,7 @@ void q2_ai_run(q2_monster *m, s32 dist)
         }
 
         if (marker) {
+            q2_ai_stats.pursue_marker++;
             m->last_sighting[0] = marker->origin[0];
             m->last_sighting[1] = marker->origin[1];
             m->last_sighting[2] = marker->origin[2];
@@ -1389,6 +1481,7 @@ void q2_ai_run(q2_monster *m, s32 dist)
      * next one on the way back through. */
     if ((s64)dist * dist >= q2_vector_length_sq(v)) {
         m->aiflags |= Q2_AI_PURSUE_NEXT;
+        q2_ai_stats.pursue_arrived++;
         dist = q2_vector_length(v);
     }
 

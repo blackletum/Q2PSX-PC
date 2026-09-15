@@ -2732,6 +2732,144 @@ static void test_train(void)
 
 /* ------------------------------------------------------------------------- */
 /*
+ * WHAT A LINEAR MOVER DOES WHEN SOMETHING IS IN THE WAY, which is not the same
+ * thing in both directions.
+ *
+ * 0x800258A8 sets s1 = (saved_state == 3), 0x80025A8C picks the motion arm from
+ * it, and the obj+0x56 countdown at 0x80025AF8 lives inside the s1 != 0 arm
+ * ONLY. So a mover blocked while CLOSING reverses for sixteen ticks and then
+ * tries again, and one blocked while OPENING reverses all the way to zero and
+ * goes idle (0x80025B98) — it never retries.
+ *
+ * The shape is BASE1 zone 1's CALL lift as --zone-trace prints it: axis 1,
+ * target 1236, speed 4, block_flags 0. MOVER_A cannot reach the opening arm at
+ * all, because its constructor writes 1 to obj+0x58 (0x80025F04).
+ */
+static void test_mover_blocked_directions(void)
+{
+    q2_mover      m;
+    q2_mover_set  set;
+    u32           ticks;
+
+    printf("blocked movers\n");
+
+    memset(&m, 0, sizeof(m));
+    m.axis          = 1;
+    m.target        = 1236;
+    m.speed         = 4;
+    m.blocks_player = 1;
+    m.wait_timer    = Q2_MOVER_WAIT_NEVER;
+    m.wait_reset    = Q2_MOVER_WAIT_NEVER;
+    m.sound_pending = Q2_MVSND_NONE;
+    m.partner       = -1;
+    m.portal_node   = -1;
+    m.node[0]       = 215;
+    m.part_count    = 1;
+
+    set.movers   = &m;
+    set.count    = 1;
+    set.capacity = 1;
+
+    /* Caught on the way UP, well past sixteen ticks of travel. */
+    m.offset      = 760;
+    m.state       = Q2_MV_OPENING;
+    m.saved_state = Q2_MV_OPENING;
+    q2_movers_tick_blocked(&set, 10, 0, train_always_blocked, NULL);
+    check_eq_i(m.state, Q2_MV_BLOCKED, "an obstruction blocks the lift");
+    check_eq_i(m.block_timer, 16, "and loads the sixteen (0x80025D08)");
+
+    for (ticks = 0; ticks < 200 && m.state == Q2_MV_BLOCKED; ticks++)
+        q2_movers_tick(&set, 10, 0);
+    check_eq_i(m.offset, 0, "blocked opening, it retreats the whole way");
+    check_eq_i(m.state, Q2_MV_IDLE, "and goes idle (0x80025B98)");
+    check(ticks > 16, "rather than retrying after sixteen ticks");
+
+    /* Caught on the way DOWN, the arm the port already had right: sixteen ticks
+     * of reversal and then the saved state comes back. Started low enough that
+     * the reversal cannot reach `target` and arrive instead. */
+    m.offset      = 100;
+    m.state       = Q2_MV_CLOSING;
+    m.saved_state = Q2_MV_CLOSING;
+    m.block_timer = 0;
+    q2_movers_tick_blocked(&set, 10, 0, train_always_blocked, NULL);
+    check_eq_i(m.state, Q2_MV_BLOCKED, "an obstruction blocks it closing too");
+
+    for (ticks = 0; ticks < 200 && m.state == Q2_MV_BLOCKED; ticks++)
+        q2_movers_tick(&set, 10, 0);
+    check_eq_i(ticks, 16, "blocked closing, it counts sixteen ticks out");
+    check_eq_i(m.state, Q2_MV_CLOSING, "and goes back to what it was doing");
+    check_eq_i(m.offset, 100 + 16 * 4 * 10,
+               "having reversed for every one of them");
+
+    /* The countdown sits AFTER the clamp (0x80025AE8 before 0x80025AF8), so a
+     * mover that reopens all the way past `target` ARRIVES and abandons it. */
+    m.offset      = m.target - 20;
+    m.state       = Q2_MV_BLOCKED;
+    m.saved_state = Q2_MV_CLOSING;
+    m.block_timer = 8;
+    q2_movers_tick(&set, 10, 0);
+    check_eq_i(m.state, Q2_MV_ARRIVED,
+               "reaching the target beats the countdown");
+    check_eq_i(m.offset, m.target, "and it stops exactly there");
+    check_eq_i(m.block_timer, 8, "with the countdown untouched");
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * A LOCKED DOOR NAMES THE KEY — 0x80025870 -> 0x800254EC.
+ *
+ * The refusal arm plays msc_keytry AND asks for the sentence; both sit behind
+ * the once-only latch at 0x800257C4, so a player leaning on a locked door is
+ * told once and not once a tick.
+ */
+static void test_mover_key_prompt(void)
+{
+    q2_mover      m;
+    q2_mover_set  set;
+
+    printf("locked doors\n");
+
+    memset(&m, 0, sizeof(m));
+    m.axis          = 1;
+    m.target        = 512;
+    m.speed         = 4;
+    m.key_mask      = 0x0001;       /* the Blue Key */
+    m.wait_timer    = Q2_MOVER_WAIT_NEVER;
+    m.wait_reset    = Q2_MOVER_WAIT_NEVER;
+    m.sound_pending = Q2_MVSND_NONE;
+    m.partner       = -1;
+    m.portal_node   = -1;
+    m.part_count    = 1;
+
+    set.movers   = &m;
+    set.count    = 1;
+    set.capacity = 1;
+
+    q2_mover_trigger(&set, 0);
+    q2_movers_tick(&set, 10, 0);
+    check_eq_i(m.state, Q2_MV_IDLE, "no key, no door");
+    check_eq_i(q2_mover_take_sound(&set, 0), Q2_MVSND_KEY_TRY,
+               "it makes the refusal noise");
+    check_eq_i(q2_mover_take_key_request(&set, 0), 0x0001,
+               "and asks for the key to be named");
+    check_eq_i(q2_mover_take_key_request(&set, 0), 0,
+               "the request is drained, not latched");
+
+    q2_mover_trigger(&set, 0);
+    q2_movers_tick(&set, 10, 0);
+    check_eq_i(q2_mover_take_key_request(&set, 0), 0,
+               "and it is not repeated while the door stays locked");
+
+    /* With the key it opens and says nothing. */
+    q2_mover_trigger(&set, 0);
+    q2_movers_tick(&set, 10, 0x0001);
+    check_eq_i(m.state, Q2_MV_DELAY, "with the key it opens");
+    check_eq_i(q2_mover_take_key_request(&set, 0), 0,
+               "and names nothing");
+}
+
+/* ------------------------------------------------------------------------- */
+/*
  * A DOOR IS SOLID TO MORE THAN THE PLAYER'S FEET.
  *
  * The mover boxes had exactly one reader — the player's own step sweep — so a
@@ -4459,6 +4597,8 @@ int main(void)
     test_melee_point();
     test_shot_point();
     test_train();
+    test_mover_blocked_directions();
+    test_mover_key_prompt();
     test_movers_block_sight_and_shots();
     test_glass_solidity_lifetime();
     test_one_shot_kill();

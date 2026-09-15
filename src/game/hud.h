@@ -298,7 +298,18 @@ void q2_hud_centre(q2_hud *hud, const q2_hud_tables *tab,
 
 /* The messages the game itself raises. */
 void q2_hud_weapon_selected(q2_hud *hud, const q2_hud_tables *tab, int weapon_id);
-void q2_hud_need_key(q2_hud *hud, const char *key_name);
+/*
+ * The locked-door refusal, 0x800254EC: name the key the door wants and put
+ * "You need the <name>" on the CENTRE line (0x80043570 -> 0x80042E14).
+ *
+ * Takes the door's mask rather than a name because the console's switch is on
+ * the mask and its default — "<<Key Error!!>>" — is part of the behaviour.
+ */
+void q2_hud_need_key(q2_hud *hud, const q2_hud_tables *tab,
+                     const q2_hud_ctx *ctx, u16 key_mask);
+
+/* That switch on its own, for a caller that wants the name without the line. */
+const char *q2_hud_key_name(u16 key_mask);
 
 /* ------------------------------------------------------------------------- */
 /* The pickup caption                                                         */

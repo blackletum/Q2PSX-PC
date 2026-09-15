@@ -318,6 +318,25 @@ q2_result q2_rotators_build(q2_rotator_set *out, const q2_events *events,
                     return Q2_ERR_NO_MEMORY;
                 }
                 r->target = target;
+
+                /*
+                 * The two timers, 0x8002DE1C and 0x8002DE54. Both are BYTES
+                 * (`lbu`), both are multiplied by 300 — the `5x; <<4; -; <<2`
+                 * chain the exec spells it with — and 0xFF on the second means
+                 * 0xFFFF, which state 6 tests for and refuses to count down.
+                 *
+                 * Snapshotted at build; the live copies are loaded when an IDLE
+                 * hatch is triggered, which is where the exec loads them.
+                 */
+                {
+                    u8 time_a = q2_rd_u8(p + 16);
+                    u8 time_b = q2_rd_u8(p + 17);
+
+                    r->delay_reset = (u16)(time_a * Q2_UF_TIME_UNIT);
+                    r->hold_reset  = (time_b == 0xFF)
+                                     ? Q2_UF_TIME_NEVER
+                                     : (u16)(time_b * Q2_UF_TIME_UNIT);
+                }
                 {
                     /* The X adjustment is subtracted; Y and Z are added.
                      * Loads are `lhu` in retail, but the result is stored by
@@ -392,17 +411,29 @@ static void rotator_fire(q2_rotator *r)
         break;
 
     case Q2_ROT_TARGET:
-        /* A hatch sweeps until it passes its target; re-triggering a moving one
-         * changes nothing — including its sound, which is why the raise is
-         * gated on the rotator not already running. 0x8002B3C8. */
-        if (!r->running) {
-            r->running        = true;
-            r->sound_pending  = Q2_ROTSND_START;
-            /* 0x8002B3C8 and 0x8002B3DC are consecutive in one basic block:
-             * the thud and the motor go up together on the tick the turn
-             * begins, which is why the motor is a channel of its own and not a
-             * third value of `sound_pending`. */
-            r->loop_pending  |= Q2_ROTLOOP_WANT_START;
+        /*
+         * 0x8002DDA0, the ROTHATCH exec, and it does two things.
+         *
+         * It ORs THE SAME BIT SIMROT USES (0x8002DDE8, 0x01000000), which the
+         * handler reads and clears every frame — so this is a per-frame
+         * request and not a latch, and a hatch that is already holding open
+         * reads it as "the player is still standing there".
+         *
+         * Then, and ONLY while obj+0x52 is still 0 (`lbu v0, 82(a1); bne v0,
+         * zero` at 0x8002DDF0), it reloads the two timers from the item. So
+         * re-triggering a hatch mid-delay does not restart the delay and
+         * re-triggering one mid-hold does not reload it with the authored time
+         * — state 6 does that itself, with a 1.
+         *
+         * pt1__strt does NOT belong here. 0x8002B3C8 plays it at the DELAY's
+         * exit, which is the whole point of a hatch with a one-second delay:
+         * the motor is heard when it starts turning, not when the script
+         * reaches the call.
+         */
+        r->step_pending = true;
+        if (r->state == Q2_ROTST_IDLE) {
+            r->delay = r->delay_reset;
+            r->hold  = r->hold_reset;
         }
         break;
 
@@ -529,10 +560,106 @@ u32 q2_rotators_tick(q2_rotator_set *set, s32 dt)
             break;
 
         case Q2_ROT_TARGET: {
-            s32 step;
+            s32 step, old, a;
+            bool trig = r->step_pending;
 
-            if (!r->running)
+            /*
+             * 0x8002B270 - 0x8002B284. The handler reads bit 24 of obj+0x50
+             * into a0 and clears it from the object BEFORE it dispatches, every
+             * frame and in every state. That is what makes the trigger a
+             * per-frame flag: state 6 below uses it to mean "the script called
+             * me again this frame", which is a player still standing in the
+             * volume, and the shared sweep entry at 0x8002B43C picks forward
+             * from the same flag.
+             */
+            r->step_pending = false;
+
+            /*
+             * THE OTHER SIX STATES, 0x800ABDA0. The port ran the sweep and
+             * nothing else, so a hatch opened on the frame the script reached
+             * it and stayed open for the rest of the level. Six of the disc's
+             * seventeen author a hold and three author a delay.
+             *
+             * NOT MODELLED, and said here rather than left to be discovered:
+             * states 5 and 3 also move the hatch's AABB. 0x8002B3B4/0x8002B3CC
+             * subtract 10000 from the record at obj+0x28 (+4 and +0x10, which
+             * are min[1] and max[1]) as the sweep starts, and 0x8002B5F8/
+             * 0x8002B610 add it back when the close finishes — the box is
+             * lifted out of the world while the hatch is open. No rotator in
+             * this port reaches the collision world at all (world.c's zone draw
+             * is the only consumer of q2_rotators_node_transform), so what
+             * follows restores the VISUAL half of the machine and nothing else:
+             * a hatch that now shuts still does not block anyone.
+             */
+            switch (r->state) {
+            case Q2_ROTST_IDLE:
+                /* 0x8002B2BC: a call arms the delay, and nothing else does. */
+                if (trig)
+                    r->state = Q2_ROTST_DELAY;
                 continue;
+
+            case Q2_ROTST_DELAY:
+                /*
+                 * 0x8002B2F8. `lhu` the timer, subtract the frame dt in 32
+                 * bits, and `blez` — a timer that lands exactly on dt expires
+                 * this frame rather than next.
+                 */
+                if ((s32)r->delay - dt > 0) {
+                    r->delay = (u16)((s32)r->delay - dt);
+                    continue;
+                }
+                r->state = Q2_ROTST_OPENING;
+                /* 0x8002B3C8: HERE is where pt1__strt plays — at the delay's
+                 * exit, with the box lift, not on the trigger. 0x8002B3C8 and
+                 * 0x8002B3DC are consecutive in one basic block, so the motor
+                 * loop goes up with the thud and on the same tick. */
+                r->sound_pending = Q2_ROTSND_START;
+                r->loop_pending |= Q2_ROTLOOP_WANT_START;
+                continue;
+
+            case Q2_ROTST_OPEN:
+                /*
+                 * 0x8002B2D0 is `lhu v0, 78(s1); beq v0, zero, exit`: a hold of
+                 * ZERO is the second, quieter "never close", and it is a
+                 * different test from the 0xFFFF one state 6 makes. LAB's
+                 * hatches at item offsets 2376 and 2396 author time_b 0, so
+                 * treating 0 as an already-spent hold would slam shut two
+                 * hatches the console leaves open.
+                 */
+                if (r->hold == 0)
+                    continue;
+                r->state = Q2_ROTST_HOLD;
+                continue;
+
+            case Q2_ROTST_HOLD:
+                /* 0x8002B3F8: the authored 0xFF, which the exec turned into
+                 * 0xFFFF. The countdown is never even attempted. */
+                if (r->hold == Q2_UF_TIME_NEVER)
+                    continue;
+                if ((s32)r->hold - dt > 0) {
+                    r->hold = (u16)((s32)r->hold - dt);
+                    continue;
+                }
+                /* 0x8002B420-0x8002B42C: called again this frame, the hold is
+                 * reloaded with ONE — not with the authored time — so the hatch
+                 * stays open exactly as long as the calls keep coming and shuts
+                 * one frame after they stop. */
+                if (trig) {
+                    r->hold = 1;
+                    continue;
+                }
+                r->state = Q2_ROTST_CLOSING;
+                continue;
+
+            case Q2_ROTST_OPENING:
+            case Q2_ROTST_CLOSING:
+                break;
+
+            default:
+                /* State 4's table slot exists but nothing writes it. */
+                r->state = Q2_ROTST_IDLE;
+                continue;
+            }
 
             /*
              * 0x8002B460 - 0x8002B490. The step is (speed * dt) / 8 with the
@@ -545,24 +672,67 @@ u32 q2_rotators_tick(q2_rotator_set *set, s32 dt)
                 step += 7;
             step >>= 3;
 
-            r->angle = (s16)((r->angle + step) & Q2_ROT_ANGLE_MASK);
+            old = r->angle & Q2_ROT_ANGLE_MASK;
+
+            if (r->state == Q2_ROTST_CLOSING) {
+                /*
+                 * THE RETURN SWEEP, 0x8002B578, and it does not finish on a
+                 * sign test.
+                 *
+                 * The same step is SUBTRACTED, which reverses a hatch whatever
+                 * the sign of its speed, and the arrival test at
+                 * 0x8002B5A8-0x8002B5E4 is on the quadrant bits of the angle
+                 * before and after: bit 11 unchanged means keep going, and only
+                 * a flip between quadrant 0 and quadrant 3 — the pair that
+                 * straddles zero — is the hatch being shut. `angle <= 0` gets
+                 * the negative-speed hatches (JAIL3, WASTE1, WASTE2) wrong,
+                 * because those close by counting UP through 0xFFF and wrapping.
+                 */
+                a = ((s32)r->angle - step) & Q2_ROT_ANGLE_MASK;
+
+                if ((a & 0x800) == (old & 0x800)) {
+                    r->angle = (s16)a;
+                } else if (((a & 0xC00) == 0xC00 && (old & 0xC00) == 0) ||
+                           ((old & 0xC00) == 0xC00 && (a & 0xC00) == 0)) {
+                    /* 0x8002B5E8-0x8002B618: state 0, box restored, angle 0. */
+                    r->state = Q2_ROTST_IDLE;
+                    r->angle = 0;
+                } else {
+                    r->angle = (s16)a;
+                }
+                moved++;
+                break;
+            }
+
+            a = ((s32)r->angle + step) & Q2_ROT_ANGLE_MASK;
 
             /*
              * 0x8002B48C splits on the direction of travel and each arm tests
              * whether the angle has gone past the target. Comparing on the
              * wrapped angle is the original's own behaviour.
              */
-            if (r->speed > 0 ? (r->angle > r->target)
-                             : (r->angle < r->target)) {
-                r->angle   = r->target;
-                r->running = false;
+            if (r->speed > 0 ? (a > (s32)r->target) : (a < (s32)r->target)) {
+                r->angle = r->target;
+                r->state = Q2_ROTST_OPEN;
+
                 /*
-                 * 0x8002B534 plays pt1__end and 0x8002B568, on the same path
-                 * and unconditionally, hands object+52 to 0x8007398C. Both
-                 * channels are raised here for that reason.
+                 * AND ONLY THE POSITIVE ARM SPEAKS. 0x8002B534 plays pt1__end
+                 * on the `speed > 0` arrival; the `blez` arm at 0x8002B54C sets
+                 * state 2, stores the target and jumps STRAIGHT to the loop
+                 * stop at 0x8002B568 with no play call in between. A hatch
+                 * whose target is at or past 2048 — which is what gives it a
+                 * negative speed, 0x8002B70C — therefore arrives silently.
+                 * Reproduced, not tidied up.
                  */
-                r->sound_pending = Q2_ROTSND_END;
+                if (r->speed > 0)
+                    r->sound_pending = Q2_ROTSND_END;
+
+                /* 0x8002B568 is on BOTH arms — the silent one reaches it by
+                 * jumping straight there — so the motor is handed back
+                 * whichever way the hatch arrived. */
                 r->loop_pending |= Q2_ROTLOOP_WANT_STOP;
+            } else {
+                r->angle = (s16)a;
             }
             moved++;
             break;

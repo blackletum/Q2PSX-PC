@@ -781,9 +781,11 @@ static int render_overlay(const disc *d, const q2_hud_tables *tab,
     /* Everything the overlay can show, at once. */
     q2_hud_pickup(&hud, "Rocket Launcher");
     q2_hud_weapon_selected(&hud, tab, 8);      /* &O — Rocket Launcher */
-    q2_hud_need_key(&hud, "Blue Key");
     q2_hud_message(&hud, "^C8F000|0Kills 12/40    3/5 Secrets");
-    q2_hud_centre(&hud, tab, &ctx, "Mission Objective Complete");
+    /* There is ONE centre line, so the sheet shows the locked-door refusal
+     * (0x800254EC, which formats the sentence and calls 0x80042E14) rather
+     * than a bare q2_hud_centre: it exercises both ends of the same path. */
+    q2_hud_need_key(&hud, tab, &ctx, 0x0001);   /* "You need the Blue Key" */
     q2_hud_track(&hud, 100, 50);
     q2_hud_track(&hud, 88, 50);                /* a health hit: red flash */
 

@@ -58,12 +58,32 @@
  *                           Insane uses 0x08, 0x10, 0x40 and 0x80).
  *     0x16  u16  index      slot 0..323, not strictly monotonic, UNKNOWN
  *
- * Path record (path group only), 24 bytes:
- *     0x00  s32  x, y, z    xyz is at +0x00 here, NOT +0x04 as in a spawn
- *     0x0C  u16  unk0
- *     0x0E  u16  zero
- *     0x10  u32  link0      neighbour index; 0xFFFFFFFF means none (INFERRED)
- *     0x14  u32  link1
+ * Path record (path group only), 24 bytes. CONFIRMED field by field against
+ * the dedicated path-corner spawner at 0x8007F390, whose only caller is
+ * 0x800575A4, reached from 0x80057588 where the literal "PathCorner" at
+ * 0x800ACD90 selects the group. The loop runs with s1 = record and
+ * s0 = record + 0x0C:
+ *     0x00  s32  x, y, z    xyz is at +0x00 here, NOT +0x04 as in a spawn.
+ *                           0x8007F404-0x8007F418 copy it VERBATIM into the
+ *                           entity: no eye lift, no nudge, no drop to floor.
+ *     0x0C  u16  flags      low nine bits into entity.spawnflags 18..26, the
+ *                           same transport a spawn record's flags use
+ *                           (0x8007F430-0x8007F448, mask 0xF803FFFF)
+ *     0x0E  u16  wait       low byte written to entity+0x1C byte 0 by
+ *                           0x8007F3F8/0x8007F400; path_corner_touch
+ *                           (0x8005F2F4) reads it back as the pause in ticks
+ *                           the creature holds at this corner
+ *     0x10  u16  targetname this corner's own id — `lhu v0,4(s0)` /
+ *                           `sh v0,24(a2)` at 0x8007F3E0/0x8007F3E8
+ *     0x14  u16  target     the next corner's id — `lhu v0,8(s0)` /
+ *                           `sh v0,22(a2)` at 0x8007F3EC/0x8007F3F4
+ *
+ * These two were documented here as "link0/link1 neighbour index (INFERRED)".
+ * They are not neighbour indices in a list: read as (targetname, target) the
+ * 20 BASE1 records form closed cycles — 25->28->27->26->25 — and 8 of that
+ * map's 9 creature links land on one. The creature entity filler at
+ * 0x8007E5A0-0x8007E6DC never writes entity+0x18 at all, so on this disc a
+ * targetname belongs to a path corner and to nothing else.
  *
  * Place record, 16 bytes:
  *     0x00  s32  x, y, z
@@ -126,8 +146,10 @@ typedef struct q2_pop_spawn {
 
 typedef struct q2_pop_path {
     s32 x, y, z;
-    u16 unk0;
-    u32 link0, link1;
+    u16 flags;       /* low 9 -> entity.spawnflags bits 18..26 */
+    u16 wait;        /* low byte -> entity+0x1C byte 0, the corner's pause */
+    u16 targetname;  /* this corner's id                                   */
+    u16 target;      /* the next corner's id                               */
 } q2_pop_path;
 
 typedef struct q2_pop_place {

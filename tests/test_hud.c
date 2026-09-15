@@ -510,6 +510,45 @@ static void test_measure_and_flash(void)
           "a 4-point armour hit lands in the dead band and raises nothing");
 }
 
+/*
+ * "You need the <key>" — 0x800254EC, the arm a locked door takes.
+ *
+ * The switch is on the whole mask and its default is the image's own joke
+ * string; the sentence goes to the CENTRE line (0x80042E14), not to the
+ * notification ring (0x80042D4C), which is where this used to send it.
+ */
+static void test_need_key(void)
+{
+    q2_hud     hud;
+    q2_hud_ctx ctx;
+
+    printf("the locked-door line\n");
+
+    check(strcmp(q2_hud_key_name(0x0001), "Blue Key") == 0,
+          "bit 0 is the Blue Key (0x800ABB60)");
+    check(strcmp(q2_hud_key_name(0x0004), "Security Pass") == 0,
+          "bit 2 is the Security Pass");
+    check(strcmp(q2_hud_key_name(0x0800), "White Key") == 0,
+          "bit 11 is the White Key");
+    check(strcmp(q2_hud_key_name(0x0008), "<<Key Error!!>>") == 0,
+          "bit 3 has no case and takes the default (0x800ABBE8)");
+    check(strcmp(q2_hud_key_name(0x0003), "<<Key Error!!>>") == 0,
+          "and so does a mask with two bits: the compare is on the whole word");
+
+    q2_hud_init(&hud, &g_tab, 1);
+    q2_hud_ctx_default(&ctx, Q2_HUD_SPACE_W, Q2_HUD_SPACE_H);
+
+    check_eq_i(hud.centre_age, Q2_HUD_CENTRE_TICKS,
+               "nothing is on the centre line to start with");
+
+    q2_hud_need_key(&hud, &g_tab, &ctx, 0x0001);
+    check_eq_i(hud.centre_age, 0, "the refusal puts a line up");
+    check(strstr(hud.centre, "You need the Blue Key") != NULL,
+          "and it names the key the door wants");
+    check_eq_i(hud.msg_count, 0,
+               "on the centre line, not queued in the notification ring");
+}
+
 static void test_layout(void)
 {
     q2_hud_ctx ctx;
@@ -541,6 +580,7 @@ int main(void)
     test_weapon_glyphs();
     test_bar_reads_disc_tables();
     test_measure_and_flash();
+    test_need_key();
     test_layout();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);

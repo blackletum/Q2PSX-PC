@@ -163,6 +163,24 @@ typedef struct q2_creature_world {
      */
     q2_monster         sight;
 
+    /*
+     * THE MAP'S PATH CORNERS — the "PathCorner" group, spawned by 0x8007F390.
+     *
+     * They are ordinary entities on the console and G_PickTarget hands one
+     * back as one, so they are q2_monster here too: monster_start_go reads
+     * `class_id` and `pos` off whatever the resolver returns. They are NOT in
+     * `set`, and that is deliberate on three counts — `set.count` is the kill
+     * denominator the mission HUD divides by, the per-index model and actor
+     * arrays in the client are sized from it, and `class_module[]` is indexed
+     * by the Population class 0..37 while a corner's 114 belongs to the other
+     * class namespace entirely.
+     *
+     * The array never grows after the load, because q2_pick_target hands out
+     * pointers into it and monster_start_go keeps them as movetarget.
+     */
+    q2_monster        *corner;
+    u32                corner_count;
+
     bool               ready;
 } q2_creature_world;
 

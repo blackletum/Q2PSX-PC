@@ -650,14 +650,57 @@ void q2_hud_weapon_selected(q2_hud *hud, const q2_hud_tables *tab, int weapon_id
     q2_hud_message(hud, buf);
 }
 
-void q2_hud_need_key(q2_hud *hud, const char *key_name)
+/*
+ * 0x800254EC's own switch, key mask -> name.
+ *
+ * It switches on the WHOLE halfword, not on individual bits (`sll 16; sra 16`
+ * at 0x800254F0 and then a chain of `beq a0, v0`), so a door authored with two
+ * key bits set falls to the default like any other unrecognised value. Bit 3
+ * has no case at all and is unused on the disc.
+ *
+ * The strings are the image's, quoted exactly — including the joke default,
+ * which is what the console prints and therefore what this does. Two of them
+ * live in the other pool (0x800AE77C, 0x800AE784); the rest run from
+ * 0x800ABB60 to 0x800ABBE8.
+ */
+const char *q2_hud_key_name(u16 key_mask)
 {
-    char buf[Q2_HUD_MSG_LEN];
+    switch (key_mask) {
+    case 0x0001: return "Blue Key";             /* 0x800ABB60 */
+    case 0x0002: return "Red Key";              /* 0x800AE77C */
+    case 0x0004: return "Security Pass";        /* 0x800ABB6C */
+    case 0x0010: return "Commander's Head";     /* 0x800ABB7C */
+    case 0x0020: return "Red Pyramid Key";      /* 0x800ABB90 */
+    case 0x0040: return "Purple Pyramid Key";   /* 0x800ABBA0 */
+    case 0x0080: return "Data CD";              /* 0x800AE784 */
+    case 0x0100: return "Data Spinner";         /* 0x800ABBB4 */
+    case 0x0200: return "Green Key";            /* 0x800ABBC4 */
+    case 0x0400: return "Yellow Key";           /* 0x800ABBD0 */
+    case 0x0800: return "White Key";            /* 0x800ABBDC */
+    default:     return "<<Key Error!!>>";      /* 0x800ABBE8 */
+    }
+}
 
-    if (!hud || !key_name)
+/*
+ * The rest of 0x800254EC: "You need the %s" (0x800ABBF8) formatted into the
+ * scratch buffer at [0x800B2DFC] and handed to 0x80043570, which re-formats it
+ * into 0x800C8DDC and calls 0x80042E14 with it.
+ *
+ * 0x80042E14 IS the centre line, not the notification ring — that is
+ * 0x80042D4C, a different entry — and this used to route here through
+ * q2_hud_message, so a refusal that did reach the HUD would have queued behind
+ * pickups in the corner instead of being put in front of the player. Nothing
+ * reached it at all: the caller did not exist.
+ */
+void q2_hud_need_key(q2_hud *hud, const q2_hud_tables *tab,
+                     const q2_hud_ctx *ctx, u16 key_mask)
+{
+    char buf[Q2_HUD_CENTRE_LEN];
+
+    if (!hud || !ctx)
         return;
-    snprintf(buf, sizeof(buf), "You need the %s", key_name);
-    q2_hud_message(hud, buf);
+    snprintf(buf, sizeof(buf), "You need the %s", q2_hud_key_name(key_mask));
+    q2_hud_centre(hud, tab, ctx, buf);
 }
 
 bool q2_hud_track(q2_hud *hud, s16 health, s16 armour)

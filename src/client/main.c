@@ -1297,6 +1297,10 @@ typedef struct client {
      */
     u32               rot_loop_starts;
     u32               rot_loop_stops;
+    /* Locked doors that named their key on the centre line (0x800254EC).
+     * Counted where the request is drained rather than where it is raised, so
+     * it reports sentences PUT ON SCREEN and not refusals reached. */
+    u32               key_prompts;
     /* Transitions whose voice did NOT start: no audio device, or the name is
      * not in this map's bank. Counted apart so a headless run cannot be read
      * as proof that anything was heard. */
@@ -2238,8 +2242,9 @@ static void client_load_creatures(client *c, const s32 eye[3])
      * not know and are dropped rather than given a Soldier's gun.
      */
     /*
-     * The breadcrumb trail the AI hunts along — `0x800D517C`, the sixteen-slot
-     * ring at gp+17892. `q2_trail_add` had no caller anywhere in the tree, so
+     * The breadcrumb trail the AI hunts along — `0x800D517C`, the eight-slot
+     * ring at gp+17892 (`addiu v1, zero, 8` at 0x80060BE8 and the `andi ..., 7`
+     * masks). `q2_trail_add` had no caller anywhere in the tree, so
      * the trail was always empty and the three-stage pursuit a creature runs
      * when it loses you could never reach its second stage: it had nowhere to
      * follow you to.
@@ -3347,6 +3352,37 @@ static u32 client_rot_turned(const client *c)
     for (i = 0; i < c->rotators.count; i++)
         if (c->rotators.rotators[i].angle != 0)
             n++;
+
+    return n;
+}
+
+/*
+ * The rotating hatches, and how many of them are not shut.
+ *
+ * A separate census from `client_rot_turned` because a hatch's ANGLE is not the
+ * question: one whose target is 3084 and which has just finished closing sits
+ * at angle 0 exactly like one that never opened, and what a run needs to know
+ * is whether the seven-state machine ran to the end. `state` answers that —
+ * anything but Q2_ROTST_IDLE is a hatch mid-delay, mid-sweep or standing open.
+ */
+static u32 client_hatches(const client *c, u32 *not_shut)
+{
+    u32 i, n = 0;
+
+    if (not_shut)
+        *not_shut = 0;
+    if (!c->rotators_ready)
+        return 0;
+
+    for (i = 0; i < c->rotators.count; i++) {
+        const q2_rotator *r = &c->rotators.rotators[i];
+
+        if (r->kind != Q2_ROT_TARGET)
+            continue;
+        n++;
+        if (not_shut && r->state != Q2_ROTST_IDLE)
+            (*not_shut)++;
+    }
 
     return n;
 }
@@ -8991,13 +9027,31 @@ static void client_input_simulated(client *c, float dt)
     q2_sim_view_angles(&c->sim[0], view);
 
     /*
-     * Drop a breadcrumb. The original writes one as the player moves, and the
-     * AI's lost-you pursuit walks them backwards; ten frames apart is close
-     * enough that a sixteen-slot ring covers the few seconds the pursuit
-     * looks over.
+     * Drop a breadcrumb — 0x8007E32C is PlayerTrail_Add's only caller.
+     *
+     * NOT ON A TIMER. 0x8007E2C4 fetches the previous crumb and 0x8007E2D8
+     * skips the add while the player can still see it, so the eight slots are
+     * corner markers spanning a whole route. The ten-frame throttle stays
+     * because this sits on the render frame while the console's caller sits on
+     * the game frame; all it bounds now is how often the question is asked.
+     *
+     * AND THE CRUMB IS AN ENTITY ORIGIN, NOT THE EYE. The slots are fed
+     * straight to `visible` and then to M_MoveToGoal as goal positions, both
+     * of which are in the origin frame — this is the same rule the AI tick
+     * below already follows. Recording the eye put every crumb
+     * Q2_VIEW_STAND - Q2_EYE_BASE = 290 units out in Y, which is further than
+     * a run frame's step, so ai_run's arrival test (`dist*dist >= |v|^2`)
+     * could never fire and the pursuit stalled on its first waypoint.
      */
-    if (c->creatures_ready && (c->frame_index % 10) == 0)
-        q2_trail_add(eye, (s16)c->sim[0].player[0].yaw);
+    if (c->creatures_ready && (c->frame_index % 10) == 0
+        && q2_trail_needs_spot(eye)) {
+        s32 crumb[3];
+
+        crumb[0] = c->sim[0].player[0].pos[0];
+        crumb[1] = q2_sim_origin_y(c->sim[0].player[0].pos[1]);
+        crumb[2] = c->sim[0].player[0].pos[2];
+        q2_trail_add(crumb);
+    }
 
     /* The multiplayer session's own frame, on the same clock. */
     if (ticked) client_mp_tick(c, c->sim[0].cur_dt);
@@ -9221,6 +9275,44 @@ static void client_input_simulated(client *c, float dt)
                         c->mover_sounds++;
                     else
                         c->mover_sounds_missed++;
+                }
+            }
+
+            /*
+             * AND WHAT A LOCKED DOOR SAYS.
+             *
+             * The refusal arm is not just a noise: 0x80025870 hands the door's
+             * own key mask to 0x800254EC, which switches it onto one of eleven
+             * names, formats "You need the %s" and puts the sentence on the
+             * centre line through 0x80043570. The port played msc_keytry and
+             * printed nothing, so a player at a locked door learned that it was
+             * locked but never which of the disc's eleven keys opens it.
+             *
+             * Drained here for the same reason the sounds are: mover.c has no
+             * HUD. Player 0's HUD, because player 0's inventory is what the
+             * tick above gated the lock on.
+             *
+             * DEVIATION: the line is laid out in the console's own 512x248
+             * space, which is exactly what the single-screen draw uses
+             * (q2_hud_ctx_centre_in). In split-screen the overlay is built per
+             * view, so a prompt raised here sits at the full-width centre
+             * rather than that view's — there is no console behaviour to match,
+             * since the console has one screen and one key inventory.
+             */
+            {
+                u32 mi;
+                q2_hud_ctx kctx;
+
+                q2_hud_ctx_default(&kctx, Q2_HUD_SPACE_W, Q2_HUD_SPACE_H);
+                for (mi = 0; mi < c->movers.count; mi++) {
+                    u16 need = q2_mover_take_key_request(&c->movers, mi);
+
+                    if (!need)
+                        continue;
+                    c->key_prompts++;
+                    if (c->hud_ready && c->hud_tables_ready)
+                        q2_hud_need_key(&c->hud[0], &c->hud_tables, &kctx,
+                                        need);
                 }
             }
 
@@ -15436,6 +15528,7 @@ static void client_report(const client *c)
 {
     const q2_sim *s = &c->sim[0];
     u32 cre_live = 0, cre_hunting = 0, cre_dead = 0, cre_moved = 0;
+    u32 cre_patrol = 0;
 
     if (c->creatures_ready) {
         u32 i;
@@ -15450,6 +15543,13 @@ static void client_report(const client *c)
             cre_live++;
             if (m->enemy)
                 cre_hunting++;
+            /*
+             * Walking a route rather than standing: monster_start_go
+             * (0x80061BA4) only leaves `movetarget` set when G_PickTarget
+             * resolved the record's target to a path corner.
+             */
+            if (m->movetarget)
+                cre_patrol++;
             /*
              * MOVED, not "walked": a creature the AI never reached and one
              * whose every step was refused are both stationary, and the whole
@@ -15521,6 +15621,10 @@ static void client_report(const client *c)
     REPORT("creatures.hunting",     cre_hunting);
     REPORT("creatures.dead",        cre_dead);
     REPORT("creatures.moved",       cre_moved);
+    /* The patrol routes: how many corners this map's PathCorner group spawned
+     * (0x8007F390) and how many live creatures are walking one. */
+    REPORT("creatures.corners",     c->creatures_ready ? c->creatures.corner_count : 0);
+    REPORT("creatures.patrolling",  cre_patrol);
     REPORT("creatures.thoughts",    c->ai_thoughts);
     REPORT("creatures.swings",      c->cre_swings);
     /* Swings `fire_hit`'s own reach test threw away (0x80061198, crebind.c).
@@ -15535,6 +15639,10 @@ static void client_report(const client *c)
     REPORT("creatures.traces",      c->ai_world.stats.traces);
     REPORT("creatures.blocked_door", c->ai_world.stats.trace_blocked_ent);
     REPORT("creatures.blocked_body", c->ai_world.stats.trace_blocked_body);
+    /* The lost-you pursuit: how often a creature reached its waypoint and how
+     * often the breadcrumb ring gave it the next one. */
+    REPORT("creatures.pursue_arrived", q2_ai_stats.pursue_arrived);
+    REPORT("creatures.pursue_marker",  q2_ai_stats.pursue_marker);
 
     /* Not "how many bursts were raised" — how many primitives reached the
      * ordering table. The two differ by exactly the area cull. */
@@ -15549,6 +15657,14 @@ static void client_report(const client *c)
     REPORT("world.rot_moved",       c->rot_moved);
     REPORT("world.rot_loop_starts", c->rot_loop_starts);
     REPORT("world.rot_loop_stops",  c->rot_loop_stops);
+    {
+        u32 not_shut = 0;
+        u32 hatches  = client_hatches(c, &not_shut);
+
+        REPORT("world.hatches",     hatches);
+        REPORT("world.hatches_open", not_shut);
+    }
+    REPORT("world.key_prompts",     c->key_prompts);
     REPORT("world.breakable_hits",  s->breakable_hits);
     REPORT("world.explosive_blasts", s->explosive_destroyed);
     REPORT("world.triggers",        s->triggers.count);

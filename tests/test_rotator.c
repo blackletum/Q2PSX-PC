@@ -378,7 +378,18 @@ static void test_target_sweep(void)
     check_eq(q2_rotators_tick(&set, 8), 0, "an untriggered hatch is still");
 
     q2_rotator_trigger(&set, 0);
-    check(set.rotators[0].running, "the trigger starts the sweep");
+    check_eq(set.rotators[0].state, Q2_ROTST_IDLE,
+             "the trigger is only a flag until the handler runs (0x8002DDE8)");
+
+    /* 0x8002B2BC: state 0 sends it to state 5, and state 5 with a zero delay
+     * expires on the same tick it is entered — so the sweep starts on the
+     * SECOND tick after the trigger, not the first. */
+    check_eq(q2_rotators_tick(&set, 8), 0, "state 0 arms the delay, nothing turns");
+    check_eq(set.rotators[0].state, Q2_ROTST_DELAY, "and it is in state 5");
+    check_eq(q2_rotators_tick(&set, 8), 0, "a zero delay expires without turning");
+    check_eq(set.rotators[0].state, Q2_ROTST_OPENING, "and state 1 is next");
+    check_eq(q2_rotator_take_sound(&set, 0), Q2_ROTSND_START,
+             "pt1__strt plays at the delay's exit (0x8002B3C8)");
 
     /* 64 * 8 = 512; 512 / 8 = 64 per tick. */
     q2_rotators_tick(&set, 8);
@@ -391,13 +402,19 @@ static void test_target_sweep(void)
     /* Run it to the target; it must stop exactly there, not overshoot. */
     {
         int guard = 0;
-        while (set.rotators[0].running && guard++ < 1000)
+        while (set.rotators[0].state == Q2_ROTST_OPENING && guard++ < 1000)
             q2_rotators_tick(&set, 8);
 
         check(guard < 1000, "the sweep terminates");
         check_eq(set.rotators[0].angle, 1024, "and lands exactly on the target");
-        check(!set.rotators[0].running, "and stops running");
+        check_eq(set.rotators[0].state, Q2_ROTST_OPEN, "and it is open");
+        /* hold_reset is 0, which is the 0x8002B2D0 'never close': state 2 tests
+         * obj+0x4E for non-zero and stays where it is. */
         check_eq(q2_rotators_tick(&set, 8), 0, "and stays stopped");
+        check_eq(set.rotators[0].state, Q2_ROTST_OPEN,
+                 "a zero hold never leaves state 2");
+        check_eq(q2_rotators_tick(&set, 100000), 0, "however long it is left");
+        check_eq(set.rotators[0].angle, 1024, "still at its target");
     }
 
     q2_rotators_free(&set);
@@ -412,6 +429,9 @@ static void test_target_sweep(void)
     r->target = 2048;
     r->angle  = 3000;
     q2_rotator_trigger(&set, 0);
+    q2_rotators_tick(&set, 1);      /* state 0 -> 5 */
+    q2_rotators_tick(&set, 1);      /* state 5 -> 1, the zero delay expires */
+    check_eq(set.rotators[0].state, Q2_ROTST_OPENING, "it is sweeping");
     q2_rotators_tick(&set, 1);
     check_eq(set.rotators[0].angle, 3000,
              "a sub-step negative tick rounds toward zero and does not move");
@@ -419,6 +439,120 @@ static void test_target_sweep(void)
     q2_rotators_free(&set);
 }
 
+/*
+ * The six states the port used to skip: the delay before a hatch starts, the
+ * hold once it is open, the reverse sweep, and the two ways a hatch is
+ * authored never to close at all. Jump table 0x800ABDA0.
+ */
+static void test_target_state_machine(void)
+{
+    q2_rotator_set set;
+    q2_rotator *r;
+    int guard;
+
+    puts("ROTHATCH delays, holds and closes again (0x800ABDA0)");
+
+    /* MATRIX4's hatch at item offset 172: target 3084, so the builder gives it
+     * a NEGATIVE speed (0x8002B70C), time_b 8 = a 2400-tick hold. */
+    memset(&set, 0, sizeof(set));
+    r = q2_rotators_add(&set, Q2_ROT_TARGET, 7, 1, -64);
+    r->target     = 3084;
+    r->hold_reset = 8 * Q2_UF_TIME_UNIT;
+
+    q2_rotator_trigger(&set, 0);
+    check_eq(set.rotators[0].hold, 8 * Q2_UF_TIME_UNIT,
+             "the trigger loads the hold (0x8002DE54)");
+
+    q2_rotators_tick(&set, 8);      /* 0 -> 5 */
+    q2_rotators_tick(&set, 8);      /* 5 -> 1 */
+    check_eq(q2_rotator_take_sound(&set, 0), Q2_ROTSND_START,
+             "the delay's exit starts the motor");
+    guard = 0;
+    while (set.rotators[0].state == Q2_ROTST_OPENING && guard++ < 1000)
+        q2_rotators_tick(&set, 8);
+    check_eq(set.rotators[0].angle, 3084, "it sweeps down to its target");
+    check_eq(set.rotators[0].state, Q2_ROTST_OPEN, "and arrives open");
+    check_eq(q2_rotator_take_sound(&set, 0), Q2_ROTSND_NONE,
+             "the negative arm arrives silent (0x8002B54C has no play call)");
+
+    /* 0x8002B2D0 moves it into the hold, which then counts down by dt. */
+    q2_rotators_tick(&set, 8);
+    check_eq(set.rotators[0].state, Q2_ROTST_HOLD, "then it holds");
+
+    guard = 0;
+    while (set.rotators[0].state == Q2_ROTST_HOLD && guard++ < 1000)
+        q2_rotators_tick(&set, 8);
+    check_eq(set.rotators[0].state, Q2_ROTST_CLOSING, "the hold runs out");
+
+    /* And back to zero, through the 0x800/0xC00 quadrant test — an angle test
+     * on the sign would never fire for this one, which closes by counting UP
+     * through 0xFFF and wrapping. */
+    guard = 0;
+    while (set.rotators[0].state == Q2_ROTST_CLOSING && guard++ < 2000)
+        q2_rotators_tick(&set, 8);
+    check(guard < 2000, "the return sweep terminates");
+    check_eq(set.rotators[0].angle, 0, "and lands on exactly zero (0x8002B60C)");
+    check_eq(set.rotators[0].state, Q2_ROTST_IDLE, "with the hatch idle again");
+
+    q2_rotators_free(&set);
+
+    /* BASE2's hatch at item offset 804: time_a 1, a one-second delay before
+     * anything turns. The port used to turn on the trigger. */
+    memset(&set, 0, sizeof(set));
+    r = q2_rotators_add(&set, Q2_ROT_TARGET, 8, 1, 64);
+    r->target      = 1024;
+    r->delay_reset = 1 * Q2_UF_TIME_UNIT;
+
+    q2_rotator_trigger(&set, 0);
+    q2_rotators_tick(&set, 10);
+    for (guard = 0; guard < 29; guard++)
+        q2_rotators_tick(&set, 10);
+    check_eq(set.rotators[0].angle, 0, "nothing turns during the delay");
+    check_eq(set.rotators[0].state, Q2_ROTST_DELAY, "it is still counting down");
+    check_eq(q2_rotator_take_sound(&set, 0), Q2_ROTSND_NONE,
+             "and pt1__strt has not played yet");
+
+    q2_rotators_tick(&set, 10);     /* 300 spent: the delay expires */
+    check_eq(set.rotators[0].state, Q2_ROTST_OPENING, "then it starts");
+    check_eq(q2_rotator_take_sound(&set, 0), Q2_ROTSND_START,
+             "and the motor is heard now, not a second ago");
+
+    q2_rotators_free(&set);
+
+    /* 0xFF -> 0xFFFF: state 6 returns on it without counting (0x8002B3F8). */
+    memset(&set, 0, sizeof(set));
+    r = q2_rotators_add(&set, Q2_ROT_TARGET, 9, 1, 64);
+    r->target     = 512;
+    r->hold_reset = Q2_UF_TIME_NEVER;
+
+    q2_rotator_trigger(&set, 0);
+    for (guard = 0; guard < 400; guard++)
+        q2_rotators_tick(&set, 8);
+    check_eq(set.rotators[0].state, Q2_ROTST_HOLD, "a 0xFF hold never expires");
+    check_eq(set.rotators[0].angle, 512, "so the hatch stays open");
+
+    q2_rotators_free(&set);
+
+    /* A HELD hatch reloads its hold with 1 (0x8002B424) and shuts one frame
+     * after the calls stop, not the authored time later. */
+    memset(&set, 0, sizeof(set));
+    r = q2_rotators_add(&set, Q2_ROT_TARGET, 10, 1, 64);
+    r->target     = 512;
+    r->hold_reset = 300;
+
+    q2_rotator_trigger(&set, 0);
+    for (guard = 0; guard < 200; guard++) {
+        q2_rotator_trigger(&set, 0);        /* still standing in the volume */
+        q2_rotators_tick(&set, 8);
+    }
+    check_eq(set.rotators[0].state, Q2_ROTST_HOLD, "it is held open");
+    check_eq(set.rotators[0].hold, 1, "with the hold pinned at one");
+    q2_rotators_tick(&set, 8);
+    check_eq(set.rotators[0].state, Q2_ROTST_CLOSING,
+             "and it shuts the frame after the calls stop");
+}
+
+/* ------------------------------------------------------------------------- */
 /*
  * The motor loop, which used to be decoded and never raised.
  *
@@ -431,6 +565,7 @@ static void test_motor_loop(void)
 {
     q2_rotator_set set;
     q2_rotator *r;
+    int guard;
 
     puts("ROTHATCH raises pt1__mid on the turn and stops it on arrival");
 
@@ -441,9 +576,22 @@ static void test_motor_loop(void)
     check_eq(q2_rotator_take_loop(&set, 0), Q2_ROTLOOP_NONE,
              "an untriggered hatch asks for no motor");
 
+    /*
+     * The trigger does not start the motor. 0x8002DDA0 only ORs the request
+     * bit and reloads the timers; 0x8002B3C8 and 0x8002B3DC are in the DELAY's
+     * exit arm, so the thud and the motor go up together two states later —
+     * even here, where the authored delay is zero.
+     */
     q2_rotator_trigger(&set, 0);
+    check_eq(q2_rotator_take_loop(&set, 0), Q2_ROTLOOP_NONE,
+             "the trigger alone asks for no motor");
+
+    q2_rotators_tick(&set, 8);      /* IDLE -> the request state */
+    q2_rotators_tick(&set, 8);      /* ...-> OPENING, past a zero delay */
+    check_eq(set.rotators[0].state, Q2_ROTST_OPENING,
+             "two ticks put a zero-delay hatch into its sweep");
     check_eq(q2_rotator_take_sound(&set, 0), Q2_ROTSND_START,
-             "the trigger still asks for pt1__strt");
+             "the delay's exit asks for pt1__strt");
     check_eq(q2_rotator_take_loop(&set, 0), Q2_ROTLOOP_START,
              "and for the motor alongside it, on the same tick");
     check(set.rotators[0].loop_running, "which is then recorded as running");
@@ -457,12 +605,10 @@ static void test_motor_loop(void)
     check_eq(q2_rotator_take_loop(&set, 0), Q2_ROTLOOP_NONE,
              "and the motor is already running");
 
-    {
-        int guard = 0;
-        while (set.rotators[0].running && guard++ < 1000)
-            q2_rotators_tick(&set, 8);
-        check(guard < 1000, "the sweep terminates");
-    }
+    guard = 0;
+    while (set.rotators[0].state == Q2_ROTST_OPENING && guard++ < 1000)
+        q2_rotators_tick(&set, 8);
+    check(guard < 1000, "the sweep terminates");
 
     check_eq(q2_rotator_take_sound(&set, 0), Q2_ROTSND_END,
              "arrival asks for pt1__end (0x8002B534)");
@@ -476,17 +622,20 @@ static void test_motor_loop(void)
 
     /*
      * THE ONE-TICK TURN. BASE3 and MAGDEMO each hold a hatch whose whole travel
-     * fits in a single tick, and both requests are then waiting at the same
-     * drain. The console plays both — the start comes out of the trigger's own
-     * arm before the motion arm ever runs — so the drain must hand over both,
-     * in that order, rather than letting the arrival overwrite the start.
+     * fits in a single tick, so the start and the arrival land at the same
+     * drain. The console plays both — 0x8002B3DC runs in the delay's exit arm
+     * before the motion arm is reached — so the drain must hand over both, in
+     * that order, rather than letting the arrival overwrite the start.
      */
     memset(&set, 0, sizeof(set));
     r = q2_rotators_add(&set, Q2_ROT_TARGET, 3, 1, 64);
     r->target = 8;
     q2_rotator_trigger(&set, 0);
-    q2_rotators_tick(&set, 8);
-    check(!set.rotators[0].running, "the hatch arrives on its first tick");
+    q2_rotators_tick(&set, 8);      /* IDLE -> the request state            */
+    q2_rotators_tick(&set, 8);      /* -> OPENING, and the start is raised  */
+    q2_rotators_tick(&set, 8);      /* the first sweeping tick, which lands */
+    check(set.rotators[0].state == Q2_ROTST_OPEN,
+          "the hatch arrives on its first sweeping tick");
     check_eq(q2_rotator_take_loop(&set, 0), Q2_ROTLOOP_START,
              "the start is still delivered first");
     check_eq(q2_rotator_take_loop(&set, 0), Q2_ROTLOOP_STOP,
@@ -607,6 +756,7 @@ int main(void)
 
     test_one_step_per_request();
     test_target_sweep();
+    test_target_state_machine();
     test_motor_loop();
     test_snap_button();
     test_angle_wrap();

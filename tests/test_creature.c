@@ -106,6 +106,38 @@ static void test_summoned_batch_is_started(void)
 }
 
 /* ------------------------------------------------------------------------- */
+static void test_player_noise_stamps_the_window(void)
+{
+    q2_creature_world w;
+
+    puts("PlayerNoise stamps the noise so the five-second window can run");
+
+    memset(&w, 0, sizeof(w));
+    q2_monster_init(&w.sight);
+    w.ready = true;
+
+    q2_level_reset();
+    q2_level_state.time     = 137;
+    q2_level_state.framenum = 137;
+
+    q2_creature_world_player_noise(&w, true);
+    check(q2_level_state.sound_entity == &w.sight,
+          "a weapon noise goes to the loud channel");
+    check_eq_i(q2_level_state.sound_entity_framenum, 137,
+               "with this tick's framenum");
+    check_eq_i(w.sight.teleport_time, 137,
+               "and 0x80062CD4's level.time stamp, which ai_checkattack "
+               "measures staleness against");
+
+    q2_level_state.time     = 200;
+    q2_level_state.framenum = 200;
+    q2_creature_world_player_noise(&w, false);
+    check(q2_level_state.sound2_entity == &w.sight,
+          "the player's own noise goes to the quiet channel");
+    check_eq_i(w.sight.teleport_time, 200, "and is stamped the same way");
+}
+
+/* ------------------------------------------------------------------------- */
 /* A creature shaped like a decoded one, without needing a disc               */
 /* ------------------------------------------------------------------------- */
 #define TEST_CLASS 77
@@ -1414,6 +1446,7 @@ int main(void)
     printf("Q2PSX-PC creature tests\n\n");
 
     test_summoned_batch_is_started();
+    test_player_noise_stamps_the_window();
     test_bind();
     test_population_spawn_flags();
     test_move_lookup();
