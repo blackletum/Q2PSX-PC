@@ -236,7 +236,7 @@ typedef enum q2_uf_prim {
     Q2_UF_SHOOTTHEN,      /* hit-point counter; also the damage callback      */
     Q2_UF_MISCOMPLETE,    /* mission complete: fixed start point, state 7     */
     Q2_UF_PLATFORM,       /* linear platform                                  */
-    Q2_UF_TIMER,          /* delayed continuation of the rest of the record   */
+    Q2_UF_TIMER,          /* repeating N-item window over the record          */
     Q2_UF_TIMEDLIGHT,     /* timed light                                      */
     Q2_UF_ONKEYDO,        /* inventory/key predicate; aborts the record       */
     Q2_UF_TELEPORT,       /* move the entity to a named StartPos              */

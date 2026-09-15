@@ -63,6 +63,7 @@
 #include "../formats/collision.h"
 #include "effect.h"
 #include "events.h"
+#include "events_rt.h"   /* q2_laserbeams_draw needs the raiser's dead bit */
 #include "population.h"
 #include "userfuncs.h"
 #include "q2psx.h"
@@ -607,8 +608,20 @@ u32 q2_laserbeams_build(q2_laserbeam_set *out, const q2_events *events,
  * Queue every raised beam into this frame's pool. The transient pool empties
  * every frame (effect.h), which is why the console's walk re-submits its whole
  * list every frame too. Returns how many were queued.
+ *
+ * `rt` is the runtime over the SAME Events chunk the set was built from — the
+ * COMMON one, which is what 0x8002EE7C `lw a3,372(gp)` rebases each entry's
+ * raiser onto. It carries the only off switch a level beam has: 0x8002EE88
+ * `lbu v0,3(base + raiser)` / 0x8002EE90 `andi 0x80` / 0x8002EE94 `bne` skips
+ * the beam while the record that raised it is disabled. Passing NULL draws
+ * every beam, which is this function's behaviour before the gate existed.
+ *
+ * 30 beams on five maps are switched off by ordinary script: POWER1's
+ * "YELLOWBUTT" and its neighbour (6), JAIL2's volumes 14/15/23 (14),
+ * COMMAND's "LasersOff" (2), JAIL3's volume 2 (4) and SECURITY's
+ * "OrbDestroyed" (4).
  */
-u32 q2_laserbeams_draw(const q2_laserbeam_set *set, q2_fx_world *w,
-                       q2_rng *rng);
+u32 q2_laserbeams_draw(const q2_laserbeam_set *set, const q2_event_rt *rt,
+                       q2_fx_world *w, q2_rng *rng);
 
 #endif /* Q2PSX_LEVELBIN_H */

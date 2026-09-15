@@ -676,6 +676,149 @@ static q2_event_outcome run_item(q2_event_rt *rt, const q2_event_item *item)
 }
 
 /* ------------------------------------------------------------------------- */
+/* The TIMER table at 0x800C6F74                                              */
+/* ------------------------------------------------------------------------- */
+/*
+ * CLAIM A SLOT, 0x80026FEC — what the TIMER primitive does with the three
+ * operands the owner's hook has just left in `defer_ticks`/`defer_fires`/
+ * `defer_window`.
+ *
+ * Two refusals, and they are the whole reason this is a keyed table rather
+ * than a queue:
+ *
+ *   - 0x8002703C..0x80027054 scans all eight slots for slot+12 == this item
+ *     and, on a hit, leaves with a0 = -1 (0x8002701C) which the `bltz` at
+ *     0x80027088 turns into "fill nothing". An already-armed TIMER is NOT
+ *     re-armed, re-rolled or reset. Without that, COMMAND 0x718, POWER1 0x408
+ *     and POWER2 0x7a8 — CAT_B records with one trigger volume each and a fire
+ *     count of 0 — would claim a fresh slot on every frame the player stood in
+ *     the volume, and eight frames later no TIMER anywhere on the map could
+ *     arm again.
+ *   - 0x8002705C..0x80027084 then looks for a free slot (slot+12 == 0) and
+ *     leaves with a0 = -2 when there is none. The request is dropped; nothing
+ *     is evicted.
+ */
+static void timer_arm(q2_event_rt *rt, u32 rec_offset,
+                      const q2_event_item *item, u32 index)
+{
+    u32 s, slot = Q2_EVENT_RT_TIMER_MAX;
+
+    for (s = 0; s < Q2_EVENT_RT_TIMER_MAX; s++) {
+        if (rt->deferred[s].item == item->offset) {   /* 0x80027044 */
+            rt->defer_ticks  = 0;
+            rt->defer_fires  = 0;
+            rt->defer_window = 0;
+            return;
+        }
+    }
+    for (s = 0; s < Q2_EVENT_RT_TIMER_MAX; s++) {
+        if (rt->deferred[s].item == 0) {              /* 0x8002706C */
+            slot = s;
+            break;
+        }
+    }
+
+    if (slot < Q2_EVENT_RT_TIMER_MAX) {
+        rt->deferred[slot].item        = item->offset;   /* 0x800270C0 */
+        rt->deferred[slot].offset      = rec_offset;     /* 0x800270C4 */
+        rt->deferred[slot].timer_index = (u8)index;
+        rt->deferred[slot].next_item   = (u8)(index + 1u); /* 0x800270BC */
+        rt->deferred[slot].window      = rt->defer_window; /* 0x800270C8 */
+        rt->deferred[slot].fires       = rt->defer_fires;  /* 0x800270B0 */
+        rt->deferred[slot].period      = rt->defer_ticks;  /* 0x80027104 */
+        rt->deferred[slot].due         = rt->clock + rt->defer_ticks;
+        rt->deferred_count++;
+    }
+
+    rt->defer_ticks  = 0;
+    rt->defer_fires  = 0;
+    rt->defer_window = 0;
+}
+
+/* 0x800273E0 `sw zero,12(s0)`: the fire count reached zero and the slot is
+ * free again. */
+static void timer_free(q2_event_rt *rt, u32 slot)
+{
+    memset(&rt->deferred[slot], 0, sizeof(rt->deferred[slot]));
+    if (rt->deferred_count)
+        rt->deferred_count--;
+}
+
+/*
+ * 0x800273F0..0x8002742C: a fresh period into slot+0.
+ *
+ * DEVIATION. The console re-rolls here — `jal 0x80089E28` then
+ * `(base + ((range * rand()) >> 15)) * 30` off the TIMER item at slot+12 — and
+ * this runtime has no RNG: the roll belongs to the owner's `on_call` hook,
+ * which is not running at a deadline. The period armed by the first roll is
+ * reused. All 18 TIMER items on the disc carry range 0, so the console's
+ * re-roll returns that same constant and nothing on this disc can tell them
+ * apart; a script with a range would jitter once here and every time there.
+ */
+static void timer_rearm(q2_event_rt *rt, u32 slot)
+{
+    rt->deferred[slot].due = rt->clock + rt->deferred[slot].period;
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * ONE ITEM THROUGH THE DISPATCHER, 0x80027468 — its prologue and its call.
+ *
+ * Split out because the TIMER window enters the SAME function the record's own
+ * item loop does — 0x800271F8 `jal 0x80027468` — so the disabled skip and the
+ * one-shot latch have to be identical on both paths, and having two copies of
+ * them was how they would stop being.
+ *
+ * Returns false for an item the prologue skipped, which is the dispatcher's 0
+ * answer at 0x80027480: the caller CONTINUES rather than stopping. `*out` is
+ * the answer of an item that did run.
+ */
+static bool dispatch_item(q2_event_rt *rt, const q2_event_item *item,
+                          q2_event_outcome *out)
+{
+    /*
+     * 0x80027474 `lbu v1,0(t0)` reads the op byte OUT OF THE CHUNK, which the
+     * console writes back to. Here the chunk is borrowed const, so the mutable
+     * half of that byte lives in item_flags[], keyed by the item's immutable
+     * chunk offset. This used to read `item.op` straight from the file, which
+     * meant the bit could be tested but never set.
+     */
+    u8 op = item->op;
+
+    *out = Q2_EVENT_OK;
+
+    if (rt->item_flags && item->offset < rt->item_flags_size)
+        op = (u8)(op | rt->item_flags[item->offset]);
+
+    /* 0x8002747C `andi v0,v1,0x80` / 0x80027480 `bne v0,zero,0x80027940`
+     * with `addu v0,zero,zero` in the delay slot: a DISABLED item returns
+     * 0, so the record CONTINUES to the next item rather than stopping. */
+    if (op & Q2_EVOP_DISABLED)
+        return false;
+
+    /*
+     * 0x80027488 `sll v0,v1,1` / 0x8002748C `andi v0,v0,0x80` /
+     * 0x80027490 `andi v1,v1,0x7F` / 0x80027494 `or v1,v1,v0` /
+     * 0x80027498 `sb v1,0(t0)` — op := (op & 0x7F) | ((op & 0x40) << 1),
+     * i.e. DISABLED := ONESHOT. The item retires itself.
+     *
+     * IT HAPPENS HERE AND NOT INSIDE run_item(), because on the console it
+     * happens BEFORE the opcode bounds check at 0x8002749C..0x800274A8 and
+     * therefore before any handler's own length test. A one-shot item of a
+     * dead opcode, or of a live opcode carrying a length its handler
+     * rejects, still retires on its first dispatch and is never dispatched
+     * again. 457 items on the disc carry the bit — 316 CALL, 73 FXGROUP,
+     * 24 ENABLE, 29 MOVER_A, 9 DISABLE, 6 MOVER_C across 243 records —
+     * and none carries 0x80, which is what makes bit 7 purely runtime.
+     */
+    if ((op & Q2_EVOP_ONESHOT) && rt->item_flags &&
+        item->offset < rt->item_flags_size)
+        rt->item_flags[item->offset] |= Q2_EVOP_DISABLED;
+
+    *out = run_item(rt, item);
+    return true;
+}
+
 /*
  * Run a record's items from `from`. Returns true when it DEFERRED — the record
  * is unfinished.
@@ -698,50 +841,12 @@ static bool run_items(q2_event_rt *rt, const q2_event_record *rec, u32 from,
     for (i = from; i < rec->n_items; i++) {
         q2_event_item item;
         q2_event_outcome r;
-        u8 op;
 
         if (!q2_events_get_item(&rt->events, rec, i, &item))
             break;
 
-        /*
-         * The item dispatcher's prologue, 0x80027468..0x80027498.
-         *
-         * 0x80027474 `lbu v1,0(t0)` reads the op byte OUT OF THE CHUNK, which
-         * the console writes back to. Here the chunk is borrowed const, so the
-         * mutable half of that byte lives in item_flags[], keyed by the item's
-         * immutable chunk offset. This used to read `item.op` straight from the
-         * file, which meant the bit could be tested but never set.
-         */
-        op = item.op;
-        if (rt->item_flags && item.offset < rt->item_flags_size)
-            op = (u8)(op | rt->item_flags[item.offset]);
-
-        /* 0x8002747C `andi v0,v1,0x80` / 0x80027480 `bne v0,zero,0x80027940`
-         * with `addu v0,zero,zero` in the delay slot: a DISABLED item returns
-         * 0, so the record CONTINUES to the next item rather than stopping. */
-        if (op & Q2_EVOP_DISABLED)
+        if (!dispatch_item(rt, &item, &r))
             continue;
-
-        /*
-         * 0x80027488 `sll v0,v1,1` / 0x8002748C `andi v0,v0,0x80` /
-         * 0x80027490 `andi v1,v1,0x7F` / 0x80027494 `or v1,v1,v0` /
-         * 0x80027498 `sb v1,0(t0)` — op := (op & 0x7F) | ((op & 0x40) << 1),
-         * i.e. DISABLED := ONESHOT. The item retires itself.
-         *
-         * IT HAPPENS HERE AND NOT INSIDE run_item(), because on the console it
-         * happens BEFORE the opcode bounds check at 0x8002749C..0x800274A8 and
-         * therefore before any handler's own length test. A one-shot item of a
-         * dead opcode, or of a live opcode carrying a length its handler
-         * rejects, still retires on its first dispatch and is never dispatched
-         * again. 457 items on the disc carry the bit — 316 CALL, 73 FXGROUP,
-         * 24 ENABLE, 29 MOVER_A, 9 DISABLE, 6 MOVER_C across 243 records —
-         * and none carries 0x80, which is what makes bit 7 purely runtime.
-         */
-        if ((op & Q2_EVOP_ONESHOT) && rt->item_flags &&
-            item.offset < rt->item_flags_size)
-            rt->item_flags[item.offset] |= Q2_EVOP_DISABLED;
-
-        r = run_item(rt, &item);
         if (r == Q2_EVENT_ZONE_CHANGE)
             *result = Q2_EVENT_ZONE_CHANGE;
 
@@ -767,16 +872,13 @@ static bool run_items(q2_event_rt *rt, const q2_event_record *rec, u32 from,
                 rt->flags[slot] |= Q2_EVREC_DISABLED;
         }
 
-        /* A TIMER. The rest of the record waits. */
+        /*
+         * A TIMER. The record stops here whether or not a slot was free —
+         * 0x8002710C sets gp+16956 on every exit of 0x80026FEC, including the
+         * two refusals, and 0x80027778 is where the executor reads it.
+         */
         if (rt->defer_ticks > 0) {
-            if (rt->deferred_count < Q2_EVENT_RT_PENDING_MAX) {
-                rt->deferred[rt->deferred_count].offset    = offset;
-                rt->deferred[rt->deferred_count].next_item = (u8)(i + 1);
-                rt->deferred[rt->deferred_count].due =
-                    rt->clock + rt->defer_ticks;
-                rt->deferred_count++;
-            }
-            rt->defer_ticks = 0;
+            timer_arm(rt, offset, &item, i);
             return true;
         }
     }
@@ -855,6 +957,104 @@ static bool record_begin(q2_event_rt *rt, s32 slot)
     return true;
 }
 
+/*
+ * THE TIMER CONTINUATION EXECUTOR, 0x8002712C, called from the sweep at
+ * 0x800273B4 with the slot in a0.
+ *
+ * It is not "run the rest of the record", which is what this port used to do.
+ * It is a WINDOW of `slot+6` items that walks round the record for ever,
+ * stepping over the TIMER item on each lap.
+ */
+static void timer_fire(q2_event_rt *rt, u32 slot, q2_event_outcome *result)
+{
+    q2_event_record rec;
+    u32 start, idx;
+    s32 remaining;
+
+    if (!q2_events_record_at(&rt->events, rt->deferred[slot].offset, &rec))
+        return;
+
+    /* 0x80027174..0x800271C0: the same gate and the same latch as every other
+     * executor (record_begin), ahead of the walk to the resume pointer. The
+     * sweep never reads the answer, so a refused resume still spends a fire. */
+    if (!record_begin(rt, record_slot(rt, rt->deferred[slot].offset)))
+        return;
+
+    start = rt->deferred[slot].next_item;
+
+    /*
+     * 0x800271BC..0x800271D4: turning slot+16 back into an index is a walk
+     * bounded by the record's item count, and it RETURNS 0 when it runs out
+     * rather than wrapping. That is what a TIMER with nothing after it in its
+     * record does — the resume pointer 0x800270BC stored is the record's end —
+     * so such a slot runs nothing, ever, and only burns its fire count.
+     */
+    if (start >= rec.n_items)
+        return;
+
+    idx       = start;
+    remaining = (s32)rt->deferred[slot].window;   /* s3 = lh 6(s4), 0x800271F0 */
+
+    /*
+     * A do-while: 0x800271F4 is the loop head and the decrement and test are
+     * at 0x80027250/0x80027254, so a window of 0 or 1 runs exactly one item.
+     */
+    do {
+        q2_event_item item;
+        q2_event_outcome r = Q2_EVENT_OK;
+
+        if (!q2_events_get_item(&rt->events, &rec, idx, &item))
+            break;
+
+        if (dispatch_item(rt, &item, &r)) {
+            if (r == Q2_EVENT_ZONE_CHANGE)
+                *result = Q2_EVENT_ZONE_CHANGE;
+
+            /* A DISABLEME inside the window disables the record being
+             * continued: 0x80027170 put its offset in gp+16936 for the whole
+             * loop, and 0x8002EAA8 reads it from there. */
+            if (rt->disable_self) {
+                s32 s = record_slot(rt, rt->deferred[slot].offset);
+
+                rt->disable_self = false;
+                if (s >= 0)
+                    rt->flags[s] |= Q2_EVREC_DISABLED;
+            }
+
+            /* And a TIMER inside the window claims its own slot, keyed on its
+             * own item — which is how a record can carry two of them. */
+            if (rt->defer_ticks > 0)
+                timer_arm(rt, rt->deferred[slot].offset, &item, idx);
+        }
+
+        /*
+         * THE WINDOW DOES NOT READ THE ABORT FLAG. 0x8002712C's loop tests the
+         * dispatcher's return value (0x80027200) and nothing else — gp+16956
+         * is read only by the record executor, at 0x80027778 — so an ONKEYDO
+         * that refuses inside a window stops nothing. Dropped rather than
+         * honoured, and unreachable on this disc: no record that carries a
+         * TIMER carries an ONKEYDO.
+         */
+        rt->abort_record = false;
+
+        /*
+         * 0x8002720C..0x80027240: step to the next item. Running off the end
+         * goes back to item 0, walks up to the TIMER item at slot+12
+         * (0x8002721C..0x8002723C) and steps past it (0x80027240), so the lap
+         * resumes after the TIMER and never dispatches it again.
+         */
+        if (++idx >= rec.n_items)
+            idx = (u32)rt->deferred[slot].timer_index + 1u;
+
+        if (idx == start)                    /* 0x8002724C: full circle */
+            break;
+        if (r == Q2_EVENT_ZONE_CHANGE)       /* 0x80027200 */
+            break;
+    } while (--remaining > 0);
+
+    rt->deferred[slot].next_item = (u8)idx;  /* 0x80027270 */
+}
+
 void q2_event_rt_advance(q2_event_rt *rt, s32 ticks)
 {
     if (rt) {
@@ -876,69 +1076,46 @@ q2_event_outcome q2_event_rt_update(q2_event_rt *rt)
     if (!rt)
         return Q2_EVENT_OK;
 
-    /* Anything that has come due resumes BEFORE new triggers are taken, so a
-     * timer that has expired runs on the frame it expires rather than behind
-     * whatever else the player has just walked into. */
+    /*
+     * THE TIMER SWEEP, 0x80027340. Anything that has come due runs BEFORE new
+     * triggers are taken, so a timer that has expired runs on the frame it
+     * expires rather than behind whatever else the player has just walked into.
+     *
+     * A slot with slot+12 == 0 is free (0x8002737C). The console holds a
+     * COUNTDOWN in slot+0 and subtracts the frame's delta from it (0x8002738C..
+     * 0x800273A4, due when it goes negative); this runtime holds a deadline
+     * against the same clock instead, which is the port's existing shape and
+     * fires one tick earlier for a period that lands exactly on a frame
+     * boundary.
+     */
     {
-        u32 d = 0;
+        u32 s;
 
-        while (d < rt->deferred_count) {
-            q2_event_record rec;
-
-            if (rt->deferred[d].due > rt->clock) {
-                d++;
+        for (s = 0; s < Q2_EVENT_RT_TIMER_MAX; s++) {
+            if (rt->deferred[s].item == 0)
                 continue;
-            }
-
-            if (q2_events_record_at(&rt->events, rt->deferred[d].offset, &rec)) {
-                u32 from = rt->deferred[d].next_item;
-                u32 off  = rt->deferred[d].offset;
-
-                /* Drop the entry before running, or a record that timers twice
-                 * would push onto a list it is being walked out of. And before
-                 * the gate, not after it: the sweep at 0x80027340 never reads
-                 * 0x8002712C's answer (v0 is reloaded from slot+8 at
-                 * 0x800273BC straight after the jal at 0x800273B4), so a
-                 * refused resume spends the slot exactly as a completed one
-                 * does. Which way it is spent is decided by the fire count
-                 * alone — freed at 0x800273E0 when it reaches zero, re-armed
-                 * otherwise — and this port's "resume once" is the
-                 * fire-count-1 case of that. */
-                rt->deferred_count--;
-                memmove(&rt->deferred[d], &rt->deferred[d + 1],
-                        (size_t)(rt->deferred_count - d) *
-                        sizeof(rt->deferred[0]));
-
-                rt->resumed_count++;
-
-                /*
-                 * EVERY RESUME PATH RE-RUNS THE PROLOGUE. This block used to
-                 * call run_items directly, testing nothing and latching
-                 * nothing, so a record disabled between the defer and the due
-                 * tick — by a DISABLE item, by DISABLEME (main.c), or by its
-                 * own one-shot latch — resumed anyway.
-                 *
-                 * 0x8002712C, the TIMER continuation executor this port
-                 * actually models, carries the identical prologue: the gate at
-                 * 0x80027174..0x80027180 and the latch at
-                 * 0x800271A8..0x800271C0, both ahead of the walk to the resume
-                 * pointer at slot+16. So does the runtime-OBJECT completion
-                 * resume, which re-enters 0x80027950 at its top from the call
-                 * site 0x8002EFC8 inside 0x8002EF1C.
-                 *
-                 * (What 0x8002712C does AFTER the prologue is not what this
-                 * port does — it runs a window of slot+6 items and wraps, it
-                 * does not run the rest of the record. See the note above
-                 * `deferred[]` in the header. Only the prologue is fixed here.)
-                 */
-                if (record_begin(rt, record_slot(rt, off)))
-                    run_items(rt, &rec, from, off, &result);
+            if (rt->deferred[s].due > rt->clock)
                 continue;
-            }
 
-            rt->deferred_count--;
-            memmove(&rt->deferred[d], &rt->deferred[d + 1],
-                    (size_t)(rt->deferred_count - d) * sizeof(rt->deferred[0]));
+            rt->resumed_count++;
+            timer_fire(rt, s, &result);
+
+            /*
+             * 0x800273BC..0x800273EC: the fire count is spent whatever the
+             * continuation did — v0 is reloaded from slot+8 straight after the
+             * `jal`, so the sweep never reads its answer and a refused resume
+             * spends a fire exactly as a completed one does. Zero frees the
+             * slot; a count that was ALREADY zero underflows to -1 and is
+             * clamped back to 0 at 0x800273EC, which is what makes 0 mean
+             * forever.
+             */
+            if (rt->deferred[s].fires == 0) {
+                timer_rearm(rt, s);
+            } else if (--rt->deferred[s].fires == 0) {
+                timer_free(rt, s);           /* 0x800273E0 */
+            } else {
+                timer_rearm(rt, s);
+            }
         }
     }
 
@@ -1085,16 +1262,11 @@ static void replay_item(q2_event_rt *rt, const q2_event_item *item,
             rt->flags[slot] |= Q2_EVREC_DISABLED;
     }
 
-    if (rt->defer_ticks > 0) {
-        if (rt->deferred_count < Q2_EVENT_RT_PENDING_MAX) {
-            rt->deferred[rt->deferred_count].offset    = rec_offset;
-            rt->deferred[rt->deferred_count].next_item = (u8)(index + 1);
-            rt->deferred[rt->deferred_count].due =
-                rt->clock + rt->defer_ticks;
-            rt->deferred_count++;
-        }
-        rt->defer_ticks = 0;
-    }
+    /* A TIMER the replay re-dispatches claims a slot the same way, with the
+     * same fire count and window — otherwise a timer that survives a zone seam
+     * would come back as a window-less one-shot. */
+    if (rt->defer_ticks > 0)
+        timer_arm(rt, rec_offset, item, index);
 }
 
 /* 0x80029094 `addiu s2,zero,128` in the writer; `slti v0,v0,128` at

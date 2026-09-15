@@ -92,6 +92,14 @@
  */
 #define Q2_EVENT_RT_WAIT_MAX 8
 
+/*
+ * The TIMER table, 0x800C6F74: eight 20-byte slots, bounded by `slti v0,v1,8`
+ * at 0x8002704C and 0x80027078 in the claim loops and at 0x80027440 in the
+ * sweep. Its own constant and not Q2_EVENT_RT_PENDING_MAX, which is the
+ * trigger queue's 64 and must not shrink with it.
+ */
+#define Q2_EVENT_RT_TIMER_MAX 8
+
 typedef enum q2_event_outcome {
     Q2_EVENT_OK = 0,
     Q2_EVENT_ZONE_CHANGE,   /* a zone gate fired; see pending_zone */
@@ -202,7 +210,8 @@ typedef struct q2_event_rt {
      * func_explosive or re-spawn a batch on every zone change.
      *
      * q2_event_rt_replay sets it for its own duration, as 0x8002936C does. The
-     * port runs no STARTLEV pass; an owner that adds one sets it around that.
+     * STARTLEV pass is the owner's — this runtime has no load — and
+     * client_load_zone raises it around its own, as 0x8007C2AC/0x8007C338 do.
      */
     bool initial_pass;
 
@@ -306,23 +315,28 @@ typedef struct q2_event_rt {
     bool abort_record;
 
     /*
-     * DEFER THE REST OF THIS RECORD — what `TIMER` means.
+     * ARM A TIMER SLOT — what `TIMER` means.
      *
-     * `TIMER` is "a delayed continuation of the rest of the record": the items
-     * before it run now and the ones after it run later. Expressed the same way
-     * the abort is, as a field an `on_call` hook writes, because the hook
-     * reports a CALL and has nowhere else to put an answer. Non-zero stops the
-     * record HERE and queues its remainder for `clock + defer_ticks`.
+     * The three operands 0x80026FEC copies into the slot, written by an
+     * `on_call` hook for the same reason `abort_record` is: the hook reports a
+     * CALL and has nowhere else to put an answer. A non-zero `defer_ticks`
+     * stops the record at the TIMER item and claims a slot for it.
      *
-     * The delay is the primitive's: `(base + ((range * rand()) >> 15)) * 30`,
-     * and the 30 is not the 300 everything else on this clock uses — which
-     * `userfuncs.c` calls out and which is why the caller computes it.
+     *   defer_ticks   slot+0, the period: `(base + ((range * rand()) >> 15))
+     *                 * 30` from item+4 and item+6 (0x800270D0..0x80027104).
+     *                 The 30 is not the 300 everything else on this clock
+     *                 uses — `userfuncs.c` calls that out, which is why the
+     *                 caller computes it rather than this file.
+     *   defer_fires   slot+8, from item+8 (0x800270A4). How many times the
+     *                 window runs before the slot is freed; 0 is FOREVER.
+     *   defer_window  slot+6, from item+10 (0x800270B4). How many items one
+     *                 deadline runs.
      *
-     * "A delayed continuation of the rest of the record" is the PORT's model,
-     * not retail's — see the note above `deferred[]` for what 0x80026FEC and
-     * 0x8002712C actually do with item+8 and item+10.
+     * The executor clears all three once the slot is claimed.
      */
     s32 defer_ticks;
+    u16 defer_fires;
+    u16 defer_window;
 
     /*
      * DISABLE THE RECORD THAT IS RUNNING — what `DISABLEME` means.
@@ -340,43 +354,70 @@ typedef struct q2_event_rt {
     bool disable_self;
 
     /*
-     * Records waiting to resume, and the clock they are waiting against.
-     * `q2_event_rt_advance` moves the clock; `q2_event_rt_update` runs whatever
-     * has come due before it takes anything new off the queue.
+     * THE EIGHT TIMER SLOTS, 0x800C6F74, and the clock they count against.
+     * `q2_event_rt_advance` moves the clock; `q2_event_rt_update` is the sweep
+     * 0x80027340 and runs whatever has come due before it takes anything new
+     * off the trigger queue.
      *
-     * THIS IS NOT WHAT RETAIL'S TIMER DOES, and the comment above `defer_ticks`
-     * used to describe the port's model as if it were the console's. What
-     * 0x80026FEC actually builds is a repeating N-item WINDOW: it claims one of
-     * eight 20-byte slots at 0x800C6F74 and fills it with the record offset
-     * (0x800270AC), a FIRE COUNT from item+8 (0x800270A4 -> slot+8), an ITEM
-     * WINDOW from item+10 (0x800270B4 -> slot+6), the TIMER item itself
-     * (0x800270C0 -> slot+12) and the resume pointer (0x800270BC -> slot+16).
-     * When the slot comes due the sweep at 0x80027340 calls 0x8002712C, which
-     * runs `slot+6` items and no more (s3 = lh 6(s4) at 0x800271F0, loop
-     * 0x800271F4..0x80027254), stopping early if it comes full circle to the
-     * resume pointer (0x8002724C). It WRAPS when it runs off the end of the
-     * record: 0x8002721C..0x8002723C walks from item 0 up to the TIMER item
-     * (slot+12) and 0x80027240 steps past it, so the window carries on at the
-     * item AFTER the TIMER and never re-dispatches the TIMER itself. It stores
-     * the new resume pointer back at 0x80027270, and the sweep re-arms: slot+8
-     * is decremented at 0x800273BC..0x800273EC, zero frees the slot and a fire
-     * count that was already 0 is clamped back to 0 — so 0 means FOREVER.
+     * What 0x80026FEC builds is a repeating N-item WINDOW, not the "delayed
+     * continuation of the rest of the record" this port used to model. It
+     * claims one of eight 20-byte slots and fills it with the record offset
+     * (0x800270AC -> slot+4), a FIRE COUNT from item+8 (0x800270A4 -> slot+8),
+     * an ITEM WINDOW from item+10 (0x800270B4 -> slot+6), the TIMER item
+     * itself (0x800270C0 -> slot+12) and the resume pointer, the item straight
+     * after the TIMER (0x800270BC -> slot+16).
      *
-     * The disc uses all of it. 18 TIMER CALL items in COMMON alone, e.g. BOSS1
-     * 0x394 (base 10, range 0, fires 0, window 1 — forever, one item at a
-     * time) and BOSS1 0x3e4 (fires 11, window 2, inside a 13-item record).
-     * This port reads neither item+8 nor item+10 and resumes once, to the end
-     * of the record. That is a real fidelity gap; it is NOT closed here,
-     * because a per-slot machine is a change of shape rather than a fix and it
-     * deserves its own round. What IS closed here is that the resume path
-     * re-runs the executor prologue — see record_begin() in events_rt.c.
+     * THE SLOT IS KEYED ON THE TIMER ITEM, which is what makes the table safe.
+     * 0x8002703C..0x80027054 scans all eight for slot+12 == this item and
+     * returns having done NOTHING when it finds one (a0 = -1 at 0x8002701C,
+     * refused by the `bltz` at 0x80027088) — so a CAT_B record standing under
+     * the player's feet re-arms nothing, and 0x8002705C..0x80027084 drops the
+     * request outright when no slot is free (a0 = -2). Either way the primitive
+     * still returns the next item and still sets gp+16956, so the record stops
+     * at the TIMER whether or not a slot was claimed.
+     *
+     * When the slot comes due the sweep calls 0x8002712C, which runs `slot+6`
+     * items and no more (s3 = lh 6(s4) at 0x800271F0, loop 0x800271F4..
+     * 0x80027254 — a do-while, so a window of 0 runs one item), stopping early
+     * if it comes full circle to the resume pointer (0x8002724C) or if an item
+     * answers non-zero (0x80027200). It WRAPS when it runs off the end of the
+     * record: 0x8002721C..0x8002723C walks from item 0 up to the TIMER item and
+     * 0x80027240 steps past it, so the window carries on at the item AFTER the
+     * TIMER and never re-dispatches the TIMER itself. The new resume pointer is
+     * stored back at 0x80027270, and the sweep then re-arms: slot+8 is
+     * decremented at 0x800273BC..0x800273EC, zero frees the slot (0x800273E0)
+     * and a fire count that was already 0 is clamped back to 0 — so 0 means
+     * FOREVER — and 0x800273F0..0x8002742C puts a fresh period in slot+0.
+     *
+     * The disc uses all of it. 18 TIMER CALL items in COMMON, 11 of them
+     * "forever": BOSS2 0x184 is TIMER + 8 TIMEDLIGHTs with window 1, so the
+     * eight lights cycle one per deadline for the rest of the level, and BOSS1
+     * 0x3e4 is fires 11 window 2 in a 13-item record — the arena destruct,
+     * two items a second, eleven times. This port ran the whole remainder on
+     * the first deadline and never resumed again.
+     *
+     * DEVIATION, stated where it happens (timer_rearm in events_rt.c): the
+     * re-arm re-rolls `rand()` on the console and this runtime has no RNG —
+     * the roll is the owner's, in the `on_call` hook. The armed period is
+     * reused instead. Every one of the 18 TIMERs on the disc has range 0, so
+     * the console's re-roll is a constant there and nothing on this disc can
+     * tell the two apart.
+     *
+     * `item` is the slot's identity and 0 means free, exactly as slot+12 does:
+     * no item can live at chunk offset 0, which is the u32 record count.
      */
     struct {
-        u32 offset;
-        u8  next_item;
-        s32 due;
-    }    deferred[Q2_EVENT_RT_PENDING_MAX];
-    u32  deferred_count;
+        u32 item;        /* slot+12: the TIMER item's chunk offset  */
+        u32 offset;      /* slot+4:  the record it continues        */
+        u8  timer_index; /* that item's index, for the wrap         */
+        u8  next_item;   /* slot+16, as an index rather than a ptr  */
+        u16 window;      /* slot+6                                  */
+        u16 fires;       /* slot+8; 0 is forever                    */
+        s32 period;      /* slot+0 as armed                         */
+        s32 due;         /* clock + period                          */
+    }    deferred[Q2_EVENT_RT_TIMER_MAX];
+    u32  deferred_count;   /* slots in use, for a caller's "did anything
+                            * happen"; the array is indexed, not packed */
     s32  clock;
 
     /*

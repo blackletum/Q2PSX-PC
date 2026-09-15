@@ -7377,6 +7377,17 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       The measurement above suppresses the transition. A player who walks into one volume rather than all
       of them does not have that problem.
 
+      **SUPERSEDED — "the rest of the record, later" is the fire-count-1 case and nothing more.**
+      `0x80026FEC` claims one of eight 20-byte slots at `0x800C6F74`, keyed on the TIMER ITEM at
+      `slot+12`, and fills it with a FIRE COUNT from item+8 and an ITEM WINDOW from item+10 as well as
+      the period above. The sweep at `0x80027340` runs `slot+6` items and no more (`0x800271F0`), wraps
+      past the TIMER item when it runs off the end of the record (`0x8002721C`..`0x80027240`), stores the
+      resume pointer back (`0x80027270`) and re-arms unless the fire count reaches zero — a count that
+      was already 0 being clamped back to 0 at `0x800273EC`, so 0 is FOREVER. 13 of the disc's 18 TIMERs
+      need it. The runtime models the slot table now; see the note above `deferred[]` in `events_rt.h`.
+      The LAB measurement above still holds — its timer is `fires 0, window 1` in a three-item record, so
+      the first deadline is in the same place; what changed is that there is a second one.
+
 - [x] 84. **PLATFORM is read in full, and its slot is empty like the others — which is now a pattern, not
       an accident.**
 

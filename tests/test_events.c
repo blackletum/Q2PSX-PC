@@ -549,8 +549,11 @@ static void defer_hook(void *user, const q2_event_item *item, u8 index)
     q2_event_rt *rt = (q2_event_rt *)user;
 
     (void)item;
-    if (index == 1)             /* stand-in for a TIMER primitive */
-        rt->defer_ticks = 10;
+    if (index == 1) {           /* stand-in for a TIMER primitive */
+        rt->defer_ticks  = 10;
+        rt->defer_fires  = 1;   /* item+8: one deadline and the slot is freed */
+        rt->defer_window = 1;   /* item+10 */
+    }
 }
 
 /* [CALL 1 (defers), CALL 2] under the given record flags. */
@@ -604,11 +607,11 @@ static void test_deferred_resume_runs_the_prologue(void)
     q2_event_rt_advance(&rt, 20);
     q2_event_rt_update(&rt);
     check_eq_i(rt.resumed_count, 1, "the entry came due and was spent");
-    /* Only for a fire count of 1: 0x800273E0 frees the slot when the count
+    /* The fixture's fire count is 1: 0x800273E0 frees the slot when the count
      * reaches zero, and 0x800273E4..0x800273EC re-arm any other — BOSS1 0x394's
-     * fire count of 0 keeps its slot forever. This port models count 1. */
+     * fire count of 0 keeps its slot for the rest of the level. */
     check_eq_i(rt.deferred_count, 0,
-               "and is gone, as retail's slot is for a fire count of 1");
+               "and is gone, its fire count of 1 having been spent");
     check_eq_i(rt.call_count, 1,
                "but the resume was refused at the gate (0x80027180)");
     check_eq_i(rt.ran_count, 1, "so it was not latched a second time");
@@ -656,6 +659,225 @@ static void test_deferred_resume_runs_the_prologue(void)
     check_eq_i(rt.resumed_count, 1, "its entry comes due");
     check_eq_i(rt.call_count, 1,
                "and its own latch refuses the rest of the record");
+    q2_event_rt_free(&rt);
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * THE TIMER SLOT MACHINE, 0x80026FEC / 0x8002712C / 0x80027340.
+ *
+ * A slot runs a WINDOW of `item+10` items per deadline, `item+8` times, walking
+ * round the record and stepping over the TIMER item on each lap. The port used
+ * to run the whole remainder once and never resume, which is the fire-count-1,
+ * window-to-the-end case of this and nothing else.
+ *
+ * The fixture is the disc's shape: item 0 is the TIMER (BOSS1 0x3e4, BOSS2
+ * 0x184, POWER1 0x408 and every other TIMER record on the disc opens with it)
+ * and the items after it are what the window cycles.
+ */
+typedef struct timer_probe {
+    q2_event_rt *rt;
+    u8           seen[64];
+    u32          n;
+    u16          fires;
+    u16          window;
+} timer_probe;
+
+static void timer_probe_hook(void *user, const q2_event_item *item, u8 index)
+{
+    timer_probe *p = (timer_probe *)user;
+
+    (void)item;
+    if (index == 0) {                   /* the stand-in for TIMER */
+        p->rt->defer_ticks  = 10;
+        p->rt->defer_fires  = p->fires;
+        p->rt->defer_window = p->window;
+        return;
+    }
+    if (p->n < sizeof(p->seen))
+        p->seen[p->n++] = index;
+}
+
+/* [CALL 0 (the timer), CALL 1 .. CALL n]. */
+static u32 fix_timer_record(fixture *f, u32 items)
+{
+    u8 pay[10];
+    u32 rec, i;
+
+    rec = fix_record(f, Q2_EVREC_CAT_B);
+    for (i = 0; i <= items; i++) {
+        call_payload(pay, (u8)i);
+        fix_item(f, rec, Q2_EVOP_CALL, 12, pay);
+    }
+    fix_end_record(f, rec);
+    return rec;
+}
+
+/* Wind the clock past one deadline and sweep. */
+static void timer_step(q2_event_rt *rt)
+{
+    q2_event_rt_advance(rt, 10);
+    q2_event_rt_update(rt);
+}
+
+static bool seen_is(const timer_probe *p, const char *want)
+{
+    u32 i;
+
+    if (p->n != (u32)strlen(want))
+        return false;
+    for (i = 0; i < p->n; i++)
+        if (p->seen[i] != (u8)(want[i] - '0'))
+            return false;
+    return true;
+}
+
+static void test_timer_window_and_fire_count(void)
+{
+    fixture f;
+    q2_event_rt rt;
+    timer_probe probe;
+    u32 rec, k;
+
+    printf("the TIMER slot runs a window, repeats and wraps (0x8002712C)\n");
+
+    /* ---- fires 3, window 1: one item per deadline, three deadlines ------- */
+    fix_begin(&f);
+    rec = fix_timer_record(&f, 3);
+    fix_end(&f, 1);
+
+    check(q2_event_rt_init(&rt, &f.ev) == Q2_OK, "the fixture starts a runtime");
+    memset(&probe, 0, sizeof(probe));
+    probe.rt = &rt; probe.fires = 3; probe.window = 1;
+    rt.on_call = timer_probe_hook; rt.on_call_user = &probe;
+
+    q2_event_rt_trigger(&rt, rec);
+    q2_event_rt_update(&rt);
+    check_eq_i(rt.deferred_count, 1, "the TIMER claims a slot");
+    check_eq_i(probe.n, 0,
+               "and the record stops there: nothing after it has run");
+
+    for (k = 0; k < 4; k++)
+        timer_step(&rt);
+    check(seen_is(&probe, "123"),
+          "three deadlines run one item each, in order, and the fourth "
+          "finds the slot freed (0x800273E0)");
+    check_eq_i(rt.deferred_count, 0, "the slot is free again");
+    q2_event_rt_free(&rt);
+
+    /* ---- fires 0, window 1: forever, wrapping past the TIMER ------------- */
+    check(q2_event_rt_init(&rt, &f.ev) == Q2_OK, "the fixture restarts");
+    memset(&probe, 0, sizeof(probe));
+    probe.rt = &rt; probe.fires = 0; probe.window = 1;
+    rt.on_call = timer_probe_hook; rt.on_call_user = &probe;
+
+    q2_event_rt_trigger(&rt, rec);
+    q2_event_rt_update(&rt);
+    for (k = 0; k < 10; k++)
+        timer_step(&rt);
+    check(seen_is(&probe, "1231231231"),
+          "a fire count of 0 is FOREVER (0x800273EC) and the lap steps over "
+          "the TIMER item itself (0x8002721C..0x80027240)");
+    check_eq_i(rt.deferred_count, 1, "its slot is never freed");
+    q2_event_rt_free(&rt);
+
+    /* ---- window 2: BOSS1 0x3e4's shape, two items every deadline --------- */
+    check(q2_event_rt_init(&rt, &f.ev) == Q2_OK, "the fixture restarts");
+    memset(&probe, 0, sizeof(probe));
+    probe.rt = &rt; probe.fires = 0; probe.window = 2;
+    rt.on_call = timer_probe_hook; rt.on_call_user = &probe;
+
+    q2_event_rt_trigger(&rt, rec);
+    q2_event_rt_update(&rt);
+    for (k = 0; k < 3; k++)
+        timer_step(&rt);
+    check(seen_is(&probe, "123123"),
+          "window 2 runs two items a deadline and carries the lap across it "
+          "(s3 = lh 6(s4), 0x800271F0)");
+    q2_event_rt_free(&rt);
+
+    /* ---- the full-circle stop, 0x8002724C -------------------------------- */
+    fix_begin(&f);
+    rec = fix_timer_record(&f, 1);          /* [TIMER, CALL 1] */
+    fix_end(&f, 1);
+    check(q2_event_rt_init(&rt, &f.ev) == Q2_OK, "a one-item record");
+    memset(&probe, 0, sizeof(probe));
+    probe.rt = &rt; probe.fires = 0; probe.window = 3;
+    rt.on_call = timer_probe_hook; rt.on_call_user = &probe;
+
+    q2_event_rt_trigger(&rt, rec);
+    q2_event_rt_update(&rt);
+    timer_step(&rt);
+    check(seen_is(&probe, "1"),
+          "a window wider than the record stops when it comes back round to "
+          "the resume pointer (0x8002724C)");
+    q2_event_rt_free(&rt);
+}
+
+/*
+ * THE SLOT IS KEYED ON THE TIMER ITEM, 0x8002703C..0x80027054, and the table is
+ * eight deep, 0x8002705C..0x80027084.
+ *
+ * This is what keeps COMMAND 0x718, POWER1 0x408 and POWER2 0x7a8 — CAT_B
+ * records with a trigger volume and a fire count of 0 — from eating the whole
+ * table while the player stands still.
+ */
+static void test_timer_slot_is_keyed_on_its_item(void)
+{
+    fixture f;
+    q2_event_rt rt;
+    timer_probe probe;
+    u32 rec[9], k;
+
+    printf("a live TIMER slot is not re-armed (0x80027044)\n");
+
+    fix_begin(&f);
+    rec[0] = fix_timer_record(&f, 1);
+    fix_end(&f, 1);
+
+    check(q2_event_rt_init(&rt, &f.ev) == Q2_OK, "the fixture starts a runtime");
+    memset(&probe, 0, sizeof(probe));
+    probe.rt = &rt; probe.fires = 0; probe.window = 1;
+    rt.on_call = timer_probe_hook; rt.on_call_user = &probe;
+
+    q2_event_rt_trigger(&rt, rec[0]);
+    q2_event_rt_update(&rt);
+
+    /* Half way to the deadline, the volume fires the record again. */
+    q2_event_rt_advance(&rt, 5);
+    q2_event_rt_trigger(&rt, rec[0]);
+    q2_event_rt_update(&rt);
+    check_eq_i(rt.deferred_count, 1, "no second slot is claimed");
+
+    q2_event_rt_advance(&rt, 5);
+    q2_event_rt_update(&rt);
+    check(seen_is(&probe, "1"),
+          "and the deadline the FIRST arm set still stands: a re-arm neither "
+          "resets the period nor rewinds the lap");
+    q2_event_rt_free(&rt);
+
+    /* Nine records, nine distinct TIMER items, eight slots. */
+    fix_begin(&f);
+    for (k = 0; k < 9; k++)
+        rec[k] = fix_timer_record(&f, 1);
+    fix_end(&f, 9);
+
+    check(q2_event_rt_init(&rt, &f.ev) == Q2_OK, "nine timers, eight slots");
+    memset(&probe, 0, sizeof(probe));
+    probe.rt = &rt; probe.fires = 0; probe.window = 1;
+    rt.on_call = timer_probe_hook; rt.on_call_user = &probe;
+
+    for (k = 0; k < 9; k++)
+        q2_event_rt_trigger(&rt, rec[k]);
+    q2_event_rt_update(&rt);
+    check_eq_i(rt.deferred_count, Q2_EVENT_RT_TIMER_MAX,
+               "the table fills at eight (0x8002707C `slti v0,v1,8`)");
+
+    q2_event_rt_advance(&rt, 10);
+    q2_event_rt_update(&rt);
+    check_eq_i(probe.n, 8,
+               "and the ninth was dropped, not queued: nothing is evicted "
+               "(0x80027084 a0 = -2)");
     q2_event_rt_free(&rt);
 }
 
@@ -1647,6 +1869,8 @@ int main(void)
     test_record_latch_precedes_items();
     test_record_latch_keeps_a_self_disable();
     test_deferred_resume_runs_the_prologue();
+    test_timer_window_and_fire_count();
+    test_timer_slot_is_keyed_on_its_item();
     test_zonegate_abort();
     test_initial_pass_mutes_zone_gates();
     test_catc_leave_edge_runs_nothing();

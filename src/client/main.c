@@ -4531,30 +4531,48 @@ static void client_event_call(void *user, const q2_event_item *item,
     }
 
     /*
-     * TIMER — the rest of the record, later.
+     * TIMER — a repeating window over the rest of the record.
      *
-     * `ticks = (base + ((range * rand()) >> 15)) * 30`, and the 30 is not the
-     * 300 every other time on this clock uses — `userfuncs.c` calls that out
-     * and it is the sort of thing that is silently four-fifths wrong if
-     * assumed. The RNG is the sim's rather than the BIOS's, which is a stated
+     * All four operands, which is the half this arm did not have. `0x80026FEC`
+     * claims one of the eight slots at 0x800C6F74 and fills it from the item:
+     *
+     *   +4/+6   base and range -> the period, 0x800270D0..0x80027104:
+     *           `(base + ((range * rand()) >> 15)) * 30`, and the 30 is not
+     *           the 300 every other time on this clock uses — `userfuncs.c`
+     *           calls that out and it is the sort of thing that is silently
+     *           four-fifths wrong if assumed.
+     *   +8      the FIRE COUNT (0x800270A4 -> slot+8), 0 meaning forever.
+     *           11 of the disc's 18 TIMERs are authored that way and every one
+     *           of them used to run once and stop.
+     *   +10     the ITEM WINDOW (0x800270B4 -> slot+6): how many items one
+     *           deadline runs. BOSS2 0x184 is TIMER + eight TIMEDLIGHTs with
+     *           window 1, so the console cycles the eight one at a time and
+     *           this port flashed all eight together.
+     *
+     * The RNG is the sim's rather than the BIOS's, which is a stated
      * divergence: the console's `rand()` stream is not reproduced here, so a
-     * timer's jitter is the right shape and not the same sequence.
+     * timer's jitter is the right shape and not the same sequence. Every TIMER
+     * on the disc carries range 0, so no timer here rolls it at all.
      */
     {
         q2_uf_call call;
 
         if (q2_uf_decode_call(&call, &c->sim[0].userfuncs, item) == Q2_OK &&
             call.prim == Q2_UF_TIMER) {
-            u32 base = 0, range = 0;
+            u32 base = 0, range = 0, fires = 0, window = 0;
 
             q2_uf_operand_u32(&call, 0, 0, &base);
             q2_uf_operand_u32(&call, 1, 0, &range);
+            q2_uf_operand_u32(&call, 2, 0, &fires);
+            q2_uf_operand_u32(&call, 3, 0, &window);
 
             {
                 s32 r  = (s32)(q2_rng_next(&c->sim[0].fx_rng) & 0x7FFFu);
                 s32 t  = (s32)base + (s32)(((s64)range * r) >> 15);
 
-                c->sim[0].event_rt.defer_ticks = t * 30;
+                c->sim[0].event_rt.defer_ticks  = t * 30;
+                c->sim[0].event_rt.defer_fires  = (u16)fires;
+                c->sim[0].event_rt.defer_window = (u16)window;
                 c->script_timers++;
             }
         }
@@ -6552,6 +6570,70 @@ static bool client_load_zone(client *c, const char *map, int index)
         c->sim[0].event_rt.on_mover_user = c;
         c->sim[0].event_rt.on_explosive      = client_event_explosive;
         c->sim[0].event_rt.on_explosive_user = c;
+
+        /*
+         * THE LOAD-TIME SCRIPT PASS — the named event "STARTLEV", which the
+         * zone loader runs at EVERY level and zone load and which this port
+         * never ran at all.
+         *
+         * 0x8007C290 `addiu t0,a0,-10920` materialises the twelve bytes at
+         * 0x800AD558 — `53 54 41 52 54 4C 45 56 00 00 00 00`, "STARTLEV" — and
+         * 0x8007C324 `jal 0x80027CC4` runs it, inside the zone loader
+         * 0x8007B3F8 that 0x800794D8 calls on every load. 0x80027CC4 is the
+         * engine's own named-event runner and a transitive drain: it seeds the
+         * queue at 0x800C6F24 (0x80027D60..0x80027D74) and runs everything the
+         * chain TRIGGERs through the usual gate and latch (0x80027DA0..
+         * 0x80027DC8), which q2_event_rt_update's drain_pending reproduces.
+         *
+         * The pass is bracketed by two flags, `addiu v0,zero,1` stored into
+         * 0x800B281C (0x8007C2A4) and 0x800B2834 (0x8007C2AC) and cleared at
+         * 0x8007C330/0x8007C338. The second is `initial_pass`, and every hook
+         * that must go quiet during a rebuild already honours it.
+         *
+         * IT IS NOT GATED ON THE CARRY and it comes BEFORE the replay:
+         * 0x80079114 calls the loader, and only then does 0x80079120..
+         * 0x80079130 test 0x800AEBCC and call the replay. So a spent ENABLE
+         * the replay re-dispatches correctly re-opens what STARTLEV has just
+         * closed, and deathmatch — which skips the replay — still gets the
+         * pass. Skipping it on the carry path would put all 22 records back on
+         * their feet at every zone seam: q2_event_rt_init reseeds the flags
+         * from disc and the carry only restores records whose bits are
+         * (DISABLED|HASRUN) both set, which a STARTLEV disable is not.
+         *
+         * WHAT IT DOES ON THIS DISC, walked from each COMMON script's STARTLEV
+         * directory entry: 18 of the 49 scripts have one, and their TRIGGER
+         * closures DISABLE 22 records on eight maps — LAB alone shuts twelve,
+         * eleven of them named by trigger volumes the player walks through, so
+         * five doors, two button-and-lift pairs, a CREBATCH ambush and a
+         * message were all live from frame 0. The other half of the pass is
+         * the raising: 13 TIMEDLIGHT, 8 TIMER, 2 SIMROT2, 2 LASERWALL, 1
+         * LIFT1, 1 PLATFORM, 1 MISEVENT and 72 LASERBEAM. Not one MOVER_A/B/C
+         * and not one ZONEGATE in any of the eighteen, so the pass cannot move
+         * a door or ask for a zone while the level is still being built.
+         *
+         * The 72 LASERBEAM and 2 LASERWALL calls are no-ops in
+         * client_event_call, which implements neither: the beams are already
+         * raised by q2_laserbeams_build, which is where the console's own
+         * registration pass raises them (levelbin.h), and nothing here can
+         * double-register one or deal LASERWALL damage at load.
+         */
+        c->sim[0].event_rt.initial_pass = true;          /* 0x8007C2AC */
+        if (q2_event_rt_trigger_named(&c->sim[0].event_rt, "STARTLEV")) {
+            const q2_event_rt *rt = &c->sim[0].event_rt;
+            u32 before = rt->ran_count, dead = 0, mi;
+
+            q2_event_rt_update(&c->sim[0].event_rt);     /* 0x8007C324 */
+
+            for (mi = 0; rt->flags && mi < rt->record_count; mi++)
+                if (rt->flags[mi] & Q2_EVREC_DISABLED)
+                    dead++;
+            Q2_INFO("STARTLEV: %u record%s run at load, %u of %u now "
+                    "disabled (the pass's own one-shots included)",
+                    rt->ran_count - before,
+                    rt->ran_count - before == 1 ? "" : "s",
+                    dead, rt->record_count);
+        }
+        c->sim[0].event_rt.initial_pass = false;         /* 0x8007C338 */
 
         /*
          * THE EVE_ REPLAY, for a gate inside one map (events_rt.h,
@@ -8699,8 +8781,8 @@ static void client_input_simulated(client *c, float dt)
      */
     c->laser_drawn = c->no_lasers
                      ? 0
-                     : q2_laserbeams_draw(&c->lasers, &c->sim[0].fx,
-                                          &c->sim[0].fx_rng);
+                     : q2_laserbeams_draw(&c->lasers, &c->sim[0].event_rt,
+                                          &c->sim[0].fx, &c->sim[0].fx_rng);
 
     /*
      * The 1/300 s clock three separate subsystems run on, and each is now

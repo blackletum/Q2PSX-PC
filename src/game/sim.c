@@ -1889,6 +1889,37 @@ static void update_env_flags(q2_sim *sim)
             if (!q2_trigger_get(&sim->triggers, i, &t) ||
                 !volume_dispatchable(&t, area))
                 continue;
+
+            /*
+             * AND THE RECORD PROLOGUE'S GATE, 0x8002799C `andi v0,a0,0x80` /
+             * 0x800279A0 `bne v0,zero` — the third thing the one dispatcher
+             * does before it reaches an item.
+             *
+             * INCROUCH (0x8002E5B4), UNDERACID (0x8002E4C8) and the rest are
+             * ordinary handlers reached only through the record executor, so a
+             * record the script has retired ORs no flag into entity+0x98 and
+             * calls no T_Damage: none of its items is dispatched at all. This
+             * port resolves the mask and the hazard once at attach
+             * (record_env_mask, record_hazard) for the cost reason stated
+             * above, which left this half of the gate on the floor — the script
+             * arm honours it through record_begin and the environment arm did
+             * not.
+             *
+             * Read per tick, never hoisted into build_volume_env: ENABLE,
+             * DISABLE and a memory-card restore (save.c) all write these flags
+             * while the level runs.
+             *
+             * Three volumes on the disc reach it — BASE1 25 and LAB 40 (CALL
+             * INCROUCH, records +540 and +84) and WASTE3 33 (CALL UNDERACID,
+             * record +876) — and all three are disabled by their map's
+             * STARTLEV record, so WASTE3's acid is off until 'WasteFill'
+             * turns it on. q2_event_rt_flags answers 0 for an offset it does
+             * not know, which is why no Q2_TRIGGER_NO_EVENT guard is needed.
+             */
+            if (q2_event_rt_flags(&sim->event_rt, t.event_offset) &
+                Q2_EVREC_DISABLED)
+                continue;
+
             if (!q2_trigger_contains(&sim->triggers, i, at))
                 continue;
 

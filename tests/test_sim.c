@@ -3078,7 +3078,7 @@ static void test_dispatcher_gates(void)
     q2_sim sim;
     q2_input in;
     s32 feet_a[3], feet_b[3];
-    u32 in_a, in_b, no_hull, env_a, env_b;
+    u32 in_a, in_b, no_hull, env_a, env_b, env_off;
     u32 i;
 
     printf("trigger dispatcher gates\n");
@@ -3149,6 +3149,22 @@ static void test_dispatcher_gates(void)
     q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
     in_b  = gate_contacts(&sim);
     env_b = sim.player[0].ent.flags & (Q2_ENT_INCROUCH | Q2_ENT_INLOWCROUCH);
+
+    /*
+     * AND THE THIRD GATE, the one the environment arm did not take: the
+     * record's own DISABLED bit, 0x8002799C `andi v0,a0,0x80` / 0x800279A0
+     * `bne v0,zero`. INCROUCH (0x8002E5B4) and UNDERACID (0x8002E4C8) are
+     * ordinary handlers behind the record executor, so a retired record ORs no
+     * flag and calls no damage. Volume 2's record is disabled by hand here
+     * exactly as a map's STARTLEV chain retires BASE1 +540, LAB +84 and
+     * WASTE3 +876 — the three env/hazard records on the disc a DISABLE names.
+     */
+    for (i = 0; i < sim.event_rt.record_count; i++) {
+        if (sim.event_rt.offsets[i] == 16)
+            sim.event_rt.flags[i] |= Q2_EVREC_DISABLED;
+    }
+    q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
+    env_off = sim.player[0].ent.flags & (Q2_ENT_INCROUCH | Q2_ENT_INLOWCROUCH);
     q2_sim_free(&sim);
 
     /* No hull: the area is unknown, so only the flag gate can refuse. */
@@ -3169,6 +3185,9 @@ static void test_dispatcher_gates(void)
                "without a hull the id gate stands aside; bit 0 still refuses");
     check(env_a == 0 && env_b == Q2_ENT_INLOWCROUCH,
           "the environment half takes the same two gates");
+    check_eq_i(env_off, 0,
+               "and the record's DISABLED bit too: a retired record asserts "
+               "nothing (0x8002799C)");
 }
 
 /* ------------------------------------------------------------------------- */

@@ -599,7 +599,8 @@ u32 q2_laserbeams_build(q2_laserbeam_set *out, const q2_events *events,
     return out->count;
 }
 
-u32 q2_laserbeams_draw(const q2_laserbeam_set *set, q2_fx_world *w, q2_rng *rng)
+u32 q2_laserbeams_draw(const q2_laserbeam_set *set, const q2_event_rt *rt,
+                       q2_fx_world *w, q2_rng *rng)
 {
     u32 i, n = 0;
 
@@ -609,6 +610,18 @@ u32 q2_laserbeams_draw(const q2_laserbeam_set *set, q2_fx_world *w, q2_rng *rng)
     for (i = 0; i < set->count; i++) {
         const q2_laserbeam *b = &set->beam[i];
         q2_fx_laser_result  r;
+
+        /*
+         * THE RAISER'S DEAD BIT, 0x8002EE78..0x8002EE94. The walk takes the
+         * entry's raiser out of the 32-entry list at 0x800C7014, rebases it
+         * onto the Events chunk at gp+372 and skips the beam when byte +3 of
+         * that record has 0x80 set. Nothing else ever clears the list — gp+0x420C
+         * only counts up — so this is the only way a beam a script switched off
+         * goes dark before the zone changes, and the port stored `raiser` for
+         * this test without ever making it.
+         */
+        if (rt && (q2_event_rt_flags(rt, b->raiser) & Q2_EVREC_DISABLED))
+            continue;
 
         /* ends = 0 — the fifth argument the walk zeroes on the stack at
          * 0x8002EEBC. A level's beams are tube only. */

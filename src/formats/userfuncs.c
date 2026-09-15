@@ -87,8 +87,11 @@ static const q2_uf_prim_info uf_table[Q2_UF_PRIM_COUNT] = {
     {4,  1, Q2_UF_OP_U16, "delay_base",
      "ticks = (base + ((range * rand()) >> 15)) * 30 -- NOT 300"},
     {6,  1, Q2_UF_OP_U16, "delay_range", "rand() is BIOS A(0x2F)"},
-    {8,  1, Q2_UF_OP_U16, "slot_arg", "copied to timer slot +8"},
-    {10, 1, Q2_UF_OP_U16, "slot_arg2", "copied to timer slot +6"}}},
+    {8,  1, Q2_UF_OP_U16, "fires",
+     "timer slot +8 (0x800270A4): deadlines before the slot is freed, "
+     "decremented at 0x800273BC and clamped at 0x800273EC -- so 0 is forever"},
+    {10, 1, Q2_UF_OP_U16, "window",
+     "timer slot +6 (0x800270B4): items one deadline runs, s3 at 0x800271F0"}}},
 
 {Q2_UF_DISABLEME, "DISABLEME", 4, false, true, 0, {OP_NONE}},
 
