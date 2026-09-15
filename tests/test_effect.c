@@ -2623,6 +2623,9 @@ static void test_emitters_use_the_frame_camera(void)
     memset(&list, 0, sizeof(list));
     list.p[0].in_use = true;
     list.p[0].kind   = Q2_PROJ_BOLT;
+    /* A bolt is drawn as a box only when its flags carry bit 0x4, which the
+     * hyperblaster's 14 does and the blaster's 11 does not (projectile.h). */
+    list.p[0].flags  = Q2_PROJ_FLAGS_HYPERBLASTER;
     list.p[0].node   = Q2_PROJ_NODE_UNKNOWN;
     list.p[0].pos[0] = 0;
     list.p[0].pos[1] = 0;
@@ -2670,6 +2673,149 @@ static void test_emitters_use_the_frame_camera(void)
     psx_ot_free(&ot);
 }
 
+/* ------------------------------------------------------------------------- */
+/*
+ * THE BOLT'S BODY IS THE HYPERBLASTER'S, AND IT IS THE DISC'S OWN BOX.
+ *
+ * 0x80047F44 gates the whole GTE block on bit 0x4 of record+0x22; the blaster
+ * passes 11 and the hyperblaster 14, so only the second has a body at all.
+ * 0x800B1E28 then emits it as six gouraud, untextured, OPAQUE quads over the
+ * table at 0x8009D664, culling a face whose `nclip` comes out zero or positive
+ * (0x800B1EBC `bgez` skips), which on a closed box leaves the three that face
+ * the camera. The colours are the table's: (255,64,0) on every corner at local
+ * z = -50 and (255,255,0) on every corner at z = +50.
+ */
+static void test_bolt_body(void)
+{
+    q2_projectiles list;
+    q2_camera      cam;
+    psx_ot         ot;
+    gte_state      gte;
+    u32            blaster, hyper, i, orange = 0, yellow = 0, other = 0;
+    u32            flat = 0, blended = 0, worst = 0, quiet = 0;
+    int            q;
+
+    /* Six orientations: down the view axis, across it, and four general ones.
+     * A closed convex box shows at most three of its six faces from anywhere,
+     * which is the property the cull has to have. */
+    static const s32 cfg[6][6] = {
+        {   0,    0,  600,  4096,     0,    0 },
+        { 300,  200,  800,  2000,  1000, 3000 },
+        { 200,    0,  700,     0,  4096,    0 },
+        {-300,  150,  900,  3000, -1000, 1000 },
+        {   0,    0,  600,     0,     0, 4096 },
+        { 400, -200, 1200, -2000,  2000, 1000 }
+    };
+
+    printf("the bolt body is the hyperblaster's alone\n");
+
+    memset(&gte, 0, sizeof(gte));
+    if (psx_ot_init(&ot, 256, 4096) != Q2_OK) {
+        check(false, "an ordering table for the bolt");
+        return;
+    }
+    memset(&cam, 0, sizeof(cam));
+    cam.projection = 256;
+    cam.ofs_x      = 256;
+    cam.ofs_y      = 124;
+    cam.far_z      = Q2_CAMERA_FAR_DEFAULT;
+    cam.sort_range = Q2_CAMERA_SORT_RANGE;
+    /* q2_camera_apply_area_projection installs nothing for an unrouted area,
+     * so the projection has to be set here or every corner lands on the
+     * origin and every face is degenerate. */
+    gte_set_projection(&gte, (u16)cam.projection, cam.ofs_x, cam.ofs_y);
+
+    memset(&list, 0, sizeof(list));
+    list.p[0].in_use = true;
+    list.p[0].kind   = Q2_PROJ_BOLT;
+    list.p[0].node   = Q2_PROJ_NODE_UNKNOWN;
+    list.live        = 1;
+
+    for (q = 0; q < 6; q++) {
+        u32 n;
+        int k;
+
+        for (k = 0; k < 3; k++) {
+            list.p[0].pos[k] = cfg[q][k];
+            list.p[0].vel[k] = cfg[q][3 + k];
+        }
+
+        list.p[0].flags = Q2_PROJ_FLAGS_BLASTER;
+        psx_ot_clear(&ot);
+        if (q2_projectiles_build_ot(&list, NULL, &cam, &ot, &gte) == 0)
+            quiet++;
+
+        list.p[0].flags = Q2_PROJ_FLAGS_HYPERBLASTER;
+        psx_ot_clear(&ot);
+        n = q2_projectiles_build_ot(&list, NULL, &cam, &ot, &gte);
+        if (n > worst)
+            worst = n;
+        printf("  orientation %d: %u faces\n", q, n);
+    }
+
+    /* And the last one again, held so its primitives can be read. */
+    {
+        int k;
+        for (k = 0; k < 3; k++) {
+            list.p[0].pos[k] = cfg[1][k];
+            list.p[0].vel[k] = cfg[1][3 + k];
+        }
+    }
+    list.p[0].flags = Q2_PROJ_FLAGS_BLASTER;
+    psx_ot_clear(&ot);
+    blaster = q2_projectiles_build_ot(&list, NULL, &cam, &ot, &gte);
+
+    list.p[0].flags = Q2_PROJ_FLAGS_HYPERBLASTER;
+    psx_ot_clear(&ot);
+    hyper = q2_projectiles_build_ot(&list, NULL, &cam, &ot, &gte);
+
+    for (i = 0; i < ot.prim_count; i++) {
+        const psx_prim *pr = &ot.prims[i];
+        int c;
+
+        if (pr->kind != PSX_PRIM_G4)
+            flat++;
+        if (pr->semi_transparent)
+            blended++;
+        for (c = 0; c < 4; c++) {
+            if (pr->rgb[c].r == 255 && pr->rgb[c].g == 64 &&
+                pr->rgb[c].b == 0)
+                orange++;
+            else if (pr->rgb[c].r == 255 && pr->rgb[c].g == 255 &&
+                     pr->rgb[c].b == 0)
+                yellow++;
+            else
+                other++;
+        }
+    }
+
+    printf("  blaster %u, hyperblaster %u; corners %u orange, %u yellow, "
+           "%u neither; %u not gouraud, %u blended\n",
+           blaster, hyper, orange, yellow, other, flat, blended);
+
+    check_eq_i((int)blaster, 0,
+               "a blaster bolt emits nothing: bit 0x4 is clear in its 11 "
+               "(0x80047F44 draws, 0x8004D7A4 writes, both on that bit)");
+    check_eq_i((int)quiet, 6,
+               "and emits nothing from any of the six orientations either");
+    check_eq_i((int)hyper, 3,
+               "a hyperblaster bolt seen off-axis emits three faces");
+    check((int)worst <= 3,
+          "and never more than three from anywhere: nclip drops the far side "
+          "(0x800B1EBC skips on MAC0 >= 0, so a face is drawn when it is "
+          "negative)");
+    check_eq_i((int)other, 0,
+               "every corner takes one of the two colours in 0x8009D664");
+    check(orange > 0 && yellow > 0,
+          "and both appear: the box shades from its tail to its nose");
+    check_eq_i((int)flat, 0,
+               "the primitive is POLY_G4 — nine words, four colours, no UVs");
+    check_eq_i((int)blended, 0,
+               "and opaque: the command byte in the table is 0x38, not 0x3A");
+
+    psx_ot_free(&ot);
+}
+
 int main(void)
 {
     printf("effect system\n\n");
@@ -2704,6 +2850,7 @@ int main(void)
     test_debris();
     test_build_ot();
     test_emitters_use_the_frame_camera();
+    test_bolt_body();
     test_effect_sorts_with_the_world();
     test_texture_survives_clear();
     test_timed_beams();

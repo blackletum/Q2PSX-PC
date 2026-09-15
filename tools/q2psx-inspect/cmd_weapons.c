@@ -124,6 +124,19 @@ int cmd_weapons(const disc *d)
                disc_side.bolt_shape[i][1], disc_side.bolt_shape[i][2]);
     printf("\n");
 
+    printf("\n  bolt body (0x8009D664), six gouraud quads:\n");
+    for (i = 0; i < Q2_WT_BOLT_FACES; i++) {
+        const q2_wt_bolt_face *f = &disc_side.bolt_face[i];
+        int c;
+
+        printf("    (%u,%u,%u,%u)", f->idx[0], f->idx[1], f->idx[2],
+               f->idx[3]);
+        for (c = 0; c < 4; c++)
+            printf("  %3u,%3u,%3u", f->rgb[c][0], f->rgb[c][1],
+                   f->rgb[c][2]);
+        printf("\n");
+    }
+
     printf("\nchecking the port's built-in copy against the disc\n");
     bad = q2_weapon_tables_diff(&disc_side, builtin, report, NULL);
 

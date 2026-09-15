@@ -138,6 +138,7 @@
 /* Where the tables are in the catalogued PAL build                           */
 /* ------------------------------------------------------------------------- */
 #define Q2_WT_ADDR_BOLT_SHAPE    0x8009DB1Cu
+#define Q2_WT_ADDR_BOLT_FACES    0x8009D664u
 #define Q2_WT_ADDR_AMMO_PER_SHOT 0x8009DB4Cu   /* 1-based base */
 #define Q2_WT_ADDR_AUTOSWITCH    0x8009DB7Cu
 #define Q2_WT_ADDR_NAMES         0x8009DB9Cu   /* 1-based base */
@@ -157,6 +158,36 @@
 #define Q2_WT_ARMOUR_CLASSES  3
 #define Q2_WT_SOUND_COUNT    22
 #define Q2_WT_BOLT_POINTS     8
+#define Q2_WT_BOLT_FACES      6
+
+/*
+ * ONE FACE OF THE BOLT'S BOX, as 0x8009D664 stores it: a packed word of four
+ * corner indices followed by four GPU colour words.
+ *
+ * The emitter is 0x800B1E28, called at 0x80048160 with a0 = 0x8009D664 and
+ * a1 = 0x8009D6C8. It unpacks the indices with `sll 2` / `srl 6` / `srl 14` /
+ * `srl 22`, each masked 0x3FC, so they index the projected-corner array a word
+ * at a time; then it writes a nine-word, 36-byte packet — `ori t0, zero, 0x9`
+ * and `sb t0, 3(a3)` at 0x800B1F38/0x800B1F4C, `addiu a3, a3, 36` at
+ * 0x800B1F50 — interleaving four colours with four screen points. Nine words
+ * with four colours and no UVs is POLY_G4: gouraud, untextured. The command
+ * byte on every colour word is 0x38, the opaque code (fxtables.h reads the same
+ * byte the same way), so a bolt's body does not blend with what is behind it.
+ *
+ * SIX, NOT FIVE. a1 - a0 is 100 and the stride is 20, but the loop is bottom
+ * tested: `bne a0, a1, 0x800B1E64` at 0x800B1F54 carries `addiu a0, a0, 20` in
+ * its DELAY SLOT, so the compare sees the pre-increment pointer and the record
+ * AT a1 is processed. The sixth row is the box's y = +10 face; without it the
+ * box has a hole.
+ *
+ * `rgb` drops the command byte, which is 0x38 on all 24 words — the loader
+ * refuses the read outright if it ever is not, rather than silently decoding a
+ * textured primitive as an untextured one.
+ */
+typedef struct q2_wt_bolt_face {
+    u8 idx[4];       /* into bolt_shape, in the GPU's own quad order */
+    u8 rgb[4][3];    /* one colour per corner, paired with idx       */
+} q2_wt_bolt_face;
 
 /* The 22 weapon sound names, in table order. Named so a caller can ask for one
  * without counting, and so the order is checkable against the disc. */
@@ -218,6 +249,9 @@ typedef struct q2_weapon_tables {
 
     /* The bolt's eight local points, in world units. */
     s16  bolt_shape[Q2_WT_BOLT_POINTS][3];
+
+    /* And the six quads they make. */
+    q2_wt_bolt_face bolt_face[Q2_WT_BOLT_FACES];
 } q2_weapon_tables;
 
 /*

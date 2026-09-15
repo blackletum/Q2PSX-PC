@@ -351,24 +351,23 @@ u32 q2_entity_build_ot(q2_entity_set *set, const q2_entity_draw_ctx *ctx,
 /* Projectiles in flight — see the note in entitydraw.h                       */
 /* ------------------------------------------------------------------------- */
 /*
- * The six faces of the eight-corner box, in the corner order the table at
- * 0x8009DB1C stores them:
+ * THE Z-ORDER SHUFFLE, which is the only thing this file does to the disc's own
+ * face table.
+ *
+ * 0x8009D664 holds the six faces in the GPU's quad order: the hardware draws a
+ * four-point primitive as the triangles (0,1,2) and (1,2,3), so the fourth
+ * corner is diagonally opposite the first. This renderer's quads are perimeter
+ * walks (raster.c, and world.c:1468 undoing the same shuffle for map faces), so
+ * a corner list is converted by exchanging the last two — {0,1,2,3} becomes
+ * {0,1,3,2}. Applied to both the indices and the colours together, which keeps
+ * each colour on the corner the disc gave it.
+ *
+ * The corners themselves are bolt_shape, 0x8009DB1C:
  *
  *     0 (-10,-10,-50)  1 ( 10,-10,-50)  2 (-10,-10, 50)  3 ( 10,-10, 50)
  *     4 (-10, 10,-50)  5 ( 10, 10,-50)  6 (-10, 10, 50)  7 ( 10, 10, 50)
- *
- * so x picks the low bit, z the second and y the third. Each row below is a
- * perimeter walk, which is the order the rasteriser wants; the table's own
- * order is the Z-order every mesh on this disc is stored in.
  */
-static const u8 k_bolt_face[6][4] = {
-    { 0, 1, 3, 2 },   /* y = -10 */
-    { 4, 6, 7, 5 },   /* y = +10 */
-    { 0, 4, 5, 1 },   /* z = -50 */
-    { 2, 3, 7, 6 },   /* z = +50 */
-    { 0, 2, 6, 4 },   /* x = -10 */
-    { 1, 5, 7, 3 }    /* x = +10 */
-};
+static const int k_bolt_quad_order[4] = { 0, 1, 3, 2 };
 
 /*
  * A rotation whose +Z axis lies along `dir`.
@@ -492,6 +491,24 @@ u32 q2_projectiles_build_ot(const struct q2_projectiles *list,
                            p->node == Q2_PROJ_NODE_HELD))
             continue;
 
+        /*
+         * AND A BLASTER BOLT HAS NO BODY.
+         *
+         * 0x80047F44 `andi v0, v0, 0x4` on the flags at record+0x22 gates the
+         * whole GTE block that projects the eight corners, and 0x8004D7A4 is
+         * the same test in the spawner deciding whether to write them at all.
+         * The blaster passes 11 and the hyperblaster 14 (projectile.h), so the
+         * bit is set for one and clear for the other: the hyperblaster's bolt
+         * is this box and the blaster's is its trail (effect.h), and they are
+         * mutually exclusive.
+         *
+         * A bolt is the only projectile that carries flags — the four class
+         * spawners take no such argument — so everything else keeps the body
+         * it has always been drawn with.
+         */
+        if (p->kind == Q2_PROJ_BOLT && !(p->flags & Q2_PROJ_FLAG_BODY))
+            continue;
+
         if (psx_ot_area_active(ot) && coll) {
             q2_coll_node cell;
             s32 node = p->node;
@@ -512,8 +529,15 @@ u32 q2_projectiles_build_ot(const struct q2_projectiles *list,
         if (!bolt_basis(p->vel, m))
             continue;
 
-        /* The kind's own glow, from the preset the dynamic light reads out of
-         * 0x800AE954 — so the body and the light it casts agree. */
+        /*
+         * ONLY THE KINDS THIS PORT DRAWS A BOX FOR AT ALL take a flat tint.
+         *
+         * A bolt's colours are the disc's own, per corner, out of the face
+         * table below. The other four kinds are named-class entities on the
+         * console with models of their own and no missile record, so their box
+         * is this port's stand-in and keeps the glow it was given — the preset
+         * at 0x800AE954 that their dynamic light also reads.
+         */
         tint.pad = 0;
         if (p->kind == Q2_PROJ_BFG) {
             tint.r = Q2_PROJ_BFG_LIGHT_R;
@@ -558,19 +582,41 @@ u32 q2_projectiles_build_ot(const struct q2_projectiles *list,
             }
         }
 
-        for (f = 0; f < 6; f++) {
-            const u8 *idx = k_bolt_face[f];
+        for (f = 0; f < Q2_WT_BOLT_FACES; f++) {
+            const q2_wt_bolt_face *face = &wt->bolt_face[f];
             psx_prim *prim;
             u32 depth = 0;
             bool good = true;
             int c;
 
             for (c = 0; c < 4; c++) {
-                if (!ok[idx[c]]) { good = false; break; }
-                depth += z[idx[c]];
+                if (!ok[face->idx[c]]) { good = false; break; }
+                depth += z[face->idx[c]];
             }
             if (!good)
                 continue;
+
+            /*
+             * BACKFACE, the console's own test and its own sense.
+             *
+             * 0x800B1EB0 runs `nclip` on the first three corners IN THE
+             * TABLE'S ORDER — before the shuffle above — and 0x800B1EBC
+             * `bgez v0, 0x800B1F54` SKIPS the emit when MAC0 is zero or
+             * positive. So a face is drawn when the cross product is
+             * negative, which is the opposite of the reading this file used to
+             * carry, and it is what keeps the far side of an opaque box out of
+             * the table.
+             */
+            {
+                const gte_sxy *a = &xy[face->idx[0]];
+                const gte_sxy *b = &xy[face->idx[1]];
+                const gte_sxy *c2 = &xy[face->idx[2]];
+                s32 nclip = ((s32)b->x - a->x) * ((s32)c2->y - a->y) -
+                            ((s32)c2->x - a->x) * ((s32)b->y - a->y);
+
+                if (nclip >= 0)
+                    continue;
+            }
 
             /* The mean depth as the key too, so a bolt and the geometry it
              * shares a bucket with sort by depth rather than by which emitter
@@ -591,18 +637,41 @@ u32 q2_projectiles_build_ot(const struct q2_projectiles *list,
             if (!prim)
                 break;
 
-            /* Additive and flat: a bolt is a light source, and one that
-             * occluded the wall behind it would read as a solid brick. */
-            prim->kind             = PSX_PRIM_F4;
-            prim->semi_transparent = true;
-            prim->tpage            = Q2_FX_ABR_ADD;
-            prim->rgb[0]           = tint;
+            /*
+             * OPAQUE AND GOURAUD for a bolt, because that is what 0x800B1E28
+             * emits: nine words with four per-vertex colours, no UVs, and the
+             * command byte 0x38 that carries no ABE bit. The box is solid and
+             * shades from its (255,64,0) tail to its (255,255,0) nose.
+             *
+             * The other kinds keep the additive flat quad they have always had
+             * — it is this port's own stand-in for a model, and the disc has no
+             * primitive to copy for them.
+             */
+            if (p->kind == Q2_PROJ_BOLT) {
+                prim->kind             = PSX_PRIM_G4;
+                prim->semi_transparent = false;
+                prim->tpage            = 0;
+            } else {
+                prim->kind             = PSX_PRIM_F4;
+                prim->semi_transparent = true;
+                prim->tpage            = Q2_FX_ABR_ADD;
+                prim->rgb[0]           = tint;
+            }
 
             for (c = 0; c < 4; c++) {
+                const int s = k_bolt_quad_order[c];
+
+                if (p->kind == Q2_PROJ_BOLT) {
+                    prim->rgb[c].r   = face->rgb[s][0];
+                    prim->rgb[c].g   = face->rgb[s][1];
+                    prim->rgb[c].b   = face->rgb[s][2];
+                    prim->rgb[c].pad = 0;
+                }
+
                 /* gte_sxy and psx_xy share a layout but are distinct types;
                  * reading one through the other is undefined. */
-                prim->xy[c].x = xy[idx[c]].x;
-                prim->xy[c].y = xy[idx[c]].y;
+                prim->xy[c].x = xy[face->idx[s]].x;
+                prim->xy[c].y = xy[face->idx[s]].y;
             }
 
             emitted++;

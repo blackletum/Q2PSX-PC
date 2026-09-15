@@ -56,9 +56,10 @@ const q2_weapon_behaviour q2_weapon_behaviour_table[Q2_WT_SLOTS] = {
     /* 0 — no weapon. 0x8004EB08 is `jr ra; nop`. */
     { Q2_FK_NONE, 0, 0, 0, {{0,0,0}}, 0, false, 0, 0, 0x8004EB08u },
 
-    /* 1 blaster — a bolt entity, no ammo, no scatter. */
+    /* 1 blaster — a bolt entity, no ammo, no scatter. Mod 6 is the sixth
+     * argument its call site passes to the spawner (0x8004C124). */
     { Q2_FK_BOLT, 8, 32, 1, {{0,0,0}}, -11, false, 0,
-      Q2_MOD_ENERGY_BOLT, 0x8004BFBCu },
+      Q2_MOD_BOLT, 0x8004BFBCu },
 
     /* 2 shotgun — five pellets, +-1024 on every axis. */
     { Q2_FK_BULLET, 6, 24, 5, {{4,4,4}}, -22, false, 0,
@@ -91,9 +92,10 @@ const q2_weapon_behaviour q2_weapon_behaviour_table[Q2_WT_SLOTS] = {
     { Q2_FK_ROCKET, 0, 0, 1, {{0,0,0}}, -11, false, 0,
       Q2_MOD_ROCKET, 0x8004D038u },
 
-    /* 9 hyperblaster — no kick, no refire gate of its own. */
+    /* 9 hyperblaster — no kick, no refire gate of its own. Mod 5, from its
+     * call site's sixth argument (0x8004D3F0). */
     { Q2_FK_BOLT, 20, 80, 1, {{0,0,0}}, 0, false, 0,
-      Q2_MOD_ENERGY_BOLT, 0x8004D250u },
+      Q2_MOD_BOLT_HYPER, 0x8004D250u },
 
     /* 10 railgun — 100, or 150 in deathmatch; quad shifts left by two. */
     { Q2_FK_RAIL, 0, 0, 1, {{0,0,0}}, -34, false, 0,

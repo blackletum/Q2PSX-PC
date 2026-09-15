@@ -827,6 +827,74 @@ s32 q2_fx_gib_trail(q2_fx_world *w, q2_rng *rng, const s32 at[3],
 }
 
 /* ------------------------------------------------------------------------- */
+/* 0x80048588 — the energy bolt's trail                                        */
+/* ------------------------------------------------------------------------- */
+s32 q2_fx_bolt_trail(q2_fx_world *w, q2_rng *rng, const s32 at[3],
+                     const s16 disp[3], u8 area)
+{
+    s16 offs[Q2_FX_BOLT_TRAIL_COUNT][3];
+    s16 v[Q2_FX_BOLT_TRAIL_COUNT][3];
+    s16 base[3], step[3];
+    s32 origin[3];
+    const q2_fx_ramp *r;
+    u32 i;
+    int k;
+
+    if (!w || !rng || !at || !disp)
+        return -1;
+
+    for (k = 0; k < 3; k++) {
+        /*
+         * 0x80048328 `sra v1, a0, 17` — the halfword is sign-extended into a
+         * word by `sll 16` first, so this is an arithmetic halving that rounds
+         * toward negative infinity, not C's truncating `/ 2`.
+         */
+        s32 half = ((s32)disp[k] << 16) >> 17;
+
+        origin[k] = at[k] - half;
+
+        /* 0x80048364 `sra v0, a0, 20`: the same sign-extension, then >> 4. */
+        base[k] = (s16)(((s32)disp[k] << 16) >> 20);
+
+        /*
+         * 0x80048384 `sra a0, a0, 12` then `div` by record+0x4A. The shift is
+         * on the ALREADY sign-extended word, so it is `disp << 4`, and the
+         * divide is the compiler's signed one and truncates toward zero.
+         */
+        step[k] = (s16)(((((s32)disp[k] << 16) >> 12)) /
+                        Q2_FX_BOLT_TRAIL_COUNT);
+
+        /* 0x80048434..0x8004846C — and the spawner throws this entry away. */
+        offs[0][k] = (s16)(-half);
+        v[0][k]    = base[k];
+    }
+
+    /*
+     * 0x800484A8..0x8004854C. The chain is halfword arithmetic and wraps as
+     * the original's does; the velocities take three `rand()` draws an axis in
+     * x, y, z order, and particle 0's are NOT drawn for (0x80048470 copies
+     * them), which is why the loop starts at one.
+     */
+    for (i = 1; i < Q2_FX_BOLT_TRAIL_COUNT; i++) {
+        for (k = 0; k < 3; k++) {
+            offs[i][k] = (s16)(offs[i - 1][k] + step[k]);
+            v[i][k]    = (s16)(base[k] +
+                               ((q2_rng_next(rng) - 16384) >>
+                                Q2_FX_BOLT_TRAIL_SHIFT));
+        }
+    }
+
+    /* Both ends are the same ramp — 0x8009BF04 at a3 and again at sp+16
+     * (0x80048560, 0x80048564) — so the group does not cross-fade. */
+    r = q2_fx_ramp_at(w->tab, Q2_FX_BOLT_TRAIL_RAMP);
+    return q2_fx_group_spawn_offsets(w, origin, (const s16 (*)[3])offs,
+                                     (const s16 (*)[3])v,
+                                     Q2_FX_BOLT_TRAIL_COUNT, r, r,
+                                     Q2_FX_BOLT_TRAIL_LIFE,
+                                     Q2_FX_BOLT_TRAIL_SIZE, area);
+}
+
+/* ------------------------------------------------------------------------- */
 /* 0x80058638 — the effect[1] dispatcher, which also OWNS the countdown       */
 /* ------------------------------------------------------------------------- */
 void q2_fx_actor_damage_effect(q2_fx_world *w, struct q2_actor *a,
@@ -957,7 +1025,8 @@ void q2_fx_actor_present(q2_fx_world *w, q2_rng *rng, struct q2_actor *a,
     out->groups += fx_tick_spark(w, rng, src, frame, area, viewport_skip,
                                  &a->effect[2], dt_alive);
 
-    /* 0x8005B8CC — effect[4], armed with 5 by Q2_MOD_5, dt a constant 1. */
+    /* 0x8005B8CC — effect[4], armed with 5 by the hyperblaster's own mod,
+     * dt a constant 1. */
     out->groups += fx_tick_spark(w, rng, src, frame, area, viewport_skip,
                                  &a->effect[4], 1);
 

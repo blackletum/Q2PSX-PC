@@ -1184,6 +1184,65 @@ s32 q2_fx_gib_trail(q2_fx_world *w, q2_rng *rng, const s32 at[3],
                     const s16 vel[3], u8 area);
 
 /* ------------------------------------------------------------------------- */
+/* 0x80048588 — the energy bolt's trail                                        */
+/* ------------------------------------------------------------------------- */
+/*
+ * A BLASTER BOLT'S ONLY BODY.
+ *
+ * The missile sweep's per-tick arms are all gated on one halfword, the flags at
+ * record+0x22 that the spawner writes from its fifth argument (0x8004D7BC).
+ * Five bits, five arms:
+ *
+ *     0x01  0x800482B0   THIS — a particle group, every tick
+ *     0x02  0x800481C0   the dynamic light (0x80075C34)
+ *     0x04  0x80047F44   the eight-corner body (0x800B1E28)
+ *     0x08  0x80048660   the impact burst
+ *     0x10  0x80048238   a second, larger light — no caller on this disc sets it
+ *
+ * and the three callers of the spawner pass exactly two values: 11 for the
+ * blaster (0x8004C11C) and for a monster's (0x800620D4), 14 for the
+ * hyperblaster (0x8004D3E8) and for a monster's hyper variant (0x800620BC,
+ * chosen by `andi v0, 0x40` at 0x800620A8). 11 has bit 0x1 and not 0x4; 14 has
+ * 0x4 and not 0x1. So the two are MUTUALLY EXCLUSIVE: the blaster's bolt is
+ * this trail and nothing else, and the hyperblaster's is the box and has no
+ * trail. A port that drew the box for both and trailed neither had them
+ * exactly the wrong way round.
+ *
+ * WHAT THE ARM BUILDS, 0x800482B8..0x800485DC, per tick:
+ *
+ *     disp      = velocity * the frame's dt   (0x80047D50, [0x800B2DB4])
+ *     origin    = pos - disp/2                (0x80048328 `sra 17`)
+ *     step      = (disp << 4) / record+0x4A   (0x80048384 `sra 12`, then div)
+ *     offs[0]   = -(disp/2)                   (0x80048434)
+ *     offs[i]   = offs[i-1] + step            (0x800484A8)
+ *     vel[0]    = disp >> 4                   (0x80048364 `sra 20`)
+ *     vel[i]    = (disp >> 4) + ((rand() - 16384) >> 12)   three draws an axis
+ *
+ * and hands them to the offsets spawner with count = record+0x4A, both ramps
+ * 0x8009BF04 and the operands below (0x80048550..0x8004858C). `offs[0]` is
+ * discarded by that spawner — particle 0 IS the origin — so the first entry
+ * exists to seed the chain and nothing else.
+ *
+ * The outer loop runs record+0x42 times, a counter clamped to record+0x3A; the
+ * spawner writes 1 there for every caller (0x8004D7B4), so it is always one
+ * pass and the counter is a mechanism with no live second case on this disc.
+ * Modelled as one pass, with the clamp stated rather than reproduced.
+ */
+#define Q2_FX_BOLT_TRAIL_COUNT    6      /* record+0x4A, 0x8004D7A0   */
+#define Q2_FX_BOLT_TRAIL_LIFE    23      /* 0x8004856C                */
+#define Q2_FX_BOLT_TRAIL_SIZE  8192      /* 0x80048574                */
+#define Q2_FX_BOLT_TRAIL_RAMP     9      /* 0x8009BF04, both ends     */
+#define Q2_FX_BOLT_TRAIL_SHIFT   12      /* 0x800484F0, the jitter    */
+
+/*
+ * `vel` is the bolt's velocity already multiplied by the frame's dt — the
+ * `disp` above — because that is what the sweep has in hand when it builds
+ * this and the caller is the only one who knows the tick length.
+ */
+s32 q2_fx_bolt_trail(q2_fx_world *w, q2_rng *rng, const s32 at[3],
+                     const s16 disp[3], u8 area);
+
+/* ------------------------------------------------------------------------- */
 /* The per-actor presentation pass — 0x8005B880                               */
 /* ------------------------------------------------------------------------- */
 /*

@@ -16,11 +16,30 @@
  *     0x800ACBBC  "BFGBlast"   0x8004BE04   BFG
  *
  * The blaster and hyperblaster share a fifth path, 0x8004D70C, which does not
- * name a class: it allocates a bare entity, gives it a speed of 2560 and eight
- * hull corners read from 0x8009DB1C, and links it. The hyperblaster's bolt sets
- * bit 2 of its flags word and gets those corners rotated into place; the
- * blaster's does not, so its bolt has no orientation. That flag is the only
- * difference between the two projectiles.
+ * name a class: it allocates a bare entity, gives it a lifetime of 2560 and,
+ * for some callers, eight corners read from 0x8009DB1C, and links it.
+ *
+ * WHICH CALLERS, and it is not a detail. The spawner's fifth argument is a
+ * FLAGS halfword, stored at record+0x22 (0x8004D7BC), and every per-tick arm
+ * of the sweep is gated on one of its bits:
+ *
+ *     0x01  0x800482B0   the particle trail          (effect.h)
+ *     0x02  0x800481C0   the dynamic light
+ *     0x04  0x80047F44   the eight-corner body, and the spawner only rotates
+ *                        those corners in at all when this bit is set
+ *                        (0x8004D7A4)
+ *     0x08  0x80048660   the impact burst
+ *     0x10  0x80048238   a second, larger light; no caller sets it
+ *
+ * Three callers pass two values. The blaster passes 11 (0x8004C11C) and so
+ * does a monster's blaster (0x800620D4); the hyperblaster passes 14
+ * (0x8004D3E8) and so does a monster's hyper variant (0x800620BC, selected by
+ * `andi v0, 0x40` at 0x800620A8). 11 carries 0x1 and not 0x4, and 14 carries
+ * 0x4 and not 0x1 — so the trail and the body are MUTUALLY EXCLUSIVE and the
+ * two projectiles differ in what draws them, not merely in whether the same
+ * body is oriented. This file used to say bit 2 of the flags was "the only
+ * difference between the two projectiles"; it is the difference between having
+ * a body and having a trail.
  *
  * ---------------------------------------------------------------------------
  * Splash
@@ -43,7 +62,7 @@
  * ---------------------------------------------------------------------------
  * The entity list, and what a bolt's numbers mean
  * ---------------------------------------------------------------------------
- * Projectiles live in an 88-byte-record array at 0x800C91C0 which a per-frame
+ * Projectiles live in a 104-byte-record array at 0x800C91C0 which a per-frame
  * sweep at 0x80047C6C walks. Reading that sweep settles two fields the bolt
  * spawner writes that would otherwise have to be guessed at:
  *
@@ -52,6 +71,15 @@
  *          is about eight and a half seconds on the 300 Hz clock.
  *   +0x52  is the VELOCITY, in world units per dt unit. The sweep multiplies it
  *          by the frame's dt to get the move.
+ *   +0x22  the FLAGS above, 11 or 14.
+ *   +0x32  the MEANS OF DEATH, handed to the damage function as a3 at
+ *          0x80047EF8. The blaster's is 6 (0x8004C124) and the
+ *          hyperblaster's is 5 (0x8004D3F0) — neither is mod 1.
+ *   +0x3A  how many trail bursts one tick may raise; 1 for every caller
+ *          (0x8004D7B4).
+ *   +0x42  the counter that clamps against it, the sweep's own (0x800482C8).
+ *   +0x4A  the trail's particle count AND the divisor its spacing uses; 6 for
+ *          every caller (0x8004D7A0).
  *
  * That means the direction argument the bolt spawner is handed IS its velocity:
  * the blaster's `aim >> 6` gives 64 units per dt and the hyperblaster's
@@ -98,6 +126,20 @@ typedef enum q2_proj_kind {
     Q2_PROJ_BFG            /* "BFGBlast", 0x8004BE04                        */
 } q2_proj_kind;
 
+/* The flags halfword at record+0x22, bit for bit. */
+#define Q2_PROJ_FLAG_TRAIL      0x0001u  /* 0x800482B0 */
+#define Q2_PROJ_FLAG_LIGHT      0x0002u  /* 0x800481C0 */
+#define Q2_PROJ_FLAG_BODY       0x0004u  /* 0x80047F44 */
+#define Q2_PROJ_FLAG_IMPACT     0x0008u  /* 0x80048660 */
+#define Q2_PROJ_FLAG_LIGHT_BIG  0x0010u  /* 0x80048238; no caller sets it */
+
+/* The two values any caller of 0x8004D70C passes. */
+#define Q2_PROJ_FLAGS_BLASTER      11u   /* 0x8004C11C, 0x800620D4 */
+#define Q2_PROJ_FLAGS_HYPERBLASTER 14u   /* 0x8004D3E8, 0x800620BC */
+
+/* The pairing the three call sites keep: 11 with mod 6, 14 with mod 5. */
+u16 q2_projectile_flags_for_mod(s16 mod);
+
 /* Splash, as read. Radius is world units. */
 #define Q2_SPLASH_RADIUS_GRENADE 1000
 #define Q2_SPLASH_RADIUS_ROCKET  1300
@@ -120,8 +162,10 @@ typedef enum q2_proj_kind {
  * A projectile lights the world around it.
  *
  * The per-frame sweep at `0x80047C6C` calls the engine's dynamic-light append
- * (`0x80075C34`) at `0x80048228` for every live projectile, and it does not
- * compute the light -- it reads a preset out of globals:
+ * (`0x80075C34`) at `0x80048228` for every bolt whose flags carry bit 0x2 --
+ * `0x800481C4` is the test, and both live flag values set it, so in practice
+ * every bolt -- and it does not compute the light: it reads a preset out of
+ * globals:
  *
  *     0x800AE954   FF 64 4B      RGB (255, 100, 75), a warm orange
  *     0x800AE958   2C 01 20 03   two u16 packed lo | hi<<16: 300 and 800
@@ -191,6 +235,20 @@ typedef struct q2_projectile {
     bool in_use;
     q2_proj_kind kind;
 
+    /*
+     * The console's record+0x22, and what every per-tick arm of the sweep is
+     * gated on — see the header note. Only a bolt has one; the four class
+     * spawners take no such argument, so it is zero for them and no arm runs.
+     *
+     * NOT SAVED, and it does not need to be: the two live values pair one for
+     * one with the means of death at the three call sites of 0x8004D70C — 11
+     * always goes with mod 6 and 14 always with mod 5 — so a restore
+     * reconstructs it from `mod`, which is saved. q2_projectile_flags_for_mod
+     * is that reconstruction, stated in one place so the pairing is not
+     * re-derived at each use.
+     */
+    u16  flags;
+
     s32  pos[3];
     s32  vel[3];        /* 1.0.12 velocity; held Grenade3 uses vel[2]=charge */
     s16  damage;
@@ -236,6 +294,15 @@ typedef struct q2_projectiles {
 } q2_projectiles;
 
 void q2_projectiles_init(q2_projectiles *list);
+
+/*
+ * One axis of a projectile's velocity in the CONSOLE's units — the halfword the
+ * spawner stored, not the runtime's 1.0.12 form. The sweep's `vel * dt`
+ * (0x80047D50) is in those units, so anything reproducing an arm of that sweep
+ * needs them back. Exposed rather than re-derived per caller because the
+ * divisor is per kind and getting it wrong is silent.
+ */
+s32 q2_projectile_raw_velocity(const q2_projectile *p, int axis);
 
 /*
  * Launch what a fire result asked for. Does nothing for a hitscan or rail

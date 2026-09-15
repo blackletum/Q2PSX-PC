@@ -48,7 +48,7 @@ s16 q2_mod_effect_timer(s16 mod, int *slot)
     case Q2_MOD_ENERGY_BOLT: if (slot) *slot = 1; return 3;
     case Q2_MOD_2:           if (slot) *slot = 0; return 15;
     case Q2_MOD_4:           if (slot) *slot = 2; return 30;
-    case Q2_MOD_5:           if (slot) *slot = 4; return 5;
+    case Q2_MOD_BOLT_HYPER:  if (slot) *slot = 4; return 5;
     default:                 if (slot) *slot = -1; return 0;
     }
 }

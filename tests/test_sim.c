@@ -3831,24 +3831,57 @@ static void test_sp_creature_presented(void)
     q2_sim_set_targets(&sim, list, 1);     /* and NOT the world list */
 
     memset(&in, 0, sizeof(in));
-    (void)q2_sim_fire(&sim);
-    for (flew = 0; flew < 40 && cre.effect[1] == 0; flew++)
+
+    /*
+     * AND THE WEAPON IS THE HYPERBLASTER, because the blaster's means of death
+     * arms nothing.
+     *
+     * q2_mod_effect_timer has four arms, mods 1, 2, 4 and 5 (0x800585A4..
+     * 0x80058604). The blaster is mod 6 (0x8004C124) and the hyperblaster mod
+     * 5 (0x8004D3F0), so it is the hyperblaster that raises a timer here --
+     * slot 4 to 5. This test used to fire the blaster and expect slot 1, which
+     * only held while the port had the blaster on the BFG's mod 1.
+     */
+    sim.combat.weapon_id = 9;
+    (void)q2_sim_give_weapon(&sim, Q2_WID_HYPERBLASTER);
+    sim.combat.inv.ammo[Q2_AMMO_CELLS] = 50;
+    check(q2_sim_fire(&sim).fired, "the hyperblaster fires");
+    for (flew = 0; flew < 40 && cre.effect[4] == 0; flew++)
         q2_sim_tick(&sim, &in, 12);
 
-    slot[0] = cre.effect[1];
+    slot[0] = cre.effect[4];
+    for (k = 0; k < 3; k++) {
+        q2_sim_tick(&sim, &in, 12);
+        slot[k + 1] = cre.effect[4];
+    }
+
+    printf("  bolt landed after %d ticks; effect[4] %u -> %u -> %u -> %u\n",
+           flew, (unsigned)slot[0], (unsigned)slot[1], (unsigned)slot[2],
+           (unsigned)slot[3]);
+    check(slot[0] == 5 && slot[1] == 4 && slot[2] == 3 && slot[3] == 2,
+          "a single-player creature's energy effect runs down through the sim "
+          "(0x80058638 per frame)");
+    check(cre.health < 1000,
+          "and the bolt reached a creature registered only as a target");
+
+    /*
+     * THE GREEN LIGHT IS SLOT 1'S ALONE -- 0x800586D0 tests effect[1] >= 3 --
+     * and slot 1 belongs to mod 1, the BFG's. Armed here directly rather than
+     * by firing one across the room, because what is under test is the
+     * presentation pass and not the BFG's flight.
+     */
+    cre.effect[1] = 3;
     for (k = 0; k < 3; k++) {
         q2_sim_tick(&sim, &in, 12);
         slot[k + 1] = cre.effect[1];
         lit[k] = energy_lights_at(&sim, cre.origin);
     }
 
-    printf("  bolt landed after %d ticks; effect[1] %u -> %u -> %u -> %u; "
-           "energy lights %u, %u, %u\n", flew, (unsigned)slot[0],
+    printf("  effect[1] 3 -> %u -> %u -> %u; energy lights %u, %u, %u\n",
            (unsigned)slot[1], (unsigned)slot[2], (unsigned)slot[3],
            lit[0], lit[1], lit[2]);
-    check(slot[0] == 3 && slot[1] == 2 && slot[2] == 1 && slot[3] == 0,
-          "a single-player creature's energy effect runs down 3, 2, 1, 0 "
-          "through the sim (0x80058638 per frame)");
+    check(slot[1] == 2 && slot[2] == 1 && slot[3] == 0,
+          "the BFG's own slot runs down 3, 2, 1, 0 the same way");
     check(lit[0] == 1 && lit[1] == 0 && lit[2] == 0,
           "and raises the green light on the first presented tick only "
           "(0x800586D0, effect[1] >= 3)");
@@ -4560,6 +4593,86 @@ static void test_kill_raises_no_burst(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * THE BLASTER LEAVES A TRAIL AND THE HYPERBLASTER DOES NOT.
+ *
+ * The sweep's bit-0x1 arm (0x800482B4) spawns one particle group per tick for
+ * every bolt whose flags carry it. The blaster passes 11 and the hyperblaster
+ * 14, so only the blaster's does. The group is six particles (record+0x4A, set
+ * to 6 at 0x8004D7A0 and used both as the follower count at 0x80048588 and as
+ * the divisor of the step at 0x80048388), life 23 and size 8192.
+ *
+ * Counted per tick rather than in total, because the console respawns the
+ * group every tick: the count at record+0x42 increments and then clamps to
+ * record+0x3A, which the spawner sets to a hard 1.
+ */
+static u32 trail_groups(const q2_sim *sim)
+{
+    u32 g, n = 0;
+
+    for (g = 0; g < sim->fx.group_count; g++) {
+        const q2_fx_group *grp = &sim->fx.group[g];
+
+        if (grp->life > 0 && grp->count == Q2_FX_BOLT_TRAIL_COUNT &&
+            grp->life <= Q2_FX_BOLT_TRAIL_LIFE &&
+            grp->size == Q2_FX_BOLT_TRAIL_SIZE)
+            n++;
+    }
+    return n;
+}
+
+static void test_bolt_trail(void)
+{
+    q2_sim   sim;
+    q2_input in;
+    s32      spawn[3] = { 0, 0, 0 };
+    u32      blaster_first, blaster_later, hyper_first, hyper_later;
+
+    printf("a blaster bolt trails and a hyperblaster bolt does not\n");
+
+    memset(&g_kill_tab, 0, sizeof(g_kill_tab));
+    g_kill_tab.loaded = true;
+    memset(&in, 0, sizeof(in));
+
+    q2_sim_init(&sim, NULL, 50);
+    q2_sim_attach_effects(&sim, &g_kill_tab, 1);
+    q2_sim_spawn(&sim, spawn, 0);
+    sim.fire_from_input = false;
+    check(q2_sim_fire(&sim).fired, "the blaster fires");
+    q2_sim_tick(&sim, &in, 12);
+    blaster_first = trail_groups(&sim);
+    q2_sim_tick(&sim, &in, 12);
+    blaster_later = trail_groups(&sim);
+    q2_sim_free(&sim);
+
+    q2_sim_init(&sim, NULL, 50);
+    q2_sim_attach_effects(&sim, &g_kill_tab, 1);
+    q2_sim_spawn(&sim, spawn, 0);
+    sim.fire_from_input = false;
+    (void)q2_sim_give_weapon(&sim, Q2_WID_HYPERBLASTER);
+    sim.combat.weapon_id = Q2_WID_HYPERBLASTER;
+    sim.combat.inv.ammo[Q2_AMMO_CELLS] = 50;
+    check(q2_sim_fire(&sim).fired, "and so does the hyperblaster");
+    q2_sim_tick(&sim, &in, 12);
+    hyper_first = trail_groups(&sim);
+    q2_sim_tick(&sim, &in, 12);
+    hyper_later = trail_groups(&sim);
+    q2_sim_free(&sim);
+
+    printf("  blaster %u then %u six-particle groups; hyperblaster %u then %u\n",
+           blaster_first, blaster_later, hyper_first, hyper_later);
+    check(blaster_first == 1,
+          "the blaster's bolt raises one six-particle group on its first tick "
+          "(0x80048588, count record+0x4A = 6)");
+    check(blaster_later >= 1,
+          "and another on the next, because the count clamps to 1 every tick "
+          "(0x800482D4 against record+0x3A)");
+    check(hyper_first == 0 && hyper_later == 0,
+          "the hyperblaster's raises none: bit 0x1 is clear in its 14 "
+          "(0x800482B4)");
+}
+
+/* ------------------------------------------------------------------------- */
 int main(void)
 {
     printf("Q2PSX-PC simulation tests\n\n");
@@ -4616,6 +4729,7 @@ int main(void)
     test_respawned_player_killer_byte();
     test_bfg_beams_damage();
     test_kill_raises_no_burst();
+    test_bolt_trail();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     printf("%s\n", g_failures == 0 ? "PASS" : "FAIL");

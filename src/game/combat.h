@@ -159,8 +159,19 @@ enum {
     Q2_MOD_2            =  2,   /* raises the +0x2F0 effect timer to 15      */
     Q2_MOD_RAIL         =  3,   /* 0x80049330                                */
     Q2_MOD_4            =  4,   /* raises the +0x2F2 effect timer to 30      */
-    Q2_MOD_5            =  5,   /* raises the +0x2F4 effect timer to 5       */
-    Q2_MOD_6            =  6,
+    /*
+     * The two ENERGY BOLT classes, and they are not mod 1.
+     *
+     * 0x8004D70C's sixth argument is stored at record+0x32 (0x8004D7B0)
+     * and handed to the damage function as a3 on every hit (0x80047EF8).
+     * The hyperblaster passes 5 (0x8004D3F0) and the blaster 6
+     * (0x8004C124); a monster's blaster passes the same pair on the
+     * `andi v0, 0x40` split at 0x800620A8 (0x800620C8 and 0x800620DC).
+     * Mod 1 is the BFG's, and giving a bolt mod 1 armed the wrong
+     * victim-side effect timer.
+     */
+    Q2_MOD_BOLT_HYPER   =  5,   /* raises the +0x2F4 effect timer to 5       */
+    Q2_MOD_BOLT         =  6,
     Q2_MOD_MELEE        =  7,   /* 0x800612F0, a creature's contact hit      */
     Q2_MOD_NO_ARMOUR    =  8,   /* 0x8003D380 — the only class armour skips  */
     Q2_MOD_ACID         =  9,   /* 0x8002E4B0; throttled to once per 400     */

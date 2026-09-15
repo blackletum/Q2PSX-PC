@@ -1546,12 +1546,18 @@ void q2_sim_combat_tick(q2_sim *sim)
                 p->node == Q2_PROJ_NODE_HELD);
 
         /*
-         * Every live projectile lights the world, from the preset the sweep at
-         * 0x80047C6C reads out of 0x800AE954 -- warm orange, outer radius 800.
-         * Raised before the step so the light sits where the bolt was drawn
-         * this frame rather than where it is about to be.
+         * The light, from the preset the sweep at 0x80047C6C reads out of
+         * 0x800AE954 -- warm orange, outer radius 800. Raised before the step
+         * so it sits where the projectile was drawn this frame rather than
+         * where it is about to be.
+         *
+         * GATED, for a bolt, on bit 0x2 of its flags (0x800481C0). Both bolt
+         * values carry it, so nothing changes today; the gate is here because
+         * the same halfword decides the body and the trail and reading one bit
+         * of it in one place and not the others is how they drift apart.
          */
-        if (!held) {
+        if (!held && (p->kind != Q2_PROJ_BOLT ||
+                      (p->flags & Q2_PROJ_FLAG_LIGHT))) {
             static const u8 glow[3]     = { Q2_PROJ_LIGHT_R, Q2_PROJ_LIGHT_G,
                                             Q2_PROJ_LIGHT_B };
             static const u8 bfg_glow[3] = { Q2_PROJ_BFG_LIGHT_R,
@@ -1565,6 +1571,27 @@ void q2_sim_combat_tick(q2_sim *sim)
                                 : Q2_PROJ_LIGHT_INNER,
                             bfg ? Q2_PROJ_BFG_LIGHT_OUTER
                                 : Q2_PROJ_LIGHT_OUTER);
+        }
+
+        /*
+         * AND THE TRAIL, which is the blaster bolt's only body — 0x800482B0's
+         * arm, every tick, before the move, because the group it raises is
+         * built around the displacement this tick is ABOUT to make
+         * (0x80048334 takes pos - disp/2, with pos still the old one).
+         */
+        if (!held && (p->flags & Q2_PROJ_FLAG_TRAIL) && sim->fx_ready) {
+            s16 disp[3];
+            int d;
+
+            for (d = 0; d < 3; d++) {
+                /* The sweep's own `vel * dt`, 0x80047D50 against
+                 * [0x800B2DB4], in the velocity's raw halfword units. */
+                s32 raw_vel = q2_projectile_raw_velocity(p, d);
+
+                disp[d] = (s16)(raw_vel * sim->cur_dt);
+            }
+            q2_fx_bolt_trail(&sim->fx, &sim->combat.rng, p->pos, disp,
+                             fx_area_resolve(sim, 0, p->pos));
         }
 
         q2_projectile_step(&sim->combat.projectiles, i, sim->gravity,

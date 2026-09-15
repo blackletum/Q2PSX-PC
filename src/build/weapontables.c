@@ -88,7 +88,31 @@ static const q2_weapon_tables k_builtin = {
     .bolt_shape = { { -10, -10, -50 }, {  10, -10, -50 },
       { -10, -10,  50 }, {  10, -10,  50 },
       { -10,  10, -50 }, {  10,  10, -50 },
-      { -10,  10,  50 }, {  10,  10,  50 } }
+      { -10,  10,  50 }, {  10,  10,  50 } },
+
+    /*
+     * bolt_face — 0x8009D664, six 20-byte rows, walked by 0x800B1E28.
+     *
+     * Read straight off the disc and left in its order. The colour on every
+     * corner at z = -50 is (255, 64, 0) and on every corner at z = +50 is
+     * (255, 255, 0), on all six faces without exception, so the console's bolt
+     * is an orange tail shading to a yellow nose. That regularity is a
+     * PROPERTY of the transcription, not the rule it was transcribed by.
+     */
+    .bolt_face = {
+      { { 0, 1, 2, 3 }, { { 255,  64, 0 }, { 255,  64, 0 },
+                          { 255, 255, 0 }, { 255, 255, 0 } } },  /* y = -10 */
+      { { 0, 4, 1, 5 }, { { 255,  64, 0 }, { 255,  64, 0 },
+                          { 255,  64, 0 }, { 255,  64, 0 } } },  /* z = -50 */
+      { { 1, 5, 3, 7 }, { { 255,  64, 0 }, { 255,  64, 0 },
+                          { 255, 255, 0 }, { 255, 255, 0 } } },  /* x = +10 */
+      { { 3, 7, 2, 6 }, { { 255, 255, 0 }, { 255, 255, 0 },
+                          { 255, 255, 0 }, { 255, 255, 0 } } },  /* z = +50 */
+      { { 2, 6, 0, 4 }, { { 255, 255, 0 }, { 255, 255, 0 },
+                          { 255,  64, 0 }, { 255,  64, 0 } } },  /* x = -10 */
+      { { 5, 4, 7, 6 }, { { 255,  64, 0 }, { 255,  64, 0 },
+                          { 255, 255, 0 }, { 255, 255, 0 } } }   /* y = +10 */
+    }
 };
 
 const q2_weapon_tables *q2_weapon_tables_builtin(void)
@@ -242,6 +266,36 @@ q2_result q2_weapon_tables_load(q2_weapon_tables *out, const disc *d,
                 goto bad;
     }
 
+    for (i = 0; i < Q2_WT_BOLT_FACES; i++) {
+        u32 base = A(Q2_WT_ADDR_BOLT_FACES) + 20 * i;
+        u32 packed;
+        int c;
+
+        /* The four indices arrive as one word, low byte first — the order
+         * 0x800B1E28's `sll 2`, `srl 6`, `srl 14` and `srl 22` unpack them in.
+         */
+        if (!q2_exe_u32(&out->exe, base, &packed))
+            goto bad;
+        for (c = 0; c < 4; c++) {
+            u32 rgbc;
+
+            out->bolt_face[i].idx[c] = (u8)((packed >> (8 * c)) & 0xFFu);
+            if (out->bolt_face[i].idx[c] >= Q2_WT_BOLT_POINTS)
+                goto bad;
+
+            if (!q2_exe_u32(&out->exe, base + 4 + 4 * (u32)c, &rgbc))
+                goto bad;
+            /* Anything but POLY_G4's opaque 0x38 means this is not the
+             * primitive the port draws, and decoding it as one would be a
+             * quiet lie. */
+            if ((rgbc >> 24) != 0x38u)
+                goto bad;
+            out->bolt_face[i].rgb[c][0] = (u8)(rgbc & 0xFFu);
+            out->bolt_face[i].rgb[c][1] = (u8)((rgbc >> 8) & 0xFFu);
+            out->bolt_face[i].rgb[c][2] = (u8)((rgbc >> 16) & 0xFFu);
+        }
+    }
+
     return Q2_OK;
 
 bad:
@@ -357,6 +411,21 @@ u32 q2_weapon_tables_diff(const q2_weapon_tables *a, const q2_weapon_tables *b,
             snprintf(label, sizeof(label), "bolt_shape[%u][%d]", i, k);
             note(report, user, &bad, label, b->bolt_shape[i][k],
                  a->bolt_shape[i][k]);
+        }
+    }
+
+    for (i = 0; i < Q2_WT_BOLT_FACES; i++) {
+        int c, k;
+        for (c = 0; c < 4; c++) {
+            snprintf(label, sizeof(label), "bolt_face[%u].idx[%d]", i, c);
+            note(report, user, &bad, label, b->bolt_face[i].idx[c],
+                 a->bolt_face[i].idx[c]);
+            for (k = 0; k < 3; k++) {
+                snprintf(label, sizeof(label), "bolt_face[%u].rgb[%d][%d]",
+                         i, c, k);
+                note(report, user, &bad, label, b->bolt_face[i].rgb[c][k],
+                     a->bolt_face[i].rgb[c][k]);
+            }
         }
     }
 

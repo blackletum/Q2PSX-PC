@@ -148,30 +148,34 @@ bool q2_entity_draw_rotation(const q2_entity *e, s16 out[3][3]);
  * The bolt's own body, as the eight corners of a 20 x 20 x 100 box oriented
  * along its direction of travel.
  *
- * WHERE THE GEOMETRY COMES FROM, and what is inferred. The eight local points
- * are `0x8009DB1C`, an executable table this port already decodes
- * (weapontables.h). The spawner at 0x8004D70C builds a rotation from the
- * bolt's direction (`jal 0x80089E38`, RotMatrix) and rotates all eight into
- * the ENTITY, at +12, +20, +28, +36, +44, +52, +60 and +68 — eight SVECTORs,
- * one `jal 0x8006FC1C` each, at 0x8004D848 through 0x8004D8B8.
+ * NO LONGER AN INFERENCE. This note used to say the console might not draw
+ * these corners, because the search for a reader stopped at the gate that
+ * guards it. The whole chain is read now:
  *
- * What is NOT established is that the console DRAWS them. It was previously
- * recorded as a collision hull, on the strength of the very next instruction
- * block: 0x8004D8D4 calls q2_coll_probe_point. But that call takes `a1 =
- * s2 + 76`, which is the field AFTER the eight corners, not the corners
- * themselves — so the probe is not their consumer, and nothing else in the
- * three references to the missile array (0x80047CD4, 0x80048B08, 0x80048C58)
- * reads them either.
+ *   0x8004D7A4  `andi v0, s1, 0x4` — the spawner writes the corners at all
+ *               only when the flags it was handed carry bit 0x4. It builds the
+ *               rotation from the bolt's direction (`jal 0x80089E38`,
+ *               RotMatrix) and rotates the eight points of 0x8009DB1C into the
+ *               record at +12, +20, +28, +36, +44, +52, +60 and +68, one
+ *               `jal 0x8006FC1C` each, 0x8004D848 through 0x8004D8B8.
+ *   0x80047F44  `andi v0, v0, 0x4` — the same bit of the same halfword, and
+ *               the per-view arm behind it is the reader: 0x80048088 `lwc2`
+ *               the corners in three `rtpt` batches (corner 5 projected twice,
+ *               into the same slot), 0x8004813C `swc2 SZ3` for the sort depth.
+ *   0x80048160  `jal 0x800B1E28(0x8009D664, 0x8009D6C8, sp+40, [0x800B2744])`
+ *               — the emitter, over the six-face table (weapontables.h).
+ *   0x80048194  `jal 0x80064FAC` links the result into the ordering table.
  *
- * So: the geometry is the disc's, the orientation is the disc's, and the
- * conclusion that these corners are what a bolt looks like is an INFERENCE
- * from "they are written per bolt and nothing else reads them". It is marked
- * here rather than presented as a transcription. Without it a bolt is
- * invisible and only its dynamic light exists, which is worse.
+ * So the geometry is the disc's, the orientation is the disc's, and so is the
+ * decision to draw it. The colour is NOT 0x800AE954 — that preset is read only
+ * by the two dynamic-light arms at 0x800481CC and 0x80048244. A bolt's body
+ * carries its own four colours per face, in the GPU header words of
+ * 0x8009D664, and it is opaque.
  *
- * The colour is the projectile's own glow from 0x800AE954 — the same preset
- * the light uses — so nothing about the appearance is invented beyond the
- * decision to draw it at all.
+ * AND A BLASTER BOLT HAS NO BODY. Bit 0x4 is clear in the 11 the blaster
+ * passes and set in the 14 the hyperblaster passes, so one is this box and the
+ * other is the particle trail bit 0x1 gives it instead (effect.h). The two are
+ * mutually exclusive across all three callers of 0x8004D70C.
  *
  * Returns the number of primitives emitted.
  */

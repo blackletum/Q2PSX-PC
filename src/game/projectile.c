@@ -68,6 +68,29 @@ static s32 raw_to_fixed(s32 raw, s32 divisor)
     return (s32)(((s64)raw * 4096) / divisor);
 }
 
+s32 q2_projectile_raw_velocity(const q2_projectile *p, int axis)
+{
+    if (!p || axis < 0 || axis > 2)
+        return 0;
+    return fixed_to_raw(p->vel[axis], velocity_divisor(p->kind));
+}
+
+/* ------------------------------------------------------------------------- */
+u16 q2_projectile_flags_for_mod(s16 mod)
+{
+    /*
+     * The three callers of 0x8004D70C pass the flags and the means of death as
+     * a pair, and there are only two pairs: (11, 6) at 0x8004C11C/0x8004C124
+     * and at 0x800620D4/0x800620DC, and (14, 5) at 0x8004D3E8/0x8004D3F0 and
+     * at 0x800620BC/0x800620C8. Anything that is not a bolt has neither.
+     */
+    if (mod == Q2_MOD_BOLT_HYPER)
+        return Q2_PROJ_FLAGS_HYPERBLASTER;
+    if (mod == Q2_MOD_BOLT)
+        return Q2_PROJ_FLAGS_BLASTER;
+    return 0;
+}
+
 /* ------------------------------------------------------------------------- */
 s32 q2_projectile_launch(q2_projectiles *list, const q2_fire_result_v2 *fire,
                          s32 owner, s32 now)
@@ -114,6 +137,9 @@ s32 q2_projectile_launch(q2_projectiles *list, const q2_fire_result_v2 *fire,
         p->kind = Q2_PROJ_BOLT;
         p->splash_radius = 0;
         p->expires = now + Q2_LIFETIME_BOLT;
+        /* record+0x22, from the fifth argument of 0x8004D70C. It decides
+         * whether this bolt trails or has a body, and the two are exclusive. */
+        p->flags = q2_projectile_flags_for_mod(p->mod);
         for (k = 0; k < 3; k++)
             p->vel[k] = s->dir[k] * 4096;      /* 1.0.12, as the mover wants */
         return index;
