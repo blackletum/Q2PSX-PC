@@ -806,11 +806,34 @@ typedef struct client {
      *
      * KILLS are the creature world's: how many of the map's placed creatures
      * are dead. Both totals are per MAP, so both reset with it.
+     *
+     * "Per MAP" is what `zone_dead`/`zone_placed` are for. The console keeps
+     * one live kills word (`0x800B29E8`, stamped into the row by `0x80022420`
+     * on every death) and one live total (`0x800B29E4`, counted once out of
+     * the whole of Common.Dat at `0x8007AB34`), and clears neither at a zone
+     * boundary — the only writer of zero is `0x80070874`'s level reset. The
+     * port cannot hold the count the same way: `client_load_creatures` frees
+     * and rebuilds the creature set at every zone load, so every `dead` flag
+     * and the `cre_in_zone` denominator go with it, and the tally reported
+     * only the zone the player happened to be standing in.
+     *
+     * So each zone's pair is kept in its own slot, written as the zone is
+     * LEFT, and the level's figure is the sum with the resident zone's half
+     * recomputed live. Indexed by zone rather than accumulated, so walking
+     * back through a gate into a zone already visited replaces that zone's
+     * slot instead of counting it twice. Cleared with `secrets_found`, on a
+     * real level change and not on a gate.
+     *
+     * `secrets_total` needs no such treatment and does not get one: it is
+     * counted out of COMMON.DAT's script, which is the MAP's file — every
+     * zone of one level recounts the same INSECRET items to the same number.
      */
     u32               secrets_total;
     u32               secrets_found;
     u32               secret_seen[64];   /* item offsets already counted */
     u32               secret_seen_count;
+    u32               zone_dead[Q2_SAVE_LEVEL_ZONES];
+    u32               zone_placed[Q2_SAVE_LEVEL_ZONES];
     /*
      * Which of the six mission-table rows this level holds, or -1 when it has
      * none — a level outside a unit, or a seventh distinct one. Claimed on
@@ -3575,24 +3598,57 @@ static void client_music_for_level(client *c, bool force);
  */
 #define Q2_LAST_UNIT             5
 
-/*
- * The pause page's status row. The same two pairs the level tally shows, so a
- * player can ask mid-level how they are doing — which is what the row is for.
- */
-static void client_menu_fill_stats(client *c)
+/* How many of the RESIDENT zone's creatures are dead, right now. */
+static u32 client_zone_dead(const client *c)
 {
-    u32 i, dead = 0;
-
-    if (!c)
-        return;
+    u32 i, d = 0;
 
     if (c->creatures_ready)
         for (i = 0; i < c->creatures.set.count; i++)
             if (c->creatures.set.monsters[i].dead)
-                dead++;
+                d++;
 
-    q2_menu_set_stats(&c->menu, (int)dead, (int)c->cre_in_zone,
-                      (int)c->secrets_found, (int)c->secrets_total);
+    return d;
+}
+
+/*
+ * Put the zone being LEFT into its slot, before the creature set that holds
+ * its answer is freed.
+ *
+ * Called at the top of every `client_load_zone`, so it runs on a zone gate, a
+ * level change, a restart and a save restore alike. Only the gate's answer
+ * ends up being used: the two clears in the load below throw the array away
+ * whenever the level itself changes, exactly where `secrets_found` is thrown
+ * away and for the same reason.
+ *
+ * An index past the array is dropped rather than clamped — the disc's highest
+ * zone file is ZONE5 and the array holds eight, so this cannot happen on a
+ * real level, and folding a stray zone into somebody else's slot would be a
+ * wrong number rather than a missing one.
+ *
+ * THE SLOT ONLY EVER RISES. Walking back through a gate into a zone already
+ * visited reloads that zone's creature set from COMMON.DAT with every `dead`
+ * flag cleared — the port carries a zone's script latches across a gate
+ * (`carry_events`) and not its casualties — so a plain assignment here would
+ * hand the level's kill count back to zero the second time the player stood
+ * in the room they cleared first. The console's counter cannot do that:
+ * `0x8007CD84` only ever adds one to `0x800B29E8`, and nothing inside a level
+ * subtracts from it. Keeping the larger of the two is how a port that rebuilds
+ * the set reproduces that, and it is a deviation only in mechanism.
+ */
+static void client_zone_stash(client *c)
+{
+    int z = c->zone_index;
+    u32 dead;
+
+    if (!c->creatures_ready || z < 0 || z >= Q2_SAVE_LEVEL_ZONES)
+        return;
+
+    dead = client_zone_dead(c);
+    if (dead > c->zone_dead[z])
+        c->zone_dead[z] = dead;
+    if (c->cre_in_zone > c->zone_placed[z])
+        c->zone_placed[z] = c->cre_in_zone;
 }
 
 /*
@@ -3608,18 +3664,66 @@ static void client_menu_fill_stats(client *c)
  * clear exactly as an out-of-zone one does, so counting live bodies made the
  * total grow as the player sprang each ambush: "3/3 kills" on a level with
  * nine.
+ *
+ * ...and the level's figure is every zone's, not the resident one's. A row is
+ * a LEVEL's — the console keys it by `MapTitle` and a map has one whatever
+ * zone is loaded — and its kills word survives a gate because the console
+ * never rebuilds the creature set inside a level. The port does rebuild, so
+ * the zones already visited are read out of their slots and only the resident
+ * zone's pair is computed from the live set. Its own slot is stale between
+ * gates and is skipped.
+ *
+ * NOT the sum of the map's placed records, which would be the other wrong
+ * number: on BASE2 that is 36 while the two zones the gates reach hold 18 and
+ * 5, so thirteen creatures the player can never meet would sit in the
+ * denominator.
  */
 static void client_level_tally(const client *c, u32 *dead, u32 *placed)
 {
-    u32 i, d = 0;
+    u32 i, d = 0, p = 0;
+    u32 res_dead   = client_zone_dead(c);
+    u32 res_placed = c->creatures_ready ? c->cre_in_zone : 0;
+    int z = c->zone_index;
 
-    if (c->creatures_ready)
-        for (i = 0; i < c->creatures.set.count; i++)
-            if (c->creatures.set.monsters[i].dead)
-                d++;
+    for (i = 0; i < Q2_SAVE_LEVEL_ZONES; i++) {
+        if ((int)i == z)
+            continue;
+        d += c->zone_dead[i];
+        p += c->zone_placed[i];
+    }
 
-    *dead   = d;
-    *placed = c->creatures_ready ? c->cre_in_zone : 0;
+    /* The resident zone's own slot is not stale — it is what was stashed the
+     * last time the player left this zone, and on a return visit the reloaded
+     * set is alive again. The larger of the two is the one that does not
+     * un-kill anything; see `client_zone_stash`. */
+    if (z >= 0 && z < Q2_SAVE_LEVEL_ZONES) {
+        if (c->zone_dead[z] > res_dead)
+            res_dead = c->zone_dead[z];
+        if (c->zone_placed[z] > res_placed)
+            res_placed = c->zone_placed[z];
+    }
+
+    *dead   = d + res_dead;
+    *placed = p + res_placed;
+}
+
+/*
+ * The pause page's status row. The same two pairs the level tally shows, so a
+ * player can ask mid-level how they are doing — which is what the row is for,
+ * and which is why it asks `client_level_tally` for them rather than counting
+ * the resident zone itself: the row used to go backwards the moment the
+ * player walked through a gate and paused again.
+ */
+static void client_menu_fill_stats(client *c)
+{
+    u32 dead, placed;
+
+    if (!c)
+        return;
+
+    client_level_tally(c, &dead, &placed);
+    q2_menu_set_stats(&c->menu, (int)dead, (int)placed,
+                      (int)c->secrets_found, (int)c->secrets_total);
 }
 
 /*
@@ -4733,6 +4837,12 @@ static bool client_load_zone(client *c, const char *map, int index)
     bool placed = false;
     bool same_map_transition = c->carry_player && c->carry_same_map &&
                                c->map[0] && client_name_eq(c->map, map);
+
+    /*
+     * The outgoing zone's kill tally, before anything below frees the set that
+     * holds it. First statement of the load for that reason.
+     */
+    client_zone_stash(c);
 
     /*
      * AND THE SCREEN GOES UP FIRST — BUT ONLY FOR A ZONE CHANGE INSIDE ONE MAP.
@@ -5910,6 +6020,11 @@ static bool client_load_zone(client *c, const char *map, int index)
                 if (!c->carry_same_map) {
                     c->secrets_found     = 0;
                     c->secret_seen_count = 0;
+                    /* The kill slots are the same question about the other
+                     * column: a zone gate must not throw away the kills made
+                     * before it, and a level change must. See `zone_dead`. */
+                    memset(c->zone_dead,   0, sizeof(c->zone_dead));
+                    memset(c->zone_placed, 0, sizeof(c->zone_placed));
                 }
                 {
                     q2_event_record rec;
@@ -10655,6 +10770,43 @@ static bool client_capture(client *c)
     }
 
     q2_save_capture_mission(&c->snapshot, &c->mission);
+    /*
+     * ...and the live counters the row's first column is a copy of. The row
+     * alone is not enough to resume a level: it holds one clamped byte per
+     * counter and nothing about WHICH secrets have counted or WHERE the kills
+     * were made. See `q2_save_level_counters`.
+     */
+    {
+        q2_save_level_counters lc;
+        u32 i;
+        int z = c->zone_index;
+
+        memset(&lc, 0, sizeof(lc));
+        lc.secrets_found     = c->secrets_found;
+        lc.secret_seen_count = c->secret_seen_count;
+        if (lc.secret_seen_count > Q2_SAVE_SECRETS_SEEN)
+            lc.secret_seen_count = Q2_SAVE_SECRETS_SEEN;
+        for (i = 0; i < lc.secret_seen_count; i++)
+            lc.secret_seen[i] = c->secret_seen[i];
+
+        for (i = 0; i < Q2_SAVE_LEVEL_ZONES; i++) {
+            lc.zone_dead[i]   = c->zone_dead[i];
+            lc.zone_placed[i] = c->zone_placed[i];
+        }
+        /* The resident zone's slot is only written when the zone is left, so
+         * take its answer from the live set the way the tally does — the
+         * larger of the two, for the reason `client_zone_stash` gives. */
+        if (z >= 0 && z < Q2_SAVE_LEVEL_ZONES) {
+            u32 live = client_zone_dead(c);
+
+            if (live > lc.zone_dead[z])
+                lc.zone_dead[z] = live;
+            if (c->creatures_ready && c->cre_in_zone > lc.zone_placed[z])
+                lc.zone_placed[z] = c->cre_in_zone;
+        }
+
+        q2_save_set_level_counters(&c->snapshot, &lc);
+    }
     /* The doors, which the client owns rather than the sim. Without them a
      * reload shuts every one the player opened AND cannot reopen it: the
      * script flags are carried, so the record that opened it has run. */
@@ -10731,6 +10883,76 @@ static bool client_apply_save(client *c, const q2_save *s)
         q2_save_apply_movers(s, &c->movers);
     if (c->creatures_ready)
         q2_save_apply_creatures(s, &c->creatures.set);
+
+    /*
+     * AND THE LIVE COUNTERS, which the restore used to destroy.
+     *
+     * `0x8003DD9C` calls `0x80022210` on the level being resumed, and that is
+     * the only caller in the executable: four `lbu`s off the restored row into
+     * the four live words. The port had the table and not the words —
+     * `client_load_zone` above has just zeroed `secrets_found` (this is not a
+     * `carry_same_map` transition), and `client_mission_update` writes the
+     * client's counters into the row every frame, so the next frame put the
+     * zero it had just been handed back into the row the save had restored.
+     * A game saved with two secrets found reloaded as 0/2 and then saved as
+     * 0/2, and every secret in the level could be walked into again.
+     *
+     * Version 7 carries the client's own state, which is a superset: the same
+     * found count plus the dedupe list and the per-zone kill slots, neither of
+     * which the console needs (see `q2_save_level_counters`). An older file
+     * has no such chunk and falls back to the console's own move, the row.
+     */
+    {
+        q2_save_level_counters lc;
+
+        if (q2_save_get_level_counters(s, &lc)) {
+            u32 i;
+
+            c->secrets_found     = lc.secrets_found;
+            c->secret_seen_count = lc.secret_seen_count;
+            if (c->secret_seen_count >
+                sizeof(c->secret_seen) / sizeof(c->secret_seen[0]))
+                c->secret_seen_count =
+                    sizeof(c->secret_seen) / sizeof(c->secret_seen[0]);
+            for (i = 0; i < c->secret_seen_count; i++)
+                c->secret_seen[i] = lc.secret_seen[i];
+
+            /*
+             * The zone slots go back whole. The resident zone's is skipped by
+             * the tally in favour of the live set, which `q2_save_apply_
+             * creatures` has just restored above — so it does not matter that
+             * the slot and the set agree, only that the zones already left do.
+             */
+            for (i = 0; i < Q2_SAVE_LEVEL_ZONES; i++) {
+                c->zone_dead[i]   = lc.zone_dead[i];
+                c->zone_placed[i] = lc.zone_placed[i];
+            }
+        } else if (c->mission_row >= 0) {
+            int secrets = 0;
+
+            /*
+             * 0x80022210, on a file from before the chunk existed. Only
+             * `secrets` is taken back: the other three counters the console
+             * reloads are derived here rather than stored — `secrets_total`
+             * is recounted from the map's INSECRET items by the load above,
+             * and both kill figures come from the creature world — so pulling
+             * them out of the row would be overwritten on the same frame by
+             * `client_mission_update` and could disagree with the creature set
+             * the save restored.
+             *
+             * DEVIATION, stated because it is visible: the seen-list cannot be
+             * recovered from a number, so a pre-version-7 save that is
+             * reloaded standing inside a secret volume can count that secret a
+             * second time and read one over the map's total. That is still the
+             * better of the two answers available — the alternative is the
+             * zero this whole block exists to stop — and it cannot happen to a
+             * save this build writes.
+             */
+            if (q2_mission_get_counts(&c->mission, c->mission_row,
+                                      &secrets, NULL, NULL, NULL))
+                c->secrets_found = (u32)secrets;
+        }
+    }
 
     /* The weapon in the hands follows the restored selection. Without this the
      * player holds whatever the fresh spawn gave them while the simulation
@@ -14590,6 +14812,16 @@ static void client_report(const client *c)
     REPORT("level.jumps_seen",      c->jumps_seen);
     REPORT("level.secrets_found",   c->secrets_found);
     REPORT("level.secrets_total",   c->secrets_total);
+    /* The mission row's Kills pair, which is the LEVEL's and not the resident
+     * zone's — `creatures.dead` below is the resident zone's live set and the
+     * two differ the moment a gate has been crossed. */
+    {
+        u32 kdead, kplaced;
+
+        client_level_tally(c, &kdead, &kplaced);
+        REPORT("level.kills_found",  kdead);
+        REPORT("level.kills_total",  kplaced);
+    }
 
     /* Where they ended up. Three integers rather than a vector, because the
      * consumer is a script and a script wants numbers it can subtract. */

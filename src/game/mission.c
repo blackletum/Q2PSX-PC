@@ -131,6 +131,30 @@ void q2_mission_set_counts(q2_mission *m, int index,
     r->kills_total   = clamp_count(kills_total);
 }
 
+/*
+ * 0x80022210. Four `lbu`/`sw` pairs off the matched row — +21 into
+ * 0x800B29FC, +22 into 0x800B29F8, +23 into 0x800B29E8, +24 into 0x800B29E4 —
+ * and nothing else. Taking it by index rather than by name is the only
+ * difference: the caller here has already resolved the name with
+ * `q2_mission_find`, which is the same compare the console's loop makes.
+ */
+bool q2_mission_get_counts(const q2_mission *m, int index,
+                           int *secrets, int *secrets_total,
+                           int *kills, int *kills_total)
+{
+    const q2_mission_row *r;
+
+    if (!m || index < 0 || index >= Q2_MISSION_ROWS)
+        return false;
+
+    r = &m->row[index];
+    if (secrets)       *secrets       = r->secrets;
+    if (secrets_total) *secrets_total = r->secrets_total;
+    if (kills)         *kills         = r->kills;
+    if (kills_total)   *kills_total   = r->kills_total;
+    return true;
+}
+
 /* 0x800220C8's two constants: the length that forces a wrap, and the size of
  * each of the two buffers it writes. */
 #define MISSION_WRAP_AT   36

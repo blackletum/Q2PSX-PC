@@ -139,7 +139,22 @@
  *
  * Version 1 was a flat format that stored a raw `q2_inventory`.
  */
-#define Q2_SAVE_VERSION    6
+/*
+ * 7 — LVLC, the level's LIVE counters: how many secrets have been found, which
+ * INSECRET items have already counted, and the per-zone kill tallies. MISN has
+ * always carried the mission table's u8 copy of the first of these, but the
+ * console restores the live globals FROM that row on a load (`0x80022210`,
+ * called once, from the save restore at `0x8003DD9C`) and the port had nothing
+ * to restore them into: the client's own `secrets_found` was zeroed by the map
+ * load and written back over the restored row on the next frame. The seen-list
+ * and the kill slots are the port's own state and have no console counterpart
+ * — see the chunk's comment in save.c.
+ *
+ * A version-6 file has no LVLC and is still read: an unknown-or-absent tag is
+ * skipped, and the restore falls back to `q2_mission_get_counts` on the row,
+ * which is `0x80022210` itself.
+ */
+#define Q2_SAVE_VERSION    7
 
 /* The oldest version read, with the migration above. Older is refused. */
 #define Q2_SAVE_VERSION_OLDEST 5
@@ -162,6 +177,38 @@
 /* Six 25-byte level records, as the MISSION screen stores them (mission.h). */
 #define Q2_SAVE_MISSION_ROWS 6
 #define Q2_SAVE_MISSION_NAME 21
+
+/*
+ * The level's live counters (LVLC, version 7).
+ *
+ * `secrets_found` is the console's `0x800B29FC`, which `0x80022210` reloads
+ * out of the mission row on a restore. The other two halves are the PORT's,
+ * and are here because the console does not need them:
+ *
+ *  - `secret_seen[]` is the dedupe list. The port counts DISTINCT INSECRET
+ *    items because the event runtime fires a volume on entry rather than
+ *    continuously (client main.c, `secrets_found`), so a restore that put the
+ *    count back without the list would let the same secret count twice and
+ *    push the figure past the map's total.
+ *  - the zone slots are how the port keeps a LEVEL's kill tally on a machine
+ *    that rebuilds the creature set at every zone gate. The console counts
+ *    kills into one global and never rebuilds, so one number sufficed there.
+ *
+ * `Q2_SAVE_SECRETS_SEEN` matches the client's own array, and
+ * `Q2_SAVE_LEVEL_ZONES` is one more than the highest ZONE<N>.DAT on the disc
+ * (ZONE5, on both retail discs), so a real level always fits.
+ */
+#define Q2_SAVE_SECRETS_SEEN 64
+#define Q2_SAVE_LEVEL_ZONES  8
+
+typedef struct q2_save_level_counters {
+    bool present;                            /* false on a pre-v7 file       */
+    u32  secrets_found;
+    u32  secret_seen_count;
+    u32  secret_seen[Q2_SAVE_SECRETS_SEEN];  /* item offsets already counted */
+    u32  zone_dead[Q2_SAVE_LEVEL_ZONES];     /* kills recorded per zone      */
+    u32  zone_placed[Q2_SAVE_LEVEL_ZONES];   /* what each zone placed        */
+} q2_save_level_counters;
 
 struct q2_mission;   /* mission.h; only the copy helpers below need it */
 
@@ -391,6 +438,9 @@ typedef struct q2_save {
     q2_save_level_stats mission[Q2_SAVE_MISSION_ROWS];
     s32  mission_unit;
 
+    /* ...and the live counters behind that table's first column. */
+    q2_save_level_counters level;
+
     s16  settings[Q2_SAVE_SETTINGS_MAX];
     u32  settings_count;
 } q2_save;
@@ -447,6 +497,15 @@ void q2_save_apply_creatures(const q2_save *s, q2_monster_set *set);
  * — the counters are inputs to the screen). Both are no-ops on NULL. */
 void q2_save_capture_mission(q2_save *s, const struct q2_mission *m);
 void q2_save_apply_mission(const q2_save *s, struct q2_mission *m);
+
+/*
+ * And the live counters the row is a copy of. `set` marks the chunk present;
+ * `get` returns false — writing nothing — for a file that has none, which is
+ * every save written before version 7, and leaves the caller to fall back to
+ * `q2_mission_get_counts` on the restored row.
+ */
+void q2_save_set_level_counters(q2_save *s, const q2_save_level_counters *lc);
+bool q2_save_get_level_counters(const q2_save *s, q2_save_level_counters *out);
 
 /* The menu settings, as an opaque run of s16 — see Q2_SAVE_SETTINGS_MAX. */
 void q2_save_set_settings(q2_save *s, const s16 *values, u32 count);

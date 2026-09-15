@@ -1285,9 +1285,87 @@ static void test_mission_and_settings(void)
     q2_mission_totals(&restored, &secrets, &secrets_total, &kills, &kills_total);
     check_eq_i(kills, 23, "the totals still add up after a round trip");
 
+    /*
+     * 0x80022210 — the counters back OUT of a row, which is what the console's
+     * save restore does and what the port had no way to do. Reading them is
+     * the fallback for a file written before LVLC existed.
+     */
+    secrets = secrets_total = kills = kills_total = -1;
+    check(q2_mission_get_counts(&restored, 0, &secrets, &secrets_total,
+                                &kills, &kills_total),
+          "a row hands its counters back");
+    check_eq_i(secrets, 2, "...the secrets found");
+    check_eq_i(secrets_total, 3, "...the secrets there are");
+    check_eq_i(kills, 14, "...the kills made");
+    check_eq_i(kills_total, 20, "...and the kills there are");
+    check(!q2_mission_get_counts(&restored, 6, &secrets, NULL, NULL, NULL),
+          "a seventh row has nothing to hand back");
+    check_eq_i(secrets, 2, "...and writes nothing when it refuses");
+
+    /* The file this save came from has no LVLC chunk yet. */
+    {
+        q2_save_level_counters lc;
+
+        check(!q2_save_get_level_counters(&loaded, &lc),
+              "a save with no live counters says so");
+    }
+
     memset(back, 0, sizeof(back));
     check_eq_i(q2_save_get_settings(&loaded, back, 8), 8, "eight settings back");
     check_eq_i(back[7], 8, "the last setting survives");
+
+    q2_save_free(&saved);
+    q2_save_free(&loaded);
+    q2_sim_free(&sim);
+    remove(tmp_path());
+}
+
+/*
+ * LVLC — the counters the mission row is a clamped copy of.
+ *
+ * The row alone cannot resume a level. It holds one byte per counter and says
+ * nothing about WHICH secrets have already counted or WHERE the kills were
+ * made, and without those two a restored game either re-counts a secret it has
+ * already banked or hands the level's kill tally back to the resident zone's.
+ */
+static void test_level_counters_round_trip(void)
+{
+    q2_sim sim;
+    q2_inventory inv;
+    q2_save saved, loaded;
+    q2_save_level_counters lc, back;
+
+    printf("the level's live counters\n");
+
+    build_state(&sim, &inv);
+    q2_save_capture(&saved, &sim, &inv, "SLES-01534", "BASE1", 1);
+
+    memset(&lc, 0, sizeof(lc));
+    lc.secrets_found     = 3;
+    lc.secret_seen_count = 3;
+    lc.secret_seen[0]    = 0x40;
+    lc.secret_seen[1]    = 0x118;
+    lc.secret_seen[2]    = 0x2A0;
+    lc.zone_dead[0]      = 5;   /* a zone left behind */
+    lc.zone_placed[0]    = 8;
+    lc.zone_dead[1]      = 2;   /* the resident one   */
+    lc.zone_placed[1]    = 10;
+    q2_save_set_level_counters(&saved, &lc);
+
+    check(q2_save_write(&saved, tmp_path()) == Q2_OK, "writes");
+    check(q2_save_read(&loaded, tmp_path()) == Q2_OK, "reads back");
+
+    memset(&back, 0, sizeof(back));
+    check(q2_save_get_level_counters(&loaded, &back),
+          "the chunk comes back present");
+    check_eq_i(back.secrets_found, 3, "the found count survives");
+    check_eq_i(back.secret_seen_count, 3, "so does the length of the list");
+    check_eq_i(back.secret_seen[1], 0x118, "and the offsets in it");
+    check_eq_i(back.zone_dead[0], 5, "a departed zone's kills survive");
+    check_eq_i(back.zone_placed[0], 8, "...with what it placed");
+    check_eq_i(back.zone_dead[1] + back.zone_dead[0], 7,
+               "and the level's tally is the sum over its zones");
+    check_eq_i(back.zone_dead[2], 0, "a zone never visited stays empty");
 
     q2_save_free(&saved);
     q2_save_free(&loaded);
@@ -1647,6 +1725,7 @@ int main(void)
     test_item_latches_round_trip();
     test_detects_corruption();
     test_mission_and_settings();
+    test_level_counters_round_trip();
     test_slots();
     test_slot_scan_survives_rubbish();
     test_settings_slots_and_ui();

@@ -38,6 +38,7 @@
 #define TAG_ENTS TAG('E', 'N', 'T', 'S')   /* per-entity mutable state        */
 #define TAG_ITEM TAG('I', 'T', 'E', 'M')   /* group order and stable item keys */
 #define TAG_MISN TAG('M', 'I', 'S', 'N')   /* the mission tallies             */
+#define TAG_LVLC TAG('L', 'V', 'L', 'C')   /* the level's live counters (v7)  */
 #define TAG_BRKS TAG('B', 'R', 'K', 'S')   /* which panes have been shot      */
 #define TAG_MOVR TAG('M', 'O', 'V', 'R')   /* which doors are open, and where */
 #define TAG_CRES TAG('C', 'R', 'E', 'S')   /* who is dead and where the rest are */
@@ -1017,6 +1018,42 @@ void q2_save_apply_mission(const q2_save *s, struct q2_mission *m)
                            s->mission[i].kills,   s->mission[i].kills_total);
 }
 
+/*
+ * The live counters behind the mission row's first column.
+ *
+ * The console has one of these three: `0x800B29FC`, the secrets-found word
+ * that `0x80022210` reloads out of the row. It needs no seen-list because its
+ * INSECRET stamp is the script's, and no zone slots because it never rebuilds
+ * the creature set inside a level. Both of the extras are the port's and are
+ * carried here rather than reconstructed, because neither can be: the offsets
+ * of the secrets already counted are not derivable from their number, and a
+ * row's single kills byte cannot say which zones they were made in.
+ */
+void q2_save_set_level_counters(q2_save *s, const q2_save_level_counters *lc)
+{
+    if (!s)
+        return;
+
+    if (!lc) {
+        memset(&s->level, 0, sizeof(s->level));
+        return;
+    }
+
+    s->level = *lc;
+    s->level.present = true;
+    if (s->level.secret_seen_count > Q2_SAVE_SECRETS_SEEN)
+        s->level.secret_seen_count = Q2_SAVE_SECRETS_SEEN;
+}
+
+bool q2_save_get_level_counters(const q2_save *s, q2_save_level_counters *out)
+{
+    if (!s || !out || !s->level.present)
+        return false;
+
+    *out = s->level;
+    return true;
+}
+
 void q2_save_set_settings(q2_save *s, const s16 *values, u32 count)
 {
     u32 i;
@@ -1826,6 +1863,72 @@ static void read_mission(rbuf *r, q2_save *s)
     }
 }
 
+/*
+ * LVLC. Written only when there is something to write, so a utility snapshot
+ * that never touched a level does not claim counters it does not have — and so
+ * `present` means what it says on the way back in.
+ *
+ * The two counts lead their arrays so a later version can widen either without
+ * a new tag; the reader takes what it can hold and steps over the rest.
+ */
+static void write_level_counters(wbuf *w, const q2_save *s)
+{
+    size_t at;
+    u32 i;
+
+    if (!s->level.present)
+        return;
+
+    at = w_chunk_begin(w, TAG_LVLC);
+    w_u32(w, s->level.secrets_found);
+    w_u32(w, s->level.secret_seen_count);
+    for (i = 0; i < s->level.secret_seen_count &&
+                i < Q2_SAVE_SECRETS_SEEN; i++)
+        w_u32(w, s->level.secret_seen[i]);
+
+    w_u32(w, (u32)Q2_SAVE_LEVEL_ZONES);
+    for (i = 0; i < Q2_SAVE_LEVEL_ZONES; i++) {
+        w_u32(w, s->level.zone_dead[i]);
+        w_u32(w, s->level.zone_placed[i]);
+    }
+    w_chunk_end(w, at);
+}
+
+static void read_level_counters(rbuf *r, q2_save *s)
+{
+    u32 n, z, i;
+
+    memset(&s->level, 0, sizeof(s->level));
+
+    s->level.secrets_found = r_u32(r);
+    n = r_u32(r);
+    for (i = 0; i < n; i++) {
+        u32 off = r_u32(r);
+
+        if (r->bad)
+            return;
+        if (i < Q2_SAVE_SECRETS_SEEN)
+            s->level.secret_seen[i] = off;
+    }
+    s->level.secret_seen_count =
+        (n > Q2_SAVE_SECRETS_SEEN) ? Q2_SAVE_SECRETS_SEEN : n;
+
+    z = r_u32(r);
+    for (i = 0; i < z; i++) {
+        u32 dead   = r_u32(r);
+        u32 placed = r_u32(r);
+
+        if (r->bad)
+            return;
+        if (i < Q2_SAVE_LEVEL_ZONES) {
+            s->level.zone_dead[i]   = dead;
+            s->level.zone_placed[i] = placed;
+        }
+    }
+
+    s->level.present = !r->bad;
+}
+
 static void write_settings(wbuf *w, const q2_save *s)
 {
     size_t at = w_chunk_begin(w, TAG_SETT);
@@ -1915,6 +2018,7 @@ static q2_result build_body(const q2_save *s, wbuf *w)
     write_movers(w, s);
     write_creatures(w, s);
     write_mission(w, s);
+    write_level_counters(w, s);
     write_settings(w, s);
 
     return w->bad ? Q2_ERR_NO_MEMORY : Q2_OK;
@@ -2084,6 +2188,7 @@ static q2_result read_body(q2_save *out, const u8 *body, size_t body_size)
         case TAG_CMBT: read_combat(&c, out);  break;
         case TAG_PROJ: read_projectiles(&c, out); break;
         case TAG_MISN: read_mission(&c, out); break;
+        case TAG_LVLC: read_level_counters(&c, out); break;
         case TAG_SETT: read_settings(&c, out); break;
 
         case TAG_EVNT:

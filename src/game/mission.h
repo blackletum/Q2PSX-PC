@@ -321,6 +321,30 @@ void q2_mission_set_counts(q2_mission *m, int index,
                            int kills, int kills_total);
 
 /*
+ * 0x80022210 — the other direction: a row's four counters back OUT.
+ *
+ * The console keeps the live counters in four words — secrets_found at
+ * `0x800B29FC`, secrets_total at `0x800B29F8`, kills_found at `0x800B29E8`,
+ * kills_total at `0x800B29E4` — and a row is the u8 copy of them at +21..+24.
+ * `0x800222B8` and the two stamps push the globals into the row; this is the
+ * one function that pulls them back, and it has exactly one caller: the save
+ * restore, at `0x8003DD9C`, on the name `0x800701B4` just resolved for the
+ * level being resumed.
+ *
+ * Without it a restored game would carry the table on screen and nothing in
+ * the simulation, which is precisely what the port did before this existed:
+ * the row said 2 secrets and the live counter said 0, and the live counter
+ * won on the next frame.
+ *
+ * Returns false — writing nothing — for an index that names no row, which is
+ * what the console's name search does when it falls off the sixth record.
+ * Any of the four out-pointers may be NULL.
+ */
+bool q2_mission_get_counts(const q2_mission *m, int index,
+                           int *secrets, int *secrets_total,
+                           int *kills, int *kills_total);
+
+/*
  * 0x800220C8 — the two centred body lines, from one string.
  *
  * Word-wrapped into `subtitle` and `footer` exactly as the console wraps it:
