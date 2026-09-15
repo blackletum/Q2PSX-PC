@@ -53,6 +53,11 @@
 #include "collision.h"
 #include "q2psx.h"
 
+/* The BIOS rand() this project already reproduces bit for bit (weapon.h). The
+ * separation pass below draws from it, and only when two bodies coincide
+ * exactly, so a forward declaration is all this header wants of it. */
+struct q2_rng;
+
 /* Entity flag bits this module reads or writes, at entity+0x44. */
 #define Q2_ENT_ON_GROUND      0x00000020u /* 0x800452D8: blocked by a floor    */
 #define Q2_ENT_ON_ENTITY      0x00000040u /* 0x800452AC: standing on an entity */
@@ -366,6 +371,98 @@ int q2_move_checked(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
                     q2_move_stuck_fn stuck_test, const void *user,
                     const q2_move_world *world);
 
+/* ------------------------------------------------------------------------- */
+/* Bodies are solid to each other — 0x80051258                                */
+/* ------------------------------------------------------------------------- */
+/*
+ * THE PART THAT MAKES A MONSTER SOMETHING YOU CANNOT WALK THROUGH.
+ *
+ * Neither the world hull nor the entity-box table has anything to do with it.
+ * The console separates bodies in the stepped mover itself, two instructions
+ * apart at the top of 0x8004583C:
+ *
+ *     80045990  jal 0x800552B4     append myself to the frame's ACTOR LIST
+ *     80045998  jal 0x80051258     run the separation pass over that list
+ *     800459A0  andi v0, v0, 2     bit 1 of the result: "I stood on a body"
+ *
+ * and the pass's whole output is a correction ADDED TO THE FRAME'S DELTA at
+ * entity+0xEC..+0xF0 — 0x80051580 and 0x800515BC — which 0x80045B70
+ * (`addiu s5, s0, 236`) then hands to the sliding move. So the push is not a
+ * teleport: it is swept through the world with the rest of the frame's motion,
+ * and a body can never be shoved into geometry.
+ *
+ * Both movers reach that one function (`xrefs 0x8004583C` gives 0x80039AC4,
+ * the player's frame, and 0x8007EE00 / 0x8007EFD0, the creature handler's), so
+ * one pass makes every body solid to every other in both directions.
+ *
+ * WHAT THE PASS DOES, disassembled:
+ *
+ *   0x80051288  decline if my own +0x10C carries 0x8000
+ *   0x80051294  build my box from pos + delta, then + mins/maxs (+0x6C/+0x72)
+ *   0x8005133C  walk the list at gp+17808..gp+17816 (0x800B2B90..0x800B2B98)
+ *   0x80051340  reject on the six-face AABB overlap against the other's own
+ *               relinked box at +0x78..+0x84 — which is what keeps a creature
+ *               one floor down out of it
+ *   0x800513E0  skip myself, by pointer
+ *   0x800513F0  skip anything whose +0x10C carries 0x8000
+ *   0x800513FC  dx^2 + dz^2 against (r + r)^2, r = entity+0x90 — a HORIZONTAL
+ *               cylinder, and +0x90 is NOT the hitscan radius at +0x94
+ *   0x800514B4  sqrt (0x8008A7E8, the GTE leading-zero one), then
+ *               pen = (r + r) - dist, and dx*pen/dist into +0xEC and
+ *               dz*pen/dist into +0xF0
+ *   0x8005158C  ...or, when the two centres coincide exactly, a random nudge
+ *               of (rand() - 16384) >> 10 on each axis, so two bodies stacked
+ *               to the unit still come apart
+ *
+ * THE "STAND ON A BODY" ARM IS NOT REPRODUCED, and the reason is in the image.
+ * 0x80051454 reads `20(sp)` and compares it against the other body's top, and
+ * nothing in 0x80051258 ever WRITES 20(sp) — the function's only stack stores
+ * are its register saves at 88..116 and its own box at 48..84. The comparand is
+ * uninitialised stack. With a leftover that looks like an address, the first
+ * test (`V < other_top`) fails and the second (`other_top < V - dy`) passes, so
+ * the console takes the push arm; the arm is effectively dead and what it would
+ * do is not determinable from the image. Reproducing it with a CORRECT feet
+ * value would be inventing behaviour, so this stops at the push.
+ *
+ * `Q2_BODY_RADIUS` is entity+0x90, written as a constant 128 by both relink
+ * sites (0x80020BB4 and 0x8005A9D4) and never by anything else, so it is the
+ * same for a player and for a Tank Commander.
+ */
+#define Q2_BODY_RADIUS 128
+
+/* The pass's return, 0x800515D4's s5. */
+#define Q2_SEPARATE_PUSHED   0x1   /* 0x800514B8 `ori s5, s5, 1` */
+#define Q2_SEPARATE_STOOD_ON 0x2   /* 0x80051490 — see above; never set here */
+
+typedef struct q2_move_body {
+    s32  pos[3];      /* +0x54: the body's ORIGIN, not its feet   */
+    s16  mins[3];     /* +0x6C                                    */
+    s16  maxs[3];     /* +0x72                                    */
+    s16  radius;      /* +0x90; Q2_BODY_RADIUS unless a caller
+                       * has a reason                             */
+    s32  id;          /* the caller's handle; -1 is never a body  */
+    bool solid;       /* !(flags & 0x8000)                        */
+} q2_move_body;
+
+typedef struct q2_move_bodies {
+    const q2_move_body *list;
+    u32                 count;
+} q2_move_bodies;
+
+/*
+ * 0x80051258 — push `delta` out of every other body it would end up inside.
+ *
+ * `self_id` is the mover's own handle, skipped the way the original skips
+ * itself by pointer; pass -1 for a mover that is not in the list. `delta` is
+ * read and written, exactly as entity+0xEC..+0xF0 is. `rng` may be NULL, in
+ * which case two exactly-coincident bodies are left alone rather than nudged.
+ *
+ * Returns the Q2_SEPARATE_* bits.
+ */
+u32 q2_move_separate(const q2_move_bodies *w, s32 self_id, const s32 pos[3],
+                     const s16 mins[3], const s16 maxs[3], s16 radius,
+                     s16 delta[3], struct q2_rng *rng);
+
 /*
  * 0x8004583C — one frame of an entity's stepped movement.
  *
@@ -373,10 +470,16 @@ int q2_move_checked(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
  * amount plus however far the lift actually got. That third move is the one
  * that decides ground contact.
  *
+ * `bodies` is the actor list the separation pass above runs over, and `self_id`
+ * / `mins` / `maxs` describe the mover inside it. NULL is a world with no other
+ * bodies in it, which is what every caller had before the pass existed.
+ *
  * Returns true when the entity finished the frame on the ground.
  */
 bool q2_move_step(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
-                  const q2_move_world *world);
+                  const q2_move_world *world,
+                  const q2_move_bodies *bodies, s32 self_id,
+                  const s16 mins[3], const s16 maxs[3], struct q2_rng *rng);
 
 /* 0x80045880: 216 unless the entity's flags carry 0x600, then 108. */
 s32 q2_move_step_height(u32 flags);

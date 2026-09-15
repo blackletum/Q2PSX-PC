@@ -122,6 +122,22 @@ void q2_log_set_level(q2_log_level level);
 q2_log_level q2_log_get_level(void);
 void q2_log(q2_log_level level, const char *fmt, ...) Q2PSX_PRINTF(2, 3);
 
+/*
+ * HOW MANY OF EACH HAVE BEEN EMITTED, so a headless run can be asserted on.
+ *
+ * A scripted run's only verdict used to be its exit code, and nothing in this
+ * client exits non-zero for a level that warned its way through the load — so
+ * "BASE3 still loads" and "BASE3 loads and complains eleven times" looked the
+ * same to a test. Counted at the point of emission rather than by grepping the
+ * log, because the log is only written at all above `g_log_level` and a run at
+ * a quieter level would otherwise report a clean sweep it never made.
+ *
+ * Counted whether or not the line was PRINTED, for the same reason: the number
+ * is about what happened, not about what was shown.
+ */
+u32  q2_log_count(q2_log_level level);
+void q2_log_counts_reset(void);
+
 #define Q2_ERROR(...) q2_log(Q2_LOG_ERROR, __VA_ARGS__)
 #define Q2_WARN(...)  q2_log(Q2_LOG_WARN,  __VA_ARGS__)
 #define Q2_INFO(...)  q2_log(Q2_LOG_INFO,  __VA_ARGS__)

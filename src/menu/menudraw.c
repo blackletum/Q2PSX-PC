@@ -57,6 +57,7 @@ void q2_menu_draw_opts_default(q2_menu_draw_opts *o, const q2_menu_font *font)
     o->bar_colour = Q2_MENU_BAR_BLUE;
     o->backdrop   = 0;
     o->backdrop_alpha = 0;
+    o->highlight_row  = -1;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -299,6 +300,10 @@ u32 q2_menu_build_ot(const q2_menu *m, psx_ot *ot,
             continue;                     /* the empty-string records */
 
         selected = (i == m->cursor) && q2_menu_item_selectable(m, i);
+        /* ...or the row the CALLER has lit, which is how 0x80079178 makes the
+         * word LOADING bright on a page with nothing selectable on it. */
+        if (i == opts->highlight_row)
+            selected = true;
         greyed   = !q2_menu_item_selectable(m, i) &&
                    i >= (int)m->page->first;
 

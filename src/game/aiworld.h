@@ -78,6 +78,7 @@ typedef struct q2_ai_world_stats {
     u32 los_blocked;
     u32 los_blocked_ent;    /* by a DOOR rather than by the hull          */
     u32 trace_blocked_ent;  /* a step trace a mover cut short             */
+    u32 trace_blocked_body; /* ...and one another BODY cut short          */
     u32 bottom_on_ent;      /* a corner whose ground was a lift, not floor*/
 } q2_ai_world_stats;
 
@@ -113,6 +114,38 @@ typedef struct q2_ai_world_bind {
      */
     const q2_move_world *ents;
 
+    /*
+     * AND THE OTHER BODIES, which are not in that list either.
+     *
+     * `0x8005BD3C` runs the hull walk, then the entity-box clip, and then —
+     * gated on the caller's mask — the ACTOR sweep:
+     *
+     *     8005BF18  lui  v0, 0x0200
+     *     8005BF1C  and  v0, s6, v0        ; the mask
+     *     8005BF20  beq  v0, zero, +0x34   ; no bit, no actors
+     *     8005BF30  addu a2, s3, zero      ; the entity to IGNORE
+     *     8005BF38  lw   v0, 0x800B2B90    ; the actor list, begin
+     *     8005BF40  lw   v1, 0x800B2B98    ; ...and end
+     *     8005BF4C  jal  0x800544EC        ; the sweep
+     *
+     * and `SV_movestep` passes MASK_MONSTERSOLID, 0x02020003, on every walking
+     * and flying step (aimove.c). So a creature is stopped by the player and by
+     * other creatures on the console, and this port's `bound_trace` dropped
+     * `ignore` on the floor and clipped doors and nothing else — which is the
+     * whole of "monsters don't collide with players" from the creature's side.
+     *
+     * The list is the sim's actor list (trace.h's `q2_move_bodies`), the same
+     * one the player's separation pass runs over, so the two halves cannot
+     * disagree about who is solid. Borrowed; NULL behaves as before.
+     *
+     * `ignore` arrives as a `q2_monster *`, and the handles in the list are the
+     * client's indices into its own creature set — so the binding is told where
+     * that set starts and turns the pointer into an index.
+     */
+    const q2_move_bodies    *bodies;
+    const struct q2_monster *body_owner_base;   /* the creature set's array   */
+    u32                      body_owner_count;
+
     /* How far below a creature ground may be and still count. The step height,
      * because a creature that can climb a step can also stand off one. */
     s32 bottom_reach;
@@ -145,6 +178,21 @@ void q2_ai_world_bind_init(q2_ai_world_bind *bind, q2_collision *coll,
  */
 void q2_ai_world_bind_entities(q2_ai_world_bind *bind,
                                const q2_move_world *ents);
+
+/*
+ * Give the binding the sim's ACTOR list, so a creature is stopped by the player
+ * and by other creatures — the arm at 0x8005BF4C above.
+ *
+ * `owner_base` is the creature set's `monsters` array and `owner_count` its
+ * length; a body whose handle is in `[0, owner_count)` belongs to
+ * `owner_base[handle]`, which is how `ignore` is recognised. Pass NULL for a
+ * caller with no creature set, and the sweep will simply never ignore anything
+ * — which is right for a caller whose only bodies are players.
+ */
+void q2_ai_world_bind_bodies(q2_ai_world_bind *bind,
+                             const q2_move_bodies *bodies,
+                             const struct q2_monster *owner_base,
+                             u32 owner_count);
 
 void q2_ai_world_bind_install(q2_ai_world_bind *bind);
 

@@ -86,6 +86,27 @@ void q2_loading_raise(q2_loading *l)
     loading_set_page(l, Q2_LOADING_PAGE_LOADING);
 
     /*
+     * AND THE STRIP GOES BACK TO THE BEGINNING.
+     *
+     * This used to restart the hold and leave `spin` alone, so the SECOND
+     * screen of a session opened wherever the first one stopped — a third of
+     * the way through the turn — and the third opened a third further on. The
+     * whole reason the strip is walked backwards is that the screen should open
+     * on the broadside cell (loading.h, "which end it starts from is most of
+     * what the player ever sees of the rotation"), and tests/test_loading.c
+     * asserts exactly that. It passed because it only ever asked a freshly
+     * zeroed struct.
+     *
+     * The console cannot have the fault: 0x80079364 ENTERS page 46 and
+     * 0x80079374 / 0x80079384 re-install both records from scratch at every
+     * transition, so every screen is a new one.
+     *
+     * Measured on a run with two screens in it: the first opened 22 pixels wide
+     * (cell 22, broadside) and the second 18 (cell 16). Both are 22 now.
+     */
+    l->spin = 0.0;
+
+    /*
      * The hold RESTARTS rather than accumulating. A transition that loads twice
      * — a level change whose arrival lands in another zone — is one screen to
      * the player, and adding the two would make it linger for a second.
@@ -291,6 +312,23 @@ u32 q2_loading_build_ot(const q2_loading *l, psx_ot *ot, int width, int height)
         mo.view_x   = 0;
         mo.view_w   = width < Q2_MENU_SCREEN_W ? width : Q2_MENU_SCREEN_W;
 
+        /*
+         * AND THE WORD IS BRIGHT — 0x80079398.
+         *
+         * The transition sets drawable 0's highlight flag right after it enters
+         * page 46, which at size 16 selects palette 70 (menufont.h, pages.c).
+         * The port had the observation written down in two places and the draw
+         * in neither: `k_loading` has `first == count == 1`, so its only row is
+         * index 0, the cursor is 1, `selected` is never true, and the word came
+         * out in `clut_text` — the sheet's blue. Measured off a capture of a
+         * real zone gate it was (64, 128, 160).
+         *
+         * Only the executable's LOADING page. QFRONT's STARTING / GAME pair is
+         * installed by `0x80101E4C` and nothing there writes the flag, so those
+         * two rows stay in the text palette.
+         */
+        if (l->menu.page && l->menu.page->id == Q2_PAGE_LOADING)
+            mo.highlight_row = 0;
 
         n += q2_menu_build_ot(&l->menu, ot, &mo);
     }

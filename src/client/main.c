@@ -585,6 +585,11 @@ typedef struct client {
     bool             *cre_model_ok;
     client_model_anim *cre_anim;
     q2_actor         *cre_actor;      /* what combat shoots at                 */
+    /*
+     * ...and what it BUMPS INTO, which is a different list with a different
+     * radius. See client_bodies_publish and q2_sim_set_bodies.
+     */
+    q2_move_body     *cre_body;
     q2_actor        **cre_target;
     client_fx_pose   *cre_fx;         /* the last drawn pose, for 0x8006CC44   */
     /*
@@ -879,6 +884,19 @@ typedef struct client {
     s32               sort_cell;
 
     bool              zone_trace;
+    /*
+     * `--report`: one machine-readable block at exit, so a scripted run has
+     * something to assert on besides its exit code.
+     *
+     * The counters below already existed and were each printed, if at all, by
+     * whichever subsystem owned them, at whichever moment it happened to be
+     * finished — which is why a harness that wanted "did anything shoot" had to
+     * grep prose. This gathers them in one place, in one shape, at one time.
+     */
+    bool              report;
+    u32               loads_done;      /* client_load_zone calls that landed  */
+    u32               loads_failed;    /* ...and ones that found no such zone */
+    u32               loading_raises;  /* screens the transitions put up      */
     const char       *move_reason;    /* set by a deliberate relocation      */
     s32               last_pos[3];    /* the player's position last tick     */
     bool              last_pos_valid;
@@ -1796,6 +1814,8 @@ static void client_free_creatures(client *c)
     free(c->cre_target);
     free(c->cre_home);
     free(c->cre_fx);
+    free(c->cre_body);
+    c->cre_body     = NULL;
     c->cre_home     = NULL;
     c->cre_model    = NULL;
     c->cre_model_ok = NULL;
@@ -1806,6 +1826,8 @@ static void client_free_creatures(client *c)
 
     if (c->creatures_ready) {
         q2_sim_set_targets(&c->sim[0], NULL, 0);
+        q2_sim_set_bodies(&c->sim[0], NULL, 0);
+        q2_ai_world_bind_bodies(&c->ai_world, NULL, NULL, 0);
         q2_creature_world_free(&c->creatures);
         c->creatures_ready = false;
     }
@@ -1845,10 +1867,13 @@ static void client_load_creatures(client *c, const s32 eye[3])
                                               sizeof(*c->cre_target));
         c->cre_fx       = (client_fx_pose *)calloc(c->creatures.set.count,
                                                    sizeof(*c->cre_fx));
+        /* The solid half of the same set — see client_bodies_publish. */
+        c->cre_body     = (q2_move_body *)calloc(c->creatures.set.count,
+                                                 sizeof(*c->cre_body));
     }
 
     if (!c->cre_model || !c->cre_model_ok || !c->cre_anim ||
-        !c->cre_actor || !c->cre_target || !c->cre_fx) {
+        !c->cre_actor || !c->cre_target || !c->cre_fx || !c->cre_body) {
         if (c->creatures.set.count)
             Q2_WARN("no memory for %u creatures", c->creatures.set.count);
         client_free_creatures(c);
@@ -2033,6 +2058,25 @@ static void client_load_creatures(client *c, const s32 eye[3])
      * next zone will again.
      */
     q2_ai_world_bind_entities(&c->ai_world, &c->sim[0].move_world);
+
+    /*
+     * AND THE OTHER BODIES, which are in neither hull either.
+     *
+     * The sim rebuilds its actor list every world tick (sim.h) from its own
+     * players plus whatever `q2_sim_set_bodies` registered — which is
+     * `client_bodies_publish` below, once per frame, from the creature set. The
+     * address handed over is the sim's `body_world` itself, whose own array
+     * moves as creatures come and go.
+     *
+     * The creature set's `monsters` array is what turns the AI's `ignore`
+     * pointer back into a handle: `q2_creature_world_load` allocates it once
+     * per zone and it does not move afterwards, so it is taken here, beside the
+     * bind that needs it, rather than at each trace.
+     */
+    q2_ai_world_bind_bodies(&c->ai_world, &c->sim[0].body_world,
+                            c->creatures_ready ? c->creatures.set.monsters
+                                               : NULL,
+                            c->creatures_ready ? c->creatures.set.count : 0);
 
     q2_ai_world_bind_install(&c->ai_world);
 
@@ -4685,32 +4729,63 @@ static bool client_load_zone(client *c, const char *map, int index)
                                c->map[0] && client_name_eq(c->map, map);
 
     /*
-     * AND THE SCREEN GOES UP FIRST.
+     * AND THE SCREEN GOES UP FIRST — BUT ONLY FOR A ZONE CHANGE INSIDE ONE MAP.
      *
-     * Every load this client makes comes through here, so this is the one
-     * place that has to know a load is happening: a level change, a zone gate,
-     * a restart, a save being restored and the front end's own arrival all
-     * reach it, and on the console all of them go through the transition that
-     * raises page 46 (loading.h).
+     * This used to raise page 46 for EVERY load: a level change, a zone gate, a
+     * restart, a save being restored and the front end's own arrival, on the
+     * reading that "on the console all of them go through the transition that
+     * raises page 46". They do not, and the executable settles it in two
+     * questions:
+     *
+     *   q2psx-inspect xrefs <disc> 0x800A3314
+     *       -> 0 calls, 1 materialised constant: 80079370, inside 0x80079178.
+     *          The record {"LOADING", 256, 124} is installed by one
+     *          instruction in the whole image, so 0x80079178 is the only thing
+     *          that can put the word up.
+     *
+     *   q2psx-inspect xrefs <disc> 0x80079178
+     *       -> 2 calls: 0x80027828 and 0x80028ACC.
+     *
+     * 0x80027828 is the ZONEGATE opcode's handler (events_rt.c transcribes
+     * 0x80027784..0x8002783C around it) and 0x80028ACC is the TELEPORT
+     * primitive's exec, which builds its twelve-byte name from a zone INDEX
+     * (0x80028A90 `lbu v0,26(s1)`, 0x80028A98 `addiu v0,v0,48` — the ASCII
+     * digit) and, on acceptance, moves the entity and drops it by 286.
+     *
+     * Both are zone changes inside one map. A LEVEL change is not one of them:
+     * a LOADMAP writes 2 into the outer state word at 0x8002DD80 and the state
+     * machine loads the map, and a unit end is state 7, the tally board at
+     * 0x80018ED8, which then writes `EndMission N` and drops into that same
+     * state 2. Neither goes near 0x80079178. Nor does a restart, a memory-card
+     * restore, or the front end.
+     *
+     * So the port was inserting a black half second at every level boundary and
+     * TWO of them at every unit end — one between the tally board and the
+     * end-of-mission placard and one after it — which is what "the loading
+     * screen shows at the end of zones" is.
+     *
+     * `same_map_transition` is exactly the two console callers: the zone gate
+     * (main loop, `carry_player`/`carry_same_map` both set) and the cross-zone
+     * TELEPORT (`client_apply_teleports`, which sets the same pair). Nothing
+     * else in this file sets both with the map unchanged.
      *
      * Raising it does not draw anything. It arms the hold, and the main loop
      * owns every frame that follows — which is deliberate: presenting from
      * inside a load would swap the buffers under a frame that has not begun,
      * and a headless capture numbers its shots by frame.
      *
-     * NOT FOR THE LOAD THAT STARTS THE RUN, and `c->running` is exactly that
-     * test: main sets it on the line before the frame loop, so every load
-     * before it — `--map`, `--zone-probe`, the front end being opened at
-     * startup — is setup rather than a transition. Two reasons, and the second
-     * is the one that decides it. A run that is told which map to stand in was
-     * never at a doorway, so there is nothing for a screen to cover. And every
-     * capture this project takes is `--frames N --shot`, which writes the LAST
-     * frame: raising it here would make `--frames 1` photograph the loading
-     * screen instead of the level, and would cost the first half second of
-     * ticks in every run whose numbers are counted per frame (AGENTS.md).
+     * `c->running` stays, and still means the load that STARTS the run: main
+     * sets it on the line before the frame loop, so `--map`, `--zone-probe` and
+     * the front end being opened at startup are setup rather than transitions.
+     * It is redundant with the carry test today — a load before the loop
+     * carries nothing — and it is kept because it is the cheaper half of the
+     * guarantee that `--frames 1 --shot` photographs the level and not the
+     * screen (AGENTS.md).
      */
-    if (c->running)
+    if (c->running && same_map_transition) {
         q2_loading_raise(&c->loading);
+        c->loading_raises++;
+    }
 
     /*
      * EVERY load announces itself, because a load is the only thing that can
@@ -4757,6 +4832,28 @@ static bool client_load_zone(client *c, const char *map, int index)
         c->carry_player   = false;
         c->carry_same_map = false;
         c->gate_name[0]   = '\0';
+
+        /*
+         * AND THE SCREEN COMES BACK DOWN, because nothing loaded.
+         *
+         * The raise above is unconditional and happens before the read, which
+         * is right — it is the console's order. What was missing is the other
+         * half: `0x80079178` only reaches `0x80079364`, the `jal 0x8001A384`
+         * that enters page 46, AFTER its two refusals, so a transition the
+         * console declines never puts a screen up at all. Here the decline is
+         * later — it is the read failing rather than a name compare — so the
+         * screen is already up and has to be taken down again.
+         *
+         * Without this, a request for a zone the map does not have is half a
+         * second of LOADING over a level that never went anywhere, which is
+         * indistinguishable, from the player's chair, from the game hanging.
+         */
+        if (c->running) {
+            q2_loading_hide(&c->loading);
+            if (c->loading_raises)
+                c->loading_raises--;
+        }
+        c->loads_failed++;
         return false;
     }
 
@@ -5086,6 +5183,37 @@ static bool client_load_zone(client *c, const char *map, int index)
                     Q2_INFO("--at (%d,%d,%d) yaw %d",
                             c->at[0], c->at[1], c->at[2], (int)c->cam.yaw);
                 }
+
+                /*
+                 * AND THE CREATURE WORLD GOES FIRST, because it borrows this
+                 * file too and the borrow is not a read-only curiosity — it is
+                 * dereferenced between here and the reload.
+                 *
+                 * `q2_creature_world.pop` points into COMMON.DAT's `Population`
+                 * chunk; creworld.h said it "borrows COMMON.DAT, which outlives
+                 * the zone", and that was true of the zone and false of the
+                 * FILE: every load re-reads COMMON, including a gate between
+                 * two zones of one map. Between the close below and
+                 * `client_load_creatures` several hundred lines down sits
+                 * `q2_sim_settle`, which ticks the world, which runs the event
+                 * runtime, which runs CREBATCH, which calls
+                 * `q2_creature_world_summon` — and that walks `w->pop`.
+                 *
+                 * AddressSanitizer on `--map JAIL3 --zone-probe`:
+                 * heap-use-after-free, 12 bytes read in `q2_pop_get_group`
+                 * (population.c:56) out of the buffer `q2_common_close` frees
+                 * here. It crashed four runs in five; the fifth read whatever
+                 * the allocator had put back and carried on, which is the worse
+                 * half of the fault.
+                 *
+                 * Freeing here rather than teaching the population to own a
+                 * copy keeps one rule instead of two: nothing holds a pointer
+                 * into COMMON.DAT across the swap. The summons those settle
+                 * passes make were never reaching this zone's creatures anyway
+                 * — the set they name is rebuilt afterwards — so nothing that
+                 * used to happen stops happening.
+                 */
+                client_free_creatures(c);
 
                 /* The sim borrows the triggers and script out of this file, so
                  * it has to outlive the zone. Release the previous map's copy
@@ -6512,6 +6640,7 @@ static bool client_load_zone(client *c, const char *map, int index)
         c->cam.roll   = view[2];
     }
 
+    c->loads_done++;
     return true;
 }
 
@@ -7892,7 +8021,38 @@ static void client_input_simulated(client *c, float dt)
             if (!m->in_use)
                 memset(c->cre_actor[i].effect, 0,
                        sizeof(c->cre_actor[i].effect));
+
+            /*
+             * AND THE SOLID, in the same pass and for the same reason: the
+             * separation the stepped mover runs (trace.h) has to be against
+             * where the creature IS this frame, not where it was when the zone
+             * loaded.
+             *
+             * `solid` is `in_use && !dead`. The console's own gate is bit
+             * 0x8000 at entity+0x10C and a corpse is appended to the list
+             * (0x8007F740), so this is narrower than the original — but the
+             * port has no equivalent of that bit, and the alternative, leaving
+             * every corpse solid forever, would wall a corridor off with the
+             * things the player has killed in it. Stated rather than implied:
+             * a body you cannot walk through is the console's, a corpse you
+             * cannot walk through is not established.
+             */
+            {
+                q2_move_body *b = &c->cre_body[i];
+                int k;
+
+                memset(b, 0, sizeof(*b));
+                for (k = 0; k < 3; k++) {
+                    b->pos[k]  = m->pos[k];
+                    b->mins[k] = m->mins[k];
+                    b->maxs[k] = m->maxs[k];
+                }
+                b->radius = Q2_BODY_RADIUS;
+                b->id     = (s32)i;
+                b->solid  = m->in_use && !m->dead;
+            }
         }
+        q2_sim_set_bodies(&c->sim[0], c->cre_body, c->creatures.set.count);
     }
 
     if (in.attack) c->player_attacks++;
@@ -13996,6 +14156,8 @@ static void usage(void)
            "                jump in the player's position while you play\n");
     printf("  --zone-probe  ...and, without playing, where each of this map's\n"
            "                zone gates leads and whether it lands anywhere\n");
+    printf("  --report      print the run's own counters at exit, one\n"
+           "                'report.<group>.<name> <integer>' per line\n");
     printf("  --ot-range N  how far the depth sort reaches, in world units\n"
            "                (default %d)\n", Q2_CAMERA_SORT_RANGE);
     printf("  --sort-data   use the zone's authored SortData (the default)\n");
@@ -14304,6 +14466,117 @@ static void client_zone_probe(client *c, const char *map)
     }
 }
 
+/* ------------------------------------------------------------------------- */
+/*
+ * `--report`: the run's own numbers, in one block, in one shape.
+ *
+ * Everything here already existed. What did not was a place to read it from:
+ * the big per-shot census in `client_write_shot` is prose, is only printed when
+ * a picture is written, and reports the moment the shutter fell rather than the
+ * run. So a scripted sweep over the whole disc could tell that the client had
+ * not crashed and nothing else — not whether a creature ever woke, whether a
+ * door ever moved, whether the level had warned its way through its load.
+ *
+ * One `key value` per line under a fixed prefix, because the consumer is a
+ * script: `report.<group>.<name> <integer>`. Integers only, so a comparison is
+ * a comparison and not a diff of English.
+ *
+ * Emitted at exit, after the frame loop and before anything is freed.
+ */
+static void client_report(const client *c)
+{
+    const q2_sim *s = &c->sim[0];
+    u32 cre_live = 0, cre_hunting = 0, cre_dead = 0, cre_moved = 0;
+
+    if (c->creatures_ready) {
+        u32 i;
+
+        for (i = 0; i < c->creatures.set.count; i++) {
+            const q2_monster *m = &c->creatures.set.monsters[i];
+
+            if (m->dead)
+                cre_dead++;
+            if (!m->in_use || m->dead)
+                continue;
+            cre_live++;
+            if (m->enemy)
+                cre_hunting++;
+            /*
+             * MOVED, not "walked": a creature the AI never reached and one
+             * whose every step was refused are both stationary, and the whole
+             * point of this figure is to tell either of them from one that is
+             * chasing. `cre_home` is the spawn position the client keeps.
+             */
+            if (c->cre_home &&
+                (m->pos[0] != c->cre_home[i * 3 + 0] ||
+                 m->pos[2] != c->cre_home[i * 3 + 2]))
+                cre_moved++;
+        }
+    }
+
+#define REPORT(name, value) Q2_INFO("report.%s %ld", name, (long)(value))
+    REPORT("run.frames",            c->frame_index);
+    REPORT("run.ticks",             s->tick_count);
+    REPORT("run.level_time",        s->level_time);
+    REPORT("run.errors",            q2_log_count(Q2_LOG_ERROR));
+    REPORT("run.warnings",          q2_log_count(Q2_LOG_WARN));
+
+    REPORT("level.loads",           c->loads_done);
+    REPORT("level.loads_failed",    c->loads_failed);
+    REPORT("level.loading_screens", c->loading_raises);
+    REPORT("level.zone",            c->zone_index);
+    REPORT("level.nodes",           c->zone.scene.node_count);
+    REPORT("level.vertices",        c->zone.points.count);
+    REPORT("level.jumps_seen",      c->jumps_seen);
+    REPORT("level.secrets_found",   c->secrets_found);
+    REPORT("level.secrets_total",   c->secrets_total);
+
+    /* Where they ended up. Three integers rather than a vector, because the
+     * consumer is a script and a script wants numbers it can subtract. */
+    REPORT("player.x",              s->player[0].pos[0]);
+    REPORT("player.y",              s->player[0].pos[1]);
+    REPORT("player.z",              s->player[0].pos[2]);
+    REPORT("player.on_ground",      s->player[0].on_ground ? 1 : 0);
+    REPORT("player.health",         s->combat.inv.health);
+    REPORT("player.armour",         s->combat.inv.armour);
+    REPORT("player.weapon",         s->combat.weapon_id);
+    REPORT("player.attacks",        c->player_attacks);
+    REPORT("player.shots",          c->shots_fired);
+    REPORT("player.shots_dry",      c->shots_dry);
+
+    REPORT("creatures.placed",      c->creatures_ready ? c->creatures.set.count : 0);
+    REPORT("creatures.live",        cre_live);
+    REPORT("creatures.hunting",     cre_hunting);
+    REPORT("creatures.dead",        cre_dead);
+    REPORT("creatures.moved",       cre_moved);
+    REPORT("creatures.thoughts",    c->ai_thoughts);
+    REPORT("creatures.swings",      c->cre_swings);
+    REPORT("creatures.shots",       c->cre_shots);
+    REPORT("creatures.sounds",      c->cre_sounds);
+    REPORT("creatures.drops",       c->cre_drops);
+    /* The three ways a creature's step can be cut short, so a run can tell
+     * "nothing blocked it" from "nothing tried to move". */
+    REPORT("creatures.traces",      c->ai_world.stats.traces);
+    REPORT("creatures.blocked_door", c->ai_world.stats.trace_blocked_ent);
+    REPORT("creatures.blocked_body", c->ai_world.stats.trace_blocked_body);
+
+    REPORT("world.movers",          c->movers_ready ? c->movers.count : 0);
+    REPORT("world.mover_boxes",     s->mover_count);
+    REPORT("world.rot_steps",       c->rot_steps);
+    REPORT("world.rot_moved",       c->rot_moved);
+    REPORT("world.breakable_hits",  s->breakable_hits);
+    REPORT("world.explosive_blasts", s->explosive_destroyed);
+    REPORT("world.triggers",        s->triggers.count);
+
+    REPORT("script.calls",          s->event_rt.call_count);
+    REPORT("script.strings",        c->script_strings);
+    REPORT("script.sounds",         c->script_sounds);
+    REPORT("script.summoned",       c->script_summoned);
+    REPORT("script.teleports",      c->script_teleports);
+    REPORT("script.units",          c->script_units);
+#undef REPORT
+}
+
 int main(int argc, char **argv)
 {
     client c;
@@ -14315,6 +14588,16 @@ int main(int argc, char **argv)
     int scale = 3;
     int i;
     u64 last;
+    /*
+     * WHAT THE PROCESS TELLS ITS CALLER.
+     *
+     * `main` used to return 0 whatever happened, including from the three
+     * `goto done` arms below — so `--map NOSUCHMAP` and `--movie TYPO` were
+     * indistinguishable, to a script, from a level that loaded and played.
+     * Every scripted sweep in this project is a subprocess whose first check is
+     * the exit code, which made that check worthless.
+     */
+    int exit_code = 0;
 
     /* Answered before any setup, and before --disc is required: someone
      * asking a binary what it is should not need a disc to find out. The
@@ -14381,6 +14664,7 @@ int main(int argc, char **argv)
             c.continues = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--ot-range") && i + 1 < argc) c.ot_range = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--zone-trace"))            c.zone_trace = true;
+        else if (!strcmp(argv[i], "--report"))                c.report = true;
         else if (!strcmp(argv[i], "--fire-triggers")) {
             /* An optional frame to fire ON, so a test can let the player take
              * damage or collect something first and then walk through the
@@ -15069,6 +15353,7 @@ no_window:
 
     if (!client_load_zone(&c, map, zone_index)) {
         fprintf(stderr, "cannot load %s zone %d\n", map, zone_index);
+        exit_code = 1;
         goto done;
     }
 
@@ -15100,6 +15385,7 @@ no_window:
             c.in_front_end = false;
         } else {
             fprintf(stderr, "no such movie: %s\n", c.film_arg);
+            exit_code = 1;
             goto done;
         }
     }
@@ -16106,6 +16392,9 @@ no_window:
         client_write_shot(&c, false);
     }
 
+    if (c.report)
+        client_report(&c);
+
 done:
     client_boot_free(&c);
     q2_loading_close(&c.loading);
@@ -16134,5 +16423,5 @@ done:
     q2_gamepads_close(&c.gamepads);
     SDL_Quit();
     disc_close(c.disc);
-    return 0;
+    return exit_code;
 }

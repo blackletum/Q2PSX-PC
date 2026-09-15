@@ -185,6 +185,53 @@ static void test_raise_restarts_rather_than_accumulating(void)
           frames);
 }
 
+/* ------------------------------------------------------------------------- */
+/*
+ * EVERY SCREEN IS A NEW SCREEN, including the second one in a session.
+ *
+ * `test_spin` asserts that a fresh screen opens on the broadside cell, and it
+ * passed for two years on a freshly zeroed struct while the shipped client got
+ * it wrong from the second transition onward: `q2_loading_raise` restarted the
+ * hold and left `spin` holding whatever the previous screen ended on. The
+ * console cannot have the fault — `0x80079364` ENTERS page 46 and
+ * `0x80079374` / `0x80079384` re-install both records from scratch at every
+ * transition — and the backwards walk exists precisely so that the first thing
+ * on screen is the logo facing the player (loading.h).
+ */
+static void test_every_raise_restarts_the_strip(void)
+{
+    q2_loading l;
+    int        i;
+
+    armed(&l);
+
+    /* One whole screen, spent. */
+    q2_loading_raise(&l);
+    for (i = 0; i < 40 && q2_loading_step(&l, 1.0 / 30.0); i++)
+        ;
+    CHECK(!l.open, "the first screen never came down");
+    CHECK(q2_loading_cell(&l) != Q2_LOADING_CELLS - 1,
+          "the first screen ended on the cell it started on, so this check "
+          "cannot tell a restart from a carry-over");
+
+    /* The next one starts where the first one did. */
+    q2_loading_raise(&l);
+    CHECK(q2_loading_cell(&l) == Q2_LOADING_CELLS - 1,
+          "the second screen opens on cell %u, not the broadside %u",
+          q2_loading_cell(&l), (u32)Q2_LOADING_CELLS - 1);
+
+    /* And a third, after a screen that was SHOWN rather than raised — the
+     * STARTING page turns the same strip on the caller's clock. */
+    q2_loading_show(&l, Q2_LOADING_PAGE_STARTING);
+    for (i = 0; i < 12; i++)
+        (void)q2_loading_step(&l, 1.0 / 30.0);
+    q2_loading_hide(&l);
+    q2_loading_raise(&l);
+    CHECK(q2_loading_cell(&l) == Q2_LOADING_CELLS - 1,
+          "a screen raised after a shown one opens on cell %u, not %u",
+          q2_loading_cell(&l), (u32)Q2_LOADING_CELLS - 1);
+}
+
 static void test_never_raised_without_assets(void)
 {
     q2_loading l;
@@ -361,6 +408,7 @@ int main(void)
     test_hold_roundoff();
     test_hold_is_a_floor_at_any_rate();
     test_raise_restarts_rather_than_accumulating();
+    test_every_raise_restarts_the_strip();
     test_never_raised_without_assets();
     test_spin();
     test_logo_lands_in_the_top_right();

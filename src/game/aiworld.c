@@ -2,6 +2,7 @@
 
 #include "worldscale.h"
 
+#include <stddef.h>
 #include <string.h>
 
 #include "aimove.h"
@@ -64,6 +65,126 @@ static bool box_is_real(const s16 mins[3], const s16 maxs[3])
     return false;
 }
 
+/*
+ * 0x800544EC's narrow phase, for a MOVE rather than for a shot.
+ *
+ * A vertical cylinder of `radius` around the body, intersected with the Y slab
+ * its box occupies, against the segment `from`..`to`. The mover's own box grows
+ * the cylinder, which is the Minkowski sum the door arm above also applies: a
+ * creature is a body and not a point, and without it a Gunner would stop with
+ * its centre against a Soldier's skin and half of it inside.
+ *
+ * `combat.c` holds the port's transcription of the same routine for the SHOT
+ * path, and this is not a second copy of it by accident: that one filters on
+ * `takedamage` (deliberately, because T_Damage rejects on that bit) and
+ * parametrises by the 286-unit hitscan radius at entity+0x94. Neither belongs
+ * to a movement clip — 0x800545E8 skips only the ignore entity and nothing
+ * else, and the body radius is +0x90.
+ *
+ * Returns the crossing point, which for a blocked step is where the creature
+ * ends up.
+ */
+static bool body_clip_segment(const s32 from[3], const s32 to[3],
+                              const q2_move_body *o,
+                              const s16 mins[3], const s16 maxs[3],
+                              s32 out[3])
+{
+    s64 d[3], oc[3];
+    s64 radius, a, bq, c, disc, root, t;
+    s32 ymin, ymax;
+    s64 grow_xz = 0;
+    s64 grow_y_lo = 0, grow_y_hi = 0;
+    int k;
+
+    for (k = 0; k < 3; k++)
+        d[k] = (s64)to[k] - from[k];
+
+    /* The mover's half-extents: horizontal into the radius, vertical into the
+     * slab, because the cylinder is what the console tests. */
+    for (k = 0; k < 3; k += 2) {
+        s64 lo = mins ? -(s64)mins[k] : 0;
+        s64 hi = maxs ?  (s64)maxs[k] : 0;
+
+        if (lo > grow_xz) grow_xz = lo;
+        if (hi > grow_xz) grow_xz = hi;
+    }
+    if (mins) grow_y_lo = -(s64)mins[1];
+    if (maxs) grow_y_hi =  (s64)maxs[1];
+    if (grow_y_lo < 0) grow_y_lo = 0;
+    if (grow_y_hi < 0) grow_y_hi = 0;
+
+    radius = (s64)o->radius + grow_xz;
+    if (radius <= 0)
+        return false;
+
+    ymin = (s32)(o->pos[1] + o->mins[1] - grow_y_hi);
+    ymax = (s32)(o->pos[1] + o->maxs[1] + grow_y_lo);
+
+    oc[0] = (s64)from[0] - o->pos[0];
+    oc[2] = (s64)from[2] - o->pos[2];
+
+    a  = d[0] * d[0] + d[2] * d[2];
+    bq = 2 * (d[0] * oc[0] + d[2] * oc[2]);
+    c  = oc[0] * oc[0] + oc[2] * oc[2] - radius * radius;
+
+    if (a == 0) {
+        /* A purely vertical move: the horizontal test is the containment one. */
+        if (c > 0)
+            return false;
+        t = 0;
+    } else {
+        s64 lo, hi, mid;
+
+        disc = bq * bq - 4 * a * c;
+        if (disc < 0)
+            return false;
+
+        /* isqrt, the shape 0x8008A7E8 has. */
+        lo = 0; hi = 0x7FFFFFFF;
+        while (lo < hi) {
+            mid = lo + (hi - lo + 1) / 2;
+            if (mid * mid <= disc) lo = mid; else hi = mid - 1;
+        }
+        root = lo;
+
+        /* The near root, in 1.0.12 along the segment. */
+        t = ((-bq - root) * Q2_TRACE_SEG_ONE) / (2 * a);
+        if (t > Q2_TRACE_SEG_ONE)
+            return false;
+        if (t < 0) {
+            s64 leave = ((-bq + root) * Q2_TRACE_SEG_ONE) / (2 * a);
+
+            if (leave <= 0)
+                return false;      /* the whole segment is past it */
+            t = 0;                 /* started inside */
+        }
+    }
+
+    for (k = 0; k < 3; k++)
+        out[k] = (s32)(from[k] + (d[k] * t) / Q2_TRACE_SEG_ONE);
+
+    /* The Y slab, tested at the crossing: the cylinder is unbounded and the
+     * body is not. */
+    if (out[1] < ymin || out[1] > ymax)
+        return false;
+
+    /* Only a crossing that shortens the move is one. */
+    {
+        s64 had = 0, now = 0;
+
+        for (k = 0; k < 3; k++) {
+            s64 was = (s64)to[k] - from[k];
+            s64 is  = (s64)out[k] - from[k];
+
+            had += was * was;
+            now += is * is;
+        }
+        if (now >= had)
+            return false;
+    }
+    return true;
+}
+
 static void bound_trace(void *user, const s32 start[3], const s16 mins[3],
                         const s16 maxs[3], const s32 end[3],
                         const q2_monster *ignore, u32 mask, q2_ai_trace *out)
@@ -74,15 +195,15 @@ static void bound_trace(void *user, const s32 start[3], const s16 mins[3],
     s32 node = -1;
 
     /*
-     * `ignore` is still dropped, and CREATURES AND BODIES still do not clip:
-     * the port has no per-creature box list to hand this. `mask` is now read
-     * for the one bit that matters — 0x02000000, which SV_movestep sets
-     * (0x02020003 at 0x8005FE7C and 0x80060014) and which is what turns the
-     * entity clip at 0x800544EC on. The entity list it clips against here is
-     * the mover set: the doors and lifts, which are the entities a walker
-     * actually has to be stopped by.
+     * `mask` is read for the one bit that matters — 0x02000000, which
+     * SV_movestep sets (0x02020003 at 0x8005FE7C and 0x80060014) and which is
+     * what turns the entity clip on. Behind it the console runs TWO passes:
+     * the entity boxes (the doors and lifts, 0x80053974) and then the ACTOR
+     * list (0x800544EC), and `ignore` belongs to the second. It used to be
+     * dropped here with a note saying "CREATURES AND BODIES still do not clip:
+     * the port has no per-creature box list to hand this"; it has one now, and
+     * the second pass is at the end of this function.
      */
-    (void)ignore;
 
     memset(out, 0, sizeof(*out));
 
@@ -176,6 +297,50 @@ static void bound_trace(void *user, const s32 start[3], const s16 mins[3],
             pos[1] = mh.pos[1];
             pos[2] = mh.pos[2];
             b->stats.trace_blocked_ent++;
+        }
+    }
+
+    /*
+     * AND THE OTHER BODIES — 0x8005BF4C, behind the same mask bit.
+     *
+     * Clipped from the START to wherever the hull and the doors left the move,
+     * so the nearest of the three wins with no fractions to compare, exactly as
+     * the door arm above does.
+     *
+     * `ignore` is honoured here and nowhere else in this function, which is why
+     * it stopped being `(void)ignore`: 0x8005BF30 puts the caller's own entity
+     * in a2 and 0x800545E8 skips it by pointer. Without that a creature's first
+     * step would end on its own cylinder and no creature would ever move again.
+     *
+     * The cylinder's radius is the BODY's, `Q2_BODY_RADIUS` — the same +0x90
+     * the separation pass reads — and not the actor's own 286-unit hitscan
+     * radius at +0x94. Using the latter would make a creature refuse to
+     * approach anything closer than four times its own width.
+     */
+    if (b->bodies && b->bodies->list && (mask & Q2_MASK_ENTITY_BIT)) {
+        s32 ignore_id = -1;
+        u32 i;
+
+        if (ignore && b->body_owner_base && b->body_owner_count) {
+            ptrdiff_t k = ignore - b->body_owner_base;
+
+            if (k >= 0 && (u32)k < b->body_owner_count)
+                ignore_id = (s32)k;
+        }
+
+        for (i = 0; i < b->bodies->count; i++) {
+            const q2_move_body *o = &b->bodies->list[i];
+            s32 hit[3];
+
+            if (!o->solid || o->id == ignore_id)
+                continue;
+            if (!body_clip_segment(start, pos, o, mins, maxs, hit))
+                continue;
+
+            pos[0] = hit[0];
+            pos[1] = hit[1];
+            pos[2] = hit[2];
+            b->stats.trace_blocked_body++;
         }
     }
 
@@ -383,6 +548,21 @@ void q2_ai_world_bind_entities(q2_ai_world_bind *bind,
      * rest of the level. The clip copes with a count of zero on its own.
      */
     bind->ents = ents;
+}
+
+void q2_ai_world_bind_bodies(q2_ai_world_bind *bind,
+                             const q2_move_bodies *bodies,
+                             const struct q2_monster *owner_base,
+                             u32 owner_count)
+{
+    if (!bind)
+        return;
+
+    /* Stored as handed over, for the reason `_bind_entities` gives: the sim
+     * rebuilds this list every tick and its count moves with the level. */
+    bind->bodies           = bodies;
+    bind->body_owner_base  = owner_base;
+    bind->body_owner_count = owner_count;
 }
 
 void q2_ai_world_bind_install(q2_ai_world_bind *bind)

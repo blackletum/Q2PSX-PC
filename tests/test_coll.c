@@ -500,7 +500,7 @@ static void test_step_move(void)
     ent.max_slope_ny = 2048;
 
     delta[0] = 300; delta[1] = 0; delta[2] = 0;
-    q2_move_step(&c, &ent, delta, NULL);
+    q2_move_step(&c, &ent, delta, NULL, NULL, -1, NULL, NULL, NULL);
 
     check_eq_i(ent.pos[0], 800, "an airborne slide moves the full distance");
     check_eq_i(ent.pos[1], 500,
@@ -533,7 +533,7 @@ static void test_step_move(void)
     ent.flags = Q2_ENT_ON_GROUND;
 
     delta[0] = 300; delta[1] = 0; delta[2] = 0;
-    q2_move_step(&c, &ent, delta, NULL);
+    q2_move_step(&c, &ent, delta, NULL, NULL, -1, NULL, NULL, NULL);
 
     check_eq_i(ent.pos[0], 800, "walking moves the full distance when nothing is in the way");
     check_eq_i(ent.pos[1], 500,
@@ -549,7 +549,7 @@ static void test_step_move(void)
     ent.flags = Q2_ENT_ON_GROUND;
 
     delta[0] = 300; delta[1] = 0; delta[2] = 0;
-    q2_move_step(&c, &ent, delta, NULL);
+    q2_move_step(&c, &ent, delta, NULL, NULL, -1, NULL, NULL, NULL);
 
     check(ent.flags & Q2_ENT_ON_GROUND, "within a step of the floor, the drop lands");
     check_eq_i(ent.pos[1], 1000, "resting exactly on it");
@@ -567,7 +567,7 @@ static void test_step_move(void)
     ent.max_slope_ny = 2048;
 
     delta[0] = 0; delta[1] = 300; delta[2] = 0;
-    q2_move_step(&c, &ent, delta, NULL);
+    q2_move_step(&c, &ent, delta, NULL, NULL, -1, NULL, NULL, NULL);
 
     check(ent.flags & Q2_ENT_ON_GROUND, "a falling entity lands on the floor");
 
@@ -589,7 +589,7 @@ static void test_step_move(void)
     ent.flags = Q2_ENT_ON_GROUND;
 
     delta[0] = 300; delta[1] = 0; delta[2] = 0;
-    q2_move_step(&c, &ent, delta, NULL);
+    q2_move_step(&c, &ent, delta, NULL, NULL, -1, NULL, NULL, NULL);
 
     check(ent.pos[0] <= 2000, "a wall stops the move");
     check(ent.pos[0] > 1900, "but does not undo it");
@@ -938,6 +938,119 @@ static void test_contents(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/* 0x80051258 — bodies push each other apart                                  */
+/* ------------------------------------------------------------------------- */
+static void body_at(q2_move_body *b, s32 id, s32 x, s32 y, s32 z)
+{
+    int k;
+
+    memset(b, 0, sizeof(*b));
+    b->pos[0] = x;
+    b->pos[1] = y;
+    b->pos[2] = z;
+    for (k = 0; k < 3; k++) {
+        b->mins[k] = -286;
+        b->maxs[k] =  286;
+    }
+    b->radius = Q2_BODY_RADIUS;
+    b->id     = id;
+    b->solid  = true;
+}
+
+static void test_separate(void)
+{
+    q2_move_body list[3];
+    q2_move_bodies w;
+    s16 mins[3] = { -286, -286, -286 };
+    s16 maxs[3] = {  286,  286,  286 };
+    s16 delta[3];
+    s32 pos[3];
+    u32 r;
+
+    printf("bodies push each other apart\n");
+
+    w.list  = list;
+    w.count = 1;
+
+    /* Far enough apart that nothing happens: 300 units between centres, and
+     * the two radii together reach 256. */
+    body_at(&list[0], 7, 300, 0, 0);
+    pos[0] = 0; pos[1] = 0; pos[2] = 0;
+    delta[0] = 0; delta[1] = 0; delta[2] = 0;
+    r = q2_move_separate(&w, 1, pos, mins, maxs, Q2_BODY_RADIUS, delta, NULL);
+    check(r == 0, "a body 300 units away pushes");
+    check(delta[0] == 0 && delta[2] == 0, "...and moved the delta");
+
+    /* Inside the cylinder: 200 apart on X, so 56 units of penetration, all of
+     * it along -X because that is where the other body is. */
+    body_at(&list[0], 7, 200, 0, 0);
+    delta[0] = 0; delta[1] = 0; delta[2] = 0;
+    r = q2_move_separate(&w, 1, pos, mins, maxs, Q2_BODY_RADIUS, delta, NULL);
+    check((r & Q2_SEPARATE_PUSHED) != 0, "an overlapping body does not push");
+    check(delta[0] == -56, "the push is not the penetration");
+    check(delta[1] == 0, "the push moved the vertical delta");
+    check(delta[2] == 0, "the push moved a perpendicular axis");
+
+    /* The SAME body, named as self, is skipped by handle the way the original
+     * skips it by pointer. */
+    delta[0] = 0; delta[1] = 0; delta[2] = 0;
+    r = q2_move_separate(&w, 7, pos, mins, maxs, Q2_BODY_RADIUS, delta, NULL);
+    check(r == 0 && delta[0] == 0, "a body pushed itself");
+
+    /* A body flagged out of the list is skipped too. */
+    list[0].solid = false;
+    delta[0] = 0; delta[1] = 0; delta[2] = 0;
+    r = q2_move_separate(&w, 1, pos, mins, maxs, Q2_BODY_RADIUS, delta, NULL);
+    check(r == 0 && delta[0] == 0, "a body that is not solid pushed");
+
+    /*
+     * VERTICAL SEPARATION IS THE BOX'S JOB. The cylinder is horizontal and
+     * unbounded, so without the six-face reject at 0x8005133C a creature on the
+     * floor below would shove the player sideways. 600 units of Y between two
+     * 286-half-height bodies leaves no overlap.
+     */
+    body_at(&list[0], 7, 0, 600, 0);
+    delta[0] = 0; delta[1] = 0; delta[2] = 0;
+    r = q2_move_separate(&w, 1, pos, mins, maxs, Q2_BODY_RADIUS, delta, NULL);
+    check(r == 0, "a body 600 units below pushed");
+
+    /* ...and at 300 it does overlap, and being dead-centre needs the RNG to
+     * pick a direction. Without one it is left alone rather than guessed at. */
+    body_at(&list[0], 7, 0, 300, 0);
+    delta[0] = 0; delta[1] = 0; delta[2] = 0;
+    r = q2_move_separate(&w, 1, pos, mins, maxs, Q2_BODY_RADIUS, delta, NULL);
+    check((r & Q2_SEPARATE_PUSHED) != 0, "an overlapping body above does not push");
+    check(delta[0] == 0 && delta[2] == 0,
+          "coincident bodies were nudged with no generator");
+
+    /*
+     * THE DELTA IS PART OF THE TEST, not just its output: 0x80051294 builds the
+     * box from pos + delta. A body 400 away is clear, and a 250-unit step
+     * toward it is not.
+     */
+    body_at(&list[0], 7, 400, 0, 0);
+    delta[0] = 0; delta[1] = 0; delta[2] = 0;
+    r = q2_move_separate(&w, 1, pos, mins, maxs, Q2_BODY_RADIUS, delta, NULL);
+    check(r == 0, "a body 400 units away pushed a standing body");
+
+    delta[0] = 250; delta[1] = 0; delta[2] = 0;
+    r = q2_move_separate(&w, 1, pos, mins, maxs, Q2_BODY_RADIUS, delta, NULL);
+    check((r & Q2_SEPARATE_PUSHED) != 0,
+          "a step INTO a body was not separated");
+    check(delta[0] < 250, "the step was not shortened");
+
+    /* Two bodies at once, both pushing: the corrections accumulate, as the
+     * original's `+=` at 0x8005157C does. */
+    w.count = 2;
+    body_at(&list[0], 7, 200, 0, 0);
+    body_at(&list[1], 8, 0, 0, 200);
+    delta[0] = 0; delta[1] = 0; delta[2] = 0;
+    r = q2_move_separate(&w, 1, pos, mins, maxs, Q2_BODY_RADIUS, delta, NULL);
+    check(delta[0] == -56 && delta[2] == -56,
+          "two bodies did not both push");
+}
+
+/* ------------------------------------------------------------------------- */
 int main(void)
 {
     printf("collision model\n\n");
@@ -955,6 +1068,7 @@ int main(void)
     test_world_sweep();
     test_clip_segment();
     test_contents();
+    test_separate();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;

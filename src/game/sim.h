@@ -680,6 +680,31 @@ typedef struct q2_sim {
     q2_move_world   move_world;
 
     /*
+     * THE ACTOR LIST — 0x800B2B90..0x800B2B98, and it is not the box table.
+     *
+     * A 32-slot array of live entity pointers, double-buffered and swapped each
+     * frame at 0x8005525C; `0x800552B4` appends to it and the stepped mover
+     * 0x8004583C appends the entity it is about to move (0x80045990) before
+     * running the separation pass over it (0x80045998). That pass is what makes
+     * a creature something a player cannot walk through, and the port had
+     * nothing corresponding to it — `move_world` above is doors, glass and
+     * trigger brushes, and no creature was ever in it.
+     *
+     * Rebuilt each tick from the sim's own players and from whatever the owner
+     * has registered with `q2_sim_set_bodies` (the creatures; the client keeps
+     * them). Owned here rather than borrowed because the players have to go in
+     * it and only the sim has them.
+     */
+    q2_move_body   *bodies;
+    u32             body_count;
+    u32             body_capacity;
+    q2_move_bodies  body_world;
+
+    /* What the owner registered, kept so the rebuild can copy it. Borrowed. */
+    const q2_move_body *extra_bodies;
+    u32                 extra_body_count;
+
+    /*
      * Take up a better weapon the moment it is picked up.
      *
      * ON by default and a deliberate deviation from the disc, which only
@@ -1532,6 +1557,22 @@ void q2_sim_trace(q2_sim *sim, const s32 start[3], const s32 end[3],
  * caller keeps ownership and may pass NULL to clear it.
  */
 void q2_sim_set_targets(q2_sim *sim, q2_actor **targets, u32 count);
+
+/*
+ * Register the SOLID bodies the player can walk into — the other half of the
+ * actor list at 0x800B2B90 (see `q2_sim.bodies`).
+ *
+ * Separate from `q2_sim_set_targets` because the two lists answer different
+ * questions and the console keeps them apart too: the target list is what a
+ * shot sweeps (0x800544EC, radius entity+0x94 = 286) and this is what the
+ * stepped mover separates (0x80051258, radius entity+0x90 = 128). A corpse is
+ * on one and not the other.
+ *
+ * The sim copies the entries into its own array on the next tick; the caller
+ * keeps ownership of what it passes and may pass NULL to clear it. The sim adds
+ * its own players, so a caller registers creatures only.
+ */
+void q2_sim_set_bodies(q2_sim *sim, const q2_move_body *bodies, u32 count);
 
 /* Reset the combat state to a freshly spawned player: the blaster, no other
  * weapon, an empty projectile list. Called by q2_sim_init. */

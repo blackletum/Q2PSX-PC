@@ -7,6 +7,9 @@
 
 static q2_log_level g_log_level = Q2_LOG_INFO;
 
+/* One per level, indexed by it. See q2_log_count. */
+static u32 g_log_counts[Q2_LOG_TRACE + 1];
+
 const char *q2_result_str(q2_result r)
 {
     switch (r) {
@@ -25,10 +28,27 @@ const char *q2_result_str(q2_result r)
 void q2_log_set_level(q2_log_level level) { g_log_level = level; }
 q2_log_level q2_log_get_level(void)       { return g_log_level; }
 
+u32 q2_log_count(q2_log_level level)
+{
+    if ((int)level < 0 || (int)level > Q2_LOG_TRACE)
+        return 0;
+    return g_log_counts[level];
+}
+
+void q2_log_counts_reset(void)
+{
+    memset(g_log_counts, 0, sizeof(g_log_counts));
+}
+
 void q2_log(q2_log_level level, const char *fmt, ...)
 {
     static const char *const tag[] = { "error", "warn ", "info ", "debug", "trace" };
     va_list ap;
+
+    /* Before the level gate: the count is of what HAPPENED, not of what was
+     * printed, so a run at a quieter level still reports its warnings. */
+    if ((int)level >= 0 && (int)level <= Q2_LOG_TRACE)
+        g_log_counts[level]++;
 
     if (level > g_log_level)
         return;

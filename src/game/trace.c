@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "weapon.h"      /* q2_rng_next — the separation pass's coincident draw */
 #include "worldscale.h"
 
 /* ------------------------------------------------------------------------- */
@@ -770,11 +771,144 @@ int q2_move_checked(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
 }
 
 /* ------------------------------------------------------------------------- */
+/* 0x80051258 — bodies push each other apart                                  */
+/* ------------------------------------------------------------------------- */
+/* The shape 0x8008A7E8 has; the same routine ai.c keeps for the same reason. */
+static s32 separate_isqrt(s64 n)
+{
+    s64 x, y;
+
+    if (n <= 0)
+        return 0;
+
+    x = n;
+    y = (x + 1) / 2;
+    while (y < x) {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+    return (s32)x;
+}
+
+u32 q2_move_separate(const q2_move_bodies *w, s32 self_id, const s32 pos[3],
+                     const s16 mins[3], const s16 maxs[3], s16 radius,
+                     s16 delta[3], struct q2_rng *rng)
+{
+    /*
+     * MY BOX, WHERE THE FRAME WILL LEAVE ME — 0x80051294..0x8005132C builds it
+     * from pos + delta and only then adds mins and maxs. Testing where I am
+     * would let a body walk into another one and be pushed out next frame,
+     * which is the flicker this avoids.
+     */
+    s32 at[3], box_min[3], box_max[3];
+    u32 result = 0;
+    u32 i;
+    int k;
+
+    if (!w || !w->list || !w->count || !pos || !delta)
+        return 0;
+
+    for (k = 0; k < 3; k++) {
+        at[k]      = pos[k] + delta[k];
+        box_min[k] = at[k] + (mins ? mins[k] : 0);
+        box_max[k] = at[k] + (maxs ? maxs[k] : 0);
+    }
+
+    for (i = 0; i < w->count; i++) {
+        const q2_move_body *o = &w->list[i];
+        s32 omin[3], omax[3];
+        s64 dx, dz, d2, reach;
+        s32 dist, pen;
+        bool clear = false;
+
+        /* 0x800513E0 skips self by pointer; the port's handle says the same
+         * thing and survives the list being rebuilt each tick. */
+        if (!o->solid || o->id == self_id)
+            continue;
+
+        for (k = 0; k < 3; k++) {
+            omin[k] = o->pos[k] + o->mins[k];
+            omax[k] = o->pos[k] + o->maxs[k];
+        }
+
+        /*
+         * 0x8005133C..0x800513CC — the six-face reject, and it is what keeps
+         * the horizontal cylinder below from reaching a creature standing one
+         * floor down. Without it a body directly above or below another would
+         * be shoved sideways.
+         */
+        for (k = 0; k < 3; k++) {
+            if (box_max[k] < omin[k] || omax[k] < box_min[k]) {
+                clear = true;
+                break;
+            }
+        }
+        if (clear)
+            continue;
+
+        /*
+         * 0x800513FC..0x8005144C — dx^2 + dz^2 against (r + r)^2. X and Z only:
+         * 0x80051400 reads +0x54 and 0x80051414 reads +0x5C, and nothing reads
+         * +0x58. The vertical axis has already had its say in the box test.
+         */
+        dx = (s64)at[0] - o->pos[0];
+        dz = (s64)at[2] - o->pos[2];
+        d2 = dx * dx + dz * dz;
+        reach = (s64)radius + o->radius;
+        if (d2 >= reach * reach)
+            continue;
+
+        result |= Q2_SEPARATE_PUSHED;
+
+        /*
+         * 0x800514EC — two bodies at exactly the same X and Z have no direction
+         * to be pushed along, so the original draws one: `(rand() - 16384) >> 10`
+         * on each axis, which is +/- 16 units. Without an RNG there is nothing
+         * honest to put here, so the pair is left to the next frame.
+         */
+        if (dx == 0 && dz == 0) {
+            if (rng) {
+                delta[0] = (s16)(delta[0] + ((q2_rng_next(rng) - 16384) >> 10));
+                delta[2] = (s16)(delta[2] + ((q2_rng_next(rng) - 16384) >> 10));
+            }
+            continue;
+        }
+
+        /* 0x800514B4 the root, 0x800514E8 the penetration, 0x8005157C and
+         * 0x800515B8 the two accumulates. Integer divides, as the original's
+         * are — this is 16-bit arithmetic all the way down. */
+        dist = separate_isqrt(d2);
+        if (dist <= 0)
+            continue;
+        pen = (s32)reach - dist;
+        if (pen <= 0)
+            continue;
+
+        delta[0] = (s16)(delta[0] + (s32)((dx * pen) / dist));
+        delta[2] = (s16)(delta[2] + (s32)((dz * pen) / dist));
+    }
+
+    return result;
+}
+
+/* ------------------------------------------------------------------------- */
 /* 0x8004583C — the stepped frame move                                        */
 /* ------------------------------------------------------------------------- */
-bool q2_move_step(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
-                  const q2_move_world *world)
+bool q2_move_step(q2_collision *coll, q2_move_ent *ent, const s16 delta_in[3],
+                  const q2_move_world *world,
+                  const q2_move_bodies *bodies, s32 self_id,
+                  const s16 mins[3], const s16 maxs[3], struct q2_rng *rng)
 {
+    /*
+     * THE FRAME'S DELTA IS A LOCAL, because the separation pass writes to it.
+     *
+     * 0x80051258 accumulates its push into entity+0xEC..+0xF0, which is the
+     * entity's own delta and is what 0x80045B70 then hands to the slide. The
+     * port's callers pass the delta in rather than keeping it on the entity, so
+     * the copy is where the write lands; the integrator rewrites the caller's
+     * every tick anyway, exactly as the console's does.
+     */
+    s16 delta[3];
     s32 step;
     s32 saved_y;
     s32 drop;
@@ -783,8 +917,21 @@ bool q2_move_step(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
     s32 pre_pos[3],  pre_node;
     s32 post_pos[3], post_node;
 
-    if (!coll || !ent || !delta)
+    if (!coll || !ent || !delta_in)
         return false;
+
+    delta[0] = delta_in[0];
+    delta[1] = delta_in[1];
+    delta[2] = delta_in[2];
+
+    /*
+     * 0x80045990 / 0x80045998 — the append and the separation, at the TOP of
+     * the stepped move and before anything reads the flags. The append is the
+     * caller's job here: `bodies` is the list, already published.
+     */
+    if (bodies)
+        (void)q2_move_separate(bodies, self_id, ent->pos, mins, maxs,
+                               Q2_BODY_RADIUS, delta, rng);
 
     step    = q2_move_step_height(ent->flags);
     saved_y = ent->pos[1];

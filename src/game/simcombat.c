@@ -321,6 +321,14 @@ void q2_sim_set_targets(q2_sim *sim, q2_actor **targets, u32 count)
     sim->combat.target_count = targets ? count : 0;
 }
 
+void q2_sim_set_bodies(q2_sim *sim, const q2_move_body *bodies, u32 count)
+{
+    if (!sim)
+        return;
+    sim->extra_bodies      = bodies;
+    sim->extra_body_count  = bodies ? count : 0;
+}
+
 bool q2_sim_give_weapon(q2_sim *sim, int weapon_id)
 {
     const q2_weapon_tables *t = q2_weapon_tables_builtin();

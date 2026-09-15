@@ -115,6 +115,25 @@ typedef struct q2_menu_draw_opts {
      * asks for it here. Alpha 0 leaves the world visible. */
     u16 backdrop;
     int backdrop_alpha;
+
+    /*
+     * A ROW DRAWN BRIGHT WITHOUT BEING SELECTED. -1 for none, which is every
+     * ordinary page.
+     *
+     * The highlight palette normally follows the cursor, and on a page with
+     * nothing navigable on it the cursor is the terminator, so nothing is ever
+     * bright. That is right for RESTARTING and QUITTING and wrong for LOADING,
+     * because the transition that opens LOADING writes the flag itself:
+     * `0x80079398 sh 1, 0x800C3638` is drawable 0's `+0x48`, the highlight
+     * (menufont.h), set immediately after `0x80079364` enters page 46. There
+     * are exactly two writers of that address in the image — the generic
+     * selection row at `0x8001D4F4`, and this one.
+     *
+     * Carried here rather than in the page table because the console's write is
+     * in the TRANSITION and not in the page: the same records drawn by anything
+     * else would not be bright.
+     */
+    int highlight_row;
 } q2_menu_draw_opts;
 
 void q2_menu_draw_opts_default(q2_menu_draw_opts *o, const q2_menu_font *font);

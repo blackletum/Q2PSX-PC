@@ -116,6 +116,7 @@ void q2_sim_free(q2_sim *sim)
     free(sim->volume_damage);
     free(sim->volume_mod);
     free(sim->volume_env);
+    free(sim->bodies);
     memset(sim, 0, sizeof(*sim));
 }
 
@@ -1069,6 +1070,107 @@ static void mover_part_box(const q2_scene *scene, s32 node,
         min_out[k] = n.bbox_min[k];
         max_out[k] = n.bbox_max[k];
     }
+}
+
+/* ------------------------------------------------------------------------- */
+/* The actor list the separation pass runs over — 0x800B2B90                  */
+/* ------------------------------------------------------------------------- */
+/*
+ * THE PLAYER'S BODY, and it is the one box in the game that is not on its
+ * entity.
+ *
+ * worldscale.h settles it: SecondaryCol is PrimaryColl eroded by 286 on all six
+ * axes, so the player's hull is baked into the geometry and the whole player
+ * call chain reads no per-entity bounds at all. The separation pass needs one
+ * anyway, because it tests a box against the OTHER body's box before it tests
+ * the cylinder — and a player with a degenerate box would clear every reject
+ * and be pushed by a creature on the floor below.
+ *
+ * 286 on every axis is therefore the player's, stated here rather than taken
+ * from `Q2_SWEEP_HALF_EXTENT` by coincidence — that constant is the sweep's
+ * inflation and this is a body.
+ */
+static const s16 q2_player_body_mins[3] = { -286, -286, -286 };
+static const s16 q2_player_body_maxs[3] = {  286,  286,  286 };
+
+/*
+ * Handles in the actor list. A player is `-(slot + 2)`, so player 0 is -2 and
+ * no player can ever collide with a creature's index or with the -1 that means
+ * "not in the list".
+ */
+static s32 sim_body_id_for_player(int slot)
+{
+    return -(slot + 2);
+}
+
+/*
+ * Rebuild the list: this sim's live players, then whatever the owner
+ * registered. Once per tick, before the players move — the console appends
+ * inside the mover itself (0x80045990) and swaps the whole array each frame
+ * (0x8005525C), so nothing survives a tick it was not rebuilt in.
+ */
+static void sim_bodies_rebuild(q2_sim *sim)
+{
+    u32 want, n = 0;
+    int i;
+
+    sim->body_count        = 0;
+    sim->body_world.list   = NULL;
+    sim->body_world.count  = 0;
+
+    want = (u32)Q2_SIM_MAX_PLAYERS + sim->extra_body_count;
+    if (want > sim->body_capacity) {
+        q2_move_body *grown =
+            (q2_move_body *)realloc(sim->bodies, want * sizeof(*grown));
+
+        if (!grown)
+            return;
+        sim->bodies        = grown;
+        sim->body_capacity = want;
+    }
+    if (!sim->bodies)
+        return;
+
+    for (i = 0; i < Q2_SIM_MAX_PLAYERS; i++) {
+        const q2_player *p = &sim->player[i];
+        q2_move_body *b;
+        int k;
+
+        /*
+         * Slot 0 is always live; the rest only once multiplayer has spawned
+         * them. `player_count` is what says so, and a slot past it holds the
+         * zeros q2_sim_init left, which would put a body at the origin.
+         */
+        if (i > 0 && i >= sim->player_count)
+            continue;
+
+        /*
+         * A DEAD PLAYER IS STILL A BODY. The console's gate is bit 0x8000 at
+         * entity+0x10C (0x800513F0) and nothing in the death chain sets it —
+         * `0x8007F740` appends a corpse to this very list. So no health test
+         * here; the owner can clear `solid` on an entry it wants out.
+         */
+        b = &sim->bodies[n++];
+        memset(b, 0, sizeof(*b));
+        for (k = 0; k < 3; k++) {
+            b->pos[k]  = p->ent.pos[k];
+            b->mins[k] = q2_player_body_mins[k];
+            b->maxs[k] = q2_player_body_maxs[k];
+        }
+        b->radius = Q2_BODY_RADIUS;
+        b->id     = sim_body_id_for_player(i);
+        b->solid  = true;
+    }
+
+    if (sim->extra_bodies && sim->extra_body_count) {
+        memcpy(sim->bodies + n, sim->extra_bodies,
+               sim->extra_body_count * sizeof(*sim->bodies));
+        n += sim->extra_body_count;
+    }
+
+    sim->body_count       = n;
+    sim->body_world.list  = sim->bodies;
+    sim->body_world.count = n;
 }
 
 static void mover_targets_drop(q2_sim *sim)
@@ -3117,6 +3219,16 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
         q2_ent_events_clear(&sim->ent_world.events);
 
     /*
+     * The actor list, rebuilt before anything moves. The console swaps its two
+     * halves at the top of a frame (0x8005525C) and every mover appends itself
+     * on the way in (0x80045990), so the list a body separates against is this
+     * frame's. Once a frame, not once a player, for the same reason the counter
+     * above is.
+     */
+    if (run_world)
+        sim_bodies_rebuild(sim);
+
+    /*
      * The frame counter [0x800B2DE4], counted HERE, before anything in the
      * tick reads it. The console's frame function 0x80070490 stores the new
      * value at 0x80070610 and only then does 0x80038D4C call 0x8006A4F0, the
@@ -3327,7 +3439,11 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
          * The delta is LAST tick's, per q2_player.frame_delta.
          */
         q2_move_step(&sim->coll, &p->ent, p->frame_delta,
-                     sim->move_world.count ? &sim->move_world : NULL);
+                     sim->move_world.count ? &sim->move_world : NULL,
+                     sim->body_world.count ? &sim->body_world : NULL,
+                     sim_body_id_for_player(sim->cur_player),
+                     q2_player_body_mins, q2_player_body_maxs,
+                     &sim->combat.rng);
 
         p->pos[0] = p->ent.pos[0];
         p->pos[1] = q2_sim_feet_y(p->ent.pos[1]);
