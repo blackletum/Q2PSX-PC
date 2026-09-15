@@ -449,9 +449,27 @@ u32 q2_projectiles_build_ot(const struct q2_projectiles *list,
 {
     const q2_weapon_tables *wt = q2_weapon_tables_builtin();
     u32 i, emitted = 0;
+    gte_matrix rot;
 
     if (!list || !cam || !ot || !gte)
         return 0;
+
+    /*
+     * The emitter owns the camera it projects through; it does not inherit one.
+     * On the console every emitter installs the same frame camera before it
+     * draws — 0x8003058C and 0x80047CA4 are both `SetRotMatrix(view + 160)`,
+     * the matrix 0x80037F38 builds through 0x80055DE4 and the world draw loads
+     * at 0x800313CC. This pass used to run on whatever `q2_fx_build_ot` left
+     * behind (src/client/main.c calls it immediately before), which meant bolts
+     * picked up that pass's camera by accident and moved with it.
+     *
+     * Nothing inside the loop disturbs either register set:
+     * q2_camera_apply_area_projection touches only the projection, and
+     * bolt_basis applies the projectile's own orientation in software.
+     */
+    q2_rotation_view_anamorphic(rot.m, cam->yaw, cam->pitch, cam->roll);
+    gte_set_rotation(gte, &rot);
+    gte_set_translation(gte, 0, 0, 0);
 
     for (i = 0; i < Q2_PROJ_MAX; i++) {
         const q2_projectile *p = &list->p[i];

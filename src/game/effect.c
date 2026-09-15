@@ -2060,9 +2060,23 @@ u32 q2_fx_glint_draw(const q2_fx_glint *g, const s32 origin[3], s32 yaw,
 /* ------------------------------------------------------------------------- */
 /* Drawing                                                                    */
 /* ------------------------------------------------------------------------- */
+/*
+ * The camera the effect emitter projects through is the frame's ONE camera, not
+ * a basis of its own. 0x8003058C is `SetRotMatrix(view + 160)` — literally the
+ * same matrix the world draw loads at 0x800313CC — and view+160 is what
+ * 0x80037F38 fills by calling 0x80055DE4 with the basis at view+192 and the
+ * viewport's (vw, vh): the anamorphic camera, roll included. So the row-0 scale
+ * and the roll belong here as much as they do in world.c and modeldraw.c.
+ *
+ * Only row 2 of this matrix leaves the GTE — `to_camera` feeds the near test and
+ * the quad size divide, and both read cam_space[2] alone. The anamorphic scale
+ * touches row 0 only and the roll mixes rows 0 and 1 only (src/common/trig.c),
+ * so every near test and every quad size is unchanged by this; what changes is
+ * where the quads land.
+ */
 static void camera_basis(const q2_camera *cam, s16 view[3][3])
 {
-    q2_rotation_yaw_pitch(view, cam->yaw, cam->pitch);
+    q2_rotation_view_anamorphic(view, cam->yaw, cam->pitch, cam->roll);
 }
 
 static void to_camera(const s16 view[3][3], const q2_camera *cam,

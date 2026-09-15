@@ -16,7 +16,9 @@
 
 #include "combat.h"      /* q2_actor: the presentation pass ticks its slots */
 #include "effect.h"
+#include "entitydraw.h"  /* q2_projectiles_build_ot: the other emitter       */
 #include "itemtable.h"   /* Q2_ITEM_GLOW_*: the materialise burst's colours */
+#include "projectile.h"
 #include "trig.h"        /* the spark's reference velocities                */
 
 static int g_failures;
@@ -2400,6 +2402,139 @@ static void test_effect_sorts_with_the_world(void)
     psx_ot_free(&ot);
 }
 
+/*
+ * Both emitters project through the FRAME's camera, the one the world draw uses
+ * — 0x8003058C is `SetRotMatrix(view + 160)` in the effect draw and 0x80047CA4
+ * is the same call in the projectile draw, and view+160 is the matrix 0x80037F38
+ * builds by handing the basis at view+192 and the viewport's (vw, vh) to
+ * 0x80055DE4. There is exactly one of these in the image: a scan of the whole
+ * text segment finds a direct `ctc2 R11R12` in game code only at 0x800313DC,
+ * the world draw's own load of the same view+160.
+ *
+ * The port had the effect emitter building a plain yaw/pitch basis of its own
+ * and the projectile emitter installing nothing at all, so bolts and sparks
+ * came out at two thirds of their horizontal offset from the screen centre and
+ * did not roll.
+ */
+static void test_emitters_use_the_frame_camera(void)
+{
+    q2_fx_world w;
+    q2_rng rng;
+    q2_camera cam;
+    psx_ot ot;
+    gte_state gte;
+    q2_projectiles list;
+    gte_matrix want;
+    gte_sxy xy;
+    u16 z;
+    s32 at[3];
+    int r, c;
+
+    printf("draw: both emitters install the frame's camera\n");
+
+    if (psx_ot_init(&ot, 256, 4096) != Q2_OK) {
+        printf("  FAIL  could not allocate an ordering table\n");
+        g_failures++;
+        return;
+    }
+
+    gte_init(&gte);
+    gte_set_projection(&gte, 256, 256, 124);
+
+    memset(&cam, 0, sizeof(cam));
+    cam.projection = 256;
+    cam.ofs_x      = 256;
+    cam.ofs_y      = 124;
+    cam.far_z      = Q2_CAMERA_FAR_DEFAULT;
+    cam.sort_range = Q2_CAMERA_SORT_RANGE;
+    /* An eighth of a turn of roll, so the roll term is load-bearing here: the
+     * basis the effect emitter used to build had no roll at all. */
+    cam.yaw   = 512;
+    cam.pitch = 128;
+    cam.roll  = 512;
+
+    q2_rotation_view_anamorphic(want.m, cam.yaw, cam.pitch, cam.roll);
+
+    q2_fx_world_init(&w, &g_tab);
+    q2_rng_seed(&rng, 2024);
+    at[0] = 0; at[1] = 0; at[2] = 4000;
+    check(q2_fx_spawn(&w, &rng, Q2_FX_EXPLOSION, at, 0) >= 0,
+          "a burst to give the effect emitter something to draw");
+
+    psx_ot_clear(&ot);
+    check(q2_fx_build_ot(&w, &cam, 0, &ot, &gte) > 0,
+          "the burst reached the table");
+
+    for (r = 0; r < 3; r++) {
+        for (c = 0; c < 3; c++) {
+            char what[64];
+            snprintf(what, sizeof(what),
+                     "effect emitter left the frame camera in R%d%d", r + 1,
+                     c + 1);
+            check_eq_i(gte.rot.m[r][c], want.m[r][c], what);
+        }
+    }
+
+    /* Now scribble over it, so the projectile emitter cannot pass by inheriting
+     * what the effect emitter just installed — which is exactly how it passed
+     * before it installed one of its own. */
+    {
+        gte_matrix junk;
+        q2_rotation_yaw_pitch(junk.m, 1024, 0);
+        gte_set_rotation(&gte, &junk);
+        gte_set_translation(&gte, 111, 222, 333);
+    }
+
+    memset(&list, 0, sizeof(list));
+    list.p[0].in_use = true;
+    list.p[0].kind   = Q2_PROJ_BOLT;
+    list.p[0].node   = Q2_PROJ_NODE_UNKNOWN;
+    list.p[0].pos[0] = 0;
+    list.p[0].pos[1] = 0;
+    list.p[0].pos[2] = 4000;
+    list.p[0].vel[2] = 4096;          /* straight down +Z, so bolt_basis holds */
+    list.live = 1;
+
+    psx_ot_clear(&ot);
+    check(q2_projectiles_build_ot(&list, NULL, &cam, &ot, &gte) > 0,
+          "the bolt reached the table");
+
+    for (r = 0; r < 3; r++) {
+        for (c = 0; c < 3; c++) {
+            char what[64];
+            snprintf(what, sizeof(what),
+                     "projectile emitter installed R%d%d", r + 1, c + 1);
+            check_eq_i(gte.rot.m[r][c], want.m[r][c], what);
+        }
+    }
+    check_eq_i(gte.tr.x, 0, "and zeroed TRX rather than inheriting one");
+    check_eq_i(gte.tr.y, 0, "and zeroed TRY");
+    check_eq_i(gte.tr.z, 0, "and zeroed TRZ");
+
+    /*
+     * And the size of the term, stated as a picture rather than as a matrix. On
+     * axis (yaw = pitch = roll = 0) the camera is diag(3/2, 1, 1), so a point
+     * 600 units off to the right at 2000 deep lands at
+     *     256 + 256 * (600 * 3/2) / 2000 = 371
+     * where the plain basis the emitter used to build put it at 332 — the two
+     * thirds that had every spark and bolt pulled towards the crosshair.
+     */
+    memset(&cam, 0, sizeof(cam));
+    cam.projection = 256;
+    cam.ofs_x      = 256;
+    cam.ofs_y      = 124;
+    cam.far_z      = Q2_CAMERA_FAR_DEFAULT;
+    cam.sort_range = Q2_CAMERA_SORT_RANGE;
+
+    psx_ot_clear(&ot);
+    q2_fx_build_ot(&w, &cam, 0, &ot, &gte);
+    check(gte_project_point(&gte, 600, 0, 2000, &xy, &z),
+          "an off-axis point projects through the camera the emitter left");
+    check_eq_i(xy.x, 371, "and lands at the anamorphic x, not 332");
+
+    psx_ot_free(&ot);
+}
+
 int main(void)
 {
     printf("effect system\n\n");
@@ -2433,6 +2568,7 @@ int main(void)
     test_gib_trail();
     test_debris();
     test_build_ot();
+    test_emitters_use_the_frame_camera();
     test_effect_sorts_with_the_world();
     test_texture_survives_clear();
     test_timed_beams();
