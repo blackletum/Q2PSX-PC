@@ -825,6 +825,20 @@ typedef struct q2_sim {
     bool no_fall_damage;
 
     /*
+     * 0x800B3360 — the WEAPON STAY row on the GAME VARIABLES page, and a
+     * halfword of its own rather than a bit of the cheat word: the page's row
+     * table points straight at it (0x8009A748, 0x8009A808, 0x8009A8C8 all hold
+     * the address), 0x8001BE5C and 0x800204B4 zero it, and the two readers
+     * fetch it with `lh` — 0x80037E60 inside the weapon-give helper and
+     * 0x8005988C inside the touch fold. gamevars.h records the same split.
+     *
+     * Kept beside `cheats` rather than in it for exactly that reason, and
+     * carried UNGATED by the multiplayer flag because the console's menu writes
+     * the halfword directly; both readers require deathmatch themselves.
+     */
+    bool weapons_stay;
+
+    /*
      * 0x800B3342 — the AUTOCENTRE row on the player page, and until now the one
      * shipped setting with nothing on the other end of it.
      *
@@ -1586,6 +1600,22 @@ void q2_sim_combat_tick(q2_sim *sim);
 /* Give a weapon and select it if nothing better is held, exactly as the pickup
  * path at 0x80037E28 does: the switch happens only when the blaster is out. */
 bool q2_sim_give_weapon(q2_sim *sim, int weapon_id);
+
+/*
+ * 0x80037E84's store, decided rather than performed: the weapon a player
+ * holding `held` ends up with after being granted `weapon_id`, given this sim's
+ * `autoswitch`. Returns `held` unchanged when nothing switches.
+ *
+ * Split out of q2_sim_give_weapon because the item sweep's pickups need the
+ * same rule and cannot use that function: it refuses an already-owned weapon,
+ * where the touch dispatch must still report the pickup as collected
+ * (0x80037E4C), and it knows nothing of the infinite-ammo arm or the grenade
+ * launcher's second grant. `inv` is the inventory the ammo test reads — pass
+ * the one the grant belongs to, which in split-screen is not always the live
+ * player's.
+ */
+int q2_sim_weapon_after_pickup(const q2_sim *sim, const q2_inventory *inv,
+                               int held, int weapon_id);
 
 /* Step to the next or previous usable weapon. Returns false when there is
  * nothing to switch to, which is what the original's cycle reports.

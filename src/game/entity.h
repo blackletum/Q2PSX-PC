@@ -444,6 +444,39 @@ typedef struct q2_entity_world {
     q2_entity_player player[Q2_MAX_PLAYERS];
     u32              player_count;   /* 0x800B2C2C */
 
+    /*
+     * -----------------------------------------------------------------------
+     * The half of 0x80037E28 that does not fit in this layer
+     * -----------------------------------------------------------------------
+     * The console's weapon-give helper does two stores. 0x80037E7C raises the
+     * owned bit in client+104 — that is `q2_inventory.weapons`, and it is
+     * here. 0x80037E84 stores the picked-up weapon into client+102, the
+     * SELECTED weapon, when client+98 (the weapon whose model is raised) is
+     * the blaster. Neither of those halfwords is in `q2_inventory`: the port
+     * folds both into one `q2_sim.combat.weapon_id` (statusbar.h records that
+     * simplification), and the sim sits above this layer.
+     *
+     * So the sweep reports the grant and the host performs the switch. Before
+     * this existed nothing did: the pickup raised the owned bit, the HUD strip
+     * inferred the new icon from the owned set, and the gun in your hands never
+     * changed until you worked the carousel by hand.
+     *
+     * `granted_weapon` is what the last `q2_item_touch` would have put in
+     * client+102 — the 1-based id named by 0x80037E28's third argument, which
+     * for the grenade launcher's two calls is the launcher both times
+     * (0x8003668C / 0x800366D0). Zero when the touch granted no new weapon.
+     * The sweep clears it before each touch; a caller that drives
+     * `q2_item_touch` directly can read it instead of installing a hook.
+     *
+     * `weapon_grant` is keyed by the sweep's PLAYER SLOT, not by "the current
+     * player": a parked split-screen player's inventory is registered in this
+     * world too (sim.c's q2_sim_select_player), so a host that wrote the live
+     * weapon id unconditionally would switch the wrong player's gun.
+     */
+    int   granted_weapon;
+    void (*weapon_grant)(void *user, u32 player, int weapon_id);
+    void *weapon_grant_user;
+
     const q2_item_table *items;      /* borrowed; NULL uses the built-in */
 
     q2_ent_events events;

@@ -120,6 +120,49 @@ void q2_sim_free(q2_sim *sim)
     memset(sim, 0, sizeof(*sim));
 }
 
+/*
+ * 0x80037E84 — the pickup's own weapon switch, performed here because the
+ * halfword it writes lives here.
+ *
+ * The item sweep raises the owned bit and reports the grant (entity.h's
+ * `granted_weapon` / `weapon_grant`); this is the other half. Until it existed
+ * a weapon pickup left the blaster in your hands: `q2_inventory.current_weapon`
+ * took the store, nothing in the running game read that byte, and only working
+ * the carousel by hand ever changed the gun.
+ *
+ * KEYED BY THE SWEEP'S SLOT. A parked split-screen player's inventory is
+ * registered in the entity world too (q2_sim_select_player), so only the
+ * CURRENT player's grant lands in `combat.weapon_id`; anyone else's belongs to
+ * their parked half, and writing the live id for them would have switched the
+ * wrong player's gun.
+ */
+static void sim_weapon_grant(void *user, u32 player, int weapon_id)
+{
+    q2_sim *sim = (q2_sim *)user;
+
+    if (!sim || player >= (u32)Q2_SIM_MAX_PLAYERS)
+        return;
+    if (weapon_id <= Q2_WID_NONE || weapon_id > Q2_WID_COUNT)
+        return;
+
+    if ((int)player == sim->cur_player) {
+        sim->combat.weapon_id =
+            q2_sim_weapon_after_pickup(sim, &sim->combat.inv,
+                                       sim->combat.weapon_id, weapon_id);
+    } else {
+        q2_player_combat *pc = &sim->pcombat[player];
+
+        pc->weapon_id = q2_sim_weapon_after_pickup(sim, &pc->inv,
+                                                   pc->weapon_id, weapon_id);
+    }
+}
+
+static void sim_bind_entity_world(q2_sim *sim)
+{
+    sim->ent_world.weapon_grant      = sim_weapon_grant;
+    sim->ent_world.weapon_grant_user = sim;
+}
+
 q2_result q2_sim_attach_items(q2_sim *sim, const q2_common_file *common,
                               int zone, const q2_item_table *table,
                               const struct q2_model_bank *bank)
@@ -142,6 +185,7 @@ q2_result q2_sim_attach_items(q2_sim *sim, const q2_common_file *common,
     sim->item_table = NULL;
     sim->item_bank  = NULL;
     q2_entity_world_init(&sim->ent_world);
+    sim_bind_entity_world(sim);
     sim->entities_ready = false;
 
     /* Kept so a detonation can bind the `Explosion` model entity without the
@@ -419,6 +463,7 @@ u32 q2_sim_attach_scene(q2_sim *sim, const q2_common_file *common,
      */
     if (!sim->entities_ready) {
         q2_entity_world_init(&sim->ent_world);
+        sim_bind_entity_world(sim);
         sim->ent_world.deathmatch = sim->multiplayer;
         sim->ent_world.items      = table;
         sim->ent_world.level_time = sim->level_time;
@@ -3578,6 +3623,11 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
             sim->ent_world.dt         = dt;
             sim->ent_world.deathmatch = sim->multiplayer;
             sim->ent_world.cheats     = sim->cheats;
+            /* 0x800B3360, refreshed beside the other two because the pause menu
+             * can change it between ticks. Only player 0's tick runs the sweep,
+             * so sim[0] is the only sim that needs it — if the sweep is ever
+             * broadcast, this has to be broadcast with it. */
+            sim->ent_world.weapons_stay = sim->weapons_stay;
             q2_entity_run(&sim->entities, &sim->ent_world);
         }
     }

@@ -765,6 +765,13 @@ static u16 pal_clut(const q2_statusbar *b, u32 index, u16 fallback)
 static bool counter_is_low(const q2_statusbar *b, int value, int threshold,
                            bool solid_at_zero)
 {
+    /* A counter with no threshold (armour, Q2_SBAR_LOW_NONE) never flashes,
+     * whatever its value. The explicit test rather than relying on
+     * `value >= 0`: the power arm feeds `cells`, which is s16 and is NOT
+     * guarded on being positive at its call site, so a negative count would
+     * otherwise satisfy `value < threshold` and blink. */
+    if (threshold <= 0)
+        return false;
     if (value >= threshold)
         return false;
     if (solid_at_zero && value <= 0)
@@ -931,9 +938,11 @@ static u32 emit_frags(const q2_statusbar *b, const q2_sbar_field *fields,
                           ot, bucket, ox, oy);
 }
 
-/* The two upper-right digit fields belong to the powerup timer alone. Unlike
- * the three main counters they never flash, and their ICON field precedes them
- * in the console's assembled record list (13, 14, 15). */
+/* The two upper-right digit fields belong to the powerup timer alone. They
+ * never flash — and neither does armour, so the flash belongs to health and
+ * ammo alone, not to "the three main counters" as this note used to say. Their
+ * ICON field precedes them in the console's assembled record list (13, 14,
+ * 15). */
 static u32 emit_powerup_timer(const q2_statusbar *b, u16 tpage, u16 clut,
                               psx_ot *ot, u32 bucket, int ox, int oy)
 {
@@ -1164,6 +1173,14 @@ u32 q2_statusbar_build_ot(const q2_statusbar *b, u16 tpage, u16 clut,
      * jumps straight to the shared draw at 0x800359A8, so a power item with
      * cells showing reads out even at zero armour.
      *
+     * NEITHER ARM FLASHES. Both used to pass Q2_SBAR_LOW_AMMO here, which had
+     * the armour readout alternating into palette 7 twice a second below six
+     * points — or below six cells while a power item was up. The sub-draw has
+     * since been read end to end and contains no compare of the armour or
+     * cells value and no store into a digit record's palette byte; only health
+     * (0x8003523C/0x8003524C) and ammo (0x80035440/0x80035460) write the flash.
+     * Q2_SBAR_LOW_NONE, and the reasoning, are in statusbar.h.
+     *
      * (The paragraph that used to stand here saying the blaster's blank ammo
      * counter was unexplained has been deleted: it contradicted the paragraph
      * a hundred lines above it, which reads 0x80035498 correctly and which the
@@ -1173,12 +1190,12 @@ u32 q2_statusbar_build_ot(const q2_statusbar *b, u16 tpage, u16 clut,
         n += emit_counter(b, fields, tpage, clut, ot, bucket,
                           origin_x, origin_y,
                           Q2_SBAR_ARMOUR, b->cells, b->armour_icon,
-                          Q2_SBAR_LOW_AMMO, false, true, false);
+                          Q2_SBAR_LOW_NONE, false, true, false);
     else if (!dead && show_armour && b->armour > 0)
         n += emit_counter(b, fields, tpage, clut, ot, bucket,
                           origin_x, origin_y,
                           Q2_SBAR_ARMOUR, b->armour, b->armour_icon,
-                          Q2_SBAR_LOW_AMMO, false, true, false);
+                          Q2_SBAR_LOW_NONE, false, true, false);
 
     /* Not gated on `dead`: the frag counter belongs to the split hooks, and
      * none of them carries the health test. */

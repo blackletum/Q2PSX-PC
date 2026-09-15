@@ -329,16 +329,15 @@ void q2_sim_set_bodies(q2_sim *sim, const q2_move_body *bodies, u32 count)
     sim->extra_body_count  = bodies ? count : 0;
 }
 
-bool q2_sim_give_weapon(q2_sim *sim, int weapon_id)
+int q2_sim_weapon_after_pickup(const q2_sim *sim, const q2_inventory *inv,
+                               int held, int weapon_id)
 {
     const q2_weapon_tables *t = q2_weapon_tables_builtin();
+    u32 i;
+    int rank_new = -1, rank_held = -1;
 
-    if (!sim || weapon_id <= 0 || weapon_id > Q2_WID_COUNT)
-        return false;
-    if (sim->combat.inv.weapons & t->owned_bit[weapon_id])
-        return false;
-
-    sim->combat.inv.weapons |= t->owned_bit[weapon_id];
+    if (!sim || !inv || weapon_id <= 0 || weapon_id > Q2_WID_COUNT)
+        return held;
 
     /*
      * AUTOSWITCH, and it is a DEVIATION from the console rather than a fix to
@@ -347,7 +346,7 @@ bool q2_sim_give_weapon(q2_sim *sim, int weapon_id)
      * 0x80037E78 switches to the weapon just picked up only when the BLASTER is
      * the one in hand: take a shotgun while holding a railgun and the railgun
      * stays. That is the disc's behaviour and it is what `autoswitch == false`
-     * still does, exactly.
+     * still does, exactly — 0x80037E84's store, and nothing else.
      *
      * With it on — the default, at the owner's request — a pickup that ranks
      * ABOVE the held weapon is taken up instead. The ranking is not invented:
@@ -360,34 +359,42 @@ bool q2_sim_give_weapon(q2_sim *sim, int weapon_id)
      * A weapon with no ammo does not win: `q2_weapon_usable` gates the walk, so
      * picking up a railgun you cannot feed leaves you holding what you had.
      */
-    if (!sim->autoswitch) {
-        if (sim->combat.weapon_id == Q2_WID_BLASTER)
-            sim->combat.weapon_id = weapon_id;
-        return true;
+    if (!sim->autoswitch)
+        return held == Q2_WID_BLASTER ? weapon_id : held;
+
+    for (i = 0; i < t->autoswitch_count; i++) {
+        if (t->autoswitch[i] == weapon_id && rank_new < 0)
+            rank_new = (int)i;
+        if (t->autoswitch[i] == held && rank_held < 0)
+            rank_held = (int)i;
     }
 
-    {
-        u32 i;
-        int rank_new = -1, rank_held = -1;
+    /* Off the list entirely — an explosive — is never promoted to. */
+    if (rank_new < 0)
+        return held;
 
-        for (i = 0; i < t->autoswitch_count; i++) {
-            if (t->autoswitch[i] == weapon_id && rank_new < 0)
-                rank_new = (int)i;
-            if (t->autoswitch[i] == sim->combat.weapon_id && rank_held < 0)
-                rank_held = (int)i;
-        }
-
-        /* Off the list entirely — an explosive — is never promoted to. */
-        if (rank_new < 0)
-            return true;
-
-        /* Holding something the list does not rank (the blaster is on it, so
-         * this is an explosive in hand) means anything ranked wins. */
-        if (rank_held < 0 || rank_new < rank_held) {
-            if (q2_weapon_usable(&sim->combat.inv, weapon_id))
-                sim->combat.weapon_id = weapon_id;
-        }
+    /* Holding something the list does not rank (the blaster is on it, so this
+     * is an explosive in hand) means anything ranked wins. */
+    if (rank_held < 0 || rank_new < rank_held) {
+        if (q2_weapon_usable(inv, weapon_id))
+            return weapon_id;
     }
+
+    return held;
+}
+
+bool q2_sim_give_weapon(q2_sim *sim, int weapon_id)
+{
+    const q2_weapon_tables *t = q2_weapon_tables_builtin();
+
+    if (!sim || weapon_id <= 0 || weapon_id > Q2_WID_COUNT)
+        return false;
+    if (sim->combat.inv.weapons & t->owned_bit[weapon_id])
+        return false;
+
+    sim->combat.inv.weapons |= t->owned_bit[weapon_id];
+    sim->combat.weapon_id   = q2_sim_weapon_after_pickup(
+        sim, &sim->combat.inv, sim->combat.weapon_id, weapon_id);
 
     return true;
 }

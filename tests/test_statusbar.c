@@ -1876,6 +1876,116 @@ static void test_dead_strips_the_bar(void)
     psx_ot_free(&ot);
 }
 
+/* ------------------------------------------------------------------------- */
+/* The armour counter does NOT flash — 0x80035554..0x800359B0                 */
+/* ------------------------------------------------------------------------- */
+/*
+ * The whole armour sub-draw has been read: the five-arm icon select, one
+ * `sb v0, 8(a2)` into the ICON's rect record at 0x80035748 / 0x80035990, the
+ * zero guard at 0x80035994 and the `jal 0x80034F90` at 0x800359A8. Nothing in
+ * it compares the armour or cells value against a threshold and nothing writes
+ * byte 8 of a DIGIT record, so the digits keep the numeral palette the field
+ * initialiser left there. Only health (0x8003523C/0x8003524C) and ammo
+ * (0x80035440/0x80035460) carry the low-value flash.
+ *
+ * Both arms are covered: the regular one is guarded on `armour > 0`, the power
+ * one (0x80035754 jumping straight to the shared draw) is guarded on nothing
+ * at all, so a bare threshold change would leave that arm free to regress.
+ * The flash is only observable through a palette bank — with `b.hud` NULL
+ * pal_clut hands back the caller's single clut for both indices and the two
+ * frames would match whatever the code did.
+ */
+static void test_armour_never_flashes(void)
+{
+    static q2_hud_tables pal;
+    q2_icon_tables icons;
+    q2_statusbar b;
+    psx_ot ot;
+    const psx_prim *p;
+    const int ax = BAR_ANCHOR_X + q2_sbar_fields[11].dx;   /* armour units */
+    u16 vest_a, vest_b, cells_a, cells_b;
+    int n;
+
+    build_icons(&icons);
+    real_cell(&icons, Q2_SBAR_ICON_ARMOUR_JACKET, 128, 24, 33);
+    real_cell(&icons, Q2_SBAR_ICON_POWER_SHIELD, 160, 24, 34);
+    if (psx_ot_init(&ot, 128, 256) != Q2_OK) {
+        CHECK(0, "an ordering table for the armour readout");
+        return;
+    }
+
+    memset(&pal, 0, sizeof(pal));
+    pal.palette_count = Q2_HUD_PALETTE_MAX;
+    pal.palette[Q2_SBAR_PAL_LOW].present    = true;
+    pal.palette[Q2_SBAR_PAL_LOW].clut_id    = 0x0077;
+    pal.palette[Q2_SBAR_PAL_DIGITS].present = true;
+    pal.palette[Q2_SBAR_PAL_DIGITS].clut_id = 0x0088;
+
+    q2_statusbar_init(&b, &icons, 1);
+    q2_statusbar_anchor(&b, BAR_ANCHOR_X, BAR_ANCHOR_Y);
+    q2_statusbar_set_palettes(&b, &pal);
+    b.health = 100;
+    b.health_icon = 34;
+    b.weapon = 0;
+
+    /* Three points of armour, both parities of the blink clock. */
+    b.armour = 3;
+    b.armour_icon = Q2_SBAR_ICON_ARMOUR_JACKET;
+    b.showing_power = false;
+    b.ticks = 0;
+    psx_ot_clear(&ot);
+    q2_statusbar_build_ot(&b, 1, 0, &ot, 8, 0, 0);
+    p = cell_at(&ot, ax, &n);
+    vest_a = p ? p->clut : 0;
+    CHECK(p && p->uv[0].u == 3 * 24 && p->uv[0].v == 168,
+          "3 points of armour reads a 3 in the units cell");
+    b.ticks = Q2_SBAR_BLINK_BIT;
+    psx_ot_clear(&ot);
+    q2_statusbar_build_ot(&b, 1, 0, &ot, 8, 0, 0);
+    p = cell_at(&ot, ax, &n);
+    vest_b = p ? p->clut : 0;
+    CHECK(vest_a == 0x0088 && vest_b == 0x0088,
+          "and holds the numerals' palette 8 on both parities — the armour "
+          "sub-draw has no threshold compare (%04X, %04X)", vest_a, vest_b);
+
+    /* And the power arm, which is the one with no value guard in front of it. */
+    b.armour = 0;
+    b.cells = 3;
+    b.armour_icon = Q2_SBAR_ICON_POWER_SHIELD;
+    b.showing_power = true;
+    b.ticks = 0;
+    psx_ot_clear(&ot);
+    q2_statusbar_build_ot(&b, 1, 0, &ot, 8, 0, 0);
+    p = cell_at(&ot, ax, &n);
+    cells_a = p ? p->clut : 0;
+    b.ticks = Q2_SBAR_BLINK_BIT;
+    psx_ot_clear(&ot);
+    q2_statusbar_build_ot(&b, 1, 0, &ot, 8, 0, 0);
+    p = cell_at(&ot, ax, &n);
+    cells_b = p ? p->clut : 0;
+    CHECK(cells_a == 0x0088 && cells_b == 0x0088,
+          "three cells under a power shield do not flash either (%04X, %04X)",
+          cells_a, cells_b);
+
+    /* Health at 10 still does, so the change did not disable the mechanism. */
+    b.health = 10;
+    b.ticks = 0;
+    psx_ot_clear(&ot);
+    q2_statusbar_build_ot(&b, 1, 0, &ot, 8, 0, 0);
+    p = cell_at(&ot, BAR_ANCHOR_X - 23, &n);
+    vest_a = p ? p->clut : 0;
+    b.ticks = Q2_SBAR_BLINK_BIT;
+    psx_ot_clear(&ot);
+    q2_statusbar_build_ot(&b, 1, 0, &ot, 8, 0, 0);
+    p = cell_at(&ot, BAR_ANCHOR_X - 23, &n);
+    vest_b = p ? p->clut : 0;
+    CHECK(vest_a == 0x0077 && vest_b == 0x0088,
+          "while health at 10 still blinks 7/8 (%04X, %04X)", vest_a, vest_b);
+
+    q2_statusbar_set_palettes(&b, NULL);
+    psx_ot_free(&ot);
+}
+
 int main(void)
 {
     test_field_groups();
@@ -1901,6 +2011,7 @@ int main(void)
     test_bar_on_screen();
     test_split_sprite_texels();
     test_signed_health();
+    test_armour_never_flashes();
     test_dead_strips_the_bar();
 
     if (g_fail) {

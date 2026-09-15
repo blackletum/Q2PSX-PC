@@ -344,6 +344,24 @@ u8 q2_sbar_armour_icon(u32 inv_flags, bool show_power);
  */
 #define Q2_SBAR_LOW_HEALTH  26
 #define Q2_SBAR_LOW_AMMO     6
+
+/*
+ * And the ARMOUR counter has no threshold at all. The whole armour sub-draw
+ * 0x80035554..0x800359B0 has now been read instruction by instruction: it is
+ * the five-arm icon select (0x8003564C / 0x8003576C / 0x80035800 / 0x80035894 /
+ * 0x80035928), the two `sb v0, 8(a2)` at 0x80035748 and 0x80035990 that put the
+ * ICON's own palette into the ICON's rect record, the zero guard at
+ * 0x80035994 and the `jal 0x80034F90` at 0x800359A8. There is no compare of
+ * the armour or cells value against anything, and nothing writes byte 8 of a
+ * DIGIT record anywhere in it — so the armour digits keep the numeral palette
+ * the field initialiser left there (0x800337FC..0x80033814) at every value.
+ *
+ * Passed rather than special-cased so the two call sites read the same as the
+ * health and ammo ones. Do not "restore" the 6 here: sharing the ammo constant
+ * is what made the armour readout blink red below six points.
+ */
+#define Q2_SBAR_LOW_NONE     0
+
 #define Q2_SBAR_BLINK_BIT 0x80u
 
 /*
@@ -713,6 +731,27 @@ typedef struct q2_statusbar {
      *     0x8004ED8C tests only a2.
      *   - 0x8003B040 WRITES ONLY UNDER ALL WEAPONS: 0x8003B070 branches to the
      *     epilogue unless bit 0x20 of 0x800B29EC (Q2_CHEAT_ALL_WEAPONS) is up.
+     *     WHAT IT GRANTS used to be recorded here as unknown; it is not, and
+     *     the whole routine is four steps:
+     *       1. ids 1..11 in a loop (0x8003B0A8-0x8003B168). Each id's TWELVE
+     *          NAME BYTES at 0x8009DB9C + id*12 ("Blaster G", "Shotgun G", …)
+     *          are reassembled into three registers and handed to 0x8006D008,
+     *          the CastList lookup (`q2_model_bank_find`). 0x8003B13C skips the
+     *          id when it returns zero, so ALL WEAPONS grants ONLY the weapons
+     *          whose view model this map actually ships — a shorter list than
+     *          "every weapon" on most zones.
+     *       2. the owned bit for a surviving id is ORed into client+104 from
+     *          0x8009DC2C + id*4 (0x8003B144-0x8003B154). Nothing else in the
+     *          loop writes, so no ammo is added per weapon.
+     *       3. the SIX AMMO POOLS at client+108..+118 are filled from
+     *          0x8009C5C8 + client+74 (0x8003B174-0x8003B20C) — the max-ammo
+     *          table, `q2_ammo_max` in inventory.c, and client+74 is the
+     *          element index of the player's tier row (0, 6 or 12), so every
+     *          pool goes to the CAP OF THE TIER HELD, bandolier and pack
+     *          included.
+     *       4. client+102 = client+98 (0x8003B204), then the strip pair. It
+     *          does NOT run the preference walk: the gun in your hands after an
+     *          ALL WEAPONS grant is the one that was already in them.
      *
      * THE PORT. q2_statusbar_weapon_slots() below is the pair of calls, and
      * this array is the latch. Five of the six events exist here — the pickups
@@ -720,7 +759,15 @@ typedef struct q2_statusbar {
      * q2_sim_autoselect_weapon — and the sixth does not: Q2_CHEAT_ALL_WEAPONS
      * is set by menu.c and tested nowhere (the cheat word's readers test
      * infinite ammo in item.c, one-shot kill in combat.c and no fall damage
-     * in the client), so nothing grants what 0x8003B040 grants. A caller that
+     * in the client), so nothing grants what 0x8003B040 grants. The row is not
+     * reachable either, and that is the order the gap has to be closed in: the
+     * ALL WEAPONS row lives only on the GOLD variant of the GAME VARIABLES page
+     * (pages.c's k_vars_gold / k_front_vars_gold), menu.c's `resolve` picks the
+     * variant from `q2_menu.cheat_level`, and `q2_menu_set_cheat_level` has no
+     * caller outside the tests — the memory card carries the value
+     * (`q2_mcard.cheat_level`) and nothing moves it across. Until that hop
+     * exists the page is three rows and INFINITE AMMO and ONE SHOT KILL are as
+     * unreachable as this one; they differ only in being ready. A caller that
      * sees an event calls the writer there; the pickups happen inside the
      * sim, where a once-a-frame caller cannot see them, and
      * q2_statusbar_weapon_slots_track() infers those from what they leave.

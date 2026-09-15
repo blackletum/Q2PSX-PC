@@ -447,9 +447,46 @@ static void test_teleports_lighting_and_bodies(void)
     release_fixture(c);
 }
 
+/*
+ * The GAME VARIABLES rows that have to survive the trip out of the menu.
+ *
+ * WEAPON STAY is 0x800B3360, a halfword of its own rather than a bit of the
+ * cheat word at 0x800B29EC (gamevars.h), and the row wrote nothing on the far
+ * end: `q2_entity_world.weapons_stay` had two readers and no writer, so the
+ * weapons-stay branches at 0x80037E60 and 0x8005988C were dead code.
+ */
+static void test_game_variables(void)
+{
+    client *c = fixture(1);
+    q2_sim *sim = &c->sim[0];
+
+    c->menu.multiplayer = true;
+    c->settings.v[Q2_SET_WEAPON_STAY] = 1;
+    client_apply_settings(c);
+    CHECK(sim->weapons_stay);
+
+    c->settings.v[Q2_SET_WEAPON_STAY] = 0;
+    client_apply_settings(c);
+    CHECK(!sim->weapons_stay);
+
+    /*
+     * Single player too: 0x8001C698 zeroes the cheat word on its disabled arm
+     * and never touches 0x800B3360, so this setting is not gated on the
+     * session type here either. Both readers test deathmatch themselves.
+     */
+    c->menu.multiplayer = false;
+    c->settings.v[Q2_SET_WEAPON_STAY] = 1;
+    client_apply_settings(c);
+    CHECK(sim->weapons_stay);
+    CHECK(sim->cheats == 0);
+
+    release_fixture(c);
+}
+
 int main(void)
 {
     test_inputs();
+    test_game_variables();
     test_fast_frames();
     test_owned_respawn_input();
     test_pickups_and_respawn();

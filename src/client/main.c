@@ -1298,6 +1298,12 @@ typedef struct client {
     u32               shots_fired;
     u32               shots_dry;
 
+    /* "Selected <weapon>" lines posted to the overlay, which the console
+     * raises from the cycle routine 0x8004ECB4 and nowhere else. A harness
+     * number: it should equal the number of weapon-cycle presses and nothing
+     * else, so a pickup or a spawn adding to it is this defect coming back. */
+    u32               weapon_lines;
+
     int               cre_last_sound;
     /* ------------------------------------------------------------------- */
     /* The multiplayer session. QMULTI.C is a per-map LevelBin module and the
@@ -7312,30 +7318,22 @@ static void client_advance_view_weapon(client *c, bool attack, float dt)
         if (ticks < 1) ticks = 1;
         if (ticks > Q2_SCREEN_DT_MAX) ticks = Q2_SCREEN_DT_MAX;
 
+        /*
+         * THE OVERLAY LINE IS NOT POSTED HERE. It used to be, on any change of
+         * `combat.weapon_id` — but statusbar.h:665-672 lists six writers of the
+         * held weapon (a weapon pickup 0x80037E28, an ammo pickup 0x80037ECC,
+         * the ALL WEAPONS variable 0x8003B040, the spawn loadout 0x8003D4FC,
+         * the cycle 0x8004ECB4 and the refire pass's auto-select 0x8004F87C)
+         * and the console prints from exactly one of them: the `jal 0x800434B8`
+         * at 0x8004EDF0 is inside the cycle routine, 0x1C before the next
+         * function begins at 0x8004EE0C. Posting from here named the weapon on
+         * spawn, on every pickup and after every dry-weapon auto-select, none
+         * of which the console announces. It lives in client_cycle_input now,
+         * which is where the console keeps it.
+         */
         if (c->sim[0].combat.weapon_id != c->vw_last_weapon[pi]) {
             q2_vw_select(&c->vw[pi], c->sim[0].combat.weapon_id);
             c->vw_last_weapon[pi] = c->sim[0].combat.weapon_id;
-
-            /*
-             * Name the weapon, which is what that line of the overlay is FOR.
-             *
-             * The string is the weapon's GLYPH, not its name: `weapon_glyph[]`
-             * at 0x8009DC8C holds "&B", "&S", "&U" and the markup layer expands
-             * an escape into a pre-rendered word out of chars.lbm's icon table
-             * (hudtables.h). So "Shotgun" on screen is one sprite, not seven
-             * characters, which is why hunting for the string never found it.
-             *
-             * This line used to carry a hardcoded "Quake II" posted once at
-             * startup — a placeholder from before the overlay had anything real
-             * to say, which then sat there for the whole session because
-             * nothing ever replaced it.
-             */
-            if (c->hud_ready && c->hud_tables_ready) {
-                int w = c->sim[0].combat.weapon_id;
-
-                if (w > 0 && w < Q2_HUD_WEAPON_SLOTS)
-                    q2_hud_message(&c->hud[pi], c->hud_tables.weapon_glyph[w]);
-            }
         }
 
         /*
@@ -7630,6 +7628,35 @@ static void client_extra_input(client *c, int pi, s32 step, bool resumed,
     q2_pad_read(pad, &cfg, out);
 }
 
+/*
+ * 0x8004ECB4 — the weapon next/previous routine, and the ONLY place the
+ * console names a weapon on the overlay. Its tail, read out:
+ *
+ *     8004ED8C  beq   a2, zero, 0x8004EDF8   nothing pressed, no line
+ *     8004EDB4  sh    v0, 100(s0)            the next-weapon cache
+ *     8004EDBC  sh    v0, 96(s0)             the previous-weapon cache
+ *     8004EDC8  lw    a0, 0(v0)              the notification target
+ *     8004EDD0  beq   a0, zero, 0x8004EDF8   none bound, no line
+ *     8004EDD8  lh    v1, 102(s0)            the weapon now held
+ *     8004EDDC  addiu a1, a1, -13076         0x800ACCEC "Selected %s"
+ *     8004EDE4  addiu a2, a2, -9076          0x8009DC8C weapon_glyph[]
+ *     8004EDE8  sll / addu                   a2 += weapon_id * 3
+ *     8004EDF0  jal   0x800434B8             sprintf, then post
+ *
+ * so the line is "Selected " followed by the weapon's GLYPH — weapon_glyph[]
+ * holds "&B", "&S", "&U" and the markup layer expands an escape into a
+ * pre-rendered word out of chars.lbm's icon table (hudtables.h). "Selected
+ * Shotgun" on screen is nine characters and one sprite, which is why hunting
+ * for the whole string never found it; the port had the prefix sitting unused
+ * in q2_hud_weapon_selected and posted the bare glyph instead.
+ *
+ * NOT GATED ON THE CYCLE SUCCEEDING. `a2` is the "a cycle button was pressed"
+ * flag and 0x8004ED40 sets it to 1 in the delay slot of the jump to that tail
+ * whether or not 0x80050758 found another weapon — what a failing scan skips
+ * is the store at 0x8004ED38, not the flag. So a player holding his only
+ * weapon and tapping NEXT gets the line again, naming what he already has, and
+ * the bool from q2_sim_cycle_weapon is deliberately not consulted.
+ */
 static void client_cycle_input(client *c, int pi, const q2_input *in)
 {
     int saved = c->sim[0].cur_player;
@@ -7639,6 +7666,16 @@ static void client_cycle_input(client *c, int pi, const q2_input *in)
     q2_sim_cycle_weapon(&c->sim[0],
                         in->buttons & Q2_BTN_WEAP_NEXT ? 1 : -1);
     client_sbar_write_slots(c, pi, CLIENT_SLOTS_SELECT);
+    /* After the two caches, as at 0x8004EDC0, and while this pad's player is
+     * still the selected one. `hud[pi]` is this viewport's own overlay, which
+     * is the split-screen reading of the per-client target at 0x8004EDC8.
+     * q2_hud_weapon_selected does the table lookup and the blank slot 0; the
+     * console range-checks nothing and slot 0 is the deliberate "  ". */
+    if (c->hud_ready && c->hud_tables_ready) {
+        q2_hud_weapon_selected(&c->hud[pi], &c->hud_tables,
+                               c->sim[0].combat.weapon_id);
+        c->weapon_lines++;
+    }
     q2_sim_select_player(&c->sim[0], saved);
 }
 
@@ -9406,6 +9443,21 @@ static void client_apply_settings(client *c)
      */
     c->sim[0].cheats         = rules.cheats;
     c->sim[0].no_fall_damage = (rules.cheats & Q2_CHEAT_NO_FALL_DAMAGE) != 0;
+
+    /*
+     * WEAPON STAY, which had the same fate as the cheat word above and is fixed
+     * the same way — the row was on six page layouts and moved nothing, so a
+     * gun still vanished under the first player to touch it.
+     *
+     * NOT through `q2_menu_rules`. 0x8001C698 folds four toggles into the cheat
+     * halfword at 0x800B29EC and never touches 0x800B3360; the GAME VARIABLES
+     * row writes that halfword itself (its address is the row's own operand at
+     * 0x8009A748) and only 0x8001BE5C / 0x800204B4 clear it. Routing it through
+     * `enabled` would model a zeroing the console does not do — and it is not
+     * needed, because both readers (0x80037E60, 0x8005988C) test deathmatch
+     * first anyway.
+     */
+    c->sim[0].weapons_stay   = c->settings.v[Q2_SET_WEAPON_STAY] != 0;
     if (rules.tick_rate > 0)
         c->sim[0].dt_per_field = 300 / rules.tick_rate;
     if (c->sim[0].dt_per_field <= 0)
@@ -14551,6 +14603,7 @@ static void client_report(const client *c)
     REPORT("player.attacks",        c->player_attacks);
     REPORT("player.shots",          c->shots_fired);
     REPORT("player.shots_dry",      c->shots_dry);
+    REPORT("player.weapon_lines",   c->weapon_lines);
 
     REPORT("creatures.placed",      c->creatures_ready ? c->creatures.set.count : 0);
     REPORT("creatures.live",        cre_live);

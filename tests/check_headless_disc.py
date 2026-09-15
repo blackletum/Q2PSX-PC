@@ -514,6 +514,41 @@ def build_cases(quick, ntsc):
                           frames=120,
                           checks=[no_errors, ticked, rendered]))
 
+    # THE HUD, one case per thing that changes it. None of these asserts what
+    # the overlay LOOKS like — that is what the inspectors are for — but a run
+    # that errors or draws nothing is a fault whatever the pixels were meant to
+    # be, and before this the carousel, the powerup shells, the key row and the
+    # objectives pop-up had no headless coverage at all.
+    for kind in ("quad", "invuln", "enviro", "breather"):
+        cases.append(Case(f"powerup-{kind}",
+                          ["--map", "BASE1", "--powerup", kind, "--god"],
+                          frames=90,
+                          checks=[no_errors, ticked, rendered]))
+    for weapon in range(1, 12):
+        cases.append(Case(f"weapon-{weapon:02d}",
+                          ["--map", "BASE1", "--weapon", str(weapon),
+                           "--shoot", "--god"],
+                          frames=90,
+                          checks=[no_errors, ticked, rendered]))
+    cases.append(Case("hud-keys", ["--map", "JAIL2", "--keys", "--armour",
+                                   "body"],
+                      frames=90, checks=[no_errors, ticked, rendered]))
+    cases.append(Case("hud-objectives", ["--map", "BASE1", "--objectives", "20"],
+                      frames=120, checks=[no_errors, ticked, rendered]))
+    cases.append(Case("credits", ["--credits"], frames=300,
+                      checks=[no_errors], timeout=300))
+
+    # A creature framed, shot at and watched as it dies, with the trace on. The
+    # `--trace-cre` path is a different code path through the AI and has never
+    # been exercised by anything automated.
+    cases.append(Case("watch-SECURITY",
+                      ["--map", "SECURITY", "--watch", "--watch-hold", "60",
+                       "--shoot", "--god", "--weapon", "3", "--trace-cre", "0"],
+                      frames=600,
+                      checks=[no_errors, ticked, rendered,
+                              expect("creatures.thoughts", at_least=1)],
+                      timeout=600))
+
     # THE SAME RUN, TWICE. See the note in run_case: this is the only case that
     # tests what --headless is for.
     for name, extra in (("BASE1", ["--demo", "--shoot"]),

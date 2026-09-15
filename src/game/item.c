@@ -157,7 +157,7 @@ static s16 clamp_add(s16 max, s16 cur, s16 add)
  * `selects` is the weapon the engine switches to when the blaster is out.
  */
 static bool give_weapon(q2_inventory *inv, int weapon_id, int selects,
-                        const q2_entity_world *w)
+                        q2_entity_world *w)
 {
     u32 bit;
     bool had;
@@ -180,10 +180,30 @@ static bool give_weapon(q2_inventory *inv, int weapon_id, int selects,
 
     inv->weapons |= (u16)bit;
 
-    /* 0x80037E84: the switch happens only when the blaster is out. */
-    if (inv->current_weapon == Q2_WEAPON_BLASTER &&
-        selects >= 1 && selects <= Q2_WEAPON_COUNT)
+    if (selects < 1 || selects > Q2_WEAPON_COUNT)
+        return true;
+
+    /*
+     * 0x80037E84: the switch happens only when the blaster is out.
+     *
+     * `inv->current_weapon` is the inventory's own zero-based record of it, and
+     * it is only a record: the console's two halfwords are client+98 and
+     * client+102, the port keeps one id for both (statusbar.h), and that id
+     * lives in the sim. This byte is written here and by nothing else in the
+     * running game, so gating on it would go stale the moment the pad cycled
+     * the held weapon — pick up a shotgun, cycle back to the blaster, walk over
+     * a railgun, and the console switches while this test says "shotgun".
+     */
+    if (inv->current_weapon == Q2_WEAPON_BLASTER)
         inv->current_weapon = (s8)(selects - 1);
+
+    /*
+     * So the gate that matters is applied by the host, against the weapon it
+     * actually holds. Reported UNGATED here for that reason; entity.h's
+     * `granted_weapon` says who reads it.
+     */
+    if (w)
+        w->granted_weapon = selects;
 
     return true;
 }
@@ -1114,7 +1134,17 @@ touch_sweep:
         if (!q2_entity_bounds_overlap(e, &pl->ent))
             continue;
 
+        w->granted_weapon = 0;
         r = q2_item_touch(e->effect, pl->inv, pl->pos, w);
+
+        /*
+         * The console's 0x80037E84 store, which this layer reports rather than
+         * performs — see entity.h. Before the weapons-stay fold below, because
+         * on the disc it happens inside 0x80036348, i.e. before 0x80059878 ever
+         * looks at the result.
+         */
+        if (w->granted_weapon && w->weapon_grant)
+            w->weapon_grant(w->weapon_grant_user, p, w->granted_weapon);
 
         /*
          * 0x80059878: a weapon-style pickup survives only when the item is not

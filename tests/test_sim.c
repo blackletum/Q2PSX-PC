@@ -2191,6 +2191,109 @@ static void test_autoswitch(void)
                "on: a grenade never arms itself in your hand");
 }
 
+/*
+ * 0x80037E84 THROUGH THE SWEEP — walking over a gun has to put it in your
+ * hands, and until the entity world carried a grant hook it did not: the touch
+ * dispatch wrote `q2_inventory.current_weapon`, nothing in the running game
+ * read that byte, and the blaster stayed up. This pins the JOIN (the sim
+ * installs the hook and applies the switch), which is what neither
+ * test_autoswitch above nor test_item.c's weapon cases could see on their own.
+ *
+ * Autoswitch is turned off throughout so the assertions are the disc's rule
+ * alone: switch when the blaster is out, and only then.
+ */
+static void test_pickup_switches_weapon(void)
+{
+    enum { ZONE_PLACES = 80,
+           BATCH_PLACES = ZONE_PLACES + Q2_POP_PLACE_SIZE + 4,
+           POP_SIZE = BATCH_PLACES + Q2_POP_PLACE_SIZE + 4 };
+    u8 population[POP_SIZE];
+    dat_chunk pop_chunk;
+    q2_common_file common;
+    q2_sim sim;
+
+    printf("\na pickup puts the gun in your hands (0x80037E84)\n");
+
+    memset(population, 0, sizeof(population));
+    item_put_group(population, 0,  "Zone0", ZONE_PLACES);
+    item_put_group(population, 24, "Guns",  BATCH_PLACES);
+    item_put_u32(population + 48, 0);              /* group terminator */
+    item_put_place(population, ZONE_PLACES, 39);   /* Shotgun P, effect 2 */
+    item_put_place(population, BATCH_PLACES, 36);  /* Machgun P, effect 4 */
+
+    memset(&pop_chunk, 0, sizeof(pop_chunk));
+    pop_chunk.data = population;
+    pop_chunk.size = sizeof(population);
+    memset(&common, 0, sizeof(common));
+    common.chunk[Q2_COMMON_POPULATION] = &pop_chunk;
+
+    q2_sim_init(&sim, NULL, 50);
+    sim.autoswitch = false;
+    check_eq_i(q2_sim_attach_items(&sim, &common, 0, NULL, NULL), Q2_OK,
+               "the synthetic shotgun attaches");
+    sim.ent_world.dt = 6;
+
+    check_eq_i(sim.combat.weapon_id, Q2_WID_BLASTER,
+               "the spawn loadout is the blaster (0x8003D4FC)");
+    q2_entity_run(&sim.entities, &sim.ent_world);
+    check(q2_inventory_has_weapon(&sim.combat.inv, Q2_WEAPON_SHOTGUN),
+          "the sweep collects the shotgun");
+    check_eq_i(sim.combat.weapon_id, Q2_WID_SHOTGUN,
+               "and the shotgun is now the weapon in hand");
+
+    /*
+     * The pad cycles back to the blaster (q2_sim_cycle_weapon writes the held
+     * weapon and nothing else), and the NEXT pickup must switch again. This is
+     * the case a gate on `inv.current_weapon` gets wrong: that byte still says
+     * "shotgun", because the pickup path is the only thing that writes it.
+     */
+    sim.combat.weapon_id = Q2_WID_BLASTER;
+    check_eq_i(sim.combat.inv.current_weapon, Q2_WEAPON_SHOTGUN,
+               "the inventory's own record is left behind by the carousel");
+    check_eq_i(q2_sim_activate_item_group(&sim, "Guns"), 1,
+               "CREBATCH spawns the machinegun");
+    q2_entity_run(&sim.entities, &sim.ent_world);
+    check_eq_i(sim.combat.weapon_id, Q2_WID_MACHINEGUN,
+               "back on the blaster, the next pickup switches too");
+
+    /*
+     * WEAPON STAY's own hop, pinned here because this is the fixture with a
+     * live entity world. 0x800B3360 is a halfword of its own, not a bit of the
+     * cheat word, and the sweep reads it off the world beside `deathmatch` —
+     * which nothing was writing, so both weapons-stay branches were dead.
+     */
+    {
+        q2_input in;
+
+        memset(&in, 0, sizeof(in));
+        check(!sim.ent_world.weapons_stay, "weapons-stay starts clear");
+        sim.weapons_stay = true;
+        q2_sim_tick(&sim, &in, sim.frame_dt);
+        check(sim.ent_world.weapons_stay,
+              "sim->weapons_stay reaches the sweep's world (0x800B3360)");
+        sim.weapons_stay = false;
+        q2_sim_tick(&sim, &in, sim.frame_dt);
+        check(!sim.ent_world.weapons_stay, "and clearing it reaches it too");
+    }
+
+    q2_sim_free(&sim);
+
+    /* 0x80037E78's gate: holding anything else, the pickup is only stored. */
+    q2_sim_init(&sim, NULL, 50);
+    sim.autoswitch = false;
+    check_eq_i(q2_sim_attach_items(&sim, &common, 0, NULL, NULL), Q2_OK,
+               "the synthetic shotgun attaches a second time");
+    sim.ent_world.dt = 6;
+    sim.combat.weapon_id = Q2_WID_RAILGUN;
+    q2_entity_run(&sim.entities, &sim.ent_world);
+    check(q2_inventory_has_weapon(&sim.combat.inv, Q2_WEAPON_SHOTGUN),
+          "the shotgun is still collected");
+    check_eq_i(sim.combat.weapon_id, Q2_WID_RAILGUN,
+               "but the railgun stays up — the switch is blaster-only");
+
+    q2_sim_free(&sim);
+}
+
 /* Grenade3's state lives across the weapon, view-model and projectile layers.
  * This pins the sim-side join: prime is free, cook follows the attached hand,
  * release spends one grenade, and a fuse that wins detonates without spending
@@ -3859,6 +3962,7 @@ int main(void)
     test_event_contact_categories();
     test_underwater_air();
     test_autoswitch();
+    test_pickup_switches_weapon();
     test_session_reaches_the_shot();
     test_held_hand_grenade();
     test_tick_rate();
