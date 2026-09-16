@@ -1011,29 +1011,30 @@ static void move_step_gate(q2_collision *coll, q2_move_ent *ent,
     }
 
     /*
-     * 0x800447C0's second chance, approximated. The original asks a fuller
-     * question than the port can put to it — its head is
+     * 0x80045DC0 — AND THE SECOND CHANCE IS NOT A TEST, IT IS A REPAIR.
      *
-     *     800447F4  bgez a2, 0x80044828     ; a negative cell index...
-     *     800447FC  j    0x80044C18
-     *     80044800  addiu v0, zero, 1       ; ...is ACCEPTED outright
+     * This used to ask q2_coll_point_in_node whether the position was in the
+     * cached cell and rewind the frame when it was not, under a note saying
+     * the port was "stricter than retail" and that a rewind was the safe
+     * direction to be wrong in. It is not safe. 0x800447C0 does not answer a
+     * question — it PULLS the point into the cell, one grid unit at a time,
+     * toward the centroid of the cell's own planes, and writes the corrected
+     * position back (q2_coll_settle_point, transcribed in collision.c). Only
+     * the arm that runs out of room returns zero, and only that arm rewinds
+     * (0x80045DC8 `beq v0, zero, 0x80045E04`).
      *
-     * and the >= 0 path walks the cell's box and planes with a slack and a
-     * neighbour fallback that is not transcribed yet. q2_coll_point_in_node
-     * (0x80044098) is the strict half of that walk, so the port is STRICTER
-     * here than retail: a position the console would wave through on the
-     * marginal-plane path can still be rewound. It is the safe direction to
-     * be wrong in — a rewind loses a frame of motion, a false accept leaves
-     * the entity outside the hull — and it is flagged rather than hidden.
+     * The cost of the approximation was a player who could not move at all.
+     * BASE2 zone 0 and MATRIX5 zone 0 both spawn on floors where
+     * q2_coll_find_node cannot re-locate the cell after a step: 45 of the
+     * first 90 frames were rewound on BASE2, the position never changed, and
+     * `q2psx-inspect walk BASE2 0 200` reported the player walking 0 world
+     * units in 99 ticks of walking input.
      *
-     * The `node < 0 -> accept` case is NOT optional. The port reaches node =
-     * -1 as a real state (sim.c's player_area), and without it an entity with
-     * no cached cell would be rewound to its pre-lift position every single
-     * tick and never move again.
+     * The `node < 0 -> accept` case lives inside q2_coll_settle_point now,
+     * where 0x800447F4 puts it. It is still not optional: the port reaches
+     * node = -1 as a real state (sim.c's player_area).
      */
-    if (ent->node < 0)
-        return;
-    if (q2_coll_point_in_node(coll, (u32)ent->node, ent->pos))
+    if (q2_coll_settle_point(coll, ent->pos, ent->node))
         return;
 
     q2_move_step_scan.rewound_unplaced++;

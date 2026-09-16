@@ -1055,6 +1055,51 @@ static void timer_fire(q2_event_rt *rt, u32 slot, q2_event_outcome *result)
     rt->deferred[slot].next_item = (u8)idx;  /* 0x80027270 */
 }
 
+/* ------------------------------------------------------------------------- */
+/* 0x8002EF1C -> 0x80027950 — the weapon router's resume                      */
+/* ------------------------------------------------------------------------- */
+bool q2_event_rt_resume_after_item(q2_event_rt *rt, u32 record_offset,
+                                   u32 item_offset, q2_event_outcome *out)
+{
+    q2_event_record rec;
+    u32 i;
+
+    if (out)
+        *out = Q2_EVENT_OK;
+    if (!rt || !rt->events.data)
+        return false;
+    if (!q2_events_record_at(&rt->events, record_offset, &rec))
+        return false;
+
+    /* 0x80027994's DISABLED gate and 0x800279A8's latch, both applied before
+     * the walk to the resume pointer, exactly as the ordinary executor does.
+     * A record already DISABLED loses its crate and runs no tail. */
+    if (!record_begin(rt, record_slot(rt, record_offset)))
+        return false;
+
+    /*
+     * 0x800279C0..0x800279EC. The router passes `item + len`, the item AFTER
+     * the one that fired, and the executor walks to it before entering the
+     * item loop. Walking by offset rather than by index because that is what
+     * the console has in hand: obj+0x3E is the item's own byte offset.
+     */
+    for (i = 0; i < rec.n_items; i++) {
+        q2_event_item item;
+
+        if (!q2_events_get_item(&rt->events, &rec, i, &item))
+            return false;
+        if (item.offset == item_offset) {
+            q2_event_outcome r = Q2_EVENT_OK;
+
+            run_items(rt, &rec, i + 1, record_offset, &r);
+            if (out)
+                *out = r;
+            return true;
+        }
+    }
+    return false;
+}
+
 void q2_event_rt_advance(q2_event_rt *rt, s32 ticks)
 {
     if (rt) {

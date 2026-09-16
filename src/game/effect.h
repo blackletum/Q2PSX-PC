@@ -1232,7 +1232,7 @@ s32 q2_fx_gib_trail(q2_fx_world *w, q2_rng *rng, const s32 at[3],
 #define Q2_FX_BOLT_TRAIL_LIFE    23      /* 0x8004856C                */
 #define Q2_FX_BOLT_TRAIL_SIZE  8192      /* 0x80048574                */
 #define Q2_FX_BOLT_TRAIL_RAMP     9      /* 0x8009BF04, both ends     */
-#define Q2_FX_BOLT_TRAIL_SHIFT   12      /* 0x800484F0, the jitter    */
+#define Q2_FX_BOLT_TRAIL_SHIFT   12      /* 0x80048500, the jitter    */
 
 /*
  * `vel` is the bolt's velocity already multiplied by the frame's dt — the

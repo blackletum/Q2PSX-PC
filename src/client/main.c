@@ -391,6 +391,8 @@ typedef struct client {
      * zero however hard the trigger is held. That is a property of the counter,
      * not of the gate; `quad_raises` is the reproducible half.
      */
+    u32              cocks_played;
+    u32              zone_screens;   /* of loading_raises, the stills */
     u32              quad_raises;
     u32              quad_gated;
 
@@ -523,6 +525,34 @@ typedef struct client {
      */
     client_voice    *quad_voice;
     u32              quad_voice_serial;
+
+    /*
+     * THE SHOTGUN'S COCK, which is deferred rather than played with the bang.
+     *
+     * 0x8004C460 `sb s4, 695(s5)` raises a byte on the player entity on every
+     * shotgun shot that actually fires, and the view weapon's per-substep
+     * driver spends it: 0x80050484 admits only weapon 2, 0x80050494 tests the
+     * byte, and 0x800504AC asks 0x800739B8 whether the handle at entity+276/278
+     * — the voice `wep_shotgf1b` was started on — is STILL SOUNDING. While it
+     * is, 0x800504B4 drops the request and asks again next substep; the first
+     * one after the bang has finished plays `[0x800B2B78]`, which is
+     * `wep_shotgr1b`, and 0x800504CC clears the byte.
+     *
+     * So the cock lands about half a second after the shot (the sample is
+     * 12,936 frames at 22,050 Hz, 0.536 s at the console's 35/32 pitch) and,
+     * because a second shot restarts the voice and re-raises the byte, after
+     * the LAST shot of a burst rather than between shots.
+     *
+     * It is the plain shotgun's alone: 0x8004C488..0x8004C740, the super
+     * shotgun's fire function, contains no write to +695, and `wep_sshotr1b`
+     * is only the fallback NAME for the same slot at 0x8004DC38.
+     *
+     * Per player, because the byte is on the player entity; the handle is the
+     * one the shot itself took, so it is latched where the shot is played.
+     */
+    bool             cock_pending[Q2_MP_MAX_PLAYERS];
+    client_voice    *shot_voice[Q2_MP_MAX_PLAYERS];
+    u32              shot_voice_serial[Q2_MP_MAX_PLAYERS];
     u32              popup_raises;
     u32              popup_opens;
     s32              popup_at_frame;   /* --objectives N; 0 is off */
@@ -5148,6 +5178,29 @@ static bool client_load_zone(client *c, const char *map, int index)
     bool placed = false;
     bool same_map_transition = c->carry_player && c->carry_same_map &&
                                c->map[0] && client_name_eq(c->map, map);
+    /*
+     * THE TWO QUESTIONS THE TWO SCREENS ASK, and they are not the negation of
+     * each other.
+     *
+     * `map_change` is the level screen's: is the directory about to be read a
+     * different one? That is what `ProcessGame` is deciding when it calls
+     * TestIt at 0x80018C88 -- GetLevelData has resolved the name at
+     * 0x80018C6C and LoadLevel follows at 0x80018C90.
+     *
+     * `zone_change` is MaybeLoadZoneName's, and it is a NAME COMPARE rather
+     * than a carry test: 0x800791E0 puts the twelve bytes it was handed
+     * against the resident name at 0x800E465C through 0x8006DBC0, and
+     * 0x800791EC returns 0 with no screen when they match. Every ZONEGATE on
+     * the disc names a zone -- "Zone0".."Zone4", checked on all 22 story maps
+     * -- so the console's question is "a different zone of THIS map", and a
+     * reload of the zone you are standing in raises nothing at all.
+     *
+     * Neither is `!same_map_transition`. That negation also catches a death,
+     * a restart, an arena round reset and a memory-card restore, none of
+     * which changes the directory and none of which goes near either screen.
+     */
+    bool map_change  = !(c->map[0] && client_name_eq(c->map, map));
+    bool zone_change = !map_change && index != c->zone_index;
 
     /*
      * The outgoing zone's kill tally, before anything below frees the set that
@@ -5156,62 +5209,73 @@ static bool client_load_zone(client *c, const char *map, int index)
     client_zone_stash(c);
 
     /*
-     * AND THE SCREEN GOES UP FIRST — BUT ONLY FOR A ZONE CHANGE INSIDE ONE MAP.
+     * AND WHICH SCREEN GOES UP, WHICH IS TWO QUESTIONS AND NOT ONE.
      *
-     * This used to raise page 46 for EVERY load: a level change, a zone gate, a
-     * restart, a save being restored and the front end's own arrival, on the
-     * reading that "on the console all of them go through the transition that
-     * raises page 46". They do not, and the executable settles it in two
-     * questions:
+     * THIS BLOCK USED TO ARGUE THE OPPOSITE AND IT WAS WRONG. It reasoned:
+     * `xrefs 0x800A3314` finds the {"LOADING",256,124} record materialised by
+     * exactly one instruction, inside 0x80079178; `xrefs 0x80079178` finds two
+     * callers, the ZONEGATE opcode (0x80027828) and the TELEPORT primitive
+     * (0x80028ACC); both are zone changes inside one map; therefore a LEVEL
+     * change raises no loading screen. Every one of those facts is true, and
+     * all 21 callers of the page-enter 0x8001A384 really do pass something
+     * other than 46 except that one. The conclusion is still wrong, because
+     * THE LEVEL SCREEN IS NOT A MENU PAGE and a search for menu pages could
+     * never have found it.
      *
-     *   q2psx-inspect xrefs <disc> 0x800A3314
-     *       -> 0 calls, 1 materialised constant: 80079370, inside 0x80079178.
-     *          The record {"LOADING", 256, 124} is installed by one
-     *          instruction in the whole image, so 0x80079178 is the only thing
-     *          that can put the word up.
+     * The executable's own symbol table names both (SLUS-00757 /MAIN.SYM,
+     * through the PAL->USA relocation; docs/FORMATS.md §9.13):
      *
-     *   q2psx-inspect xrefs <disc> 0x80079178
-     *       -> 2 calls: 0x80027828 and 0x80028ACC.
+     *   0x80079178  MaybeLoadZoneName   LOADLEV.C  -- the ZONE screen
+     *   0x8006E150  TestIt              TITLE.C    -- the LEVEL screen
      *
-     * 0x80027828 is the ZONEGATE opcode's handler (events_rt.c transcribes
-     * 0x80027784..0x8002783C around it) and 0x80028ACC is the TELEPORT
-     * primitive's exec, which builds its twelve-byte name from a zone INDEX
-     * (0x80028A90 `lbu v0,26(s1)`, 0x80028A98 `addiu v0,v0,48` — the ASCII
-     * digit) and, on acceptance, moves the entity and drops it by 286.
+     * `ProcessGame` (0x80018A10, MAIN.C) is the only thing that changes level,
+     * and its body is: 0x80018C6C `jal 0x8007C54C` GetLevelData, 0x80018C88
+     * `jal 0x8006E150` TestIt, 0x80018C90 `jal 0x8007CA44` LoadLevel,
+     * 0x80018C98 `sw zero, 0x800B2D94`, 0x80018CA8 MainGameLoop. TestIt clears
+     * both ordering tables (0x8006E188, 0x8006E194), calls InitLoadingAnim
+     * (0x80038DFC) and InitialiseVBlankLoading (0x8006DFB8), and that last
+     * function ends at 0x8006E144 with `sw 0x8006E288, 0x800B2D94` -- which
+     * installs VBlankLoading as the VERTICAL-BLANK HOOK the ISR calls at
+     * 0x8001908C. Every vblank from then until FadeOutLoading (0x8007C8F8)
+     * spin-waits for it at 0x8007C914 and unhooks at 0x8007C92C draws a whole
+     * frame -- DoubleTrebleBuffer, PutDispEnv, DrawOTag, ClearOTag,
+     * VBlankMainLoop -- while the CD read blocks. A level change on this
+     * console shows an ANIMATED screen for several seconds.
      *
-     * Both are zone changes inside one map. A LEVEL change is not one of them:
-     * a LOADMAP writes 2 into the outer state word at 0x8002DD80 and the state
-     * machine loads the map, and a unit end is state 7, the tally board at
-     * 0x80018ED8, which then writes `EndMission N` and drops into that same
-     * state 2. Neither goes near 0x80079178. Nor does a restart, a memory-card
-     * restore, or the front end.
+     * MaybeLoadZoneName's is the other one, and it is a still: enter page 46,
+     * present one frame, and let the deferred load at 0x8007901C run after it.
+     * It does not clear the world behind it and it holds no clock.
      *
-     * So the port was inserting a black half second at every level boundary and
-     * TWO of them at every unit end — one between the tally board and the
-     * end-of-mission placard and one after it — which is what "the loading
-     * screen shows at the end of zones" is.
+     * So the port had the two exactly inverted -- the level screen's
+     * appearance on the zone screen's occasions, and nothing at all on the
+     * level's. `map_change` and `zone_change` above are the console's own two
+     * tests, and a load that is neither (a death, a restart, an arena round
+     * reset, a memory-card restore) raises nothing, which is what the console
+     * does with it too.
      *
-     * `same_map_transition` is exactly the two console callers: the zone gate
-     * (main loop, `carry_player`/`carry_same_map` both set) and the cross-zone
-     * TELEPORT (`client_apply_teleports`, which sets the same pair). Nothing
-     * else in this file sets both with the map unchanged.
-     *
-     * Raising it does not draw anything. It arms the hold, and the main loop
-     * owns every frame that follows — which is deliberate: presenting from
-     * inside a load would swap the buffers under a frame that has not begun,
-     * and a headless capture numbers its shots by frame.
+     * Raising either does not draw anything. It arms the screen, and the main
+     * loop owns every frame that follows -- deliberate: presenting from inside
+     * a load would swap the buffers under a frame that has not begun, and a
+     * headless capture numbers its shots by frame.
      *
      * `c->running` stays, and still means the load that STARTS the run: main
-     * sets it on the line before the frame loop, so `--map`, `--zone-probe` and
-     * the front end being opened at startup are setup rather than transitions.
-     * It is redundant with the carry test today — a load before the loop
-     * carries nothing — and it is kept because it is the cheaper half of the
-     * guarantee that `--frames 1 --shot` photographs the level and not the
-     * screen (AGENTS.md).
+     * sets it on the line before the frame loop, so `--map`, `--zone-probe`
+     * and the front end being opened at startup are setup rather than
+     * transitions, and `--frames 1 --shot` photographs the level rather than
+     * the screen (AGENTS.md).
+     *
+     * NOT REPRODUCED: the level screen's animation. The console runs a whole
+     * scene graph off the vertical blank for the length of the read; this port
+     * puts up the same word and the same turning logo for a fixed hold,
+     * because its own load is milliseconds and there is nothing to fill.
      */
-    if (c->running && same_map_transition) {
+    if (c->running && map_change) {
         q2_loading_raise(&c->loading);
         c->loading_raises++;
+    } else if (c->running && zone_change) {
+        q2_loading_raise_zone(&c->loading);
+        c->loading_raises++;
+        c->zone_screens++;
     }
 
     /*
@@ -8198,9 +8262,36 @@ static void client_advance_view_weapon(client *c, bool attack, float dt)
                 const q2_weapon_tables *wt = q2_weapon_tables_builtin();
 
                 if ((u32)shot->sound < Q2_WT_SOUND_COUNT &&
-                    wt->sound[shot->sound][0])
-                    client_play_sound(c, wt->sound[shot->sound]);
+                    wt->sound[shot->sound][0] &&
+                    client_play_sound(c, wt->sound[shot->sound])) {
+                    /* entity+276/278: the handle the cock waits on. */
+                    c->shot_voice[pi]        = c->voice_last;
+                    c->shot_voice_serial[pi] = c->voice_last_serial;
+                }
             }
+
+            /* 0x8004C460. The raise is the fire function's, so it is keyed on
+             * the shot having fired and on the weapon that fired it. */
+            if (shot->fired && c->sim[0].combat.weapon_id == Q2_WID_SHOTGUN)
+                c->cock_pending[pi] = true;
+        }
+
+        /*
+         * 0x80050484..0x800504D0, the deferred half. The console asks on every
+         * substep of the key loop and this asks once a frame, which moves the
+         * cock by at most one frame and cannot move it before the bang ends —
+         * the query is the same one.
+         */
+        if (c->cock_pending[pi] &&
+            c->sim[0].combat.weapon_id == Q2_WID_SHOTGUN &&
+            !client_voice_playing(c->shot_voice[pi],
+                                  c->shot_voice_serial[pi])) {
+            const q2_weapon_tables *wt = q2_weapon_tables_builtin();
+
+            if (wt->sound[Q2_WSND_SHOTGUN_RELOAD][0])
+                client_play_sound(c, wt->sound[Q2_WSND_SHOTGUN_RELOAD]);
+            c->cock_pending[pi] = false;
+            c->cocks_played++;
         }
     }
 
@@ -14742,7 +14833,19 @@ static void client_frame(client *c)
 
         lo.textures = true;
         q2_loading_build_ot(&c->loading, &c->ot, c->width, c->height);
-        psx_fb_clear(q2_screen_back(&c->screen), 0);
+        /*
+         * THE LEVEL SCREEN CLEARS AND THE ZONE STILL DOES NOT.
+         *
+         * TestIt clears both ordering tables at 0x8006E188/0x8006E194 before
+         * the vblank hook takes the screen, so nothing of the level survives
+         * under it. MaybeLoadZoneName clears nothing: it enters page 46 and
+         * returns, and the frame that goes out is the one the renderer had
+         * already built, with the word over it. Blacking the world out for a
+         * zone gate is a half-second of nothing where the console shows the
+         * room you are standing in.
+         */
+        if (c->loading.kind == Q2_LOADING_LEVEL)
+            psx_fb_clear(q2_screen_back(&c->screen), 0);
         q2_screen_compose(&c->screen, &c->ot, c->loading.vram, &lo);
         client_present(c);
         return;
@@ -15603,6 +15706,8 @@ static void client_report(const client *c)
     REPORT("player.attacks",        c->player_attacks);
     REPORT("match.banner_frames", c->mp_banner_frames);
     REPORT("audio.quad_raises",     c->quad_raises);
+    REPORT("audio.shotgun_cocks",   c->cocks_played);
+    REPORT("level.zone_screens",    c->zone_screens);
     REPORT("audio.quad_gated",      c->quad_gated);
     REPORT("player.shots",          c->shots_fired);
     REPORT("player.shots_dry",      c->shots_dry);

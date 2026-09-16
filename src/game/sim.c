@@ -1469,6 +1469,37 @@ void q2_sim_movers_update(q2_sim *sim, const q2_mover_set *set)
              */
             q2_mover_displacement(m, disp);
 
+            /*
+             * EXCEPT A CONVEYOR CRATE, WHOSE HULL DOES NOT MOVE AT ALL.
+             *
+             * The volume translator 0x80051EC0 has three callers and the only
+             * one that could reach a crate is 0x80025BD8, inside 0x80025658 —
+             * which is reached solely through the object tick loop at
+             * 0x8002DC04 calling obj+0x2C. BASE0's DOCRATES clears exactly
+             * that field: `sw zero, 44(a1)` at 0x801001CC, on every crate,
+             * every tick. So the crate's object is never ticked, the
+             * translator never runs, and its hull stands still in the pristine
+             * box the constructor gave it while the DRAWN node slides.
+             *
+             * That is the half this port had wrong in the other direction:
+             * the boxes translated with the crates and carried the player,
+             * which is a ride the console does not give. The box stays
+             * registered and stays solid — retail allocates one per crate node
+             * from the node's own bbox — so a crate is still something you
+             * cannot walk through.
+             */
+            if (m->external) {
+                for (k = 0; k < 3; k++) {
+                    t->min[k] = base[k];
+                    t->max[k] = base[3 + k];
+                    if (t->min[k] < t->env_min[k]) t->env_min[k] = t->min[k];
+                    if (t->max[k] > t->env_max[k]) t->env_max[k] = t->max[k];
+                }
+                t->dy = 0;
+                sim->mover_last_off[out] = 0;
+                continue;
+            }
+
             for (k = 0; k < 3; k++) {
                 t->min[k] = base[k] + disp[k];
                 t->max[k] = base[3 + k] + disp[k];

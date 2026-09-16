@@ -2357,10 +2357,26 @@ static u32 draw_groups(q2_fx_world *w, const q2_camera *cam, u32 viewport,
 
             q2_fx_group_point(g, i, pt);
 
-            if (!gte_project_point(gte, pt[0] - cam->pos[0],
-                                   pt[1] - cam->pos[1],
-                                   pt[2] - cam->pos[2], &xy, &z))
-                continue;
+            /*
+             * A PARTICLE THAT FAILS TO PROJECT IS STILL DRAWN, because the
+             * console's inner quad loop has no way out of itself. 0x800308F8
+             * runs `rtps` per follower and 0x8003093C stores SXY2 straight
+             * into the packet; there is no `cfc2`, no flag test and no
+             * `continue` anywhere in the 420 instructions of 0x800304A8. The
+             * only near-plane decision is the GROUP-level one already made
+             * above (0x80030708, effect.c's Q2_FX_NEAR_DEPTH test), and that
+             * one drops the whole group or none of it.
+             *
+             * Dropping the failures one at a time made a six-particle trail
+             * emit five, or four, at the angles where the GTE's divide
+             * overflows — a streak that thins and thickens with the camera
+             * rather than with the bolt. On a failure `xy` holds what the
+             * projection left in SXY2, which is the same halfword the console
+             * reads on the same instruction.
+             */
+            (void)gte_project_point(gte, pt[0] - cam->pos[0],
+                                    pt[1] - cam->pos[1],
+                                    pt[2] - cam->pos[2], &xy, &z);
 
             if (area_routed) {
                 prim = batch >= 0

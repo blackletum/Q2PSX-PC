@@ -342,6 +342,144 @@ bool q2_coll_point_in_node(const q2_collision *c, u32 index, const s32 point[3])
 }
 
 /* ------------------------------------------------------------------------- */
+/* 0x800447C0 — settle a point into a node, moving it if it has to            */
+/* ------------------------------------------------------------------------- */
+/* 0x8006FA2C. Not a length: the largest absolute component, which is what
+ * makes the step below advance the point by one grid unit at a time. */
+static s32 chebyshev(const s16 v[3])
+{
+    s32 big = v[0] < 0 ? -(s32)v[0] : v[0];
+    s32 y   = v[1] < 0 ? -(s32)v[1] : v[1];
+    s32 z   = v[2] < 0 ? -(s32)v[2] : v[2];
+
+    if (y > big) big = y;
+    if (z > big) big = z;
+    return big;
+}
+
+bool q2_coll_settle_point(const q2_collision *c, s32 point[3], s32 node)
+{
+    const u8 *rec;
+    u32 first, end, k, count;
+    s16 orig[3], work[3], dir[3];
+    s32 mean[3];
+    s32 push = 0, step = 0;
+    int i;
+
+    if (!c || !point)
+        return false;
+
+    /* 0x800447F4 `bgez a2` — a negative cell is accepted with the point left
+     * exactly as it is. The port reaches node = -1 as a real state, and this
+     * is the arm that keeps an entity with no cached cell moving. */
+    if (node < 0)
+        return true;
+    if (!c->nodes || !c->planes || (u32)node >= c->node_count)
+        return false;
+
+    rec = node_rec(c, (u32)node);
+    relative_rec(rec, point, orig);
+    for (i = 0; i < 3; i++)
+        work[i] = orig[i];
+
+    node_plane_range(c, (u32)node, &first, &end);
+    count = end - first;
+
+    for (;;) {
+        bool inside = true;
+
+        /*
+         * 0x800448E8's walk. The same predicate as q2_coll_point_in_node and
+         * deliberately not a call to it: this loop has no AABB gate and no
+         * solid test, because 0x800447C0 does not perform either. A point on
+         * the far side of the box is meant to reach the pull below, not be
+         * refused before it.
+         */
+        for (k = first; k < end; k++) {
+            const u8 *p = c->planes + (size_t)k * Q2_COLL_PLANE_SIZE;
+            s16 dx = (s16)(u16)((u16)work[0] - q2_rd_u16(p + 0));
+            s16 dy = (s16)(u16)((u16)work[1] - q2_rd_u16(p + 2));
+            s16 dz = (s16)(u16)((u16)work[2] - q2_rd_u16(p + 4));
+            s32 d  = (s32)dx * q2_rd_s16(p + 6)
+                   + (s32)dy * q2_rd_s16(p + 8)
+                   + (s32)dz * q2_rd_s16(p + 10);
+
+            if (d > 0) {
+                inside = false;
+                break;
+            }
+        }
+        if (inside)
+            break;
+
+        /*
+         * 0x80044980 `bne t3, zero` — the direction and the step are computed
+         * ONCE, on the first failure, and reused for every pull after it. The
+         * centroid is the mean of the planes' own reference points
+         * (0x800449AC's sum, 0x800449FC's divide by the plane count), which
+         * for a convex cell is a point inside it.
+         */
+        if (step == 0) {
+            s32 sum[3];
+            s32 big;
+
+            if (count == 0)
+                return false;
+
+            for (i = 0; i < 3; i++)
+                sum[i] = 0;
+            for (k = first; k < end; k++) {
+                const u8 *p = c->planes + (size_t)k * Q2_COLL_PLANE_SIZE;
+                sum[0] += q2_rd_s16(p + 0);
+                sum[1] += q2_rd_s16(p + 2);
+                sum[2] += q2_rd_s16(p + 4);
+            }
+            for (i = 0; i < 3; i++)
+                mean[i] = sum[i] / (s32)count;
+            for (i = 0; i < 3; i++)
+                dir[i] = (s16)(u16)((u16)mean[i] - (u16)work[i]);
+
+            big = chebyshev(dir);
+            if (big == 0)
+                return false;          /* 0x80044AE8's divide would trap */
+            step = 4096 / big;
+            if (step == 0)
+                step = 1;              /* 0x80044B18 */
+        }
+
+        /* 0x80044B24: the give-up test is made BEFORE the step is added, so a
+         * point that reached the centroid gets one more walk before failing. */
+        if (push == 4096)
+            return false;
+        push += step;
+
+        if (push >= 4096) {
+            /* 0x80044B38 — snap to the centroid rather than overshoot. */
+            push = 4096;
+            for (i = 0; i < 3; i++)
+                work[i] = (s16)(u16)(u32)mean[i];
+        } else {
+            /* 0x80044B58. From the ORIGINAL point every time, not from the
+             * last one, and rounded toward zero by the +4095 at 0x80044B70. */
+            for (i = 0; i < 3; i++) {
+                s32 t = (s32)dir[i] * push;
+
+                if (t < 0)
+                    t += 4095;
+                work[i] = (s16)(u16)((u16)orig[i] + (u16)(s16)(t >> 12));
+            }
+        }
+    }
+
+    /* 0x80044BDC — and the settled position is written back. This is the whole
+     * point of the routine: the caller commits the frame at the corrected
+     * position instead of throwing the frame away. */
+    for (i = 0; i < 3; i++)
+        point[i] = q2_rd_s32(rec + i * 4) + work[i];
+    return true;
+}
+
+/* ------------------------------------------------------------------------- */
 /* 0x80044F54 — locate the node holding a point                               */
 /* ------------------------------------------------------------------------- */
 s32 q2_coll_find_node(const q2_collision *c, const s32 point[3], s32 hint,

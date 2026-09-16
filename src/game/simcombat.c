@@ -1574,18 +1574,32 @@ void q2_sim_combat_tick(q2_sim *sim)
         }
 
         /*
-         * AND THE TRAIL, which is the blaster bolt's only body — 0x800482B0's
-         * arm, every tick, before the move, because the group it raises is
-         * built around the displacement this tick is ABOUT to make
-         * (0x80048334 takes pos - disp/2, with pos still the old one).
+         * AND THE TRAIL, which is the blaster bolt's only body.
+         *
+         * AFTER THE MOVE, NOT BEFORE IT. This used to run above the step,
+         * under a note saying 0x80048334 takes `pos - disp/2` with pos "still
+         * the old one". It is not: the sweep commits the new position to the
+         * record at 0x80047EE8 and 0x80047F30 — the contact arm and the clear
+         * arm — and BOTH of those are above the flags dispatch at 0x80047F44,
+         * so by the time the bit-0x1 arm loads 0(s6)/4(s6)/8(s6) at
+         * 0x800482E8 the record already holds where the bolt ended up. The
+         * group therefore spans `[newpos - disp, newpos]`, which is exactly
+         * the segment just travelled; raising it first spanned
+         * `[oldpos - disp, oldpos]`, the segment travelled on the PREVIOUS
+         * tick, and left a whole step of clear air between a bolt and the
+         * trail behind it.
          */
+        q2_projectile_step(&sim->combat.projectiles, i, sim->gravity,
+                           sim->cur_dt, sim->level_time, &step);
+
         if (!held && (p->flags & Q2_PROJ_FLAG_TRAIL) && sim->fx_ready) {
             s16 disp[3];
             int d;
 
             for (d = 0; d < 3; d++) {
                 /* The sweep's own `vel * dt`, 0x80047D50 against
-                 * [0x800B2DB4], in the velocity's raw halfword units. */
+                 * [0x800B2DB4], truncated to a halfword by the `sh` at
+                 * 0x80047D58, in the velocity's raw halfword units. */
                 s32 raw_vel = q2_projectile_raw_velocity(p, d);
 
                 disp[d] = (s16)(raw_vel * sim->cur_dt);
@@ -1593,9 +1607,6 @@ void q2_sim_combat_tick(q2_sim *sim)
             q2_fx_bolt_trail(&sim->fx, &sim->combat.rng, p->pos, disp,
                              fx_area_resolve(sim, 0, p->pos));
         }
-
-        q2_projectile_step(&sim->combat.projectiles, i, sim->gravity,
-                           sim->cur_dt, sim->level_time, &step);
 
         /* State 1 has no mover, collision body, light or visible model. The
          * owner update after the view-model step attaches it and resolves an
@@ -2705,6 +2716,20 @@ u32 q2_sim_breakable_shot(q2_sim *sim, const s32 from[3], const s32 to[3],
                     sizeof(sim->breakable_open) / sizeof(sim->breakable_open[0]))
                 sim->breakable_open[sim->breakable_open_count++] =
                     b->item_offset;
+
+            /*
+             * AND ITS RECORD RUNS ON TOO. 0x8002F050 is the fourth damage
+             * callback with 0x800267C4's contract: 0x8002F084 returns 0 while
+             * the leaf stands, and the fatal hit falls through to 0x8002F144
+             * `jr ra` / 0x8002F148 `addiu v0, a0, 24` — item + 24, the next
+             * item — so 0x8002EFA8 lets it through to the executor exactly as
+             * it does a crate's. A shoot-to-open door whose record carries a
+             * STRING or a second mover behind it runs those as well.
+             */
+            if (sim->events_ready)
+                (void)q2_event_rt_resume_after_item(&sim->event_rt,
+                                                    b->record_offset,
+                                                    b->item_offset, NULL);
             return 0;
         }
 
@@ -2748,6 +2773,29 @@ u32 q2_sim_breakable_shot(q2_sim *sim, const s32 from[3], const s32 to[3],
             explosive_apply(sim, &res);
             explosive_free_boxes(sim, b->item_offset);
             sim->breakable_pieces += made;
+
+            /*
+             * AND THE REST OF THE RECORD RUNS, because a weapon killed it.
+             *
+             * 0x800267C4 returns `item + 28` rather than 0 once the
+             * destruction loop has run (0x800269FC), and the weapon-impact
+             * router at 0x8002EFA8 takes that as a cue: it reads the record
+             * offset out of obj+0x40 and hands the record back to the
+             * executor at the NEXT item (0x8002EFC8, a2 = item + len). The
+             * visibility swap and the freed boxes happen first, exactly as
+             * they do above, because the console's exec does them itself and
+             * only then returns to the router.
+             *
+             * This is what spawns BASE0's jacket armour: record +508 is
+             * [FXGROUP, CALL CREBATCH "Amour", CALL INSECRET] and nothing on
+             * the map can reach it except a shot. Ten records on the disc
+             * have a tail behind a shootable 0x08 item.
+             */
+            if (sim->events_ready &&
+                q2_event_rt_resume_after_item(&sim->event_rt,
+                                              b->record_offset,
+                                              b->item_offset, NULL))
+                sim->breakable_fired++;
             return made;
         }
 

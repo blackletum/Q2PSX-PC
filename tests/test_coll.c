@@ -201,6 +201,62 @@ static void test_parse(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * 0x800447C0 PULLS A POINT INTO A CELL, and that is what keeps a player
+ * walking. The validity gate at the foot of the stepped mover calls it with
+ * the CACHED cell whenever q2_coll_find_node cannot re-locate one
+ * (0x80045DA8 / 0x80045DC0), and only a zero return rewinds the frame.
+ */
+static void test_settle_point(void)
+{
+    q2_collision c;
+    s32 inside[3]  = { 500, 500, 500 };
+    s32 outside[3] = { 1200, 500, 500 };
+    s32 far_away[3] = { 9000, 500, 500 };
+    s32 keep[3];
+    int k;
+
+    printf("settle a point into its cell\n");
+    open_hull(&c, false);
+
+    for (k = 0; k < 3; k++)
+        keep[k] = inside[k];
+    check(q2_coll_settle_point(&c, inside, 0),
+          "a point already inside its cell settles");
+    check(inside[0] == keep[0] && inside[1] == keep[1] && inside[2] == keep[2],
+          "and is not moved");
+
+    /* 0x800447F4: a negative cell is accepted with the point untouched. */
+    for (k = 0; k < 3; k++)
+        keep[k] = outside[k];
+    check(q2_coll_settle_point(&c, outside, -1),
+          "a negative cell is accepted outright");
+    check(outside[0] == keep[0],
+          "and the point is left exactly where it was");
+
+    /* 200 units past node 0's +X face, with node 0 as the cached cell. The
+     * console pulls it back toward the mean of the cell's own plane points
+     * until it is inside, and writes the corrected position back. */
+    check(q2_coll_settle_point(&c, outside, 0),
+          "a point just outside its cached cell is pulled in");
+    check(q2_coll_point_in_node(&c, 0, outside),
+          "and the point it comes back with really is in that cell");
+    printf("  (1200,500,500) settled to (%d,%d,%d)\n",
+           outside[0], outside[1], outside[2]);
+    check(outside[0] <= 1000 && outside[0] > 0,
+          "it moved along x and no further than it had to");
+    check(outside[1] >= 166 && outside[1] <= 500,
+          "and the other axes moved toward the centroid, not past it");
+
+    /* Far enough out that the pull reaches the centroid. The console snaps to
+     * it at 0x80044B38 rather than overshooting, so this still settles. */
+    check(q2_coll_settle_point(&c, far_away, 0),
+          "a point far outside settles at the centroid");
+    check(q2_coll_point_in_node(&c, 0, far_away),
+          "which is inside the cell by construction");
+}
+
+/* ------------------------------------------------------------------------- */
 static void test_point_in_node(void)
 {
     q2_collision c;
@@ -1289,6 +1345,7 @@ int main(void)
 
     test_parse();
     test_point_in_node();
+    test_settle_point();
     test_solid_bit();
     test_clip();
     test_move_through_portal();

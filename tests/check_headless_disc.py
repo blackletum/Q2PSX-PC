@@ -325,36 +325,46 @@ def no_loading_screen(report, out, shot):
                       " run that never changed zone")
 
 
-def screens_only_for_zone_gates(report, out, shot):
+def screens_only_for_real_transitions(report, out, shot):
     """
-    A LEVEL change raises no loading screen. `--fire-triggers` fires every
-    volume on the map, so a map with no gates at all does several loads and
-    must still show none; a map with gates shows at most one per gate.
+    THE CONSOLE HAS TWO SCREENS AND THIS USED TO ASSERT THE WRONG ONE.
+
+    It read "a LEVEL change raises no loading screen", which came from finding
+    that page 46 is entered from one place (MaybeLoadZoneName, 0x80079178) and
+    concluding there was nothing else. The level screen is not a menu page: it
+    is the vblank hook TestIt installs at 0x8006E144 around LoadLevel. So a
+    level change raises one and a zone gate raises one, and what must never
+    happen is a screen for a load that changed neither -- a death, a restart,
+    an arena round reset, a memory-card restore.
+
+    The first load of a run is setup and raises nothing, so the ceiling is
+    loads - 1.
     """
     screens = report.get("level.loading_screens", 0)
+    zone = report.get("level.zone_screens", 0)
     loads = report.get("level.loads", 0)
-    if screens > loads:
+    if screens > max(loads - 1, 0):
         raise Failure(f"{screens} loading screens for {loads} loads")
+    if zone > screens:
+        raise Failure(f"{zone} zone stills among {screens} screens")
 
 
 def crossed_one_gate(case):
     """
-    A real zone gate, walked through, is exactly one loading screen.
+    A real zone gate, walked through, is exactly one zone STILL.
 
-    The console puts page 46 up for a zone change inside one map and for
-    nothing else — `xrefs 0x800A3314` finds the LOADING record materialised by
-    one instruction, inside 0x80079178, and `xrefs 0x80079178` finds two
-    callers, the ZONEGATE opcode and the TELEPORT primitive. So the count is
-    the thing to assert: one screen for one gate, and the level change that may
-    follow it adds none.
+    MaybeLoadZoneName (0x80079178) is entered from the ZONEGATE opcode and the
+    TELEPORT primitive, and it raises the still -- page 46 over the frame the
+    renderer already built, with no clear and no hold. A level change raises
+    the other screen instead, so the count to assert here is the still's.
     """
     def check(report, out, shot):
         gates = len(re.findall(r"zone gate -> zone \d+", case.log))
         if gates < 1:
             raise Failure("the player never crossed a zone gate")
-        screens = report.get("level.loading_screens", 0)
+        screens = report.get("level.zone_screens", 0)
         if screens != gates:
-            raise Failure(f"{gates} zone gates but {screens} loading screens")
+            raise Failure(f"{gates} zone gates but {screens} zone stills")
         if report.get("level.loads", 0) < 1 + gates:
             raise Failure("a gate fired without a load behind it")
     return check
@@ -513,7 +523,7 @@ def build_cases(quick, ntsc):
                           ["--map", name, "--fire-triggers"],
                           frames=300,
                           checks=[no_errors, script_did_something,
-                                  screens_only_for_zone_gates],
+                                  screens_only_for_real_transitions],
                           timeout=600))
 
     # WALKING THROUGH A ZONE GATE, on every map that has one. The probe says

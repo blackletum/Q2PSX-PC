@@ -313,6 +313,46 @@ bool q2_coll_plane_point(const q2_collision *c, u32 node_index, u32 plane_index,
 bool q2_coll_point_in_node(const q2_collision *c, u32 index, const s32 point[3]);
 
 /*
+ * 0x800447C0 — PUT `point` INSIDE NODE `node`, moving it if it has to.
+ *
+ * The other half of the cell question, and the one that matters when the
+ * answer is no. q2_coll_point_in_node asks whether a point is in a cell;
+ * this MAKES it so, and writes the corrected position back.
+ *
+ * The console reaches it from one place, the validity gate at the foot of the
+ * stepped mover: 0x80045D98 re-locates the cell from where the frame ended,
+ * and on -1 (0x80045DA8) 0x80045DC0 calls this with the CACHED cell. A frame
+ * whose end position no cell claims is therefore not thrown away — the
+ * position is pulled back into the cell it was already in, one grid unit at a
+ * time, and only a pull that runs out of room at 0x80044B24 rewinds the frame
+ * (0x80045DC8 on a zero return).
+ *
+ * The walk, instruction for instruction:
+ *
+ *   0x800447F4  a NEGATIVE cell is accepted outright, point untouched
+ *   0x8004483C  work = point - node.bbox_min, in the 16-bit grid
+ *   0x800448E8  the plane walk — the same `(work - p)·n > 0 means outside`
+ *               as 0x80044098, but WITHOUT that function's AABB gate and
+ *               solid test: this one is a bare plane loop
+ *   0x800449AC  on the first failure only, sum the planes' own reference
+ *               points and divide by the plane count (0x800449FC) — the
+ *               cell's centroid
+ *   0x80044AA4  dir = centroid - work
+ *   0x80044ADC  0x8006FA2C is max(|x|,|y|,|z|), NOT a length, so
+ *   0x80044AE8  step = 4096 / that, which advances the largest component by
+ *               one grid unit an iteration; a zero step is forced to 1
+ *   0x80044B24  push == 4096 already: give up, return 0
+ *   0x80044B28  push += step; at or past 4096 the point SNAPS to the
+ *               centroid (0x80044B38); short of it, work = orig + dir*push
+ *               >> 12, rounded toward zero (0x80044B70's +4095)
+ *   0x80044BDC  accept: point = node.bbox_min + work
+ *
+ * Returns false only for the 0x80044804 arm — the point could not be settled
+ * even at the centroid — which is the caller's cue to rewind the frame.
+ */
+bool q2_coll_settle_point(const q2_collision *c, s32 point[3], s32 node);
+
+/*
  * 0x80044F54 — which node holds `point`.
  *
  * Tries `hint` first, then the hint's portal neighbours, then — only if

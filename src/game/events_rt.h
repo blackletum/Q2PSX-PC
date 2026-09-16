@@ -454,6 +454,38 @@ q2_result q2_event_rt_init(q2_event_rt *rt, const q2_events *events);
  * records come due against it. Also steps `tick` by one — one call is one
  * frame, which is what a WAIT counts. */
 void q2_event_rt_advance(q2_event_rt *rt, s32 ticks);
+
+/*
+ * RESUME A RECORD AFTER THE ITEM THAT JUST FIRED — 0x8002EF1C's second half.
+ *
+ * A destroyable brush group does not only break: when the hit that kills it
+ * came from a WEAPON, the rest of its Events record runs. 0x800267C4 returns 0
+ * while the group stands (0x80026834) and `item + 28` once the destruction
+ * loop has run (0x800269FC); the weapon-impact router tests that at
+ * 0x8002EFA8 and, on a non-zero answer, reads the record offset out of
+ * obj+0x40 (0x8002EFB4) and calls the record executor 0x80027950 with
+ * a2 = item + len — the NEXT item (0x8002EFCC).
+ *
+ * Shooting a crate is therefore a script event. On BASE0 that is what spawns
+ * the jacket armour: COMMON.DAT record +508 is
+ * [FXGROUP item+512 hp 10, CALL CREBATCH "Amour", CALL INSECRET], the batch
+ * 'Amour' holds exactly one place record — id 4 Jacket P at
+ * (-15402,-52,-4731), inside that group's own box — and no trigger volume,
+ * directory entry or list opcode on the map names record +508. The shot is
+ * the only route to it. Ten records across the disc have a shootable 0x08
+ * item with a tail; six of them, BASE0's included, are reachable no other way.
+ *
+ * This is the SHOT route only. The script route (0x800276B0) returns 0 and
+ * the record executor the item is already inside carries on by itself, so a
+ * resume there would run the tail twice.
+ *
+ * Returns false when the record is disabled, the offsets do not resolve, or
+ * the item is not in the record. `out` takes the outcome so a ZONEGATE in the
+ * tail still reaches the caller.
+ */
+bool q2_event_rt_resume_after_item(q2_event_rt *rt, u32 record_offset,
+                                   u32 item_offset, q2_event_outcome *out);
+
 void      q2_event_rt_free(q2_event_rt *rt);
 
 /* Queue the record at `offset` to run on the next update. */
