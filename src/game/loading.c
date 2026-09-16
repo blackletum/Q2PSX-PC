@@ -113,28 +113,6 @@ void q2_loading_raise(q2_loading *l)
      */
     l->hold  = (double)Q2_LOADING_HOLD_UNITS;
     l->timed = true;
-    l->kind  = Q2_LOADING_LEVEL;
-    l->open  = true;
-}
-
-void q2_loading_raise_zone(q2_loading *l)
-{
-    if (!l || !l->ready)
-        return;
-
-    loading_set_page(l, Q2_LOADING_PAGE_LOADING);
-
-    /*
-     * NO HOLD AND NO STRIP RESTART. 0x80079178 enters page 46 and returns; the
-     * load it queued runs after the next frame is presented, and the screen is
-     * gone the moment the caller takes it down. There is no clock anywhere in
-     * that function — the only thing it arms is 0x800C3638, the highlight — so
-     * a timed hold here would be this port inventing a pause the console does
-     * not take.
-     */
-    l->timed = false;
-    l->hold  = 0.0;
-    l->kind  = Q2_LOADING_ZONE;
     l->open  = true;
 }
 
@@ -321,17 +299,11 @@ u32 q2_loading_build_ot(const q2_loading *l, psx_ot *ot, int width, int height)
     origin_y = (height - Q2_MENU_SCREEN_H) / 2;
 
     /*
-     * THE LOGO IS THE LEVEL SCREEN'S, NOT THE ZONE STILL'S.
-     *
-     * InitLoadingAnim (0x80038DFC) is called by TestIt and by nothing else,
-     * and the turning strip is what it sets running for the length of the CD
-     * read. MaybeLoadZoneName does four things — enter page 46, install two
-     * text records, set the highlight flag, queue the load — and none of them
-     * touches it. A zone still with a logo in the corner would be this port
-     * putting the level screen's furniture on the other screen.
+     * The turning strip is InitLoadingAnim's (0x80038DFC), which TestIt calls
+     * and nothing else does — so it belongs to the level screen, which is the
+     * only screen this port raises for a load.
      */
-    if (l->kind == Q2_LOADING_LEVEL)
-        n += loading_draw_logo(l, ot, origin_x, origin_y);
+    n += loading_draw_logo(l, ot, origin_x, origin_y);
 
     /*
      * And the page over it, through the same builder every other page goes

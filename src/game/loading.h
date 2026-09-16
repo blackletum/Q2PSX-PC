@@ -228,10 +228,9 @@ typedef enum q2_loading_page {
 } q2_loading_page;
 
 /*
- * WHICH OF THE TWO SCREENS THIS IS, because the console has two and they are
- * not the same screen.
+ * THE CONSOLE HAS TWO LOADING SCREENS AND THIS PORT RAISES ONE OF THEM.
  *
- * Q2_LOADING_LEVEL is the one `ProcessGame` puts up around `LoadLevel`
+ * The level screen is the one `ProcessGame` puts up around `LoadLevel`
  * (0x80018C88 `jal 0x8006E150`, TestIt in TITLE.C). It clears both ordering
  * tables (0x8006E188, 0x8006E194), calls InitLoadingAnim (0x80038DFC) and
  * InitialiseVBlankLoading (0x8006DFB8), and the last thing that does is
@@ -239,22 +238,13 @@ typedef enum q2_loading_page {
  * VERTICAL-BLANK HOOK. From then until FadeOutLoading (0x8007C8F8) spin-waits
  * for it at 0x8007C914 and unhooks at 0x8007C92C, every vblank draws a whole
  * animated frame while the CD read blocks. It owns the screen, for seconds.
+ * This is the one below.
  *
- * Q2_LOADING_ZONE is MaybeLoadZoneName's (0x80079178, LOADLEV.C), and it is a
- * STILL: one line of text entered onto page 46, one frame presented with it,
- * and the deferred load at 0x8007901C running after that frame has gone out.
- * It does not clear the world behind it and it has no clock of its own — it
- * lasts exactly as long as the read.
- *
- * The port used to raise the first screen's appearance on the second screen's
- * occasions and nothing at all on the first's, which is backwards in both
- * directions at once.
+ * The other is MaybeLoadZoneName's (0x80079178, LOADLEV.C), a still over one
+ * frame while the zone streams in. This port does not raise it: its own zone
+ * load is milliseconds off a file on disk, there is no read to cover, and a
+ * zone seam is meant to pass without the player seeing anything at all.
  */
-typedef enum q2_loading_kind {
-    Q2_LOADING_LEVEL = 0,   /* TestIt / VBlankLoading: owns the screen  */
-    Q2_LOADING_ZONE         /* MaybeLoadZoneName: a still over the frame */
-} q2_loading_kind;
-
 typedef struct q2_loading {
     /*
      * Its own VRAM image rather than the live one.
@@ -278,7 +268,6 @@ typedef struct q2_loading {
 
     /* Live state. */
     bool            open;
-    q2_loading_kind kind;
     bool            timed;    /* it runs its own hold, rather than a caller's */
     double          hold;     /* 1/300 s units still to run, when `timed`    */
     double          spin;     /* 1/300 s units spent on the strip            */
@@ -309,11 +298,6 @@ void      q2_loading_close(q2_loading *l);
  */
 void q2_loading_raise(q2_loading *l);
 
-/*
- * Raise the ZONE screen: the same word, over whatever is already on the frame,
- * for as long as the load takes and no longer. No hold, no clear.
- */
-void q2_loading_raise_zone(q2_loading *l);
 
 /*
  * Put a page up with no clock of its own, for a caller that already has one —

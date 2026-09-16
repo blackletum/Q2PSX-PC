@@ -38,6 +38,10 @@
  *   F7 / F8      the memory-card front end, saving and loading
  *   F9 / F10     quick save and quick load, slot 1
  *   F11          screenshot, of the 512x248 framebuffer rather than the window
+ *   P            toggle the view's own world position and angles along the
+ *                top of the frame, in the units --at, --yaw and --pitch
+ *                take. Not the console's: nothing on this disc puts a
+ *                position on screen. `--coords` starts a run with it up
  *   V            cycle how the picture is shaped: the console's own pixel, the
  *                raw buffer, a forced 4:3, or filling the window
  *   space        jump — and, held, swim up. One key because it is one BUTTON:
@@ -392,7 +396,6 @@ typedef struct client {
      * not of the gate; `quad_raises` is the reproducible half.
      */
     u32              cocks_played;
-    u32              zone_screens;   /* of loading_raises, the stills */
     u32              quad_raises;
     u32              quad_gated;
 
@@ -1638,6 +1641,19 @@ typedef struct client {
 
     bool             show_glint;
     bool             force_underwater;   /* F3 — stands in for a water volume */
+
+    /*
+     * P, or `--coords`: the view's own world position and angles, along the
+     * top of the frame.
+     *
+     * A reader's tool and nothing the console has. It answers the question
+     * every capture in this project starts with — where am I standing, and
+     * which way am I looking — in the units `--at`, `--yaw` and `--pitch`
+     * take, so a spot found by walking can be handed straight to a headless
+     * run. Off unless asked for, and drawn nowhere near the notification
+     * column so it cannot cover a pickup line.
+     */
+    bool             show_coords;
     bool             running;
 
     /*
@@ -5179,28 +5195,17 @@ static bool client_load_zone(client *c, const char *map, int index)
     bool same_map_transition = c->carry_player && c->carry_same_map &&
                                c->map[0] && client_name_eq(c->map, map);
     /*
-     * THE TWO QUESTIONS THE TWO SCREENS ASK, and they are not the negation of
-     * each other.
+     * IS THE DIRECTORY ABOUT TO BE READ A DIFFERENT ONE?
      *
-     * `map_change` is the level screen's: is the directory about to be read a
-     * different one? That is what `ProcessGame` is deciding when it calls
-     * TestIt at 0x80018C88 -- GetLevelData has resolved the name at
-     * 0x80018C6C and LoadLevel follows at 0x80018C90.
+     * That is the level screen's question, and the one `ProcessGame` is
+     * deciding when it calls TestIt at 0x80018C88 -- GetLevelData has resolved
+     * the name at 0x80018C6C and LoadLevel follows at 0x80018C90.
      *
-     * `zone_change` is MaybeLoadZoneName's, and it is a NAME COMPARE rather
-     * than a carry test: 0x800791E0 puts the twelve bytes it was handed
-     * against the resident name at 0x800E465C through 0x8006DBC0, and
-     * 0x800791EC returns 0 with no screen when they match. Every ZONEGATE on
-     * the disc names a zone -- "Zone0".."Zone4", checked on all 22 story maps
-     * -- so the console's question is "a different zone of THIS map", and a
-     * reload of the zone you are standing in raises nothing at all.
-     *
-     * Neither is `!same_map_transition`. That negation also catches a death,
-     * a restart, an arena round reset and a memory-card restore, none of
-     * which changes the directory and none of which goes near either screen.
+     * It is NOT `!same_map_transition`. That negation also catches a death, a
+     * restart, an arena round reset and a memory-card restore, none of which
+     * changes the directory and none of which goes near the screen.
      */
     bool map_change  = !(c->map[0] && client_name_eq(c->map, map));
-    bool zone_change = !map_change && index != c->zone_index;
 
     /*
      * The outgoing zone's kill tally, before anything below frees the set that
@@ -5242,20 +5247,28 @@ static bool client_load_zone(client *c, const char *map, int index)
      * VBlankMainLoop -- while the CD read blocks. A level change on this
      * console shows an ANIMATED screen for several seconds.
      *
-     * MaybeLoadZoneName's is the other one, and it is a still: enter page 46,
-     * present one frame, and let the deferred load at 0x8007901C run after it.
-     * It does not clear the world behind it and it holds no clock.
+     * MaybeLoadZoneName's is the other one, and this port SHOWS NOTHING FOR IT.
+     * On the console it is a still that covers a CD read: enter page 46,
+     * present one frame, and let the deferred load at 0x8007901C run after it,
+     * during which nothing is drawn at all. Here a zone load is a handful of
+     * milliseconds off a file on disk with no frame to cover, so putting the
+     * word up buys nothing and costs the one thing a zone seam must not cost
+     * -- a visible break. A zone change is seamless.
      *
-     * So the port had the two exactly inverted -- the level screen's
-     * appearance on the zone screen's occasions, and nothing at all on the
-     * level's. `map_change` and `zone_change` above are the console's own two
-     * tests, and a load that is neither (a death, a restart, an arena round
-     * reset, a memory-card restore) raises nothing, which is what the console
-     * does with it too.
+     * It also had a fault that made the case for the rule. The zone still was
+     * raised with `timed = false`, and `q2_loading_step` only takes a screen
+     * down when a hold runs out; nothing else called `q2_loading_hide` on the
+     * success path. So the word went up at the first gate and STAYED up, over
+     * a world that was still running underneath it -- a bar that never
+     * finished, which is what a frozen game looks like from the chair.
      *
-     * Raising either does not draw anything. It arms the screen, and the main
-     * loop owns every frame that follows -- deliberate: presenting from inside
-     * a load would swap the buffers under a frame that has not begun, and a
+     * A load that changes no directory -- a death, a restart, an arena round
+     * reset, a memory-card restore -- raises nothing either, which is what the
+     * console does with those too.
+     *
+     * Raising it does not draw anything. It arms the screen, and the main loop
+     * owns every frame that follows -- deliberate: presenting from inside a
+     * load would swap the buffers under a frame that has not begun, and a
      * headless capture numbers its shots by frame.
      *
      * `c->running` stays, and still means the load that STARTS the run: main
@@ -5272,10 +5285,6 @@ static bool client_load_zone(client *c, const char *map, int index)
     if (c->running && map_change) {
         q2_loading_raise(&c->loading);
         c->loading_raises++;
-    } else if (c->running && zone_change) {
-        q2_loading_raise_zone(&c->loading);
-        c->loading_raises++;
-        c->zone_screens++;
     }
 
     /*
@@ -14834,18 +14843,11 @@ static void client_frame(client *c)
         lo.textures = true;
         q2_loading_build_ot(&c->loading, &c->ot, c->width, c->height);
         /*
-         * THE LEVEL SCREEN CLEARS AND THE ZONE STILL DOES NOT.
-         *
-         * TestIt clears both ordering tables at 0x8006E188/0x8006E194 before
-         * the vblank hook takes the screen, so nothing of the level survives
-         * under it. MaybeLoadZoneName clears nothing: it enters page 46 and
-         * returns, and the frame that goes out is the one the renderer had
-         * already built, with the word over it. Blacking the world out for a
-         * zone gate is a half-second of nothing where the console shows the
-         * room you are standing in.
+         * And it clears: TestIt empties both ordering tables at 0x8006E188 and
+         * 0x8006E194 before the vblank hook takes the screen, so nothing of the
+         * level it is leaving survives under it.
          */
-        if (c->loading.kind == Q2_LOADING_LEVEL)
-            psx_fb_clear(q2_screen_back(&c->screen), 0);
+        psx_fb_clear(q2_screen_back(&c->screen), 0);
         q2_screen_compose(&c->screen, &c->ot, c->loading.vram, &lo);
         client_present(c);
         return;
@@ -14958,6 +14960,49 @@ static void client_frame(client *c)
         c->hud[0].crosshair = (c->settings.v[Q2_SET_CROSSHAIR] != 0);
         q2_hud_ctx_centre_in(&ctx, c->width, c->height);
         q2_hud_build_ot(&c->hud[0], &c->hud_font, &ctx, &c->ot, 0);
+    }
+
+    /*
+     * THE VIEW'S OWN COORDINATES, along the top — P, or `--coords`.
+     *
+     * `c->cam` is the camera client_draw_view rewrote for the last viewport it
+     * composed, so in a single-player frame it is the player's view: the eye
+     * position q2_sim_eye publishes and the angles q2_sim_view_angles does, not
+     * the feet and not the body's facing. In a split it reports the last of the
+     * viewports rather than all of them, which is the honest thing a one-line
+     * readout can say.
+     *
+     * Drawn OUTSIDE the overlay's own gate above. That gate is the console's
+     * arrangement for the console's overlay; this is a reader's tool, and it is
+     * wanted under a paused menu as much as in play. It stays out of the front
+     * end, a film and the boot chain, where a world position means nothing.
+     *
+     * y = 4 puts it above Q2_HUD_MSG_TOP, so a pickup line stacking down the
+     * top-left corner never has to share the row. The string carries no markup
+     * escape — no @, ^, |, ~, # or & — so the interpreter at 0x80042328 lays it
+     * out as plain glyphs.
+     */
+    if (c->show_coords && c->hud_font_ready && !c->in_front_end &&
+        !c->film_open && !c->boot_open) {
+        q2_hud_ctx ctx;
+        q2_hud_pen pen;
+        char line[72];
+
+        /* The yaw is shown on the circle `--yaw` takes, 0..4095: the camera's
+         * own accumulates and goes negative, and -1055 and 3041 are the same
+         * heading. The pitch is left signed, because `--pitch` is. */
+        snprintf(line, sizeof(line),
+                 "X %d  Y %d  Z %d  YAW %d  PITCH %d",
+                 (int)c->cam.pos[0], (int)c->cam.pos[1], (int)c->cam.pos[2],
+                 (int)(c->cam.yaw & 4095), (int)c->cam.pitch);
+
+        q2_hud_ctx_centre_in(&ctx, c->width, c->height);
+        q2_hud_pen_default(&pen);
+        /* q2_hud_measure is the original's measurer and counts CHARACTERS; the
+         * glyph advance is a constant 8 (hud.h). */
+        ctx.home_x = (s16)(ctx.width / 2 - q2_hud_measure(line) * 8 / 2);
+        ctx.home_y = 4;
+        q2_hud_print(&c->hud_font, &ctx, &pen, &c->ot, 0, line);
     }
 
     /*
@@ -15296,6 +15341,9 @@ static void usage(void)
     printf("  --at X,Y,Z    stand here instead of at the zone's spawn point\n");
     printf("  --yaw N       ...facing this way (the engine's 0..4095)\n");
     printf("  --pitch N     ...and looking this far up or down\n");
+    printf("  --coords      show the view's world position and angles along\n"
+           "                the top of the frame; the P key toggles the same\n"
+           "                readout while you play\n");
     printf("  --zone-trace  log every zone gate, teleport and unexplained\n"
            "                jump in the player's position while you play\n");
     printf("  --zone-probe  ...and, without playing, where each of this map's\n"
@@ -15707,7 +15755,6 @@ static void client_report(const client *c)
     REPORT("match.banner_frames", c->mp_banner_frames);
     REPORT("audio.quad_raises",     c->quad_raises);
     REPORT("audio.shotgun_cocks",   c->cocks_played);
-    REPORT("level.zone_screens",    c->zone_screens);
     REPORT("audio.quad_gated",      c->quad_gated);
     REPORT("player.shots",          c->shots_fired);
     REPORT("player.shots_dry",      c->shots_dry);
@@ -15905,6 +15952,8 @@ int main(int argc, char **argv)
          */
         else if (!strcmp(argv[i], "--glint"))                 c.show_glint = true;
         else if (!strcmp(argv[i], "--shoot"))                 c.shoot = true;
+        /* The same readout P toggles, for a run with nobody at the keyboard. */
+        else if (!strcmp(argv[i], "--coords"))                c.show_coords = true;
         /*
          * `--save-load N`: quick-save at frame N and quick-load on the next
          * frame, reporting the world state either side. A round-trip test at
@@ -16803,6 +16852,17 @@ no_window:
                             q2_screen_fit_name(c.fit), pn, pd);
                     break;
                 }
+                case SDLK_P:
+                    /*
+                     * The view's own coordinates along the top of the frame.
+                     * P because every other letter on the keyboard already
+                     * means something to the pad bindings, and because this is
+                     * the port's tool rather than the console's: nothing on
+                     * this disc puts a position on screen.
+                     */
+                    c.show_coords = !c.show_coords;
+                    Q2_INFO("coordinates: %s", c.show_coords ? "on" : "off");
+                    break;
                 case SDLK_F1: c.opts.dither    = !c.opts.dither;    break;
                 case SDLK_F2: c.opts.affine_uv = !c.opts.affine_uv; break;
                 case SDLK_F3:
