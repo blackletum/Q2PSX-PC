@@ -699,7 +699,9 @@ static int census_wake(const disc *d)
                 mo->model_ext2 = mdl.hdr.ext2;   /* obj+0xF8, 0x80056710 */
         }
 
-        q2_creature_world_wake(w, origin);
+        /* A census stands a full-health player in the map; the health is
+         * what the AI's dead-enemy gates read. */
+        q2_creature_world_wake(w, origin, 100);
 
         have_sb = (q2_sound_bank_load(&sb, d, map) == Q2_OK);
         sbp     = have_sb ? &sb : NULL;

@@ -2824,8 +2824,14 @@ u32 q2_sim_breakable_shot(q2_sim *sim, const s32 from[3], const s32 to[3],
 
         if (damage != 0) {
             b->health = (s16)(b->health - damage);
-            if (b->health > 0)
+            if (b->health > 0) {
+                /* The hit burst this call made still counts. Returning
+                 * straight out skipped the accumulator at the foot of the
+                 * function, so every non-fatal hit on a pane threw its piece
+                 * and reported none. */
+                sim->breakable_pieces += made;
                 return made;
+            }
         }
 
         /* The shatter, across the whole box: 0x8002A3DC passes zero for the

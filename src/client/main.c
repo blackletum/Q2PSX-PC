@@ -2340,7 +2340,8 @@ static void client_load_creatures(client *c, const s32 eye[3])
         player_origin[0] = eye[0];
         player_origin[1] = q2_sim_origin_y(c->sim[0].player[0].pos[1]);
         player_origin[2] = eye[2];
-        q2_creature_world_wake(&c->creatures, player_origin);
+        q2_creature_world_wake(&c->creatures, player_origin,
+                               c->sim[0].combat.inv.health);
     }
     c->ai_accum = 0.0;
 
@@ -3132,7 +3133,8 @@ static void client_creatures_tick(client *c, float dt, const s32 eye[3])
     c->ai_accum += (double)dt;
     while (c->ai_accum >= 0.1 && guard++ < 8) {
         c->ai_accum -= 0.1;
-        c->ai_thoughts += q2_creature_world_tick(&c->creatures, eye);
+        c->ai_thoughts += q2_creature_world_tick(&c->creatures, eye,
+                                                 c->sim[0].combat.inv.health);
 
         /*
          * One creature, one line per AI tick: the move it is playing, the frame
@@ -9079,7 +9081,24 @@ static void client_input_simulated(client *c, float dt)
             if (c->mp_enabled)
                 client_targets_for(c, pi);
             q2_combat_scan_who = c->mp_enabled ? pi : Q2_COMBAT_SCAN_OTHER;
-            client_advance_view_weapon(c, view_attack[pi], dt);
+            /*
+             * A CORPSE HOLDS A STILL GUN. The view-weapon driver 0x8004EE0C
+             * has exactly one call site in the whole image, 0x8003AD98, and
+             * that is inside the player think — which `player_die` replaces
+             * with the corpse think at 0x800396AC, so the driver is never
+             * reached again for that entity (playerdeath.h says this of the
+             * pad read in the same breath; the pad half was already honoured
+             * in sim.c and this half was not).
+             *
+             * The attack was already gated, because the sim hands a dead
+             * player a neutral input, so nothing was firing. What still ran
+             * was the MACHINE: the lower clip kept playing, the 70-tick swap
+             * countdown kept running, and the frame sounds kept draining, so
+             * a dead player's gun went on animating in his hands and could
+             * still change weapon under him.
+             */
+            if (!(c->sim[0].player[pi].ent2_flags & Q2_ENT2_DEAD))
+                client_advance_view_weapon(c, view_attack[pi], dt);
             client_score_deaths(c);
         }
         q2_sim_select_player(&c->sim[0], saved);

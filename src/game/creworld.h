@@ -211,7 +211,8 @@ q2_result q2_creature_world_load(q2_creature_world *w, const disc *d,
  * client's own view height converts, exactly as 0x8005B950 does for every
  * other entity. Passing the eye adds the view height twice.
  */
-void q2_creature_world_wake(q2_creature_world *w, const s32 player_origin[3]);
+void q2_creature_world_wake(q2_creature_world *w, const s32 player_origin[3],
+                            s16 player_health);
 
 /*
  * One AI tick. `player_eye` moves the sight client first, so a creature that
@@ -219,7 +220,8 @@ void q2_creature_world_wake(q2_creature_world *w, const s32 player_origin[3]);
  *
  * Returns how many creatures thought, which is zero on a level with none.
  */
-u32 q2_creature_world_tick(q2_creature_world *w, const s32 player_origin[3]);
+u32 q2_creature_world_tick(q2_creature_world *w, const s32 player_origin[3],
+                           s16 player_health);
 
 /*
  * The player made a noise, and creatures may look for it.

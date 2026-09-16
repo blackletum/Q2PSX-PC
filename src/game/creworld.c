@@ -652,7 +652,33 @@ static void sight_place(q2_creature_world *w, const s32 origin[3])
     w->sight.pos[2] = origin[2];
 }
 
-void q2_creature_world_wake(q2_creature_world *w, const s32 player_origin[3])
+/*
+ * AND THE PLAYER'S HEALTH, WHICH THE STAND-IN USED TO HOLD AT 100 FOR EVER.
+ *
+ * The AI asks this entity whether its enemy is still worth shooting, in two
+ * places that are both transcriptions:
+ *
+ *   ai_checkattack's "he's dead Jim" (ai.c) clears `enemy` and falls back to
+ *   the old enemy, the move target or a stand — `enemy->health <= 0`
+ *   q2_M_CheckAttack (0x8005D8EC) takes the dead-enemy arm on the same test
+ *
+ * Neither can ever fire against a constant. `q2_creature_world_wake` set the
+ * stand-in's health to 100 and the tick refreshed only the position, so every
+ * creature on every map believed the player was at full health from the
+ * moment the zone loaded until it was torn down. A player who died went on
+ * being shot where they fell: SECURITY, `--demo --watch`, reported health
+ * -14 at frame 560 and -48 by 620, still dropping.
+ *
+ * max_health is left where the spawn put it. Nothing in the AI reads it, and
+ * it is the stand-in's own field rather than a copy of the player's.
+ */
+static void sight_health(q2_creature_world *w, s16 health)
+{
+    w->sight.health = health;
+}
+
+void q2_creature_world_wake(q2_creature_world *w, const s32 player_origin[3],
+                            s16 player_health)
 {
     if (!w)
         return;
@@ -667,7 +693,7 @@ void q2_creature_world_wake(q2_creature_world *w, const s32 player_origin[3])
     w->sight.in_use      = true;
     w->sight.spawnflags |= Q2_SVFLAG_INUSE;
     w->sight.client      = true;     /* entity+0x0C != NULL: this is a player */
-    w->sight.health      = 100;
+    w->sight.health      = player_health;
     w->sight.max_health  = 100;
     /* The eye the console's `visible` reconstructs from the origin: the
      * origin is feet - 286 and the eye is feet - 576, so -290. */
@@ -677,12 +703,14 @@ void q2_creature_world_wake(q2_creature_world *w, const s32 player_origin[3])
     q2_monster_set_wake(&w->set, &w->sight);
 }
 
-u32 q2_creature_world_tick(q2_creature_world *w, const s32 player_origin[3])
+u32 q2_creature_world_tick(q2_creature_world *w, const s32 player_origin[3],
+                           s16 player_health)
 {
     if (!w || !w->ready)
         return 0;
 
     sight_place(w, player_origin);
+    sight_health(w, player_health);
     return q2_monster_set_tick(&w->set);
 }
 
