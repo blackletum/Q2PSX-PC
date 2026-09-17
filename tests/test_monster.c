@@ -126,18 +126,22 @@ static void test_frame_distance(void)
     check(q2_monster_frame_dist(&m, &f) != 0, "and releases it again");
 
     /*
-     * AND A DEAD CREATURE NEVER TRANSLATES. The console's corpse handler
-     * (0x8007F71C) makes no position write at all, and this port's swept step
-     * was lifting a body a full step height it then had no way to come down
-     * from: measured on BASE2, a Soldier corpse stranded 215 units up over
-     * ground the sight hull reports flat. Wider than the console's own scope
-     * and labelled as such at the site.
+     * A DYING CREATURE STILL TRANSLATES, AND A DETACHED CORPSE DOES NOT.
+     *
+     * The console's corpse handler (0x8007F71C) makes no position write at
+     * all, which is why `corpse` stops it — but `corpse` is raised by the
+     * module's own `*_dead`, at the END of the death move. A body between the
+     * killing hit and that callback is still an edict and still steps, and it
+     * has to: the Infantry's Death1 opens at dist -4 and carries non-zero
+     * steps most of the way through, so suppressing them played the whole
+     * death clip on the spot the creature was shot.
      */
     m.dead = true;
-    check_eq_i(q2_monster_frame_dist(&m, &f), 0, "a dead creature does not move");
+    check(q2_monster_frame_dist(&m, &f) != 0,
+          "a dying creature still translates: the death move's own steps");
     m.dead   = false;
     m.corpse = true;
-    check_eq_i(q2_monster_frame_dist(&m, &f), 0, "nor does a detached corpse");
+    check_eq_i(q2_monster_frame_dist(&m, &f), 0, "a detached corpse does not");
     m.corpse = false;
 }
 

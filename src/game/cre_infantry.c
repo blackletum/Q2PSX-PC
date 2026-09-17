@@ -41,10 +41,18 @@
  *
  *   - when the word at object+0x10C is NEGATIVE it calls import +0xA0
  *     `muzzle_flash_light` with the cached muzzle pose at module+0x1D80 packed
- *     into a1/a2 and 120 in a3 (0x80100E44..0x80100E88). Neither the meaning of
- *     object+0x10C nor the meaning of that fourth argument is established —
- *     the import table leaves a3 unnamed too — so only the sign test and the
- *     literal are claimed here.
+ *     into a1/a2 and 120 in a3 (0x80100E44..0x80100E88).
+ *
+ *     OBJECT+0x10C IS `monsterinfo.pausetime`, established since. Two of this
+ *     module's own thinks write it and one reads it: `infantry_duck_down`
+ *     stores `level.time + 10` there (0x801011A8), `infantry_cock_gun` stores
+ *     `level.time + (rand() & 15) + 10` (0x80101284), and `infantry_duck_hold`
+ *     compares it against `level.time` to decide whether to hold the frame
+ *     (0x801011C8). The port keeps it in `q2_monster.pausetime`, which is the
+ *     same field the shared AI pauses on, exactly as id shares it. So export
+ *     1's test is "the pause deadline has gone negative", and what the fourth
+ *     argument means is still not established — the import table leaves a3
+ *     unnamed — so only the sign test and the literal are claimed here.
  *
  * Neither is creature behaviour — they are effects the renderer would run —
  * and this port has no per-object render hook for a creature to install, so
@@ -190,6 +198,23 @@
 /* The move set, by first frame — how every caller in this port names a move  */
 /* (crebind.h). The module address of each record is beside it.               */
 /* ------------------------------------------------------------------------- */
+/*
+ * THE RUN LURCHES, AND IT IS SUPPOSED TO.
+ *
+ * Reported as "speeding around sometimes", and measured rather than argued.
+ * The eight Run frames at module+0x19DC carry distances 20, 5, 7, 30, 35, 2,
+ * 6 and 8, which through the console's own scale — `(dist * scale * 12) / 10`
+ * at 0x80061930..0x8006196C, with this creature's scale of 10 — become steps
+ * of 240, 60, 84, 360, 420, 24, 72 and 96 world units per 10 Hz tick. A
+ * seventeen-fold swing inside one gait cycle, on JAIL2 as on the disc: it is
+ * id's own `infantry_frames_run` and not a defect here.
+ *
+ * The attack shuffle is the same kind of thing. Attack1 (module+0x1B40) runs
+ * 4, -1, -1, 0, -1, 1, 1, 2, -2, -3, 1, 5, -1, -2, -3, so the Infantry steps
+ * backwards through most of its own burst. A trace reading `drift 2035` —
+ * travelling within a few units of due opposite to its facing — is that, not
+ * a moonwalk.
+ */
 #define INF_FIDGET       1     /*   1..49   "Fidget"   module+0x1980 */
 #define INF_STAND       50     /*  50..71   "Stand1"   module+0x18DC */
 #define INF_WALK        74     /*  74..85   "Walk"     module+0x19B4 */

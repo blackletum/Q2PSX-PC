@@ -130,20 +130,29 @@ s32 q2_monster_frame_dist(const q2_monster *m, const q2_mframe *frame)
      * animation still playing out in full, leaves the body on the floor for
      * the whole run — necessary and sufficient, established by counterfactual.
      *
-     * THE SCOPE IS WIDER THAN THE CONSOLE'S, and that is the departure.
-     * `m->corpse` is only raised once the module's own `*_dead` has run, which
-     * is the END of the death move — and the lift happens on the FIRST dead
-     * tick. The console's dying body is still an edict and does still step; it
-     * gets away with it because it does not have this port's hull
-     * disagreement. So the rule here is "dead", not "detached", and what it
-     * costs is the small forward lurch the death frames carry (115 units on
-     * the Soldier's first, then zero within four frames). That is the trade:
-     * a lurch, against bodies stranded 215 units up with no way down.
+     * THE SCOPE USED TO BE WIDER THAN THE CONSOLE'S and is not any more.
+     * `m->corpse` is raised once the module's own `*_dead` has run, which is
+     * the END of the death move; the rule here used to be "dead", which is
+     * the FIRST tick of it, and the whole death move lost its translation.
+     *
+     * That is not a small loss. The Infantry's Death1 opens at dist -4 — -48
+     * world units once the scale is applied — and carries non-zero steps most
+     * of the way through. The body is meant to stagger as it goes down, and
+     * instead it played the clip standing on the spot it was shot.
+     *
+     * The wider rule was taken as a trade against bodies stranded 215 units up
+     * over ground `PrimaryColl` reports flat, because `ai_move`'s swept step
+     * lifts a full Q2_STEPSIZE before it moves horizontally and the drop that
+     * should undo the lift returns almost at once. Measured again on the maps
+     * that actually place an Infantry, the trade no longer pays: BASE2's dies
+     * through Death1 with steps of 47, 11 and 47 units and settles at y 1632,
+     * which is the floor its living self stood on, and a staged BASE2 Soldier
+     * death ends at the same positions with the rule either way.
      *
      * The hull disagreement is a real second defect with its own victim (that
-     * twelve-step hop) and is deliberately NOT fixed here.
+     * twelve-step hop) and is still deliberately NOT fixed here.
      */
-    if (m->corpse || m->dead)
+    if (m->corpse)
         return 0;
 
     return ((s32)frame->dist * (s32)m->speed_scale * 12) / 10;
