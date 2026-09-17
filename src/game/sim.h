@@ -1149,6 +1149,19 @@ u32 q2_sim_attach_breakables(q2_sim *sim, const q2_scene *scene,
  * which is the difference between the two debris calls at 0x8002A384 and
  * 0x8002A3DC.
  */
+/*
+ * How far past a hitscan's impact point the pane sweep still looks, in
+ * world units along the ray.
+ *
+ * A pane is solid, so the pellet meant to break it is the pellet it
+ * stopped, and the trace hands back a point on the near side of that
+ * surface — one unit of back-off at 0x800453F8 plus the hull's own
+ * rounding. Eight units covers it and reaches nothing behind: the
+ * thinnest wall on the disc is thicker than that, and the console has no
+ * equivalent tolerance only because its sweep runs inside the trace.
+ */
+#define Q2_BREAKABLE_REACH 8
+
 u32 q2_sim_breakable_shot(q2_sim *sim, const s32 from[3], const s32 to[3],
                           s16 damage);
 

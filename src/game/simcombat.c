@@ -262,7 +262,50 @@ static void fx_hitscan_impact(q2_sim *sim, const s32 origin[3],
          * end: the console's sweep runs INSIDE the trace, so a pane in front of
          * the wall is what the shot hits, not the wall behind it.
          */
-        q2_sim_breakable_shot(sim, origin, at, damage);
+        {
+            /*
+             * AND THE END IS PUSHED A LITTLE PAST THE IMPACT, or a pane can
+             * never be shot at all.
+             *
+             * A pane is SOLID in the hull, so the pellet that is meant to
+             * break it is the pellet the pane itself stopped — and the trace
+             * hands back a point on the near side of that surface, a unit or
+             * so outside the Scene node's own box (trace.c backs off one unit
+             * along the dominant axis at 0x800453F8). Testing the segment
+             * origin -> impact against the unpadded box therefore missed the
+             * very case it exists for: LAB's node 205, fired on from 577 units
+             * away, stopped every bullet at x 322..325 against a box whose
+             * far face is x 321, and 285 rounds registered six hits — the six
+             * that happened to enter across a corner.
+             *
+             * The console does not have the problem because its pane sweep
+             * runs INSIDE the trace (0x8004874C): the pane is one of the
+             * things the trace can stop on, and when it does, that IS the hit.
+             * This port traces first and asks afterwards, so the question has
+             * to be asked a few units further along the ray.
+             *
+             * Along the RAY and not by padding the box: the build deliberately
+             * takes the node's own numbers rather than q2_scene_node_bounds'
+             * culling slop, because a padded box would be shootable from
+             * beside the pane. Extending the segment keeps the aim exact and
+             * only forgives the back-off. The step is measured on the ray's
+             * dominant axis, which is the norm 0x8006FA2C computes.
+             */
+            s32 to[3];
+            s32 big = 0;
+            int a;
+
+            for (a = 0; a < 3; a++) {
+                s32 m = dir[a] < 0 ? -dir[a] : dir[a];
+                if (m > big) big = m;
+            }
+            for (a = 0; a < 3; a++)
+                to[a] = big > 0
+                      ? at[a] + (s32)(((s64)dir[a] * Q2_BREAKABLE_REACH) / big)
+                      : at[a];
+
+            q2_sim_breakable_shot(sim, origin, to, damage);
+        }
     }
 }
 
