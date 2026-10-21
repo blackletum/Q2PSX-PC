@@ -536,7 +536,56 @@ typedef struct q2_actor {
      * hit draws exactly as it did before.
      */
     u8   ambient[3];        /* entity+0x2AC                                  */
+
+    /*
+     * ARMOUR_FADE, gp+1184 (0x800AEAA0), and the screen wash it gates.
+     *
+     * The console's is a single global byte, because the console can raise the
+     * wash where it decides: CheckPowerArmour calls SetWinFade at 0x80057B80
+     * and CheckArmour at 0x80057D24, both writing the viewport fields the
+     * viewport draw at 0x80076764 reads. This port has no screen inside
+     * combat.c, so the absorb stage records WHICH of the two fired and the
+     * client drains it into q2_screen_flash_set — one raise per frame, which is
+     * what the console's last-writer-wins on view+672 comes to.
+     *
+     * It lives on the actor rather than in a file-scope global because the
+     * console's viewport is picked from the entity's own client pointer
+     * (0x80057B3C `lw v1, 0(s1)`), so the raise belongs to the entity that was
+     * hit — and because a global would be wrong the moment two players are in
+     * the frame.
+     *
+     * 0x80057AB0 clears it as the FIRST instruction of CheckPowerArmour, before
+     * any guard, so a hit that finds no shield clears it too.
+     */
+    s8   armour_fade;       /* Q2_ACTOR_FADE_*, gp+1184                      */
 } q2_actor;
+
+/*
+ * The two SetWinFade raisers, with the operands each site passes.
+ *
+ *   POWER  0x800AEAA4 = 00 80 20 00 → rgb(0,128,32), a green wash;
+ *          mode 2 (FADE) at 0x80057B54, strength 10 at 0x80057B38 and initial
+ *          10 in [sp+16] at 0x80057B58 — ten drawn frames easing out.
+ *   ARMOUR 0x800AEAA8 = 80 80 80 00 → rgb(128,128,128), grey;
+ *          mode 2 at 0x80057CF8, strength 20 at 0x80057CDC and initial 20 at
+ *          0x80057CFC — twenty frames.
+ *
+ * Both are far stronger and far longer than the health/armour delta flash the
+ * HUD raises at 0x8003AE10 (grey 0x40, at most five frames), which is the only
+ * one this port used to have.
+ */
+typedef enum q2_actor_fade {
+    Q2_ACTOR_FADE_NONE   = 0,
+    Q2_ACTOR_FADE_POWER  = 1,   /* 0x80057B80 */
+    Q2_ACTOR_FADE_ARMOUR = 2    /* 0x80057D24 */
+} q2_actor_fade;
+
+#define Q2_ACTOR_FADE_MODE            2    /* SetWinFade's a2 at both sites  */
+#define Q2_ACTOR_FADE_POWER_STRENGTH  10   /* 0x80057B38 / 0x80057B58        */
+#define Q2_ACTOR_FADE_ARMOUR_STRENGTH 20   /* 0x80057CDC / 0x80057CFC        */
+
+extern const u8 q2_actor_fade_power_rgb[3];    /* 0x800AEAA4 */
+extern const u8 q2_actor_fade_armour_rgb[3];   /* 0x800AEAA8 */
 
 /* True while an actor's energy-bolt effect is at full strength (effect[1] >= 3),
  * which is the arm 0x80058660 takes to the lit path. */

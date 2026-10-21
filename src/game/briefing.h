@@ -123,6 +123,10 @@ extern const char q2_briefing_default_objective[]; /* 0x8009B534 */
 
 #define Q2_BRIEFING_FIELD_MAX   128
 
+/* A Strings key, as `LastOrders` and `LastObjective` hold one: twelve bytes,
+ * moved by three lwl/lwr pairs at 0x80020F80..0x80020F94. */
+#define Q2_BRIEFING_KEY_LEN     12
+
 typedef struct q2_briefing {
     char location[Q2_BRIEFING_FIELD_MAX];    /* text("MapTitle")   */
     char orders[Q2_BRIEFING_FIELD_MAX];      /* 0x800B27A4         */
@@ -232,6 +236,26 @@ typedef struct q2_briefing_popup {
     /* 0x800B27A4 / 0x800B27A8 — global, and deliberately not per level. */
     char orders[Q2_BRIEFING_FIELD_MAX];
     char objective[Q2_BRIEFING_FIELD_MAX];
+
+    /*
+     * AND THE TWO KEYS THE TEXT WAS RESOLVED FROM, which the port did not
+     * keep and the save therefore could not carry.
+     *
+     * `HelpComputer_SetMessages` takes two 12-byte Strings KEYS by value,
+     * stores them in `LastOrders` (0x800C6EDC) and `LastObjective`
+     * (0x800C6ED0) at 0x80020F80..0x80020FD0, and only then resolves them
+     * through 0x800701B4 into the two pointers above. The keys outlive the
+     * resolution because they are what travels: every unit's `LoadSaveHub`
+     * copies both into its save block with `HelpComputer_GetMessages`
+     * (0x800218A8) and hands them back to `SetMessages` on the restore, so a
+     * loaded game shows the pair that was current — re-resolved against
+     * whatever level it is resumed in.
+     *
+     * Empty means "no HELPCOMPUTER has fired", which is exactly the twelve
+     * zero bytes `HelpComputer_Reset` (0x80021968) copies from 0x800AB87C.
+     */
+    char orders_key[Q2_BRIEFING_KEY_LEN + 1];
+    char objective_key[Q2_BRIEFING_KEY_LEN + 1];
 } q2_briefing_popup;
 
 /* The clamp at 0x8002136C and the constants both raisers pass. */
@@ -250,9 +274,14 @@ void q2_briefing_popup_init(q2_briefing_popup *p);
  * hard-coded fallback. Pass NULL or an empty string for a key the level's text
  * does not carry and the fallback is used, which is what the console does when
  * the lookup misses.
+ *
+ * The KEYS go in too, and are kept verbatim — `SetMessages` stores them before
+ * it resolves anything, and they are what the save carries. This module still
+ * does no lookup of its own: the caller resolves, and hands over both halves.
  */
-void q2_briefing_popup_set(q2_briefing_popup *p, const char *orders,
-                           const char *objective);
+void q2_briefing_popup_set(q2_briefing_popup *p,
+                           const char *orders_key, const char *orders,
+                           const char *objective_key, const char *objective);
 
 /*
  * 0x800213B0. `delay` in the item's own units; zero opens immediately and

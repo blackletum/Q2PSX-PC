@@ -98,6 +98,8 @@
 /* The map's CastList, so an item's model can be resolved at spawn. Declared
  * rather than included: sim.h has no other use for the model format. */
 struct q2_model_bank;
+struct q2_rotator_set;
+struct q2_scene_solid;
 
 /* ------------------------------------------------------------------------- */
 /* Input, as the pad delivered it                                             */
@@ -471,7 +473,7 @@ typedef struct q2_breakable {
     /* MOVER: the event item the leaf was built from, which is the identity
      * q2_movers_trigger_item keys on. */
     u32 item_offset;
-    /* GLASS only: index of its live Q2_MOVE_KIND_ENTITY box in `volumes`.
+    /* GLASS/SHOOTTHEN: index of its live entity box in `volumes`.
      * Movers are inserted before it, so this is rebased whenever that prefix
      * is rebuilt. -1 for breakables that never block movement. */
     s32 solid_target;
@@ -596,6 +598,13 @@ typedef struct q2_sim {
     s16         *volume_damage;
     s16         *volume_mod;
 
+    /*
+     * Entries into shallow water — 0x8003D4C4, one GenerateWaterSplash call
+     * each. Counted because the splash is otherwise only visible on screen, and
+     * a headless run is where the port is measured.
+     */
+    u32          water_splashes;
+
     /* The map's breakable panes, and which collision node each one occupies. */
     q2_breakable breakable[Q2_SIM_MAX_BREAKABLES];
     u32          breakable_count;
@@ -656,6 +665,26 @@ typedef struct q2_sim {
      */
     s32          blast_at[Q2_EXPLOSIVE_MAX_PARTS][3];
     u32          blast_count;
+
+    /*
+     * AND WHERE EACH PANE SHATTERED, so the owner can play Q2_GLASS_SOUND.
+     *
+     * The same arrangement, for the same reason, one handler along: 0x8002A4A4
+     * plays the handle at 0x800B27FC (`Sound_GlassSmash`) through 0x80073704 at
+     * the centre of the pane's Scene node box, which 0x8002A3E4..0x8002A4A0
+     * builds on the stack immediately before the call. Every breaking window in
+     * the game was silent in this port until this queue existed — the sample is
+     * in the maps' own banks (BASE1's SNDVRAM entry 29 is `amb_brkglas`) and
+     * nothing ever asked for it.
+     *
+     * Eight is an arbitrary depth. The console plays the sound the instant it
+     * makes it and cannot drop one, so all this bound decides is how many panes
+     * may break in a single tick before a smash is lost; a ninth is dropped
+     * exactly as a thirty-third node_vis change is.
+     */
+    s32          glass_at[8][3];
+    u32          glass_count;
+
     /* The scene the panes' nodes belong to, kept so the hitscan path can throw
      * their debris without every shot carrying a scene pointer. */
     const struct q2_scene *breakable_scene;
@@ -682,9 +711,13 @@ typedef struct q2_sim {
      * player walked through.
      */
     q2_move_target *volumes;
-    u32             volume_count;   /* movers + intact glass + trigger volumes */
+    u32             volume_count;   /* all entity boxes + trigger volumes      */
     u32             mover_count;    /* how many of them are mover parts        */
-    u32             breakable_solid_count; /* GLASS boxes after mover prefix    */
+    u32             breakable_solid_count; /* GLASS/SHOOTTHEN after movers      */
+    /* ROTHATCH, OBJDRAWOFF and every intact FXGROUP part follow breakables.
+     * Their indices are implicit, so rebuilding either prefix preserves them. */
+    struct q2_scene_solid *scene_solids;
+    u32                   scene_solid_count;
 
     /*
      * The mover parts' PRISTINE boxes, six s32 each, parallel to the first
@@ -1048,6 +1081,15 @@ u32 q2_sim_debris_burst(q2_sim *sim, const s32 bmin[3], const s32 bmax[3],
                         const s32 *at, u32 count, u8 area);
 
 /*
+ * The area byte a particle spawner wants — `0x800686C4`.
+ *
+ * Non-zero in means non-zero out (0x800686D0); zero asks PrimaryColl which
+ * cell `at` is in and returns that cell's area record. Public because the
+ * spawn sites live in two translation units and the console has one helper.
+ */
+u8 q2_sim_fx_area(q2_sim *sim, u8 area, const s32 at[3]);
+
+/*
  * GLASS and SHOOTTHEN, run from a script CALL.
  *
  * `0x8002A350` is GLASS, and reading it settles both what a pane throws and
@@ -1060,14 +1102,35 @@ u32 q2_sim_debris_burst(q2_sim *sim, const s32 bmin[3], const s32 bmax[3],
  *         item[+6] -= damage                     ; hit points, mutated in place
  *         if (item[+6] > 0) return               ; still standing
  *     }
- *     debris(obj->node, obj->param_b, 0)         ; 0x8002A3DC, the shatter
- *     sound(id, centre of the node's box)        ; 0x8002A4A4
+ *     if (item[+4] < 0) return                   ; 0x8002A3BC
+ *     if (!Event_MuteLevFlag) {                  ; 0x8002A3C4/0x8002A3CC
+ *         debris(obj->node, obj->param_b, 0)     ; 0x8002A3DC, the shatter
+ *         sound(Sound_GlassSmash,                ; 0x8002A490/0x8002A4A4
+ *               centre of the node's box)        ; 0x8002A3E4..0x8002A4A0
+ *     }
+ *     Scene2Data[obj->node].flags08 |= 0x8000    ; 0x8002A4C8..0x8002A4E0
+ *     FreeSolidBoxs(obj->box)                    ; 0x8002A4E4/0x8002A4E8
+ *     obj->box = 0; obj->damage_fn = 0           ; 0x8002A4F0/0x8002A4F4
+ *
+ * THE LAST THREE LINES ARE BELOW THE BRANCH, and this transcription used to
+ * stop at the sound and miss them entirely. Bit 15 of a Scene node's flags at
+ * +8 is do-not-draw, so the console's pane VANISHES the instant it breaks; the
+ * port drew the geometry of every shot-out window for as long as the zone was
+ * loaded. Being below the branch also means both happen during the EVE_ replay,
+ * so a pane the script already broke comes back broken and invisible rather
+ * than whole. The hide is queued through q2_sim_next_node_vis and the freed box
+ * is the port's `broken` flag plus q2_sim_breakables_sync_solidity, which is
+ * the same pair of effects: nothing draws it and nothing can hit it again.
  *
  * `0x80064558` — the debris burst this port already transcribes — takes the
  * SCENE NODE INDEX, a count, and a third argument that is a fixed origin or
  * zero: zero scatters the pieces uniformly through the node's box, which is
  * what makes a shattering window come apart across its whole surface. So the
  * hit burst comes out of a point and the shatter comes out of the pane.
+ *
+ * The sound is `amb_brkglas` — see Q2_GLASS_SOUND below for how the handle at
+ * 0x800B27FC is named — played positionally at the box centre, and it is inside
+ * the branch with the shatter rather than below it with the hide.
  *
  * A SCRIPTED call passes damage 0, and the branch at `0x8002A390` therefore
  * skips the hit-point subtract entirely and falls straight through to the
@@ -1148,6 +1211,13 @@ u32 q2_sim_attach_breakables(q2_sim *sim, const q2_scene *scene,
  * comes out of the crossing POINT and the shatter out of the pane's whole box,
  * which is the difference between the two debris calls at 0x8002A384 and
  * 0x8002A3DC.
+ *
+ * A fatal hit on a pane also runs PSXGLASS's tail (0x8002A4AC..0x8002A4F4):
+ * the node is queued for hiding through q2_sim_next_node_vis and its smash is
+ * queued through q2_sim_next_glass_smash. Both are the caller's to drain — the
+ * hide array and the mixer are the owner's — and a caller that drains neither
+ * gets the behaviour this port had before they existed: a shot-out window that
+ * is still drawn and still silent.
  */
 /*
  * How far past a hitscan's impact point the pane sweep still looks, in
@@ -1169,6 +1239,20 @@ u32 q2_sim_breakable_shot(q2_sim *sim, const s32 from[3], const s32 to[3],
  * the breakable records directly, then calls this once so shattered panes do
  * not become solid again merely because a zone was reconstructed first. */
 void q2_sim_breakables_sync_solidity(q2_sim *sim);
+
+/* Register the remaining users of retail's entity-box allocator (0x800555D8).
+ * Call after building explosives and rotators, before the load-time scripts.
+ * Repeated calls replace the old registry. Only TARGET rotators own boxes;
+ * SIMROT and ROTBUTTON constructors allocate none. */
+q2_result q2_sim_attach_scene_solids(q2_sim *sim, const q2_scene *scene,
+                                      const q2_uf_operands *ops,
+                                      const struct q2_rotator_set *rotators);
+/* Refresh hatch displacement and explosive lifetimes. NULL leaves hatch
+ * positions alone, useful when only an explosive changed inside the sim. */
+void q2_sim_scene_solids_update(q2_sim *sim,
+                                 const struct q2_rotator_set *rotators);
+/* OBJDRAWOFF frees the node's box; later visibility alone cannot recreate it. */
+void q2_sim_scene_solids_hide(q2_sim *sim, s32 node);
 
 /*
  * Put a zone's `func_explosive` groups into the same registry.
@@ -1211,6 +1295,39 @@ bool q2_sim_next_node_vis(q2_sim *sim, s16 *node, u8 *hidden);
  * 0x800B27F8, which 0x8002695C is the ONLY reader of in the whole executable.
  */
 bool q2_sim_next_blast(q2_sim *sim, s32 out[3]);
+
+/*
+ * WHAT A BREAKING PANE SOUNDS LIKE, and there is no guesswork in the name.
+ *
+ * 0x800B27FC has exactly two references in the whole image: the read at
+ * 0x8002A490 that feeds 0x8002A4A4, and the store at 0x8002DB70 — the tail of
+ * `InitEventSoundsEachLevel` (0x8002D46C, EVENT.C), which hands GetSoundNum
+ * (0x80073518) the twelve-byte key at 0x800ABCC8, `amb_brkglas`. The NTSC
+ * disc's symbol table names that global `Sound_GlassSmash`.
+ *
+ * The pair either side of it settles any remaining doubt: the same function's
+ * previous call (0x8002DACC, key 0x800ABCBC `wep_grenlx1a`) stores its answer
+ * at 0x8002DAE4 into 0x800B27F8, which is the handle the detonation report
+ * reads. Two adjacent keys in the string table, two adjacent handles in bss,
+ * initialised one after the other, and one reader each.
+ *
+ * Eleven characters in a twelve-byte field, which is exactly what
+ * client_find_sound's prefix rule matches: BASE1's bank carries it as SNDVRAM
+ * entry 29, `029_amb_brkglas`.
+ */
+#define Q2_GLASS_SOUND "amb_brkglas"
+
+/*
+ * Take the next queued pane-smash position, or false when the queue is empty.
+ *
+ * The caller plays Q2_GLASS_SOUND there, positionally, exactly as it plays a
+ * detonation's report: 0x8002A4A4 is the same 0x80073704 by-handle entry with
+ * the same kind of argument, the centre of the pane's Scene node box.
+ *
+ * Drain this every tick beside q2_sim_next_blast. A queue left undrained keeps
+ * its entries and eventually drops new ones, which is a mute pane again.
+ */
+bool q2_sim_next_glass_smash(q2_sim *sim, s32 out[3]);
 
 /*
  * Where the sim fires effects from, so a reader does not have to find them:

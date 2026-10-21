@@ -500,4 +500,44 @@ bool q2_player_abandon_tick(s32 *ticks, s32 dt);
  */
 bool q2_player_spend_resupply(int *continues);
 
+/* ------------------------------------------------------------------------- */
+/* The death camera's roll                                                    */
+/* ------------------------------------------------------------------------- */
+/*
+ * MoveQuakeCamera's no-body branch (0x800380C8) and QuakeCamera's Q2_ENT2_DEAD
+ * branch (0x80038664) are the same four instructions twice over: seek the
+ * camera's roll at view+16 toward -384 with a fraction of `50 * dt`.
+ *
+ * THE FRACTION IS NOT A CONSTANT, and treating it as one is what this port did.
+ * 0x800380D8..0x800380EC is `sll 1 / addu / sll 3 / addu / sll 1` over the frame
+ * delta at [0x800B2DB4] — 2d, 3d, 24d, 25d, 50d — so the arc closed per frame
+ * scales with the frame's own length and the roll therefore takes the same WALL
+ * TIME at any frame rate. At the console's 25 Hz PAL rate dt is 12 and the
+ * fraction is 600 of 2048, about 29% of what is left every frame.
+ */
+#define Q2_PDEATH_CAM_ROLL   (-384)   /* 0x800380C8 `addiu a1, zero, -384`   */
+#define Q2_PDEATH_CAM_RATE   50       /* 0x800380D8..0x800380EC              */
+
+/*
+ * MISC.C `SeekAng`, 0x8006FAC8 — the short way round the 4096-step circle,
+ * which is the only thing the two branches above call.
+ *
+ *   d = (want - cur) & 0xFFF
+ *   d & 0x800  ?  cur - (((4096 - d) * frac + 2047) >> 11)   (0x8006FAF4)
+ *              :  cur + (( d          * frac + 2047) >> 11)  (0x8006FADC)
+ *   and the result is masked back to 12 bits either way.
+ *
+ * `frac` is a 1/2048 fraction, NOT 1/4096: the shift is 11 and the +2047 is the
+ * round-to-nearest that goes with it. A `frac` of 2048 therefore arrives in one
+ * step, and anything above it overshoots — which is a thing the original can do
+ * and is left alone.
+ */
+s16 q2_pdeath_seek_ang(s16 cur, s16 want, s32 frac);
+
+/*
+ * One frame of the death camera's roll. `dt` is the frame delta in the engine's
+ * own 1/300 s units, the port's stand-in for [0x800B2DB4].
+ */
+s16 q2_pdeath_cam_roll(s16 roll, s32 dt);
+
 #endif /* Q2PSX_GAME_PLAYERDEATH_H */

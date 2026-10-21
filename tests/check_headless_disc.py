@@ -595,13 +595,17 @@ def build_cases(quick, ntsc):
     # A quick save taken mid-level and restored. It is a LOAD, and it must not
     # raise the transition screen: a memory-card restore is the outer state
     # machine's, not 0x80079178's.
-    cases.append(Case("save-load", ["--map", "BASE1", "--save-load", "40"],
-                      frames=120,
-                      checks=[no_errors, ticked, rendered,
-                              no_loading_screen,
-                              expect("level.loads", exactly=2),
-                              expect("level.loads_failed", exactly=0)],
-                      timeout=300))
+    # Every campaign map exercises its own module bindings and creature roster.
+    # A BASE1-only check cannot expose an unresolved animation in another module.
+    for name in CAMPAIGN:
+        case_name = "save-load" if name == "BASE1" else f"save-load-{name}"
+        cases.append(Case(case_name, ["--map", name, "--save-load", "40"],
+                          frames=120,
+                          checks=[no_errors, ticked, rendered,
+                                  no_loading_screen,
+                                  expect("level.loads", exactly=2),
+                                  expect("level.loads_failed", exactly=0)],
+                          timeout=300))
 
     # The screens, which are not levels: they have no world and must not be
     # asked for one, but they must still compose a frame and exit clean.

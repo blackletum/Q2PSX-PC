@@ -38,6 +38,27 @@ void q2_sfx_pitch_add(q2_sfx_pitch *pitch, s32 delta)
         pitch->current = (u8)((s64)pitch->current + delta);
 }
 
+u8 q2_sfx_volume_add(u8 volume, s32 delta)
+{
+    s32 v;
+
+    if (delta == Q2_SFX_VOLUME_UNCHANGED)
+        return volume;
+
+    /* The store is a byte and the test reads it back masked, so the wrap
+     * happens BEFORE the clamp. 63 + 40 = 103 fails `sltiu 64` and is pinned;
+     * 63 - 40 = 23 passes and is kept. */
+    v = (s32)(u8)((s32)volume + delta);
+    return (u8)(v < 64 ? v : 63);
+}
+
+s32 q2_sfx_voice_volume(u8 volume, s32 scale)
+{
+    /* `mult` then `sra 4` — an arithmetic shift, not a divide, which for the
+     * non-negative products every call site produces is the same thing. */
+    return ((s32)volume * scale) >> 4;
+}
+
 bool q2_sfx_pitch_set_range(q2_sfx_pitch *pitch,
                             s32 upper_delta, s32 lower_delta)
 {

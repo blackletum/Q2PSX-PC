@@ -398,6 +398,20 @@ typedef struct q2_ent_event {
     s32 model_index;
     s32 radius;         /* Q2_ENT_EVENT_LIGHT: the OUTER radius            */
     s32 inner_radius;   /* Q2_ENT_EVENT_LIGHT: the inner, 0 if unspecified  */
+
+    /*
+     * Q2_ENT_EVENT_LIGHT: 0 for AddLight (0x80075C34), > 0 for AddTimedLight
+     * (0x80075D14) with that many frames to fade over.
+     *
+     * The two are different engine calls, not a parameter — one appends to the
+     * frame's world list and is gone at the next ProcessLights, the other parks
+     * a slot in the sixteen-entry table at 0x800E1218 and counts it down. The
+     * distinction reaches this queue because the queue is the port's seam
+     * between a fire function and the light world, and the shotgun and the
+     * super shotgun raise the timed kind (0x8004C3FC, 0x8004C6C0) while the
+     * machinegun and the chaingun raise the plain one.
+     */
+    s32 ticks;
 } q2_ent_event;
 
 typedef struct q2_ent_events {
@@ -420,6 +434,15 @@ void q2_ent_sound_at(q2_ent_events *ev, q2_ent_sound which, const s32 pos[3]);
  */
 void q2_ent_light_at(q2_ent_events *ev, const s32 pos[3], const u8 glow[3],
                      s32 inner_radius, s32 radius);
+/*
+ * The same, through AddTimedLight (0x80075D14) instead: the light is parked in
+ * the sixteen-slot table and fades over `ticks` frames rather than lasting one.
+ * `ticks == 0` stores a counter that already reads free, which is the engine's
+ * own way of saying "nothing", so this is not guarded against.
+ */
+void q2_ent_light_timed_at(q2_ent_events *ev, const s32 pos[3],
+                           const u8 glow[3], s32 inner_radius, s32 radius,
+                           s32 ticks);
 void q2_ent_burst_at(q2_ent_events *ev, const s32 pos[3], const u8 glow[3],
                      s32 model_index);
 

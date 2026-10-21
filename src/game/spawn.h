@@ -68,6 +68,14 @@ typedef struct q2_spawn_stats {
      * counts it, because a creature the hull cannot place is exactly what
      * three reports of "stuck in geometry" have been about. */
     u32 unplaced;
+    /*
+     * Records the current difficulty removes outright — SpawnGeneral's
+     * 0x800565E8..0x80056664 mask, applied through q2_pop_spawn_allows_skill.
+     * Counted separately so the "N of M spawn records placed" line stays
+     * honest: these are not failures, they are records this skill does not
+     * have.
+     */
+    u32 skill_filtered;
 } q2_spawn_stats;
 
 typedef struct q2_monster_set {
@@ -105,9 +113,15 @@ q2_result q2_spawn_from_population(q2_monster_set *out, const q2_population *pop
  * Wake every placed creature: monster_start_go on each, which points its think
  * at the frame driver and schedules it for the next tick.
  *
- * `player` becomes the level's sight client — the entity FindTarget falls back
- * on when no second-hand alert is pending — and may be NULL, in which case
- * nothing will ever be acquired.
+ * `player` is registered as the level's CLIENT ROSTER — q2_ai_set_clients — and
+ * the sight client is then recomputed from it by the rotation, here once and
+ * again on every tick. It may be NULL, in which case nothing will ever be
+ * acquired; and a player who is already dead leaves the sight client NULL,
+ * which is correct, because nothing may notice a corpse.
+ *
+ * It used to say "`player` becomes the level's sight client". Still true in
+ * effect with one client, but the mechanism is the roster plus AI_SetSightClient
+ * (0x8005EC60) now, and with more than one client the rotation is what picks.
  */
 void q2_monster_set_wake(q2_monster_set *set, q2_monster *player);
 

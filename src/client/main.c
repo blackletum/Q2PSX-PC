@@ -101,6 +101,7 @@
  * client has. Everything BEHIND the prompt is the console's — the screens, the
  * four rows, the release rule and the state machine (memcard.h, saveui.h).
  */
+#include "random.h"
 #include <SDL3/SDL.h>
 
 #include <stdio.h>
@@ -200,12 +201,24 @@ static const u8 k_pan[CLIENT_PAN_STEPS] = {
 };
 
 /*
- * A sound's own level before the slider, and the distance at which it reaches
- * zero. `level = base * (reach - dist) / 4096`, so a source at the listener is
- * three times its base and one at the reach is silent.
+ * The distance at which a positional sound reaches zero.
+ * `level = req_vol * (reach - dist) / 4096`, so a source at the listener is
+ * three times the request's own volume and one at the reach is silent.
  */
-#define CLIENT_SFX_BASE   63
 #define CLIENT_SFX_REACH  12288
+/*
+ * A REQUEST'S OWN VOLUME, which is where the 63 above comes from.
+ *
+ * It is not a constant on the console: it is byte +2 of the 12-byte sound
+ * request record at 0x800DFDE4, written as 63 when the request is made and
+ * altered afterwards only by SoundSetRelativeVolume. `0x80072AF0` reads that
+ * byte, scales it by the caller's own factor and writes the result into the
+ * voice's three volume fields — so with the default byte the voice volume IS
+ * 63, and this port's attenuation base has been that number under another name
+ * all along. The arithmetic itself lives beside the request's PITCH byte in
+ * vag.h, which is the other byte of the same record.
+ */
+#define CLIENT_SFX_REQ_VOL ((s32)Q2_SFX_VOLUME_DEFAULT)
 /* What a listener-local sound gets instead — the menu, the player's own weapon
  * and footsteps, the HUD. Never attenuated, never panned. */
 #define CLIENT_SFX_LOCAL  254
@@ -250,6 +263,15 @@ typedef struct client_voice {
      * does the listener; 0..255 each. */
     s32          level;
     s32          pan_l, pan_r;
+
+    /*
+     * The REQUEST's volume byte this voice was started from — 0x800DFDE4's +2,
+     * 63 unless something called SoundSetRelativeVolume on the request. The
+     * per-frame recompute above overwrites `level` from the distance every
+     * frame, so a request's own volume cannot live there; it is folded in as a
+     * ratio against the default instead.
+     */
+    u8           req_vol;
 } client_voice;
 
 /* One render-clock cursor per articulated world model. `frame_stamp` prevents
@@ -384,6 +406,15 @@ typedef struct client {
     client_voice     voice[CLIENT_VOICES];
     u32              voice_started;
     u32              voice_dropped;   /* all 24 busy, as the SPU would be */
+
+    /*
+     * Weapon-fire sounds ASKED FOR, which is a different number from voices
+     * started: a headless run has no audio device and starts none, and the
+     * question "does the chaingun bang once per bullet" has to be answerable
+     * there. `chaingun_bangs` is the per-bullet clone alone.
+     */
+    u32              weapon_sounds;
+    u32              chaingun_bangs;
 
     /*
      * The quad's firing sound, on both sides of its gate: how many shots asked
@@ -569,6 +600,15 @@ typedef struct client {
      */
     q2_hud           hud[Q2_MP_MAX_PLAYERS];
     u32              hud_flashes[Q2_MP_MAX_PLAYERS];
+    /* FlashPowerUp's two outputs (0x80039A80 and 0x80039A00). The tint count is
+     * per DRAWN frame, because that is what the raise is: a run holding a
+     * powerup should show one per frame minus the three blink windows. */
+    u32              powerup_tints[Q2_MP_MAX_PLAYERS];
+    u32              powerup_warns[Q2_MP_MAX_PLAYERS];
+    /* The absorb stages' washes, 0x80057B80 and 0x80057D24. One per hit the
+     * power shield or the armour took, not one per frame. */
+    u32              power_flashes[Q2_MP_MAX_PLAYERS];
+    u32              armour_flashes[Q2_MP_MAX_PLAYERS];
     bool             hud_ready;
 
     /* The map's own sound bank, for the menu's five effects. Per zone load, as
@@ -617,6 +657,24 @@ typedef struct client {
     q2_menu          card_menu;
     q2_mcard_screen  card_screen;
     int              card_return_page; /* front-end page restored on close */
+
+    /*
+     * "DO YOU WANT TO SAVE?" — the stop the console puts on the first frame of
+     * every new level (GameCheckPaused 0x8003E6FC..0x8003E75C). Its screen is
+     * Q2_MCARD_SAVE_PROMPT, drawn and navigated through a shadow menu of its
+     * own, for the same reason the card front end has one.
+     */
+    bool             save_prompt_open;
+    q2_menu          save_prompt_menu;
+    /* LevelChange (0x800AEBD0) and GameCheckPaused's private latch (gp+700).
+     * The counter is bumped by every level load, the latch by the question
+     * being asked — or by a load that arrived on an exit code that does not
+     * ask. See q2_mcard_save_prompt_due. */
+    u32              level_change_serial;
+    u32              save_prompt_latch;
+    u16              save_prompt_pad;    /* the release edge, prev & ~cur    */
+    u32              save_prompt_frames; /* the headless stand-in's count    */
+    u32              save_prompts;       /* report.level.save_prompts        */
 
     /* What a save writes. Held here rather than built inside the front end
      * because q2_save_ui borrows it and the capture needs the whole client —
@@ -747,6 +805,31 @@ typedef struct client {
     s32               music_total;
     s32               music_left;
     double            music_clock;
+    /*
+     * THE CD VOLUME IS A PAIR, and the port used to model only half of it.
+     *
+     * `targetcdvol` (0x800B2E50) is where the volume is being asked to go and
+     * `actcdvol` (0x800B2E74) is where it actually is; CdCheckMusic walks the
+     * live one toward the target by exactly four per call and clamps it on
+     * overshoot (0x800718F8..0x8007194C), and it is the LIVE value that the
+     * two 64-tick track fades scale and the CD mix is built from (0x80071958).
+     * Nothing in this tree used to correspond to either address: the bed was
+     * scaled straight off the MUSIC slider, so the volume stepped where the
+     * console slides and never moved at all when the pause menu came up.
+     *
+     * `actcdvol` lives in BSS and so starts at zero, which is why the first
+     * track of a session swells in from silence rather than starting at level.
+     */
+    s16               music_target;
+    s16               music_level;
+    /* The ramp is per MainGameLoop iteration — one video field — not per
+     * rendered frame, so it accumulates on the build's own tick rate the way
+     * the countdown above does. */
+    double            music_ramp_clock;
+    /* Playlist starts, for `--report`: a session that works through a level's
+     * seven tracks and one that plays the first for ever look identical in the
+     * log otherwise. */
+    u32               music_tracks;
     u32               ent_light_added;
     u32               script_lights;
     u32               pose_by_name;
@@ -887,13 +970,27 @@ typedef struct client {
     s16               carry_fire_kick[3];
 
     /*
-     * COMMON's script latches across a zone change (events_rt.h,
+     * COMMON's script latches for the load now running (events_rt.h,
      * q2_event_carry): every record's flags byte and every item's latched
-     * bit 7, which the console never reloads between zones of one map.
-     * Taken off the outgoing runtime and put back on the new one within one
-     * client_load_zone; `size` is 0 whenever nothing is being carried.
+     * bit 7. Filled from the ENTERING map's block below and put back on the
+     * fresh runtime within one client_load_zone; `size` is 0 whenever the map
+     * being entered has left nothing behind.
      */
     q2_event_carry    carry_events;
+
+    /*
+     * AND THE BLOCKS THEMSELVES, one per map visited (events_rt.h,
+     * q2_event_store). The console keeps these in save memory, which a level
+     * boundary does not empty — the only clear in the image is the new-game
+     * memset 0x8003DDB8 (mission.h, on the sibling "PlayerSave" block) — so
+     * the store outlives the level, which is what makes a map walked back into
+     * arrive with the script state it was left in.
+     */
+    q2_event_store    event_store;
+
+    /* Non-NULL only during a saved-game load. Its latches must reach the
+     * constructor/replay pass before the old session can contribute any. */
+    const q2_save   *restoring_save;
 
     /*
      * THE MISSION SCREEN'S TWO COUNTERS, which mission.h names as the reason
@@ -1054,6 +1151,15 @@ typedef struct client {
      */
     q2_laserbeam_set  lasers;
     u32               laser_drawn;
+
+    /*
+     * And the teleport pads, which are the same two halves: PSXTELEPORT_T
+     * registers a volume at zone load and DrawTelePorts walks the list every
+     * frame, right beside the two laser walks this client already makes.
+     */
+    q2_teleport_set   teleports;
+    u32               teleport_drawn;
+    u32               teleport_lights;
 
     /*
      * The movie table a QENDMIS map's module carries, the film it names, and
@@ -1334,6 +1440,13 @@ typedef struct client {
      * Counted where the request is drained rather than where it is raised, so
      * it reports sentences PUT ON SCREEN and not refusals reached. */
     u32               key_prompts;
+    /* Lines put on the centre line by a script — STRING (0x8002B930) and the
+     * secret handler (0x80028F90), both of which reach `centreprintf`. Counted
+     * where the buffer is written, so it reports lines the player is shown and
+     * not calls decoded. A RUN counter, not a per-map one, for the same reason
+     * `key_prompts` is: a map change is exactly when it would otherwise be
+     * thrown away, and every capture that fires a script crosses one. */
+    u32               centre_lines;
     /* Transitions whose voice did NOT start: no audio device, or the name is
      * not in this map's bank. Counted apart so a headless run cannot be read
      * as proof that anything was heard. */
@@ -1369,6 +1482,16 @@ typedef struct client {
     u32               ent_shadows;    /* retail posed-footprint FT4s emitted */
     u32               explosive_sounds;
     u32               explosive_sounds_missed;
+    /* The same pair for `amb_brkglas`, drained from the sim's smash queue. */
+    u32               glass_sounds;
+    u32               glass_sounds_missed;
+    /* Every append ProcessTimedLights made, and every world vertex
+     * ProcessMobileLights repainted, over the whole run. */
+    u32               timed_lights_emitted;
+    u32               world_lit_points;
+    /* Corners a mobile light reached whose point's four slot bytes do not name
+     * them — the console cannot paint those either. */
+    u32               world_lit_unslotted;
     bool              mission_after_map; /* the screen is holding a LOADMAP */
     /*
      * Has this level put a frame on the screen yet? Cleared by every zone load
@@ -1393,6 +1516,18 @@ typedef struct client {
 
     u32               mission_frames;
     u32               briefing_frames;
+
+    /*
+     * gp+362 (0x800AE76A) — the tally board's dismissal lock, in the console's
+     * own 1/300 s units. Seeded 1200 in .data and re-armed only by the
+     * dismissal, which is why it is initialised once here and never at the
+     * raise. See `q2_mission_pad_end`.
+     */
+    s32               mission_gate;
+    /* The pad record's previous FIRE, latched every tally frame whether or not
+     * `PadEndInterMission` got as far as reading it — the console's edge is
+     * against 0x800D5EDC+16, which the pad reader fills regardless. */
+    bool              mission_fire_prev;
 
     bool              map_change_pending;
     char              pending_map[Q2_UF_NAME_LEN + 1];
@@ -1968,6 +2103,7 @@ static bool client_mover_blocked(u32 index, const s32 step[3], void *user)
 }
 
 static bool client_play_sound(client *c, const char *want);
+static void client_sound_set_relative_volume(client *c, s32 delta);
 static bool client_play_sound_at(client *c, const char *want, const s32 at[3]);
 static bool client_find_sound(client *c, const char *want, q2_vag *out);
 /* The console's 0x800739B8 / 0x8007398C, on a (slot, tag) handle. */
@@ -2089,8 +2225,28 @@ static void client_load_creatures(client *c, const s32 eye[3])
      * twenty, standing in ZONE1's rooms while ZONE0 is loaded, thinking and
      * being drawn and shootable through the void.
      */
-    /* Everything the map placed, until the zone test says otherwise. */
-    c->cre_in_zone = c->creatures.set.count;
+    /*
+     * AND NOT EVERY CREATURE THE MAP PLACED IS ONE THE PLAYER IS ASKED TO KILL.
+     * CreatureCount (CREATURE.C 0x8005771C) is the only writer of the
+     * denominator at 0x800B29E4, and per record it does
+     *
+     *     80057860  addiu v0, v0, -34
+     *     80057864  sltiu v0, v0, 3
+     *     80057868  bne   v0, zero, <skip the increment>
+     *
+     * so classes 34, 35 and 36 — Insane, Rider2 and Rider3 — are never in it.
+     * `q2_mission_class_counts` is that window test; the wounded marines lying
+     * about BASE1 were being counted as monsters to kill and the tally could
+     * not be finished. It reads `pop_class_id`, the Population ROW, and not
+     * `class_id`, which q2_creature_spawn has already overwritten with the
+     * module's own descriptor key.
+     */
+    /* Everything the map placed that the tally is about, until the zone test
+     * says otherwise. */
+    c->cre_in_zone = 0;
+    for (i = 0; i < c->creatures.set.count; i++)
+        if (q2_mission_class_counts(c->creatures.set.monsters[i].pop_class_id))
+            c->cre_in_zone++;
 
     if (c->sim[0].coll_primary_ready) {
         u32 elsewhere = 0;
@@ -2112,8 +2268,17 @@ static void client_load_creatures(client *c, const s32 eye[3])
          * so far", which climbs as the player springs each ambush. A level with
          * 22 records and 13 in another zone has 9 kills to get, whether or not
          * the player ever triggers the batch that holds five of them.
+         *
+         * Recounted rather than subtracted, because the class filter and the
+         * zone filter are not independent: a subtraction would take a
+         * discounted Insane out of a denominator it was never in.
          */
-        c->cre_in_zone = c->creatures.set.count - elsewhere;
+        c->cre_in_zone = 0;
+        for (i = 0; i < c->creatures.set.count; i++) {
+            const q2_monster *m = &c->creatures.set.monsters[i];
+            if (m->in_use && q2_mission_class_counts(m->pop_class_id))
+                c->cre_in_zone++;
+        }
     }
 
     /*
@@ -2188,6 +2353,19 @@ static void client_load_creatures(client *c, const s32 eye[3])
                 c->cre_model_ok[i] = true;
                 c->creatures.set.monsters[i].model_ext2 =
                     c->cre_model[i].hdr.ext2;
+                /*
+                 * AND THE HIT CYLINDER, which is the model's too. 0x8007E50C
+                 * calls GetCreHitSize with the creature and hands the result
+                 * to SetupBoxDrop as its fifth argument; with a model bound at
+                 * cre+0x10 that is the header's `lhu +0x18`/`lhu +0x1A` pair.
+                 * Only a creature whose model resolved may be given it — the
+                 * no-model fallback of 286/600 that q2_monster_init leaves is
+                 * exactly what the console gives a creature with cre+0x10
+                 * null, so a failed bind must not call this.
+                 */
+                q2_monster_bind_hit_size(&c->creatures.set.monsters[i], true,
+                                         c->cre_model[i].hdr.ext0,
+                                         c->cre_model[i].hdr.ext1);
                 resolved++;
                 continue;
             }
@@ -2200,6 +2378,10 @@ static void client_load_creatures(client *c, const s32 eye[3])
                 c->cre_model_ok[i] = true;
                 c->creatures.set.monsters[i].model_ext2 =
                     c->cre_model[i].hdr.ext2;
+                /* The zone bank's arm, same call for the same reason. */
+                q2_monster_bind_hit_size(&c->creatures.set.monsters[i], true,
+                                         c->cre_model[i].hdr.ext0,
+                                         c->cre_model[i].hdr.ext1);
                 resolved++;
             }
         }
@@ -2387,11 +2569,37 @@ static void client_load_creatures(client *c, const s32 eye[3])
         }
 
         Q2_INFO("creatures: %u live in this zone, %u of %u spawn records "
-                "placed, %u with a model%s",
+                "placed (%u removed by skill %d), %u with a model%s",
                 live, c->creatures.stats.placed, c->creatures.stats.records,
+                c->creatures.stats.skill_filtered, (int)q2_cre_skill(),
                 resolved,
                 c->creatures.stats.no_module
                     ? ", some classes have no module" : "");
+
+        /*
+         * AND THE HIT CYLINDER EACH ONE IS SHOT AT THROUGH — GetCreHitSize's
+         * pair, entity+0x94 and +0x96. A line rather than a counter because
+         * the whole point is that they DIFFER: while the pair came from the
+         * movement hull every creature in the game was one 286-radius,
+         * 600-tall cylinder, so a run where `own` is zero or where every pair
+         * reads 286/600 is a run where the bind did not happen.
+         */
+        {
+            u32 own = 0, k;
+            s16 fr = 0, fh = 0;
+
+            for (k = 0; k < c->creatures.set.count; k++) {
+                const q2_monster *m = &c->creatures.set.monsters[k];
+
+                if (m->hit_radius == 286 && m->hit_height == 600)
+                    continue;
+                if (!own) { fr = m->hit_radius; fh = m->hit_height; }
+                own++;
+            }
+            Q2_INFO("creatures: %u of %u are shot at through their MODEL's "
+                    "cylinder (first %d x %d; the no-model pair is 286 x 600)",
+                    own, c->creatures.set.count, (int)fr, (int)fh);
+        }
     }
 }
 
@@ -2884,11 +3092,10 @@ static bool client_cre_bank_has(const char *name, void *user)
     return client_find_sound((client *)user, name, &vag);
 }
 
-/* BIOS rand(), 0x80089E28: the creature layer's convention (ai.c, aimove.c,
- * monster.c's drop heading) is the C library's rand() in its fifteen bits. */
+/* BIOS rand(), 0x80089E28, on the same saved stream as creature decisions. */
 static int client_bios_rand(void)
 {
-    return rand() & 0x7FFF;
+    return q2_random_next();
 }
 
 /*
@@ -3436,6 +3643,43 @@ static u32 client_hatches(const client *c, u32 *not_shut)
 }
 
 /*
+ * The same question for PISTONs, which have no state to read: `running` is the
+ * console's obj+0x52 latch and `strokes` its obj+0x4E half-stroke counter, and
+ * the pair is the only way to tell a piston that has finished its count from
+ * one that was never triggered.
+ */
+static u32 client_pistons(const client *c, u32 *running, u32 *done, s32 *offset)
+{
+    u32 i, n = 0;
+
+    if (running) *running = 0;
+    if (done)    *done    = 0;
+    if (offset)  *offset  = 0;
+    if (!c->movers_ready)
+        return 0;
+
+    for (i = 0; i < c->movers.count; i++) {
+        const q2_mover *m = &c->movers.movers[i];
+
+        if (m->prim != Q2_UF_PISTON)
+            continue;
+        n++;
+        if (m->running && running)
+            (*running)++;
+        if (done)
+            *done += m->strokes_done;
+        /* SIGNED, and that is the point: the console displaces by MINUS
+         * target (0x8002CFD0 `subu v0, zero, v0`) and this port used to
+         * displace by plus it, so the sum's sign alone says which way the
+         * three slabs of a pumping station are travelling. */
+        if (offset)
+            *offset += m->offset;
+    }
+
+    return n;
+}
+
+/*
  * How many of this creature's moves before `mv` have the same length, so a move
  * can pick the matching one when several clips share a length. Both lists are
  * walked in their own order, which is the same technique the move NAMES use.
@@ -3859,8 +4103,10 @@ static void client_queue_teleport(client *c, const q2_start_pos *sp)
 }
 
 /* Selects the loaded level's music. Defined beside the rest of the music code;
- * declared here because client_load_zone ends by calling it. */
-static void client_music_for_level(client *c, bool force);
+ * declared here because client_load_zone ends by calling it. `zone_gate` is
+ * that caller's `same_map_transition` — the console runs a different level load
+ * for one of those, and it treats the playlist differently. */
+static void client_music_for_level(client *c, bool force, bool zone_gate);
 
 /*
  * How long a headless run holds each of the three screens a transition puts up
@@ -3909,10 +4155,28 @@ static u32 client_zone_dead(const client *c)
 {
     u32 i, d = 0;
 
+    /*
+     * AND THE NUMERATOR REFUSES ONE CLASS, NOT THREE. ProcessQuakeDeath
+     * (QENTS.C 0x8007CD24) is the only writer that ever raises 0x800B29E8, and
+     * its filter is a single compare:
+     *
+     *     8007CD5C  addiu v1, zero, 34
+     *     8007CD60  beq   v0, v1, <past the increment>
+     *
+     * so shooting a wounded marine moves neither half, while shooting a Rider2
+     * moves the numerator and was never in the denominator. That is the
+     * console's own inconsistency and it is left alone rather than tidied into
+     * agreement with `q2_mission_class_counts` — see mission.h for both
+     * derivations. The class comes from ent+0xD2, or from ent+0xDA when
+     * ent+0xD2 is already 47, so a detached body is still judged by the row it
+     * died as; `pop_class_id` is that row on both a creature and its corpse.
+     */
     if (c->creatures_ready)
-        for (i = 0; i < c->creatures.set.count; i++)
-            if (c->creatures.set.monsters[i].dead)
+        for (i = 0; i < c->creatures.set.count; i++) {
+            const q2_monster *m = &c->creatures.set.monsters[i];
+            if (m->dead && q2_mission_class_kills(m->pop_class_id))
                 d++;
+        }
 
     return d;
 }
@@ -4048,30 +4312,37 @@ static void client_menu_fill_stats(client *c)
  * row as they move — which is the other half of the console's model
  * (`0x800223A8` for a secret, `0x80022420` for a kill).
  *
- * **NOTHING CLEARS IT BETWEEN UNITS, and this used to.** The table is a
- * CAMPAIGN's six rows, not a unit's, and the clear the port invented for the
- * unit boundary was the last guess left in this screen. Where the only clear
- * in the executable actually is:
+ * **THE TABLE IS EMPTIED BETWEEN UNITS, and this comment used to deny it.**
+ * What was read here was `0x80022498` — a six-iteration loop with no body,
+ * sitting in the MISCOMPLETE arm between the board's setup and its spin — and
+ * the conclusion drawn from it, that a per-unit clear had been written and then
+ * gutted, was wrong. That loop is not the clear. There are TWO clears:
  *
- *     0x8003D62C(player, 0)  looks up a block by the key "PlayerSave"
- *                            (0x8007FBEC) and, when it finds one, copies six
- *                            25-byte records out of it at +0xD4 into
- *                            0x8009B550 and hands the loaded level's counters
- *                            back with 0x80022210.
- *     0x8003DDB8             the `else` of that: memset(0x8009B550, 0, 150).
+ *     0x8003DDB8             memset(0x8009B550, 0, 150), the `else` of
+ *                            `0x8003D62C`'s restore — taken when the lookup of
+ *                            "PlayerSave" through `0x8007FBEC` finds no block.
+ *                            That is the NEW GAME clear, and it is the one this
+ *                            comment found.
+ *     0x80021A0C             ClearLevelIntermission, and it is
+ *                            `GameInterMission`'s LAST act (`jal` at
+ *                            0x8001902C, after the spin). It opens the
+ *                            "PlayerSave0" block and memsets 150 bytes at
+ *                            block+228 — which is precisely where the six
+ *                            records live, since the save arm writes row i to
+ *                            `block + 16 + 212 + i*25` (0x8003D764, 0x8003DAB4)
+ *                            and the load arm reads it back (0x8003DCC8).
  *
- * So the six rows are cleared when there is no player block to restore — a new
- * game — and at no other time. The one place a per-unit clear belongs,
- * `0x80022498` in the MISCOMPLETE arm between the board's setup and its spin,
- * is a six-iteration loop with no body; and no engine export hands a level
- * module the array's address, so a module cannot clear it either.
+ * The live array is untouched by the second, and does not need to be:
+ * `InitialiseQuakePlayer` calls `GamePlayerLoadSave(player, 0)` at 0x8003B4B0
+ * on every level entry, and that arm either copies the block's six records back
+ * into 0x8009B550 or, with no block at all, falls into the memset above.
  *
- * The consequence is the console's and the port now reproduces it: six rows,
- * first six distinct levels, and a seventh registers nothing. A player reaches
- * unit 2's board having visited exactly six levels, so that board is full, and
- * unit 3's shows the same six. That is a defect in the original rather than a
- * design, and it is transcribed here rather than tidied because a board that
- * lists a unit's own levels is a screen the console does not draw.
+ * So the board lists a UNIT's levels, `-1` is a seventh level inside one unit
+ * and not a seventh level of the campaign, and the port's old consequence —
+ * unit 2 showing unit 1's rows, and the Secrets and Kills counters silently
+ * stopping from unit 2 onward because every row was taken — was this port's
+ * defect rather than the original's. The boundary clear is where the console
+ * puts it, in the mission_after_map arm; see `q2_mission_clear_rows`.
  *
  * The unit still tracks the map, from `Unit<N>Miss1`, because the title needs
  * it: the disc's maps group by it exactly as the game does — Base 1, Jail and
@@ -4091,7 +4362,7 @@ static void client_mission_enter(client *c)
 
     c->mission_row = q2_mission_register(&c->mission, name);
     if (c->mission_row < 0)
-        Q2_WARN("mission: no row for %s — the campaign's six are taken, which "
+        Q2_WARN("mission: no row for %s — this unit's six are taken, which "
                 "is what the console does too", name);
     else
         Q2_INFO("mission: %s takes row %d of unit %d",
@@ -4248,6 +4519,9 @@ static bool client_change_map(client *c, const char *map, const char *start)
     return true;
 }
 
+/* Defined with the other menu state below; the arrival raises it. */
+static void client_save_prompt_open(client *c);
+
 /*
  * Perform the queued transition, and everything that goes with arriving.
  *
@@ -4259,6 +4533,44 @@ static void client_change_map_and_brief(client *c)
 {
     if (!client_change_map(c, c->pending_map, c->pending_start))
         return;
+
+    /*
+     * AND THE GAME STOPS AND ASKS WHETHER TO SAVE.
+     *
+     * GameCheckPaused (0x8003E538, QUAKE.C) runs every frame, and on the first
+     * one after a level change it takes 0x8003E6FC..0x8003E75C:
+     *
+     *   8003E700  lw   v1, 0x800AEBD0       LevelChange, incremented once per
+     *                                       level load at 0x80018C4C
+     *   8003E704  lw   v0, gp+700           its own latch (0x800AE8BC), read
+     *                                       here and written at 0x8003E728 and
+     *                                       nowhere else in the image
+     *   8003E70C  beq  v1, v0 -> 0x8003E770 already asked for this load
+     *   8003E718  lw   v0, 0x800AEBCC       LevelIsMultiPlayer
+     *   8003E720  bne  v0, zero -> skip
+     *   8003E728  sw   v1, gp+700           latch, whatever the exit code is
+     *   8003E730  lw   v1, 0x800B271C       the exit code the transition carried
+     *   8003E738  beq  v1, 2 -> raise       LOADMAP (screen.h)
+     *   8003E740  bne  v1, 4 -> skip        4 has no dispatch arm of its own
+     *   8003E750  sh   zero, 0x800B2E50     the CD volume target to nothing
+     *   8003E754  sw   1, gp+692            Paused
+     *   8003E758  sw   zero, gp+696         Pauser = player 0
+     *   8003E75C  jal  0x800203C4           InGame_GOTO_WANT_TO_SAVE
+     *
+     * This function is what a LOADMAP arrives through — a plain one, the tally
+     * board being dismissed, and the end-of-mission placard, which is the whole
+     * of exit code 2 and of the 7 that drops to it. Exit 4 is not raised here
+     * because nothing in this port produces it and screen.h leaves it
+     * unidentified rather than guessing.
+     *
+     * THE LATCH IS STRUCTURAL. The console asks from a per-frame checker and
+     * needs 0x800AE8BC to stop it asking a second time; there is one call here
+     * per level change, so there is nothing for a latch to suppress.
+     */
+    if (q2_mcard_save_prompt_due(c->level_change_serial,
+                                 &c->save_prompt_latch, c->mp_enabled,
+                                 Q2_SCREEN_EXIT_CHANGE_MAP))
+        client_save_prompt_open(c);
 
     /*
      * AND NO ARRIVAL BRIEFING, which this used to raise here.
@@ -4406,6 +4718,41 @@ static void client_event_explosive(void *user, const q2_event_item *item)
 
     if (q2_sim_explosive_trigger_item(&c->sim[0], item->offset))
         c->explosive_scripted++;
+}
+
+/*
+ * A SCRIPTED LINE GOES ON THE CENTRE LINE, and every one of them did not.
+ *
+ * PSXSTRING resolves its twelve-byte key through GetStringFromStringtable and
+ * hands the text to `centreprintf` (0x80043570) with player 0's window context
+ * — the `jal` at 0x8002B930 — and the secret handler does exactly the same at
+ * 0x80028F90. centreprintf parks the icon CLUT at 72 (0x800435A4), formats the
+ * body into 0x800C8DDC and calls DoAddCentredSpriText (0x80042E14): the ONE
+ * buffer at ctx+0x240, prefixed `*7`, placed at `width/2 - 4*len` by
+ * `height/2 + 20`, with its timer reset to zero so it holds for 1200.
+ *
+ * The notification ring is DoAddSpriText, 0x80042D24 — a different entry, and
+ * the right one for pickups and the weapon caption. Routing the level text
+ * there, which is what this did, put "Access granted" in the top-left corner at
+ * x = 24, unboxed, stacked under up to three earlier lines and retiring on the
+ * ring's 60-tick clock rather than held in front of the player for 1200 with
+ * the backdrop fading out from under the words.
+ *
+ * DEVIATION, and it is the one the key prompt already carries: the line is laid
+ * out in the console's own 512x248 space, which is what the single-screen
+ * overlay draws in. A split-screen view centres its own half instead; the
+ * console has neither a second screen nor a second string table.
+ */
+static void client_centre_line(client *c, const char *text)
+{
+    q2_hud_ctx ctx;
+
+    if (!c || !text || !text[0] || !c->hud_ready)
+        return;
+
+    q2_hud_ctx_default(&ctx, Q2_HUD_SPACE_W, Q2_HUD_SPACE_H);
+    q2_hud_centre(&c->hud[0], &c->hud_tables, &ctx, text);
+    c->centre_lines++;
 }
 
 static void client_event_call(void *user, const q2_event_item *item,
@@ -4564,16 +4911,24 @@ static void client_event_call(void *user, const q2_event_item *item,
                  * orders scrolled past as two lines of chatter and the screen
                  * that exists to hold them was never raised.
                  */
+                /* The keys are kept, not just their answers: they are what
+                 * `HelpComputer_GetMessages` puts in the save block, and what
+                 * a restore re-resolves. See q2_briefing_popup. */
+                char keys[2][Q2_UF_NAME_LEN + 1];
+
+                keys[0][0] = keys[1][0] = '\0';
                 for (k = 0; k < 2; k++) {
                     if (!q2_uf_operand_name(&call, (u32)k, key) || !key[0])
                         continue;
+                    snprintf(keys[k], sizeof(keys[k]), "%s", key);
                     if (c->leveltext_ready)
                         text[k] = q2_leveltext_find(&c->leveltext, key);
                     if (text[k])
                         c->script_strings++;
                 }
 
-                q2_briefing_popup_set(&c->popup, text[0], text[1]);
+                q2_briefing_popup_set(&c->popup, keys[0], text[0],
+                                      keys[1], text[1]);
 
                 (void)q2_uf_operand_u32(&call, 2, 0, &param);
                 delay = (s32)param;
@@ -4750,28 +5105,21 @@ static void client_event_call(void *user, const q2_event_item *item,
      *           window 1, so the console cycles the eight one at a time and
      *           this port flashed all eight together.
      *
-     * The RNG is the sim's rather than the BIOS's, which is a stated
-     * divergence: the console's `rand()` stream is not reproduced here, so a
-     * timer's jitter is the right shape and not the same sequence. Every TIMER
-     * on the disc carries range 0, so no timer here rolls it at all.
+     * The runtime rolls only after accepting the slot and again at each
+     * re-arm, using the shared BIOS-compatible gameplay random stream.
      */
     {
         q2_uf_call call;
 
         if (q2_uf_decode_call(&call, &c->sim[0].userfuncs, item) == Q2_OK &&
             call.prim == Q2_UF_TIMER) {
-            u32 base = 0, range = 0, fires = 0, window = 0;
+            u32 fires = 0, window = 0;
 
-            q2_uf_operand_u32(&call, 0, 0, &base);
-            q2_uf_operand_u32(&call, 1, 0, &range);
             q2_uf_operand_u32(&call, 2, 0, &fires);
             q2_uf_operand_u32(&call, 3, 0, &window);
 
             {
-                s32 r  = (s32)(q2_rng_next(&c->sim[0].fx_rng) & 0x7FFFu);
-                s32 t  = (s32)base + (s32)(((s64)range * r) >> 15);
-
-                c->sim[0].event_rt.defer_ticks  = t * 30;
+                c->sim[0].event_rt.defer_timer  = true;
                 c->sim[0].event_rt.defer_fires  = (u16)fires;
                 c->sim[0].event_rt.defer_window = (u16)window;
                 c->script_timers++;
@@ -4847,6 +5195,10 @@ static void client_event_call(void *user, const q2_event_item *item,
                     continue;            /* negative terminates, per the table */
                 if ((u32)node >= c->node_hidden_count)
                     continue;
+                q2_sim_scene_solids_hide(&c->sim[0], node);
+                if (c->sim[0].event_rt.object_flags &&
+                    item->offset < c->sim[0].event_rt.item_flags_size)
+                    c->sim[0].event_rt.object_flags[item->offset] = 1;
                 if (!c->node_hidden[node]) {
                     c->node_hidden[node] = 1;
                     c->script_hidden++;
@@ -4903,7 +5255,8 @@ static void client_event_call(void *user, const q2_event_item *item,
                 const char *text = q2_leveltext_find(&c->leveltext, key);
 
                 if (text) {
-                    q2_hud_message(&c->hud[0], text);
+                    /* 0x8002B930's own destination — see client_centre_line. */
+                    client_centre_line(c, text);
                     c->script_strings++;
                     Q2_INFO("script says: \"%s\"", text);
                 }
@@ -5033,7 +5386,9 @@ static void client_event_call(void *user, const q2_event_item *item,
                 if (c->secret_message[0]) {
                     q2_vag vag;
 
-                    q2_hud_message(&c->hud[0], c->secret_message);
+                    /* 0x80028F90 is `jal 0x80043570` with the same player-0
+                     * context PSXSTRING passes: the centre line, not the ring. */
+                    client_centre_line(c, c->secret_message);
 
                     if (client_find_sound(c, Q2_SECRET_SOUND, &vag))
                         c->secret_sounds++;
@@ -5110,20 +5465,44 @@ static void client_event_call(void *user, const q2_event_item *item,
     }
 
     /*
-     * TIMEDLIGHT — a script-placed dynamic light, and the last piece of the
+     * TIMEDLIGHT — a script-placed light that FADES, and the last piece of the
      * fifteen `0x80075C34` call sites that this port could reach without
      * tracing a runtime value.
      *
-     * The operand table (userfuncs.c) has carried its layout for a while with
-     * nothing behind it: origin at +4 as three s32, `radius` at +18 "tripled
-     * before the call", and a packed colour at +24. The triple is the engine's,
-     * not a guess. The colour's own consumer is 0x80075D14; the low three bytes
-     * are taken as r, g, b here, which is what every other packed colour on this
+     * THE HALFWORD AT +18 IS NOT A RADIUS, and this comment used to say it was
+     * ("radius at +18 tripled before the call"). PSXTLIGHT is 0x8002E97C and
+     * its five operand reads are unambiguous:
+     *
+     *   8002E99C  lhu   a3, 18(s0)      \
+     *   8002E9B4  sll   t0, a3, 1        |  a3 = item[+18] * 3   -> TICKS
+     *   8002E9BC  addu  a3, t0, a3      /
+     *   8002E9C4  lhu   v1, 20(s0)      \  a2 = item[+20]
+     *   8002E9A0  lhu   a2, 22(s0)       |     | item[+22] << 16
+     *   8002E9B8  sll   a2, a2, 16       |
+     *   8002E9D4  or    a2, v1, a2      /
+     *   8002E9D0  jal   0x80075D14         AddTimedLight(pos, colour, a2, a3)
+     *
+     * and AddTimedLight reads that a2 back as two SIGNED halfwords — `lh v0,
+     * 8(sp)` at 0x80075D90 is the low half and squares it into slot+0x14, `lh
+     * v0, 10(sp)` at 0x80075DA4 is the high half and squares it into slot+0x18
+     * — which is inner radius and outer radius. The triple goes into slot+0x20
+     * and +0x22, the countdown and its divisor (0x80075DD8/0x80075DDC).
+     *
+     * So the record carries three numbers where this port read one, and the one
+     * it read was the wrong one: every TIMEDLIGHT was a full-brightness
+     * one-frame flash of radius 3*ticks instead of a light of the authored size
+     * fading over 3*item[+18] frames. It is the only primitive on the disc that
+     * reaches AddTimedLight from a script — the other three call sites are the
+     * shotgun, the super shotgun and 0x80058758.
+     *
+     * The colour's own consumer is still 0x80075D14; the low three bytes are
+     * taken as r, g, b here, which is what every other packed colour on this
      * path does.
      *
-     * FLKLIGHT is deliberately NOT handled: its on/off times are randomised as
-     * ((rand()*500)>>15)+400, so it needs the engine's RNG stream to look right
-     * rather than merely to appear.
+     * A seventeenth live light is DROPPED rather than replacing anything
+     * (0x80075D48..0x80075D58), so the return value is deliberately ignored
+     * here and the script call is counted either way — the console's script
+     * does not learn about the drop either.
      */
     /*
      * FLKLIGHT — registered once and then blinked by q2_flklights_tick. Origin
@@ -5170,22 +5549,49 @@ static void client_event_call(void *user, const q2_event_item *item,
         s32 at[3];
         u8  rgb[3];
         u32 packed;
-        s32 radius;
+        s32 ticks, inner, outer;
 
         at[0]  = (s32)q2_rd_u32(p + 4);
         at[1]  = (s32)q2_rd_u32(p + 8);
         at[2]  = (s32)q2_rd_u32(p + 12);
-        radius = (s32)q2_rd_u16(p + 18) * 3;
+        ticks  = (s32)q2_rd_u16(p + 18) * 3;   /* 0x8002E9B4 / 0x8002E9BC */
+        inner  = (s32)q2_rd_u16(p + 20);       /* a2's low half,  0x8002E9C4 */
+        outer  = (s32)q2_rd_u16(p + 22);       /* a2's high half, 0x8002E9A0 */
         packed = q2_rd_u32(p + 24);
         rgb[0] = (u8)(packed & 0xFF);
         rgb[1] = (u8)((packed >> 8) & 0xFF);
         rgb[2] = (u8)((packed >> 16) & 0xFF);
 
-        if (radius > 0)
-            q2_ent_light_at(&c->sim[0].ent_world.events, at, rgb, 0, radius);
+        /*
+         * No `if` on anything. AddTimedLight is called unconditionally at
+         * 0x8002E9D0, and a zero tick count simply parks a slot whose counter
+         * already reads free — which is the original's own way of saying
+         * "nothing", not a guard this port adds. The truncation of all three to
+         * halfwords is the store inside q2_light_add_timed, exactly as the
+         * console's `sh` is.
+         */
+        q2_light_add_timed(&c->light_world, at, rgb, inner, outer, ticks);
         c->script_lights++;
     }
 }
+
+
+/* ------------------------------------------------------------------------- */
+/* The EVE_<map> blocks — what a map remembers about its own script            */
+/* ------------------------------------------------------------------------- */
+/*
+ * A LEVEL CHANGE RUNS THE SAME LEAVE SEQUENCE A ZONE GATE DOES, and this port
+ * had the second half of that and not the first.
+ *
+ * `OnLeavingLevel` (0x8007CB8C, LOADLEV.C) has exactly one instruction in its
+ * body: `jal 0x80078D1C` at 0x8007CB94, which is `OnLeavingZone` — the same
+ * function the zone-change callback calls at 0x80079080. So the `EVE_<map>`
+ * write at 0x80078E70 happens on a LOADMAP exactly as it happens on a gate,
+ * and coming back `RestoreSavedData` (0x8007CBAC, from InitLevel at
+ * 0x80070F50) replays the block named after the level being entered. The
+ * store is q2_event_store (events_rt.h); what follows is the client's two
+ * ends of it.
+ */
 
 
 /* ------------------------------------------------------------------------- */
@@ -5214,6 +5620,16 @@ static bool client_load_zone(client *c, const char *map, int index)
      * holds it. First statement of the load for that reason.
      */
     client_zone_stash(c);
+
+    /*
+     * LevelChange (0x800AEBD0), bumped at 0x80018C4C by ProcessGame — the
+     * outer state machine that loads a LEVEL. A zone gate never reaches it,
+     * because a gate stays inside one level; everything else does, including a
+     * restart and a save being restored. What reads it is the SAVE? prompt's
+     * once-per-load gate (q2_mcard_save_prompt_due).
+     */
+    if (!same_map_transition)
+        c->level_change_serial++;
 
     /*
      * AND WHICH SCREEN GOES UP, WHICH IS TWO QUESTIONS AND NOT ONE.
@@ -5404,17 +5820,40 @@ static bool client_load_zone(client *c, const char *map, int index)
     }
 
     /*
-     * And the script's latches, for a gate inside one map. Taken HERE, not
-     * where the sim is freed: COMMON is re-read below and the old copy closed
-     * (q2_common_close), and the outgoing runtime borrows its Events chunk.
-     * The console never reloads that chunk on a zone change — gp+372 is
-     * stored only by the level load (0x8007AD54) — and its zone-change
-     * callback writes the spent bits out (0x80029078) before the load and
-     * replays them after (0x8002936C); events_rt.h, q2_event_carry.
+     * And the script's latches. Taken HERE, not where the sim is freed:
+     * COMMON is re-read below and the old copy closed (q2_common_close), and
+     * the outgoing runtime borrows its Events chunk. The console never
+     * reloads that chunk on a zone change — gp+372 is stored only by the
+     * level load (0x8007AD54) — and its zone-change callback writes the spent
+     * bits out (0x80029078) before the load and replays them after
+     * (0x8002936C); events_rt.h, q2_event_carry.
+     *
+     * NOT `same_map_transition`, WHICH IS WHAT THIS USED TO TEST. 0x80029078
+     * is reached from OnLeavingZone, and OnLeavingZone has two callers: the
+     * zone-change callback at 0x80079080 and OnLeavingLevel at 0x8007CB94,
+     * whose whole body is that one call. A LOADMAP writes the block exactly
+     * as a gate does — under the map being left, because the name is built
+     * from 0x800E46B4 at 0x800290A4 — and the block outlives the level. The
+     * fetch below is the other half: RestoreSavedData (0x8007CBAC) reads back
+     * the block named after the map being ENTERED.
+     *
+     * Retail replays outside deathmatch only (0x80079128, 0x8007CBB8), and
+     * OnLeavingZone runs only on a real level (+0x20 of the level record,
+     * 0x80078D44) — so an arena neither writes nor reads one.
      */
-    c->carry_events.size = 0;
-    if (same_map_transition && c->sim[0].events_ready) {
-        q2_event_rt_carry_out(&c->sim[0].event_rt, &c->carry_events);
+    if (!c->restoring_save && !c->mp_enabled && c->map[0] &&
+        c->sim[0].events_ready) {
+        q2_event_carry *slot = q2_event_store_open(&c->event_store, c->map);
+
+        if (slot) {
+            u32 i;
+            q2_event_rt_carry_out(&c->sim[0].event_rt, slot);
+            for (i = 0; c->explosives_ready && i < c->explosives.count; i++) {
+                const q2_explosive *e = &c->explosives.items[i];
+                if (e->destroyed && e->item_offset < slot->size)
+                    slot->destroyed_items[e->item_offset] = 1;
+            }
+        }
 
         /* The doors on this side of the seam, for the arrival line to be read
          * against: everything the outgoing zone's script had set moving. */
@@ -5433,6 +5872,31 @@ static bool client_load_zone(client *c, const char *map, int index)
                         m->target);
             }
         }
+    }
+
+    /*
+     * AND WHAT THE MAP BEING ENTERED LEFT BEHIND LAST TIME.
+     *
+     * RestoreSavedData (0x8007CBAC), which InitLevel calls at 0x80070F50,
+     * runs RestoreEvents against the block named after the level it is
+     * ARRIVING at — the block just written when this is a gate inside one map,
+     * and the block from the previous visit when it is not. A map with no
+     * block gets nothing: 0x80029498 falls straight out when OpenSaveMemory
+     * returns zero, and `size` 0 is how that is said here.
+     *
+     * NOT MODELLED: OnLeavingZone also declines to write when the game-state
+     * word 0x800B2E28 reads 3 (0x80078D58), which is the arm the menu takes at
+     * 0x8001F994 when the parked code is 3 — an autosave reload rather than a
+     * transition. RESTART LEVEL parks 21 and is NOT that arm, so it writes the
+     * block like any other exit; the port has no autosave reload to hang the
+     * exclusion on, so it is left out rather than guessed at.
+     */
+    c->carry_events.size = 0;
+    if (!c->mp_enabled) {
+        const q2_event_carry *prev = q2_event_store_find(&c->event_store, map);
+
+        if (prev)
+            c->carry_events = *prev;
     }
 
     /* MOVE, never assign: q2_zone_file.chunk points into the archive directory
@@ -6037,6 +6501,13 @@ static bool client_load_zone(client *c, const char *map, int index)
          */
         c->sim[0].event_rt.current_zone = c->zone_index;
 
+        if (c->restoring_save &&
+            q2_save_event_carry(c->restoring_save, &c->sim[0].event_rt,
+                                 &c->carry_events) != Q2_OK) {
+            Q2_ERROR("save script state does not match %s", c->map);
+            return false;
+        }
+
         /* The latches, back on the fresh runtime before anything can run it.
          * They only restore state; the replay after the hooks and the movers
          * are in place is what runs script (q2_event_rt_replay). */
@@ -6192,8 +6663,8 @@ static bool client_load_zone(client *c, const char *map, int index)
              * newly loaded bank.
              *
              * A genuine fresh load — new game, restart or save restore — still
-             * takes the init arm. Save restore applies its selected weapon and
-             * initialises once more after the save body is read, below.
+             * takes the init arm. Save restore then replaces that initial
+             * state with its live weapon machine, when present in the file.
              */
             if (!c->carry_player)
                 client_reset_view_model(c, 0);
@@ -6321,6 +6792,15 @@ static bool client_load_zone(client *c, const char *map, int index)
          * it is opened against the hull the sim already has.
          */
         c->lights_ready = false;
+        /*
+         * InitLights' whole treatment of the timed table, 0x80074194: zero the
+         * sixteen counters and leave everything else. It runs here rather than
+         * inside the arm below because the memset there is conditional on the
+         * zone having lights at all — and a TIMEDLIGHT parked by the level the
+         * player just left would otherwise keep counting down over the top of
+         * the next one, in a slot nothing on this level can reuse.
+         */
+        q2_light_timed_reset(&c->light_world);
         if (c->sim[0].coll_ready &&
             q2_lights_parse(&c->lights, &c->common) == Q2_OK &&
             q2_spacelights_open(&c->spacelights, &c->zone.zone,
@@ -6772,6 +7252,23 @@ static bool client_load_zone(client *c, const char *map, int index)
                             c->lasers.count == 1 ? "" : "s",
                             c->lasers.declined ? " (some declared dark)" : "");
 
+                /*
+                 * The teleport pads, registered from the SAME pass and against
+                 * COMMON's Events because Event_GlobalEVOFFSET is measured
+                 * against gp+372 (0x80026E84) and every TrigBounds link on the
+                 * disc names a COMMON record.
+                 */
+                if (q2_teleports_build(&c->teleports, &ev, &uf,
+                                       c->sim[0].triggers_ready
+                                           ? &c->sim[0].triggers : NULL)
+                    || c->teleports.unmarked)
+                    Q2_INFO("teleports: %u pad%s registered, %u TELEPORT"
+                            " call%s with no volume of their own",
+                            c->teleports.count,
+                            c->teleports.count == 1 ? "" : "s",
+                            c->teleports.unmarked,
+                            c->teleports.unmarked == 1 ? "" : "s");
+
                 if (q2_movers_build(&c->movers, &ev, &c->ev_operands) == Q2_OK) {
                     u32 opcode_built = c->movers.count;
 
@@ -6857,6 +7354,14 @@ static bool client_load_zone(client *c, const char *map, int index)
                             c->rotators.count,
                             have_zev ? "the zone's Events" : "COMMON only");
                 }
+                if (q2_sim_attach_scene_solids(&c->sim[0], &c->zone.scene,
+                                                &c->ev_operands,
+                                                &c->rotators) != Q2_OK) {
+                    Q2_ERROR("could not build scene collision boxes");
+                    return false;
+                }
+                Q2_INFO("scene solids: %u hatch, explosive and script boxes",
+                        c->sim[0].scene_solid_count);
             }
         }
 
@@ -6868,6 +7373,7 @@ static bool client_load_zone(client *c, const char *map, int index)
          */
         c->sim[0].event_rt.on_call       = client_event_call;
         c->sim[0].event_rt.on_call_user  = c;
+        c->sim[0].event_rt.timer_period  = q2_event_timer_period;
         c->sim[0].event_rt.on_mover      = client_event_mover;
         c->sim[0].event_rt.on_mover_user = c;
         c->sim[0].event_rt.on_explosive      = client_event_explosive;
@@ -6938,7 +7444,9 @@ static bool client_load_zone(client *c, const char *map, int index)
         c->sim[0].event_rt.initial_pass = false;         /* 0x8007C338 */
 
         /*
-         * THE EVE_ REPLAY, for a gate inside one map (events_rt.h,
+         * THE EVE_ REPLAY — for a gate inside one map AND for a map walked
+         * back into, because the block is named after the level and lives
+         * in save memory (events_rt.h,
          * q2_event_rt_replay): every spent record and spent one-shot item the
          * carry kept is dispatched again, so a door, a lift or a hidden node
          * the script had changed comes back as the script left it rather than
@@ -7007,11 +7515,12 @@ static bool client_load_zone(client *c, const char *map, int index)
                             m->part_count == 1 ? "" : "s", m->state,
                             m->offset, m->target);
             }
-            Q2_INFO("zone change: %u spent records carried, %u script items "
+            Q2_INFO("arrival: %u spent records carried, %u script items "
                     "replayed; %u doors and lifts stand displaced after the "
                     "seven passes", spent, rt->replayed_count, moved);
         }
         c->carry_events.size = 0;
+        q2_sim_scene_solids_update(&c->sim[0], &c->rotators);
 
         q2_sim_spawn(&c->sim[0], feet, c->cam.yaw);
         c->sim[0].player[0].ground_y = feet[1];
@@ -7270,9 +7779,10 @@ static bool client_load_zone(client *c, const char *map, int index)
      * And this level's music. Here rather than in `main()` because a session
      * loads many zones and only the first one used to be asked what it sounded
      * like. A gate between zones of the same map resolves to the same level
-     * record and is left alone — see client_music_for_level.
+     * record and does NOT restart the playlist — but it does not leave the
+     * stream alone either; see client_music_for_level.
      */
-    client_music_for_level(c, false);
+    client_music_for_level(c, false, same_map_transition);
 
     /* `client_input_simulated` normally publishes the eye and composed view
      * after a player tick. A gate is processed later in that same frame, so a
@@ -7320,6 +7830,7 @@ static bool client_music_start(client *c, char letter, u8 channel)
     q2_xa_decoder_reset(&c->music_dec);
     c->music_cursor = 0;
     c->music_open   = true;
+    c->music_tracks++;
 
     Q2_INFO("music: QUAKE_%c channel %u", letter, channel);
     return true;
@@ -7390,15 +7901,30 @@ static bool client_music_play_id(client *c, int id)
  * console's single call to the playlist-start entry point hangs off it, so this
  * belongs at the end of a successful zone load and nowhere else.
  *
- * A ZONE GATE IS NOT A LEVEL CHANGE. Both resolve to the same level record, and
- * restarting the playlist on every gate would restart the music every time the
- * player crossed a zone boundary inside one map — so the record is compared and
- * an unchanged one is left playing. `force` is for the one caller that needs
- * the restart anyway: coming back off a film, where the drive was taken away.
+ * A ZONE GATE IS NOT A LEVEL CHANGE. Both resolve to the same level record, so
+ * the record is compared and an unchanged one does not go back to entry 0 of
+ * the playlist. `force` is for the one caller that needs the restart anyway:
+ * coming back off a film, where the drive was taken away.
+ *
+ * BUT AN UNCHANGED RECORD IS NOT "LEAVE THE STREAM ALONE" EITHER, which is what
+ * this used to say and what it did. ReloadLevelData — the zone load — is
+ * branchless from 0x800793D4 to its tail, and 0x800794F8 writes ZERO to the
+ * countdown at 0x800B2710 on the way out while 0x800794F0 puts the playing flag
+ * back up. Nothing on that path touches the playlist cursor at 0x800AEC00: the
+ * only writer that resets the cursor is 0x80071B34, whose one caller is
+ * LoadLevelData at 0x800796C8, i.e. the whole-level load. So the next
+ * CdCheckMusic falls through the `bgtz` at 0x80071A60 with the countdown at
+ * zero, steps the cursor at 0x80071A70 and starts the NEXT entry from its first
+ * sector with a fresh duration and the 64-field fade-in.
+ *
+ * Measured before: BASE1 played entry 0 (id 8, QUAKE_B channel 2) across both
+ * of its zones and for the whole 154.8 s that entry lasts, so a seven-track
+ * playlist was heard at roughly a seventh of the rate the console works
+ * through it.
  */
 static bool client_music_play_id(client *c, int id);
 
-static void client_music_for_level(client *c, bool force)
+static void client_music_for_level(client *c, bool force, bool zone_gate)
 {
     const q2_level_entry *lv;
 
@@ -7419,8 +7945,26 @@ static void client_music_for_level(client *c, bool force)
     }
 
     lv = q2_level_find(&c->level_table, c->map);
-    if (lv == c->level && !force)
-        return;                 /* same level: a zone gate, or nothing moved */
+    if (lv == c->level && !force) {
+        /*
+         * Same level record. A ZONE GATE is ReloadLevelData, and 0x800794F8 is
+         * the countdown to zero and nothing else — the advance itself belongs
+         * to the next CdCheckMusic, which here is the frame loop's countdown
+         * block, so the cursor steps there exactly as it does when a track runs
+         * its duration out.
+         *
+         * Everything ELSE that resolves the same record — a restart, a death,
+         * an arena round reset, a memory-card restore — is left playing as it
+         * was. Which of the console's two level loads those run is not traced
+         * (ReloadLevelData has one caller, LoadZone at 0x80079114, and
+         * LoadLevelData has one, 0x80070D44), and the difference decides
+         * whether the playlist advances or goes back to entry 0. Guessing
+         * would be inventing a behaviour, so they keep what they had.
+         */
+        if (zone_gate)
+            c->music_left = 0;
+        return;
+    }
 
     c->level           = lv;
     c->music_cursor_at = -1;
@@ -7476,12 +8020,111 @@ static void client_music_advance(client *c)
 }
 
 /*
- * The music volume for the sector about to be handed out — the slider, and the
- * fade the two duration globals exist for.
+ * `Paused` — 0x800AE8B4, and GameCheckPaused's own arms are the only things
+ * that raise it. The DEATH page is not one of them: page 41 is built by
+ * 0x8001D774 over a level that is still running, and it writes neither Paused
+ * nor the CD volume target, so it is excluded here by name rather than falling
+ * out of `menu.open`. The front end is QFRONT with no level under it and
+ * GameCheckPaused never runs there at all.
+ */
+static bool client_music_paused(const client *c)
+{
+    /* And the SAVE? prompt, which is the third `sh zero, 0x800B2E50` above:
+     * 0x8003E750 writes the target in the same breath as `sw 1, Paused`. */
+    if (c->save_prompt_open)
+        return true;
+
+    return c->menu.open && !c->in_front_end &&
+           c->menu.page_id != Q2_PAGE_DEATH;
+}
+
+/*
+ * `targetcdvol` (0x800B2E50) — where the CD volume is being ASKED to go.
  *
- * SOUND OPTIONS -> MUSIC. The original scales by the slider doubled
- * (0x800205F4 stores music*2 into the volume global), so the top of the slider
- * is full scale and the bottom is silence.
+ * Thirteen instructions in the executable write it, and this reproduces the
+ * state they leave between them, because each of them is a level rule said as
+ * an edge. `xrefs 0x800B2E50` lists all thirteen:
+ *
+ *   0 on a pause raise      GameCheckPaused 0x8003E888 (the START press, which
+ *                           goes on to InGame_GOTO_PAUSED), 0x8003E854 (a pad
+ *                           pulled out) and 0x8003E750 (the level-change SAVE?
+ *                           prompt) each execute `sh zero, 0x800B2E50` in the
+ *                           same breath as `sw 1, Paused`.
+ *   MUSIC*2 on the way down InGame_GOTO_RESUME 0x800201AC and
+ *                           InGame_GOTO_MISSION 0x800203A8, both of which
+ *                           clear Paused in the same block, and 0x8001F134.
+ *   MUSIC*2 after a load    MainGameLoop 0x80018430, off the `JustLoaded` flag
+ *                           at 0x800B2E0C and only on the not-paused arm.
+ *   MUSIC*2 at boot         FrontEndResetSoundDefaults 0x8001FA74, seeding
+ *                           96 — the default slider of 48, doubled.
+ *   the SOUND page's rule   CHECK_FOR_SLIDER (0x8001BF1C), installed as page
+ *                           29's per-frame hook at 0x80020268. It records in
+ *                           s7 the row whose slider pointer is &musicvol
+ *                           (0x800B3348, the compare at 0x8001C1EC), leaves s7
+ *                           at -1 when the page carries no such row
+ *                           (0x8001BF2C) and then writes nothing at all
+ *                           (0x8001C220); otherwise MUSIC*2 while that row is
+ *                           the cursor row (0x8001C24C) and ZERO when it is
+ *                           not (0x8001C25C). That is an AUDITION: on
+ *                           OPTIONS -> SOUND the track plays only while the
+ *                           cursor stands on MUSIC, so what you are setting is
+ *                           what you can hear, and SOUND FX, STEREO and RESET
+ *                           TO DEFAULTS are silent rows.
+ *   and on the way out      InGame_GOTO_OPTIONS2 0x800205C0 repeats the pause
+ *                           choice as TRIANGLE leaves that page: 0 while
+ *                           Paused is still set (0x800205DC), MUSIC*2 when it
+ *                           is not (0x800205FC).
+ *
+ * So the SOUND page decides while it is up, the pause decides otherwise, and
+ * MUSIC*2 is everything else. The one frame the two readings differ is the
+ * press of RESET TO DEFAULTS on the SOUND page, where 0x8001FA74 writes MUSIC*2
+ * and the page hook writes 0 straight back over it; one frame moves the live
+ * value by four, so this takes the hook's answer and says so.
+ */
+static s16 client_music_target(const client *c)
+{
+    s16 full = (s16)(c->settings.v[Q2_SET_MUSIC] * 2);
+
+    /*
+     * The EXECUTABLE's SOUND page. Not QFRONT's: the front end is a separate
+     * image whose pages are built by its own module code, and whether that
+     * module installs the same audition hook is NOT traced. This port shares
+     * one page table between the two, so the front end keeps the plain slider
+     * rather than an untraced behaviour borrowed from the in-game page.
+     */
+    if (c->menu.open && !c->in_front_end) {
+        int audition = q2_menu_music_audition(&c->menu, full);
+
+        if (audition >= 0)
+            return (s16)audition;
+    }
+
+    return client_music_paused(c) ? 0 : full;
+}
+
+/*
+ * CdCheckMusic's first act: walk the live value at 0x800B2E74 toward the target
+ * at 0x800B2E50 by four (0x800718F8..0x8007194C). The step itself is
+ * `q2_xa_cd_volume_step`, in xa.c beside the stream it governs.
+ *
+ * The console's gate on all of this is `UseCdMusic` (0x800AE8D4, tested at
+ * 0x800718F0 BEFORE the ramp, so a build with the CD off never moves the live
+ * value at all). This port has no equivalent — a disc that carries the XA
+ * streams always plays them — so there is nothing here to reproduce it with.
+ */
+static void client_music_ramp(client *c)
+{
+    c->music_level = q2_xa_cd_volume_step(c->music_level, c->music_target);
+}
+
+/*
+ * The music volume for the sector about to be handed out — the LIVE value, and
+ * the fade the two duration globals exist for.
+ *
+ * This used to read `settings.v[Q2_SET_MUSIC] * 2` — the target — directly, and
+ * so had no pause duck, no audition and no ramp: the slider doubled is what
+ * 0x800205F4 and its six siblings write into 0x800B2E50, but 0x80071958 loads
+ * 0x800B2E74 and it is that halfword the fades scale. See `music_level`.
  *
  * `0x80071954` then scales by `remaining / 64` while the countdown is under 64
  * ticks and `0x80071980` by `elapsed / 64` while the elapsed count is — so a
@@ -7489,10 +8132,16 @@ static void client_music_advance(client *c)
  * that is 1.28 seconds each way, and it is the reason the durations are restart
  * points rather than lengths. The NTSC build keeps the 64 and ticks at 60 Hz:
  * 1.07 seconds.
+ *
+ * NOT reproduced, because the retail build cannot reach it: 0x800719AC scales
+ * the result again by `trkvolboost` (0x800B2E6C) and clamps it to 255, but the
+ * only instruction in the executable that writes that halfword is 0x8007175C,
+ * `sh zero` — so the branch at 0x800719B4 is always taken and the multiplier
+ * never applies.
  */
 static s32 client_music_volume(const client *c)
 {
-    s32 vol = c->settings.v[Q2_SET_MUSIC] * 2;
+    s32 vol = c->music_level;
 
     /* A film carries its own track and has no countdown to fade against. */
     if (!c->film_open && c->music_total > 0) {
@@ -7556,11 +8205,20 @@ static bool client_bed_refill(client *c)
     {
         s32 vol = client_music_volume(c);
 
-        if (vol < 255) {
-            u32 i;
-            for (i = 0; i < n; i++)
-                c->bed[i] = (s16)((c->bed[i] * vol) / 255);
-        }
+        /*
+         * AND STEREO OFF FOLDS THE MUSIC TO MONO, which this used not to do at
+         * all: it scaled both channels independently and never consulted the
+         * setting. 0x800719EC branches on 0x800B333E and writes volume/2 into
+         * all four mix bytes when it is clear, so each output carries the sum
+         * of both XA channels at half level — see `q2_xa_cd_mix`.
+         *
+         * This is the CD half of the setting; the SPU half already worked. The
+         * same halfword is read at 0x80072C48 as a one-or-two channel count,
+         * which is `client_voices_update` collapsing an effect's panning to
+         * 0x80/0x80 — so turning STEREO off centred every sound effect and left
+         * the music alone in full stereo.
+         */
+        q2_xa_cd_mix(c->bed, n, vol, c->settings.v[Q2_SET_STEREO] != 0);
     }
 
     c->bed_frames = n / XA_CHANNELS;
@@ -7973,6 +8631,18 @@ static void client_advance_view_weapon(client *c, bool attack, float dt)
         s32 ticks = (s32)((double)dt * 300.0 + 0.5);
         bool swapped;
 
+        /*
+         * HOW MANY TIMES THE FIRE FUNCTION RAN THIS FRAME, AND HOW MANY BULLETS
+         * CAME OUT OF IT.
+         *
+         * The console raises its sounds INSIDE the fire function, so a frame
+         * that ran it twice made two bangs; this port raised one per change of
+         * `shot_serial`, which is one per frame however many calls there were.
+         * On a wound-up chaingun that is the difference between a rip and a
+         * tap: measured 573 fire calls against 95 sounds on a 300-frame run.
+         */
+        u32 fire_calls = 0, fire_bullets = 0;
+
         if (ticks < 1) ticks = 1;
         if (ticks > Q2_SCREEN_DT_MAX) ticks = Q2_SCREEN_DT_MAX;
 
@@ -8047,8 +8717,14 @@ static void client_advance_view_weapon(client *c, bool attack, float dt)
              * that need to be faster get it from their own frame driver, which
              * is drained just below.
              */
-            if (ticks > 0 && attack && q2_vw_wants_fire(&c->vw[pi]))
-                q2_sim_fire(&c->sim[0]);
+            if (ticks > 0 && attack && q2_vw_wants_fire(&c->vw[pi])) {
+                q2_fire_result_v2 r = q2_sim_fire(&c->sim[0]);
+
+                if (r.fired) {
+                    fire_calls++;
+                    fire_bullets += r.shot_count;
+                }
+            }
 
             if (c->sim[0].combat.shot_serial != c->shot_serial_shown[pi]) {
                 c->shot_serial_shown[pi] = c->sim[0].combat.shot_serial;
@@ -8083,6 +8759,29 @@ static void client_advance_view_weapon(client *c, bool attack, float dt)
             c->vw[pi].quad_active =
                 (c->sim[0].level_time <
                  c->sim[0].combat.inv.quad_until);
+
+            /*
+             * AND THE BARREL'S OWN PITCH, client+0x46. PrimaryQuakePlayer eases
+             * it toward client+0x44 once a tick at 0x8003A44C..0x8003A460 —
+             * `Seek(&client+0x46, client+0x44, [0x800B2DB4] * 4)` — and
+             * 0x8004F3F0 adds the result to the clip rotation's X before the
+             * weapon model's matrix is built, so the gun tips onto a target
+             * above or below you while the view stays level. `ticks` is the
+             * same 1/300 s frame delta the console passes, which is what
+             * q2_vw_advance is already given.
+             *
+             * THE TARGET IS ZERO AND THAT IS THE HALF THAT IS MISSING, said
+             * plainly rather than hidden behind a call that looks wired. The
+             * elevation comes from FindPlayerTarget (QPLAYER.C 0x80039DDC),
+             * which picks one of eleven candidates and writes the ratan2 of the
+             * offset into client+0x44 at 0x8003A138 — and writes ZERO at
+             * 0x8003A190 when it finds nobody. Nothing in this port searches
+             * for that target yet, so what runs here is the no-target arm: the
+             * console's own answer when there is nothing in front of you, and
+             * the reason `view.aim_assist` reads zero in every report today.
+             * When the search lands, only this argument changes.
+             */
+            q2_vw_seek_aim_assist(&c->vw[pi], 0, ticks);
 
             swapped = q2_vw_advance(&c->vw[pi], ticks, attack, report);
         }
@@ -8140,8 +8839,13 @@ static void client_advance_view_weapon(client *c, bool attack, float dt)
             s16 snd;
 
             while (n--) {
-                q2_sim_fire(&c->sim[0]);
+                q2_fire_result_v2 r = q2_sim_fire(&c->sim[0]);
+
                 c->player_attacks++;
+                if (r.fired) {
+                    fire_calls++;
+                    fire_bullets += r.shot_count;
+                }
             }
 
             /* And the clip's own sound at a band boundary — the chaingun's
@@ -8269,15 +8973,64 @@ static void client_advance_view_weapon(client *c, bool attack, float dt)
 
             c->shot_serial_heard[pi] = c->sim[0].combat.shot_serial;
 
-            if ((shot->fired || shot->dry) && shot->sound >= 0) {
+            /*
+             * THE CHAINGUN BANGS ONCE PER BULLET, AND QUIETLY.
+             *
+             * QPlayerFireChainGun's bullet loop runs `lhu s5, 44(s6)` times —
+             * one, two or three, written by the view-model arm at 0x800501C0
+             * and clamped to the ammo at 0x80050200 — and 0x8004CCB4/0x8004CCB8
+             * play `SoundChaingunFire` (gp+17700) at the player's origin INSIDE
+             * it, once per bullet. That handle is not the machinegun's: 0x8004E0F8
+             * CLONES the wep_machgf1b request with GetSoundClone and 0x8004E2CC
+             * takes the clone down by 40, so it sounds at 23 of 63 — a little
+             * over a third of a machinegun shot from the same sample.
+             *
+             * Then, after the loop, 0x8004CCD8 plays the SEPARATE full-volume
+             * request at gp+17744 (SoundMachinegunFire) once through
+             * SoundByCreature. So a three-bullet chaingun tick is three quiet
+             * bangs and one loud one, and this port made a single loud one.
+             */
+            if (fire_bullets &&
+                c->sim[0].combat.weapon_id == Q2_WID_CHAINGUN) {
                 const q2_weapon_tables *wt = q2_weapon_tables_builtin();
+                const char *key = wt->sound[Q2_WSND_MACHINEGUN];
+                u32 b;
 
-                if ((u32)shot->sound < Q2_WT_SOUND_COUNT &&
-                    wt->sound[shot->sound][0] &&
-                    client_play_sound(c, wt->sound[shot->sound])) {
-                    /* entity+276/278: the handle the cock waits on. */
-                    c->shot_voice[pi]        = c->voice_last;
-                    c->shot_voice_serial[pi] = c->voice_last_serial;
+                for (b = 0; b < fire_bullets && key[0]; b++) {
+                    c->chaingun_bangs++;
+                    if (client_play_sound(c, key))
+                        client_sound_set_relative_volume(
+                            c, Q2_SFX_VOLUME_CHAINGUN_DELTA);
+                }
+            }
+
+            /*
+             * ONCE PER FIRE CALL, not once per frame. Every fire function plays
+             * its weapon's sound itself — the chaingun's trailing one is
+             * 0x8004CCD8 — so a frame in which the frame-fire driver ran the
+             * function three times made three of them, and this raised one.
+             *
+             * `fire_calls` counts only the calls that FIRED, which is also why
+             * it is preferred to `shot->fired`: that is the LAST attempt's
+             * outcome, and a frame can fire twice and then be refused.
+             * A dry trigger has no call to count and still clicks once.
+             */
+            {
+                u32 want = fire_calls ? fire_calls
+                                      : ((shot->fired || shot->dry) ? 1u : 0u);
+                u32 k;
+
+                for (k = 0; k < want && shot->sound >= 0; k++) {
+                    const q2_weapon_tables *wt = q2_weapon_tables_builtin();
+
+                    c->weapon_sounds++;
+                    if ((u32)shot->sound < Q2_WT_SOUND_COUNT &&
+                        wt->sound[shot->sound][0] &&
+                        client_play_sound(c, wt->sound[shot->sound])) {
+                        /* entity+276/278: the handle the cock waits on. */
+                        c->shot_voice[pi]        = c->voice_last;
+                        c->shot_voice_serial[pi] = c->voice_last_serial;
+                    }
                 }
             }
 
@@ -8799,9 +9552,16 @@ static void client_input_simulated(client *c, float dt)
                 b->radius = Q2_BODY_RADIUS;
                 /*
                  * The SWEEP's own pair, entity+0x94 and +0x96, taken from the
-                 * actor rebuilt beside it: `q2_actor_from_monster` derives them
-                 * from the creature's hull exactly as 0x800544EC reads them,
+                 * actor rebuilt beside it exactly as 0x800544EC reads them,
                  * and a corpse's are already the wider, shorter ones.
+                 *
+                 * NOT from the creature's hull, which is what this said. The
+                 * pair comes from the creature's MODEL now — GetCreHitSize's
+                 * `lhu +0x18`/`lhu +0x1A`, bound at zone load — and only falls
+                 * back to 286/600 for a creature whose model never resolved.
+                 * The hull is the same 286 cube for every creature in the game,
+                 * so while it was the source every creature was shot at as one
+                 * cylinder.
                  */
                 b->sweep_radius = c->cre_actor[i].radius;
                 b->height       = c->cre_actor[i].height;
@@ -9061,9 +9821,21 @@ static void client_input_simulated(client *c, float dt)
      * wobbling as the frame rate did. It is also why the sixteen dynamic light
      * slots were being refilled from the same events several times a frame.
      */
-    if (ticked)
-        client_entity_events(c);
-
+    /*
+     * AND AFTER THE WEAPON, NOT BEFORE IT. This drain used to sit above the
+     * view-weapon block, and the muzzle flash never reached the light world
+     * once: `q2_sim_fire` is called from inside `client_advance_view_weapon`,
+     * so the flash was appended to a list that had already been walked and was
+     * thrown away by the next tick's clear. The machinegun and the chaingun
+     * have carried a muzzle light for as long as `q2_weapon_has_muzzle_light`
+     * has existed and not one of them was ever seen — which is why the timed
+     * shotgun flashes looked dormant when they were merely last in a queue
+     * nobody read.
+     *
+     * Still immediately after the tick in the sense that matters — nothing
+     * between here and there clears the list, and the next tick's clear is a
+     * whole frame away.
+     */
     /*
      * The weapon in the hands, advanced on the same clock. The selection comes
      * from the simulation, but the SWAP does not happen when the selection
@@ -9107,24 +9879,126 @@ static void client_input_simulated(client *c, float dt)
         q2_combat_scan_who = Q2_COMBAT_SCAN_OTHER;
     }
 
+    if (ticked)
+        client_entity_events(c);
+
     /* Damage tracking is per player, like the viewport's flash tile
      * (0x8003AE10 writes the same view+672 that 0x80076764 draws). */
     if (c->hud_ready) {
         int pi;
+        /* [0x800B2DB4] for this drawn frame: the ring counts frames and the
+         * centre line counts these (hud.h). */
+        s32 frame_dt = (s32)((double)dt * 300.0 + 0.5);
+
+        if (frame_dt < 1) frame_dt = 1;
+        if (frame_dt > Q2_SCREEN_DT_MAX) frame_dt = Q2_SCREEN_DT_MAX;
 
         for (pi = 0; pi < Q2_MP_MAX_PLAYERS; pi++) {
             q2_hud *hud = &c->hud[pi];
-            const q2_inventory *inv;
+            q2_inventory *inv;
 
             if (pi > 0 && (!c->mp_enabled || !c->sim_ready[pi]))
                 continue;
             inv = pi == c->sim[0].cur_player ? &c->sim[0].combat.inv
                                             : &c->sim[0].pcombat[pi].inv;
-            q2_hud_tick(hud, 1);
+            q2_hud_tick(hud, 1, frame_dt);
+
+            /*
+             * THE POWERUP TINT, and it goes FIRST because 0x8003A2F4 does:
+             * FlashPowerUp runs near the top of the player think and the
+             * health/armour compare at 0x8003AE10 runs near the bottom, both
+             * writing the same view+672. A frame in which a quadded player is
+             * also hurt therefore ends on the grey damage tile, and the purple
+             * comes back on the next frame — which it can, because the tint is
+             * re-armed every frame rather than left to count down.
+             *
+             * Per RENDERED frame rather than per tick, for the same reason the
+             * tile is: strength 1 means one drawn frame of colour, so a raise
+             * that only happened on sim ticks would strobe at whatever fraction
+             * of the frame rate the accumulator happens to be running at.
+             */
+            {
+                const s32 until[Q2_HUD_POWERUP_SLOTS] = {
+                    inv->quad_until, inv->invuln_until,
+                    inv->enviro_until, inv->breather_until
+                };
+                q2_hud_powerup_flash pf =
+                    q2_hud_powerup_flash_tick(until, c->sim[0].level_time,
+                                              &inv->powerup_quiet_until,
+                                              &inv->powerup_warn_secs);
+
+                if (pf.tint) {
+                    q2_screen_flash_set(&c->screen, pi, pf.rgb,
+                                        Q2_HUD_POWERUP_STRENGTH,
+                                        Q2_HUD_POWERUP_MODE);
+                    c->powerup_tints[pi]++;
+                }
+                if (pf.warn) {
+                    /* 0x800398CC picks [0x800B28B0] for quad and 0x80039918
+                     * picks [0x800B28AC] for the other three; both are item
+                     * sounds, so they come out of the item table by key.
+                     * 0x800399EC passes entity+0x54 — the port's player
+                     * position is the FEET, the same stand-in the secret chime
+                     * makes, and both are inside a body's width of the ear. */
+                    const char *snd =
+                        c->item_sound[pf.slot == 0 ? Q2_SND_QUAD
+                                                   : Q2_SND_PROTECT];
+
+                    c->powerup_warns[pi]++;
+                    if (snd[0])
+                        client_play_sound_at(c, snd, c->sim[0].player[pi].pos);
+                }
+            }
+
             if (q2_hud_track(hud, inv->health, inv->armour)) {
                 q2_screen_flash_set(&c->screen, pi, hud->flash.rgb,
                                     hud->flash.strength, hud->flash.mode);
                 c->hud_flashes[pi]++;
+            }
+
+            /*
+             * AND THE ABSORB'S OWN WASH — 0x80057B80's green for a hit the
+             * power shield ate and 0x80057D24's grey for one ordinary armour
+             * took, the two SetWinFade raisers `xrefs 0x8007832C` lists that
+             * nothing in this port had ever called. Without them a Power Shield
+             * absorbing a hit whole gave the player no feedback at all: it
+             * costs cells, not health or armour, so 0x8003AE10's compare above
+             * has nothing to see either.
+             *
+             * DRAINED LAST, and this is a judgement rather than a transcription.
+             * The two raisers fire inside T_Damage, which runs from whatever
+             * hurt the player, while the two above run inside the player's own
+             * think — and which of those the entity sweep reaches first is not
+             * established from the addresses read here. What IS established is
+             * that all four write the same view+672 and the last one wins, and
+             * that the console's armour hit is a grey-128 wash over twenty
+             * frames where the HUD's is grey-64 over at most five. The stronger,
+             * longer one is the one a player describes, so it is the one this
+             * port lets survive the frame.
+             *
+             * The flag is cleared on the way out for the same reason the console
+             * clears it at 0x80057AB0: it is per hit, not per frame, and a fade
+             * left latched would re-arm itself every frame forever.
+             */
+            {
+                q2_actor *self = pi == c->sim[0].cur_player
+                                     ? &c->sim[0].combat.self
+                                     : &c->sim[0].pcombat[pi].self;
+
+                if (self->armour_fade == Q2_ACTOR_FADE_POWER) {
+                    q2_screen_flash_set(&c->screen, pi,
+                                        q2_actor_fade_power_rgb,
+                                        Q2_ACTOR_FADE_POWER_STRENGTH,
+                                        Q2_ACTOR_FADE_MODE);
+                    c->power_flashes[pi]++;
+                } else if (self->armour_fade == Q2_ACTOR_FADE_ARMOUR) {
+                    q2_screen_flash_set(&c->screen, pi,
+                                        q2_actor_fade_armour_rgb,
+                                        Q2_ACTOR_FADE_ARMOUR_STRENGTH,
+                                        Q2_ACTOR_FADE_MODE);
+                    c->armour_flashes[pi]++;
+                }
+                self->armour_fade = Q2_ACTOR_FADE_NONE;
             }
         }
     }
@@ -9187,6 +10061,40 @@ static void client_input_simulated(client *c, float dt)
                                           &c->sim[0].fx, &c->sim[0].fx_rng);
 
     /*
+     * AND THE TELEPORT PADS, which is the third of QuakeLoop's three per-frame
+     * walks — 0x80038FA4 calls DrawTelePorts immediately BEFORE DrawLaserWalls
+     * and DrawLaserBeams, so this goes above the beams in the console's order
+     * and the beams' own draws follow. Called unconditionally and on every map,
+     * because the console's is: the fifteen shared velocities come out of the
+     * generator before NumTelePorts is tested (levelbin.h).
+     *
+     * The light is added here rather than inside the walk because the light
+     * world is the client's and `client_entity_events` has already emptied it
+     * for this frame; sixteen dynamic slots is the engine's ceiling and
+     * q2_light_add_dynamic drops the seventeenth by itself.
+     */
+    {
+        q2_teleport_frame tp;
+        u32 k;
+
+        c->teleport_drawn =
+            q2_teleports_draw(&c->teleports, &c->sim[0].triggers,
+                              &c->sim[0].fx, &c->sim[0].fx_rng,
+                              c->sim[0].level_time, &tp);
+
+        if (c->lights_ready) {
+            for (k = 0; k < tp.light_count; k++) {
+                if (q2_light_add_dynamic(&c->light_world, tp.light[k].pos,
+                                         tp.light[k].rgb, tp.light[k].inner,
+                                         tp.light[k].outer,
+                                         Q2_FX_TELEPORT_LIGHT_STYLE,
+                                         Q2_FX_TELEPORT_LIGHT_SIZE))
+                    c->teleport_lights++;
+            }
+        }
+    }
+
+    /*
      * The 1/300 s clock three separate subsystems run on, and each is now
      * gated on its OWN readiness rather than on the rotators'.
      *
@@ -9218,6 +10126,7 @@ static void client_input_simulated(client *c, float dt)
         /* The rotating brushes. */
         if (c->rotators_ready)
             c->rot_moved += q2_rotators_tick(&c->rotators, ticks);
+        q2_sim_scene_solids_update(&c->sim[0], &c->rotators);
 
         /* The script's own clock, which is what a TIMER's deadline is measured
          * against. It has no readiness flag of its own and never needed one. */
@@ -9329,6 +10238,43 @@ static void client_input_simulated(client *c, float dt)
                     c->explosive_sounds_missed++;
 
                 client_play_sound_at(c, Q2_EXPLOSIVE_SOUND, at);
+            }
+        }
+
+        /*
+         * AND WHAT A BREAKING PANE SOUNDS LIKE. The same arrangement one
+         * handler along: PSXGLASS's tail plays the handle at 0x800B27FC
+         * (`Sound_GlassSmash`, the twelve-byte key `amb_brkglas` at
+         * 0x800ABCC8) through 0x8002A4A4, positioned at the centre of the
+         * pane's Scene node box — the same point the shatter debris comes out
+         * of. The sim queues the position because it knows where the pane was;
+         * the mixer and the map's bank are this side's.
+         *
+         * Outside `movers_ready` for the reason the blast is: a window has
+         * nothing to do with a door, and a zone with no movers still has them.
+         * Every breaking window in the game was silent until this drain
+         * existed — the queue filled to eight and dropped the ninth, which is
+         * harmless and completely invisible.
+         */
+        {
+            s32 at[3];
+
+            while (q2_sim_next_glass_smash(&c->sim[0], at)) {
+                q2_vag vag;
+
+                /*
+                 * COUNTED ON WHETHER THE BANK HAS IT, the same trap as the
+                 * blast above: `client_play_sound_at` returns false when
+                 * `c->audio` is NULL, which is every headless run, so counting
+                 * its return would report a missing audio device as a missing
+                 * sample. BASE1's SNDVRAM entry 29 is `029_amb_brkglas`.
+                 */
+                if (client_find_sound(c, Q2_GLASS_SOUND, &vag))
+                    c->glass_sounds++;
+                else
+                    c->glass_sounds_missed++;
+
+                client_play_sound_at(c, Q2_GLASS_SOUND, at);
             }
         }
 
@@ -9843,19 +10789,26 @@ static void client_input_simulated(client *c, float dt)
      *
      * The ease is the engine's short-way angle lerp (0x8006FAC8): take the
      * difference modulo the circle, and go whichever way round is shorter.
+     *
+     * AND ITS FRACTION IS `50 * dt`, NOT A CONSTANT. This used to pass a flat
+     * 100, which is what 0x800380D8..0x800380EC gives at about 144 fps and a
+     * fifth of what it gives at the console's own PAL rate (dt 12 → 600): the
+     * horizon took roughly 46 frames to lie over where the console takes eight,
+     * and — because the step was per RENDERED frame with no dt in it — the same
+     * death rolled at a visibly different speed on a fast machine and a slow
+     * one, where the console's rolls identically at both. The lerp itself was
+     * already right, including the +2047 rounding and the 0x800 half-circle
+     * test, so the whole of the fix is the fraction; it lives beside the rest of
+     * the death chain now (playerdeath.h) rather than open-coded here.
      */
     if (c->sim[0].player[0].ent2_flags & Q2_ENT2_DEAD) {
-        s32 cur  = c->cam.roll & 0xFFF;
-        s32 want = (-384) & 0xFFF;
-        s32 d    = (want - cur) & 0xFFF;
-        s32 frac = 100;                 /* 1/2048 units per frame of ease */
+        s32 dt_ticks = (s32)((double)dt * 300.0 + 0.5);
 
-        if (!(d & 0x800))
-            cur = cur + ((d * frac + 2047) >> 11);
-        else
-            cur = cur - (((4096 - d) * frac + 2047) >> 11);
-
-        c->cam.roll = (s16)(cur & 0xFFF);
+        if (dt_ticks > Q2_SCREEN_DT_MAX) dt_ticks = Q2_SCREEN_DT_MAX;
+        /* view+16 is a halfword on the console (`lh`/`sh` at 0x800380D4 and
+         * 0x80038100); the camera carries it as a word, so it is narrowed on
+         * the way in and widened back out. */
+        c->cam.roll = q2_pdeath_cam_roll((s16)(c->cam.roll & 0xFFF), dt_ticks);
     } else {
         /*
          * THE PLAIN ANGLES. The kick does NOT reach the camera.
@@ -10401,7 +11354,7 @@ static bool client_ui_open(const client *c)
 {
     return c->menu.open || c->mcard_open || c->mission_open ||
            c->briefing_open || c->credits_open || c->film_open ||
-           c->boot_open || c->popup.visible;
+           c->boot_open || c->popup.visible || c->save_prompt_open;
 }
 
 static void client_update_grab(client *c)
@@ -10460,6 +11413,40 @@ static void client_menu_close(client *c)
     q2_prompt_hide_all(&c->prompts);
 }
 
+/*
+ * IsPlayerPadShockable (0x80033250) for every player, from the host's pads.
+ *
+ * The console reads bit 8 of the pad record's +0x0E, which PadDualShock raises
+ * at 0x80031844 only when PadInfoAct reports two actuators and clears at
+ * 0x80031878 otherwise; 0x8001C9D8 greys VIBRATION and skips the row when it is
+ * clear. The port's answer is the pad's own rumble capability, and a player on
+ * keyboard and mouse has no pad at all — which is the console's answer for a
+ * controller with no motors, i.e. false.
+ *
+ * It defaults to false, so until this ran OPTIONS -> CONTROLLER greyed
+ * VIBRATION for everyone, DualShock owners included. The gate is read by
+ * q2_menu_goto's page hook, so calling it after the page is already open takes
+ * effect on the next entry — the same granularity the console's per-frame hook
+ * gives in practice, since the pad set cannot change while a page is being
+ * walked.
+ */
+static void client_menu_bind_pads(client *c)
+{
+    int p;
+
+    for (p = 0; p < Q2_MENU_MP_MAX_PLAYERS; p++) {
+        bool rumble = false;
+
+        if (p < Q2_SIM_MAX_PLAYERS && c->gamepads.device[p])
+            rumble = SDL_GetBooleanProperty(
+                         SDL_GetGamepadProperties(c->gamepads.device[p]),
+                         SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false);
+
+        /* The card menu never reaches page 31, so only the one that can. */
+        q2_menu_set_pad_shockable(&c->menu, p, rumble);
+    }
+}
+
 /* Defined with the front-end state machines below; their menu requests reach
  * them here, before their full definitions in this translation unit. */
 static void client_card_open(client *c, q2_save_ui_mode mode);
@@ -10496,6 +11483,25 @@ static void client_mp_configure(client *c, q2_mp_mode mode, int players,
     c->mp.frag_limit  = frag_limit;
     c->mp.time_limit  = time_limit;
     c->mp.round_limit = round_limit;
+
+    /*
+     * And the session halfwords the pause banner is coloured from. 0x800B3354
+     * is the mode, and it is only ever asked one question — 0x8001CFF0 tests it
+     * against 1, so TEAM DEATHMATCH takes the TEAM halfword at config+2 and
+     * every other mode takes the player-colour halfword at config+4.
+     *
+     * The per-player pair is fed from the session's own `team[]`, which had no
+     * reader in this port before now, and from the player index for the colour.
+     * That index IS the colour: FrontEndResetMultiplayerDefaults writes
+     * `colour = p` at 0x8001BEDC and `team = p & 1` at 0x8001BF04, so a client
+     * that never got here still has the disc's defaults from q2_menu_init.
+     */
+    q2_menu_set_mp_mode(&c->menu, (int)c->mp.mode);
+    for (pi = 0; pi < Q2_MENU_MP_MAX_PLAYERS; pi++)
+        q2_menu_set_player_colour(&c->menu, pi,
+                                  pi < Q2_MP_MAX_PLAYERS ? (int)c->mp.team[pi]
+                                                         : (pi & 1),
+                                  pi);
 
     c->mp_spawn_count    = 0;
     c->mp_rng_state      = 0x13572468u;
@@ -11020,12 +12026,28 @@ static bool client_play_sound(client *c, const char *want)
     v->step   = q2_sfx_step_16_16(rate, Q2_SFX_PITCH_DEFAULT,
                                   XA_SAMPLE_RATE);
     v->vol    = vol;
+    /* A fresh request, so 0x80071C5C's 63. A caller that wants the chaingun's
+     * clone overwrites it through client_sound_set_relative_volume below. */
+    v->req_vol = (u8)Q2_SFX_VOLUME_DEFAULT;
     v->active = true;
     c->voice_started++;
     c->voice_last        = v;
     c->voice_last_serial = v->serial;
 
     return true;
+}
+
+/*
+ * SoundSetRelativeVolume (0x80072BB4), applied to the voice this port has just
+ * started rather than to a request record it does not keep. The byte's own
+ * wrap-then-clamp is q2_sfx_volume_add, beside the same record's pitch byte.
+ */
+static void client_sound_set_relative_volume(client *c, s32 delta)
+{
+    if (!c->voice_last)
+        return;
+
+    c->voice_last->req_vol = q2_sfx_volume_add(c->voice_last->req_vol, delta);
 }
 
 /*
@@ -11113,7 +12135,13 @@ static void client_voices_update(client *c)
             continue;
 
         if (!v->positional) {
-            v->level = CLIENT_SFX_LOCAL;
+            /*
+             * Scaled by the request's own volume, because on the console that
+             * byte IS the voice's volume field and the listener-local path does
+             * not touch it either. 63/63 leaves every existing caller exactly
+             * where it was; the chaingun's 23/63 is the one ratio that moves.
+             */
+            v->level = (CLIENT_SFX_LOCAL * (s32)v->req_vol) / CLIENT_SFX_REQ_VOL;
             v->pan_l = v->pan_r = stereo ? 0xFF : 0x80;
             continue;
         }
@@ -11137,7 +12165,10 @@ static void client_voices_update(client *c)
             dist = (s32)(len > 0 ? len : 1);
         }
 
-        level = (CLIENT_SFX_BASE * (CLIENT_SFX_REACH - dist)) / 4096;
+        /* The base was this number under another name: the request's volume
+         * byte, 63 by default. Read it off the voice now that a request can
+         * carry something else. */
+        level = ((s32)v->req_vol * (CLIENT_SFX_REACH - dist)) / 4096;
         if (level < 0)   level = 0;
         if (level > 255) level = 255;
         v->level = level;
@@ -11430,10 +12461,24 @@ static void client_entity_events(client *c)
                         ev->e[i].pos[0], ev->e[i].pos[1], ev->e[i].pos[2],
                         inner, ev->e[i].radius);
 
+            /*
+             * AddLight OR AddTimedLight, and the event says which. A `ticks`
+             * of zero is 0x80075C34, one frame on the world list; anything
+             * above is 0x80075D14, a slot in the sixteen-entry table at
+             * 0x800E1218 that re-emits the light at a falling fraction of its
+             * radii for that many frames. The shotgun, the super shotgun and
+             * the energy pulse are the three raisers that take the second path
+             * (simcombat.c), and all three raised nothing at all until now.
+             * Both refuse a seventeenth, and the drop is counted the same way.
+             */
             if (!c->lights_ready ||
-                !q2_light_add_dynamic(&c->light_world, ev->e[i].pos,
-                                      ev->e[i].glow, inner,
-                                      ev->e[i].radius, 0, 0))
+                (ev->e[i].ticks > 0
+                     ? !q2_light_add_timed(&c->light_world, ev->e[i].pos,
+                                           ev->e[i].glow, inner,
+                                           ev->e[i].radius, ev->e[i].ticks)
+                     : !q2_light_add_dynamic(&c->light_world, ev->e[i].pos,
+                                             ev->e[i].glow, inner,
+                                             ev->e[i].radius, 0, 0)))
                 c->ent_light_dropped++;
             else
                 c->ent_light_added++;
@@ -11535,7 +12580,24 @@ static bool client_capture(client *c)
         return false;
     }
 
+    rc = q2_save_capture_event_history(&c->snapshot, &c->event_store);
+    if (rc != Q2_OK) {
+        Q2_ERROR("cannot capture script history: %s", q2_result_str(rc));
+        q2_save_free(&c->snapshot);
+        return false;
+    }
+
     q2_save_capture_mission(&c->snapshot, &c->mission);
+    /*
+     * ...and the help computer's current message pair, as the two Strings KEYS
+     * it was resolved from. `HelpComputer_GetMessages` (0x800218A8) copies
+     * `LastOrders` and `LastObjective` into the unit's save block on the save
+     * arm of every `LoadSaveHub`, so which board the player last read is part
+     * of a saved game and not session scratch. Without it a reload showed the
+     * shipped "Awaiting Orders." however far into the unit the save was taken.
+     */
+    q2_save_set_help_keys(&c->snapshot, c->popup.orders_key,
+                          c->popup.objective_key);
     /*
      * ...and the live counters the row's first column is a copy of. The row
      * alone is not enough to resume a level: it holds one clamped byte per
@@ -11578,11 +12640,28 @@ static bool client_capture(client *c)
      * script flags are carried, so the record that opened it has run. */
     if (c->movers_ready)
         q2_save_capture_movers(&c->snapshot, &c->movers);
+    if (c->rotators_ready &&
+        q2_save_capture_rotators(&c->snapshot, &c->rotators) != Q2_OK) {
+        Q2_ERROR("cannot capture rotating brushes");
+        return false;
+    }
     /* And who is dead: without this a save reloads into a room the player has
      * already cleared, full again. */
-    if (c->creatures_ready)
+    if (c->creatures_ready) {
         q2_save_capture_creatures(&c->snapshot, &c->creatures.set);
+        if (q2_save_capture_ai(&c->snapshot, &c->creatures,
+                (u32)(c->ai_accum * 1000000.0 + 0.5)) != Q2_OK) {
+            Q2_ERROR("cannot capture creature behavior");
+            return false;
+        }
+    }
     q2_save_set_settings(&c->snapshot, c->settings.v, Q2_SET_COUNT);
+    if (c->vm_ready && q2_save_capture_viewweapon(&c->snapshot, &c->vw[0],
+            c->vw_last_weapon[0], c->shot_serial_shown[0],
+            c->shot_serial_heard[0], c->cock_pending[0]) != Q2_OK) {
+        Q2_ERROR("cannot capture view weapon");
+        return false;
+    }
     return true;
 }
 
@@ -11601,6 +12680,29 @@ static bool client_apply_save(client *c, const q2_save *s)
     q2_result rc;
     s32 eye[3];
     bool was_front_end = c->in_front_end;
+    q2_event_store saved_history = {0}, previous_history;
+    s32 previous_skill = q2_cre_skill(), saved_skill;
+
+    /* Refuse the wrong disc before loading anything or changing the screen. */
+    if (s->serial[0] && strcmp(s->serial, c->build.serial) != 0) {
+        Q2_ERROR("save is for build %s, this disc is %s",
+                 s->serial, c->build.serial);
+        return false;
+    }
+    rc = q2_save_restore_event_history(s, &saved_history);
+    if (rc != Q2_OK) {
+        Q2_ERROR("cannot restore script history: %s", q2_result_str(rc));
+        return false;
+    }
+    previous_history = c->event_store;
+    c->event_store = saved_history;
+    c->restoring_save = s;
+    c->carry_player = false;
+    c->carry_same_map = false;
+    c->carry_inv = s->inventory;  /* Mover settling during replay uses saved keys. */
+    /* SpawnGeneral filters Population before the creature set is built. */
+    if (q2_save_get_skill(s, &saved_skill))
+        q2_cre_set_skill(saved_skill);
 
     /* Game saves are single-player. LOAD GAME can be entered from QFRONT, so
      * clear that screen's state before the map load chooses fonts, HUD and
@@ -11614,13 +12716,51 @@ static bool client_apply_save(client *c, const q2_save *s)
         Q2_ERROR("the save names %s zone %d, which will not load",
                  s->map, (int)s->zone);
         c->in_front_end = was_front_end;
+        c->restoring_save = NULL;
+        q2_event_store_free(&c->event_store);
+        c->event_store = previous_history;
+        q2_cre_set_skill(previous_skill);
         return false;
     }
+    c->restoring_save = NULL;
+    q2_event_store_free(&previous_history);
 
     rc = q2_save_apply(s, &c->sim[0], NULL, c->build.serial, c->map);
     if (rc != Q2_OK) {
         Q2_ERROR("cannot apply the save: %s", q2_result_str(rc));
         return false;
+    }
+
+    /* BRKS restores hitboxes, EXPL restores group health/destruction. Apply
+     * the same geometry swap as a live hit, without a new blast, sound or
+     * script continuation. Some shootable crates have no one-shot script bit
+     * at all, so EVE_ replay alone cannot reconstruct them. */
+    if (c->explosives_ready) {
+        u32 i;
+        for (i = 0; i < c->explosives.count; i++) {
+            q2_explosive *e = &c->explosives.items[i];
+            q2_explosive_result vis;
+            if (!s->explosive_count) {
+                u32 j;
+                /* Older files still carry broken shootable boxes in BRKS. */
+                for (j = 0; j < c->sim[0].breakable_count; j++) {
+                    const q2_breakable *b = &c->sim[0].breakable[j];
+                    if (b->kind == Q2_BREAKABLE_FXGROUP &&
+                        b->item_offset == e->item_offset && b->broken)
+                        e->destroyed = 1;
+                }
+            }
+            if (e->destroyed) {
+                e->destroyed = 0;
+                q2_explosive_trigger_item(&c->explosives, e->item_offset,
+                                            true, &c->zone.scene, &vis);
+            } else {
+                /* The constructor already showed intact geometry. Repeating
+                 * it here would undo an OBJDRAWOFF from the script replay. */
+                continue;
+            }
+            client_apply_node_vis(c, &vis);
+        }
     }
 
     /* The settings travel with the save, and applying them is what states 14
@@ -11645,10 +12785,56 @@ static bool client_apply_save(client *c, const q2_save *s)
      */
     if (c->map_unit > 0)
         client_mission_enter(c);
+
+    /*
+     * THE HELP COMPUTER'S PAIR, re-resolved rather than restored as text.
+     *
+     * The restore arm of every unit hub hands the two saved keys back to
+     * `HelpComputer_SetMessages` (0x800229C8 and its four siblings), which does
+     * the 0x800701B4 lookups again — so the pair is resolved against the level
+     * being resumed, not against the one it was saved in. That is why the save
+     * carries keys. A key that misses here falls to the shipped default at
+     * 0x8009B520/0x8009B534, exactly as a live HELPCOMPUTER whose key is not in
+     * this level's Strings does.
+     *
+     * A file older than version 8 has no chunk; the session's pair stands,
+     * which is the closest thing to "this save predates the question".
+     */
+    {
+        q2_save_help hk;
+
+        if (q2_save_get_help_keys(s, &hk)) {
+            const char *ot = NULL, *bt = NULL;
+
+            if (c->leveltext_ready) {
+                if (hk.orders_key[0])
+                    ot = q2_leveltext_find(&c->leveltext, hk.orders_key);
+                if (hk.objective_key[0])
+                    bt = q2_leveltext_find(&c->leveltext, hk.objective_key);
+            }
+            q2_briefing_popup_set(&c->popup, hk.orders_key, ot,
+                                  hk.objective_key, bt);
+        }
+    }
+
     if (c->movers_ready)
         q2_save_apply_movers(s, &c->movers);
-    if (c->creatures_ready)
-        q2_save_apply_creatures(s, &c->creatures.set);
+    if (q2_save_apply_rotators(s, &c->rotators) != Q2_OK) {
+        Q2_ERROR("save rotators do not match this map");
+        return false;
+    }
+    q2_sim_scene_solids_update(&c->sim[0], &c->rotators);
+    {
+        u32 phase_us = 0;
+        if (c->creatures_ready)
+            q2_save_apply_creatures(s, &c->creatures.set);
+        if (q2_save_apply_ai(s, &c->creatures, &phase_us) != Q2_OK) {
+            Q2_ERROR("save creature behavior does not match this map");
+            return false;
+        }
+        c->ai_accum = (double)phase_us / 1000000.0;
+    }
+    if (q2_save_get_skill(s, &saved_skill)) c->menu.skill = saved_skill;
 
     /*
      * AND THE LIVE COUNTERS, which the restore used to destroy.
@@ -11720,12 +12906,23 @@ static bool client_apply_save(client *c, const q2_save *s)
         }
     }
 
-    /* The weapon in the hands follows the restored selection. Without this the
-     * player holds whatever the fresh spawn gave them while the simulation
-     * thinks they are holding the railgun. */
+    /* Resume the live machine, including a selection that has not yet reached
+     * the hands. Legacy saves only recorded the selected weapon. */
     if (c->vm_ready) {
         client_reset_view_model(c, 0);
+        if (q2_save_apply_viewweapon(s, &c->vw[0], &c->vm_tables) != Q2_OK) {
+            Q2_ERROR("save has an incompatible view-weapon animation");
+            return false;
+        }
+        if (s->viewweapon_present) {
+            c->vw_last_weapon[0] = s->viewweapon_selected;
+            c->shot_serial_shown[0] = s->shot_serial_shown;
+            c->shot_serial_heard[0] = s->shot_serial_heard;
+            c->cock_pending[0] = s->cock_pending;
+            client_bind_view_model(c, 0);
+        }
     }
+    q2_save_apply_game_rng(s);
 
     /* A restored game is a played game, so it resumes under the simulation
      * rather than in the free-fly camera. */
@@ -12084,6 +13281,161 @@ static void client_card_frame(client *c)
 }
 
 /* ------------------------------------------------------------------------- */
+/* "DO YOU WANT TO SAVE?" — InGame_GOTO_WANT_TO_SAVE, 0x800203C4               */
+/* ------------------------------------------------------------------------- */
+/*
+ * 0x800203C4 is five things in twenty instructions:
+ *
+ *   800203D0  jal 0x8001A384(39)      enter page 39
+ *   800203E0  a0 = 0x8009B3B4, a1 = 16 install the caption table — one record,
+ *                                     "DO YOU WANT TO SAVE?" (0x800AB18C) at
+ *                                     (256, 98)
+ *   800203F8  sh 1, 0x800B348A        the flag GameCheckPaused tests at
+ *                                     0x8003E6A0 so START cannot dismiss it
+ *   80020400  a0 = 0x8009B3E4, a1 = 16 install the answers — "YES" (0x800AE644)
+ *                                     at (256, 124) with action 0x80020428,
+ *                                     "NO" (0x800AE640) at (256, 150) with
+ *                                     action 0x80020140 (InGame_GOTO_RESUME)
+ *   80020414  sw zero, 0x800B3270
+ *
+ * The port already carries both tables, transcribed in memcard.c as
+ * Q2_MCARD_SAVE_PROMPT with `first` = 1, so YES is the row the cursor starts
+ * on and NO is the one below it. YES is the only record in the whole card
+ * front end with a real action, and 0x80020428 is what this port's
+ * `client_card_open(Q2_SAVE_UI_SAVE)` already stands in for — it is the same
+ * call F7 makes. NO is the ordinary resume.
+ *
+ * The world does not tick behind it: `Paused` is up (0x8003E754) and
+ * MainGameLoop's GameIsPaused check at 0x800183C4 zeroes the frame delta, so
+ * the arm in the frame loop below runs this and nothing else.
+ */
+
+/*
+ * HEADLESS PICKS "NO", AND THIS IS THE PORT'S, NOT THE CONSOLE'S.
+ *
+ * The console has no timeout on this screen at all: it waits for a press, and
+ * a windowed player here waits with it. A scripted run cannot press anything,
+ * and a prompt that waited would stop every sweep this project takes at the
+ * first level boundary — which is the same problem the tally board has, and
+ * this is the same answer it already got (Q2_INTERMISSION_HEADLESS). Two
+ * frames, so the page is composed and drawn at least once and a capture taken
+ * across a level change still shows it.
+ */
+#define Q2_SAVE_PROMPT_HEADLESS 2
+
+static void client_save_prompt_close(client *c)
+{
+    c->save_prompt_open      = false;
+    c->save_prompt_menu.open = false;
+    c->save_prompt_menu.page = NULL;
+}
+
+static void client_save_prompt_open(client *c)
+{
+    const q2_menu_page *page = q2_mcard_page(Q2_MCARD_SAVE_PROMPT);
+
+    /* 0x8003E718: never in deathmatch. An arena has no save to write and
+     * nothing to pause for. */
+    if (!page || c->mp_enabled || c->in_front_end)
+        return;
+
+    memset(c->save_prompt_menu.text, 0, sizeof(c->save_prompt_menu.text));
+    memset(c->save_prompt_menu.disabled, 0,
+           sizeof(c->save_prompt_menu.disabled));
+    c->save_prompt_menu.page   = page;
+    c->save_prompt_menu.cursor = (int)page->first;   /* YES */
+    c->save_prompt_menu.open   = true;
+    c->save_prompt_menu.pad_prev = 0;
+    c->save_prompt_pad     = 0;
+    c->save_prompt_frames  = 0;
+    c->save_prompt_open    = true;
+    c->save_prompts++;
+
+    /* The prompt owns the screen. Nothing else may be standing behind it —
+     * 0x800203D0 enters a page, which replaces whatever was up. */
+    client_menu_close(c);
+    c->mission_open  = false;
+    c->briefing_open = false;
+
+    Q2_INFO("SAVE?: %s asks whether to save", c->map);
+}
+
+static void client_save_prompt_frame(client *c)
+{
+    const q2_menu_page *page = c->save_prompt_menu.page;
+    q2_menu_sound snd;
+    u16 pad, released;
+    int row;
+
+    if (!page) {
+        client_save_prompt_close(c);
+        return;
+    }
+
+    c->save_prompt_frames++;
+
+    pad  = client_menu_pointer(c, &c->save_prompt_menu);
+    pad |= client_menu_pad(c);
+
+    /*
+     * ESCAPE AND TRIANGLE DO NOTHING HERE, which is the point of 0x800B348A:
+     * 0x800203F8 raises it and GameCheckPaused's START arm refuses to unpause
+     * while it is up (0x8003E6A0). One of the two answers is the only way out,
+     * so the key handler in the frame loop leaves this screen alone as well.
+     */
+    q2_menu_advance(&c->save_prompt_menu, pad);
+
+    snd = q2_menu_take_sound(&c->save_prompt_menu);
+    if (snd != Q2_MSND_NONE)
+        client_play_menu_sound(c, snd);
+
+    /*
+     * THE TWO ANSWERS ARE TAKEN FROM DIFFERENT PLACES, because on the console
+     * they ARE different things.
+     *
+     * NO is 0x80020140, InGame_GOTO_RESUME — an ordinary menu action, which
+     * this port already carries as Q2_ACT_RESUME on that record, so the engine
+     * has run it by the time we get here and left the request behind. Taking
+     * it from the request rather than from the cursor matters: Q2_ACT_RESUME
+     * calls q2_menu_close, and a reading that went back to the cursor
+     * afterwards would depend on what a close happens to leave there.
+     *
+     * YES is 0x80020428, which is not a page transition in this engine's sense
+     * — it is the card front end, and the client owns that — so it is read
+     * positionally, exactly as the card screens read their own rows
+     * (`cursor - first`, 0x800B32AC minus 0x800B32AE).
+     */
+    if (q2_menu_take_request(&c->save_prompt_menu) == Q2_MREQ_RESUME) {
+        client_save_prompt_close(c);
+        return;
+    }
+
+    if (c->headless && c->save_prompt_frames >= Q2_SAVE_PROMPT_HEADLESS) {
+        Q2_INFO("SAVE?: headless — taking NO");
+        client_save_prompt_close(c);
+        return;
+    }
+
+    /*
+     * The release rule for YES. Both records carry bit 13 (memcard.c's
+     * ANSWER), which is the on-release idiom the confirmations use, and the
+     * edge starts empty so the button that was down when the level changed
+     * cannot answer the question it raised.
+     */
+    released = (u16)(c->save_prompt_pad & ~pad);
+    c->save_prompt_pad = pad;
+
+    if ((pad & Q2_PAD_CROSS) != 0 || (released & Q2_PAD_CROSS) == 0)
+        return;
+
+    row = c->save_prompt_menu.cursor - (int)page->first;
+    if (row == 0) {
+        client_save_prompt_close(c);
+        client_card_open(c, Q2_SAVE_UI_SAVE);
+    }
+}
+
+/* ------------------------------------------------------------------------- */
 /* Quick save and quick load — slot 1, no screens.                            */
 /*                                                                            */
 /* Entirely the port's: the console has no such thing, and it is here because  */
@@ -12324,6 +13676,13 @@ static void client_write_shot(client *c, bool numbered)
                 c->sim[0].fx.stats.beams_dropped,
                 c->sim[0].fx.stats.beam_faces_emitted);
 
+    if (c->teleports.count)
+        Q2_INFO("  teleports %u pad%s registered in this zone, %u column%s "
+                "queued this frame, %u light%s added over the run",
+                c->teleports.count, c->teleports.count == 1 ? "" : "s",
+                c->teleport_drawn, c->teleport_drawn == 1 ? "" : "s",
+                c->teleport_lights, c->teleport_lights == 1 ? "" : "s");
+
     if (c->creatures_ready && c->creatures.set.count) {
         u32 i, live = 0, hunting = 0, dead = 0;
         long hp = 0;
@@ -12412,6 +13771,9 @@ static void client_write_shot(client *c, bool numbered)
                 c->glass_calls, c->glass_pieces,
                 c->sim[0].breakable_count, c->sim[0].breakable_hits,
                 c->sim[0].breakable_pieces, c->sim[0].breakable_fired);
+        Q2_INFO("            %u panes smashed audibly, %u the bank could not"
+                " name",
+                c->glass_sounds, c->glass_sounds_missed);
         Q2_INFO("  explosive %u groups, %u shootable parts; %u destroyed"
                 " (%u by script), %u detonated, %u node show/hide,"
                 " %u reports the bank carries (%u it does not),"
@@ -12766,7 +14128,7 @@ static void client_film_stop(client *c)
      * `force`, because the level record has not changed and the ordinary
      * early-out would decline to restart it.
      */
-    client_music_for_level(c, true);
+    client_music_for_level(c, true, false);
 
     Q2_INFO("movie: %u frames shown", c->film_frames);
 }
@@ -13068,7 +14430,7 @@ static void client_enter_front_end(client *c)
      */
     if (c->music_held) {
         c->music_held = false;
-        client_music_for_level(c, true);
+        client_music_for_level(c, true, false);
     }
 }
 
@@ -13290,14 +14652,19 @@ static void client_start_game(client *c)
     q2_loading_hide(&c->loading);
 
     /*
-     * A NEW GAME is the one thing that empties the mission table, and it is
-     * the only thing that does on the console either: `0x8003D62C`'s restore
-     * finds no "PlayerSave" block and takes the `memset(0x8009B550, 0, 150)`
-     * at `0x8003DDB8`. See `client_mission_enter` for why there is no clear at
-     * a unit boundary.
+     * A NEW GAME empties the mission table — `0x8003D62C`'s restore finds no
+     * "PlayerSave" block and takes the `memset(0x8009B550, 0, 150)` at
+     * `0x8003DDB8`. It is not the ONLY thing that does, which this comment used
+     * to claim: `ClearLevelIntermission` empties it again at every unit
+     * boundary. See `client_mission_enter`.
      */
     q2_mission_init(&c->mission);
     c->mission_row = -1;
+
+    /* And the same memset takes the EVE_ blocks with it: a new game is the one
+     * thing in the image that empties save memory, which is why a map walked
+     * back into WITHIN a game still remembers its script. */
+    q2_event_store_clear(&c->event_store);
 
     client_load_zone(c, c->first_map, 0);
 }
@@ -13427,17 +14794,96 @@ static void client_film_blit(client *c)
  * on the tally and zeroes the frame-delta accumulator each pass, so no game
  * time elapses. All this does is take the dismiss.
  */
+/*
+ * The tally board's own camera — `MoveQuakeCameraInterMission`, 0x80038460.
+ *
+ * `SetInterMission` installs this as view[0]'s per-view hook before anything
+ * else it does (0x800224C8), and `ProcessAllCameras` runs the hook from
+ * `QuakeInterMissionLoop` on every frame the board is up — so the shot is
+ * re-established each frame rather than set once, and this is called from the
+ * intermission frame for that reason.
+ *
+ * The console's guard is `lw a1, 288(view)` for the owning entity and then
+ * `lh v0, 264(a1)` > 0 at 0x800384A0: a DEAD player keeps their own camera and
+ * the authored one is never installed. The port's equivalent of entity+264 is
+ * the combat inventory's health, which is the same number the status bar
+ * draws.
+ *
+ * `q2_mission_camera_for_unit` says what is and is not transcribed, including
+ * the one unit the table has no record for.
+ */
+static void client_mission_camera(client *c)
+{
+    q2_mission_camera cam;
+
+    if (!c || !c->mission_open)
+        return;
+    if (c->sim[0].combat.inv.health <= 0)
+        return;
+    if (!q2_mission_camera_for_unit(c->mission.unit, &cam))
+        return;
+
+    /* view+0/+4/+8 are written outright — they are the EYE, not the feet:
+     * `QuakeCamera`'s live arm reaches the same fields by adding 286 to the
+     * entity's y (0x80038638), so the record is already in eye space. */
+    c->cam.pos[0] = cam.pos[0];
+    c->cam.pos[1] = cam.pos[1];
+    c->cam.pos[2] = cam.pos[2];
+    c->cam.pitch  = cam.pitch;
+    c->cam.yaw    = cam.yaw;
+    c->cam.roll   = cam.roll;
+}
+
 static void client_intermission_frame(client *c, float dt)
 {
     u16 pad = client_menu_pad(c);
     bool cross = (pad & (Q2_PAD_CROSS | Q2_PAD_START)) != 0;
+
+    /*
+     * THE TALLY BOARD IS ITS OWN CASE, and it is the only one of the three with
+     * a lock on it.
+     *
+     * `PadEndInterMission` (0x800224F4) runs before the draw on every tally
+     * frame and will not so much as read the pad for the first 1200 ticks —
+     * four seconds at this port's rate. The press it then wants is the FIRE
+     * binding (`MapPadInputToFire(0)`, default mask 0x4000), on a rising edge,
+     * and START is not part of it: the port used to close the board on the
+     * first CROSS **or START** of the first frame, so a player who reached the
+     * exit holding fire never saw the screen at all. See mission.h.
+     */
+    if (c->mission_open) {
+        bool fire = (pad & Q2_PAD_CROSS) != 0;
+        bool edge = fire && !c->mission_fire_prev;
+        s32  ticks;
+
+        /* The console's own delta, clamped exactly where 0x80018914 clamps
+         * it: `slti v0, v0, 31` then 30. */
+        ticks = (s32)((double)dt * 300.0 + 0.5);
+        if (ticks < 1)                  ticks = 1;
+        if (ticks > Q2_SCREEN_DT_MAX)   ticks = Q2_SCREEN_DT_MAX;
+
+        /* Latched unconditionally — the pad record is updated whether or not
+         * the gate let anybody look at it. */
+        c->mission_fire_prev = fire;
+
+        if (q2_mission_pad_end(&c->mission_gate, ticks, edge)) {
+            c->mission_open = false;
+            q2_prompt_hide_all(&c->prompts);
+        }
+
+        /* And the camera, which `ProcessAllCameras` reinstalls every frame the
+         * board is up rather than once at the raise. */
+        client_mission_camera(c);
+
+        c->popup_cross_prev = cross;
+        return;
+    }
 
     (void)dt;
 
     /* An edge, so the press that opened the board cannot also close it. */
     if (cross && !c->popup_cross_prev) {
         if (c->endmis_open)       c->endmis_open   = false;
-        else if (c->mission_open) c->mission_open  = false;
         else                      c->briefing_open = false;
         q2_prompt_hide_all(&c->prompts);
     }
@@ -13759,6 +15205,12 @@ static void client_draw_view(void *user, q2_screen *s, int p,
 
     q2_world_build_ot(&c->zone, &c->cam, s->view[p].w, s->view[p].h,
                       ot, gte, &c->render, &stats);
+    /* How many Gouraud corners ProcessMobileLights actually repainted, summed
+     * over the run — the number that says the world is being lit at all. The
+     * timed table that feeds it is ticked once a frame around q2_screen_build,
+     * not here: this function runs per VIEWPORT. */
+    c->world_lit_points    += stats.mobile_corners;
+    c->world_lit_unslotted += stats.mobile_unslotted;
     c->shot_stats = stats;
     c->cre_drawn  = 0;
     c->cre_faces  = 0;
@@ -14908,7 +16360,43 @@ static void client_frame(client *c)
     hooks.user = c;
     {
         q2_camera saved_cam = c->cam;
+        /*
+         * PROCESSTIMEDLIGHTS, AND EXACTLY AROUND THE WORLD PASS.
+         *
+         * ProcessLights (0x80075B94) is three calls — ProcessTimedLights
+         * (0x800741AC), ProcessMobileLights (0x80074598), then the two list
+         * pointers reset — and the frame calls it at 0x8003903C, which is AFTER
+         * DrawAllModels at 0x80039020. So a timed light is appended to the
+         * world list, consumed by the world repaint and thrown away inside one
+         * call: it NEVER reaches the per-entity GTE gather. Ticking the table
+         * beside `q2_light_world_begin_frame` at the top of the frame, which is
+         * where it looks like it belongs, would light every model the console
+         * leaves dark.
+         *
+         * This port draws the world before its entities and applies the repaint
+         * inline as each quad's baked colour is copied, so the console's
+         * visibility window is reproduced by bracketing the whole screen build:
+         * append here, and cut the list back to its previous length the moment
+         * the last viewport has been walked. The dynamic lights already on the
+         * list — a rocket's glow, a muzzle flash — are untouched either side,
+         * which is right: those are visible to both passes on both machines.
+         *
+         * ONCE A FRAME, not once a viewport. The console's ProcessLights runs
+         * from the frame function and the split screen's four views are drawn
+         * inside `q2_screen_build`, so a tick inside `client_draw_view` would
+         * count a two-player match's timed lights down twice as fast.
+         */
+        u32 dyn_before = c->lights_ready ? c->light_world.dynamic_world_count
+                                         : 0;
+
+        if (c->lights_ready)
+            c->timed_lights_emitted += q2_light_timed_tick(&c->light_world);
+
         q2_screen_build(&c->screen, &c->ot, &c->gte, &hooks);
+
+        if (c->lights_ready)
+            c->light_world.dynamic_world_count = dyn_before;
+
         /* A paused frame must start from player zero's camera again. */
         c->cam = saved_cam;
     }
@@ -14955,6 +16443,20 @@ static void client_frame(client *c)
                                                   : Q2_MENU_SCREEN_W;
 
         q2_menu_build_ot(&c->card_menu, &c->ot, &mo);
+    }
+
+    /* And the SAVE? prompt, which is one of those same screens raised by the
+     * transition rather than by the front end (0x800203C4). */
+    if (c->save_prompt_open && c->menu_font_ready && c->save_prompt_menu.page) {
+        q2_menu_draw_opts mo;
+
+        q2_menu_draw_opts_default(&mo, &c->menu_font);
+        client_menu_origin(c, &mo.origin_x, &mo.origin_y);
+        mo.view_x   = 0;
+        mo.view_w   = c->width < Q2_MENU_SCREEN_W ? c->width
+                                                  : Q2_MENU_SCREEN_W;
+
+        q2_menu_build_ot(&c->save_prompt_menu, &c->ot, &mo);
     }
 
     /*
@@ -15211,6 +16713,34 @@ static void client_frame(client *c)
 
         q2_hud_ctx_centre_in(&ctx, c->width, c->height);
         q2_hud_pen_default(&pen);
+
+        /*
+         * THE PANEL FIRST, and the port had none.
+         *
+         * `DBInterMission`'s first act, before a single glyph, is
+         * `jal 0x8003F0E4` at 0x80021B74 with the four `MissionRect` halfwords
+         * packed into a0/a1 — `DrawDarkenedBox`, which is this port's
+         * `q2_panel_build_ot` (two half-strength black TILEs and the eight-quad
+         * rounded frame). Without it the tally was white text floating over the
+         * corridor the player was standing in, while the end-of-mission placard
+         * that appears seconds later had the full panel: the inconsistency was
+         * visible inside one transition.
+         *
+         * The two bucket numbers are the briefing's and the placard's, so all
+         * three screens sit on the same furniture in the same order.
+         */
+        if (c->menu_font_ready) {
+            q2_panel_rect r;
+
+            r.x = c->mission.box.x;
+            r.y = c->mission.box.y;
+            r.w = c->mission.box.w;
+            r.h = c->mission.box.h;
+            q2_panel_build_ot(&c->menu_font, &r, &c->ot,
+                              psx_ot_depth_bucket(&c->ot, 2),
+                              psx_ot_depth_bucket(&c->ot, 1), NULL);
+        }
+
         /* The HUD layer takes a DEPTH rather than a bucket (gpu.h), and zero
          * is the front — which lands in the overlay slice, since no viewport
          * window is installed once q2_screen_build has returned. */
@@ -15743,6 +17273,16 @@ static void client_report(const client *c)
     REPORT("level.loads",           c->loads_done);
     REPORT("level.loads_failed",    c->loads_failed);
     REPORT("level.loading_screens", c->loading_raises);
+    REPORT("level.save_prompts",    c->save_prompts);
+    /* client+0x46 for player one, the term the weapon model's matrix carries
+     * and the camera's does not, and the pitch RotMatrixYXZ is actually handed
+     * once the clip rotation is added to it. Both read zero until something
+     * writes client+0x44 — see the seek beside q2_vw_advance. */
+    REPORT("view.aim_assist",       c->vw[0].aim_assist);
+    /* The camera's roll as a signed angle on the 4096-step circle, which is
+     * where the death cam's ease toward -384 can be read (0x800380C8). */
+    REPORT("view.cam_roll",         ((c->cam.roll + 2048) & 0xFFF) - 2048);
+    REPORT("view.clip_pitch",       q2_vw_clip_pitch(&c->vw[0]));
     REPORT("level.zone",            c->zone_index);
     REPORT("level.nodes",           c->zone.scene.node_count);
     REPORT("level.vertices",        c->zone.points.count);
@@ -15773,11 +17313,34 @@ static void client_report(const client *c)
     REPORT("player.attacks",        c->player_attacks);
     REPORT("match.banner_frames", c->mp_banner_frames);
     REPORT("audio.quad_raises",     c->quad_raises);
+    /* One per FIRE CALL, and — for the chaingun alone — one more per bullet
+     * out of the clone at 23/63. See client_advance_view_weapon. */
+    REPORT("player.water_splashes", s->water_splashes);
+    REPORT("audio.weapon_sounds",   c->weapon_sounds);
+    REPORT("audio.chaingun_bangs",  c->chaingun_bangs);
     REPORT("audio.shotgun_cocks",   c->cocks_played);
     REPORT("audio.quad_gated",      c->quad_gated);
+    /*
+     * 0x800B2E74 and 0x800B2E50 — the live CD volume and the one it is walking
+     * toward at four a tick (CdCheckMusic, 0x800718F8). A run that ends with
+     * the two equal has finished its ramp; one that ends with the live value at
+     * zero under a pause page is the duck. `music_tracks` counts playlist
+     * STARTS, which is how a zone gate shows up here at all: 0x800794F8 zeroes
+     * the countdown and the next entry begins.
+     */
+    REPORT("audio.music_level",     c->music_level);
+    REPORT("audio.music_target",    c->music_target);
+    REPORT("audio.music_tracks",    c->music_tracks);
     REPORT("player.shots",          c->shots_fired);
     REPORT("player.shots_dry",      c->shots_dry);
     REPORT("player.weapon_lines",   c->weapon_lines);
+    /* The player tick's three screen-flash raisers: 0x80039A80 and its warning
+     * beep, and the health/armour compare at 0x8003AE10. */
+    REPORT("player.damage_flashes", c->hud_flashes[0]);
+    REPORT("player.powerup_tints",  c->powerup_tints[0]);
+    REPORT("player.powerup_warns",  c->powerup_warns[0]);
+    REPORT("player.armour_flashes", c->armour_flashes[0]);
+    REPORT("player.power_flashes",  c->power_flashes[0]);
 
     /* 0x80045D54's verdicts. `gate_rewinds` counts the frames retail threw
      * away because they ended inside a live entity box; `gate_unplaced` the
@@ -15821,6 +17384,24 @@ static void client_report(const client *c)
     REPORT("fx.bursts",             c->ent_bursts);
     REPORT("fx.debris_models",      c->debris_models);
     REPORT("fx.debris_faces",       c->debris_faces);
+    /* DrawTelePorts: pads registered by PSXTELEPORT_T, columns queued on the
+     * last frame, and every dynamic light the walk placed over the run. */
+    REPORT("fx.teleport_pads",      c->teleports.count);
+    REPORT("fx.teleport_columns",   c->teleport_drawn);
+    REPORT("fx.teleport_lights",    c->teleport_lights);
+
+    /*
+     * There is no lights group in the original's own reporting because there is
+     * no reporting; these exist so a headless run can see a timed light at all.
+     * `timed_active` is how many of the sixteen slots are still counting down
+     * at the end of the run, `timed_emitted` is every append ProcessTimedLights
+     * made over the whole run, and `world_lit` is how many world vertices
+     * ProcessMobileLights repainted.
+     */
+    REPORT("lights.timed_active",   q2_light_timed_active(&c->light_world));
+    REPORT("lights.timed_emitted",  c->timed_lights_emitted);
+    REPORT("lights.world_lit",      c->world_lit_points);
+    REPORT("lights.world_unslotted", c->world_lit_unslotted);
 
     REPORT("world.movers",          c->movers_ready ? c->movers.count : 0);
     REPORT("world.mover_boxes",     s->mover_count);
@@ -15835,8 +17416,22 @@ static void client_report(const client *c)
         REPORT("world.hatches",     hatches);
         REPORT("world.hatches_open", not_shut);
     }
+    {
+        u32 running = 0, strokes = 0;
+        s32 offset  = 0;
+        u32 pistons = client_pistons(c, &running, &strokes, &offset);
+
+        REPORT("world.pistons",         pistons);
+        REPORT("world.pistons_running", running);
+        REPORT("world.piston_strokes",  strokes);   /* half-strokes MADE */
+        REPORT("world.piston_offset",   offset);    /* signed, summed     */
+    }
     REPORT("world.key_prompts",     c->key_prompts);
+    REPORT("world.centre_lines",    c->centre_lines);
     REPORT("world.breakable_hits",  s->breakable_hits);
+    /* Drained, not queued: `sim->glass_count` is zero again by the time this
+     * runs, so the client's own tally is the only durable one. */
+    REPORT("world.glass_smashes",   c->glass_sounds + c->glass_sounds_missed);
     REPORT("world.explosive_blasts", s->explosive_destroyed);
     REPORT("world.triggers",        s->triggers.count);
 
@@ -16353,6 +17948,15 @@ no_window:
     q2_menu_reset_video_for(&c.settings, c.screen.disp.height);
 
     /*
+     * And the CD volume target with them: FrontEndResetSoundDefaults writes the
+     * slider at 0x8001FA60 and then `sh v0, 0x800B2E50` at 0x8001FA74 with v0
+     * still holding 96, which is that slider doubled. The LIVE value is left at
+     * its BSS zero, which is what makes the first track of a session swell in
+     * rather than start at level.
+     */
+    c.music_target = (s16)(c.settings.v[Q2_SET_MUSIC] * 2);
+
+    /*
      * USE MOUSE, on — and only for a run with a window and a player at it.
      *
      * `q2_menu_reset_player` writes 0 because it is 0x8001BDA8 transcribed, and
@@ -16377,11 +17981,19 @@ no_window:
     q2_menu_set_fb_height(&c.menu, c.screen.disp.height);
     q2_menu_set_multiplayer(&c.menu, false);
     q2_menu_set_us_english(&c.menu, c.build.region == Q2_REGION_NTSC_U);
+    /* The pads are already open, so ask each one whether it can shock before
+     * anything can reach OPTIONS -> CONTROLLER. */
+    client_menu_bind_pads(&c);
 
     /* The level-completion screen. Its counters are the sim's to fill; until
      * kills and secrets are tallied it honestly reads zero. */
     q2_mission_init(&c.mission);
     c.mission_row = -1;
+    /* gp+362's .data seed, 0x800AE76A = 0x04B0. Set ONCE, because
+     * `PadEndInterMission` is its only writer and `SetInterMission` does not
+     * re-arm it: the first board is gated for the same four seconds as every
+     * board after it. */
+    c.mission_gate = Q2_MISSION_GATE_TICKS;
     /* Two frames back, so the very first tick of a session is a resume: a key
      * held while the window opens must not be a press. */
     c.pad_frame   = -2;
@@ -16410,6 +18022,13 @@ no_window:
     q2_menu_init(&c.card_menu, &c.settings, Q2_MENU_SCREEN_H);
     q2_menu_set_fb_height(&c.card_menu, c.screen.disp.height);
     q2_menu_set_us_english(&c.card_menu, c.build.region == Q2_REGION_NTSC_U);
+
+    /* And a third, for the one card screen the TRANSITION raises rather than
+     * the front end: "DO YOU WANT TO SAVE?" (0x800203C4). */
+    q2_menu_init(&c.save_prompt_menu, &c.settings, Q2_MENU_SCREEN_H);
+    q2_menu_set_fb_height(&c.save_prompt_menu, c.screen.disp.height);
+    q2_menu_set_us_english(&c.save_prompt_menu,
+                           c.build.region == Q2_REGION_NTSC_U);
 
     Q2_INFO("saves: %s", q2_save_dir());
 
@@ -16721,9 +18340,14 @@ no_window:
         while (!c.headless && SDL_PollEvent(&ev)) {
             int gp = q2_gamepads_event(&c.gamepads, &ev);
             if (gp >= 0 && (ev.type == SDL_EVENT_GAMEPAD_ADDED ||
-                            ev.type == SDL_EVENT_GAMEPAD_REMOVED))
+                            ev.type == SDL_EVENT_GAMEPAD_REMOVED)) {
                 Q2_INFO("controller: player %d %s", gp + 1,
                         c.gamepads.id[gp] ? "connected" : "disconnected");
+                /* The pad set changed, so the VIBRATION gate has to be asked
+                 * again — a DualShock plugged in mid-session is shockable and
+                 * the pad that just left is not. */
+                client_menu_bind_pads(&c);
+            }
             if (gp >= 0 && ev.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN &&
                 ev.gbutton.button == SDL_GAMEPAD_BUTTON_START &&
                 !c.in_front_end && !c.mp_scoreboard && !c.film_open &&
@@ -16736,6 +18360,37 @@ no_window:
                      * composes the KILLS/SECRETS row, so the numbers have to be
                      * in the menu before it opens. */
                     client_menu_fill_stats(&c);
+                    /*
+                     * WHO PRESSED START. 0x800AE8B8 is `Pauser`, and it decides
+                     * two things: which 34-byte configuration record
+                     * FrontEndAddPausedTitle colours the pause banner from
+                     * (0x800B32B8 + p*34 in TEAM DEATHMATCH, 0x800B32BA + p*34
+                     * otherwise), and which entry of the shockable array the
+                     * VIBRATION gate reads (0x8001C9B4). It has to be set
+                     * before the open, because page 26's install hook is what
+                     * composes the banner.
+                     */
+                    q2_menu_set_pauser(&c.menu, gp);
+                    /*
+                     * AND THE PAUSE PAGE IS A SILENT SCREEN.
+                     *
+                     * InGame_GOTO_PAUSED (0x8001FD88) is two calls and nothing
+                     * else: `jal 0x80073C68` — killallsounds, which walks all
+                     * twenty-four voice slots at 0x80073CA8..0x80073CC0
+                     * (`slti v0, a0, 24`) clearing each one's key-on record and
+                     * resetting the driver's channel word — and then
+                     * `jal 0x8001D5A8`, which builds the page. GameCheckPaused
+                     * reaches it at 0x8003E894 on the START press and calls
+                     * killallsounds itself at 0x8003E860 on the pad-violation
+                     * arm, so every effect still sounding is cut on the frame
+                     * the page appears: a hyperblaster tail, a rocket's flight
+                     * loop, a door, a creature's pain cry. Here they ran to
+                     * their ends underneath the menu.
+                     *
+                     * The music bed is a separate global and is NOT touched by
+                     * this — it ducks on its own ramp; see client_music_target.
+                     */
+                    client_voices_stop(&c);
                     q2_menu_open(&c.menu);
                 }
             }
@@ -16781,13 +18436,26 @@ no_window:
                 case SDLK_ESCAPE:
                     /* START on the console: it opens the pause menu, and
                      * closes it again from the root page. Deeper in, the
-                     * menu's own TRIANGLE handling owns going back. The
-                     * mission screen sits in front of all of that and takes
-                     * the press first. */
-                    if (c.mcard_open)
+                     * menu's own TRIANGLE handling owns going back.
+                     *
+                     * THE TALLY BOARD EATS IT AND DOES NOTHING. It used to
+                     * dismiss the board, which the console never does: the
+                     * tally spin at 0x80018ED8 calls `PadEndInterMission` and
+                     * nothing else, and that reads the FIRE binding
+                     * (`MapPadInputToFire(0)`, 0x8001FC50) — not a menu
+                     * confirm. So START neither leaves the board nor opens the
+                     * pause menu behind it, and the `else if` below must not
+                     * see the press either. */
+                    if (c.save_prompt_open) {
+                        /* Deliberately nothing: 0x800203F8 raises 0x800B348A
+                         * and GameCheckPaused's START arm refuses to unpause
+                         * while it is up (0x8003E6A0). YES or NO, or nothing. */
+                    }
+                    else if (c.mcard_open)
                         client_card_close(&c);
-                    else if (c.mission_open)
-                        c.mission_open = false;
+                    else if (c.mission_open) {
+                        /* Deliberately nothing. */
+                    }
                     else if (!c.menu.open) {
                         /*
                          * The pause page's KILLS/SECRETS row. The numbers are
@@ -16797,6 +18465,11 @@ no_window:
                          * page, so filling them in before opening is correct.
                          */
                         client_menu_fill_stats(&c);
+                        /* Escape is player one's START, so player one paused. */
+                        q2_menu_set_pauser(&c.menu, 0);
+                        /* And killallsounds with it — InGame_GOTO_PAUSED
+                         * (0x8001FD88), exactly as the gamepad twin above. */
+                        client_voices_stop(&c);
                         q2_menu_open(&c.menu);
                     }
                     else if (c.menu.depth == 0)
@@ -16981,6 +18654,15 @@ no_window:
                  * The two screens that take ANY key also take any click: a
                  * film and the credit roll. Answering them with the keyboard
                  * only would be the one place the mouse stopped working.
+                 *
+                 * THE TALLY BOARD IS NOT ONE OF THEM ANY MORE. A right-click
+                 * used to dismiss it as "the back gesture"; the console's board
+                 * has one way off it and it is the FIRE edge after the 1200-tick
+                 * gate (`PadEndInterMission`, mission.h). TRIANGLE — which is
+                 * what the right button is here — does nothing to it, and a
+                 * gesture that skipped the gate defeated the whole lock. Return,
+                 * Enter and Space are CROSS, so the keyboard still has a way
+                 * out; it just has to wait four seconds like a pad does.
                  */
                 if (down && c.film_open) {
                     client_film_stop(&c);
@@ -16990,11 +18672,6 @@ no_window:
                     c.credits_open = false;
                     q2_menu_open(&c.menu);
                     q2_menu_goto(&c.menu, Q2_PAGE_FRONT_TITLE);
-                } else if (down && ev.button.button == SDL_BUTTON_RIGHT &&
-                           c.mission_open) {
-                    /* The back gesture, on the one screen in front of the menu
-                     * that Esc also dismisses. */
-                    c.mission_open = false;
                 }
             } else if (ev.type == SDL_EVENT_MOUSE_WHEEL) {
                 /*
@@ -17048,6 +18725,14 @@ no_window:
              * so it takes the pad first and nothing ticks underneath it.
              */
             client_card_frame(&c);
+        } else if (c.save_prompt_open) {
+            /*
+             * THE SAVE? PROMPT, and nothing under it moves. `Paused` is up
+             * (0x8003E754) and MainGameLoop zeroes the frame delta while it is
+             * (0x800183C4), so the new level's first frame is held exactly
+             * where the load left it until YES or NO is chosen.
+             */
+            client_save_prompt_frame(&c);
         } else if (c.menu.open) {
             /* The world is frozen while the menu is up: no input, no tick.
              *
@@ -17266,6 +18951,16 @@ no_window:
             c.map_change_pending = false;
 
             client_mission_update(&c);
+            /*
+             * SetInterMission, 0x800224B8, in the order it does it: the camera
+             * hook, then `GetMissionName`, then the board's HEIGHT — its last
+             * act is `sh v0, 358(gp)` at 0x800224E8, from
+             * `PreProcessInterMission`. The rectangle behind the text hugs the
+             * table, growing ten pixels for every level the unit listed, so it
+             * has to be computed after the rows and the wrapped objective are
+             * final and not left at the .data seed.
+             */
+            c.mission.box.h = q2_mission_box_height(&c.mission);
             c.mission_open      = true;
             c.mission_after_map = true;
             c.mission_frames    = 0;
@@ -17282,10 +18977,16 @@ no_window:
                 for (rw = 0; rw < Q2_MISSION_ROWS; rw++)
                     if (c.mission.row[rw].name[0])
                         rows++;
+                /* The rectangle is logged with the totals because it is DERIVED
+                 * from them — `PreProcessInterMission` counts the same rows to
+                 * size the panel, so a board whose height does not match its
+                 * row count is the first sign the two have drifted. */
                 Q2_INFO("tally: mission %d complete — %d level%s, "
-                        "secrets %d/%d, kills %d/%d",
+                        "secrets %d/%d, kills %d/%d, box %d,%d %dx%d",
                         c.mission.unit, rows, rows == 1 ? "" : "s",
-                        rs, rst, rk, rkt);
+                        rs, rst, rk, rkt,
+                        (int)c.mission.box.x, (int)c.mission.box.y,
+                        (int)c.mission.box.w, (int)c.mission.box.h);
             }
             /*
              * AND SAY THAT IT CAN BE DISMISSED. The console's tally spins on a
@@ -17371,12 +19072,55 @@ no_window:
              * first level boundary, which is precisely where the interesting
              * part starts.
              */
-            if (c.headless && c.mission_frames >= Q2_INTERMISSION_HEADLESS)
-                c.mission_open = false;
+            /*
+             * AND IT STILL CANNOT LEAVE EARLIER THAN THE CONSOLE DOES. The gate
+             * at gp+362 refuses the pad for 1200 ticks and there is no second
+             * way off the board, so a headless stand-in that pressed at frame
+             * 45 would be dismissing a screen the console would not let anyone
+             * dismiss. It waits for both now: 1200 ticks at the headless dt of
+             * 1/30 s is 120 frames, so the count is the one that binds.
+             */
+            if (c.headless && c.mission_frames >= Q2_INTERMISSION_HEADLESS &&
+                c.mission_gate <= 0) {
+                c.mission_open  = false;
+                c.mission_gate  = Q2_MISSION_GATE_TICKS;   /* 0x80022538 */
+                q2_prompt_hide_all(&c.prompts);
+            }
 
             if (!c.mission_open) {
                 c.mission_after_map = false;
                 c.unit_over         = false;
+                Q2_INFO("tally: dismissed after %u frames", c.mission_frames);
+                /*
+                 * THE UNIT'S SIX ROWS GO, and the port used to keep them.
+                 *
+                 * `ClearLevelIntermission` (0x80021A0C) is `GameInterMission`'s
+                 * last act — `jal` at 0x8001902C, after the spin and after the
+                 * destination has been written, which is exactly this point. It
+                 * opens the "PlayerSave0" block and memsets 150 bytes at
+                 * block+228, and that is where `GamePlayerLoadSave` keeps the
+                 * six 25-byte records (0x8003DAB4 writes them, 0x8003DCC8 reads
+                 * them back). The live array survives the call and does not
+                 * need to: `InitialiseQuakePlayer` reloads it from the block at
+                 * every level entry (0x8003B4B0), so the next unit starts on an
+                 * empty table.
+                 *
+                 * Without this the six slots stayed full from unit 2 onward,
+                 * `q2_mission_register` returned -1 for every level after the
+                 * sixth, `mission_row` stayed -1 and `client_mission_update`
+                 * returned early — so Secrets and Kills stopped being recorded
+                 * for the rest of the campaign. mission.h used to document that
+                 * as the console's behaviour; it is not, and the note is
+                 * corrected there too.
+                 *
+                 * NOT the unit number: 0x800B2E20 is outside the 150 bytes.
+                 */
+                q2_mission_clear_rows(&c.mission);
+                c.mission_row = -1;
+                /* The block is what the console clears, so the snapshot's copy
+                 * goes with it — a save written from a stale capture would
+                 * otherwise restore the unit that has just ended. */
+                q2_save_capture_mission(&c.snapshot, &c.mission);
                 /*
                  * The destination the board was holding: `EndMission N`, or
                  * `Extro FMV` on the last unit. `0x80018ED8` writes it after
@@ -17496,6 +19240,28 @@ no_window:
                 }
             }
         }
+        /*
+         * CdCheckMusic's volume ramp, and where it sits is half the point.
+         *
+         * MainGameLoop calls it at 0x80018374 — the FIRST thing in the
+         * iteration, before the GameIsPaused test at 0x800183C4 — so the CD
+         * volume keeps moving on the frames the pause page owns and the world
+         * does not. This block sits at frame-loop level, OUTSIDE the
+         * menu / boot / film chain, for exactly that reason: a step inside that
+         * chain would stop the moment a page took the frame, and a duck that
+         * only runs while the game is not paused is no duck at all.
+         *
+         * Per console TICK rather than per rendered frame, because one
+         * MainGameLoop iteration is one video field. A 144 Hz host would
+         * otherwise duck the music three times faster than a console does.
+         */
+        c.music_ramp_clock += dt * (double)q2_build_tick_rate(&c.build);
+        while (c.music_ramp_clock >= 1.0) {
+            c.music_ramp_clock -= 1.0;
+            c.music_target = client_music_target(&c);
+            client_music_ramp(&c);
+        }
+
         /*
          * The music countdown, on the console's own field rate — 50 Hz on PAL,
          * 60 on NTSC. At zero the engine moves to the next playlist entry
@@ -17699,6 +19465,7 @@ done:
         q2_level_table_free(&c.level_table);
     q2_save_ui_free(&c.save_ui);
     q2_save_free(&c.snapshot);
+    q2_event_store_free(&c.event_store);  /* the EVE_ blocks, one per map */
     q2_gib_attach(NULL);            /* before the set it names goes */
     q2_sim_free(&c.sim[0]);
     q2_common_close(&c.common);

@@ -1,3 +1,4 @@
+#include "random.h"
 #include "viewweapon.h"
 
 #include "trig.h"
@@ -44,7 +45,7 @@ static s32 key_duration(const q2_vm_key *k)
         return k->duration;
 
     {
-        s32 r = (s32)(rand() & 0x7FFF);
+        s32 r = (s32)(q2_random_next() & 0x7FFF);
         s32 n = ((r * (s32)k->duration) >> 15) + 1;
         return n * 10;
     }
@@ -969,6 +970,96 @@ bool q2_vw_advance(q2_viewweapon *vw, s32 dt, bool fire_held,
 }
 
 /* ------------------------------------------------------------------------- */
+/* The auto-aim assist — client+0x46                                          */
+/* ------------------------------------------------------------------------- */
+void q2_vw_set_aim_assist(q2_viewweapon *vw, s16 assist)
+{
+    if (vw)
+        vw->aim_assist = assist;
+}
+
+/*
+ * Seek — MISC.C, 0x8006FE3C, transcribed whole because every one of its four
+ * arms matters at the extremes.
+ *
+ * The compare is on the SIGN-EXTENDED halfword (`lh a3` at 0x8006FE44) and the
+ * arithmetic on the ZERO-EXTENDED one (`lhu t1` at 0x8006FE48): the step is
+ * added to the unsigned copy and the result truncated by the `sh`, so a value
+ * that walks off either end wraps the way a PSX angle should. Doing the
+ * arithmetic on the signed copy instead would be the same number everywhere
+ * except at the wrap, which is exactly where an angle lives.
+ *
+ * The overshoot test is `cur + step < target` rather than `<=`, so a step that
+ * lands EXACTLY on the target takes the snap arm (0x8006FE90). That is a
+ * DISTINCTION WITHOUT A DIFFERENCE and is written out so nobody straightens
+ * it: both arms store the same halfword and both report arrival. The strict
+ * `<` is kept because it is what the `slt` at 0x8006FE64 says.
+ */
+static bool seek_halfword(s16 *cur, s16 target, s32 step)
+{
+    s32 c = (s32)*cur;                  /* 0x8006FE44: lh   */
+    u16 u = (u16)*cur;                  /* 0x8006FE48: lhu  */
+
+    if (c < (s32)target) {              /* 0x8006FE4C: slt  */
+        if (c + step < (s32)target)     /* 0x8006FE64: slt  */
+            *cur = (s16)(u16)((u32)u + (u32)step);   /* 0x8006FE74 */
+        else
+            *cur = target;              /* 0x8006FE94 */
+    } else {
+        if ((s32)target < c - step)     /* 0x8006FE84: slt  */
+            *cur = (s16)(u16)((u32)u - (u32)step);   /* 0x8006FE98 */
+        else
+            *cur = target;              /* 0x8006FE94 */
+    }
+
+    /* 0x8006FEAC: `xor` then `sltiu ..., 1` — one when it arrived. */
+    return *cur == target;
+}
+
+bool q2_vw_seek_aim_assist(q2_viewweapon *vw, s16 target, s32 frame_dt)
+{
+    /*
+     * 0x8003A45C / 0x8003A464: `sll a2, a2, 18` then `sra a2, a2, 16`. That is
+     * the frame delta times four with the top fourteen bits shifted off the
+     * end, and it is written out rather than as `* 4` because the discard is
+     * the console's own — a delta over 16383 would wrap here on the console
+     * too. At the PAL frame delta of 12 ([0x800B2DB4], twice the per-field
+     * [0x800B2DD8]) the step is 48 of the 4096-unit circle a tick, so the
+     * barrel covers a quarter turn in about twenty-one ticks.
+     */
+    s32 step = (s32)((u32)frame_dt << 18) >> 16;
+
+    if (!vw)
+        return false;
+
+    return seek_halfword(&vw->aim_assist, target, step);
+}
+
+s16 q2_vw_clip_pitch(const q2_viewweapon *vw)
+{
+    if (!vw)
+        return 0;
+
+    /*
+     * 0x8004F3E4…0x8004F3F8. Both operands are read with `lhu` and the sum is
+     * stored back with `sh` before `RotMatrixYXZ` reads it, so the sum is a
+     * SIXTEEN-BIT one and wrapping is the behaviour, not an accident: a clip
+     * rotation near the top of the circle plus an upward assist comes out the
+     * other side, which is the same angle.
+     *
+     * The store back into the entity is not reproduced, and the reason is that
+     * it is dead. Nothing reads viewweapon+0xE6 again before the next tick
+     * recomputes it from scratch at 0x8004F2F8 (`sh v0, 230(s3)`, the
+     * interpolated display value written after the substep loop), and the two
+     * reads that follow in this function — 0x8004F40C and 0x8004F438 — are off
+     * `s6`, the PLAYER entity, not `s3`. Keeping `cur_r` clean instead means a
+     * frame on which the interpolation happens not to run cannot accumulate
+     * the assist twice.
+     */
+    return (s16)(u16)((u32)(u16)vw->cur_r[0] + (u32)(u16)vw->aim_assist);
+}
+
+/* ------------------------------------------------------------------------- */
 /* Placement                                                                  */
 /* ------------------------------------------------------------------------- */
 void q2_vw_place(const q2_viewweapon *vw,
@@ -1006,8 +1097,15 @@ void q2_vw_place(const q2_viewweapon *vw,
 
     if (angles_out) {
         /* The model's own orientation does carry the clip's rotation, composed
-         * on top of the view — 0x8004F474's MulMatrix. */
-        angles_out[0] = ang[0] + vw->cur_r[0];
+         * on top of the view — 0x8004F474's MulMatrix.
+         *
+         * AND THE X COMPONENT CARRIES ONE MORE TERM. 0x8004F3F0 adds the
+         * owner's client+0x46 to the clip rotation X before the matrix is
+         * built, so the barrel pitches onto the auto-aim target while the view
+         * does not. This used to be plain `vw->cur_r[0]` on the strength of a
+         * sweep that proved the halfword unwritten; it is written, indirectly,
+         * and `q2_vw_clip_pitch` says where. */
+        angles_out[0] = ang[0] + q2_vw_clip_pitch(vw);
         angles_out[1] = ang[1] + vw->cur_r[1];
         angles_out[2] = ang[2] + vw->cur_r[2];
     }
@@ -1250,7 +1348,15 @@ u32 q2_vw_build_ot(const q2_viewweapon *vw,
          * camera, which is what the cancellation is for.
          */
         q2_rotation_view(inv, cam->yaw, cam->pitch, cam->roll);
-        q2_rotation_euler(clip, vw->cur_r[0], vw->cur_r[1], vw->cur_r[2]);
+        /*
+         * `q2_vw_clip_pitch` and not `cur_r[0]`: this call IS 0x8004F3F4's
+         * `RotMatrixYXZ(s3+230, s3+704)`, and the halfword at s3+230 has had
+         * the owner's client+0x46 added to it four instructions earlier. The
+         * camera's matrix is built without that term, which is the whole point
+         * — the gun tips onto the lock and the view stays put.
+         */
+        q2_rotation_euler(clip, q2_vw_clip_pitch(vw),
+                          vw->cur_r[1], vw->cur_r[2]);
 
         for (r = 0; r < 3; r++) {
             for (c = 0; c < 3; c++) {

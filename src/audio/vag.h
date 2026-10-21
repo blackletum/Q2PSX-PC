@@ -149,6 +149,51 @@ u8 q2_sfx_pitch_begin(q2_sfx_pitch *pitch, bool randomising_path,
 u32 q2_sfx_spu_pitch(u32 sample_rate, u8 modifier);
 u32 q2_sfx_step_16_16(u32 sample_rate, u8 modifier, u32 output_rate);
 
+/* ------------------------------------------------------------------------- */
+/* BYTE +2 OF THE SAME REQUEST RECORD: its RELATIVE VOLUME                    */
+/* ------------------------------------------------------------------------- */
+/*
+ * The pitch above is byte +1. Byte +2 is the request's own volume, and it has
+ * the same shape: a default written once when the request is made, a mutator
+ * that adds a signed delta, and a reader that scales it into the voice.
+ *
+ *     80071C0C  addiu t0, zero, 63    ; the default...
+ *     80071C5C  sb    t0, 2(v1)       ; ...written into the new record
+ *
+ *     80072BB4  SoundSetRelativeVolume(handle, delta)
+ *     80072BB8  a1 == 128 -> return         ; the sentinel that changes nothing
+ *     80072BD4  v0 = rec[+2] + delta
+ *     80072BE0  sb  v0, 2(rec)              ; stored as a BYTE, so it wraps
+ *     80072BE8  sltiu (v0 & 0xFF), 64       ; and anything at or above 64...
+ *     80072BF4  sb  63, 2(rec)              ; ...is pinned back to 63
+ *
+ *     80072AF0  lbu v0, 2(s0)               ; the reader
+ *     80072AF8  mult v0, s4                 ; times the caller's scale
+ *     80072B0C  sra v0, a3, 4               ; over sixteen
+ *     80072B10  sh  v0, 24(a0)              ; -> the voice's three volume fields
+ *                                           ;    (+24, +30, +32)
+ *
+ * The clamp AFTER the wrap is why the three `+40` calls PreInitChaingun makes
+ * on the spin-up, loop and spin-down handles (0x8004E2E4, 0x8004E2F0,
+ * 0x8004E2FC) do nothing: 63 + 40 is 103, 103 is not below 64, so the byte goes
+ * straight back to 63. Only the `-40` at 0x8004E2D8, on the CLONE of
+ * wep_machgf1b that QPlayerFireChainGun plays once per bullet, moves anything —
+ * and it moves it to 23, a little over a third of a normal shot.
+ */
+#define Q2_SFX_VOLUME_DEFAULT      63u
+#define Q2_SFX_VOLUME_UNCHANGED   128   /* the a1 the early-out tests */
+#define Q2_SFX_VOLUME_SCALE_AT_LOCATION 16  /* SoundAtLocation's a2   */
+
+/* 0x8004E2D8, the one request on the disc that is not 63. */
+#define Q2_SFX_VOLUME_CHAINGUN_DELTA (-40)
+
+/* Apply one SoundSetRelativeVolume to a request's byte and return the new one.
+ * `delta` of 128 leaves it alone, as the early-out does. */
+u8 q2_sfx_volume_add(u8 volume, s32 delta);
+
+/* `(volume * scale) >> 4` — what 0x80072AF0 writes into the voice. */
+s32 q2_sfx_voice_volume(u8 volume, s32 scale);
+
 #define VAG_HEADER_SIZE   48
 #define SPU_BLOCK_SIZE    16
 #define SPU_SAMPLES_PER_BLOCK 28

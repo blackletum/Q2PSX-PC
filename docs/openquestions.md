@@ -2365,15 +2365,14 @@ scale call at all. The squeeze is the game's, not the reconstruction's, and must
       `0x80089E18`. It is a zero rotated by a matrix, added to a position. Nothing to reproduce, and worth
       recording so it is not "found" again.
 
-      *One operand looked missing and is provably zero.* `0x8004F3E4…0x8004F3F8` adds `[combat+70]` to the
-      X component of the interpolated clip rotation immediately before `RotMatrix`. `combat` is
-      `[entity+12]`, the same block the weapon id (`+98`), the selection (`+102`) and the switch countdown
-      (`+222`) live in. **That halfword is read here and nowhere else in the image, and nothing writes
-      it**: every `sb`/`sh`/`sw` with an immediate of 68..72 on any base is either a different struct (the
-      `0x8001xxxx` sprite block, whose `+64/+66/+70/+72` are its own), a stack slot, a materialised global
-      (`0x8003B424` writes `0x800C7CA6`), or library code above `0x80086000`. So the term is `x + 0`, and
-      the port's expression IS the console's expression. Not a gap — an operand that costs nothing, named
-      here so nobody re-derives it.
+      **Correction: the extra pitch is live auto-aim state.** `0x8004F3E4…0x8004F3F8` adds client+70
+      to the interpolated weapon rotation. The earlier write search missed an indirect store:
+      `0x8003A44C` passes `client+70` to Seek (`0x8006FE3C`), targeting the halfword at client+68 and
+      stepping by four times the frame delta. FindPlayerTarget (`0x80039DDC`) writes that target at
+      `0x8003A138`; `0x8003B424` clears client[0]+70 at initialization. The view-weapon transform and
+      easing are implemented, but `client_advance_view_weapon` still feeds a target of zero. Target
+      selection remains an implementation gap; the old conclusion that this operand was always zero
+      was incorrect.
 
       *And the weapon was drawn from RAW VERTICES.* `q2_vw_build_ot` passed `pose = NULL`, so the one model
       in the frame that never got its rest transform was the one in the player's hands. That is now fixed
@@ -5088,9 +5087,15 @@ nothing saying so.
       24 bytes / 4 operands. **What the port lacks is a handler**, which is exactly the state `SIMROT` was in
       before `q2_rotators_build` existed — a decoded command with no runtime behind it.
 
-      **TIMEDLIGHT is implemented.** `client_event_call` now raises a light event when the script runs one:
-      origin from +4 as three s32, `radius` from +18 **tripled** (the engine's own multiply, recorded in the
-      operand table, not a choice), and the packed colour at +24 read low-byte-first as r, g, b.
+      **TIMEDLIGHT is implemented, and the halfword at +18 is NOT a radius.** This entry used to say
+      "`radius` from +18 **tripled**". `PSXTLIGHT` is `0x8002E97C` and it reads three numbers out of the
+      record, not one: `lhu 18` tripled at `0x8002E9B4`/`0x8002E9BC` into `a3`, `lhu 20` and `lhu 22` packed
+      into `a2`'s low and high halves at `0x8002E9C4`/`0x8002E9A0`, and the colour word at +24. It then calls
+      `AddTimedLight` (`0x80075D14`), which reads `a2` back as two signed halfwords and squares them into the
+      slot's inner and outer radius (`0x80075D90`, `0x80075DA4`) and stores `a3` into both the countdown and
+      its divisor (`0x80075DD8`, `0x80075DDC`). So +18 is the LIFETIME in frames, +20 and +22 are the radii,
+      and the port was drawing a one-frame flash of radius `3 * lifetime` where the disc asks for an authored
+      light fading over `3 * item[+18]` frames. Corrected in `client_event_call`.
 
       **FLKLIGHT is not handled yet, but the reason has changed.** Its on/off times are randomised as
       `((rand()*500)>>15)+400`, which was recorded here as needing "the engine's RNG stream" — and the port
@@ -5320,7 +5325,20 @@ nothing saying so.
                                        DIMS over six steps rather than holding a colour — an ember or an
                                        explosion cooling, and the first site found that animates its own
                                        colour rather than its radius.
-          0x80028E6C  in 0x80028BDC  = the script command area, beside SHOOTTHEN
+          0x80028E6C  in 0x80028BDC  = **DrawTelePorts** (EVENT.C, named by the NTSC symbol table), one of
+                                       QuakeLoop's three per-frame walks — 0x80038FA4 calls it immediately
+                                       before DrawLaserWalls and DrawLaserBeams. Not the script command
+                                       area: the adjacency to SHOOTTHEN was real and named nothing.
+
+                                       The light is one teleport pad's glow, placed at the volume's bbox
+                                       centre after the particle column has been spawned from its mins or
+                                       maxs face (0x80028DF8 overwrites the Y). Its colour word is
+                                       0x00FF1020 at `0x800AE798` — rgb(32, 16, 255), so blue — its inner
+                                       radius the immediate 400 at 0x80028E14, and its outer a 512-tick
+                                       TRIANGLE on `LevelTicks`: `phase = clk & 0x1FF`, mirrored about 256
+                                       by the `slti 257` at 0x80028DFC, times four, plus 800. So it
+                                       breathes between 800 and 1824 while the column pumps on its own,
+                                       faster, 128-tick saw. Closed; see levelbin.h and effect.h.
 
           0x800288C8  in 0x800287A0  = **FLKLIGHT, not SHOOTTHEN.** The colour bytes come from the item at
                                        +18/+19/+20 (`0x80028808`), which is FLKLIGHT's documented operand
@@ -7365,8 +7383,10 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
 
       The delay is `(base + ((range * rand()) >> 15)) * 30`, and **the 30 is not the 300** every other
       time on this clock uses; `userfuncs.c` calls that out and it is the sort of thing that is silently
-      four-fifths wrong if assumed. The RNG is the sim's rather than the BIOS's — a stated divergence,
-      so a timer's jitter is the right shape and not the same sequence.
+      four-fifths wrong if assumed. Timer periods now use the shared BIOS-compatible random stream.
+      The initial roll happens only after a slot is accepted (`0x800270C8`); every surviving deadline
+      rerolls (`0x800273F0`), including range-zero items. Duplicate requests, full tables and the final
+      deadline of a finite timer consume no draw.
 
       Measured on LAB, whose two timers read `base 50, range 0` — 1,500 ticks, five seconds. From a
       trigger at frame 60: **0 resumed at frame 200, 1 at 260, 2 at 400**, which is the deadline landing
@@ -7387,6 +7407,13 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       need it. The runtime models the slot table now; see the note above `deferred[]` in `events_rt.h`.
       The LAB measurement above still holds — its timer is `fires 0, window 1` in a three-item record, so
       the first deadline is in the same place; what changed is that there is a second one.
+
+      **Deadline and save-state correction.** `0x800273A0` branches on `bgez` after subtracting the
+      frame delta: a countdown of exactly zero still waits. The runtime now uses the same strict
+      boundary. The additive `ERTS` save chunk preserves timer slots, their current window position,
+      fire counts, clocks, WAIT counters and queued triggers; loading no longer restarts their delay.
+      The synthetic tests check random rearming and exact boundaries, and the disc regression resumes
+      BOSS2's repeating light timer across a cold load.
 
 - [x] 84. **PLATFORM is read in full, and its slot is empty like the others — which is now a pattern, not
       an accident.**

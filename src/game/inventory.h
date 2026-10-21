@@ -189,6 +189,27 @@ typedef struct q2_inventory {
 
     /* client+0xC8. Mega health bleeds one point per interval back to the cap. */
     s32 mega_health_next;
+
+    /*
+     * FlashPowerUp's own two fields, 0x80039870, which sit beside the four
+     * deadlines above in the same client record and are read by nothing else.
+     *
+     * `powerup_quiet_until` is client+0xC4: the deadline while which the tint
+     * is NOT drawn. It is zero for the whole of a powerup's ordinary life —
+     * 0x80039A88 clears it on every frame that flashes — so the `0 < now` at
+     * 0x80039A20 is true and the tile is re-armed every single frame. It is set
+     * to `now + 150` at 0x800399FC only on the three warning boundaries, and
+     * that half-second is what the blink IS.
+     *
+     * `powerup_warn_secs` is client+0xDC: the last whole second of remaining
+     * life that raised a warning, so the beep fires once per boundary rather
+     * than every frame. It is a halfword (`sh` at 0x800399F8, `lh` at
+     * 0x800399E0), and the test at 0x800399E8 is an equality against the fresh
+     * count — so a NEW powerup picked up while an old one is inside its warning
+     * window re-arms the warning the moment the count differs.
+     */
+    s32 powerup_quiet_until;    /* client+0xC4 */
+    s16 powerup_warn_secs;      /* client+0xDC */
 } q2_inventory;
 
 void q2_inventory_init(q2_inventory *inv);

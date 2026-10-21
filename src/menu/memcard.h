@@ -216,6 +216,40 @@ void q2_mcard_set_name(q2_mcard *m, int slot, const char *name);
  */
 bool q2_mcard_advance(q2_mcard *m, u16 buttons);
 
+/* ------------------------------------------------------------------------- */
+/* What raises the SAVE? screen outside the front end                         */
+/* ------------------------------------------------------------------------- */
+/*
+ * GameCheckPaused (0x8003E538, QUAKE.C) runs every frame, and the only thing
+ * in the image that reaches InGame_GOTO_WANT_TO_SAVE is its arm at
+ * 0x8003E6FC..0x8003E75C:
+ *
+ *   8003E700  lw   v1, 0x800AEBD0   LevelChange — incremented at 0x80018C4C,
+ *                                   once per level load in ProcessGame
+ *   8003E704  lw   v0, gp+700       the latch (0x800AE8BC), written at
+ *                                   0x8003E728 and read here, and those are
+ *                                   its only two references in the image
+ *   8003E70C  beq  v1, v0 -> out    this load has already been asked about
+ *   8003E718  lw   v0, 0x800AEBCC   LevelIsMultiPlayer
+ *   8003E720  bne  v0, zero -> out  never in deathmatch
+ *   8003E728  sw   v1, gp+700       LATCH FIRST...
+ *   8003E730  lw   v1, 0x800B271C   ...THEN read the exit code the transition
+ *                                   carried (stored at 0x80018C84)
+ *   8003E738  beq  v1, 2 -> raise   LOADMAP (screen.h)
+ *   8003E740  bne  v1, 4 -> out     4 has no dispatch arm of its own
+ *
+ * THE ORDER OF THOSE LAST FOUR IS THE BEHAVIOUR, which is why this is a
+ * function rather than an `if` at the call site. The latch is advanced for a
+ * load that arrived by ANY exit code, so a level reached by a RESTART (21) or
+ * a RESUPPLY (20) is not asked about — and is not asked about a frame later
+ * either, because the counter and the latch now agree. The deathmatch test
+ * comes BEFORE the latch write, so an arena leaves the latch where it was.
+ *
+ * `latch` is the caller's copy of gp+700 and is advanced in place.
+ */
+bool q2_mcard_save_prompt_due(u32 level_change, u32 *latch,
+                              bool deathmatch, int exit_code);
+
 /* The screen the current state shows, or Q2_MCARD_NONE when the state has no
  * arm. This is the one place the reconstruction is INCOMPLETE and says so: the
  * nine table installers are separate functions and which state calls which was

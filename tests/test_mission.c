@@ -89,6 +89,21 @@ static void test_layout_steps(void)
     CHECK(Q2_MISSION_BODY_Y == 36, "the first body line is at 36");
     CHECK(Q2_MISSION_BODY_STEP_1 == 10 && Q2_MISSION_BODY_STEP_2 == 8,
           "the body steps are 10 then 8");
+    /*
+     * And the step PAST the third line, which only happens when the line is
+     * drawn (0x80021CB0, skipped by the `beq` at 0x80021C58). Without it the
+     * header row is eight pixels high whenever the objective wraps, and the
+     * two are tied together: the same eight is what PreProcessInterMission
+     * adds to the panel for a wrapped objective.
+     */
+    CHECK(Q2_MISSION_BODY_STEP_3 == 8, "the step past the third line is 8");
+    CHECK(Q2_MISSION_BODY_Y + Q2_MISSION_BODY_STEP_1 +
+          Q2_MISSION_BODY_STEP_2 + Q2_MISSION_HEADER_DROP == 60,
+          "an unwrapped objective puts the header at 60");
+    CHECK(Q2_MISSION_BODY_Y + Q2_MISSION_BODY_STEP_1 +
+          Q2_MISSION_BODY_STEP_2 + Q2_MISSION_BODY_STEP_3 +
+          Q2_MISSION_HEADER_DROP == 68,
+          "a wrapped one puts it at 68");
     CHECK(Q2_MISSION_LABEL_INDENT == 20, "the labels are inset 20 from the box");
 
     /*
@@ -247,6 +262,206 @@ static void test_objective_wrap(void)
     CHECK(m.subtitle[0] == 0 && m.footer[0] == 0, "no objective, no lines");
 }
 
+/*
+ * MissionRect, 0x800AE760 — and it is initialised data, not a guess.
+ *
+ *     800AE760  54 00 1E 00 58 01 7C 00
+ *
+ * The x matters twice over: the column indent is `box.x + 20`, so the whole
+ * Location/Secrets/Kills table moves with it. The port used to use 96 and every
+ * column sat twelve pixels right of the console's — invisible on the three
+ * centred lines, because 84 + 344/2 and 96 + 320/2 are both 256, which is why
+ * it went unnoticed.
+ */
+static void test_box_is_the_image_rectangle(void)
+{
+    q2_mission m;
+
+    q2_mission_init(&m);
+    CHECK(m.box.x == 84, "x is 0x0054, got %d", m.box.x);
+    CHECK(m.box.y == 30, "y is 0x001E, got %d", m.box.y);
+    CHECK(m.box.w == 344, "w is 0x0158, got %d", m.box.w);
+    CHECK(m.box.h == 124, "h seeds at 0x007C, got %d", m.box.h);
+
+    /* The Location column, which is what the 12-pixel shift moved. */
+    CHECK(m.box.x + Q2_MISSION_LABEL_INDENT == 104,
+          "the label indent lands at 104, got %d",
+          m.box.x + Q2_MISSION_LABEL_INDENT);
+
+    /* ...and the centred lines really are unaffected, which is the reason the
+     * wrong x survived: both rectangles centre on 256. */
+    CHECK(q2_mission_centre_x("ABCD", 84, 84 + 344) ==
+          q2_mission_centre_x("ABCD", 96, 96 + 320),
+          "the two rectangles centre identically");
+}
+
+/*
+ * PreProcessInterMission, 0x80022664 — the height SetInterMission stores into
+ * gp+358. 42 for a one-line objective, 50 for a wrapped one, +10 a row, +14.
+ */
+static void test_box_height(void)
+{
+    q2_mission m;
+    int i;
+
+    q2_mission_init(&m);
+    /* Nothing registered and no objective: 24 + 18 + 14. */
+    CHECK(q2_mission_box_height(&m) == 56,
+          "an empty board is 56, got %d", q2_mission_box_height(&m));
+
+    q2_mission_register(&m, "Outer Base");
+    CHECK(q2_mission_box_height(&m) == 66,
+          "one row adds ten, got %d", q2_mission_box_height(&m));
+
+    /* A short objective leaves the SECOND wrapped line empty, and the branch at
+     * 0x80022690 tests that line and not the first. */
+    q2_mission_set_objective(&m, "Locate unit exit.");
+    CHECK(m.footer[0] == '\0', "the objective fitted on one line");
+    CHECK(q2_mission_box_height(&m) == 66,
+          "an unwrapped objective does not grow it, got %d",
+          q2_mission_box_height(&m));
+
+    q2_mission_set_objective(&m,
+        "Locate the unit exit and kill all resistance on the way to it.");
+    CHECK(m.footer[0] != '\0', "the objective wrapped");
+    CHECK(q2_mission_box_height(&m) == 74,
+          "a wrapped objective adds eight, got %d",
+          q2_mission_box_height(&m));
+
+    /* And the .data seed is the six-row, wrapped-objective answer, which is the
+     * confirmation that the formula is read right: 50 + 14 + 6*10 = 124. */
+    for (i = 1; i < Q2_MISSION_ROWS; i++) {
+        char name[16];
+        snprintf(name, sizeof(name), "L%d", i);
+        q2_mission_register(&m, name);
+    }
+    CHECK(q2_mission_box_height(&m) == 124,
+          "six rows and a wrapped objective is the .data seed 124, got %d",
+          q2_mission_box_height(&m));
+}
+
+/*
+ * PadEndInterMission, 0x800224F4 — the board cannot be dismissed for its first
+ * 1200 ticks, and the port used to close it on the first press of the first
+ * frame.
+ */
+static void test_dismissal_gate(void)
+{
+    s32 gate = Q2_MISSION_GATE_TICKS;
+    int ticks;
+
+    CHECK(Q2_MISSION_GATE_TICKS == 1200,
+          "the .data seed at 0x800AE76A is 0x04B0");
+
+    /* A press on the very first frame does nothing — the pad is not even read
+     * while the counter is positive (the `bgtz` at 0x80022514). */
+    CHECK(!q2_mission_pad_end(&gate, 10, true),
+          "fire on frame one does not dismiss the board");
+    CHECK(gate == 1190, "the counter came down by the delta, got %d", gate);
+
+    /*
+     * 1200 ticks at the headless delta of 10 is 120 frames. Frame n leaves the
+     * counter at 1200 - 10n, and `bgtz` keeps the board up while that is
+     * strictly positive — so frames 1..119 are locked and frame 120 is the
+     * first that reads the pad at all.
+     */
+    for (ticks = 2; ticks <= 119; ticks++)
+        CHECK(!q2_mission_pad_end(&gate, 10, true),
+              "still locked at frame %d", ticks);
+    CHECK(gate == 10, "one delta left at frame 119, got %d", gate);
+
+    /* Frame 120: the gate opens, and it still wants an EDGE. */
+    CHECK(!q2_mission_pad_end(&gate, 10, false),
+          "the gate opens on frame 120 but nobody pressed anything");
+    CHECK(gate == 0, "the counter clamps to zero, got %d", gate);
+
+    CHECK(!q2_mission_pad_end(&gate, 10, false),
+          "no press, no dismissal");
+    CHECK(gate == 0, "and the counter stays clamped, got %d", gate);
+
+    CHECK(q2_mission_pad_end(&gate, 10, true),
+          "the first fire edge past the gate dismisses it");
+    /* 0x80022538: re-armed by the DISMISSAL, not by the next raise. */
+    CHECK(gate == Q2_MISSION_GATE_TICKS,
+          "the dismissal re-arms the counter to 1200, got %d", gate);
+
+    /* A counter below the delta wraps as a u16 and is then rejected by the
+     * SIGNED 16-bit test — which is what `sll v0,16` before the `bgtz` is for,
+     * and what stops the board locking for another 65,000 ticks. */
+    gate = 5;
+    CHECK(!q2_mission_pad_end(&gate, 30, false),
+          "an underflowing counter does not read as positive");
+    CHECK(gate == 0, "...and clamps to zero, got %d", gate);
+}
+
+/* QuakeCameraInterMission's table, 0x8009C668 — four 24-byte records. */
+static void test_camera_table(void)
+{
+    q2_mission_camera cam;
+
+    CHECK(q2_mission_camera_for_unit(1, &cam), "unit 1 has a record");
+    CHECK(cam.pos[0] == -9314 && cam.pos[1] == -2562 && cam.pos[2] == 10594,
+          "unit 1's position is 0x8009C668's three words, got (%d,%d,%d)",
+          cam.pos[0], cam.pos[1], cam.pos[2]);
+    CHECK(cam.pitch == 500, "and its pitch is 0x01F4, got %d", cam.pitch);
+    /* 0x800387FC negates the yaw on the way in. */
+    CHECK(cam.yaw == -5490, "the yaw is negated, got %d", cam.yaw);
+    CHECK(cam.cell == 170 && cam.area == 31,
+          "the record's collision cell and area travel with it");
+
+    /*
+     * Unit 4's raw yaw is 0xFD95, and the two readings differ: the console
+     * loads it with `lhu` and negates the UNSIGNED value, which gives +619.
+     * Negating the s16 would give -619 and point the camera the other way.
+     */
+    CHECK(q2_mission_camera_for_unit(4, &cam), "unit 4 has a record");
+    CHECK(cam.yaw == 619,
+          "0xFD95 negated as an unsigned halfword is +619, got %d", cam.yaw);
+
+    /* The table is four records long: 0x8009C6C8 is the string "QFront". */
+    CHECK(!q2_mission_camera_for_unit(5, &cam),
+          "unit 5 has no record and keeps the player's camera");
+    CHECK(!q2_mission_camera_for_unit(0, &cam), "nor does unit 0");
+}
+
+/*
+ * ClearLevelIntermission, 0x80021A0C — the six records go at a unit boundary,
+ * and nothing else does. This port used to keep them, which filled the table
+ * after unit 1 and stopped the Secrets and Kills counters for the rest of the
+ * campaign.
+ */
+static void test_unit_boundary_clears_the_rows(void)
+{
+    q2_mission m;
+    int i;
+
+    q2_mission_init(&m);
+    m.unit = 2;
+    q2_mission_set_objective(&m, "Locate unit exit.");
+    for (i = 0; i < Q2_MISSION_ROWS; i++) {
+        char name[16];
+        snprintf(name, sizeof(name), "L%d", i);
+        q2_mission_register(&m, name);
+        q2_mission_set_counts(&m, i, 1, 2, 3, 4);
+    }
+    CHECK(q2_mission_register(&m, "L9") < 0, "the table is full");
+
+    q2_mission_clear_rows(&m);
+
+    for (i = 0; i < Q2_MISSION_ROWS; i++) {
+        CHECK(m.row[i].name[0] == '\0', "row %d's name is gone", i);
+        CHECK(m.row[i].secrets == 0 && m.row[i].kills_total == 0,
+              "row %d's counters went with it", i);
+    }
+    /* ...so the next unit's first level gets row 0 rather than -1. */
+    CHECK(q2_mission_register(&m, "Warehouse") == 0,
+          "the next unit's first level takes row 0");
+
+    /* The unit number and the objective are outside the 150 bytes. */
+    CHECK(m.unit == 2, "the unit number survives the memset");
+    CHECK(m.subtitle[0] != '\0', "and so does the objective");
+}
+
 int main(void)
 {
     test_title();
@@ -260,6 +475,11 @@ int main(void)
     test_register_is_by_name();
     test_seventh_level_gets_no_row();
     test_objective_wrap();
+    test_box_is_the_image_rectangle();
+    test_box_height();
+    test_dismissal_gate();
+    test_camera_table();
+    test_unit_boundary_clears_the_rows();
 
     if (g_fail) {
         printf("\n%d mission check%s failed\n", g_fail, g_fail == 1 ? "" : "s");

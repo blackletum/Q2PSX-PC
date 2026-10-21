@@ -315,12 +315,13 @@ static void test_messages(void)
     q2_hud_message(&hud, "five");
     check_eq_i(hud.msg_count, 4, "the fifth displaces the oldest");
 
-    /* One line retires every 60 ticks. */
-    q2_hud_tick(&hud, Q2_HUD_MSG_TICKS - 1);
+    /* One line retires every 60 FRAMES: 0x80042BEC increments by one, and it
+     * is the centre line beside it that counts the frame delta instead. */
+    q2_hud_tick(&hud, Q2_HUD_MSG_TICKS - 1, 0);
     check_eq_i(hud.msg_count, 4, "nothing retires before 60 ticks");
-    q2_hud_tick(&hud, 1);
+    q2_hud_tick(&hud, 1, 0);
     check_eq_i(hud.msg_count, 3, "one retires at 60");
-    q2_hud_tick(&hud, Q2_HUD_MSG_TICKS * 3);
+    q2_hud_tick(&hud, Q2_HUD_MSG_TICKS * 3, 0);
     check_eq_i(hud.msg_count, 0, "and the rest follow");
 
     /* Truncation matches the original's strncpy(dst, src, 63). */
@@ -547,6 +548,146 @@ static void test_need_key(void)
           "and it names the key the door wants");
     check_eq_i(hud.msg_count, 0,
                "on the centre line, not queued in the notification ring");
+
+    /*
+     * AND THE CENTRE LINE RUNS ON THE OTHER CLOCK. UpdateMessageText adds the
+     * halfword at [0x800B2DB4] to ctx+0x28C (0x80042BA8/0x80042BB0), not the
+     * flat one it adds to the ring beside it (0x80042BEC), so the 1200 at
+     * 0x80042B98 is FOUR SECONDS of the 300-to-the-second clock — a hundred
+     * drawn frames at the PAL delta of 12, a hundred and twenty at the port's
+     * 1/30 s step of 10.
+     *
+     * Ageing it one per frame, which is what this used to do, left every level
+     * message on screen for 1200 frames: forty seconds, with the `*7` backdrop
+     * sitting at `*0` for thirty-nine of them.
+     */
+    {
+        int i;
+
+        q2_hud_need_key(&hud, &g_tab, &ctx, 0x0001);
+        for (i = 0; i < 119; i++)
+            q2_hud_tick(&hud, 1, 10);
+        check(hud.centre_age < Q2_HUD_CENTRE_TICKS,
+              "still up after 119 frames of the 1/30 s step");
+        q2_hud_tick(&hud, 1, 10);
+        check(hud.centre_age >= Q2_HUD_CENTRE_TICKS,
+              "and gone on the 120th, which is four seconds and not forty");
+
+        /* The ring's own clock is untouched by that: it counts frames. */
+        q2_hud_init(&hud, &g_tab, 1);
+        q2_hud_message(&hud, "one");
+        for (i = 0; i < Q2_HUD_MSG_TICKS; i++)
+            q2_hud_tick(&hud, 1, 10);
+        check_eq_i(hud.msg_count, 0,
+                   "a notification still retires on its sixtieth frame");
+    }
+}
+
+/*
+ * FlashPowerUp — 0x80039870, the player tick's OTHER SetWinFade raiser.
+ *
+ * The port had no equivalent of this at all: `q2_screen_flash_set` had two
+ * callers, the damage compare and the respawn reset, so thirty seconds of Quad
+ * Damage looked exactly like thirty seconds of nothing. What the console does
+ * is take the first live deadline of four, tint the whole viewport in that
+ * powerup's colour EVERY frame — mode 3 at strength 1, re-armed rather than
+ * counted down — and, in the last three seconds, beep once per whole second
+ * and take the tint away for 150 level-clock units each time.
+ */
+static void test_powerup_flash(void)
+{
+    s32 until[Q2_HUD_POWERUP_SLOTS];
+    s32 quiet;
+    s16 warn;
+    q2_hud_powerup_flash pf;
+    int i, tints, warns;
+
+    printf("the powerup tint\n");
+
+    /* 0x80039994's `beq v0, zero, 0x80039A8C`: nothing held, nothing drawn. */
+    memset(until, 0, sizeof(until));
+    quiet = 0;
+    warn  = 0;
+    pf = q2_hud_powerup_flash_tick(until, 1000, &quiet, &warn);
+    check_eq_i(pf.slot, -1, "no powerup, no slot");
+    check(!pf.tint && !pf.warn, "and nothing is raised");
+
+    /*
+     * The tint is a STATE, not a pulse. 0x80039A88 clears client+0xC4 in the
+     * flashing branch, so the next frame's `sltu 0, now` passes again and the
+     * tile is laid down afresh — one raise per frame for the powerup's life.
+     */
+    memset(until, 0, sizeof(until));
+    until[0] = 10000;
+    quiet = 0;
+    warn  = 0;
+    for (i = 0, tints = 0; i < 5; i++) {
+        pf = q2_hud_powerup_flash_tick(until, 1000 + i, &quiet, &warn);
+        if (pf.tint)
+            tints++;
+    }
+    check_eq_i(tints, 5, "the solid tint is raised on every frame it is held");
+    check_eq_i(pf.rgb[0], 0x28, "0x800AE874's purple: red 0x28");
+    check_eq_i(pf.rgb[1], 0x00, "no green");
+    check_eq_i(pf.rgb[2], 0x28, "blue 0x28");
+
+    /* Four `sltu`s in a chain, each jumping to the shared tail: the FIRST live
+     * deadline wins and the rest are never looked at. */
+    memset(until, 0, sizeof(until));
+    until[0] = 10000;   /* quad */
+    until[2] = 20000;   /* environment suit */
+    quiet = 0;
+    warn  = 0;
+    pf = q2_hud_powerup_flash_tick(until, 1000, &quiet, &warn);
+    check_eq_i(pf.slot, 0, "quad outranks the suit while both are live");
+
+    quiet = 0;
+    warn  = 0;
+    pf = q2_hud_powerup_flash_tick(until, 12000, &quiet, &warn);
+    check_eq_i(pf.slot, 2, "an expired quad lets the suit through");
+    check_eq_i(pf.rgb[1], 0x23, "and the suit is 0x800AE87C's green");
+
+    /*
+     * The three warnings. Four seconds of quad, stepped one level-clock unit at
+     * a time, counting what comes back.
+     *
+     * The tint is dark on 1 + 3*150 of those frames: the warning frame itself,
+     * which returns at 0x80039A08 before the flash, and the 150 units of quiet
+     * it arms. It is also dark on the very first frame here, because the clock
+     * starts at 0 and 0x80039A20's compare is STRICT — an artefact of the test
+     * starting the level clock at zero, which real play never does.
+     */
+    memset(until, 0, sizeof(until));
+    until[0] = 1200;
+    quiet = 0;
+    warn  = 0;
+    tints = warns = 0;
+    for (i = 0; i < 1200; i++) {
+        pf = q2_hud_powerup_flash_tick(until, i, &quiet, &warn);
+        if (pf.tint)
+            tints++;
+        if (pf.warn)
+            warns++;
+    }
+    check_eq_i(warns, 3, "three warnings, at 2, 1 and 0 whole seconds left");
+    check_eq_i(tints, 1200 - 1 - 3 * (1 + Q2_HUD_POWERUP_QUIET),
+               "and the tint blinks off for each of them");
+
+    /*
+     * Three seconds left is NOT a warning — 0x800399D4 is `slti v0, v1, 3` —
+     * and the frame that does warn draws no tile.
+     */
+    memset(until, 0, sizeof(until));
+    until[0] = 901;
+    quiet = 0;
+    warn  = 0;
+    pf = q2_hud_powerup_flash_tick(until, 1, &quiet, &warn);
+    check(pf.tint && !pf.warn, "three whole seconds left is still just a tint");
+    pf = q2_hud_powerup_flash_tick(until, 2, &quiet, &warn);
+    check(pf.warn && !pf.tint, "the frame that beeps does not also flash");
+    check_eq_i(quiet, 2 + Q2_HUD_POWERUP_QUIET,
+               "and it arms the 150-unit quiet window");
+    check_eq_i(warn, 2, "client+0xDC records the second that raised it");
 }
 
 static void test_layout(void)
@@ -581,6 +722,7 @@ int main(void)
     test_bar_reads_disc_tables();
     test_measure_and_flash();
     test_need_key();
+    test_powerup_flash();
     test_layout();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);

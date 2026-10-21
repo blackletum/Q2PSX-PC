@@ -7,13 +7,9 @@
  * plus the collision hull. Keeping it separate from sim.c also keeps the
  * movement code readable, which is the harder of the two to follow.
  *
- * The one decision made here rather than read: a shot is traced against the
- * SecondaryCol hull the player moves in, because that is the only hull the port
- * can trace a segment through today. The console traces bullets against
- * PrimaryColl (0x80053974 takes the primary context) and only movement against
- * the secondary. The difference is the player's own 286-unit erosion, so a
- * bullet fired flat along a wall stops 286 units early. It is called out here
- * rather than hidden because it is a real divergence, not a rounding one.
+ * Shots use q2_sim_trace: the PrimaryColl hull followed by the runtime entity
+ * boxes. Movement alone uses SecondaryCol's baked-in player hull. See sim.c
+ * for the original call sites and the distinction between these contexts.
  */
 #include <stdlib.h>
 #include <string.h>
@@ -177,6 +173,18 @@ static void fx_at(q2_sim *sim, q2_fx_preset_id id, const s32 at[3])
 }
 
 /*
+ * The same resolve, reachable from the other half of the sim.
+ *
+ * sim.c is a separate translation unit and the player's own per-frame state
+ * think lives there — the water splash needs `entity+0x9E` the same way every
+ * spawner in this file does, and 0x800686C4 is one function on the console.
+ */
+u8 q2_sim_fx_area(q2_sim *sim, u8 area, const s32 at[3])
+{
+    return fx_area_resolve(sim, area, at);
+}
+
+/*
  * Where a hitscan shot leaves its mark.
  *
  * The port DOES have a contact point: `world_fraction_for` already runs the
@@ -190,7 +198,7 @@ static void fx_at(q2_sim *sim, q2_fx_preset_id id, const s32 at[3])
  * 4096 with no victim means the shot ran out of range in open air.
  *
  * CORRECTION — the world arm is NOT a spark, and this was the loud half of
- * "all effects are broken". It used to raise Q2_FX_SPARK, whose site
+ * "all effects are broken". It used to raise Q2_FX_WATER_SPLASH, whose site
  * (0x8003E0C0) sits inside 0x8003E014, and `xrefs 0x8003E014` returns exactly
  * one caller: 0x8003D4C4, inside the player's per-frame STATE think. No weapon
  * in the executable reaches it. Its ramp is record 0 — (64,64,255), pure blue,
@@ -856,33 +864,76 @@ q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
     }
 
     /*
-     * The muzzle flash. Only the machinegun and the chaingun carry one, and its
-     * radii come from a single rand draw the way 0x8004C978 computes them --
-     * see weapon.h. Drawn AFTER the shot so the flash does not perturb the
-     * spread sequence, which is what the fire function's own ordering does.
+     * The muzzle flash, and there are FOUR weapons with one, not two.
+     *
+     * `q2_weapon_has_muzzle_light` answers for the machinegun and the chaingun,
+     * which are the two that reach AddLight (0x80075C34) — and enumerating that
+     * function's call sites is exactly why the other two were missed. The
+     * shotgun and the super shotgun each raise a TIMED light instead:
+     *
+     *   QPlayerFireShotGun       0x8004C3B0 a0 = entity+0xA4, radii 600/1200
+     *                            from 0x800AE9D8/0x800AE9DA, ticks 3
+     *   QPlayerFireSuperShotGun  0x8004C674 a0 = entity+0x54, radii 800/1600
+     *                            from 0x800AE9E4/0x800AE9E6, ticks 4
+     *
+     * both through AddTimedLight (0x80075D14), both taking their colour from
+     * the same `C8 64 64` at 0x800AE9D4 the machinegun uses. So the super
+     * shotgun has the largest and longest flash the player owns and it was the
+     * one raising nothing at all. `q2_light_muzzle_preset` is the table.
+     *
+     * Drawn AFTER the shot so the flash does not perturb the spread sequence,
+     * which is what the fire function's own ordering does — and for the two
+     * timed weapons that ordering is the console's literally, because their
+     * AddTimedLight call comes after the pellet loop (0x8004C398's `slti 5`).
      */
-    if (q2_weapon_has_muzzle_light((u8)sim->combat.weapon_id)) {
-        static const u8 flash[3] = { Q2_MUZZLE_LIGHT_R, Q2_MUZZLE_LIGHT_G,
-                                     Q2_MUZZLE_LIGHT_B };
-        s32 inner, outer;
+    {
+        q2_muzzle_light ml;
 
-        q2_weapon_muzzle_light(q2_rng_next(&sim->combat.rng), &inner, &outer);
-        /*
-         * At the player ENTITY ORIGIN, not at the eye and not at the feet.
-         * The console passes `addiu a0, s3, 84` — player + 0x54.
-         *
-         * `sim->player[].pos` is the FEET (sim.h says so at the top of the
-         * file, and sim.c converts with q2_sim_origin_y everywhere it wants
-         * the entity). Passing it raw moved the flash from 290 above the
-         * origin to 286 below it — a correction in the right direction that
-         * overshot by the whole body.
-         */
-        s32 lit[3];
+        if (q2_light_muzzle_preset((u8)sim->combat.weapon_id, &ml)) {
+            s32 inner = ml.inner;
+            s32 outer = ml.outer;
+            s32 lit[3];
 
-        lit[0] = sim->player[sim->cur_player].pos[0];
-        lit[1] = q2_sim_origin_y(sim->player[sim->cur_player].pos[1]);
-        lit[2] = sim->player[sim->cur_player].pos[2];
-        q2_ent_light_at(&sim->ent_world.events, lit, flash, inner, outer);
+            /*
+             * The machinegun and the chaingun redraw both radii from ONE rand()
+             * the way 0x8004C978 computes them — see weapon.h. The two shotguns
+             * carry fixed halfword pairs and must not touch the RNG, or a fired
+             * shotgun would shift every later spread.
+             */
+            if (ml.random_radii)
+                q2_weapon_muzzle_light(q2_rng_next(&sim->combat.rng),
+                                       &inner, &outer);
+
+            /*
+             * At the player ENTITY ORIGIN, not at the eye and not at the feet.
+             *
+             * `sim->player[].pos` is the FEET (sim.h says so at the top of the
+             * file, and sim.c converts with q2_sim_origin_y everywhere it wants
+             * the entity). Passing it raw moved the flash from 290 above the
+             * origin to 286 below it — a correction in the right direction that
+             * overshot by the whole body.
+             *
+             * AND THE TWO OFFSETS ARE NOT COLLAPSED HERE — they are already the
+             * same point. The preset carries 0xA4 for the shotgun and 0x54 for
+             * the other three because those are the fields the console passes,
+             * but on a PLAYER entity this port makes them equal: entity.c's
+             * player update writes `ent.origin[] = ent.pos[]` outright, with
+             * the note that for the player +0x54 IS the origin. They diverge
+             * for an entity with a model height bias at +0xF8, which a player
+             * has not. Kept in the record so the day a player entity grows one,
+             * the two arms are already distinguishable.
+             */
+            lit[0] = sim->player[sim->cur_player].pos[0];
+            lit[1] = q2_sim_origin_y(sim->player[sim->cur_player].pos[1]);
+            lit[2] = sim->player[sim->cur_player].pos[2];
+
+            if (ml.ticks > 0)
+                q2_ent_light_timed_at(&sim->ent_world.events, lit, ml.rgb,
+                                      inner, outer, ml.ticks);
+            else
+                q2_ent_light_at(&sim->ent_world.events, lit, ml.rgb,
+                                inner, outer);
+        }
     }
 
     sim->combat.next_fire = r.next_fire;
@@ -1389,11 +1440,12 @@ static void present_client_of(const q2_sim *sim, const q2_actor *a,
  * still states the same predicate for anyone who wants it without running a
  * presentation pass; combat.c owns it.
  *
- * NOT RAISED HERE: `rep.energy_pulse`, the `effect[1] == 2` arm's own light
+ * AND RAISED HERE TOO: `rep.energy_pulse`, the `effect[1] == 2` arm's own light
  * at 0x80058758. It goes through 0x80075D14, a different function from the
- * `>= 3` arm's 0x80075C34, and which list entry that appends is lighting.c's
- * to name (effect.h). It is reported so it stops being invisible, and not
- * raised on a guess.
+ * `>= 3` arm's 0x80075C34 — AddTimedLight, whose fourth argument is a lifetime
+ * in frames — so the two arms are not two spellings of the same light. This
+ * comment used to end "it is reported so it stops being invisible, and not
+ * raised on a guess"; the guess is gone and so is the silence.
  */
 static void present_actor(q2_sim *sim, q2_actor *a)
 {
@@ -1446,6 +1498,21 @@ static void present_actor(q2_sim *sim, q2_actor *a)
     if (rep.energy_light)
         q2_ent_light_at(&sim->ent_world.events, a->origin, energy,
                         Q2_ENERGY_LIGHT_INNER, Q2_ENERGY_LIGHT_OUTER);
+
+    /*
+     * AND THE OTHER ARM'S LIGHT, which the note above says is "not raised on a
+     * guess" — it is not a guess any more. 0x80058758 is AddTimedLight
+     * (0x80075D14), not the `>= 3` arm's AddLight, with the same colour word at
+     * 0x800AEAAC and the radii packed out of 0x800AEAB0/0x800AEAB2 — the same
+     * 800/1300 — and a fourth argument of 4. So the effect[1] == 2 arm parks a
+     * slot that re-emits the green at 4/4, 3/4, 2/4 and 1/4 over the four
+     * frames after the crackle stops: the tail of the glow, which is exactly
+     * why it fires on the tick the bigger effect ends.
+     */
+    if (rep.energy_pulse)
+        q2_ent_light_timed_at(&sim->ent_world.events, a->origin, energy,
+                              Q2_ENERGY_LIGHT_INNER, Q2_ENERGY_LIGHT_OUTER,
+                              Q2_ENERGY_PULSE_TICKS);
 
     /*
      * And the ambient write the report has been carrying with no reader:
@@ -2067,6 +2134,91 @@ u32 q2_sim_debris_burst(q2_sim *sim, const s32 bmin[3], const s32 bmax[3],
                               area);
 }
 
+/* ------------------------------------------------------------------------- */
+/* PSXGLASS's tail — 0x8002A3E4..0x8002A4F4, shared by both ways in           */
+/* ------------------------------------------------------------------------- */
+/* Defined with the rest of the visibility queue further down; needed here
+ * because a breaking pane hides its own node. */
+static void node_vis_push(q2_sim *sim, s16 node, u8 hidden);
+
+/*
+ * The centre of a Scene node's box, which is where the smash is played.
+ *
+ * 0x8002A3E4..0x8002A4A0 builds it a component at a time on the stack: +0x10
+ * with +0x1C, +0x14 with +0x20, +0x18 with +0x24, each pair `addu` / `srl 31`
+ * / `addu` / `sra 1`. That sequence is the compiler's signed divide by two and
+ * rounds TOWARDS ZERO, which a plain `/ 2` on a s32 does as well — so this is
+ * the arithmetic transcribed and not an approximation of it. A shift by one
+ * would floor, and a pane straddling the origin would sound half a unit out.
+ */
+static void glass_box_centre(const q2_scene_node *node, s32 out[3])
+{
+    int k;
+
+    for (k = 0; k < 3; k++)
+        out[k] = (node->bbox_min[k] + node->bbox_max[k]) / 2;
+}
+
+/*
+ * Queue one `amb_brkglas` at `at` for the owner to play — the console's
+ * 0x8002A4A4, which passes the handle at 0x800B27FC to SoundAtLocation.
+ *
+ * Queued rather than played for the reason the detonation report is: the sim
+ * has no mixer and no sound bank. Overflow drops the smash rather than
+ * overwriting an earlier one, because the earlier one is the one already on its
+ * way to the mixer.
+ */
+static void glass_smash_push(q2_sim *sim, const s32 at[3])
+{
+    u32 cap = sizeof(sim->glass_at) / sizeof(sim->glass_at[0]);
+    int k;
+
+    if (sim->glass_count >= cap)
+        return;
+    for (k = 0; k < 3; k++)
+        sim->glass_at[sim->glass_count][k] = at[k];
+    sim->glass_count++;
+}
+
+/*
+ * AND THE PANE STOPS EXISTING. 0x8002A4AC..0x8002A4F4, which is BELOW the
+ * branch at 0x8002A3CC and therefore runs on every break, replay included.
+ *
+ * Two things happen there and this port had neither:
+ *
+ *   - 0x8002A4C8 loads Scene2Data (0x800B2C3C), 0x8002A4D4/0x8002A4DC/
+ *     0x8002A4E0 read the node's flags at +8, OR in 0x8000 and write them back.
+ *     Bit 15 is do-not-draw, so the geometry vanishes the instant the pane
+ *     breaks. The port drew every shot-out window for as long as the zone was
+ *     loaded: node_vis_push is the port's way of setting that bit, because the
+ *     hide array belongs to the owner (sim.h, node_vis).
+ *
+ *   - 0x8002A4E4/0x8002A4E8 free the damageable box at obj+0x28 and
+ *     0x8002A4F0/0x8002A4F4 zero obj+0x28 and obj+0x24, the damage callback.
+ *     Here that is `broken` plus the solidity sync: nothing can hit it again
+ *     and it stops being solid. The shot path already did this half; the script
+ *     path did not, so a pane a trigger had shattered was still a wall.
+ *
+ * Matched on the SCENE NODE rather than on the registry index because that is
+ * the console's own key — the tail reads obj+0x38, the node, and the box it
+ * frees is the box that node's constructor allocated (0x8002A518).
+ */
+static void glass_break_tail(q2_sim *sim, s32 node)
+{
+    u32 i;
+
+    /* The registry keeps the index in a s32; the console's own field is the
+     * signed halfword at obj+0x38 that 0x8002A4AC reads with `lh`, which is the
+     * width the visibility queue carries too. */
+    node_vis_push(sim, (s16)node, 1);
+
+    for (i = 0; i < sim->breakable_count; i++)
+        if (sim->breakable[i].kind == Q2_BREAKABLE_GLASS &&
+            sim->breakable[i].scene_node == node)
+            sim->breakable[i].broken = true;
+    q2_sim_breakables_sync_solidity(sim);
+}
+
 u32 q2_sim_breakable_call(q2_sim *sim, const q2_scene *scene,
                           const q2_uf_operands *ops,
                           const q2_event_item *item, u8 call_index)
@@ -2120,10 +2272,8 @@ u32 q2_sim_breakable_call(q2_sim *sim, const q2_scene *scene,
      */
     {
         s32 centre[3];
-        int k;
 
-        for (k = 0; k < 3; k++)
-            centre[k] = (node.bbox_min[k] + node.bbox_max[k]) / 2;
+        glass_box_centre(&node, centre);
 
         made += q2_sim_debris_burst(sim, node.bbox_min, node.bbox_max,
                                     centre, count_a, 0);
@@ -2136,10 +2286,28 @@ u32 q2_sim_breakable_call(q2_sim *sim, const q2_scene *scene,
          * a second time. The console's flag is the global gp+16948; the port's
          * is the runtime's own copy of it (events_rt.h, `initial_pass`).
          */
-        if (!sim->event_rt.initial_pass)
+        if (!sim->event_rt.initial_pass) {
             made += q2_sim_debris_burst(sim, node.bbox_min, node.bbox_max,
                                         NULL, count_b, 0);
+
+            /*
+             * AND IT SMASHES. 0x8002A490 loads Sound_GlassSmash and 0x8002A4A4
+             * plays it at the centre built just above — inside this branch with
+             * the shatter, not below it with the hide, so a pane the replay
+             * re-breaks comes back broken in silence. Nothing in this port ever
+             * asked for `amb_brkglas` before: every breaking window was mute.
+             */
+            glass_smash_push(sim, centre);
+        }
     }
+
+    /*
+     * The tail, OUTSIDE the branch: 0x8002A3CC jumps to 0x8002A4AC rather than
+     * past it, so the hide and the freed box happen on the replay pass too.
+     * That is what makes a pane the script already broke come back broken and
+     * invisible instead of whole.
+     */
+    glass_break_tail(sim, slot);
 
     return made;
 }
@@ -2171,7 +2339,7 @@ static void breakable_solids_drop(q2_sim *sim)
 }
 
 /*
- * GLASS owns an ordinary entry in retail's 48-slot entity-box table.
+ * GLASS and SHOOTTHEN own ordinary entries in retail's entity-box table.
  * Insert those boxes after mover parts and before trigger volumes, preserving
  * the same entity-then-volume walk that q2_move_sweep_world implements.
  */
@@ -2181,7 +2349,8 @@ static bool breakable_solids_add(q2_sim *sim)
     u32 count = 0, first, out = 0, i;
 
     for (i = 0; i < sim->breakable_count; i++)
-        if (sim->breakable[i].kind == Q2_BREAKABLE_GLASS)
+        if (sim->breakable[i].kind == Q2_BREAKABLE_GLASS ||
+            sim->breakable[i].kind == Q2_BREAKABLE_SHOOTTHEN)
             count++;
     if (!count)
         return true;
@@ -2206,7 +2375,7 @@ static bool breakable_solids_add(q2_sim *sim)
         q2_move_target *t;
         int k;
 
-        if (b->kind != Q2_BREAKABLE_GLASS)
+        if (b->kind != Q2_BREAKABLE_GLASS && b->kind != Q2_BREAKABLE_SHOOTTHEN)
             continue;
 
         t = &grown[first + out];
@@ -2242,7 +2411,7 @@ void q2_sim_breakables_sync_solidity(q2_sim *sim)
     for (i = 0; i < sim->breakable_count; i++) {
         q2_breakable *b = &sim->breakable[i];
 
-        if (b->kind != Q2_BREAKABLE_GLASS || b->solid_target < 0 ||
+        if (b->solid_target < 0 ||
             (u32)b->solid_target >= sim->volume_count)
             continue;
         sim->volumes[b->solid_target].active = !b->broken;
@@ -2271,6 +2440,8 @@ u32 q2_sim_attach_breakables(q2_sim *sim, const q2_scene *scene,
     sim->explosives           = NULL;
     sim->node_vis_count       = 0;
     sim->blast_count          = 0;
+    sim->glass_count          = 0;   /* a smash from the last zone is not one
+                                      * the new zone's mixer should hear */
     sim->explosive_destroyed  = 0;
     sim->explosive_blasts     = 0;
 
@@ -2532,12 +2703,33 @@ bool q2_sim_next_blast(q2_sim *sim, s32 out[3])
     return true;
 }
 
+/* The same drain for the pane smashes, because 0x8002A4A4 is the same
+ * SoundAtLocation call with the same kind of argument as 0x8002695C's. */
+bool q2_sim_next_glass_smash(q2_sim *sim, s32 out[3])
+{
+    u32 i;
+
+    if (!sim || !sim->glass_count)
+        return false;
+
+    if (out) {
+        out[0] = sim->glass_at[0][0];
+        out[1] = sim->glass_at[0][1];
+        out[2] = sim->glass_at[0][2];
+    }
+    for (i = 1; i < sim->glass_count; i++) {
+        sim->glass_at[i - 1][0] = sim->glass_at[i][0];
+        sim->glass_at[i - 1][1] = sim->glass_at[i][1];
+        sim->glass_at[i - 1][2] = sim->glass_at[i][2];
+    }
+    sim->glass_count--;
+    return true;
+}
+
 /*
  * Turn one destruction into effects and visibility changes.
  *
- * The port's stand-in for `0x8005A778` is the PARTICLE explosion — see
- * explosive.h for why, and for what changes here when the model-entity
- * explosion exists.
+ * `0x8005A778` spawns a model explosion; explosive.h describes its arguments.
  */
 static void explosive_apply(q2_sim *sim, const q2_explosive_result *res)
 {
@@ -2616,6 +2808,7 @@ static void explosive_free_boxes(q2_sim *sim, u32 item_offset)
         if (sim->breakable[i].kind == Q2_BREAKABLE_FXGROUP &&
             sim->breakable[i].item_offset == item_offset)
             sim->breakable[i].broken = true;
+    q2_sim_scene_solids_update(sim, NULL);
 }
 
 bool q2_sim_explosive_trigger_item(q2_sim *sim, u32 item_offset)
@@ -2850,6 +3043,7 @@ u32 q2_sim_breakable_shot(q2_sim *sim, const s32 from[3], const s32 to[3],
                 return 0;
 
             b->broken = true;                /* the box is freed, not reused */
+            q2_sim_breakables_sync_solidity(sim);
             if (sim->events_ready &&
                 q2_event_rt_trigger(&sim->event_rt, b->record_offset))
                 sim->breakable_fired++;
@@ -2877,12 +3071,32 @@ u32 q2_sim_breakable_shot(q2_sim *sim, const s32 from[3], const s32 to[3],
             }
         }
 
-        /* The shatter, across the whole box: 0x8002A3DC passes zero for the
-         * origin and the burst then scatters uniformly through the node. */
-        made += q2_sim_debris_burst(sim, node.bbox_min, node.bbox_max, NULL,
-                                    b->count_b, 0);
-        b->broken = true;
-        q2_sim_breakables_sync_solidity(sim);
+        /*
+         * The shatter, across the whole box: 0x8002A3DC passes zero for the
+         * origin and the burst then scatters uniformly through the node. And
+         * the smash with it, at the box centre — 0x8002A490/0x8002A4A4.
+         *
+         * Both sit under 0x8002A3CC's test of Event_MuteLevFlag, the same one
+         * the script path reads. A weapon impact cannot reach PSXGLASS during
+         * the EVE_ replay — the replay fires nothing — so this arm is that one
+         * branch transcribed where it lives rather than a second rule; it is
+         * here because there is one console function and it tests the flag once
+         * for both ways in.
+         */
+        if (!sim->event_rt.initial_pass) {
+            s32 centre[3];
+
+            made += q2_sim_debris_burst(sim, node.bbox_min, node.bbox_max,
+                                        NULL, b->count_b, 0);
+
+            glass_box_centre(&node, centre);
+            glass_smash_push(sim, centre);
+        }
+
+        /* And the tail below that branch: the node stops drawing and the box
+         * is freed. `b` is marked by the node it occupies, so the pointer is
+         * not used again here. */
+        glass_break_tail(sim, b->scene_node);
     }
 
     sim->breakable_pieces += made;

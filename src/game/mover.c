@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../common/trig.h"   /* the piston's raised sine, 0x800A5430 */
+
 /* The bank keys, registered by name at 0x8002D4E0..0x8002D800. */
 const char *const q2_mover_sound_name[Q2_MVSND_COUNT] = {
     "msc_keyuse",   /* 0x800B27CC */
@@ -679,7 +681,15 @@ q2_result q2_movers_build_calls(q2_mover_set *out, const q2_events *events,
                 m->speed      = p[5];
                 m->target     = q2_rd_s16(p + 6);
                 collect_nodes(m, p, 8);
-                m->wait_timer = q2_rd_u16(p + 16);
+                /*
+                 * item[+16] IS NOT A HOLD TIME. `lhu 16(a0)` at 0x8002EA44
+                 * goes to obj+0x4E, which PSXPISTON_M decrements once per
+                 * end-of-travel crossing and stops on — a HALF-STROKE COUNT.
+                 * Reading it as `wait_timer` put it into the generic door
+                 * machine's hold state and made a pumping piston into one
+                 * out-and-back with a pause in the middle of it.
+                 */
+                m->strokes_reset = q2_rd_u16(p + 16);
                 m->blocks_player = q2_rd_s16(p + 18) != 0;
                 break;
 
@@ -807,6 +817,23 @@ void q2_mover_trigger(q2_mover_set *set, u32 index)
     m->triggered = 1;
 
     /*
+     * A PISTON IS ARMED, NOT OPENED. PSXPISTON (0x8002E9EC) tests obj+0x52
+     * BEFORE it writes anything (`lbu v0, 82(a1)` / `bne v0, zero` at
+     * 0x8002EA2C) and returns when the latch is up, so a script that reaches a
+     * stroking piston every tick — which is what a volume the player is
+     * standing in does — neither restarts it nor extends it. Arming reloads the
+     * half-stroke count from the item (0x8002EA44) and nothing else; the phase
+     * is deliberately left where the last run stopped.
+     */
+    if (m->prim == Q2_UF_PISTON) {
+        if (!m->running) {
+            m->running = 1;
+            m->strokes = m->strokes_reset;
+        }
+        return;
+    }
+
+    /*
      * 0x8002752C..0x800275CC, in that order.
      *
      * A closing door reverses at once rather than waiting for the next tick,
@@ -835,6 +862,90 @@ void q2_mover_trigger(q2_mover_set *set, u32 index)
     } else if (m->state == Q2_MV_IDLE) {
         m->delay_timer = m->delay_reset;
         m->wait_timer  = m->wait_reset;
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* PSXPISTON_M — 0x8002CEB8, and not one of the seven states                  */
+/* ------------------------------------------------------------------------- */
+/*
+ * One tick of the oscillator, transcribed instruction for instruction because
+ * every width in it is load-bearing.
+ *
+ *     8002CEF0  mult v1, v0             ; speed (obj+0x3A) * dt [0x800B2DB4]
+ *     8002CEF8  lhu  s1, 32(s0)         ; the phase, as a HALFWORD
+ *     8002CF04  bgez / subu             ; |target|
+ *     8002CF10  sll  a2, v0, 4          ; |target| * 16
+ *     8002CF14  sll  v0,20 / sra a0,16  ; the same, truncated to s16: HALF
+ *     8002CF28  slt  (phase<<16), (|t|<<20)   ; is the phase still on the way out
+ *     8002CF3C  slt  (s16)new, HALF     ; ...and has this step taken it past
+ *     8002CF54  slt  (s16)new, 2*HALF   ; on the way back, past the wrap
+ *     8002CF64  subu s1, new, 2*HALF    ; wrap
+ *     8002CF7C  div  (phase<<11), HALF
+ *     8002CFB4  addiu -1024 / andi FFF  ; into the 4096-step circle
+ *     8002CFC4  lh   sin                ; 0x800A5430[idx].sin
+ *     8002CFCC  addiu +4096             ; a RAISED sine: 0 .. 8192
+ *     8002CFD4  mult (sin+4096), -target
+ *     8002CFDC  bgez / addiu 8191       ; divide rounding toward zero...
+ *     8002CFEC  srl  13                 ; ...by 8192
+ *     8002D048  sh   s1, 18+2*axis(obj) ; every object in the +0x30 chain
+ *
+ * So the displacement is zero at phase 0, exactly -target at HALF, and zero
+ * again at 2*HALF — and the sign is the opposite of every other mover in this
+ * engine, which is why the port's pistons travelled the wrong way.
+ */
+static void piston_tick(q2_mover *m, s32 dt)
+{
+    s32 target = m->target;
+    s32 mag    = target < 0 ? -target : target;
+    s32 half   = (s16)(u16)((u32)mag << 4);   /* sll 20; sra 16 */
+    s32 old    = (s32)m->phase;
+    s32 now    = old + (s32)m->speed * dt;
+    s32 idx, prod;
+    int crossed = 0;
+
+    /*
+     * A ZERO TARGET WOULD TRAP. 0x8002CF80's `bne v0, zero` guards the divide
+     * with a `break 0x1C00`, which on hardware is a fatal exception — the
+     * original is not surviving this case, it is asserting against it. No
+     * PISTON on the disc authors a zero travel; the port stands still rather
+     * than dividing, and says so instead of inventing motion.
+     */
+    if (half == 0) {
+        m->offset = 0;
+        return;
+    }
+
+    if ((s32)((u32)(u16)old << 16) < (s32)((u32)mag << 20)) {
+        /* On the way out: the stroke ends when the phase reaches HALF. */
+        crossed = !((s16)(u16)now < half);
+    } else if (!((s16)(u16)now < 2 * half)) {
+        /* And on the way back, when it reaches the full period. */
+        crossed = 1;
+        now -= 2 * half;
+    }
+
+    m->phase = (u16)now;
+
+    idx  = ((((s32)(s16)(u16)now << 11) / half) - 1024) & 0xFFF;
+    prod = (q2_sin12(idx) + 4096) * -target;
+    if (prod < 0)
+        prod += 8191;
+    m->offset = (s16)(u16)((u32)prod >> 13);
+
+    /*
+     * 0x8002CFF0..0x8002D014. The counter is only touched on a crossing, and
+     * only while it is non-zero; reaching zero clears obj+0x2C (the handler)
+     * and obj+0x52 (the latch) together, so the piston both stops and becomes
+     * re-triggerable on the same tick.
+     */
+    if (crossed) {
+        m->strokes_done++;
+        if (m->strokes) {
+            m->strokes--;
+            if (m->strokes == 0)
+                m->running = 0;
+        }
     }
 }
 
@@ -1102,6 +1213,27 @@ u32 q2_movers_tick_blocked(q2_mover_set *set, s32 dt, u16 player_keys,
          * handler clears obj+0x2C before the generic object tick reaches it. */
         if (m->external)
             continue;
+
+        /*
+         * AND THE PISTON RUNS ITS OWN HANDLER. Its constructor (0x8002D114)
+         * never installs the generic 0x80025658 — the note at its build arm
+         * has said so for a long time, and the generic seven-state machine was
+         * what ran anyway. obj+0x2C is only non-NULL between an arm and the
+         * last half-stroke, so a piston that has not been triggered, or has
+         * finished its count, is not ticked at all.
+         *
+         * It takes no part in the obstruction test either: `blocks_player` is
+         * PISTON's signed item[+18] gate and all thirteen calls on the PAL disc
+         * leave it zero, so no piston on this disc is in the collision world to
+         * be blocked by anything.
+         */
+        if (m->prim == Q2_UF_PISTON) {
+            if (m->running)
+                piston_tick(m, dt);
+            if (m->offset != before)
+                moved++;
+            continue;
+        }
 
         switch (m->state) {
         case Q2_MV_IDLE:

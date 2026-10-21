@@ -171,6 +171,7 @@
  * `q2_cre_shot` below and no `Q2_IMP_FIRE_*` slot, and the absence is the
  * module's own answer rather than an unread one.
  */
+#include "random.h"
 #include <stdlib.h>
 
 #include "ai.h"
@@ -237,7 +238,7 @@ static void ber_play(q2_monster *m, u32 handle_addr)
 /* import +0x14, 0..32767. The thresholds below are fractions of 32768. */
 static s32 ber_rand(void)
 {
-    return (s32)(rand() & 0x7FFF);
+    return (s32)(q2_random_next() & 0x7FFF);
 }
 
 #define BER_R_0_15   4916       /* `random() > 0.15` at module+0xE34 */

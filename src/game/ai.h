@@ -124,6 +124,36 @@ void q2_project_source(const s32 point[3], const s16 distance[3],
 /* ------------------------------------------------------------------------- */
 bool q2_visible(const q2_monster *self, const q2_monster *other);
 
+/* ------------------------------------------------------------------------- */
+/* The client roster, and the rotation over it                                */
+/* ------------------------------------------------------------------------- */
+/*
+ * game.maxclients, 0x800B2C2C. The executable writes it in five places and
+ * only ever writes 1, 2 or 4: 1 for single player (0x80077668, 0x80077D38),
+ * 2 for the two-player modes (0x80077960, 0x80077B48) and 4 for the
+ * four-player one (0x80077778). Four is therefore the ceiling.
+ */
+#define Q2_AI_MAX_CLIENTS 4
+
+/*
+ * Register the clients the sight rotation walks — the console's
+ * g_edicts[1..game.maxclients] (0x800B2FD0, 0x800B2C2C). The pointers are
+ * copied, so the caller's array need not outlive the call; the entities must.
+ * Passing NULL, or a count of zero, empties the roster.
+ */
+void q2_ai_set_clients(q2_monster *const *clients, s32 maxclients);
+
+/*
+ * AI_SetSightClient, 0x8005EC60 — rotate level.sight_client onto the next
+ * client that is in use, alive and not FL_NOTARGET, or NULL when none is.
+ *
+ * QuakeThinkGeneral calls this every tick, immediately after bumping
+ * level.framenum and level.time (0x8007E27C), and it is the whole reason a
+ * dead player stops being acquirable: FindTarget's default arm has no health
+ * test of its own because on the console it never needed one.
+ */
+void q2_ai_set_sight_client(void);
+
 /*
  * Look for a target. Returns true on acquisition, having already run
  * FoundTarget and the sight callback.
@@ -165,6 +195,16 @@ typedef struct q2_trail_spot {
     s32 timestamp;      /* +0x0C */
     s16 yaw;            /* +0x10, the direction of travel between crumbs */
 } q2_trail_spot;
+
+/* Portable save state for the pursuit ring, including its next write slot. */
+typedef struct q2_trail_state {
+    q2_trail_spot spot[Q2_TRAIL_LENGTH];
+    u32 head;
+    bool active;
+} q2_trail_state;
+
+void q2_trail_capture(q2_trail_state *out);
+bool q2_trail_restore(const q2_trail_state *state);
 
 void q2_trail_init(void);
 

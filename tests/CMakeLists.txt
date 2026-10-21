@@ -59,6 +59,11 @@ if(TARGET q2psx)
     target_link_libraries(test_client_split PRIVATE ${split_client_libraries})
     add_dependencies(test_client_split q2psx)
     add_test(NAME split_client COMMAND test_client_split)
+
+    add_executable(test_client_save test_client_save.c ../src/client/gamepad.c)
+    target_link_libraries(test_client_save PRIVATE ${split_client_libraries})
+    add_dependencies(test_client_save q2psx)
+    add_test(NAME save_client COMMAND test_client_save)
 endif()
 
 add_executable(test_pad test_pad.c)

@@ -443,3 +443,36 @@ bool q2_player_spend_resupply(int *continues)
     *continues -= 1;
     return true;
 }
+
+/* ------------------------------------------------------------------------- */
+/* The death camera's roll                                                    */
+/* ------------------------------------------------------------------------- */
+s16 q2_pdeath_seek_ang(s16 cur, s16 want, s32 frac)
+{
+    s32 c = (s32)cur;
+    s32 d = ((s32)want - c) & 0xFFF;
+
+    /* 0x8006FAD0/0x8006FAD4 test bit 11 of the difference, which is the same
+     * bit whether or not it has been masked to twelve first. */
+    if (d & 0x800)
+        c = c - (((4096 - d) * frac + 2047) >> 11);   /* 0x8006FAF4 */
+    else
+        c = c + ((d * frac + 2047) >> 11);            /* 0x8006FADC */
+
+    return (s16)(c & 0xFFF);                          /* 0x8006FAF0 */
+}
+
+s16 q2_pdeath_cam_roll(s16 roll, s32 dt)
+{
+    /*
+     * A dt of zero would freeze the roll outright, which no drawn console frame
+     * can produce — [0x800B2DB4] is at least one field — so the floor is the
+     * port's, and it is the same floor the other per-frame conversions in
+     * main.c take.
+     */
+    if (dt < 1)
+        dt = 1;
+
+    return q2_pdeath_seek_ang(roll, Q2_PDEATH_CAM_ROLL,
+                              Q2_PDEATH_CAM_RATE * dt);
+}

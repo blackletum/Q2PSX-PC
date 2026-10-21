@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "effect.h"     /* only for Q2_ENERGY_PULSE_TICKS, which is 0x80058718 */
 #include "flare.h"
 #include "gte.h"
 #include "lighting.h"
@@ -622,6 +623,316 @@ static void test_muzzle_light(void)
     check(q2_weapon_has_muzzle_light(Q2_WID_MACHINEGUN), "machinegun flashes");
     check(q2_weapon_has_muzzle_light(Q2_WID_CHAINGUN),   "chaingun flashes");
     check(!q2_weapon_has_muzzle_light(Q2_WID_BFG),       "the BFG does not");
+
+    /*
+     * FOUR weapons flash, not two. `q2_weapon_has_muzzle_light` enumerates the
+     * two that go through AddLight; the shotgun and the super shotgun go
+     * through AddTimedLight (0x8004C3FC, 0x8004C6C0) and were invisible to a
+     * sweep of 0x80075C34's call sites. The numbers below are the four words at
+     * 0x800AE9D4, 0x800AE9D8/0x800AE9DA and 0x800AE9E4/0x800AE9E6 plus the two
+     * `addiu a3` literals.
+     */
+    {
+        q2_muzzle_light m;
+
+        check(q2_light_muzzle_preset(Q2_WID_SHOTGUN, &m), "the shotgun flashes");
+        check_eq_i(m.rgb[0], 200, "shotgun flash red");
+        check_eq_i(m.rgb[1], 100, "shotgun flash green");
+        check_eq_i(m.rgb[2], 100, "shotgun flash blue");
+        check_eq_i(m.inner,   600, "shotgun inner, 0x800AE9D8");
+        check_eq_i(m.outer,  1200, "shotgun outer, 0x800AE9DA");
+        check_eq_i(m.ticks,     3, "shotgun lifetime, 0x8004C3BC");
+        check_eq_i(m.origin_offset, 0xA4, "and it lights entity+0xA4");
+        check(!m.random_radii, "the shotgun's radii are fixed, not drawn");
+
+        check(q2_light_muzzle_preset(Q2_WID_SUPER_SHOTGUN, &m),
+              "the super shotgun flashes");
+        check_eq_i(m.inner,   800, "super shotgun inner, 0x800AE9E4");
+        check_eq_i(m.outer,  1600, "super shotgun outer, 0x800AE9E6");
+        check_eq_i(m.ticks,     4, "super shotgun lifetime, 0x8004C680");
+        check_eq_i(m.origin_offset, 0x54,
+                   "but it lights entity+0x54 -- a DIFFERENT field");
+
+        check(q2_light_muzzle_preset(Q2_WID_MACHINEGUN, &m),
+              "the machinegun is in the table too");
+        check_eq_i(m.ticks, 0, "with no lifetime: AddLight, one frame");
+        check(m.random_radii, "and radii from a rand draw");
+        check_eq_i(m.rgb[0], 200, "sharing 0x800AE9D4 with the shotguns");
+
+        check(!q2_light_muzzle_preset(Q2_WID_BFG, NULL),
+              "the BFG still does not flash");
+        check(!q2_light_muzzle_preset(Q2_WID_BLASTER, NULL),
+              "nor the blaster");
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * The TIMED light table — 0x80075D14 in, 0x800741AC out.
+ *
+ * The behaviour worth pinning is the SHAPE OF THE FADE, because it is the whole
+ * of what a timed light is and the port had none of it: the emit happens before
+ * the decrement, so a slot given N ticks is emitted exactly N times, starting
+ * at full size and ending at one N-th, never at zero. The shotgun's three and
+ * the super shotgun's four are the two the disc actually uses.
+ */
+static void test_timed_lights(void)
+{
+    q2_light_world w;
+    s32 pos[3] = { 1000, -200, 3000 };
+    u8  rgb[3] = { Q2_MUZZLE_FLASH_R, Q2_MUZZLE_FLASH_G, Q2_MUZZLE_FLASH_B };
+    int i;
+
+    printf("the timed light table\n");
+
+    memset(&w, 0, sizeof(w));
+
+    /* A zeroed table is sixteen free slots, which is what InitLights leaves. */
+    check_eq_i(q2_light_timed_active(&w), 0, "a fresh table is empty");
+
+    /* The SHOTGUN: 600/1200 for three ticks (0x8004C3FC). */
+    check(q2_light_add_timed(&w, pos, rgb, Q2_SHOTGUN_LIGHT_INNER,
+                             Q2_SHOTGUN_LIGHT_OUTER, Q2_SHOTGUN_LIGHT_TICKS),
+          "the shotgun parks a slot");
+    check_eq_i(q2_light_timed_active(&w), 1, "one slot is counting down");
+
+    /* Nothing reaches the world list until the tick runs — the console raises
+     * it inside ProcessLights, after every model has been drawn. */
+    check_eq_i(w.dynamic_world_count, 0, "and nothing is raised yet");
+
+    {
+        static const s32 want_in[3]  = { 600, 400, 200 };
+        static const s32 want_out[3] = { 1200, 800, 400 };
+
+        for (i = 0; i < 3; i++) {
+            q2_light_world_begin_frame(&w);
+            check_eq_i(q2_light_timed_tick(&w), 1, "the slot emits");
+            check_eq_i(w.dynamic_world_count, 1, "one light on the list");
+            check_eq_i(w.dynamic_world[0].radius, want_out[i],
+                       "outer radius shrinks by remaining/total");
+            check_eq_i(w.dynamic_world[0].radius_sq,
+                       want_out[i] * want_out[i], "and is squared on the way");
+            check_eq_i(w.dynamic_world[0].inner_radius_sq,
+                       want_in[i] * want_in[i], "inner likewise");
+            check_eq_i(w.dynamic_world[0].r, 200, "the colour never scales");
+            check_eq_i(w.dynamic_world[0].x, 1000, "nor does the position");
+            check_eq_i(q2_flare_style_of(w.dynamic_world[0].type), 0,
+                       "style 0: the four bytes at sp+28 are memset first");
+        }
+
+        /* The fourth tick: the counter reached zero on the third EMIT, so there
+         * is no 0/3 frame at all. */
+        q2_light_world_begin_frame(&w);
+        check_eq_i(q2_light_timed_tick(&w), 0, "the fourth tick emits nothing");
+        check_eq_i(q2_light_timed_active(&w), 0, "and the slot is free again");
+    }
+
+    /* The SUPER SHOTGUN: 800/1600 for four (0x8004C6C0) — the biggest flash the
+     * player owns, and the one that raised nothing at all before. */
+    memset(&w, 0, sizeof(w));
+    check(q2_light_add_timed(&w, pos, rgb, Q2_SSHOTGUN_LIGHT_INNER,
+                             Q2_SSHOTGUN_LIGHT_OUTER, Q2_SSHOTGUN_LIGHT_TICKS),
+          "the super shotgun parks a slot");
+    {
+        static const s32 want_out[4] = { 1600, 1200, 800, 400 };
+
+        for (i = 0; i < 4; i++) {
+            q2_light_world_begin_frame(&w);
+            q2_light_timed_tick(&w);
+            check_eq_i(w.dynamic_world[0].radius, want_out[i],
+                       "super shotgun outer radius over four ticks");
+        }
+        q2_light_world_begin_frame(&w);
+        check_eq_i(q2_light_timed_tick(&w), 0, "then it is done");
+    }
+
+    /* The ENERGY PULSE: 800/1300 for four (0x80058758). 1300*3/4 truncates. */
+    memset(&w, 0, sizeof(w));
+    {
+        static const u8  green[3]   = { 0, 255, 0 };
+        static const s32 want_out[4] = { 1300, 975, 650, 325 };
+
+        check(q2_light_add_timed(&w, pos, green, 800, 1300,
+                                 Q2_ENERGY_PULSE_TICKS),
+              "the energy pulse parks a slot");
+        for (i = 0; i < 4; i++) {
+            q2_light_world_begin_frame(&w);
+            q2_light_timed_tick(&w);
+            check_eq_i(w.dynamic_world[0].radius, want_out[i],
+                       "energy pulse outer radius, truncating");
+            check_eq_i(w.dynamic_world[0].g, 255, "and it is green");
+        }
+    }
+
+    /* Sixteen slots, first free wins, and the seventeenth is DROPPED — the scan
+     * at 0x80075D28 has no eviction path. */
+    memset(&w, 0, sizeof(w));
+    for (i = 0; i < Q2_TIMEDLIGHT_SLOTS; i++)
+        check(q2_light_add_timed(&w, pos, rgb, 100, 400, 5), "the table fills");
+    check(!q2_light_add_timed(&w, pos, rgb, 100, 400, 5),
+          "the seventeenth timed light is dropped, not swapped in");
+    check_eq_i(q2_light_timed_active(&w), Q2_TIMEDLIGHT_SLOTS, "all sixteen live");
+
+    /*
+     * Sixteen live slots against a sixteen-light world list: every one gets
+     * through, and then a seventeenth ADDLIGHT has nowhere to go. More
+     * importantly, a slot whose append IS refused still burns a tick — the
+     * branch at 0x800742A8 lands on the decrement, not past it.
+     */
+    q2_light_world_begin_frame(&w);
+    check(q2_light_add_dynamic(&w, pos, rgb, 100, 400, 0, 0),
+          "an ordinary light takes the first world slot");
+    check_eq_i(q2_light_timed_tick(&w), Q2_DYNLIGHT_MAX - 1,
+               "so only fifteen of the sixteen timed lights fit");
+    check_eq_i(q2_light_timed_active(&w), Q2_TIMEDLIGHT_SLOTS,
+               "but all sixteen counted down, including the one dropped");
+    {
+        u32 live = 0;
+        for (i = 0; i < Q2_TIMEDLIGHT_SLOTS; i++)
+            if (w.timed[i].remaining == 4)
+                live++;
+        check_eq_i(live, Q2_TIMEDLIGHT_SLOTS,
+                   "every counter is at 4, the refused one included");
+    }
+
+    /* A frame boundary must not free the table: only InitLights does that. */
+    q2_light_world_begin_frame(&w);
+    check_eq_i(q2_light_timed_active(&w), Q2_TIMEDLIGHT_SLOTS,
+               "a new frame leaves the timed table alone");
+    q2_light_timed_reset(&w);
+    check_eq_i(q2_light_timed_active(&w), 0, "a level load frees it");
+
+    /* Zero ticks writes a zero counter, so the slot reads as free and the light
+     * is never emitted. That is 0x80075D28's own arithmetic, not a guard. */
+    memset(&w, 0, sizeof(w));
+    check(q2_light_add_timed(&w, pos, rgb, 100, 400, 0), "zero ticks is accepted");
+    check_eq_i(q2_light_timed_active(&w), 0, "but leaves the slot free");
+    q2_light_timed_tick(&w);
+    check_eq_i(w.dynamic_world_count, 0, "and emits nothing, ever");
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * ProcessMobileLights' ramp — the arithmetic that repaints the world's own
+ * vertex colours. Nothing calls this yet (world.c owns the vertex colours), so
+ * the numbers below are the only thing holding it to the disassembly.
+ *
+ * A 600/1200 light is the worked example: 1440000 needs three quarterings to
+ * fit in 32767, which leaves inner 5625, outer 22500 and den 65.
+ */
+static void test_mobile_ramp(void)
+{
+    q2_light      l;
+    q2_light_ramp r;
+
+    printf("the mobile light ramp\n");
+
+    memset(&l, 0, sizeof(l));
+    l.r = 200; l.g = 100; l.b = 100;
+    l.radius          = 1200;
+    l.inner_radius_sq = 600u * 600u;
+    l.radius_sq       = 1200u * 1200u;
+
+    q2_light_ramp_begin(&r, &l);
+    check_eq_i(r.shift,    3, "three quarterings to get under 32767");
+    check_eq_i(r.outer_sq, 22500, "outer square after them");
+    check_eq_i(r.inner_sq,  5625, "inner square after them");
+    check_eq_i(r.den, (22500 - 5625) / 256, "the ramp denominator, truncated");
+    check_eq_i(r.den, 65, "which is 65, not 65.9");
+
+    /* The box test: pos +/- the RADIUS, six strict compares. */
+    {
+        s32 lp[3]  = { 0, 0, 0 };
+        s32 lo[3]  = { 1200, -10, -10 };
+        s32 hi[3]  = { 2000,  10,  10 };
+
+        check(!q2_light_ramp_reaches(&r, lp, lo, hi, 0),
+              "a brush whose face exactly touches the box is rejected: strict");
+        lo[0] = 1199;
+        check(q2_light_ramp_reaches(&r, lp, lo, hi, 0),
+              "one unit inside and it is not");
+        check(!q2_light_ramp_reaches(&r, lp, lo, hi, Q2_LIGHT_NO_MOBILE),
+              "0x00800000 opts the object out whatever the box says");
+        check(q2_light_ramp_reaches(&r, lp, lo, hi, ~Q2_LIGHT_NO_MOBILE),
+              "and every other flag bit is ignored");
+    }
+
+    {
+        s32 local[3] = { 0, 0, 0 };
+        s32 out[3];
+        s16 p[3];
+
+        /* Inside the inner radius: the full colour, no ramp evaluated. */
+        p[0] = 300; p[1] = 0; p[2] = 0;
+        check(q2_light_ramp_point(&r, p, local, out), "a near point is lit");
+        check_eq_i(out[0], 200, "and takes the light's red whole");
+        check_eq_i(out[1], 100, "green whole");
+        check_eq_i(out[2], 100, "blue whole");
+
+        /* Mid-ramp. 800 >> 3 = 100, squared 10000; t = 4375, t/65 = 67,
+         * s = 188, and 188*200 >> 8 = 146. */
+        p[0] = 800;
+        check(q2_light_ramp_point(&r, p, local, out), "a mid point is lit");
+        check_eq_i(out[0], 146, "red on the ramp");
+        check_eq_i(out[1],  73, "green on the ramp");
+
+        /* Past the outer radius the point is skipped outright. */
+        p[0] = 1300;
+        check(!q2_light_ramp_point(&r, p, local, out),
+              "a point past the outer radius contributes nothing");
+
+        /*
+         * And exactly ON the outer radius the contribution is NEGATIVE, because
+         * den was truncated down: 22500 - 5625 = 16875, 16875/65 = 259, and
+         * 255 - 259 = -4. -4*200 = -800, truncated toward zero by 256 = -3.
+         * The console adds that as a signed word, so the outermost shell of a
+         * mobile light darkens the world very slightly.
+         */
+        p[0] = 1200;
+        check(q2_light_ramp_point(&r, p, local, out),
+              "a point exactly on the outer radius is still in range");
+        check_eq_i(out[0], -3, "and its contribution is negative, not 253");
+        check_eq_i(out[1], -1, "green likewise");
+
+        /* The add clamps at 255 and has no floor. */
+        {
+            u8  v[3] = { 200, 200, 200 };
+            s32 c[3] = { 100, 10, -3 };
+
+            q2_light_ramp_add(v, c);
+            check_eq_i(v[0], 255, "the add clamps at 255");
+            check_eq_i(v[1], 210, "and otherwise just adds");
+            check_eq_i(v[2], 197, "a negative contribution subtracts");
+        }
+    }
+
+    /* The point's four slot bytes, through InitLights' table at 0x800E1018. */
+    {
+        u32 block, poly, corner;
+
+        check(!q2_light_point_slot(0xFF, &block, &poly, &corner),
+              "0xFF ends the slot list");
+
+        check(q2_light_point_slot(0, &block, &poly, &corner), "slot 0 decodes");
+        check_eq_i(block, 0, "block 0");
+        check_eq_i(poly, 0, "poly 0");
+        check_eq_i(corner, 0, "corner 0");
+        check_eq_i(q2_light_packet_offset(0), 4, "the 4-byte packet tag");
+
+        check(q2_light_point_slot(7, &block, &poly, &corner), "slot 7 decodes");
+        check_eq_i(poly, 1, "byte 7 is poly 1");
+        check_eq_i(corner, 3, "corner 3");
+        check_eq_i(q2_light_packet_offset(7), 52 + 4 + 36, "52 + 4 + 12*3");
+
+        check(q2_light_point_slot(0x80, &block, &poly, &corner),
+              "bit 7 still decodes");
+        check_eq_i(block, 1, "but selects the second packet base");
+        check_eq_i(poly, 0, "with the poly index wrapping at 32");
+        check_eq_i(q2_light_packet_offset(0x80), 4,
+                   "so its table entry repeats the first block's");
+        check_eq_i(q2_light_packet_offset(0xFE), 52 * 31 + 4 + 24,
+                   "and the last usable byte lands on poly 31, corner 2");
+    }
 }
 
 
@@ -964,6 +1275,8 @@ int main(void)
     test_flare_geometry();
     test_glow_fade();
     test_dynamic();
+    test_timed_lights();
+    test_mobile_ramp();
     test_muzzle_light();
     test_flklight();
 

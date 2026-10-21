@@ -14,11 +14,16 @@
  * A disc is not available to the test suite, so this pins the arithmetic rather
  * than the correspondence. If someone later "simplifies" the divisor, or drops
  * the inclusive +1, these fail.
+ *
+ * Two more sections have since joined it: block A's face draw order, and the
+ * LEVEL-LOAD FACE REWRITE that makes the explosion additive — the one thing on
+ * this disc whose drawn face flags differ from its stored ones.
  */
 #include <stdio.h>
 #include <string.h>
 
 #include "model.h"
+#include "surface.h"
 
 static int g_failures;
 static int g_checks;
@@ -371,6 +376,120 @@ static void test_draw_order_rejects_a_bad_block(void)
              "and so is an entry past the eighth");
 }
 
+/* ------------------------------------------------------------------------- */
+/* The level-load face rewrite                                                */
+/* ------------------------------------------------------------------------- */
+/*
+ * `PreInitExplosion` (0x8005AAA4), reached once a level from the class table's
+ * +0x14 column by `RemapModels` (0x8007E6E4), runs
+ * `BodgeModelDataTransparent` (0x8005B938) over every face of the `Explosion`
+ * model. Four instructions:
+ *
+ *     lbu v0, 12(a0) ; andi v0, v0, 0x1F ; ori v0, v0, 0x40 ; sb v0, 12(a0)
+ *
+ * so the texture page survives and the blend selector becomes 2 — which is
+ * codeTable[2] = ABE and blendTable[2] = 32, i.e. B+F, additive.
+ *
+ * The AND BEFORE THE OR is the load-bearing part and the reason this is pinned
+ * rather than left to the one-liner: a reader who writes `flags | 0x40` gets the
+ * same answer on all 36 of BASE1's faces (they are all 0x05) and a different one
+ * the moment a face arrives with any other selector already set.
+ */
+#define FACE_STRIDE 16
+static u8 g_faces[4 * FACE_STRIDE];
+
+static void build_faces(q2_model *m, const u8 *flags, const u8 *texture, u32 n)
+{
+    u32 i;
+
+    memset(g_faces, 0, sizeof(g_faces));
+    memset(m, 0, sizeof(*m));
+
+    for (i = 0; i < n; i++) {
+        g_faces[i * FACE_STRIDE + 12] = flags[i];
+        g_faces[i * FACE_STRIDE + 13] = texture[i];
+    }
+
+    m->base           = g_faces;
+    m->size           = sizeof(g_faces);
+    m->hdr.num_faces  = (u16)n;
+    m->hdr.ofs_faces  = 0;
+}
+
+static void test_bodge_is_keyed_on_the_class_name(void)
+{
+    check_eq(q2_model_class_bodges_transparent("Explosion"), 1,
+             "0x800A3CF8's name is the one that carries 0x8005AAA4");
+    check_eq(q2_model_class_bodges_transparent("EXPLOSION"), 1,
+             "GetModelHdr's compare ignores case, so this does too");
+    /* The other three -1 records in the same run of the table, whose PreInit is
+     * PreInitDebris (0x80064F70) and touches no face data. */
+    check_eq(q2_model_class_bodges_transparent("Debris1"), 0,
+             "Debris1 registers a model, it does not rewrite one");
+    /* 0x800ACE00, which 0 of the disc's 164 CastLists carry and which has no
+     * class record at all — a spawn name, not a class name. */
+    check_eq(q2_model_class_bodges_transparent("Hexplosion"), 0,
+             "Hexplosion is not in the class table");
+    check_eq(q2_model_class_bodges_transparent("Explosions"), 0,
+             "and the match is the whole name, not a prefix");
+    check_eq(q2_model_class_bodges_transparent(NULL), 0, "NULL is rejected");
+    check_eq(q2_model_class_bodges_transparent(""), 0, "and so is empty");
+}
+
+static void test_faces_are_untouched_without_the_bodge(void)
+{
+    /* BASE1 model 14 `Explosion`: 36 faces, every one of them flags 0x05 and
+     * texture 59 on the disc. */
+    static const u8 flags[2]   = { 0x05, 0x05 };
+    static const u8 texture[2] = { 59, 59 };
+    q2_model m;
+    q2_model_face f;
+
+    build_faces(&m, flags, texture, 2);
+
+    check_eq(q2_model_get_face(&m, 0, &f), 1, "face 0 reads");
+    check_eq(f.flags, 0x05, "the file's own byte, on an unbodged model");
+    check_eq(q2_model_face_page(&f), 5, "page 5");
+    check_eq(q2_model_face_blend(&f), 0, "selector 0 — opaque, as on the disc");
+    check_eq(q2_surf_selector_semi(q2_model_face_blend(&f)), 0,
+             "and the rasteriser is told not to blend it");
+}
+
+static void test_bodge_forces_the_additive_selector(void)
+{
+    static const u8 flags[4]   = { 0x05, 0x1F, 0xE5, 0x00 };
+    static const u8 texture[4] = { 59, 180, 7, 0 };
+    q2_model m;
+    q2_model_face f;
+
+    build_faces(&m, flags, texture, 4);
+    m.bodge_transparent = true;
+
+    check_eq(q2_model_get_face(&m, 0, &f), 1, "face 0 reads");
+    check_eq(f.flags, 0x45, "0x05 -> 0x45: page 5 kept, selector 2 forced");
+    check_eq(q2_model_face_page(&f), 5, "the texture page survives");
+    check_eq(q2_model_face_blend(&f), 2, "selector 2");
+    check_eq(q2_surf_selector_semi(q2_model_face_blend(&f)), 1,
+             "codeTable[2] sets ABE, so the face is drawn blended");
+    check_eq(q2_surf_selector_blend(q2_model_face_blend(&f)), PSX_BLEND_ADD,
+             "blendTable[2] is 32, which is ABR 1: B+F, additive");
+    check_eq(f.texture, 59, "and the CLUT byte at +13 is not touched at all");
+
+    /* The highest page a model face can name. */
+    check_eq(q2_model_get_face(&m, 1, &f), 1, "face 1 reads");
+    check_eq(f.flags, 0x5F, "0x1F -> 0x5F: page 31 kept");
+    check_eq(f.texture, 180, "the highest `texture` on the disc, untouched");
+
+    /* The andi before the ori: a selector that is already set is REPLACED, not
+     * merged. 0xE5 is selector 7 on page 5; `flags | 0x40` would leave 0xE5. */
+    check_eq(q2_model_get_face(&m, 2, &f), 1, "face 2 reads");
+    check_eq(f.flags, 0x45, "0xE5 -> 0x45, not 0xE5: the AND runs first");
+    check_eq(q2_model_face_blend(&f), 2, "so the selector is 2 and not 7");
+
+    check_eq(q2_model_get_face(&m, 3, &f), 1, "face 3 reads");
+    check_eq(f.flags, 0x40, "0x00 -> 0x40: page 0 is still page 0");
+}
+
 int main(void)
 {
     puts("block D: the move table");
@@ -390,6 +509,14 @@ int main(void)
     test_draw_order_walks_the_stream();
     test_zero_byte_is_an_escape();
     test_draw_order_rejects_a_bad_block();
+
+    puts("");
+    puts("the level-load face rewrite");
+    puts("===========================");
+
+    test_bodge_is_keyed_on_the_class_name();
+    test_faces_are_untouched_without_the_bodge();
+    test_bodge_forces_the_additive_selector();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;

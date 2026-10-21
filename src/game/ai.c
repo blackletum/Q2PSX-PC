@@ -1,3 +1,4 @@
+#include "random.h"
 #include "ai.h"
 
 #include <stdlib.h>
@@ -307,6 +308,23 @@ static q2_trail_spot g_trail[Q2_TRAIL_LENGTH];
 static int  g_trail_head;
 static bool g_trail_active;
 
+void q2_trail_capture(q2_trail_state *out)
+{
+    if (!out) return;
+    memcpy(out->spot, g_trail, sizeof(g_trail));
+    out->head = (u32)g_trail_head;
+    out->active = g_trail_active;
+}
+
+bool q2_trail_restore(const q2_trail_state *state)
+{
+    if (!state || state->head >= Q2_TRAIL_LENGTH) return false;
+    memcpy(g_trail, state->spot, sizeof(g_trail));
+    g_trail_head = (int)state->head;
+    g_trail_active = state->active;
+    return true;
+}
+
 #define TRAIL_NEXT(i) (((i) + 1) & (Q2_TRAIL_LENGTH - 1))
 #define TRAIL_PREV(i) (((i) - 1) & (Q2_TRAIL_LENGTH - 1))
 
@@ -497,7 +515,7 @@ const q2_trail_spot *q2_trail_pick_next(q2_monster *self)
  */
 static s32 rand15(void)
 {
-    return (s32)(rand() & 0x7FFF);
+    return (s32)(q2_random_next() & 0x7FFF);
 }
 
 static s32 random_scaled(s32 n)
@@ -720,6 +738,149 @@ void q2_m_react_to_damage(q2_monster *targ, q2_monster *attacker)
      * 0x800627D4. */
     if (!(targ->aiflags & Q2_AI_DUCKED))
         q2_found_target(targ);
+}
+
+/* ------------------------------------------------------------------------- */
+/* AI_SetSightClient — 0x8005EC60, G_AI.C line 61                             */
+/* ------------------------------------------------------------------------- */
+/*
+ * WHO FINDTARGET IS ALLOWED TO NOTICE, recomputed once a tick.
+ *
+ * This had no counterpart in the port at all, and its absence is why a dead
+ * player could still be acquired. `q2_monster_set_wake` wrote
+ * `level.sight_client` once, at zone wake, and nothing ever revisited it —
+ * so FindTarget's default arm kept handing every creature a pointer to a
+ * corpse. The corpse could not be SHOT (M_CheckAttack reads the stand-in's
+ * real health), but it could still be acquired, and every acquisition ran
+ * FoundTarget: the module's sight sound played, `sight_entity` was published,
+ * that woke the next creature through FindTarget's first arm, and
+ * ai_checkattack's "he's dead Jim" arm dropped the enemy again on the next
+ * tick so the whole thing repeated for as long as the level ran.
+ *
+ * On the console it never starts, because the acquisition never happens:
+ * sight_client is NULL from the first frame after the player's health reaches
+ * zero. QuakeThinkGeneral bumps level.framenum and level.time
+ * (0x8007E264..0x8007E278) and its very next instruction is `jal 0x8005EC60`
+ * (0x8007E27C) — the only call to this function in the whole executable.
+ *
+ * The rotation itself: from the index of the client currently held it steps
+ * FORWARD one, wraps past game.maxclients (0x800B2C2C) back to 1, and takes
+ * the first client that passes all three of
+ *
+ *     ent+0x1C & 0x20000000      in use            0x8005ECFC
+ *     ent+0x24 -> lh +0x108 > 0  the actor's health  0x8005ED10 / 0x8005ED18
+ *     !(ent+0x20 & 0x20)         FL_NOTARGET clear   0x8005ED28
+ *
+ * When it comes back round to the index it started from with nothing accepted
+ * it stores NULL (0x8005ED3C `sw zero, 8(t1)`). Note the order: the sweep
+ * starts at start+1, not at start, so with two live clients the pointer
+ * ALTERNATES every tick rather than sticking on whoever was found first. That
+ * is deliberate — it is how the original spreads sightings around a deathmatch
+ * — and it is transcribed here even though single player only ever has one
+ * client, because the four-player mode has four.
+ */
+
+/*
+ * g_edicts[1..game.maxclients], 0x800B2FD0 + 324 and 0x800B2C2C. The console
+ * walks a contiguous edict array and recovers an index by dividing a pointer
+ * difference; this port has no such array, so the roster is registered as
+ * pointers and the index is a search. `q2_monster_set_wake` is the only writer,
+ * which mirrors the console rebuilding g_edicts for every level.
+ */
+static q2_monster *g_ai_clients[Q2_AI_MAX_CLIENTS];
+static s32         g_ai_maxclients;
+
+void q2_ai_set_clients(q2_monster *const *clients, s32 maxclients)
+{
+    s32 i;
+
+    memset(g_ai_clients, 0, sizeof(g_ai_clients));
+    g_ai_maxclients = 0;
+
+    if (!clients || maxclients <= 0)
+        return;
+
+    if (maxclients > Q2_AI_MAX_CLIENTS)
+        maxclients = Q2_AI_MAX_CLIENTS;
+
+    for (i = 0; i < maxclients; i++)
+        g_ai_clients[i] = clients[i];
+
+    g_ai_maxclients = maxclients;
+}
+
+/* g_edicts[i] for the console's own 1-based client index. Out of range answers
+ * NULL, which the accept gate below then rejects. */
+static q2_monster *client_edict(s32 i)
+{
+    if (i < 1 || i > g_ai_maxclients)
+        return NULL;
+    return g_ai_clients[i - 1];
+}
+
+void q2_ai_set_sight_client(void)
+{
+    s32 start = 1;
+    s32 check;
+    s32 i;
+
+    /*
+     * Where the sweep starts. With no client held the console jumps straight
+     * to index 1 (0x8005EC74/0x8005EC78); otherwise it recovers the held
+     * client's index from its offset into g_edicts, as an EXACT division by
+     * sizeof(edict_t) = 324 — `lo(offset * 0x781948B1) >> 2` at
+     * 0x8005EC8C..0x8005EC9C, 0x781948B1 being the inverse of 81 modulo 2^32
+     * and 324 being 4 * 81. Pointers here are not an array, so this is a
+     * search, and a sight_client that is not on the roster at all (a level
+     * teardown left it behind) falls back to 1 rather than to a garbage index.
+     */
+    if (q2_level_state.sight_client) {
+        for (i = 1; i <= g_ai_maxclients; i++) {
+            if (g_ai_clients[i - 1] == q2_level_state.sight_client) {
+                start = i;
+                break;
+            }
+        }
+    }
+
+    check = start;
+    for (;;) {
+        q2_monster *ent;
+
+        /*
+         * Step forward, then wrap. The increment happens BEFORE the bound test
+         * on the console too — a1 is already start+1 when the loop head at
+         * 0x8005ECDC runs `slt v0, maxclients, a1`, and the wrap arm at
+         * 0x8005ECE8/0x8005ECEC resets both the pointer and the index to 1.
+         */
+        check++;
+        if (check > g_ai_maxclients)
+            check = 1;
+
+        ent = client_edict(check);
+
+        /* The three gates, in the console's order. `health` is the ACTOR's
+         * halfword at +0x108, reached through entity+0x24; it is the one the
+         * port keeps on the monster itself, and on the sight stand-in it is
+         * the live player's (q2_creature_world_tick). */
+        if (ent && q2_ent_inuse(ent)
+            && ent->health > 0
+            && !(ent->flags & Q2_FL_NOTARGET)) {
+            q2_level_state.sight_client = ent;   /* 0x8005EC80 */
+            return;
+        }
+
+        /* Back where we began with nothing taken. 0x8005ED34 `bne a1, a2`. */
+        if (check == start)
+            break;
+    }
+
+    /*
+     * Nobody. 0x8005ED40 `sw zero, 8(t1)`, t1 being &level.framenum, so this
+     * is level.sight_client. An empty roster reaches here after probing one
+     * slot, which is also what the console does when game.maxclients is 0.
+     */
+    q2_level_state.sight_client = NULL;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1155,7 +1316,7 @@ static bool checkattack_decide(q2_monster *m)
      * (0x8005DB04's `rand() & 3`), then melee if there is one and a missile
      * otherwise. */
     if (q2_enemy_range == Q2_RANGE_MELEE) {
-        if (skill == 0 && (rand() & 3) != 0)
+        if (skill == 0 && (q2_random_next() & 3) != 0)
             return false;
 
         m->attack_state = m->melee ? Q2_AS_MELEE : Q2_AS_MISSILE;
@@ -1178,7 +1339,7 @@ static bool checkattack_decide(q2_monster *m)
     if (skill == 0)      chance /= 2;
     else if (skill >= 2) chance *= 2;
 
-    if ((rand() & 0xFFF) < chance) {
+    if ((q2_random_next() & 0xFFF) < chance) {
         m->attack_state = Q2_AS_MISSILE;
         /*
          * THE RELOAD IS TWO SECONDS, WHICH IS TWENTY TICKS.
@@ -1196,13 +1357,13 @@ static bool checkattack_decide(q2_monster *m)
          * `addiu a1, zero, 10` at 0x8005D2F0 is the same conversion.
          */
         m->attack_finished = q2_level_state.time
-                           + Q2_AI_SECONDS(2) * (rand() & 0x7FFF) / 32767;
+                           + Q2_AI_SECONDS(2) * (q2_random_next() & 0x7FFF) / 32767;
         return true;
     }
 
     /* A flyer that did not shoot picks a strafe instead — 9830 of 32768. */
     if (m->flags & Q2_FL_FLY)
-        m->attack_state = ((rand() & 0x7FFF) < 9830) ? Q2_AS_SLIDING
+        m->attack_state = ((q2_random_next() & 0x7FFF) < 9830) ? Q2_AS_SLIDING
                                                      : Q2_AS_STRAIGHT;
     return false;
 }

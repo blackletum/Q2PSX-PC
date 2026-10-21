@@ -406,6 +406,41 @@ typedef struct q2_monster {
     s16 angles[3];          /* +0x10  yaw is angles[2] (+0x14)               */
     s16 mins[3];            /* the movement hull, from 0x8005CCF4            */
     s16 maxs[3];
+
+    /*
+     * THE HIT CYLINDER, AND IT IS A DIFFERENT VOLUME FROM THE HULL ABOVE.
+     *
+     * `SetupBoxDrop` (COLL.C 0x80050FA0) writes two independent boxes from two
+     * independent arguments. Its `a2` pair — 286 / 572 at 0x800AECEC for every
+     * creature — becomes the symmetric movement hull at obj+0x18..0x22, i.e.
+     * `mins`/`maxs` above (0x80050FD4..0x80051022). Its FIFTH argument, the
+     * word the caller leaves at sp+0x10, becomes obj+0x40 / obj+0x42 —
+     * entity+0x94 and entity+0x96, because the collision object is cre+0x54 —
+     * at 0x80051030..0x80051044, and nothing else ever writes them.
+     *
+     * The creature spawner fills that fifth argument from the creature's own
+     * MODEL: 0x8007E50C `jal GetCreHitSize` (MODELS.C 0x8006DC1C) with the
+     * creature in a1, and the result word is shuffled into the outgoing
+     * argument slot at 0x8007E534..0x8007E544. GetCreHitSize is two facts:
+     * with a model bound at cre+0x10 it returns the model header's `lhu +0x18`
+     * and `lhu +0x1A` — q2_model_header's ext0 and ext1 — and with no model it
+     * returns the literals 286 and 600 (0x8006DC6C..0x8006DC78). Six hundred,
+     * not 572: the fallback is not the hull's pair.
+     *
+     * LineIntersectCreCylinder (COLL.C 0x800544EC) reads only this pair.
+     * 0x8005474C `lh v1, 148(v0)` is the horizontal radius and
+     * 0x80054830..0x80054840 builds the vertical slab as
+     * [origin.y + 286 - height, origin.y + 286] — from the feet upward by the
+     * model's own height. So a Soldier is shot at as radius 124, not 286, and
+     * a Tank Commander reaches far above the 286 a fixed cylinder stops at.
+     *
+     * This port used to derive both numbers from `mins`/`maxs`, which are the
+     * same ±286 for every creature in the game, so every creature was shot at
+     * as one 286-radius, 572-tall cylinder. See q2_monster_bind_hit_size.
+     */
+    s16 hit_radius;         /* +0x94  GetCreHitSize's first halfword          */
+    s16 hit_height;         /* +0x96  its second; the slab hangs off the feet */
+
     s16 view_height;        /* +0x4C  added to origin[1] by visible()        */
 
     /* --- identity -------------------------------------------------------- */
@@ -968,12 +1003,22 @@ s32 q2_monster_drop_ammo_static(void);
  * off. A console corpse does not fall because a console corpse is not an
  * entity any more.
  *
- * THE VOLUME RESCALE, 0x8007F77C, is two divides on the actor's own box:
- * `+0x96 /= 4` (0x8007F794, an arithmetic shift with the usual +3 bias) and
- * `+0x94 = (3 * +0x94) / 2` (0x8007F79C..0x8007F7B4). So a body becomes half as
- * tall again as it is wide and a quarter as tall as it was — id's
- * `self->maxs[2] = -8` generalised. That is what stops a corpse blocking a
- * doorway at head height.
+ * THE VOLUME RESCALE, 0x8007F77C — MAIN.SYM names it `QuakeDeadHitCollision`
+ * (QENTS.C line 1810), and the name is the point. It is two divides and they
+ * land on the HIT CYLINDER, not on the movement hull: `+0x42 /= 4`
+ * (0x8007F794, an arithmetic shift with the usual +3 bias) and
+ * `+0x40 = (3 * +0x40) / 2` (0x8007F79C..0x8007F7B4) on the collision object
+ * it is handed at 0x8007F0E0 (a0 = cre+0x54), i.e. entity+0x96 and
+ * entity+0x94 — `hit_height` and `hit_radius`. It never touches obj+0x18..0x22,
+ * so a corpse keeps the ±286 movement hull it stood up in. So a body becomes
+ * half again as wide and a quarter as tall as it was — id's
+ * `self->maxs[2] = -8` generalised. That is what stops a corpse being shot at
+ * at head height.
+ *
+ * This port used to apply those two divides to `mins`/`maxs` instead, because
+ * that is where it derived the cylinder from; the hull was the wrong box and
+ * the numbers it produced were the wrong numbers (143 tall rather than a
+ * quarter of the model's own height).
  *
  * THE HANDLER, 0x8007F71C, makes four calls, in this order:
  *
@@ -1083,6 +1128,23 @@ s32 q2_monster_drop_ammo_static(void);
  * port's pass does not.
  */
 void q2_monster_corpse_detach(q2_monster *m);
+
+/*
+ * GetCreHitSize (MODELS.C 0x8006DC1C) as the spawner uses it, 0x8007E50C.
+ *
+ * `has_model` is `cre+0x10 != NULL`, the test at 0x8006DC24; `ext0` and `ext1`
+ * are the model header's two halfwords at +0x18 and +0x1A, which
+ * q2_model_header already parses (src/formats/model.h). With no model the pair
+ * is 286 / 600, the literals at 0x8006DC6C and 0x8006DC74 — NOT the movement
+ * hull's 286 / 572, which is a different constant in a different argument.
+ *
+ * Call it once when the creature's model is bound and before anything shoots
+ * at it. A creature nobody calls it for keeps q2_monster_init's seed, which is
+ * the same no-model fallback, so the worst an unbound creature gets is the
+ * cylinder the console gives a creature with no model.
+ */
+void q2_monster_bind_hit_size(q2_monster *m, bool has_model,
+                              s16 ext0, s16 ext1);
 
 typedef enum q2_corpse_dissolve {
     Q2_CORPSE_DISSOLVE_NONE = 0,  /* the gate answered 0: the handler goes on */

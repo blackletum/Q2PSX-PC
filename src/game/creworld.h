@@ -47,10 +47,9 @@
  * as "could not start", so every creature was told it was buried in the floor it
  * stood on and none of them moved. See openquestions #48.
  *
- * What it still cannot do is anything its module's think functions have not been
- * transcribed for. The Soldier's are written; the other six run on the generic
- * implementation, which animates and chases correctly and performs no per-frame
- * action, so a Tank Commander hunts you down and swings without firing.
+ * The seven shipped modules use their transcribed callbacks and decoded
+ * per-frame actions through crebind and cre_actions. Unsupported actions are
+ * counted in the action diagnostics rather than silently treated as attacks.
  */
 #ifndef Q2PSX_CREWORLD_H
 #define Q2PSX_CREWORLD_H
@@ -183,6 +182,36 @@ typedef struct q2_creature_world {
 
     bool               ready;
 } q2_creature_world;
+
+/*
+ * HALF THE SIDE OF A PATH CORNER'S TRIGGER CUBE.
+ *
+ * A corner has no stored hull and is never linked, so its absolute bounds are
+ * invented on demand: CalcAbsFromCreBox (Q_SHARED.C 0x8005CB00) short-circuits
+ * on the class byte 114 and writes origin - 96 / origin + 96 on all three axes
+ * (0x8005CB28, 0x8005CB38, 0x8005CB48 and 0x8005CB58, 0x8005CB68, 0x8005CB78).
+ * The per-axis accessors agree — getminsvx/y/z and getmaxsvx/y/z at 0x8005CBBC,
+ * 0x8005CBF0, 0x8005CC24, 0x8005CC58, 0x8005CC8C and 0x8005CCC0 return the same
+ * ∓96 for a corner, which is where corner_touch's teleport correction gets its
+ * mins.y.
+ *
+ * So arriving at a corner is "the creature's hull overlaps a 192-unit cube",
+ * not "the corner's point is inside the creature's hull".
+ */
+#define Q2_CORNER_ABS_EXTENT  96
+
+/*
+ * Has this creature reached that corner? — BoxEdicts' per-candidate overlap,
+ * 0x8005C81C (CalcAbsFromCreBox on the candidate) followed by 0x8005C828
+ * (VectBoxOverlap), for the one candidate class this port keeps in an array
+ * rather than an area tree.
+ *
+ * Exposed because it is the whole of what "arrival" means and it used to be
+ * wrong: the test was `corner->pos` inside the creature's hull, a 286-unit
+ * window per axis against the console's 382, and with no vertical slack at all
+ * for a corner authored below the floor a creature settles on.
+ */
+bool q2_creature_corner_overlaps(const q2_monster *m, const q2_monster *corner);
 
 /*
  * Decode every creature module this map ships, and place every spawn record

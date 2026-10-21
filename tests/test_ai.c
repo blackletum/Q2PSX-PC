@@ -11,6 +11,7 @@
  * map to behaviour — are not asserted, because there is nothing yet to be
  * right or wrong about.
  */
+#include "random.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -674,6 +675,154 @@ static void test_acquisition(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * AI_SetSightClient, 0x8005EC60, and the tick that runs it (0x8007E27C).
+ *
+ * The port had no equivalent: `q2_monster_set_wake` wrote `sight_client` once
+ * and nothing revisited it, so a dead player stayed acquirable for the rest of
+ * the level. Everything below is the executable's, including the parts that
+ * only a deathmatch reaches.
+ */
+static void test_sight_client(void)
+{
+    q2_monster a, b;
+    q2_monster *roster[2];
+    q2_monster_set set;
+
+    printf("AI_SetSightClient\n");
+    q2_level_reset();
+
+    make_player(&a, 0, 3000);
+    make_player(&b, 0, -3000);
+    a.health = 100;
+    b.health = 100;
+    roster[0] = &a;
+    roster[1] = &b;
+
+    /* --- one client, which is single player (game.maxclients = 1, the value
+     * written at 0x80077668) ------------------------------------------------ */
+    q2_ai_set_clients(roster, 1);
+
+    q2_level_state.sight_client = NULL;
+    q2_ai_set_sight_client();
+    check(q2_level_state.sight_client == &a,
+          "the live player becomes the sight client");
+
+    /* The health gate, 0x8005ED10/0x8005ED18: `lh` off the actor then `blez`,
+     * so zero is dead and so is anything negative. */
+    a.health = 0;
+    q2_ai_set_sight_client();
+    check(q2_level_state.sight_client == NULL,
+          "a player at zero health stops being the sight client");
+
+    a.health = -50;
+    q2_ai_set_sight_client();
+    check(q2_level_state.sight_client == NULL, "and one past zero too");
+
+    a.health = 100;
+    q2_ai_set_sight_client();
+    check(q2_level_state.sight_client == &a, "healing them back gets it again");
+
+    /* FL_NOTARGET, 0x8005ED28. */
+    a.flags |= Q2_FL_NOTARGET;
+    q2_ai_set_sight_client();
+    check(q2_level_state.sight_client == NULL, "FL_NOTARGET rejects a client");
+    a.flags = (u16)(a.flags & ~(unsigned)Q2_FL_NOTARGET);
+
+    /* In use, 0x8005ECFC: entity+0x1C & 0x20000000. */
+    a.in_use = false;
+    q2_ai_set_sight_client();
+    check(q2_level_state.sight_client == NULL, "so does not being in use");
+    a.in_use = true;
+
+    /* --- two clients: the sweep starts at start+1, so it alternates --------- */
+    q2_ai_set_clients(roster, 2);
+
+    q2_level_state.sight_client = NULL;
+    q2_ai_set_sight_client();
+    check(q2_level_state.sight_client == &b,
+          "with none held the sweep starts at index 1 and takes index 2");
+
+    q2_ai_set_sight_client();
+    check(q2_level_state.sight_client == &a,
+          "and wraps past maxclients back to index 1");
+
+    q2_ai_set_sight_client();
+    check(q2_level_state.sight_client == &b,
+          "so two live clients alternate every tick");
+
+    /* Kill one and the rotation settles on the survivor rather than flicking
+     * between a live client and a corpse. */
+    a.health = 0;
+    q2_ai_set_sight_client();
+    check(q2_level_state.sight_client == &b, "a dead client is skipped");
+    q2_ai_set_sight_client();
+    check(q2_level_state.sight_client == &b, "and the survivor is kept");
+
+    b.health = 0;
+    q2_ai_set_sight_client();
+    check(q2_level_state.sight_client == NULL,
+          "with every client dead it comes back round and stores NULL");
+
+    /* An empty roster accepts nothing. */
+    a.health = 100;
+    q2_level_state.sight_client = &a;
+    q2_ai_set_clients(NULL, 0);
+    q2_ai_set_sight_client();
+    check(q2_level_state.sight_client == NULL, "an empty roster clears it");
+
+    /*
+     * --- and the whole point: the tick runs it.
+     *
+     * This is what was missing. q2_monster_set_tick bumps the clock and, on the
+     * console, jumps straight to AI_SetSightClient (0x8007E278 then 0x8007E27C).
+     * Without that call the assertions below both fail: the pointer written at
+     * wake simply stays there, corpse or not.
+     */
+    memset(&set, 0, sizeof(set));
+    a.health = 100;
+    b.health = 100;
+    q2_ai_set_clients(roster, 1);
+    q2_level_state.sight_client = NULL;
+
+    q2_monster_set_tick(&set);
+    check(q2_level_state.sight_client == &a,
+          "one tick is enough to acquire the sight client");
+
+    /*
+     * And the other direction, which is the regression this closes. The
+     * pointer is planted by hand first — exactly what the old wake did, and
+     * the only thing that ever wrote it — so that a tick which does not run
+     * the rotation would simply leave it there.
+     */
+    q2_level_state.sight_client = &a;
+    a.health = 0;
+    q2_monster_set_tick(&set);
+    check(q2_level_state.sight_client == NULL,
+          "and the tick after the killing blow takes it away again");
+
+    /* A creature must therefore no longer notice the corpse. FindTarget's
+     * default arm reads sight_client and has no health test of its own. */
+    {
+        q2_monster m;
+
+        q2_ai_set_world(&g_test_world);
+        g_wall_on = false;
+        reset_spies();
+        place(&m, 0, 0, 0);
+        hook_up(&m);
+        check(!q2_find_target(&m), "and FindTarget acquires nothing");
+        check(m.enemy == NULL, "leaving the creature with no enemy");
+        check_eq_i(g_sight_calls, 0, "and no sight sound played");
+        q2_ai_set_world(NULL);
+    }
+
+    /* Leave the roster empty so the tests that follow are unaffected. */
+    q2_ai_set_clients(NULL, 0);
+    q2_level_reset();
+}
+
+/* ------------------------------------------------------------------------- */
 static void test_alerting(void)
 {
     q2_monster m, player, noisy;
@@ -875,7 +1024,7 @@ static void test_checkattack(void)
     {
         s32 lo = 1 << 30, hi = -1, fired = 0, k;
 
-        srand(20250915);
+        q2_random_seed(20250915);
         for (k = 0; k < 20000; k++) {
             m.attack_finished = 0;
             m.attack_state    = Q2_AS_STRAIGHT;
@@ -939,7 +1088,7 @@ static void test_stand_and_walk(void)
     q2_level_reset();
     q2_ai_set_world(&g_test_world);
     g_wall_on = false;
-    srand(1);
+    q2_random_seed(1);
 
     q2_level_state.framenum = 100;
     q2_level_state.time     = 100;
@@ -1021,7 +1170,7 @@ static void test_movement_verbs(void)
     q2_ai_set_world(&g_floor_world);
     g_ledge_x = 0x7FFFFFFF;
     g_floor_y = 0;
-    srand(3);
+    q2_random_seed(3);
 
     q2_level_state.framenum = 100;
     q2_level_state.time     = 100;
@@ -1376,7 +1525,7 @@ static void test_chase_directions(void)
     q2_level_reset();
     q2_ai_set_world(&g_floor_world);
     g_ledge_x = 0x7FFFFFFF;
-    srand(7);
+    q2_random_seed(7);
 
     /* A step that would leave the creature facing more than 45 degrees off
      * the direction it asked for is thrown away — but still reports true. */
@@ -1446,7 +1595,7 @@ static void test_lost_sight(void)
     q2_level_reset();
     q2_ai_set_world(&g_test_world);
     g_wall_on = false;
-    srand(11);
+    q2_random_seed(11);
 
     q2_level_state.framenum = 100;
     q2_level_state.time     = 100;
@@ -1981,7 +2130,7 @@ static void test_end_to_end(void)
     g_no_floor = false;
     g_floor_y  = 0;
     g_mini_hits = 0;
-    srand(17);
+    q2_random_seed(17);
     mini_setup();
 
     q2_level_state.framenum = 1;
@@ -2074,6 +2223,7 @@ int main(void)
     test_facing();
     test_turning();
     test_acquisition();
+    test_sight_client();
     test_alerting();
     test_checkattack();
     test_stand_and_walk();

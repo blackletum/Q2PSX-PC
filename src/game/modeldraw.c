@@ -906,6 +906,15 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
              * transparent face the additive mode regardless of which one it
              * asked for. Unlike the world's, this path never writes the table
              * back.
+             *
+             * AND THE SELECTOR IS NOT ALWAYS THE ONE ON THE DISC. No face in
+             * any CastList sets a blend bit, which for a long time made this
+             * whole branch look inert — `faces_semi` was zero for every model
+             * on every map. It is not inert: `PreInitExplosion` (0x8005AAA4)
+             * rewrites every face of the `Explosion` model to selector 2 at
+             * level load, so the fireball is B+F. `q2_model_get_face` hands
+             * that rewritten byte back; see the level-load section in model.h
+             * for the walk and the four instructions that do it.
              */
             {
                 u32 sel  = q2_model_face_blend(&f);

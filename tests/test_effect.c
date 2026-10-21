@@ -351,10 +351,25 @@ static void test_presets(void)
     check_eq_i(p->site, 0x800596B0u,
                "and its site is inside the ITEM think 0x80059330");
 
-    p = q2_fx_preset_at(Q2_FX_SPARK);
-    check_eq_i(p->ramp0, 0, "a spark is the blue ramp (0x8003E040)");
-    check_eq_i(p->life, 25, "a spark lives 25 ticks (0x8003E0A0)");
+    p = q2_fx_preset_at(Q2_FX_WATER_SPLASH);
+    check_eq_i(p->ramp0, 0, "the splash is the blue ramp (0x8003E040)");
+    check_eq_i(p->life, 25, "it lives 25 ticks (0x8003E0A0)");
     check_eq_i(p->size, 3072, "and is 3072 across (0x8003E0A8)");
+    check_eq_i(p->site, 0x8003E0C0u,
+               "and its site is inside GenerateWaterSplash 0x8003E014");
+
+    /*
+     * THE TELEPORT COLUMN'S SHIFT IS 13, and this row said 9 for as long as it
+     * was called "scripted". `sra v0, v0, 13` at 0x80028C5C and 0x80028C88 —
+     * four units of sideways drift where a 9 would have given thirty-two, which
+     * is a cloud rather than a column.
+     */
+    p = q2_fx_preset_at(Q2_FX_TELEPORT);
+    check_eq_i(p->spread_shift, 13,
+               "the teleport column drifts on shift 13 (0x80028C5C)");
+    check_eq_i(p->ramp0, 1, "its first ramp is index[2], red (0x8009BAE4)");
+    check_eq_i(p->ramp1, 0, "and its second index[0], blue (0x8009BA60)");
+    check_eq_i(p->count, 15, "fifteen quads (0x80028DA4)");
 
     check(q2_fx_preset_at(Q2_FX_PRESET_COUNT) == NULL,
           "an unknown preset is NULL");
@@ -370,8 +385,8 @@ static void test_presets(void)
                "blood spawns twice (0x80048C24)");
     check_eq_i(q2_fx_preset_at(Q2_FX_BFG_BURST)->repeat, 3,
                "the BFG spawns three times (0x8004BDD0)");
-    check_eq_i(q2_fx_preset_at(Q2_FX_SPARK)->repeat, 4,
-               "the spark spawns four times (0x8003E0DC)");
+    check_eq_i(q2_fx_preset_at(Q2_FX_WATER_SPLASH)->repeat, 4,
+               "the splash spawns four times (0x8003E0DC)");
     check_eq_i(q2_fx_preset_at(Q2_FX_ITEM_MATERIALISE)->repeat, 1,
                "the materialise site has no outer loop");
     /* Not 4: q2_fx_laser spawns its own four groups and never comes through
@@ -380,8 +395,8 @@ static void test_presets(void)
                "the laser end's repeat lives in q2_fx_laser, not the table");
 
     /* And the Y acceleration four sites write after the spawner returns. */
-    check_eq_i(q2_fx_preset_at(Q2_FX_SPARK)->accel_y, 4,
-               "the spark sags at 4 (sh 4, 98(v1) at 0x8003E0D4)");
+    check_eq_i(q2_fx_preset_at(Q2_FX_WATER_SPLASH)->accel_y, 4,
+               "the splash sags at 4 (sh 4, 98(v1) at 0x8003E0D4)");
     check_eq_i(q2_fx_preset_at(Q2_FX_BLOOD)->accel_y, 2,
                "blood sags at 2 (0x80048C1C)");
     check_eq_i(q2_fx_preset_at(Q2_FX_LASER_END)->accel_y, 2,
@@ -726,6 +741,87 @@ static void test_laser(void)
 
     check(!q2_fx_laser(&w, &rng, Q2_FX_LASER_KIND_COUNT, a, b, 0, 0, &r),
           "kind 6 is refused, matching the sltiu bound");
+}
+
+/* ------------------------------------------------------------------------- */
+/* 0x80028BDC — DrawTelePorts, the pad column nothing in this port drew       */
+/* ------------------------------------------------------------------------- */
+static void test_teleport_column(void)
+{
+    q2_fx_world w;
+    q2_rng rng;
+    s16 vel[Q2_FX_GROUP_QUADS][3];
+    s32 centre[3] = { 1000, -200, 3000 };
+    s32 slot;
+    u32 i;
+
+    printf("teleport column\n");
+
+    q2_fx_world_init(&w, &g_tab);
+    q2_rng_seed(&rng, 1);
+
+    /*
+     * THE SAW, 0x80028C14: `LevelTicks & 0x7F` below 63 streams up, everything
+     * else streams down. It is an `sltiu` against 63, so the rise is 63 ticks
+     * and the fall 65 — not a symmetric split, and a port that used 64 would be
+     * one tick out every cycle for ever.
+     */
+    check_eq_i(q2_fx_teleport_sign(0), 1, "tick 0 streams up");
+    check_eq_i(q2_fx_teleport_sign(62), 1, "and tick 62 still does");
+    check_eq_i(q2_fx_teleport_sign(63), -1, "tick 63 turns over");
+    check_eq_i(q2_fx_teleport_sign(127), -1, "and 127 is still falling");
+    check_eq_i(q2_fx_teleport_sign(128), 1, "128 wraps to the rise again");
+
+    /*
+     * The velocities. X and Z are `(rand() - 16384) >> 13`, so -2..1; Y is
+     * `(rand() >> 8) * sign`, so 0..127 with NO bias subtracted — which is what
+     * makes it a column and not a cloud. The generic preset draw would have
+     * given all three the same shape.
+     */
+    q2_fx_teleport_velocities(&rng, 1, vel);
+    for (i = 0; i < Q2_FX_GROUP_QUADS; i++) {
+        check(vel[i][0] >= -2 && vel[i][0] <= 1, "X drifts within -2..1");
+        check(vel[i][2] >= -2 && vel[i][2] <= 1, "Z drifts within -2..1");
+        check(vel[i][1] >= 0 && vel[i][1] <= 127, "Y streams up, 0..127");
+    }
+
+    q2_rng_seed(&rng, 1);
+    q2_fx_teleport_velocities(&rng, -1, vel);
+    for (i = 0; i < Q2_FX_GROUP_QUADS; i++)
+        check(vel[i][1] <= 0 && vel[i][1] >= -127, "and down on the other arm");
+
+    /*
+     * One pad's group: the jitter is ±127 about the centre in X and Z and the
+     * caller's Y is untouched, the lifetime is `(rand() + 24) & 15` and the
+     * size `(rand() & 0x2047) + 12000`.
+     */
+    slot = q2_fx_teleport_column(&w, &rng, vel, centre, 7);
+    check(slot >= 0, "a pad queues a group");
+    if (slot >= 0) {
+        const q2_fx_group *g = &w.group[slot];
+
+        check(g->origin[0] >= centre[0] - 127 && g->origin[0] <= centre[0] + 128,
+              "X is jittered within 127 of the centre (0x80028D64)");
+        check(g->origin[2] >= centre[2] - 127 && g->origin[2] <= centre[2] + 128,
+              "Z likewise (0x80028D7C)");
+        check_eq_i(g->origin[1], centre[1],
+                   "and Y is the face the caller chose, untouched");
+        check(g->life <= 15, "the lifetime is (rand()+24)&15 (0x80028D8C)");
+        check(g->size >= 12000 && g->size <= 12000 + 0x2047,
+              "and the size (rand()&0x2047)+12000 (0x80028DA8)");
+        check_eq_i(g->area, 7, "the volume's own ID byte is the area (0x80028DC0)");
+    }
+
+    /*
+     * The light, 0x80028DFC..0x80028E24: a 512-tick triangle on the level
+     * clock, mirrored about 256, times four, plus 800.
+     */
+    check_eq_i(q2_fx_teleport_light_radius(0), 800, "the light starts at 800");
+    check_eq_i(q2_fx_teleport_light_radius(256), 1824, "peaks at 1824");
+    check_eq_i(q2_fx_teleport_light_radius(512), 800, "and is back at 800");
+    check_eq_i(q2_fx_teleport_light_radius(384),
+               q2_fx_teleport_light_radius(128),
+               "the two halves of the triangle mirror");
 }
 
 /* ------------------------------------------------------------------------- */
@@ -2838,6 +2934,7 @@ int main(void)
     test_beam_hull();
     test_beam_hull_vertical();
     test_laser();
+    test_teleport_column();
     test_item_materialise();
     test_mesh_crackle();
     test_view_mask_skips_one_viewport();

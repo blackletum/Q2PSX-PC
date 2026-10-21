@@ -972,6 +972,141 @@ static void test_viewweapon_selects_area_one(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * THE BARREL TIPS ONTO THE AUTO-AIM TARGET AND THE VIEW DOES NOT.
+ *
+ * 0x8004F3E4…0x8004F3F8 adds the owner's client+0x46 to the interpolated clip
+ * rotation's X and hands the sum straight to `RotMatrixYXZ`. This tree spent
+ * two passes proving that halfword to be permanently zero — the sweep behind
+ * that claim enumerated stores with an immediate of 68..72 and so could not
+ * see Seek's `sh v0, 0(a0)`, reached through `addiu a0, s1, 70` at 0x8003A44C,
+ * nor recognise 0x8003B424's `sh zero, 70(0x800C7C60)` as client[0]+0x46.
+ * Without the term the drawn weapon is rigidly parallel to the view at all
+ * times, which is the one continuous tell that the game has locked on.
+ */
+static void test_aim_assist_pitches_the_barrel(void)
+{
+    q2_viewweapon vw;
+    s32 feet[3] = { 1000, 2000, 3000 };
+    s16 zero[3] = { 0, 0, 0 };
+    s32 o0[3], o1[3], a0[3], a1[3];
+
+    q2_vw_init(&vw, &g_tab, 1);
+    q2_vw_advance(&vw, 20, false, Q2_VW_FIRED);
+
+    CHECK(vw.aim_assist == 0, "a fresh weapon starts with an assist of %d",
+          (int)vw.aim_assist);
+    CHECK(q2_vw_clip_pitch(&vw) == vw.cur_r[0],
+          "with no target the matrix pitch is %d and the clip's is %d",
+          (int)q2_vw_clip_pitch(&vw), (int)vw.cur_r[0]);
+
+    q2_vw_place(&vw, feet, 576, zero, zero, o0, a0);
+
+    /* 200 of the 4096-unit circle, about eighteen degrees up. */
+    q2_vw_set_aim_assist(&vw, 200);
+    q2_vw_place(&vw, feet, 576, zero, zero, o1, a1);
+
+    CHECK(q2_vw_clip_pitch(&vw) == (s16)(vw.cur_r[0] + 200),
+          "the matrix pitch is %d, not the clip's %d plus the assist",
+          (int)q2_vw_clip_pitch(&vw), (int)vw.cur_r[0]);
+    CHECK(a1[0] - a0[0] == 200,
+          "the assist must reach the drawn pitch: delta %d, wanted 200",
+          a1[0] - a0[0]);
+    CHECK(a1[1] == a0[1] && a1[2] == a0[2],
+          "the assist must not disturb yaw or roll");
+
+    /*
+     * And it must not move the weapon. The console adds it to the entity's own
+     * rotation halfword, which only `RotMatrixYXZ` reads — the placement
+     * matrix at 0x8004F464 is built from the player's aim and the kick and has
+     * never seen it.
+     */
+    CHECK(o1[0] == o0[0] && o1[1] == o0[1] && o1[2] == o0[2],
+          "the assist moved the weapon from (%d,%d,%d) to (%d,%d,%d)",
+          o0[0], o0[1], o0[2], o1[0], o1[1], o1[2]);
+
+    /*
+     * The sum is a SIXTEEN-BIT one — both reads are `lhu` and the result goes
+     * back through an `sh` before the matrix builder sees it — so a clip
+     * rotation near the top of the circle plus an upward assist comes out the
+     * other side. That is the same angle and the wrap is the behaviour.
+     */
+    vw.cur_r[0] = 32000;
+    q2_vw_set_aim_assist(&vw, 1000);
+    CHECK(q2_vw_clip_pitch(&vw) == (s16)-32536,
+          "32000 + 1000 as a halfword is %d, not -32536",
+          (int)q2_vw_clip_pitch(&vw));
+}
+
+/*
+ * And it EASES rather than snapping — Seek (MISC.C, 0x8006FE3C) driven at
+ * 0x8003A44C with a step of `frame_dt * 4`, which is what makes the barrel
+ * settle back to level when the lock is lost instead of flicking.
+ */
+static void test_aim_assist_eases_and_clamps(void)
+{
+    q2_viewweapon vw;
+    const s32 dt = 12;       /* [0x800B2DB4], the PAL frame delta */
+    bool arrived;
+    int  i;
+
+    q2_vw_init(&vw, &g_tab, 1);
+
+    /* One step is frame_dt * 4 — 0x8003A45C's `sll a2, a2, 18` against
+     * 0x8003A464's `sra a2, a2, 16`. */
+    arrived = q2_vw_seek_aim_assist(&vw, 200, dt);
+    CHECK(vw.aim_assist == 48, "one step took the assist to %d, not 48",
+          (int)vw.aim_assist);
+    CHECK(!arrived, "Seek reported arrival after one step of four needed");
+
+    /* 48, 96, 144, 192, and the fifth call lands on it. */
+    for (i = 0; i < 8 && !arrived; i++)
+        arrived = q2_vw_seek_aim_assist(&vw, 200, dt);
+    CHECK(i == 4, "the target took %d further steps, not 4", i);
+
+    /*
+     * CLAMPED, NOT OVERSHOT. From 192 the next step is 240, which is past the
+     * target, so 0x8006FE68 takes the snap arm and stores the target itself.
+     */
+    CHECK(vw.aim_assist == 200,
+          "the assist settled at %d rather than on the target 200",
+          (int)vw.aim_assist);
+    CHECK(arrived, "Seek never reported arrival");
+
+    /* Holding on the target is a no-op that keeps reporting arrival. */
+    CHECK(q2_vw_seek_aim_assist(&vw, 200, dt) && vw.aim_assist == 200,
+          "a held target moved the assist to %d", (int)vw.aim_assist);
+
+    /*
+     * The target goes away — FindPlayerTarget writes zero at 0x8003A190 — and
+     * the barrel walks back down at the same rate rather than dropping.
+     */
+    CHECK(!q2_vw_seek_aim_assist(&vw, 0, dt),
+          "losing the target snapped the barrel level in one tick");
+    CHECK(vw.aim_assist == 152, "the first step back went to %d, not 152",
+          (int)vw.aim_assist);
+
+    for (i = 0; i < 8; i++)
+        (void)q2_vw_seek_aim_assist(&vw, 0, dt);
+    CHECK(vw.aim_assist == 0, "the assist rested at %d, not level",
+          (int)vw.aim_assist);
+
+    /*
+     * Downwards too: a target below the eye is a negative elevation, and the
+     * arithmetic is done on the ZERO-extended halfword (0x8006FE48's `lhu`)
+     * while the compare is on the sign-extended one (0x8006FE44's `lh`), so
+     * crossing zero is a wrap that reads back negative.
+     */
+    (void)q2_vw_seek_aim_assist(&vw, -100, dt);
+    CHECK(vw.aim_assist == -48, "a step down went to %d, not -48",
+          (int)vw.aim_assist);
+    CHECK(!q2_vw_seek_aim_assist(&vw, -100, dt) && vw.aim_assist == -96,
+          "the second step down went to %d, not -96", (int)vw.aim_assist);
+    CHECK(q2_vw_seek_aim_assist(&vw, -100, dt) && vw.aim_assist == -100,
+          "a step down clamped to %d, not -100", (int)vw.aim_assist);
+}
+
+/* ------------------------------------------------------------------------- */
 int main(void)
 {
     build_bank();
@@ -985,6 +1120,8 @@ int main(void)
     test_switch_cannot_cancel_a_shot();
     test_long_frame_consumes_keys();
     test_placement();
+    test_aim_assist_pitches_the_barrel();
+    test_aim_assist_eases_and_clamps();
     test_roll_reaches_the_offset();
     test_no_weapon();
     test_camera_undoes_the_placement();

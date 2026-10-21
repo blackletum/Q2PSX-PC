@@ -19,8 +19,13 @@
 #include <string.h>
 
 #include "mission.h"
+#include "explosive.h"
+#include "modelent.h"
 #include "save.h"
 #include "saveui.h"
+#include "ai.h"
+#include "creworld.h"
+#include "random.h"
 
 static int g_failures;
 static int g_checks;
@@ -401,6 +406,78 @@ static void test_deferred_item_group_restore(void)
 }
 
 /* ------------------------------------------------------------------------- */
+static void test_game_random_restore(void)
+{
+    q2_sim sim;
+    q2_inventory inv;
+    q2_save saved = {0}, loaded = {0}, legacy = {0};
+    s32 expected[32];
+    u32 i, state;
+    printf("shared gameplay random state\n");
+    build_state(&sim, &inv);
+    q2_random_seed(0xF1234567u);
+    for (i = 0; i < 17; i++) (void)q2_random_next();
+    state = q2_random_state();
+    check(q2_save_capture(&saved, &sim, &inv, "SLES-01534", "BASE1", 0) == Q2_OK,
+          "capture the shared random stream");
+    check(q2_save_write(&saved, tmp_path()) == Q2_OK &&
+          q2_save_read(&loaded, tmp_path()) == Q2_OK, "random state survives disk");
+    for (i = 0; i < 32; i++) expected[i] = q2_random_next();
+    q2_random_seed(42);
+    check(q2_save_apply(&loaded, &sim, NULL, "SLUS-00757", "BASE1") != Q2_OK &&
+          q2_random_state() == 42, "a refused save leaves the stream alone");
+    check(q2_save_apply(&loaded, &sim, NULL, "SLES-01534", "BASE1") == Q2_OK &&
+          q2_random_state() == state, "restore the complete state after rebuilding");
+    for (i = 0; i < 32; i++)
+        check_eq_i(q2_random_next(), expected[i], "resume the next gameplay choices");
+    q2_random_seed(123);
+    q2_save_apply_game_rng(&legacy);
+    check_eq_i(q2_random_state(), 123, "legacy files leave the unspecified stream alone");
+    saved.game_rng_state = 0;
+    q2_save_free(&loaded);
+    check(q2_save_write(&saved, tmp_path()) == Q2_OK &&
+          q2_save_read(&loaded, tmp_path()) == Q2_OK, "zero state survives disk");
+    q2_save_apply_game_rng(&loaded);
+    check_eq_i(q2_random_state(), 0, "zero is restored without changing the seed");
+    q2_save_free(&saved); q2_save_free(&loaded); q2_sim_free(&sim);
+    remove(tmp_path());
+}
+
+static void test_projectile_runtime_restore(void)
+{
+    q2_sim sim;
+    q2_save saved = {0}, loaded = {0};
+    printf("projectile effects and BFG beam timing\n");
+    q2_sim_init(&sim, NULL, 50);
+    sim.combat.projectiles.p[0].in_use = true;
+    sim.combat.projectiles.p[0].kind = Q2_PROJ_BOLT;
+    sim.combat.projectiles.p[0].mod = 5;
+    sim.combat.projectiles.p[0].flags = Q2_PROJ_FLAGS_HYPERBLASTER;
+    sim.combat.projectiles.p[1].in_use = true;
+    sim.combat.projectiles.p[1].kind = Q2_PROJ_BFG;
+    sim.combat.projectiles.p[1].beam_time = 27;
+    check(q2_save_capture(&saved, &sim, NULL, "SLES-01534", "BASE0", 0) == Q2_OK,
+          "capture a bolt and a BFG near its next beam tick");
+    check(q2_save_write(&saved, tmp_path()) == Q2_OK &&
+          q2_save_read(&loaded, tmp_path()) == Q2_OK, "projectile state survives disk");
+    check(q2_save_apply(&loaded, &sim, NULL, "SLES-01534", "BASE0") == Q2_OK,
+          "restore projectile state");
+    check_eq_i(sim.combat.projectiles.p[0].flags, Q2_PROJ_FLAGS_HYPERBLASTER,
+               "bolt body, light and impact flags survive");
+    check_eq_i(sim.combat.projectiles.p[1].beam_time, 27,
+               "BFG damage cadence keeps its accumulated phase");
+    saved.projectile_runtime_present = false;
+    q2_save_free(&loaded);
+    check(q2_save_write(&saved, tmp_path()) == Q2_OK &&
+          q2_save_read(&loaded, tmp_path()) == Q2_OK && !loaded.projectile_runtime_present,
+          "read a legacy file without PRST");
+    check_eq_i(loaded.proj[0].flags, Q2_PROJ_FLAGS_HYPERBLASTER,
+               "legacy bolt flags are reconstructed from means of death");
+    check_eq_i(loaded.proj[1].beam_time, 0, "legacy BFG has no recorded phase");
+    q2_save_free(&saved); q2_save_free(&loaded); q2_sim_free(&sim);
+    remove(tmp_path());
+}
+
 static void test_round_trip(void)
 {
     q2_sim sim;
@@ -1057,12 +1134,135 @@ static bool save_events_attach(q2_sim *sim)
     return true;
 }
 
+typedef struct saved_timer_probe {
+    q2_event_rt *rt;
+    u32 calls[4];
+} saved_timer_probe;
+
+static void saved_timer_call(void *user, const q2_event_item *item, u8 index)
+{
+    saved_timer_probe *p = user;
+    (void)item;
+    if (index == 0) {
+        p->rt->defer_timer = true;
+        p->rt->defer_fires = 2;
+        p->rt->defer_window = 1;
+    } else if (index < 4) p->calls[index]++;
+}
+
+static void test_event_scheduler_restore(void)
+{
+    u8 raw[80] = {0};
+    q2_sim live, rebuilt;
+    q2_save saved = {0}, loaded = {0};
+    saved_timer_probe a = {0}, b = {0};
+    q2_event_timer expected;
+    u32 next_random;
+    printf("resident TIMER, WAIT and pending-trigger restore\n");
+    raw[8] = 28; raw[10] = 2; raw[11] = Q2_EVREC_CAT_B;
+    raw[12] = Q2_EVOP_CALL; raw[13] = 12; raw[16] = 2; raw[18] = 10;
+    raw[24] = Q2_EVOP_CALL; raw[25] = 12; raw[26] = 1;
+    raw[36] = 28; raw[38] = 2; raw[39] = Q2_EVREC_CAT_B;
+    raw[40] = Q2_EVOP_WAIT; raw[41] = 12; raw[48] = raw[50] = 3;
+    raw[52] = Q2_EVOP_CALL; raw[53] = 12; raw[54] = 3;
+    raw[64] = 16; raw[66] = 1; raw[67] = Q2_EVREC_CAT_B;
+    raw[68] = Q2_EVOP_CALL; raw[69] = 12; raw[70] = 2;
+    q2_sim_init(&live, NULL, 50); q2_sim_init(&rebuilt, NULL, 50);
+    live.events.data = raw; live.events.size = sizeof(raw);
+    live.events.first_record = 8; live.events.record_count = 3;
+    rebuilt.events = live.events;
+    check(save_events_attach(&live) && save_events_attach(&rebuilt), "attach scheduler fixtures");
+    a.rt = &live.event_rt; b.rt = &rebuilt.event_rt;
+    a.rt->on_call = b.rt->on_call = saved_timer_call;
+    a.rt->on_call_user = &a; b.rt->on_call_user = &b;
+    a.rt->timer_period = b.rt->timer_period = q2_event_timer_period;
+    q2_random_seed(1);
+    q2_event_rt_trigger(a.rt, 8); q2_event_rt_update(a.rt);
+    q2_event_rt_advance(a.rt, 70);
+    q2_event_rt_trigger(a.rt, 36); q2_event_rt_update(a.rt);
+    q2_event_rt_trigger(a.rt, 64); /* queued, not yet dispatched */
+    check_eq_i(a.rt->wait[0].count, 2, "WAIT was partially consumed");
+    check(q2_save_capture(&saved, &live, NULL, "SLES-01534", "BASE0", 0) == Q2_OK,
+          "capture scheduler between deadlines");
+    check(q2_save_write(&saved, tmp_path()) == Q2_OK &&
+          q2_save_read(&loaded, tmp_path()) == Q2_OK, "scheduler survives disk");
+    q2_event_rt_advance(a.rt, 141); q2_event_rt_update(a.rt);
+    expected = a.rt->deferred[0]; next_random = q2_random_state();
+    check_eq_i(expected.period, 90, "original rerolls the next period");
+    check(q2_save_apply(&loaded, &rebuilt, NULL, "SLES-01534", "BASE0") == Q2_OK,
+          "restore into a rebuilt scheduler");
+    check_eq_i(b.rt->clock, 70, "restore the scheduler clock");
+    check_eq_i(b.rt->deferred[0].due, 210, "retain remaining delay, not a full restart");
+    check_eq_i(b.rt->deferred_count, 1, "rebuild the active slot count");
+    check_eq_i(b.rt->wait[0].count, 2, "retain WAIT countdown");
+    check_eq_i(b.rt->wait[0].stamp, 2, "retain WAIT consecutive-arrival stamp");
+    check_eq_i(b.calls[1] + b.calls[2], 0, "loading dispatches nothing");
+    q2_event_rt_advance(b.rt, 141); q2_event_rt_update(b.rt);
+    check_eq_i(b.calls[1], 1, "saved timer runs its one-item window");
+    check_eq_i(b.calls[2], 1, "queued trigger is not lost or repeated");
+    check(memcmp(&expected, &b.rt->deferred[0], sizeof(expected)) == 0 &&
+          q2_random_state() == next_random, "rearm and randomness match uninterrupted play");
+    q2_event_rt_advance(b.rt, 91); q2_event_rt_update(b.rt);
+    check_eq_i(b.calls[1], 2, "saved repeat count reaches the final deadline");
+    check_eq_i(b.rt->deferred_count, 0, "finite timer frees the restored slot");
+    check_eq_i(q2_random_state(), next_random, "final deadline draws no random number");
+    loaded.event_runtime.timers[0].timer_index = 1;
+    rebuilt.player[0].pos[0] = 987;
+    check(q2_save_apply(&loaded, &rebuilt, NULL, "SLES-01534", "BASE0") == Q2_ERR_BAD_FORMAT &&
+          rebuilt.player[0].pos[0] == 987, "reject an inconsistent item key before mutating the sim");
+    loaded.event_runtime.timers[0].timer_index = 0;
+    raw[18] = 11;
+    check(q2_save_apply(&loaded, &rebuilt, NULL, "SLES-01534", "BASE0") == Q2_ERR_BAD_FORMAT,
+          "reject a changed script with the same byte and record counts");
+    raw[18] = 10;
+    loaded.event_runtime_present = false;
+    check(q2_save_apply(&loaded, &rebuilt, NULL, "SLES-01534", "BASE0") == Q2_OK,
+          "old saves without a scheduler retain legacy reconstruction");
+    saved.event_runtime.timers[1] = saved.event_runtime.timers[0];
+    check(q2_save_write(&saved, tmp_path()) == Q2_ERR_BAD_FORMAT, "duplicate timer keys are refused");
+    q2_save_free(&saved); q2_save_free(&loaded);
+    q2_sim_free(&live); q2_sim_free(&rebuilt);
+    remove(tmp_path());
+}
+
 /*
  * VERSION 5 IS MIGRATED. The runtime that wrote version 5 refused a record on
  * ONESHOT && HASRUN and never set DISABLED for it, so a spent one-shot record
  * is 0x49 in a v5 file. Today's gate is DISABLED alone (0x8002799C) — loaded
  * as-is, that record would fire again. The reader gives it its DISABLED bit.
  */
+static void test_projectile_chunk_order(void)
+{
+    save_image image;
+    q2_save loaded;
+    u32 order, part, at, i;
+    for (order = 0; order < 2; order++) {
+        memset(&image, 0, sizeof(image));
+        for (part = 0; part < 2; part++) {
+            if (part == order) {
+                at = img_chunk_begin(&image, "PRST");
+                img_u32(&image, 1); img_u32(&image, Q2_PROJ_MAX);
+                for (i = 0; i < Q2_PROJ_MAX; i++)
+                    img_u32(&image, i == 0 ? (27u << 16) | Q2_PROJ_FLAGS_HYPERBLASTER : 0);
+            } else {
+                at = img_chunk_begin(&image, "PROJ");
+                img_u32(&image, 1);
+                img_u8(&image, 1); img_u8(&image, Q2_PROJ_BFG);
+                for (i = 0; i < 43; i++) img_u8(&image, 0);
+            }
+            img_chunk_end(&image, at);
+        }
+        check(img_write(tmp_path(), Q2_SAVE_VERSION, &image) &&
+              q2_save_read(&loaded, tmp_path()) == Q2_OK &&
+              loaded.proj[0].in_use && loaded.proj[0].kind == Q2_PROJ_BFG &&
+              loaded.proj[0].flags == Q2_PROJ_FLAGS_HYPERBLASTER &&
+              loaded.proj[0].beam_time == 27,
+              "projectile runtime state is independent of chunk order");
+        q2_save_free(&loaded);
+    }
+    remove(tmp_path());
+}
+
 static void test_migrates_v5_spent_oneshots(void)
 {
     /*
@@ -1196,6 +1396,475 @@ static void test_item_latches_round_trip(void)
  * cannot catch this; the checksum is what exists for it, and a save system
  * without one turns a bad byte into a game that behaves strangely.
  */
+static void test_permanent_object_state(void)
+{
+    u8 raw[40];
+    q2_sim sim;
+    q2_save saved, loaded;
+    q2_event_carry carry;
+    puts("permanent object changes without one-shot latches");
+    q2_sim_init(&sim, NULL, 50);
+    save_events_chunk(raw, &sim.events);
+    raw[11] = Q2_EVREC_CAT_A;
+    raw[28] = Q2_EVOP_CALL;
+    check(save_events_attach(&sim), "object-state runtime attaches");
+    sim.event_rt.object_flags[12] = 1;
+    check(q2_save_capture(&saved, &sim, NULL, "SLES-01534", "SECURITY", 2) == Q2_OK,
+          "capture includes permanent changes");
+    check(saved.event_object_count == sizeof(raw) && saved.event_object_flags[12],
+          "object flags are separate from the script's control flags");
+    check(q2_save_write(&saved, tmp_path()) == Q2_OK &&
+          q2_save_read(&loaded, tmp_path()) == Q2_OK, "object state survives the file");
+    sim.event_rt.object_flags[28] = 1; /* Change made after saving. */
+    check(q2_save_event_carry(&loaded, &sim.event_rt, &carry) == Q2_OK &&
+          carry.destroyed_items[12] && !carry.destroyed_items[28],
+          "load replays only the saved object changes");
+    q2_event_rt_carry_in(&sim.event_rt, &carry);
+    q2_event_rt_replay(&sim.event_rt, &carry);
+    check_eq_i(sim.event_rt.call_count, 1, "only the changed item is replayed");
+    q2_event_rt_carry_out(&sim.event_rt, &carry);
+    check(carry.destroyed_items[12] && !carry.destroyed_items[28],
+          "the next zone departure retains that same object state");
+    sim.event_rt.object_flags[12] = 0;
+    check(q2_save_apply(&loaded, &sim, NULL, "SLES-01534", "SECURITY") == Q2_OK &&
+          sim.event_rt.object_flags[12], "direct apply restores the marker too");
+    loaded.event_object_count++;
+    check(q2_save_write(&loaded, tmp_path()) == Q2_ERR_BAD_FORMAT,
+          "mismatched object-state length is rejected");
+    loaded.event_object_count--;
+    free(loaded.event_object_flags); loaded.event_object_flags = NULL;
+    loaded.event_object_count = 0;
+    check(q2_save_event_carry(&loaded, &sim.event_rt, &carry) == Q2_OK &&
+          !carry.destroyed_items[12], "legacy saves never borrow later object changes");
+    q2_save_free(&saved); q2_save_free(&loaded); q2_sim_free(&sim);
+    remove(tmp_path());
+}
+
+static void test_event_history_round_trip(void)
+{
+    u8 raw[40];
+    q2_sim sim;
+    q2_save saved, loaded, legacy = {0};
+    q2_event_store history = {0}, restored = {0};
+    q2_event_carry *block;
+
+    printf("visited-map script history\n");
+    q2_sim_init(&sim, NULL, 50);
+    save_events_chunk(raw, &sim.events);
+    check(save_events_attach(&sim), "history fixture attaches");
+    q2_event_rt_trigger(&sim.event_rt, SAVE_EV_ONESHOT_RECORD);
+    q2_event_rt_update(&sim.event_rt);
+    block = q2_event_store_open(&history, "WASTE1");
+    check(block != NULL, "visited map has a history block");
+    if (block) q2_event_rt_carry_out(&sim.event_rt, block);
+    q2_event_rt_trigger(&sim.event_rt, SAVE_EV_MIXED_RECORD);
+    q2_event_rt_update(&sim.event_rt);
+    block = q2_event_store_open(&history, "WASTE2");
+    if (block) {
+        q2_event_rt_carry_out(&sim.event_rt, block);
+        block->destroyed_items[12] = 1;
+    }
+
+    check(q2_save_capture(&saved, &sim, NULL, "SLES-01534", "WASTE3", 0)
+              == Q2_OK, "history snapshot captures");
+    check(q2_save_capture_event_history(&saved, &history) == Q2_OK,
+          "history is captured with the save");
+    q2_event_store_free(&history);
+    check(q2_save_write(&saved, tmp_path()) == Q2_OK,
+          "history snapshot writes independently of the live store");
+    check(q2_save_read(&loaded, tmp_path()) == Q2_OK,
+          "history snapshot reads");
+    q2_event_store_open(&restored, "UNSAVED");
+    check(q2_save_restore_event_history(&loaded, &restored) == Q2_OK,
+          "restore replaces the abandoned session's store");
+    check_eq_i(restored.count, 2, "both visited maps, no abandoned map");
+    check(q2_event_store_find(&restored, "UNSAVED") == NULL,
+          "later progression does not leak into the save");
+    block = q2_event_store_find(&restored, "waste1");
+    check(block && (block->record_flags[0] & Q2_EVREC_DISABLED) &&
+              block->item_flags[SAVE_EV_MIXED_ITEM] == 0,
+          "the first map retains its own latches");
+    block = q2_event_store_find(&restored, "WASTE2");
+    check(block && block->item_flags[SAVE_EV_MIXED_ITEM] == Q2_EVOP_DISABLED,
+          "the second map retains its different item history");
+    check(block && block->destroyed_items[12],
+          "non-one-shot destruction survives with the visited map");
+    q2_save_free(&loaded);
+    check(block && block->size == sizeof(raw), "restore owns its blocks");
+
+    check(q2_save_restore_event_history(&legacy, &restored) == Q2_OK &&
+              restored.count == 0,
+          "older saves clear unrelated history rather than borrowing it");
+    q2_event_store_free(&restored);
+    q2_save_free(&saved);
+    q2_sim_free(&sim);
+    remove(tmp_path());
+}
+
+static void test_saved_script_replay(void)
+{
+    u8 raw[40];
+    q2_sim sim;
+    q2_save saved;
+    q2_event_carry carry;
+    u32 calls;
+
+    printf("replay uses saved script state\n");
+    q2_sim_init(&sim, NULL, 50);
+    save_events_chunk(raw, &sim.events);
+    check(save_events_attach(&sim), "replay fixture attaches");
+    check(q2_save_capture(&saved, &sim, NULL, "SLES-01534", "BASE1", 0)
+              == Q2_OK, "save before the switch is used");
+    q2_event_rt_trigger(&sim.event_rt, SAVE_EV_ONESHOT_RECORD);
+    q2_event_rt_update(&sim.event_rt);
+    calls = sim.event_rt.call_count;
+    check(q2_save_event_carry(&saved, &sim.event_rt, &carry) == Q2_OK,
+          "prepare saved latches before rebuilding world objects");
+    q2_event_rt_carry_in(&sim.event_rt, &carry);
+    q2_event_rt_replay(&sim.event_rt, &carry);
+    check_eq_i(sim.event_rt.call_count, calls,
+               "a switch used after the save is not replayed");
+    q2_save_free(&saved);
+
+    q2_event_rt_trigger(&sim.event_rt, SAVE_EV_ONESHOT_RECORD);
+    q2_event_rt_update(&sim.event_rt);
+    check(q2_save_capture(&saved, &sim, NULL, "SLES-01534", "BASE1", 0)
+              == Q2_OK, "save after the switch is used");
+    q2_event_rt_free(&sim.event_rt);
+    check(save_events_attach(&sim), "a new process starts with fresh script state");
+    check(q2_save_event_carry(&saved, &sim.event_rt, &carry) == Q2_OK,
+          "the cold load builds its replay from the save");
+    q2_event_rt_carry_in(&sim.event_rt, &carry);
+    q2_event_rt_replay(&sim.event_rt, &carry);
+    check_eq_i(sim.event_rt.call_count, 1,
+               "the switch's world effect is reconstructed on cold load");
+    saved.event_count++;
+    check(q2_save_event_carry(&saved, &sim.event_rt, &carry) == Q2_ERR_BAD_FORMAT
+              && carry.size == 0,
+          "mismatched saved script counts cannot be replayed");
+    saved.event_count--;
+    saved.event_item_count++;
+    check(q2_save_event_carry(&saved, &sim.event_rt, &carry) == Q2_ERR_BAD_FORMAT,
+          "mismatched item latches cannot be replayed");
+    saved.event_item_count--;
+    q2_save_free(&saved);
+    q2_sim_free(&sim);
+}
+
+static void test_explosive_save_and_transient_models(void)
+{
+    u8 population[120] = {0};
+    dat_chunk chunk = {0};
+    q2_common_file common = {0};
+    q2_sim source, restored;
+    q2_save saved, loaded;
+    q2_entity *effect;
+    q2_explosive group = {0};
+    q2_explosive_set groups = {0};
+
+    printf("destroyable groups and transient models\n");
+    batch_put_group(population, 0, "Zone0", 32);
+    batch_put_place(population, 32, 1000, 27);
+    chunk.data = population;
+    chunk.size = sizeof(population);
+    common.chunk[Q2_COMMON_POPULATION] = &chunk;
+    q2_sim_init(&source, NULL, 50);
+    q2_sim_init(&restored, NULL, 50);
+    check(q2_sim_attach_items(&source, &common, 0, NULL, NULL) == Q2_OK &&
+              q2_sim_attach_items(&restored, &common, 0, NULL, NULL) == Q2_OK,
+          "both worlds start with the same pickup");
+    effect = q2_entity_alloc(&source.entities);
+    check(effect != NULL, "a live explosion takes the next slot");
+    if (effect) {
+        effect->kind = Q2_ENT_KIND_MODEL;
+        effect->think = q2_model_ent_think;
+    }
+    effect = q2_entity_alloc(&source.entities);
+    if (effect) {
+        effect->kind = Q2_GIB_BOSS_CLASS;
+        effect->think = q2_gib_think;
+    }
+    group.item_offset = 24;
+    group.health = 3;
+    groups.items = &group;
+    groups.count = 1;
+    source.explosives = &groups;
+    check(q2_save_capture(&saved, &source, NULL, "SLES-01534", "BASE0", 0)
+              == Q2_OK, "save during an explosion captures");
+    check(saved.entity_count == 3 && !saved.entities[1].in_use &&
+              !saved.entities[2].in_use,
+          "explosion and boss-gib slots are empty in the save");
+    check(q2_save_write(&saved, tmp_path()) == Q2_OK &&
+              q2_save_read(&loaded, tmp_path()) == Q2_OK,
+          "the explosive group survives the file");
+    group.health = 10;
+    restored.explosives = &groups;
+    restored.breakable_count = 2;
+    restored.breakable[0].kind = restored.breakable[1].kind = Q2_BREAKABLE_FXGROUP;
+    restored.breakable[0].item_offset = restored.breakable[1].item_offset = 24;
+    check(q2_save_apply(&loaded, &restored, NULL, "SLES-01534", "BASE0") == Q2_OK,
+          "a mid-explosion save restores without requiring transient models");
+    check(restored.entities.count == 3 && restored.entities.ent[0].in_use &&
+              !restored.entities.ent[1].in_use && !restored.entities.ent[2].in_use,
+          "the real pickup survives and the effect slots remain reusable");
+    check(group.health == 3 && restored.breakable[0].health == 3 &&
+              restored.breakable[1].health == 3,
+          "group health, shared by all hitboxes, is restored exactly");
+    loaded.explosives[0].destroyed = 1;
+    check(q2_save_apply(&loaded, &restored, NULL, "SLES-01534", "BASE0") == Q2_OK
+              && group.destroyed && restored.breakable[0].broken &&
+              restored.breakable[1].broken,
+          "a destroyed group retires every restored hitbox");
+    q2_save_free(&saved);
+    q2_save_free(&loaded);
+    q2_sim_free(&source);
+    q2_sim_free(&restored);
+    remove(tmp_path());
+}
+
+static void test_history_rejects_bad_counts(void)
+{
+    save_image image;
+    q2_save loaded;
+    u32 at;
+    u32 i;
+    static const char *const new_tags[] = { "VWPN", "ERTS", "PRST" };
+
+    for (i = 0; i < sizeof(new_tags) / sizeof(new_tags[0]); i++) {
+        memset(&image, 0, sizeof(image));
+        at = img_chunk_begin(&image, new_tags[i]);
+        img_u32(&image, 1); /* Valid version, missing state. */
+        img_chunk_end(&image, at);
+        check(img_write(tmp_path(), Q2_SAVE_VERSION, &image) &&
+              q2_save_read(&loaded, tmp_path()) == Q2_ERR_BAD_FORMAT,
+              "truncated live-state chunk is rejected");
+        memset(&image, 0, sizeof(image));
+        at = img_chunk_begin(&image, new_tags[i]);
+        img_u32(&image, 99);
+        img_chunk_end(&image, at);
+        check(img_write(tmp_path(), Q2_SAVE_VERSION, &image) &&
+              q2_save_read(&loaded, tmp_path()) == Q2_ERR_BAD_FORMAT,
+              "unknown live-state chunk version is rejected");
+    }
+    printf("malformed added save chunks\n");
+    memset(&image, 0, sizeof(image));
+    at = img_chunk_begin(&image, "EVHS");
+    img_u32(&image, 65);
+    img_chunk_end(&image, at);
+    check(img_write(tmp_path(), Q2_SAVE_VERSION, &image) &&
+              q2_save_read(&loaded, tmp_path()) == Q2_ERR_BAD_FORMAT,
+          "an oversized visited-map count is rejected");
+    memset(&image, 0, sizeof(image));
+    at = img_chunk_begin(&image, "EVHS");
+    img_u32(&image, 1);
+    img_str(&image, "BASE0", Q2_EVENT_BLOCK_NAME_MAX);
+    img_u32(&image, Q2_EVENT_CARRY_MAX + 1);
+    img_u32(&image, 1);
+    img_u32(&image, 0);
+    img_chunk_end(&image, at);
+    check(img_write(tmp_path(), Q2_SAVE_VERSION, &image) &&
+              q2_save_read(&loaded, tmp_path()) == Q2_ERR_BAD_FORMAT,
+          "an oversized map script cannot overrun the carry arrays");
+    memset(&image, 0, sizeof(image));
+    at = img_chunk_begin(&image, "EXPL");
+    img_u32(&image, 1); /* No entry follows. */
+    img_chunk_end(&image, at);
+    check(img_write(tmp_path(), Q2_SAVE_VERSION, &image) &&
+              q2_save_read(&loaded, tmp_path()) == Q2_ERR_BAD_FORMAT,
+          "a truncated explosive entry is rejected");
+    memset(&image, 0, sizeof(image));
+    at = img_chunk_begin(&image, "ROTR");
+    img_u32(&image, 1); img_u32(&image, 1); /* Missing rotator. */
+    img_chunk_end(&image, at);
+    check(img_write(tmp_path(), Q2_SAVE_VERSION, &image) &&
+          q2_save_read(&loaded, tmp_path()) == Q2_ERR_BAD_FORMAT,
+          "a truncated rotator cannot allocate or restore partial motion");
+    memset(&image, 0, sizeof(image));
+    at = img_chunk_begin(&image, "CAIS");
+    img_u32(&image, 1); img_u32(&image, 65536); /* No roster follows. */
+    img_chunk_end(&image, at);
+    check(img_write(tmp_path(), Q2_SAVE_VERSION, &image) &&
+          q2_save_read(&loaded, tmp_path()) == Q2_ERR_BAD_FORMAT,
+          "an AI roster count is bounded by its available payload");
+    memset(&image, 0, sizeof(image));
+    at = img_chunk_begin(&image, "SKIL"); img_u32(&image, 4);
+    img_chunk_end(&image, at);
+    check(img_write(tmp_path(), Q2_SAVE_VERSION, &image) &&
+          q2_save_read(&loaded, tmp_path()) == Q2_ERR_BAD_FORMAT,
+          "invalid difficulty is rejected before spawning");
+    remove(tmp_path());
+}
+
+static void test_rotator_resume(void)
+{
+    q2_rotator_set live = {0}, rebuilt = {0};
+    q2_save saved = {0}, loaded = {0}, legacy = {0};
+    u32 i, tick;
+    printf("rotators resume between endpoints\n");
+    for (i = 0; i < 3; i++) {
+        q2_rotator *r = q2_rotators_add(&live, (q2_rot_kind)i,
+                                         (s16)(20 + i), 1, 40);
+        q2_rotator *fresh = q2_rotators_add(&rebuilt, (q2_rot_kind)i,
+                                             (s16)(20 + i), 1, 40);
+        r->target = fresh->target = 1200;
+        r->hold_reset = fresh->hold_reset = 300;
+        q2_rotator_trigger(&live, i);
+    }
+    for (i = 0; i < 3; i++) q2_rotators_tick(&live, 24);
+    q2_rotator_trigger(&live, 0); /* Preserve the unconsumed SIMROT request. */
+    check(live.rotators[1].angle > 0 && live.rotators[1].angle < 1200,
+          "the fixture hatch is moving, not at an endpoint");
+    check(q2_save_capture_rotators(&saved, &live) == Q2_OK, "capture rotators");
+    check(q2_save_write(&saved, tmp_path()) == Q2_OK &&
+          q2_save_read(&loaded, tmp_path()) == Q2_OK, "rotators survive disk");
+    rebuilt.rotators[2].node++;
+    check(q2_save_apply_rotators(&loaded, &rebuilt) == Q2_ERR_BAD_FORMAT &&
+          rebuilt.rotators[1].angle == 0, "roster mismatch changes no rotator");
+    rebuilt.rotators[2].node--;
+    check(q2_save_apply_rotators(&loaded, &rebuilt) == Q2_OK, "restore motion");
+    check_eq_i(q2_rotator_take_loop(&rebuilt, 1), Q2_ROTLOOP_START,
+               "a running hatch restarts its motor on a new voice");
+    check(rebuilt.rotators[1].loop_voice == NULL &&
+          q2_rotator_take_sound(&rebuilt, 1) == Q2_ROTSND_NONE,
+          "no stale mixer handle or repeated opening sound");
+    for (tick = 0; tick < 12; tick++) {
+        q2_rotators_tick(&live, 24);
+        q2_rotators_tick(&rebuilt, 24);
+        for (i = 0; i < 3; i++) {
+            const q2_rotator *a = &live.rotators[i], *b = &rebuilt.rotators[i];
+            check(a->angle == b->angle && a->accum == b->accum &&
+                  a->state == b->state && a->delay == b->delay &&
+                  a->hold == b->hold && a->step_pending == b->step_pending,
+                  "loaded motion follows the uninterrupted timeline");
+        }
+    }
+    rebuilt.rotators[0].angle = 123;
+    check(q2_save_apply_rotators(&legacy, &rebuilt) == Q2_OK &&
+          rebuilt.rotators[0].angle == 123, "legacy saves retain replay fallback");
+    q2_rotators_free(&live); q2_rotators_free(&rebuilt);
+    q2_save_free(&saved); q2_save_free(&loaded);
+    remove(tmp_path());
+}
+
+static q2_creature_world *save_ai_fixture(void)
+{
+    q2_creature_world *w = calloc(1, sizeof(*w));
+    q2_creature_module *mod;
+    u32 i;
+    if (!w) exit(2);
+    w->set.count = w->set.capacity = 3;
+    w->set.monsters = calloc(3, sizeof(*w->set.monsters));
+    w->corner_count = 2;
+    w->corner = calloc(2, sizeof(*w->corner));
+    if (!w->set.monsters || !w->corner) exit(2);
+    w->mod_count = 1;
+    mod = &w->mod[0];
+    snprintf(mod->name, sizeof(mod->name), "Test");
+    mod->cre.base = 0x80100000;
+    mod->cre.move_count = mod->bind.move_count = 1;
+    mod->cre.move[0].addr = mod->cre.base + 0x100;
+    mod->bind.cre = &mod->cre;
+    mod->bind.move[0].first_frame = 10;
+    mod->bind.move[0].last_frame = 12;
+    mod->bind.move[0].frames = mod->cre.frames;
+    for (i = 0; i < 3; i++) {
+        q2_monster_init(&w->set.monsters[i]);
+        w->set.monsters[i].group = (u16)i;
+        w->set.monsters[i].pop_class_id = 18;
+        w->set.monsters[i].stand = q2_cre_generic_stand;
+    }
+    q2_monster_init(&w->sight);
+    w->sight.health = 70;
+    return w;
+}
+
+static void test_ai_resume(void)
+{
+    q2_creature_world *live = save_ai_fixture(), *rebuilt = save_ai_fixture();
+    q2_save saved = {0}, loaded = {0}, legacy = {0};
+    q2_monster stranger = {0}, *m = &live->set.monsters[0], *body;
+    q2_trail_state trail;
+    s32 crumb[3] = { 100, -300, 900 }, skill;
+    u32 phase = 0;
+    printf("creature behavior resumes through stable links\n");
+    q2_level_reset(); q2_trail_init();
+    q2_level_state.time = q2_level_state.framenum = 200;
+    q2_level_state.total_monsters = 3; q2_level_state.killed_monsters = 1;
+    q2_level_state.sight_client = &live->sight;
+    q2_level_state.sight_entity = m;
+    q2_level_state.sound_entity = &live->sight;
+    q2_level_state.sound_entity_framenum = 199;
+    live->sight.teleport_time = 198;
+    q2_trail_add(crumb);
+    m->in_use = true; m->spawnflags |= Q2_SVFLAG_INUSE;
+    m->enemy = &live->sight; m->oldenemy = &live->set.monsters[1];
+    m->goalentity = &live->corner[1]; m->movetarget = &live->corner[0];
+    m->owner = &live->set.monsters[2];
+    m->currentmove = &live->mod[0].bind.move[0];
+    m->frame = 10; m->think = q2_M_MoveFrame; m->next_think = 201;
+    m->attack_finished = 220; m->pain_debounce = 205; m->idle_time = 230;
+    m->aiflags = Q2_AI_LOST_SIGHT; m->last_sighting[2] = 1200;
+    m->saved_goal[0] = 600; m->trail_time = 199;
+    m->velocity[0] = 40; m->maxs[1] = 100; m->on_ground = true;
+    body = &live->set.monsters[1];
+    body->in_use = body->dead = body->corpse = true;
+    body->class_id = Q2_CLASS_CORPSE; body->corpse_was_class = 87;
+    body->dissolve = 12; body->effect[2] = 3; body->hit_height = 150;
+    saved.skill_present = true; saved.skill = 2;
+    check(q2_save_capture_ai(&saved, live, 33333) == Q2_OK, "capture AI state");
+    m->enemy = &stranger;
+    check(q2_save_capture_ai(&saved, live, 0) == Q2_ERR_BAD_FORMAT,
+          "unknown references fail capture without replacing the snapshot");
+    check(q2_save_write(&saved, tmp_path()) == Q2_OK &&
+          q2_save_read(&loaded, tmp_path()) == Q2_OK, "AI state survives disk");
+    check(q2_save_get_skill(&loaded, &skill) && skill == 2,
+          "difficulty survives independently of menu settings");
+    q2_level_reset(); q2_trail_init();
+    rebuilt->set.monsters[2].group = 99;
+    check(q2_save_apply_ai(&loaded, rebuilt, &phase) == Q2_ERR_BAD_FORMAT &&
+          q2_level_state.time == 0 && !rebuilt->set.monsters[0].enemy,
+          "validate the whole roster before applying behavior");
+    rebuilt->set.monsters[2].group = 2;
+    check(q2_save_apply_ai(&loaded, rebuilt, &phase) == Q2_OK, "restore AI");
+    m = &rebuilt->set.monsters[0]; body = &rebuilt->set.monsters[1];
+    check(m->enemy == &rebuilt->sight && m->oldenemy == body &&
+          m->goalentity == &rebuilt->corner[1] &&
+          m->movetarget == &rebuilt->corner[0] &&
+          m->owner == &rebuilt->set.monsters[2], "all five links use new objects");
+    check(m->currentmove == &rebuilt->mod[0].bind.move[0] && m->frame == 10 &&
+          m->think == q2_M_MoveFrame && m->stand == q2_cre_generic_stand,
+          "resume the exact animation with rebuilt callbacks");
+    check(m->next_think == 201 && m->attack_finished == 220 &&
+          m->pain_debounce == 205 && m->idle_time == 230 &&
+          m->trail_time == 199, "absolute AI deadlines survive");
+    check(m->velocity[0] == 40 && m->maxs[1] == 100 && m->on_ground &&
+          m->aiflags == Q2_AI_LOST_SIGHT && m->last_sighting[2] == 1200 &&
+          m->saved_goal[0] == 600, "movement and pursuit state survive");
+    check(body->corpse && body->dead && body->class_id == Q2_CLASS_CORPSE &&
+          body->dissolve == 12 && body->effect[2] == 3 && body->hit_height == 150 &&
+          body->stand == NULL, "a detached corpse stays detached at its size");
+    check(q2_level_state.time == 200 && q2_level_state.framenum == 200 &&
+          q2_level_state.sight_entity == m &&
+          q2_level_state.sound_entity == &rebuilt->sight &&
+          q2_level_state.sound_entity_framenum == 199 &&
+          rebuilt->sight.teleport_time == 198 && phase == 33333,
+          "AI clock, pending noise and fractional tick survive");
+    q2_trail_capture(&trail);
+    check(trail.active && trail.head == 1 && trail.spot[0].timestamp == 200 &&
+          trail.spot[0].origin[2] == 900, "pursuit breadcrumbs survive");
+    q2_M_MoveFrame(m);
+    check(m->frame == 11, "the next frame continues instead of restarting stand");
+    check(q2_save_apply_ai(&legacy, rebuilt, &phase) == Q2_OK && m->frame == 11,
+          "a legacy file retains its basic creature restore");
+    trail.head = Q2_TRAIL_LENGTH;
+    check(!q2_trail_restore(&trail), "an invalid trail head is refused");
+    q2_save_free(&saved); q2_save_free(&loaded);
+    free(live->set.monsters); free(live->corner); free(live);
+    free(rebuilt->set.monsters); free(rebuilt->corner); free(rebuilt);
+    q2_level_reset(); q2_trail_init();
+    remove(tmp_path());
+}
+
 static void test_detects_corruption(void)
 {
     q2_sim sim;
@@ -1369,6 +2038,67 @@ static void test_level_counters_round_trip(void)
 
     q2_save_free(&saved);
     q2_save_free(&loaded);
+    q2_sim_free(&sim);
+    remove(tmp_path());
+}
+
+/*
+ * HELP — the help computer's current message pair, as the two Strings keys.
+ *
+ * `HelpComputer_GetMessages` (0x800218A8) copies `LastOrders` and
+ * `LastObjective` into the unit's save block on the save arm of every
+ * `LoadSaveHub`, so the pair the player last read is part of a saved game. The
+ * port carried neither, and a reload showed the shipped defaults.
+ *
+ * Both halves are pinned: that a written file brings the keys back, and that a
+ * file with no chunk reports absent rather than empty — the caller has to be
+ * able to tell "this unit has had no HELPCOMPUTER" from "this file predates the
+ * question", because only the second keeps the session's pair.
+ */
+static void test_help_keys_round_trip(void)
+{
+    q2_sim sim;
+    q2_inventory inv;
+    q2_save saved, loaded, bare, bare_back;
+    q2_save_help hk;
+
+    printf("the help computer's message pair\n");
+
+    build_state(&sim, &inv);
+    q2_save_capture(&saved, &sim, &inv, "SLES-01534", "BASE1", 1);
+
+    q2_save_set_help_keys(&saved, "Base1Ord2", "Base1Obj2");
+    check(q2_save_write(&saved, tmp_path()) == Q2_OK, "writes");
+    check(q2_save_read(&loaded, tmp_path()) == Q2_OK, "reads back");
+
+    memset(&hk, 0, sizeof(hk));
+    check(q2_save_get_help_keys(&loaded, &hk), "the chunk comes back present");
+    check(strcmp(hk.orders_key, "Base1Ord2") == 0, "the orders key survives");
+    check(strcmp(hk.objective_key, "Base1Obj2") == 0,
+          "the objective key survives");
+
+    q2_save_free(&saved);
+    q2_save_free(&loaded);
+    remove(tmp_path());
+
+    /* And a capture that never set them: absent, not empty-and-present. */
+    q2_save_capture(&bare, &sim, &inv, "SLES-01534", "BASE1", 1);
+    check(q2_save_write(&bare, tmp_path()) == Q2_OK, "writes a file with none");
+    check(q2_save_read(&bare_back, tmp_path()) == Q2_OK, "reads it back");
+    memset(&hk, 0, sizeof(hk));
+    check(!q2_save_get_help_keys(&bare_back, &hk),
+          "a file with no HELP reports absent");
+
+    /* Twelve zero bytes is what HelpComputer_Reset writes, and it IS an
+     * answer: present, with both keys empty. */
+    q2_save_set_help_keys(&bare, "", "");
+    check(q2_save_get_help_keys(&bare, &hk),
+          "a reset pair is present rather than absent");
+    check(hk.orders_key[0] == '\0' && hk.objective_key[0] == '\0',
+          "...and both keys are empty");
+
+    q2_save_free(&bare);
+    q2_save_free(&bare_back);
     q2_sim_free(&sim);
     remove(tmp_path());
 }
@@ -1715,6 +2445,10 @@ int main(void)
     printf("Q2PSX-PC save tests\n\n");
 
     test_deferred_item_group_restore();
+    test_game_random_restore();
+    test_event_scheduler_restore();
+    test_projectile_runtime_restore();
+    test_projectile_chunk_order();
     test_round_trip();
     test_apply();
     test_apply_rejects_mismatched_map();
@@ -1723,9 +2457,17 @@ int main(void)
     test_migrates_v5_spent_oneshots();
     test_v5_spent_record_stays_spent();
     test_item_latches_round_trip();
+    test_event_history_round_trip();
+    test_permanent_object_state();
+    test_saved_script_replay();
+    test_explosive_save_and_transient_models();
+    test_history_rejects_bad_counts();
+    test_rotator_resume();
+    test_ai_resume();
     test_detects_corruption();
     test_mission_and_settings();
     test_level_counters_round_trip();
+    test_help_keys_round_trip();
     test_slots();
     test_slot_scan_survives_rubbish();
     test_settings_slots_and_ui();

@@ -313,3 +313,20 @@ bool q2_mcard_advance(q2_mcard *m, u16 buttons)
 
     return accepted;
 }
+
+bool q2_mcard_save_prompt_due(u32 level_change, u32 *latch,
+                              bool deathmatch, int exit_code)
+{
+    if (!latch)
+        return false;
+
+    if (level_change == *latch)          /* 0x8003E70C */
+        return false;
+    if (deathmatch)                      /* 0x8003E720, before the latch */
+        return false;
+
+    *latch = level_change;               /* 0x8003E728 */
+
+    /* 0x8003E738 / 0x8003E740. Both arms fall into 0x8003E748 together. */
+    return exit_code == 2 || exit_code == 4;
+}

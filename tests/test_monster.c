@@ -5,11 +5,13 @@
  * wrong and hard to notice in play: the unpadded frame stride, the distance
  * scaling, and the width of the forward cone.
  */
+#include "random.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "ai.h"
+#include "combat.h"
 #include "crebind.h"
 #include "monster.h"
 #include "trig.h"
@@ -472,6 +474,98 @@ static void test_damage_reaction(void)
 
 /* ------------------------------------------------------------------------- */
 /*
+ * THE HIT CYLINDER — GetCreHitSize (0x8006DC1C) and what the shot reads.
+ *
+ * The pair entity+0x94 / entity+0x96 is per MODEL. It arrives as SetupBoxDrop's
+ * fifth argument (0x8007E534..0x8007E560) and is written to obj+0x40/+0x42 at
+ * 0x80051030 and 0x80051044; the ±286 movement hull is a different argument
+ * written to obj+0x18..0x22, and the two are not the same volume.
+ *
+ * This port derived both from the hull, so every creature in the game was shot
+ * at as radius 286, height 572. The numbers below are read off this disc's own
+ * CastList headers.
+ */
+static void test_hit_cylinder(void)
+{
+    q2_monster m;
+    q2_actor   a;
+    s32 origin[3], dir[3];
+    s64 enter, exit_;
+
+    printf("the hit cylinder\n");
+
+    q2_monster_init(&m);
+
+    /*
+     * The seed is GetCreHitSize's NO-MODEL fallback, 0x8006DC6C and 0x8006DC74.
+     * 600, not the hull's 572 — they are different constants, and the port used
+     * to have the wrong one here.
+     */
+    check_eq_i(m.hit_radius, 286, "a creature with no model is 286 wide");
+    check_eq_i(m.hit_height, 600, "and 600 tall, not the hull's 572");
+
+    /* The model arm: the header's two halfwords, verbatim. */
+    q2_monster_bind_hit_size(&m, true, 124, 607);       /* Soldier  */
+    check_eq_i(m.hit_radius, 124, "a bound model supplies the radius");
+    check_eq_i(m.hit_height, 607, "and the height");
+
+    q2_monster_bind_hit_size(&m, false, 124, 607);
+    check_eq_i(m.hit_radius, 286, "and losing the model returns the fallback");
+    check_eq_i(m.hit_height, 600, "on both halves");
+
+    /* The projection: the actor takes the cylinder, and the hull crosses
+     * untouched beside it. */
+    q2_monster_bind_hit_size(&m, true, 327, 918);       /* Tankcomm */
+    q2_actor_from_monster(&a, &m);
+    check_eq_i(a.radius, 327, "the actor's radius is the model's");
+    check_eq_i(a.height, 918, "and so is its slab");
+    check_eq_i(a.mins[0], -286, "the movement hull still crosses");
+    check_eq_i(a.maxs[1],  286, "unscaled, on every axis");
+
+    /*
+     * AND THE SHOT AGREES. 0x8005474C takes entity+0x94 as the horizontal
+     * radius, so a Soldier is missed by everything more than 124 units off its
+     * axis — the port used to connect out to 286.
+     */
+    q2_monster_init(&m);
+    q2_monster_bind_hit_size(&m, true, 124, 607);
+    m.pos[0] = 0; m.pos[1] = 0; m.pos[2] = 0;
+    q2_actor_from_monster(&a, &m);
+
+    origin[0] = 200; origin[1] = 0; origin[2] = -4000;
+    dir[0] = 0; dir[1] = 0; dir[2] = 8000;
+    check(!q2_combat_cylinder_interval(origin, dir, a.origin, a.radius,
+                                       a.height, &enter, &exit_),
+          "a shot 200 units off a Soldier's axis misses, as 124 says");
+
+    origin[0] = 100;
+    check(q2_combat_cylinder_interval(origin, dir, a.origin, a.radius,
+                                      a.height, &enter, &exit_),
+          "and one at 100 units connects");
+
+    /*
+     * The slab hangs off the FEET: 0x80054838 builds origin.y + 286 and
+     * 0x80054840 subtracts entity+0x96 from it, so a tall creature reaches far
+     * above the 286 a fixed 572-tall cylinder stopped at. Y points down, so
+     * "above the origin" is a smaller Y.
+     */
+    q2_monster_init(&m);
+    q2_monster_bind_hit_size(&m, true, 327, 918);
+    q2_actor_from_monster(&a, &m);
+
+    origin[0] = 0; origin[1] = -500; origin[2] = -4000;
+    check(q2_combat_cylinder_interval(origin, dir, a.origin, a.radius,
+                                      a.height, &enter, &exit_),
+          "a Tank Commander is hit 500 above its origin — 918 reaches 632");
+
+    origin[1] = -700;
+    check(!q2_combat_cylinder_interval(origin, dir, a.origin, a.radius,
+                                       a.height, &enter, &exit_),
+          "and 700 above it is over the top of even that cylinder");
+}
+
+/* ------------------------------------------------------------------------- */
+/*
  * Corpses — the detach at 0x8007F098, the volume rescale at 0x8007F77C and the
  * handler at 0x8007F71C. None of this existed on this side, which is why a body
  * stayed a full-height creature that the AI still owned.
@@ -484,6 +578,10 @@ static void test_corpse(void)
 
     q2_level_reset();
     make_monster(&targ, 87, 100);
+    /* The Soldier's own model header pair, read off this disc's CastList:
+     * ext0 = 124, ext1 = 607. GetCreHitSize hands exactly these to
+     * SetupBoxDrop's fifth argument. */
+    q2_monster_bind_hit_size(&targ, true, 124, 607);
     make_player(&player);
     targ.health = -10;
     q2_monster_damage_reaction(&targ, &player, 110);
@@ -504,17 +602,26 @@ static void test_corpse(void)
     check(targ.in_use, "but it is still in the world");
 
     /*
-     * The volume: a quarter as tall and half again as wide, from a ±286 cube.
-     * 286/4 = 71 and (286*3)/2 = 429, with the console's own rounding.
+     * THE VOLUME, and QuakeDeadHitCollision (0x8007F77C) rescales the HIT
+     * CYLINDER — obj+0x40 and obj+0x42, entity+0x94 and entity+0x96 — and
+     * nothing else. From a Soldier's own model pair, 124 and 607:
+     * 607/4 = 151 and (124*3)/2 = 186.
+     *
+     * The movement hull at obj+0x18..0x22 is not written anywhere in that
+     * function, so it stays the ±286 cube SetupBoxDrop gave it. This used to
+     * be the other way round — the hull was scaled and the cylinder was
+     * derived from it — which made every body 429 wide and 143 tall.
      */
-    check_eq_i(targ.maxs[1], 71,  "a corpse is a quarter as tall");
-    check_eq_i(targ.mins[1], -71, "on both sides");
-    check_eq_i(targ.maxs[0], 429, "and half again as wide");
-    check_eq_i(targ.maxs[2], 429, "on both horizontal axes");
+    check_eq_i(targ.hit_height, 151, "a corpse is a quarter as tall");
+    check_eq_i(targ.hit_radius, 186, "and half again as wide");
+    check_eq_i(targ.maxs[1], 286,  "the movement hull is not rescaled");
+    check_eq_i(targ.mins[1], -286, "on either side");
+    check_eq_i(targ.maxs[0], 286,  "nor on the horizontal axes");
+    check_eq_i(targ.maxs[2], 286,  "either of them");
 
     /* Detaching twice must not rescale twice. */
     q2_monster_corpse_detach(&targ);
-    check_eq_i(targ.maxs[1], 71, "detaching again changes nothing");
+    check_eq_i(targ.hit_height, 151, "detaching again changes nothing");
     check_eq_i(targ.corpse_was_class, 87, "and does not lose the old class");
 
     /* The handler gibs when health passes the threshold it kept. */
@@ -807,11 +914,9 @@ static void test_start_go_kinds(void)
 
 /*
  * A seed whose first masked draw is not a multiple of `span`, and whose first
- * two masked draws differ modulo `span`, under whatever C library this is
- * built against. The pick is only pinned if `first + r % span` cannot come
- * out equal to `first`, or equal to what the second draw would give. The
- * fixed srand(2024) failed that on the UCRT: its first draw is 6648, a
- * multiple of 6, so a pick that dropped the remainder passed.
+ * two masked draws differ modulo `span`. The pick is only pinned if
+ * `first + r % span` cannot equal `first` or what the second draw would give.
+ * This now uses the portable gameplay stream rather than a host libc sequence.
  */
 static unsigned seed_for_span(int span)
 {
@@ -820,9 +925,9 @@ static unsigned seed_for_span(int span)
     for (s = 2024; s < 2024 + 1000; s++) {
         int a, b;
 
-        srand(s);
-        a = rand() & 0x7FFF;
-        b = rand() & 0x7FFF;
+        q2_random_seed(s);
+        a = q2_random_next() & 0x7FFF;
+        b = q2_random_next() & 0x7FFF;
         if (a % span != 0 && a % span != b % span)
             return s;
     }
@@ -861,15 +966,15 @@ static void test_start_frame_pick(void)
 
     seed = seed_for_span(6);
     for (k = 0; k < 3; k++) {
-        srand(seed);
-        r1 = rand();
-        r2 = rand();
+        q2_random_seed(seed);
+        r1 = q2_random_next();
+        r2 = q2_random_next();
 
-        srand(seed);
+        q2_random_seed(seed);
         q2_monster_init(&m);
         m.currentmove = &mv;
         start[k](&m);
-        next = rand();
+        next = q2_random_next();
 
         /* The seed's own conditions are in the test so that a library on
          * which none of the thousand seeds qualify fails loudly rather than
@@ -885,23 +990,23 @@ static void test_start_frame_pick(void)
      * both the draw and the store. Checked together with the case above, so
      * the rule is "exactly when a move is installed".
      */
-    srand(2024);
-    r1 = rand();
-    srand(2024);
+    q2_random_seed(2024);
+    r1 = q2_random_next();
+    q2_random_seed(2024);
     q2_monster_init(&m);
     m.frame = 7;
     q2_monster_walk_start(&m);
-    none_drawn = (rand() != r1);
+    none_drawn = (q2_random_next() != r1);
     none_frame = m.frame;
 
-    srand(2024);
-    r1 = rand();
-    r2 = rand();
-    srand(2024);
+    q2_random_seed(2024);
+    r1 = q2_random_next();
+    r2 = q2_random_next();
+    q2_random_seed(2024);
     q2_monster_init(&m);
     m.currentmove = &mv;
     q2_monster_walk_start(&m);
-    next = rand();
+    next = q2_random_next();
 
     check(next == r2 && r1 != r2 && !none_drawn && none_frame == 7,
           "the pick draws exactly when a move is installed, and leaves the "
@@ -1077,9 +1182,9 @@ static void test_death_drop_queue(void)
      * 0x80020820 `jal 0x80089E28` / 0x8002082C `andi a1, v0, 0xFFF`: one draw,
      * low twelve bits, taken on the spawning path only.
      */
-    srand(1234);
-    want_heading = rand() & 0xFFF;
-    srand(1234);
+    q2_random_seed(1234);
+    want_heading = q2_random_next() & 0xFFF;
+    q2_random_seed(1234);
     q2_monster_drop_flush();
     check_eq_i(g_drop_calls, 1, "and the flush spawns exactly one item");
     check_eq_i(g_drop_item, 27, "27 Shells, from class row 18");
@@ -1099,12 +1204,12 @@ static void test_death_drop_queue(void)
     m.spawnflags   = Q2_SPAWNFLAG_DROP_ITEM;
     q2_monster_death_use(&m);
     check_eq_i(q2_monster_drop_pending(), 1, "a flagged Parasite still queues");
-    srand(1234);
-    want_heading = rand();
-    srand(1234);
+    q2_random_seed(1234);
+    want_heading = q2_random_next();
+    q2_random_seed(1234);
     q2_monster_drop_flush();
     check_eq_i(g_drop_calls, 0, "but spawns nothing when it is picked");
-    check_eq_i(rand(), want_heading,
+    check_eq_i(q2_random_next(), want_heading,
                "and draws no random number: 0x800207D0 jumps past 0x80020820");
 
     /*
@@ -1208,6 +1313,7 @@ int main(void)
     test_damage();
     test_react_to_damage();
     test_damage_reaction();
+    test_hit_cylinder();
     test_corpse();
     test_corpse_dissolve();
     test_start_go_kinds();

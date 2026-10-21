@@ -356,20 +356,13 @@ static bool bound_los(void *user, const s32 a[3], const s32 b3[3])
  * 48-slot entity-box table at 0x800CAE10, which returns 0 when a box stops the
  * segment; 0x8005FC3C `bne v0, zero` then returns 0 — a ledge — only when no
  * box did. The port's table is `b->ents`, the sim's `move_world`, and its
- * entity half (q2_move_clip_segment skips the trigger volumes) holds the two
- * families the port registers: every mover part (q2_sim_attach_movers) and
- * every intact GLASS pane (q2_sim_attach_breakables, which inserts the pane's
- * box after the mover prefix and disables it in the fatal-hit call). So a
- * creature on a lift, in a doorway floored by the door, or on a window is
- * standing on something, as on the console.
- *
- * What is still missing is the rest of that table, not a rule: the allocator
- * 0x800555D8 has fourteen call sites and the port registers the boxes of those
- * two families only. A creature standing on any other box-owning primitive
- * reads as a ledge here where the console finds ground. Creatures, corpses and
- * items are NOT in the console's table either — a slot is a copy of the box
- * its caller hands 0x800555D8, a Scene node record + 16 — so a creature
- * standing on another creature is at a ledge on both.
+ * entity half (q2_move_clip_segment skips the trigger volumes) holds movers,
+ * GLASS, SHOOTTHEN, ROTHATCH, OBJDRAWOFF and intact FXGROUP parts. The last
+ * three are registered by scenesolid.c, including health-zero explosives
+ * which are solid without having damage callbacks. Freed boxes cease to
+ * support a creature in the same call that destroys or hides their object.
+ * Creatures, corpses and items use the separate body list, not this Scene-box
+ * table, so this probe does not treat another creature as ground.
  */
 #define AI_BOTTOM_CORNER  (Q2_EYE_BASE / 2)             /* 143 */
 
@@ -426,7 +419,7 @@ static bool bound_bottom(void *user, const q2_monster *m)
          * 0x8005FB24 does not fail on it either: it hands the completed sweep
          * to 0x80053974, the ENTITY clip, and only that finding nothing makes
          * it a ledge. The entity list here is the sim's entity boxes — mover
-         * parts and intact glass, see the block above — so a creature standing
+         * parts, hatches and intact breakables, see above — so a creature standing
          * on a LIFT, in a doorway whose floor is the door itself, or on a pane
          * is standing on something instead of being told it is at the edge of
          * the world and refusing to walk.

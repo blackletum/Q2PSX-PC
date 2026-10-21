@@ -156,6 +156,7 @@
  *     the refire's, module+0x11E8 (`lh v0, 264(v0)` at +0x120C, `blez` at
  *     +0x1214): whether the chain fires again, not whether this round leaves.
  */
+#include "random.h"
 #include <stdlib.h>
 
 #include "ai.h"
@@ -246,7 +247,7 @@ static void gun_play(q2_monster *m, u32 handle_addr)
 /* random(), in the module's own fixed point: import +0x14 returns 0..32767. */
 static s32 gun_rand(void)
 {
-    return (s32)(rand() & 0x7FFF);
+    return (s32)(q2_random_next() & 0x7FFF);
 }
 
 /* The module's literal thresholds, kept as the integers it uses. */
@@ -482,7 +483,7 @@ static void gunner_duck_down(q2_monster *self)
 
     self->aiflags |= Q2_AI_DUCKED;
 
-    if (q2_cre_skill() >= 2 && (rand() & 1))
+    if (q2_cre_skill() >= 2 && (q2_random_next() & 1))
         gunner_grenade(self);
 
     self->takedamage = Q2_DAMAGE_YES;
@@ -641,7 +642,7 @@ static void gunner_attack(q2_monster *self)
         return;
     }
 
-    q2_cre_set_move(self, (rand() & 1) ? GUN_ATTACK_GRENADE
+    q2_cre_set_move(self, (q2_random_next() & 1) ? GUN_ATTACK_GRENADE
                                        : GUN_ATTACK_CHAIN);
 }
 

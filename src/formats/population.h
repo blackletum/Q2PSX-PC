@@ -129,6 +129,46 @@
 #define Q2_POP_SPAWN_FLAGS_MASK   0x01FFu
 #define Q2_POP_SPAWN_FLAGS_SHIFT  18u
 
+/*
+ * AND THREE OF THE BITS THE TRANSPORT ABOVE DISCARDS ARE THE DIFFICULTY.
+ *
+ * SpawnGeneral (CREATURE.C 0x800565C4) is the one function that turns a spawn
+ * record into a creature — the engine installs it at engine+0x3A0 (0x8007A020)
+ * and at module+0x68 (0x8007DB10), and ProcessCreatureBatches calls it directly
+ * for a CREBATCH (0x80056DF0). Before it allocates anything it asks LOADLEV.C
+ * GetDifficultySetting (0x800565E0 -> 0x8007CCEC) and switches three ways on
+ * the answer, reading `lhu 20(record)` — the record's +0x14 `flags` — each time:
+ *
+ *     800565E0  jal   GetDifficultySetting
+ *     80056620  lhu   v0, 20(s1)    skill 0
+ *     80056628  andi  v0, v0, 0x800
+ *     8005663C  lhu   v0, 20(s1)    skill 1
+ *     80056644  andi  v0, v0, 0x1000
+ *     80056658  lhu   v0, 20(s1)    skill 2
+ *     80056660  andi  v0, v0, 0x2000
+ *
+ * On a hit it sets v0 = 0 and jumps to the epilogue at 0x800567E0: no entity,
+ * no model, no AI. Skill 3 and anything negative fall through the `slti`/`beq`
+ * chain at 0x800565F0..0x8005661C unfiltered.
+ *
+ * CreatureCount (0x8005771C) applies the identical mask to the kill
+ * denominator at 0x80057770..0x80057878, which is the confirmation: those
+ * records are meant not to exist at that skill, not merely to be hidden.
+ *
+ * The masks are NOT the place record's. A place record puts NOT_EASY /
+ * NOT_MEDIUM / NOT_HARD at 0x2000 / 0x4000 / 0x8000 of its +0x0C (below); a
+ * spawn record puts them at 0x800 / 0x1000 / 0x2000 of its +0x14. The two
+ * cannot share a constant and they are written out separately on purpose.
+ */
+#define Q2_POP_SPAWN_NOT_EASY     0x0800u
+#define Q2_POP_SPAWN_NOT_MEDIUM   0x1000u
+#define Q2_POP_SPAWN_NOT_HARD     0x2000u
+#define Q2_POP_SPAWN_DIFFICULTY   0x3800u
+
+/* Exact 0x800565E8..0x80056664 selection. Skills outside the retail menu's
+ * 0..2 range take the fall-through arm and are not filtered. */
+bool q2_pop_spawn_allows_skill(u16 flags, s32 skill);
+
 typedef struct q2_pop_group {
     char name[13];
     u32  spawn_offset;   /* 0 when absent */

@@ -454,6 +454,22 @@ typedef enum q2_menu_request {
 #define Q2_MENU_MP_FRAG_DEFAULT      5
 #define Q2_MENU_MP_ROUND_DEFAULT     2
 
+/* ------------------------------------------------------------------------- */
+/*
+ * The selection bar's colour — bits 6..8 of a drawable's flag word.
+ *
+ * FrontEndDrawCursor recovers the field with `srl 6` / `andi 7` at 0x8001A9C4
+ * and switches on 0, 1, 2 and 3; the value 4 is the sentinel that suppresses
+ * the bar entirely (`(flags & 0x1C0) == 0x100` at 0x8001A828). The palettes are
+ * in menudraw.h — this is the field, which the menu fills in and the drawing
+ * code only reads.
+ */
+#define Q2_MENU_BAR_BLUE    0
+#define Q2_MENU_BAR_RED     1
+#define Q2_MENU_BAR_PURPLE  2
+#define Q2_MENU_BAR_GREEN   3
+#define Q2_MENU_BAR_NONE    4
+
 typedef struct q2_menu_mp_setup {
     s16 mode;          /* 0 DEATHMATCH, 1 TEAM DEATHMATCH, 5 VERSUS */
     s16 players;       /* 2..connected controller count              */
@@ -495,9 +511,21 @@ typedef struct q2_menu {
     int                 stat_secrets;        /* 0x800B29FC */
     int                 stat_total_secrets;  /* 0x800B29F8 */
 
-    /* The engine keeps the cursor per page, so returning to a page puts you
-     * back where you were (0x8001A3B0 saves it into 0x800C68A0). */
+    /*
+     * CursorMemory (0x800C68A0), the 47 two-byte records the engine keeps one
+     * per page.
+     *
+     * InGameInitScreen SAVES the outgoing page's cursor into byte 0 on every
+     * switch (`lbu a2, 712(v1)` at 0x8001A3B4, `sb a2, 0(v0)` at 0x8001A3C0),
+     * but RESTORING is opt-in: see `cursor_restores` in menu.c for the seven
+     * executable pages that ask for it. Byte 1
+     * is a never-visited flag, seeded to 1 for all 47 records by
+     * FrontEndClearCursorMemory (0x8001FC0C) and cleared on the first restore
+     * (0x8001FBF0), so a page's first visit takes the builder's default rather
+     * than a saved zero.
+     */
     u8                  cursor_save[256];
+    u8                  cursor_seen[256];
 
     /* Where the page graph came from, so BACK can retrace it. The original
      * stored one handler per page; a stack is the same thing said honestly. */
@@ -514,6 +542,46 @@ typedef struct q2_menu {
 
     bool                open;
     bool                multiplayer;  /* 0x800AEBCC — picks page 43 over 26  */
+
+    /*
+     * Who pressed START (0x800AE8B8, `Pauser`), and the two halfwords of that
+     * player's 34-byte configuration record the pause banner is coloured from.
+     *
+     * FrontEndAddPausedTitle reads the TEAM halfword at 0x800B32B8 + p*34 when
+     * the session mode is 1 and the player-colour halfword at 0x800B32BA + p*34
+     * otherwise (0x8001CFE0..0x8001D038), and IsPlayerPadShockable is asked
+     * about the same `Pauser` index (0x8001C9B4, 0x8001C9D0). The seeds below
+     * are FrontEndResetMultiplayerDefaults': colour = p (0x8001BEDC), team =
+     * p & 1 (0x8001BF04).
+     */
+    int                 pauser;
+    s16                 mp_team[Q2_MENU_MP_MAX_PLAYERS];    /* config +2  */
+    s16                 mp_colour[Q2_MENU_MP_MAX_PLAYERS];  /* config +4  */
+    s16                 mp_mode;      /* 0x800B3354 — 1 is TEAM DEATHMATCH */
+
+    /*
+     * Whether each player's pad has rumble motors — IsPlayerPadShockable
+     * (0x80033250), which reads bit 8 of the pad record's +0x0E, a bit
+     * PadDualShock sets at 0x80031844 only when PadInfoAct reports two
+     * actuators and clears at 0x80031878 otherwise.
+     *
+     * This is a PAD CAPABILITY, not the VIBRATION setting: the setting is a
+     * separate halfword (0x800B32BC + p*34) that the capability gates. Zero
+     * here is the console's answer for a pad with no motors, so the client has
+     * to say otherwise — q2_menu_set_pad_shockable.
+     */
+    u8                  pad_shockable[Q2_MENU_MP_MAX_PLAYERS];
+
+    /*
+     * The bar colour of the page BANNER, which is a per-drawable field and not
+     * a per-page one: FrontEndAddPausedTitle stamps bits 6..8 of drawable 0's
+     * flag word (0x8001D044) and FrontEndDrawCursor reads them straight back
+     * (`srl 6` / `andi 7` at 0x8001A9C4). Rows never carry it — FrontEndCreateMenu
+     * clears those bits on every record it appends (0x8001A524) — so the
+     * selected row's band stays blue while the banner identifies the pauser.
+     */
+    u8                  title_bar_colour;   /* Q2_MENU_BAR_* */
+
     /*
      * Whether the pages come from QFRONT rather than from the executable.
      *
@@ -602,8 +670,40 @@ bool q2_menu_point_at(q2_menu *m, int index);
  * value is clamped by the adjust loop's own rule (0x8001C1B8). */
 bool q2_menu_set_slider(q2_menu *m, int index, int value);
 
+/*
+ * What CHECK_FOR_SLIDER's tail (0x8001C218) would write into the CD volume
+ * target for the page that is up: `full` when the MUSIC row is the cursor row,
+ * 0 when the page carries a MUSIC row and the cursor is elsewhere, and -1 —
+ * "leave the target alone" — when it carries none at all, which is the s7 = -1
+ * seed at 0x8001BF2C surviving the walk. `full` is the slider doubled; see the
+ * definition for why the caller and not this does the doubling.
+ */
+int q2_menu_music_audition(const q2_menu *m, int full);
+
 /* Context the pages read. Set these before opening. */
 void q2_menu_set_multiplayer(q2_menu *m, bool on);
+
+/*
+ * Who paused, and what that player's session record says — 0x800AE8B8,
+ * 0x800B32B8 + p*34, 0x800B32BA + p*34 and 0x800B3354. Together they decide
+ * the banner's bar colour in a split-screen match; in single player
+ * FrontEndAddPausedTitle branches straight past all of it (0x8001CFD0) and the
+ * band is blue, so a single-player client need set none of them.
+ */
+void q2_menu_set_pauser(q2_menu *m, int player);
+void q2_menu_set_player_colour(q2_menu *m, int player, int team, int colour);
+void q2_menu_set_mp_mode(q2_menu *m, int mode);
+
+/*
+ * Whether player `player`'s pad has rumble motors — the answer
+ * IsPlayerPadShockable (0x80033250) gives for that pad. The CONTROLLER page
+ * greys VIBRATION and skips it when this is false (0x8001C9D8). It is a
+ * capability, not the setting: the setting is Q2_SET_VIBRATION.
+ */
+void q2_menu_set_pad_shockable(q2_menu *m, int player, bool on);
+
+/* The banner's bar colour for the page now installed — Q2_MENU_BAR_*. */
+int q2_menu_title_bar_colour(const q2_menu *m);
 
 /* Serve QFRONT's tables where they differ from the executable's. See
  * q2_menu.front_end for why this is a flag here and nothing at all there. */

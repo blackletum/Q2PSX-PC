@@ -81,12 +81,11 @@
  *
  * The port exposes the index rather than the colour so a caller can say which
  * player is looking at the menu; single player is 0, which is blue.
+ *
+ * The Q2_MENU_BAR_* names themselves live in menu.h, because the field is the
+ * menu's and not the rasteriser's: FrontEndAddPausedTitle picks the banner's
+ * value (0x8001D044) long before anything is drawn.
  */
-#define Q2_MENU_BAR_BLUE    0
-#define Q2_MENU_BAR_RED     1
-#define Q2_MENU_BAR_PURPLE  2
-#define Q2_MENU_BAR_GREEN   3
-#define Q2_MENU_BAR_NONE    4
 
 /* The bright end of each; the dark end is the same hue at 32. */
 extern const u8 q2_menu_bar_rgb[4][3];

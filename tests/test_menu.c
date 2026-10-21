@@ -341,6 +341,70 @@ static void test_slider(void)
     CHECK(s.v[Q2_SET_MUSIC] == 0, "clamps low at %d", s.v[Q2_SET_MUSIC]);
 }
 
+/*
+ * CHECK_FOR_SLIDER's tail, 0x8001C218..0x8001C25C: the MUSIC row auditions the
+ * music and every other row on the page silences it.
+ *
+ * The hook (0x8001BF1C, installed as the SOUND page's per-frame handler at
+ * 0x80020268) seeds s7 = -1, walks the page for the drawable bound to
+ * &musicvol (0x800B3348) and then writes the CD volume target three ways:
+ * nothing at all if the page carries no such row, `musicvol * 2` if that row is
+ * the cursor row, zero if it is not. Before this the port scaled the bed
+ * straight off the slider, so the track played through every page and on every
+ * row of SOUND.
+ */
+static void test_music_audition(void)
+{
+    q2_menu_settings s;
+    q2_menu m;
+
+    q2_menu_settings_defaults(&s);
+    q2_menu_init(&m, &s, Q2_MENU_SCREEN_H);
+
+    /* A closed menu is no page at all: CHECK_FOR_SLIDER is a page hook. */
+    CHECK(q2_menu_music_audition(&m, 96) == -1, "a closed menu writes nothing");
+
+    m.open = true;
+    q2_menu_goto(&m, Q2_PAGE_SOUND);
+    CHECK(m.page->items[0].setting == Q2_SET_MUSIC, "row 0 is not MUSIC");
+
+    /* The page opens on the MUSIC row, so the track is audible. */
+    m.cursor = 0;
+    CHECK(q2_menu_music_audition(&m, 96) == 96,
+          "the MUSIC row should audition at 96, got %d",
+          q2_menu_music_audition(&m, 96));
+
+    /* SOUND FX, STEREO and RESET TO DEFAULTS all silence it (0x8001C25C). */
+    m.cursor = 1;
+    CHECK(q2_menu_music_audition(&m, 96) == 0, "SOUND FX should silence it");
+    m.cursor = 2;
+    CHECK(q2_menu_music_audition(&m, 96) == 0, "STEREO should silence it");
+    m.cursor = 3;
+    CHECK(q2_menu_music_audition(&m, 96) == 0, "RESET should silence it");
+
+    /* The doubling belongs to the caller, so a moved slider is reflected by
+     * what it passes in and not by anything read here. */
+    m.cursor = 0;
+    CHECK(q2_menu_music_audition(&m, 0) == 0,
+          "a MUSIC slider at zero auditions silence");
+    CHECK(q2_menu_music_audition(&m, 254) == 254,
+          "a MUSIC slider at the top auditions 254");
+
+    /*
+     * And a page with no MUSIC row leaves the target ALONE — the -1 answer,
+     * which is s7 surviving the walk at its 0x8001BF2C seed and the `bltz` at
+     * 0x8001C220 branching past both stores. This is the half that makes the
+     * pause duck work: the pause page must not have its zero overwritten with
+     * the slider every frame.
+     */
+    q2_menu_goto(&m, Q2_PAGE_PLAYER);
+    CHECK(q2_menu_music_audition(&m, 96) == -1,
+          "PLAYER carries no MUSIC row and must write nothing");
+    q2_menu_goto(&m, Q2_PAGE_PAUSE_SP);
+    CHECK(q2_menu_music_audition(&m, 96) == -1,
+          "the pause page carries no MUSIC row and must write nothing");
+}
+
 /* 0x8001C944: the controller style wraps inside its class's three names. */
 static void test_choice(void)
 {
@@ -421,12 +485,220 @@ static void test_page_graph(void)
     CHECK(m.page_id == Q2_PAGE_PAUSE_SP && m.open,
           "triangle at the root left page %d", m.page_id);
 
-    /* The cursor is remembered per page (0x8001A3B0). */
+    /*
+     * The PAUSE page does NOT come back where you left it.
+     *
+     * This check used to read `m.cursor == 2` — "the pause cursor came back as
+     * 2" — and that was the port's own invention. The save at 0x8001A3B0 is
+     * unconditional, but the RESTORE is opt-in per page and the pause pages
+     * opt out twice over: InGame_GOTO_PAUSEDBACK never calls
+     * FrontEndRestoreCursor, and its tail re-reads `first` and stores it over
+     * the cursor for both page 26 and page 43 (`lhu v1, 714(v0)` at 0x8001D714,
+     * `sh v1, 712(v0)` at 0x8001D71C). So pressing TRIANGLE out of OPTIONS puts
+     * you back on RETURN TO GAME, not on OPTIONS.
+     */
     m.cursor = 2;
     tap(&m, Q2_PAD_CROSS);
     CHECK(m.page_id == Q2_PAGE_OPTIONS, "back into OPTIONS");
     tap(&m, Q2_PAD_TRIANGLE);
-    CHECK(m.cursor == 2, "the pause cursor came back as %d", m.cursor);
+    CHECK(m.cursor == 0, "the pause cursor came back as %d, not RETURN TO GAME",
+          m.cursor);
+
+    /* OPTIONS, on the other hand, is one of the seven pages that do ask
+     * (0x8001FDF4 stores what FrontEndRestoreCursor returns). */
+    m.cursor = 2;
+    tap(&m, Q2_PAD_CROSS);              /* -> OPTIONS, first visit was above  */
+    CHECK(m.page_id == Q2_PAGE_OPTIONS, "back into OPTIONS again");
+    m.cursor = 2;                       /* VIDEO OPTIONS */
+    tap(&m, Q2_PAD_CROSS);
+    CHECK(m.page_id == Q2_PAGE_VIDEO, "-> page %d", m.page_id);
+    tap(&m, Q2_PAD_TRIANGLE);
+    CHECK(m.page_id == Q2_PAGE_OPTIONS && m.cursor == 2,
+          "OPTIONS came back on row %d", m.cursor);
+}
+
+/*
+ * Which pages ask for their cursor back, and what a FIRST visit gets.
+ *
+ * The seven restoring sites are listed in menu.c; the shape here is the one
+ * FrontEndRestoreCursor itself has (0x8001FBC4): CursorMemory[page].byte1 is
+ * seeded to 1 for all 47 records by FrontEndClearCursorMemory (0x8001FC0C), and
+ * while it is set the function returns the CURRENT cursor and clears the flag
+ * (0x8001FBF0/0x8001FBF4) rather than the saved byte at 0x8001FC00. A page that
+ * has never been open therefore opens on the builder's default, not on zero.
+ */
+static void test_cursor_policy(void)
+{
+    q2_menu_settings s;
+    q2_menu m;
+
+    q2_menu_settings_defaults(&s);
+    open_menu(&m, &s, false);
+
+    /*
+     * A first visit to a restoring page. Seed cursor_save[] with something a
+     * restore would pick up; the never-visited flag must beat it.
+     */
+    m.cursor_save[Q2_PAGE_SOUND] = 3;
+    q2_menu_goto(&m, Q2_PAGE_SOUND);
+    CHECK(m.cursor == 0, "the first visit to SOUND opened on %d", m.cursor);
+
+    /* Now it has been visited, so the save is live. */
+    m.cursor = 3;
+    q2_menu_goto(&m, Q2_PAGE_PLAYER);
+    q2_menu_goto(&m, Q2_PAGE_SOUND);
+    CHECK(m.cursor == 3, "SOUND came back on %d", m.cursor);
+
+    /* A page that never restores ignores its save however often it is used —
+     * the confirmation opens on NO every time (the answer table's first row),
+     * which is what makes "back out of QUIT GAME?" safe. */
+    q2_menu_goto(&m, Q2_PAGE_QUIT_CONFIRM);
+    m.cursor = 2;                        /* YES */
+    q2_menu_goto(&m, Q2_PAGE_PAUSE_SP);
+    q2_menu_goto(&m, Q2_PAGE_QUIT_CONFIRM);
+    CHECK(m.cursor == 1 &&
+          strcmp(q2_menu_item_text(&m, m.cursor), "NO") == 0,
+          "the confirmation reopened on %s", q2_menu_item_text(&m, m.cursor));
+
+    /* And the multiplayer pause page resets like the single-player one
+     * (0x8001D5D8's arm reaches the same 0x8001D71C). */
+    q2_menu_init(&m, &s, Q2_MENU_SCREEN_H);
+    q2_menu_set_multiplayer(&m, true);
+    q2_menu_open(&m);
+    q2_menu_advance(&m, 0);
+    CHECK(m.page_id == Q2_PAGE_PAUSE_MP, "multiplayer opens page %d", m.page_id);
+    m.cursor = 1;
+    q2_menu_goto(&m, Q2_PAGE_OPTIONS);
+    q2_menu_goto(&m, Q2_PAGE_PAUSE_MP);
+    CHECK(m.cursor == 0, "the multiplayer pause cursor came back as %d",
+          m.cursor);
+}
+
+/*
+ * VIBRATION is a row the pad has to earn — 0x8001C9D0.
+ *
+ * InGame_CHECK_FOR_CONTROLLER asks IsPlayerPadShockable (0x80033250) about the
+ * pausing player and, when the answer is zero, greys drawable 2 and pulls the
+ * cursor off it (0x8001C9E0..0x8001CA44). Drawable 2 is item 1 here, because
+ * FrontEndAddPausedTitle takes drawable 0 (0x8001D07C) — the same arithmetic
+ * that makes 216 = 2*92 + 32 the row's text and 258 its disable halfword.
+ *
+ * Note that this is a PAD CAPABILITY and not the VIBRATION setting: the setting
+ * is the halfword at 0x800B32BC + p*34, whose only reader in the whole image is
+ * PadDualShock's `lh v0, 728(v0)` at 0x8003179C.
+ */
+static void test_vibration_needs_a_shockable_pad(void)
+{
+    q2_menu_settings s;
+    q2_menu m;
+    char line[64];
+
+    q2_menu_settings_defaults(&s);
+    q2_menu_init(&m, &s, Q2_MENU_SCREEN_H);
+    m.open = true;
+    q2_menu_goto(&m, Q2_PAGE_CONTROLLER);
+
+    /* Nothing has said the pad rumbles, which is IsPlayerPadShockable's own
+     * answer for a pad with no actuators (0x80031878 clears the bit). */
+    CHECK(!q2_menu_item_selectable(&m, 1),
+          "VIBRATION must be out on a pad with no motors");
+    q2_menu_item_display(&m, 1, line, (u32)sizeof(line));
+    CHECK(line[0] == Q2_MENU_CODE_GREY,
+          "VIBRATION must draw grey, got \"%s\"", line);
+
+    /* And the cursor is not left on it. */
+    m.cursor = 1;
+    q2_menu_goto(&m, Q2_PAGE_PLAYER);
+    q2_menu_goto(&m, Q2_PAGE_CONTROLLER);
+    CHECK(m.cursor != 1, "the cursor stayed on the grey VIBRATION row");
+
+    /* Say the pad has motors and the row comes back, bright and landable —
+     * 0x8001CA48's arm strips the prefix and clears the halfword. */
+    q2_menu_init(&m, &s, Q2_MENU_SCREEN_H);
+    m.open = true;
+    q2_menu_set_pad_shockable(&m, 0, true);
+    q2_menu_goto(&m, Q2_PAGE_CONTROLLER);
+    CHECK(q2_menu_item_selectable(&m, 1),
+          "VIBRATION must be live on a DualShock");
+    q2_menu_item_display(&m, 1, line, (u32)sizeof(line));
+    CHECK(line[0] != Q2_MENU_CODE_GREY,
+          "VIBRATION must draw bright on a DualShock, got \"%s\"", line);
+
+    /* The other two blocks grey their labels as well as disabling them —
+     * 0x8001CAC0 and 0x8001CB9C sprintf through the same "g%s". The port had
+     * been setting only the halfword, so they went unreachable while still
+     * drawing in the bright colour. */
+    q2_menu_item_display(&m, 2, line, (u32)sizeof(line));
+    CHECK(line[0] == Q2_MENU_CODE_GREY,
+          "SWAP Y AXIS must draw grey, got \"%s\"", line);
+    q2_menu_item_display(&m, 3, line, (u32)sizeof(line));
+    CHECK(line[0] == Q2_MENU_CODE_GREY,
+          "USE MOUSE must draw grey, got \"%s\"", line);
+}
+
+/*
+ * The banner wears the pausing player's colour — 0x8001CFC8..0x8001D05C.
+ *
+ * Single player branches straight to the clear at 0x8001D054 and the band is
+ * blue. In a match FrontEndAddPausedTitle indexes the 34-byte record with
+ * `Pauser` and takes the TEAM halfword when the mode is 1 and the player-colour
+ * halfword otherwise. Menu ROWS never carry it — FrontEndCreateMenu clears bits
+ * 6..8 on every record it appends (0x8001A524) — which is what makes the
+ * banner's colour read as an identifier.
+ */
+static void test_paused_banner_colour(void)
+{
+    q2_menu_settings s;
+    q2_menu m;
+
+    q2_menu_settings_defaults(&s);
+
+    /* Single player: blue, whatever the per-player table says. */
+    open_menu(&m, &s, false);
+    CHECK(q2_menu_title_bar_colour(&m) == Q2_MENU_BAR_BLUE,
+          "single player banner is colour %d", q2_menu_title_bar_colour(&m));
+
+    /* Deathmatch, player 2 paused: the seed at 0x8001BEDC is colour = p. */
+    q2_menu_init(&m, &s, Q2_MENU_SCREEN_H);
+    q2_menu_set_multiplayer(&m, true);
+    q2_menu_set_pauser(&m, 1);
+    q2_menu_open(&m);
+    CHECK(q2_menu_title_bar_colour(&m) == Q2_MENU_BAR_RED,
+          "player 2's banner is colour %d", q2_menu_title_bar_colour(&m));
+    CHECK(m.page_id == Q2_PAGE_PAUSE_MP, "on page %d", m.page_id);
+
+    /* Player 3 keeps its own, and every page that FrontEndAddPausedTitle builds
+     * carries it — there are nine such callers, OPTIONS among them. */
+    q2_menu_set_pauser(&m, 2);
+    q2_menu_goto(&m, Q2_PAGE_OPTIONS);
+    CHECK(q2_menu_title_bar_colour(&m) == Q2_MENU_BAR_PURPLE,
+          "player 3's OPTIONS banner is colour %d",
+          q2_menu_title_bar_colour(&m));
+
+    /* Page 42's banner is the first record of its own table, appended by
+     * FrontEndCreateMenu, so it is blue even in a match. */
+    q2_menu_goto(&m, Q2_PAGE_VARIABLES);
+    CHECK(q2_menu_title_bar_colour(&m) == Q2_MENU_BAR_BLUE,
+          "MPCHEAT's banner is colour %d", q2_menu_title_bar_colour(&m));
+
+    /* TEAM DEATHMATCH takes the team halfword instead: the seed is p & 1, so
+     * players 2 and 4 share a colour and players 1 and 3 share the other. */
+    q2_menu_set_mp_mode(&m, 1);
+    q2_menu_set_pauser(&m, 2);
+    q2_menu_goto(&m, Q2_PAGE_PAUSE_MP);
+    CHECK(q2_menu_title_bar_colour(&m) == Q2_MENU_BAR_BLUE,
+          "team 0's banner is colour %d", q2_menu_title_bar_colour(&m));
+    q2_menu_set_pauser(&m, 3);
+    q2_menu_goto(&m, Q2_PAGE_PAUSE_MP);
+    CHECK(q2_menu_title_bar_colour(&m) == Q2_MENU_BAR_RED,
+          "team 1's banner is colour %d", q2_menu_title_bar_colour(&m));
+
+    /* A host that names its own colours is obeyed, masked to three bits. */
+    q2_menu_set_mp_mode(&m, 0);
+    q2_menu_set_player_colour(&m, 3, 0, Q2_MENU_BAR_GREEN);
+    q2_menu_goto(&m, Q2_PAGE_PAUSE_MP);
+    CHECK(q2_menu_title_bar_colour(&m) == Q2_MENU_BAR_GREEN,
+          "the named colour came back as %d", q2_menu_title_bar_colour(&m));
 }
 
 static void test_quit_flow(void)
@@ -445,10 +717,14 @@ static void test_quit_flow(void)
     CHECK(strcmp(q2_menu_item_text(&m, m.cursor), "NO") == 0,
           "the confirmation must start on NO");
 
-    /* NO goes back where it came from. */
+    /* NO goes back where it came from — and onto RETURN TO GAME, because the
+     * pause page takes the builder's default rather than its saved cursor
+     * (0x8001D71C). Walking back down to QUIT GAME is part of the journey. */
     tap(&m, Q2_PAD_CROSS);
     CHECK(m.page_id == Q2_PAGE_PAUSE_SP, "NO -> page %d", m.page_id);
+    CHECK(m.cursor == 0, "NO left the pause cursor on %d", m.cursor);
 
+    m.cursor = 4;                        /* QUIT GAME, again */
     tap(&m, Q2_PAD_CROSS);
     CHECK(m.page_id == Q2_PAGE_QUIT_CONFIRM, "-> page %d", m.page_id);
     tap(&m, Q2_PAD_DOWN);                /* NO -> YES, which is drawn above */
@@ -1604,6 +1880,84 @@ static void test_prompt_menu_policy(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * THE SAVE? PROMPT, and what puts it up.
+ *
+ * On the console arriving at a new level stops the game and asks; the port
+ * used to walk straight in, and the screen existed only behind a function key
+ * because "what SHOWS that prompt is not established". It is established:
+ * GameCheckPaused's arm at 0x8003E6FC..0x8003E75C, transcribed as
+ * q2_mcard_save_prompt_due.
+ *
+ * The table is the other half. `first` is 1, so the cursor lands on YES, and
+ * the port reads the answer POSITIONALLY the way the card front end does
+ * (`cursor - first`, 0x800B32AC minus 0x800B32AE) — which means the row order
+ * decides whether a player who said NO gets a save written. It is checked
+ * against the addresses the two tables live at.
+ */
+static void test_save_prompt(void)
+{
+    const q2_menu_page *sp = q2_mcard_page(Q2_MCARD_SAVE_PROMPT);
+    u32 latch = 0;
+
+    CHECK(sp && sp->addr == 0x8009B3B4u && sp->addr2 == 0x8009B3E4u,
+          "SAVE? is the caption table plus the answers");
+    if (sp) {
+        CHECK(sp->count == 3 && sp->first == 1,
+              "one caption and two answers, the cursor starting on the first");
+        CHECK(sp->items[0].y == 98 && sp->items[1].y == 124 &&
+              sp->items[2].y == 150,
+              "at 98, 124 and 150 (0x8009B3B4, 0x8009B3E4)");
+        CHECK(sp->items[0].x == 256 && sp->items[1].x == 256 &&
+              sp->items[2].x == 256, "all three centred at 256");
+        /* Row 0 relative to `first` is YES and row 1 is NO. Swap them and a
+         * player who answers NO has their game written over. */
+        CHECK(sp->items[sp->first + 0].label &&
+              strcmp(sp->items[sp->first + 0].label, "YES") == 0,
+              "the first answer is YES (0x80020428)");
+        CHECK(sp->items[sp->first + 1].label &&
+              strcmp(sp->items[sp->first + 1].label, "NO") == 0,
+              "the second is NO (0x80020140, InGame_GOTO_RESUME)");
+        CHECK(sp->items[sp->first + 0].on_release &&
+              sp->items[sp->first + 1].on_release,
+              "and both fire on the release");
+    }
+
+    /* 0x8003E738: exit code 2, a LOADMAP, is what asks. */
+    CHECK(q2_mcard_save_prompt_due(1, &latch, false, 2),
+          "a level reached by LOADMAP asks");
+    CHECK(latch == 1, "and the latch follows the counter (0x8003E728)");
+
+    /* 0x8003E70C: the same load is not asked about twice. This is what stops
+     * the per-frame checker re-raising the page it has just raised. */
+    CHECK(!q2_mcard_save_prompt_due(1, &latch, false, 2),
+          "the same load is asked about once");
+
+    /* 0x8003E740: 4 is the only other exit code that raises it. */
+    latch = 0;
+    CHECK(q2_mcard_save_prompt_due(7, &latch, false, 4), "exit code 4 asks");
+
+    /*
+     * AND THE LATCH IS WRITTEN BEFORE THE EXIT CODE IS READ (0x8003E728 then
+     * 0x8003E730), which is the whole reason a RESTART does not ask: the load
+     * it arrived on spends the counter, so the question is never put, then or
+     * on any later frame of that level.
+     */
+    latch = 0;
+    CHECK(!q2_mcard_save_prompt_due(3, &latch, false, 21),
+          "a level reached by RESTART does not ask");
+    CHECK(latch == 3, "but it spends the counter all the same");
+    CHECK(!q2_mcard_save_prompt_due(3, &latch, false, 2),
+          "so nothing can ask about that load afterwards");
+
+    /* 0x8003E720, and it comes BEFORE the latch write: an arena leaves the
+     * latch where it was. */
+    latch = 0;
+    CHECK(!q2_mcard_save_prompt_due(5, &latch, true, 2),
+          "deathmatch never asks");
+    CHECK(latch == 0, "and does not spend the counter either");
+}
+
 int main(void)
 {
     test_font_upload_alias_order();
@@ -1615,9 +1969,13 @@ int main(void)
     test_death_is_inert_at_first();
     test_toggle();
     test_slider();
+    test_music_audition();
     test_choice();
     test_press_versus_release();
     test_page_graph();
+    test_cursor_policy();
+    test_vibration_needs_a_shockable_pad();
+    test_paused_banner_colour();
     test_quit_flow();
     test_restart_flow();
     test_text_only_page();
@@ -1641,6 +1999,7 @@ int main(void)
     test_mcard_choices();
     test_mcard_accept();
     test_mcard_names();
+    test_save_prompt();
 
     test_hit_rows();
     test_hit_skips_the_unreachable();

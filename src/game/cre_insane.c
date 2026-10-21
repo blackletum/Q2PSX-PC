@@ -183,6 +183,7 @@
  * inlined at every use, and they are useful as corroboration rather than as
  * code — see insane_flags, insane_is_down and insane_moan.
  */
+#include "random.h"
 #include <stdlib.h>
 
 #include "ai.h"
@@ -311,7 +312,7 @@ static void ins_play(q2_monster *m, u32 handle_addr)
 static s32 ins_rand(void)
 {
     /* Import +0x14, 0..32767. */
-    return (s32)(rand() & 0x7FFF);
+    return (s32)(q2_random_next() & 0x7FFF);
 }
 
 /* The module's literal thresholds, kept as the integers it uses. */

@@ -110,12 +110,12 @@ const q2_weapon_behaviour q2_weapon_behaviour_table[Q2_WT_SLOTS] = {
 };
 
 /* ------------------------------------------------------------------------- */
-/* A deterministic stand-in for the engine's generator                        */
+/* The engine's deterministic generator                                      */
 /* ------------------------------------------------------------------------- */
 void q2_rng_seed(q2_rng *r, u32 seed)
 {
     if (r)
-        r->state = seed ? seed : 1u;
+        r->state = seed;
 }
 
 void q2_creature_muzzle_light(s32 rand_a, s32 rand_b, s32 *inner, s32 *outer)

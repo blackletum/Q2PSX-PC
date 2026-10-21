@@ -10,6 +10,7 @@
  * first frame rather than its position, and that a creature with no hand
  * written implementation still animates instead of standing still.
  */
+#include "random.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +19,7 @@
 #include "crebind.h"
 #include "creworld.h"
 #include "creature.h"
+#include "mission.h"
 #include "spawn.h"
 
 static int g_failures;
@@ -298,6 +300,227 @@ static void test_population_spawn_flags(void)
     }
 
     q2_monster_set_free(&set);
+}
+
+/*
+ * THE DIFFICULTY FILTER ON A SPAWN RECORD — SpawnGeneral, 0x800565C4.
+ *
+ * Nothing in this port consulted it: every skill put out the hard setting's
+ * full roster. The predicate is the rule; wiring it into the record loop is
+ * spawn.c's (see the note there). The masks are 0x800 / 0x1000 / 0x2000 on the
+ * record's +0x14, NOT a place record's 0x2000 / 0x4000 / 0x8000.
+ */
+static void test_spawn_difficulty_masks(void)
+{
+    printf("the spawn record's difficulty bits\n");
+
+    check(q2_pop_spawn_allows_skill(0x0000, 0), "an unmarked record spawns on easy");
+    check(q2_pop_spawn_allows_skill(0x0000, 1), "on medium");
+    check(q2_pop_spawn_allows_skill(0x0000, 2), "and on hard");
+
+    /* 0x80056620/0x80056628: skill 0 reads +0x14 and tests 0x800. */
+    check(!q2_pop_spawn_allows_skill(Q2_POP_SPAWN_NOT_EASY, 0),
+          "the 0x800 bit removes the record on easy");
+    check(q2_pop_spawn_allows_skill(Q2_POP_SPAWN_NOT_EASY, 1),
+          "and only on easy");
+    check(q2_pop_spawn_allows_skill(Q2_POP_SPAWN_NOT_EASY, 2),
+          "hard included");
+
+    /* 0x8005663C/0x80056644 and 0x80056658/0x80056660. */
+    check(!q2_pop_spawn_allows_skill(Q2_POP_SPAWN_NOT_MEDIUM, 1),
+          "0x1000 removes it on medium");
+    check(q2_pop_spawn_allows_skill(Q2_POP_SPAWN_NOT_MEDIUM, 0),
+          "and leaves easy alone");
+    check(!q2_pop_spawn_allows_skill(Q2_POP_SPAWN_NOT_HARD, 2),
+          "0x2000 removes it on hard");
+    check(q2_pop_spawn_allows_skill(Q2_POP_SPAWN_NOT_HARD, 1),
+          "and leaves medium alone");
+
+    /*
+     * The 0x81D8 record test_population_spawn_flags builds carries 0x8000 and
+     * the low nine bits 0x1D8, and NONE of the three difficulty bits, which
+     * sit at 11, 12 and 13 between them. It spawns at every skill — the high
+     * bits the entity filler discards are not the filter's, and reading the
+     * word as a place record's would wrongly refuse it on hard.
+     */
+    check(q2_pop_spawn_allows_skill(0x81D8u, 0) &&
+          q2_pop_spawn_allows_skill(0x81D8u, 1) &&
+          q2_pop_spawn_allows_skill(0x81D8u, 2),
+          "0x81D8 carries no difficulty bit and spawns at every skill");
+    check(!q2_pop_place_allows_skill(0x81D8u, 2),
+          "while the same word read as a place record's would be not-hard");
+
+    /*
+     * The fall-through arm, 0x800565F0..0x8005661C: skill 3 and anything
+     * negative reach 0x8005666C past all three tests.
+     */
+    check(q2_pop_spawn_allows_skill(Q2_POP_SPAWN_DIFFICULTY, 3),
+          "skill 3 filters nothing");
+    check(q2_pop_spawn_allows_skill(Q2_POP_SPAWN_DIFFICULTY, -1),
+          "and neither does a negative skill");
+
+    /* The two record layouts must not be conflated: a place record's NOT_EASY
+     * bit means nothing in a spawn record's flags word and vice versa. */
+    check(q2_pop_spawn_allows_skill(Q2_POP_PLACE_NOT_MEDIUM, 1),
+          "a place record's 0x4000 is not a spawn record's medium bit");
+    check(q2_pop_place_allows_skill(Q2_POP_SPAWN_NOT_EASY, 0),
+          "and a spawn record's 0x800 is not a place record's easy bit");
+}
+
+/*
+ * AND THE RECORD LOOP ACTUALLY APPLIES IT. The predicate above was transcribed
+ * and tested with no caller, so every skill still put out the hard setting's
+ * whole roster. SpawnGeneral asks GetDifficultySetting at 0x800565E0 BEFORE it
+ * allocates anything and returns from the epilogue at 0x800567E0 on a hit, so a
+ * refused record produces no monster at all — not a hidden one, not a sleeping
+ * one. `skill_filtered` counts them apart from the failures so the "N of M
+ * placed" line stays honest.
+ */
+static void test_spawn_loop_honours_difficulty(void)
+{
+    enum { SPAWN_LIST = Q2_POP_GROUP_SIZE + 4,
+           SIZE = SPAWN_LIST + 2 * Q2_POP_SPAWN_SIZE + 4 };
+    u8 bytes[SIZE];
+    q2_population pop;
+    q2_monster_set set;
+    q2_spawn_stats st;
+    s32 saved = q2_cre_skill();
+
+    printf("difficulty removes a creature from the map\n");
+
+    memset(bytes, 0, sizeof(bytes));
+    memcpy(bytes, "Zone0", 5);
+    put_u32(bytes + 0x0C, SPAWN_LIST);
+
+    /* Two records of the same class. The first is marked NOT_MEDIUM at +0x14,
+     * the second carries no difficulty bit at all. */
+    put_u32(bytes + SPAWN_LIST, 18);
+    put_u16(bytes + SPAWN_LIST + 0x14, (u16)Q2_POP_SPAWN_NOT_MEDIUM);
+    put_u32(bytes + SPAWN_LIST + Q2_POP_SPAWN_SIZE, 18);
+    put_u16(bytes + SPAWN_LIST + Q2_POP_SPAWN_SIZE + 0x14, 0);
+
+    memset(&pop, 0, sizeof(pop));
+    pop.data        = bytes;
+    pop.size        = sizeof(bytes);
+    pop.group_count = 1;
+
+    q2_cre_set_skill(1);
+    memset(&set, 0, sizeof(set));
+    memset(&st, 0, sizeof(st));
+    q2_monster_set_register(&set, 18);
+    check_eq_i(q2_spawn_from_population(&set, &pop, NULL, &st), Q2_OK,
+               "the population spawns on medium");
+    check_eq_i(st.records, 2, "both records were seen");
+    check_eq_i(st.skill_filtered, 1,
+               "the 0x1000 record is REMOVED on medium, not merely hidden");
+    check_eq_i(set.count, 1, "and only one creature exists");
+    check_eq_i(st.no_module, 0,
+               "a skill-filtered record is not miscounted as a missing module");
+    q2_monster_set_free(&set);
+
+    /* The same population on easy keeps both: 0x1000 is the medium bit alone. */
+    q2_cre_set_skill(0);
+    memset(&set, 0, sizeof(set));
+    memset(&st, 0, sizeof(st));
+    q2_monster_set_register(&set, 18);
+    check_eq_i(q2_spawn_from_population(&set, &pop, NULL, &st), Q2_OK,
+               "and on easy");
+    check_eq_i(st.skill_filtered, 0, "nothing is removed on easy");
+    check_eq_i(set.count, 2, "both creatures exist");
+    q2_monster_set_free(&set);
+
+    q2_cre_set_skill(saved);
+}
+
+/*
+ * ARRIVING AT A PATH CORNER — CalcAbsFromCreBox 0x8005CB00 and VectBoxOverlap
+ * 0x800552D8, as BoxEdicts pairs them at 0x8005C81C/0x8005C828.
+ *
+ * A corner is not a point. Its absolute bounds are made up on the spot by the
+ * class-114 arm at 0x8005CB20 — origin ∓ 96 on every axis — so the window is
+ * the creature's hull grown by 96, 382 per axis rather than 286.
+ */
+static void test_corner_trigger_box(void)
+{
+    q2_monster m, c;
+
+    printf("the path corner's trigger cube\n");
+
+    q2_monster_init(&m);
+    q2_monster_init(&c);
+    m.pos[0] = m.pos[1] = m.pos[2] = 0;
+    c.pos[0] = c.pos[1] = c.pos[2] = 0;
+
+    check(q2_creature_corner_overlaps(&m, &c),
+          "a corner under the creature's origin is reached");
+
+    /* The old point-in-hull test accepted out to 286 and no further. The
+     * console's box reaches 286 + 96. */
+    c.pos[0] = 300;
+    check(q2_creature_corner_overlaps(&m, &c),
+          "and one 300 units away, which the point test dropped");
+
+    c.pos[0] = 382;
+    check(q2_creature_corner_overlaps(&m, &c),
+          "382 is inside: VectBoxOverlap's tests are strict, so touching "
+          "faces overlap");
+
+    c.pos[0] = 383;
+    check(!q2_creature_corner_overlaps(&m, &c),
+          "383 is outside — the window is closed, not open");
+
+    /* Every axis, including the vertical one where the port had no slack at
+     * all: a corner authored below the floor the creature settles on. */
+    c.pos[0] = 0;
+    c.pos[1] = 350;
+    check(q2_creature_corner_overlaps(&m, &c),
+          "the same 96 applies on the vertical axis");
+    c.pos[1] = 0;
+    c.pos[2] = -370;
+    check(q2_creature_corner_overlaps(&m, &c),
+          "and on Z, in both directions");
+
+    /* It is the MOVER's own box, not a constant: a corpse-sized hull would
+     * shrink the window with it. The diagonal is not a sphere — 382 on each
+     * axis at once is still an overlap, because this is a box test. */
+    c.pos[0] = 380; c.pos[1] = 380; c.pos[2] = 380;
+    check(q2_creature_corner_overlaps(&m, &c),
+          "and the test is a box, so the corner of the box counts");
+
+    check(!q2_creature_corner_overlaps(NULL, &c) &&
+          !q2_creature_corner_overlaps(&m, NULL),
+          "a missing end overlaps nothing");
+}
+
+/*
+ * WHICH CLASSES THE KILL TALLY IS ABOUT — CreatureCount 0x80057860 for the
+ * denominator, ProcessQuakeDeath 0x8007CD5C for the numerator.
+ *
+ * Both halves of the port's tally were class-blind, so the board asked the
+ * player to kill the wounded marines that are scenery. The two rules are NOT
+ * the same rule and the difference is the console's: three classes are refused
+ * the denominator and one the numerator.
+ */
+static void test_kill_tally_classes(void)
+{
+    printf("which classes the kill tally counts\n");
+
+    /* `(u32)(class - 34) < 3` skips the increment at 0x80057868. */
+    check(!q2_mission_class_counts(34), "the Insane is not in the denominator");
+    check(!q2_mission_class_counts(35), "nor Rider2");
+    check(!q2_mission_class_counts(36), "nor Rider3");
+    check(q2_mission_class_counts(33), "33 is");
+    check(q2_mission_class_counts(37), "and so is 37 — the window is exactly 3");
+    check(q2_mission_class_counts(0),
+          "and class 0 is, which an unsigned subtract is what makes true");
+
+    /* 0x8007CD60 is one `beq` against 34 and nothing more. */
+    check(!q2_mission_class_kills(34), "shooting an Insane raises nothing");
+    check(q2_mission_class_kills(35),
+          "but shooting a Rider2 does, though it was never counted — the "
+          "console's own asymmetry, left alone");
+    check(q2_mission_class_kills(36), "and a Rider3 the same");
+    check(q2_mission_class_kills(18), "a Soldier counts on both halves");
 }
 
 static void test_move_lookup(void)
@@ -1387,21 +1610,21 @@ static void test_insane_start_draws(void)
     q2_level_reset();
 
     /* The stream the spawn will read, taken out in advance. */
-    srand(4321);
-    r1 = rand();
-    r2 = rand();
-    r3 = rand();
+    q2_random_seed(4321);
+    r1 = q2_random_next();
+    r2 = q2_random_next();
+    r3 = q2_random_next();
 
     /*
      * PRONE: flymonster_start through import +0x100 (0x80100994), whose
      * monster_start draws at 0x80061B2C for the start frame — and then
      * 0x8010099C jumps past the skin. ONE draw, and the frame it makes.
      */
-    srand(4321);
+    q2_random_seed(4321);
     q2_monster_init(&m);
     m.spawnflags = 0x08u << 18;
     q2_creature_spawn(&bind, &m, 0);
-    next = rand();
+    next = q2_random_next();
     check(r1 != r2 && next == r2,
           "a prone Insane's spawn draws exactly once: the start frame inside "
           "flymonster_start (0x800622B8 -> 0x80061B2C)");
@@ -1413,11 +1636,11 @@ static void test_insane_start_draws(void)
      * UPRIGHT: walkmonster_start (0x801009AC) draws the start frame first,
      * THEN the module draws the skin at 0x801009BC. Two draws, in that order.
      */
-    srand(4321);
+    q2_random_seed(4321);
     q2_monster_init(&m);
     m.spawnflags = 0;
     q2_creature_spawn(&bind, &m, 0);
-    next = rand();
+    next = q2_random_next();
     check(r2 != r3 && next == r3,
           "an upright Insane's spawn draws exactly twice");
     check(m.frame == 59 + (r1 & 0x7FFF) % 6 &&
@@ -1449,6 +1672,10 @@ int main(void)
     test_player_noise_stamps_the_window();
     test_bind();
     test_population_spawn_flags();
+    test_spawn_difficulty_masks();
+    test_spawn_loop_honours_difficulty();
+    test_corner_trigger_box();
+    test_kill_tally_classes();
     test_move_lookup();
     test_endfunc_resolution();
     test_frames_drive();

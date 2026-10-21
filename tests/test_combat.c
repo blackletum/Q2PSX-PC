@@ -21,6 +21,7 @@
 #include "multiplayer.h"
 #include "playerdeath.h"
 #include "projectile.h"
+#include "sim.h"
 #include "trig.h"
 #include "weapon.h"
 
@@ -716,6 +717,106 @@ static void test_damage(void)
     target.has_client = true;
     q2_combat_damage(NULL, &target, 30000, Q2_MOD_BULLET, NULL, &rules);
     check_eq_i(target.health, 10 - 30000, "a player's health has no floor");
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * ARMOUR_FADE, gp+1184, and the two screen washes it gates — 0x80057B80's
+ * green for a hit the power shield ate and 0x80057D24's grey for one ordinary
+ * armour took. `xrefs 0x8007832C` lists four SetWinFade raisers and this port
+ * had one of them; these are two of the missing three.
+ *
+ * The flag is NOT about the hit sound, which is what the code used to say. It
+ * is read in exactly one place, 0x80057CB8, and the branch at 0x80057CC0 jumps
+ * over CheckArmour's SetWinFade and lands on the armour subtraction — so the
+ * points still come off, only the grey tint is suppressed.
+ */
+static void test_armour_fade_flag(void)
+{
+    q2_actor a;
+    q2_combat_rules rules;
+
+    printf("the armour screen wash\n");
+    q2_combat_rules_default(&rules);
+    rules.skill = 0;
+
+    /* The colours, read straight out of `bytes 0x800AEAA0 16`. */
+    check_eq_i(q2_actor_fade_power_rgb[0], 0x00, "0x800AEAA4 red is 0");
+    check_eq_i(q2_actor_fade_power_rgb[1], 0x80, "its green is 128");
+    check_eq_i(q2_actor_fade_power_rgb[2], 0x20, "its blue is 32");
+    check_eq_i(q2_actor_fade_armour_rgb[1], 0x80, "0x800AEAA8 is grey 128");
+
+    /* A hit the power shield absorbs raises the green one. */
+    place(&a, 0, 0, 0, 100);
+    a.has_client = true;
+    a.powerups   = Q2_POWERUP_POWER_ARMOUR;
+    a.cells      = 100;
+    check(q2_combat_power_armour_absorb(&a, 90) > 0, "the shield absorbs");
+    check_eq_i(a.armour_fade, Q2_ACTOR_FADE_POWER,
+               "and 0x80057B24 raises the green wash");
+
+    /*
+     * 0x80057AB0 clears the flag as the function's FIRST instruction, before
+     * every guard — so a second hit that finds nothing to absorb takes the
+     * green wash away rather than leaving it latched.
+     */
+    a.cells = 0;
+    check_eq_i(q2_combat_power_armour_absorb(&a, 90), 0, "no cells, no save");
+    check_eq_i(a.armour_fade, Q2_ACTOR_FADE_NONE,
+               "and the flag is cleared ahead of the guards");
+
+    /* Ordinary armour on its own raises the grey one. */
+    place(&a, 0, 0, 0, 100);
+    a.has_client   = true;
+    a.armour       = 50;
+    a.armour_class = 0;
+    check(q2_combat_armour_absorb(&a, 100, false, false, &rules) > 0,
+          "jacket absorbs");
+    check_eq_i(a.armour_fade, Q2_ACTOR_FADE_ARMOUR,
+               "and 0x80057D24 raises the grey wash");
+
+    /*
+     * With the flag already up, CheckArmour takes its points and raises
+     * nothing: one hit is one colour on the screen.
+     */
+    place(&a, 0, 0, 0, 100);
+    a.has_client   = true;
+    a.armour       = 50;
+    a.armour_class = 0;
+    a.armour_fade  = Q2_ACTOR_FADE_POWER;
+    check_eq_i(q2_combat_armour_absorb(&a, 100, true, true, &rules), 0,
+               "jacket stops no energy, so there is nothing to suppress");
+    place(&a, 0, 0, 0, 100);
+    a.has_client   = true;
+    a.armour       = 50;
+    a.armour_class = 0;
+    a.armour_fade  = Q2_ACTOR_FADE_POWER;
+    check(q2_combat_armour_absorb(&a, 100, false, true, &rules) > 0,
+          "the armour still spends its points (past 0x80057CC0's join)");
+    check_eq_i(a.armour_fade, Q2_ACTOR_FADE_POWER,
+               "but the grey wash is suppressed and the green one stands");
+
+    /*
+     * And through the whole damage function: a hit the shield eats entirely
+     * costs no health and no armour, which is exactly why the HUD's own
+     * compare at 0x8003AE10 cannot stand in for this raiser.
+     */
+    {
+        q2_actor target;
+        q2_damage_result r;
+
+        place(&target, 0, 0, 0, 100);
+        target.has_client = true;
+        target.powerups   = Q2_POWERUP_POWER_ARMOUR;
+        target.cells      = 100;
+        target.armour     = 0;
+
+        r = q2_combat_damage(NULL, &target, 30, Q2_MOD_BULLET, NULL, &rules);
+        check(r.absorbed_power > 0, "the shield took some of it");
+        check_eq_i(r.absorbed_armour, 0, "and armour took none");
+        check_eq_i(target.armour_fade, Q2_ACTOR_FADE_POWER,
+                   "so the only feedback the player gets is the green wash");
+    }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1500,8 +1601,26 @@ static void test_actor_cylinder_trace(void)
                                         Q2_HITSCAN_RADIUS, list, 1);
     check_eq_i(idx, 0, "the parallel sweep hits inside the X/Z circle");
 
-    /* The monster projection must carry the corpse resize. A standing sphere
-     * of radius 429 would catch y=100; the anchored 143-unit slab does not. */
+    /*
+     * The monster projection must carry the corpse resize. A standing sphere
+     * of radius 429 would catch y=100; the anchored quarter-height slab does
+     * not.
+     *
+     * THE THREE NUMBERS BELOW CHANGED, and both changes are the same fix.
+     * This test used to want height 143 and a hull shortened to +/-71, because
+     * the port derived the hit cylinder from `mins`/`maxs` and scaled those.
+     * The console does neither. `GetCreHitSize` (0x8006DC1C) takes the pair
+     * from the bound MODEL's header at +0x18/+0x1A and falls back to a literal
+     * 286 and **600** at 0x8006DC6C/0x8006DC74 — not 572, which is what the
+     * old 143 was a quarter of. This corpse has no model bound, so it takes
+     * that fallback and its quarter-height is 600/4 = 150.
+     *
+     * And `QuakeDeadHitCollision` (0x8007F77C) writes exactly two halfwords:
+     * obj+0x42 at 0x8007F798 and obj+0x40 at 0x8007F7BC, which are the hit
+     * cylinder's height and radius. obj+0x18..0x22 — the +/-286 movement hull
+     * — appears nowhere in the function, so a body keeps the box it walked
+     * around in and the Y bounds stay where they were.
+     */
     q2_monster_init(&corpse);
     corpse.pos[2] = 4000;
     corpse.health = -20;
@@ -1510,9 +1629,9 @@ static void test_actor_cylinder_trace(void)
     corpse.takedamage = Q2_DAMAGE_YES;
     q2_actor_from_monster(&corner, &corpse);
     check_eq_i(corner.radius, 429, "a detached body projects its wider radius");
-    check_eq_i(corner.height, 143, "and the retail quarter-height of 143");
-    check_eq_i(corner.mins[1], -71, "and its shortened upper Y bound");
-    check_eq_i(corner.maxs[1], 71, "and its shortened lower Y bound");
+    check_eq_i(corner.height, 150, "and the quarter of GetCreHitSize's 600");
+    check_eq_i(corner.mins[1], -286, "and the movement hull it is NOT shrunk by");
+    check_eq_i(corner.maxs[1], 286, "...on both faces");
 
     beam_origin[1] = 100;
     list[0] = &corner;
@@ -1652,6 +1771,176 @@ static void test_energy_light_gate(void)
     }
 }
 
+/* ------------------------------------------------------------------------- */
+/*
+ * WHAT A PANE DOES AFTER IT BREAKS — PSXGLASS's tail, 0x8002A4AC..0x8002A4F4.
+ *
+ * Everything asserted here used to be missing. The port threw the debris, took
+ * the pane out of the collision set and stopped: the geometry went on drawing
+ * for as long as the zone was loaded, and no window in the game ever made a
+ * sound. The console does three more things on a break, and two of them are
+ * BELOW the branch at 0x8002A3CC so they happen on the EVE_ replay pass too:
+ *
+ *   0x8002A490/0x8002A4A4  play Sound_GlassSmash — `amb_brkglas` — at the
+ *                          centre of the pane's Scene node box (gated)
+ *   0x8002A4C8..0x8002A4E0 set bit 15, do-not-draw, in that node's flags
+ *   0x8002A4E4..0x8002A4F4 free the damageable box and clear the callback
+ *
+ * The box is BASE1's own pane, node 221, so the centre is a real one: all three
+ * sums are odd, and the console's `addu`/`srl 31`/`addu`/`sra 1` rounds each
+ * towards zero. A shift by one would floor and give (-10784, -1298, -16959),
+ * which is why the numbers below are written out rather than computed.
+ */
+static void wr_le32(u8 *p, s32 v)
+{
+    u32 u = (u32)v;
+
+    p[0] = (u8)(u & 0xFF);
+    p[1] = (u8)((u >> 8) & 0xFF);
+    p[2] = (u8)((u >> 16) & 0xFF);
+    p[3] = (u8)((u >> 24) & 0xFF);
+}
+
+/* The sim is far larger than a test's stack frame, so both of these are file
+ * scope rather than automatic. */
+static q2_sim  g_glass_sim;
+static u8      g_glass_node[Q2_SCENE_NODE_SIZE];
+
+static void test_glass_break_tail(void)
+{
+    q2_sim *sim = &g_glass_sim;
+    q2_scene scene;
+    q2_breakable *b;
+    s16 hidden_node = -1;
+    u8  hidden = 0;
+    s32 at[3];
+    /* BASE1 zone 0: "breakable 0: GLASS node 221, 10 hp, 1+20 pieces". */
+    const s32 bmin[3] = { -10879, -1918, -17919 };
+    const s32 bmax[3] = { -10688,  -677, -15998 };
+    const s32 centre[3] = { -10783, -1297, -16958 };
+    /* Straight through the pane, along +z, from outside its box. */
+    s32 from[3] = { -10783, -1297, -19000 };
+    s32 to[3]   = { -10783, -1297, -15000 };
+    int k;
+
+    printf("glass break tail\n");
+
+    memset(g_glass_node, 0, sizeof(g_glass_node));
+    for (k = 0; k < 3; k++) {
+        wr_le32(g_glass_node + 0x10 + k * 4, bmin[k]);
+        wr_le32(g_glass_node + 0x1C + k * 4, bmax[k]);
+    }
+    memset(&scene, 0, sizeof(scene));
+    scene.nodes      = g_glass_node;
+    scene.node_count = 1;
+
+    q2_sim_init(sim, NULL, 50);
+    sim->breakable_scene = &scene;
+    sim->breakable_count = 1;
+
+    b = &sim->breakable[0];
+    memset(b, 0, sizeof(*b));
+    b->solid_target = -1;      /* no movement box in this fixture */
+    b->scene_node   = 0;       /* index 0 of the one-node scene above */
+    b->health       = 10;
+    b->kind         = Q2_BREAKABLE_GLASS;
+    b->count_a      = 1;
+    b->count_b      = 20;
+    for (k = 0; k < 3; k++) {
+        b->bmin[k] = bmin[k];
+        b->bmax[k] = bmax[k];
+    }
+
+    /* A SURVIVING HIT CHANGES NOTHING. 0x8002A3AC returns while the hit points
+     * are above zero, long before either queue. */
+    (void)q2_sim_breakable_shot(sim, from, to, 9);
+    check(!b->broken, "a surviving hit leaves the pane standing");
+    check(!q2_sim_next_node_vis(sim, &hidden_node, &hidden),
+          "...and queues no hide");
+    check(!q2_sim_next_glass_smash(sim, at), "...and no smash");
+
+    /* The fatal one. */
+    (void)q2_sim_breakable_shot(sim, from, to, 1);
+    check(b->broken, "the fatal hit frees the pane's box (0x8002A4E4)");
+    check(q2_sim_next_node_vis(sim, &hidden_node, &hidden),
+          "and queues the node's visibility change (0x8002A4DC)");
+    check_eq_i(hidden_node, 0, "...for the pane's own node");
+    check_eq_i(hidden, 1, "...hidden, which is what bit 15 means");
+    check(!q2_sim_next_node_vis(sim, &hidden_node, &hidden),
+          "...exactly once");
+
+    check(q2_sim_next_glass_smash(sim, at),
+          "and queues the smash (0x8002A4A4)");
+    check_eq_i(at[0], centre[0], "at the box centre in x, rounded towards zero");
+    check_eq_i(at[1], centre[1], "...in y");
+    check_eq_i(at[2], centre[2], "...in z");
+    check(!q2_sim_next_glass_smash(sim, at), "...exactly once");
+
+    /*
+     * THE SCRIPT PATH DOES THE SAME, because it is the same function: a CALL
+     * carries damage 0 and 0x8002A390 falls straight through to the shatter.
+     * This is the path a zone seam replays, and the hide below the branch is
+     * why a pane the script already broke comes back broken and invisible.
+     */
+    {
+        /* One UserFuncs record, "GLASS", at per-map index 0. */
+        static u8 uf[4 + Q2_UF_RECORD_SIZE];
+        /* A 16-byte GLASS item: object slot at +4, hit points at +6, the two
+         * piece counts at +10 and +12. */
+        static u8 raw[16];
+        q2_event_item item;
+
+        memset(uf, 0, sizeof(uf));
+        uf[0] = 1;                       /* count, low halfword of the u32 */
+        memcpy(uf + 4, "GLASS", 5);
+
+        memset(raw, 0, sizeof(raw));
+        raw[4]  = 0;  raw[5] = 0;        /* slot 0 */
+        raw[6]  = 10; raw[7] = 0;        /* hit points */
+        raw[10] = 1;                     /* param_a, the hit burst */
+        raw[12] = 20;                    /* param_b, the shatter */
+
+        memset(&item, 0, sizeof(item));
+        item.op      = Q2_EVOP_CALL;
+        item.opcode  = Q2_EVOP_CALL;
+        item.len     = 16;
+        item.payload = raw + 2;
+
+        sim->userfuncs.data  = uf;
+        sim->userfuncs.size  = sizeof(uf);
+        sim->userfuncs.count = 1;
+        sim->userfuncs_ready = true;
+
+        b->broken = false;               /* a fresh pane for the script to break */
+
+        (void)q2_sim_breakable_call(sim, &scene, NULL, &item, 0);
+        check(b->broken, "a scripted GLASS call frees the box as well");
+        check(q2_sim_next_node_vis(sim, &hidden_node, &hidden),
+              "...and hides the node, which the port never did");
+        check_eq_i(hidden, 1, "...hidden");
+        check(q2_sim_next_glass_smash(sim, at), "...and smashes audibly");
+        check_eq_i(at[2], centre[2], "...at the same centre");
+
+        /*
+         * AND ON THE REPLAY PASS the hide still happens and the smash does not:
+         * 0x8002A3CC branches TO 0x8002A4AC, so the sound is skipped and the
+         * tail is not. Event_MuteLevFlag (0x800B2834) is `initial_pass` here.
+         */
+        b->broken = false;
+        sim->event_rt.initial_pass = true;
+        (void)q2_sim_breakable_call(sim, &scene, NULL, &item, 0);
+        sim->event_rt.initial_pass = false;
+
+        check(b->broken, "the replay frees the box too (below the branch)");
+        check(q2_sim_next_node_vis(sim, &hidden_node, &hidden),
+              "...and hides the node too");
+        check(!q2_sim_next_glass_smash(sim, at),
+              "...but plays nothing, which is what the mute flag is for");
+    }
+
+    q2_sim_free(sim);
+}
+
 int main(void)
 {
     printf("combat behaviour\n\n");
@@ -1660,6 +1949,7 @@ int main(void)
     test_ray_distance();
     test_armour_absorption();
     test_power_armour();
+    test_armour_fade_flag();
     test_damage();
     test_takedamage_gate();
     test_one_shot_kill();
@@ -1673,6 +1963,7 @@ int main(void)
     test_mod_classification();
 
     test_energy_light_gate();
+    test_glass_break_tail();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;

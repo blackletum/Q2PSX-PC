@@ -58,8 +58,15 @@ static const q2_fx_preset k_preset[Q2_FX_PRESET_COUNT] = {
     { 15,    15,  6144,  10,   2,    3,    2,  2,  0x80048C08u },  /* BLOOD     */
     { 15,    15,  20000, 9,    11,   11,   3,  0,  0x8004BDC4u },  /* BFG_BURST */
     { 15,    10,  10000, 9,    1,    1,    1,  0,  0x800596B0u },  /* ITEM_MAT. */
-    { 15,     0,  0,     9,    1,    0,    1,  0,  0x80028DC8u },  /* SCRIPTED  */
-    { 15,    25,  3072,  9,    0,    0,    4,  4,  0x8003E0C0u },  /* SPARK     */
+    /*
+     * TELEPORT's shift is 13, not 9 — `sra v0, v0, 13` at 0x80028C5C and
+     * 0x80028C88 — and it applies to X and Z only: the Y component is
+     * `(rand() >> 8) * sign` (0x80028C68), which is not a `draw()` at all. The
+     * row is here for its count and its two ramps; the column's own velocities
+     * come out of q2_fx_teleport_column, which is the only caller the site has.
+     */
+    { 15,     0,  0,     13,   1,    0,    1,  0,  0x80028DC8u },  /* TELEPORT  */
+    { 15,    25,  3072,  9,    0,    0,    4,  4,  0x8003E0C0u },  /* WATER_SPL */
     { 15,    15,  6144,  10,   1,    1,    1,  2,  0x80049074u }   /* LASER_END */
 };
 
@@ -929,6 +936,13 @@ void q2_fx_actor_damage_effect(q2_fx_world *w, struct q2_actor *a,
          * `>= 3` arm's 0x80075C34 and takes a fourth argument of 4
          * (0x80058718). The re-read is the same value here because the drawer
          * cannot touch the byte.
+         *
+         * 0x80075D14 is AddTimedLight and that 4 is a LIFETIME, not a style or
+         * a radius: the light is re-emitted for four frames at 4/4, 3/4, 2/4
+         * and 1/4 of 800/1300 (lighting.h, and Q2_ENERGY_PULSE_TICKS in
+         * effect.h). The effect's illumination therefore outlives the effect's
+         * own countdown, which is the part the port was missing — not just one
+         * unraised light but the whole fade-out.
          */
         if (armed == 2 && out)
             out->energy_pulse = true;
@@ -1184,12 +1198,12 @@ s32 q2_fx_spawn(q2_fx_world *w, q2_rng *rng, q2_fx_preset_id id,
     size = p->size;
 
     /*
-     * The scripted effect draws its lifetime and size before its velocities
+     * The teleport column draws its lifetime and size before its velocities
      * (0x80028D84 and 0x80028D90), so the generator's sequence differs from
      * every other preset's. Reproducing the order is what keeps a seeded replay
      * identical.
      */
-    if (id == Q2_FX_SCRIPTED) {
+    if (id == Q2_FX_TELEPORT) {
         life = (u32)((q2_rng_next(rng) + 24) & 0xF);
         size = (q2_rng_next(rng) & 0x2047) + 12000;
     }
@@ -1234,6 +1248,100 @@ s32 q2_fx_spawn(q2_fx_world *w, q2_rng *rng, q2_fx_preset_id id,
     }
 
     return first;
+}
+
+/* ------------------------------------------------------------------------- */
+/* The teleport column — DrawTelePorts, 0x80028BDC                            */
+/* ------------------------------------------------------------------------- */
+s32 q2_fx_teleport_sign(s32 level_time)
+{
+    /*
+     * 0x80028BE8..0x80028C24. `s4` starts at +1 and becomes -1 unless
+     * `LevelTicks & 0x7F` is below 63 — an `sltiu`, so it is a 128-tick saw
+     * with 63 ticks of rise and 65 of fall, not a symmetric one. At 300 ticks
+     * to the second that is a little over two cycles a second.
+     */
+    return ((u32)level_time & 0x7Fu) < 63u ? 1 : -1;
+}
+
+void q2_fx_teleport_velocities(q2_rng *rng, s32 sign,
+                               s16 vel[Q2_FX_GROUP_QUADS][3])
+{
+    u32 i;
+
+    if (!rng || !vel)
+        return;
+
+    /*
+     * DRAWN ONCE PER FRAME AND SHARED BY EVERY PAD. The fifteen triples go
+     * into the stack buffer at sp+32 before the walk over the registered list
+     * begins (0x80028C34..0x80028C9C is above the `blez` on NumTelePorts at
+     * 0x80028CA8), and nothing inside the walk touches that buffer. So a map
+     * with seven pads draws 45 velocities a frame, not 315, and every pad's
+     * column leans the same way on the same frame.
+     *
+     * X and Z are `(rand() - 16384) >> 13` — a range of -4..3, much tighter
+     * than any other site's shift of 9 or 10 — and Y is `(rand() >> 8) * sign`
+     * (0x80028C68 `sra v0, 8`, 0x80028C6C `mult v0, s1`), which is 0..127 with
+     * no bias subtracted at all. That asymmetry IS the column: the quads
+     * stream steadily up or down and barely spread sideways.
+     */
+    for (i = 0; i < Q2_FX_GROUP_QUADS; i++) {
+        vel[i][0] = (s16)draw(rng, 13);
+        vel[i][1] = (s16)((q2_rng_next(rng) >> 8) * sign);
+        vel[i][2] = (s16)draw(rng, 13);
+    }
+}
+
+s32 q2_fx_teleport_column(q2_fx_world *w, q2_rng *rng,
+                          const s16 vel[Q2_FX_GROUP_QUADS][3],
+                          const s32 centre[3], u8 area)
+{
+    const q2_fx_preset *p = q2_fx_preset_at(Q2_FX_TELEPORT);
+    const q2_fx_ramp *r0, *r1;
+    s32 at[3];
+    u32 life;
+    s32 size;
+
+    if (!w || !rng || !vel || !centre || !p)
+        return -1;
+
+    /*
+     * The pad's own jitter, in that order: X first (0x80028D54), then Z
+     * (0x80028D6C). `centre - 127 + (rand() & 0xFF)` is 128 units either side,
+     * so the column wanders across the pad rather than rising from one point.
+     * Y is left where the caller put it — the mins or maxs face, chosen by the
+     * sign at 0x80028D38.
+     */
+    at[0] = centre[0] - 127 + (s32)(q2_rng_next(rng) & 0xFF);
+    at[1] = centre[1];
+    at[2] = centre[2] - 127 + (s32)(q2_rng_next(rng) & 0xFF);
+
+    /* 0x80028D8C and 0x80028DA8, the same two expressions q2_fx_spawn
+     * special-cases for this preset — and in the same place in the sequence,
+     * after the jitter and before the spawn. */
+    life = (u32)((q2_rng_next(rng) + 24) & 0xF);
+    size = (s32)(q2_rng_next(rng) & 0x2047) + 12000;
+
+    r0 = q2_fx_ramp_at(w->tab, p->ramp0);   /* index[2], 0x8009BAE4: red  */
+    r1 = q2_fx_ramp_at(w->tab, p->ramp1);   /* index[0], 0x8009BA60: blue */
+
+    return q2_fx_group_spawn(w, at, vel, p->count, r0, r1, life, size, area);
+}
+
+s32 q2_fx_teleport_light_radius(s32 level_time)
+{
+    /*
+     * 0x80028DDC..0x80028E24. A 512-tick triangle on the level clock —
+     * `phase = LevelTicks & 0x1FF`, mirrored about 256 by the `slti 257` at
+     * 0x80028DFC — scaled by four and offset by 800, so the outer radius
+     * breathes between 800 and 1824 while the inner stays at 400.
+     */
+    s32 phase = (s32)((u32)level_time & 0x1FFu);
+
+    if (phase >= 257)
+        phase = 512 - phase;
+    return phase * 4 + 800;
 }
 
 /* ------------------------------------------------------------------------- */

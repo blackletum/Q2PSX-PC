@@ -1,3 +1,4 @@
+#include "random.h"
 #include "aimove.h"
 
 #include <stdlib.h>
@@ -458,7 +459,7 @@ void q2_M_MoveToGoal(q2_monster *m, s32 dist)
      * could, which shakes a creature out of a corner it would otherwise press
      * against forever.
      */
-    if ((rand() & 3) == 1 || !q2_SV_StepDirection(m, m->ideal_yaw, dist)) {
+    if ((q2_random_next() & 3) == 1 || !q2_SV_StepDirection(m, m->ideal_yaw, dist)) {
         if (m->spawnflags & Q2_SVFLAG_INUSE)
             q2_SV_NewChaseDir(m, goal, dist);
     }
@@ -565,7 +566,7 @@ void q2_SV_NewChaseDir(q2_monster *actor, q2_monster *enemy, s32 dist)
     }
 
     /* Try the two axes, in an order a coin flip and the larger delta decide. */
-    if ((rand() & 1) || labs((long)deltaz) > labs((long)deltax)) {
+    if ((q2_random_next() & 1) || labs((long)deltaz) > labs((long)deltax)) {
         tdir = d[1];
         d[1] = d[2];
         d[2] = tdir;
@@ -584,7 +585,7 @@ void q2_SV_NewChaseDir(q2_monster *actor, q2_monster *enemy, s32 dist)
         return;
 
     /* Then everything else, sweeping in a randomly chosen rotation. */
-    if (rand() & 1) {
+    if (q2_random_next() & 1) {
         for (tdir = 0; tdir <= 3584; tdir += Q2_CHASE_STEP)
             if (tdir != turnaround && q2_SV_StepDirection(actor, tdir, dist))
                 return;

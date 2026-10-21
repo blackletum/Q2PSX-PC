@@ -143,8 +143,12 @@
  *
  * The whole 150-byte array (6 x 25) is cleared by `0x8003DDB8`'s `memset` on a
  * new game and restored from the save block by the six-record copy loop just
- * above it, which is what makes it a campaign-long table rather than a
- * session-long one.
+ * above it — which is what carries it ACROSS LEVELS rather than rebuilding it
+ * at each one. It does not carry across UNITS: `ClearLevelIntermission`
+ * (`0x80021A0C`) empties the block's copy when the tally board is dismissed,
+ * and the next `InitialiseQuakePlayer` restores the emptiness. See
+ * `q2_mission_register` below, which is where that used to be documented the
+ * other way round.
  *
  * ---------------------------------------------------------------------------
  * The two centred body lines ARE the unit objective, wrapped
@@ -177,9 +181,31 @@
 /* The text box — gp+352…gp+358                                               */
 /* ------------------------------------------------------------------------- */
 /*
- * The console's values are runtime state, not constants; these are what the
- * screen is authored against in the 512 x 248 space and what the port uses
- * until a caller overrides them.
+ * `MissionRect`, 0x800AE760 — and three quarters of it is INITIALISED DATA
+ * rather than runtime state, which this header used to have the wrong way
+ * round.
+ *
+ *     800AE760  54 00 1E 00 58 01 7C 00     x 84, y 30, w 344, h 124
+ *
+ * `xrefs` on each halfword: x, y and w are read thirteen times between them and
+ * written never; h has one writer, `SetInterMission` at 0x800224E8. So the
+ * rectangle is fixed except for its height, which is recomputed per unit by
+ * `q2_mission_box_height`.
+ *
+ * AND THE RECTANGLE IS DRAWN. `DBInterMission`'s first act, before a single
+ * glyph, is to pack the four halfwords into two registers —
+ *
+ *     80021B40  sll a0, a0, 16        a0 = x | (y << 16)
+ *     80021B44  or  a0, v0, a0
+ *     80021B48  sll a1, a1, 16        a1 = w | (h << 16)
+ *     80021B50  or  a1, v1, a1
+ *     80021B74  jal 0x8003F0E4        DrawDarkenedBox
+ *
+ * — and `DrawDarkenedBox` spills them straight back to the stack and reads
+ * (x, y, w, h) out as four s16 (0x8003F168..0x8003F174). That is the port's
+ * `q2_panel_build_ot`: two half-strength black TILEs and the eight-quad rounded
+ * frame, the same furniture the briefing and the end-of-mission placard sit in.
+ * The tally board had none of it and drew as bare text over the live scene.
  */
 typedef struct q2_mission_box {
     s16 x, y, w, h;
@@ -188,11 +214,97 @@ typedef struct q2_mission_box {
 void q2_mission_box_default(q2_mission_box *b);
 
 /* ------------------------------------------------------------------------- */
+/* The board's own camera — QCAMERA.C `TestCamera`, 0x8009C668                 */
+/* ------------------------------------------------------------------------- */
+/*
+ * THE TALLY IS NOT DRAWN OVER WHERE THE PLAYER WAS STANDING. It is drawn over
+ * a fixed, hand-authored view of the level, one per unit, and the port had no
+ * such thing: the world behind the board was whatever the exit happened to be
+ * facing, which on most maps is a doorframe.
+ *
+ * `SetInterMission`'s VERY FIRST store is the hook:
+ *
+ *     800224C4  addiu v1, v1, -31648        0x80038460
+ *     800224C8  sw    v1, 23900(v0)         view[0] + 300
+ *
+ * `ProcessAllCameras` (0x80037FFC) calls that hook per view at 0x80038038 and
+ * `QuakeInterMissionLoop` calls `ProcessAllCameras` at 0x800392D0, so
+ * `MoveQuakeCameraInterMission` runs on EVERY frame the board is up — which is
+ * why this belongs in the intermission frame rather than at the raise.
+ *
+ * `MoveQuakeCameraInterMission` ORs 7 into view+144, and then, only when the
+ * owning entity exists and `lh 264(ent)` is positive (0x800384A0), calls
+ * `QuakeCameraInterMission` (0x80038720). That indexes
+ *
+ *     80038740  sll   v0, unit, 1           v0 = unit * 24
+ *     80038744  addu  v0, v0, unit
+ *     80038748  sll   v0, v0, 3
+ *     8003874C  addiu v0, v0, -24           ...minus one record
+ *     80038750  addu  a0, v0, 0x8009C668
+ *
+ * so the record for unit N is `TestCamera[N - 1]`, and writes it straight into
+ * the view — the same view+0/+4/+8 that `QuakeCamera` fills from the player at
+ * 0x8003862C/0x80038640/0x8003864C, plus the three angles at +12/+14/+16.
+ *
+ * TWO THINGS THE PORT DOES NOT TAKE, stated rather than hidden:
+ *
+ *   - view+146 and view+158 (record +18 and +20) are the PrimaryColl camera
+ *     cell and its area — FORMATS.md §PrimaryColl: "the renderer indexes the
+ *     PrimaryColl node through view+146". This port derives both from the
+ *     camera position every frame, so seeding them would be overwritten.
+ *     They are carried in the record anyway, because they are what identifies
+ *     these numbers as an authored camera and not a coincidence.
+ *
+ *   - THE FIFTH UNIT HAS NO RECORD. The table is four records long: 0x8009C6C8
+ *     is the string "QFront". `Mission` reaches 5 (0x80018F24 compares it
+ *     against 5 to choose `Extro FMV`), the index is unbounded, and the console
+ *     therefore reads `51 46 72 6F / 6E 74 00 00 / 00 00 00 00` as a camera at
+ *     (1868088913, 29798, 0). A port cannot reproduce what a GTE does with
+ *     that, so unit 5 keeps the player's camera here. That is a DEVIATION and
+ *     it is the only one on this screen.
+ */
+typedef struct q2_mission_camera {
+    s32 pos[3];    /* +0, +4, +8   -> view+0/+4/+8, the eye outright     */
+    s16 pitch;     /* +12          -> view+12                            */
+    s16 yaw;       /* +14          -> view+14, NEGATED on the way in     */
+    s16 roll;      /* +16          -> view+16                            */
+    s16 cell;      /* +18          -> view+146, the PrimaryColl cell     */
+    s16 area;      /* +20          -> view+158                           */
+} q2_mission_camera;
+
+/* How many records the table really has (0x8009C668..0x8009C6C7). */
+#define Q2_MISSION_CAMERAS 4
+
+/*
+ * `TestCamera[unit - 1]`, with the yaw already negated as 0x800387FC does.
+ * Returns false — writing nothing — for a unit outside 1..4, where the console
+ * reads past the end of the table (see above).
+ */
+bool q2_mission_camera_for_unit(int unit, q2_mission_camera *out);
+
+/* ------------------------------------------------------------------------- */
 /* Layout constants                                                           */
 /* ------------------------------------------------------------------------- */
 #define Q2_MISSION_BODY_Y       36  /* the first centred line (0x80021B18)   */
 #define Q2_MISSION_BODY_STEP_1  10  /* to the second (0x80021C00)            */
 #define Q2_MISSION_BODY_STEP_2   8  /* to the third  (0x80021C4C)            */
+/*
+ * AND A FOURTH STEP, WHICH ONLY HAPPENS WHEN THE THIRD LINE IS DRAWN — the
+ * port used to leave it out, and the header row landed on top of the wrapped
+ * objective on every level whose objective wraps.
+ *
+ *     80021C4C  addiu v0, v0, 8          y += 8, unconditional
+ *     80021C50  jal   strlen(0x8009B634) ...on the SECOND wrapped line
+ *     80021C58  beq   v0, zero, 0x80021CB8   empty: straight to the header
+ *     80021CB0  addiu v0, v0, 8          drawn: y += 8 again
+ *     80021CDC  addiu v0, v0, 6          and then the header row
+ *
+ * So the header sits at 60 when the objective fitted on one line and at 68
+ * when it wrapped. This is the same eight pixels `PreProcessInterMission` adds
+ * to the panel's height for a wrapped objective (24 -> 32), which is the
+ * cross-check: the rectangle grows by exactly what the text grows by.
+ */
+#define Q2_MISSION_BODY_STEP_3   8  /* past the third, if drawn (0x80021CB0) */
 #define Q2_MISSION_LABEL_INDENT 20  /* box_x + 20    (0x80021B54)            */
 #define Q2_MISSION_HEADER_DROP   6  /* to the header row (0x80021CDC)        */
 #define Q2_MISSION_FIRST_ROW    12  /* header to the first data row (0x80021D60) */
@@ -276,6 +388,68 @@ typedef struct q2_mission {
 void q2_mission_init(q2_mission *m);
 
 /*
+ * 0x80022664 — how tall the rectangle is for THIS unit.
+ *
+ * 42 when the objective fits on one line and 50 when it wrapped, plus 10 for
+ * every row with a name, plus 14. `SetInterMission` calls it once when the
+ * board goes up and stores the answer into gp+358 (0x800224E8), so the panel
+ * grows with the table rather than being a fixed slab. See mission.c for the
+ * instructions it is transcribed from, and why 124 is the .data seed.
+ */
+s16 q2_mission_box_height(const q2_mission *m);
+
+/* ------------------------------------------------------------------------- */
+/* The dismissal lock — 0x800224F4, PadEndInterMission                        */
+/* ------------------------------------------------------------------------- */
+/*
+ * THE BOARD CANNOT BE DISMISSED FOR ITS FIRST 1200 TICKS, and the port used to
+ * let the first press through.
+ *
+ * `PadEndInterMission` runs once per tally frame, before the draw
+ * (0x8001893C, immediately ahead of `DBInterMission` at 0x80018944):
+ *
+ *     800224F4  lhu  v0, 362(gp)              the counter
+ *     800224FC  lhu  v1, 0x800B2DB4           the frame delta
+ *     80022508  subu v0, v0, v1
+ *     8002250C  sh   v0, 362(gp)
+ *     80022510  sll  v0, v0, 16
+ *     80022514  bgtz v0, 0x80022540           still positive -> return 0
+ *     8002251C  sh   zero, 362(gp)            otherwise clamp to 0
+ *     80022520  jal  0x8001FC50               MapPadInputToFire(0)
+ *     8002252C  addiu v0, zero, 1200          on an edge, re-arm...
+ *     80022538  sh   v0, 362(gp)
+ *     8002253C  addiu v0, zero, 4             ...and end the spin
+ *
+ * While the counter is positive THE PAD IS NOT EVEN READ. 1200 in the
+ * console's own 1/300 s units is four seconds, and the delta is the one
+ * `MainInterMissionLoop` clamps to 30 at 0x80018914 — the same
+ * `Q2_SCREEN_DT_MAX` the rest of this port already uses.
+ *
+ * THE COUNTER IS SEEDED IN .DATA, NOT AT THE RAISE. 0x800AE76A holds 0x04B0
+ * and `xrefs` finds exactly four references, all four inside this function —
+ * `SetInterMission` does not touch it. So the first board is gated too, and
+ * every board after it is gated because the DISMISSAL re-arms the counter. A
+ * port that reset it when the board went up would behave identically and would
+ * be describing a different mechanism; this does what the executable does.
+ *
+ * And the press is the FIRE binding, `MapPadInputToFire(0)`, not a menu
+ * confirm: 0x8001FCD8's default mask is 0x4000 (CROSS) with 0x0002/0x0004/
+ * 0x0400/0x0800 on the mouse and stick styles, and the answer is a RISING EDGE
+ * — `pad & mask` against `prev & mask` at 0x8001FCDC..0x8001FCFC. START never
+ * dismisses this board on the console, and it used to here.
+ */
+#define Q2_MISSION_GATE_TICKS 1200
+
+/*
+ * One frame of it. `gate` is the caller's copy of gp+362, `dt` the frame delta
+ * already clamped, `fire_edge` the rising edge `MapPadInputToFire` returns.
+ *
+ * Returns true when the board is dismissed — the console's answer 4, which is
+ * what ends `0x80018ED8`'s spin — and re-arms `gate` to 1200 on the way out.
+ */
+bool q2_mission_pad_end(s32 *gate, s32 dt, bool fire_edge);
+
+/*
  * Fill row `index`. Counts above 255 clamp rather than wrap — the console
  * stores each as a u8 and a port that let them roll over would show a level
  * with 300 kills as one with 44.
@@ -291,22 +465,50 @@ void q2_mission_set_row(q2_mission *m, int index, const char *name,
  * stamps the four counters into it. Returns the row index, or -1 when the name
  * is empty or all six rows are taken by other levels.
  *
- * **-1 is a real answer and the console has it too.** The table is a
- * CAMPAIGN's six rows, not a unit's: the only clear in the executable is
- * `0x8003DDB8`'s `memset(0x8009B550, 0, 150)`, and it is the `else` arm of
- * `0x8003D62C`'s restore — taken when the lookup of `"PlayerSave"` through
- * `0x8007FBEC` finds no block, i.e. on a new game. Nothing empties it at a
- * unit boundary: `0x80022498`, which sits in the MISCOMPLETE arm between the
- * board's setup and its spin, is a six-iteration loop with no body, and no
- * engine export hands a level module the array's address.
+ * -1 is a real answer and the console has it too — a seventh DISTINCT level
+ * inside one unit registers nothing. What it is NOT is a campaign-long
+ * condition, and this header used to say it was.
  *
- * So a seventh distinct level registers nothing, and since a player reaches
- * unit 2's board having visited exactly six levels, that board is full and
- * unit 3's shows the same six. That is the original's, not a simplification
- * here. `q2_mission_init` is the new-game clear and the only one a caller
- * should make.
+ * **CORRECTION: THE TABLE IS EMPTIED AT EVERY UNIT BOUNDARY.** The note here
+ * used to read "Nothing empties it at a unit boundary", on the strength of
+ * `0x80022498` being a six-iteration loop with no body. That loop really is
+ * empty, and it is also not the clear. The clear is `ClearLevelIntermission`
+ * (IMISSION.C `0x80021A0C`), and it is `GameInterMission`'s LAST act —
+ * 0x8001902C, after the spin, after `EndMission N` or `Extro FMV` has been
+ * written:
+ *
+ *     80021A18  bne  v0, zero, ...            bail if LevelIsMultiPlayer
+ *     80021AB0  jal  0x8007FBEC               OpenSaveMemory("PlayerSave0")
+ *     80021AB8  beq  v0, zero, ...            no block, nothing to clear
+ *     80021ABC  addiu a0, v0, 228
+ *     80021AC8  addiu a2, zero, 150           memset(block + 228, 0, 150)
+ *
+ * and block+228 is exactly where the six records live. `GamePlayerLoadSave`'s
+ * save arm writes row i to `block + 16 + 212 + i*25` (0x8003D764 `s0 = s1+16`,
+ * 0x8003DAB4 `swr t1, 212(v1)`) and its load arm reads it back from the same
+ * place into 0x8009B550 (0x8003DCC8). 228 + 6*25 = 378, so the memset covers
+ * the six and nothing else.
+ *
+ * The live array is not touched — it does not have to be. `InitialiseQuakePlayer`
+ * calls `GamePlayerLoadSave(player, 0)` at 0x8003B4B0 on every level entry, and
+ * that arm either copies the block's six records into 0x8009B550 or, with no
+ * block at all, runs `0x8003DDB8`'s `memset(0x8009B550, 0, 150)`. Either way
+ * the array the next unit starts with is empty.
+ *
+ * So the board really does list a unit's own levels, the six rows are a UNIT's
+ * and not a campaign's, and the port's consequence — unit 2 showing unit 1's
+ * levels and `q2_mission_register` refusing every level after the sixth — was
+ * a defect here rather than a transcribed one. `q2_mission_clear_rows` is the
+ * boundary clear; `q2_mission_init` is still the new-game one.
  */
 int q2_mission_register(q2_mission *m, const char *name);
+
+/*
+ * `ClearLevelIntermission`'s memset, 0x80021ABC..0x80021AC8 — the six records
+ * and nothing else. The unit number is left alone: it is `0x800B2E20`, which
+ * lives outside the 150 bytes and is what the next board's title reads.
+ */
+void q2_mission_clear_rows(q2_mission *m);
 
 /* The row whose name matches, or -1. Case-sensitive, as `0x80089D48` is. */
 int q2_mission_find(const q2_mission *m, const char *name);
@@ -358,6 +560,55 @@ void q2_mission_set_objective(q2_mission *m, const char *text);
  * at 0x80021E58…0x80021E80 do. */
 void q2_mission_totals(const q2_mission *m, int *secrets, int *secrets_total,
                        int *kills, int *kills_total);
+
+/*
+ * ---------------------------------------------------------------------------
+ * WHAT COUNTS AS A KILL, and it is not every creature
+ * ---------------------------------------------------------------------------
+ * The two counters this screen divides — kills_total at `0x800B29E4` and
+ * kills_found at `0x800B29E8` — are written by two functions, and both of them
+ * refuse certain CLASSES outright. The refusals are not the same refusal, and
+ * the asymmetry is transcribed rather than tidied.
+ *
+ * THE DENOMINATOR. CreatureCount (CREATURE.C `0x8005771C`) runs once over the
+ * whole of COMMON.DAT's Population (`0x8007AB2C`, stored to `0x800B29E4` at
+ * `0x8007AB3C`) and, per record, does
+ *
+ *     80057860  addiu v0, v0, -34
+ *     80057864  sltiu v0, v0, 3
+ *     80057868  bne   v0, zero, 0x80057888     skip the increment
+ *
+ * so classes 34, 35 and 36 — Insane, Rider2 and Rider3 — never enter it. (The
+ * same loop also applies the difficulty mask at `0x80057870`..`0x8005787C`;
+ * that half is `q2_pop_spawn_allows_skill`, population.h.)
+ *
+ * THE NUMERATOR. QENTS.C ProcessQuakeDeath (`0x8007CD24`) is the only writer
+ * that ever raises `0x800B29E8`. It takes the class from ent+0xD2, or from
+ * ent+0xDA when ent+0xD2 is already 47 — a body that has been detached keeps
+ * the row it died as (`0x8007CD40`..`0x8007CD54`) — and then
+ *
+ *     8007CD5C  addiu v1, zero, 34
+ *     8007CD60  beq   v0, v1, 0x8007CD94        jump past the increment
+ *
+ * ONE class, not three. Shooting a wounded marine moves neither half; shooting
+ * a Rider2 moves the numerator and was never in the denominator, which is the
+ * console's own inconsistency and is left alone here.
+ *
+ * `0x8007CD7C` `slt v0, kills, total` also clamps: the count only rises while
+ * it is strictly below the denominator, which matters only if the two halves
+ * ever disagree about a record.
+ *
+ * These are predicates on the POPULATION class id, 0..37 — `pop_class_id` on a
+ * live creature, not `class_id`, which the module's spawn overwrites with its
+ * own class byte.
+ */
+bool q2_mission_class_counts(u32 pop_class_id);
+bool q2_mission_class_kills(u32 pop_class_id);
+
+/* The Population class ids the two rules above name. */
+#define Q2_MISSION_CLASS_INSANE   34u
+#define Q2_MISSION_CLASS_RIDER2   35u
+#define Q2_MISSION_CLASS_RIDER3   36u
 
 /* The title line the console composes into 0x8009B5E8. Returns `out`. */
 const char *q2_mission_title(const q2_mission *m, char *out, u32 out_size);

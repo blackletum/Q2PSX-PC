@@ -240,12 +240,9 @@ typedef struct q2_projectile {
      * gated on — see the header note. Only a bolt has one; the four class
      * spawners take no such argument, so it is zero for them and no arm runs.
      *
-     * NOT SAVED, and it does not need to be: the two live values pair one for
-     * one with the means of death at the three call sites of 0x8004D70C — 11
-     * always goes with mod 6 and 14 always with mod 5 — so a restore
-     * reconstructs it from `mod`, which is saved. q2_projectile_flags_for_mod
-     * is that reconstruction, stated in one place so the pairing is not
-     * re-derived at each use.
+     * Saved in PRST. Legacy files reconstruct the two authored values from
+     * the means of death: 11 pairs with mod 6 and 14 with mod 5 at the three
+     * callers of 0x8004D70C. q2_projectile_flags_for_mod owns that fallback.
      */
     u16  flags;
 

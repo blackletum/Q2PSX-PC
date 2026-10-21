@@ -748,33 +748,128 @@ bool q2_hud_track(q2_hud *hud, s16 health, s16 armour)
     return raised;
 }
 
-void q2_hud_tick(q2_hud *hud, int ticks)
+/* ------------------------------------------------------------------------- */
+/* FlashPowerUp — 0x80039870                                                  */
+/* ------------------------------------------------------------------------- */
+const u8 q2_hud_flash_powerup_rgb[Q2_HUD_POWERUP_SLOTS][3] = {
+    { 0x28, 0x00, 0x28 },   /* 0x800AE874 — quad damage, purple              */
+    { 0x1E, 0x1E, 0x00 },   /* 0x800AE878 — invulnerability, yellow          */
+    { 0x00, 0x23, 0x00 },   /* 0x800AE87C — environment suit, green          */
+    { 0x00, 0x0A, 0x00 }    /* 0x800AE880 — rebreather, a fainter green      */
+};
+
+q2_hud_powerup_flash q2_hud_powerup_flash_tick(
+    const s32 until[Q2_HUD_POWERUP_SLOTS], s32 now,
+    s32 *quiet_until, s16 *warn_secs)
+{
+    q2_hud_powerup_flash out;
+    s32 secs;
+    int i;
+
+    memset(&out, 0, sizeof(out));
+    out.slot = -1;
+    if (!until || !quiet_until || !warn_secs)
+        return out;
+
+    /*
+     * 0x800398AC, 0x800398FC, 0x80039948, 0x80039990 — four `sltu`s against the
+     * level clock, each jumping to the shared tail. The FIRST live deadline
+     * wins and the chain stops there, so a player holding quad and the suit at
+     * once is tinted purple and never green. Unsigned, as the compares are.
+     */
+    for (i = 0; i < Q2_HUD_POWERUP_SLOTS; i++) {
+        if ((u32)now < (u32)until[i]) {
+            out.slot = i;
+            break;
+        }
+    }
+
+    /*
+     * 0x80039994 `beq v0, zero, 0x80039A8C`: with nothing held the fourth test
+     * branches past everything to the epilogue. Neither carried field is
+     * touched, which is why a powerup that ends inside its own blink leaves
+     * client+0xC4 armed — harmlessly, since nothing reads it again until the
+     * next powerup, by which time the clock has passed it.
+     */
+    if (out.slot < 0)
+        return out;
+
+    memcpy(out.rgb, q2_hud_flash_powerup_rgb[out.slot], 3);
+
+    /*
+     * 0x800399C4..0x800399D0: `multu` by 0x1B4E81B5, `mfhi`, `srl 5` — the
+     * compiler's unsigned divide by 300, which is whole seconds of life left,
+     * truncated toward zero.
+     */
+    secs = (s32)(((u32)until[out.slot] - (u32)now) / Q2_HUD_POWERUP_SECOND);
+
+    /*
+     * 0x800399D4 `slti v0, v1, 3` and 0x800399E8's equality against the
+     * halfword at client+0xDC: under three seconds, and only on the frame the
+     * count first changes. The store, the 150-unit quiet window and the sound
+     * are 0x800399F8, 0x800399FC and 0x80039A00.
+     */
+    if (secs < Q2_HUD_POWERUP_WARN && secs != (s32)*warn_secs) {
+        *warn_secs   = (s16)secs;
+        *quiet_until = now + Q2_HUD_POWERUP_QUIET;
+        out.warn     = true;
+        return out;             /* 0x80039A08 — and no tint on this frame */
+    }
+
+    /*
+     * 0x80039A20 `sltu v0, v0, v1` with client+0xC4 on the left: STRICTLY
+     * less, so the frame the quiet window ends on is still dark. 0x80039A88
+     * clears the field in the flashing branch's delay slot, which is what makes
+     * the ordinary case — a zero deadline against a running clock — re-arm the
+     * tile every single frame.
+     */
+    if ((u32)*quiet_until < (u32)now) {
+        out.tint     = true;
+        *quiet_until = 0;
+    }
+
+    return out;
+}
+
+void q2_hud_tick(q2_hud *hud, int frames, s32 dt)
 {
     int i;
 
-    if (!hud || ticks <= 0)
+    if (!hud)
         return;
 
-    /* 0x80042BE4: one line retires every 60 ticks, oldest first. */
-    hud->msg_expire = (s16)(hud->msg_expire + ticks);
-    while (hud->msg_expire >= Q2_HUD_MSG_TICKS) {
-        hud->msg_expire = (s16)(hud->msg_expire - Q2_HUD_MSG_TICKS);
-        if (hud->msg_count > 0)
-            hud->msg_count--;
-        else
-            break;
+    if (frames > 0) {
+        /* 0x80042BE4: one line retires every 60 FRAMES — 0x80042BEC is
+         * `addiu v1, v0, 1`, a flat increment, not the frame delta. */
+        hud->msg_expire = (s16)(hud->msg_expire + frames);
+        while (hud->msg_expire >= Q2_HUD_MSG_TICKS) {
+            hud->msg_expire = (s16)(hud->msg_expire - Q2_HUD_MSG_TICKS);
+            if (hud->msg_count > 0)
+                hud->msg_count--;
+            else
+                break;
+        }
+        if (hud->msg_count == 0)
+            hud->msg_expire = 0;
+
+        for (i = 0; i < Q2_HUD_MSG_SLOTS; i++)
+            if (hud->msg_age[i] < 0x7000)
+                hud->msg_age[i] = (s16)(hud->msg_age[i] + frames);
     }
-    if (hud->msg_count == 0)
-        hud->msg_expire = 0;
 
-    for (i = 0; i < Q2_HUD_MSG_SLOTS; i++)
-        if (hud->msg_age[i] < 0x7000)
-            hud->msg_age[i] = (s16)(hud->msg_age[i] + ticks);
-
-    /* 0x80042B90: the centre line ages, and its backdrop level walks down one
-     * step per draw until it reaches '0'. */
-    if (hud->centre_age < Q2_HUD_CENTRE_TICKS)
-        hud->centre_age += ticks;
+    /*
+     * 0x80042B90: the centre line ages BY THE FRAME DELTA, not by one.
+     * 0x80042BA8 loads the halfword at [0x800B2DB4] and 0x80042BB0 adds it, so
+     * the 1200 at 0x80042B98 is four seconds of the 300-to-the-second clock —
+     * and at the PAL rate of 12 per frame, a hundred drawn frames.
+     *
+     * This used to advance by the same flat one the ring does, which at the
+     * port's 30 Hz step made every level message last 1200 frames: forty
+     * seconds on screen instead of four, with the `*7` backdrop sitting at `*0`
+     * for thirty-nine of them.
+     */
+    if (dt > 0 && hud->centre_age < Q2_HUD_CENTRE_TICKS)
+        hud->centre_age += dt;
 }
 
 /* Decrement a leading `*N` towards `*0`, which is how the backdrop fades. The

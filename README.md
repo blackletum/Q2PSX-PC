@@ -213,6 +213,50 @@ on the injured player. `--baseline /path/to/previous/q2psx` also compares
 single-player pixels. The client accepts `--crosshair` and `--no-crosshair` to
 override that menu setting during a capture.
 
+Save restoration also has a disc-backed regression:
+
+```powershell
+build-msvc/bin/Release/test_client_save.exe --headless .install/disc/game.cue .agents/tmp/save-restore
+```
+
+Create the output directory first. The check saves before and during a crate
+explosion, restores in the same session and a fresh client, then saves on another
+map and revisits the destroyed crate. It writes the engine's framebuffer captures
+and checks restored geometry, hitboxes and visited-map script history. New saves
+carry that history and shared explosive-group health; loading an older save never
+borrows progress from the session being replaced. Transient explosion and gib
+models are omitted so a save made during their animation remains loadable.
+
+The same regression restores a hatch halfway through its rotation and a hunting
+creature from a save made at a different difficulty. Saves now retain rotator
+timers, creature animation and target links, corpse state, the AI clock and
+pursuit trail. Difficulty is restored before spawning the saved map's roster.
+The shared gameplay random stream uses the BIOS generator and is saved in full,
+so a loaded creature makes the same subsequent random attack choices. The added
+chunks remain optional when reading older files.
+
+Live weapon state also survives a save: recoil, chaingun spin, a held grenade,
+and a pending weapon switch resume at the same animation position. The regression
+compares the saved and restored framebuffer, then checks the next 45 frames of
+animation, ammunition, projectiles, shot reports and random choices. Bolt effect
+flags and the BFG beam-damage accumulator are retained too. Active script timers
+retain their remaining delay, repeat count and item window; WAIT counters and
+queued triggers are retained too. Timer periods reroll on every rearm, including
+range-zero timers, while duplicate requests and full tables consume no random
+draw. The disc test also resumes BOSS2's repeating light timer after a cold load.
+Deadlines fire only after the countdown passes zero, as in the original sweep.
+Older files without these chunks retain the previous reconstruction behavior.
+
+Scene collision also covers shoot switches, script-hidden objects, all intact
+explosive parts (including groups destroyed only by scripts), and rotating
+hatches. Hatches lift their collision slab by 10,000 units while open, exactly
+as the original handler does; closing restores it. Destruction frees the box
+for movement, shots, creature sight and ground checks. The disc regression
+captures movement into an intact crate and checks restored hatch collision.
+It also checks all seven script-hidden objects across four maps, including
+SECURITY's repeatable script: hidden geometry and freed collision boxes survive
+both a cold load and saving elsewhere before returning.
+
 For local play, the keyboard and mouse control player one; connected SDL gamepads
 fill players two through four in connection order. Disconnecting a controller
 releases its input without moving the other controllers to different players.
@@ -327,6 +371,9 @@ build/bin/q2psx-inspect movie  "Quake II (Europe).cue"            # every film, 
 build/bin/q2psx-inspect movie  "Quake II (Europe).cue" OUTRO1P.STX out.ppm 200
 build/bin/q2psx-inspect movie  "Quake II (Europe).cue" sweep      # score the escape's field widths
 build/bin/q2psx-inspect movie  "Quake II (Europe).cue" encode ROGUEINP.STX out.stx 400
+
+build/bin/q2psx-inspect syms   "Quake II (USA).cue"             # the linker's own symbol table
+build/bin/q2psx-inspect syms   "Quake II (USA).cue" T_Damage    # -> 0x800627F8, G_COMBAT.C
 ```
 
 `movie encode` is the round trip: it decodes a film off the disc, re-encodes it into a

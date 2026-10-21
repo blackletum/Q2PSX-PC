@@ -146,6 +146,23 @@ void q2_ent_light_at(q2_ent_events *ev, const s32 pos[3], const u8 glow[3],
     e->kind         = Q2_ENT_EVENT_LIGHT;
     e->radius       = radius;
     e->inner_radius = inner_radius;
+    /* event_push zeroes the record, so `ticks` is already the AddLight 0. */
+    event_fill(e, pos, glow);
+}
+
+void q2_ent_light_timed_at(q2_ent_events *ev, const s32 pos[3],
+                           const u8 glow[3], s32 inner_radius, s32 radius,
+                           s32 ticks)
+{
+    q2_ent_event *e = event_push(ev);
+
+    if (!e)
+        return;
+
+    e->kind         = Q2_ENT_EVENT_LIGHT;
+    e->radius       = radius;
+    e->inner_radius = inner_radius;
+    e->ticks        = ticks;
     event_fill(e, pos, glow);
 }
 

@@ -773,7 +773,6 @@ static void test_resupply_is_spent(void)
  * corpse is not steered and does not hold a gun, without either being a rule
  * anybody wrote down.
  */
-
 static void test_a_corpse_is_not_driven_by_the_pad(void)
 {
     q2_sim   driven, still;
@@ -852,6 +851,77 @@ static void test_the_view_weapon_is_freed_with_the_player(void)
 
 /* ------------------------------------------------------------------------- */
 
+
+/* ------------------------------------------------------------------------- */
+/* The death camera's roll                                                    */
+/* ------------------------------------------------------------------------- */
+/*
+ * 0x800380C8 (MoveQuakeCamera's no-body branch) and 0x80038664 (QuakeCamera's
+ * Q2_ENT2_DEAD branch) are the same four instructions twice: seek view+16
+ * toward -384 with a fraction of `50 * dt`, through SeekAng at 0x8006FAC8.
+ *
+ * The port had a flat 100 there — which is what that expression happens to give
+ * at about 144 fps, and a fifth of what it gives at the console's own PAL rate.
+ * Two things were wrong with it: the horizon took roughly 46 frames to lie over
+ * where the console takes eight, and because the step was per RENDERED frame
+ * with no dt in it, the same death rolled at a different speed on a fast
+ * machine and a slow one. The console's rolls identically on both.
+ */
+static int roll_signed(s16 roll)
+{
+    return (((int)roll + 2048) & 0xFFF) - 2048;
+}
+
+static void test_the_death_camera_rolls_over(void)
+{
+    s16 fast = 0, slow = 0;
+    int i;
+
+    /* SeekAng itself: `(d * frac + 2047) >> 11`, so the fraction is in 1/2048
+     * and a full one arrives in a single step. */
+    CHECK(q2_pdeath_seek_ang(0, 1024, 2048) == 1024,
+          "a fraction of 2048 should arrive, got %d",
+          (int)q2_pdeath_seek_ang(0, 1024, 2048));
+    CHECK(q2_pdeath_seek_ang(0, 0, 500) == 0, "already there stays put");
+
+    /*
+     * One frame at the sim's own 1/30 s step. dt 10 gives frac 500, and
+     * 384 * 500 / 2048 rounds to 94 of the circle's 4096 steps. The constant
+     * this replaced gave 19.
+     */
+    CHECK(roll_signed(q2_pdeath_cam_roll(0, DT)) == -94,
+          "one frame of death roll moved %d, want -94",
+          roll_signed(q2_pdeath_cam_roll(0, DT)));
+
+    /* Eight frames is most of the arc. Forty-six used to be needed. */
+    for (i = 0; i < 8; i++)
+        fast = q2_pdeath_cam_roll(fast, DT);
+    CHECK(roll_signed(fast) <= -320,
+          "eight frames reached %d of -384", roll_signed(fast));
+
+    /*
+     * AND THE SAME ROLL IN THE SAME WALL TIME AT TWICE THE FRAME RATE, which is
+     * the whole reason dt is in the expression: sixteen half-length frames land
+     * within a degree of eight full ones. With the old fixed fraction the two
+     * were eighty-odd units apart, because the ease counted frames rather than
+     * time.
+     */
+    for (i = 0; i < 16; i++)
+        slow = q2_pdeath_cam_roll(slow, DT / 2);
+    CHECK(roll_signed(fast) - roll_signed(slow) <= 12 &&
+          roll_signed(slow) - roll_signed(fast) <= 12,
+          "30 Hz reached %d and 60 Hz reached %d over the same quarter second",
+          roll_signed(fast), roll_signed(slow));
+
+    /* And it settles ON -384 rather than creeping past it: at a remainder of
+     * zero the `+2047` rounds to nothing and the angle stops. */
+    fast = 0;
+    for (i = 0; i < 200; i++)
+        fast = q2_pdeath_cam_roll(fast, DT);
+    CHECK(roll_signed(fast) == -384, "the roll settled at %d",
+          roll_signed(fast));
+}
+
 int main(void)
 {
     test_move_names();
@@ -881,6 +951,7 @@ int main(void)
     test_the_corpse_slows_down();
     test_the_walk_back_to_the_front_end();
     test_resupply_is_spent();
+    test_the_death_camera_rolls_over();
     test_a_corpse_is_not_driven_by_the_pad();
     test_the_view_weapon_is_freed_with_the_player();
 

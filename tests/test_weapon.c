@@ -10,6 +10,7 @@
 
 #include "projectile.h"
 #include "weapon.h"
+#include "random.h"
 #include "worldscale.h"   /* Q2_DT_NOMINAL, Q2_GRAVITY, Q2_VEL_DIV */
 
 static int g_failures;
@@ -44,6 +45,27 @@ static void give_all(q2_inventory *inv)
 }
 
 /* ------------------------------------------------------------------------- */
+static void test_bios_random(void)
+{
+    static const s32 expected[] = {16838, 5758, 10113, 17515, 31051, 5627, 23010, 7419};
+    q2_rng rng;
+    u32 i;
+    printf("portable BIOS random sequence\n");
+    q2_rng_seed(&rng, 1);
+    q2_random_seed(1);
+    for (i = 0; i < sizeof(expected) / sizeof(expected[0]); i++) {
+        check_eq_i(q2_rng_next(&rng), expected[i], "BIOS seed-1 known answer");
+        check_eq_i(q2_random_next(), expected[i], "shared stream uses BIOS sequence");
+    }
+    q2_random_seed(1);
+    (void)q2_random_next();
+    check_eq_i(q2_random_state(), 0x41C67EA6u, "state retains all 32 bits");
+    q2_random_seed(0);
+    check_eq_i(q2_random_state(), 0, "zero is a valid seed");
+    check_eq_i(q2_random_next(), 0, "zero seed's first answer");
+    check_eq_i(q2_random_next(), 21468, "zero seed advances instead of sticking");
+}
+
 static void test_tables(void)
 {
     const q2_weapon_tables *t = q2_weapon_tables_builtin();
@@ -689,6 +711,7 @@ int main(void)
 {
     printf("weapon behaviour\n\n");
 
+    test_bios_random();
     test_tables();
     test_selection();
     test_firing();

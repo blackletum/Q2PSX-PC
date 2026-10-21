@@ -86,25 +86,25 @@ void q2_loading_raise(q2_loading *l)
     loading_set_page(l, Q2_LOADING_PAGE_LOADING);
 
     /*
-     * AND THE STRIP GOES BACK TO THE BEGINNING.
+     * AND THE STRIP IS LEFT ALONE, which is the opposite of what this used to
+     * do and of what the comment here used to argue.
      *
-     * This used to restart the hold and leave `spin` alone, so the SECOND
-     * screen of a session opened wherever the first one stopped — a third of
-     * the way through the turn — and the third opened a third further on. The
-     * whole reason the strip is walked backwards is that the screen should open
-     * on the broadside cell (loading.h, "which end it starts from is most of
-     * what the player ever sees of the rotation"), and tests/test_loading.c
-     * asserts exactly that. It passed because it only ever asked a freshly
-     * zeroed struct.
+     * The argument was that every screen is a new one — 0x80079364 enters page
+     * 46 and 0x80079374 / 0x80079384 re-install both records from scratch at
+     * every transition — so the strip should restart with it. The PAGE is new.
+     * The counter behind the logo is not: it lives at `gp+612` (0x800AE864),
+     * and `xrefs` on it returns the two reads in SpriteAnim, the increment at
+     * 0x80038CE8 and the wrap at 0x80038CFC, and nothing else in the image.
+     * InitLoadingAnim (0x80038DFC), which is the function TestIt calls to set
+     * this animation up, clears `gp+17100` and leaves this halfword where it
+     * was. A second screen therefore picks the rotation up mid-turn, and it is
+     * SUPPOSED to.
      *
-     * The console cannot have the fault: 0x80079364 ENTERS page 46 and
-     * 0x80079374 / 0x80079384 re-install both records from scratch at every
-     * transition, so every screen is a new one.
-     *
-     * Measured on a run with two screens in it: the first opened 22 pixels wide
-     * (cell 22, broadside) and the second 18 (cell 16). Both are 22 now.
+     * The old behaviour was itself a fix for a real complaint — the second
+     * screen of a session did not open the way the first did — but the fix was
+     * on the wrong side: what made the first screen special was the backwards
+     * walk, and the walk is what the executable contradicts.
      */
-    l->spin = 0.0;
 
     /*
      * The hold RESTARTS rather than accumulating. A transition that loads twice
@@ -178,59 +178,123 @@ bool q2_loading_step(q2_loading *l, double dt)
 }
 
 /*
- * BACKWARDS ALONG THE SHEET, so the first thing on screen is the logo facing
- * the player.
+ * FORWARDS ALONG THE COUNTER — 0x80038CDC…0x80038CFC, `c = c + 1` wrapping at
+ * 31 — and the screen opens on whatever the last one left behind.
  *
- * The strip's direction is not read from anything — nothing found binds this
- * quad, let alone counts its index — so it comes off the capture, and the
- * capture is decisive. Read forwards the widths run 17 16 14 13 11 9 7 5 4 ...,
- * which starts a THIRD of the way into the turn and is edge-on within half a
- * second; read backwards they run 22 22 22 21 19 19 18 17 16 ..., which starts
- * broadside and turns away. A screen that is up for half a second shows about
- * seven cells at this rate, and the retail capture's logo is a wide one — so
- * the seven it shows are the wide end, not the narrow.
+ * This used to walk BACKWARDS, from the last cell of the 8 x 3 block to the
+ * first, and the argument for it was a retail capture: read forwards the grid
+ * block's widths run 17 16 14 13 11 9 7 5 4 ..., which is a third of the way
+ * into the turn and edge-on within half a second, where the capture's logo is
+ * a wide one. The observation was right and the conclusion was not. The turn
+ * does start wide — it starts at (224, 0), a 24-wide broadside cell that is
+ * not in the block at all and is held for five steps — and then narrows
+ * through the block exactly as it is laid out. Reversing the block was a way
+ * of getting a wide first frame out of a strip whose first EIGHT steps — the
+ * five-step hold and the three cells after it — had not been found.
  *
- * It also makes the strip a half turn that begins where a half turn begins:
- * broadside, to edge-on at cell 8, to nearly broadside again.
+ * The counter's own range is 0..30: the increment at 0x80038CE4 runs before
+ * the wrap test at 0x80038CF4, so 31 is written and immediately replaced and
+ * is never a value the draw sees.
  */
 u32 q2_loading_cell(const q2_loading *l)
 {
     u32 step;
 
     if (!l || l->spin < 0.0)
-        return Q2_LOADING_CELLS - 1;
+        return 0;
 
     step = (u32)(l->spin / (double)Q2_LOADING_CELL_UNITS);
     if (step >= Q2_LOADING_CELLS)
         step = Q2_LOADING_CELLS - 1;
-    return (Q2_LOADING_CELLS - 1) - step;
+    return step;
 }
 
 /*
- * The logo, as one textured quad off the menu's own atlas.
+ * SpriteAnim's cell map, 0x80038840…0x800388DC, arm for arm.
  *
- * A POLY_FT4 rather than the gouraud quad `q2_menu_draw_icon` emits, because
+ * Four of the thirty-one steps are not on the 8 x 3 block: the author parked
+ * further rotation frames in spare corners of the sheet, and the switch names
+ * their corners one at a time. The `c < 5` arm is a HOLD — five consecutive
+ * steps on the same broadside cell — which is why the widths measured in
+ * counter order come out as one smooth sweep with a pause at the top.
+ */
+void q2_loading_cell_uv(u32 cell, u8 *u_out, u8 *v_out)
+{
+    u8 u, v;
+
+    if (cell >= Q2_LOADING_CELLS)
+        cell = Q2_LOADING_CELLS - 1;
+
+    if (cell < 5) {                  /* 0x80038848 slti v0, v1, 5           */
+        u = 224; v = 0;              /* 0x80038850 / 0x80038854 (sb zero)   */
+    } else if (cell == 5) {          /* 0x80038864                          */
+        u = 192; v = 80;             /* 0x8003886C / 0x80038874             */
+    } else if (cell == 6) {          /* 0x80038880                          */
+        u = 224; v = 120;            /* 0x80038888 / 0x80038890             */
+    } else if (cell == 7) {          /* 0x8003889C                          */
+        u = 0;   v = 220;            /* 0x800388A4 (sb zero) / 0x800388A0   */
+    } else {
+        /*
+         * 0x800388B8: `andi v0, v1, 7` then `sll v0, v0, 5` — the column
+         * times the 32-texel pitch. 0x800388C0: `andi v1, v1, 0x18` then
+         * `srl v1, v1, 3` — the row, which for 8..30 is 1, 2 or 3 and never 0,
+         * so the base the row is measured from is 124 and not 144. The `* 20`
+         * is 0x800388CC…0x800388D4's `(r * 4 + r) * 4`.
+         */
+        u = (u8)((cell & 7u) * Q2_LOADING_CELL_W);
+        v = (u8)(124u + 20u * ((cell >> 3) & 3u));
+    }
+
+    if (u_out)
+        *u_out = u;
+    if (v_out)
+        *v_out = v;
+}
+
+/*
+ * The logo, as one textured SPRITE off the menu's own atlas.
+ *
+ * A SPRT rather than the gouraud quad `q2_menu_draw_icon` emits, because
  * nothing modulates this: the strip is already the colour it should be.
- * `Q2_MENU_MOD_NORMAL` on all four corners is unity for a modulated primitive,
- * which is the same thing said the way the hardware says it (menufont.h).
+ * `Q2_MENU_MOD_NORMAL` is unity for a modulated primitive, which is the same
+ * thing said the way the hardware says it (menufont.h).
+ *
+ * AND A SPRT RATHER THAN A POLY_FT4, which is not a taste. SpriteAnim builds a
+ * libgpu `SPRT` and nothing else: 0x80038B24 writes `{r,g,b,code}` from
+ * gp+616 into prim+4, 0x80038B38 the corner into prim+8, 0x80038B48 the two
+ * texel bytes into prim+12/+13, 0x80038B50 the CLUT into prim+14 and
+ * 0x80038B60 the 32 x 20 size into prim+16 — the SPRT layout field for field —
+ * and 0x80038B68 calls `SetSprt` (0x8008A338, named in the NTSC symbol table),
+ * whose whole body is `len = 4` and `code = 0x64`.
+ *
+ * The difference is visible in exactly the frames this pass added. A rectangle
+ * steps one texel per pixel from its (u, v) and WRAPS in eight bits; a polygon
+ * interpolates between corner coordinates that are also eight bits. Six of the
+ * counter's thirty-one steps sit at u = 224 — the five-step hold at (224, 0)
+ * and the cell at (224, 120) — and a quad's far corner there is 256, which is
+ * 0 in a byte, so the polygon path would have run the texture backwards across
+ * the whole sheet. The port never noticed because the two grid cells at u = 224
+ * are mid-turn and the old backwards walk reached them a second in.
  */
 static u32 loading_draw_logo(const q2_loading *l, psx_ot *ot,
                              int origin_x, int origin_y)
 {
     psx_prim *p;
     u32 cell = q2_loading_cell(l);
-    u8  u = (u8)((cell % Q2_LOADING_CELL_COLS) * Q2_LOADING_CELL_W);
-    u8  v = (u8)(Q2_LOADING_CELL_V +
-                 (cell / Q2_LOADING_CELL_COLS) * Q2_LOADING_CELL_H);
+    u8  u, v;
     int x = origin_x + Q2_LOADING_X;
     int y = origin_y + Q2_LOADING_Y;
     int i;
+
+    /* SpriteAnim's own switch, not a grid: four of the thirty-one steps are
+     * off the block at v = 144. 0x80038840…0x800388DC. */
+    q2_loading_cell_uv(cell, &u, &v);
 
     p = psx_ot_add_bucket(ot, Q2_LOADING_OT_BUCKET);
     if (!p)
         return 0;
 
-    p->kind  = PSX_PRIM_FT4;
+    p->kind  = PSX_PRIM_SPRT;    /* SetSprt, 0x80038B68 */
     p->tpage = l->font.tpage_item;
     /*
      * PALETTE 4, THE GREY RAMP — not the sheet's own blue one.
@@ -267,6 +331,14 @@ static u32 loading_draw_logo(const q2_loading *l, psx_ot *ot,
     p->xy[3].x = (s16)x;
     p->xy[3].y = (s16)(y + Q2_LOADING_CELL_H);
 
+    /*
+     * The rectangle path reads `uv[0]` alone and steps from it, which is the
+     * console's `u0`/`v0` at prim+12/+13 (0x80038B48). The other three corners
+     * are filled anyway, the way `emit_sprite` fills them in hud.c, so that a
+     * reader is not left wondering what a half-built primitive means — and the
+     * far ones DO wrap to zero on the six steps at u = 224, which is exactly
+     * why the rectangle path and not the polygon one.
+     */
     p->uv[0].u = u;
     p->uv[0].v = v;
     p->uv[1].u = (u8)(u + Q2_LOADING_CELL_W);

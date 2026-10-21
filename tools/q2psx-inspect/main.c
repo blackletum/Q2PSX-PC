@@ -31,6 +31,7 @@
 #include "cmd_screen.h"
 #include "cmd_viewweapon.h"
 #include "cmd_surfaces.h"
+#include "cmd_syms.h"
 #include "classtable.h"
 #include "collision.h"
 #include "dat.h"
@@ -205,6 +206,8 @@ static void usage(void)
     puts("  disasm  <disc> <addr> [n]   disassemble n instructions (0 = to the return)");
     puts("  xrefs   <disc> <addr>       every reference to an address, code and data");
     puts("  funcs   <disc> [addr]       call targets found by sweeping the image");
+    puts("  syms    <disc> [list|name]  the linker's own symbol table: 1,037 named");
+    puts("                             functions, by source file (NTSC disc only)");
     puts("  moddisasm <disc> <map> [addr] [n] [creature]  disassemble one CreAIBin module");
     puts("  levdisasm <disc> <map> [addr] [n]  disassemble a relocated LevelBin module");
     puts("  modstrings <disc> <map> [crea]  the text a relocated module carries");
@@ -6348,6 +6351,8 @@ int main(int argc, char **argv)
             bool lev = (argc < 7) || strcmp(argv[6], "crea") != 0;
             rc = cmd_modbytes(d, argv[3], argv[4], n, lev);
         }
+    } else if (strcmp(cmd, "syms") == 0) {
+        rc = cmd_syms(d, (argc >= 4) ? argv[3] : NULL);
     } else if (strcmp(cmd, "funcs") == 0) {
         rc = cmd_funcs(d, (argc >= 4) ? argv[3] : NULL);
     } else if (strcmp(cmd, "bytes") == 0) {

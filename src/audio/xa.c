@@ -362,3 +362,82 @@ u32 q2_xa_track_read(q2_xa_track *track, q2_xa_decoder *dec,
 
     return 0;
 }
+
+/* ------------------------------------------------------------------------- */
+/* The CD volume                                                              */
+/* ------------------------------------------------------------------------- */
+
+s16 q2_xa_cd_volume_step(s16 live, s16 target)
+{
+    /*
+     * 0x800718F8..0x8007194C, instruction for instruction:
+     *
+     *     lh   a2, actcdvol      lh   a0, targetcdvol
+     *     slt  v0, a2, a0        below the target?
+     *     addiu v0, v1, 4        ...then four up, stored with `sh`
+     *     slt  v0, a0, v0        and if that went past it,
+     *     sh   a1, actcdvol      take the target outright
+     *
+     * with the mirrored arm at 0x80071928 doing the same downward. Equal
+     * values fall through both `slt`s and nothing is written.
+     *
+     * The step is four and it is not scaled by anything: at the default target
+     * of 96 (the MUSIC slider's 48, doubled) a fade is 24 calls, and at the
+     * maximum 254 it is 64.
+     */
+    if (live < target) {
+        s16 up = (s16)(live + 4);
+
+        return (target < up) ? target : up;
+    }
+
+    if (target < live) {
+        s16 down = (s16)(live - 4);
+
+        return (down < target) ? target : down;
+    }
+
+    return live;
+}
+
+void q2_xa_cd_mix(s16 *pcm, u32 samples, s32 volume, bool stereo)
+{
+    u32 i;
+
+    if (!pcm)
+        return;
+
+    if (volume < 0)
+        volume = 0;
+    if (volume > 255)
+        volume = 255;      /* 0x800719D0's clamp */
+
+    if (!stereo) {
+        /*
+         * 0x80071A08..0x80071A1C writes volume/2 into all four mix bytes, so
+         * each output is (left + right) at half level. The halving is on the
+         * VOLUME and truncates toward zero — `srl v0, v1, 31 / addu / sra v0,
+         * v0, 1` is the compiler's signed divide by two — which is why this is
+         * not tidied into ((l + r) / 2 * volume): at an odd volume the two
+         * differ, and the console's answer is the quieter one.
+         */
+        s32 half = volume / 2;
+
+        for (i = 0; i + 1 < samples; i += XA_CHANNELS) {
+            s32 m = (pcm[i] * half + pcm[i + 1] * half) / 255;
+
+            pcm[i]     = (s16)m;
+            pcm[i + 1] = (s16)m;
+        }
+        return;
+    }
+
+    /* Stereo: left-to-left and right-to-right carry the volume and both cross
+     * terms are zero (0x800719F4..0x80071A04), i.e. each channel scaled on its
+     * own. 255 is unity and there is nothing to do. */
+    if (volume >= 255)
+        return;
+
+    for (i = 0; i < samples; i++)
+        pcm[i] = (s16)((pcm[i] * volume) / 255);
+}

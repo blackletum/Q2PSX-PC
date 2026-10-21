@@ -61,6 +61,7 @@
 
 #include "../build/itemtable.h"     /* Q2_ITEM_COUNT — the scene's id list */
 #include "../formats/collision.h"
+#include "../formats/trigger.h"   /* q2_teleports_build walks TrigBounds */
 #include "effect.h"
 #include "events.h"
 #include "events_rt.h"   /* q2_laserbeams_draw needs the raiser's dead bit */
@@ -623,5 +624,106 @@ u32 q2_laserbeams_build(q2_laserbeam_set *out, const q2_events *events,
  */
 u32 q2_laserbeams_draw(const q2_laserbeam_set *set, const q2_event_rt *rt,
                        q2_fx_world *w, q2_rng *rng);
+
+/* ------------------------------------------------------------------------- */
+/* TELEPORT — the pads a zone marks with a particle column                    */
+/* ------------------------------------------------------------------------- */
+/*
+ * The same shape as the beams above: a load-time registration pass and a
+ * per-frame walk, the two halves of one UserFuncs binding record.
+ *
+ * `bytes 0x8009B9C0` reads `TELEPORT\0\0\0\0 | 14 89 02 80 | F0 E3 02 80`, so
+ * the primitive's fn_exec is 0x80028914 (PSXTELEPORT, the thing that moves the
+ * player) and its fn_load is 0x8002E3F0 (PSXTELEPORT_T). The port had the exec
+ * and treated the record as having no constructor at all — `has_ctor` false in
+ * userfuncs.c — so nothing was ever registered and DrawTelePorts had nothing to
+ * walk even once it existed.
+ *
+ * THE CONSTRUCTOR, 0x8002E3F0, run once per TELEPORT item at zone load:
+ *
+ *     8002E400  lh   v1, 22(0x800C9114)  ; the TrigBounds count
+ *     8002E404  lw   a1, 4(0x800C9114)   ; and the volume array
+ *     8002E414  lh   a3, 16936(gp)       ; Event_GlobalEVOFFSET: the record
+ *                                        ; currently being constructed
+ *     8002E428  lb   v0, 32(rec)         ; the volume's ID byte...
+ *     8002E430  beq  v0, -1 -> next      ; ...255 means "no area": skipped
+ *     8002E438  lh   v0, 26(rec)         ; its event_offset...
+ *     8002E440  bne  v0, a3 -> next      ; ...must be THIS record
+ *     8002E464  sh   (rec - base), TelePortData[NumTelePorts]
+ *     8002E468  sh   n+1, NumTelePorts
+ *     8002E46C  jr   ra                  ; and stop: ONE volume per item
+ *
+ * so a TELEPORT registers the FIRST volume in the map's own table that fires
+ * the record the item lives in and carries an area. It does not register the
+ * volume that fired it — nothing has fired anything yet — and it does not
+ * register all of them.
+ *
+ * THE LOOP BOUND IS A BUG IN THE ORIGINAL, and the port does not reproduce it.
+ * 0x8002E3F8 sign-extends the LOW HALFWORD OF a0 and uses it as the starting
+ * index (`slt v0, (s16)a0, count` at 0x8002E408, and the same register is the
+ * loop counter at 0x8002E478). a0 is the ITEM POINTER — the load pre-pass at
+ * 0x80026F6C passes `addu a0, s0, zero` with s0 the item, exactly as it does
+ * for every other constructor, and SETWIBBLE's and LASERBEAM's both read it as
+ * one. So whether a pad registers at all depends on where in the 0x800EE718 ..
+ * 0x801FF600 heap that zone's Events chunk happened to land: a low halfword
+ * with bit 15 set passes, one holding a small positive number passes, and
+ * anything else returns before the scan starts. That is not reproducible and
+ * not a behaviour a port can transcribe, so this scans unconditionally and says
+ * so — the same treatment userfuncs.h gives T_Damage's uninitialised fifth
+ * argument and effect.c gives the item glow ramp's missing else.
+ *
+ * THE WALK is `DrawTelePorts`, 0x80028BDC; see effect.h for the draws it makes.
+ * Nothing clears the list either, so a pad registered at zone load pumps until
+ * the zone changes — 0x8007B490 zeroes `NumTelePorts` at level load and there
+ * is no other writer.
+ */
+
+/* `TelePortData` is 0x800C6F44..0x800C6F74 (EventTimers), 48 bytes of
+ * halfwords: 24 entries. PSXTELEPORT_T does NOT bounds-check the store, so the
+ * console would walk off the end; this drops the overflow instead. No map on
+ * the disc comes close. */
+#define Q2_TELEPORT_MAX 24
+
+typedef struct q2_teleport_set {
+    u16 trigger[Q2_TELEPORT_MAX];   /* index into the map's TrigBounds */
+    u32 count;
+    /* TELEPORT items whose own record no volume names, or whose volume has no
+     * area: the constructor walks the whole table and registers nothing. They
+     * still teleport when a script reaches them — they just have no column. */
+    u32 unmarked;
+} q2_teleport_set;
+
+/*
+ * Register every TELEPORT item's volume, as the load pre-pass does.
+ *
+ * `events` is COMMON's chunk, the one Event_GlobalEVOFFSET is measured
+ * against; `trigs` is the map's TrigBounds. Returns the number registered.
+ */
+u32 q2_teleports_build(q2_teleport_set *out, const q2_events *events,
+                       const q2_userfuncs *uf, const q2_triggers *trigs);
+
+/*
+ * What one frame of DrawTelePorts produced, for a caller that owns the light
+ * list. The lights are handed back rather than added here for the same reason
+ * `q2_levelbin_scene_lights` hands its five back: levelbin has no light world
+ * and the client clears one per frame.
+ */
+typedef struct q2_teleport_frame {
+    u32         groups;                    /* particle groups queued */
+    u32         light_count;
+    q2_lb_light light[Q2_TELEPORT_MAX];
+} q2_teleport_frame;
+
+/*
+ * Queue this frame's columns. Call it EVERY frame, and on every map: QuakeLoop
+ * calls DrawTelePorts unconditionally and the fifteen shared velocities are
+ * drawn before the count is even looked at (0x80028CA8), so the generator is
+ * consumed on a map with no pads too. `out` may be NULL.
+ *
+ * Returns the number of groups queued.
+ */
+u32 q2_teleports_draw(const q2_teleport_set *set, const q2_triggers *trigs,
+                      q2_fx_world *w, q2_rng *rng, s32 level_time,
+                      q2_teleport_frame *out);
 
 #endif /* Q2PSX_LEVELBIN_H */

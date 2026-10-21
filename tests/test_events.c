@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "events_rt.h"
+#include "random.h"
 
 static int g_failures;
 static int g_checks;
@@ -716,7 +717,7 @@ static u32 fix_timer_record(fixture *f, u32 items)
 /* Wind the clock past one deadline and sweep. */
 static void timer_step(q2_event_rt *rt)
 {
-    q2_event_rt_advance(rt, 10);
+    q2_event_rt_advance(rt, 11);
     q2_event_rt_update(rt);
 }
 
@@ -851,6 +852,9 @@ static void test_timer_slot_is_keyed_on_its_item(void)
 
     q2_event_rt_advance(&rt, 5);
     q2_event_rt_update(&rt);
+    check_eq_i(probe.n, 0, "countdown zero still waits (0x800273A0 bgez)");
+    q2_event_rt_advance(&rt, 1);
+    q2_event_rt_update(&rt);
     check(seen_is(&probe, "1"),
           "and the deadline the FIRST arm set still stands: a re-arm neither "
           "resets the period nor rewinds the lap");
@@ -873,11 +877,96 @@ static void test_timer_slot_is_keyed_on_its_item(void)
     check_eq_i(rt.deferred_count, Q2_EVENT_RT_TIMER_MAX,
                "the table fills at eight (0x8002707C `slti v0,v1,8`)");
 
-    q2_event_rt_advance(&rt, 10);
+    q2_event_rt_advance(&rt, 11);
     q2_event_rt_update(&rt);
     check_eq_i(probe.n, 8,
                "and the ninth was dropped, not queued: nothing is evicted "
                "(0x80027084 a0 = -2)");
+    q2_event_rt_free(&rt);
+}
+
+static void rolling_timer_hook(void *user, const q2_event_item *item, u8 index)
+{
+    timer_probe *p = user;
+    if (index == 0) {
+        p->rt->defer_timer = true;
+        p->rt->defer_fires = p->fires;
+        p->rt->defer_window = 1;
+    } else {
+        timer_probe_hook(user, item, index);
+    }
+}
+
+static void test_timer_random_sequence(void)
+{
+    fixture f;
+    q2_event_rt rt;
+    timer_probe p = {0};
+    u32 rec[9], k, state;
+
+    printf("TIMER rerolls only accepted slots and surviving deadlines\n");
+    fix_begin(&f);
+    for (k = 0; k < 9; k++) {
+        rec[k] = fix_timer_record(&f, 1);
+        f.raw[rec[k] + 8] = 2;   /* item+4 base */
+        f.raw[rec[k] + 10] = 10; /* item+6 range */
+    }
+    fix_end(&f, 9);
+    check(q2_event_rt_init(&rt, &f.ev) == Q2_OK, "random timer fixture");
+    p.rt = &rt; p.fires = 3;
+    rt.on_call = rolling_timer_hook; rt.on_call_user = &p;
+    rt.timer_period = q2_event_timer_period;
+    q2_random_seed(1);
+    q2_event_rt_trigger(&rt, rec[0]);
+    q2_event_rt_update(&rt);
+    check_eq_i(rt.deferred[0].period, 210, "initial BIOS roll 16838");
+    state = q2_random_state();
+    q2_event_rt_trigger(&rt, rec[0]);
+    q2_event_rt_update(&rt);
+    check_eq_i(q2_random_state(), state, "duplicate consumes no random draw");
+    check_eq_i(rt.deferred[0].due, 210, "duplicate preserves deadline");
+    q2_event_rt_advance(&rt, 210);
+    q2_event_rt_update(&rt);
+    check_eq_i(p.n, 0, "exact deadline has not run a window");
+    check_eq_i(q2_random_state(), state, "exact deadline has not rerolled");
+    q2_event_rt_advance(&rt, 1);
+    q2_event_rt_update(&rt);
+    check_eq_i(rt.deferred[0].period, 90, "first rearm uses roll 5758");
+    check_eq_i(rt.deferred[0].due, 301, "new period starts at current clock");
+    q2_event_rt_advance(&rt, 91);
+    q2_event_rt_update(&rt);
+    check_eq_i(rt.deferred[0].period, 150, "second rearm uses roll 10113");
+    state = q2_random_state();
+    q2_event_rt_advance(&rt, 151);
+    q2_event_rt_update(&rt);
+    check_eq_i(rt.deferred_count, 0, "third deadline frees finite timer");
+    check_eq_i(p.n, 3, "each deadline runs its window once");
+    check_eq_i(q2_random_state(), state, "expired timer consumes no roll");
+
+    for (k = 0; k < 8; k++) q2_event_rt_trigger(&rt, rec[k]);
+    q2_event_rt_update(&rt);
+    state = q2_random_state();
+    q2_event_rt_trigger(&rt, rec[8]);
+    q2_event_rt_update(&rt);
+    check_eq_i(rt.deferred_count, 8, "ninth timer is refused");
+    check_eq_i(q2_random_state(), state, "full table consumes no roll");
+    q2_event_rt_free(&rt);
+
+    f.raw[rec[0] + 8] = f.raw[rec[0] + 10] = 0;
+    check(q2_event_rt_init(&rt, &f.ev) == Q2_OK, "zero-period fixture");
+    p.fires = 0; p.n = 0;
+    rt.on_call = rolling_timer_hook; rt.on_call_user = &p;
+    rt.timer_period = q2_event_timer_period;
+    q2_random_seed(1);
+    q2_event_rt_trigger(&rt, rec[0]);
+    q2_event_rt_update(&rt);
+    check_eq_i(rt.deferred_count, 1, "zero-period timer still claims a slot");
+    check_eq_i(p.n, 0, "zero period still stops the initial record");
+    check_eq_i(q2_random_state(), 1103527590u, "range zero still consumes initial roll");
+    q2_event_rt_advance(&rt, 1);
+    q2_event_rt_update(&rt);
+    check_eq_i(p.n, 1, "zero period fires once per sweep");
+    check_eq_i(q2_random_state(), 2524885223u, "range zero still rerolls");
     q2_event_rt_free(&rt);
 }
 
@@ -1857,6 +1946,111 @@ static void test_oneshot_items_take_positions(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * AND THE BLOCK IS FILED UNDER A MAP, NOT UNDER "WHEREVER WE WERE LAST".
+ *
+ * StoreEventStates names its save-memory block "EVE_" (0x800AE7A0) plus eight
+ * bytes of the current level name (0x800290A4..0x800290E8), and the writer is
+ * reached from OnLeavingZone — whose two callers are the zone-change callback
+ * at 0x80079080 and OnLeavingLevel at 0x8007CB94, a function whose whole body
+ * is that one `jal`. So leaving WASTE3 for WASTE2 files WASTE3's latches under
+ * WASTE3, and walking back in finds them again: RestoreSavedData (0x8007CBAC)
+ * replays the block named after the level being ENTERED, and 0x80029498 falls
+ * straight out when there is none.
+ *
+ * Nothing empties save memory at a level boundary — the only clear in the
+ * image is the new-game memset — which is the last check here.
+ *
+ * This is the test that fails without the store: the third runtime below is a
+ * second arrival at WASTE3, and with one carry slot instead of a dictionary it
+ * comes up with the one-shot back on the shelf, which on the disc is a spent
+ * CREBATCH ambush summoning itself all over again.
+ */
+static void test_store_files_a_block_under_its_map(void)
+{
+    fixture f;
+    q2_event_rt rt;
+    q2_event_store store;
+    q2_event_carry *slot;
+    call_tally tally;
+    carry_world w;
+    u32 item2;
+    char name[16];
+    int i;
+
+    printf("a map's spent records are filed under that map (0x800290A4)\n");
+
+    memset(&store, 0, sizeof(store));
+    fix_carry_world(&f, &w, 3);
+    item2 = w.mixed + 4;             /* the first item follows the header */
+
+    check(q2_event_store_find(&store, "WASTE3") == NULL,
+          "a map never visited has left nothing behind");
+
+    /* The first visit to WASTE3, and the LOADMAP out of it. */
+    check(q2_event_rt_init(&rt, &f.ev) == Q2_OK, "WASTE3's first runtime");
+    memset(&tally, 0, sizeof(tally));
+    rt.on_call      = tally_hook;
+    rt.on_call_user = &tally;
+    play_carry_world(&rt, &w);
+    check_eq_i(tally.by_index[1], 1, "the one-shot record runs on this visit");
+
+    slot = q2_event_store_open(&store, "WASTE3");
+    check(slot != NULL, "leaving WASTE3 opens its block (0x8007FBEC)");
+    if (slot)
+        q2_event_rt_carry_out(&rt, slot);
+    q2_event_rt_free(&rt);
+    check_eq_i(store.count, 1, "one block, for the one map left");
+
+    /* Arriving at WASTE2. Its own block does not exist, so it replays
+     * nothing — the level change must not hand it WASTE3's. */
+    check(q2_event_store_find(&store, "WASTE2") == NULL,
+          "WASTE2 does not inherit WASTE3's block");
+
+    /*
+     * And the allocation grows without losing the key. The store starts at
+     * eight blocks and doubles, so nine maps is one realloc past the first.
+     */
+    for (i = 0; i < 9; i++) {
+        snprintf(name, sizeof(name), "MAP%d", i);
+        check(q2_event_store_open(&store, name) != NULL, "another map's block");
+    }
+    check_eq_i(store.count, 10, "ten blocks after nine more maps");
+
+    /* WALKING BACK INTO WASTE3. Case-blind, because the level table and the
+     * ISO directory do not agree on case. */
+    slot = q2_event_store_find(&store, "waste3");
+    check(slot != NULL, "the second arrival finds WASTE3's block again");
+
+    check(q2_event_rt_init(&rt, &f.ev) == Q2_OK, "WASTE3's second runtime");
+    check_eq_i(q2_event_rt_flags(&rt, w.oneshot), 0x48,
+               "which on its own has put the spent record back on the shelf");
+    if (slot)
+        q2_event_rt_carry_in(&rt, slot);
+    check_eq_i(q2_event_rt_flags(&rt, w.oneshot), 0xC9,
+               "and the block brings it back spent");
+    check_eq_i(q2_event_rt_item_flags(&rt, item2), Q2_EVOP_DISABLED,
+               "with the spent one-shot item still retired");
+
+    memset(&tally, 0, sizeof(tally));
+    rt.on_call      = tally_hook;
+    rt.on_call_user = &tally;
+    q2_event_rt_trigger(&rt, w.oneshot);
+    q2_event_rt_update(&rt);
+    check_eq_i(tally.by_index[1], 0,
+               "so the one-shot does not fire a second time on the map");
+    q2_event_rt_free(&rt);
+
+    /* A NEW GAME, and only a new game, empties save memory (0x8003DDB8). */
+    q2_event_store_clear(&store);
+    check(q2_event_store_find(&store, "WASTE3") == NULL,
+          "a new game empties every block");
+    check_eq_i(store.count, 0, "and the store with them");
+
+    q2_event_store_free(&store);
+}
+
+/* ------------------------------------------------------------------------- */
 int main(void)
 {
     printf("Q2PSX-PC event runtime tests\n\n");
@@ -1871,6 +2065,7 @@ int main(void)
     test_deferred_resume_runs_the_prologue();
     test_timer_window_and_fire_count();
     test_timer_slot_is_keyed_on_its_item();
+    test_timer_random_sequence();
     test_zonegate_abort();
     test_initial_pass_mutes_zone_gates();
     test_catc_leave_edge_runs_nothing();
@@ -1880,6 +2075,7 @@ int main(void)
     test_loader_forces_cat_b();
     test_carry_keeps_the_latches();
     test_carry_refuses_another_script();
+    test_store_files_a_block_under_its_map();
     test_replay_reopens_a_spent_gate_door();
     test_replay_picks_only_spent_items();
     test_replay_drains_through_the_gate();

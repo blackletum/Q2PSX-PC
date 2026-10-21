@@ -818,11 +818,15 @@ s32 q2_fx_group_spawn_points(q2_fx_world *w,
  * 0x8004874C: 0x80048928 tests whether the sweep found an entity, 0x80048980
  * takes the blood branch and 0x80048990 this one.
  *
- * It is NOT the spark. Q2_FX_SPARK's site (0x8003E0C0) lives in a function
- * whose only caller in the entire executable is 0x8003D4C4, inside the
- * player's per-frame state think — no weapon reaches it. Raising it for every
- * bullet impact is what covered the screen in pure-blue additive discs, and it
- * was the reported bug: ramp 0 is (64,64,255).
+ * It is NOT the spark, and there is no spark. Q2_FX_WATER_SPLASH's site
+ * (0x8003E0C0) lives in `GenerateWaterSplash` (QPLAYER.C, 0x8003E014), whose
+ * only caller in the entire executable is 0x8003D4C4, inside the player's
+ * per-frame state think — no weapon reaches it. Raising it for every bullet
+ * impact is what covered the screen in pure-blue additive discs, and it was the
+ * reported bug: ramp 0 is (64,64,255), which is water.
+ *
+ * That note used to stop one step short of naming the function and left the
+ * preset with no caller at all. It has one now: the wade arm in sim.c.
  *
  * These two ramps are grey (record 6, 64/64/64, B+F) and dark red (record 4,
  * 64/32/32, B-F), striped three quads at a time — a smoke puff.
@@ -1322,6 +1326,15 @@ s32 q2_fx_bolt_trail(q2_fx_world *w, q2_rng *rng, const s32 at[3],
  * a q2_fx_present_report and let the driver act on it. That keeps effect.c
  * presentation-only, which is the shape the rest of this module already has.
  */
+
+/*
+ * 0x80058718 `addiu a3, zero, 4` — how many ticks the energy pulse's timed
+ * light lives. The colour and the two radii are the same words the `>= 3` arm
+ * uses, 0x800AEAAC and 0x800AEAB0/0x800AEAB2, which combat.h already names
+ * Q2_ENERGY_LIGHT_*; only the lifetime is new, so only the lifetime is here.
+ */
+#define Q2_ENERGY_PULSE_TICKS 4
+
 typedef struct q2_fx_present_report {
     /*
      * 0x800586D0 — 0x80075C34 with colour 0x800AEAAC and the radii at
@@ -1335,8 +1348,17 @@ typedef struct q2_fx_present_report {
      * radii at 0x800AEAB0 and a fourth argument of 4. Raised only when
      * effect[1] is EXACTLY 2. This arm was missed entirely by the port's
      * `effect[1] >= 3` reading, which treated the `< 3` branch as silent.
-     * Which light 0x80075D14 appends is lighting.c's to name; this only reports
-     * that the site fired.
+     *
+     * 0x80075D14 IS NOW NAMED: AddTimedLight, and its fourth argument is a
+     * LIFETIME IN TICKS (lighting.h). So the two arms are not two spellings of
+     * the same light. The `>= 3` arm's 0x80075C34 raises one green light for
+     * one frame at 800/1300; this arm parks a slot that re-emits the SAME
+     * colour at 800/1300 scaled 4/4, 3/4, 2/4, 1/4 over the four frames that
+     * follow — the tail of the glow, which is why it fires on the tick the
+     * bigger crackle stops. Q2_ENERGY_PULSE_TICKS below is that 4.
+     *
+     * The caller raises it with q2_light_add_timed; this only reports that the
+     * site fired, because the light lists are lighting.c's.
      */
     bool energy_pulse;
 
@@ -1688,8 +1710,8 @@ typedef enum q2_fx_preset_id {
     Q2_FX_BLOOD,           /* 0x80048C08 — the only two-ramp effect          */
     Q2_FX_BFG_BURST,       /* 0x8004BDC4 — the biggest quads in the game     */
     Q2_FX_ITEM_MATERIALISE,/* 0x800596B0 — an ITEM fading in, not a gib      */
-    Q2_FX_SCRIPTED,        /* 0x80028DC8 — the UserFuncs effect primitive    */
-    Q2_FX_SPARK,           /* 0x8003E0C0 — a surface being struck            */
+    Q2_FX_TELEPORT,        /* 0x80028DC8 — the UserFuncs effect primitive    */
+    Q2_FX_WATER_SPLASH,    /* 0x8003E0C0 — wading in, four bursts of fifteen */
     Q2_FX_LASER_END,       /* 0x80049074 — both ends of a laser beam         */
     Q2_FX_PRESET_COUNT
 } q2_fx_preset_id;
@@ -1746,11 +1768,70 @@ s32 q2_fx_spawn(q2_fx_world *w, q2_rng *rng, q2_fx_preset_id id,
                 const s32 at[3], u8 area);
 
 /*
- * The scripted effect (0x80028DC8) is the one preset whose life and size are
+ * The teleport column (0x80028DC8) is the one preset whose life and size are
  * not constant: life is `(rand() + 24) & 15` and size is
  * `(rand() & 0x2047) + 12000`. Both draws happen before the velocities, so the
  * generator's sequence matters; q2_fx_spawn reproduces the order.
  */
+
+/* ------------------------------------------------------------------------- */
+/* DrawTelePorts — 0x80028BDC, one of QuakeLoop's three per-frame draws        */
+/* ------------------------------------------------------------------------- */
+/*
+ * A TELEPORT PAD IS MARKED BY A COLUMN, and this port drew nothing.
+ *
+ * `DrawTelePorts` (EVENT.C, named by the NTSC symbol table) is called from
+ * QuakeLoop at 0x80038FA4, immediately before `DrawLaserWalls` (0x8002A02C)
+ * and `DrawLaserBeams` (0x8002EE38) — the third of three unconditional
+ * per-frame walks, and the only one this port had no counterpart for. Its list
+ * is `TelePortData` at 0x800C6F44 with `NumTelePorts` at gp+16940, built at
+ * zone load by `PSXTELEPORT_T` (0x8002E3F0), which is the fn_load half of the
+ * TELEPORT binding record at 0x8009B9C0.
+ *
+ * Each frame it draws FIFTEEN velocity triples ONCE (0x80028C34), then walks
+ * the list. Per pad it takes the volume's bbox centre in X and Z, the mins or
+ * maxs face in Y depending on the direction of travel, jitters X and Z by
+ * ±127, draws a lifetime and a size, and spawns one fifteen-quad group on
+ * ramps 1 (red) and 0 (blue) with the volume's own area byte. Then it adds a
+ * pulsing blue light at the same place (0x80028E6C, AddLight).
+ *
+ * Split into four pieces here because the pieces belong to two modules: the
+ * walk needs the map's trigger volumes and lives in levelbin.c, while the
+ * draws have to stay in the order the console makes them or a seeded replay
+ * diverges on the first frame.
+ */
+
+/* +1 while the column streams up, -1 while it falls. 0x80028C14. */
+s32 q2_fx_teleport_sign(s32 level_time);
+
+/* The fifteen shared velocities for this frame. 0x80028C34..0x80028C9C. */
+void q2_fx_teleport_velocities(q2_rng *rng, s32 sign,
+                               s16 vel[Q2_FX_GROUP_QUADS][3]);
+
+/*
+ * One pad's group. `centre` is (x centre, the chosen Y face, z centre); the
+ * ±127 jitter, the lifetime and the size are drawn here because they are drawn
+ * per pad on the console, in that order, out of the same generator.
+ *
+ * Returns the slot, or -1 when the pool is full — which the console's walk
+ * ignores and carries on from, so this one does too.
+ */
+s32 q2_fx_teleport_column(q2_fx_world *w, q2_rng *rng,
+                          const s16 vel[Q2_FX_GROUP_QUADS][3],
+                          const s32 centre[3], u8 area);
+
+/* The outer radius of the pad's light this frame, 800..1824. 0x80028E1C. */
+s32 q2_fx_teleport_light_radius(s32 level_time);
+
+/* The inner radius, and the light's colour and type word. 0x80028E14 writes
+ * 400; the colour is 0x00FF1020 at 0x800AE798 (r 32, g 16, b 255) and the
+ * type word 0x00020001 at 0x800AE79C — style 1, size shift 2. */
+#define Q2_FX_TELEPORT_LIGHT_INNER  400
+#define Q2_FX_TELEPORT_LIGHT_R       32
+#define Q2_FX_TELEPORT_LIGHT_G       16
+#define Q2_FX_TELEPORT_LIGHT_B      255
+#define Q2_FX_TELEPORT_LIGHT_STYLE    1
+#define Q2_FX_TELEPORT_LIGHT_SIZE     2
 
 /* ------------------------------------------------------------------------- */
 /* 0x800596B0 is the ITEM MATERIALISE burst, and its ramp is an ITEM's glow    */

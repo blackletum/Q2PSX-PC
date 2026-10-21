@@ -1,4 +1,5 @@
 #include "events_rt.h"
+#include "random.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -39,7 +40,8 @@ q2_result q2_event_rt_init(q2_event_rt *rt, const q2_events *events)
      * comment. Under 3 KB on the largest chunk the disc has. */
     if (events->size > 0) {
         rt->item_flags = (u8 *)calloc(events->size, 1);
-        if (!rt->item_flags) {
+        rt->object_flags = (u8 *)calloc(events->size, 1);
+        if (!rt->item_flags || !rt->object_flags) {
             q2_event_rt_free(rt);
             return Q2_ERR_NO_MEMORY;
         }
@@ -94,6 +96,7 @@ void q2_event_rt_free(q2_event_rt *rt)
     free(rt->flags);
     free(rt->offsets);
     free(rt->item_flags);
+    free(rt->object_flags);
     memset(rt, 0, sizeof(*rt));
 }
 
@@ -698,6 +701,18 @@ static q2_event_outcome run_item(q2_event_rt *rt, const q2_event_item *item)
  *     leaves with a0 = -2 when there is none. The request is dropped; nothing
  *     is evicted.
  */
+s32 q2_event_timer_period(const q2_event_item *item)
+{
+    u32 base, range, roll;
+
+    if (!item || item->len != 12 || !item->payload)
+        return 0;
+    base = (u32)item->payload[2] | ((u32)item->payload[3] << 8);
+    range = (u32)item->payload[4] | ((u32)item->payload[5] << 8);
+    roll = q2_random_next();
+    return (s32)((base + ((range * roll) >> 15)) * 30u);
+}
+
 static void timer_arm(q2_event_rt *rt, u32 rec_offset,
                       const q2_event_item *item, u32 index)
 {
@@ -705,6 +720,7 @@ static void timer_arm(q2_event_rt *rt, u32 rec_offset,
 
     for (s = 0; s < Q2_EVENT_RT_TIMER_MAX; s++) {
         if (rt->deferred[s].item == item->offset) {   /* 0x80027044 */
+            rt->defer_timer  = false;
             rt->defer_ticks  = 0;
             rt->defer_fires  = 0;
             rt->defer_window = 0;
@@ -719,17 +735,19 @@ static void timer_arm(q2_event_rt *rt, u32 rec_offset,
     }
 
     if (slot < Q2_EVENT_RT_TIMER_MAX) {
+        s32 period = rt->timer_period ? rt->timer_period(item) : rt->defer_ticks;
         rt->deferred[slot].item        = item->offset;   /* 0x800270C0 */
         rt->deferred[slot].offset      = rec_offset;     /* 0x800270C4 */
         rt->deferred[slot].timer_index = (u8)index;
         rt->deferred[slot].next_item   = (u8)(index + 1u); /* 0x800270BC */
         rt->deferred[slot].window      = rt->defer_window; /* 0x800270C8 */
         rt->deferred[slot].fires       = rt->defer_fires;  /* 0x800270B0 */
-        rt->deferred[slot].period      = rt->defer_ticks;  /* 0x80027104 */
-        rt->deferred[slot].due         = rt->clock + rt->defer_ticks;
+        rt->deferred[slot].period      = period;  /* 0x80027104 */
+        rt->deferred[slot].due         = rt->clock + period;
         rt->deferred_count++;
     }
 
+    rt->defer_timer  = false;
     rt->defer_ticks  = 0;
     rt->defer_fires  = 0;
     rt->defer_window = 0;
@@ -747,16 +765,20 @@ static void timer_free(q2_event_rt *rt, u32 slot)
 /*
  * 0x800273F0..0x8002742C: a fresh period into slot+0.
  *
- * DEVIATION. The console re-rolls here — `jal 0x80089E28` then
- * `(base + ((range * rand()) >> 15)) * 30` off the TIMER item at slot+12 — and
- * this runtime has no RNG: the roll belongs to the owner's `on_call` hook,
- * which is not running at a deadline. The period armed by the first roll is
- * reused. All 18 TIMER items on the disc carry range 0, so the console's
- * re-roll returns that same constant and nothing on this disc can tell them
- * apart; a script with a range would jitter once here and every time there.
+ * The console re-rolls here — `jal 0x80089E28` then
+ * `(base + ((range * rand()) >> 15)) * 30` off the TIMER item at slot+12.
+ * Looking up the immutable item also works after a saved slot is restored.
  */
 static void timer_rearm(q2_event_rt *rt, u32 slot)
 {
+    q2_event_record rec;
+    q2_event_item item;
+
+    if (rt->timer_period &&
+        q2_events_record_at(&rt->events, rt->deferred[slot].offset, &rec) &&
+        q2_events_get_item(&rt->events, &rec, rt->deferred[slot].timer_index, &item) &&
+        item.offset == rt->deferred[slot].item)
+        rt->deferred[slot].period = rt->timer_period(&item);
     rt->deferred[slot].due = rt->clock + rt->deferred[slot].period;
 }
 
@@ -877,7 +899,7 @@ static bool run_items(q2_event_rt *rt, const q2_event_record *rec, u32 from,
          * 0x8002710C sets gp+16956 on every exit of 0x80026FEC, including the
          * two refusals, and 0x80027778 is where the executor reads it.
          */
-        if (rt->defer_ticks > 0) {
+        if (rt->defer_timer || rt->defer_ticks > 0) {
             timer_arm(rt, offset, &item, i);
             return true;
         }
@@ -1023,7 +1045,7 @@ static void timer_fire(q2_event_rt *rt, u32 slot, q2_event_outcome *result)
 
             /* And a TIMER inside the window claims its own slot, keyed on its
              * own item — which is how a record can carry two of them. */
-            if (rt->defer_ticks > 0)
+            if (rt->defer_timer || rt->defer_ticks > 0)
                 timer_arm(rt, rt->deferred[slot].offset, &item, idx);
         }
 
@@ -1129,9 +1151,8 @@ q2_event_outcome q2_event_rt_update(q2_event_rt *rt)
      * A slot with slot+12 == 0 is free (0x8002737C). The console holds a
      * COUNTDOWN in slot+0 and subtracts the frame's delta from it (0x8002738C..
      * 0x800273A4, due when it goes negative); this runtime holds a deadline
-     * against the same clock instead, which is the port's existing shape and
-     * fires one tick earlier for a period that lands exactly on a frame
-     * boundary.
+     * against the same clock instead. Equality must still wait: the original
+     * branches past the fire on `bgez`, including a countdown of exactly zero.
      */
     {
         u32 s;
@@ -1139,7 +1160,7 @@ q2_event_outcome q2_event_rt_update(q2_event_rt *rt)
         for (s = 0; s < Q2_EVENT_RT_TIMER_MAX; s++) {
             if (rt->deferred[s].item == 0)
                 continue;
-            if (rt->deferred[s].due > rt->clock)
+            if (rt->deferred[s].due >= rt->clock)
                 continue;
 
             rt->resumed_count++;
@@ -1247,6 +1268,7 @@ void q2_event_rt_carry_out(const q2_event_rt *rt, q2_event_carry *out)
 
     memset(out->record_flags, 0, sizeof(out->record_flags));
     memset(out->item_flags, 0, sizeof(out->item_flags));
+    memset(out->destroyed_items, 0, sizeof(out->destroyed_items));
 
     /* The whole byte, contact bits too: the console's copy is not touched by
      * the zone load, so RT2 still says "inside last frame" in the next zone
@@ -1254,6 +1276,8 @@ void q2_event_rt_carry_out(const q2_event_rt *rt, q2_event_carry *out)
     memcpy(out->record_flags, rt->flags, rt->record_count);
     if (rt->item_flags && rt->item_flags_size <= Q2_EVENT_CARRY_MAX)
         memcpy(out->item_flags, rt->item_flags, rt->item_flags_size);
+    if (rt->object_flags && rt->item_flags_size <= Q2_EVENT_CARRY_MAX)
+        memcpy(out->destroyed_items, rt->object_flags, rt->item_flags_size);
 
     out->size         = rt->events.size;
     out->record_count = rt->record_count;
@@ -1268,6 +1292,8 @@ void q2_event_rt_carry_in(q2_event_rt *rt, const q2_event_carry *in)
     memcpy(rt->flags, in->record_flags, rt->record_count);
     if (rt->item_flags && rt->item_flags_size == in->size)
         memcpy(rt->item_flags, in->item_flags, rt->item_flags_size);
+    if (rt->object_flags && rt->item_flags_size == in->size)
+        memcpy(rt->object_flags, in->destroyed_items, rt->item_flags_size);
 }
 
 /*
@@ -1310,7 +1336,7 @@ static void replay_item(q2_event_rt *rt, const q2_event_item *item,
     /* A TIMER the replay re-dispatches claims a slot the same way, with the
      * same fire count and window — otherwise a timer that survives a zone seam
      * would come back as a window-less one-shot. */
-    if (rt->defer_ticks > 0)
+    if (rt->defer_timer || rt->defer_ticks > 0)
         timer_arm(rt, rec_offset, item, index);
 }
 
@@ -1373,7 +1399,9 @@ void q2_event_rt_replay(q2_event_rt *rt, const q2_event_carry *carry)
 
                 /* 0x800295AC: a spent record replays every item; otherwise
                  * only a spent one-shot item does. */
-                if (rec_bit || item_bit)
+                if (rec_bit || item_bit ||
+                    (item.offset < carry->size &&
+                     carry->destroyed_items[item.offset]))
                     replay_item(rt, &item, i, rec.offset);
             }
 
@@ -1383,4 +1411,85 @@ void q2_event_rt_replay(q2_event_rt *rt, const q2_event_carry *carry)
     }
 
     rt->initial_pass = false;                       /* 0x80029754 */
+}
+
+/* ------------------------------------------------------------------------- */
+/* The blocks themselves — one carry per map (events_rt.h)                     */
+/* ------------------------------------------------------------------------- */
+/*
+ * The key compare. Case-blind for the reason every other name compare in this
+ * port is: the executable's level table and the ISO directory do not agree on
+ * case, so an exact compare would file the same map under two names and the
+ * second visit would find nothing.
+ */
+static bool block_name_eq(const char *a, const char *b)
+{
+    while (*a && *b) {
+        int ca = (int)(unsigned char)*a++;
+        int cb = (int)(unsigned char)*b++;
+
+        if (ca >= 'A' && ca <= 'Z') ca += 'a' - 'A';
+        if (cb >= 'A' && cb <= 'Z') cb += 'a' - 'A';
+        if (ca != cb)
+            return false;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+q2_event_carry *q2_event_store_find(q2_event_store *s, const char *map)
+{
+    u32 i;
+
+    if (!s || !map || !map[0])
+        return NULL;
+
+    for (i = 0; i < s->count; i++)
+        if (block_name_eq(s->block[i].map, map))
+            return &s->block[i].carry;
+    return NULL;
+}
+
+q2_event_carry *q2_event_store_open(q2_event_store *s, const char *map)
+{
+    q2_event_carry *have = q2_event_store_find(s, map);
+    q2_event_block *grown;
+    u32 cap, n;
+
+    if (have)
+        return have;
+    if (!s || !map || !map[0])
+        return NULL;
+
+    if (s->count == s->cap) {
+        cap = s->cap ? s->cap * 2u : 8u;
+        grown = (q2_event_block *)realloc(s->block,
+                                          (size_t)cap * sizeof(*grown));
+        if (!grown)
+            return NULL;
+        s->block = grown;
+        s->cap   = cap;
+    }
+
+    grown = &s->block[s->count++];
+    memset(grown, 0, sizeof(*grown));
+    for (n = 0; n + 1 < Q2_EVENT_BLOCK_NAME_MAX && map[n]; n++)
+        grown->map[n] = map[n];
+    grown->map[n] = '\0';
+    return &grown->carry;
+}
+
+void q2_event_store_clear(q2_event_store *s)
+{
+    if (s)
+        s->count = 0;
+}
+
+void q2_event_store_free(q2_event_store *s)
+{
+    if (!s)
+        return;
+    free(s->block);
+    s->block = NULL;
+    s->count = 0;
+    s->cap   = 0;
 }

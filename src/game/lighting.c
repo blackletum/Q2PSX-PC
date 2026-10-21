@@ -2,7 +2,10 @@
  * lighting.c — the three-light selector and the GTE state it produces.
  *
  * Transcribed from 0x8006AFE8 (the gather), 0x8006AD4C (one candidate),
- * 0x80076040 (the attenuation) and 0x8008A5E8 (libgte's VectorNormal). Where
+ * 0x80076040 (the attenuation) and 0x8008A5E8 (libgte's VectorNormal), and
+ * since the timed-light round from 0x80075D14 (AddTimedLight), 0x800741AC
+ * (ProcessTimedLights) and the ramp inside 0x80074598 (ProcessMobileLights).
+ * Where
  * the original's arithmetic is observable it is reproduced rather than tidied:
  * the 16-bit wrapping delta, the truncating divides, the order the three axes
  * are rejected in, and the fact that the ranking never actually sorts — it
@@ -306,6 +309,413 @@ void q2_light_world_begin_frame(q2_light_world *w)
 
     w->dynamic_world_count = 0;
     w->dynamic_view_count  = 0;
+
+    /* The timed table is NOT cleared here. ProcessLights resets only the two
+     * list pointers (0x80075BAC, 0x80075BC0); the counters at 0x800E1218 are
+     * zeroed by InitLights and by nothing else. */
+}
+
+/* ------------------------------------------------------------------------- */
+/* 0x80075D14 — AddTimedLight                                                 */
+/* ------------------------------------------------------------------------- */
+bool q2_light_add_timed(q2_light_world *w, const s32 pos[3], const u8 rgb[3],
+                        s32 inner_radius, s32 outer_radius, s32 ticks)
+{
+    q2_timed_light *t;
+    u32 i;
+
+    if (!w || !pos || !rgb)
+        return false;
+
+    /*
+     * 0x80075D28: the first slot whose REMAINING halfword is zero. There is no
+     * age, no priority and no eviction — when all sixteen are counting down the
+     * function falls out of its loop with a null slot pointer and returns 0
+     * (0x80075D48..0x80075D58).
+     */
+    for (i = 0; i < Q2_TIMEDLIGHT_SLOTS; i++)
+        if (w->timed[i].remaining == 0)
+            break;
+
+    if (i == Q2_TIMEDLIGHT_SLOTS)
+        return false;
+
+    t = &w->timed[i];
+
+    t->pos[0] = pos[0];          /* 0x80075D64..0x80075D78 */
+    t->pos[1] = pos[1];
+    t->pos[2] = pos[2];
+
+    t->rgb[0]    = rgb[0];       /* 0x80075D7C: the whole colour word, so the */
+    t->rgb[1]    = rgb[1];       /* fourth byte travels with it even though   */
+    t->rgb[2]    = rgb[2];       /* both presets on the disc have it zero.    */
+    t->colour_hi = 0;
+
+    /*
+     * The radii arrive packed into one register — inner in the low halfword,
+     * outer in the high — and the truncation to 16 bits is the store, not the
+     * caller. ProcessTimedLights reads them back with `lh`, signed.
+     */
+    t->inner = (s16)inner_radius;
+    t->outer = (s16)outer_radius;
+
+    /* 0x80075DD8 / 0x80075DDC: the SAME value into both counters. */
+    t->total     = (s16)ticks;
+    t->remaining = (s16)ticks;
+
+    return true;
+}
+
+/* ------------------------------------------------------------------------- */
+/* 0x800741AC — ProcessTimedLights                                            */
+/* ------------------------------------------------------------------------- */
+u32 q2_light_timed_tick(q2_light_world *w)
+{
+    u32 emitted = 0;
+    u32 i;
+
+    if (!w)
+        return 0;
+
+    for (i = 0; i < Q2_TIMEDLIGHT_SLOTS; i++) {
+        q2_timed_light *t = &w->timed[i];
+        s32 inner, outer;
+
+        /* 0x800741E4: a zero counter is a free slot and is stepped over
+         * without being decremented. */
+        if (t->remaining == 0)
+            continue;
+
+        /*
+         * 0x800741EC..0x80074270. `mult` then `div`, both 32-bit and both
+         * truncating toward zero, and the multiply happens FIRST — scaling the
+         * radius before the divide is what keeps a small light from collapsing
+         * to nothing on its second tick.
+         */
+        inner = ((s32)t->inner * t->remaining) / t->total;
+        outer = ((s32)t->outer * t->remaining) / t->total;
+
+        /*
+         * The append is spelled out inline in the original rather than calling
+         * AddLight, but it is instruction-for-instruction the same store
+         * sequence, and the style and size bits come from four bytes the
+         * function memsets to zero first (0x80074294 -> 0x80089E18 with a2 = 4).
+         * So: style 0, size 0, always.
+         */
+        if (q2_light_add_dynamic(w, t->pos, t->rgb, inner, outer, 0, 0))
+            emitted++;
+
+        /*
+         * 0x80074358, and reached from BOTH arms: a slot whose append was
+         * refused because the world list is full still burns a tick. The
+         * decrement is after the emit, which is why a slot given N ticks is
+         * emitted at N/N first and 1/N last, and never at zero.
+         */
+        t->remaining = (s16)(t->remaining - 1);
+    }
+
+    return emitted;
+}
+
+void q2_light_timed_reset(q2_light_world *w)
+{
+    u32 i;
+
+    if (!w)
+        return;
+
+    /* 0x80074194 walks the sixteen slots backwards storing zero into slot+32
+     * and touches nothing else. A slot's position, colour and radii survive a
+     * level load; only its claim on the table does not. */
+    for (i = 0; i < Q2_TIMEDLIGHT_SLOTS; i++)
+        w->timed[i].remaining = 0;
+}
+
+u32 q2_light_timed_active(const q2_light_world *w)
+{
+    u32 n = 0;
+    u32 i;
+
+    if (!w)
+        return 0;
+
+    for (i = 0; i < Q2_TIMEDLIGHT_SLOTS; i++)
+        if (w->timed[i].remaining != 0)
+            n++;
+
+    return n;
+}
+
+/* ------------------------------------------------------------------------- */
+/* The four muzzle flashes                                                    */
+/* ------------------------------------------------------------------------- */
+bool q2_light_muzzle_preset(u8 weapon_id, q2_muzzle_light *out)
+{
+    q2_muzzle_light m;
+
+    memset(&m, 0, sizeof(m));
+    m.rgb[0] = Q2_MUZZLE_FLASH_R;      /* 0x800AE9D4, all four weapons */
+    m.rgb[1] = Q2_MUZZLE_FLASH_G;
+    m.rgb[2] = Q2_MUZZLE_FLASH_B;
+
+    switch (weapon_id) {
+    case Q2_WID_SHOTGUN:
+        /* 0x8004C3B0 addiu a0, s3, 164; 0x8004C3BC addiu a3, zero, 3. */
+        m.inner         = Q2_SHOTGUN_LIGHT_INNER;
+        m.outer         = Q2_SHOTGUN_LIGHT_OUTER;
+        m.ticks         = Q2_SHOTGUN_LIGHT_TICKS;
+        m.origin_offset = 0xA4;
+        break;
+
+    case Q2_WID_SUPER_SHOTGUN:
+        /* 0x8004C674 addiu a0, s3, 84; 0x8004C680 addiu a3, zero, 4. */
+        m.inner         = Q2_SSHOTGUN_LIGHT_INNER;
+        m.outer         = Q2_SSHOTGUN_LIGHT_OUTER;
+        m.ticks         = Q2_SSHOTGUN_LIGHT_TICKS;
+        m.origin_offset = 0x54;
+        break;
+
+    case Q2_WID_MACHINEGUN:
+    case Q2_WID_CHAINGUN:
+        /*
+         * 0x8004C744 and 0x8004CA9C. One frame through AddLight, and the radii
+         * are a single rand() draw away — q2_weapon_muzzle_light computes them,
+         * so this record carries no numbers, only the fact that it must.
+         */
+        m.ticks         = 0;
+        m.origin_offset = 0x54;
+        m.random_radii  = true;
+        break;
+
+    default:
+        return false;
+    }
+
+    if (out)
+        *out = m;
+
+    return true;
+}
+
+/* ------------------------------------------------------------------------- */
+/* 0x80074598 — ProcessMobileLights, the arithmetic half                      */
+/* ------------------------------------------------------------------------- */
+
+/* `bgez` then `addiu +3` then `sra 2`: a divide by four that truncates toward
+ * zero rather than flooring (0x80074658..0x80074674). */
+static s32 div4_trunc(s32 v)
+{
+    return (v < 0 ? v + 3 : v) >> 2;
+}
+
+void q2_light_ramp_begin(q2_light_ramp *out, const q2_light *l)
+{
+    s32 inner, outer;
+
+    if (!out)
+        return;
+
+    memset(out, 0, sizeof(*out));
+
+    if (!l)
+        return;
+
+    /* 0x80074628/0x80074638/0x80074644: r, g and b, in that order, out of
+     * light+12, +13 and +14. */
+    out->rgb[0] = l->r;
+    out->rgb[1] = l->g;
+    out->rgb[2] = l->b;
+    out->radius = (s32)l->radius;
+
+    inner = (s32)l->inner_radius_sq;
+    outer = (s32)l->radius_sq;
+
+    /*
+     * 0x80074648: while the OUTER square will not fit in 32767, quarter both
+     * and count the step. The limit is not arbitrary — GetDist2Shift_ squares
+     * through the GTE with lm = 1, so each axis' square saturates at 0x7FFF and
+     * a comparison against an unscaled radiusSq would be against a number the
+     * distance can never reach.
+     */
+    while (outer > 32767) {
+        inner = div4_trunc(inner);
+        outer = div4_trunc(outer);
+        out->shift++;
+    }
+
+    out->inner_sq = inner;
+    out->outer_sq = outer;
+
+    /* 0x8007468C..0x800746E4: the difference, divided by 256, truncating. It
+     * is computed once per light and reused for every point of every brush. */
+    out->den = div256_trunc(outer - inner);
+}
+
+bool q2_light_ramp_reaches(const q2_light_ramp *r, const s32 light_pos[3],
+                           const s32 box_min[3], const s32 box_max[3],
+                           u32 obj_flags)
+{
+    s32 lo[3], hi[3];
+    int i;
+
+    if (!r || !light_pos || !box_min || !box_max)
+        return false;
+
+    /* 0x8007469C..0x800746FC: the light's own box, pos +/- the RADIUS — not the
+     * radius squared, and not the scaled one. */
+    for (i = 0; i < 3; i++) {
+        lo[i] = light_pos[i] - r->radius;
+        hi[i] = light_pos[i] + r->radius;
+    }
+
+    /*
+     * Six strict compares in the order x, z, y (0x80074734, 0x80074764,
+     * 0x80074794 and the three interleaved with them). Strict matters: a light
+     * whose box exactly touches a brush's face misses it.
+     */
+    if (!(lo[0] < box_max[0])) return false;
+    if (!(box_min[0] < hi[0])) return false;
+    if (!(lo[2] < box_max[2])) return false;
+    if (!(box_min[2] < hi[2])) return false;
+    if (!(lo[1] < box_max[1])) return false;
+    if (!(box_min[1] < hi[1])) return false;
+
+    /* 0x800747C4: the object's own dword at +0x0C, tested against 0x00800000.
+     * An object carrying it is skipped whole — it keeps its baked colours. */
+    if (obj_flags & Q2_LIGHT_NO_MOBILE)
+        return false;
+
+    return true;
+}
+
+/*
+ * 0x800B0FB4 GetDist2Shift_ — the squared distance, shifted.
+ *
+ * MTC2 into IR1..IR3 keeps the low halfword sign-extended, so the shifted delta
+ * is truncated to 16 bits before it is ever squared; SQR runs with sf = 0 and
+ * lm = 1, so each component's square is unshifted and saturates at 0x7FFF. The
+ * sum of three saturating squares is what the ramp is measured against, and it
+ * is why the /4 loop above exists.
+ */
+static s32 gte_sqr_ir(s32 v)
+{
+    s32 s = (s16)v;
+    s32 q = s * s;
+
+    return q > 32767 ? 32767 : q;
+}
+
+static s32 dist2_shift(const s16 point[3], const s32 light_local[3], s32 shift)
+{
+    s32 sum = 0;
+    int i;
+
+    for (i = 0; i < 3; i++) {
+        /* `lh` the point, `lw` the light, subtract in 32 bits, `srav`. */
+        s32 d = (s32)point[i] - light_local[i];
+        sum += gte_sqr_ir(d >> shift);
+    }
+
+    return sum;
+}
+
+bool q2_light_ramp_point(const q2_light_ramp *r, const s16 point[3],
+                         const s32 light_local[3], s32 out[3])
+{
+    s32 dist, t, s;
+    int i;
+
+    if (!r || !point || !light_local || !out)
+        return false;
+
+    dist = dist2_shift(point, light_local, r->shift);
+
+    /* 0x800749BC: strictly outside the outer square and the point is skipped
+     * altogether — no contribution, and the packet keeps its baked colour. */
+    if (r->outer_sq < dist)
+        return false;
+
+    t = dist - r->inner_sq;
+
+    if (t < 0 || r->den == 0) {
+        /*
+         * 0x800749C8: inside the INNER radius the ramp is not evaluated at all
+         * and the light contributes its colour bytes whole. So a light's core
+         * is flat, not peaked — the falloff only exists between the two radii.
+         *
+         * `den == 0` joins that arm rather than dividing. The original would
+         * take the `break 0x1C00` at 0x800749F8 — a divide-by-zero trap — which
+         * needs innerSq == outerSq after the /4 loop. No light on the disc and
+         * none AddLight builds produces that, so this is a guard for a case the
+         * console never reaches, not a difference in behaviour.
+         */
+        out[0] = r->rgb[0];
+        out[1] = r->rgb[1];
+        out[2] = r->rgb[2];
+        return true;
+    }
+
+    /*
+     * 0x800749EC then 0x80074A1C. `s` reaches 0 well before the outer radius
+     * and goes NEGATIVE on the last shell, because `den` was truncated down:
+     * 600/1200 gives den = 65, and a point exactly on the outer radius has
+     * t = 16875, t / den = 259, s = -4. The three `addiu +255` biases at
+     * 0x80074A30, 0x80074A4C and 0x80074A68 exist to make that final divide
+     * truncate toward zero rather than floor.
+     */
+    s = 255 - t / r->den;
+
+    for (i = 0; i < 3; i++)
+        out[i] = div256_trunc(s * (s32)r->rgb[i]);
+
+    return true;
+}
+
+void q2_light_ramp_add(u8 vertex_rgb[3], const s32 contrib[3])
+{
+    int i;
+
+    if (!vertex_rgb || !contrib)
+        return;
+
+    /*
+     * 0x80074AC0..0x80074B0C: `addu` in 32 bits, `slti 256`, `sb`. There is a
+     * ceiling and no floor, so the negative contribution of the outermost shell
+     * subtracts and, on an already-black vertex, wraps through the byte store.
+     * The cast is that `sb`.
+     */
+    for (i = 0; i < 3; i++) {
+        s32 v = (s32)vertex_rgb[i] + contrib[i];
+
+        if (v > 255)
+            v = 255;
+        vertex_rgb[i] = (u8)v;
+    }
+}
+
+bool q2_light_point_slot(u8 slot, u32 *block, u32 *poly, u32 *corner)
+{
+    /* 0x80074A84: 0xFF ends the point's slot list, and the remaining slots of
+     * that point are not examined. */
+    if (slot == 0xFF)
+        return false;
+
+    /* 0x80074A8C tests the sign of the byte shifted up 24, i.e. bit 7. */
+    if (block)
+        *block = (u32)(slot >> 7);
+    if (poly)
+        *poly = (u32)((slot >> 2) & 31);   /* InitLights 0x8007413C andi 0x1F */
+    if (corner)
+        *corner = (u32)(slot & 3);
+
+    return true;
+}
+
+s32 q2_light_packet_offset(u8 slot)
+{
+    /* 0x8007413C..0x80074164 builds this halfword for every byte 0..255:
+     * 52 bytes a POLY_GT4, a 4-byte tag, and 12 bytes a corner. */
+    return 52 * (s32)((slot >> 2) & 31) + 4 + 12 * (s32)(slot & 3);
 }
 
 /* ------------------------------------------------------------------------- */

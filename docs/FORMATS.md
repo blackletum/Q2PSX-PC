@@ -3903,6 +3903,43 @@ identified by address, and every one checked agrees:
 | `0x800701B4` | the `Strings` lookup | `GetStringFromStringtable` (`MISC.C`) |
 | `0x800AEC4C` | "the meter's base y" | `ScreenYOff` — see below |
 
+**And it is now readable from the disc.** `q2psx-inspect syms <disc>` walks the whole 3,495,896-byte
+stream and ends on its last byte: 167,089 records, 1,037 functions, 2,892 symbols. The format is flat —
+`u32 address`, `u8 type`, then a payload the type alone decides the length of — with no index and no
+record length, so a type whose payload is sized wrongly does not corrupt one record, it desynchronises
+every record after it and the wreckage reads as data rather than as an error. The reader therefore stops
+dead on a type it does not know, and "the walk ended on the last byte" is the check that any of it is
+being read correctly. Addresses come back in SLES-01534's space through the relocation below, so
+`syms <disc> T_Damage` answers `0x800627F8` — which is how the table above was checked.
+
+It also finds what the sweep cannot. `funcs` locates a function by being the target of a `jal`, so a
+handler reached only through a pointer table is invisible to it: of the 1,037 functions the table gives a
+source file, **274 are not in its output at all**, and every one of them begins with a stack-frame
+prologue. `PSXGLASS` (`0x8002A31C`) is one — the event script reaches its handlers by table, never by
+call. In the other direction the table closes almost all of the sweep's own uncertainty: between the
+function records and the 2,892 plain symbols it names **1,076 of the sweep's 1,127 starts**, leaving 51
+anonymous. 1,829 symbols sit past the last named function, and they are two things: the Psy-Q library
+entry points the game calls — `DrawOTag`, `VSync`, `rand`, `memset`, which the sweep could only show as
+unnamed targets — and then the globals. `syms <disc> data` prints that band with the BSS marked, and
+`syms <disc> ColList` answers `CreColList` at `0x800B35D8` and `MissColList` at `0x800B34D8`.
+
+**What the names are for.** Every address this project has ever written down, in source or in docs, is a
+set of 5,588; the symbol table is a set of 1,037 named functions. Subtract, and **425 named functions have
+never been mentioned anywhere in this tree** — the executable's unexamined half, grouped by the module it
+belongs to. Some of those groups are things a port does not need (`MYMALLOC.C`, `MEMCARD.C`, the SPU and
+CD hardware); the interesting ones are the small residues, where a file is read almost to the end and
+stops: 24 of 26 in `GMONSTER.C`, 12 of 13 in `G_AI.C`, 8 of 9 in `QUAKEGUN.C`, 22 of 23 in `QPANEL.C`. A
+leftover there is far more likely to be something missed than something skipped, and that is how several
+of the gaps in this changelog's current entries were found.
+
+The census is one command and one pipeline:
+
+```sh
+q2psx-inspect syms "Quake II (USA).cue" list | awk '/^  0x/{print $1}' | sort -u > named.txt
+grep -rhoE "0x800[0-9A-Fa-f]{5}" src tools docs | tr a-f A-F | sed s/0X/0x/ | sort -u > cited.txt
+comm -23 named.txt cited.txt      # the executable's unexamined half
+```
+
 **The relocation.** The two images aligned word for word, with every word that can hold an address masked
 first — a `j`/`jal` target, a `lui` and its `%lo`, a `$gp` offset, a pointer in data — match on
 **158,097 of SLES-01534's 158,208 words**, in nine runs of constant displacement:
@@ -6635,10 +6672,26 @@ Implemented in `src/game/multiplayer.[ch]`; `q2psx-inspect multi` checks the dat
 ### 17.1 There are two lighting systems and they never meet
 
 **The world is lit at build time.** Every `MapMod` quad carries four indices into its node's RGB table and
-the world renderer copies them straight into the `POLY_GT4` (`0x800681D8`). Nothing at runtime modulates
-them: no second pass, no lightmap texture, no light applied to world geometry anywhere in the image. That
-baked Gouraud table **is** the PlayStation's lightmap, and it is why a PSX level looks lit without any
-lighting code running.
+the world renderer copies them straight into the `POLY_GT4` (`0x800681D8`). That baked Gouraud table **is**
+the PlayStation's lightmap, and it is why a PSX level looks lit without any lighting code running.
+
+**But a runtime light DOES repaint it, and this section used to say otherwise** — "no second pass, no
+lightmap texture, no light applied to world geometry anywhere in the image". The first two halves are true
+and the third is not. `ProcessMobileLights` (`0x80074598`, LIGHTS.C, named by the NTSC symbol table) is the
+second call of `ProcessLights` (`0x80075B94`) and it runs every frame at `0x8003903C`, after `DrawAllScenes`
+has emitted the world's packets and after `DrawAllModels`. For each light on the 16-slot world dynamic list
+it walks the brushes `DrawScene` registered this frame (52-byte records at `0x800DA578`, count at
+`0x800B2C80`), rejects the ones the light's box misses (`0x80074734`), and for every point of a surviving
+node's `Points` list adds a distance-ramped share of the light's colour **into the Gouraud bytes of the
+packets already in the ordering table** — up to four corners per point, named by the four slot bytes at
+point+6…+9 (§2.9). `UndoMobileLights` (`0x80075F60`) takes it back off at the top of the next frame from a
+per-draw-buffer undo list at `0x800E1458`, which is the clearest proof the pass is a genuine mutation of
+persistent packets rather than a colour chosen at build time.
+
+So the two systems meet in exactly one place: a rocket flying down a corridor lights the corridor, not only
+the rocket. The ramp is transcribed in `src/game/lighting.c` (`q2_light_ramp_*`) and applied in
+`src/game/world.c` where the baked colour is copied into the quad — this port rebuilds its quads every
+frame, so it needs neither the undo list nor the packet-poking.
 
 **Everything else is lit per vertex by the GTE**, from at most three point lights chosen per entity per
 frame plus an ambient. Three is not a budget picked by the game: the GTE's light matrix has three rows.
@@ -7002,9 +7055,9 @@ same pointer twice.
 0 6 1 2 3 4 5 7 8 9 10 11 12 13 14 16 17 18 15
 ```
 
-Call sites reach ramps both ways — the script effect at `0x80028D9C` indexes the table, everything else
-materialises the record address — so ids and array indices both exist and confusing them shifts every
-scripted effect's colour by one.
+Call sites reach ramps both ways — the teleport column at `0x80028D9C` indexes the table, everything else
+materialises the record address — so ids and array indices both exist and confusing them shifts the
+column's colour by one.
 
 ### 18.4 What each burst is, with the address its numbers came from
 
@@ -7014,12 +7067,28 @@ scripted effect's colour by one.
 | blood | `0x80048C08` | 15 | 15 | 6144 | 10 | 2, 3 (dark red + subtractive cyan) |
 | BFG burst | `0x8004BDC4` | 15 | 15 | 20000 | 9 | 11, 11 (green) |
 | item materialise | `0x800596B0` | 15 | 10 | 10000 | 9 | 1, 11 or 0 by the item's glow bit, see below |
-| scripted | `0x80028DC8` | 15 | `(rand()+24)&15` | `(rand()&0x2047)+12000` | 9 | 1, 0 |
-| spark | `0x8003E0C0` | 15 | 25 | 3072 | 9 | 0, 0 (blue) |
+| teleport column | `0x80028DC8` | 15 | `(rand()+24)&15` | `(rand()&0x2047)+12000` | 13 (X/Z only) | 1, 0 (red + blue) |
+| water splash | `0x8003E0C0` | 15 | 25 | 3072 | 9 | 0, 0 (blue) |
 | laser end | `0x80049074` | 15 | 15 | 6144 | 10 | the kind's |
 
 `shift` is applied to `rand() - 16384` per component, so a *smaller* shift is a wider burst: 9 gives
 components in -32..31 and 10 gives -16..15.
+
+**Two of those rows used to be called "scripted" and "spark", and both names hid the site's only caller.**
+
+`0x80028DC8` is inside **`DrawTelePorts`** (`0x80028BDC`, EVENT.C), which QuakeLoop calls every frame at
+`0x80038FA4` — immediately before `DrawLaserWalls` and `DrawLaserBeams`. Its list is built at zone load by
+`PSXTELEPORT_T` (`0x8002E3F0`), the fn_load half of the `TELEPORT` binding record at `0x8009B9C0`. Its shift
+is **13**, not 9 (`sra v0, v0, 13` at `0x80028C5C` and `0x80028C88`), and it applies to X and Z only: Y is
+`(rand() >> 8) * sign` at `0x80028C68`, with no bias subtracted and the sign taken from a 128-tick saw on
+`LevelTicks` (`0x80028C14`, an `sltiu` against 63, so 63 ticks up and 65 down). That asymmetry is what makes
+it a **column** rather than a cloud. The fifteen triples are drawn ONCE per frame, above the `blez` on
+`NumTelePorts` at `0x80028CA8`, and shared by every registered pad.
+
+`0x8003E0C0` is inside **`GenerateWaterSplash`** (`0x8003E014`, QPLAYER.C), whose only caller in the whole
+executable is `0x8003D4C4` — the shallow-water arm of the player's per-frame state think, on the tick the wade
+counter is still zero. No weapon reaches it, so it is not a bullet's spark; it is the sixty blue droplets you
+throw up stepping into water.
 
 **The `0x800596B0` row is an item materialising, and its colour is the item's glow, not a creature's
 blood.** This row used to be called "gib", with a blood-colour rule. It sits inside the item think `0x80059330`,

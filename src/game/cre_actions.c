@@ -31,6 +31,7 @@
  * An unclassified import call does nothing and is counted. `q2psx-inspect
  * creatures` prints which import it wanted, so the gap has an address.
  */
+#include "random.h"
 #include <stdlib.h>
 
 #include "ai.h"
@@ -60,7 +61,7 @@ static void run_step(q2_monster *m, const q2_cre_step *s)
     case Q2_CRE_OP_MELEE: {
         s32 damage = s->damage_base;
         if (s->damage_rand > 1)
-            damage += rand() % s->damage_rand;
+            damage += q2_random_next() % s->damage_rand;
         q2_cre_fire_hit(m, s->aim, damage, s->kick);
         break;
     }

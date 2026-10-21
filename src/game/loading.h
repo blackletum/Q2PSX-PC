@@ -43,18 +43,24 @@
  * The turning logo in the corner is a PRE-RENDERED SPRITE STRIP, and it is in
  * the atlas this screen already writes its word with. Rows 144..203 of
  * `frontend.lbm` — under the 32-pixel face at rows 0..109 and the 16-pixel face
- * at 111..142, above the panel and prompt art at 213..255 — hold a **23-cell
- * rotation of the Quake II logo** on a 32 x 20 grid, eight cells across and
- * three rows down, with `RETRY` occupying the twenty-fourth slot.
+ * at 111..142, above the panel and prompt art at 213..255 — hold twenty-four
+ * cells of a **rotation of the Quake II logo** on a 32 x 20 grid, eight cells
+ * across and three rows down.
  *
  * The cell WIDTHS are what prove both the grid and what the strip is. Read on
  * that grid they run
  *
- *     17 16 14 13 11 9 7 5 4 5 7 9 11 13 14 16 18 19 19 21 22 22 22
+ *     17 16 14 13 11 9 7 5 4 5 7 9 11 13 14 16 18 19 19 21 22 22 22 [24]
  *
  * — a smooth narrowing to a single minimum and out again, which is |cos| and
  * is a rotation about the vertical axis. Every cell is the full 20 rows tall,
  * because a thing turning that way does not change height.
+ *
+ * THE TWENTY-FOURTH SLOT IS NOT `RETRY`. This file used to say it was, and the
+ * decoded sheet says otherwise: (224, 184) is a full-height 24-wide logo cell,
+ * differing from the broadside cell at (224, 0) in 75 of its 640 texels — the
+ * next rotation step, not a word. SpriteAnim never draws it anyway, because
+ * the counter wraps one short of it (below).
  *
  * The grid was found by getting it wrong first. Read as two rows of 30 the same
  * sixty rows give widths 17 16 14 13 12 13 14 16 / 18 19 19 21 22 22 22, which
@@ -95,19 +101,68 @@
  * directory as an observation rather than as an argument.
  *
  * ---------------------------------------------------------------------------
- * The turn, and the corner
+ * THE CODE THAT COUNTS THE CELL INDEX — SpriteAnim, 0x80038820 (MAINLOOP.C)
  * ---------------------------------------------------------------------------
- * The strip's RATE is not on the disc — a cell index is a number some code
- * counts, and that code has not been found — so it is set here to the one rate
- * the disc does give for this logo, the front end's own. See
- * Q2_LOADING_CELL_UNITS; it is in the level clock's 1/300 s units so that it is
- * the same speed at every frame rate.
+ * This file used to say "a cell index is a number some code counts, and that
+ * code has not been found", and then chose a rate and a direction of its own.
+ * The code is `SpriteAnim`, and it disagrees on every point that was guessed.
  *
- * Its DIRECTION is not on the disc either, and the capture settles it: the
- * strip is walked BACKWARDS, from the last cell to the first, so the screen
- * opens on the logo facing the player. See `q2_loading_cell`. At this rate half
- * a second is about seven cells, so which end it starts from is most of what
- * the player ever sees of the rotation.
+ * Called with a0 = 0 it draws ONE 32 x 20 SPRITE at (460, 40) — 0x800388F4 and
+ * 0x800388FC for the corner, 0x8003890C and 0x80038914 for the size, which is
+ * where `Q2_LOADING_X/Y/CELL_W/CELL_H` already agreed — out of VRAM slot 13
+ * (`s1 = 13` at 0x800388F0, which indexes the page tables at 0x800A3274 and
+ * 0x800A329C), and the cell it draws comes from a single free-running halfword
+ * at `gp+612` (0x800AE864):
+ *
+ *     c  < 5   -> (u,v) = (224,   0)      0x80038850 / 0x80038854
+ *     c == 5   ->        = (192,  80)     0x8003886C / 0x80038874
+ *     c == 6   ->        = (224, 120)     0x80038888 / 0x80038890
+ *     c == 7   ->        = (  0, 220)     0x800388A4 / 0x800388A0
+ *     c >= 8   ->  u = (c & 7) * 32       0x800388B8 / 0x800388BC
+ *                  v = 124 + 20 * ((c >> 3) & 3)
+ *                                         0x800388C0…0x800388D8
+ *
+ * and the tail at 0x80038CDC…0x80038CFC is `c = c + 1; if (c == 31) c = 0`.
+ *
+ * So THIRTY-ONE steps, not twenty-three, and FORWARDS. The four cells outside
+ * the 144..203 block are further rotation frames the author parked in spare
+ * corners of the sheet: measured on the decoded atlas in counter order the
+ * inked widths run
+ *
+ *     24 24 24 24 24  21 20 19  17 16 14 13 11 9 7 5 4 5 7 9 11 13 14 16
+ *     18 19 19 21 22 22 22
+ *
+ * — one smooth |cos| sweep with a five-step HOLD at broadside, which no
+ * reading of the 8 x 3 block alone can produce. `c >= 8` covers exactly the
+ * twenty-three cells at v = 144 / 164 / 184 that this file already knew about;
+ * the wrap at 31 is what keeps the twenty-fourth out of the animation.
+ *
+ * The counter is NEVER RESET. `xrefs 0x800AE864` finds the two reads, the
+ * increment and the wrap, and nothing else — InitLoadingAnim (0x80038DFC)
+ * zeroes `gp+17100` and not this — so a new loading screen picks the rotation
+ * up wherever the last one left it. `q2_loading_raise` used to set `spin` back
+ * to zero on the strength of the argument that every screen is a new page;
+ * the page is, and the counter behind the logo is not.
+ *
+ * The RATE is one step per VIDEO FIELD. SpriteAnim(0) is reached only from
+ * 0x80038D54 in VBlankMainLoop (0x80038D1C), which is the tail of VBlankLoading
+ * (0x8006E288, the hook TestIt installs at 0x8006E144), which the vertical-blank
+ * ISR calls at 0x8001908C. The same ISR advances the level clock by
+ * [0x800B2DD8] per call (0x800190B4), and that global is the HALF frame delta
+ * briefing.c already names — 6 of the 1/300 s units this port counts in, which
+ * the ISR itself spells out as a literal on its other arm (0x800190F0,
+ * `addiu v0, v0, 6`). One cell every 6 units: a whole turn-and-hold is
+ * 31 * 6 = 186 units, 0.62 s, against the 1.687 s this file used to take.
+ *
+ * And the PRIMITIVE is a rectangle, not a polygon — 0x80038B24…0x80038B60 fill
+ * a libgpu `SPRT` field for field and 0x80038B68 calls `SetSprt` (0x8008A338).
+ * That matters here rather than being bookkeeping: a rectangle steps one texel
+ * per pixel and wraps in eight bits, and six of the thirty-one steps sit at
+ * u = 224, where a quad's far corner would be 256. See `loading.c`.
+ *
+ * ---------------------------------------------------------------------------
+ * The corner
+ * ---------------------------------------------------------------------------
  *
  * WHERE it stands is measured off the capture, in the console's own 512 x 248
  * pixels, against the two text rows as a ruler: those are `STARTING` at
@@ -147,31 +202,47 @@
 #define Q2_LOADING_HOLD_UNITS  150
 
 /*
- * The logo strip in `frontend.lbm`, measured off the decoded sheet.
+ * The logo strip in `frontend.lbm`, measured off the decoded sheet and mapped
+ * by SpriteAnim's own switch.
  *
- * Eight cells across on a 32-texel pitch and three rows down on a 20-texel one,
- * at v = 144; the twenty-fourth slot is the word `RETRY`, so the rotation is 23
- * cells long. Cell content is centred horizontally and fills the full height.
+ * The quad is 32 x 20 (0x8003890C, 0x80038914). The block at v = 144 is eight
+ * cells across on a 32-texel pitch and three rows down on a 20-texel one, and
+ * it is where counter values 8..30 land — `Q2_LOADING_CELL_V` and
+ * `Q2_LOADING_CELL_COLS` are the `(c & 7) * 32` and `124 + 20 * ((c >> 3) & 3)`
+ * at 0x800388B8…0x800388D8, written as a grid. Values 0..7 are the four cells
+ * elsewhere on the sheet; `q2_loading_cell_uv` holds the whole map.
  */
 #define Q2_LOADING_CELL_W     32
 #define Q2_LOADING_CELL_H     20
 #define Q2_LOADING_CELL_V    144
 #define Q2_LOADING_CELL_COLS   8
-#define Q2_LOADING_CELLS      23
 
 /*
- * One cell every 22 units of the level clock.
+ * How many steps the counter takes before it starts again — 0x80038CE0's
+ * `addiu v1, zero, 31` against 0x80038CF4's `bne v0, v1`, with the reset at
+ * 0x80038CFC. The increment comes first, so the values the draw ever sees are
+ * 0..30 and the thirty-first is never one of them.
  *
- * The atlas gives the frames and not their rate, and no code that counts a cell
- * index has been found — so this is the port's. It is not arbitrary, though:
- * the disc does state a rate for this logo, and it is the front end's own
- * `yaw -= 4 * dt` (Q2_LB_SCENE_SPIN, module+0x9D24), which turns the model
- * through 4096 in 1024 ticks. The strip's widths trace a single minimum, so its
- * 23 cells are one HALF turn, and half of 1024 over 23 cells is 22.3 ticks a
- * cell. Rounding to 22 makes the sprite turn at the rate the title screen turns
- * the model it was rendered from.
+ * It was 23 here, which is the size of the grid block and not the length of
+ * the animation: the four cells at (224,0), (192,80), (224,120) and (0,220)
+ * were simply not being shown.
  */
-#define Q2_LOADING_CELL_UNITS  22
+#define Q2_LOADING_CELLS      31
+
+/*
+ * One cell every 6 units of the level clock — one per VIDEO FIELD.
+ *
+ * SpriteAnim runs off the vertical-blank hook, and the same ISR advances the
+ * clock by [0x800B2DD8] per call (0x800190B4). briefing.c already records that
+ * global as HALF the frame delta, and the ISR spells the value out as a literal
+ * on the arm where it must not read it (0x800190F0, `addiu v0, v0, 6`); six of
+ * the 1/300 s units this port counts in is 50 steps a second, the PAL field
+ * rate, which is what Q2_DT_HZ is measured against.
+ *
+ * It was 22 — a rate derived from the front end's model spin on the assumption
+ * that nothing on the disc stated one, which made the turn 3.7 times too slow.
+ */
+#define Q2_LOADING_CELL_UNITS  6
 
 /*
  * The top-left corner of the quad, in the console's 512 x 248 pixels.
@@ -316,9 +387,18 @@ void q2_loading_hide(q2_loading *l);
  */
 bool q2_loading_step(q2_loading *l, double dt);
 
-/* Which cell of the strip is up, so the turn can be checked without a
- * framebuffer. */
+/* Which step of the strip is up — SpriteAnim's `gp+612`, 0..30 — so the turn
+ * can be checked without a framebuffer. */
 u32 q2_loading_cell(const q2_loading *l);
+
+/*
+ * Where that step's cell sits on `frontend.lbm`, as the texel coordinates a
+ * POLY_FT4's `u0`/`v0` take. The whole of SpriteAnim's switch,
+ * 0x80038840…0x800388DC, including the four cells that are not on the grid.
+ * A step past the counter's range is clamped to the last one rather than
+ * wrapping off the sheet.
+ */
+void q2_loading_cell_uv(u32 cell, u8 *u_out, u8 *v_out);
 
 /* Build the black screen's contents into `ot`: the logo, then the page over it.
  * `width` and `height` are the framebuffer's, so the 512 x 248 layout can be

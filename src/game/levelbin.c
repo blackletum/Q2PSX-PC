@@ -634,6 +634,185 @@ u32 q2_laserbeams_draw(const q2_laserbeam_set *set, const q2_event_rt *rt,
 }
 
 /* ------------------------------------------------------------------------- */
+/* TELEPORT — PSXTELEPORT_T (0x8002E3F0) and DrawTelePorts (0x80028BDC)       */
+/* ------------------------------------------------------------------------- */
+/*
+ * `(a + b) / 2`, rounding toward zero.
+ *
+ * The idiom is `addu; srl 31; addu; sra 1` — 0x80028D04..0x80028D10 and its
+ * two siblings — which is C's own division and not the floor an arithmetic
+ * shift alone would give. One unit on a negative coordinate, and most of this
+ * game's world is at negative coordinates.
+ */
+static s32 mid2(s32 a, s32 b)
+{
+    s32 sum = a + b;
+
+    return (sum + (s32)((u32)sum >> 31)) >> 1;
+}
+
+u32 q2_teleports_build(q2_teleport_set *out, const q2_events *events,
+                       const q2_userfuncs *uf, const q2_triggers *trigs)
+{
+    q2_event_record rec;
+
+    if (!out)
+        return 0;
+
+    memset(out, 0, sizeof(*out));
+
+    if (!events || !uf || !trigs || trigs->count == 0)
+        return 0;
+    if (events->record_count == 0 || !q2_events_first_record(events, &rec))
+        return 0;
+
+    do {
+        u32 i;
+
+        for (i = 0; i < rec.n_items; i++) {
+            q2_event_item item;
+            q2_uf_call    call;
+            u32           t;
+
+            if (!q2_events_get_item(events, &rec, i, &item))
+                break;
+            if ((item.opcode & Q2_EVOP_MASK) != Q2_EVOP_CALL)
+                continue;
+            if (q2_uf_decode_call(&call, uf, &item) != Q2_OK)
+                continue;
+            if (call.prim != Q2_UF_TELEPORT)
+                continue;
+
+            /*
+             * The scan, 0x8002E424..0x8002E490. From the top of the table, not
+             * from wherever the item pointer's low halfword happened to point
+             * — see levelbin.h. First match wins and the constructor returns
+             * (0x8002E46C), so an item whose record several volumes name gets
+             * the lowest-numbered of them, and two TELEPORT items in one
+             * record register that same volume twice. Both are kept: they are
+             * what the console's list holds.
+             */
+            for (t = 0; t <= trigs->count; t++) {
+                q2_trigger trig;
+
+                if (t == trigs->count) {       /* the scan ran out */
+                    out->unmarked++;
+                    break;
+                }
+                if (!q2_trigger_get(trigs, t, &trig))
+                    break;
+                /* `lb v0, 32(rec)` against -1 — the ID byte, which is the
+                 * volume's AREA (the dispatcher at 0x80027EF4 compares it with
+                 * entity+0x9E). 255 means it has none. */
+                if ((trig.id & 0xFFu) == Q2_TRIGGER_NO_ID)
+                    continue;
+                if (trig.event_offset != rec.offset)
+                    continue;
+
+                if (out->count < Q2_TELEPORT_MAX)
+                    out->trigger[out->count++] = (u16)t;
+                break;
+            }
+        }
+    } while (q2_events_next_record(events, &rec, &rec));
+
+    return out->count;
+}
+
+u32 q2_teleports_draw(const q2_teleport_set *set, const q2_triggers *trigs,
+                      q2_fx_world *w, q2_rng *rng, s32 level_time,
+                      q2_teleport_frame *out)
+{
+    s16 vel[Q2_FX_GROUP_QUADS][3];
+    s32 sign, radius;
+    u32 i, n = 0;
+
+    if (out)
+        memset(out, 0, sizeof(*out));
+
+    if (!w || !rng)
+        return 0;
+
+    /*
+     * BEFORE THE COUNT IS TESTED. 0x80028C34's fifteen triples are drawn at
+     * the top of the function and 0x80028CA8's `blez` on NumTelePorts comes
+     * after them, so a map with no pads still spends 45 draws a frame. Moving
+     * them inside the walk would be tidier and would put every seeded replay
+     * one generator state out per frame.
+     */
+    sign = q2_fx_teleport_sign(level_time);
+    q2_fx_teleport_velocities(rng, sign, vel);
+
+    if (!set || set->count == 0 || !trigs)
+        return 0;
+
+    radius = q2_fx_teleport_light_radius(level_time);
+
+    for (i = 0; i < set->count; i++) {
+        q2_trigger trig;
+        s32 centre[3];
+        s32 y_face, y_centre;
+
+        if (!q2_trigger_get(trigs, set->trigger[i], &trig))
+            continue;
+
+        /* 0x80028CF8..0x80028D34: the bbox centre in X and Z. */
+        centre[0] = mid2(trig.min[0], trig.max[0]);
+        centre[2] = mid2(trig.min[2], trig.max[2]);
+
+        /*
+         * And Y is a FACE, not a centre: 0x80028D38 branches on the sign of
+         * the same up/down saw the velocities use, taking mins[1] while the
+         * column streams up and maxs[1] while it falls. So the quads always
+         * start at the end of the volume they are travelling away from and the
+         * column fills the pad rather than hanging in its middle.
+         */
+        y_face = (sign > 0) ? trig.min[1] : trig.max[1];
+        centre[1] = y_face;
+
+        if (q2_fx_teleport_column(w, rng, vel, centre,
+                                  (u8)(trig.id & 0xFFu)) >= 0)
+            n++;
+
+        if (!out || out->light_count >= Q2_TELEPORT_MAX)
+            continue;
+
+        /*
+         * The light, 0x80028DD8..0x80028E6C. It does NOT sit on the face: the
+         * Y at sp+132 is overwritten with the bbox centre at 0x80028DF8, after
+         * the particle spawn and before AddLight, while the jittered X and Z
+         * are carried over from it. So the column comes out of one end of the
+         * volume and the glow sits in the middle of it.
+         *
+         * The jitter is the PARTICLES' — q2_fx_teleport_column drew it — and
+         * this port cannot see it from here, so the light takes the unjittered
+         * centre. 127 units either side of a source whose outer radius is at
+         * least 800 is not a difference anything can see, and inventing two
+         * more generator draws to recover it would be.
+         */
+        {
+            q2_lb_light *l = &out->light[out->light_count++];
+
+            y_centre = mid2(trig.min[1], trig.max[1]);
+
+            l->pos[0] = centre[0];
+            l->pos[1] = y_centre;
+            l->pos[2] = centre[2];
+            l->rgb[0] = Q2_FX_TELEPORT_LIGHT_R;
+            l->rgb[1] = Q2_FX_TELEPORT_LIGHT_G;
+            l->rgb[2] = Q2_FX_TELEPORT_LIGHT_B;
+            l->inner  = Q2_FX_TELEPORT_LIGHT_INNER;
+            l->outer  = radius;
+        }
+    }
+
+    if (out)
+        out->groups = n;
+
+    return n;
+}
+
+/* ------------------------------------------------------------------------- */
 /* VIEW CREDITS — see levelbin.h                                              */
 /* ------------------------------------------------------------------------- */
 /* Is `p` the start of a printable, NUL-terminated string of at least two

@@ -361,6 +361,7 @@ void q2_weapon_muzzle_light(s32 rand_0_32767, s32 *inner, s32 *outer);
  */
 typedef struct q2_rng { u32 state; } q2_rng;
 
+/* Zero is valid for this LCG; its additive term advances it normally. */
 void q2_rng_seed(q2_rng *r, u32 seed);
 /* 0..32767, the range every fire function assumes when it subtracts 16384. */
 s32  q2_rng_next(q2_rng *r);

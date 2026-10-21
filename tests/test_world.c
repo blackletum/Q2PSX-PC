@@ -239,6 +239,142 @@ static void test_backface(void)
     }
 }
 
+/* ------------------------------------------------------------------------- */
+/* The linker's rejection set, and the near rejection that is not in it        */
+/* ------------------------------------------------------------------------- */
+
+static void set_depth(u16 d[4], u16 d0, u16 d1, u16 d2, u16 d3)
+{
+    d[0] = d0; d[1] = d1; d[2] = d2; d[3] = d3;
+}
+
+/*
+ * The finding this pins: none of the three quad linkers rejects a quad for
+ * having a corner close to the eye.
+ *
+ * `q2_world_quad_linker_rejects()` was carrying an extra arm — "a corner's
+ * divide overflowed and nothing is going to subdivide this, so drop the whole
+ * quad" — which has no counterpart in the executable. The depth sum is compared
+ * exactly once, at 0x800AF974, and only to decide whether SubDivRoutine is
+ * called; when that routine declines and returns 0 (0x800699A8, 0x800699C4) the
+ * `bne v0, zero` at 0x800AF9B4 is not taken and 0x800AF9BC links the flat quad
+ * anyway. Variant 1 (0x800AFC9C) never calls the hook at all and still links.
+ *
+ * The cases below are all quads whose corners are far nearer than the divide
+ * overflow threshold — `gte_divide` overflows once the projection distance
+ * reaches twice the depth, so at the one-player H of 160 anything under SZ 80 —
+ * and every one of them must be drawn.
+ */
+static void test_near_is_not_a_rejection(void)
+{
+    gte_state gte;
+    gte_sxy   q[4];
+    u16       d[4];
+
+    puts("\nnear corners are not a rejection");
+
+    memset(&gte, 0, sizeof(gte));
+
+    /* The clockwise square the world keeps, well inside a 320x240 viewport,
+     * with one corner at SZ 4 — deep inside the overflow band. */
+    set_quad(q, 40, 40, 200, 40, 200, 180, 40, 180);
+    set_depth(d, 4, 900, 900, 900);
+
+    check(q2_world_quad_linker_rejects(&gte, Q2_SURF_VARIANT_SUBDIVIDE,
+                                       q, d, 320, 240) == Q2_WORLD_QUAD_DRAW,
+          "variant 0 draws a quad with a corner inside the overflow band");
+    check(q2_world_quad_linker_rejects(&gte, Q2_SURF_VARIANT_TAGGED,
+                                       q, d, 320, 240) == Q2_WORLD_QUAD_DRAW,
+          "variant 2 draws it too");
+
+    /*
+     * And variant 1 above all, because it never subdivides: the deleted test's
+     * escape clause could never fire for it, so every near variant-1 quad in
+     * the level was being thrown away unconditionally.
+     */
+    check(q2_world_quad_linker_rejects(&gte, Q2_SURF_VARIANT_FLAT,
+                                       q, d, 320, 240) == Q2_WORLD_QUAD_DRAW,
+          "and variant 1, which has no subdivision to be rescued by");
+
+    /* All four corners near — a floor the player is standing on. Still drawn. */
+    set_depth(d, 3, 5, 6, 4);
+    check(q2_world_quad_linker_rejects(&gte, Q2_SURF_VARIANT_SUBDIVIDE,
+                                       q, d, 320, 240) == Q2_WORLD_QUAD_DRAW,
+          "a quad with all four corners near is still drawn");
+
+    /*
+     * Variant 1's zero-depth test is a different thing and is still here
+     * (0x800AFD20 / 0x800AFD34). It looks at vertex 1 and vertex 3 only, so a
+     * zero on vertex 0 or 2 is not its business — and variants 0 and 2 do not
+     * have the test at all. Reading it as "any corner at zero" or applying it
+     * to all three variants would put the deleted rejection back in disguise.
+     */
+    set_depth(d, 900, 0, 900, 900);
+    check(q2_world_quad_linker_rejects(&gte, Q2_SURF_VARIANT_FLAT,
+                                       q, d, 320, 240)
+              == Q2_WORLD_QUAD_REJECT_FLAT,
+          "variant 1 drops a quad whose vertex 1 projected to depth zero");
+    set_depth(d, 900, 900, 900, 0);
+    check(q2_world_quad_linker_rejects(&gte, Q2_SURF_VARIANT_FLAT,
+                                       q, d, 320, 240)
+              == Q2_WORLD_QUAD_REJECT_FLAT,
+          "and one whose vertex 3 did");
+    set_depth(d, 0, 900, 0, 900);
+    check(q2_world_quad_linker_rejects(&gte, Q2_SURF_VARIANT_FLAT,
+                                       q, d, 320, 240) == Q2_WORLD_QUAD_DRAW,
+          "but not one where only vertices 0 and 2 are at zero");
+    set_depth(d, 900, 0, 900, 0);
+    check(q2_world_quad_linker_rejects(&gte, Q2_SURF_VARIANT_SUBDIVIDE,
+                                       q, d, 320, 240) == Q2_WORLD_QUAD_DRAW,
+          "and variants 0 and 2 have no zero-depth test to apply");
+
+    /*
+     * The straddle escape, which is what makes a near quad drawable at all: its
+     * saturated corners land off opposite edges of the viewport, and variants 0
+     * and 2 only reject when all four are off the SAME edge
+     * (0x800AF8DC-0x800AF968). Variant 1 (0x800AFDA0-0x800AFDEC) has no escape.
+     */
+    set_depth(d, 4, 900, 900, 900);
+    set_quad(q, -900, -900, 900, -900, 900, 900, -900, 900);
+    check(q2_world_quad_linker_rejects(&gte, Q2_SURF_VARIANT_SUBDIVIDE,
+                                       q, d, 320, 240) == Q2_WORLD_QUAD_DRAW,
+          "a quad straddling the viewport on both axes survives");
+    check(q2_world_quad_linker_rejects(&gte, Q2_SURF_VARIANT_FLAT,
+                                       q, d, 320, 240)
+              == Q2_WORLD_QUAD_REJECT_BOUNDS,
+          "but variant 1 needs a corner inside on each axis");
+
+    /* All four off the same edge is the case that really is rejected. */
+    set_quad(q, -900, 40, -700, 40, -700, 180, -900, 180);
+    set_depth(d, 900, 900, 900, 900);
+    check(q2_world_quad_linker_rejects(&gte, Q2_SURF_VARIANT_SUBDIVIDE,
+                                       q, d, 320, 240)
+              == Q2_WORLD_QUAD_REJECT_BOUNDS,
+          "all four corners off the same edge is rejected");
+
+    /* A viewport with no area rejects everything, which is the guard the build
+     * loop used to carry separately. */
+    set_quad(q, 40, 40, 200, 40, 200, 180, 40, 180);
+    check(q2_world_quad_linker_rejects(&gte, Q2_SURF_VARIANT_SUBDIVIDE,
+                                       q, d, 0, 240)
+              == Q2_WORLD_QUAD_REJECT_BOUNDS,
+          "an empty clip rectangle draws nothing");
+
+    /* Backface still runs, and reports itself as backface rather than as one of
+     * the other two. */
+    {
+        gte_sxy r[4];
+        int i;
+
+        for (i = 0; i < 4; i++)
+            r[i] = q[3 - i];
+        check(q2_world_quad_linker_rejects(&gte, Q2_SURF_VARIANT_SUBDIVIDE,
+                                           r, d, 320, 240)
+                  == Q2_WORLD_QUAD_REJECT_BACK,
+              "the back facing is still culled, and says so");
+    }
+}
+
 /*
  * The model linker's own rejection, whose two comparisons are the world's
  * EXCHANGED (0x800B24A0 `blez` against 0x800AF8A8 `bgtz`). Model quads are
@@ -299,6 +435,178 @@ static void test_model_backface(void)
     }
 }
 
+/* ------------------------------------------------------------------------- */
+/* ProcessMobileLights — a runtime light repaints the level's own vertices     */
+/* ------------------------------------------------------------------------- */
+/*
+ * The pass 0x80074598 runs after DrawAllScenes every frame and that this port
+ * never had: sixteen dynamic lights were appended, gathered per ENTITY, and
+ * dropped, so a rocket lit itself and left the corridor it flew down black.
+ *
+ * The world half is a walk, and this is the walk: one node, one polygon, four
+ * points, one light in the middle of it. What the test pins is not the ramp —
+ * lighting.c owns that and test_light.c checks it — but the three things the
+ * walk decides: that the light is tested against the NODE's box, that the point
+ * is made local against the node's origin, and that a corner is painted only
+ * when the point's own slot list names it.
+ */
+static void mob_put_u16(u8 *p, u16 v) { p[0] = (u8)v; p[1] = (u8)(v >> 8); }
+
+static void mob_put_u32(u8 *p, u32 v)
+{
+    p[0] = (u8)v; p[1] = (u8)(v >> 8); p[2] = (u8)(v >> 16); p[3] = (u8)(v >> 24);
+}
+
+static void mob_put_s32(u8 *p, s32 v) { mob_put_u32(p, (u32)v); }
+
+/* The quad's four corners, 1000 units square, 2000 in front of the camera. */
+static const s16 mob_pt[4][3] = {
+    { -500, -500, 2000 },
+    {  500, -500, 2000 },
+    {  500,  500, 2000 },
+    { -500,  500, 2000 },
+};
+
+/*
+ * Vertex j paints packet corner (0, 1, 3, 2)[j] — the Z order libgpu wants, and
+ * the shuffle the world renderer's own colour writes establish. A slot byte is
+ * poly * 4 + packet corner, so for polygon 0 those are 0, 1, 3 and 2.
+ */
+static const u8 mob_slot_of_vertex[4] = { 0, 1, 3, 2 };
+
+static void mob_build(u8 *scene_nodes, u8 *mapmod, u8 *points,
+                      const u8 *slot0, u8 baked)
+{
+    int v;
+
+    /* One Scene node: MapMod at 0, variant 0, origin at the world origin and a
+     * box that contains the quad. */
+    memset(scene_nodes, 0, Q2_SCENE_NODE_SIZE);
+    mob_put_u32(scene_nodes + 0x00, 0);       /* mapmod_offset */
+    mob_put_u16(scene_nodes + 0x08, 0);       /* flags: drawn, variant 0 */
+    for (v = 0; v < 3; v++) {
+        mob_put_s32(scene_nodes + 0x10 + v * 4, -4000);
+        mob_put_s32(scene_nodes + 0x1C + v * 4,  4000);
+        mob_put_s32(scene_nodes + 0x28 + v * 4,  0);   /* origin */
+    }
+
+    /* One polygon: vertices 0..3, every corner on colour 0, no CLUT, UV set 0. */
+    memset(mapmod, 0, 32);
+    mob_put_u16(mapmod + 0, 1);      /* num_polys      */
+    mob_put_u16(mapmod + 2, 20);     /* 8 + 1*12       */
+    mob_put_u32(mapmod + 4, 24);     /* uv_offset      */
+    mapmod[8]  = 0; mapmod[9]  = 1; mapmod[10] = 2; mapmod[11] = 3;  /* vtx */
+    mapmod[12] = 0; mapmod[13] = 0; mapmod[14] = 0; mapmod[15] = 0;  /* col */
+    mob_put_u16(mapmod + 16, 0x3000);  /* clut: a real palette, not sealing */
+    mapmod[18] = 0;                    /* tpage  */
+    mapmod[19] = 0;                    /* uv_idx */
+    mapmod[20] = baked; mapmod[21] = baked; mapmod[22] = baked;
+
+    for (v = 0; v < 4; v++) {
+        u8 *p = points + v * Q2_POINT_SIZE;
+
+        mob_put_u16(p + 0, (u16)mob_pt[v][0]);
+        mob_put_u16(p + 2, (u16)mob_pt[v][1]);
+        mob_put_u16(p + 4, (u16)mob_pt[v][2]);
+        p[6] = slot0[v];
+        p[7] = p[8] = p[9] = p[10] = p[11] = 0xFF;
+    }
+}
+
+static u32 mob_run(const u8 *slot0, bool with_light, q2_world_stats *out)
+{
+    u8 scene_nodes[Q2_SCENE_NODE_SIZE];
+    u8 mapmod[32];
+    u8 points[4 * Q2_POINT_SIZE];
+    q2_point_group group = { 0, 4 };
+    q2_world_zone z;
+    q2_light_world lw;
+    q2_camera cam;
+    q2_world_stats stats;
+    q2_world_render render;
+    psx_ot ot;
+    gte_state gte;
+    u32 emitted;
+
+    mob_build(scene_nodes, mapmod, points, slot0, 64);
+
+    memset(&z, 0, sizeof(z));
+    z.scene.nodes       = scene_nodes;
+    z.scene.node_count  = 1;
+    z.scene.mapmod      = mapmod;
+    z.scene.mapmod_size = sizeof(mapmod);
+    z.points.data       = points;
+    z.points.count      = 4;
+    z.points.groups     = &group;
+    z.points.group_count = 1;
+
+    memset(&lw, 0, sizeof(lw));
+    if (with_light) {
+        static const s32 at[3]  = { 0, 0, 2000 };
+        static const u8  rgb[3] = { 200, 100, 100 };
+
+        /* 600/1200, the muzzle-flash pair — the shift comes out 3 and the
+         * working radii 5625 and 22500, which lighting.h works through. */
+        q2_light_add_dynamic(&lw, at, rgb, 600, 1200, 0, 0);
+    }
+    z.lights = &lw;
+
+    memset(&cam, 0, sizeof(cam));
+    cam.projection = 160;
+
+    q2_world_render_init(&render);
+    memset(&ot, 0, sizeof(ot));
+    psx_ot_init(&ot, 1024, 64);
+    memset(&gte, 0, sizeof(gte));
+    memset(&stats, 0, sizeof(stats));
+
+    emitted = q2_world_build_ot(&z, &cam, 320, 240, &ot, &gte, &render, &stats);
+
+    if (out)
+        *out = stats;
+
+    psx_ot_free(&ot);
+    return emitted;
+}
+
+static void test_mobile_light_repaints_the_world(void)
+{
+    q2_world_stats lit, dark, half;
+    u8 slots[4];
+    int v;
+
+    puts("\nmobile lights repaint the world's own vertices");
+
+    for (v = 0; v < 4; v++)
+        slots[v] = mob_slot_of_vertex[v];
+
+    check(mob_run(slots, true, &lit) == 1, "the quad is emitted");
+    check(lit.mobile_lights == 1,
+          "the light's box overlaps the node's, so the node is lit");
+    check(lit.mobile_corners == 4,
+          "all four corners take a share of it");
+    check(lit.mobile_unslotted == 0,
+          "and every corner is named by its point's slot list");
+
+    /* With the list empty nothing is repainted, which is what this port did on
+     * every frame of every map before the walk existed. */
+    check(mob_run(slots, false, &dark) == 1, "the same quad still draws");
+    check(dark.mobile_lights == 0 && dark.mobile_corners == 0,
+          "with no runtime light the baked colours stand alone");
+
+    /*
+     * A POINT PAINTS ONLY THE CORNERS IT NAMES. 0x80074A84 breaks the slot walk
+     * on the first 0xFF, so a point with no slots paints nothing at all — the
+     * console has no way to reach that packet corner. Blanking vertex 2's slot
+     * must cost exactly one corner, not four and not none.
+     */
+    slots[2] = 0xFF;
+    check(mob_run(slots, true, &half) == 1, "the quad is emitted either way");
+    check(half.mobile_corners == 3,
+          "a point whose slot list is empty paints no corner");
+    check(half.mobile_unslotted == 1, "and is counted as unreachable");
+}
+
 int main(void)
 {
     puts("world quad gates");
@@ -308,7 +616,9 @@ int main(void)
     test_scene_area();
     test_sort_region_visibility();
     test_backface();
+    test_near_is_not_a_rejection();
     test_model_backface();
+    test_mobile_light_repaints_the_world();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;

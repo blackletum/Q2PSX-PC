@@ -68,11 +68,25 @@ void q2_briefing_popup_init(q2_briefing_popup *p)
     copy_field(p->objective, q2_briefing_default_objective);
 }
 
-void q2_briefing_popup_set(q2_briefing_popup *p, const char *orders,
-                           const char *objective)
+void q2_briefing_popup_set(q2_briefing_popup *p,
+                           const char *orders_key, const char *orders,
+                           const char *objective_key, const char *objective)
 {
     if (!p)
         return;
+
+    /*
+     * THE KEYS FIRST, because that is the order 0x80020F34 does it in: the
+     * three lwl/lwr pairs into `LastOrders` at 0x80020F80 and into
+     * `LastObjective` at 0x80020FBC both run before the two 0x800701B4
+     * lookups. They are stored whether or not the lookup below finds anything,
+     * which matters — a key that misses in THIS level may resolve in the level
+     * the game is reloaded into, and the save carries the key, not the text.
+     */
+    snprintf(p->orders_key, sizeof(p->orders_key), "%s",
+             orders_key ? orders_key : "");
+    snprintf(p->objective_key, sizeof(p->objective_key), "%s",
+             objective_key ? objective_key : "");
 
     /*
      * 0x80020F34, twice over: a Strings lookup, and the shipped default when

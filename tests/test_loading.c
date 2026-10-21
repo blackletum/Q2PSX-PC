@@ -11,6 +11,7 @@
  * scales x by 3/2 and a placement that ignores it lands off the screen.
  */
 #include "loading.h"
+#include "worldscale.h"     /* Q2_DT_HZ: the strip's rate is in clock units */
 
 #include <stdio.h>
 #include <math.h>
@@ -187,20 +188,21 @@ static void test_raise_restarts_rather_than_accumulating(void)
 
 /* ------------------------------------------------------------------------- */
 /*
- * EVERY SCREEN IS A NEW SCREEN, including the second one in a session.
+ * THE PAGE IS NEW AT EVERY TRANSITION AND THE COUNTER BEHIND IT IS NOT.
  *
- * `test_spin` asserts that a fresh screen opens on the broadside cell, and it
- * passed for two years on a freshly zeroed struct while the shipped client got
- * it wrong from the second transition onward: `q2_loading_raise` restarted the
- * hold and left `spin` holding whatever the previous screen ended on. The
- * console cannot have the fault — `0x80079364` ENTERS page 46 and
- * `0x80079374` / `0x80079384` re-install both records from scratch at every
- * transition — and the backwards walk exists precisely so that the first thing
- * on screen is the logo facing the player (loading.h).
+ * This used to assert the opposite — that every raise puts the strip back to
+ * its first cell — on the argument that `0x80079364` enters page 46 and
+ * `0x80079374` / `0x80079384` re-install both records from scratch. Both of
+ * those are true of the PAGE. The cell index is a free-running halfword at
+ * `gp+612` (0x800AE864) that only SpriteAnim touches: `xrefs` returns the two
+ * reads, the increment at 0x80038CE8 and the wrap at 0x80038CFC, and
+ * InitLoadingAnim (0x80038DFC) — the function that sets this animation up —
+ * does not clear it. A second screen carries on mid-turn.
  */
-static void test_every_raise_restarts_the_strip(void)
+static void test_the_counter_free_runs_across_screens(void)
 {
     q2_loading l;
+    u32        ended, opened;
     int        i;
 
     armed(&l);
@@ -210,26 +212,28 @@ static void test_every_raise_restarts_the_strip(void)
     for (i = 0; i < 40 && q2_loading_step(&l, 1.0 / 30.0); i++)
         ;
     CHECK(!l.open, "the first screen never came down");
-    CHECK(q2_loading_cell(&l) != Q2_LOADING_CELLS - 1,
-          "the first screen ended on the cell it started on, so this check "
-          "cannot tell a restart from a carry-over");
+    ended = q2_loading_cell(&l);
+    CHECK(ended != 0,
+          "the first screen ended on cell 0, so this check cannot tell a "
+          "carry-over from a restart");
 
-    /* The next one starts where the first one did. */
+    /* The next one carries on from there rather than starting again. */
     q2_loading_raise(&l);
-    CHECK(q2_loading_cell(&l) == Q2_LOADING_CELLS - 1,
-          "the second screen opens on cell %u, not the broadside %u",
-          q2_loading_cell(&l), (u32)Q2_LOADING_CELLS - 1);
+    opened = q2_loading_cell(&l);
+    CHECK(opened == ended,
+          "the second screen opens on cell %u where the first left off at %u",
+          opened, ended);
 
-    /* And a third, after a screen that was SHOWN rather than raised — the
-     * STARTING page turns the same strip on the caller's clock. */
-    q2_loading_show(&l, Q2_LOADING_PAGE_STARTING);
+    /* And so does a screen that was SHOWN rather than raised — the STARTING
+     * page turns the same strip on the caller's clock. */
     for (i = 0; i < 12; i++)
         (void)q2_loading_step(&l, 1.0 / 30.0);
+    ended = q2_loading_cell(&l);
     q2_loading_hide(&l);
-    q2_loading_raise(&l);
-    CHECK(q2_loading_cell(&l) == Q2_LOADING_CELLS - 1,
-          "a screen raised after a shown one opens on cell %u, not %u",
-          q2_loading_cell(&l), (u32)Q2_LOADING_CELLS - 1);
+    q2_loading_show(&l, Q2_LOADING_PAGE_STARTING);
+    CHECK(q2_loading_cell(&l) == ended,
+          "a shown screen opens on cell %u, not the %u the last one reached",
+          q2_loading_cell(&l), ended);
 }
 
 static void test_never_raised_without_assets(void)
@@ -254,20 +258,20 @@ static void test_spin(void)
     armed(&l);
     q2_loading_raise(&l);
 
-    /* Backwards along the sheet: a fresh screen starts at the LAST cell, which
-     * is the broadside one. See q2_loading_cell. */
-    CHECK(q2_loading_cell(&l) == Q2_LOADING_CELLS - 1,
-          "a fresh screen starts at cell %u, not %u", q2_loading_cell(&l),
-          (u32)Q2_LOADING_CELLS - 1);
+    /* FORWARDS from the counter's zero — 0x80038CE4's `addiu v0, v0, 1`. A
+     * struct that has never had a screen on it holds the same zero the
+     * executable's BSS does. */
+    CHECK(q2_loading_cell(&l) == 0,
+          "a never-used screen starts at cell %u, not 0", q2_loading_cell(&l));
 
     /*
-     * One cell every Q2_LOADING_CELL_UNITS of the level clock. At the headless
-     * 1/30 s step a frame is 10 of those units, so the cell index is the frame
-     * count times 10 over the pitch.
+     * One cell every Q2_LOADING_CELL_UNITS of the level clock, which is one per
+     * video field. At the headless 1/30 s step a frame is 10 of those units, so
+     * the cell index is the frame count times 10 over the pitch — a step and
+     * two thirds a frame, where the port used to manage one every 2.2 frames.
      */
     for (i = 1; i <= 8; i++) {
-        u32 want = Q2_LOADING_CELLS - 1 -
-                   (u32)(i * 10) / Q2_LOADING_CELL_UNITS;
+        u32 want = (u32)(i * 10) / Q2_LOADING_CELL_UNITS;
 
         (void)q2_loading_step(&l, 1.0 / 30.0);
         CHECK(q2_loading_cell(&l) == want,
@@ -275,8 +279,21 @@ static void test_spin(void)
               q2_loading_cell(&l), want);
     }
 
-    /* Every cell of the strip is reached, and none outside it: an index past
-     * the fifteenth is the word RETRY, which is in the sixteenth slot. */
+    /*
+     * THE WHOLE TURN IS 0.62 SECONDS. 31 steps of 6 clock units is 186 units,
+     * which at 300 to the second is 0.62 — the console's 31 fields at the PAL
+     * 50 Hz. The port used to take 1.687 s over 23 cells.
+     */
+    {
+        double one_turn = (double)(Q2_LOADING_CELLS * Q2_LOADING_CELL_UNITS) /
+                          (double)Q2_DT_HZ;
+
+        CHECK(one_turn > 0.61 && one_turn < 0.63,
+              "a whole turn takes %.3f s, not 0.62", one_turn);
+    }
+
+    /* Every step of the counter is reached, and none outside it: 31 is written
+     * and replaced in the same breath (0x80038CF4), so it is never drawn. */
     memset(seen, 0, sizeof(seen));
     armed(&l);
     q2_loading_show(&l, Q2_LOADING_PAGE_LOADING);
@@ -293,6 +310,71 @@ static void test_spin(void)
     CHECK(distinct == Q2_LOADING_CELLS,
           "%u of the strip's %u cells were reached", distinct,
           (u32)Q2_LOADING_CELLS);
+}
+
+/*
+ * SpriteAnim's cell map, 0x80038840…0x800388DC — the part of this strip that
+ * cannot be written as a grid.
+ *
+ * The port drew 23 cells out of the 8 x 3 block at v = 144 and never touched
+ * the other four, which is what kept the widest quarter of the rotation off
+ * the screen. Cell widths quoted here are the inked bounding boxes measured on
+ * the decoded `frontend.lbm`.
+ */
+static void test_cell_map_is_the_consoles(void)
+{
+    static const struct { u32 c; u8 u, v; } off_grid[] = {
+        { 0, 224,   0 },  /* width 24, and held for five steps */
+        { 4, 224,   0 },
+        { 5, 192,  80 },  /* width 21 */
+        { 6, 224, 120 },  /* width 20 */
+        { 7,   0, 220 }   /* width 19 */
+    };
+    unsigned k;
+    u32 i;
+    u8  u, v;
+
+    for (k = 0; k < sizeof(off_grid) / sizeof(off_grid[0]); k++) {
+        q2_loading_cell_uv(off_grid[k].c, &u, &v);
+        CHECK(u == off_grid[k].u && v == off_grid[k].v,
+              "step %u draws (%u,%u), not (%u,%u)", off_grid[k].c,
+              (unsigned)u, (unsigned)v,
+              (unsigned)off_grid[k].u, (unsigned)off_grid[k].v);
+    }
+
+    /* Five steps on one cell is the HOLD at broadside, and it is what makes
+     * the measured widths a smooth sweep with a pause rather than a jump. */
+    for (i = 1; i < 5; i++) {
+        u8 u0, v0;
+
+        q2_loading_cell_uv(0, &u0, &v0);
+        q2_loading_cell_uv(i, &u, &v);
+        CHECK(u == u0 && v == v0, "step %u breaks the broadside hold", i);
+    }
+
+    /* And 8..30 are the grid, at v = 144 / 164 / 184 — `(c & 7) * 32` and
+     * `124 + 20 * ((c >> 3) & 3)`. */
+    for (i = 8; i < Q2_LOADING_CELLS; i++) {
+        u8 want_u = (u8)((i & 7u) * Q2_LOADING_CELL_W);
+        u8 want_v = (u8)(Q2_LOADING_CELL_V +
+                         ((i / Q2_LOADING_CELL_COLS) - 1u) *
+                             Q2_LOADING_CELL_H);
+
+        q2_loading_cell_uv(i, &u, &v);
+        CHECK(u == want_u && v == want_v,
+              "step %u draws (%u,%u), not the grid's (%u,%u)", i,
+              (unsigned)u, (unsigned)v,
+              (unsigned)want_u, (unsigned)want_v);
+    }
+
+    /* The twenty-fourth slot of the block — (224, 184) — is a rotation cell
+     * and not the word RETRY this file used to name, and either way the wrap
+     * at 31 means the animation never reaches it. */
+    for (i = 0; i < Q2_LOADING_CELLS; i++) {
+        q2_loading_cell_uv(i, &u, &v);
+        CHECK(!(u == 224 && v == 184),
+              "step %u reaches the slot past the end of the animation", i);
+    }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -332,20 +414,21 @@ static void test_cells_stay_on_the_sheet(void)
     u32 i;
 
     /*
-     * A 4bpp texture page is 256 texels square and a POLY_FT4's uv are BYTES,
-     * so a cell that runs past 255 does not clip, it WRAPS — and the strip's
-     * last column ends at exactly 256. Checking the far corner of every cell is
-     * what says the grid and the sheet agree.
+     * A 4bpp texture page is 256 texels square and a primitive's uv are BYTES,
+     * so a cell that runs past 255 does not clip, it WRAPS. Checking the far
+     * corner of every step of the counter is what says the map and the sheet
+     * agree — and it now has four steps to check that are not on the grid, one
+     * of which (0, 220) reaches row 240, deep into the panel art the strip
+     * itself stops short of.
      */
     for (i = 0; i < Q2_LOADING_CELLS; i++) {
-        int u = (int)(i % Q2_LOADING_CELL_COLS) * Q2_LOADING_CELL_W;
-        int v = Q2_LOADING_CELL_V +
-                (int)(i / Q2_LOADING_CELL_COLS) * Q2_LOADING_CELL_H;
+        u8 u, v;
 
-        CHECK(u + Q2_LOADING_CELL_W <= 256,
-              "cell %u runs to u %d", i, u + Q2_LOADING_CELL_W);
-        CHECK(v + Q2_LOADING_CELL_H <= 256,
-              "cell %u runs to v %d", i, v + Q2_LOADING_CELL_H);
+        q2_loading_cell_uv(i, &u, &v);
+        CHECK((int)u + Q2_LOADING_CELL_W <= 256,
+              "cell %u runs to u %d", i, (int)u + Q2_LOADING_CELL_W);
+        CHECK((int)v + Q2_LOADING_CELL_H <= 256,
+              "cell %u runs to v %d", i, (int)v + Q2_LOADING_CELL_H);
     }
 
     /*
@@ -408,9 +491,10 @@ int main(void)
     test_hold_roundoff();
     test_hold_is_a_floor_at_any_rate();
     test_raise_restarts_rather_than_accumulating();
-    test_every_raise_restarts_the_strip();
+    test_the_counter_free_runs_across_screens();
     test_never_raised_without_assets();
     test_spin();
+    test_cell_map_is_the_consoles();
     test_logo_lands_in_the_top_right();
     test_cells_stay_on_the_sheet();
     test_starting_page();

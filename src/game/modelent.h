@@ -129,6 +129,22 @@
  * 0x800AEAB4 are both zero. The port raises that exact light through the
  * entity-event seam every tick, so the explosion model lights actors around
  * it just as retail did.
+ *
+ * ---------------------------------------------------------------------------
+ * The mesh is ADDITIVE, and nothing in this file is what makes it so
+ * ---------------------------------------------------------------------------
+ * The `Explosion` model's faces are opaque on the disc and additive in RAM. The
+ * entity class table has a record for the name at 0x800A3CF8 whose +0x14 is
+ * `PreInitExplosion` (0x8005AAA4), `RemapModels` (0x8007E6E4) calls it once a
+ * level with the model header, and it forces every face's blend selector to 2 —
+ * B+F. So the fireball this entity draws lets the wall behind it through, and a
+ * spawn is not the thing that decides that: the model is already additive before
+ * the first one is raised, for every reader.
+ *
+ * It lives at the face decode (`q2_model_get_face`, model.h) rather than here
+ * for exactly that reason. The gib dispatcher's Boss2/Flyer/Hover and Strider
+ * arms raise the same model through 0x8005A778, and the console patched the
+ * faces long before any of them ran.
  */
 #ifndef Q2PSX_MODELENT_H
 #define Q2PSX_MODELENT_H

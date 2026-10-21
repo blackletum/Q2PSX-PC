@@ -161,7 +161,66 @@ q2_result q2_model_get(const q2_model_bank *bank, u32 index, q2_model *out)
     }
 
     out->scratch_size = hi;
+
+    /*
+     * And the level-load rewrite the class table asks for, decided here so that
+     * every reader of this model sees it — which is the reach the console's
+     * in-RAM patch has. `RemapModels` (0x8007E6E4) resolves the class name
+     * through the loaded model list and hands the header to the record's
+     * PreInit; for "Explosion" that is 0x8005AAA4, and the faces come back
+     * additive. See the section in model.h.
+     */
+    out->bodge_transparent = q2_model_class_bodges_transparent(h->name);
+
     return Q2_OK;
+}
+
+/* The same compare `q2_model_bank_find` does, factored out so the class-table
+ * lookup below matches names exactly as `GetModelHdr` (0x8006D008) does. */
+static bool name_matches(const char *a, const char *b)
+{
+    /* An inline compare rather than strcasecmp: that is not in C11 and the
+     * names are a fixed 12 bytes with no locale in play. */
+    while (*a && *b) {
+        int ca = *a >= 'a' && *a <= 'z' ? *a - 32 : *a;
+        int cb = *b >= 'a' && *b <= 'z' ? *b - 32 : *b;
+        if (ca != cb)
+            break;
+        a++;
+        b++;
+    }
+    return !*a && !*b;
+}
+
+/*
+ * The class-table records whose PreInit rewrites the model's own face data —
+ * see the level-load section in model.h.
+ *
+ * A TABLE OF ONE, deliberately shaped like the console's. `RemapModels`
+ * (0x8007E6E4) calls every record's +0x14 with the model header, and of the 58
+ * records only 0x800A3CF8 "Explosion" -> 0x8005AAA4 touches the faces. The
+ * weapon PreInits register sounds; PreInitDebris (0x80064F70) appends the header
+ * to the burst's pick list, which main.c registers by name already; the rest
+ * carry a null pointer. If another one ever turns out to bodge geometry, it
+ * belongs in this list beside the first.
+ */
+static const char *const bodge_transparent_classes[] = {
+    "Explosion"          /* 0x800A3CF8 +0x14 = 0x8005AAA4 PreInitExplosion */
+};
+
+bool q2_model_class_bodges_transparent(const char *name)
+{
+    u32 i;
+
+    if (!name || !name[0])
+        return false;
+
+    for (i = 0; i < (u32)(sizeof(bodge_transparent_classes) /
+                          sizeof(bodge_transparent_classes[0])); i++) {
+        if (name_matches(name, bodge_transparent_classes[i]))
+            return true;
+    }
+    return false;
 }
 
 s32 q2_model_bank_find(const q2_model_bank *bank, const char *name)
@@ -173,24 +232,11 @@ s32 q2_model_bank_find(const q2_model_bank *bank, const char *name)
 
     for (i = 0; i < bank->count; i++) {
         q2_model probe;
-        const char *a, *b;
 
         if (q2_model_get(bank, i, &probe) != Q2_OK)
             continue;
 
-        /* An inline compare rather than strcasecmp: that is not in C11 and the
-         * names are a fixed 12 bytes with no locale in play. */
-        a = probe.hdr.name;
-        b = name;
-        while (*a && *b) {
-            int ca = *a >= 'a' && *a <= 'z' ? *a - 32 : *a;
-            int cb = *b >= 'a' && *b <= 'z' ? *b - 32 : *b;
-            if (ca != cb)
-                break;
-            a++;
-            b++;
-        }
-        if (!*a && !*b)
+        if (name_matches(probe.hdr.name, name))
             return (s32)i;
     }
     return -1;
@@ -251,6 +297,21 @@ bool q2_model_get_face(const q2_model *m, u32 index, q2_model_face *out)
     }
     out->flags   = q2_rd_u8(f + 12);
     out->texture = q2_rd_u8(f + 13);
+
+    /*
+     * BodgeModelDataTransparent, 0x8005B938, on the models whose class asks for
+     * it — `lbu v0,12(a0); andi 0x1F; ori 0x40; sb v0,12(a0)`. The texture page
+     * survives and the blend selector becomes 2, which is B+F: additive.
+     *
+     * The console writes this into the loaded chunk once, at level load, so
+     * doing it here rather than there is a difference of bookkeeping and not of
+     * behaviour — the byte a reader sees is the same byte. What is NOT copied is
+     * the walker's off-by-one, which bodges one record past the array into block
+     * A's padding; see model.h.
+     */
+    if (m->bodge_transparent)
+        out->flags = (u8)((out->flags & Q2_MODEL_BODGE_KEEP) |
+                          Q2_MODEL_BODGE_SET);
 
     return true;
 }

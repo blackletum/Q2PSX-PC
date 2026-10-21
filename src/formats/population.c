@@ -214,6 +214,26 @@ bool q2_pop_get_place(const q2_population *p, const q2_pop_group *g,
     return true;
 }
 
+bool q2_pop_spawn_allows_skill(u16 flags, s32 skill)
+{
+    /*
+     * SpawnGeneral's own three-way switch, 0x800565E8..0x80056664. Written as
+     * the same shape as the place-record rule below because they are the same
+     * rule in two record layouts — but the masks differ (see population.h) and
+     * the two must not be merged.
+     *
+     * The default arm is the console's: 0x800565F0's `beq v1, 1` and
+     * 0x800565F4's `slti v0, v1, 2` route 3-and-above and anything negative
+     * straight to 0x8005666C, past all three tests.
+     */
+    switch (skill) {
+    case 0:  return (flags & Q2_POP_SPAWN_NOT_EASY) == 0;
+    case 1:  return (flags & Q2_POP_SPAWN_NOT_MEDIUM) == 0;
+    case 2:  return (flags & Q2_POP_SPAWN_NOT_HARD) == 0;
+    default: return true;
+    }
+}
+
 bool q2_pop_place_allows_skill(u16 angle_flags, s32 skill)
 {
     switch (skill) {

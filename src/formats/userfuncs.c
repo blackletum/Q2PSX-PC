@@ -311,14 +311,38 @@ static const q2_uf_prim_info uf_table[Q2_UF_PRIM_COUNT] = {
     {8, 1, Q2_UF_OP_OBJSLOT, "object_c", "pointer parked in gp+0x4204"}}},
 
 /* ---- lights and visuals ------------------------------------------------- */
-{Q2_UF_TIMEDLIGHT, "TIMEDLIGHT", 28, false, false, 5, {
+/*
+ * TIMEDLIGHT's operands, corrected. This entry used to call +18 a "radius,
+ * tripled before the call" and the u32 at +20 an unexplained "param_a", and
+ * both readings were wrong for the same reason: 0x80075D14 had never been
+ * traced, so the shape of its argument list was a guess.
+ *
+ * It is AddTimedLight (LIGHTS.C, named by the NTSC symbol table). PSXTLIGHT at
+ * 0x8002E97C passes it a0 = item+4, a1 = the colour word at item+24, a2 =
+ * (lhu item+22) << 16 | (lhu item+20), and a3 = 3 * (lhu item+18) — the
+ * `sll t0, a3, 1` / `addu a3, t0, a3` pair at 0x8002E9B4/0x8002E9BC.
+ *
+ * AddTimedLight then squares a2's LOW half as the inner radius (0x80075D90) and
+ * its HIGH half as the outer (0x80075DA4), and stores a3 into both halfword
+ * counters at slot+32 and slot+34 (0x80075DD8/0x80075DDC) — remaining and
+ * total. So +18 is a LIFETIME and +20/+22 are the radii the port never read.
+ */
+{Q2_UF_TIMEDLIGHT, "TIMEDLIGHT", 28, false, false, 6, {
     {4,  1, Q2_UF_OP_VEC3_S32, "origin", "absolute"},
     {16, 1, Q2_UF_OP_U16,      "unknown",
      "UNKNOWN and NOT PADDING: unread by the handler, but non-zero on 72 of "
      "78 items across 7 distinct values. Preserve it; do not act on it"},
-    {18, 1, Q2_UF_OP_U16,      "radius",  "tripled before the call"},
-    {20, 1, Q2_UF_OP_U32,      "param_a", NULL},
-    {24, 1, Q2_UF_OP_U32,      "colour",  "packed; consumer is 0x80075D14"}}},
+    {18, 1, Q2_UF_OP_U16,      "ticks",
+     "the light's LIFETIME in ticks, tripled before the call (0x8002E9B4). "
+     "ProcessTimedLights re-emits the light once a frame with both radii "
+     "scaled by remaining/total and decrements, so it fades out over 3*N "
+     "frames rather than blinking for one"},
+    {20, 1, Q2_UF_OP_U16,      "inner_radius",
+     "a2's low half; squared into slot+20 at 0x80075D90"},
+    {22, 1, Q2_UF_OP_U16,      "outer_radius",
+     "a2's high half; squared into slot+24 at 0x80075DA4"},
+    {24, 1, Q2_UF_OP_U32,      "colour",
+     "packed r,g,b,x; consumer is AddTimedLight, 0x80075D14"}}},
 
 {Q2_UF_FLKLIGHT, "FLKLIGHT", 24, true, false, 4, {
     {4,  1, Q2_UF_OP_VEC3_S32, "origin",

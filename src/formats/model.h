@@ -258,10 +258,15 @@ typedef struct q2_model_face {
  * size the upload, which is why the split looked vestigial from the data side.
  *
  * Checked disc-wide by `q2psx-inspect cluts` over all 138,290 faces: not one
- * has `texture >= clut4_count_b`, not one sets a blend bit — every model face
- * on this disc is opaque — and not one names a texture page the map does not
- * upload. The highest `texture` seen is 180 against a largest `clut4_count_b`
- * of 181, so the fit is tight rather than permissive.
+ * has `texture >= clut4_count_b`, not one sets a blend bit ON THE DISC, and not
+ * one names a texture page the map does not upload. The highest `texture` seen
+ * is 180 against a largest `clut4_count_b` of 181, so the fit is tight rather
+ * than permissive.
+ *
+ * THAT SECOND CLAUSE USED TO READ "every model face on this disc is opaque",
+ * and it is true of the FILE and false of what is drawn. See the level-load
+ * rewrite below: the engine patches one model's faces in RAM before the first
+ * frame, and that model is the explosion.
  *
  * ---------------------------------------------------------------------------
  * Verified instruction by instruction at 0x8006A3FC
@@ -338,6 +343,100 @@ Q2PSX_INLINE u32 q2_model_face_clut_index(const q2_model_face *f,
 {
     return clut4_count_a + (u32)f->texture;
 }
+
+/* ---------------------------------------------------------------------------
+ * THE LEVEL-LOAD FACE REWRITE — why "every face on the disc is opaque" is not
+ * the same statement as "every face the engine draws is opaque"
+ * ---------------------------------------------------------------------------
+ * The entity class table (build/classtable.h) does not stop at the creatures.
+ * It runs on past them, 48 bytes a record, through the fourteen `... G` view
+ * weapons and then four more that carry code: `Explosion` at 0x800A3CF8,
+ * `Debris1` at 0x800A3D28, `Debris2` and `Debris3`. Those records carry -1 where
+ * a creature carries its class id, and what matters about them is the pointer at
+ * +0x14. The table runs to 58 records and terminates on a zero class id at
+ * 0x800A3E48.
+ *
+ * `RemapModels` (0x8007E6E4, QENTS.C:1492) walks the whole table once a level
+ * has loaded. For each record it hands the twelve name bytes at +0x04 to
+ * `GetModelHdr` (0x8006D008) — the same first-match-wins walk of the loaded
+ * model list that `q2_model_bank_find` transcribes — caches the header it finds
+ * at record+0x2C, and then calls the record's +0x14:
+ *
+ *     8007E970  lw   v0, 0(s1)        ; s1 is record + 0x14
+ *     8007E97C  addu a0, s5, zero     ; the model header, or...
+ *     8007E994  addu a0, zero, zero   ; ...zero when the map has no such model
+ *     8007E998  jalr v0
+ *
+ * So a class's PreInit runs ONCE A LEVEL, with the model header in a0 and a
+ * NULL when the map's CastList does not carry the name. Every weapon PreInit
+ * uses it to register a sound. `PreInitDebris` (0x80064F70) uses it to append
+ * the header to the 32-slot list the debris burst picks from, which is what
+ * main.c's `Debris1`..`Debris3` registration already transcribes.
+ *
+ * `PreInitExplosion` (0x8005AAA4, QUAKECRE.C:1832) is the only one that
+ * REWRITES MODEL DATA, and it does it first:
+ *
+ *     8005AAA8  beq  a0, zero, ...            ; no Explosion on this map: done
+ *     8005AAB4  addiu a1, a1, -18120          ; 0x8005B938
+ *     8005AAC0  jal  0x8006D998               ; ForEachPolyInModelHdr
+ *
+ * `ForEachPolyInModelHdr` (0x8006D998, MODELS.C:2600) walks `*(u32 *)(hdr+0x20)`
+ * — ofs_faces, which `InitialiseModelFile` (0x8006D124) has already turned from
+ * an offset into a pointer — for `*(s16 *)(hdr+0x14)` records at a 16-byte
+ * stride, and calls the callback on each. `BodgeModelDataTransparent`
+ * (0x8005B938, QUAKECRE.C:1827) is the whole of the change, four instructions:
+ *
+ *     8005B938  lbu  v0, 12(a0)       ; the face's flags byte
+ *     8005B940  andi v0, v0, 0x1F     ; keep the texture page
+ *     8005B944  ori  v0, v0, 0x40     ; blend selector := 2
+ *     8005B94C  sb   v0, 12(a0)
+ *
+ * Selector 2 is `codeTable[2] = 0x02` (the ABE bit, so the code becomes 0x3E)
+ * and `blendTable[2] = 32`, i.e. ABR 1 — B+F, ADDITIVE. So every face of every
+ * `Explosion` model is drawn additively, and the fireball the console puts on
+ * screen lets the wall behind it through. Drawn opaque it is a solid lump.
+ *
+ * On BASE1 the Explosion is model 14: 36 faces, every one of them flags 0x05 in
+ * the file — page 5, selector 0 — and every one of them 0x45 once the engine has
+ * run. Thirty-four of the disc's 164 CastLists carry an `Explosion` — all of
+ * them COMMON banks, 34 of the 49 maps, no zone bank and no bank twice — so
+ * there are exactly 34 models this applies to and the first-match rule never has
+ * to break a tie. The other 15 maps are the front-end and cinematic containers,
+ * and on those `PreInitExplosion` is handed a null and does nothing, which is
+ * the same nothing `q2_model_get` produces when no model carries the name.
+ *
+ * TWO THINGS THIS PORT DELIBERATELY DOES NOT COPY.
+ *
+ * The walk is a do-while whose continue test is `end < ptr` on a pointer already
+ * stepped past the record it just handled (0x8006DA0C/0x8006DA10), with `end`
+ * one past the last face — so it runs num_faces + 1 times and bodges SIXTEEN
+ * BYTES PAST THE FACE ARRAY. `ofs_block_a == ofs_faces + 16 * num_faces` on
+ * every model on the disc, so what it actually hits is block A's second entry,
+ * whose byte +0x04 is the first byte of that entry's four PAD BYTES: BASE1's
+ * Explosion has `00 00 00 00` there before load and `40 00 00 00` after. The
+ * block-A reader below takes only `start` and `offset` out of an entry, so
+ * nothing reads the byte either before or after, and this port keeps its face
+ * view read-only rather than reproducing a stray write into data no one looks
+ * at. It is, though, an independent confirmation that the word IS padding — the
+ * engine scribbles on it.
+ *
+ * And the console patches BYTES, once, in the loaded chunk; this port patches at
+ * the one place a face is decoded (`q2_model_get_face`), because its face array
+ * is a read-only view over the level file's buffer. The reach is the same: the
+ * console's rewrite is visible to every later reader of that model, and so is
+ * this.
+ * ------------------------------------------------------------------------- */
+
+/* BodgeModelDataTransparent's two constants, 0x8005B940 and 0x8005B944. */
+#define Q2_MODEL_BODGE_KEEP 0x1F
+#define Q2_MODEL_BODGE_SET  0x40
+
+/*
+ * True when the class table's record for this model name carries a PreInit that
+ * rewrites the model's face flags — i.e. when the name is "Explosion". Matched
+ * the way `GetModelHdr` matches, case-insensitively over the 12 name bytes.
+ */
+bool q2_model_class_bodges_transparent(const char *name);
 
 /* ---------------------------------------------------------------------------
  * Animation — block C
@@ -434,6 +533,14 @@ typedef struct q2_model {
     u32              size;         /* ofs_end, or the remainder of the chunk */
     q2_model_header  hdr;
     u32              scratch_size; /* max over parts of vert_base + num_verts */
+
+    /*
+     * PreInitExplosion's level-load rewrite of every face's blend selector —
+     * see the face-flags section above. `q2_model_get` sets it from the name,
+     * `q2_model_get_face` applies it, and a fixture that leaves it false gets
+     * the file's own bytes, which is what every other model gets.
+     */
+    bool             bodge_transparent;
 } q2_model;
 
 /* The whole bank. Borrows the level file's buffer, so it must outlive this. */
@@ -469,7 +576,13 @@ q2_result q2_model_get(const q2_model_bank *bank, u32 index, q2_model *out);
  */
 s32 q2_model_bank_find(const q2_model_bank *bank, const char *name);
 
-/* Decode one vertex, part or face. Return false if the index is out of range. */
+/*
+ * Decode one vertex, part or face. Return false if the index is out of range.
+ *
+ * `q2_model_get_face` is also where the engine's level-load face rewrite lands:
+ * on a model whose `bodge_transparent` is set it returns the flags byte the
+ * console would have written into RAM, not the one on the disc.
+ */
 bool q2_model_get_vertex(const q2_model *m, u32 index, q2_model_vertex *out);
 bool q2_model_get_part(const q2_model *m, u32 index, q2_model_part *out);
 bool q2_model_get_face(const q2_model *m, u32 index, q2_model_face *out);
@@ -867,14 +980,12 @@ bool q2_model_part_rotation_word(const q2_model *m, const q2_model_anim *clip,
                                  u32 tick, u32 part, u32 *out);
 
 /*
- * Decode every part's pose at `frame` of `clip` into `out`, which must hold
- * num_parts entries.
- *
- * Returns Q2_ERR_UNSUPPORTED for a variable-rate clip rather than decoding it
- * wrongly — those need the interpolating path, which is not implemented.
+ * Decode every part's pose at `tick` of `clip` into `out`, which must hold
+ * num_parts entries. Uniform clips select a key; variable-rate clips interpolate
+ * each part's duration stream. Ticks past the last key hold its final pose.
  */
 q2_result q2_model_pose_at(const q2_model *m, const q2_model_anim *clip,
-                           u32 frame, q2_model_pose *out);
+                           u32 tick, q2_model_pose *out);
 
 /*
  * THE LOWEST POINT OF A POSE, which is not the same as the model's own.

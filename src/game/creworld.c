@@ -1,3 +1,4 @@
+#include "random.h"
 #include "creworld.h"
 
 #include "worldscale.h"
@@ -384,7 +385,7 @@ static q2_monster *creworld_pick_target(s16 targetname, void *user)
     if (!n)
         return NULL;
 
-    return found[(u32)rand() % n];
+    return found[(u32)q2_random_next() % n];
 }
 
 /*
@@ -418,7 +419,7 @@ static void corner_touch(q2_monster *m, q2_monster *corner)
      * the bit has not been measured, so this arm may never run here.
      */
     if (next && ((next->spawnflags >> Q2_POP_SPAWN_FLAGS_SHIFT) & 1)) {
-        const s32 corner_mins_y = -96;          /* 0x8005CC14 */
+        const s32 corner_mins_y = -Q2_CORNER_ABS_EXTENT;   /* 0x8005CC14 */
 
         m->pos[0] = next->pos[0];
         m->pos[1] = next->pos[1] - corner_mins_y + m->mins[1];
@@ -467,11 +468,66 @@ static void corner_touch(q2_monster *m, q2_monster *corner)
  *
  * DEVIATION: the original asks the area tree for the AREA_TRIGGERS entities
  * the mover's box overlaps (0x8005F554, a3 = 2). This port has no area tree,
- * so the corner array is scanned instead. A corner is a POINT — 0x8007F390
- * never gives it a hull and never links it, so its absmin and absmax are its
- * origin — which makes the overlap test "is the corner inside the creature's
- * box", and there are at most a couple of dozen corners in a map.
+ * so the corner array is scanned instead. There are at most a couple of dozen
+ * corners in a map, so the scan is not the interesting part.
+ *
+ * WHAT IS INTERESTING IS THE CORNER'S OWN BOX, and this used to treat it as a
+ * point. BoxEdicts (Q_SHARED.C 0x8005C7C0) does not read a candidate's stored
+ * bounds: at 0x8005C81C it calls CalcAbsFromCreBox (Q_SHARED.C 0x8005CB00) on
+ * the CANDIDATE first and only then runs VectBoxOverlap (COLL.C 0x800552D8) at
+ * 0x8005C828. CalcAbsFromCreBox opens with
+ *
+ *     8005CB00  lbu   v1, 35(a0)          the object's class byte
+ *     8005CB04  addiu v0, zero, 114       PathCorner
+ *     8005CB08  beq   v1, v0, 0x8005CB20
+ *
+ * and the 0x8005CB20 arm writes origin - 96 into absmin on all three axes
+ * (0x8005CB28, 0x8005CB38, 0x8005CB48) and origin + 96 into absmax
+ * (0x8005CB58, 0x8005CB68, 0x8005CB78). Everything else takes 0x8005CB84,
+ * which copies the edict's linked +0x78..+0x8C. So a corner IS given a hull —
+ * a 192-unit cube, made up on the spot every time it is asked for rather than
+ * stored — and the corner really is in the trigger set the filter accepts
+ * (0x8007F41C..0x8007F42C sets solid = SOLID_TRIGGER; 0x8005C840 tests it).
+ *
+ * The acceptance window is therefore the creature's hull grown by 96 on every
+ * axis: 382 per axis, not 286. VectBoxOverlap rejects only on a STRICT `slt`
+ * (0x800552E4 and its five siblings), so boxes that merely touch overlap.
+ *
+ * monster.c already had the right reading of 0x8005CCFC's corner short-circuit
+ * while the comment here had the wrong one; the tree no longer disagrees with
+ * itself.
  */
+bool q2_creature_corner_overlaps(const q2_monster *m, const q2_monster *corner)
+{
+    int axis;
+
+    if (!m || !corner)
+        return false;
+
+    for (axis = 0; axis < 3; axis++) {
+        /* CalcAbsFromCreBox's corner arm: origin ∓ 96 on every axis, 0x8005CB28
+         * and 0x8005CB58. The corner has no stored hull to read. */
+        s32 cmin = corner->pos[axis] - Q2_CORNER_ABS_EXTENT;
+        s32 cmax = corner->pos[axis] + Q2_CORNER_ABS_EXTENT;
+
+        /*
+         * VectBoxOverlap, 0x800552D8. Every one of its six tests is a strict
+         * `slt` (0x800552E4, 0x800552FC, 0x80055314, 0x80055334, 0x8005534C,
+         * 0x80055364), so boxes whose faces coincide still overlap and the
+         * window is closed at both ends.
+         *
+         * The mover's own box comes from the same function's general arm,
+         * which copies the linked edict's +0x78..+0x8C — origin + mins and
+         * origin + maxs, which is what this builds inline.
+         */
+        if (cmax < m->pos[axis] + m->mins[axis]
+            || cmin > m->pos[axis] + m->maxs[axis])
+            return false;
+    }
+
+    return true;
+}
+
 static void creworld_touch(q2_monster *m, void *user)
 {
     q2_creature_world *w = (q2_creature_world *)user;
@@ -482,21 +538,26 @@ static void creworld_touch(q2_monster *m, void *user)
 
     for (i = 0; i < w->corner_count; i++) {
         q2_monster *c = &w->corner[i];
-        int axis;
 
         if (!q2_ent_inuse(c) || c->class_id != Q2_CLASS_PATH_CORNER)
             continue;
 
-        for (axis = 0; axis < 3; axis++) {
-            if (c->pos[axis] < m->pos[axis] + m->mins[axis]
-                || c->pos[axis] > m->pos[axis] + m->maxs[axis])
-                break;
-        }
-        if (axis != 3)
+        if (!q2_creature_corner_overlaps(m, c))
             continue;
 
+        /*
+         * EVERY OVERLAPPING CORNER, NOT THE FIRST. BoxEdicts hands back the
+         * whole list and 0x8005F568..0x8005F5CC walks all of it: 0x8005F5A0's
+         * `j 0x8005F5C4` lands on the loop's own `addiu s0, s0, 1`, so a
+         * path_corner_touch is followed by the next candidate rather than by a
+         * return. This used to stop after one, which was invisible while the
+         * acceptance window was a point and is not now that it is a 382-unit
+         * box: two corners can sit inside one creature's grown hull, and
+         * stopping on the first would let a corner that is not the movetarget
+         * shadow the one that is. path_corner_touch's own `bne` at 0x8005F218
+         * is what makes visiting all of them safe.
+         */
         corner_touch(m, c);
-        return;                         /* the touch has changed movetarget */
     }
 }
 

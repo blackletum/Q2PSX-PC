@@ -159,4 +159,39 @@ q2_result q2_xa_track_open(q2_xa_track *out, const disc *d, char letter, u8 chan
 u32 q2_xa_track_read(q2_xa_track *track, q2_xa_decoder *dec,
                      u32 *cursor, s16 *out, u32 out_capacity);
 
+/* ------------------------------------------------------------------------- */
+/* The CD volume                                                              */
+/* ------------------------------------------------------------------------- */
+/*
+ * CdCheckMusic (0x800718E4, CDAUDIO.C) keeps TWO volumes, not one: a target at
+ * 0x800B2E50 (`targetcdvol`) that the menu and the pause write, and a live
+ * value at 0x800B2E74 (`actcdvol`) that it walks toward the target. The mix
+ * handed to the drive at 0x80071A20 is built from the LIVE one, which is why a
+ * pause fades the music out instead of cutting it.
+ *
+ * Both halves live here rather than in the client because both are properties
+ * of the CD/XA stream — the SPU voice path has its own, separate volume — and
+ * because the arithmetic is worth testing on its own.
+ */
+
+/*
+ * One step of the ramp: 0x800718F8..0x8007194C. Four toward the target, or the
+ * target itself if four would carry the live value past it. Halfword arithmetic
+ * throughout, because the store at 0x80071914 is `sh`.
+ */
+s16 q2_xa_cd_volume_step(s16 live, s16 target);
+
+/*
+ * Apply the live volume to `samples` interleaved stereo samples, the way
+ * 0x800719EC..0x80071A20 builds the four bytes of the CD mix.
+ *
+ * `stereo` is the STEREO setting at 0x800B333E. Non-zero: left-to-left and
+ * right-to-right both carry `volume` and the two cross terms are ZERO
+ * (0x800719F4..0x80071A04). Zero: ALL FOUR carry volume/2, so each output is
+ * the sum of both channels at half level (0x80071A08..0x80071A1C) — a fold to
+ * mono, which is what SetCDVolume's own pair of arms at 0x80071BB0/0x80071BC4
+ * does too. 255 is unity; the console's own clamp is at 0x800719D0.
+ */
+void q2_xa_cd_mix(s16 *pcm, u32 samples, s32 volume, bool stereo);
+
 #endif /* Q2PSX_XA_H */

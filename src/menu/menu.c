@@ -376,6 +376,121 @@ static const q2_menu_page *resolve(const q2_menu *m, int id)
     return q2_menu_page_find(id);
 }
 
+/*
+ * Does this page ASK for its saved cursor back?
+ *
+ * The save is unconditional — InGameInitScreen writes the outgoing page's
+ * cursor into CursorMemory[page].byte0 on every switch (0x8001A39C). The
+ * restore is not. FrontEndRestoreCursor (0x8001FBC4) is reached only through
+ * the export slot at 0x800B31CC, and exactly seven sites `jalr` it and store
+ * what it returns into the cursor at 0x800B32AC; an eighth has it inlined. The
+ * eight, with the page each one is entering:
+ *
+ *   InGame_GOTO_SCREENPOSITION  page  7   inlined at 0x8001D0E8..0x8001D124
+ *   InGame_GOTO_CONTROLLER      page 31   0x8001D1E4
+ *   InGame_GOTO_MPCHEAT         page 42   0x8001D580
+ *   InGame_GOTO_OPTIONS         page 27   0x8001FDF4
+ *   InGame_GOTO_PLAYER          page 28   0x800201FC
+ *   InGame_GOTO_SOUND           page 29   0x80020268
+ *   InGame_GOTO_VIDEO           page 30   0x80020320
+ *   InGame_GOTO_OPTIONS2        page 27   0x80020664
+ *
+ * Every other page keeps whatever FrontEndCreateMenu left: `cursor := first`,
+ * the index of the first row of the LAST table the builder appended
+ * (0x8001A4B0..0x8001A4BC). The pause pages say so twice — the tail of
+ * InGame_GOTO_PAUSEDBACK re-reads `first` and stores it over the cursor for
+ * both page 26 and page 43 (`lhu v1, 714(v0)` / `sh v1, 712(v0)` at
+ * 0x8001D714/0x8001D71C), as does InGame_GOTO_DIED for page 41 at 0x8001D82C —
+ * but since nothing between the builder and those tails moves the cursor, they
+ * are the builder's default said again, not a third policy. The port models
+ * two policies for that reason.
+ *
+ * This port used to restore for EVERY page, which is why the pause menu
+ * reopened on whatever row you last used instead of on RETURN TO GAME, and why
+ * backing out of QUIT GAME? came back to YES rather than NO.
+ *
+ * QFRONT's pages are deliberately excluded from the finding, not from the
+ * restore. The front end is a separate image that these tools cannot
+ * disassemble — `disasm` answers "0x8010EC3C is outside the loaded segment" —
+ * so its cursor handling is unread, and its pages keep the port's existing
+ * restore-everywhere rather than being changed on evidence that does not cover
+ * them.
+ */
+static bool cursor_restores(int page_id)
+{
+    switch (page_id) {
+    case Q2_PAGE_SCREEN_POSITION:   /* 7  */
+    case Q2_PAGE_OPTIONS:           /* 27 */
+    case Q2_PAGE_PLAYER:            /* 28 */
+    case Q2_PAGE_SOUND:             /* 29 */
+    case Q2_PAGE_VIDEO:             /* 30 */
+    case Q2_PAGE_CONTROLLER:        /* 31 */
+    case Q2_PAGE_VARIABLES:         /* 42 */
+        return true;
+    case Q2_PAGE_FRONT_TITLE:       /* 46, but QFRONT's own table */
+        return true;
+    default:
+        /* The rest of QFRONT's, which share the 200+ block. */
+        return page_id >= Q2_PAGE_FRONT_START;
+    }
+}
+
+/*
+ * The banner's bar colour — FrontEndAddPausedTitle's tail, 0x8001CFC8..0x8001D05C.
+ *
+ * Single player takes the branch at 0x8001CFD0 straight to 0x8001D054, which
+ * ANDs bits 6..8 out of the flag word: colour 0, the blue band. Multiplayer
+ * indexes the 34-byte per-player record with `Pauser` and takes the TEAM
+ * halfword at +724 when the mode is 1 (0x8001CFE8, 0x8001D00C) and the
+ * player-colour halfword at +726 otherwise (0x8001D038), then `andi 7`
+ * (0x8001D040) before shifting it into place. Shifting in and reading back out
+ * is a round trip, so the three-bit field IS the value — and the port's
+ * Q2_MENU_BAR_* run 0 blue, 1 red, 2, 3, 4 suppressed, which is the same
+ * encoding FrontEndDrawCursor switches on at 0x8001A9C8 and suppresses on at
+ * 0x8001A828.
+ */
+static int paused_title_bar(const q2_menu *m)
+{
+    int p, v;
+
+    if (!m->multiplayer)
+        return Q2_MENU_BAR_BLUE;
+
+    p = m->pauser;
+    if (p < 0 || p >= Q2_MENU_MP_MAX_PLAYERS)
+        p = 0;
+
+    v = (m->mp_mode == 1) ? (int)m->mp_team[p] : (int)m->mp_colour[p];
+    return v & 7;
+}
+
+/*
+ * Which pages get that banner at all.
+ *
+ * FrontEndAddPausedTitle has nine callers (0x8001D09C, 0x8001D148, 0x8001D5F4,
+ * 0x8001D620, 0x8001FDC8, 0x800201D0, 0x80020230, 0x8002029C, 0x80020638), and
+ * they are the in-game pages below. Page 42's banner is the first record of its
+ * own table instead, appended by FrontEndCreateMenu, which clears bits 6..8 —
+ * so MPCHEAT's "PAUSED" is blue even in a match. QFRONT's banners are the
+ * module's own and are blue for the same reason.
+ */
+static bool page_has_paused_title(int page_id)
+{
+    switch (page_id) {
+    case Q2_PAGE_SCREEN_POSITION:
+    case Q2_PAGE_PAUSE_SP:
+    case Q2_PAGE_OPTIONS:
+    case Q2_PAGE_PLAYER:
+    case Q2_PAGE_SOUND:
+    case Q2_PAGE_VIDEO:
+    case Q2_PAGE_CONTROLLER:
+    case Q2_PAGE_PAUSE_MP:
+        return true;
+    default:
+        return false;
+    }
+}
+
 void q2_menu_goto(q2_menu *m, int page_id)
 {
     const q2_menu_page *p;
@@ -403,12 +518,30 @@ void q2_menu_goto(q2_menu *m, int page_id)
 
     page_entered(m);
 
-    /* Restore where the cursor was, then pull it onto something selectable. */
-    m->cursor = (page_id < (int)sizeof(m->cursor_save))
-                    ? (int)m->cursor_save[page_id] : 0;
+    /*
+     * The builder's default: `cursor := first`, the first row of the last table
+     * appended (0x8001A4B0..0x8001A4BC). This is what the pause pages end on
+     * too, by way of the explicit re-store at 0x8001D71C.
+     */
+    m->cursor = (int)p->first;
+
+    /* ...and then, only for the pages that ask, what the player left behind. */
+    if (cursor_restores(page_id) && page_id < (int)sizeof(m->cursor_save)) {
+        if (m->cursor_seen[page_id])
+            m->cursor = (int)m->cursor_save[page_id];  /* 0x8001FC00 */
+        m->cursor_seen[page_id] = 1;                   /* 0x8001FBF0 */
+    }
+
+    /* Pull it onto something selectable. */
     if (m->cursor < (int)p->first || m->cursor >= (int)p->count ||
         !q2_menu_item_selectable(m, m->cursor))
         m->cursor = first_selectable(m);
+
+    /* The banner's own bar colour, stamped once per page entry the way
+     * FrontEndAddPausedTitle stamps drawable 0 (0x8001D044). */
+    m->title_bar_colour = page_has_paused_title(page_id)
+                              ? (u8)paused_title_bar(m)
+                              : (u8)Q2_MENU_BAR_BLUE;
 }
 
 static void push(q2_menu *m, int page_id)
@@ -476,6 +609,40 @@ static void go_back(q2_menu *m)
 }
 
 /*
+ * Take a row out of the page the way a hook does: prefix its text with the grey
+ * code and set the object's +0x4A.
+ *
+ * Both halves, because the original does both — `sprintf(text, "g%s", text)`
+ * through 0x800AE6BC and `sh 1, +0x4A` — and they answer different questions.
+ * The prefix is what makes the row draw at (32,32,32); the halfword is what
+ * q2_menu_item_selectable reads. Either alone leaves the row half-disabled: the
+ * label bright but unreachable, or grey but still landable.
+ *
+ * The re-prefix guard is the original's own: every block tests the first
+ * character against 'g' (0x8001C9E8, 0x8001CAA8, 0x8001CB7C) before writing, so
+ * a hook that runs every frame does not stack prefixes.
+ */
+static void grey_item(q2_menu *m, int index)
+{
+    char        was[Q2_MENU_TEXT_MAX];
+    const char *label;
+
+    if (index < 0 || index >= Q2_MENU_MAX_ITEMS)
+        return;
+
+    label = q2_menu_item_text(m, index);
+    if (label[0] != Q2_MENU_CODE_GREY) {
+        /* Through a copy: the original sprintf's via a stack buffer at sp+16
+         * for the same reason (0x8001CA00 then 0x8001CA18), because the source
+         * and the destination can be the same text. */
+        snprintf(was, sizeof(was), "%s", label);
+        snprintf(m->text[index], Q2_MENU_TEXT_MAX, "%c%s",
+                 Q2_MENU_CODE_GREY, was);
+    }
+    m->disabled[index] = 1;
+}
+
+/*
  * Page entry hooks — the per-page work the original does after installing the
  * item table.
  */
@@ -511,12 +678,49 @@ static void page_entered(q2_menu *m)
         break;
 
     case Q2_PAGE_CONTROLLER: {
-        /* 0x8001CA28 / 0x8001CAA8: the two items that need analogue sticks
-         * grey themselves out when the pad has none. */
+        /*
+         * InGame_CHECK_FOR_CONTROLLER greys rows out in three separate blocks,
+         * and they are three different questions. The comment here used to
+         * blame the first one on the analogue sticks; it is not about sticks at
+         * all.
+         *
+         *   0x8001C9D0  jal IsPlayerPadShockable, and if it returns zero the
+         *               block at 0x8001C9E0..0x8001CA44 greys DRAWABLE 2 —
+         *               VIBRATION. Offset 216 = 2*92 + 32 is drawable 2's text
+         *               and 258 = 2*92 + 74 its disable halfword, and the
+         *               cursor test that follows is `cursor == 2`.
+         *   0x8001CAA8  drawable 3, SWAP Y AXIS: offsets 308 and 350,
+         *               `cursor == 3`. Greyed when the pad class is neither a
+         *               mouse nor an analogue pad (0x8001CA94).
+         *   0x8001CB90  drawable 4, USE MOUSE: offsets 400 and 442,
+         *               `cursor == 4` (0x8001CB58).
+         *
+         * FrontEndAddPausedTitle fills drawable 0 and leaves the count at 1
+         * (0x8001D07C), so the page's five items are drawables 1..5 and the
+         * port's item index is the console's drawable less one.
+         *
+         * Each block does TWO things: sprintf the label through "g%s"
+         * (0x800AE6BC) so it draws at (32,32,32) — FORMATS.md 10.5 — and store
+         * 1 into the object's +0x4A. The port had been doing only the second,
+         * so SWAP Y AXIS and USE MOUSE went unreachable while still drawing in
+         * the bright colour.
+         *
+         * The console then pulls the cursor back by ONE from the row it just
+         * greyed, without re-testing; the port's generic "pull onto the first
+         * selectable row" in q2_menu_goto stands in for that. The two agree
+         * except when the row below the cursor is greyed in the same pass, in
+         * which case the console lands on a grey row and this does not.
+         */
+        bool shock  = (m->pauser >= 0 &&
+                       m->pauser < Q2_MENU_MP_MAX_PLAYERS &&
+                       m->pad_shockable[m->pauser] != 0);
         bool sticks = (m->set && m->set->v[Q2_SET_PAD_CLASS] == 1);
+
+        if (!shock)
+            grey_item(m, 1);        /* VIBRATION   — gate at 0x8001C9D8 */
         if (!sticks) {
-            m->disabled[2] = 1;
-            m->disabled[3] = 1;
+            grey_item(m, 2);        /* SWAP Y AXIS — gate at 0x8001CA94 */
+            grey_item(m, 3);        /* USE MOUSE   — gate at 0x8001CB58 */
         }
         break;
     }
@@ -543,6 +747,8 @@ static void page_entered(q2_menu *m)
 
 void q2_menu_init(q2_menu *m, q2_menu_settings *settings, int screen_h)
 {
+    int i;
+
     if (!m)
         return;
 
@@ -558,9 +764,54 @@ void q2_menu_init(q2_menu *m, q2_menu_settings *settings, int screen_h)
     m->mp_setup.time_option   = Q2_MENU_MP_TIME_DEFAULT;
     m->mp_setup.frag_option   = Q2_MENU_MP_FRAG_DEFAULT;
     m->mp_setup.round_option  = Q2_MENU_MP_ROUND_DEFAULT;
+
+    /*
+     * FrontEndResetMultiplayerDefaults' seeds for the two halfwords the banner
+     * is coloured from: colour = p (`sh a1, 726(v1)` at 0x8001BEDC) and
+     * team = p & 1 (`sh a0, 724(v1)` at 0x8001BF04), for all four players.
+     * Everything else is memset to zero above, which is what the banner wants
+     * in single player anyway.
+     */
+    for (i = 0; i < Q2_MENU_MP_MAX_PLAYERS; i++) {
+        m->mp_colour[i] = (s16)i;
+        m->mp_team[i]   = (s16)(i & 1);
+    }
+    m->title_bar_colour = (u8)Q2_MENU_BAR_BLUE;
 }
 
 void q2_menu_set_multiplayer(q2_menu *m, bool on)  { if (m) m->multiplayer = on; }
+
+void q2_menu_set_pauser(q2_menu *m, int player)
+{
+    if (!m)
+        return;
+    if (player < 0) player = 0;
+    if (player >= Q2_MENU_MP_MAX_PLAYERS) player = Q2_MENU_MP_MAX_PLAYERS - 1;
+    m->pauser = player;
+}
+
+void q2_menu_set_player_colour(q2_menu *m, int player, int team, int colour)
+{
+    if (!m || player < 0 || player >= Q2_MENU_MP_MAX_PLAYERS)
+        return;
+    m->mp_team[player]   = (s16)team;
+    m->mp_colour[player] = (s16)colour;
+}
+
+void q2_menu_set_mp_mode(q2_menu *m, int mode) { if (m) m->mp_mode = (s16)mode; }
+
+void q2_menu_set_pad_shockable(q2_menu *m, int player, bool on)
+{
+    if (!m || player < 0 || player >= Q2_MENU_MP_MAX_PLAYERS)
+        return;
+    m->pad_shockable[player] = on ? 1u : 0u;
+}
+
+int q2_menu_title_bar_colour(const q2_menu *m)
+{
+    return m ? (int)m->title_bar_colour : Q2_MENU_BAR_BLUE;
+}
+
 void q2_menu_set_front_end(q2_menu *m, bool on)    { if (m) m->front_end = on; }
 void q2_menu_set_us_english(q2_menu *m, bool on)   { if (m) m->us_english = on; }
 void q2_menu_set_controller_count(q2_menu *m, int count)
@@ -1099,6 +1350,51 @@ bool q2_menu_set_slider(q2_menu *m, int index, int value)
     }
 
     return true;
+}
+
+/*
+ * CHECK_FOR_SLIDER's TAIL (0x8001C218..0x8001C25C) — the MUSIC row auditions
+ * itself, and no other row on the page does.
+ *
+ * The function at 0x8001BF1C is installed as the SOUND page's per-frame hook
+ * (0x80020268 writes it into the page's +656 slot) and is tail-called by two
+ * other handlers besides. It seeds s7 = -1 at 0x8001BF2C, then walks every
+ * drawable on the live page and, at 0x8001C1EC, compares each one's slider
+ * pointer with &musicvol (0x800B3348); the one that matches leaves its index in
+ * s7. After the walk:
+ *
+ *     bltz  v1, 0x8001C260        s7 still -1: write NOTHING and return
+ *     lh    v0, 0x800B32AC        the cursor row
+ *     bne   v1, v0, 0x8001C258    not the cursor row:
+ *     sh    zero, targetcdvol       ...silence the music (0x8001C25C)
+ *     sh    v0, targetcdvol         ...otherwise musicvol * 2 (0x8001C24C)
+ *
+ * So on OPTIONS -> SOUND the track plays ONLY while the cursor stands on the
+ * MUSIC row, which is what lets you hear what you are setting; SOUND FX, STEREO
+ * and RESET TO DEFAULTS are silent rows. Every page that carries no MUSIC
+ * slider leaves the volume alone entirely, which is the -1 case and is why this
+ * returns three answers rather than two.
+ *
+ * The caller supplies `full` — the slider doubled — rather than this reading
+ * the binding, because the doubling belongs to the CD volume and not to the
+ * page: 0x8001C244 is `sll v0, v0, 1` on the value the row is bound to.
+ */
+int q2_menu_music_audition(const q2_menu *m, int full)
+{
+    int i;
+
+    if (!m || !m->open || !m->page)
+        return -1;
+
+    for (i = 0; i < (int)m->page->count; i++) {
+        if (m->page->items[i].widget != Q2_WIDGET_SLIDER)
+            continue;
+        if (m->page->items[i].setting != Q2_SET_MUSIC)
+            continue;
+        return (i == m->cursor) ? full : 0;
+    }
+
+    return -1;
 }
 
 /*

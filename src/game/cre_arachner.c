@@ -187,6 +187,7 @@
  *     dead sounds, and they are the disc's rather than this port's, so neither
  *     is given a constant below.
  */
+#include "random.h"
 #include <stdlib.h>
 
 #include "ai.h"
@@ -302,7 +303,7 @@ static void ara_play(q2_monster *m, u32 handle_addr)
 /* import +0x14, 0..32767. */
 static s32 ara_rand(void)
 {
-    return (s32)(rand() & 0x7FFF);
+    return (s32)(q2_random_next() & 0x7FFF);
 }
 
 /*

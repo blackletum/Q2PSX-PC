@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "vag.h"
+#include "xa.h"
 
 static int g_checks;
 static int g_failures;
@@ -27,6 +28,15 @@ static void check_eq_u32(u32 got, u32 want, const char *what)
     g_checks++;
     if (got != want) {
         printf("  FAIL  %s: got %u, want %u\n", what, got, want);
+        g_failures++;
+    }
+}
+
+static void check_eq_s32(s32 got, s32 want, const char *what)
+{
+    g_checks++;
+    if (got != want) {
+        printf("  FAIL  %s: got %d, want %d\n", what, (int)got, (int)want);
         g_failures++;
     }
 }
@@ -183,12 +193,172 @@ static void test_rate_conversion(void)
                  "unrepresentable host step saturates instead of wrapping");
 }
 
+/*
+ * CdCheckMusic's volume ramp — 0x800718F8..0x8007194C.
+ *
+ * The console keeps a target at 0x800B2E50 and a live value at 0x800B2E74 and
+ * moves the live one by FOUR a call, clamping to the target on overshoot. It is
+ * the live value the CD mix is built from (0x80071958), which is why a pause
+ * slides the music away instead of cutting it. The port had no such pair at
+ * all: it scaled the bed straight off the MUSIC slider, so nothing ever ramped.
+ */
+static void test_cd_volume_ramp(void)
+{
+    s16 v;
+    int steps;
+
+    puts("CD volume ramp");
+
+    check_eq_s32(q2_xa_cd_volume_step(0, 96), 4,
+                 "the first step off silence is four");
+    check_eq_s32(q2_xa_cd_volume_step(96, 96), 96,
+                 "an arrived value does not move");
+    check_eq_s32(q2_xa_cd_volume_step(96, 0), 92,
+                 "and it comes down by four");
+
+    /* 0x80071944/0x8007194C: overshoot in either direction takes the target
+     * outright rather than stepping past it. */
+    check_eq_s32(q2_xa_cd_volume_step(94, 96), 96, "an over-step clamps up");
+    check_eq_s32(q2_xa_cd_volume_step(2, 0), 0, "an under-step clamps down");
+    check_eq_s32(q2_xa_cd_volume_step(252, 254), 254,
+                 "the maximum clamps the same way");
+
+    /* The default MUSIC slider is 48 and the target is that doubled, so a fade
+     * is twenty-four calls — under half a second of 50 Hz fields. */
+    for (v = 0, steps = 0; v != 96 && steps < 1000; steps++)
+        v = q2_xa_cd_volume_step(v, 96);
+    check_eq_s32(steps, 24, "silence to the default 96 takes 24 calls");
+
+    for (v = 96, steps = 0; v != 0 && steps < 1000; steps++)
+        v = q2_xa_cd_volume_step(v, 0);
+    check_eq_s32(steps, 24, "and the duck back to silence takes 24");
+
+    /* The top of the slider is 127, doubled to 254: sixty-four, which is also
+     * the width of the two track fades and not a coincidence. */
+    for (v = 0, steps = 0; v != 254 && steps < 1000; steps++)
+        v = q2_xa_cd_volume_step(v, 254);
+    check_eq_s32(steps, 64, "silence to the maximum 254 takes 64 calls");
+}
+
+/*
+ * The four mix bytes CdCheckMusic builds before handing the stream to the
+ * drive — 0x800719EC..0x80071A20, branching on the STEREO setting at
+ * 0x800B333E. Stereo scales each channel on its own; mono puts volume/2 into
+ * all four entries, so both channels are summed into both outputs at half
+ * level. The port applied the volume and ignored the setting.
+ */
+static void test_cd_mix_stereo_fold(void)
+{
+    s16 pcm[4];
+
+    puts("CD mix and the STEREO fold");
+
+    /* Stereo at unity is the identity: 255 is full scale and 0x800719D0's
+     * clamp is what makes it the ceiling. */
+    pcm[0] = 1000; pcm[1] = -1000; pcm[2] = 32767; pcm[3] = -32768;
+    q2_xa_cd_mix(pcm, 4, 255, true);
+    check_eq_s32(pcm[0],  1000, "stereo at 255 leaves the left channel");
+    check_eq_s32(pcm[1], -1000, "stereo at 255 leaves the right channel");
+    check_eq_s32(pcm[3], -32768, "stereo at 255 leaves the extreme");
+
+    /* Stereo below unity scales the two independently and keeps them apart. */
+    pcm[0] = 1000; pcm[1] = -1000;
+    q2_xa_cd_mix(pcm, 2, 96, true);
+    check_eq_s32(pcm[0],  376, "stereo at 96 scales the left channel");
+    check_eq_s32(pcm[1], -376, "stereo at 96 scales the right channel");
+
+    /*
+     * Mono sums both channels at half level, so a hard-panned pair collapses
+     * to the centre and an out-of-phase pair cancels. That is the whole of the
+     * symptom: with STEREO off the effects went centre and the music did not.
+     */
+    pcm[0] = 1000; pcm[1] = -1000;
+    q2_xa_cd_mix(pcm, 2, 255, false);
+    check_eq_s32(pcm[0], 0, "mono cancels an out-of-phase pair, left");
+    check_eq_s32(pcm[1], 0, "mono cancels an out-of-phase pair, right");
+
+    pcm[0] = 1000; pcm[1] = 0;
+    q2_xa_cd_mix(pcm, 2, 96, false);
+    check_eq_s32(pcm[0], 188, "mono at 96 sums a hard-left pair");
+    check_eq_s32(pcm[1], 188, "...into both outputs");
+
+    /*
+     * AND THE HALVING IS ON THE VOLUME, not on the sum. 0x80071A08 computes
+     * volume/2 truncated toward zero and writes that byte four times, so an odd
+     * volume loses half a unit: 1000 in both channels at 255 comes back as 996
+     * and not 1000. Transcribed rather than tidied — the tidy version would be
+     * a mono fold half a percent louder than the console's.
+     */
+    pcm[0] = 1000; pcm[1] = 1000;
+    q2_xa_cd_mix(pcm, 2, 255, false);
+    check_eq_s32(pcm[0], 996, "the odd-volume truncation is the console's");
+
+    /* A zero-length buffer and a null one are both no-ops rather than faults. */
+    q2_xa_cd_mix(pcm, 0, 96, false);
+    check_eq_s32(pcm[0], 996, "an empty buffer is untouched");
+    q2_xa_cd_mix(NULL, 2, 96, false);
+}
+
+/*
+ * BYTE +2 OF THE REQUEST RECORD — its relative volume, and the one request on
+ * the disc that does not keep the default.
+ *
+ * PreInitChaingun (0x8004E050) clones wep_machgf1b and takes the clone down by
+ * 40; QPlayerFireChainGun then plays THAT clone once per bullet at the player's
+ * origin (0x8004CCB4) and the untouched machinegun request once at the end of
+ * the loop (0x8004CCD8). This port had no per-request volume at all, so the
+ * chaingun's bullets — when it raised any — were as loud as a machinegun shot.
+ */
+static void test_request_volume(void)
+{
+    printf("request volume\n");
+
+    check_eq_s32(Q2_SFX_VOLUME_DEFAULT, 63,
+                 "a fresh request is 63 (0x80071C0C / 0x80071C5C)");
+
+    /* The chaingun's clone, 0x8004E2D8. */
+    check_eq_s32(q2_sfx_volume_add((u8)Q2_SFX_VOLUME_DEFAULT,
+                                   Q2_SFX_VOLUME_CHAINGUN_DELTA),
+                 23, "minus forty leaves the chaingun's clone at 23");
+
+    /*
+     * And the three `+40` calls that follow it are no-ops, because the clamp
+     * at 0x80072BE8 pins anything that reached 64 back to 63. A port that
+     * clamped BEFORE adding, or that saturated at 255, would make the chaingun
+     * spin-up louder than every other sound in the game.
+     */
+    check_eq_s32(q2_sfx_volume_add((u8)Q2_SFX_VOLUME_DEFAULT, 40), 63,
+                 "plus forty on a default request changes nothing");
+    check_eq_s32(q2_sfx_volume_add(23, 40), 63,
+                 "and on the clone it pins at 63 rather than reaching 63 by sum");
+    check_eq_s32(q2_sfx_volume_add(10, 40), 50,
+                 "an addition that stays below 64 is kept");
+
+    /* The `a1 == 128` early-out at 0x80072BB8. */
+    check_eq_s32(q2_sfx_volume_add(23, Q2_SFX_VOLUME_UNCHANGED), 23,
+                 "a delta of 128 is the leave-alone sentinel");
+
+    /* The byte WRAPS before it is tested: 63 + 200 is 263, stored as 7. */
+    check_eq_s32(q2_sfx_volume_add(63, 200), 7,
+                 "the store is a byte, so it wraps before the clamp");
+
+    /* 0x80072AF0: what reaches the voice. SoundAtLocation's scale is 16, so a
+     * default request is 63 and the chaingun's clone 23 — 36%. */
+    check_eq_s32(q2_sfx_voice_volume(63, Q2_SFX_VOLUME_SCALE_AT_LOCATION), 63,
+                 "a default request reaches the voice at 63");
+    check_eq_s32(q2_sfx_voice_volume(23, Q2_SFX_VOLUME_SCALE_AT_LOCATION), 23,
+                 "and the chaingun's clone at 23");
+}
+
 int main(void)
 {
     test_request_state();
     test_start_paths();
     test_observed_ranges();
     test_rate_conversion();
+    test_request_volume();
+    test_cd_volume_ramp();
+    test_cd_mix_stereo_fold();
 
     if (g_failures) {
         printf("\n%d/%d sound-pitch checks failed\n", g_failures, g_checks);

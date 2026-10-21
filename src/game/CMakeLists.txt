@@ -67,6 +67,8 @@ add_library(q2psx_game STATIC
     multiplayer.h
     projectile.c
     projectile.h
+    random.c
+    random.h
     weapon.c
     weapon.h
     statusbar.c
@@ -84,6 +86,7 @@ add_library(q2psx_game STATIC
     sim.c
     sim.h
     simcombat.c
+    scenesolid.c
     trace.c
     trace.h
     viewweapon.c

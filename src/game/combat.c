@@ -161,6 +161,14 @@ void q2_actor_init(q2_actor *a)
      * hit had written it.
      */
     a->last_attacker = (s8)Q2_MP_NOT_A_PLAYER;
+    /*
+     * entity+0x94 and entity+0x96, the hit cylinder, at the pair the player
+     * and the box-built actors carry. A CREATURE does not keep these:
+     * q2_actor_from_monster replaces both with the pair GetCreHitSize took
+     * from the creature's model (0x8006DC1C), and a creature with no model
+     * bound gets that function's own fallback, 286 / 600, from
+     * q2_monster_init. Neither number here is a creature's.
+     */
     a->radius = 286;      /* entity+0x94, the live actor's X/Z radius */
     a->height = 572;      /* entity+0x96, from origin-286 to origin+286 */
     for (k = 0; k < 3; k++) {
@@ -174,7 +182,6 @@ void q2_actor_init(q2_actor *a)
 
 void q2_actor_from_monster(q2_actor *a, const q2_monster *m)
 {
-    s32 radius;
     int k;
     u8  effect[sizeof(a->effect)];
     u8  ambient[sizeof(a->ambient)];
@@ -223,37 +230,38 @@ void q2_actor_from_monster(q2_actor *a, const q2_monster *m)
     a->has_enemy  = (m->enemy != NULL);
 
     /*
-     * 0x800544EC clips X/Z against entity+0x94 and Y as a separate interval.
-     * q2_monster owns the corresponding hull in this port. In particular,
-     * q2_monster_corpse_detach makes it wider and much shorter; dropping these
-     * six values here made a dead body keep its standing hit volume.
+     * THE MOVEMENT HULL AND THE HIT CYLINDER ARE TWO DIFFERENT VOLUMES, and
+     * this used to derive the second from the first.
+     *
+     * SetupBoxDrop (0x80050FA0) builds both from two different arguments: its
+     * `a2` pair, always 286/572 for a creature (0x800AECEC), becomes the
+     * symmetric movement box at obj+0x18..0x22, and its FIFTH argument becomes
+     * obj+0x40/+0x42 — entity+0x94 and entity+0x96 — at 0x80051030 and
+     * 0x80051044. The spawner fills that fifth argument from GetCreHitSize
+     * (0x8007E50C), which reads the creature's own MODEL header. 0x800544EC
+     * reads only the second pair: 0x8005474C `lh v1, 148(v0)` for the radius
+     * and 0x80054834 `lh v0, 150(v0)` for the slab.
+     *
+     * Taking the largest |mins|/|maxs| as the radius and maxs[1]-mins[1] as the
+     * height therefore gave every creature in the game the same 286/572
+     * cylinder, because q2_monster_init gives every creature the same ±286
+     * hull and nothing else writes it. A Soldier (model 124/607) was being shot
+     * at through a band 162 units wider than it is on either side, and a Tank
+     * Commander (327/918) was unhittable above the 286 the slab stopped at,
+     * and Jorg (590/1749) could only be shot in the bottom third — 572 of the
+     * 1749 the model actually stands.
+     *
+     * `mins`/`maxs` still cross, because the actor keeps the source hull for
+     * callers that project a box rather than an entity (actor_cylinder_interval
+     * falls back to it when `height` is zero, and the sim's body sweep reads
+     * it), but they are no longer where the cylinder comes from.
      */
-    radius = 0;
     for (k = 0; k < 3; k++) {
-        s32 lo, hi;
-
         a->mins[k] = m->mins[k];
         a->maxs[k] = m->maxs[k];
-        if (k == 1)
-            continue;
-        lo = m->mins[k] < 0 ? -(s32)m->mins[k] : (s32)m->mins[k];
-        hi = m->maxs[k] < 0 ? -(s32)m->maxs[k] : (s32)m->maxs[k];
-        if (lo > radius) radius = lo;
-        if (hi > radius) radius = hi;
     }
-    if (radius > 0)
-        a->radius = radius;
-    {
-        s32 height = (s32)m->maxs[1] - m->mins[1];
-
-        /* The console quarters one 572-unit height field to 143. The port's
-         * symmetric hull quarters -286 and +286 separately to -71/+71 and
-         * therefore loses the odd unit; put it back in the actor projection. */
-        if (m->corpse && height > 0 && m->mins[1] < 0 && m->maxs[1] > 0)
-            height++;
-        if (height > 0 && height <= 32767)
-            a->height = (s16)height;
-    }
+    a->radius = m->hit_radius;   /* entity+0x94 */
+    a->height = m->hit_height;   /* entity+0x96 */
 
     /*
      * AND WHETHER IT CAN BE HURT AT ALL, which never crossed this boundary.
@@ -428,11 +436,29 @@ void q2_actor_to_player(const q2_actor *a, q2_inventory *inv)
 /* ------------------------------------------------------------------------- */
 /* Armour                                                                     */
 /* ------------------------------------------------------------------------- */
+/* 0x800AEAA4 and 0x800AEAA8, which `bytes 0x800AEAA0 16` shows as
+ * `00 00 00 00 | 00 80 20 00 | 80 80 80 00` — the flag byte and the two colour
+ * words side by side. The fourth byte of each is padding the packer carries
+ * into SetWinFade's colour argument and the draw never reads back. */
+const u8 q2_actor_fade_power_rgb[3]  = { 0x00, 0x80, 0x20 };
+const u8 q2_actor_fade_armour_rgb[3] = { 0x80, 0x80, 0x80 };
+
 s16 q2_combat_power_armour_absorb(q2_actor *a, s16 damage)
 {
     s32 save, cap;
 
-    if (!a || damage <= 0 || !a->has_client)
+    if (!a)
+        return 0;
+
+    /*
+     * 0x80057AB0 `sb zero, 1184(gp)` is the FIRST instruction of the function,
+     * ahead of every guard — so a hit that finds no shield, no cells or no
+     * damage still clears the flag, and CheckArmour that follows it is free to
+     * raise its own wash.
+     */
+    a->armour_fade = Q2_ACTOR_FADE_NONE;
+
+    if (damage <= 0 || !a->has_client)
         return 0;
     /* 0x80057AC0: both power items live in one bit pair of the powerup word. */
     if (!(a->powerups & Q2_POWERUP_POWER_ARMOUR))
@@ -451,6 +477,14 @@ s16 q2_combat_power_armour_absorb(q2_actor *a, s16 damage)
     if (save <= 0)
         return 0;
 
+    /*
+     * 0x80057B24 `sb v0, 1184(gp)` with v0 = 1, and 0x80057B80's SetWinFade
+     * right behind it: the shield ate something, so the viewport gets the green
+     * wash. Both happen BEFORE the cells come off at 0x80057B8C, which is the
+     * order kept here even though nothing observes it.
+     */
+    a->armour_fade = Q2_ACTOR_FADE_POWER;
+
     /* 0x80057B8C: one cell per two points absorbed, truncating. */
     a->cells = (s16)(a->cells - (save / Q2_POWER_ARMOUR_CELLS));
     if (a->cells < 0)
@@ -466,8 +500,6 @@ s16 q2_combat_armour_absorb(q2_actor *a, s16 damage, bool energy,
     const q2_weapon_tables *t = q2_weapon_tables_builtin();
     const q2_wt_armour *cls;
     s32 bias, factor, save;
-
-    (void)power_armour_fired;   /* only suppresses the hit sound, not the maths */
 
     if (!a || damage <= 0 || !a->has_client)
         return 0;
@@ -504,6 +536,21 @@ s16 q2_combat_armour_absorb(q2_actor *a, s16 damage, bool energy,
     save = (s16)save;
     if (save <= 0)
         return 0;
+
+    /*
+     * 0x80057CB8 `lbu v0, 1184(gp)` / 0x80057CC0 `bne v0, zero, 0x80057D2C`:
+     * Armour_Fade gates the GREY WASH AND NOTHING ELSE. The branch lands on the
+     * armour subtraction at 0x80057D2C, which is past the join, so a hit the
+     * power shield already washed green still takes its armour points — and
+     * only one of the two colours is ever on the screen for one hit.
+     *
+     * The parameter used to be discarded here under a comment saying it "only
+     * suppresses the hit sound, not the maths". It does not: the hit sound is
+     * chosen at 0x800584D4..0x800585A0 by MOD and never reads gp+1184, and
+     * 0x80057CB8 is the only reader of that byte in the image.
+     */
+    if (!power_armour_fired)
+        a->armour_fade = Q2_ACTOR_FADE_ARMOUR;
 
     a->armour = (s16)(a->armour - save);
     return (s16)save;

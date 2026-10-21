@@ -1,3 +1,4 @@
+#include "random.h"
 #include "monster.h"
 
 #include "combat.h"        /* Q2_HEALTH_FLOOR: one copy of 0x800629B4's clamp */
@@ -62,14 +63,33 @@ void q2_monster_init(q2_monster *m)
      * the hull select in aiworld.c it decides which collision model a trace
      * runs against, and q2_SV_CloseEnough reads it directly.
      *
-     * NOT filled per model. The comment here used to claim "the loader fills
-     * it from SecondaryCol" and nothing ever did; the claim that the original
-     * varies it per MODEL is also unproven — every writer reachable from here
-     * passes the same 286/572 pair. What does differ is by CLASS: 0x8005CCFC
-     * short-circuits class 114, the path corner, to a -96/+96 cube.
+     * NOT filled per model, AND THAT IS ONLY TRUE OF THIS BOX. The comment
+     * here used to go further and say the original does not vary ANY creature
+     * volume per model — "every writer reachable from here passes the same
+     * 286/572 pair" — which read SetupBoxDrop's `a2` and missed its FIFTH
+     * argument. That fifth argument is per model and it is the hit cylinder;
+     * see `hit_radius` in monster.h and q2_monster_bind_hit_size below. The
+     * movement hull really is the same 286/572 cube for every creature, which
+     * is what 0x800AECEC holds and what 0x80050FD4..0x80051022 writes.
+     *
+     * What differs here is by CLASS: 0x8005CCFC short-circuits class 114, the
+     * path corner, to a -96/+96 cube.
      */
     m->mins[0] = m->mins[1] = m->mins[2] = -286;
     m->maxs[0] = m->maxs[1] = m->maxs[2] =  286;
+
+    /*
+     * And the hit cylinder at GetCreHitSize's NO-MODEL fallback, 286 and 600
+     * (0x8006DC6C `addiu v0, zero, 286` / 0x8006DC74 `addiu v0, zero, 600`).
+     * A creature whose model is bound replaces both through
+     * q2_monster_bind_hit_size; one whose model never resolves keeps these,
+     * which is exactly what the console gives a creature with cre+0x10 null.
+     *
+     * 600, not 572. The two pairs are different constants and the port had
+     * been using the hull's for both.
+     */
+    m->hit_radius = 286;
+    m->hit_height = 600;
 
     /*
      * The eye, as an offset from the ORIGIN — `visible` (0x8005B950) adds this
@@ -542,7 +562,7 @@ void q2_monster_drop_flush(void)
          * library's, as aimove.c and every cre_*.c do, so the one stream the
          * console shares between them is at least one stream here.
          */
-        req.heading = (u16)(rand() & 0xFFF);
+        req.heading = (u16)(q2_random_next() & 0xFFF);
 
         req.pos[0] = g_drop_queue[i].pos[0];
         req.pos[1] = g_drop_queue[i].pos[1];
@@ -594,6 +614,42 @@ void q2_monster_death_use(q2_monster *self)
 }
 
 /* ------------------------------------------------------------------------- */
+/* The hit cylinder — GetCreHitSize, MODELS.C 0x8006DC1C                       */
+/* ------------------------------------------------------------------------- */
+/*
+ * Two facts and a fallback, which is all the function is:
+ *
+ *     8006DC1C  lw   v0, 16(a1)        the creature's bound model
+ *     8006DC24  beq  v0, zero, ...     none: take the literals
+ *     8006DC34  lhu  v0, 24(v0)        model header +0x18 -> out[0]
+ *     8006DC48  lhu  v0, 26(v0)        model header +0x1A -> out[1]
+ *     8006DC6C  addiu v0, zero, 286    no model: out[0] = 286
+ *     8006DC74  addiu v0, zero, 600                out[1] = 600
+ *
+ * The halfwords are read UNSIGNED and then stored back into signed halfwords
+ * at obj+0x40/+0x42 (0x80051038/0x80051044) and read back signed by
+ * LineIntersectCreCylinder (0x8005474C, 0x80054834), so the round trip is an
+ * s16 and the port keeps them as s16. Measured on this disc they are extents:
+ * the Soldier's are 124 and 607, the Tank Commander's 327 and 918,
+ * Jorg's 590 and 1749.
+ */
+void q2_monster_bind_hit_size(q2_monster *m, bool has_model,
+                              s16 ext0, s16 ext1)
+{
+    if (!m)
+        return;
+
+    if (has_model) {
+        m->hit_radius = ext0;
+        m->hit_height = ext1;
+        return;
+    }
+
+    m->hit_radius = 286;
+    m->hit_height = 600;
+}
+
+/* ------------------------------------------------------------------------- */
 /* Corpses — 0x8007F098 (detach), 0x8007F77C (volume), 0x8007F71C (handler)   */
 /* ------------------------------------------------------------------------- */
 /*
@@ -619,8 +675,6 @@ static s16 corpse_wider(s16 v)
 
 void q2_monster_corpse_detach(q2_monster *m)
 {
-    int ax;
-
     if (!m || m->corpse)
         return;
 
@@ -636,20 +690,24 @@ void q2_monster_corpse_detach(q2_monster *m)
     m->class_id         = Q2_CLASS_CORPSE;
 
     /*
-     * The volume, half again as wide and a quarter as tall. The port's box is
-     * symmetric about the origin on all three axes, so the height divide lands
-     * on the Y pair and the width multiply on the other two — which is the
-     * same box the console builds, expressed in this port's own frame.
+     * The volume, half again as wide and a quarter as tall — AND IT IS THE HIT
+     * CYLINDER, not the movement hull.
+     *
+     * QuakeDeadHitCollision (0x8007F77C, QENTS.C 1810) is handed the collision
+     * object at 0x8007F0E0 with `a0 = s1 + 84`, cre+0x54, and touches exactly
+     * two halfwords of it: 0x8007F780 `lh v0, 66(a0)` and 0x8007F798
+     * `sh v0, 66(a0)` for obj+0x42, and 0x8007F790 / 0x8007F7BC for obj+0x40.
+     * Those are entity+0x96 and entity+0x94, `hit_height` and `hit_radius`.
+     * obj+0x18..0x22 — the ±286 movement hull — is not written anywhere in the
+     * function, so a corpse keeps the box it walked around in.
+     *
+     * This loop used to run over `mins`/`maxs` instead, because the cylinder
+     * was derived from them. That made a body 429 wide and 143 tall whatever
+     * it had been, and it shrank a hull the console leaves alone. Both halves
+     * are now where the console puts them.
      */
-    for (ax = 0; ax < 3; ax++) {
-        if (ax == 1) {
-            m->mins[ax] = corpse_shorter(m->mins[ax]);
-            m->maxs[ax] = corpse_shorter(m->maxs[ax]);
-        } else {
-            m->mins[ax] = corpse_wider(m->mins[ax]);
-            m->maxs[ax] = corpse_wider(m->maxs[ax]);
-        }
-    }
+    m->hit_height = corpse_shorter(m->hit_height);
+    m->hit_radius = corpse_wider(m->hit_radius);
 
     /*
      * The console frees the edict here (`entity+0x1C &= 0xDFFFFFFF`) and nulls
@@ -1321,7 +1379,7 @@ static void monster_start_frame(q2_monster *m)
     if (!mv)
         return;
 
-    r    = (s32)(rand() & 0x7FFF);
+    r    = (s32)(q2_random_next() & 0x7FFF);
     span = mv->last_frame - mv->first_frame + 1;
 
     /*

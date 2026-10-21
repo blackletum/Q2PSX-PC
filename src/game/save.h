@@ -48,13 +48,12 @@
  *                         shoot the same spread.
  *
  * All of it is below. What is deliberately NOT saved is transient presentation
- * — live particles, beams, the last shot's tracer — because it is regenerated
- * within a tick and storing it would only make the format brittle.
+ * — live particles, beams, explosion/gib models and the last shot's tracer.
+ * These effects finish naturally; loading a save drops their presentation.
  *
- * Creatures are not saved either, and that is a limit rather than a choice: the
- * sim does not own them (sim.h — a caller registers actors), so there is no set
- * to walk. q2_save_apply says so at the site rather than silently restoring a
- * level with its monsters back at full health and no way to tell.
+ * The client supplies creatures and doors through the capture/apply helpers
+ * below because it owns those sets. CAIS additionally restores AI animation,
+ * targets, timers and pursuit history; ROTR restores motion between endpoints.
  *
  * ---------------------------------------------------------------------------
  * Format
@@ -86,10 +85,12 @@
 #include "events_rt.h"
 #include "inventory.h"
 #include "mover.h"
+#include "rotator.h"
 #include "spawn.h"
 #include "projectile.h"
 #include "q2psx.h"
 #include "sim.h"
+#include "viewweapon.h"
 
 #define Q2_SAVE_MAGIC      "Q2PS"
 
@@ -154,7 +155,60 @@
  * skipped, and the restore falls back to `q2_mission_get_counts` on the row,
  * which is `0x80022210` itself.
  */
-#define Q2_SAVE_VERSION    7
+/*
+ * 8 — HELP, the help computer's CURRENT MESSAGE PAIR, as the two 12-byte
+ * Strings keys.
+ *
+ * `HelpComputer_SetMessages` (0x80020F34) keeps the keys of the HELPCOMPUTER
+ * that last fired in `LastOrders` (0x800C6EDC) and `LastObjective`
+ * (0x800C6ED0) and resolves them into the two displayed pointers. They are not
+ * session scratch: `HelpComputer_GetMessages` (0x800218A8) copies both keys
+ * straight out into the unit's save block on the save arm of every
+ * `LoadSaveHub` — 0x800227D4 in QMBASE and its four siblings at 0x80022F40,
+ * 0x80023A90, 0x80024288 and 0x800249F8 — and the restore arm hands them back
+ * to `SetMessages`. `HelpComputer_Reset` (0x80021968), which writes twelve
+ * zero bytes from 0x800AB87C into both, sits only on the arm taken when the
+ * unit has NO saved block.
+ *
+ * The KEYS travel, not the text: the console re-resolves them through the
+ * level's Strings on the way back in, so a restore in a different level shows
+ * that level's wording of the same message. The port does the same, and falls
+ * back to the shipped "Awaiting Orders." defaults for a file with no chunk.
+ *
+ * A version-7 file has no HELP and is still read, the same way a version-6 file
+ * has no LVLC.
+ */
+#define Q2_SAVE_VERSION    8
+
+/* Additive chunks on version 8: EVHS holds visited-map event blocks (map name,
+ * script size/count/identity, record latches, item latches and destroyed-group
+ * bytes); EXPL holds resident group item offsets, shared health and destruction.
+ * Missing EVHS starts a fresh history. Missing EXPL uses saved BRKS for broken
+ * shootable groups and the existing script replay for script-only destruction.
+ * ROTR holds rotator angles, pending motion and timers. CAIS holds creature
+ * behavior, stable target/move keys, the AI clock and pursuit trail. SKIL holds
+ * the difficulty used to build the creature roster.
+ * Missing ROTR/CAIS retains the older endpoint replay/basic creature restore.
+ * Older readers skip these chunks under the existing container contract. */
+
+/* EOBJ records permanent script-object changes without a one-shot latch.
+ * They also travel in EVHS on map departure. Older files retain normal EVE_
+ * replay; they cannot recover an object change that was never recorded. */
+
+/* RAND adds the shared gameplay random stream. Older files have no recorded
+ * state for that stream, so their load retains the reconstructed world's state. */
+
+/* VWPN preserves the live view-weapon machine and its consumed-shot cursors.
+ * Old files keep the previous fresh-weapon initialization on load. Runtime
+ * table/model pointers are rebound from this disc, never stored in the file. */
+
+/* ERTS preserves resident script clocks, TIMER/WAIT slots and pending triggers.
+ * Missing ERTS retains legacy replay; a new save replaces that reconstructed
+ * scheduler without firing any items while loading. */
+
+/* PRST adds projectile effect flags and the BFG beam-damage accumulator.
+ * Older files reconstruct bolt flags from the saved means of death, and start
+ * the unrecorded beam accumulator at zero. */
 
 /* The oldest version read, with the migration above. Older is refused. */
 #define Q2_SAVE_VERSION_OLDEST 5
@@ -209,6 +263,23 @@ typedef struct q2_save_level_counters {
     u32  zone_dead[Q2_SAVE_LEVEL_ZONES];     /* kills recorded per zone      */
     u32  zone_placed[Q2_SAVE_LEVEL_ZONES];   /* what each zone placed        */
 } q2_save_level_counters;
+
+/*
+ * The help computer's current pair (HELP, version 8).
+ *
+ * Twelve bytes each because that is what `LastOrders` and `LastObjective` are
+ * — `HelpComputer_SetMessages` moves them with three `lwl`/`lwr` pairs
+ * (0x80020F80..0x80020F94), and `HelpComputer_Reset` zeroes the same twelve
+ * from 0x800AB87C. `present` is false on anything older than version 8, and an
+ * empty key means "never fired", which is exactly what Reset leaves behind.
+ */
+#define Q2_SAVE_HELP_KEY 12
+
+typedef struct q2_save_help {
+    bool present;
+    char orders_key[Q2_SAVE_HELP_KEY + 1];      /* 0x800C6EDC */
+    char objective_key[Q2_SAVE_HELP_KEY + 1];   /* 0x800C6ED0 */
+} q2_save_help;
 
 struct q2_mission;   /* mission.h; only the copy helpers below need it */
 
@@ -305,11 +376,8 @@ typedef struct q2_save_mover {
  * where the survivors are standing and how hurt they are, and without those a
  * save reloads into a room the player has already cleared, full again.
  *
- * A STATED DIVERGENCE: the AI's own timers and its target are not carried, so a
- * creature that was hunting the player resumes from its stand. The console
- * keeps them; this port would have to serialise pointers into a set that is
- * rebuilt, and restoring a stale enemy pointer is worse than restarting the
- * hunt. Recorded here rather than left to be discovered.
+ * CRES remains the compatibility baseline. The optional CAIS chunk adds the
+ * AI state using roster indices and module-relative move keys, never pointers.
  */
 typedef struct q2_save_creature {
     u8  in_use;
@@ -320,11 +388,29 @@ typedef struct q2_save_creature {
     s32 pos[3];
 } q2_save_creature;
 
+typedef struct q2_save_rotator {
+    s16 node;
+    u8 kind, axis;
+    s32 accum;
+    s16 angle;
+    u8 state, step_pending, motor_active;
+    u16 delay, hold;
+} q2_save_rotator;
+
+struct q2_save_ai;
+struct q2_creature_world;
+
 typedef struct q2_save_breakable {
     s32 scene_node;
     s16 health;
     u8  broken;
 } q2_save_breakable;
+
+typedef struct q2_save_explosive {
+    u32 item_offset;
+    s16 health;
+    u8  destroyed;
+} q2_save_explosive;
 
 /* ------------------------------------------------------------------------- */
 /* One level's tally, as the MISSION screen's 25-byte record holds it          */
@@ -338,6 +424,15 @@ typedef struct q2_save_level_stats {
 /* ------------------------------------------------------------------------- */
 /* The snapshot                                                               */
 /* ------------------------------------------------------------------------- */
+typedef struct q2_save_event_runtime {
+    u32 script_size, script_crc, record_count;
+    s32 clock, tick;
+    u32 pending_count;
+    u32 pending[Q2_EVENT_RT_PENDING_MAX];
+    q2_event_timer timers[Q2_EVENT_RT_TIMER_MAX];
+    q2_event_wait waits[Q2_EVENT_RT_WAIT_MAX];
+} q2_save_event_runtime;
+
 typedef struct q2_save {
     /* --- identity ------------------------------------------------------- */
     char serial[Q2_SAVE_SERIAL_LEN];  /* the disc this save belongs to       */
@@ -376,9 +471,19 @@ typedef struct q2_save {
     s32  chaingun_bullets;
     u32  rng_state;       /* the weapon generator: same save, same spread     */
     u32  fx_rng_state;
+    bool game_rng_present;
+    u32  game_rng_state;
+
+    bool viewweapon_present;
+    q2_viewweapon viewweapon;  /* scalar state only; tab/model are NULL */
+    s32 viewweapon_selected;
+    u32 shot_serial, shot_serial_shown, shot_serial_heard;
+    bool shot_fired, shot_dry, cock_pending;
+    s16 shot_sound;
 
     /* Projectiles in flight. A rocket mid-air is as much state as the player. */
     q2_projectile proj[Q2_PROJ_MAX];
+    bool projectile_runtime_present;
 
     /* --- the world ------------------------------------------------------- */
     /* One flags byte per event record, indexed as the runtime indexes them. */
@@ -389,6 +494,17 @@ typedef struct q2_save {
      * as the runtime's `item_flags` is. Version 6; absent from a v5 file. */
     u8  *event_item_flags;
     u32  event_item_count;
+    /* Optional EOBJ: permanent object changes without a one-shot latch. */
+    u8  *event_object_flags;
+    u32  event_object_count;
+    bool event_runtime_present;
+    q2_save_event_runtime event_runtime;
+
+    /* EVE_ blocks for previously visited maps. EVHS is additive: older files
+     * have no history, so loading them starts with only their resident map's
+     * EVNT/EVIT state, never the abandoned session's history. */
+    bool           event_history_present;
+    q2_event_store event_history;
 
     /* One byte per trigger volume: was the player inside it last tick. */
     u8  *trigger_inside;
@@ -422,9 +538,18 @@ typedef struct q2_save {
     q2_save_breakable *breakables;
     u32                breakable_count;
 
+    /* Group health is shared by all its hitboxes; script-only groups have no
+     * hitbox at all. Neither can be reconstructed from BRKS alone. */
+    q2_save_explosive *explosives;
+    u32                explosive_count;
+
     /* Which doors and lifts are open, and where in their travel. */
     q2_save_mover *movers;
     u32            mover_count;
+
+    bool rotators_present;
+    q2_save_rotator *rotators;
+    u32 rotator_count;
 
     /*
      * Who is dead and where the rest are standing. Parallel to the rebuilt
@@ -433,6 +558,9 @@ typedef struct q2_save {
      */
     q2_save_creature *creatures;
     u32               creature_count;
+    struct q2_save_ai *ai;
+    bool skill_present;
+    s32 skill;
 
     /* --- presentation ---------------------------------------------------- */
     q2_save_level_stats mission[Q2_SAVE_MISSION_ROWS];
@@ -440,6 +568,9 @@ typedef struct q2_save {
 
     /* ...and the live counters behind that table's first column. */
     q2_save_level_counters level;
+
+    /* The help computer's current message pair, as keys (0x800218A8). */
+    q2_save_help help;
 
     s16  settings[Q2_SAVE_SETTINGS_MAX];
     u32  settings_count;
@@ -479,6 +610,17 @@ q2_result q2_save_capture(q2_save *out, const q2_sim *sim,
 q2_result q2_save_apply(const q2_save *s, q2_sim *sim, q2_inventory *inv,
                         const char *serial, const char *map);
 
+/* Deep copies; a failed copy leaves the destination unchanged. Restore also
+ * clears an existing store when the file predates EVHS. */
+q2_result q2_save_capture_event_history(q2_save *s, const q2_event_store *store);
+q2_result q2_save_restore_event_history(const q2_save *s, q2_event_store *store);
+
+/* Build the resident map's replay input from the SAVE, after its Events chunk
+ * is attached but before STARTLEV/replay constructs the world. The chunk's
+ * identity comes from the loaded runtime; EVNT/EVIT sizes must match it. */
+q2_result q2_save_event_carry(const q2_save *s, const q2_event_rt *rt,
+                              q2_event_carry *out);
+
 /*
  * The movers, which live in the CLIENT rather than the sim — the same shape as
  * the mission tallies below, and for the same reason: `q2_save_capture` is
@@ -487,11 +629,35 @@ q2_result q2_save_apply(const q2_save *s, q2_sim *sim, q2_inventory *inv,
 void q2_save_capture_movers(q2_save *s, const q2_mover_set *set);
 void q2_save_apply_movers(const q2_save *s, q2_mover_set *set);
 
+q2_result q2_save_capture_rotators(q2_save *s, const q2_rotator_set *set);
+/* Apply to freshly rebuilt rotators whose old audio voices have been stopped. */
+q2_result q2_save_apply_rotators(const q2_save *s, q2_rotator_set *set);
+
 /* And the creatures, for the same reason: the set lives in the client. The
  * count must match on apply, or the save is for a different population and
  * nothing is restored. */
 void q2_save_capture_creatures(q2_save *s, const q2_monster_set *set);
 void q2_save_apply_creatures(const q2_save *s, q2_monster_set *set);
+
+/* The client calls these alongside CRES. No AI chunk means legacy behavior.
+ * Skill must be restored BEFORE spawning the map's difficulty-filtered roster.
+ * phase_us is the unspent fraction of the client's 100 ms AI tick. */
+q2_result q2_save_capture_ai(q2_save *s, const struct q2_creature_world *world,
+                             u32 phase_us);
+q2_result q2_save_apply_ai(const q2_save *s, struct q2_creature_world *world,
+                           u32 *phase_us);
+bool q2_save_get_skill(const q2_save *s, s32 *skill);
+/* Called by q2_save_apply and again after client-side presentation rebuilds,
+ * so their constructor draws cannot consume the saved gameplay sequence. */
+void q2_save_apply_game_rng(const q2_save *s);
+
+q2_result q2_save_capture_viewweapon(q2_save *s, const q2_viewweapon *vw,
+                                     int selected, u32 shown, u32 heard,
+                                     bool cock_pending);
+/* Keeps the current weapon unchanged for a legacy save without VWPN.
+ * The caller rebinds the model after success and restores the shot cursors. */
+q2_result q2_save_apply_viewweapon(const q2_save *s, q2_viewweapon *vw,
+                                   const q2_vm_tables *tables);
 
 /* The mission tallies, which live in the client rather than the sim (mission.h
  * — the counters are inputs to the screen). Both are no-ops on NULL. */
@@ -506,6 +672,20 @@ void q2_save_apply_mission(const q2_save *s, struct q2_mission *m);
  */
 void q2_save_set_level_counters(q2_save *s, const q2_save_level_counters *lc);
 bool q2_save_get_level_counters(const q2_save *s, q2_save_level_counters *out);
+
+/*
+ * `HelpComputer_GetMessages` / `HelpComputer_SetMessages`, 0x800218A8 and
+ * 0x80020F34 — the two Strings KEYS of the message pair that is current, which
+ * every unit hub copies into and out of its save block.
+ *
+ * `set` marks the chunk present even when both keys are empty: empty is a real
+ * answer, and it is what `HelpComputer_Reset` writes on the arm taken when a
+ * unit has no saved block at all. `get` returns false — writing nothing — for a
+ * file older than version 8, and the caller then keeps the session's pair.
+ */
+void q2_save_set_help_keys(q2_save *s, const char *orders_key,
+                           const char *objective_key);
+bool q2_save_get_help_keys(const q2_save *s, q2_save_help *out);
 
 /* The menu settings, as an opaque run of s16 — see Q2_SAVE_SETTINGS_MAX. */
 void q2_save_set_settings(q2_save *s, const s16 *values, u32 count);

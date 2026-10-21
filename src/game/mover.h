@@ -416,6 +416,40 @@ typedef struct q2_mover {
     u16 delay_reset;
     u16 wait_reset;
 
+    /*
+     * THE PISTON, WHICH IS NOT A DOOR — obj+0x20, obj+0x4E and obj+0x52.
+     *
+     * PSXPISTON (0x8002E9EC) installs PSXPISTON_M (0x8002CEB8) and that handler
+     * is a continuous raised-sine oscillator, not one of the seven states.
+     * Each tick it advances `phase` by speed*dt, wraps it at 2*|target|*16, and
+     * reads the displacement out of the sine table at 0x800A5430 — so the
+     * motion eases out to MINUS target and back, over and over, and it does
+     * that `strokes` half-strokes before it stops.
+     *
+     * `strokes` is obj+0x4E, item[+16] (`lhu 16(a0)` at 0x8002EA44), decremented
+     * once per end-of-travel crossing at 0x8002CFF0. ZERO MEANS FOR EVER: the
+     * `beq v0, zero` at 0x8002CFF8 skips the whole counter when it is already
+     * nought, so it never reaches the stop at 0x8002D010.
+     *
+     * `running` is obj+0x52, the one-shot latch the exec tests at 0x8002EA2C
+     * before it arms anything, and clears with the handler at 0x8002D014. A
+     * trigger that arrives while a piston is stroking does nothing at all.
+     *
+     * `phase` is NOT reset by either half. The object is memset once by the
+     * constructor (0x8002D1F0), so a piston re-armed after it has stopped picks
+     * the wave up wherever the last stroke left it.
+     */
+    u16 phase;
+    u16 strokes;
+    u16 strokes_reset;
+    u8  running;
+
+    /* Every end-of-travel crossing this piston has made, counted whether or
+     * not `strokes` is doing anything with it. Not the console's — it has no
+     * such field — but "did it pump or did it slide out once" is otherwise
+     * unaskable from outside, and that was exactly the defect. */
+    u32 strokes_done;
+
     s32 offset;         /* current displacement along the axis */
 
     /* Which primitive built it, or Q2_MOVER_PRIM_OPCODE for the MOVER_A/B/C

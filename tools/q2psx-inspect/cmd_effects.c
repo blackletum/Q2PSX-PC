@@ -65,8 +65,12 @@ static const char *preset_name(q2_fx_preset_id id)
     /* 0x800596B0 is the ITEM materialise burst, not a gib — the row this
      * printed as "gib" until the preset was renamed (effect.h). */
     case Q2_FX_ITEM_MATERIALISE: return "item materialise";
-    case Q2_FX_SCRIPTED:  return "scripted";
-    case Q2_FX_SPARK:     return "spark";
+    /* 0x80028DC8 is DrawTelePorts' (EVENT.C), the per-frame column a
+     * registered TELEPORT volume pumps out of itself — not "scripted". */
+    case Q2_FX_TELEPORT:  return "teleport column";
+    /* 0x8003E0C0 is GenerateWaterSplash's, not a spark: the only caller of
+     * 0x8003E014 is the wade arm of the player's state think (effect.h). */
+    case Q2_FX_WATER_SPLASH: return "water splash";
     case Q2_FX_LASER_END: return "laser end";
     default:              return "?";
     }
@@ -268,13 +272,13 @@ static u32 exercise(const q2_fx_tables *t)
     {
         s32 at[3] = { 0, 0, 0 };
         u32 made = 0, tries, want;
-        const q2_fx_preset *sp = q2_fx_preset_at(Q2_FX_SPARK);
+        const q2_fx_preset *sp = q2_fx_preset_at(Q2_FX_WATER_SPLASH);
         u32 rep = (sp && sp->repeat) ? sp->repeat : 1u;
 
         /*
          * ONE q2_fx_spawn IS NOT ONE GROUP. Six of the eight spawn sites sit
          * inside an outer loop and the preset's `repeat` column carries the
-         * bound; the spark's is four (`slti v0, s2, 4` at 0x8003E0DC). This
+         * bound; the splash's is four (`slti v0, s2, 4` at 0x8003E0DC). This
          * check used to assume one and read a correct pool as broken the
          * moment the loop was implemented.
          */
@@ -283,7 +287,7 @@ static u32 exercise(const q2_fx_tables *t)
 
         q2_fx_world_clear(&w);
         for (i = 0; i < tries; i++) {
-            if (q2_fx_spawn(&w, &rng, Q2_FX_SPARK, at, 0) >= 0)
+            if (q2_fx_spawn(&w, &rng, Q2_FX_WATER_SPLASH, at, 0) >= 0)
                 made++;
         }
         printf("\n  pool refuses when full : %u of %u calls accepted"

@@ -100,6 +100,21 @@
  */
 #define Q2_EVENT_RT_TIMER_MAX 8
 
+typedef struct q2_event_timer {
+    u32 item;        /* slot+12: TIMER item offset, zero means free */
+    u32 offset;      /* slot+4: containing record */
+    u8 timer_index, next_item;
+    u16 window, fires;
+    s32 period, due;
+} q2_event_timer;
+
+typedef struct q2_event_wait {
+    bool in_use;
+    u32 offset;
+    s32 stamp;
+    u16 count;
+} q2_event_wait;
+
 typedef enum q2_event_outcome {
     Q2_EVENT_OK = 0,
     Q2_EVENT_ZONE_CHANGE,   /* a zone gate fired; see pending_zone */
@@ -154,6 +169,10 @@ typedef struct q2_event_rt {
      */
     u8  *item_flags;
     u32  item_flags_size;
+    /* Permanent object changes whose script item has no one-shot latch.
+     * Indexed like item_flags; an owner sets a byte when that item must be
+     * replayed to reconstruct its object (for example OBJDRAWOFF). */
+    u8  *object_flags;
 
     u32  pending[Q2_EVENT_RT_PENDING_MAX];
     u32  pending_count;
@@ -319,24 +338,30 @@ typedef struct q2_event_rt {
      *
      * The three operands 0x80026FEC copies into the slot, written by an
      * `on_call` hook for the same reason `abort_record` is: the hook reports a
-     * CALL and has nowhere else to put an answer. A non-zero `defer_ticks`
-     * stops the record at the TIMER item and claims a slot for it.
+     * CALL and has nowhere else to put an answer. `defer_timer` stops the
+     * record even for a zero-period timer. A positive `defer_ticks` also
+     * requests a slot for owners that supply their own fixed period.
      *
      *   defer_ticks   slot+0, the period: `(base + ((range * rand()) >> 15))
      *                 * 30` from item+4 and item+6 (0x800270D0..0x80027104).
      *                 The 30 is not the 300 everything else on this clock
-     *                 uses — `userfuncs.c` calls that out, which is why the
-     *                 caller computes it rather than this file.
+     *                 uses. The installed period callback computes it only
+     *                 after acceptance; defer_ticks is the fixed fallback.
      *   defer_fires   slot+8, from item+8 (0x800270A4). How many times the
      *                 window runs before the slot is freed; 0 is FOREVER.
      *   defer_window  slot+6, from item+10 (0x800270B4). How many items one
      *                 deadline runs.
      *
-     * The executor clears all three once the slot is claimed.
+     * The executor clears the request even if the slot is refused.
      */
+    bool defer_timer;
     s32 defer_ticks;
     u16 defer_fires;
     u16 defer_window;
+    /* Called only after a slot is accepted, and again after each deadline
+     * that leaves it armed. Install q2_event_timer_period for retail scripts;
+     * NULL keeps the owner's fixed defer_ticks. Rebind after loading a map. */
+    s32 (*timer_period)(const q2_event_item *item);
 
     /*
      * DISABLE THE RECORD THAT IS RUNNING — what `DISABLEME` means.
@@ -396,26 +421,14 @@ typedef struct q2_event_rt {
      * two items a second, eleven times. This port ran the whole remainder on
      * the first deadline and never resumed again.
      *
-     * DEVIATION, stated where it happens (timer_rearm in events_rt.c): the
-     * re-arm re-rolls `rand()` on the console and this runtime has no RNG —
-     * the roll is the owner's, in the `on_call` hook. The armed period is
-     * reused instead. Every one of the 18 TIMERs on the disc has range 0, so
-     * the console's re-roll is a constant there and nothing on this disc can
-     * tell the two apart.
+     * The period callback rerolls at each re-arm, including range-zero items:
+     * they still advance the shared random stream on the console. Refused
+     * requests and the final deadline of a finite timer consume no roll.
      *
      * `item` is the slot's identity and 0 means free, exactly as slot+12 does:
      * no item can live at chunk offset 0, which is the u32 record count.
      */
-    struct {
-        u32 item;        /* slot+12: the TIMER item's chunk offset  */
-        u32 offset;      /* slot+4:  the record it continues        */
-        u8  timer_index; /* that item's index, for the wrap         */
-        u8  next_item;   /* slot+16, as an index rather than a ptr  */
-        u16 window;      /* slot+6                                  */
-        u16 fires;       /* slot+8; 0 is forever                    */
-        s32 period;      /* slot+0 as armed                         */
-        s32 due;         /* clock + period                          */
-    }    deferred[Q2_EVENT_RT_TIMER_MAX];
+    q2_event_timer deferred[Q2_EVENT_RT_TIMER_MAX];
     u32  deferred_count;   /* slots in use, for a caller's "did anything
                             * happen"; the array is indexed, not packed */
     s32  clock;
@@ -435,12 +448,7 @@ typedef struct q2_event_rt {
      * taking the real delta. Nothing on the disc exercises this, so nothing
      * on the disc can confirm the mapping.
      */
-    struct {
-        bool in_use;
-        u32  offset;
-        s32  stamp;
-        u16  count;
-    }    wait[Q2_EVENT_RT_WAIT_MAX];
+    q2_event_wait wait[Q2_EVENT_RT_WAIT_MAX];
     s32  tick;
 
     u32  mover_count;   /* MOVER items reported                          */
@@ -600,6 +608,12 @@ typedef struct q2_event_carry {
 
     /* Parallel to q2_event_rt.item_flags: the runtime bits, by item offset. */
     u8  item_flags[Q2_EVENT_CARRY_MAX];
+
+    /* Native world-state extension: FXGROUP destruction and OBJDRAWOFF need
+     * not have one-shot script latches. Replay only the changed item, without
+     * re-running its pickup/secret tail. Includes rt.object_flags and the
+     * owner's destroyed explosive groups, indexed by item offset. */
+    u8  destroyed_items[Q2_EVENT_CARRY_MAX];
 } q2_event_carry;
 
 /* Take the latches off a runtime about to be freed. Leaves `size` 0 — nothing
@@ -649,5 +663,66 @@ void q2_event_rt_carry_in(q2_event_rt *rt, const q2_event_carry *in);
  * owner's too.
  */
 void q2_event_rt_replay(q2_event_rt *rt, const q2_event_carry *carry);
+
+/* ------------------------------------------------------------------------- */
+/* The blocks themselves — one carry per map                                  */
+/* ------------------------------------------------------------------------- */
+/*
+ * THE CARRY ABOVE IS NOT A ZONE-CHANGE THING. It is filed under a MAP.
+ *
+ * StoreEventStates (0x80029078) builds its save-memory block name by copying
+ * the five bytes "EVE_" from 0x800AE7A0 and then eight bytes of the current
+ * level name from 0x800E46B4 (0x800290A4..0x800290E8), and OpenSaveMemory
+ * (0x8007FBEC at 0x80029490) makes the block if it is not already there. The
+ * writer is reached from OnLeavingZone, whose two callers are the zone-change
+ * callback at 0x80079080 AND OnLeavingLevel at 0x8007CB94 — a function whose
+ * entire body is that one `jal`. So a LOADMAP writes the block exactly as a
+ * gate does, under the map being left.
+ *
+ * Coming in, RestoreSavedData (0x8007CBAC), which InitLevel calls at
+ * 0x80070F50, reads the block named after the level being ENTERED; 0x80029498
+ * falls straight out when there is none, so a first visit replays nothing.
+ *
+ * And nothing empties save memory at a level or a unit boundary: the only
+ * clear in the image is the new-game memset (mission.h, the sibling
+ * "PlayerSave" block). That is what makes the Waste unit work — its maps
+ * interconnect both ways, so WASTE2 and WASTE3 are each entered two or more
+ * times in one ordinary playthrough, and on the second visit the console
+ * re-arms none of the one-shots the player already spent.
+ *
+ * Heap, because one block is a little over five kilobytes and an owner may
+ * hold twenty-two of them.
+ */
+#define Q2_EVENT_BLOCK_NAME_MAX 64
+
+typedef struct q2_event_block {
+    char           map[Q2_EVENT_BLOCK_NAME_MAX];
+    q2_event_carry carry;
+} q2_event_block;
+
+typedef struct q2_event_store {
+    q2_event_block *block;
+    u32             count;
+    u32             cap;
+} q2_event_store;
+
+/* The block a map left behind, or NULL. Names are matched case-blind: the
+ * level table and the ISO directory disagree on case, and the console's own
+ * key is whatever 0x800E46B4 happens to hold. */
+q2_event_carry *q2_event_store_find(q2_event_store *s, const char *map);
+
+/* The same, making the block on a first visit — OpenSaveMemory's own
+ * behaviour. NULL only when there is no room for it. */
+q2_event_carry *q2_event_store_open(q2_event_store *s, const char *map);
+
+/* A NEW GAME, and nothing else: the memset at 0x8003DDB8 that 0x8003D62C
+ * takes when no block is found. The allocation is kept for reuse. */
+void q2_event_store_clear(q2_event_store *s);
+
+void q2_event_store_free(q2_event_store *s);
+
+/* Retail TIMER item+4/+6, in 1/300 s ticks. The caller has already identified
+ * this CALL as TIMER. A valid item always consumes one gameplay random draw. */
+s32 q2_event_timer_period(const q2_event_item *item);
 
 #endif /* Q2PSX_EVENTS_RT_H */

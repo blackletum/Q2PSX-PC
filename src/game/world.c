@@ -502,6 +502,45 @@ void q2_world_render_init(q2_world_render *r)
 /* polygon and every one of them has to go through the same colour, UV, CLUT   */
 /* and blend rules as the original.                                            */
 /* ------------------------------------------------------------------------- */
+/*
+ * Does this point's slot list name corner `corner` of polygon `poly`?
+ *
+ * ProcessMobileLights walks point+6..+9, breaks out of the whole slot loop on
+ * the first 0xFF (0x80074A84 `beq v0, t6`) and stops after four (0x80074B74
+ * `slti v0, t1, 4`). Each byte decodes through the halfword table InitLights
+ * fills at 0x800E1018 (0x80074134..0x80074174):
+ *
+ *     52 * ((b >> 2) & 31) + 4 + 12 * (b & 3)
+ *
+ * with bit 7 of `b` choosing the second 32-polygon packet block (0x80074A8C
+ * tests the sign of `b << 24`). Since the block adds 32 to the polygon index,
+ * that is simply polygon `b >> 2`, corner `b & 3` — which is the reverse index
+ * points.h already documents. A polygon past 63 has no encoding and is never
+ * painted, and a point used by more than four corners paints only its first
+ * four; both are consequences of the storage, not rules laid on top of it.
+ *
+ * The port keeps six slot bytes because the record has room for six; only the
+ * first four are read here, because only the first four are read there.
+ */
+static bool point_paints_corner(const q2_point *pt, u32 poly, u32 corner)
+{
+    u32 s;
+
+    if (poly > 63u)
+        return false;
+
+    for (s = 0; s < 4; s++) {
+        u8 b = pt->slot[s];
+
+        if (b == 0xFFu)
+            return false;
+        if ((u32)(b >> 2) == poly && (u32)(b & 3u) == corner)
+            return true;
+    }
+
+    return false;
+}
+
 typedef struct world_quad {
     gte_sxy screen[4];
     u16     depth[4];
@@ -949,6 +988,14 @@ u32 q2_world_build_ot(const q2_world_zone *z,
         s32 active_clip_h = cam->clip_h > 0 ? cam->clip_h : screen_h;
         u32 p;
         s32 translation[3];
+        /*
+         * The mobile lights that reach THIS node — ProcessMobileLights'
+         * surviving (light, brush) pairs, hoisted out of the polygon loop the
+         * way 0x80074628..0x800746E4 hoists the ramp out of the point loop.
+         */
+        q2_light_ramp mob[Q2_DYNLIGHT_MAX];
+        s32           mob_local[Q2_DYNLIGHT_MAX][3];
+        u32           mob_count = 0;
 
         if (have_order) {
             q2_sort_item it;
@@ -1197,6 +1244,73 @@ u32 q2_world_build_ot(const q2_world_zone *z,
                                 (s32)(tz >> Q2_FRAC_12));
         }
 
+        /*
+         * ---------------------------------------------------------------
+         * ProcessMobileLights, 0x80074598 — which lights reach this node
+         * ---------------------------------------------------------------
+         * NOTHING IN THE WORLD EVER GOT BRIGHTER in this port. Sixteen
+         * dynamic lights were being appended every frame by projectiles,
+         * muzzle flashes and script primitives, gathered per ENTITY by
+         * q2_light_gather, and then dropped: the level's own geometry was
+         * drawn from its baked Gouraud bytes and nothing else, so a rocket
+         * flying down a corridor lit the rocket and left the corridor black.
+         *
+         * The console does not light the world through the GTE at all. It
+         * walks the brushes DrawScene registered this frame (52-byte records
+         * at 0x800DA578, count at 0x800B2C80), rejects the ones the light's
+         * box misses, and POKES the Gouraud bytes of the packets it has
+         * already emitted — undoing them again on the next frame through
+         * UndoMobileLights (0x80075F60), whose per-draw-buffer undo list at
+         * 0x800E1458 exists precisely because the packets persist.
+         *
+         * This port rebuilds its quads every frame, so it needs neither the
+         * undo list nor the packet-poking: the ramp is applied where the
+         * baked colour is copied into the quad, a few lines below. The
+         * subdivision path then inherits it for free, which is what
+         * UpdateSubdivisionLighting (0x800695E0) does by hand at 0x80075BC4.
+         *
+         * THE LIGHT IS MADE LOCAL BY SUBTRACTING object+0x28/+0x2C/+0x30
+         * (0x80074940..0x80074980) and nothing else — in particular NOT the
+         * runtime displacement at object+0x12 that the node's draw position
+         * carries. So a mobile light falling on a moving door is computed
+         * against the door's authored position; `mover_shift` is deliberately
+         * absent here and present in the draw translation above.
+         */
+        if (z->lights && z->lights->dynamic_world_count) {
+            u32 li;
+
+            for (li = 0; li < z->lights->dynamic_world_count &&
+                         mob_count < Q2_DYNLIGHT_MAX; li++) {
+                const q2_light *l = &z->lights->dynamic_world[li];
+                s32 lp[3];
+                q2_light_ramp r;
+
+                lp[0] = l->x;
+                lp[1] = l->y;
+                lp[2] = l->z;
+
+                q2_light_ramp_begin(&r, l);
+
+                /*
+                 * `obj_flags` is the dword at object+0x0C, whose 0x00800000
+                 * opts an object out entirely (0x800747D4). A Scene node in
+                 * this port has no runtime object and therefore no such word,
+                 * so zero is passed: nothing opts out, which is what every
+                 * static piece of level geometry does on the console too.
+                 */
+                if (!q2_light_ramp_reaches(&r, lp, node.bbox_min,
+                                           node.bbox_max, 0))
+                    continue;
+
+                mob[mob_count] = r;
+                mob_local[mob_count][0] = lp[0] - node.origin[0];
+                mob_local[mob_count][1] = lp[1] - node.origin[1];
+                mob_local[mob_count][2] = lp[2] - node.origin[2];
+                mob_count++;
+                if (stats) stats->mobile_lights++;
+            }
+        }
+
         if (deferred_area >= 0) {
             s32 bounds_min[3], bounds_max[3];
             int axis;
@@ -1255,10 +1369,6 @@ u32 q2_world_build_ot(const q2_world_zone *z,
                 world_quad q;
                 gte_sxy screen[4];
                 u16 depth[4];
-                /* Did any corner's divide overflow? Its screen position is then
-                 * a clamp rather than a projection, and two tests below must
-                 * not be asked about it. */
-                bool corner_over = false;
 
                 screen[0] = gte->sxy[0];
                 screen[1] = gte->sxy[1];
@@ -1288,9 +1398,10 @@ u32 q2_world_build_ot(const q2_world_zone *z,
                  * The original's near-plane treatment is not rejection, it is
                  * SUBDIVISION (0x800AF7CC and 0x800AFA2C, and see the emit
                  * below): a near quad is replaced by a 4x4 mesh whose pieces
-                 * each project sanely. Only draw variant 1 rejects anything, and
-                 * that test is its own, is address-backed, and is still applied
-                 * a few lines down.
+                 * each project sanely — and when the mesh is declined, the flat
+                 * quad is linked anyway at 0x800AF9BC. Only draw variant 1
+                 * rejects anything, and that test is its own, is address-backed,
+                 * and is still applied a few lines down.
                  */
                 gte->v[0].x = pt[3].x; gte->v[0].y = pt[3].y; gte->v[0].z = pt[3].z;
                 gte_rtps(gte, false);
@@ -1299,137 +1410,80 @@ u32 q2_world_build_ot(const q2_world_zone *z,
                 depth[3]  = gte->sz[3];
 
                 /*
-                 * A CORNER THAT OVERFLOWED THE DIVIDE HAS NO USABLE SCREEN
-                 * POSITION, and the quad is rejected unless SUBDIVISION is
-                 * going to rescue it.
+                 * AND THAT IS THE WHOLE OF THE NEAR-PLANE STORY. Nothing is
+                 * asked here about how close a corner is, because none of the
+                 * three linkers asks it.
                  *
-                 * This is the near-plane rule, and getting it wrong in either
-                 * direction is visible. Rejecting whenever ANY corner overflows
-                 * — the sticky-flag test that used to be here — throws away a
-                 * quarter of an ordinary view, and near geometry projects to
-                 * the frame's border, so the holes appear at the outskirts.
-                 * Keeping such a quad instead is worse: `gte_divide` clamps to
-                 * 0x1FFFF on overflow, so that corner comes back SATURATED, and
-                 * the quad is emitted stretched across the screen where it
-                 * paints over everything behind it. That reads as "distant
-                 * geometry is being culled" and is the opposite — it is near
-                 * geometry being smeared over the distance.
+                 * A depth-based rejection stood in this spot until this pass:
+                 * "any corner's divide overflowed, and nothing is going to
+                 * subdivide this quad, so drop it". `gte_divide` overflows once
+                 * the projection distance reaches twice the depth, so at the
+                 * one-player viewport's H of 160 it fired for any corner inside
+                 * 80 units — and it took the WHOLE quad with it. Draw variant 1
+                 * never subdivides at all, so for a variant-1 node the escape
+                 * clause could never fire and the rejection was unconditional.
                  *
-                 * The original resolves it by SUBDIVIDING (0x800AF7CC,
-                 * 0x800AFA2C): the 4x4 mesh's pieces each project sanely, so
-                 * there is nothing to reject. Where subdivision does not apply —
-                 * draw variant 1, which never subdivides, and variant 2's
-                 * untagged polygons — the quad really is undrawable and goes.
-                 * So the test is "any corner overflowed AND nothing is going to
-                 * subdivide this", which is the same predicate consulted below,
-                 * asked early.
+                 * It was modelling a test that is not in the executable. The
+                 * provenance is in world.h beside
+                 * q2_world_quad_linker_rejects(); the short version is that the
+                 * depth sum at 0x800AF874 is compared once, at 0x800AF974, and
+                 * only to decide whether to CALL the subdivision hook — and when
+                 * that hook declines and returns 0 the flat quad is linked
+                 * regardless at 0x800AF9BC. The smear the old test feared is
+                 * handled where the console handles it: the GTE saturates the
+                 * clamped corner to +/-1024 and the GPU refuses any polygon
+                 * spanning more than 1023x511, which src/render/raster.c already
+                 * implements. This block was written before that rule existed
+                 * and had been double-counting it ever since.
+                 *
+                 * WHAT IT ACTUALLY COST, measured rather than assumed, because
+                 * the counter overstates it badly. On the BASE1 demo walk `near`
+                 * ran 6..43 quads a frame and `flat` stayed at 0 for all 400
+                 * frames — but every single one of those 10,886 quads ALSO fails
+                 * the 2D bounds test a few lines down, so removing the rejection
+                 * changes that walk by exactly zero pixels. The quads it really
+                 * lost are rarer: sweeping 26 maps x 4 zones x 200 demo frames
+                 * finds 46 of them, and only POWER2 zone 0 has one the GPU's
+                 * span rule would then have drawn. That one is worth the whole
+                 * change — riding the lift at frames 43..46, a ceiling slab with
+                 * all four corners at SZ 0 projects to a clean 239x162 rectangle
+                 * and 15,581 pixels, 12% of the frame, were simply absent.
                  */
-                {
-                    u32 h = (u32)cam->projection;
-
-                    corner_over = (h >= (u32)depth[0] * 2u) ||
-                                  (h >= (u32)depth[1] * 2u) ||
-                                  (h >= (u32)depth[2] * 2u) ||
-                                  (h >= (u32)depth[3] * 2u);
-
-                    if (corner_over &&
-                        !(render->subdiv_threshold > 0 &&
-                          q2_surf_should_subdivide(variant, poly.clut,
-                                                   (s32)depth[1] + (s32)depth[3],
-                                                   render->subdiv_threshold,
-                                                   render->pressure))) {
-                        if (stats) stats->quads_rejected_near++;
-                        continue;
-                    }
-                }
 
                 /*
-                 * THE 2D SCREEN-BOUNDS REJECT — the console's real answer to a
-                 * corner the GTE clamped, and the test this port never had.
+                 * The three rejections the console does have, in one place. The
+                 * rule and its provenance are in world.h; what belongs here is
+                 * what each was costing.
                  *
-                 * Variants 0 and 2 (0x800AF8DC-0x800AF968, 0x800AFB3C-0x800AFBC8)
-                 * reject only when all four corners are off the SAME edge. A
-                 * quad that STRADDLES the viewport survives, and that straddle
-                 * escape is precisely what lets a near quad with saturated
-                 * corners still be drawn — which is why the console needs no
-                 * near-plane rule and this port kept inventing one.
+                 * Bounds: this port had no 2D test at all, and its absence is
+                 * what made the invented near rejection look necessary.
                  *
-                 * Variant 1 (0x800AFDA0-0x800AFDEC) has no escape: it needs at
-                 * least one corner inside on each axis.
+                 * Backface: levels are sealed by brushes whose outward faces are
+                 * never meant to be seen, and drawn without a cull those faces
+                 * land in front of the rooms they enclose and black them out. It
+                 * reads as a visibility fault — as if whole areas were failing
+                 * to stream in — when the geometry behind them was being
+                 * transformed and emitted correctly all along. It runs
+                 * unconditionally, including for a quad with a saturated corner:
+                 * the console feeds NCLIP exactly the same +/-1024-saturated
+                 * SXY, because the vertex array it reads is what the transform
+                 * at 0x800AED30 wrote and the GTE saturates before storing.
                  */
-                if (active_clip_w <= 0 || active_clip_h <= 0) {
+                switch (q2_world_quad_linker_rejects(gte, variant,
+                                                     screen, depth,
+                                                     active_clip_w,
+                                                     active_clip_h)) {
+                case Q2_WORLD_QUAD_REJECT_BOUNDS:
                     if (stats) stats->quads_rejected_bounds++;
                     continue;
-                } else {
-                    int k, in_x = 0, in_y = 0;
-                    int lo_x = 0, hi_x = 0, lo_y = 0, hi_y = 0;
-
-                    for (k = 0; k < 4; k++) {
-                        s32 sx = screen[k].x, sy = screen[k].y;
-
-                        if (sx >= 0 && sx < active_clip_w) in_x++;
-                        else if (sx < 0)                 lo_x++;
-                        else                             hi_x++;
-
-                        if (sy >= 0 && sy < active_clip_h) in_y++;
-                        else if (sy < 0)                 lo_y++;
-                        else                             hi_y++;
-                    }
-
-                    if (variant == Q2_SURF_VARIANT_FLAT) {
-                        if (in_x == 0 || in_y == 0) {
-                            if (stats) stats->quads_rejected_bounds++;
-                            continue;
-                        }
-                    } else if (lo_x == 4 || hi_x == 4 ||
-                               lo_y == 4 || hi_y == 4) {
-                        if (stats) stats->quads_rejected_bounds++;
-                        continue;
-                    }
-                }
-
-                /*
-                 * Draw variant 1's own rejection (0x800AFD20 / 0x800AFD34): if
-                 * either of the two corners it looks up — vertex 1 and vertex 3,
-                 * the packed byte pairs it extracts first — projected to depth
-                 * zero, the quad is dropped without further testing. Variants 0
-                 * and 2 have no such test, which is the only place the three
-                 * linkers disagree about what is drawable at all.
-                 */
-                if (variant == Q2_SURF_VARIANT_FLAT &&
-                    (depth[1] == 0 || depth[3] == 0)) {
+                case Q2_WORLD_QUAD_REJECT_FLAT:
                     if (stats) stats->quads_rejected_flat++;
                     continue;
-                }
-
-                /*
-                 * Backface rejection, which the port did not have at all.
-                 *
-                 * The rule and its provenance are in world.h; what belongs here
-                 * is what it was costing. Levels are sealed by brushes whose
-                 * outward faces are never meant to be seen, and drawn without a
-                 * cull those faces land in front of the rooms they enclose and
-                 * black them out. It reads as a visibility fault — as if whole
-                 * areas were failing to stream in — when the geometry behind
-                 * them was being transformed and emitted correctly all along.
-                 */
-                /*
-                 * UNCONDITIONALLY, which is what the console does — NCLIP runs
-                 * first on every variant (0x800AF8A8, 0x800AFB08, 0x800AFD6C).
-                 *
-                 * This was briefly skipped for quads with a saturated corner,
-                 * on the worry that a clamped corner makes the cross product
-                 * meaningless. The worry is unfounded: the console feeds NCLIP
-                 * exactly the same +/-1024-saturated SXY, because the vertex
-                 * array it reads is what the transform at 0x800AED30 wrote and
-                 * the GTE saturates before storing. Skipping it let backfaces
-                 * through, and now that the 2D bounds test above removes the
-                 * off-screen quads properly there is nothing left for the skip
-                 * to protect.
-                 */
-                if (!q2_world_quad_faces_camera(gte, screen)) {
+                case Q2_WORLD_QUAD_REJECT_BACK:
                     if (stats) stats->quads_rejected_back++;
                     continue;
+                case Q2_WORLD_QUAD_DRAW:
+                    break;
                 }
 
                 for (i = 0; i < 4; i++) {
@@ -1451,6 +1505,78 @@ u32 q2_world_build_ot(const q2_world_zone *z,
                         q.rgb[i].r = q.rgb[i].g = q.rgb[i].b = 128;
                     }
                     q.rgb[i].pad = 0;
+                }
+
+                /*
+                 * ...and then the mobile lights repaint it, corner by corner.
+                 *
+                 * WHICH CORNERS A POINT MAY PAINT IS NOT "ALL OF THEM". The
+                 * console's inner loop is per POINT: it takes the four slot
+                 * bytes at point+6..+9, stops at the first 0xFF (0x80074A84),
+                 * and never looks past the fourth (0x80074B74 `slti 4`). Each
+                 * slot decodes through the table InitLights builds at
+                 * 0x800E1018 into "corner (b & 3) of POLY_GT4 (b >> 2)", so a
+                 * vertex shared by five quad corners lights four of them and a
+                 * node's sixty-fifth polygon can be named by no slot at all.
+                 * Painting every corner instead would be brighter than the
+                 * console in exactly the places geometry is densest.
+                 *
+                 * The packet corner is not the vertex index: the world
+                 * renderer's own colour writes (0x80068118..0x800681D8)
+                 * establish that packet corner 2 is vertex 3 and corner 3 is
+                 * vertex 2, which is the Z order libgpu wants — the same
+                 * shuffle the UV block below undoes. The disc agrees: over a
+                 * 900-frame BASE1 run this permutation leaves `mobile_unslotted`
+                 * at 0, and the straight-through { 0, 1, 2, 3 } leaves 1824
+                 * corners the slot list refuses to name.
+                 *
+                 * `q2_light_ramp_point` hands back SIGNED components on
+                 * purpose (lighting.h): `den` is truncated down, so the last
+                 * shell inside the outer radius comes out slightly negative and
+                 * the outermost ring of a mobile light very faintly DARKENS the
+                 * world. Rounding that to a byte first would turn -3 into +253
+                 * and paint the ring white.
+                 */
+                if (mob_count) {
+                    static const u32 packet_corner[4] = { 0, 1, 3, 2 };
+                    u32 li;
+
+                    for (i = 0; i < 4; i++) {
+                        u8 rgb[3];
+                        bool any = false;
+
+                        if (!point_paints_corner(&pt[i], p, packet_corner[i])) {
+                            if (stats) stats->mobile_unslotted++;
+                            continue;
+                        }
+
+                        rgb[0] = q.rgb[i].r;
+                        rgb[1] = q.rgb[i].g;
+                        rgb[2] = q.rgb[i].b;
+
+                        for (li = 0; li < mob_count; li++) {
+                            s16 lpt[3];
+                            s32 contrib[3];
+
+                            lpt[0] = pt[i].x;
+                            lpt[1] = pt[i].y;
+                            lpt[2] = pt[i].z;
+
+                            if (!q2_light_ramp_point(&mob[li], lpt,
+                                                     mob_local[li], contrib))
+                                continue;
+
+                            q2_light_ramp_add(rgb, contrib);
+                            any = true;
+                            if (stats) stats->mobile_corners++;
+                        }
+
+                        if (any) {
+                            q.rgb[i].r = rgb[0];
+                            q.rgb[i].g = rgb[1];
+                            q.rgb[i].b = rgb[2];
+                        }
+                    }
                 }
 
                 /*

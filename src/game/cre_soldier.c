@@ -153,6 +153,7 @@
  * constants below are the disc's own frame numbering and can be checked
  * against `q2psx-inspect creatures` directly.
  */
+#include "random.h"
 #include "ai.h"
 #include "crebind.h"
 #include "monster.h"
@@ -287,7 +288,7 @@ static void sol_play(q2_monster *m, sol_sound_id which)
 
 static s32 sol_rand(void)
 {
-    return (s32)(rand() & 0x7FFF);
+    return (s32)(q2_random_next() & 0x7FFF);
 }
 
 /*

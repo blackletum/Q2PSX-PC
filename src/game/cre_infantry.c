@@ -187,6 +187,7 @@
  * id's `infantry_fidget` plays `sound_idle`. Those are the disc's omissions,
  * not this port's.
  */
+#include "random.h"
 #include <stdlib.h>
 
 #include "ai.h"
@@ -283,7 +284,7 @@ static void inf_play(q2_monster *m, u32 handle)
 /* The module's random import (+0x14, 0x80089E28) returns 0..32767. */
 static s32 inf_rand(void)
 {
-    return (s32)(rand() & 0x7FFF);
+    return (s32)(q2_random_next() & 0x7FFF);
 }
 
 /* ------------------------------------------------------------------------- */

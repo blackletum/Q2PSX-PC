@@ -1,5 +1,7 @@
 #include "spawn.h"
 
+#include "ai.h"           /* AI_SetSightClient: the tick's first act, 0x8007E27C */
+#include "crebind.h"      /* q2_cre_skill: GetDifficultySetting, 0x8007CCEC */
 #include "entity.h"       /* q2_entity_drop_to_floor: the shared spawn drop */
 #include "worldscale.h"   /* Q2_EYE_BASE: the record is the feet */
 
@@ -72,6 +74,37 @@ q2_result q2_spawn_from_population(q2_monster_set *out, const q2_population *pop
                 break;
 
             local.records++;
+
+            /*
+             * DIFFICULTY REMOVES A CREATURE FROM THE MAP, it does not merely
+             * quieten one — and nothing in this port had ever applied it.
+             *
+             * SpawnGeneral (CREATURE.C 0x800565C4) is the one function that
+             * turns a spawn record into a creature, and before it allocates
+             * anything it asks GetDifficultySetting (0x800565E0) and switches
+             * three ways on the answer, reading the record's +0x14 each time
+             * against 0x800, 0x1000 and 0x2000 (0x80056620..0x80056660). On a
+             * hit it returns 0 from the epilogue at 0x800567E0: no entity, no
+             * model, no AI, no slot. Skill 3 and anything negative fall through
+             * the `slti`/`beq` chain at 0x800565F0..0x8005661C unfiltered.
+             *
+             * BEFORE the class tests below, because SpawnGeneral filters before
+             * it allocates; a record refused here must not consume the
+             * out-of-range or no-module counters either, which is why it has
+             * one of its own. CreatureCount applies the identical mask to the
+             * kill denominator at 0x80057770, which is the confirmation that
+             * these records are meant not to EXIST at that skill rather than to
+             * be present and hidden.
+             *
+             * The masks are the SPAWN record's, not a place record's — 0x800 /
+             * 0x1000 / 0x2000 at +0x14 against 0x2000 / 0x4000 / 0x8000 at
+             * +0x0C — and population.h keeps the two predicates deliberately
+             * apart.
+             */
+            if (!q2_pop_spawn_allows_skill(rec.flags, q2_cre_skill())) {
+                local.skill_filtered++;
+                continue;
+            }
 
             if (rec.class_id >= Q2_MONSTER_CLASS_COUNT) {
                 local.out_of_range++;
@@ -210,7 +243,26 @@ void q2_monster_set_wake(q2_monster_set *set, q2_monster *player)
 {
     u32 i;
 
-    q2_level_state.sight_client = player;
+    /*
+     * The client roster, not the sight client itself. This used to write
+     * `q2_level_state.sight_client = player` and that was the ONLY assignment
+     * to it in the port — nothing ever revisited it, so a player who died
+     * stayed acquirable for the rest of the level. On the console there is no
+     * wake at all: `level` is zeroed at load and every tick recomputes the
+     * pointer from the roster through AI_SetSightClient (0x8005EC60). So what
+     * belongs here is the roster, which is g_edicts[1..game.maxclients] over
+     * there (0x800B2FD0, 0x800B2C2C) and one entry here.
+     */
+    q2_ai_set_clients(&player, player ? 1 : 0);
+
+    /*
+     * ...and then run the rotation once, so that a caller inspecting the level
+     * between waking it and ticking it sees what the console's first
+     * QuakeThinkGeneral tick would have left behind rather than a stale
+     * pointer. Waking a zone with the player already dead therefore leaves
+     * sight_client NULL, which is correct: nothing may notice a corpse.
+     */
+    q2_ai_set_sight_client();
 
     if (!set)
         return;
@@ -235,6 +287,17 @@ u32 q2_monster_set_tick(q2_monster_set *set)
      */
     q2_level_state.framenum++;
     q2_level_state.time++;
+
+    /*
+     * AND THE VERY NEXT INSTRUCTION IS THE SIGHT ROTATION. QuakeThinkGeneral
+     * stores the bumped clock at 0x8007E278 and jumps to AI_SetSightClient at
+     * 0x8007E27C — the only call to it in the executable — before it touches a
+     * single entity. Nothing here did that, which left `sight_client` frozen at
+     * whatever the zone wake wrote and let every creature keep acquiring a dead
+     * player. It goes before the `set` test because the console's does: the
+     * pointer is level state, not creature state.
+     */
+    q2_ai_set_sight_client();
 
     if (!set)
         return 0;

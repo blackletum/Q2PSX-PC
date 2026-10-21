@@ -1,3 +1,4 @@
+#include "random.h"
 #include "sim.h"
 
 #include <stdlib.h>
@@ -115,6 +116,7 @@ void q2_sim_free(q2_sim *sim)
     free(sim->item_group_order);
     free(sim->trigger_inside);
     free(sim->volumes);
+    free(sim->scene_solids);
     free(sim->mover_base);
     free(sim->mover_last_off);
     free(sim->volume_damage);
@@ -1610,6 +1612,9 @@ static void build_volumes(q2_sim *sim)
     free(sim->volumes);
     sim->volumes      = NULL;
     sim->volume_count = 0;
+    free(sim->scene_solids);
+    sim->scene_solids = NULL;
+    sim->scene_solid_count = 0;
     /* The mover boxes live at the front of the same array, so rebuilding the
      * volumes discards them too; the caller re-attaches after a zone load. */
     free(sim->mover_base);
@@ -2982,7 +2987,7 @@ static void world_effects(q2_sim *sim)
              * the game's one-bit random result. */
             p->water_voice = !p->water_voice;
             if (p->water_voice) {
-                q2_ent_sound sound = (rand() & 1) ? Q2_SND_DROWN
+                q2_ent_sound sound = (q2_random_next() & 1) ? Q2_SND_DROWN
                                                    : Q2_SND_GASP;
 
                 q2_ent_sound_at(&sim->ent_world.events, sound, p->pos);
@@ -3009,6 +3014,25 @@ static void world_effects(q2_sim *sim)
         if (p->wade == 0) {
             q2_ent_sound_at(&sim->ent_world.events, Q2_SND_WATER_IN, p->pos);
             p->splash_time = sim->level_time + 100;
+
+            /*
+             * AND THE SPLASH — 0x8003D4C4, `jal GenerateWaterSplash` with
+             * a0 = entity+0x54 (the position) and a1 = entity+0x9E (the area).
+             * It sits between the sound and the wade increment on exactly this
+             * arm, and this port had the two ends of it and not the middle.
+             *
+             * The preset is the one this table used to call SPARK. Its site
+             * 0x8003E0C0 is inside GenerateWaterSplash and has no other caller
+             * in the executable, so a bullet never reached it and a wade never
+             * did either: sixty additive blue quads that nothing raised. The
+             * row's `repeat` of 4 is the outer loop at 0x8003E0DC and its
+             * `accel_y` of 4 the `sh 4, 98(v1)` at 0x8003E0D4, so one
+             * q2_fx_spawn is the whole of it.
+             */
+            sim->water_splashes++;
+            if (sim->fx_ready)
+                q2_fx_spawn(&sim->fx, &sim->fx_rng, Q2_FX_WATER_SPLASH,
+                            p->pos, q2_sim_fx_area(sim, 0, p->pos));
         }
         p->wade++;
     } else {

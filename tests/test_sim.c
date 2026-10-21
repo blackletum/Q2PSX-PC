@@ -11,9 +11,11 @@
 
 #include "aiworld.h"
 #include "crebind.h"   /* q2_cre_set_skill — the global sync_rules reads */
+#include "lighting.h"  /* the four muzzle presets, 0x800AE9D4 onward */
 #include "levelbin.h"
 #include "multiplayer.h"  /* q2_mp_batches — what an arena spawns */
 #include "playerdeath.h"   /* q2_player_die — where the killer byte is read */
+#include "rotator.h"
 #include "sim.h"
 #include "trig.h"
 
@@ -1317,6 +1319,83 @@ static void test_fall_damage(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * WADING IN THROWS A SPLASH — 0x8003D4C4, `jal GenerateWaterSplash`.
+ *
+ * The port had both ends of that arm and not the middle: the pla_watr_in sound
+ * at 0x8003D4A0 and the client+216 cooldown at 0x8003D4BC were transcribed and
+ * the call between them was not, so stepping into water was silent on screen.
+ * The preset it spawns is the one this codebase used to call SPARK — its site
+ * 0x8003E0C0 lives inside GenerateWaterSplash and has no other caller in the
+ * executable, so it had been sitting in the table with nothing raising it.
+ */
+static q2_fx_tables g_splash_tab;
+
+static void test_water_splash(void)
+{
+    q2_sim   sim;
+    q2_input in;
+    s32 spawn[3] = { 0, 0, 0 };
+    u32 groups = 0, blue = 0, sagging = 0, g;
+    int i;
+
+    printf("water splash\n");
+
+    memset(&g_splash_tab, 0, sizeof(g_splash_tab));
+    g_splash_tab.loaded = true;
+    memset(&in, 0, sizeof(in));
+
+    q2_sim_init(&sim, NULL, 50);
+    q2_sim_attach_effects(&sim, &g_splash_tab, 1);
+    q2_sim_spawn(&sim, spawn, 0);
+    sim.player[0].ground_y = 0;
+
+    /* Dry: nothing at all. */
+    for (i = 0; i < 4; i++)
+        q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
+    for (g = 0; g < sim.fx.group_count; g++)
+        if (sim.fx.group[g].life)
+            groups++;
+    check_eq_i(groups, 0, "walking about on dry land splashes nothing");
+
+    /* 0x8003D480: the INWATER bit, on the tick the wade counter is still zero. */
+    sim.env_flags = Q2_ENT_INWATER;
+    q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
+
+    for (g = 0; g < sim.fx.group_count; g++) {
+        const q2_fx_group *q = &sim.fx.group[g];
+
+        if (!q->life)
+            continue;
+        groups++;
+        if (q->ramp[0] == &g_splash_tab.ramp[0] &&
+            q->ramp[1] == &g_splash_tab.ramp[0])
+            blue++;
+        if (q->accel[1] == 4)
+            sagging++;
+    }
+
+    /* `slti v0, s2, 4` at 0x8003E0DC — the outer loop runs four times, so one
+     * entry into water is sixty quads and not fifteen. */
+    check_eq_i(groups, 4, "entering water spawns four groups of fifteen");
+    check_eq_i(blue, 4, "all on ramp 0, the additive blue (0x8003E040)");
+    check_eq_i(sagging, 4, "and all sagging at 4 (sh 4, 98(v1) at 0x8003E0D4)");
+    check_eq_i(sim.player[0].splash_time, sim.level_time + 100,
+               "the 0x8003D4BC cooldown is still armed beside it");
+
+    /* And only on the EDGE: the wade counter is non-zero from here on. */
+    groups = 0;
+    for (g = 0; g < sim.fx.group_count; g++)
+        sim.fx.group[g].life = 0;
+    for (i = 0; i < 8; i++)
+        q2_sim_tick(&sim, &in, Q2_DT_NOMINAL);
+    for (g = 0; g < sim.fx.group_count; g++)
+        if (sim.fx.group[g].life)
+            groups++;
+    check_eq_i(groups, 0, "standing in it splashes again on no later tick");
+}
+
+/* ------------------------------------------------------------------------- */
 static void test_movement(void)
 {
     q2_sim sim;
@@ -1534,6 +1613,235 @@ static void test_piston_decode(void)
     check(set.count && set.movers[0].blocks_player,
           "a non-zero +18 enables the collision pusher");
     q2_movers_free(&set);
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * A PISTON PUMPS. PSXPISTON_M (0x8002CEB8) is a raised-sine oscillator, not a
+ * door, and the port used to run it through the seven-state machine: one linear
+ * stroke to PLUS target, a hold, a stroke back, and then nothing for ever.
+ *
+ * WASTE1 zone 1's three are the concrete case — speed 25/10/35, target 250,
+ * item[+16] zero — so this uses those numbers.
+ */
+static void test_piston_oscillator(void)
+{
+    q2_mover      m;
+    q2_mover_set  set;
+    s32  lo = 0, hi = 0;
+    u32  i, crossings;
+
+    printf("piston oscillator\n");
+
+    memset(&m, 0, sizeof(m));
+    m.prim          = Q2_UF_PISTON;
+    m.axis          = 1;
+    m.speed         = 25;
+    m.target        = 250;
+    m.strokes_reset = 0;            /* WASTE1's: no count, so for ever */
+    m.silent        = 1;
+    m.partner       = -1;
+    m.portal_node   = -1;
+    m.part_count    = 1;
+    m.sound_pending = Q2_MVSND_NONE;
+
+    set.movers   = &m;
+    set.count    = 1;
+    set.capacity = 1;
+
+    /* Untriggered, obj+0x2C is NULL and nothing is ticked. */
+    q2_movers_tick(&set, 10, 0);
+    check_eq_i(m.offset, 0, "an untriggered piston does not move");
+    check_eq_i(m.running, 0, "and is not running");
+
+    q2_mover_trigger(&set, 0);
+    check_eq_i(m.running, 1, "a trigger arms it (obj+0x52)");
+    check_eq_i(m.state, Q2_MV_IDLE,
+               "and leaves the door state machine alone");
+
+    /* One full period is 2*|target|*16 = 8000 phase units; at speed 25 and
+     * dt 10 that is 250 a tick, so 32 ticks. Two periods, sampled. */
+    for (i = 0; i < 64; i++) {
+        q2_movers_tick(&set, 10, 0);
+        if (m.offset < lo) lo = m.offset;
+        if (m.offset > hi) hi = m.offset;
+    }
+
+    /* THE SIGN. 0x8002CFD0 negates the target before the multiply, so the
+     * displacement is 0 .. -target and never positive. The port's old linear
+     * stroke went to +250. */
+    check_eq_i(hi, 0, "it never displaces past zero the positive way");
+    check_eq_i(lo, -250, "and reaches exactly minus the target");
+
+    /* And it keeps going: item[+16] of zero never reaches the stop. */
+    crossings = m.strokes_done;
+    check(crossings >= 4, "two periods make at least four half-strokes");
+    check_eq_i(m.running, 1, "a zero half-stroke count never stops");
+
+    /* A trigger that arrives while it is stroking is a no-op — the latch is
+     * tested before anything is written (0x8002EA2C). */
+    m.strokes = 7;
+    q2_mover_trigger(&set, 0);
+    check_eq_i(m.strokes, 7, "re-triggering a running piston reloads nothing");
+
+    /* Now give it a count and let it run out. Six half-strokes is three full
+     * periods; it must stop on the sixth crossing and become re-armable. */
+    m.running       = 0;
+    m.strokes       = 0;
+    m.strokes_reset = 6;
+    m.phase         = 0;
+    m.strokes_done  = 0;
+    q2_mover_trigger(&set, 0);
+    check_eq_i(m.strokes, 6, "an idle piston reloads its half-stroke count");
+    for (i = 0; i < 200 && m.running; i++)
+        q2_movers_tick(&set, 10, 0);
+    check_eq_i(m.running, 0, "it stops when the count runs out");
+    check_eq_i(m.strokes_done, 6, "after exactly six half-strokes");
+    check_eq_i(i, 96, "which is three full periods of 32 ticks");
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * PSXTELEPORT_T (0x8002E3F0), the half of the TELEPORT binding record this port
+ * never ran — so DrawTelePorts had an empty list and every pad on the four
+ * deathmatch maps was bare geometry.
+ */
+static void test_teleport_registration(void)
+{
+    static const u8 funcs[16] = {
+        1, 0, 0, 0, 'T', 'E', 'L', 'E', 'P', 'O', 'R', 'T', 0, 0, 0, 0
+    };
+    u8 raw[32];
+    u8 tb[4 + 36 * 4];
+    q2_userfuncs    uf;
+    q2_events       events;
+    q2_triggers     trigs;
+    q2_teleport_set set;
+
+    printf("teleport registration\n");
+
+    /* One record at +8 — four bytes of header plus one 16-byte TELEPORT CALL. */
+    memset(raw, 0, sizeof(raw));
+    hwr16(raw + 8, 20);
+    raw[10] = 1;
+    raw[12] = Q2_EVOP_CALL;
+    raw[13] = 16;
+
+    memset(&uf, 0, sizeof(uf));
+    uf.data  = funcs;
+    uf.size  = (u32)sizeof(funcs);
+    uf.count = 1;
+    memset(&events, 0, sizeof(events));
+    events.data         = raw;
+    events.size         = (u32)sizeof(raw);
+    events.record_count = 1;
+    events.first_record = 8;
+
+    /*
+     * Three volumes and the sentinel. Volume 0 names the record but carries no
+     * area (255, the `lb 32(rec) == -1` skip at 0x8002E430); volume 1 names it
+     * and does; volume 2 also does, and must lose — the constructor returns at
+     * 0x8002E46C the moment it stores one.
+     */
+    memset(tb, 0, sizeof(tb));
+    hwr16(tb + 0, 3);
+    hwr16(tb + 2, 0);
+    hwr16(tb + 4 + 0 * 36 + 0x1A, 8);      /* names record 8   */
+    hwr16(tb + 4 + 0 * 36 + 0x20, 255);    /* ...with no area  */
+    hwr32(tb + 4 + 1 * 36 + 0x00, (u32)-400);   /* min x */
+    hwr32(tb + 4 + 1 * 36 + 0x04, (u32)-100);   /* min y */
+    hwr32(tb + 4 + 1 * 36 + 0x08, (u32)-800);   /* min z */
+    hwr32(tb + 4 + 1 * 36 + 0x0C, 600);         /* max x */
+    hwr32(tb + 4 + 1 * 36 + 0x10, 300);         /* max y */
+    hwr32(tb + 4 + 1 * 36 + 0x14, 1000);        /* max z */
+    hwr16(tb + 4 + 1 * 36 + 0x1A, 8);
+    hwr16(tb + 4 + 1 * 36 + 0x20, 23);
+    hwr16(tb + 4 + 2 * 36 + 0x1A, 8);
+    hwr16(tb + 4 + 2 * 36 + 0x20, 24);
+    hwr16(tb + 4 + 3 * 36 + 0x20, 255);    /* the sentinel */
+
+    memset(&trigs, 0, sizeof(trigs));
+    trigs.data  = tb + 4;
+    trigs.count = 3;
+
+    check_eq_i(q2_teleports_build(&set, &events, &uf, &trigs), 1,
+               "one TELEPORT registers one volume");
+    check_eq_i(set.trigger[0], 1,
+               "the first volume with an area that names the record, not the "
+               "first that names it");
+    check_eq_i(set.unmarked, 0, "and nothing goes unmarked");
+
+    /* The walk, with the same volume. */
+    {
+        q2_fx_tables      tab;
+        q2_fx_world       w;
+        q2_rng            rng;
+        q2_teleport_frame frame;
+        u32               n;
+
+        memset(&tab, 0, sizeof(tab));
+        tab.loaded = true;
+        q2_fx_world_init(&w, &tab);
+        q2_rng_seed(&rng, 7);
+
+        /* Level tick 0: the saw is on its rising arm, so Y comes from mins. */
+        n = q2_teleports_draw(&set, &trigs, &w, &rng, 0, &frame);
+        check_eq_i(n, 1, "the walk queues one column per registered pad");
+        check_eq_i(frame.light_count, 1, "and one light beside it");
+        check_eq_i(frame.light[0].pos[1], 100,
+                   "the LIGHT sits at the bbox centre in Y (0x80028DF8)");
+        check_eq_i(frame.light[0].inner, Q2_FX_TELEPORT_LIGHT_INNER,
+                   "with the 400 at 0x80028E14");
+        check_eq_i(frame.light[0].rgb[2], 255, "and the blue of 0x800AE798");
+
+        {
+            u32 g, found = 0;
+
+            for (g = 0; g < w.group_count; g++) {
+                if (!w.group[g].life)
+                    continue;
+                found++;
+                check_eq_i(w.group[g].origin[1], -100,
+                           "the COLUMN starts at mins[1] while it rises");
+                check_eq_i(w.group[g].area, 23,
+                           "and takes the volume's ID byte as its area");
+            }
+            check_eq_i(found, 1, "exactly one group");
+        }
+
+        /* Tick 63 turns the saw over: Y becomes maxs and the quads fall. */
+        for (n = 0; n < w.group_count; n++)
+            w.group[n].life = 0;
+        q2_teleports_draw(&set, &trigs, &w, &rng, 63, &frame);
+        {
+            u32 g;
+            for (g = 0; g < w.group_count; g++)
+                if (w.group[g].life)
+                    check_eq_i(w.group[g].origin[1], 300,
+                               "and at maxs[1] while it falls (0x80028D38)");
+        }
+
+        /*
+         * AND THE FIFTEEN VELOCITIES ARE DRAWN WHETHER OR NOT THERE ARE PADS.
+         * 0x80028C34 runs above the `blez` on NumTelePorts at 0x80028CA8, so a
+         * map with none still consumes 45 draws a frame — moving them inside
+         * the walk would put every seeded replay one state out per frame.
+         */
+        {
+            q2_teleport_set empty;
+            q2_rng a, b;
+            u32 k;
+
+            memset(&empty, 0, sizeof(empty));
+            q2_rng_seed(&a, 99);
+            q2_rng_seed(&b, 99);
+            q2_teleports_draw(&empty, &trigs, &w, &a, 0, NULL);
+            for (k = 0; k < 45; k++)
+                (void)q2_rng_next(&b);
+            check_eq_i(q2_rng_next(&a), q2_rng_next(&b),
+                       "an empty list still spends 45 draws");
+        }
+    }
 }
 
 /* BASE2 Events+888: the cage at the level start drops once and stays there. */
@@ -2357,6 +2665,105 @@ static void test_session_reaches_the_shot(void)
 }
 
 /*
+ * THE FOUR MUZZLE FLASHES, and the two that were raising nothing at all.
+ *
+ * Enumerating AddLight's (0x80075C34) call sites found the machinegun at
+ * 0x8004C744 and the chaingun at 0x8004CA9C and stopped there — "the two
+ * weapons that carry one". The shotgun and the super shotgun each raise a
+ * TIMED one instead, through a different function:
+ *
+ *   QPlayerFireShotGun       0x8004C3B0 a0 = entity+0xA4, 600/1200, ticks 3
+ *   QPlayerFireSuperShotGun  0x8004C674 a0 = entity+0x54, 800/1600, ticks 4
+ *
+ * both at 0x80075D14 and both with the colour word at 0x800AE9D4 the
+ * machinegun already uses. So the super shotgun has the largest and longest
+ * flash the player owns and it was the one nothing ever raised.
+ */
+static u32 count_light_events(const q2_sim *sim, const q2_ent_event **first)
+{
+    u32 i, n = 0;
+
+    if (first)
+        *first = NULL;
+
+    for (i = 0; i < sim->ent_world.events.count; i++) {
+        const q2_ent_event *e = &sim->ent_world.events.e[i];
+
+        if (e->kind != Q2_ENT_EVENT_LIGHT)
+            continue;
+        if (first && !*first)
+            *first = e;
+        n++;
+    }
+
+    return n;
+}
+
+static void fire_once(q2_sim *sim, u8 weapon, q2_ammo ammo)
+{
+    s32 spawn[3] = { 0, 0, 0 };
+
+    q2_sim_init(sim, NULL, 30);
+    q2_sim_spawn(sim, spawn, 0);
+    q2_sim_give_weapon(sim, weapon);
+    sim->combat.weapon_id = weapon;
+    sim->combat.inv.ammo[ammo] = 50;
+    q2_ent_events_clear(&sim->ent_world.events);
+    check(q2_sim_fire(sim).fired, "the weapon fires");
+}
+
+static void test_muzzle_flash_reaches_the_light_world(void)
+{
+    q2_sim sim;
+    const q2_ent_event *e;
+
+    printf("all four muzzle flashes\n");
+
+    fire_once(&sim, Q2_WID_SHOTGUN, Q2_AMMO_SHELLS);
+    check_eq_i(count_light_events(&sim, &e), 1, "the shotgun raises one light");
+    if (e) {
+        check_eq_i(e->ticks, Q2_SHOTGUN_LIGHT_TICKS,
+                   "through AddTimedLight, for three frames");
+        check_eq_i(e->inner_radius, Q2_SHOTGUN_LIGHT_INNER,
+                   "600 inner, from 0x800AE9D8");
+        check_eq_i(e->radius, Q2_SHOTGUN_LIGHT_OUTER,
+                   "1200 outer, from 0x800AE9DA");
+        check_eq_i(e->glow[0], Q2_MUZZLE_FLASH_R, "and the shared muzzle red");
+        check_eq_i(e->glow[1], Q2_MUZZLE_FLASH_G, "green");
+        check_eq_i(e->glow[2], Q2_MUZZLE_FLASH_B, "blue");
+    }
+
+    fire_once(&sim, Q2_WID_SUPER_SHOTGUN, Q2_AMMO_SHELLS);
+    check_eq_i(count_light_events(&sim, &e), 1,
+               "the super shotgun raises one too");
+    if (e) {
+        check_eq_i(e->ticks, Q2_SSHOTGUN_LIGHT_TICKS, "for four frames");
+        check_eq_i(e->inner_radius, Q2_SSHOTGUN_LIGHT_INNER, "800 inner");
+        check_eq_i(e->radius, Q2_SSHOTGUN_LIGHT_OUTER, "1600 outer");
+    }
+
+    /*
+     * The machinegun keeps the AddLight path: one frame, and both radii from a
+     * single rand() draw rather than a fixed pair. `ticks == 0` is what tells
+     * the light world which of the two engine calls this was.
+     */
+    fire_once(&sim, Q2_WID_MACHINEGUN, Q2_AMMO_BULLETS);
+    check_eq_i(count_light_events(&sim, &e), 1,
+               "the machinegun raises one light");
+    if (e) {
+        check_eq_i(e->ticks, 0, "through AddLight, which is one frame");
+        check(e->radius >= Q2_MUZZLE_OUTER_BASE &&
+              e->radius <= Q2_MUZZLE_OUTER_BASE + Q2_MUZZLE_OUTER_SCALE,
+              "with a rand-drawn outer radius in the console's band");
+    }
+
+    /* And a weapon with no flash raises nothing, which is most of them. */
+    fire_once(&sim, Q2_WID_BLASTER, Q2_AMMO_CELLS);
+    check_eq_i(count_light_events(&sim, NULL), 0,
+               "the blaster's own bolt is a projectile, not a muzzle flash");
+}
+
+/*
  * Picking a weapon up. The disc leaves the blaster and nothing else
  * (0x80037E78); autoswitch promotes to anything ranked higher on the console's
  * own preference list at 0x8009DB7C, and to nothing that is not on it.
@@ -2994,6 +3401,172 @@ static void test_movers_block_sight_and_shots(void)
 
 /* ------------------------------------------------------------------------- */
 /* GLASS owns a normal entity box until the fatal hit frees that box. */
+static void test_scene_solid_lifetimes(void)
+{
+    q2_sim sim;
+    q2_scene scene = {0};
+    q2_rotator_set rot = {0};
+    q2_explosive groups[2] = {0};
+    q2_explosive_set exp = {0};
+    q2_mover mover = {0};
+    q2_mover_set movers = {0};
+    q2_uf_operands ops;
+    q2_move_contact hit;
+    q2_move_seg_hit ray;
+    q2_ai_world_bind bind;
+    q2_trace tr;
+    u8 raw[6 * Q2_SCENE_NODE_SIZE] = {0};
+    u8 events[32] = {0}, operands[32], names[28] = {0};
+    s32 from[3] = {500, 300, 500}, to[3] = {500, 300, 3500};
+    u32 i, k, count;
+
+    puts("scene boxes follow hatch, explosive and script lifetimes");
+    q2_sim_init(&sim, NULL, 50);
+    check(open_box_hull(&sim.coll), "scene-box test has an open room");
+    sim.coll_ready = true;
+    scene.nodes = raw; scene.node_count = 6;
+    for (i = 0; i < 6; i++) {
+        const s32 lo[3] = {300 + (s32)i * 1000, 200, 2000};
+        const s32 hi[3] = {700 + (s32)i * 1000, 600, 2400};
+        for (k = 0; k < 3; k++) {
+            hwr32(raw + i*Q2_SCENE_NODE_SIZE + 16 + 4*k, (u32)lo[k]);
+            hwr32(raw + i*Q2_SCENE_NODE_SIZE + 28 + 4*k, (u32)hi[k]);
+        }
+    }
+    /* One OBJDRAWOFF with a hole before its live slot, then SHOOTTHEN.
+     * COMMON's node operands have been consumed; the zone copy still has 3. */
+    hwr32(events, 1); events[8] = 24; events[10] = 2;
+    events[12] = Q2_EVOP_CALL; events[13] = 12;
+    memset(events + 16, 255, 8);
+    events[24] = Q2_EVOP_CALL; events[25] = 8; events[26] = 1;
+    events[28] = 5; events[30] = 10;
+    memcpy(operands, events, sizeof(events));
+    operands[18] = 3; operands[19] = 0;
+    hwr32(names, 2);
+    memcpy(names + 4, "OBJDRAWOFF", 10);
+    memcpy(names + 16, "SHOOTTHEN", 9);
+    sim.events.data = events; sim.events.size = sizeof(events);
+    sim.events.record_count = 1; sim.events.dir_offset = 4;
+    sim.events.first_record = 8; sim.events_ready = true;
+    sim.userfuncs.data = names; sim.userfuncs.size = sizeof(names);
+    sim.userfuncs.count = 2; sim.userfuncs_ready = true;
+    ops.base_a = events; ops.base_b = operands; ops.b_size = sizeof(operands);
+    sim.volumes = calloc(1, sizeof(*sim.volumes));
+    sim.volume_count = 1;
+    sim.volumes[0].kind = Q2_MOVE_KIND_VOLUME; sim.volumes[0].id = 77;
+    check_eq_i(q2_sim_attach_breakables(&sim, &scene, &ops), 1,
+               "SHOOTTHEN registers its damage callback");
+    check_eq_i(sim.breakable_solid_count, 1, "and its movement box");
+    for (i = 0; i < 2; i++) {
+        for (k = 0; k < 4; k++) groups[i].node[k] = groups[i].rubble[k] = -1;
+        groups[i].node[0] = (s16)(i + 1); groups[i].part_count = 1;
+        groups[i].reveal = -1; groups[i].item_offset = 64 + i*28;
+    }
+    groups[0].health = 10; groups[0].damageable = 1;
+    exp.items = groups; exp.count = exp.capacity = 2;
+    check_eq_i(q2_sim_attach_explosives(&sim, &exp, &scene), 1,
+               "only the damageable explosive has a callback");
+    check(q2_rotators_add(&rot, Q2_ROT_TARGET, 0, 0, 256) != NULL, "hatch added");
+    check(q2_rotators_add(&rot, Q2_ROT_ACCUM, 4, 0, 256) != NULL, "spinner added");
+    rot.rotators[0].target = 512;
+    rot.rotators[0].delay_reset = rot.rotators[0].hold_reset = 2;
+    check_eq_i(q2_sim_attach_scene_solids(&sim, &scene, &ops, &rot), Q2_OK,
+               "scene collision registry builds");
+    check_eq_i(sim.scene_solid_count, 4, "hatch, two explosive parts, hidden object");
+    check_eq_i(sim.volume_count, 6, "shoot switch and trigger are preserved");
+    check_eq_i(sim.volumes[5].id, 77, "trigger remains behind all entity boxes");
+    for (i = 0; i < 6; i++) {
+        from[0] = to[0] = 500 + (s32)i*1000;
+        check((q2_move_sweep_world(&sim.move_world, from, to, &hit) == 0) == (i != 4),
+              "every allocating constructor blocks movement; SIMROT does not");
+        check(q2_move_clip_segment(&sim.move_world, from, to, NULL, &ray) == (i != 4),
+              "the same boxes clip shots");
+    }
+    from[0] = to[0] = 500;
+    q2_sim_trace(&sim, from, to, &tr);
+    check(tr.hit && tr.end[2] == 2000, "sim traces stop at the closed hatch");
+    q2_ai_world_bind_init(&bind, &sim.coll, NULL);
+    q2_ai_world_bind_entities(&bind, &sim.move_world);
+    check(!bind.world.line_of_sight(bind.world.user, from, to),
+          "closed hatch also blocks creature sight");
+    q2_rotator_trigger(&rot, 0);
+    q2_rotators_tick(&rot, 1); q2_sim_scene_solids_update(&sim, &rot);
+    check(!q2_move_sweep_world(&sim.move_world, from, to, &hit),
+          "hatch remains solid during its delay");
+    for (i = 0; i < 10 && rot.rotators[0].state != Q2_ROTST_OPENING; i++) {
+        q2_rotators_tick(&rot, 1); q2_sim_scene_solids_update(&sim, &rot);
+    }
+    check_eq_i(rot.rotators[0].state, Q2_ROTST_OPENING, "hatch starts opening");
+    check_eq_i(sim.volumes[1].min[1], -9800, "live slab moves up 10000");
+    check_eq_i(sim.volumes[1].env_min[1], 200, "broad-phase envelope stays authored");
+    check_eq_i(sim.volumes[1].dy, 0, "hatch relocation does not carry riders");
+    check(q2_move_sweep_world(&sim.move_world, from, to, &hit), "open passage is clear");
+    check(bind.world.line_of_sight(bind.world.user, from, to), "open passage admits sight");
+    for (i = 0; i < 100 && rot.rotators[0].state != Q2_ROTST_IDLE; i++) {
+        q2_rotators_tick(&rot, 1); q2_sim_scene_solids_update(&sim, &rot);
+    }
+    check_eq_i(rot.rotators[0].state, Q2_ROTST_IDLE, "hatch completes closing");
+    check(!q2_move_sweep_world(&sim.move_world, from, to, &hit), "closed slab returns");
+
+    from[0] = to[0] = 1500;
+    {
+        q2_monster standing = {0};
+        standing.pos[0] = 1500; standing.pos[1] = 50; standing.pos[2] = 2200;
+        bind.bottom_reach = 0; /* Probe the crate, without reaching the room floor. */
+        check(bind.world.check_bottom(bind.world.user, &standing),
+              "a creature standing on a crate finds entity ground at all four corners");
+    }
+    q2_sim_breakable_shot(&sim, from, to, 9);
+    check(!q2_move_sweep_world(&sim.move_world, from, to, &hit), "surviving crate blocks");
+    q2_sim_breakable_shot(&sim, from, to, 1);
+    check(groups[0].destroyed && q2_move_sweep_world(&sim.move_world, from, to, &hit),
+          "fatal hit immediately frees the crate box");
+    {
+        q2_monster standing = {0};
+        standing.pos[0] = 1500; standing.pos[1] = 50; standing.pos[2] = 2200;
+        check(!bind.world.check_bottom(bind.world.user, &standing),
+              "the destroyed crate no longer supports a creature");
+    }
+    from[0] = to[0] = 2500;
+    q2_sim_breakable_shot(&sim, from, to, 100);
+    check(!groups[1].destroyed && !q2_move_sweep_world(&sim.move_world, from, to, &hit),
+          "health-zero group is solid but cannot be shot apart");
+    check(q2_sim_explosive_trigger_item(&sim, groups[1].item_offset), "script destroys it");
+    check(q2_move_sweep_world(&sim.move_world, from, to, &hit), "script frees its box");
+    from[0] = to[0] = 5500;
+    q2_sim_breakable_shot(&sim, from, to, 10);
+    check(q2_move_sweep_world(&sim.move_world, from, to, &hit), "shoot switch frees its box");
+    from[0] = to[0] = 3500;
+    q2_sim_scene_solids_hide(&sim, 3);
+    q2_sim_scene_solids_update(&sim, &rot);
+    check(q2_move_sweep_world(&sim.move_world, from, to, &hit), "OBJDRAWOFF frees its box");
+
+    /* Neither prefix rebuild may corrupt the independent scene registry. */
+    count = sim.volume_count;
+    mover.blocks_player = 1; mover.part_count = 1; mover.node[0] = 4;
+    movers.movers = &mover; movers.count = movers.capacity = 1;
+    check_eq_i(q2_sim_attach_movers(&sim, &movers, &scene), Q2_OK, "insert mover prefix");
+    q2_sim_scene_solids_update(&sim, &rot);
+    check_eq_i(sim.volume_count, count + 1, "prefix adds exactly one box");
+    check(q2_move_sweep_world(&sim.move_world, from, to, &hit), "hidden object stays clear");
+    check_eq_i(q2_sim_attach_movers(&sim, NULL, NULL), Q2_OK, "remove mover prefix");
+    q2_sim_scene_solids_update(&sim, &rot);
+    check_eq_i(sim.volume_count, count, "prefix removal preserves all other boxes");
+    check_eq_i(q2_sim_attach_breakables(&sim, &scene, &ops), 1, "rebuild breakable prefix");
+    q2_sim_attach_explosives(&sim, &exp, &scene);
+    q2_sim_scene_solids_update(&sim, &rot);
+    check(q2_move_sweep_world(&sim.move_world, from, to, &hit),
+          "rebuilding breakables preserves a freed scene box");
+    check_eq_i(sim.volume_count, count, "breakable rebuild preserves target count");
+    check_eq_i(q2_sim_attach_scene_solids(&sim, &scene, &ops, &rot), Q2_OK, "rebuild registry");
+    check_eq_i(sim.volume_count, count, "reattach does not duplicate boxes");
+    check(!q2_move_sweep_world(&sim.move_world, from, to, &hit), "new level starts object intact");
+    check_eq_i(q2_sim_attach_scene_solids(&sim, NULL, NULL, NULL), Q2_OK, "detach scene boxes");
+    check_eq_i(sim.volume_count, 2, "detach preserves shoot switch and trigger");
+    q2_rotators_free(&rot);
+    q2_sim_free(&sim);
+}
+
 static void test_glass_solidity_lifetime(void)
 {
     u8 raw[Q2_SCENE_NODE_SIZE];
@@ -3767,7 +4340,14 @@ static q2_fx_tables g_present_tab;
 
 /* The energy-bolt light (combat.h's Q2_ENERGY_LIGHT_*, 0x800586D0) in this
  * tick's event list at `at`. */
-static u32 energy_lights_at(const q2_sim *sim, const s32 at[3])
+/*
+ * THE TWO ARMS RAISE THE SAME COLOUR AT THE SAME RADII THROUGH DIFFERENT ENGINE
+ * CALLS, so `ticks` is the only thing that tells them apart — which is why it
+ * is a parameter here rather than something this helper ignores. 0x800586D0
+ * (effect[1] >= 3) goes to AddLight, one frame; 0x80058758 (effect[1] == 2)
+ * goes to AddTimedLight with a fourth argument of 4.
+ */
+static u32 energy_lights_at(const q2_sim *sim, const s32 at[3], s32 ticks)
 {
     u32 i, n = 0;
 
@@ -3775,6 +4355,7 @@ static u32 energy_lights_at(const q2_sim *sim, const s32 at[3])
         const q2_ent_event *e = &sim->ent_world.events.e[i];
 
         if (e->kind == Q2_ENT_EVENT_LIGHT &&
+            e->ticks == ticks &&
             e->glow[0] == Q2_ENERGY_LIGHT_R &&
             e->glow[1] == Q2_ENERGY_LIGHT_G &&
             e->glow[2] == Q2_ENERGY_LIGHT_B &&
@@ -3808,6 +4389,7 @@ static void test_sp_creature_presented(void)
     s16 aim[3];
     u8  slot[4];
     u32 lit[3];
+    u32 pulse[3];
     int k, flew;
 
     printf("single player presents its creatures\n");
@@ -3874,17 +4456,31 @@ static void test_sp_creature_presented(void)
     for (k = 0; k < 3; k++) {
         q2_sim_tick(&sim, &in, 12);
         slot[k + 1] = cre.effect[1];
-        lit[k] = energy_lights_at(&sim, cre.origin);
+        lit[k]   = energy_lights_at(&sim, cre.origin, 0);
+        pulse[k] = energy_lights_at(&sim, cre.origin, Q2_ENERGY_PULSE_TICKS);
     }
 
-    printf("  effect[1] 3 -> %u -> %u -> %u; energy lights %u, %u, %u\n",
+    printf("  effect[1] 3 -> %u -> %u -> %u; energy lights %u, %u, %u;"
+           " pulses %u, %u, %u\n",
            (unsigned)slot[1], (unsigned)slot[2], (unsigned)slot[3],
-           lit[0], lit[1], lit[2]);
+           lit[0], lit[1], lit[2], pulse[0], pulse[1], pulse[2]);
     check(slot[1] == 2 && slot[2] == 1 && slot[3] == 0,
           "the BFG's own slot runs down 3, 2, 1, 0 the same way");
     check(lit[0] == 1 && lit[1] == 0 && lit[2] == 0,
           "and raises the green light on the first presented tick only "
           "(0x800586D0, effect[1] >= 3)");
+
+    /*
+     * AND THE TAIL OF THE GLOW, on the tick after. 0x80058758 is a DIFFERENT
+     * function from the arm above — AddTimedLight, not AddLight — raised only
+     * when effect[1] is EXACTLY 2, with the same colour and radii and a
+     * lifetime of four frames. The port reported that site and raised nothing
+     * from it; this check is the hook. The two arms cannot be told apart by
+     * anything but the lifetime, which is why `energy_lights_at` takes it.
+     */
+    check(pulse[0] == 0 && pulse[1] == 1 && pulse[2] == 0,
+          "the effect[1] == 2 tick parks a four-frame timed light instead "
+          "(0x80058758)");
 
     q2_sim_free(&sim);
 }
@@ -4686,6 +5282,7 @@ int main(void)
     test_autoswitch();
     test_pickup_switches_weapon();
     test_session_reaches_the_shot();
+    test_muzzle_flash_reaches_the_light_world();
     test_held_hand_grenade();
     test_tick_rate();
     test_gravity();
@@ -4697,8 +5294,11 @@ int main(void)
     test_jump();
     test_ground_projection();
     test_liquid();
+    test_water_splash();
     test_fall_damage();
     test_piston_decode();
+    test_piston_oscillator();
+    test_teleport_registration();
     test_cagelift_timers();
     test_crate_conveyor();
     test_hull_movement();
@@ -4714,6 +5314,7 @@ int main(void)
     test_mover_key_prompt();
     test_movers_block_sight_and_shots();
     test_glass_solidity_lifetime();
+    test_scene_solid_lifetimes();
     test_one_shot_kill();
     test_weapon_stay_reaches_the_world();
     test_splash_occlusion();

@@ -232,6 +232,70 @@ typedef struct q2_hud_flash {
 extern const u8 q2_hud_flash_armour_rgb[3];
 extern const u8 q2_hud_flash_health_rgb[3];
 
+/* ------------------------------------------------------------------------- */
+/* FlashPowerUp — 0x80039870, QPLAYER.C                                       */
+/* ------------------------------------------------------------------------- */
+/*
+ * THE OTHER RAISER IN THE PLAYER TICK, and the port had no equivalent of it at
+ * all: `q2_screen_flash_set` had two callers, the damage compare below and the
+ * respawn reset, so holding Quad Damage, Invulnerability, the Environment Suit
+ * or the Rebreather looked exactly like holding nothing.
+ *
+ * PrimaryQuakePlayer calls this unconditionally and FIRST — `jal` at
+ * 0x8003A2F4, a long way before the health/armour compare at 0x8003AE10 — so a
+ * frame in which the player is both quadded and hurt ends on the damage flash
+ * and the tint comes back the frame after. That ordering is the reason this is
+ * called before `q2_hud_track` rather than after it.
+ *
+ * What it draws is not a fade. The mode is 3, SOLID, at strength 1 with initial
+ * 1 (0x80039A44 / 0x80039A50 / 0x80039A38), so the tile is emitted once at full
+ * colour and the strength immediately counts out — and because client+0xC4 is
+ * cleared on every flashing frame the whole thing is re-armed on the next one.
+ * The result is a constant wash for the powerup's entire life, not a pulse.
+ *
+ * It lives here rather than in a player file because its four colours are the
+ * same data blob as the two above — 0x800AE874 through 0x800AE883, immediately
+ * before 0x800AE884 — and because this is already where the port keeps the
+ * player tick's other screen-flash raiser.
+ */
+#define Q2_HUD_POWERUP_SLOTS     4
+#define Q2_HUD_POWERUP_SECOND    300  /* 0x800399CC's reciprocal divide       */
+#define Q2_HUD_POWERUP_WARN      3    /* 0x800399D4 `slti v0, v1, 3`          */
+#define Q2_HUD_POWERUP_QUIET     150  /* 0x800399FC `addiu v0, v0, 150`       */
+#define Q2_HUD_POWERUP_MODE      3    /* 0x80039A44, Q2_SCREEN_FLASH_SOLID    */
+#define Q2_HUD_POWERUP_STRENGTH  1    /* 0x80039A50 a3 = 1, [sp+16] = 1       */
+
+/*
+ * 0x800AE874, 0x800AE878, 0x800AE87C, 0x800AE880, in the order the four-way
+ * chain tests the deadlines at client+0xAC: quad, invulnerability, environment
+ * suit, rebreather. The fourth byte of each word is padding the packer carries
+ * into the colour argument and SetWinFade never reads back.
+ */
+extern const u8 q2_hud_flash_powerup_rgb[Q2_HUD_POWERUP_SLOTS][3];
+
+typedef struct q2_hud_powerup_flash {
+    int  slot;      /* 0..3, the powerup that won; -1 when none is live      */
+    bool tint;      /* 0x80039A80 ran: raise the SOLID tile this frame       */
+    bool warn;      /* 0x800399F8..0x80039A04 ran: sound the warning         */
+    u8   rgb[3];    /* the winning slot's colour, zero when there is none    */
+} q2_hud_powerup_flash;
+
+/*
+ * One frame of it. `until` is the four deadlines at client+0xAC in that order,
+ * `now` the level clock at [0x800AEBAC], and the two pointers are the client's
+ * own carried fields (inventory.h: `powerup_quiet_until`, `powerup_warn_secs`).
+ *
+ * The caller sounds `itm_damage3` ([0x800B28B0]) for slot 0 and `itm_protect`
+ * ([0x800B28AC]) for the other three — 0x800398CC against 0x80039918 — at the
+ * player's own origin, entity+0x54 (0x800399EC).
+ *
+ * A frame that warns does NOT also tint: 0x80039A08 jumps straight to the
+ * epilogue, which is what makes the first frame of each blink dark.
+ */
+q2_hud_powerup_flash q2_hud_powerup_flash_tick(
+    const s32 until[Q2_HUD_POWERUP_SLOTS], s32 now,
+    s32 *quiet_until, s16 *warn_secs);
+
 typedef struct q2_hud {
     /* Notifications: a ring, newest at write_index - 1. */
     char msg[Q2_HUD_MSG_SLOTS][Q2_HUD_MSG_LEN];
@@ -367,8 +431,19 @@ u32 q2_hud_pickup_build_ot(q2_hud *hud, const q2_hud_font *font,
  */
 bool q2_hud_track(q2_hud *hud, s16 health, s16 armour);
 
-/* Advance one game tick: age the messages, retire the oldest, fade the box. */
-void q2_hud_tick(q2_hud *hud, int ticks);
+/*
+ * Advance one drawn frame: age the messages, retire the oldest, fade the box.
+ *
+ * TWO CLOCKS, because UpdateMessageText (0x80042B30) uses two. The notification
+ * ring counts FRAMES — 0x80042BEC is a flat `addiu v1, v0, 1` against the 60 at
+ * 0x80042BF8 — while the centre line counts the frame DELTA, 0x80042BA8's
+ * halfword at [0x800B2DB4] added at 0x80042BB0 against the 1200 at 0x80042B98.
+ * So the ring is sixty drawn frames whatever the machine is doing and the
+ * centre line is four seconds of the 300-to-the-second clock.
+ *
+ * `frames` is normally 1 and `dt` the frame's own delta in those units.
+ */
+void q2_hud_tick(q2_hud *hud, int frames, s32 dt);
 
 /*
  * How far BEHIND `otz` the crosshair goes, as a depth — larger is farther.

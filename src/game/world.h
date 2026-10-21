@@ -329,6 +329,103 @@ Q2PSX_INLINE bool q2_world_quad_faces_camera(gte_state *g, const gte_sxy screen[
     return g->mac0 < 0;
 }
 
+/*
+ * THE WHOLE OF THE QUAD LINKER'S REJECTION SET — and the shape of this enum is
+ * the finding: there is no NEAR member, because there is no near rejection.
+ *
+ * DrawSceneBitAllSubDiv_ (0x800AF7CC) was read end to end and it drops a quad
+ * in exactly three places: the two NCLIP halves (0x800AF8A8, 0x800AF8C8) and
+ * the 2D screen-bounds pair (0x800AF8DC-0x800AF968). The depth question is
+ * asked once, at 0x800AF974 — `slt t4, t5, t3`, the two opposite corners' SZ
+ * summed at 0x800AF874 against SubdivideDistance (0x800B2CCC) — and its only
+ * consequence is whether SubDivRoutine (0x800B2C70, which holds
+ * T2GlobSubdivideGt4 at 0x80069834) is called. When that routine declines —
+ * budget spent at 0x800698A0..0x800698EC, or too far for the tighter test at
+ * 0x800698D8 — it returns 0 (0x800699A8, 0x800699C4), the `bne v0, zero` at
+ * 0x800AF9B4 is not taken, and control falls into 0x800AF9BC, which LINKS THE
+ * FLAT QUAD ANYWAY. When the hook is not called at all, because the depth sum
+ * is at or above the threshold, the same link happens. DrawSceneBitSomeSubDiv_
+ * (0x800AFA2C) is the same shape behind the CLUT gate at 0x800AFBCC, and
+ * DrawSceneBitNoSubDiv_ (0x800AFC9C) never calls the hook and adds only the
+ * two zero-depth tests at 0x800AFD20 and 0x800AFD34.
+ *
+ * So a corner close enough to the eye that the GTE clamped it is not, on its
+ * own, a reason to drop anything. The console leaves the flat quad in the
+ * ordering table with its saturated corner, and the GPU refuses the primitive
+ * if it ends up spanning more than 1023x511 — see src/render/raster.c, which
+ * implements that rule and is where the genuinely undrawable ones go.
+ *
+ * THE 2D BOUNDS TEST is the console's real answer to a corner it clamped.
+ * Variants 0 and 2 (0x800AF8DC-0x800AF968, 0x800AFB3C-0x800AFBC8) reject only
+ * when all four corners are off the SAME edge, so a quad that STRADDLES the
+ * viewport survives — and that straddle escape is precisely what lets a near
+ * quad with saturated corners still be drawn. Variant 1 (0x800AFDA0-0x800AFDEC)
+ * has no escape: it needs at least one corner inside on each axis.
+ *
+ * VARIANT 1's ZERO-DEPTH TEST (0x800AFD20, 0x800AFD34) looks at the two corners
+ * it extracts first — vertex 1 and vertex 3 — and drops the quad if either
+ * projected to depth zero. Variants 0 and 2 have no such test, which is the
+ * only place the three linkers disagree about what is drawable at all.
+ *
+ * ORDER. The console runs NCLIP first and bounds second, and variant 1 asks its
+ * zero-depth question before either. This asks bounds, then zero depth, then
+ * NCLIP. Every arm is a pure rejection with no side effect on the quad, so the
+ * set of drawn quads is identical either way; the order only decides which
+ * counter records a quad that would fail more than one of them.
+ *
+ * Clobbers the GTE's SXY registers and MAC0, so call it once the projected
+ * corners have been copied out.
+ */
+typedef enum q2_world_quad_reject {
+    Q2_WORLD_QUAD_DRAW = 0,       /* linked — flat, or handed to subdivision */
+    Q2_WORLD_QUAD_REJECT_BOUNDS,  /* 0x800AF8DC-0x800AF968 / 0x800AFDA0-EC   */
+    Q2_WORLD_QUAD_REJECT_FLAT,    /* 0x800AFD20 / 0x800AFD34, variant 1 only */
+    Q2_WORLD_QUAD_REJECT_BACK     /* 0x800AF8A8 / 0x800AF8C8                 */
+} q2_world_quad_reject;
+
+Q2PSX_INLINE q2_world_quad_reject q2_world_quad_linker_rejects(
+    gte_state *g,
+    q2_surf_variant variant,
+    const gte_sxy screen[4],
+    const u16 depth[4],
+    s32 clip_w,
+    s32 clip_h)
+{
+    int k, in_x = 0, in_y = 0;
+    int lo_x = 0, hi_x = 0, lo_y = 0, hi_y = 0;
+
+    if (clip_w <= 0 || clip_h <= 0)
+        return Q2_WORLD_QUAD_REJECT_BOUNDS;
+
+    for (k = 0; k < 4; k++) {
+        s32 sx = screen[k].x, sy = screen[k].y;
+
+        if (sx >= 0 && sx < clip_w) in_x++;
+        else if (sx < 0)            lo_x++;
+        else                        hi_x++;
+
+        if (sy >= 0 && sy < clip_h) in_y++;
+        else if (sy < 0)            lo_y++;
+        else                        hi_y++;
+    }
+
+    if (variant == Q2_SURF_VARIANT_FLAT) {
+        if (in_x == 0 || in_y == 0)
+            return Q2_WORLD_QUAD_REJECT_BOUNDS;
+    } else if (lo_x == 4 || hi_x == 4 || lo_y == 4 || hi_y == 4) {
+        return Q2_WORLD_QUAD_REJECT_BOUNDS;
+    }
+
+    if (variant == Q2_SURF_VARIANT_FLAT &&
+        (depth[1] == 0 || depth[3] == 0))
+        return Q2_WORLD_QUAD_REJECT_FLAT;
+
+    if (!q2_world_quad_faces_camera(g, screen))
+        return Q2_WORLD_QUAD_REJECT_BACK;
+
+    return Q2_WORLD_QUAD_DRAW;
+}
+
 /* Statistics from one build, so callers can tell "drew nothing" apart from
  * "drew everything off-screen" — a distinction that matters a great deal when
  * bringing a renderer up. */
@@ -336,7 +433,12 @@ typedef struct q2_world_stats {
     u32 nodes_visited;
     u32 quads_total;
     u32 quads_emitted;
-    u32 quads_rejected_near;   /* GTE reported a divide overflow  */
+    /* Subdivision was asked for and produced nothing — every cell of the mesh
+     * had a corner at SZ 0. It is NOT "a corner was near the eye": the linkers
+     * have no such rejection, so a quad that is merely close is emitted flat
+     * and this counter stays put. It read 6..43 a frame on the BASE1 demo walk
+     * while that invented test was in; it now reads 0..2. */
+    u32 quads_rejected_near;
     u32 quads_rejected_back;   /* both NCLIP halves faced away    */
     u32 quads_rejected_bad;    /* malformed record or bad indices */
     u32 quads_no_uv;           /* UV lookup failed; drawn untextured */
@@ -381,6 +483,21 @@ typedef struct q2_world_stats {
     u32 flare_dark;            /* rejected: attenuation fell to zero      */
     u32 flare_drawn;
     u32 flare_prims;
+
+    /*
+     * ProcessMobileLights (0x80074598), the pass that repaints the level's own
+     * baked vertex colours under a runtime light.
+     *
+     * `mobile_lights` is how many (light, node) pairs survived the AABB test at
+     * 0x80074734; `mobile_corners` is how many Gouraud corners were actually
+     * added to, i.e. how many times 0x80074AC0 ran. `mobile_unslotted` is the
+     * corners a light DID reach whose point does not name them in its first
+     * four slot bytes — the console cannot paint those, and counting them is
+     * what says whether the slot decode is right.
+     */
+    u32 mobile_lights;
+    u32 mobile_corners;
+    u32 mobile_unslotted;
 } q2_world_stats;
 
 /*

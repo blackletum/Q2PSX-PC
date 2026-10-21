@@ -59,6 +59,13 @@
  * animation is rotated before the eye is added, so the weapon swings with the
  * view rather than sliding across it.
  *
+ * The model's own matrix carries ONE TERM THE CAMERA'S DOES NOT: 0x8004F3F0
+ * adds the owner's client+0x46, the eased auto-aim elevation, to the clip
+ * rotation's X before 0x8004F3F4 builds the matrix. That is the barrel tipping
+ * onto a target above or below you while the view stays level. See
+ * `aim_assist` in the struct for the chain that produces it, and for what this
+ * tree got wrong when it proved that halfword to be zero.
+ *
  * ---------------------------------------------------------------------------
  * The model is authored in VIEW space, and that is the whole trick
  * ---------------------------------------------------------------------------
@@ -244,6 +251,68 @@ typedef struct q2_viewweapon {
     /* The interpolated present, which is what the transform uses. */
     s16         cur_t[3];
     s16         cur_r[3];
+
+    /*
+     * THE BARREL FOLLOWS THE AUTO-AIM TARGET — client+0x46, and it is NOT the
+     * zero this tree spent two passes proving it was.
+     *
+     * 0x8004F3E4…0x8004F3F8 is four instructions:
+     *
+     *     8004F3E4  lhu v0, 230(s3)     ; the interpolated clip rotation X
+     *     8004F3E8  lhu v1, 70(s7)      ; the OWNER's client block, +0x46
+     *     8004F3F0  addu v0, v0, v1
+     *     8004F3F4  jal 0x80089E38      ; RotMatrixYXZ(s3+230, s3+704)
+     *     8004F3F8  sh  v0, 230(s3)
+     *
+     * where `s6 = [viewweapon+0x44]` is the player entity (0x8004EE48) and
+     * `s7 = [s6+0x0C]` is its client block (0x8004EE50). So the matrix the
+     * weapon MODEL is drawn with carries one extra pitch term that the camera
+     * does not: the gun tips onto whatever the auto-aim has locked, while the
+     * view stays where the player put it.
+     *
+     * `docs/openquestions.md` records the opposite as settled — "that halfword
+     * is read here and nowhere else in the image, and nothing writes it ... So
+     * the term is `x + 0`". Two things are wrong with the sweep that concluded
+     * it, and both are worth naming so the next reader does not repeat them:
+     *
+     *   - The tick write is INDIRECT. PrimaryQuakePlayer (QPLAYER.C,
+     *     0x8003A1C8) takes `s1 = [entity+12]`, the same client block, and at
+     *     0x8003A44C…0x8003A460 does
+     *
+     *         addiu a0, s1, 70          ; &client+0x46
+     *         lh    a1, 68(s1)          ; client+0x44, the target
+     *         lw    a2, [0x800B2DB4]    ; the frame delta
+     *         sll   a2, a2, 18
+     *         sra   a2, a2, 16          ; ... times four
+     *         jal   0x8006FE3C          ; Seek (MISC.C)
+     *
+     *     Seek's store is `sh v0, 0(a0)`. An enumeration of `sb`/`sh`/`sw`
+     *     with an immediate of 68..72 cannot see it, because the immediate at
+     *     the store is ZERO and the 70 is in an `addiu`.
+     *
+     *   - The one DIRECT write was mis-filed. 0x8003B424, in
+     *     InitialiseQuakePlayer, is `sh zero, 70(a0)` with `a0 = 0x800C7C60` —
+     *     which the sweep read as "a materialised global (0x8003B424 writes
+     *     0x800C7CA6)". 0x800C7C60 IS the client array, as 0x8003A46C's
+     *     `subu v0, s1, 0x800C7C60` proves, so 0x800C7CA6 is client[0]+0x46
+     *     and that line is the spawn clearing this very field.
+     *
+     * The TARGET is FindPlayerTarget's (QPLAYER.C, 0x80039DDC): with a target
+     * it writes the elevation to it into client+0x44 (0x8003A138, the result
+     * of the ratan2 at 0x8008A358), and with none it writes zero (0x8003A190).
+     * Seek then eases +0x46 toward it, which is what makes the barrel settle
+     * back to level when the lock is lost instead of snapping.
+     *
+     * This port has no client block yet, so the field lives here and a caller
+     * feeds it — `q2_vw_set_aim_assist`, or `q2_vw_seek_aim_assist` for a
+     * caller that has only the target. It is zero until something does, which
+     * is exactly the console's own value with no target in front of you.
+     *
+     * `q2_vw_init` clears it with the rest of the struct, and that is right
+     * rather than incidental: the console clears client+0x46 at the same
+     * moment, in InitialiseQuakePlayer.
+     */
+    s16         aim_assist;
 
     bool        fire_latch;      /* +216: a shot is in flight this state      */
 
@@ -496,6 +565,39 @@ bool q2_vw_take_event(q2_viewweapon *vw, s16 *event_out);
 
 /* True while the machine wants the caller's fire function called this tick. */
 bool q2_vw_wants_fire(const q2_viewweapon *vw);
+
+/* ------------------------------------------------------------------------- */
+/* The auto-aim assist — client+0x46                                          */
+/* ------------------------------------------------------------------------- */
+/*
+ * Park the eased assist angle, for a caller that already keeps a client block
+ * and so already holds client+0x46 itself. See `aim_assist` above for what the
+ * halfword is and why this tree used to believe it was zero.
+ */
+void q2_vw_set_aim_assist(q2_viewweapon *vw, s16 assist);
+
+/*
+ * Ease it toward `target` — Seek (MISC.C, 0x8006FE3C) driven the way
+ * PrimaryQuakePlayer drives it at 0x8003A44C, one step of `frame_dt * 4` per
+ * tick, clamping rather than overshooting. `target` is client+0x44, the
+ * elevation FindPlayerTarget wrote (0x8003A138), or zero for no target
+ * (0x8003A190). Returns true on the tick it arrives, which is Seek's own
+ * return value.
+ *
+ * THIS IS THE PLAYER THINK'S EASING, not the weapon's, and it is offered here
+ * only because nothing in this port owns a client block yet. A caller that
+ * grows one should do the Seek there, next to FindPlayerTarget's own write,
+ * and feed the result through `q2_vw_set_aim_assist` instead.
+ */
+bool q2_vw_seek_aim_assist(q2_viewweapon *vw, s16 target, s32 frame_dt);
+
+/*
+ * The pitch `RotMatrixYXZ` is actually handed — the interpolated clip rotation
+ * X plus the assist, summed and truncated as one halfword exactly as
+ * 0x8004F3F0's `addu` and 0x8004F3F8's `sh` do it. Exposed because it is the
+ * one number that says whether the barrel is following anything.
+ */
+s16 q2_vw_clip_pitch(const q2_viewweapon *vw);
 
 /* ------------------------------------------------------------------------- */
 /* Placement and drawing                                                      */

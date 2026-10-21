@@ -359,9 +359,19 @@ u32 q2_menu_build_ot(const q2_menu *m, psx_ot *ot,
      *
      * Its bar is emitted after its text, so it lands behind, and the title's
      * cell is 20 tall against an item's 11.
+     *
+     * Its COLOUR is its own, not the page's. The bar colour is bits 6..8 of a
+     * drawable's flag word, and FrontEndAddPausedTitle is the only thing in the
+     * image that ever sets them to something other than zero: it fills them from
+     * the pausing player's configuration record (0x8001CFF0..0x8001D044), while
+     * FrontEndCreateMenu clears them on every row it appends (0x8001A524). So in
+     * a split-screen match the banner wears the pauser's colour and the selected
+     * row's band stays blue. This drew the page's one colour for both, which was
+     * right for the rows by accident and wrong for the banner always.
      */
     if (m->page->title) {
         int ty = q2_menu_title_y(m->screen_h);
+        int tc = (int)m->title_bar_colour;
         const q2_menu_face *tf = q2_menu_face_get(Q2_MENU_FACE_TITLE);
 
         n += q2_menu_font_print(opts->font, ot, opts->bucket,
@@ -369,8 +379,16 @@ u32 q2_menu_build_ot(const q2_menu *m, psx_ot *ot,
                                 opts->origin_x, opts->origin_y,
                                 m->page->title);
 
-        if (opts->bar_colour != Q2_MENU_BAR_NONE) {
-            emit_select_bar(ot, opts->bucket, opts->bar_colour,
+        /*
+         * The caller's own suppression still wins — a screen that asks for no
+         * bars at all gets none — and 4 in the field suppresses this one
+         * (0x8001A828). The field is three bits wide, but 5..7 cannot arise in
+         * the shipped build: colour is the player index over four players and
+         * team is `p & 1` (0x8001BEDC, 0x8001BF04). They are folded in with 4
+         * here so the palette lookup stays in range.
+         */
+        if (opts->bar_colour != Q2_MENU_BAR_NONE && tc < Q2_MENU_BAR_NONE) {
+            emit_select_bar(ot, opts->bucket, tc,
                             opts->view_x, opts->view_w, ty,
                             tf ? tf->cell_h : 20,
                             opts->origin_x, opts->origin_y);

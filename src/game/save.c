@@ -1,6 +1,11 @@
 #include "save.h"
 
 #include "mission.h"
+#include "explosive.h"
+#include "modelent.h"
+#include "ai.h"
+#include "creworld.h"
+#include "random.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,14 +39,25 @@
 #define TAG_PROJ TAG('P', 'R', 'O', 'J')   /* projectiles in flight           */
 #define TAG_EVNT TAG('E', 'V', 'N', 'T')   /* script flags                    */
 #define TAG_EVIT TAG('E', 'V', 'I', 'T')   /* script item latches (v6)        */
+#define TAG_EOBJ TAG('E', 'O', 'B', 'J')   /* permanent object changes        */
+#define TAG_EVHS TAG('E', 'V', 'H', 'S')   /* previously visited maps        */
 #define TAG_TRIG TAG('T', 'R', 'I', 'G')   /* trigger residency               */
 #define TAG_ENTS TAG('E', 'N', 'T', 'S')   /* per-entity mutable state        */
 #define TAG_ITEM TAG('I', 'T', 'E', 'M')   /* group order and stable item keys */
 #define TAG_MISN TAG('M', 'I', 'S', 'N')   /* the mission tallies             */
 #define TAG_LVLC TAG('L', 'V', 'L', 'C')   /* the level's live counters (v7)  */
+#define TAG_HELP TAG('H', 'E', 'L', 'P')   /* the help computer's pair (v8)   */
 #define TAG_BRKS TAG('B', 'R', 'K', 'S')   /* which panes have been shot      */
+#define TAG_EXPL TAG('E', 'X', 'P', 'L')   /* shared destroyable-group state  */
 #define TAG_MOVR TAG('M', 'O', 'V', 'R')   /* which doors are open, and where */
 #define TAG_CRES TAG('C', 'R', 'E', 'S')   /* who is dead and where the rest are */
+#define TAG_ROTR TAG('R', 'O', 'T', 'R')   /* rotating brush motion */
+#define TAG_CAIS TAG('C', 'A', 'I', 'S')   /* creature behavior */
+#define TAG_SKIL TAG('S', 'K', 'I', 'L')   /* difficulty before roster build */
+#define TAG_RAND TAG('R', 'A', 'N', 'D')   /* shared gameplay random state */
+#define TAG_VWPN TAG('V', 'W', 'P', 'N')   /* live weapon animation */
+#define TAG_ERTS TAG('E', 'R', 'T', 'S')   /* resident script scheduler */
+#define TAG_PRST TAG('P', 'R', 'S', 'T')   /* projectile flags/beam clock */
 #define TAG_SETT TAG('S', 'E', 'T', 'T')   /* the menu settings               */
 
 #define SAVE_FILE_HEADER 16                /* magic, version, size, crc       */
@@ -54,6 +70,71 @@
 #define SAVE_MAX_TRIGGERS (1u << 16)
 #define SAVE_MAX_ENTITIES (1u << 16)
 #define SAVE_MAX_ITEM_GROUPS (1u << 16)
+#define SAVE_MAX_EVENT_MAPS 64u
+
+/* These snapshots carry scalar state only. Runtime callbacks stay with the
+ * rebuilt module, links use roster indices, and moves use module-relative
+ * addresses. None of q2_monster's pointers are copied or written to disk. */
+typedef struct save_ai_monster {
+    q2_monster state;
+    s32 refs[5];               /* enemy, oldenemy, goal, movetarget, owner */
+    char move_module[13];
+    u32 move_offset;
+    u8 has_move, thinking;
+} save_ai_monster;
+
+struct q2_save_ai {
+    save_ai_monster *monsters;
+    u32 count, corner_count, phase_us;
+    q2_monster sight;
+    q2_level level;
+    s32 level_refs[4];
+    q2_trail_state trail;
+};
+
+/* One field list keeps capture, portable encoding and apply in agreement. */
+#define AI_SCALARS(X) \
+    X(s16, hit_radius) X(s16, hit_height) X(s16, view_height) \
+    X(u32, spawnflags) X(u16, flags) X(u8, solid) X(u8, movetype) \
+    X(u8, deadflag) X(u8, takedamage) X(s16, mass) X(u8, skinnum) \
+    X(u8, class_id) X(u8, class_byte) X(u8, pop_class_id) X(u8, start_kind) \
+    X(s16, model_ext2) X(u16, group) X(u32, svflags) X(u8, client) \
+    X(s16, health) X(s16, max_health) X(s16, gib_health) X(s16, frame) \
+    X(s32, next_think) X(s32, pain_debounce) X(u8, hurt) \
+    X(s32, show_hostile) X(s32, teleport_time) X(s16, targetname) \
+    X(s16, target) X(s16, combattarget) X(s16, yaw_speed) X(s16, ideal_yaw) \
+    X(u32, aiflags) X(s32, bigturn_threshold) X(s32, pausetime) \
+    X(s32, attack_finished) X(s32, search_time) X(s32, trail_time) \
+    X(s32, idle_time) X(u16, nextframe) X(u8, attack_state) X(u8, lefty) \
+    X(u8, blindfire) X(u8, speed_scale) X(u8, in_use) X(u8, dead) \
+    X(u8, gibbed) X(u8, corpse) X(u8, corpse_was_class) X(u8, dissolve_arm) \
+    X(s16, dissolve) X(u8, on_ground) X(s32, ground_height)
+#define AI_ARRAYS(X) \
+    X(s32, pos, 3) X(s32, velocity, 3) X(s16, angles, 3) \
+    X(s16, mins, 3) X(s16, maxs, 3) X(s32, blind_target, 3) \
+    X(s32, saved_goal, 3) X(s32, last_sighting, 3) X(u8, effect, 6)
+
+#define VW_SCALARS(X) \
+    X(s16, scale) X(s16, fade) X(s16, light_selector) \
+    X(s32, weapon) X(s32, pending) X(u32, state) X(u32, frame) \
+    X(s32, total) X(s32, left) X(s16, aim_assist) \
+    X(bool, fire_latch) X(bool, refire) X(s16, switch_ticks) \
+    X(s16, event) X(bool, event_pending) X(s16, hyper_ramp) \
+    X(bool, quad_active) X(bool, quad_sound) \
+    X(s16, anim_pos) X(s16, anim_end) X(u16, anim_flags) \
+    X(u32, keys_played) X(u32, anims_started) X(u32, fires_started) \
+    X(s32, spin_accum) X(s32, spin_rate) X(s32, last_fire_frame) \
+    X(bool, cook) X(s16, hand_prev_anim) X(s32, hand_cook_ticks) \
+    X(bool, hand_release) X(u32, frame_fires) X(s16, frame_sound)
+#define VW_ARRAYS(X) \
+    X(u8, glow, 3) X(s16, from_t, 3) X(s16, from_r, 3) \
+    X(s16, cur_t, 3) X(s16, cur_r, 3)
+
+static void free_ai(struct q2_save_ai *ai)
+{
+    if (ai) free(ai->monsters);
+    free(ai);
+}
 
 /* ------------------------------------------------------------------------- */
 /* CRC32                                                                      */
@@ -280,14 +361,161 @@ void q2_save_free(q2_save *s)
         return;
     free(s->event_flags);
     free(s->event_item_flags);
+    free(s->event_object_flags);
+    q2_event_store_free(&s->event_history);
     free(s->trigger_inside);
     free(s->entities);
     free(s->item_group_order);
     free(s->item_keys);
     free(s->breakables);
+    free(s->explosives);
     free(s->movers);
+    free(s->rotators);
     free(s->creatures);
+    free_ai(s->ai);
     memset(s, 0, sizeof(*s));
+}
+
+static bool valid_event_runtime(const q2_save_event_runtime *e)
+{
+    u32 i, j;
+    if (e->script_size > SAVE_MAX_EVENTS ||
+        e->record_count > e->script_size / 4 ||
+        e->pending_count > Q2_EVENT_RT_PENDING_MAX) return false;
+    for (i = 0; i < e->pending_count; i++)
+        if (e->pending[i] >= e->script_size) return false;
+    for (i = 0; i < Q2_EVENT_RT_TIMER_MAX; i++) {
+        const q2_event_timer *t = &e->timers[i];
+        if (!t->item) continue;
+        if (t->item >= e->script_size || t->offset >= e->script_size ||
+            t->period < 0 || t->next_item <= t->timer_index) return false;
+        for (j = 0; j < i; j++) if (e->timers[j].item == t->item) return false;
+    }
+    for (i = 0; i < Q2_EVENT_RT_WAIT_MAX; i++) {
+        if (!e->waits[i].in_use) continue;
+        if (e->waits[i].offset >= e->script_size) return false;
+        for (j = 0; j < i; j++)
+            if (e->waits[j].in_use && e->waits[j].offset == e->waits[i].offset)
+                return false;
+    }
+    return true;
+}
+
+static bool event_runtime_matches(const q2_save_event_runtime *e,
+                                   const q2_event_rt *rt)
+{
+    u32 i, j, k;
+    q2_event_record rec;
+    q2_event_item item;
+    if (!valid_event_runtime(e) || !rt->events.data ||
+        e->script_size != rt->events.size || e->record_count != rt->record_count ||
+        e->script_crc != crc32_of(rt->events.data, rt->events.size)) return false;
+    for (i = 0; i < e->pending_count; i++)
+        if (!q2_events_record_at(&rt->events, e->pending[i], &rec)) return false;
+    for (i = 0; i < Q2_EVENT_RT_TIMER_MAX; i++) {
+        const q2_event_timer *t = &e->timers[i];
+        if (!t->item) continue;
+        if (!q2_events_record_at(&rt->events, t->offset, &rec) ||
+            t->next_item > rec.n_items ||
+            !q2_events_get_item(&rt->events, &rec, t->timer_index, &item) ||
+            item.offset != t->item || item.opcode != Q2_EVOP_CALL) return false;
+    }
+    for (i = 0; i < Q2_EVENT_RT_WAIT_MAX; i++) {
+        bool found = false;
+        if (!e->waits[i].in_use) continue;
+        for (j = 0; j < rt->record_count && !found; j++) {
+            if (!q2_events_record_at(&rt->events, rt->offsets[j], &rec)) return false;
+            for (k = 0; k < rec.n_items; k++) {
+                if (!q2_events_get_item(&rt->events, &rec, k, &item)) return false;
+                if (item.offset == e->waits[i].offset &&
+                    item.opcode == Q2_EVOP_WAIT && item.len == 12) { found = true; break; }
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
+static bool valid_event_carry(const q2_event_carry *c)
+{
+    return c->size <= Q2_EVENT_CARRY_MAX &&
+           c->record_count <= c->size / 4;
+}
+
+static q2_result copy_event_history(q2_event_store *out,
+                                     const q2_event_store *in)
+{
+    q2_event_store copy = {0};
+    u32 i;
+
+    if (!out || !in || in->count > SAVE_MAX_EVENT_MAPS ||
+        (in->count && !in->block))
+        return Q2_ERR_INVALID_ARG;
+    for (i = 0; i < in->count; i++) {
+        const q2_event_block *b = &in->block[i];
+        q2_event_carry *dst;
+
+        if (!b->map[0] || !memchr(b->map, 0, sizeof(b->map)) ||
+            !valid_event_carry(&b->carry) ||
+            q2_event_store_find(&copy, b->map)) {
+            q2_event_store_free(&copy);
+            return Q2_ERR_BAD_FORMAT;
+        }
+        dst = q2_event_store_open(&copy, b->map);
+        if (!dst) {
+            q2_event_store_free(&copy);
+            return Q2_ERR_NO_MEMORY;
+        }
+        *dst = b->carry;
+    }
+    q2_event_store_free(out);
+    *out = copy;
+    return Q2_OK;
+}
+
+q2_result q2_save_capture_event_history(q2_save *s, const q2_event_store *store)
+{
+    q2_result rc;
+    if (!s) return Q2_ERR_INVALID_ARG;
+    rc = copy_event_history(&s->event_history, store);
+    if (rc == Q2_OK) s->event_history_present = true;
+    return rc;
+}
+
+q2_result q2_save_restore_event_history(const q2_save *s, q2_event_store *store)
+{
+    const q2_event_store empty = {0};
+    if (!s) return Q2_ERR_INVALID_ARG;
+    return copy_event_history(store, s->event_history_present
+                                       ? &s->event_history : &empty);
+}
+
+q2_result q2_save_event_carry(const q2_save *s, const q2_event_rt *rt,
+                              q2_event_carry *out)
+{
+    u32 i;
+    if (!s || !rt || !out) return Q2_ERR_INVALID_ARG;
+    memset(out, 0, sizeof(*out));
+    if (!s->event_count && !s->event_item_count) return Q2_OK;
+    if (!s->event_flags || s->event_count != rt->record_count ||
+        (s->event_item_count && (!s->event_item_flags ||
+                                s->event_item_count != rt->item_flags_size)) ||
+        (s->event_object_count && (!s->event_object_flags ||
+                                  s->event_object_count != s->event_item_count)))
+        return Q2_ERR_BAD_FORMAT;
+    q2_event_rt_carry_out(rt, out);
+    if (!out->size) return Q2_ERR_BAD_FORMAT;
+    memcpy(out->record_flags, s->event_flags, s->event_count);
+    memset(out->item_flags, 0, sizeof(out->item_flags));
+    memset(out->destroyed_items, 0, sizeof(out->destroyed_items));
+    if (s->event_item_count)
+        memcpy(out->item_flags, s->event_item_flags, s->event_item_count);
+    if (s->event_object_count)
+        memcpy(out->destroyed_items, s->event_object_flags, s->event_object_count);
+    for (i = 0; i < s->explosive_count; i++)
+        if (s->explosives[i].destroyed && s->explosives[i].item_offset < out->size)
+            out->destroyed_items[s->explosives[i].item_offset] = 1;
+    return Q2_OK;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -334,6 +562,8 @@ q2_result q2_save_capture(q2_save *out, const q2_sim *sim,
     snprintf(out->map, sizeof(out->map), "%s", map);
     out->zone      = zone;
     out->timestamp = (u32)time(NULL);
+    out->skill_present = true;
+    out->skill = q2_cre_skill();
 
     /* --- the player, whole ---------------------------------------------- */
     out->player = sim->player[0];
@@ -361,8 +591,29 @@ q2_result q2_save_capture(q2_save *out, const q2_sim *sim,
     out->chaingun_bullets = sim->combat.chaingun_bullets;
     out->rng_state        = sim->combat.rng.state;
     out->fx_rng_state     = sim->fx_rng.state;
+    out->shot_serial      = sim->combat.shot_serial;
+    out->shot_fired       = sim->combat.last_shot.fired;
+    out->shot_dry         = sim->combat.last_shot.dry;
+    out->shot_sound       = sim->combat.last_shot.sound;
+    out->game_rng_present = true;
+    out->game_rng_state   = q2_random_state();
 
     memcpy(out->proj, sim->combat.projectiles.p, sizeof(out->proj));
+    out->projectile_runtime_present = true;
+
+    if (sim->events_ready && sim->event_rt.events.data) {
+        const q2_event_rt *rt = &sim->event_rt;
+        q2_save_event_runtime *e = &out->event_runtime;
+        e->script_size = rt->events.size;
+        e->script_crc = crc32_of(rt->events.data, rt->events.size);
+        e->record_count = rt->record_count;
+        e->clock = rt->clock; e->tick = rt->tick;
+        e->pending_count = rt->pending_count;
+        memcpy(e->pending, rt->pending, sizeof(e->pending));
+        memcpy(e->timers, rt->deferred, sizeof(e->timers));
+        memcpy(e->waits, rt->wait, sizeof(e->waits));
+        out->event_runtime_present = true;
+    }
 
     /*
      * --- script state -----------------------------------------------------
@@ -403,6 +654,15 @@ q2_result q2_save_capture(q2_save *out, const q2_sim *sim,
 
         memcpy(out->event_item_flags, sim->event_rt.item_flags, n);
         out->event_item_count = n;
+        if (sim->event_rt.object_flags) {
+            out->event_object_flags = (u8 *)malloc(n);
+            if (!out->event_object_flags) {
+                q2_save_free(out);
+                return Q2_ERR_NO_MEMORY;
+            }
+            memcpy(out->event_object_flags, sim->event_rt.object_flags, n);
+            out->event_object_count = n;
+        }
     }
 
     /*
@@ -442,6 +702,22 @@ q2_result q2_save_capture(q2_save *out, const q2_sim *sim,
         }
     }
 
+    if (sim->explosives && sim->explosives->count) {
+        u32 i, n = sim->explosives->count;
+        out->explosives = calloc(n, sizeof(*out->explosives));
+        if (!out->explosives) {
+            q2_save_free(out);
+            return Q2_ERR_NO_MEMORY;
+        }
+        out->explosive_count = n;
+        for (i = 0; i < n; i++) {
+            const q2_explosive *e = &sim->explosives->items[i];
+            out->explosives[i].item_offset = e->item_offset;
+            out->explosives[i].health = e->health;
+            out->explosives[i].destroyed = e->destroyed;
+        }
+    }
+
     /* --- the entity set ---------------------------------------------------- */
     if (sim->entities.count > 0 && sim->entities.ent) {
         u32 n = sim->entities.count;
@@ -472,6 +748,13 @@ q2_result q2_save_capture(q2_save *out, const q2_sim *sim,
             d->pos[0]     = e->pos[0];
             d->pos[1]     = e->pos[1];
             d->pos[2]     = e->pos[2];
+
+            /* These are transient presentation, as the save contract states.
+             * Their callbacks/models are not Population places and cannot be
+             * rebuilt by index. Keeping them live made a mid-explosion save
+             * fail to load. Keep the slot empty so later item keys still map. */
+            if (e->kind == Q2_ENT_KIND_MODEL || e->think == q2_gib_think)
+                d->in_use = 0;
         }
     }
 
@@ -756,6 +1039,10 @@ q2_result q2_save_apply(const q2_save *s, q2_sim *sim, q2_inventory *inv,
         return Q2_ERR_INVALID_ARG;
     }
 
+    if (s->event_runtime_present &&
+        (!sim->events_ready || !event_runtime_matches(&s->event_runtime, &sim->event_rt)))
+        return Q2_ERR_BAD_FORMAT;
+
     rebuild = rebuild_saved_item_roster(s, sim);
     if (rebuild != Q2_OK)
         return rebuild;
@@ -835,17 +1122,28 @@ q2_result q2_save_apply(const q2_save *s, q2_sim *sim, q2_inventory *inv,
     sim->combat.rng.state        = s->rng_state;
     sim->fx_rng.state            = s->fx_rng_state;
 
-    /* The last shot is presentation — a tracer and a sound the client has
-     * already drawn — so it is cleared rather than restored. */
+    /* Frame-driven fire can leave one report for the next view-weapon step.
+     * VWPN records its consumer cursors; no projectile or damage is replayed. */
     memset(&sim->combat.last_shot, 0, sizeof(sim->combat.last_shot));
+    sim->combat.shot_serial = s->viewweapon_present ? s->shot_serial : 0;
+    if (s->viewweapon_present) {
+        sim->combat.last_shot.fired = s->shot_fired;
+        sim->combat.last_shot.dry = s->shot_dry;
+        sim->combat.last_shot.sound = s->shot_sound;
+    }
 
     {
         u32 i, live = 0;
 
         memcpy(sim->combat.projectiles.p, s->proj, sizeof(s->proj));
-        for (i = 0; i < Q2_PROJ_MAX; i++)
+        for (i = 0; i < Q2_PROJ_MAX; i++) {
+            if (!s->projectile_runtime_present &&
+                sim->combat.projectiles.p[i].kind == Q2_PROJ_BOLT)
+                sim->combat.projectiles.p[i].flags =
+                    q2_projectile_flags_for_mod(sim->combat.projectiles.p[i].mod);
             if (sim->combat.projectiles.p[i].in_use)
                 live++;
+        }
         sim->combat.projectiles.live = live;
     }
 
@@ -870,6 +1168,29 @@ q2_result q2_save_apply(const q2_save *s, q2_sim *sim, q2_inventory *inv,
             n = sim->event_rt.item_flags_size;
         memset(sim->event_rt.item_flags, 0, sim->event_rt.item_flags_size);
         memcpy(sim->event_rt.item_flags, s->event_item_flags, n);
+    }
+
+    if (s->event_object_flags && sim->events_ready && sim->event_rt.object_flags) {
+        u32 n = s->event_object_count;
+        if (n > sim->event_rt.item_flags_size) n = sim->event_rt.item_flags_size;
+        memset(sim->event_rt.object_flags, 0, sim->event_rt.item_flags_size);
+        memcpy(sim->event_rt.object_flags, s->event_object_flags, n);
+    }
+
+    if (s->event_runtime_present) {
+        q2_event_rt *rt = &sim->event_rt;
+        const q2_save_event_runtime *e = &s->event_runtime;
+        u32 i;
+        rt->clock = e->clock; rt->tick = e->tick;
+        rt->pending_count = e->pending_count;
+        memcpy(rt->pending, e->pending, sizeof(rt->pending));
+        memcpy(rt->deferred, e->timers, sizeof(rt->deferred));
+        memcpy(rt->wait, e->waits, sizeof(rt->wait));
+        rt->deferred_count = 0;
+        for (i = 0; i < Q2_EVENT_RT_TIMER_MAX; i++)
+            if (rt->deferred[i].item) rt->deferred_count++;
+        rt->abort_record = rt->disable_self = rt->defer_timer = false;
+        rt->defer_ticks = rt->defer_fires = rt->defer_window = 0;
     }
 
     /* --- trigger residency -------------------------------------------------- */
@@ -906,6 +1227,29 @@ q2_result q2_save_apply(const q2_save *s, q2_sim *sim, q2_inventory *inv,
     }
 
     q2_sim_breakables_sync_solidity(sim);
+
+    if (sim->explosives) {
+        u32 i, j;
+        for (i = 0; i < s->explosive_count; i++) {
+            const q2_save_explosive *d = &s->explosives[i];
+            int index = q2_explosive_find(sim->explosives, d->item_offset);
+            q2_explosive *e;
+            if (index < 0) continue;
+            e = &sim->explosives->items[index];
+            e->health = d->health;
+            e->destroyed = d->destroyed;
+            for (j = 0; j < sim->breakable_count; j++) {
+                q2_breakable *b = &sim->breakable[j];
+                if (b->kind == Q2_BREAKABLE_FXGROUP &&
+                    b->item_offset == d->item_offset) {
+                    b->health = d->health;
+                    b->broken = d->destroyed != 0;
+                }
+            }
+        }
+    }
+
+    q2_sim_scene_solids_update(sim, NULL);
 
     /* --- the entity set ------------------------------------------------------ */
     if (s->entities && sim->entities.ent) {
@@ -975,14 +1319,10 @@ q2_result q2_save_apply(const q2_save *s, q2_sim *sim, q2_inventory *inv,
         q2_entity_world_move_player(&sim->ent_world, 0, sim->player[0].pos);
     }
 
-    /*
-     * Creatures are NOT restored, because the sim does not own them: a caller
-     * registers actors (sim.h). A client that spawns monsters must reload the
-     * map's population itself, which is what a fresh zone load already does —
-     * so a restored level has its monsters alive again even if the player had
-     * killed them. Called out rather than hidden; storing them needs the
-     * creature set to live somewhere the save can reach.
-     */
+    /* The owner restores its separate creature and mover sets with the
+     * q2_save_apply_creatures / q2_save_apply_movers helpers. */
+
+    q2_save_apply_game_rng(s);
 
     return Q2_OK;
 }
@@ -1055,6 +1395,40 @@ bool q2_save_get_level_counters(const q2_save *s, q2_save_level_counters *out)
         return false;
 
     *out = s->level;
+    return true;
+}
+
+/*
+ * The help computer's pair, 0x800218A8 / 0x80020F34.
+ *
+ * Marked present even when both keys are empty, because empty is what
+ * `HelpComputer_Reset` leaves and it is a real answer: "this unit has had no
+ * HELPCOMPUTER yet". Reading it back as "absent" would make a reset unit and a
+ * pre-version-8 file indistinguishable, and only the second should fall back to
+ * the session's pair.
+ */
+void q2_save_set_help_keys(q2_save *s, const char *orders_key,
+                           const char *objective_key)
+{
+    if (!s)
+        return;
+
+    memset(&s->help, 0, sizeof(s->help));
+    s->help.present = true;
+    if (orders_key)
+        snprintf(s->help.orders_key, sizeof(s->help.orders_key), "%s",
+                 orders_key);
+    if (objective_key)
+        snprintf(s->help.objective_key, sizeof(s->help.objective_key), "%s",
+                 objective_key);
+}
+
+bool q2_save_get_help_keys(const q2_save *s, q2_save_help *out)
+{
+    if (!s || !out || !s->help.present)
+        return false;
+
+    *out = s->help;
     return true;
 }
 
@@ -1343,6 +1717,151 @@ static void read_combat(rbuf *r, q2_save *s)
     s->fx_rng_state     = r_u32(r);
 }
 
+static void write_event_runtime(wbuf *w, const q2_save *s)
+{
+    const q2_save_event_runtime *e = &s->event_runtime;
+    u32 i;
+    size_t at;
+    if (!s->event_runtime_present) return;
+    at = w_chunk_begin(w, TAG_ERTS);
+    w_u32(w, 1);
+    w_u32(w, e->script_size); w_u32(w, e->script_crc); w_u32(w, e->record_count);
+    w_s32(w, e->clock); w_s32(w, e->tick);
+    w_u32(w, e->pending_count);
+    for (i = 0; i < e->pending_count; i++) w_u32(w, e->pending[i]);
+    w_u32(w, Q2_EVENT_RT_TIMER_MAX);
+    for (i = 0; i < Q2_EVENT_RT_TIMER_MAX; i++) {
+        const q2_event_timer *t = &e->timers[i];
+        w_u32(w, t->item); w_u32(w, t->offset);
+        w_u8(w, t->timer_index); w_u8(w, t->next_item);
+        w_u16(w, t->window); w_u16(w, t->fires);
+        w_s32(w, t->period); w_s32(w, t->due);
+    }
+    w_u32(w, Q2_EVENT_RT_WAIT_MAX);
+    for (i = 0; i < Q2_EVENT_RT_WAIT_MAX; i++) {
+        const q2_event_wait *v = &e->waits[i];
+        w_bool(w, v->in_use); w_u32(w, v->offset);
+        w_s32(w, v->stamp); w_u16(w, v->count);
+    }
+    w_chunk_end(w, at);
+}
+
+static bool read_event_runtime(rbuf *r, q2_save *s)
+{
+    q2_save_event_runtime *e = &s->event_runtime;
+    u32 i;
+    if (s->event_runtime_present || r_u32(r) != 1) return false;
+    e->script_size = r_u32(r); e->script_crc = r_u32(r); e->record_count = r_u32(r);
+    e->clock = r_s32(r); e->tick = r_s32(r);
+    e->pending_count = r_u32(r);
+    if (e->pending_count > Q2_EVENT_RT_PENDING_MAX) return false;
+    for (i = 0; i < e->pending_count; i++) e->pending[i] = r_u32(r);
+    if (r_u32(r) != Q2_EVENT_RT_TIMER_MAX) return false;
+    for (i = 0; i < Q2_EVENT_RT_TIMER_MAX; i++) {
+        q2_event_timer *t = &e->timers[i];
+        t->item = r_u32(r); t->offset = r_u32(r);
+        t->timer_index = r_u8(r); t->next_item = r_u8(r);
+        t->window = r_u16(r); t->fires = r_u16(r);
+        t->period = r_s32(r); t->due = r_s32(r);
+    }
+    if (r_u32(r) != Q2_EVENT_RT_WAIT_MAX) return false;
+    for (i = 0; i < Q2_EVENT_RT_WAIT_MAX; i++) {
+        q2_event_wait *v = &e->waits[i];
+        v->in_use = r_bool(r); v->offset = r_u32(r);
+        v->stamp = r_s32(r); v->count = r_u16(r);
+    }
+    s->event_runtime_present = true;
+    return !r->bad && r->at == r->len && valid_event_runtime(e);
+}
+
+static bool valid_viewweapon(const q2_save *s)
+{
+    const q2_viewweapon *v = &s->viewweapon;
+    return v->weapon >= 0 && v->weapon < Q2_VM_SLOTS &&
+           v->pending >= 0 && v->pending < Q2_VM_SLOTS &&
+           (u32)v->state < Q2_VM_STATES && v->total >= 0 &&
+           v->left >= 0 && v->left <= v->total &&
+           s->viewweapon_selected >= 0 && s->viewweapon_selected < Q2_VM_SLOTS;
+}
+
+q2_result q2_save_capture_viewweapon(q2_save *s, const q2_viewweapon *vw,
+                                     int selected, u32 shown, u32 heard,
+                                     bool cock_pending)
+{
+    if (!s || !vw) return Q2_ERR_INVALID_ARG;
+    s->viewweapon = *vw;
+    s->viewweapon.tab = NULL;
+    s->viewweapon.model = NULL;
+    s->viewweapon_selected = selected;
+    s->shot_serial_shown = shown;
+    s->shot_serial_heard = heard;
+    s->cock_pending = cock_pending;
+    if (!valid_viewweapon(s)) return Q2_ERR_BAD_FORMAT;
+    s->viewweapon_present = true;
+    return Q2_OK;
+}
+
+q2_result q2_save_apply_viewweapon(const q2_save *s, q2_viewweapon *vw,
+                                   const q2_vm_tables *tables)
+{
+    const q2_vm_clip *clip;
+    if (!s || !vw || !tables) return Q2_ERR_INVALID_ARG;
+    if (!s->viewweapon_present) return Q2_OK;
+    if (!valid_viewweapon(s)) return Q2_ERR_BAD_FORMAT;
+    clip = q2_vm_clip_get(tables, s->viewweapon.weapon, s->viewweapon.state);
+    if (!clip || !clip->count || s->viewweapon.frame >= clip->count)
+        return Q2_ERR_BAD_FORMAT;
+    *vw = s->viewweapon;
+    vw->tab = tables;
+    vw->model = NULL;
+    return Q2_OK;
+}
+
+static void write_viewweapon(wbuf *w, const q2_save *s)
+{
+    size_t at;
+    u32 k;
+    const q2_viewweapon *v = &s->viewweapon;
+    if (!s->viewweapon_present) return;
+    at = w_chunk_begin(w, TAG_VWPN);
+    w_u32(w, 1); /* chunk version */
+#define WRITE_VW(t, f) w_##t(w, (t)v->f);
+#define WRITE_VW_ARRAY(t, f, n) for (k = 0; k < n; k++) w_##t(w, v->f[k]);
+    VW_SCALARS(WRITE_VW)
+    VW_ARRAYS(WRITE_VW_ARRAY)
+#undef WRITE_VW
+#undef WRITE_VW_ARRAY
+    w_s32(w, s->viewweapon_selected);
+    w_u32(w, s->shot_serial);
+    w_u32(w, s->shot_serial_shown);
+    w_u32(w, s->shot_serial_heard);
+    w_bool(w, s->shot_fired); w_bool(w, s->shot_dry);
+    w_s16(w, s->shot_sound); w_bool(w, s->cock_pending);
+    w_chunk_end(w, at);
+}
+
+static bool read_viewweapon(rbuf *r, q2_save *s)
+{
+    u32 k;
+    q2_viewweapon *v = &s->viewweapon;
+    if (s->viewweapon_present || r_u32(r) != 1) return false;
+    memset(v, 0, sizeof(*v));
+#define READ_VW(t, f) v->f = r_##t(r);
+#define READ_VW_ARRAY(t, f, n) for (k = 0; k < n; k++) v->f[k] = r_##t(r);
+    VW_SCALARS(READ_VW)
+    VW_ARRAYS(READ_VW_ARRAY)
+#undef READ_VW
+#undef READ_VW_ARRAY
+    s->viewweapon_selected = r_s32(r);
+    s->shot_serial = r_u32(r);
+    s->shot_serial_shown = r_u32(r);
+    s->shot_serial_heard = r_u32(r);
+    s->shot_fired = r_bool(r); s->shot_dry = r_bool(r);
+    s->shot_sound = r_s16(r); s->cock_pending = r_bool(r);
+    s->viewweapon_present = true;
+    return !r->bad && r->at == r->len && valid_viewweapon(s);
+}
+
 static void write_projectiles(wbuf *w, const q2_save *s)
 {
     size_t at = w_chunk_begin(w, TAG_PROJ);
@@ -1366,6 +1885,16 @@ static void write_projectiles(wbuf *w, const q2_save *s)
     }
 
     w_chunk_end(w, at);
+    if (s->projectile_runtime_present) {
+        at = w_chunk_begin(w, TAG_PRST);
+        w_u32(w, 1);
+        w_u32(w, Q2_PROJ_MAX);
+        for (i = 0; i < Q2_PROJ_MAX; i++) {
+            w_u16(w, s->proj[i].flags);
+            w_u16(w, s->proj[i].beam_time);
+        }
+        w_chunk_end(w, at);
+    }
 }
 
 static void read_projectiles(rbuf *r, q2_save *s)
@@ -1376,6 +1905,13 @@ static void read_projectiles(rbuf *r, q2_save *s)
     for (i = 0; i < n; i++) {
         q2_projectile scratch;
         q2_projectile *p = (i < Q2_PROJ_MAX) ? &s->proj[i] : &scratch;
+        u16 flags = 0, beam_time = 0;
+
+        /* Chunks may arrive in either order. PRST's state must survive the
+         * base projectile reader's initialization when it appeared first. */
+        if (s->projectile_runtime_present && i < Q2_PROJ_MAX) {
+            flags = p->flags; beam_time = p->beam_time;
+        }
 
         memset(p, 0, sizeof(*p));
         p->in_use = r_bool(r);
@@ -1389,10 +1925,26 @@ static void read_projectiles(rbuf *r, q2_save *s)
         p->owner         = r_s32(r);
         p->bounced       = r_bool(r);
         p->node          = r_s32(r);
+        p->flags = s->projectile_runtime_present ? flags :
+                   (p->kind == Q2_PROJ_BOLT ? q2_projectile_flags_for_mod(p->mod) : 0);
+        p->beam_time = beam_time;
 
         if (r->bad)
             return;
     }
+}
+
+static bool read_projectile_runtime(rbuf *r, q2_save *s)
+{
+    u32 i;
+    if (s->projectile_runtime_present || r_u32(r) != 1 ||
+        r_u32(r) != Q2_PROJ_MAX) return false;
+    for (i = 0; i < Q2_PROJ_MAX; i++) {
+        s->proj[i].flags = r_u16(r);
+        s->proj[i].beam_time = r_u16(r);
+    }
+    s->projectile_runtime_present = true;
+    return !r->bad && r->at == r->len;
 }
 
 static void write_entities(wbuf *w, const q2_save *s)
@@ -1712,6 +2264,365 @@ void q2_save_apply_movers(const q2_save *s, q2_mover_set *set)
     }
 }
 
+q2_result q2_save_capture_rotators(q2_save *s, const q2_rotator_set *set)
+{
+    q2_save_rotator *copy;
+    u32 i;
+    if (!s || !set || (set->count && !set->rotators)) return Q2_ERR_INVALID_ARG;
+    copy = set->count ? calloc(set->count, sizeof(*copy)) : NULL;
+    if (set->count && !copy) return Q2_ERR_NO_MEMORY;
+    for (i = 0; i < set->count; i++) {
+        const q2_rotator *r = &set->rotators[i];
+        q2_save_rotator *d = &copy[i];
+        d->node = r->node; d->kind = (u8)r->kind; d->axis = r->axis;
+        d->accum = r->accum; d->angle = r->angle; d->state = r->state;
+        d->step_pending = r->step_pending;
+        d->delay = r->delay; d->hold = r->hold;
+        d->motor_active = (r->loop_running ||
+                           (r->loop_pending & Q2_ROTLOOP_WANT_START)) &&
+                          !(r->loop_pending & Q2_ROTLOOP_WANT_STOP);
+    }
+    free(s->rotators);
+    s->rotators = copy;
+    s->rotator_count = set->count;
+    s->rotators_present = true;
+    return Q2_OK;
+}
+
+q2_result q2_save_apply_rotators(const q2_save *s, q2_rotator_set *set)
+{
+    u32 i;
+    if (!s || !set) return Q2_ERR_INVALID_ARG;
+    if (!s->rotators_present) return Q2_OK;
+    if (s->rotator_count != set->count ||
+        (set->count && (!set->rotators || !s->rotators))) return Q2_ERR_BAD_FORMAT;
+    /* Validate the entire rebuilt roster before changing any member. */
+    for (i = 0; i < set->count; i++) {
+        const q2_save_rotator *d = &s->rotators[i];
+        const q2_rotator *r = &set->rotators[i];
+        if (d->node != r->node || d->kind != (u8)r->kind || d->axis != r->axis)
+            return Q2_ERR_BAD_FORMAT;
+    }
+    for (i = 0; i < set->count; i++) {
+        const q2_save_rotator *d = &s->rotators[i];
+        q2_rotator *r = &set->rotators[i];
+        r->accum = d->accum; r->angle = d->angle; r->state = d->state;
+        r->step_pending = d->step_pending != 0;
+        r->delay = d->delay; r->hold = d->hold;
+        r->sound_pending = Q2_ROTSND_NONE;
+        r->loop_running = false;
+        r->loop_pending = d->motor_active ? Q2_ROTLOOP_WANT_START : 0;
+        r->loop_voice = NULL;
+        r->loop_serial = 0;
+    }
+    return Q2_OK;
+}
+
+static void write_rotators(wbuf *w, const q2_save *s)
+{
+    size_t at;
+    u32 i;
+    if (!s->rotators_present) return;
+    at = w_chunk_begin(w, TAG_ROTR);
+    w_u32(w, 1); w_u32(w, s->rotator_count);
+    for (i = 0; i < s->rotator_count; i++) {
+        const q2_save_rotator *d = &s->rotators[i];
+        w_s16(w, d->node); w_u8(w, d->kind); w_u8(w, d->axis);
+        w_s32(w, d->accum); w_s16(w, d->angle); w_u8(w, d->state);
+        w_u8(w, d->step_pending); w_u8(w, d->motor_active);
+        w_u16(w, d->delay); w_u16(w, d->hold);
+    }
+    w_chunk_end(w, at);
+}
+
+static bool read_rotators(rbuf *r, q2_save *s)
+{
+    u32 version = r_u32(r), n = r_u32(r), i;
+    if (r->bad || version != 1 || s->rotators_present ||
+        n > SAVE_MAX_ENTITIES || n != (r->len - r->at) / 17) return false;
+    s->rotators = n ? calloc(n, sizeof(*s->rotators)) : NULL;
+    if (n && !s->rotators) return false;
+    s->rotator_count = n;
+    s->rotators_present = true;
+    for (i = 0; i < n; i++) {
+        q2_save_rotator *d = &s->rotators[i];
+        d->node = r_s16(r); d->kind = r_u8(r); d->axis = r_u8(r);
+        d->accum = r_s32(r); d->angle = r_s16(r); d->state = r_u8(r);
+        d->step_pending = r_u8(r); d->motor_active = r_u8(r);
+        d->delay = r_u16(r); d->hold = r_u16(r);
+        if (r->bad || d->kind > Q2_ROT_SNAP || d->axis > 3 ||
+            d->state > Q2_ROTST_HOLD || d->state == 4 ||
+            d->step_pending > 1 || d->motor_active > 1) return false;
+    }
+    return r->at == r->len;
+}
+
+static void copy_ai_state(q2_monster *d, const q2_monster *m)
+{
+#define COPY_SCALAR(t, f) d->f = m->f;
+#define COPY_ARRAY(t, f, n) memcpy(d->f, m->f, sizeof(d->f));
+    AI_SCALARS(COPY_SCALAR)
+    AI_ARRAYS(COPY_ARRAY)
+#undef COPY_SCALAR
+#undef COPY_ARRAY
+}
+
+static void write_ai_state(wbuf *w, const q2_monster *m)
+{
+    u32 k;
+#define WRITE_SCALAR(t, f) w_##t(w, (t)m->f);
+#define WRITE_ARRAY(t, f, n) for (k = 0; k < n; k++) w_##t(w, m->f[k]);
+    AI_SCALARS(WRITE_SCALAR)
+    AI_ARRAYS(WRITE_ARRAY)
+#undef WRITE_SCALAR
+#undef WRITE_ARRAY
+}
+
+static void read_ai_state(rbuf *r, q2_monster *m)
+{
+    u32 k;
+#define READ_SCALAR(t, f) m->f = r_##t(r);
+#define READ_ARRAY(t, f, n) for (k = 0; k < n; k++) m->f[k] = r_##t(r);
+    AI_SCALARS(READ_SCALAR)
+    AI_ARRAYS(READ_ARRAY)
+#undef READ_SCALAR
+#undef READ_ARRAY
+}
+
+/* -1 = no target, -2 = player proxy, -(3+i) = path corner, i >= 0 = monster. */
+static bool ai_ref(const q2_creature_world *w, const q2_monster *m, s32 *out)
+{
+    u32 i;
+    if (!m) { *out = -1; return true; }
+    if (m == &w->sight) { *out = -2; return true; }
+    for (i = 0; i < w->set.count; i++)
+        if (m == &w->set.monsters[i]) { *out = (s32)i; return true; }
+    for (i = 0; i < w->corner_count; i++)
+        if (m == &w->corner[i]) { *out = -3 - (s32)i; return true; }
+    return false;
+}
+
+static bool valid_ai_ref(s32 ref, u32 count, u32 corners)
+{
+    if (ref == -1 || ref == -2) return true;
+    return ref >= 0 ? (u32)ref < count : -(s64)ref - 3 < (s64)corners;
+}
+
+static q2_monster *resolve_ai_ref(q2_creature_world *w, s32 ref)
+{
+    if (ref == -1) return NULL;
+    if (ref == -2) return &w->sight;
+    if (ref >= 0) return &w->set.monsters[ref];
+    return &w->corner[-(s64)ref - 3];
+}
+
+static const q2_mmove *resolve_ai_move(const q2_creature_world *w,
+                                       const save_ai_monster *d)
+{
+    u32 i, j;
+    for (i = 0; i < w->mod_count; i++) {
+        const q2_creature_module *mod = &w->mod[i];
+        if (strcmp(mod->name, d->move_module)) continue;
+        for (j = 0; j < mod->bind.move_count && j < mod->cre.move_count; j++)
+            if (!mod->cre.move[j].clip_piece &&
+                mod->cre.move[j].addr - mod->cre.base == d->move_offset)
+                return &mod->bind.move[j];
+    }
+    return NULL;
+}
+
+bool q2_save_get_skill(const q2_save *s, s32 *skill)
+{
+    if (!s || !s->skill_present || !skill) return false;
+    *skill = s->skill;
+    return true;
+}
+
+void q2_save_apply_game_rng(const q2_save *s)
+{
+    if (s && s->game_rng_present) q2_random_seed(s->game_rng_state);
+}
+
+q2_result q2_save_capture_ai(q2_save *s, const q2_creature_world *w, u32 phase_us)
+{
+    struct q2_save_ai *a;
+    u32 i, j, k;
+    if (!s || !w || phase_us > 500000 || w->set.count > SAVE_MAX_ENTITIES ||
+        w->corner_count > SAVE_MAX_ENTITIES ||
+        (w->set.count && !w->set.monsters) || (w->corner_count && !w->corner))
+        return Q2_ERR_INVALID_ARG;
+    a = calloc(1, sizeof(*a));
+    if (!a) return Q2_ERR_NO_MEMORY;
+    a->count = w->set.count; a->corner_count = w->corner_count;
+    a->phase_us = phase_us;
+    a->monsters = a->count ? calloc(a->count, sizeof(*a->monsters)) : NULL;
+    if (a->count && !a->monsters) { free_ai(a); return Q2_ERR_NO_MEMORY; }
+    a->level = q2_level_state;
+    if (!ai_ref(w, a->level.sight_client, &a->level_refs[0]) ||
+        !ai_ref(w, a->level.sight_entity, &a->level_refs[1]) ||
+        !ai_ref(w, a->level.sound_entity, &a->level_refs[2]) ||
+        !ai_ref(w, a->level.sound2_entity, &a->level_refs[3])) goto bad;
+    a->level.sight_client = a->level.sight_entity = NULL;
+    a->level.sound_entity = a->level.sound2_entity = NULL;
+    copy_ai_state(&a->sight, &w->sight);
+    q2_trail_capture(&a->trail);
+    for (i = 0; i < a->count; i++) {
+        const q2_monster *m = &w->set.monsters[i];
+        save_ai_monster *d = &a->monsters[i];
+        copy_ai_state(&d->state, m);
+        if (!ai_ref(w, m->enemy, &d->refs[0]) ||
+            !ai_ref(w, m->oldenemy, &d->refs[1]) ||
+            !ai_ref(w, m->goalentity, &d->refs[2]) ||
+            !ai_ref(w, m->movetarget, &d->refs[3]) ||
+            !ai_ref(w, m->owner, &d->refs[4])) goto bad;
+        if (m->think && m->think != q2_M_MoveFrame) goto bad;
+        d->thinking = m->think != NULL;
+        if (!m->currentmove) continue;
+        for (j = 0; j < w->mod_count && !d->has_move; j++) {
+            const q2_creature_module *mod = &w->mod[j];
+            for (k = 0; k < mod->bind.move_count && k < mod->cre.move_count; k++) {
+                if (m->currentmove != &mod->bind.move[k]) continue;
+                snprintf(d->move_module, sizeof(d->move_module), "%s", mod->name);
+                d->move_offset = mod->cre.move[k].addr - mod->cre.base;
+                d->has_move = 1;
+                break;
+            }
+        }
+        if (!d->has_move) goto bad;
+    }
+    free_ai(s->ai);
+    s->ai = a;
+    return Q2_OK;
+bad:
+    free_ai(a);
+    return Q2_ERR_BAD_FORMAT;
+}
+
+q2_result q2_save_apply_ai(const q2_save *s, q2_creature_world *w, u32 *phase_us)
+{
+    const struct q2_save_ai *a;
+    u32 i, j;
+    if (!s || !w) return Q2_ERR_INVALID_ARG;
+    if (!s->ai) return Q2_OK;
+    a = s->ai;
+    if (a->count != w->set.count || a->corner_count != w->corner_count ||
+        (a->count && (!w->set.monsters || !a->monsters)) ||
+        (a->corner_count && !w->corner) || a->trail.head >= Q2_TRAIL_LENGTH)
+        return Q2_ERR_BAD_FORMAT;
+    for (i = 0; i < 4; i++)
+        if (!valid_ai_ref(a->level_refs[i], a->count, a->corner_count))
+            return Q2_ERR_BAD_FORMAT;
+    for (i = 0; i < a->count; i++) {
+        const save_ai_monster *d = &a->monsters[i];
+        const q2_monster *m = &w->set.monsters[i];
+        if (m->pop_class_id != d->state.pop_class_id || m->group != d->state.group ||
+            (d->has_move && !resolve_ai_move(w, d))) return Q2_ERR_BAD_FORMAT;
+        for (j = 0; j < 5; j++)
+            if (!valid_ai_ref(d->refs[j], a->count, a->corner_count))
+                return Q2_ERR_BAD_FORMAT;
+    }
+    for (i = 0; i < a->count; i++) {
+        const save_ai_monster *d = &a->monsters[i];
+        q2_monster *m = &w->set.monsters[i];
+        copy_ai_state(m, &d->state);
+        m->currentmove = d->has_move ? resolve_ai_move(w, d) : NULL;
+        m->think = d->thinking ? q2_M_MoveFrame : NULL;
+        m->enemy = resolve_ai_ref(w, d->refs[0]);
+        m->oldenemy = resolve_ai_ref(w, d->refs[1]);
+        m->goalentity = resolve_ai_ref(w, d->refs[2]);
+        m->movetarget = resolve_ai_ref(w, d->refs[3]);
+        m->owner = resolve_ai_ref(w, d->refs[4]);
+        if (m->corpse) {
+            m->stand = m->idle = m->search = m->walk = m->run = NULL;
+            m->attack = m->melee = NULL;
+            m->dodge = NULL; m->sight = NULL; m->checkattack = NULL;
+            m->bigturn = NULL;
+        }
+    }
+    copy_ai_state(&w->sight, &a->sight);
+    q2_level_state = a->level;
+    q2_level_state.sight_client = resolve_ai_ref(w, a->level_refs[0]);
+    q2_level_state.sight_entity = resolve_ai_ref(w, a->level_refs[1]);
+    q2_level_state.sound_entity = resolve_ai_ref(w, a->level_refs[2]);
+    q2_level_state.sound2_entity = resolve_ai_ref(w, a->level_refs[3]);
+    q2_trail_restore(&a->trail);
+    if (phase_us) *phase_us = a->phase_us;
+    return Q2_OK;
+}
+
+static void write_ai(wbuf *w, const q2_save *s)
+{
+    const struct q2_save_ai *a = s->ai;
+    size_t at;
+    u32 i;
+    if (!a) return;
+    at = w_chunk_begin(w, TAG_CAIS);
+    w_u32(w, 1); w_u32(w, a->count); w_u32(w, a->corner_count);
+    w_u32(w, a->phase_us);
+    w_s32(w, a->level.framenum); w_s32(w, a->level.time);
+    w_s32(w, a->level.total_monsters); w_s32(w, a->level.killed_monsters);
+    w_s32v(w, a->level_refs, 4);
+    w_s32(w, a->level.sight_entity_framenum);
+    w_s32(w, a->level.sound_entity_framenum);
+    w_s32(w, a->level.sound2_entity_framenum);
+    write_ai_state(w, &a->sight);
+    w_u32(w, a->trail.head); w_u8(w, a->trail.active);
+    for (i = 0; i < Q2_TRAIL_LENGTH; i++) {
+        w_s32v(w, a->trail.spot[i].origin, 3);
+        w_s32(w, a->trail.spot[i].timestamp); w_s16(w, a->trail.spot[i].yaw);
+    }
+    for (i = 0; i < a->count; i++) {
+        const save_ai_monster *d = &a->monsters[i];
+        write_ai_state(w, &d->state);
+        w_s32v(w, d->refs, 5); w_str(w, d->move_module, sizeof(d->move_module));
+        w_u32(w, d->move_offset); w_u8(w, d->has_move); w_u8(w, d->thinking);
+    }
+    w_chunk_end(w, at);
+}
+
+static bool read_ai(rbuf *r, q2_save *s)
+{
+    struct q2_save_ai *a;
+    u32 version = r_u32(r), n = r_u32(r), i, j;
+    if (r->bad || version != 1 || s->ai || n > SAVE_MAX_ENTITIES ||
+        n > (r->len - r->at) / 128) return false;
+    a = calloc(1, sizeof(*a));
+    if (!a) return false;
+    s->ai = a;
+    a->count = n; a->corner_count = r_u32(r); a->phase_us = r_u32(r);
+    if (a->corner_count > SAVE_MAX_ENTITIES || a->phase_us > 500000) return false;
+    a->monsters = n ? calloc(n, sizeof(*a->monsters)) : NULL;
+    if (n && !a->monsters) return false;
+    a->level.framenum = r_s32(r); a->level.time = r_s32(r);
+    a->level.total_monsters = r_s32(r); a->level.killed_monsters = r_s32(r);
+    r_s32v(r, a->level_refs, 4);
+    for (i = 0; i < 4; i++)
+        if (!valid_ai_ref(a->level_refs[i], n, a->corner_count)) return false;
+    a->level.sight_entity_framenum = r_s32(r);
+    a->level.sound_entity_framenum = r_s32(r);
+    a->level.sound2_entity_framenum = r_s32(r);
+    read_ai_state(r, &a->sight);
+    a->trail.head = r_u32(r); a->trail.active = r_u8(r) != 0;
+    if (a->trail.head >= Q2_TRAIL_LENGTH) return false;
+    for (i = 0; i < Q2_TRAIL_LENGTH; i++) {
+        r_s32v(r, a->trail.spot[i].origin, 3);
+        a->trail.spot[i].timestamp = r_s32(r); a->trail.spot[i].yaw = r_s16(r);
+    }
+    for (i = 0; i < n; i++) {
+        save_ai_monster *d = &a->monsters[i];
+        read_ai_state(r, &d->state);
+        r_s32v(r, d->refs, 5);
+        for (j = 0; j < sizeof(d->move_module); j++)
+            d->move_module[j] = (char)r_u8(r);
+        d->move_offset = r_u32(r); d->has_move = r_u8(r); d->thinking = r_u8(r);
+        if (r->bad || d->has_move > 1 || d->thinking > 1 ||
+            !memchr(d->move_module, 0, sizeof(d->move_module))) return false;
+        for (j = 0; j < 5; j++)
+            if (!valid_ai_ref(d->refs[j], n, a->corner_count)) return false;
+    }
+    return !r->bad && r->at == r->len;
+}
+
 static void write_creatures(wbuf *w, const q2_save *s)
 {
     size_t at = w_chunk_begin(w, TAG_CRES);
@@ -1933,6 +2844,32 @@ static void read_level_counters(rbuf *r, q2_save *s)
     s->level.present = !r->bad;
 }
 
+/*
+ * HELP. Two fixed-width keys and nothing else — what the console's hub arms
+ * copy is exactly twelve bytes apiece (0x800218B0..0x800218DC), and the width
+ * here is thirteen only so the reader always has a terminator.
+ */
+static void write_help_keys(wbuf *w, const q2_save *s)
+{
+    size_t at;
+
+    if (!s->help.present)
+        return;
+
+    at = w_chunk_begin(w, TAG_HELP);
+    w_str(w, s->help.orders_key,    sizeof(s->help.orders_key));
+    w_str(w, s->help.objective_key, sizeof(s->help.objective_key));
+    w_chunk_end(w, at);
+}
+
+static void read_help_keys(rbuf *r, q2_save *s)
+{
+    memset(&s->help, 0, sizeof(s->help));
+    r_str(r, s->help.orders_key,    sizeof(s->help.orders_key));
+    r_str(r, s->help.objective_key, sizeof(s->help.objective_key));
+    s->help.present = !r->bad;
+}
+
 static void write_settings(wbuf *w, const q2_save *s)
 {
     size_t at = w_chunk_begin(w, TAG_SETT);
@@ -1999,8 +2936,117 @@ static bool read_bytes_chunk(rbuf *r, u8 **out, u32 *out_count, u32 limit)
 /* ------------------------------------------------------------------------- */
 /* Files                                                                      */
 /* ------------------------------------------------------------------------- */
+static void write_explosives(wbuf *w, const q2_save *s)
+{
+    u32 i;
+    size_t at;
+    if (!s->explosive_count) return;
+    at = w_chunk_begin(w, TAG_EXPL);
+    w_u32(w, s->explosive_count);
+    for (i = 0; i < s->explosive_count; i++) {
+        w_u32(w, s->explosives[i].item_offset);
+        w_s16(w, s->explosives[i].health);
+        w_u8(w, s->explosives[i].destroyed);
+    }
+    w_chunk_end(w, at);
+}
+
+static bool read_explosives(rbuf *r, q2_save *s)
+{
+    u32 i, n = r_u32(r);
+    if (r->bad || n > SAVE_MAX_ENTITIES || s->explosives ||
+        !r_need(r, (size_t)n * 7)) return false;
+    if (n) {
+        s->explosives = calloc(n, sizeof(*s->explosives));
+        if (!s->explosives) return false;
+    }
+    s->explosive_count = n;
+    for (i = 0; i < n; i++) {
+        s->explosives[i].item_offset = r_u32(r);
+        s->explosives[i].health = r_s16(r);
+        s->explosives[i].destroyed = r_u8(r);
+        if (s->explosives[i].destroyed > 1) return false;
+    }
+    return r->at == r->len;
+}
+
+static void write_event_history(wbuf *w, const q2_save *s)
+{
+    size_t at;
+    u32 i;
+
+    if (!s->event_history_present) return;
+    at = w_chunk_begin(w, TAG_EVHS);
+    w_u32(w, s->event_history.count);
+    for (i = 0; i < s->event_history.count; i++) {
+        const q2_event_block *b = &s->event_history.block[i];
+        const q2_event_carry *c = &b->carry;
+        w_str(w, b->map, Q2_EVENT_BLOCK_NAME_MAX);
+        w_u32(w, c->size);
+        w_u32(w, c->record_count);
+        w_u32(w, c->identity);
+        w_bytes(w, c->record_flags, c->record_count);
+        w_bytes(w, c->item_flags, c->size);
+        w_bytes(w, c->destroyed_items, c->size);
+    }
+    w_chunk_end(w, at);
+}
+
+static bool read_event_history(rbuf *r, q2_save *s)
+{
+    u32 n = r_u32(r), i;
+
+    if (r->bad || n > SAVE_MAX_EVENT_MAPS || s->event_history_present)
+        return false;
+    s->event_history_present = true;
+    for (i = 0; i < n; i++) {
+        char map[Q2_EVENT_BLOCK_NAME_MAX];
+        q2_event_carry value = {0};
+        q2_event_carry *dst;
+
+        if (!r_need(r, sizeof(map)) || r->p[r->at + sizeof(map) - 1])
+            return false;
+        r_str(r, map, sizeof(map));
+        value.size = r_u32(r);
+        value.record_count = r_u32(r);
+        value.identity = r_u32(r);
+        if (r->bad || !map[0] || !valid_event_carry(&value) ||
+            q2_event_store_find(&s->event_history, map) ||
+            !r_need(r, (size_t)value.record_count + 2u * value.size))
+            return false;
+        memcpy(value.record_flags, r->p + r->at, value.record_count);
+        r->at += value.record_count;
+        memcpy(value.item_flags, r->p + r->at, value.size);
+        r->at += value.size;
+        memcpy(value.destroyed_items, r->p + r->at, value.size);
+        r->at += value.size;
+        dst = q2_event_store_open(&s->event_history, map);
+        if (!dst) return false;
+        *dst = value;
+    }
+    return r->at == r->len;
+}
+
 static q2_result build_body(const q2_save *s, wbuf *w)
 {
+    u32 i;
+    if ((s->skill_present && (s->skill < 0 || s->skill > 3)) ||
+        (s->viewweapon_present && !valid_viewweapon(s)) ||
+        (s->event_runtime_present && !valid_event_runtime(&s->event_runtime)) ||
+        s->rotator_count > SAVE_MAX_ENTITIES ||
+        (s->rotator_count && !s->rotators) ||
+        s->event_object_count > SAVE_MAX_EVENTS ||
+        (s->event_object_count && (!s->event_object_flags ||
+                                  s->event_object_count != s->event_item_count)))
+        return Q2_ERR_BAD_FORMAT;
+    if (s->event_history_present) {
+        if (s->event_history.count > SAVE_MAX_EVENT_MAPS ||
+            (s->event_history.count && !s->event_history.block))
+            return Q2_ERR_BAD_FORMAT;
+        for (i = 0; i < s->event_history.count; i++)
+            if (!valid_event_carry(&s->event_history.block[i].carry))
+                return Q2_ERR_BAD_FORMAT;
+    }
     write_head(w, s);
     write_player(w, s);
     write_sim(w, s);
@@ -2012,17 +3058,36 @@ static q2_result build_body(const q2_save *s, wbuf *w)
     }
 
     write_combat(w, s);
+    write_viewweapon(w, s);
+    write_event_runtime(w, s);
+    if (s->game_rng_present) {
+        size_t at = w_chunk_begin(w, TAG_RAND);
+        w_u32(w, s->game_rng_state);
+        w_chunk_end(w, at);
+    }
     write_projectiles(w, s);
     write_bytes_chunk(w, TAG_EVNT, s->event_flags, s->event_count);
     write_bytes_chunk(w, TAG_EVIT, s->event_item_flags, s->event_item_count);
+    if (s->event_object_flags)
+        write_bytes_chunk(w, TAG_EOBJ, s->event_object_flags, s->event_object_count);
+    write_event_history(w, s);
     write_bytes_chunk(w, TAG_TRIG, s->trigger_inside, s->trigger_count);
     write_entities(w, s);
     write_item_state(w, s);
     write_breakables(w, s);
+    write_explosives(w, s);
     write_movers(w, s);
+    write_rotators(w, s);
     write_creatures(w, s);
+    write_ai(w, s);
+    if (s->skill_present) {
+        size_t at = w_chunk_begin(w, TAG_SKIL);
+        w_s32(w, s->skill);
+        w_chunk_end(w, at);
+    }
     write_mission(w, s);
     write_level_counters(w, s);
+    write_help_keys(w, s);
     write_settings(w, s);
 
     return w->bad ? Q2_ERR_NO_MEMORY : Q2_OK;
@@ -2193,6 +3258,7 @@ static q2_result read_body(q2_save *out, const u8 *body, size_t body_size)
         case TAG_PROJ: read_projectiles(&c, out); break;
         case TAG_MISN: read_mission(&c, out); break;
         case TAG_LVLC: read_level_counters(&c, out); break;
+        case TAG_HELP: read_help_keys(&c, out); break;
         case TAG_SETT: read_settings(&c, out); break;
 
         case TAG_EVNT:
@@ -2204,6 +3270,18 @@ static q2_result read_body(q2_save *out, const u8 *body, size_t body_size)
         case TAG_EVIT:
             if (!read_bytes_chunk(&c, &out->event_item_flags,
                                   &out->event_item_count, SAVE_MAX_EVENTS))
+                return Q2_ERR_BAD_FORMAT;
+            break;
+
+        case TAG_EVHS:
+            if (!read_event_history(&c, out))
+                return Q2_ERR_BAD_FORMAT;
+            break;
+
+        case TAG_EOBJ:
+            if (out->event_object_flags ||
+                !read_bytes_chunk(&c, &out->event_object_flags,
+                                  &out->event_object_count, SAVE_MAX_EVENTS))
                 return Q2_ERR_BAD_FORMAT;
             break;
 
@@ -2228,6 +3306,11 @@ static q2_result read_body(q2_save *out, const u8 *body, size_t body_size)
                 return Q2_ERR_BAD_FORMAT;
             break;
 
+        case TAG_EXPL:
+            if (!read_explosives(&c, out))
+                return Q2_ERR_BAD_FORMAT;
+            break;
+
         case TAG_MOVR:
             if (!read_movers(&c, out))
                 return Q2_ERR_BAD_FORMAT;
@@ -2236,6 +3319,39 @@ static q2_result read_body(q2_save *out, const u8 *body, size_t body_size)
         case TAG_CRES:
             if (!read_creatures(&c, out))
                 return Q2_ERR_BAD_FORMAT;
+            break;
+
+        case TAG_ROTR:
+            if (!read_rotators(&c, out)) return Q2_ERR_BAD_FORMAT;
+            break;
+
+        case TAG_CAIS:
+            if (!read_ai(&c, out)) return Q2_ERR_BAD_FORMAT;
+            break;
+
+        case TAG_SKIL:
+            if (out->skill_present || c.len != 4) return Q2_ERR_BAD_FORMAT;
+            out->skill = r_s32(&c);
+            if (out->skill < 0 || out->skill > 3) return Q2_ERR_BAD_FORMAT;
+            out->skill_present = true;
+            break;
+
+        case TAG_RAND:
+            if (out->game_rng_present || c.len != 4) return Q2_ERR_BAD_FORMAT;
+            out->game_rng_state = r_u32(&c);
+            out->game_rng_present = true;
+            break;
+
+        case TAG_VWPN:
+            if (!read_viewweapon(&c, out)) return Q2_ERR_BAD_FORMAT;
+            break;
+
+        case TAG_ERTS:
+            if (!read_event_runtime(&c, out)) return Q2_ERR_BAD_FORMAT;
+            break;
+
+        case TAG_PRST:
+            if (!read_projectile_runtime(&c, out)) return Q2_ERR_BAD_FORMAT;
             break;
 
         default:
@@ -2250,7 +3366,8 @@ static q2_result read_body(q2_save *out, const u8 *body, size_t body_size)
         top.at += size;
     }
 
-    if (top.at != top.len)
+    if (top.at != top.len || (out->event_object_count &&
+                             out->event_object_count != out->event_item_count))
         return Q2_ERR_BAD_FORMAT;
 
     return Q2_OK;
