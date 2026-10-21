@@ -636,8 +636,8 @@ static void grey_item(q2_menu *m, int index)
          * for the same reason (0x8001CA00 then 0x8001CA18), because the source
          * and the destination can be the same text. */
         snprintf(was, sizeof(was), "%s", label);
-        snprintf(m->text[index], Q2_MENU_TEXT_MAX, "%c%s",
-                 Q2_MENU_CODE_GREY, was);
+        snprintf(m->text[index], Q2_MENU_TEXT_MAX, "%c%.*s",
+                 Q2_MENU_CODE_GREY, Q2_MENU_TEXT_MAX - 2, was);
     }
     m->disabled[index] = 1;
 }

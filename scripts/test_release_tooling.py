@@ -287,6 +287,23 @@ class ReleaseNotes(unittest.TestCase):
     def test_summary_leads(self):
         self.assertTrue(self.compose(summary="A first release.").startswith("A first release."))
 
+    def test_highlights_replace_long_notes_and_link_the_tagged_changelog(self):
+        highlights = self.root / "highlights.md"
+        highlights.write_text("- Save and restore weapon recoil.\n", encoding="utf-8")
+        text = self.compose(highlights_path=highlights)
+        self.assertIn("Save and restore weapon recoil.", text)
+        self.assertNotIn("The scene graph is read.", text)
+        self.assertIn("/blob/v0.1.0/CHANGELOG.md", text)
+        self.assertIn("no game assets", text)
+        self.assertIn("SHA256SUMS.txt", text)
+        self.assertIn("See CHANGELOG.md", self.compose(highlights_path=highlights, slug=None))
+
+    def test_empty_highlights_are_rejected(self):
+        highlights = self.root / "highlights.md"
+        highlights.write_text("\n", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            self.compose(highlights_path=highlights)
+
     def test_compare_link_uses_the_previous_tag(self):
         text = self.compose(previous_tag="v0.0.9")
         self.assertIn("compare/v0.0.9...v0.1.0", text)

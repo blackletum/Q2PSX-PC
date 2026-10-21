@@ -204,10 +204,13 @@ jobs:
       # Stamping goes through the resolver rather than writing the file
       # directly, so the same validation runs here as in the validate job. The
       # edit is local to this runner; the publish job commits its own.
-      - name: Stamp the version
+      - name: Stamp the version and changelog
         shell: bash
         run: |
           python scripts/version.py resolve --set "${{ needs.validate.outputs.version }}" --write
+          python scripts/changelog.py release \
+            --version "${{ needs.validate.outputs.version }}" \
+            --date "${{ needs.validate.outputs.date }}"
           cat VERSION
 
       - name: Configure

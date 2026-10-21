@@ -67,6 +67,11 @@ remember what it was for.
 The workflow **refuses to release with an empty queue**. Release notes that say
 nothing are worse than no release.
 
+For a large release, `docs/releases/<version>.md` can supply concise highlights
+for the GitHub release body. The renderer uses that file when present and links
+to the full changelog at the release tag. The complete dated changelog still
+ships in every archive; releases without a highlights file use it verbatim.
+
 ## Cutting a release
 
 From the repository's **Actions** tab, run **Release**:

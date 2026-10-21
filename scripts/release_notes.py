@@ -4,14 +4,13 @@
 The notes are assembled from things that already exist rather than written at
 release time:
 
-* the changelog section for the version, which is what the work said about
-  itself as it landed;
+* the changelog section for the version, or its curated highlights under
+  docs/releases/ when the full changelog is too long for a release body;
 * the archives actually produced by the build, so the download table cannot
   advertise a file that is not attached;
 * the commit and the previous tag, so the release says what it was built from.
 
-Only the optional one-line summary is typed by a human, in the workflow's own
-input box.
+The optional one-line summary comes from the workflow's own input box.
 
 The standing preamble — what this is, that you need your own disc — is here
 rather than in the workflow, because it is prose that wants editing without
@@ -142,6 +141,7 @@ def compose(
     archive_dir: Path | None,
     changelog_path: Path,
     slug: str | None,
+    highlights_path: Path | None = None,
 ) -> str:
     tag = version_mod.tag_for(version)
     prefix = f"{version_mod.archive_prefix_for(version)}-"
@@ -151,7 +151,18 @@ def compose(
         parts.append(summary.strip() + "\n")
 
     parts.append(PREAMBLE)
-    parts.append("## What changed\n\n" + changelog_body(changelog_path, version))
+    changes = changelog_body(changelog_path, version)
+    if highlights_path is not None:
+        changes = highlights_path.read_text(encoding="utf-8").strip()
+        if not changes:
+            raise ValueError(f"{highlights_path} has no release highlights")
+        if slug:
+            changes += (
+                f"\n\n[Full changelog](https://github.com/{slug}/blob/{tag}/CHANGELOG.md).\n"
+            )
+        else:
+            changes += "\n\nSee CHANGELOG.md in the download for the full changelog.\n"
+    parts.append("## What changed\n\n" + changes)
 
     parts.append("## Getting it\n\n" + REQUIREMENT)
     table = download_table(archive_rows(archive_dir, prefix))
@@ -229,6 +240,7 @@ def main(argv: list[str] | None = None) -> int:
             tags = version_mod.release_tags()
             previous = tags[1] if len(tags) > 1 else None
 
+    highlights = ROOT / "docs" / "releases" / f"{version}.md"
     text = compose(
         version=version,
         date=args.date,
@@ -238,6 +250,7 @@ def main(argv: list[str] | None = None) -> int:
         archive_dir=args.archive_dir,
         changelog_path=args.changelog,
         slug=repo_slug(args.repo),
+        highlights_path=highlights if highlights.is_file() else None,
     )
 
     if args.output:
