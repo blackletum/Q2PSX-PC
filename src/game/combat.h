@@ -819,6 +819,16 @@ s32 q2_combat_nearest_on_segment(const s32 origin[3], const s32 dir[3],
                                  u32 count);
 
 /*
+ * The same question cut short by the world: the nearest actor entered before
+ * `world_fraction` (1.0.12, 4096 = the whole segment), with the 1.0.12
+ * fraction at which it is entered in `out_along`. What q2_combat_fire_bullet
+ * asks before it deals damage, for a caller that has to deal it itself.
+ */
+s32 q2_combat_nearest_hit(const s32 origin[3], const s32 dir[3],
+                          s32 world_fraction, s32 fallback_radius,
+                          q2_actor **targets, u32 count, s64 *out_along);
+
+/*
  * One hitscan trace, 0x8004874C.
  *
  * The trace runs from `origin` to `origin + dir` and stops at the first actor

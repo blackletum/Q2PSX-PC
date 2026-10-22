@@ -1255,7 +1255,8 @@ static void spy_shot(q2_monster *m, const q2_cre_shot *shot, void *user)
 
 static void test_fire_shot_has_no_enemy_guard(void)
 {
-    static const q2_cre_shot shot = { 0x98, 0x98, 50, 550, 0, 0, 0, 1 };
+    static const q2_cre_shot shot = { 0x98, 0x98, 50, 550, 0, 0, 0, 1,
+                                      false, { 0, 0, 0 }, { 0, 0, 0 } };
     q2_monster m, foe;
     u32 i;
 
@@ -1502,6 +1503,174 @@ static void test_tank_burst_rule(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/* The machinegun guard's burst, and where a dying creature's rounds go       */
+/* ------------------------------------------------------------------------- */
+static q2_cre_shot g_last_shot;
+
+static void spy_last_shot(q2_monster *m, const q2_cre_shot *shot, void *user)
+{
+    (void)m; (void)user;
+    g_last_shot = *shot;
+    g_shot_calls++;
+}
+
+static void test_soldier_burst_and_death_aim(void)
+{
+    const q2_cre_impl *impl = q2_cre_impl_find("Soldier");
+    q2_monster m, foe;
+    s32 fwd[3];
+    s32 hold_until;
+    int k;
+
+    printf("the machinegun guard holds its fire frame; Death1 fires ahead\n");
+
+    if (!impl || !impl->method[16] || !impl->method[20] || !impl->method[6]) {
+        check(false, "the Soldier's fire thinks are registered");
+        return;
+    }
+    q2_cre_set_shot_hook(spy_last_shot, NULL);
+
+    /*
+     * Attack4's frame 41 (think 16, flash 3) on a machinegun guard — class row
+     * 20. module+0x14E8..+0x1540: pausetime = time + 3 + rand() % 8, only with
+     * AI_HOLD_FRAME clear; module+0x159C..+0x15CC holds while time < pausetime.
+     */
+    q2_monster_init(&m);
+    q2_monster_init(&foe);
+    m.pop_class_id = 20;
+    m.health = m.max_health = 40;
+    m.angles[2] = 1024;                       /* facing +X */
+    foe.pos[0] = 4000;
+    foe.health = 100;
+    m.enemy = &foe;
+    q2_level_state.time = 100;
+
+    g_shot_calls = 0;
+    impl->method[16](&m);
+    check_eq_i(g_shot_calls, 1, "frame 41 fires one round");
+    check_eq_i(g_last_shot.slot, Q2_IMP_FIRE_BULLET,
+               "through monster_fire_bullet, import +0x84");
+    check(g_last_shot.aimed && g_last_shot.damage == 2,
+          "aimed, damage 2 (module+0x1574)");
+    check((m.aiflags & Q2_AI_HOLD_FRAME) != 0 &&
+              m.pausetime >= 103 && m.pausetime <= 110,
+          "and holds the frame for 3 + rand() % 8 ticks");
+
+    hold_until = m.pausetime;
+    q2_level_state.time = 101;
+    impl->method[16](&m);
+    check_eq_i(m.pausetime, hold_until,
+               "a held frame does not rearm the pause (the AI_HOLD_FRAME test)");
+    check((m.aiflags & Q2_AI_HOLD_FRAME) != 0, "and keeps holding");
+
+    q2_level_state.time = hold_until;
+    impl->method[16](&m);
+    check_eq_i(g_shot_calls, 3, "every held tick is another round");
+    check((m.aiflags & Q2_AI_HOLD_FRAME) == 0,
+          "and the round fired at the deadline releases it");
+
+    /*
+     * Death1's frame 293, think 20, flash 5: `aim = forward`, at nobody —
+     * module+0x1274's `addiu v0, s4, -5; sltiu v0, v0, 2`. A blaster guard
+     * here, so the burst arm does not run.
+     */
+    q2_monster_init(&m);
+    m.pop_class_id = 19;
+    m.health = -5;
+    m.dead = true;
+    m.angles[2] = 1024;
+    m.enemy = &foe;
+    foe.pos[0] = -4000;                       /* BEHIND it */
+    q2_angle_vectors(m.angles, fwd, NULL, NULL);
+    impl->method[20](&m);
+    check_eq_i(g_last_shot.slot, Q2_IMP_FIRE_BLASTER,
+               "a blaster guard's dying shot is a bolt");
+    for (k = 0; k < 3; k++)
+        if (g_last_shot.dir[k] != fwd[k])
+            break;
+    check(k == 3, "and it goes straight along the body's own forward vector, "
+                  "not at the enemy behind it");
+    check(g_last_shot.start[0] == m.pos[0] && g_last_shot.start[2] == m.pos[2],
+          "from the origin when nothing can pose the muzzle");
+
+    /* An ordinary aimed flash goes AT the enemy, inside its crandom spread. */
+    q2_monster_init(&m);
+    m.pop_class_id = 19;
+    m.health = 20;
+    m.angles[2] = 1024;
+    m.enemy = &foe;
+    /* Not exactly 0: an X-aligned aim trips vectoangles' own quirk
+     * (0x8005F998) and comes back a quarter turn off, on the console too. */
+    foe.pos[0] = 37;
+    foe.pos[2] = 6000;                        /* off to +Z */
+    impl->method[6](&m);
+    check(g_last_shot.aimed && g_last_shot.dir[2] > 3800,
+          "flash 0 aims at the enemy within the module's spread");
+
+    q2_cre_set_shot_hook(NULL, NULL);
+    q2_level_state.time = 0;
+}
+
+static void test_infantry_death_sweep(void)
+{
+    const q2_cre_impl *impl = q2_cre_impl_find("Infantry");
+    q2_monster m, foe;
+    s32 fwd[3];
+    s16 a[3];
+
+    printf("the dying Infantry sweeps its burst up the wall\n");
+
+    if (!impl || !impl->method[1]) {
+        check(false, "InfantryMachineGun is registered");
+        return;
+    }
+    q2_cre_set_shot_hook(spy_last_shot, NULL);
+
+    q2_monster_init(&m);
+    m.health = -10;
+    m.dead = true;
+    m.angles[2] = 2048;
+
+    /* Frame 155: `angles - aimangles[0]`, (0, 0, 57) — five degrees across. */
+    m.frame = 155;
+    g_shot_calls = 0;
+    impl->method[1](&m);
+    a[0] = 0; a[1] = 0; a[2] = (s16)(2048 - 57);
+    q2_angle_vectors(a, fwd, NULL, NULL);
+    check_eq_i(g_shot_calls, 1, "frame 155 fires");
+    check(g_last_shot.aimed && g_last_shot.dir[0] == fwd[0] &&
+              g_last_shot.dir[1] == fwd[1] && g_last_shot.dir[2] == fwd[2],
+          "along angles - aimangles[0]");
+
+    /* Frame 166: aimangles[11] is (1024, 0, 398) — 90 degrees of pitch, so
+     * straight up, and up is -Y on this console. */
+    m.frame = 166;
+    impl->method[1](&m);
+    check(g_last_shot.dir[1] == -4096,
+          "and frame 166 fires straight at the ceiling");
+
+    /* A frame the table does not cover does not read off its end. */
+    m.frame = 170;
+    g_shot_calls = 0;
+    impl->method[1](&m);
+    check_eq_i(g_shot_calls, 0, "a frame past the table fires nothing");
+
+    /* The attack frame, 194, leads the enemy by -819/4096 of its velocity. */
+    q2_monster_init(&m);
+    q2_monster_init(&foe);
+    m.health = 100;
+    m.frame = 194;
+    m.enemy = &foe;
+    foe.pos[2] = 8192;
+    foe.velocity[0] = 4096 * 5;               /* moving +X */
+    impl->method[1](&m);
+    check(g_last_shot.dir[2] > 0 && g_last_shot.dir[0] < 0,
+          "frame 194 aims where the enemy was, not where it is going");
+
+    q2_cre_set_shot_hook(NULL, NULL);
+}
+
+/* ------------------------------------------------------------------------- */
 /* A prone Insane is a flyer — module+0x974, import +0x100                    */
 /* ------------------------------------------------------------------------- */
 static void test_insane_prone_flies(void)
@@ -1685,6 +1854,8 @@ int main(void)
     test_sound_fallback();
     test_fire_shot_has_no_enemy_guard();
     test_tank_burst_rule();
+    test_soldier_burst_and_death_aim();
+    test_infantry_death_sweep();
     test_insane_prone_flies();
     test_insane_start_draws();
 

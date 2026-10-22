@@ -1844,6 +1844,23 @@ q2_hand_grenade_update q2_sim_hand_grenade_update(
 q2_damage_result q2_sim_hurt_player(q2_sim *sim, q2_actor *attacker,
                                     s16 damage, s16 mod, const s32 point[3]);
 
+/*
+ * One creature round from `start` to `start + dir` — 0x8004874C as the
+ * creature spawners reach it. The first box entered before the world takes
+ * it: a creature other than `attacker` (its index in combat.targets comes
+ * back), the player (Q2_SIM_HIT_PLAYER), or the world (-1, with the puff).
+ * `dir` carries the range, as the console's does: the bullet spawners pass
+ * the 1.12 aim shifted left by two, 16384 units. `mod` is the means of death
+ * (Q2_MOD_BULLET for the spawners' own rounds); `mark_world` false leaves no
+ * puff on the wall, for a bolt this port resolves along its line. `impact`,
+ * when not NULL, receives where the round stopped (or its range's end).
+ */
+#define Q2_SIM_HIT_PLAYER       (-2)
+#define Q2_SIM_CRE_HITSCAN_MAX  128
+s32 q2_sim_creature_hitscan(q2_sim *sim, q2_actor *attacker,
+                            const s32 start[3], const s32 dir[3], s16 damage,
+                            s16 mod, bool mark_world, s32 impact[3]);
+
 /* Apply a validated Events FX item to the current player. Returns false when
  * the item is not the retail fixed-size FX form. The original leaves
  * T_Damage's point argument uninitialised; this reproducible port uses NULL,

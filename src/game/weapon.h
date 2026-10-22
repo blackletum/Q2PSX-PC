@@ -319,8 +319,10 @@ bool q2_weapon_usable(const q2_inventory *inv, int id);
 #define Q2_MUZZLE_OUTER_SCALE  200
 
 /*
- * The CREATURE muzzle flash — import slot 0xA0, which only the Gunner's think 13
- * calls on the whole disc.
+ * The CREATURE muzzle flash — import slot 0xA0, which the Soldier's, the
+ * Infantry's and the Gunner's export 1 call while their object's +0x10C sign
+ * bit is up (q2_fx_flash in effect.h). It is not the Gunner's think 13, which
+ * an earlier census credited: that method is an empty `jr ra`.
  *
  * Same colour as the player's, and the same shape of computation, but bigger and
  * drawn TWICE rather than once (0x800311B0 and 0x800311E0 are two separate

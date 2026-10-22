@@ -459,6 +459,62 @@ static void test_vectors(void)
         check(fwd[2] < 64 && fwd[2] > -64, "and has no Z component");
         check(right[2] < -4000, "with right a quarter turn clockwise of it");
     }
+
+    /*
+     * 0x8005BB58 reads PITCH and ROLL too — angles[0] and angles[1]. Y points
+     * down, so a positive pitch looks down; the dying Infantry's sweep is a
+     * negative one and climbs the wall.
+     */
+    {
+        s16 down[3] = { Q2_ANGLE_90, 0, 0 };
+        s16 up45[3] = { -512, 0, 0 };
+        s16 rolled[3] = { 0, Q2_ANGLE_90, 0 };
+        s32 up[3];
+
+        q2_angle_vectors(down, fwd, NULL, NULL);
+        check_vec3(fwd, 0, 4096, 0, "pitch 1024 looks straight down (+Y)");
+        q2_angle_vectors(up45, fwd, NULL, up);
+        check(fwd[1] < -2800 && fwd[2] > 2800,
+              "a negative pitch climbs, half up and half ahead");
+        check(up[1] < -2800 && up[2] < -2800,
+              "and up tips back with it");
+        q2_angle_vectors(rolled, NULL, right, up);
+        check(right[1] == 4096 && up[0] == 4096,
+              "a quarter roll turns right to +Y and up to +X");
+    }
+
+    /* 0x8005C460: the product divides by 4096 toward zero, not a shift. */
+    {
+        s32 o[3] = { 10, 20, 30 }, d[3] = { 4096, -4096, 1 }, r[3];
+
+        q2_vector_ma(o, -819, d, r);
+        check_vec3(r, 10 - 819, 20 + 819, 30,
+                   "VectorMA truncates each product toward zero");
+    }
+
+    /* 0x8005F934, quirks and all. */
+    {
+        s32 w[3];
+        s16 ang[3];
+
+        w[0] = 0; w[1] = 500; w[2] = 0;
+        q2_vectoangles(w, ang);
+        check(ang[0] == 1024 && ang[2] == 0 && ang[1] == 0,
+              "straight down is pitch 1024, yaw 0, roll written zero");
+        w[0] = 100; w[1] = 0; w[2] = 100;
+        q2_vectoangles(w, ang);
+        check(ang[2] == 512 && ang[0] == 0, "a diagonal is yaw 512");
+        w[0] = 0; w[1] = 0; w[2] = 100;
+        q2_vectoangles(w, ang);
+        check_eq_i(ang[2], 1024,
+                   "and straight down +Z comes back a quarter turn off, as "
+                   "id's unswapped `value1[1] > 0 ? 90` makes it on the "
+                   "console");
+        w[0] = 300; w[1] = -300; w[2] = 0;
+        q2_vectoangles(w, ang);
+        check(ang[0] == 4096 - 512 && ang[2] == 1024,
+              "a climbing vector is a negative pitch, lifted by 4096");
+    }
 }
 
 /* ------------------------------------------------------------------------- */

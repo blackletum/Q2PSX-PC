@@ -1653,6 +1653,20 @@ s32 q2_combat_nearest_on_segment(const s32 origin[3], const s32 dir[3],
                        (u32)-1, NULL);
 }
 
+s32 q2_combat_nearest_hit(const s32 origin[3], const s32 dir[3],
+                          s32 world_fraction, s32 fallback_radius,
+                          q2_actor **targets, u32 count, s64 *out_along)
+{
+    if (out_along)
+        *out_along = 0;
+    if (!origin || !dir || !targets)
+        return -1;
+    if (world_fraction <= 0 || world_fraction > 4096)
+        world_fraction = (world_fraction <= 0) ? 0 : 4096;
+    return nearest_hit(origin, dir, world_fraction, fallback_radius, targets,
+                       count, (u32)-1, out_along);
+}
+
 s32 q2_combat_fire_bullet(q2_actor *attacker, const s32 origin[3],
                           const s32 dir[3], s16 damage, s32 world_fraction,
                           s32 fallback_radius, q2_actor **targets, u32 count,

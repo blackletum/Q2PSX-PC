@@ -1212,6 +1212,115 @@ q2_damage_result q2_sim_hurt_player(q2_sim *sim, q2_actor *attacker,
 }
 
 /*
+ * ONE CREATURE ROUND, traced — 0x8004874C as `monster_fire_bullet`
+ * (0x80061E9C) and every pellet of `monster_fire_shotgun` (0x80061FCC) reach
+ * it: from the muzzle to `start + dir` through the hull, the first entity box
+ * the segment enters before the world stops it takes the damage, and the
+ * world gets the puff and the breakable test when nothing does.
+ *
+ * It is the player's own hitscan pointed the other way, and that is the
+ * point: the console has ONE bullet path (combat.h), and the creatures'
+ * rounds were the one thing in the port that did not go through it. They were
+ * a line-of-sight test against the player and a guaranteed hit — so a guard
+ * that missed by a mile on the console hit every time here, a dying soldier
+ * firing at the floor hit the player standing behind it, and no creature
+ * round ever marked a wall.
+ *
+ * WHAT CAN BE HIT is everything the console's sweep tests: every creature but
+ * the shooter (the sweep's ignore argument), and the player. A creature caught
+ * in another's line of fire takes the round, as on the console; its reaction
+ * is the client's drain, which credits the player — a stated approximation,
+ * the actor sync having no inflictor to report.
+ *
+ * THE PLAYER'S BOX is built here rather than taken from `combat.self`, whose
+ * origin holds the FEET (q2_actor_from_player). The console's sweep measures
+ * the slab from the entity origin (combat.c, `centre[1] + 286`), so the
+ * player is placed at its origin, Q2_EYE_BASE above the feet, with the
+ * actor's own 286 x 572 cylinder. The damage then goes through
+ * q2_sim_hurt_player with the point it rebuilds for a creature shot, at the
+ * height the round actually struck.
+ *
+ * Returns the creature's index in `sim->combat.targets`, Q2_SIM_HIT_PLAYER,
+ * or -1 when the round hit only the world or nothing.
+ */
+s32 q2_sim_creature_hitscan(q2_sim *sim, q2_actor *attacker,
+                            const s32 start[3], const s32 dir[3], s16 damage,
+                            s16 mod, bool mark_world, s32 impact[3])
+{
+    q2_actor  *list[Q2_SIM_CRE_HITSCAN_MAX + 1];
+    q2_actor   player;
+    q2_damage_result dr;
+    u32        n = 0, i;
+    u8         area;
+    s32        frac, idx, k;
+    s64        along = 0;
+    s32        player_slot = -1;
+    s32        at[3];
+
+    if (!sim || !start || !dir)
+        return -1;
+
+    for (i = 0; i < sim->combat.target_count && n < Q2_SIM_CRE_HITSCAN_MAX;
+         i++) {
+        if (sim->combat.targets[i] && sim->combat.targets[i] != attacker)
+            list[n++] = sim->combat.targets[i];
+    }
+
+    if (sim->combat.inv.health > 0) {
+        const s32 *feet = sim->player[sim->cur_player].pos;
+
+        q2_actor_from_player(&sim->combat.self, &sim->combat.inv, feet);
+        player = sim->combat.self;
+        player.origin[1] = q2_sim_origin_y(feet[1]);
+        player_slot = (s32)n;
+        list[n++] = &player;
+    }
+
+    frac = world_fraction_for(sim, start, dir, &area);
+    idx  = q2_combat_nearest_hit(start, dir, frac, Q2_HITSCAN_RADIUS, list, n,
+                                 &along);
+    if (impact) {
+        s64 f = idx >= 0 ? along : frac;
+
+        for (k = 0; k < 3; k++)
+            impact[k] = start[k] + (s32)(((s64)dir[k] * f) / 4096);
+    }
+
+    if (idx >= 0 && idx == player_slot) {
+        const s32 *feet = sim->player[sim->cur_player].pos;
+        s32 point[3];
+
+        /* Horizontally on the player, as the creature hooks have always
+         * passed it, so q2_sim_hurt_player rebuilds the impact facing the
+         * shooter — and at the height the round struck. */
+        point[0] = feet[0];
+        point[1] = start[1] + (s32)(((s64)dir[1] * along) / 4096);
+        point[2] = feet[2];
+        q2_sim_hurt_player(sim, attacker, damage, mod, point);
+        return Q2_SIM_HIT_PLAYER;
+    }
+
+    memset(&dr, 0, sizeof(dr));
+    if (idx >= 0) {
+        for (k = 0; k < 3; k++)
+            at[k] = start[k] + (s32)(((s64)dir[k] * along) / 4096);
+        sync_rules(sim);
+        dr = q2_combat_damage(attacker, list[idx], damage, mod, at,
+                              &sim->combat.rules);
+        fx_hitscan_impact(sim, start, dir, (s32)along, area, idx, &dr, damage);
+
+        for (i = 0; i < sim->combat.target_count; i++)
+            if (sim->combat.targets[i] == list[idx])
+                return (s32)i;
+        return -1;
+    }
+
+    if (mark_world)
+        fx_hitscan_impact(sim, start, dir, frac, area, -1, NULL, damage);
+    return -1;
+}
+
+/*
  * The actor that fired a projectile, from the owner index the launch recorded.
  *
  * The step runs on player 0's tick — projectiles are the world's — so

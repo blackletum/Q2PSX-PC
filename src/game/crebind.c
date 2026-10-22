@@ -439,6 +439,30 @@ void q2_cre_set_shot_hook(void (*fn)(q2_monster *m, const q2_cre_shot *shot,
     g_shot_user = user;
 }
 
+/* The muzzle hook — see q2_cre_muzzle in crebind.h. */
+static bool (*g_muzzle_fn)(const q2_monster *m, s16 vert_a, s16 vert_b,
+                           s32 out[3], void *user);
+static void  *g_muzzle_user;
+
+void q2_cre_set_muzzle_hook(bool (*fn)(const q2_monster *m, s16 vert_a,
+                                       s16 vert_b, s32 out[3], void *user),
+                            void *user)
+{
+    g_muzzle_fn   = fn;
+    g_muzzle_user = user;
+}
+
+void q2_cre_muzzle(const q2_monster *m, s16 vert_a, s16 vert_b, s32 out[3])
+{
+    if (!m || !out)
+        return;
+    if (g_muzzle_fn && g_muzzle_fn(m, vert_a, vert_b, out, g_muzzle_user))
+        return;
+    out[0] = m->pos[0];
+    out[1] = m->pos[1];
+    out[2] = m->pos[2];
+}
+
 /*
  * The melee hook itself lives beside the sound hook in cre_soldier.c, which is
  * where the first transcribed creature put it; this is the engine side of it.

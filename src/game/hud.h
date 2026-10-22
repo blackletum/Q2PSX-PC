@@ -200,6 +200,7 @@ int q2_hud_measure(const char *s);
 #define Q2_HUD_CENTRE_LEN    64
 #define Q2_HUD_CENTRE_TICKS 1200
 #define Q2_HUD_CENTRE_DROP   20     /* below the middle of the view          */
+#define Q2_HUD_CENTRE_TOO_LONG "String too long!"   /* 0x800AC994          */
 #define Q2_HUD_BOX_START      7     /* `*7`, the darkest backdrop            */
 
 /*
@@ -311,6 +312,9 @@ typedef struct q2_hud {
     /* The centre line. */
     char centre[Q2_HUD_CENTRE_LEN];
     s32  centre_age;      /* ctx+0x28C; drawn while < 1200                   */
+    /* The age test made BEFORE this frame's delta was added — what the draw
+     * actually keys on (0x80042B90..0x80042BB4). See q2_hud_tick. */
+    bool centre_live;
 
     /*
      * The pickup caption, already marked up. Empty means nothing to draw.
