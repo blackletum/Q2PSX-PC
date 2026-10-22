@@ -266,6 +266,18 @@ typedef struct q2_projectile {
     q2_actor *shooter;
 
     /*
+     * THE ATTITUDE ITS MODEL IS DRAWN WITH — entity+0xE6, the SVECTOR the
+     * spawner hands RotMatrix. A rocket's is set from its flight
+     * (q2_projectile_aim_rocket) and circles it; a launched grenade's is three
+     * rand()s that never change (q2_projectile_spin_grenade). `base` and
+     * `phase` are the rocket's +0x50/+0x4C and +0x48. Not saved: a restored
+     * rocket is re-aimed from its velocity (save.c).
+     */
+    s16 angles[3];
+    s16 base[2];
+    u16 phase;
+
+    /*
      * The collision cell this projectile is in, carried across ticks exactly as
      * the mover carries the player's. A rocket that has flown across the map is
      * nowhere near the shooter's cell, so tracing it from the shooter's would
@@ -309,6 +321,28 @@ void q2_projectiles_init(q2_projectiles *list);
  * divisor is per kind and getting it wrong is silent.
  */
 s32 q2_projectile_raw_velocity(const q2_projectile *p, int axis);
+
+/*
+ * A rocket's attitude at launch — AnyoneFireRocketL, 0x8004B1D4..0x8004B24C.
+ *
+ *     pitch = -ratan2(vel.y, SquareRootNR(vel.x^2 + vel.z^2))
+ *     yaw   = the SHOOTER's yaw (`lhu 232(s1)`), not the flight's
+ *     roll  = 0
+ *
+ * read off the halfword velocity the spawner stores, and kept as the base the
+ * think circles (q2_projectile_step). The yaw being the shooter's is why a
+ * rocket fired at something off to the side still points where its launcher
+ * faced.
+ */
+void q2_projectile_aim_rocket(q2_projectile *p, s32 shooter_yaw);
+
+/*
+ * A launched grenade's attitude — AnyoneFireGrenadeL, 0x8004A2B8..0x8004A2EC:
+ * three rand()s, stored as halfwords and handed to RotMatrix once.
+ * PrimaryGrenadeLActive (0x80049E70) never writes +0xE6 again, so it does not
+ * tumble; it lands and bounces at the attitude it left with.
+ */
+void q2_projectile_spin_grenade(q2_projectile *p, s32 r0, s32 r1, s32 r2);
 
 /*
  * Launch what a fire result asked for. Does nothing for a hitscan or rail

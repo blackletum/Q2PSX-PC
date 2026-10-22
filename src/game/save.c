@@ -6,6 +6,7 @@
 #include "ai.h"
 #include "creworld.h"
 #include "random.h"
+#include "trig.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1143,6 +1144,15 @@ q2_result q2_save_apply(const q2_save *s, q2_sim *sim, q2_inventory *inv,
                     q2_projectile_flags_for_mod(sim->combat.projectiles.p[i].mod);
             /* A creature's actor does not outlive the zone it was built in. */
             sim->combat.projectiles.p[i].shooter = NULL;
+            /* Nor is the attitude saved: a rocket is re-aimed from its own
+             * flight, its yaw from the velocity since the shooter's is gone. */
+            if (sim->combat.projectiles.p[i].kind == Q2_PROJ_ROCKET) {
+                q2_projectile *rp = &sim->combat.projectiles.p[i];
+
+                q2_projectile_aim_rocket(rp, q2_ratan2(
+                    q2_projectile_raw_velocity(rp, 0),
+                    q2_projectile_raw_velocity(rp, 2)));
+            }
             if (sim->combat.projectiles.p[i].in_use)
                 live++;
         }

@@ -1,5 +1,6 @@
 #include "projectile.h"
 
+#include "trig.h"
 #include "worldscale.h"
 
 #include <string.h>
@@ -89,6 +90,56 @@ u16 q2_projectile_flags_for_mod(s16 mod)
     if (mod == Q2_MOD_BOLT)
         return Q2_PROJ_FLAGS_BLASTER;
     return 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* SquareRootNR (0x80055CBC) as shock.c stands in for it: an exact floor root,
+ * where the console seeds two Newton steps from libgte's table. */
+static s32 floor_sqrt(u32 v)
+{
+    u32 r = 0, bit = 1u << 30;
+
+    while (bit > v)
+        bit >>= 2;
+    while (bit) {
+        if (v >= r + bit) {
+            v -= r + bit;
+            r = (r >> 1) + bit;
+        } else {
+            r >>= 1;
+        }
+        bit >>= 2;
+    }
+    return (s32)r;
+}
+
+void q2_projectile_aim_rocket(q2_projectile *p, s32 shooter_yaw)
+{
+    s32 vx, vy, vz;
+
+    if (!p)
+        return;
+    vx = (s16)q2_projectile_raw_velocity(p, 0);
+    vy = (s16)q2_projectile_raw_velocity(p, 1);
+    vz = (s16)q2_projectile_raw_velocity(p, 2);
+
+    /* 0x8004B1D4..0x8004B208: `mult` of the two halfwords, one root, then
+     * ratan2 of the vertical against it, negated. */
+    p->base[0]   = (s16)-q2_ratan2(vy, floor_sqrt((u32)(vx * vx + vz * vz)));
+    p->base[1]   = (s16)shooter_yaw;
+    p->angles[0] = p->base[0];
+    p->angles[1] = p->base[1];
+    p->angles[2] = 0;
+    p->phase     = 0;                      /* 0x8004B244 `sw zero, 72(s0)` */
+}
+
+void q2_projectile_spin_grenade(q2_projectile *p, s32 r0, s32 r1, s32 r2)
+{
+    if (!p)
+        return;
+    p->angles[0] = (s16)r0;
+    p->angles[1] = (s16)r1;
+    p->angles[2] = (s16)r2;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -287,6 +338,20 @@ void q2_projectile_step(q2_projectiles *list, u32 index, s32 gravity, s32 dt,
 
     if (dt <= 0)
         dt = Q2_DT_NOMINAL;
+
+    /*
+     * A ROCKET CIRCLES ITS LINE OF FLIGHT, before it moves — the head of
+     * PrimaryRocketActive, 0x8004AD34..0x8004ADBC. Its phase at +0x48 gains
+     * `dt << 5` a tick, and the attitude it is drawn with is the launch
+     * attitude plus a sine and a cosine of that phase, each halfword taken
+     * `sll 16; sra 22`: a 64-step (5.6 degree) wobble of pitch against yaw,
+     * once round every 4096 / 384 ticks at the PAL delta.
+     */
+    if (p->kind == Q2_PROJ_ROCKET) {
+        p->phase     = (u16)((p->phase + ((u32)dt << 5)) & 0xFFFu);
+        p->angles[0] = (s16)(p->base[0] + ((s16)q2_sin12(p->phase) >> 6));
+        p->angles[1] = (s16)(p->base[1] + ((s16)q2_cos12(p->phase) >> 6));
+    }
 
     /*
      * Only the grenades fall; the bolt, the rocket and the BFG blast fly

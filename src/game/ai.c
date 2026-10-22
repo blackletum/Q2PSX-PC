@@ -304,19 +304,10 @@ void q2_vector_ma(const s32 a[3], s32 scale, const s32 b[3], s32 out[3])
         out[k] = a[k] + mul4096(scale, b[k]);
 }
 
-/*
- * ratan2 (0x8008A358): the Psy-Q library's table-driven atan2, an angle on the
- * 4096-step circle in -2048..2048. The console looks the ratio up in a
- * 1025-entry table at 0x800A9430 after folding the octant; this computes the
- * same function in floating point and rounds to the unit, the way trig.c
- * builds its sine table. The two can differ by one step where the table's own
- * rounding does — not enough to move a shot off its target.
- */
+/* ratan2 (0x8008A358) — q2_ratan2 in trig.h, and why it is not the table. */
 static s32 ratan2_4096(s32 y, s32 x)
 {
-    if (x == 0 && y == 0)
-        return 0;                                   /* 0x8008A384 */
-    return (s32)lround(atan2((double)y, (double)x) * 2048.0 / 3.14159265358979323846);
+    return q2_ratan2(y, x);
 }
 
 /*

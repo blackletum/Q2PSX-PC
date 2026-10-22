@@ -5707,14 +5707,15 @@ static void test_creature_launch(void)
     targets[0] = &cre;
     q2_sim_set_targets(&sim, targets, 1);
 
-    rocket = q2_sim_creature_launch(&sim, &cre, Q2_FK_ROCKET, start, aim, 50);
+    rocket = q2_sim_creature_launch(&sim, &cre, Q2_FK_ROCKET, start, aim, 50,
+                                    0);
     check(rocket >= 0, "the rocket takes a slot");
     check_eq_i(q2_projectile_raw_velocity(&sim.combat.projectiles.p[rocket],
                                           2), -6144,
                "at half again the aim, where the player's launcher doubles");
     q2_projectiles_init(&sim.combat.projectiles);
 
-    bolt = q2_sim_creature_launch(&sim, &cre, Q2_FK_BOLT, start, aim, 16);
+    bolt = q2_sim_creature_launch(&sim, &cre, Q2_FK_BOLT, start, aim, 16, 0);
     check(bolt >= 0, "the bolt takes a slot");
     check(sim.combat.projectiles.p[bolt].shooter == &cre &&
           sim.combat.projectiles.p[bolt].owner == -1,
@@ -5732,6 +5733,64 @@ static void test_creature_launch(void)
     check_eq_i(cre.health, 750, "its shooter, which it started inside, does not");
 
     q2_sim_set_targets(&sim, NULL, 0);
+    q2_sim_free(&sim);
+}
+
+/*
+ * A rocket's attitude: launched along the shooter's yaw at the pitch of its
+ * own flight (0x8004B1D4..0x8004B24C), then circling that by 64 steps as its
+ * phase gains `dt << 5` a tick (0x8004AD34..0x8004ADBC).
+ */
+static void test_rocket_attitude(void)
+{
+    q2_projectiles list;
+    q2_fire_result_v2 r;
+    q2_proj_step step;
+    q2_sim sim;
+    s32 spawn[3] = { 0, 0, 0 };
+    s32 i;
+
+    printf("a rocket points along its launcher and circles its line\n");
+
+    q2_projectiles_init(&list);
+    memset(&r, 0, sizeof(r));
+    r.fired = true;
+    r.kind = Q2_FK_ROCKET;
+    r.shot_count = 1;
+    r.shot[0].dir[1] = -8192;          /* climbing at 45 degrees: Y is down */
+    r.shot[0].dir[2] = 8192;
+    i = q2_projectile_launch(&list, &r, 0, 0);
+    check(i >= 0, "the rocket launches");
+
+    q2_projectile_aim_rocket(&list.p[i], 1000);
+    check_eq_i(list.p[i].angles[0], 512,
+               "pitched up an eighth of a turn: -ratan2(vy, |vxz|)");
+    check_eq_i(list.p[i].angles[1], 1000,
+               "turned to the shooter's yaw, not the flight's");
+    check_eq_i(list.p[i].angles[2], 0, "and never rolled");
+
+    q2_projectile_step(&list, (u32)i, 0, 12, 0, &step);
+    check_eq_i(list.p[i].phase, 384, "the phase gains dt << 5 a tick");
+    check_eq_i(list.p[i].angles[0], 512 + (q2_sin12(384) >> 6),
+               "pitch is the base plus the phase's sine over 64");
+    check_eq_i(list.p[i].angles[1], 1000 + (q2_cos12(384) >> 6),
+               "yaw is the base plus its cosine over 64");
+
+    /* And the sim's own launch hands it the player's yaw. */
+    q2_sim_init(&sim, NULL, 50);
+    q2_sim_spawn(&sim, spawn, 0);
+    sim.fire_from_input = false;
+    sim.player[0].yaw = 700;
+    (void)q2_sim_give_weapon(&sim, Q2_WID_ROCKET_LAUNCHER);
+    sim.combat.weapon_id = Q2_WID_ROCKET_LAUNCHER;
+    sim.combat.inv.ammo[Q2_AMMO_ROCKETS] = 10;
+    check(q2_sim_fire(&sim).fired, "the launcher fires");
+    for (i = 0; i < Q2_PROJ_MAX; i++)
+        if (sim.combat.projectiles.p[i].in_use &&
+            sim.combat.projectiles.p[i].kind == Q2_PROJ_ROCKET)
+            break;
+    check(i < Q2_PROJ_MAX && sim.combat.projectiles.p[i].base[1] == 700,
+          "a fired rocket takes the player's yaw");
     q2_sim_free(&sim);
 }
 
@@ -5804,6 +5863,7 @@ int main(void)
     test_kill_raises_no_burst();
     test_bolt_trail();
     test_creature_launch();
+    test_rocket_attitude();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     printf("%s\n", g_failures == 0 ? "PASS" : "FAIL");

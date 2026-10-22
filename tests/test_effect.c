@@ -2862,7 +2862,7 @@ static void test_emitters_use_the_frame_camera(void)
     list.live = 1;
 
     psx_ot_clear(&ot);
-    check(q2_projectiles_build_ot(&list, NULL, &cam, &ot, &gte) > 0,
+    check(q2_projectiles_build_ot(&list, NULL, &cam, &ot, &gte, NULL) > 0,
           "the bolt reached the table");
 
     for (r = 0; r < 3; r++) {
@@ -2970,12 +2970,12 @@ static void test_bolt_body(void)
 
         list.p[0].flags = Q2_PROJ_FLAGS_BLASTER;
         psx_ot_clear(&ot);
-        if (q2_projectiles_build_ot(&list, NULL, &cam, &ot, &gte) == 0)
+        if (q2_projectiles_build_ot(&list, NULL, &cam, &ot, &gte, NULL) == 0)
             quiet++;
 
         list.p[0].flags = Q2_PROJ_FLAGS_HYPERBLASTER;
         psx_ot_clear(&ot);
-        n = q2_projectiles_build_ot(&list, NULL, &cam, &ot, &gte);
+        n = q2_projectiles_build_ot(&list, NULL, &cam, &ot, &gte, NULL);
         if (n > worst)
             worst = n;
         printf("  orientation %d: %u faces\n", q, n);
@@ -2991,11 +2991,11 @@ static void test_bolt_body(void)
     }
     list.p[0].flags = Q2_PROJ_FLAGS_BLASTER;
     psx_ot_clear(&ot);
-    blaster = q2_projectiles_build_ot(&list, NULL, &cam, &ot, &gte);
+    blaster = q2_projectiles_build_ot(&list, NULL, &cam, &ot, &gte, NULL);
 
     list.p[0].flags = Q2_PROJ_FLAGS_HYPERBLASTER;
     psx_ot_clear(&ot);
-    hyper = q2_projectiles_build_ot(&list, NULL, &cam, &ot, &gte);
+    hyper = q2_projectiles_build_ot(&list, NULL, &cam, &ot, &gte, NULL);
 
     for (i = 0; i < ot.prim_count; i++) {
         const psx_prim *pr = &ot.prims[i];

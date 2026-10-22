@@ -466,16 +466,117 @@ static bool bolt_basis(const s32 dir[3], s16 m[3][3])
     return true;
 }
 
+/*
+ * One rocket or launched grenade, as the model entity its spawner allocates.
+ *
+ * The spawner looks the model up by NAME in the level's CastList — "Rocket"
+ * at 0x800ACBA4, "Grenade2" at 0x800ACB8C, through GetModelHdr (0x8006D008) —
+ * and when the bank carries none it raises the hide bit in every viewport's
+ * draw record (0x8004B064..0x8004B094), so the shot flies unseen. It draws
+ * through the entity matrix like any model: RotMatrix of entity+0xE6, built
+ * from the attitude the projectile keeps (projectile.h), at its origin.
+ *
+ * A rocket's light back colour is (127, 127, 127): the spawner copies
+ * 0x800AE9A8 over both +0x2AC and +0x2B0 (0x8004B10C..0x8004B134) where every
+ * other entity keeps the allocator's 0x40. A grenade keeps 0x40.
+ */
+static u32 projectile_model_build_ot(const q2_projectile *p, s32 index,
+                                     const q2_entity_draw_ctx *ctx,
+                                     const q2_camera *cam, psx_ot *ot,
+                                     gte_state *gte)
+{
+    static const u8 rocket_glow[3] = { 0x7F, 0x7F, 0x7F };
+    static const u8 plain_glow[3]  = { 0x40, 0x40, 0x40 };
+    q2_model mdl;
+    q2_model_instance inst;
+    q2_model_draw_stats st;
+    q2_light_env env;
+    s16 spin[3][3];
+    s32 node;
+    int k;
+
+    if (index < 0 || q2_model_get(ctx->bank, (u32)index, &mdl) != Q2_OK)
+        return 0;
+
+    q2_model_instance_init(&inst);
+    inst.model     = &mdl;
+    inst.origin[0] = p->pos[0];
+    inst.origin[1] = p->pos[1];
+    inst.origin[2] = p->pos[2];
+
+    /* Through `rot`, as a gib and a debris piece are: see
+     * q2_entity_draw_rotation for why not the instance's angle fields. */
+    q2_rotation_euler(spin, p->angles[0], p->angles[1], p->angles[2]);
+    inst.rot           = (const s16 (*)[3])spin;
+    inst.scale         = Q2_ONE_12;
+    inst.clut4_count_a = ctx->clut4_count_a;
+    inst.tpage         = ctx->tpage;
+
+    node = p->node;
+    if (ctx->coll && node < 0)
+        node = q2_coll_find_node(ctx->coll, p->pos, -1, true);
+    if (ctx->coll && node >= 0) {
+        q2_coll_node cell;
+
+        if (q2_collision_get_node(ctx->coll, (u32)node, &cell))
+            inst.sort_area = cell.contents & 0x7F;
+    }
+    for (k = 0; k < 3; k++) {
+        inst.sort_bounds_min[k] = p->pos[k] - Q2_SWEEP_HALF_EXTENT;
+        inst.sort_bounds_max[k] = p->pos[k] + Q2_SWEEP_HALF_EXTENT;
+    }
+    inst.sort_bounds_valid = true;
+
+    if (ctx->lights) {
+        q2_light_set set;
+
+        q2_light_gather(&set, ctx->lights, p->pos, node, 0);
+        q2_light_env_build(&env, &set, Q2_LIGHT_ONE, Q2_LIGHT_ONE,
+                           p->kind == Q2_PROJ_ROCKET ? rocket_glow
+                                                     : plain_glow);
+        inst.light = &env;
+    }
+
+    q2_model_build_ot(&inst, cam, ot, gte, &st);
+    return st.faces_emitted;
+}
+
 u32 q2_projectiles_build_ot(const struct q2_projectiles *list,
                             const q2_collision *coll,
-                            const q2_camera *cam, psx_ot *ot, gte_state *gte)
+                            const q2_camera *cam, psx_ot *ot, gte_state *gte,
+                            const q2_entity_draw_ctx *models)
 {
     const q2_weapon_tables *wt = q2_weapon_tables_builtin();
     u32 i, emitted = 0;
     gte_matrix rot;
+    s32 rocket_model = -1, grenade_model = -1;
 
     if (!list || !cam || !ot || !gte)
         return 0;
+
+    if (models && models->bank) {
+        rocket_model  = q2_model_bank_find(models->bank, "Rocket");
+        grenade_model = q2_model_bank_find(models->bank, "Grenade2");
+    }
+
+    /*
+     * The models first: they install their own camera through
+     * q2_model_build_ot, so the box pass below sets its own afterwards.
+     */
+    if (models && models->bank) {
+        for (i = 0; i < Q2_PROJ_MAX; i++) {
+            const q2_projectile *p = &list->p[i];
+
+            if (!p->in_use)
+                continue;
+            if (p->kind == Q2_PROJ_ROCKET)
+                emitted += projectile_model_build_ot(p, rocket_model, models,
+                                                     cam, ot, gte);
+            else if (p->kind == Q2_PROJ_GRENADE)
+                emitted += projectile_model_build_ot(p, grenade_model, models,
+                                                     cam, ot, gte);
+        }
+    }
 
     /*
      * The emitter owns the camera it projects through; it does not inherit one.
@@ -512,6 +613,12 @@ u32 q2_projectiles_build_ot(const struct q2_projectiles *list,
          * the projectile body appears only after the 411 release crossing. */
         if (!p->in_use || (p->kind == Q2_PROJ_HAND_GRENADE &&
                            p->node == Q2_PROJ_NODE_HELD))
+            continue;
+
+        /* Drawn as their models above, or hidden as the console hides one
+         * whose model the level does not carry. */
+        if (models && models->bank &&
+            (p->kind == Q2_PROJ_ROCKET || p->kind == Q2_PROJ_GRENADE))
             continue;
 
         /*
@@ -557,9 +664,12 @@ u32 q2_projectiles_build_ot(const struct q2_projectiles *list,
          *
          * A bolt's colours are the disc's own, per corner, out of the face
          * table below. The other four kinds are named-class entities on the
-         * console with models of their own and no missile record, so their box
-         * is this port's stand-in and keeps the glow it was given — the preset
-         * at 0x800AE954 that their dynamic light also reads.
+         * console with models of their own and no missile record. The rocket
+         * and the launched grenade draw theirs above when the caller passes a
+         * bank; the BFG ball ("BFGBlast", animated by its think) and the hand
+         * grenade ("Grenade3") still take this box as the port's stand-in,
+         * with the glow it was given — the preset at 0x800AE954 that their
+         * dynamic light also reads.
          */
         tint.pad = 0;
         if (p->kind == Q2_PROJ_BFG) {

@@ -186,13 +186,23 @@ bool q2_entity_draw_rotation(const q2_entity *e, s16 out[3][3]);
  * other is the particle trail bit 0x1 gives it instead (effect.h). The two are
  * mutually exclusive across all three callers of 0x8004D70C.
  *
+ * A ROCKET AND A LAUNCHED GRENADE ARE NOT THIS BOX. Their spawners allocate a
+ * model entity — "Rocket" (AnyoneFireRocketL, 0x8004AF7C) and "Grenade2"
+ * (AnyoneFireGrenadeL, 0x8004A100) out of the level's CastList — so with
+ * `models` given, those two kinds draw as their models at the attitude the
+ * projectile keeps (projectile.h), lit with `models->lights`, and draw nothing
+ * on a level whose bank lacks the model, which is the spawner's own hide arm.
+ * `models` NULL keeps the box for every kind, as an offline caller with no
+ * bank needs. The BFG ball and the hand grenade still take the box.
+ *
  * Returns the number of primitives emitted.
  */
 struct q2_projectiles;
 
 u32 q2_projectiles_build_ot(const struct q2_projectiles *list,
                             const q2_collision *coll,
-                            const q2_camera *cam, psx_ot *ot, gte_state *gte);
+                            const q2_camera *cam, psx_ot *ot, gte_state *gte,
+                            const q2_entity_draw_ctx *models);
 
 /* ------------------------------------------------------------------------- */
 /* Debris — the pieces a shattered pane or a destroyed brush group throws      */

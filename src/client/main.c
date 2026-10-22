@@ -3412,7 +3412,7 @@ static void client_cre_shot(q2_monster *m, const q2_cre_shot *shot, void *user)
         if (q2_sim_creature_launch(&c->sim[0], client_cre_actor(c, m),
                                    bolt ? Q2_FK_BOLT : Q2_FK_ROCKET,
                                    shot->start, shot->dir,
-                                   (s16)shot->damage) >= 0)
+                                   (s16)shot->damage, m->angles[2]) >= 0)
             c->cre_launched++;
         return;
     }
@@ -16608,12 +16608,29 @@ static void client_draw_view(void *user, q2_screen *s, int p,
                                   &c->render.tpage, c->clut4_count_a,
                                   &c->cam, ot, gte);
 
-    c->proj_prims += q2_projectiles_build_ot(&c->sim[0].combat.projectiles,
-                                             c->sim[0].coll_primary_ready
-                                                 ? &c->sim[0].coll_primary
-                                                 : (c->sim[0].coll_ready
-                                                     ? &c->sim[0].coll : NULL),
-                                             &c->cam, ot, gte);
+    /*
+     * A rocket and a launched grenade are drawn as their own models out of
+     * the map's CastList, lit like any entity (entitydraw.h); the rest keep
+     * the bolt's box. The hull is the primary one their cells are kept in.
+     */
+    {
+        q2_entity_draw_ctx pctx;
+        const q2_collision *phull = c->sim[0].coll_primary_ready
+                                        ? &c->sim[0].coll_primary
+                                        : (c->sim[0].coll_ready
+                                            ? &c->sim[0].coll : NULL);
+
+        memset(&pctx, 0, sizeof(pctx));
+        pctx.bank          = c->model_bank_ready ? &c->model_bank : NULL;
+        pctx.clut4_count_a = c->clut4_count_a;
+        pctx.tpage         = &c->render.tpage;
+        pctx.lights        = c->lights_ready ? &c->light_world : NULL;
+        pctx.coll          = phull;
+        pctx.coll_node     = -1;
+
+        c->proj_prims += q2_projectiles_build_ot(
+            &c->sim[0].combat.projectiles, phull, &c->cam, ot, gte, &pctx);
+    }
 
     /*
      * The status bar, into this viewport's own slice — because the console

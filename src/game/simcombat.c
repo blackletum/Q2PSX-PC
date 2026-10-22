@@ -965,6 +965,7 @@ q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
     s32 eye[3];
     s16 aim[3];
     s32 prev_next_fire;
+    s32 launched;
     u32 i;
 
     memset(&r, 0, sizeof(r));
@@ -1184,8 +1185,25 @@ q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
         /* WHO fired it. The -1 here meant "the world", so a bolt could not say
          * who to credit and a kill by one had no killer. */
         q2_sim_proj_scan.launched++;
-        if (q2_projectile_launch(&sim->combat.projectiles, &r,
-                                 sim->cur_player, sim->level_time) < 0) {
+        launched = q2_projectile_launch(&sim->combat.projectiles, &r,
+                                        sim->cur_player, sim->level_time);
+        if (launched >= 0) {
+            q2_projectile *lp = &sim->combat.projectiles.p[launched];
+
+            /* The attitude its model is drawn with: the player's yaw for a
+             * rocket, three of the same rand()s the shot drew for a grenade
+             * (projectile.h). */
+            if (lp->kind == Q2_PROJ_ROCKET) {
+                q2_projectile_aim_rocket(lp, sim->player[sim->cur_player].yaw);
+            } else if (lp->kind == Q2_PROJ_GRENADE) {
+                s32 r0 = q2_rng_next(&sim->combat.rng);
+                s32 r1 = q2_rng_next(&sim->combat.rng);
+                s32 r2 = q2_rng_next(&sim->combat.rng);
+
+                q2_projectile_spin_grenade(lp, r0, r1, r2);
+            }
+        }
+        if (launched < 0) {
             /*
              * THE POOL WAS FULL, and the shot has already been paid for:
              * q2_weapon_fire decrements the ammo and advances the refire gate
@@ -1573,7 +1591,8 @@ static q2_actor **proj_targets(q2_sim *sim, const q2_projectile *p,
 }
 
 s32 q2_sim_creature_launch(q2_sim *sim, q2_actor *shooter, q2_fire_kind kind,
-                           const s32 start[3], const s32 aim[3], s16 damage)
+                           const s32 start[3], const s32 aim[3], s16 damage,
+                           s32 shooter_yaw)
 {
     q2_fire_result_v2 r;
     q2_shot *s;
@@ -1618,6 +1637,9 @@ s32 q2_sim_creature_launch(q2_sim *sim, q2_actor *shooter, q2_fire_kind kind,
         return -1;
     }
     sim->combat.projectiles.p[index].shooter = shooter;
+    if (kind == Q2_FK_ROCKET)
+        q2_projectile_aim_rocket(&sim->combat.projectiles.p[index],
+                                 shooter_yaw);
     return index;
 }
 

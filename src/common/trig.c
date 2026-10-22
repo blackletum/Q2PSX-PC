@@ -66,6 +66,14 @@ s32 q2_acos12(s32 cos12)
     return (s32)angle;
 }
 
+s32 q2_ratan2(s32 y, s32 x)
+{
+    if (x == 0 && y == 0)
+        return 0;
+    return (s32)lround(atan2((double)y, (double)x) * 2048.0 /
+                       3.14159265358979323846);
+}
+
 void q2_rotation_yaw_pitch(s16 m[3][3], s32 yaw, s32 pitch)
 {
     s32 sy = q2_sin12(yaw),   cy = q2_cos12(yaw);

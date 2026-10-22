@@ -1932,11 +1932,13 @@ s32 q2_sim_creature_hitscan(q2_sim *sim, q2_actor *attacker,
  * monster_fire_rocket (0x8006210C) hand the player's spawners a velocity made
  * from the module's 1.12 aim — `aim / 64` for the bolt, `aim * 3/2` for the
  * rocket — so it flies, trails or smokes, bursts where it lands and splashes.
- * `shooter` is credited and never hit; the player is a target of it. Returns
- * the slot, or -1 when the list is full or `kind` is neither.
+ * `shooter` is credited and never hit; the player is a target of it. A
+ * rocket points along the shooter's yaw, as 0x8004B210 takes it (projectile.h).
+ * Returns the slot, or -1 when the list is full or `kind` is neither.
  */
 s32 q2_sim_creature_launch(q2_sim *sim, q2_actor *shooter, q2_fire_kind kind,
-                           const s32 start[3], const s32 aim[3], s16 damage);
+                           const s32 start[3], const s32 aim[3], s16 damage,
+                           s32 shooter_yaw);
 
 /* Apply a validated Events FX item to the current player. Returns false when
  * the item is not the retail fixed-size FX form. The original leaves

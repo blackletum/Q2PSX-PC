@@ -55,6 +55,16 @@ s32 q2_cos12(s32 angle);
  */
 s32 q2_acos12(s32 cos12);
 
+/*
+ * ratan2 (0x8008A358): the Psy-Q library's table-driven atan2, an angle on the
+ * 4096-step circle in -2048..2048, and 0 for (0, 0) (0x8008A384). The console
+ * looks the ratio up in a 1025-entry table at 0x800A9430 after folding the
+ * octant; this computes the same function in floating point and rounds to the
+ * unit, the way the sine table is built. The two can differ by one step where
+ * the table's own rounding does.
+ */
+s32 q2_ratan2(s32 y, s32 x);
+
 /* Build a 1.3.12 rotation matrix for yaw then pitch, in the order the camera
  * wants: yaw about Y, then pitch about X. `m` is row-major m[row][col]. */
 void q2_rotation_yaw_pitch(s16 m[3][3], s32 yaw, s32 pitch);
