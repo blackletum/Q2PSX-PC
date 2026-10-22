@@ -115,6 +115,10 @@ s64  q2_vector_length_sq(const s32 v[3]);           /* 0x8005C59C */
 s32  q2_vector_normalize(s32 v[3]);                 /* 0x8005C634 */
 void q2_angle_vectors(const s16 angles[3], s32 forward[3], s32 right[3],
                       s32 up[3]);                   /* 0x8005BB58 */
+void q2_vector_ma(const s32 a[3], s32 scale, const s32 b[3],
+                  s32 out[3]);                      /* 0x8005C460 */
+/* Pitch in out[0], yaw in out[2], roll written zero. */
+void q2_vectoangles(const s32 v[3], s16 out[3]);    /* 0x8005F934 */
 void q2_project_source(const s32 point[3], const s16 distance[3],
                        const s32 forward[3], const s32 right[3],
                        s32 out[3]);                 /* 0x8005F5FC */

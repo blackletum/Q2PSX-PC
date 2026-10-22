@@ -776,6 +776,22 @@ typedef struct client {
     u32               cre_fire_no_figures;
 
     /*
+     * Creature rounds through the one bullet path (q2_sim_creature_hitscan):
+     * how many were traced and what each met. `cre_dying_shots` is every shot
+     * a creature fired after its `die` ran — the Soldier's two Death1 frames
+     * and the Infantry's twelve Death2 ones — and `cre_flashes` the muzzle
+     * flashes the three flashing modules raised (q2_fx_flash). `flash_spin` is
+     * gp+16996, the flash's running turn.
+     */
+    u32               cre_rounds;
+    u32               cre_rounds_player;
+    u32               cre_rounds_creature;
+    u32               cre_rounds_world;
+    u32               cre_dying_shots;
+    u32               cre_flashes;
+    s32               flash_spin;
+
+    /*
      * The death drops (client_cre_drop): requests the queue flushed to us,
      * items actually spawned, and requests 0x8002085C itself turned down —
      * no record, no model, no entity. Counted apart so "no creature dropped
@@ -1382,6 +1398,9 @@ typedef struct client {
     bool              pitch_given;
     bool              no_lasers;   /* --no-lasers: the before picture */
     bool              shoot;       /* --shoot: hold fire              */
+    /* --shoot-to-kill: hold fire until the first creature dies, then let
+     * go, so its death plays out instead of being shot past gib_health. */
+    bool              shoot_to_kill;
     long              save_load_at; /* --save-load N                  */
     bool              show_credits; /* --credits                      */
     bool              start_new_game; /* --new-game                   */
@@ -2184,6 +2203,8 @@ static void client_cre_melee(q2_monster *m, const s32 aim[3], s32 damage,
 static void client_cre_sound(q2_monster *m, int which, void *user);
 static void client_cre_fire(q2_monster *m, int flash, void *user);
 static void client_cre_shot(q2_monster *m, const q2_cre_shot *shot, void *user);
+static bool client_cre_muzzle(const q2_monster *m, s16 vert_a, s16 vert_b,
+                              s32 out[3], void *user);
 static void client_cre_drop(const q2_monster_drop_request *req, void *user);
 static bool client_cre_bank_has(const char *name, void *user);
 static bool client_fx_mesh(void *user, const q2_actor *a, q2_fx_mesh_src *out);
@@ -2652,6 +2673,7 @@ static void client_load_creatures(client *c, const s32 eye[3])
     q2_cre_set_sound_hook(client_cre_sound, c);
     q2_cre_set_fire_hook(client_cre_fire, c);
     q2_cre_set_shot_hook(client_cre_shot, c);
+    q2_cre_set_muzzle_hook(client_cre_muzzle, c);
 
     /*
      * WHERE A FLAGGED CREATURE'S DROP GOES. monster_death_use records the
@@ -2744,6 +2766,70 @@ static void client_load_creatures(client *c, const s32 eye[3])
                 resolved,
                 c->creatures.stats.no_module
                     ? ", some classes have no module" : "");
+
+        /*
+         * WHICH GUARDS, by the class-table row the Soldier's spawn dispatches
+         * on (cre_soldier.c, soldier_base_skin): 19 blaster, 18 shotgun, 20
+         * machinegun. Three different fights on one model, and nothing else
+         * in the log says which a map holds.
+         */
+        {
+            u32 k, n[3] = { 0, 0, 0 };
+            s32 first[3] = { -1, -1, -1 };
+            static const char *const kind[3] = {
+                "blaster", "shotgun", "machinegun"
+            };
+
+            for (k = 0; k < c->creatures.set.count; k++) {
+                const q2_monster *m = &c->creatures.set.monsters[k];
+                int v = m->pop_class_id == 19 ? 0
+                      : m->pop_class_id == 18 ? 1
+                      : m->pop_class_id == 20 ? 2 : -1;
+
+                if (!m->in_use || v < 0)
+                    continue;
+                if (n[v]++ == 0)
+                    first[v] = (s32)k;
+            }
+            if (n[0] || n[1] || n[2])
+                Q2_INFO("creatures: guards %u blaster, %u shotgun, "
+                        "%u machinegun", n[0], n[1], n[2]);
+
+            /* And the first of every other module, by name. */
+            for (k = 0; k < c->creatures.set.count; k++) {
+                const q2_monster *m = &c->creatures.set.monsters[k];
+                const q2_cre_bind *bind = q2_cre_bind_for(m);
+                const char *name = bind && bind->impl ? bind->impl->name : NULL;
+                u32 j;
+                bool seen = false;
+
+                if (!m->in_use || !name || !strcmp(name, "Soldier"))
+                    continue;
+                for (j = 0; j < k && !seen; j++) {
+                    const q2_cre_bind *b2 =
+                        q2_cre_bind_for(&c->creatures.set.monsters[j]);
+                    seen = c->creatures.set.monsters[j].in_use && b2 &&
+                           b2->impl && b2->impl->name &&
+                           !strcmp(b2->impl->name, name);
+                }
+                if (!seen)
+                    Q2_INFO("creatures: first %s is #%u at (%d,%d,%d) yaw %d",
+                            name, k, m->pos[0], m->pos[1], m->pos[2],
+                            (int)m->angles[2]);
+            }
+            /* Where to stand to meet each: the first of every kind, by the
+             * index --trace-cre takes. */
+            for (k = 0; k < 3; k++) {
+                const q2_monster *m;
+
+                if (first[k] < 0)
+                    continue;
+                m = &c->creatures.set.monsters[first[k]];
+                Q2_INFO("creatures: first %s guard is #%d at (%d,%d,%d) "
+                        "yaw %d", kind[k], (int)first[k], m->pos[0],
+                        m->pos[1], m->pos[2], (int)m->angles[2]);
+            }
+        }
 
         /*
          * AND THE HIT CYLINDER EACH ONE IS SHOT AT THROUGH — GetCreHitSize's
@@ -2869,196 +2955,321 @@ static void client_cre_melee(q2_monster *m, const s32 aim[3], s32 damage,
  * spread, and the engine reads neither: its `lhu s1, 112(sp)` is the only
  * stack argument 0x80061ED0 or 0x8004874C ever touches, and that is the
  * trace's cell hint, not the module's. So a shotgun guard's blast is at most
- * 5 x 2 = 10 points on the console, where this port was delivering 12 x 2 =
- * 24 — two and a half times the damage, at every range.
+ * 5 x 2 = 10 points on the console.
  *
- * WHAT IS STILL MISSING, stated rather than hidden: the jitter. Each pellet
- * adds `((rand() - 16384) << 10) >> 14` to components 0 and 1 of the aim
- * (0x80061F80..0x80061FC4), which is applied to a direction the routine has
- * already scaled `<< 2` — so it is +/- 1/16 of a unit vector, the same
- * shift-on-`rand() - 16384` scheme this console uses for the player's own
- * spread (weapon.c) rather than id's `crandom() * hspread`. Reproducing it
- * needs a per-pellet trace against the player's hull, which this hook does not
- * have; until then every pellet that has line of sight still lands, and the
- * count is the half of it that is a transcribed figure.
+ * THE JITTER IS TRANSCRIBED, and it is stranger than a spread. The aim is
+ * scaled `<< 2` into three halfwords at sp+24 (0x80061F1C..0x80061F50). Each
+ * pellet then ADDS `((rand() - 16384) << 10) >> 14` to the first of them and,
+ * from a second rand(), to the second (0x80061F80..0x80061FC4), and stores the
+ * sums back with `sh`. Nothing resets them between pellets, so the five are a
+ * RANDOM WALK away from the aim rather than five draws around it — and only X
+ * and the vertical move: a guard firing along Z sprays sideways and up and
+ * down, one firing along X only up and down.
  *
  * `monster_fire_bullet` (+0x84, 0x80061DFC) has no jitter at all — one trace,
- * no `rand()` — so a machinegun guard's single exact shot is already right.
+ * no `rand()` — so a machinegun guard's round goes exactly where it aimed; its
+ * miss is the aim's own crandom (cre_soldier.c).
  */
 #define Q2_CRE_SHOTGUN_PELLETS 5   /* 0x80061FD4 */
 
 /*
- * A creature's shot, with the figures read out of its own module.
+ * The reports the engine's two hitscan spawners play THEMSELVES, at the
+ * object, through import +0x20 — whatever the module played first:
+ * `SoundMachinegunFire` (gp+17744, 0x80061EAC) and the shotgun's (gp+17768,
+ * 0x80061F04), registered from `wep_machgf1b` (0x800ACC4C) and `wep_shotgf1b`
+ * (0x800ACC34). So every round the Infantry fires is heard, the twelve of its
+ * death burst included, where this port played nothing for think 1 at all;
+ * and a Soldier's round is two voices of one sample, its module's and the
+ * engine's, because 0x8007270C starts a fresh voice on every call
+ * (0x8007278C).
+ */
+#define Q2_CRE_SND_BULLET  "wep_machgf1b"
+#define Q2_CRE_SND_SHOTGUN "wep_shotgf1b"
+
+/*
+ * A DECODED creature's fire — the one-int hook, which now carries only the
+ * import slot a decoded think called (cre_actions.c). The Soldier's three
+ * weapon tables used to arrive here as `table * 8 + flash` and be put into
+ * the player whenever the Soldier could see them; it hands over a whole
+ * q2_cre_shot now, with its muzzle and its aim, so all this does is count.
  *
- * `soldier_fire` hands over `table * 8 + flash`, and the table is chosen by
- * skin: 0 blaster, 1 shotgun, 2 machinegun. Each arm's call is now read, and
- * every figure in it is id's own — which is the check that says the read is
- * right rather than merely self-consistent:
- *
- *     table 0  import +0x80  0x80062000  blaster   dmg 5, speed 600
- *     table 1  import +0x88  0x80061ED0  shotgun   dmg 2, kick 1,
- *                                                  spread 1000/500, 12 pellets
- *                                                  (the engine reads none
- *                                                   of those three; see
- *                                                   the block above)
- *     table 2  import +0x84  0x80061DFC  bullet    dmg 2, kick 4,
- *                                                  spread 300/500
- *
- * Only the Soldier's are known, so only the Soldier shoots: another creature's
- * fire reaches this with a table this does not recognise and is dropped rather
- * than given a Soldier's gun.
+ * What a decoded creature's shot DOES is not the port's to guess:
+ * `monster_fire_rocket` (0x8006210C) scales the aim by 3/2 and passes its
+ * caller's `a1` and `a3` straight through to 0x8004AF28 without touching
+ * them, so the damage and the speed are the MODULE's arguments, not the
+ * engine's constants. Until a creature's table is read, its shot is counted
+ * here rather than invented — the same rule the sound hook follows.
  */
 static void client_cre_fire(q2_monster *m, int flash, void *user)
 {
     client *c = (client *)user;
-    int table = flash >> 3;
-    s16 damage;
-    int shots;
-    q2_actor *attacker;
 
+    (void)m;
+    (void)flash;
     if (!c || !c->creatures_ready)
         return;
-    if (m->enemy != &c->creatures.sight)
-        return;
-
-    /*
-     * TWO CALLERS, TWO ENCODINGS, AND ONE OF THEM WAS BEING THROWN AWAY.
-     *
-     * A TRANSCRIBED creature hands over `weapon_table * 8 + flash_number`,
-     * which for the Soldier's three tables is 0..23. A DECODED one has no such
-     * table and hands over the IMPORT SLOT its think function called, which is
-     * 0x80..0x9C — the eight projectile spawners (creature.h).
-     *
-     * The ranges do not overlap, so the two are told apart on sight. They were
-     * not: this began `table = flash >> 3` and switched on 0, 1 and 2, so every
-     * decoded creature's shot arrived as table 16..19 and hit `default: return`.
-     * The action layer counted it as `fire_sent` and it went nowhere — six of
-     * the disc's seven creatures firing into a `return` while the counter said
-     * the shot had been delivered.
-     *
-     * It still does not fire, and now it says so. What a decoded creature's
-     * shot DOES is not the port's to guess: `monster_fire_rocket` (0x8006210C)
-     * scales the aim by 3/2 and passes its caller's `a1` and `a3` straight
-     * through to 0x8004AF28 without touching them, so the damage and the speed
-     * are the MODULE's arguments, not the engine's constants. Reading them is
-     * per-creature transcription. Until a creature's table is read, its shot is
-     * counted here rather than invented — the same rule the sound hook follows.
-     */
-    if (flash >= Q2_IMP_FIRE_BLASTER && flash <= Q2_IMP_FIRE_LASER) {
-        c->cre_fire_no_figures++;
-        return;
-    }
-
-    switch (table) {
-    case 0:  damage = 5; shots = 1;  break;   /* blaster    */
-    case 1:  damage = 2; shots = Q2_CRE_SHOTGUN_PELLETS; break;
-    case 2:  damage = 2; shots = 1;  break;   /* machinegun */
-    default: return;
-    }
-
-    /*
-     * The delivery is still one line-of-sight test per shot, which for a
-     * single-pellet weapon is exact and for the shotgun is an approximation
-     * — but it is now an approximation of the RIGHT NUMBER of pellets. See
-     * Q2_CRE_SHOTGUN_PELLETS above for the read, and for what the engine does
-     * with the spread the module passes: nothing.
-     */
-    c->cre_shots++;
-
-    /*
-     * THE MUZZLE FLASH AND THE REPORT, neither of which a creature had.
-     *
-     * `soldier_fire` hands over a (table, flash) pair and this took the damage
-     * out of it and dropped everything else, so a guard shooting at you was
-     * silent and unlit — the only clue you were under fire was your own health
-     * falling. The player's shot raises both (simcombat.c); a creature's shot
-     * is the same event seen from the other end and raises the same two.
-     *
-     * The light is the ENGINE's muzzle flash, not one invented here:
-     * Q2_MUZZLE_LIGHT_* and the radii `q2_weapon_muzzle_light` rolls are what
-     * the player's own gun uses. It goes at the ENTITY ORIGIN — the console
-     * passes entity+0x54 for the player's, and `m->pos` already is that for a
-     * monster, which is the one place a creature does not need the feet-to-
-     * origin correction.
-     *
-     * The report is the module's own handle: index 9 `wep_shotgf1b` for a
-     * shotgun guard, 8 `wep_machgf1b` for a machinegun guard. The blaster
-     * guard gets neither, and that is not an omission — its module registers no
-     * fire sound at all, because the bolt it throws carries its own.
-     */
-    if (c->lights_ready) {
-        static const u8 muzzle_colour[3] = {
-            Q2_MUZZLE_LIGHT_R, Q2_MUZZLE_LIGHT_G, Q2_MUZZLE_LIGHT_B
-        };
-        s32 inner, outer;
-        s32 ra = q2_rng_next(&c->sim[0].combat.rng);
-        s32 rb = q2_rng_next(&c->sim[0].combat.rng);
-
-        /* The machinegun's flash, which draws once per radius (weapon.h). */
-        q2_weapon_muzzle_light(Q2_WID_MACHINEGUN, ra, rb, &inner, &outer);
-        q2_light_add_dynamic(&c->light_world, m->pos, muzzle_colour,
-                             inner, outer, 0, 0);
-    }
-
-    {
-        const char *report = (table == 1) ? q2_cre_soldier_sound_name(9)
-                           : (table == 2) ? q2_cre_soldier_sound_name(8)
-                           : NULL;
-        q2_vag vag;
-
-        /*
-         * Asked for by name and CHECKED, because "it plays a sound" is the
-         * easiest claim in this file to make falsely: client_play_sound_at
-         * returns false with no audio device, which is every headless run, so
-         * a bare call proves nothing. A name the bank does not carry is
-         * counted rather than swallowed.
-         */
-        if (report) {
-            if (client_find_sound(c, report, &vag))
-                client_play_sound_at(c, report, m->pos);
-            else
-                c->cre_sound_missing++;
-            c->cre_fire_sounds++;
-        }
-    }
-
-    /*
-     * The shooter, not NULL. 0x800582C8 is the skill-0 rule that a monster
-     * hitting a player does half, rounded up, and it keys on the ATTACKER:
-     * 0x800582E0 loads attacker+0x2EC and 0x800582F0 tests the attacker's
-     * client block, so with no attacker there is nothing to test and the
-     * rule cannot fire. Handing the damage path NULL made every creature
-     * shot land at full strength on easy. The melee hook above already
-     * resolves its actor this way; the point stays the sight position,
-     * because a hitscan's point is where the shot arrives, not where the
-     * shooter stands.
-     */
-    attacker = client_cre_actor(c, m);
-
-    while (shots-- > 0) {
-        if (!q2_visible(m, &c->creatures.sight))
-            break;
-        q2_sim_hurt_player(&c->sim[0], attacker, damage,
-                           table == 0 ? Q2_MOD_ENERGY_BOLT : Q2_MOD_BULLET,
-                           c->creatures.sight.pos);
-    }
+    c->cre_fire_no_figures++;
 }
 
 /*
- * A CREATURE'S SHOT, WITH ITS OWN FIGURES — the hook that replaces the one
- * above for everything that has been transcribed.
+ * ONE CREATURE'S DAMAGE, carried from its combat actor back to the monster.
  *
- * `client_cre_fire` takes an int and can therefore only serve the Soldier,
- * whose three weapons the client hardcodes. Every other creature reached it
- * naming an import slot and was declined; six of the seven modules could hunt
- * you down and never hurt you. `q2_cre_shot` carries what the module passes to
- * the engine's spawner, and all of it is read (crebind.h).
+ * The frame's drain runs this for every creature once the sim tick and the
+ * player's guns are done (below the sim tick in the frame). A creature's own
+ * round can strike ANOTHER creature, and that happens inside the AI tick,
+ * after the drain — where the next frame's actor rebuild
+ * (q2_actor_from_monster, from the monster's untouched health) would quietly
+ * undo it. So a round that hits a creature runs this for its victim at once,
+ * which is also the console's timing: T_Damage runs inside the shooter's
+ * think and calls the victim's pain or die before it returns.
+ */
+static void client_cre_drain_one(client *c, u32 i)
+{
+    q2_monster *m    = &c->creatures.set.monsters[i];
+    bool        was  = m->dead;
+    s16         hp   = m->health;
+
+    q2_actor_to_monster(&c->cre_actor[i], m);
+
+    /*
+     * T_Damage ends by calling the entity's own `pain` (+0xA0) or `die`
+     * (+0xA4) — 0x80062A9C for the latter — and this port had neither
+     * installed, so `soldier_pain` and `soldier_die` were dead code and
+     * damage only ever moved a number. This is the site that sees the
+     * health CROSS a threshold, and it used to dispatch the two hooks
+     * from here directly.
+     *
+     * IT NO LONGER DOES, because dispatching them was only half of what
+     * the original does between the subtraction and the return.
+     * `q2_monster_damage_reaction` is the whole of that tail —
+     * M_ReactToDamage, the AI_DUCKED gate, the nightmare pain debounce,
+     * the death-use pass, the kill counter and the no-knockback bit —
+     * transcribed in monster.c. What is left here is deciding WHEN to
+     * call it and with what.
+     *
+     * The attacker is the sight client, which is where the player is;
+     * the port has no inflictor entity to hand over. For a creature struck
+     * by another creature's round that is an approximation, stated: the
+     * console's M_ReactToDamage sees the shooter.
+     *
+     * One honest approximation, stated: the original calls the tail on
+     * every hit, INCLUDING one that armour or godmode reduced to zero —
+     * and still reacts to it, because being shot at and unhurt is still
+     * being shot at. The actor sync reports health, not the shot, so a
+     * hit that took nothing is indistinguishable here from no hit at
+     * all. The gate is therefore "the health moved", which is a subset
+     * of the original's occasions and never a superset.
+     */
+    if (m->health != hp || (!was && m->health <= 0)) {
+        s16 took = (s16)(hp - m->health);
+
+        if (took < 0)
+            took = 0;
+
+        q2_monster_damage_reaction(m, &c->creatures.sight, took);
+
+        if (!was && m->dead)
+            c->cre_die_calls++;
+        else if (!m->dead && took > 0)
+            c->cre_pain_calls++;
+    }
+
+    /*
+     * The frame it died on. What can be reconstructed from the module's
+     * data rather than its code is the animation, so a body whose own
+     * `die` did not choose a move is put into one and left to play it
+     * out — and it now STOPS there rather than looping, because
+     * M_MoveFrame raises the corpse bit when a dead creature's move
+     * runs out (monster.c).
+     *
+     * Without this a killed creature simply vanished — the tick and the
+     * draw both skipped anything with `dead` set, so a Soldier shot
+     * dead was gone on the frame it died.
+     */
+    if (!was && m->dead && !m->currentmove) {
+        s32 f = q2_creature_world_death_frame(&c->creatures, m);
+
+        if (f >= 0 && q2_cre_set_move(m, f)) {
+            m->frame     = (s16)f;
+            c->cre_bodies++;
+        }
+    } else if (!was && m->dead) {
+        c->cre_bodies++;
+    }
+}
+
+/* A creature's last drawn pose (client_fx_pose), or NULL when it has none. */
+static const q2_model_instance *client_cre_pose(client *c, const q2_monster *m)
+{
+    size_t idx;
+
+    if (!c || !c->creatures_ready || !c->cre_fx || !c->cre_model_ok || !m ||
+        m < c->creatures.set.monsters)
+        return NULL;
+    idx = (size_t)(m - c->creatures.set.monsters);
+    if (idx >= c->creatures.set.count || !c->cre_model_ok[idx] ||
+        !c->cre_fx[idx].valid)
+        return NULL;
+    return &c->cre_fx[idx].inst;
+}
+
+/* THE MUZZLE HOOK — q2_cre_muzzle (crebind.h): the posed attachment, placed. */
+static bool client_cre_muzzle(const q2_monster *m, s16 vert_a, s16 vert_b,
+                              s32 out[3], void *user)
+{
+    const q2_model_instance *inst = client_cre_pose((client *)user, m);
+    s32 local[3];
+
+    if (!inst || !q2_model_blend_local(inst, vert_a, vert_b, local))
+        return false;
+    q2_model_local_to_world(inst, local, out);
+    return true;
+}
+
+/*
+ * Which modules draw a muzzle flash, and from which cache: the three whose
+ * export 1 calls import +0xA0 while object+0x10C is negative, each reading
+ * the attachment its own init blended (crebind.h, q2_cre_muzzle).
  *
- * What this does NOT reproduce, stated rather than hidden: the projectile
- * spawners really do spawn an entity that flies, and this resolves the shot
- * immediately along the line of sight instead. A rocket's travel time and its
- * splash are the difference, and both belong to the projectile system rather
- * than here. Damage, kick, spread and pellet count are the module's.
+ *     Soldier   0x80102120  module+0x32D8  vertices 228, 234
+ *     Infantry  0x80100DC0  module+0x1D80  vertices 200, 205
+ *     Gunner    0x801014BC  module+0x1D28  vertices 227, 231
+ *
+ * The Tank Commander's module has no export 1 at all, and the Arachner's and
+ * the Berserk's draw blur trails, so none of the three flashes whatever it
+ * fires.
+ */
+static bool client_cre_flash_verts(const q2_monster *m, s16 *a, s16 *b)
+{
+    const q2_cre_bind *bind = q2_cre_bind_for(m);
+    const char *name = NULL;
+
+    if (bind && bind->cre && bind->cre->name[0])
+        name = bind->cre->name;
+    else if (bind && bind->impl)
+        name = bind->impl->name;
+    if (!name)
+        return false;
+
+    if (strcmp(name, "Soldier") == 0)  { *a = 228; *b = 234; return true; }
+    if (strcmp(name, "Infantry") == 0) { *a = 200; *b = 205; return true; }
+    if (strcmp(name, "Gunner") == 0)   { *a = 227; *b = 231; return true; }
+    return false;
+}
+
+/*
+ * THE MUZZLE FLASH, which a creature never had: 0x80031094 for the frame of
+ * the round (q2_fx_flash, effect.h). The port used to raise the PLAYER's
+ * machinegun light — 250..349 and 700..899 — at every creature's origin on
+ * every shot of every weapon. The console raises the creature's own,
+ * 850..1049 and 1200..1599 from two rand()s, and only for a bullet or a
+ * shotgun round from one of the three modules above: a blaster guard's bolt,
+ * the Tank Commander's guns and the Arachner's rail flash nothing.
+ *
+ * WHERE THE LIGHT GOES is a quirk, and it is kept. 0x80031178..0x800311AC adds
+ * the attachment's MODEL-space offset to the object origin without rotating
+ * it — the quad's corners are rotated at 0x8003132C, the light's point is
+ * not. So the light sits where the muzzle would be if the creature faced
+ * yaw 0. Its radii are several times the offset, so what it lights barely
+ * moves; but it is not where the flash is drawn, and that is the console's.
+ *
+ * The two draws come from the BIOS stream the creatures decide on, because
+ * that is the generator 0x800311B0 calls.
+ */
+static void client_cre_flash(client *c, const q2_monster *m)
+{
+    const q2_model_instance *inst;
+    s32 local[3], world[3];
+    s16 va, vb;
+    int k;
+
+    if (!client_cre_flash_verts(m, &va, &vb))
+        return;
+    inst = client_cre_pose(c, m);
+    if (!inst || !q2_model_blend_local(inst, va, vb, local))
+        return;
+
+    if (c->lights_ready) {
+        static const u8 colour[3] = {
+            Q2_MUZZLE_LIGHT_R, Q2_MUZZLE_LIGHT_G, Q2_MUZZLE_LIGHT_B
+        };
+        s32 inner, outer, at[3];
+        s32 ra = q2_random_next();
+        s32 rb = q2_random_next();
+
+        for (k = 0; k < 3; k++)
+            at[k] = inst->origin[k] + local[k];
+        q2_creature_muzzle_light(ra, rb, &inner, &outer);
+        q2_light_add_dynamic(&c->light_world, at, colour, inner, outer, 0, 0);
+    }
+
+    if (c->sim[0].fx_ready) {
+        s32 corner_local[4][3], corner[4][3];
+
+        q2_model_local_to_world(inst, local, world);
+        q2_fx_flash_corners(local, q2_fx_flash_angle(c->flash_spin,
+                                                     (u32)c->frame_index),
+                            corner_local);
+        for (k = 0; k < 4; k++)
+            q2_model_local_to_world(inst, corner_local[k], corner[k]);
+        q2_fx_flash_add(&c->sim[0].fx, (const s32 (*)[3])corner, world,
+                        q2_sim_fx_area(&c->sim[0], 0, world));
+    }
+    c->cre_flashes++;
+}
+
+/* One traced round, and what it met. */
+static void client_cre_round(client *c, q2_monster *m, const s32 start[3],
+                             const s32 dir[3], s16 damage, s16 mod,
+                             bool mark_world)
+{
+    s32 at[3];
+    s32 hit = q2_sim_creature_hitscan(&c->sim[0], client_cre_actor(c, m),
+                                      start, dir, damage, mod, mark_world, at);
+
+    c->cre_rounds++;
+    if (hit == Q2_SIM_HIT_PLAYER) {
+        c->cre_rounds_player++;
+    } else if (hit >= 0) {
+        c->cre_rounds_creature++;
+        /* T_Damage's tail runs now, inside the shooter's think, as on the
+         * console — see client_cre_drain_one. */
+        if (c->cre_actor && (u32)hit < c->creatures.set.count)
+            client_cre_drain_one(c, (u32)hit);
+    } else {
+        c->cre_rounds_world++;
+    }
+
+    /* Where the traced creature's rounds went, beside its per-tick line. */
+    if (c->trace_cre >= 0 && m == &c->creatures.set.monsters[c->trace_cre])
+        Q2_INFO("round frame %d from (%d,%d,%d) -> %s at (%d,%d,%d)",
+                (int)m->frame, start[0], start[1], start[2],
+                hit == Q2_SIM_HIT_PLAYER ? "player"
+                : hit >= 0 ? "creature" : "world", at[0], at[1], at[2]);
+}
+
+/*
+ * A CREATURE'S SHOT, WITH ITS OWN FIGURES — and, for the creatures whose aim
+ * is transcribed, ITS OWN DIRECTION.
+ *
+ * An AIMED hitscan (the Soldier's bullet and shotgun, the Infantry's bullet)
+ * goes through the engine's one bullet path, q2_sim_creature_hitscan: from
+ * the posed muzzle along the module's own aim, `<< 2` into halfwords as
+ * 0x80061E2C stores it — 16384 units — to the first creature, the player or
+ * the wall. It hits what is in front of it. A guard's aimed round still
+ * misses by its crandom spread; a dying guard's round goes where the body
+ * faces as it falls; and the Infantry's death burst climbs the wall and
+ * crosses the ceiling, and hurts the player only if the player stands in it.
+ *
+ * An aimed BOLT is the same question asked of the same segment with no mark
+ * left on the wall: the console's blaster spawner launches a projectile, and
+ * a creature's bolt has no flight in this port yet, so it is resolved at once
+ * along its line. What it hits is now right; that it arrives instantly and
+ * leaves no burst is the remaining departure.
+ *
+ * An UNAIMED shot — a creature whose muzzle and aim are not transcribed (the
+ * Gunner, the Tank Commander, the Arachner) — is resolved as before: at the
+ * player, when the player is its enemy and in sight. Nothing more is known.
  */
 static void client_cre_shot(q2_monster *m, const q2_cre_shot *shot, void *user)
 {
@@ -3066,6 +3277,7 @@ static void client_cre_shot(q2_monster *m, const q2_cre_shot *shot, void *user)
     s32 shots;
     int mod;
     q2_actor *attacker;
+    bool hitscan;
 
     if (!c || !c->creatures_ready || !m || !shot)
         return;
@@ -3076,11 +3288,7 @@ static void client_cre_shot(q2_monster *m, const q2_cre_shot *shot, void *user)
      * a dead one vanished — flash, report and count with it. The engine does
      * not refuse those (TankMachineGun, module+0xF90: `beq a3, zero` and no
      * load of the enemy's +0x108; crebind.c no longer refuses them either),
-     * so the flash and the count happen for EVERY shot the module fires. What
-     * stays gated is who it can hurt: this port has one target for a creature,
-     * the player, and a shot is only aimed at the player when the player is
-     * its enemy. The dead-enemy half of the old refusal never fired against
-     * the player anyway — sight.health is pinned at 100 (creworld.c).
+     * so the flash and the count happen for EVERY shot the module fires.
      */
 
     /*
@@ -3093,18 +3301,8 @@ static void client_cre_shot(q2_monster *m, const q2_cre_shot *shot, void *user)
     }
 
     c->cre_shots++;
-
-    /* The muzzle flash is the engine's own, exactly as the Soldier's is. */
-    if (c->lights_ready) {
-        static const u8 flash[3] = { Q2_MUZZLE_LIGHT_R, Q2_MUZZLE_LIGHT_G,
-                                     Q2_MUZZLE_LIGHT_B };
-        s32 inner, outer;
-        s32 ra = q2_rng_next(&c->sim[0].combat.rng);
-        s32 rb = q2_rng_next(&c->sim[0].combat.rng);
-
-        q2_weapon_muzzle_light(Q2_WID_MACHINEGUN, ra, rb, &inner, &outer);
-        q2_light_add_dynamic(&c->light_world, m->pos, flash, inner, outer, 0, 0);
-    }
+    if (m->dead || m->deadflag == Q2_DEAD_DEAD)
+        c->cre_dying_shots++;
 
     switch (shot->slot) {
     case Q2_IMP_FIRE_BLASTER: mod = Q2_MOD_ENERGY_BOLT; break;
@@ -3112,6 +3310,58 @@ static void client_cre_shot(q2_monster *m, const q2_cre_shot *shot, void *user)
     case Q2_IMP_FIRE_ROCKET:  mod = Q2_MOD_ROCKET;      break;
     case Q2_IMP_FIRE_GRENADE: mod = Q2_MOD_GRENADE;     break;
     default:                  mod = Q2_MOD_BULLET;      break;
+    }
+
+    /*
+     * The two hitscan spawners' own business, before their trace: the report
+     * (Q2_CRE_SND_*) and object+0x10C's sign bit, which is this frame's flash
+     * for a module that draws one (client_cre_flash).
+     */
+    hitscan = shot->slot == Q2_IMP_FIRE_BULLET ||
+              shot->slot == Q2_IMP_FIRE_SHOTGUN;
+    if (hitscan) {
+        const char *report = shot->slot == Q2_IMP_FIRE_SHOTGUN
+                           ? Q2_CRE_SND_SHOTGUN : Q2_CRE_SND_BULLET;
+        q2_vag vag;
+
+        /*
+         * Counted on the BANK, not on a voice starting: client_play_sound_at
+         * returns false with no audio device, which is every headless run.
+         */
+        if (client_find_sound(c, report, &vag))
+            client_play_sound_at(c, report, m->pos);
+        else
+            c->cre_sound_missing++;
+        c->cre_fire_sounds++;
+
+        client_cre_flash(c, m);
+    }
+
+    if (shot->aimed && (hitscan || shot->slot == Q2_IMP_FIRE_BLASTER)) {
+        s32 dir[3];
+        int k;
+
+        /* 0x80061E2C / 0x80061F1C: `sll 2` and stored with `sh`. */
+        for (k = 0; k < 3; k++)
+            dir[k] = (s16)(shot->dir[k] * 4);
+
+        if (shot->slot == Q2_IMP_FIRE_SHOTGUN) {
+            int p;
+
+            for (p = 0; p < Q2_CRE_SHOTGUN_PELLETS; p++) {
+                s32 jx = ((q2_random_next() - 16384) * 1024) >> 14;
+                s32 jy = ((q2_random_next() - 16384) * 1024) >> 14;
+
+                dir[0] = (s16)(dir[0] + jx);
+                dir[1] = (s16)(dir[1] + jy);
+                client_cre_round(c, m, shot->start, dir, (s16)shot->damage,
+                                 (s16)mod, true);
+            }
+        } else {
+            client_cre_round(c, m, shot->start, dir, (s16)shot->damage,
+                             (s16)mod, hitscan);
+        }
+        return;
     }
 
     /*
@@ -3124,7 +3374,7 @@ static void client_cre_shot(q2_monster *m, const q2_cre_shot *shot, void *user)
     shots    = shot->slot == Q2_IMP_FIRE_SHOTGUN ? Q2_CRE_SHOTGUN_PELLETS
              : shot->count > 0                   ? shot->count
                                                  : 1;
-    attacker = client_cre_actor(c, m);   /* 0x800582C8: see client_cre_fire */
+    attacker = client_cre_actor(c, m);   /* 0x800582C8: the skill-0 halving */
 
     if (m->enemy != &c->creatures.sight)
         return;                          /* fired, but not at the player */
@@ -4937,6 +5187,16 @@ static void client_centre_line(client *c, const char *text)
     q2_hud_ctx ctx;
 
     if (!c || !text || !text[0] || !c->hud_ready)
+        return;
+
+    /*
+     * 0x80042E54: `lh v1, [0x800B2834]; bne v1, zero` — the centre line itself
+     * refuses everything while the engine's initial-state pass runs, the same
+     * gp+16948 flag STRING and INSECRET already test at their top
+     * (client_event_call). Asked here too because it is 0x80042E14's own gate
+     * and so covers every caller, not only the two that test it first.
+     */
+    if (c->sim[0].event_rt.initial_pass)
         return;
 
     q2_hud_ctx_default(&ctx, Q2_HUD_SPACE_W, Q2_HUD_SPACE_H);
@@ -9758,7 +10018,7 @@ static void client_input_simulated(client *c, float dt)
      * `--dm-stage` — a headless run cannot press a button, and "shoot the pane
      * and see it break" is not a claim a still frame can make on its own.
      */
-    if (c->shoot) {
+    if (c->shoot || (c->shoot_to_kill && c->cre_die_calls == 0)) {
         in.attack   = true;
         in.buttons |= Q2_BTN_ATTACK | Q2_BTN_ATTACK_PRESS;
     }
@@ -10945,77 +11205,8 @@ static void client_input_simulated(client *c, float dt)
      */
     if (c->creatures_ready && c->cre_actor) {
         u32 i;
-        for (i = 0; i < c->creatures.set.count; i++) {
-            q2_monster *m    = &c->creatures.set.monsters[i];
-            bool        was  = m->dead;
-            s16         hp   = m->health;
-
-            q2_actor_to_monster(&c->cre_actor[i], m);
-
-            /*
-             * T_Damage ends by calling the entity's own `pain` (+0xA0) or `die`
-             * (+0xA4) — 0x80062A9C for the latter — and this port had neither
-             * installed, so `soldier_pain` and `soldier_die` were dead code and
-             * damage only ever moved a number. This is the site that sees the
-             * health CROSS a threshold, and it used to dispatch the two hooks
-             * from here directly.
-             *
-             * IT NO LONGER DOES, because dispatching them was only half of what
-             * the original does between the subtraction and the return.
-             * `q2_monster_damage_reaction` is the whole of that tail —
-             * M_ReactToDamage, the AI_DUCKED gate, the nightmare pain debounce,
-             * the death-use pass, the kill counter and the no-knockback bit —
-             * transcribed in monster.c. What is left here is deciding WHEN to
-             * call it and with what.
-             *
-             * The attacker is the sight client, which is where the player is;
-             * the port has no inflictor entity to hand over.
-             *
-             * One honest approximation, stated: the original calls the tail on
-             * every hit, INCLUDING one that armour or godmode reduced to zero —
-             * and still reacts to it, because being shot at and unhurt is still
-             * being shot at. The actor sync reports health, not the shot, so a
-             * hit that took nothing is indistinguishable here from no hit at
-             * all. The gate is therefore "the health moved", which is a subset
-             * of the original's occasions and never a superset.
-             */
-            if (m->health != hp || (!was && m->health <= 0)) {
-                s16 took = (s16)(hp - m->health);
-
-                if (took < 0)
-                    took = 0;
-
-                q2_monster_damage_reaction(m, &c->creatures.sight, took);
-
-                if (!was && m->dead)
-                    c->cre_die_calls++;
-                else if (!m->dead && took > 0)
-                    c->cre_pain_calls++;
-            }
-
-            /*
-             * The frame it died on. What can be reconstructed from the module's
-             * data rather than its code is the animation, so a body whose own
-             * `die` did not choose a move is put into one and left to play it
-             * out — and it now STOPS there rather than looping, because
-             * M_MoveFrame raises the corpse bit when a dead creature's move
-             * runs out (monster.c).
-             *
-             * Without this a killed creature simply vanished — the tick and the
-             * draw both skipped anything with `dead` set, so a Soldier shot
-             * dead was gone on the frame it died.
-             */
-            if (!was && m->dead && !m->currentmove) {
-                s32 f = q2_creature_world_death_frame(&c->creatures, m);
-
-                if (f >= 0 && q2_cre_set_move(m, f)) {
-                    m->frame     = (s16)f;
-                    c->cre_bodies++;
-                }
-            } else if (!was && m->dead) {
-                c->cre_bodies++;
-            }
-        }
+        for (i = 0; i < c->creatures.set.count; i++)
+            client_cre_drain_one(c, i);
     }
 
     /*
@@ -11026,6 +11217,18 @@ static void client_input_simulated(client *c, float dt)
      */
     {
         s32 player_origin[3];
+        s32 flash_dt = (s32)((double)dt * 300.0 + 0.5);
+
+        /*
+         * 0x8007EE20: the object handler drops the muzzle bit before the think
+         * that may raise it again, every frame — so a flash is the frame of
+         * its round and no other. And gp+16996, the flash's turn, takes twice
+         * the frame delta once per new frame (0x800310E0..0x800310F8).
+         */
+        q2_fx_flash_clear(&c->sim[0].fx);
+        if (flash_dt < 1) flash_dt = 1;
+        if (flash_dt > Q2_SCREEN_DT_MAX) flash_dt = Q2_SCREEN_DT_MAX;
+        c->flash_spin += 2 * flash_dt;
 
         player_origin[0] = c->sim[0].player[0].pos[0];
         player_origin[1] = q2_sim_origin_y(c->sim[0].player[0].pos[1]);
@@ -17816,6 +18019,13 @@ static void client_report(const client *c)
      * the wind-up — exactly the swing that used to land from any distance. */
     REPORT("creatures.swings_short", q2_cre_actions.melee_short);
     REPORT("creatures.shots",       c->cre_shots);
+    REPORT("creatures.dying_shots", c->cre_dying_shots);
+    REPORT("creatures.rounds",      c->cre_rounds);
+    REPORT("creatures.rounds_player",   c->cre_rounds_player);
+    REPORT("creatures.rounds_creature", c->cre_rounds_creature);
+    REPORT("creatures.rounds_world",    c->cre_rounds_world);
+    REPORT("creatures.flashes",     c->cre_flashes);
+    REPORT("creatures.fire_sounds", c->cre_fire_sounds);
     REPORT("creatures.sounds",      c->cre_sounds);
     REPORT("creatures.drops",       c->cre_drops);
     /* The three ways a creature's step can be cut short, so a run can tell
@@ -17831,6 +18041,7 @@ static void client_report(const client *c)
     /* Not "how many bursts were raised" — how many primitives reached the
      * ordering table. The two differ by exactly the area cull. */
     REPORT("fx.prims",              c->fx_prims);
+    REPORT("fx.flashes",            c->sim[0].fx.stats.flashes_drawn);
     REPORT("fx.bursts",             c->ent_bursts);
     REPORT("fx.debris_models",      c->debris_models);
     REPORT("fx.debris_faces",       c->debris_faces);
@@ -18025,6 +18236,7 @@ int main(int argc, char **argv)
          */
         else if (!strcmp(argv[i], "--glint"))                 c.show_glint = true;
         else if (!strcmp(argv[i], "--shoot"))                 c.shoot = true;
+        else if (!strcmp(argv[i], "--shoot-to-kill"))         c.shoot_to_kill = true;
         /* The same readout P toggles, for a run with nobody at the keyboard. */
         else if (!strcmp(argv[i], "--coords"))                c.show_coords = true;
         /*

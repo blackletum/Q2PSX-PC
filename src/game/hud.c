@@ -584,9 +584,22 @@ void q2_hud_centre(q2_hud *hud, const q2_hud_tables *tab,
     if (x < 0)
         x = 0;
 
+    /*
+     * "String too long!" — 0x80042F18..0x80042F70. The measure of the body
+     * plus the measure of the format plus five must stay under 63 (`slti v0,
+     * v0, 63`), or the line is formatted with the module's apology in place of
+     * the body, at the position the body would have had. Both measures are
+     * 0x800702A0's, one short, so a boxed line takes 46 characters and a `|0`
+     * one 48. No string the disc centre-prints is longer than 37 (`q2psx-inspect
+     * text`), so retail never shows it; a port-side caller that did would.
+     */
+    if (q2_hud_measure(body) + q2_hud_measure(fmt) + 5 >= 63)
+        body = Q2_HUD_CENTRE_TOO_LONG;
+
     snprintf(hud->centre, sizeof(hud->centre), fmt, (unsigned)x, (unsigned)y,
              body);
     hud->centre_age = 0;
+    hud->centre_live = true;
 }
 
 void q2_hud_pickup(q2_hud *hud, const char *item_name)
@@ -867,7 +880,15 @@ void q2_hud_tick(q2_hud *hud, int frames, s32 dt)
      * port's 30 Hz step made every level message last 1200 frames: forty
      * seconds on screen instead of four, with the `*7` backdrop sitting at `*0`
      * for thirty-nine of them.
+     *
+     * AND THE TEST COMES FIRST. 0x80042B98 compares the age against 1200,
+     * 0x80042BB0 adds the delta, and 0x80042BB4 draws — so the frame on which
+     * the age reaches 1200 is still drawn, and the line is up for 1200 / dt
+     * frames, 120 at this port's 30 Hz. Testing the aged value at the draw, as
+     * this did, dropped that last frame. `centre_live` is the test as the
+     * console makes it.
      */
+    hud->centre_live = hud->centre_age < Q2_HUD_CENTRE_TICKS;
     if (dt > 0 && hud->centre_age < Q2_HUD_CENTRE_TICKS)
         hud->centre_age += dt;
 }
@@ -952,8 +973,9 @@ void q2_hud_build_ot(q2_hud *hud, const q2_hud_font *font, q2_hud_ctx *ctx,
 
     emit_crosshair(hud, font, ctx, ot, otz);
 
-    /* The centre line. */
-    if (hud->centre_age < Q2_HUD_CENTRE_TICKS && hud->centre[0]) {
+    /* The centre line, while its age was under 1200 before this frame's delta
+     * went on (q2_hud_tick). */
+    if (hud->centre_live && hud->centre[0]) {
         ctx->home_x = 0;
         ctx->home_y = 0;
         q2_hud_print(font, ctx, pen, ot, otz, hud->centre);

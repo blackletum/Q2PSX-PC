@@ -577,6 +577,57 @@ typedef struct q2_fx_debris {
 } q2_fx_debris;
 
 /* ------------------------------------------------------------------------- */
+/* A creature's muzzle flash                                                  */
+/* ------------------------------------------------------------------------- */
+/*
+ * 0x80031094, import +0xA0, which the Soldier's, the Infantry's and the
+ * Gunner's export 1 call while their object is drawn — and ONLY while the
+ * sign bit of object+0x10C is up. `monster_fire_bullet` and
+ * `monster_fire_shotgun` raise it (0x80061E28, 0x80061F18; the blaster, rail,
+ * rocket and grenade spawners do not), and the object's per-frame handler
+ * drops it before the next think (0x8007EE20, `and 0x7FFFFFFF`). So a flash is
+ * one frame per round, from those three creatures and from those two weapons.
+ *
+ * It is a light — q2_creature_muzzle_light's radii at the muzzle — and this
+ * quad: a POLY_FT4, code 0x2C with the semi-transparency bit (0x800314C8),
+ * colour (255, 255, 255), UVs (64,208) (95,208) (64,239) (95,239) — a 32x32
+ * cell of the chars.lbm page, `GetTPage(0, 0, 0, 256)` with ABR 1, ADDITIVE
+ * (0x80031590..0x800315A8) — and CLUT `[0x800E3FAC]`, built-in palette 64.
+ *
+ * The corners are built in MODEL space around the posed muzzle: a square of
+ * half-diagonal 120 turned by a free-running angle, (x - c, y - s), (x + s,
+ * y - c), (x - s, y + c), (x + c, y + s) with c and s the angle's cosine and
+ * sine times 120 (0x80031270..0x80031320), all at the muzzle's own z. Rotated
+ * by the object's matrix, they lie across the model's X/Y plane — square to
+ * the way the creature faces, so a guard firing at you shows the whole star
+ * and one seen side-on shows a sliver. The caller does that part (it owns the
+ * pose) and hands over world corners in hardware Z order.
+ *
+ * THE ANGLE is gp+16996, advanced by twice the frame delta once per new frame
+ * (0x800310E0..0x800310F8) and read as itself on an odd frame and 128 behind
+ * on an even one (0x800310FC..0x80031120): a slow spin with an eleven-degree
+ * flicker. q2_fx_flash_angle is that.
+ *
+ * The flash is skipped in a viewport whose camera-space depth to the muzzle
+ * is under 257 (0x80031470). Sorted at the third corner's depth (`swc2 SZ3`).
+ */
+#define Q2_FX_FLASH_MAX         16
+#define Q2_FX_FLASH_SIZE       120     /* a3 at 0x8010216C, 0x801014xx */
+#define Q2_FX_FLASH_U0          64
+#define Q2_FX_FLASH_V0         208
+#define Q2_FX_FLASH_U1          95
+#define Q2_FX_FLASH_V1         239
+#define Q2_FX_FLASH_PALETTE_ID  64
+#define Q2_FX_FLASH_ABR       0x20u     /* ABR 1, additive                  */
+#define Q2_FX_FLASH_NEAR       257
+
+typedef struct q2_fx_flash {
+    s32 corner[4][3];   /* world space, hardware Z order */
+    s32 centre[3];      /* the muzzle, for the near test */
+    u8  area;
+} q2_fx_flash;
+
+/* ------------------------------------------------------------------------- */
 /* The effect world                                                           */
 /* ------------------------------------------------------------------------- */
 typedef struct q2_fx_stats {
@@ -590,6 +641,7 @@ typedef struct q2_fx_stats {
     u32 beam_faces_emitted;
     u32 debris_live;
     u32 ot_overflow;
+    u32 flashes_drawn;          /* creature muzzle-flash quads emitted      */
 } q2_fx_stats;
 
 typedef struct q2_fx_world {
@@ -644,6 +696,11 @@ typedef struct q2_fx_world {
      */
     bool         untextured;
 
+    /* This frame's creature muzzle flashes; see q2_fx_flash_add. */
+    q2_fx_flash  flash[Q2_FX_FLASH_MAX];
+    u32          flash_count;
+    u16          flash_clut;    /* [0x800E3F2C + 128] = palette 64 */
+
     q2_fx_stats  stats;
 } q2_fx_world;
 
@@ -663,6 +720,24 @@ void q2_fx_set_texture(q2_fx_world *w, u16 tpage_base, u16 clut);
 #define Q2_FX_CLUT_PALETTE_ID 75
 struct q2_hud_font;
 void q2_fx_use_hud_atlas(q2_fx_world *w, const struct q2_hud_font *font);
+
+/* Queue one creature muzzle flash for this frame's draw. False when the list
+ * is full. See q2_fx_flash. */
+bool q2_fx_flash_add(q2_fx_world *w, const s32 corner[4][3],
+                     const s32 centre[3], u8 area);
+
+/* Drop this frame's flashes — the object handler's 0x8007EE20, before the
+ * thinks that may raise new ones. */
+void q2_fx_flash_clear(q2_fx_world *w);
+
+/*
+ * The flash's turn on the 4096-step circle. `spin` is the running gp+16996
+ * total, `frame` the frame counter whose parity picks the arm.
+ */
+s32 q2_fx_flash_angle(s32 spin, u32 frame);
+
+/* The four model-space corners around `centre`, in hardware Z order. */
+void q2_fx_flash_corners(const s32 centre[3], s32 angle, s32 out[4][3]);
 
 /* 512, so that `size_scale == Q2_FX_SIZE_SCALE_UNITY` passes the argument
  * through. The disc's own value lives in level data, not in the executable. */

@@ -293,13 +293,13 @@ static void tank_play(q2_monster *m, u32 handle_addr)
  * world-space `start` built from them.
  */
 static const q2_cre_shot tank_shot_blaster = {
-    Q2_IMP_FIRE_BLASTER, 0, 16, 800, 0, 0, 0, 1
+    Q2_IMP_FIRE_BLASTER, 0, 16, 800, 0, 0, 0, 1, false, { 0, 0, 0 }, { 0, 0, 0 }
 };
 static const q2_cre_shot tank_shot_rocket = {
-    Q2_IMP_FIRE_ROCKET, 0, 50, 550, 0, 0, 0, 1
+    Q2_IMP_FIRE_ROCKET, 0, 50, 550, 0, 0, 0, 1, false, { 0, 0, 0 }, { 0, 0, 0 }
 };
 static const q2_cre_shot tank_shot_bullet = {
-    Q2_IMP_FIRE_BULLET, 0, 20, 0, 4, 300, 500, 1
+    Q2_IMP_FIRE_BULLET, 0, 20, 0, 4, 300, 500, 1, false, { 0, 0, 0 }, { 0, 0, 0 }
 };
 
 /* import +0x14, 0..32767. Every threshold below is a fraction of 32768. */

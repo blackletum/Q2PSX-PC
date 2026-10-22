@@ -203,9 +203,7 @@ u32 q2_model_total_verts(const q2_model *m)
 bool q2_model_world_vertex(const q2_model_instance *inst, s32 index,
                            s32 out[3])
 {
-    s16 spin[3][3];
     s32 posed[3];
-    int r;
 
     if (!inst || !out)
         return false;
@@ -223,6 +221,19 @@ bool q2_model_world_vertex(const q2_model_instance *inst, s32 index,
     if (!shadow_pose_vertex(inst->model, inst->pose, (u32)index, posed))
         return false;
 
+    q2_model_local_to_world(inst, posed, out);
+    return true;
+}
+
+void q2_model_local_to_world(const q2_model_instance *inst,
+                             const s32 local[3], s32 out[3])
+{
+    s16 spin[3][3];
+    int r;
+
+    if (!inst || !local || !out)
+        return;
+
     instance_spin(inst, spin);
     instance_scale(inst, spin);
 
@@ -236,12 +247,75 @@ bool q2_model_world_vertex(const q2_model_instance *inst, s32 index,
     for (r = 0; r < 3; r++) {
         /* Formed wide and brought back to 32 bits by conversion, which is the
          * `mflo`/`addu` wrap without signed overflow in C. */
-        s64 wide = (s64)spin[r][0] * posed[0] +
-                   (s64)spin[r][1] * posed[1] +
-                   (s64)spin[r][2] * posed[2];
+        s64 wide = (s64)spin[r][0] * local[0] +
+                   (s64)spin[r][1] * local[1] +
+                   (s64)spin[r][2] * local[2];
         s32 sum  = (s32)(u32)(u64)wide;
 
         out[r] = inst->origin[r] + (s32)(s16)(sum >> Q2_FRAC_12);
+    }
+}
+
+/* The part that owns a storage vertex, and the raw vertex — 0x8006CA44's walk
+ * (`a1 -= lbu 3(part)` until it goes negative). */
+static bool vertex_part(const q2_model *m, u32 index, u32 *part_out,
+                        s32 raw[3])
+{
+    u32 part, cursor = 0;
+
+    if (!m)
+        return false;
+    for (part = 0; part < m->hdr.num_parts; part++) {
+        q2_model_part p;
+
+        if (!q2_model_get_part(m, part, &p))
+            return false;
+        if (index < cursor + p.num_verts) {
+            q2_model_vertex v;
+
+            if (!q2_model_get_vertex(m, index, &v))
+                return false;
+            raw[0] = v.x;
+            raw[1] = v.y;
+            raw[2] = v.z;
+            *part_out = part;
+            return true;
+        }
+        cursor += p.num_verts;
+    }
+    return false;
+}
+
+bool q2_model_blend_local(const q2_model_instance *inst, s32 vert_a,
+                          s32 vert_b, s32 out[3])
+{
+    s32 a[3], b[3];
+    u32 pa, pb;
+    int k;
+
+    if (!inst || !inst->model || !out || vert_a < 0 || vert_b < 0)
+        return false;
+    if (!vertex_part(inst->model, (u32)vert_a, &pa, a) ||
+        !vertex_part(inst->model, (u32)vert_b, &pb, b))
+        return false;
+
+    /* 0x8006CBA4: one part, the midpoint; two parts, the first alone. */
+    if (pa == pb)
+        for (k = 0; k < 3; k++)
+            a[k] = (a[k] + b[k]) / 2;
+
+    if (inst->pose) {
+        s16 rot[3][3];
+
+        q2_quat_to_matrix(rot, inst->pose[pa].q);
+        matrix_apply(rot, a, out);
+        out[0] += inst->pose[pa].t[0];
+        out[1] += inst->pose[pa].t[1];
+        out[2] += inst->pose[pa].t[2];
+    } else {
+        out[0] = a[0];
+        out[1] = a[1];
+        out[2] = a[2];
     }
     return true;
 }

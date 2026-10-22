@@ -5180,6 +5180,19 @@ nothing saying so.
       that the two draws are independent — the creature flash uses TWO where the player's uses one, so an
       implementation that reused a single draw would produce correlated radii and look right.
 
+      **CORRECTION, and the function was never called.** The census above looked only at THINK steps, and
+      the Gunner's think 13 is a two-instruction `jr ra` whose `call(+A0)` was the decoder walking into the
+      next function (cre_gunner.c). The callers are the modules' **export 1** render hooks: the Soldier's
+      (`0x80102120` on BASE1), the Infantry's (`0x80100DC0`) and the Gunner's (`0x801014BC`), each
+      `lw v0, 268(a0); bgez` — drawn only while the sign bit of object+0x10C is up. `monster_fire_bullet`
+      and `monster_fire_shotgun` raise it (`0x80061E28`, `0x80061F18`) and the object handler drops it before
+      the next think (`0x8007EE20`), so a flash is one frame per round. And it is not only a light: from
+      `0x80031270` it builds a 32x32 additive POLY_FT4 of the chars page (UV 64,208, CLUT `[0x800E3FAC]`,
+      palette 64), turned by gp+16996 across the model's X/Y plane, per viewport. `q2_creature_muzzle_light`
+      had no caller in the client, which lit every creature shot with the PLAYER's one-draw radii; it is
+      called now, the quad is `q2_fx_flash` (effect.h), and the light sits where 0x80031178 puts it — the
+      object origin plus the attachment's UNROTATED model-space offset.
+
       **And one more site named, which turns up the first non-zero style.** `0x800648B8` sits in
       `0x80064780`, which `model.h` already identifies as **the fixed-size effect renderer** — so this is an
       effect's own light. Its operands:

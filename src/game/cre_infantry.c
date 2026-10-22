@@ -43,21 +43,19 @@
  *     `muzzle_flash_light` with the cached muzzle pose at module+0x1D80 packed
  *     into a1/a2 and 120 in a3 (0x80100E44..0x80100E88).
  *
- *     OBJECT+0x10C IS `monsterinfo.pausetime`, established since. Two of this
- *     module's own thinks write it and one reads it: `infantry_duck_down`
- *     stores `level.time + 10` there (0x801011A8), `infantry_cock_gun` stores
- *     `level.time + (rand() & 15) + 10` (0x80101284), and `infantry_duck_hold`
- *     compares it against `level.time` to decide whether to hold the frame
- *     (0x801011C8). The port keeps it in `q2_monster.pausetime`, which is the
- *     same field the shared AI pauses on, exactly as id shares it. So export
- *     1's test is "the pause deadline has gone negative", and what the fourth
- *     argument means is still not established — the import table leaves a3
- *     unnamed — so only the sign test and the literal are claimed here.
+ *     OBJECT+0x10C IS NOT `pausetime`, which an earlier reading here said
+ *     it was. The thinks that write pausetime write the ENTITY's +0x10C
+ *     (`infantry_cock_gun`, 0x80101284, off the entity in s0); export 1 is
+ *     handed the OBJECT, a different record, and its +0x10C is a flags word
+ *     whose sign bit `monster_fire_bullet` raises on every round (0x80061E28)
+ *     and the object's per-frame handler drops before the next think
+ *     (0x8007EE20). So the test is "a round went out this frame", and a3 = 120
+ *     is the flash quad's size. That is the creature muzzle flash — the quad
+ *     and the light — and the client draws it now (`client_cre_flash`,
+ *     q2_fx_flash in effect.h) for this module, the Soldier and the Gunner.
  *
- * Neither is creature behaviour — they are effects the renderer would run —
- * and this port has no per-object render hook for a creature to install, so
- * both are owed rather than done. The Gunner's file records the same call at
- * +0xA0 from ITS export 1, so this is the second module to want one.
+ * The blur trail is still owed: this port has no per-object render hook for
+ * a creature to install, and the flash is reached from the shot instead.
  *
  * ---------------------------------------------------------------------------
  * It is PC Quake II's `infantry.c`, and the evidence is arithmetic
@@ -105,9 +103,9 @@
  *     (796, 0, 398)  (70, 0, 35)    { 70.0, 35.0, 0.0 }
  *    (1024, 0, 398)  (90, 0, 35)    { 90.0, 35.0, 0.0 }
  *
- * Twenty-four values, all of them id's. It is not reproduced as code below,
- * for the reason given on `infantry_machinegun`: nothing downstream of this
- * port's fire hook can be handed a direction yet.
+ * Twenty-four values, all of them id's, and `k_inf_aimangles` below is the
+ * table as the module stores it — the shot hook carries a direction now, so
+ * the sweep is code rather than prose.
  *
  * ---------------------------------------------------------------------------
  * The method table, straight out of export 2
@@ -235,14 +233,25 @@
  * 194 is 184 + 10, the eleventh frame of the gun attack — id's FRAME_attak111.
  * Everything else that reaches the shot is a Death2 frame in 155..166, and the
  * module reads its aim table at index `frame - 155` (0x8010103C).
- *
- * Neither is referenced by the code below, and that is not an oversight: the
- * only thing the branch decides is a DIRECTION, and a direction cannot cross
- * this port's fire hook. They are here because the numbers are the module's and
- * a reader checking the disassembly wants them named rather than in prose.
  */
 #define INF_FRAME_ATTACK_FIRE 194
 #define INF_FRAME_DEATH_FIRE0 155
+#define INF_AIMANGLES         12
+
+/*
+ * module+0x1CE4: twelve {pitch, roll, yaw} records of three words, read back
+ * as halfwords (`lhu 0`, `lhu 4`, `lhu 8` at 0x8010105C..0x80101084). See the
+ * header for the same numbers in degrees beside id's `aimangles`.
+ */
+static const s16 k_inf_aimangles[INF_AIMANGLES][3] = {
+    {    0, 0,  57 }, {  114, 0, 171 }, {  228, 0, 284 }, {  284, 0, 398 },
+    {  341, 0, 455 }, {  341, 0, 512 }, {  284, 0, 569 }, {  228, 0, 455 },
+    {  171, 0, 398 }, {  455, 0, 398 }, {  796, 0, 398 }, { 1024, 0, 398 }
+};
+
+/* The muzzle cache, blended from these two model vertices at load. */
+#define INF_MUZZLE_VERT_A 200
+#define INF_MUZZLE_VERT_B 205
 
 /* ------------------------------------------------------------------------- */
 /* Sound handles, by the module address the init writes them to               */
@@ -356,18 +365,18 @@ static s32 inf_rand(void)
  * flash. 300 and 500 are id's DEFAULT_BULLET_HSPREAD and DEFAULT_BULLET_VSPREAD
  * exactly, and they recur unchanged in three other modules.
  *
- * THE FIGURES CROSS NOW; THE DIRECTION STILL DOES NOT. `q2_cre_fire_shot` takes
- * the whole shot — spawner slot, flash, damage, kick and both spreads — so the
- * five numbers above are handed over instead of merely documented. `speed` is
- * zero because a hitscan has none and `count` is 1 because this is not a
- * shotgun; both are the struct's "the weapon does not use this" value rather
- * than a figure that went unread.
+ * THE FIGURES AND THE DIRECTION BOTH CROSS. `q2_cre_fire_shot` takes the
+ * whole shot — spawner slot, flash, damage, kick and both spreads — and now
+ * the muzzle and the aim with it, so the branch above is code: the attack
+ * frame leads the enemy, and the eleven-degree steps of the death sweep walk
+ * the burst up and across the room while the body goes over backwards. The
+ * console's sweep hits the player only when the player happens to stand in
+ * it; this port used to put every one of the twelve rounds into the player
+ * whenever the body could see them. `speed` is zero because a hitscan has
+ * none and `count` is 1 because this is not a shotgun.
  *
- * WHAT IS STILL NOT WRITTEN is `start` and `forward`. The hook carries no
- * origin and no direction, so the muzzle geometry above and the twelve-record
- * aim table in the header stay prose: computing a direction here and dropping
- * it at the call would be dead code pretending to be a transcription. That is
- * the one thing this file still needs from outside itself.
+ * The muzzle is `q2_cre_muzzle` on vertices 200 and 205, which is the cache
+ * the init builds at 0x80100D48..0x80100D68 (crebind.h).
  *
  * NO DEPARTURE NOW. The module fires from the death animation with NO enemy
  * check at all — the enemy is loaded only on the `frame == 194` arm
@@ -386,12 +395,62 @@ static const q2_cre_shot k_infantry_machinegun = {
     4,                    /* kick     — sp+16                              */
     300,                  /* hspread  — sp+20, id's DEFAULT_BULLET_HSPREAD */
     500,                  /* vspread  — sp+24, id's DEFAULT_BULLET_VSPREAD */
-    1                     /* pellets  — not a shotgun                      */
+    1,                    /* pellets  — not a shotgun                      */
+    false,                /* aimed    — set per round, infantry_machinegun */
+    { 0, 0, 0 },          /* start    — the posed muzzle, per round        */
+    { 0, 0, 0 }           /* dir      — per round                          */
 };
 
 static void infantry_machinegun(q2_monster *self)
 {
-    q2_cre_fire_shot(self, &k_infantry_machinegun);
+    q2_cre_shot shot = k_infantry_machinegun;
+    s32 forward[3];
+    int k;
+
+    shot.aimed = true;
+    q2_cre_muzzle(self, INF_MUZZLE_VERT_A, INF_MUZZLE_VERT_B, shot.start);
+
+    if (self->frame == INF_FRAME_ATTACK_FIRE) {
+        if (self->enemy) {
+            /* 0x80100FA8..0x80101004: VectorMA(enemy origin, -819, enemy
+             * velocity), the view height added, aimed from the muzzle and
+             * normalised. */
+            s32 target[3];
+
+            q2_vector_ma(self->enemy->pos, -819, self->enemy->velocity,
+                         target);
+            target[1] += self->enemy->view_height;
+            for (k = 0; k < 3; k++)
+                shot.dir[k] = target[k] - shot.start[k];
+            q2_vector_normalize(shot.dir);
+        } else {
+            /* 0x80101014: straight ahead. */
+            q2_angle_vectors(self->angles, forward, NULL, NULL);
+            for (k = 0; k < 3; k++)
+                shot.dir[k] = forward[k];
+        }
+    } else {
+        /*
+         * 0x80101038..0x80101090: the death sweep, `angles - aimangles[frame -
+         * 155]` component by component as halfwords, through AngleVectors for
+         * forward alone. The module does not bound the index; only the twelve
+         * Death2 frames 155..166 carry this think, so the port's guard below
+         * changes nothing on the disc and keeps a stray frame from reading off
+         * the table.
+         */
+        s32 n = self->frame - INF_FRAME_DEATH_FIRE0;
+        s16 vec[3];
+
+        if (n < 0 || n >= INF_AIMANGLES)
+            return;
+        for (k = 0; k < 3; k++)
+            vec[k] = (s16)(self->angles[k] - k_inf_aimangles[n][k]);
+        q2_angle_vectors(vec, forward, NULL, NULL);
+        for (k = 0; k < 3; k++)
+            shot.dir[k] = forward[k];
+    }
+
+    q2_cre_fire_shot(self, &shot);
 }
 
 /*

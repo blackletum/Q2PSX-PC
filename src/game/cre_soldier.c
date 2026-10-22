@@ -154,7 +154,10 @@
  * against `q2psx-inspect creatures` directly.
  */
 #include "random.h"
+#include <string.h>
+
 #include "ai.h"
+#include "creature.h"
 #include "crebind.h"
 #include "monster.h"
 
@@ -218,6 +221,8 @@ typedef enum sol_sound {
     SOL_SND_SIGHT  = 1,     /* +0x32A4  sol_sght1     sight,   module+0x2250 */
     SOL_SND_PAIN   = 4,     /* +0x32B4  sol_pain3     pain,    module+0x1078 */
     SOL_SND_DEATH  = 7,     /* +0x32C0  sol_deth3     die,     module+0x23D0 */
+    SOL_SND_MACHGUN = 8,    /* +0x32CC  wep_machgf1b  fire,    module+0x1550 */
+    SOL_SND_SHOTGUN = 9,    /* +0x32D0  wep_shotgf1b  fire,    module+0x148C */
     /* Registered at module+0xCF8 and loaded by nothing — see the header. Kept
      * so the name is still reachable for the bank, not because this plays it. */
     SOL_SND_UDEATH = 10,    /* +0x32C8  msc_udeath                           */
@@ -324,22 +329,15 @@ s32  q2_cre_skill(void)          { return g_skill; }
  * decoded creature reaches the engine's spawners through the same one callback
  * a transcribed one does. */
 /*
- * AND THIS IS THE OLD ONE-INT HOOK, ON PURPOSE.
+ * THE OLD ONE-INT HOOK, and the Soldier no longer uses it.
  *
- * `crebind.h` now carries `q2_cre_shot`, which names the damage, the speed,
- * the kick, the spread and the pellet count, and every other transcribed
- * creature should use it. The Soldier does not, because it is the one creature
- * whose shot is already delivered: `client/main.c` reads the packed
- * `table * 8 + flash` this sends and holds the three muzzle-flash tables that
- * module+0x1150..+0x1188 selects between, and that path works today. Moving it
- * would mean editing the client, which this file does not own.
- *
- * A DEPARTURE, then, and the only one this pass leaves standing. It is named
- * rather than fixed because fixing it is a two-file change and this file owns
- * one of them: the Soldier's damage, spread and pellet count were read out of
- * the three arms of module+0x1120 and they live in `client_cre_fire`
- * (client/main.c), which is the consumer of this hook and the one place they
- * would have to move from.
+ * It carries `table * 8 + flash` or, from a decoded creature, the import slot
+ * its think called (cre_actions.c), and nothing else — no muzzle, no aim. The
+ * Soldier used it until its shot had to say WHERE it goes: flashes 5 and 6 are
+ * fired straight ahead from a falling body, and a host that only knows "the
+ * Soldier fired" can do nothing but put that round into the player. So
+ * `soldier_fire` now hands over a whole `q2_cre_shot` like every other
+ * transcribed creature, and this stays for the decoded path alone.
  */
 void (*q2_cre_fire_fn)(q2_monster *m, int flash_index, void *user);
 void  *q2_cre_fire_user;
@@ -369,34 +367,145 @@ void q2_cre_set_fire_hook(void (*fn)(q2_monster *, int, void *), void *user)
  * module+0x14B0..+0x14D0) and the rest call import +0x84 (bullet, damage 2,
  * kick 4, hspread 300, vspread 500, module+0x1574..+0x158C). 300 and 500 are
  * id's DEFAULT_BULLET_HSPREAD and DEFAULT_BULLET_VSPREAD and 12 is its
- * DEFAULT_SHOTGUN_COUNT, unchanged. Those figures are not repeated here — they
- * live in `client_cre_fire`, which is this hook's consumer; see the departure
- * named above the hook.
+ * DEFAULT_SHOTGUN_COUNT, unchanged, and they are the figures in the three
+ * `q2_cre_shot`s below.
  *
- * A GAP, AND IT IS THIS FUNCTION'S: the machinegun arm also writes
- * `pausetime = level.time + 3 + rand() % 8` when `AI_HOLD_FRAME` is clear —
- * module+0x14E8 tests entity+0xDC against 0x80 and module+0x1540 stores to
- * entity+0x10C. The port drops it, because `soldier_fire` here is a pure
- * hand-off to the host and the write is monster state the host never sees.
- * Not transcribed rather than not found: `ai_stand` reads `pausetime`, so
- * writing it would change how long a machinegun guard holds its ground, and
- * that is a behaviour change this pass has no capture to check against.
+ * THE WHOLE FUNCTION, in the module's order:
+ *
+ *   1. AngleVectors(self->angles, forward, right, NULL)   module+0x11AC
+ *   2. start = the posed muzzle (module+0x32D8, vertices 228/234 blended at
+ *      load) rotated by the object's matrix, plus its origin  +0x11FC..+0x1270
+ *   3. flash 5 or 6 — `addiu v0, s4, -5; sltiu v0, v0, 2` at +0x1274 — and
+ *      aim = forward, a straight copy. These are the two DEATH1 frames,
+ *      293 and 296 (think 20 and 21): the body fires where it faces while it
+ *      falls, at nobody.
+ *      Any other flash: end = enemy origin with the enemy's view height
+ *      added (+0x12A0..+0x12F8), aim = end - start, then vectoangles,
+ *      AngleVectors again for a fresh forward/right/up, two rand()s —
+ *      r = crandom * 1000 and u = crandom * 500, `125 * (rand - 16384) << 4`
+ *      and `<< 3` over 32768 (+0x1334..+0x13B8) — and
+ *      end = start + 8192 forward + r right + u up, aim = normalize(end -
+ *      start). id's soldier_fire to the constant.
+ *   4. The weapon, on skinnum again (+0x1430).
+ *
+ * THE MACHINEGUN ARM IS A BURST, and the port had dropped the half that made
+ * it one. module+0x14E8 tests AI_HOLD_FRAME (entity+0xDC & 0x80) and, only
+ * when it is clear, stores `pausetime = level.time + 3 + rand() % 8` at
+ * module+0x1540; after the shot, module+0x159C..+0x15CC holds the frame while
+ * `level.time < pausetime` and releases it after. M_MoveFrame re-runs a held
+ * frame's think (monster.c), so frame 41 of Attack4 fires again on every 10 Hz
+ * tick until the pause runs out: four to eleven rounds a trigger pull, where
+ * the port fired one. The same arm runs from the two Death1 frames, so a
+ * machinegun guard that dies that way empties a burst into the floor twice on
+ * its way down rather than firing two single shots.
+ *
+ * The two shotgun and machinegun arms each play their module's own report
+ * first — +0x32D0 at +0x148C and +0x32CC at +0x1550, both through import
+ * +0x20 at the object — and the engine's spawner then plays its own too
+ * (0x80061F04, 0x80061EAC): two voices of one sample, as on the console. The
+ * blaster arm plays nothing; its bolt has no report.
  */
 /* Which of the three flash tables this soldier's skin selects. */
 static u8 soldier_skin(const q2_monster *m);
+
+/* module+0xF20..+0xF48: the muzzle cache's two model vertices. */
+#define SOL_MUZZLE_VERT_A 228
+#define SOL_MUZZLE_VERT_B 234
+
+/* `crandom() * scale` as module+0x1344 and +0x1378 compute it: the product is
+ * divided by 32768 rounding toward zero (`bgez; addiu 32767; sra 15`). */
+static s32 sol_crandom(s32 scale)
+{
+    return (s32)(((s64)(sol_rand() - 16384) * (2 * scale)) / 32768);
+}
 
 static void soldier_fire(q2_monster *self, int flash_number)
 {
     u8 skin = soldier_skin(self);
     int table = (skin < 2) ? 0 : (skin < 4 ? 1 : 2);
+    q2_cre_shot shot;
+    s32 forward[3], right[3], up[3];
+    int k;
 
-    /*
-     * The port hands the host a (weapon, flash) pair rather than reproducing
-     * the muzzle-offset arithmetic here: which bullet spread a shotgun guard
-     * throws is a combat question, and it already has an answer in combat.c.
-     */
-    if (g_fire)
-        g_fire(self, table * 8 + flash_number, g_fire_user);
+    memset(&shot, 0, sizeof(shot));
+    shot.flash = table * 8 + flash_number;
+    shot.aimed = true;
+
+    q2_angle_vectors(self->angles, forward, right, NULL);
+    q2_cre_muzzle(self, SOL_MUZZLE_VERT_A, SOL_MUZZLE_VERT_B, shot.start);
+
+    if (flash_number == 5 || flash_number == 6) {
+        for (k = 0; k < 3; k++)
+            shot.dir[k] = forward[k];
+    } else {
+        s32 end[3], aim[3], r, u;
+        s16 dir[3];
+
+        /*
+         * `self->enemy` with no test, as the module reads it: these flashes
+         * only run from the attack moves, which are only entered with one.
+         * The NULL arm is the port's — it aims along forward rather than
+         * faulting the host.
+         */
+        if (self->enemy) {
+            end[0] = self->enemy->pos[0];
+            end[1] = self->enemy->pos[1] + self->enemy->view_height;
+            end[2] = self->enemy->pos[2];
+            for (k = 0; k < 3; k++)
+                aim[k] = end[k] - shot.start[k];
+            q2_vectoangles(aim, dir);
+            q2_angle_vectors(dir, forward, right, up);
+        } else {
+            q2_angle_vectors(self->angles, forward, right, up);
+        }
+
+        r = sol_crandom(1000);
+        u = sol_crandom(500);
+        q2_vector_ma(shot.start, 8192, forward, end);
+        q2_vector_ma(end, r, right, end);
+        q2_vector_ma(end, u, up, end);
+        for (k = 0; k < 3; k++)
+            shot.dir[k] = end[k] - shot.start[k];
+        q2_vector_normalize(shot.dir);
+    }
+
+    if (skin <= 1) {
+        /* import +0x80: damage 5 in a3, speed 600 and EF_BLASTER 8 on the
+         * stack (module+0x144C..+0x1460). */
+        shot.slot   = Q2_IMP_FIRE_BLASTER;
+        shot.damage = 5;
+        shot.speed  = 600;
+        shot.count  = 1;
+        q2_cre_fire_shot(self, &shot);
+    } else if (skin <= 3) {
+        /* import +0x88 (module+0x14B0..+0x14D8). */
+        sol_play(self, SOL_SND_SHOTGUN);
+        shot.slot    = Q2_IMP_FIRE_SHOTGUN;
+        shot.damage  = 2;
+        shot.kick    = 1;
+        shot.hspread = 1000;
+        shot.vspread = 500;
+        shot.count   = 12;
+        q2_cre_fire_shot(self, &shot);
+    } else {
+        if (!(self->aiflags & Q2_AI_HOLD_FRAME))
+            self->pausetime = q2_level_state.time + 3 + (sol_rand() % 8);
+
+        /* import +0x84 (module+0x1568..+0x1598). */
+        sol_play(self, SOL_SND_MACHGUN);
+        shot.slot    = Q2_IMP_FIRE_BULLET;
+        shot.damage  = 2;
+        shot.kick    = 4;
+        shot.hspread = 300;
+        shot.vspread = 500;
+        shot.count   = 1;
+        q2_cre_fire_shot(self, &shot);
+
+        if (q2_level_state.time >= self->pausetime)
+            self->aiflags &= ~(u32)Q2_AI_HOLD_FRAME;
+        else
+            self->aiflags |= Q2_AI_HOLD_FRAME;
+    }
 }
 
 /* ------------------------------------------------------------------------- */

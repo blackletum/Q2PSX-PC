@@ -550,6 +550,28 @@ static void test_need_key(void)
                "on the centre line, not queued in the notification ring");
 
     /*
+     * 0x80042F18..0x80042F70: measure(body) + measure(format) + 5 must stay
+     * under 63, or the console prints its apology instead. With the boxed
+     * format that is 46 characters, and 47 is one too many.
+     */
+    {
+        static const char fits[] =
+            "0123456789012345678901234567890123456789012345";      /* 46 */
+        static const char spills[] =
+            "01234567890123456789012345678901234567890123456";     /* 47 */
+
+        q2_hud_centre(&hud, &g_tab, &ctx, fits);
+        check(strstr(hud.centre, fits) != NULL,
+              "a 46-character line is shown as it is");
+        q2_hud_centre(&hud, &g_tab, &ctx, spills);
+        check(strstr(hud.centre, "String too long!") != NULL &&
+                  strstr(hud.centre, spills) == NULL,
+              "a 47-character one is replaced by \"String too long!\"");
+        check(strncmp(hud.centre, "*7@", 3) == 0,
+              "keeping the box and the position the long line would have had");
+    }
+
+    /*
      * AND THE CENTRE LINE RUNS ON THE OTHER CLOCK. UpdateMessageText adds the
      * halfword at [0x800B2DB4] to ctx+0x28C (0x80042BA8/0x80042BB0), not the
      * flat one it adds to the ring beside it (0x80042BEC), so the 1200 at
@@ -571,7 +593,12 @@ static void test_need_key(void)
               "still up after 119 frames of the 1/30 s step");
         q2_hud_tick(&hud, 1, 10);
         check(hud.centre_age >= Q2_HUD_CENTRE_TICKS,
-              "and gone on the 120th, which is four seconds and not forty");
+              "and aged out on the 120th, which is four seconds and not forty");
+        /* 0x80042B98 tests before 0x80042BB0 adds: the 120th frame, the one
+         * that takes the age to 1200, is still drawn. */
+        check(hud.centre_live, "but the 120th frame still draws it");
+        q2_hud_tick(&hud, 1, 10);
+        check(!hud.centre_live, "and the 121st does not");
 
         /* The ring's own clock is untouched by that: it counts frames. */
         q2_hud_init(&hud, &g_tab, 1);

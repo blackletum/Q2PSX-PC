@@ -313,6 +313,30 @@ bool q2_model_world_vertex(const q2_model_instance *inst, s32 index,
                            s32 out[3]);
 
 /*
+ * A CREATURE'S ATTACHMENT, which is the other half of the same machinery.
+ *
+ * `pose_blend_two_positions` (import +0x34, 0x8006CA2C) runs once at a
+ * module's load over two storage vertices: when both lie in one part it keeps
+ * their midpoint, each component halved toward zero (`srl 31; addu; sra 1`
+ * at 0x8006CBE0), with that part's index; when they do not it keeps the first
+ * vertex alone (0x8006CBA4). `attachment_local_offset` (import +0x2C,
+ * 0x8006C6C8) then poses that point with the part's live pose. This is the
+ * two together — the posed point in MODEL space, before the instance's
+ * rotation — which is where the creature muzzle-flash routine builds its quad
+ * (0x80031170). False when either index is not on the model.
+ */
+bool q2_model_blend_local(const q2_model_instance *inst, s32 vert_a,
+                          s32 vert_b, s32 out[3]);
+
+/*
+ * A model-space point placed in the world: rotated by the instance's own
+ * matrix as 0x8006FC1C does it (each row stored as a halfword) and the origin
+ * added — the tail of q2_model_world_vertex, for a point that is not a vertex.
+ */
+void q2_model_local_to_world(const q2_model_instance *inst,
+                             const s32 local[3], s32 out[3]);
+
+/*
  * 0x8006D6AC — how many storage vertices a model's parts hold: the SUM of each
  * 8-byte part record's `lbu +3` over the `lh 22(obj)` of them at `lw 40(obj)`.
  * It sums rather than reading the header's own count, and the damage drawers

@@ -1084,6 +1084,75 @@ static void test_view_mask_skips_one_viewport(void)
     psx_ot_free(&ot);
 }
 
+/*
+ * The creature muzzle flash, 0x80031094: a square of half-diagonal 120 turned
+ * by gp+16996 in model space, one additive quad of the chars page, dropped
+ * nearer than 257 and cleared every frame.
+ */
+static void test_creature_flash(void)
+{
+    q2_fx_world w;
+    q2_camera cam;
+    psx_ot ot;
+    gte_state gte;
+    s32 centre[3] = { 10, 20, 30 };
+    s32 corner[4][3];
+    s32 at[3] = { 0, 0, 2000 };
+
+    printf("draw: a creature's muzzle flash is one spinning additive quad\n");
+
+    check_eq_i(q2_fx_flash_angle(1000, 1), 1000 & 0xFFF,
+               "an odd frame reads the spin itself (0x80031108)");
+    check_eq_i(q2_fx_flash_angle(1000, 2), (1000 - 128) & 0xFFF,
+               "an even frame reads it 128 behind (0x8003111C)");
+
+    q2_fx_flash_corners(centre, 0, corner);
+    check(corner[0][0] == 10 - 120 && corner[0][1] == 20 &&
+              corner[1][0] == 10 && corner[1][1] == 20 - 120 &&
+              corner[2][0] == 10 && corner[2][1] == 20 + 120 &&
+              corner[3][0] == 10 + 120 && corner[3][1] == 20 &&
+              corner[0][2] == 30 && corner[3][2] == 30,
+          "at turn 0 the corners are left, top, bottom, right at the "
+          "muzzle's own depth (0x800312D4..0x8003131C)");
+
+    if (psx_ot_init(&ot, 256, 4096) != Q2_OK) {
+        printf("  FAIL  could not allocate an ordering table\n");
+        g_failures++;
+        return;
+    }
+    gte_init(&gte);
+    gte_set_projection(&gte, 256, 256, 124);
+    memset(&cam, 0, sizeof(cam));
+    cam.projection = 256;
+    cam.far_z      = Q2_CAMERA_FAR_DEFAULT;
+    cam.sort_range = Q2_CAMERA_SORT_RANGE;
+
+    q2_fx_world_init(&w, &g_tab);
+    q2_fx_set_texture(&w, 0x10, 0x1234);
+    q2_fx_flash_corners(at, 300, corner);
+    check(q2_fx_flash_add(&w, (const s32 (*)[3])corner, at, 0),
+          "a flash is queued");
+
+    psx_ot_clear(&ot);
+    check_eq_i(q2_fx_build_ot(&w, &cam, 0, &ot, &gte), 1,
+               "and drawn as exactly one primitive");
+    check_eq_i(w.stats.flashes_drawn, 1, "counted as a flash");
+
+    q2_fx_flash_clear(&w);
+    psx_ot_clear(&ot);
+    check_eq_i(q2_fx_build_ot(&w, &cam, 0, &ot, &gte), 0,
+               "and gone once the frame's flag is dropped (0x8007EE20)");
+
+    at[2] = 200;
+    q2_fx_flash_corners(at, 300, corner);
+    q2_fx_flash_add(&w, (const s32 (*)[3])corner, at, 0);
+    psx_ot_clear(&ot);
+    check_eq_i(q2_fx_build_ot(&w, &cam, 0, &ot, &gte), 0,
+               "a muzzle nearer than 257 is not drawn (0x80031470)");
+
+    psx_ot_free(&ot);
+}
+
 static void test_mesh_spark(void)
 {
     q2_fx_world w;
@@ -2938,6 +3007,7 @@ int main(void)
     test_item_materialise();
     test_mesh_crackle();
     test_view_mask_skips_one_viewport();
+    test_creature_flash();
     test_mesh_spark();
     test_mesh_blood();
     test_actor_present_tickers();

@@ -165,6 +165,8 @@ void q2_fx_set_texture(q2_fx_world *w, u16 tpage_base, u16 clut)
     w->tpage_base = (u16)(tpage_base & ~(u16)Q2_FX_ABR_MASK);
     w->clut       = clut;
     w->untextured = false;
+    if (!w->flash_clut)
+        w->flash_clut = clut;
 }
 
 void q2_fx_use_hud_atlas(q2_fx_world *w, const struct q2_hud_font *font)
@@ -186,10 +188,59 @@ void q2_fx_use_hud_atlas(q2_fx_world *w, const struct q2_hud_font *font)
     {
         const q2_hud_palette *pal =
             q2_hud_palette_get(font->tab, Q2_FX_CLUT_PALETTE_ID);
+        /* The creature muzzle flash shares the page and takes palette 64:
+         * 0x800315AC loads [0x800E3FAC], 128 bytes into the same table. */
+        const q2_hud_palette *flash =
+            q2_hud_palette_get(font->tab, Q2_FX_FLASH_PALETTE_ID);
 
+        w->flash_clut = flash ? flash->clut_id : font->clut_font;
         q2_fx_set_texture(w, font->tpage,
                           pal ? pal->clut_id : font->clut_font);
     }
+}
+
+bool q2_fx_flash_add(q2_fx_world *w, const s32 corner[4][3],
+                     const s32 centre[3], u8 area)
+{
+    q2_fx_flash *f;
+
+    if (!w || !corner || !centre || w->flash_count >= Q2_FX_FLASH_MAX)
+        return false;
+    f = &w->flash[w->flash_count++];
+    memcpy(f->corner, corner, sizeof(f->corner));
+    vec_copy(f->centre, centre);
+    f->area = area;
+    return true;
+}
+
+void q2_fx_flash_clear(q2_fx_world *w)
+{
+    if (w)
+        w->flash_count = 0;
+}
+
+s32 q2_fx_flash_angle(s32 spin, u32 frame)
+{
+    /* 0x800310FC: `andi v0, a0, 1` on the frame counter. */
+    return (frame & 1u) ? (spin & 0xFFF) : ((spin - 128) & 0xFFF);
+}
+
+void q2_fx_flash_corners(const s32 centre[3], s32 angle, s32 out[4][3])
+{
+    /* 0x80031288..0x800312B4: the table's cosine and sine scaled by the size
+     * and divided by 4096 toward zero. */
+    s32 c = (q2_cos12(angle) * Q2_FX_FLASH_SIZE) / 4096;
+    s32 s = (q2_sin12(angle) * Q2_FX_FLASH_SIZE) / 4096;
+    int k;
+
+    if (!centre || !out)
+        return;
+    out[0][0] = centre[0] - c;  out[0][1] = centre[1] - s;
+    out[1][0] = centre[0] + s;  out[1][1] = centre[1] - c;
+    out[2][0] = centre[0] - s;  out[2][1] = centre[1] + c;
+    out[3][0] = centre[0] + c;  out[3][1] = centre[1] + s;
+    for (k = 0; k < 4; k++)
+        out[k][2] = centre[2];
 }
 
 void q2_fx_world_resize(q2_fx_world *w, u32 groups, u32 viewports)
@@ -220,7 +271,7 @@ void q2_fx_world_clear(q2_fx_world *w)
 {
     u32 groups, views;
     s16 scale;
-    u16 tpage, clut;
+    u16 tpage, clut, flash_clut;
     bool untextured;
     const q2_fx_tables *tab;
 
@@ -237,6 +288,7 @@ void q2_fx_world_clear(q2_fx_world *w)
      * memset zero the flag would leave every later quad sampling page 0. */
     tpage      = w->tpage_base;
     clut       = w->clut;
+    flash_clut = w->flash_clut;
     untextured = w->untextured;
 
     memset(w, 0, sizeof(*w));
@@ -245,6 +297,7 @@ void q2_fx_world_clear(q2_fx_world *w)
     w->size_scale = scale;
     w->tpage_base = tpage;
     w->clut       = clut;
+    w->flash_clut = flash_clut;
     w->untextured = untextured;
     q2_fx_world_resize(w, groups, views);
 }
@@ -2803,6 +2856,84 @@ static u32 draw_beams(q2_fx_world *w, const q2_camera *cam,
     return emitted;
 }
 
+/*
+ * The creature muzzle flashes — 0x80031324..0x800316D8, once per viewport.
+ * See q2_fx_flash in effect.h for where each number comes from.
+ */
+static u32 draw_flashes(q2_fx_world *w, const q2_camera *cam, psx_ot *ot,
+                        gte_state *gte, const s16 view[3][3])
+{
+    u32 emitted = 0, i;
+
+    for (i = 0; i < w->flash_count; i++) {
+        const q2_fx_flash *f = &w->flash[i];
+        static const u8 uv[4][2] = {
+            { Q2_FX_FLASH_U0, Q2_FX_FLASH_V0 }, { Q2_FX_FLASH_U1, Q2_FX_FLASH_V0 },
+            { Q2_FX_FLASH_U0, Q2_FX_FLASH_V1 }, { Q2_FX_FLASH_U1, Q2_FX_FLASH_V1 }
+        };
+        /* psx_prim runs around the perimeter; the hardware's quad is Z
+         * ordered, so its corners 2 and 3 trade places (draw_groups). */
+        static const u8 order[4] = { 0, 1, 3, 2 };
+        s32 cs[3];
+        gte_sxy xy[4];
+        u16 z[4];
+        u32 bucket = 0;
+        bool area_routed = psx_ot_area_active(ot);
+        psx_prim *prim;
+        int k;
+
+        /* 0x80031468..0x80031474: the muzzle's own camera-space depth, and
+         * the flash is not drawn this side of 257. */
+        to_camera(view, cam, f->centre, cs);
+        if (cs[2] < Q2_FX_FLASH_NEAR)
+            continue;
+
+        if (area_routed && !psx_ot_area_bucket(ot, f->area & 0x7Fu, &bucket))
+            continue;
+        q2_camera_apply_area_projection(cam, ot,
+                                        area_routed ? (s32)(f->area & 0x7Fu)
+                                                    : -1,
+                                        gte);
+
+        for (k = 0; k < 4; k++)
+            (void)gte_project_point(gte, f->corner[k][0] - cam->pos[0],
+                                    f->corner[k][1] - cam->pos[1],
+                                    f->corner[k][2] - cam->pos[2],
+                                    &xy[k], &z[k]);
+
+        /* Sorted at SZ3 of the `rtpt` — the third corner (0x80031638). */
+        prim = area_routed
+             ? psx_ot_add_bucket_depth(ot, bucket, z[2], z[2])
+             : psx_ot_add_depth(ot,
+                                (u16)bucket_for(ot, z[2], 1, cam->sort_range),
+                                sort_key_for(z[2], 1));
+        if (!prim) {
+            w->stats.ot_overflow++;
+            break;
+        }
+
+        prim->kind = w->untextured ? PSX_PRIM_F4 : PSX_PRIM_FT4;
+        for (k = 0; k < 4; k++) {
+            prim->xy[k].x  = xy[order[k]].x;
+            prim->xy[k].y  = xy[order[k]].y;
+            prim->uv[k].u  = uv[order[k]][0];
+            prim->uv[k].v  = uv[order[k]][1];
+            prim->rgb[k].r = 255;
+            prim->rgb[k].g = 255;
+            prim->rgb[k].b = 255;
+            prim->rgb[k].pad = 0;
+        }
+        prim->clut             = w->flash_clut;
+        prim->tpage            = (u16)(w->tpage_base | Q2_FX_FLASH_ABR);
+        prim->semi_transparent = true;
+        prim->textured_blend   = true;
+
+        emitted++;
+        w->stats.flashes_drawn++;
+    }
+    return emitted;
+}
+
 u32 q2_fx_build_ot(q2_fx_world *w,
                    const q2_camera *cam,
                    u32 viewport,
@@ -2832,6 +2963,12 @@ u32 q2_fx_build_ot(q2_fx_world *w,
 
     emitted += draw_groups(w, cam, viewport, ot, gte, view);
     emitted += draw_beams(w, cam, ot, gte);
+
+    /* draw_groups leaves the GTE on its last group's projection. */
+    memcpy(gm.m, view, sizeof(gm.m));
+    gte_set_rotation(gte, &gm);
+    gte_set_translation(gte, 0, 0, 0);
+    emitted += draw_flashes(w, cam, ot, gte, view);
 
     return emitted;
 }

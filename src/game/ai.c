@@ -1,6 +1,7 @@
 #include "random.h"
 #include "ai.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -225,35 +226,143 @@ s32 q2_vector_normalize(s32 v[3])
 }
 
 /*
- * 0x8005BB58 — forward, right and up from a yaw.
+ * 0x8005BB58 — forward, right and up from all THREE angles.
  *
- * Only yaw is used by anything the AI does; the creature's pitch and roll stay
- * zero. Forward is (sin, 0, cos) to match M_walkmove's move vector, and right
- * is forward turned a quarter circle so that the corner peek's +192 lands on
- * the creature's right hand.
+ * This used to read the yaw alone, on the grounds that a walking creature's
+ * pitch and roll stay zero. They do, and for every caller that passes a
+ * creature's own angles the full transcription below gives the same three
+ * vectors to the unit — cos 0 is 4096, so each product divides back out
+ * exactly. It stopped being enough when the dying Infantry became a caller:
+ * InfantryMachineGun hands this `self->angles - aimangles[n]`, whose PITCH
+ * sweeps from 0 to 90 degrees, and a yaw-only answer fired that whole burst
+ * along the floor.
+ *
+ * The table at 0x800A5430 is {sin, cos} per step (q2_sin12/q2_cos12 are it,
+ * 4096 of 4096), read for angles[2] (yaw), angles[0] (pitch) and angles[1]
+ * (roll). Every product is `mult; bgez; addiu 4095; sra 12` — a divide by 4096
+ * that rounds toward zero, which is C's `/` and not a shift:
+ *
+ *     forward = (cp*sy, sp, cp*cy)
+ *     right   = (-sr*sp*sy + cr*cy,  sr*cp,  -sr*sp*cy - cr*sy)
+ *     up      = ( cr*sp*sy + sr*cy, -cr*cp,   cr*sp*cy - sr*sy)
+ *
+ * Y points down, so a positive pitch looks DOWN, as id's does, and with all
+ * three zero forward is (sin, 0, cos) to match M_walkmove's move vector,
+ * right is forward turned a quarter circle so the corner peek's +192 lands on
+ * the creature's right hand, and up is (0, -4096, 0).
  */
+static s32 mul4096(s32 a, s32 b)
+{
+    return (s32)(((s64)a * b) / 4096);
+}
+
 void q2_angle_vectors(const s16 angles[3], s32 forward[3], s32 right[3],
                       s32 up[3])
 {
-    s32 yaw = angles ? q2_anglemod(angles[2]) : 0;
-    s32 s   = q2_sin12(yaw);
-    s32 c   = q2_cos12(yaw);
+    s32 sy = 0, cy = 4096, sp = 0, cp = 4096, sr = 0, cr = 4096;
 
-    if (forward) {
-        forward[0] = s;
-        forward[1] = 0;
-        forward[2] = c;
+    if (angles) {
+        sy = q2_sin12(angles[2] & 0xFFF);  cy = q2_cos12(angles[2] & 0xFFF);
+        sp = q2_sin12(angles[0] & 0xFFF);  cp = q2_cos12(angles[0] & 0xFFF);
+        sr = q2_sin12(angles[1] & 0xFFF);  cr = q2_cos12(angles[1] & 0xFFF);
     }
-    if (right) {
-        right[0] =  c;
-        right[1] =  0;
-        right[2] = -s;
+
+    if (forward) {                                  /* 0x8005BBAC */
+        forward[0] = mul4096(cp, sy);
+        forward[1] = sp;
+        forward[2] = mul4096(cp, cy);
     }
-    if (up) {
-        up[0] =  0;
-        up[1] = -4096;      /* Y points down, so up is negative Y */
-        up[2] =  0;
+    if (right) {                                    /* 0x8005BBE8 */
+        s32 t = mul4096(sr, -sp);
+
+        right[0] = mul4096(t, sy) + mul4096(cr, cy);
+        right[2] = mul4096(t, cy) + mul4096(cr, -sy);
+        right[1] = -mul4096(sr, -cp);
     }
+    if (up) {                                       /* 0x8005BC90 */
+        s32 t = mul4096(cr, sp);
+
+        up[0] = mul4096(t, sy) + mul4096(-sr, -cy);
+        up[2] = mul4096(t, cy) + mul4096(-sr, sy);
+        up[1] = -mul4096(cr, cp);
+    }
+}
+
+/*
+ * 0x8005C460 — VectorMA. `out = a + scale * b`, the product a divide by 4096
+ * rounded toward zero, component by component (`bgez; addiu 4095; sra 12`).
+ * `b` is a 1.12 direction and `scale` a distance in world units, which is how
+ * every module call site uses it.
+ */
+void q2_vector_ma(const s32 a[3], s32 scale, const s32 b[3], s32 out[3])
+{
+    int k;
+
+    if (!a || !b || !out)
+        return;
+    for (k = 0; k < 3; k++)
+        out[k] = a[k] + mul4096(scale, b[k]);
+}
+
+/*
+ * ratan2 (0x8008A358): the Psy-Q library's table-driven atan2, an angle on the
+ * 4096-step circle in -2048..2048. The console looks the ratio up in a
+ * 1025-entry table at 0x800A9430 after folding the octant; this computes the
+ * same function in floating point and rounds to the unit, the way trig.c
+ * builds its sine table. The two can differ by one step where the table's own
+ * rounding does — not enough to move a shot off its target.
+ */
+static s32 ratan2_4096(s32 y, s32 x)
+{
+    if (x == 0 && y == 0)
+        return 0;                                   /* 0x8008A384 */
+    return (s32)lround(atan2((double)y, (double)x) * 2048.0 / 3.14159265358979323846);
+}
+
+/*
+ * 0x8005F934 — vectoangles, id's own shape with the axes renamed: the ground
+ * plane is XZ and Y points down, so id's `value1[0], [1], [2]` are v[0], v[2]
+ * and v[1] here.
+ *
+ *   - v[0] and v[2] both zero: yaw 0, pitch 1024 when v[1] > 0 (straight
+ *     down) and 3072 otherwise (0x8005F96C..0x8005F980).
+ *   - v[0] zero, v[2] not: yaw 1024 when v[2] > 0, else 3072 (0x8005F998).
+ *     THAT IS id's `value1[1] > 0 ? 90 : 270` carried over without the axis
+ *     swap, and it is wrong for this console's convention — a vector straight
+ *     down +Z comes back at yaw 1024, a quarter turn off. Reproduced: it only
+ *     fires on an exactly axis-aligned input, and the console does it.
+ *   - otherwise yaw = ratan2(v[0], v[2]), pitch = ratan2(v[1], sqrt(v[0]^2 +
+ *     v[2]^2)), each lifted by 4096 when negative.
+ *
+ * Roll (out[1]) is always written zero (0x8005F9FC).
+ */
+void q2_vectoangles(const s32 v[3], s16 out[3])
+{
+    s32 yaw, pitch;
+
+    if (!v || !out)
+        return;
+
+    if (v[0] == 0 && v[2] == 0) {
+        yaw   = 0;
+        pitch = v[1] > 0 ? 1024 : 3072;
+    } else {
+        if (v[0] != 0)
+            yaw = ratan2_4096(v[0], v[2]);
+        else
+            yaw = v[2] > 0 ? 1024 : 3072;
+        if (yaw < 0)
+            yaw += 4096;
+
+        pitch = ratan2_4096(v[1], isqrt64((s64)v[0] * v[0] +
+                                          (s64)v[2] * v[2]));
+        if (pitch < 0)
+            pitch += 4096;
+    }
+
+    out[0] = (s16)pitch;
+    out[1] = 0;
+    out[2] = (s16)yaw;
 }
 
 /*

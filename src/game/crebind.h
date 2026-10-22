@@ -234,6 +234,17 @@ const char *q2_cre_sound_resolve(const q2_monster *m, const char *registered,
  * from a rail without the creature having to. A field a given weapon does not
  * use is zero, and a hook that finds `damage == 0` should decline rather than
  * invent: that is the state a creature whose figures are not read would be in.
+ *
+ * AND WHERE IT GOES, for a creature whose aim has been read. The spawners'
+ * a1 and a2 are the muzzle and a 1.12 unit aim, and the engine traces the
+ * shot from the one along the other (0x80061E2C scales the aim `<< 2`, so a
+ * round reaches 16384 units). `aimed` says the creature filled `start` and
+ * `dir` with what its module computes; a shot without it is resolved the old
+ * way, at whoever the creature is hunting, because nothing more is known.
+ * Without the direction a Soldier killed mid-stride shot the player through
+ * the back of its own head: `soldier_fire` aims flashes 5 and 6 — the two
+ * Death1 frames — straight along its own forward vector, not at anyone, and
+ * the dying Infantry sweeps its burst up and across the ceiling.
  */
 typedef struct q2_cre_shot {
     u32 slot;           /* Q2_IMP_FIRE_* — which engine spawner            */
@@ -244,7 +255,29 @@ typedef struct q2_cre_shot {
     s32 hspread;        /* hitscan spread, id's DEFAULT_* where it matches */
     s32 vspread;
     s32 count;          /* pellets; 1 for anything that is not a shotgun   */
+    bool aimed;         /* start and dir below are the module's own        */
+    s32 start[3];       /* a1: the posed muzzle, world units               */
+    s32 dir[3];         /* a2: the aim, a 1.12 unit vector                 */
 } q2_cre_shot;
+
+/*
+ * THE MUZZLE — import +0x2C (0x8006C6C8) posing the point the module cached at
+ * load, then +0x28 rotating it by the object's matrix and the object's origin
+ * added. The cache is `pose_blend_two_positions` (import +0x34, 0x8006CA2C)
+ * over two model vertices: their midpoint when both lie in one part, the first
+ * alone when they do not (0x8006CBA4). The Soldier blends 228 and 234
+ * (module+0xF20..+0xF48), the Infantry 200 and 205.
+ *
+ * Only the host has a posed model, so it answers through a hook, with the pose
+ * it last drew — at most a frame behind the think that asks, the same timing
+ * the damage effects already accept (client_fx_pose). With no hook, or a
+ * creature it cannot pose, the answer is the origin, which is where every
+ * creature shot started before this existed.
+ */
+void q2_cre_set_muzzle_hook(bool (*fn)(const q2_monster *m, s16 vert_a,
+                                       s16 vert_b, s32 out[3], void *user),
+                            void *user);
+void q2_cre_muzzle(const q2_monster *m, s16 vert_a, s16 vert_b, s32 out[3]);
 
 void q2_cre_set_shot_hook(void (*fn)(q2_monster *m, const q2_cre_shot *shot,
                                      void *user),
