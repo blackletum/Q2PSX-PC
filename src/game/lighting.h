@@ -313,7 +313,7 @@ typedef struct q2_muzzle_light {
     s16  outer;          /* likewise                                      */
     s16  ticks;          /* 0 = AddLight, one frame; > 0 = AddTimedLight  */
     u16  origin_offset;  /* the entity field the console passes: 0x54/0xA4*/
-    bool random_radii;   /* the machinegun/chaingun single rand() draw     */
+    bool random_radii;   /* the machinegun/chaingun two rand() draws       */
 } q2_muzzle_light;
 
 /* True and fills `out` for the four weapons that flash; false for the rest.

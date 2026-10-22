@@ -363,3 +363,12 @@ target_link_libraries(test_events PRIVATE
 )
 
 add_test(NAME event_runtime COMMAND test_events)
+
+add_executable(test_shock test_shock.c)
+
+target_link_libraries(test_shock PRIVATE
+    q2psx_common
+    q2psx_game
+)
+
+add_test(NAME dualshock COMMAND test_shock)

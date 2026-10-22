@@ -1647,6 +1647,15 @@ typedef struct q2_sim_proj_stats {
     u32 splash_asked;
     u32 splash_occluded;
     u32 splash_unplaced;
+
+    /*
+     * THE MUZZLE'S CLIP into PrimaryColl (Find3dSpaceGivenSecondary, every
+     * fire function but the BFG's and the hand grenade's): shots whose muzzle
+     * the hull pulled back from inside a wall, and shots whose shooter stood
+     * in no PrimaryColl cell, so the unclipped point was kept.
+     */
+    u32 muzzle_clipped;
+    u32 muzzle_unplaced;
 } q2_sim_proj_stats;
 
 extern q2_sim_proj_stats q2_sim_proj_scan;

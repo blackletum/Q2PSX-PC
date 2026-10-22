@@ -649,6 +649,10 @@ static void test_scene_lights(void)
         s32 wa[2] = { 0, 0 }, wb[2] = { 0, 0 };
         q2_rng ra, rb;
 
+        /* q2_lb_light pads a byte after `rgb`, which nothing writes; the
+         * memcmp below compares it, so it must start equal in both. */
+        memset(a, 0, sizeof(a));
+        memset(b, 0, sizeof(b));
         q2_rng_seed(&ra, 7);
         q2_rng_seed(&rb, 7);
         for (f = 0; f < 20; f++) {
@@ -1702,6 +1706,102 @@ static void test_piston_oscillator(void)
 
 /* ------------------------------------------------------------------------- */
 /*
+ * A BUTTON is not a door. Its handler 0x80029C28 clicks amb_butn2 ONCE, when a
+ * positive-speed press reaches its stop; a negative-speed press arrives
+ * silently and every return is silent. The port ran it through the door's
+ * machine and clicked at the start of the press and again at the start of the
+ * return. The three cases are the disc's three buttons (`zonescript`).
+ */
+static void button_init(q2_mover *m, q2_mover_set *set, s16 speed, s16 target,
+                        u8 axis, u16 wait, s16 node)
+{
+    memset(m, 0, sizeof(*m));
+    m->prim          = Q2_UF_BUTTON;
+    m->is_button     = 1;
+    m->speed         = speed;
+    m->target        = target;
+    m->axis          = axis;
+    m->wait_timer    = wait;
+    m->wait_reset    = wait;
+    m->node[0]       = node;
+    m->part_count    = node >= 0 ? 1 : 0;
+    m->partner       = -1;
+    m->portal_node   = -1;
+    m->sound_pending = Q2_MVSND_NONE;
+    set->movers   = m;
+    set->count    = 1;
+    set->capacity = 1;
+}
+
+static void test_button_handler(void)
+{
+    q2_mover     m;
+    q2_mover_set set;
+    u32 i, clicks;
+    s32 d[3];
+
+    printf("button handler\n");
+
+    /* BASE2 zone 2: travel 0 on Y, inverted, a one-second wait. */
+    button_init(&m, &set, 1, 0, 1, 300, 278);
+    q2_movers_tick(&set, 10, 0);
+    check_eq_i(q2_mover_take_sound(&set, 0), Q2_MVSND_NONE,
+               "an unpressed button is silent");
+    q2_mover_trigger(&set, 0);
+    check_eq_i(m.state, Q2_BTN_PRESSING, "the exec starts the press");
+    q2_movers_tick(&set, 10, 0);
+    check_eq_i(q2_mover_take_sound(&set, 0), Q2_MVSND_BUTTON,
+               "a zero travel arrives on the first tick, and clicks");
+    check_eq_i(m.state, Q2_BTN_PRESSED, "and is pressed");
+    q2_mover_trigger(&set, 0);
+    check_eq_i(m.state, Q2_BTN_PRESSED, "a press while pressed does nothing");
+    for (clicks = 0, i = 0; i < 40; i++) {
+        q2_movers_tick(&set, 10, 0);
+        if (q2_mover_take_sound(&set, 0) != Q2_MVSND_NONE)
+            clicks++;
+    }
+    check_eq_i(clicks, 0, "the wait and the return are silent");
+    check_eq_i(m.state, Q2_BTN_REST, "and it comes back to rest");
+
+    /* A positive travel moves on its own axis and clicks at the stop. */
+    button_init(&m, &set, 1, 60, 0, 0, 5);
+    q2_mover_trigger(&set, 0);
+    for (clicks = 0, i = 0; i < 10; i++) {
+        q2_movers_tick(&set, 10, 0);
+        if (q2_mover_take_sound(&set, 0) == Q2_MVSND_BUTTON) {
+            clicks++;
+            check_eq_i(i, 6, "the click is the tick that would pass 60");
+        }
+    }
+    check_eq_i(clicks, 1, "one click per press");
+    q2_mover_displacement(&m, d);
+    check(d[0] == 60 && d[1] == 0 && d[2] == 0, "60 along X, its own axis");
+    check_eq_i(m.state, Q2_BTN_PRESSED, "a zero wait holds it pressed");
+
+    /* JAIL2 zone 2: travel -60 on Z, inverted. The negative speed's stop is
+     * minus the target, +60, and it reaches it on the first tick, silently. */
+    button_init(&m, &set, -1, -60, 2, (u16)((65535u * 300u) & 0xFFFFu), 96);
+    q2_mover_trigger(&set, 0);
+    q2_movers_tick(&set, 10, 0);
+    check_eq_i(m.offset, 60, "JAIL2's button snaps to +60");
+    check_eq_i(m.state, Q2_BTN_PRESSED, "pressed");
+    check_eq_i(q2_mover_take_sound(&set, 0), Q2_MVSND_NONE,
+               "without a click: the negative arm has none");
+    q2_movers_tick(&set, 10, 0);
+    check_eq_i(m.wait_timer, 65236 - 10,
+               "the wrapped wait is a long one, not an expired one");
+    check_eq_i(m.offset, 60, "and it stays pressed through it");
+
+    /* JAIL4: no object in any zone, so the exec returns at once. */
+    button_init(&m, &set, 1, 0, 1, 300, -1);
+    q2_mover_trigger(&set, 0);
+    q2_movers_tick(&set, 10, 0);
+    check_eq_i(m.state, Q2_BTN_REST, "an objectless button is never pressed");
+    check_eq_i(q2_mover_take_sound(&set, 0), Q2_MVSND_NONE, "nor clicks");
+}
+
+/* ------------------------------------------------------------------------- */
+/*
  * PSXTELEPORT_T (0x8002E3F0), the half of the TELEPORT binding record this port
  * never ran — so DrawTelePorts had an empty list and every pad on the four
  * deathmatch maps was bare geometry.
@@ -2743,8 +2843,8 @@ static void test_muzzle_flash_reaches_the_light_world(void)
     }
 
     /*
-     * The machinegun keeps the AddLight path: one frame, and both radii from a
-     * single rand() draw rather than a fixed pair. `ticks == 0` is what tells
+     * The machinegun keeps the AddLight path: one frame, and its radii from
+     * two rand() draws rather than a fixed pair. `ticks == 0` is what tells
      * the light world which of the two engine calls this was.
      */
     fire_once(&sim, Q2_WID_MACHINEGUN, Q2_AMMO_BULLETS);
@@ -2755,12 +2855,68 @@ static void test_muzzle_flash_reaches_the_light_world(void)
         check(e->radius >= Q2_MUZZLE_OUTER_BASE &&
               e->radius <= Q2_MUZZLE_OUTER_BASE + Q2_MUZZLE_OUTER_SCALE,
               "with a rand-drawn outer radius in the console's band");
+        check(e->inner_radius >= Q2_MUZZLE_INNER_BASE &&
+              e->inner_radius < Q2_MUZZLE_INNER_BASE + Q2_MUZZLE_INNER_SCALE,
+              "and an inner one in its own");
     }
 
     /* And a weapon with no flash raises nothing, which is most of them. */
     fire_once(&sim, Q2_WID_BLASTER, Q2_AMMO_CELLS);
     check_eq_i(count_light_events(&sim, NULL), 0,
                "the blaster's own bolt is a projectile, not a muzzle flash");
+}
+
+/*
+ * Which kick fields a shot writes. The shotgun stores pitch alone and re-arms
+ * the deadline (0x8004C250..0x8004C25C), so a machinegun burst's yaw and roll
+ * are re-applied under it; the hyperblaster stores nothing and arms nothing.
+ */
+static void test_kick_fields(void)
+{
+    q2_sim sim;
+    s32 spawn[3] = { 0, 0, 0 };
+    q2_player *p;
+    s16 yaw, roll;
+    s32 deadline;
+
+    printf("kick fields\n");
+
+    q2_sim_init(&sim, NULL, 30);
+    q2_sim_spawn(&sim, spawn, 0);
+    p = &sim.player[sim.cur_player];
+    q2_sim_give_weapon(&sim, Q2_WID_MACHINEGUN);
+    q2_sim_give_weapon(&sim, Q2_WID_SHOTGUN);
+    q2_sim_give_weapon(&sim, Q2_WID_HYPERBLASTER);
+    sim.combat.inv.ammo[Q2_AMMO_BULLETS] = 50;
+    sim.combat.inv.ammo[Q2_AMMO_SHELLS]  = 50;
+    sim.combat.inv.ammo[Q2_AMMO_CELLS]   = 50;
+
+    /* Seeded so the burst's yaw and roll are not both zero. */
+    do {
+        sim.combat.weapon_id = Q2_WID_MACHINEGUN;
+        check(q2_sim_fire(&sim).fired, "the machinegun fires");
+    } while (p->kick[1] == 0 && p->kick[2] == 0 &&
+             sim.combat.inv.ammo[Q2_AMMO_BULLETS] > 0);
+    yaw  = p->kick[1];
+    roll = p->kick[2];
+    check_eq_i(p->kick_time, sim.level_time + Q2_VIEW_KICK_FIRE,
+               "a machinegun shot arms the 30-tick deadline");
+
+    sim.level_time += 7;
+    sim.combat.weapon_id = Q2_WID_SHOTGUN;
+    check(q2_sim_fire(&sim).fired, "the shotgun fires");
+    check_eq_i(p->kick[0], -22, "the shotgun writes its pitch");
+    check_eq_i(p->kick[1], yaw,  "and leaves the burst's yaw");
+    check_eq_i(p->kick[2], roll, "and its roll");
+    check_eq_i(p->kick_time, sim.level_time + Q2_VIEW_KICK_FIRE,
+               "and re-arms the deadline over them");
+
+    deadline = p->kick_time;
+    sim.level_time += 7;
+    sim.combat.weapon_id = Q2_WID_HYPERBLASTER;
+    check(q2_sim_fire(&sim).fired, "the hyperblaster fires");
+    check_eq_i(p->kick[0], -22, "the hyperblaster writes no kick");
+    check_eq_i(p->kick_time, deadline, "and leaves the deadline running");
 }
 
 /*
@@ -3836,6 +3992,62 @@ static bool two_room_hull(q2_collision *out, u8 area_a, u8 area_b)
     zf.chunk[Q2_ZONE_SECONDARY_COL] = &chunk;
 
     return q2_collision_parse(out, &zf, Q2_COLL_SECONDARY) == Q2_OK;
+}
+
+/*
+ * THE MUZZLE IS CLIPPED BEFORE THE SHOT LEAVES IT — Find3dSpaceGivenSecondary
+ * at 0x8004C890, the machinegun's. A player in room A facing the wall at
+ * x = 1000 has a muzzle 250 in front of the eye, inside the wall; the shot is
+ * built from where a move from the origin to that point stops, the wall's
+ * near face. Facing away, nothing is clipped, and the BFG has no such call.
+ */
+static void test_muzzle_clip(void)
+{
+    q2_sim sim;
+    const s32 feet[3] = { 860, 300 + Q2_EYE_BASE, 500 };
+    q2_fire_result_v2 r;
+
+    printf("muzzle clip\n");
+
+    q2_sim_init(&sim, NULL, 50);
+    check(two_room_hull(&sim.coll_primary, 1, 2), "the two-room hull parses");
+    sim.coll_primary_ready = true;
+    q2_sim_give_weapon(&sim, Q2_WID_MACHINEGUN);
+    q2_sim_give_weapon(&sim, Q2_WID_BFG);
+    sim.combat.inv.ammo[Q2_AMMO_BULLETS] = 50;
+    sim.combat.inv.ammo[Q2_AMMO_CELLS]   = 200;
+
+    memset(&q2_sim_proj_scan, 0, sizeof(q2_sim_proj_scan));
+    q2_sim_spawn(&sim, feet, 1024);                 /* facing +X, the wall */
+    sim.combat.weapon_id = Q2_WID_MACHINEGUN;
+    r = q2_sim_fire(&sim);
+    check(r.fired, "the machinegun fires at the wall");
+    check_eq_i(r.shot[0].origin[0], ROOM_A_X1,
+               "from the wall's near face, not from inside it");
+    check_eq_i(q2_sim_proj_scan.muzzle_clipped, 1, "and the clip is counted");
+
+    memset(&q2_sim_proj_scan, 0, sizeof(q2_sim_proj_scan));
+    q2_sim_spawn(&sim, feet, 3072);                 /* facing -X, open room */
+    r = q2_sim_fire(&sim);
+    check(r.shot[0].origin[0] < feet[0] - 200,
+          "facing into the room the muzzle stands where it was formed");
+    check_eq_i(q2_sim_proj_scan.muzzle_clipped, 0, "unclipped");
+
+    memset(&q2_sim_proj_scan, 0, sizeof(q2_sim_proj_scan));
+    q2_sim_spawn(&sim, feet, 1024);
+    sim.combat.weapon_id = Q2_WID_BFG;
+    r = q2_sim_fire(&sim);
+    check(r.fired, "the BFG fires at the wall");
+    check_eq_i(q2_sim_proj_scan.muzzle_clipped, 0,
+               "AnyoneFireBFG has no clip, so neither does the port");
+
+    memset(&q2_sim_proj_scan, 0, sizeof(q2_sim_proj_scan));
+    q2_sim_spawn(&sim, (const s32[3]){ 1100, 300 + Q2_EYE_BASE, 500 }, 1024);
+    sim.combat.weapon_id = Q2_WID_MACHINEGUN;
+    r = q2_sim_fire(&sim);
+    check_eq_i(q2_sim_proj_scan.muzzle_unplaced, 1,
+               "a shooter in no cell keeps the unclipped point");
+    q2_sim_free(&sim);
 }
 
 /* One grenade whose fuse has already run out at `at`, stepped once by the
@@ -5283,6 +5495,8 @@ int main(void)
     test_pickup_switches_weapon();
     test_session_reaches_the_shot();
     test_muzzle_flash_reaches_the_light_world();
+    test_kick_fields();
+    test_muzzle_clip();
     test_held_hand_grenade();
     test_tick_rate();
     test_gravity();
@@ -5298,6 +5512,7 @@ int main(void)
     test_fall_damage();
     test_piston_decode();
     test_piston_oscillator();
+    test_button_handler();
     test_teleport_registration();
     test_cagelift_timers();
     test_crate_conveyor();

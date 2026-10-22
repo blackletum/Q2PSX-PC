@@ -761,6 +761,50 @@ static void test_machinegun_accumulator_resets(void)
     CHECK(vw.frame == 0, "held on key 2 wraps to key 0, got %u", vw.frame);
 }
 
+/*
+ * The arm's answer to a dry shot, 0x8004FFF4: the machinegun goes straight to
+ * IDLE, ending the burst loop it would otherwise hold for as long as the
+ * trigger is down, and the quad's sound waits for a shot that fired
+ * (0x80050004). The chaingun and the hyperblaster raise the latch instead
+ * (0x80050230, 0x800502FC).
+ */
+static void test_dry_frame_fire(void)
+{
+    q2_viewweapon vw;
+    u32 got;
+
+    park_in_fire(&vw, 4, 0);
+    vw.quad_active = true;
+    vw.quad_sound  = false;
+    q2_vw_advance(&vw, 30, true, Q2_VW_FIRE_NONE);
+    got = q2_vw_take_frame_fires(&vw);
+    CHECK(got == 1, "a held machinegun asks for its round, got %u", got);
+    CHECK(!vw.quad_sound, "the quad's sound is not raised by the ask");
+    q2_vw_frame_fire_result(&vw, false);
+    CHECK(vw.quad_sound, "but by the round that fired");
+    CHECK(vw.state == Q2_VM_FIRE, "a round that fired keeps the burst going");
+
+    vw.quad_sound = false;
+    q2_vw_advance(&vw, 30, true, Q2_VW_FIRE_NONE);
+    (void)q2_vw_take_frame_fires(&vw);
+    q2_vw_frame_fire_result(&vw, true);
+    CHECK(vw.state == Q2_VM_IDLE,
+          "an empty machinegun drops to IDLE mid-burst, state %d",
+          (int)vw.state);
+    CHECK(!vw.quad_sound, "and a dry round brings no quad sound");
+    CHECK(vw.spin_accum == 0, "with the accumulator cleared");
+    CHECK(!vw.fire_latch, "and no latch: the idle pass asks again");
+
+    park_in_fire(&vw, 5, 12);
+    q2_vw_frame_fire_result(&vw, true);
+    CHECK(vw.fire_latch, "a dry chaingun raises the latch");
+    CHECK(vw.state == Q2_VM_FIRE, "and plays its loop out");
+
+    park_in_fire(&vw, 9, 3);
+    q2_vw_frame_fire_result(&vw, true);
+    CHECK(vw.fire_latch, "so does a dry hyperblaster");
+}
+
 /* 0x80050298 and 0x800502C8: frames 1..5 are the loop and frame 6 is the tail,
  * which the loop must not fire on. */
 static void test_hyperblaster_loop(void)
@@ -1128,6 +1172,7 @@ int main(void)
     test_chaingun_bands();
     test_chaingun_loop_and_spin_down();
     test_machinegun_accumulator_resets();
+    test_dry_frame_fire();
     test_hyperblaster_loop();
     test_grenade_cook_waits_for_the_arm();
     test_rotmatrix_order();

@@ -578,7 +578,7 @@ typedef enum q2_cre_op {
  *     +0x120 0x8005A778  spawn_explosion
  *     +0x124 0x8008A108  swap_stack_pointer
  *     +0x128 0x800B28D4  DATA: the saved stack pointer for +0x124
- *     +0x12C 0x80040800  player_proximity_effect
+ *     +0x12C 0x80040800  SetShockData — pad rumble, shock.h
  *
  * ---------------------------------------------------------------------------
  * Three things the full read settled that a partial one could not

@@ -479,8 +479,9 @@ bool q2_light_muzzle_preset(u8 weapon_id, q2_muzzle_light *out)
     case Q2_WID_CHAINGUN:
         /*
          * 0x8004C744 and 0x8004CA9C. One frame through AddLight, and the radii
-         * are a single rand() draw away — q2_weapon_muzzle_light computes them,
-         * so this record carries no numbers, only the fact that it must.
+         * are two rand() draws away, with a different scale and base for each
+         * weapon — q2_weapon_muzzle_light computes them, so this record carries
+         * no numbers, only the fact that it must.
          */
         m.ticks         = 0;
         m.origin_offset = 0x54;

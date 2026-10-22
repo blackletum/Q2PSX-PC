@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "combat.h"
+#include "shock.h"
 #include "trig.h"
 
 /* ------------------------------------------------------------------------- */
@@ -52,61 +53,69 @@
  * the port's, because the port asks the fire function every tick and the
  * console asks it once per pass.
  */
+/*
+ * The two columns after `kick_random` are which kick fields the function
+ * stores (weapon.h, "View kick") and the id it hands SetShockData (shock.h).
+ */
 const q2_weapon_behaviour q2_weapon_behaviour_table[Q2_WT_SLOTS] = {
     /* 0 — no weapon. 0x8004EB08 is `jr ra; nop`. */
-    { Q2_FK_NONE, 0, 0, 0, {{0,0,0}}, 0, false, 0, 0, 0x8004EB08u },
+    { Q2_FK_NONE, 0, 0, 0, {{0,0,0}}, 0, false, 0, 0, 0, Q2_SHOCK_NONE,
+      0x8004EB08u },
 
     /* 1 blaster — a bolt entity, no ammo, no scatter. Mod 6 is the sixth
      * argument its call site passes to the spawner (0x8004C124). */
-    { Q2_FK_BOLT, 8, 32, 1, {{0,0,0}}, -11, false, 0,
-      Q2_MOD_BOLT, 0x8004BFBCu },
+    { Q2_FK_BOLT, 8, 32, 1, {{0,0,0}}, -11, false, Q2_KICK_PITCH, 0,
+      Q2_MOD_BOLT, Q2_SHOCK_BLASTER, 0x8004BFBCu },
 
     /* 2 shotgun — five pellets, +-1024 on every axis. */
-    { Q2_FK_BULLET, 6, 24, 5, {{4,4,4}}, -22, false, 0,
-      Q2_MOD_BULLET, 0x8004C1C0u },
+    { Q2_FK_BULLET, 6, 24, 5, {{4,4,4}}, -22, false, Q2_KICK_PITCH, 0,
+      Q2_MOD_BULLET, Q2_SHOCK_SHOTGUN, 0x8004C1C0u },
 
     /* 3 super shotgun — ten pellets, +-2048 across and +-1024 otherwise.
      * 0x8004C5F0 shifts by 3 where 0x8004C60C and 0x8004C634 shift by 4. */
-    { Q2_FK_BULLET, 8, 32, 10, {{3,4,4}}, -22, false, 0,
-      Q2_MOD_BULLET, 0x8004C488u },
+    { Q2_FK_BULLET, 8, 32, 10, {{3,4,4}}, -22, false, Q2_KICK_PITCH, 0,
+      Q2_MOD_BULLET, Q2_SHOCK_SSHOTGUN, 0x8004C488u },
 
-    /* 4 machinegun — one bullet, +-512, random kick. */
-    { Q2_FK_BULLET, 8, 32, 1, {{5,5,5}}, 0, true, 0,
-      Q2_MOD_BULLET, 0x8004C744u },
+    /* 4 machinegun — one bullet, +-512, a random kick on all three axes. */
+    { Q2_FK_BULLET, 8, 32, 1, {{5,5,5}}, 0, true, Q2_KICK_ALL, 0,
+      Q2_MOD_BULLET, Q2_SHOCK_MACHINEGUN, 0x8004C744u },
 
     /* 5 chaingun — as the machinegun, but the pellet count comes from the
-     * spin state the caller passes in. */
-    { Q2_FK_BULLET, 8, 32, 0, {{5,5,5}}, 0, true, 0,
-      Q2_MOD_BULLET, 0x8004CA9Cu },
+     * spin state the caller passes in, and the random kick is yaw and roll
+     * only. */
+    { Q2_FK_BULLET, 8, 32, 0, {{5,5,5}}, 0, true,
+      Q2_KICK_YAW | Q2_KICK_ROLL, 0,
+      Q2_MOD_BULLET, Q2_SHOCK_CHAINGUN, 0x8004CA9Cu },
 
-    /* 6 hand grenade. */
-    { Q2_FK_HAND_GRENADE, 120, 480, 1, {{0,0,0}}, 0, false, 0,
-      Q2_MOD_GRENADE, 0x8004EBDCu },
+    /* 6 hand grenade — the shock is the PRIME (7); the throw's (8) belongs to
+     * the held entity's release at 0x8004A52C. */
+    { Q2_FK_HAND_GRENADE, 120, 480, 1, {{0,0,0}}, 0, false, 0, 0,
+      Q2_MOD_GRENADE, Q2_SHOCK_GRENADE_OPEN, 0x8004EBDCu },
 
     /* 7 grenade launcher. */
-    { Q2_FK_GRENADE, 120, 480, 1, {{0,0,0}}, -11, false, 0,
-      Q2_MOD_GRENADE, 0x8004CE18u },
+    { Q2_FK_GRENADE, 120, 480, 1, {{0,0,0}}, -11, false, Q2_KICK_PITCH, 0,
+      Q2_MOD_GRENADE, Q2_SHOCK_GRENADEL, 0x8004CE18u },
 
     /* 8 rocket launcher — damage is 100 + rand() % 20, quad shifts it left
      * by two rather than picking a second immediate. */
-    { Q2_FK_ROCKET, 0, 0, 1, {{0,0,0}}, -11, false, 0,
-      Q2_MOD_ROCKET, 0x8004D038u },
+    { Q2_FK_ROCKET, 0, 0, 1, {{0,0,0}}, -11, false, Q2_KICK_PITCH, 0,
+      Q2_MOD_ROCKET, Q2_SHOCK_ROCKETL, 0x8004D038u },
 
     /* 9 hyperblaster — no kick, no refire gate of its own. Mod 5, from its
      * call site's sixth argument (0x8004D3F0). */
-    { Q2_FK_BOLT, 20, 80, 1, {{0,0,0}}, 0, false, 0,
-      Q2_MOD_BOLT_HYPER, 0x8004D250u },
+    { Q2_FK_BOLT, 20, 80, 1, {{0,0,0}}, 0, false, 0, 0,
+      Q2_MOD_BOLT_HYPER, Q2_SHOCK_HYPERBLASTER, 0x8004D250u },
 
     /* 10 railgun — 100, or 150 in deathmatch; quad shifts left by two. */
-    { Q2_FK_RAIL, 0, 0, 1, {{0,0,0}}, -34, false, 0,
-      Q2_MOD_RAIL, 0x8004D498u },
+    { Q2_FK_RAIL, 0, 0, 1, {{0,0,0}}, -34, false, Q2_KICK_PITCH, 0,
+      Q2_MOD_RAIL, Q2_SHOCK_RAILGUN, 0x8004D498u },
 
     /* 11 BFG — fifty cells a shot, the most expensive in the game. */
-    { Q2_FK_BFG, 200, 800, 1, {{0,0,0}}, 0, false, 0,
-      Q2_MOD_ENERGY_BOLT, 0x8004EB10u },
+    { Q2_FK_BFG, 200, 800, 1, {{0,0,0}}, 0, false, 0, 0,
+      Q2_MOD_ENERGY_BOLT, Q2_SHOCK_BFG, 0x8004EB10u },
 
     /* 12 — the phantom slot the cycle scan walks into. */
-    { Q2_FK_NONE, 0, 0, 0, {{0,0,0}}, 0, false, 0, 0, 0 }
+    { Q2_FK_NONE, 0, 0, 0, {{0,0,0}}, 0, false, 0, 0, 0, Q2_SHOCK_NONE, 0 }
 };
 
 /* ------------------------------------------------------------------------- */
@@ -133,14 +142,19 @@ bool q2_weapon_has_muzzle_light(u8 weapon_id)
     return weapon_id == Q2_WID_MACHINEGUN || weapon_id == Q2_WID_CHAINGUN;
 }
 
-void q2_weapon_muzzle_light(s32 rand_0_32767, s32 *inner, s32 *outer)
+void q2_weapon_muzzle_light(u8 weapon_id, s32 rand_a, s32 rand_b,
+                            s32 *inner, s32 *outer)
 {
+    bool cg = weapon_id == Q2_WID_CHAINGUN;
+
     if (inner)
-        *inner = ((rand_0_32767 * Q2_MUZZLE_INNER_SCALE) >> 15)
-                 + Q2_MUZZLE_INNER_BASE;
+        *inner = ((rand_a * (cg ? Q2_CG_MUZZLE_INNER_SCALE
+                                : Q2_MUZZLE_INNER_SCALE)) >> 15)
+                 + (cg ? Q2_CG_MUZZLE_INNER_BASE : Q2_MUZZLE_INNER_BASE);
     if (outer)
-        *outer = ((rand_0_32767 * Q2_MUZZLE_OUTER_SCALE) >> 15)
-                 + Q2_MUZZLE_OUTER_BASE;
+        *outer = ((rand_b * (cg ? Q2_CG_MUZZLE_OUTER_SCALE
+                                : Q2_MUZZLE_OUTER_SCALE)) >> 15)
+                 + (cg ? Q2_CG_MUZZLE_OUTER_BASE : Q2_MUZZLE_OUTER_BASE);
 }
 
 s32 q2_rng_next(q2_rng *r)
@@ -435,8 +449,14 @@ q2_fire_result_v2 q2_weapon_fire(q2_inventory *inv, q2_rng *rng,
     q2_weapon_muzzle_origin(tab->muzzle[weapon_id], eye, yaw, pitch, roll,
                             origin);
 
-    /* View kick. */
-    if (w->kick_random) {
+    /* View kick, and which of its fields this weapon stores at all. */
+    res.kick_axes = w->kick_axes;
+    if (weapon_id == Q2_WID_CHAINGUN) {
+        /* 0x8004CB1C..0x8004CB58: two draws, both shifted by 11, into yaw and
+         * roll. Pitch is not drawn and not written. */
+        res.kick[1] = kick_draw(rng, 11);
+        res.kick[2] = kick_draw(rng, 11);
+    } else if (w->kick_random) {
         /* 0x8004C7C0..0x8004C804: three draws, shifts 11, 12, 12. */
         res.kick[0] = kick_draw(rng, 11);
         res.kick[1] = kick_draw(rng, 12);
@@ -444,6 +464,15 @@ q2_fire_result_v2 q2_weapon_fire(q2_inventory *inv, q2_rng *rng,
     } else {
         res.kick[0] = w->kick_pitch;
     }
+
+    /*
+     * The pad's half of the kick. Every fire function asks once per call, at
+     * the end; the chaingun only when its spin fired something (0x8004CCD0
+     * `beq` on the bullet count skips the sound and the shock together).
+     */
+    res.shock = w->shock;
+    if (weapon_id == Q2_WID_CHAINGUN && chaingun_bullets <= 0)
+        res.shock = Q2_SHOCK_NONE;
 
     /* Damage. */
     switch (weapon_id) {

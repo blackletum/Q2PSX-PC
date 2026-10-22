@@ -78,6 +78,8 @@ add_library(q2psx_game STATIC
     save.c
     save.h
     saveui.c
+    shock.c
+    shock.h
     saveui.h
     pad.c
     pad.h

@@ -20,7 +20,8 @@ change; see [`docs/RELEASING.md`](docs/RELEASING.md).
 ## [Unreleased]
 
 ### Reconstruction
-- _Nothing yet._
+- **The machinegun's recoil reaches the pad.** Every player fire function ends with `SetShockData(player, id, 4096, NULL)` (`0x80040800`) — the machinegun's at `0x8004CA6C` with pattern 5 — and this port had read that call as an SPU emitter and played nothing. MAIN.SYM names it SetShockData, the slots it fills are four per player at GameWindows+732, and their only reader, ProcessShockData (`0x80040B28`), runs once a field from the VBlank ISR and hands PadSetAct two bytes. Both are here (`src/game/shock.c`), with the sixteen patterns at `0x8009D420` transcribed point for point, and SDL drives the pad's two motors from them while VIBRATION is on (`--vibration` turns it on from the command line; it defaults off, as on the console). A machinegun shot is a 16-tick buzz of the big motor at 1536/4096 and an 8-tick burst of the small one: three fields of 95/255 and two of on, which is what a 300-frame BASE1 run reports for 91 shots (276 and 183 fields). Every other weapon's pattern is wired the same way, the chaingun's only when its spin fired, the hand grenade's on the prime and again on the throw (`0x8004A52C`); the train's two calls (`0x8002C778`, `0x8002C8D8`) rumble every pad within 4096 of it, full inside 2048.
+- **A BUTTON runs its own handler.** `0x80029C28` is not the door's machine: it has no delay and no blocked state, clicks `amb_butn2` once when a positive-speed press reaches its stop (`0x80029E18`), arrives silently on a negative-speed press and returns silently, and never returns at all with a zero wait. The port ran buttons through the door's seven states with every door sound mapped to the click, so a press clicked when it started and again when it came back. The exec's own arithmetic is read too: the sign of `travel` is the speed and the target is its magnitude (`0x8002E118`), the axis is the low two bits of the item's +4 byte (`0x80029F94`) — the same byte the exec tests to negate the target — and a button whose object slot is -1 does nothing (`0x8002E0D0`). JAIL2's console button now slides 60 into its console on Z, silently, where it rose 60 on Y and clicked twice; BASE2's clicks once a press; JAIL4's names no object and is inert.
 
 ### Client
 - _Nothing yet._
@@ -29,16 +30,20 @@ change; see [`docs/RELEASING.md`](docs/RELEASING.md).
 - _Nothing yet._
 
 ### Tools
-- _Nothing yet._
+- `q2psx-inspect zonescript` lists each zone's BUTTON operands — axis, the target-negating byte, travel, wait and object.
 
 ### Fixes
-- _Nothing yet._
+- The machinegun's muzzle flash takes two `rand()` draws, one per radius (`0x8004C970`, `0x8004C990`), not one shared draw; and the chaingun's is bigger than the machinegun's — 350..549 and 900..1199 (`0x8004CD48`..`0x8004CD94`) — where the two had shared 250..349 and 700..899.
+- A shot writes only the kick fields its fire function stores: pitch for the blaster, shotguns, launchers and railgun, all three for the machinegun, yaw and roll for the chaingun (two draws, both `>>> 11`), and none — with the 30-tick deadline left running — for the hyperblaster, the BFG and the hand grenade.
+- The muzzle is pulled back into the room before a shot leaves it. Every fire function except the BFG's and the hand grenade's moves from the shooter's origin to the muzzle through PrimaryColl (Find3dSpaceGivenSecondary, `0x80055054`) and builds the shot from where that stops; the port used the unclipped point, which aiming up under a low ceiling put on the far side of it.
+- An empty machinegun leaves its burst loop. A dry return from the frame driver's call sets the view model to IDLE on the spot (`0x8004FFF4`), so the idle pass that switches weapon is reached; the port held the loop for as long as the trigger was down, clicking dry. The chaingun and hyperblaster raise the dry latch instead (`0x80050230`, `0x800502FC`), and the quad's sound follows only a round that fired.
+- A mover's sound comes from the centre of its object's own box, plus the live displacement except on a button — a cage lift's collision slabs had moved its sounds off-centre.
 
 ### Build and packaging
 - _Nothing yet._
 
 ### Documentation
-- _Nothing yet._
+- `0x80040800` is SetShockData, not an SPU voice emitter: corrected in `mover.h`, `combat.h`, `creature.h`, `docs/openquestions.md` and FORMATS.md, which gains §13.5a on the DualShock patterns and who asks for each.
 
 ## [0.2.0] - 2026-10-21
 

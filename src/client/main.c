@@ -160,6 +160,7 @@
 #include "sortdata.h"
 #include "pad.h"
 #include "gamepad.h"
+#include "shock.h"
 #include "sim.h"
 #include "statusbar.h"
 #include "trace.h"
@@ -1413,16 +1414,38 @@ typedef struct client {
     bool              movers_ready;
 
     /*
-     * The train's two extra voices, drained rather than played.
+     * The train's two RUMBLES — not voices, which this used to call them.
      *
-     * PLATFORM asks for id 13 while it moves and id 14 when it arrives, both
-     * through 0x80040800's numeric SPU-parameter table rather than through the
-     * bank (mover.h). There is nothing here that can play one, so the request
-     * is TAKEN and counted: a latch nobody clears would sit at 14 for the rest
-     * of the level and read as "the train is arriving" forever.
+     * PLATFORM asks SetShockData for ShockData_Explosion (13) while it moves
+     * and ShockData_Stomp (14) when it arrives (mover.h, shock.h). They are
+     * TAKEN every tick so the latch cannot stick, counted, and handed to every
+     * player's pad through the positional arm of `client_shock`.
      */
     u32               train_move_calls;
     u32               train_stop_calls;
+
+    /*
+     * THE DUALSHOCK — GameWindows[p]+732 and +764, one per player, and the
+     * field clock that drives ProcessShockData.
+     *
+     * The console runs ProcessShockData from the vertical-blank ISR, once a
+     * field, adding PalNtscRate to each slot's time. Here the sim's ticks are
+     * banked in `shock_clock` and spent a field (`dt_per_field`) at a time, so
+     * the patterns play at the console's rate whatever the host's frame rate.
+     * `shock_out` is the last field's pair of motor bytes — little, then big,
+     * as PadSetAct takes them — and `shock_sent` what the pad was last told,
+     * so an unchanged pair is not re-sent every frame.
+     */
+    q2_shock          shock[Q2_SIM_MAX_PLAYERS];
+    s32               shock_clock;
+    u8                shock_out[Q2_SIM_MAX_PLAYERS][2];
+    u8                shock_sent[Q2_SIM_MAX_PLAYERS][2];
+    bool              shock_live;       /* the world ran this frame        */
+    u32               shock_requests;   /* SetShockData calls, all players */
+    u32               shock_taken;      /* ...that a slot accepted         */
+    u32               shock_fields;     /* ProcessShockData samples, p0    */
+    u32               shock_big_fields; /* ...with the big motor running   */
+    u32               shock_little_fields; /* ...and the little one on     */
     u32               mover_triggers;   /* items the script reached */
     u32               mover_moved;      /* ticks on which one moved */
     u32               conveyor_steps;   /* BASE0 DOCRATES object writes */
@@ -2822,9 +2845,11 @@ static void client_cre_fire(q2_monster *m, int flash, void *user)
             Q2_MUZZLE_LIGHT_R, Q2_MUZZLE_LIGHT_G, Q2_MUZZLE_LIGHT_B
         };
         s32 inner, outer;
+        s32 ra = q2_rng_next(&c->sim[0].combat.rng);
+        s32 rb = q2_rng_next(&c->sim[0].combat.rng);
 
-        q2_weapon_muzzle_light(q2_rng_next(&c->sim[0].combat.rng),
-                               &inner, &outer);
+        /* The machinegun's flash, which draws once per radius (weapon.h). */
+        q2_weapon_muzzle_light(Q2_WID_MACHINEGUN, ra, rb, &inner, &outer);
         q2_light_add_dynamic(&c->light_world, m->pos, muzzle_colour,
                              inner, outer, 0, 0);
     }
@@ -2928,9 +2953,10 @@ static void client_cre_shot(q2_monster *m, const q2_cre_shot *shot, void *user)
         static const u8 flash[3] = { Q2_MUZZLE_LIGHT_R, Q2_MUZZLE_LIGHT_G,
                                      Q2_MUZZLE_LIGHT_B };
         s32 inner, outer;
+        s32 ra = q2_rng_next(&c->sim[0].combat.rng);
+        s32 rb = q2_rng_next(&c->sim[0].combat.rng);
 
-        q2_weapon_muzzle_light(q2_rng_next(&c->sim[0].combat.rng),
-                               &inner, &outer);
+        q2_weapon_muzzle_light(Q2_WID_MACHINEGUN, ra, rb, &inner, &outer);
         q2_light_add_dynamic(&c->light_world, m->pos, flash, inner, outer, 0, 0);
     }
 
@@ -5620,6 +5646,15 @@ static bool client_load_zone(client *c, const char *map, int index)
      * holds it. First statement of the load for that reason.
      */
     client_zone_stash(c);
+
+    /* KillDualShocks (0x800411F0), which OnLeavingZone calls at 0x80078D24:
+     * every pattern slot freed, the little motor's accumulator left. */
+    {
+        int p;
+
+        for (p = 0; p < Q2_SIM_MAX_PLAYERS; p++)
+            q2_shock_kill(&c->shock[p]);
+    }
 
     /*
      * LevelChange (0x800AEBD0), bumped at 0x80018C4C by ProcessGame — the
@@ -8618,6 +8653,138 @@ static const q2_monster *client_watch_pick(client *c, const s32 eye[3],
     return best;
 }
 
+/* ------------------------------------------------------------------------- */
+/* The DualShock — SetShockData, ProcessShockData and PadSetAct               */
+/* ------------------------------------------------------------------------- */
+
+/* MaxWindows (0x800B2C2C): one window per player in this level. */
+static int client_shock_windows(const client *c)
+{
+    int n = c->mp_enabled ? c->mp.player_count : 1;
+
+    return n < 1 ? 1 : (n > Q2_SIM_MAX_PLAYERS ? Q2_SIM_MAX_PLAYERS : n);
+}
+
+/*
+ * SetShockData (0x80040800). `player` is a window, or Q2_SHOCK_ALL_PLAYERS
+ * for every one — the train's call. `pos` NULL is a request that is not
+ * positional, which is every weapon's; otherwise each window measures from
+ * its own view position (GameWindows+0), which here is that player's eye.
+ */
+static void client_shock(client *c, int player, int id, s32 strength,
+                         const s32 pos[3], s16 near_r, s16 far_r)
+{
+    int p, first = player, last = player;
+
+    if (player == Q2_SHOCK_ALL_PLAYERS) {
+        first = 0;
+        last  = client_shock_windows(c) - 1;
+    }
+
+    for (p = first; p <= last; p++) {
+        s32 ear[3];
+
+        if (p < 0 || p >= Q2_SIM_MAX_PLAYERS)
+            continue;
+        c->shock_requests++;
+        if (pos)
+            q2_sim_player_eye(&c->sim[0], p, ear);
+        if (q2_shock_set(&c->shock[p], id, strength, pos, pos ? ear : NULL,
+                         near_r, far_r))
+            c->shock_taken++;
+    }
+}
+
+/* What PadSetAct sends, as SDL's two motors: the big one is the low-frequency
+ * weight, the little on/off one the high-frequency. The duration is a dead
+ * man's handle — renewed every tick while the motors run, so a host that
+ * stops calling cannot leave a pad buzzing. */
+#define Q2_SHOCK_HOLD_MS 120u
+
+static void client_shock_send(client *c, int p)
+{
+    SDL_Gamepad *pad = (p >= 0 && p < Q2_SIM_MAX_PLAYERS)
+                     ? c->gamepads.device[p] : NULL;
+    u8 little = c->shock_out[p][0], big = c->shock_out[p][1];
+
+    if (!pad)
+        return;
+    if (!little && !big && !c->shock_sent[p][0] && !c->shock_sent[p][1])
+        return;
+
+    SDL_RumbleGamepad(pad, (Uint16)(big * 257u), little ? 0xFFFFu : 0u,
+                      (little || big) ? Q2_SHOCK_HOLD_MS : 0u);
+    c->shock_sent[p][0] = little;
+    c->shock_sent[p][1] = big;
+}
+
+/*
+ * PadDualShock (0x80031728) for every window, once per field of sim time.
+ *
+ * Its gates, in its order: nothing is processed while Paused or in self-play
+ * (the port reaches here only when the world is running, so both hold), nor
+ * with that player's VIBRATION off (Engine+728 + 34*player, 0x8003179C) — the
+ * slots freeze rather than play out. Then ProcessShockData, which silences a
+ * dead window itself; and with three or more players in a multiplayer level
+ * the odd and even pads take alternate frames (0x800317B4..0x80031808), which
+ * reads the game's frame counter and so takes the host's here.
+ */
+static void client_shock_tick(client *c, s32 ticks)
+{
+    s32 field = c->sim[0].dt_per_field > 0 ? c->sim[0].dt_per_field : 6;
+    int n = client_shock_windows(c), p;
+
+    c->shock_clock += ticks;
+
+    while (c->shock_clock >= field) {
+        c->shock_clock -= field;
+
+        for (p = 0; p < n; p++) {
+            u8 out[2] = { 0, 0 };
+
+            if (c->settings.v[Q2_SET_VIBRATION]) {
+                const bool local = (p == c->sim[0].cur_player);
+                const s16 health = local ? c->sim[0].combat.inv.health
+                                         : c->sim[0].pcombat[p].inv.health;
+
+                q2_shock_process(&c->shock[p], field, health > 0, out);
+                if (n >= 3 && c->mp_enabled &&
+                    (c->frame_index & 1) != (p & 1))
+                    out[0] = out[1] = 0;
+            }
+
+            /* PadSetAct's order: act[0] the little motor, act[1] the big. */
+            c->shock_out[p][0] = out[1];
+            c->shock_out[p][1] = out[0];
+
+            if (p == 0) {
+                c->shock_fields++;
+                if (out[0]) c->shock_big_fields++;
+                if (out[1]) c->shock_little_fields++;
+                Q2_DEBUG("shock: field %u t%d big %u little %u",
+                         c->shock_fields, (int)c->sim[0].level_time,
+                         (unsigned)out[0], (unsigned)out[1]);
+            }
+        }
+    }
+
+    for (p = 0; p < n; p++)
+        client_shock_send(c, p);
+}
+
+/* A frame on which the world did not run — a menu, the pop-up, a board — has
+ * Paused set on the console, and PadDualShock zeroes the motors without
+ * touching the slots. */
+static void client_shock_hold(client *c)
+{
+    int p;
+
+    for (p = 0; p < Q2_SIM_MAX_PLAYERS; p++) {
+        c->shock_out[p][0] = c->shock_out[p][1] = 0;
+        client_shock_send(c, p);
+    }
+}
+
 /* Each view-weapon entity owns its animation, selection and shot cursors.
  * The caller selects the same owner's combat block before entering here. */
 static void client_advance_view_weapon(client *c, bool attack, float dt)
@@ -8723,6 +8890,10 @@ static void client_advance_view_weapon(client *c, bool attack, float dt)
                 if (r.fired) {
                     fire_calls++;
                     fire_bullets += r.shot_count;
+                    /* The fire function's own SetShockData, at its end. */
+                    if (r.shock)
+                        client_shock(c, pi, r.shock, Q2_SHOCK_FULL,
+                                     NULL, 0, 0);
                 }
             }
 
@@ -8816,6 +8987,11 @@ static void client_advance_view_weapon(client *c, bool attack, float dt)
                                                 cook_ticks, release);
             if (state == Q2_HAND_GRENADE_EXPIRED)
                 q2_vw_hand_grenade_expired(&c->vw[pi]);
+            /* 0x8004A52C: the held entity's release shakes the thrower's pad
+             * with ShockData_GrenadeThrow, after the throw sound. */
+            if (state == Q2_HAND_GRENADE_RELEASED)
+                client_shock(c, pi, Q2_SHOCK_GRENADE_THROW, Q2_SHOCK_FULL,
+                             NULL, 0, 0);
         }
 
         /*
@@ -8845,7 +9021,21 @@ static void client_advance_view_weapon(client *c, bool attack, float dt)
                 if (r.fired) {
                     fire_calls++;
                     fire_bullets += r.shot_count;
+                    if (r.shock)
+                        client_shock(c, pi, r.shock, Q2_SHOCK_FULL,
+                                     NULL, 0, 0);
                 }
+
+                /*
+                 * AND THE ARM HEARS HOW IT WENT. Each of 0x8004FEE8's arms
+                 * tests the fire function's return before anything else: a
+                 * dry machinegun drops to IDLE there and then, a dry chaingun
+                 * or hyperblaster raises the latch, and only a shot that
+                 * fired brings the quad's sound. A shot the port's own gate
+                 * refused is neither, and is not reported.
+                 */
+                if (r.fired || r.dry)
+                    q2_vw_frame_fire_result(&c->vw[pi], r.dry);
             }
 
             /* And the clip's own sound at a band boundary — the chaingun's
@@ -9191,6 +9381,9 @@ static void client_input_simulated(client *c, float dt)
     if (c->pad_frame != c->frame_index - 1)
         c->pad_resume = true;
     resumed = c->pad_resume;
+    /* The world runs this frame, ticked or not: the pads keep what they were
+     * last given rather than being held as if Paused. */
+    c->shock_live = true;
     q2_pad_bindings     bind;
     u16                 raw;
     s32                 step;
@@ -10286,29 +10479,38 @@ static void client_input_simulated(client *c, float dt)
              * console positions every one of these calls at the CENTRE of that
              * box (with the live displacement added on the closing arm), so
              * the sound follows the door.
+             *
+             * THE OBJECT'S OWN BOX, not the collision volume built from it.
+             * Each call reads the bbox of the Scene node at obj+0x38 and halves
+             * its corners (the button's at 0x80029D58..0x80029E14), and the
+             * door's adds obj+0x12..0x16 — which is zero on every arm but the
+             * closing one, so adding the live displacement is the console's
+             * arithmetic on all of them. The sim volume is the same point for
+             * a door, but not for a CAGE LIFT, whose volume is reshaped into a
+             * ceiling or floor slab (sim.c), and not for a BUTTON, whose click
+             * comes from where it rests, not where it has been pushed to.
              */
             {
                 u32 mi;
 
                 for (mi = 0; mi < c->movers.count; mi++) {
                     s8 which = q2_mover_take_sound(&c->movers, mi);
+                    const q2_mover *m = &c->movers.movers[mi];
                     s32 at[3];
-                    u32 t;
-                    bool have = false;
+                    bool have;
 
                     if (which < 0 || which >= Q2_MVSND_COUNT)
                         continue;
 
-                    for (t = 0; t < c->sim[0].mover_count; t++) {
-                        const q2_move_target *mt = &c->sim[0].volumes[t];
+                    have = m->part_count > 0 &&
+                           client_node_centre(c, m->node[0], at);
+                    if (have && !m->is_button) {
+                        s32 d[3];
                         int k;
 
-                        if (mt->id != (s32)mi)
-                            continue;
+                        q2_mover_displacement(m, d);
                         for (k = 0; k < 3; k++)
-                            at[k] = (mt->min[k] + mt->max[k]) / 2;
-                        have = true;
-                        break;
+                            at[k] += d[k];
                     }
 
                     /*
@@ -10382,21 +10584,40 @@ static void client_input_simulated(client *c, float dt)
             }
 
             /*
-             * AND THE TRAIN'S TWO, which are not bank keys and cannot go
-             * through the call above. Taken here so the field cannot latch,
-             * and counted so a future mixer has a number to check itself
-             * against.
+             * AND THE TRAIN'S TWO, which are not sounds at all: SetShockData
+             * for every window, from the centre of the platform's box plus
+             * its displacement, full inside 2048 and nothing past 4096
+             * (0x8002C778, 0x8002C8D8; mover.h). Taken every tick so the
+             * field cannot latch.
              */
             {
                 u32 mi;
 
                 for (mi = 0; mi < c->movers.count; mi++) {
+                    const q2_mover *m = &c->movers.movers[mi];
                     u8 id = q2_mover_take_travel_sound(&c->movers, mi);
+                    s32 at[3], d[3];
+                    s32 strength;
+                    int k;
 
-                    if (id == Q2_MOVER_TRAVEL_MOVE_ID)
+                    if (id == Q2_MOVER_TRAVEL_MOVE_ID) {
                         c->train_move_calls++;
-                    else if (id == Q2_MOVER_TRAVEL_STOP_ID)
+                        strength = Q2_MOVER_TRAVEL_MOVE_VOL;
+                    } else if (id == Q2_MOVER_TRAVEL_STOP_ID) {
                         c->train_stop_calls++;
+                        strength = Q2_MOVER_TRAVEL_STOP_VOL;
+                    } else {
+                        continue;
+                    }
+
+                    if (m->part_count == 0 ||
+                        !client_node_centre(c, m->node[0], at))
+                        continue;
+                    q2_mover_displacement(m, d);
+                    for (k = 0; k < 3; k++)
+                        at[k] += d[k];
+                    client_shock(c, Q2_SHOCK_ALL_PLAYERS, id, strength, at,
+                                 Q2_MOVER_TRAVEL_NEAR, Q2_MOVER_TRAVEL_FAR);
                 }
             }
 
@@ -10508,6 +10729,9 @@ static void client_input_simulated(client *c, float dt)
              * front of the door, and that is fixed in update_triggers.
              */
         }
+
+        /* And the pads, once this tick's requests are all in (shock.h). */
+        client_shock_tick(c, ticks);
     }
 
     /*
@@ -13751,6 +13975,16 @@ static void client_write_shot(client *c, bool numbered)
                 q2_sim_proj_scan.splash_asked,
                 q2_sim_proj_scan.splash_occluded,
                 q2_sim_proj_scan.splash_unplaced);
+        /* The muzzle's clip into the hull (simcombat.c, clip_muzzle). */
+        Q2_INFO("  muzzle    %u pulled back out of a wall, %u from no cell",
+                q2_sim_proj_scan.muzzle_clipped,
+                q2_sim_proj_scan.muzzle_unplaced);
+        /* The DualShock (shock.h): SetShockData calls, the ones a slot
+         * took, and player 0's fields with each motor running. */
+        Q2_INFO("  shock     %u requests, %u taken; %u fields, big %u, "
+                "little %u%s", c->shock_requests, c->shock_taken,
+                c->shock_fields, c->shock_big_fields, c->shock_little_fields,
+                c->settings.v[Q2_SET_VIBRATION] ? "" : " (VIBRATION off)");
         /* The mixer, because "sounds are broken" needs a number to argue with.
          * `dropped` is voices that found all 24 busy — a steady stream of those
          * means something is raising more than the SPU could ever have played. */
@@ -13840,7 +14074,7 @@ static void client_write_shot(client *c, bool numbered)
                     client_node_centre(c, m->node[0], home);
                 Q2_INFO("  train     %u part%s (node %d%s) from (%d,%d,%d), "
                         "path (%d,%d,%d) len %d, speed %d, "
-                        "at %d/%d -> (%d,%d,%d), %u running voices, %u stops",
+                        "at %d/%d -> (%d,%d,%d), %u running rumbles, %u stops",
                         m->part_count, m->part_count == 1 ? "" : "s",
                         m->part_count ? m->node[0] : -1,
                         m->part_count > 1 ? ", +more" : "",
@@ -16871,6 +17105,7 @@ static void usage(void)
     printf("  --dm-rounds N  rounds needed to win Versus (1..32767)\n");
     printf("  --gamepad-player-one  assign four pads starting with player one\n");
     printf("  --crosshair / --no-crosshair  override the crosshair setting\n");
+    printf("  --vibration / --no-vibration  override the VIBRATION setting\n");
     printf("  --watch       frame and aim at the nearest live creature\n");
     printf("  --watch-hold N  ...and keep a killed creature framed for N frames\n");
     printf("  --movie NAME  play a film from Q2DATA/MOVIES and nothing else\n"
@@ -17504,6 +17739,7 @@ int main(int argc, char **argv)
     int        mp_players = 2;
     s16        mp_horizontal_split = -1;
     s16        force_crosshair = -1;
+    s16        force_vibration = -1;
     s16        mp_frags   = -2;
     s16        mp_minutes = -2;
 
@@ -17517,6 +17753,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--demo"))                  c.demo = true;
         else if (!strcmp(argv[i], "--crosshair"))             force_crosshair = 1;
         else if (!strcmp(argv[i], "--no-crosshair"))          force_crosshair = 0;
+        else if (!strcmp(argv[i], "--vibration"))             force_vibration = 1;
+        else if (!strcmp(argv[i], "--no-vibration"))          force_vibration = 0;
         else if (!strcmp(argv[i], "--watch"))                 c.watch = true;
         else if (!strcmp(argv[i], "--watch-hold") && i + 1 < argc) {
             c.watch      = true;
@@ -18167,6 +18405,10 @@ no_window:
      */
     if (force_crosshair >= 0)
         c.settings.v[Q2_SET_CROSSHAIR] = force_crosshair;
+    /* VIBRATION is off until the CONTROLLER page turns it on, as on the
+     * console (0x8001BDA8 resets it to 0); this is the shortcut. */
+    if (force_vibration >= 0)
+        c.settings.v[Q2_SET_VIBRATION] = force_vibration;
 
     if (c.mp_enabled) {
         s16 frag = (mp_frags != -2)
@@ -18828,6 +19070,11 @@ no_window:
 
         /* The button edges the menu's click handling is built on, taken after
          * everything that reads them. */
+        /* A frame the world did not run is a Paused frame to the pads. */
+        if (!c.shock_live)
+            client_shock_hold(&c);
+        c.shock_live = false;
+
         c.mouse_left_prev  = c.mouse_left;
         c.mouse_right_prev = c.mouse_right;
         {
