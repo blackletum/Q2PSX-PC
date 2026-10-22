@@ -84,6 +84,7 @@
 #include "events_rt.h"
 #include "explosive.h"
 #include "item.h"
+#include "modelent.h"   /* q2_model_ent_sounds, the spawn's bang */
 #include "mover.h"
 #include "projectile.h"
 #include "scene.h"
@@ -95,8 +96,7 @@
 #include "worldscale.h"
 #include "world.h"
 
-/* The map's CastList, so an item's model can be resolved at spawn. Declared
- * rather than included: sim.h has no other use for the model format. */
+/* The map's CastList, so an item's model can be resolved at spawn. */
 struct q2_model_bank;
 struct q2_rotator_set;
 struct q2_scene_solid;
@@ -653,6 +653,15 @@ typedef struct q2_sim {
     u32          explosive_models;     /* ...and ones that spawned a model */
 
     /*
+     * Rockets and grenades that went off, and how many of those bound the
+     * `Explosion` model — PrimaryRocketActive (0x8004ADF0), both grenade
+     * thinks (0x80049F9C/0x8004A01C, 0x8004A8E0/0x8004A9B0). Each spawn is
+     * also a SetShockData for every pad (modelent.h).
+     */
+    u32          projectile_blasts;
+    u32          projectile_models;
+
+    /*
      * WHERE each detonation happened, so the owner can place `wep_grenlx1a`.
      *
      * 0x8002695C plays it through the by-handle path at 0x80073704 with the
@@ -665,6 +674,35 @@ typedef struct q2_sim {
      */
     s32          blast_at[Q2_EXPLOSIVE_MAX_PARTS][3];
     u32          blast_count;
+
+    /*
+     * AND EACH EXPLOSION MODEL'S OWN BANG, which is a second sound and not
+     * the same one twice by accident.
+     *
+     * Every spawn that binds the `Explosion` model calls SoundByCreature
+     * (0x8005AA54) with Sound_Explosion — `wep_grenlx1a` again, through
+     * PreInitExplosion's handle at 0x800AEA9C (modelent.h). The rockets and
+     * grenades have no other: their thinks never play one themselves, so
+     * without this queue they went off silently.
+     *
+     * A DESTROYABLE BRUSH PLAYS IT TWICE. PSXEXPLODE calls the spawn at
+     * 0x80026950 and then, without looking at what it returned, its own
+     * report at 0x8002695C — the handle at 0x800B27F8, which
+     * InitEventSoundsEachLevel resolved from the same key in the same table,
+     * so both name the same request. Each start takes its own channel from
+     * GetFreeChannel (0x800740DC) and nothing on that path or in
+     * ProcessSounds' 24-voice walk compares one voice with another; neither
+     * request has a random pitch range (SetRandomPitch's only weapon callers
+     * name wep_machgf1b). So in a map that carries `Explosion` a brush
+     * detonation starts two identical voices at the same point in the same
+     * frame, and the report stays queued on `blast_at` beside this. In one
+     * that does not, the spawn bails and only the report plays.
+     *
+     * Filled by q2_model_ent_spawn itself, so every path to it — the brush,
+     * the missiles, and the gib dispatcher's boss arms through q2_gib_world's
+     * `sounds` — lands here. Drain with q2_sim_next_explosion_sound.
+     */
+    q2_model_ent_sounds explosion_sounds;
 
     /*
      * AND WHERE EACH PANE SHATTERED, so the owner can play Q2_GLASS_SOUND.
@@ -1295,6 +1333,16 @@ bool q2_sim_next_node_vis(q2_sim *sim, s16 *node, u8 *hidden);
  * 0x800B27F8, which 0x8002695C is the ONLY reader of in the whole executable.
  */
 bool q2_sim_next_blast(q2_sim *sim, s32 out[3]);
+
+/*
+ * Take the next queued Explosion-model bang, or false when the queue is empty.
+ *
+ * The caller plays Q2_MODEL_ENT_SOUND there, positionally — SoundByCreature
+ * (0x8005AA54) at the spawn's point. Drain it every tick beside
+ * q2_sim_next_blast, and before it: the spawn's call comes first in PSXEXPLODE
+ * (0x80026950, then 0x8002695C), so its voice is the one allocated first.
+ */
+bool q2_sim_next_explosion_sound(q2_sim *sim, s32 out[3]);
 
 /*
  * WHAT A BREAKING PANE SOUNDS LIKE, and there is no guesswork in the name.

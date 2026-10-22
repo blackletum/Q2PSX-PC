@@ -20,6 +20,7 @@
 #include "creworld.h"
 #include "creature.h"
 #include "mission.h"
+#include "shock.h"
 #include "spawn.h"
 
 static int g_failures;
@@ -1671,6 +1672,73 @@ static void test_infantry_death_sweep(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/* The Tank's footstep shakes every pad — module+0x153C, import +0x12C        */
+/* ------------------------------------------------------------------------- */
+static int        g_step_log[4];     /* 1 = a shock, 2 = a sound, in order */
+static int        g_step_n;
+static int        g_step_player, g_step_id;
+static s32        g_step_strength, g_step_pos[3];
+static s16        g_step_near, g_step_far;
+static bool       g_step_positional;
+
+static void step_shock(void *u, int player, int id, s32 strength,
+                       const s32 pos[3], s16 near_r, s16 far_r)
+{
+    (void)u;
+    if (g_step_n < 4)
+        g_step_log[g_step_n] = 1;
+    g_step_n++;
+    g_step_player = player; g_step_id = id; g_step_strength = strength;
+    g_step_positional = pos != NULL;
+    if (pos)
+        memcpy(g_step_pos, pos, sizeof(g_step_pos));
+    g_step_near = near_r; g_step_far = far_r;
+}
+
+static void step_sound(q2_monster *m, int which, void *u)
+{
+    (void)m; (void)u;
+    if (g_step_n < 4)
+        g_step_log[g_step_n] = (u32)which == 0x80102110u ? 2 : 3;
+    g_step_n++;
+}
+
+static void test_tank_footstep_rumble(void)
+{
+    const q2_cre_impl *impl = q2_cre_impl_find("Tankcomm");
+    q2_monster m;
+
+    printf("the Tank's footstep is SetShockData, then tnk_step\n");
+
+    if (!impl || !impl->method[6]) {
+        check(false, "the Tank's think 6, tank_footstep");
+        return;
+    }
+
+    q2_monster_init(&m);
+    m.pos[0] = 1234; m.pos[1] = -567; m.pos[2] = 8910;
+
+    g_step_n = 0;
+    q2_shock_attach(step_shock, NULL);
+    q2_cre_set_sound_hook(step_sound, NULL);
+    impl->method[6](&m);
+    q2_cre_set_sound_hook(NULL, NULL);
+    q2_shock_attach(NULL, NULL);
+
+    check_eq_i(g_step_n, 2, "one rumble and one sound");
+    check(g_step_log[0] == 1 && g_step_log[1] == 2,
+          "the rumble first (module+0x157C), then tnk_step (module+0x1598)");
+    check_eq_i(g_step_player, 4, "a0 = 4: every window");
+    check_eq_i(g_step_id, 14, "a1 = 14: ShockData_Stomp");
+    check_eq_i(g_step_strength, 4096, "a2 = 4096");
+    check(g_step_positional && g_step_pos[0] == 1234 &&
+          g_step_pos[1] == -567 && g_step_pos[2] == 8910,
+          "a3 = self, read as the Tank's origin");
+    check(g_step_near == 2048 && g_step_far == 8192,
+          "sp+16 = 2048 and sp+18 = 8192");
+}
+
+/* ------------------------------------------------------------------------- */
 /* A prone Insane is a flyer — module+0x974, import +0x100                    */
 /* ------------------------------------------------------------------------- */
 static void test_insane_prone_flies(void)
@@ -1856,6 +1924,7 @@ int main(void)
     test_tank_burst_rule();
     test_soldier_burst_and_death_aim();
     test_infantry_death_sweep();
+    test_tank_footstep_rumble();
     test_insane_prone_flies();
     test_insane_start_draws();
 

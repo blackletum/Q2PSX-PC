@@ -199,14 +199,94 @@ bool q2_model_ent_height(const q2_model_bank *bank, const char *name,
  *
  * `at` is the world point the effect happens at; `surface` is the byte the
  * caller wants at ent+0x9E (opcode 0x08 passes the Scene node's `area & 0x7F`).
+ * `size` is the third argument, 1.0.12: Q2_MODEL_ENT_SIZE_FULL from every
+ * caller but the gib dispatcher's two Explosion arms, which pass half.
+ *
+ * A spawn that binds its model ends in two calls, and both sit past
+ * 0x8005A894's bail, so a map whose CastList has no `Explosion` makes neither:
+ *
+ *   0x8005AA54  SoundByCreature(Sound_Explosion, ent) — the explosion's own
+ *               bang, queued on `sounds` (below) for the owner to play;
+ *   0x8005AA7C  SetShockData — every pad within `size` of `at` rumbles
+ *               (q2_shock_explosion).
+ *
+ * NOT REPRODUCED: the other thing `size` does. 0x8005A96C hands it to
+ * 0x80055F3C with the entity's matrix at +0x2C0 as both source and
+ * destination, which scales the model by it, so the gib arms' fireball is
+ * drawn at half the size of a rocket's. q2_entity has no per-entity draw
+ * scale (`scale` is the +0xFC light intensity), and every one is drawn at
+ * 4096.
+ *
+ * `sounds` may be NULL, for a caller with nobody to hear it; the entity is
+ * spawned either way.
  *
  * Returns the entity, or NULL when the pool is full or the map's CastList does
  * not carry the name. A NULL return is a real outcome and not an error: three
  * of the disc's banks carry no `Explosion` at all.
  */
+#define Q2_MODEL_ENT_SIZE_FULL 4096   /* `addiu a2, zero, 4096` at six sites */
+#define Q2_MODEL_ENT_SIZE_GIB  2048   /* 0x8007CF18, 0x8007D010              */
+
+/*
+ * THE EXPLOSION'S OWN SOUND — 0x8005AA44..0x8005AA54.
+ *
+ *     8005AA44  lw   a0, 1180(gp)       ; Sound_Explosion, 0x800AEA9C
+ *     8005AA48  addu a1, s1, zero       ; the entity just bound
+ *     8005AA54  jal  0x8007270C         ; SoundByCreature
+ *
+ * Sound_Explosion has two references in the image: that load, and the store
+ * at 0x8005AB5C that ends PreInitExplosion (0x8005AAA4), which hands
+ * GetSoundNum (0x80073518) the twelve-byte key at 0x800ACE0C. RemapModels
+ * calls PreInitExplosion once a level, with a NULL header when the CastList
+ * has no `Explosion` — and then the store is skipped, but so is every spawn,
+ * so a stale handle is never played.
+ *
+ * SoundByCreature places the voice AT THE ENTITY. It copies ent+0x54..+0x5C
+ * into the voice (0x8007287C..0x80072894), which the spawn has just set to
+ * `at` (0x8005A8D8), and keeps the entity pointer so ProcessSounds re-ranges
+ * it from ent+0xA4 every frame — also `at`, and an explosion never moves. So
+ * the bang is positional at the point the spawn was handed, the same point
+ * PSXEXPLODE's report uses. (In split screen, 0x800AEBCC, SoundByCreature
+ * plays every voice flat instead; this port positions all of its creature
+ * sounds and this one is no different.)
+ *
+ * IT IS NOT CUT SHORT WITH THE FIREBALL. The voice's tag goes to ent+0x114/
+ * +0x116, and the think's removal, KillModel (0x8006D280), hands that tag to
+ * SoundStopOnCreDeath (0x80073800) — which only marks the voice state 8. The
+ * state-8 arm of ProcessSounds (0x800731F0) keys a voice off early only when
+ * its request carries flag 0x4, and FlagIfLoopingSample (0x80073FF4) is the
+ * only writer of that bit: it is "this sample loops". `wep_grenlx1a` is a
+ * one-shot of 1.34 s on every bank, so the bang plays out long after the
+ * 400-unit fireball has gone.
+ *
+ * Queued rather than played for the reason sim.h's `blast_at` is: the game
+ * layer has no mixer. The owner drains the queue between ticks and plays
+ * Q2_MODEL_ENT_SOUND at each position.
+ *
+ * Twenty-four, because ProcessSounds walks twenty-four voices (`slti v0, s2,
+ * 24` at 0x800734A4) and GetFreeChannel (0x800740DC) refuses a twenty-fifth:
+ * more bangs than that in one tick could not have sounded at once on the
+ * console either. A twenty-fifth is dropped and counted.
+ */
+#define Q2_MODEL_ENT_SOUND      "wep_grenlx1a"   /* 0x800ACE0C, twelve bytes */
+#define Q2_MODEL_ENT_SOUNDS_MAX 24
+
+typedef struct q2_model_ent_sounds {
+    s32 at[Q2_MODEL_ENT_SOUNDS_MAX][3];
+    u32 count;
+    u32 dropped;
+} q2_model_ent_sounds;
+
+void q2_model_ent_sounds_clear(q2_model_ent_sounds *q);
+
+/* Take the oldest queued position, or false when there is none. In the order
+ * the spawns happened, which is the order their voices were allocated. */
+bool q2_model_ent_sound_next(q2_model_ent_sounds *q, s32 out[3]);
+
 q2_entity *q2_model_ent_spawn(q2_entity_set *set, const q2_model_bank *bank,
                               q2_model_ent_kind kind, const s32 at[3],
-                              u8 surface);
+                              u8 surface, s32 size,
+                              q2_model_ent_sounds *sounds);
 
 /* The think at 0x8005A5F8, installed by the spawn. Exposed so a test can run
  * one tick of it without a world. */
@@ -520,6 +600,8 @@ typedef void (*q2_gib_describe_fn)(void *user, q2_gib_victim kind,
  *   gravity  NULL: Q2_GRAVITY. It is [0x800AE924], per dt, and it is READ
  *            LIVE — the sim's own word, so the GAME VARIABLES menu reaches a
  *            gib in flight the way item.h's q2_item_env lets it reach a drop
+ *   sounds   NULL: the boss arms' Explosion is silent — it is still spawned,
+ *            but its Sound_Explosion (0x8005AA54) has nowhere to go
  */
 typedef struct q2_gib_world {
     q2_entity_set               *set;       /* 0x800CBA28, the pool       */
@@ -529,6 +611,7 @@ typedef struct q2_gib_world {
     q2_collision                *coll;      /* 0x800C8E90, PRIMARY        */
     const struct q2_move_world  *ents;      /* what 0x80053974 clips      */
     const s32                   *gravity;   /* [0x800AE924]               */
+    q2_model_ent_sounds         *sounds;    /* the spawn's bang, queued   */
     q2_gib_describe_fn           describe;
     void                        *user;
 } q2_gib_world;

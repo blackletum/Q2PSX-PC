@@ -657,7 +657,10 @@ typedef struct q2_damage_result {
     /*
      * The per-mod hit sound, 0x800584D4..0x800585A0. These are the emitter's
      * own operands rather than a name invented for them, following the
-     * precedent mover.h:236-244 set for the other 0x80040800 ids.
+     * precedent mover.h:236-244 set for the other 0x80040800 ids. The damage
+     * function also makes the call itself: the pair goes to SetShockData on
+     * the victim's window through the shock sink (shock.h), so a caller that
+     * reads these is reading what was already requested.
      */
     u8   hit_sound_id;      /* 0x800ACE5C's entry; 0 when the mod is silent   */
     s16  hit_sound_vol;     /* 4096 or 2048                                   */

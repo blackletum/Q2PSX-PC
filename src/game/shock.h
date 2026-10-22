@@ -161,4 +161,60 @@ void q2_shock_kill(q2_shock *s);
 /* True while any slot is playing. */
 bool q2_shock_active(const q2_shock *s);
 
+/*
+ * ---------------------------------------------------------------------------
+ * SetShockData as the rest of the game library reaches it
+ * ---------------------------------------------------------------------------
+ * The console has one SetShockData and every caller jumps straight to it. In
+ * the port the slots and the pads are the client's — a q2_shock per window,
+ * and SDL behind it — so a caller inside this library hands its six arguments
+ * to whatever registered here instead. Three do:
+ *
+ *   - T_Damage's tail, a hit on a player that survived (0x8005859C), from
+ *     combat.c;
+ *   - QuakeGenExplosion (0x8005AA7C), from the model-entity spawn in
+ *     modelent.c, which is that function;
+ *   - the Tank Commander's footstep, through its module's import +0x12C
+ *     (module+0x157C on COMMAND and WASTE4), from cre_tankcomm.c.
+ *
+ * The weapons and the train reach the client in results it already reads, and
+ * it routes those itself. With nothing attached a request is dropped, which is
+ * what a unit test that does not attach a spy wants.
+ *
+ * `player` is a window, or Q2_SHOCK_ALL_PLAYERS; `pos` is NULL for a request
+ * that is not positional, and then the two radii are not read — exactly
+ * q2_shock_set's terms, one window at a time.
+ */
+typedef void (*q2_shock_sink_fn)(void *user, int player, int id, s32 strength,
+                                 const s32 pos[3], s16 near_r, s16 far_r);
+
+/* Register the sink, or detach with NULL. One at a time, as there is one
+ * SetShockData. */
+void q2_shock_attach(q2_shock_sink_fn fn, void *user);
+
+/* SetShockData (0x80040800) with the console's own arguments. */
+void q2_shock_request(int player, int id, s32 strength, const s32 pos[3],
+                      s16 near_r, s16 far_r);
+
+/*
+ * QuakeGenExplosion's request, 0x8005AA5C..0x8005AA7C:
+ *
+ *     a0 = 4, a1 = 13, a2 = size, a3 = the point it was handed,
+ *     sh (size / 2) -> sp+16, sh size -> sp+18
+ *
+ * Every window, ShockData_Explosion at the explosion's own size, full within
+ * half of it and nothing past it. `size` is the spawn's third argument, the
+ * one that also scales its matrix (0x80055F3C): 4096 from a rocket, both
+ * grenades and an explosive brush, 2048 from the gib dispatcher's two
+ * Explosion arms. The halving is the compiler's signed divide (`srl 31`,
+ * `addu`, `sra 1` at 0x8005AA68), so it rounds toward zero.
+ */
+void q2_shock_explosion(const s32 at[3], s32 size);
+
+/* The Tank Commander's footstep at module+0x1550..+0x157C: every window,
+ * ShockData_Stomp at full strength, full within 2048 of the Tank and nothing
+ * past 8192. */
+#define Q2_SHOCK_TANK_STEP_NEAR 2048
+#define Q2_SHOCK_TANK_STEP_FAR  8192
+
 #endif /* Q2PSX_SHOCK_H */

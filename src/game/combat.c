@@ -1,6 +1,7 @@
 #include "combat.h"
 
 #include "playerdeath.h"   /* Q2_PDEATH_GIB_HEALTH: one copy of 0x800397FC */
+#include "shock.h"         /* SetShockData, the hit on a player's tail      */
 
 #include <math.h>
 #include <string.h>
@@ -99,8 +100,18 @@ u8 q2_mod_hit_sound(s16 mod, s16 *volume)
  * back-pointer, has no counterpart in this port's actor model and is therefore
  * not reproduced; nothing here can hold a client block whose entity is NULL.
  *
- * No mixer call is made. There is none in this port yet, and mover.h's
- * `travel_sound` is the precedent for recording the operands and stopping.
+ * And then the call itself, 0x80058558..0x8005859C, which is SetShockData and
+ * not a mixer (shock.h):
+ *
+ *     a0 = (client->window - 0x800D5C30) * 0x1A1F58D1 >> 4
+ *     a1 = the id, a2 = the strength, a3 = 0
+ *
+ * The multiply-and-shift is a divide by 784, GameWindows' stride, so a0 is
+ * the VICTIM's own window; `owner` is this port's name for which player an
+ * actor is. a3 NULL makes it the non-positional kind — the memset of sp+16 at
+ * 0x80058588 zeroes the two radii, which are then never read. An actor that
+ * claims a client but is no player's (`owner` -1) has no window, and the
+ * request goes nowhere.
  */
 static void set_hit_sound(const q2_actor *t, s16 mod, q2_damage_result *out)
 {
@@ -109,8 +120,12 @@ static void set_hit_sound(const q2_actor *t, s16 mod, q2_damage_result *out)
     if (!t->has_client || t->health <= 0)
         return;
     out->hit_sound_id = q2_mod_hit_sound(mod, &out->hit_sound_vol);
-    if (out->hit_sound_id == 0)
+    if (out->hit_sound_id == 0) {
         out->hit_sound_vol = 0;
+        return;                             /* 0x80058554 `beq s1, zero` */
+    }
+    q2_shock_request(t->owner, out->hit_sound_id, out->hit_sound_vol,
+                     NULL, 0, 0);
 }
 
 bool q2_actor_energy_lit(const q2_actor *a)
