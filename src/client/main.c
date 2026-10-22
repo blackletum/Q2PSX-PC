@@ -1562,6 +1562,16 @@ typedef struct client {
     char              pending_start[Q2_UF_NAME_LEN + 1];
 
     /*
+     * The arrival point: the StartPos a level is entered at, by name. The
+     * console keeps it at 0x800C8CD0 -- a LOADMAP writes its operand there and
+     * a fresh start (MISCOMPLETE's 0x8002DC68 among them) writes "Default".
+     * A load that does not carry the player stands them on it when it lies
+     * in the zone being loaded, so a restart returns to the doorway the level
+     * was entered by rather than to whichever StartPos the file lists first.
+     */
+    char              arrival[Q2_UF_NAME_LEN + 1];
+
+    /*
      * Which primitive queued it, because they do not leave by the same door.
      *
      * A LOADMAP is state 2 and nothing else happens: the outer state machine
@@ -4571,6 +4581,42 @@ static void client_mission_update(client *c)
  * unconditional branch to itself. This warns and tries the name as a directory
  * instead, because hanging is not a behaviour worth reproducing.
  */
+static bool client_find_arrival(client *c, const char *map, const char *start,
+                                q2_start_pos *out)
+{
+    char   path[256];
+    q2_buf buf;
+    bool   found = false;
+
+    if (!start || !start[0])
+        return false;
+    snprintf(path, sizeof(path), "Q2DATA/LEVELS/%s/COMMON.DAT", map);
+    if (disc_read_file(c->disc, path, &buf) == Q2_OK) {
+        q2_common_file probe;
+
+        if (q2_common_open(&probe, &buf) == Q2_OK) {
+            q2_start_pos_list spawns;
+
+            found = q2_start_pos_parse(&spawns, &probe) == Q2_OK &&
+                    q2_start_pos_find(&spawns, start, out);
+            q2_common_close(&probe);
+        } else {
+            q2_buf_free(&buf);
+        }
+    }
+    return found;
+}
+
+/* The zone a fresh start of MAP loads: its "Default" arrival point's, as the
+ * console's own fresh start resolves it, or zone 0 for a map without one. */
+static int client_default_zone(client *c, const char *map)
+{
+    q2_start_pos sp;
+
+    snprintf(c->arrival, sizeof(c->arrival), "Default");
+    return client_find_arrival(c, map, c->arrival, &sp) ? sp.zone : 0;
+}
+
 static bool client_change_map(client *c, const char *map, const char *start)
 {
     int  zone = 0;
@@ -4594,28 +4640,11 @@ static bool client_change_map(client *c, const char *map, const char *start)
                     "directory", map);
     }
 
-    if (start && start[0]) {
-        char   path[256];
-        q2_buf buf;
-
-        snprintf(path, sizeof(path), "Q2DATA/LEVELS/%s/COMMON.DAT", map);
-        if (disc_read_file(c->disc, path, &buf) == Q2_OK) {
-            q2_common_file probe;
-
-            if (q2_common_open(&probe, &buf) == Q2_OK) {
-                q2_start_pos_list spawns;
-
-                if (q2_start_pos_parse(&spawns, &probe) == Q2_OK &&
-                    q2_start_pos_find(&spawns, start, &arrival)) {
-                    zone         = arrival.zone;
-                    have_arrival = true;
-                }
-                q2_common_close(&probe);
-            } else {
-                q2_buf_free(&buf);
-            }
-        }
+    if (client_find_arrival(c, map, start, &arrival)) {
+        zone         = arrival.zone;
+        have_arrival = true;
     }
+    snprintf(c->arrival, sizeof(c->arrival), "%s", start ? start : "");
 
     /* A level change is a transition, so the player keeps what they are
      * carrying; the clock is a new level's, so the powerup deadlines are
@@ -6242,6 +6271,28 @@ static bool client_load_zone(client *c, const char *map, int index)
                         Q2_INFO("zone gate: carried through at (%d,%d,%d)",
                                 c->carry_pos[0], c->carry_pos[1],
                                 c->carry_pos[2]);
+                    }
+
+                    /*
+                     * The arrival point first, when it is in this zone. Every
+                     * single-player map carries a "Default", and it is NOT
+                     * always the first StartPos of zone 0: COMMAND's is in
+                     * zone 2, while its zone 0 opens on 'Mapzone0', a ledge
+                     * the player falls from and dies within two seconds.
+                     */
+                    if (!placed && c->arrival[0]) {
+                        q2_start_pos sp;
+
+                        if (q2_start_pos_find(&spawns, c->arrival, &sp) &&
+                            sp.zone == index) {
+                            c->cam.pos[0] = sp.x;
+                            c->cam.pos[1] = sp.y;
+                            c->cam.pos[2] = sp.z;
+                            c->cam.yaw    = sp.angle;
+                            placed = true;
+                            Q2_INFO("spawned at arrival '%s' (%d,%d,%d)",
+                                    sp.name, sp.x, sp.y, sp.z);
+                        }
                     }
 
                     for (i = 0; !placed && i < spawns.count; i++) {
@@ -15028,7 +15079,7 @@ static void client_start_game(client *c)
      * back into WITHIN a game still remembers its script. */
     q2_event_store_clear(&c->event_store);
 
-    client_load_zone(c, c->first_map, 0);
+    client_load_zone(c, c->first_map, client_default_zone(c, c->first_map));
 }
 
 /*
@@ -17820,6 +17871,7 @@ int main(int argc, char **argv)
     bool map_given = false;
     bool zone_probe = false;
     int zone_index = 0;
+    bool zone_given = false;
     int scale = 3;
     int i;
     u64 last;
@@ -17880,7 +17932,7 @@ int main(int argc, char **argv)
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--disc") && i + 1 < argc)       disc_path = argv[++i];
         else if (!strcmp(argv[i], "--map") && i + 1 < argc) { map = argv[++i]; map_given = true; }
-        else if (!strcmp(argv[i], "--zone") && i + 1 < argc)  zone_index = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--zone") && i + 1 < argc)  { zone_index = atoi(argv[++i]); zone_given = true; }
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--headless"))              c.headless = true;
         else if (!strcmp(argv[i], "--demo"))                  c.demo = true;
@@ -18642,6 +18694,12 @@ no_window:
         client_zone_probe(&c, map);
         goto done;
     }
+
+    /* A level started from the command line is a fresh start, entered at its
+     * "Default" arrival point and in that point's zone unless `--zone` says
+     * otherwise. An arena has no Default: its players take MultiSpawns. */
+    if (!c.in_front_end && !c.mp_enabled && !zone_given)
+        zone_index = client_default_zone(&c, map);
 
     if (!client_load_zone(&c, map, zone_index)) {
         fprintf(stderr, "cannot load %s zone %d\n", map, zone_index);
