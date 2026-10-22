@@ -1,0 +1,715 @@
+// Generated: one entry per single-player level (SP) and arena (MP).
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "build: stage-local",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--build",
+                "build-msvc",
+                "--config",
+                "Release",
+                "--target",
+                "stage-local",
+                "--parallel"
+            ],
+            "group": "build",
+            "problemMatcher": "$msCompile"
+        },
+        {
+            "label": "build: q2psx (RelWithDebInfo)",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--build",
+                "build-msvc",
+                "--config",
+                "RelWithDebInfo",
+                "--target",
+                "q2psx",
+                "--parallel"
+            ],
+            "group": "build",
+            "problemMatcher": "$msCompile"
+        },
+        {
+            "label": "SP 01: BASE0",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "BASE0"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "SP 02: BASE1",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "BASE1"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "SP 03: BASE2",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "BASE2"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "SP 04: BASE3",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "BASE3"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "SP 05: JAIL2",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "JAIL2"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "SP 06: JAIL3",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "JAIL3"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "SP 07: JAIL4",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "JAIL4"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "SP 08: JAIL5",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "JAIL5"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "SP 09: SECURITY",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "SECURITY"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "SP 10: POWER1",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "POWER1"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "SP 11: POWER2",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "POWER2"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "SP 12: WASTE1",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "WASTE1"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "SP 13: WASTE2",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "WASTE2"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "SP 14: WASTE3",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "WASTE3"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "SP 15: WASTE4",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "WASTE4"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "SP 16: LAB",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "LAB"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "SP 17: COMMAND",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "COMMAND"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "SP 18: BIGGUN",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "BIGGUN"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "SP 19: BOSS1",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "BOSS1"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "SP 20: BOSS2",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "BOSS2"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "SP 21: MAGDEMO",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "MAGDEMO"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "MP 01: MATRIX6 (Cold Storage)",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "MATRIX6",
+                "--dm",
+                "--dm-players",
+                "${input:dmPlayers}"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "MP 02: MATRIX7 (Warehouse)",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "MATRIX7",
+                "--dm",
+                "--dm-players",
+                "${input:dmPlayers}"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "MP 03: MATRIX2 (Aquaplex)",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "MATRIX2",
+                "--dm",
+                "--dm-players",
+                "${input:dmPlayers}"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "MP 04: THEVAT (Colosseum)",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "THEVAT",
+                "--dm",
+                "--dm-players",
+                "${input:dmPlayers}"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "MP 05: MATRIX9 (Mainframe)",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "MATRIX9",
+                "--dm",
+                "--dm-players",
+                "${input:dmPlayers}"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "MP 06: TIMS (Quickfire)",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "TIMS",
+                "--dm",
+                "--dm-players",
+                "${input:dmPlayers}"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "MP 07: MATRIX1 (Captivity)",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "MATRIX1",
+                "--dm",
+                "--dm-players",
+                "${input:dmPlayers}"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "MP 08: PODCITY (The Shaft)",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "PODCITY",
+                "--dm",
+                "--dm-players",
+                "${input:dmPlayers}"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "MP 09: MATRIX3 (Hydraphobia)",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "MATRIX3",
+                "--dm",
+                "--dm-players",
+                "${input:dmPlayers}"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "MP 10: MATRIX8 (Toxic Vats)",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "MATRIX8",
+                "--dm",
+                "--dm-players",
+                "${input:dmPlayers}"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "MP 11: MATRIX4 (The Forge)",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "MATRIX4",
+                "--dm",
+                "--dm-players",
+                "${input:dmPlayers}"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "MP 12: MATRIX5 (Badlands)",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue",
+                "--map",
+                "MATRIX5",
+                "--dm",
+                "--dm-players",
+                "${input:dmPlayers}"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        }
+    ],
+    "inputs": [
+        {
+            "id": "dmPlayers",
+            "type": "pickString",
+            "description": "Split-screen players",
+            "options": [
+                "1",
+                "2",
+                "3",
+                "4"
+            ],
+            "default": "2"
+        }
+    ]
+}

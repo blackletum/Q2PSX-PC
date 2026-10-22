@@ -63,7 +63,9 @@ __pycache__/
 
 # Editors
 .vs/
-.vscode/
+.vscode/*
+!.vscode/tasks.json
+!.vscode/launch.json
 .idea/
 *.user
 *.swp
