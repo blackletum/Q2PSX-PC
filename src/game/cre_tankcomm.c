@@ -120,11 +120,12 @@
  *    Whether the shot then HURTS anything is the host's business — see
  *    `client_cre_shot`.
  *
- *  - THE FOOTSTEP'S RUMBLE IS NOT ROUTED. `tank_footstep` calls import +0x12C,
- *    the player proximity effect, with effect 14 at magnitude 4096 over radii
- *    2048..8192. Nothing in the port receives that, so only the sound is
- *    played. Named here because "the footstep is transcribed" would otherwise
- *    imply the shake is too.
+ *  - (No longer owed.) The footstep's rumble. `tank_footstep` calls import
+ *    +0x12C, which is SetShockData (0x80040800, shock.h) and not a "player
+ *    proximity effect": ShockData_Stomp at 4096 for every pad within 8192 of
+ *    the Tank, full inside 2048. It goes to the client through the shock sink
+ *    now, before the step's sound, in the module's order. It is the only call
+ *    to +0x12C in any of the seven modules.
  *
  *  - THE IDLE HANDLE'S SUBSTITUTION IS DECLARED BUT NOT YET CALLED BY THE
  *    HOST. module+0x2100 is registered as `tnk_idle1` and then overwritten with
@@ -188,6 +189,7 @@
 #include "crebind.h"
 #include "creature.h"
 #include "monster.h"
+#include "shock.h"     /* import +0x12C — SetShockData */
 
 /* ------------------------------------------------------------------------- */
 /* The move set, by first frame — and two of them by module address           */
@@ -749,21 +751,31 @@ static void tankcomm_reattack_blaster(q2_monster *self)
  *     import +0x12C (4, 14, 4096, self, {2048, 8192});
  *     play(module+0x2110, self->[0x24]);           ; tnk_step
  *
- * Import +0x12C is the player proximity effect (creature.h): `4` means every
- * player, `14` is the effect descriptor id, 4096 is the magnitude and 2048 and
- * 8192 are the inner and outer radii — 170 and 683 id units at the AI's scale
- * of twelve. It is the console shaking the pad when something that heavy puts a
- * foot down. The fourth argument is the ENTITY (`addu a3, s1, zero` at
- * module+0x1580, and `s1` is `a0` at entry), not its origin; the two radii are
- * `sh` stores to sp+16 and sp+18, so they share one argument slot as a pair of
- * halfwords rather than being two words. Nothing in the port receives any of
- * it, so only the sound is played and the call is recorded here rather than
- * approximated.
+ * Import +0x12C is SetShockData (0x80040800, shock.h): `4` is every window,
+ * `14` is ShockData_Stomp, 4096 the strength, and 2048 and 8192 the near and
+ * far radii — 170 and 683 id units at the AI's scale of twelve. It is the
+ * console shaking the pad when something that heavy puts a foot down. The two
+ * radii are `sh` stores to sp+16 and sp+18 (module+0x155C, +0x1570), the fifth
+ * and sixth arguments as SetShockData reads them back with `lh 72(sp)` and
+ * `lh 74(sp)` (0x80040944, 0x8004088C).
+ *
+ * THE FOURTH ARGUMENT IS `self` (`addu a3, s1, zero` at module+0x1580, and
+ * `s1` is `a0` at entry), and that IS the position. This note used to call it
+ * the entity and not its origin; but SetShockData reads its a3 as three words
+ * at +0, +4 and +8 (0x80040884, 0x800408AC, 0x800408D4), and a creature's
+ * `self` is its collision object at entity+0x54, whose first three words are
+ * the origin (q2_monster.pos, monster.h). So the request is positional at the
+ * Tank's own origin, and it stacks: Stomp is one of the two patterns without
+ * the merge flag, so a step that lands while the last one's 64 ticks are still
+ * playing takes a slot of its own, and so does a second Tank's.
  *
  * id's `tank_footstep` is the sound alone; the rumble is the console's addition.
  */
 static void tankcomm_footstep(q2_monster *self)
 {
+    q2_shock_request(Q2_SHOCK_ALL_PLAYERS, Q2_SHOCK_STOMP, Q2_SHOCK_FULL,
+                     self->pos, Q2_SHOCK_TANK_STEP_NEAR,
+                     Q2_SHOCK_TANK_STEP_FAR);
     tank_play(self, TANK_SND_STEP);
 }
 

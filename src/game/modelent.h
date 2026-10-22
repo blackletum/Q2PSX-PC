@@ -199,14 +199,34 @@ bool q2_model_ent_height(const q2_model_bank *bank, const char *name,
  *
  * `at` is the world point the effect happens at; `surface` is the byte the
  * caller wants at ent+0x9E (opcode 0x08 passes the Scene node's `area & 0x7F`).
+ * `size` is the third argument, 1.0.12: Q2_MODEL_ENT_SIZE_FULL from every
+ * caller but the gib dispatcher's two Explosion arms, which pass half.
+ *
+ * A spawn that binds its model ends in SetShockData — every pad within `size`
+ * of `at` rumbles (q2_shock_explosion). That is the call at 0x8005AA7C, and it
+ * is reached only past 0x8005A894's bail, so a map whose CastList has no
+ * `Explosion` shakes nothing either.
+ *
+ * NOT REPRODUCED: the other thing `size` does. 0x8005A96C hands it to
+ * 0x80055F3C with the entity's matrix at +0x2C0 as both source and
+ * destination, which scales the model by it, so the gib arms' fireball is
+ * drawn at half the size of a rocket's. q2_entity has no per-entity draw
+ * scale (`scale` is the +0xFC light intensity), and every one is drawn at
+ * 4096. Nor is the call just before the rumble: 0x8005AA54 hands
+ * SoundByCreature (0x8007270C) the entity and Sound_Explosion (gp+1180,
+ * 0x800AEA9C), which PreInitExplosion fills from `wep_grenlx1a` at
+ * 0x8005AB5C. The spawn has no mixer to reach, so it plays nothing.
  *
  * Returns the entity, or NULL when the pool is full or the map's CastList does
  * not carry the name. A NULL return is a real outcome and not an error: three
  * of the disc's banks carry no `Explosion` at all.
  */
+#define Q2_MODEL_ENT_SIZE_FULL 4096   /* `addiu a2, zero, 4096` at six sites */
+#define Q2_MODEL_ENT_SIZE_GIB  2048   /* 0x8007CF18, 0x8007D010              */
+
 q2_entity *q2_model_ent_spawn(q2_entity_set *set, const q2_model_bank *bank,
                               q2_model_ent_kind kind, const s32 at[3],
-                              u8 surface);
+                              u8 surface, s32 size);
 
 /* The think at 0x8005A5F8, installed by the spawn. Exposed so a test can run
  * one tick of it without a world. */

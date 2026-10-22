@@ -37,6 +37,7 @@
 #include "modelent.h"
 #include "monster.h"
 #include "playerdeath.h"
+#include "shock.h"
 #include "trace.h"        /* q2_move_world — the door the gib meets */
 #include "trig.h"
 
@@ -231,6 +232,18 @@ static void test_think_removes_unanimated(void)
     check(!e.in_use, "clip_length 0 gives a lifetime of 0, so it goes");
 }
 
+/* SetShockData, the spawn's last call: counted, so a spawn that never happens
+ * can be shown to shake nothing. */
+static int g_shocks;
+
+static void count_shock(void *u, int player, int id, s32 strength,
+                        const s32 pos[3], s16 near_r, s16 far_r)
+{
+    (void)u; (void)player; (void)id; (void)strength; (void)pos;
+    (void)near_r; (void)far_r;
+    g_shocks++;
+}
+
 static void test_spawn_needs_a_bank(void)
 {
     q2_entity_set set;
@@ -240,9 +253,15 @@ static void test_spawn_needs_a_bank(void)
 
     memset(&set, 0, sizeof(set));
 
-    check(q2_model_ent_spawn(&set, NULL, Q2_MODEL_ENT_EXPLOSION, at, 0) == NULL,
+    g_shocks = 0;
+    q2_shock_attach(count_shock, NULL);
+    check(q2_model_ent_spawn(&set, NULL, Q2_MODEL_ENT_EXPLOSION, at, 0,
+                             Q2_MODEL_ENT_SIZE_FULL) == NULL,
           "no bank, no entity");
+    q2_shock_attach(NULL, NULL);
     check_eq(set.count, 0, "and nothing was taken from the pool");
+    check_eq(g_shocks, 0,
+             "and no pad shakes: 0x8005AA7C is past 0x8005A894's bail");
 
     q2_entity_set_free(&set);
 }

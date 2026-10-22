@@ -5684,13 +5684,89 @@ three or more players in a multiplayer level, odd and even pads take alternate f
 | 11 | ShockData_RailGun | 1 | `0x8004D6D0` |
 | 12 | ShockData_BFG | 1 | `0x8004EBC0` |
 | 13 | ShockData_Explosion | 1 | the train moving (`0x8002C778`, 1024), an explosion (`0x8005AA7C`), a mod-1 hit |
-| 14 | ShockData_Stomp | 0 | the train arriving (`0x8002C8D8`, 3072) |
+| 14 | ShockData_Stomp | 0 | the train arriving (`0x8002C8D8`, 3072), the Tank Commander's footstep (its import `+0x12C`) |
 | 15 | ShockData_Impact_Distinct | 0 | hits of mod 3, 7, 19, 20, 21 |
 | 16 | ShockData_Impact_Mergeable | 1 | hits of mod 5, 6, 18 |
 
 The machinegun's pattern is a 16-tick buzz of the big motor at 1536 and an 8-tick burst of the little one:
 three fields of big motor at 95/255 and two of the little one, per shot. The envelopes are transcribed point for
 point in `src/game/shock.c`.
+
+**Three callers live outside the weapons and the train**, and each is routed from the place the console makes
+the call. The game library hands SetShockData's six arguments to a sink the client registers
+(`q2_shock_attach`, shock.h), so the request is made by the same code that makes it on the disc.
+
+**A hit on a player — `0x8005859C`, in the damage function `0x80057D54`.** After the health store:
+
+    800584D4  lw   v0, 12(s2)          ; the target's client; none -> skip
+    800584E4  lw   v0, 0(v0)           ; the client's window pointer; none -> skip
+    800584F4  lh   v0, 264(s2)         ; health AFTER the store
+    800584FC  blez v0, 0x800585A4      ; dead -> skip
+    80058504  sltiu v0, v1, 21         ; mod-1 into the jump table at 0x800ACE5C
+    80058554  beq  s1, zero            ; a silent arm -> skip
+    80058560  lw v1,12(s2); lw v1,0(v1); subu v1, 0x800D5C30; mult 0x1A1F58D1; sra 4
+    80058588  jal  0x80089E18          ; memset(sp+16, 0, 4): both radii zero
+    8005859C  jal  0x80040800          ; a0 = window, a1 = id, a2 = strength, a3 = 0
+
+The multiply and shift divide by 784, GameWindows' stride, so `a0` is the victim's own window. `a3 = 0` makes it
+non-positional. Every path that damages a player reaches it: a creature's shot and claw, a player's bullet or
+rail in deathmatch, splash (a BFG blast hurts its own shooter by half), the BFG's beams, a crusher. A rocket's
+mod 15 and a grenade's 13 take the silent arm, so neither rumbles as a hit; their explosions do (below). The
+port raises it in `set_hit_sound` (combat.c), keyed on the actor's `owner`. A 900-frame `--headless --demo
+--watch --vibration` run on SECURITY went from 11 requests (all blaster shots) to 80, of which 69 are id 16 from
+the Soldiers' bullets.
+
+**An explosion — `0x8005AA7C`, the last call of QuakeGenExplosion (`0x8005A778`).**
+
+    8005AA5C  addiu a0, zero, 4        ; every window
+    8005AA60  addiu a1, zero, 13       ; ShockData_Explosion
+    8005AA64  addu  a2, s3, zero       ; the spawn's third argument, its size
+    8005AA68  srl / addu / sra 1       ; size / 2, rounding toward zero
+    8005AA74  addu  a3, s2, zero       ; the point the spawn was handed
+    8005AA78  sh    v0, 16(sp)         ; near = size / 2
+    8005AA80  sh    a2, 18(sp)         ; far = size (delay slot of the jal)
+
+It is reached only past the spawn's two bails — the pool allocation (`0x8005A7B0`) and the model bind
+(`0x8005A894`) — so a map whose CastList has no `Explosion` shakes nothing. Eight call sites in the
+executable, every one with kind 0:
+
+| site | function | size |
+|---|---|---|
+| `0x80026950` | PSXEXPLODE, a destroyable brush | 4096 |
+| `0x80049F9C`, `0x8004A01C` | PrimaryGrenadeLActive: meeting an entity; the fuse | 4096 |
+| `0x8004A8E0`, `0x8004A9B0` | PrimaryGrenadeActive (the hand grenade): the same two | 4096 |
+| `0x8004ADF0` | PrimaryRocketActive: any impact, before the direct hit and the blast | 4096 |
+| `0x8007CF20`, `0x8007D020` | QuakeCreatureSmash's Boss2/Flyer/Hover and Strider arms | 2048 |
+
+The creature import `+0x120` points at it as well, but no module on the disc calls it. A hand grenade cooked
+past its fuse reaches `0x8004A9B0` too: the held arm marks it, sets state 2 and re-dispatches
+(`0x8004A464`..`0x8004A46C`), and the release falls into the flying arm in the same call (`0x8004A7D4`).
+
+The port had only the first and last rows. Its rockets and grenades drew the missile tick's particle burst and
+no Explosion model, so they did not rumble either. They now go through `q2_model_ent_spawn` too
+(`projectile_explosion`, simcombat.c), which brings the fireball and its C0/40/31 light with the rumble. Two
+other effects of `size` and the spawn are still missing. `0x8005A96C` passes the size to MyScaleMatrix
+(`0x80055F3C`), so a gib arm's fireball is half the size of a rocket's, but q2_entity has no draw scale. And
+`0x8005AA54` plays Sound_Explosion (`0x800AEA9C`, `wep_grenlx1a`, filled by PreInitExplosion at `0x8005AB5C`)
+through SoundByCreature, which nothing in the port does: a rocket and a grenade still go off silently.
+
+**The Tank Commander's footstep — Tankcomm module+0x153C, the call at module+0x157C.**
+
+    module+1550  addiu a0, zero, 4     ; every window
+    module+1554  addiu a1, zero, 14    ; ShockData_Stomp
+    module+155C  sh    v0, 16(sp)      ; near, v0 = 2048 (module+1558)
+    module+156C  addiu a2, zero, 4096
+    module+1570  sh    v0, 18(sp)      ; far, v0 = 8192 (module+1560)
+    module+1574  lw    v0, 300(s0)     ; import +0x12C, 0x80040800
+    module+1580  addu  a3, s1, zero    ; self (delay slot)
+
+`a3` is `self`, and SetShockData reads its fourth argument as three words at +0, +4 and +8 (`0x80040884`,
+`0x800408AC`, `0x800408D4`). A creature's `self` is its collision object at entity+0x54, whose first three words
+are its origin, so the request is positional at the Tank. Stomp has no merge flag, so overlapping steps (or
+two Tanks) stack in separate slots. `moddisasm` of every module — BASE1's Soldier, COMMAND's and WASTE4's
+Tankcomm, WASTE4's Berserk, POWER1's Gunner and Arachner, WASTE3's Gunner, LAB's Insane and POWER2's
+Infantry — finds no other load of import `+0x12C`, and no load of `+0x120` at all. So the "31 calls" a 400-frame COMMAND capture once counted are this one site reached 31 times. A
+600-frame COMMAND run with `--god` now reports `14x6` beside its eight blaster shots.
 
 ### 13.6 Hitscan, rail and splash
 
