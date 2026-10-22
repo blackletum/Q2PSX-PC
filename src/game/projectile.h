@@ -268,14 +268,23 @@ typedef struct q2_projectile {
     /*
      * THE ATTITUDE ITS MODEL IS DRAWN WITH — entity+0xE6, the SVECTOR the
      * spawner hands RotMatrix. A rocket's is set from its flight
-     * (q2_projectile_aim_rocket) and circles it; a launched grenade's is three
-     * rand()s that never change (q2_projectile_spin_grenade). `base` and
+     * (q2_projectile_aim_rocket) and circles it; a grenade's and the BFG
+     * ball's are set once at launch (q2_projectile_set_attitude). `base` and
      * `phase` are the rocket's +0x50/+0x4C and +0x48. Not saved: a restored
      * rocket is re-aimed from its velocity (save.c).
      */
     s16 angles[3];
     s16 base[2];
     u16 phase;
+
+    /*
+     * The BFG ball's animation position, entity+0x100, and the end of its
+     * "Spin" move it wraps at (0x8004B7FC..0x8004B838); see
+     * q2_projectile_spin_bfg. Zero for everything else, which draws at the
+     * rest pose.
+     */
+    s16 anim;
+    s16 anim_end;
 
     /*
      * The collision cell this projectile is in, carried across ticks exactly as
@@ -337,12 +346,31 @@ s32 q2_projectile_raw_velocity(const q2_projectile *p, int axis);
 void q2_projectile_aim_rocket(q2_projectile *p, s32 shooter_yaw);
 
 /*
- * A launched grenade's attitude — AnyoneFireGrenadeL, 0x8004A2B8..0x8004A2EC:
- * three rand()s, stored as halfwords and handed to RotMatrix once.
- * PrimaryGrenadeLActive (0x80049E70) never writes +0xE6 again, so it does not
- * tumble; it lands and bounces at the attitude it left with.
+ * An attitude set once and kept — entity+0xE6, which three spawners write and
+ * no think of theirs writes again:
+ *
+ *     Grenade2  AnyoneFireGrenadeL 0x8004A2B8..0x8004A2EC: three rand()s
+ *     Grenade3  PrimaryGrenadeActive's release, 0x8004A6FC..0x8004A770:
+ *               the thrower's view, (-(pitch + 1280), -yaw, roll)
+ *     BFGBlast  PrimaryBFG's launch, 0x8004B544..0x8004B5DC: the thrower's
+ *               view, (-pitch, -yaw, roll), or a shooter with no client's
+ *               own (-pitch, yaw, roll)
+ *
+ * So a grenade lands and bounces at the attitude it left with, and the ball's
+ * turning is its animation (q2_projectile_spin_bfg), not its matrix.
  */
-void q2_projectile_spin_grenade(q2_projectile *p, s32 r0, s32 r1, s32 r2);
+void q2_projectile_set_attitude(q2_projectile *p, s32 r0, s32 r1, s32 r2);
+
+/*
+ * The BFG ball's spin — PrimaryBFG looks its "Spin" move up by name
+ * (0x8004B70C, FindAnimHdr), starts the position at the move's first halfword
+ * (0x8004B728), and each tick adds the frame delta and takes the move's LAST
+ * halfword off for as long as it is not below it (0x8004B7FC..0x8004B838) —
+ * so after the first pass it runs from 0, which is the move's own start on
+ * the disc's one BFGBlast. `start` and `end` are in timeline positions (block
+ * D times five, as viewweapon.c reads it).
+ */
+void q2_projectile_spin_bfg(q2_projectile *p, s32 start, s32 end);
 
 /*
  * Launch what a fire result asked for. Does nothing for a hitscan or rail

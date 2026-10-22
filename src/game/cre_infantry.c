@@ -54,8 +54,9 @@
  *     and the light — and the client draws it now (`client_cre_flash`,
  *     q2_fx_flash in effect.h) for this module, the Soldier and the Gunner.
  *
- * The blur trail is still owed: this port has no per-object render hook for
- * a creature to install, and the flash is reached from the shot instead.
+ * The blur trail is drawn by the client from the posed mesh, since this port
+ * has no per-object hook for a creature to install (client_cre_blurs); the
+ * flash is reached from the shot instead.
  *
  * ---------------------------------------------------------------------------
  * It is PC Quake II's `infantry.c`, and the evidence is arithmetic

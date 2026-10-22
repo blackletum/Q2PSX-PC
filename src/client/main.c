@@ -3179,6 +3179,116 @@ static bool client_cre_attach_place(const q2_monster *m,
 }
 
 /*
+ * THE SWING TRAILS — the blur ribbons three creature modules lay from their
+ * export 1, the per-object handler the engine calls once a frame.
+ *
+ * Each export compares the object's animation position (+0x100) against a
+ * window its init built from a named move's block-D record and, inside it,
+ * calls import +0x78 — AddBlurPoints, 0x8002F238 — over a vertex list in
+ * grey (0x00202020) for six frames:
+ *
+ *     Arachner  module+0xAAC   "Melee" [start, end]
+ *                              {290, 299} and {239, 244}  (+0x2D4, +0x2E0)
+ *     Berserk   module+0xC64   "Attack1" [start + 60,  start + 140] {280, 281, 286}
+ *                              "Attack2" [start + 130, start + 190] {275, 263}
+ *                              "Attack3" [start + 100, start + 240] {274, 265}
+ *                              (+0x1F8, +0x204, +0x20C; the inits at
+ *                              module+0x370, +0x454, +0x538)
+ *     Infantry  module+0xDC0   "Attack2" [start, end]  {200, 201}  (+0x2B8)
+ *
+ * THE WINDOWS ARE IN POSITION UNITS, block D's halfwords times five. The
+ * init stores the record's +12/+14 with no scale of its own and the handler
+ * compares them with +0x100 directly, so the record in RAM must already be in
+ * position units — the conclusion viewweapon.c reaches for the hand grenade's
+ * `Set` from the other side (its 380 could never be reached unscaled), and
+ * the one the windows themselves force: read raw, the Berserk's "Attack2" and
+ * "Attack3" windows and the Arachner's "Melee" all fall inside the creature's
+ * FIRST move, while times five each sits mid-swing in its own. No load-time
+ * multiply has been found (openquestions #51f), so the five is the port's, as
+ * it is in viewweapon.c.
+ *
+ * A module whose name does not resolve stores (1, 0) and never trails; so does
+ * a creature this frame has not posed yet. The samples come off the mesh the
+ * last draw posed (client_fx_pose), through 0x8006CC44's walk.
+ */
+typedef struct client_blur_rule {
+    const char *module;
+    const char *move;
+    s16         lo, hi;      /* added to the move's start; hi < 0: its end */
+    s16         list[2][3];  /* -1 ended, up to two lists */
+} client_blur_rule;
+
+static const client_blur_rule k_cre_blurs[] = {
+    { "Arachner", "Melee",   0,  -1, { { 290, 299, -1 }, { 239, 244, -1 } } },
+    { "Berserk",  "Attack1", 60, 140, { { 280, 281, 286 }, { -1, -1, -1 } } },
+    { "Berserk",  "Attack2", 130, 190, { { 275, 263, -1 }, { -1, -1, -1 } } },
+    { "Berserk",  "Attack3", 100, 240, { { 274, 265, -1 }, { -1, -1, -1 } } },
+    { "Infantry", "Attack2", 0,  -1, { { 200, 201, -1 }, { -1, -1, -1 } } }
+};
+
+static void client_cre_blurs(client *c)
+{
+    static const u8 grey[3] = { Q2_FX_BLUR_GREY, Q2_FX_BLUR_GREY,
+                                Q2_FX_BLUR_GREY };
+    u32 i, r;
+
+    if (!c->creatures_ready || !c->cre_fx || !c->cre_model_ok ||
+        !c->sim[0].fx_ready)
+        return;
+
+    for (i = 0; i < c->creatures.set.count; i++) {
+        const q2_monster *m = &c->creatures.set.monsters[i];
+        const client_fx_pose *fp = &c->cre_fx[i];
+        const q2_cre_bind *bind;
+        const char *name = NULL;
+
+        if (!m->in_use || !c->cre_model_ok[i] || !fp->valid ||
+            !fp->inst.model)
+            continue;
+        bind = q2_cre_bind_for(m);
+        if (bind && bind->cre && bind->cre->name[0])
+            name = bind->cre->name;
+        else if (bind && bind->impl)
+            name = bind->impl->name;
+        if (!name)
+            continue;
+
+        for (r = 0; r < Q2PSX_ARRAY_COUNT(k_cre_blurs); r++) {
+            const client_blur_rule *rule = &k_cre_blurs[r];
+            q2_model_move mv;
+            s32 lo, hi, pos = fp->inst.anim_pos;
+            int l;
+
+            if (strcmp(rule->module, name) != 0 ||
+                !q2_model_move_by_name(fp->inst.model, rule->move, &mv))
+                continue;
+            lo = (s32)mv.start * 5 + rule->lo;
+            hi = rule->hi < 0 ? (s32)mv.end * 5
+                              : (s32)mv.start * 5 + rule->hi;
+            if (pos < lo || pos > hi)
+                continue;
+
+            for (l = 0; l < 2 && rule->list[l][0] >= 0; l++) {
+                s32 pts[3][3];
+                u32 n = 0;
+
+                while (n < 3 && rule->list[l][n] >= 0 &&
+                       q2_model_world_vertex(&fp->inst, rule->list[l][n],
+                                             pts[n]))
+                    n++;
+                if (n < 2)
+                    continue;
+                q2_fx_blur_add(&c->sim[0].fx, (u16)(0x200u + i),
+                               (u16)rule->list[l][0],
+                               (const s32 (*)[3])pts, n, grey, 6,
+                               (u8)(fp->inst.sort_area > 0
+                                        ? fp->inst.sort_area : 0));
+            }
+        }
+    }
+}
+
+/*
  * Which modules draw a muzzle flash, and from which cache: the three whose
  * export 1 calls import +0xA0 while object+0x10C is negative, each reading
  * the attachment its own init blended (crebind.h, q2_cre_muzzle).
@@ -16580,6 +16690,10 @@ static void client_draw_view(void *user, q2_screen *s, int p,
      * the reset per view would make split screen lose the beams in every
      * viewport but the first.
      */
+    /* The creatures' swing trails, once a frame, off the meshes this frame
+     * has just posed (client_cre_blurs). */
+    if (p == 0)
+        client_cre_blurs(c);
     c->fx_prims += q2_fx_build_ot(&c->sim[0].fx, &c->cam, (u32)p, ot, gte);
 
     /*
@@ -18223,6 +18337,8 @@ static void client_report(const client *c)
      * ordering table. The two differ by exactly the area cull. */
     REPORT("fx.prims",              c->fx_prims);
     REPORT("fx.flashes",            c->sim[0].fx.stats.flashes_drawn);
+    REPORT("fx.blur_samples",       c->sim[0].fx.stats.blur_samples);
+    REPORT("fx.blur_quads",         c->sim[0].fx.stats.blur_quads);
     REPORT("fx.bursts",             c->ent_bursts);
     REPORT("fx.debris_models",      c->debris_models);
     REPORT("fx.debris_faces",       c->debris_faces);

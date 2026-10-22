@@ -467,10 +467,11 @@ static bool bolt_basis(const s32 dir[3], s16 m[3][3])
 }
 
 /*
- * One rocket or launched grenade, as the model entity its spawner allocates.
+ * One rocket, grenade or BFG ball, as the model entity its spawner allocates.
  *
  * The spawner looks the model up by NAME in the level's CastList — "Rocket"
- * at 0x800ACBA4, "Grenade2" at 0x800ACB8C, through GetModelHdr (0x8006D008) —
+ * at 0x800ACBA4, "Grenade2" at 0x800ACB8C, "Grenade3" at 0x800ACB98 and
+ * "BFGBlast" at 0x800ACBBC, through GetModelHdr (0x8006D008) —
  * and when the bank carries none it raises the hide bit in every viewport's
  * draw record (0x8004B064..0x8004B094), so the shot flies unseen. It draws
  * through the entity matrix like any model: RotMatrix of entity+0xE6, built
@@ -491,6 +492,7 @@ static u32 projectile_model_build_ot(const q2_projectile *p, s32 index,
     q2_model_instance inst;
     q2_model_draw_stats st;
     q2_light_env env;
+    q2_model_pose pose[Q2_MODEL_REST_POSE_MAX];
     s16 spin[3][3];
     s32 node;
     int k;
@@ -500,6 +502,22 @@ static u32 projectile_model_build_ot(const q2_projectile *p, s32 index,
 
     q2_model_instance_init(&inst);
     inst.model     = &mdl;
+    inst.pose      = q2_model_pose_rest(&mdl, pose, Q2_MODEL_REST_POSE_MAX)
+                   ? pose : NULL;
+
+    /* The BFG ball turns by its animation, at the position its think keeps
+     * (q2_projectile_spin_bfg); everything else stands at the rest pose. */
+    if (p->kind == Q2_PROJ_BFG && p->anim_end > 0 &&
+        mdl.hdr.num_parts <= Q2_MODEL_REST_POSE_MAX) {
+        q2_model_anim clip;
+        u32 within = 0;
+
+        if (q2_model_anim_at_held(&mdl, (u32)(p->anim > 0 ? p->anim : 0),
+                                  &clip, &within, NULL) &&
+            q2_model_pose_at(&mdl, &clip, within, pose) == Q2_OK)
+            inst.pose = pose;
+        inst.anim_pos = p->anim;
+    }
     inst.origin[0] = p->pos[0];
     inst.origin[1] = p->pos[1];
     inst.origin[2] = p->pos[2];
@@ -549,7 +567,8 @@ u32 q2_projectiles_build_ot(const struct q2_projectiles *list,
     const q2_weapon_tables *wt = q2_weapon_tables_builtin();
     u32 i, emitted = 0;
     gte_matrix rot;
-    s32 rocket_model = -1, grenade_model = -1;
+    s32 rocket_model = -1, grenade_model = -1, hand_model = -1;
+    s32 bfg_model = -1;
 
     if (!list || !cam || !ot || !gte)
         return 0;
@@ -557,6 +576,8 @@ u32 q2_projectiles_build_ot(const struct q2_projectiles *list,
     if (models && models->bank) {
         rocket_model  = q2_model_bank_find(models->bank, "Rocket");
         grenade_model = q2_model_bank_find(models->bank, "Grenade2");
+        hand_model    = q2_model_bank_find(models->bank, "Grenade3");
+        bfg_model     = q2_model_bank_find(models->bank, "BFGBlast");
     }
 
     /*
@@ -574,6 +595,13 @@ u32 q2_projectiles_build_ot(const struct q2_projectiles *list,
                                                      cam, ot, gte);
             else if (p->kind == Q2_PROJ_GRENADE)
                 emitted += projectile_model_build_ot(p, grenade_model, models,
+                                                     cam, ot, gte);
+            else if (p->kind == Q2_PROJ_HAND_GRENADE &&
+                     p->node != Q2_PROJ_NODE_HELD)
+                emitted += projectile_model_build_ot(p, hand_model, models,
+                                                     cam, ot, gte);
+            else if (p->kind == Q2_PROJ_BFG)
+                emitted += projectile_model_build_ot(p, bfg_model, models,
                                                      cam, ot, gte);
         }
     }
@@ -618,7 +646,7 @@ u32 q2_projectiles_build_ot(const struct q2_projectiles *list,
         /* Drawn as their models above, or hidden as the console hides one
          * whose model the level does not carry. */
         if (models && models->bank &&
-            (p->kind == Q2_PROJ_ROCKET || p->kind == Q2_PROJ_GRENADE))
+            p->kind != Q2_PROJ_BOLT)
             continue;
 
         /*
@@ -664,12 +692,10 @@ u32 q2_projectiles_build_ot(const struct q2_projectiles *list,
          *
          * A bolt's colours are the disc's own, per corner, out of the face
          * table below. The other four kinds are named-class entities on the
-         * console with models of their own and no missile record. The rocket
-         * and the launched grenade draw theirs above when the caller passes a
-         * bank; the BFG ball ("BFGBlast", animated by its think) and the hand
-         * grenade ("Grenade3") still take this box as the port's stand-in,
-         * with the glow it was given — the preset at 0x800AE954 that their
-         * dynamic light also reads.
+         * console with models of their own and no missile record, and draw
+         * them above when the caller passes a bank. Without one this box is
+         * the stand-in, with the glow it was given — the preset at 0x800AE954
+         * that their dynamic light also reads.
          */
         tint.pad = 0;
         if (p->kind == Q2_PROJ_BFG) {

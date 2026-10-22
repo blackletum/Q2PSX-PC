@@ -135,8 +135,9 @@
  * base+140] of the moves "Attack1", "Attack2" and "Attack3", resolved by name
  * at init through import +0x74 and stored at module+0x176C..+0x1777; when a
  * name does not resolve the pair is written (1, 0) so the window can never
- * match. None of that has a home: `q2_cre_impl` has no per-frame object hook
- * and `q2_monster` has no object. Named here so it is not mistaken for absent.
+ * match. `q2_cre_impl` has no per-frame object hook and `q2_monster` has no
+ * object, so the client runs it from the posed mesh instead
+ * (client_cre_blurs, effect.h's blur trail).
  *
  * The spawn function's `mass = 250`, `solid = SOLID_BBOX` and
  * `movetype = MOVETYPE_STEP` are no longer in this list: monster.h carries all

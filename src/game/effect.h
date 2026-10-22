@@ -627,6 +627,66 @@ typedef struct q2_fx_flash {
     u8  area;
 } q2_fx_flash;
 
+/*
+ * THE BLUR TRAIL — BLUR.C: AddBlurPoints 0x8002F238, ProcessBlurs 0x8002F51C,
+ * InitBlurPoints 0x8002FD98.
+ *
+ * Six 32-byte records at 0x800C73F4 and a pool of 96 eight-byte points at
+ * 0x800C70EC (index 1..96; index 0 is the slot an exhausted pool writes into),
+ * with a byte stack of free indices at 0x800C7094 that InitBlurPoints fills
+ * 1..96 and AddBlurPoints pops from the top.
+ *
+ *     record +0   u16 owner (entity+0xD0), u16 first vertex   — the key
+ *            +4   the entity
+ *            +8   s32[3] origin: the first vertex where the record was made
+ *            +20  colour word, three bytes and a code byte
+ *            +24  the frame it was last refreshed, [0x800B2DE4]
+ *            +28  s16 life, in frames — the caller's fourth argument
+ *            +30  u8  head point
+ *            +31  u8  vertices per sample, less one
+ *     point  +0   s16[3] offset from the record's origin
+ *            +6   s8  next: > 0 the same sample, < 0 the head of the older
+ *                     sample negated, 0 the end
+ *
+ * Every call samples the listed model vertices (0x8006CC44, world space) and
+ * PREPENDS them as a new sample — a "generation" — linked to the previous one
+ * by a negated index. The draw joins consecutive samples into gouraud,
+ * semi-transparent POLY_G4s, one per neighbouring vertex pair: a ribbon swept
+ * out by the line through the vertices. The newest sample is lit at the full
+ * colour scaled by `remaining / life`, where remaining is the refresh frame
+ * plus the life less now, and each older one at one less over life; a sample
+ * whose share would fall below zero is cut off and its points returned to the
+ * pool. So a trail refreshed every frame is life + 1 samples long and fades
+ * to black at its tail, and one no longer refreshed fades out over `life`
+ * frames. A record whose entity has gone (its +0xF4 zero, or its +0xD0 no
+ * longer the key's) is freed at once — q2_fx_blur_release.
+ *
+ * The quads carry no texture page, so their blend is the draw mode the world
+ * left: B+F, additive (flare.c makes the same argument). The colour every
+ * caller on this disc passes is (32, 32, 32), so a trail is a faint grey
+ * brightening of what it crosses.
+ */
+#define Q2_FX_BLURS             6    /* 0x800C73F4..0x800C74B4, 32 each   */
+#define Q2_FX_BLUR_POINTS      96    /* InitBlurPoints' `slti 96`          */
+#define Q2_FX_BLUR_SPAN_MAX    16    /* the two 64-byte xy buffers, sp+56  */
+#define Q2_FX_BLUR_GREY      0x20    /* 0x800AE96C, every caller's colour  */
+
+typedef struct q2_fx_blur_point {
+    s16 d[3];
+    s8  next;
+} q2_fx_blur_point;
+
+typedef struct q2_fx_blur {
+    u32 key;          /* owner | first vertex << 16; 0 is a free record */
+    s32 origin[3];
+    u8  rgb[3];
+    s32 stamp;
+    s16 life;
+    u8  head;
+    s8  span;
+    u8  area;         /* the draw area the trail sorts in (entity+0x9E) */
+} q2_fx_blur;
+
 /* ------------------------------------------------------------------------- */
 /* The effect world                                                           */
 /* ------------------------------------------------------------------------- */
@@ -642,6 +702,8 @@ typedef struct q2_fx_stats {
     u32 debris_live;
     u32 ot_overflow;
     u32 flashes_drawn;          /* creature muzzle-flash quads emitted      */
+    u32 blur_samples;           /* AddBlurPoints calls that took a record   */
+    u32 blur_quads;             /* ribbon quads emitted                     */
 } q2_fx_stats;
 
 typedef struct q2_fx_world {
@@ -701,6 +763,13 @@ typedef struct q2_fx_world {
     u32          flash_count;
     u16          flash_clut;    /* [0x800E3F2C + 128] = palette 64 */
 
+    /* The blur trails, BLUR.C — see q2_fx_blur_add. */
+    q2_fx_blur        blur[Q2_FX_BLURS];
+    q2_fx_blur_point  blur_pt[Q2_FX_BLUR_POINTS + 1];  /* [0] is the dummy */
+    u8                blur_free[Q2_FX_BLUR_POINTS];
+    u32               blur_free_top;
+    s32               blur_clock;     /* [0x800B2DE4], a frame counter */
+
     q2_fx_stats  stats;
 } q2_fx_world;
 
@@ -723,6 +792,20 @@ void q2_fx_use_hud_atlas(q2_fx_world *w, const struct q2_hud_font *font);
 
 /* Queue one creature muzzle flash for this frame's draw. False when the list
  * is full. See q2_fx_flash. */
+/*
+ * AddBlurPoints for one owner: `pts` are the listed vertices' world positions
+ * this frame, `count` of them (two or three on this disc), keyed on `owner`
+ * and `first_vert` as the console keys on entity+0xD0 and the list's first
+ * index. A new record takes its origin from pts[0]; an existing one is
+ * refreshed. False when every record is taken ("Too many blurs", 0x800ABDF0).
+ */
+bool q2_fx_blur_add(q2_fx_world *w, u16 owner, u16 first_vert,
+                    const s32 (*pts)[3], u32 count, const u8 rgb[3],
+                    s16 life, u8 area);
+
+/* Free every record of `owner` — the entity-gone arm of ProcessBlurs. */
+void q2_fx_blur_release(q2_fx_world *w, u16 owner);
+
 bool q2_fx_flash_add(q2_fx_world *w, const s32 corner[4][3],
                      const s32 centre[3], u8 area);
 

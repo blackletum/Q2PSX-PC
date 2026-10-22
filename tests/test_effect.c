@@ -482,6 +482,87 @@ static void test_spawn_offsets_and_puff(void)
 }
 
 /*
+ * The blur trail (BLUR.C). Each AddBlurPoints prepends a sample; a sample is
+ * joined to the newer one beside it by a quad per neighbouring vertex pair;
+ * a trail refreshed every frame keeps life + 1 samples and one that stops
+ * being refreshed is gone after `life` frames. The pool is 96 points.
+ */
+static void test_blur_trail(void)
+{
+    q2_fx_world w;
+    static const u8 grey[3] = { 32, 32, 32 };
+    psx_ot ot;
+    gte_state gte;
+    q2_camera cam;
+    s32 pts[2][3];
+    u32 f, quads, n;
+
+    printf("blur: AddBlurPoints and ProcessBlurs\n");
+
+    q2_fx_world_init(&w, &g_tab);
+    check_eq_i(w.blur_free_top, Q2_FX_BLUR_POINTS, "a full pool of 96");
+
+    /* Ten frames of a two-vertex sample moving +Z, refreshed every frame. */
+    for (f = 0; f < 10; f++) {
+        w.blur_clock++;
+        pts[0][0] = -50; pts[0][1] = 0; pts[0][2] = 3000 + (s32)f * 100;
+        pts[1][0] =  50; pts[1][1] = 0; pts[1][2] = 3000 + (s32)f * 100;
+        check(q2_fx_blur_add(&w, 7, 15, (const s32 (*)[3])pts, 2, grey, 6, 0),
+              "the sample takes the record");
+    }
+    check_eq_i(w.blur[0].key, 7u | (15u << 16), "keyed on owner and vertex");
+    check_eq_i(w.blur[0].span, 1, "two vertices: one quad a step");
+    check_eq_i(w.stats.blur_samples, 10, "ten samples taken");
+
+    if (psx_ot_init(&ot, 256, 4096) != Q2_OK) {
+        printf("  FAIL  could not allocate an ordering table\n");
+        g_failures++;
+        return;
+    }
+    gte_init(&gte);
+    gte_set_projection(&gte, 256, 256, 124);
+    memset(&cam, 0, sizeof(cam));
+    cam.projection = 256;
+    cam.far_z      = Q2_CAMERA_FAR_DEFAULT;
+    cam.sort_range = Q2_CAMERA_SORT_RANGE;
+
+    /* The draw's housekeeping cuts the chain to life + 1 = 7 samples, so 6
+     * quads; and gives 20 points back. */
+    quads = w.stats.blur_quads;
+    (void)q2_fx_build_ot(&w, &cam, 0, &ot, &gte);
+    check_eq_i(w.stats.blur_quads - quads, 6,
+               "seven samples, six quads between them");
+    check_eq_i(w.blur_free_top, Q2_FX_BLUR_POINTS - 14,
+               "the eighth sample on is back in the pool");
+
+    /* The newest sample is at the full colour, the next at 5/6 of it. */
+    n = 0;
+    {
+        u32 b;
+        for (b = 0; b < ot.prim_count; b++)
+            if (ot.prims[b].kind == PSX_PRIM_G4 &&
+                ot.prims[b].rgb[2].r == 32 && ot.prims[b].rgb[0].r == 26)
+                n++;
+    }
+    check(n == 1, "the newest quad shades 32 at its front and 26 behind");
+
+    /* Six frames without a refresh and the record is gone. */
+    w.blur_clock += 6;
+    psx_ot_clear(&ot);
+    (void)q2_fx_build_ot(&w, &cam, 0, &ot, &gte);
+    check_eq_i(w.blur[0].key, 0, "a trail not refreshed for its life is freed");
+    check_eq_i(w.blur_free_top, Q2_FX_BLUR_POINTS, "and every point returned");
+
+    /* An owner gone takes its trail with it the same frame. */
+    w.blur_clock++;
+    check(q2_fx_blur_add(&w, 9, 0, (const s32 (*)[3])pts, 2, grey, 6, 0),
+          "a new trail");
+    q2_fx_blur_release(&w, 9);
+    check_eq_i(w.blur[0].key, 0, "released with its owner");
+    psx_ot_free(&ot);
+}
+
+/*
  * The rail's spiral (0x8004917C's tail). A 3000-unit beam is three 1024-unit
  * segments, `(3000 >> 10) + 1`, and the spawn loop runs `segs & ~1` = 2 in
  * steps of two — one pass of two groups, then the last group of fifteen —
@@ -3061,6 +3142,7 @@ int main(void)
     test_presets();
     test_spawn_offsets_and_puff();
     test_rail_trail();
+    test_blur_trail();
     test_spawn_points();
     test_spawn_preset_separates();
     test_beam_pool();

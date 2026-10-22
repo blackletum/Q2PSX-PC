@@ -186,14 +186,15 @@ bool q2_entity_draw_rotation(const q2_entity *e, s16 out[3][3]);
  * other is the particle trail bit 0x1 gives it instead (effect.h). The two are
  * mutually exclusive across all three callers of 0x8004D70C.
  *
- * A ROCKET AND A LAUNCHED GRENADE ARE NOT THIS BOX. Their spawners allocate a
- * model entity — "Rocket" (AnyoneFireRocketL, 0x8004AF7C) and "Grenade2"
- * (AnyoneFireGrenadeL, 0x8004A100) out of the level's CastList — so with
- * `models` given, those two kinds draw as their models at the attitude the
- * projectile keeps (projectile.h), lit with `models->lights`, and draw nothing
- * on a level whose bank lacks the model, which is the spawner's own hide arm.
- * `models` NULL keeps the box for every kind, as an offline caller with no
- * bank needs. The BFG ball and the hand grenade still take the box.
+ * ONLY A HYPERBLASTER BOLT IS THIS BOX. Every other projectile's spawner
+ * allocates a model entity out of the level's CastList — "Rocket"
+ * (AnyoneFireRocketL, 0x8004AF7C), "Grenade2" (AnyoneFireGrenadeL,
+ * 0x8004A100), "Grenade3" (AnyoneFireGrenade, 0x8004AAB0) and "BFGBlast"
+ * (AnyoneFireBFG, 0x8004BE40) — so with `models` given, those draw as their
+ * models at the attitude the projectile keeps (projectile.h), the BFG ball
+ * posed at its spin, lit with `models->lights`; and draw nothing on a level
+ * whose bank lacks the model, which is the spawner's own hide arm. `models`
+ * NULL keeps the box for every kind, as an offline caller with no bank needs.
  *
  * Returns the number of primitives emitted.
  */

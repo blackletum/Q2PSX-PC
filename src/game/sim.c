@@ -3702,8 +3702,12 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
      * tests/test_sim.c had a check named for this and it asserted `tick_count`,
      * which is guarded three lines up and was never the counter at fault.
      */
-    if (run_world)
+    if (run_world) {
         sim->level_time += dt;
+        /* [0x800B2DE4], the frame count, moves before anything this frame
+         * samples a blur trail against it (effect.h, q2_fx_blur_add). */
+        sim->fx.blur_clock++;
+    }
 
     /* `sim->cur_dt` is set at the TOP of this function — see the note there.
      * The world half of the tick and the projectile sweep (0x80047D40, which

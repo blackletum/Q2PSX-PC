@@ -200,6 +200,17 @@ u32 q2_model_total_verts(const q2_model *m)
     return total;
 }
 
+bool q2_model_pose_rest(const q2_model *m, q2_model_pose *pose, u32 max)
+{
+    q2_model_anim clip;
+    u32 within = 0;
+
+    if (!m || !pose || m->hdr.num_parts > max)
+        return false;
+    return q2_model_anim_at_held(m, 0, &clip, &within, NULL) &&
+           q2_model_pose_at(m, &clip, within, pose) == Q2_OK;
+}
+
 bool q2_model_world_vertex(const q2_model_instance *inst, s32 index,
                            s32 out[3])
 {

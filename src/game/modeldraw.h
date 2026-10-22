@@ -320,6 +320,16 @@ bool q2_model_world_vertex(const q2_model_instance *inst, s32 index,
                            s32 out[3]);
 
 /*
+ * The pose at animation position 0 — what an entity no think animates is drawn
+ * in, since its +0x100 stays where the allocator left it. A part's rest
+ * transform is not the identity, so even a static model is posed (entitydraw.c
+ * makes the argument for the medkits). False, leaving `pose` alone, for a
+ * model with more parts than `max` or no clip.
+ */
+#define Q2_MODEL_REST_POSE_MAX 64
+bool q2_model_pose_rest(const q2_model *m, q2_model_pose *pose, u32 max);
+
+/*
  * A CREATURE'S ATTACHMENT, which is the other half of the same machinery.
  *
  * `pose_blend_two_positions` (import +0x34, 0x8006CA2C) runs once at a

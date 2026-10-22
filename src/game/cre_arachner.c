@@ -178,9 +178,9 @@
  *   - `export 1` at module+0xAAC, which is a render-time hook rather than an
  *     AI one: while the object's animation position lies inside the model's
  *     "Melee" clip it starts two blur trails through import +0x78, over
- *     positions {290, 299} and {239, 244} with colour 0x00202020 and six
- *     samples each. `q2_cre_impl` has no slot for it, so it is named and not
- *     written.
+ *     positions {290, 299} and {239, 244} with colour 0x00202020 and a life
+ *     of six frames. `q2_cre_impl` has no slot for it, so the client runs it
+ *     from the posed mesh instead (client_cre_blurs, effect.h's blur trail).
  *   - `module+0x1284` plays `ara_melee1` (module+0x19B0) and NOTHING CALLS IT.
  *     It is not in the method table, not a callback and not a move endfunc.
  *     `msc_udeath` (module+0x19C8) is likewise registered and never read. Two

@@ -3,6 +3,7 @@
 #include "combat.h"   /* q2_actor: the presentation pass ticks its effect[] slots */
 #include "fixed.h"
 #include "hud.h"
+#include "surface.h"  /* the blend the world leaves for the blur */
 #include "trig.h"
 
 #include <string.h>
@@ -142,12 +143,25 @@ u32 q2_fx_budget(u32 group_count, u32 viewport_count)
     return (group_count / 2u) * viewport_count * Q2_FX_GROUP_QUADS;
 }
 
+/* InitBlurPoints, 0x8002FD98: the records zeroed (the memset of 192 bytes) and
+ * the free stack filled with 1..96, popped from the top. */
+static void blur_init(q2_fx_world *w)
+{
+    u32 i;
+
+    memset(w->blur, 0, sizeof(w->blur));
+    for (i = 0; i < Q2_FX_BLUR_POINTS; i++)
+        w->blur_free[i] = (u8)(i + 1);
+    w->blur_free_top = Q2_FX_BLUR_POINTS;
+}
+
 void q2_fx_world_init(q2_fx_world *w, const q2_fx_tables *tab)
 {
     if (!w)
         return;
 
     memset(w, 0, sizeof(*w));
+    blur_init(w);
     w->tab        = tab;
     w->size_scale = Q2_FX_SIZE_SCALE_UNITY;
     /* No image registered yet, so quads would sample an empty page. */
@@ -292,6 +306,7 @@ void q2_fx_world_clear(q2_fx_world *w)
     untextured = w->untextured;
 
     memset(w, 0, sizeof(*w));
+    blur_init(w);
 
     w->tab        = tab;
     w->size_scale = scale;
@@ -300,6 +315,275 @@ void q2_fx_world_clear(q2_fx_world *w)
     w->flash_clut = flash_clut;
     w->untextured = untextured;
     q2_fx_world_resize(w, groups, views);
+}
+
+/* ------------------------------------------------------------------------- */
+/* The blur trail — BLUR.C                                                    */
+/* ------------------------------------------------------------------------- */
+/* Return a chain to the free stack, following the negated links across
+ * samples to the end (0x8002F6C0..0x8002F6FC, 0x8002FCC4..0x8002FD00). */
+static void blur_free_chain(q2_fx_world *w, s32 index)
+{
+    while (index != 0) {
+        if (index < 0)
+            index = -index;
+        if (index > Q2_FX_BLUR_POINTS)
+            break;
+        if (w->blur_free_top < Q2_FX_BLUR_POINTS)
+            w->blur_free[w->blur_free_top++] = (u8)index;
+        index = w->blur_pt[index].next;
+    }
+}
+
+bool q2_fx_blur_add(q2_fx_world *w, u16 owner, u16 first_vert,
+                    const s32 (*pts)[3], u32 count, const u8 rgb[3],
+                    s16 life, u8 area)
+{
+    u32 key = (u32)owner | ((u32)first_vert << 16);
+    q2_fx_blur *b = NULL;
+    u8 *link;
+    u8  old_head;
+    u32 i;
+    int k;
+
+    if (!w || !pts || !rgb || count == 0 || key == 0)
+        return false;
+
+    /* 0x8002F2D0: the record already keyed on this owner and vertex... */
+    for (i = 0; i < Q2_FX_BLURS; i++)
+        if (w->blur[i].key == key) {
+            b = &w->blur[i];
+            break;
+        }
+
+    if (b) {
+        b->stamp = w->blur_clock;                 /* 0x8002F314 */
+    } else {
+        /* ...or the first free one (a zero key, 0x8002F324..0x8002F368). */
+        for (i = 0; i < Q2_FX_BLURS; i++)
+            if (w->blur[i].key == 0) {
+                b = &w->blur[i];
+                break;
+            }
+        if (!b)
+            return false;                         /* "Too many blurs" */
+        b->key   = key;
+        b->head  = 0;
+        b->stamp = w->blur_clock;
+        b->rgb[0] = rgb[0];
+        b->rgb[1] = rgb[1];
+        b->rgb[2] = rgb[2];
+        b->life  = life;
+        for (k = 0; k < 3; k++)
+            b->origin[k] = pts[0][k];             /* 0x8002F3D8 */
+    }
+    b->area = area;
+
+    /*
+     * The new sample, prepended: the first point popped becomes the head, each
+     * next one the link of the one before, and the last links to the old head
+     * negated. An empty stack hands out index 0, which ends the chain there and
+     * writes the point into the dummy slot (0x8002F42C).
+     */
+    old_head = b->head;
+    link = &b->head;
+    for (i = 0; i < count; i++) {
+        u8 index = 0;
+        q2_fx_blur_point *p;
+
+        if (w->blur_free_top > 0)
+            index = w->blur_free[--w->blur_free_top];
+        *link = index;
+        p = &w->blur_pt[index];
+        for (k = 0; k < 3; k++)
+            p->d[k] = (s16)(pts[i][k] - b->origin[k]);
+        link = (u8 *)&p->next;
+    }
+    *link = (u8)(-(s32)old_head);                 /* 0x8002F4DC */
+    w->stats.blur_samples++;
+    b->span = (s8)(count - 1);                    /* 0x8002F4E0 */
+    return true;
+}
+
+void q2_fx_blur_release(q2_fx_world *w, u16 owner)
+{
+    u32 i;
+
+    if (!w)
+        return;
+    for (i = 0; i < Q2_FX_BLURS; i++) {
+        q2_fx_blur *b = &w->blur[i];
+
+        if (b->key == 0 || (u16)(b->key & 0xFFFFu) != owner)
+            continue;
+        blur_free_chain(w, b->head);
+        b->key = 0;
+    }
+}
+
+/*
+ * The housekeeping half of ProcessBlurs, once a frame: a record past its life
+ * is freed (0x8002F65C..0x8002F708), and a sample whose share has run below
+ * zero is cut from the chain with everything older (0x8002FBA0, 0x8002FCB0).
+ * The console does the cut while it draws; here it happens before the first
+ * viewport draws, which is the same frame.
+ */
+static void blur_expire(q2_fx_world *w)
+{
+    u32 i;
+
+    for (i = 0; i < Q2_FX_BLURS; i++) {
+        q2_fx_blur *b = &w->blur[i];
+        s32 remaining, index;
+
+        if (b->key == 0)
+            continue;
+        remaining = b->stamp + b->life - w->blur_clock;
+        if (remaining < 1) {
+            blur_free_chain(w, b->head);
+            b->key = 0;
+            continue;
+        }
+
+        index = b->head;
+        while (index > 0) {
+            s32 last = index, next;
+
+            while ((next = w->blur_pt[last].next) > 0)
+                last = next;
+            if (next == 0)
+                break;
+            if (--remaining == -1) {
+                w->blur_pt[last].next = 0;
+                blur_free_chain(w, -next);
+                break;
+            }
+            index = -next;
+        }
+    }
+}
+
+/* The colour of a sample `remaining` frames from its end (0x8002F740..). */
+static void blur_shade(const q2_fx_blur *b, s32 remaining, psx_rgb *out)
+{
+    out->r   = (u8)(((s32)b->rgb[0] * remaining) / b->life);
+    out->g   = (u8)(((s32)b->rgb[1] * remaining) / b->life);
+    out->b   = (u8)(((s32)b->rgb[2] * remaining) / b->life);
+    out->pad = 0;
+}
+
+static u32 draw_blurs(q2_fx_world *w, const q2_camera *cam, psx_ot *ot,
+                      gte_state *gte)
+{
+    u32 emitted = 0, i;
+    bool area_routed = psx_ot_area_active(ot);
+
+    for (i = 0; i < Q2_FX_BLURS; i++) {
+        const q2_fx_blur *b = &w->blur[i];
+        gte_sxy xy[2][Q2_FX_BLUR_SPAN_MAX];
+        bool    ok[2][Q2_FX_BLUR_SPAN_MAX];
+        u32     n[2] = { 0, 0 };
+        psx_rgb colour, prev_colour;
+        s32 remaining, index, gen = 0;
+        u32 bucket = 0;
+        int cur = 0;
+
+        if (b->key == 0 || b->life <= 0)
+            continue;
+        remaining = b->stamp + b->life - w->blur_clock;
+        if (remaining < 1)
+            continue;
+
+        if (area_routed && !psx_ot_area_bucket(ot, b->area & 0x7Fu, &bucket))
+            continue;
+        q2_camera_apply_area_projection(cam, ot,
+                                        area_routed ? (s32)(b->area & 0x7Fu)
+                                                    : -1,
+                                        gte);
+
+        blur_shade(b, remaining, &colour);
+        prev_colour = colour;
+        index = b->head;
+
+        while (index > 0) {
+            u16 z = 0;
+            s32 next = 0;
+            u32 q;
+
+            /* One sample: every point to the screen, the last one's depth
+             * kept for the sort (0x8002F8EC..0x8002F9B8). */
+            n[cur] = 0;
+            while (index > 0) {
+                const q2_fx_blur_point *p = &w->blur_pt[index];
+                u32 slot = n[cur];
+
+                if (slot < Q2_FX_BLUR_SPAN_MAX) {
+                    ok[cur][slot] = gte_project_point(
+                        gte,
+                        b->origin[0] + p->d[0] - cam->pos[0],
+                        b->origin[1] + p->d[1] - cam->pos[1],
+                        b->origin[2] + p->d[2] - cam->pos[2],
+                        &xy[cur][slot], &z);
+                    n[cur]++;
+                }
+                next  = p->next;
+                index = next > 0 ? next : 0;
+            }
+
+            /* From the second sample on, a quad per neighbouring pair between
+             * this sample and the newer one (0x8002FA14..0x8002FB8C): corners
+             * in libgpu's Z order, this sample's colour on the first two. */
+            for (q = 0; gen > 0 && (s32)q < b->span; q++) {
+                psx_prim *prim;
+                int c;
+
+                if (q + 1 >= n[cur] || q + 1 >= n[cur ^ 1])
+                    break;
+                if (!ok[cur][q] || !ok[cur][q + 1] ||
+                    !ok[cur ^ 1][q] || !ok[cur ^ 1][q + 1])
+                    continue;
+
+                prim = area_routed
+                     ? psx_ot_add_bucket_depth(ot, bucket, z, z)
+                     : psx_ot_add_depth(ot,
+                                        (u16)bucket_for(ot, z, 1,
+                                                        cam->sort_range),
+                                        sort_key_for(z, 1));
+                if (!prim) {
+                    w->stats.ot_overflow++;
+                    return emitted;
+                }
+                prim->kind = PSX_PRIM_G4;
+                prim->quad_zorder = true;
+                prim->xy[0].x = xy[cur][q].x;
+                prim->xy[0].y = xy[cur][q].y;
+                prim->xy[1].x = xy[cur][q + 1].x;
+                prim->xy[1].y = xy[cur][q + 1].y;
+                prim->xy[2].x = xy[cur ^ 1][q].x;
+                prim->xy[2].y = xy[cur ^ 1][q].y;
+                prim->xy[3].x = xy[cur ^ 1][q + 1].x;
+                prim->xy[3].y = xy[cur ^ 1][q + 1].y;
+                for (c = 0; c < 4; c++)
+                    prim->rgb[c] = c < 2 ? colour : prev_colour;
+                prim->semi_transparent = true;
+                prim->textured_blend   = false;
+                prim->tpage = q2_surf_blend_table[Q2_SURF_WORLD_BLEND_SELECTOR];
+                emitted++;
+                w->stats.blur_quads++;
+            }
+
+            if (next == 0)
+                break;
+            index = -next;
+            if (--remaining < 0)
+                break;
+            prev_colour = colour;
+            blur_shade(b, remaining, &colour);
+            cur ^= 1;
+            gen++;
+        }
+    }
+    return emitted;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -3081,6 +3365,13 @@ u32 q2_fx_build_ot(q2_fx_world *w,
     gte_set_rotation(gte, &gm);
     gte_set_translation(gte, 0, 0, 0);
     emitted += draw_flashes(w, cam, ot, gte, view);
+
+    /* The blur trails: their housekeeping once a frame, as the first
+     * viewport's pass of ProcessBlurs does it, then the ribbons, on the
+     * frame camera draw_flashes left installed. */
+    if (viewport == 0)
+        blur_expire(w);
+    emitted += draw_blurs(w, cam, ot, gte);
 
     return emitted;
 }

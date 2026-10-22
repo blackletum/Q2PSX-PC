@@ -133,13 +133,21 @@ void q2_projectile_aim_rocket(q2_projectile *p, s32 shooter_yaw)
     p->phase     = 0;                      /* 0x8004B244 `sw zero, 72(s0)` */
 }
 
-void q2_projectile_spin_grenade(q2_projectile *p, s32 r0, s32 r1, s32 r2)
+void q2_projectile_set_attitude(q2_projectile *p, s32 r0, s32 r1, s32 r2)
 {
     if (!p)
         return;
     p->angles[0] = (s16)r0;
     p->angles[1] = (s16)r1;
     p->angles[2] = (s16)r2;
+}
+
+void q2_projectile_spin_bfg(q2_projectile *p, s32 start, s32 end)
+{
+    if (!p)
+        return;
+    p->anim     = (s16)start;
+    p->anim_end = (s16)end;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -347,6 +355,14 @@ void q2_projectile_step(q2_projectiles *list, u32 index, s32 gravity, s32 dt,
      * `sll 16; sra 22`: a 64-step (5.6 degree) wobble of pitch against yaw,
      * once round every 4096 / 384 ticks at the PAL delta.
      */
+    /* The BFG ball's spin: the delta on, the move's end off until below it
+     * (0x8004B7FC..0x8004B838), in the halfword the console keeps it in. */
+    if (p->kind == Q2_PROJ_BFG && p->anim_end > 0) {
+        p->anim = (s16)(p->anim + dt);
+        while (p->anim >= p->anim_end)
+            p->anim = (s16)(p->anim - p->anim_end);
+    }
+
     if (p->kind == Q2_PROJ_ROCKET) {
         p->phase     = (u16)((p->phase + ((u32)dt << 5)) & 0xFFFu);
         p->angles[0] = (s16)(p->base[0] + ((s16)q2_sin12(p->phase) >> 6));

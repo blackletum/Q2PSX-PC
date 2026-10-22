@@ -17,6 +17,7 @@
 #include "sim.h"
 #include "explosive.h"
 #include "lighting.h"     /* q2_light_glow_fade — 0x80075E14 */
+#include "modeldraw.h"    /* q2_model_world_vertex, 0x8006CC44: the blur */
 #include "modelent.h"
 #include "trig.h"
 
@@ -1200,7 +1201,22 @@ q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
                 s32 r1 = q2_rng_next(&sim->combat.rng);
                 s32 r2 = q2_rng_next(&sim->combat.rng);
 
-                q2_projectile_spin_grenade(lp, r0, r1, r2);
+                q2_projectile_set_attitude(lp, r0, r1, r2);
+            } else if (lp->kind == Q2_PROJ_BFG) {
+                const q2_player *pl = &sim->player[sim->cur_player];
+                q2_model mdl;
+                q2_model_move mv;
+                s32 bfg = sim->model_bank
+                        ? q2_model_bank_find(sim->model_bank, "BFGBlast")
+                        : -1;
+
+                q2_projectile_set_attitude(lp, -pl->pitch, -pl->yaw,
+                                           pl->roll);
+                if (bfg >= 0 &&
+                    q2_model_get(sim->model_bank, (u32)bfg, &mdl) == Q2_OK &&
+                    q2_model_move_by_name(&mdl, "Spin", &mv))
+                    q2_projectile_spin_bfg(lp, (s32)mv.start * 5,
+                                           (s32)mv.end * 5);
             }
         }
         if (launched < 0) {
@@ -1746,6 +1762,12 @@ q2_hand_grenade_update q2_sim_hand_grenade_update(
 
         if (q2_projectile_hand_release(&sim->combat.projectiles,
                                        sim->cur_player, origin, raw_dir)) {
+            /* 0x8004A6FC..0x8004A770: Grenade3 leaves at the thrower's
+             * view, pitched down a further 1280 and both negated, and
+             * keeps that attitude for the rest of its flight. */
+            q2_projectile_set_attitude(&sim->combat.projectiles.p[index],
+                                       -(pl->pitch + 1280), -pl->yaw,
+                                       pl->roll);
             /* 0x8004A7C0: after reveal, velocity and throw sound. */
             (void)q2_weapon_consume(&sim->combat.inv,
                                     Q2_WID_HAND_GRENADE);
@@ -1934,6 +1956,90 @@ static void present_actor(q2_sim *sim, q2_actor *a)
 }
 
 /* ------------------------------------------------------------------------- */
+/* The blur ribbons projectiles lay — AddBlurPoints from three thinks          */
+/* ------------------------------------------------------------------------- */
+/* The key a projectile's records carry, standing in for entity+0xD0. */
+static u16 proj_blur_owner(u32 slot)
+{
+    return (u16)(0x100u + slot);
+}
+
+/*
+ * One think's AddBlurPoints calls (0x8002F238), each over a short vertex list
+ * of the projectile's own model, in grey (0x800AE96C) for `life` frames:
+ *
+ *     Rocket     {15, 21} and {38, 30}, 7   PrimaryRocketActive 0x8004AEB8,
+ *                                                                0x8004AEE0
+ *     Grenade2   {0, 7}, 6                  PrimaryGrenadeLActive 0x80049EE8
+ *     Grenade3   {2, 39}, 6, once thrown    PrimaryGrenadeActive 0x8004A830
+ *
+ * The lists are 0x800AE998, 0x800AE9A0, 0x800AE964 and 0x800AE988, each ended
+ * by -1. Each think samples at entity+0xA4, which it refreshes from +0x54 just
+ * before the call and which therefore still holds the position from before
+ * this frame's move. A level whose bank lacks the model has nothing to sample:
+ * the console reports "No model for blur" and adds nothing.
+ */
+static void proj_blur(q2_sim *sim, u32 slot, const q2_projectile *p,
+                      const s32 at[3])
+{
+    static const s16 rocket_a[2] = { 15, 21 }, rocket_b[2] = { 38, 30 };
+    static const s16 grenade[2]  = { 0, 7 },   hand[2]     = { 2, 39 };
+    static const u8  grey[3] = { Q2_FX_BLUR_GREY, Q2_FX_BLUR_GREY,
+                                 Q2_FX_BLUR_GREY };
+    const s16 *lists[2] = { NULL, NULL };
+    const char *name;
+    q2_model mdl;
+    q2_model_instance inst;
+    q2_model_pose pose[Q2_MODEL_REST_POSE_MAX];
+    s16 spin[3][3];
+    s16 life;
+    s32 index;
+    u8 area;
+    int l;
+
+    if (!sim->fx_ready || !sim->model_bank)
+        return;
+
+    switch (p->kind) {
+    case Q2_PROJ_ROCKET:
+        name = "Rocket";   lists[0] = rocket_a; lists[1] = rocket_b; life = 7;
+        break;
+    case Q2_PROJ_GRENADE:
+        name = "Grenade2"; lists[0] = grenade;  life = 6;
+        break;
+    case Q2_PROJ_HAND_GRENADE:
+        name = "Grenade3"; lists[0] = hand;     life = 6;
+        break;
+    default:
+        return;
+    }
+
+    index = q2_model_bank_find(sim->model_bank, name);
+    if (index < 0 || q2_model_get(sim->model_bank, (u32)index, &mdl) != Q2_OK)
+        return;
+
+    q2_model_instance_init(&inst);
+    inst.model = &mdl;
+    memcpy(inst.origin, at, sizeof(inst.origin));
+    q2_rotation_euler(spin, p->angles[0], p->angles[1], p->angles[2]);
+    inst.rot  = (const s16 (*)[3])spin;
+    inst.pose = q2_model_pose_rest(&mdl, pose, Q2_MODEL_REST_POSE_MAX)
+              ? pose : NULL;
+
+    area = fx_area_resolve(sim, 0, at);
+    for (l = 0; l < 2 && lists[l]; l++) {
+        s32 pts[2][3];
+        int v;
+
+        for (v = 0; v < 2; v++)
+            if (!q2_model_world_vertex(&inst, lists[l][v], pts[v]))
+                return;
+        q2_fx_blur_add(&sim->fx, proj_blur_owner(slot), (u16)lists[l][0],
+                       (const s32 (*)[3])pts, 2, grey, life, area);
+    }
+}
+
+/* ------------------------------------------------------------------------- */
 void q2_sim_combat_tick(q2_sim *sim)
 {
     u32 i;
@@ -2106,6 +2212,11 @@ void q2_sim_combat_tick(q2_sim *sim)
          */
         q2_projectile_step(&sim->combat.projectiles, i, sim->gravity,
                            sim->cur_dt, sim->level_time, &step);
+
+        /* The blur ribbon its think lays from its own model's vertices, at
+         * where it stood before this move (proj_blur). */
+        if (!held)
+            proj_blur(sim, i, p, step.from);
 
         if (!held && (p->flags & Q2_PROJ_FLAG_TRAIL) && sim->fx_ready) {
             s16 disp[3];
@@ -2524,6 +2635,17 @@ void q2_sim_combat_tick(q2_sim *sim)
 
         q2_projectile_commit(&sim->combat.projectiles, i, step.to);
     }
+
+    /*
+     * A trail whose projectile is gone goes with it, this frame: ProcessBlurs
+     * frees a record whose entity's +0xF4 has reached zero or whose +0xD0 is
+     * no longer the key's (0x8002F67C..0x8002F6A0), so a rocket's ribbon
+     * vanishes the frame it bursts rather than fading.
+     */
+    if (sim->fx_ready)
+        for (i = 0; i < Q2_PROJ_MAX; i++)
+            if (!sim->combat.projectiles.p[i].in_use)
+                q2_fx_blur_release(&sim->fx, proj_blur_owner(i));
 
     /*
      * Debris, through PRIMARY collision.
