@@ -18,6 +18,7 @@
 #include "cmd_hud.h"
 #include "cmd_text.h"
 #include "cmd_items.h"
+#include "cmd_loadout.h"
 #include "cmd_lights.h"
 #include "cmd_menu.h"
 #include "cmd_pmove.h"
@@ -170,6 +171,7 @@ static void usage(void)
     puts("  fps     <disc> <map> [zone] [weapon] [out.ppm] [yaw] [gunyaw] [eye_dy] [roll]");
     puts("  classes <disc>              the entity class table, checked against every spawn");
     puts("  items   <disc>              the item table and every place record, checked");
+    puts("  loadout <disc> [skill]      what --map hands the player on each campaign level");
     puts("  lights  <disc>              the lighting model: SpaceLights, styles, flares");
     puts("  lit     <disc> [map]        gather the lights where the player starts");
     puts("  weapons <disc>              the weapon, armour and sound tables, checked");
@@ -6375,6 +6377,8 @@ int main(int argc, char **argv)
                      (argc >= 5) ? argv[4] : NULL);
     } else if (strcmp(cmd, "items") == 0) {
         rc = cmd_items(d);
+    } else if (strcmp(cmd, "loadout") == 0) {
+        rc = cmd_loadout(d, argc > 3 ? argv[3] : NULL);
     } else if (strcmp(cmd, "lights") == 0) {
         rc = cmd_lights(d);
     } else if (strcmp(cmd, "lit") == 0) {

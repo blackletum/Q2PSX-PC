@@ -135,6 +135,7 @@
 #include "ident.h"
 #include "launcher.h"
 #include "item.h"
+#include "loadout.h"
 #include "itemtable.h"
 #include "menu.h"
 #include "menudraw.h"
@@ -1410,6 +1411,20 @@ typedef struct client {
      * BFG had no way to be looked at at all. Zero leaves the inventory alone.
      */
     int               give_weapon;
+
+    /*
+     * The launch loadout (loadout.h): what a player reaching `--map`'s level
+     * through the campaign would be carrying. Derived once at launch and
+     * handed out on every fresh load of THAT level -- the first and each
+     * restart -- because a fresh load re-runs q2_sim_init, which would put
+     * the blaster alone back in their hands. A level reached from it by
+     * LOADMAP carries what the player really has instead. `--no-loadout`
+     * starts with the blaster, as the bare level start does.
+     */
+    bool              no_loadout;
+    bool              launch_loadout_valid;
+    char              launch_loadout_map[Q2_UF_NAME_LEN + 1];
+    q2_inventory      launch_loadout;
 
     q2_mover_set      movers;
     bool              movers_ready;
@@ -7873,6 +7888,16 @@ static bool client_load_zone(client *c, const char *map, int index)
             }
 
             Q2_INFO("carried through: %d hp, %d armour, weapon %d, weapons %04X",
+                    c->sim[0].combat.inv.health, c->sim[0].combat.inv.armour,
+                    c->sim[0].combat.weapon_id, c->sim[0].combat.inv.weapons);
+        } else if (c->launch_loadout_valid && !c->mp_enabled &&
+                   client_name_eq(c->launch_loadout_map, map)) {
+            /* Nothing carried in, but this is the level the session was
+             * launched into: arrive with what the campaign would have given,
+             * holding the gun the console's own preference list picks. */
+            c->sim[0].combat.inv = c->launch_loadout;
+            q2_sim_autoselect_weapon(&c->sim[0]);
+            Q2_INFO("launch loadout: %d hp, %d armour, weapon %d, weapons %04X",
                     c->sim[0].combat.inv.health, c->sim[0].combat.inv.armour,
                     c->sim[0].combat.weapon_id, c->sim[0].combat.inv.weapons);
         }
@@ -17274,7 +17299,11 @@ static void usage(void)
            "           it a launcher lists your discs and drives and starts\n"
            "           on the one played last\n");
     printf("  --map    level directory name (default BASE0)\n");
-    printf("  --zone   zone index within the map (default 0)\n");
+    printf("  --zone   zone index within the map (default: the level's own\n"
+           "           start, its \"Default\" arrival point)\n");
+    printf("  --no-loadout  start with the blaster alone; otherwise --map\n"
+           "           hands the player what the campaign would have by\n"
+           "           then (q2psx-inspect loadout prints the table)\n");
     printf("  --scale  buffer pixels across, i.e. horizontal zoom (default 3)\n");
     printf("  --aspect 4:3 (default) | tv | square | stretch\n");
     printf("           4:3    the drawn buffer as 4:3, as the game is played\n");
@@ -17956,6 +17985,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--depth-sort"))            c.use_sort = false;
         else if (!strcmp(argv[i], "--no-autoswitch"))         c.no_autoswitch = true;
         else if (!strcmp(argv[i], "--god"))                   c.god = true;
+        else if (!strcmp(argv[i], "--no-loadout"))            c.no_loadout = true;
         else if (!strcmp(argv[i], "--continues") && i + 1 < argc)
             c.continues = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--ot-range") && i + 1 < argc) c.ot_range = atoi(argv[++i]);
@@ -18706,6 +18736,15 @@ no_window:
      * otherwise. An arena has no Default: its players take MultiSpawns. */
     if (!c.in_front_end && !c.mp_enabled && !zone_given)
         zone_index = client_default_zone(&c, map);
+
+    /* ...and carrying what the campaign would have handed them by then. */
+    if (!c.in_front_end && !c.mp_enabled && !c.no_loadout &&
+        c.item_table_ready &&
+        q2_loadout_for_level(&c.launch_loadout, c.disc, &c.item_table, map,
+                             q2_cre_skill()) > 0) {
+        c.launch_loadout_valid = true;
+        snprintf(c.launch_loadout_map, sizeof(c.launch_loadout_map), "%s", map);
+    }
 
     if (!client_load_zone(&c, map, zone_index)) {
         fprintf(stderr, "cannot load %s zone %d\n", map, zone_index);
