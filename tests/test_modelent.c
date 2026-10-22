@@ -247,6 +247,7 @@ static void count_shock(void *u, int player, int id, s32 strength,
 static void test_spawn_needs_a_bank(void)
 {
     q2_entity_set set;
+    q2_model_ent_sounds sounds;
     s32 at[3] = { 100, 200, 300 };
 
     puts("a spawn with no model is no entity at all (0x8005A894)");
@@ -254,14 +255,144 @@ static void test_spawn_needs_a_bank(void)
     memset(&set, 0, sizeof(set));
 
     g_shocks = 0;
+    q2_model_ent_sounds_clear(&sounds);
     q2_shock_attach(count_shock, NULL);
     check(q2_model_ent_spawn(&set, NULL, Q2_MODEL_ENT_EXPLOSION, at, 0,
-                             Q2_MODEL_ENT_SIZE_FULL) == NULL,
+                             Q2_MODEL_ENT_SIZE_FULL, &sounds) == NULL,
           "no bank, no entity");
     q2_shock_attach(NULL, NULL);
     check_eq(set.count, 0, "and nothing was taken from the pool");
     check_eq(g_shocks, 0,
              "and no pad shakes: 0x8005AA7C is past 0x8005A894's bail");
+    check_eq(sounds.count, 0,
+             "and no bang: 0x8005AA54 is past the same bail");
+
+    q2_entity_set_free(&set);
+}
+
+/*
+ * A ONE-MODEL CASTLIST holding a bodiless `Explosion`: the 64-byte header and
+ * nothing behind it, which satisfies every size identity q2_model_get checks
+ * with zero verts, parts and faces. Enough for the bind at 0x8005A894 to
+ * succeed, which is all the bang waits on.
+ */
+static u8 g_boom[Q2_MODEL_HEADER_SIZE];
+
+static void boom_wr16(u8 *p, u32 v) { p[0] = (u8)v; p[1] = (u8)(v >> 8); }
+static void boom_wr32(u8 *p, u32 v)
+{
+    p[0] = (u8)v; p[1] = (u8)(v >> 8); p[2] = (u8)(v >> 16); p[3] = (u8)(v >> 24);
+}
+
+static void boom_bank(q2_model_bank *bank)
+{
+    memset(g_boom, 0, sizeof(g_boom));
+    boom_wr16(g_boom + 0x02, 40);                     /* lh(model + 2)      */
+    memcpy(g_boom + 0x08, "Explosion", 9);
+    boom_wr16(g_boom + 0x1C, 300);                    /* ext2, the height   */
+    boom_wr32(g_boom + 0x20, Q2_MODEL_HEADER_SIZE);   /* faces              */
+    boom_wr32(g_boom + 0x24, Q2_MODEL_HEADER_SIZE);   /* verts              */
+    boom_wr32(g_boom + 0x28, Q2_MODEL_HEADER_SIZE);   /* parts              */
+
+    bank->data  = g_boom;
+    bank->size  = sizeof(g_boom);
+    bank->count = 1;
+}
+
+/* What the queue held when SetShockData ran, so the ORDER of the spawn's last
+ * two calls is checked and not just that both happened. */
+static const q2_model_ent_sounds *g_watch;
+static s64 g_queued_at_shock;
+
+static void order_shock(void *u, int player, int id, s32 strength,
+                        const s32 pos[3], s16 near_r, s16 far_r)
+{
+    count_shock(u, player, id, strength, pos, near_r, far_r);
+    g_queued_at_shock = g_watch ? (s64)g_watch->count : -1;
+}
+
+static void test_spawn_bangs(void)
+{
+    q2_entity_set set;
+    q2_model_bank bank;
+    q2_model_ent_sounds q;
+    s32 at[3] = { -1200, 340, 5600 };
+    s32 out[3] = { 0, 0, 0 };
+    q2_entity *e;
+
+    puts("a spawn that binds bangs where it is, before it shakes (0x8005AA54)");
+
+    memset(&set, 0, sizeof(set));
+    boom_bank(&bank);
+    q2_model_ent_sounds_clear(&q);
+
+    g_shocks          = 0;
+    g_watch           = &q;
+    g_queued_at_shock = -1;
+    q2_shock_attach(order_shock, NULL);
+
+    e = q2_model_ent_spawn(&set, &bank, Q2_MODEL_ENT_EXPLOSION, at, 0,
+                           Q2_MODEL_ENT_SIZE_FULL, &q);
+    check(e != NULL, "a bank that carries `Explosion` binds it");
+    check_eq(q.count, 1, "and one Sound_Explosion is queued");
+    check_eq(g_queued_at_shock, 1,
+             "before SetShockData: 0x8005AA54 precedes 0x8005AA7C");
+    check(q2_model_ent_sound_next(&q, out) &&
+          out[0] == at[0] && out[1] == at[1] && out[2] == at[2],
+          "at the point the spawn was handed, which is ent+0x54");
+    check(!q2_model_ent_sound_next(&q, out), "and only the one");
+
+    check(q2_model_ent_spawn(&set, &bank, Q2_MODEL_ENT_HEXPLOSION, at, 0,
+                             Q2_MODEL_ENT_SIZE_FULL, &q) == NULL,
+          "kind 1 binds nothing: no bank carries `Hexplosion`");
+    check_eq(q.count, 0, "so it makes no sound either");
+
+    check(q2_model_ent_spawn(&set, &bank, Q2_MODEL_ENT_EXPLOSION, at, 0,
+                             Q2_MODEL_ENT_SIZE_GIB, NULL) != NULL,
+          "a caller with no queue still gets its entity");
+    check_eq(g_shocks, 2, "and both binds shook the pads");
+
+    q2_shock_attach(NULL, NULL);
+    g_watch = NULL;
+    q2_entity_set_free(&set);
+}
+
+static void test_bang_queue(void)
+{
+    q2_entity_set set;
+    q2_model_bank bank;
+    q2_model_ent_sounds q;
+    s32 at[3], out[3];
+    s32 i;
+    bool in_order = true;
+
+    puts("the bang queue: oldest first, 24 deep (ProcessSounds' voices)");
+
+    memset(&set, 0, sizeof(set));
+    boom_bank(&bank);
+    q2_model_ent_sounds_clear(&q);
+
+    for (i = 0; i < Q2_MODEL_ENT_SOUNDS_MAX + 1; i++) {
+        at[0] = i * 100;
+        at[1] = -i;
+        at[2] = 7;
+        (void)q2_model_ent_spawn(&set, &bank, Q2_MODEL_ENT_EXPLOSION, at, 0,
+                                 Q2_MODEL_ENT_SIZE_FULL, &q);
+    }
+    check_eq(set.count, Q2_MODEL_ENT_SOUNDS_MAX + 1,
+             "every spawn is an entity: the queue never refuses one");
+    check_eq(q.count, Q2_MODEL_ENT_SOUNDS_MAX, "the queue holds twenty-four");
+    check_eq(q.dropped, 1, "and counts the twenty-fifth it dropped");
+
+    for (i = 0; i < Q2_MODEL_ENT_SOUNDS_MAX; i++)
+        if (!q2_model_ent_sound_next(&q, out) || out[0] != i * 100 ||
+            out[1] != -i || out[2] != 7)
+            in_order = false;
+    check(in_order, "drained in the order the spawns happened");
+    check(!q2_model_ent_sound_next(&q, NULL), "and then empty");
+
+    q2_model_ent_sounds_clear(&q);
+    check_eq(q.dropped, 0, "clearing forgets the drop count too");
 
     q2_entity_set_free(&set);
 }
@@ -1011,6 +1142,61 @@ static void test_gib_dispatch_arms(void)
     }
 }
 
+/*
+ * THE BOSS ARMS' EXPLOSION BANGS TOO. 0x8007CF20 and 0x8007D020 are the same
+ * 0x8005A778, so the SoundByCreature inside it runs for a Boss2 coming apart
+ * just as for a rocket. The dispatcher reaches the queue through the gib world.
+ */
+static void test_gib_arm_bangs(void)
+{
+    static const struct {
+        u16 cls; bool sounds; bool explosion; u32 bangs; const char *what;
+    } k[] = {
+        { 2,  true,  true,  1, "Boss2 (0x8007CF20): one bang, at the body"   },
+        { 32, true,  true,  1, "Strider (0x8007D020): one bang"              },
+        { 2,  false, true,  0, "with no queue the model is still spawned"     },
+        { 13, true,  false, 0, "Jorg's arm calls no spawn, so it is silent"   },
+        { 18, true,  false, 0, "a Soldier's Chest arm calls no spawn either"  },
+    };
+    u32 i;
+
+    puts("\nthe boss arms' Explosion bangs through the gib world (0x8005AA54)");
+
+    for (i = 0; i < sizeof(k) / sizeof(k[0]); i++) {
+        gib_fixture f;
+        q2_gib_parent p;
+        q2_gib_report rep;
+        q2_model_bank bank;
+        q2_model_ent_sounds q;
+        s32 out[3] = { 0, 0, 0 };
+        char what[128];
+
+        boom_bank(&bank);
+        q2_model_ent_sounds_clear(&q);
+        fixture_open(&f, 0x2200u + i, NULL);
+        f.gw.bank   = &bank;
+        f.gw.sounds = k[i].sounds ? &q : NULL;
+        q2_gib_attach(&f.gw);
+
+        q2_gib_parent_init(&p);
+        p.placed = true;
+        p.cls    = k[i].cls;
+        p.pos[0] = 2500; p.pos[1] = -80; p.pos[2] = -900 - (s32)i;
+
+        (void)q2_gib_destroy(&f.gw, &p, &rep);
+        snprintf(what, sizeof(what), "%s — the model", k[i].what);
+        check(rep.explosion == k[i].explosion, what);
+        snprintf(what, sizeof(what), "%s — the queue", k[i].what);
+        check_eq(q.count, k[i].bangs, what);
+        if (k[i].bangs) {
+            snprintf(what, sizeof(what), "%s — at +0x54", k[i].what);
+            check(q2_model_ent_sound_next(&q, out) && out[0] == p.pos[0] &&
+                  out[1] == p.pos[1] && out[2] == p.pos[2], what);
+        }
+        fixture_close(&f);
+    }
+}
+
 static void test_gib_pool_refusal(void)
 {
     gib_fixture f;
@@ -1432,6 +1618,8 @@ int main(void)
     test_think_clock();
     test_think_removes_unanimated();
     test_spawn_needs_a_bank();
+    test_spawn_bangs();
+    test_bang_queue();
 
     puts("\ngibs - 0x8007CEB4, 0x8005A3D4, 0x8005A0AC, 0x8005AD8C, "
          "0x8005B0AC, 0x80059DE0");
@@ -1446,6 +1634,7 @@ int main(void)
     test_gib_boss_chunk();
     test_gib_jorg_ring();
     test_gib_dispatch_arms();
+    test_gib_arm_bangs();
     test_gib_pool_refusal();
     test_gib_clip_and_land();
     test_gib_door();

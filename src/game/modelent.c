@@ -123,9 +123,52 @@ bool q2_model_ent_height(const q2_model_bank *bank, const char *name,
 }
 
 /* ------------------------------------------------------------------------- */
+void q2_model_ent_sounds_clear(q2_model_ent_sounds *q)
+{
+    if (!q)
+        return;
+    q->count   = 0;
+    q->dropped = 0;
+}
+
+static void model_ent_sound_push(q2_model_ent_sounds *q, const s32 at[3])
+{
+    int k;
+
+    if (!q)
+        return;
+    if (q->count >= Q2_MODEL_ENT_SOUNDS_MAX) {
+        q->dropped++;
+        return;
+    }
+    for (k = 0; k < 3; k++)
+        q->at[q->count][k] = at[k];
+    q->count++;
+}
+
+bool q2_model_ent_sound_next(q2_model_ent_sounds *q, s32 out[3])
+{
+    u32 i;
+    int k;
+
+    if (!q || !q->count)
+        return false;
+
+    if (out)
+        for (k = 0; k < 3; k++)
+            out[k] = q->at[0][k];
+    for (i = 1; i < q->count; i++)
+        for (k = 0; k < 3; k++)
+            q->at[i - 1][k] = q->at[i][k];
+    q->count--;
+    return true;
+}
+
+/* ------------------------------------------------------------------------- */
 q2_entity *q2_model_ent_spawn(q2_entity_set *set, const q2_model_bank *bank,
                               q2_model_ent_kind kind, const s32 at[3],
-                              u8 surface, s32 size)
+                              u8 surface, s32 size,
+                              q2_model_ent_sounds *sounds)
 {
     const char *name = q2_model_ent_name(kind);
     q2_entity *e;
@@ -207,6 +250,13 @@ q2_entity *q2_model_ent_spawn(q2_entity_set *set, const q2_model_bank *bank,
 
     e->hidden = false;
     e->kind   = Q2_ENT_KIND_MODEL;
+
+    /*
+     * THE BANG — 0x8005AA54, SoundByCreature(Sound_Explosion, ent), at the
+     * entity's own +0x54, which is `at`. Before the rumble, as on the console;
+     * the owner plays it (modelent.h).
+     */
+    model_ent_sound_push(sounds, at);
 
     /*
      * AND EVERY PAD NEAR IT SHAKES — the function's last call, 0x8005AA7C,
@@ -920,7 +970,8 @@ u32 q2_gib_destroy(const q2_gib_world *w, const q2_gib_parent *parent,
                                                    Q2_MODEL_ENT_EXPLOSION,
                                                    parent->pos,
                                                    parent->area,
-                                                   Q2_MODEL_ENT_SIZE_GIB)
+                                                   Q2_MODEL_ENT_SIZE_GIB,
+                                                   w->sounds)
                                 != NULL;
 
             rep.chunks = q2_gib_throw_named(w, parent, Q2_GIB_RING_COUNT,

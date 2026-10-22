@@ -5744,11 +5744,52 @@ past its fuse reaches `0x8004A9B0` too: the held arm marks it, sets state 2 and 
 
 The port had only the first and last rows. Its rockets and grenades drew the missile tick's particle burst and
 no Explosion model, so they did not rumble either. They now go through `q2_model_ent_spawn` too
-(`projectile_explosion`, simcombat.c), which brings the fireball and its C0/40/31 light with the rumble. Two
-other effects of `size` and the spawn are still missing. `0x8005A96C` passes the size to MyScaleMatrix
-(`0x80055F3C`), so a gib arm's fireball is half the size of a rocket's, but q2_entity has no draw scale. And
-`0x8005AA54` plays Sound_Explosion (`0x800AEA9C`, `wep_grenlx1a`, filled by PreInitExplosion at `0x8005AB5C`)
-through SoundByCreature, which nothing in the port does: a rocket and a grenade still go off silently.
+(`projectile_explosion`, simcombat.c), which brings the fireball and its C0/40/31 light with the rumble. One
+other effect of `size` is still missing: `0x8005A96C` passes it to MyScaleMatrix (`0x80055F3C`), so a gib arm's
+fireball is half the size of a rocket's, but q2_entity has no draw scale.
+
+**The bang just before the rumble — `0x8005AA54`, SoundByCreature (`0x8007270C`).**
+
+    8005AA44  lw    a0, 1180(gp)       ; Sound_Explosion, 0x800AEA9C
+    8005AA48  addu  a1, s1, zero       ; the entity just bound
+    8005AA54  jal   0x8007270C         ; SoundByCreature
+
+Sound_Explosion has two references: this load and the store at `0x8005AB5C` that ends PreInitExplosion
+(`0x8005AAA4`), which hands GetSoundNum (`0x80073518`) the twelve-byte key `wep_grenlx1a` at `0x800ACE0C`.
+RemapModels runs PreInitExplosion once a level, with a NULL header when the CastList has no `Explosion`; then
+the store is skipped, but so is every spawn, so a stale handle is never played. Like the rumble, the call is
+past both bails.
+
+SoundByCreature takes a free channel (GetFreeChannel, `0x800740DC`) and places the voice at the entity: it
+copies ent+0x54..+0x5C (`0x8007287C`..`0x80072894`), which the spawn has just set to the point it was handed
+(`0x8005A8D8`), and keeps the entity pointer so ProcessSounds re-ranges it from ent+0xA4 each frame. An
+explosion never moves, so the bang sits where the blast is. (With 0x800AEBCC set, split screen, it plays every
+such voice flat at volume 127 instead, as for any creature sound; the port positions all of them.) The voice's
+tag goes to ent+0x114/+0x116, and the think's removal, KillModel (`0x8006D280`), hands it to SoundStopOnCreDeath
+(`0x80073800`). That only marks the voice state 8, and ProcessSounds' state-8 arm (`0x800731F0`) keys a voice
+off early only when its request carries flag 0x4, whose one writer is FlagIfLoopingSample (`0x80073FF4`): "this
+sample loops". `wep_grenlx1a` is a 1.341 s one-shot on all 43 banks that carry it, so the bang plays out after
+the fireball has gone.
+
+It is the only bang a rocket or a grenade makes. The grenade thinks' own SoundByCreature calls play
+`0x800B2B1C`, `wep_grenlb1b`, the bounce. The weapon PreInit does register `wep_grenlx1a` (`0x8004DD88`, into
+`0x800B2B30`), but nothing in the image reads that handle back.
+
+**A destroyable brush plays it twice.** PSXEXPLODE calls the spawn at `0x80026950` and then its own report at
+`0x8002695C` (SoundAtLocation, the handle at `0x800B27F8`) without testing what the spawn returned. That handle
+was resolved by InitEventSoundsEachLevel from the same key in the same table, so both calls name one request.
+Each takes its own channel, nothing on either path or in ProcessSounds' 24-voice walk compares one voice with
+another, and neither request has a random pitch range (SetRandomPitch's only weapon callers name
+`wep_machgf1b`). So in a map that carries `Explosion` a brush starts two identical voices at the box centre in
+one frame, and in one that does not only the report plays.
+
+The port: `q2_model_ent_spawn` queues the point on a `q2_model_ent_sounds` (modelent.h) after a successful bind
+and before the rumble. The sim owns one (`explosion_sounds`, sim.h) that the brush, the missiles and, through
+`q2_gib_world.sounds`, the gib dispatcher's boss arms all fill. The client drains it before the brush report
+and plays `wep_grenlx1a` at each point. The queue is 24 deep, one per SPU voice, and counts what it drops.
+`--report` gives `audio.explosion_sounds` beside `audio.explosive_reports`: a 60-frame SECURITY `--shoot
+--weapon 8` run has one rocket go off and one bang, where it had none, and BASE1's `--fire-triggers` run
+reports 2 and 2.
 
 **The Tank Commander's footstep — Tankcomm module+0x153C, the call at module+0x157C.**
 

@@ -4169,6 +4169,112 @@ static void test_projectile_explosion(void)
 }
 
 /*
+ * A BRUSH BANGS TWICE AND A GRENADE ONCE.
+ *
+ * Every spawn that binds the Explosion model queues Sound_Explosion
+ * (SoundByCreature, 0x8005AA54) at its point. PSXEXPLODE then plays its own
+ * report at 0x8002695C without looking at what the spawn returned, so a brush
+ * in a map that carries the model makes both and one in a map that does not
+ * makes only the report. A grenade has no report: its bang is the spawn's.
+ *
+ * The CastList is one bodiless `Explosion` header, which is all the bind needs.
+ */
+static u8 g_boom[Q2_MODEL_HEADER_SIZE];
+
+static void boom_bank(q2_model_bank *bank)
+{
+    memset(g_boom, 0, sizeof(g_boom));
+    hwr16(g_boom + 0x02, 40);                     /* lh(model + 2)    */
+    memcpy(g_boom + 0x08, "Explosion", 9);
+    hwr16(g_boom + 0x1C, 300);                    /* ext2, the height */
+    hwr32(g_boom + 0x20, Q2_MODEL_HEADER_SIZE);   /* faces            */
+    hwr32(g_boom + 0x24, Q2_MODEL_HEADER_SIZE);   /* verts            */
+    hwr32(g_boom + 0x28, Q2_MODEL_HEADER_SIZE);   /* parts            */
+
+    bank->data  = g_boom;
+    bank->size  = sizeof(g_boom);
+    bank->count = 1;
+}
+
+static bool same3(const s32 a[3], const s32 b[3])
+{
+    return a[0] == b[0] && a[1] == b[1] && a[2] == b[2];
+}
+
+static void test_explosion_bangs(void)
+{
+    q2_sim sim;
+    q2_model_bank bank;
+    q2_scene scene;
+    q2_explosive group;
+    q2_explosive_set exp;
+    q2_actor victim;
+    q2_actor *list[1];
+    u8 raw[Q2_SCENE_NODE_SIZE];
+    const s32 lo[3] = { 1000, 200, 2000 }, hi[3] = { 1400, 600, 2400 };
+    const s32 centre[3] = { 1200, 400, 2200 };
+    const s32 at[3] = { 0, 300, 500 };
+    s32 out[3] = { 0, 0, 0 };
+    int k;
+
+    printf("a brush bangs twice and a grenade once (0x8005AA54, 0x8002695C)\n");
+
+    q2_sim_init(&sim, NULL, 50);
+    boom_bank(&bank);
+    sim.model_bank     = &bank;
+    sim.entities_ready = true;
+
+    memset(&scene, 0, sizeof(scene));
+    memset(raw, 0, sizeof(raw));
+    for (k = 0; k < 3; k++) {
+        hwr32(raw + 16 + 4 * k, (u32)lo[k]);
+        hwr32(raw + 28 + 4 * k, (u32)hi[k]);
+    }
+    scene.nodes      = raw;
+    scene.node_count = 1;
+
+    memset(&group, 0, sizeof(group));
+    for (k = 0; k < Q2_EXPLOSIVE_MAX_PARTS; k++)
+        group.node[k] = group.rubble[k] = -1;
+    group.node[0]     = 0;
+    group.part_count  = 1;
+    group.reveal      = -1;
+    group.destroy     = -1;      /* detonate and throw nothing (0x80026944) */
+    group.item_offset = 64;
+    exp.items    = &group;
+    exp.count    = 1;
+    exp.capacity = 1;
+    (void)q2_sim_attach_explosives(&sim, &exp, &scene);
+
+    check(q2_sim_explosive_trigger_item(&sim, 64), "a script blows the brush");
+    check_eq_i(sim.explosive_models, 1, "and its Explosion binds");
+    check(q2_sim_next_explosion_sound(&sim, out) && same3(out, centre),
+          "the spawn bangs at the box centre (0x8005AA54)");
+    check(!q2_sim_next_explosion_sound(&sim, out), "once");
+    check(q2_sim_next_blast(&sim, out) && same3(out, centre),
+          "AND the brush reports at the same point (0x8002695C)");
+    check(!q2_sim_next_blast(&sim, out), "once");
+
+    splash_victim(&victim, 20000);
+    list[0] = &victim;
+    splash_once(&sim, 0, at, list, 1);
+    check_eq_i(sim.projectile_models, 1, "a grenade's fuse binds the model");
+    check(q2_sim_next_explosion_sound(&sim, out) && same3(out, at),
+          "and bangs where the grenade was (0x8004A01C -> 0x8005AA54)");
+    check(!q2_sim_next_blast(&sim, out), "with no brush report beside it");
+
+    sim.model_bank  = NULL;      /* a CastList with no `Explosion` */
+    group.destroyed = 0;
+    check(q2_sim_explosive_trigger_item(&sim, 64), "the brush blows again");
+    check(!q2_sim_next_explosion_sound(&sim, out),
+          "no model, no bang: 0x8005A894 bails before 0x8005AA54");
+    check(q2_sim_next_blast(&sim, out) && same3(out, centre),
+          "but the report still plays: 0x8002695C ignores the spawn's return");
+
+    q2_sim_free(&sim);
+}
+
+/*
  * RADIUS DAMAGE IS OCCLUDED. 0x80050810 asks the world, per candidate that
  * survived the falloff, whether the blast can see it — 0x80050A24 (the hull's
  * swept move, 0x80044C44) and 0x80050A3C (the entity-box clip, 0x80053974) —
@@ -5614,6 +5720,7 @@ int main(void)
     test_weapon_stay_reaches_the_world();
     test_splash_occlusion();
     test_projectile_explosion();
+    test_explosion_bangs();
     test_dispatcher_gates();
     test_zonegate_deathmatch();
     test_fx_mesh_hook();

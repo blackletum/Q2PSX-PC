@@ -1514,6 +1514,11 @@ typedef struct client {
     /* The same pair for `amb_brkglas`, drained from the sim's smash queue. */
     u32               glass_sounds;
     u32               glass_sounds_missed;
+    /* And for the Explosion model's own bang, SoundByCreature at 0x8005AA54,
+     * drained from the sim's `explosion_sounds`: a second voice at a brush,
+     * and the only one a rocket, a grenade or a boss's gib arm makes. */
+    u32               explosion_sounds;
+    u32               explosion_sounds_missed;
     /* Every append ProcessTimedLights made, and every world vertex
      * ProcessMobileLights repainted, over the whole run. */
     u32               timed_lights_emitted;
@@ -6935,6 +6940,7 @@ static bool client_load_zone(client *c, const char *map, int index)
                               ? &c->sim[0].coll_primary : NULL;
             gw.ents     = &c->sim[0].move_world;
             gw.gravity  = &c->sim[0].gravity;
+            gw.sounds   = &c->sim[0].explosion_sounds;
             gw.describe = client_gib_describe;
             gw.user     = c;
             q2_gib_attach(&gw);
@@ -10534,6 +10540,33 @@ static void client_input_simulated(client *c, float dt)
                     c->node_hidden[node] = hidden;
                     c->explosive_vis++;
                 }
+            }
+        }
+
+        /*
+         * THE EXPLOSION'S OWN BANG. Every spawn that bound the `Explosion`
+         * model ends with SoundByCreature(Sound_Explosion, ent) at
+         * 0x8005AA54 — `wep_grenlx1a`, at the entity, which is the point the
+         * spawn was handed (modelent.h). For a rocket or a grenade it is the
+         * only sound the detonation makes; for a brush it is the first of
+         * two, and this drain runs first because PSXEXPLODE's spawn
+         * (0x80026950) comes before its report (0x8002695C).
+         *
+         * Counted on the bank, not on a voice starting, for the reason the
+         * report below gives.
+         */
+        {
+            s32 at[3];
+
+            while (q2_sim_next_explosion_sound(&c->sim[0], at)) {
+                q2_vag vag;
+
+                if (client_find_sound(c, Q2_MODEL_ENT_SOUND, &vag))
+                    c->explosion_sounds++;
+                else
+                    c->explosion_sounds_missed++;
+
+                client_play_sound_at(c, Q2_MODEL_ENT_SOUND, at);
             }
         }
 
@@ -14182,6 +14215,12 @@ static void client_write_shot(client *c, bool numbered)
         Q2_INFO("  missiles  %u rockets and grenades went off, %u Explosion"
                 " models spawned", c->sim[0].projectile_blasts,
                 c->sim[0].projectile_models);
+        /* QuakeGenExplosion's own bang, from every spawn that bound its
+         * model — brush, missile or gib arm (modelent.h). */
+        Q2_INFO("            %u Explosion bangs the bank carries (%u it"
+                " does not), %u dropped on a full queue",
+                c->explosion_sounds, c->explosion_sounds_missed,
+                c->sim[0].explosion_sounds.dropped);
         Q2_INFO("  entities  %u drawn (%u faces, %u shadows),"
                 " %u could not resolve a model, %u outside the zone",
                 c->ent_drawn, c->ent_faces, c->ent_shadows,
@@ -17717,6 +17756,12 @@ static void client_report(const client *c)
      * out of the clone at 23/63. See client_advance_view_weapon. */
     REPORT("player.water_splashes", s->water_splashes);
     REPORT("audio.weapon_sounds",   c->weapon_sounds);
+    /* SoundByCreature's bang at 0x8005AA54, one per Explosion model that
+     * bound, and PSXEXPLODE's own report at 0x8002695C beside it. A brush
+     * in a map with the model adds one to each. */
+    REPORT("audio.explosion_sounds", c->explosion_sounds);
+    REPORT("audio.explosion_sounds_missed", c->explosion_sounds_missed);
+    REPORT("audio.explosive_reports", c->explosive_sounds);
     REPORT("audio.chaingun_bangs",  c->chaingun_bangs);
     REPORT("audio.shotgun_cocks",   c->cocks_played);
     REPORT("audio.quad_gated",      c->quad_gated);

@@ -387,9 +387,14 @@ static q2_fx_preset_id fx_for_projectile(q2_proj_kind kind)
  *
  * The bolt and the BFG ball never call it. So on the console a rocket or a
  * grenade bursts as the missile tick's particles AND as the Explosion model,
- * whose think raises the C0/40/31 light every tick (modelent.h) — and every
- * pad within 4096 of it shakes (0x8005AA7C). This port drew the particles
- * alone.
+ * whose think raises the C0/40/31 light every tick (modelent.h) — and it
+ * bangs (0x8005AA54, queued on `explosion_sounds`), and every pad within 4096
+ * of it shakes (0x8005AA7C). This port drew the particles alone.
+ *
+ * That bang is the missile's ONLY one. The grenade thinks' own SoundByCreature
+ * calls play 0x800B2B1C, `wep_grenlb1b`, the bounce; the weapon PreInit does
+ * register `wep_grenlx1a` (0x8004DD88, into 0x800B2B30), but nothing in the
+ * image ever reads that handle back.
  *
  * The surface byte is the projectile's cell's area. The port's projectile
  * carries no +0x9E, so it comes from the burst point through the 0x800686C4
@@ -411,7 +416,7 @@ static void projectile_explosion(q2_sim *sim, q2_proj_kind kind,
         q2_model_ent_spawn(&sim->entities, sim->model_bank,
                            Q2_MODEL_ENT_EXPLOSION, at,
                            fx_area_resolve(sim, 0, at),
-                           Q2_MODEL_ENT_SIZE_FULL))
+                           Q2_MODEL_ENT_SIZE_FULL, &sim->explosion_sounds))
         sim->projectile_models++;
 }
 
@@ -2577,6 +2582,7 @@ u32 q2_sim_attach_breakables(q2_sim *sim, const q2_scene *scene,
     sim->explosives           = NULL;
     sim->node_vis_count       = 0;
     sim->blast_count          = 0;
+    q2_model_ent_sounds_clear(&sim->explosion_sounds);
     sim->glass_count          = 0;   /* a smash from the last zone is not one
                                       * the new zone's mixer should hear */
     sim->explosive_destroyed  = 0;
@@ -2840,6 +2846,11 @@ bool q2_sim_next_blast(q2_sim *sim, s32 out[3])
     return true;
 }
 
+bool q2_sim_next_explosion_sound(q2_sim *sim, s32 out[3])
+{
+    return sim && q2_model_ent_sound_next(&sim->explosion_sounds, out);
+}
+
 /* The same drain for the pane smashes, because 0x8002A4A4 is the same
  * SoundAtLocation call with the same kind of argument as 0x8002695C's. */
 bool q2_sim_next_glass_smash(q2_sim *sim, s32 out[3])
@@ -2900,13 +2911,19 @@ static void explosive_apply(q2_sim *sim, const q2_explosive_result *res)
             if (sim->entities_ready &&
                 q2_model_ent_spawn(&sim->entities, sim->model_bank,
                                    Q2_MODEL_ENT_EXPLOSION, b->at,
-                                   (u8)b->area, Q2_MODEL_ENT_SIZE_FULL))
+                                   (u8)b->area, Q2_MODEL_ENT_SIZE_FULL,
+                                   &sim->explosion_sounds))
                 sim->explosive_models++;
 
             sim->explosive_blasts++;
 
             /* And the report, at the same point (0x8002695C). Queued for the
-             * owner, which is the half that has a mixer and a sound bank. */
+             * owner, which is the half that has a mixer and a sound bank.
+             *
+             * ALWAYS, and as well as the spawn's own bang: 0x8002695C does not
+             * test 0x8005A778's return, so the brush makes this sound whether
+             * or not the model bound, and a second, identical one inside the
+             * spawn when it did (sim.h, `explosion_sounds`). */
             if (sim->blast_count <
                     sizeof(sim->blast_at) / sizeof(sim->blast_at[0])) {
                 int k;
