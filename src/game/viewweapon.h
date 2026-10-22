@@ -491,6 +491,28 @@ typedef struct q2_viewweapon {
  */
 u32 q2_vw_take_frame_fires(q2_viewweapon *vw);
 
+/*
+ * Tell the machine how one of those shots went — once per fire call, in
+ * order, `dry` being the fire function's return of 2.
+ *
+ * Each arm tests that return before anything else it does. A shot that fired
+ * raises the quad's sound (0x80050004, 0x80050234, 0x80050300); a dry one
+ * does not, and instead:
+ *
+ *   machinegun    0x8004FFF4  `sw v0, 72` with v0 = 2: the state becomes
+ *                             IDLE on the spot, ending the burst loop, and the
+ *                             accumulator clears (0x80050038)
+ *   chaingun      0x80050230  the dry latch (+216) is raised, so the loop
+ *                             falls out into the spin-down
+ *   hyperblaster  0x800502FC  likewise
+ *
+ * Without the machinegun's arm an empty gun held its burst loop — frame 2
+ * wraps back to 0 for as long as the trigger is down — clicking dry every
+ * time the accumulator passed 30, and never reached the idle pass that
+ * switches weapon.
+ */
+void q2_vw_frame_fire_result(q2_viewweapon *vw, bool dry);
+
 /* The sound a frame boundary asked for, or -1. Drains it. */
 s16 q2_vw_take_frame_sound(q2_viewweapon *vw);
 

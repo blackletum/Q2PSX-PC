@@ -186,9 +186,13 @@
  * family, and this port folds several families into one set:
  *
  *   MOVER_A/B/C, LIFT1, CAGELIFT1           -> the three above
- *   PLATFORM                                -> those three AND two more
- *   BUTTON                                  -> amb_butn2 and nothing else
+ *   PLATFORM                                -> those three, and two rumbles
+ *   BUTTON                                  -> amb_butn2, once, on arrival
  *   PISTON, DISH                            -> silent, deliberately
+ *
+ * A BUTTON is folded in for its sound bank and nothing else: its own handler
+ * 0x80029C28 clicks only when a positive-speed press reaches its stop
+ * (0x80029E18), and its return is silent. See button_tick in mover.c.
  *
  * PLATFORM REACHES THE SAME THREE BY A DIFFERENT ROUTE, and the folding above
  * is a convenience rather than a reading of the engine. 0x80025658 is installed
@@ -199,28 +203,27 @@
  * msc_keytry at 0x8002C4C0, pt1__strt at 0x8002C5C0 and 0x8002C6A0 — so the
  * bank-key set agrees even though the code path does not.
  *
- * IT PLAYS TWO MORE, and this file used to end the paragraph at "the outcome
- * agrees". It does not agree: a train is the one mover with a running sound and
- * an arrival sound, and it reaches them through a different call entirely.
+ * AND IT SHAKES THE PAD, which is not a sound. A train makes two more calls,
+ * through a different function entirely:
  *
- *   0x8002C778  id 13, volume 1024, EVERY TICK the platform is moving
- *   0x8002C8D8  id 14, volume 3072, on the tick it arrives
+ *   0x8002C778  id 13, strength 1024, EVERY TICK the platform is moving
+ *   0x8002C8D8  id 14, strength 3072, on the tick it arrives
  *
- * Both go to `0x80040800(4, id, volume, &pos, 2048, 4096)`, which is not
- * 0x80073704's by-handle path at all. It walks the entity array at 0x800D5C30,
- * rejects anything further than the outer radius, attenuates linearly between
- * the two (`vol * (far - d) / (far - near)`, dropped under 513), and resolves
- * `id` against a 16-record table of SPU parameter pairs at 0x8009D420 — ids 1
- * through 0x10, each `{ const void *a; const void *b; u16 flags; u16 id; }`.
+ * Both are `SetShockData(4, id, strength, &pos, 2048, 4096)`. This used to
+ * read them as an SPU emitter with a sixteen-record "parameter table"; MAIN.SYM
+ * names 0x80040800 SetShockData, the array it walks at 0x800D5C30 is
+ * GameWindows — one record per PLAYER, `4` meaning all of them — and the
+ * records at 0x8009D420 are ShockData_Explosion (13) and ShockData_Stomp (14)
+ * among sixteen DualShock patterns. So the train rumbles every pad within 4096
+ * of it, at full strength inside 2048, and thumps on arrival; no train audio is
+ * missing. shock.h has the engine; `travel_sound` carries which of the two a
+ * tick asked for, and the client turns it into the request.
  *
- * There is no mixer in this port yet, so `travel_sound` records WHICH of the
- * two a tick asked for and nothing consumes it. Recorded rather than dropped,
- * because a silent train is a thing somebody will eventually go looking for.
- *
- * WHERE it comes from: every call passes the CENTRE of the mover's collision
- * box, and the CLOSING one adds the live displacement (0x80025A00 onward), so
- * the sound follows the door. A mover with no box in this zone is not in this
- * zone, and is silent rather than listener-local.
+ * WHERE a sound comes from: every call passes the CENTRE of the object's box,
+ * and the door's CLOSING arm adds the live displacement (0x80025A00 onward),
+ * so the sound follows the door; the BUTTON's click adds none (0x80029D58..
+ * 0x80029E14). A mover with no object in this zone is not in this zone, and is
+ * silent rather than listener-local.
  */
 typedef enum q2_mover_sound {
     Q2_MVSND_NONE = -1,
@@ -235,17 +238,16 @@ typedef enum q2_mover_sound {
 extern const char *const q2_mover_sound_name[Q2_MVSND_COUNT];
 
 /*
- * PLATFORM's two, which are NOT bank keys — they are indices into the SPU
- * parameter table at 0x8009D420 and go through 0x80040800. Kept as the raw
- * numbers the executable passes so that a future mixer has the same operand the
- * console had, rather than a name this port invented for it.
+ * PLATFORM's two, which are NOT bank keys — they are SetShockData pattern ids
+ * (shock.h: 13 is ShockData_Explosion, 14 ShockData_Stomp), kept as the raw
+ * numbers the executable passes.
  */
 #define Q2_MOVER_TRAVEL_MOVE_ID   13u
-#define Q2_MOVER_TRAVEL_MOVE_VOL  1024u
+#define Q2_MOVER_TRAVEL_MOVE_VOL  1024u  /* strength, 1.0.12              */
 #define Q2_MOVER_TRAVEL_STOP_ID   14u
 #define Q2_MOVER_TRAVEL_STOP_VOL  3072u
-#define Q2_MOVER_TRAVEL_NEAR      2048   /* full volume within this radius */
-#define Q2_MOVER_TRAVEL_FAR       4096   /* silent beyond it               */
+#define Q2_MOVER_TRAVEL_NEAR      2048   /* full strength within this radius */
+#define Q2_MOVER_TRAVEL_FAR       4096   /* nothing beyond it                */
 
 /* obj+0x52 in the original. */
 typedef enum q2_mover_state {
@@ -257,6 +259,15 @@ typedef enum q2_mover_state {
     Q2_MV_DELAY,
     Q2_MV_OPEN
 } q2_mover_state;
+
+/* A BUTTON's obj+0x52 has its own four values — its handler is 0x80029C28,
+ * not the door's (mover.c, button_tick). Kept in the same `state` byte. */
+enum {
+    Q2_BTN_REST = 0,
+    Q2_BTN_PRESSING,
+    Q2_BTN_PRESSED,
+    Q2_BTN_RETURNING
+};
 
 enum {
     Q2_MV_BLK_IGNORE_OPENING = 1,
@@ -320,7 +331,8 @@ typedef struct q2_mover {
     u8  external_part;
 
     /*
-     * The sound this tick asked for from 0x80040800's numeric table, or 0.
+     * The RUMBLE this tick asked SetShockData (0x80040800) for, or 0 — a
+     * pattern id, not a sound (shock.h).
      *
      * Q2_MOVER_TRAVEL_MOVE_ID while it is moving, Q2_MOVER_TRAVEL_STOP_ID on
      * the tick it arrives. Trains only — no other family reaches that call.
@@ -378,7 +390,7 @@ typedef struct q2_mover {
      * handler a constructor installs is what decides it.
      */
     u8  silent;        /* PISTON, DISH: no sound at all      */
-    u8  is_button;     /* amb_butn2 instead of the three     */
+    u8  is_button;     /* its own handler, and amb_butn2     */
 
     /*
      * The sound this tick asked for, or Q2_MVSND_NONE. Drained by the owner,

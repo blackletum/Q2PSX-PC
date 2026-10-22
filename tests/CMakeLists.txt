@@ -53,14 +53,27 @@ target_link_libraries(test_sim PRIVATE
 
 add_test(NAME sim_behaviour COMMAND test_sim)
 
+add_executable(test_launchcfg test_launchcfg.c ../src/client/launchcfg.c)
+
+target_include_directories(test_launchcfg PRIVATE ../src/client)
+target_link_libraries(test_launchcfg PRIVATE
+    q2psx_common
+)
+
+add_test(NAME launcher_config COMMAND test_launchcfg)
+
 if(TARGET q2psx)
-    add_executable(test_client_split test_client_split.c ../src/client/gamepad.c)
+    set(client_extra_sources
+        ../src/client/gamepad.c
+        ../src/client/launcher.c
+        ../src/client/launchcfg.c)
+    add_executable(test_client_split test_client_split.c ${client_extra_sources})
     get_target_property(split_client_libraries q2psx LINK_LIBRARIES)
     target_link_libraries(test_client_split PRIVATE ${split_client_libraries})
     add_dependencies(test_client_split q2psx)
     add_test(NAME split_client COMMAND test_client_split)
 
-    add_executable(test_client_save test_client_save.c ../src/client/gamepad.c)
+    add_executable(test_client_save test_client_save.c ${client_extra_sources})
     target_link_libraries(test_client_save PRIVATE ${split_client_libraries})
     add_dependencies(test_client_save q2psx)
     add_test(NAME save_client COMMAND test_client_save)
@@ -363,3 +376,12 @@ target_link_libraries(test_events PRIVATE
 )
 
 add_test(NAME event_runtime COMMAND test_events)
+
+add_executable(test_shock test_shock.c)
+
+target_link_libraries(test_shock PRIVATE
+    q2psx_common
+    q2psx_game
+)
+
+add_test(NAME dualshock COMMAND test_shock)

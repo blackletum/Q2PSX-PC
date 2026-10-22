@@ -568,8 +568,9 @@ static void test_dynamic(void)
  * the same with one more shift; this recomputes both the long way and checks the
  * port's multiply agrees at the ends of the range and at a value in the middle.
  *
- * The bases are the two `addiu` immediates, 250 and 700, and one rand draw feeds
- * both radii -- so a shot's inner and outer always move together.
+ * The bases are the two `addiu` immediates, 250 and 700, and each radius has a
+ * rand draw of its own -- 0x8004C970 for the inner, 0x8004C990 for the outer --
+ * so a shot's inner and outer vary independently.
  */
 static void test_muzzle_light(void)
 {
@@ -588,7 +589,7 @@ static void test_muzzle_light(void)
         t = r << 1; t += r; t <<= 3; t += r; t <<= 3;
         want_out = (t >> 15) + 700;
 
-        q2_weapon_muzzle_light(r, &inner, &outer);
+        q2_weapon_muzzle_light(Q2_WID_MACHINEGUN, r, r, &inner, &outer);
         check_eq_i(inner, want_in,  "muzzle inner radius");
         check_eq_i(outer, want_out, "muzzle outer radius");
     }
@@ -596,12 +597,42 @@ static void test_muzzle_light(void)
     /* The documented ranges, which are what a reader will sanity-check against. */
     {
         s32 lo_in, lo_out, hi_in, hi_out;
-        q2_weapon_muzzle_light(0, &lo_in, &lo_out);
-        q2_weapon_muzzle_light(32767, &hi_in, &hi_out);
+        q2_weapon_muzzle_light(Q2_WID_MACHINEGUN, 0, 0, &lo_in, &lo_out);
+        q2_weapon_muzzle_light(Q2_WID_MACHINEGUN, 32767, 32767,
+                               &hi_in, &hi_out);
         check_eq_i(lo_in, 250,  "inner at rand 0");
         check_eq_i(hi_in, 349,  "inner at rand 32767");
         check_eq_i(lo_out, 700, "outer at rand 0");
         check_eq_i(hi_out, 899, "outer at rand 32767");
+
+        /* Two draws: each radius ignores the other's. */
+        q2_weapon_muzzle_light(Q2_WID_MACHINEGUN, 0, 32767, &lo_in, &hi_out);
+        check_eq_i(lo_in, 250,  "the inner radius reads only the first draw");
+        check_eq_i(hi_out, 899, "the outer radius reads only the second");
+    }
+
+    /*
+     * The chaingun's own chains: r1 * 200 built as ((2r + r) << 3 + r) << 3
+     * at 0x8004CD48, r2 * 300 as ((4r + r) << 4 - 5r) << 2 at 0x8004CD68, on
+     * bases 350 and 900.
+     */
+    {
+        s32 in0, out0, in1, out1, r = 12345, t, want_in, want_out, cin, cout;
+
+        q2_weapon_muzzle_light(Q2_WID_CHAINGUN, 0, 0, &in0, &out0);
+        q2_weapon_muzzle_light(Q2_WID_CHAINGUN, 32767, 32767, &in1, &out1);
+        check_eq_i(in0,   350, "chaingun inner at rand 0");
+        check_eq_i(in1,   549, "chaingun inner at rand 32767");
+        check_eq_i(out0,  900, "chaingun outer at rand 0");
+        check_eq_i(out1, 1199, "chaingun outer at rand 32767");
+
+        t = r << 1; t += r; t <<= 3; t += r; t <<= 3;
+        want_in = (t >> 15) + 350;
+        t = (r << 2) + r; t = (t << 4) - t; t <<= 2;
+        want_out = (t >> 15) + 900;
+        q2_weapon_muzzle_light(Q2_WID_CHAINGUN, r, r, &cin, &cout);
+        check_eq_i(cin,  want_in,  "chaingun inner, the shift-add chain");
+        check_eq_i(cout, want_out, "chaingun outer, the shift-add chain");
     }
 
     /* The creature flash: two draws, bigger bases, same colour. */

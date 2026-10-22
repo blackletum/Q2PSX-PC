@@ -11,6 +11,7 @@
 #include "projectile.h"
 #include "weapon.h"
 #include "random.h"
+#include "shock.h"
 #include "worldscale.h"   /* Q2_DT_NOMINAL, Q2_GRAVITY, Q2_VEL_DIV */
 
 static int g_failures;
@@ -707,6 +708,117 @@ static void test_projectiles(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * The machinegun as QPlayerFireMachineGun (0x8004C744) builds a shot, draw by
+ * draw: three kick draws (pitch >>> 11, yaw and roll >>> 12), then three
+ * spread draws, and a SetShockData request for pattern 5. The chaingun takes
+ * two kick draws, both >>> 11, into yaw and roll, and does not write pitch.
+ */
+static s16 kick_of(s32 draw, int shift)
+{
+    return (s16)(u16)((u32)((draw & 0x7FFF) - 16384) >> shift);
+}
+
+static void test_kick_and_shock(void)
+{
+    static const struct { int id; s16 shock; u8 axes; } want[] = {
+        { Q2_WID_BLASTER,          Q2_SHOCK_BLASTER,      Q2_KICK_PITCH },
+        { Q2_WID_SHOTGUN,          Q2_SHOCK_SHOTGUN,      Q2_KICK_PITCH },
+        { Q2_WID_SUPER_SHOTGUN,    Q2_SHOCK_SSHOTGUN,     Q2_KICK_PITCH },
+        { Q2_WID_MACHINEGUN,       Q2_SHOCK_MACHINEGUN,   Q2_KICK_ALL },
+        { Q2_WID_CHAINGUN,         Q2_SHOCK_CHAINGUN,
+                                   Q2_KICK_YAW | Q2_KICK_ROLL },
+        { Q2_WID_HAND_GRENADE,     Q2_SHOCK_GRENADE_OPEN, 0 },
+        { Q2_WID_GRENADE_LAUNCHER, Q2_SHOCK_GRENADEL,     Q2_KICK_PITCH },
+        { Q2_WID_ROCKET_LAUNCHER,  Q2_SHOCK_ROCKETL,      Q2_KICK_PITCH },
+        { Q2_WID_HYPERBLASTER,     Q2_SHOCK_HYPERBLASTER, 0 },
+        { Q2_WID_RAILGUN,          Q2_SHOCK_RAILGUN,      Q2_KICK_PITCH },
+        { Q2_WID_BFG,              Q2_SHOCK_BFG,          0 },
+    };
+    q2_inventory inv;
+    q2_rng rng, ref;
+    q2_fire_result_v2 r;
+    s32 eye[3] = { 0, 0, 0 };
+    s16 aim[3] = { 0, 0, 4096 };
+    s32 d;
+    u32 i;
+
+    printf("machinegun kick and shock\n");
+
+    q2_rng_seed(&rng, 7);
+    ref = rng;
+    give_all(&inv);
+    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_MACHINEGUN, eye, 0, 0, 0, aim,
+                       0, 0, false, false, 0);
+    check(r.fired, "the machinegun fires");
+    check_eq_i(inv.ammo[Q2_AMMO_BULLETS], 199, "one bullet");
+    d = q2_rng_next(&ref);
+    check_eq_i(r.kick[0], kick_of(d, 11), "pitch is the first draw, >>> 11");
+    d = q2_rng_next(&ref);
+    check_eq_i(r.kick[1], kick_of(d, 12), "yaw the second, >>> 12");
+    d = q2_rng_next(&ref);
+    check_eq_i(r.kick[2], kick_of(d, 12), "roll the third, >>> 12");
+    d = q2_rng_next(&ref);
+    check_eq_i(r.shot[0].dir[0], (d - 16384) >> 5,
+               "then x's spread, +-512 on an aim times four");
+    d = q2_rng_next(&ref);
+    check_eq_i(r.shot[0].dir[1], (d - 16384) >> 5, "y's");
+    d = q2_rng_next(&ref);
+    check_eq_i(r.shot[0].dir[2], 4 * 4096 + ((d - 16384) >> 5), "and z's");
+    check_eq_i(r.shot[0].damage, 8, "for 8");
+    check_eq_i(r.mod, Q2_MOD_BULLET, "as a bullet");
+    check_eq_i(r.shock, Q2_SHOCK_MACHINEGUN, "and pattern 5 on the pad");
+
+    /* The truncated unsigned shift keeps the kick small and signed. */
+    for (i = 0; i < 256; i++) {
+        give_all(&inv);
+        r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_MACHINEGUN, eye, 0, 0, 0,
+                           aim, 0, 0, false, false, 0);
+        check(r.kick[0] >= -8 && r.kick[0] <= 7, "pitch kick within -8..7");
+        check(r.kick[1] >= -4 && r.kick[1] <= 3, "yaw kick within -4..3");
+        check(r.kick[2] >= -4 && r.kick[2] <= 3, "roll kick within -4..3");
+    }
+
+    /* The chaingun: two draws, yaw and roll, pitch untouched. */
+    q2_rng_seed(&rng, 7);
+    ref = rng;
+    give_all(&inv);
+    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_CHAINGUN, eye, 0, 0, 0, aim,
+                       0, 0, false, false, 2);
+    check_eq_i(r.kick_axes, Q2_KICK_YAW | Q2_KICK_ROLL,
+               "the chaingun writes yaw and roll only");
+    check_eq_i(r.kick[0], 0, "and leaves pitch alone");
+    d = q2_rng_next(&ref);
+    check_eq_i(r.kick[1], kick_of(d, 11), "yaw is its first draw, >>> 11");
+    d = q2_rng_next(&ref);
+    check_eq_i(r.kick[2], kick_of(d, 11), "roll its second, also >>> 11");
+    check_eq_i(r.shock, Q2_SHOCK_CHAINGUN, "a spin that fires shakes the pad");
+
+    give_all(&inv);
+    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_CHAINGUN, eye, 0, 0, 0, aim,
+                       0, 0, false, false, 0);
+    check_eq_i(r.shock, Q2_SHOCK_NONE,
+               "one that fires nothing does not (0x8004CCD0)");
+
+    /* Every weapon's id and kick fields, against its call site. */
+    for (i = 0; i < sizeof(want) / sizeof(want[0]); i++) {
+        const q2_weapon_behaviour *b = &q2_weapon_behaviour_table[want[i].id];
+
+        check_eq_i(b->shock, want[i].shock, "the SetShockData id");
+        check_eq_i(b->kick_axes, want[i].axes, "the kick fields written");
+    }
+
+    /* A dry trigger asks the pad for nothing. */
+    give_all(&inv);
+    inv.ammo[Q2_AMMO_BULLETS] = 0;
+    r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_MACHINEGUN, eye, 0, 0, 0, aim,
+                       0, 0, false, false, 0);
+    check(r.dry, "an empty machinegun is dry");
+    check_eq_i(r.shock, Q2_SHOCK_NONE, "and shakes nothing");
+    check_eq_i(r.kick_axes, 0, "nor kicks");
+}
+
+/* ------------------------------------------------------------------------- */
 int main(void)
 {
     printf("weapon behaviour\n\n");
@@ -715,6 +827,7 @@ int main(void)
     test_tables();
     test_selection();
     test_firing();
+    test_kick_and_shock();
     test_muzzle();
     test_projectiles();
 

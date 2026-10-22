@@ -62,13 +62,23 @@
  * ---------------------------------------------------------------------------
  * Written straight into the player's kick fields, and constant for most
  * weapons: -11 for the blaster, grenade launcher and rocket launcher, -22 for
- * both shotguns, -34 for the railgun, zero for the hyperblaster. The machinegun
- * and chaingun instead take three random draws, `((rand & 0x7FFF) - 16384) >>>
- * n` with an UNSIGNED shift on a value that is usually negative; truncated to
- * the s16 the field holds, that yields a small signed number, so the effect is
- * a jitter of about +-8 in pitch and +-4 in yaw and roll. The port reproduces
- * the truncation rather than the intent, because the truncation is what the
- * console did.
+ * both shotguns, -34 for the railgun. The machinegun instead takes three
+ * random draws, `((rand & 0x7FFF) - 16384) >>> n` with an UNSIGNED shift on a
+ * value that is usually negative; truncated to the s16 the field holds, that
+ * yields a small signed number, so the effect is a jitter of -8..7 in pitch
+ * and -4..3 in yaw and roll. The port reproduces the truncation rather than
+ * the intent, because the truncation is what the console did.
+ *
+ * WHICH FIELDS A WEAPON WRITES IS PART OF ITS KICK. The constant weapons
+ * store client+160 (pitch) alone; the machinegun stores +160, +162 and +164
+ * (0x8004C7D8, 0x8004C7EC, 0x8004C810); the chaingun only +162 and +164, both
+ * shifted by 11 (0x8004CB34, 0x8004CB58), and leaves pitch as the last shot
+ * left it. The hyperblaster, the BFG and the hand grenade write none and do
+ * not touch the 30-tick deadline at client+204 either. Every writer re-arms
+ * that deadline, so a field a weapon does NOT write is re-applied from
+ * whatever an earlier shot put there: a shotgun fired straight after a burst
+ * of machinegun carries the burst's last yaw and roll. `kick_axes` below
+ * records which fields each fire function stores.
  *
  * ---------------------------------------------------------------------------
  * Refire
@@ -78,14 +88,29 @@
  * model animation loop instead. So the console does not have per-weapon fire
  * rates in the PC sense; it has one gate plus animation length.
  *
- * AND NOTHING READS IT BACK, which is why every `refire` in the table below is
- * zero rather than 30. The write to client+204 is real and FORMATS.md §13.1
- * records it; no instruction in the weapon path loads that word again. The
- * console's idle state calls the fire function once per fire pass and then
- * enters the FIRE clip, so the CLIP is the rate — and a port that also armed a
- * 30-tick gate here would be adding a second, invented limiter on top of it.
- * `Q2_WEAPON_DRY_REFIRE` is the one gate this module does arm, and it is the
- * port's own, for the empty-trigger case the console has no deadline for.
+ * AND NOTHING IN THE WEAPON PATH READS IT BACK, which is why every `refire` in
+ * the table below is zero rather than 30. The write to client+204 is real and
+ * FORMATS.md §13.1 records it; it is the VIEW KICK's deadline, read by the
+ * view composer at 0x800382A4 to decay the kick over thirty ticks, and no
+ * fire path loads it. The console's idle state calls the fire function once
+ * per fire pass and then enters the FIRE clip, so the CLIP is the rate — and
+ * a port that also armed a 30-tick gate here would be adding a second,
+ * invented limiter on top of it. `Q2_WEAPON_DRY_REFIRE` is the one gate this
+ * module does arm, and it is the port's own, for the empty-trigger case the
+ * console has no deadline for.
+ *
+ * ---------------------------------------------------------------------------
+ * And the pad
+ * ---------------------------------------------------------------------------
+ * Every fire function that spends ammunition ends with
+ * `SetShockData(player, id, 4096, NULL)` (0x80040800, shock.h): the
+ * machinegun's kick is felt as well as seen. The ids are immediates at each
+ * call site — 0x8004C19C blaster 1, 0x8004C454 shotgun 3, 0x8004C718 super
+ * shotgun 4, 0x8004CA6C machinegun 5, 0x8004CD28 chaingun 6, 0x8004D010
+ * grenade launcher 9, 0x8004D224 rocket launcher 10, 0x8004D460 hyperblaster
+ * 2, 0x8004D6D0 railgun 11, 0x8004EBC0 BFG 12, 0x8004EC90 the hand grenade's
+ * prime 7 — and the chaingun's sits behind its bullet count, so a spin that
+ * fires nothing shakes nothing (0x8004CCD0).
  */
 #ifndef Q2PSX_WEAPON_H
 #define Q2PSX_WEAPON_H
@@ -157,13 +182,22 @@ typedef struct q2_weapon_behaviour {
     q2_spread spread;
 
     s16 kick_pitch;     /* written to the player's kick field                */
-    bool kick_random;   /* machinegun and chaingun: three random draws       */
+    bool kick_random;   /* machinegun and chaingun: random draws, not pitch  */
+    u8  kick_axes;      /* Q2_KICK_* — which of client+160/162/164 it stores */
 
     s16 refire;         /* ticks; 0 when the animation drives the rate       */
     s16 mod;            /* means of death the shot carries                   */
+    s16 shock;          /* SetShockData id (shock.h), 0 for none             */
 
     u32 addr;           /* the fire function, so a reader can check a row    */
 } q2_weapon_behaviour;
+
+/* The three kick fields a fire function may store. A weapon with none of them
+ * also leaves the deadline at client+204 alone. */
+#define Q2_KICK_PITCH  0x01u    /* client+160 */
+#define Q2_KICK_YAW    0x02u    /* client+162 */
+#define Q2_KICK_ROLL   0x04u    /* client+164 */
+#define Q2_KICK_ALL    (Q2_KICK_PITCH | Q2_KICK_YAW | Q2_KICK_ROLL)
 
 /* Indexed by the 1-based weapon id; slot 0 is the do-nothing stub. */
 extern const q2_weapon_behaviour q2_weapon_behaviour_table[Q2_WT_SLOTS];
@@ -295,20 +329,28 @@ bool q2_weapon_usable(const q2_inventory *inv, int id);
  * The machinegun's fire function (0x8004C744, weapon id 4) and the chaingun's
  * (0x8004CA9C, id 5) each append a dynamic light. Both read their colour from
  * 0x800AE9D4 -- `C8 64 64`, rgb(200, 100, 100) -- and both compute their radii
- * from a SINGLE BIOS rand() draw (0x8004C970 -> 0x80089E28):
+ * from TWO BIOS rand() draws, one per radius:
  *
- *     8004C978  sll/addu/sll/addu/sll   ; r * 100
- *     8004C98C  sra  s0, s0, 15         ; >> 15
- *     8004C994  addiu s0, s0, 250       ; inner = ((r*100)>>15) + 250
+ *     8004C970  jal  0x80089E28         ; r1 = rand()
+ *     8004C978  sll/addu/sll/addu/sll   ; r1 * 100
+ *     8004C98C  sra  s0, s0, 15
+ *     8004C990  jal  0x80089E28         ; r2 = rand()
+ *     8004C994  addiu s0, s0, 250       ; inner = ((r1*100)>>15) + 250
+ *     8004C998  sll/addu/sll/addu/sll   ; r2 * 200
+ *     8004C9AC  sra  v1, v1, 15
+ *     8004C9C0  addiu v1, v1, 700       ; outer = ((r2*200)>>15) + 700
  *
- *     8004C998  sll/addu/sll/addu/sll   ; r * 200
- *     8004C9AC  sra  v1, v1, 15         ; >> 15
- *     8004C9C0  addiu v1, v1, 700       ; outer = ((r*200)>>15) + 700
+ * This used to say one draw fed both, and the port spent one; the `jal` at
+ * 0x8004C990 sits in the gap between the two shift-add chains, with the
+ * inner radius's +250 in its delay slot. So the two radii vary independently:
+ * 250..349 and 700..899, in any combination.
  *
- * One draw feeds both, so the flash's size varies shot to shot but its inner and
- * outer stay in proportion: 250..349 and 700..899. `q2_rng_next` is the BIOS
- * generator bit for bit (see weapon.c), so this reproduces the console's
- * sequence rather than approximating it.
+ * AND THE CHAINGUN'S IS BIGGER. Its chains at 0x8004CD48 and 0x8004CD68 build
+ * r1 * 200 and r2 * 300, with bases 350 (0x8004CD64) and 900 (0x8004CD94):
+ * 350..549 and 900..1199. The two weapons used to share the machinegun's.
+ *
+ * `q2_rng_next` is the BIOS generator bit for bit (see weapon.c), so this
+ * reproduces the console's sequence rather than approximating it.
  */
 #define Q2_MUZZLE_LIGHT_R      200
 #define Q2_MUZZLE_LIGHT_G      100
@@ -317,6 +359,10 @@ bool q2_weapon_usable(const q2_inventory *inv, int id);
 #define Q2_MUZZLE_INNER_SCALE  100
 #define Q2_MUZZLE_OUTER_BASE   700
 #define Q2_MUZZLE_OUTER_SCALE  200
+#define Q2_CG_MUZZLE_INNER_BASE   350
+#define Q2_CG_MUZZLE_INNER_SCALE  200
+#define Q2_CG_MUZZLE_OUTER_BASE   900
+#define Q2_CG_MUZZLE_OUTER_SCALE  300
 
 /*
  * The CREATURE muzzle flash — import slot 0xA0, which the Soldier's, the
@@ -324,9 +370,8 @@ bool q2_weapon_usable(const q2_inventory *inv, int id);
  * bit is up (q2_fx_flash in effect.h). It is not the Gunner's think 13, which
  * an earlier census credited: that method is an empty `jr ra`.
  *
- * Same colour as the player's, and the same shape of computation, but bigger and
- * drawn TWICE rather than once (0x800311B0 and 0x800311E0 are two separate
- * rand() calls):
+ * Same colour as the player's, and the same shape of computation — two rand()
+ * calls, 0x800311B0 and 0x800311E0, one per radius — but bigger:
  *
  *     inner = ((r1 * 200) >> 15) + 850     850..1049
  *     outer = ((r2 * 400) >> 15) + 1200   1200..1599
@@ -347,8 +392,11 @@ void q2_creature_muzzle_light(s32 rand_a, s32 rand_b, s32 *inner, s32 *outer);
 /* True for the two weapon ids whose fire function appends a light. */
 bool q2_weapon_has_muzzle_light(u8 weapon_id);
 
-/* The flash's radii from one rand draw, exactly as 0x8004C978 computes them. */
-void q2_weapon_muzzle_light(s32 rand_0_32767, s32 *inner, s32 *outer);
+/* The flash's radii from its two rand draws, the inner from the first, as
+ * 0x8004C978 (machinegun) and 0x8004CD48 (chaingun) compute them. Any other id
+ * gets the machinegun's. */
+void q2_weapon_muzzle_light(u8 weapon_id, s32 rand_a, s32 rand_b,
+                            s32 *inner, s32 *outer);
 
 /* ------------------------------------------------------------------------- */
 /* Firing                                                                     */
@@ -407,6 +455,8 @@ typedef struct q2_fire_result_v2 {
     q2_shot shot[Q2_FIRE_MAX_PELLETS];
 
     s16  kick[3];           /* what to write into the player's view kick     */
+    u8   kick_axes;         /* which of `kick` to write; 0 leaves the deadline */
+    s16  shock;             /* SetShockData id for the shooter's pad, or 0   */
     s32  next_fire;         /* level tick when firing is allowed again       */
     s16  sound;             /* q2_wt_sound, or -1                            */
     s32  projectile_timer;  /* spawner's fuse/lifetime, in level ticks       */

@@ -339,11 +339,10 @@ static void fire_state_step(q2_viewweapon *vw, s32 step, bool fire_held)
             vw->spin_accum += step;
             if (vw->spin_accum >= VW_SPIN_THRESHOLD) {
                 /* 0x8004FFD0 skips the shot on the last key and leaves the
-                 * accumulator standing, so the next substep asks again. */
+                 * accumulator standing, so the next substep asks again. The
+                 * quad's sound waits for the shot's result (0x80050004). */
                 if (vw->frame != 2) {
                     vw->frame_fires++;
-                    if (vw->quad_active)      /* 0x80050004 */
-                        vw->quad_sound = true;
                     vw->spin_accum = 0;
                 }
             }
@@ -443,8 +442,7 @@ static void fire_state_step(q2_viewweapon *vw, s32 step, bool fire_held)
             if (n < 1)
                 n = 1;
             vw->frame_fires += (u32)n;
-            if (vw->quad_active)              /* 0x80050234 */
-                vw->quad_sound = true;
+            /* 0x80050234's quad sound follows the result, as above. */
         }
         break;
     }
@@ -461,11 +459,8 @@ static void fire_state_step(q2_viewweapon *vw, s32 step, bool fire_held)
 
             vw->spin_accum += step;
             if (vw->spin_accum >= VW_SPIN_THRESHOLD) {
-                if (vw->frame != 6) {
-                    vw->frame_fires++;
-                    if (vw->quad_active)      /* 0x80050300 */
-                        vw->quad_sound = true;
-                }
+                if (vw->frame != 6)
+                    vw->frame_fires++;    /* quad: 0x80050300, on the result */
                 vw->spin_accum = 0;
             }
         } else if (!fire_held) {
@@ -711,6 +706,43 @@ u32 q2_vw_take_frame_fires(q2_viewweapon *vw)
     n = vw->frame_fires;
     vw->frame_fires = 0;
     return n;
+}
+
+void q2_vw_frame_fire_result(q2_viewweapon *vw, bool dry)
+{
+    if (!vw)
+        return;
+
+    if (!dry) {
+        if (vw->quad_active)
+            vw->quad_sound = true;
+        return;
+    }
+
+    switch (vw->weapon) {
+    case VW_MACHINEGUN:
+        /*
+         * 0x8004FFF4: `bne v0, s1` against 2 falls through to `j 0x80050034`
+         * with `sw v0, 72(s0)` in its delay slot, and 0x80050038 clears +52.
+         * The frame is left where it was; the caller at 0x8004EF54 sees the
+         * state change and reloads the key for it, which begin_key is.
+         */
+        if (vw->state == Q2_VM_FIRE) {
+            vw->state      = Q2_VM_IDLE;
+            vw->spin_accum = 0;
+            begin_key(vw);
+            interpolate(vw);
+        }
+        break;
+
+    case VW_CHAINGUN:
+    case VW_HYPERBLASTER:
+        vw->fire_latch = true;      /* 0x80050230 / 0x800502FC */
+        break;
+
+    default:
+        break;
+    }
 }
 
 bool q2_vw_take_quad_sound(q2_viewweapon *vw)

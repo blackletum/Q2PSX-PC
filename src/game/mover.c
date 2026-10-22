@@ -13,14 +13,12 @@ const char *const q2_mover_sound_name[Q2_MVSND_COUNT] = {
     "amb_butn2"     /* 0x800B27E4 */
 };
 
-/* Ask for a sound, unless this family has none. A BUTTON has exactly one and
- * uses it for everything; PISTON and DISH have none at all. */
+/* Ask for a sound, unless this family has none. PISTON and DISH have none at
+ * all; a BUTTON's single click is raised by its own handler (button_tick). */
 static void mover_sound(q2_mover *m, s8 which)
 {
     if (m->silent)
         return;
-    if (m->is_button)
-        which = Q2_MVSND_BUTTON;
     m->sound_pending = which;
 }
 
@@ -599,18 +597,42 @@ q2_result q2_movers_build_calls(q2_mover_set *out, const q2_events *events,
                  * references none of the other five handles. */
                 m->is_button = 1;
                 /*
-                 * `travel`'s SIGN selects obj+0x3A = +1 or -1 and its magnitude
-                 * goes to obj+0x44 — so a button's speed is literally one unit
-                 * a tick and its target is the travel. `invert` negates the
-                 * target. Both are userfuncs.c's wording, not a reading of it.
+                 * THE EXEC'S OWN ARITHMETIC (0x8002E118..0x8002E18C), read
+                 * rather than paraphrased. `travel`'s sign is the SPEED:
+                 * non-negative stores +1 to obj+0x3A and travel itself to
+                 * obj+0x44, negative stores -1 and the travel's negation. So
+                 * the target is the magnitude and the direction lives in the
+                 * speed — the port had them the other way round, speed 1 and
+                 * the sign in the target, which sends a negative-travel button
+                 * the wrong way.
+                 *
+                 * And the byte at +4 is read TWICE. The constructor takes its
+                 * low two bits as the axis (0x80029F94..0x80029FA8, into bits
+                 * 14..15 of obj+0x50, which 0x80029CE4 turns into an offset
+                 * into the displacement triple at +18), and the exec negates
+                 * the target whenever it is non-zero (0x8002E170). All three
+                 * BUTTONs on the disc have it non-zero: BASE2 and JAIL4 on Y,
+                 * JAIL2 on Z (`q2psx-inspect zonescript`).
+                 *
+                 * The axis used to be hard-coded to Y like the lifts'.
                  */
                 s16 travel = q2_rd_s16(p + 14);
-                s16 mag    = (s16)abs(travel);
+                u16 mag    = (u16)travel;
 
-                m->target     = (s8)p[4] ? (s16)-mag : mag;
-                m->speed      = 1;
+                if (travel >= 0) {
+                    m->target = (s16)mag;
+                    m->speed  = 1;
+                } else {
+                    m->target = (s16)(0u - mag);
+                    m->speed  = -1;
+                }
+                if (p[4])
+                    m->target = (s16)-m->target;
+                m->axis       = (u8)(p[4] & 3u);
                 m->node[0]    = q2_rd_s16(p + 12);
                 m->part_count = (m->node[0] >= 0) ? 1 : 0;
+                /* `* 300` in a halfword (0x8002E150..0x8002E16C): a wait of
+                 * 65535, which JAIL2's is, wraps to 65236. */
                 m->wait_timer = (u16)(q2_rd_u16(p + 8) * Q2_MOVER_TIMEBASE);
                 break;
             }
@@ -817,6 +839,22 @@ void q2_mover_trigger(q2_mover_set *set, u32 index)
     m->triggered = 1;
 
     /*
+     * A BUTTON IS PRESSED BY ITS EXEC, not by a latch its handler reads.
+     * 0x8002E0D0 returns at once when the item's object slot is negative —
+     * JAIL4's button names no object in any zone and so never moves or
+     * clicks — and 0x8002E10C only starts a button that is at rest (state 0),
+     * which is what makes a volume the player stands in press it once. The
+     * wait is reloaded from the item on every press (0x8002E16C).
+     */
+    if (m->is_button) {
+        if (m->node[0] >= 0 && m->state == Q2_BTN_REST) {
+            m->state      = Q2_BTN_PRESSING;
+            m->wait_timer = m->wait_reset;
+        }
+        return;
+    }
+
+    /*
      * A PISTON IS ARMED, NOT OPENED. PSXPISTON (0x8002E9EC) tests obj+0x52
      * BEFORE it writes anything (`lbu v0, 82(a1)` / `bne v0, zero` at
      * 0x8002EA2C) and returns when the latch is up, so a script that reaches a
@@ -947,6 +985,97 @@ static void piston_tick(q2_mover *m, s32 dt)
                 m->running = 0;
         }
     }
+}
+
+/* ------------------------------------------------------------------------- */
+/* BUTTON — 0x80029C28                                                        */
+/* ------------------------------------------------------------------------- */
+/*
+ * THE BUTTON HAS ITS OWN HANDLER, and it is not the door's. The constructor
+ * installs 0x80029C28 at obj+0x2C (0x80029F90) and never the generic
+ * 0x80025658, so a button has no delay, no blocked state, no key and — the
+ * reason this was split out — ONE sound at ONE moment:
+ *
+ *   state 0  at rest: the return arm, which holds it at zero
+ *   state 1  pressing: `pos += speed * dt` toward the stop. Positive speed
+ *            stops at `target` and, on the tick it gets there, plays
+ *            amb_butn2 at the centre of the object's box (0x80029E18) and
+ *            enters state 2. Negative speed stops at `-target` and enters
+ *            state 2 SILENTLY (0x80029E28..0x80029E5C).
+ *   state 2  pressed: the wait counts down; a zero wait never returns
+ *            (0x80029C98), and on expiry the wait is set to 0xFFFF and the
+ *            state to 3. The countdown is `lhu` minus dt in a full register,
+ *            so a wait in the top half of the halfword is a LONG wait, not an
+ *            expired one.
+ *   state 3  returning: `pos -= speed * dt` back to zero, then state 0,
+ *            silently.
+ *
+ * The port used to run a button through the door's seven states with every
+ * door sound mapped to amb_butn2, so it clicked when the press STARTED and
+ * again when the return started, and never on arrival.
+ *
+ * The position is a halfword (`lhu` at 0x80029CF8, `sh` at 0x80029ED0) and
+ * every comparison is on its sign-extended value; a button whose target sits
+ * on the far side of zero from its speed reaches it on its first tick, as two
+ * of the disc's three do.
+ */
+static void button_tick(q2_mover *m, s32 dt)
+{
+    s32 pos = (s32)(u16)m->offset;   /* `lhu s2, 18(v0)` */
+    s32 to;
+    bool pressing;
+
+    switch (m->state) {
+    case Q2_BTN_PRESSING:
+        pressing = true;
+        break;
+
+    case Q2_BTN_PRESSED:
+        if (m->wait_timer == 0) {
+            pressing = true;        /* 0x80029C98: held forever */
+            break;
+        }
+        {
+            s32 left = (s32)m->wait_timer - dt;
+
+            m->wait_timer = (u16)left;
+            if (left <= 0) {
+                m->wait_timer = 0xFFFFu;
+                m->state      = Q2_BTN_RETURNING;
+            }
+            pressing = left > 0;
+        }
+        break;
+
+    default:
+        pressing = false;
+        break;
+    }
+
+    if (pressing) {
+        to = pos + m->speed * dt;
+        if (m->speed > 0) {
+            if ((s16)to > m->target) {
+                to = (u16)m->target;
+                if (m->state == Q2_BTN_PRESSING) {
+                    mover_sound(m, Q2_MVSND_BUTTON);
+                    m->state = Q2_BTN_PRESSED;
+                }
+            }
+        } else if ((s16)to < -(s32)m->target) {
+            to = -(s32)(u16)m->target;
+            if (m->state == Q2_BTN_PRESSING)
+                m->state = Q2_BTN_PRESSED;
+        }
+    } else {
+        to = pos - m->speed * dt;
+        if (m->speed > 0 ? (s16)to <= 0 : (s16)to >= 0) {
+            to = 0;
+            m->state = Q2_BTN_REST;
+        }
+    }
+
+    m->offset = (s16)to;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1230,6 +1359,15 @@ u32 q2_movers_tick_blocked(q2_mover_set *set, s32 dt, u16 player_keys,
         if (m->prim == Q2_UF_PISTON) {
             if (m->running)
                 piston_tick(m, dt);
+            if (m->offset != before)
+                moved++;
+            continue;
+        }
+
+        /* Nor does a BUTTON run the door's machine, and it is never blocked:
+         * 0x80029C28 has no obstruction test in it. */
+        if (m->is_button) {
+            button_tick(m, dt);
             if (m->offset != before)
                 moved++;
             continue;

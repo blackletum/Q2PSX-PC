@@ -424,6 +424,36 @@ int cmd_zonescript(const disc *d, const char *only_map)
                                     prim_have[call.prim]++;
 
                                 /*
+                                 * The three BUTTONs, operand for operand. The
+                                 * byte at +4 is read twice: the constructor
+                                 * takes its low two bits as the AXIS
+                                 * (0x80029F94..0x80029FA8) and the exec
+                                 * negates the target when it is non-zero
+                                 * (0x8002E170). `travel`'s sign is the speed.
+                                 * Each zone keeps its own copy of the item,
+                                 * and that copy is the one the zone runs.
+                                 */
+                                if (call.prim == Q2_UF_BUTTON &&
+                                    item.len >= 16) {
+                                    size_t boff = (size_t)(pp - cev.data);
+                                    u32 zq;
+
+                                    for (zq = 0; zq < zcount; zq++) {
+                                        const u8 *zp = zev[zq].data + boff;
+
+                                        if (boff + 16 > zev[zq].size)
+                                            continue;
+                                        printf("    %s zone%u: BUTTON axis %u%s"
+                                               " travel %d wait %u object %d\n",
+                                               g_maps[mi], zq, zp[4] & 3u,
+                                               zp[4] ? " (target negated)" : "",
+                                               q2_rd_s16(zp + 14),
+                                               q2_rd_u16(zp + 8),
+                                               q2_rd_s16(zp + 12));
+                                    }
+                                }
+
+                                /*
                                  * LASERBEAM, which no trigger reaches, and the
                                  * reason it needs none.
                                  *

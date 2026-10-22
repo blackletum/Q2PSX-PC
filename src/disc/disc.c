@@ -18,6 +18,7 @@
 #endif
 
 #include "disc.h"
+#include "cddrive.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -45,6 +46,7 @@ typedef struct backing_file {
 struct disc {
     backing_file backing[DISC_MAX_BACKING];
     int          backing_count;
+    cd_drive    *drive;          /* a disc in a drive; NULL for an image */
 
     cd_track     tracks[CD_MAX_TRACKS];
     int          track_count;
@@ -214,6 +216,7 @@ static void disc_reset_loaded(disc *d)
         if (d->backing[i].fp)
             fclose(d->backing[i].fp);
     }
+    cd_drive_close(d->drive);
     free(d->files);
     memset(d, 0, sizeof(*d));
 }
@@ -263,6 +266,8 @@ q2_result disc_read_raw_sector(const disc *d, u32 lba, u8 *out)
     t = disc_track_for_lba(d, lba);
     if (!t)
         return Q2_ERR_NOT_FOUND;
+    if (d->drive)
+        return cd_drive_read_raw(d->drive, lba, out);
     if (t->file_index < 0 || t->file_index >= d->backing_count)
         return Q2_ERR_IO;
 
@@ -853,6 +858,40 @@ static q2_result disc_load_iso_path(disc *d, const char *path)
 }
 
 /* ------------------------------------------------------------------------- */
+/* A disc in an optical drive                                                 */
+/* ------------------------------------------------------------------------- */
+/* The drive's own table of contents stands in for a CUE sheet; every sector
+ * then comes through cddrive.c rather than a backing file. */
+static q2_result disc_load_drive(disc *d, const char *path)
+{
+    q2_result r;
+    int i;
+
+    r = cd_drive_open(&d->drive, path);
+    if (r != Q2_OK)
+        return r;
+
+    r = cd_drive_read_toc(d->drive, d->tracks, CD_MAX_TRACKS, &d->track_count);
+    if (r != Q2_OK) {
+        Q2_ERROR("%s: cannot read the disc's table of contents", path);
+        return r;
+    }
+
+    d->data_track = -1;
+    for (i = 0; i < d->track_count; i++) {
+        if (d->tracks[i].type == CD_TRACK_DATA) {
+            d->data_track = i;
+            break;
+        }
+    }
+    if (d->data_track < 0) {
+        Q2_ERROR("%s: the disc in the drive has no data track", path);
+        return Q2_ERR_BAD_FORMAT;
+    }
+    return Q2_OK;
+}
+
+/* ------------------------------------------------------------------------- */
 /* Public API                                                                 */
 /* ------------------------------------------------------------------------- */
 q2_result disc_open(disc **out, const char *path)
@@ -872,7 +911,9 @@ q2_result disc_open(disc **out, const char *path)
 
     ext = path_extension(path);
 
-    if (ascii_casecmp(ext, "cue") == 0) {
+    if (cd_drive_parse(path, NULL, 0, NULL, 0)) {
+        r = disc_load_drive(d, path);
+    } else if (ascii_casecmp(ext, "cue") == 0) {
         r = disc_load_cue(d, path);
     } else if (ascii_casecmp(ext, "iso") == 0) {
         r = disc_load_iso_path(d, path);
@@ -921,8 +962,9 @@ q2_result disc_open(disc **out, const char *path)
     }
 
     snprintf(d->description, sizeof(d->description),
-             "%s — %s, %d track%s, %u sectors, %d files",
-             path,
+             "%s%s%s — %s, %d track%s, %u sectors, %d files",
+             path, d->drive ? ", read " : "",
+             d->drive ? cd_drive_mode_name(cd_drive_read_mode(d->drive)) : "",
              d->system_id[0] ? d->system_id : "unknown system",
              d->track_count, d->track_count == 1 ? "" : "s",
              d->volume_sectors, d->file_count);

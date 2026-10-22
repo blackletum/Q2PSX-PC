@@ -807,6 +807,69 @@ static void player_damage_end(q2_sim *sim)
     }
 }
 
+/*
+ * THE MUZZLE IS PULLED BACK INTO THE ROOM before anything leaves it.
+ *
+ * Every fire function forms its muzzle point as eye + the rotated offset and
+ * then calls Find3dSpaceGivenSecondary (0x80055054) with that point, the
+ * shooter's own origin at entity+0x54 and its cell at +0xA2 — the
+ * machinegun's at 0x8004C890. That moves from the origin to the muzzle
+ * through PrimaryColl (0x80044C44), and what the shot is built from is not
+ * the point it was handed but where the move stopped, read back from
+ * CollMap+40 (`lw a0, 40(v1)` at 0x8004C8A0, the three words copied over the
+ * origin at 0x8004C8AC..0x8004C8C0), with the cell from CollMap+26.
+ *
+ * WHEN IT BITES. SecondaryCol keeps the origin 286 from every face, and a
+ * level muzzle 250 ahead of the eye never reaches one: BASE1 and BASE2 runs
+ * clip nothing. The eye sits up to 290 above the origin, though, so aiming up
+ * under a low ceiling — or into any face the box erosion is not square to —
+ * puts the formed point inside or beyond it, and there the port fired from
+ * the far side while the console fires from the face and hits it. Every
+ * hitscan and projectile path does the
+ * same (0x8004C078 blaster, 0x8004C2D4 shotgun, 0x8004C598 super shotgun,
+ * 0x8004CBD8 chaingun, 0x8004CF34 grenade launcher, 0x8004D344
+ * hyperblaster, and inside AnyoneFireInstantRail 0x800491CC and
+ * AnyoneFireRocketL 0x8004AF6C). AnyoneFireBFG and the hand grenade's spawner
+ * have no such call.
+ *
+ * A shooter standing in no PrimaryColl cell keeps the unclipped point: the
+ * console's start comes from the +0xA2 hint and always has a cell, and the
+ * port's move would instead leave the muzzle at the origin.
+ */
+static void clip_muzzle(q2_sim *sim, q2_fire_result_v2 *r)
+{
+    const q2_player *p = &sim->player[sim->cur_player];
+    s32 from[3], to[3], end[3], node = -1;
+    u32 i;
+
+    if (!sim->coll_primary_ready || r->shot_count == 0)
+        return;
+    if (r->kind == Q2_FK_BFG || r->kind == Q2_FK_HAND_GRENADE)
+        return;
+
+    from[0] = p->pos[0];
+    from[1] = q2_sim_origin_y(p->pos[1]);
+    from[2] = p->pos[2];
+    memcpy(to, r->shot[0].origin, sizeof(to));
+
+    (void)q2_coll_move(&sim->coll_primary, from, to, -1, end, &node);
+    if (sim->coll_primary.current_node < 0) {
+        q2_sim_proj_scan.muzzle_unplaced++;
+        return;
+    }
+    if (end[0] != to[0] || end[1] != to[1] || end[2] != to[2]) {
+        q2_sim_proj_scan.muzzle_clipped++;
+        Q2_DEBUG("muzzle: player at (%d,%d,%d) yaw %d, (%d,%d,%d) clipped to "
+                 "(%d,%d,%d)", (int)p->pos[0], (int)p->pos[1], (int)p->pos[2],
+                 (int)p->yaw, (int)to[0], (int)to[1], (int)to[2],
+                 (int)end[0], (int)end[1], (int)end[2]);
+    }
+
+    /* One muzzle per call: every pellet of a shotgun shares it. */
+    for (i = 0; i < r->shot_count; i++)
+        memcpy(r->shot[i].origin, end, sizeof(end));
+}
+
 q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
 {
     q2_fire_result_v2 r;
@@ -863,6 +926,9 @@ q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
         return r;
     }
 
+    clip_muzzle(sim, &r);
+    sim->combat.last_shot = r;
+
     /*
      * The muzzle flash, and there are FOUR weapons with one, not two.
      *
@@ -895,14 +961,20 @@ q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
             s32 lit[3];
 
             /*
-             * The machinegun and the chaingun redraw both radii from ONE rand()
-             * the way 0x8004C978 computes them — see weapon.h. The two shotguns
-             * carry fixed halfword pairs and must not touch the RNG, or a fired
-             * shotgun would shift every later spread.
+             * The machinegun and the chaingun draw their radii from TWO
+             * rand()s, inner first (0x8004C970, 0x8004C990) — see weapon.h.
+             * Sequenced into locals, because the order C evaluates a call's
+             * arguments in is unspecified and the order here is the console's.
+             * The two shotguns carry fixed halfword pairs and must not touch
+             * the RNG, or a fired shotgun would shift every later spread.
              */
-            if (ml.random_radii)
-                q2_weapon_muzzle_light(q2_rng_next(&sim->combat.rng),
+            if (ml.random_radii) {
+                s32 ra = q2_rng_next(&sim->combat.rng);
+                s32 rb = q2_rng_next(&sim->combat.rng);
+
+                q2_weapon_muzzle_light((u8)sim->combat.weapon_id, ra, rb,
                                        &inner, &outer);
+            }
 
             /*
              * At the player ENTITY ORIGIN, not at the eye and not at the feet.
@@ -937,20 +1009,32 @@ q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
     }
 
     sim->combat.next_fire = r.next_fire;
-    sim->combat.kick[0] = r.kick[0];
-    sim->combat.kick[1] = r.kick[1];
-    sim->combat.kick[2] = r.kick[2];
 
     /*
      * And on to the view, which is where a kick was always going: the weapon
      * table's figure has had a home in `combat.kick` for a while and nothing
      * read it. `q2_sim_view_angles` composes it over 30 ticks (FORMATS.md
      * §9.12.11a), so the deadline is what turns one number into recoil.
+     *
+     * ONLY THE FIELDS THE FIRE FUNCTION STORES. All three used to be written
+     * on every shot and the deadline re-armed for every weapon, which zeroed a
+     * machinegun burst's yaw and roll under a following shotgun's pitch and
+     * cancelled any kick in flight when a hyperblaster, a BFG or a hand
+     * grenade fired. The console's shotgun writes pitch alone, its chaingun
+     * yaw and roll alone, and those three write nothing at all (weapon.h).
      */
-    sim->player[sim->cur_player].kick[0]  = r.kick[0];
-    sim->player[sim->cur_player].kick[1]  = r.kick[1];
-    sim->player[sim->cur_player].kick[2]  = r.kick[2];
-    sim->player[sim->cur_player].kick_time = sim->level_time + Q2_VIEW_KICK_FIRE;
+    if (r.kick_axes) {
+        q2_player *p = &sim->player[sim->cur_player];
+        int k;
+
+        for (k = 0; k < 3; k++) {
+            if (!(r.kick_axes & (1u << k)))
+                continue;
+            sim->combat.kick[k] = r.kick[k];
+            p->kick[k]          = r.kick[k];
+        }
+        p->kick_time = sim->level_time + Q2_VIEW_KICK_FIRE;
+    }
 
     player_damage_begin(sim); /* after the fire function spends ammunition */
     switch (r.kind) {

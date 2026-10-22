@@ -930,7 +930,9 @@ Three consequences a port has to reproduce rather than approximate:
 It also plays two sounds nothing else in the family plays, and not through `0x80073704`: `0x8002C778` asks
 for id 13 at volume 1024 on every moving tick and `0x8002C8D8` for id 14 at volume 3072 on arrival, both via
 `0x80040800(4, id, volume, &pos, 2048, 4096)` -- a positional call that attenuates linearly between the two
-radii and resolves `id` against a 16-record table of SPU parameter pairs at `0x8009D420`.
+radii and resolves `id` against the sixteen records at `0x8009D420`. Those are not sounds: `0x80040800` is
+SetShockData and ids 13 and 14 are ShockData_Explosion and ShockData_Stomp, so the train rumbles every pad
+within 4096 of it and thumps on arrival (§13.5a).
 
 One PLATFORM ships on the disc: BIGGUN, `Events+476`, resident in zone 2, Scene nodes 31, 32 and 30 -- a
 deck and its two side walls. The map's own script entry point for it is named `PLATFORM` and its LevelBin
@@ -5614,9 +5616,9 @@ absorbs `damage*2/3`, capped at twice the cells, and spends one cell per two poi
 ### 13.5 Means of death — 1…21
 
 Read from the `a3` immediate at each call site, and from the two tables they index: a 16-entry
-armour-column selector at `0x800ACE1C` (mod−1) and a 21-entry **hit-sound** jump table at `0x800ACE5C` (mod−1,
-`0x80058504`). It is not pad rumble: its arms load a sound id and a volume for `0x80040800`, the SPU voice
-emitter — id 13 at 4096 for mod 1; 15 at 4096 for 3, 7, 19, 20 and 21; 16 at 2048 for 5, 6 and 18; the rest
+armour-column selector at `0x800ACE1C` (mod−1) and a 21-entry **hit-rumble** jump table at `0x800ACE5C` (mod−1,
+`0x80058504`). It IS pad rumble, which this paragraph used to deny: its arms load a pattern id and a strength
+for `0x80040800`, SetShockData (§13.5a) — id 13 at 4096 for mod 1; 15 at 4096 for 3, 7, 19, 20 and 21; 16 at 2048 for 5, 6 and 18; the rest
 silent — and the call is reached only for a client target still alive after the health store (`0x800584FC`).
 
 | mod | what | evidence |
@@ -5643,6 +5645,52 @@ back out, so the s16 clamps around it are reachable — anything past about 123 
 `125*(mass+64)/64` normally and `25*(mass+64)/4` when a player hurt themselves, a factor of 3.2: the rocket
 jump. Outside deathmatch the upward component is capped at −3072, so single player's rocket jump has a
 ceiling deathmatch's does not.
+
+### 13.5a The pad's rumble — `SetShockData` (`0x80040800`)
+
+Every player weapon, a hit on a player, an explosion and the train all end in one call, and it is not audio.
+MAIN.SYM names it SetShockData (QUAKE.C); its arguments are `(player or 4 for all, id, strength, pos or NULL,
+near, far)`. It finds the first record in ShockDataAvailable (`0x8009D4E0`, NULL-terminated) whose `id`
+matches and parks it in one of four 8-byte slots at GameWindows[player]+732 (`0x800D5C30`, 784 bytes a
+player): `{ pattern, s16 time = 0, s16 strength }`. A positional request is dropped past `far` on any axis or
+in distance, kept whole inside `near`, and scaled `strength * (far - d) / (far - near)` between; anything left
+under 513 is dropped. A record with flag bit 0 RESTARTS a slot already playing it; Stomp and Impact_Distinct,
+the two without it, stack.
+
+ProcessShockData (`0x80040B28`) runs once per pad per video field from the VBlank ISR (`0x80019070` →
+DualShockStuff → PadDualShock). Each record is `{ big, little, u16 flags, u16 id }`, each envelope a run of
+`{ s16 level, s16 duration }` points (1.0.12 level, ticks) ending in a zero duration. The level is
+interpolated linearly within a span; the terminator's is read only on the sample whose remaining time is
+exactly zero. Each live slot adds `level * strength >> 12` per motor; a slot advances by PalNtscRate
+(`0x800B2DD8`, the field's 6 ticks) while either envelope is still inside a span and is freed otherwise. The
+big motor gets `min(sum, 4096) * 255 >> 12`; the little one is on/off, driven by a sigma-delta at +764 that
+runs the motor on each field where the accumulator reaches 129, taking 256 back. PadSetAct gets little in
+act[0] and big in act[1]. The pad is silenced, with the slots still advancing, while the window's player is
+dead; and it is not processed at all while Paused, in self-play, or with that player's VIBRATION off. With
+three or more players in a multiplayer level, odd and even pads take alternate frames.
+
+| id | record (`0x8009D420` + 12n) | flags | who asks |
+|---|---|---|---|
+| 1 | ShockData_Blaster | 1 | `0x8004C19C` |
+| 2 | ShockData_HyperBlaster | 1 | `0x8004D460` |
+| 3 | ShockData_Shotgun | 1 | `0x8004C454` |
+| 4 | ShockData_SShotgun | 1 | `0x8004C718` |
+| 5 | ShockData_MachineGun | 1 | `0x8004CA6C` |
+| 6 | ShockData_ChainGun | 1 | `0x8004CD28`, only when the spin fired |
+| 7 | ShockData_GrenadeOpen | 1 | `0x8004EC90`, the hand grenade's prime |
+| 8 | ShockData_GrenadeThrow | 1 | `0x8004A52C`, its release |
+| 9 | ShockData_GrenadeL | 1 | `0x8004D010` |
+| 10 | ShockData_RocketL | 1 | `0x8004D224` |
+| 11 | ShockData_RailGun | 1 | `0x8004D6D0` |
+| 12 | ShockData_BFG | 1 | `0x8004EBC0` |
+| 13 | ShockData_Explosion | 1 | the train moving (`0x8002C778`, 1024), an explosion (`0x8005AA7C`), a mod-1 hit |
+| 14 | ShockData_Stomp | 0 | the train arriving (`0x8002C8D8`, 3072) |
+| 15 | ShockData_Impact_Distinct | 0 | hits of mod 3, 7, 19, 20, 21 |
+| 16 | ShockData_Impact_Mergeable | 1 | hits of mod 5, 6, 18 |
+
+The machinegun's pattern is a 16-tick buzz of the big motor at 1536 and an 8-tick burst of the little one:
+three fields of big motor at 95/255 and two of the little one, per shot. The envelopes are transcribed point for
+point in `src/game/shock.c`.
 
 ### 13.6 Hitscan, rail and splash
 

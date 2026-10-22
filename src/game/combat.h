@@ -241,17 +241,21 @@ bool q2_mod_knocks_back(s16 mod);
 s16 q2_mod_effect_timer(s16 mod, int *slot);
 
 /*
- * The hit sound a mod plays through 0x80040800, or 0 for silence.
+ * The RUMBLE a hit on a player raises through 0x80040800, or 0 for none. The
+ * name says "sound" and is kept because the fields that carry it are; what
+ * the call does is shake the victim's pad.
  *
  * 0x80058504 `sltiu v0, v1, 21` indexes the twenty-one-word jump table at
- * 0x800ACE5C by mod-1; the four arms it lands on are 0x8005852C (id 13, volume
- * 4096), 0x80058538 (id 16, 2048), 0x80058544 (id 15, 4096) and 0x80058550
- * (silent). `volume` may be NULL.
+ * 0x800ACE5C by mod-1; the four arms it lands on are 0x8005852C (id 13,
+ * strength 4096), 0x80058538 (id 16, 2048), 0x80058544 (id 15, 4096) and
+ * 0x80058550 (none). `volume` may be NULL.
  *
- * 0x80040800 is the SPU voice emitter, not pad rumble: 0x800409E0 drops any
- * request below volume 513 and it allocates from the entity's four voice slots
- * at entity+732. The damage call passes a3 = 0, so unlike the movers' call it
- * is NON-POSITIONAL — no attenuation and no distance reject.
+ * 0x80040800 IS pad rumble — SetShockData, shock.h — and this note used to
+ * say the opposite. The "four voice slots at entity+732" are four PATTERN
+ * slots at GameWindows[player]+732, and 13, 15 and 16 are ShockData_Explosion,
+ * _Impact_Distinct and _Impact_Mergeable. The damage call passes a3 = 0, so
+ * unlike the train's it is NON-POSITIONAL — no attenuation and no distance
+ * reject.
  */
 u8 q2_mod_hit_sound(s16 mod, s16 *volume);
 

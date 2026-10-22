@@ -277,6 +277,29 @@ u32 q2_entity_build_ot(q2_entity_set *set, const q2_entity_draw_ctx *ctx,
         } else if (ctx->coll && coll_node >= 0 &&
                    q2_collision_get_node(ctx->coll, (u32)coll_node, &cell)) {
             sort_area = cell.contents & 0x7F;
+        } else if (ctx->coll && ctx->coll_primary) {
+            /*
+             * Outside SecondaryCol. The PrimaryColl cell names the same
+             * area, as UpdateBoxStuff's mode 2 (0x80054E60) reads +0x9E;
+             * and an item that NO cell of the loaded zone holds is not in
+             * this zone at all — the test the client already puts creatures
+             * through at load. Drawn anyway it has no area, which is global
+             * depth: JAIL3's zone 0 places a Large Medi P standing in zone
+             * 4's cell 60, ten thousand units past zone 0's last cell, and
+             * it painted over the walls from 162 of zone 0's 167 cells.
+             * It is the one item on the disc in neither hull.
+             */
+            s32 primary = q2_coll_find_node(ctx->coll_primary, e->pos, -1,
+                                            true);
+
+            if (primary < 0 ||
+                !q2_collision_get_node(ctx->coll_primary, (u32)primary,
+                                       &cell)) {
+                if (stats)
+                    stats->outside_zone++;
+                continue;
+            }
+            sort_area = cell.contents & 0x7F;
         }
         inst.sort_area = sort_area;
         inst.sort_quick = (e->render_flags & Q2_RF_QUICK_SORT) != 0;

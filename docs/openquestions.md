@@ -3899,6 +3899,9 @@ spawners. It takes a player index or 4 for "all", reads the active player count 
 player array at `0x800D5C30` and tests each player's position against a supplied point and a radius on the
 stack — a per-player proximity call. Named that far and no further.
 
+**Named since:** SetShockData, the DualShock rumble (FORMATS.md §13.5a). COMMAND's 31 calls are its pad
+shakes; the port does not route a creature's yet.
+
 So the fire routing committed an hour ago is still not observed in play: what a Tank Commander reaches in a
 400-frame capture is its sounds and this proximity call, not its attack thinks.
 
@@ -9150,6 +9153,10 @@ separate from the upper-left pickup caption because the retail sub-draws are sep
       SPU parameter pairs at `0x8009D420` — `{ const void *a; const void *b; u16 flags; u16 id; }`, ids 1
       through 0x10. There is no mixer in this port, so `travel_sound` records which of the two a tick asked
       for and nothing consumes it.
+
+      **Answered: neither is a sound.** `0x80040800` is SetShockData, the entity array is GameWindows (one
+      record per player), and the sixteen records are DualShock patterns — 13 ShockData_Explosion, 14
+      ShockData_Stomp. The train rumbles the pads near it; `travel_sound` now feeds that (FORMATS.md §13.5a).
 
       **A rider is carried DOWN and not ALONG, on the console too.** The obvious next worry is that a
       player on a train that moves sideways is left behind, and they are — but that is the engine's answer,
