@@ -1,4 +1,4 @@
-add_executable(q2psx main.c gamepad.c)
+add_executable(q2psx main.c gamepad.c launcher.c launchcfg.c)
 
 target_link_libraries(q2psx PRIVATE
     q2psx_common

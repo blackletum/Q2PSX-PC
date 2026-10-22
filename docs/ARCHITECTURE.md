@@ -60,7 +60,9 @@ backwards from that INDEX 01 offset into the upcoming track's backing file.
 
 The public surface is deliberately small — `disc_find`, `disc_read_file`,
 `disc_read_raw_sector` — so that adding CHD support or a physical CD backend
-later touches nothing above this layer.
+later touches nothing above this layer. The drive backend proved it: `cddrive.c`
+turns a drive's table of contents into the same track table and its sectors into
+the same 2352-byte frames, and nothing above `disc_open` knows.
 
 ### `build`
 Identifies *which release* the disc is, keyed on the SHA-256 of the boot

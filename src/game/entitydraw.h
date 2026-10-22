@@ -42,6 +42,7 @@ typedef struct q2_entity_draw_stats {
     u32 drawn;
     u32 no_model;      /* the bank does not carry the name the table gave    */
     u32 invisible;     /* hidden or collected                                */
+    u32 outside_zone;  /* no cell of the loaded zone's hulls holds it        */
     u32 faces_emitted;
     u32 shadows_emitted;
     u32 ot_overflow;
@@ -86,9 +87,17 @@ typedef struct q2_entity_draw_ctx {
      * frame where the camera resolved to no cell at all — which happens
      * routinely — every item in the level fell back to the grey default.
      * Negative still means the fallback light.
+     *
+     * `coll_primary` is the un-eroded hull, consulted only when no `coll`
+     * cell holds an item: an origin just inside the eroded floor is still in
+     * a PrimaryColl cell, whose byte +32 names the same area (the client's
+     * client_cre_area has the census), and an item in neither hull is not
+     * in this zone and is not drawn. Without it such an item has no area,
+     * and no area is global depth — drawn over every wall in front of it.
      */
     const q2_light_world *lights;
     const q2_collision   *coll;
+    const q2_collision   *coll_primary;
     s32                   coll_node;
 } q2_entity_draw_ctx;
 

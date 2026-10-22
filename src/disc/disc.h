@@ -85,6 +85,7 @@ typedef struct disc disc;
 
 /*
  * Open a disc from a path. Accepts:
+ *   - an optical drive: "E:" on Windows, "/dev/sr0" on Linux (cddrive.h)
  *   - a .cue file (the backing .bin files are resolved relative to it)
  *   - a .bin / .img file on its own (a single-track raw image is assumed)
  *   - a .iso file (2048-byte cooked sectors)

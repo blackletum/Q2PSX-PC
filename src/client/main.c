@@ -133,6 +133,7 @@
 #include "fxtables.h"
 #include "hudtables.h"
 #include "ident.h"
+#include "launcher.h"
 #include "item.h"
 #include "itemtable.h"
 #include "menu.h"
@@ -1501,6 +1502,7 @@ typedef struct client {
      * counter already made and now documents. */
     u32               ent_drawn;      /* entity draws the OT accepted   */
     u32               ent_no_model;   /* ...and ones the bank could not resolve */
+    u32               ent_outside;    /* ...and ones no cell of the zone holds  */
     u32               ent_faces;
     u32               ent_shadows;    /* retail posed-footprint FT4s emitted */
     u32               explosive_sounds;
@@ -1680,6 +1682,8 @@ typedef struct client {
     u32               player_drawn;
     u32               player_faces;
     s32              *cre_home;      /* where each creature spawned          */
+    s32              *cre_cell;      /* link +0xA2: its last SecondaryCol cell */
+    s16              *cre_area;      /* link +0x9E: the area it is drawn in   */
 
     /* The map's CLUT split. A model face's palette index is offset by it —
      * model palettes live in the second section of the array (model.h §233). */
@@ -2155,6 +2159,96 @@ static void client_cre_drop(const q2_monster_drop_request *req, void *user);
 static bool client_cre_bank_has(const char *name, void *user);
 static bool client_fx_mesh(void *user, const q2_actor *a, q2_fx_mesh_src *out);
 
+/*
+ * WHICH AREA A CREATURE IS DRAWN IN, and why it is remembered rather than
+ * found afresh — the BASE1 Soldier that painted over the start room's wall.
+ *
+ * The console keeps it on the creature's link object, which the model draw
+ * reads at 0x8006BE9C: +0x9E, byte +32 of the SecondaryCol cell at +0xA2.
+ * PrimaryQuakeCreature (0x8007EBC4) moves that object with NewTrueMove3d, and
+ * its cell is never forgotten there: the lookup walks out from +0xA2
+ * (0x80045D98, Find3dSpaceIndxLink with the cell as the hint), a miss puts
+ * the old cell back (0x80045E04), and UpdateBoxStuff (0x80054DD4, mode 1)
+ * then rewrites +0x9E from it. linkentity (0x8005C8C8) copies the origin and
+ * touches neither. So a body is drawn through the area of the last cell it
+ * stood in.
+ *
+ * The draw used to look the cell up from scratch every frame and, on a miss,
+ * leave the sort area at -1 — which modeldraw takes as "no area" and files by
+ * global depth, the one path with no portal behind it. BASE1's Soldier at
+ * (-15523, 114, -13554) is that miss: the SecondaryCol floor under it is at
+ * 113, so its origin is a unit inside the eroded hull and no cell holds it.
+ * Seen from the raised floor at (-13748, -16758) it was drawn over the wall
+ * between that room and its own, area 11, which is not visible from there.
+ *
+ * So the lookup walks out from the remembered cell (the hint is the portal
+ * walk 0x80044F54 makes) and a miss keeps the last area. A body that has never
+ * been inside SecondaryCol takes the area of the PrimaryColl cell holding its
+ * origin — the cell that admitted it to the zone, and the hull UpdateBoxStuff's
+ * own mode 2 reads +0x9E from (+0xA0 against [0x800C8E94]). The two hulls
+ * number areas alike: of the SecondaryCol cells on the disc whose centre lies
+ * inside them, 10,564 read the same byte as the PrimaryColl cell holding that
+ * centre and 7 do not, each a centre on a portal plane.
+ *
+ * Returns the area, or -1 with neither hull loaded, and hands back the
+ * remembered cell: the light gather keys on it as the console's does on +0xA2.
+ */
+static s32 client_cre_area(client *c, u32 i, s32 *cell_out)
+{
+    const q2_monster *m;
+    q2_coll_node node;
+    s32 cell = -1, area = -1, found;
+
+    if (cell_out)
+        *cell_out = -1;
+    if (!c || i >= c->creatures.set.count)
+        return -1;
+    m = &c->creatures.set.monsters[i];
+
+    if (c->cre_cell && c->cre_area) {
+        cell = c->cre_cell[i];
+        area = c->cre_area[i];
+    }
+
+    if (c->sim[0].coll_ready) {
+        found = q2_coll_find_node(&c->sim[0].coll, m->pos, cell, true);
+        if (found >= 0 &&
+            q2_collision_get_node(&c->sim[0].coll, (u32)found, &node)) {
+            cell = found;
+            area = node.contents & 0x7F;
+        } else if (cell < 0 && c->sim[0].coll_primary_ready) {
+            found = q2_coll_find_node(&c->sim[0].coll_primary, m->pos, -1,
+                                      true);
+            if (found >= 0 &&
+                q2_collision_get_node(&c->sim[0].coll_primary, (u32)found,
+                                      &node))
+                area = node.contents & 0x7F;
+        }
+    }
+
+    if (c->cre_cell && c->cre_area) {
+        c->cre_cell[i] = cell;
+        c->cre_area[i] = (s16)area;
+    }
+    if (cell_out)
+        *cell_out = cell;
+    return area;
+}
+
+/* Every body has been put somewhere new — a save restored over the level —
+ * so what each remembered of its cell is from before. */
+static void client_cre_area_forget(client *c)
+{
+    u32 i;
+
+    if (!c || !c->cre_cell || !c->cre_area)
+        return;
+    for (i = 0; i < c->creatures.set.count; i++) {
+        c->cre_cell[i] = -1;
+        c->cre_area[i] = -1;
+    }
+}
+
 /* ------------------------------------------------------------------------- */
 /*
  * The creatures a map places, made live.
@@ -2171,10 +2265,14 @@ static void client_free_creatures(client *c)
     free(c->cre_actor);
     free(c->cre_target);
     free(c->cre_home);
+    free(c->cre_cell);
+    free(c->cre_area);
     free(c->cre_fx);
     free(c->cre_body);
     c->cre_body     = NULL;
     c->cre_home     = NULL;
+    c->cre_cell     = NULL;
+    c->cre_area     = NULL;
     c->cre_model    = NULL;
     c->cre_model_ok = NULL;
     c->cre_anim     = NULL;
@@ -2336,6 +2434,25 @@ static void client_load_creatures(client *c, const s32 eye[3])
 
     c->cre_home = (s32 *)calloc(c->creatures.set.count ?
                                 c->creatures.set.count * 3 : 1, sizeof(s32));
+    c->cre_cell = (s32 *)calloc(c->creatures.set.count ?
+                                c->creatures.set.count : 1, sizeof(s32));
+    c->cre_area = (s16 *)calloc(c->creatures.set.count ?
+                                c->creatures.set.count : 1, sizeof(s16));
+    client_cre_area_forget(c);
+    {
+        u32 outside = 0;
+
+        for (i = 0; i < c->creatures.set.count; i++) {
+            s32 cell;
+
+            if (c->creatures.set.monsters[i].in_use &&
+                client_cre_area(c, i, &cell) >= 0 && cell < 0)
+                outside++;
+        }
+        if (outside)
+            Q2_INFO("creatures: %u outside SecondaryCol take their draw "
+                    "area from PrimaryColl", outside);
+    }
 
     for (i = 0; i < c->creatures.set.count; i++) {
         const q2_monster *m = &c->creatures.set.monsters[i];
@@ -3261,10 +3378,9 @@ static bool client_fx_mesh(void *user, const q2_actor *a, q2_fx_mesh_src *out)
  *     `in_use` only after the dispatch returns. This is not one of combat's
  *     asks, so the hook's three counters are put back and `gib_mesh_posed`
  *     counts it instead.
- *   - The area is the SecondaryCol cell byte at `pos`: the lookup this
- *     client's creature draw makes for the same body's sort area, so the spray
- *     sorts with the body it came out of. Which hull the console's own
- *     creature +0x9E comes from is not traced — INFERRED.
+ *   - The area is the body's remembered +0x9E (client_cre_area): the same
+ *     value this client's creature draw files the body under, so the spray
+ *     sorts with the body it came out of.
  *
  * A PLAYER is placed only here: +0x54 is the ORIGIN frame, Q2_EYE_BASE above
  * the feet (sim.h), `vel` is +0xE0 in the same raw units (per dt before the
@@ -3279,7 +3395,6 @@ static void client_gib_describe(void *user, q2_gib_victim kind,
 {
     client *c = (client *)user;
     q2_coll_node cn;
-    s32 node;
     int k;
 
     if (!c || !who || !p)
@@ -3312,11 +3427,11 @@ static void client_gib_describe(void *user, q2_gib_victim kind,
             c->fx_mesh_given = given;
             c->fx_mesh_armed = armed;
         }
-        if (c->sim[0].coll_ready) {
-            node = q2_coll_find_node(&c->sim[0].coll, m->pos, -1, true);
-            if (node >= 0 &&
-                q2_collision_get_node(&c->sim[0].coll, (u32)node, &cn))
-                p->area = cn.contents;
+        {
+            s32 area = client_cre_area(c, (u32)i, NULL);
+
+            if (area >= 0)
+                p->area = (u8)area;
         }
         return;
     }
@@ -13050,8 +13165,10 @@ static bool client_apply_save(client *c, const q2_save *s)
     q2_sim_scene_solids_update(&c->sim[0], &c->rotators);
     {
         u32 phase_us = 0;
-        if (c->creatures_ready)
+        if (c->creatures_ready) {
             q2_save_apply_creatures(s, &c->creatures.set);
+            client_cre_area_forget(c);
+        }
         if (q2_save_apply_ai(s, &c->creatures, &phase_us) != Q2_OK) {
             Q2_ERROR("save creature behavior does not match this map");
             return false;
@@ -14019,9 +14136,9 @@ static void client_write_shot(client *c, bool numbered)
                 c->explosive_sounds_missed,
                 c->sim[0].explosive_models);
         Q2_INFO("  entities  %u drawn (%u faces, %u shadows),"
-                " %u could not resolve a model",
+                " %u could not resolve a model, %u outside the zone",
                 c->ent_drawn, c->ent_faces, c->ent_shadows,
-                c->ent_no_model);
+                c->ent_no_model, c->ent_outside);
         Q2_INFO("  script    %u strings, %u sounds, %u gated by ONKEYDO, "
                 "%u nodes hidden, %u summoned, %u teleports, %u timers, %u resumed,"
                 " %u records retired",
@@ -15500,6 +15617,8 @@ static void client_draw_view(void *user, q2_screen *s, int p,
          * borrowing the player's. `coll_node` above stays as the fallback for
          * the title screen, which has no collision world at all. */
         ectx.coll          = c->sim[0].coll_ready ? &c->sim[0].coll : NULL;
+        ectx.coll_primary  = c->sim[0].coll_primary_ready
+                           ? &c->sim[0].coll_primary : NULL;
 
         q2_entity_build_ot(&c->sim[0].entities, &ectx, &c->cam, ot, gte, &estats);
         /* Model entities are drawn through the same walk items are, so the
@@ -15507,6 +15626,7 @@ static void client_draw_view(void *user, q2_screen *s, int p,
          * is to count what the walk actually emitted. */
         c->ent_drawn    += estats.drawn;
         c->ent_no_model += estats.no_model;
+        c->ent_outside  += estats.outside_zone;
         c->ent_faces    += estats.faces_emitted;
         c->ent_shadows  += estats.shadows_emitted;
     }
@@ -15539,7 +15659,6 @@ static void client_draw_view(void *user, q2_screen *s, int p,
             q2_model_pose pose[64];
             q2_model_anim clip;
             q2_light_env  cre_env;
-            q2_coll_node  area_node;
             s32 cell = -1;
             bool posed = false;
 
@@ -15723,13 +15842,10 @@ static void client_draw_view(void *user, q2_screen *s, int p,
             inst.model         = &c->cre_model[i];
             inst.pose          = posed ? pose : NULL;
 
-            if (c->sim[0].coll_ready)
-                cell = q2_coll_find_node(&c->sim[0].coll,
-                                         m->pos, -1, true);
-            if (cell >= 0 &&
-                q2_collision_get_node(&c->sim[0].coll,
-                                      (u32)cell, &area_node))
-                inst.sort_area = area_node.contents & 0x7F;
+            /* The link object's area and cell, which outlive a frame whose
+             * lookup misses — see client_cre_area. A -1 here would take
+             * the creature off the portal walk and paint it through walls. */
+            inst.sort_area = client_cre_area(c, i, &cell);
             {
                 int axis;
                 for (axis = 0; axis < 3; axis++) {
@@ -17084,9 +17200,11 @@ static void client_frame(client *c)
 static void usage(void)
 {
     printf("q2psx - native Quake II PSX\n\n");
-    printf("usage: q2psx --disc <path> [--map NAME] [--zone N] [--scale N]\n"
+    printf("usage: q2psx [--disc <path>] [--map NAME] [--zone N] [--scale N]\n"
            "             [--aspect MODE] [--saves DIR]\n\n");
-    printf("  --disc   a .cue, .bin, .img or .iso, or a drive letter\n");
+    printf("  --disc   a .cue, .bin, .img or .iso, or a drive letter; without\n"
+           "           it a launcher lists your discs and drives and starts\n"
+           "           on the one played last\n");
     printf("  --map    level directory name (default BASE0)\n");
     printf("  --zone   zone index within the map (default 0)\n");
     printf("  --scale  buffer pixels across, i.e. horizontal zoom (default 3)\n");
@@ -17683,6 +17801,9 @@ int main(int argc, char **argv)
 {
     client c;
     const char *disc_path = NULL;
+    /* The launcher's choice, and its window for the game to take over. */
+    static char launch_path[1024];
+    SDL_Window *launch_window = NULL;
     const char *map = "BASE0";
     bool map_given = false;
     bool zone_probe = false;
@@ -17955,9 +18076,22 @@ int main(int argc, char **argv)
         else { usage(); return 1; }
     }
 
+    /*
+     * NO DISC NAMED, so ask — unless nobody is there to answer. A headless
+     * run is a script, and a script that forgot --disc wants the usage and a
+     * failing exit code, not a window it cannot see.
+     */
     if (!disc_path) {
-        usage();
-        return 1;
+        if (c.headless) {
+            usage();
+            return 1;
+        }
+        if (!q2_launcher_run(launch_path, sizeof(launch_path),
+                             &launch_window)) {
+            SDL_Quit();
+            return 0;
+        }
+        disc_path = launch_path;
     }
 
     if (disc_open(&c.disc, disc_path) != Q2_OK) {
@@ -18073,7 +18207,18 @@ int main(int argc, char **argv)
         if (ww < 64) ww = 64;
         if (wh < 64) wh = 64;
 
-        c.window = SDL_CreateWindow("Q2PSX-PC", ww, wh, SDL_WINDOW_RESIZABLE);
+        /* The launcher's window, when there was one, becomes the game's: no
+         * close and reopen between choosing the disc and the first frame. */
+        if (launch_window) {
+            c.window = launch_window;
+            SDL_SetWindowSize(c.window, ww, wh);
+            SDL_SetWindowResizable(c.window, true);
+            SDL_SetWindowPosition(c.window, SDL_WINDOWPOS_CENTERED,
+                                  SDL_WINDOWPOS_CENTERED);
+        } else {
+            c.window = SDL_CreateWindow("Q2PSX-PC", ww, wh,
+                                        SDL_WINDOW_RESIZABLE);
+        }
     }
     if (!c.window) {
         fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError());
