@@ -13,7 +13,7 @@ and it runs.
 ```
 q2psx --disc "D:\games\Quake II (Europe).cue"
 q2psx --disc E:            # physical CD drive
-q2psx                      # auto-detect: scans configured search paths and optical drives
+q2psx                      # the disc selector: your images and drives, the last one selected
 ```
 
 ## Why not just emulate it?
@@ -56,7 +56,7 @@ See [`docs/FIDELITY.md`](docs/FIDELITY.md) for the full rendering conformance sp
 | `.img` / `.ccd` / `.sub` | supported |
 | `.mds` / `.mdf` | planned |
 | `.chd` | planned |
-| Physical CD drive (Windows SPTI / Linux SG_IO) | planned |
+| Physical CD drive (Windows, Linux) | supported — the music and films need a drive that hands over raw sectors |
 
 Regions and revisions are detected per *build*, not per region, because localised
 releases move the executable's data tables. See [`docs/FORMATS.md`](docs/FORMATS.md).
@@ -280,6 +280,12 @@ cmake -S . -B build-msvc -DCMAKE_BUILD_TYPE=Release
 cmake --build build-msvc --config Release --target stage-local --parallel
 .\.install\q2psx.exe --version
 ```
+
+Run `.\.install\q2psx.exe` with no arguments and it opens the disc selector: the
+disc you played last is selected, any image in `.install/disc/` or beside the
+executable is listed, every optical drive is listed with what is in it, Browse opens
+the system's file picker, and an image dropped on the window joins the list. The
+choice is remembered in `%APPDATA%\Q2PSX-PC\launcher.cfg`.
 
 Launch with `.\.install\q2psx.exe --disc "path\to\your\disc.cue"`, or put a copy
 of your CUE at `.install/disc/game.cue` with its referenced BIN tracks alongside

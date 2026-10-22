@@ -16,6 +16,7 @@
 #  include <unistd.h>
 #endif
 
+#include "cddrive.h"
 #include "disc.h"
 
 #define DATA_SECTORS  20u
@@ -504,6 +505,35 @@ cleanup:
     remove(image_path);
 }
 
+/* Which paths disc_open hands to the drive backend instead of a file. A
+ * drive letter must not swallow an image path on that drive, and a file
+ * name must never be mistaken for a device. */
+static void test_drive_paths(void)
+{
+    char device[64], name[32];
+
+    check(!cd_drive_parse("game.cue", device, sizeof(device), name,
+                          sizeof(name)), "a bare file name is not a drive");
+    check(!cd_drive_parse("", NULL, 0, NULL, 0), "an empty path is not a drive");
+#if defined(_WIN32)
+    check(cd_drive_parse("e:", device, sizeof(device), name, sizeof(name)),
+          "a drive letter is a drive");
+    check(strcmp(device, "\\\\.\\E:") == 0, "its device is \\.\\E:");
+    check(strcmp(name, "E:") == 0, "its name is E:");
+    check(cd_drive_parse("E:\\", NULL, 0, NULL, 0), "a drive root is a drive");
+    check(cd_drive_parse("\\\\.\\F:", NULL, 0, name, sizeof(name)) &&
+          strcmp(name, "F:") == 0, "a device path is a drive");
+    check(!cd_drive_parse("E:\\Quake II.cue", NULL, 0, NULL, 0),
+          "an image on a drive is a file");
+    check(!cd_drive_parse("1:", NULL, 0, NULL, 0), "a digit is not a drive letter");
+#else
+    check(!cd_drive_parse("/dev/null", NULL, 0, NULL, 0),
+          "a character device is not a drive");
+    check(!cd_drive_parse("/tmp/game.cue", NULL, 0, NULL, 0),
+          "a path outside /dev is not a drive");
+#endif
+}
+
 int main(void)
 {
     printf("disc CUE layout tests\n");
@@ -512,6 +542,7 @@ int main(void)
     test_audio_first_data_volume();
     test_malformed_sibling_fallback_closes_backings();
     test_raw_image_with_iso_suffix();
+    test_drive_paths();
 
     if (g_failures) {
         printf("%d/%d checks failed\n", g_failures, g_checks);
