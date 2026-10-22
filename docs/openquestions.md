@@ -3902,6 +3902,11 @@ stack — a per-player proximity call. Named that far and no further.
 **Named since:** SetShockData, the DualShock rumble (FORMATS.md §13.5a). COMMAND's 31 calls are its pad
 shakes; the port does not route a creature's yet.
 
+**Routed since.** All 31 are one site, `tank_footstep`'s call at module+0x157C:
+`(4, 14, 4096, self, 2048, 8192)`, ShockData_Stomp at the Tank's own origin, because `self`'s first three
+words are the origin. It is the only load of `+0x12C` in any module on the disc. `tankcomm_footstep` now
+makes the request before its sound, as the module does.
+
 So the fire routing committed an hour ago is still not observed in play: what a Tank Commander reaches in a
 400-frame capture is its sounds and this proximity call, not its attack thinks.
 

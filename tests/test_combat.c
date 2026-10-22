@@ -21,6 +21,7 @@
 #include "multiplayer.h"
 #include "playerdeath.h"
 #include "projectile.h"
+#include "shock.h"
 #include "sim.h"
 #include "trig.h"
 #include "weapon.h"
@@ -1085,6 +1086,118 @@ static void test_hit_sound(void)
 
 /* ------------------------------------------------------------------------- */
 /*
+ * AND THE "SOUND" IS A RUMBLE: 0x8005859C hands those operands to
+ * SetShockData(victim's window, id, strength, NULL). A spy on the shock sink
+ * sees every request the damage function makes, in order.
+ */
+typedef struct shock_call {
+    int  player, id;
+    s32  strength;
+    bool positional;
+} shock_call;
+
+static shock_call g_shock[8];
+static int        g_shock_n;
+
+static void spy_shock(void *user, int player, int id, s32 strength,
+                      const s32 pos[3], s16 near_r, s16 far_r)
+{
+    (void)user; (void)near_r; (void)far_r;
+    if (g_shock_n < (int)(sizeof(g_shock) / sizeof(g_shock[0]))) {
+        g_shock[g_shock_n].player     = player;
+        g_shock[g_shock_n].id         = id;
+        g_shock[g_shock_n].strength   = strength;
+        g_shock[g_shock_n].positional = pos != NULL;
+    }
+    g_shock_n++;
+}
+
+static void test_hit_rumble(void)
+{
+    q2_actor player, mob;
+    q2_combat_rules rules;
+
+    printf("a hit on a player rumbles that player's pad (0x8005859C)\n");
+    q2_combat_rules_default(&rules);
+    q2_shock_attach(spy_shock, NULL);
+
+    /* A bullet on player 2, who survives it: id 16 at 2048, on window 2,
+     * not positional. */
+    g_shock_n = 0;
+    place(&player, 0, 0, 0, 100);
+    player.has_client = true;
+    player.owner      = 2;
+    q2_combat_damage(NULL, &player, 20, Q2_MOD_BULLET, NULL, &rules);
+    check_eq_i(g_shock_n, 1, "one request for one surviving hit");
+    check_eq_i(g_shock[0].player, 2, "on the victim's own window");
+    check_eq_i(g_shock[0].id, Q2_SHOCK_IMPACT_MERGEABLE,
+               "ShockData_Impact_Mergeable for a bullet");
+    check_eq_i(g_shock[0].strength, 2048, "at half strength");
+    check(!g_shock[0].positional, "and with a3 = NULL, not positional");
+
+    /* Mod 1 and a contact hit take the other two arms. */
+    g_shock_n = 0;
+    place(&player, 0, 0, 0, 100);
+    player.has_client = true;
+    player.owner      = 0;
+    q2_combat_damage(NULL, &player, 5, Q2_MOD_ENERGY_BOLT, NULL, &rules);
+    q2_combat_damage(NULL, &player, 5, Q2_MOD_RAIL, NULL, &rules);
+    check_eq_i(g_shock_n, 2, "two hits, two requests");
+    check(g_shock[0].id == Q2_SHOCK_EXPLOSION && g_shock[0].strength == 4096,
+          "mod 1 is ShockData_Explosion at 4096");
+    check(g_shock[1].id == Q2_SHOCK_IMPACT_DISTINCT &&
+          g_shock[1].strength == 4096,
+          "mod 3 is ShockData_Impact_Distinct at 4096");
+
+    /* The three things that raise nothing: the killing hit (0x800584FC reads
+     * the health after the store), a silent mod, and a target without a
+     * client (0x800584D4). */
+    g_shock_n = 0;
+    place(&player, 0, 0, 0, 20);
+    player.has_client = true;
+    player.owner      = 0;
+    q2_combat_damage(NULL, &player, 20, Q2_MOD_BULLET, NULL, &rules);
+    check_eq_i(g_shock_n, 0, "the hit that kills shakes nothing");
+
+    place(&player, 0, 0, 0, 100);
+    player.has_client = true;
+    player.owner      = 0;
+    q2_combat_damage(NULL, &player, 20, Q2_MOD_ROCKET, NULL, &rules);
+    q2_combat_damage(NULL, &player, 20, Q2_MOD_GRENADE, NULL, &rules);
+    check_eq_i(g_shock_n, 0, "a rocket's and a grenade's mods are silent");
+
+    place(&mob, 0, 0, 0, 100);
+    q2_combat_damage(NULL, &mob, 20, Q2_MOD_BULLET, NULL, &rules);
+    check_eq_i(g_shock_n, 0, "and a creature has no pad");
+
+    /* Splash reaches the same tail: the BFG's blast is mod 1 and hurts its
+     * own shooter by half (0x80050A0C), who survives it and feels it. */
+    {
+        q2_actor *list[1];
+
+        g_shock_n = 0;
+        place(&player, 0, 0, 0, 100);
+        player.has_client = true;
+        player.owner      = 1;
+        list[0] = &player;
+        q2_combat_radius_damage(&player, NULL, player.origin, 50, 1300,
+                                Q2_MOD_ENERGY_BOLT, list, 1, &rules);
+        check(g_shock_n == 1 && g_shock[0].player == 1 &&
+              g_shock[0].id == Q2_SHOCK_EXPLOSION,
+              "a player inside his own BFG blast rumbles once, as id 13");
+    }
+
+    q2_shock_attach(NULL, NULL);
+    g_shock_n = 0;
+    place(&player, 0, 0, 0, 100);
+    player.has_client = true;
+    player.owner      = 0;
+    q2_combat_damage(NULL, &player, 20, Q2_MOD_BULLET, NULL, &rules);
+    check_eq_i(g_shock_n, 0, "with no sink attached the request goes nowhere");
+}
+
+/* ------------------------------------------------------------------------- */
+/*
  * EVERY DEADLINE IS COMPARED UNSIGNED. The five tests are `sltu`:
  * 0x80058238 (the suit, acid only), 0x8005824C (invulnerability, acid),
  * 0x80058260 and 0x800582A4 (the two throttles) and 0x80058314 (the general
@@ -1954,6 +2067,7 @@ int main(void)
     test_takedamage_gate();
     test_one_shot_kill();
     test_hit_sound();
+    test_hit_rumble();
     test_deadlines_are_unsigned();
     test_killer_byte_survives();
     test_knockback();

@@ -16,6 +16,7 @@
 #include "multiplayer.h"  /* q2_mp_batches — what an arena spawns */
 #include "playerdeath.h"   /* q2_player_die — where the killer byte is read */
 #include "rotator.h"
+#include "shock.h"     /* the sink a detonation would call */
 #include "sim.h"
 #include "trig.h"
 
@@ -4089,6 +4090,85 @@ static void splash_victim(q2_actor *a, s32 x)
 }
 
 /*
+ * A ROCKET OR A GRENADE GOES OFF AS QUAKEGENEXPLOSION, and nothing else does.
+ *
+ * The three missile thinks that call 0x8005A778 on detonation are the
+ * rocket's and the two grenades' (simcombat.c, projectile_explosion). A
+ * grenade's fuse is one such detonation; a rocket's lifetime running out is
+ * not — 0x8004ADB0 frees it with no effect — and neither is a bolt's.
+ *
+ * With no entity set and no bank the spawn binds nothing, and SetShockData
+ * sits past that bail (0x8005AA7C), so no pad is asked to shake. The spawn
+ * itself is the console's whole QuakeGenExplosion and is checked on its own
+ * (test_modelent, test_shock).
+ */
+static int g_sim_shocks;
+
+static void count_sim_shock(void *u, int player, int id, s32 strength,
+                            const s32 pos[3], s16 near_r, s16 far_r)
+{
+    (void)u; (void)player; (void)id; (void)strength; (void)pos;
+    (void)near_r; (void)far_r;
+    g_sim_shocks++;
+}
+
+static void expire_once(q2_sim *sim, q2_proj_kind kind)
+{
+    q2_projectile *p;
+
+    q2_projectiles_init(&sim->combat.projectiles);
+    p = &sim->combat.projectiles.p[0];
+    p->in_use  = true;
+    p->kind    = kind;
+    p->pos[0]  = 0;
+    p->pos[1]  = 300;
+    p->pos[2]  = 500;
+    p->owner   = 0;
+    p->expires = 1;
+    p->node    = Q2_PROJ_NODE_UNKNOWN;
+    sim->combat.projectiles.live = 1;
+
+    sim->level_time = 10;
+    q2_sim_combat_tick(sim);
+}
+
+static void test_projectile_explosion(void)
+{
+    q2_sim sim;
+    q2_actor victim;
+    q2_actor *list[1];
+    const s32 at[3] = { 0, 300, 500 };
+
+    printf("a rocket or a grenade goes off as QuakeGenExplosion\n");
+
+    q2_sim_init(&sim, NULL, 50);
+    splash_victim(&victim, 20000);          /* well outside the blast */
+    list[0] = &victim;
+
+    g_sim_shocks = 0;
+    q2_shock_attach(count_sim_shock, NULL);
+
+    splash_once(&sim, 0, at, list, 1);
+    check_eq_i(sim.projectile_blasts, 1,
+               "a grenade's fuse is a detonation (0x8004A01C)");
+    check_eq_i(sim.projectile_models, 0,
+               "with no entity set the Explosion model is not bound");
+    check_eq_i(g_sim_shocks, 0, "so no pad shakes (0x8005AA7C is past it)");
+
+    expire_once(&sim, Q2_PROJ_ROCKET);
+    expire_once(&sim, Q2_PROJ_BOLT);
+    check_eq_i(sim.projectile_blasts, 1,
+               "a rocket's lifetime and a bolt's end quietly (0x8004ADB0)");
+
+    expire_once(&sim, Q2_PROJ_HAND_GRENADE);
+    check_eq_i(sim.projectile_blasts, 2,
+               "and a thrown hand grenade's fuse is one (0x8004A9B0)");
+
+    q2_shock_attach(NULL, NULL);
+    q2_sim_free(&sim);
+}
+
+/*
  * RADIUS DAMAGE IS OCCLUDED. 0x80050810 asks the world, per candidate that
  * survived the falloff, whether the blast can see it — 0x80050A24 (the hull's
  * swept move, 0x80044C44) and 0x80050A3C (the entity-box clip, 0x80053974) —
@@ -5533,6 +5613,7 @@ int main(void)
     test_one_shot_kill();
     test_weapon_stay_reaches_the_world();
     test_splash_occlusion();
+    test_projectile_explosion();
     test_dispatcher_gates();
     test_zonegate_deathmatch();
     test_fx_mesh_hook();

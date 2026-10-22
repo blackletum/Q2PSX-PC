@@ -653,6 +653,15 @@ typedef struct q2_sim {
     u32          explosive_models;     /* ...and ones that spawned a model */
 
     /*
+     * Rockets and grenades that went off, and how many of those bound the
+     * `Explosion` model — PrimaryRocketActive (0x8004ADF0), both grenade
+     * thinks (0x80049F9C/0x8004A01C, 0x8004A8E0/0x8004A9B0). Each spawn is
+     * also a SetShockData for every pad (modelent.h).
+     */
+    u32          projectile_blasts;
+    u32          projectile_models;
+
+    /*
      * WHERE each detonation happened, so the owner can place `wep_grenlx1a`.
      *
      * 0x8002695C plays it through the by-handle path at 0x80073704 with the

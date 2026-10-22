@@ -367,6 +367,54 @@ static q2_fx_preset_id fx_for_projectile(q2_proj_kind kind)
     }
 }
 
+/*
+ * QUAKEGENEXPLOSION, FOR A ROCKET OR A GRENADE THAT WENT OFF.
+ *
+ * Three missile thinks call 0x8005A778 with their own origin (+0x54), their
+ * own surface byte (+0x9E), 4096 and kind 0 on every detonation:
+ *
+ *     PrimaryRocketActive    0x8004ADF0  any impact, before the direct hit
+ *                                        and the 1300 blast
+ *     PrimaryGrenadeLActive  0x80049F9C  meeting an entity
+ *                            0x8004A01C  the fuse running out
+ *     PrimaryGrenadeActive   0x8004A8E0  meeting an entity
+ *                            0x8004A9B0  the fuse running out — in the hand
+ *                                        too: the held arm marks an expired
+ *                                        fuse, sets state 2 and re-dispatches
+ *                                        (0x8004A464..0x8004A46C), and the
+ *                                        release falls into the flying arm in
+ *                                        the same call (0x8004A7D4)
+ *
+ * The bolt and the BFG ball never call it. So on the console a rocket or a
+ * grenade bursts as the missile tick's particles AND as the Explosion model,
+ * whose think raises the C0/40/31 light every tick (modelent.h) — and every
+ * pad within 4096 of it shakes (0x8005AA7C). This port drew the particles
+ * alone.
+ *
+ * The surface byte is the projectile's cell's area. The port's projectile
+ * carries no +0x9E, so it comes from the burst point through the 0x800686C4
+ * lookup the bursts already use.
+ *
+ * A grenade here that meets the WORLD goes off instead of bouncing (the note
+ * at the world arm below), so it explodes where the console's would bounce.
+ * That is the existing deviation carried through, not a new one.
+ */
+static void projectile_explosion(q2_sim *sim, q2_proj_kind kind,
+                                 const s32 at[3])
+{
+    if (kind != Q2_PROJ_ROCKET && kind != Q2_PROJ_GRENADE &&
+        kind != Q2_PROJ_HAND_GRENADE)
+        return;
+
+    sim->projectile_blasts++;
+    if (sim->entities_ready &&
+        q2_model_ent_spawn(&sim->entities, sim->model_bank,
+                           Q2_MODEL_ENT_EXPLOSION, at,
+                           fx_area_resolve(sim, 0, at),
+                           Q2_MODEL_ENT_SIZE_FULL))
+        sim->projectile_models++;
+}
+
 /* ------------------------------------------------------------------------- */
 void q2_sim_combat_init(q2_sim *sim)
 {
@@ -1402,6 +1450,7 @@ q2_hand_grenade_update q2_sim_hand_grenade_update(
                                       count, &sim->combat.rules,
                                       splash_clear, sim);
         fx_at(sim, Q2_FX_EXPLOSION, where);
+        projectile_explosion(sim, p->kind, where);
         player_damage_end(sim);
         return Q2_HAND_GRENADE_EXPIRED;
     }
@@ -1832,6 +1881,7 @@ void q2_sim_combat_tick(q2_sim *sim)
                                               &sim->combat.rules,
                                               splash_clear, sim);
                 fx_at(sim, fx, where);
+                projectile_explosion(sim, p->kind, where);
             } else {
                 q2_projectile_expire(&sim->combat.projectiles, i);
             }
@@ -2072,6 +2122,7 @@ void q2_sim_combat_tick(q2_sim *sim)
              * and that needs a posed model this file does not carry.
              */
             fx_at(sim, fx, step.to);
+            projectile_explosion(sim, p->kind, step.to);
             if (victim)
                 fx_at(sim, Q2_FX_BLOOD, step.to);
             continue;
@@ -2160,8 +2211,10 @@ void q2_sim_combat_tick(q2_sim *sim)
                     &sim->combat.rules, splash_clear, sim);
                 /* A grenade that only bounced has not gone off, so it must not
                  * leave a fireball behind. */
-                if (consumed)
+                if (consumed) {
                     fx_at(sim, fx, end);
+                    projectile_explosion(sim, p->kind, end);
+                }
                 continue;
             }
         }
@@ -2847,7 +2900,7 @@ static void explosive_apply(q2_sim *sim, const q2_explosive_result *res)
             if (sim->entities_ready &&
                 q2_model_ent_spawn(&sim->entities, sim->model_bank,
                                    Q2_MODEL_ENT_EXPLOSION, b->at,
-                                   (u8)b->area))
+                                   (u8)b->area, Q2_MODEL_ENT_SIZE_FULL))
                 sim->explosive_models++;
 
             sim->explosive_blasts++;

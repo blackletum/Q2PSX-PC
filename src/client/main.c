@@ -1447,6 +1447,7 @@ typedef struct client {
     u32               shock_fields;     /* ProcessShockData samples, p0    */
     u32               shock_big_fields; /* ...with the big motor running   */
     u32               shock_little_fields; /* ...and the little one on     */
+    u32               shock_by_id[Q2_SHOCK_PATTERNS + 1]; /* requests, by id */
     u32               mover_triggers;   /* items the script reached */
     u32               mover_moved;      /* ticks on which one moved */
     u32               conveyor_steps;   /* BASE0 DOCRATES object writes */
@@ -8802,12 +8803,28 @@ static void client_shock(client *c, int player, int id, s32 strength,
         if (p < 0 || p >= Q2_SIM_MAX_PLAYERS)
             continue;
         c->shock_requests++;
+        if (id >= 0 && id <= Q2_SHOCK_PATTERNS)
+            c->shock_by_id[id]++;
         if (pos)
             q2_sim_player_eye(&c->sim[0], p, ear);
         if (q2_shock_set(&c->shock[p], id, strength, pos, pos ? ear : NULL,
                          near_r, far_r))
             c->shock_taken++;
     }
+}
+
+/*
+ * The game library's own SetShockData callers, through the sink shock.h
+ * keeps: a hit on a player that survived (combat.c, 0x8005859C), every
+ * QuakeGenExplosion that bound its model (modelent.c, 0x8005AA7C) and the
+ * Tank Commander's footstep (cre_tankcomm.c, its import +0x12C). Each one
+ * arrives with SetShockData's own six arguments, so it is the same call the
+ * weapons and the train make from here.
+ */
+static void client_shock_sink(void *user, int player, int id, s32 strength,
+                              const s32 pos[3], s16 near_r, s16 far_r)
+{
+    client_shock((client *)user, player, id, strength, pos, near_r, far_r);
 }
 
 /* What PadSetAct sends, as SDL's two motors: the big one is the low-frequency
@@ -14102,6 +14119,21 @@ static void client_write_shot(client *c, bool numbered)
                 "little %u%s", c->shock_requests, c->shock_taken,
                 c->shock_fields, c->shock_big_fields, c->shock_little_fields,
                 c->settings.v[Q2_SET_VIBRATION] ? "" : " (VIBRATION off)");
+        /* ...and which patterns they asked for, `id x count`, so a hit (13,
+         * 15, 16), an explosion (13) and a Tank's step (14) can be told from
+         * the weapons (1..12). */
+        {
+            char line[192];
+            int  id, n = 0;
+
+            line[0] = '\0';
+            for (id = 1; id <= Q2_SHOCK_PATTERNS; id++)
+                if (c->shock_by_id[id] && n < (int)sizeof(line) - 16)
+                    n += snprintf(line + n, sizeof(line) - (size_t)n,
+                                  " %dx%u", id, c->shock_by_id[id]);
+            if (n)
+                Q2_INFO("            by id%s", line);
+        }
         /* The mixer, because "sounds are broken" needs a number to argue with.
          * `dropped` is voices that found all 24 busy — a steady stream of those
          * means something is raising more than the SPU could ever have played. */
@@ -14135,6 +14167,10 @@ static void client_write_shot(client *c, bool numbered)
                 c->explosive_vis, c->explosive_sounds,
                 c->explosive_sounds_missed,
                 c->sim[0].explosive_models);
+        /* Rockets and grenades through QuakeGenExplosion (simcombat.c). */
+        Q2_INFO("  missiles  %u rockets and grenades went off, %u Explosion"
+                " models spawned", c->sim[0].projectile_blasts,
+                c->sim[0].projectile_models);
         Q2_INFO("  entities  %u drawn (%u faces, %u shadows),"
                 " %u could not resolve a model, %u outside the zone",
                 c->ent_drawn, c->ent_faces, c->ent_shadows,
@@ -18555,6 +18591,9 @@ no_window:
     if (force_vibration >= 0)
         c.settings.v[Q2_SET_VIBRATION] = force_vibration;
 
+    /* The library's SetShockData callers reach the pads through here. */
+    q2_shock_attach(client_shock_sink, &c);
+
     if (c.mp_enabled) {
         s16 frag = (mp_frags != -2)
                        ? mp_frags
@@ -19859,6 +19898,7 @@ done:
     q2_save_free(&c.snapshot);
     q2_event_store_free(&c.event_store);  /* the EVE_ blocks, one per map */
     q2_gib_attach(NULL);            /* before the set it names goes */
+    q2_shock_attach(NULL, NULL);
     q2_sim_free(&c.sim[0]);
     q2_common_close(&c.common);
     q2_world_free_zone(&c.zone);

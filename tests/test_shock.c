@@ -216,6 +216,92 @@ static void test_sigma_delta(void)
     check_eq_s32((s16)s.little_accum, 125, "127, then 254 -> -2, then 125");
 }
 
+/* ------------------------------------------------------------------------- */
+typedef struct sink_call {
+    int        player, id;
+    s32        strength;
+    const s32 *pos;
+    s16        near_r, far_r;
+    void      *user;
+} sink_call;
+
+static sink_call g_call[4];
+static int       g_calls;
+
+static void spy(void *user, int player, int id, s32 strength,
+                const s32 pos[3], s16 near_r, s16 far_r)
+{
+    if (g_calls < 4) {
+        sink_call *k = &g_call[g_calls];
+
+        k->player = player; k->id = id; k->strength = strength;
+        k->pos = pos; k->near_r = near_r; k->far_r = far_r; k->user = user;
+    }
+    g_calls++;
+}
+
+static void test_sink(void)
+{
+    static int   token;
+    const s32    at[3] = { 100, -200, 300 };
+    q2_shock     s;
+    s32          ear[3];
+
+    puts("the library's callers, through the sink");
+
+    g_calls = 0;
+    q2_shock_request(0, Q2_SHOCK_BLASTER, Q2_SHOCK_FULL, NULL, 0, 0);
+    check_eq_s32(g_calls, 0, "nothing attached, nothing called");
+
+    q2_shock_attach(spy, &token);
+    q2_shock_request(3, Q2_SHOCK_IMPACT_MERGEABLE, 2048, NULL, 0, 0);
+    check(g_calls == 1 && g_call[0].player == 3 &&
+          g_call[0].id == Q2_SHOCK_IMPACT_MERGEABLE &&
+          g_call[0].strength == 2048 && g_call[0].pos == NULL &&
+          g_call[0].user == &token,
+          "a request arrives with its own arguments and the sink's user");
+
+    /* 0x8005AA5C..0x8005AA7C for a rocket's 4096 and a gib arm's 2048. */
+    g_calls = 0;
+    q2_shock_explosion(at, 4096);
+    q2_shock_explosion(at, 2048);
+    check_eq_s32(g_calls, 2, "one request per explosion");
+    check(g_call[0].player == Q2_SHOCK_ALL_PLAYERS &&
+          g_call[0].id == Q2_SHOCK_EXPLOSION && g_call[0].pos == at,
+          "every window, ShockData_Explosion, from the explosion's point");
+    check(g_call[0].strength == 4096 && g_call[0].near_r == 2048 &&
+          g_call[0].far_r == 4096, "4096: full within 2048, none past 4096");
+    check(g_call[1].strength == 2048 && g_call[1].near_r == 1024 &&
+          g_call[1].far_r == 2048, "2048: full within 1024, none past 2048");
+
+    q2_shock_attach(NULL, NULL);
+    g_calls = 0;
+    q2_shock_explosion(at, 4096);
+    check_eq_s32(g_calls, 0, "and detached, nothing again");
+
+    /* What the pads make of the two positional callers. */
+    memset(&s, 0, sizeof(s));
+    ear[0] = at[0] + 3000; ear[1] = at[1]; ear[2] = at[2];
+    check(q2_shock_set(&s, Q2_SHOCK_EXPLOSION, 4096, at, ear, 2048, 4096),
+          "a rocket 3000 away is felt");
+    check_eq_s32(s.slot[3].strength, 4096 * (4096 - 3000) / 2048,
+                 "at 2192: linear between 2048 and 4096");
+
+    memset(&s, 0, sizeof(s));
+    ear[0] = at[0] + 5000;
+    check(q2_shock_set(&s, Q2_SHOCK_STOMP, Q2_SHOCK_FULL, at, ear,
+                       Q2_SHOCK_TANK_STEP_NEAR, Q2_SHOCK_TANK_STEP_FAR),
+          "a Tank's step 5000 away is felt");
+    /* Stomp has no merge flag, so it takes the FIRST free slot
+     * (0x80040A9C), where the merging explosion above took the last. */
+    check_eq_s32(s.slot[0].strength, 4096 * (8192 - 5000) / (8192 - 2048),
+                 "at 2128 over its 2048..8192, in slot 0");
+    check(q2_shock_set(&s, Q2_SHOCK_STOMP, Q2_SHOCK_FULL, at, ear,
+                       Q2_SHOCK_TANK_STEP_NEAR, Q2_SHOCK_TANK_STEP_FAR) &&
+          s.slot[0].data && s.slot[1].data,
+          "and the next step stacks in slot 1: Stomp does not merge");
+}
+
 int main(void)
 {
     test_table();
@@ -224,6 +310,7 @@ int main(void)
     test_dead_and_hold();
     test_position();
     test_sigma_delta();
+    test_sink();
 
     printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;

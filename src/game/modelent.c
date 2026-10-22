@@ -9,6 +9,7 @@
 #include "item.h"          /* q2_item_shrink_think — 0x8005B358 */
 #include "monster.h"       /* the corpse site's record */
 #include "playerdeath.h"   /* the player site's record */
+#include "shock.h"         /* q2_shock_explosion — 0x8005AA7C */
 #include "trace.h"         /* q2_move_push_vector — 0x8005625C */
 #include "trig.h"
 #include "worldscale.h"    /* Q2_GRAVITY, Q2_VEL_DIV */
@@ -124,7 +125,7 @@ bool q2_model_ent_height(const q2_model_bank *bank, const char *name,
 /* ------------------------------------------------------------------------- */
 q2_entity *q2_model_ent_spawn(q2_entity_set *set, const q2_model_bank *bank,
                               q2_model_ent_kind kind, const s32 at[3],
-                              u8 surface)
+                              u8 surface, s32 size)
 {
     const char *name = q2_model_ent_name(kind);
     q2_entity *e;
@@ -206,6 +207,13 @@ q2_entity *q2_model_ent_spawn(q2_entity_set *set, const q2_model_bank *bank,
 
     e->hidden = false;
     e->kind   = Q2_ENT_KIND_MODEL;
+
+    /*
+     * AND EVERY PAD NEAR IT SHAKES — the function's last call, 0x8005AA7C,
+     * SetShockData(4, 13, size, at, size / 2, size). It sits after the bind's
+     * bail, so only an explosion that is really there is felt.
+     */
+    q2_shock_explosion(at, size);
 
     return e;
 }
@@ -911,7 +919,9 @@ u32 q2_gib_destroy(const q2_gib_world *w, const q2_gib_parent *parent,
                 rep.explosion = q2_model_ent_spawn(w->set, w->bank,
                                                    Q2_MODEL_ENT_EXPLOSION,
                                                    parent->pos,
-                                                   parent->area) != NULL;
+                                                   parent->area,
+                                                   Q2_MODEL_ENT_SIZE_GIB)
+                                != NULL;
 
             rep.chunks = q2_gib_throw_named(w, parent, Q2_GIB_RING_COUNT,
                                             impulse, ring->name, ring->digit,

@@ -363,3 +363,26 @@ bool q2_shock_active(const q2_shock *s)
             return true;
     return false;
 }
+
+/* ------------------------------------------------------------------------- */
+static q2_shock_sink_fn g_sink;
+static void            *g_sink_user;
+
+void q2_shock_attach(q2_shock_sink_fn fn, void *user)
+{
+    g_sink      = fn;
+    g_sink_user = fn ? user : NULL;
+}
+
+void q2_shock_request(int player, int id, s32 strength, const s32 pos[3],
+                      s16 near_r, s16 far_r)
+{
+    if (g_sink)
+        g_sink(g_sink_user, player, id, strength, pos, near_r, far_r);
+}
+
+void q2_shock_explosion(const s32 at[3], s32 size)
+{
+    q2_shock_request(Q2_SHOCK_ALL_PLAYERS, Q2_SHOCK_EXPLOSION, size, at,
+                     (s16)(size / 2), (s16)size);
+}
