@@ -280,6 +280,10 @@ extern const q2_weapon_behaviour q2_weapon_behaviour_table[Q2_WT_SLOTS];
 #define Q2_AIM_SHIFT_BOLT_HYPER     7    /* 0x8004D39C: aim >> 7             */
 #define Q2_AIM_SCALE_BULLET         4    /* 0x8004C330: aim << 2             */
 #define Q2_AIM_SCALE_ROCKET         2    /* 0x8004D190: aim << 1             */
+/* The railgun's fire function hands the aim over untouched and the rail itself
+ * shifts it, for the player and a creature alike: 0x80049220..0x80049250 add
+ * `dir << 2` to the start, so a slug reaches 16384 units as a bullet does. */
+#define Q2_AIM_SCALE_RAIL           4    /* 0x80049224: dir << 2             */
 
 /* ------------------------------------------------------------------------- */
 /* Weapon selection — 0x800506C4 and 0x80050758                               */

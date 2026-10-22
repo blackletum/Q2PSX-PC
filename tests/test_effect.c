@@ -482,6 +482,69 @@ static void test_spawn_offsets_and_puff(void)
 }
 
 /*
+ * The rail's spiral (0x8004917C's tail). A 3000-unit beam is three 1024-unit
+ * segments, `(3000 >> 10) + 1`, and the spawn loop runs `segs & ~1` = 2 in
+ * steps of two — one pass of two groups, then the last group of fifteen —
+ * so three groups cover two of the three segments, as on the console.
+ */
+static void test_rail_trail(void)
+{
+    q2_fx_world w;
+    static const s32 start[3] = { 100, 200, 300 };
+    static const s32 end[3]   = { 100, 200, 3300 };
+    static const s16 basis[2][3] = { { 4096, 0, 0 }, { 0, 4096, 0 } };
+    s32 cs, sn, pstep;
+    u32 n;
+
+    printf("rail: the spiral from the muzzle\n");
+
+    q2_fx_world_init(&w, &g_tab);
+    n = q2_fx_rail_trail(&w, start, end, basis, false, 1, NULL, NULL);
+    check_eq_i(n, 3, "two groups on the pass and one at the end");
+    check_eq_i(w.group[0].origin[2], 300, "the pass starts at the muzzle");
+    check_eq_i(w.group[1].origin[2], 300,
+               "and its second fifteen share the origin");
+    check_eq_i(w.group[2].origin[2], 1300,
+               "the last group is one 1000-unit step on");
+    check_eq_i(w.group[0].count, 15, "fifteen particles a group");
+    check_eq_i(w.group[0].life, Q2_FX_RAIL_LIFE, "sixteen ticks");
+    check(w.group[0].ramp[0] == q2_fx_ramp_at(&g_tab, 0) &&
+          w.group[0].ramp[1] == q2_fx_ramp_at(&g_tab, 0),
+          "ramp 0 at both ends, the blue one");
+    check(w.group[2].size < w.group[0].size,
+          "the last group is drawn at 6000, smaller than the 7000 before it");
+
+    /* Particle 1: a twelfth of a turn round the ring (4096 / 30 = 136), the
+     * ring's (cos, sin) through the basis, a quarter of it, and 1/30 of the
+     * step along the beam — all then >> 4 by the spawner. */
+    cs    = q2_cos12(136);
+    sn    = q2_sin12(136);
+    pstep = (1000 << 4) / 30;
+    check_eq_i(w.group[0].offset[0][0], (s16)(cs >> 2) >> 4,
+               "the ring's x is cos, a quarter, then the spawner's >> 4");
+    check_eq_i(w.group[0].offset[0][1], (s16)(sn >> 2) >> 4,
+               "its y is sin");
+    check_eq_i(w.group[0].offset[0][2], (s16)pstep >> 4,
+               "and it is one thirtieth of the segment along");
+    check_eq_i(w.group[0].vel[0], 4096 >> 10,
+               "particle 0 drifts outward at 4096 >> 10");
+
+    /* Multiplayer: fifteen to a segment, so one group a pass. */
+    q2_fx_world_init(&w, &g_tab);
+    n = q2_fx_rail_trail(&w, start, end, basis, true, 2, NULL, NULL);
+    check_eq_i(n, 2, "a multiplayer pass raises one group, then the last");
+
+    /* A short beam is one segment: no pass, only the last group. */
+    q2_fx_world_init(&w, &g_tab);
+    {
+        static const s32 near_end[3] = { 100, 200, 800 };
+        n = q2_fx_rail_trail(&w, start, near_end, basis, false, 1,
+                             NULL, NULL);
+    }
+    check_eq_i(n, 1, "a beam under 1024 units is the last group alone");
+}
+
+/*
  * The THIRD spawner, 0x8002FDFC: absolute world points in, raw differences
  * stored. The one instruction that separates it from 0x8003004C is the missing
  * shift, so every offset check below uses a difference whose >> 4 is a
@@ -2997,6 +3060,7 @@ int main(void)
     test_budget();
     test_presets();
     test_spawn_offsets_and_puff();
+    test_rail_trail();
     test_spawn_points();
     test_spawn_preset_separates();
     test_beam_pool();

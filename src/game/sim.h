@@ -1849,6 +1849,14 @@ typedef enum q2_hand_grenade_update {
 q2_hand_grenade_update q2_sim_hand_grenade_update(
     q2_sim *sim, const s32 attached_pos[3], s32 cook_dt, bool release);
 
+/*
+ * The rail's spiral from `start` to `end` (q2_fx_rail_trail), turned by the
+ * shooter's own angles — the player's view, or a creature's facing — because
+ * the console rings it in the SHOOTER's matrix, entity+0x2C0, not the beam's.
+ */
+void q2_sim_rail_trail(q2_sim *sim, const s32 start[3], const s32 end[3],
+                       s32 yaw, s32 pitch, s32 roll);
+
 /* Hurt the player, going through the same damage path everything else does. */
 q2_damage_result q2_sim_hurt_player(q2_sim *sim, q2_actor *attacker,
                                     s16 damage, s16 mod, const s32 point[3]);
@@ -1869,6 +1877,18 @@ q2_damage_result q2_sim_hurt_player(q2_sim *sim, q2_actor *attacker,
 s32 q2_sim_creature_hitscan(q2_sim *sim, q2_actor *attacker,
                             const s32 start[3], const s32 dir[3], s16 damage,
                             s16 mod, bool mark_world, s32 impact[3]);
+
+/*
+ * A creature's BOLT or ROCKET, launched as the engine's own projectile rather
+ * than resolved along its line: monster_fire_blaster (0x80062000) and
+ * monster_fire_rocket (0x8006210C) hand the player's spawners a velocity made
+ * from the module's 1.12 aim — `aim / 64` for the bolt, `aim * 3/2` for the
+ * rocket — so it flies, trails or smokes, bursts where it lands and splashes.
+ * `shooter` is credited and never hit; the player is a target of it. Returns
+ * the slot, or -1 when the list is full or `kind` is neither.
+ */
+s32 q2_sim_creature_launch(q2_sim *sim, q2_actor *shooter, q2_fire_kind kind,
+                           const s32 start[3], const s32 aim[3], s16 damage);
 
 /* Apply a validated Events FX item to the current player. Returns false when
  * the item is not the retail fixed-size FX form. The original leaves

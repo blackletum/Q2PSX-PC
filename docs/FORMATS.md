@@ -514,8 +514,17 @@ against +0.2450 / 65.51 % for whole-model absolute.
 > Block B being an 8-entry head table is what the earlier measurement saw as "exactly 16 zero bytes in
 > 821/965 models": eight empty chains. Block C's ×10 is **time, not distance** — it is what makes the
 > runtime clock tick ten times per animation frame. (An earlier draft of this table guessed it was spatial
-> because ten is also the world's lattice step; the pose selector settles it.) Block B's tens are still
-> unattributed: its entries are pairs, which fits neither a 3-vector nor a duration cleanly.
+> because ten is also the world's lattice step; the pose selector settles it.) Block B's tens are time
+> too: its pairs are FRAME RANGES. Block B is the per-octant override of block A's draw order, read by
+> `CalcSortList` (`0x8006A020`, MODELS.C:306), which ClipGlobalModel calls with the entity's origin less
+> the camera's (`0x8006BEC8`). It takes that vector into the model's frame by the transpose of the
+> entity matrix (`0x8006FF80` reads `+0x2C0` down its columns) and keeps three signs, `octant = (x > 0)
+> | (y > 0) << 1 | (z > 0) << 2`. Block B's head for that octant is searched for a node holding a pair
+> `lo <= entity+0x100 <= hi` (the animation position, ten to a frame, hence the load-time scale); a
+> match draws in the node's own inline stream, starting on the head's upper nine bits, and no match
+> draws in block A's entry for the octant. The result is the draw record's `+4`/`+6` that `0x8006BC94`
+> hands the linker. On WASTE1 the Soldier and the hand-grenade view model carry overrides; on COMMAND,
+> the Tank Commander.
 
 ### 2.2.1 `CastList` block C — the animation bank
 
@@ -7362,6 +7371,13 @@ Which means **nothing in this engine draws a weapon trail.** The blaster bolt's 
 oriented hull — the 20 x 20 x 100 box at `0x8009DB1C` (§9.6) — and it leaves nothing behind it; a rocket is
 a model; the laser is a beam that exists only while it fires. A port that added trails would be adding
 something the console does not have.
+
+> **CORRECTION, for two weapons.** The glint is not a trail, but the blaster bolt's particles (`0x80048588`)
+> and the railgun's are: `AnyoneFireInstantRail` (`0x8004917C`) ends in three calls to the offsets spawner
+> `0x8003004C` (`0x800497B8`, `0x800497F8`, `0x80049964`) that lay a corkscrew of ramp-0 particles along
+> the shot, a ring 64 units out per 1024-unit segment turned by the shooter's matrix. `q2_fx_rail_trail`
+> in `src/game/effect.h` carries the whole construction, including the spawn loop that covers about half
+> of a long beam.
 
 ### 18.8.1 What turns a glint on — and it is not the engine
 

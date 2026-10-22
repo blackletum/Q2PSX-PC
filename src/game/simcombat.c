@@ -317,6 +317,42 @@ static void fx_hitscan_impact(q2_sim *sim, const s32 origin[3],
     }
 }
 
+static u8 rail_area_at(void *user, const s32 at[3])
+{
+    return fx_area_resolve((q2_sim *)user, 0, at);
+}
+
+void q2_sim_rail_trail(q2_sim *sim, const s32 start[3], const s32 end[3],
+                       s32 yaw, s32 pitch, s32 roll)
+{
+    /*
+     * The shooter's matrix at entity+0x2C0, applied to the ring's (1, 0, 0)
+     * and (0, 1, 0) with the Y negated after (0x800496B0, 0x800496C4). That is
+     * the same rotate-then-negate the fire functions give their muzzle
+     * offsets, which q2_weapon_muzzle_origin takes pre-negated — so the second
+     * column goes in as (0, -1, 0).
+     */
+    static const s16 ring_x[3] = { Q2_ONE_12, 0, 0 };
+    static const s16 ring_y[3] = { 0, -Q2_ONE_12, 0 };
+    static const s32 none[3]   = { 0, 0, 0 };
+    s32 col[3];
+    s16 basis[2][3];
+    int k;
+
+    if (!sim || !sim->fx_ready || !start || !end)
+        return;
+
+    q2_weapon_muzzle_origin(ring_x, none, yaw, pitch, roll, col);
+    for (k = 0; k < 3; k++)
+        basis[0][k] = (s16)col[k];
+    q2_weapon_muzzle_origin(ring_y, none, yaw, pitch, roll, col);
+    for (k = 0; k < 3; k++)
+        basis[1][k] = (s16)col[k];
+
+    q2_fx_rail_trail(&sim->fx, start, end, (const s16 (*)[3])basis,
+                     sim->multiplayer, sim->player_count, rail_area_at, sim);
+}
+
 /*
  * Which burst a projectile leaves behind.
  *
@@ -1076,6 +1112,18 @@ q2_fire_result_v2 q2_sim_fire(q2_sim *sim)
         fx_hitscan_impact(sim, s->origin, s->dir, frac, frac_area, -1, NULL,
                           s->damage);
         (void)hits;
+
+        /* And the spiral, from the muzzle to where the trace stopped. */
+        if (sim->fx_ready) {
+            const q2_player *p = &sim->player[sim->cur_player];
+            s32 end[3];
+            int k;
+
+            for (k = 0; k < 3; k++)
+                end[k] = s->origin[k] +
+                         (s32)(((s64)s->dir[k] * frac) >> Q2_FRAC_12);
+            q2_sim_rail_trail(sim, s->origin, end, p->yaw, p->pitch, p->roll);
+        }
         break;
     }
 
@@ -1431,6 +1479,93 @@ static q2_actor *attacker_for(q2_sim *sim, s32 owner)
     if (owner == sim->cur_player)
         return &sim->combat.self;
     return &sim->pcombat[owner].self;
+}
+
+/* The creature that fired it, or the player `owner` names. */
+static q2_actor *proj_attacker(q2_sim *sim, const q2_projectile *p)
+{
+    return p->shooter ? p->shooter : attacker_for(sim, p->owner);
+}
+
+/*
+ * Who a projectile in flight can hit — the world's list, and for a
+ * CREATURE's shot in a single-player run the player as well. That list only
+ * exists in multiplayer; alone, `combat.targets` is the creatures, which
+ * left a creature's bolt nothing to hit but its own kind. The player's actor
+ * is the one player_damage_begin placed for this tick, at the entity origin.
+ * `with_player` false leaves the player out — a splash under god mode, which
+ * projectile_owner_splash declines for the same reason.
+ */
+static q2_actor **proj_targets(q2_sim *sim, const q2_projectile *p,
+                               bool with_player, q2_actor **buf, u32 cap,
+                               u32 *count)
+{
+    q2_actor **list = sim->world_targets ? sim->world_targets
+                                         : sim->combat.targets;
+    u32 n = sim->world_targets ? sim->world_target_count
+                               : sim->combat.target_count;
+    u32 i;
+
+    if (!p->shooter || sim->world_targets || !with_player ||
+        sim->combat.inv.health <= 0 || !sim->combat.self.takedamage ||
+        n >= cap) {
+        *count = n;
+        return list;
+    }
+    for (i = 0; i < n; i++)
+        buf[i] = list[i];
+    buf[n++] = &sim->combat.self;
+    *count = n;
+    return buf;
+}
+
+s32 q2_sim_creature_launch(q2_sim *sim, q2_actor *shooter, q2_fire_kind kind,
+                           const s32 start[3], const s32 aim[3], s16 damage)
+{
+    q2_fire_result_v2 r;
+    q2_shot *s;
+    s32 index;
+    int k;
+
+    if (!sim || !start || !aim ||
+        (kind != Q2_FK_BOLT && kind != Q2_FK_ROCKET))
+        return -1;
+
+    memset(&r, 0, sizeof(r));
+    r.fired      = true;
+    r.kind       = kind;
+    r.shot_count = 1;
+    s = &r.shot[0];
+    memcpy(s->origin, start, sizeof(s->origin));
+    s->damage = damage;
+
+    for (k = 0; k < 3; k++) {
+        if (kind == Q2_FK_BOLT) {
+            /* 0x80062038..0x80062084: `bgez; addiu 63; sra 6` on each word —
+             * the player blaster's own shift, rounding toward zero. */
+            s32 a = aim[k];
+            s->dir[k] = (a >= 0 ? a : a + 63) >> Q2_AIM_SHIFT_BOLT_BLASTER;
+        } else {
+            /* 0x80062114..0x80062160: the low halfword times three, back to a
+             * halfword, then `sra 17` of it — half again, where the player's
+             * launcher doubles (Q2_AIM_SCALE_ROCKET). */
+            s->dir[k] = (s16)((u16)aim[k] * 3u) >> 1;
+        }
+    }
+    /* 0x800620D4/0x800620DC: flags 11 with mod 6 — the effect-8 bolt every
+     * creature that fires one asks for. The hyper pair (14, 5) needs bit 0x40
+     * in that argument, which no module on this disc passes. */
+    r.mod = kind == Q2_FK_BOLT ? Q2_MOD_BOLT : Q2_MOD_ROCKET;
+
+    q2_sim_proj_scan.launched++;
+    index = q2_projectile_launch(&sim->combat.projectiles, &r, -1,
+                                 sim->level_time);
+    if (index < 0) {
+        q2_sim_proj_scan.dropped_full++;
+        return -1;
+    }
+    sim->combat.projectiles.p[index].shooter = shooter;
+    return index;
 }
 
 /* The caller's target list normally excludes the shooter so a bolt cannot hit
@@ -1835,6 +1970,7 @@ void q2_sim_combat_tick(q2_sim *sim)
         q2_projectile *p = &sim->combat.projectiles.p[i];
         q2_proj_step step;
         q2_actor **hit_list;
+        q2_actor  *cand[Q2_SIM_CRE_HITSCAN_MAX + 1];
         u32 hit_count;
         s32 hit_index;
         s32 dir[3];
@@ -2097,10 +2233,10 @@ void q2_sim_combat_tick(q2_sim *sim)
         for (k = 0; k < 3; k++)
             dir[k] = step.to[k] - step.from[k];
 
-        hit_list  = sim->world_targets ? sim->world_targets
-                                       : sim->combat.targets;
-        hit_count = sim->world_targets ? sim->world_target_count
-                                       : sim->combat.target_count;
+        /* The player stops a creature's shot even in god mode; it is the
+         * damage that god mode refuses (q2_sim_hurt_player). */
+        hit_list = proj_targets(sim, p, true, cand, (u32)Q2PSX_ARRAY_COUNT(cand),
+                                &hit_count);
 
         hit_index = q2_combat_nearest_on_segment(step.from, dir,
                                                  Q2_HITSCAN_RADIUS,
@@ -2108,7 +2244,7 @@ void q2_sim_combat_tick(q2_sim *sim)
 
         /* Never its own shooter: the world list holds everybody, including the
          * player who fired this. */
-        if (hit_index >= 0 && hit_list[hit_index] == attacker_for(sim, p->owner))
+        if (hit_index >= 0 && hit_list[hit_index] == proj_attacker(sim, p))
             hit_index = -1;
 
         /*
@@ -2133,7 +2269,7 @@ void q2_sim_combat_tick(q2_sim *sim)
                 /* Same rule as the sweep in combat.c: a corpse is a target
                  * until its `takedamage` says otherwise, which is what lets a
                  * rocket finish the job on a body already down. */
-                if (!t || t == attacker_for(sim, p->owner) || !t->takedamage)
+                if (!t || t == proj_attacker(sim, p) || !t->takedamage)
                     continue;
 
                 d2 = q2_combat_ray_dist_sq(step.from, dir, t->origin, &along);
@@ -2158,6 +2294,35 @@ void q2_sim_combat_tick(q2_sim *sim)
             }
         }
 
+        if (hit_index >= 0 && p->shooter &&
+            hit_list[hit_index] == &sim->combat.self) {
+            /*
+             * A CREATURE'S SHOT ON THE PLAYER takes the path every other
+             * creature hit on the player takes, for the flinch, the blood and
+             * god mode — and that path re-seats the actor at the feet, so the
+             * origin this tick placed is put back for the next projectile. The
+             * splash then reaches everyone else; the victim of a direct hit is
+             * not in its own blast.
+             */
+            q2_fx_preset_id fx = fx_for_projectile(p->kind);
+            s32 keep[3];
+            u32 others;
+            q2_actor **rest;
+
+            q2_sim_proj_scan.hit++;
+            memcpy(keep, sim->combat.self.origin, sizeof(keep));
+            q2_sim_hurt_player(sim, p->shooter, p->damage, p->mod, step.to);
+            memcpy(sim->combat.self.origin, keep, sizeof(keep));
+
+            rest = proj_targets(sim, p, false, cand, (u32)Q2PSX_ARRAY_COUNT(cand),
+                                &others);
+            q2_projectile_impact_traced(&sim->combat.projectiles, i, step.to,
+                                        NULL, p->shooter, NULL, rest, others,
+                                        &sim->combat.rules, splash_clear, sim);
+            fx_at(sim, fx, step.to);
+            continue;
+        }
+
         if (hit_index >= 0) {
             q2_actor *victim = hit_list[hit_index];
 
@@ -2166,7 +2331,7 @@ void q2_sim_combat_tick(q2_sim *sim)
 
             projectile_owner_splash(sim, p, step.to, hit_list, hit_count);
             q2_projectile_impact_traced(&sim->combat.projectiles, i, step.to,
-                                        NULL, attacker_for(sim, p->owner),
+                                        NULL, proj_attacker(sim, p),
                                         victim, hit_list, hit_count,
                                         &sim->combat.rules,
                                         splash_clear, sim);
@@ -2256,16 +2421,18 @@ void q2_sim_combat_tick(q2_sim *sim)
                  * one of the twenty-two and the behaviour certainly exists. */
                 bool consumed;
                 q2_fx_preset_id fx = fx_for_projectile(p->kind);
-                q2_actor **targets = sim->world_targets
-                                          ? sim->world_targets
-                                          : sim->combat.targets;
-                u32 count = sim->world_targets ? sim->world_target_count
-                                               : sim->combat.target_count;
+                u32 count;
+                /* A creature's rocket on the wall beside the player reaches
+                 * the player too, unless god mode is holding the damage off. */
+                q2_actor **targets = proj_targets(sim, p, !sim->invulnerable,
+                                                  cand,
+                                                  (u32)Q2PSX_ARRAY_COUNT(cand),
+                                                  &count);
 
                 projectile_owner_splash(sim, p, end, targets, count);
                 consumed = q2_projectile_impact_traced(
                     &sim->combat.projectiles, i, end, NULL,
-                    attacker_for(sim, p->owner), NULL, targets, count,
+                    proj_attacker(sim, p), NULL, targets, count,
                     &sim->combat.rules, splash_clear, sim);
                 /* A grenade that only bounced has not gone off, so it must not
                  * leave a fireball behind. */

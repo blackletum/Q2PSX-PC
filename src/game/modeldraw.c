@@ -286,17 +286,17 @@ static bool vertex_part(const q2_model *m, u32 index, u32 *part_out,
     return false;
 }
 
-bool q2_model_blend_local(const q2_model_instance *inst, s32 vert_a,
-                          s32 vert_b, s32 out[3])
+bool q2_model_attach_blend(const q2_model *m, s32 vert_a, s32 vert_b,
+                           q2_model_attach *out)
 {
     s32 a[3], b[3];
     u32 pa, pb;
     int k;
 
-    if (!inst || !inst->model || !out || vert_a < 0 || vert_b < 0)
+    if (!m || !out || vert_a < 0 || vert_b < 0)
         return false;
-    if (!vertex_part(inst->model, (u32)vert_a, &pa, a) ||
-        !vertex_part(inst->model, (u32)vert_b, &pb, b))
+    if (!vertex_part(m, (u32)vert_a, &pa, a) ||
+        !vertex_part(m, (u32)vert_b, &pb, b))
         return false;
 
     /* 0x8006CBA4: one part, the midpoint; two parts, the first alone. */
@@ -304,19 +304,45 @@ bool q2_model_blend_local(const q2_model_instance *inst, s32 vert_a,
         for (k = 0; k < 3; k++)
             a[k] = (a[k] + b[k]) / 2;
 
-    if (inst->pose) {
+    for (k = 0; k < 3; k++)
+        out->off[k] = (s16)a[k];
+    out->part = (u16)pa;
+    return true;
+}
+
+void q2_model_attach_pose(const q2_model_instance *inst,
+                          const q2_model_attach *a, s32 out[3])
+{
+    s32 p[3];
+    int k;
+
+    for (k = 0; k < 3; k++)
+        p[k] = a->off[k];
+
+    if (inst->pose && inst->model && a->part < inst->model->hdr.num_parts) {
         s16 rot[3][3];
 
-        q2_quat_to_matrix(rot, inst->pose[pa].q);
-        matrix_apply(rot, a, out);
-        out[0] += inst->pose[pa].t[0];
-        out[1] += inst->pose[pa].t[1];
-        out[2] += inst->pose[pa].t[2];
+        q2_quat_to_matrix(rot, inst->pose[a->part].q);
+        matrix_apply(rot, p, out);
+        out[0] += inst->pose[a->part].t[0];
+        out[1] += inst->pose[a->part].t[1];
+        out[2] += inst->pose[a->part].t[2];
     } else {
-        out[0] = a[0];
-        out[1] = a[1];
-        out[2] = a[2];
+        out[0] = p[0];
+        out[1] = p[1];
+        out[2] = p[2];
     }
+}
+
+bool q2_model_blend_local(const q2_model_instance *inst, s32 vert_a,
+                          s32 vert_b, s32 out[3])
+{
+    q2_model_attach a;
+
+    if (!inst || !out ||
+        !q2_model_attach_blend(inst->model, vert_a, vert_b, &a))
+        return false;
+    q2_model_attach_pose(inst, &a, out);
     return true;
 }
 
@@ -459,14 +485,10 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
     u32 part, face_index = 0, emitted = 0, vertex_cursor = 0;
 
     /*
-     * One slot per face: the primitive built for it, its own mean depth and
-     * whether it was transformed at all. The depth is NOT what buckets the
-     * model — that is one link point from the origin, below — it is what picks
-     * which of block A's eight orders to draw in (model.h).
+     * One slot per face: the primitive built for it, linked afterwards in the
+     * order block A or block B names (model.h).
      */
     psx_prim *built[Q2_MODEL_MAX_FACES];
-    u16       face_z[Q2_MODEL_MAX_FACES];
-    u8        face_ok[Q2_MODEL_MAX_FACES];
     u16       order[Q2_MODEL_MAX_FACES];
     u32       built_count = 0;
     u32       bucket = 0;
@@ -483,7 +505,6 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
 
     memset(window, 0, sizeof(window));
     memset(built, 0, sizeof(built));
-    memset(face_ok, 0, sizeof(face_ok));
 
     reorder = (m->hdr.num_faces <= Q2_MODEL_MAX_FACES);
 
@@ -885,17 +906,6 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
                 }
             }
 
-            /* Its own mean depth, kept for the order pick below. A face the
-             * backface test is about to drop still counts: `start` names an
-             * order whether or not that face is drawn. */
-            if (face_index < Q2_MODEL_MAX_FACES) {
-                u32 fz = 0;
-                for (i = 0; i < 4; i++)
-                    fz += window[f.v[i]].z;
-                face_z[face_index]  = (u16)(fz / 4);
-                face_ok[face_index] = 1;
-            }
-
             /*
              * The linker's own NCLIP pair, before anything is allocated. An
              * ordering table has no depth buffer, so a face that has been
@@ -1025,14 +1035,30 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
      * A model with no usable order — a malformed block, or more faces than the
      * table can hold — falls back to file order, which is what this did for
      * every model before block A was read correctly.
+     *
+     * WHICH order is CalcSortList's (0x8006A020): the camera-to-model vector
+     * taken into the model's own frame by the transpose of its matrix — the
+     * unscaled one, since only the signs are kept — and its octant.
      */
     if (reorder) {
-        u32 n = q2_model_draw_sequence(
-                    m,
-                    q2_model_draw_order_pick(m, face_z, face_ok,
-                                             Q2_MODEL_MAX_FACES),
-                    order, Q2_MODEL_MAX_FACES);
-        u32 k;
+        q2_model_draw_order ord;
+        s32 d[3], dir[3];
+        u32 n = 0, k;
+        int r;
+
+        for (k = 0; k < 3; k++)
+            d[k] = inst->origin[k] - cam->pos[k];
+        for (r = 0; r < 3; r++) {
+            /* 0x8006FF80 keeps the raw sum, so only its sign is taken. */
+            s64 sum = (s64)spin_unscaled[0][r] * d[0] +
+                      (s64)spin_unscaled[1][r] * d[1] +
+                      (s64)spin_unscaled[2][r] * d[2];
+            dir[r] = sum > 0 ? 1 : sum < 0 ? -1 : 0;
+        }
+
+        if (q2_model_draw_order_select(m, dir, inst->anim_pos, &ord))
+            n = q2_model_draw_sequence_from(m, &ord, order,
+                                            Q2_MODEL_MAX_FACES);
 
         if (n == 0) {
             for (k = 0; k < built_count; k++)

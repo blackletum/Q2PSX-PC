@@ -955,6 +955,118 @@ s32 q2_fx_bolt_trail(q2_fx_world *w, q2_rng *rng, const s32 at[3],
 }
 
 /* ------------------------------------------------------------------------- */
+/* The rail's spiral — the tail of 0x8004917C                                  */
+/* ------------------------------------------------------------------------- */
+/* An exact floor root standing in for SquareRootNR (0x80055CBC), whose seed is
+ * libgte's table; shock.c makes the same substitution. The segment count only
+ * moves when the length crosses a multiple of 1024, so a unit cannot show. */
+static s32 rail_sqrt(s64 n)
+{
+    u64 v = (u64)n, r = 0, bit = (u64)1 << 62;
+
+    if (n <= 0)
+        return 0;
+    while (bit > v)
+        bit >>= 2;
+    while (bit) {
+        if (v >= r + bit) {
+            v -= r + bit;
+            r = (r >> 1) + bit;
+        } else {
+            r >>= 1;
+        }
+        bit >>= 2;
+    }
+    return (s32)r;
+}
+
+u32 q2_fx_rail_trail(q2_fx_world *w, const s32 start[3], const s32 end[3],
+                     const s16 basis[2][3], bool multiplayer, int windows,
+                     u8 (*area_at)(void *user, const s32 at[3]), void *user)
+{
+    s16 offs[Q2_FX_RAIL_PER_SEG][3], vel[Q2_FX_RAIL_PER_SEG][3];
+    s32 d[3], step[3], pstep[3], at[3];
+    s32 segs, per, turns, astep, angle = 0, n;
+    const q2_fx_ramp *r;
+    u32 groups = 0;
+    int i, k;
+    u8 area;
+
+    if (!w || !start || !end || !basis)
+        return 0;
+
+    for (k = 0; k < 3; k++)
+        d[k] = end[k] - start[k];
+
+    segs = (rail_sqrt((s64)d[0] * d[0] + (s64)d[1] * d[1] + (s64)d[2] * d[2])
+            >> Q2_FX_RAIL_SEG_SHIFT) + 1;
+
+    if (multiplayer) {
+        per   = Q2_FX_RAIL_PER_SEG_MP;
+        turns = windows < Q2_FX_RAIL_MP_TWO_TURNS ? 1 : 2;
+    } else {
+        per   = Q2_FX_RAIL_PER_SEG;
+        turns = 1;
+    }
+
+    /* Both divides are the compiler's signed ones and truncate toward zero. */
+    for (k = 0; k < 3; k++) {
+        step[k]    = d[k] / segs;
+        pstep[k]   = (step[k] << 4) / per;
+        offs[0][k] = 0;
+    }
+    for (i = 1; i < per; i++)
+        for (k = 0; k < 3; k++)
+            offs[i][k] = (s16)(offs[i - 1][k] + (s16)pstep[k]);
+
+    astep = (turns << 12) / per;
+    for (i = 0; i < per; i++, angle += astep) {
+        s32 cs = q2_cos12(angle & 0xFFF), sn = q2_sin12(angle & 0xFFF);
+
+        for (k = 0; k < 3; k++) {
+            s16 v = (s16)(((s32)basis[0][k] * cs +
+                           (s32)basis[1][k] * sn) >> Q2_FRAC_12);
+
+            offs[i][k] = (s16)(offs[i][k] + (v >> Q2_FX_RAIL_RING_SHIFT));
+            vel[i][k]  = (s16)(v >> Q2_FX_RAIL_DRIFT_SHIFT);
+        }
+    }
+
+    r = q2_fx_ramp_at(w->tab, Q2_FX_RAIL_RAMP);
+    for (k = 0; k < 3; k++)
+        at[k] = start[k];
+    area = area_at ? area_at(user, at) : 0;
+
+    for (n = 0; n < (segs & ~1); n += 2) {
+        if (q2_fx_group_spawn_offsets(w, at, (const s16 (*)[3])offs,
+                                      (const s16 (*)[3])vel, Q2_FX_RAIL_GROUP,
+                                      r, r, Q2_FX_RAIL_LIFE, Q2_FX_RAIL_SIZE,
+                                      area) >= 0)
+            groups++;
+        if (per == Q2_FX_RAIL_PER_SEG &&
+            q2_fx_group_spawn_offsets(w, at,
+                                      (const s16 (*)[3])offs[Q2_FX_RAIL_GROUP],
+                                      (const s16 (*)[3])vel[Q2_FX_RAIL_GROUP],
+                                      Q2_FX_RAIL_GROUP, r, r, Q2_FX_RAIL_LIFE,
+                                      Q2_FX_RAIL_SIZE, area) >= 0)
+            groups++;
+
+        /* The step is added as the halfword it was stored as (`lh 72(s2)`). */
+        for (k = 0; k < 3; k++)
+            at[k] += (s16)step[k];
+        if (area_at)
+            area = area_at(user, at);
+    }
+
+    if (q2_fx_group_spawn_offsets(w, at, (const s16 (*)[3])offs,
+                                  (const s16 (*)[3])vel, Q2_FX_RAIL_GROUP,
+                                  r, r, Q2_FX_RAIL_LIFE, Q2_FX_RAIL_SIZE_LAST,
+                                  area) >= 0)
+        groups++;
+    return groups;
+}
+
+/* ------------------------------------------------------------------------- */
 /* 0x80058638 — the effect[1] dispatcher, which also OWNS the countdown       */
 /* ------------------------------------------------------------------------- */
 void q2_fx_actor_damage_effect(q2_fx_world *w, struct q2_actor *a,

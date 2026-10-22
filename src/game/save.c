@@ -1141,6 +1141,8 @@ q2_result q2_save_apply(const q2_save *s, q2_sim *sim, q2_inventory *inv,
                 sim->combat.projectiles.p[i].kind == Q2_PROJ_BOLT)
                 sim->combat.projectiles.p[i].flags =
                     q2_projectile_flags_for_mod(sim->combat.projectiles.p[i].mod);
+            /* A creature's actor does not outlive the zone it was built in. */
+            sim->combat.projectiles.p[i].shooter = NULL;
             if (sim->combat.projectiles.p[i].in_use)
                 live++;
         }

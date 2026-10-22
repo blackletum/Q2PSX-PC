@@ -257,6 +257,15 @@ typedef struct q2_projectile {
     bool bounced;       /* a grenade that has hit something at least once    */
 
     /*
+     * A CREATURE that fired it (q2_sim_creature_launch), or NULL for a
+     * player's. `owner` is -1 then, since a creature is not a player index.
+     * It names who is credited and who the shot cannot hit, and it makes the
+     * player a target of it. Not saved: a creature's bolt or rocket in flight
+     * across a save comes back as the world's.
+     */
+    q2_actor *shooter;
+
+    /*
      * The collision cell this projectile is in, carried across ticks exactly as
      * the mover carries the player's. A rocket that has flown across the map is
      * nowhere near the shooter's cell, so tracing it from the shooter's would

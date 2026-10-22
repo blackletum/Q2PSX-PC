@@ -279,6 +279,33 @@ void q2_cre_set_muzzle_hook(bool (*fn)(const q2_monster *m, s16 vert_a,
                             void *user);
 void q2_cre_muzzle(const q2_monster *m, s16 vert_a, s16 vert_b, s32 out[3]);
 
+/*
+ * The muzzle in its two halves, for a module that works on the cache between
+ * them — the Tank Commander lerps its rocket tubes (cre_tankcomm.c).
+ *
+ * `q2_cre_attach_blend` is import +0x34 alone: the 8-byte cache a module
+ * keeps, three part-local halfwords and the part. It depends on the model and
+ * not on the pose, so asking for it at the shot gives what the module cached
+ * at load. `q2_cre_attach_place` is +0x2C and +0x28: that point posed, turned
+ * by the object's matrix and put at its origin. Without the host's hooks the
+ * blend fails and the place answers with the origin, as q2_cre_muzzle does.
+ */
+typedef struct q2_cre_attach {
+    s16 off[3];
+    u16 part;
+} q2_cre_attach;
+
+void q2_cre_set_attach_hooks(
+    bool (*blend)(const q2_monster *m, s16 vert_a, s16 vert_b,
+                  q2_cre_attach *out, void *user),
+    bool (*place)(const q2_monster *m, const q2_cre_attach *a, s32 out[3],
+                  void *user),
+    void *user);
+bool q2_cre_attach_blend(const q2_monster *m, s16 vert_a, s16 vert_b,
+                         q2_cre_attach *out);
+void q2_cre_attach_place(const q2_monster *m, const q2_cre_attach *a,
+                         s32 out[3]);
+
 void q2_cre_set_shot_hook(void (*fn)(q2_monster *m, const q2_cre_shot *shot,
                                      void *user),
                           void *user);

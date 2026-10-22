@@ -194,6 +194,13 @@ typedef struct q2_model_instance {
     s32                  sort_area;
 
     /*
+     * Entity +0x100, the animation position (ten to a frame) the pose was
+     * taken at. CalcSortList keys block B's draw-order overrides on it
+     * (model.h); zero, the rest pose, for anything not animated.
+     */
+    s32                  anim_pos;
+
+    /*
      * Entity +0x78..+0x8F: the absolute AABB retail puts at batch record +8.
      * A live entity always supplies it. `sort_bounds_valid` is false for
      * structural/offline models; if such a caller nevertheless selects an
@@ -327,6 +334,23 @@ bool q2_model_world_vertex(const q2_model_instance *inst, s32 index,
  */
 bool q2_model_blend_local(const q2_model_instance *inst, s32 vert_a,
                           s32 vert_b, s32 out[3]);
+
+/*
+ * The same two halves APART, because one module does arithmetic on what the
+ * first half caches before the second reads it: the Tank Commander lerps its
+ * three rocket tubes between two blended attachments at load (cre_tankcomm.c).
+ * `q2_model_attach` is the 8-byte cache a module keeps — three halfwords and
+ * the part (`sh` at +0, +2, +4 and +6, 0x8006CBE0..0x8006CC28).
+ */
+typedef struct q2_model_attach {
+    s16 off[3];   /* part-local                                       */
+    u16 part;
+} q2_model_attach;
+
+bool q2_model_attach_blend(const q2_model *m, s32 vert_a, s32 vert_b,
+                           q2_model_attach *out);           /* 0x8006CA2C */
+void q2_model_attach_pose(const q2_model_instance *inst,
+                          const q2_model_attach *a, s32 out[3]); /* 0x8006C6C8 */
 
 /*
  * A model-space point placed in the world: rotated by the instance's own

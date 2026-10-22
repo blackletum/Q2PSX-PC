@@ -5480,6 +5480,75 @@ static void test_bolt_trail(void)
           "(0x800482B4)");
 }
 
+/*
+ * A creature's bolt and rocket are the player's projectiles with the
+ * creature's own velocity rule (0x80062000: aim / 64; 0x8006210C: aim * 3/2),
+ * and the player is a target of them. The bolt starts inside its shooter's
+ * cylinder, which it must not hit.
+ */
+static void test_creature_launch(void)
+{
+    q2_sim   sim;
+    q2_input in;
+    q2_actor cre;
+    q2_actor *targets[1];
+    s32 spawn[3] = { 0, 0, 0 };
+    s32 start[3], aim[3] = { 0, 0, -4096 };
+    s32 bolt, rocket;
+    s16 before;
+    int i;
+
+    printf("a creature's bolt and rocket fly, and hit the player\n");
+
+    memset(&g_kill_tab, 0, sizeof(g_kill_tab));
+    g_kill_tab.loaded = true;
+    memset(&in, 0, sizeof(in));
+
+    q2_sim_init(&sim, NULL, 50);
+    q2_sim_attach_effects(&sim, &g_kill_tab, 1);
+    q2_sim_spawn(&sim, spawn, 0);
+    sim.fire_from_input = false;
+
+    start[0] = 0;
+    start[1] = q2_sim_origin_y(0);
+    start[2] = 2000;
+
+    q2_actor_init(&cre);
+    memcpy(cre.origin, start, sizeof(start));
+    cre.health     = 750;
+    cre.radius     = 286;
+    cre.takedamage = Q2_DAMAGE_AIM;
+    targets[0] = &cre;
+    q2_sim_set_targets(&sim, targets, 1);
+
+    rocket = q2_sim_creature_launch(&sim, &cre, Q2_FK_ROCKET, start, aim, 50);
+    check(rocket >= 0, "the rocket takes a slot");
+    check_eq_i(q2_projectile_raw_velocity(&sim.combat.projectiles.p[rocket],
+                                          2), -6144,
+               "at half again the aim, where the player's launcher doubles");
+    q2_projectiles_init(&sim.combat.projectiles);
+
+    bolt = q2_sim_creature_launch(&sim, &cre, Q2_FK_BOLT, start, aim, 16);
+    check(bolt >= 0, "the bolt takes a slot");
+    check(sim.combat.projectiles.p[bolt].shooter == &cre &&
+          sim.combat.projectiles.p[bolt].owner == -1,
+          "credited to the creature, and no player's");
+    check_eq_i(q2_projectile_raw_velocity(&sim.combat.projectiles.p[bolt], 2),
+               -64, "at the aim over 64, the blaster's own shift");
+    check(sim.combat.projectiles.p[bolt].flags == Q2_PROJ_FLAGS_BLASTER,
+          "and it trails, as effect 8 asks (flags 11)");
+
+    before = sim.combat.inv.health;
+    for (i = 0; i < 400 && sim.combat.projectiles.p[bolt].in_use; i++)
+        q2_sim_tick(&sim, &in, 12);
+    check(!sim.combat.projectiles.p[bolt].in_use, "the bolt arrives");
+    check(sim.combat.inv.health < before, "and the player takes it");
+    check_eq_i(cre.health, 750, "its shooter, which it started inside, does not");
+
+    q2_sim_set_targets(&sim, NULL, 0);
+    q2_sim_free(&sim);
+}
+
 /* ------------------------------------------------------------------------- */
 int main(void)
 {
@@ -5546,6 +5615,7 @@ int main(void)
     test_bfg_beams_damage();
     test_kill_raises_no_burst();
     test_bolt_trail();
+    test_creature_launch();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     printf("%s\n", g_failures == 0 ? "PASS" : "FAIL");

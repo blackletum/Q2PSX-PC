@@ -361,6 +361,66 @@ static void test_zero_byte_is_an_escape(void)
     check_eq(out[3], 256, "and the one after that");
 }
 
+/*
+ * CalcSortList (0x8006A020): the octant of the camera-to-model vector in the
+ * model's own axes picks block A's entry, unless block B carries a node for
+ * that octant whose frame range holds the animation position. The fixture
+ * gives every block-A entry its own index as its start face, so the start
+ * says which entry was taken, and parks a block-B node on octant 5.
+ */
+#define BLOCK_B 256
+
+static void test_draw_order_select(void)
+{
+    q2_model m;
+    q2_model_draw_order ord;
+    u16 out[16];
+    static const s8 d[7] = { 1, 1, 1, 1, 1, 1, 1 };
+    static const s32 o5[3] = { 7, -2, 1 }, o2[3] = { -7, 2, -1 };
+    static const s32 none[3] = { 0, 0, 0 };
+    u32 e, node = BLOCK_B + 16, n;
+
+    build_block_a(&m, 8, 0, d, 7);
+    for (e = 1; e < 8; e++) {
+        g_blocka[BLOCK_A + 8 * e + 0] = (u8)e;
+        g_blocka[BLOCK_A + 8 * e + 2] = 64;
+    }
+
+    check_eq(q2_model_draw_octant(o5), 5, "x > 0 and z > 0 is octant 5");
+    check_eq(q2_model_draw_octant(o2), 2, "y > 0 alone is octant 2");
+    check_eq(q2_model_draw_octant(none), 0,
+             "a zero component counts as not greater than zero");
+
+    check_eq(q2_model_draw_order_select(&m, o2, 0, &ord), 1, "selects");
+    check_eq(ord.start, 2, "an empty block B leaves the octant's own entry");
+
+    /* Block B: octant 5's chain head, then one node — count 1, start face 6
+     * in the upper nine bits — holding frames 2..4, its stream after it. */
+    m.hdr.ofs_block_b = BLOCK_B;
+    g_blocka[BLOCK_B + 2 * 5] = (u8)(node - BLOCK_B);
+    g_blocka[node + 0] = (u8)((1u | (6u << 7)) & 0xFF);
+    g_blocka[node + 1] = (u8)((1u | (6u << 7)) >> 8);
+    g_blocka[node + 4] = 2;
+    g_blocka[node + 6] = 4;
+    g_blocka[node + 8 + 3] = 1;     /* first delta, most significant first */
+
+    check_eq(q2_model_draw_order_select(&m, o5, 0, &ord), 1, "selects");
+    check_eq(ord.start, 5, "frame 0 is outside 2..4: block A's entry 5");
+
+    check_eq(q2_model_draw_order_select(&m, o5, 30, &ord), 1, "selects");
+    check_eq(ord.start, 6, "position 30 is inside 20..40: block B's node");
+    check_eq(ord.offset, node + 8 - BLOCK_A,
+             "and its stream is the one after its pairs, from block A");
+    n = q2_model_draw_sequence_from(&m, &ord, out, 16);
+    check_eq(out[0], 6, "the walk starts on the node's face");
+    check_eq(n >= 2 && out[1] == 7, 1, "and steps by the node's own stream");
+
+    check_eq(q2_model_draw_order_select(&m, o5, 41, &ord), 1, "selects");
+    check_eq(ord.start, 5, "41 is past 4 * 10: block A again");
+    check_eq(q2_model_draw_order_select(&m, o2, 30, &ord), 1, "selects");
+    check_eq(ord.start, 2, "and another octant never sees octant 5's node");
+}
+
 static void test_draw_order_rejects_a_bad_block(void)
 {
     q2_model m;
@@ -509,6 +569,7 @@ int main(void)
     test_draw_order_walks_the_stream();
     test_zero_byte_is_an_escape();
     test_draw_order_rejects_a_bad_block();
+    test_draw_order_select();
 
     puts("");
     puts("the level-load face rewrite");

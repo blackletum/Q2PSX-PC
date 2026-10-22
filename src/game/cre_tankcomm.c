@@ -95,16 +95,14 @@
  * ---------------------------------------------------------------------------
  * What this transcription still owes, named rather than hidden
  * ---------------------------------------------------------------------------
- *  - THE MUZZLE POSITION AND THE BLASTER'S EFFECT ARE NOT PASSED. All three
- *    weapons' FIGURES now land — `q2_cre_shot` carries damage, speed, kick and
- *    spread, and `tankcomm_blaster`, `tankcomm_rocket` and
- *    `tankcomm_machinegun` fill it from the module's own arguments — but two
- *    things the module also computes have no field on that struct. The first is
- *    `start`: the module builds a world-space launch point from a model
- *    attachment (and the rocket LERPS three of them, one per firing frame), and
- *    the hook leaves the muzzle to the host. The second is the blaster's
- *    seventh argument, `8` = id's EF_BLASTER, which selects the bolt's trail.
- *    Both are recorded at their think functions and neither is invented.
+ *  - (No longer owed.) The muzzles and the aim. All three guns hand the host
+ *    the module's own launch point — the blaster's and the chaingun's blended
+ *    attachments, and the rocket's three tubes lerped between two (see
+ *    tank_rocket_tube) — and the module's own direction, so a bolt and a
+ *    rocket fly from the arm and the shoulder as real projectiles and the
+ *    chaingun's rounds sweep with its yaw. The blaster's seventh argument, `8`
+ *    = id's EF_BLASTER, still has no field: it is the only value any module
+ *    passes, and the bolt the host launches is that bolt.
  *
  *  - (No longer owed.) The chaingun fires without a target and all three guns
  *    fire at a dead one, as the module does. `TankMachineGun` tolerates `enemy
@@ -301,6 +299,71 @@ static const q2_cre_shot tank_shot_rocket = {
 static const q2_cre_shot tank_shot_bullet = {
     Q2_IMP_FIRE_BULLET, 0, 20, 0, 4, 300, 500, 1, false, { 0, 0, 0 }, { 0, 0, 0 }
 };
+
+/*
+ * THE MUZZLES, as export 2 builds them (module+0x9C4..+0xC00): import +0x34
+ * over two model vertices each, every call followed by the module's own
+ * "...muzzle points are from different submodels" check.
+ *
+ *     module+0x2128  chaingun   251, 260   (+0x9D0, +0x9D4)
+ *     module+0x2130  blaster    287, 289   (+0xA14, +0xA18)
+ *     sp+16          rocket A   307, 306   (+0xA4C, +0xA50)
+ *     sp+24          rocket B   304, 305   (+0xA68, +0xA70)
+ *
+ * and the three tubes at +0x2140, +0x2148, +0x2150 lerped between A and B in
+ * thirds, in 1.5 fixed point (+0xAA4..+0xBFC):
+ *
+ *     d     = ((B - A) << 5) / 3                   stored as a halfword
+ *     tube  = A + (d / 2 + i * d) / 32             i = 0, 1, 2
+ *
+ * every divide rounding toward zero, the part copied from A's halfword +6.
+ */
+#define TANK_CHAIN_VERT_A   251
+#define TANK_CHAIN_VERT_B   260
+#define TANK_BLAST_VERT_A   287
+#define TANK_BLAST_VERT_B   289
+#define TANK_ROCKET_A0      307
+#define TANK_ROCKET_A1      306
+#define TANK_ROCKET_B0      304
+#define TANK_ROCKET_B1      305
+
+static void tank_rocket_tube(const q2_monster *self, int i, s32 out[3])
+{
+    q2_cre_attach a, b, tube;
+    int k;
+
+    if (!q2_cre_attach_blend(self, TANK_ROCKET_A0, TANK_ROCKET_A1, &a) ||
+        !q2_cre_attach_blend(self, TANK_ROCKET_B0, TANK_ROCKET_B1, &b)) {
+        q2_cre_attach_place(self, NULL, out);
+        return;
+    }
+    for (k = 0; k < 3; k++) {
+        s16 d = (s16)((((s32)b.off[k] - a.off[k]) << 5) / 3);
+
+        tube.off[k] = (s16)(a.off[k] + ((s32)d / 2 + i * (s32)d) / 32);
+    }
+    tube.part = a.part;
+    q2_cre_attach_place(self, &tube, out);
+}
+
+/*
+ * The blaster's and the rocket's aim: the enemy's origin with its view height
+ * added, less the start, through import +0xC4 (module+0xD30..+0xD94 for the
+ * blaster, the same shape at +0xEC0 for the rocket). `enemy` is read with no
+ * test; the NULL arm is the port's, and aims along the body.
+ */
+static void tank_aim_at_enemy(const q2_monster *self, const s32 start[3],
+                              s32 dir[3])
+{
+    if (!self->enemy) {
+        q2_angle_vectors(self->angles, dir, NULL, NULL);
+        return;
+    }
+    dir[0] = self->enemy->pos[0] - start[0];
+    dir[1] = self->enemy->pos[1] + self->enemy->view_height - start[1];
+    dir[2] = self->enemy->pos[2] - start[2];
+    q2_vector_normalize(dir);
+}
 
 /* import +0x14, 0..32767. Every threshold below is a fraction of 32768. */
 static s32 tank_rand(void)
@@ -793,15 +856,17 @@ static void tankcomm_footstep(q2_monster *self)
  * id's own, and 0x80062000 never reads it: the console's bolt carries its own.
  * Damage 16 is NOT id's, which is 30. Read, not adjusted.
  *
- * Damage and speed go through `q2_cre_shot`; the EFFECT does not, because the
- * struct has no field for it. That is the one figure of this shot the host does
- * not receive, and it is in the header's list.
+ * Damage, speed, the muzzle and the aim go through `q2_cre_shot`; the EFFECT
+ * does not, because the struct has no field for it — and it needs none: 8 is
+ * the only value any module passes, and the host's bolt is that one.
  *
  * Unlike id, the console picks ONE muzzle attachment for all three shots rather
  * than three flash offsets, so there is no per-frame selection here at all.
  */
 static void tankcomm_blaster(q2_monster *self)
 {
+    q2_cre_shot shot = tank_shot_blaster;
+
     /*
      * No enemy guard, because the module has none: it dereferences `enemy`
      * without a test to build the aim and never reads the enemy's health. A
@@ -809,9 +874,12 @@ static void tankcomm_blaster(q2_monster *self)
      * tank_reattack_blaster's `health > 0` (module+0x144C) is what then stops
      * a second volley. With a NULL enemy the console would build its aim out
      * of whatever sits at address zero — nothing the port can reproduce — so
-     * the shot is handed over as it stands and the host decides.
+     * the aim falls back to the body's facing (tank_aim_at_enemy).
      */
-    q2_cre_fire_shot(self, &tank_shot_blaster);
+    shot.aimed = true;
+    q2_cre_muzzle(self, TANK_BLAST_VERT_A, TANK_BLAST_VERT_B, shot.start);
+    tank_aim_at_enemy(self, shot.start, shot.dir);
+    q2_cre_fire_shot(self, &shot);
 }
 
 /*
@@ -833,11 +901,11 @@ static void tankcomm_strike(q2_monster *self)
  *     frame 141 -> module+0x2148      id's MZ2_TANK_ROCKET_2
  *     otherwise -> module+0x2150      id's MZ2_TANK_ROCKET_3
  *
- * The three are not three attachments. module+0xAA4..+0xC00 blends animation
- * positions 307/306 and 304/305 into two endpoints and then LERPS three points
+ * The three are not three attachments. module+0xAA4..+0xC00 blends model
+ * vertices 307/306 and 304/305 into two endpoints and then LERPS three points
  * evenly between them — `base + (i * delta + delta/2) / 3` in 1.5 fixed point,
- * i = 0, 1, 2. So the console derives the three launch tubes from two model
- * points instead of shipping three.
+ * i = 0, 1, 2 (tank_rocket_tube). So the console derives the three launch
+ * tubes from two model points instead of shipping three.
  *
  * The aim is the blaster's: enemy eye minus start, normalised.
  *
@@ -847,16 +915,18 @@ static void tankcomm_strike(q2_monster *self)
  *
  * at module+0xF60 (a3 = 50), +0xF68 (sp+16 = 550) and +0xF74 (sp+20 = 0), both
  * figures being id's `monster_fire_rocket (self, start, dir, 50, 550, ...)`
- * exactly.
- *
- * The two figures now reach the host. The MUZZLE does not: `q2_cre_shot` names
- * the spawner and the shot, not the start point, so the three-way selection
- * above is recorded here and the host launches from wherever it launches. That
- * costs the rocket its per-frame launch tube and nothing else.
+ * exactly. The speed is not read: 0x8006210C makes the rocket's velocity from
+ * the aim alone (q2_sim_creature_launch).
  */
 static void tankcomm_rocket(q2_monster *self)
 {
-    q2_cre_fire_shot(self, &tank_shot_rocket);
+    q2_cre_shot shot = tank_shot_rocket;
+    int tube = self->frame == 138 ? 0 : self->frame == 141 ? 1 : 2;
+
+    shot.aimed = true;
+    tank_rocket_tube(self, tube, shot.start);
+    tank_aim_at_enemy(self, shot.start, shot.dir);
+    q2_cre_fire_shot(self, &shot);
 }
 
 /*
@@ -958,7 +1028,33 @@ static void tankcomm_poststrike(q2_monster *self)
  */
 static void tankcomm_machinegun(q2_monster *self)
 {
-    q2_cre_fire_shot(self, &tank_shot_bullet);
+    q2_cre_shot shot = tank_shot_bullet;
+    s16 angles[3];
+
+    shot.aimed = true;
+    q2_cre_muzzle(self, TANK_CHAIN_VERT_A, TANK_CHAIN_VERT_B, shot.start);
+
+    /* module+0x107C..+0x10F4: the pitch at the enemy's eye, or flat. */
+    angles[0] = 0;
+    if (self->enemy) {
+        s32 at[3];
+        s16 to[3];
+
+        at[0] = self->enemy->pos[0] - shot.start[0];
+        at[1] = self->enemy->pos[1] + self->enemy->view_height -
+                shot.start[1];
+        at[2] = self->enemy->pos[2] - shot.start[2];
+        q2_vectoangles(at, to);
+        angles[0] = to[0];
+    }
+    angles[1] = 0;
+    /* module+0x10F8..+0x1144, obj+0x38 the frame and obj+0x14 the yaw. */
+    angles[2] = self->frame < 182
+              ? (s16)(self->angles[2] + 91 * (self->frame - 174))
+              : (s16)(self->angles[2] - 128 * (self->frame - 187));
+    q2_angle_vectors(angles, shot.dir, NULL, NULL);
+
+    q2_cre_fire_shot(self, &shot);
 }
 
 /*

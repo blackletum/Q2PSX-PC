@@ -547,10 +547,12 @@ q2_fire_result_v2 q2_weapon_fire(q2_inventory *inv, q2_rng *rng,
         q2_shot *s = &res.shot[res.shot_count++];
         memcpy(s->origin, origin, sizeof(s->origin));
         /* The railgun hands the aim vector over untouched (0x8004D600 copies
-         * player+0x3C straight to the stack). */
-        s->dir[0] = aim ? aim[0] : 0;
-        s->dir[1] = aim ? aim[1] : 0;
-        s->dir[2] = aim ? aim[2] : 0;
+         * player+0x3C straight to the stack), and the rail shifts it: the
+         * shot's `dir` carries the range here as a bullet's does. A bare aim
+         * stopped every slug 4096 units out, a quarter of its reach. */
+        s->dir[0] = (aim ? aim[0] : 0) * Q2_AIM_SCALE_RAIL;
+        s->dir[1] = (aim ? aim[1] : 0) * Q2_AIM_SCALE_RAIL;
+        s->dir[2] = (aim ? aim[2] : 0) * Q2_AIM_SCALE_RAIL;
         s->damage = damage;
         res.sound = Q2_WSND_RAILGUN;
         break;

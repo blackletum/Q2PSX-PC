@@ -787,6 +787,7 @@ typedef struct client {
     u32               cre_rounds_player;
     u32               cre_rounds_creature;
     u32               cre_rounds_world;
+    u32               cre_launched;      /* bolts and rockets that flew */
     u32               cre_dying_shots;
     u32               cre_flashes;
     s32               flash_spin;
@@ -2205,6 +2206,12 @@ static void client_cre_fire(q2_monster *m, int flash, void *user);
 static void client_cre_shot(q2_monster *m, const q2_cre_shot *shot, void *user);
 static bool client_cre_muzzle(const q2_monster *m, s16 vert_a, s16 vert_b,
                               s32 out[3], void *user);
+static bool client_cre_attach_blend(const q2_monster *m, s16 vert_a,
+                                    s16 vert_b, q2_cre_attach *out,
+                                    void *user);
+static bool client_cre_attach_place(const q2_monster *m,
+                                    const q2_cre_attach *a, s32 out[3],
+                                    void *user);
 static void client_cre_drop(const q2_monster_drop_request *req, void *user);
 static bool client_cre_bank_has(const char *name, void *user);
 static bool client_fx_mesh(void *user, const q2_actor *a, q2_fx_mesh_src *out);
@@ -2674,6 +2681,8 @@ static void client_load_creatures(client *c, const s32 eye[3])
     q2_cre_set_fire_hook(client_cre_fire, c);
     q2_cre_set_shot_hook(client_cre_shot, c);
     q2_cre_set_muzzle_hook(client_cre_muzzle, c);
+    q2_cre_set_attach_hooks(client_cre_attach_blend, client_cre_attach_place,
+                            c);
 
     /*
      * WHERE A FLAGGED CREATURE'S DROP GOES. monster_death_use records the
@@ -3126,6 +3135,43 @@ static bool client_cre_muzzle(const q2_monster *m, s16 vert_a, s16 vert_b,
     return true;
 }
 
+/* q2_cre_attach_blend's host half: the cache, off the creature's own model. */
+static bool client_cre_attach_blend(const q2_monster *m, s16 vert_a,
+                                    s16 vert_b, q2_cre_attach *out,
+                                    void *user)
+{
+    const q2_model_instance *inst = client_cre_pose((client *)user, m);
+    q2_model_attach a;
+
+    if (!inst || !q2_model_attach_blend(inst->model, vert_a, vert_b, &a))
+        return false;
+    out->off[0] = a.off[0];
+    out->off[1] = a.off[1];
+    out->off[2] = a.off[2];
+    out->part   = a.part;
+    return true;
+}
+
+/* ...and q2_cre_attach_place's: posed with the last drawn pose, then placed. */
+static bool client_cre_attach_place(const q2_monster *m,
+                                    const q2_cre_attach *a, s32 out[3],
+                                    void *user)
+{
+    const q2_model_instance *inst = client_cre_pose((client *)user, m);
+    q2_model_attach at;
+    s32 local[3];
+
+    if (!inst)
+        return false;
+    at.off[0] = a->off[0];
+    at.off[1] = a->off[1];
+    at.off[2] = a->off[2];
+    at.part   = a->part;
+    q2_model_attach_pose(inst, &at, local);
+    q2_model_local_to_world(inst, local, out);
+    return true;
+}
+
 /*
  * Which modules draw a muzzle flash, and from which cache: the three whose
  * export 1 calls import +0xA0 while object+0x10C is negative, each reading
@@ -3261,15 +3307,13 @@ static void client_cre_round(client *c, q2_monster *m, const s32 start[3],
  * faces as it falls; and the Infantry's death burst climbs the wall and
  * crosses the ceiling, and hurts the player only if the player stands in it.
  *
- * An aimed BOLT is the same question asked of the same segment with no mark
- * left on the wall: the console's blaster spawner launches a projectile, and
- * a creature's bolt has no flight in this port yet, so it is resolved at once
- * along its line. What it hits is now right; that it arrives instantly and
- * leaves no burst is the remaining departure.
+ * An aimed BOLT or ROCKET flies: the console's spawners launch a projectile,
+ * and q2_sim_creature_launch launches the same one the player's gun does —
+ * the Soldier's blaster bolt, the Tank Commander's bolts and rockets.
  *
  * An UNAIMED shot — a creature whose muzzle and aim are not transcribed (the
- * Gunner, the Tank Commander, the Arachner) — is resolved as before: at the
- * player, when the player is its enemy and in sight. Nothing more is known.
+ * Gunner, the Arachner) — is resolved as before: at the player, when the
+ * player is its enemy and in sight. Nothing more is known.
  */
 static void client_cre_shot(q2_monster *m, const q2_cre_shot *shot, void *user)
 {
@@ -3337,7 +3381,37 @@ static void client_cre_shot(q2_monster *m, const q2_cre_shot *shot, void *user)
         client_cre_flash(c, m);
     }
 
-    if (shot->aimed && (hitscan || shot->slot == Q2_IMP_FIRE_BLASTER)) {
+    /*
+     * An aimed BOLT or ROCKET flies. monster_fire_blaster (0x80062000) and
+     * monster_fire_rocket (0x8006210C) hand the player's own spawners a
+     * velocity made from the aim, so it is the same projectile the player's
+     * gun throws — trail, body, burst and splash — and q2_sim_creature_launch
+     * makes the player a target of it. Each plays its report: the blaster
+     * wrapper itself through SoundByCreature (0x80062088, the handle at
+     * 0x800B2B34 that the player's blaster plays too), the rocket spawner its
+     * launch (0x8004B26C, 0x800B2B4C).
+     */
+    if (shot->aimed && (shot->slot == Q2_IMP_FIRE_BLASTER ||
+                        shot->slot == Q2_IMP_FIRE_ROCKET)) {
+        bool bolt = shot->slot == Q2_IMP_FIRE_BLASTER;
+        const char *report = bolt ? "wep_blastf1a" : "wep_rocklf1a";
+        q2_vag vag;
+
+        if (client_find_sound(c, report, &vag))
+            client_play_sound_at(c, report, shot->start);
+        else
+            c->cre_sound_missing++;
+        c->cre_fire_sounds++;
+
+        if (q2_sim_creature_launch(&c->sim[0], client_cre_actor(c, m),
+                                   bolt ? Q2_FK_BOLT : Q2_FK_ROCKET,
+                                   shot->start, shot->dir,
+                                   (s16)shot->damage) >= 0)
+            c->cre_launched++;
+        return;
+    }
+
+    if (shot->aimed && hitscan) {
         s32 dir[3];
         int k;
 
@@ -15957,6 +16031,9 @@ static void client_draw_view(void *user, q2_screen *s, int p,
             q2_light_env  cre_env;
             s32 cell = -1;
             bool posed = false;
+            /* entity+0x100: where on the model's whole timeline the pose is,
+             * which block B's draw orders are keyed on (model.h). */
+            s32 anim_pos = 0;
 
             if (!m->in_use || !c->cre_model_ok[i])
                 continue;
@@ -16066,6 +16143,7 @@ static void client_draw_view(void *user, q2_screen *s, int p,
 
                             if (sample < 0)
                                 sample = 0;
+                            anim_pos = sample;
                             if (mname)
                                 have_clip = q2_model_anim_at_position_held(
                                     mdl, (u32)sample, &clip, &pose_tick,
@@ -16103,6 +16181,8 @@ static void client_draw_view(void *user, q2_screen *s, int p,
                                 pose_tick = sample > 0 ? (u32)sample : 0u;
                                 if (pose_tick > last)
                                     pose_tick = last;
+                                anim_pos = (s32)(q2_model_anim_base(mdl, &clip)
+                                                 + pose_tick);
                             }
                         }
                     }
@@ -16118,6 +16198,7 @@ static void client_draw_view(void *user, q2_screen *s, int p,
 
                     if (sample < 0)
                         sample = 0;
+                    anim_pos = sample;
                     have_clip = q2_model_anim_at_position(
                         mdl, (u32)sample, &clip, &pose_tick);
                 }
@@ -16137,6 +16218,7 @@ static void client_draw_view(void *user, q2_screen *s, int p,
             q2_model_instance_init(&inst);
             inst.model         = &c->cre_model[i];
             inst.pose          = posed ? pose : NULL;
+            inst.anim_pos      = anim_pos;
 
             /* The link object's area and cell, which outlive a frame whose
              * lookup misses — see client_cre_area. A -1 here would take
@@ -18024,6 +18106,7 @@ static void client_report(const client *c)
     REPORT("creatures.rounds_player",   c->cre_rounds_player);
     REPORT("creatures.rounds_creature", c->cre_rounds_creature);
     REPORT("creatures.rounds_world",    c->cre_rounds_world);
+    REPORT("creatures.launched",    c->cre_launched);
     REPORT("creatures.flashes",     c->cre_flashes);
     REPORT("creatures.fire_sounds", c->cre_fire_sounds);
     REPORT("creatures.sounds",      c->cre_sounds);

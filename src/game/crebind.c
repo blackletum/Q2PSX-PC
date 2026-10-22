@@ -463,6 +463,45 @@ void q2_cre_muzzle(const q2_monster *m, s16 vert_a, s16 vert_b, s32 out[3])
     out[2] = m->pos[2];
 }
 
+/* The attachment hooks — see q2_cre_attach_blend in crebind.h. */
+static bool (*g_attach_blend_fn)(const q2_monster *m, s16 vert_a, s16 vert_b,
+                                 q2_cre_attach *out, void *user);
+static bool (*g_attach_place_fn)(const q2_monster *m, const q2_cre_attach *a,
+                                 s32 out[3], void *user);
+static void  *g_attach_user;
+
+void q2_cre_set_attach_hooks(
+    bool (*blend)(const q2_monster *m, s16 vert_a, s16 vert_b,
+                  q2_cre_attach *out, void *user),
+    bool (*place)(const q2_monster *m, const q2_cre_attach *a, s32 out[3],
+                  void *user),
+    void *user)
+{
+    g_attach_blend_fn = blend;
+    g_attach_place_fn = place;
+    g_attach_user     = user;
+}
+
+bool q2_cre_attach_blend(const q2_monster *m, s16 vert_a, s16 vert_b,
+                         q2_cre_attach *out)
+{
+    if (!m || !out || !g_attach_blend_fn)
+        return false;
+    return g_attach_blend_fn(m, vert_a, vert_b, out, g_attach_user);
+}
+
+void q2_cre_attach_place(const q2_monster *m, const q2_cre_attach *a,
+                         s32 out[3])
+{
+    if (!m || !out)
+        return;
+    if (a && g_attach_place_fn && g_attach_place_fn(m, a, out, g_attach_user))
+        return;
+    out[0] = m->pos[0];
+    out[1] = m->pos[1];
+    out[2] = m->pos[2];
+}
+
 /*
  * The melee hook itself lives beside the sound hook in cre_soldier.c, which is
  * where the first transcribed creature put it; this is the engine side of it.

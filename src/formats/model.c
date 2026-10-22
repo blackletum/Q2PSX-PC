@@ -344,30 +344,38 @@ bool q2_model_get_draw_order(const q2_model *m, u32 index,
 u32 q2_model_draw_sequence(const q2_model *m, u32 index, u16 *out, u32 max)
 {
     q2_model_draw_order ord;
+
+    if (!q2_model_get_draw_order(m, index, &ord))
+        return 0;
+    return q2_model_draw_sequence_from(m, &ord, out, max);
+}
+
+u32 q2_model_draw_sequence_from(const q2_model *m,
+                                const q2_model_draw_order *ord,
+                                u16 *out, u32 max)
+{
     const u8 *stream;
     u32 n, limit, written = 0, read = 0;
     s32 cur;
     bool pending = false;
 
-    if (!m || !out || max == 0)
-        return 0;
-    if (!q2_model_get_draw_order(m, index, &ord))
+    if (!m || !ord || !out || max == 0 || !m->hdr.ofs_block_a)
         return 0;
 
     n = m->hdr.num_faces;
     if (n == 0)
         return 0;
 
-    if (ord.start >= n)
+    if (ord->start >= n)
         return 0;
 
     /* The stream may not leave the model's own image. */
-    if (m->hdr.ofs_block_a + ord.offset >= m->size)
+    if (m->hdr.ofs_block_a + ord->offset >= m->size)
         return 0;
-    stream = m->base + m->hdr.ofs_block_a + ord.offset;
-    limit  = m->size - (m->hdr.ofs_block_a + ord.offset);
+    stream = m->base + m->hdr.ofs_block_a + ord->offset;
+    limit  = m->size - (m->hdr.ofs_block_a + ord->offset);
 
-    cur = (s32)ord.start;
+    cur = (s32)ord->start;
     out[written++] = (u16)cur;
 
     while (written < n && written < max) {
@@ -405,38 +413,73 @@ u32 q2_model_draw_sequence(const q2_model *m, u32 index, u16 *out, u32 max)
 }
 
 /*
- * Pick one of the eight — see the note in model.h for the measurement.
- *
- * Each entry starts on the face that is frontmost from the direction it was
- * authored for, and the first face of a stream is the one drawn last, so the
- * entry to take is the one whose start face is nearest. Entries whose start
- * face was never transformed this frame are skipped rather than counted as
- * infinitely near.
+ * CalcSortList, 0x8006A020 — see the note in model.h. The octant is three sign
+ * tests (0x8006A058..0x8006A074); block B's chain for it is searched for a node
+ * with a range holding the animation position (0x8006A0A8..0x8006A104), and
+ * without one the octant indexes block A directly (0x8006A16C).
  */
-u32 q2_model_draw_order_pick(const q2_model *m, const u16 *face_depth,
-                             const u8 *face_valid, u32 face_count)
+u32 q2_model_draw_octant(const s32 dir[3])
 {
-    q2_model_draw_order ord;
-    u32 e, best = 0;
-    u16 best_depth = 0;
-    bool found = false;
+    u32 octant = 0;
 
-    if (!m || !face_depth || !face_valid)
+    if (!dir)
         return 0;
+    if (dir[0] > 0) octant |= 1u;
+    if (dir[1] > 0) octant |= 2u;
+    if (dir[2] > 0) octant |= 4u;
+    return octant;
+}
 
-    for (e = 0; e < Q2_MODEL_DRAW_ORDERS; e++) {
-        if (!q2_model_get_draw_order(m, e, &ord))
-            continue;
-        if (ord.start >= face_count || !face_valid[ord.start])
-            continue;
-        if (!found || face_depth[ord.start] < best_depth) {
-            best_depth = face_depth[ord.start];
-            best  = e;
-            found = true;
+bool q2_model_draw_order_select(const q2_model *m, const s32 dir[3],
+                                s32 anim_pos, q2_model_draw_order *out)
+{
+    u32 octant = q2_model_draw_octant(dir);
+
+    if (!m || !out)
+        return false;
+
+    /* Block B is the one header offset InitialiseModelFile leaves relative, so
+     * its chain links are offsets from the block, as the console adds them. */
+    if (m->hdr.ofs_block_b &&
+        m->hdr.ofs_block_b + 2u * Q2_MODEL_DRAW_ORDERS <= m->size) {
+        const u8 *b    = m->base + m->hdr.ofs_block_b;
+        u32       node = q2_rd_u16(b + 2u * octant);
+        u32       hops = 0;
+
+        while (node != 0 && hops++ < 256) {
+            u32 at = m->hdr.ofs_block_b + node;
+            u32 head, count, k;
+
+            if (at + 4u > m->size)
+                break;
+            head  = q2_rd_u16(m->base + at);
+            count = head & 0x7Fu;
+            if (at + 4u + 4u * count > m->size)
+                break;
+
+            for (k = 0; k < count; k++) {
+                const u8 *e = m->base + at + 4u + 4u * k;
+                /* BodgeAnimData multiplies both halfwords by ten at load
+                 * (0x8006C214); the port reads the disc, so it scales here.
+                 * The compare is `slt` against the entity's signed +0x100. */
+                s32 lo = (u16)(q2_rd_u16(e + 0) * 10u);
+                s32 hi = (u16)(q2_rd_u16(e + 2) * 10u);
+
+                if (anim_pos >= lo && anim_pos <= hi) {
+                    /* The node's own stream follows its ranges, and the
+                     * offset the draw takes is from block A (0x8006A15C..
+                     * 0x8006A168: the address less block A's low half). */
+                    out->start  = (u16)(head >> 7);
+                    out->offset = (u16)(at + 4u + 4u * count -
+                                        m->hdr.ofs_block_a);
+                    return true;
+                }
+            }
+            node = q2_rd_u16(m->base + at + 2u);
         }
     }
 
-    return best;
+    return q2_model_get_draw_order(m, octant, out);
 }
 
 bool q2_model_is_static(const q2_model *m)
@@ -771,6 +814,21 @@ u32 q2_model_anim_count(const q2_model *m)
     while (q2_model_anim_get(m, n, &clip))
         n++;
     return n;
+}
+
+u32 q2_model_anim_base(const q2_model *m, const q2_model_anim *clip)
+{
+    q2_model_anim at;
+    u32 n, base = 0;
+
+    if (!clip)
+        return 0;
+    for (n = 0; q2_model_anim_get(m, n, &at); n++) {
+        if (at.offset == clip->offset)
+            return base;
+        base += (u32)at.frames * Q2_MODEL_TICKS_PER_FRAME;
+    }
+    return 0;
 }
 
 /* Unpack one key's translation. The shifts are the engine's own, and they are

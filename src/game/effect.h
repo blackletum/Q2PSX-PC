@@ -1322,6 +1322,63 @@ s32 q2_fx_bolt_trail(q2_fx_world *w, q2_rng *rng, const s32 at[3],
                      const s16 disp[3], u8 area);
 
 /* ------------------------------------------------------------------------- */
+/* The rail's spiral — the tail of AnyoneFireInstantRail, 0x8004917C          */
+/* ------------------------------------------------------------------------- */
+/*
+ * The railgun's trail, and it is particles: the three `jal 0x8003004C` at
+ * 0x800497B8, 0x800497F8 and 0x80049964 are the offsets spawner, and nothing
+ * else in the function draws. The port resolved the rail's damage and left the
+ * rest of the function out, so a railgun shot was a sound and a hole.
+ *
+ * WHAT IT BUILDS, after the damage pass, from the trace's start and end:
+ *
+ *     len    = SquareRootNR(|end - start|^2)            0x800493B4
+ *     segs   = (len >> 10) + 1, at least 1              0x80049420
+ *     step   = (end - start) / segs                     0x8004943C..0x800494A4
+ *     per    = 30 single-player, 15 in a multiplayer    0x800493C8: [0x800AEBCC]
+ *     turns  = 1, or 2 with three or four windows       0x800493E0: [0x800B2C2C]
+ *     offs[i]= i * ((step << 4) / per)                  halfword sums, 0x800495E4
+ *     ring   = rcossin(i * (turns << 12) / per)         0x80049678, x cos, y sin
+ *     vel[i] = shooter matrix * ring, Y negated         0x800496B0, 0x800496C4
+ *     offs[i] += vel[i] >> 2;  vel[i] >>= 10            0x800496D4, 0x80049724
+ *
+ * so one segment's particles start on a ring 64 units out (4096 >> 2, then the
+ * spawner's >> 4) around the beam, one full turn of it spaced along 1024 units,
+ * and drift outward at four a tick: a corkscrew, perpendicular to where the
+ * SHOOTER faces rather than to the beam — the matrix is entity+0x2C0.
+ *
+ * THE SPAWN LOOP COVERS ROUGHLY HALF THE BEAM, and that is the console's. It
+ * runs `for (n = 0; n < (segs & ~1); n += 2)`, advancing the origin ONE segment
+ * per pass (0x80049800..0x80049838), then spawns once more where it stopped
+ * (0x80049964). So a two-segment shot is drawn whole, and a long one from the
+ * muzzle for segs / 2 + 1 segments. Each pass raises the first fifteen
+ * particles and, at thirty, the second fifteen as a group of their own
+ * (0x800497C4); the last raises only the first fifteen, at size 6000 rather
+ * than 7000. Every group is ramp 0 at both ends, the blue one, for 16 ticks.
+ *
+ * `basis` is the shooter's matrix's first two columns with the Y row negated,
+ * in 1.12: what `ring` (1, 0) and (0, 1) become. `area_at` names the draw area
+ * for a segment's origin — the console walks the trace's own area list to the
+ * last entry behind it (0x80049850..0x80049914), which is the area of the cell
+ * holding that point.
+ */
+#define Q2_FX_RAIL_SEG_SHIFT     10     /* 0x80049420 `sra fp, v1, 10`      */
+#define Q2_FX_RAIL_PER_SEG       30     /* 0x800493F8, single-player        */
+#define Q2_FX_RAIL_PER_SEG_MP    15     /* 0x800493D0, [0x800AEBCC] != 0    */
+#define Q2_FX_RAIL_MP_TWO_TURNS   3     /* 0x800493E0, `slti v0, v0, 3`     */
+#define Q2_FX_RAIL_GROUP         15     /* sp+20 at all three spawns        */
+#define Q2_FX_RAIL_LIFE          16     /* sp+24                            */
+#define Q2_FX_RAIL_SIZE        7000     /* 0x800497A4                       */
+#define Q2_FX_RAIL_SIZE_LAST   6000     /* 0x80049958                       */
+#define Q2_FX_RAIL_RAMP           0     /* 0x8009BA60, both ends            */
+#define Q2_FX_RAIL_RING_SHIFT     2     /* 0x800496D4 `sra 18` of a halfword */
+#define Q2_FX_RAIL_DRIFT_SHIFT   10     /* 0x80049728 `sra 26` of a halfword */
+
+u32 q2_fx_rail_trail(q2_fx_world *w, const s32 start[3], const s32 end[3],
+                     const s16 basis[2][3], bool multiplayer, int windows,
+                     u8 (*area_at)(void *user, const s32 at[3]), void *user);
+
+/* ------------------------------------------------------------------------- */
 /* The per-actor presentation pass — 0x8005B880                               */
 /* ------------------------------------------------------------------------- */
 /*

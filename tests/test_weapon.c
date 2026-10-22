@@ -209,6 +209,8 @@ static void test_firing(void)
                        0, 0, false, false, 0);
     check_eq_i(r.shot[0].damage, 100, "the railgun does 100");
     check_eq_i(r.kick[0], -34, "with the heaviest kick in the game");
+    check_eq_i(r.shot[0].dir[2], 4 * 4096,
+               "and reaches 16384, the rail's own `dir << 2` (0x80049224)");
 
     give_all(&inv);
     r = q2_weapon_fire(&inv, &rng, NULL, Q2_WID_RAILGUN, eye, 0, 0, 0, aim,

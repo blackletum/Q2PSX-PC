@@ -1326,6 +1326,7 @@ u32 q2_vw_build_ot(const q2_viewweapon *vw,
 
     inst.model     = vw->model;
     inst.pose      = posed ? pose : NULL;
+    inst.anim_pos  = vw->anim_pos > 0 ? vw->anim_pos : 0;
     /* +0xFC/+0xFE scale the GTE light matrix and back colour, not the model
      * transform. The caller passes them to q2_light_env_build; geometry keeps
      * the allocator-neutral transform just like an ordinary entity. */

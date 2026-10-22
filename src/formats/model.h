@@ -632,8 +632,8 @@ bool q2_model_get_face(const q2_model *m, u32 index, q2_model_face *out);
  * (`swl t1, 2(t6)` / `addu v0, t6, zero`), so the FIRST face in a stream is
  * drawn LAST and therefore on top. A stream runs near to far.
  *
- * Eight of them, one per view direction, and which one a frame takes is decided
- * by `q2_model_draw_order_pick` below.
+ * Eight of them, one per view octant, and which one a frame takes is decided
+ * by `q2_model_draw_order_select` below.
  */
 #define Q2_MODEL_DRAW_ORDERS      8
 #define Q2_MODEL_DRAW_ORDER_TABLE 64   /* bytes of {start, offset} records */
@@ -653,38 +653,45 @@ bool q2_model_get_draw_order(const q2_model *m, u32 index,
  */
 u32 q2_model_draw_sequence(const q2_model *m, u32 index, u16 *out, u32 max);
 
+/* The same walk for an order already chosen — block A's or block B's. */
+u32 q2_model_draw_sequence_from(const q2_model *m,
+                                const q2_model_draw_order *ord,
+                                u16 *out, u32 max);
+
 /*
- * WHICH of the eight, and why the start face is the key.
+ * WHICH of the eight — `CalcSortList`, 0x8006A020 (MODELS.C:306).
  *
- * Each entry begins on a different face — 52, 53, 66, 34, 43, 44, 39, 35 on
- * `Blaster G` — and the first face of a stream is the one drawn LAST, on top.
- * An order authored for a given direction therefore starts on the face that is
- * frontmost from it, which makes `start` the entry's own direction key and
- * makes the choice "take the entry whose start face is nearest".
+ * The draw record's two halfwords that 0x8006BC94 hands the linker (`s7+4`,
+ * `s7+6`) are written by ClipGlobalModel at 0x8006BEC8, which calls this with
+ * the entity's origin less the camera's (0x8006BD2C..0x8006BD68). It takes
+ * that vector into the MODEL's frame with the transpose of the entity matrix
+ * (0x8006FF80 reads +0x2C0 down its columns) and keeps three signs:
  *
- * That is measured, not assumed. Scoring all eight orders against the pairs
- * that can actually paint over each other — faces whose screen boxes overlap,
- * where the order is right when the nearer face is drawn later — over 396
- * decisive samples of a Soldier seen from 24 camera placements:
+ *     octant = (x > 0) | (y > 0) << 1 | (z > 0) << 2
  *
- *     best possible (per-sample oracle)   78.0%
- *     nearest start face                  71.4%
- *     file order, i.e. ignoring block A   50.3%
+ * so `dir` here is camera-to-model, in model axes, at any scale. The octant
+ * indexes block A directly unless block B overrides it.
  *
- * Scoring EVERY adjacent pair instead of the overlapping ones buries this:
- * most consecutive faces never overlap, so they contribute coin flips and drag
- * every order to 50%. That is what made an earlier pass here conclude block A
- * was not a draw order at all.
+ * BLOCK B IS THAT OVERRIDE, and it answers what the table's pairs are. Its
+ * eight u16 are one chain head per octant, offsets from the block itself (the
+ * one header offset InitialiseModelFile leaves relative). A node is
+ * `{u16 count | start << 7; u16 next; {u16 lo, hi}[count]; stream...}`, and the
+ * first node holding a pair with `lo <= +0x100 <= hi` wins: its start face is
+ * the head's upper nine bits and its stream follows the pairs inline. +0x100 is
+ * the animation position, ten to a frame, which is why BodgeAnimData scales
+ * both halfwords by ten at load — the pairs are FRAME RANGES. A model with 16
+ * zero bytes there (821 of 965) always takes its octant's block-A entry.
  *
- * WHAT IS NOT ESTABLISHED is the console's own selector. It reads the chosen
- * entry's two halfwords out of a draw record (`s7+4` and `s7+6` at 0x8006BC94)
- * and this port has not traced who fills them. The rule below fits the geometry
- * and needs no table; a fitted eight-way lookup on the model's facing in view
- * space does marginally better (74.7%) and is not used, because eight numbers
- * fitted to this port's own measurements are not a reading of the original.
+ * This replaced a measured stand-in — "the entry whose start face is nearest",
+ * 71.4% against a 78.0% per-sample oracle on a Soldier — which was right most
+ * of the time and visibly wrong on a view weapon: `Railgun G` sits close
+ * enough to the eye that the nearest start face named an order for the wrong
+ * side, and a face from the far side of the gun painted a black slab across
+ * the coil (a dark green wedge under the level's lights).
  */
-u32 q2_model_draw_order_pick(const q2_model *m, const u16 *face_depth,
-                             const u8 *face_valid, u32 face_count);
+u32  q2_model_draw_octant(const s32 dir[3]);
+bool q2_model_draw_order_select(const q2_model *m, const s32 dir[3],
+                                s32 anim_pos, q2_model_draw_order *out);
 
 
 /*
@@ -799,6 +806,11 @@ bool q2_model_anim_by_length(const q2_model *m, u32 frames, u32 skip,
 
 /* How many clips the chain holds. Zero for a model with no animation. */
 u32 q2_model_anim_count(const q2_model *m);
+
+/* Where `clip` starts on the model's whole timeline, in ticks — the sum of
+ * every earlier clip's length, which is how far entity+0x100 has to run to
+ * reach it. Zero for the first clip, or for a clip not in the chain. */
+u32 q2_model_anim_base(const q2_model *m, const q2_model_anim *clip);
 
 /*
  * Block D — the NAMED MOVE table.
