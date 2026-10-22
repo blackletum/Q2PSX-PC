@@ -1747,6 +1747,7 @@ typedef struct client {
     bool             mouse_right;
     bool             mouse_left_prev; /* so a click has an edge              */
     bool             mouse_right_prev;
+    bool             menu_esc_back;   /* Esc on a sub-page: one TRIANGLE     */
 
     /*
      * The wheel, queued rather than applied. Every pad bit it feeds — weapon
@@ -15359,6 +15360,11 @@ static void client_menu_frame(client *c)
      */
     pad  = client_menu_pointer(c, &c->menu);
     pad |= client_menu_pad(c);
+    /* A key-down, not a held key, so it is one frame of TRIANGLE: the engine
+     * sees the press on this advance and the release on the next. */
+    if (c->menu_esc_back)
+        pad |= Q2_PAD_TRIANGLE;
+    c->menu_esc_back = false;
 
     /*
      * RIGHT-CLICK OUT OF THE PAUSE MENU.
@@ -18893,7 +18899,10 @@ no_window:
                 case SDLK_ESCAPE:
                     /* START on the console: it opens the pause menu, and
                      * closes it again from the root page. Deeper in, the
-                     * menu's own TRIANGLE handling owns going back.
+                     * menu's own TRIANGLE handling owns going back — so Esc
+                     * hands it one TRIANGLE press rather than doing nothing,
+                     * which left Backspace and the right button as the only
+                     * way up a level.
                      *
                      * THE TALLY BOARD EATS IT AND DOES NOTHING. It used to
                      * dismiss the board, which the console never does: the
@@ -18931,6 +18940,8 @@ no_window:
                     }
                     else if (c.menu.depth == 0)
                         client_menu_close(&c);
+                    else
+                        c.menu_esc_back = true;
                     break;
                 case SDLK_F12:
                     /*
@@ -19292,6 +19303,7 @@ no_window:
 
         c.mouse_left_prev  = c.mouse_left;
         c.mouse_right_prev = c.mouse_right;
+        c.menu_esc_back    = false;   /* unspent if no menu frame ran */
         {
             int pi;
             for (pi = 0; pi < Q2_MP_MAX_PLAYERS; pi++)
