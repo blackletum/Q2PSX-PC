@@ -135,6 +135,7 @@
 #include "ident.h"
 #include "launcher.h"
 #include "item.h"
+#include "loadout.h"
 #include "itemtable.h"
 #include "menu.h"
 #include "menudraw.h"
@@ -1411,6 +1412,20 @@ typedef struct client {
      */
     int               give_weapon;
 
+    /*
+     * The launch loadout (loadout.h): what a player reaching `--map`'s level
+     * through the campaign would be carrying. Derived once at launch and
+     * handed out on every fresh load of THAT level -- the first and each
+     * restart -- because a fresh load re-runs q2_sim_init, which would put
+     * the blaster alone back in their hands. A level reached from it by
+     * LOADMAP carries what the player really has instead. `--no-loadout`
+     * starts with the blaster, as the bare level start does.
+     */
+    bool              no_loadout;
+    bool              launch_loadout_valid;
+    char              launch_loadout_map[Q2_UF_NAME_LEN + 1];
+    q2_inventory      launch_loadout;
+
     q2_mover_set      movers;
     bool              movers_ready;
 
@@ -1566,6 +1581,16 @@ typedef struct client {
     bool              map_change_pending;
     char              pending_map[Q2_UF_NAME_LEN + 1];
     char              pending_start[Q2_UF_NAME_LEN + 1];
+
+    /*
+     * The arrival point: the StartPos a level is entered at, by name. The
+     * console keeps it at 0x800C8CD0 -- a LOADMAP writes its operand there and
+     * a fresh start (MISCOMPLETE's 0x8002DC68 among them) writes "Default".
+     * A load that does not carry the player stands them on it when it lies
+     * in the zone being loaded, so a restart returns to the doorway the level
+     * was entered by rather than to whichever StartPos the file lists first.
+     */
+    char              arrival[Q2_UF_NAME_LEN + 1];
 
     /*
      * Which primitive queued it, because they do not leave by the same door.
@@ -1743,6 +1768,7 @@ typedef struct client {
     bool             mouse_right;
     bool             mouse_left_prev; /* so a click has an edge              */
     bool             mouse_right_prev;
+    bool             menu_esc_back;   /* Esc on a sub-page: one TRIANGLE     */
 
     /*
      * The wheel, queued rather than applied. Every pad bit it feeds — weapon
@@ -4577,6 +4603,42 @@ static void client_mission_update(client *c)
  * unconditional branch to itself. This warns and tries the name as a directory
  * instead, because hanging is not a behaviour worth reproducing.
  */
+static bool client_find_arrival(client *c, const char *map, const char *start,
+                                q2_start_pos *out)
+{
+    char   path[256];
+    q2_buf buf;
+    bool   found = false;
+
+    if (!start || !start[0])
+        return false;
+    snprintf(path, sizeof(path), "Q2DATA/LEVELS/%s/COMMON.DAT", map);
+    if (disc_read_file(c->disc, path, &buf) == Q2_OK) {
+        q2_common_file probe;
+
+        if (q2_common_open(&probe, &buf) == Q2_OK) {
+            q2_start_pos_list spawns;
+
+            found = q2_start_pos_parse(&spawns, &probe) == Q2_OK &&
+                    q2_start_pos_find(&spawns, start, out);
+            q2_common_close(&probe);
+        } else {
+            q2_buf_free(&buf);
+        }
+    }
+    return found;
+}
+
+/* The zone a fresh start of MAP loads: its "Default" arrival point's, as the
+ * console's own fresh start resolves it, or zone 0 for a map without one. */
+static int client_default_zone(client *c, const char *map)
+{
+    q2_start_pos sp;
+
+    snprintf(c->arrival, sizeof(c->arrival), "Default");
+    return client_find_arrival(c, map, c->arrival, &sp) ? sp.zone : 0;
+}
+
 static bool client_change_map(client *c, const char *map, const char *start)
 {
     int  zone = 0;
@@ -4600,28 +4662,11 @@ static bool client_change_map(client *c, const char *map, const char *start)
                     "directory", map);
     }
 
-    if (start && start[0]) {
-        char   path[256];
-        q2_buf buf;
-
-        snprintf(path, sizeof(path), "Q2DATA/LEVELS/%s/COMMON.DAT", map);
-        if (disc_read_file(c->disc, path, &buf) == Q2_OK) {
-            q2_common_file probe;
-
-            if (q2_common_open(&probe, &buf) == Q2_OK) {
-                q2_start_pos_list spawns;
-
-                if (q2_start_pos_parse(&spawns, &probe) == Q2_OK &&
-                    q2_start_pos_find(&spawns, start, &arrival)) {
-                    zone         = arrival.zone;
-                    have_arrival = true;
-                }
-                q2_common_close(&probe);
-            } else {
-                q2_buf_free(&buf);
-            }
-        }
+    if (client_find_arrival(c, map, start, &arrival)) {
+        zone         = arrival.zone;
+        have_arrival = true;
     }
+    snprintf(c->arrival, sizeof(c->arrival), "%s", start ? start : "");
 
     /* A level change is a transition, so the player keeps what they are
      * carrying; the clock is a new level's, so the powerup deadlines are
@@ -6250,6 +6295,28 @@ static bool client_load_zone(client *c, const char *map, int index)
                                 c->carry_pos[2]);
                     }
 
+                    /*
+                     * The arrival point first, when it is in this zone. Every
+                     * single-player map carries a "Default", and it is NOT
+                     * always the first StartPos of zone 0: COMMAND's is in
+                     * zone 2, while its zone 0 opens on 'Mapzone0', a ledge
+                     * the player falls from and dies within two seconds.
+                     */
+                    if (!placed && c->arrival[0]) {
+                        q2_start_pos sp;
+
+                        if (q2_start_pos_find(&spawns, c->arrival, &sp) &&
+                            sp.zone == index) {
+                            c->cam.pos[0] = sp.x;
+                            c->cam.pos[1] = sp.y;
+                            c->cam.pos[2] = sp.z;
+                            c->cam.yaw    = sp.angle;
+                            placed = true;
+                            Q2_INFO("spawned at arrival '%s' (%d,%d,%d)",
+                                    sp.name, sp.x, sp.y, sp.z);
+                        }
+                    }
+
                     for (i = 0; !placed && i < spawns.count; i++) {
                         q2_start_pos sp;
                         if (!q2_start_pos_get(&spawns, i, &sp))
@@ -7828,6 +7895,16 @@ static bool client_load_zone(client *c, const char *map, int index)
             }
 
             Q2_INFO("carried through: %d hp, %d armour, weapon %d, weapons %04X",
+                    c->sim[0].combat.inv.health, c->sim[0].combat.inv.armour,
+                    c->sim[0].combat.weapon_id, c->sim[0].combat.inv.weapons);
+        } else if (c->launch_loadout_valid && !c->mp_enabled &&
+                   client_name_eq(c->launch_loadout_map, map)) {
+            /* Nothing carried in, but this is the level the session was
+             * launched into: arrive with what the campaign would have given,
+             * holding the gun the console's own preference list picks. */
+            c->sim[0].combat.inv = c->launch_loadout;
+            q2_sim_autoselect_weapon(&c->sim[0]);
+            Q2_INFO("launch loadout: %d hp, %d armour, weapon %d, weapons %04X",
                     c->sim[0].combat.inv.health, c->sim[0].combat.inv.armour,
                     c->sim[0].combat.weapon_id, c->sim[0].combat.inv.weapons);
         }
@@ -15103,7 +15180,7 @@ static void client_start_game(client *c)
      * back into WITHIN a game still remembers its script. */
     q2_event_store_clear(&c->event_store);
 
-    client_load_zone(c, c->first_map, 0);
+    client_load_zone(c, c->first_map, client_default_zone(c, c->first_map));
 }
 
 /*
@@ -15383,6 +15460,11 @@ static void client_menu_frame(client *c)
      */
     pad  = client_menu_pointer(c, &c->menu);
     pad |= client_menu_pad(c);
+    /* A key-down, not a held key, so it is one frame of TRIANGLE: the engine
+     * sees the press on this advance and the release on the next. */
+    if (c->menu_esc_back)
+        pad |= Q2_PAD_TRIANGLE;
+    c->menu_esc_back = false;
 
     /*
      * RIGHT-CLICK OUT OF THE PAUSE MENU.
@@ -17292,7 +17374,11 @@ static void usage(void)
            "           it a launcher lists your discs and drives and starts\n"
            "           on the one played last\n");
     printf("  --map    level directory name (default BASE0)\n");
-    printf("  --zone   zone index within the map (default 0)\n");
+    printf("  --zone   zone index within the map (default: the level's own\n"
+           "           start, its \"Default\" arrival point)\n");
+    printf("  --no-loadout  start with the blaster alone; otherwise --map\n"
+           "           hands the player what the campaign would have by\n"
+           "           then (q2psx-inspect loadout prints the table)\n");
     printf("  --scale  buffer pixels across, i.e. horizontal zoom (default 3)\n");
     printf("  --aspect 4:3 (default) | tv | square | stretch\n");
     printf("           4:3    the drawn buffer as 4:3, as the game is played\n");
@@ -17901,6 +17987,7 @@ int main(int argc, char **argv)
     bool map_given = false;
     bool zone_probe = false;
     int zone_index = 0;
+    bool zone_given = false;
     int scale = 3;
     int i;
     u64 last;
@@ -17961,7 +18048,7 @@ int main(int argc, char **argv)
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--disc") && i + 1 < argc)       disc_path = argv[++i];
         else if (!strcmp(argv[i], "--map") && i + 1 < argc) { map = argv[++i]; map_given = true; }
-        else if (!strcmp(argv[i], "--zone") && i + 1 < argc)  zone_index = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--zone") && i + 1 < argc)  { zone_index = atoi(argv[++i]); zone_given = true; }
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--headless"))              c.headless = true;
         else if (!strcmp(argv[i], "--demo"))                  c.demo = true;
@@ -17979,6 +18066,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--depth-sort"))            c.use_sort = false;
         else if (!strcmp(argv[i], "--no-autoswitch"))         c.no_autoswitch = true;
         else if (!strcmp(argv[i], "--god"))                   c.god = true;
+        else if (!strcmp(argv[i], "--no-loadout"))            c.no_loadout = true;
         else if (!strcmp(argv[i], "--continues") && i + 1 < argc)
             c.continues = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--ot-range") && i + 1 < argc) c.ot_range = atoi(argv[++i]);
@@ -18727,6 +18815,21 @@ no_window:
         goto done;
     }
 
+    /* A level started from the command line is a fresh start, entered at its
+     * "Default" arrival point and in that point's zone unless `--zone` says
+     * otherwise. An arena has no Default: its players take MultiSpawns. */
+    if (!c.in_front_end && !c.mp_enabled && !zone_given)
+        zone_index = client_default_zone(&c, map);
+
+    /* ...and carrying what the campaign would have handed them by then. */
+    if (!c.in_front_end && !c.mp_enabled && !c.no_loadout &&
+        c.item_table_ready &&
+        q2_loadout_for_level(&c.launch_loadout, c.disc, &c.item_table, map,
+                             q2_cre_skill()) > 0) {
+        c.launch_loadout_valid = true;
+        snprintf(c.launch_loadout_map, sizeof(c.launch_loadout_map), "%s", map);
+    }
+
     if (!client_load_zone(&c, map, zone_index)) {
         fprintf(stderr, "cannot load %s zone %d\n", map, zone_index);
         exit_code = 1;
@@ -18919,7 +19022,10 @@ no_window:
                 case SDLK_ESCAPE:
                     /* START on the console: it opens the pause menu, and
                      * closes it again from the root page. Deeper in, the
-                     * menu's own TRIANGLE handling owns going back.
+                     * menu's own TRIANGLE handling owns going back — so Esc
+                     * hands it one TRIANGLE press rather than doing nothing,
+                     * which left Backspace and the right button as the only
+                     * way up a level.
                      *
                      * THE TALLY BOARD EATS IT AND DOES NOTHING. It used to
                      * dismiss the board, which the console never does: the
@@ -18957,6 +19063,8 @@ no_window:
                     }
                     else if (c.menu.depth == 0)
                         client_menu_close(&c);
+                    else
+                        c.menu_esc_back = true;
                     break;
                 case SDLK_F12:
                     /*
@@ -19318,6 +19426,7 @@ no_window:
 
         c.mouse_left_prev  = c.mouse_left;
         c.mouse_right_prev = c.mouse_right;
+        c.menu_esc_back    = false;   /* unspent if no menu frame ran */
         {
             int pi;
             for (pi = 0; pi < Q2_MP_MAX_PLAYERS; pi++)

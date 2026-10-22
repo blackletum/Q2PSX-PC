@@ -42,6 +42,8 @@ add_library(q2psx_game STATIC
     inventory.h
     item.c
     item.h
+    loadout.c
+    loadout.h
     lighting.c
     lighting.h
     loading.c

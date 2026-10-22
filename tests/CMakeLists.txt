@@ -97,6 +97,15 @@ target_link_libraries(test_inventory PRIVATE
 
 add_test(NAME inventory COMMAND test_inventory)
 
+add_executable(test_loadout test_loadout.c)
+
+target_link_libraries(test_loadout PRIVATE
+    q2psx_common
+    q2psx_game
+)
+
+add_test(NAME loadout COMMAND test_loadout)
+
 add_executable(test_monster test_monster.c)
 
 target_link_libraries(test_monster PRIVATE
