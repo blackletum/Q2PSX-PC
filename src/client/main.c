@@ -1460,6 +1460,9 @@ typedef struct client {
      */
     u32               rot_loop_starts;
     u32               rot_loop_stops;
+    /* ROTBUTTON's amb_butn2, a press or a release, counted on the bank
+     * carrying it as the motor is: a headless run starts no voice. */
+    u32               rot_clicks;
     /* Locked doors that named their key on the centre line (0x800254EC).
      * Counted where the request is drained rather than where it is raised, so
      * it reports sentences PUT ON SCREEN and not refusals reached. */
@@ -10820,6 +10823,14 @@ static void client_input_simulated(client *c, float dt)
                     if (which < 0 || which >= Q2_ROTSND_COUNT || !have_at)
                         continue;
 
+                    if (which == Q2_ROTSND_BUTTON) {
+                        q2_vag vag;
+
+                        if (client_find_sound(c, q2_rot_sound_name[which],
+                                              &vag))
+                            c->rot_clicks++;
+                    }
+
                     if (client_play_sound_at(c, q2_rot_sound_name[which], at))
                         c->rot_sounds++;
                     else
@@ -17762,6 +17773,7 @@ static void client_report(const client *c)
     REPORT("world.rot_moved",       c->rot_moved);
     REPORT("world.rot_loop_starts", c->rot_loop_starts);
     REPORT("world.rot_loop_stops",  c->rot_loop_stops);
+    REPORT("world.rot_clicks",      c->rot_clicks);
     {
         u32 not_shut = 0;
         u32 hatches  = client_hatches(c, &not_shut);

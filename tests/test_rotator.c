@@ -701,6 +701,75 @@ static void test_snap_button(void)
 }
 
 /*
+ * A switch the player stands at is pressed on EVERY tick: the record that
+ * reaches it is CAT_B, and BASE1's lift switch (COMMON +680, never released)
+ * is one. 0x8002BF04 returns when the angle is already non-zero, so the click
+ * comes once per press and once per release — never once per tick — and a
+ * press mid-hold does not reload the hold.
+ */
+static u32 snap_clicks(q2_rotator_set *set, u32 ticks, s32 dt)
+{
+    u32 t, clicks = 0;
+
+    for (t = 0; t < ticks; t++) {
+        q2_rotator_trigger(set, 0);
+        q2_rotators_tick(set, dt);
+        if (q2_rotator_take_sound(set, 0) == Q2_ROTSND_BUTTON)
+            clicks++;
+    }
+    return clicks;
+}
+
+static void test_snap_button_latch(void)
+{
+    q2_rotator_set set;
+    q2_rotator *r;
+
+    puts("ROTBUTTON ignores a press while it is down (0x8002BF04)");
+
+    /* BASE1's: item+6 is -1, so it never comes back up. */
+    memset(&set, 0, sizeof(set));
+    r = q2_rotators_add(&set, Q2_ROT_SNAP, 5, 1, 0);
+    r->target     = Q2_ROT_BUTTON_TARGET;
+    r->hold_reset = Q2_UF_TIME_NEVER;
+    check_eq(snap_clicks(&set, 46, 20), 1,
+             "a never-release switch clicks once in 46 ticks of pressing");
+    check_eq(set.rotators[0].angle, 2048, "and stays down");
+    q2_rotators_free(&set);
+
+    /* A one-unit hold, pressed every tick of 10. */
+    memset(&set, 0, sizeof(set));
+    r = q2_rotators_add(&set, Q2_ROT_SNAP, 5, 1, 0);
+    r->target     = Q2_ROT_BUTTON_TARGET;
+    r->hold_reset = 300;
+    check_eq(snap_clicks(&set, 2, 10), 1, "the press clicks, the next tick does not");
+    check_eq(set.rotators[0].hold, 280,
+             "and the second press did not reload the hold");
+    check_eq(snap_clicks(&set, 28, 10), 1,
+             "the release clicks on the tick the hold runs out");
+    check_eq(set.rotators[0].angle, 0, "and the switch is up");
+    check_eq(snap_clicks(&set, 1, 10), 1, "the next press finds it up and clicks");
+    check_eq(set.rotators[0].angle, 2048, "and it is down again");
+    q2_rotators_free(&set);
+
+    /*
+     * The handler's first test is on the angle, not on a spent hold
+     * (0x8002C03C). A hold of 0 lets the switch up on the next tick; gated on
+     * the hold it would stay down, and the latch would refuse every press.
+     */
+    memset(&set, 0, sizeof(set));
+    r = q2_rotators_add(&set, Q2_ROT_SNAP, 5, 1, 0);
+    r->target     = Q2_ROT_BUTTON_TARGET;
+    r->hold_reset = 0;
+    q2_rotator_trigger(&set, 0);
+    check_eq(q2_rotator_take_sound(&set, 0), Q2_ROTSND_BUTTON, "a zero hold presses");
+    q2_rotators_tick(&set, 10);
+    check_eq(set.rotators[0].angle, 0, "and comes up on the next tick");
+    check_eq(q2_rotator_take_sound(&set, 0), Q2_ROTSND_BUTTON, "with its click");
+    q2_rotators_free(&set);
+}
+
+/*
  * MISEVENT's namespace, and the compare that finds a key in it.
  *
  * The engine's search (0x8006DB10) reads THREE WORDS and compares them whole.
@@ -759,6 +828,7 @@ int main(void)
     test_target_state_machine();
     test_motor_loop();
     test_snap_button();
+    test_snap_button_latch();
     test_angle_wrap();
     test_constructor_pivots();
     test_axis_and_transform();

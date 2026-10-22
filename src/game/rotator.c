@@ -438,6 +438,20 @@ static void rotator_fire(q2_rotator *r)
         break;
 
     case Q2_ROT_SNAP:
+        /*
+         * A BUTTON THAT IS DOWN IS LEFT ALONE. 0x8002BEFC..0x8002BF04 is
+         * `lh v0, 14(a1)` / `bne v0, zero, exit`: the exec reads the angle it
+         * is about to write and returns when it is already non-zero, before
+         * the click and before the hold is reloaded. That test is the whole of
+         * what makes a press a press. 21 of the disc's 59 ROTBUTTON items sit
+         * in a CAT_B record, which runs on EVERY tick the player stands in its
+         * volume — BASE1's lift switch, COMMON +680, is one — and without it
+         * such a switch clicked thirty times a second for as long as the
+         * player stood at it.
+         */
+        if (r->angle != 0)
+            break;
+
         /* 0x8002BFD8: pressed, the angle IS the target immediately. */
         r->angle = r->target;
         r->hold  = r->hold_reset;
@@ -739,10 +753,20 @@ u32 q2_rotators_tick(q2_rotator_set *set, s32 dt)
         }
 
         case Q2_ROT_SNAP:
-            /* 0x8002C054: the hold counts down by dt, and 0x8002C078 puts the
-             * angle back to zero when it runs out. Q2_UF_TIME_NEVER holds. */
-            if (r->hold == 0 || r->hold == Q2_UF_TIME_NEVER)
+            /*
+             * 0x8002C034..0x8002C04C: a button at REST is skipped, and so is
+             * one held for good. The first test is on the ANGLE, as the exec's
+             * latch is, and the two have to agree: gating on a spent hold
+             * would leave a button with an authored hold of 0 down for good —
+             * latched, so no press could ever reach it again — where the
+             * console lets it up on the next tick. No item on the disc authors
+             * a 0, so nothing here moves differently; nothing can wedge either.
+             */
+            if (r->angle == 0 || r->hold == Q2_UF_TIME_NEVER)
                 continue;
+
+            /* 0x8002C054: the hold counts down by dt, and 0x8002C078 puts the
+             * angle back to zero when it runs out. */
 
             if ((s32)r->hold > dt) {
                 r->hold = (u16)(r->hold - dt);

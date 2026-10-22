@@ -125,7 +125,9 @@ typedef enum q2_rot_kind {
     /*
      * ROTBUTTON — 0x8002BFD8 sets the angle to a literal 2048 when pressed and
      * the handler at 0x8002C078 stores zero back when its timer expires. It is
-     * a snap, not a sweep, and it is hard-wired to obj+0x0E, the Y slot.
+     * a snap, not a sweep, and it is hard-wired to obj+0x0E, the Y slot. A
+     * press that finds the angle already non-zero does nothing (0x8002BF04),
+     * so a volume the player stands in presses it once, not every tick.
      */
     Q2_ROT_SNAP
 } q2_rot_kind;
@@ -251,7 +253,8 @@ typedef enum q2_rot_sound {
     Q2_ROTSND_MID,         /* pt1__mid,  0x8002B3DC — looping while it runs */
     Q2_ROTSND_END,         /* pt1__end,  0x8002B534 — it has arrived        */
     /* ROTBUTTON's own, played on the press (0x8002BFB8, exec 0x8002BEB0)
-     * AND again on the release (0x8002C11C, handler 0x8002C020). */
+     * AND again on the release (0x8002C11C, handler 0x8002C020) — once each,
+     * since a button already down ignores the exec. */
     Q2_ROTSND_BUTTON,      /* amb_butn2, 0x800B27E4                          */
     Q2_ROTSND_COUNT
 } q2_rot_sound;
