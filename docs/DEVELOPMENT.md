@@ -421,7 +421,8 @@ Movies and boot artwork retain their original proportions.
 Resize the window freely, or use `--size 2560x1080` to choose its initial size.
 For repeatable captures use `--headless --size 2560x1080 --frames 60 --shot out.ppm`.
 The raw render target retains console-shaped pixels; `--shot-display display.ppm`
-writes the aspect-correct presentation. The software target stays within the
+writes the aspect-correct presentation, placed as the display envs place it
+and cropped to the 240 lines the television is shown. The software target stays within the
 original projection hardware's coordinate limits, so very extreme shapes may
 have borders. `--aspect 4:3`, `tv`, `square` and `stretch` remain available;
 press **V** to cycle modes. Only `auto` adjusts the camera to the display.
@@ -446,9 +447,10 @@ for comparisons or troubleshooting. F11 always preserves display pixel aspect
 and includes the effect when enabled;
 `--shot` always keeps the untouched console framebuffer for fidelity checks.
 For a reproducible picture of the fitted display, use
-`--headless --frames 60 --scale 2 --crt --shot-display crt.ppm` with your disc
-and map arguments. Display captures omit the window borders and screen-position
-offset. GPU captures use a hidden context and read the engine's output target.
+`--headless --frames 60 --scale 2 --crt --shot-effects crt.ppm` with your disc
+and map arguments. The effects capture omits the window borders and the
+screen-position offset; `--shot-display` keeps both, because it is the
+television's own picture rather than a filter preview. GPU captures use a hidden context and read the engine's output target.
 CRT works with every aspect mode and split-screen layout. No CRT filtering runs
 while the option is off.
 
@@ -469,7 +471,8 @@ split-screen viewport filters independently. When CRT is also enabled, it
 processes the finished scene/UI composite as before.
 
 Use `--bloom` / `--no-bloom` to override the saved setting at launch. F11 and
-`--shot-display` include bloom; `--shot` remains the unfiltered RGB555 frame.
+`--shot-effects` include bloom; `--shot-display` carries the placement but
+not the filters, and `--shot` remains the unfiltered RGB555 frame.
 For deterministic captures, add `--headless --frames 60 --scale 2`.
 Bloom requires the OpenGL display backend; the CPU fallback and `--crt-cpu`
 display without bloom. Loading screens, boot images and movies are unaffected.
