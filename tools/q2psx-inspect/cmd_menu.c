@@ -506,6 +506,11 @@ static int shoot_page(const disc *d, const q2_menu_page *p, int cheat_level,
      * so the numbers have to be in before the page is entered, not after. */
     q2_menu_set_resupplies(&m, 2);
     q2_menu_set_stats(&m, 12, 40, 1, 3);
+    /* Page 38's two rewritten rows need the violation in before entry for the
+     * same reason: InGame_GOTO_REINSERT_CONTROLLER stores its three arguments
+     * (0x8001D204..0x8001D234) and only then enters the page. A pad on port
+     * two is the case worth drawing, since it exercises both rows. */
+    q2_menu_set_violation(&m, Q2_VIOLATION_PAD, 1, "2");
     q2_menu_goto(&m, p->id);
     m.page = p;                    /* honour the variant the caller picked */
     if (p->id == Q2_PAGE_DEATH)

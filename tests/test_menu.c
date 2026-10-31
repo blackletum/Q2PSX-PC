@@ -2179,6 +2179,114 @@ static void test_player_setup_pointer(void)
           "quad controls retain their actual drawn hit areas");
 }
 
+/*
+ * The reinsert screen — InGame_GOTO_REINSERT_CONTROLLER (0x8001D200) and
+ * FrontEndCheckForReinsert (0x800204F4).
+ *
+ * Three things make this page what it is and each is checked: the middle line
+ * names the device that went, the bottom one names its port, and NOTHING on
+ * the page does anything until the device is back.
+ */
+static void test_reinsert_screen(void)
+{
+    q2_menu_settings s;
+    q2_menu m;
+    const q2_menu_page *p;
+
+    q2_menu_settings_defaults(&s);
+    q2_menu_init(&m, &s, Q2_MENU_SCREEN_H);
+
+    /* 0x8001D238 enters page 38 outright: no pause page underneath. */
+    q2_menu_open_reinsert(&m, Q2_VIOLATION_PAD, 1, "2");
+    CHECK(m.open, "the page opens the menu");
+    CHECK(m.page_id == Q2_PAGE_NO_CONTROLLER, "on page 38, not %d", m.page_id);
+    CHECK(q2_menu_reinsert_open(&m), "and reports itself as the reinsert page");
+    CHECK(m.depth == 0, "with nothing beneath it");
+
+    /* The table's row 0 is never rewritten; rows 1 and 2 always are. */
+    CHECK(!strcmp(q2_menu_item_text(&m, 0), "PLEASE INSERT"),
+          "row 0 is the table's: '%s'", q2_menu_item_text(&m, 0));
+    CHECK(!strcmp(q2_menu_item_text(&m, 1), "CONTROLLER INTO"),
+          "row 1 names the pad: '%s'", q2_menu_item_text(&m, 1));
+    CHECK(!strcmp(q2_menu_item_text(&m, 2), "CONTROLLER PORT 2"),
+          "row 2 names the port: '%s'", q2_menu_item_text(&m, 2));
+
+    /* 0x8001D41C appends the shared empty terminator, as every text-only
+     * page does; the port's table had carried no second address. */
+    p = m.page;
+    CHECK(p->addr2 != 0, "the page installs its terminator table");
+    CHECK(p->first == p->count, "nothing on it is navigable");
+    CHECK(p->back == Q2_ACT_NONE, "and triangle has nowhere to go");
+
+    /*
+     * NO WAY OFF IT. Every button, and the page is still up — this is the
+     * whole point of the screen, and the reason the client refuses START and
+     * Escape over it too.
+     */
+    tap(&m, Q2_PAD_CROSS);
+    tap(&m, Q2_PAD_TRIANGLE);
+    tap(&m, Q2_PAD_CIRCLE);
+    tap(&m, Q2_PAD_SQUARE);
+    tap(&m, Q2_PAD_DOWN);
+    tap(&m, Q2_PAD_UP);
+    CHECK(m.page_id == Q2_PAGE_NO_CONTROLLER,
+          "no button leaves the page; landed on %d", m.page_id);
+    CHECK(m.open, "and none of them closes the menu");
+
+    /* 0x8002050C: a violation that has not cleared leaves it alone. */
+    CHECK(!q2_menu_reinsert_poll(&m, true), "a live violation holds the page");
+    CHECK(m.page_id == Q2_PAGE_NO_CONTROLLER, "which it did");
+
+    /* 0x80020514: a clear one goes to InGame_GOTO_PAUSED. */
+    CHECK(q2_menu_reinsert_poll(&m, false), "a cleared violation gives way");
+    CHECK(m.page_id == Q2_PAGE_PAUSE_SP, "to the pause page, not %d", m.page_id);
+    CHECK(!q2_menu_reinsert_open(&m), "and the page is no longer up");
+    CHECK(m.violating_type == Q2_VIOLATION_NONE, "the violation is cleared");
+
+    /* Harmless off the page. */
+    CHECK(!q2_menu_reinsert_poll(&m, false), "polling elsewhere does nothing");
+    CHECK(m.page_id == Q2_PAGE_PAUSE_SP, "and moves nothing");
+
+    /* In multiplayer it hands back to page 43 instead (0x8001D5C8). */
+    q2_menu_init(&m, &s, Q2_MENU_SCREEN_H);
+    q2_menu_set_multiplayer(&m, true);
+    q2_menu_open_reinsert(&m, Q2_VIOLATION_PAD, 2, "1-C");
+    CHECK(!strcmp(q2_menu_item_text(&m, 2), "CONTROLLER PORT 1-C"),
+          "a tapped port keeps its letter: '%s'", q2_menu_item_text(&m, 2));
+    CHECK(q2_menu_reinsert_poll(&m, false), "it gives way in multiplayer too");
+    CHECK(m.page_id == Q2_PAGE_PAUSE_MP, "to page 43, not %d", m.page_id);
+
+    /* The other two violation kinds. 3 is the literal; anything that is not
+     * 1 or 3 says MOUSE, which is the console's else and not a default. */
+    q2_menu_init(&m, &s, Q2_MENU_SCREEN_H);
+    q2_menu_open_reinsert(&m, Q2_VIOLATION_MULTI_TAP, 0, "1");
+    CHECK(!strcmp(q2_menu_item_text(&m, 1), "MULTI TAP INTO"),
+          "kind 3 is the literal: '%s'", q2_menu_item_text(&m, 1));
+
+    q2_menu_init(&m, &s, Q2_MENU_SCREEN_H);
+    q2_menu_open_reinsert(&m, Q2_VIOLATION_MOUSE, 0, "1");
+    CHECK(!strcmp(q2_menu_item_text(&m, 1), "MOUSE INTO"),
+          "kind 2 names the mouse: '%s'", q2_menu_item_text(&m, 1));
+
+    /* No port name leaves the table's own placeholder standing. */
+    q2_menu_init(&m, &s, Q2_MENU_SCREEN_H);
+    q2_menu_open_reinsert(&m, Q2_VIOLATION_PAD, 0, NULL);
+    CHECK(!strcmp(q2_menu_item_text(&m, 2), "CONTROLLER PORT XX"),
+          "an unnamed port keeps the placeholder: '%s'",
+          q2_menu_item_text(&m, 2));
+
+    /* It replaces whatever page was up: a pad can leave mid-OPTIONS, and the
+     * console's caller does not check either. */
+    q2_menu_init(&m, &s, Q2_MENU_SCREEN_H);
+    q2_menu_open(&m);
+    q2_menu_advance(&m, 0);
+    q2_menu_goto(&m, Q2_PAGE_OPTIONS);
+    q2_menu_open_reinsert(&m, Q2_VIOLATION_PAD, 0, "1");
+    CHECK(m.page_id == Q2_PAGE_NO_CONTROLLER,
+          "it takes over an open menu; landed on %d", m.page_id);
+    CHECK(m.depth == 0, "and flattens the depth so triangle has no parent");
+}
+
 int main(void)
 {
     test_player_setup();
@@ -2203,6 +2311,7 @@ int main(void)
     test_quit_flow();
     test_restart_flow();
     test_text_only_page();
+    test_reinsert_screen();
     test_screen_position();
     test_variables_pages();
     test_video_variant();

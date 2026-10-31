@@ -729,11 +729,183 @@ static void capture_unlocks(const char *disc, const char *dir)
     q2_cre_set_skill(old_skill);
 }
 
+/*
+ * A PAD THAT LEAVES — GameCheckPaused's violation scan (0x8003E6C4) into
+ * InGame_GOTO_REINSERT_CONTROLLER (0x8001D200), and FrontEndCheckForReinsert
+ * (0x800204F4) back out of it.
+ *
+ * The port learns the violation from SDL rather than by polling
+ * SnapShotPadViolation, so what is checked here is everything after it: the
+ * port name the page is given, that the page comes up instead of the pause
+ * menu, and that it holds until the device is back.
+ */
+static void reinsert_checks(void)
+{
+    client *c = calloc(1, sizeof(*c));
+    SDL_JoystickID id;
+
+    c->headless = true;
+    q2_menu_settings_defaults(&c->settings);
+    q2_menu_init(&c->menu, &c->settings, 248);
+
+    /*
+     * ControlGetPortName's two regimes. Without a multi tap every slot on
+     * controller port one answers "1" and port two answers "2" (0x8009B4AC,
+     * 0x8009B4B0); three or four players cannot be played without a tap, and
+     * then the eight names at 0x8009B48C apply.
+     */
+    CHECK(!strcmp(client_pad_port_name(c, 0), "1"));
+    CHECK(!strcmp(client_pad_port_name(c, 1), "2"));
+    c->mp_enabled = true;
+    c->screen.view_count = 2;
+    CHECK(!strcmp(client_pad_port_name(c, 1), "2"));
+    c->screen.view_count = 4;
+    CHECK(!strcmp(client_pad_port_name(c, 0), "1-A"));
+    CHECK(!strcmp(client_pad_port_name(c, 3), "1-D"));
+    c->mp_enabled = false;
+    c->screen.view_count = 1;
+
+    /* A pad arrives, then goes. */
+    id = test_controller(SDL_GAMEPAD_TYPE_PS4);
+    CHECK(id != 0);
+    {
+        SDL_Event e = {0};
+        e.type = SDL_EVENT_GAMEPAD_ADDED;
+        e.gdevice.which = id;
+        CHECK(q2_gamepads_event(&c->gamepads, &e) == 0);
+        CHECK(c->gamepads.id[0] == id);
+    }
+
+    CHECK(client_reinsert_open(c, 0));
+    CHECK(c->menu.open);
+    CHECK(c->menu.page_id == Q2_PAGE_NO_CONTROLLER);
+    CHECK(q2_menu_reinsert_open(&c->menu));
+    CHECK(c->menu.violating_player == 0);
+    CHECK(!strcmp(q2_menu_item_text(&c->menu, 1), "CONTROLLER INTO"));
+    CHECK(!strcmp(q2_menu_item_text(&c->menu, 2), "CONTROLLER PORT 1"));
+
+    /* The pad is still gone as far as SDL is concerned, so the page holds —
+     * and holds across as many frames as you like. */
+    {
+        SDL_Event e = {0};
+        e.type = SDL_EVENT_GAMEPAD_REMOVED;
+        e.gdevice.which = id;
+        CHECK(q2_gamepads_event(&c->gamepads, &e) == 0);
+        CHECK(c->gamepads.id[0] == 0);
+    }
+    client_reinsert_poll(c);
+    client_reinsert_poll(c);
+    CHECK(c->menu.page_id == Q2_PAGE_NO_CONTROLLER);
+
+    /* Back in, and the pause page is what it hands over to. */
+    id = test_controller(SDL_GAMEPAD_TYPE_PS4);
+    CHECK(id != 0);
+    {
+        SDL_Event e = {0};
+        e.type = SDL_EVENT_GAMEPAD_ADDED;
+        e.gdevice.which = id;
+        CHECK(q2_gamepads_event(&c->gamepads, &e) == 0);
+        CHECK(c->gamepads.id[0] == id);
+    }
+    client_reinsert_poll(c);
+    CHECK(c->menu.page_id == Q2_PAGE_PAUSE_SP);
+    CHECK(!q2_menu_reinsert_open(&c->menu));
+
+    /* The screens that own the frame outright are not interrupted: the
+     * console cannot reach this call from any of them, because
+     * GameCheckPaused belongs to the game. */
+    q2_menu_init(&c->menu, &c->settings, 248);
+    c->film_open = true;
+    CHECK(!client_reinsert_open(c, 0));
+    c->film_open = false;
+    c->in_front_end = true;
+    CHECK(!client_reinsert_open(c, 0));
+    c->in_front_end = false;
+    CHECK(client_reinsert_open(c, 0));
+
+    free(c);
+}
+
+/*
+ * The reinsert page OVER A LEVEL, which is the only place it is ever seen:
+ * GameCheckPaused raises it from the game's own frame, so what is behind it is
+ * the frame the game last drew.
+ *
+ * Captured with the pad taken away between two frames, the way SDL delivers
+ * it, and again after it comes back — so the pair shows both the screen and
+ * the thing that ends it.
+ */
+static void capture_reinsert(const char *disc, const char *dir)
+{
+    client *c = open_client(disc);
+    SDL_JoystickID id;
+    SDL_Event e = {0};
+    char path[1024];
+    int frame;
+
+    c->fit = Q2_SCREEN_FIT_AUTO;
+    c->output_width = 960; c->output_height = 720;
+    CHECK(client_load_zone(c, "BASE1", 0));
+    CHECK(c->menu_font_ready);
+
+    /* A pad arrives, and a few frames of the level are drawn under it. */
+    id = test_controller(SDL_GAMEPAD_TYPE_PS4);
+    CHECK(id != 0);
+    e.type = SDL_EVENT_GAMEPAD_ADDED; e.gdevice.which = id;
+    CHECK(q2_gamepads_event(&c->gamepads, &e) == 0);
+    for (frame = 0; frame < 8; frame++) {
+        q2_screen_tick_dt(&c->screen, 1.0 / 30.0);
+        client_frame(c);
+        c->frame_index++;
+    }
+    snprintf(path, sizeof(path), "%s/reinsert-before.ppm", dir);
+    write_display(c, path, c->output_width, c->output_height);
+
+    /* And now it leaves. */
+    e.type = SDL_EVENT_GAMEPAD_REMOVED; e.gdevice.which = id;
+    CHECK(q2_gamepads_event(&c->gamepads, &e) == 0);
+    CHECK(SDL_DetachVirtualJoystick(id));
+    CHECK(client_reinsert_open(c, 0));
+    CHECK(q2_menu_reinsert_open(&c->menu));
+    for (frame = 0; frame < 4; frame++) {
+        q2_screen_tick_dt(&c->screen, 1.0 / 30.0);
+        /* The main loop runs this whenever the menu is up (0x8003E538's own
+         * place in the frame), and it is what carries the page's check. */
+        client_menu_frame(c);
+        client_frame(c);
+        c->frame_index++;
+        /* Every one of those frames is still the page: nothing it draws, and
+         * no frame that passes, takes it down. */
+        CHECK(q2_menu_reinsert_open(&c->menu));
+    }
+    snprintf(path, sizeof(path), "%s/reinsert-held.ppm", dir);
+    write_display(c, path, c->output_width, c->output_height);
+
+    /* Back in: the pause page, with the level still behind it. */
+    id = test_controller(SDL_GAMEPAD_TYPE_PS4);
+    CHECK(id != 0);
+    e.type = SDL_EVENT_GAMEPAD_ADDED; e.gdevice.which = id;
+    CHECK(q2_gamepads_event(&c->gamepads, &e) == 0);
+    q2_screen_tick_dt(&c->screen, 1.0 / 30.0);
+    client_menu_frame(c);
+    client_frame(c);
+    c->frame_index++;
+    CHECK(c->menu.page_id == Q2_PAGE_PAUSE_SP);
+    snprintf(path, sizeof(path), "%s/reinsert-after.ppm", dir);
+    write_display(c, path, c->output_width, c->output_height);
+
+    e.type = SDL_EVENT_GAMEPAD_REMOVED; e.gdevice.which = id;
+    CHECK(q2_gamepads_event(&c->gamepads, &e) == 0);
+    CHECK(SDL_DetachVirtualJoystick(id));
+    close_client(c);
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1 && !strcmp(argv[1], "--headless")) { argc--; argv++; }
     CHECK(SDL_Init(SDL_INIT_GAMEPAD));
     input_checks();
+    reinsert_checks();
     if (argc > 3 && !strcmp(argv[3], "--unlocks"))
         capture_unlocks(argv[1], argv[2]);
     else if (argc > 3 && !strcmp(argv[3], "--credits"))
@@ -742,6 +914,8 @@ int main(int argc, char **argv)
         capture_player_setup(argv[1], argv[2]);
     else if (argc > 3 && !strcmp(argv[3], "--profiles"))
         capture_controller_profiles(argv[1], argv[2]);
+    else if (argc > 3 && !strcmp(argv[3], "--reinsert"))
+        capture_reinsert(argv[1], argv[2]);
     else if (argc > 2) capture_menu(argv[1], argv[2]);
     SDL_Quit();
     printf("menu client: %d checks, %d failures\n", checks, failures);

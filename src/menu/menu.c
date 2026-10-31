@@ -682,6 +682,37 @@ static void page_entered(q2_menu *m)
                  m->stat_secrets, m->stat_total_secrets);
         break;
 
+    case Q2_PAGE_NO_CONTROLLER:
+        /*
+         * 0x8001D250..0x8001D398. Two of the three rows are rewritten; the
+         * first, "PLEASE INSERT", is the table's own and is never touched.
+         *
+         * The middle row goes through a stack buffer and then "%s" into the
+         * object (0x8001D318), which is a copy this does not need — the two
+         * sprintf's per row at +0 and +32 are the object's text and its
+         * shadow, and `m->text` is one buffer. What matters is which string
+         * reaches it, and that is the violation kind: 3 is the literal
+         * "MULTI TAP INTO", 1 is "CONTROLLER" through "%s INTO", and anything
+         * else is "MOUSE" through the same. Note the else: a kind the console
+         * has no name for still says MOUSE rather than nothing.
+         */
+        if (m->violating_type == Q2_VIOLATION_MULTI_TAP)
+            snprintf(m->text[1], Q2_MENU_TEXT_MAX, "MULTI TAP INTO");
+        else
+            snprintf(m->text[1], Q2_MENU_TEXT_MAX, "%s INTO",
+                     m->violating_type == Q2_VIOLATION_PAD ? "CONTROLLER"
+                                                           : "MOUSE");
+
+        /*
+         * 0x8001D378: "CONTROLLER PORT %s" with ControlGetPortName's answer.
+         * An empty name leaves the table's own "CONTROLLER PORT XX", which is
+         * what the page draws before anything has filled it in.
+         */
+        if (m->violating_port[0])
+            snprintf(m->text[2], Q2_MENU_TEXT_MAX, "CONTROLLER PORT %s",
+                     m->violating_port);
+        break;
+
     case Q2_PAGE_DEATH:
         /* 0x8001D774: the middle line is written with the resupply count and
          * greyed out when there are none, which also stops the cursor landing
@@ -883,6 +914,67 @@ void q2_menu_open(q2_menu *m)
     /* Latch one frame before acting, so the button that opened the menu
      * cannot also select the item under the cursor. */
     m->settle = 1;
+}
+
+void q2_menu_set_violation(q2_menu *m, int type, int player, const char *port)
+{
+    if (!m)
+        return;
+    m->violating_type   = type;
+    m->violating_player = player;
+    snprintf(m->violating_port, sizeof(m->violating_port), "%s",
+             port ? port : "");
+}
+
+void q2_menu_open_reinsert(q2_menu *m, int type, int player, const char *port)
+{
+    if (!m)
+        return;
+
+    q2_menu_set_violation(m, type, player, port);
+
+    /*
+     * 0x8001D238 enters page 38 OUTRIGHT: the pause page is not built on the
+     * way, so there is nothing underneath to come back to with triangle, and
+     * InGame_GOTO_PAUSED later builds it fresh. An already-open menu is
+     * switched rather than refused — a pad can leave while its owner is
+     * halfway down OPTIONS, and the console's caller does not check either.
+     */
+    m->open    = true;
+    m->depth   = 0;
+    m->page_id = Q2_PAGE_NONE;
+    q2_menu_goto(m, Q2_PAGE_NO_CONTROLLER);
+
+    /* The same one-frame latch every opener takes, so the frame the device
+     * left cannot also be a press on the page it opened. */
+    m->settle = 1;
+}
+
+bool q2_menu_reinsert_open(const q2_menu *m)
+{
+    return m && m->open && m->page_id == Q2_PAGE_NO_CONTROLLER;
+}
+
+bool q2_menu_reinsert_poll(q2_menu *m, bool still_violating)
+{
+    if (!q2_menu_reinsert_open(m))
+        return false;
+
+    /*
+     * 0x8002050C `bne v0, zero`: a non-zero violation returns and the page
+     * stays up. Only a clean answer reaches InGame_GOTO_PAUSED (0x80020514),
+     * which is the ordinary pause page for this session.
+     */
+    if (still_violating)
+        return false;
+
+    m->violating_type = Q2_VIOLATION_NONE;
+    m->depth          = 0;
+    q2_menu_goto(m, m->multiplayer ? Q2_PAGE_PAUSE_MP : Q2_PAGE_PAUSE_SP);
+    /* The pad came back with buttons possibly held; the same latch keeps the
+     * press that reconnected it from selecting a row. */
+    m->settle = 1;
+    return true;
 }
 
 void q2_menu_close(q2_menu *m)

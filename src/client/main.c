@@ -18017,10 +18017,105 @@ static void client_popup_frame(client *c, float dt)
     c->popup_cross_prev = cross;
 }
 
+/*
+ * ControlGetPortName (0x8001FB3C) for a host device.
+ *
+ * The console's answer depends on one thing this port has no equivalent of —
+ * whether a MULTI TAP is in the port the player's pad is plugged into. Without
+ * one, 0x8001FB4C's `lh 0x800B2870` test fails and every slot on controller
+ * port 1 answers "1" and every slot on port 2 answers "2" (the two words at
+ * 0x8009B4AC and 0x8009B4B0). With one, the eight names at 0x8009B48C come out
+ * instead: "1-A".."1-D" then "2-A".."2-D".
+ *
+ * So the mapping here is the console's own hardware rule, not an invention:
+ * one or two players need no tap and are ports "1" and "2"; three or four
+ * cannot be played on this machine WITHOUT a tap in port one, and are
+ * "1-A".."1-D". Nothing a host pad carries says which USB socket it is in, and
+ * a socket number would be a different fact from the one this screen asks the
+ * player to act on.
+ */
+static const char *client_pad_port_name(const client *c, int player)
+{
+    static const char *tapped[4] = { "1-A", "1-B", "1-C", "1-D" };
+    int players = c->mp_enabled ? c->screen.view_count : 1;
+
+    if (player < 0 || player >= Q2_SIM_MAX_PLAYERS)
+        return "";
+    if (players > 2)
+        return tapped[player];
+    return player == 0 ? "1" : "2";
+}
+
+/*
+ * The pad removal GameCheckPaused sees — 0x8003E6C4..0x8003E874.
+ *
+ * The console scans every player with SnapShotPadViolation each frame and, on
+ * the first non-zero answer, kills every voice (0x8003E860) and goes to the
+ * reinsert page with that answer, the port byte and the player. The port has
+ * the answer handed to it by SDL instead of polling for it, which is the same
+ * fact from the other direction; everything after it is the console's.
+ *
+ * `q2_menu_open_reinsert` replaces whatever page is up, because the console's
+ * caller does not look either: a pad can leave while its owner is halfway down
+ * OPTIONS, and the page they were on is exactly the thing they can no longer
+ * drive.
+ */
+static bool client_reinsert_open(client *c, int player)
+{
+    /* The screens that are not the pause menu and own the frame outright. A
+     * film, the boot chain, the memory card and the front end all run with no
+     * game under them, so there is nothing to pause and nothing to go back
+     * to; the console cannot reach this call in any of them either, because
+     * GameCheckPaused is the GAME's. */
+    if (c->in_front_end || c->film_open || c->boot_open || c->mcard_open ||
+        c->save_prompt_open || c->mission_open || c->briefing_open ||
+        c->endmis_open || c->credits_open || c->mp_scoreboard)
+        return false;
+    if (c->mp_enabled && c->mp.end != Q2_MP_RUNNING)
+        return false;
+
+    client_menu_fill_stats(c);
+    q2_menu_set_pauser(&c->menu, player);
+    /* 0x8003E860's killallsounds, before the page. */
+    client_voices_stop(c);
+    q2_menu_open_reinsert(&c->menu, Q2_VIOLATION_PAD, player,
+                          client_pad_port_name(c, player));
+    Q2_INFO("controller: player %d lost its pad; holding on NO CONTROLLER "
+            "(port %s)", player + 1, client_pad_port_name(c, player));
+    return true;
+}
+
+/*
+ * FrontEndCheckForReinsert (0x800204F4), once a frame while the page is up.
+ *
+ * The console asks SnapShotPadViolation again; here the question is whether
+ * that player's pad is back, which is the same question SDL has already
+ * answered into `id`.
+ */
+static void client_reinsert_poll(client *c)
+{
+    int player;
+
+    if (!q2_menu_reinsert_open(&c->menu))
+        return;
+
+    player = c->menu.violating_player;
+    if (player < 0 || player >= Q2_SIM_MAX_PLAYERS)
+        return;
+
+    if (q2_menu_reinsert_poll(&c->menu, c->gamepads.id[player] == 0))
+        Q2_INFO("controller: player %d is back; the pause menu returns",
+                player + 1);
+}
+
 static void client_menu_frame(client *c)
 {
     q2_menu_sound snd;
     u16 pad;
+
+    /* Before anything a button could do, because the page it is on has no
+     * buttons and the one it hands back to does. */
+    client_reinsert_poll(c);
 
     /*
      * The CONTROLLER page's two greyed rows, given back — the port's decision,
@@ -21830,16 +21925,24 @@ no_window:
                  * again — a DualShock plugged in mid-session is shockable and
                  * the pad that just left is not. */
                 client_menu_bind_pads(&c);
+                /*
+                 * A pad that leaves does not open the PAUSE menu — it opens
+                 * the console's own NO CONTROLLER page, which names the device
+                 * and the port and holds there until the pad is back
+                 * (0x8003E850..0x8003E874). The pause menu is what the reinsert
+                 * check hands back to afterwards, not what comes up now.
+                 */
                 if (ev.type == SDL_EVENT_GAMEPAD_REMOVED &&
                     (gp == 0 || (c.mp_enabled && gp < c.screen.view_count)))
-                    client_pause_open(&c, gp);
+                    client_reinsert_open(&c, gp);
             }
             if (gp >= 0 && ev.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN &&
                 ev.gbutton.button == SDL_GAMEPAD_BUTTON_START &&
                 !c.in_front_end && !c.mp_scoreboard && !c.film_open &&
                 (!c.mp_enabled || c.mp.end == Q2_MP_RUNNING) &&
                 !c.boot_open && !c.mcard_open && !c.save_prompt_open && !c.mission_open &&
-                !c.briefing_open && !c.endmis_open && !c.credits_open) {
+                !c.briefing_open && !c.endmis_open && !c.credits_open &&
+                !q2_menu_reinsert_open(&c.menu)) {
                 if (c.menu.open) {
                     client_menu_close(&c);
                 } else {
@@ -21911,6 +22014,17 @@ no_window:
                         client_card_close(&c);
                     else if (c.mission_open) {
                         /* Deliberately nothing. */
+                    }
+                    else if (q2_menu_reinsert_open(&c.menu)) {
+                        /*
+                         * NOTHING. The reinsert page has no action on any
+                         * row and no back action (0x8009B42C), and the only
+                         * thing that takes it down is the device coming back
+                         * (0x800204F4). Esc is player one's START here, and
+                         * START does not take it down either, so neither a
+                         * second player nor the keyboard can dismiss the
+                         * screen that is waiting on somebody else's pad.
+                         */
                     }
                     else if (!c.menu.open) {
                         /* Escape is player one's START, so player one paused. */

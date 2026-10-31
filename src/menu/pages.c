@@ -217,6 +217,18 @@ static const q2_menu_item k_loading[] = {
     { "LOADING", 256, 124, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
 };
 
+/*
+ * NO CONTROLLER — 0x8009B42C, with the shared empty table after it
+ * (0x8001D41C installs 0x8009B30C at size 16, as every text-only page does).
+ *
+ * TWO OF THESE THREE LABELS ARE PLACEHOLDERS. InGame_GOTO_REINSERT_CONTROLLER
+ * (0x8001D200) rewrites rows 1 and 2 on entry from the violation it was handed
+ * — "CONTROLLER INTO", "MOUSE INTO" or "MULTI TAP INTO", and the real port
+ * name in place of "XX" — so what is stored here is only what the page would
+ * draw if nothing had filled it in. Row 0 is never touched. See
+ * `q2_menu_open_reinsert` in menu.h for the composition and for why this is
+ * the one page with no way off it but the device coming back.
+ */
 static const q2_menu_item k_no_controller[] = {
     { "PLEASE INSERT",      256,  98, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
     { "CONTROLLER INTO",    256, 124, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
@@ -533,7 +545,7 @@ static const q2_menu_page k_pages[] = {
     { Q2_PAGE_RESUPPLYING,      NULL,         k_restarting,       N(k_restarting),       N(k_restarting),    Q2_ACT_NONE,         0x8009AC4Cu, EMPTY },
     { Q2_PAGE_QUIT_CONFIRM,     NULL,         k_quit_confirm,     N(k_quit_confirm),     1,                  Q2_ACT_BACK,         0x8009AC94u, 0x8009ACC4u },
     { Q2_PAGE_QUITTING,         NULL,         k_quitting,         N(k_quitting),         N(k_quitting),      Q2_ACT_NONE,         0x8009AD0Cu, EMPTY },
-    { Q2_PAGE_NO_CONTROLLER,    NULL,         k_no_controller,    N(k_no_controller),    N(k_no_controller), Q2_ACT_NONE,         0x8009B42Cu, 0 },
+    { Q2_PAGE_NO_CONTROLLER,    NULL,         k_no_controller,    N(k_no_controller),    N(k_no_controller), Q2_ACT_NONE,         0x8009B42Cu, EMPTY },
     { Q2_PAGE_DEATH,            NULL,         k_death,            N(k_death),            0,                  Q2_ACT_NONE,         0x8009AB74u, 0 },
     { Q2_PAGE_VARIABLES,        "PAUSED",     k_vars_none,        N(k_vars_none),        0,                  Q2_ACT_BACK,         0x8009A6C4u, 0 },
     { Q2_PAGE_PAUSE_MP,         "PAUSED",     k_pause_mp,         N(k_pause_mp),         0,                  Q2_ACT_NONE,         0x8009A964u, 0 },

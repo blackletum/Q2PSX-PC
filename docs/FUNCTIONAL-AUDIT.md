@@ -719,6 +719,7 @@ The save/capture fixtures require existing output directories:
 .\build-msvc\bin\Release\test_client_menu.exe --headless .install/disc/game.cue .agents/tmp/functional-parity/players --players
 .\build-msvc\bin\Release\test_client_menu.exe --headless .install/disc/game.cue .agents/tmp/functional-parity/credits --credits
 .\build-msvc\bin\Release\test_client_menu.exe --headless .install/disc/game.cue .agents/tmp/functional-parity/unlocks --unlocks
+.\build-msvc\bin\Release\test_client_menu.exe --headless .install/disc/game.cue .agents/tmp/functional-parity/reinsert --reinsert
 .\build-msvc\bin\Release\test_client_population.exe --disc .install/disc/game.cue
 .\build-msvc\bin\Release\test_client_population.exe --selectors .install/disc/game.cue .agents/tmp/functional-parity/selectors/after
 .\build-msvc\bin\Release\test_client_population.exe --callbacks .install/disc/game.cue .agents/tmp/functional-parity/callbacks
@@ -1294,6 +1295,71 @@ Validation: all 73 CTests pass, including the three new regressions. The
 disc-backed creature, weapon, muzzle, save and client-effect suites pass on both
 PAL and US. `.install/q2psx.exe` is staged from this tree and completes a
 120-frame WASTE4 capture with zero errors and zero warnings.
+
+## The screen for a controller that went away, 31 October
+
+Found by the symbol-table census rather than by reading code: of the 1,037
+functions `/MAIN.SYM` names, only eleven are cited nowhere in this tree, and
+four of them belong to one flow — `InGame_GOTO_REINSERT_CONTROLLER`
+(0x8001D200), `FrontEndCheckForReinsert` (0x800204F4),
+`InGame_PrintMemCardMessage` and `ControlGetPortName` (0x8001FB3C), all
+QFR_SING.C. The first two are the console's lost-controller screen, and the
+port had the page's data without ever entering it.
+
+**Where it comes from.** `GameCheckPaused` (QUAKE.C 0x8003E538) walks every
+player each frame with `SnapShotPadViolation` (INPUT.C 0x80032DCC) at
+0x8003E6C4..0x8003E6F8. The first non-zero answer breaks the loop at
+0x8003E850: the pause word is set, the player index is stored, `killallsounds`
+runs (0x8003E860) and 0x8003E870 enters the page with three arguments — the
+violation kind, the port byte the query wrote, and the player.
+
+**What the page is.** 0x8001D238 enters page 38 OUTRIGHT, so no pause page is
+built underneath it; 0x8001D41C appends the shared empty terminator table that
+every text-only page uses. Two of the three rows are then rewritten. The middle
+one is the literal "MULTI TAP INTO" for kind 3 (0x8001D278) and otherwise
+"%s INTO" with "CONTROLLER" for kind 1 or "MOUSE" for anything else
+(0x8001D284..0x8001D2AC) — note the else: an unnamed kind still says MOUSE. The
+bottom one is "CONTROLLER PORT %s" with `ControlGetPortName`'s answer
+(0x8001D378), which is "1" or "2" with no multi tap and one of "1-A".."2-D"
+with one (0x8009B48C against 0x8009B4AC / 0x8009B4B0). Finally 0x8001D42C
+installs `FrontEndCheckForReinsert` as the page's per-frame hook, and that is
+the ONLY way off it: no row carries an action and the page has no back action,
+so neither X nor triangle does anything. The hook asks the query again and, on
+a zero, calls `InGame_GOTO_PAUSED` (0x8001FD88).
+
+**What the port did instead.** `SDL_EVENT_GAMEPAD_REMOVED` opened the PAUSE
+menu. That is the right screen at the wrong time — it is what the console shows
+when the device comes BACK — and it offered RESTART LEVEL and QUIT GAME to a
+player with nothing to drive them with, while saying nothing about what had
+happened or which port to look at.
+
+**What it does now.** The removal raises page 38 with the device and the port
+named, kills voices first as 0x8003E860 does, and holds: START and Escape are
+both refused over it, so a second player or the keyboard cannot dismiss a
+screen that is waiting on somebody else's pad. When the pad is back the
+per-frame check hands over to the pause page, which is page 43 in a match and
+26 otherwise.
+
+DEVIATION, stated: the port learns the violation from SDL rather than by
+polling `SnapShotPadViolation`, which is the same fact arriving from the other
+direction, and it has no multi tap. `ControlGetPortName`'s rule is applied as
+the console's own hardware rule rather than invented — one or two players need
+no tap and are ports "1" and "2"; three or four cannot be played on that
+machine without a tap in port one, and are "1-A".."1-D". Nothing an SDL pad
+carries names a socket, and a USB socket number would be a different fact from
+the one the screen asks the player to act on. Only kind 1 is reachable here:
+the port's mouse is not a pad the engine can lose, and there is no tap.
+
+One table correction came with it: page 38's record in `pages.c` carried no
+second table address where 0x8001D41C installs the shared empty one.
+
+Validation: `test_menu` adds the composition, the three violation kinds, the
+empty port name, the "no button leaves the page" sweep and both arms of the
+check; a control build with the composition removed fails five of them.
+`test_client_menu --reinsert` drives the whole cycle through the real client on
+BASE1 — pad added, frames drawn, pad removed, four frames held with the page
+still up, pad back, pause page — and writes the three captures. All 73 CTests
+pass, and the menu suites pass on PAL and US.
 
 ## Limits
 

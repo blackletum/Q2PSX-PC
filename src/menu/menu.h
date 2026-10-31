@@ -636,6 +636,22 @@ typedef struct q2_menu {
     bool                us_english;   /* the North American build's spellings */
     int                 cheat_level;  /* 0x800B335C                          */
     int                 resupplies;   /* 0x800B335D                          */
+
+    /*
+     * WHOSE DEVICE WENT, AND WHICH ONE — gViolatingType (0x800B2788),
+     * gViolatingPlayer (0x800B279C) and the port byte between them
+     * (0x800B278C), as InGame_GOTO_REINSERT_CONTROLLER stores its three
+     * arguments at 0x8001D204, 0x8001D230 and 0x8001D234.
+     *
+     * `violating_port` is the NAME, not the byte: ControlGetPortName
+     * (0x8001FB3C) has already turned it into "1", "2" or one of a tap's
+     * "1-A".."2-D", and only the client knows which of those a host device
+     * answers to. See q2_menu_set_violation.
+     */
+    int                 violating_type;    /* q2_menu_violation             */
+    int                 violating_player;
+    char                violating_port[8];
+
     int                 screen_h;     /* 0x800B2DA2 — the title's y follows  */
 
     /*
@@ -684,6 +700,56 @@ void q2_menu_init(q2_menu *m, q2_menu_settings *settings, int screen_h);
 /* Open on the pause page this session would have used (43 in multiplayer,
  * 26 otherwise — 0x8001D5C8). */
 void q2_menu_open(q2_menu *m);
+
+/* ------------------------------------------------------------------------- */
+/* The device that went away — QFR_SING.C's reinsert screen                   */
+/* ------------------------------------------------------------------------- */
+/*
+ * WHAT SnapShotPadViolation (INPUT.C 0x80032DCC) RETURNS, which is what picks
+ * the middle line of page 38. Zero is "nothing wrong" and never opens it.
+ */
+typedef enum q2_menu_violation {
+    Q2_VIOLATION_NONE      = 0,
+    Q2_VIOLATION_PAD       = 1,  /* 0x8001D294: "CONTROLLER INTO"  */
+    Q2_VIOLATION_MOUSE     = 2,  /* 0x8001D2A8: "MOUSE INTO"       */
+    Q2_VIOLATION_MULTI_TAP = 3   /* 0x8001D278: "MULTI TAP INTO"   */
+} q2_menu_violation;
+
+/*
+ * Open the NO CONTROLLER page — InGame_GOTO_REINSERT_CONTROLLER (0x8001D200).
+ *
+ * The console stores the three arguments, enters page 38, appends the empty
+ * terminator table, and rewrites the page's last two rows: the middle one from
+ * `type` through "%s INTO" (0x800AE6C8) or the literal "MULTI TAP INTO"
+ * (0x800AB2D4), and the bottom one through "CONTROLLER PORT %s" (0x800AB2E4)
+ * with the name ControlGetPortName gave. Then it installs
+ * FrontEndCheckForReinsert as the page's per-frame hook (0x8001D42C), and that
+ * is the ONLY way off this page: there is no action on any row and no back
+ * action, so neither X nor triangle does anything until the device is back.
+ *
+ * `port` may be NULL, which leaves the bottom row as the table's
+ * "CONTROLLER PORT XX".
+ */
+void q2_menu_open_reinsert(q2_menu *m, int type, int player, const char *port);
+
+/*
+ * Set the three without opening, for a caller that wants the page composed on
+ * the next entry rather than now.
+ */
+void q2_menu_set_violation(q2_menu *m, int type, int player, const char *port);
+
+/*
+ * FrontEndCheckForReinsert (0x800204F4), the page's per-frame hook: it asks
+ * SnapShotPadViolation about gViolatingPlayer and, when the answer is zero,
+ * calls InGame_GOTO_PAUSED (0x8001FD88). `still_violating` is that answer.
+ *
+ * True when the page gave way to the pause menu this call. Harmless to call
+ * when the page is not up; it does nothing.
+ */
+bool q2_menu_reinsert_poll(q2_menu *m, bool still_violating);
+
+/* Is the reinsert page the one that is up? */
+bool q2_menu_reinsert_open(const q2_menu *m);
 void q2_menu_close(q2_menu *m);
 void q2_menu_goto(q2_menu *m, int page_id);
 
