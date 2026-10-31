@@ -1414,6 +1414,113 @@ bool q2_combat_cylinder_interval(const s32 origin[3], const s32 dir[3],
                              out_enter, out_exit);
 }
 
+/* ------------------------------------------------------------------------- */
+/* GenMissileHitPlane — COLL.C 0x80054BD4, and the plane it reads             */
+/* ------------------------------------------------------------------------- */
+/* `mult` keeps 64 bits and `mflo` takes the low 32, so a product that does not
+ * fit wraps rather than saturating. Every sum below is `addu`. */
+static s32 mflo32(s64 v)
+{
+    return (s32)(u32)(u64)v;
+}
+
+/* MIPS `div` truncates toward zero. */
+static s32 div_toward_zero(s32 a, s32 b)
+{
+    if (b == 0)
+        return 0;        /* 0x80054CCC's `break 0x1C00`; unreachable here */
+    return a / b;
+}
+
+/* One 1.3.12 product with MYRotMatrixYXZ2's own rounding — `bgez x; addiu x,
+ * x, 4095` before the `sra 12`, which is a truncation toward zero where the
+ * shared basis in trig.c floors. Kept local: changing the shared one would
+ * move every camera in the game by up to a unit. */
+static s32 mul12_toward_zero(s32 a, s32 b)
+{
+    s64 p = (s64)a * b;
+
+    if (p < 0)
+        p += Q2_ONE_12 - 1;
+    return (s32)(p >> Q2_FRAC_12);
+}
+
+bool q2_combat_missile_hit_plane(const q2_view_plane *plane,
+                                 const s32 dir[3], s32 point[3])
+{
+    s32 d, num, w[3];
+    int k;
+
+    if (!plane || !dir || !point)
+        return false;
+
+    /* 0x80054BD8..0x80054C24: `n . dir`, and a non-negative one is refused. */
+    d = 0;
+    for (k = 0; k < 3; k++)
+        d = mflo32((s64)d + mflo32((s64)plane->normal[k] * dir[k]));
+    if (d >= 0)
+        return false;
+
+    /* 0x80054C2C..0x80054C70: the plane's point, less the shot's. */
+    for (k = 0; k < 3; k++)
+        w[k] = mflo32((s64)mflo32((s64)plane->pos[k] + plane->off[k])
+                      - point[k]);
+
+    /* 0x80054C74..0x80054CA8. */
+    num = 0;
+    for (k = 0; k < 3; k++)
+        num = mflo32((s64)num + mflo32((s64)plane->normal[k] * w[k]));
+
+    /* 0x80054CB0..0x80054DC4: one divide per axis, then the three adds. */
+    for (k = 0; k < 3; k++)
+        point[k] = mflo32((s64)point[k] +
+                          div_toward_zero(mflo32((s64)dir[k] * num), d));
+    return true;
+}
+
+void q2_combat_view_plane(q2_view_plane *out, const s32 eye[3],
+                          s32 yaw, s32 pitch, s32 roll)
+{
+    s32 sy, cy, sp, cp;
+    int k;
+
+    if (!out)
+        return;
+
+    memset(out, 0, sizeof(*out));
+    if (eye) {
+        for (k = 0; k < 3; k++)
+            out->pos[k] = eye[k];
+    }
+
+    /*
+     * The roll never reaches row 2 — the console's m2* carries no angle-2 term
+     * and `q2_rotation_view` copies base row 2 through untouched — so the lean
+     * tilts the picture without tilting the plane.
+     */
+    (void)roll;
+
+    sy = q2_sin12(yaw);
+    cy = q2_cos12(yaw);
+    sp = q2_sin12(pitch);
+    cp = q2_cos12(pitch);
+
+    /* MYRotMatrixYXZ2's rounding: toward zero, not the shared basis's floor. */
+    out->normal[0] = (s16)mul12_toward_zero(cp, sy);
+    out->normal[1] = (s16)(-sp);
+    out->normal[2] = (s16)mul12_toward_zero(cp, cy);
+
+    /* 0x80037F6C..0x80037FB4: `bgez; addiu 7; sra 3` — over eight, toward
+     * zero. 4096/8 is 512, so a level view's plane is 512 units out. */
+    for (k = 0; k < 3; k++) {
+        s32 v = out->normal[k];
+
+        if (v < 0)
+            v += 7;
+        out->off[k] = (s16)(v >> 3);
+    }
+}
+
 static bool actor_cylinder_interval(const s32 origin[3], const s32 dir[3],
                                     const q2_actor *t, s32 fallback_radius,
                                     s64 *out_enter, s64 *out_exit)

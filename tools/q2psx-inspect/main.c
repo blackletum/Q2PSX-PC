@@ -183,7 +183,7 @@ static void usage(void)
     puts("                              then wake every placed one and census its eye");
     puts("  mob     <disc> <map> [zone] [n] [out.ppm]  stand in front of a creature");
     puts("  models  <disc> <map>        list a map's model bank");
-    puts("  model   <disc> <map> <name|idx> [clip] [frame] [out.ppm] [yaw]  render one model");
+    puts("  model   <disc> <map> <name|idx> [clip] [frame] [out.ppm] [yaw] [scale]  render one model");
     puts("  hud     <disc> [map] [out.ppm]  the HUD's tables, or draw the overlay");
     puts("  text    <disc> [map] [out.ppm]  the Strings chunk, the briefing screen, the UI chrome");
     puts("  menu    <disc> [page] [out.ppm] [WxH]  the menu, checked against the executable");
@@ -2352,7 +2352,7 @@ static int cmd_models(disc *d, const char *map)
 }
 
 static int cmd_model(disc *d, const char *map, const char *want, int clip_index,
-                     int frame, const char *out_path, s32 view_yaw)
+                     int frame, const char *out_path, s32 view_yaw, s32 scale)
 {
     const int W = 512, H = 480;
     q2_buf buf;
@@ -2699,6 +2699,7 @@ static int cmd_model(disc *d, const char *map, const char *want, int clip_index,
         cam.pos[2] = cz - ((q2_cos12(view_yaw) * dist) >> 12);
     }
     inst.yaw = 0;
+    inst.scale = scale > 0 ? scale : Q2_ONE_12;
 
     if (psx_ot_init(&ot, 4096, 300000) != Q2_OK ||
         psx_fb_init(&fb, W, H) != Q2_OK) {
@@ -6237,7 +6238,11 @@ int main(int argc, char **argv)
              */
             s32 vy = (argc >= 9) ? (s32)strtol(argv[8], NULL, 10)
                                  : Q2_ANGLE_180;
-            rc = cmd_model(d, argv[3], argv[4], ci, fr, outp, vy);
+            /* The geometric scale MyScaleMatrix folds into entity+0x2C0 —
+             * 4096 is the model as authored, and 2048 is what the gib
+             * dispatcher's Explosion arms pass (modelent.h). */
+            s32 sc = (argc >= 10) ? (s32)strtol(argv[9], NULL, 10) : Q2_ONE_12;
+            rc = cmd_model(d, argv[3], argv[4], ci, fr, outp, vy, sc);
         }
     } else if (strcmp(cmd, "bmodel") == 0) {
         if (argc < 4) {

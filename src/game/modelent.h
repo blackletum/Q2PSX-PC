@@ -210,12 +210,13 @@ bool q2_model_ent_height(const q2_model_bank *bank, const char *name,
  *   0x8005AA7C  SetShockData — every pad within `size` of `at` rumbles
  *               (q2_shock_explosion).
  *
- * NOT REPRODUCED: the other thing `size` does. 0x8005A96C hands it to
- * 0x80055F3C with the entity's matrix at +0x2C0 as both source and
- * destination, which scales the model by it, so the gib arms' fireball is
- * drawn at half the size of a rocket's. q2_entity has no per-entity draw
- * scale (`scale` is the +0xFC light intensity), and every one is drawn at
- * 4096.
+ * THE OTHER THING `size` DOES. 0x8005A96C hands it to MyScaleMatrix
+ * (0x80055F3C) with the entity's matrix at +0x2C0 as both source and
+ * destination, which multiplies all nine elements by it, so the gib arms'
+ * fireball is drawn at half the size of a rocket's. That factor is now kept
+ * per entity as `q2_entity.matrix_scale` — distinct from `scale`, which is
+ * the +0xFC light intensity — and spent as the model instance's uniform
+ * scale at draw time, with MyScaleMatrix's own round-toward-zero.
  *
  * `sounds` may be NULL, for a caller with nobody to hear it; the entity is
  * spawned either way.

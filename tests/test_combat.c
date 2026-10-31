@@ -1948,6 +1948,148 @@ static void test_mod_classification(void)
 /* ------------------------------------------------------------------------- */
 
 /*
+ * GenMissileHitPlane (0x80054BD4) and the plane UpdateWindowStuff builds for
+ * it (0x80037F30..0x80037F94).
+ *
+ * The numbers here are the arithmetic, not a capture: a level view looking
+ * along +Z has a forward of (0, 0, 4096), an offset of (0, 0, 512) and a plane
+ * 512 units in front of the eye, and a round arriving head-on lands on it
+ * whatever the body query said. The gate is the half with teeth — a round
+ * taking the player from behind travels WITH the normal and must leave the
+ * entry point alone, because that is what decides which way DoDamage then
+ * throws them.
+ */
+static void test_view_plane(void)
+{
+    q2_view_plane vp;
+    s32 eye[3] = { 1000, -2000, 3000 };
+
+    printf("the view plane a shot is projected onto\n");
+
+    /* Level, looking along +Z: q2_rotation_view's row 2 is (sy*cp, -sp,
+     * cy*cp) and at yaw 0 that is (0, 0, 4096). */
+    q2_combat_view_plane(&vp, eye, 0, 0, 0);
+    check_eq_i(vp.normal[0], 0, "a level view's forward has no X");
+    check_eq_i(vp.normal[1], 0, "nor any Y");
+    check_eq_i(vp.normal[2], 4096, "and is a full unit along +Z");
+    check_eq_i(vp.off[2], 512, "the offset is the normal over eight");
+    check_eq_i(vp.pos[0], eye[0], "the plane is anchored at the eye");
+    check_eq_i(vp.pos[1], eye[1], "on Y too");
+
+    /* A quarter turn: forward becomes +X. 1024 of 4096 is 90 degrees. */
+    q2_combat_view_plane(&vp, eye, 1024, 0, 0);
+    check_eq_i(vp.normal[0], 4096, "a quarter turn faces +X");
+    check_eq_i(vp.normal[2], 0, "and nothing along Z");
+
+    /* The roll never reaches row 2, so a lean does not tilt the plane. */
+    {
+        q2_view_plane rolled;
+        q2_combat_view_plane(&vp, eye, 700, 300, 0);
+        q2_combat_view_plane(&rolled, eye, 700, 300, 400);
+        check(memcmp(vp.normal, rolled.normal, sizeof(vp.normal)) == 0,
+              "a strafe roll leaves the plane's normal alone");
+    }
+
+    /*
+     * THE ARITHMETIC, where it does not overflow. `dir` is what the bullet arm
+     * holds: the aim shifted left two, so 16384 units long (0x80048790 adds it
+     * to the start to get the end point). The eye is at the origin looking
+     * along +Z, so the plane is z = 512; a round entering 31 units short of it
+     * lands exactly on it, because `dir * num` is then still inside 32 bits.
+     */
+    {
+        s32 origin[3] = { 0, 0, 0 };
+        s32 dir[3]    = { 0, 0, -16384 };
+        s32 point[3]  = { 0, 0, 481 };
+
+        q2_combat_view_plane(&vp, origin, 0, 0, 0);
+        check(q2_combat_missile_hit_plane(&vp, dir, point),
+              "a round arriving head-on is projected");
+        check_eq_i(point[2], 512, "onto the plane 512 units in front");
+        check_eq_i(point[0], 0, "with no X drift");
+        check_eq_i(point[1], 0, "and no Y drift");
+    }
+
+    /*
+     * AND WHERE IT OVERFLOWS, WHICH IS EVERY SHOT IN PLAY.
+     *
+     * 0x80054CB0 is `mult v0, v1` followed by `mflo t1`, so the numerator is
+     * the LOW 32 BITS of `dir[k] * num` and the divide gets whatever that
+     * wrapped to. With `dir` 16384 long the product clears 2^31 as soon as
+     * `num` passes 131072 — 32 units of travel — and the body query puts the
+     * entry point on the victim's 286-unit cylinder, hundreds of units from
+     * the plane. So the real shift is bounded and is not a projection at all:
+     * from the skin at z = 286 the point moves 30 units, not 226.
+     *
+     * This is the whole of "a shift of at most a few dozen units per axis".
+     * It is the console's defined arithmetic, not an approximation here, and
+     * it is why this arm is worth transcribing rather than idealising.
+     */
+    {
+        s32 origin[3] = { 0, 0, 0 };
+        s32 dir[3]    = { 0, 0, -16384 };
+        s32 point[3]  = { 0, 0, 286 };
+
+        q2_combat_view_plane(&vp, origin, 0, 0, 0);
+        check(q2_combat_missile_hit_plane(&vp, dir, point),
+              "a round from the skin is projected too");
+        check_eq_i(point[2], 256,
+                   "but the numerator wrapped, so it moves 30 and not 226");
+    }
+
+    /*
+     * 0x80054C24 `bgez t0`: a round travelling WITH the normal is refused, and
+     * the point it was given is what DoDamage sees. Shot in the back.
+     */
+    {
+        s32 origin[3] = { 0, 0, 0 };
+        s32 dir[3]    = { 0, 0, 16384 };
+        s32 point[3]  = { 0, 0, -286 };
+
+        q2_combat_view_plane(&vp, origin, 0, 0, 0);
+        check(!q2_combat_missile_hit_plane(&vp, dir, point),
+              "a round from behind is not projected");
+        check_eq_i(point[2], -286, "and keeps the entry the body query gave");
+    }
+
+    /*
+     * The case that makes it a KNOCKBACK change rather than a cosmetic one: a
+     * round off the eye line moves on BOTH axes, so `origin - point` — the
+     * direction DoDamage throws the player along — comes out somewhere else.
+     */
+    {
+        s32 origin[3] = { 0, 0, 0 };
+        s32 dir[3]    = { -4096, 0, -15872 };
+        s32 point[3]  = { 0, -40, 481 };
+
+        q2_combat_view_plane(&vp, origin, 0, 0, 0);
+        check(q2_combat_missile_hit_plane(&vp, dir, point),
+              "a round angled into the plane is projected");
+        check_eq_i(point[2], 512, "onto the plane");
+        check_eq_i(point[0], 8, "and sideways along its own line");
+        check_eq_i(point[1], -40,
+                   "while an axis the shot does not travel stays");
+    }
+
+    /*
+     * A view that has never had a tick has a zero normal, so every dot
+     * product is zero and the gate refuses: the port's un-ticked state does
+     * what the console's pre-camera-pass state does.
+     */
+    {
+        s32 dir[3]   = { 0, 0, -4096 };
+        s32 point[3] = { 7, 8, 9 };
+
+        memset(&vp, 0, sizeof(vp));
+        check(!q2_combat_missile_hit_plane(&vp, dir, point),
+              "a view with no plane yet projects nothing");
+        check_eq_i(point[0], 7, "leaving the point untouched");
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+
+/*
  * The energy-bolt effect's light gate. 0x80058660 is `sltiu v0, v0, 3` — below
  * three takes a different branch — so the lit arm is `>= 3`, and MOD_ENERGY_BOLT
  * arms slot 1 with exactly 3. The boundary is the whole content of this: an
@@ -2267,6 +2409,7 @@ int main(void)
     test_native_projectile_contacts();
     test_native_autoaim();
     test_mod_classification();
+    test_view_plane();
 
     test_energy_light_gate();
     test_glass_break_tail();

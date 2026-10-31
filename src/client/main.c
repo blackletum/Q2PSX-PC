@@ -20712,6 +20712,12 @@ static void client_report(const client *c)
     REPORT("creatures.dying_shots", c->cre_dying_shots);
     REPORT("creatures.rounds",      c->cre_rounds);
     REPORT("creatures.rounds_player",   c->cre_rounds_player);
+    /* Rounds that reached the player's DoDamage, and the ones
+     * GenMissileHitPlane moved onto the player's own view plane first
+     * (combat.h). The remainder came from behind it and 0x80054C24 refused. */
+    REPORT("creatures.player_hits",     q2_sim_proj_scan.player_hits);
+    REPORT("creatures.player_hits_projected",
+                                        q2_sim_proj_scan.player_hits_projected);
     REPORT("creatures.rounds_creature", c->cre_rounds_creature);
     REPORT("creatures.rounds_world",    c->cre_rounds_world);
     REPORT("creatures.launched",    c->cre_launched);
@@ -20749,6 +20755,13 @@ static void client_report(const client *c)
     REPORT("fx.particle_budget",    c->sim[0].fx.budget);
     REPORT("fx.blur_samples",       c->sim[0].fx.stats.blur_samples);
     REPORT("fx.blur_quads",         c->sim[0].fx.stats.blur_quads);
+    /* The timed list (0x800CABC0): how many records ProcessSplurges re-derived
+     * over the run, and how many are still alive at exit. A run whose BFG
+     * beamed anything has far more refreshes than the weapon made, because the
+     * list keeps tracking for the rest of each 45-tick timer. */
+    REPORT("fx.beams_queued",       c->sim[0].fx.stats.beams_queued);
+    REPORT("fx.beams_refreshed",    c->sim[0].fx.stats.beams_refreshed);
+    REPORT("fx.beams_live",         q2_fx_timed_live(&c->sim[0].fx));
     REPORT("fx.bursts",             c->ent_bursts);
     REPORT("fx.debris_models",      c->debris_models);
     REPORT("fx.debris_faces",       c->debris_faces);

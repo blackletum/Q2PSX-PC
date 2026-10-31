@@ -3454,6 +3454,9 @@ static void write_zone_runtime(wbuf *w, const q2_zone_object *o)
         w_s16v(w, r->entity.velocity, 3);
         w_s16v(w, r->entity.gib.vel, 3); w_u32(w, r->entity.gib.move_flags);
         w_s32(w, r->entity.gib.spin);
+        /* v6: the factor MyScaleMatrix folded into entity+0x2C0, so a gib
+         * dispatcher's half-size fireball comes back half size. */
+        w_s16(w, m->matrix_scale);
     }
 #undef WRITE_ZONE_SCALAR
 #undef WRITE_ZONE_ARRAY
@@ -3507,6 +3510,11 @@ static bool read_zone_runtime(rbuf *b, q2_zone_object *o, u32 version)
         r_s16v(b, r->entity.velocity, 3);
         r_s16v(b, r->entity.gib.vel, 3); r->entity.gib.move_flags = r_u32(b);
         r->entity.gib.spin = r_s32(b); r->entity.gib.cell = -1;
+        /* Versions 1..5 carry no geometric scale; everything they could hold
+         * was spawned at Q2_MODEL_ENT_SIZE_FULL anyway. */
+        m->matrix_scale = version >= 6 ? r_s16(b) : (s16)Q2_ONE_12;
+        if (m->matrix_scale <= 0)
+            m->matrix_scale = (s16)Q2_ONE_12;
     }
 #undef READ_ZONE_SCALAR
 #undef READ_ZONE_ARRAY
@@ -3519,7 +3527,7 @@ static void write_zone_history(wbuf *w, const q2_save *s)
     size_t at;
     if (!s->zone_history_present) return;
     at = w_chunk_begin(w, TAG_ZPOP);
-    w_u32(w, 5);
+    w_u32(w, 6);
     w_u32(w, s->zone_history.count);
     for (i = 0; i < s->zone_history.count; i++) {
         const q2_zone_population *p = &s->zone_history.map[i];
@@ -3551,7 +3559,7 @@ static void write_zone_history(wbuf *w, const q2_save *s)
 static bool read_zone_history(rbuf *r, q2_save *s)
 {
     u32 i, j, count, version = r_u32(r);
-    if (s->zone_history_present || version < 1 || version > 5) return false;
+    if (s->zone_history_present || version < 1 || version > 6) return false;
     count = r_u32(r);
     if (r->bad || count > Q2_ZONE_HISTORY_MAPS ||
         !r_need(r, (size_t)count * (Q2_ZONE_MAP_NAME + 8))) return false;

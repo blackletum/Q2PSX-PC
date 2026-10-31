@@ -34,6 +34,7 @@
 #include "entity.h"
 #include "item.h"         /* q2_item_shrink_think — 0x8005B358 */
 #include "level.h"
+#include "modeldraw.h"    /* q2_model_local_to_world — the scale's consumer */
 #include "modelent.h"
 #include "monster.h"
 #include "playerdeath.h"
@@ -354,6 +355,85 @@ static void test_spawn_bangs(void)
 
     q2_shock_attach(NULL, NULL);
     g_watch = NULL;
+    q2_entity_set_free(&set);
+}
+
+/*
+ * MyScaleMatrix, and the one caller that passes anything but 4096.
+ *
+ * 0x8005A96C hands the spawn's third argument to 0x80055F3C with entity+0x2C0
+ * as both source and destination, so the mesh draws at `size / 4096` of its
+ * authored size. The gib dispatcher's two Explosion arms (0x8007CF18,
+ * 0x8007D010) pass half; every other caller passes 4096. The port had no
+ * per-entity geometric scale at all and drew the gib fireball full size.
+ */
+static void test_spawn_scales_the_matrix(void)
+{
+    q2_entity_set set;
+    q2_model_bank bank;
+    q2_entity *full, *gib;
+    s32 at[3] = { 100, -200, 300 };
+
+    puts("the spawn's size is a matrix scale, not a light factor");
+
+    memset(&set, 0, sizeof(set));
+    boom_bank(&bank);
+
+    full = q2_model_ent_spawn(&set, &bank, Q2_MODEL_ENT_EXPLOSION, at, 0,
+                              Q2_MODEL_ENT_SIZE_FULL, NULL);
+    gib  = q2_model_ent_spawn(&set, &bank, Q2_MODEL_ENT_EXPLOSION, at, 0,
+                              Q2_MODEL_ENT_SIZE_GIB, NULL);
+    check(full != NULL && gib != NULL, "both arms bind their model");
+    if (full && gib) {
+        check_eq(full->matrix_scale, Q2_ONE_12,
+                 "a rocket's fireball is unscaled");
+        check_eq(gib->matrix_scale, Q2_MODEL_ENT_SIZE_GIB,
+                 "a gib arm's is half");
+        check_eq(Q2_MODEL_ENT_SIZE_GIB, Q2_ONE_12 / 2,
+                 "and half is 2048 of 4096");
+
+        /* The two light factors are untouched by it: +0xFC and +0xFE scale the
+         * GTE light matrix and nothing else, which is why a fading explosion
+         * darkens without shrinking. */
+        check_eq(gib->scale, Q2_ONE_12, "the light intensity stays full");
+        check_eq(gib->fade, Q2_ONE_12, "and so does the second factor");
+    }
+
+    /* An entity that never goes through this spawn has no scale of its own. */
+    {
+        q2_entity *plain = q2_entity_alloc(&set);
+        check(plain != NULL && plain->matrix_scale == Q2_ONE_12,
+              "the allocator leaves an entity unscaled");
+    }
+
+    /*
+     * AND THE SCALE REACHES GEOMETRY, with MyScaleMatrix's own rounding.
+     *
+     * 0x80055F4C `bgez v0` / `addiu v0, v0, 4095` adds 4095 to a NEGATIVE
+     * product before the `sra 12`, so the divide truncates toward zero where a
+     * bare `>> 12` floors. An element divisible by two hides the difference, so
+     * the case that shows it is an ODD negative one: `instance_spin` negates
+     * the yaw, so a yaw of 2 puts sin(-2) = -13 at row 2 column 0, and halving
+     * that gives -6 toward zero against -7 floored.
+     */
+    {
+        q2_model_instance inst;
+        s32 local[3] = { 4096, 0, 0 };
+        s32 unscaled[3], half[3];
+
+        q2_model_instance_init(&inst);
+        inst.yaw = 2;
+        q2_model_local_to_world(&inst, local, unscaled);
+        check_eq(unscaled[0], 4096, "unscaled, cos(-2) is a full unit");
+        check_eq(unscaled[2], -13, "and sin(-2) is -13");
+
+        inst.scale = Q2_MODEL_ENT_SIZE_GIB;
+        q2_model_local_to_world(&inst, local, half);
+        check_eq(half[0], 2048, "half the scale is half the offset");
+        check_eq(half[2], -6,
+                 "and the odd negative element truncates toward zero, not down");
+    }
+
     q2_entity_set_free(&set);
 }
 
@@ -1621,6 +1701,7 @@ int main(void)
     test_think_removes_unanimated();
     test_spawn_needs_a_bank();
     test_spawn_bangs();
+    test_spawn_scales_the_matrix();
     test_bang_queue();
 
     puts("\ngibs - 0x8007CEB4, 0x8005A3D4, 0x8005A0AC, 0x8005AD8C, "

@@ -1972,6 +1972,17 @@ bool q2_fx_beam_attached(q2_fx_world *w, s32 owner, s32 target, s16 vertex,
     return beam_timed(w, owner, target, from, to, 10, 4, 45, area, vertex);
 }
 
+void q2_fx_timed_bind(q2_fx_world *w,
+                      bool (*fn)(void *user, const q2_fx_timed_beam *t,
+                                 s32 from[3], s32 to[3], s16 *area),
+                      void *user)
+{
+    if (!w)
+        return;
+    w->timed_resolve      = fn;
+    w->timed_resolve_user = user;
+}
+
 void q2_fx_timed_tick(q2_fx_world *w, s32 frame_delta)
 {
     u32 i;
@@ -1982,12 +1993,33 @@ void q2_fx_timed_tick(q2_fx_world *w, s32 frame_delta)
     /* 0x80048CE0 tests before subtracting. Even the tick that reaches zero
      * continues to the submit at 0x80048D98, in every viewport that frame. */
     for (i = 0; i < Q2_FX_TIMED_BEAMS_MAX; i++) {
-        w->timed[i].present = w->timed[i].timer > 0;
-        if (w->timed[i].timer <= 0)
+        q2_fx_timed_beam *t = &w->timed[i];
+
+        t->present = t->timer > 0;
+        if (t->timer <= 0)
             continue;
-        w->timed[i].timer = (s16)(w->timed[i].timer - frame_delta);
-        if (w->timed[i].timer < 0)
-            w->timed[i].timer = 0;
+        t->timer = (s16)(t->timer - frame_delta);
+        if (t->timer < 0)
+            t->timer = 0;
+
+        /*
+         * 0x80048D0C..0x80048D74, for THIS record, before its submit: both
+         * ends and the area come off the two things the record points at, not
+         * off a copy taken when it was last refreshed. A hook that declines
+         * leaves the record as it stands, which is what the port can offer for
+         * an owner that no longer exists (effect.h, q2_fx_timed_bind).
+         */
+        if (w->timed_resolve) {
+            s32 from[3], to[3];
+            s16 area = t->area;
+
+            if (w->timed_resolve(w->timed_resolve_user, t, from, to, &area)) {
+                vec_copy(t->from, from);
+                vec_copy(t->to, to);
+                t->area = (s16)(area & 0x7F);
+                w->stats.beams_refreshed++;
+            }
+        }
     }
 }
 

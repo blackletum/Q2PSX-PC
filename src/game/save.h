@@ -214,6 +214,9 @@
  * and module-shared creature state, including pending boss/revival transitions.
  * Version 5 adds the same physical actor state as CAIS v5, rebasing its clock
  * and invalidating its collision-cell cache when the zone is rebuilt.
+ * Version 6 adds a model entity's geometric scale — the factor MyScaleMatrix
+ * (0x8005A96C) folded into entity+0x2C0 — which earlier versions could only
+ * ever have held at 4096.
  * Version 1 and missing ZPOP remain readable; neither borrows session history. */
 
 /* RAND adds the shared gameplay random stream. Older files have no recorded

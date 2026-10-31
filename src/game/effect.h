@@ -237,8 +237,8 @@ typedef struct q2_fx_timed_beam {
     /*
      * WHICH AREA THE RE-SUBMITTED BEAM IS FILED UNDER, and the record has no
      * console counterpart because the console does not store it — it resolves
-     * it afresh on every submit. 0x80048D24 calls the point-clip-and-area
-     * helper 0x8004E920 with the record's OWNER (record+0x08) and a scratch
+     * it afresh on every submit. 0x80048D24 calls GetFireLocSpace
+     * (0x8004E920) with the record's OWNER (record+0x08) and a scratch
      * halfword, and 0x80048D50 `lh a3, 64(sp)` hands that halfword to the beam
      * queue 0x80064E64 as its area argument. The helper's answer is the area
      * record PrimaryColl leaves at 0x800C8EAA after clipping the owner's
@@ -246,10 +246,10 @@ typedef struct q2_fx_timed_beam {
      *
      * The port used to pass a literal 0 at submit and the beam draw culls an
      * area with no screen-change record, so the BFG's whole trail was invisible
-     * in any zone with a SortData stream. DEVIATION: this is resolved once per
-     * refresh, by the caller, rather than once per submit from the owner
-     * entity, so a beam that outlives its ball keeps the area it was last
-     * refreshed in instead of following an owner that no longer exists.
+     * in any zone with a SortData stream. The resolve hook now refreshes it
+     * from the owner on every pass, as ProcessSplurges does; what the caller
+     * supplies at refresh is the seed, and the fallback for a record whose
+     * owner the hook can no longer find.
      */
     s16 area;
 
@@ -751,6 +751,7 @@ typedef struct q2_fx_stats {
     u32 quads_emitted;
     u32 beams_queued;
     u32 beams_dropped;          /* the pool was full when one was offered */
+    u32 beams_refreshed;        /* timed records ProcessSplurges re-derived */
     u32 beam_faces_emitted;
     u32 debris_live;
     u32 ot_overflow;
@@ -771,6 +772,17 @@ typedef struct q2_fx_world {
     /* The persistent list at 0x800CABC0. Unlike `beam`, these survive the
      * frame and are re-submitted until their timers run out. */
     q2_fx_timed_beam timed[Q2_FX_TIMED_BEAMS_MAX];
+
+    /*
+     * WHAT MAKES THE LIST'S ENDPOINTS LIVE — see q2_fx_timed_bind.
+     *
+     * ProcessSplurges re-derives both ends of every record from the two
+     * pointers it stores, every pass. Nothing but the owner of those two ids
+     * can do that, so it is a hook rather than arithmetic here.
+     */
+    bool (*timed_resolve)(void *user, const q2_fx_timed_beam *t,
+                          s32 from[3], s32 to[3], s16 *area);
+    void  *timed_resolve_user;
 
     q2_fx_debris debris[Q2_FX_DEBRIS_MAX];
 
@@ -1740,11 +1752,43 @@ bool q2_fx_beam_attached(q2_fx_world *w, s32 owner, s32 target, s16 vertex,
                          const s32 from[3], const s32 to[3], u8 area);
 
 /*
- * Age the timed list by one frame's worth. 0x80048CE8 subtracts the frame delta
- * and clamps at zero — it does not free the slot, so a record stays matchable
- * by its owner/target pair until something else claims it.
+ * Age the timed list by one frame's worth, then re-derive every live record's
+ * two ends. This is the whole of ProcessSplurges (0x80048CA8, QUAKEMIS.C):
+ * 0x80048CE8 subtracts the frame delta and clamps at zero — it does not free
+ * the slot, so a record stays matchable by its owner/target pair until
+ * something else claims it — and then, for the same record, in the same pass:
+ *
+ *   0x80048D0C  GetAbsoluteModelVert(owner, clip, &near) — the NEAR end, from
+ *               the owner's posed vertex, or, for a negative clip, the owner's
+ *               own drawn position at +0xA4 (0x8006CD98);
+ *   0x80048D24  GetFireLocSpace(owner, &near, &area) — the clipped point and
+ *               the cell byte the submit spends;
+ *   0x80048D2C  the FAR end is the target entity's origin (+0x54..+0x5C)...
+ *   0x80048D4C  ...raised by `(572 - target+0x96) / 2`, truncated toward zero;
+ *   0x80048D98  the submit, with the record's radius and three faces.
+ *
+ * So nothing on the record is a frozen copy: a beam whose ball has moved on
+ * follows the ball and its target for the rest of its 45 ticks. The port had
+ * stored the two ends at refresh and re-sent them unchanged, which froze a
+ * beam the moment the ball stopped refreshing it.
  */
 void q2_fx_timed_tick(q2_fx_world *w, s32 frame_delta);
+
+/*
+ * Who answers the two pointers. `t` is the record; fill `from`, `to` and
+ * `area` for it and return true, or return false to leave the record's last
+ * values alone.
+ *
+ * DEVIATION, stated: native holds raw entity pointers and reads them whatever
+ * has become of the entities, so a beam outliving its ball reads a recycled
+ * record. The port's ids let the hook say "gone", and the last resolved
+ * endpoints then stand for the rest of the timer. Nothing else can be
+ * reproduced without reproducing the allocator's reuse order.
+ */
+void q2_fx_timed_bind(q2_fx_world *w,
+                      bool (*fn)(void *user, const q2_fx_timed_beam *t,
+                                 s32 from[3], s32 to[3], s16 *area),
+                      void *user);
 
 /* How many timed beams are still alive. */
 u32 q2_fx_timed_live(const q2_fx_world *w);

@@ -161,8 +161,18 @@ static void instance_spin(const q2_model_instance *inst, s16 spin[3][3])
                           inst->roll);
 }
 
-/* The port-side uniform scale on top of it; a no-op at Q2_ONE_12. See the
- * note in q2_model_build_ot on why it is not entity+0xFC. */
+/*
+ * The uniform scale on top of it; a no-op at Q2_ONE_12. See the note in
+ * q2_model_build_ot on why it is not entity+0xFC.
+ *
+ * This IS MyScaleMatrix (0x80055F3C, MYMATRIX.C), which the model-entity
+ * spawn applies to entity+0x2C0 at 0x8005A96C: nine elements, each
+ * `(m * size)` shifted down twelve. The rounding is the one detail worth
+ * transcribing — 0x80055F4C `bgez` / `addiu v0, v0, 4095` adds 4095 to a
+ * NEGATIVE product before the `sra`, so the divide truncates toward zero
+ * rather than flooring. A bare `>> 12` is a unit low on every negative
+ * element, which at half size tilts the mesh by a 4096th of a turn.
+ */
 static void instance_scale(const q2_model_instance *inst, s16 spin[3][3])
 {
     if (inst->scale != Q2_ONE_12) {
@@ -175,8 +185,13 @@ static void instance_scale(const q2_model_instance *inst, s16 spin[3][3])
             s = 8 * Q2_ONE_12;
 
         for (r = 0; r < 3; r++)
-            for (c = 0; c < 3; c++)
-                spin[r][c] = (s16)(((s32)spin[r][c] * s) >> Q2_FRAC_12);
+            for (c = 0; c < 3; c++) {
+                s32 p = (s32)spin[r][c] * s;
+
+                if (p < 0)
+                    p += Q2_ONE_12 - 1;
+                spin[r][c] = (s16)(p >> Q2_FRAC_12);
+            }
     }
 }
 

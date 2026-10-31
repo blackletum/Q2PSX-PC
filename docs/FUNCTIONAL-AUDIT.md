@@ -1126,9 +1126,16 @@ host policy.
 - Player noise; corrected in the next section.
 - The BFG beam freezes its endpoints for up to about four ticks when a
   refresh is skipped; native recomputes them every frame (ProcessSplurges).
-  This is visual only.
+  This is visual only. Corrected 31 October; see the section below.
 - The AI body clip (aiworld.c) still uses the older cylinder arithmetic. Its
   list order against native list membership is unqualified.
+
+  **This first clause was already stale when it was written.** The clip's
+  narrow phase has called combat.c's shared transcription of 0x800544EC since
+  `ff7795c` (`aiworld.c:103`, `q2_combat_cylinder_interval`); what that commit
+  kept separate, deliberately, is the FILTER, because the shot path rejects on
+  `takedamage` and 0x800545E8 skips only the ignore entity. The second clause
+  stands: list ORDER against native list membership is still unqualified.
 
 All 73 CTests pass. The disc-backed muzzle, weapon (grenade, projectile
 contact, bolt, auto-aim), save, player-animation and split-screen suites pass
@@ -1200,6 +1207,93 @@ previous commit (`0b5d7dc`) with this change:
 | BASE2 | 29 -> 42 | The player dies in both runs |
 
 These are port demo runs, not matched retail traces.
+
+## Three named gaps, 31 October
+
+This round took the three items the table above named as closable and closed
+them, and found that one of its own claims had gone stale.
+
+**The BFG beam's ends are live.** `ProcessSplurges` (0x80048CA8, QUAKEMIS.C) is
+one function and it does four things per record per pass: subtract the frame
+delta (0x80048CE8), pose the near end off the owner through
+`GetAbsoluteModelVert` (0x80048D0C — a negative clip takes the owner's own drawn
+position at +0xA4, 0x8006CD98), resolve the area from that owner through
+`GetFireLocSpace` (0x80048D24), and read the far end off the target entity's
++0x54..+0x5C raised by `(572 - target+0x96) / 2` (0x80048D4C). The port had the
+timer and the submit but kept the two ends the refresh was handed, so a beam
+froze the moment `BFGSpecial` stopped re-arming it — when the ball lost sight of
+a body, and for the whole tail of each 45-tick timer after the ball had moved
+on. `q2_fx_timed_bind` is those two pointers as a hook; the sim answers it from
+the projectile slot and the live target list. A 600-frame headless `--demo
+--watch --shoot --weapon 11` run of WASTE4 zone 1 queues 154 beams before and
+after, and re-derives 62 of them where it re-derived none; 8 of 60 captured
+frames differ, the largest by 2,800 pixels.
+
+DEVIATION, stated: native holds raw entity pointers and reads them whatever has
+become of the entities, so a beam outliving its ball reads a recycled record.
+The hook can say "gone" instead, and the last resolved ends then stand. An
+attached record — the Parasite's style-4 beam — is still refreshed by
+`client_cre_beams_update` once a display frame, because only the client can pose
+its owner's vertex; the resolver declines those rather than resolving them twice.
+
+**A model entity carries a geometric scale.** `QuakeGenExplosion`'s third
+argument reaches `MyScaleMatrix` (0x80055F3C, MYMATRIX.C) at 0x8005A96C with
+entity+0x2C0 as both source and destination, multiplying all nine elements by it
+in 1.0.12. Every caller passes 4096 but the gib dispatcher's two `Explosion`
+arms (0x8007CF18, 0x8007D010), which pass 2048 — so a Boss2's, Flyer's, Hover's
+or Strider's fireball is half the size of a rocket's. The header recorded this as
+NOT REPRODUCED because `q2_entity` had no draw scale (`scale` is the +0xFC light
+intensity). It has one now, spent as the model instance's uniform scale, and
+`instance_scale` was given MyScaleMatrix's own round-toward-zero
+(`bgez` / `addiu 4095` before the `sra 12`) in place of a floor — a unit per
+negative matrix element, which at half scale is a 4096th of a turn of tilt.
+ZPOP gains version 6 for the field; versions 1..5 read as 4096, which is all
+they could ever have held.
+
+**GenMissileHitPlane, and the overflow that is its behaviour.** COLL.C's
+0x80054BD4 moves a hit point onto the victim's own view plane before DoDamage
+sees it, and only a client has one: both callers load `entity+0x0C`, dereference
+it and pass that record and `record + 52`. `UpdateWindowStuff` (CAMERA.C
+0x80037F10) fills it at the end of each camera pass — `MYRotMatrixYXZ2`,
+`ReverseMatrix`, then `RotateS(transpose, {0,0,4096}, view+58)`, so +58..+62 is
+the camera's forward and +52..+56 is that over eight. The plane therefore sits
+512 units in front of the eye, facing it, and what a shot reads during the
+game's frame is the plane the previous frame left.
+
+It reads as a ray/plane intersection and it is not one. 0x80054CB0 is `mult v0,
+v1` then `mflo t1`, so the numerator handed to `div` is the LOW 32 BITS of
+`dir[k] * num`. `dir` is the shot's full-length direction — the bullet arm's aim
+shifted left two, 16384 units — so the product clears 2^31 once `num` passes
+131072, which is 32 units of travel, and the body query puts the entry point on
+the victim's 286-unit cylinder. In play the product always wraps: head-on from
+the skin the point moves 30 units, not the 226 that would put it on the plane.
+That bound is exactly the "few dozen units per axis" this audit had estimated,
+and it is why the arm is transcribed instruction for instruction instead of
+written as the intersection it resembles. `q2_combat_missile_hit_plane` keeps
+the `addu` wraps and the toward-zero divides; `test_combat` pins both the
+non-overflowing case and the wrapped one, the `n . dir >= 0` gate that leaves a
+shot from behind alone, and the un-ticked view that projects nothing.
+
+The port applies it on the creature-bullet arm (0x80048930..0x80048954), which
+is the one the audit named. `--report` now counts `creatures.player_hits` and
+`creatures.player_hits_projected`: a 900-frame JAIL2 zone 0 `--demo` run
+projects 3 of 9, and BASE2 and WASTE4 project none of theirs because every round
+reached the player from behind their own view plane. The projectile arm's call
+(0x80047E94..0x80047EB8) and its `LineIntersectCrePlane` fallback are read and
+NOT applied: the projected point feeds `ProcessMissiles_Many`'s later reads at
+0x80047EDC, so applying it wants that function's ordering established first.
+
+**And one of this file's own claims was stale.** "The AI body clip (aiworld.c)
+still uses the older cylinder arithmetic" was true when it was first written and
+not when it was last repeated: `ff7795c` moved that narrow phase onto combat.c's
+transcription of 0x800544EC and said so in its message. The list-order half of
+the same bullet still stands. Corrected in place above rather than deleted,
+because a stale claim that was carried forward twice is worth leaving visible.
+
+Validation: all 73 CTests pass, including the three new regressions. The
+disc-backed creature, weapon, muzzle, save and client-effect suites pass on both
+PAL and US. `.install/q2psx.exe` is staged from this tree and completes a
+120-frame WASTE4 capture with zero errors and zero warnings.
 
 ## Limits
 
@@ -1277,9 +1371,9 @@ question are different kinds of evidence; none is silently counted as complete.
 | Area | Current limit | Evidence needed to close it |
 | --- | --- | --- |
 | Player-body / weapon scheduling | Body transitions, RNG use and draw-independent advancement have native fixtures. The view-weapon driver runs once per logic tick, and ATTACK follows its last-substep return, dry 2 included (29 October section). The port's restructured driver loop can still order writes differently from native within a call that crosses key boundaries. | Execute full native weapon-driver sequences against the port's loop, and compare integrated live/death ordering and RNG histories. |
-| Projectile and other collision/toss details | Grenade bounce/owner lifetime, projectile actor queries, owner self-splash, cold-save cells and bolt flight/impact effects are corrected. Hitscan now uses the native query, with a single rail victim, immune shielding and entry-point blood. Knockback uses the entity origin, and gib rebounds use SDK arithmetic. Still open: the AI body clip's arithmetic, GenMissileHitPlane for client targets, the cached bolt hull marcher, posed contact refinement, final-frame body submission, other entity/contact and simultaneous-sound ordering, and extreme math domains. | Migrate the AI body clip and compare it with native list order. Qualify the remaining collision, presentation and sound boundaries and reachable numeric domains. |
+| Projectile and other collision/toss details | Grenade bounce/owner lifetime, projectile actor queries, owner self-splash, cold-save cells and bolt flight/impact effects are corrected. Hitscan now uses the native query, with a single rail victim, immune shielding and entry-point blood. Knockback uses the entity origin, and gib rebounds use SDK arithmetic. GenMissileHitPlane now moves a client target's entry onto that player's own view plane before DoDamage, with the 32-bit wrap its numerator really has (31 October). The AI body clip's narrow phase has shared combat.c's transcription of 0x800544EC since `ff7795c`; the claim that it had not was stale. Still open: that clip's list ORDER against native list membership, the projectile arm's own GenMissileHitPlane call (0x80047EB8) and its LineIntersectCrePlane fallback, the cached bolt hull marcher, posed contact refinement, final-frame body submission, other entity/contact and simultaneous-sound ordering, and extreme math domains. | Compare the AI clip's list order with native. Read ProcessMissiles_Many's ordering around 0x80047E94 before applying its arm, since the projected point feeds that function's later reads. Qualify the remaining collision, presentation and sound boundaries and reachable numeric domains. |
 | Shared gameplay randomness | The port retains separate combat, effect and global gameplay streams. Bolt trail/impact draws now share their saved combat stream, but native BIOS randomness is shared across subsystems. | Reconstruct reachable caller order, unify stream ownership and qualify integrated gameplay plus cold-save histories without claiming isolated seeded fixtures establish whole-frame parity. |
-| Other explicit source deviations | Reviewed 29 October. The chime origin, knockback, BFG beam centring and drowning arms are corrected. Secret dedup, path-corner order, briefing-unit selection, actor effect areas and the muzzle's roll composition are equivalent or unreachable. The unit-five camera stays host policy. Remaining: a one-unit muzzle rounding difference and the BFG beam's endpoint freeze when a refresh is skipped. | Pin the muzzle rounding against a native RotMatrix/RotateS fixture, and recompute BFG beam endpoints per submit while the ball lives. |
+| Other explicit source deviations | Reviewed 29 October. The chime origin, knockback, BFG beam centring and drowning arms are corrected. Secret dedup, path-corner order, briefing-unit selection, actor effect areas and the muzzle's roll composition are equivalent or unreachable. The unit-five camera stays host policy. The BFG beam's endpoint freeze is corrected (31 October): ProcessSplurges' two pointers are a resolver the sim fills, so a live record's ends and area come off the ball and the body every pass. A model entity's geometric scale is carried and spent, so the gib dispatcher's fireball draws at half size. Remaining: a one-unit muzzle rounding difference, and a beam whose owner the resolver can no longer find keeps its last ends where native reads the recycled entity. | Pin the muzzle rounding against a native RotMatrix/RotateS fixture. The stale-owner case needs the allocator's reuse order to be reproduced before it can be anything but a stated deviation. |
 | Creature hearing (player noise) | Corrected (Player noise section): native noise entities, sources, saves and FindTarget's owner test. The expiry relies on the noise's zero health standing in for an undefined null-pointer read. Zone history deliberately drops a heard noise. The silencer and rebreather arms are unreachable in shipped data. | Matched retail traces of creatures responding to noise, if the undefined expiry read needs confirming. |
 | Native mission and campaign behavior | Named handlers are implemented, but static LevelBin fallback does not execute arbitrary branches or track registers. Registered frame callbacks, trigger combinations and their persistent state are not exhaustively qualified. | Compare reachable native branches and state transitions across difficulties, zone returns, deaths, restarts and saves; extend regressions for each discrepancy. |
 | Whole-game behavior | Creature callbacks, movement, weapons, menus and multiplayer have focused native/functional coverage; a scripted campaign route is not a complete retail playthrough. | Matched retail state/input traces for remaining interactions, including boss combat and movement edge cases. |

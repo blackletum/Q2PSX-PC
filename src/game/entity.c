@@ -31,6 +31,14 @@ void q2_entity_init(q2_entity *e)
     e->fade = Q2_ONE_12;
 
     /*
+     * The GEOMETRIC scale is a separate thing and starts unscaled. The
+     * allocator never touches entity+0x2C0; RotMatrix overwrites it at the
+     * one spawn that builds it, and only MyScaleMatrix (0x80055F3C) folds a
+     * factor in afterwards. See q2_entity.matrix_scale.
+     */
+    e->matrix_scale = Q2_ONE_12;
+
+    /*
      * The allocator's ambient pair — 0x8006C1D8..0x8006C1FC copies the
      * four-byte constant at 0x800AEB84 (40 40 40 00) into both +0x2AC and
      * +0x2B0. The draw reads +0x2AC unconditionally as the GTE back colour;

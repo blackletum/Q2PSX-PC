@@ -199,6 +199,25 @@ typedef struct q2_entity {
      */
     s16  fade;                  /* +0xFE, historical name */
 
+    /*
+     * THE GEOMETRIC ONE, AND IT IS THE MATRIX — not +0xFC or +0xFE.
+     *
+     * QuakeGenExplosion's third argument reaches the entity through
+     * MyScaleMatrix (0x80055F3C, MYMATRIX.C), handed entity+0x2C0 as both
+     * source and destination at 0x8005A96C: every element of the rotation the
+     * spawn has just built is multiplied by `size` in 1.0.12, so the model
+     * draws at that fraction of its authored size. Nothing else on the disc
+     * scales a matrix this way, and every other caller of the spawn passes
+     * Q2_MODEL_ENT_SIZE_FULL, so this is 4096 for all but the gib
+     * dispatcher's two Explosion arms (0x8007CF18, 0x8007D010), which pass
+     * half.
+     *
+     * 4096 is unscaled. The allocator leaves the matrix alone, so an entity
+     * that never goes through the model-entity spawn has no scale of its own
+     * and this stays at Q2_ONE_12.
+     */
+    s16  matrix_scale;          /* the factor folded into +0x2C0 */
+
     s16  model_offset;          /* +0xF8 */
     s32  frame;                 /* +0x100 */
     s16  health;                /* +0x108 */

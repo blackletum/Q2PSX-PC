@@ -825,6 +825,88 @@ bool q2_combat_cylinder_interval(const s32 origin[3], const s32 dir[3],
 bool q2_combat_centre_is_ahead(const s32 origin[3], const s32 dir[3],
                                const s32 centre[3]);
 
+/* ------------------------------------------------------------------------- */
+/* GenMissileHitPlane — COLL.C 0x80054BD4                                     */
+/* ------------------------------------------------------------------------- */
+/*
+ * A CLIENT'S OWN VIEW PLANE, which is what a shot that lands on a player is
+ * moved onto before DoDamage sees it.
+ *
+ * Both of the function's callers reach it the same way: the arm takes the body
+ * the shot stopped in, loads `entity+0x0C`, dereferences it, and passes that
+ * record and `record + 52` — so the plane belongs to the VIEW, and only a
+ * client has one. The creature-bullet path is 0x80048930..0x80048954 (and does
+ * nothing at all for a body with no view); the projectile-impact path is
+ * 0x80047E94..0x80047EB8, which falls back to LineIntersectCrePlane
+ * (0x800542A4) for a body without one.
+ *
+ * UpdateWindowStuff (CAMERA.C 0x80037F10) fills it once a frame, at the end of
+ * the camera pass, so what a shot reads during the game's frame is the plane
+ * the PREVIOUS frame left:
+ *
+ *   0x80037F30  MYRotMatrixYXZ2(view+12, view+192)   the view basis
+ *   0x80037F54  ReverseMatrix(view+224, view+192)    its transpose
+ *   0x80037F64  RotateS(view+224, {0,0,4096}, view+58)
+ *                   -> view+58..+62, the camera's FORWARD, 1.3.12
+ *   0x80037F6C  view+52..+56 = view+58..+62 / 8, truncated toward zero
+ *
+ * `pos` is the view's own position, `off` the eighth and `normal` the forward.
+ * So the plane sits |n|/8 = 512 units in front of the eye, facing the way the
+ * eye faces.
+ */
+typedef struct q2_view_plane {
+    s32 pos[3];      /* the view record's +0x00..+0x08 */
+    s16 off[3];      /* +52..+56, the normal over eight */
+    s16 normal[3];   /* +58..+62, the camera's forward  */
+} q2_view_plane;
+
+/*
+ * Move `point` along `dir` onto `plane`, as 0x80054BD4 does, and say whether it
+ * moved.
+ *
+ * 0x80054BD4..0x80054C24 refuses a shot that is not travelling INTO the plane:
+ * `n . dir >= 0` returns zero and leaves the point where it was, so a player
+ * shot in the back keeps the entry point the body query gave. Everything after
+ * that reads as one ray/plane intersection — and it is not one, because of
+ * where the arithmetic is kept.
+ *
+ * IT OVERFLOWS, AND THAT IS THE BEHAVIOUR. 0x80054CB0 is `mult v0, v1`
+ * followed by `mflo t1`, so the numerator handed to `div` is the LOW 32 BITS
+ * of `dir[k] * num`. `dir` is the shot's own direction vector at full length —
+ * the bullet arm's aim shifted left two, 16384 units (0x80048778 unpacks it
+ * from the argument and 0x80048790 adds it to the start) — so the product
+ * clears 2^31 once `num` passes 131072, which is 32 units of travel. A body
+ * query puts the entry point on the victim's 286-unit cylinder, hundreds of
+ * units from a plane 512 out, so in play the product ALWAYS wraps and the
+ * point moves a bounded few dozen units along the shot rather than onto the
+ * plane. From the skin at 286 units head-on it moves 30, not 226.
+ *
+ * That is why this is transcribed instruction for instruction instead of
+ * written as the intersection it looks like: the idealised version would move
+ * the damage point an order of magnitude further and throw the player
+ * somewhere else. The sums are `addu` and the three divides truncate toward
+ * zero, both reproduced.
+ *
+ * `dir` is the shot's direction as the caller holds it: the bullet arm's
+ * triple at sp+56, and the projectile arm's entity+82.
+ */
+bool q2_combat_missile_hit_plane(const q2_view_plane *plane,
+                                 const s32 dir[3], s32 point[3]);
+
+/*
+ * UpdateWindowStuff's tail, for one view — 0x80037F30..0x80037F94.
+ *
+ * `yaw`, `pitch` and `roll` are the port's own camera angles, whose signs are
+ * the negatives of the console's stored triple on both the yaw and the pitch
+ * axes; row 2 of `q2_rotation_view` is therefore element for element the
+ * console's `(-c0*s1, s0, c0*c1)` and is used as the forward. The two sines
+ * and cosines are multiplied out here rather than read off that matrix so the
+ * products can truncate toward zero, as MYRotMatrixYXZ2's own
+ * `bgez / addiu 4095 / sra 12` does and as the shared basis does not.
+ */
+void q2_combat_view_plane(q2_view_plane *out, const s32 eye[3],
+                          s32 yaw, s32 pitch, s32 roll);
+
 /*
  * Fallback horizontal radius for callers which project an actor without a
  * usable entity radius. Normal actors carry their own radius and Y slab, just

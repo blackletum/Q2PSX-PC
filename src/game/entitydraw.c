@@ -258,8 +258,16 @@ u32 q2_entity_build_ot(q2_entity_set *set, const q2_entity_draw_ctx *ctx,
          * animated value: a materialising pickup brightens without growing,
          * an explosion darkens without shrinking, and a corpse dissolves by
          * illumination rather than collapsing toward its origin.
+         *
+         * WHAT DOES SCALE GEOMETRY is the matrix, and exactly one spawn folds
+         * a factor into it: MyScaleMatrix at 0x8005A96C, from
+         * QuakeGenExplosion's third argument (entity.h, `matrix_scale`). The
+         * instance's own uniform scale is that factor, so the gib
+         * dispatcher's fireball draws at half size and everything else at
+         * 4096. `instance_scale` rounds the product the way MyScaleMatrix
+         * does.
          */
-        inst.scale         = Q2_ONE_12;
+        inst.scale         = e->matrix_scale ? e->matrix_scale : Q2_ONE_12;
         inst.clut4_count_a = ctx->clut4_count_a;
         inst.tpage         = ctx->tpage;
 

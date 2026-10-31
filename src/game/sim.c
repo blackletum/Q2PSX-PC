@@ -3786,6 +3786,38 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
      * 0x80035580, which the console does from inside the status bar. Here
      * because a headless run has no bar and the state is the inventory's. */
     q2_inventory_armour_upkeep(&sim->combat.inv);
+
+    /*
+     * LAST: the view plane this player's camera pass would leave behind.
+     *
+     * UpdateWindowStuff runs after the game's frame, so the plane a shot reads
+     * during the next one is this. Built from the same two things the client
+     * hands its camera — the eye and the player's plain aim, not the weapon's
+     * kicked angles (sim.h, q2_sim_player_view_angles explains which is which).
+     */
+    q2_sim_view_plane_refresh(sim, sim->cur_player);
+}
+
+void q2_sim_view_plane_refresh(q2_sim *sim, int index)
+{
+    s32 eye[3];
+
+    if (!sim || index < 0 || index >= Q2_SIM_MAX_PLAYERS)
+        return;
+
+    q2_sim_player_eye(sim, index, eye);
+    q2_combat_view_plane(&sim->view_plane[index], eye,
+                         sim->player[index].yaw,
+                         sim->player[index].pitch,
+                         sim->player[index].roll);
+    sim->view_plane_ready[index] = true;
+}
+
+const q2_view_plane *q2_sim_view_plane_for(const q2_sim *sim, int index)
+{
+    if (!sim || index < 0 || index >= Q2_SIM_MAX_PLAYERS)
+        return NULL;
+    return sim->view_plane_ready[index] ? &sim->view_plane[index] : NULL;
 }
 
 /*

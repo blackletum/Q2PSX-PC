@@ -515,6 +515,20 @@ typedef struct q2_sim {
     q2_actor           **world_targets;
     u32                  world_target_count;
 
+    /*
+     * Each player's view plane — what a shot that lands on them is projected
+     * onto before DoDamage (combat.h, q2_combat_missile_hit_plane).
+     *
+     * One per viewport owner, because the console keeps one per view record
+     * and the arm reads the VICTIM's. Rebuilt at the end of every player's
+     * tick, which is where UpdateWindowStuff's pass sits relative to the
+     * game's, so a shot landing during tick N reads the plane tick N-1 left.
+     * Not saved: the next tick rebuilds it from the eye and the angles, both
+     * of which are.
+     */
+    q2_view_plane        view_plane[Q2_SIM_MAX_PLAYERS];
+    bool                 view_plane_ready[Q2_SIM_MAX_PLAYERS];
+
     /* The level clock the weapon gates and the damage throttles use, in dt
      * units. Advanced by q2_sim_tick alongside the physics. */
     s32                  level_time;
@@ -1156,6 +1170,14 @@ u32 q2_sim_debris_burst(q2_sim *sim, const s32 bmin[3], const s32 bmax[3],
 u8 q2_sim_fx_area(q2_sim *sim, u8 area, const s32 at[3]);
 
 /*
+ * Hand the effect world the resolver ProcessSplurges' two pointers stand for,
+ * so a live timed beam's ends follow the ball and the body it is held on
+ * (effect.h, q2_fx_timed_bind). Called once the sim's effect world is up; the
+ * hook costs nothing while the timed list is empty.
+ */
+void q2_sim_fx_timed_bind(q2_sim *sim);
+
+/*
  * GLASS and SHOOTTHEN, run from a script CALL.
  *
  * `0x8002A350` is GLASS, and reading it settles both what a pane throws and
@@ -1743,6 +1765,16 @@ typedef struct q2_sim_proj_stats {
      */
     u32 muzzle_clipped;
     u32 muzzle_unplaced;
+
+    /*
+     * Rounds that landed on the player, and how many of those GenMissileHitPlane
+     * moved before DoDamage saw them (combat.h). The gap between the two is the
+     * shots that came from behind the player's own view plane, which
+     * 0x80054C24 refuses — so the pair says both that the arm is reached and
+     * how often its gate turns it away.
+     */
+    u32 player_hits;
+    u32 player_hits_projected;
 } q2_sim_proj_stats;
 
 extern q2_sim_proj_stats q2_sim_proj_scan;
@@ -1799,6 +1831,17 @@ void q2_sim_player_eye(const q2_sim *sim, int index, s32 out_pos[3]);
 void q2_sim_view_angles(const q2_sim *sim, s32 out[3]);
 /* Includes this player's decaying firing, damage and landing kicks. */
 void q2_sim_player_view_angles(const q2_sim *sim, int index, s32 out[3]);
+
+/*
+ * Rebuild one player's view plane — UpdateWindowStuff's tail (combat.h,
+ * q2_combat_view_plane). The tick's last act for every player that runs one;
+ * public so a fixture can place a view without running a frame.
+ */
+void q2_sim_view_plane_refresh(q2_sim *sim, int index);
+/* NULL until that player has had a tick, which is the console's state before
+ * the first camera pass: the record is zeroed and its normal is zero, so the
+ * `n . dir >= 0` gate refuses every shot. */
+const q2_view_plane *q2_sim_view_plane_for(const q2_sim *sim, int index);
 
 /*
  * Post a view kick — what a weapon's recoil and a damage hit do. `period` picks

@@ -125,14 +125,19 @@
  *    now, before the step's sound, in the module's order. It is the only call
  *    to +0x12C in any of the seven modules.
  *
- *  - THE IDLE HANDLE'S SUBSTITUTION IS DECLARED BUT NOT YET CALLED BY THE
- *    HOST. module+0x2100 is registered as `tnk_idle1` and then overwritten with
- *    the `tnk_step` handle because no bank on the disc carries `tnk_idle1` (see
- *    below). That move is now the Tankcomm entry of the fallback table in
- *    creature.c (`q2_cre_sound_fallback`), reached through
- *    `q2_cre_sound_resolve`; until `client_cre_sound` calls it, the host still
- *    resolves the handle by its REGISTERED name and `tankcomm_think_idle` and
- *    the death move's frame 249 stay silent where the console thuds.
+ *  - (No longer owed.) The idle handle's substitution. module+0x2100 is
+ *    registered as `tnk_idle1` and then overwritten with the `tnk_step` handle
+ *    because no bank on the disc carries `tnk_idle1` (see below), and the
+ *    overwrite is the MODULE'S OWN — `q2psx-inspect creatures` prints both
+ *    writes to that slot, `80102100=tnk_idle1 ... 80102100=tnk_step`. The host
+ *    runs that initializer with the live bank predicate every time it resolves
+ *    a request (`client_cre_request` -> `q2_creature_world_sound_request` ->
+ *    `module_sound_requests`), so `tankcomm_think_idle` and the death move's
+ *    frame 249 thud as the console does. The Tankcomm entry of the fallback
+ *    table in creature.c (`q2_cre_sound_fallback`, reached through
+ *    `q2_cre_sound_resolve`) is the same answer by a second road, and serves
+ *    the census in `q2psx-inspect creatures` and `test_creature`; it reports
+ *    no mismatch on any map that carries this module.
  *
  *  - THE SECOND VARIANT CANNOT BE PLACED. The spawn function's last two
  *    instructions are `if (class_id == 92) skinnum = 2`, and 92 is a class byte

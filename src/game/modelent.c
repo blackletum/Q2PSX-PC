@@ -232,6 +232,16 @@ q2_entity *q2_model_ent_spawn(q2_entity_set *set, const q2_model_bank *bank,
     e->fade  = (s16)Q2_ONE_12;         /* ent+0xFE, full size   */
     e->scale = (s16)Q2_ONE_12;         /* ent+0xFC              */
 
+    /*
+     * 0x8005A96C: MyScaleMatrix(ent+0x2C0, ent+0x2C0, size). The spawn's own
+     * RotMatrix has just filled that matrix from the entity's angles, and this
+     * multiplies every element by `size` in 1.0.12 — so the mesh draws at
+     * `size / 4096` of its authored size. The gib dispatcher's two Explosion
+     * arms pass Q2_MODEL_ENT_SIZE_GIB and get a fireball half the size of a
+     * rocket's; every other caller passes Q2_MODEL_ENT_SIZE_FULL.
+     */
+    e->matrix_scale = (s16)size;
+
     e->surface = surface;              /* ent+0x9E */
     e->field90 = Q2_MODEL_ENT_FIELD90; /* ent+0x90 */
 

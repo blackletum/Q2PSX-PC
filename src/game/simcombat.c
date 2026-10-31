@@ -35,6 +35,10 @@ void q2_sim_attach_effects(q2_sim *sim, const q2_fx_tables *tab, u32 seed)
     q2_fx_world_init(&sim->fx, tab);
     q2_rng_seed(&sim->fx_rng, seed);
     sim->fx_ready = (tab != NULL && tab->loaded);
+
+    /* q2_fx_world_init zeroes the world, the hook with it, so it goes back on
+     * here rather than at every site that attaches effects. */
+    q2_sim_fx_timed_bind(sim);
 }
 
 bool q2_sim_attach_glint(q2_sim *sim, const q2_common_file *common)
@@ -292,6 +296,78 @@ static void fx_at(q2_sim *sim, q2_fx_preset_id id, const s32 at[3])
 u8 q2_sim_fx_area(q2_sim *sim, u8 area, const s32 at[3])
 {
     return fx_area_resolve(sim, area, at);
+}
+
+/*
+ * PROCESSSPLURGES' TWO POINTERS, for the records this side owns.
+ *
+ * 0x80048D0C..0x80048D74 re-derives a timed beam's near end from its owner and
+ * its far end from its target on every pass, so a BFG beam tracks the ball
+ * that raised it and the body it is held on for the whole of its 45 ticks. The
+ * port had kept the pair the refresh supplied, which froze a beam the instant
+ * the ball stopped refreshing it — when the target left sight, when the ball
+ * burst, and for the two tenths of a second the lattice is meant to trail
+ * behind a live ball.
+ *
+ * `owner` is the projectile slot and `target` the index into the live target
+ * list, the ids `BFGSpecial`'s arm stores. An attached record — attachment >= 0,
+ * the Parasite's style-4 beam — belongs to the client, which poses its owner's
+ * vertex in `client_cre_beams_update` once a display frame; those are declined
+ * here rather than resolved twice.
+ *
+ * Declining is also the answer for a ball that has gone: native would read the
+ * recycled entity, and the last resolved pair is the nearest defined thing to
+ * it (effect.h, q2_fx_timed_bind).
+ */
+static bool sim_timed_resolve(void *user, const q2_fx_timed_beam *t,
+                              s32 from[3], s32 to[3], s16 *area)
+{
+    q2_sim *sim = (q2_sim *)user;
+    const q2_projectile *p;
+    q2_actor **list;
+    u32 count;
+    q2_actor *a;
+    int k;
+
+    if (!sim || !t || t->attachment >= 0)
+        return false;
+    if (t->owner < 0 || t->owner >= (s32)Q2_PROJ_MAX)
+        return false;
+
+    /* The near end: GetAbsoluteModelVert with a negative clip is the owner's
+     * own drawn position (0x8006CD98), which for a projectile is where it is
+     * this tick. A slot that has been reused by another shot is not this
+     * beam's ball, so the serial-free test is the kind as well as the use. */
+    p = &sim->combat.projectiles.p[t->owner];
+    if (!p->in_use || p->kind != Q2_PROJ_BFG)
+        return false;
+
+    list  = sim->world_targets ? sim->world_targets : sim->combat.targets;
+    count = sim->world_targets ? sim->world_target_count
+                               : sim->combat.target_count;
+    if (t->target < 0 || (u32)t->target >= count)
+        return false;
+    a = list ? list[t->target] : NULL;
+    if (!a)
+        return false;
+
+    for (k = 0; k < 3; k++)
+        from[k] = p->pos[k];
+
+    /* 0x80048D4C..0x80048D74, the far end raised to the middle of the hull. */
+    to[0] = a->origin[0];
+    to[1] = a->origin[1] + (572 - (s32)a->height) / 2;
+    to[2] = a->origin[2];
+
+    /* 0x80048D24, from the owner, every pass. */
+    *area = (s16)fx_area_resolve(sim, 0, from);
+    return true;
+}
+
+void q2_sim_fx_timed_bind(q2_sim *sim)
+{
+    if (sim)
+        q2_fx_timed_bind(&sim->fx, sim_timed_resolve, sim);
 }
 
 /*
@@ -1668,10 +1744,27 @@ static s32 actor_hitscan(q2_sim *sim, q2_actor *attacker,
     if (impact)
         memcpy(impact, at, sizeof(at));
 
-    /* The entry point itself goes to the player's DoDamage, as 0x80048970
-     * passes it: the knockback is formed against the entity origin there. */
+    /*
+     * The entry point goes to the player's DoDamage, as 0x80048970 passes it —
+     * the knockback is formed against the entity origin there — but not
+     * before 0x80048930..0x80048954 has moved it onto the victim's own view
+     * plane. That arm only runs for a body with a view, which here is only
+     * ever the player, and it only moves the point for a shot travelling into
+     * the plane: a round that catches you from behind keeps its entry.
+     *
+     * 0x80048770 does NOT apply it to the impact the caller gets back (the
+     * presentation and the blood keep sp+40's unprojected entry), so this
+     * happens after `impact` is filled.
+     */
     if (idx >= 0 && idx == player_slot) {
-        q2_sim_hurt_player(sim, attacker, damage, mod, at);
+        const q2_view_plane *vp = q2_sim_view_plane_for(sim, sim->cur_player);
+        s32 hurt_at[3];
+
+        memcpy(hurt_at, at, sizeof(hurt_at));
+        q2_sim_proj_scan.player_hits++;
+        if (vp && q2_combat_missile_hit_plane(vp, dir, hurt_at))
+            q2_sim_proj_scan.player_hits_projected++;
+        q2_sim_hurt_player(sim, attacker, damage, mod, hurt_at);
         return Q2_SIM_HIT_PLAYER;
     }
 

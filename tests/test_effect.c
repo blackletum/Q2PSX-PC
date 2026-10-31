@@ -2240,6 +2240,103 @@ static void test_timed_beams(void)
 }
 
 /*
+ * PROCESSSPLURGES RE-DERIVES BOTH ENDS, every pass.
+ *
+ * 0x80048D0C poses the near end off the owner, 0x80048D2C reads the far end off
+ * the target entity and 0x80048D4C raises it to the middle of the hull — so a
+ * beam whose ball has moved on tracks the ball and the body for the rest of its
+ * 45 ticks. The port stored the pair its refresh was handed and re-sent it
+ * unchanged, which froze a beam the instant the ball stopped refreshing it.
+ */
+static s32 g_resolve_from[3];
+static s32 g_resolve_to[3];
+static s16 g_resolve_area;
+static bool g_resolve_answer;
+static u32 g_resolve_calls;
+
+static bool resolver(void *user, const q2_fx_timed_beam *t,
+                     s32 from[3], s32 to[3], s16 *area)
+{
+    int k;
+
+    (void)user;
+    g_resolve_calls++;
+    if (t->attachment >= 0 || !g_resolve_answer)
+        return false;
+    for (k = 0; k < 3; k++) {
+        from[k] = g_resolve_from[k];
+        to[k]   = g_resolve_to[k];
+    }
+    *area = g_resolve_area;
+    return true;
+}
+
+static void test_timed_beams_track_their_ends(void)
+{
+    q2_fx_world w;
+    s32 a[3] = { -2000, 0, 4000 }, b[3] = { 2000, 0, 4000 };
+
+    printf("beam: a timed beam's ends follow what it is held between\n");
+
+    q2_fx_world_init(&w, &g_tab);
+    q2_fx_timed_bind(&w, resolver, NULL);
+    check(w.timed_resolve != NULL, "the resolver is installed");
+
+    g_resolve_calls  = 0;
+    g_resolve_answer = true;
+    g_resolve_area   = 9;
+    g_resolve_from[0] = 11; g_resolve_from[1] = 22; g_resolve_from[2] = 33;
+    g_resolve_to[0]   = 44; g_resolve_to[1]   = 55; g_resolve_to[2]   = 66;
+
+    q2_fx_beam_timed(&w, 1, 7, a, b, Q2_FX_TIMED_BEAM_RADIUS,
+                     Q2_FX_TIMED_BEAM_STYLE, Q2_FX_TIMED_BEAM_LIFE, 5);
+    check_eq_i(w.timed[0].from[0], a[0], "the refresh seeds the near end");
+    check_eq_i(w.timed[0].area, 5, "and the area");
+
+    /* One tick, and both ends plus the area come off the two things it
+     * points at rather than off that seed. */
+    q2_fx_timed_tick(&w, 1);
+    check_eq_i(g_resolve_calls, 1, "one live record, one resolve");
+    check_eq_i(w.timed[0].from[0], 11, "the near end was re-derived");
+    check_eq_i(w.timed[0].to[2], 66, "and the far end");
+    check_eq_i(w.timed[0].area, 9, "and the area with them");
+    check_eq_i(w.stats.beams_refreshed, 1, "counted as a refresh");
+
+    /* It keeps tracking without any further refresh from the weapon — which
+     * is the whole of the fix: 44 ticks of a beam nothing is re-arming. */
+    g_resolve_to[0] = 4444;
+    q2_fx_timed_tick(&w, 1);
+    check_eq_i(w.timed[0].to[0], 4444, "and again the next tick, unprompted");
+
+    /*
+     * A resolver that declines leaves the record as it stands. That is the
+     * port's answer for a ball that has gone, where native reads the recycled
+     * entity (effect.h, q2_fx_timed_bind).
+     */
+    g_resolve_answer = false;
+    g_resolve_to[0]  = -1;
+    q2_fx_timed_tick(&w, 1);
+    check_eq_i(w.timed[0].to[0], 4444, "a declined record keeps its last ends");
+
+    /* An expired record is not resolved: 0x80048CE0's `beq v0, zero` skips
+     * the whole body for a timer already at zero. */
+    g_resolve_answer = true;
+    q2_fx_timed_tick(&w, 1000);
+    g_resolve_calls = 0;
+    q2_fx_timed_tick(&w, 1);
+    check_eq_i(g_resolve_calls, 0, "a dead record is not re-derived");
+
+    /* And an attached record — the Parasite's — is the client's to refresh,
+     * so this resolver declines it and its ends stand. */
+    q2_fx_world_clear(&w);
+    q2_fx_timed_bind(&w, resolver, NULL);
+    q2_fx_beam_attached(&w, 1, 7, 97, a, b, 5);
+    q2_fx_timed_tick(&w, 1);
+    check_eq_i(w.timed[0].from[0], a[0],
+               "an attached beam is left to its own host");
+}
+
+/*
  * THE SPAWN TICK IS A DRAW TICK.
  *
  * 0x800304A8 draws every group and only then, from 0x80030B1C, ages them, so a
@@ -3693,6 +3790,7 @@ int main(void)
     test_effect_sorts_with_the_world();
     test_texture_survives_clear();
     test_timed_beams();
+    test_timed_beams_track_their_ends();
     test_spawn_tick_is_drawable();
     test_glint_script_scan();
     test_glint_two_paths();
