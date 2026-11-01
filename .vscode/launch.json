@@ -1,7 +1,21 @@
-// Generated: one entry per single-player level (SP) and arena (MP).
+// The plain start comes first; after it, one entry per single-player level (SP)
+// and arena (MP).
 {
     "version": "0.2.0",
     "configurations": [
+        {
+            "name": "q2psx (normal start)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build-msvc/bin/RelWithDebInfo/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue"
+            ],
+            "cwd": "${workspaceFolder}/.install",
+            "console": "integratedTerminal",
+            "preLaunchTask": "build: q2psx (RelWithDebInfo)"
+        },
         {
             "name": "SP 01: BASE0",
             "type": "cppvsdbg",

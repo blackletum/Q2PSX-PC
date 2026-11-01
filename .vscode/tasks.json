@@ -1,4 +1,5 @@
-// Generated: one entry per single-player level (SP) and arena (MP).
+// The builds and the plain run come first; after them, one entry per
+// single-player level (SP) and arena (MP).
 {
     "version": "2.0.0",
     "tasks": [
@@ -33,6 +34,24 @@
             ],
             "group": "build",
             "problemMatcher": "$msCompile"
+        },
+        {
+            "label": "run: q2psx (normal start)",
+            "type": "process",
+            "command": "${workspaceFolder}/.install/q2psx.exe",
+            "args": [
+                "--disc",
+                "${workspaceFolder}/.install/disc/game.cue"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/.install"
+            },
+            "dependsOn": "build: stage-local",
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
         },
         {
             "label": "SP 01: BASE0",
