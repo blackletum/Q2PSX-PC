@@ -697,6 +697,7 @@ static void test_retail_subdivision(void)
     cam.projection = 160;
     q2_world_render_init(&render);
     render.subdiv_threshold = 40000;
+    render.subdiv_seal = false;     /* the retail points, unmoved */
     if (psx_ot_init(&ot, 1024, 64) != Q2_OK) {
         check(false, "allocate subdivision test OT");
         return;
@@ -722,6 +723,55 @@ static void test_retail_subdivision(void)
                   "subdivision UVs follow rounded diagonal midpoints");
         }
     }
+    /*
+     * And with the seal on, which is the client's default: no edge point of
+     * the mesh may sit on the inner side of the straight line between the two
+     * corners it lies between, because that is where a flat neighbour's edge
+     * runs and a point inside it opens a crack. Interior points stay exactly
+     * where retail projects them.
+     */
+    q2_world_render_init(&render);
+    render.subdiv_threshold = 40000;
+    emitted = q2_world_build_ot(&z, &cam, 320, 240, &ot, &gte, &render, &stats);
+    check(emitted == 16, "the sealed mesh still emits sixteen packets");
+    if (emitted == 16) {
+        static const int cx[4] = {0, 4, 4, 0}, cy[4] = {0, 0, 4, 4};
+        int gxy[5][5][2], centre[2] = {0, 0}, e, k, inner_points = 0;
+
+        for (y = 0; y < 4; y++) for (x = 0; x < 4; x++)
+            for (i = 0; i < 4; i++) {
+                gxy[y+dy[i]][x+dx[i]][0] = ot.prims[y*4+x].xy[i].x;
+                gxy[y+dy[i]][x+dx[i]][1] = ot.prims[y*4+x].xy[i].y;
+            }
+        for (e = 0; e < 4; e++) {
+            centre[0] += gxy[cy[e]][cx[e]][0];
+            centre[1] += gxy[cy[e]][cx[e]][1];
+        }
+        centre[0] /= 4; centre[1] /= 4;
+        for (e = 0; e < 4; e++) {
+            const int *a = gxy[cy[e]][cx[e]], *b = gxy[cy[(e+1)&3]][cx[(e+1)&3]];
+            long in = (long)(b[0]-a[0])*(centre[1]-a[1]) -
+                      (long)(b[1]-a[1])*(centre[0]-a[0]);
+            for (k = 1; k < 4; k++) {
+                int px = cx[e] + (cx[(e+1)&3]-cx[e])/4*k;
+                int py = cy[e] + (cy[(e+1)&3]-cy[e])/4*k;
+                long s = (long)(b[0]-a[0])*(gxy[py][px][1]-a[1]) -
+                         (long)(b[1]-a[1])*(gxy[py][px][0]-a[0]);
+                if (s != 0 && (s > 0) == (in > 0))
+                    inner_points++;
+            }
+        }
+        check(inner_points == 0,
+              "no sealed edge point lies inside its corners' line");
+        reference = gte;
+        reference.v[0].x = 0; reference.v[0].y = 0;
+        reference.v[0].z = (s16)(2000 + value[2][2]);
+        gte_rtps(&reference, false);
+        check(gxy[2][2][0] == reference.sxy[2].x &&
+              gxy[2][2][1] == reference.sxy[2].y,
+              "the seal leaves interior points where retail puts them");
+    }
+
     /* Parent storage gates the real walker independently of the host OT and
      * the mesh pool. Denial must not allocate a child or promote a material. */
     q2_world_render_init(&render);render.subdiv_threshold=40000;

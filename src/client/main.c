@@ -586,6 +586,7 @@ typedef struct client {
     u32              popup_raises;
     u32              popup_opens;
     s32              popup_at_frame;   /* --objectives N; 0 is off */
+    s32              pause_at_frame;   /* --pause N; 0 is off */
     q2_prompt_bar    prompts;
 
     /*
@@ -8799,6 +8800,34 @@ static bool client_load_zone(client *c, const char *map, int index)
                                                    &c->hud_tables, &vs,
                                                    c->vram,
                                                    c->mp_enabled, hud_players);
+                /*
+                 * THREE LEVELS CARRY NO `frontend.lbm`: BASE3, WASTE3 and
+                 * MAGDEMO spend the bank on DemoSp1/2.lbm instead. The console
+                 * never notices, because nothing clears VRAM between maps and
+                 * slot 13 is above every map's texture pages: the copy the
+                 * front end registered at boot is still resident. The port
+                 * clears VRAM on every map load, so those three drew the pause
+                 * menu as bare highlight bars and the help pop-up without its
+                 * frame. Put back what the console would still have, from the
+                 * front end's own bank.
+                 */
+                if (fr == Q2_OK && !c->menu_font.item_resident &&
+                    vs.texpage_count <= Q2_MENU_ATLAS_SLOT) {
+                    q2_vram_section fs;
+
+                    if (q2_vram_load(&fs, c->disc, "QFRONT") == Q2_OK) {
+                        if (q2_vram_upload_named(&fs, Q2_MENU_ATLAS_NAME,
+                                                 Q2_MENU_ATLAS_SLOT,
+                                                 Q2_MENU_ATLAS_V_OFS,
+                                                 c->vram, NULL) == Q2_OK) {
+                            c->menu_font.item_resident = true;
+                            Q2_INFO("%s carries no '%s': kept QFRONT's, as "
+                                    "the console's VRAM would have", map,
+                                    Q2_MENU_ATLAS_NAME);
+                        }
+                        q2_vram_free(&fs);
+                    }
+                }
                 c->menu_font_ready = (fr == Q2_OK);
                 if (!c->menu_font_ready) {
                     /*
@@ -18145,6 +18174,17 @@ static void client_popup_frame(client *c, float dt)
      * loop, not by the game logic the menu flag skips.
      */
     c->sim[0].level_time += ticks;
+    /*
+     * ...and the item world's copy of it, which the console does not have:
+     * 0x800AEBAC is the one clock. The port keeps two in step, and this was
+     * the only place one moved without the other. A board left up for its
+     * full fifteen seconds put the item clock 4,500 ticks behind, so a
+     * pickup stamped its 900-tick caption deadline against the lagging copy
+     * and the status bar, reading `level_time`, expired it the frame it was
+     * set. BASE0 opens with that board, which is where every caption of the
+     * level went.
+     */
+    c->sim[0].ent_world.level_time += ticks;
 
     (void)q2_briefing_popup_tick(&c->popup, ticks, c->sim[0].level_time,
                                  cross, c->popup_cross_prev);
@@ -20450,6 +20490,7 @@ static void usage(void)
     printf("  --shot-every N  ...and one every N frames, numbered\n");
     printf("  --screen-pos X Y  override SCREEN POSITION (-20..20, -32..64)\n");
     printf("  --powerup KIND hold quad|invuln|enviro|breather for HUD capture\n");
+    printf("  --pause N     press START at frame N: the pause menu, for capture\n");
     printf("  --fire-event NAME [F]  queue ONE named Events entry point at\n"
            "                frame F, instead of every trigger volume on the\n"
            "                map. Level authors name the interesting ones\n"
@@ -21277,6 +21318,10 @@ int main(int argc, char **argv)
          */
         else if (!strcmp(argv[i], "--objectives") && i + 1 < argc)
             c.popup_at_frame = (s32)strtol(argv[++i], NULL, 10);
+        /* `--pause N`: player one presses START at frame N, so a headless
+         * run can capture the pause menu over any map. */
+        else if (!strcmp(argv[i], "--pause") && i + 1 < argc)
+            c.pause_at_frame = (s32)strtol(argv[++i], NULL, 10);
         /* `--weapon N`: hold weapon slot N, fed. See the field's note. */
         else if (!strcmp(argv[i], "--weapon") && i + 1 < argc)
             c.give_weapon = (int)strtol(argv[++i], NULL, 10);
@@ -22921,6 +22966,9 @@ no_window:
             c.popup_raises++;
             Q2_INFO("--objectives: raised at frame %d", (int)c.frame_index);
         }
+        if (c.pause_at_frame > 0 && (s32)c.frame_index == c.pause_at_frame &&
+            !c.menu.open)
+            client_pause_open(&c, 0);
         /* `--armour`: likewise re-asserted, and likewise only for observability.
          * The points are re-topped rather than latched so a run that takes
          * damage still exercises the armour arm to the end. */

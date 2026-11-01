@@ -553,6 +553,10 @@ typedef struct q2_world_render {
      */
     s32                   subdiv_threshold;
     q2_surf_pool_pressure pressure;
+    /* Move a mesh's rounded edge points out onto its corners' line, so a flat
+     * neighbour cannot show a crack (world.c, subdiv_seal_edges). A port
+     * addition; on by default, off to compare against retail geometry. */
+    bool                  subdiv_seal;
     u8 subdiv_view; /* current viewport; packet owners are distinct per view */
     u16 subdiv_capacity, subdiv_used, subdiv_pending_count;
     u16 subdiv_free[Q2_WORLD_SUBDIV_MAX];

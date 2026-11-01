@@ -494,6 +494,7 @@ void q2_world_render_init(q2_world_render *r)
     q2_tpage_table_init(&r->tpage);
     r->subdiv_threshold = 0;
     r->pressure         = Q2_SURF_POOL_FREE;
+    r->subdiv_seal      = true;
     q2_world_subdiv_reset(r, Q2_WORLD_SUBDIV_DEFAULT);
     q2_world_packet_reset(r, Q2_WORLD_PACKET_DEFAULT);
 }
@@ -918,6 +919,85 @@ static void subdiv_midpoint(s32 out[8], const s32 a[8], const s32 b[8])
     for (i = 0; i < 8; i++) out[i] = (a[i] + b[i]) >> 1;
 }
 
+/*
+ * THE T-JUNCTION SEAL — a port addition, not a console behaviour.
+ *
+ * Whether a quad subdivides is decided per quad, from its own depth sum, so a
+ * mesh routinely meets a FLAT neighbour along a shared edge. The flat side's
+ * edge is the straight screen line between the two projected corners; the
+ * mesh's edge runs through three more points that were projected on their own
+ * and rounded to whole pixels, so it wanders up to half a pixel either side of
+ * that line. Wherever it wanders inwards no polygon covers the pixel, and a
+ * dotted crack opens along the seam: the tile boundaries where a near quad
+ * meets a farther one.
+ *
+ * The console has the same holes and hides them by accident. A level frame is
+ * never cleared (0x80070490 leaves gp+18712 at zero whenever the level
+ * record's +0x20 is non-zero), so a crack shows whatever that buffer held two
+ * frames earlier. The port clears every frame, and each crack was a black dot.
+ *
+ * So an edge point that rounded to the INNER side of its corners' line is moved
+ * one pixel outward along the dominant axis of the outward normal, which is at
+ * least 0.7 px of normal distance against at most 0.5 px of rounding. The mesh
+ * outline then contains the flat edge, the neighbour's fill rule meets it, and
+ * nothing depends on draw order. Two meshes sharing an edge round each point
+ * identically, so at most one of them moves it and they overlap by a pixel
+ * instead of gapping. UVs stay where they were; the move is sub-texel.
+ */
+static s32 subdiv_side(gte_sxy a, gte_sxy b, s32 x, s32 y)
+{
+    return ((s32)b.x - a.x) * (y - a.y) - ((s32)b.y - a.y) * (x - a.x);
+}
+
+static void subdiv_seal_edges(gte_sxy xy[5][5], const bool ok[5][5])
+{
+    /* Each edge: its two corners, then the step from the first to the second. */
+    static const int edge[4][4] = {
+        { 0, 0, 0, 1 }, { 0, 4, 1, 0 }, { 4, 4, 0, -1 }, { 4, 0, -1, 0 }
+    };
+    s32 cx = 0, cy = 0;
+    int e, k;
+
+    for (e = 0; e < 4; e++) {
+        if (!ok[edge[e][0]][edge[e][1]])
+            return;
+        cx += xy[edge[e][0]][edge[e][1]].x;
+        cy += xy[edge[e][0]][edge[e][1]].y;
+    }
+    cx /= 4;
+    cy /= 4;
+
+    for (e = 0; e < 4; e++) {
+        int gy = edge[e][0], gx = edge[e][1];
+        int sy = edge[e][2], sx = edge[e][3];
+        gte_sxy a = xy[gy][gx], b = xy[gy + 4 * sy][gx + 4 * sx];
+        s32 inner = subdiv_side(a, b, cx, cy);
+        s32 nx = -((s32)b.y - a.y), ny = (s32)b.x - a.x;   /* one normal */
+
+        if (inner == 0 || (a.x == b.x && a.y == b.y))
+            continue;
+        if (inner > 0) {          /* `inner` is n.(C - A): n points in */
+            nx = -nx;
+
+            ny = -ny;
+        }
+        for (k = 1; k < 4; k++) {
+            gte_sxy *p = &xy[gy + k * sy][gx + k * sx];
+            s32 side;
+
+            if (!ok[gy + k * sy][gx + k * sx])
+                continue;
+            side = subdiv_side(a, b, p->x, p->y);
+            if (side == 0 || (side > 0) != (inner > 0))
+                continue;                     /* on the line, or outside */
+            if ((nx < 0 ? -nx : nx) >= (ny < 0 ? -ny : ny))
+                p->x = (s16)(p->x + (nx > 0 ? 1 : -1));
+            else
+                p->y = (s16)(p->y + (ny > 0 ? 1 : -1));
+        }
+    }
+}
+
 static void subdiv_grid(s32 g[5][5][8], const q2_point pt[4],
                         const world_quad *q)
 {
@@ -1039,6 +1119,8 @@ static u32 emit_subdivided(psx_ot *ot,
             grid_z[gy][gx]  = gte->sz[3];
         }
     }
+    if (render->subdiv_seal)
+        subdiv_seal_edges(grid_xy, grid_ok);
 
     for (gy = 0; gy < N; gy++) {
         for (gx = 0; gx < N; gx++) {
