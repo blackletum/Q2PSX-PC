@@ -661,7 +661,8 @@ u32 q2_mp_scoreboard(const q2_mp_session *s, const char *const *names,
     snprintf(lines[n++], Q2_MP_SCORE_LINE, "%s", q2_mp_score_title(s->mode));
     count = q2_mp_score_rows(s, names, 0, rows, Q2_MP_SCORE_ROWS);
     for (i = 0; i < count && n < max; i++)
-        snprintf(lines[n++], Q2_MP_SCORE_LINE, "%s", rows[i].text);
+        snprintf(lines[n++], Q2_MP_SCORE_LINE, "%.*s", Q2_MP_SCORE_LINE - 1,
+                 rows[i].text);
     return n;
 }
 

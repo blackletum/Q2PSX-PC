@@ -760,7 +760,12 @@ static q2_result iso_walk_dir(disc *d, u32 lba, u32 length, const char *prefix, 
         iso_copy_field(name, sizeof(name), rec + 33, name_len);
         iso_clean_name(name);
 
-        snprintf(full, sizeof(full), "%s/%s", prefix, name);
+        /* No path on a real disc comes near 255 characters. One that would
+         * is a corrupt record, and truncating it could alias another file. */
+        if (snprintf(full, sizeof(full), "%s/%s", prefix, name) >= (int)sizeof(full)) {
+            off += rec_len;
+            continue;
+        }
 
         if (flags & 0x02) {
             r = iso_walk_dir(d, ext_lba, ext_len, full, depth + 1);

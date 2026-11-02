@@ -147,7 +147,7 @@ static void test_native_fallbacks(const char *module,const u8 *image,size_t size
     for(i=0;i<Q2PSX_ARRAY_COUNT(cases);i++)if(!strncmp(module,cases[i].module,12)) {
         q2_cre_sound_bind out[128]; u32 n=0,fault=0;
         CHECK(q2_creature_init_sounds(image,size,0x80100000u,one_sample,
-              (void *)cases[i].sample,out,128,&n,&fault)==Q2_OK);
+              (void *)(uintptr_t)cases[i].sample,out,128,&n,&fault)==Q2_OK);
         for(k=0;k<3 && cases[i].slots[k];k++) {
             /* MAGDEMO's 13172-byte Soldier has its BSS eight bytes later:
              * +0xE54..+0xEB8 fills +0x32B4/+0x32B8/+0x32BC. */
@@ -216,9 +216,11 @@ static void test_disc(const char *path)
                 CHECK(!memcmp(img,copy,size));
             }
             free(copy);free(img);modules++;
-            if(!bn || !rn)break;boff=bn;roff=rn;
+            if(!bn || !rn)break;
+            boff=bn;roff=rn;
         }
-        if(have_bank)q2_sound_bank_free(&bank);dat_close(&ar);
+        if(have_bank)q2_sound_bank_free(&bank);
+        dat_close(&ar);
     }
     printf("%u native module initializers, %u bank configurations\n",modules,runs);
     CHECK(modules==166);disc_close(d);

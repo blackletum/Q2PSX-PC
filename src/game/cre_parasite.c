@@ -141,5 +141,5 @@ const q2_cre_impl q2_cre_parasite = {
       parasite_walk, parasite_end_fidget, parasite_fidget, parasite_refidget,
       parasite_scratch, parasite_tap, parasite_launch, parasite_drain,
       parasite_reel, parasite_dead },
-    parasite_spawn
+    parasite_spawn, false
 };

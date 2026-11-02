@@ -924,5 +924,5 @@ const q2_cre_impl q2_cre_gunner = {
         NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
         NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
     },
-    gunner_spawn
+    gunner_spawn, false
 };

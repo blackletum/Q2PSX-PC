@@ -114,5 +114,5 @@ const q2_cre_impl q2_cre_boss1 = {
       (q2_class_method)(void *)boss1_die },
     { NULL, NULL, boss1_dead, boss1_rocket, boss1_machinegun, boss1_repeat,
       boss1_empty, boss1_run, boss1_explode },
-    boss1_spawn
+    boss1_spawn, false
 };

@@ -285,7 +285,7 @@ static void bound_trace(void *user, const s32 start[3], const s16 mins[3],
             pos[2] = hit[2];
             out->ent = o->id == -2 ? b->player_owner :
                        (o->id >= 0 && (u32)o->id < b->body_owner_count)
-                         ? (q2_monster *)&b->body_owner_base[o->id] : NULL;
+                         ? &b->body_owner_base[o->id] : NULL;
             b->stats.trace_blocked_body++;
         }
     }
@@ -490,7 +490,7 @@ void q2_ai_world_bind_entities(q2_ai_world_bind *bind,
 
 void q2_ai_world_bind_bodies(q2_ai_world_bind *bind,
                              const q2_move_bodies *bodies,
-                             const struct q2_monster *owner_base,
+                             struct q2_monster *owner_base,
                              u32 owner_count)
 {
     if (!bind)

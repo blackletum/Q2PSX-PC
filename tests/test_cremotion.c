@@ -173,7 +173,10 @@ static bool run(cpu *c, u32 start, u32 end)
         case 43: c->r[d]=c->r[s]<c->r[t]; break;
         default: goto unsupported;
         } else switch(op) {
-        case 1: if (t>1) goto unsupported; if (((s32)c->r[s]<0)==(t==0)) branch=pc+4+(u32)(imm*4); break;
+        case 1:
+            if (t>1) goto unsupported;
+            if (((s32)c->r[s]<0)==(t==0)) branch=pc+4+(u32)(imm*4);
+            break;
         case 2: branch=((pc+4)&0xF0000000u)|((w&0x3FFFFFFu)<<2); break;
         case 3: c->r[31]=pc+8; branch=((pc+4)&0xF0000000u)|((w&0x3FFFFFFu)<<2); break;
         case 4: if(c->r[s]==c->r[t]) branch=pc+4+(u32)(imm*4); break;
@@ -246,7 +249,8 @@ static void test_native_edge_branches(dat_archive *ar,cpu *c)
                 }
             }
         }
-        if(!bn || !rn)break; boff=bn;roff=rn;
+        if(!bn || !rn)break;
+        boff=bn;roff=rn;
     }
 }
 static void test_native_poses(disc *d,cpu *c)

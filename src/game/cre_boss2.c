@@ -150,5 +150,5 @@ const q2_cre_impl q2_cre_boss2 = {
     { NULL, NULL, boss2_run, boss2_stand, boss2_dead, boss2_attack,
       boss2_start_fire, boss2_repeat, NULL, boss2_machineguns, boss2_rockets,
       boss2_activate },
-    boss2_spawn
+    boss2_spawn, false
 };

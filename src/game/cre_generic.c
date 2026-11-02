@@ -100,5 +100,5 @@ const q2_cre_impl q2_cre_generic = {
         think_24, think_25, think_26, think_27, think_28, think_29,
         think_30, think_31
     },
-    NULL
+    NULL, false
 };

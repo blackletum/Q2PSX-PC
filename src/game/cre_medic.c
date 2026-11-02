@@ -219,5 +219,5 @@ const q2_cre_impl q2_cre_medic = {
       [7] = medic_fire, [8] = medic_refire, [9] = medic_launch,
       [10] = medic_cable, [11] = medic_retract, [27] = medic_ai_stand,
       [28] = medic_ai_walk, [29] = medic_ai_run, [30] = medic_ai_charge,
-      [31] = medic_ai_move }, medic_spawn
+      [31] = medic_ai_move }, medic_spawn, false
 };

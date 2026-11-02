@@ -749,5 +749,5 @@ const q2_cre_impl q2_cre_berserk = {
         NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
         NULL
     },
-    berserk_spawn
+    berserk_spawn, false
 };

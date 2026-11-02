@@ -1035,5 +1035,5 @@ const q2_cre_impl q2_cre_insane = {
         NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
         NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
     },
-    insane_spawn
+    insane_spawn, false
 };

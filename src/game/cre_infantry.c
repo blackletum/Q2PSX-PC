@@ -399,7 +399,8 @@ static const q2_cre_shot k_infantry_machinegun = {
     1,                    /* pellets  — not a shotgun                      */
     false,                /* aimed    — set per round, infantry_machinegun */
     { 0, 0, 0 },          /* start    — the posed muzzle, per round        */
-    { 0, 0, 0 }           /* dir      — per round                          */
+    { 0, 0, 0 },          /* dir      — per round                          */
+    0                     /* effects  — not the blaster wrapper            */
 };
 
 static void infantry_machinegun(q2_monster *self)
@@ -991,5 +992,5 @@ const q2_cre_impl q2_cre_infantry = {
         NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
         NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
     },
-    infantry_spawn
+    infantry_spawn, false
 };

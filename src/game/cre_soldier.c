@@ -1393,5 +1393,5 @@ const q2_cre_impl q2_cre_soldier = {
     /* module+0x1604, export 0 — mass, solid, movetype, skinnum, health,
      * gib_health and the stand call. The scale, the links and
      * walkmonster_start stay the framework's. */
-    soldier_spawn
+    soldier_spawn, false
 };

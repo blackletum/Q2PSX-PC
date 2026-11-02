@@ -389,7 +389,7 @@ static const q2_cre_impl g_impl = {
       NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
       NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
       NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL },
-    NULL
+    NULL, false
 };
 
 /* ------------------------------------------------------------------------- */
@@ -1114,19 +1114,19 @@ static void test_actions(void)
 #define TEST_MOD_BASE 0x80100000u
 
 static const q2_cre_sound_bind k_soldier_binds[] = {
-    { 0x801032A4u, "sol_sght1" },
-    { 0x801032ACu, "sol_pain1" },
-    { 0x801032B0u, "sol_pain2" },
-    { 0x801032B4u, "sol_pain3" },
-    { 0x801032B8u, "sol_deth1" },
-    { 0x801032BCu, "sol_deth2" },
-    { 0x801032C0u, "sol_deth3" }
+    { .addr = 0x801032A4u, .name = "sol_sght1" },
+    { .addr = 0x801032ACu, .name = "sol_pain1" },
+    { .addr = 0x801032B0u, .name = "sol_pain2" },
+    { .addr = 0x801032B4u, .name = "sol_pain3" },
+    { .addr = 0x801032B8u, .name = "sol_deth1" },
+    { .addr = 0x801032BCu, .name = "sol_deth2" },
+    { .addr = 0x801032C0u, .name = "sol_deth3" }
 };
 
 static const q2_cre_sound_bind k_tank_binds[] = {
-    { 0x80102100u, "tnk_idle1" },
-    { 0x80102110u, "tnk_step" },
-    { 0x80102104u, "tnk_pain" }
+    { .addr = 0x80102100u, .name = "tnk_idle1" },
+    { .addr = 0x80102110u, .name = "tnk_step" },
+    { .addr = 0x80102104u, .name = "tnk_pain" }
 };
 
 /* The bank, as a NULL-terminated list of the names it carries. */
@@ -1429,7 +1429,7 @@ static void spy_shot(q2_monster *m, const q2_cre_shot *shot, void *user)
 static void test_fire_shot_has_no_enemy_guard(void)
 {
     static const q2_cre_shot shot = { 0x98, 0x98, 50, 550, 0, 0, 0, 1,
-                                      false, { 0, 0, 0 }, { 0, 0, 0 } };
+                                      false, { 0, 0, 0 }, { 0, 0, 0 }, 0 };
     q2_monster m, foe;
     u32 i;
 
@@ -2345,11 +2345,11 @@ static void test_disc_gladiator(q2_creature_module *mod)
     u32 count, i;
     int first, second;
     static const q2_cre_sound_bind expected[] = {
-        { 0x801013D0u, "gld_pain2" }, { 0x801013D4u, "gld_pain2" },
-        { 0x801013D8u, "gld_death" }, { 0x801013DCu, "wep_railgf1a" },
-        { 0x801013E0u, "gld_melee3" }, { 0x801013ECu, "gld_idle1" },
-        { 0x801013F0u, "gld_srch1" }, { 0x801013F4u, "gld_sight" },
-        { 0x801013F8u, "msc_udeath" }
+        { .addr = 0x801013D0u, .name = "gld_pain2" }, { .addr = 0x801013D4u, .name = "gld_pain2" },
+        { .addr = 0x801013D8u, .name = "gld_death" }, { .addr = 0x801013DCu, .name = "wep_railgf1a" },
+        { .addr = 0x801013E0u, .name = "gld_melee3" }, { .addr = 0x801013ECu, .name = "gld_idle1" },
+        { .addr = 0x801013F0u, .name = "gld_srch1" }, { .addr = 0x801013F4u, .name = "gld_sight" },
+        { .addr = 0x801013F8u, .name = "msc_udeath" }
     };
     count = q2_creature_sound_bindings(mod->image, mod->size, Q2_CREWORLD_BASE,
                                         sounds, 48);
@@ -2657,11 +2657,11 @@ static void test_disc_ironmaiden(q2_creature_module *mod)
     u32 count, i;
     int seed, first, next;
     static const q2_cre_sound_bind expected[] = {
-        { 0x80101B60u, "chk_atck1" }, { 0x80101B64u, "wep_rocklf1a" },
-        { 0x80101B68u, "ara_melee1" }, { 0x80101B6Cu, "chk_atck4" },
-        { 0x80101B78u, "chk_deth2" }, { 0x80101B84u, "chk_idle2" },
-        { 0x80101B90u, "chk_pain3" }, { 0x80101B94u, "chk_sght1" },
-        { 0x80101B9Cu, "msc_udeath" }
+        { .addr = 0x80101B60u, .name = "chk_atck1" }, { .addr = 0x80101B64u, .name = "wep_rocklf1a" },
+        { .addr = 0x80101B68u, .name = "ara_melee1" }, { .addr = 0x80101B6Cu, .name = "chk_atck4" },
+        { .addr = 0x80101B78u, .name = "chk_deth2" }, { .addr = 0x80101B84u, .name = "chk_idle2" },
+        { .addr = 0x80101B90u, .name = "chk_pain3" }, { .addr = 0x80101B94u, .name = "chk_sght1" },
+        { .addr = 0x80101B9Cu, .name = "msc_udeath" }
     };
     count = q2_creature_sound_bindings(mod->image, mod->size, Q2_CREWORLD_BASE,
                                         sounds, 48);

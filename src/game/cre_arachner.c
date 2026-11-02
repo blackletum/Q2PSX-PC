@@ -961,5 +961,5 @@ const q2_cre_impl q2_cre_arachner = {
         NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
         NULL
     },
-    arachner_spawn
+    arachner_spawn, false
 };

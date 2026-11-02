@@ -122,5 +122,5 @@ const q2_cre_impl q2_cre_jorg = {
     (q2_class_method)(void *)jorg_pain, (q2_class_method)(void *)jorg_die },
     { NULL, NULL, jorg_toss_rider, jorg_dead, jorg_bfg, NULL,
       jorg_machineguns, jorg_repeat, jorg_start_fire, jorg_idle,
-      jorg_left, jorg_right, jorg_hit, jorg_run, jorg_explode }, jorg_spawn
+      jorg_left, jorg_right, jorg_hit, jorg_run, jorg_explode }, jorg_spawn, false
 };

@@ -123,5 +123,5 @@ const q2_cre_impl q2_cre_hover = {
     },
     { NULL, hover_run, hover_stand, hover_dead, hover_fire_start,
       hover_refire, hover_fire },
-    hover_spawn
+    hover_spawn, false
 };

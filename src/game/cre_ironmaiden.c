@@ -140,5 +140,5 @@ const q2_cre_impl q2_cre_ironmaiden = {
       maiden_fire_start, maiden_moan, maiden_fidget, maiden_dead,
       maiden_duck_down, maiden_duck_hold, maiden_duck_up, maiden_launch_sound,
       maiden_rocket, maiden_reload, maiden_slash_start, maiden_slash },
-    maiden_spawn
+    maiden_spawn, false
 };

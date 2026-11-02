@@ -298,13 +298,13 @@ static void tank_play(q2_monster *m, u32 handle_addr)
  * world-space `start` built from them.
  */
 static const q2_cre_shot tank_shot_blaster = {
-    Q2_IMP_FIRE_BLASTER, 0, 16, 800, 0, 0, 0, 1, false, { 0, 0, 0 }, { 0, 0, 0 }
+    Q2_IMP_FIRE_BLASTER, 0, 16, 800, 0, 0, 0, 1, false, { 0, 0, 0 }, { 0, 0, 0 }, 0
 };
 static const q2_cre_shot tank_shot_rocket = {
-    Q2_IMP_FIRE_ROCKET, 0, 50, 550, 0, 0, 0, 1, false, { 0, 0, 0 }, { 0, 0, 0 }
+    Q2_IMP_FIRE_ROCKET, 0, 50, 550, 0, 0, 0, 1, false, { 0, 0, 0 }, { 0, 0, 0 }, 0
 };
 static const q2_cre_shot tank_shot_bullet = {
-    Q2_IMP_FIRE_BULLET, 0, 20, 0, 4, 300, 500, 1, false, { 0, 0, 0 }, { 0, 0, 0 }
+    Q2_IMP_FIRE_BULLET, 0, 20, 0, 4, 300, 500, 1, false, { 0, 0, 0 }, { 0, 0, 0 }, 0
 };
 
 /*
@@ -1257,5 +1257,5 @@ const q2_cre_impl q2_cre_tankcomm = {
         NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
         NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
     },
-    tankcomm_spawn
+    tankcomm_spawn, false
 };

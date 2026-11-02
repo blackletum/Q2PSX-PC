@@ -198,12 +198,12 @@ const q2_cre_impl q2_cre_rider = {
     "Rider", { rider_stand, NULL, NULL, rider_walk, rider_run, NULL,
     rider_attack, NULL, NULL, (q2_class_method)(void *)rider_checkattack, NULL,
     (q2_class_method)(void *)rider_pain, (q2_class_method)(void *)rider_die },
-    RIDER_METHODS, rider_spawn
+    RIDER_METHODS, rider_spawn, false
 };
 const q2_cre_impl q2_cre_jorg_rider = {
     "JorgRider", { rider_stand, NULL, NULL, rider_walk, rider_run, NULL,
     rider_attack, NULL, (q2_class_method)(void *)rider_sight,
     (q2_class_method)(void *)rider_checkattack, NULL,
     (q2_class_method)(void *)rider_pain, (q2_class_method)(void *)rider_die },
-    RIDER_METHODS, rider_spawn
+    RIDER_METHODS, rider_spawn, false
 };

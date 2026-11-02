@@ -184,5 +184,5 @@ const q2_cre_impl q2_cre_strider = {
       strider_melee, strider_stomp, strider_step, strider_run_step, strider_explode,
       strider_finish_turn, strider_melee_finish_turn, strider_right, strider_left,
       strider_empty },
-    strider_spawn
+    strider_spawn, false
 };

@@ -137,5 +137,5 @@ const q2_cre_impl q2_cre_gladiator = {
         (q2_class_method)(void *)glad_die
     },
     { NULL, glad_swing, glad_hit, glad_run, glad_fire, glad_dead },
-    glad_spawn
+    glad_spawn, false
 };

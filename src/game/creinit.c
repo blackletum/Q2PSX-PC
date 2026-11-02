@@ -181,7 +181,10 @@ static bool init_run(init_vm *v)
             default: return false;
             }
         } else switch(op) {
-        case 1: if (t>1) return false; if (((s32)R(s)<0)==(t==0)) BRANCH(pc+4+(u32)(imm*4)); break;
+        case 1:
+            if (t>1) return false;
+            if (((s32)R(s)<0)==(t==0)) BRANCH(pc+4+(u32)(imm*4));
+            break;
         case 2: BRANCH(((pc+4)&0xF0000000u)|((w&0x3FFFFFFu)<<2)); break;
         case 3: dst=31; result.word=pc+8; BRANCH(((pc+4)&0xF0000000u)|((w&0x3FFFFFFu)<<2)); break;
         case 4: if(R(s)==R(t)) BRANCH(pc+4+(u32)(imm*4)); break;

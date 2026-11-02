@@ -143,7 +143,7 @@ typedef struct q2_ai_world_bind {
      * that set starts and turns the pointer into an index.
      */
     const q2_move_bodies    *bodies;
-    const struct q2_monster *body_owner_base;   /* the creature set's array   */
+    struct q2_monster       *body_owner_base;   /* the creature set's array   */
     u32                      body_owner_count;
     struct q2_monster       *player_owner; /* body id -2, the AI sight client */
 
@@ -192,7 +192,7 @@ void q2_ai_world_bind_entities(q2_ai_world_bind *bind,
  */
 void q2_ai_world_bind_bodies(q2_ai_world_bind *bind,
                              const q2_move_bodies *bodies,
-                             const struct q2_monster *owner_base,
+                             struct q2_monster *owner_base,
                              u32 owner_count);
 
 void q2_ai_world_bind_install(q2_ai_world_bind *bind);

@@ -149,6 +149,13 @@ def vec(values):
     return '{' + ','.join(map(str, values)) + '}'
 
 
+# An empty array still writes one zero element in full, so the fixture builds
+# under -Wmissing-braces and -Wmissing-field-initializers alike.
+ZERO_LIGHT = '{' + ','.join([vec([0, 0, 0]), '0u', '0u', '0u']) + '}'
+ZERO_GROUP = '{' + ','.join([vec([0, 0, 0]), '0', '0', '0', vec([0, 0]), vec([0, 0, 0]),
+                             '0u', '0']) + '}'
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('pal', type=Path)
@@ -178,8 +185,8 @@ def main():
         lines.append('    {' + ','.join([str(r['flags']), str(r['mode']), str(r['remaining']),
                      str(r['dt']), vec(r['start']), vec(r['velocity']),
                      str(r['seed']) + 'u', vec(r['position']), str(r['live']), str(r['rng']) + 'u',
-                     str(r['damage']), str(len(lights)), '{' + (','.join(lights) or '0') + '}',
-                     str(len(groups)), '{' + (','.join(groups) or '0') + '}']) + '},')
+                     str(r['damage']), str(len(lights)), '{' + (','.join(lights) or ZERO_LIGHT) + '}',
+                     str(len(groups)), '{' + (','.join(groups) or ZERO_GROUP) + '}']) + '},')
     text = '\n'.join(lines + ['};', '#endif', ''])
     if args.check:
         assert args.output.read_text(encoding='utf-8') == text

@@ -175,5 +175,5 @@ const q2_cre_impl q2_cre_flyer = {
         flyer_stand, flyer_next_move, flyer_run, flyer_fire_left,
         flyer_fire_right, flyer_slash_start, flyer_slash_left, flyer_slash_right
     },
-    flyer_spawn
+    flyer_spawn, false
 };
