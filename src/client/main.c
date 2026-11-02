@@ -671,6 +671,11 @@ typedef struct client {
     u32              save_prompt_latch;
     u16              save_prompt_pad;    /* the release edge, prev & ~cur    */
     u32              save_prompt_frames; /* the headless stand-in's count    */
+    /* Due but not yet up: the new level is shown first. See
+     * client_save_prompt_arm. */
+    bool             save_prompt_armed;
+    int              save_prompt_wait_frames;
+    double           save_prompt_wait_s;
     u32              save_prompts;       /* report.level.save_prompts        */
 
     /* What a save writes. Held here rather than built inside the front end
@@ -1801,6 +1806,8 @@ typedef struct client {
     bool             mouse_left;      /* held, this frame                    */
     bool             mouse_right;
     bool             mouse_left_prev; /* so a click has an edge              */
+    bool             mouse_left_tap;  /* a press seen this frame, even if it  */
+                                      /* was released in the same poll       */
     bool             mouse_right_prev;
     bool             menu_esc_back;   /* Esc on a sub-page: one TRIANGLE     */
 
@@ -5453,6 +5460,7 @@ static bool client_change_map(client *c, const char *map, const char *start)
 
 /* Defined with the other menu state below; the arrival raises it. */
 static void client_save_prompt_open(client *c);
+static void client_save_prompt_arm(client *c);
 
 /*
  * Perform the queued transition, and everything that goes with arriving.
@@ -5502,7 +5510,7 @@ static void client_change_map_and_brief(client *c)
     if (q2_mcard_save_prompt_due(c->level_change_serial,
                                  &c->save_prompt_latch, c->mp_enabled,
                                  Q2_SCREEN_EXIT_CHANGE_MAP))
-        client_save_prompt_open(c);
+        client_save_prompt_arm(c);
 
     /*
      * AND NO ARRIVAL BRIEFING, which this used to raise here.
@@ -7986,6 +7994,10 @@ static bool client_load_zone(client *c, const char *map, int index)
     bool same_map_transition = c->carry_player && c->carry_same_map &&
                                c->map[0] && client_name_eq(c->map, map);
     q2_fx_glint carry_glint = c->sim[0].glint;
+
+    /* A load replaces the level the pending SAVE? was about. A LOADMAP arms a
+     * fresh one after this returns. */
+    c->save_prompt_armed = false;
     u32 carry_ticks = c->sim[0].tick_count;
     u32 carry_lava_burn_calls = c->sim[0].lava_burn_calls;
     s32 carry_accum = c->sim[0].dt_accum;
@@ -11117,7 +11129,7 @@ static u16 client_pad_mask(const client *c, const q2_pad_bindings *b)
      * MOUSE2 jumps because that is what RIGHT MOUSE says they do, not because
      * this line chose it.
      */
-    if (c->mouse_left)  pad |= (u16)b->fire;
+    if (c->mouse_left || c->mouse_left_tap)  pad |= (u16)b->fire;
     if (c->mouse_right) pad |= (u16)b->jump;
 
     return pad;
@@ -13838,7 +13850,7 @@ static u16 client_menu_pointer(client *c, q2_menu *m)
 {
     q2_menu_hit hit = {0};
     int  mx = 0, my = 0;
-    bool have_pos, have_hit, pressed;
+    bool have_pos, have_hit, pressed, held;
     u16  pad = 0;
 
     /* A scripted run has no pointer, and letting a stray one move the cursor
@@ -13848,7 +13860,16 @@ static u16 client_menu_pointer(client *c, q2_menu *m)
 
     have_pos = client_menu_pointer_pos(c, &mx, &my);
     have_hit = have_pos && q2_menu_hit_test(m, mx, my, &hit);
-    pressed  = c->mouse_left && !c->mouse_left_prev;
+    /*
+     * A TAP COUNTS. The button is sampled from the event queue once a frame,
+     * and a touchpad tap or a quick click can put its press and its release in
+     * the same poll -- so the held state alone never showed it, and the click
+     * was simply lost. A press seen this frame is held for this frame, and the
+     * release then lands on the next one, which is the edge a release-fired
+     * row (SAVE?'s YES and NO among them) is waiting for.
+     */
+    pressed  = c->mouse_left_tap || (c->mouse_left && !c->mouse_left_prev);
+    held     = c->mouse_left || c->mouse_left_tap;
 
     /*
      * Hover, but only while nothing is held: once the button is down the press
@@ -13856,7 +13877,7 @@ static u16 client_menu_pointer(client *c, q2_menu *m)
      * That is what makes a slider draggable and what stops a click that drifts
      * a pixel activating the row below.
      */
-    if (have_hit && !c->mouse_left && !c->mouse_right)
+    if (have_hit && !held && !c->mouse_right)
         q2_menu_point_at(m, hit.index);
 
     if (pressed) {
@@ -13875,7 +13896,7 @@ static u16 client_menu_pointer(client *c, q2_menu *m)
         }
     }
 
-    if (c->mouse_left && c->menu_click_index >= 0) {
+    if (held && c->menu_click_index >= 0) {
         switch (c->menu_click_part) {
         case Q2_MENU_HIT_SLIDER: {
             int value;
@@ -13913,7 +13934,7 @@ static u16 client_menu_pointer(client *c, q2_menu *m)
         }
     }
 
-    if (!c->mouse_left) {
+    if (!held) {
         c->menu_click_index = -1;
         c->menu_click_part  = Q2_MENU_HIT_NONE;
     }
@@ -14157,7 +14178,8 @@ static void client_menu_close(client *c)
 
 static bool client_pause_open(client *c, int player)
 {
-    if (c->menu.open || c->save_prompt_open || c->in_front_end || c->mp_scoreboard ||
+    if (c->menu.open || c->save_prompt_open || c->save_prompt_armed ||
+        c->in_front_end || c->mp_scoreboard ||
         (c->mp_enabled && c->mp.end != Q2_MP_RUNNING) || c->film_open || c->boot_open ||
         c->mcard_open || c->mission_open || c->briefing_open || c->endmis_open || c->credits_open)
         return false;
@@ -16371,6 +16393,42 @@ static void client_save_prompt_open(client *c)
     c->briefing_open = false;
 
     Q2_INFO("SAVE?: %s asks whether to save", c->map);
+}
+
+/*
+ * THE NEW LEVEL IS SHOWN BEFORE IT IS ASKED ABOUT.
+ *
+ * GameCheckPaused raises the page on the first frame after a level change, so
+ * it used to come up on the very frame the loading screen went away: the
+ * player never saw where they had arrived before being asked whether to save
+ * it. The world is held from the moment the question is due, as it is on the
+ * console (Paused, 0x8003E754), but the page waits for two console frames --
+ * each is VSync(2), four fields in all -- and for at least two drawn frames,
+ * so a fast display does not shrink the beat to nothing.
+ */
+#define Q2_SAVE_PROMPT_DELAY_FRAMES 2
+
+static void client_save_prompt_arm(client *c)
+{
+    int fields = q2_build_tick_rate(&c->build);
+
+    c->save_prompt_armed       = true;
+    c->save_prompt_wait_frames = Q2_SAVE_PROMPT_DELAY_FRAMES;
+    c->save_prompt_wait_s      = fields > 0
+        ? (double)(Q2_SAVE_PROMPT_DELAY_FRAMES * 2) / (double)fields
+        : 0.0;
+}
+
+static void client_save_prompt_wait(client *c, float dt)
+{
+    if (c->save_prompt_wait_frames > 0)
+        c->save_prompt_wait_frames--;
+    c->save_prompt_wait_s -= (double)dt;
+    if (c->save_prompt_wait_frames > 0 || c->save_prompt_wait_s > 0.0)
+        return;
+
+    c->save_prompt_armed = false;
+    client_save_prompt_open(c);
 }
 
 static void client_save_prompt_frame(client *c)
@@ -22413,8 +22471,11 @@ no_window:
                     c.pointer_valid = true;
                 }
 
-                if (ev.button.button == SDL_BUTTON_LEFT)
+                if (ev.button.button == SDL_BUTTON_LEFT) {
                     c.mouse_left = down;
+                    if (down)
+                        c.mouse_left_tap = true;
+                }
                 else if (ev.button.button == SDL_BUTTON_RIGHT)
                     c.mouse_right = down;
 
@@ -22489,6 +22550,9 @@ no_window:
              * so it takes the pad first and nothing ticks underneath it.
              */
             client_card_frame(&c);
+        } else if (c.save_prompt_armed) {
+            /* The level on screen, held, before the question comes up. */
+            client_save_prompt_wait(&c, dt);
         } else if (c.save_prompt_open) {
             /*
              * THE SAVE? PROMPT, and nothing under it moves. `Paused` is up
@@ -22599,6 +22663,7 @@ no_window:
         c.shock_live = false;
 
         c.mouse_left_prev  = c.mouse_left;
+        c.mouse_left_tap   = false;
         c.mouse_right_prev = c.mouse_right;
         c.menu_esc_back    = false;   /* unspent if no menu frame ran */
         {

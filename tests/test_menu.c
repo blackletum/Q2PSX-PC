@@ -1729,9 +1729,16 @@ static void test_hit_rows(void)
     CHECK(!q2_menu_hit_test(&m, x, y - 40, &hit) && hit.index == -1,
           "the gap above the first row hits nothing");
 
-    /* And so is a point far off to the side of a centred label. */
-    CHECK(!q2_menu_hit_test(&m, x - 240, y, &hit),
-          "beside the label hits nothing");
+    /* Beside a centred label is still its row: the bar the console lights
+     * spans the menu, and that band is what a player aims at. */
+    CHECK(q2_menu_hit_test(&m, x - 240, y, &hit) &&
+          hit.index == (int)m.page->first && hit.part == Q2_MENU_HIT_LABEL,
+          "beside the label is its row's band (got %d)", hit.index);
+
+    /* Off the menu's own width is nothing. */
+    CHECK(!q2_menu_hit_test(&m, -1, y, &hit) &&
+          !q2_menu_hit_test(&m, Q2_MENU_SCREEN_W, y, &hit),
+          "outside the menu width hits nothing");
 }
 
 static void test_hit_skips_the_unreachable(void)
@@ -1753,11 +1760,21 @@ static void test_hit_skips_the_unreachable(void)
     CHECK(!q2_menu_hit_test(&m, x, y, &hit),
           "the static question is not clickable");
 
-    /* Both answers are. */
+    /* Both answers are, and across the width of their bars, not only on the
+     * two or three letters of the word. */
     item_centre(&m, 1, &x, &y);
     CHECK(q2_menu_hit_test(&m, x, y, &hit) && hit.index == 1, "NO is clickable");
+    CHECK(q2_menu_hit_test(&m, 40, y, &hit) && hit.index == 1,
+          "NO's bar is clickable well to the side of the word");
     item_centre(&m, 2, &x, &y);
     CHECK(q2_menu_hit_test(&m, x, y, &hit) && hit.index == 2, "YES is clickable");
+    CHECK(q2_menu_hit_test(&m, Q2_MENU_SCREEN_W - 40, y, &hit) && hit.index == 2,
+          "YES's bar is clickable well to the side of the word");
+
+    /* The static question above them stays out of reach across its band too. */
+    item_centre(&m, 0, &x, &y);
+    CHECK(!q2_menu_hit_test(&m, 40, y, &hit),
+          "the question's band is not clickable either");
 
     /* The death page greys its middle row when there are no resupplies, which
      * takes it out of the navigation — and out of reach of the pointer. */

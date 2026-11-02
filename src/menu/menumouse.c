@@ -261,6 +261,42 @@ bool q2_menu_hit_test(const q2_menu *m, int x, int y, q2_menu_hit *out)
         break;   /* rows do not overlap; the first that contains it wins */
     }
 
+    /*
+     * OFF THE TEXT, THE BAND. A row's text is all that used to count, so SAVE?'s
+     * NO was a target two glyphs wide in the middle of a bar that lights the
+     * full width of the screen, and a click a little to one side of it went
+     * nowhere. The band is what lights up and what the player aims at; it is
+     * taken only when exactly one selectable row's band holds the point, so
+     * nothing a page draws side by side can be confused.
+     */
+    if (hit.index < 0 && x >= 0 && x < Q2_MENU_SCREEN_W) {
+        int found = -1, count = 0;
+
+        for (i = (int)m->page->first; i < (int)m->page->count; i++) {
+            int x0, y0, x1, y1;
+
+            if (!q2_menu_item_selectable(m, i) ||
+                !q2_menu_item_rect(m, i, &x0, &y0, &x1, &y1))
+                continue;
+            if (y < y0 || y > y1)
+                continue;
+            found = i;
+            count++;
+        }
+
+        if (count == 1) {
+            const q2_menu_item *it = &m->page->items[found];
+
+            hit.index = found;
+            /* A choice is the whole row either side of its centre already;
+             * every other row's band is the row itself. */
+            if (it->widget == Q2_WIDGET_CHOICE)
+                hit.part = (x < it->x) ? Q2_MENU_HIT_PREV : Q2_MENU_HIT_NEXT;
+            else
+                hit.part = Q2_MENU_HIT_LABEL;
+        }
+    }
+
     if (out)
         *out = hit;
 

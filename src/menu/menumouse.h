@@ -80,6 +80,11 @@ bool q2_menu_item_rect(const q2_menu *m, int index,
  * a SELECTABLE item: a grey row and the static text above a page's navigable
  * group are drawn but cannot be aimed at, exactly as they cannot be reached
  * with the d-pad (0x80019CC4).
+ *
+ * The text is tried first, so the words of a toggle and the track of a slider
+ * keep their meaning. Off the text, a point still lands on a row when it is
+ * inside that row's band across the whole menu width -- the bar the console
+ * lights spans the viewport -- and no other selectable row's band holds it.
  */
 bool q2_menu_hit_test(const q2_menu *m, int x, int y, q2_menu_hit *out);
 
