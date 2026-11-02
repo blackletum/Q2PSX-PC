@@ -518,6 +518,28 @@ bool q2_player_abandon_tick(s32 *ticks, s32 dt);
  */
 bool q2_player_spend_resupply(int *continues);
 
+/*
+ * What the resupply buys, RestartLevel(1)'s arm at 0x800406EC..0x800407E4. It
+ * edits the "PlayerSave0" record just restored from the level-start copy,
+ * whose fields sit 12 bytes below the client record's (GamePlayerLoadSave
+ * copies client+72..+223 to block+76, and RestartLevel indexes block+16):
+ *
+ *   - every owned weapon from the shotgun to the BFG (ids 2..11 against the
+ *     owned-bit table 0x8009DC2C) lifts its ammo to half the BASE capacity at
+ *     0x8009C5C8, `sll 16 / sra 17`. The bandolier and pack tiers are not
+ *     consulted, and ammo already above half is left alone;
+ *   - health becomes the cap (client+0x48 into the entity's health);
+ *   - an armour class other than combat or body becomes jacket, with the
+ *     combat and body bits cleared and the jacket bit set (0x80040778..A8);
+ *   - armour rises to the JACKET record's maximum, 0x8009C5ED -- whatever
+ *     class is held, so 50 points of body armour is a possible result.
+ *
+ * Keys, powerups and the tier are untouched. The caller restarts the level
+ * with the result; it does not spend the continue (q2_player_spend_resupply).
+ */
+struct q2_inventory;
+void q2_player_resupply(struct q2_inventory *inv);
+
 /* ------------------------------------------------------------------------- */
 /* The death camera's roll                                                    */
 /* ------------------------------------------------------------------------- */

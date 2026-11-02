@@ -3017,11 +3017,13 @@ static void test_disc_native_lifecycle(const char *disc_path, const char *output
     u32 i;
     for (i = 0; i < Q2PSX_ARRAY_COUNT(cases); i++) {
         client *c = open_client(disc_path);
-        q2_native_mission fresh, armed, state;
+        q2_native_mission fresh, armed, state, armed_all;
+        u32 entry_flags;
         int request;
         printf("%s native lifetime: gates, cold saves, refused loads, restart/resupply\n", cases[i].map);
         CHECK(client_load_zone(c, cases[i].map, cases[i].zone));
         fresh = native_module_state(c);
+        entry_flags = c->native_mission.flags;
         switch (i) {
         case 0:
             mission_call(c, "Laser0"); mission_call(c, "Laser1");
@@ -3062,9 +3064,40 @@ static void test_disc_native_lifecycle(const char *disc_path, const char *output
         c->native_mission.flags |= Q2_NATIVE_COMP1;
         CHECK(q2_native_mission_valid(&c->native_mission));
         armed = native_module_state(c);
+        armed_all = c->native_mission;
+        /* RESTART in the session the level was entered in: the module starts
+         * again, and the unit words go back to the level-start copy, which
+         * COMP1 post-dates (RestoreLevelStartState, 0x800806C8). */
+        {
+            u32 serial = c->level_change_serial;
+            q2_native_mission *s = &c->native_mission;
+            q2_native_lift lift[Q2_NATIVE_LIFT_COUNT];
+            c->continues = 2;
+            c->menu.request = Q2_MREQ_RESTART;
+            client_menu_requests(c);
+            CHECK(c->level_change_serial == serial + 1 && c->zone_index == cases[i].zone);
+            state = native_module_state(c);
+            CHECK(!memcmp(&fresh, &state, sizeof(state)));
+            CHECK(c->native_mission.flags == entry_flags);
+            if (i == 0) {
+                const s32 eye[3] = {-2700,-1800,3500}, at[3] = {-1511,-1100,3750};
+                q2_fx_beams_reset(&c->sim[0].fx);
+                client_native_mission_frame(c, false);
+                printf("LAB after restart: sweep phases %d,%d, beams %u\n",
+                    c->native_mission.lab_phase[0], c->native_mission.lab_phase[1], c->sim[0].fx.beam_count);
+                CHECK(!c->sim[0].fx.beam_count);
+                capture_native(c, output, "lab-restart", eye, at);
+                c->sim_enabled = true;
+            }
+            /* Re-arm the same state for the cold save. */
+            memcpy(lift, s->lift, sizeof(lift));
+            *s = armed_all;
+            memcpy(s->lift, lift, sizeof(lift));
+        }
         c = cold_population_save(c, disc_path, output);
         state = native_module_state(c);
         CHECK(!memcmp(&armed, &state, sizeof(state)));
+        armed_all = c->native_mission;
         CHECK(!client_load_zone(c, cases[i].map, 99));
         state = native_module_state(c);
         CHECK(!memcmp(&armed, &state, sizeof(state)));
@@ -3078,41 +3111,181 @@ static void test_disc_native_lifecycle(const char *disc_path, const char *output
         CHECK(client_load_zone(c, cases[i].map, cases[i].zone));
         state = native_module_state(c);
         CHECK(!memcmp(&armed, &state, sizeof(state)));
+        /* After a cold load, the loaded game is the restart point (the
+         * deviation client_apply_save states), module clocks included. */
         for (request = 0; request < 2; request++) {
-            u32 unit_flags = c->native_mission.flags & ~state.flags;
             u32 serial = c->level_change_serial;
+            q2_native_mission loaded = armed_all;
             /* Invoke the real menu request path without a host input device. */
             c->continues = 2;
             c->menu.request = request ? Q2_MREQ_RESUPPLY : Q2_MREQ_RESTART;
             client_menu_requests(c);
             CHECK(c->level_change_serial == serial + 1 && c->zone_index == cases[i].zone);
             CHECK(c->continues == (request ? 1 : 2));
-            state = native_module_state(c);
-            CHECK(!memcmp(&fresh, &state, sizeof(state)));
-            CHECK((c->native_mission.flags & unit_flags) == unit_flags);
-            if (i == 0 && !request) {
-                const s32 eye[3] = {-2700,-1800,3500}, at[3] = {-1511,-1100,3750};
-                q2_fx_beams_reset(&c->sim[0].fx);
-                client_native_mission_frame(c, false);
-                printf("LAB after restart: sweep phases %d,%d, beams %u\n",
-                    c->native_mission.lab_phase[0], c->native_mission.lab_phase[1], c->sim[0].fx.beam_count);
-                CHECK(!c->sim[0].fx.beam_count);
-                capture_native(c, output, "lab-restart", eye, at);
-                c->sim_enabled = true;
-            }
-            if (!request) {
-                /* Re-arm the same pre-reload state to cover resupply too. */
-                q2_native_mission *s = &c->native_mission;
-                q2_native_lift lift[Q2_NATIVE_LIFT_COUNT];
-                memcpy(lift, s->lift, sizeof(lift));
-                *s = armed;
-                s->flags |= unit_flags;
-                memcpy(s->lift, lift, sizeof(lift));
-                state = native_module_state(c);
-            }
+            memcpy(loaded.lift, c->native_mission.lift, sizeof(loaded.lift));
+            CHECK(!memcmp(&loaded, &c->native_mission, sizeof(loaded)));
         }
         close_client(c);
     }
+}
+
+/* Where the player stands on coming back: one frame of the world from the
+ * restored eye. The main loop's per-frame update (the gun coming up, the
+ * status bar) is not part of client_frame; `--restart N` captures those. */
+static void restart_shot(client *c, const char *output, const char *name)
+{
+    char path[1024];
+    if (!output) return;
+    c->frame_index++;
+    q2_screen_tick_dt(&c->screen, 1.0 / 30.0);
+    client_frame(c);
+    snprintf(path, sizeof(path), "%s/%s.ppm", output, name);
+    CHECK(psx_fb_write_ppm(q2_screen_front(&c->screen), path) == Q2_OK);
+}
+
+static bool same_loadout(const q2_inventory *a, const q2_inventory *b)
+{
+    return a->health == b->health && a->armour == b->armour &&
+           a->armour_class == b->armour_class && a->weapons == b->weapons &&
+           a->flags == b->flags && !memcmp(a->ammo, b->ammo, sizeof(a->ammo));
+}
+
+/*
+ * RESTART LEVEL and RESUPPLY AND RESTART return to the copy of save memory the
+ * level was entered with (StoreLevelStartState 0x80080620 at InitLevel's end,
+ * RestoreLevelStartState 0x800806C8 at RestartLevel's start), in the zone and
+ * at the spot the player arrived, with what they arrived carrying -- however
+ * many gates and pickups came after. A resupply tops up the restored record
+ * and does not change the copy. The legacy reload is kept for a session with
+ * no copy and is captured as the "before".
+ */
+static void test_disc_restart(const char *disc_path, const char *output)
+{
+    client *c = open_client(disc_path);
+    q2_inventory entered, *inv = &c->sim[0].combat.inv;
+    s32 pos[3], yaw, entry_time;
+    u32 serial, blocks, flags;
+    bool base2_block;
+
+    printf("restart: the level start, through a zone gate and a death\n");
+    /* Arrive on BASE2 from BASE1 the way a LOADMAP does, carrying a shotgun. */
+    CHECK(client_load_zone(c, "BASE1", 0));
+    CHECK(q2_sim_give_weapon(&c->sim[0], 2));
+    inv->ammo[Q2_AMMO_SHELLS] = 40;
+    inv->health = 64;
+    inv->armour = 25;
+    inv->armour_class = Q2_ARMOUR_JACKET;
+    inv->flags |= Q2_INV_ARMOUR_JACKET;
+    c->carry_player = true;
+    c->carry_same_map = false;
+    CHECK(client_load_zone(c, "BASE2", 0));
+    CHECK(c->autosave_valid);
+    entered = *inv;
+    memcpy(pos, c->sim[0].player[0].pos, sizeof(pos));
+    yaw = c->sim[0].player[0].yaw;
+    entry_time = c->sim[0].level_time;
+    blocks = c->event_store.count;
+    base2_block = q2_event_store_find(&c->event_store, "BASE2") != NULL;
+    flags = c->native_mission.flags;
+    CHECK(entered.weapons & (1u << Q2_WEAPON_SHOTGUN));
+    CHECK(entered.health == 64 && entered.ammo[Q2_AMMO_SHELLS] == 40);
+    printf("restart: entered BASE2 zone 0 at (%d,%d,%d) yaw %d, %d hp, %d shells\n",
+           pos[0], pos[1], pos[2], yaw, entered.health, entered.ammo[Q2_AMMO_SHELLS]);
+
+    /* Play on: a chaingun, a secret, a unit word, then through the gate. */
+    CHECK(q2_sim_give_weapon(&c->sim[0], 5));
+    inv->ammo[Q2_AMMO_BULLETS] = 150;
+    inv->ammo[Q2_AMMO_SHELLS] = 3;
+    c->secrets_found = 1;
+    c->native_mission.flags |= Q2_NATIVE_COMP1;
+    c->carry_player = c->carry_same_map = true;
+    CHECK(client_load_zone(c, "BASE2", 1));
+    CHECK(c->zone_index == 1 && c->autosave.zone == 0);
+    CHECK(q2_event_store_find(&c->event_store, "BASE2") != NULL);
+    inv->health = 0;
+
+    /* RESTART LEVEL, through the real request. */
+    serial = c->level_change_serial;
+    c->continues = 2;
+    c->menu.request = Q2_MREQ_RESTART;
+    client_menu_requests(c);
+    CHECK(c->restarts == 1 && c->level_change_serial == serial + 1);
+    CHECK(c->zone_index == 0 && client_name_eq(c->map, "BASE2"));
+    CHECK(same_loadout(inv, &entered));
+    CHECK(!(inv->weapons & (1u << Q2_WEAPON_CHAINGUN)));
+    CHECK(!memcmp(c->sim[0].player[0].pos, pos, sizeof(pos)));
+    CHECK(c->sim[0].player[0].yaw == yaw);
+    CHECK(c->sim[0].level_time == entry_time);
+    CHECK(c->secrets_found == 0);
+    CHECK(c->native_mission.flags == flags);
+    CHECK(c->event_store.count == blocks);
+    CHECK((q2_event_store_find(&c->event_store, "BASE2") != NULL) == base2_block);
+    CHECK(c->continues == 2);
+    printf("restart: back in zone %d at (%d,%d,%d), %d hp, %d shells, weapons %04X\n",
+           c->zone_index, c->sim[0].player[0].pos[0], c->sim[0].player[0].pos[1],
+           c->sim[0].player[0].pos[2], inv->health, inv->ammo[Q2_AMMO_SHELLS], inv->weapons);
+    restart_shot(c, output, "restart-level-start");
+
+    /* RESUPPLY AND RESTART: the same copy, topped up, and a continue spent. */
+    inv->ammo[Q2_AMMO_SHELLS] = 1;
+    inv->health = 0;
+    c->menu.request = Q2_MREQ_RESUPPLY;
+    client_menu_requests(c);
+    CHECK(c->restarts == 2 && c->continues == 1 && c->zone_index == 0);
+    CHECK(inv->ammo[Q2_AMMO_SHELLS] == 50);
+    CHECK(inv->health == entered.health_max);
+    CHECK(inv->armour == 50 && inv->armour_class == Q2_ARMOUR_JACKET);
+    CHECK(inv->weapons == entered.weapons);
+    CHECK(!memcmp(c->sim[0].player[0].pos, pos, sizeof(pos)));
+    printf("restart: resupplied to %d hp, %d armour, %d shells\n",
+           inv->health, inv->armour, inv->ammo[Q2_AMMO_SHELLS]);
+    restart_shot(c, output, "restart-resupplied");
+
+    /* The top-up went into the restored record, not into the copy. */
+    c->menu.request = Q2_MREQ_RESTART;
+    client_menu_requests(c);
+    CHECK(c->restarts == 3 && same_loadout(inv, &entered));
+
+    /* A loaded game is where a restart returns to afterwards. */
+    c->carry_player = c->carry_same_map = true;
+    CHECK(client_load_zone(c, "BASE2", 1));
+    CHECK(q2_sim_give_weapon(&c->sim[0], 5));
+    inv->health = 41;
+    c = cold_population_save(c, disc_path, output);
+    inv = &c->sim[0].combat.inv;
+    CHECK(c->autosave_valid && c->autosave.zone == 1);
+    entered = *inv;
+    memcpy(pos, c->sim[0].player[0].pos, sizeof(pos));
+    inv->health = 0;
+    c->menu.request = Q2_MREQ_RESTART;
+    client_menu_requests(c);
+    CHECK(c->restarts == 1 && c->zone_index == 1 && same_loadout(inv, &entered));
+    CHECK(!memcmp(c->sim[0].player[0].pos, pos, sizeof(pos)));
+    close_client(c);
+
+    /* And the reload this did before, from the same death: the zone the player
+     * died in, and q2_sim_spawn's bare level-start loadout. */
+    c = open_client(disc_path);
+    inv = &c->sim[0].combat.inv;
+    CHECK(client_load_zone(c, "BASE1", 0));
+    CHECK(q2_sim_give_weapon(&c->sim[0], 2));
+    inv->ammo[Q2_AMMO_SHELLS] = 40;
+    inv->health = 64;
+    c->carry_player = true;
+    c->carry_same_map = false;
+    CHECK(client_load_zone(c, "BASE2", 0));
+    c->carry_player = c->carry_same_map = true;
+    CHECK(client_load_zone(c, "BASE2", 1));
+    inv->health = 0;
+    c->autosave_valid = false;
+    c->menu.request = Q2_MREQ_RESTART;
+    client_menu_requests(c);
+    CHECK(c->restarts == 0 && c->zone_index == 1);
+    CHECK(!(inv->weapons & (1u << Q2_WEAPON_SHOTGUN)));
+    printf("restart: legacy reload, zone %d, %d hp, weapons %04X\n",
+           c->zone_index, inv->health, inv->weapons);
+    restart_shot(c, output, "restart-legacy-reload");
+    close_client(c);
 }
 
 int main(int argc, char **argv)
@@ -3120,6 +3293,8 @@ int main(int argc, char **argv)
     test_synthetic_batch();
     if (argc >= 3 && !strcmp(argv[1], "--native-lifecycle"))
         test_disc_native_lifecycle(argv[2], argc >= 4 ? argv[3] : NULL);
+    if (argc >= 3 && !strcmp(argv[1], "--restart"))
+        test_disc_restart(argv[2], argc >= 4 ? argv[3] : NULL);
     if (argc >= 3 && !strcmp(argv[1], "--native-sweeps"))
         test_disc_native_sweeps(argv[2], argc >= 4 ? argv[3] : NULL);
     if (argc >= 3 && !strcmp(argv[1], "--security-orb"))

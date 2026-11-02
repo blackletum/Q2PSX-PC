@@ -53,6 +53,7 @@ static void close_client(client *c)
     if (c->sfx_ready) q2_sound_bank_free(&c->sfx);
     if (c->level_table_ready) q2_level_table_free(&c->level_table);
     q2_save_free(&c->snapshot);
+    q2_save_free(&c->autosave);
     q2_event_store_free(&c->event_store);
     q2_zone_history_free(&c->zone_history);
     q2_gib_attach(NULL);

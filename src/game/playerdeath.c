@@ -3,7 +3,9 @@
  * every number in here comes from.
  */
 #include "playerdeath.h"
+#include "inventory.h"
 #include "random.h"
+#include "weapontables.h"
 
 #include "modelent.h"      /* q2_gib_player_body: 0x80039578 / 0x8003E2A4 */
 #include "monster.h"       /* the dissolve gate 0x8005B2A8, shared with the
@@ -525,6 +527,44 @@ bool q2_player_spend_resupply(int *continues)
     /* 0x8001FF0C. */
     *continues -= 1;
     return true;
+}
+
+void q2_player_resupply(q2_inventory *inv)
+{
+    const q2_weapon_tables *wt = q2_weapon_tables_builtin();
+    int id;
+
+    if (!inv || !wt)
+        return;
+
+    /* 0x800406F4..0x80040774: ids 2..11, the owned-bit and ammo-type tables
+     * indexed by id, the base-tier capacity halved. */
+    for (id = 2; id < Q2_WT_SLOTS && id <= 11; id++) {
+        s32 type = wt->ammo_type[id];
+        s16 half;
+
+        if (!(inv->weapons & wt->owned_bit[id]) || type < 0 ||
+            type >= Q2_AMMO_COUNT)
+            continue;
+        half = (s16)(q2_ammo_max[Q2_AMMO_TIER_BASE][type] >> 1);
+        if (inv->ammo[type] < half)
+            inv->ammo[type] = half;
+    }
+
+    /* 0x80040778..0x8004078C: the entity's health from the cap. */
+    inv->health = inv->health_max;
+
+    /* 0x80040780..0x800407AC: `class - 1 < 2` unsigned keeps combat and body. */
+    if ((u8)(inv->armour_class - 1) >= 2) {
+        inv->armour_class = Q2_ARMOUR_JACKET;
+        inv->flags = (inv->flags & ~(u32)(Q2_INV_ARMOUR_BODY |
+                                          Q2_INV_ARMOUR_COMBAT)) |
+                     Q2_INV_ARMOUR_JACKET;
+    }
+
+    /* 0x800407B0..0x800407D8: against the jacket record whatever is held. */
+    if (inv->armour < wt->armour[Q2_ARMOUR_JACKET].max_count)
+        inv->armour = wt->armour[Q2_ARMOUR_JACKET].max_count;
 }
 
 /* ------------------------------------------------------------------------- */

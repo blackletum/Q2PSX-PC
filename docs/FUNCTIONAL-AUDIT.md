@@ -45,6 +45,7 @@ does not claim whole-game equivalence to a hardware capture.
 | Sound effects bypassed native Gaussian filtering and envelopes | Voices now run the SPU predictor, Gaussian filter, pitch accumulator and ADSR at 44,100 Hz, with release tails and immediate logical-slot reuse. Twenty-eight published hardware capture cases match after documented phase alignment. The host output conversion and unmeasured SPU transitions remain open in the audio audit. |
 | Music and movies used the wrong CD gain scale | The CD matrix now uses 128 as unity and the mixer applies the native CD-input and main-volume gains. All 512 stereo/volume register combinations are checked against executed PAL SDK code. Independent final-output amplitude and clipping measurements remain open. |
 | The mixer downsampled native voices and omitted CD interpolation | Mixing now remains at 44,100 Hz, with native voice consumption and the CD's seven-phase, 25-tap XA interpolation. Movie scheduling/fades use the same output clock. The software reference, full suite and disc sweep pass; independent XA waveform and device-output measurements remain open. |
+| RESTART LEVEL reloaded the zone the player died in, with the blaster, and RESUPPLY did the same | Both now restore the copy of save memory taken when the level was last fully loaded. That brings back the arrival zone, position and facing, the carried inventory and every zone's script, population, tallies and mission words. RESUPPLY tops up the restored record as `RestartLevel(1)` does. Settings, cheat level, skill, continues and the random generators carry on (2 November section). |
 
 The controller ownership follows the per-player 34-byte records used by
 `0x8001C81C`, the pauser selection at `0x8001C9B4`, and the vibration reader at
@@ -1360,6 +1361,113 @@ check; a control build with the composition removed fails five of them.
 BASE1 — pad added, frames drawn, pad removed, four frames held with the page
 still up, pad back, pause page — and writes the three captures. All 73 CTests
 pass, and the menu suites pass on PAL and US.
+
+## RESTART LEVEL and the level-start copy, 2 November
+
+This was found by a symbol-table census that also counted a function as covered
+when any address inside it is cited. `ReloadAutoSave` (QUAKE.C `0x800400A8`,
+1,376 bytes) was cited nowhere, by name or by address. It turned out to be the
+whole of RESTART LEVEL, and the port's version of that row did something else.
+
+**What the console does.** The death and pause pages park 21 (RESTART) and 20
+(RESUPPLY) at `0x8001FE48` / `0x8001FEEC`. QuakeLoop's tail runs OnLeavingZone
+(`0x80039138` → `0x8007CB8C` → `0x80078D1C`), which writes the dying zone's
+blocks as any exit would. The outer loop then calls `RestartLevel(0)` or
+`RestartLevel(1)` (`0x80018788` / `0x8001876C`). `RestartLevel` (`0x80040608`):
+
+- calls `RestoreLevelStartState` (`0x800806C8`), copying 7,168 bytes from
+  `0x800E47A0` back over save memory at `0x800E65A0`, which overwrites the
+  blocks just written;
+- for a resupply only, opens `"PlayerSave0"` and edits it (below);
+- calls `ReloadAutoSave`.
+
+`ReloadAutoSave` reads the restored record: the level name at block+28, the
+position at block+52..60 (y raised 286), the yaw at block+66 and the zone digit
+at block+20. It builds a synthetic start position named "Reload Start" at
+`0x800C8CB4`, makes that the arrival, and sets the state word to 3, so the
+reload's OnLeavingZone writes nothing (`0x80078D58`).
+
+The copy is `StoreLevelStartState` (`0x80080620`). InitLevel calls it at
+`0x80070F94`, after OnLoadZone, on every full load: a new game, a LOADMAP or a
+unit change. `0x80070F80..0x80070F8C` skips it when the arrival reads "Reload
+Start", so a restart's reload keeps its copy. A zone gate never reaches it:
+LoadZone (`0x8007901C`) is OnLeavingZone and ReloadLevelData, and InitLevel is
+not part of that. Restart therefore returns to the level's start, in whichever
+zone the player died. `InitialiseQuakePlayer` writes `PlayerSave0` back after
+spawning (`GamePlayerLoadSave(…, 1)` at `0x8003B6B0`), so the copy holds the
+arrival point. Save memory carries every map's EVE_ blocks, the creature
+batches, the unit's mission words, and the player record. That record holds
+client+72..+223 at block+76, the entity's health, position and angles, the
+level-clock word `0x800B29D4` at block+380, and the six tally rows at
+block+228.
+
+**What the resupply edits.** `RestartLevel` indexes block+16, so its offsets are
+the client record's minus 12 (`0x800406EC..0x800407E4`):
+
+- for ids 2..11 whose owned bit (`0x8009DC2C`) is set, ammo of the id's type
+  (`0x8009DC5C`) is raised to half the BASE capacity at `0x8009C5C8`
+  (`sll 16 / sra 17`); the tier is never read;
+- health is set from the cap (client+0x48);
+- a class byte other than 1 or 2 becomes jacket, with flags `& ~0x6000 | 0x1000`;
+- armour rises to the jacket record's maximum (`0x8009C5ED`, 50), whatever the
+  class.
+
+**What the port did.** It reloaded `c->zone_index`, the zone the player died
+in, with the carry flags down. `q2_sim_spawn` then handed out the blaster and
+100 health, except on the map the session was launched into, where the derived
+launch loadout stood in. The arrival rule placed the player at that zone's
+first start position whenever the arrival lay in another zone. The dying
+zone's event block was carried into the reload, so doors and spent records
+stayed as they were at death. RESUPPLY spent a continue and then took the same
+path.
+
+**What it does now.** `client_load_zone` captures a saved game into
+`c->autosave` at the end of every full load in single player. It skips zone
+gates, saved-game and restart reloads, the front end and matches. The resident
+zone is stashed into a scratch history, not the live one. RESTART and RESUPPLY
+apply that save through `client_apply_save`, the card-load path, as the console
+does. For a resupply, `q2_player_resupply` edits the save's inventory for the
+duration of the apply and the copy is put back. What save memory does not hold
+carries on: settings, cheat level, skill, the continues byte `0x800B335D`, and
+the three random streams.
+
+DEVIATION, stated: after a game is loaded from a file, a restart returns to
+the loaded game. The console's card load is `ReloadAutoSave` too, so it also
+skips the copy. A restart would then restore whatever the last full load left
+at `0x800E47A0`: another level, or QFRONT's save memory when the game was
+loaded from the title. In the second case `ReloadAutoSave` finds no record, and
+the loaded level is rebuilt from empty save memory at the card's position.
+Module clocks follow the port's existing saved-game policy for that case.
+
+Validation: `test_playerdeath` pins the top-up arithmetic. The new
+`test_client_population --restart` arrives on BASE2 from BASE1 carrying a
+shotgun, picks up a chaingun, gains a secret and a unit word, goes through the
+zone-1 gate and dies. It then checks that RESTART restores the zone, position,
+yaw, clock, loadout, secrets, mission words and event store. It checks that
+RESUPPLY tops up the same record, that a third restart gets the un-topped
+record, that a cold-loaded save becomes the restart point, and that the legacy
+reload kept for a session with no copy still lands in zone 1 with the blaster.
+It passes on PAL and US. The native-lifecycle test now asserts that an
+in-session restart rolls back a unit word set after entry, and that a restart
+after a cold load keeps the loaded module state. All 73 CTests pass, as do every
+`test_client_population` mode and `test_client_save --headless` on PAL. The
+whole-disc `check_headless_disc.py --quick` sweep passes 163 of 163 on PAL. A
+real-client run, `--map BASE2 --headless --demo --restart 360`, takes the HUD
+from 97/48/28 back to the launch loadout's 102/50/28 at the entry point, with
+zero errors and zero warnings. Captures are under
+`.agents/tmp/functional-parity/restart/`.
+
+**Census residues checked and found not to be gaps.** These names came up in
+the same sweep and need no work:
+
+- `monster_use` (`0x80062354`) is installed at entity+0x9C by `monster_start`,
+  but no game code loads that field back. Only LevelBin modules call an actor's
+  use, and the BOSS1 and LAB callers are the scripted RiderStand and DeadComm.
+- `monster_triggered_spawn` (`0x800623D4`) is a bare `jr ra`.
+- `IsEnergyWeapon` (`0x8005B8FC`) has no caller.
+- The six `PrintMissionDetails` only print, through `PrintIdentityName` and
+  `PrintBool`. The `InitMission*` functions that install them were not read.
+- The `PSXB3ROCKS` family is bound, but no map declares it (userfuncs.h).
 
 ## Limits
 

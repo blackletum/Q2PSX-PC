@@ -785,6 +785,82 @@ static void test_resupply_is_spent(void)
     CHECK(n == 0, "an empty resupply wrapped to %d", n);
 }
 
+/*
+ * And what it buys: RestartLevel(1)'s edit of the restored PlayerSave0 record,
+ * 0x800406EC..0x800407E4. Half the BASE capacity for every owned weapon's ammo,
+ * health to the cap, jacket armour unless combat or body is held, and armour
+ * to the jacket record's 50 whatever the class.
+ */
+static void test_resupply_tops_up_the_level_start(void)
+{
+    q2_inventory inv, top;
+
+    q2_inventory_init(&inv);
+    inv.health     = 7;
+    inv.health_max = 103;      /* an adrenaline cap is the one restored */
+    inv.ammo_tier  = Q2_AMMO_TIER_PACK;
+    inv.weapons    = (u16)((1u << Q2_WEAPON_BLASTER) |
+                           (1u << Q2_WEAPON_SHOTGUN) |
+                           (1u << Q2_WEAPON_CHAINGUN) |
+                           (1u << Q2_WEAPON_HAND_GRENADE) |
+                           (1u << Q2_WEAPON_RAILGUN));
+    inv.ammo[Q2_AMMO_SHELLS]   = 12;   /* -> 50, half of the base 100        */
+    inv.ammo[Q2_AMMO_BULLETS]  = 160;  /* above half of 200: left alone      */
+    inv.ammo[Q2_AMMO_GRENADES] = 0;    /* -> 25: the hand grenade owns a bit */
+    inv.ammo[Q2_AMMO_ROCKETS]  = 3;    /* no launcher owned: untouched       */
+    inv.ammo[Q2_AMMO_CELLS]    = 0;    /* nothing draws cells: untouched     */
+    inv.ammo[Q2_AMMO_SLUGS]    = 30;   /* above half of 50                    */
+    inv.flags        = Q2_KEY_RED;
+    inv.armour       = 0;
+    inv.armour_class = Q2_ARMOUR_JACKET;
+    inv.quad_until   = 1234;
+
+    top = inv;
+    q2_player_resupply(&top);
+    CHECK(top.ammo[Q2_AMMO_SHELLS] == 50, "shells %d", top.ammo[Q2_AMMO_SHELLS]);
+    CHECK(top.ammo[Q2_AMMO_BULLETS] == 160, "bullets %d", top.ammo[Q2_AMMO_BULLETS]);
+    CHECK(top.ammo[Q2_AMMO_GRENADES] == 25, "grenades %d", top.ammo[Q2_AMMO_GRENADES]);
+    CHECK(top.ammo[Q2_AMMO_ROCKETS] == 3, "rockets %d", top.ammo[Q2_AMMO_ROCKETS]);
+    CHECK(top.ammo[Q2_AMMO_CELLS] == 0, "cells %d", top.ammo[Q2_AMMO_CELLS]);
+    CHECK(top.ammo[Q2_AMMO_SLUGS] == 30, "slugs %d", top.ammo[Q2_AMMO_SLUGS]);
+    CHECK(top.health == 103, "health %d", top.health);
+    CHECK(top.armour == 50 && top.armour_class == Q2_ARMOUR_JACKET,
+          "armour %d class %d", top.armour, top.armour_class);
+    CHECK(top.flags == (Q2_KEY_RED | Q2_INV_ARMOUR_JACKET), "flags %08X",
+          (unsigned)top.flags);
+    CHECK(top.weapons == inv.weapons && top.quad_until == 1234 &&
+          top.ammo_tier == Q2_AMMO_TIER_PACK, "something else moved");
+
+    /* Combat and body keep their class and bits; the floor is still 50. */
+    inv.armour_class = Q2_ARMOUR_COMBAT;
+    inv.armour       = 10;
+    inv.flags        = Q2_INV_ARMOUR_COMBAT;
+    top = inv;
+    q2_player_resupply(&top);
+    CHECK(top.armour == 50 && top.armour_class == Q2_ARMOUR_COMBAT &&
+          top.flags == Q2_INV_ARMOUR_COMBAT, "combat: %d class %d flags %08X",
+          top.armour, top.armour_class, (unsigned)top.flags);
+
+    inv.armour_class = Q2_ARMOUR_BODY;
+    inv.armour       = 120;
+    inv.flags        = Q2_INV_ARMOUR_BODY;
+    top = inv;
+    q2_player_resupply(&top);
+    CHECK(top.armour == 120 && top.armour_class == Q2_ARMOUR_BODY &&
+          top.flags == Q2_INV_ARMOUR_BODY, "body: %d class %d flags %08X",
+          top.armour, top.armour_class, (unsigned)top.flags);
+
+    /* A class byte past body is not 1 or 2, so it becomes jacket. */
+    inv.armour_class = 3;
+    inv.armour       = 80;
+    inv.flags        = Q2_INV_ARMOUR_BODY | Q2_INV_ARMOUR_COMBAT;
+    top = inv;
+    q2_player_resupply(&top);
+    CHECK(top.armour == 80 && top.armour_class == Q2_ARMOUR_JACKET &&
+          top.flags == Q2_INV_ARMOUR_JACKET, "class 3: %d class %d flags %08X",
+          top.armour, top.armour_class, (unsigned)top.flags);
+}
+
 
 /* ------------------------------------------------------------------------- */
 /* Nobody is driving                                                          */
@@ -978,6 +1054,7 @@ int main(void)
     test_the_corpse_slows_down();
     test_the_walk_back_to_the_front_end();
     test_resupply_is_spent();
+    test_resupply_tops_up_the_level_start();
     test_the_death_camera_rolls_over();
     test_a_corpse_is_not_driven_by_the_pad();
     test_the_view_weapon_is_freed_with_the_player();

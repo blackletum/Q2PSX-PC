@@ -587,6 +587,7 @@ typedef struct client {
     u32              popup_opens;
     s32              popup_at_frame;   /* --objectives N; 0 is off */
     s32              pause_at_frame;   /* --pause N; 0 is off */
+    s32              restart_at_frame; /* --restart N; 0 is off */
     q2_prompt_bar    prompts;
 
     /*
@@ -682,6 +683,20 @@ typedef struct client {
      * because q2_save_ui borrows it and the capture needs the whole client —
      * the sim, the mission tallies and the menu settings. */
     q2_save          snapshot;
+
+    /*
+     * THE LEVEL-START STATE, which RESTART LEVEL and RESUPPLY AND RESTART go
+     * back to. InitLevel copies all 7,168 bytes of save memory at 0x800E65A0
+     * to 0x800E47A0 through StoreLevelStartState (0x80080620, called from
+     * 0x80070F94) on every full level load, and RestartLevel (0x80040608)
+     * copies them back (0x800806C8) before reloading through ReloadAutoSave
+     * (0x800400A8) -- the same reload a memory-card load uses. See
+     * client_autosave_store and client_restart_level.
+     */
+    q2_save          autosave;
+    bool             autosave_valid;
+    bool             restarting;         /* only while `autosave` is applied */
+    u32              restarts;           /* report.level.restarts            */
 
     /*
      * The item table — 64 records, the 55-slot touch dispatch and the eleven
@@ -5019,6 +5034,8 @@ static bool client_mp_respawn(client *c, int pi)
  * reads the same offsets.
  */
 static bool client_load_zone(client *c, const char *map, int index);
+static void client_autosave_store(client *c);
+static bool client_restart_level(client *c, bool resupply);
 
 /* Deferred script work must retain the entity passed to the CALL dispatcher.
  * Several players can enter different teleport volumes on the same frame. */
@@ -8302,12 +8319,13 @@ static bool client_load_zone(client *c, const char *map, int index)
      * block gets nothing: 0x80029498 falls straight out when OpenSaveMemory
      * returns zero, and `size` 0 is how that is said here.
      *
-     * NOT MODELLED: OnLeavingZone also declines to write when the game-state
-     * word 0x800B2E28 reads 3 (0x80078D58), which is the arm the menu takes at
-     * 0x8001F994 when the parked code is 3 — an autosave reload rather than a
-     * transition. RESTART LEVEL parks 21 and is NOT that arm, so it writes the
-     * block like any other exit; the port has no autosave reload to hang the
-     * exclusion on, so it is left out rather than guessed at.
+     * OnLeavingZone also declines to write when the game-state word
+     * 0x800B2E28 reads 3 (0x80078D58), which ReloadAutoSave sets (0x80040230)
+     * for a memory-card load and for a restart's reload. A restart's death
+     * still writes its block at QuakeLoop's tail (0x80039138), but
+     * RestoreLevelStartState then puts the level-start copy over it. Both
+     * arrive here as `restoring_save`, which skips the write above and has
+     * already replaced the store with the save's own (client_restart_level).
      */
     c->carry_events.size = 0;
     if (!c->mp_enabled) {
@@ -10349,6 +10367,17 @@ static bool client_load_zone(client *c, const char *map, int index)
     }
 
     c->loads_done++;
+
+    /*
+     * And the copy RESTART LEVEL returns to: StoreLevelStartState at the end
+     * of InitLevel (client_autosave_store). Not at a gate inside one map,
+     * which never runs InitLevel, and not while a save or a restart is being
+     * applied, whose reload arrives at "Reload Start" -- client_apply_save
+     * decides for those. A match and the front end have no restart to serve.
+     */
+    if (!same_map_transition && !c->restoring_save && !c->mp_enabled &&
+        !c->in_front_end)
+        client_autosave_store(c);
     return true;
 }
 
@@ -14628,7 +14657,9 @@ static void client_campaign_complete(client *c)
 
 static void client_menu_requests(client *c)
 {
-    switch (q2_menu_take_request(&c->menu)) {
+    q2_menu_request request = q2_menu_take_request(&c->menu);
+
+    switch (request) {
     case Q2_MREQ_RESUME:
         client_install_game_variables(c);
         break;
@@ -14645,9 +14676,22 @@ static void client_menu_requests(client *c)
             Q2_WARN("resupply: none left — the row should have been greyed");
         q2_menu_set_resupplies(&c->menu, c->continues);
         Q2_INFO("resupply: %d left", c->continues);
+        if (client_restart_level(c, true)) {
+            client_menu_close(c);
+            break;
+        }
         /* fall through: what it does after spending one is restart the level */
         /* FALLTHROUGH */
     case Q2_MREQ_RESTART:
+        /*
+         * Back to the level start (client_restart_level). What follows is the
+         * reload this did before that existed, kept for a session with no
+         * level start to return to.
+         */
+        if (request == Q2_MREQ_RESTART && client_restart_level(c, false)) {
+            client_menu_close(c);
+            break;
+        }
         Q2_INFO("restarting %s zone %d", c->map, c->zone_index);
         /*
          * A RESTART IS NOT A TRANSITION, and the carry flags must be down
@@ -15478,41 +15522,41 @@ static void client_entity_events(client *c)
  * tallies, which the HUD owns, and the menu settings, which the pause menu
  * edits and which state 14 "applies" on the console (memcard.h).
  */
-static bool client_capture(client *c)
+static bool client_capture_into(client *c, q2_save *out, q2_zone_history *history)
 {
     q2_result rc;
 
-    q2_save_free(&c->snapshot);
+    q2_save_free(out);
 
-    rc = q2_save_capture(&c->snapshot, &c->sim[0], NULL, c->build.serial,
+    rc = q2_save_capture(out, &c->sim[0], NULL, c->build.serial,
                          c->map, c->zone_index);
     if (rc != Q2_OK) {
         Q2_ERROR("cannot capture a save: %s", q2_result_str(rc));
         return false;
     }
 
-    rc = q2_save_capture_event_history(&c->snapshot, &c->event_store);
+    rc = q2_save_capture_event_history(out, &c->event_store);
     if (rc != Q2_OK) {
         Q2_ERROR("cannot capture script history: %s", q2_result_str(rc));
-        q2_save_free(&c->snapshot);
+        q2_save_free(out);
         return false;
     }
 
-    c->snapshot.native_mission_present = true;
+    out->native_mission_present = true;
     client_native_lifts_capture(c);
-    c->snapshot.native_mission = c->native_mission;
-    q2_save_capture_mission(&c->snapshot, &c->mission);
-    rc = q2_zone_history_capture(&c->zone_history, c->map, c->zone_index,
+    out->native_mission = c->native_mission;
+    q2_save_capture_mission(out, &c->mission);
+    rc = q2_zone_history_capture(history, c->map, c->zone_index,
                                   &c->sim[0], c->creatures_ready ? &c->creatures : NULL,
                                   c->cre_actor, c->cre_anim, (u32)(c->ai_accum * 1000000.0 + 0.5));
     if (rc == Q2_OK)
-        rc = q2_zone_history_copy(&c->snapshot.zone_history, &c->zone_history);
+        rc = q2_zone_history_copy(&out->zone_history, history);
     if (rc != Q2_OK) {
         Q2_ERROR("cannot save zone populations: %s", q2_result_str(rc));
-        q2_save_free(&c->snapshot);
+        q2_save_free(out);
         return false;
     }
-    c->snapshot.zone_history_present = true;
+    out->zone_history_present = true;
     /*
      * ...and the help computer's current message pair, as the two Strings KEYS
      * it was resolved from. `HelpComputer_GetMessages` (0x800218A8) copies
@@ -15521,7 +15565,7 @@ static bool client_capture(client *c)
      * of a saved game and not session scratch. Without it a reload showed the
      * shipped "Awaiting Orders." however far into the unit the save was taken.
      */
-    q2_save_set_help_keys(&c->snapshot, c->popup.orders_key,
+    q2_save_set_help_keys(out, c->popup.orders_key,
                           c->popup.objective_key);
     /*
      * ...and the live counters the row's first column is a copy of. The row
@@ -15558,37 +15602,152 @@ static bool client_capture(client *c)
                 lc.zone_placed[z] = c->cre_in_zone;
         }
 
-        q2_save_set_level_counters(&c->snapshot, &lc);
+        q2_save_set_level_counters(out, &lc);
     }
     /* The doors, which the client owns rather than the sim. Without them a
      * reload shuts every one the player opened AND cannot reopen it: the
      * script flags are carried, so the record that opened it has run. */
     if (c->movers_ready)
-        q2_save_capture_movers(&c->snapshot, &c->movers);
+        q2_save_capture_movers(out, &c->movers);
     if (c->rotators_ready &&
-        q2_save_capture_rotators(&c->snapshot, &c->rotators) != Q2_OK) {
+        q2_save_capture_rotators(out, &c->rotators) != Q2_OK) {
         Q2_ERROR("cannot capture rotating brushes");
         return false;
     }
     /* And who is dead: without this a save reloads into a room the player has
      * already cleared, full again. */
     if (c->creatures_ready) {
-        q2_save_capture_creatures(&c->snapshot, &c->creatures.set);
-        if (q2_save_capture_ai(&c->snapshot, &c->creatures,
+        q2_save_capture_creatures(out, &c->creatures.set);
+        if (q2_save_capture_ai(out, &c->creatures,
                 (u32)(c->ai_accum * 1000000.0 + 0.5)) != Q2_OK) {
             Q2_ERROR("cannot capture creature behavior");
             return false;
         }
     }
-    q2_save_set_settings(&c->snapshot, c->settings.v, Q2_SET_COUNT);
-    c->snapshot.cheat_level_present = true;
-    c->snapshot.cheat_level = (u8)c->menu.cheat_level;
-    if (c->vm_ready && q2_save_capture_viewweapon(&c->snapshot, &c->vw[0],
+    q2_save_set_settings(out, c->settings.v, Q2_SET_COUNT);
+    out->cheat_level_present = true;
+    out->cheat_level = (u8)c->menu.cheat_level;
+    if (c->vm_ready && q2_save_capture_viewweapon(out, &c->vw[0],
             c->vw_last_weapon[0], c->shot_serial_shown[0],
             c->shot_serial_heard[0], c->cock_pending[0]) != Q2_OK) {
         Q2_ERROR("cannot capture view weapon");
         return false;
     }
+    return true;
+}
+
+static bool client_capture(client *c)
+{
+    return client_capture_into(c, &c->snapshot, &c->zone_history);
+}
+
+/*
+ * StoreLevelStartState, 0x80080620: the 7,168 bytes of save memory at
+ * 0x800E65A0 copied whole to 0x800E47A0. InitLevel calls it at 0x80070F94,
+ * after OnLoadZone, on every full level load -- a new game, a LOADMAP, a unit
+ * change -- with one exception: 0x80070F80..0x80070F8C skips it when the
+ * arrival name at 0x800C8CD0 reads "Reload Start", which is what
+ * ReloadAutoSave writes (0x80040338..0x80040370), so the reload a restart
+ * performs keeps the copy it was restored from. A zone gate never reaches it:
+ * LoadZone (0x8007901C) is OnLeavingZone and ReloadLevelData, not InitLevel.
+ *
+ * Save memory is where the console keeps everything a level can be returned
+ * to: every map's EVE_ blocks, the creature batches, the unit's mission words
+ * and the "PlayerSave0" record, which InitialiseQuakePlayer writes back
+ * (0x8003B6B0) after placing the player -- inventory, health, armour,
+ * position, facing, the level clock word 0x800B29D4 at block+380 and the six
+ * tally rows at block+228. The port holds the same state in a saved game, so
+ * the copy is one, taken where the console takes its own. The resident zone is
+ * stashed into a scratch history, not the live one.
+ */
+static void client_autosave_store(client *c)
+{
+    q2_zone_history scratch = {0};
+
+    c->autosave_valid = false;
+    if (q2_zone_history_copy(&scratch, &c->zone_history) != Q2_OK) {
+        Q2_ERROR("cannot keep the level start of %s", c->map);
+        return;
+    }
+    c->autosave_valid = client_capture_into(c, &c->autosave, &scratch);
+    q2_zone_history_free(&scratch);
+    if (c->autosave_valid)
+        Q2_DEBUG("level start kept: %s zone %d, %d hp, weapons %04X", c->map,
+                 c->zone_index, c->autosave.inventory.health,
+                 c->autosave.inventory.weapons);
+}
+
+static bool client_apply_save(client *c, const q2_save *s);
+
+/*
+ * RESTART LEVEL and RESUPPLY AND RESTART are one function with one argument.
+ * The pages park 21 and 20 (0x8001FE48 / 0x8001FEEC), the outer loop calls
+ * RestartLevel(0) and RestartLevel(1) for them (0x80018788 / 0x8001876C), and
+ * RestartLevel (0x80040608) is
+ *
+ *     0x80040614  RestoreLevelStartState -- save memory back to the copy
+ *     0x800406DC  OpenSaveMemory("PlayerSave0")
+ *     0x800406EC  resupply only: top that record up (q2_player_resupply)
+ *     0x800407E8  ReloadAutoSave         -- the memory-card load's reload
+ *
+ * QuakeLoop's tail has already run OnLeavingZone (0x80039138) by then, so the
+ * blocks it wrote for the zone the player died in are overwritten by the
+ * restore: nothing done since the level was entered survives, in any zone.
+ * ReloadAutoSave reads the level, zone, position and yaw back out of the
+ * restored record (0x800401F0..0x80040240) and sets the state word to 3, so
+ * the reload's own OnLeavingZone declines to write (0x80078D58).
+ *
+ * The port applies the level-start save through the path a saved game takes,
+ * which is the console's arrangement too. What is not in save memory carries
+ * on instead of rewinding: the settings, cheat level and skill (engine
+ * variables, installed by 0x8001C698), the continues byte 0x800B335D, and the
+ * random generators.
+ */
+static bool client_restart_level(client *c, bool resupply)
+{
+    q2_save *s = &c->autosave;
+    q2_inventory entered;
+    u32 rng, fx_rng, game_rng;
+    bool game_rng_present, ok;
+
+    if (!c->autosave_valid || c->mp_enabled)
+        return false;
+    entered          = s->inventory;
+    rng              = s->rng_state;
+    fx_rng           = s->fx_rng_state;
+    game_rng         = s->game_rng_state;
+    game_rng_present = s->game_rng_present;
+
+    /* The top-up goes into the live block after the restore, not into the
+     * copy at 0x800E47A0, so a later plain restart still returns the record
+     * the level was entered with. */
+    if (resupply)
+        q2_player_resupply(&s->inventory);
+    s->rng_state        = c->sim[0].combat.rng.state;
+    s->fx_rng_state     = c->sim[0].fx_rng.state;
+    s->game_rng_state   = q2_random_state();
+    s->game_rng_present = true;
+
+    /* A board that was up must not survive the restart, or the player comes
+     * back alive standing behind it. */
+    c->mission_open  = false;
+    c->briefing_open = false;
+    c->restarting    = true;
+    ok = client_apply_save(c, s);
+    c->restarting    = false;
+
+    s->inventory        = entered;
+    s->rng_state        = rng;
+    s->fx_rng_state     = fx_rng;
+    s->game_rng_state   = game_rng;
+    s->game_rng_present = game_rng_present;
+    if (!ok)
+        return false;
+    c->restarts++;
+    Q2_INFO("%s: back to the level start, %s zone %d: %d hp, %d armour, "
+            "weapons %04X", resupply ? "resupply" : "restart", c->map,
+            c->zone_index, c->sim[0].combat.inv.health,
+            c->sim[0].combat.inv.armour, c->sim[0].combat.inv.weapons);
     return true;
 }
 
@@ -15641,7 +15800,7 @@ static bool client_apply_save(client *c, const q2_save *s)
     c->carry_same_map = false;
     c->carry_inv = s->inventory;  /* Mover settling during replay uses saved keys. */
     /* SpawnGeneral filters Population before the creature set is built. */
-    if (q2_save_get_skill(s, &saved_skill))
+    if (!c->restarting && q2_save_get_skill(s, &saved_skill))
         q2_cre_set_skill(saved_skill);
 
     /* Game saves are single-player. LOAD GAME can be entered from QFRONT, so
@@ -15707,21 +15866,22 @@ static bool client_apply_save(client *c, const q2_save *s)
         }
     }
 
-    q2_menu_set_cheat_level(&c->menu, s->cheat_level_present ? s->cheat_level : 0);
     /* The settings travel with the save, and applying them is what states 14
-     * and 16 do on the console (0x8001C698, the GAME VARIABLES application). */
-    {
+     * and 16 do on the console (0x8001C698, the GAME VARIABLES application).
+     * A restart's copy is save memory alone, which holds neither. */
+    if (!c->restarting) {
         s16 v[Q2_SET_COUNT];
         q2_menu_settings defaults;
         u32 n = q2_save_get_settings(s, v, (u32)Q2_SET_COUNT);
         u32 k;
+        q2_menu_set_cheat_level(&c->menu, s->cheat_level_present ? s->cheat_level : 0);
         q2_menu_settings_defaults(&defaults);
         for (k = n; k < Q2_SET_COUNT; k++)
             c->settings.v[k] = defaults.v[k];
         for (k = 0; k < n; k++)
             c->settings.v[k] = v[k];
+        client_apply_settings(c);
     }
-    client_apply_settings(c);
 
     q2_save_apply_mission(s, &c->mission);
     /*
@@ -15811,7 +15971,7 @@ static bool client_apply_save(client *c, const q2_save *s)
                                 &c->creatures, c->cre_actor, c->cre_anim, &phase_us);
         c->ai_accum = (double)phase_us / 1000000.0;
     }
-    if (q2_save_get_skill(s, &saved_skill)) c->menu.skill = saved_skill;
+    if (!c->restarting && q2_save_get_skill(s, &saved_skill)) c->menu.skill = saved_skill;
 
     /*
      * AND THE LIVE COUNTERS, which the restore used to destroy.
@@ -15911,6 +16071,20 @@ static bool client_apply_save(client *c, const q2_save *s)
     c->cam.pos[2] = eye[2];
     c->cam.yaw    = c->sim[0].player[0].yaw;
     c->cam.pitch  = c->sim[0].player[0].pitch;
+
+    /*
+     * DEVIATION, stated: a game loaded from a file becomes the point a restart
+     * returns to. The console's card load is ReloadAutoSave as well, so its
+     * "Reload Start" arrival skips StoreLevelStartState too, and the copy at
+     * 0x800E47A0 stays whatever the last full load left there -- the level
+     * played before the load, or QFRONT's when loading from the title. A
+     * restart would then return to that other level, or find no PlayerSave0
+     * block and rebuild the loaded level with an empty save memory. The port
+     * keeps what was loaded instead. A restart's own reload keeps its copy,
+     * which is the console's rule.
+     */
+    if (!c->restarting)
+        client_autosave_store(c);
 
     Q2_INFO("loaded %s zone %d at %d:%02d",
             s->map, (int)s->zone,
@@ -20549,6 +20723,7 @@ static void usage(void)
     printf("  --screen-pos X Y  override SCREEN POSITION (-20..20, -32..64)\n");
     printf("  --powerup KIND hold quad|invuln|enviro|breather for HUD capture\n");
     printf("  --pause N     press START at frame N: the pause menu, for capture\n");
+    printf("  --restart N   take RESTART LEVEL at frame N, for capture\n");
     printf("  --fire-event NAME [F]  queue ONE named Events entry point at\n"
            "                frame F, instead of every trigger volume on the\n"
            "                map. Level authors name the interesting ones\n"
@@ -20940,6 +21115,7 @@ static void client_report(const client *c)
     REPORT("level.loads_failed",    c->loads_failed);
     REPORT("level.loading_screens", c->loading_raises);
     REPORT("level.save_prompts",    c->save_prompts);
+    REPORT("level.restarts",        c->restarts);
     /* client+0x46 for player one, the term the weapon model's matrix carries
      * and the camera's does not, and the pitch RotMatrixYXZ is actually handed
      * once the clip rotation is added to it. Both read zero until something
@@ -21380,6 +21556,10 @@ int main(int argc, char **argv)
          * run can capture the pause menu over any map. */
         else if (!strcmp(argv[i], "--pause") && i + 1 < argc)
             c.pause_at_frame = (s32)strtol(argv[++i], NULL, 10);
+        /* `--restart N`: RESTART LEVEL taken at frame N, as the death and
+         * pause pages raise it, so a headless run can capture the return. */
+        else if (!strcmp(argv[i], "--restart") && i + 1 < argc)
+            c.restart_at_frame = (s32)strtol(argv[++i], NULL, 10);
         /* `--weapon N`: hold weapon slot N, fed. See the field's note. */
         else if (!strcmp(argv[i], "--weapon") && i + 1 < argc)
             c.give_weapon = (int)strtol(argv[++i], NULL, 10);
@@ -23034,6 +23214,11 @@ no_window:
         if (c.pause_at_frame > 0 && (s32)c.frame_index == c.pause_at_frame &&
             !c.menu.open)
             client_pause_open(&c, 0);
+        if (c.restart_at_frame > 0 && (s32)c.frame_index == c.restart_at_frame &&
+            !c.in_front_end && !c.mp_enabled) {
+            c.menu.request = Q2_MREQ_RESTART;
+            client_menu_requests(&c);
+        }
         /* `--armour`: likewise re-asserted, and likewise only for observability.
          * The points are re-topped rather than latched so a run that takes
          * damage still exercises the armour arm to the end. */
@@ -23295,6 +23480,7 @@ done:
         q2_level_table_free(&c.level_table);
     q2_save_ui_free(&c.save_ui);
     q2_save_free(&c.snapshot);
+    q2_save_free(&c.autosave);
     q2_event_store_free(&c.event_store);  /* the EVE_ blocks, one per map */
     q2_zone_history_free(&c.zone_history);
     q2_gib_attach(NULL);            /* before the set it names goes */
