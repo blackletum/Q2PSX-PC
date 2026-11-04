@@ -869,7 +869,7 @@ static void test_disc_parasite(const char *disc_path, const char *output)
     memcpy(feet, c->creatures.sight.pos, sizeof(feet)); feet[1] += 286;
     q2_sim_spawn(&c->sim[0], feet, 0);
     memcpy(body[0].pos, c->creatures.sight.pos, sizeof(body[0].pos));
-    body[0].id = -2; body[0].solid = true;
+    body[0].id = -2; body[0].solid = true; body[0].listed = true;
     body[0].sweep_radius = body[0].radius = 286; body[0].height = 572;
     bodies.list = body; bodies.count = 1;
     q2_ai_world_bind_bodies(&c->ai_world, &bodies, c->creatures.set.monsters,
@@ -1305,7 +1305,7 @@ static void test_disc_medic(const char *disc_path, const char *output)
             q2_monster *m = &c->creatures.set.monsters[i];
             q2_move_body *b = &c->cre_body[i];
             q2_actor_from_monster(&c->cre_actor[i], m);
-            b->id = (s32)i; b->solid = m->in_use && !m->dead;
+            b->id = (s32)i; b->solid = m->in_use && !m->dead; b->listed = m->in_use && !m->dissolve_arm;
             memcpy(b->pos, m->pos, sizeof(b->pos));
             b->sweep_radius = m->hit_radius; b->height = m->hit_height;
         }

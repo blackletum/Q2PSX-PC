@@ -1624,10 +1624,9 @@ q2_damage_result q2_sim_hurt_player(q2_sim *sim, q2_actor *attacker,
      * claw's kick is fire_hit's own. The attacker's origin is a host fallback
      * for a melee caller that supplies none.
      *
-     * Still open: for a CLIENT target the bullet arm adjusts the entry with
-     * GenMissileHitPlane (0x80048930..0x80048954) against the previous
-     * frame's view plane before DoDamage. That shift is bounded to a few
-     * dozen units and is not reproduced here.
+     * The callers have already moved it where the console does: the bullet
+     * arm onto the previous frame's view plane (0x80048930..0x80048954) and a
+     * bolt through bolt_contact_point (0x80047E84..0x80047ED8).
      */
     if (mod == Q2_MOD_MELEE && !point && attacker)
         point = attacker->origin;
@@ -1757,7 +1756,9 @@ static s32 actor_hitscan(q2_sim *sim, q2_actor *attacker,
      * happens after `impact` is filled.
      */
     if (idx >= 0 && idx == player_slot) {
-        const q2_view_plane *vp = q2_sim_view_plane_for(sim, sim->cur_player);
+        /* Fired from a think, ahead of this frame's camera pass: the plane
+         * the previous frame left (sim.h, `view_plane_prev`). */
+        const q2_view_plane *vp = q2_sim_view_plane_prev_for(sim, sim->cur_player);
         s32 hurt_at[3];
 
         memcpy(hurt_at, at, sizeof(hurt_at));
@@ -2539,6 +2540,63 @@ static void bolt_impact_effect(q2_sim *sim, q2_fx_preset_id id, const s32 at[3])
                     fx_area_resolve(sim, 0, at));
 }
 
+/* DoNoise (QENTS.C 0x8007F15C), type 2, at the bolt's own origin: PlayerNoise
+ * for a bolt whose owner has a client, outside multiplayer (the sim's own
+ * gate). ProcessMissiles_Many reaches it on every arm that runs through
+ * 0x80048608 — the flagged actor contact (0x8004861C), the flagged entity-box
+ * contact (0x80048650) and the hull impact, which falls into the same block at
+ * 0x80048604 and takes whichever arm sp+388 selects. */
+static void bolt_noise(q2_sim *sim, const q2_projectile *p, const s32 at[3])
+{
+    if (!p->shooter && p->owner >= 0 && p->owner < Q2_SIM_MAX_PLAYERS)
+        q2_sim_player_noise(sim, 2, at);   /* type 2, an impact */
+}
+
+/* The player whose combat half `a` is — live (`combat.self`) or parked — or
+ * -1 for any other actor. */
+static int actor_player_index(const q2_sim *sim, const q2_actor *a)
+{
+    int k;
+
+    if (a == &sim->combat.self)
+        return sim->cur_player;
+    for (k = 0; k < Q2_SIM_MAX_PLAYERS; k++)
+        if (k != sim->cur_player && a == &sim->pcombat[k].self)
+            return k;
+    return -1;
+}
+
+/*
+ * 0x80047E84..0x80047ED8: the actor query's entry point is moved before
+ * anything reads it. A body with a client (`+0x0C`) whose view record exists
+ * goes onto that view's plane through GenMissileHitPlane (0x80054BD4), with the
+ * bolt's raw velocity at +0x52 as the direction; a client with no view record
+ * keeps the entry (0x80047EAC); a body with no client at all goes through
+ * LineIntersectCrePlane (0x800542A4) from the bolt's old origin.
+ */
+static void bolt_contact_point(const q2_sim *sim, const q2_projectile *p,
+                               const q2_actor *victim, const s32 from[3],
+                               s32 point[3])
+{
+    if (victim->has_client) {
+        int who = actor_player_index(sim, victim);
+        const q2_view_plane *vp = who >= 0 ? q2_sim_view_plane_for(sim, who)
+                                           : NULL;
+        s32 dir[3];
+        int k;
+
+        if (!vp)
+            return;
+        for (k = 0; k < 3; k++)
+            dir[k] = (s16)q2_projectile_raw_velocity(p, k);
+        if (q2_combat_missile_hit_plane(vp, dir, point))
+            q2_sim_proj_scan.bolt_projected++;
+        return;
+    }
+    q2_combat_line_cre_plane(from, point, victim->origin, point);
+    q2_sim_proj_scan.bolt_cre_plane++;
+}
+
 static void bolt_contact_tick(q2_sim *sim, u32 index, const q2_proj_step *step,
                               q2_actor *attacker, q2_actor **targets, u32 count,
                               s32 hit_index, const s32 contact[3])
@@ -2561,6 +2619,9 @@ static void bolt_contact_tick(q2_sim *sim, u32 index, const q2_proj_step *step,
             q2_sim_breakable_shot(sim, step->from, end, (s16)p->damage);
         consumed = true;
         if (p->flags & Q2_PROJ_FLAG_IMPACT) {
+            /* 0x80047E7C -> 0x80048608 with sp+388 cleared: DoNoise at the
+             * record's old origin (0x80048650), then the sparks there. */
+            bolt_noise(sim, p, p->pos);
             bolt_impact_effect(sim, Q2_FX_EXPLOSION, p->pos);
             q2_projectile_expire(&sim->combat.projectiles, index);
             return;
@@ -2571,13 +2632,18 @@ static void bolt_contact_tick(q2_sim *sim, u32 index, const q2_proj_step *step,
         q2_actor *direct = sim->invulnerable && victim == &sim->combat.self
                             ? NULL : victim;
         q2_sim_proj_scan.hit++;
+        /* Moved first, then copied into the bolt's origin (0x80047EE8), which
+         * is the point DoDamage, DoNoise and the blood all read. */
+        bolt_contact_point(sim, p, victim, step->from, end);
         q2_projectile_impact_traced(&sim->combat.projectiles, index, end,
                                     attacker, direct, targets, count,
                                     &sim->combat.rules, splash_clear, sim);
         consumed = true;
         if (p->flags & Q2_PROJ_FLAG_IMPACT) {
-            /* The blood call at 0x80048638 does not test the damage result.
-             * There is no additional world burst on an actor contact. */
+            /* 0x80047F1C -> 0x80048608 with the body still in sp+388: DoNoise
+             * (0x8004861C), then the blood (0x80048638), which does not test
+             * the damage result. There is no world burst on this arm. */
+            bolt_noise(sim, p, end);
             bolt_impact_effect(sim, Q2_FX_BLOOD, end);
             return;
         }
@@ -2595,11 +2661,9 @@ static void bolt_contact_tick(q2_sim *sim, u32 index, const q2_proj_step *step,
         if (!complete) {
             memcpy(p->pos, clipped, sizeof(p->pos));
             consumed = true;
-            /* 0x8004861C / 0x80048650: DoNoise, type 2, on both arms of the
-             * hull impact and before the flag-8 test, for a bolt a player
-             * fired. A bolt's actor contacts raise none. */
-            if (!p->shooter && p->owner >= 0 && p->owner < Q2_SIM_MAX_PLAYERS)
-                q2_sim_player_noise(sim, 2, p->pos);
+            /* The hull impact falls into 0x80048604 and raises DoNoise on
+             * whichever arm sp+388 selects, before the flag-8 test. */
+            bolt_noise(sim, p, p->pos);
             if (p->flags & Q2_PROJ_FLAG_IMPACT)
                 bolt_impact_effect(sim, Q2_FX_EXPLOSION, p->pos);
         }

@@ -1273,6 +1273,10 @@ static void sim_bodies_rebuild(q2_sim *sim)
         b->id           = sim_body_id_for_player(i);
         b->solid        = p->motion == Q2_PLAYER_MOTION_LIVE ||
                           p->motion == Q2_PLAYER_MOTION_CORPSE;
+        /* Every player record appends itself, alive or not: PrimaryQuake-
+         * Player through QCre_Move's NewTrueMove3d, then PrimaryQuakeDying-
+         * Player (0x80039588) and PrimaryQuakeDeadPlayerBody (0x8003E25C). */
+        b->listed       = true;
     }
 
     if (sim->extra_bodies && sim->extra_body_count) {
@@ -3680,6 +3684,10 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
     if (sim->fire_from_input && input->attack)
         q2_sim_fire(sim);
 
+    /* ProcessAllCameras (0x80038FD8) precedes ProcessMissiles (0x80039000):
+     * the bolt sweep below reads the plane this frame's camera pass writes. */
+    q2_sim_view_plane_camera_pass(sim, sim->cur_player);
+
     q2_sim_combat_tick(sim);
 
     /*
@@ -3818,6 +3826,23 @@ const q2_view_plane *q2_sim_view_plane_for(const q2_sim *sim, int index)
     if (!sim || index < 0 || index >= Q2_SIM_MAX_PLAYERS)
         return NULL;
     return sim->view_plane_ready[index] ? &sim->view_plane[index] : NULL;
+}
+
+const q2_view_plane *q2_sim_view_plane_prev_for(const q2_sim *sim, int index)
+{
+    if (!sim || index < 0 || index >= Q2_SIM_MAX_PLAYERS)
+        return NULL;
+    return sim->view_plane_prev_ready[index] ? &sim->view_plane_prev[index]
+                                             : NULL;
+}
+
+void q2_sim_view_plane_camera_pass(q2_sim *sim, int index)
+{
+    if (!sim || index < 0 || index >= Q2_SIM_MAX_PLAYERS)
+        return;
+    sim->view_plane_prev[index]       = sim->view_plane[index];
+    sim->view_plane_prev_ready[index] = sim->view_plane_ready[index];
+    q2_sim_view_plane_refresh(sim, index);
 }
 
 /*

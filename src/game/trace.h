@@ -471,7 +471,15 @@ typedef struct q2_move_body {
     s32  sweep_radius; /* +0x94                                   */
     s16  height;       /* +0x96                                   */
     s32  id;          /* the caller's handle; -1 is never a body  */
-    bool solid;       /* !(flags & 0x8000)                        */
+    bool solid;       /* !(flags & 0x8000), the separation gate   */
+    /*
+     * On the frame's ACTOR LIST — appended by its handler (0x800552B4): a live
+     * player or creature through NewTrueMove3d (0x80045990), a dying or dead
+     * player (0x80039588, 0x8003E25C), a corpse until its dissolve gate
+     * answers (0x8007F740). This, not `solid`, is what puts a body in front of
+     * 0x800544EC; a corpse is listed and not solid.
+     */
+    bool listed;
 } q2_move_body;
 
 typedef struct q2_move_bodies {

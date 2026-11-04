@@ -68,48 +68,41 @@ static bool box_is_real(const s16 mins[3], const s16 maxs[3])
 }
 
 /*
- * 0x800544EC, for a MOVE rather than for a shot.
+ * 0x800544EC, for a MOVE rather than for a shot — the same function, run
+ * through combat.c's transcription (q2_combat_trace_cylinders), which the
+ * projectile-contact fixture checks against the disc's own code.
  *
- * The narrow phase is combat.c's, shared rather than rewritten: a vertical
- * cylinder of the candidate's entity+0x94 radius around its origin, intersected
- * with the Y slab that runs upward from origin.y + 286 by entity+0x96
- * (0x800545F4, 0x80054650, 0x80054834). What is NOT shared is the filter — the
- * shot path rejects on `takedamage` because T_Damage does, and 0x800545E8 skips
- * only the ignore entity and nothing else.
+ * This used to run an older cylinder approximation of its own, with exact roots
+ * where the console takes SquareRoot0's and its fraction divide, and a filter
+ * of its own as well: it dropped every body that was not `solid`, so a corpse
+ * never stopped a walker unless the caller's mask carried 0x04000000. Neither
+ * is the console's. gitrace (0x8005BD3C) tests the mask for 0x02000000 alone
+ * (0x8005BF18) and 0x800544EC skips the ignore entity alone (0x800545E8);
+ * what decides whether a body is in the query at all is whether its handler
+ * put it on the frame's actor list, which `listed` records. `solid` is the
+ * separation pass's gate (0x800513F0) and stays there.
  *
  * The mover is a POINT here, and that is the console's: 0x800544EC reads the
  * candidate's radius and slab and nothing of the caller's own box. It works
  * because the radius it reads is 286, the player's own half-extent, so a
  * creature that stops 286 from a player's centre stops at their skin.
- *
- * Returns the crossing point, which for a blocked step is where the creature
- * ends up. A start already inside gives fraction 0 and refuses the step
- * outright, which is what the sweep's own `along < 0 -> 0` clamp amounts to.
  */
-static bool body_clip_segment(const s32 from[3], const s32 to[3],
-                              const q2_move_body *o, s32 out[3])
+typedef struct body_trace_list {
+    const q2_move_body *list;
+    s32                 ignore_id;
+} body_trace_list;
+
+static bool body_trace_get(void *user, u32 index, s32 origin[3],
+                           s32 *radius, s16 *height)
 {
-    s32 dir[3];
-    s64 enter = 0, leave = 0;
-    int k;
+    const body_trace_list *l = (const body_trace_list *)user;
+    const q2_move_body *o = &l->list[index];
 
-    for (k = 0; k < 3; k++)
-        dir[k] = to[k] - from[k];
-
-    if (!dir[0] && !dir[1] && !dir[2])
+    if (!o->listed || o->id == l->ignore_id)
         return false;
-    if (!q2_combat_centre_is_ahead(from, dir, o->pos))
-        return false;
-    if (!q2_combat_cylinder_interval(from, dir, o->pos, o->sweep_radius,
-                                     o->height, &enter, &leave))
-        return false;
-    if (leave <= 0 || enter > Q2_TRACE_SEG_ONE)
-        return false;
-    if (enter < 0)
-        enter = 0;
-
-    for (k = 0; k < 3; k++)
-        out[k] = (s32)(from[k] + ((s64)dir[k] * enter) / Q2_TRACE_SEG_ONE);
+    memcpy(origin, o->pos, sizeof(o->pos));
+    *radius = o->sweep_radius;
+    *height = o->height;
     return true;
 }
 
@@ -248,37 +241,31 @@ static void bound_trace(void *user, const s32 start[3], const s16 mins[3],
      * creature that stops 286 from a player's centre stops at their skin.
      */
     if (b->bodies && b->bodies->list && (mask & Q2_MASK_ENTITY_BIT)) {
-        s32 ignore_id = -1;
+        body_trace_list l;
+        s32 hit[3], idx;
         u32 i;
 
-        if (ignore && ignore == b->player_owner) ignore_id = -2;
+        l.list = b->bodies->list;
+        l.ignore_id = -1;
+        if (ignore && ignore == b->player_owner) l.ignore_id = -2;
         else if (ignore && b->body_owner_base && b->body_owner_count) {
             for (i = 0; i < b->body_owner_count; i++)
-                if (ignore == &b->body_owner_base[i]) { ignore_id = (s32)i; break; }
+                if (ignore == &b->body_owner_base[i]) { l.ignore_id = (s32)i; break; }
         }
 
-        for (i = 0; i < b->bodies->count; i++) {
-            const q2_move_body *o = &b->bodies->list[i];
-            q2_move_body corpse_body;
-            s32 hit[3];
-
-            if (o->id == ignore_id) continue;
-            if (!o->solid) {
-                const q2_monster *corpse;
-                /* Medic import+0xF4 passes 0x06000003, whose extra bit
-                 * includes dead actors. They remain non-solid to walkers. */
-                if (!(mask & 0x04000000u) || !b->body_owner_base || o->id < 0 ||
-                    (u32)o->id >= b->body_owner_count) continue;
-                corpse = &b->body_owner_base[o->id];
-                if (!corpse->in_use || !corpse->corpse || corpse->dissolve_arm) continue;
-                corpse_body = *o;
-                memcpy(corpse_body.pos, corpse->pos, sizeof(corpse_body.pos));
-                corpse_body.sweep_radius = corpse->hit_radius;
-                corpse_body.height = corpse->hit_height;
-                o = &corpse_body;
-            }
-            if (!body_clip_segment(start, pos, o, hit))
-                continue;
+        /*
+         * 0x8005BF4C hands 0x800544EC the frame's actor list and the caller's
+         * own entity, and that is the whole filter: 0x800545E8 skips the
+         * ignore entity and nothing else, so a corpse still on the list —
+         * PrimaryQuakeDeadBody appends one each frame until its dissolve gate
+         * answers (0x8007F728..0x8007F740) — stops a walker with its corpse
+         * cylinder exactly as it stops a round. Run through the shot path's
+         * own transcription, so the two cannot drift apart again.
+         */
+        idx = q2_combat_trace_cylinders(start, pos, body_trace_get, &l,
+                                        b->bodies->count, hit);
+        if (idx >= 0) {
+            const q2_move_body *o = &b->bodies->list[idx];
 
             pos[0] = hit[0];
             pos[1] = hit[1];

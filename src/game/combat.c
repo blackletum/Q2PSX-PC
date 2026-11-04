@@ -1478,6 +1478,54 @@ bool q2_combat_missile_hit_plane(const q2_view_plane *plane,
     return true;
 }
 
+/* `bgez v; addiu v, v, 4095; sra v, v, 12` on a 32-bit word. */
+static s32 sra12_toward_zero32(s32 v)
+{
+    if (v < 0)
+        v = (s32)((u32)v + 4095u);
+    return v >> Q2_FRAC_12;
+}
+
+static s32 mul32(s32 a, s32 b)
+{
+    return (s32)((u32)a * (u32)b);
+}
+
+void q2_combat_line_cre_plane(const s32 start[3], const s32 end[3],
+                              const s32 centre[3], s32 out[3])
+{
+    s32 d[3], e[3], s[3], c[3], sq;
+    u32 root;
+    int k;
+
+    if (!start || !end || !centre || !out)
+        return;
+
+    /* 0x800542B8..0x80054348: every read of `end` happens here. */
+    for (k = 0; k < 3; k++) {
+        d[k] = (s32)((u32)end[k]   - (u32)start[k]);
+        e[k] = (s32)((u32)end[k]   - (u32)centre[k]);
+        s[k] = (s32)((u32)start[k] - (u32)centre[k]);
+    }
+
+    /* 0x80054354..0x800543F8: s x e, each term rounded toward zero. */
+    c[0] = sra12_toward_zero32((s32)((u32)mul32(s[1], e[2]) - (u32)mul32(s[2], e[1])));
+    c[1] = sra12_toward_zero32((s32)((u32)mul32(s[2], e[0]) - (u32)mul32(s[0], e[2])));
+    c[2] = sra12_toward_zero32((s32)((u32)mul32(s[0], e[1]) - (u32)mul32(s[1], e[0])));
+
+    /* 0x800543E0..0x80054450: s.s less c.c, summed in the image's order. */
+    sq = (s32)(((u32)mul32(s[0], s[0]) + (u32)mul32(s[1], s[1]) +
+                (u32)mul32(s[2], s[2])) -
+               ((u32)mul32(c[0], c[0]) + (u32)mul32(c[1], c[1]) +
+                (u32)mul32(c[2], c[2])));
+    root = q2_sdk_sqrt0((u32)sq);
+
+    /* 0x80054454..0x800544D4. */
+    for (k = 0; k < 3; k++)
+        out[k] = (s32)((u32)start[k] +
+                       (u32)sra12_toward_zero32(mul32(d[k], (s32)root)));
+}
+
 void q2_combat_view_plane(q2_view_plane *out, const s32 eye[3],
                           s32 yaw, s32 pitch, s32 roll)
 {
@@ -1819,9 +1867,70 @@ static bool native_cylinder_roots(s32 a, s32 b, s32 c, s32 *first, s32 *last)
     return true;
 }
 
-s32 q2_combat_trace_actors(const s32 from[3], const s32 to[3],
-                            const q2_actor *ignore, q2_actor *const *targets,
-                            u32 count, s32 out[3])
+/* 0x800544EC, one candidate against the segment as it stands: `point` and
+ * `delta` are the current (possibly already shortened) end and from->end. On
+ * acceptance `*y_enter_out` is the 1.0.12 entry the caller shortens to. */
+static bool trace_cylinder_candidate(const s32 from[3], const s32 point[3],
+                                     const s32 delta[3], s32 length,
+                                     const s32 origin[3], s32 radius_in,
+                                     s16 height, s32 *y_enter_out)
+{
+    s32 radius, low[3], high[3], rel[3], dot, cross;
+    s32 enter = 0, leave = 4096, y_enter = 0, y_leave = 4096;
+    u32 dot_bits = 0;
+    bool overlaps = true;
+    int k;
+
+    radius = (s16)radius_in;                       /* `lh` of entity+0x94 */
+    low[0] = (s32)((u32)origin[0] - (u32)radius);
+    high[0] = (s32)((u32)origin[0] + (u32)radius);
+    low[2] = (s32)((u32)origin[2] - (u32)radius);
+    high[2] = (s32)((u32)origin[2] + (u32)radius);
+    high[1] = (s32)((u32)origin[1] + 286u);
+    low[1] = (s32)((u32)high[1] - (u32)(s32)height);
+    for (k = 0; k < 3; k++) {
+        s32 minimum = from[k] < point[k] ? from[k] : point[k];
+        s32 maximum = from[k] > point[k] ? from[k] : point[k];
+        if (maximum < low[k] || minimum > high[k]) overlaps = false;
+        rel[k] = (s32)((u32)from[k] - (u32)origin[k]);
+        dot_bits += (u32)delta[k] * (u32)rel[k];
+    }
+    if (!overlaps) return false;
+    dot = (s32)dot_bits;
+    if (dot >= 0) return false;
+    cross = (s32)((u32)rel[2] * ((u32)point[0] - (u32)origin[0]) -
+                  (u32)rel[0] * ((u32)point[2] - (u32)origin[2]));
+    if (cross < 0) cross = (s32)(0u - (u32)cross);
+    if (cross >= (s32)((u32)radius * (u32)length)) return false;
+    {
+        s32 a = (s32)((u32)delta[0] * (u32)delta[0] +
+                      (u32)delta[2] * (u32)delta[2]);
+        s32 b = (s32)(2u * ((u32)delta[0] * (u32)rel[0] +
+                            (u32)delta[2] * (u32)rel[2]));
+        s32 c = (s32)((u32)rel[0] * (u32)rel[0] +
+                      (u32)rel[2] * (u32)rel[2] - (u32)radius * (u32)radius);
+        if (a && !native_cylinder_roots(a, b, c, &enter, &leave)) return false;
+    }
+    if (enter < 0 && leave >= 0) enter = 0;
+    if ((u32)enter >= 4096u) return false;
+    if (delta[1]) {
+        s32 near_y = delta[1] > 0 ? low[1] : high[1];
+        s32 far_y = delta[1] > 0 ? high[1] : low[1];
+        s32 numerator = (s32)(((u32)near_y - (u32)from[1]) << 12);
+        y_enter = (s32)((s64)numerator / delta[1]);
+        numerator = (s32)(((u32)far_y - (u32)from[1]) << 12);
+        y_leave = (s32)((s64)numerator / delta[1]);
+    } else if (from[1] < low[1] || from[1] > high[1]) return false;
+    if (enter > y_enter) y_enter = enter;
+    if (leave < y_leave) y_leave = leave;
+    if (y_leave < y_enter || y_enter > 4096) return false;
+    *y_enter_out = y_enter;
+    return true;
+}
+
+s32 q2_combat_trace_cylinders(const s32 from[3], const s32 to[3],
+                              q2_combat_cylinder_fn get, void *user,
+                              u32 count, s32 out[3])
 {
     s32 point[3], delta[3], length, best = -1;
     u32 squared = 0, i;
@@ -1833,56 +1942,13 @@ s32 q2_combat_trace_actors(const s32 from[3], const s32 to[3],
         squared += (u32)delta[k] * (u32)delta[k];
     }
     length = (s32)q2_sdk_sqrt_refined(squared);
-    for (i = 0; targets && i < count; i++) {
-        const q2_actor *actor = targets[i];
-        s32 radius, low[3], high[3], rel[3], dot, cross;
-        s32 enter = 0, leave = 4096, y_enter = 0, y_leave = 4096;
-        u32 dot_bits = 0;
-        bool overlaps = true;
-        if (!actor || actor == ignore) continue;
-        radius = (s16)actor->radius;
-        low[0] = (s32)((u32)actor->origin[0] - (u32)radius);
-        high[0] = (s32)((u32)actor->origin[0] + (u32)radius);
-        low[2] = (s32)((u32)actor->origin[2] - (u32)radius);
-        high[2] = (s32)((u32)actor->origin[2] + (u32)radius);
-        high[1] = (s32)((u32)actor->origin[1] + 286u);
-        low[1] = (s32)((u32)high[1] - (u32)(s32)actor->height);
-        for (k = 0; k < 3; k++) {
-            s32 minimum = from[k] < point[k] ? from[k] : point[k];
-            s32 maximum = from[k] > point[k] ? from[k] : point[k];
-            if (maximum < low[k] || minimum > high[k]) overlaps = false;
-            rel[k] = (s32)((u32)from[k] - (u32)actor->origin[k]);
-            dot_bits += (u32)delta[k] * (u32)rel[k];
-        }
-        if (!overlaps) continue;
-        dot = (s32)dot_bits;
-        if (dot >= 0) continue;
-        cross = (s32)((u32)rel[2] * ((u32)point[0] - (u32)actor->origin[0]) -
-                      (u32)rel[0] * ((u32)point[2] - (u32)actor->origin[2]));
-        if (cross < 0) cross = (s32)(0u - (u32)cross);
-        if (cross >= (s32)((u32)radius * (u32)length)) continue;
-        {
-            s32 a = (s32)((u32)delta[0] * (u32)delta[0] +
-                          (u32)delta[2] * (u32)delta[2]);
-            s32 b = (s32)(2u * ((u32)delta[0] * (u32)rel[0] +
-                                (u32)delta[2] * (u32)rel[2]));
-            s32 c = (s32)((u32)rel[0] * (u32)rel[0] +
-                          (u32)rel[2] * (u32)rel[2] - (u32)radius * (u32)radius);
-            if (a && !native_cylinder_roots(a, b, c, &enter, &leave)) continue;
-        }
-        if (enter < 0 && leave >= 0) enter = 0;
-        if ((u32)enter >= 4096u) continue;
-        if (delta[1]) {
-            s32 near_y = delta[1] > 0 ? low[1] : high[1];
-            s32 far_y = delta[1] > 0 ? high[1] : low[1];
-            s32 numerator = (s32)(((u32)near_y - (u32)from[1]) << 12);
-            y_enter = (s32)((s64)numerator / delta[1]);
-            numerator = (s32)(((u32)far_y - (u32)from[1]) << 12);
-            y_leave = (s32)((s64)numerator / delta[1]);
-        } else if (from[1] < low[1] || from[1] > high[1]) continue;
-        if (enter > y_enter) y_enter = enter;
-        if (leave < y_leave) y_leave = leave;
-        if (y_leave < y_enter || y_enter > 4096) continue;
+    for (i = 0; get && i < count; i++) {
+        s32 origin[3], radius = 0, y_enter;
+        s16 height = 0;
+        if (!get(user, i, origin, &radius, &height)) continue;
+        if (!trace_cylinder_candidate(from, point, delta, length, origin,
+                                      radius, height, &y_enter))
+            continue;
         best = (s32)i;
         if (!out) return best;
         squared = 0;
@@ -1896,6 +1962,34 @@ s32 q2_combat_trace_actors(const s32 from[3], const s32 to[3],
     }
     if (out) memcpy(out, point, sizeof(point));
     return best;
+}
+
+typedef struct trace_actor_list {
+    const q2_actor *ignore;
+    q2_actor *const *targets;
+} trace_actor_list;
+
+static bool trace_actor_get(void *user, u32 index, s32 origin[3],
+                            s32 *radius, s16 *height)
+{
+    const trace_actor_list *l = (const trace_actor_list *)user;
+    const q2_actor *actor = l->targets[index];
+    if (!actor || actor == l->ignore) return false;
+    memcpy(origin, actor->origin, sizeof(actor->origin));
+    *radius = actor->radius;
+    *height = actor->height;
+    return true;
+}
+
+s32 q2_combat_trace_actors(const s32 from[3], const s32 to[3],
+                            const q2_actor *ignore, q2_actor *const *targets,
+                            u32 count, s32 out[3])
+{
+    trace_actor_list l;
+    l.ignore = ignore;
+    l.targets = targets;
+    return q2_combat_trace_cylinders(from, to, targets ? trace_actor_get : NULL,
+                                     &l, count, out);
 }
 
 s32 q2_combat_find_target(const s32 eye[3], const s32 angles[3],

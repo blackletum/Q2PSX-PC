@@ -5937,7 +5937,7 @@ static void test_bolt_native_sequence(void)
     for (row = 0; row < Q2PSX_ARRAY_COUNT(native_bolts); row++) {
         const native_bolt_case *r = &native_bolts[row];
         q2_sim sim;
-        q2_actor victim, *targets[1];
+        q2_actor local, *victim, *targets[1];
         q2_move_target wall = {0};
         q2_projectile *p;
         q2_fire_result_v2 shot = {0};
@@ -5948,10 +5948,23 @@ static void test_bolt_native_sequence(void)
         q2_sim_spawn(&sim, feet, 0);
         q2_sim_attach_effects(&sim, &g_kill_tab, r->seed);
         sim.cur_dt = sim.level_time = r->dt;
-        q2_actor_init(&victim);
-        victim.origin[0] = 600; victim.radius = 50; victim.height = 572;
-        victim.health = 1000; victim.takedamage = Q2_DAMAGE_YES;
-        targets[0] = &victim;
+        /* Victim kinds, as generate_bolt_reference.py sets +0x0C: 0 a client
+         * with no view record, 1 no client, 2/3 a client whose view is
+         * player 1's, holding PLANES[0]/[1]. */
+        victim = r->victim >= 2 ? &sim.pcombat[1].self : &local;
+        q2_actor_init(victim);
+        victim->origin[0] = 600; victim->radius = 50; victim->height = 572;
+        victim->health = 1000; victim->takedamage = Q2_DAMAGE_YES;
+        victim->has_client = r->victim != 1;
+        if (r->victim >= 2) {
+            static const q2_view_plane planes[2] = {
+                {{1000, 0, 0}, {-512, 0, 0}, {-4096, 0, 0}},
+                {{900, 40, -60}, {-362, 0, -362}, {-2896, 0, -2896}},
+            };
+            sim.view_plane[1] = planes[r->victim - 2];
+            sim.view_plane_ready[1] = true;
+        }
+        targets[0] = victim;
         if (r->mode == 1 || r->mode == 2) q2_sim_set_world_targets(&sim, targets, 1);
         if (r->mode == 2) {
             wall.min[0] = 400; wall.max[0] = 420;
@@ -5980,8 +5993,13 @@ static void test_bolt_native_sequence(void)
         q2_sim_combat_tick(&sim);
         check_eq_i(p->in_use, r->live, "native bolt liveness");
         check_eq_i(sim.combat.rng.state, r->rng, "native bolt RNG after the whole sweep");
-        check_eq_i(victim.health, 1000 - r->damage * 10, "entity contact shields the actor");
+        check_eq_i(victim->health, 1000 - r->damage * 10, "entity contact shields the actor");
         for (k = 0; k < 3; k++) check_eq_i(p->pos[k], r->position[k], "native bolt final position");
+        /* DoNoise, type 2, on every arm through 0x80048608. */
+        check_eq_i(sim.noise[1].pending, r->noise > 0, "native DoNoise on the bolt's contact");
+        if (r->noise > 0)
+            for (k = 0; k < 3; k++)
+                check_eq_i(sim.noise[1].at[k], r->noise_at[k], "native DoNoise position");
         for (e = 0; e < sim.ent_world.events.count; e++) {
             const q2_ent_event *light = &sim.ent_world.events.e[e];
             if (light->kind != Q2_ENT_EVENT_LIGHT) continue;
@@ -6017,8 +6035,8 @@ static void test_bolt_native_sequence(void)
             groups++;
         }
         check_eq_i(groups, r->group_count, "native effect group count");
-        if (g_failures != failures_before) printf("  bolt case %u flags=%d mode=%d remaining=%d\n",
-                                                  row, r->flags, r->mode, r->remaining);
+        if (g_failures != failures_before) printf("  bolt case %u flags=%d mode=%d remaining=%d victim=%d\n",
+                                                  row, r->flags, r->mode, r->remaining, r->victim);
         q2_sim_free(&sim);
     }
 }
@@ -6391,8 +6409,12 @@ static void test_projectile_contacts(void)
         check(!p->in_use && sim.projectile_blasts == (kind < 3 ? 1u : 0u),
               "actor contact consumes the shot and creates its own explosion kind");
         /* These exact clipped coordinates come from PAL 0x800544EC execution;
-         * truncation leaves the contact one unit outside the ideal cylinder. */
+         * truncation leaves the contact one unit outside the ideal cylinder.
+         * A bolt then moves its contact with LineIntersectCrePlane, because
+         * neither body has a client: the same two cases run through the whole
+         * PAL sweep (0x80047C6C) end at 10 and 33. */
         check_eq_i(p->pos[0], kind == 4 ? (scenario == 0 ? -1 : 0) :
+                             kind == 3 ? (scenario == 0 ? 10 : 33) :
                              scenario == 0 ? 549 : scenario == 1 ? 349 : 287,
                    "damage and explosion retain the native clipped contact");
         if (scenario == 0)

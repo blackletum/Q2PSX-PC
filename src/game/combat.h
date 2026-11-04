@@ -893,6 +893,39 @@ typedef struct q2_view_plane {
 bool q2_combat_missile_hit_plane(const q2_view_plane *plane,
                                  const s32 dir[3], s32 point[3]);
 
+/* ------------------------------------------------------------------------- */
+/* LineIntersectCrePlane — COLL.C 0x800542A4                                  */
+/* ------------------------------------------------------------------------- */
+/*
+ * What a bolt's hit point becomes when the body it struck has NO client:
+ * ProcessMissiles_Many takes this arm at 0x80047EC8..0x80047ED8 when
+ * `body+0x0C` is null, with the bolt record (still at its old position) as
+ * `start`, the actor query's entry point as `end`, the body as the centre
+ * source (+0x54..+0x5C) and the entry point again as the output. The result is
+ * copied into the bolt's own origin (0x80047EE8) and is what DoDamage, DoNoise
+ * and GenerateBulletBlood all read.
+ *
+ *   d = end - start,  e = end - centre,  s = start - centre
+ *   c = (s x e) >> 12, each component toward zero (`bgez; addiu 4095; sra 12`)
+ *   r = SquareRoot0(s.s - c.c)                      (0x8008A7E8)
+ *   out = start + ((d * r) >> 12), toward zero
+ *
+ * It is the closest point on the line to the centre ONLY when |d| is 4096:
+ * `s x e` is |d| times the perpendicular distance, so with a unit step `s.s -
+ * c.c` is the squared distance along. A bolt's step is velocity * dt, far
+ * short of that, so the point lands `along * |d| / 4096` from the start — a
+ * blaster bolt meeting a creature 600 units ahead with a 1200-unit step stops
+ * at 79, and its blood is drawn there. That is the disc's arithmetic,
+ * confirmed by executing the function in the bolt fixture
+ * (generate_bolt_reference.py, victim kind 1), not an approximation of it.
+ *
+ * Every product is the low word of `mult` and every sum a wrapping `addu` /
+ * `subu`, as in the image. `out` may alias `end`: the function reads `end`
+ * before it writes anything.
+ */
+void q2_combat_line_cre_plane(const s32 start[3], const s32 end[3],
+                              const s32 centre[3], s32 out[3]);
+
 /*
  * UpdateWindowStuff's tail, for one view — 0x80037F30..0x80037F94.
  *
@@ -935,6 +968,20 @@ s32 q2_combat_nearest_on_segment(const s32 origin[3], const s32 dir[3],
 s32 q2_combat_trace_actors(const s32 from[3], const s32 to[3],
                             const q2_actor *ignore, q2_actor *const *targets,
                             u32 count, s32 out[3]);
+
+/*
+ * The same 0x800544EC over a caller's own candidate records: candidate `i`'s
+ * entity+0x54 origin, +0x94 radius and +0x96 slab come from `get`, which
+ * returns false to omit it (the ignore entity, which is the only thing the
+ * native loop skips at 0x800545E8). One body of arithmetic for every caller —
+ * the AI's trace (gitrace's actor pass, 0x8005BF4C) runs exactly what the shot
+ * path runs, over the same frame's actor list.
+ */
+typedef bool (*q2_combat_cylinder_fn)(void *user, u32 index, s32 origin[3],
+                                      s32 *radius, s16 *height);
+s32 q2_combat_trace_cylinders(const s32 from[3], const s32 to[3],
+                              q2_combat_cylinder_fn get, void *user,
+                              u32 count, s32 out[3]);
 
 /* FindPlayerTarget, 0x80039DDC. Angles use native pitch/yaw/roll; the caller
  * converts the host pitch sign. The eleven elevation rays use the complete

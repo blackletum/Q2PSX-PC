@@ -1,9 +1,11 @@
 """Execute the PAL/US bolt sweep with explicit collision/output services.
 
 The complete sweep and blood spawner execute retail instructions. Actor
-queries also execute unchanged. Entity contacts and the cached hull marcher
-are supplied inputs; rendering, damage, sound and particle allocation are
-recording hooks. This qualifies control flow and effect/RNG arguments, not
+queries also execute unchanged, and so do both contact-point arms that follow
+them: GenMissileHitPlane for a body with a client and a view record,
+LineIntersectCrePlane for one with no client. Entity contacts and the cached
+hull marcher are supplied inputs; rendering, damage, sound and particle
+allocation are recording hooks, and DoNoise records its position. This qualifies control flow and effect/RNG arguments, not
 hardware rendering or the cached hull algorithm. No retail code is exported.
 """
 import argparse
@@ -18,6 +20,11 @@ from generate_resource_reference import SEGMENT_SHA
 from generate_toss_reference import TossMachine
 
 ACTOR, OBJECT, LIST, GROUPS = 0x801D0000, 0x801D0400, 0x801D0800, 0x801D1000
+VIEW = 0x801D0C00
+# The view planes a kind-2/3 victim's record holds: (+0x00 position, +52 the
+# normal over eight, +58 the normal), facing back along the bolt's path.
+PLANES = [([1000, 0, 0], [-512, 0, 0], [-4096, 0, 0]),
+          ([900, 40, -60], [-362, 0, -362], [-2896, 0, -2896])]
 
 
 def motion_hash(velocities, offsets):
@@ -55,6 +62,9 @@ class BoltMachine(TossMachine):
             self.damage += 1
         elif pal in (0x8007F15C, 0x800435D0):
             self.sequence.append('noise' if pal == 0x8007F15C else 'entity-response')
+            if pal == 0x8007F15C:
+                self.noise += 1
+                self.noise_at = self.vector(self.r[5])
         elif pal == 0x80075C34:
             self.sequence.append('light')
             self.lights.append([self.vector(self.r[4]), self.r[5], self.r[6], self.r[7]])
@@ -100,16 +110,28 @@ def execute(cue, ntsc):
     assert digest == (NTSC_SEGMENT_SHA if ntsc else SEGMENT_SHA)
     m = BoltMachine(image, ntsc)
     rows = []
-    inputs = [(flags, mode, remaining, 12, [0, 0, 0], [100, 0, 0])
+    # victim: 0 = a client whose view record is null (no point moved),
+    # 1 = no client (LineIntersectCrePlane), 2/3 = a client with view plane
+    # PLANES[0]/[1] (GenMissileHitPlane).
+    inputs = [(flags, mode, remaining, 12, [0, 0, 0], [100, 0, 0], 0)
               for flags in (11, 14, 0, 1, 2, 8, 16, 31)
               for mode in range(4) for remaining in (11, 12, 13, 2560)]
     for i in range(64):
         inputs.append((11 if i % 2 else 14, 0, 2560, (1, 6, 12, 20, 30)[i % 5],
                        [12345, -9876, 4321],
-                       [(-1, 3, -5), (-128, 0, 64), (2731, -2731, 33), (2000, -2000, 1)][i % 4]))
-    for flags, mode, remaining, dt, start, velocity in inputs:
+                       [(-1, 3, -5), (-128, 0, 64), (2731, -2731, 33), (2000, -2000, 1)][i % 4], 0))
+    for victim in (1, 2, 3):
+        for flags in (11, 14, 0, 8):
+            for mode in range(4):
+                inputs.append((flags, mode, 2560, 12, [0, 0, 0], [100, 0, 0], victim))
+        for i in range(12):
+            inputs.append((11 if i % 2 else 14, 1, 2560, (6, 12, 20)[i % 3],
+                           [(0, 0, 0), (-300, 120, 40), (150, -30, -25)][i % 3],
+                           [(50, 3, -2), (341, 0, 0), (60, -4, 7), (100, 1, 1)][i % 4], victim))
+    for flags, mode, remaining, dt, start, velocity, victim in inputs:
         m.mode = mode
         m.sequence, m.lights, m.groups, m.damage = [], [], [], 0
+        m.noise, m.noise_at = 0, [0, 0, 0]
         pool = m.address(0x800C91C0)
         m.put(pool, bytes(64 * 104))
         m.write(pool + 0x1A, 2, remaining)
@@ -123,7 +145,18 @@ def execute(cue, ntsc):
         m.write(m.address(0x800B2C2C), 4, 0)
         m.put(ACTOR, bytes(1024))
         m.put(OBJECT, bytes(4))
-        m.write(ACTOR + 12, 4, OBJECT)  # No posed-model refinement.
+        m.put(VIEW, bytes(256))
+        if victim == 1:
+            m.write(ACTOR + 12, 4, 0)       # No client: LineIntersectCrePlane.
+        else:
+            m.write(ACTOR + 12, 4, OBJECT)  # A client; kind 0 has no view.
+        if victim >= 2:
+            pos, off, normal = PLANES[victim - 2]
+            m.write(OBJECT, 4, VIEW)
+            m.put_vector(VIEW, pos)
+            for k in range(3):
+                m.write(VIEW + 52 + 2 * k, 2, off[k] & 0xFFFF)
+                m.write(VIEW + 58 + 2 * k, 2, normal[k] & 0xFFFF)
         m.put_vector(ACTOR + 0x54, [600, 0, 0])
         m.write(ACTOR + 0x94, 2, 50)
         m.write(ACTOR + 0x96, 2, 572)
@@ -135,7 +168,8 @@ def execute(cue, ntsc):
         m.call(0x80047C6C)
         for i, group in enumerate(m.groups):
             group['accel_y'] = signed(m.read(GROUPS + i * 256 + 98, 2), 16)
-        rows.append({'flags': flags, 'mode': mode, 'remaining': remaining,
+        rows.append({'victim': victim, 'noise': m.noise, 'noise_at': m.noise_at,
+                     'flags': flags, 'mode': mode, 'remaining': remaining,
                      'dt': dt, 'start': start, 'velocity': list(velocity),
                      'seed': seed, 'position': m.vector(pool),
                      'live': int(m.read(pool + 0x1A, 2) != 0),
@@ -175,6 +209,7 @@ def main():
              '    int group_count;',
              '    struct { int origin[3], count, life, size, ramps[2], velocity[3];',
              '             unsigned motion_hash; int accel_y; } groups[3];',
+             '    int victim, noise, noise_at[3];',
              '} native_bolt_case;',
              'static const native_bolt_case native_bolts[] = {']
     for r in runs[0]['cases']:
@@ -186,7 +221,8 @@ def main():
                      str(r['dt']), vec(r['start']), vec(r['velocity']),
                      str(r['seed']) + 'u', vec(r['position']), str(r['live']), str(r['rng']) + 'u',
                      str(r['damage']), str(len(lights)), '{' + (','.join(lights) or ZERO_LIGHT) + '}',
-                     str(len(groups)), '{' + (','.join(groups) or ZERO_GROUP) + '}']) + '},')
+                     str(len(groups)), '{' + (','.join(groups) or ZERO_GROUP) + '}',
+                     str(r['victim']), str(r['noise']), vec(r['noise_at'])]) + '},')
     text = '\n'.join(lines + ['};', '#endif', ''])
     if args.check:
         assert args.output.read_text(encoding='utf-8') == text

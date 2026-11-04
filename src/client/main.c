@@ -4327,6 +4327,7 @@ static void client_creatures_tick(client *c, float dt, const s32 eye[3])
             q2_move_body *body = &c->cre_body[i];
             memcpy(body->pos, q2_cre_origin(m), sizeof(body->pos));
             body->solid = m->in_use && !(m->motion.flags & 0x8000u);
+            body->listed = m->in_use && !m->dissolve_arm;
             body->sweep_radius = m->hit_radius;
             body->height = m->hit_height;
             for (j = 0; j < c->sim[0].body_count; j++)
@@ -12230,14 +12231,13 @@ static void client_input_simulated(client *c, float dt)
              * where the creature IS this frame, not where it was when the zone
              * loaded.
              *
-             * `solid` is `in_use && !dead`. The console's own gate is bit
-             * 0x8000 at entity+0x10C and a corpse is appended to the list
-             * (0x8007F740), so this is narrower than the original — but the
-             * port has no equivalent of that bit, and the alternative, leaving
-             * every corpse solid forever, would wall a corridor off with the
-             * things the player has killed in it. Stated rather than implied:
-             * a body you cannot walk through is the console's, a corpse you
-             * cannot walk through is not established.
+             * `solid` is the console's own separation gate, bit 0x8000 at
+             * entity+0x10C (the creature's motion flags), which the tick
+             * keeps current. `listed` is the other question: whether the
+             * creature's handler put it on the frame's actor list, which a
+             * corpse's does every frame until its dissolve gate answers
+             * (0x8007F740) — so a corpse stops a walker's sweep and a round
+             * without being something the separation pass pushes against.
              */
             {
                 q2_move_body *b = &c->cre_body[i];
@@ -12266,7 +12266,8 @@ static void client_input_simulated(client *c, float dt)
                 b->sweep_radius = c->cre_actor[i].radius;
                 b->height       = c->cre_actor[i].height;
                 b->id     = (s32)i;
-                b->solid  = m->in_use && !m->dead;
+                b->solid  = m->in_use && !(m->motion.flags & 0x8000u);
+                b->listed = m->in_use && !m->dissolve_arm;
             }
         }
         q2_sim_set_bodies(&c->sim[0], c->cre_body, c->creatures.set.count);
@@ -21231,6 +21232,10 @@ static void client_report(const client *c)
     REPORT("creatures.player_hits",     q2_sim_proj_scan.player_hits);
     REPORT("creatures.player_hits_projected",
                                         q2_sim_proj_scan.player_hits_projected);
+    /* Bolt contacts moved before DoDamage: onto a view plane, and by
+     * LineIntersectCrePlane for a body with no client (combat.h). */
+    REPORT("projectiles.bolt_projected", q2_sim_proj_scan.bolt_projected);
+    REPORT("projectiles.bolt_cre_plane", q2_sim_proj_scan.bolt_cre_plane);
     REPORT("creatures.rounds_creature", c->cre_rounds_creature);
     REPORT("creatures.rounds_world",    c->cre_rounds_world);
     REPORT("creatures.launched",    c->cre_launched);

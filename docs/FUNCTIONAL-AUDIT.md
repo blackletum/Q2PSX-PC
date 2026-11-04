@@ -1469,6 +1469,84 @@ the same sweep and need no work:
   `PrintBool`. The `InitMission*` functions that install them were not read.
 - The `PSXB3ROCKS` family is bound, but no map declares it (userfuncs.h).
 
+
+## Known differences from the console, 4 November
+
+The first two of this round's items are closed; the rest are open and listed
+at the end. Every claim below was checked by executing the disc's own code
+(the bolt fixture's R3000 machine) or by a whole-disc sweep.
+
+**The projectile arm's contact point.** ProcessMissiles_Many takes the actor
+query's entry and moves it before anything reads it (0x80047E84..0x80047ED8):
+for a body whose `+0x0C` record has a view, GenMissileHitPlane against that
+view's plane with the bolt's raw velocity (+0x52) as the direction; for a client
+with no view record, nothing (0x80047EAC); for a body with no client,
+LineIntersectCrePlane (0x800542A4). The result is copied into the bolt's origin
+(0x80047EE8), which is the point DoDamage's knockback, DoNoise and
+GenerateBulletBlood (0x80048B64) all read. LineIntersectCrePlane computes
+`start + d * SquareRoot0(s.s - |(s x e) >> 12|^2) >> 12`. That is the closest
+point on the line only when |d| is 4096. A 1200-unit step against a body 600
+ahead comes out at 79, not at the skin, and executing the disc's own function
+says exactly that. `q2_combat_line_cre_plane` transcribes it with the image's
+wrapping arithmetic and toward-zero shifts, and `bolt_contact_point` applies
+both arms.
+
+DoNoise runs on every arm through 0x80048608, not only on the hull impact:
+the flagged actor contact (0x8004861C), the flagged entity-box contact
+(0x80048650) and the hull impact. The previous note said a bolt striking a body
+makes none; the branches at 0x80047E7C and 0x80047F1C say otherwise.
+
+The bolt fixture (`generate_bolt_reference.py`) now runs four victim kinds: a
+client with no view record, no client, and two client view planes. It records
+DoNoise's calls and position, giving 276 cases per disc, with PAL and US in
+agreement. `test_sim` matches every one.
+
+**Which frame's view plane.** QuakeLoop (0x80038E70) runs QuakeLogic and
+ProcessCreatureBatches, then ProcessAllCameras (0x80038FD8, UpdateWindowStuff at
+0x8003815C), then ProcessMissiles (0x80039000). So a creature's round, fired
+from a think, reads the previous frame's plane, and a bolt reads the plane this
+frame's camera pass has just written. The port refreshed the plane only at the
+end of the player's tick, and its creatures tick after the sim, so the two arms
+were swapped. The tick now runs a camera pass ahead of the combat tick and keeps
+the earlier plane in `view_plane_prev` for the creature round.
+
+**The AI body clip.** gitrace (0x8005BD3C) gates its actor pass on mask
+0x02000000 alone (0x8005BF18) and hands 0x800544EC the frame's actor list
+(0x800B2B90..0x800B2B98); that function skips the ignore entity and nothing
+else (0x800545E8). The port's pass ran an older cylinder approximation and
+dropped every non-solid body unless the mask carried 0x04000000. Neither rule is
+the console's. It now runs the shot path's transcription
+(`q2_combat_trace_cylinders`). Membership is `listed`: on the actor list,
+corpses included until their dissolve gate answers (0x8007F728..0x8007F740).
+That is kept separate from `solid`, which is the separation gate (0x800513F0).
+Against HEAD, the whole-disc sweep changes only `creatures.blocked_body` in the
+two SECURITY cases (69 to 66 and 17 to 14), which are borderline cylinder
+contacts the approximation accepted.
+
+The list's ORDER is the record-slot order of MoveModels (0x8006A4F0), which
+walks the 48 records at 0x800CBA28 and calls each handler. Each handler appends
+itself through AddCreToNextBumpList (0x800552B4), and InitialiseBumpListFrame
+(0x8005525C) swaps the double buffer each frame. Slots come from GetNextCre's
+free stack (0x8006C098, 0x800B2BAC), which items and model entities share. The
+port does not model that allocator. Instead the order was measured: with every
+0x800544EC caller's candidate order reversed, the full PAL sweep's 213 reports
+(29,568 values) and every final frame are identical. Order decides only exact
+ties and the rounding of a shortened segment, and neither occurs in that sweep.
+
+**Still open from this round:**
+
+- The single random stream. The console seeds rand() once per level, as the
+  first act of InitLevel (0x80070E34): `srand(InSelfPlayMode ? 13 :
+  GetRCnt(0xF2000001))`. Every caller then draws from that one state, and
+  RestoreSavedData does not restore it. The draw-site map and the binding design
+  are worked out; the work in progress is at `refs/checkpoints/known-differences`.
+  BIGGUN's glint draws from a module-local generator at module+0x43B0 and must
+  stay private.
+- Weapon-driver write order, the gun-arm palette 91 brightness, trigger-volume
+  bits #25, the articulated vertex rule #2b, and the one-unit muzzle rounding.
+- Multiplayer: the bolt sweep runs inside player 0's tick, before players 1..3
+  move, where the console's missiles follow every player's think.
+
 ## Limits
 
 The audit remains open. Passing suites did not demonstrate full functional

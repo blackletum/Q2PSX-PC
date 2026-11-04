@@ -520,14 +520,27 @@ typedef struct q2_sim {
      * onto before DoDamage (combat.h, q2_combat_missile_hit_plane).
      *
      * One per viewport owner, because the console keeps one per view record
-     * and the arm reads the VICTIM's. Rebuilt at the end of every player's
-     * tick, which is where UpdateWindowStuff's pass sits relative to the
-     * game's, so a shot landing during tick N reads the plane tick N-1 left.
-     * Not saved: the next tick rebuilds it from the eye and the angles, both
-     * of which are.
+     * and the arm reads the VICTIM's.
+     *
+     * WHICH FRAME'S PLANE A SHOT READS DEPENDS ON WHERE IT IS FIRED FROM.
+     * QuakeLoop (0x80038E70) runs QuakeLogic (0x80038EF8) and
+     * ProcessCreatureBatches (0x80038F24), then ProcessAllCameras (0x80038FD8,
+     * which calls UpdateWindowStuff at 0x8003815C), then ProcessMissiles
+     * (0x80039000). So a creature's ROUND, fired from a think, reads the plane
+     * the previous frame's camera pass left — `view_plane_prev` — while a BOLT,
+     * swept after the cameras, reads the one this frame's pass has just
+     * written. The tick refreshes `view_plane` ahead of the combat tick (the
+     * camera pass) and again at its end, keeping what the plane held before
+     * the first of those in `view_plane_prev`; the client's creatures tick
+     * after the sim and read that.
+     *
+     * Not saved: the next tick rebuilds both from the eye and the angles,
+     * both of which are.
      */
     q2_view_plane        view_plane[Q2_SIM_MAX_PLAYERS];
     bool                 view_plane_ready[Q2_SIM_MAX_PLAYERS];
+    q2_view_plane        view_plane_prev[Q2_SIM_MAX_PLAYERS];
+    bool                 view_plane_prev_ready[Q2_SIM_MAX_PLAYERS];
 
     /* The level clock the weapon gates and the damage throttles use, in dt
      * units. Advanced by q2_sim_tick alongside the physics. */
@@ -1775,6 +1788,14 @@ typedef struct q2_sim_proj_stats {
      */
     u32 player_hits;
     u32 player_hits_projected;
+
+    /*
+     * Bolt contacts whose point ProcessMissiles_Many moved before DoDamage
+     * (0x80047E84..0x80047ED8): onto a client's view plane, and through
+     * LineIntersectCrePlane for a body with no client (combat.h).
+     */
+    u32 bolt_projected;
+    u32 bolt_cre_plane;
 } q2_sim_proj_stats;
 
 extern q2_sim_proj_stats q2_sim_proj_scan;
@@ -1842,6 +1863,13 @@ void q2_sim_view_plane_refresh(q2_sim *sim, int index);
  * the first camera pass: the record is zeroed and its normal is zero, so the
  * `n . dir >= 0` gate refuses every shot. */
 const q2_view_plane *q2_sim_view_plane_for(const q2_sim *sim, int index);
+/* The plane as the previous frame's camera pass left it — what a creature's
+ * round reads (see `view_plane_prev`). NULL until it exists. */
+const q2_view_plane *q2_sim_view_plane_prev_for(const q2_sim *sim, int index);
+/* This frame's camera pass for one player: keep the plane in
+ * `view_plane_prev`, then rebuild it. The tick calls it ahead of the combat
+ * tick, so the bolt sweep reads the current frame's plane. */
+void q2_sim_view_plane_camera_pass(q2_sim *sim, int index);
 
 /*
  * Post a view kick — what a weapon's recoil and a damage hit do. `period` picks
