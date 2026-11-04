@@ -63,6 +63,7 @@ change; see [`docs/RELEASING.md`](docs/RELEASING.md).
 - **SAVE? waits until the new level is on screen.** It used to come up on the very frame the loading screen went away. The world is held from the moment the question is due, as on the console, but the prompt now appears after two console frames (80 ms PAL, 67 ms NTSC) and at least two drawn frames.
 - `--pause N` presses START for player one at frame N, so a headless run can capture the pause menu over any map.
 - `--restart N` takes RESTART LEVEL at frame N through the request the death and pause pages raise, so a headless run can capture the return to the level start. `--report` counts them as `level.restarts`.
+- F2 no longer appears to toggle affine texture mapping. It flipped a flag nothing read, so the picture never changed; the key and the flag are gone. Affine mapping is always on, as on the console.
 
 ### Rendering and audio
 - **Creatures have muzzle flashes.** The Soldier's, Infantry's and Gunner's export 1 call `0x80031094` while their object's `+0x10C` sign bit is up — raised by the bullet and shotgun spawners only, dropped every frame at `0x8007EE20` — and it draws a 32x32 additive quad of the chars page (UV 64,208, palette 64) turned by a free-running angle across the creature's X/Y plane, plus a light. The port drew no quad and lit every creature shot of every weapon with the player's machinegun radii; it now raises the creature's own 850..1049 / 1200..1599 from two `rand()`s, and a blaster guard, the Tank Commander and the Arachner flash nothing, as on the console.

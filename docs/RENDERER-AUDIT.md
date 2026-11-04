@@ -219,9 +219,9 @@ of GPU execution cycles. See the fixture README for provenance and reproduction.
   copies and flash state. RGB555-to-host channel order has its existing runtime
   check. CRT and bloom are presentation features, not native framebuffer parity.
 - Adaptive sizing and host simulation scheduling are intentional extensions.
-  The legacy F2/`affine_uv` toggle currently has no rasterizer effect; a
-  perspective-correct mode is not implemented. README and FIDELITY now state
-  that limitation instead of advertising it.
+  The legacy F2/`affine_uv` toggle, which no rasterizer code read, has been
+  removed; a perspective-correct mode is not implemented. README and FIDELITY
+  state that limitation instead of advertising it.
 
 ## Validation and reproduction
 

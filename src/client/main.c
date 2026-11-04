@@ -26,7 +26,6 @@
  *   shift        move faster
  *   1..9, 0      switch zone
  *   F1           toggle dithering
- *   F2           toggle affine UVs (perspective-correct comparison)
  *   F3           toggle the ordering-table sort
  *   F4           toggle simulated movement vs free-fly camera
  *   F5           cycle the console's viewport layouts (one, the two splits,
@@ -22562,7 +22561,6 @@ no_window:
                     Q2_INFO("coordinates: %s", c.show_coords ? "on" : "off");
                     break;
                 case SDLK_F1: c.opts.dither    = !c.opts.dither;    break;
-                case SDLK_F2: c.opts.affine_uv = !c.opts.affine_uv; break;
                 case SDLK_F3:
                     /*
                      * Submerge, as a testing override. Authored trigger volumes

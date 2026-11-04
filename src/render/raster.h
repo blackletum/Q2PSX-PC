@@ -81,7 +81,6 @@ typedef struct psx_texture_cache {
  * turning any of them off is a deliberate departure from the original. */
 typedef struct psx_raster_opts {
     bool dither;             /* 4x4 ordered dither before 15-bit truncation  */
-    bool affine_uv;          /* reserved diagnostic flag; backend is affine */
     bool semi_transparency;  /* honour the four blend modes                  */
     bool textures;           /* sample VRAM — off draws flat/Gouraud only    */
 

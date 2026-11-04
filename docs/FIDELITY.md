@@ -62,13 +62,13 @@ the frontend can enforce — a GPU backend has to explicitly avoid the perspecti
 correction it would otherwise get for free, either by writing the interpolation
 by hand or by feeding it `noperspective` varyings.
 
-**Control.** Affine mapping is always enabled. The legacy `affine_uv` flag/F2
-binding has no rasterizer reader and does not enable perspective correction.
+**Control.** Affine mapping is always on, and there is no perspective-correct
+mode. The old F2 toggle, which set a flag nothing read, has been removed.
 
 **Note.** Because the original had no perspective correction, the artists and
-level designers worked around it by subdividing large surfaces. Turning this off
-therefore does not just "fix" the game — it reveals geometry that was tessellated
-for a problem that no longer exists.
+level designers worked around it by subdividing large surfaces. A
+perspective-correct renderer would therefore not just "fix" the game — it would
+reveal geometry that was tessellated for a problem that no longer exists.
 
 ---
 

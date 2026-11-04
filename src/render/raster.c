@@ -9,7 +9,6 @@ void psx_raster_opts_default(psx_raster_opts *opts)
     if (!opts)
         return;
     opts->dither            = true;
-    opts->affine_uv         = true;
     opts->semi_transparency = true;
     opts->textures          = true;
     opts->clip_x = opts->clip_y = opts->clip_w = opts->clip_h = 0;
