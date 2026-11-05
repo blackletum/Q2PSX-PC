@@ -658,7 +658,8 @@ u32 q2_projectiles_build_ot(const struct q2_projectiles *list,
      * q2_camera_apply_area_projection touches only the projection, and
      * bolt_basis applies the projectile's own orientation in software.
      */
-    q2_rotation_view_anamorphic(rot.m, cam->yaw, cam->pitch, cam->roll);
+    q2_rotation_view_anamorphic(rot.m, cam->yaw, cam->pitch, cam->roll,
+                                cam->anam_w, cam->anam_h);
     gte_set_rotation(gte, &rot);
     gte_set_translation(gte, 0, 0, 0);
 

@@ -615,7 +615,8 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
 
     /* The same basis the world is drawn with, roll included — models and brush
      * geometry must lean together or the two separate as soon as you strafe. */
-    q2_rotation_view_anamorphic(view, cam->yaw, cam->pitch, cam->roll);
+    q2_rotation_view_anamorphic(view, cam->yaw, cam->pitch, cam->roll,
+                                cam->anam_w, cam->anam_h);
 
     /* 0x8006BEB0 calls the retail screen-record selector before either the
      * origin or a vertex is projected.  Models in a portal area therefore use

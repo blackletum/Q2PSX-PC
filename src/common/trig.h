@@ -137,7 +137,8 @@ void q2_rotation_view(s16 m[3][3], s32 yaw, s32 pitch, s32 roll);
  * 0x800781F0, which would settle it by naming the distance, is reached only as
  * a function pointer (0x80079CB4) and can be called by a relocated module.
  */
-void q2_rotation_view_anamorphic(s16 m[3][3], s32 yaw, s32 pitch, s32 roll);
+void q2_rotation_view_anamorphic(s16 m[3][3], s32 yaw, s32 pitch, s32 roll,
+                                 s32 ext_w, s32 ext_h);
 
 /*
  * Rotation matrix for a quaternion, both in 1.3.12. `q` is x, y, z, w, which is

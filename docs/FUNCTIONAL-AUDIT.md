@@ -1869,22 +1869,39 @@ handler rebuilds after its think (so a turning Soldier fires from last frame's
 facing), and the bullet's body sweep starts from the wall trace's own end, not one
 rebuilt from its fraction.
 
-*Where it parts now: frame 379.* Creature 9 (the second batch's Soldier) chases
-player one a frame later than on the console because its activity gate
+*Frame 379 to 450: all of the recorded run.* Creature 9 (the second batch's
+Soldier) chased player one a frame late because its activity gate
 (`0x800578D8`) suspends it on the console at 292 and not in the port. The gate
 asks whether the creature's area was drawn last frame (`0x800689C0`, stamped by
 the SortData region test at `0x80065CC4`) and, if not, whether it is within 8192
-of the view. With the same camera the port's SortData regions differ from the
-console's: areas 20 and 30 get a rectangle where the console's are empty, and 16
-and 35 come out a few pixels apart, so the port counted area 16 as drawn. The
-port's transcription of the region arithmetic (`world.c`) is the next thing to
-compare. The trigger-volume adjustment of the sighting spot and crumbs
-(`0x80061024`, `0x80060C94`) is still not modelled, and the player's own bullets
-still rebuild their wall end from the trace fraction.
+of the view. The port's regions differed for two reasons:
+- **A sealed door closes its SortData marker.** The marker test reads the node's
+  runtime bit 15 (`0x80065D54..0x80065D60`), which a shut door sets on its
+  portal as well as OBJDRAWOFF. The port tested OBJDRAWOFF alone, so areas 20
+  and 30 got a rectangle behind a closed door.
+- **The camera's row scales come from the view.** `0x80055DE4` scales row 0 by
+  the view width over 320 and row 1 by the height over 240: ×1.6 and ×1.033 for
+  PAL single player's 512×248. The port used ×1.5 and ×1, which moved areas 16
+  and 35 a few pixels and counted area 16 as drawn.
+
+With both, the region rectangles at frame 291 match the console's exactly. The
+last fault was at 381: a pickup burst (`0x8005AB70`) draws its fifteen velocity
+triples whatever the mesh, where the port drew three numbers per group.
+
+The `rand()` stream and player one's path now match the console's for all 450
+recorded frames, the length of the reference run (`native 450 | compared 450 |
+first rand() divergence at frame None`). Three known differences remain that
+the run did not reach:
+- the trigger-volume adjustment of the sighting spot and crumbs (`0x80061024`,
+  `0x80060C94`);
+- the player's own bullets still rebuild their wall end from the trace fraction;
+- a pickup burst's groups start at the item, not at fifteen of the posed mesh's
+  vertices (`0x8006CC44`).
 
 Player one's survival is not a steady score while the fights are still
-settling: the BASE3 demo now ends at 353 of 1,125 frames (601 at one point in
-this round), JAIL2's at 454 (329 before) and WASTE2's at 120 (115).
+settling. The BASE3 demo now ends at 493 of 1,125 frames (353 before this step).
+JAIL2's (454) and WASTE2's (120) were last measured before it, and neither
+demo, nor any US one, has been run against the oracle.
 
 ## Limits
 

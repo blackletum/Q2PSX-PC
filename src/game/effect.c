@@ -2531,7 +2531,8 @@ static u32 glint_build_ot(const q2_fx_glint_mesh *mesh,
     if (routed && !psx_ot_area_bucket(ot, (u32)area & 0x7Fu, &area_bucket))
         return 0;
     q2_camera_apply_area_projection(cam, ot, area, gte);
-    q2_rotation_view_anamorphic(view.m, cam->yaw, cam->pitch, cam->roll);
+    q2_rotation_view_anamorphic(view.m, cam->yaw, cam->pitch, cam->roll,
+                                cam->anam_w, cam->anam_h);
     gte_set_rotation(gte, &view);
     gte_set_translation(gte, 0, 0, 0);
 
@@ -2972,7 +2973,8 @@ u32 q2_fx_glint_lightning_draw(const q2_fx_glint *g, u16 tpage, u16 clut,
     if (routed && !psx_ot_area_bucket(ot, g->area, &area_bucket))
         return 0;
     q2_camera_apply_area_projection(cam, ot, g->area, gte);
-    q2_rotation_view_anamorphic(view.m, cam->yaw, cam->pitch, cam->roll);
+    q2_rotation_view_anamorphic(view.m, cam->yaw, cam->pitch, cam->roll,
+                                cam->anam_w, cam->anam_h);
     gte_set_rotation(gte, &view);
     gte_set_translation(gte, 0, 0, 0);
     q2_rotation_euler(owner, g->angles[0], g->angles[1], g->angles[2]);
@@ -3108,7 +3110,8 @@ u32 q2_fx_glint_lightning_draw(const q2_fx_glint *g, u16 tpage, u16 clut,
  */
 static void camera_basis(const q2_camera *cam, s16 view[3][3])
 {
-    q2_rotation_view_anamorphic(view, cam->yaw, cam->pitch, cam->roll);
+    q2_rotation_view_anamorphic(view, cam->yaw, cam->pitch, cam->roll,
+                                cam->anam_w, cam->anam_h);
 }
 
 static void to_camera(const s16 view[3][3], const q2_camera *cam,

@@ -637,7 +637,10 @@ recorded frame's NEWV and makes the copy. `ORACLE_WATCH=lo:hi` (hex addresses)
 prints every store into that range with the storing PC.
 Each frame also lists the areas player one's view drew (`seen`) and the view's
 position and angles (`camera`), which is what a creature's activity test reads
-in the next frame.
+in the next frame. With `--probes`, each SortData region test (`0x80065C5C`)
+adds its area, rectangle, the GTE rotation, screen offset and projection
+distance, so a port's region
+can be checked against the camera that made it.
 
 Each record frame gives every `rand()` call with its caller and result, player
 one, every creature's actor and edict, the active-area mask, the closed doors

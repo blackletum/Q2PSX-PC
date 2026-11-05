@@ -3188,7 +3188,8 @@ static void test_emitters_use_the_frame_camera(void)
     cam.pitch = 128;
     cam.roll  = 512;
 
-    q2_rotation_view_anamorphic(want.m, cam.yaw, cam.pitch, cam.roll);
+    q2_rotation_view_anamorphic(want.m, cam.yaw, cam.pitch, cam.roll,
+                                cam.anam_w, cam.anam_h);
 
     q2_fx_world_init(&w, &g_tab);
     q2_rng_seed(&rng, 2024);

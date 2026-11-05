@@ -255,14 +255,32 @@ void q2_quat_to_matrix(s16 m[3][3], const s16 q[4])
     m[2][0]=(s16)(xz-wy); m[2][1]=(s16)(yz+wx); m[2][2]=(s16)(4096-xx-yy);
 }
 
-void q2_rotation_view_anamorphic(s16 m[3][3], s32 yaw, s32 pitch, s32 roll)
+void q2_rotation_view_anamorphic(s16 m[3][3], s32 yaw, s32 pitch, s32 roll,
+                                 s32 ext_w, s32 ext_h)
 {
     int c;
 
     q2_rotation_view(m, yaw, pitch, roll);
 
-    /* 0x80055DE4's row scales, expressed on the horizontal so the vertical --
-     * which already matches the console to the pixel -- is left alone. */
-    for (c = 0; c < 3; c++)
-        m[0][c] = (s16)(((s32)m[0][c] * 3) / 2);
+    /*
+     * 0x80055DE4 itself: row 0 times `vw / 320` and row 1 times `vh / 240`,
+     * each divide toward zero (0x66666667 and 0x88888889 with the sign fix).
+     * One player's view on the PAL disc is 512 x 248, so the rows go up by
+     * 8/5 and 31/30 at H = 160: the console's own matrix, read off the BASE3
+     * attract run (5513 / 4231 where the basis has 3446 / 4095). The old
+     * fixed 3/2 on row 0 took the two-player split's 320 x 160 for every
+     * view, which left the world 6% narrow and 3% short and moved every
+     * SortData region a few pixels (a far creature's area then counted as
+     * drawn when the console's was not). It stays as the fallback for a
+     * camera with no view extent.
+     */
+    if (ext_w <= 0 || ext_h <= 0) {
+        for (c = 0; c < 3; c++)
+            m[0][c] = (s16)(((s32)m[0][c] * 3) / 2);
+        return;
+    }
+    for (c = 0; c < 3; c++) {
+        m[0][c] = (s16)(((s32)m[0][c] * ext_w) / 320);
+        m[1][c] = (s16)(((s32)m[1][c] * ext_h) / 240);
+    }
 }

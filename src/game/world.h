@@ -71,6 +71,12 @@ typedef struct q2_world_zone {
      */
     const u8 *node_hidden;
     u32       node_hidden_count;
+    /* Scene nodes whose runtime flags carry bit 15: node_hidden plus every
+     * sealed door portal (the client builds it for the area flood too). A
+     * SortData marker on one of these yields an empty region (0x80065D54..
+     * 0x80065D60). NULL means node_hidden alone. */
+    const u8 *node_closed;
+    u32       node_closed_count;
 
     /*
      * The AUTHORED draw order, from the zone's SortData chunk.
@@ -173,6 +179,10 @@ typedef struct q2_camera {
      * sentinel `ofs_x`/`ofs_y` use.
      */
     s32 ext_w, ext_h;
+    /* The NATIVE view's 2D extent (view+278/+280 as the console lays it out),
+     * which 0x80055DE4 scales the camera rows by; 0 for a camera that is not
+     * a game view (q2_rotation_view_anamorphic then keeps its old 3/2). */
+    s32 anam_w, anam_h;
 
     /*
      * THE CLIP EXTENT, and it is the console's ONLY rejection for a quad that

@@ -281,7 +281,9 @@ class OracleMachine(LoaderMachine):
         if pc == 0x80065C5C:  # SortData's region test: the area and its packed rectangle
             self.rand_log.append(('region', self.r[16], [signed(self.read(self.r[29] + 78, 2), 16)] +
                                   [signed(self.read(self.r[16] + 2 * i, 2), 16) for i in range(4)] +
-                                  [signed(self.read(self.read(0x800B2C24, 4) + 4 * i, 4)) for i in range(3)]))
+                                  [signed(self.read(self.read(0x800B2C24, 4) + 4 * i, 4)) for i in range(3)] +
+                                  [x for row in self.gte._mat(0) for x in row] +
+                                  [self.gte.c[24], self.gte.c[25], self.gte.c[26]]))
         if pc in (0x800689F4, 0x800578D8):  # area stamp (player, area) / the creature activity test
             self.rand_log.append(('stamp' if pc == 0x800689F4 else 'activity', self.r[31], [self.r[4], self.r[5]]))
         if pc == 0x801FB724:  # BASE3's Soldier fire, after attachment_local_offset: the local muzzle and its inputs

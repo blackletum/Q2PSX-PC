@@ -180,7 +180,14 @@ static bool sort_entity_projects(const q2_world_zone *z, s32 index,
      * OBJDRAWOFF and corrupts every node reference which follows it. */
     if (!valid_node || q2_scene_flags_nodraw(node.flags) ||
         (z->node_hidden && (u32)index < z->node_hidden_count &&
-         z->node_hidden[index])) {
+         z->node_hidden[index]) ||
+        /* 0x80065D54..0x80065D60: the marker node's RUNTIME flags, bit 15,
+         * which a sealed door sets on its portal as well as OBJDRAWOFF.
+         * Through a shut door the console's region is empty and the area
+         * behind it is neither drawn nor stamped as seen (0x80065CC4), so a
+         * creature there may sleep (0x800578D8). */
+        (z->node_closed && (u32)index < z->node_closed_count &&
+         z->node_closed[index])) {
         sort_rect_empty(&out, 0, 0);
     } else {
         s16 rel[3];
@@ -1221,7 +1228,8 @@ u32 q2_world_build_ot(const q2_world_zone *z,
                        (cam->ofs_x || cam->ofs_y) ? cam->ofs_x : screen_w / 2,
                        (cam->ofs_x || cam->ofs_y) ? cam->ofs_y : screen_h / 2);
 
-    q2_rotation_view_anamorphic(rot.m, cam->yaw, cam->pitch, cam->roll);
+    q2_rotation_view_anamorphic(rot.m, cam->yaw, cam->pitch, cam->roll,
+                                cam->anam_w, cam->anam_h);
     gte_set_rotation(gte, &rot);
 
     /*

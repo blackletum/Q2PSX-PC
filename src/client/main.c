@@ -2136,15 +2136,16 @@ static void client_pickup_burst(client *c, const s32 pos[3], s32 model_index,
             total += part.num_verts;
     }
 
+    /* 0x8005ABBC..0x8005ABDC: one GROUP per fifteen vertices. */
     count = total / 15;
-    if (count == 0) {
-        c->burst_no_verts++;
-        return;
-    }
-    if (count > Q2_FX_GROUP_QUADS)
-        count = Q2_FX_GROUP_QUADS;
 
-    for (k = 0; k < count; k++) {
+    /*
+     * FIFTEEN VELOCITIES, ALWAYS, and before any group (0x8005AC38..
+     * 0x8005ACC0): the loop runs to 15 whatever the mesh, and every group
+     * shares them. Drawing one triple per group took 3 numbers where the
+     * console takes 45 (BASE3's attract run, record frame 381).
+     */
+    for (k = 0; k < 15 && k < Q2_FX_GROUP_QUADS; k++) {
         int a;
 
         for (a = 0; a < 3; a++) {
@@ -2155,6 +2156,12 @@ static void client_pickup_burst(client *c, const s32 pos[3], s32 model_index,
                 v += 16383;
             vel[k][a] = (s16)(v >> 14);
         }
+    }
+
+    /* A mesh under fifteen vertices still took the draws (0x8005ACC4). */
+    if (count == 0) {
+        c->burst_no_verts++;
+        return;
     }
 
     /*
@@ -2184,9 +2191,14 @@ static void client_pickup_burst(client *c, const s32 pos[3], s32 model_index,
         if (node >= 0 && q2_collision_get_node(hull, (u32)node, &cell))
             area = (u8)(cell.contents & 0x7F);
 
-        q2_fx_group_spawn(&c->sim[0].fx, pos, vel, count,
-                          q2_fx_ramp_at(&c->fx_tables, 10),
-                          q2_fx_ramp_at(&c->fx_tables, 0), 32, 6144, area);
+        /* 0x8005ACD4..0x8005AD54: one 15-particle group per fifteen
+         * vertices. The console seeds each group at fifteen of the mesh's
+         * own posed vertices (0x8006CC44); this burst has no posed mesh to
+         * hand, so every group starts at the item. */
+        for (k = 0; k < count; k++)
+            q2_fx_group_spawn(&c->sim[0].fx, pos, vel, 15,
+                              q2_fx_ramp_at(&c->fx_tables, 10),
+                              q2_fx_ramp_at(&c->fx_tables, 0), 32, 6144, area);
     }
     c->ent_bursts++;
 }
@@ -4522,6 +4534,8 @@ static void client_cre_activity(client *c)
     q2_area_graph graph;
 
     c->cre_activity_ready = false;
+    c->zone.node_closed       = NULL;
+    c->zone.node_closed_count = 0;
     if (!c->creatures_ready)
         return;
     c->cre_activity_ready = c->sim[0].coll_primary_ready &&
@@ -4567,6 +4581,11 @@ static void client_cre_activity(client *c)
         }
         /* Every area on the level's first frame: ChrisCount == 1
          * (0x800651E0), or any multiplayer layout (0x800651F4). */
+        /* The same set closes the SortData markers the world draw meets. */
+        if (closed && closed_count <= closed_cap) {
+            c->zone.node_closed       = closed;
+            c->zone.node_closed_count = closed_count;
+        }
         q2_cre_active_areas(&graph, &c->zone.scene,
             closed ? closed : c->node_hidden,
             closed ? closed_count : c->node_hidden_count, area,
@@ -20338,6 +20357,8 @@ static void client_draw_view(void *user, q2_screen *s, int p,
      * the two fields only differ on the two-horizontal split. */
     c->cam.ext_w      = s->view[p].vw;
     c->cam.ext_h      = s->view[p].vh;
+    c->cam.anam_w     = s->native_view[p].vw;
+    c->cam.anam_h     = s->native_view[p].vh;
     c->cam.ofs_x      = s->view[p].ofs_x;
     c->cam.ofs_y      = s->view[p].ofs_y;
     c->cam.far_z      = s->view[p].far_z;
