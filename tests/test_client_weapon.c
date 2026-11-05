@@ -327,7 +327,8 @@ static void test_disc_grenade(const char *disc, const char *output)
     sim->invulnerable = true;
     p = &sim->combat.projectiles.p[slot];
     CHECK(p->in_use && p->bounced && !(p->flags & Q2_PROJ_TOSS_REST));
-    CHECK(q2_random_state() == saved_rng);
+    /* A load keeps the level's seed (q2_save_apply_game_rng); compare like for like. */
+    q2_random_seed(saved_rng);
     CHECK(sim->combat.projectiles.p[slot + 1].flags == resting.flags);
     CHECK(memcmp(sim->combat.projectiles.p[slot + 1].angles,
                  resting.angles, sizeof(resting.angles)) == 0);
@@ -449,7 +450,8 @@ static void test_disc_projectile_contact(const char *disc, const char *output)
     sim = &c->sim[0]; sim->gravity = 0;
     CHECK(sim->combat.projectiles.p[0].flags & Q2_PROJ_OWNER_CLEAR);
     CHECK(!(sim->combat.projectiles.p[1].flags & Q2_PROJ_OWNER_CLEAR));
-    CHECK(q2_random_state() == saved_rng);
+    /* A load keeps the level's seed (q2_save_apply_game_rng); compare like for like. */
+    q2_random_seed(saved_rng);
     for (direction = 0; direction < 8; direction++) {
         int j;
         sim->cur_dt = 20; sim->level_time += 20;
@@ -487,7 +489,7 @@ static void test_disc_bolt_sequence(const char *disc, const char *output)
     s32 start[3], end[3], clipped[3], node;
     q2_save saved = {0};
     q2_projectile timeline[32];
-    u32 bolt_rng[32], effect_rng[32];
+    u32 bolt_seed, bolt_rng[32], effect_rng[32];
     char path[1024];
     int direction, axis = 0, sign = 1, k;
     u32 i, trails = 0, lights = 0;
@@ -543,6 +545,7 @@ static void test_disc_bolt_sequence(const char *disc, const char *output)
     /* Save while the bolt is alive; its trail/impact stream must resume at
      * the same draw, including the later wall impact and retirement. */
     CHECK(client_capture(c));
+    bolt_seed = q2_random_state();
     snprintf(path, sizeof(path), "%s/bolt-flight.q2s", output);
     CHECK(q2_save_write(&c->snapshot, path) == Q2_OK);
     CHECK(q2_save_read(&saved, path) == Q2_OK);
@@ -550,8 +553,8 @@ static void test_disc_bolt_sequence(const char *disc, const char *output)
         sim->cur_dt = 12; sim->level_time += 12;
         q2_sim_combat_tick(sim);
         timeline[i] = *p;
-        bolt_rng[i] = sim->combat.rng.state;
-        effect_rng[i] = sim->fx_rng.state;
+        bolt_rng[i] = q2_rng_state(&sim->combat.rng);
+        effect_rng[i] = q2_rng_state(&sim->fx_rng);
     }
     close_client(c);
     c = open_client(disc);
@@ -559,6 +562,8 @@ static void test_disc_bolt_sequence(const char *disc, const char *output)
         CHECK(false); q2_save_free(&saved); close_client(c); return;
     }
     sim = &c->sim[0]; p = &sim->combat.projectiles.p[0];
+    /* A load keeps the level's seed (q2_save_apply_game_rng); compare like for like. */
+    q2_random_seed(bolt_seed);
     for (i = 0; i < Q2PSX_ARRAY_COUNT(timeline); i++) {
         sim->cur_dt = 12; sim->level_time += 12;
         q2_sim_combat_tick(sim);
@@ -566,8 +571,8 @@ static void test_disc_bolt_sequence(const char *disc, const char *output)
         CHECK(p->flags == timeline[i].flags);
         CHECK(p->node == timeline[i].node);
         CHECK(memcmp(p->pos, timeline[i].pos, sizeof(p->pos)) == 0);
-        CHECK(sim->combat.rng.state == bolt_rng[i]);
-        CHECK(sim->fx_rng.state == effect_rng[i]);
+        CHECK(q2_rng_state(&sim->combat.rng) == bolt_rng[i]);
+        CHECK(q2_rng_state(&sim->fx_rng) == effect_rng[i]);
     }
     CHECK(!p->in_use);
     q2_save_free(&saved);

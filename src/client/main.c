@@ -1204,6 +1204,21 @@ typedef struct client {
     q2_teleport_set   teleports;
     u32               teleport_drawn;
     u32               teleport_lights;
+    /*
+     * The display-rate halves of effects whose rand() draws belong to the
+     * console's frame, which is this port's logic tick (QuakeLoop runs once
+     * per game frame). On a host frame with no tick the drawing is redone
+     * from what the last tick drew, so a faster display neither draws more
+     * numbers from the shared stream nor spawns more columns.
+     */
+    q2_teleport_frame teleport_last;
+    s32               native_light_jitter[16][2];
+    u32               native_light_count;   /* filled on the last tick */
+    u32               native_light_next;    /* this frame's call index */
+    bool              native_light_tick;
+    u32               lightning_tick;       /* sim tick_count it last ran */
+    q2_lb_light       scene_light[Q2_LB_LIGHT_MAX];
+    u32               scene_light_count;
 
     /*
      * The movie table a QENDMIS map's module carries, the film it names, and
@@ -4630,18 +4645,15 @@ static u32 client_move_ordinal(const q2_monster *m, const q2_mmove *mv)
 }
 
 /*
- * The tie-break the spawn selector asks for. The original's is the engine's own
- * RNG; any source does here, because it is only consulted when two spawn points
- * are exactly equally far from everybody, and it must not be a constant or the
- * same point wins every draw.
+ * The tie-break the spawn selector asks for: the engine's own rand(), the one
+ * shared state every other draw in the game comes from (weapon.h, q2_rng). It
+ * is only consulted when two spawn points are exactly equally far from
+ * everybody.
  */
 static u32 client_mp_rng(void *user)
 {
-    client *c = (client *)user;
-
-    /* Numerical Recipes' LCG. The value is used modulo a small count. */
-    c->mp_rng_state = c->mp_rng_state * 1664525u + 1013904223u;
-    return c->mp_rng_state >> 16;
+    (void)user;
+    return (u32)q2_random_next();
 }
 
 /*
@@ -6553,9 +6565,24 @@ static void client_native_power2(client *c, bool tick)
 static void client_native_light(client *c, const s32 at[3], const u8 rgb[3],
                                   s32 inner, s32 inner_span, s32 outer, s32 outer_span)
 {
-    /* Module lights use BIOS rand()/32768, style 1, size shift 3. */
-    inner += q2_rng_next(&c->sim[0].fx_rng) * inner_span / 32768;
-    outer += q2_rng_next(&c->sim[0].fx_rng) * outer_span / 32768;
+    /* Module lights use BIOS rand()/32768, style 1, size shift 3. Drawn once
+     * per tick, in call order; a host frame between ticks replays them. */
+    u32 k = c->native_light_next++;
+    s32 ji, jo;
+    if (c->native_light_tick || k >= c->native_light_count) {
+        ji = q2_rng_next(&c->sim[0].fx_rng);
+        jo = q2_rng_next(&c->sim[0].fx_rng);
+        if (k < 16) {
+            c->native_light_jitter[k][0] = ji;
+            c->native_light_jitter[k][1] = jo;
+            if (c->native_light_tick) c->native_light_count = k + 1;
+        }
+    } else {
+        ji = c->native_light_jitter[k][0];
+        jo = c->native_light_jitter[k][1];
+    }
+    inner += ji * inner_span / 32768;
+    outer += jo * outer_span / 32768;
     if (c->lights_ready)
         q2_light_add_dynamic(&c->light_world, at, rgb, inner, outer, 1, 3);
 }
@@ -6810,6 +6837,9 @@ static void client_native_quakes(client *c)
 
 static void client_native_mission_frame(client *c, bool tick)
 {
+    c->native_light_next = 0;
+    c->native_light_tick = tick;
+    if (tick) c->native_light_count = 0;
     q2_native_mission *s = &c->native_mission;
     s32 dt = tick ? c->sim[0].cur_dt : 0;
     u32 i;
@@ -6830,7 +6860,9 @@ static void client_native_mission_frame(client *c, bool tick)
     if (client_name_eq(c->map, "POWER2")) client_native_power2(c, tick);
     if (client_name_eq(c->map, "SECURITY") && c->zone_index == 0)
         client_native_security_lasers(c, tick);
-    if (client_name_eq(c->map, "LAB") || client_name_eq(c->map, "BOSS1"))
+    /* The fifteen sweep velocities are only read by a burst, and a burst
+     * only happens on a tick, so they are drawn on the tick alone. */
+    if (tick && (client_name_eq(c->map, "LAB") || client_name_eq(c->map, "BOSS1")))
         for (i = 0; i < Q2_FX_GROUP_QUADS; i++) {
             velocity[i][0] = (s16)((q2_rng_next(&c->sim[0].fx_rng) - 16384) >> 8);
             velocity[i][2] = (s16)((q2_rng_next(&c->sim[0].fx_rng) - 16384) >> 8);
@@ -6899,8 +6931,13 @@ static void client_level_effects_frame(client *c, bool tick)
      * static lasers, then import +100's mission callback. Teleports consume
      * 45 random values even without pads. A callback's shutdown affects the
      * next frame's shared beam walk, not one that has already happened. */
-    c->teleport_drawn = q2_teleports_draw(&c->teleports, &c->sim[0].triggers,
-        &c->sim[0].fx, &c->sim[0].fx_rng, c->sim[0].level_time, &tp);
+    if (tick) {
+        c->teleport_drawn = q2_teleports_draw(&c->teleports, &c->sim[0].triggers,
+            &c->sim[0].fx, &c->sim[0].fx_rng, c->sim[0].level_time, &tp);
+        c->teleport_last = tp;
+    } else {
+        tp = c->teleport_last;   /* the same glow, no draws, no columns */
+    }
     if (c->lights_ready)
         for (k = 0; k < tp.light_count; k++)
             if (q2_light_add_dynamic(&c->light_world, tp.light[k].pos,
@@ -8975,6 +9012,18 @@ static bool client_load_zone(client *c, const char *map, int index)
      */
     q2_item_drop_reset();
     q2_monster_drop_reset();
+    /*
+     * srand() -- the first thing InitLevel does (0x80070E34), before the
+     * level's data, its spawns or a card's RestoreSavedData, so everything a
+     * load draws comes from this seed and a restored game is NOT handed back
+     * the rand() state it was saved with (the card never held one). The
+     * console's seed is 13 in self-play and otherwise the root counter at
+     * that instant (GetRCnt(0xF2000001), 0x80070E20). A headless run takes
+     * the self-play arm, so its every load is reproducible; an interactive
+     * one reads the host clock in the counter's place.
+     */
+    q2_random_seed(c->headless ? 13u
+                               : (u32)((SDL_GetTicksNS() / 64000u) & 0xFFFFu));
     q2_sim_init(&c->sim[0], &c->zone, q2_build_tick_rate(&c->build));
     /* 0x800AE898 is initialized once in the executable, with no level,
      * respawn or card-load reset. Keep its cadence across every zone rebuild. */
@@ -9192,7 +9241,7 @@ static bool client_load_zone(client *c, const char *map, int index)
         if (c->fx_tables_ready) {
             q2_zone_resources resources;
             q2_sim_attach_effects(&c->sim[0], &c->fx_tables,
-                                  0x51A5E5u + (u32)index);
+                                  q2_random_state());
             /* 0x80070E98 / 0x8007148C pass Resources+0x18 to the particle
              * allocator. Its zero-argument default is not the authored pool. */
             if (q2_common_resources(&c->common, c->zone.name, &resources))
@@ -15379,7 +15428,7 @@ static const char *client_ent_sound_name(const client *c, u32 which)
  * fills the list in four frames and the logo is then lit by a frozen snapshot
  * of frame four for the rest of the session.
  */
-static void client_scene_lights(client *c)
+static void client_scene_lights(client *c, bool tick)
 {
     q2_lb_light light[Q2_LB_LIGHT_MAX];
     u32 n, i;
@@ -15389,7 +15438,17 @@ static void client_scene_lights(client *c)
 
     q2_light_world_begin_frame(&c->light_world);
 
-    n = q2_levelbin_scene_lights(light, c->scene_wander, &c->sim[0].combat.rng);
+    /* QFRONT's lights draw rand() once per game frame; between scene ticks
+     * the last tick's set is re-added rather than drawn again. */
+    if (tick || !c->scene_light_count) {
+        n = q2_levelbin_scene_lights(light, c->scene_wander, &c->sim[0].combat.rng);
+        if (n > Q2_LB_LIGHT_MAX) n = Q2_LB_LIGHT_MAX;
+        memcpy(c->scene_light, light, n * sizeof(light[0]));
+        c->scene_light_count = n;
+    } else {
+        n = c->scene_light_count;
+        memcpy(light, c->scene_light, n * sizeof(light[0]));
+    }
     for (i = 0; i < n; i++)
         q2_light_add_dynamic(&c->light_world, light[i].pos, light[i].rgb,
                              light[i].inner, light[i].outer, 0, 0);
@@ -20232,7 +20291,12 @@ static void client_frame(client *c)
      * All viewports use that state. UVs read the shared frame counter, even
      * after a pause or a streamed-zone return; they have no private clock. */
     c->sim[0].glint.lightning_frame = (u32)c->frame_index;
-    q2_fx_glint_lightning_tick(&c->sim[0].glint, &c->sim[0].fx_rng);
+    /* Once per game frame, as the console's draw hook is reached once per
+     * QuakeLoop pass, and not at all while paused, when no pass runs. */
+    if (c->sim[0].tick_count != c->lightning_tick) {
+        c->lightning_tick = c->sim[0].tick_count;
+        q2_fx_glint_lightning_tick(&c->sim[0].glint, &c->sim[0].fx_rng);
+    }
     {
         q2_camera saved_cam = c->cam;
         /*
@@ -22746,8 +22810,7 @@ no_window:
             client_save_prompt_frame(&c);
         } else if (c.credits_open) {
             client_credits_frame(&c, (double)dt);
-            q2_sim_scene_advance(&c.sim[0], (double)dt);
-            client_scene_lights(&c);
+            client_scene_lights(&c, q2_sim_scene_advance(&c.sim[0], (double)dt) != 0);
         } else if (c.menu.open) {
             /* The world is frozen while the menu is up: no input, no tick.
              *
@@ -22759,8 +22822,7 @@ no_window:
              * is the whole of this level rather than a shortcut through it. */
             client_menu_frame(&c);
             if (c.in_front_end) {
-                q2_sim_scene_advance(&c.sim[0], (double)dt);
-                client_scene_lights(&c);
+                client_scene_lights(&c, q2_sim_scene_advance(&c.sim[0], (double)dt) != 0);
             } else if (c.menu.page_id == Q2_PAGE_DEATH) {
                 /*
                  * AND NEITHER IS THE DEATH PAGE A PAUSED WORLD.
@@ -22791,8 +22853,7 @@ no_window:
              * The pad is nobody's for these fifteen frames, because 0x80101CD0
              * does not read it.
              */
-            q2_sim_scene_advance(&c.sim[0], (double)dt);
-            client_scene_lights(&c);
+            client_scene_lights(&c, q2_sim_scene_advance(&c.sim[0], (double)dt) != 0);
             client_start_beat(&c, dt);
         } else if (c.mission_open || c.briefing_open || c.endmis_open) {
             /*

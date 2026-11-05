@@ -434,8 +434,7 @@ static void capture_credits(const char *disc, const char *dir)
     q2_ai_module_free(&relocated);
     for (frame = 1; frame <= 150; frame++) {
         client_credits_frame(c, 1.0/30.0);
-        q2_sim_scene_advance(&c->sim[0], 1.0/30.0);
-        client_scene_lights(c);
+        client_scene_lights(c, q2_sim_scene_advance(&c->sim[0], 1.0/30.0) != 0);
         q2_screen_tick_dt(&c->screen, 1.0/30.0);
         client_frame(c); c->frame_index++;
         if (frame == 60 || frame == 150) {

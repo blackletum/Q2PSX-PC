@@ -33,7 +33,11 @@ void q2_sim_attach_effects(q2_sim *sim, const q2_fx_tables *tab, u32 seed)
 
     q2_fx_flash_clear(&sim->fx);
     q2_fx_world_init(&sim->fx, tab);
-    q2_rng_seed(&sim->fx_rng, seed);
+    /* Bound to the shared rand(); `seed` reseeds it, as srand() would. The
+     * client passes the current state, so a zone load keeps the level's
+     * seed (InitLevel 0x80070E34); a fixture passes its own. */
+    q2_rng_bind(&sim->fx_rng, q2_random_rng());
+    q2_random_seed(seed);
     sim->fx_ready = (tab != NULL && tab->loaded);
 
     /* q2_fx_world_init zeroes the world, the hook with it, so it goes back on
@@ -90,7 +94,10 @@ bool q2_sim_attach_glint(q2_sim *sim, const q2_common_file *common)
         sim->glint.phase      = script.phase ? script.phase
                                              : Q2_FX_GLINT_PHASE_START;
 
-        q2_rng_seed(&sim->glint.script_rng, 0); /* module+0x43B0 */
+        /* module+0x43B0: BIGGUN's own generator state, not the BIOS rand(),
+         * so this stream alone stays private (weapon.h, q2_rng). */
+        q2_rng_bind(&sim->glint.script_rng, NULL);
+        q2_rng_seed(&sim->glint.script_rng, 0);
         for (i = 0; i < sim->glint.band_count &&
                     i < Q2_FX_GLINT_BANDS_MAX; i++) {
             memcpy(sim->glint.base_angle[i], script.angle[i],
@@ -668,7 +675,10 @@ void q2_sim_combat_init(q2_sim *sim)
     sim->combat.rules.environment_sound = environment_sound;
     sim->combat.rules.environment_sound_user = sim;
     q2_projectiles_init(&sim->combat.projectiles);
-    q2_rng_seed(&sim->combat.rng, 0x51ED2701u);
+    /* Every fire function's draws go to 0x80089E28, the BIOS rand() the
+     * whole game shares; the seed is the level's (InitLevel 0x80070E34), not
+     * the sim's, so binding is all this does. */
+    q2_rng_bind(&sim->combat.rng, q2_random_rng());
 
     /* A fresh player has the blaster and nothing else, which is what the
      * spawn path at 0x8003D4FC leaves in the weapon fields. */

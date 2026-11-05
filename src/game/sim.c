@@ -104,6 +104,12 @@ void q2_sim_init(q2_sim *sim, const q2_world_zone *zone, int tick_rate_hz)
     sim->player[sim->cur_player].look_scheme = Q2_PAD_STYLE_STANDARD_A;
 
     q2_sim_combat_init(sim);
+
+    /* One rand() for the whole game (weapon.h, q2_rng). The effect stream is
+     * bound here as well as by q2_sim_attach_effects, so a sim that never
+     * attaches tables still draws its splashes from the shared state. */
+    q2_rng_bind(&sim->fx_rng, q2_random_rng());
+    q2_rng_bind(&sim->ent_world.rng, q2_random_rng());
 }
 
 void q2_sim_free(q2_sim *sim)

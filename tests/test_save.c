@@ -150,8 +150,8 @@ static void build_state(q2_sim *sim, q2_inventory *inv)
     sim->combat.next_fire        = 123500;
     sim->combat.kick[0]          = -12;
     sim->combat.chaingun_bullets = 3;
-    sim->combat.rng.state        = 0xABCDEF01u;
-    sim->fx_rng.state            = 0x0BADF00Du;
+    /* One rand() state, which every subsystem's stream is bound to. */
+    q2_random_seed(0xABCDEF01u);
 
     /* A rocket in flight is as much state as the player is. */
     sim->combat.projectiles.p[2].in_use  = true;
@@ -420,35 +420,32 @@ static void test_game_random_restore(void)
 {
     q2_sim sim;
     q2_inventory inv;
-    q2_save saved = {0}, loaded = {0}, legacy = {0};
-    s32 expected[32];
+    q2_save saved = {0}, loaded = {0};
     u32 i, state;
-    printf("shared gameplay random state\n");
+    printf("rand() state: written, read, and not restored\n");
     build_state(&sim, &inv);
     q2_random_seed(0xF1234567u);
     for (i = 0; i < 17; i++) (void)q2_random_next();
     state = q2_random_state();
     check(q2_save_capture(&saved, &sim, &inv, "SLES-01534", "BASE1", 0) == Q2_OK,
           "capture the shared random stream");
+    check(saved.game_rng_state == state && saved.rng_state == state &&
+          saved.fx_rng_state == state, "all three slots hold the one state");
     check(q2_save_write(&saved, tmp_path()) == Q2_OK &&
-          q2_save_read(&loaded, tmp_path()) == Q2_OK, "random state survives disk");
-    for (i = 0; i < 32; i++) expected[i] = q2_random_next();
-    q2_random_seed(42);
-    check(q2_save_apply(&loaded, &sim, NULL, "SLUS-00757", "BASE1") != Q2_OK &&
-          q2_random_state() == 42, "a refused save leaves the stream alone");
+          q2_save_read(&loaded, tmp_path()) == Q2_OK &&
+          loaded.game_rng_present && loaded.game_rng_state == state,
+          "random state survives disk");
+    /*
+     * InitLevel seeds rand() first (0x80070E34) and RestoreSavedData runs
+     * after it (0x80070F50) with no generator state to hand back, so a load
+     * keeps the level's own seed. The client seeds at the start of the zone
+     * load; applying a save must leave that alone.
+     */
+    q2_random_seed(13);
     check(q2_save_apply(&loaded, &sim, NULL, "SLES-01534", "BASE1") == Q2_OK &&
-          q2_random_state() == state, "restore the complete state after rebuilding");
-    for (i = 0; i < 32; i++)
-        check_eq_i(q2_random_next(), expected[i], "resume the next gameplay choices");
-    q2_random_seed(123);
-    q2_save_apply_game_rng(&legacy);
-    check_eq_i(q2_random_state(), 123, "legacy files leave the unspecified stream alone");
-    saved.game_rng_state = 0;
-    q2_save_free(&loaded);
-    check(q2_save_write(&saved, tmp_path()) == Q2_OK &&
-          q2_save_read(&loaded, tmp_path()) == Q2_OK, "zero state survives disk");
+          q2_random_state() == 13, "a load keeps the level's seed");
     q2_save_apply_game_rng(&loaded);
-    check_eq_i(q2_random_state(), 0, "zero is restored without changing the seed");
+    check_eq_i(q2_random_state(), 13, "the RAND chunk is not applied");
     q2_save_free(&saved); q2_save_free(&loaded); q2_sim_free(&sim);
     remove(tmp_path());
 }
@@ -621,9 +618,9 @@ static void test_round_trip(void)
     check_eq_i(loaded.kick[0], -12, "the view kick survives");
     check_eq_i(loaded.chaingun_bullets, 3, "the chaingun spin survives");
     check_eq_i((s64)loaded.rng_state, (s64)0xABCDEF01u,
-               "the weapon generator survives");
-    check_eq_i((s64)loaded.fx_rng_state, (s64)0x0BADF00Du,
-               "the effect generator survives");
+               "the shared rand() state is written to the weapon slot");
+    check_eq_i((s64)loaded.fx_rng_state, (s64)0xABCDEF01u,
+               "and to the effect slot, for an older reader");
 
     check(loaded.proj[2].in_use, "a projectile in flight survives");
     check_eq_i(loaded.proj[2].kind, Q2_PROJ_ROCKET, "its kind survives");
@@ -1175,7 +1172,7 @@ static void test_event_scheduler_restore(void)
     q2_save saved = {0}, loaded = {0};
     saved_timer_probe a = {0}, b = {0};
     q2_event_timer expected;
-    u32 next_random;
+    u32 next_random, saved_random;
     printf("resident TIMER, WAIT and pending-trigger restore\n");
     raw[8] = 28; raw[10] = 2; raw[11] = Q2_EVREC_CAT_B;
     raw[12] = Q2_EVOP_CALL; raw[13] = 12; raw[16] = 2; raw[18] = 10;
@@ -1200,6 +1197,7 @@ static void test_event_scheduler_restore(void)
     q2_event_rt_trigger(a.rt, 36); q2_event_rt_update(a.rt);
     q2_event_rt_trigger(a.rt, 64); /* queued, not yet dispatched */
     check_eq_i(a.rt->wait[0].count, 2, "WAIT was partially consumed");
+    saved_random = q2_random_state();
     check(q2_save_capture(&saved, &live, NULL, "SLES-01534", "BASE0", 0) == Q2_OK,
           "capture scheduler between deadlines");
     check(q2_save_write(&saved, tmp_path()) == Q2_OK &&
@@ -1209,6 +1207,9 @@ static void test_event_scheduler_restore(void)
     check_eq_i(expected.period, 90, "original rerolls the next period");
     check(q2_save_apply(&loaded, &rebuilt, NULL, "SLES-01534", "BASE0") == Q2_OK,
           "restore into a rebuilt scheduler");
+    /* A load does not restore rand() (q2_save_apply_game_rng); put the stream
+     * where it stood at the save, so the rearm is compared like for like. */
+    q2_random_seed(saved_random);
     check_eq_i(b.rt->clock, 70, "restore the scheduler clock");
     check_eq_i(b.rt->deferred[0].due, 210, "retain remaining delay, not a full restart");
     check_eq_i(b.rt->deferred_count, 1, "rebuild the active slot count");

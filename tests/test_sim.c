@@ -6600,6 +6600,34 @@ static void test_grenade_geometry(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * ONE rand(). Every caller of 0x80089E28 shares the BIOS's state, so the sim's
+ * weapon, effect and entity streams are bound to the gameplay state: a draw
+ * from any of them advances that one sequence, in call order.
+ */
+static void test_one_random_stream(void)
+{
+    q2_sim sim;
+    q2_rng ref;
+    s32 a, b, c, d;
+    printf("one shared rand() behind every stream\n");
+    q2_sim_init(&sim, NULL, 50);
+    q2_random_seed(99);
+    q2_rng_seed(&ref, 99);
+    a = q2_rng_next(&sim.combat.rng);
+    b = q2_rng_next(&sim.fx_rng);
+    c = q2_rng_next(&sim.ent_world.rng);
+    d = q2_random_next();
+    check_eq_i(a, q2_rng_next(&ref), "the weapon stream draws the first value");
+    check_eq_i(b, q2_rng_next(&ref), "the effect stream the second");
+    check_eq_i(c, q2_rng_next(&ref), "the entity stream the third");
+    check_eq_i(d, q2_rng_next(&ref), "and the gameplay stream the fourth");
+    check(q2_rng_state(&sim.combat.rng) == q2_random_state() &&
+          q2_rng_state(&sim.fx_rng) == q2_random_state(),
+          "every bound stream reads the one state");
+    q2_sim_free(&sim);
+}
+
 int main(void)
 {
     printf("Q2PSX-PC simulation tests\n\n");

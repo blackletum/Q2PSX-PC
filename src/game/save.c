@@ -604,8 +604,10 @@ q2_result q2_save_capture(q2_save *out, const q2_sim *sim,
     out->kick[1]          = sim->combat.kick[1];
     out->kick[2]          = sim->combat.kick[2];
     out->chaingun_bullets = sim->combat.chaingun_bullets;
-    out->rng_state        = sim->combat.rng.state;
-    out->fx_rng_state     = sim->fx_rng.state;
+    /* One shared rand() now (weapon.h); all three slots hold its state, so a
+     * file still parses for an older reader. */
+    out->rng_state        = q2_rng_state(&sim->combat.rng);
+    out->fx_rng_state     = q2_rng_state(&sim->fx_rng);
     out->shot_serial      = sim->combat.shot_serial;
     out->shot_fired       = sim->combat.last_shot.fired;
     out->shot_dry         = sim->combat.last_shot.dry;
@@ -1136,8 +1138,7 @@ q2_result q2_save_apply(const q2_save *s, q2_sim *sim, q2_inventory *inv,
     sim->combat.kick[1]          = s->kick[1];
     sim->combat.kick[2]          = s->kick[2];
     sim->combat.chaingun_bullets = s->chaingun_bullets;
-    sim->combat.rng.state        = s->rng_state;
-    sim->fx_rng.state            = s->fx_rng_state;
+    /* rng_state / fx_rng_state are NOT applied: see q2_save_apply_game_rng. */
 
     /* Frame-driven fire can leave one report for the next view-weapon step.
      * VWPN records its consumer cursors; no projectile or damage is replayed. */
@@ -2502,9 +2503,17 @@ bool q2_save_get_skill(const q2_save *s, s32 *skill)
     return true;
 }
 
+/*
+ * A load does not get the rand() state back, because the console's never did:
+ * InitLevel seeds rand() as its first act (0x80070E34) and RestoreSavedData
+ * (0x80070F50) comes after it and holds no generator state. The load's own
+ * seed — the level's, set where the client begins the zone — stands, along
+ * with whatever the rebuild drew from it. The RAND chunk is still written and
+ * read, so files stay compatible both ways; this is where it is not applied.
+ */
 void q2_save_apply_game_rng(const q2_save *s)
 {
-    if (s && s->game_rng_present) q2_random_seed(s->game_rng_state);
+    (void)s;
 }
 
 q2_result q2_save_capture_ai(q2_save *s, const q2_creature_world *w, u32 phase_us)

@@ -1472,8 +1472,8 @@ the same sweep and need no work:
 
 ## Known differences from the console, 4 November
 
-The first two of this round's items are closed; the rest are open and listed
-at the end. Every claim below was checked by executing the disc's own code
+The first three of this round's items are closed; the rest are open and
+listed at the end. Every claim below was checked by executing the disc's own code
 (the bolt fixture's R3000 machine) or by a whole-disc sweep.
 
 **The projectile arm's contact point.** ProcessMissiles_Many takes the actor
@@ -1533,15 +1533,47 @@ port does not model that allocator. Instead the order was measured: with every
 (29,568 values) and every final frame are identical. Order decides only exact
 ties and the rounding of a shortened segment, and neither occurs in that sweep.
 
+**One random stream, 5 November.** The console has one generator: every call
+of 0x80089E28 jumps to BIOS A(2Fh) rand(), one state for the whole program.
+The port kept five: the gameplay stream, `combat.rng`, `fx_rng`,
+`ent_world.rng` and the glint's `script_rng`. A `q2_rng` can now be BOUND to
+the gameplay state (`shared`), and the sim binds the weapon, effect and entity
+streams at init. The glint stays private, because BIGGUN seeds and draws from
+its own module-local state (module+0x43B0), not from the BIOS. The multiplayer
+spawn tie-break used a host LCG; it now draws rand(). `q2_rng_seed` always makes
+a stream private, so a fixture or preview owns its generator; the shared state
+is seeded only by `q2_random_seed`, the console's srand().
+
+The seed follows the console. InitLevel's first act is
+`srand(InSelfPlayMode ? 13 : GetRCnt(0xF2000001))` (0x80070E20..0x80070E34),
+ahead of the level data, the spawns and RestoreSavedData (0x80070F50). The
+client seeds at the same point of its zone load: 13 for a headless run, the
+self-play arm, which keeps every capture reproducible; the host clock otherwise,
+in the root counter's place. A load therefore does not restore the saved
+rand() state. The RAND chunk and the CMBT slots are still written (all three
+hold the one state) and read, but `q2_save_apply_game_rng` applies nothing.
+Because normal play seeds from the root counter, the console's absolute
+sequence cannot be observed outside self-play, which this port does not run.
+What can be matched is the structure: one state, every draw on the game
+frame, and a reseed at each load.
+
+The draws that ran per DISPLAY frame now run on the logic tick, which is the
+console's frame (QuakeLoop runs once per game frame):
+- the teleport columns, 45 draws plus 4 per pad, which also spawned a group
+  each displayed frame;
+- the LAB and BOSS1 sweep velocities, 45;
+- the mission lights;
+- BIGGUN's lightning, which also advanced while paused;
+- the title screen's scene lights.
+
+On a host frame with no tick, the tick's result is redrawn without drawing
+numbers: the teleport glow, the light jitter and the scene lights are cached.
+`test_sim` checks that one draw from each bound stream advances the single
+sequence in call order. The save tests now check that a load keeps the level's
+seed.
+
 **Still open from this round:**
 
-- The single random stream. The console seeds rand() once per level, as the
-  first act of InitLevel (0x80070E34): `srand(InSelfPlayMode ? 13 :
-  GetRCnt(0xF2000001))`. Every caller then draws from that one state, and
-  RestoreSavedData does not restore it. The draw-site map and the binding design
-  are worked out; the work in progress is at `refs/checkpoints/known-differences`.
-  BIGGUN's glint draws from a module-local generator at module+0x43B0 and must
-  stay private.
 - Weapon-driver write order, the gun-arm palette 91 brightness, trigger-volume
   bits #25, the articulated vertex rule #2b, and the one-unit muzzle rounding.
 - Multiplayer: the bolt sweep runs inside player 0's tick, before players 1..3

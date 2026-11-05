@@ -501,7 +501,8 @@ static void test_disc_weapon_restore(const char *disc, const char *output)
         CHECK(same_weapon(cold->vw[0], at_save));
         CHECK(cold->vw_last_weapon[0] == selected);
         CHECK(cold->shot_serial_shown[0] == shown && cold->shot_serial_heard[0] == heard);
-        CHECK(q2_random_state() == rng);
+        /* A load keeps the level's seed (q2_save_apply_game_rng); compare like for like. */
+        q2_random_seed(rng);
         if (ci == 2)
             CHECK(q2_projectile_hand_held_index(&cold->sim[0].combat.projectiles, 0) >= 0);
         snprintf(name, sizeof(name), "weapon-%u-restored", ci);
@@ -543,6 +544,7 @@ static void test_disc_timer_restore(const char *disc, const char *output)
     q2_save saved = {0};
     q2_event_timer original[Q2_EVENT_RT_TIMER_MAX];
     s32 clock;
+    u32 at_save;
     u32 state, calls, timers;
     char path[1024];
     CHECK(client_load_zone(c, "BOSS2", 0));
@@ -558,6 +560,7 @@ static void test_disc_timer_restore(const char *disc, const char *output)
     snprintf(path, sizeof(path), "%s/timer.q2s", output);
     CHECK(q2_save_write(&c->snapshot, path) == Q2_OK);
     CHECK(q2_save_read(&saved, path) == Q2_OK);
+    at_save = q2_random_state();
     clock = c->sim[0].event_rt.clock;
     timers = c->sim[0].event_rt.deferred_count;
     memcpy(original, c->sim[0].event_rt.deferred, sizeof(original));
@@ -569,6 +572,8 @@ static void test_disc_timer_restore(const char *disc, const char *output)
     close_client(c);
     cold = open_client(disc);
     CHECK(client_apply_save(cold, &saved));
+    /* A load keeps the level's seed (q2_save_apply_game_rng); compare like for like. */
+    q2_random_seed(at_save);
     CHECK(cold->sim[0].event_rt.clock == clock);
     CHECK(cold->sim[0].event_rt.deferred_count == timers);
     CHECK(memcmp(original, cold->sim[0].event_rt.deferred, sizeof(original)) == 0);

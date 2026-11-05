@@ -1,5 +1,6 @@
 #include "entity.h"
 #include "trace.h"
+#include "random.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -284,7 +285,9 @@ void q2_entity_world_init(q2_entity_world *w)
         return;
 
     memset(w, 0, sizeof(*w));
-    q2_rng_seed(&w->rng, 1);
+    /* The materialise sparkles draw rand() (0x80059608..0x800596B0), the
+     * shared BIOS state, so this stream is bound rather than seeded. */
+    q2_rng_bind(&w->rng, q2_random_rng());
 }
 
 void q2_entity_world_add_player(q2_entity_world *w, u32 slot,

@@ -17,3 +17,8 @@ void q2_random_seed(u32 state)
 {
     q2_rng_seed(&gameplay_rng, state);
 }
+
+q2_rng *q2_random_rng(void)
+{
+    return &gameplay_rng;
+}

@@ -1083,13 +1083,13 @@ typedef struct q2_sim {
      * means no colour, and inventing one would be the port making up an effect
      * the console does not have.
      *
-     * `fx_rng` is separate from the weapon generator on purpose. Effects draw
-     * far more numbers than firing does, and sharing one stream would make a
-     * shot's spread depend on how many sparks happened to be alive — which the
-     * original does do, since it has one rand(), but which makes a seeded
-     * replay of the SIMULATION impossible to reproduce independently of the
-     * frame rate. This is a deliberate divergence and it is why it is a second
-     * generator rather than the same one.
+     * `fx_rng` is BOUND to the one shared rand() (weapon.h, q2_rng), like the
+     * weapon and entity streams: the console has a single generator, so a
+     * shot's spread does depend on how many sparks were drawn before it. It
+     * was once a second generator, to keep a seeded replay independent of the
+     * display rate; what made that necessary was effects drawing per DISPLAY
+     * frame, and those draws now happen on the tick (the client's level
+     * effects and BIGGUN's lightning), which is the console's frame.
      */
     q2_fx_world  fx;
     q2_rng       fx_rng;

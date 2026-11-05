@@ -2139,7 +2139,7 @@ static void test_quake_boundaries(client *c, bool boss, const char *disc_path, c
     CHECK(c->sim[0].player[0].impulse[2] == (boss ? 32238 : 31715));
     CHECK(c->sim[0].player[0].impulse_armed && (c->sim[0].player[0].ent2_flags & 0x4000));
     CHECK(!memcmp(velocity, c->sim[0].player[0].vel, sizeof(velocity)));
-    CHECK(c->sim[0].fx_rng.state == 0xF94BDF32u);
+    CHECK(q2_rng_state(&c->sim[0].fx_rng) == 0xF94BDF32u);
     CHECK(c->voice_started == sounds && c->shock_requests == 1 && c->shock_taken == 1);
     CHECK(c->shock[0].slot[3].data == q2_shock_find(Q2_SHOCK_EXPLOSION) &&
           c->shock[0].slot[3].strength == 2155);
@@ -2162,7 +2162,7 @@ static void test_quake_boundaries(client *c, bool boss, const char *disc_path, c
         c->mp_enabled = n == 4;
         client_native_mission_frame(c, n != 0);
         CHECK(!c->sim[0].player[0].impulse_armed && !c->shock_requests);
-        CHECK(quake_probe_phase(c, boss) == 0 && c->sim[0].fx_rng.state == 1);
+        CHECK(quake_probe_phase(c, boss) == 0 && q2_rng_state(&c->sim[0].fx_rng) == 1);
         if (boss) CHECK(c->native_mission.boss2_quake_time == 300);
     }
     c->restoring_save = NULL;
@@ -2175,7 +2175,7 @@ static void test_quake_boundaries(client *c, bool boss, const char *disc_path, c
     CHECK(client_find_sound(c, "wep_grenlx1a", &explosion));
     sounds = c->voice_started;
     client_native_mission_frame(c, true);
-    CHECK(c->sim[0].fx_rng.state == 0x0DAA96F5u && c->voice_started == sounds + 1);
+    CHECK(q2_rng_state(&c->sim[0].fx_rng) == 0x0DAA96F5u && c->voice_started == sounds + 1);
     CHECK(c->voice_last && c->voice_last->spu.dec.adpcm == explosion.body);
     CHECK(c->voice_last && c->voice_last->source == CLIENT_SOUND_POINT);
     CHECK(c->voice_last && c->voice_last->pos_world[0] == c->sim[0].player[0].pos[0] &&
@@ -2196,11 +2196,13 @@ static void test_quake_boundaries(client *c, bool boss, const char *disc_path, c
     client_native_mission_frame(c, true);
     saved = c->native_mission;
     memcpy(impulse, c->sim[0].player[0].impulse, sizeof(impulse));
-    seed = c->sim[0].fx_rng.state;
+    seed = q2_rng_state(&c->sim[0].fx_rng);
     c = cold_population_save(c, disc_path, output);
     CHECK(!memcmp(&saved, &c->native_mission, sizeof(saved)));
     CHECK(!memcmp(impulse, c->sim[0].player[0].impulse, sizeof(impulse)) &&
-          c->sim[0].player[0].impulse_armed && c->sim[0].fx_rng.state == seed);
+          c->sim[0].player[0].impulse_armed);
+    /* A load keeps the level's seed (q2_save_apply_game_rng); compare like for like. */
+    q2_random_seed(seed);
     c->sim[0].cur_dt = 29;
     shocks = c->shock_requests;
     client_native_mission_frame(c, true);
@@ -2763,13 +2765,13 @@ static void test_disc_security_orb(const char *disc_path, const char *output)
         q2_fx_beams_reset(&c->sim[0].fx);
         client_native_mission_frame(c, true);
         no_hit = c->native_mission;
-        rng_after = c->sim[0].fx_rng.state;
+        rng_after = q2_rng_state(&c->sim[0].fx_rng);
         security_beam_player(c, &c->sim[0].fx.beam[2]);
         c->native_mission = initial;
         q2_rng_seed(&c->sim[0].fx_rng, 1);
         q2_fx_beams_reset(&c->sim[0].fx);
         client_native_mission_frame(c, true);
-        CHECK(c->sim[0].combat.inv.health == 1999 && c->sim[0].fx_rng.state != rng_after);
+        CHECK(c->sim[0].combat.inv.health == 1999 && q2_rng_state(&c->sim[0].fx_rng) != rng_after);
         CHECK(!memcmp(c->native_mission.orb_arc, no_hit.orb_arc, sizeof(no_hit.orb_arc)));
     }
     /* Every native beam uses the fixed origin's cell even while the sphere

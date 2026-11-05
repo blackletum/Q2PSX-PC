@@ -121,10 +121,34 @@ const q2_weapon_behaviour q2_weapon_behaviour_table[Q2_WT_SLOTS] = {
 /* ------------------------------------------------------------------------- */
 /* The engine's deterministic generator                                      */
 /* ------------------------------------------------------------------------- */
+/* The state a stream acts on. One hop: the shared state is itself private. */
+static q2_rng *rng_target(q2_rng *r)
+{
+    return r && r->shared ? r->shared : r;
+}
+
 void q2_rng_seed(q2_rng *r, u32 seed)
 {
-    if (r)
-        r->state = seed;
+    if (!r)
+        return;
+    r->shared = NULL;      /* safe on a fresh, uninitialised local too */
+    r->state  = seed;
+}
+
+u32 q2_rng_state(const q2_rng *r)
+{
+    if (!r)
+        return 0;
+    return r->shared ? r->shared->state : r->state;
+}
+
+void q2_rng_bind(q2_rng *r, q2_rng *to)
+{
+    if (!r)
+        return;
+    if (!to && r->shared)
+        r->state = r->shared->state;
+    r->shared = (to == r) ? NULL : to;
 }
 
 void q2_creature_muzzle_light(s32 rand_a, s32 rand_b, s32 *inner, s32 *outer)
@@ -159,6 +183,7 @@ void q2_weapon_muzzle_light(u8 weapon_id, s32 rand_a, s32 rand_b,
 
 s32 q2_rng_next(q2_rng *r)
 {
+    r = rng_target(r);
     if (!r)
         return 0;
     /*

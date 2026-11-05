@@ -219,8 +219,8 @@
  * ever have held at 4096.
  * Version 1 and missing ZPOP remain readable; neither borrows session history. */
 
-/* RAND adds the shared gameplay random stream. Older files have no recorded
- * state for that stream, so their load retains the reconstructed world's state. */
+/* RAND records the shared rand() state. It is written and parsed but not
+ * applied: the console reseeds at every level load (q2_save_apply_game_rng). */
 
 /* VWPN preserves the live view-weapon machine and its consumed-shot cursors.
  * Old files keep the previous fresh-weapon initialization on load. Runtime

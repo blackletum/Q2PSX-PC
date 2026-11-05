@@ -413,12 +413,31 @@ void q2_weapon_muzzle_light(u8 weapon_id, s32 rand_a, s32 rand_b,
  * keeps its own so a replay or a test is reproducible; seed it per level to get
  * the original's variety without its unpredictability.
  */
-typedef struct q2_rng { u32 state; } q2_rng;
+/*
+ * THE CONSOLE HAS ONE OF THESE. Every caller of 0x80089E28 — the weapons, the
+ * creatures, the particles, the item sparkles, the level modules — draws from
+ * the BIOS's single rand() state, in the order the frame reaches them. A
+ * stream that a subsystem owns is BOUND to that one state (`shared`): drawing,
+ * seeding and reading it act on the shared state, so the port keeps its
+ * per-subsystem handles without keeping per-subsystem sequences. An unbound
+ * q2_rng is a private generator, which is what a fixture or a preview wants.
+ */
+typedef struct q2_rng {
+    u32            state;
+    struct q2_rng *shared;   /* NULL: private; else the state this acts on */
+} q2_rng;
 
-/* Zero is valid for this LCG; its additive term advances it normally. */
+/* Zero is valid for this LCG; its additive term advances it normally. Seeding
+ * makes `r` a PRIVATE generator with that state, whatever it was before, so a
+ * fixture or a preview can own one. The shared state is seeded with
+ * q2_random_seed, which is the console's srand(). */
 void q2_rng_seed(q2_rng *r, u32 seed);
 /* 0..32767, the range every fire function assumes when it subtracts 16384. */
 s32  q2_rng_next(q2_rng *r);
+/* The state a draw would advance: the shared one for a bound stream. */
+u32  q2_rng_state(const q2_rng *r);
+/* Bind `r` to `to` (NULL makes it private again, keeping its own state). */
+void q2_rng_bind(q2_rng *r, q2_rng *to);
 
 /*
  * Where the shot leaves the player.
