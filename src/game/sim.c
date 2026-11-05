@@ -3996,6 +3996,10 @@ s32 q2_sim_next_dt(const q2_sim *sim, double elapsed_seconds)
     if (!sim || elapsed_seconds <= 0.0)
         return 0;
 
+    /* A recorded frame's own delta (sim.h, `dt_force`). */
+    if (sim->dt_force)
+        return sim->dt_force > 0 ? sim->dt_force : 0;
+
     /* Real time -> the engine's 1/300 s units, with the sub-unit remainder
      * carried. PEEKED, not consumed: this is the speculative query. */
     accum = sim->dt_accum + sim_whole_units(sim->dt_frac, elapsed_seconds,
@@ -4029,6 +4033,13 @@ u32 q2_sim_advance(q2_sim *sim, const q2_input *input, double elapsed_seconds)
         return 0;
 
     dt = q2_sim_next_dt(sim, elapsed_seconds);
+
+    if (sim->dt_force) {
+        if (dt == 0)
+            return 0;
+        q2_sim_tick(sim, input, dt);
+        return 1;
+    }
 
     sim->dt_accum += sim_whole_units(sim->dt_frac, elapsed_seconds,
                                      &sim->dt_frac);

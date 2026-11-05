@@ -215,9 +215,17 @@ s32 q2_sfx_voice_volume(u8 volume, s32 scale);
 #define SPU_BLOCK_SIZE    16
 #define SPU_SAMPLES_PER_BLOCK 28
 
-/* Total sound RAM, and the low region reserved for the capture buffers. */
+/*
+ * Total sound RAM, and where the sample heap starts. SfxInit's SpuInitMalloc
+ * (0x8008C2DC) opens the heap at 0x1010: the decode and capture buffers below
+ * 0x1000 and the reserved block after them. No reverb work area is reserved
+ * (_spu_rev_reserve_wa, 0x800AA568, stays 0), so 520,176 bytes hold samples.
+ */
 #define SPU_RAM_SIZE      0x80000
-#define SPU_RAM_RESERVED  0x800
+#define SPU_RAM_RESERVED  0x1010
+
+/* DownloadVAB (0x80073E68) takes at most this many sounds from a bank. */
+#define Q2_SFX_BANK_SLOTS 96u
 
 enum {
     SPU_FLAG_END        = 1 << 0,
@@ -239,6 +247,11 @@ typedef struct q2_sound_bank {
     u32     section_size;
     u32     count;            /* number of sounds (entries - 1)  */
     u32    *offsets;          /* owned; relative to `section`    */
+    /* Which sounds the console has in sound RAM after DownloadVAB: the first
+     * Q2_SFX_BANK_SLOTS, each given SpuMalloc space in order or skipped when
+     * the heap is full (SfxTransEffect returns -2 at 0x80072534). */
+    u8      resident[Q2_SFX_BANK_SLOTS];
+    u32     resident_bytes;   /* heap the resident sounds take   */
 } q2_sound_bank;
 
 /* Load "<map>/SNDVRAM.DAT" and locate its sound bank. */
@@ -250,6 +263,52 @@ bool q2_sound_bank_get(const q2_sound_bank *bank, u32 index, q2_vag *out);
 
 /* Total ADPCM body bytes, for checking the bank fits in sound RAM. */
 u32 q2_sound_bank_total_body(const q2_sound_bank *bank);
+
+/*
+ * Whether sound `index` is in the console's sound RAM, so a request for it
+ * makes a noise. A sound DownloadVAB could not place has an empty slot, and
+ * both play paths return on a zero address (0x80072784, 0x80072A78). The
+ * slot's address word is never cleared between levels (SfxFreeEffect,
+ * 0x80072690, zeroes only the size), so on a console that loaded a larger
+ * bank earlier the request instead plays whatever now sits at the stale
+ * address. That depends on the session's history; the port takes the
+ * fresh-boot answer, silence.
+ */
+bool q2_sound_bank_resident(const q2_sound_bank *bank, u32 index);
+
+/*
+ * SOUND RAM, AS THE CONSOLE KEEPS IT ACROSS LEVELS.
+ *
+ * SfxInit (0x80072424) clears the 96-slot table at 0x800DF23C once, at boot
+ * (its one caller is 0x80018E70). Between levels RemoveVram frees each slot
+ * through SfxFreeEffect, which zeroes the size but not the SPU address. So a
+ * sound DownloadVAB cannot place keeps the address an earlier level's sound
+ * of the same index had, and the play paths (0x80072784, 0x80072A78) start a
+ * voice there: on whatever the current bank now holds at that address,
+ * decoding until it meets an END flag. On SECURITY, the bank's last sound
+ * (`mal_pn100_1`, the player's pain grunt) is never resident, and slot 64 is
+ * filled by most earlier levels, so in a campaign the grunt plays a piece of
+ * another of SECURITY's samples. After a fresh boot the address is zero and
+ * the request is silent.
+ */
+typedef struct q2_spu_ram {
+    u8  ram[SPU_RAM_SIZE];
+    u32 slot_addr[Q2_SFX_BANK_SLOTS];   /* 0 = never filled since boot */
+} q2_spu_ram;
+
+/* Boot: empty sound RAM and a cleared slot table (SfxInit). */
+void q2_spu_ram_reset(q2_spu_ram *spu);
+
+/* DownloadVAB: each resident sound of `bank` into the heap from 0x1010, in
+ * order, and its address into its slot. Other slots keep what they held. */
+void q2_spu_ram_download(q2_spu_ram *spu, const q2_sound_bank *bank);
+
+/*
+ * Where a voice for slot `index` starts, and how much sound RAM lies beyond
+ * it. False when the slot's address is zero, which the play paths treat as no
+ * sound. The voice stops at the first END flag it decodes, as the SPU does.
+ */
+bool q2_spu_ram_voice(const q2_spu_ram *spu, u32 index, const u8 **data, u32 *size);
 
 /*
  * Decode SPU-ADPCM to signed 16-bit PCM.

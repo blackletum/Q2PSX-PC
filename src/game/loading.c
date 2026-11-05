@@ -11,8 +11,9 @@
 static void loading_set_page(q2_loading *l, q2_loading_page page)
 {
     const q2_menu_page *p =
-        q2_menu_page_find(page == Q2_LOADING_PAGE_STARTING
-                              ? Q2_PAGE_STARTING : Q2_PAGE_LOADING);
+        q2_menu_page_find(page == Q2_LOADING_PAGE_STARTING ? Q2_PAGE_STARTING :
+                          page == Q2_LOADING_PAGE_DEMO     ? Q2_PAGE_DEMO :
+                                                             Q2_PAGE_LOADING);
 
     if (l->menu.page == p)
         return;
@@ -80,10 +81,15 @@ void q2_loading_close(q2_loading *l)
 
 void q2_loading_raise(q2_loading *l)
 {
+    q2_loading_raise_page(l, Q2_LOADING_PAGE_LOADING);
+}
+
+void q2_loading_raise_page(q2_loading *l, q2_loading_page page)
+{
     if (!l || !l->ready)
         return;
 
-    loading_set_page(l, Q2_LOADING_PAGE_LOADING);
+    loading_set_page(l, page);
 
     /*
      * AND THE STRIP IS LEFT ALONE, which is the opposite of what this used to

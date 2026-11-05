@@ -1627,7 +1627,8 @@ in the root counter's place. A load therefore does not restore the saved
 rand() state. The RAND chunk and the CMBT slots are still written (all three
 hold the one state) and read, but `q2_save_apply_game_rng` applies nothing.
 Because normal play seeds from the root counter, the console's absolute
-sequence cannot be observed outside self-play, which this port does not run.
+sequence cannot be observed outside self-play. The attract demo's levels now
+take the self-play arm as well (`selfplay_active`, see below).
 What can be matched is the structure: one state, every draw on the game
 frame, and a reseed at each load.
 
@@ -1674,13 +1675,102 @@ seed.
   therefore not texture data. With lighting already ruled out, that leaves
   the capture itself, which goes on the hardware list.
 
-**Still open:**
+**Closed after that (5 November): the self-play attract demo.** The title's
+thirty seconds (9000 units in QFRONT module+0x12DC0, US +0x12DD8, reset by
+player one's pad word and drained by the frame delta through the page hook
+module+0xC6AC) now run. At zero, 0x80101B08 puts up module page 19 with the
+one-row table at module+0xEBC4 (US +0xEBD8), `DEMO OF GAME`, hides the title
+objects, resets the player, sound and video settings and arms the engine's
+delayed state change: twelve counted frames (0x8001F964), then state 10.
+State 10 is GameSelfPlay (0x80041300, US 0x800412FC). It walks
+SelfPlayMapNamePntr (gp+712) through Base3, Jail2 and Waste2 (0x8009D228, US
+0x8009D47C), enters the level at the `SelfPlay0` start position and sets
+InSelfPlayMode, so InitLevel seeds 13. Each level's init then reads
+&InSelfPlayMode through engine+0x78 and, when set, writes a loadout (weapons,
+selected weapon, ammo and, on BASE3 and WASTE2, health 45), skill 1, calls
+SelfPlayOn (engine+0x58) on its recording (+0x8B4, +0x788, +0x7F4 on both
+discs), sets NoInputTime to 900 and installs QuakeNextDemoLevel as the
+no-input routine. The port reads all of that out of the module
+(`q2_selfplay_scan`, src/game/selfplay.c) rather than restating it.
 
-- The screen modules' full-screen VRAM pictures and per-unit palettes (QFRONT,
-  QLOGOS, QLOGOS2, QMAGEXTR, QMRESULT, QENDMIS) are drawn by the port's
-  transcribed screen paths, not from the console's VRAM rectangles.
-  `test_vram_native` reports them as pending.
-- The self-play attract demo, with its DemoSp overlay pages.
+Playback is SwapButtons mode 1 (0x800323EC, US 0x800323E8). Each halfword
+gives the frame's buttons (`& 0xFFF0`) and its length in video fields (the low
+nibble, bits 3/0/1/2 worth 1/2/4/8), and the length replaces NewVcounts after
+MainGameLoop's clamp. The terminator 0xFFFF, any real pad button or player
+one's death ends playback; the zeroed NoInputTime then fires
+QuakeNextDemoLevel at once, and its state 6 is ProcessGame's return to
+GameTitle. So every demo returns to the title, whose own thirty seconds start
+the next level. SpriteAnim(1) (0x80038820) draws the DemoSp overlay, a 64 x 20
+sprite at (224, 20) stepping one cell per field through 48 cells of DemoSp2 and
+then 48 of DemoSp1, through palette 79. `sim.dt_force` carries the recorded
+delta into the tick. The recordings differ by region: PAL 1125 / 900 / 750
+frames at 6 units a field, US 1350 / 1056 / 900 at 5.
+
+`test_client_selfplay --headless <disc>` compares every recording's decode
+with native SelfPlayOn / SwapAllButtons runs (`selfplay_reference.h`),
+including the input, death and no-input exits. It then runs the loop through
+the client: the countdown and its reset, the hand-off, the loadout, a
+repeatable player position after 100 frames, the key-press exit with settings
+restored, and the level order.
+
+One host divergence: the console never restores the settings the demo
+resets; the port puts the player's back when the demo returns to the title.
+
+Limits: the port's creatures do not reproduce the console's encounters, so
+on both discs the BASE3 and WASTE2 demos end early when player one dies there,
+and the console's player presumably does not. JAIL2 plays its whole PAL
+recording. The magazine-demo arm and the record path (SelfRecordOn) are not
+reached on a retail disc and are not modelled.
+
+**Closed after that (5 November): every level's VRAM is the console's.** The
+pending rectangles were one gap in the shared loader, not in the screens.
+LoadInGameVram (0x8003FE20) uploads every image in its registration table on
+every level load, in table order, through 0x80068FAC (the four 8bpp sheets) and
+0x80069018 (the rest), both ending in 0x800691A4. The port uploaded only the
+font atlases, the icon sheet and Squiggle. `q2_vram_upload_registered` now runs
+the table, apart from the three icon sheets, which the session picks. That puts
+the logo and screen pictures, the pad diagrams and the DemoSp pages where the
+console's loader puts them. The QENDMIS palette block differed only in palettes
+0 and 4: the uplink screen opens during the port's load and writes the unit
+tint and the globe palette (module+0x3ED4), where the console's fixture still
+shows the section's 0x8000 placeholders. `test_vram_native` checks those two
+against the module's data and the rest against the native hash. All 530
+rectangles of all 45 loadable maps match on both discs, with nothing pending;
+the regenerated fixture adds MATRIX8, which the interpreter can now load.
+
+**Closed after that (5 November): three behaviours the residue pass found.**
+
+- **The help computer after a demo.** The end of playback stores 3 into player
+  one's pad mode word (record +0x2C8, 0x800D5EF8 PAL; 0x8003281C and
+  0x800328AC), and its only other writers are SelfPlayOn (1), SelfRecordOn (2)
+  and SelfPlayRecOff (0), the last reached on a retail disc only through
+  QuakeEndSelfPlay, which nothing calls. HelpComputer_NewMessage (0x80021254)
+  and HelpComputer_DoDisplay (0x80021524) both return at once while it is
+  non-zero. So on the console, once the title has played a demo, no level's
+  help computer raises anything for the rest of the power-on session. The
+  client keeps the word (`pad_mode`) and gates both; `test_client_selfplay`
+  checks a level's raise after a demo and without one.
+- **The next unit's first level.** QENDMIS's exit sets NewMission and
+  NextMission and no name; GameNewMission empties the name from 0x800AC670 and
+  the unit's hub writes its fixed first level at `Default` (QMJAIL.C
+  0x80023340 Jail2, QMPOWER.C 0x80023D2C Power1, QMGRAV.C 0x80024538 Command,
+  QMBOSS.C 0x80024D40 Boss1). The port carried the last LOADMAP across the
+  screen and, without one, went back to the front end. `client_unit_first_level`
+  is the hub table now.
+- **Sound RAM.** See the FORMATS note on the SPU budget: two sounds never fit
+  (FRAGTOWE's last and SECURITY's), and a request for one plays from its slot's
+  stale address or not at all. `q2_spu_ram` keeps sound RAM and the slot table
+  across levels.
+
+**Still open:** the attract demos as a parity probe. A recording replays the
+console's pad against the port's simulation, so it stays in step only while
+every tick matches. On PAL BASE3, player one is killed by creature 4 after 143
+of the recording's 1,125 frames. The movement and the first fight track the
+recording (the frames show the player turning and firing at the guards it was
+recorded fighting), so the divergence is in how the fights resolve: creature
+AI, damage or the shared rand() sequence over a few hundred ticks. Each demo
+is therefore a ready-made, repeatable test of end-to-end lockstep, and the
+frame at which player one dies is its score.
 
 ## Limits
 

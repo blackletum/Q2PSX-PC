@@ -117,6 +117,7 @@
 #include "lighting.h"
 #include "loading.h"
 #include "rotator.h"
+#include "selfplay.h"
 #include "spacelights.h"
 /* Creatures on the biggest map plus three other players, with room to spare. */
 #define Q2_CLIENT_MAX_TARGETS 96
@@ -583,10 +584,12 @@ typedef struct client {
     client_voice    *shot_voice[Q2_MP_MAX_PLAYERS];
     u32              shot_voice_serial[Q2_MP_MAX_PLAYERS];
     u32              popup_raises;
+    u32              popup_muted;    /* NewMessage calls the pad mode skipped */
     u32              popup_opens;
     s32              popup_at_frame;   /* --objectives N; 0 is off */
     s32              pause_at_frame;   /* --pause N; 0 is off */
     s32              restart_at_frame; /* --restart N; 0 is off */
+    s32              press_at_frame;   /* --press N; 0 is off */
     q2_prompt_bar    prompts;
 
     /*
@@ -612,6 +615,10 @@ typedef struct client {
      * the bank is per map. */
     q2_sound_bank    sfx;
     bool             sfx_ready;
+    /* Sound RAM and its slot table, kept across levels as the console keeps
+     * them; zeroed with the client, which is the console's boot (vag.h). */
+    q2_spu_ram       spu_ram;
+    u32              sfx_stale_starts;   /* voices started at a stale slot */
 
     /*
      * The status bar — the thing this project once proved did not exist. It is
@@ -1411,9 +1418,10 @@ typedef struct client {
      *                      page `"DEMO OF GAME"` (module+0xC) and hands off.
      *                      9000 of the console's 1/300 s units is the thirty
      *                      seconds this port had, and what waits at the end of
-     *                      it is a DEMO OF THE GAME, which this port has no
-     *                      player for. So the countdown is gone rather than
-     *                      pointed at the wrong film.
+     *                      it is a DEMO OF THE GAME: a recorded pad playing
+     *                      player one through Base3, Jail2 and Waste2 in turn.
+     *                      That is `attract_idle` below and selfplay.h, and it
+     *                      is no film.
      *
      *   the reel's beat    module+0x12D90, parked with 150 by 0x80101E4C and
      *                      counted down by the page hook 0x80101CD0:
@@ -1450,6 +1458,69 @@ typedef struct client {
      * entry point left in, and it looks exactly like the live one.
      */
     double            start_beat;      /* 1/300 s units left of the beat  */
+    /*
+     * AFTER the reel: the countdown's hook installs STARTING / GAME
+     * (module+0x0EBF4, at 0x80101D88, once the blocking player 0x8010B2EC has
+     * returned) and arms engine+0x2C0 = 12 frames to state 1 (0x80101DF0).
+     * `start_handoff` is those twelve, and `start_loading` keeps STARTING as
+     * the installed page through the game's level load.
+     */
+    int               start_handoff;
+    bool              start_loading;
+
+    /*
+     * ---------------------------------------------------------------------
+     * The attract loop — selfplay.h has the whole chain and its addresses
+     * ---------------------------------------------------------------------
+     * `attract_idle` is module+0x12DC0: armed with 9000 whenever the title
+     * page comes up (`attract_on_title` notices it arriving, as the builder
+     * 0x8010CEE0 would), reset by any pad input and drained by the frame
+     * delta. `attract_handoff` is engine+0x2C0, the twelve frames DEMO OF GAME
+     * stands before state 10, live while `attract_armed`. `attract_next` is
+     * SelfPlayMapNamePntr
+     * (gp+712) as an index into GameSelfPlay's table.
+     *
+     * `selfplay_active` is InSelfPlayMode. `selfplay_clock` paces the record
+     * against real time: each word is a frame of a stated length, and one is
+     * consumed when that much time has gone by. `selfplay_input` is any key,
+     * button or click since the last frame — the real pad SwapButtons tests.
+     * `selfplay_overlay` is SpriteAnim(1)'s counter at gp+614, never reset.
+     *
+     * `selfplay_saved` is a HOST DIVERGENCE, and the only one. 0x80101B08 and
+     * SelfPlayOn both reset the player, sound and video settings to their
+     * defaults and nothing puts them back, so on the console an idle title
+     * loses the controller setup. This port restores the player's settings
+     * when the demo returns to the title: they live in a host file here, and
+     * losing them to an idle screen would be a defect rather than fidelity.
+     * The recording still plays on the defaults, which it needs.
+     */
+    double            attract_idle;
+    bool              attract_on_title;
+    bool              attract_armed;
+    int               attract_handoff;
+    u32               attract_next;
+    bool              attract_loading;   /* DEMO OF GAME is the load's page */
+    u32               attract_demos;     /* demo levels started this run    */
+    bool              selfplay_active;
+    /*
+     * Player one's pad mode word, record +0x2C8 (0x800D5EF8 PAL): 1 from
+     * SelfPlayOn, 3 when playback ends (0x8003281C, 0x800328AC), cleared
+     * only by SelfPlayRecOff, which a retail disc never reaches. Non-zero, it
+     * turns HelpComputer_NewMessage (0x80021250) and HelpComputer_DoDisplay
+     * (0x8002150C) into no-ops, so after an attract demo the help computer
+     * stays silent for the rest of the session. See client_help_muted.
+     */
+    s16               pad_mode;
+    bool              selfplay_input;
+    bool              selfplay_go_title;
+    double            selfplay_clock;
+    u32               selfplay_overlay;
+    q2_selfplay       selfplay;
+    q2_selfplay_setup selfplay_setup;
+    q2_selfplay_end   selfplay_last_end;
+    int               selfplay_level;    /* index into the table, or -1      */
+    q2_menu_settings  selfplay_saved;
+    bool              selfplay_saved_valid;
 
     /* The map's own mission-event namespace, out of its LevelBin. */
     q2_levelbin_misevent misevent[32];
@@ -1694,22 +1765,9 @@ typedef struct client {
      */
     bool              unit_over;
 
-    /*
-     * Where the unit's last level was ALSO pointing, kept across the
-     * end-of-mission screen.
-     *
-     * A unit's last level carries both primitives, and on the console the
-     * MISCOMPLETE simply overwrites the LOADMAP's destination with
-     * `EndMission N` — the next unit's first level is then `QENDMIS<N>`'s own
-     * module's business, and this port does not run that module. Rather than
-     * end the campaign at every unit boundary, the port carries the LOADMAP's
-     * destination here and continues to it when the placard is dismissed.
-     * STATED as the port's choice: nothing read from the executable says the
-     * console gets there this way, only that it gets there.
-     */
-    char              unit_next_map[Q2_UF_NAME_LEN + 1];
-    char              unit_next_start[Q2_UF_NAME_LEN + 1];
-    bool              endmis_await;   /* a placard with somewhere to go */
+    /* A placard with somewhere to go: the next unit's first level, which
+     * `client_unit_first_level` names. */
+    bool              endmis_await;
     u32               endmis_frames;  /* headless release, as the board has */
 
     u32               map_changes;    /* how many the session has made */
@@ -5905,9 +5963,28 @@ static bool client_base2_bridge(client *c)
            q2_sim_scene_solid_set(&c->sim[0], CLIENT_BASE2_BRIDGE_SOLID, min, max);
 }
 
+/*
+ * Both HelpComputer_NewMessage (0x80021254) and HelpComputer_DoDisplay
+ * (0x80021524) open by reading player one's pad mode word and return when it
+ * is non-zero. It is 1 through a self-play demo and 3 for ever after one
+ * (see `pad_mode`). So neither a trigger, a module nor the pop-up's own tick
+ * does anything once the title has played a demo: the console keeps the help
+ * computer silent for the rest of the session. The pause menu's MISSION row
+ * calls the raise directly and still plays its chime, but the pop-up never
+ * opens, because the tick that would open it is the display function.
+ */
+static bool client_help_muted(const client *c)
+{
+    return c->pad_mode != 0;
+}
+
 static void client_native_popup_dt(client *c, const char *orders,
                                    const char *objective, s32 delay, s32 dt)
 {
+    if (client_help_muted(c)) {
+        c->popup_muted++;
+        return;
+    }
     q2_briefing_popup_set(&c->popup, orders,
         c->leveltext_ready ? q2_leveltext_find(&c->leveltext, orders) : NULL,
         objective,
@@ -7261,7 +7338,9 @@ static void client_event_call(void *user, const q2_event_item *item,
                 }
             }
 
-            if (call.prim == Q2_UF_HELPCOMPUTER) {
+            if (call.prim == Q2_UF_HELPCOMPUTER && client_help_muted(c)) {
+                c->popup_muted++;           /* 0x80021254: returns at once */
+            } else if (call.prim == Q2_UF_HELPCOMPUTER) {
                 const char *text[2] = { NULL, NULL };
                 u32 param = 0;
                 s32 delay;
@@ -7417,19 +7496,10 @@ static void client_event_call(void *user, const q2_event_item *item,
                  * volume at once, so within that artificial batch the order
                  * means nothing; the unit end is the one that must survive it.
                  *
-                 * The LOADMAP's destination is not thrown away: it is where
-                 * this unit's last level was going, and it is what the port
-                 * continues to once the end-of-mission screen is dismissed.
+                 * The LOADMAP's destination is simply lost, as on the console:
+                 * the next unit's first level is fixed by its hub, not carried
+                 * (see client_unit_first_level).
                  */
-                if (c->map_change_pending && c->pending_map[0]) {
-                    snprintf(c->unit_next_map, sizeof(c->unit_next_map), "%s",
-                             c->pending_map);
-                    snprintf(c->unit_next_start, sizeof(c->unit_next_start),
-                             "%s", c->pending_start);
-                    Q2_INFO("MISCOMPLETE: holding %s '%s' for after the "
-                            "end-of-mission screen",
-                            c->unit_next_map, c->unit_next_start);
-                }
 
                 /*
                  * The DISPLAY name, not the directory: `0x80018ED8` writes
@@ -7707,6 +7777,11 @@ static void client_event_call(void *user, const q2_event_item *item,
             if (c->sim[0].glint.scripted && !strcmp(key, "Destroy Grav")) {
                 /* +0x12B0 writes mission+24 before HelpComputer. */
                 c->sim[0].glint.shutting_down = true;
+            }
+            if (c->sim[0].glint.scripted && !strcmp(key, "Destroy Grav") &&
+                client_help_muted(c)) {
+                c->popup_muted++;           /* its HelpComputer is a no-op */
+            } else if (c->sim[0].glint.scripted && !strcmp(key, "Destroy Grav")) {
                 q2_briefing_popup_set(&c->popup, "Unit4Curr8",
                     c->leveltext_ready ? q2_leveltext_find(&c->leveltext, "Unit4Curr8") : NULL,
                     "Unit4Miss2",
@@ -7863,14 +7938,9 @@ static void client_event_call(void *user, const q2_event_item *item,
                      * console the two are in different volumes and a player
                      * fires one; `--fire-triggers` fires both, and a unit end
                      * that a sweep walks straight past would be worth nothing.
-                     * So the destination is remembered as the continuation
-                     * rather than taken — the same slot the MISCOMPLETE arm
-                     * fills when the order is the other way round.
+                     * So the unit end stands and this destination is dropped,
+                     * as 0x80018ED8's overwrite drops it.
                      */
-                    snprintf(c->unit_next_map, sizeof(c->unit_next_map), "%s",
-                             map);
-                    snprintf(c->unit_next_start, sizeof(c->unit_next_start),
-                             "%s", start);
                 } else {
                     snprintf(c->pending_map, sizeof(c->pending_map), "%s", map);
                     snprintf(c->pending_start, sizeof(c->pending_start), "%s",
@@ -8382,7 +8452,15 @@ static bool client_load_zone(client *c, const char *map, int index)
      * because its own load is milliseconds and there is nothing to fill.
      */
     if (c->running && map_change) {
-        q2_loading_raise(&c->loading);
+        /* The page is whatever the front end left installed: DEMO OF GAME
+         * for an attract level, which 0x80101B08 put up and nothing took
+         * down before state 10 reached ProcessGame (selfplay.h), and
+         * STARTING / GAME for a new game, which the reel's hook put up
+         * before state 1 did the same. */
+        q2_loading_raise_page(&c->loading,
+                              c->attract_loading ? Q2_LOADING_PAGE_DEMO
+                              : c->start_loading ? Q2_LOADING_PAGE_STARTING
+                                                 : Q2_LOADING_PAGE_LOADING);
         c->loading_raises++;
     }
 
@@ -8998,10 +9076,12 @@ static bool client_load_zone(client *c, const char *map, int index)
         psx_draw_state_clear_cache(&c->screen.gpu);
         if (q2_vram_load(&vs, c->disc, map) == Q2_OK) {
             c->opts.textures = (q2_vram_upload(&vs, c->vram) == Q2_OK);
-            /* The level's lightning atlas is a standalone image. The texture
-             * page loop stops at page 11 in BIGGUN, leaving this slot empty. */
-            (void)q2_vram_upload_named(&vs, "Squiggle.lbm", 12, 159,
-                                       c->vram, NULL);
+            /* And every image LoadInGameVram registers, in its order: the
+             * pad diagrams, the deathmatch previews, BIGGUN's lightning atlas
+             * (the page loop stops at page 11 there), the self-play pages and
+             * the screen modules' full-screen pictures. test_vram_native
+             * holds the result to the console's own load. */
+            (void)q2_vram_upload_registered(&vs, c->vram);
             Q2_INFO("textures: %u pages, %u palettes",
                     vs.texpage_count, vs.clut4_count);
             c->clut4_count_a = vs.clut4_count_a;
@@ -9151,8 +9231,11 @@ static bool client_load_zone(client *c, const char *map, int index)
         }
         c->sfx_ready = (q2_sound_bank_load(&c->sfx, c->disc, map) == Q2_OK);
         c->requests_ready = false;
-        if (c->sfx_ready)
-            Q2_INFO("sound bank: %u effects", c->sfx.count);
+        if (c->sfx_ready) {
+            q2_spu_ram_download(&c->spu_ram, &c->sfx);
+            Q2_INFO("sound bank: %u effects, %u bytes resident", c->sfx.count,
+                    c->sfx.resident_bytes);
+        }
 
         client_item_sounds_resolve(c);
     }
@@ -9185,10 +9268,13 @@ static bool client_load_zone(client *c, const char *map, int index)
      * console's seed is 13 in self-play and otherwise the root counter at
      * that instant (GetRCnt(0xF2000001), 0x80070E20). A headless run takes
      * the self-play arm, so its every load is reproducible; an interactive
-     * one reads the host clock in the counter's place.
+     * one reads the host clock in the counter's place. The attract demo's
+     * levels take it because they ARE self-play: GameSelfPlay sets
+     * InSelfPlayMode before the load reaches InitLevel (selfplay.h).
      */
-    q2_random_seed(c->headless ? 13u
-                               : (u32)((SDL_GetTicksNS() / 64000u) & 0xFFFFu));
+    q2_random_seed((c->headless || c->selfplay_active)
+                       ? (u32)Q2_SELFPLAY_SEED
+                       : (u32)((SDL_GetTicksNS() / 64000u) & 0xFFFFu));
     q2_sim_init(&c->sim[0], &c->zone, q2_build_tick_rate(&c->build));
     /* 0x800AE898 is initialized once in the executable, with no level,
      * respawn or card-load reset. Keep its cadence across every zone rebuild. */
@@ -9960,9 +10046,9 @@ static bool client_load_zone(client *c, const char *map, int index)
 
                             c->endmis_open     = true;
                             /* Dismissing it is what continues the campaign,
-                             * when the MISCOMPLETE that got here had a LOADMAP
-                             * beside it to carry — see `unit_next_map`. */
-                            c->endmis_await    = (c->unit_next_map[0] != '\0');
+                             * to the next unit's first level. */
+                            c->endmis_await    = c->endmis_unit >= 1 &&
+                                                 c->endmis_unit < Q2_LAST_UNIT;
                             c->briefing_open   = false;
                             c->leveltext_ready = false;
                             q2_prompt_show(&c->prompts, Q2_PROMPT_BACK, 216);
@@ -12129,6 +12215,9 @@ static void client_grenade_bounce_audio(client *c)
     }
 }
 
+/* The attract demo's frame, with the rest of the attract loop below. */
+static bool client_selfplay_frame(client *c, float dt, u16 *buttons);
+
 static void client_input_simulated(client *c, float dt)
 {
     q2_input in;
@@ -12166,6 +12255,8 @@ static void client_input_simulated(client *c, float dt)
     u16                 raw;
     s32                 step;
     int                 style = c->sim[0].player[0].look_scheme;
+    bool                sp_tick = false;
+    u16                 sp_buttons = 0;
 
     if (!q2_pad_style_bindings(style, &bind))
         memset(&bind, 0, sizeof(bind));
@@ -12200,6 +12291,13 @@ static void client_input_simulated(client *c, float dt)
      * Everything below this that is a LEVEL rather than an edge — the look
      * axis, the mouse accumulator — stays unconditional.
      */
+    /*
+     * THE ATTRACT DEMO decides first whether this is a frame at all, because
+     * the recording is the clock as well as the pad: SwapAllButtons runs
+     * before the frame and rewrites its delta (selfplay.h, sim.h `dt_force`).
+     */
+    if (c->selfplay_active)
+        sp_tick = client_selfplay_frame(c, dt, &sp_buttons);
     step = q2_sim_next_dt(&c->sim[0], (double)dt);
 
     pad->lx = pad->ly = pad->rx = pad->ry = 0;
@@ -12225,6 +12323,23 @@ static void client_input_simulated(client *c, float dt)
 
         if (notch > 0)      raw |= (u16)bind.weapon_next;
         else if (notch < 0) raw |= (u16)bind.weapon_prev;
+    }
+
+    /*
+     * In self-play the record IS the pad: SwapButtons' mode 1 forces the pad
+     * type to 4, a digital pad, and writes the word's buttons over +0x0C, so
+     * no stick and nothing the host pressed reaches the player — a press ends
+     * the demo instead (client_selfplay_frame). One word, one tick.
+     */
+    if (c->selfplay_active) {
+        raw = sp_tick ? sp_buttons : 0;
+        *pend = 0;
+        pad->lx = pad->ly = pad->rx = pad->ry = 0;
+        c->look_acc_x = c->look_acc_y = 0.0;
+        /* The first word rolls against a clear pad, edges and all: there is
+         * no screen in between on the console to swallow them. */
+        resumed = false;
+        c->pad_resume = false;
     }
 
     *pend |= raw;
@@ -13109,7 +13224,8 @@ static void client_input_simulated(client *c, float dt)
          * by the frame's dt — so this has to run while the world is running,
          * which is exactly when the pop-up is NOT up.
          */
-        if (q2_briefing_popup_tick(&c->popup, ticks, c->sim[0].level_time,
+        if (!client_help_muted(c) &&     /* DoDisplay is a no-op too */
+            q2_briefing_popup_tick(&c->popup, ticks, c->sim[0].level_time,
                                    false, false))
             c->popup_opens++;
 
@@ -15042,14 +15158,15 @@ static void client_menu_requests(client *c)
         q2_sim_scene_page(&c->sim[0], false, false);
         c->start_beat = (double)Q2_START_BEAT_UNITS;
         /*
-         * AND THE BLANK FRONT END IS NOT BLANK. It is `STARTING` / `GAME` over
-         * black with the wire logo turning in the corner — QFRONT's own page at
-         * module+0x0EBF4, which is the screen a retail capture of this half
-         * second shows. `q2_loading_show` rather than `q2_loading_raise`,
-         * because the beat above is already the clock and two countdowns for
-         * one half second are two things that can drift.
+         * AND THE HALF SECOND IS BLANK. 0x80101E4C installs the empty table at
+         * module+0x0FADC (twice, 0x80101F1C and 0x80101F34), not STARTING.
+         * `STARTING` / `GAME` (module+0x0EBF4) is installed by the countdown's
+         * hook only after the blocking reel player returns (0x80101D88), so it
+         * is the screen between the reel and the game. A retail capture of it
+         * had been read as this half second; the code places it after the
+         * reel (`start_handoff`).
          */
-        q2_loading_show(&c->loading, Q2_LOADING_PAGE_STARTING);
+        q2_loading_hide(&c->loading);
         break;
     case Q2_MREQ_CREDITS:
         client_credits_open(c, false);
@@ -15215,6 +15332,30 @@ static bool client_play_request(client *c, const char *want, q2_sfx_request *req
 
     if (!vag.body || vag.data_size < SPU_BLOCK_SIZE)
         return false;
+    /*
+     * A sound DownloadVAB could not fit in sound RAM (FRAGTOWE's last, and
+     * SECURITY's) keeps the slot address an earlier level left, and the play
+     * path starts the voice there, or returns before taking a channel when it
+     * is zero (0x80072784). See q2_spu_ram in vag.h.
+     */
+    {
+        q2_vag sample;
+        u32 k;
+
+        for (k = 0; k < c->sfx.count; k++)
+            if (q2_sound_bank_get(&c->sfx, k, &sample) && sample.body == vag.body)
+                break;
+        if (!q2_sound_bank_resident(&c->sfx, k)) {
+            const u8 *stale;
+            u32 room;
+
+            if (!q2_spu_ram_voice(&c->spu_ram, k, &stale, &room))
+                return false;
+            vag.body      = stale;
+            vag.data_size = room;
+            c->sfx_stale_starts++;
+        }
+    }
     client_sound_requests_init(c);
     if (!request) request = client_request_for_sound(want, c);
 
@@ -18378,12 +18519,32 @@ static bool client_uplink_step(client *c, bool fire_edge)
     return false;
 }
 
+/*
+ * The level a unit starts on, whatever the last unit's level pointed at.
+ *
+ * QENDMIS's exit writes state 4 with NewMission = 1 and NextMission =
+ * Mission + 1, and never a level name. GameNewMission (0x8003F37C) then
+ * copies the twelve zero bytes at 0x800AC670 over the name and jumps through
+ * 0x800AC8EC to the unit's InitMission, whose hub (MissionLoadSaveHub, a0 =
+ * 0) sees the empty name and writes its fixed first level with "Default":
+ * QMJAIL.C 0x80023340, QMPOWER.C 0x80023D2C, QMGRAV.C 0x80024538 and
+ * QMBOSS.C 0x80024D40. Unit 1 is the front end's own new game.
+ */
+static const char *client_unit_first_level(int unit)
+{
+    static const char *const first[] = { "Base0", "Jail2", "Power1",
+                                         "Command", "Boss1" };
+
+    return unit >= 1 && unit <= (int)Q2PSX_ARRAY_COUNT(first) ? first[unit - 1]
+                                                              : NULL;
+}
+
 /* State 8's exit, in the port's terms. Unit 5 is GameExtro's "Extro FMV";
- * the others are GameNewMission, whose first level the port takes from the
- * LOADMAP the unit's MISCOMPLETE stood beside (see `unit_next_map`). */
+ * the others are GameNewMission and the next unit's fixed first level. */
 static void client_uplink_finish(client *c)
 {
     int unit = c->uplink_unit;
+    const char *next = client_unit_first_level(unit + 1);
 
     c->uplink_open = false;
     c->endmission  = false;
@@ -18393,15 +18554,12 @@ static void client_uplink_finish(client *c)
         snprintf(c->pending_map, sizeof(c->pending_map), "Extro FMV");
         snprintf(c->pending_start, sizeof(c->pending_start), "Default");
         client_change_map_and_brief(c);
-    } else if (c->unit_next_map[0]) {
-        snprintf(c->pending_map, sizeof(c->pending_map), "%s", c->unit_next_map);
-        snprintf(c->pending_start, sizeof(c->pending_start), "%s", c->unit_next_start);
-        c->unit_next_map[0]   = '\0';
-        c->unit_next_start[0] = '\0';
-        Q2_INFO("uplink: unit %d -> %s '%s'", unit + 1, c->pending_map, c->pending_start);
+    } else if (next) {
+        snprintf(c->pending_map, sizeof(c->pending_map), "%s", next);
+        snprintf(c->pending_start, sizeof(c->pending_start), "Default");
+        Q2_INFO("uplink: unit %d -> %s 'Default'", unit + 1, next);
         client_change_map_and_brief(c);
     } else {
-        Q2_INFO("uplink: no next level was carried here; back to the front end");
         client_enter_front_end(c);
     }
 }
@@ -18802,6 +18960,362 @@ static void client_start_beat(client *c, float dt)
     c->in_front_end  = false;
 }
 
+/* ------------------------------------------------------------------------- */
+/* The attract loop (selfplay.h)                                              */
+/* ------------------------------------------------------------------------- */
+
+/* PalNtscRate (0x800B2DD8): units of the 1/300 s clock per video field. */
+static s32 client_field_units(const client *c)
+{
+    int hz = q2_build_tick_rate(&c->build);
+
+    return hz > 0 ? (s32)(Q2_DT_HZ / hz) : (s32)Q2_DT_PER_FIELD;
+}
+
+/*
+ * FrontEndResetPlayerDefaults / SoundDefaults / VideoDefaults — engine+0x1F0,
+ * +0x1F4 and +0x1F8 from 0x80101BF4..0x80101C14, and again from SelfPlayOn at
+ * 0x80033138..0x80033148. The recording was made on the default controls and
+ * it only means what it meant on them. CRT and bloom are the host's and are
+ * not the console's to reset. FrontEndResetMultiplayerDefaults (+0x1FC) has
+ * nothing a single-player demo reads.
+ */
+static void client_selfplay_defaults(client *c)
+{
+    s16 crt   = c->settings.v[Q2_SET_CRT];
+    s16 bloom = c->settings.v[Q2_SET_BLOOM];
+
+    if (!c->selfplay_saved_valid) {
+        c->selfplay_saved       = c->settings;
+        c->selfplay_saved_valid = true;
+    }
+    q2_menu_reset_player(&c->settings);
+    q2_menu_reset_sound(&c->settings);
+    q2_menu_reset_video_for(&c->settings, c->height);
+    c->settings.v[Q2_SET_CRT]   = crt;
+    c->settings.v[Q2_SET_BLOOM] = bloom;
+}
+
+/*
+ * 0x80101B08: the title has sat for thirty seconds. DEMO OF GAME goes up over
+ * the front end with the title objects hidden (`client_menu_frame` keeps them
+ * hidden while the page is up), the settings go back to their defaults, and
+ * the engine's delayed state change is armed: twelve frames, then state 10.
+ */
+static void client_attract_demo_page(client *c)
+{
+    c->attract_on_title = false;
+    client_selfplay_defaults(c);
+    q2_menu_goto(&c->menu, Q2_PAGE_DEMO);
+    q2_sim_scene_page(&c->sim[0], false, false);
+    /* Nothing on the page takes a button, so the host's key hints go too. */
+    q2_prompt_hide_all(&c->prompts);
+    c->attract_handoff = Q2_SELFPLAY_HANDOFF_FRAMES;  /* engine+0x2C0 = 12 */
+    c->attract_armed   = true;                        /* engine+0x2C2 = 10 */
+    Q2_INFO("attract: DEMO OF GAME — %s in %d frames",
+            q2_selfplay_level(c->attract_next < Q2_SELFPLAY_LEVELS
+                                  ? c->attract_next : 0),
+            Q2_SELFPLAY_HANDOFF_FRAMES);
+}
+
+static void client_selfplay_finish(client *c);
+
+/*
+ * The client side of InitLevel's self-play arm and the level module's init
+ * block, applied once the level is loaded: the loadout, the skill, and
+ * SelfPlayOn. Everything but the record's pacing comes out of the module.
+ */
+static bool client_selfplay_arm(client *c)
+{
+    const dat_chunk *lb = c->common.chunk[Q2_COMMON_LEVEL_BIN];
+    q2_selfplay_setup *s = &c->selfplay_setup;
+    q2_inventory *inv = &c->sim[0].combat.inv;
+    int n;
+
+    if (!lb || !lb->data || !q2_selfplay_scan(lb->data, lb->size, s)) {
+        Q2_WARN("attract: %s's module carries no self-play block", c->map);
+        return false;
+    }
+    if (s->set & Q2_SELFPLAY_SET_WEAPONS)
+        inv->weapons = (u16)s->weapons;             /* client+0x68 */
+    for (n = 0; n < Q2_AMMO_COUNT && n < 6; n++)
+        if (s->set & (Q2_SELFPLAY_SET_AMMO0 << n))
+            inv->ammo[n] = s->ammo[n];              /* client+0x6C.. */
+    if (s->set & Q2_SELFPLAY_SET_HEALTH)
+        inv->health = s->health;                    /* entity+0x108 */
+    if (s->set & Q2_SELFPLAY_SET_WEAPON)
+        c->sim[0].combat.weapon_id = s->weapon;     /* client+0x66 */
+    if (s->skill >= 0) {                            /* engine+0x366 */
+        c->menu.skill = s->skill;
+        q2_cre_set_skill(s->skill);
+    }
+    q2_selfplay_start(&c->selfplay, lb->data, lb->size, s);
+    c->pad_mode = 1;                                /* SelfPlayOn: +0x1C = 1 */
+    c->selfplay_clock = 0.0;
+    memset(&c->pad, 0, sizeof(c->pad));
+    c->pad_pend = 0;
+    Q2_INFO("attract: %s plays %u frames from module+0x%X (weapons %02X, "
+            "weapon %d, health %d, NoInputTime %d)", c->map,
+            q2_selfplay_length(lb->data, lb->size, s->record), s->record,
+            (unsigned)s->weapons, s->weapon,
+            (s->set & Q2_SELFPLAY_SET_HEALTH) ? s->health : inv->health,
+            s->no_input);
+    return true;
+}
+
+/*
+ * State 10: GameSelfPlay (0x80041300), then ProcessGame's load of what it
+ * named, then the module's init. A new game in all but name — no carry, the
+ * mission table empty — entered at the `SelfPlay0` start position.
+ */
+static void client_selfplay_begin(client *c)
+{
+    u32 idx = q2_selfplay_next(&c->attract_next);
+    const char *name = q2_selfplay_level(idx);
+    const char *dir = name;
+    q2_start_pos sp;
+    int zone = 0;
+    bool ok;
+
+    if (c->level_table_ready) {
+        const q2_level_entry *e = q2_level_find_display(&c->level_table, name);
+
+        if (!e)
+            e = q2_level_find(&c->level_table, name);
+        if (e && !e->is_placeholder && e->directory[0])
+            dir = e->directory;
+    }
+
+    client_menu_close(c);
+    c->in_front_end     = false;
+    c->attract_armed    = false;
+    c->attract_on_title = false;
+    c->selfplay_active  = true;     /* InSelfPlayMode, before InitLevel */
+    c->selfplay_go_title = false;
+    c->selfplay_level   = (int)idx;
+    c->attract_demos++;
+    q2_menu_set_front_end(&c->menu, false);
+
+    /* SelfPlayOn's resets run again from the module (0x80033138). */
+    client_selfplay_defaults(c);
+
+    q2_mission_init(&c->mission);
+    c->mission_row = -1;
+    q2_event_store_clear(&c->event_store);
+    memset(&c->native_mission, 0, sizeof(c->native_mission));
+    c->native_mission.boss2_quake_time = Q2_NATIVE_QUAKE_INACTIVE;
+    q2_zone_history_free(&c->zone_history);
+
+    /* DirectAccessZoneName: the start position, and so the zone. */
+    snprintf(c->arrival, sizeof(c->arrival), "%s", Q2_SELFPLAY_ARRIVAL);
+    if (client_find_arrival(c, dir, c->arrival, &sp))
+        zone = sp.zone;
+    else
+        Q2_WARN("attract: %s has no '%s'", dir, Q2_SELFPLAY_ARRIVAL);
+
+    Q2_INFO("attract: state 10 — %s (%s) zone %d", name, dir, zone);
+    c->carry_player = c->carry_same_map = false;
+    c->new_game_loading = true;
+    c->attract_loading  = true;
+    ok = client_load_zone(c, dir, zone);
+    c->attract_loading  = false;
+    c->new_game_loading = false;
+
+    if (!ok || !client_selfplay_arm(c)) {
+        c->selfplay_last_end = Q2_SELFPLAY_END_NONE;
+        client_selfplay_finish(c);
+    }
+}
+
+/*
+ * The title screen's half of it, once per front-end frame. `stepped` is
+ * whether the scene took a frame, which is what 0x8001F964 counts.
+ */
+static void client_attract_frame(client *c, float dt, bool stepped)
+{
+    if (c->attract_armed) {
+        /* 0x8001F964: count while positive, otherwise write the state. */
+        if (!stepped)
+            return;
+        if (c->attract_handoff > 0) {
+            c->attract_handoff--;
+            return;
+        }
+        client_selfplay_begin(c);
+        return;
+    }
+
+    if (!c->in_front_end || c->mp_enabled ||
+        c->menu.page_id != Q2_PAGE_FRONT_TITLE) {
+        c->attract_on_title = false;
+        return;
+    }
+
+    /* The title builder, 0x8010CEE0, every time the page is entered. */
+    if (!c->attract_on_title) {
+        c->attract_on_title = true;
+        c->attract_idle     = (double)Q2_SELFPLAY_TITLE_IDLE;
+    }
+
+    /* 0x8010C6BC: engine+0x2AC, player one's pad word, resets it. */
+    if (client_menu_pad(c) || c->selfplay_input) {
+        c->attract_idle = (double)Q2_SELFPLAY_TITLE_IDLE;
+        return;
+    }
+
+    /* 0x8010C6EC..0x8010C6F4: minus the frame delta, and 0x80101B08 at or
+     * below zero. */
+    c->attract_idle -= (double)dt * (double)Q2_DT_HZ;
+    if (c->attract_idle > 1e-9)
+        return;
+    c->attract_idle = 0.0;
+    client_attract_demo_page(c);
+}
+
+/*
+ * One frame of SwapAllButtons for the recording, decided against the clock.
+ *
+ * A word is a frame of the length it states, so one is taken when that much
+ * time has passed since the last — at most one a rendered frame, which is the
+ * one tick a frame `q2_sim_advance` runs. Real input or a dead player is
+ * taken at once rather than at the next word's time: it ends playback either
+ * way, and a key should not wait up to a twelfth of a second to be noticed.
+ *
+ * Returns true when this frame ticks on the record, with its pad word in
+ * `*buttons` and its delta in `sim.dt_force`; false otherwise, with the tick
+ * suppressed. Ending playback raises `selfplay_go_title`, which the frame loop
+ * acts on once the frame is done.
+ */
+static bool client_selfplay_frame(client *c, float dt, u16 *buttons)
+{
+    s32 rate = client_field_units(c);
+    u32 due = q2_selfplay_peek_fields(&c->selfplay);
+    u16 real = c->selfplay_input ? 1u : 0u;
+    bool dead = c->sim[0].combat.inv.health <= 0;
+    bool fire;
+
+    *buttons = 0;
+    c->sim[0].dt_force = -1;
+    if (c->selfplay_go_title)
+        return false;
+
+    c->selfplay_clock += (double)dt * (double)Q2_DT_HZ;
+    if (due && !real && !dead &&
+        c->selfplay_clock + 1e-9 < (double)((s32)due * rate))
+        return false;
+
+    fire = q2_selfplay_frame(&c->selfplay, real, dead);
+    if (fire || !c->selfplay.playing) {
+        c->selfplay_last_end = c->selfplay.end;
+        c->selfplay_go_title = true;
+        Q2_INFO("attract: playback over after %u frames (%s)",
+                c->selfplay.frames,
+                c->selfplay.end == Q2_SELFPLAY_END_DATA  ? "end of record" :
+                c->selfplay.end == Q2_SELFPLAY_END_INPUT ? "real input" :
+                c->selfplay.end == Q2_SELFPLAY_END_DEATH ? "player dead" :
+                c->selfplay.end == Q2_SELFPLAY_END_IDLE  ? "no input" : "?");
+        return false;
+    }
+
+    /* NewVcounts, after the clamp: no 30-unit limit applies to it. */
+    c->sim[0].dt_force = (s32)c->selfplay.fields * rate;
+    c->selfplay_clock -= (double)c->sim[0].dt_force;
+    if (c->selfplay_clock < 0.0)
+        c->selfplay_clock = 0.0;
+    /* A host that cannot keep up plays slower rather than skipping words. */
+    if (c->selfplay_clock > (double)Q2_DT_MAX)
+        c->selfplay_clock = (double)Q2_DT_MAX;
+    c->selfplay_overlay = q2_selfplay_overlay_step(c->selfplay_overlay,
+                                                   c->selfplay.fields);
+    *buttons = c->selfplay.buttons;
+    return true;
+}
+
+/*
+ * QuakeNextDemoLevel's state 6, which ProcessGame answers with GameTitle: the
+ * front end, on its title page, whose thirty seconds then start the next
+ * level SelfPlayMapNamePntr names.
+ */
+static void client_selfplay_finish(client *c)
+{
+    c->selfplay_active   = false;      /* InSelfPlayMode = 0 */
+    if (c->pad_mode == 1)
+        c->pad_mode = 3;               /* the end of playback, never undone */
+    c->selfplay_go_title = false;
+    c->selfplay.playing  = false;
+    c->sim[0].dt_force   = 0;
+    c->attract_armed     = false;
+    if (c->selfplay_saved_valid) {
+        c->settings             = c->selfplay_saved;   /* host divergence */
+        c->selfplay_saved_valid = false;
+    }
+    client_enter_front_end(c);
+}
+
+/*
+ * SpriteAnim(1), 0x80038920..0x80038B68: one 64 x 20 SPRT out of DemoSp2 or
+ * DemoSp1, wherever the level's registration put them (slots 12 and 11,
+ * x = 832 and 768, y = 256), through the bank's palette 79.
+ */
+static void client_selfplay_overlay_build(client *c)
+{
+    psx_prim *p;
+    u32 slot;
+    u8 u, v;
+    int ox, oy, x, y, i;
+
+    if (!c->selfplay_active || !c->selfplay.playing || !c->hud_tables_ready)
+        return;
+    q2_selfplay_overlay_cell(c->selfplay_overlay, &slot, &u, &v);
+    /* (224, 20) in the draw area on BOTH builds — SLUS-00757 has the same
+     * two immediates at 0x800389D4 / 0x800389F4 — so the corner is placed
+     * against the build's own buffer, 248 or 240 lines, not the 248-line
+     * layout the menu pages are authored in. */
+    ox = (c->width - Q2_SCREEN_PAL_WIDTH) / 2;
+    oy = (c->height - (c->build.video == Q2_VIDEO_PAL ? Q2_SCREEN_PAL_HEIGHT
+                                                      : Q2_SCREEN_NTSC_HEIGHT)) / 2;
+    x = ox + Q2_SELFPLAY_OVERLAY_X;
+    y = oy + Q2_SELFPLAY_OVERLAY_Y;
+
+    p = psx_ot_add_bucket(&c->ot, Q2_LOADING_OT_BUCKET);
+    if (!p)
+        return;
+    p->kind      = PSX_PRIM_SPRT;                 /* SetSprt, 0x80038B68 */
+    /* 0x80038BAC: GetTPage(0, 1, x, y) for the slot's page — 4-bit, and
+     * SetDrawTPage's dfe = 1, dtd = 0. The slot's x is the table at
+     * 0x800A3274, 64 * (slot + 1), and its y the one at 0x800A329C. */
+    p->tpage     = (u16)(psx_make_tpage((int)slot + 1,
+                                        Q2_SELFPLAY_OVERLAY_PAGE_Y / 256,
+                                        PSX_BLEND_ADD, PSX_TEX_4BIT) |
+                         0x0400u);
+    p->set_tpage = true;
+    p->clut      = q2_hud_palette_clut(&c->hud_tables,
+                                       Q2_SELFPLAY_OVERLAY_PALETTE);
+    p->textured_blend = true;
+    p->xy[0].x = (s16)x;
+    p->xy[0].y = (s16)y;
+    p->xy[1].x = (s16)(x + Q2_SELFPLAY_OVERLAY_W);
+    p->xy[1].y = (s16)y;
+    p->xy[2].x = (s16)(x + Q2_SELFPLAY_OVERLAY_W);
+    p->xy[2].y = (s16)(y + Q2_SELFPLAY_OVERLAY_H);
+    p->xy[3].x = (s16)x;
+    p->xy[3].y = (s16)(y + Q2_SELFPLAY_OVERLAY_H);
+    p->uv[0].u = u;
+    p->uv[0].v = v;
+    p->uv[1].u = (u8)(u + Q2_SELFPLAY_OVERLAY_W);
+    p->uv[1].v = v;
+    p->uv[2].u = (u8)(u + Q2_SELFPLAY_OVERLAY_W);
+    p->uv[2].v = (u8)(v + Q2_SELFPLAY_OVERLAY_H);
+    p->uv[3].u = u;
+    p->uv[3].v = (u8)(v + Q2_SELFPLAY_OVERLAY_H);
+    /* gp+616: 0x80 0x80 0x80, the unity modulation. */
+    for (i = 0; i < 4; i++) {
+        p->rgb[i].r = Q2_MENU_MOD_NORMAL;
+        p->rgb[i].g = Q2_MENU_MOD_NORMAL;
+        p->rgb[i].b = Q2_MENU_MOD_NORMAL;
+    }
+}
+
 /*
  * Put the decoded frame on the screen.
  *
@@ -19013,8 +19527,9 @@ static void client_popup_frame(client *c, float dt)
      */
     c->sim[0].ent_world.level_time += ticks;
 
-    (void)q2_briefing_popup_tick(&c->popup, ticks, c->sim[0].level_time,
-                                 cross, c->popup_cross_prev);
+    if (!client_help_muted(c))
+        (void)q2_briefing_popup_tick(&c->popup, ticks, c->sim[0].level_time,
+                                     cross, c->popup_cross_prev);
     c->popup_cross_prev = cross;
 }
 
@@ -19244,7 +19759,11 @@ static void client_menu_frame(client *c)
             }
         } else {
             c->screen.view[0].far_z = c->screen.native_view[0].far_z = 4000;
-            q2_sim_scene_page(&c->sim[0], c->menu.page_id == Q2_PAGE_FRONT_TITLE, true);
+            /* DEMO OF GAME is up with the five title objects hidden:
+             * 0x80101B08 sets bit 0x80 on each before it installs the page,
+             * as 0x80101E4C does for the reel's beat. */
+            q2_sim_scene_page(&c->sim[0], c->menu.page_id == Q2_PAGE_FRONT_TITLE,
+                              c->menu.page_id != Q2_PAGE_DEMO);
         }
     }
 
@@ -20968,6 +21487,10 @@ static void client_frame(client *c)
         q2_hud_build_ot(&c->hud[0], &c->hud_font, &ctx, &c->ot, 0);
     }
 
+    /* SpriteAnim(1): the attract demo's own caption, while InSelfPlayMode is
+     * set and no loading hook is up (0x80038F70..0x80038F8C). */
+    client_selfplay_overlay_build(c);
+
     /*
      * THE VIEW'S OWN COORDINATES, along the top — P, or `--coords`.
      *
@@ -21326,6 +21849,7 @@ static void usage(void)
     printf("  --screen-pos X Y  override SCREEN POSITION (-20..20, -32..64)\n");
     printf("  --powerup KIND hold quad|invuln|enviro|breather for HUD capture\n");
     printf("  --pause N     press START at frame N: the pause menu, for capture\n");
+    printf("  --press N     press a key at frame N: ends the attract demo or skips a film\n");
     printf("  --restart N   take RESTART LEVEL at frame N, for capture\n");
     printf("  --fire-event NAME [F]  queue ONE named Events entry point at\n"
            "                frame F, instead of every trigger volume on the\n"
@@ -22165,6 +22689,10 @@ int main(int argc, char **argv)
          * run can capture the pause menu over any map. */
         else if (!strcmp(argv[i], "--pause") && i + 1 < argc)
             c.pause_at_frame = (s32)strtol(argv[++i], NULL, 10);
+        /* `--press N`: a key pressed at frame N, which is what ends the
+         * attract demo and resets the title's idle (selfplay.h). */
+        else if (!strcmp(argv[i], "--press") && i + 1 < argc)
+            c.press_at_frame = (s32)strtol(argv[++i], NULL, 10);
         /* `--restart N`: RESTART LEVEL taken at frame N, as the death and
          * pause pages raise it, so a headless run can capture the return. */
         else if (!strcmp(argv[i], "--restart") && i + 1 < argc)
@@ -22972,6 +23500,22 @@ no_window:
 
         while (!c.headless && SDL_PollEvent(&ev)) {
             int gp = q2_gamepads_event(&c.gamepads, &ev);
+            /*
+             * Anything pressed on the host is the real pad: the pad word the
+             * title's idle resets on (0x8010C6BC) and the +0x04 SwapButtons
+             * tests during playback (0x8003282C). In self-play it ends the
+             * demo and goes no further — not even to the pause menu, since
+             * the buttons it would have opened it with are zeroed in the same
+             * pass. The twelve frames of DEMO OF GAME take nothing either:
+             * 0x8001F964 does not read the pad.
+             */
+            if (ev.type == SDL_EVENT_KEY_DOWN ||
+                ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+                ev.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
+                c.selfplay_input = true;
+                if (c.selfplay_active || c.attract_armed)
+                    continue;
+            }
             if (gp >= 0 && (ev.type == SDL_EVENT_GAMEPAD_ADDED ||
                             ev.type == SDL_EVENT_GAMEPAD_REMOVED)) {
                 Q2_INFO("controller: player %d %s", gp + 1,
@@ -23032,7 +23576,7 @@ no_window:
                  * stall for good behind it, because it only counts down on the
                  * frames no page owns.
                  */
-                if (c.start_beat > 0.0)
+                if (c.start_beat > 0.0 || c.start_handoff > 0)
                     continue;
                 /* Credits use the ordinary Back gesture. Confirm, movement
                  * and unrelated keys must not dismiss a text-only page. */
@@ -23298,6 +23842,13 @@ no_window:
             }
         }
 
+        if (c.press_at_frame > 0 && (s32)c.frame_index == c.press_at_frame) {
+            /* What a real press would end: a self-play demo, or a film. */
+            c.selfplay_input = true;
+            if (c.film_open)
+                client_film_request_stop(&c);
+        }
+
         /*
          * Who owns the pointer this frame, and what the CONTROLLER page has
          * been set to. Both before the input dispatch below, so a menu closed
@@ -23361,9 +23912,15 @@ no_window:
              * why the scene appeared as a still the moment it was spawned.
              * Only the entity set steps; see q2_sim_scene_advance for why that
              * is the whole of this level rather than a shortcut through it. */
-            client_menu_frame(&c);
+            if (!c.attract_armed)
+                client_menu_frame(&c);
             if (c.in_front_end) {
-                client_scene_lights(&c, q2_sim_scene_advance(&c.sim[0], (double)dt) != 0);
+                bool stepped = q2_sim_scene_advance(&c.sim[0], (double)dt) != 0;
+
+                client_scene_lights(&c, stepped);
+                /* The title's thirty seconds, and DEMO OF GAME's twelve
+                 * frames after them (selfplay.h). */
+                client_attract_frame(&c, dt, stepped);
             } else if (c.menu.page_id == Q2_PAGE_DEATH) {
                 /*
                  * AND NEITHER IS THE DEATH PAGE A PAUSED WORLD.
@@ -23396,6 +23953,20 @@ no_window:
              */
             client_scene_lights(&c, q2_sim_scene_advance(&c.sim[0], (double)dt) != 0);
             client_start_beat(&c, dt);
+        } else if (c.start_handoff > 0) {
+            /*
+             * STARTING / GAME, after the reel: QFRONT still running under the
+             * page, and 0x8001F964 counting the twelve frames the scene takes
+             * before it writes state 1. Like the beat, nothing reads the pad.
+             */
+            bool stepped = q2_sim_scene_advance(&c.sim[0], (double)dt) != 0;
+
+            client_scene_lights(&c, stepped);
+            if (stepped && --c.start_handoff == 0) {
+                c.start_loading = true;
+                client_start_game(&c);
+                c.start_loading = false;
+            }
         } else if (c.uplink_open && !c.loading.open) {
             /* QENDMIS's LevelSpecific; there is no world to tick. */
             client_uplink_frame(&c, c.headless ? 1.0f / 30.0f : dt);
@@ -23442,6 +24013,13 @@ no_window:
         } else {
             client_input(&c, dt);
         }
+
+        /* QuakeNextDemoLevel's state 6, acted on once the frame that asked
+         * for it is over — the console finishes the frame too, and only the
+         * loop around MainGameLoop goes back to GameTitle (0x80018CC8). */
+        if (c.selfplay_go_title)
+            client_selfplay_finish(&c);
+        c.selfplay_input = false;
 
         /* The button edges the menu's click handling is built on, taken after
          * everything that reads them. */
@@ -23661,23 +24239,18 @@ no_window:
         }
 
         /*
-         * The placard dismissed — and on to the level the unit's last LOADMAP
-         * named. See `unit_next_map` for why the port has to carry it across
-         * and the console does not.
+         * The placard dismissed — and on to the next unit's first level, as
+         * GameNewMission picks it (client_unit_first_level).
          */
         if (c.endmis_await && !c.endmis_open) {
-            c.endmis_await = false;
-            if (c.unit_next_map[0]) {
-                char next[Q2_UF_NAME_LEN + 1], start[Q2_UF_NAME_LEN + 1];
+            const char *next = client_unit_first_level(c.endmis_unit + 1);
 
-                snprintf(next, sizeof(next), "%s", c.unit_next_map);
-                snprintf(start, sizeof(start), "%s", c.unit_next_start);
-                c.unit_next_map[0]   = '\0';
-                c.unit_next_start[0] = '\0';
-                c.endmission         = false;
+            c.endmis_await = false;
+            if (next) {
+                c.endmission = false;
                 snprintf(c.pending_map, sizeof(c.pending_map), "%s", next);
-                snprintf(c.pending_start, sizeof(c.pending_start), "%s", start);
-                Q2_INFO("end of mission over -> %s '%s'", next, start);
+                snprintf(c.pending_start, sizeof(c.pending_start), "Default");
+                Q2_INFO("end of mission over -> %s 'Default'", next);
                 client_change_map_and_brief(&c);
             }
         }
@@ -23990,8 +24563,11 @@ no_window:
                  * coming back — which is the whole difference between this and
                  * the attract loop it used to be mistaken for.
                  */
-                Q2_INFO("movie: opening reel over — starting the game");
-                client_start_game(&c);
+                Q2_INFO("movie: opening reel over — STARTING GAME for %d frames",
+                        Q2_SELFPLAY_HANDOFF_FRAMES);
+                c.film_is_start = false;
+                q2_loading_show(&c.loading, Q2_LOADING_PAGE_STARTING);
+                c.start_handoff = Q2_SELFPLAY_HANDOFF_FRAMES;  /* engine+0x2C0 = 12 */
             } else if (c.film_is_extro) {
                 Q2_INFO("movie: extro over — campaign credits");
                 client_campaign_complete(&c);

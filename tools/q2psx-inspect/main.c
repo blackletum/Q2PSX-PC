@@ -4109,7 +4109,7 @@ static int cmd_audio(disc *d)
 {
     int i, n = disc_file_count(d);
     u32 banks = 0, sounds = 0, looping = 0, bad_blocks = 0, failed = 0;
-    u32 worst_body = 0;
+    u32 worst_body = 0, unplaced = 0;
     char worst_map[64];
     s16 *pcm = NULL;
     size_t pcm_cap = 1 << 20;
@@ -4175,6 +4175,14 @@ static int cmd_audio(disc *d)
             /* Actually decode it, so a broken decoder cannot hide behind a
              * header-only check. */
             q2_spu_adpcm_decode(vag.body, vag.data_size, pcm, (u32)pcm_cap);
+
+            /* The console's own placement: a sound DownloadVAB cannot fit,
+             * or past its 96th, never reaches sound RAM. */
+            if (!q2_sound_bank_resident(&bank, s)) {
+                printf("  not in sound RAM: %s sound %u \"%s\" (%u bytes)\n",
+                       map, s, vag.name, vag.data_size);
+                unplaced++;
+            }
         }
 
         total = q2_sound_bank_total_body(&bank);
@@ -4195,9 +4203,9 @@ static int cmd_audio(disc *d)
     printf("  invalid blocks  : %u\n", bad_blocks);
     printf("  failures        : %u\n", failed);
     printf("  largest bank    : %s, %u bytes of ADPCM\n", worst_map, worst_body);
-    printf("  SPU RAM usable  : %d bytes\n", SPU_RAM_SIZE - SPU_RAM_RESERVED);
-    printf("  fits            : %s\n",
-           worst_body <= (u32)(SPU_RAM_SIZE - SPU_RAM_RESERVED) ? "yes" : "NO");
+    printf("  SPU RAM usable  : %d bytes (heap from 0x%X)\n",
+           SPU_RAM_SIZE - SPU_RAM_RESERVED, SPU_RAM_RESERVED);
+    printf("  not in sound RAM: %u sound(s), as on the console\n", unplaced);
 
     printf("\n%s\n", (failed == 0 && bad_blocks == 0)
            ? "PASS - every bank parsed and every ADPCM block is structurally valid."

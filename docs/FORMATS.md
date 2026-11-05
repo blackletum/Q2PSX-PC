@@ -261,6 +261,38 @@ The **array framing is REFUTED**, on four grounds:
 
 **Consequence for the port:** key chunks by name string. Do not persist any ordinal derived from this pool.
 
+### What the loaders do when a chunk is missing — CONFIRMED
+
+Neither loader indexes the pool. LOADLEV.C `ReadCommonFiles` (`0x8007A430`) and `ReadZoneFiles`
+(`0x8007B3F8`) copy each name's 12-byte literal to the stack and call the directory search `0x8006DBC0`,
+which answers 1 on a match and 2 at the directory's end. A miss clears the `{pointer, size}` pair with an
+8-byte `memset`. Whether that matters depends on the chunk:
+
+| file / chunk | on a miss | at |
+| --- | --- | --- |
+| `COMMON.DAT` itself | the console stops: `j 0x8007B3D8` branches to itself | `0x8007A49C` |
+| `StartPos`, `Resources`, `Events`, `Strings` | NULL stored regardless (`0x800B2A34`, `0x800B2F88`, `0x800AE774`, `0x800B2F78`); the string lookup tests it | `0x80070214` |
+| `TrigBounds` + `TriggerRemap` | `ReadCollisionData` (`0x80051600`) returns 0 and leaves the context empty | `0x8007A64C`, `0x800516B8` |
+| `Lights` | count = size / 28 = 0 | `0x8007A81C..0x8007A82C` |
+| `CastList` | size 0: no bank, `0x800B2D18 = 0` | `0x8007A930` |
+| `Population` | `InitialisePopulation` and `CreatureCount` test for NULL | `0x800575F8`, `0x80057770` |
+| `GlintMod` | `LoadShieldData` tests for NULL; absent on 48 of 49 maps | `0x800651C0` |
+| `UserFuncs` | `InitUserFuncs` tests for NULL | `0x8002ECD4` |
+| `CreAIBin`/`CreAIRel`, `LevelBin`/`LevelRel` | size 0 skips the relocation; the level pair is empty on 2 maps | `0x8007AFD4`, `0x8007B0C0`, `0x8007B1C4`, `0x8007B2B0` |
+| `ZONE<n>.DAT` itself | returns with nothing loaded | `0x8007B4A4` |
+| `PrimaryColl`/`PrimaryRemap`, `SecondaryCol`/`SecondaryRem` | `ReadCollisionData` returns 0 | `0x8007B5E8`, `0x8007B6A8` |
+| `MapNames`, `SpaceLights`, `SortData`, `MapMod`, `Points`, `AreaConx` | NULL stored regardless | |
+| `Scene` | count = size / 52 = 0 | `0x8007BA5C` |
+| zone `CastList` | size 0: `0x800B2D1C = 0`; 17 zones ship it empty | `0x8007BF24` |
+| zone `CreAIBin`/`CreAIRel` | size 0 skips; absent from 17 zones | `0x8007C03C`, `0x8007C128` |
+| zone `Events` | NULL: no `Event_TransferObjects` pass | `0x8007C268` |
+
+After its last lookup, each loader calls MYMALLOC.C `UpdateMallocStart` (`0x8006EA48`) to move the file's
+heap header up to the first chunk it keeps, and repoints `CommonFiles` (`0x800B2F5C`) or `CurrentZoneFiles`
+(`0x800B2FA8`) there. In COMMON that chunk is `Resources` (`0x8007B3C4`): `CreAIRel`, `LevelRel`,
+`Resources` lead all 49 directories. In a zone it is `Scene` (`0x8007C440`), which `Events` precedes in all
+115. Every chunk the disc omits or ships empty takes one of the tested branches above.
+
 ---
 
 ## 2. `COMMON.DAT` — per-map static data
@@ -340,7 +372,7 @@ disc-wide corpus of **1,723 models / 192,798 vertices / 138,290 faces / 553,160 
 ```c
 typedef struct {            /* 64 bytes; ALL offsets are model-relative */
     uint8_t  magic;         /* CONFIRMED: always 6 (965/965)                        */
-    uint8_t  unk1[3];       /* UNKNOWN: 24-bit LE value, range 261..333367          */
+    uint8_t  unk1[3];       /* NO READER: 24-bit LE value, range 261..333367        */
     uint32_t always3;       /* CONFIRMED: always 3 (965/965)                        */
     char     name[12];      /* CONFIRMED: present in this map's ModelNames on 49/49.
                              * NOT unique — 11 maps contain duplicate model names.  */
@@ -348,26 +380,29 @@ typedef struct {            /* 64 bytes; ALL offsets are model-relative */
     uint16_t numParts;      /* CONFIRMED                                            */
     int16_t  ext0;          /* UNKNOWN: always >= 0; no bbox correlate found        */
     int16_t  ext1;          /* UNKNOWN: negative in 72/965                          */
-    int16_t  ext2;          /* INFERRED: always >= 0; == vertex max-Y for 72.5% of
-                             * single-part and 50.9% of multi-part STATIC models,
-                             * but 0.0% (0 of 399) of ARTICULATED ones. Probable
-                             * top-of-bounds — and evidence that articulated model
-                             * vertices are stored PART-LOCAL. (An earlier pass
-                             * quoted 83% / 82.8%; re-measured they are 72.5% /
-                             * 50.9%. The conclusion is unchanged.)                 */
-    int16_t  ext3;          /* INFERRED: always <= 0; == vertex min-Y for 86.5% of
-                             * single-part and 85.4% of multi-part static models;
-                             * 1.3% (5 of 399) of articulated ones.                 */
+    int16_t  ext2;          /* CONFIRMED: the FLOOR OFFSET, GetFloorOffset
+                             * (0x8006D100); entity +0xF8. Always >= 0; == vertex
+                             * max-Y for 72.5% of single-part and 50.9% of
+                             * multi-part STATIC models, but 0.0% (0 of 399) of
+                             * ARTICULATED ones, which is evidence that articulated
+                             * model vertices are stored PART-LOCAL. Authored, not
+                             * measured: no code derives it from vertices.          */
+    int16_t  ext3;          /* CONFIRMED: the CEILING OFFSET, GetCeilingOffset
+                             * (0x8006DE94). Always <= 0; == vertex min-Y for 86.5%
+                             * of single-part and 85.4% of multi-part static models;
+                             * 1.3% (5 of 399) of articulated ones. Only feeds
+                             * entity +0xFA = ext2 + ext3, which nothing reads.     */
     uint32_t ofsFaces;      /* CONFIRMED: ofsBlockA - ofsFaces == 16*numFaces       */
     uint32_t ofsVerts;      /* CONFIRMED: ALWAYS 0x40. nVerts = (ofsParts-0x40)/12  */
     uint32_t ofsParts;      /* CONFIRMED: ofsFaces - ofsParts == 8*numParts         */
     uint32_t ofsBlockA;     /* CONFIRMED (container): 8 x {u16 count; u16 offset;
                              * u32 0} directory, offsets ascending, offsets[0]==64,
-                             * max offset <= block size. Contents UNDECODED.        */
-    uint32_t ofsBlockB;     /* INFERRED: exactly 16 zero bytes in 821/965; 144
-                             * articulated models use 12 distinct larger sizes.
-                             * Same name can carry 3 sizes across maps, so this is
-                             * per-instance, not per-class. Skeleton? UNDECODED.    */
+                             * max offset <= block size. CONFIRMED: the per-octant
+                             * face draw order, CalcSortList's fallback (below).    */
+    uint32_t ofsBlockB;     /* CONFIRMED: per-octant draw-order overrides keyed on
+                             * animation position, read by CalcSortList (below).
+                             * Exactly 16 zero bytes (8 empty chains) in 821/965;
+                             * 144 articulated models use 12 larger sizes.          */
     uint32_t ofsBlockC;     /* INFERRED: == 12 + 8*numParts for 659/965 (1265/1723
                              * disc-wide). Derive the size from ofsBlockD-ofsBlockC.
                              * NOT the per-part vertex base — see the correction.   */
@@ -671,6 +706,13 @@ following because a port has to reproduce the order and not merely the arithmeti
 > sanity check on the decode). Either `ext2`/`ext3` are authored bounds rather than measured ones, or the
 > caller's matrices carry a per-model transform that the extents include. This is recorded rather than
 > resolved; see openquestions #2d.
+>
+> **Resolved 5 November: they are authored.** `ext2` is `GetFloorOffset` (`0x8006D100`, `lh 28` at
+> `0x8006D118`), stored at entity `+0xF8` and used to seat the model at `origin.y + 286 - ext2`
+> (`0x800588F0..0x80058904`). `ext3` is `GetCeilingOffset` (`0x8006DE94`, `lh 30` at `0x8006DEAC`), whose two
+> callers only store `ext2 + ext3` at entity `+0xFA` (`0x80056728`, `0x8007D72C`), a field no code reads. No
+> code recomputes either from vertices, so the disagreement after posing is the exporter's and nothing
+> depends on it. The second hypothesis is gone too: the matrices carry no per-model scale (openquestions #2d).
 >
 > The fixed-size effect renderer at `0x80064780` is a useful *analogy* but is **not** corroboration: its loop
 > bound is `slti $v0,$s3,79` at `0x80064BC4` (79 faces, not 54), its face stride is `addiu $s2,$s2,4` at
@@ -1142,8 +1184,10 @@ array with values up to 332.
 `0x80026DC0` runs a **pre-pass over every record at load time**, with **its own 20-entry dispatch table at
 `0x800ABCF8`, indexed by `opcode - 3`** (bound `sltiu $v0,$v1,20` at `0x80026EA8`). Load handlers exist only
 for opcodes `0x03`, `0x04`, `0x05`, `0x08`, `0x09` and `0x16`. The pre-pass **rewrites `int16_t` fields inside
-the items in place**, reading the originals from a *second* `Events` pointer at `gp+0x178` (`0x800AE778`),
-distinct from the runtime base at `gp+0x174` (`0x800AE774`):
+the items in place**, reading the originals from a *second* `Events` pointer at `gp+0x178` (`0x800AE778`,
+`neweventlistbase`: the current ZONE's `Events`, stored by `ReadZoneFiles` at `0x8007C234`), distinct from the
+runtime base at `gp+0x174` (`0x800AE774`, `eventlistbase`: COMMON.DAT's, stored by `ReadCommonFiles` at
+`0x8007AD54`):
 
 ```
 ;; op 0x03 loader, 0x80025D24
@@ -1204,14 +1248,19 @@ Name-operand resolution rates, over every instance in all 164 files: `0x0F` → 
 `LOADMAP +16` → `StartPos` 135/135; `TELEPORT +4` → `StartPos` 28/28; `CREBATCH +4` → `Population` 458/472;
 `HELPCOMPUTER +4`/`+16` → `Strings` 122/127; `LOADMAP +4` → the EXE level table at `0x8009C6C8` 129/135;
 `SIMPLESOUND +20` → `SNDVRAM.DAT` 129/151; `STRING +4` → `Strings` 165/363; **`MISEVENT +4` → `Strings`
-0/93** — that namespace is entirely unlocated, not partially located.
+0/93**, because `MISEVENT` names a name and handler table, not a string (openquestions #91).
 
-> **What is still open.** The `fnB` per-frame motion integrators (27 of 43 primitives have one; none
-> decompiled); the interior of the 92-byte runtime object; the `STRING` / `MISEVENT` string namespace; the
-> three record category bits `0x08` / `0x10` / `0x20`; and which physical chunk backs `gp+0x174` versus
-> `gp+0x178`. **Doors and lifts are therefore still not reachable from the disc data alone** — the link from
-> a script slot to a moving object is manufactured at load time. The trigger / arm / disarm graph, zone gates,
-> level progression and teleports *are* reachable and usable now.
+`STRING`'s namespace is COMMON.DAT's `Strings` and nothing else. QEVENT.C `PSXSTRING` (`0x8002B880`) passes
+item `+4..+15` to MISC.C `GetStringFromStringtable` (`0x800701B4`), which searches `StringTable`
+(`0x800B2F78`). That pointer's one store is `ReadCommonFiles`' at `0x8007AE3C`. A miss returns 0 and prints
+nothing (`0x8002B924`), so the 198 unresolved uses are silent on the console too.
+
+> **Formerly open, now settled (5 November).** The motion integrators and the 92-byte object are §2.9.1–2.9.3.
+> The `STRING` and `MISEVENT` namespaces are above. The record category bits are read by `Event_ProcessTriggers`
+> (`0x80027E64`): contact sets bit 1, `0x10` runs every frame inside, `0x08` runs when bit 2 (previous
+> contact) is clear, and `0x20` is the leave edge (bit 2 set, bit 1 clear, `0x80028070..0x80028080`).
+> `0x80028160..0x80028180` then shifts bit 1 into bit 2. `gp+0x174` and `gp+0x178` are COMMON's and the zone's
+> `Events`, as stated above.
 
 ### 2.11 `LevelBin` / `CreAIBin` — relocatable MIPS modules, and `LevelRel` / `CreAIRel` — fixups
 
@@ -1300,8 +1349,8 @@ typedef struct {                /* 52 bytes */
                                  * On disc: {0, 0x400, 0x800, 0x1000, 0x1400,
                                  * 0x4000, 0x4400, 0x4800}, zero in 69.8%.         */
     uint16_t pad0A;             /* CONFIRMED: always 0 (upper half of the dword)     */
-    uint8_t  unk0C;             /* UNKNOWN: 0..4, nonzero in 6 nodes                 */
-    uint8_t  unk0D;             /* UNKNOWN: 0..3, nonzero in 5 nodes                 */
+    uint8_t  unk0C;             /* NO READER on either disc: 0..4, nonzero in 6 nodes */
+    uint8_t  unk0D;             /* NO READER on either disc: 0..3, nonzero in 5 nodes */
     uint8_t  area;              /* 0..197, 119 distinct; low 7 bits name a 64-byte
                                  * runtime screen-area record. Bit-14 nodes and
                                  * dynamic packet chains route through its authored
@@ -1329,7 +1378,7 @@ in `src/formats/surface.h`; `q2psx-inspect surfaces` checks it against all 17,03
 | bits | meaning | read at |
 |---|---|---|
 | 0-9 | runtime object slot **+ 1**, 0 = none | `0x80067724`, `0x800665D4` |
-| 10-13 | the `SETWIBBLE` field; only 10-11 are read | `0x80066740` |
+| 10-13 | the `SETWIBBLE` field. 10-11 pick the draw variant; the whole field is otherwise only tested for non-zero, to gate the inert `PortalTestWibble` (§12.9) | `0x80066740`; `0x800659C0` |
 | 14 | deferred, depth-sorted draw path | `0x80066524` |
 | 15 | do not draw (`OBJDRAWOFF`) | `0x8006771C` |
 
@@ -1751,7 +1800,13 @@ never leave the hull.
 `uint16_t remap[numNodes]`, zero-padded to 4 bytes; `len == align4(2 * numNodes)` on 115/115. Installed into
 the collision context at `ctx+0x10` alongside its hull (`0x80051798`), which is why the two always appear in
 matched pairs. The maximum value **exceeds the `Scene` node count in 100 of 115 files**, so it is definitively
-*not* a scene-node index — probably a polygon or surface id in a shared table. Still UNKNOWN.
+*not* a scene-node index.
+
+**CONFIRMED: it is a debug label.** Its only readers are debug output. `ReadCollisionData` passes `ctx+0x10`
+to `PrintBool` (`0x80051830`) and discards the answer. MISC.C `PrintDebugInfoScene` (`0x8006F23C`) prints
+`CollMap+0x10[view+146]` (`0x8006F25C`) only when `ScreenShotOn` (`0x800B2A70`) is 2, and `ScreenShotOn` is
+never stored. `MoveCollMap+0x10` has no reference. The values are an id each zone inherited from its
+authoring source (openquestions #22), and a port needs none of them.
 
 ### 3.6 `AreaConx` — area connection (portal) graph
 
@@ -2364,10 +2419,22 @@ index 1. Looping samples end with an `End|Repeat` block at `nb-1`; there are exa
 block on 176 samples: 2,181 one-shots have `flags==1` at `nb-2` followed by a `0x07` terminator, and 176 have
 `flags==1` at `nb-2` followed by a plain `flags==0` block with no terminator at all.
 
-**SPU RAM budget.** On the worst-case map the VAG *bodies* total 522,000 bytes against 522,240 usable
-(0x80000 − 0x800) — a 240-byte margin. Section B *including* the 48-byte headers is 525,124, which exceeds
-SPU RAM. **The loader must upload bodies only.** Whether reverb is disabled given that margin is an open
-question.
+**SPU RAM budget — CONFIRMED from the code.** NSOUND.C `SfxInit` (`0x80072424`) calls
+`SpuInitMalloc(128, 0x800DF9DC)`, which starts the sample heap at **`0x1010`** and sizes it
+`(0x10000 << 3) − 0x1010` = **520,176 bytes** (`0x8008C2F8..0x8008C324`). No reverb work area is ever
+reserved: `_spu_rev_reserve_wa` (`0x800AA568`) has one store, and it writes 0. `InitSoundNewGame`
+(`0x80073B80`) switches reverb off through `SsUtReverbOff`, `SsUtSetReverbType(0)` and
+`SsUtSetReverbDepth(0, 0)` (`0x80073BAC..0x80073BC4`). `DownloadVAB` (`0x80073E68`) uploads bodies only, in
+table order. `SfxTransEffect` (`0x800724EC`) `SpuMalloc`s each body, rounded up to 8 bytes, and gives up
+on a sound that does not fit (returns −2 at `0x80072534`). On the worst-case map the bodies total 522,000
+bytes, so **on FRAGTOWE sounds 0 to 58 load and sound 59, `fem_drown` (19,008 bytes), is never resident**.
+SECURITY is over too: 521,488 bytes, so its last sound, `mal_pn100_1` (2,496 bytes), is never resident.
+Every other map fits. A request for a sound that was never placed starts a voice at whatever address its
+slot last held, because the 96-slot table at `0x800DF23C` is cleared only at boot and SfxFreeEffect
+(`0x80072690`) leaves the address word. A zero address is silence (`0x80072784`, `0x80072A78`). The client
+keeps sound RAM and that table across levels (`q2_spu_ram`, vag.h). (The earlier figure of 522,240 usable
+assumed a 0x800 reserve.) Section B *including*
+the 48-byte headers is 525,124, which exceeds SPU RAM, so **the loader must upload bodies only.**
 
 Section-size statistics: section A 3,532…406,268 bytes (49 distinct values, i.e. genuinely per-map); section
 B 1,340…525,124 bytes but only **33 distinct** values across 49 files (one size recurs 8×, another 6×),
@@ -5189,10 +5256,15 @@ pages are being replaced* cannot draw out of the live image.
 
 ### 11.13.1 `STARTING` / `GAME`, and the third page — **SOLVED**
 
-The same furniture carries the front end's own version, and it is what a capture of the half second between a
-confirmed difficulty and the opening reel shows. `0x80101E4C` — the handler all three difficulty records call
-— opens with `module+0x3414(NULL, 19)`, so the screen is **module page 19** built by the ordinary front-end
-page builder with no banner, and the records are at `module+0x0EBF4`:
+The same furniture carries the front end's own version. It is the screen **between the opening reel and the
+game**. `0x80101E4C`, the handler all three difficulty records call, opens with `module+0x3414(NULL, 19)` and
+installs only the empty table at `module+0x0FADC` (`0x80101F1C`, `0x80101F34`), so the half second before the
+reel is bare. The countdown's hook plays the reel through QFRONT's own blocking player (`0x8010B2EC` at
+`0x80101D4C`) and only then installs the STARTING / GAME records (`0x80101D88`, through `engine+0x200`) and
+arms `engine+0x2C0 = 12` / `engine+0x2C2 = 1`. The page is still installed when state 1 reaches ProcessGame,
+so the first level's loading screen carries it too. (This section used to place it before the reel, reading
+a retail capture as that half second; the code puts the capture after the reel.) The records are at
+`module+0x0EBF4`:
 
 | record | text | x | y |
 |---|---|---|---|
@@ -8129,7 +8201,8 @@ numbers so that nothing downstream needs renumbering.
     `CastList` consumer in the EXE — which a full-image scan shows is genuinely absent from any code reading
     the on-disc part layout.
 
-3a. **The PSX-texel to PC-texel ratio — the last thing between S = 10 and CONFIRMED.** The texture
+3a. **~~The PSX-texel to PC-texel ratio — the last thing between S = 10 and CONFIRMED.~~ — CLOSED: nothing on
+    either disc is in PC units, so nothing depends on S (openquestions #3a).** The texture
     measurement fixes 10 world units per *PSX* texel; S = 10 requires PSX 64×64 tiles to be 1:1 with PC Quake
     II's 64×64 textures at scale 1.0, while a 2:1 downsample of 128×128 sources gives S = 5. Now that #1 is
     solved this is cheap: decompress one texture payload, count its pixels, and compare against the PC
@@ -8171,8 +8244,8 @@ numbers so that nothing downstream needs renumbering.
     looked most like a clue was a red herring in a useful way: mover-driven nodes set these bits on 6.24 %
     of their polygons against 11.84 % for static world nodes, which is just artists rotating textures on
     world geometry more often than on doors.
-12. **`Scene` node fields `unk0C` and `unk0D`.** Byte `+0x0E` is solved as the seven-bit screen/draw area;
-    only the two rare preceding bytes remain unattributed.
+12. **~~`Scene` node fields `unk0C` and `unk0D`.~~ — CLOSED: no code on either disc reads them
+    (openquestions #12b).** Byte `+0x0E` is the seven-bit screen/draw area.
 
 ### Behavioural / audio-visual polish
 
@@ -8188,9 +8261,8 @@ numbers so that nothing downstream needs renumbering.
 16. **Locate the movie player overlay.** The executable contains no `.STX` / `MOVIES` / `STX` string
     whatsoever, so both the player and its filename assembly live elsewhere. Finding it would also settle the
     movie filename suffix question and the MDEC depth in one pass.
-17. **The `SNDVRAM` SPU RAM base / reverb work area,** and whether reverb is disabled at all — the worst-case
-    map leaves only a **240-byte** margin against SPU RAM, which is suspiciously tight if a reverb buffer is
-    also allocated.
+17. **RESOLVED — the SPU RAM base is `0x1010`, no reverb work area is reserved, and reverb is switched off
+    in code (§4.2).** The margin was never 240 bytes: FRAGTOWE's last sound does not fit at all.
 18. ~~**`VramImageRec.width` / `height`: dimensions or VRAM placement coordinates?**~~ **RESOLVED by #1.**
     `width` is BYTES PER ROW of the decoded buffer and `height` is rows; the VRAM rect is `width>>1`
     halfwords wide. Confirmed by `(width>>1) * height * 2 == decoded size` in 553/553 records, and by the
@@ -8204,21 +8276,16 @@ numbers so that nothing downstream needs renumbering.
 
 ### Low-impact unknowns and archival questions
 
-21. `CastList` blocks A (8-entry directory confirmed, payloads undecoded), B (per-instance, articulated
-    models only — now the prime suspect for the per-part transform matrices, see #2a), C and D; the
-    animated-model frame layout; and the header's 24-bit field at `+0x01` (range 261…333367). **Block C is
-    no longer a candidate for the vertex base** — a direct search of all 8 byte lanes and all 7 halfword
-    lanes of its per-part body finds the base sequence on 0 of the 399 articulated models (§2.2) — and its
-    supposed "12 + 8*numParts*frames" size law fails on 458 of 1,723 models.
-22. `PrimaryRemap` value space — definitively *not* a scene-node index (max exceeds the scene node count in
-    100 of 115 files); probably a polygon or surface id in a shared table.
+21. **RESOLVED — `CastList` blocks A to D (§2.2, §2.2.1).** A is the per-octant face draw order and B its
+    frame-ranged overrides, both read by `CalcSortList` (`0x8006A020`). C is the animation bank, and D the
+    named move table read by `FindAnimHdr` (`0x8006D330`). The header's 24-bit field at `+0x01` has no reader.
+22. **RESOLVED — `PrimaryRemap` (§3.5).** Read only by debug output that the retail build never enables.
 23. ~~`CollNode` fields `c` and `d`.~~ **RESOLVED:** `d`'s low byte is contents;
     `c` is two hull-specific halfwords — PrimaryColl `+28` is the SortData byte offset and SecondaryCol
     `+30` is the first SpaceLights index (§3.4, §3.11).
-24. `Resources` field meanings are now decoded in §2.1: packet allocation control,
-    subdivision mesh count and particle group count. The native heap-dependent
-    flat-packet allocation policy remains an implementation gap, not an unknown
-    field meaning.
+24. **RESOLVED — `Resources` (§2.1).** Packet allocation control, subdivision mesh count and particle group
+    count. The heap-dependent packet policy is reproduced natively and checked against both discs' loaders
+    (renderer audit).
 25. `TrigBounds` trigger `id` (9…75 plus 255) and `flags` (14 distinct values) value semantics.
 26. The five `Lights` style values (`(n<<3)|7`, n = 0…4) — what each style *does*.
 27. Pickup `flags` bits beyond 0, 1 and 8; and the meaning of the pickup `extra` list (a consumer exists — a

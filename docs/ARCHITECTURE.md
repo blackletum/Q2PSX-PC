@@ -223,7 +223,8 @@ failed     : 0
 banks      : 49
 sounds     : 2475 (118 looping)
 invalid ADPCM blocks : 0
-largest bank : FRAGTOWE, 522000 bytes against 522240 usable
+largest bank : FRAGTOWE, 522000 bytes against 520176 usable
+not in sound RAM: FRAGTOWE sound 59 "fem_drown", SECURITY sound 64 "mal_pn100_1"
 ```
 
 Geometry renders end to end. Across 19 maps spanning a 2-quad stub to a

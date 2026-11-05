@@ -42,31 +42,53 @@ static unsigned rect_hash(const psx_vram *v, const native_vram_rect *r)
 }
 
 /*
- * Rectangles reported as PENDING rather than passed or failed, each for a
- * stated reason; the report lists every one so nothing is silently excused.
- *
- *  - The screen modules (QFRONT, QLOGOS, QLOGOS2, QMAGEXTR, QMRESULT and the
- *    QENDMIS palettes) upload full-screen pictures and per-unit palettes from
- *    their own LevelBin code; the port draws those screens through its own
- *    transcribed paths rather than out of these VRAM rectangles.
- *  - DemoSp1/DemoSp2 (BASE3, JAIL2, WASTE2, MAGDEMO, at 768/832) are the
- *    self-play overlay, uploaded on every load and drawn only in self-play,
- *    which the port does not run yet.
+ * THE ONE PLACE THE CLIENT IS AHEAD OF THE FIXTURE. A QENDMIS map opens its
+ * uplink screen as it loads, and that screen's code (module+0x3ED4, a plain
+ * LoadImage) writes the unit's screen tint into palette 0 and the globe's
+ * palette into palette 4 (client_uplink_open). The fixture stops at the
+ * level loader, before any module code, so the console's VRAM still holds the
+ * section's placeholders there (0x8000 after the STP fix-up). Each half is
+ * checked against its own source: the two palettes against the module's data,
+ * and the rest of the block, with the loader's values put back in those two
+ * palettes, against the native hash.
  */
-static bool pending(const native_vram_case *nc, const native_vram_rect *r)
+static bool uplink_palettes(const client *c, const native_vram_case *nc,
+                            const native_vram_rect *r)
 {
-    static const char *const screens[] = {
-        "QFRONT", "QLOGOS", "QLOGOS2", "QMAGEXTR", "QMRESULT",
-        "QENDMIS1", "QENDMIS2", "QENDMIS3", "QENDMIS4", "QENDMIS5"
-    };
-    u32 k;
+    return !strncmp(nc->map, "QENDMIS", 7) && r->x == 0 && r->y == 256 &&
+           c->uplink_open;
+}
 
-    for (k = 0; k < sizeof(screens) / sizeof(screens[0]); k++)
-        if (!strcmp(nc->map, screens[k]))
-            return true;
-    return r->y == 256 && (r->x == 768 || r->x == 832) &&
-           (!strcmp(nc->map, "BASE3") || !strcmp(nc->map, "JAIL2") ||
-            !strcmp(nc->map, "WASTE2") || !strcmp(nc->map, "MAGDEMO"));
+static unsigned uplink_loader_hash(client *c, const native_vram_rect *r)
+{
+    static psx_vram copy;
+    const dat_chunk *lb = c->common.chunk[Q2_COMMON_LEVEL_BIN];
+    q2_vram_section vs;
+    u32 k, p;
+
+    for (k = 0; k < 16; k++) {
+        CHECK(c->vram->px[256][k] ==
+              q2_rd_u16(lb->data + Q2_UPLINK_CLUT_SCREEN +
+                        0x20u * (u32)(c->uplink_unit - 1) + 2u * k));
+        CHECK(c->vram->px[257][k] == q2_rd_u16(lb->data + Q2_UPLINK_CLUT_GLOBE + 2u * k));
+    }
+    copy = *c->vram;
+    CHECK(q2_vram_load(&vs, c->disc, c->map) == Q2_OK);
+    for (p = 0; p <= 4; p += 4) {
+        const u8 *entries = q2_vram_clut(&vs, p);
+        u32 x, y;
+
+        CHECK(entries != NULL);
+        if (!entries)
+            continue;
+        q2_vram_clut_pos(p, &x, &y);
+        for (k = 0; k < Q2_VRAM_CLUT4_ENTRIES; k++) {
+            u16 e = q2_rd_u16(entries + 2u * k);
+            copy.px[y][x + k] = e ? (u16)(e | Q2_VRAM_STP_BIT) : 0;
+        }
+    }
+    q2_vram_free(&vs);
+    return rect_hash(&copy, r);
 }
 
 static void compare_all(const char *disc)
@@ -94,35 +116,42 @@ static void compare_all(const char *disc)
         maps++;
         for (k = 0; k < nc->count; k++) {
             const native_vram_rect *r = &nc->rect[k];
-            unsigned got = rect_hash(c->vram, r);
+            unsigned got;
+
+            if (uplink_palettes(c, nc, r)) {
+                got = uplink_loader_hash(c, r);
+                held++;
+            } else {
+                got = rect_hash(c->vram, r);
+            }
 
             rects++;
-            if (got != r->hash && pending(nc, r)) {
-                held++;
-                printf("PENDING %s: VRAM (%d,%d) %dx%d\n", nc->map, r->x, r->y, r->w, r->h);
-                continue;
-            }
-            if (got != r->hash) {
-                const char *dump = getenv("Q2PSX_VRAM_DUMP");
+            if (got != r->hash)
                 fprintf(stderr, "FAIL %s: VRAM (%d,%d) %dx%d hash %08X, native %08X\n",
                         nc->map, r->x, r->y, r->w, r->h, got, r->hash);
-                /* Opt-in: the client's whole VRAM, to diff against a native
-                 * dump of the same load. */
-                if (dump && dump[0]) {
-                    char path[1024];
-                    FILE *f;
-                    snprintf(path, sizeof(path), "%s/%s.vram", dump, nc->map);
-                    if ((f = fopen(path, "wb")) != NULL) {
-                        fwrite(c->vram->px, 1, sizeof(c->vram->px), f);
-                        fclose(f);
-                    }
+            CHECK(got == r->hash);
+        }
+        {
+            /* Opt-in: each map's whole VRAM, 1024x512 little-endian
+             * halfwords, to diff against or view beside a native dump. */
+            const char *dump = getenv("Q2PSX_VRAM_DUMP");
+
+            if (dump && dump[0]) {
+                char path[1024];
+                FILE *f;
+
+                snprintf(path, sizeof(path), "%s/%s%s.vram", dump, nc->map,
+                         ntsc ? "-US" : "");
+                if ((f = fopen(path, "wb")) != NULL) {
+                    fwrite(c->vram->px, 1, sizeof(c->vram->px), f);
+                    fclose(f);
                 }
             }
-            CHECK(got == r->hash);
         }
         close_client(c);
     }
-    printf("native VRAM (%s): %u maps, %u rectangles, %u pending, %u not loadable as a level\n",
+    printf("native VRAM (%s): %u maps, %u rectangles (%u with the uplink's own palettes "
+           "checked apart), %u not loadable as a level\n",
            ntsc ? "US" : "PAL", maps, rects, held, skipped);
 }
 

@@ -281,12 +281,22 @@ static const q2_menu_item k_death[] = {
  * carries an action, so the page is pure text and no selection bar is drawn.
  *
  * The module has a third of these at module+0x0EBC4 — one row, `DEMO OF GAME`,
- * at (256, 111) — which belongs to the attract loop this port does not run. It
- * is not transcribed because nothing would install it.
+ * at (256, 111) — and it is the attract loop's (k_demo below).
  */
 static const q2_menu_item k_starting[] = {
     { "STARTING", 256, 111, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
     { "GAME",     256, 137, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
+};
+
+/*
+ * module+0x0EBC4 — the page 0x80101B08 installs when the title has sat for
+ * thirty seconds, for the twelve frames before state 10 (selfplay.h). The text
+ * pointer is module+0xC. The US module carries the same record at +0x0EBD8 at
+ * (256, 107), which is the same place once the 248-line layout is centred in
+ * a 240-line buffer — the shift every other front-end row takes on that build.
+ */
+static const q2_menu_item k_demo[] = {
+    { "DEMO OF GAME", 256, 111, Q2_ACT_NONE, Q2_SET_NONE, Q2_WIDGET_TEXT, 0 },
 };
 
 static const q2_menu_item k_front_title[] = {
@@ -597,6 +607,7 @@ static const q2_menu_page k_pages[] = {
      */
     { Q2_PAGE_FRONT_TITLE,      NULL,            k_front_title,      N(k_front_title),      0,                  Q2_ACT_NONE,         0x8010EC3Cu, 0 },
     { Q2_PAGE_STARTING,         NULL,            k_starting,         N(k_starting),         N(k_starting),      Q2_ACT_NONE,         0x8010EBF4u, 0 },
+    { Q2_PAGE_DEMO,             NULL,            k_demo,             N(k_demo),             N(k_demo),          Q2_ACT_NONE,         0x8010EBC4u, EMPTY_FRONT },
     { Q2_PAGE_FRONT_START,      "START",         k_front_start,      N(k_front_start),      0,                  Q2_ACT_BACK,         0x8010EC84u, 0 },
     { Q2_PAGE_FRONT_OPTIONS,    "OPTIONS",       k_front_options,    N(k_front_options),    0,                  Q2_ACT_BACK,         0x8010ED44u, 0 },
     { Q2_PAGE_FRONT_NEWLOAD,    "SINGLE PLAYER", k_front_newload,    N(k_front_newload),    0,                  Q2_ACT_BACK,         0x8010EF9Cu, 0 },

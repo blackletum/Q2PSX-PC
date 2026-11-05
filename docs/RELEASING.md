@@ -76,7 +76,20 @@ work three ways:
    - saves are the port's own format;
    - no perspective-correct mode;
    - the host-clock seed in interactive play, where the console reads its
-     root counter.
+     root counter;
+   - the player's settings come back after an attract demo, where the console
+     leaves its defaults in place.
+
+   **One the other way round, for the owner to decide.** After the title has
+   played an attract demo, the console's help computer stays silent for the
+   rest of the session (player one's pad mode word is left at 3; see the
+   functional audit). The port reproduces it. Restoring the orders would be a
+   one-line deviation, and would go on this list.
+
+**Open against gate 1 (5 November):** the attract demos replay the console's
+own pad recordings, and on most of them the port's player one dies early.
+Something in the fights is not yet tick-exact. The functional audit records
+where each one ends.
 
 Saved games are the one compatibility promise: the container is chunked,
 checksummed and fixed-width so a save written by one build loads under another.

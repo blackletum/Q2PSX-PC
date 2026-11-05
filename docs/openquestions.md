@@ -2,17 +2,20 @@
 
 ## Where this stands
 
-**Current status (5 November 2026).** Every open marker below has been
-reconciled with later evidence. Several were already answered further down
-and are now marked: `view+308`, #39a, #55, #59, #59b, #78. #2b and #25 are
-settled from the console's own code. What still carries `[ ]` or `[~]` is
-format and metadata residue: fields whose meaning is unread but which nothing
-the port reproduces is known to depend on (#2d's extents, #3a/#3b, #4b, #4c,
-#12a, #12b, #17, #21, #22, #24's heap path, #31). Each entry gives its own
+**Current status (5 November 2026).** No marker in this file is open. Every
+one has been reconciled with later evidence. Several were already answered
+further down and are now marked: `view+308`, #39a, #55, #59, #59b, #78. #2b
+and #25 are settled from the console's own code. The last eleven, #2d's
+extents, #3a/#3b, #4b, #4c, #12a, #12b, #17, #21, #22, #24's heap path and
+#31, were settled the same day. Each is either read from the code that
+consumes it or shown to have no reader on either disc. None needed hardware.
+Two of them changed a finding rather than closing a gap. #17's sample heap
+starts at `0x1010`, so FRAGTOWE's last sound never loads on the console. #22's
+remap values are a debug readout's labels. Each entry gives its own
 evidence. The front-end residues (#20e, #42's page-11 BACK case and #44)
 are being closed from the module.
 
-**LevelBin census follow-up (5 November).** A census of all 458 functions in the 25 distinct LevelBin modules found eight with reachable effects the port did not reproduce. The module help-computer briefings (JAIL2, JAIL3, SECURITY, BOSS1, BOSS2), BASE2's EDrawbridge solid box and the QENDMIS uplink screen are now implemented (ENTITY-AUDIT, 5 November). `block+0x78` is `InSelfPlayMode`, not a team/flag enable. Still open: the self-play attract demo, whose recordings are in the BASE3/JAIL2/WASTE2 modules (PAL `+0x8B4`/`+0x788`/`+0x7F4`), and how `GameNewMission` chooses a unit's first level when QENDMIS is entered without a carried LOADMAP.
+**LevelBin census follow-up (5 November).** A census of all 458 functions in the 25 distinct LevelBin modules found eight with reachable effects the port did not reproduce. The module help-computer briefings (JAIL2, JAIL3, SECURITY, BOSS1, BOSS2), BASE2's EDrawbridge solid box and the QENDMIS uplink screen are now implemented (ENTITY-AUDIT, 5 November). `block+0x78` is `InSelfPlayMode`, not a team/flag enable. *Both follow-ups settled the same day.* The self-play attract demo runs: each level's init reads `InSelfPlayMode` through engine+0x78, writes its loadout and calls SelfPlayOn on its recording (PAL and US both at `+0x8B4`/`+0x788`/`+0x7F4`); a record word is buttons `& 0xFFF0` plus the frame's length in video fields, nibble bits 3/0/1/2 worth 1/2/4/8; and every demo returns to the title through QuakeNextDemoLevel's state 6 (FUNCTIONAL-AUDIT). QuakeEndSelfPlay is stored only as SelfPlayOn's unread third argument and is never reached. `GameNewMission` does not use a carried LOADMAP at all: it empties the name from `0x800AC670` and each unit's hub writes a fixed first level (Jail2, Power1, Command, Boss1) at `Default`.
 
 **Status of 28 October 2026:** this file is a chronological research
 notebook, not the current completion checklist. The
@@ -526,7 +529,7 @@ Legend: `[ ]` open · `[~]` partially resolved · `[x]` resolved (move the item,
         area stride and 16-byte viewport stride lead to the screen record and the two final batch lists
         reconstructed in 7b; the duplicate call is idempotent.
 
-- [~] **2d. What the two caller matrices hold when a model is drawn. — ANSWERED; one residue left.**
+- [x] **2d. What the two caller matrices hold when a model is drawn. — ANSWERED; one residue left.**
       The caller is the entity draw at `0x8006B924`, and it fills a draw context whose fields `0x800B1F90`
       then consumes at fixed offsets:
 
@@ -548,6 +551,19 @@ Legend: `[ ]` open · `[~]` partially resolved · `[x]` resolved (move the item,
       the header's `ext2`/`ext3` (4/399 and 15/399 against 0/399 and 5/399 unposed), while static models are
       unaffected. Now that the matrices are known to carry no per-model scale at all, the
       remaining explanation is that `ext2`/`ext3` are authored bounds rather than measured ones.
+      **Settled 5 November: `ext2` and `ext3` are authored floor and ceiling offsets, and nothing
+      measures them.** MAIN.SYM names their only readers. MODELS.C `GetFloorOffset` (`0x8006D100`) returns
+      the header halfword at `+0x1C` (`0x8006D118`), and `GetCeilingOffset` (`0x8006DE94`) returns the one
+      at `+0x1E` (`0x8006DEAC`). Each returns 0 for an entity whose model pointer at `+0x10` is NULL. The
+      floor offset lands at entity `+0xF8`: SpawnGeneral `0x80056710`, InitialiseQuakePlayer `0x8003B3F8`,
+      RespawnQuakeDeadBody `0x8007D71C`, and the pickup, projectile and gib spawners all store it there.
+      InitSimpleModel seats the model with it, `origin.y + 286 - [+0xF8]` (`0x800588F0..0x80058904`).
+      `GetCeilingOffset` has two callers, and both only store `ext2 + ext3` at entity `+0xFA`
+      (`0x80056718..0x80056728`, `0x8007D720..0x8007D72C`). No `lh` or `lhu` of `+0xFA` exists in the
+      executable or in any of the 129 relocated LevelBin and CreAIBin modules. No code derives either value
+      from vertices, so a pose was never going to restore the agreement: the extents are what the exporter
+      wrote. The port matches. `ext2` is its floor offset (`entitydraw.c`, `modelent.c` and the client's
+      creature placement), and `ext3` is parsed and unused, which is all the console does with it.
 
 - [x] **HUD. — SOLVED, and the answer is that there is no status bar.**
       The game shows no health, ammo or armour readout. That was established by enumeration, not by looking:
@@ -583,7 +599,7 @@ The residues of the resolved blockers keep their parents' numbers.
       function so it can be flipped. **It is now decidable**: the two rules transform those borrowed vertices
       with different parts' poses, and the poses are decoded, so posing a model both ways and comparing the
       seam quads against the stored vertex normals settles it.
-- [~] **3a. The PSX-texel to PC-texel ratio — the last step to CONFIRMED for S = 10.**
+- [x] **3a. The PSX-texel to PC-texel ratio — the last step to CONFIRMED for S = 10.**
       The texture measurement fixes 10 world units per *PSX* texel, which is one equation in two unknowns.
       S = 10 requires PSX 64×64 tiles to be 1:1 with PC Quake II 64×64 textures at scale 1.0; a 2:1
       downsample of 128×128 sources — standard PSX practice — gives S = 5. Nothing on this disc distinguishes
@@ -593,10 +609,24 @@ The residues of the resolved blockers keep their parents' numbers.
       above the feet on a 572-tall body, ratio 1.007, against PC's 46/56 = 0.82).
       *Attack:* now cheap, because #1 is solved — decompress one texture payload, count its pixels, compare
       against the PC Quake II `.wal` it derives from.
-  - [ ] 3b. Residue: `|v| mod 10 == 1` (8.89 %) and `== 8` (10.43 %) are 3–4× the off-lattice background,
+      **Settled 5 November, by (b): nothing on either disc depends on the ratio.** S relates this world
+      to PC Quake II's, and nothing on the disc is in PC units, so no code on either disc converts to or
+      from them. Every constant the port takes from the executable is cited at its own instruction in world
+      units (`worldscale.h`), which is why none was derived through S. The port is the same.
+      `Q2_WORLD_SCALE`, `Q2_PC_TO_WORLD`, `q2_world_to_pc` and `q2_world_snap` have no caller in `src/`. The
+      one use anywhere is the PC-unit apex that `q2psx-inspect pmove` prints beside the native one
+      (`tools/q2psx-inspect/cmd_pmove.c:210`). The `.wal` comparison above would date the art and would
+      change no value the game computes. S stays INFERRED in `worldscale.h` as documentation; as a
+      question it is closed.
+  - [x] 3b. Residue: `|v| mod 10 == 1` (8.89 %) and `== 8` (10.43 %) are 3–4× the off-lattice background,
         and a single truncation can never *increase* a magnitude. Either the exporter dithered ±1 on top of
         the truncation, or more vertices are genuinely off-lattice than the residue-2…7 background implies.
         Does not affect the decode rule; it means the grid-snapping model is incomplete.
+        **Settled 5 November, by (b): the residue belongs to the exporter, and nothing reads below the
+        stored integer.** No code on either disc rounds, snaps or tests a coordinate's low digit. Vertices
+        and node origins reach the GTE as the disc stores them. The port reads the same integers verbatim,
+        and `q2_world_snap` has no caller. Whatever put the extra mass at residues 1 and 8 happened before
+        mastering, and it cannot change a pixel or a collision.
 - [x] **4a. `Events` `fnB` motion integrators and the 92-byte runtime object. — SOLVED.**
       The per-frame handler every mover installs is `0x80025658`, reached from the sweep at `0x8002DC04`
       that walks 48 objects of 92 bytes at `0x800D6BB0`. It is a seven-state machine — at rest, opening,
@@ -610,14 +640,36 @@ The residues of the resolved blockers keep their parents' numbers.
       `bmodel <map> <zone> <group> out.ppm 1` opens a BASE1 lift and it moves 1,151 units up the Y axis.
       The full field map is in FORMATS.md §2.9.1. It corroborates the port's mover model, which was derived
       independently from the on-disc payloads: same states, same single axis, same absolute-valued speed.
-  - [ ] 4b. Which physical chunk backs `gp+0x174` versus `gp+0x178`. Both are set from loaded chunk pointers
+  - [x] 4b. Which physical chunk backs `gp+0x174` versus `gp+0x178`. Both are set from loaded chunk pointers
         (`0x8007AD54`, `0x8007C234`) and the pre-pass runs immediately after `gp+0x178` is set
         (`0x8007C278`). Given `COMMON.Events == ZONE0.Events` in 49/49 and only the `Scene`-index slots
         differing per zone, the natural reading is map-wide copy vs zone copy — but it was not established.
-  - [ ] 4c. The `STRING` operand string namespace (165/363 resolve against the map's own `Strings`) and
+        **Settled 5 November: `gp+0x174` is COMMON.DAT's `Events`, and `gp+0x178` is the current zone's.**
+        MAIN.SYM names them `eventlistbase` (`0x800AE774`) and `neweventlistbase` (`0x800AE778`). LOADLEV.C
+        `ReadCommonFiles` (`0x8007A430`) looks `Events` up in `CommonFiles` (`0x800B2F5C`) at `0x8007AC70` and
+        stores it at `0x8007AD54`. `ReadZoneFiles` (`0x8007B3F8`) looks it up in `CurrentZoneFiles`
+        (`0x800B2FA8`) at `0x8007C18C` and stores it at `0x8007C234`. It then runs `Event_TransferObjects`
+        (`0x80026DC0`) at `0x8007C278`, and only when that pointer is non-zero. Both pointers are zeroed
+        together (`0x8007C248`, `0x8007C250`) when `0x800B2818` is −1. So the pre-pass restores operands from
+        the zone's copy into the map-wide one, which is what `events_rt.h` already implements.
+  - [x] 4c. The `STRING` operand string namespace (165/363 resolve against the map's own `Strings`) and
         `MISEVENT` (**0/93** — entirely unlocated, not partially located). And record `flags` bits 3–5: the
         loader default `if ((f & 0x28) == 0) f |= 0x10` confirms `0x08`/`0x10`/`0x20` are alternatives with
         `0x10` as default, but the three categories are unidentified.
+        **Settled 5 November: all three parts are read from code.** `STRING`'s key is looked up in the
+        map's own COMMON `Strings`. QEVENT.C `PSXSTRING` (`0x8002B880`) assembles the key from item
+        `+4..+15` and calls MISC.C `GetStringFromStringtable` (`0x800701B4`). That walks the directory at
+        `StringTable` (`0x800B2F78`), whose one store is ReadCommonFiles' at `0x8007AE3C`, from COMMON.DAT's
+        `Strings`; the zone loader never repoints it. A miss returns 0, and `0x8002B924` then skips
+        `centreprintf` (`0x80043570`), so the 198 of 363 uses that do not resolve are silent by design. The
+        whole call is also skipped while `0x800B2834` is non-zero (`0x8002B890`). `MISEVENT`'s namespace is
+        the name and handler table of #91. The category bits are read by EVENT.C `Event_ProcessTriggers`
+        (`0x80027E64`). Contact sets bit 1 (`0x80027F38`). A record runs when `0x10` is set, or when
+        `flags & 0x0C` is `0x08` (`0x80027F3C..0x80027F50`): `0x10` is stay, and `0x08` is enter, with the
+        previous-contact bit 2 still clear. `0x20` is leave, taken when `flags & 0x06` is `0x04`
+        (`0x80028070..0x80028080`). `0x80028160..0x80028180` then copies bit 1 into bit 2 and clears bit 1.
+        The port reproduces all three: `q2_leveltext_find` over COMMON's `Strings` with a silent miss,
+        `q2_misevent`, and `q2_event_rt_contacts_*` in `events_rt.h`.
 - [x] **5. Collision plane point encoding. — SOLVED, and the whole collision model with it.**
       The encoding was never the interesting part. It is an unsigned halfword offset from the owning node's
       `bboxMin`, read that way at four separate sites (`0x800441DC`, `0x800446C0`, `0x80044384`,
@@ -1110,14 +1162,33 @@ The residues of the resolved blockers keep their parents' numbers.
       Y slot, and the literal 2048.
       Census over the disc: **33 rotators across 49 maps, axis X 4 / Y 25 / Z 4 with the invalid axis 3 never
       occurring, 0 node indices out of range**; 18 carry no speed, which is exactly the `ROTBUTTON` population.
-  - [ ] 12a. Residue: `flags08` bits 12-13. SETWIBBLE writes a four-bit field (`0x8002E7CC` masks with
+  - [x] 12a. Residue: `flags08` bits 12-13. SETWIBBLE writes a four-bit field (`0x8002E7CC` masks with
         `0xFFFFC3FF`) but the renderer masks to two, so values 4…15 alias onto 0…3. Bit 12 is nevertheless
         authored on disc — `0x1000` on one node and `0x1400` on three — and **no reader was located** for
         either bit anywhere in the image.
-  - [ ] 12b. Residue: `unk0C` and `unk0D`. Scene `+0x0E` is solved as the seven-bit draw area (7b).
+        **Settled 5 November: bits 12-13 have one reader, and its result is thrown away.** SCENE.C
+        `AlterScreenClipping` (`0x80065808`) takes the portal node from the halfword at `+16` of the 20-byte
+        record it is clipping (`0x80065984..0x800659B4`, with `0xFFF` meaning none). It loads that node's word
+        at `+8` and tests `0x3C00`, the whole SETWIBBLE field (`0x800659B8..0x800659C4`). A non-zero field
+        calls WATER.C `PortalTestWibble` (`0x8006333C`), which FORMATS §12.9 already records as inert. Unless
+        `view+776` is set, it parks `(8704 - clamp(dist, 512, 8704)) / 2` at `gp+17896` and hands it to
+        `0x80063330`, an empty stub. `gp+17896` has one writer (`0x80063454`) and no reader. So bits 12-13
+        only count towards "non-zero", and the one call they can reach changes nothing. A sweep of every `lw`,
+        `lhu` and `lh` at `+8`, and every `lbu` and `lb` at `+9`, followed by a mask or shift that touches bits
+        12-13 finds no other site. The port draws from `q2_scene_flags_variant`, bits 10-11 only, which
+        matches.
+  - [x] 12b. Residue: `unk0C` and `unk0D`. Scene `+0x0E` is solved as the seven-bit draw area (7b).
         `unk0C` (0…4, non-zero on 6 nodes) and `unk0D` (0…3, non-zero on 5) remain unread. Byte `+0x0F`,
         documented as "always 0", is scratch: the zone draw writes a per-frame counter into it at
         `0x80067A34`.
+        **Settled 5 November, by (b): no code reads either byte.** Every byte load at `+12` or `+13` (60
+        sites) and every halfword load at `+12` (77) in the executable was attributed to its function through
+        MAIN.SYM. None has a `Scene` node as its base. They are Events items (the `PSX*` primitives), save and
+        memory-card records, model and particle data, and InitBrush's `POLY_GT4` packets. The functions that
+        do take a node, DrawBrush (`0x80066498`, node in `s6`), DrawScene and AlterScreenClipping, load `+8`,
+        `+14` and `+15` and never `+12`. No module can reach the array. `Scene` (`0x800B2C3C`) is not among the
+        slots of the LevelBin block at `0x800B2FE4` or the 71 CreAIBin imports, and no relocated module
+        materialises an executable address. The port parses both bytes and reads neither.
 
 ---
 
@@ -1302,8 +1373,33 @@ The residues of the resolved blockers keep their parents' numbers.
       `QENDMIS1`..`QENDMIS5` are the maps that carry it. The filenames (`TAKE1BP.STX`, `OUTRO1P.STX`), the
       path pieces (`\Q2DATA\`, `MOVIES\`) and the MDEC decoder's own buffer names are all in there. The
       executable has none of it because none of it is in the executable.
-- [~] **17. SPU RAM base / reverb work area,** *(#105: reverb is off — no mode fits. The RAM base itself is still unread.)* and whether reverb is disabled — the worst-case map leaves a
+- [x] **17. SPU RAM base / reverb work area,** *(#105: reverb is off — no mode fits. The RAM base itself is still unread.)* and whether reverb is disabled — the worst-case map leaves a
       **240-byte** margin against SPU RAM, suspiciously tight if a reverb buffer is also allocated.
+      **Settled 5 November, from the code: the sample heap starts at `0x1010`, no work area is ever
+      reserved, and reverb is switched off by name.** NSOUND.C `SfxInit` (`0x80072424`) calls `SpuInit`
+      and then `SpuInitMalloc(128, 0x800DF9DC)` (`0x80072484`). `SpuInitMalloc` (`0x8008C2DC`) writes the
+      first block as `0x40000000 | 0x1010`, sized `(0x10000 << _spu_mem_mode_plus) - 4112`
+      (`0x8008C2F8..0x8008C324`), and `_spu_init` sets `_spu_mem_mode_plus` to 3 (`0x80094D48`). So the
+      samples get `0x1010..0x80000`, 520,176 bytes. `_spu_rev_reserve_wa` (`0x800AA568`) is 0 in the image,
+      and its only store writes 0 (`0x800958B0`), so `SpuMalloc` never stops short of a work area. NSOUND.C
+      `InitSoundNewGame` (`0x80073B80`) calls `SsUtReverbOff` (`0x80073BAC`), `SsUtSetReverbType(0)`
+      (`0x80073BB4`) and `SsUtSetReverbDepth(0, 0)` (`0x80073BC0`). Reverb is off by instruction, which
+      settles #105 from the code as well as from the data.
+      It also closes #105's loose end. `DownloadVAB` (`0x80073E68`) allocates every sound in table order
+      through `SfxTransEffect` (`0x800724EC`). That `SpuMalloc`s the byte-swapped VAG size, rounded to 8
+      bytes, and returns −2 when the allocation fails (`0x80072534`). Replayed against FRAGTOWE's bank,
+      sounds 0 to 58 fit and end at `0x7BCE0`. Sound 59, `fem_drown` (19,008 bytes), needs more than the
+      17,184 left, so on the console it is never resident. Nothing here needs hardware.
+      *Corrected the same day:* FRAGTOWE is not the only bank over. SECURITY's 65 sounds take 521,488
+      bytes, so its last, `mal_pn100_1` (2,496 bytes, the player's pain grunt above 75 health), is never
+      resident either. Sounds 0 to 63 end at 518,992. A sum of the largest bank alone hid it.
+      **What a request for one does** (`q2_spu_ram`, vag.h): both play paths return when the slot's
+      address word is zero (`0x80072784`, `0x80072A78`). SfxInit clears that table once, at boot
+      (`0x800724BC`, one caller at `0x80018E70`), and SfxFreeEffect (`0x80072690`) zeroes only the size
+      between levels. So after a level that filled slot 64 (BASE0 and most of the campaign do) the grunt
+      starts a voice at the stale address, on whatever SECURITY placed there, and plays to the next END
+      flag. After BASE0 that is `0x77300`, 1.39 s of another sample. Straight after boot it is silent.
+      The port models sound RAM and the slot table across levels and does both.
 - [x] **18. ~~`VramImageRec.width` / `height`: dimensions, or VRAM placement coordinates?~~ — RESOLVED by
       #1.** `width` is BYTES PER ROW of the decoded buffer, `height` is rows, and the VRAM rect is
       `width>>1` halfwords wide. Confirmed independently by `(width>>1) * height * 2 == decoded size` in
@@ -1559,7 +1655,7 @@ The residues of the resolved blockers keep their parents' numbers.
 
 ## Tier 4 — Low-impact unknowns
 
-- [~] 21. `CastList` blocks A, B, C and D — **structure now known, semantics not.** The load-time rescale at
+- [x] 21. `CastList` blocks A, B, C and D — **structure now known, semantics not.** The load-time rescale at
       `0x8006C214` reveals all three of B, C and D:
       **B** (`+0x30`, never relocated) is 8 `u16` chain heads — which is what "exactly 16 zero bytes on
       821/965 models" always was, eight empty chains — with nodes `{u16 countAndFlags; u16 next; entry[count
@@ -1571,7 +1667,22 @@ The residues of the resolved blockers keep their parents' numbers.
       The vertex array is NOT rescaled, so model vertices are already at world scale. Still open: what the
       values mean, block A's payloads, the animated-model frame layout, and the header's 24-bit field at
       `+0x01` (261…333367). **Block C is not a vertex-base candidate** (#2a).
-- [~] 22. `PrimaryRemap` value space — **narrowed by four measurements, and "probably a polygon id" does not
+      **Settled 5 November: all four blocks are read from code, and the 24-bit header field has no
+      reader.** Block A is the per-octant face draw order, and block B holds its frame-ranged overrides.
+      MODELS.C `CalcSortList` (`0x8006A020`) chooses between them. The camera-to-model vector's three signs
+      pick the octant (`0x8006A058..0x8006A074`). Block B's chain for that octant is searched for an entry
+      with `lo <= entity+0x100 <= hi` (`0x8006A080..0x8006A104`), and without one the octant indexes block A
+      (`0x8006A16C..0x8006A1A0`). The ×10 at load (`BodgeAnimData`, `0x8006C214`) puts B's pairs in the
+      same ten-per-frame units as entity `+0x100`. Block C is the animation bank (FORMATS §2.2.1, read by
+      `DrawAnimGlobalSetup`, `0x8006B924`), and its keys are the animated-model frame layout. Block D is the
+      named move table walked by `FindAnimHdr` (`0x8006D330`), with its three positions ×5 at
+      `0x8006C284..0x8006C2B0`. Header bytes `+0x01..+0x03` have no reader. `InitialiseModelFile`
+      (`0x8006D124`) reads only `+0x3C` and rewrites `+0x04`. `GetModelHdr` (`0x8006D008`) and
+      `FindIdentNameInList` (`0x8006DB10`) compare only the name at `+0x08`. `BodgeAnimData` reads only
+      block offsets. No load at `+0` to `+3` follows an entity's `+0x10` model pointer anywhere in the
+      executable or the 129 modules. The port implements all four blocks (`q2_model_draw_order_select`, the
+      pose path and the move table) and ignores the 24-bit field, as the console does.
+- [x] 22. `PrimaryRemap` value space — **narrowed by four measurements, and "probably a polygon id" does not
       survive the first of them.** The max exceeds the scene node count in 100 of 115 files, which is where
       this entry started. Measuring the values rather than their maximum:
 
@@ -1595,6 +1706,18 @@ The residues of the resolved blockers keep their parents' numbers.
       cross-reference rather than a runtime index — and the last measurement supports that: the pointer is
       installed at `ctx+0x10` by `0x80051798` and **nothing in the collision code reads offset 0x10 of a
       context**. This port implements the whole collision model without it and walks 47 of 47 maps.
+      **Settled 5 November: `PrimaryRemap` is read by debug output, and only there.** COLL.C
+      `ReadCollisionData` (`0x80051600`) installs it at `ctx+0x10` (`0x80051798`) and passes it straight to
+      `PrintBool` (`0x80051830`, calling `0x8007019C`). The "On"/"Off" result is discarded: this is a debug
+      print whose printf was compiled out. The one other reader is MISC.C `PrintDebugInfoScene`
+      (`0x8006F23C`). It loads `CollMap+0x10` directly (`0x8006F25C`), indexes it by the first view's camera
+      cell (`view+146`, `0x8006F270`) and `sprintf`s the result with `"|1@1a010%d   %d"` (`0x8006F284`).
+      That branch runs only when `ScreenShotOn` (`0x800B2A70`) equals 2 (`0x8006F244..0x8006F250`).
+      `ScreenShotOn` has three loads and no store anywhere in the executable. It is in neither module
+      import table, and no module materialises an executable address. `MoveCollMap+0x10` (`0x800C8FF8`) has
+      no reference at all. So the values are what the measurements said, an authoring id the zone
+      inherited, and the console shows them only in a build that can set that flag. The port never reads
+      the chunk, which is exact.
 - [x] 23. `CollNode` fields `c` and `d`. **Both runtime meanings are SOLVED.** `d`'s low byte is the node's **contents id**,
       read with `lbu +32` at `0x80044DB8` — where a trace records it into its contact list whenever it
       changes along the path — and at `0x8004510C`. The other three bytes are zero on all 22,773 nodes.
@@ -1603,7 +1726,7 @@ The residues of the resolved blockers keep their parents' numbers.
       offset, read with `lh +28` at `0x80066AFC` after the viewport camera cell indexes that hull. Reading
       them as one 32-bit quantity made the old maximum look like noise. The unused opposite-hull copies need
       not be monotonic: no located consumer reads PrimaryColl's light half or SecondaryCol's sort half.
-- [~] 24. **`Resources` `unk0` and `unk4` are authored constants, not derived budgets — measured against
+- [x] 24. **`Resources` `unk0` and `unk4` are authored constants, not derived budgets — measured against
       six properties of the zone each one names and correlated with none of them.** Over all 115
       record/zone pairs:
 
@@ -1630,6 +1753,15 @@ The residues of the resolved blockers keep their parents' numbers.
 
       `Resources` `unk0` (−3000…6600, 49 distinct) and `unk4` (40…180, 17 distinct); `unk3` (64, but 80
       in two records).
+      **Settled 5 November: the heap path is read and reproduced natively.** The level loader passes
+      `+0x18` to the particle allocator (`0x80071490`). It then reads `+0x0C` and `+0x1C` (`0x800714A4`,
+      `0x800714A8`) and asks MYMALLOC.C `MaxMallocSize` (`0x8006EACC`) for the largest free payload. From
+      that it computes `32 * min(256, (largest - (1882 * meshes + 2)) / 3330)` (`0x800714B4..0x8007151C`). A
+      negative `+0x0C` replaces the result with its magnitude (`0x80071518..0x80071520`) before INITLEV.C
+      `AquireGt4s` (`0x80070AA8`). The port models the allocation history that decides `largest`
+      (`nativeheap.c`, `levelmemory.c`, `q2_world_subdiv_resources_heap`). It matches native execution of
+      both discs' loaders over 78 phases, 4,241 heap checks (RENDERER-AUDIT, "US loader and retained
+      mission allocations"). Nothing in this entry remains open.
 - [x] 25. **RESOLVED 5 November: the three remaining bits select a volume and do nothing else.** The
       volume half of `0x80050CE0` (`0x80050EE8..0x80050F7C`) returns the FIRST overlapping volume whose
       flags meet the caller's mask, and returns that volume's own unmasked flags (`lh v0, 0(v1)` at
@@ -1753,7 +1885,7 @@ The residues of the resolved blockers keep their parents' numbers.
       rather than 12, music counts ×6, the menus sit four lines higher, the logo holds are re-counted for
       60 Hz, and its string lookup asks for `<key>US` first — which the shared level data answers sixteen
       times. FORMATS.md §9.13 is the whole census, and the port follows all of it.
-- [~] 31. Real xrefs to the `.DAT` chunk-name literal pool at `0x800AD414` — **found, and the pool is not
+- [x] 31. Real xrefs to the `.DAT` chunk-name literal pool at `0x800AD414` — **found, and the pool is not
       indexed.** The zone loader at `0x8007B3F8` names each chunk by materialising its 12-byte literal
       directly (`0x8007BA78` for `MapMod`, `0x8007BB74` for `Points`, and so on), copying it to the stack and
       calling the directory search at `0x8006DBC0`. There is no per-chunk flag word and no table walk, so
@@ -1762,6 +1894,41 @@ The residues of the resolved blockers keep their parents' numbers.
       lands in — `Scene` `0x800B2C3C`, `MapMod` `0x800B2C6C`, `Points` `0x800B2CA0`, `SortData` `0x800B2C84`,
       `SpaceLights` `0x800B2ED0`, `AreaConx` `0x800B2D1C`, `PrimaryColl` `0x800B2E0C`, `MapNames`
       `0x800B2C9C` — which is what makes each chunk's consumer findable with `xrefs`.
+      **Settled 5 November: a missing chunk never stops a load, but a missing COMMON.DAT stops the
+      console.** Both loaders treat a failed lookup the same way. The directory search `0x8006DBC0` returns 2
+      at the end of the directory, and the `{pointer, size}` pair is cleared by the 8-byte `memset`
+      (`jal 0x80089E18`) after every lookup. What happens next depends on the chunk:
+
+          COMMON.DAT, ReadCommonFiles 0x8007A430
+            the file          Read_File_Alloc2 fails: j 0x8007B3D8, a branch to itself (0x8007A49C)
+            StartPos          stored at 0x800B2A34 regardless
+            TrigBounds        ReadCollisionData into 0x800C9114 (0x8007A64C); a NULL hull returns 0
+            Resources         stored at 0x800B2F88 regardless; looked up again at the end, where
+                              UpdateMallocStart (0x8007B3C4) moves COMMON's heap header up to it
+            Lights            0x800B2ED4, count = size / 28 at 0x800B2EB4, so none
+            CastList          size 0: 0x800B2D18 = 0 (0x8007A958), no models
+            Population        InitialisePopulation and CreatureCount test for NULL (0x800575F8, 0x80057770)
+            GlintMod          LoadShieldData tests for NULL (0x800651C0); absent on 48 of 49 maps
+            Events, Strings   stored regardless; GetStringFromStringtable tests for NULL (0x80070214)
+            UserFuncs         InitUserFuncs tests for NULL (0x8002ECD4)
+            CreAIBin/Rel      size 0 skips the relocation (0x8007AFD4, 0x8007B0C0)
+            LevelBin/Rel      size 0 skips it (0x8007B1C4, 0x8007B2B0); empty on 2 maps
+
+          ZONEn.DAT, ReadZoneFiles 0x8007B3F8
+            the file          Read_File_Alloc2 fails: return with nothing loaded (0x8007B4A4)
+            Primary/Secondary ReadCollisionData into CollMap and MoveCollMap (0x8007B5E8, 0x8007B6A8)
+            MapNames..Points  stored regardless
+            Scene             count = size / 52 (0x8007BA5C) at 0x800B2C7C, so none
+            AreaConx          ReInitAreaConxData (0x80068530), stored regardless
+            CastList          size 0: 0x800B2D1C = 0 (0x8007BF4C); empty in 17 zones
+            CreAIBin/Rel      size 0 skips (0x8007C03C, 0x8007C128); absent from 17 zones
+            Events            NULL: no Event_TransferObjects (0x8007C268)
+            Scene, again      UpdateMallocStart (0x8007C440) moves the zone's heap header up to it
+
+      Every chunk the disc omits or ships empty (GlintMod, CreAIBin/Rel, LevelBin/Rel, zone CastList)
+      takes one of the tested branches, and the port loads all 49 maps and 115 zones, so it reproduces every
+      branch the disc can reach. The two `UpdateMallocStart` trims are `levelmemory.c`'s COMMON and zone
+      prefixes. FORMATS §1 now carries the table.
 - [x] 32. **`ModelNames` is tool-only data, and the proof is that this port has never read it.** The chunk
       is present in all 49 `COMMON.DAT` files and the string appears zero times in the executable, which
       left three hypotheses: dead data, positional access, or a runtime-assembled name.

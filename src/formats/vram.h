@@ -509,4 +509,14 @@ const u8 *q2_vram_clut(const q2_vram_section *section, u32 index);
  */
 q2_result q2_vram_upload(const q2_vram_section *section, struct psx_vram *vram);
 
+/*
+ * The rest of a level load's VRAM: every image LoadInGameVram (0x8003FE20)
+ * registers, in its order, into the cell `q2_vram_ui_images` names. A name the
+ * section does not carry is skipped, as the console's lookup skips it. The
+ * three icon sheets are left out, because the console uploads only the one the
+ * session picks (0x8003FEAC) and `q2_menu_font_upload` makes that choice.
+ * Returns how many images went in.
+ */
+u32 q2_vram_upload_registered(const q2_vram_section *section, struct psx_vram *vram);
+
 #endif /* Q2PSX_VRAM_H */

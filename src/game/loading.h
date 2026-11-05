@@ -314,18 +314,22 @@
  * LOADING is the executable's, `0x800A3314`, put up by every transition. The
  * other is the front end's own and is the one the retail capture shows:
  * QFRONT's module+0x0EBF4 installs `STARTING` at (256, 111) and `GAME` at
- * (256, 137), the same two-row shape as RESTARTING / LEVEL, and it is what the
- * half second between a difficulty being confirmed and the opening reel
- * actually looks like. This port drew a blank front end for those fifteen
- * frames.
+ * (256, 137), the same two-row shape as RESTARTING / LEVEL. It is the screen
+ * between the opening reel and the game, not the half second before the
+ * reel: the countdown's hook installs it at 0x80101D88, after the blocking
+ * film player (0x8010B2EC) has returned, holds it twelve frames and is still
+ * the installed page through the first level's load. The half second before
+ * the reel gets the empty table at module+0x0FADC.
  *
  * The module carries a third, one row reading `DEMO OF GAME` at (256, 111)
- * (module+0x0EBC4), which belongs to the attract loop this port does not run.
- * It is not offered here because nothing would raise it.
+ * (module+0x0EBC4), which belongs to the attract loop (selfplay.h). It is
+ * still the installed page when state 10 reaches ProcessGame, so the level
+ * screen that covers a demo level's load carries it instead of LOADING.
  */
 typedef enum q2_loading_page {
     Q2_LOADING_PAGE_LOADING = 0,   /* 0x800A3314, the executable's   */
-    Q2_LOADING_PAGE_STARTING       /* QFRONT module+0x0EBF4          */
+    Q2_LOADING_PAGE_STARTING,      /* QFRONT module+0x0EBF4          */
+    Q2_LOADING_PAGE_DEMO           /* QFRONT module+0x0EBC4          */
 } q2_loading_page;
 
 /*
@@ -398,6 +402,10 @@ void      q2_loading_close(q2_loading *l);
  * flash for one frame where the console shows it for seconds.
  */
 void q2_loading_raise(q2_loading *l);
+
+/* The same with another page over it — the page the front end left
+ * installed when the request was made. */
+void q2_loading_raise_page(q2_loading *l, q2_loading_page page);
 
 
 /*

@@ -139,6 +139,7 @@ static client *tone_client(void)
     c->sfx.buf.size = c->sfx.section_size = 80;
     c->sfx.section = data;
     c->sfx.count = 1;
+    c->sfx.resident[0] = 1;   /* placed, as the loader would place it */
     memcpy(data, "VAGp", 4);
     data[15] = 32;
     data[18] = 0x56; data[19] = 0x22; /* 22050 Hz, big endian */
@@ -802,6 +803,7 @@ static void test_burn_sound_resolution(void)
     c->sfx.offsets = offsets;
     offsets[1] = 80;
     c->sfx.count = 2;
+    c->sfx.resident[0] = c->sfx.resident[1] = 1;
     memcpy(data + 80, data, 80);
     for (state = 0; state < 4; state++) {
         const char *expected = state & 1 ? "pla_burn1" : "pla_burn2";
@@ -1005,7 +1007,19 @@ static void test_disc_audio(const char *path)
             }
             CHECK(q2_spu_adpcm_decode(vag.body, vag.data_size, decoded, capacity) == expected);
             free(decoded);
-            CHECK(client_play_sound(c, vag.name));
+            {
+                /* The sound the name resolves to (a bank may repeat a name)
+                 * plays when it is in sound RAM; with no level loaded before
+                 * this bank its slot is empty, so a sound DownloadVAB could
+                 * not place is silent. */
+                q2_vag named, other;
+                u32 k = 0;
+                CHECK(client_find_sound(c, vag.name, &named));
+                while (k < c->sfx.count &&
+                       !(q2_sound_bank_get(&c->sfx, k, &other) && other.body == named.body))
+                    k++;
+                CHECK(client_play_sound(c, vag.name) == q2_sound_bank_resident(&c->sfx, k));
+            }
             if (c->voice_last) {
                 /* All real banks cross decode boundaries at the highest request byte. */
                 c->voice_last->spu.pitch = (u16)q2_sfx_spu_pitch(vag.sample_rate, 255);
@@ -1138,6 +1152,97 @@ static void test_disc_audio(const char *path)
     close_client(c);
 }
 
+/*
+ * Sound RAM across levels (vag.h, q2_spu_ram). SECURITY's last sound,
+ * mal_pn100_1, never fits the 520,176-byte heap. Straight after boot its
+ * slot is empty and the request is silent. After BASE0, whose 65th sound is
+ * resident, the slot keeps BASE0's address and the request starts a voice
+ * there, on SECURITY's data, which stops at the first END flag it reaches.
+ */
+static void test_disc_sound_ram(const char *path)
+{
+    client *c = open_client(path);
+    q2_sound_bank base0;
+    u32 i, addr = SPU_RAM_RESERVED, before, samples = 0;
+
+    CHECK(client_load_zone(c, "SECURITY", 0));
+    CHECK(c->sfx.count == 65 && !q2_sound_bank_resident(&c->sfx, 64));
+    CHECK(q2_sound_bank_resident(&c->sfx, 63));
+    CHECK(!client_play_sound(c, "mal_pn100_1"));
+    CHECK(c->sfx_stale_starts == 0);
+    CHECK(client_play_sound(c, "mal_pn75_1"));
+    client_voices_stop(c);
+    close_client(c);
+
+    /* BASE0's slot 64 address, worked out from its bank alone. */
+    c = open_client(path);
+    CHECK(q2_sound_bank_load(&base0, c->disc, "BASE0") == Q2_OK);
+    for (i = 0; i < 64; i++) {
+        q2_vag v;
+        memset(&v, 0, sizeof(v));
+        CHECK(q2_sound_bank_resident(&base0, i) && q2_sound_bank_get(&base0, i, &v));
+        addr += (v.data_size + 7u) & ~7u;
+    }
+    CHECK(q2_sound_bank_resident(&base0, 64));
+    q2_sound_bank_free(&base0);
+
+    CHECK(client_load_zone(c, "BASE0", 0));
+    CHECK(c->spu_ram.slot_addr[64] == addr);
+    CHECK(client_load_zone(c, "SECURITY", 0));
+    CHECK(c->spu_ram.slot_addr[64] == addr);
+    before = c->voice_started;
+    CHECK(client_play_sound(c, "mal_pn100_1"));
+    CHECK(c->voice_started == before + 1 && c->sfx_stale_starts == 1);
+    CHECK(c->voice_last && c->voice_last->spu.dec.adpcm == c->spu_ram.ram + addr);
+    /* It is SECURITY's data at that address now, and it ends. */
+    CHECK(addr < SPU_RAM_RESERVED + c->sfx.resident_bytes);
+    if (c->voice_last) {
+        /* Opt-in: both voices as raw mono s16 at the SPU's output rate, the
+         * stale start and the sample the name means, for listening to. */
+        const char *dump = getenv("Q2PSX_SOUND_RAM_DUMP");
+        FILE *f = NULL;
+        q2_spu_player own = c->voice_last->spu;
+        q2_vag meant;
+        char name[1024];
+
+        if (dump && dump[0]) {
+            snprintf(name, sizeof(name), "%s/stale.raw", dump);
+            f = fopen(name, "wb");
+        }
+        while (c->voice_last->spu.active && samples < 44100u * 30u) {
+            s16 s = q2_spu_player_next(&c->voice_last->spu);
+            if (f) fwrite(&s, 2, 1, f);
+            samples++;
+        }
+        if (f) fclose(f);
+        CHECK(!c->voice_last->spu.active);
+        CHECK(samples > 0);
+        if (dump && dump[0] && q2_sound_bank_get(&c->sfx, 64, &meant)) {
+            u32 n = 0;
+            q2_spu_player_start(&own, meant.body, meant.data_size, own.pitch, 0, 0);
+            snprintf(name, sizeof(name), "%s/meant.raw", dump);
+            if ((f = fopen(name, "wb")) != NULL) {
+                while (own.active && n++ < 44100u * 30u) {
+                    s16 s = q2_spu_player_next(&own);
+                    fwrite(&s, 2, 1, f);
+                }
+                fclose(f);
+            }
+        }
+    }
+    client_voices_stop(c);
+    close_client(c);
+
+    /* FRAGTOWE's fem_drown, after boot: silent. */
+    c = open_client(path);
+    CHECK(client_load_zone(c, "FRAGTOWE", 0));
+    CHECK(!q2_sound_bank_resident(&c->sfx, 59));
+    CHECK(!client_play_sound(c, "fem_drown"));
+    close_client(c);
+    printf("sound RAM: BASE0 then SECURITY starts mal_pn100_1 at 0x%X and it ends "
+           "after %u output samples\n", addr, samples);
+}
+
 static void test_pause_audio(void)
 {
     client *c = tone_client();
@@ -1254,6 +1359,15 @@ static void test_film_sync(const char *path)
     u8 *rgb = malloc(Q2_STX_WIDTH * Q2_STX_HEIGHT * 3);
     unsigned i;
     if (!reference || !rgb) exit(2);
+    /* The numbers below are TAKE1BP's PAL cadence (25 fps, 1,764 samples a
+     * frame), and the US disc ships TAKE1B.STX instead. The NTSC cadence is
+     * the same scheduler at 30 fps, which the last case forces on PAL. */
+    if (c->build.region == Q2_REGION_NTSC_U) {
+        printf("film sync: PAL cadence check, skipped on the US disc\n");
+        free(reference); free(rgb);
+        close_client(c);
+        return;
+    }
     CHECK(client_film_start(c, "TAKE1BP.STX"));
     CHECK(q2_movie_open(reference, c->disc, "Q2DATA/MOVIES/TAKE1BP.STX"));
     client_film_tick(c, 10.0f);
@@ -1302,6 +1416,11 @@ int main(int argc, char **argv)
         printf("gain audio client: %d checks, %d failures\n", checks, failures);
         return failures ? 1 : 0;
     }
+    if (argc == 3 && !strcmp(argv[1], "--sound-ram")) {
+        test_disc_sound_ram(argv[2]);
+        printf("sound RAM client: %d checks, %d failures\n", checks, failures);
+        return failures ? 1 : 0;
+    }
     if (argc >= 3 && !strcmp(argv[1], "--burn")) {
         test_disc_burn_audio(argv[2], argc >= 4 ? argv[3] : NULL);
         printf("burn audio client: %d checks, %d failures\n", checks, failures);
@@ -1333,7 +1452,7 @@ int main(int argc, char **argv)
     test_body_sources();
     test_burn_sound_resolution();
     if (argc == 2) {
-        test_disc_audio(argv[1]); test_film_sync(argv[1]);
+        test_disc_audio(argv[1]); test_film_sync(argv[1]); test_disc_sound_ram(argv[1]);
         test_disc_burn_audio(argv[1], NULL); test_disc_music(argv[1]);
     }
     else if (argc != 1) return 2;

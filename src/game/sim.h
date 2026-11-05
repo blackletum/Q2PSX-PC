@@ -889,6 +889,16 @@ typedef struct q2_sim {
     double dt_frac;
 
     /*
+     * THE ATTRACT DEMO'S CLOCK. During self-play the recording sets the frame
+     * delta: SwapButtons rewrites NewVcounts (0x800B2DB4) from each word after
+     * MainGameLoop has measured and clamped it (selfplay.h). A positive value
+     * is the step the next `q2_sim_advance` takes, whatever time has passed; a
+     * negative one is a frame on which no tick runs. Zero is the ordinary
+     * accumulator. The accumulator is left alone while it is set.
+     */
+    s32 dt_force;
+
+    /*
      * The frame counter, the port's [0x800B2DE4]: +1 per WORLD tick whatever
      * the tick's dt (0x800705C4 `addiu a1, a1, 1`, stored at 0x80070610). It
      * is NOT the level clock, which moves by dt. The damage-effect drawers key

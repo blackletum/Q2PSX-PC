@@ -97,6 +97,8 @@ add_library(q2psx_game STATIC
     spawn.c
     spawn.h
     save.c
+    selfplay.c
+    selfplay.h
     save.h
     zonestate.c
     zonestate.h

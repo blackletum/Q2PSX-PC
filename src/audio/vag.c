@@ -234,7 +234,84 @@ q2_result q2_sound_bank_load(q2_sound_bank *out, const disc *d, const char *map)
     }
 
     out->count = entries - 1;
+
+    /*
+     * DownloadVAB's placement. It takes min(count, 96) sounds in order and
+     * hands each to SfxTransEffect, which asks SpuMalloc (0x8008C80C) for the
+     * VAG header's size rounded up to the 8-byte unit (shift 3, mask 7 at
+     * 0x800AA4E8/0x800AA4F0). The heap is empty after RemoveVram, so first fit
+     * is a running total; a sound that does not fit is skipped and the next
+     * is still tried. FRAGTOWE is the one bank on the disc that overflows:
+     * 522,000 bytes against 520,176, so its last sound never loads.
+     */
+    {
+        u32 heap = SPU_RAM_SIZE - SPU_RAM_RESERVED;
+        u32 slots = out->count < Q2_SFX_BANK_SLOTS ? out->count : Q2_SFX_BANK_SLOTS;
+        q2_vag vag;
+
+        for (i = 0; i < slots; i++) {
+            u32 need;
+
+            if (!q2_sound_bank_get(out, i, &vag))
+                continue;
+            need = (vag.data_size + 7u) & ~7u;
+            if (need > heap - out->resident_bytes)
+                continue;
+            out->resident[i] = 1;
+            out->resident_bytes += need;
+        }
+    }
     return Q2_OK;
+}
+
+bool q2_sound_bank_resident(const q2_sound_bank *bank, u32 index)
+{
+    return bank && index < bank->count && index < Q2_SFX_BANK_SLOTS &&
+           bank->resident[index];
+}
+
+void q2_spu_ram_reset(q2_spu_ram *spu)
+{
+    if (spu)
+        memset(spu, 0, sizeof(*spu));
+}
+
+void q2_spu_ram_download(q2_spu_ram *spu, const q2_sound_bank *bank)
+{
+    u32 i, addr = SPU_RAM_RESERVED;
+
+    if (!spu || !bank)
+        return;
+    /* First fit on an emptied heap is consecutive: each SpuMalloc splits the
+     * front of the one free block, so a sound's address is the heap base plus
+     * the rounded sizes of the resident sounds before it. */
+    for (i = 0; i < bank->count && i < Q2_SFX_BANK_SLOTS; i++) {
+        q2_vag vag;
+        u32 need;
+
+        if (!bank->resident[i] || !q2_sound_bank_get(bank, i, &vag))
+            continue;
+        need = (vag.data_size + 7u) & ~7u;
+        if (addr + need > SPU_RAM_SIZE)
+            break;
+        memcpy(spu->ram + addr, vag.body, vag.data_size);
+        spu->slot_addr[i] = addr;
+        addr += need;
+    }
+}
+
+bool q2_spu_ram_voice(const q2_spu_ram *spu, u32 index, const u8 **data, u32 *size)
+{
+    u32 addr;
+
+    if (!spu || !data || !size || index >= Q2_SFX_BANK_SLOTS)
+        return false;
+    addr = spu->slot_addr[index];
+    if (!addr || addr >= SPU_RAM_SIZE)
+        return false;
+    *data = spu->ram + addr;
+    *size = SPU_RAM_SIZE - addr;
+    return true;
 }
 
 void q2_sound_bank_free(q2_sound_bank *bank)

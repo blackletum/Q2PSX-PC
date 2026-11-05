@@ -356,7 +356,14 @@ typedef enum q2_menu_page_id {
      */
     Q2_PAGE_FRONT_RULES      = 209,
     Q2_PAGE_FRONT_PLAYERS    = 210, /* QFRONT's independently controlled panels */
-    Q2_PAGE_FRONT_UNLOCK     = 211  /* QFRONT page 17, +4454 completion reward */
+    Q2_PAGE_FRONT_UNLOCK     = 211, /* QFRONT page 17, +4454 completion reward */
+
+    /*
+     * DEMO OF GAME — the attract loop's hand-off, which the module builds as
+     * page 19 (0x80101B08 `module+0x3414(NULL, 19)`, the id STARTING / GAME
+     * shares) with the one-row table at module+0x0EBC4. See selfplay.h.
+     */
+    Q2_PAGE_DEMO             = 212
 } q2_menu_page_id;
 
 /*

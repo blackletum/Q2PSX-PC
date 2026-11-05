@@ -685,3 +685,30 @@ q2_result q2_vram_upload(const q2_vram_section *section, struct psx_vram *vram)
     free(page);
     return r;
 }
+
+u32 q2_vram_upload_registered(const q2_vram_section *section, struct psx_vram *vram)
+{
+    u32 i, n = q2_vram_ui_image_count(), placed = 0;
+
+    if (!section || !vram)
+        return 0;
+
+    /*
+     * In the table's order, which is the console's: overlapping cells keep the
+     * later image. DemoSp2 (slot 12) lands over multipic2 and Squiggle, and on
+     * the logo screens a full-screen picture at slot 0 covers the pages the
+     * level load put at x = 64..191. Both helpers it calls, 0x80068FAC for the
+     * four 8bpp sheets and 0x80069018 for the rest, end in the same upload,
+     * 0x800691A4.
+     */
+    for (i = 0; i < n; i++) {
+        const q2_vram_ui_image *ui = &q2_vram_ui_images[i];
+
+        if (!strncmp(ui->name, "qk", 2))
+            continue;
+        if (q2_vram_upload_named(section, ui->name, ui->slot, ui->v_offset,
+                                 vram, NULL) == Q2_OK)
+            placed++;
+    }
+    return placed;
+}

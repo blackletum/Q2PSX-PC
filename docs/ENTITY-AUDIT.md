@@ -593,10 +593,16 @@ the saved pair back. BothKeys now tests and sets bit 1 instead of the event's
 own latch; a save made before this change infers bit 1 from the BothKeys
 record having run.
 
-One gate is still not modelled: `NewMessage` and `HelpComputer_DoDisplay`
-both skip while the halfword at 0x800D5EF8 is non-zero. That is
-`GameWindows[0]+0x2AC+0x1C`, the pad's self-play/record state that
-`SelfPlayOn` (0x80033120) sets, not a menu flag. The port runs no self-play.
+The gate on `NewMessage` and `HelpComputer_DoDisplay` is modelled too. Both
+skip while the halfword at 0x800D5EF8 is non-zero. That is
+`GameWindows[0]+0x2AC+0x1C`, the pad's self-play/record state, not a menu
+flag. It is 1 during playback and 3 after it ends (0x8003281C, 0x800328AC).
+Every writer was traced: SelfPlayOn, SelfRecordOn and SelfPlayRecOff through
+0x800D5EDC, the end of playback through 0x800D5C30, and no memset of the pad
+records. Only SelfPlayRecOff (0x800331EC) writes 0, and its one caller,
+QuakeEndSelfPlay, is not reached on a retail disc. So after the first demo the
+console's help computer is silent for the rest of the session, and the
+client's `pad_mode` does the same (FUNCTIONAL-AUDIT, 5 November).
 
 **BASE2's drawbridge.** `+0x308`, called by the zone-1 (`+0x180`) and zone-2
 (`+0x244`) callbacks, reads `Event_GetDisableNamed("EDrawbridge")`

@@ -584,11 +584,32 @@ FNV-1a hash of what the load leaves in it, never the texels. Maps whose module
 cannot complete a load on the fixture, or that ship no `SNDVRAM.DAT`, are listed
 as skipped in the trace. `test_vram_native --headless <disc>` loads each map's
 zone 0 through the real client, in a fresh client per map, and compares the same
-rectangles. Every gameplay map matches on both discs. The screen modules'
-pictures and the DemoSp self-play pages are reported as PENDING, with the
-reason in the test.
+rectangles. Every rectangle of every map matches on both discs, the screen
+modules' pictures and the DemoSp self-play pages included. A QENDMIS map opens
+its uplink screen as it loads, and that screen writes palettes 0 and 4 before
+the fixture's load would end; the test checks those two against the module's
+data and the rest of the block against the native hash. `Q2PSX_VRAM_DUMP=<dir>`
+writes each map's whole VRAM as raw halfwords.
 
 ```
 python tests/fixtures/generate_vram_reference.py "<PAL.cue>" "<US.cue>" --trace .agents/tmp/vram/native.json [--check]
+```
+
+## Self-play recordings
+
+`generate_selfplay_reference.py` runs SelfPlayOn (`0x80033120`, US
+`0x8003311C`) on the address each demo level's init passes, then the complete
+SwapAllButtons (`0x80033030`, US `0x8003302C`) once per frame until
+NoInputTimeOutRoutine fires. Each level's LevelBin is read from the disc into
+native RAM at `0x80100000`; the recordings need no relocation. The settings
+resets, the DualShock motor call and the routine are hooks. It also runs three
+BASE3 exits: a real pad press, a dead player, and NoInputTime 20 over zero-button
+words. Only frame counts and FNV-1a hashes of the per-frame (buttons,
+NewVcounts) pairs are stored, at 25-frame checkpoints.
+`test_client_selfplay --headless <disc>` decodes the same recordings and
+compares them.
+
+```
+python tests/fixtures/generate_selfplay_reference.py "<PAL.cue>" "<US.cue>" [--trace out.json] [--check]
 ```
 
