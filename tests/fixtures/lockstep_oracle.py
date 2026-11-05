@@ -77,6 +77,8 @@ class OracleMachine(LoaderMachine):
 
     def write(self, address, size, value):
         a = address & 0x1FFFFFFF
+        if getattr(self, 'watch', None) and a < self.watch[1] and a + size > self.watch[0]:  # scratch watch
+            print('WATCH', hex(getattr(self, 'cur_pc', 0)), hex(a), size, value & ((1 << (8 * size)) - 1), flush=True)
         if a >= 0x1F800000:
             if a < 0x1F800400:
                 o = a - 0x1F800000
@@ -276,6 +278,30 @@ class OracleMachine(LoaderMachine):
             self.rand_log.append(('stepret', pc, signed(self.r[2])))
         if pc == 0x80046B98:  # the toss / tumble: its object's flags
             self.rand_log.append(('toss', self.r[4], [self.read(self.r[4] + 0x98, 4), self.read(self.r[4] + 0xE6, 2), self.read(0x800AE8B4, 4)] + [signed(self.read(self.r[4] + 0x54 + 4 * i, 4)) for i in range(3)] + [signed(self.read(self.r[4] + o, 2), 16) for o in range(0xC0, 0xF0, 2)]))
+        if pc == 0x8004874C:  # the bullet: shooter object, its edict's frame and yaw, the start and the dir
+            o = self.r[4]
+            e = self.read(o + 748, 4) if o else 0
+            self.rand_log.append(('bullet', o, [signed(self.read(e + 56, 2), 16) if e else 0, signed(self.read(e + 20, 2), 16) if e else 0,
+                                                signed(self.read(o + 0xE8, 2), 16)] +
+                                  [signed(self.read(self.r[5] + 4 * i, 4)) for i in range(3)] +
+                                  [signed(self.read(self.r[6] + 2 * i, 2), 16) for i in range(3)]))
+        if pc == 0x8003870C:  # the live camera's roll store: entity +230..234 and view +46..50
+            v, e = self.r[16], self.r[5]
+            self.rand_log.append(('camera', v, [signed(self.read(e + 230 + 2 * i, 2), 16) for i in range(3)] +
+                                  [signed(self.read(v + 46 + 2 * i, 2), 16) for i in range(3)]))
+        if pc == 0x80054BD4 and self.r[31] == 0x8004895C:  # GenMissileHitPlane from the bullet: record, plane, point, dir
+            a0, a1, a2, a3 = self.r[4], self.r[5], self.r[6], self.r[7]
+            self.rand_log.append(('hitplane', a0, [signed(self.read(a0 + 4 * i, 4)) for i in range(3)] +
+                                  [signed(self.read(a1 + 2 * i, 2), 16) for i in range(6)] +
+                                  [signed(self.read(a2 + 4 * i, 4)) for i in range(3)] +
+                                  [signed(self.read(a3 + 2 * i, 2), 16) for i in range(3)]))
+        if pc == 0x80058204:  # the knockback just stored: the victim's +0x2F8..+0x2FC and sp+40..48
+            v = self.r[18]
+            self.rand_log.append(('knock', v, [signed(self.read(v + 760 + 2 * i, 2), 16) for i in range(3)] +
+                                  [signed(self.read(self.r[29] + 40 + 4 * i, 4)) for i in range(3)]))
+        if pc == 0x80057D54:  # the damage function: caller, a0..a3 and the stack arguments
+            self.rand_log.append(('damage', self.r[31], [hex(self.r[4]), hex(self.r[5]), hex(self.r[6]), hex(self.r[7])] +
+                                  [signed(self.read(self.r[29] + 16 + 4 * i, 4)) for i in range(6)]))
         if pc in (0x8005E838, 0x8005E968, 0x8005E9CC):  # ai_run's three pursuit traces, returned
             tr = self.read(0x800AEAE8, 4)
             self.rand_log.append(('pursuit', pc, [signed(self.read(tr + 8, 4)), signed(self.r[21]), signed(self.r[19]),
@@ -490,6 +516,9 @@ def main():
     image = exe[2048:2048 + struct.unpack_from('<I', exe, 0x1C)[0]]
     m = OracleMachine(image, disc)
     m.probes = args.probes
+    if __import__('os').environ.get('ORACLE_WATCH'):
+        lo, hi = (int(x, 16) for x in __import__('os').environ['ORACLE_WATCH'].split(':'))
+        m.watch = (lo & 0x1FFFFFFF, hi & 0x1FFFFFFF)
     t0 = time.time()
     snap = args.snapshot
     if snap and snap.exists():
@@ -597,6 +626,16 @@ def run_frames(m, count, frames, t0):
         m.call(0x800837C0, m.read(0x800B2754, 4) + 10984, 217)   # ClearOTag
         m.call(SWAP_ALL)
         newv = m.read(NEWV, 4)
+        # The level clock. The VSync callback (0x80019044) adds the rate to
+        # 0x800B29D4 every field, and MainGameLoop copies it into
+        # 0x800AEBAC at the top of the frame (0x800183A0..0x800183B0). The
+        # interpreter has no vertical blank, so it adds the recorded frame's
+        # fields itself; nothing between that copy and SwapAllButtons reads
+        # the clock. Frozen at 0, every kick, caption and powerup deadline
+        # held still, and the view plane kept a landing kick for ever.
+        clock = (m.read(0x800B29D4, 4) + newv) & 0xFFFFFFFF
+        m.write(0x800B29D4, 4, clock)
+        m.write(0x800AEBAC, 4, clock)
         buttons = m.read(PAD + 12, 4)
         fn0 = m.read(0x800E46DC, 4)
         m.call(QUAKE_LOOP)

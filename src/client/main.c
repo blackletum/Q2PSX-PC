@@ -2780,6 +2780,10 @@ static void client_load_creatures(client *c, const s32 eye[3])
 
         c->cre_target[i] = &c->cre_actor[i];
         q2_actor_init(&c->cre_actor[i]);
+        /* A creature's +0xDE is 0, not the players' 4: the pool allocator clears
+         * the record (0x8006C18C) and nothing writes the byte until the
+         * creature is hurt. The knockback's self test reads it (combat.c). */
+        c->cre_actor[i].last_attacker = 0;
         q2_actor_from_monster(&c->cre_actor[i], m);
 
         if (!name)
@@ -3205,6 +3209,7 @@ static void client_cre_actor_spawn(q2_monster *m, void *user)
     if (a) {
         u32 index = (u32)(a - c->cre_actor);
         q2_actor_init(a);
+        a->last_attacker = 0;   /* a fresh record, cleared by 0x8006C18C */
         q2_actor_from_monster(a, m);
         if (c->cre_anim) memset(&c->cre_anim[index], 0, sizeof(c->cre_anim[index]));
     }
@@ -3858,19 +3863,23 @@ static void client_cre_flash_drain(client *c)
 {
     u32 s, i;
 
-    /* The draw meets them in object order. */
+    /* The draw meets them in object order. A creature blown apart this frame
+     * has no object left to draw: its flash dies with it (BASE3's attract
+     * run, record frame 288). */
     for (s = 0; s < Q2_OBJ_SLOTS; s++) {
         s32 ref;
         if (q2_obj_slot_owner((s32)s, &ref) != Q2_OBJ_CREATURE ||
             ref < 0 || (u32)ref >= c->creatures.set.count)
             continue;
         if (c->creatures.set.monsters[ref].in_use &&
+            !c->creatures.set.monsters[ref].gibbed &&
             (c->creatures.set.monsters[ref].motion.flags & 0x80000000u))
             client_cre_flash_now(c, &c->creatures.set.monsters[ref]);
     }
     for (i = 0; i < c->creatures.set.count; i++)
         if (c->creatures.set.monsters[i].obj_slot < 0 &&
             c->creatures.set.monsters[i].in_use &&
+            !c->creatures.set.monsters[i].gibbed &&
             (c->creatures.set.monsters[i].motion.flags & 0x80000000u))
             client_cre_flash_now(c, &c->creatures.set.monsters[i]);
 }
@@ -4593,6 +4602,8 @@ static void client_ai_clock(client *c, s32 ticks)
         if (c->ai_pre_valid) {
             if (q2_trail_needs_spot(c->ai_pre_eye))
                 q2_trail_add(c->trail_prev_set ? c->trail_prev : c->ai_pre_pos);
+            memcpy(c->creatures.sight.pos, c->ai_pre_pos,
+                   sizeof(c->creatures.sight.pos));        /* 0x8007E2BC */
             memcpy(c->creatures.sight.sight_spot, c->ai_pre_pos,
                    sizeof(c->creatures.sight.sight_spot));
             c->creatures.sight.sight_spot_set = true;
@@ -4602,6 +4613,8 @@ static void client_ai_clock(client *c, s32 ticks)
     }
     c->ai_accum = (double)phase / 300.0;
 }
+
+#define Q2_CLIENT_VIEW_HEIGHT (-250)   /* client edict +0x4C, 0x8007E1B0 */
 
 static void client_creatures_tick(client *c, float dt, const s32 eye[3])
 {
@@ -4620,14 +4633,36 @@ static void client_creatures_tick(client *c, float dt, const s32 eye[3])
     activity_ready = c->cre_activity_ready;
     memcpy(active_areas, c->cre_active_areas, sizeof(active_areas));
 
-    /* Aiming reads the same eye and velocity as visibility. Keep the sight
-     * entity current while crouching or moving, not frozen at its spawn. */
+    /* Aiming reads the same velocity as visibility, kept current while
+     * moving. */
     memcpy(c->creatures.sight.velocity, c->sim[0].player[0].vel,
            sizeof(c->creatures.sight.velocity));
-    c->creatures.sight.view_height =
-        (s16)(Q2_EYE_BASE - c->sim[0].player[0].view_height);
+    /*
+     * AND THE EYE IS A CONSTANT. Level setup stores -250 into every client
+     * edict's +0x4C (0x8007E1B0) and nothing writes it again, so `visible`
+     * and every creature's aim add the same 250 whether the player stands,
+     * crouches or is landing. The camera's eased height is the player's own
+     * business. Derived from it, the stand-in sat 40 units lower and a
+     * Soldier's shotgun on BASE3's attract run (record frame 248) aimed
+     * under the pellet that hits the player on the console.
+     */
+    c->creatures.sight.view_height = Q2_CLIENT_VIEW_HEIGHT;
 
-    memcpy(c->creatures.sight.pos, eye, sizeof(c->creatures.sight.pos));
+    /*
+     * THE PLAYER'S EDICT AND ITS BODY ARE TWO POSITIONS. The edict origin a
+     * creature aims at and ranges against is refreshed from the body on the AI
+     * tick, before the player moves (0x8007E2BC, client_ai_clock), and again
+     * only when `visible` pulls it (0x8005C980 with 5, visible_pull). So a
+     * Soldier that fires before anything has looked at the player this frame
+     * aims where the player stood at the top of the frame: BASE3's attract
+     * run, record frame 248. The body is where the player is now.
+     */
+    memcpy(c->creatures.sight.motion.ent.pos, eye,
+           sizeof(c->creatures.sight.motion.ent.pos));
+    c->creatures.sight.motion.yaw   = c->creatures.sight.angles[2];
+    c->creatures.sight.motion.ready = true;
+    if (!c->ai_pre_valid)
+        memcpy(c->creatures.sight.pos, eye, sizeof(c->creatures.sight.pos));
     c->creatures.sight.health = c->sim[0].combat.inv.health;
     old_clock = c->ai_clock_before;   /* client_ai_clock bumped it */
     /*

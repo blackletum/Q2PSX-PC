@@ -1176,7 +1176,7 @@ void q2_sim_glint_evacuation_tick(q2_sim *sim, s32 dt)
         bool player = a == &sim->combat.self;
         for (pi = 0; pi < Q2_SIM_MAX_PLAYERS; pi++)
             player = player || a == &sim->pcombat[pi].self;
-        if (!a || player || a->health <= 0) continue;
+        if (!a || player || a->absent || a->health <= 0) continue;
         if (a->has_client || a->entity_kind < 38 || a->entity_kind == 47)
             (void)q2_combat_damage(NULL, a, 5, Q2_MOD_ACID, a->origin,
                                    &sim->combat.rules);
@@ -1713,7 +1713,8 @@ static u32 hitscan_victims(q2_sim *sim, const q2_actor *attacker,
     *player_slot = -1;
     for (i = 0; i < sim->combat.target_count && n < Q2_SIM_CRE_HITSCAN_MAX;
          i++) {
-        if (sim->combat.targets[i] && sim->combat.targets[i] != attacker)
+        if (sim->combat.targets[i] && sim->combat.targets[i] != attacker &&
+            !sim->combat.targets[i]->absent)
             list[n++] = sim->combat.targets[i];
     }
 

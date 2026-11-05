@@ -290,6 +290,7 @@ void q2_actor_from_monster(q2_actor *a, const q2_monster *m)
      * judge by, and health is the wrong question (see `nearest_hit`).
      */
     a->takedamage = m->takedamage;
+    a->absent     = !m->in_use;
 }
 
 void q2_actor_to_monster(const q2_actor *a, q2_monster *m)
@@ -611,7 +612,19 @@ static void apply_knockback(q2_actor *attacker, q2_actor *target,
     s32 delta[3], dir[3];
     s32 scale;
     s32 mass = rules ? rules->knockback_mass : 0;
-    bool self = (attacker == target) && target->has_client;
+    /*
+     * "SELF" IS A BYTE COMPARE, not an identity test. 0x80057F30 takes it
+     * only for a client victim, and 0x80057F38..0x80057F78 compares the
+     * ATTACKER's +0xDE (last_attacker, already rewritten above for this hit)
+     * with the victim's client index. A player's own blast writes its own
+     * index there first, which is the rocket jump. A creature's byte is 0
+     * until something other than player one hurts it, so on the console a
+     * creature's round shoves player one with the self-damage force too:
+     * BASE3's attract run, record frame 248, (-16, 64, -54) where 125 gave
+     * (-5, 20, -17).
+     */
+    bool self = target->has_client && attacker &&
+                attacker->last_attacker == target->owner;
     int i;
 
     /* 0x80057EF0..0x80057F24: the subtractions are 32-bit `subu`. */
@@ -760,14 +773,12 @@ q2_damage_result q2_combat_damage(q2_actor *attacker, q2_actor *target,
      * The copy arm is how a creature's kill is scored: the creature's own byte
      * is whoever last hurt IT (0x80057E04 wrote a player's index there when a
      * player shot it), so a creature that kills player A after player B shot
-     * it hands B the frag. A creature nobody has hurt holds 4 here —
-     * `q2_actor_init`'s seed — and takes the "can't determine which player hit
-     * other player" arm (0x800ACD9C through the hook at 0x800B2FE8, not
-     * reproduced), which leaves the victim's byte as it was. INFERRED, and a
-     * known difference: the console's creature holds 0 until it is first hurt,
-     * because nothing in `access 0xDE` writes a fresh creature's byte and the
-     * pool allocator clears the entity (0x8006C18C `jal 0x80089E18`, 768
-     * bytes), which would copy a 0 and hand player 0 the frag.
+     * it hands B the frag. A creature nobody has hurt holds 0, as on the
+     * console: the pool allocator clears the entity (0x8006C18C `jal
+     * 0x80089E18`, 768 bytes) and nothing in `access 0xDE` writes a fresh
+     * creature's byte, so it copies a 0 and hands player 0 the frag. The
+     * client seeds it at the creature's first actor build. The BASE3 oracle
+     * confirms the 0 through the knockback's self test (apply_knockback).
      *
      * Leaving the byte UNWRITTEN only means something because the two
      * refreshes now carry it (q2_actor_from_player, q2_actor_from_monster).
@@ -1208,7 +1219,7 @@ u32 q2_combat_radius_damage_traced(q2_actor *attacker, q2_actor *ignore,
         s32 dist;
         s16 points;
 
-        if (!t || t == ignore)
+        if (!t || t == ignore || t->absent)
             continue;
 
         dx = (s64)t->origin[0] - point[0];
@@ -1743,7 +1754,7 @@ static s32 nearest_hit(const s32 origin[3], const s32 dir[3],
         s64 along = 0, leave = 0;
 
         SCAN_BUMP(tested);
-        if (!t || i == skip_mask_index) {
+        if (!t || t->absent || i == skip_mask_index) {
             SCAN_BUMP(skipped);
             continue;
         }
@@ -1980,7 +1991,7 @@ static bool trace_actor_get(void *user, u32 index, s32 origin[3],
 {
     const trace_actor_list *l = (const trace_actor_list *)user;
     const q2_actor *actor = l->targets[index];
-    if (!actor || actor == l->ignore) return false;
+    if (!actor || actor == l->ignore || actor->absent) return false;
     memcpy(origin, actor->origin, sizeof(actor->origin));
     *radius = actor->radius;
     *height = actor->height;

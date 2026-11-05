@@ -1530,6 +1530,7 @@ static void test_knockback(void)
 
         place(&self, 0, 0, 0, 100);
         self.has_client = true;
+        self.owner = 0;           /* player one: the self test compares indices */
         q2_combat_damage(&self, &self, 20, Q2_MOD_ROCKET, p, &rules);
 
         place(&other, 0, 0, 0, 100);
@@ -1552,11 +1553,13 @@ static void test_knockback(void)
 
         place(&under, 0, 0, 0, 400);
         under.has_client = true;
+        under.owner = 0;           /* player one: the self test compares indices */
         q2_combat_damage(&under, &under, 100, Q2_MOD_ROCKET, below, &rules);
         check_eq_i(under.knockback[1], -3072, "single player caps the lift");
 
         place(&under, 0, 0, 0, 400);
         under.has_client = true;
+        under.owner = 0;
         q2_combat_damage(&under, &under, 100, Q2_MOD_ROCKET, below, &dm);
         check(under.knockback[1] < -3072, "deathmatch does not");
     }
@@ -1840,6 +1843,7 @@ static void test_actor_cylinder_trace(void)
     corpse.gib_health = -60;
     q2_monster_corpse_detach(&corpse);
     corpse.takedamage = Q2_DAMAGE_YES;
+    corpse.in_use = true;      /* a corpse keeps its record; absent otherwise */
     q2_actor_from_monster(&corner, &corpse);
     check_eq_i(corner.radius, 429, "a detached body projects its wider radius");
     check_eq_i(corner.height, 150, "and the quarter of GetCreHitSize's 600");

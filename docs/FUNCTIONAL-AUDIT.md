@@ -1846,12 +1846,31 @@ Three more came after that:
   `0x8007E2C4..0x8007E3D4`). The port's crumbs were laid every tenth frame at
   the current position.
 
-*Where it parts now: frame 287.* A Soldier fires its shotgun, and every
-pellet's impact on the console spawns about fifteen particles with six
-`rand()` draws each (`0x80048A14..0x80048A74`). The port's impact draws
-nothing. Player one is also one unit off from frame 250, after taking a hit.
+*Frame 287 to 378.* Five faults in the port and one in the oracle:
+- **An unspawned creature has no body.** Its actor stayed in every hit list, so
+  a Soldier's pellets struck it instead of the wall (287).
+- **A gibbed creature's flash** stayed lit for the next draw (288).
+- **The player's edict and body are two positions.** Creatures aim at the
+  edict origin, refreshed on the AI tick before the player moves and by
+  `visible`'s pull; the port aimed at the moved body (248).
+- **A client's view height is a constant -250** (`0x8007E1B0`), 40 above the
+  camera's standing eye the port used (248).
+- **The knockback's self test is a byte compare** (`0x80057F38`): the
+  attacker's last-attacker byte against the victim's index. A creature's byte
+  is 0, so its hits shove player one with the self-damage force.
+- **The oracle's level clock was frozen.** The VSync callback (`0x80019044`)
+  advances it and the interpreter has none; a landing kick never decayed and
+  tilted the view plane the bullet path projects onto. It now adds each
+  recorded frame's fields.
+
+*Where it parts now: frame 379.* A creature's walk coin there follows from
+player one standing a unit off from 256. At 254 a Soldier's posed shotgun
+muzzle sits about eight units along the barrel from the console's, with the
+same animation position, frame and yaw on both sides, so the pellets enter
+the player at slightly different points. The console poses it through
+0x8006C6C8; the port's draw pose differs from that at the same position.
 The trigger-volume adjustment of the sighting spot and crumbs (`0x80061024`,
-`0x80060C94`) is not modelled.
+`0x80060C94`) is still not modelled.
 
 Player one's survival is not a steady score while the fights are still
 settling: the BASE3 demo now ends at 353 of 1,125 frames (601 at one point in

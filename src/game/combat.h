@@ -587,6 +587,14 @@ typedef struct q2_actor {
      * any guard, so a hit that finds no shield clears it too.
      */
     s8   armour_fade;       /* Q2_ACTOR_FADE_*, gp+1184                      */
+
+    /*
+     * NO OBJECT ON THE CONSOLE. A creature whose batch has not spawned, or
+     * whose record was freed, has no record in the object array, so no sweep
+     * or hit list ever meets it. The port keeps an actor for every creature in
+     * the set; this says which of them the console would not have.
+     */
+    bool absent;
 } q2_actor;
 
 /*

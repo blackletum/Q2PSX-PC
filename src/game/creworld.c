@@ -896,9 +896,9 @@ void q2_creature_world_wake(q2_creature_world *w, const s32 player_origin[3],
     w->sight.max_health  = 100;
     w->sight.hit_radius = 286;
     w->sight.hit_height = 572;
-    /* The eye the console's `visible` reconstructs from the origin: the
-     * origin is feet - 286 and the eye is feet - 576, so -290. */
-    w->sight.view_height = -(s16)(Q2_VIEW_STAND - Q2_EYE_BASE);
+    /* The eye `visible` and the creatures' aim add to the origin: a constant
+     * 250, which is 40 short of the camera's standing eye (feet - 576). */
+    w->sight.view_height = -250;   /* every client edict's +0x4C (0x8007E1B0) */
     sight_place(w, player_origin);
 
     /*

@@ -630,6 +630,11 @@ makes its two pointer stores itself (`0x80018D84..0x80018D98`). One of them is
 ai_run's scratch tempgoal (`0x800B2DFC`, the record at `0x800DDDCC`). Left at 0,
 a creature chasing a last sighting has no goal and never takes SV_NewChaseDir's
 coin, which a console does.
+Nor does it have a vertical blank, so it advances the level clock itself: the
+VSync callback (`0x80019044`) adds the rate to `0x800B29D4` per field and
+MainGameLoop copies that into `0x800AEBAC` (`0x800183A0`); the oracle adds each
+recorded frame's NEWV and makes the copy. `ORACLE_WATCH=lo:hi` (hex addresses)
+prints every store into that range with the storing PC.
 
 Each record frame gives every `rand()` call with its caller and result, player
 one, every creature's actor and edict, the active-area mask, the closed doors
