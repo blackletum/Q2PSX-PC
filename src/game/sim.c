@@ -3694,7 +3694,8 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
      * the bolt sweep below reads the plane this frame's camera pass writes. */
     q2_sim_view_plane_camera_pass(sim, sim->cur_player);
 
-    q2_sim_combat_tick(sim);
+    if (!sim->defer_missiles)
+        q2_sim_combat_tick(sim);
 
     /*
      * The effects, after the combat that spawns them. The console runs the
@@ -3711,7 +3712,7 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
     /* Once per frame, not once per player: the comment below already said
      * "once per tick, not once per viewport", and a second player is a second
      * viewport by another name. */
-    if (run_world) {
+    if (run_world && !sim->defer_missiles) {
         q2_fx_tick(&sim->fx);
 
         /* The timed beams age by the frame delta, as 0x80048CE8 does. */
@@ -3900,6 +3901,15 @@ void q2_sim_select_player(q2_sim *sim, int index)
     sim->ent_world.player[index].inv = &sim->combat.inv;
     sim->cur_player = index;
     sim->current_node = sim->player[index].ent.node;
+}
+
+void q2_sim_missiles_late(q2_sim *sim, s32 dt)
+{
+    if (!sim || !sim->defer_missiles || sim->cur_player != 0 || dt <= 0)
+        return;
+    q2_sim_combat_tick(sim);
+    q2_fx_tick(&sim->fx);
+    q2_fx_timed_tick(&sim->fx, dt);
 }
 
 void q2_sim_advance_player(q2_sim *sim, int index, const q2_input *input,

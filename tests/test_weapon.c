@@ -438,6 +438,13 @@ static void test_muzzle(void)
         check(a[2] - eye[2] > -8 && a[2] - eye[2] < 8,
               "and nothing is left along Z");
     }
+
+    /* RotateS floors in the Y-negated frame and the fire function subtracts
+     * the rotated Y (0x8004C01C, 0x8004C04C): a ceiling here. Floored, this
+     * blaster offset is -61. */
+    q2_weapon_muzzle_origin(t->muzzle[Q2_WID_BLASTER], eye, 0, 300, 0, out);
+    check_eq_i(out[1] - eye[1], -60,
+               "the muzzle's Y rounds as the console's negated frame does");
 }
 
 /* ------------------------------------------------------------------------- */

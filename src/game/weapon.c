@@ -367,10 +367,13 @@ void q2_weapon_muzzle_origin(const s16 muzzle[3], const s32 eye[3],
      * roll is the console's. An earlier note here read RotMatrix as Rz*Ry*Rx
      * and called the two different; trig.c has since corrected that reading.
      *
-     * What still differs is ROUNDING: RotateS floors each row in the frame
-     * whose Y is negated, this floors in the unnegated one, so a component can
-     * land one unit apart (the blaster at yaw 0, pitch 300 gives Y -60 there
-     * and -61 here). Not reproduced without a native fixture to pin it.
+     * AND THE ROUNDING. Every player fire function negates the offset's Y
+     * before RotateS (0x8004C01C `subu v0, zero, v0`) and SUBTRACTS the
+     * rotated Y from the eye after it (0x8004C04C), and RotateS's MVMVA
+     * floors each row (sf=1, an arithmetic >> 12). The fire matrix is this
+     * transpose conjugated by that Y flip, so X and Z floor exactly as here
+     * and Y comes out as -floor(-v): a CEILING in this frame. The blaster at
+     * yaw 0, pitch 300 lands at Y -60, not the -61 a floor gives.
      */
     q2_rotation_view(rot, yaw, pitch, roll);
 
@@ -378,7 +381,7 @@ void q2_weapon_muzzle_origin(const s16 muzzle[3], const s32 eye[3],
         s64 v = (s64)rot[0][i] * muzzle[0]
               + (s64)rot[1][i] * muzzle[1]
               + (s64)rot[2][i] * muzzle[2];
-        out[i] = eye[i] + (s32)(v >> 12);
+        out[i] = eye[i] + (i == 1 ? -(s32)((-v) >> 12) : (s32)(v >> 12));
     }
 }
 

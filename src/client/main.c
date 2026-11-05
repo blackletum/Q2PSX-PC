@@ -12469,6 +12469,8 @@ static void client_input_simulated(client *c, float dt)
 
     c->mp_input[0] = in;
     client_player_motion(c);
+    /* With several players, the missiles wait for the last of them (sim.h). */
+    c->sim[0].defer_missiles = c->mp_enabled;
     ticked = (q2_sim_advance(&c->sim[0], &in, (double)dt) != 0);
     if (ticked) client_glint_scene(c, false);
     q2_combat_scan_who = Q2_COMBAT_SCAN_OTHER;
@@ -12550,6 +12552,10 @@ static void client_input_simulated(client *c, float dt)
                 client_score_deaths(c);
             }
         }
+        /* ProcessMissiles and ProcessParticles, after every player's think.
+         * Player 0 is selected again here (q2_sim_advance_player). */
+        if (ticked && c->sim[0].defer_missiles)
+            q2_sim_missiles_late(&c->sim[0], step_dt);
     }
 
     /*

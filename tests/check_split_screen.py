@@ -22,6 +22,12 @@ WEAPON = re.compile(
 )
 SHOT = re.compile(r"player (\d+) shots (\d+), dry (\d+)")
 FLASH = re.compile(r"player (\d+) damage flashes (\d+)")
+# "view weapon: player 1 Railgun G", logged whenever that player's own view
+# model is bound: the clip bank names of weapontables.c, index = weapon id.
+SWITCH = re.compile(r"view weapon: player (\d+) ([A-Za-z]+ G)")
+WEAPON_NAMES = ["", "Blaster G", "Shotgun G", "Supershot G", "Machinegun G",
+                "Chaingun G", "HandGren G", "GrenLaunch G", "RockLaunch G",
+                "HyperBlast G", "Railgun G", "Bfg G"]
 
 
 def require(condition, message):
@@ -62,9 +68,17 @@ def run_case(client, disc, output, name, players=0, split=None, weapon=2,
     flashes = {int(p): int(n) for p, n in FLASH.findall(log)}
     if players:
         require(set(owners) == set(range(players)), f"{name}: missing viewport owner")
+        # A player's OWN last bound weapon: what that viewport must show. The
+        # others start on the blaster but may pick a weapon up where they
+        # spawn (MATRIX5 puts player 1 on the railgun), so the check is that
+        # no viewport shows a weapon its player does not hold.
+        own = {}
+        for sp, sname in SWITCH.findall(log):
+            if sname in WEAPON_NAMES:
+                own[int(sp)] = WEAPON_NAMES.index(sname)
         for p, (w, n, _, live) in owners.items():
             if not fight:
-                require(w == (weapon if p == 0 else 1),
+                require(w == (weapon if p == 0 else own.get(p, 1)),
                         f"{name}: player {p} borrowed another player's weapon ({w})")
                 require(n > 0 and live, f"{name}: player {p} has no rendered weapon")
             elif not live:

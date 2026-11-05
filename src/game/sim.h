@@ -542,6 +542,17 @@ typedef struct q2_sim {
     q2_view_plane        view_plane_prev[Q2_SIM_MAX_PLAYERS];
     bool                 view_plane_prev_ready[Q2_SIM_MAX_PLAYERS];
 
+    /*
+     * Hold the missiles and the particles for q2_sim_missiles_late. QuakeLoop
+     * runs every record's handler — every player's think — in MoveModels
+     * (0x80038F40), and only then ProcessMissiles (0x80039000) and
+     * ProcessParticles (0x80039010). With more than one player, running the
+     * sweep inside player 0's tick put every bolt ahead of players 1..3's
+     * movement; a caller that ticks several players sets this and calls
+     * q2_sim_missiles_late once the last of them has run.
+     */
+    bool                 defer_missiles;
+
     /* The level clock the weapon gates and the damage throttles use, in dt
      * units. Advanced by q2_sim_tick alongside the physics. */
     s32                  level_time;
@@ -1870,6 +1881,9 @@ const q2_view_plane *q2_sim_view_plane_prev_for(const q2_sim *sim, int index);
  * `view_plane_prev`, then rebuild it. The tick calls it ahead of the combat
  * tick, so the bolt sweep reads the current frame's plane. */
 void q2_sim_view_plane_camera_pass(q2_sim *sim, int index);
+/* The world's missiles and particles for a frame whose players have all
+ * ticked, when `defer_missiles` held them (player 0 selected). */
+void q2_sim_missiles_late(q2_sim *sim, s32 dt);
 
 /*
  * Post a view kick — what a weapon's recoil and a damage hit do. `period` picks
