@@ -753,7 +753,7 @@ static void arachner_pain(q2_monster *self, s16 damage)
 
     ara_play(self, (ara_rand() & 4) ? ARA_SND_PAIN2 : ARA_SND_PAIN2_QUIET);
 
-    if (q2_cre_skill() == 3)
+    if (q2_cre_ai_skill() == 3)
         return;
 
     q2_cre_set_move(self, ara_rand() < ARA_R_HALF ? ARA_PAIN1 : ARA_PAIN2);

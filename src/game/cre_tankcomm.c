@@ -638,7 +638,7 @@ static void tankcomm_sight(q2_monster *self, q2_monster *other)
  */
 static void tankcomm_pain(q2_monster *self, s16 damage)
 {
-    const s32 skill = q2_cre_skill();
+    const s32 skill = q2_cre_ai_skill();
     s16       f;
 
     if (!self)
@@ -769,7 +769,7 @@ static void tankcomm_die(q2_monster *self, s16 damage)
  */
 static void tankcomm_refire_rocket(q2_monster *self)
 {
-    if (q2_cre_skill() >= 2 && self->enemy && self->enemy->health > 0 &&
+    if (q2_cre_ai_skill() >= 2 && self->enemy && self->enemy->health > 0 &&
         q2_visible(self, self->enemy) && tank_rand() < TANK_R_0_4b) {
         q2_cre_set_move(self, TANK_FIRE_ROCKET);
         return;
@@ -805,7 +805,7 @@ static void tankcomm_reattack_blaster(q2_monster *self)
 {
     /* The NULL test is this port's; the module is only reached with an enemy
      * and dereferences it in both guards. */
-    if (q2_cre_skill() >= 2 && self->enemy && q2_visible(self, self->enemy) &&
+    if (q2_cre_ai_skill() >= 2 && self->enemy && q2_visible(self, self->enemy) &&
         self->enemy->health > 0 && tank_rand() < TANK_R_0_6) {
         q2_cre_set_move(self, TANK_REATTACK_BLAST);
         return;

@@ -628,6 +628,16 @@ void q2_vw_init(q2_viewweapon *vw, const q2_vm_tables *tab, int weapon);
 /* Ask for a different weapon. Takes effect through LOWER; the model does not
  * change until the lower clip has run and the countdown has expired. */
 void q2_vw_select(q2_viewweapon *vw, int weapon);
+/*
+ * The two halves of that, apart. Only the cycle routine arms the countdown:
+ * 0x8004ECB4 stores 70 at client+222 (0x8004ECF0, 0x8004ED14) when a
+ * next/previous command bit is set, whether or not a weapon is found. Every
+ * other writer of the held weapon — a pickup (0x80037E28), the spawn loadout
+ * (0x8003D4FC), ALL WEAPONS (0x8003B040), a level module's loadout — only
+ * changes client+0x66, and the driver swaps as soon as the lower ends.
+ */
+void q2_vw_request(q2_viewweapon *vw, int weapon);
+void q2_vw_arm_switch(q2_viewweapon *vw);
 
 /* Bind the resolved model for the weapon currently in hand. A caller does this
  * after `q2_vw_take_model_name` reports the swap. */

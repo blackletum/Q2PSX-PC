@@ -66,7 +66,7 @@ static void jorg_pain(q2_monster *m, s16 damage)
     if ((u16)(m->frame - 8) < 6 && q2_random_next() < 3) return;
     if ((u16)(m->frame - 18) < 8 && q2_random_next() < 164) return;
     m->pain_debounce = q2_level_state.time + 30;
-    if (q2_cre_skill() == 3) return;
+    if (q2_cre_ai_skill() == 3) return;
     if (damage <= 50) { sound(m, 0x4A38); q2_cre_set_move(m, 81); }
     else if (damage <= 100) { sound(m, 0x4A3C); q2_cre_set_move(m, 84); }
     else if (q2_random_next() < 9831) { sound(m, 0x4A40); q2_cre_set_move(m, 87); }

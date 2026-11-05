@@ -499,7 +499,7 @@ static void gunner_duck_down(q2_monster *self)
 
     self->aiflags |= Q2_AI_DUCKED;
 
-    if (q2_cre_skill() >= 2 && (q2_random_next() & 1))
+    if (q2_cre_ai_skill() >= 2 && (q2_random_next() & 1))
         gunner_grenade(self);
 
     self->takedamage = Q2_DAMAGE_YES;
@@ -730,7 +730,7 @@ static void gunner_pain(q2_monster *self, s16 damage)
 
     /* No pain anims in nightmare — the module reads cvar[0]->value through
      * import +0x4C and compares against 3, which is id's own line. */
-    if (q2_cre_skill() == 3)
+    if (q2_cre_ai_skill() == 3)
         return;
 
     if (damage <= 10)

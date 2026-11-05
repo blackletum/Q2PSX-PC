@@ -404,14 +404,16 @@ def crossed_one_gate(case):
 
 def bodies_blocked_something(report, out, shot):
     """
-    Creatures are solid. `bound_trace`'s actor arm (0x8005BF4C) is what stops a
-    creature's step against the player or another creature, and before it
-    existed this counter could only ever be zero.
+    Creatures trace their steps and walk. `bound_trace`'s actor arm
+    (0x8005BF4C) is what stops a step against the player or another creature,
+    but a blocked step is no longer something every fight produces: the
+    separation pass keeps players and creatures 572 apart (two 286 radii at
+    +0x90, trace.h), so a step only reaches another body's 286 hit cylinder
+    when it is long. PAL SECURITY still blocks 19 in 600 frames; the US run
+    blocks none. `creatures.blocked_body` is reported, not required.
     """
     if report.get("creatures.traces", 0) < 1:
         raise Failure("no creature ever traced a step")
-    if report.get("creatures.blocked_body", 0) < 1:
-        raise Failure("not one creature step was stopped by another body")
     # ...and the clip must not be so eager that nothing can walk any more. A
     # creature already overlapping a body has every step refused, which is the
     # console's behaviour too; a creature that never moves at all is not.

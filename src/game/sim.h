@@ -553,6 +553,16 @@ typedef struct q2_sim {
      */
     bool                 defer_missiles;
 
+    /*
+     * Hold the entity sweep (items, gibs, explosions) for
+     * q2_sim_entities_late. The console's model records run in MoveModels'
+     * walk after the creatures have thought, so a gib thrown by a corpse
+     * handler (0x8007F71C -> ThrowGibs) tumbles and bleeds in the frame it
+     * was thrown: on the BASE3 attract run the trail draws (0x80059EE4..
+     * 0x80059F14) follow the other creatures' AI draws in that same frame.
+     */
+    bool                 defer_entities;
+
     /* The level clock the weapon gates and the damage throttles use, in dt
      * units. Advanced by q2_sim_tick alongside the physics. */
     s32                  level_time;
@@ -1894,6 +1904,9 @@ void q2_sim_view_plane_camera_pass(q2_sim *sim, int index);
 /* The world's missiles and particles for a frame whose players have all
  * ticked, when `defer_missiles` held them (player 0 selected). */
 void q2_sim_missiles_late(q2_sim *sim, s32 dt);
+/* The entity sweep for a frame whose creatures have thought, after a tick
+ * run with `defer_entities` set (player 0 selected). */
+void q2_sim_entities_late(q2_sim *sim, s32 dt);
 
 /*
  * Post a view kick — what a weapon's recoil and a damage hit do. `period` picks

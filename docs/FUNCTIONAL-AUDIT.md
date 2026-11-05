@@ -1762,34 +1762,51 @@ the regenerated fixture adds MATRIX8, which the interpreter can now load.
   stale address or not at all. `q2_spu_ram` keeps sound RAM and the slot table
   across levels.
 
-**Still open:** the attract demos as a parity probe. A recording replays the
+**The attract demos as a parity probe (5 November).** A recording replays the
 console's pad against the port's simulation, so it stays in step only while
-every tick matches. On PAL BASE3, player one is killed by creature 4 after 143
-of the recording's 1,125 frames. The movement and the first fight track the
-recording (the frames show the player turning and firing at the guards it was
-recorded fighting), so the divergence is in how the fights resolve: creature
-AI, damage or the shared rand() sequence over a few hundred ticks. Each demo
-is therefore a ready-made, repeatable test of end-to-end lockstep, and the
-frame at which player one dies is its score.
+every tick matches. `tests/fixtures/lockstep_oracle.py` now runs the console's
+own QuakeLoop over PAL BASE3's demo, natively, recording every `rand()` call
+with its caller, player one, each creature's actor and edict, and the entity
+box table, frame by frame. The port was compared against it until each
+divergence was explained. The `rand()` stream now matches for 98 of the first
+150 record frames, against 29 before. Player one's position matches all 150.
+Player one now dies after 531 of the recording's 1,125 frames, against 143
+before.
 
-*Where it first parts (5 November, PAL BASE3, per-frame log of the record).*
-For the first 29 record frames the replay is in step: player one's travel
-direction swings onto shotgun guard #7's bearing (170-177° against 170-174°,
-1,400-1,600 units) exactly where the recorder lines up the first volley. That
-volley (frame 28) leaves the muzzle at about 196°, and all ten pellets reach
-the wall at x = -12,120. In the port, #7 stands about 28° (some 550 units)
-off that line, so the console's guard was on it and the port's is not. #7
-starts moving at record frame 5 and runs at exactly 45° (dx = dz every step)
-from (-10740, 5632). That diagonal is SV_NewChaseDir's choice, which
-M_MoveToGoal takes when the straight step fails and, in Quake II, also on
-`rand() & 3`. So the first divergence is a creature's chase-direction choice
-within five frames of the start: either the shared rand() sequence differs by
-at least one draw before then, or the straight step is refused where the
-console's succeeds. No creature module reads InSelfPlayMode (their 71-slot
-import table has no slot for it), so the demo plays by ordinary rules.
-Deciding between the two needs the console's own per-tick rand() calls and
-creature positions for this demo, which means running QuakeLoop natively
-with the record fed through SwapButtons.
+What the comparison found, in the order the run reached it:
+
+- the generator seed per level load, the first-tick all-areas rule and the
+  door gate on the area flood;
+- monster_start's one-frame deferral of the go routine;
+- the Soldier's and Infantry's spawn-time walk draws;
+- the teleport columns' 45 draws after the creatures;
+- the trigger's held bit 24 and per-pellet spread;
+- pain and death inside the damage function;
+- corpses handled the next frame;
+- the entity sweep after the creatures (`q2_sim_entities_late`);
+- BLAST FORCE's boot value of 0 (the knockback the volley's gibs carry);
+- the AI trace's start cells and its real entity sweep (`0x80053C58`, mask
+  `0x810`, 286 inflation, the monster clips);
+- step vectors rounded toward zero;
+- turns writing only the target yaw;
+- G_TouchTriggers' and `visible`'s pulls of the actor back over the edict;
+- the 286 separation radius of players and creatures;
+- the AI's `skill` cvar, a static record that always reads 0.
+
+The oracle stubs SnapShotPadViolation (`0x80032DCC`). Without it
+GameCheckPaused sees no pad and sets the menu word in frame 1, and every body
+part's tumble is skipped.
+
+*Where it parts now: frame 99, object slots.* MoveModels walks the console's
+object array (`0x800CBA28`, stride `0x300`) in slot order, and `0x8006C098`
+hands out slots from a last-in, first-out free list at `0x800D4A28`. When the
+second Infantry gibs, five of its six gibs take slots 8-12, above its own, and
+are moved that frame. The sixth takes slot 2, which the Soldier's actor freed
+at frame 30, and waits for the next frame. The port keeps its entities in a
+list of its own, so all six move at once and the trail draws come one gib
+early. Matching it means mirroring that free list for every object the
+console allocates: player and creature actors, gibs, items, explosions and
+death drops.
 
 ## Limits
 

@@ -174,6 +174,19 @@ void q2_menu_settings_defaults(q2_menu_settings *s)
     q2_menu_reset_sound(s);
     q2_menu_reset_player(s);
     q2_menu_reset_variables(s);
+    /*
+     * BUT NOT BLAST FORCE. The boot routine (0x80033120) runs the player,
+     * sound and display resets (0x8001BDA8, 0x8001FA50, 0x8001FA18) and never
+     * 0x8002048C, which only RESET TO DEFAULTS reaches; the executable's own
+     * image holds 0 at 0x800B3358, and the console's BASE3 attract run
+     * (tests/fixtures/lockstep_oracle.py) carries that 0 into the damage
+     * function: the soldier its volley gibs takes knockback (-19, 95, -46),
+     * the 125 scale, where 64 gave the port (-38, 189, -91). It is the one
+     * variable that matters outside a match, because it is carried on both of
+     * q2_menu_apply_variables' arms; the others are written over in single
+     * player, and a match runs whatever its setup page left.
+     */
+    s->v[Q2_SET_BLAST_FORCE] = 0;
 }
 
 /* 0x8001C698: what the GAME VARIABLES page is for. */
@@ -190,10 +203,10 @@ void q2_menu_apply_variables(const q2_menu_settings *s, bool enabled,
      * the reset at 0x80020498, the slider's own store at 0x8001BE38 and the
      * read at 0x80057F84. So in single player the halfword simply keeps what
      * the slider last wrote; forcing 64 on the "off" arm would invent a reset
-     * the disc does not perform. 64 is still the value a session that never
-     * touched the row has, because q2_menu_reset_variables seeds it there.
+     * the disc does not perform. A session that never touched the row has the
+     * boot value, 0 (q2_menu_settings_defaults).
      */
-    out->blast_force = s ? (s32)s->v[Q2_SET_BLAST_FORCE] : 64;
+    out->blast_force = s ? (s32)s->v[Q2_SET_BLAST_FORCE] : 0;
 
     if (!s || !enabled) {
         /* 0x8001C7E4 — the "off" path writes the same constants. */

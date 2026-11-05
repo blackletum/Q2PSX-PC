@@ -127,7 +127,13 @@ static void test_defaults(void)
     /* 0x8002048C */
     CHECK(s.v[Q2_SET_GRAVITY] == 64, "gravity default %d", s.v[Q2_SET_GRAVITY]);
     CHECK(s.v[Q2_SET_GAME_SPEED] == 64, "game speed default");
-    CHECK(s.v[Q2_SET_BLAST_FORCE] == 64, "blast force default");
+    /* ... except BLAST FORCE, which boot never resets: the image's 0. */
+    CHECK(s.v[Q2_SET_BLAST_FORCE] == 0, "blast force boots at 0, not the reset's 64");
+    {
+        q2_menu_settings r = s;
+        q2_menu_reset_variables(&r);   /* RESET TO DEFAULTS does write it */
+        CHECK(r.v[Q2_SET_BLAST_FORCE] == 64, "blast force reset %d", r.v[Q2_SET_BLAST_FORCE]);
+    }
     CHECK(s.v[Q2_SET_FALLING_DAMAGE] == 1, "falling damage default");
     CHECK(s.v[Q2_SET_ONE_SHOT_KILL] == 0, "one shot kill default");
     /* 0x8001BDA8 */

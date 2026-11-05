@@ -534,7 +534,7 @@ static void berserk_pain(q2_monster *self, s16 damage)
 
     ber_play(self, BER_SND_PAIN);
 
-    if (q2_cre_skill() == 3)
+    if (q2_cre_ai_skill() == 3)
         return;
 
     q2_cre_set_move(self, (damage < BER_PAIN_LIGHT ||

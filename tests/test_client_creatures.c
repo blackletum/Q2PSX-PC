@@ -633,6 +633,8 @@ static void test_disc_flyer(const char *disc_path, const char *output)
     CHECK(m->in_use && m->start_kind == Q2_CRE_START_FLY);
     for (i = 0; i < c->creatures.set.count; i++)
         if (i != flyer_index) c->creatures.set.monsters[i].in_use = false;
+    /* The start's go runs a frame after the spawn (monster_start). */
+    if (m->think == q2_monster_go_think) q2_monster_go_think(m);
     m->enemy = m->goalentity = &c->creatures.sight;
     m->aiflags |= Q2_AI_STAND_GROUND;
     m->angles[2] = 0;
@@ -746,6 +748,8 @@ static void test_disc_gladiator(const char *disc_path, const char *output)
     CHECK(m->in_use && m->start_kind == Q2_CRE_START_WALK);
     for (i = 0; i < c->creatures.set.count; i++)
         if (i != index) c->creatures.set.monsters[i].in_use = false;
+    /* The start's go runs a frame after the spawn (monster_start). */
+    if (m->think == q2_monster_go_think) q2_monster_go_think(m);
     m->enemy = m->goalentity = &c->creatures.sight;
     m->aiflags |= Q2_AI_STAND_GROUND;
     m->angles[2] = 0;
@@ -804,6 +808,8 @@ static void test_disc_hover(const char *disc_path, const char *output)
     CHECK(m->in_use && m->start_kind == Q2_CRE_START_FLY);
     for (i = 0; i < c->creatures.set.count; i++)
         if (i != index) c->creatures.set.monsters[i].in_use = false;
+    /* The start's go runs a frame after the spawn (monster_start). */
+    if (m->think == q2_monster_go_think) q2_monster_go_think(m);
     m->enemy = m->goalentity = &c->creatures.sight;
     m->aiflags |= Q2_AI_STAND_GROUND;
     m->angles[2] = 0;
@@ -869,6 +875,8 @@ static void test_disc_parasite(const char *disc_path, const char *output)
     CHECK(m->in_use && m->start_kind == Q2_CRE_START_WALK);
     for (i = 0; i < c->creatures.set.count; i++)
         if (i != index) c->creatures.set.monsters[i].in_use = false;
+    /* The start's go runs a frame after the spawn (monster_start). */
+    if (m->think == q2_monster_go_think) q2_monster_go_think(m);
     m->enemy = m->goalentity = &c->creatures.sight;
     m->angles[2] = 0; m->aiflags |= Q2_AI_STAND_GROUND;
     memcpy(c->creatures.sight.pos, m->pos, sizeof(m->pos));
@@ -943,6 +951,8 @@ static void test_disc_ironmaiden(const char *disc_path, const char *output)
     CHECK(m->in_use && m->start_kind == Q2_CRE_START_WALK);
     for (i = 0; i < c->creatures.set.count; i++)
         if (i != index) c->creatures.set.monsters[i].in_use = false;
+    /* The start's go runs a frame after the spawn (monster_start). */
+    if (m->think == q2_monster_go_think) q2_monster_go_think(m);
     m->enemy = m->goalentity = &c->creatures.sight;
     m->aiflags |= Q2_AI_STAND_GROUND; m->angles[2] = 0;
     memcpy(c->creatures.sight.pos, m->pos, sizeof(m->pos));
@@ -1001,6 +1011,8 @@ static void test_disc_strider(const char *disc_path, const char *output)
     CHECK(m->in_use && m->bigturn);
     for (i = 0; i < c->creatures.set.count; i++)
         if (i != index) c->creatures.set.monsters[i].in_use = false;
+    /* The start's go runs a frame after the spawn (monster_start). */
+    if (m->think == q2_monster_go_think) q2_monster_go_think(m);
     m->enemy = m->goalentity = &c->creatures.sight;
     m->aiflags |= Q2_AI_STAND_GROUND; m->angles[2] = 0;
     memcpy(c->creatures.sight.pos, m->pos, sizeof(m->pos));
@@ -1061,6 +1073,8 @@ static void test_disc_boss(const char *disc_path, const char *output, bool flyin
         q2_M_MoveFrame(m); q2_M_MoveFrame(m);
         CHECK(m->health == 1999);
     }
+    /* The start's go runs a frame after the spawn (monster_start). */
+    if (m->think == q2_monster_go_think) q2_monster_go_think(m);
     m->enemy = m->goalentity = &c->creatures.sight;
     m->aiflags |= Q2_AI_STAND_GROUND; m->angles[2] = 0;
     memcpy(c->creatures.sight.pos, m->pos, sizeof(m->pos));
@@ -1301,9 +1315,15 @@ static void test_disc_medic(const char *disc_path, const char *output)
             {700,0}, {-700,0}, {0,-700}, {0,700},
             {800,800}, {-800,800}, {800,-800}, {-800,-800}
         };
+        /* `visible` reads the bodies (it pulls each actor over its edict
+         * first, 0x8005C980 with 5), so the actors are placed with them. */
+        if (medic->motion.ready)
+            memcpy(medic->motion.ent.pos, medic->pos, sizeof(medic->pos));
         for (i = 0; i < 8; i++) {
             corpse->pos[0] = medic->pos[0] + offsets[i][0];
             corpse->pos[2] = medic->pos[2] + offsets[i][1];
+            if (corpse->motion.ready)
+                memcpy(corpse->motion.ent.pos, corpse->pos, sizeof(corpse->pos));
             if (q2_visible(medic, corpse)) break;
         }
         CHECK(i < 8);

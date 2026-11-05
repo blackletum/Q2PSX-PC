@@ -1276,6 +1276,7 @@ q2_fire_result_v2 q2_sim_fire_weapon(q2_sim *sim, int weapon_id,
     sync_rules(sim);
     q2_actor_from_player(&sim->combat.self, &sim->combat.inv, sim->player[sim->cur_player].pos);
 
+    q2_weapon_defer_spread(true);   /* each round's spread at its trace */
     r = q2_weapon_fire(&sim->combat.inv, &sim->combat.rng, NULL,
                        weapon_id, eye,
                        sim->player[sim->cur_player].yaw,
@@ -1298,6 +1299,7 @@ q2_fire_result_v2 q2_sim_fire_weapon(q2_sim *sim, int weapon_id,
                        sim->level_time < sim->combat.inv.quad_until,
                        sim->combat.rules.deathmatch,
                        chaingun_bullets);
+    q2_weapon_defer_spread(false);
 
     sim->combat.last_shot = r;
     sim->combat.shot_serial++;
@@ -1436,7 +1438,13 @@ q2_fire_result_v2 q2_sim_fire_weapon(q2_sim *sim, int weapon_id,
         /* Every pellet is its own trace, which is why a shotgun can catch two
          * creatures and a machinegun cannot. */
         for (i = 0; i < r.shot_count; i++) {
-            const q2_shot *s = &r.shot[i];
+            const q2_shot *s;
+
+            /* This round's spread now, after the last round's impact
+             * drew its sparks (weapon.h, q2_weapon_defer_spread). */
+            q2_weapon_shot_spread(&r, &r.shot[i], &sim->combat.rng);
+            sim->combat.last_shot.shot[i] = r.shot[i];
+            s = &r.shot[i];
             u8  frac_area;
             s32 frac = world_fraction_for(sim, s->origin, s->dir,
                                           &frac_area);

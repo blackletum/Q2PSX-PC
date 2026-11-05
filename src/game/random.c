@@ -1,7 +1,7 @@
 #include "random.h"
 #include "weapon.h"
 
-static q2_rng gameplay_rng = { 1u };
+static q2_rng gameplay_rng = { 1u, NULL };
 
 s32 q2_random_next(void)
 {

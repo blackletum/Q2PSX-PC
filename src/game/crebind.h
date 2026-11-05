@@ -179,13 +179,14 @@ q2_cre_bind *q2_cre_bind_for(const q2_monster *m);
 void         q2_cre_bind_reset(void);
 
 /* Stable saved callback ids: 0 none, 1 M_MoveFrame, 2..7 scripted thinks,
- * 8 deferred Rider launch, 9 Medic revival on the next actor frame.
+ * 8 deferred Rider launch, 9 Medic revival on the next actor frame, 10 the
+ * go-routine monster_start parks for the frame after a spawn.
  * Unknown functions encode as 255 and are rejected by save capture. */
 u8 q2_cre_think_id(const q2_monster *m);
 bool q2_cre_think_valid(const q2_monster *m, u8 id);
 void q2_cre_restore_think(q2_monster *m, u8 id);
 void q2_cre_script_callbacks(q2_monster *m);
-#define Q2_CRE_THINK_LAST 9
+#define Q2_CRE_THINK_LAST 10
 void q2_cre_rider_launch(q2_monster *m);
 void q2_cre_medic_revive(q2_monster *m);
 bool q2_cre_boss_checkattack(q2_monster *m, s32 cooldown);
@@ -519,6 +520,9 @@ void q2_cre_run_think(q2_monster *m, u32 index);
 /* Skill, which several creatures gate their refire and opening shot on. */
 void q2_cre_set_skill(s32 skill);
 s32  q2_cre_skill(void);
+/* The `skill` cvar the AI and the creature modules read: always 0 (see
+ * cre_soldier.c). Spawning, damage and saves use q2_cre_skill. */
+s32  q2_cre_ai_skill(void);
 
 /*
  * The bank name for one of the Soldier's eleven sounds, or NULL. The module

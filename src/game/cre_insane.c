@@ -557,7 +557,7 @@ static void insane_pain(q2_monster *self, s16 damage)
 
     /* 0x8010061C..0x80100634: cvar[0]->value, read through import +0x4C. id's
      * "no pain anims in nightmare". */
-    if (q2_cre_skill() == 3)
+    if (q2_cre_ai_skill() == 3)
         return;
 
     /* 0x80100648: id's "Don't go into pain frames if crucified", on this

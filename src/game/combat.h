@@ -286,6 +286,17 @@ typedef struct q2_combat_rules {
      * and the shared lava cadence; standalone combat may omit this hook. */
     q2_combat_environment_fn environment_sound;
     void *environment_sound_user;
+    /*
+     * T_Damage's own last act on a client-less body: its `pain` (+0xA0) or
+     * `die` (+0xA4), called before T_Damage returns (0x800627F8..0x80062B7C).
+     * The owner of the creatures resolves the actor and runs the reaction
+     * here, so a pain roll lands in the rand() sequence at the hit, ahead of
+     * the round's own blood and ahead of the next round's spread, as it does
+     * on the console. Optional: without it the reaction waits for the
+     * owner's own drain.
+     */
+    void (*damaged)(void *user, struct q2_actor *target);
+    void *damaged_user;
 } q2_combat_rules;
 
 void q2_combat_rules_default(q2_combat_rules *r);

@@ -340,6 +340,22 @@ static s32 g_skill = 1;
 void q2_cre_set_skill(s32 skill) { g_skill = skill; }
 s32  q2_cre_skill(void)          { return g_skill; }
 
+/*
+ * The skill the AI and every creature module test is not that one. They read
+ * the `skill` cvar — import +0x4C is the cvar table at 0x800AECF8, its first
+ * entry 0x800A3E78, the value at +20 (the Infantry's pain, module+0x1EA8:
+ * `lw 76(s1); lw 0(v0); lw 20(v0); addiu v0, zero, 3`) — and that record is a
+ * static stand-in: its strings point at an empty one and no instruction in the
+ * executable stores to it. So the value is 0 whatever the menu chose. The
+ * chosen difficulty, engine+0x366, is read by the damage function
+ * (0x80057C10, 0x800582D0), the spawn filter (0x8007CCF0) and the saves, and
+ * by nothing an AI think reaches. On the BASE3 attract run the Infantry at
+ * melee range draws checkattack's skill-0 coin (0x8005DB04) in frame 93.
+ */
+static s32 g_ai_skill_cvar = 0;
+
+s32 q2_cre_ai_skill(void) { return g_ai_skill_cvar; }
+
 /* ------------------------------------------------------------------------- */
 /* The firing hook. The module reaches the engine's bullet and bolt spawners  */
 /* through its import table; the port routes them through one callback so     */
@@ -1328,6 +1344,14 @@ static void soldier_spawn(q2_monster *m)
      */
     if (m->stand)
         m->stand(m);
+    /*
+     * And walkmonster_start (import +0xFC), which the module calls after the
+     * stand and the tail: monster_start's random start frame (0x80061B2C)
+     * draws from the shared rand() after soldier_stand's roll. Without it
+     * each soldier was one draw short. The console's BASE3 attract run draws
+     * stand, start frame, stand, start frame for its two guards.
+     */
+    q2_monster_walk_start(m);
 }
 
 /* ------------------------------------------------------------------------- */

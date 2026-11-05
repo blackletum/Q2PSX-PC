@@ -224,6 +224,21 @@ void q2_vw_select(q2_viewweapon *vw, int weapon)
     vw->switch_armed = true;
 }
 
+void q2_vw_request(q2_viewweapon *vw, int weapon)
+{
+    if (!vw || weapon < 0 || weapon >= Q2_VM_SLOTS)
+        return;
+    vw->pending = weapon;
+}
+
+void q2_vw_arm_switch(q2_viewweapon *vw)
+{
+    if (!vw)
+        return;
+    vw->switch_ticks = Q2_VW_SWITCH_TICKS;
+    vw->switch_armed = true;
+}
+
 void q2_vw_set_model(q2_viewweapon *vw, const q2_model *model)
 {
     if (vw)

@@ -923,7 +923,7 @@ void q2_monster_damage_reaction(q2_monster *targ, q2_monster *attacker,
              * overwrites it with five. 0x80062B10 tests the same global the
              * skill is read from everywhere else.
              */
-            if (q2_cre_skill() == 3)
+            if (q2_cre_ai_skill() == 3)
                 targ->pain_debounce =
                     q2_level_state.time + Q2_PAIN_DEBOUNCE_SKILL3;
             return;
@@ -1440,11 +1440,8 @@ void q2_monster_swim_start(q2_monster *m)
     monster_start_frame(m);                         /* 0x80062284 -> 0x80061B2C */
 }
 
-void q2_monster_start_go(q2_monster *m)
+static void monster_spawn_once(q2_monster *m)
 {
-    if (!m)
-        return;
-
     if (!m->spawn_initialized && m->cre_bind) {
         u32 variant = 0;
         const q2_creature *cre = m->cre_bind->cre;
@@ -1452,7 +1449,40 @@ void q2_monster_start_go(q2_monster *m)
             variant++;
         q2_creature_spawn(m->cre_bind, m, variant);
     }
+}
 
+/* The parked think; exported only so a save can name it (crebind.h id 10). */
+
+/*
+ * THE GO-ROUTINE RUNS A FRAME AFTER THE SPAWN, as a think. monster_start
+ * stores `nextthink = framenum + 1` (0x80061AB8..0x80061ABC) and the wrapper
+ * parks its go-routine at entity+0x94 (walkmonster_start 0x80062240 ->
+ * 0x8006241C); nothing calls it directly. Running it in the same pass as the
+ * spawn put each go-routine's stand or walk roll a frame early: on BASE3's
+ * attract run the console draws the near Soldier's stand roll in its second
+ * frame, after the four spawns, and the port drew it at load.
+ */
+void q2_monster_start(q2_monster *m)
+{
+    if (!m)
+        return;
+    monster_spawn_once(m);
+    if (m->start_kind == Q2_CRE_START_SCRIPT)
+        return;   /* the module installed its own think */
+    m->think      = q2_monster_go_think;
+    m->next_think = q2_level_state.time + 1;
+}
+
+void q2_monster_start_go(q2_monster *m)
+{
+    if (!m)
+        return;
+    monster_spawn_once(m);
+    q2_monster_go_think(m);
+}
+
+void q2_monster_go_think(q2_monster *m)
+{
     /*
      * Whichever go-routine the wrapper parked at entity+0x94. None of the
      * three writes the flags word — that was the wrapper's, at spawn.

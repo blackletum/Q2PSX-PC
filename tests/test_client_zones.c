@@ -124,7 +124,8 @@ static void test_ambush_return(const char *disc_path)
         if (m->group != group || m->population_slot != slot) continue;
         CHECK(m->in_use && !m->spawn_pending && m->health == health);
         CHECK(!memcmp(pos, m->pos, sizeof(pos)));
-        CHECK(m->think == q2_M_MoveFrame);
+        /* Captured before its first frame, it keeps the parked go. */
+        CHECK(m->think == q2_M_MoveFrame || m->think == q2_monster_go_think);
         break;
     }
     CHECK(i < c->creatures.set.count);
@@ -500,6 +501,8 @@ static void test_runtime_return(const char *disc, const char *dir)
         if (!m->in_use || !m->attack || !q2_pop_get_group(&c->creatures.pop, m->group, &g) ||
             strcmp(g.name, "Zone3")) continue;
         group[n] = m->group; slot[n] = m->population_slot; indices[n] = i;
+        /* The start's go runs a frame after the spawn (monster_start). */
+        if (m->think == q2_monster_go_think) q2_monster_go_think(m);
         m->enemy = m->goalentity = &c->creatures.sight;
         if (n == 0) m->attack(m);
         else q2_monster_damage(m, m->health + 1); /* dying, not gibbed */

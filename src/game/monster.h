@@ -1355,6 +1355,11 @@ void q2_monster_swim_start(q2_monster *m);
  * wrapper's, at spawn.
  */
 void q2_monster_start_go(q2_monster *m);
+/* The spawn now and the go-routine as the next frame's think, as
+ * monster_start parks it (nextthink = framenum + 1, 0x80061ABC). */
+void q2_monster_start(q2_monster *m);
+/* The go-routine q2_monster_start parks as the think, run a frame later. */
+void q2_monster_go_think(q2_monster *m);
 
 /*
  * G_PickTarget, 0x8005F708 — resolve a script `targetname` to an entity.

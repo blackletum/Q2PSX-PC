@@ -483,7 +483,26 @@ typedef struct q2_fire_result_v2 {
     s32  next_fire;         /* level tick when firing is allowed again       */
     s16  sound;             /* q2_wt_sound, or -1                            */
     s32  projectile_timer;  /* spawner's fuse/lifetime, in level ticks       */
+
+    /* A bullet weapon's spread, held back when q2_weapon_defer_spread is on:
+     * the shift per axis (0 = not drawn), for q2_weapon_shot_spread. */
+    bool spread_deferred;
+    u8   spread_shift[3];
 } q2_fire_result_v2;
+
+/*
+ * EACH PELLET'S SPREAD IS DRAWN AS THAT PELLET IS FIRED. The shotgun, super
+ * shotgun, machinegun and chaingun fire functions loop over their rounds and
+ * for each one draw its three spread numbers and trace it at once (the super
+ * shotgun's draws at 0x8004C5E0..0x8004C620, then fire_lead), so every
+ * round's impact — the puff's or the blood's own rand() draws — comes before
+ * the next round's spread. Drawing all the spreads first gave every round
+ * after the first a different direction and every impact different sparks.
+ * With deferral on, q2_weapon_fire leaves the directions as the bare aim and
+ * the caller draws each with q2_weapon_shot_spread just before its trace.
+ */
+void q2_weapon_defer_spread(bool on);
+void q2_weapon_shot_spread(const q2_fire_result_v2 *r, q2_shot *s, q2_rng *rng);
 
 /*
  * Fire the held weapon.

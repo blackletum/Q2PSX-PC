@@ -142,11 +142,11 @@ static void strider_pain(q2_monster *m, s16 damage)
     if (m->health < m->max_health / 2) m->skinnum |= 1;
     if (damage <= 10 || q2_level_state.time < m->pain_debounce) return;
     if (damage <= 30 && q2_random_next() >= 6554) return;
-    if (q2_cre_skill() >= 2 && ((m->frame >= 137 && m->frame <= 147) ||
+    if (q2_cre_ai_skill() >= 2 && ((m->frame >= 137 && m->frame <= 147) ||
                                (m->frame >= 189 && m->frame <= 201))) return;
     m->pain_debounce = q2_level_state.time + 30;
     strider_play(m, 0x80102BC4u);
-    if (q2_cre_skill() != 3) q2_cre_set_move(m, damage <= 30 ? 95 : 103);
+    if (q2_cre_ai_skill() != 3) q2_cre_set_move(m, damage <= 30 ? 95 : 103);
 }
 static void strider_dead(q2_monster *m)
 {

@@ -440,11 +440,19 @@ int q2_move_checked(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
  * do is not determinable from the image. Reproducing it with a CORRECT feet
  * value would be inventing behaviour, so this stops at the push.
  *
- * `Q2_BODY_RADIUS` is entity+0x90, written as a constant 128 by both relink
- * sites (0x80020BB4 and 0x8005A9D4) and never by anything else, so it is the
- * same for a player and for a Tank Commander.
+ * `Q2_BODY_RADIUS` is the 128 the two relink sites store at entity+0x90 with a
+ * halfword (0x80020BB4 for a death drop, 0x8005A9D4 for a gib).
+ *
+ * `Q2_ACTOR_BODY_RADIUS` is what a PLAYER's and a CREATURE's actor carries
+ * there instead: 286, read off the console's own records on the BASE3 attract
+ * run (player and all four creatures, tests/fixtures/lockstep_oracle.py),
+ * where no `sh` to +0x90 reaches them. So two walkers part at 572 between
+ * centres, not 256: at frame 77 of that run the pass pushes the player's step
+ * from -69 to -32 against the Infantry 543 units away, and holds them 572
+ * apart as it backs off. With 128 the port's player walked on into it.
  */
-#define Q2_BODY_RADIUS 128
+#define Q2_BODY_RADIUS       128
+#define Q2_ACTOR_BODY_RADIUS 286
 
 /* The pass's return, 0x800515D4's s5. */
 #define Q2_SEPARATE_PUSHED   0x1   /* 0x800514B8 `ori s5, s5, 1` */
@@ -458,16 +466,16 @@ typedef struct q2_move_body {
      * TWO RADII, AND THEY ARE DIFFERENT FIELDS.
      *
      * `radius` is entity+0x90, the separation pass's (0x80051428 `lh v1,
-     * 144(a1)`) — a constant 128 written by both relink sites and by nothing
-     * else. `sweep_radius` is entity+0x94, which is what the SWEEP at
+     * 144(a1)`) — 286 for a player or a creature, 128 for what the two relink
+     * sites write. `sweep_radius` is entity+0x94, which is what the SWEEP at
      * 0x800544EC reads (0x800545F4 `lh a0, 64(a2)` with a2 = entity+84) and is
      * 286 for a player. `height` is entity+0x96, the Y slab that goes with it.
      *
      * Kept on one record because they describe one body, and named apart
      * because reading the wrong one is a silent 158-unit error.
      */
-    s16  radius;      /* +0x90; Q2_BODY_RADIUS unless a caller
-                       * has a reason                             */
+    s16  radius;      /* +0x90; Q2_ACTOR_BODY_RADIUS for a player
+                       * or a creature                            */
     s32  sweep_radius; /* +0x94                                   */
     s16  height;       /* +0x96                                   */
     s32  id;          /* the caller's handle; -1 is never a body  */

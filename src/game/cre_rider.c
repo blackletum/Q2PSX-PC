@@ -136,7 +136,7 @@ static void rider_pain(q2_monster *m, s16 damage)
     if (q2_level_state.time < m->pain_debounce) return;
     if (damage <= 25 && q2_random_next() < 6553) return;
     m->pain_debounce = q2_level_state.time + 30;
-    if (q2_cre_skill() == 3) return;
+    if (q2_cre_ai_skill() == 3) return;
     if (damage <= 40) { sound(m, 0x2A10); q2_cre_set_move(m, 379); }
     else if (damage <= 110) { sound(m, 0x2A14); q2_cre_set_move(m, 383); }
     else if (damage <= 150 && (q2_random_next() < 14746 || q2_random_next() < 11469)) {

@@ -774,7 +774,7 @@ static void infantry_pain(q2_monster *self, s16 damage)
 
     self->pain_debounce = q2_level_state.time + Q2_AI_SECONDS(3);
 
-    if (q2_cre_skill() == 3)
+    if (q2_cre_ai_skill() == 3)
         return;
 
     if (inf_rand() % 2 == 0) {
@@ -943,6 +943,16 @@ static void infantry_spawn(q2_monster *self)
     self->mass     = 200;                   /* 0x80101418 */
     self->solid    = Q2_SOLID_BBOX;         /* 0x801014B0 */
     self->movetype = Q2_MOVETYPE_STEP;      /* the same store */
+    /*
+     * currentmove = Stand1 (`sw module+0x18DC, 0xD8`), then walkmonster_start
+     * (import +0xFC), whose monster_start takes the random start frame from
+     * the shared rand() (0x80061B2C). The port left both to the framework's
+     * later stand call, so the draw was never taken and every random number
+     * after it in the level was the one before. Measured against the
+     * console's own BASE3 attract run (tests/fixtures/lockstep_oracle.py).
+     */
+    q2_cre_set_move(self, INF_STAND);
+    q2_monster_walk_start(self);
 }
 
 const q2_cre_impl q2_cre_infantry = {

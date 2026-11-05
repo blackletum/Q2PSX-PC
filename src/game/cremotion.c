@@ -131,9 +131,9 @@ static void move_actor(q2_monster *m, s32 dt, bool integrate,
         } else p->ent.flags &= ~0x10u;
     }
     if (integrate && !(p->flags & 0x80000u)) {
-        q2_rng rng = { q2_random_state() };
+        q2_rng rng = { q2_random_state(), NULL };
         u32 result = q2_move_separate(w ? w->bodies : NULL, w ? w->self_id : -1,
-            p->ent.pos, m->mins, m->maxs, Q2_BODY_RADIUS, p->delta, &rng);
+            p->ent.pos, m->mins, m->maxs, Q2_ACTOR_BODY_RADIUS, p->delta, &rng);
         q2_random_seed(rng.state);
         if (result & Q2_SEPARATE_STOOD_ON) {
             p->ent.ground_normal[0] = p->ent.ground_normal[2] = 0;
@@ -168,8 +168,21 @@ u32 q2_cre_motion_tick(q2_monster *m, s32 dt, const q2_cre_motion_world *w)
     p = &m->motion;
     p->advanced = false;
     if (m->health <= 0) p->flags |= 0x8000u;
-    if ((m->svflags & Q2_SVF_DEADMONSTER) && !m->corpse)
+    /*
+     * A body that died since its last pass is detached now and handled as a
+     * corpse from the NEXT frame. The killing blow lands in another object's
+     * pass (a player's shot in PrimaryQuakePlayer, a missile in
+     * ProcessMissiles) after this creature's own object has already run in
+     * MoveModels' walk; the corpse handler die installs (0x8007F71C) first
+     * runs the frame after. Gibbing on the spot put the whole burst
+     * (ThrowGibs, 0x8007F764 -> 0x8007CEB4) and its rand() draws a frame
+     * early: on the BASE3 attract run the console's gibs come in the frame
+     * after the volley.
+     */
+    if ((m->svflags & Q2_SVF_DEADMONSTER) && !m->corpse) {
         q2_monster_corpse_detach(m);
+        return 0;
+    }
     if (m->corpse) { q2_monster_corpse_tick_dt(m, dt); return 0; }
     if (w && w->suspended) { p->clock = q2_level_state.time; return 0; }
     saved_time = q2_level_state.time;

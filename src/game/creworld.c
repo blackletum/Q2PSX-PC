@@ -1342,9 +1342,10 @@ u32 q2_creature_world_summon(q2_creature_world *w, const char *group)
              * pass creates the entity at this point and reaches
              * monster_start_go as part of that spawn. Calling the same start
              * here closes the seam introduced by the port's dormant-record
-             * representation without inventing a second wake path.
+             * representation without inventing a second wake path. The go
+             * routine follows a frame later, as the spawn parks it.
              */
-            q2_monster_start_go(m);
+            q2_monster_start(m);
             woke++;
         }
         break;

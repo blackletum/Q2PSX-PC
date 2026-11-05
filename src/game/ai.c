@@ -2,6 +2,7 @@
 #include "ai.h"
 
 #include <math.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -72,6 +73,9 @@ static const q2_ai_world g_open_world = {
 };
 
 static q2_ai_world g_world = { NULL, open_trace, open_los, open_bottom };
+
+s32 q2_ai_trace_hint = -1;
+s32 q2_ai_trace_end  = -1;
 
 void q2_ai_set_world(const q2_ai_world *w)
 {
@@ -354,12 +358,37 @@ void q2_project_source(const s32 point[3], const s16 distance[3],
 /* ------------------------------------------------------------------------- */
 /* visible — 0x8005B950                                                       */
 /* ------------------------------------------------------------------------- */
+/*
+ * 0x8005C980(edict, 5), as `visible` makes it for both of its edicts
+ * (0x8005B9C8, 0x8005BA24): the actor's position (+0x54) and its CURRENT yaw
+ * (+0xE8) are pulled back over the edict's origin and angles before the sight
+ * line is drawn. So asking whether a creature can see something also turns
+ * its edict back to the way its body actually faces, and the next turn starts
+ * from there: on the BASE3 attract run the Infantry's second step of frame 31
+ * turns from the body's 1850 to 1622, where the edict's own 1585 would have
+ * left it.
+ */
+static void visible_pull(const q2_monster *m)
+{
+    /* The console writes through it too; through uintptr_t so the qualifier
+     * is dropped on purpose, not by a cast -Wcast-qual objects to. */
+    q2_monster *w = (q2_monster *)(uintptr_t)m;
+
+    if (!w->motion.ready)
+        return;
+    memcpy(w->pos, w->motion.ent.pos, sizeof(w->pos));
+    w->angles[2] = w->motion.yaw;
+}
+
 bool q2_visible(const q2_monster *self, const q2_monster *other)
 {
     s32 spot1[3], spot2[3];
 
     if (!self || !other)
         return false;
+
+    visible_pull(self);
+    visible_pull(other);
 
     spot1[0] = self->pos[0];
     spot1[1] = self->pos[1] + self->view_height;
@@ -1382,7 +1411,7 @@ bool q2_M_CheckAttack(q2_monster *m)
  */
 static bool checkattack_decide(q2_monster *m)
 {
-    s32 chance, skill = q2_cre_skill();
+    s32 chance, skill = q2_cre_ai_skill();
 
     /* Melee range: a coin the lowest skill loses three times in four
      * (0x8005DB04's `rand() & 3`), then melee if there is one and a missile

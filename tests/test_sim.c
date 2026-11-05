@@ -6707,6 +6707,7 @@ int main(void)
     test_creature_laser();
     test_mission_laser();
     test_rocket_attitude();
+    test_one_random_stream();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     printf("%s\n", g_failures == 0 ? "PASS" : "FAIL");

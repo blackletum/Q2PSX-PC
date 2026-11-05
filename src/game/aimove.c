@@ -33,9 +33,28 @@ void q2_link_entity(q2_monster *m, u32 what)
         g_link(m, what, g_link_user);
 }
 
+/*
+ * G_TouchTriggers — 0x8005F4A8. A player or a monster whose actor is dead
+ * (+0x3C, `+0x40 & 4`, actor+0x108 <= 0) touches nothing.
+ *
+ * Its first act is 0x8005C9E0(self, 0x4001): the 0x4000 arm PULLS the actor's
+ * position (+0x54) back over the edict's origin. So the step SV_StepDirection
+ * has just taken survives only as the actor's target, which its link (0x85)
+ * wrote; the edict stands where the body really is, and a second step in the
+ * same think starts from there. Without the pull, the BASE3 attract run's
+ * Infantry stepped twice in frame 31 from two different places — the console
+ * from its start both times — and the second step hit the wall the
+ * console's misses.
+ */
 void q2_touch_triggers(q2_monster *m)
 {
-    if (g_touch && m)
+    if (!m)
+        return;
+    if ((m->client || (m->svflags & Q2_SVF_MONSTER)) && m->health <= 0)
+        return;
+    if (m->motion.ready)
+        memcpy(m->pos, m->motion.ent.pos, sizeof(m->pos));
+    if (g_touch)
         g_touch(m, g_link_user);
 }
 
@@ -99,8 +118,14 @@ bool q2_M_ChangeYaw(q2_monster *m)
         return move != raw;
     }
 
+    /*
+     * 0x80060A50 / 0x80060A54: the edict's yaw and the actor's TARGET yaw,
+     * +0xDA, and nothing else — the actor's own yaw at +0xE8 is left for the
+     * motion code to turn toward it. That is link's 4 with 0x80, not plain 4,
+     * which also snapped the body round on the spot.
+     */
     m->angles[2] = (s16)q2_anglemod(current + move);
-    q2_link_entity(m, 4);
+    q2_link_entity(m, 0x84);
 
     return move != raw;
 }
@@ -125,6 +150,12 @@ bool q2_M_CheckBottom(q2_monster *m)
  * direct move with a height correction, everything else gets the step-down
  * trace that lets a walker climb stairs.
  */
+/* actor+0xA2: the cell the actor's own moves last ended in (trace.h +0x4E). */
+static s32 actor_cell(const q2_monster *m)
+{
+    return m->motion.ready ? m->motion.ent.node : -1;
+}
+
 bool q2_SV_movestep(q2_monster *m, const s32 move[3], bool relink)
 {
     const q2_ai_world *w = q2_ai_get_world();
@@ -242,6 +273,7 @@ bool q2_SV_movestep(q2_monster *m, const s32 move[3], bool relink)
         lift[1] = m->pos[1] - stepsize;   /* Y is down, so "up" subtracts */
         lift[2] = m->pos[2];
 
+        q2_ai_trace_hint = actor_cell(m);       /* lh 162(actor), 0x8005FFA0 */
         w->trace(w->user, m->pos, m->mins, m->maxs, lift, m,
                  Q2_MASK_MONSTERSOLID, &tr);
 
@@ -279,6 +311,7 @@ bool q2_SV_movestep(q2_monster *m, const s32 move[3], bool relink)
             end[1] = neworg[1];
             end[2] = neworg[2];
 
+            q2_ai_trace_hint = q2_ai_trace_end;  /* lh 0x800C9002, 0x80060054 */
             w->trace(w->user, lifted, m->mins, m->maxs, end, m,
                      Q2_MASK_MONSTERSOLID, &tr);
         }
@@ -303,6 +336,7 @@ bool q2_SV_movestep(q2_monster *m, const s32 move[3], bool relink)
         end[1] = m->pos[1] + stepsize;
         end[2] = neworg[2];
 
+        q2_ai_trace_hint = q2_ai_trace_end;      /* 0x800600B4 */
         w->trace(w->user, neworg, m->mins, m->maxs, end, m,
                  Q2_MASK_MONSTERSOLID, &tr);
 
@@ -329,6 +363,7 @@ bool q2_SV_movestep(q2_monster *m, const s32 move[3], bool relink)
         neworg[2] = m->pos[2] + move[2];
 
         if (has_move) {
+            q2_ai_trace_hint = actor_cell(m);   /* 0x8006018C */
             w->trace(w->user, m->pos, m->mins, m->maxs, neworg, m,
                      Q2_MASK_MONSTERSOLID, &tr);
             if (tr.fraction != Q2_TRACE_ONE)
@@ -338,6 +373,9 @@ bool q2_SV_movestep(q2_monster *m, const s32 move[3], bool relink)
         end[0] = neworg[0];
         end[1] = m->pos[1] + stepsize;
         end[2] = neworg[2];
+        /* After the move, where it ended (0x800601CC); with none, the
+         * actor's own cell again (0x8006020C). */
+        q2_ai_trace_hint = has_move ? q2_ai_trace_end : actor_cell(m);
         w->trace(w->user, neworg, m->mins, m->maxs, end, m,
                  Q2_MASK_MONSTERSOLID, &tr);
 
@@ -404,9 +442,12 @@ bool q2_M_walkmove(q2_monster *m, s32 yaw, s32 dist)
 
     a = q2_anglemod(yaw);
 
-    move[0] = (s32)(((s64)q2_sin12(a) * dist + 4095) >> 12);
+    /* 0x80060814..0x80060854: toward zero, as SV_StepDirection rounds. */
+    move[0] = (s32)q2_sin12(a) * dist;
+    move[2] = (s32)q2_cos12(a) * dist;
+    move[0] = (move[0] < 0 ? move[0] + 4095 : move[0]) >> 12;
     move[1] = 0;
-    move[2] = (s32)(((s64)q2_cos12(a) * dist + 4095) >> 12);
+    move[2] = (move[2] < 0 ? move[2] + 4095 : move[2]) >> 12;
 
     return q2_SV_movestep(m, move, true);
 }
@@ -479,10 +520,19 @@ bool q2_SV_StepDirection(q2_monster *m, s32 yaw, s32 dist)
     m->ideal_yaw = (s16)yaw;
     q2_M_ChangeYaw(m);
 
+    /*
+     * 0x80060434..0x80060484: `mult` by the table's sin and cos at
+     * `yaw & 0xFFF`, then `bgez` past the +4095 — toward zero, both axes. The
+     * +4095 is a negative product's fix-up alone; added to a positive one it
+     * rounded up, and the ledge Infantry's step at -905 on the BASE3 attract
+     * run went to z 6024 where the console's goes to 6023.
+     */
     a = q2_anglemod(yaw);
-    move[0] = (s32)(((s64)q2_sin12(a) * dist + 4095) >> 12);
+    move[0] = (s32)q2_sin12(a) * dist;
+    move[2] = (s32)q2_cos12(a) * dist;
+    move[0] = (move[0] < 0 ? move[0] + 4095 : move[0]) >> 12;
     move[1] = 0;
-    move[2] = (s32)(((s64)q2_cos12(a) * dist + 4095) >> 12);
+    move[2] = (move[2] < 0 ? move[2] + 4095 : move[2]) >> 12;
 
     oldorigin[0] = m->pos[0];
     oldorigin[1] = m->pos[1];

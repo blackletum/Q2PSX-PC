@@ -86,6 +86,19 @@ typedef struct q2_ai_world {
     bool (*check_bottom)(void *user, const q2_monster *m);
 } q2_ai_world;
 
+/*
+ * THE START CELL — 0x8005BD3C's seventh argument (sp+24). A box trace walks
+ * the eroded hull from this cell rather than finding one for the start point,
+ * and does not check that the start lies in it (0x80044C74 only searches for
+ * -1). SV_movestep hands its lift the actor's own cell, actor+0xA2, and every
+ * trace after it SecondaryCol's current node, the halfword at 0x800C9002 the
+ * previous walk left behind. Set it before `trace`; the trace consumes it, so
+ * a caller that sets nothing gets -1, a search.
+ */
+extern s32 q2_ai_trace_hint;
+/* The cell the last box trace's walk ended in (0x800C9002), -1 if none. */
+extern s32 q2_ai_trace_end;
+
 /* Install the world the AI queries. Passing NULL restores the open stand-in. */
 void q2_ai_set_world(const q2_ai_world *w);
 const q2_ai_world *q2_ai_get_world(void);

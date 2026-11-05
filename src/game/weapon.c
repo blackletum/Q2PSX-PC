@@ -406,6 +406,24 @@ static s32 spread_draw(q2_rng *rng, int shift)
     return v >> shift;
 }
 
+static bool g_defer_spread;
+
+void q2_weapon_defer_spread(bool on)
+{
+    g_defer_spread = on;
+}
+
+void q2_weapon_shot_spread(const q2_fire_result_v2 *r, q2_shot *s, q2_rng *rng)
+{
+    int k;
+
+    if (!r || !s || !r->spread_deferred)
+        return;
+    for (k = 0; k < 3; k++)
+        if (r->spread_shift[k])
+            s->dir[k] += spread_draw(rng, r->spread_shift[k]);
+}
+
 q2_fire_result_v2 q2_weapon_fire(q2_inventory *inv, q2_rng *rng,
                                  const q2_weapon_tables *tab,
                                  int weapon_id,
@@ -548,6 +566,9 @@ q2_fire_result_v2 q2_weapon_fire(q2_inventory *inv, q2_rng *rng,
     case Q2_FK_BULLET:
         if (!pellets)
             break; /* a zero-rate spin has no bullet, bang or shock */
+        res.spread_deferred = g_defer_spread;
+        for (i = 0; i < 3; i++)
+            res.spread_shift[i] = (u8)w->spread.shift[i];
         for (i = 0; i < pellets; i++) {
             q2_shot *s = &res.shot[res.shot_count++];
             int k;
@@ -555,7 +576,7 @@ q2_fire_result_v2 q2_weapon_fire(q2_inventory *inv, q2_rng *rng,
             memcpy(s->origin, origin, sizeof(s->origin));
             for (k = 0; k < 3; k++) {
                 s32 d = aim ? (s32)aim[k] * Q2_AIM_SCALE_BULLET : 0;
-                if (w->spread.shift[k])
+                if (w->spread.shift[k] && !g_defer_spread)
                     d += spread_draw(rng, w->spread.shift[k]);
                 s->dir[k] = d;
             }

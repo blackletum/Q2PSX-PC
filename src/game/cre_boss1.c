@@ -73,9 +73,9 @@ static void boss1_pain(q2_monster *m, s16 damage)
     if (m->health < m->max_health / 2) m->skinnum = 1;
     if (q2_level_state.time < m->pain_debounce) return;
     if (damage <= 25 && q2_random_next() < 6553) return;
-    if (q2_cre_skill() >= 2 && m->frame >= 20 && m->frame <= 33) return;
+    if (q2_cre_ai_skill() >= 2 && m->frame >= 20 && m->frame <= 33) return;
     m->pain_debounce = q2_level_state.time + 30;
-    if (q2_cre_skill() != 3)
+    if (q2_cre_ai_skill() != 3)
         q2_cre_set_move(m, damage <= 10 ? 164 : damage <= 25 ? 168 : 172);
     /* The disc registers pain sounds but never plays them here. */
 }

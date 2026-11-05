@@ -613,3 +613,25 @@ compares them.
 python tests/fixtures/generate_selfplay_reference.py "<PAL.cue>" "<US.cue>" [--trace out.json] [--check]
 ```
 
+## Attract-demo lockstep oracle
+
+`lockstep_oracle.py` runs the console's own game over PAL BASE3's attract demo,
+natively, on the loader machine above plus a GTE (`gte.py`), the scratchpad and
+I/O space, and the BIOS `srand`/`rand` pair. It enters the level as ProcessGame's
+state 10 does (GameSelfPlay, GameNewMission, the arrival, LoadLevel), then runs
+MainGameLoop's frame order: DoubleTrebleBuffer, ClearOTag, SwapAllButtons and
+QuakeLoop. Drawing is stubbed at the GPU, and so are RestartXA, VSync, the model
+draw's ordering-table insertion and SnapShotPadViolation (`0x80032DCC`). Without
+that last stub GameCheckPaused finds no pad and pauses the run.
+
+Each record frame gives every `rand()` call with its caller and result, player
+one, every creature's actor and edict, the active-area mask, the closed doors
+and the entity box table. `--snapshot` saves the state after the 40-second load
+for later runs. `--probes` adds diagnostic events: box traces and their passes,
+SV_StepDirection, the actor pulls, player one's stepped move, body parts and
+gibs. It is a diagnostic: nothing it prints is checked in, and nothing from the
+disc is written.
+
+```
+python tests/fixtures/lockstep_oracle.py "<PAL.cue>" --frames 150 --snapshot <file> --out native.json [--probes]
+```

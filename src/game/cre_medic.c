@@ -183,7 +183,7 @@ static void medic_pain(q2_monster *m, s16 damage)
     if (m->health < m->max_health / 2) m->skinnum = 1;
     if (q2_level_state.time < m->pain_debounce) return;
     m->pain_debounce = q2_level_state.time + 30;
-    if (q2_cre_skill() == 3) return;
+    if (q2_cre_ai_skill() == 3) return;
     second = q2_random_next() >= 16384;
     sound(m, second ? 0x3410 : 0x340C); q2_cre_set_move(m, second ? 116 : 108);
 }

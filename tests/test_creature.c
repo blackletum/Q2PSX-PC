@@ -130,6 +130,12 @@ static void test_summoned_batch_is_started(void)
     check_eq_i(q2_creature_world_summon(&w, "LiftRoom"), 1,
                "the dormant record is selected");
     check(monster.in_use, "its port-side in-use latch is raised");
+    /* monster_start parks the go routine one frame out (nextthink =
+     * framenum + 1); it is that think which stands the creature. */
+    check(g_batch_stands == 0 && monster.think != NULL &&
+              monster.next_think == q2_level_state.time + 1,
+          "monster_start defers the go routine to the next frame");
+    monster.think(&monster);
     check_eq_i(g_batch_stands, 1,
                "monster_start_go installs the creature's standing move");
     check(monster.think == q2_M_MoveFrame,
@@ -187,8 +193,10 @@ static void test_batch_zone_eligibility(void)
                "CREBATCH cannot bypass the client's hull exclusion");
     check_eq_i(q2_creature_world_summon(&w, "Zone0Room2"), 1,
                "the resident ambush is still reachable");
-    check(monsters[1].think == q2_M_MoveFrame &&
+    check(monsters[1].think && monsters[1].think != q2_M_MoveFrame &&
           !monsters[1].spawn_pending, "the ambush starts and consumes its latch");
+    monsters[1].think(&monsters[1]);   /* the deferred go, a frame later */
+    check(monsters[1].think == q2_M_MoveFrame, "and its go installs the frame driver");
 }
 
 /* ------------------------------------------------------------------------- */
@@ -801,8 +809,11 @@ static void test_frames_drive(void)
     check(g_run_calls > 0,
           "and the move's end callback hands control back to run");
 
-    /* The run frames carry a distance, so the creature must have advanced. */
-    check(m.pos[0] != 0 || m.pos[2] != 0,
+    /* The run frames carry a distance, so the creature must have advanced —
+     * as its actor's TARGET: G_TouchTriggers pulls the edict back onto the
+     * body after every step (0x8005C9E0 with 0x4001), and only the motion
+     * tick, not run here, carries the body toward it. */
+    check(m.motion.target[0] != 0 || m.motion.target[2] != 0,
           "and the per-frame distances move it");
 }
 
@@ -1641,11 +1652,11 @@ static void test_tank_burst_rule(void)
           "refused, so the census's sent share is the whole of fire_calls");
 
     /*
-     * The CONTROL that keeps "none is extended" from being vacuous: the same
-     * loop against a live target does extend, on id's `random() <= 0.6`, so
-     * the refire really is reachable from here with skill, sight and the move
-     * table all in place. Thirty-two tries at 0.6 all missing has odds of
-     * about 2e-13.
+     * AND NOT AT A LIVE ONE EITHER. The refire also wants skill >= 2, and the
+     * skill it reads is the `skill` cvar, a record nothing in the executable
+     * writes (cre_soldier.c, q2_cre_ai_skill): 0 whatever the menu chose. So
+     * on the console the Tank's blaster volley is never extended, and the
+     * same loop against a live target, at menu skill 3, ends every volley.
      */
     foe.health = 100;
     extended = 0;
@@ -1655,7 +1666,7 @@ static void test_tank_burst_rule(void)
         if (m.currentmove && m.currentmove->first_frame == 65)
             extended++;
     }
-    check(extended > 0, "control: a live target can be re-attacked");
+    check(extended == 0, "a live target is not re-attacked either: the cvar is 0");
 
     /*
      * AND THE MACHINE GUN WITH NO TARGET AT ALL. TankMachineGun's `beq a3,

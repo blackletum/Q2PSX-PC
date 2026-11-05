@@ -146,7 +146,7 @@ void q2_cre_script_callbacks(q2_monster *m)
 static const q2_class_method thinks[] = {
     NULL, q2_M_MoveFrame, riderstand_idle, riderstand_shrink,
     rider2_think, rider3_think, deadcomm_drop, deadcomm_animate, q2_cre_rider_launch,
-    q2_cre_medic_revive
+    q2_cre_medic_revive, q2_monster_go_think
 };
 u8 q2_cre_think_id(const q2_monster *m)
 {
@@ -158,7 +158,7 @@ u8 q2_cre_think_id(const q2_monster *m)
 bool q2_cre_think_valid(const q2_monster *m, u8 id)
 {
     const q2_cre_bind *b = q2_cre_bind_for(m);
-    if (id <= 1) return true;
+    if (id <= 1 || id == 10) return true;   /* 10: any creature's parked go */
     if (!b || !b->impl || id > Q2_CRE_THINK_LAST) return false;
     if (id == 9) return !b->impl->scripted;
     if (id == 2 || id == 3) return !strcmp(b->impl->name, "RiderStand");

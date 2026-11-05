@@ -1271,7 +1271,7 @@ static void sim_bodies_rebuild(q2_sim *sim)
             b->mins[k] = q2_player_body_mins[k];
             b->maxs[k] = q2_player_body_maxs[k];
         }
-        b->radius       = Q2_BODY_RADIUS;
+        b->radius       = Q2_ACTOR_BODY_RADIUS;   /* +0x90 (trace.h) */
         /* entity+0x94 and +0x96 for a live player, the pair combat.c already
          * writes into the player's actor: 286 and 572, origin -286..+286. */
         b->sweep_radius = Q2_SWEEP_HALF_EXTENT;
@@ -3752,7 +3752,9 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
              * time, so it is refreshed here beside the cheat word rather than
              * latched at attach. */
             sim->ent_world.weapons_stay = sim->weapons_stay;
-            q2_entity_run(&sim->entities, &sim->ent_world);
+            /* Held for q2_sim_entities_late when the caller defers it. */
+            if (!sim->defer_entities)
+                q2_entity_run(&sim->entities, &sim->ent_world);
             q2_sim_glint_tick(sim);
             q2_sim_glint_evacuation_tick(sim, dt);
         }
@@ -3901,6 +3903,18 @@ void q2_sim_select_player(q2_sim *sim, int index)
     sim->ent_world.player[index].inv = &sim->combat.inv;
     sim->cur_player = index;
     sim->current_node = sim->player[index].ent.node;
+}
+
+void q2_sim_entities_late(q2_sim *sim, s32 dt)
+{
+    if (!sim || !sim->entities_ready ||
+        sim->cur_player != 0 || sim->settling || dt <= 0)
+        return;
+    sim->ent_world.dt           = dt;
+    sim->ent_world.deathmatch   = sim->multiplayer;
+    sim->ent_world.cheats       = sim->cheats;
+    sim->ent_world.weapons_stay = sim->weapons_stay;
+    q2_entity_run(&sim->entities, &sim->ent_world);
 }
 
 void q2_sim_missiles_late(q2_sim *sim, s32 dt)

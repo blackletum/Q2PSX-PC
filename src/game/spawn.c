@@ -278,7 +278,8 @@ void q2_monster_set_wake(q2_monster_set *set, q2_monster *player)
         q2_monster *m = &set->monsters[i];
         if (!m->in_use || m->dead || m->resume_pending)
             continue;
-        q2_monster_start_go(m);
+        /* The spawn now, the go-routine as next frame's think (monster.h). */
+        q2_monster_start(m);
     }
 }
 

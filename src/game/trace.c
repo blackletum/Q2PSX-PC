@@ -1153,7 +1153,7 @@ bool q2_move_actor(q2_collision *coll, q2_move_ent *ent, const s16 delta_in[3],
      */
     if (bodies)
         (void)q2_move_separate(bodies, self_id, ent->pos, mins, maxs,
-                               Q2_BODY_RADIUS, delta, rng);
+                               Q2_ACTOR_BODY_RADIUS, delta, rng);
 
     step    = q2_move_step_height(ent->flags);
     saved_y = ent->pos[1];

@@ -114,6 +114,7 @@ static void bound_trace(void *user, const s32 start[3], const s16 mins[3],
     q2_collision *hull;
     s32 pos[3];
     s32 node = -1;
+    bool walked;
 
     /*
      * `mask` is read for the one bit that matters — 0x02000000, which
@@ -126,6 +127,9 @@ static void bound_trace(void *user, const s32 start[3], const s16 mins[3],
      * the second pass is at the end of this function.
      */
 
+    s32 hint = q2_ai_trace_hint;
+
+    q2_ai_trace_hint = -1;              /* consumed, whatever happens below */
     memset(out, 0, sizeof(*out));
 
     if (b)
@@ -148,6 +152,10 @@ static void bound_trace(void *user, const s32 start[3], const s16 mins[3],
     if (box_is_real(mins, maxs) && b->move_hull) {
         hull = b->move_hull;
         b->stats.trace_boxed++;
+    } else {
+        /* The point arm refines the hint against the actor's position
+         * (0x80054F44) before its walk; the port finds the cell instead. */
+        hint = -1;
     }
 
     /*
@@ -163,7 +171,11 @@ static void bound_trace(void *user, const s32 start[3], const s16 mins[3],
      * the fraction, so a creature standing on a floor was told it was buried in
      * one. Measured on BASE1, 1052 of 1052 traces took that arm.
      */
-    if (!q2_coll_move(hull, start, end, -1, pos, &node) && node < 0) {
+    walked = q2_coll_move(hull, start, end, hint, pos, &node);
+    /* SecondaryCol's current node is what the next trace starts from. */
+    if (hull == b->move_hull)
+        q2_ai_trace_end = hull->current_node;
+    if (!walked && node < 0) {
         /*
          * The eroded hull could not place the START. The original does not
          * retry — 0x8005BD3C hard-selects — but a creature whose body is
@@ -174,7 +186,6 @@ static void bound_trace(void *user, const s32 start[3], const s16 mins[3],
          */
         if (hull != b->coll &&
             (q2_coll_move(b->coll, start, end, -1, pos, &node) || node >= 0)) {
-            b->stats.trace_fallback++;
         } else {
             b->stats.trace_unplaced++;
             out->fraction   = 0;
@@ -188,35 +199,31 @@ static void bound_trace(void *user, const s32 start[3], const s16 mins[3],
     }
 
     /*
-     * AND THE DOORS — the entity arm of the same sweep.
-     *
-     * Clipped from the START to wherever the hull left the move, so the nearer
-     * of the two wins with no fractions to compare. The creature's own box
-     * inflates the mover boxes, which is the Minkowski sum that makes a swept
-     * point stand for a swept body: without it a Gunner's centre would stop
-     * flush against a door and half the Gunner would be inside it.
+     * AND THE DOORS — the entity arm of the same sweep, which IS 0x80053C58:
+     * 0x8005BE94 calls it with (start, where the hull left the move, the same,
+     * 0x810), the very sweep the actor physics runs (q2_move_sweep_world). So
+     * the boxes are inflated by 286 on every face (0x80053D8C..0x80053E5C),
+     * not by the creature's own size, and the second walk's trigger VOLUMES
+     * block too when their mask meets 0x810 — the monster clips a player
+     * walks through. A segment clip that took only entity boxes, grown by the
+     * creature's own extents, let the BASE3 attract run's ledge Infantry walk
+     * through the clip the console stops it on at frame 31 (fraction 381
+     * against the port's clear run), and from there every creature drew
+     * another's numbers.
      *
      * The mask gate is the console's: a query that does not ask for entities
      * does not get them.
      */
     if (b->ents && (mask & Q2_MASK_ENTITY_BIT)) {
-        q2_move_seg_hit mh;
-        s32 body[3];
-        int k;
+        q2_move_world mw = *b->ents;
+        q2_move_contact mc;
 
-        for (k = 0; k < 3; k++) {
-            s32 lo = mins ? (s32)mins[k] : 0;
-            s32 hi = maxs ? (s32)maxs[k] : 0;
-
-            if (lo < 0) lo = -lo;
-            if (hi < 0) hi = -hi;
-            body[k] = lo > hi ? lo : hi;
-        }
-
-        if (q2_move_clip_segment(b->ents, start, pos, body, &mh)) {
-            pos[0] = mh.pos[0];
-            pos[1] = mh.pos[1];
-            pos[2] = mh.pos[2];
+        mw.half_extent = Q2_SWEEP_HALF_EXTENT;
+        mw.mask        = 0x810u;
+        if (!q2_move_sweep_world(&mw, start, pos, &mc)) {
+            pos[0] = mc.pos[0];
+            pos[1] = mc.pos[1];
+            pos[2] = mc.pos[2];
             b->stats.trace_blocked_ent++;
         }
     }

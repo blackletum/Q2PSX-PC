@@ -106,7 +106,7 @@ static void maiden_pain(q2_monster *m, s16 damage)
     m->pain_debounce = q2_level_state.time + 30;
     /* +0x9C0..0x9D0 stores the same handle at 1B90, 1B8C and 1B88. */
     maiden_play(m, 0x80101B90u);
-    if (q2_cre_skill() == 3) return;
+    if (q2_cre_ai_skill() == 3) return;
     q2_cre_set_move(m, damage <= 10 ? 90 : damage <= 25 ? 95 : 100);
 }
 static void maiden_die(q2_monster *m, s16 damage)

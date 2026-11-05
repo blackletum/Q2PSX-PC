@@ -92,7 +92,7 @@ static void glad_pain(q2_monster *m, s16 damage)
     }
     m->pain_debounce = q2_level_state.time + 30;
     glad_play(m, 0x801013D0u);
-    if (q2_cre_skill() == 3) return;
+    if (q2_cre_ai_skill() == 3) return;
     q2_cre_set_move(m, m->velocity[1] > 1200 ? 83 : 55);
 }
 

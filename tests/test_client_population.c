@@ -60,7 +60,10 @@ static void test_synthetic_batch(void)
     c->sim[0].event_rt.initial_pass = false;
     client_event_call(c, &item, 0);
     CHECK(monsters[0].in_use && !monsters[0].spawn_pending);
-    CHECK(monsters[0].think == q2_M_MoveFrame && !monsters[1].in_use);
+    /* monster_start parks the go routine a frame out; it installs the driver. */
+    CHECK(monsters[0].think && monsters[0].think != q2_M_MoveFrame && !monsters[1].in_use);
+    monsters[0].think(&monsters[0]);
+    CHECK(monsters[0].think == q2_M_MoveFrame);
     CHECK(c->sim[0].entities.count == 1 && c->sim[0].item_group_run[0]);
     CHECK(c->script_summoned == 1);
     monsters[0].in_use = false;
@@ -169,7 +172,7 @@ static void test_disc_batches(const char *disc_path, const char *output)
             q2_monster *m = &c->creatures.set.monsters[i];
             if (m->group == gi) {
                 CHECK(!m->spawn_pending);
-                if (m->in_use) { alive++; CHECK(m->think == q2_M_MoveFrame); }
+                if (m->in_use) { alive++; CHECK(m->think == q2_monster_go_think); } /* started next frame */
             }
         }
         CHECK(alive == pending);
@@ -793,6 +796,9 @@ static void kill_population_actor(q2_monster *m)
     s16 damage;
     CHECK(m && m->in_use && !m->dead && m->health > 0);
     if (!m || !m->in_use || m->dead) return;
+    /* A creature starts a frame after its spawn (monster_start); one killed in
+     * that frame would have its death move replaced by the go's stand. */
+    if (m->think == q2_monster_go_think) q2_monster_go_think(m);
     damage = (s16)(m->health + 1);
     m->health = -1;
     q2_monster_damage_reaction(m, NULL, damage);

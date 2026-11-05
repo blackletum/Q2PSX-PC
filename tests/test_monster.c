@@ -459,16 +459,18 @@ static void test_damage_reaction(void)
     check_eq_i(targ.aiflags, Q2_AI_GOOD_GUY | Q2_AI_STAND_GROUND,
                "a second hit does not re-run monster_death_use");
 
-    /* The nightmare debounce, 0x80062B20: five seconds rather than the pain
-     * handler's own three. */
+    /* The nightmare debounce, 0x80062B20, tests the `skill` cvar, which is a
+     * record nothing writes (cre_soldier.c): with NIGHTMARE chosen in the
+     * menu it still reads 0, so the pain handler's own debounce stands. */
     q2_level_reset();
     make_monster(&targ, 87, 100);
     make_player(&player);
     targ.health = 60;
     q2_cre_set_skill(3);
     q2_monster_damage_reaction(&targ, &player, 40);
-    check_eq_i(targ.pain_debounce, Q2_AI_SECONDS(5),
-               "skill 3 pushes the pain debounce out to five seconds");
+    check_eq_i(targ.pain_debounce, 0,
+               "menu skill 3 does not reach the cvar the debounce tests");
+    check_eq_i(q2_cre_ai_skill(), 0, "the AI's skill cvar reads 0");
     q2_cre_set_skill(1);
 }
 

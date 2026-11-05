@@ -608,24 +608,24 @@ static void apply_knockback(q2_actor *attacker, q2_actor *target,
                             s16 damage, const s32 point[3],
                             const q2_combat_rules *rules)
 {
-    s64 dir[3];
-    s32 len;
+    s32 delta[3], dir[3];
     s32 scale;
     s32 mass = rules ? rules->knockback_mass : 0;
     bool self = (attacker == target) && target->has_client;
     int i;
 
-    dir[0] = (s64)target->origin[0] - point[0];
-    dir[1] = (s64)target->origin[1] - point[1];
-    dir[2] = (s64)target->origin[2] - point[2];
-
-    /* 0x80057F28 normalises through 0x8008A588; the port does the same in
-     * 1.3.12 so the multiply below keeps its scale. */
-    len = isqrt64(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
-    if (len <= 0)
-        return;
+    /* 0x80057EF0..0x80057F24: the subtractions are 32-bit `subu`. */
     for (i = 0; i < 3; i++)
-        dir[i] = (dir[i] * 4096) / len;
+        delta[i] = (s32)((u32)target->origin[i] - (u32)point[i]);
+
+    /*
+     * 0x80057F28 `jal 0x8008A588` in place: the SDK's VectorNormal, a table
+     * square root and its own divide, not an exact Euclidean one. An exact
+     * isqrt here put the knocked soldier's vertical impulse one short of the
+     * console's on the BASE3 attract run (94 against 95), which the gibs it
+     * throws carry. A zero vector is not refused: the store below still runs.
+     */
+    q2_sdk_vector_normal(delta, dir);
 
     /*
      * 0x80057F80: `125 * (mass + 64) / 64` for an ordinary hit, and
@@ -1159,6 +1159,12 @@ effect_tail:
         if (slot >= 0 && slot < (int)(sizeof(target->effect)))
             target->effect[slot] = (u8)v;
     }
+
+    /* The body's pain or die, now rather than at the owner's next drain
+     * (q2_combat_rules.damaged). */
+    if (!target->has_client && target->damage_reaction_pending &&
+        rules && rules->damaged)
+        rules->damaged(rules->damaged_user, target);
 
     return out;
 }

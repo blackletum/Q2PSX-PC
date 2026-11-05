@@ -1129,6 +1129,9 @@ typedef struct client {
      */
     u8               *node_hidden;
     u32               node_hidden_count;
+    /* Creature ticks since the level loaded: ChrisCount for the area flood,
+     * which marks every area active on the level's first frame. */
+    u32               level_cre_ticks;
     u32               script_hidden;    /* nodes hidden this level */
     u32               script_summoned;  /* creatures a CREBATCH woke */
     u32               script_timers;
@@ -3335,6 +3338,17 @@ static void client_cre_fire(q2_monster *m, int flash, void *user)
  * which is also the console's timing: T_Damage runs inside the shooter's
  * think and calls the victim's pain or die before it returns.
  */
+/* q2_combat_rules.damaged: a creature's pain or die at the hit itself. */
+static void client_cre_damaged(void *user, q2_actor *target)
+{
+    client *c = (client *)user;
+
+    if (!c || !c->cre_actor || !target || target < c->cre_actor ||
+        target >= c->cre_actor + c->creatures.set.count)
+        return;
+    client_cre_drain_one(c, (u32)(target - c->cre_actor));
+}
+
 static void client_cre_drain_one(client *c, u32 i)
 {
     q2_monster *m    = &c->creatures.set.monsters[i];
@@ -4365,6 +4379,7 @@ static void client_creatures_tick(client *c, float dt, const s32 eye[3])
         return;
 
     q2_creature_world_actor_tick(&c->creatures);
+    c->level_cre_ticks++;
     activity_ready = c->sim[0].coll_primary_ready &&
         q2_area_parse(&graph, &c->zone.zone) == Q2_OK;
     if (activity_ready) {
@@ -4372,9 +4387,46 @@ static void client_creatures_tick(client *c, float dt, const s32 eye[3])
         s32 cell = q2_coll_find_node(&c->sim[0].coll_primary, c->cam.pos, -1, true);
         u8 area = cell >= 0 && q2_collision_get_node(&c->sim[0].coll_primary,
             (u32)cell, &node) ? node.contents & 0x7Fu : 0;
-        q2_cre_active_areas(&graph, &c->zone.scene, c->node_hidden,
-            c->node_hidden_count, area, c->frame_index <= 1 ||
-            c->sim[0].multiplayer, active_areas);
+        /*
+         * WHICH PORTALS ARE SHUT. CalcActiveAreaList (0x800651D4) stops at a
+         * link whose Scene node has bit 15 of its flags set (0x80065438), and
+         * that bit has two writers: OBJDRAWOFF/ON (the port's `node_hidden`)
+         * and every door, which seals its portal node at load
+         * (PSXDOOR1UP_T, 0x80025DF0) and while it is shut
+         * (PrimaryDoor2_PDH, 0x80025C5C) — the port's `mover.sealed`. The
+         * flood read only the first, so it ran through every closed door and
+         * woke creatures the console leaves asleep: on BASE3's attract run
+         * eleven extra areas, and the far Soldier in area 30 thinking (and
+         * drawing rand()) from its second frame. Measured against the
+         * console's own run (tests/fixtures/lockstep_oracle.py).
+         */
+        static u8 *closed;
+        static u32 closed_cap;
+        u32 closed_count = c->zone.scene.node_count > c->node_hidden_count
+                         ? c->zone.scene.node_count : c->node_hidden_count;
+        u32 mi;
+
+        if (closed_count > closed_cap) {
+            u8 *grown = (u8 *)realloc(closed, closed_count);
+            if (grown) { closed = grown; closed_cap = closed_count; }
+        }
+        if (closed && closed_count <= closed_cap) {
+            memset(closed, 0, closed_count);
+            if (c->node_hidden)
+                memcpy(closed, c->node_hidden, c->node_hidden_count);
+            for (mi = 0; c->movers_ready && mi < c->movers.count; mi++) {
+                const q2_mover *mv = &c->movers.movers[mi];
+                if (mv->portal_node >= 0 && (u32)mv->portal_node < closed_count &&
+                    mv->sealed)
+                    closed[mv->portal_node] = 1;
+            }
+        }
+        /* Every area on the level's first frame: ChrisCount == 1
+         * (0x800651E0), or any multiplayer layout (0x800651F4). */
+        q2_cre_active_areas(&graph, &c->zone.scene,
+            closed ? closed : c->node_hidden,
+            closed ? closed_count : c->node_hidden_count, area,
+            c->level_cre_ticks <= 1 || c->sim[0].multiplayer, active_areas);
     }
 
     /* Aiming reads the same eye and velocity as visibility. Keep the sight
@@ -9266,15 +9318,25 @@ static bool client_load_zone(client *c, const char *map, int index)
      * load draws comes from this seed and a restored game is NOT handed back
      * the rand() state it was saved with (the card never held one). The
      * console's seed is 13 in self-play and otherwise the root counter at
-     * that instant (GetRCnt(0xF2000001), 0x80070E20). A headless run takes
-     * the self-play arm, so its every load is reproducible; an interactive
-     * one reads the host clock in the counter's place. The attract demo's
-     * levels take it because they ARE self-play: GameSelfPlay sets
-     * InSelfPlayMode before the load reaches InitLevel (selfplay.h).
+     * that instant (GetRCnt(0xF2000001), 0x80070E20) — but ONLY in a
+     * multiplayer game. 0x80070DF0 loads the multiplayer flag (0x800AEBCC)
+     * and `beq v1, zero` goes straight to `a0 = 13` (0x80070E30): every
+     * single-player load, the campaign included, seeds 13; the counter is
+     * read only for a multiplayer level outside self-play (0x80070E10). So
+     * a single-player level runs the same random choices every time it is
+     * entered. An interactive multiplayer load reads the host clock in the
+     * counter's place; a headless one takes 13 so a capture is reproducible.
+     *
+     * And only on a LEVEL load. InitLevel is the one caller; a zone stream
+     * inside the level (ReloadLevelData, 0x800793B8) does not reseed, so the
+     * sequence runs on across the seam.
      */
-    q2_random_seed((c->headless || c->selfplay_active)
-                       ? (u32)Q2_SELFPLAY_SEED
-                       : (u32)((SDL_GetTicksNS() / 64000u) & 0xFFFFu));
+    if (!same_map_transition)
+        c->level_cre_ticks = 0;   /* LoadLevel zeroes ChrisCount (0x8007CA94) */
+    if (!same_map_transition)
+        q2_random_seed((!c->mp_enabled || c->headless || c->selfplay_active)
+                           ? (u32)Q2_SELFPLAY_SEED
+                           : (u32)((SDL_GetTicksNS() / 64000u) & 0xFFFFu));
     q2_sim_init(&c->sim[0], &c->zone, q2_build_tick_rate(&c->build));
     /* 0x800AE898 is initialized once in the executable, with no level,
      * respawn or card-load reset. Keep its cadence across every zone rebuild. */
@@ -11882,8 +11944,14 @@ static void client_advance_view_weapon(client *c, bool attack, s32 ticks)
          * of which the console announces. It lives in client_cycle_input now,
          * which is where the console keeps it.
          */
+        /* The held weapon changed: the driver swaps to it once the lower
+         * ends. The 70-tick hold is the cycle routine's alone, and
+         * client_cycle_input arms it (viewweapon.h, q2_vw_request). Arming it
+         * here held a pickup's or a loadout's weapon down for 70 ticks the
+         * console does not: the BASE3 attract run's super shotgun came up
+         * five frames late and fired a frame early against the recording. */
         if (c->sim[0].combat.weapon_id != c->vw_last_weapon[pi]) {
-            q2_vw_select(&c->vw[pi], c->sim[0].combat.weapon_id);
+            q2_vw_request(&c->vw[pi], c->sim[0].combat.weapon_id);
             c->vw_last_weapon[pi] = c->sim[0].combat.weapon_id;
         }
 
@@ -12134,6 +12202,9 @@ static void client_cycle_input(client *c, int pi, const q2_input *in)
     if (c->sim[0].player[pi].ent2_flags & Q2_ENT2_DEAD) return;
     if (!(in->buttons & (Q2_BTN_WEAP_NEXT | Q2_BTN_WEAP_PREV))) return;
     q2_sim_select_player(&c->sim[0], pi);
+    /* 0x8004ECEC / 0x8004ED10: the press arms the 70-tick countdown before
+     * the scan, found weapon or not. */
+    q2_vw_arm_switch(&c->vw[pi]);
     q2_sim_cycle_weapon(&c->sim[0],
                         in->buttons & Q2_BTN_WEAP_NEXT ? 1 : -1);
     client_sbar_write_slots(c, pi, CLIENT_SLOTS_SELECT);
@@ -12227,6 +12298,10 @@ static void client_input_simulated(client *c, float dt)
 
     q2_pad_state       *pad  = &c->pad;
     u16                *pend = &c->pad_pend;  /* bits seen since the last TICK */
+
+    /* A sim rebuilt by a zone load has fresh rules; keep the hook in them. */
+    c->sim[0].combat.rules.damaged      = client_cre_damaged;
+    c->sim[0].combat.rules.damaged_user = c;
     /*
      * Did something else own the previous frame?
      *
@@ -12462,7 +12537,7 @@ static void client_input_simulated(client *c, float dt)
      */
     if (c->shoot || (c->shoot_to_kill && c->cre_die_calls == 0)) {
         in.attack   = true;
-        in.buttons |= Q2_BTN_ATTACK | Q2_BTN_ATTACK_PRESS;
+        in.buttons |= Q2_BTN_ATTACK | Q2_BTN_ATTACK_PRESS | Q2_BTN_ATTACK_REPEAT;
     }
 
     (void)dt;
@@ -12615,7 +12690,7 @@ static void client_input_simulated(client *c, float dt)
                     b->mins[k] = m->mins[k];
                     b->maxs[k] = m->maxs[k];
                 }
-                b->radius = Q2_BODY_RADIUS;
+                b->radius = Q2_ACTOR_BODY_RADIUS;   /* +0x90, 286 (trace.h) */
                 /*
                  * The SWEEP's own pair, entity+0x94 and +0x96, taken from the
                  * actor rebuilt beside it exactly as 0x800544EC reads them,
@@ -12748,7 +12823,7 @@ static void client_input_simulated(client *c, float dt)
          * aimed at the top of each frame and turning away inside its own tick.
          */
         in.attack   = true;
-        in.buttons |= Q2_BTN_ATTACK_PRESS;
+        in.buttons |= Q2_BTN_ATTACK_PRESS | Q2_BTN_ATTACK_REPEAT;
         in.yaw      = 0;
         in.pitch    = 0;
 
@@ -12824,7 +12899,11 @@ static void client_input_simulated(client *c, float dt)
     client_player_motion(c);
     /* With several players, the missiles wait for the last of them (sim.h). */
     c->sim[0].defer_missiles = c->mp_enabled;
+    /* The items and gibs wait for the creatures (sim.h, defer_entities): held
+     * for this tick only, and run below by q2_sim_entities_late. */
+    c->sim[0].defer_entities = true;
     ticked = (q2_sim_advance(&c->sim[0], &in, (double)dt) != 0);
+    c->sim[0].defer_entities = false;
     if (ticked) client_glint_scene(c, false);
     q2_combat_scan_who = Q2_COMBAT_SCAN_OTHER;
     client_score_deaths(c);
@@ -12854,7 +12933,17 @@ static void client_input_simulated(client *c, float dt)
         int pi;
         s32 step_dt = c->sim[0].cur_dt;
 
-        view_attack[0] = in.attack;
+        /*
+         * The weapon driver's trigger is command bit 24, not 25: every test in
+         * PrimaryWeaponMovement reads bit 0 of command byte 11 (0x8004FB04,
+         * 0x8004FF8C, 0x80050060, 0x800501A0, 0x80050274, 0x800503E4), and
+         * MapPadInputToCommands sets that bit only when the fire mask is down
+         * in this frame's pad word AND last frame's (0x80019A6C..0x80019A98).
+         * So the console fires on the trigger's second frame and a one-frame
+         * tap never shoots. Reading the held bit fired a frame early: on the
+         * BASE3 attract run, the first volley a frame before the recording's.
+         */
+        view_attack[0] = (in.buttons & Q2_BTN_ATTACK_REPEAT) != 0;
 
         for (pi = 1; pi < Q2_MP_MAX_PLAYERS; pi++) {
             q2_input pin;
@@ -12868,7 +12957,8 @@ static void client_input_simulated(client *c, float dt)
             c->mp_input[pi] = pin;
             if (ticked) client_cycle_input(c, pi, &pin);
 
-            view_attack[pi] = (c->mp_stage && c->mp.end == Q2_MP_RUNNING) || pin.attack;
+            view_attack[pi] = (c->mp_stage && c->mp.end == Q2_MP_RUNNING) ||
+                              (pin.buttons & Q2_BTN_ATTACK_REPEAT) != 0;
             if (!ticked)
                 continue;
 
@@ -13168,8 +13258,6 @@ static void client_input_simulated(client *c, float dt)
 
     /* The multiplayer session's own frame, on the same clock. */
     if (ticked) client_mp_tick(c, c->sim[0].cur_dt);
-
-    client_level_effects_frame(c, ticked);
 
     /*
      * The 1/300 s clock three separate subsystems run on, and each is now
@@ -13698,6 +13786,23 @@ static void client_input_simulated(client *c, float dt)
     }
 
     /*
+     * MoveModels' walk: the items, gibs and explosions, after every creature
+     * has thought. A corpse handler's gibs (ThrowGibs) tumble and bleed in
+     * the frame they were thrown, as the console's trail draws do.
+     */
+    if (ticked) {
+        u32 before = c->lights_ready ? c->light_world.dynamic_world_count : 0;
+        q2_sim_entities_late(&c->sim[0], c->sim[0].cur_dt);
+        client_entity_events(c);
+        /* What the sweep lit is held to the next tick with the rest. */
+        if (c->lights_ready) {
+            u32 n = c->light_world.dynamic_world_count, l;
+            for (l = before; l < n && c->tick_light_count < Q2_DYNLIGHT_MAX; l++)
+                c->tick_lights[c->tick_light_count++] = c->light_world.dynamic_world[l];
+        }
+    }
+
+    /*
      * THIS FRAME'S DEATH DROPS — 0x80020E24, which the frame routine calls
      * once a frame (0x80038FE0). Here because it is below every site a
      * creature can die at this frame: the sim tick, the actor sync above where
@@ -13716,6 +13821,16 @@ static void client_input_simulated(client *c, float dt)
     q2_monster_set_player_weapon((s16)c->sim[0].combat.weapon_id,
                                  (u32)c->sim[0].combat.inv.weapons);
     q2_monster_drop_flush();
+
+    /*
+     * The teleport columns, laser walls and beams, AFTER the creatures:
+     * QuakeLoop runs ProcessCreatureBatches (0x80038F24) and MoveModels
+     * (0x80038F40) before DrawTelePorts (0x80038FA4). Teleports take 45
+     * rand() draws every frame, so running them first handed every creature
+     * the numbers the console gives the next frame's columns. Measured
+     * against the console's own BASE3 attract run (lockstep_oracle.py).
+     */
+    client_level_effects_frame(c, ticked);
 
     /*
      * DEATH — the whole chain now, not only the frame it starts on.

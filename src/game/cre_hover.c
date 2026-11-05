@@ -87,7 +87,7 @@ static void hover_pain(q2_monster *m, s16 damage)
     if (m->health < m->max_health / 2) m->skinnum = 1;
     if (q2_level_state.time < m->pain_debounce) return;
     m->pain_debounce = q2_level_state.time + 30;
-    if (q2_cre_skill() == 3) return;
+    if (q2_cre_ai_skill() == 3) return;
     first = damage <= 25 ? (q2_random_next() < 16384 ? 153 : 141) : 113;
     /* Init +0x480 aliases +0x1460 to this registered handle. */
     hover_play(m, 0x80101464u);

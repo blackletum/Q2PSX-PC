@@ -129,7 +129,7 @@ static void flyer_pain(q2_monster *m, s16 damage)
     if (m->health < m->max_health / 2) m->skinnum = 1;
     if (q2_level_state.time < m->pain_debounce) return;
     m->pain_debounce = q2_level_state.time + 30;
-    if (q2_cre_skill() == 3) return;
+    if (q2_cre_ai_skill() == 3) return;
     choice = q2_random_next() % 3;
     flyer_play(m, 0x8010176Cu);
     q2_cre_set_move(m, first[choice]);
