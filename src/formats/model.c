@@ -1103,14 +1103,14 @@ q2_result q2_model_bake_indices(const q2_model *m, u16 *out)
         u32 nverts   = q2_rd_u8(pp + 3);
 
         /*
-         * LAST WRITER WINS. This one line is the INFERRED part of the format.
-         * A rival rule — storage = cv + (index - base), with no shared buffer —
-         * also resolves 100% of the disc's indices in range and differs on
-         * 18,283 articulated faces; the geometry cannot separate them. We take
-         * this one because it is the only rule reaching 100.0000% storage
-         * coverage on every model, where the rival orphans 746 vertices. If the
-         * per-part transform matrices ever settle the question the other way,
-         * this loop is the only thing that changes.
+         * LAST WRITER WINS, AS THE DRAW CODE DOES IT. The model drawer at
+         * 0x800B1F90 runs one pass per part (0x800B1FF4..0x800B25C4): it
+         * transforms the part's vertices into the shared scratch starting at
+         * `(part[+2] & 0xFF) * 8` (0x800B2378..0x800B2384), and then, in the
+         * same pass, emits that part's faces reading `scratch + index * 8`
+         * (0x800B2438..0x800B2440). So a face reads whichever part wrote the
+         * slot last up to and including its own, which is this loop's rule.
+         * The rival offset rule was only ever an alternative fit.
          */
         for (k = 0; k < nverts; k++)
             map[base + k] = (s32)(cv + k);

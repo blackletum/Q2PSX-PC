@@ -30,7 +30,14 @@ enum {
     Q2_NATIVE_REACTOR_BEAM_OFF = 1u << 22,
     Q2_NATIVE_BASE3_WALL_OFF = 1u << 23,
     Q2_NATIVE_SECURITY_LIFT_HELD = 1u << 24, /* unit 2 save word +44 */
-    Q2_NATIVE_FLAGS_ALL    = (1u << 25) - 1u
+    /* Unit 2 ("Jail Mission", 208 bytes) save word +48, three latches read
+     * through [block+0x14]: bit 0 JAIL3 +0x13C's Unit2Curr2 has been raised,
+     * bit 1 JAIL3 BothKeys (+0xC34) has run, bit 2 SECURITY +0x16B0's
+     * Unit2Curr8 has been raised. */
+    Q2_NATIVE_JAIL3_BRIEFED   = 1u << 25,
+    Q2_NATIVE_JAIL3_KEYS_SEEN = 1u << 26,
+    Q2_NATIVE_SECURITY_BRIEFED = 1u << 27,
+    Q2_NATIVE_FLAGS_ALL    = (1u << 28) - 1u
 };
 
 /* Stable disk order: NMIS v5 contains the two LAB entries; v6 adds the five

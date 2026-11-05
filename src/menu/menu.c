@@ -426,16 +426,27 @@ static const q2_menu_page *resolve(const q2_menu *m, int id)
  * reopened on whatever row you last used instead of on RETURN TO GAME, and why
  * backing out of QUIT GAME? came back to YES rather than NO.
  *
- * QFRONT's pages are deliberately excluded from the finding, not from the
- * restore. The front end is a separate image that these tools cannot
- * disassemble — `disasm` answers "0x8010EC3C is outside the loaded segment" —
- * so its cursor handling is unread, and its pages keep the port's existing
- * restore-everywhere rather than being changed on evidence that does not cover
- * them.
+ * QFRONT's builders are read now (`levdisasm QFRONT`), and they ask through
+ * the same engine slot, `lw v0, 488(engine)`, at the same point — after the
+ * table install. Every builder that installs a navigable table asks, with two
+ * exceptions that matter:
+ *
+ *   module+0x4AD8  the match SETUP (module page 13). It ends with
+ *                  `lhu first` / `sh cursor` at module+0x4D44..0x4D4C, so the
+ *                  page always opens on its first row, "2 3 4 PLAYERS". It is
+ *                  reached three ways — a mode row's action, and as the BACK
+ *                  handler of GAME VARIABLES (module+0x4A88) and of the
+ *                  per-player pages — and all three land on the first row.
+ *   module+0x59CC  PROCEED's per-player pages (module page 11), whose cursors
+ *                  are per player (engine+742 + 34p) and not this one.
+ *
+ * GAME VARIABLES (module+0x49F8, page 12) does ask, at module+0x4AAC.
  */
 static bool cursor_restores(int page_id)
 {
     if (page_id == Q2_PAGE_FRONT_UNLOCK) return false;
+    if (page_id == Q2_PAGE_FRONT_DMSETUP) return false;  /* module+0x4D44 */
+    if (page_id == Q2_PAGE_FRONT_PLAYERS) return false;  /* module+0x59CC */
     switch (page_id) {
     case Q2_PAGE_SCREEN_POSITION:   /* 7  */
     case Q2_PAGE_OPTIONS:           /* 27 */

@@ -403,6 +403,8 @@ static bool same_weapon(q2_viewweapon a, q2_viewweapon b)
 {
     a.tab = b.tab = NULL;
     a.model = b.model = NULL;
+    /* The host's auto-select hook, installed per advance: not saved state. */
+    a.auto_select = b.auto_select = NULL;
     return memcmp(&a, &b, sizeof(a)) == 0;
 }
 

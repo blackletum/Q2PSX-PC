@@ -1198,9 +1198,12 @@ static void test_front_multiplayer_setup(void)
           m.page->items[8].y == 192,
           "gold front variables layout is %u rows, y %d..%d", m.page->count,
           m.page->items[0].y, m.page->items[8].y);
+    /* GAME VARIABLES' back handler is the setup builder itself, module+0x4AD8,
+     * which ends `cursor := first` (module+0x4D44..0x4D4C): BACK lands on
+     * "2 3 4 PLAYERS", not on the row that was left. */
     tap(&m, Q2_PAD_TRIANGLE);
-    CHECK(m.page_id == Q2_PAGE_FRONT_DMSETUP && m.cursor == 4,
-          "back restores setup row %d on page %d", m.cursor, m.page_id);
+    CHECK(m.page_id == Q2_PAGE_FRONT_DMSETUP && m.cursor == 0,
+          "back lands on setup row %d on page %d", m.cursor, m.page_id);
 
     m.cursor = 5;
     tap(&m, Q2_PAD_CROSS);
@@ -1564,19 +1567,81 @@ static void test_mcard_states(void)
             live++;
     CHECK(live == 6, "six of the nineteen entries have an arm, got %d", live);
 
-    CHECK(q2_mcard_state_live(Q2_MCARD_STATE_LIST), "3 is live");
-    CHECK(q2_mcard_state_live(Q2_MCARD_STATE_CHOICE_19), "19 is live");
-    CHECK(!q2_mcard_state_live(1) && !q2_mcard_state_live(12),
+    CHECK(q2_mcard_state_live(Q2_MCARD_STATE_CARDS), "3 is live");
+    CHECK(q2_mcard_state_live(Q2_MCARD_STATE_FILES), "13 is live");
+    CHECK(q2_mcard_state_live(Q2_MCARD_STATE_OVERWRITE), "19 is live");
+    CHECK(!q2_mcard_state_live(1) && !q2_mcard_state_live(12) &&
+          !q2_mcard_state_live(Q2_MCARD_STATE_FAILED),
           "the fall-through states are not");
 
-    /* Only the two the arms settle are mapped; guessing the rest would look
-     * identical in the port and be wrong on the console. */
-    CHECK(q2_mcard_screen_for_state(Q2_MCARD_STATE_LIST) == Q2_MCARD_SAVE_FILE,
-          "state 3 is the slot list");
-    CHECK(q2_mcard_screen_for_state(Q2_MCARD_STATE_REPORT) ==
-          Q2_MCARD_LOAD_MESSAGE, "state 13 is the load message");
-    CHECK(q2_mcard_screen_for_state(Q2_MCARD_STATE_CHOICE_5) == Q2_MCARD_NONE,
-          "state 5's screen is not established");
+    /* InGame_PrintMemCardMessage's table at 0x800AB6DC, whole: the status
+     * MemoryCardSetStatus stores is the message it prints. */
+    {
+        static const q2_mcard_screen want[Q2_MCARD_STATUS_MAX + 1] = {
+            Q2_MCARD_NONE,
+            Q2_MCARD_LOAD_MESSAGE, Q2_MCARD_LOAD_MESSAGE, Q2_MCARD_SELECT_SLOT,
+            Q2_MCARD_LOAD_MESSAGE, Q2_MCARD_NOT_FORMATTED, Q2_MCARD_FORMATTING,
+            Q2_MCARD_NONE,         Q2_MCARD_LOAD_MESSAGE, Q2_MCARD_LOAD_MESSAGE,
+            Q2_MCARD_LOAD_MESSAGE, Q2_MCARD_LOAD_MESSAGE, Q2_MCARD_SAVING,
+            Q2_MCARD_SAVE_FILE,    Q2_MCARD_FORMATTING,   Q2_MCARD_FORMATTING,
+            Q2_MCARD_LOAD_MESSAGE, Q2_MCARD_LOAD_MESSAGE, Q2_MCARD_SAVING,
+            Q2_MCARD_OVERWRITE,    Q2_MCARD_FORMATTING,   Q2_MCARD_FORMATTING,
+            Q2_MCARD_FORMATTING
+        };
+        bool seen[Q2_MCARD_SCREEN_COUNT] = {0};
+        for (s = 0; s <= Q2_MCARD_STATUS_MAX; s++) {
+            q2_mcard_screen got = q2_mcard_screen_for_state(s);
+            CHECK(got == want[s], "status %d shows %s, want %s", s,
+                  q2_mcard_screen_name(got), q2_mcard_screen_name(want[s]));
+            CHECK(q2_mcard_screen_for_state_port(s) == got,
+                  "the port's flow walks the same map at %d", s);
+            seen[got] = true;
+        }
+        CHECK(q2_mcard_screen_for_state(Q2_MCARD_STATUS_MAX + 1) == Q2_MCARD_NONE,
+              "past the table is nothing");
+        /* Seven of the nine are statuses; SAVE? is page 39 and NO CONTROLLER
+         * page 38. */
+        CHECK(!seen[Q2_MCARD_SAVE_PROMPT] && !seen[Q2_MCARD_NO_CONTROLLER],
+              "SAVE? and NO CONTROLLER are pages, not statuses");
+    }
+
+    /* The text each arm writes over its placeholders. */
+    {
+        char t[4][Q2_MENU_TEXT_MAX];
+        q2_mcard_context load = { false, false }, save_sp = { true, true };
+        CHECK(q2_mcard_compose(1, &load, t, 4) == 2 &&
+              !strcmp(t[0], "CHECKING FOR") && !strcmp(t[1], "MEMORY CARDS") &&
+              t[2][0] == '\0', "status 1 checks for cards");
+        CHECK(q2_mcard_compose(Q2_MCARD_STATE_LOADING, &load, t, 4) == 1 &&
+              !strcmp(t[0], "LOADING FROM"), "21 rewrites FORMATTING's XXX");
+        CHECK(q2_mcard_compose(Q2_MCARD_STATE_SAVE_NEW, &save_sp, t, 4) == 1 &&
+              !strcmp(t[0], "SAVING TO"), "22 says SAVING TO");
+        q2_mcard_compose(Q2_MCARD_STATE_DONE, &load, t, 4);
+        CHECK(!strcmp(t[0], "MULTIPLAYER") && !strcmp(t[1], "CONFIG LOADED"),
+              "a multiplayer load reports CONFIG LOADED");
+        q2_mcard_compose(Q2_MCARD_STATE_DONE, &save_sp, t, 4);
+        CHECK(!strcmp(t[0], "GAME") && !strcmp(t[1], "SAVED"),
+              "a single-player save reports GAME SAVED");
+        q2_mcard_compose(Q2_MCARD_STATE_FAILED, &save_sp, t, 4);
+        CHECK(!strcmp(t[0], "MEMORY CARD") && !strcmp(t[1], "SAVE FAILED"),
+              "17 is %%s FAILED");
+        q2_mcard_compose(Q2_MCARD_STATE_FILES, &load, t, 4);
+        CHECK(!strcmp(t[0], "LOAD MP SETUP") && t[1][0] == '\0',
+              "the file window's title follows the flags");
+        CHECK(q2_mcard_compose(Q2_MCARD_STATE_OVERWRITE, &load, t, 4) == 0,
+              "OVERWRITE? writes nothing over its table");
+    }
+
+    /* MoveBottomPoly as each arm asks. */
+    {
+        int y[2];
+        q2_mcard_prompt_rows(Q2_MCARD_STATE_FILES, true, y);
+        CHECK(y[0] == 220 && y[1] == 216, "file window SELECT 220, BACK 216");
+        q2_mcard_prompt_rows(Q2_MCARD_STATE_OVERWRITE, true, y);
+        CHECK(y[0] == 220 && y[1] == 220, "OVERWRITE? both at 220");
+        q2_mcard_prompt_rows(Q2_MCARD_STATE_LOADING, true, y);
+        CHECK(y[0] == 260 && y[1] == 260, "busy parks both");
+    }
 }
 
 static void test_mcard_fires_on_release(void)
@@ -1585,7 +1650,7 @@ static void test_mcard_fires_on_release(void)
     q2_mcard_host h;
 
     mc_open(&m, &h);
-    g_poll_state = Q2_MCARD_STATE_LIST;
+    g_poll_state = Q2_MCARD_STATE_FILES;
     m.cursor = 2;
 
     /* Holding is not firing. */
@@ -1596,8 +1661,16 @@ static void test_mcard_fires_on_release(void)
     q2_mcard_advance(&m, 0);
     CHECK(m.fired, "the release fires");
     CHECK(g_chosen == 2, "the chosen row is the cursor, got %d", g_chosen);
-    CHECK(g_requested == Q2_MCARD_STATE_LIST,
-          "a transition is requested after the row");
+    CHECK(g_requested == Q2_MCARD_STATE_FILES,
+          "the file window hands its row to the host's choice");
+
+    /* 0x8001F178..0x8001F198: a card row goes to SetActiveCard, then 4. */
+    mc_open(&m, &h);
+    g_poll_state = Q2_MCARD_STATE_CARDS;
+    m.cursor = 1;
+    mc_release_cross(&m);
+    CHECK(g_chosen == 1 && g_requested == 4,
+          "the card list asks for 4, got %d", g_requested);
 }
 
 static void test_mcard_choices(void)
@@ -1618,8 +1691,8 @@ static void test_mcard_choices(void)
     mc_release_cross(&m);
     CHECK(g_requested == 1, "state 5 row 0 asks for 1, got %d", g_requested);
 
-    /* 0x8001F718: row 1 goes to 20; row 0 falls through with no transition,
-     * which is a return rather than a request for state zero. */
+    /* 0x8001F718: YES (row 1) goes to 20; NO (row 0) goes back to the file
+     * window, 13, at 0x8001F770. */
     mc_open(&m, &h);
     g_poll_state = Q2_MCARD_STATE_CHOICE_19;
     m.cursor = 1;
@@ -1630,7 +1703,8 @@ static void test_mcard_choices(void)
     g_poll_state = Q2_MCARD_STATE_CHOICE_19;
     m.cursor = 0;
     mc_release_cross(&m);
-    CHECK(g_requested == -1, "state 19 row 0 asks for nothing");
+    CHECK(g_requested == Q2_MCARD_STATE_FILES,
+          "state 19 row 0 goes back to 13, got %d", g_requested);
 }
 
 static void test_mcard_accept(void)
@@ -1969,8 +2043,34 @@ static void test_prompt_menu_policy(void)
           "toggle row has no SELECT");
     CHECK(b.rec[Q2_PROMPT_BACK].y_target == 212, "in-game BACK target");
 
+    /* 0x8001C410..0x8001C480: page 11 (QFRONT's player setup) pins BACK at a
+     * literal corner, even though the page has no back handler and the
+     * record's own target parks it. 114 on PAL, 110 on SLUS-00757. */
+    {
+        int x, y;
+        q2_menu_goto(&m, Q2_PAGE_FRONT_PLAYERS);
+        q2_prompt_sync_menu(&b, &m, true);
+        q2_prompt_snap(&b);
+        CHECK(b.rec[Q2_PROMPT_BACK].y_target == Q2_PROMPT_Y_HIDDEN,
+              "page 11 still parks the record");
+        q2_prompt_position(&b, Q2_PROMPT_BACK, &x, &y);
+        CHECK(x == 230 && y == 114, "page 11 BACK at (%d,%d), want (230,114)", x, y);
+        q2_prompt_position(&b, Q2_PROMPT_SELECT, &x, &y);
+        CHECK(x == 346 && y == Q2_PROMPT_Y_HIDDEN, "SELECT is not pinned");
+        q2_menu_set_fb_height(&m, 240);
+        q2_prompt_sync_menu(&b, &m, true);
+        q2_prompt_position(&b, Q2_PROMPT_BACK, &x, &y);
+        CHECK(x == 230 && y == 110, "NTSC page 11 BACK at (%d,%d)", x, y);
+        q2_menu_set_fb_height(&m, Q2_MENU_SCREEN_H);
+        q2_menu_goto(&m, Q2_PAGE_FRONT_MULTI);
+        q2_prompt_sync_menu(&b, &m, true);
+        q2_prompt_position(&b, Q2_PROMPT_BACK, &x, &y);
+        CHECK(x == 90, "leaving page 11 unpins BACK");
+    }
+
     q2_menu_close(&m);
     q2_prompt_sync_menu(&b, &m, false);
+    CHECK(!b.pinned_back, "a closed menu pins nothing");
     CHECK(b.rec[Q2_PROMPT_SELECT].y_target == Q2_PROMPT_Y_HIDDEN &&
           b.rec[Q2_PROMPT_BACK].y_target == Q2_PROMPT_Y_HIDDEN &&
           b.rec[Q2_PROMPT_RULES].y_target == Q2_PROMPT_Y_HIDDEN,

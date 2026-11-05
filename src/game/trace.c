@@ -1034,11 +1034,11 @@ static void move_step_gate(q2_collision *coll, q2_move_ent *ent,
      * ent+0x98, the flags word — so the mask this query sweeps volumes with is
      * the ENTITY's own, not `world->mask`. Bit 0 set means 0x810, else 0.
      *
-     * Which entities set bit 0 was never traced (see sim.c's note beside
-     * q2_move_world.mask), so for the player as the port builds it this is 0
-     * and q2_move_contents returns 0 without looking at anything. Written as
-     * the whole call anyway: the day that bit is understood, the volume half
-     * of the gate starts working with no further change here.
+     * Bit 0 is GameSpawn's (QENTS.C 0x8007E440): `ori v0, v0, 0x1` /
+     * `sw v0, 152(s1)` at 0x8007E59C..0x8007E5A0, just before it installs
+     * PrimaryQuakeCreature. So every spawned creature sweeps the 0x810
+     * volumes here and the player, which GameSpawn never sees, sweeps none.
+     * cremotion.c builds its actors with that bit; the player's is clear.
      */
     mask = (ent->flags & 1u) ? 0x810u : 0u;
 

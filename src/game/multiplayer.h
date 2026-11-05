@@ -41,7 +41,7 @@
  *     +0x028  10  0x80056F8C   select the named Population group
  *     +0x030  12  0x8003DDF8   place player i at a MultiSpawn  (see below)
  *     +0x064  25  &0x800B2D8C  slot for the per-frame level hook
- *     +0x078  30  &0x800B2A24  the team/flag enable — see the note on cut modes
+ *     +0x078  30  &0x800B2A24  InSelfPlayMode (MAIN.SYM) — see the cut modes
  *     +0x0D4  53  &0x800B2DB4  the frame's dt
  *     +0x0D8  54  &0x800B2C2C  the active player count
  *     +0x0EC  59  &0x800AEBAC  the level clock, in dt units
@@ -83,10 +83,17 @@
  * But the front end's mode selector at `0x8010459C` writes exactly three values,
  * 0, 1 and 5, and offers exactly three labels. CTF, TAG and TEAM TAG are built,
  * described in the rules text, given scoreboard titles and given item batches,
- * and cannot be chosen. Two further pieces of evidence say the same thing:
- * QMULTI.C's init does `*(E->[0x78]) = 0` and then immediately branches on
- * `*(E->[0x78])`, so the flag/team setup that follows is unreachable; and no
- * arena on the disc carries a `RedFlag` or `BlueFlag` batch to spawn.
+ * and cannot be chosen. No arena on the disc carries a `RedFlag` or `BlueFlag`
+ * batch to spawn either.
+ *
+ * `E->[0x78]` is NOT a team/flag enable, which this note used to say. It is
+ * `&InSelfPlayMode` (0x800B2A24, named by the NTSC disc's MAIN.SYM). QMULTI's
+ * init zeroes it at +0x1334 and tests it at +0x1350, so what is dead is the
+ * SELF-PLAY setup at +0x1358..+0x1454: `SelfPlayOn` (import +0x58, 0x80033120)
+ * for two or four players by `MaxWindows` (+0xD8), `NoInputTime` (+0x6C,
+ * 0x800B2878) = 30, and `SetNoInputTimeOutRoutine` (+0x70, 0x80033244) with
+ * the routine at +0x60. It says nothing about the flag modes; the selector
+ * above is the evidence that they are cut.
  *
  * This module implements all six, because the rules for the three cut ones are
  * as well established as the rules for the three shipped ones, and marks which

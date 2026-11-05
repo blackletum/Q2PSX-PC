@@ -1872,7 +1872,7 @@ static void write_viewweapon(wbuf *w, const q2_save *s)
     const q2_viewweapon *v = &s->viewweapon;
     if (!s->viewweapon_present) return;
     at = w_chunk_begin(w, TAG_VWPN);
-    w_u32(w, 1); /* chunk version */
+    w_u32(w, 2); /* chunk version: 2 adds hand_live, switch_armed, substeps */
 #define WRITE_VW(t, f) w_##t(w, (t)v->f);
 #define WRITE_VW_ARRAY(t, f, n) for (k = 0; k < n; k++) w_##t(w, v->f[k]);
     VW_SCALARS(WRITE_VW)
@@ -1885,6 +1885,11 @@ static void write_viewweapon(wbuf *w, const q2_save *s)
     w_u32(w, s->shot_serial_heard);
     w_bool(w, s->shot_fired); w_bool(w, s->shot_dry);
     w_s16(w, s->shot_sound); w_bool(w, s->cock_pending);
+    /* v2: a held hand grenade's think (PrimaryGrenadeActive 0x8004A368)
+     * keeps running across a load; v1 files read it as not held. */
+    w_bool(w, v->hand_live);
+    w_bool(w, v->switch_armed);
+    w_u32(w, v->substeps);
     w_chunk_end(w, at);
 }
 
@@ -1892,7 +1897,10 @@ static bool read_viewweapon(rbuf *r, q2_save *s)
 {
     u32 k;
     q2_viewweapon *v = &s->viewweapon;
-    if (s->viewweapon_present || r_u32(r) != 1) return false;
+    u32 version;
+    if (s->viewweapon_present) return false;
+    version = r_u32(r);
+    if (version != 1 && version != 2) return false;
     memset(v, 0, sizeof(*v));
 #define READ_VW(t, f) v->f = r_##t(r);
 #define READ_VW_ARRAY(t, f, n) for (k = 0; k < n; k++) v->f[k] = r_##t(r);
@@ -1906,6 +1914,11 @@ static bool read_viewweapon(rbuf *r, q2_save *s)
     s->shot_serial_heard = r_u32(r);
     s->shot_fired = r_bool(r); s->shot_dry = r_bool(r);
     s->shot_sound = r_s16(r); s->cock_pending = r_bool(r);
+    if (version >= 2) {
+        v->hand_live    = r_bool(r);
+        v->switch_armed = r_bool(r);
+        v->substeps     = r_u32(r);
+    }
     s->viewweapon_present = true;
     return !r->bad && r->at == r->len && valid_viewweapon(s);
 }

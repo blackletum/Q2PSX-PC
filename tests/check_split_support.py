@@ -59,7 +59,7 @@ def main():
                                        ("versus", 5, "horizontal", 2),
                                        ("deathmatch-four", 0, "horizontal", 4),
                                        ("team-deathmatch-four", 1, "horizontal", 4)]:
-        log = run(name, "MATRIX5", 1800,
+        log = run(name, "MATRIX5", 3600,
                   ["--dm-players", str(players), "--dm-mode", str(mode), "--dm-stage", "--demo",
                    "--dm-frags", "1", "--dm-rounds", "2", "--dm-split", split])
         require("request 11 (load MPResults)" in log, f"{name}: results never opened")

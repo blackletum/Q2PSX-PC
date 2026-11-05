@@ -4428,15 +4428,59 @@ the card's name.
 **The machine — `0x8001EFDC`.** `0x80020428` enters page id **39**, stores `0x8001EFDC` at `gp + 656` and
 sets the mode flag at `0x800B32A2`; from then on that function runs per frame. It polls a state through the
 pointer at `0x800B3234`, subtracts one, and dispatches through a **19-entry jump table at `0x800AB734`**.
-Fourteen entries land on the common exit at `0x8001F7F8`, so five have behaviour:
+Thirteen entries land on the common exit at `0x8001F7F8`, so six have behaviour:
 
 | state | arm | what it does |
 | --- | --- | --- |
-| 3 | `0x8001F140` | hands the chosen row to `0x800B324C`, then requests a transition |
-| 5 | `0x8001F790` | row 1 → state 6, row 0 → state 1 |
-| 13 | `0x8001F19C` | formats a cheat-level name (`NONE`/`BRONZE`/`SILVER`/`GOLD`) into the screen |
+| 3 | `0x8001F140` | the card list: `cursor - first` to SetActiveCard (`0x800B324C`), then status 4 |
+| 5 | `0x8001F790` | NOT FORMATTED: YES (row 1) → 6, NO (row 0) → 1 |
+| 13 | `0x8001F19C` | the file window: every frame, the highlighted file's `RESUPPLIES %d` / `DIFFICULTY %s` / `CHEATS %s` into rows 2..4; on the release, SetActiveFile (`0x800B3250`), then 21 on a load, 22 for `NEW FILE` on a save with free blocks, 19 otherwise |
 | 14, 16 | `0x8001F0A4` | accept: applies the game variables (`0x8001C698`) and leaves via `0x8001E1A4` |
-| 19 | `0x8001F718` | row 1 → state 20 |
+| 19 | `0x8001F718` | OVERWRITE?: YES (row 1) → 20, NO (row 0) → 13 |
+
+Only 3 and 13 run on frames without a CROSS release (0x8001F040..0x8001F060): they scroll the file window
+and recompose its lines.
+
+**The state IS the screen.** The poll pointer is MemoryCardGetStatus (`0x80082710`, MEMCARD.C), which returns
+`0x800E82BC`; that word's writer is MemoryCardSetStatus (`0x80082720`) and the copies MemoryCardUpdate2
+inlines, and every one of them stores the status and then calls engine+`0x278` — InGame_PrintMemCardMessage,
+`0x8001E3D4` — **with the same number** (`0x80082774..0x80082788`). The only print without a store is
+`0x80081F44`, re-printing 3 while the status is already 3 (the card list redrawn after a card is pulled). So
+the nine table installers are arms of one function, and its 22-entry jump table at `0x800AB6DC`, indexed by
+`status - 1`, is the whole map:
+
+| status | screen | what the arm writes over it |
+| --- | --- | --- |
+| 1 | LOAD MESSAGE | `CHECKING FOR` / `MEMORY CARDS` |
+| 2 | LOAD MESSAGE | `NO MEMORY` / `CARDS FOUND` |
+| 3 | SELECT SLOT | one row per card, `GetCardname(i)` at (256, 100 + 16i) |
+| 4, 10, 11 | LOAD MESSAGE | `CHECKING FOR` / `QUAKE 2 FILES` |
+| 5 | NOT FORMATTED | — |
+| 6 | FORMATTING | `XXX` → `FORMATTING` |
+| 7 | (none — the screen stays; cursor := first) | — |
+| 8 | LOAD MESSAGE | `MEMORY CARD` / `FORMAT COMPLETE` |
+| 9 | LOAD MESSAGE | `MEMORY CARD` / `FORMAT FAILED` |
+| 12 | SAVING | `NO QUAKE 2` / `SINGLE PLAYER` or `MULTIPLAYER` / `FILES FOUND` |
+| 13 | SAVE FILE | FrontEnd_DoFileWindow, `0x8001D84C` (below) |
+| 14, 15, 20, 21, 22 | FORMATTING | `XXX` → `LOADING FROM` or `SAVING TO` |
+| 16 | LOAD MESSAGE | `MULTIPLAYER` / `CONFIG LOADED`, `STARTING` / `GAME`, `MULTIPLAYER` / `DATA SAVED` or `GAME` / `SAVED`; multiplayer adds `CONTINUE` (`0x8009AAB4`, 256, 163) |
+| 17 | LOAD MESSAGE | `MEMORY CARD` / `LOAD FAILED` or `SAVE FAILED` |
+| 18 | SAVING | `INSUFFICIENT FREE BLOCKS` / `PLEASE INSERT ANOTHER` / `MEMORY CARD` |
+| 19 | OVERWRITE? | — |
+
+The choice between alternatives is two flags: `0x800B32A2` (0 load, 1 save) and the byte at `0x800B32A3`
+(1 = single player). SAVE? and NO CONTROLLER are not statuses: they are pages 39 and 38, put up by
+InGame_GOTO_WANT_TO_SAVE and InGame_GOTO_REINSERT_CONTROLLER.
+
+**The file window, 13.** FrontEnd_DoFileWindow installs `SAVE FILE` **at size 32**, retitles row 0 `SAVE
+FILE`, `LOAD SINGLE` or `LOAD MP SETUP`, empties row 1, labels rows 2..4 `RESUPPLIES` / `DIFFICULTY` /
+`CHEATS` at size 16 (row 4 hidden), then appends one size-16 row per file at (256, 100 + 16i) and, on a save
+with free blocks, `NEW FILE` after them (`0x800AB3A0`). The table's four empty rows are therefore NOT the
+slot list.
+
+**Prompts.** The message function parks SELECT and BACK for every status but 3 and 13, which get both at 216
+in the front end (220 in game); 8 and 16 then raise SELECT at 220, 19 raises both at 220, and
+DoFileWindow raises SELECT at 220 last.
 
 Every live arm opens with the same gate — `if (held & CROSS) return; if (!(released & CROSS)) return;`
 against `0x800B3290` and `0x800B3298` — so the front end **fires on the release of CROSS**, spelled out
@@ -4446,12 +4490,12 @@ minus `0x800B32AE`, the two globals the item loader maintains.
 **What a PC port cannot reconstruct, and does not pretend to.** The card operations are three function
 pointers — `0x800B3234` (poll), `0x800B3238` (request) and `0x800B324C` (act on a row) — and behind them is
 `libmcrd` talking to hardware this port does not have. `src/menu/memcard.[ch]` implements the screens, the
-navigation, the release rule and the five arms, and takes those three as a host interface.
-
-**Still open:** which state shows which screen. Only two are settled by the arms themselves — state 3 hands
-over a row and `SAVE FILE` is the only row list, and state 13 composes text and `LOAD MESSAGE` is the only
-composed screen. The two-way choices at 5 and 19 share a shape with three different screens, and the nine
-table installers' callers were not followed, so the port maps those to nothing rather than guessing.
+navigation, the release rule, the six arms, the status → screen table (`q2_mcard_screen_for_state`), the
+text each arm writes (`q2_mcard_compose`) and the prompt rows (`q2_mcard_prompt_rows`), and takes those
+three as a host interface. `src/game/saveui.[ch]` walks the console's own statuses — 13, 19, 21, 16 — with
+two collapses its tests pin: one busy number for 20/21/22 (the same screen; its text follows the save flag)
+and failures reported on 16 rather than 17 so that CROSS still dismisses them. The port's slot rows sit in
+SAVE FILE's rows 1..4 rather than below the table.
 
 **What is still *not* reconstructed elsewhere.** The MISSION screen is part of the HUD system rather than
 the menu.
@@ -4959,8 +5003,17 @@ module+`0x459C` adds RULES at caller y 220 while the cursor is on one of MULTIPL
 and parks it on LOAD SETTINGS / SAVE SETTINGS. This is why the title capture has SELECT alone while START,
 SINGLE PLAYER and DIFFICULTY have BACK and SELECT.
 
-**Still open outside the ordinary menu:** the drawer special-cases page 11 record 1 at a hard-coded
-(230, 114); that page is not in the reconstructed ordinary page set.
+**Page 11 pins BACK.** Before it builds each quad the drawer tests the current page id (0x800B32AA) against
+11 and the record index against 1 (0x8001C410..0x8001C42C), and on that pair writes a literal corner —
+x = 230 (0x8001C378), y = 114 (0x8001C434; **110** on SLUS-00757) — with record 1's own uv and size. Page 11
+is QFRONT's per-player setup: its only builder is PROCEED's action, module+`0x59CC` (`module+0x3414(NULL,
+11)`), and nothing in the executable enters it. That builder sets no back handler, so the policy above parks
+BACK at 260 — and the drawer shows it anyway, mid-screen between the player panels, for as long as the page
+is up; the record's own y keeps sliding underneath unseen.
+
+**Shade and CLUT.** Every prompt quad is modulated by **0x60**, not 0x80 (0x8001C614..0x8001C620), and its
+CLUT is the table entry at 0x800E3FB6 (SLUS: 0x800E4226) — the CLUT table plus 0x8A, **built-in palette
+69**, where the text uses 68 and 70.
 
 Reconstructed in `src/menu/prompt.[ch]`.
 
@@ -5072,23 +5125,30 @@ Two things follow that a model cannot give. An **in-level** load can show the lo
 `frontend.lbm` is in every playable map's `SNDVRAM.DAT` and no model of the logo is. And it is **32 x 20
 drawn 1:1**, like every other thing cut from this sheet.
 
-**Two things here are measured rather than read**, because the strip is data with no located reader: which
-palette it is drawn through, and which end of it the animation starts at. The screen is up for half a second
-and the strip runs at a cell every 22 ticks, so a player sees about seven of the twenty-three — which end
-those seven come from is most of what the rotation ever is. Read forwards the widths open at 17 of a 4..22
-range and are edge-on within the half second; read backwards they open at 22, broadside, and turn away. The
-capture's logo is a wide one, so the port walks the strip backwards.
+**The reader is `SpriteAnim` (0x80038820, MAINLOOP.C), and it settles all three things this section used to
+measure.** (The twenty-fourth slot is not `RETRY` either: (224, 184) is one more logo cell, which the
+animation never reaches.)
 
-**The palette**, likewise, because the strip is data with no
-located reader — nothing found so far binds a CLUT for this quad. A capture shows the logo GREY, and the
-bank has exactly one palette for that: built-in id 4, `000000 080808 181818 ... D8D8D8 E8E8E8`, a monotonic
-sixteen-step grey ramp. The strip is authored against palette 68, whose sixteen entries are a blue ramp in
-the same index order — the sixty rows of the strip use exactly those sixteen colours — so 4 is the same
-image with the colour taken out, at the same weight and with its anti-aliasing intact. The other greys in
-the bank are not it: 75 is the same ramp stopped at 0x78 and comes out too dark, 76 runs bright-to-dark and
-inverts the art, 73 is a flat white, and 70 — which §11 calls the white-only mask — has four live levels
-out of sixteen and leaves a stippled fragment rather than an outline. 70 is right for a GLYPH, whose art
-sits in that band, and that is what it is there for.
+- **The cell.** Called with a0 = 0 it draws one `SPRT` (0x80038B68 `SetSprt`) 32 x 20 at (460, 40) out of
+  VRAM slot 13 (`s1 = 13`, 0x800388F0), and picks u/v from a free-running halfword at `gp+612`
+  (0x800AE864): `c < 5` -> (224, 0); 5 -> (192, 80); 6 -> (224, 120); 7 -> (0, 220); otherwise
+  `u = (c & 7) * 32`, `v = 124 + 20 * ((c >> 3) & 3)` (0x80038840..0x800388DC). The tail is
+  `c = c + 1; if (c == 31) c = 0` (0x80038CDC..0x80038CFC). Thirty-one steps, **forwards** — the four
+  off-grid cells are further rotation frames, five of them a hold at broadside — and the counter is never
+  reset, so each screen picks the turn up where the last left it.
+- **The rate.** SpriteAnim(0) is reached only from VBlankMainLoop (0x80038D54), the tail of VBlankLoading
+  (0x8006E288), which TestIt installs as the vertical-blank hook (`sw`, 0x8006E144) and the VSync callback
+  VBlank calls at 0x8001908C — **one step per video field**, 50 a second on SLES-01534.
+- **The palette.** 0x80038908 `lhu s0, 0x800E3FC8`, stored at prim+14 (0x80038B50). 0x800E3FC8 is the CLUT
+  table at 0x800E3F2C (the text drawer's 68 and 70 are its +0x88 and +0x8C) plus 0x9C — **built-in palette
+  78**, which DownloadPals (0x8007610C) fills from record 78 at 0x800A325C: sixteen greys in an unsorted
+  order (`0000 35AC 1CE7 4E72 1084 2949 460F 5AD5 316B 0842 14A5 6316 3DEE 2108 56B4 4A51`), the strip's own
+  palette. SLUS-00757 reads 0x800E4238 against its table at 0x800E419C: the same +0x9C.
+
+This is the LEVEL loading screen — ProcessGame's TestIt (0x80018C88) runs InitLoadingAnim (0x80038DFC, which
+saves the 32 x 20 of framebuffer under (460, 40) into slot 13 at (+16, +80)) and InitialiseVBlankLoading, and
+every vblank until FadeOutLoading unhooks it (0x8007C92C) restores that patch with a `DR_MOVE` and draws the
+next cell. MaybeLoadZoneName's page 46 above is the zone loader's one still frame.
 
 **What that retracts, and what survives it.** An earlier pass here argued the picture comes from
 `LEVELS/QDUMMY/` — level table record 3, `Dummy` — on the strength of what that directory holds:
@@ -5108,8 +5168,18 @@ already writing its word out of.
 
 What survives is the observation and not the argument. QDUMMY's shape is still striking, its `LevelBin` still
 compares the level name against `"Dummy"` at `module+0x96C` and installs `module+0x2E1C` — four instructions
-that ask for the next state once four frames have gone by — and the `Dummy` record is still reachable from
-that module and from nothing in the executable. What the directory is FOR is not settled here.
+that ask for the next state once four frames have gone by.
+
+**And nothing asks for it.** Levels are requested by twelve-byte name, so the question is who writes
+`Dummy` into a request, and a byte scan of the whole data track answers it: fourteen copies of the string.
+Two are the executable's — level record 3 (0x8009C770) and an orphan at 0x800AC820 in QUAKE.C's name block,
+between `SelfPlay0` and `Default`, whose every neighbour is copied out by GameSelfPlay / GameLogos /
+GameIntro and their siblings (0x80041300..0x80041958) and which has no reader of its own. The other twelve
+are the pseudo-level `COMMON.DAT`s (QDUMMY, QENDMIS1..5, QFMV, QLOGOS, QLOGOS2, QMAGINTR, QMAGEXTR,
+QMRESULT), whose shared `LevelBin` compares the CURRENT level's name against it at init to choose a
+per-frame handler — a reader of the name, not a request. No event script carries it. `Dummy` is a level
+record nothing transitions to, and the loading screen's art is whatever copy of `frontend.lbm` is already in
+VRAM slot 13.
 
 Reconstructed in `src/game/loading.[ch]`, with the page in `src/menu/pages.c` where
 `q2psx-inspect menu <disc>` checks it against `0x800A3314` record by record. The port opens QDUMMY's
@@ -6822,9 +6892,15 @@ order, so the numbering is spelled out twice rather than inferred:
 
 The front end's mode selector at `0x8010459C` writes exactly 0, 1 and 5 and offers exactly three labels
 (`DEATHMATCH`, `TEAM DEATHMATCH`, `VERSUS`). The three flag modes are built, described in QFRONT's rules text,
-given scoreboard titles and given item batches, and **cannot be chosen**. Two further negatives agree: QMULTI's
-init does `*(E->[0x78]) = 0` and then immediately branches on `*(E->[0x78])`, so the team/flag setup that
-follows is unreachable; and no map on the disc names a flag spawn or batch.
+given scoreboard titles and given item batches, and **cannot be chosen**. No map on the disc names a flag spawn
+or batch either.
+
+`E->[0x78]` (slot 30) is `&InSelfPlayMode`, `0x800B2A24` — the name is MAIN.SYM's on the NTSC disc — and not
+a team/flag enable, as this section used to say. QMULTI's init stores zero through it at `+0x1334` and
+branches on it at `+0x1350`, so the unreachable code at `+0x1358..+0x1454` is the multiplayer **self-play**
+setup: `SelfPlayOn` (`+0x58`, `0x80033120`) for two or four players according to `MaxWindows` (`+0xD8`),
+`NoInputTime` (`+0x6C`, `0x800B2878`) = 30 and `SetNoInputTimeOutRoutine` (`+0x70`, `0x80033244`). It is not
+evidence about the flag modes; the selector at `0x8010459C` is.
 
 ### 16.4 Item batches
 

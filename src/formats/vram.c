@@ -624,6 +624,30 @@ q2_result q2_vram_upload(const q2_vram_section *section, struct psx_vram *vram)
         }
     }
 
+    /*
+     * AND THE REST OF THE LAST ROW. InitCluts uploads whole rows — RECT{0,
+     * 256, 64, (count + 3) >> 2} at 0x8007632C..0x80076348 — so the slots
+     * after the last palette receive whatever the buffer holds next, raw: the
+     * fix-up above only walked `count * 16` entries. No face can name those
+     * slots, so nothing draws them; this keeps the VRAM the console's, halfword
+     * for halfword (test_vram_native).
+     */
+    if (section->clut4 && section->buf.data) {
+        const u8 *end = section->buf.data + section->buf.size;
+
+        for (i = section->clut4_count; i % 4u; i++) {
+            const u8 *entries = section->clut4 + (size_t)i * (Q2_VRAM_CLUT4_ENTRIES * 2);
+            u32 x, y, e;
+
+            q2_vram_clut_pos(i, &x, &y);
+            if (y >= PSX_VRAM_HEIGHT)
+                break;
+            for (e = 0; e < Q2_VRAM_CLUT4_ENTRIES && x + e < PSX_VRAM_WIDTH; e++)
+                if (entries + e * 2 + 2 <= end)
+                    v->px[y][x + e] = q2_rd_u16(entries + e * 2);
+        }
+    }
+
     /* Texture pages: decode each one and blit it as (width>>1) halfwords by
      * height rows, at x = 64*(slot+1), y = 256. */
     page = (u8 *)malloc((size_t)Q2_VRAM_TEXPAGE_W * Q2_VRAM_TEXPAGE_H);

@@ -539,14 +539,30 @@ static void capture_unlocks(const char *disc, const char *dir)
     client_enter_front_end(c);
     /* Verify the six rows against the actual relocated QFRONT records. */
     CHECK(q2_level_module_load(&module, &c->common, 0x80100000) == Q2_OK);
+    /* NTSC's records are authored 4 lines higher (240 against 248 lines). */
+    const s16 ntsc_up = q2_build_tick_rate(&c->build) != 50 ? 4 : 0;
+    /* Found by content, not by PAL's offsets (0xF044.., 0xF0BC..): the US
+     * module lays the same records out elsewhere. A record is a label pointer
+     * into the module, then its x and y; find the label, then compare. */
     for (i = 0; i < 6; i++) {
-        u32 address = i < 4 ? 0xF044 + i * 24 : 0xF0BC + (i - 4) * 24;
-        const u8 *record = module.image.data + address;
-        u32 text = q2_rd_u32(record) - module.base;
-        CHECK(text < module.image.size);
-        CHECK(!strcmp((const char *)module.image.data + text, page->items[i].label));
-        CHECK((s16)q2_rd_u16(record + 4) == page->items[i].x);
-        CHECK((s16)q2_rd_u16(record + 6) == page->items[i].y);
+        u32 at, found = 0;
+        s16 x = 0, y = 0;
+        for (at = 0; at + 8 <= module.image.size; at += 4) {
+            const u8 *record = module.image.data + at;
+            u32 text = q2_rd_u32(record) - module.base;
+            if (text >= module.image.size ||
+                strncmp((const char *)module.image.data + text, page->items[i].label,
+                        module.image.size - text))
+                continue;
+            x = (s16)q2_rd_u16(record + 4);
+            y = (s16)q2_rd_u16(record + 6);
+            found++;
+            if (x == page->items[i].x && y == page->items[i].y - ntsc_up) break;
+        }
+        if (!found || x != page->items[i].x || y != page->items[i].y - ntsc_up)
+            printf("unlock row %d \"%s\": module (%d,%d), page (%d,%d), %u candidates\n",
+                   i, page->items[i].label, x, y, page->items[i].x, page->items[i].y, found);
+        CHECK(found >= 1 && x == page->items[i].x && y == page->items[i].y - ntsc_up);
     }
     q2_ai_module_free(&module);
     for (skill = 0; skill < 3; skill++) {
@@ -556,7 +572,11 @@ static void capture_unlocks(const char *disc, const char *dir)
         CHECK(c->in_front_end && c->credits_open && c->credits_campaign);
         CHECK(!c->menu.open);
         if (skill == 1) {
-            for (i = 0; i < 2966; i++) client_credits_frame(c, 1.0/50.0);
+            /* Played to its end, however long the build's rate makes it
+             * (2,966 PAL frames; NTSC's roll is shorter): the client calls
+             * the roll only while it is open. */
+            for (i = 0; i < 2 * 2966 && c->credits_open; i++)
+                client_credits_frame(c, 1.0/50.0);
         } else {
             button(c, id, SDL_GAMEPAD_BUTTON_EAST, true);
             button(c, id, SDL_GAMEPAD_BUTTON_EAST, false);
@@ -899,6 +919,140 @@ static void capture_reinsert(const char *disc, const char *dir)
     close_client(c);
 }
 
+/* ------------------------------------------------------------------------- */
+/* Front-end residues: the loading strip, the card screens, page 11's BACK.    */
+/* ------------------------------------------------------------------------- */
+static void residue_frame(client *c, const char *dir, const char *name)
+{
+    char path[1024];
+    q2_prompt_snap(&c->prompts);
+    q2_screen_tick_dt(&c->screen, 1.0/30.0);
+    client_frame(c);
+    c->frame_index++;
+    snprintf(path, sizeof(path), "%s/%s.ppm", dir, name);
+    write_display(c, path, 960, 720);
+}
+
+/* Every step SpriteAnim draws, cut out of the real frame and enlarged. */
+static void capture_loading_strip(client *c, const char *dir)
+{
+    enum { CW = 32, CH = 20, SCALE = 4, PER_ROW = 16 };
+    psx_framebuffer strip = {0};
+    bool seen[Q2_LOADING_CELLS] = {0};
+    int got = 0, guard;
+    char path[1024];
+
+    CHECK(q2_loading_open(&c->loading, c->disc, &c->hud_tables, &c->settings) == Q2_OK);
+    CHECK(psx_fb_init(&strip, PER_ROW * CW * SCALE, 2 * CH * SCALE) == Q2_OK);
+    psx_fb_clear(&strip, 0);
+    q2_loading_raise(&c->loading);
+    for (guard = 0; guard < 400 && got < Q2_LOADING_CELLS; guard++) {
+        const psx_framebuffer *fb;
+        u32 cell;
+        int ox, oy, x, y;
+        c->loading.hold = 1000;   /* keep it up for as long as this takes */
+        client_frame(c);
+        cell = q2_loading_cell(&c->loading);
+        fb = q2_screen_front(&c->screen);
+        ox = (fb->width - Q2_MENU_SCREEN_W) / 2 + Q2_LOADING_X;
+        oy = (fb->height - Q2_MENU_SCREEN_H) / 2 + Q2_LOADING_Y;
+        if (cell < Q2_LOADING_CELLS && !seen[cell]) {
+            int sx = (int)(cell % PER_ROW) * CW * SCALE;
+            int sy = (int)(cell / PER_ROW) * CH * SCALE;
+            seen[cell] = true; got++;
+            for (y = 0; y < CH * SCALE; y++)
+                for (x = 0; x < CW * SCALE; x++)
+                    strip.px[(sy + y) * strip.width + sx + x] =
+                        fb->px[(oy + y / SCALE) * fb->width + ox + x / SCALE];
+        }
+        if (cell == 8) {
+            snprintf(path, sizeof(path), "%s/loading-screen.ppm", dir);
+            write_display(c, path, 960, 720);
+        }
+        (void)q2_loading_step(&c->loading, 1.0/300.0);
+    }
+    CHECK(got == Q2_LOADING_CELLS);
+    snprintf(path, sizeof(path), "%s/loading-strip.ppm", dir);
+    CHECK(psx_fb_write_ppm(&strip, path) == Q2_OK);
+    psx_fb_free(&strip);
+    q2_loading_hide(&c->loading);
+    q2_loading_close(&c->loading);
+}
+
+static void card_tap(client *c, SDL_JoystickID id, SDL_GamepadButton b)
+{
+    button(c, id, b, true); client_card_frame(c);
+    button(c, id, b, false);
+    if (c->mcard_open) client_card_frame(c);
+    (void)client_menu_pad(c);
+}
+
+/* The client's card frame, then (when this build has it) the composition the
+ * report recommends client_card_sync make. */
+static void card_shot(client *c, const char *dir, const char *name)
+{
+#ifdef Q2_MCARD_STATUS_MAX
+    q2_mcard_context ctx;
+    int y[2];
+    ctx.saving = c->card_mode == Q2_SAVE_UI_SAVE ||
+                 c->card_mode == Q2_SAVE_UI_SETTINGS_SAVE ||
+                 c->card_mode == Q2_SAVE_UI_UNLOCK_SAVE;
+    ctx.single_player = c->card_mode == Q2_SAVE_UI_SAVE ||
+                        c->card_mode == Q2_SAVE_UI_LOAD;
+    if (c->card_menu.page && c->save_ui.state != Q2_SAVEUI_STATE_LIST)
+        q2_mcard_compose(c->save_ui.state, &ctx, c->card_menu.text, 3);
+    else if (c->card_menu.page)
+        q2_mcard_compose(c->save_ui.state, &ctx, c->card_menu.text, 1);
+    q2_mcard_prompt_rows(c->save_ui.state, c->in_front_end, y);
+    q2_prompt_show(&c->prompts, Q2_PROMPT_SELECT, y[0]);
+    q2_prompt_show(&c->prompts, Q2_PROMPT_BACK, y[1]);
+    q2_prompt_show(&c->prompts, Q2_PROMPT_RULES, 260);
+#endif
+    residue_frame(c, dir, name);
+}
+
+static void capture_residues(const char *disc, const char *dir)
+{
+    client *c = open_client(disc);
+    SDL_JoystickID id = unlock_card_init(c);
+    int i;
+
+    client_enter_front_end(c);
+    c->output_width = 960; c->output_height = 720;
+    capture_loading_strip(c, dir);
+
+    /* The card front end over the settings slots, walked the console's way:
+     * the file window, a write into a free slot, the report; then the same
+     * slot again, which asks OVERWRITE? first. */
+    q2_save_set_dir(dir);
+    for (i = 0; i < Q2_SAVE_SLOTS; i++) q2_settings_slot_delete(i);
+    client_card_open(c, Q2_SAVE_UI_SETTINGS_SAVE);
+    client_card_frame(c);
+    CHECK(c->mcard_open && c->save_ui.state == Q2_SAVEUI_STATE_LIST);
+    card_shot(c, dir, "card-13-files");
+    (void)q2_menu_point_at(&c->card_menu, 1);
+    button(c, id, SDL_GAMEPAD_BUTTON_SOUTH, true); client_card_frame(c);
+    button(c, id, SDL_GAMEPAD_BUTTON_SOUTH, false); client_card_frame(c);
+    CHECK(c->save_ui.state == Q2_SAVEUI_STATE_BUSY);
+    card_shot(c, dir, "card-21-busy");
+    client_card_frame(c);
+    CHECK(c->save_ui.state == Q2_SAVEUI_STATE_REPORT &&
+          c->save_ui.status == Q2_SAVE_UI_SAVED);
+    card_shot(c, dir, "card-16-report");
+    card_tap(c, id, SDL_GAMEPAD_BUTTON_SOUTH);
+    CHECK(!c->mcard_open);
+
+    client_card_open(c, Q2_SAVE_UI_SETTINGS_SAVE);
+    client_card_frame(c);
+    (void)q2_menu_point_at(&c->card_menu, 1);
+    card_tap(c, id, SDL_GAMEPAD_BUTTON_SOUTH);
+    CHECK(c->save_ui.state == Q2_SAVEUI_STATE_CHOICE);
+    card_shot(c, dir, "card-19-overwrite");
+    client_card_close(c);
+    for (i = 0; i < Q2_SAVE_SLOTS; i++) q2_settings_slot_delete(i);
+    close_client(c);
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1 && !strcmp(argv[1], "--headless")) { argc--; argv++; }
@@ -915,6 +1069,8 @@ int main(int argc, char **argv)
         capture_controller_profiles(argv[1], argv[2]);
     else if (argc > 3 && !strcmp(argv[3], "--reinsert"))
         capture_reinsert(argv[1], argv[2]);
+    else if (argc > 3 && !strcmp(argv[3], "--residues"))
+        capture_residues(argv[1], argv[2]);
     else if (argc > 2) capture_menu(argv[1], argv[2]);
     SDL_Quit();
     printf("menu client: %d checks, %d failures\n", checks, failures);

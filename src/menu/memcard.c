@@ -1,5 +1,6 @@
 #include "memcard.h"
 
+#include <stdio.h>
 #include <string.h>
 
 /* ------------------------------------------------------------------------- */
@@ -163,62 +164,165 @@ const char *q2_mcard_screen_name(q2_mcard_screen s)
 bool q2_mcard_state_live(int state)
 {
     switch (state) {
-    case Q2_MCARD_STATE_LIST:
-    case Q2_MCARD_STATE_CHOICE_5:
-    case Q2_MCARD_STATE_REPORT:
+    case Q2_MCARD_STATE_CARDS:
+    case Q2_MCARD_STATE_FORMAT_ASK:
+    case Q2_MCARD_STATE_FILES:
     case Q2_MCARD_STATE_ACCEPT_A:
-    case Q2_MCARD_STATE_ACCEPT_B:
-    case Q2_MCARD_STATE_CHOICE_19:
+    case Q2_MCARD_STATE_DONE:
+    case Q2_MCARD_STATE_OVERWRITE:
         return true;
     default:
         return false;
     }
 }
 
+/*
+ * InGame_PrintMemCardMessage's jump table, 0x800AB6DC, `status - 1` in
+ * 0..21. Each entry is the arm's first instruction; the table each arm hands
+ * to FrontEndCreateMenu (engine+0x200) is the screen.
+ */
+static const u8 k_status_screen[Q2_MCARD_STATUS_MAX] = {
+    Q2_MCARD_LOAD_MESSAGE,   /*  1  0x8001E52C  0x8009B06C            */
+    Q2_MCARD_LOAD_MESSAGE,   /*  2  0x8001E844                        */
+    Q2_MCARD_SELECT_SLOT,    /*  3  0x8001E5E0  0x8009B2C4 + cards    */
+    Q2_MCARD_LOAD_MESSAGE,   /*  4  0x8001E7B4                        */
+    Q2_MCARD_NOT_FORMATTED,  /*  5  0x8001EBDC  0x8009B1A4 + B204     */
+    Q2_MCARD_FORMATTING,     /*  6  0x8001EC1C  0x8009B24C            */
+    Q2_MCARD_NONE,           /*  7  0x8001EFB0  installs nothing      */
+    Q2_MCARD_LOAD_MESSAGE,   /*  8  0x8001EC7C                        */
+    Q2_MCARD_LOAD_MESSAGE,   /*  9  0x8001E8D4                        */
+    Q2_MCARD_LOAD_MESSAGE,   /* 10  0x8001E7B4, as 4                  */
+    Q2_MCARD_LOAD_MESSAGE,   /* 11  0x8001E7B4, as 4                  */
+    Q2_MCARD_SAVING,         /* 12  0x8001ED2C  0x8009B0B4            */
+    Q2_MCARD_SAVE_FILE,      /* 13  0x8001EEC0  -> 0x8001D84C, B114   */
+    Q2_MCARD_FORMATTING,     /* 14  0x8001EED0  0x8009B24C            */
+    Q2_MCARD_FORMATTING,     /* 15  0x8001EED0                        */
+    Q2_MCARD_LOAD_MESSAGE,   /* 16  0x8001EA28                        */
+    Q2_MCARD_LOAD_MESSAGE,   /* 17  0x8001E964                        */
+    Q2_MCARD_SAVING,         /* 18  0x8001EDF4  0x8009B0B4            */
+    Q2_MCARD_OVERWRITE,      /* 19  0x8001E4D8  0x8009B324 + B36C     */
+    Q2_MCARD_FORMATTING,     /* 20  0x8001EED0                        */
+    Q2_MCARD_FORMATTING,     /* 21  0x8001EED0                        */
+    Q2_MCARD_FORMATTING      /* 22  0x8001EED0                        */
+};
+
 q2_mcard_screen q2_mcard_screen_for_state(int state)
 {
-    /*
-     * Only what the arms themselves settle. State 3 hands a chosen ROW to the
-     * card code, and SAVE FILE is the only screen with a row list; state 13
-     * formats a cheat level into its text, and LOAD MESSAGE is the only screen
-     * whose text is runtime-composed. The two-way choices at 5 and 19 share a
-     * shape with three different screens (NOT FORMATTED, OVERWRITE, SAVE?), and
-     * which is which was NOT established — the nine table installers are
-     * separate functions and their callers were not followed. Returning NONE
-     * there is the honest answer; inventing a mapping would look identical in
-     * the port and be wrong on the console.
-     */
-    switch (state) {
-    case Q2_MCARD_STATE_LIST:   return Q2_MCARD_SAVE_FILE;
-    case Q2_MCARD_STATE_REPORT: return Q2_MCARD_LOAD_MESSAGE;
-    default:                    return Q2_MCARD_NONE;
-    }
+    if (state < 1 || state > Q2_MCARD_STATUS_MAX)
+        return Q2_MCARD_NONE;
+    return (q2_mcard_screen)k_status_screen[state - 1];
 }
 
 q2_mcard_screen q2_mcard_screen_for_state_port(int state)
 {
-    /*
-     * The two the function above commits to are taken from it rather than
-     * repeated, so the port cannot drift from the reading. The rest are the
-     * port's own use of states the console's mapping does not settle:
-     *
-     *   5  the two-way choice, used for OVERWRITE? — the only one of that
-     *      screen's three candidates a filesystem has any use for
-     *   6  the busy state the choice's YES arm targets, which is what SAVING
-     *      is for
-     *
-     * State 19 stays unclaimed: its remaining candidate is NOT FORMATTED, and
-     * there is no card to format.
-     */
-    q2_mcard_screen s = q2_mcard_screen_for_state(state);
+    /* The console's map is complete, so the port's flow walks it as it is. */
+    return q2_mcard_screen_for_state(state);
+}
 
-    if (s != Q2_MCARD_NONE)
-        return s;
+static int put(char (*text)[Q2_MENU_TEXT_MAX], int rows, int row,
+               const char *s)
+{
+    if (row < rows)
+        snprintf(text[row], Q2_MENU_TEXT_MAX, "%s", s);
+    return row + 1;
+}
+
+int q2_mcard_compose(int state, const q2_mcard_context *ctx,
+                     char (*text)[Q2_MENU_TEXT_MAX], int rows)
+{
+    bool saving = ctx && ctx->saving;
+    bool single = ctx && ctx->single_player;
+    int  i, n = 0;
+
+    if (!text || rows <= 0)
+        return 0;
+    for (i = 0; i < rows; i++)
+        text[i][0] = '\0';
 
     switch (state) {
-    case Q2_MCARD_STATE_CHOICE_5: return Q2_MCARD_OVERWRITE;
-    case 6:                       return Q2_MCARD_SAVING;
-    default:                      return Q2_MCARD_NONE;
+    case 1:                                    /* 0x8001E59C / 0x8001E5A4 */
+        n = put(text, rows, 0, "CHECKING FOR");
+        n = put(text, rows, 1, "MEMORY CARDS");
+        break;
+    case 2:                                    /* 0x8001E890 / 0x8001E898 */
+        n = put(text, rows, 0, "NO MEMORY");
+        n = put(text, rows, 1, "CARDS FOUND");
+        break;
+    case 4: case 10: case 11:                  /* 0x8001E800 / 0x8001E808 */
+        n = put(text, rows, 0, "CHECKING FOR");
+        n = put(text, rows, 1, "QUAKE 2 FILES");
+        break;
+    case 6:                                    /* 0x8001EC68 */
+        n = put(text, rows, 0, "FORMATTING");
+        break;
+    case 8:                                    /* 0x8001ECC8 / 0x8001ECD0 */
+        n = put(text, rows, 0, "MEMORY CARD");
+        n = put(text, rows, 1, "FORMAT COMPLETE");
+        break;
+    case 9:                                    /* 0x8001E920 / 0x8001E928 */
+        n = put(text, rows, 0, "MEMORY CARD");
+        n = put(text, rows, 1, "FORMAT FAILED");
+        break;
+    case 12:                                   /* 0x8001ED64..0x8001EDE4 */
+        n = put(text, rows, 0, "NO QUAKE 2");
+        n = put(text, rows, 1, single ? "SINGLE PLAYER" : "MULTIPLAYER");
+        n = put(text, rows, 2, "FILES FOUND");
+        break;
+    case 13:                                   /* 0x8001D88C..0x8001D90C */
+        n = put(text, rows, 0, saving ? "SAVE FILE"
+                             : single ? "LOAD SINGLE" : "LOAD MP SETUP");
+        break;
+    case 14: case 15: case 20: case 21: case 22:   /* 0x8001EF08..0x8001EF28 */
+        n = put(text, rows, 0, saving ? "SAVING TO" : "LOADING FROM");
+        break;
+    case 16:                                   /* 0x8001EA48..0x8001EB74 */
+        if (saving) {
+            n = put(text, rows, 0, single ? "GAME" : "MULTIPLAYER");
+            n = put(text, rows, 1, single ? "SAVED" : "DATA SAVED");
+        } else {
+            n = put(text, rows, 0, single ? "STARTING" : "MULTIPLAYER");
+            n = put(text, rows, 1, single ? "GAME" : "CONFIG LOADED");
+        }
+        break;
+    case 17:                                   /* 0x8001E9B0..0x8001E9DC */
+        n = put(text, rows, 0, "MEMORY CARD");
+        n = put(text, rows, 1, saving ? "SAVE FAILED" : "LOAD FAILED");
+        break;
+    case 18:                                   /* 0x8001EE40..0x8001EE64 */
+        n = put(text, rows, 0, "INSUFFICIENT FREE BLOCKS");
+        n = put(text, rows, 1, "PLEASE INSERT ANOTHER");
+        n = put(text, rows, 2, "MEMORY CARD");
+        break;
+    default:
+        /* 3, 5, 7 and 19 write nothing over their tables. */
+        break;
+    }
+    return n < rows ? n : rows;
+}
+
+void q2_mcard_prompt_rows(int state, bool front_end, int y[2])
+{
+    if (!y)
+        return;
+    y[0] = y[1] = 260;                         /* 0x8001E400..0x8001E424 */
+
+    switch (state) {
+    case Q2_MCARD_STATE_CARDS:
+        y[0] = y[1] = front_end ? 216 : 220;   /* 0x8001E428..0x8001E488 */
+        break;
+    case Q2_MCARD_STATE_FILES:
+        y[1] = front_end ? 216 : 220;
+        y[0] = 220;                            /* 0x8001DD0C, last word */
+        break;
+    case 8:
+    case Q2_MCARD_STATE_DONE:
+        y[0] = 220;                            /* 0x8001ED10, 0x8001EB8C */
+        break;
+    case Q2_MCARD_STATE_OVERWRITE:
+        y[0] = y[1] = 220;                     /* 0x8001E510, 0x8001ED14 */
+        break;
+    default:
+        break;
     }
 }
 
@@ -277,30 +381,50 @@ bool q2_mcard_advance(q2_mcard *m, u16 buttons)
     m->fired = true;
 
     switch (m->state) {
-    case Q2_MCARD_STATE_LIST:
-        /* 0x8001F140: the chosen row goes to the card code, then a transition
-         * is requested. The row is `cursor - first`, already relative here. */
+    case Q2_MCARD_STATE_CARDS:
+        /* 0x8001F178..0x8001F198: `cursor - first` to SetActiveCard
+         * (engine+0x268), then SetStatus(4) — CHECKING FOR QUAKE 2 FILES. */
         if (m->host && m->host->choose)
             m->host->choose(m->host->user, m->cursor);
         if (m->host && m->host->request)
-            m->host->request(m->host->user, m->state);
+            m->host->request(m->host->user, 4);
         break;
 
-    case Q2_MCARD_STATE_CHOICE_5:
-        /* 0x8001F790: row 1 goes on, row 0 goes back to the start. */
+    case Q2_MCARD_STATE_FILES:
+        /* 0x8001F67C..0x8001F714: `cursor - first` to SetActiveFile
+         * (engine+0x26C), then 21 / 22 / 19 by the save flag, the row and the
+         * free blocks. The host owns all three facts here, so it is told the
+         * row was chosen and decides (memcard.h). */
+        if (m->host && m->host->choose)
+            m->host->choose(m->host->user, m->cursor);
         if (m->host && m->host->request)
-            m->host->request(m->host->user, m->cursor == 1 ? 6 : 1);
+            m->host->request(m->host->user, Q2_MCARD_STATE_FILES);
         break;
 
-    case Q2_MCARD_STATE_CHOICE_19:
-        /* 0x8001F718: row 1 goes on; row 0 falls through to the exit, which
-         * is a return with no transition rather than a transition to zero. */
-        if (m->cursor == 1 && m->host && m->host->request)
-            m->host->request(m->host->user, 20);
+    case Q2_MCARD_STATE_FORMAT_ASK:
+        /* 0x8001F790: YES (row 1) formats, NO (row 0) starts again. Any other
+         * row is a return with no transition (0x8001F7E0). */
+        if (m->host && m->host->request) {
+            if (m->cursor == 1)
+                m->host->request(m->host->user, Q2_MCARD_STATE_FORMATTING);
+            else if (m->cursor == 0)
+                m->host->request(m->host->user, 1);
+        }
+        break;
+
+    case Q2_MCARD_STATE_OVERWRITE:
+        /* 0x8001F718: YES (row 1) writes over the file (20); NO (row 0) goes
+         * back to the file window (13, 0x8001F770..0x8001F780). */
+        if (m->host && m->host->request) {
+            if (m->cursor == 1)
+                m->host->request(m->host->user, Q2_MCARD_STATE_SAVE_OVER);
+            else if (m->cursor == 0)
+                m->host->request(m->host->user, Q2_MCARD_STATE_FILES);
+        }
         break;
 
     case Q2_MCARD_STATE_ACCEPT_A:
-    case Q2_MCARD_STATE_ACCEPT_B:
+    case Q2_MCARD_STATE_DONE:
         /* 0x8001F0A4: apply and leave. On the console that is 0x8001C698 —
          * the same game-variable application the GAME VARIABLES page uses —
          * followed by 0x8001E1A4. The caller owns both here. */

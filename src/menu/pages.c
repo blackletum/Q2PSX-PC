@@ -371,6 +371,36 @@ static const q2_menu_item k_front_versus_setup[] = {
  * the front end carries four separate arrays at +F194/+F1F4/+F284/+F344 and
  * uses the GAME VARIABLES banner. The small coordinate differences are the
  * bytes in those records, not layout adjustments made by the port.
+ *
+ * WHICH ARRAY is the same question InGame_GOTO_MPCHEAT (0x8001D510) answers
+ * for the pause menu, asked of the same byte: module+0x4A20 is `lbu
+ * engine+0x378` — 0x800B335C, the cheat level — and 3 takes +F344, 2 +F284,
+ * 1 +F1F4 and anything else +F194, the executable's 0x8009A874 / A7B4 / A724 /
+ * A6C4 order exactly. So NONE / BRONZE / SILVER / GOLD, and
+ * q2_menu_front_variables_page indexes the array by that level.
+ *
+ * WHAT THE ROWS DO. Only RESET TO DEFAULTS carries an action, module+0xC7A8,
+ * and it is INGAME_RESET_CHEATS (0x8002048C) store for store: 64 into the
+ * three sliders at +0x374/+0x376/+0x37A, 0 into the toggles at
+ * +0x37C/+0x37E/+0x380/+0x388, 1 into +0x382 (falling damage) — and 10 into
+ * +0x36A and +0x36C, the TIME and FRAG limits. That last pair is dead in the
+ * front end: the setup page shows its limits from the module's own option
+ * indices (+EBC2/+EBBE, derived from the engine only once, by module+0x1608
+ * at init) and the match start writes the engine back FROM those indices
+ * (module+0x21D4/+0x2234), so a reset here never reaches a match. The other
+ * rows are bare records — +8 onward zero — and are adjusted by the page's
+ * per-frame handler, which module+0x4A98 copies out of engine+0x214:
+ * CHECK_FOR_SLIDER (0x8001BF1C), where the pause menu installs
+ * CHECK_FOR_SLIDERANDSCROLL (0x800204CC, the same plus the card window's
+ * scroll). Nothing is applied on this page: PatchEngineVariables runs when the
+ * match starts (module+0x228C, through engine+0x390).
+ *
+ * THE ROW THAT OPENS IT, module+0x49F8, does three things beyond the install:
+ * the back handler (engine+0x28C) becomes module+0x4AD8 — the setup page's own
+ * builder, so BACK rebuilds the setup for the mode in engine+0x370 and lands on
+ * its FIRST row (menu.c, cursor_restores) — the per-frame handler becomes
+ * CHECK_FOR_SLIDER, and the cursor is restored through FrontEndRestoreCursor
+ * (engine+0x1E8), so GAME VARIABLES reopens where it was left.
  */
 static const q2_menu_item k_front_vars_none[] = {
     { "    GRAVITY",       168,  97, Q2_ACT_NONE,            Q2_SET_GRAVITY,        Q2_WIDGET_SLIDER, 0 },

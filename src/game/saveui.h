@@ -25,25 +25,29 @@
  * ---------------------------------------------------------------------------
  * The states, and which of them are the console's
  * ---------------------------------------------------------------------------
- * The numbers are the original's (memcard.h §"The states"). What each one MEANS
- * here is a mixture, and the mixture is worth being precise about:
+ * The numbers are the original's — MEMCARD.C's status word, which is also the
+ * screen (memcard.h: MemoryCardSetStatus prints the message with the same
+ * number it stores, and InGame_PrintMemCardMessage's table is the map). The
+ * port walks the console's own path through them, minus the card hardware:
  *
- *    3  LIST         the console's. It hands a chosen row to the card code, and
- *                    SAVE FILE is the only screen with rows — that mapping is
- *                    established, not guessed.
- *    5  CHOICE       the console's arm (row 1 -> 6, row 0 -> 1). WHICH screen
- *                    it belongs to was not established; three have that shape.
- *                    The port uses it for OVERWRITE?, which is the only one of
- *                    the three a filesystem needs, and that choice is the
- *                    PORT'S rather than a reading.
- *    6  BUSY         the console's arm target. The port does its file I/O here,
- *                    which is what the SAVING screen is for.
- *    13 REPORT       the console's. It composes text, and LOAD MESSAGE is the
- *                    only screen whose text is runtime-composed.
+ *    13 LIST         the FILE window, SAVE FILE / LOAD SINGLE / LOAD MP SETUP.
+ *                    A session opens here: the console reaches it through
+ *                    1 (checking for cards), 3 (pick a card) and 4 (checking
+ *                    for files), and a filesystem has no cards to check.
+ *    19 CHOICE       OVERWRITE?, which the console's 13 arm raises for a save
+ *                    over an existing file (0x8001F70C).
+ *    21 BUSY         LOADING FROM / SAVING TO, the FORMATTING table with its
+ *                    row 0 rewritten. The console numbers the same screen 20
+ *                    (overwrite), 21 (load) and 22 (new file); the port keeps
+ *                    one number for all three, and the text, which is what is
+ *                    seen, follows the save flag exactly as the arm does.
+ *    16 REPORT       the success message (CONFIG LOADED, GAME SAVED ...),
+ *                    whose CROSS is the accept arm 0x8001F0A4. A failure is
+ *                    the console's 17 — the same screen, `%s FAILED`, with no
+ *                    arm — and the port reports it on 16 as well so that one
+ *                    press still dismisses it.
  *    14 ACCEPT       the console's: apply what was loaded and leave.
- *    19 CHOICE       the console's other two-way choice. The port does not use
- *                    it: its remaining candidate is NOT FORMATTED, and there is
- *                    no card to format. Left unclaimed rather than repurposed.
+ *     1 START        the console's restart; here, a rescan and the list.
  *
  * The SAVE? prompt is NOT in here. On the console it is a page, and its YES is
  * what installs the state machine in the first place (0x80020428) — so it
@@ -57,13 +61,18 @@
 /* The port's use of the state numbers above. The console's own names are in
  * memcard.h; these are duplicated rather than included because the game layer
  * does not depend on the menu. */
-#define Q2_SAVEUI_STATE_START    1    /* the choice's "no" arm — back to 3   */
-#define Q2_SAVEUI_STATE_LIST     3
-#define Q2_SAVEUI_STATE_CHOICE   5    /* OVERWRITE?                          */
-#define Q2_SAVEUI_STATE_BUSY     6    /* SAVING / LOADING                    */
-#define Q2_SAVEUI_STATE_REPORT  13
+#define Q2_SAVEUI_STATE_START    1    /* restart: rescan, back to the list   */
+#define Q2_SAVEUI_STATE_LIST    13    /* the file window                     */
+#define Q2_SAVEUI_STATE_CHOICE  19    /* OVERWRITE?                          */
+#define Q2_SAVEUI_STATE_BUSY    21    /* LOADING FROM / SAVING TO (20..22)   */
+#define Q2_SAVEUI_STATE_REPORT  16    /* the message; CROSS accepts          */
 #define Q2_SAVEUI_STATE_ACCEPT  14
 #define Q2_SAVEUI_STATE_ACCEPT2 16
+
+/* The console's other two numbers for the busy screen, which a request may
+ * name (memcard.c's 19 arm asks for 20). */
+#define Q2_SAVEUI_STATE_BUSY_OVER 20
+#define Q2_SAVEUI_STATE_BUSY_NEW  22
 
 typedef enum q2_save_ui_mode {
     Q2_SAVE_UI_SAVE = 0,
@@ -171,10 +180,9 @@ q2_save_ui_status q2_save_ui_update(q2_save_ui *ui);
 /*
  * Dismiss the report and finish.
  *
- * State 13's arm on the console composes text and does not transition; what
- * moves it on was not followed, so the press that dismisses it is the PORT's.
- * It lands on state 14, which is the console's accept arm, so the shape is
- * right even where the trigger is not.
+ * The report is the console's 16, whose CROSS is the accept arm 0x8001F0A4:
+ * apply the game variables and leave. This is the "leave" half; the caller
+ * owns the apply. It lands on 14, the other number that arm serves.
  */
 void q2_save_ui_acknowledge(q2_save_ui *ui);
 

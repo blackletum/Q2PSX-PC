@@ -545,6 +545,87 @@ An unplaceable item is rejected by the constructor at `0x800588C0`. This is
 spawn-time placement, not evidence of a general continuous item-unsticking
 system. The port now respects the final sweep position and rejection result.
 
+### 5 November 2026: module briefings, BASE2's drawbridge and the QENDMIS uplink
+
+The LevelBin census found module behaviour with reachable effects that the
+port did not run. All of it is read from the PAL disc with `levdisasm`
+(modules relocated at 0x80100000) and checked on SLUS-00757.
+
+**Help-computer briefings from module code.** `HelpComputer_NewMessage`
+(0x80021250, import `block+0x3D8`) is also called by module init and zone-entry
+callbacks, not only by script HELPCOMPUTER items and mission events:
+
+| map | where | orders / objective, delay | gate |
+|---|---|---|---|
+| JAIL2 | zone 0, `+0xCC` | Unit2Curr1 / Unit2Miss1, 10 | none: every zone-0 entry |
+| JAIL3 | zone 0, `+0x13C` | Unit2Curr2 / Unit2Miss1, 50 | unit word +48 bit 0, then set |
+| JAIL3 | zone 4, `+0x290` | Unit2Curr7 or Unit2Curr3, 50; Unit2Curr2, 100 | `module+0x1218 == -1`; key 0x20; bit 1 |
+| JAIL3 | zone 5, `+0x614` | Unit2Curr7 or Unit2Curr6, 50; Unit2Curr2, 100 | `module+0x1218 == -1`; key 0x40; bit 1 |
+| SECURITY | zone 0, `+0x16B0` | Unit2Curr8 / Unit2Miss1, 40 | unit word +48 bit 2, then set |
+| BOSS1 | init `+0x1C90` | Unit5Curr1 / Unit5Miss1, 40 | none: every full load |
+| BOSS2 | init `+0x1484` | Unit5Curr2 / Unit5Miss1, 50 | none: every full load |
+
+Unit word +48 belongs to the 208-byte "Jail Mission" block that
+`InitMissionJail` (0x800233F4) allocates; JAIL3 caches `[block+0x14]` at
+`module+0x133C` and SECURITY at `module+0x26DC`. Bit 1 is set by JAIL3's
+BothKeys handler on every path (`+0xFB8`), after the no-key panel tests it at
+`+0xCC0`. JAIL3's `module+0x1218` is -1 from init (`+0xC18`) and is then
+written by every zone callback (0, 1, 2, 3, 4, 5 from `+0x13C`, `+0x1150`,
+`+0x1178`, `+0x1188`, `+0x290`, `+0x614`), so the zone-4/5 panels appear only
+when that zone is the first one entered after a level load.
+
+Order: InitLevel calls export 0 at 0x80070F64 and OnEnteringZone (which runs
+the zone callback) at 0x80070F6C; a gate's 0x8007901C runs the event replay,
+the unit hub's restore (`0x800B2A68`, a0 = 0, which hands the saved pair to
+`HelpComputer_SetMessages`) and only then the callback. The module's pair
+therefore replaces the restored one. Card loads and restarts reload the level
+through `ReloadAutoSave` (0x800400A8), so they run init and the callback too;
+only the unit word stops the one-shots there. `StoreLevelStartState`
+(0x80070F94) is taken after the callback, so a restart keeps the latch.
+
+The port keeps the three bits in `q2_native_mission.flags`
+(`Q2_NATIVE_JAIL3_BRIEFED`, `Q2_NATIVE_JAIL3_KEYS_SEEN`,
+`Q2_NATIVE_SECURITY_BRIEFED`), which NMIS already saves; the tracker is
+`client.jail3_prev_zone` and needs no save because every load resets it. The
+raise is queued during the load and armed on the first logic tick with that
+tick's frame delta (`client_native_popup_queue`), after a card load has put
+the saved pair back. BothKeys now tests and sets bit 1 instead of the event's
+own latch; a save made before this change infers bit 1 from the BothKeys
+record having run.
+
+One gate is still not modelled: `NewMessage` and `HelpComputer_DoDisplay`
+both skip while the halfword at 0x800D5EF8 is non-zero. That is
+`GameWindows[0]+0x2AC+0x1C`, the pad's self-play/record state that
+`SelfPlayOn` (0x80033120) sets, not a menu flag. The port runs no self-play.
+
+**BASE2's drawbridge.** `+0x308`, called by the zone-1 (`+0x180`) and zone-2
+(`+0x244`) callbacks, reads `Event_GetDisableNamed("EDrawbridge")`
+(0x80027BF0: bit 7 of the record's flag byte, -1 for a missing name), stores
+it in Base Mission word +28 (no reader on the disc) and, when non-zero, calls
+`GenSolidBox` (0x800555D8) with (-5063,100,7039)..(-3918,304,9530) and (0, 1).
+The walk test (`test_client_levelbin`) drops the player at (-4490, 8285) in
+zone 2: before EDrawbridge has run the feet fall to y 1919; after it has run
+and the zone is re-entered they stop on the box top at y 100. Without the box
+the port let the player fall through the lowered bridge on both discs. The
+box goes into the entity-box registry with no Scene node
+(`client_base2_bridge`), after the replay, on every zone-1/2 entry.
+
+**The QENDMIS uplink.** The shared screen module's LevelSpecific `+0x197C`
+replaces the placeholder placard on QENDMIS1..5. Init (`+0x414`) loads palette
+0 from `module+0x52C8 + 0x20*(N-1)` and palette 1 from `+0x52A8` into VRAM
+(0,256) and (0,257). Each game frame: the globe's brightness (`+0x5260`)
+steps by 2 toward 128, or toward 0 after `+0x5264`; `+0x2364` draws Globe
+frame `ChrisCount & 15` (192 x 128, 4bpp, additive, slot 4 + n/2, v = 128 on
+odd frames) at (40,20); `+0x2508` draws Screena over Screenb as four 256-wide
+sprites scrolled by `+0x525C`; fire skips once `ChrisCount >= 31`. The state
+machine (jump table `module+0x2EC`) prints the four centre lines with waits of
+90, 64 and 19 frames, scrolls 240 frames, prints "closing uplink....", waits
+60 and exits: 481 game frames unpressed, LevelComplete 4 with NewMission 1 and
+NextMission = Mission + 1 for units 1..4, 13 (`GameExtro`) for unit 5. The
+counts are identical on the NTSC disc, so the port runs them at the game-frame
+rate (25 / 30 a second) rather than the field rate the logo screens use. The
+census had the exit as 13 for every unit; only Mission 5 writes 13.
+
 ## Save compatibility
 
 CAIS chunk version 2 adds one boolean `spawn_pending` after each monster's

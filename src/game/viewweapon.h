@@ -14,7 +14,11 @@
  * ---------------------------------------------------------------------------
  * The state machine — 0x8004F87C
  * ---------------------------------------------------------------------------
- * Four states, and every transition is an animation event rather than a timer:
+ * It runs at the top of EVERY substep of the driver's key loop, not only when a
+ * key runs out: the pass itself advances the frame when the key's clock is
+ * spent, and the per-weapon drivers and the key reload follow it (see
+ * q2_vw_advance). Four states, and every transition is an animation event
+ * rather than a timer:
  *
  *        RAISE ──clip ends──> IDLE ──fire pressed──> FIRE
  *          ^                   │                      │
@@ -30,13 +34,16 @@
  *
  *   - **LOWER holds rather than loops.** When the lower clip runs out, the
  *     70-tick switch countdown at weapon-block +222 is checked (0x8004F944); if
- *     it has not expired the frame index is *rewound by one* and the state
- *     stays, so the weapon hangs at the bottom of its arc. The model is only
- *     swapped when the countdown reaches zero.
+ *     it has not expired the frame index is *rewound by one*, the state stays
+ *     and the pass raises the halt flag that ends the driver's loop for the
+ *     frame, so the weapon hangs at the bottom of its arc with the key spent.
+ *     The model is only swapped when the countdown reaches zero.
  *   - **Running dry does not just stop the gun.** If the fire function reports
- *     it could not fire, the machine clears the fire latch and recomputes the
- *     next and previous weapons (0x800506C4 / 0x80050758 at 0x8004FB5C), which
- *     is what makes the console auto-switch off an empty weapon.
+ *     it could not fire, the machine clears the fire latch and calls the
+ *     auto-select 0x800506C4, which writes the best weapon with ammo into the
+ *     selection on the spot, then refills the neighbours (0x80050758), all at
+ *     0x8004FB5C — which is what makes the console auto-switch off an empty
+ *     weapon within the same driver call.
  *
  * ---------------------------------------------------------------------------
  * Where it sits, which is the part ports get visibly wrong
@@ -166,6 +173,22 @@ typedef enum q2_vw_fire_result {
     Q2_VW_FIRE_DENIED = 2,
 
     /*
+     * The console's 0: the fire function ran and spawned nothing (a full
+     * projectile pool). The idle arm treats every answer but 2 alike
+     * (0x8004FB44), so the fire clip still plays, the quad's sound still
+     * sounds, and the driver's return is 0.
+     */
+    Q2_VW_FIRE_FAILED = 1,
+
+    /*
+     * NOT A CONSOLE VALUE either: "the caller has not called the fire
+     * function". Passed as `fired`, it makes the idle arm call the advance's
+     * `fire` callback at the console's own moment instead of consuming a
+     * report made before the call.
+     */
+    Q2_VW_FIRE_ASK = -2,
+
+    /*
      * NOT A CONSOLE VALUE, and negative so it cannot be confused with one.
      *
      * On the console the idle state CALLS the fire function and branches on
@@ -178,10 +201,20 @@ typedef enum q2_vw_fire_result {
      * Reporting that as Q2_VW_FIRED plays a fire clip for a shot that never
      * happened; reporting it as Q2_VW_FIRE_DENIED switches the player off a
      * perfectly loaded gun. It has to be its own value, and the machine's
-     * response to it is to leave the idle state alone.
+     * response to it is to leave the idle state alone: the idle arm's pass
+     * proceeds as though the trigger were up. (A fire function that ran and
+     * spawned nothing is Q2_VW_FIRE_FAILED, the console's 0, and DOES play
+     * the clip.)
      */
     Q2_VW_FIRE_NONE = -1
 } q2_vw_fire_result;
+
+/*
+ * The dry pass's auto-select, 0x800506C4: given the weapon in hand, return the
+ * weapon the selection becomes (the console writes it into client+102 and the
+ * pending weapon +214 in the same call), or a negative value to leave it.
+ */
+typedef int (*q2_vw_select_fn)(void *user, int weapon);
 
 typedef struct q2_viewweapon {
     const q2_vm_tables *tab;
@@ -314,17 +347,32 @@ typedef struct q2_viewweapon {
      */
     s16         aim_assist;
 
-    bool        fire_latch;      /* +216: a shot is in flight this state      */
+    bool        fire_latch;      /* +216: the DRY latch (0x80050230/0x800502FC) */
 
     /*
-     * Set on the pass that releases the latch, which is also the pass on which
-     * the original recomputes the player's next and previous weapons
-     * (0x8004FB5C). A caller drains it to do the auto-switch off an empty gun —
-     * the thing that makes running dry feel like the console rather than like a
-     * click.
+     * Set on the dry pass — an idle shot that came back 2, or the latch being
+     * released (0x8004FB5C) — which is the pass on which the original calls
+     * its auto-select 0x800506C4. A caller drains it to do the auto-switch off
+     * an empty gun — the thing that makes running dry feel like the console
+     * rather than like a click.
      */
     bool        refire;
+
+    /*
+     * And the auto-select itself, for a caller that can answer it inside the
+     * advance: the console's 0x800506C4 changes the selection in the middle of
+     * the state machine's pass, so the NEXT substep of the same driver call
+     * starts the lower. Called with the advance's `user`. NULL leaves it to a
+     * caller draining `refire` afterwards, which lowers a tick later.
+     */
+    q2_vw_select_fn auto_select;
+
     s16         switch_ticks;    /* weapon block +222, the 70-tick countdown  */
+
+    /* Armed by q2_vw_select this frame: the cycle routine that arms the
+     * countdown does not also count it down (0x8004ECF0 vs 0x8004ED54), so
+     * the next advance leaves it at seventy. */
+    bool        switch_armed;
 
     /* The last event a key raised, and the frame it happened on. A caller
      * drains this to make a muzzle flash or a shell eject happen on the frame
@@ -418,8 +466,10 @@ typedef struct q2_viewweapon {
     s16         anim_end;        /* the playing move's last position, -1 idle */
     u16         anim_flags;      /* +258: bit 1 playing, bit 0 has played     */
 
-    /* Diagnostics: how many keys have been consumed since the last reset. */
+    /* Diagnostics: how many keys have been consumed since the last reset, and
+     * how many substeps (state-machine passes) the last advance ran. */
     u32         keys_played;
+    u32         substeps;
     u32         anims_started;   /* how many named moves have been started    */
 
     /*
@@ -459,10 +509,29 @@ typedef struct q2_viewweapon {
     s32         last_fire_frame; /* +218: fire once per NEW frame            */
     bool        cook;            /* the grenade is primed and held           */
 
-    /* Grenade3 observes the model timeline from its own think. These are the
-     * port-side bridge: elapsed time at the pinned 380 position charges the
-     * hidden projectile, and crossing 411 releases it. */
+    /*
+     * The held grenade's view of the model timeline — PrimaryGrenadeActive,
+     * 0x8004A368, the hidden entity AnyoneFireGrenade (0x8004AA6C) creates
+     * when the hand grenade's fire function succeeds. Its held state
+     * (0x8004A414…0x8004A544) runs once per frame after the player's think:
+     *
+     *     pos == 380                      charge += dt*6   0x8004A42C
+     *     pos >= 261 and mark < 261       wep_hgrenc1b     0x8004A474
+     *     pos >= 411 and mark < 411       thrown (state 2) 0x8004A4A8
+     *     mark = pos - 1                                   0x8004A544
+     *
+     * `mark` IS viewmodel+740 (`hand_prev_anim`), and the driver reads it: the cook arm will not
+     * pin the arm unless it is below 380 (0x80050404), so a trigger pressed
+     * again after the arm has passed the cook position does not drag it back.
+     * The advance runs this think at its end while `hand_live`; the outputs
+     * are the bridge to the port's own grenade. `hand_cook_ticks` is the
+     * charge over six, in the advance's dt units.
+     */
+    /* +740, the grenade's previous position - 1. A word on the console;
+     * its range (-1..470) fits the halfword the save chunk has always
+     * carried under this name. */
     s16         hand_prev_anim;
+    bool        hand_live;       /* a held grenade is thinking               */
     s32         hand_cook_ticks;
     bool        hand_release;
 
@@ -528,8 +597,11 @@ void q2_vw_frame_fire_result(q2_viewweapon *vw, bool dry);
 /* The sound a frame boundary asked for, or -1. Drains it. */
 s16 q2_vw_take_frame_sound(q2_viewweapon *vw);
 
-/* Drain Grenade3's two gameplay outputs. Cook time is in the same 300 Hz dt
- * units passed to q2_vw_advance; release is a one-shot 411 crossing. */
+/* Drain Grenade3's two gameplay outputs, which its held think (0x8004A368,
+ * run at the end of each advance) produces. Cook time is in the same 300 Hz dt
+ * units passed to q2_vw_advance — a whole frame's dt for each advance that
+ * ends at the cook position, the console's charge of dt*6 over six; release
+ * is a one-shot 411 crossing against the +740 mark. */
 s32 q2_vw_take_hand_grenade_cook(q2_viewweapon *vw);
 bool q2_vw_take_hand_grenade_release(q2_viewweapon *vw);
 
@@ -574,12 +646,19 @@ const char *q2_vw_model_name(const q2_viewweapon *vw);
 /*
  * Advance by `dt` in the console's 1/300 s units, consuming as many keys as it
  * spans — the original's loop at 0x8004EEA4 takes `min(left, dt)` and repeats,
- * so a long frame plays a short clip through rather than skipping it.
+ * so a long frame plays a short clip through rather than skipping it. Each
+ * substep runs, in 0x8004EE0C's order, the state machine's pass, the model's
+ * named move, the per-weapon frame driver, the key reload when the frame or
+ * the state moved, and the hyperblaster's barrel; the display value is
+ * computed once after the loop. tests/fixtures/viewweapon_driver_reference.h
+ * is the native driver executed over the same inputs, call for call.
  *
- * `fire_held` is the trigger. `fired` is what the caller's fire function
- * decided when the machine asked it to shoot; pass Q2_VW_FIRED normally and
- * Q2_VW_FIRE_DENIED when the shot could not happen, which is what triggers the
- * auto-switch.
+ * `fire_held` is the trigger. `fired` is a fire function's answer made before
+ * the call: when the call begins with q2_vw_wants_fire true and the trigger
+ * down, the first substep's idle arm is certain to ask, and `fired` is its
+ * answer. Every other ask goes to the callback of q2_vw_advance_firing; with
+ * no callback `fired` answers them all. Q2_VW_FIRE_ASK makes every ask a
+ * callback call.
  *
  * Returns true when the weapon in hand changed, which is a caller's cue to
  * resolve the new model name.
@@ -587,10 +666,11 @@ const char *q2_vw_model_name(const q2_viewweapon *vw);
 bool q2_vw_advance(q2_viewweapon *vw, s32 dt, bool fire_held,
                    q2_vw_fire_result fired);
 
-/* Resolve each frame-driven burst during its animation substep. This keeps
- * the held weapon, burst size and dry result together even across multiple
- * keys in one frame. Without a callback, advance queues individual rounds
- * for q2_vw_take_frame_fires, as used by offline animation probes. */
+/* Resolve each fire call during its own substep — the idle arm's after the
+ * first (see above) and every frame-driven burst. This keeps the held weapon,
+ * burst size and dry result together even across multiple keys in one frame.
+ * Without a callback, advance queues individual rounds for
+ * q2_vw_take_frame_fires, as used by offline animation probes. */
 typedef q2_vw_fire_result (*q2_vw_fire_fn)(void *user, int weapon, int rounds);
 bool q2_vw_advance_firing(q2_viewweapon *vw, s32 dt, bool fire_held,
                           q2_vw_fire_result fired, q2_vw_fire_fn fire,

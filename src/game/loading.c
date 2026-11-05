@@ -299,27 +299,12 @@ static u32 loading_draw_logo(const q2_loading *l, psx_ot *ot,
     p->tpage |= 0x0600u;
     p->set_tpage = true; /* loading screen's paired texture-page setup */
     /*
-     * PALETTE 4, THE GREY RAMP — not the sheet's own blue one.
-     *
-     * The logo is GREY on the console, and the bank has exactly the palette for
-     * that. The sprite is authored against 68: its sixty rows use sixteen
-     * colours and they are 68's sixteen entries, a monotonic blue ramp dark to
-     * light. Palette 4 is the same shape with the colour taken out —
-     * `000000 080808 181818 ... D8D8D8 E8E8E8`, sixteen evenly spaced greys in
-     * the same index order — so drawing the strip through it gives the same
-     * image, same weight, same anti-aliasing, in grey. Nothing else in the bank
-     * does: 75 is the same ramp stopped at 0x78 and comes out too dark, 76 runs
-     * bright-to-dark and inverts the art, and 73 is a flat white.
-     *
-     * Palette 70 was tried and is wrong here for a reason worth keeping:
-     * hudtables.h calls it "a white-only mask palette the menu uses" and the
-     * bank confirms 0xF8F8F8 at indices 8..11 with the other twelve black, so
-     * it turns a sixteen-level ramp into four and the logo comes out a stippled
-     * fragment. It is right for a GLYPH, whose art sits in that band.
-     *
-     * WHICH palette the console binds is not read — the strip is data with no
-     * located reader — so this is chosen to match the capture, the same way the
-     * corner and the size are.
+     * PALETTE 78 — the CLUT table entry SpriteAnim reads at 0x80038908
+     * (`lhu s0, 0x800E3FC8`, the table at 0x800E3F2C plus 0x9C) and stores at
+     * prim+14 (0x80038B50). Record 78 is sixteen greys in an unsorted order,
+     * the strip's own palette; loading.h has the bytes. This was palette 4, a
+     * sorted grey ramp chosen to match the capture while the reader was
+     * unknown.
      */
     p->clut  = q2_hud_palette_clut(l->font.tab, Q2_LOADING_PALETTE);
     p->textured_blend = true;

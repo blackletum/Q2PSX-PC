@@ -100,6 +100,25 @@
  * needs. Its lone `Q2LOGO` is not drawn. FORMATS §11.13 keeps the shape of that
  * directory as an observation rather than as an argument.
  *
+ * NOTHING ON THE DISC ASKS FOR IT, and that is now a reading rather than an
+ * empty xref. Levels are requested by their twelve-byte NAME (ModNameCmp,
+ * 0x8006DBC0, against 0x800E465C), so the question is who writes "Dummy" into
+ * a request. A byte scan of the whole data track finds the string in exactly
+ * fourteen places: the executable twice — its level-table record 3
+ * (0x8009C770) and an orphan in QUAKE.C's name block (0x800AC820, between
+ * `SelfPlay0` and `Default`, which GameSelfPlay / GameLogos / GameIntro and
+ * their siblings at 0x80041300..0x80041958 copy their names out of — every
+ * neighbour has a reader, this one has none) — and the twelve pseudo-level
+ * `COMMON.DAT`s (QDUMMY, QENDMIS1..5, QFMV, QLOGOS, QLOGOS2, QMAGINTR,
+ * QMAGEXTR, QMRESULT), whose shared LevelBin compares the CURRENT level's
+ * name against it at init (`jalr engine+0x47C` with module+0x118, at
+ * module+0x0BA0 in QLOGOS / QFMV / QMRESULT and module+0x096C in QDUMMY) to
+ * pick its per-frame handler. That is a reader of the name, not a request for the level. No
+ * event script carries it. So `Dummy` is a level record nothing transitions
+ * to, and the loading screen's art is the copy of `frontend.lbm` already in
+ * VRAM slot 13 from whatever map is loaded — SpriteAnim samples slot 13 and
+ * InitLoadingAnim (0x80038DFC) copies its background save into the same page.
+ *
  * ---------------------------------------------------------------------------
  * THE CODE THAT COUNTS THE CELL INDEX — SpriteAnim, 0x80038820 (MAINLOOP.C)
  * ---------------------------------------------------------------------------
@@ -259,14 +278,25 @@
 #define Q2_LOADING_Y    40
 
 /*
- * The palette the logo is drawn through — the executable's built-in bank, id 4.
+ * The palette the logo is drawn through — the executable's built-in bank, id
+ * 78. READ, not chosen.
  *
- * A monotonic sixteen-step grey ramp, `000000 080808 181818 ... D8D8D8 E8E8E8`.
- * The strip is authored against palette 68, whose sixteen entries are a blue
- * ramp in the same index order, so 4 is the same picture with the colour taken
- * out. See loading.c for why the other greys in the bank are not it.
+ * SpriteAnim's mode-0 arm loads the sprite's CLUT word with `lhu s0,
+ * 0x800E3FC8` (0x80038908) and stores it at prim+14 (0x80038B50). 0x800E3FC8 is
+ * the CLUT table at 0x800E3F2C (engine+0x1DC; the text drawer reads its 68 and
+ * 70 from +0x88 and +0x8C, 0x8001B058 / 0x8001B044) plus 0x9C: entry 78. The
+ * only writer of that table is DownloadPals (0x8007610C), which stores record
+ * N's CLUT word at entry N, and record 78 (0x800A325C) is sixteen GREYS in an
+ * unsorted order — `0000 35AC 1CE7 4E72 1084 2949 460F 5AD5 316B 0842 14A5
+ * 6316 3DEE 2108 56B4 4A51` — an image-specific palette, which is why the
+ * capture's logo is grey. SLUS-00757 is the same: 0x800E4238 against its table
+ * at 0x800E419C, also +0x9C.
+ *
+ * It was 4, the bank's sorted grey ramp, picked to match the capture while no
+ * reader was known; drawing an index image authored for 78 through a sorted
+ * ramp keeps the outline and scrambles the shading.
  */
-#define Q2_LOADING_PALETTE  4
+#define Q2_LOADING_PALETTE  78
 
 /*
  * The ordering-table bucket the logo is linked into.

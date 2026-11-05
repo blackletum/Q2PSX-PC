@@ -40,6 +40,44 @@ Semantic versioning, read against the *disc*:
 | **minor** | New behaviour: a subsystem that now runs, a format that is now read, a fidelity switch that now exists. While the major version is 0, this is also where behaviour is allowed to *change*. |
 | **patch** | Fixes and packaging, with no new behaviour. |
 
+### What 1.0.0 is measured against (proposed, awaiting the owner's sign-off)
+
+"Nothing known to be wrong" needs a boundary, or the measurements that only
+a console can make keep it open forever. The proposal splits the remaining
+work three ways:
+
+1. **Gates 1.0.** Anything the disc's own code can settle: a behaviour the
+   port gets wrong against a reading or a native fixture, a stale or
+   contradictory audit claim, a test that fails on either supported disc.
+   These are fixed or proved equivalent before 1.0.
+2. **Qualifies after 1.0.** Anything that needs retail hardware or a trusted
+   capture to measure, and no disc reading can decide. This list lives in the
+   functional audit's remaining-work table:
+   - paired PAL and NTSC frames;
+   - GPU timing and scanout;
+   - GTE and GPU golden vectors beyond the current set;
+   - final audio amplitude, the XA filters and SPU key-on timing;
+   - movie A/V phase;
+   - host audio-device switching;
+   - physical controllers and rumble.
+
+   A finding from any of these that the disc then explains becomes a 1.0.x fix.
+3. **Signed off, not fixed.** Deliberate differences, stated in the player
+   guide:
+   - the stronger pickup weapon switch (off restores the console's rule);
+   - standing on another body does not ground the player;
+   - Boss1's aim with no enemy;
+   - a BFG beam keeps its last ends after its ball is gone;
+   - the unit-five briefing camera;
+   - RESTART after loading a save returns to the loaded game;
+   - the `LiftRing1` name mismatch;
+   - CD-DA playback for modified tables;
+   - CTF and Tag stay cut;
+   - saves are the port's own format;
+   - no perspective-correct mode;
+   - the host-clock seed in interactive play, where the console reads its
+     root counter.
+
 Saved games are the one compatibility promise: the container is chunked,
 checksummed and fixed-width so a save written by one build loads under another.
 A release that cannot keep that gets a minor bump and says so in its notes.

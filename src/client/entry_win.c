@@ -73,7 +73,13 @@ static int run_client(int argc, char **argv)
     result = main(argc, argv);
     fflush(stdout);
     fflush(stderr);
-    if (result && !cli && !developer) {
+    /* The box is for a player who started the game from Explorer and has
+     * nowhere else to read why it stopped. A caller holding the output -- a
+     * terminal, a pipe, a redirected file -- already has the reason, and a
+     * script that checks the exit code would otherwise wait on a modal
+     * dialog nobody is there to close. */
+    if (result && !cli && !developer && !console &&
+        !redirected(output) && !redirected(errors)) {
         char message[2304];
         snprintf(message, sizeof(message), "Quake II could not start.%s%s",
                  log_path[0] ? "\n\nDetails are saved in:\n" : "\nRun with --developer for details.", log_path);

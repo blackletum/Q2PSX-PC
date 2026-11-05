@@ -2,7 +2,19 @@
 
 ## Where this stands
 
-**Current status (28 October 2026):** this file is a chronological research
+**Current status (5 November 2026).** Every open marker below has been
+reconciled with later evidence. Several were already answered further down
+and are now marked: `view+308`, #39a, #55, #59, #59b, #78. #2b and #25 are
+settled from the console's own code. What still carries `[ ]` or `[~]` is
+format and metadata residue: fields whose meaning is unread but which nothing
+the port reproduces is known to depend on (#2d's extents, #3a/#3b, #4b, #4c,
+#12a, #12b, #17, #21, #22, #24's heap path, #31). Each entry gives its own
+evidence. The front-end residues (#20e, #42's page-11 BACK case and #44)
+are being closed from the module.
+
+**LevelBin census follow-up (5 November).** A census of all 458 functions in the 25 distinct LevelBin modules found eight with reachable effects the port did not reproduce. The module help-computer briefings (JAIL2, JAIL3, SECURITY, BOSS1, BOSS2), BASE2's EDrawbridge solid box and the QENDMIS uplink screen are now implemented (ENTITY-AUDIT, 5 November). `block+0x78` is `InSelfPlayMode`, not a team/flag enable. Still open: the self-play attract demo, whose recordings are in the BASE3/JAIL2/WASTE2 modules (PAL `+0x8B4`/`+0x788`/`+0x7F4`), and how `GameNewMission` chooses a unit's first level when QENDMIS is entered without a carried LOADMAP.
+
+**Status of 28 October 2026:** this file is a chronological research
 notebook, not the current completion checklist. The
 [functional audit's remaining-work table](FUNCTIONAL-AUDIT.md#consolidated-remaining-work-28-october)
 and the linked subsystem audits describe the current limits. All 22 creature
@@ -12,7 +24,8 @@ implementations are missing, or that no questions remain open, are superseded.
 Unresolved markers in older entries still need reconciliation with subsequent
 native evidence; they do not by themselves establish a current gameplay bug.
 
-**Historical creature coverage correction (2026-10-23):** the earlier seven-module census
+**Historical creature coverage correction (2026-10-23; superseded by the 28 October status above:
+Jorg, Rider and Medic are implemented):** the earlier seven-module census
 searched COMMON.DAT only. Including zone files finds 22 distinct modules; Jorg,
 Rider and Medic still lack native implementations, and shared creature physics
 remains unfinished. Historical claims below about all creatures
@@ -491,7 +504,12 @@ Legend: `[ ]` open · `[~]` partially resolved · `[x]` resolved (move the item,
       (`{32, 0, 32, 64, 96}`) is the **semi-transparency field of a tpage word**, indexed by a face's texture
       byte shifted right by five, so an unset selector is B+F rather than the half blend; and `InitGeom`
       leaves **ZSF3 = 341, ZSF4 = 256**, which no code overrides.
-  - [ ] Residue: **what `view+308` points at.** Every layout stores its own argument there as a word and the
+  - [x] Residue: **what `view+308` points at. — ANSWERED 5 November: the view's HUD panel routine.** The
+        three addresses the layouts store are QPANEL.C's `ProcessQuakePanel1by1` (`0x800337D0`),
+        `ProcessQuakePanel1by2` (`0x80033D30`) and `ProcessQuakePanel2by1` (`0x80034288`), and DRAW.C's
+        `ProcessAllPanels` (`0x8007821C`, reached from QuakeLoop at `0x80038FE8`) loads `view+308` and calls
+        it per view (`0x80078244..0x80078254`). Original text follows.
+        Residue: **what `view+308` points at.** Every layout stores its own argument there as a word and the
         callers pass function addresses (`0x800337D0` for one player, `0x80033D30` / `0x80034288` for the two
         splits). It is a per-view callback; what invokes it was not followed. The port expresses it as the
         `view` hook in `q2_screen_hooks`.
@@ -552,7 +570,13 @@ Legend: `[ ]` open · `[~]` partially resolved · `[x]` resolved (move the item,
 
 The residues of the resolved blockers keep their parents' numbers.
 
-- [~] **2b. Cross-part index resolution for 21,217 faces (15.3 %), all inside the articulated
+- [x] **2b. Cross-part index resolution — RESOLVED 5 November, from the draw code: last writer wins.**
+      The model drawer `0x800B1F90` makes one pass per part (`0x800B1FF4..0x800B25C4`), transforming the
+      part's vertices into the shared scratch from `(part[+2] & 0xFF) * 8` (`0x800B2378..0x800B2384`) and
+      then, in the same pass, emitting the part's faces from `scratch + index * 8`
+      (`0x800B2438..0x800B2440`). A face therefore reads whichever part wrote the slot last, up to and
+      including its own, which is `q2_model_bake_indices`. Original text follows.
+      **2b. Cross-part index resolution for 21,217 faces (15.3 %), all inside the articulated
       models.** Last-writer-wins and a rival arithmetic rule both resolve 100 % of indices in range and
       differ on 18,283 articulated faces; geometry alone cannot separate them. Last-writer-wins wins on
       coverage (100.0000 % / 1,723 models vs 99.6131 % / 1,462) and is what the module implements, behind one
@@ -1411,7 +1435,16 @@ The residues of the resolved blockers keep their parents' numbers.
       against `0x800AE634`, which is the **NUL terminating the previous string** — so the comparand is `""`,
       not the word at `0x800AE638`. An earlier reading of this pass had it as the label `PAUSED`; it is
       "a row with no text draws no bar", which is exactly what SAVE FILE's four empty slots need.
-  - [~] 20e. Residue: which of the nineteen states shows which of the nine screens. Only two are settled by
+  - [x] 20e. **SOLVED (5 November) — the state IS the screen.** MemoryCardSetStatus (0x80082720) and its
+        inlined copies store the status and then call InGame_PrintMemCardMessage (0x8001E3D4) with the same
+        number, so its 22-entry jump table at 0x800AB6DC is the whole map: 1/2/4/8/9/10/11/16/17 LOAD
+        MESSAGE (text rewritten per status), 3 SELECT SLOT (+ card rows), 5 NOT FORMATTED,
+        6/14/15/20/21/22 FORMATTING (row 0 → FORMATTING / LOADING FROM / SAVING TO), 7 nothing, 12/18
+        SAVING, 13 SAVE FILE (FrontEnd_DoFileWindow 0x8001D84C), 19 OVERWRITE?. SAVE? and NO CONTROLLER are
+        pages 39 and 38. The earlier pairs below were both wrong: 3 is the card list, 13 the file window.
+        The arms: 3 → SetActiveCard, 4; 13 → SetActiveFile, then 21/22/19; 19 NO → 13. FORMATS §10.10;
+        `q2_mcard_screen_for_state` / `q2_mcard_compose`. Original residue:
+        which of the nineteen states shows which of the nine screens. Only two are settled by
         the arms themselves — state 3 hands over a row and SAVE FILE is the only row list, state 13 composes
         text and LOAD MESSAGE is the only composed screen. *Attack:* xref each of the nine table installers
         and follow its callers back to the state that reaches it.
@@ -1597,7 +1630,17 @@ The residues of the resolved blockers keep their parents' numbers.
 
       `Resources` `unk0` (−3000…6600, 49 distinct) and `unk4` (40…180, 17 distinct); `unk3` (64, but 80
       in two records).
-- [~] 25. `TrigBounds` trigger `id` (9…75 plus 255, where 255 is "none") and `flags` (14 distinct values up
+- [x] 25. **RESOLVED 5 November: the three remaining bits select a volume and do nothing else.** The
+      volume half of `0x80050CE0` (`0x80050EE8..0x80050F7C`) returns the FIRST overlapping volume whose
+      flags meet the caller's mask, and returns that volume's own unmasked flags (`lh v0, 0(v1)` at
+      `0x80050F78`). The player's caller `0x800458A0` passes `0x3360` and then tests the answer for
+      `0x1000`, `0x0200` and `0x2000` only (`0x800458B4`, `0x800458F8`, `0x80045920`); it never reads it
+      again. So `0x0100`, `0x0040` and `0x0020` only decide which volume answers: an earlier volume carrying
+      one of them can shadow a later water volume. `q2_move_contents` keeps the first match and the unmasked
+      return. The other two callers pass their own masks: the step gate passes `0x810` for an entity whose
+      `+0x98` bit 0 is set, and GameSpawn sets that bit on every creature (`0x8007E59C`). Neither
+      passes the three bits. Original text follows.
+      `TrigBounds` trigger `id` (9…75 plus 255, where 255 is "none") and `flags` (14 distinct values up
       to 10240). **Three flag bits are now known**, read out of the contents test at `0x80050CE0` and the
       player integrator that consumes it: `0x0200` makes an entity **sink slowly** (vertical velocity eased
       toward +1024, decelerating by `dt*24` above it), `0x2000` makes it **buoyant** (eased toward −3072,
@@ -1823,7 +1866,10 @@ The residues of the resolved blockers keep their parents' numbers.
       Implemented in `src/game/mission.[ch]`. The counters are inputs rather than something the module
       invents, because kills and secrets are simulation state the sim does not yet tally — a caller that has
       counted nothing gets a screen saying zero rather than a screen that lies.
-  - [ ] 39a. Residue: the y step between the label rows and the value column's exact x. The rows are emitted
+  - [x] 39a. RESOLVED (stale marker, reconciled 5 November): `mission.h` pins every step and column to
+        its instruction (data-row step 10 at `0x80021E7C`, columns at `0x80021CD8..0x80021EC0`, values
+        right-aligned at `0x80021DB8`/`0x80021E0C`) and no `_UNREAD` constant remains. Original residue:
+        the y step between the label rows and the value column's exact x. The rows are emitted
         with individually incremented values rather than from a table, so pinning each needs another pass
         over `0x80021CC0`…`0x80021ECC`. Both are marked `_UNREAD` at every use.
       **~~The split-screen overlay.~~ — RESOLVED, and there is no split-screen overlay.**
@@ -1899,7 +1945,7 @@ item records at run time instead of transcribing a table, so there is nothing to
       mirrored by writing the screen corners backwards against ascending UVs, not by flipping the UVs. It
       overhangs its rectangle by 10 and 6. FORMATS §11.10; `src/menu/panel.[ch]`; `tests/test_panel.c`.
 
-- [~] 42. **The button prompts — the art, table and ordinary-menu policy SOLVED.** The reason a
+- [x] 42. **The button prompts — the art, table and ordinary-menu policy SOLVED** (and the page-11 case below). The reason a
       string sweep never found `BACK` is that there is no such string: each prompt is one 76 x 16
       pre-rendered cell in `frontend.lbm`, glyph and word together, drawn as a single quad. The table is
       three 18-byte records at `0x8009B4D8` giving uv, size, x and a target/current y pair; the three sit at
@@ -1909,8 +1955,12 @@ item records at run time instead of transcribing a table, so there is nothing to
       `0x8001A280..0x8001A348` settles the common policy: SELECT follows a non-NULL action on the current
       row and BACK follows a non-NULL page back handler, at caller y 216 in QFRONT and 220 in-game. QFRONT
       module+`0x459C` adds RULES at y 220 for the first three MULTIPLAYER mode rows and parks it on the two
-      settings rows. `q2_prompt_sync_menu` and the client now apply and render those rules. *Still open
-      outside the ordinary menu:* the retail drawer's page-11 BACK special case at (230,114).
+      settings rows. `q2_prompt_sync_menu` and the client now apply and render those rules. **Page 11 — SOLVED
+      (5 November).** `0x8001C410..0x8001C42C` tests page id 11 and record 1 and draws BACK at the literal
+      (230, 114) — (230, 110) on SLUS-00757 — with record 1's art, whatever its y. Page 11 is QFRONT's
+      per-player setup (module+0x59CC, PROCEED), which installs no back handler, so BACK sits mid-screen
+      between the player panels for the page's whole life. The same drawer modulates every prompt at 0x60
+      and samples built-in palette 69 (0x800E3FB6), not 68. `q2_prompt_position`; FORMATS §11.11.
       **RULES now opens something.** The caption and the button are one routine: `module+0x4630` computes
       `cursor - first < 3` and raises the prompt, then `module+0x4654` tests the SQUARE bit in the
       just-pressed word at `engine+0x2BC` and calls `module+0x4868`, which indexes the six-entry jump table
@@ -1929,7 +1979,7 @@ item records at run time instead of transcribing a table, so there is nothing to
       The three fields come from the map's own `Strings` chunk, which this pass also decoded — see the note
       under #45. FORMATS §11.12; `src/game/briefing.[ch]`; `q2psx-inspect text <map>`.
 
-- [~] 44. **The front end's own menus.** *(#100 reads the pages out of the module and makes the transcription checkable; what remains is driving them.)* A separate page set from the in-game pause menu — the in-game
+- [x] 44. **The front end's own menus.** *(Variables and BACK settled 5 November; below.)* *(#100 reads the pages out of the module and makes the transcription checkable; what remains is driving them.)* A separate page set from the in-game pause menu — the in-game
       OPTIONS at `0x8009AB14` has three items and no credits entry. Capture shows at least:
       the title screen (START / OPTIONS); START -> SINGLE PLAYER / MULTI PLAYER; OPTIONS -> PLAYER / SOUND /
       VIDEO OPTIONS / **VIEW CREDITS**; MULTIPLAYER -> DEATHMATCH / TEAM DEATHMATCH / VERSUS /
@@ -2078,8 +2128,14 @@ item records at run time instead of transcribing a table, so there is nothing to
       VARIABLES page's four cheat-level variants at `0x8009A6C4` (§10). Eight toggles spread across them.
       VERSUS at `module+0x0F9BC` is four rows: the player count at y 63, the run-time map name at 82,
       a third string at 153 and GAME VARIABLES at 172.
-      *Still open:* which variables array goes with which cheat level, and what each `action` does beyond
-      the page it opens.
+      **SOLVED (5 November).** module+0x4A20 reads the cheat level 0x800B335C exactly as 0x8001D510 does:
+      3 → +F344, 2 → +F284, 1 → +F1F4, else +F194 (NONE/BRONZE/SILVER/GOLD). Only RESET TO DEFAULTS
+      carries an action — module+0xC7A8, store for store INGAME_RESET_CHEATS, including the time/frag limits,
+      which are dead in the front end because the match start rewrites them from the module's own option
+      indices. The other rows are bare and are adjusted by CHECK_FOR_SLIDER (0x8001BF1C, not the pause menu's
+      CHECK_FOR_SLIDERANDSCROLL); nothing is applied until the match starts (module+0x228C). The opener
+      module+0x49F8 sets BACK to the setup builder module+0x4AD8 — which always lands on the first row
+      (module+0x4D44) — and restores its own cursor. pages.c, menu.c `cursor_restores`.
 
       *Also still open: the SCENE the title is drawn over,* and the reason is worth stating so nobody
       invents it. QFRONT's world is two nodes and eight vertices — there is no room in it for a title
@@ -3986,7 +4042,8 @@ shots before and after.
       and 1, while `+0x84` is on think 2. Berserk and Insane have no attack move at all, which is right: they
       are melee creatures.
 
-- [~] 55. **READ, for the Tank Commander. It is a range-and-chance table, and the move the port plays is the
+- [x] 55. *(Superseded: `src/game/cre_tankcomm.c` transcribes the whole module, `tankcomm_attack` included;
+      see CREATURE-AUDIT.md.)* **READ, for the Tank Commander. It is a range-and-chance table, and the move the port plays is the
       one for a DEAD enemy.**
 
       `tankcomm_attack` is at `module+0x11BC`, and it decodes cleanly:
@@ -4484,7 +4541,7 @@ player-versus-player damage:
   `weapon_id = 0`, which is "no weapon" — so three of four players spawned holding nothing and could not have
   fired a shot between them. They now start with what player 0 has, which is what a deathmatch start does.
 
-- [~] 59. **A staged encounter produces shots but no damage, and the counters have narrowed it to one
+- [x] 59. *(Answered by #59c below: a player can hurt another player.)* **A staged encounter produces shots but no damage, and the counters have narrowed it to one
       comparison.** Three real faults fixed on the way, then an instrument that should have come first.
 
       Fixed, each of which alone would have prevented a hit:
@@ -4546,7 +4603,7 @@ player-versus-player damage:
         and a rocket crossed an arena at four times its speed. It is the same class of bug the world-half
         gate exists for, missed because it lives in another file. Now gated on `cur_player == 0`.
 
-- [~] 59b. **Owner given, world list built, three faults fixed — and a bolt still hits nothing.**
+- [x] 59b. *(Answered by #59c below.)* **Owner given, world list built, three faults fixed — and a bolt still hits nothing.**
 
       `q2_sim_proj_scan` counts what happens to the projectiles: `601 launched, 4356 stepped, 52 expired,
       0 hit`. They fly. They are stepped. They never intersect anything.
@@ -7277,7 +7334,11 @@ frame exists, "the weapon looks smaller" is an impression from mid-play footage 
       *Note on the measurement:* `SIMPLESOUND` reports 0 played in every headless run, and that is the
       absence of an audio device rather than of the wiring — `client_play_sound` needs one.
 
-- [~] 78. **OBJDRAWOFF is wired and its operands read -1, which is a measurement rather than a failure.**
+- [x] 78. *(Answered by #85: the object exists only in the zone whose script names it. The constructor at
+      `0x8002BD58` stamps -1 into the working slot and reads the node from the zone's pristine copy, and
+      JAIL4's four slots hold 203, 196, 189 and 182 in zone 3. The "-1 in all four zones" measurement below
+      was wrong; see `userfuncs.c`.)*
+      **OBJDRAWOFF is wired and its operands read -1, which is a measurement rather than a failure.**
       `flags08` bit 15 is the hide flag and the zone draw has honoured it since the surface pass; it is
       clear on every node on the disc because this primitive sets it at RUN TIME, on the runtime object.
       This port does not build the console's 48-entry object array (mover.h says why), so the runtime
@@ -9887,34 +9948,14 @@ unit, 4095.3 mean over every part of `Blaster G`) or the GTE reaches it.
       `frontend.lbm` is in every playable map's `SNDVRAM.DAT` and no model of the logo is. And it is
       32 x 20 drawn 1:1.
 
-      **Two things are measured, not read**, because nothing found so far binds a CLUT for this quad or
-      counts its index. The first is which END of the strip the animation starts at. The screen is up for
-      half a second and the strip runs at a cell every 22 ticks, so about seven of the twenty-three are ever
-      seen; read forwards the widths open at 17 of a 4..22 range and reach edge-on inside that half second,
-      read backwards they open at 22 — broadside — and turn away. The capture's logo is a wide one, so the
-      port walks it backwards.
-
-      **And the palette.** Nothing found so far binds a CLUT for this quad, so the strip
-      is data with no reader. The capture shows the logo GREY, and the bank has one palette for that:
-      built-in id 4, `000000 080808 181818 ... D8D8D8 E8E8E8`. The strip is authored against 68 — its sixty
-      rows use exactly 68's sixteen entries, a blue ramp — so 4 is the same image in the same index order
-      with the colour taken out. 75 is that ramp stopped at 0x78 and too dark, 76 runs bright-to-dark and
-      inverts the art, 73 is flat white, and 70 (the white-only mask) has four live levels out of sixteen
-      and stipples it. 70 is right for a GLYPH, whose art sits in that band.
-
-      **Two wrong answers, and why.** The first was `Q2LOGO` from QDUMMY; the second, after the capture ruled
-      that out on shape, was `q2logowire` — QFRONT's outlined twin of the same mesh, identical part for part
-      (6 parts, 306 vertices, 281 faces) and differing only in the texture id its faces name, 4 against 0.
-      Right shape, wrong colour, and in the one directory an in-level load cannot borrow from. Both were
-      models because the title screen's logo is a model. Neither pass opened the atlas.
-
-      **What is NOT settled.** The rate the strip runs at: a cell index is a number some code counts and that
-      code has not been found. The port sets it to the one rate the disc does give for this logo — the front
-      end's own `yaw -= 4 * dt`, 1024 ticks a revolution — which over 23 cells of a half turn is 22 ticks a
-      cell. And the `"Dummy"` string is still reachable from QDUMMY's module and from **nothing in the
-      executable** (`xrefs 0x800AC820` comes back empty), so what asked the console for that directory is
-      still open; the port opens its `SNDVRAM.DAT` only because at 21 KB it is the smallest carrier of
-      `frontend.lbm` on the disc.
+      **All three now read (5 November)** (`SpriteAnim`, 0x80038820, MAINLOOP.C): 31 forward steps from the
+      free-running gp+612, one per video field from the VSync hook VBlankLoading, drawn as a SPRT 32×20 at
+      (460, 40) from slot 13. Its CLUT is clut-table entry 78 (`lhu 0x800E3FC8`, 0x80038908) — palette
+      record 78, sixteen greys in an unsorted order; the port's id 4 was a guess and scrambled the shading.
+      Nothing on the disc requests QDUMMY: a scan finds `Dummy` only in level record 3, an unreferenced string
+      at 0x800AC820, and twelve pseudo-level modules that compare the current level's name against it. The
+      logo is drawn from the `frontend.lbm` already in slot 13; the port opens QDUMMY's SNDVRAM only as the
+      smallest carrier. loading.h; FORMATS §11.13.
 
       **`STARTING` / `GAME` came out of the same capture.** `0x80101E4C`, the handler all three difficulty
       records call, opens with `module+0x3414(NULL, 19)` — module page 19, built by the ordinary front-end

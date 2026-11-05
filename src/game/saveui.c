@@ -161,10 +161,10 @@ void q2_save_ui_choose(void *user, int row)
 
 /*
  * Where the list goes next, which is the one decision that differs between the
- * two modes:
+ * two modes — the console's own at 0x8001F6A4..0x8001F714:
  *
- *   SAVE  an occupied slot needs the OVERWRITE? question first; an empty one
- *         goes straight to the write.
+ *   SAVE  an occupied slot needs the OVERWRITE? question first (19); an empty
+ *         one goes straight to the write (the console's 22, NEW FILE).
  *   LOAD  an empty slot has nothing to load. The row draws as the empty string
  *         and takes no selection bar, so it cannot normally be picked at all —
  *         this is the belt to that brace.
@@ -217,24 +217,31 @@ void q2_save_ui_request(void *user, int state)
     switch (state) {
     case Q2_SAVEUI_STATE_LIST:
         /*
-         * 0x8001F140 hands over the row and then asks for a transition with its
-         * OWN state number, so "request(3)" means "the list has chosen", not
-         * "go to the list".
+         * Two callers, told apart by where the session is. From the list
+         * itself it is the 13 arm handing over a chosen row (memcard.c), and
+         * the choice the console makes inline at 0x8001F6A4..0x8001F714 is
+         * made here. From OVERWRITE? it is that screen's NO (0x8001F770),
+         * which is the console going back to the file window.
          */
-        advance_from_list(ui);
+        if (ui->state == Q2_SAVEUI_STATE_CHOICE)
+            ui->state = Q2_SAVEUI_STATE_LIST;
+        else
+            advance_from_list(ui);
         break;
 
     case Q2_SAVEUI_STATE_START:
         /*
-         * The choice's "no" arm. State 1 has no arm of its own, so what it
-         * SHOWS was never established; returning to the list is the only thing
-         * the port can do with it that is not a dead end, and it is what "back
-         * to the start" means when the list is where a session starts.
+         * The console's 1 is CHECKING FOR MEMORY CARDS, which rescans and, with
+         * one card, walks 3 -> 4 -> 13 back to the file window. The port has no
+         * cards: a rescan and the list is that same walk.
          */
+        q2_save_ui_rescan(ui);
         ui->state = Q2_SAVEUI_STATE_LIST;
         break;
 
+    case Q2_SAVEUI_STATE_BUSY_OVER:
     case Q2_SAVEUI_STATE_BUSY:
+    case Q2_SAVEUI_STATE_BUSY_NEW:
         ui->state      = Q2_SAVEUI_STATE_BUSY;
         ui->pending_io = true;
         break;

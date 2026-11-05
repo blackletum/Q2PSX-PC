@@ -1057,11 +1057,85 @@ regression drives a dry click through the real client loop. It passes on the old
 build as well, because that build's counter also counted dry attempts, so it is
 a regression check rather than a control.
 
-Limit: the port's driver is restructured. Its state machine runs at key
-boundaries, plus an end-of-call idle check, and the fire report is computed
-before the call. The result is written at the equivalent points, but within a
-call that crosses key boundaries the ordering can still differ from native. No
-native driver-sequence fixture has been executed.
+**Driver write order, 5 November.** `generate_viewweapon_driver_reference.py`
+executes the whole PAL and US driver: the substep loop, the state machine, the
+model-move driver 0x80050454, the frame driver, the key reload, the barrel ramp
+0x8004FC78 and the dry pass's 0x800506C4/0x80050758. After each call with a
+held hand grenade it also executes that grenade's think 0x8004A368 in its held
+state. It uses a synthetic bank with the retail key counts and events,
+synthetic move records, and scripted fire answers 1, 0 and 2.
+
+The 133 sequences cover all eleven weapons, dt 1, 12, 30 and a mixed 1..30
+pattern, holds and releases, mid-burst and double-tap selections, and quad.
+They also cover moves frozen outside FIRE, swaps with a move on the record, and
+grenade cooks, re-presses and failed spawns. That is 7,838 calls and 594 fire
+calls, identical between revisions; 1,357 calls have a move on the record. The
+HEAD driver diverged from the first 78 sequences in 71 (2,419 calls).
+
+The native order per substep is: `min(left, dt)` comes off the clock, then the
+state-machine pass runs. The pass, not the loop, advances the frame when the
+key is spent. The idle arm can fire on any substep, not only at a boundary.
+Then come the move driver, the frame driver, the key reload when frame or state
+moved, and the ramp. The display is computed once after the loop.
+
+The move driver returns before it reads the record unless the weapon in hand is
+3, 6, 7, 8 or 11 (0x800504D4) and the state is FIRE (0x80050508). So a move
+advances and starts only inside a fire clip. One still playing when its clip
+ends stands at its position through IDLE, LOWER and RAISE, and resumes on the
+next fire clip. The event that starts a move is read through the clip the
+substep began with, so a fire clip's first-key event starts one substep late.
+A swap writes +256 and nothing else (0x8004FA3C/0x8004FA44): the record +736
+and flags +258 carry over to the new weapon.
+
+The held grenade's think charges +76 by `dt*6` at position 380. It primes on
+`pos >= 261` against its mark and throws on `pos >= 411`, then writes the mark
++740 = pos - 1 (0x8004A42C-0x8004A544). The cook arm pins only while that mark
+is below 380 (0x80050404), so a re-press past 380 does not drag the arm back.
+
+The port now runs that loop. The following port behaviours were wrong and are
+fixed:
+
+- the machinegun's held wrap loaded key 2's clock;
+- the LOWER hold replayed its last key instead of halting (0x8004FA50);
+- an idle dry answer set the latch instead of asking again;
+- a spawn that failed (0) did not play the fire clip;
+- the chaingun's released rate was written only at frame 9 (0x800500A0);
+- the hyperblaster's accumulator was cleared on frame 6;
+- a new shot reset the +218 cache, +44 and +52;
+- the constructor's +44/+218 of 1 were missing;
+- the countdown was decremented on the frame it was armed (0x8004ECF0 against
+  0x8004ED54);
+- a playing move advanced in any state;
+- a swap cleared the move record;
+- the cook ignored +740;
+- the grenade's crossings and charge were taken per substep from the arm
+  instead of once per frame from the held grenade's mark, and ran with no
+  grenade after a failed spawn.
+
+Base and display arithmetic now matches the native `mult`/`div`/halfword form
+without clamps. `test_viewweapon` drives every call twice. It matches the fire
+calls (substep, arm, state, frame, clock, rounds) and the end state. It checks
+all six bases, the display, the barrel, the rand state, sound, quad and swap.
+It also checks the move position, flags and record, the +740 mark, and the
+grenade's charge, release and liveness. The first pass asks inside the
+substep. The second reports before the call the way
+`client_advance_view_weapon` does. Mutants that advance a move outside FIRE,
+clear the record on a swap or ignore the mark each fail hundreds of checks.
+
+Limit: the dry pass's auto-select is in-driver only through
+`q2_viewweapon.auto_select`, which the client does not set. The client still
+reselects from `refire` a tick late, and its `q2_vw_select` arms the 70-tick
+countdown where 0x800506C4 does not. The port therefore stops asking after a
+dry pass, as the console's next pass lowers instead.
+
+The grenade's think is placed after the driver in the same frame, the client's
+order; the console's entity order was not traced. The thrown grenade's flight,
+its fuse expiry (0x8004AA1C, mirrored by `q2_vw_hand_grenade_expired`) and the
+throw sample are outside the fixture. `hand_live` is not in the save chunk, so
+a held grenade restored from a save stops thinking. PrimaryBFG 0x8004B2B4
+writes the gun's move fields from the BFG projectile's think; the port has no
+counterpart. The shotgun's +695 cock path in 0x80050454 is left to the client's
+`cock_pending`. The fixture has no hardware timing and no real fire functions.
 
 **Hitscan.** Every native instant weapon calls LineIntersectCreCylinder
 0x800544EC, the routine `q2_combat_trace_actors` reproduces, from the world
@@ -1572,12 +1646,41 @@ numbers: the teleport glow, the light jitter and the scene lights are cached.
 sequence in call order. The save tests now check that a load keeps the level's
 seed.
 
-**Still open from this round:**
+**Closed later in the round (5 November):**
 
-- Weapon-driver write order, the gun-arm palette 91 brightness, trigger-volume
-  bits #25, the articulated vertex rule #2b, and the one-unit muzzle rounding.
-- Multiplayer: the bolt sweep runs inside player 0's tick, before players 1..3
-  move, where the console's missiles follow every player's think.
+- **Weapon-driver write order.** See "Driver write order, 5 November" above.
+  It is checked against 7,838 native driver calls over every weapon.
+- **The muzzle's Y rounding.** Every player fire function negates the
+  offset's Y around RotateS (0x8004C01C, 0x8004C04C). With RotateS flooring,
+  the height is a ceiling in the port's frame.
+- **Multiplayer missile order.** QuakeLoop runs every record's think, then
+  ProcessMissiles and ProcessParticles. With `defer_missiles` the client runs
+  `q2_sim_missiles_late` after the last player's tick.
+- **Trigger bits #25.** `0x0100`, `0x0040` and `0x0020` only select which
+  volume answers the first-match query (0x80050EE8..0x80050F7C). The player's
+  consumer tests `0x1000`/`0x0200`/`0x2000` and never reads the result again.
+  The port keeps the first match and the unmasked return.
+- **Vertex rule #2b.** The drawer 0x800B1F90 writes each part's vertices into
+  the scratch at vert_base * 8 and emits that part's faces in the same pass.
+  That is last writer wins, as `q2_model_bake_indices` does.
+- **Gun-arm palette 91.** The console's own BASE0 load, executed with its
+  LoadImage captured, puts every texel of the arm's page and every entry of
+  CLUT 91 exactly where the port decodes them. The texture data was never the
+  difference. `test_vram_native` now compares the client's whole VRAM with
+  the console's load for every level on both discs, rectangle by rectangle.
+  Every gameplay map matches. The test exposed and fixed one difference:
+  InitCluts uploads whole rows, so the slots after the last palette hold the
+  buffer's following bytes. The darker arm in the one retail capture is
+  therefore not texture data. With lighting already ruled out, that leaves
+  the capture itself, which goes on the hardware list.
+
+**Still open:**
+
+- The screen modules' full-screen VRAM pictures and per-unit palettes (QFRONT,
+  QLOGOS, QLOGOS2, QMAGEXTR, QMRESULT, QENDMIS) are drawn by the port's
+  transcribed screen paths, not from the console's VRAM rectangles.
+  `test_vram_native` reports them as pending.
+- The self-play attract demo, with its DemoSp overlay pages.
 
 ## Limits
 

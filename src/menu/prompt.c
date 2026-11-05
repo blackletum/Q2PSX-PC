@@ -16,6 +16,8 @@ void q2_prompt_init(q2_prompt_bar *b)
         return;
 
     memcpy(b->rec, q2_prompt_table, sizeof(b->rec));
+    b->pinned_back = false;
+    b->pinned_y    = Q2_PROMPT_PINNED_Y_PAL;
 
     /*
      * The shipped targets are all ZERO, and left alone they would march every
@@ -94,9 +96,17 @@ void q2_prompt_sync_menu(q2_prompt_bar *b, const q2_menu *m, bool front_end)
     if (!b)
         return;
     if (!m || !m->open || !m->page) {
+        b->pinned_back = false;
         q2_prompt_hide_all(b);
         return;
     }
+
+    /* 0x8001C410: page 11 is QFRONT's player setup, which this port calls
+     * Q2_PAGE_FRONT_PLAYERS. The y is the build's own literal — 114 on the PAL
+     * disc, 110 on SLUS-00757 — told apart by the framebuffer height. */
+    b->pinned_back = front_end && m->page_id == Q2_PAGE_FRONT_PLAYERS;
+    b->pinned_y    = (s16)(m->fb_h == 240 ? Q2_PROMPT_PINNED_Y_NTSC
+                                          : Q2_PROMPT_PINNED_Y_PAL);
 
     /* 0x8001A280..0x8001A348. The test is the current object's action
      * pointer, not general navigability: sliders and toggles are adjustable,
@@ -116,6 +126,25 @@ void q2_prompt_sync_menu(q2_prompt_bar *b, const q2_menu *m, bool front_end)
      * answers it can never disagree. */
     rules = front_end && q2_menu_front_rules_row(m);
     q2_prompt_show(b, Q2_PROMPT_RULES, rules ? 220 : 260);
+}
+
+void q2_prompt_position(const q2_prompt_bar *b, q2_prompt_id id,
+                        int *x, int *y)
+{
+    int px = 0, py = Q2_PROMPT_Y_HIDDEN;
+
+    if (b && (int)id >= 0 && (int)id < Q2_PROMPT_COUNT) {
+        px = b->rec[id].x;
+        py = b->rec[id].y;
+        /* 0x8001C434..0x8001C480: the corner is a literal, and the record's
+         * own y keeps sliding underneath it unseen. */
+        if (b->pinned_back && id == Q2_PROMPT_BACK) {
+            px = Q2_PROMPT_PINNED_X;
+            py = b->pinned_y;
+        }
+    }
+    if (x) *x = px;
+    if (y) *y = py;
 }
 
 static u32 keycap(psx_ot *ot, u32 bucket, int x, int y, int w, int h,
@@ -146,22 +175,24 @@ u32 q2_prompt_build_labels(const q2_prompt_bar *b, const q2_menu_font *font,
         const q2_prompt_rec *r = &b->rec[i];
         const char *action;
         char key[16];
-        int kw, aw, x, len;
+        int kw, aw, x, len, rx, ry, centre;
         if (!labels[i] || !(action = strchr(labels[i], ' '))) continue;
+        q2_prompt_position(b, (q2_prompt_id)i, &rx, &ry);
+        centre = r->centre + (rx - r->x);
         len = (int)(action-labels[i]);
         if (len >= (int)sizeof(key)) len = (int)sizeof(key)-1;
         memcpy(key, labels[i], (size_t)len); key[len] = 0;
         action++;
         kw = q2_menu_font_width(Q2_MENU_FACE_SMALL, key)+8;
         aw = q2_menu_font_width(Q2_MENU_FACE_SMALL, action);
-        x = r->centre-(kw+8+aw)/2;
+        x = centre-(kw+8+aw)/2;
         n += q2_menu_font_print(font, ot, bucket, Q2_MENU_FACE_SMALL,
-            x+kw/2, r->y+8, true, ox, oy, key);
+            x+kw/2, ry+8, true, ox, oy, key);
         n += q2_menu_font_print(font, ot, bucket, Q2_MENU_FACE_SMALL,
-            x+kw+8+aw/2, r->y+8, false, ox, oy, action);
+            x+kw+8+aw/2, ry+8, false, ox, oy, action);
         /* AddPrim prepends: the inset and border land behind the letters. */
-        n += keycap(ot, bucket, ox+x+1, oy+r->y+2, kw-2, 12, 29, 36, 40);
-        n += keycap(ot, bucket, ox+x, oy+r->y+1, kw, 14, 112, 100, 76);
+        n += keycap(ot, bucket, ox+x+1, oy+ry+2, kw-2, 12, 29, 36, 40);
+        n += keycap(ot, bucket, ox+x, oy+ry+1, kw, 14, 112, 100, 76);
     }
     return n;
 }
@@ -178,11 +209,15 @@ u32 q2_prompt_build_ot(const q2_prompt_bar *b, const q2_menu_font *font,
     for (i = 0; i < Q2_PROMPT_COUNT; i++) {
         const q2_prompt_rec *r = &b->rec[i];
         psx_prim *p = psx_ot_add_bucket(ot, bucket);
-        int k, x1, y1;
+        int k, x0, y0, x1, y1;
+        u16 clut;
         u8  u1, v1;
 
         if (!p)
             break;
+
+        /* The record's corner, or page 11's literal one for BACK. */
+        q2_prompt_position(b, (q2_prompt_id)i, &x0, &y0);
 
         /*
          * One quad per prompt, glyph and word together, straight out of the
@@ -196,31 +231,39 @@ u32 q2_prompt_build_ot(const q2_prompt_bar *b, const q2_menu_font *font,
          * now, so the far corner is the console's and the coverage comes out
          * the same width it samples.
          */
-        x1 = r->x + (int)r->w;
-        y1 = r->y + (int)r->h;
+        x1 = x0 + (int)r->w;
+        y1 = y0 + (int)r->h;
         u1 = (u8)(r->u + r->w);
         v1 = (u8)(r->v + r->h);
 
+        /* 0x8001C638: the clut table's entry 69, not the text's 68. A bank
+         * without it (no executable tables) falls back to the text palette
+         * rather than to CLUT word zero. */
+        clut = font->tab ? q2_hud_palette_clut(font->tab, Q2_PROMPT_PALETTE) : 0;
+        if (!clut)
+            clut = font->clut_text;
+
         p->kind  = PSX_PRIM_FT4;
         p->tpage = font->tpage_item;   /* frontend.lbm */
-        p->clut  = font->clut_text;
+        p->clut  = clut;
         p->textured_blend   = true;
         p->semi_transparent = false;
 
-        p->xy[0].x = r->x;      p->xy[0].y = r->y;
-        p->xy[1].x = (s16)x1;   p->xy[1].y = r->y;
+        p->xy[0].x = (s16)x0;   p->xy[0].y = (s16)y0;
+        p->xy[1].x = (s16)x1;   p->xy[1].y = (s16)y0;
         p->xy[2].x = (s16)x1;   p->xy[2].y = (s16)y1;
-        p->xy[3].x = r->x;      p->xy[3].y = (s16)y1;
+        p->xy[3].x = (s16)x0;   p->xy[3].y = (s16)y1;
 
         p->uv[0].u = (u8)r->u;  p->uv[0].v = (u8)r->v;
         p->uv[1].u = u1;        p->uv[1].v = (u8)r->v;
         p->uv[2].u = u1;        p->uv[2].v = v1;
         p->uv[3].u = (u8)r->u;  p->uv[3].v = v1;
 
+        /* 0x8001C614..0x8001C620: 96, three quarters of neutral. */
         for (k = 0; k < 4; k++) {
-            p->rgb[k].r = 0x80;
-            p->rgb[k].g = 0x80;
-            p->rgb[k].b = 0x80;
+            p->rgb[k].r = Q2_PROMPT_SHADE;
+            p->rgb[k].g = Q2_PROMPT_SHADE;
+            p->rgb[k].b = Q2_PROMPT_SHADE;
         }
         n++;
     }

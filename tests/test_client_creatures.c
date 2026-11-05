@@ -438,7 +438,15 @@ static void test_disc_dry_attack(const char *disc_path, const char *output)
            (int)c->player_anim[1].state.move, c->player_anim[1].state.position,
            sim->pcombat[1].inv.health);
     CHECK(c->mp_dry[1] == 1 && c->mp_shots[1] == shots);
-    CHECK(client_player_visual_move(c, 1) == Q2_PMOVE_ATTAK);
+    /* 0x8003ADA0..0x8003ADB4 requests ATTACK for any nonzero low halfword
+     * of the driver's return, which is its LAST substep's (0x8004F6D4). A
+     * dry pass now auto-selects inside the call (0x800506C4), so a call
+     * whose step crosses into the next substep can end quiet: whether the
+     * click poses the body depends on the step, PAL's 12 or NTSC's 10, as
+     * on the console. The driver's result is pinned call for call by the
+     * native fixture (test_viewweapon); this checks the body follows it. */
+    CHECK((q2_vw_result(&c->vw[1]) != 0) ==
+          (client_player_visual_move(c, 1) == Q2_PMOVE_ATTAK));
     /* One more frame into the clip, and look at player 1 from its front. */
     c->mp_pad_pend[1] |= (u16)bind.fire;
     client_input_simulated(c, 1.0f / 30.0f);

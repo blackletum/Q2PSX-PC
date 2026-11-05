@@ -1026,6 +1026,15 @@ typedef struct client {
      */
     q2_event_store    event_store;
     q2_native_mission native_mission;
+    /* JAIL3 module+0x1218, the zone its last zone-entry callback ran for:
+     * -1 from init (+0xC18), then 0..5. Not saved: every card load and
+     * restart is a full level load, which runs init again. */
+    s32               jail3_prev_zone;
+    /* A module's HelpComputer_NewMessage made during a load, raised on the
+     * first logic tick after it (client_native_popup_queue). */
+    bool              native_popup_pending;
+    s32               native_popup_delay;
+    char              native_popup_orders[16], native_popup_objective[16];
     q2_fx_beam_style  reactor_beam;
     bool              reactor_beam_ready;
     q2_zone_history   zone_history;
@@ -1234,6 +1243,24 @@ typedef struct client {
     q2_endmission     endmis;
     bool              endmis_open;
     int               endmis_unit;
+
+    /*
+     * QENDMIS1..5's own screen, the "uplink": the shared screen module's
+     * LevelSpecific +0x197C and its two draws +0x2364/+0x2508
+     * (client_uplink_step). Each field is the module word it stands for.
+     */
+    bool              uplink_open;
+    int               uplink_unit;     /* the EndMission N the init matched */
+    s32               uplink_state;    /* module+0x7518, 0..8              */
+    s32               uplink_wait;     /* module+0x742C                    */
+    s32               uplink_scroll;   /* module+0x525C, 0..240            */
+    s32               uplink_fade;     /* module+0x5260, 0..128 by 2       */
+    bool              uplink_fade_out; /* module+0x5264                    */
+    u32               uplink_count;    /* ChrisCount 0x800B2DE4 since load */
+    double            uplink_carry;    /* host time toward the next frame  */
+    bool              uplink_fire_prev;
+    u32               uplink_frames;   /* module frames run                */
+    char              uplink_text[4][24]; /* module+0x27C/+0x294/+0x2AC/+0x2C0 */
 
     q2_movie          film;
     bool              film_open;       /* a film is loaded and running   */
@@ -5046,6 +5073,7 @@ static bool client_mp_respawn(client *c, int pi)
  * reads the same offsets.
  */
 static bool client_load_zone(client *c, const char *map, int index);
+static bool client_uplink_open(client *c, int unit);
 static void client_autosave_store(client *c);
 static bool client_restart_level(client *c, bool resupply);
 
@@ -5548,16 +5576,21 @@ static void client_change_map_and_brief(client *c)
      * console screen: `briefing_open`, raised by the transition, and `popup`,
      * raised by the script — and both draw through `q2_briefing_build_ot`
      * because they are the same panel. The console has only the second.
-     * `0x80021250` sets the two fields and `0x800213B0` raises them, and every
-     * caller of either is a script primitive (`0x80023894`, `0x8002BBF4`) or
-     * the pause menu's MISSION row (`0x800203AC`). Nothing in the transition
-     * path touches them: what the outer state machine does run on a new
-     * level's first frame is `0x800203C4`, and that installs two overlay
-     * tables through `0x800B2FE4+512` rather than raising a panel.
+     * `0x80021250` sets the two fields and `0x800213B0` raises them. Their
+     * callers are the script primitive (`0x80023894`, `0x8002BBF4`), the
+     * pause menu's MISSION row (`0x800203AC`) and the LevelBin modules, which
+     * reach `0x80021250` through import `block+0x3D8`: mission-event handlers
+     * (COMMAND, POWER2, SECURITY, BOSS2, BIGGUN, JAIL3 BothKeys) and the init
+     * and zone-entry callbacks of JAIL2, JAIL3, SECURITY, BOSS1 and BOSS2
+     * (client_native_zone_briefings). The transition path itself does not
+     * touch them: what the outer state machine does run on a new level's
+     * first frame is `0x800203C4`, and that installs two overlay tables
+     * through `0x800B2FE4+512` rather than raising a panel.
      *
-     * So the panel a player sees just after arriving is a trigger volume near
-     * the spawn calling HELPCOMPUTER, and on a map that has none it does not
-     * appear — the two fields are global (`0x800B27A4`/`0x800B27A8`,
+     * So the panel a player sees just after arriving is either a trigger
+     * volume near the spawn calling HELPCOMPUTER or the level's own module
+     * raising it from init or the zone callback; on a map with neither it
+     * does not appear — the two fields are global (`0x800B27A4`/`0x800B27A8`,
      * "deliberately not per level"), so the orders simply stand until
      * something changes them. Measured across ten maps with no trigger fired:
      * BASE0, POWER1 and LAB raise it at level start on their own and the other
@@ -5840,18 +5873,85 @@ static bool client_jail3_bridge(client *c)
            q2_scene_set_bounds(&c->zone.zone, (u32)node, min, max);
 }
 
-static void client_native_popup(client *c, const char *orders,
-                                  const char *objective, s32 delay)
+/*
+ * BASE2 +0x308, called by the zone-1 (+0x180) and zone-2 (+0x244) entry
+ * callbacks, after OnEnteringZone's event replay. It reads EDrawbridge's
+ * record through Event_GetDisableNamed (import +0xA4, 0x80027BF0: bit 7 of the
+ * record's flag byte, or -1 when the name is missing), stores the answer in
+ * Base Mission word +28 (no reader on the disc) and, when non-zero, calls
+ * GenSolidBox (import +0x80, 0x800555D8) with the six words at module+0x3C
+ * and (0, 1): a static entity box (-5063,100,7039)..(-3918,304,9530), the
+ * floor of the lowered drawbridge. The box belongs to no Scene node; the
+ * registry key below only lets a second entry replace it.
+ */
+#define CLIENT_BASE2_BRIDGE_SOLID 0x7FFFFFFF
+static bool client_base2_bridge(client *c)
 {
-    if (c->sim[0].event_rt.initial_pass || c->restoring_save) return;
+    static const s32 min[3] = { -5063, 100, 7039 };
+    static const s32 max[3] = { -3918, 304, 9530 };
+    const q2_event_rt *rt = &c->sim[0].event_rt;
+    bool disabled = true;   /* -1 for a missing name is non-zero too */
+    u32 i;
+    if (c->mp_enabled || !client_name_eq(c->map, "BASE2") ||
+        (c->zone_index != 1 && c->zone_index != 2)) return false;
+    for (i = 0; i < rt->events.dir_count; i++) {
+        q2_event_dir_entry e;
+        if (q2_events_get_dir_entry(&rt->events, i, &e) && !strcmp(e.name, "EDrawbridge")) {
+            disabled = (q2_event_rt_flags(rt, e.offset) & Q2_EVREC_DISABLED) != 0;
+            break;
+        }
+    }
+    return disabled &&
+           q2_sim_scene_solid_set(&c->sim[0], CLIENT_BASE2_BRIDGE_SOLID, min, max);
+}
+
+static void client_native_popup_dt(client *c, const char *orders,
+                                   const char *objective, s32 delay, s32 dt)
+{
     q2_briefing_popup_set(&c->popup, orders,
         c->leveltext_ready ? q2_leveltext_find(&c->leveltext, orders) : NULL,
         objective,
         c->leveltext_ready ? q2_leveltext_find(&c->leveltext, objective) : NULL);
     q2_briefing_popup_raise(&c->popup, delay, Q2_BRIEFING_SECONDS,
-                            c->sim[0].level_time, c->sim[0].cur_dt);
+                            c->sim[0].level_time, dt);
     c->popup_raises++;
     client_play_sound(c, "msc_comp_up");
+    Q2_INFO("help computer (module): \"%s\" / \"%s\" in %d", orders, objective, (int)delay);
+}
+
+static void client_native_popup(client *c, const char *orders,
+                                  const char *objective, s32 delay)
+{
+    if (c->sim[0].event_rt.initial_pass || c->restoring_save) return;
+    client_native_popup_dt(c, orders, objective, delay, c->sim[0].cur_dt);
+}
+
+/*
+ * HelpComputer_NewMessage (import +0x3D8, 0x80021250) from a LevelBin init or
+ * zone-entry callback, i.e. from inside a load. InitLevel calls export 0 at
+ * 0x80070F64 and OnEnteringZone (0x80078E98, which runs the zone callback) at
+ * 0x80070F6C; a gate's 0x8007901C calls the unit hub's restore (0x800B2A68,
+ * a0 = 0, which hands the saved pair to SetMessages) at 0x8007914C and the
+ * callback at 0x80079154. Init's own hub restore comes earlier still, through
+ * InitialiseQuakePlayer. So the module's pair always replaces the restored
+ * one, and its raise arms `delay` frames on the frame delta (0x800213E8).
+ *
+ * The port defers the raise to the first logic tick after the load: that is
+ * where its frame delta exists, and it is after client_apply_save has put a
+ * card's saved pair back. A card load and a restart are level loads on the
+ * console too (ReloadAutoSave 0x800400A8 reloads the level through InitLevel),
+ * so they raise it as well; only the unit save word stops the one-shots. Two
+ * raises inside one load leave the last, as two NewMessage calls would.
+ */
+static void client_native_popup_queue(client *c, const char *orders,
+                                        const char *objective, s32 delay)
+{
+    if (c->mp_enabled) return;
+    snprintf(c->native_popup_orders, sizeof(c->native_popup_orders), "%s", orders);
+    snprintf(c->native_popup_objective, sizeof(c->native_popup_objective), "%s",
+             objective);
+    c->native_popup_delay = delay;
+    c->native_popup_pending = true;
 }
 
 static void client_stop_platform(client *c)
@@ -6059,7 +6159,72 @@ static void client_native_security_lift(client *c, bool tick)
     }
 }
 
-static void client_native_mission_restore(client *c)
+/*
+ * The briefings the modules raise on arrival, from init (full loads only) and
+ * from the zone-entry callback (every load). Unit 2's latches are bits of its
+ * save word +48 (nativemission.h), read through module+0x133C (JAIL3) and
+ * module+0x26DC (SECURITY), both cached from [block+0x14] by init.
+ *
+ *   BOSS1 init +0x1C90  Unit5Curr1 / Unit5Miss1, delay 40, unconditional
+ *   BOSS2 init +0x1484  Unit5Curr2 / Unit5Miss1, delay 50, unconditional
+ *   JAIL2 zone 0 +0xCC  Unit2Curr1 / Unit2Miss1, delay 10, unconditional
+ *   SECURITY zone 0 +0x16B0  Unit2Curr8 / Unit2Miss1, delay 40, unless bit 2;
+ *                       then sets bit 2
+ *   JAIL3 zone 0 +0x13C Unit2Curr2 / Unit2Miss1, delay 50, unless bit 0; then
+ *                       sets bit 0. Always writes module+0x1218 = 0.
+ *   JAIL3 zones 1/2/3   +0x1150/+0x1178/+0x1188 write module+0x1218 = 1/2/3.
+ *   JAIL3 zone 4 +0x290, zone 5 +0x614: only while module+0x1218 == -1 (the
+ *                       first callback since init). With the zone's own key
+ *                       (0x20 for zone 4, 0x40 for zone 5): Unit2Curr7 when the
+ *                       other key is held too, else Unit2Curr3 (zone 4) /
+ *                       Unit2Curr6 (zone 5), delay 50. Without it: Unit2Curr2,
+ *                       delay 100, unless bit 1 (BothKeys has run). Neither
+ *                       sets a bit. Then module+0x1218 = 4 / 5.
+ *
+ * The keys are those the zone is entered with: on a gate the carried
+ * inventory, on a card load the saved one (0x800B29D0 is restored before
+ * the level's init runs).
+ */
+static void client_native_zone_briefings(client *c, bool full_load)
+{
+    q2_native_mission *s = &c->native_mission;
+    const u32 keys = (c->restoring_save || c->carry_player)
+                   ? c->carry_inv.flags : c->sim[0].combat.inv.flags;
+    if (c->mp_enabled) return;
+    if (full_load) {
+        if (client_name_eq(c->map, "BOSS1"))
+            client_native_popup_queue(c, "Unit5Curr1", "Unit5Miss1", 40);
+        else if (client_name_eq(c->map, "BOSS2"))
+            client_native_popup_queue(c, "Unit5Curr2", "Unit5Miss1", 50);
+        else if (client_name_eq(c->map, "JAIL3"))
+            c->jail3_prev_zone = -1;                       /* +0xC18 */
+    }
+    if (client_name_eq(c->map, "JAIL2") && c->zone_index == 0) {
+        client_native_popup_queue(c, "Unit2Curr1", "Unit2Miss1", 10);
+    } else if (client_name_eq(c->map, "SECURITY") && c->zone_index == 0) {
+        if (!(s->flags & Q2_NATIVE_SECURITY_BRIEFED)) {
+            client_native_popup_queue(c, "Unit2Curr8", "Unit2Miss1", 40);
+            s->flags |= Q2_NATIVE_SECURITY_BRIEFED;
+        }
+    } else if (client_name_eq(c->map, "JAIL3") && c->zone_index >= 0 &&
+               c->zone_index <= 5) {
+        if (c->zone_index == 0 && !(s->flags & Q2_NATIVE_JAIL3_BRIEFED)) {
+            client_native_popup_queue(c, "Unit2Curr2", "Unit2Miss1", 50);
+            s->flags |= Q2_NATIVE_JAIL3_BRIEFED;
+        } else if (c->zone_index >= 4 && c->jail3_prev_zone == -1) {
+            const u32 own = c->zone_index == 4 ? Q2_KEY_PYRAMID_RED : Q2_KEY_PYRAMID_PURPLE;
+            const u32 other = c->zone_index == 4 ? Q2_KEY_PYRAMID_PURPLE : Q2_KEY_PYRAMID_RED;
+            if (keys & own)
+                client_native_popup_queue(c, (keys & other) ? "Unit2Curr7"
+                    : c->zone_index == 4 ? "Unit2Curr3" : "Unit2Curr6", "Unit2Miss1", 50);
+            else if (!(s->flags & Q2_NATIVE_JAIL3_KEYS_SEEN))
+                client_native_popup_queue(c, "Unit2Curr2", "Unit2Miss1", 100);
+        }
+        c->jail3_prev_zone = c->zone_index;
+    }
+}
+
+static void client_native_mission_restore(client *c, bool full_load)
 {
     u32 i;
     const u32 computers = Q2_NATIVE_COMP1 | Q2_NATIVE_COMP2;
@@ -6067,6 +6232,11 @@ static void client_native_mission_restore(client *c)
         if ((!client_native_keys[i].map || client_name_eq(c->map, client_native_keys[i].map)) &&
             client_mission_seen(c, client_native_keys[i].key))
             c->native_mission.flags |= client_native_keys[i].bit;
+    /* BothKeys sets word +48 bit 1 every time it runs (+0xFB8). A save made
+     * before the port kept that bit still remembers the event as run. */
+    if (client_name_eq(c->map, "JAIL3") && client_mission_seen(c, "BothKeys"))
+        c->native_mission.flags |= Q2_NATIVE_JAIL3_KEYS_SEEN;
+    client_native_zone_briefings(c, full_load);
     if (client_name_eq(c->map, "JAIL3") && c->zone_index == 1 &&
         (c->native_mission.flags & Q2_NATIVE_BRIDGE)) client_jail3_bridge(c);
     if (client_name_eq(c->map, "COMMAND") &&
@@ -7516,8 +7686,9 @@ static void client_event_call(void *user, const q2_event_item *item,
                 u32 flags = rt->initial_pass && (c->carry_player || c->restoring_save)
                               ? c->carry_inv.flags : c->sim[0].combat.inv.flags;
                 u32 keys = flags & (Q2_KEY_PYRAMID_RED | Q2_KEY_PYRAMID_PURPLE);
-                bool seen = rt->object_flags && item->offset < rt->item_flags_size &&
-                            rt->object_flags[item->offset];
+                /* +0xCC0: with no key the panel is gated on unit word +48
+                 * bit 1, which +0xFB8 then sets on every path. */
+                bool seen = (c->native_mission.flags & Q2_NATIVE_JAIL3_KEYS_SEEN) != 0;
                 const char *orders = keys == Q2_KEY_PYRAMID_PURPLE ? "Unit2Curr6"
                                    : keys == (Q2_KEY_PYRAMID_RED | Q2_KEY_PYRAMID_PURPLE)
                                        ? "Unit2CurrA" : "Unit2Curr3";
@@ -7525,16 +7696,10 @@ static void client_event_call(void *user, const q2_event_item *item,
                 if (!rt->initial_pass) {
                     if (!keys)
                         client_centre_line(c, "You need both Pyramid Keys");
-                    if (keys || !seen) {
-                        q2_briefing_popup_set(&c->popup, orders,
-                            c->leveltext_ready ? q2_leveltext_find(&c->leveltext, orders) : NULL,
-                            "Unit2Miss1",
-                            c->leveltext_ready ? q2_leveltext_find(&c->leveltext, "Unit2Miss1") : NULL);
-                        q2_briefing_popup_raise(&c->popup, 100, Q2_BRIEFING_SECONDS,
-                                                c->sim[0].level_time, c->sim[0].cur_dt);
-                        c->popup_raises++;
-                    }
+                    if (keys || !seen)
+                        client_native_popup(c, orders, "Unit2Miss1", 100);
                 }
+                c->native_mission.flags |= Q2_NATIVE_JAIL3_KEYS_SEEN;
                 if (rt->object_flags && item->offset < rt->item_flags_size)
                     rt->object_flags[item->offset] = 1;
             }
@@ -9235,6 +9400,13 @@ static bool client_load_zone(client *c, const char *map, int index)
                 client_reset_view_model(c, 0);
             else
                 client_bind_view_model(c, 0);
+            /* And every other player's: the bank their model pointers named has just
+             * been freed. A model this map does not ship binds to none. */
+            {
+                int other;
+                for (other = 1; other < Q2_MP_MAX_PLAYERS; other++)
+                    client_bind_view_model(c, other);
+            }
         }
         /* The zone number seeds the effect generator, so re-entering a zone
          * looks the same twice and two zones do not share a sequence. */
@@ -9653,6 +9825,7 @@ static bool client_load_zone(client *c, const char *map, int index)
 
                     c->movie_count = 0;
                     c->endmission  = false;
+                    c->uplink_open = false;
                     if (vlb && vlb->data && vlb->size) {
                         u32 got = q2_levelbin_movies(vlb->data, vlb->size,
                                                      c->movies, 4);
@@ -9754,7 +9927,15 @@ static bool client_load_zone(client *c, const char *map, int index)
                          * would be a confident wrong answer, so those still get
                          * the placard.
                          */
-                        if (film && c->endmis_unit == 5 &&
+                        if (c->endmis_unit >= 1 && c->endmis_unit <= 5 &&
+                            client_uplink_open(c, c->endmis_unit)) {
+                            /* The module's own screen; see client_uplink_step.
+                             * Its exit continues the campaign, so neither the
+                             * placard nor its await is raised. */
+                            c->endmis_open   = false;
+                            c->endmis_await  = false;
+                            c->briefing_open = false;
+                        } else if (film && c->endmis_unit == 5 &&
                             client_film_start(c, film)) {
                             c->endmis_open   = false;
                             c->briefing_open = false;
@@ -10064,7 +10245,7 @@ static bool client_load_zone(client *c, const char *map, int index)
          * from 0x800B29D4 while 0x800B2E0C is up, and the zone loader sets
          * that word at 0x8007B588.
          */
-        client_native_mission_restore(c);
+        client_native_mission_restore(c, !same_map_transition);
 
         if (c->carry_events.size && !c->mp_enabled) {
             const q2_event_rt *rt = &c->sim[0].event_rt;
@@ -10107,6 +10288,8 @@ static bool client_load_zone(client *c, const char *map, int index)
         }
         c->carry_events.size = 0;
         client_native_lifts_restore(c);
+        if (client_base2_bridge(c))
+            Q2_INFO("BASE2: EDrawbridge has run; the lowered bridge is solid");
         client_native_security_lift(c, false);
         q2_sim_scene_solids_update(&c->sim[0], &c->rotators);
 
@@ -11484,6 +11667,28 @@ static void client_shock_hold(client *c)
 /* Consume each fire result at its call site. last_shot is a diagnostic latch,
  * not an event queue: a later dry attempt must not replace an earlier bang,
  * nor may yesterday's burst restart an idle animation on trigger release. */
+/*
+ * 0x800506C4, answered inside the driver call (viewweapon.h, `auto_select`).
+ * The dry pass writes the best owned, fed weapon into the selection and the
+ * view record's pending weapon at once (0x80050744, 0x8005074C), so the next
+ * substep of the same call lowers. It arms no switch countdown, which is why
+ * `vw_last_weapon` is brought along here: the frame-top change test would
+ * otherwise call q2_vw_select and arm the 70 ticks the cycle routine arms.
+ */
+static int client_vw_auto_select(void *user, int weapon)
+{
+    client *c = user;
+    int pi = c->sim[0].cur_player;
+
+    (void)weapon;
+    q2_sim_autoselect_weapon(&c->sim[0]);
+    /* ...and the next/previous pair after it, picked or not
+     * (0x8004FB68..0x8004FB98). */
+    client_sbar_write_slots(c, pi, CLIENT_SLOTS_AUTOSELECT);
+    c->vw_last_weapon[pi] = c->sim[0].combat.weapon_id;
+    return c->sim[0].combat.weapon_id;
+}
+
 static q2_vw_fire_result client_fire_view_weapon(void *user, int weapon, int rounds)
 {
     client *c = user;
@@ -11612,6 +11817,7 @@ static void client_advance_view_weapon(client *c, bool attack, s32 ticks)
                 (c->sim[0].level_time <
                  c->sim[0].combat.inv.quad_until);
 
+            c->vw[pi].auto_select = client_vw_auto_select;
             swapped = q2_vw_advance_firing(&c->vw[pi], ticks, attack, report,
                                             client_fire_view_weapon, c);
         }
@@ -11736,13 +11942,9 @@ static void client_advance_view_weapon(client *c, bool attack, s32 ticks)
          * q2_weapon_autoselect — the correct transcription — was already in the
          * tree with no production caller at all.
          */
-        if (q2_vw_take_refire(&c->vw[pi])) {
-            q2_sim_autoselect_weapon(&c->sim[0]);
-            /* ...and the pair after it, picked or not (0x8004FB68..0x8004FB98;
-             * client_sbar_write_slots). */
-            client_sbar_write_slots(c, c->sim[0].cur_player,
-                                    CLIENT_SLOTS_AUTOSELECT);
-        }
+        /* Drained only: the auto-select ran inside the driver call, on the
+         * dry pass itself (client_vw_auto_select). */
+        (void)q2_vw_take_refire(&c->vw[pi]);
 
         /* Diagnostic copy of the key event. 0x80050454 dispatches on WEAPON
          * id, not effect id: q2_vw_advance already starts the named model move,
@@ -12340,6 +12542,31 @@ static void client_input_simulated(client *c, float dt)
         s32 eye0[3];
 
         q2_sim_eye(&c->sim[0], eye0);
+        s32 stage_yaw = c->sim[0].player[0].yaw;
+
+        /*
+         * The way to stage along: player 0's facing when the world leaves
+         * room there, else the first quarter-turn that does. A respawn can
+         * face player 0 into a wall, and staging the others behind it
+         * left every bolt in the brickwork and the round unwinnable. A
+         * harness choice, like the rest of this block.
+         */
+        {
+            int turn;
+            for (turn = 0; turn < 4; turn++) {
+                s32 yaw = c->sim[0].player[0].yaw + turn * 1024;
+                s32 to[3];
+                q2_trace tr;
+                to[0] = eye0[0] + ((q2_sin12(yaw) * 720) >> Q2_FRAC_12);
+                to[1] = eye0[1];
+                to[2] = eye0[2] + ((q2_cos12(yaw) * 720) >> Q2_FRAC_12);
+                q2_sim_trace(&c->sim[0], eye0, to, &tr);
+                if (tr.fraction >= 4096) {
+                    stage_yaw = yaw;
+                    break;
+                }
+            }
+        }
 
         for (pi = 1; pi < Q2_MP_MAX_PLAYERS; pi++) {
             q2_player *pl;
@@ -12366,10 +12593,10 @@ static void client_input_simulated(client *c, float dt)
                 s32 fwd = 360 + 120 * pi;
 
                 pl->pos[0] = c->sim[0].player[0].pos[0] +
-                    ((q2_sin12(c->sim[0].player[0].yaw) * fwd) >> Q2_FRAC_12);
+                    ((q2_sin12(stage_yaw) * fwd) >> Q2_FRAC_12);
                 pl->pos[1] = c->sim[0].player[0].pos[1];
                 pl->pos[2] = c->sim[0].player[0].pos[2] +
-                    ((q2_cos12(c->sim[0].player[0].yaw) * fwd) >> Q2_FRAC_12);
+                    ((q2_cos12(stage_yaw) * fwd) >> Q2_FRAC_12);
             }
             pl->ent.node = c->sim[0].player[0].ent.node;
             /*
@@ -12462,9 +12689,20 @@ static void client_input_simulated(client *c, float dt)
      * at higher render rates q2_sim_advance legitimately does nothing on the
      * intervening frames.
      */
-    if (q2_sim_next_dt(&c->sim[0], (double)dt) != 0) {
-        q2_event_rt_trigger_named(&c->sim[0].event_rt, "ALWAYS");
-        client_native_mission_queue(c);
+    {
+        s32 next_dt = q2_sim_next_dt(&c->sim[0], (double)dt);
+        if (next_dt != 0) {
+            /* A module raise made during the load, armed on this tick's delta
+             * before any trigger of this tick can replace it. */
+            if (c->native_popup_pending) {
+                c->native_popup_pending = false;
+                client_native_popup_dt(c, c->native_popup_orders,
+                                       c->native_popup_objective,
+                                       c->native_popup_delay, next_dt);
+            }
+            q2_event_rt_trigger_named(&c->sim[0].event_rt, "ALWAYS");
+            client_native_mission_queue(c);
+        }
     }
 
     c->mp_input[0] = in;
@@ -16399,6 +16637,7 @@ static void client_card_sync(client *c)
 {
     q2_mcard_screen want = q2_mcard_screen_for_state_port(c->save_ui.state);
     const q2_menu_page *page;
+    q2_mcard_context ctx;
 
     if (want != c->card_screen) {
         c->card_screen = want;
@@ -16416,20 +16655,17 @@ static void client_card_sync(client *c)
     if (!page)
         return;
 
+    ctx.saving = c->card_mode == Q2_SAVE_UI_SAVE || c->card_mode == Q2_SAVE_UI_SETTINGS_SAVE ||
+                 c->card_mode == Q2_SAVE_UI_UNLOCK_SAVE;
+    ctx.single_player = c->card_mode == Q2_SAVE_UI_SAVE || c->card_mode == Q2_SAVE_UI_LOAD;
     if (c->card_screen == Q2_MCARD_SAVE_FILE) {
+        q2_mcard_compose(c->save_ui.state, &ctx, c->card_menu.text, 1);
         client_card_rows(c);
-    } else if (c->card_screen == Q2_MCARD_LOAD_MESSAGE) {
-        /*
-         * The screen whose text the runtime composes — which is why state 13
-         * maps to it (memcard.h). BOTH of its rows are placeholders, and both
-         * have to be written: an empty override falls back to the table's own
-         * label, so leaving the second alone leaves the word HERE on screen.
-         * A single space is what blanks a line the report does not need.
-         */
-        snprintf(c->card_menu.text[0], Q2_MENU_TEXT_MAX, "%s",
-                 c->save_ui.message);
-        snprintf(c->card_menu.text[1], Q2_MENU_TEXT_MAX, "%s",
-                 c->save_ui.detail[0] ? c->save_ui.detail : " ");
+    } else {
+        q2_mcard_compose(c->save_ui.status == Q2_SAVE_UI_FAILED &&
+                         c->save_ui.state == Q2_SAVEUI_STATE_REPORT
+                         ? Q2_MCARD_STATE_FAILED : c->save_ui.state,
+                         &ctx, c->card_menu.text, 3);
     }
 }
 
@@ -16492,6 +16728,12 @@ static void client_card_frame(client *c)
     q2_save_ui_update(&c->save_ui);
 
     client_card_sync(c);
+    {
+        int y[2];
+        q2_mcard_prompt_rows(c->save_ui.state, c->in_front_end, y);
+        q2_prompt_show(&c->prompts, Q2_PROMPT_SELECT, y[0]);
+        q2_prompt_show(&c->prompts, Q2_PROMPT_BACK, y[1]);
+    }
     page = c->card_menu.page;
 
     /*
@@ -17976,6 +18218,294 @@ static void client_enter_front_end(client *c)
     if (c->music_held) {
         c->music_held = false;
         client_music_for_level(c, true, false);
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* QENDMIS: the end-of-unit uplink                                            */
+/* ------------------------------------------------------------------------- */
+/*
+ * The shared screen module (29,988 bytes, the same image on the PAL and NTSC
+ * discs) carried by QENDMIS1..5. Its init (+0x414) compares ThisLevelName
+ * against "EndMission 1".."EndMission 5" (module+0x7C, import +0x47C); on a
+ * match it installs +0x197C as LevelSpecific (import +0x64), points palette
+ * table entries 0 and 1 (import +0x1DC, 0x800E3F2C) at CLUT cells 0x4000 and
+ * 0x4040 — VRAM (0,256) and (0,257) — and loads sixteen entries into each with
+ * +0x3ED4 (LoadImage, import +0x184): entry 0 from module+0x52C8 + 0x20*(N-1),
+ * the unit's own tint for the background, entry 1 from module+0x52A8 for the
+ * globe. The state word +0x7518 starts at 0.
+ *
+ * The images are the map's own, at the slots 0x8003FE20 registers
+ * (vram.c): Screena 0 and Screenb 2, 512 x 256 and 512 x 224 at 4bpp, two
+ * pages each; Globe0..7 at 4..11, 256 x 256 at 4bpp, two 192 x 128 frames
+ * stacked in each.
+ */
+static const char *const k_uplink_images[] = {
+    "Screena.lbm", "Screenb.lbm", "Globe0.lbm", "Globe1.lbm", "Globe2.lbm",
+    "Globe3.lbm", "Globe4.lbm", "Globe5.lbm", "Globe6.lbm", "Globe7.lbm"
+};
+#define Q2_UPLINK_MODULE_SIZE  29988u
+#define Q2_UPLINK_CLUT_GLOBE   0x52A8u
+#define Q2_UPLINK_CLUT_SCREEN  0x52C8u
+#define Q2_UPLINK_OT_BUCKET    (50 * PSX_OT_SUBDIV) /* [block+0x1E0] + 0x2BB0 */
+
+static bool client_uplink_open(client *c, int unit)
+{
+    static const u32 text_at[4] = { 0x27C, 0x294, 0x2AC, 0x2C0 };
+    const dat_chunk *lb = c->common.chunk[Q2_COMMON_LEVEL_BIN];
+    q2_vram_section art;
+    u32 i, k;
+    bool ok = true;
+
+    c->uplink_open = false;
+    if (unit < 1 || unit > 5 || !c->vram || !lb || !lb->data ||
+        lb->size != Q2_UPLINK_MODULE_SIZE)
+        return false;
+    for (i = 0; i < 4; i++) {
+        const char *s = (const char *)lb->data + text_at[i];
+        size_t n = strnlen(s, sizeof(c->uplink_text[i]));
+        if (n == 0 || n >= sizeof(c->uplink_text[i])) return false;
+        memcpy(c->uplink_text[i], s, n + 1);
+    }
+    if (strcmp(c->uplink_text[0], "establishing uplink...."))
+        return false;
+    if (q2_vram_load(&art, c->disc, c->map) != Q2_OK)
+        return false;
+    for (i = 0; ok && i < sizeof(k_uplink_images) / sizeof(k_uplink_images[0]); i++) {
+        u32 slot;
+        int v_offset;
+        ok = q2_vram_ui_slot(k_uplink_images[i], &slot, &v_offset) &&
+             q2_vram_upload_named(&art, k_uplink_images[i], slot, v_offset,
+                                  c->vram, NULL) == Q2_OK;
+    }
+    q2_vram_free(&art);
+    if (!ok) {
+        Q2_WARN("uplink: %s does not carry its images", c->map);
+        return false;
+    }
+    psx_vram_transfer(c->vram);
+    /* +0x3ED4 is a plain LoadImage: no STP fix-up, so the globe's own
+     * semi-transparent entries are the ones the data marks. */
+    for (k = 0; k < 16; k++) {
+        c->vram->px[256][k] = q2_rd_u16(lb->data + Q2_UPLINK_CLUT_SCREEN +
+                                        0x20u * (u32)(unit - 1) + 2u * k);
+        c->vram->px[257][k] = q2_rd_u16(lb->data + Q2_UPLINK_CLUT_GLOBE + 2u * k);
+    }
+
+    c->uplink_unit      = unit;
+    c->uplink_state     = 0;
+    c->uplink_wait      = 0;
+    c->uplink_scroll    = 0;
+    c->uplink_fade      = 0;
+    c->uplink_fade_out  = false;
+    c->uplink_count     = 0;   /* 0x8007C9F0 zeroes ChrisCount at the load */
+    c->uplink_carry     = 0.0;
+    c->uplink_fire_prev = true; /* an edge, so a held button does not skip */
+    c->uplink_frames    = 0;
+    c->uplink_open      = true;
+    Q2_INFO("uplink: EndMission %d, background CLUT module+0x%X", unit,
+            (unsigned)(Q2_UPLINK_CLUT_SCREEN + 0x20u * (u32)(unit - 1)));
+    return true;
+}
+
+/*
+ * One call of LevelSpecific +0x197C. Returns true on the frame the machine
+ * reaches state 8, which writes the exit.
+ *
+ *   +0x1A00  the globe's brightness +0x5260: when non-zero, +2 a frame to 128,
+ *            or -2 to 0 once +0x5264 is set; drawn (+0x2364) while non-zero
+ *   +0x1ADC  the background (+0x2508) every frame, scrolled by +0x525C
+ *   +0x1B14  ChrisCount >= 31 and MapPadInputToFire(0) (import +0x158):
+ *            straight to state 8
+ *   state 0  centreprintf "establishing uplink....", wait 90   (jump table
+ *   state 2  "uplink established....", wait 64, brightness 2    at
+ *   state 4  "scanning area....", wait 19                        module+0x2EC)
+ *   state 6  +0x525C += 1; at 240 "closing uplink....", fade out, wait 60
+ *   odd      wait -= 1; below zero, the next state
+ *   state 8  printf "Mission completed %d"; Mission 5 writes LevelComplete
+ *            13 (GameExtro, 0x800418A8), any other 4 with NewMission = 1 and
+ *            NextMission = Mission + 1
+ *
+ * centreprintf is import +0x11C (0x80043570) with viewport 0, the same centre
+ * line client_centre_line draws. Each state's print and its wait count happen
+ * on the same frame, so a wait of n holds n + 1 frames.
+ */
+static bool client_uplink_step(client *c, bool fire_edge)
+{
+    c->uplink_count++;          /* 0x80070610, once per game frame */
+    c->uplink_frames++;
+    if (c->uplink_fade) {
+        if (c->uplink_fade_out) {
+            c->uplink_fade -= 2;
+            if (c->uplink_fade < 0) c->uplink_fade = 0;
+        } else {
+            c->uplink_fade += 2;
+            if (c->uplink_fade > 128) c->uplink_fade = 128;
+        }
+    }
+    if (c->uplink_count >= 31 && fire_edge)
+        c->uplink_state = 8;
+    switch (c->uplink_state) {
+    case 0:
+        client_centre_line(c, c->uplink_text[0]);
+        c->uplink_wait = 90;
+        c->uplink_state++;
+        break;
+    case 2:
+        client_centre_line(c, c->uplink_text[1]);
+        c->uplink_wait = 64;
+        c->uplink_fade = 2;
+        c->uplink_state++;
+        break;
+    case 4:
+        client_centre_line(c, c->uplink_text[2]);
+        c->uplink_wait = 19;
+        c->uplink_state++;
+        break;
+    case 6:
+        if (++c->uplink_scroll < 240) break;
+        client_centre_line(c, c->uplink_text[3]);
+        c->uplink_fade_out = true;
+        c->uplink_wait = 60;
+        c->uplink_state++;
+        break;
+    case 8:
+        return true;
+    default:
+        if (--c->uplink_wait < 0) c->uplink_state++;
+        break;
+    }
+    return false;
+}
+
+/* State 8's exit, in the port's terms. Unit 5 is GameExtro's "Extro FMV";
+ * the others are GameNewMission, whose first level the port takes from the
+ * LOADMAP the unit's MISCOMPLETE stood beside (see `unit_next_map`). */
+static void client_uplink_finish(client *c)
+{
+    int unit = c->uplink_unit;
+
+    c->uplink_open = false;
+    c->endmission  = false;
+    Q2_INFO("uplink: Mission completed %d after %u frames", unit, c->uplink_frames);
+    if (unit == Q2_LAST_UNIT) {
+        snprintf(c->film_screen, sizeof(c->film_screen), "Extro FMV");
+        snprintf(c->pending_map, sizeof(c->pending_map), "Extro FMV");
+        snprintf(c->pending_start, sizeof(c->pending_start), "Default");
+        client_change_map_and_brief(c);
+    } else if (c->unit_next_map[0]) {
+        snprintf(c->pending_map, sizeof(c->pending_map), "%s", c->unit_next_map);
+        snprintf(c->pending_start, sizeof(c->pending_start), "%s", c->unit_next_start);
+        c->unit_next_map[0]   = '\0';
+        c->unit_next_start[0] = '\0';
+        Q2_INFO("uplink: unit %d -> %s '%s'", unit + 1, c->pending_map, c->pending_start);
+        client_change_map_and_brief(c);
+    } else {
+        Q2_INFO("uplink: no next level was carried here; back to the front end");
+        client_enter_front_end(c);
+    }
+}
+
+/*
+ * The in-game loop's frame on a QENDMIS map: the world is empty and the
+ * module's hook is all there is. The hook runs once per game frame, which on
+ * the console is VSync(2) — 25 a second on PAL, 30 on NTSC (screen.h's
+ * nominal 12 / 10 ticks) — and the counts in the module are the same on both
+ * discs, so the port counts game frames at that rate rather than its own.
+ * The centre line ages by the same 12 / 10 ticks a frame (hud.h).
+ */
+static void client_uplink_frame(client *c, float dt)
+{
+    int rate = q2_build_tick_rate(&c->build);
+    double frame_rate = rate > 0 ? rate / 2.0 : 25.0;
+    s32 frame_dt = rate > 0 ? (s32)(600 / rate) : Q2_SCREEN_DT_NOMINAL;
+    bool fire = (client_menu_pad(c) & Q2_PAD_CROSS) != 0;
+    bool edge = fire && !c->uplink_fire_prev;
+
+    c->uplink_fire_prev = fire;
+    c->uplink_carry += (double)dt * frame_rate;
+    while (c->uplink_open && c->uplink_carry >= 1.0) {
+        c->uplink_carry -= 1.0;
+        if (c->hud_ready) q2_hud_tick(&c->hud[0], 1, frame_dt);
+        if (client_uplink_step(c, edge)) {
+            client_uplink_finish(c);
+            break;
+        }
+        edge = false;   /* one press, one frame */
+    }
+}
+
+/*
+ * +0x2364 and +0x2508, as primitives in viewport 0's slice at the bucket the
+ * module links them into. AddPrim puts the last one first, so the background,
+ * linked after the globe, is drawn under it; each sprite's DR_MODE
+ * (+0x4630: dfe 1, dtd 0) is linked after the sprite and so precedes it.
+ */
+static void client_uplink_build_ot(client *c)
+{
+    const u32 cc = c->uplink_count & 0xFu;   /* ChrisCount & 0xF, +0x1AD0 */
+    psx_prim *p;
+    s32 left = 240, h = 256 - c->uplink_scroll, y = 0;
+    u8 v = (u8)c->uplink_scroll;
+    u32 band, page = 0;
+
+    if (!c->uplink_open)
+        return;
+
+    /* +0x2364(40,20, 192x128, palette 1, page 4 + (cc >> 1), colour f,f,f):
+     * SPRT code 0x66, v = (cc & 1) * 128, GetTPage(4bpp, abr 1). */
+    if (c->uplink_fade && (p = psx_ot_add_bucket(&c->ot, Q2_UPLINK_OT_BUCKET))) {
+        u32 slot = 4u + (cc >> 1);
+        u8 gv = (u8)((cc & 1u) << 7);
+        p->kind = PSX_PRIM_SPRT;
+        p->xy[0].x = 40;  p->xy[0].y = 20;
+        p->xy[1].x = 232; p->xy[1].y = 20;
+        p->xy[2].x = 232; p->xy[2].y = 148;
+        p->xy[3].x = 40;  p->xy[3].y = 148;
+        p->uv[0].u = 0;   p->uv[0].v = gv;
+        p->uv[1].u = 192; p->uv[1].v = gv;
+        p->uv[2].u = 192; p->uv[2].v = (u8)(gv + 128);
+        p->uv[3].u = 0;   p->uv[3].v = (u8)(gv + 128);
+        p->rgb[0].r = p->rgb[0].g = p->rgb[0].b = (u8)c->uplink_fade;
+        p->tpage = (u16)(psx_make_tpage(q2_vram_slot_x[slot] >> 6,
+                                        (q2_vram_slot_y[slot] >> 8) & 1,
+                                        PSX_BLEND_ADD, PSX_TEX_4BIT) | 0x0400u);
+        p->clut = psx_make_clut(0, 257);
+        p->set_tpage = p->semi_transparent = p->textured_blend = true;
+    }
+
+    /* +0x2508(scroll, palette 0, page 0, 4bpp, colour 128): four 256-wide
+     * SPRT bands, two from rows scroll..255 of the first pair of pages and
+     * two below them from the second pair, 240 rows in all. */
+    for (band = 0; band < 4; band++) {
+        s32 x = (s32)((band << 8) & 0x1FFu);
+        if (left == 0) continue;
+        if (h > left) h = left;
+        if ((p = psx_ot_add_bucket(&c->ot, Q2_UPLINK_OT_BUCKET)) != NULL) {
+            p->kind = PSX_PRIM_SPRT;
+            p->xy[0].x = (s16)x;         p->xy[0].y = (s16)y;
+            p->xy[1].x = (s16)(x + 256); p->xy[1].y = (s16)y;
+            p->xy[2].x = (s16)(x + 256); p->xy[2].y = (s16)(y + h);
+            p->xy[3].x = (s16)x;         p->xy[3].y = (s16)(y + h);
+            p->uv[0].u = 0;   p->uv[0].v = v;
+            p->uv[1].u = 255; p->uv[1].v = v;
+            p->uv[2].u = 255; p->uv[2].v = (u8)(v + h);
+            p->uv[3].u = 0;   p->uv[3].v = (u8)(v + h);
+            p->rgb[0].r = p->rgb[0].g = p->rgb[0].b = 128;
+            p->tpage = (u16)(psx_make_tpage(q2_vram_slot_x[page] >> 6,
+                                            (q2_vram_slot_y[page] >> 8) & 1,
+                                            PSX_BLEND_ADD, PSX_TEX_4BIT) | 0x0400u);
+            p->clut = psx_make_clut(0, 256);
+            p->set_tpage = p->textured_blend = true;
+            p->semi_transparent = false;
+        }
+        page++;
+        if (band == 1) {
+            left -= h;
+            y = 256 - c->uplink_scroll;
+            h = 256;
+            v = 0;
+        }
     }
 }
 
@@ -20432,7 +20962,8 @@ static void client_frame(client *c)
         !c->endmis_open && !c->credits_open) {
         q2_hud_ctx ctx;
 
-        c->hud[0].crosshair = (c->settings.v[Q2_SET_CROSSHAIR] != 0);
+        /* No player on a QENDMIS screen, so no crosshair over the uplink. */
+        c->hud[0].crosshair = (c->settings.v[Q2_SET_CROSSHAIR] != 0) && !c->uplink_open;
         q2_hud_ctx_centre_in(&ctx, c->width, c->height);
         q2_hud_build_ot(&c->hud[0], &c->hud_font, &ctx, &c->ot, 0);
     }
@@ -20479,6 +21010,8 @@ static void client_frame(client *c)
         ctx.home_y = 4;
         q2_hud_print(&c->hud_font, &ctx, &pen, &c->ot, 0, line);
     }
+
+    client_uplink_build_ot(c);
 
     /* QMRESULT +0x0E1C builds the sorted rows; +0x1714 supplies the title
      * and prompts. Its frame hook draws wipteam1 behind that menu. */
@@ -21181,6 +21714,8 @@ static void client_report(const client *c)
     REPORT("run.errors",            q2_log_count(Q2_LOG_ERROR));
     REPORT("run.warnings",          q2_log_count(Q2_LOG_WARN));
 
+    REPORT("uplink.frames",         c->uplink_frames);
+    REPORT("uplink.state",          c->uplink_state);
     REPORT("level.loads",           c->loads_done);
     REPORT("level.loads_failed",    c->loads_failed);
     REPORT("level.loading_screens", c->loading_raises);
@@ -22861,6 +23396,9 @@ no_window:
              */
             client_scene_lights(&c, q2_sim_scene_advance(&c.sim[0], (double)dt) != 0);
             client_start_beat(&c, dt);
+        } else if (c.uplink_open && !c.loading.open) {
+            /* QENDMIS's LevelSpecific; there is no world to tick. */
+            client_uplink_frame(&c, c.headless ? 1.0f / 30.0f : dt);
         } else if (c.mission_open || c.briefing_open || c.endmis_open) {
             /*
              * AND THE INTERMISSION BOARDS FREEZE IT TOO. This was the bug that

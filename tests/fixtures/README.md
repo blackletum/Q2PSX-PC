@@ -502,6 +502,57 @@ framebuffer capture and 32-step cold-save continuation through impact.
 python -B tests/fixtures/generate_bolt_reference.py .install/disc/game.cue '<US-disc.cue>' --trace .agents/tmp/functional-parity/bolt-sequence/native.json --check
 ```
 
+## Native view-weapon driver order
+
+`generate_viewweapon_driver_reference.py` checks the PAL and US executable
+hashes. It then executes the complete driver `0x8004EE0C` unchanged, which
+includes:
+
+- its substep loop and the state machine `0x8004F87C`;
+- the move driver `0x80050454` and the frame driver `0x8004FEE8`;
+- the key reload and the barrel ramp `0x8004FC78`;
+- the dry pass's auto-select `0x800506C4` and neighbour search `0x80050758`.
+
+After each call with a held hand grenade it also executes the grenade's think,
+`0x8004A368`, in its held state. That think is the only writer of the
+viewmodel's `+740` mark, which the cook arm reads.
+
+The clip bank is synthetic. It keeps the retail key counts and key events per
+weapon and state, so each frame-index arm and each move trigger sees its real
+clip shape, but the poses and durations are generated. The move records
+`0x8006D330` returns are synthetic too and are emitted in block-D units. Both
+the bank and the moves are emitted with the results. Every seeded record field
+names the instruction that reads it.
+
+The fire table points at recording hooks. They return a script of 1, 0 and 2.
+A 2 also empties that weapon's ammo slot. A hand grenade's 1 creates its held
+grenade the way `0x8004AA6C` does: state 1, charge 4096, the owner, and a fuse
+long enough not to expire. The harness applies the cycle routine's countdown
+and `+214` update before each call. Sound, model lookup, matrix, kick, rumble
+and light services are hooks.
+
+All eleven weapons are covered. They run at dt 1, 12, 30 and a mixed pattern,
+with holds, releases, selections and quad. Further cases cover a move frozen
+outside FIRE and resumed, a swap with a move on the record, a cooked grenade,
+a re-press past the cook position and a grenade whose spawn failed. This gives
+133 sequences, 7,838 calls and 594 fire calls; 1,357 calls have a move on the
+record, with 189 swaps, 12 primes and 11 releases. Both revisions agree.
+
+The fixture does not cover the thrown grenade's flight or its fuse expiry,
+`PrimaryBFG`'s own writes to the move fields, the shotgun's `+695` cock path,
+real fire functions or hardware timing.
+
+`test_viewweapon` drives `q2_vw_advance_firing` over every call twice. The first
+pass asks inside the substep. The second reports before the call, as the
+client does. Both check fire-call placement and the complete end state,
+including the move position, flags and record, the `+740` mark, and the held
+grenade's charge, prime and release. The local JSON holds each region's hooks
+and the bank.
+
+```powershell
+python -B tests/fixtures/generate_viewweapon_driver_reference.py .install/disc/game.cue '<US-disc.cue>' --trace .agents/tmp/functional-parity/viewweapon-driver/native.json --check
+```
+
 ## Native player auto-aim
 
 `generate_autoaim_reference.py` verifies the PAL/US executable hashes and runs
@@ -522,3 +573,22 @@ checks the optional player tail and legacy/truncated records.
 ```powershell
 python -B tests/fixtures/generate_autoaim_reference.py .install/disc/game.cue '<US-disc.cue>' --trace .agents/tmp/functional-parity/autoaim/native.json
 ```
+
+## Native level VRAM
+
+`generate_vram_reference.py` runs each level-table map's retail load (the heap
+fixture's `LoaderMachine`, with `LoadImage` at `0x80083648` serviced into a
+1024x512 VRAM model, and `SquareRoot0` serviced instruction for instruction
+because the interpreter has no GTE). It records every uploaded rectangle with an
+FNV-1a hash of what the load leaves in it, never the texels. Maps whose module
+cannot complete a load on the fixture, or that ship no `SNDVRAM.DAT`, are listed
+as skipped in the trace. `test_vram_native --headless <disc>` loads each map's
+zone 0 through the real client, in a fresh client per map, and compares the same
+rectangles. Every gameplay map matches on both discs. The screen modules'
+pictures and the DemoSp self-play pages are reported as PENDING, with the
+reason in the test.
+
+```
+python tests/fixtures/generate_vram_reference.py "<PAL.cue>" "<US.cue>" --trace .agents/tmp/vram/native.json [--check]
+```
+

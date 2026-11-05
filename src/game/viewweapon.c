@@ -12,22 +12,42 @@
 /* The part 0x8004FED0 hands 0x8006D43C, in its `a2`. */
 #define VW_HYPER_BARREL_PART 6
 
+/* The four weapons the frame driver 0x8004FEE8 has an arm for. */
+#define VW_MACHINEGUN    4
+#define VW_CHAINGUN      5
+#define VW_HAND_GRENADE  6
+#define VW_HYPERBLASTER  9
+
 /* ------------------------------------------------------------------------- */
 /* Keys                                                                       */
 /* ------------------------------------------------------------------------- */
-static const q2_vm_key *current_key(const q2_viewweapon *vw)
+static const q2_vm_key *clip_key(const q2_vm_clip *c, u32 frame)
 {
-    const q2_vm_clip *c = q2_vm_clip_get(vw->tab, vw->weapon, vw->state);
-
-    if (!c || vw->frame >= c->count)
+    if (!c || frame >= c->count)
         return NULL;
-    return &c->key[vw->frame];
+    return &c->key[frame];
 }
 
-static u32 clip_length(const q2_viewweapon *vw, q2_vm_state state)
+static const q2_vm_clip *current_clip(const q2_viewweapon *vw)
 {
-    const q2_vm_clip *c = q2_vm_clip_get(vw->tab, vw->weapon, state);
-    return c ? c->count : 0;
+    return q2_vm_clip_get(vw->tab, vw->weapon, vw->state);
+}
+
+static const q2_vm_key *current_key(const q2_viewweapon *vw)
+{
+    return clip_key(current_clip(vw), vw->frame);
+}
+
+/*
+ * The machine's whole "has the animation finished" test, 0x8004F93C and its
+ * three siblings: `clip_start + 20*frame == clip_end`. The console compares for
+ * EQUALITY, so a frame index that somehow walked past the end would never test
+ * done; `>=` is the same answer for every index the retail bank can produce
+ * and stops a malformed table from running off the end here.
+ */
+static bool clip_done(const q2_vm_clip *c, u32 frame)
+{
+    return !c || frame >= c->count;
 }
 
 /*
@@ -51,17 +71,61 @@ static s32 key_duration(const q2_vm_key *k)
     }
 }
 
-/* Latch the interpolation's starting point and load the new key's clock. */
-static void begin_key(q2_viewweapon *vw)
+/*
+ * `base + (key - base) * (total - left) / total`, as one of the six blocks at
+ * 0x8004EF80…0x8004F1C0 (and the display's at 0x8004F284…0x8004F3E0) computes
+ * it: the difference is formed from two `lh` reads, `mult` keeps the low word
+ * of the product, `div` truncates toward zero, and the sum goes back through
+ * `lhu`/`addu`/`sh`, so it wraps as a halfword. There is no clamp — a key whose
+ * remaining time exceeds its total (the cooked-off grenade's 150 at 0x8004AA1C)
+ * extrapolates backwards exactly as the console does.
+ *
+ * A zero total would reach the `break 7` the compiler put after each `div`;
+ * no retail key has one, and here it simply lands on the key.
+ */
+static s16 key_lerp(s16 base, s16 to, s32 total, s32 left)
 {
-    const q2_vm_key *k = current_key(vw);
+    s32 diff = (s32)to - (s32)base;
+    s32 prod;
+
+    if (total == 0)
+        return to;
+    prod = (s32)(u32)(u64)((s64)diff * (s64)(total - left));
+    return (s16)(u16)((u32)(u16)base + (u32)(prod / total));
+}
+
+/*
+ * The KEY RELOAD — 0x8004EF5C…0x8004F264, which runs inside the substep loop
+ * whenever the frame or the state differs from what it was at the top of the
+ * substep, and at no other time.
+ *
+ * It does two things in a fixed order. First the six base halfwords (+224…+228
+ * rotation, +236…+240 translation) take the fraction of the OLD key that was
+ * actually played — `old` is the clip the substep began with and `old_frame`
+ * its frame then, and the fraction uses the clock as the frame driver left it.
+ * Then the new key is loaded from the clip and frame the machine and the arms
+ * have settled on: its duration, jittered through rand() if it asks, into both
+ * +48 and +80.
+ *
+ * Doing it here, after both drivers, is what makes a machinegun's held wrap
+ * (frame 2 → 0 in the arm) load key 0's clock instead of playing key 2's
+ * duration toward key 0's pose, and what makes the LOWER hold, which rewinds
+ * the frame back to where the substep found it, load nothing at all.
+ */
+static void reload_key(q2_viewweapon *vw, const q2_vm_clip *old, u32 old_frame)
+{
+    const q2_vm_key *was = clip_key(old, old_frame);
+    const q2_vm_key *k;
     int i;
 
-    for (i = 0; i < 3; i++) {
-        vw->from_t[i] = vw->cur_t[i];
-        vw->from_r[i] = vw->cur_r[i];
+    if (was) {
+        for (i = 0; i < 3; i++) {
+            vw->from_r[i] = key_lerp(vw->from_r[i], was->r[i], vw->total, vw->left);
+            vw->from_t[i] = key_lerp(vw->from_t[i], was->t[i], vw->total, vw->left);
+        }
     }
 
+    k = current_key(vw);
     vw->total = key_duration(k);
     vw->left  = vw->total;
 
@@ -71,28 +135,8 @@ static void begin_key(q2_viewweapon *vw)
     }
 }
 
-/*
- * `v = from + (key - from) * (total - left) / total`, which is 0x8004EF80 and
- * its five siblings. A zero-duration key is legal — the original's divide would
- * trap, so the engine never reaches it with total == 0, and here it simply
- * snaps.
- */
-static s16 lerp_field(s16 from, s16 to, s32 total, s32 left)
-{
-    s32 elapsed;
-
-    if (total <= 0)
-        return to;
-
-    elapsed = total - left;
-    if (elapsed <= 0)
-        return from;
-    if (elapsed >= total)
-        return to;
-
-    return (s16)((s32)from + ((s32)to - (s32)from) * elapsed / total);
-}
-
+/* 0x8004F280…0x8004F3E0: the display value, computed fresh after the substep
+ * loop from the base and the current key without being written back. */
 static void interpolate(q2_viewweapon *vw)
 {
     const q2_vm_key *k = current_key(vw);
@@ -102,8 +146,8 @@ static void interpolate(q2_viewweapon *vw)
         return;
 
     for (i = 0; i < 3; i++) {
-        vw->cur_t[i] = lerp_field(vw->from_t[i], k->t[i], vw->total, vw->left);
-        vw->cur_r[i] = lerp_field(vw->from_r[i], k->r[i], vw->total, vw->left);
+        vw->cur_t[i] = key_lerp(vw->from_t[i], k->t[i], vw->total, vw->left);
+        vw->cur_r[i] = key_lerp(vw->from_r[i], k->r[i], vw->total, vw->left);
     }
 }
 
@@ -138,16 +182,24 @@ void q2_vw_init(q2_viewweapon *vw, const q2_vm_tables *tab, int weapon)
      *
      * The note here used to cite 0x8004FA48, which is the state the machine
      * lands in AFTER A SWAP — a different moment. The difference is visible:
-     * a one-tick LOWER completes immediately and goes through the swap arm,
-     * which is what resolves the model, so the console shows no weapon at all
-     * for the first frames of a level and then raises it. Starting in RAISE
-     * skips that and has the gun present from frame zero.
+     * the first substep finds the key spent, so the lower plays out from its
+     * second key and then goes through the swap arm, which is what resolves
+     * the model, so the console shows no weapon at all for the first frames of
+     * a level and then raises it. Starting in RAISE skips that and has the gun
+     * present from frame zero.
+     *
+     * The constructor loads NO key — no clock from the clip, no jitter roll,
+     * no event — and it writes two fields the driver's arms read before
+     * anything else does: the chaingun's rate +44 is 1 (0x8004F7C0) and the
+     * per-frame cache +218 is 1 (0x8004F7B0, `s1` from 0x8004F748), so a first
+     * chaingun shot's frame 0 is a NEW frame and plays the spin-up.
      */
     vw->state = Q2_VM_LOWER;
     vw->frame = 0;
-    begin_key(vw);
     vw->total = 1;
     vw->left  = 0;
+    vw->spin_rate       = 1;
+    vw->last_fire_frame = 1;
     interpolate(vw);
 }
 
@@ -161,8 +213,15 @@ void q2_vw_select(q2_viewweapon *vw, int weapon)
      * 0x8004ECEC. Asking for a weapon arms the 70-tick countdown; LOWER holds
      * at the bottom of its arc until it expires, which is what stops a fast
      * double-tap from swapping the model twice in as many frames.
+     *
+     * The cycle routine that does this (0x8004ECB4, called at 0x8003A8E0)
+     * runs before the driver (0x8003AD98) in the same player think, and on the
+     * frame it arms the countdown it does NOT also count it down — that is the
+     * other arm, 0x8004ED44. So the advance that follows a selection sees the
+     * full seventy; `switch_armed` is how it knows.
      */
     vw->switch_ticks = Q2_VW_SWITCH_TICKS;
+    vw->switch_armed = true;
 }
 
 void q2_vw_set_model(q2_viewweapon *vw, const q2_model *model)
@@ -206,122 +265,21 @@ bool q2_vw_wants_fire(const q2_viewweapon *vw)
 }
 
 /* ------------------------------------------------------------------------- */
-/* The state machine — 0x8004F87C, called once per key boundary               */
+/* One advance's fire plumbing                                                */
 /* ------------------------------------------------------------------------- */
 /*
- * The fire check the idle state runs — 0x8004FB04…0x8004FB98.
- *
- * The order here is the original's and it is not the obvious one. The latch is
- * tested BEFORE the fire function is consulted, and a set latch does not fire:
- * it clears, and that clearing is the same pass that recomputes the player's
- * next and previous weapons. So one shot per press is not enforced by a timer,
- * it falls out of a latch that costs one pass to release. A port that clears
- * the latch when the fire clip ends instead fires a frame early, every time.
+ * What an advance knows about its fire function. `precomputed` is the one
+ * report the caller made before the call (see q2_vw_advance_firing): it
+ * answers the idle arm's first ask and nothing else.
  */
-static void q2_vw_idle_fire_check(q2_viewweapon *vw, bool fire_held,
-                                  q2_vw_fire_result fired)
-{
-    /* 0x8004FAB4 checks the pending selection before entering the idle
-     * fire arm. A held trigger must not postpone lowering indefinitely. */
-    if (vw->pending != vw->weapon)
-        return;
-    if (!fire_held && !vw->fire_latch)
-        return;                     /* 0x8004FB18: nothing to do */
-
-    if (vw->fire_latch) {
-        /*
-         * 0x8004FB5C, and `fire_latch` IS THE DRY LATCH — viewmodel+216.
-         *
-         * This used to be set on every successful shot, on the reading that
-         * "one shot per press falls out of a latch that costs one pass to
-         * release". `access 216` says otherwise: inside the state machine
-         * (0x8004F87C) the halfword is only ever CLEARED — `sh zero` at
-         * 0x8004F968 and 0x8004FB64 — and the only two non-zero writes in the
-         * whole image are 0x80050230 and 0x800502FC, the chaingun and
-         * hyperblaster arms, both immediately after `beq result, 2`, i.e.
-         * after a fire function reported it could not fire.
-         *
-         * What setting it on a normal shot cost: this arm raises `refire`, the
-         * caller turns `refire` into the auto-switch pass (0x800506C4), and a
-         * selection change plays a full LOWER then RAISE. So the gun dipped out
-         * of view and swung back in after EVERY shot. Measured on BASE1, 120
-         * frames, --weapon 1 --shoot: ten model re-binds against one for the
-         * same run not firing.
-         */
-        vw->fire_latch = false;
-        vw->refire     = true;
-        return;
-    }
-
-    if (fired == Q2_VW_FIRE_DENIED) {
-        /*
-         * Running dry: no clip, the neighbours are recomputed, and THIS is
-         * where the latch is set — 0x80050230 / 0x800502FC store it after a
-         * fire function returns 2. It costs the next pass, so a held trigger
-         * on an empty gun asks once and then waits rather than hammering the
-         * auto-switch at tick rate.
-         */
-        vw->fire_latch = true;
-        vw->refire     = true;
-        vw->result     = 2;
-        return;
-    }
-
-    /*
-     * And the port's own third case: the trigger is down, the weapon is fed,
-     * and no shot happened because the refire gate had not expired. The
-     * original cannot reach this — its idle state calls the fire function
-     * rather than being told about it afterwards — so the machine simply stays
-     * idle. Without this the fire clip restarted on every held-trigger frame,
-     * at RENDER rate rather than tick rate.
-     */
-    if (fired == Q2_VW_FIRE_NONE)
-        return;
-
-    /* A successful shot does NOT set the latch — see above. What limits the
-     * rate is the clip: this arm only runs from the IDLE state, so the next
-     * shot waits for the fire animation to finish, which is exactly what
-     * weapon.h means by "one gate plus animation length". */
-    /* 0x8004FB9C sits between the successful shot and `state = FIRE`, so the
-     * quad's sound belongs to the shot rather than to the clip. */
-    if (vw->quad_active)
-        vw->quad_sound = true;
-
-    vw->result          = 1;
-    vw->state           = Q2_VM_FIRE;
-    vw->frame           = 0;
-    vw->frame_sound     = -1;
-    vw->spin_accum      = 0;
-    vw->spin_rate       = 1;
-    vw->last_fire_frame = -1;
-    vw->cook            = false;
-    vw->hand_prev_anim  = vw->anim_pos;
-    vw->hand_cook_ticks = 0;
-    vw->hand_release    = false;
-    vw->fires_started++;
-    begin_key(vw);
-}
-
-/* ------------------------------------------------------------------------- */
-/* The per-weapon FIRE-state driver — 0x8004FEE8                              */
-/* ------------------------------------------------------------------------- */
-/*
- * Called from inside the key loop on every substep (0x8004EF4C), gated on
- * `state == FIRE` (0x8004FF38), then a switch on the weapon id. Only four
- * weapons have an arm; every other weapon's fire clip simply plays out.
- *
- * The shots these arms take are not the idle check's. On the console each arm
- * `jalr`s the weapon's fire function directly, which is how a chaingun fires
- * once per animation frame for as long as its loop runs. Here they raise
- * `frame_fires` and the caller drains it.
- */
-#define VW_MACHINEGUN    4
-#define VW_CHAINGUN      5
-#define VW_HAND_GRENADE  6
-#define VW_HYPERBLASTER  9
-
-/* +52 accumulates the step and fires each time it passes 30 (0x8004FFB8). */
-#define VW_SPIN_THRESHOLD 30
+typedef struct vw_fire_ctx {
+    bool              held;
+    q2_vw_fire_result fired;
+    bool              precomputed;
+    q2_vw_fire_fn     fire;
+    void             *user;
+    bool              dry_seen;    /* a dry pass with no auto_select */
+} vw_fire_ctx;
 
 /* The console's own word for a fire function's answer: 1 for a shot (the
  * blaster's 0x8004C1A4), 2 for dry, 0 for neither. The port's enum numbers
@@ -332,25 +290,278 @@ static s16 native_fire_word(q2_vw_fire_result r)
     return r == Q2_VW_FIRED ? 1 : r == Q2_VW_FIRE_DENIED ? 2 : 0;
 }
 
-static void frame_fire(q2_viewweapon *vw, int rounds, q2_vw_fire_fn fire,
-                       void *user)
+/* A fire function ran: a shot or a spawn that failed (the console's 1 or 0). */
+static bool fire_ran(q2_vw_fire_result r)
 {
-    /* The arm stores the fire function's return over the substep's result
-     * (`sh v0, 0(s6)`), a quiet zero included. */
-    if (fire) {
-        q2_vw_fire_result result = fire(user, vw->weapon, rounds);
-        vw->result = native_fire_word(result);
-        if (result != Q2_VW_FIRE_NONE)
-            q2_vw_frame_fire_result(vw, result == Q2_VW_FIRE_DENIED);
+    return r == Q2_VW_FIRED || r == Q2_VW_FIRE_FAILED;
+}
+
+/* The idle arm's `jalr` at 0x8004FB30. */
+static q2_vw_fire_result idle_fire(q2_viewweapon *vw, vw_fire_ctx *cx)
+{
+    if (cx->precomputed) {
+        cx->precomputed = false;
+        return cx->fired;
+    }
+    /*
+     * After a dry pass the console never asks again in the same call: its
+     * auto-select has already changed the selection, so the next pass lowers
+     * (0x8004FAB4) before it reaches this arm. A caller that reselects only
+     * after the advance has not changed it yet, and asking it again would be
+     * a call the console never makes; the trigger reads as up instead.
+     */
+    if (cx->dry_seen)
+        return Q2_VW_FIRE_NONE;
+    if (cx->fire)
+        return cx->fire(cx->user, vw->weapon, 1);
+    return cx->fired == Q2_VW_FIRE_ASK ? Q2_VW_FIRE_NONE : cx->fired;
+}
+
+/*
+ * One of the arms' `jalr`s — 0x8004FFE0, 0x8005020C, 0x800502D8 — and the
+ * `sh v0, 0(s6)` after each, which stores the answer over the substep's result,
+ * a quiet zero included. Without a callback the round is queued for
+ * q2_vw_take_frame_fires and its outcome deferred to q2_vw_frame_fire_result;
+ * Q2_VW_FIRE_ASK is the "deferred" answer the arms then ignore.
+ */
+static q2_vw_fire_result frame_fire(q2_viewweapon *vw, int rounds,
+                                    vw_fire_ctx *cx)
+{
+    q2_vw_fire_result r;
+
+    if (cx->fire) {
+        r = cx->fire(cx->user, vw->weapon, rounds);
+        vw->result = native_fire_word(r);
+        return r;
+    }
+    vw->frame_fires += (u32)rounds;
+    vw->result = 1;
+    return Q2_VW_FIRE_ASK;
+}
+
+/* ------------------------------------------------------------------------- */
+/* The state machine — 0x8004F87C, called at the top of EVERY substep         */
+/* ------------------------------------------------------------------------- */
+/*
+ * The dry pass — 0x8004FB5C…0x8004FB98, reached when the idle arm's fire
+ * function answered 2 or when the dry latch was already up.
+ *
+ * `fire_latch` IS THE DRY LATCH — viewmodel+216. Inside the state machine the
+ * halfword is only ever CLEARED, `sh zero` at 0x8004F968 and in this pass's
+ * delay slot at 0x8004FB64; the only two non-zero writes in the image are
+ * 0x80050230 and 0x800502FC, the chaingun and hyperblaster arms after a fire
+ * function reported 2. An earlier version also SET it here, on an idle shot
+ * that came back dry, and so swallowed the next pass's ask; the console asks
+ * again on every pass the trigger is down (the native driver fixture pins it).
+ *
+ * The pass then calls 0x800506C4, which is not a neighbour search but the
+ * AUTO-SELECT: it walks the priority list at 0x8009DB7C for the first owned
+ * weapon with at least the 0x8009DB4C minimum of its ammo and writes it into
+ * the selection (client+102, 0x80050744) AND this record's pending weapon
+ * (+214, 0x8005074C). So the very next substep's pass sees `weapon !=
+ * selection` and lowers — in the same driver call. `auto_select` lets a caller
+ * answer it in place; one that cannot drains `refire` after the advance and
+ * reselects a tick late. 0x80050758 (twice) then fills the next/previous
+ * neighbours at client+100/+96, which this module has no counterpart for.
+ */
+static void dry_pass(q2_viewweapon *vw, vw_fire_ctx *cx)
+{
+    vw->fire_latch = false;
+    vw->refire     = true;
+    if (vw->auto_select) {
+        int w = vw->auto_select(cx->user, vw->weapon);
+
+        if (w >= 0 && w < Q2_VM_SLOTS)
+            vw->pending = w;
     } else {
-        vw->frame_fires += (u32)rounds;
-        vw->result = 1;
+        cx->dry_seen = true;
     }
 }
 
-static void fire_state_step(q2_viewweapon *vw, s32 step, bool fire_held,
-                            q2_vw_fire_fn fire, void *user)
+/*
+ * One pass, in the console's order. `clip` is the clip the driver handed in —
+ * the one for the weapon and state at the top of the substep (0x8004EEE0) —
+ * and every "done" test below is against it, including the FIRE test at the
+ * end, after the idle arm may already have changed the state.
+ *
+ * Returns the halt flag, the halfword at 0x800B2B7C that the driver turns into
+ * "consume no more of this frame" (0x8004EF14). Only the LOWER hold raises it.
+ */
+static bool machine_pass(q2_viewweapon *vw, const q2_vm_clip *clip,
+                         vw_fire_ctx *cx, bool *swapped)
 {
+    s16 result = 0;       /* s4 — 0x8004F8DC */
+
+    /* 0x8004F8F4…0x8004F910: a spent key advances the frame HERE, before any
+     * state is looked at, and only here. */
+    if (vw->left == 0) {
+        vw->frame++;
+        vw->keys_played++;
+    }
+
+    if (vw->state == Q2_VM_LOWER) {
+        if (clip_done(clip, vw->frame)) {
+            /*
+             * 0x8004F944. The countdown (client+222) gates the swap: while it
+             * runs the frame is rewound to the key the substep began on, the
+             * halt flag is raised and the driver stops consuming this frame
+             * (0x8004FA48…0x8004FA58). The frame is then unchanged, so no key
+             * is reloaded: the weapon hangs at the bottom of its arc with the
+             * last key's clock spent, rather than replaying it.
+             */
+            if (vw->switch_ticks > 0) {
+                vw->frame--;
+                vw->result = 0;
+                return true;
+            }
+
+            vw->weapon     = vw->pending;     /* 0x8004F96C */
+            vw->state      = Q2_VM_RAISE;     /* 0x8004F960 */
+            vw->frame      = 0;               /* 0x8004F964 */
+            vw->fire_latch = false;           /* 0x8004F968 */
+            *swapped       = true;
+            /*
+             * 0x8004FA44. A new model in the hands starts at position 0 of its
+             * own timeline — the rest pose. (0x8004FA3C is the hyperblaster's
+             * exception, and it stores the PLAYER INDEX times ten, which is
+             * zero for the only player this port draws a weapon for.)
+             *
+             * And that is ALL the swap writes. The move record +736 and the
+             * flags +258 are left as the old weapon had them — nothing
+             * between 0x8004F954 and 0x8004FA44 touches either — so a move
+             * still on the record when the weapon went down resumes from
+             * position 0 on the new weapon's next fire clip, if the new weapon
+             * is one whose clips move it at all. This used to clear both.
+             */
+            vw->anim_pos   = 0;
+        }
+        vw->result = result;
+        return false;
+    }
+
+    /* 0x8004FA5C: the raise ends in IDLE, which is where the fire function is
+     * bound for the weapon now in hand (0x8004FAA4). */
+    if (vw->state == Q2_VM_RAISE && clip_done(clip, vw->frame)) {
+        vw->state = Q2_VM_IDLE;
+        vw->frame = 0;
+        vw->result = result;
+        return false;
+    }
+
+    /*
+     * 0x8004FAB4. A selection that differs from what is in hand starts the
+     * lower from RAISE or IDLE — never from FIRE, which is why you cannot
+     * cancel a shot by switching — and it is tested BEFORE the idle arm, so a
+     * held trigger cannot postpone it.
+     */
+    if (vw->pending != vw->weapon && vw->state != Q2_VM_FIRE) {
+        vw->state = Q2_VM_LOWER;
+        vw->frame = 0;
+        vw->result = result;
+        return false;
+    }
+
+    if (vw->state == Q2_VM_IDLE) {
+        /* 0x8004FAF4: the trigger, or a latch to release. */
+        if (cx->held || vw->fire_latch) {
+            u32 was = vw->frame;
+            q2_vw_fire_result r = Q2_VW_FIRE_NONE;
+
+            vw->frame = 0;                     /* 0x8004FB2C, before the call */
+            if (!vw->fire_latch) {
+                r = idle_fire(vw, cx);
+                if (r == Q2_VW_FIRE_NONE) {
+                    /*
+                     * The port's own outcome: the trigger is down, the weapon
+                     * is fed, and the sim's refire gate said no. The console
+                     * cannot reach this — its idle arm always fires — so the
+                     * pass behaves as though the trigger were up: the frame is
+                     * put back and the idle loop below decides. Treating it as
+                     * a shot would play a fire clip that never happened;
+                     * treating it as dry would switch off a loaded gun.
+                     */
+                    vw->frame = was;
+                    goto idle_loop;
+                }
+                result = native_fire_word(r);
+            }
+
+            /* 0x8004FB44 / 0x8004FB54: dry, or the latch was up. */
+            if (result == 2 || vw->fire_latch) {
+                dry_pass(vw, cx);
+                goto fire_check;
+            }
+
+            /*
+             * 0x8004FB9C…0x8004FBD4. Anything else — a shot, or a fire
+             * function that spawned nothing (its 0) — plays the fire clip, and
+             * the quad's sound belongs to the call rather than the clip.
+             */
+            if (vw->quad_active)
+                vw->quad_sound = true;
+            vw->state = Q2_VM_FIRE;
+            vw->cook  = false;
+            vw->fires_started++;
+            /* QPlayerFireGrenade 0x8004EBDC creates the held grenade through
+             * AnyoneFireGrenade 0x8004AA6C — on a shot, not on a spawn that
+             * failed — and from this frame its think owns +740. */
+            if (vw->weapon == VW_HAND_GRENADE && r == Q2_VW_FIRED) {
+                vw->hand_live       = true;
+                vw->hand_cook_ticks = 0;
+                vw->hand_release    = false;
+            }
+            goto fire_check;
+        }
+
+idle_loop:
+        /* 0x8004FBD8: idle loops. */
+        if (clip_done(clip, vw->frame)) {
+            vw->frame = 0;
+            vw->result = result;
+            return false;
+        }
+    }
+
+fire_check:
+    /*
+     * 0x8004FC04: the fire clip returns to idle when it runs out — and it does
+     * NOT clear the latch, which is what lets a dry chaingun's latch reach the
+     * idle pass that releases it.
+     */
+    if (vw->state == Q2_VM_FIRE && clip_done(clip, vw->frame)) {
+        vw->state = Q2_VM_IDLE;
+        vw->frame = 0;
+    }
+
+    vw->result = result;              /* 0x8004FC3C / 0x8004FC40 */
+    return false;
+}
+
+/* ------------------------------------------------------------------------- */
+/* The per-weapon FIRE-state driver — 0x8004FEE8                              */
+/* ------------------------------------------------------------------------- */
+/*
+ * Called from inside the key loop on every substep (0x8004EF4C), after the
+ * state machine's pass and the model-move driver, gated on `state == FIRE`
+ * (0x8004FF38), then a switch on the weapon id. Only four weapons have an arm;
+ * every other weapon's fire clip simply plays out.
+ *
+ * Because it runs after the pass, it sees the frame the pass has just
+ * advanced to with that key's clock still spent: a wrap here replaces the
+ * frame before the reload, so the reload loads the key the arm chose.
+ *
+ * The shots these arms take are not the idle check's. On the console each arm
+ * `jalr`s the weapon's fire function directly, which is how a chaingun fires
+ * once per animation frame for as long as its loop runs.
+ */
+
+/* +52 accumulates the step and fires each time it passes 30 (0x8004FFB8). */
+#define VW_SPIN_THRESHOLD 30
+
+static void fire_state_step(q2_viewweapon *vw, s32 step, vw_fire_ctx *cx)
+{
+    q2_vw_fire_result r;
+
     if (vw->state != Q2_VM_FIRE)
         return;
 
@@ -360,25 +571,34 @@ static void fire_state_step(q2_viewweapon *vw, s32 step, bool fire_held,
          * 0x8004FF84. Held: frame 2 wraps back to 0 so the three-key cycle
          * repeats, and the accumulator fires once each time it passes 30.
          *
+         * The wrap happens on the substep that ENDS key 1 — the pass has just
+         * advanced the frame to 2 — so key 2 is never played while the trigger
+         * is down: the reload after this arm loads key 0's clock. The port
+         * used to wrap a substep later, after key 2's clock had been loaded,
+         * and so played key 2's duration toward key 0's pose.
+         *
          * The accumulator is RESET, not decremented (0x80050038's
-         * `sw zero, 52`), so a long substep cannot bank a burst — which is
-         * what taking `-= 30` in a loop did here, turning one host frame at a
-         * low frame rate into several rounds.
+         * `sw zero, 52`), so a long substep cannot bank a burst. 0x8004FFD0
+         * re-tests frame 2 before the call; after the wrap it cannot be.
          */
-        if (fire_held) {
+        if (cx->held) {
             if (vw->frame == 2)
                 vw->frame = 0;
 
             vw->spin_accum += step;
-            if (vw->spin_accum >= VW_SPIN_THRESHOLD) {
-                /* 0x8004FFD0 skips the shot on the last key and leaves the
-                 * accumulator standing, so the next substep asks again. The
-                 * quad's sound waits for the shot's result (0x80050004). */
-                if (vw->frame != 2) {
-                    frame_fire(vw, 1, fire, user);
-                    vw->spin_accum = 0;
-                }
+            if (vw->spin_accum < VW_SPIN_THRESHOLD)
+                break;
+
+            r = frame_fire(vw, 1, cx);
+            if (r == Q2_VW_FIRE_DENIED) {
+                /* 0x8004FFF4: `j 0x80050034` with `sw v0, 72` in its delay
+                 * slot — IDLE on the spot, frame untouched; the driver's
+                 * reload sees the state change and loads the idle key. */
+                vw->state = Q2_VM_IDLE;
+            } else if (fire_ran(r) && vw->quad_active) {
+                vw->quad_sound = true;          /* 0x80050004 */
             }
+            vw->spin_accum = 0;                 /* 0x80050038 */
         } else {
             /*
              * 0x8005003C. Releasing clears the accumulator, and a release on
@@ -391,7 +611,7 @@ static void fire_state_step(q2_viewweapon *vw, s32 step, bool fire_held,
         }
         break;
 
-    case VW_CHAINGUN: {
+    case VW_CHAINGUN:
         /*
          * 0x80050058. Three bands in one 28-key clip: spin-up 0..8, LOOP
          * 9..17, spin-down 18..27.
@@ -403,24 +623,26 @@ static void fire_state_step(q2_viewweapon *vw, s32 step, bool fire_held,
          * the sounds), which is what lets the loop fall out into the spin-down
          * instead of grinding on an empty gun.
          */
-        if (fire_held) {
+        if (cx->held) {
             if (!vw->fire_latch && vw->frame == 17)
                 vw->frame = 9;
         } else {
+            /* 0x800500A0 stores the STATE (1) into the rate field from the
+             * delay slot of the frame-9 test, so EVERY released substep writes
+             * it, not only the one at frame 9. Any frame that reaches the band
+             * table below overwrites it before the shot. */
             vw->spin_accum = 0;
-            if (vw->frame == 9) {
-                /* 0x800500A0 stores the STATE into the rate field, which is 1
-                 * — not the 2 this used to write. Any frame that reaches the
-                 * band table below overwrites it anyway. */
-                vw->spin_rate = 1;
-                vw->frame     = 27;
-            }
+            vw->spin_rate  = 1;
+            if (vw->frame == 9)
+                vw->frame = 27;
         }
 
-        /* Everything below is once per NEW frame — the cache at +218. */
-        if ((s32)vw->frame == vw->last_fire_frame)
+        /* Everything below is once per NEW frame — the halfword cache at
+         * +218, which nothing but this arm and the constructor writes: a new
+         * fire clip does not reset it. */
+        if ((s32)(s16)vw->frame == vw->last_fire_frame)
             break;
-        vw->last_fire_frame = (s32)vw->frame;
+        vw->last_fire_frame = (s32)(s16)vw->frame;
 
         /* The three band boundaries each play their own clip. */
         if (vw->frame == 0)       vw->frame_sound = Q2_WSND_CHAINGUN_UP;
@@ -430,10 +652,8 @@ static void fire_state_step(q2_viewweapon *vw, s32 step, bool fire_held,
         if (vw->fire_latch) {
             /* 0x800503C4: a dry gun leaves the FIRE state when the clip comes
              * back round to its first key, rather than at the clip's end. */
-            if (vw->frame == 0) {
+            if (vw->frame == 0)
                 vw->state = Q2_VM_IDLE;
-                vw->frame = 0;
-            }
             break;
         }
 
@@ -453,51 +673,53 @@ static void fire_state_step(q2_viewweapon *vw, s32 step, bool fire_held,
          * — so a chaingun wound all the way up throws three rounds per
          * animation frame and a tapped one throws a single round. Frame 9 is
          * filtered out above and is the one frame that writes no rate at all.
+         * 0x800501E8 then clamps the rate to the ammo the selection holds; the
+         * fire callback owns the ammo, so it clamps this single burst itself.
          */
         if (vw->frame < 5)
             vw->spin_rate = 1;
         else if (vw->frame < 9)
-            vw->spin_rate = fire_held ? 2 : 1;
+            vw->spin_rate = cx->held ? 2 : 1;
         else if (vw->frame >= 10)
             vw->spin_rate = 3;
 
-        /* The fire callback clamps this single burst to available ammo.
-         * Splitting it into independent shots changes recoil, RNG and sound
-         * and incorrectly reports dry halfway through a partial burst. */
-        {
-            s32 n = vw->spin_rate;
-
-            if (n < 1)
-                n = 1;
-            frame_fire(vw, n, fire, user);
-            /* 0x80050234's quad sound follows the result, as above. */
-        }
+        r = frame_fire(vw, vw->spin_rate < 1 ? 1 : vw->spin_rate, cx);
+        if (r == Q2_VW_FIRE_DENIED)
+            vw->fire_latch = true;              /* 0x80050230 */
+        else if (fire_ran(r) && vw->quad_active)
+            vw->quad_sound = true;              /* 0x80050234 */
         break;
-    }
 
     case VW_HYPERBLASTER:
         /*
          * 0x8005026C. Frames 1..5 are the loop; a held trigger wraps 5 back to
          * 1, and frame 6 is the tail the loop must not fire on. A dry gun goes
          * straight to the sounds, which is what lets it reach frame 6 and stop.
+         *
+         * The accumulator is cleared by a shot (0x80050330) and by a release,
+         * but NOT when it passes 30 on frame 6 — 0x800502C8 branches past the
+         * clear, so it stands until the trigger lets go.
          */
-        if (fire_held && !vw->fire_latch) {
+        if (cx->held && !vw->fire_latch) {
             if (vw->frame == 5)
                 vw->frame = 1;
 
             vw->spin_accum += step;
-            if (vw->spin_accum >= VW_SPIN_THRESHOLD) {
-                if (vw->frame != 6)
-                    frame_fire(vw, 1, fire, user);
+            if (vw->spin_accum >= VW_SPIN_THRESHOLD && vw->frame != 6) {
+                r = frame_fire(vw, 1, cx);
+                if (r == Q2_VW_FIRE_DENIED)
+                    vw->fire_latch = true;      /* 0x800502FC */
+                else if (fire_ran(r) && vw->quad_active)
+                    vw->quad_sound = true;      /* 0x80050300 */
                 vw->spin_accum = 0;
             }
-        } else if (!fire_held) {
+        } else if (!cx->held) {
             vw->spin_accum = 0;
         }
 
-        if ((s32)vw->frame == vw->last_fire_frame)
+        if ((s32)(s16)vw->frame == vw->last_fire_frame)
             break;
-        vw->last_fire_frame = (s32)vw->frame;
+        vw->last_fire_frame = (s32)(s16)vw->frame;
 
         /*
          * AND IT LOOPS THE CHAINGUN'S SAMPLE. 0x80050378 loads `0x800B2B3C`,
@@ -513,10 +735,8 @@ static void fire_state_step(q2_viewweapon *vw, s32 step, bool fire_held,
             vw->frame_sound = Q2_WSND_HYPERBLAST_DOWN;
 
         /* 0x800503C4 again, shared with the chaingun. */
-        if (vw->fire_latch && vw->frame == 0) {
+        if (vw->fire_latch && vw->frame == 0)
             vw->state = Q2_VM_IDLE;
-            vw->frame = 0;
-        }
         break;
 
     case VW_HAND_GRENADE:
@@ -534,29 +754,22 @@ static void fire_state_step(q2_viewweapon *vw, s32 step, bool fire_held,
          * key's remaining time GROWS by the step, so the clip cannot advance
          * and the grenade is held for as long as the trigger is down.
          */
-        /* Grenade3's own think owns both sounds/transitions. It compares the
-         * current model position against the prior one at 0x8004A474 and
-         * 0x8004A4A8, so a long substep still raises each crossing once. */
-        if (vw->anim_pos >= Q2_VW_HAND_PRIME_POSITION &&
-            vw->hand_prev_anim < Q2_VW_HAND_PRIME_POSITION)
-            vw->frame_sound = Q2_WSND_HANDGREN_PRIME;
-
-        if (fire_held && vw->anim_pos >= Q2_VW_COOK_POSITION) {
-            vw->anim_pos = Q2_VW_COOK_POSITION;
-            vw->frame    = 1;
-            vw->left    += step;
+        /*
+         * AND ON THE GRENADE'S MARK: 0x80050404 also requires +740 — the held
+         * grenade's previous position minus one — to be below 380. Pinned, the
+         * mark is 379 and the hold continues; released past 380 and pressed
+         * again, the mark is past it and the arm keeps going. The sounds and
+         * the throw are the grenade's own think, at the end of the advance.
+         */
+        if (cx->held && vw->anim_pos >= Q2_VW_COOK_POSITION &&
+            vw->hand_prev_anim < Q2_VW_COOK_POSITION) {
+            vw->anim_pos = Q2_VW_COOK_POSITION;     /* 0x8005041C */
+            vw->frame    = 1;                       /* 0x80050420 */
+            vw->left    += step;                    /* 0x80050428 */
             vw->cook     = true;
-            vw->hand_cook_ticks += step;
         } else {
             vw->cook = false;
         }
-
-        if (vw->anim_pos >= Q2_VW_HAND_RELEASE_POSITION &&
-            vw->hand_prev_anim < Q2_VW_HAND_RELEASE_POSITION) {
-            vw->hand_release = true;
-            vw->frame_sound  = Q2_WSND_HANDGREN_THROW;
-        }
-        vw->hand_prev_anim = vw->anim_pos;
         break;
 
     default:
@@ -593,12 +806,30 @@ static const char *anim_move_name(int weapon)
  * carrying event 1 in the FIRE state starts one. The state test is
  * 0x80050508's `state != 1`, which is FIRE — an idle clip's event, if one ever
  * carried this value, would not reach the lookup.
+ *
+ * `event` is what the driver hands it in `a1` (0x8004EF1C…0x8004EF34): the
+ * event of the key at the frame the state machine has just left, read through
+ * the clip the substep BEGAN with. On the substep that enters FIRE that is the
+ * idle clip's key 0, so a fire clip's first-key event starts its move one
+ * substep later, from the fire clip itself.
  */
-static void anim_step(q2_viewweapon *vw, s32 step)
+static void anim_step(q2_viewweapon *vw, s32 step, s16 event)
 {
-    const q2_vm_key *k;
     const char      *name;
     q2_model_move    mv;
+
+    /*
+     * BOTH HALVES ARE GATED, and on two things. 0x800504D4…0x800504F8 returns
+     * for any weapon in hand (client+98) but 3, 6, 7, 8 and 11, and 0x80050508
+     * returns for any state but FIRE — before the record at +736 is even
+     * looked at. So a move only ever advances inside a fire clip: one still
+     * playing when its clip runs out stands where it is through IDLE, LOWER
+     * and RAISE, and picks up again on the next fire clip. This used to
+     * advance a playing move in any state, which let it run out in idle.
+     */
+    name = anim_move_name(vw->weapon);
+    if (!name || vw->state != Q2_VM_FIRE)
+        return;
 
     if (vw->anim_end >= 0) {
         s32 pos = (s32)vw->anim_pos + step;
@@ -615,17 +846,11 @@ static void anim_step(q2_viewweapon *vw, s32 step)
         return;
     }
 
-    if (vw->state != Q2_VM_FIRE)
+    if (event != 1)                       /* 0x80050564 */
         return;
-    if (vw->anim_flags & 2u)
+    if (vw->anim_flags & 2u)              /* 0x80050574 */
         return;
-
-    k = current_key(vw);
-    if (!k || k->event != 1)
-        return;
-
-    name = anim_move_name(vw->weapon);
-    if (!name || !vw->model)
+    if (!vw->model)
         return;
     if (!q2_model_move_by_name(vw->model, name, &mv))
         return;
@@ -674,6 +899,9 @@ static void anim_step(q2_viewweapon *vw, s32 step)
  * Frames 0, 5 and everything from 7 write nothing, and neither does any state
  * but FIRE and IDLE — so a raise or a lower holds whatever the last shot left
  * the barrel at, which is what makes the spin carry across the clip boundary.
+ *
+ * It runs AFTER the key reload, through the clip the reload used, so on the
+ * substep a key starts it already sees that key's fresh clock.
  *
  * `duration` here is the key's STORED duration (`lh 12(v0)` reads the key, not
  * the viewmodel's clock), so a jittered key would divide by a different number
@@ -752,13 +980,16 @@ void q2_vw_frame_fire_result(q2_viewweapon *vw, bool dry)
         /*
          * 0x8004FFF4: `bne v0, s1` against 2 falls through to `j 0x80050034`
          * with `sw v0, 72(s0)` in its delay slot, and 0x80050038 clears +52.
-         * The frame is left where it was; the caller at 0x8004EF54 sees the
-         * state change and reloads the key for it, which begin_key is.
+         * The frame is left where it was. In the driver the reload after the
+         * arm loads the idle key; this deferred form, reached after the
+         * advance, does that reload itself.
          */
         if (vw->state == Q2_VM_FIRE) {
+            const q2_vm_clip *fire_clip = current_clip(vw);
+
             vw->state      = Q2_VM_IDLE;
             vw->spin_accum = 0;
-            begin_key(vw);
+            reload_key(vw, fire_clip, vw->frame);
             interpolate(vw);
         }
         break;
@@ -831,110 +1062,51 @@ void q2_vw_hand_grenade_expired(q2_viewweapon *vw)
     vw->anim_end        = -1;
     vw->anim_flags      = (u16)((vw->anim_flags | 1u) & ~2u);
     vw->cook            = false;
-    vw->hand_prev_anim  = 0;
+    vw->hand_prev_anim       = 0;              /* 0x8004AA28 */
+    vw->hand_live       = false;
     vw->hand_cook_ticks = 0;
     vw->hand_release    = false;
     vw->frame_sound     = -1;
 }
 
 /*
- * Returns true when the model in hand changed. `clip_done` is the original's
- * `clip_start + 20*frame == clip_end`, i.e. the frame index has walked off the
- * end of the clip.
+ * The held grenade's think, PrimaryGrenadeActive 0x8004A368, in its held state
+ * (0x8004A414…0x8004A544) — run once per frame after the driver, as the
+ * console's entity pass runs it after the player's. The fuse, the copy of the
+ * weapon's position and the throw itself belong to the port's own grenade;
+ * what is here is everything the think reads off and writes back to this
+ * record.
  */
-static bool machine_step(q2_viewweapon *vw, bool clip_done, bool fire_held,
-                         q2_vw_fire_result fired)
+static void hand_grenade_think(q2_viewweapon *vw, s32 dt)
 {
-    bool swapped = false;
+    s32 pos = vw->anim_pos;
 
-    /* Every pass rewrites the result: 0x8004FA58, 0x8004FAB0 and 0x8004FC40
-     * all store into it, and only the idle arm stores anything but zero. */
-    vw->result = 0;
+    if (!vw->hand_live)
+        return;
 
-    switch (vw->state) {
-    case Q2_VM_LOWER:
-        if (!clip_done)
-            break;
+    /* 0x8004A42C: at the cook position the charge (+76) grows by dt*6. */
+    if (pos == Q2_VW_COOK_POSITION)
+        vw->hand_cook_ticks += dt;
 
-        /*
-         * 0x8004F944. The countdown gates the swap: while it runs the frame is
-         * rewound by one and the weapon hangs at the bottom of its arc. Only
-         * when it expires does the pending weapon become the real one.
-         */
-        if (vw->switch_ticks > 0) {
-            if (vw->frame > 0)
-                vw->frame--;
-            break;
-        }
+    /* 0x8004A474: the prime sample, wep_hgrenc1b. */
+    if (pos >= Q2_VW_HAND_PRIME_POSITION &&
+        vw->hand_prev_anim < Q2_VW_HAND_PRIME_POSITION)
+        vw->frame_sound = Q2_WSND_HANDGREN_PRIME;
 
-        vw->weapon     = vw->pending;
-        vw->state      = Q2_VM_RAISE;
-        vw->frame      = 0;
-        vw->fire_latch = false;
-        swapped        = true;
-        /*
-         * 0x8004FA44. A new model in the hands starts at position 0 of its own
-         * timeline — the rest pose — with nothing playing. (0x8004FA3C is the
-         * hyperblaster's exception, and it stores the PLAYER INDEX times ten,
-         * which is zero for the only player this port draws a weapon for.)
-         */
-        vw->anim_pos   = 0;
-        vw->anim_end   = -1;
-        vw->anim_flags = 0;
-        begin_key(vw);
-        break;
-
-    case Q2_VM_RAISE:
-        /* 0x8004FA80: the raise ends in IDLE, and that is where the fire
-         * function is bound for the weapon now in hand. */
-        if (clip_done) {
-            vw->state = Q2_VM_IDLE;
-            vw->frame = 0;
-            begin_key(vw);
-        }
-        break;
-
-    case Q2_VM_FIRE:
-        /*
-         * 0x8004FC04: the fire clip always returns to idle — and it does NOT
-         * clear the latch. That omission is the refire cadence: the shot stays
-         * latched into the idle state, and it takes one further pass through
-         * the fire check to clear it, so a held trigger fires, idles for one
-         * pass, and fires again rather than restarting the clip every tick.
-         */
-        if (clip_done) {
-            vw->state = Q2_VM_IDLE;
-            vw->frame = 0;
-            begin_key(vw);
-        }
-        break;
-
-    case Q2_VM_IDLE:
-    default:
-        q2_vw_idle_fire_check(vw, fire_held, fired);
-        if (vw->state == Q2_VM_IDLE && clip_done) {
-            /* 0x8004FBD8: idle loops. */
-            vw->frame = 0;
-            begin_key(vw);
-        }
-        break;
+    /* 0x8004A4A8…0x8004A4D0: thrown — state 2, and this think ends. */
+    if (pos >= Q2_VW_HAND_RELEASE_POSITION &&
+        vw->hand_prev_anim < Q2_VW_HAND_RELEASE_POSITION) {
+        vw->hand_release = true;
+        vw->frame_sound  = Q2_WSND_HANDGREN_THROW;
+        vw->hand_live    = false;
     }
 
-    /*
-     * 0x8004FAB4. A selection that differs from what is in hand starts the
-     * lower, from any state except the one already firing — which is why you
-     * cannot cancel a shot by switching.
-     */
-    if (!swapped && vw->pending != vw->weapon &&
-        vw->state != Q2_VM_FIRE && vw->state != Q2_VM_LOWER) {
-        vw->state = Q2_VM_LOWER;
-        vw->frame = 0;
-        begin_key(vw);
-    }
-
-    return swapped;
+    vw->hand_prev_anim = (s16)(pos - 1);              /* 0x8004A534…0x8004A544 */
 }
 
+/* ------------------------------------------------------------------------- */
+/* The driver — 0x8004EE0C                                                    */
+/* ------------------------------------------------------------------------- */
 bool q2_vw_advance(q2_viewweapon *vw, s32 dt, bool fire_held,
                    q2_vw_fire_result fired)
 {
@@ -945,105 +1117,108 @@ bool q2_vw_advance_firing(q2_viewweapon *vw, s32 dt, bool fire_held,
                           q2_vw_fire_result fired, q2_vw_fire_fn fire,
                           void *user)
 {
+    vw_fire_ctx cx;
     bool swapped = false;
     int guard = 0;
+    s32 frame_dt = dt;
 
     if (!vw || !vw->tab)
         return false;
 
-    if (vw->switch_ticks > 0) {
+    /*
+     * The caller's report answers the idle arm's FIRST ask, and only when the
+     * call begins where that ask is certain: idle, unlatched, nothing pending,
+     * trigger down. The state machine is the first thing every substep runs
+     * (0x8004EEFC), so in exactly that state the first substep's pass reaches
+     * the `jalr` at 0x8004FB30 before anything else in the call has moved —
+     * a caller that fires on `q2_vw_wants_fire` has made the console's call at
+     * the console's moment. Every later ask in the same call goes to `fire`.
+     */
+    cx.held        = fire_held;
+    cx.fired       = fired;
+    cx.precomputed = fire_held && fired != Q2_VW_FIRE_ASK &&
+                     q2_vw_wants_fire(vw);
+    cx.fire        = fire;
+    cx.user        = user;
+    cx.dry_seen    = false;
+
+    /* The cycle routine's half (0x8004ED44…0x8004ED70), which the console
+     * runs before the driver on every frame that does not arm it. */
+    if (vw->switch_armed) {
+        vw->switch_armed = false;
+    } else if (vw->switch_ticks > 0) {
         vw->switch_ticks = (s16)(vw->switch_ticks - dt);
         if (vw->switch_ticks < 0)
             vw->switch_ticks = 0;
     }
 
     /*
-     * 0x8004EEA4. The original consumes dt in chunks of `min(left, dt)` and
-     * loops, so a long host frame plays a short clip all the way through
-     * instead of skipping it — which matters because the events on those keys
-     * are what fire the shot.
+     * 0x8004EEA4…0x8004F278, one iteration per substep, in this order:
      *
-     * The guard is a port's own: the original cannot spin here because every
-     * clip has at least one key with a non-zero duration, but a mis-read table
-     * could, and hanging is a worse failure than a stalled animation.
+     *   step = min(left, dt); left -= step        0x8004EEAC / 0x8004EED0
+     *   the state machine's pass                  0x8004EEFC  (0x8004F87C)
+     *   dt -= step, or 0 if it raised the halt    0x8004EF10 / 0x8004EF14
+     *   the model's named move                    0x8004EF38  (0x80050454)
+     *   the per-weapon frame driver               0x8004EF4C  (0x8004FEE8)
+     *   the key reload, if frame or state moved   0x8004EF5C…0x8004F264
+     *   the hyperblaster's barrel                 0x8004F270  (0x8004FC78)
      *
-     * The first substep's state-machine pass clears the result; each later
-     * substep's pass is the machine_step that ended the one before it. With no
-     * substep at all the console returns the stale global (0x8004EE9C skips
-     * straight to the `lh` at 0x8004F6D4), so the value is left alone.
+     * So the machine runs on EVERY substep, not only at key boundaries: the
+     * frame advances inside the pass when the key's clock is spent, and the
+     * idle arm's trigger test — and its fire call — happens on the first
+     * substep of the call, before the step has done anything but shorten the
+     * key. Every write the port makes falls in that order now; the
+     * restructured loop it replaced ran the machine after the drivers, only at
+     * key boundaries, plus an idle check and a selection test after the loop.
+     *
+     * The guard is a port's own. The console has two configurations that
+     * would spin here forever: an idle clip of a single key whose clock is
+     * spent (the pass rewinds the frame to the key it was on, so nothing
+     * reloads and the step stays zero), and a dry trigger held with nothing
+     * to switch to. The retail bank has no one-key clip and 0x800506C4 always
+     * finds the blaster, so neither arises on the console; here a substep that
+     * leaves everything as it found it reloads its key instead of repeating.
      */
-    if (dt > 0)
-        vw->result = 0;
+    vw->substeps = 0;
     while (dt > 0 && guard++ < 512) {
-        s32 step = dt;
+        const q2_vm_clip *clip = current_clip(vw);       /* s4, 0x8004EEE0 */
+        const q2_vm_key  *k;
+        u32         old_frame   = vw->frame;              /* s1, 0x8004EEC8 */
+        q2_vm_state old_state   = vw->state;              /* s2, 0x8004EEC0 */
+        bool        old_latch   = vw->fire_latch;
+        int         old_pending = vw->pending;
+        s32         old_accum   = vw->spin_accum;
+        s32         step        = (vw->left < dt) ? vw->left : dt;
+        bool        halt;
 
-        if (vw->total > 0 && vw->left < step)
-            step = vw->left;
         if (step < 0)
             step = 0;
-
         vw->left -= step;
-        dt       -= step;
+        vw->substeps++;
 
-        /*
-         * Two drivers per substep, in the original's order: the MODEL's own
-         * named move at 0x8004EF38, then the per-weapon frame driver at
-         * 0x8004EF4C. The order is load-bearing — the grenade's cook arm pins
-         * the animation position the move driver has just advanced, so running
-         * them the other way round un-pins it every substep.
-         */
-        anim_step(vw, step);
-        fire_state_step(vw, step, fire_held, fire, user);
+        halt = machine_pass(vw, clip, &cx, &swapped);
+        dt -= step;
+        if (halt)
+            dt = 0;
+
+        k = clip_key(clip, vw->frame);
+        anim_step(vw, step, k ? k->event : (s16)Q2_VM_EVENT_NONE);
+        fire_state_step(vw, step, &cx);
+
+        if (vw->frame != old_frame || vw->state != old_state)
+            reload_key(vw, clip, old_frame);
+        else if (step == 0 && !halt && vw->fire_latch == old_latch &&
+                 vw->pending == old_pending && vw->spin_accum == old_accum)
+            reload_key(vw, clip, old_frame);   /* the port's guard, above */
+
         hyper_ramp_step(vw);
-
-        interpolate(vw);
-
-        if (vw->left > 0)
-            break;
-
-        /* The key is spent: advance, and let the machine see whether that ran
-         * off the end of the clip. */
-        vw->frame++;
-        vw->keys_played++;
-
-        {
-            u32 len = clip_length(vw, vw->state);
-            bool done = (vw->frame >= len);
-
-            if (machine_step(vw, done, fire_held, fired))
-                swapped = true;
-            else if (done && vw->state != Q2_VM_LOWER)
-                vw->frame = 0;
-        }
-
-        begin_key(vw);
-        interpolate(vw);
-
-        if (vw->total <= 0 && dt > 0) {
-            /* A zero-length key would otherwise consume no time and spin. */
-            continue;
-        }
     }
 
-    /*
-     * The trigger is tested every tick, not every key boundary (0x8004FAF4), so
-     * a press between two keys still fires on the tick it arrived.
-     */
-    if (vw->state == Q2_VM_IDLE) {
-        q2_vw_idle_fire_check(vw, fire_held, fired);
-        if (vw->state == Q2_VM_FIRE)
-            interpolate(vw);
-    }
+    /* 0x8004F280: the display value, which runs even when dt was zero and no
+     * substep did (0x8004EE9C branches straight here). */
+    interpolate(vw);
 
-    /* And a selection change likewise. */
-    if (vw->pending != vw->weapon &&
-        vw->state != Q2_VM_FIRE && vw->state != Q2_VM_LOWER) {
-        vw->state = Q2_VM_LOWER;
-        vw->frame = 0;
-        begin_key(vw);
-        interpolate(vw);
-    }
-
+    hand_grenade_think(vw, frame_dt);
     return swapped;
 }
 

@@ -157,6 +157,18 @@ if(TARGET q2psx)
     add_dependencies(test_client_zones q2psx)
     add_test(NAME zones_client COMMAND test_client_zones)
 
+    # The client's level VRAM against the console's own load (vram_reference.h).
+    # Skips without a disc; run as `test_vram_native --headless <disc.cue>`.
+    add_executable(test_vram_native test_vram_native.c ${client_extra_sources})
+    target_link_libraries(test_vram_native PRIVATE ${split_client_libraries})
+    add_dependencies(test_vram_native q2psx)
+    add_test(NAME vram_native COMMAND test_vram_native)
+
+    add_executable(test_client_levelbin test_client_levelbin.c ${client_extra_sources})
+    target_link_libraries(test_client_levelbin PRIVATE ${split_client_libraries})
+    add_dependencies(test_client_levelbin q2psx)
+    add_test(NAME levelbin_client COMMAND test_client_levelbin)
+
     add_executable(test_client_memory test_client_memory.c ${client_extra_sources})
     target_link_libraries(test_client_memory PRIVATE ${split_client_libraries})
     add_dependencies(test_client_memory q2psx)

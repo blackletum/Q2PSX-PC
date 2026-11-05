@@ -2582,8 +2582,14 @@ static void test_disc_security_lasers(const char *disc_path, const char *output)
         client_input_simulated(c, 1.0f / 30.0f);
     printf("SECURITY fixed frames: clock %d, ticks %u, mask %06X\n",
         c->sim[0].level_time, c->sim[0].tick_count, security_laser_mask(c));
-    CHECK(c->sim[0].level_time == 300 && c->sim[0].tick_count == 15);
-    CHECK(security_laser_mask(c) == 0x104000u);
+    /* Thirty 1/30 s frames reach clock 300 in 15 PAL ticks and 30 NTSC ones
+     * (the step the build's frame delta allows); the course picks its side
+     * from the tick's parity (`odd`), so the two discs end on opposite sides
+     * at the same clock. */
+    CHECK(c->sim[0].level_time == 300 &&
+          c->sim[0].tick_count == (c->sim[0].frame_dt >= 12 ? 15u : 30u));
+    CHECK(security_laser_mask(c) ==
+          ((c->sim[0].tick_count & 1u) ? 0x104000u : 0x440000u));
     close_client(c);
 }
 

@@ -15,6 +15,7 @@
  * is unambiguous. That is deliberate: a test that used the real bank would be
  * testing the disc as much as the code.
  */
+#include "random.h"
 #include "trig.h"
 #include "viewweapon.h"
 
@@ -833,11 +834,13 @@ static void test_grenade_cook_waits_for_the_arm(void)
     q2_viewweapon vw;
     s32 before;
 
-    /* Grenade3 compares current and previous model positions: 261 primes once
-     * and 411 throws once. */
+    /* The held grenade's think (0x8004A368) compares the position with its
+     * mark, +740, which it leaves at the position minus one: 261 primes and
+     * 411 throws. */
     park_in_fire(&vw, 6, 0);
+    CHECK(vw.hand_live, "a hand grenade that fired is held by its think");
     vw.hand_prev_anim = Q2_VW_HAND_PRIME_POSITION - 1;
-    vw.anim_pos       = Q2_VW_HAND_PRIME_POSITION;
+    vw.anim_pos  = Q2_VW_HAND_PRIME_POSITION;
     q2_vw_advance(&vw, 1, false, Q2_VW_FIRE_NONE);
     CHECK(q2_vw_take_frame_sound(&vw) == Q2_WSND_HANDGREN_PRIME,
           "crossing 261 plays the hand-grenade prime sample");
@@ -854,7 +857,8 @@ static void test_grenade_cook_waits_for_the_arm(void)
           (int)before);
 
     park_in_fire(&vw, 6, 0);
-    vw.anim_pos = Q2_VW_COOK_POSITION;
+    vw.anim_pos  = Q2_VW_COOK_POSITION;
+    vw.hand_prev_anim = Q2_VW_COOK_POSITION - 1;
     before = vw.left;
     q2_vw_advance(&vw, 10, true, Q2_VW_FIRE_NONE);
     CHECK(vw.cook, "at 380 the grenade primes");
@@ -865,7 +869,10 @@ static void test_grenade_cook_waits_for_the_arm(void)
     CHECK(vw.anim_pos == Q2_VW_COOK_POSITION,
           "the arm holds where it is, at %d", (int)vw.anim_pos);
     CHECK(q2_vw_take_hand_grenade_cook(&vw) == 10,
-          "the held entity receives the same ten cook ticks");
+          "the held entity receives the frame's ten cook ticks");
+    CHECK(vw.hand_prev_anim == Q2_VW_COOK_POSITION - 1,
+          "and leaves its mark at 379, so the hold continues: %d",
+          (int)vw.hand_prev_anim);
     CHECK(q2_vw_take_hand_grenade_cook(&vw) == 0,
           "cook time drains rather than being counted twice");
 
@@ -873,7 +880,7 @@ static void test_grenade_cook_waits_for_the_arm(void)
     q2_vw_advance(&vw, 10, false, Q2_VW_FIRE_NONE);
     CHECK(!vw.cook, "releasing the trigger lets the throw animation continue");
     vw.hand_prev_anim = Q2_VW_HAND_RELEASE_POSITION - 1;
-    vw.anim_pos       = Q2_VW_HAND_RELEASE_POSITION;
+    vw.anim_pos  = Q2_VW_HAND_RELEASE_POSITION;
     q2_vw_advance(&vw, 1, false, Q2_VW_FIRE_NONE);
     CHECK(q2_vw_take_hand_grenade_release(&vw),
           "crossing 411 releases Grenade3");
@@ -881,6 +888,17 @@ static void test_grenade_cook_waits_for_the_arm(void)
           "the release crossing is a drained one-shot");
     CHECK(q2_vw_take_frame_sound(&vw) == Q2_WSND_HANDGREN_THROW,
           "and crossing 411 plays the throw sample");
+    CHECK(!vw.hand_live, "and the thrown grenade no longer thinks as held");
+
+    /* 0x80050404: a trigger pressed again after the arm has passed 380 does
+     * not drag it back — the mark is past the cook position. */
+    park_in_fire(&vw, 6, 0);
+    vw.anim_pos  = Q2_VW_COOK_POSITION + 10;
+    vw.hand_prev_anim = Q2_VW_COOK_POSITION + 9;
+    q2_vw_advance(&vw, 10, true, Q2_VW_FIRE_NONE);
+    CHECK(!vw.cook && vw.anim_pos == Q2_VW_COOK_POSITION + 10,
+          "a re-press past the cook position does not re-pin: cook %d at %d",
+          (int)vw.cook, (int)vw.anim_pos);
 
     /* A fuse that reaches zero while held takes the forced-reset arm at
      * 0x8004AA1C rather than playing the throw tail. */
@@ -902,6 +920,8 @@ static void test_grenade_cook_waits_for_the_arm(void)
     CHECK(!vw.cook && q2_vw_take_hand_grenade_cook(&vw) == 0 &&
           !q2_vw_take_hand_grenade_release(&vw),
           "with no stale cook or release output");
+    CHECK(vw.hand_prev_anim == 0 && !vw.hand_live,
+          "and the mark cleared (0x8004AA28)");
     CHECK(q2_vw_take_frame_sound(&vw) == -1,
           "and no throw sound after an in-hand detonation");
 }
@@ -1225,10 +1245,307 @@ static void test_driver_result(void)
           q2_vw_result(&vw), (int)vw.state);
 }
 
+/* ------------------------------------------------------------------------- */
+/* THE NATIVE DRIVER, CALL FOR CALL                                           */
+/* ------------------------------------------------------------------------- */
+/*
+ * tests/fixtures/generate_viewweapon_driver_reference.py executes the PAL and
+ * US driver 0x8004EE0C — its substep loop, the state machine 0x8004F87C, the
+ * frame driver 0x8004FEE8, the key reload, the barrel ramp and the dry pass's
+ * auto-select 0x800506C4 — over a synthetic bank with the retail key counts,
+ * fire functions scripted to answer 1, 0 or 2. Every call below is one native
+ * call: the same dt, trigger and selection, the same scripted answers in the
+ * same order, and the auto-select answered with what the native one chose.
+ *
+ * Each fire call is checked where it happens — which substep, which arm, and
+ * the state, frame and clock it sees — and each call's end state against the
+ * native record: state, frame, both halves of the key clock, the latch, the
+ * accumulator, the chaingun rate and cache, the returned word, all six base
+ * halfwords and the display value, the barrel, the rand() state, the sound the
+ * frame driver last played, the quad's sound, and the swap.
+ *
+ * The second pass drives the same sequences the way the client does: fire on
+ * `q2_vw_wants_fire` BEFORE the advance and hand the report in, callback for
+ * every other ask. It must end every call in the same state.
+ */
+#include "fixtures/viewweapon_driver_reference.h"
+
+#define NAT_KEY_COUNT (sizeof(native_vw_keys) / sizeof(native_vw_keys[0]))
+
+static q2_vm_key    g_nat_keys[NAT_KEY_COUNT];
+static q2_vm_tables g_nat;
+
+static void build_native_bank(void)
+{
+    size_t i;
+    int w, s, k;
+
+    memset(&g_nat, 0, sizeof(g_nat));
+    for (i = 0; i < NAT_KEY_COUNT; i++) {
+        for (k = 0; k < 3; k++) {
+            g_nat_keys[i].r[k] = native_vw_keys[i][k];
+            g_nat_keys[i].t[k] = native_vw_keys[i][3 + k];
+        }
+        g_nat_keys[i].duration = native_vw_keys[i][6];
+        g_nat_keys[i].jitter   = native_vw_keys[i][7];
+        g_nat_keys[i].event    = native_vw_keys[i][8];
+    }
+    for (w = 0; w < Q2_VM_SLOTS; w++) {
+        for (s = 0; s < Q2_VM_STATES; s++) {
+            g_nat.clip[w][s].count = (u32)native_vw_clips[w][s][1];
+            g_nat.clip[w][s].key   = &g_nat_keys[native_vw_clips[w][s][0]];
+        }
+        snprintf(g_nat.model_name[w], sizeof(g_nat.model_name[w]),
+                 "Weapon %d", w);
+    }
+}
+
+/* One fake model per weapon, carrying the single move 0x80050454 asks it for
+ * (native_vw_moves, block-D units: the port scales by five where the
+ * loader's 0x8006C214 does). */
+static u8       g_nat_model_bytes[Q2_VM_SLOTS][64];
+static q2_model g_nat_models[Q2_VM_SLOTS];
+
+static void build_native_models(void)
+{
+    static const char *names[Q2_VM_SLOTS] = {
+        [3] = "Fire", [6] = "Set", [7] = "Spin", [8] = "Fire", [11] = "Fire"
+    };
+    int w;
+
+    memset(g_nat_model_bytes, 0, sizeof(g_nat_model_bytes));
+    memset(g_nat_models, 0, sizeof(g_nat_models));
+    for (w = 0; w < Q2_VM_SLOTS; w++) {
+        u8 *p = g_nat_model_bytes[w];
+
+        g_nat_models[w].base = p;
+        g_nat_models[w].size = sizeof(g_nat_model_bytes[w]);
+        if (!names[w])
+            continue;
+        g_nat_models[w].hdr.ofs_block_d = 4;
+        memcpy(p + 4, names[w], strlen(names[w]));
+        p[4 + 12] = (u8)native_vw_moves[w][0];
+        p[4 + 13] = (u8)(native_vw_moves[w][0] >> 8);
+        p[4 + 14] = (u8)native_vw_moves[w][1];
+        p[4 + 15] = (u8)(native_vw_moves[w][1] >> 8);
+        p[4 + 18] = 1;
+    }
+}
+
+typedef struct nat_ctx {
+    q2_viewweapon            *vw;
+    const native_vw_sequence *seq;
+    const native_vw_call     *call;
+    int                       cursor;    /* the script, shared by every arm */
+    int                       fires;     /* fire calls made in this call     */
+    int                       selects;   /* auto-selects made in this call   */
+    bool                      loose;     /* the precomputed pass             */
+    int                       seq_index, call_index;
+} nat_ctx;
+
+static int g_nat_reports;
+
+#define NAT_FAIL(cx, ...)                                                     \
+    do {                                                                      \
+        g_fail++;                                                             \
+        if (g_nat_reports++ < 24) {                                           \
+            printf("FAIL native driver %s seq %d call %d: ",                  \
+                   (cx)->loose ? "(precomputed)" : "", (cx)->seq_index,       \
+                   (cx)->call_index);                                         \
+            printf(__VA_ARGS__);                                              \
+            printf("\n");                                                     \
+        }                                                                     \
+    } while (0)
+
+static q2_vw_fire_result nat_fire(void *user, int weapon, int rounds)
+{
+    nat_ctx *cx = user;
+    const q2_viewweapon *vw = cx->vw;
+    int answer = cx->seq->script[cx->cursor++ % cx->seq->script_len];
+    int site = vw->state == Q2_VM_IDLE ? 0 :
+               weapon == 4 ? 1 : weapon == 5 ? 2 : weapon == 9 ? 3 : -1;
+
+    if (cx->fires >= cx->call->fire_count) {
+        NAT_FAIL(cx, "an extra fire call (site %d, frame %u)", site, vw->frame);
+    } else {
+        const int *f = native_vw_fires[cx->call->fire_first + cx->fires];
+        bool same = site == f[1] && rounds == f[5] && answer == f[6];
+
+        if (!cx->loose)
+            same = same && (int)vw->substeps == f[0] &&
+                   (int)vw->state == f[2] && (int)vw->frame == f[3] &&
+                   vw->left == f[4];
+        if (!same)
+            NAT_FAIL(cx, "fire %d: substep %u site %d state %d frame %u left %d "
+                     "rounds %d answer %d; native %d %d %d %d %d %d %d",
+                     cx->fires, vw->substeps, site, (int)vw->state, vw->frame,
+                     (int)vw->left, rounds, answer, f[0], f[1], f[2], f[3],
+                     f[4], f[5], f[6]);
+    }
+    cx->fires++;
+    return answer == 1 ? Q2_VW_FIRED :
+           answer == 0 ? Q2_VW_FIRE_FAILED : Q2_VW_FIRE_DENIED;
+}
+
+static int nat_select(void *user, int weapon)
+{
+    nat_ctx *cx = user;
+
+    (void)weapon;
+    if (cx->selects >= cx->call->select_count) {
+        NAT_FAIL(cx, "an extra dry pass");
+        cx->selects++;
+        return -1;
+    }
+    return native_vw_selects[cx->call->select_first + cx->selects++];
+}
+
+static int nat_sound(s16 snd)
+{
+    return snd == Q2_WSND_CHAINGUN_UP ? 1 : snd == Q2_WSND_CHAINGUN_LOOP ? 2 :
+           snd == Q2_WSND_CHAINGUN_DOWN ? 3 :
+           snd == Q2_WSND_HYPERBLAST_DOWN ? 4 : snd < 0 ? 0 : 99;
+}
+
+static void nat_compare(nat_ctx *cx, q2_viewweapon *vw, bool swapped)
+{
+    const native_vw_call *c = cx->call;
+    int got[24], want[24], i, n = 0;
+    s16 snd = q2_vw_take_frame_sound(vw);
+    static const char *names[24] = {
+        "weapon", "selection", "state", "frame", "total", "left", "latch",
+        "accum", "rate", "cache", "result", "countdown", "ramp", "sound",
+        "quad", "swap", "move position", "move flags", "move end", "mark",
+        "cook charge", "release", "held grenade"
+    };
+
+    got[n] = vw->weapon;                  want[n++] = c->weapon;
+    got[n] = vw->pending;                 want[n++] = c->pending;
+    got[n] = (int)vw->state;              want[n++] = c->state;
+    got[n] = (int)vw->frame;              want[n++] = c->frame;
+    got[n] = vw->total;                   want[n++] = c->total;
+    got[n] = vw->left;                    want[n++] = c->left;
+    got[n] = vw->fire_latch;              want[n++] = c->latch;
+    got[n] = vw->spin_accum;              want[n++] = c->accum;
+    got[n] = vw->spin_rate;               want[n++] = c->rate;
+    got[n] = vw->last_fire_frame;         want[n++] = c->cache;
+    got[n] = q2_vw_result(vw);            want[n++] = c->result;
+    got[n] = vw->switch_ticks;            want[n++] = c->countdown > 0 ? c->countdown : 0;
+    got[n] = vw->hyper_ramp;              want[n++] = c->ramp;
+    /* The frame driver's sound, or the held grenade's prime; a throw's own
+     * sample is the port's (the console's lives in the flight branch, which
+     * the fixture does not execute), so it stands in for whatever came
+     * before it. */
+    if (c->released && snd == Q2_WSND_HANDGREN_THROW) {
+        got[n] = 0;                       want[n++] = 0;
+    } else {
+        got[n] = snd == Q2_WSND_HANDGREN_PRIME ? 5 : nat_sound(snd);
+        want[n++] = c->sound ? c->sound : c->primes ? 5 : 0;
+    }
+    got[n] = q2_vw_take_quad_sound(vw);   want[n++] = c->quad > 0;
+    got[n] = swapped;                     want[n++] = c->models > 0;
+    got[n] = vw->anim_pos;                want[n++] = c->anim_pos;
+    got[n] = vw->anim_flags;              want[n++] = c->anim_flags;
+    got[n] = vw->anim_end;                want[n++] = c->move_end;
+    got[n] = vw->hand_prev_anim;               want[n++] = c->mark;
+    got[n] = q2_vw_take_hand_grenade_cook(vw) * 6; want[n++] = c->charge;
+    got[n] = q2_vw_take_hand_grenade_release(vw);  want[n++] = c->released;
+    got[n] = vw->hand_live;               want[n++] = c->live;
+
+    for (i = 0; i < n; i++)
+        if (got[i] != want[i])
+            NAT_FAIL(cx, "%s %d, native %d", names[i], got[i], want[i]);
+
+    for (i = 0; i < 3; i++) {
+        if (vw->from_r[i] != c->base[i] || vw->from_t[i] != c->base[3 + i])
+            NAT_FAIL(cx, "base %d: r %d t %d, native %d %d", i, vw->from_r[i],
+                     vw->from_t[i], c->base[i], c->base[3 + i]);
+        if (vw->cur_r[i] != c->display[i] || vw->cur_t[i] != c->display[3 + i])
+            NAT_FAIL(cx, "display %d: r %d t %d, native %d %d", i,
+                     vw->cur_r[i], vw->cur_t[i], c->display[i],
+                     c->display[3 + i]);
+    }
+    if (q2_random_state() != c->rng)
+        NAT_FAIL(cx, "rand state %u, native %u", q2_random_state(), c->rng);
+    if (!cx->loose && (int)vw->substeps != c->substeps)
+        NAT_FAIL(cx, "%u substeps, native %d", vw->substeps, c->substeps);
+    if (cx->fires != c->fire_count)
+        NAT_FAIL(cx, "%d fire calls, native %d", cx->fires, c->fire_count);
+    if (cx->selects != c->select_count)
+        NAT_FAIL(cx, "%d dry passes, native %d", cx->selects, c->select_count);
+    if (q2_vw_take_refire(vw) != (c->select_count > 0))
+        NAT_FAIL(cx, "refire disagrees with %d dry passes", c->select_count);
+}
+
+static void run_native_sequences(bool precomputed)
+{
+    size_t si;
+    u32 calls = 0, fires = 0;
+
+    for (si = 0; si < sizeof(native_vw_sequences) / sizeof(native_vw_sequences[0]); si++) {
+        const native_vw_sequence *seq = &native_vw_sequences[si];
+        q2_viewweapon vw;
+        nat_ctx cx;
+        int ci;
+
+        memset(&cx, 0, sizeof(cx));
+        cx.vw = &vw;
+        cx.seq = seq;
+        cx.loose = precomputed;
+        cx.seq_index = (int)si;
+
+        q2_vw_init(&vw, &g_nat, seq->weapon);
+        q2_vw_set_model(&vw, &g_nat_models[seq->weapon]);
+        vw.auto_select = nat_select;
+        vw.quad_active = seq->quad != 0;
+        q2_random_seed(seq->seed);
+
+        for (ci = 0; ci < seq->count; ci++) {
+            const native_vw_call *c = &native_vw_calls[seq->first + ci];
+            q2_vw_fire_result report = Q2_VW_FIRE_ASK;
+            bool swapped;
+
+            cx.call = c;
+            cx.call_index = ci;
+            cx.fires = 0;
+            cx.selects = 0;
+            if (c->select >= 0)
+                q2_vw_select(&vw, c->select);
+            if (precomputed) {
+                /* The client's shape: client_advance_view_weapon fires on
+                 * q2_vw_wants_fire before the advance and passes NONE when it
+                 * did not. */
+                report = Q2_VW_FIRE_NONE;
+                if (c->held && q2_vw_wants_fire(&vw))
+                    report = nat_fire(&cx, vw.weapon, 1);
+            }
+            swapped = q2_vw_advance_firing(&vw, c->dt, c->held != 0, report,
+                                            nat_fire, &cx);
+            /* 0x8004FA0C binds the new model inside the swap; the port's
+             * caller binds it after the advance that reports one. */
+            if (swapped)
+                q2_vw_set_model(&vw, &g_nat_models[vw.weapon]);
+            nat_compare(&cx, &vw, swapped);
+            calls++;
+            fires += (u32)cx.fires;
+        }
+    }
+    printf("native driver%s: %u calls, %u fire calls compared against "
+           "0x8004EE0C\n", precomputed ? " (precomputed report)" : "",
+           calls, fires);
+    CHECK(fires == (u32)NATIVE_VW_FIRES,
+          "%u fire calls made against the native fixture's %d", fires,
+          NATIVE_VW_FIRES);
+}
+
 int main(void)
 {
     build_bank();
     build_driver_bank();
+    build_native_bank();
+    build_native_models();
+    run_native_sequences(false);
+    run_native_sequences(true);
 
     test_raise_to_idle();
     test_fire();

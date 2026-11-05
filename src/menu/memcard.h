@@ -34,16 +34,38 @@
  * mode flag at `0x800B32A2`. From then on that function runs per frame.
  *
  * It reads a state from a function pointer at `0x800B3234`, subtracts one, and
- * dispatches through a **19-entry jump table at `0x800AB734`**. Fourteen of the
- * nineteen entries land on the common exit at `0x8001F7F8`, so five states have
+ * dispatches through a **19-entry jump table at `0x800AB734`**. Thirteen of the
+ * nineteen entries land on the common exit at `0x8001F7F8`, so six states have
  * behaviour of their own:
  *
- *     3   `0x8001F140`  a LIST: hands the chosen row to the card code
- *     5   `0x8001F790`  a two-way choice: item 1 -> state 6, item 0 -> state 1
- *    13   `0x8001F19C`  formats the cheat-level name into the screen's text
+ *     3   `0x8001F140`  the CARD list: the chosen row -> SetActiveCard, then 4
+ *     5   `0x8001F790`  NOT FORMATTED: YES (row 1) -> 6, NO (row 0) -> 1
+ *    13   `0x8001F19C`  the FILE window: composes the highlighted file's
+ *                       RESUPPLIES / DIFFICULTY / CHEATS lines every frame;
+ *                       the chosen row -> SetActiveFile, then 21 on a load,
+ *                       22 for NEW FILE on a save, 19 for any other save row
  *    14   `0x8001F0A4`  accept: applies the game variables and leaves
  *    16   `0x8001F0A4`  the same arm as 14
- *    19   `0x8001F718`  a two-way choice: item 1 -> state 20
+ *    19   `0x8001F718`  OVERWRITE?: YES (row 1) -> 20, NO (row 0) -> 13
+ *
+ * ---------------------------------------------------------------------------
+ * The state IS the screen — MemoryCardSetStatus, 0x80082720
+ * ---------------------------------------------------------------------------
+ * `0x800B3234` is engine+0x250, MemoryCardGetStatus (0x80082710, MEMCARD.C),
+ * which returns the word at 0x800E82BC. Its only writer outside init is
+ * MemoryCardSetStatus (0x80082720) and the copies of it MemoryCardUpdate2
+ * inlines, and every one of them is the same three instructions: store the
+ * status, then call engine+0x278 — InGame_PrintMemCardMessage (0x8001E3D4) —
+ * WITH THAT SAME NUMBER (0x80082774..0x80082788; the inlined copies are the
+ * `addu v0, a0, zero` / `jalr v1` / `sw v0, 12(...)` triples at 0x80081350,
+ * 0x80081384 ... 0x800826B8). The one place a message is printed without a
+ * status store is 0x80081F44, which re-prints message 3 while the status is
+ * already 3 — the card list redrawn after a card is pulled or inserted.
+ *
+ * So the nine table installers are all arms of ONE function, and which screen
+ * a state shows is that function's 22-entry jump table at 0x800AB6DC, indexed
+ * by `status - 1` (0x8001E4A4..0x8001E4D0). `q2_mcard_screen_for_state` is
+ * that table; `q2_mcard_compose` is the text each arm writes over it.
  *
  * ---------------------------------------------------------------------------
  * How an item fires — and it is the release, on both pads
@@ -142,17 +164,59 @@ const char *q2_mcard_screen_name(q2_mcard_screen s);
 /* The states                                                                 */
 /* ------------------------------------------------------------------------- */
 /*
- * The original's own numbering, so a host that wants to match it can. Only the
- * six with an arm of their own are named; the rest fall through to the common
- * exit and are left as numbers rather than given invented meanings.
+ * The original's own numbering — MEMCARD.C's status word, which is also the
+ * message number InGame_PrintMemCardMessage switches on. What each one SHOWS
+ * is read off that function's arms (0x800AB6DC):
+ *
+ *    1  LOAD MESSAGE  "CHECKING FOR" / "MEMORY CARDS"          0x8001E52C
+ *    2  LOAD MESSAGE  "NO MEMORY" / "CARDS FOUND"              0x8001E844
+ *    3  SELECT SLOT   + one row per card at y = 100 + 16i      0x8001E5E0
+ *    4  LOAD MESSAGE  "CHECKING FOR" / "QUAKE 2 FILES"         0x8001E7B4
+ *    5  NOT FORMATTED + NO / YES                               0x8001EBDC
+ *    6  FORMATTING    row 0 "XXX" -> "FORMATTING"              0x8001EC1C
+ *    7  (nothing installed: the screen stays, cursor = first)  0x8001EFB0
+ *    8  LOAD MESSAGE  "MEMORY CARD" / "FORMAT COMPLETE"        0x8001EC7C
+ *    9  LOAD MESSAGE  "MEMORY CARD" / "FORMAT FAILED"          0x8001E8D4
+ *   10  as 4                                                   0x8001E7B4
+ *   11  as 4                                                   0x8001E7B4
+ *   12  SAVING        "NO QUAKE 2" / "SINGLE PLAYER" or
+ *                     "MULTIPLAYER" / "FILES FOUND"            0x8001ED2C
+ *   13  SAVE FILE     FrontEnd_DoFileWindow (0x8001D84C)       0x8001EEC0
+ *   14  FORMATTING    row 0 -> "LOADING FROM" / "SAVING TO"    0x8001EED0
+ *   15  as 14
+ *   16  LOAD MESSAGE  "MULTIPLAYER" / "CONFIG LOADED",
+ *                     "STARTING" / "GAME", "MULTIPLAYER" /
+ *                     "DATA SAVED" or "GAME" / "SAVED"         0x8001EA28
+ *   17  LOAD MESSAGE  "MEMORY CARD" / "LOAD FAILED" or
+ *                     "SAVE FAILED"                            0x8001E964
+ *   18  SAVING        "INSUFFICIENT FREE BLOCKS" /
+ *                     "PLEASE INSERT ANOTHER" / "MEMORY CARD"  0x8001EDF4
+ *   19  OVERWRITE?    + NO / YES                               0x8001E4D8
+ *   20  as 14  (21 and 22 too)                                 0x8001EED0
+ *
+ * SAVE? and NO CONTROLLER are not statuses: SAVE? is page 39, put up by
+ * InGame_GOTO_WANT_TO_SAVE (0x800203C4), and NO CONTROLLER is page 38, put up
+ * by InGame_GOTO_REINSERT_CONTROLLER (0x8001D200).
  */
-#define Q2_MCARD_STATE_LIST        3    /* 0x8001F140 */
-#define Q2_MCARD_STATE_CHOICE_5    5    /* 0x8001F790 -> 6 or 1 */
-#define Q2_MCARD_STATE_REPORT     13    /* 0x8001F19C */
-#define Q2_MCARD_STATE_ACCEPT_A   14    /* 0x8001F0A4 */
-#define Q2_MCARD_STATE_ACCEPT_B   16    /* the same arm */
-#define Q2_MCARD_STATE_CHOICE_19  19    /* 0x8001F718 -> 20 */
-#define Q2_MCARD_STATE_MAX        19    /* the jump table's length */
+#define Q2_MCARD_STATE_CARDS       3    /* 0x8001F140: card row -> 4          */
+#define Q2_MCARD_STATE_FORMAT_ASK  5    /* 0x8001F790: -> 6 or 1              */
+#define Q2_MCARD_STATE_FORMATTING  6
+#define Q2_MCARD_STATE_FILES      13    /* 0x8001F19C: file row -> 19/21/22   */
+#define Q2_MCARD_STATE_ACCEPT_A   14    /* 0x8001F0A4                         */
+#define Q2_MCARD_STATE_DONE       16    /* 0x8001F0A4, the success message    */
+#define Q2_MCARD_STATE_ACCEPT_B   Q2_MCARD_STATE_DONE
+#define Q2_MCARD_STATE_FAILED     17    /* no arm: BACK is the way out        */
+#define Q2_MCARD_STATE_OVERWRITE  19    /* 0x8001F718: -> 20 or 13            */
+#define Q2_MCARD_STATE_SAVE_OVER  20    /* busy: writing over a file          */
+#define Q2_MCARD_STATE_LOADING    21    /* busy: reading                      */
+#define Q2_MCARD_STATE_SAVE_NEW   22    /* busy: writing a NEW FILE           */
+
+/* The two-way choices under their older names. */
+#define Q2_MCARD_STATE_CHOICE_5   Q2_MCARD_STATE_FORMAT_ASK
+#define Q2_MCARD_STATE_CHOICE_19  Q2_MCARD_STATE_OVERWRITE
+
+#define Q2_MCARD_STATE_MAX        19    /* the input jump table's length      */
+#define Q2_MCARD_STATUS_MAX       22    /* the message jump table's length    */
 
 /* Does this state have an arm of its own, or does it fall through? */
 bool q2_mcard_state_live(int state);
@@ -163,8 +227,9 @@ bool q2_mcard_state_live(int state);
 /*
  * `poll` stands in for `0x800B3234` — what the card is doing now, as one of the
  * state numbers above. `request` stands in for `0x800B3238`, which the arms
- * call with the state they want next. `choose` stands in for `0x800B324C`,
- * which state 3 calls with the selected row.
+ * call with the state they want next. `choose` stands in for `0x800B324C`
+ * (SetActiveCard), which state 3 calls with the selected card, and for
+ * `0x800B3250` (SetActiveFile), which state 13 calls with the selected file.
  *
  * A port with no memory card supplies its own save handling behind these; the
  * shape is the original's, the implementation is not, and nothing here pretends
@@ -187,8 +252,9 @@ typedef struct q2_mcard {
      * slot and draws nothing. */
     char            name[Q2_MCARD_SLOTS][Q2_MCARD_NAME_MAX];
 
-    /* The cheat level state 13 formats into its message (NONE/BRONZE/SILVER/
-     * GOLD, from the array the arm builds on its stack at 0x8001F19C). */
+    /* The highlighted file's cheat level, which state 13 formats into its
+     * `CHEATS %s` line (NONE/BRONZE/SILVER/GOLD, from the array the arm
+     * builds on its stack at 0x8001F19C). */
     int             cheat_level;
 
     int             cursor;         /* 0x800B32AC minus 0x800B32AE           */
@@ -205,9 +271,14 @@ void q2_mcard_set_name(q2_mcard *m, int slot, const char *name);
  * One frame. Polls the state, maps it to a screen, and — on the RELEASE of
  * CROSS, which is what every live arm tests — acts on the cursor:
  *
- *   state 3    calls `choose(cursor)`, then asks for the next state
+ *   state 3    `choose(cursor)` (SetActiveCard), then request(4)
  *   state 5    cursor 1 -> request(6),  cursor 0 -> request(1)
- *   state 19   cursor 1 -> request(20)
+ *   state 13   `choose(cursor)` (SetActiveFile), then request(13). The
+ *              console's arm picks 21 / 22 / 19 itself from the save flag,
+ *              the row and GetNumFreeBlocks (0x8001F6A4..0x8001F714); here
+ *              the host owns the slots, so asking for 13 FROM 13 means
+ *              "this row was chosen" and the host makes that same choice
+ *   state 19   cursor 1 -> request(20), cursor 0 -> request(13)
  *   14 / 16    accept: `accepted` comes back true so the caller can apply the
  *              loaded settings and leave, which is what 0x8001C698 and
  *              0x8001E1A4 do on the console
@@ -250,24 +321,73 @@ bool q2_mcard_advance(q2_mcard *m, u16 buttons);
 bool q2_mcard_save_prompt_due(u32 level_change, u32 *latch,
                               bool deathmatch, int exit_code);
 
-/* The screen the current state shows, or Q2_MCARD_NONE when the state has no
- * arm. This is the one place the reconstruction is INCOMPLETE and says so: the
- * nine table installers are separate functions and which state calls which was
- * not followed, so this maps only the states whose screen is unambiguous from
- * the arm's own behaviour. */
+/*
+ * The screen a status shows: InGame_PrintMemCardMessage's jump table at
+ * 0x800AB6DC, whole. Q2_MCARD_NONE for 7, whose arm installs nothing and
+ * leaves whatever was up, and for anything outside 1..22.
+ */
 q2_mcard_screen q2_mcard_screen_for_state(int state);
 
 /*
- * The same question, answered for the PORT's own file-backed flow.
- *
- * A host that implements the three function pointers has to put something on
- * screen for every state it uses, including the ones whose console mapping was
- * never established. This is that mapping, and it is the port's: it agrees with
- * `q2_mcard_screen_for_state` wherever that one commits, and fills in the rest
- * with the screen the port's own flow needs there (saveui.h explains which of
- * the two each state is). Keeping them as separate functions is what stops a
- * reader mistaking the port's arrangement for a reading of the disc.
+ * The same map, for the port's own file-backed flow (saveui.h). Since the
+ * console's map is complete this IS it; it is kept as a separate entry point
+ * because the client and the inspector call it, and so that a port-only
+ * arrangement, if one is ever needed again, has somewhere to live that is not
+ * the reading.
  */
 q2_mcard_screen q2_mcard_screen_for_state_port(int state);
+
+/* ------------------------------------------------------------------------- */
+/* What each arm writes over its table                                        */
+/* ------------------------------------------------------------------------- */
+/*
+ * Two of the nine tables are placeholders the arms overwrite through
+ * FrontEndModifyText: LOAD MESSAGE's `LOAD MESSAGE` / `HERE` and SAVING's
+ * `LONGER LOAD` / `SAVE MESSAGE` / `HERE` are never seen as such, and
+ * FORMATTING's row 0 is the literal `XXX`. What goes there depends on two
+ * flags the console keeps in the menu block:
+ *
+ *   saving         0x800B32A2 — 0 on a load, 1 on a save (the same byte
+ *                  0x80020428 sets when SAVE? is answered YES)
+ *   single_player  the byte at 0x800B32A3 — `(0x800B32A0 & 0x7F000000) ==
+ *                  0x01000000` (0x8001ED64..0x8001ED74); zero is the
+ *                  front end's multiplayer settings file
+ */
+typedef struct q2_mcard_context {
+    bool saving;
+    bool single_player;
+} q2_mcard_context;
+
+/*
+ * Fill `text[0..rows-1]` — a q2_menu's text overrides — with what status
+ * `state`'s arm writes, and empty the rest. Returns how many leading rows were
+ * written. A row the arm does not touch is left "", so the table's own label
+ * shows, which is exactly what the console draws there.
+ *
+ * Status 13 writes row 0 only — `SAVE FILE`, `LOAD SINGLE` or `LOAD MP SETUP`
+ * (0x8001D88C..0x8001D8D8) — and row 1 is the empty string. Its rows 2..4 are,
+ * on the console, the highlighted file's `RESUPPLIES %d` / `DIFFICULTY %s` /
+ * `CHEATS %s` (0x8001F19C..0x8001F644), and the files themselves are appended
+ * BELOW the table at y = 100 + 16i with `NEW FILE` after them on a save
+ * (0x8001DAB0..0x8001DCA4). The port's slot rows sit in rows 1..4 instead,
+ * which is the one layout here that is the port's.
+ */
+int q2_mcard_compose(int state, const q2_mcard_context *ctx,
+                     char (*text)[Q2_MENU_TEXT_MAX], int rows);
+
+/*
+ * The prompt rows each status asks for, as the y it passes to MoveBottomPoly
+ * (0x8001F938) or 260 for parked: [0] SELECT, [1] BACK.
+ *
+ *   3, 13       SELECT and BACK at 216 in the front end, 220 in game
+ *               (0x8001E3E0..0x8001E488, keyed on 0x800AE8B4)
+ *   8, 16       SELECT at 220 (0x8001ED10, 0x8001EB8C)
+ *   19          SELECT and BACK at 220 (0x8001E510, then 0x8001ED14)
+ *   all others  both parked (0x8001E400..0x8001E424)
+ *
+ * Status 13 then asks for SELECT at 220 again from FrontEnd_DoFileWindow
+ * (0x8001DD0C), so in the front end its SELECT ends at 220 and its BACK at 216.
+ */
+void q2_mcard_prompt_rows(int state, bool front_end, int y[2]);
 
 #endif /* Q2PSX_MEMCARD_H */

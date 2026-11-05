@@ -66,9 +66,30 @@
  * of the first three mode rows is selected, and parks it on the two settings
  * rows. `q2_prompt_sync_menu` is that per-frame policy in port terms.
  *
- * The one unrelated placement special case is still in the retail drawer: on
- * page 11, record 1 is drawn at a hard-coded (230, 114) rather than from the
- * table. Page 11 is not one of the ordinary menu pages reconstructed here.
+ * ---------------------------------------------------------------------------
+ * Page 11 — BACK pinned to the middle of the screen
+ * ---------------------------------------------------------------------------
+ * DrawBottomPoly (0x8001C34C) still steps all three records, but before it
+ * builds each quad it tests the current page id at 0x800B32AA against 11 and
+ * the record index against 1 (0x8001C410..0x8001C42C). On that one pair it
+ * ignores the record's x and y and writes a literal corner — x = 230 from
+ * `s5` (0x8001C378), y = 114 (0x8001C434) — with record 1's own uv and size.
+ * SLUS-00757 is the same code with y = 110 (its 0x8001C434), which is PAL's
+ * 114 moved up by the four lines the 240-line raster loses at each edge.
+ *
+ * Page 11 is QFRONT's per-player setup: its only builder is PROCEED's action,
+ * module+0x59CC, `module+0x3414(NULL, 11)`, and no caller in the executable
+ * enters it. That builder never sets a back handler (the page's +0x28C stays
+ * the NULL InGameInitScreen wrote), so the ordinary policy above parks BACK at
+ * 260 — and the drawer shows it anyway, mid-screen, every frame the page is
+ * up. It is the split screen's shared caption, between the player panels.
+ *
+ * And every prompt quad is MODULATED AT 0x60, not 0x80: 0x8001C614..0x8001C620
+ * store 96 into r, g and b unconditionally, so the cells draw at three
+ * quarters of their texel brightness. Its CLUT is the table entry at
+ * 0x800E3FB6 (SLUS: 0x800E4226), which is the clut table plus 0x8A — built-in
+ * palette 69, not the text's 68: a ramp in entries 0..7 and eight unrelated
+ * colours in 8..15, where 68 is one sixteen-step blue ramp.
  */
 #ifndef Q2PSX_MENU_PROMPT_H
 #define Q2PSX_MENU_PROMPT_H
@@ -93,6 +114,17 @@ extern "C" {
 /* At most this many pixels of travel per frame, either way (0x8001C3D0). */
 #define Q2_PROMPT_SPEED         3
 
+/* Page 11's pinned BACK corner (0x8001C378, 0x8001C434). */
+#define Q2_PROMPT_PINNED_X      230
+#define Q2_PROMPT_PINNED_Y_PAL  114
+#define Q2_PROMPT_PINNED_Y_NTSC 110
+
+/* The modulation every prompt quad carries (0x8001C614..0x8001C620). */
+#define Q2_PROMPT_SHADE         0x60
+
+/* The built-in palette the quads sample through (0x800E3FB6 = table + 0x8A). */
+#define Q2_PROMPT_PALETTE       69
+
 /* Indices into the table, in storage order — not left-to-right order. */
 typedef enum q2_prompt_id {
     Q2_PROMPT_SELECT = 0,   /* X SELECT        */
@@ -111,6 +143,11 @@ typedef struct q2_prompt_rec {
 
 typedef struct q2_prompt_bar {
     q2_prompt_rec rec[Q2_PROMPT_COUNT];
+
+    /* Page 11 is current: record 1 is drawn at (230, pinned_y) whatever its
+     * y says. Set by q2_prompt_sync_menu, cleared when no menu is up. */
+    bool          pinned_back;
+    s16           pinned_y;
 } q2_prompt_bar;
 
 /* The shipped table, verbatim. */
@@ -141,6 +178,15 @@ void q2_prompt_step(q2_prompt_bar *b);
  * remains the sole owner of the three-pixel slide.
  */
 void q2_prompt_sync_menu(q2_prompt_bar *b, const q2_menu *m, bool front_end);
+
+/*
+ * Where prompt `id` is drawn this frame: the record's (x, y), except record 1
+ * while page 11 is current, which is the drawer's literal corner. Both
+ * builders below go through this, so the pinned case cannot drift between the
+ * console's art and the host's labels.
+ */
+void q2_prompt_position(const q2_prompt_bar *b, q2_prompt_id id,
+                        int *x, int *y);
 
 /*
  * Draw whatever is currently on screen. Steps nothing — call q2_prompt_step

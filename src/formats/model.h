@@ -89,7 +89,13 @@
  * ---------------------------------------------------------------------------
  * What is INFERRED rather than confirmed
  * ---------------------------------------------------------------------------
- * Cross-part resolution. 21,217 faces — 15.3% of the disc, all inside the
+ * Cross-part resolution was CONFIRMED from the draw code on 5 November: the
+ * drawer at 0x800B1F90 writes each part's vertices into the scratch at
+ * vert_base * 8 and emits that part's faces from the scratch in the same
+ * per-part pass (q2_model_bake_indices cites the addresses), which is last
+ * writer wins. The account below is how it was first settled by fit.
+ *
+ * 21,217 faces — 15.3% of the disc, all inside the
  * articulated models — carry an index outside their own part's window. Two
  * rules both fit: LAST WRITER WINS in the shared buffer, and a pure arithmetic
  * offset with no buffer at all. Both resolve 100% of indices in range, they
