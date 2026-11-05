@@ -550,6 +550,7 @@ typedef struct q2_monster {
     u16 group;
     u32 population_slot;  /* authored slot, stable across zone module rosters */
     bool population_active; /* actually spawned here, even after being freed */
+    s16 obj_slot;           /* its actor's console object slot (objslot.h), -1 none */
     u32 svflags;            /* +0x40  SVF_MONSTER and the freed bit          */
     bool client;            /* +0x3C  non-NULL for a player                  */
 

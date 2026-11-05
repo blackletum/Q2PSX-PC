@@ -1,6 +1,7 @@
 #include "entity.h"
 #include "trace.h"
 #include "random.h"
+#include "objslot.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -14,6 +15,7 @@ void q2_entity_init(q2_entity *e)
     memset(e, 0, sizeof(*e));
     if (++audio_generation == 0) ++audio_generation;
     e->audio_generation = audio_generation;
+    e->obj_slot = -1;                /* no console slot until one is taken */
 
     /* 0x800587C0: the spawner's first act is to write this word, so a port that
      * starts from zero renders nothing. Bit 0 is cleared again by the item
@@ -369,6 +371,7 @@ q2_entity *q2_entity_alloc(q2_entity_set *set)
         if (!set->ent[i].in_use) {
             q2_entity_init(&set->ent[i]);
             set->ent[i].in_use = true;
+            set->ent[i].obj_slot = (s16)q2_obj_slot_alloc(Q2_OBJ_ENTITY, (s32)i);
             return &set->ent[i];
         }
     }
@@ -387,6 +390,7 @@ q2_entity *q2_entity_alloc(q2_entity_set *set)
         q2_entity *e = &set->ent[set->count++];
         q2_entity_init(e);
         e->in_use = true;
+        e->obj_slot = (s16)q2_obj_slot_alloc(Q2_OBJ_ENTITY, (s32)(e - set->ent));
         return e;
     }
 }
@@ -397,8 +401,61 @@ void q2_entity_remove(q2_entity *e)
      * `in_use` false is that, and the slot is reused by the next alloc. */
     if (!e)
         return;
+    q2_obj_slot_free(e->obj_slot);
     q2_entity_init(e);
     e->in_use = false;
+}
+
+static bool walk_runs(q2_entity *e, q2_entity_world *w)
+{
+    if (!e->in_use || !e->think)
+        return false;
+    e->think(e, w);
+    return true;
+}
+
+void q2_entity_walk_begin(q2_entity_set *set, q2_entity_world *w)
+{
+    if (!set || !w)
+        return;
+    w->level_time += w->dt;        /* once, as q2_entity_run does */
+    set->walk_slot  = 0;
+    set->walk_count = set->count;
+    set->walking    = true;
+}
+
+u32 q2_entity_walk_to(q2_entity_set *set, q2_entity_world *w, s32 slot)
+{
+    u32 ran = 0;
+
+    if (!set || !w || !set->walking)
+        return 0;
+    if (slot > Q2_OBJ_SLOTS)
+        slot = Q2_OBJ_SLOTS;
+    for (; set->walk_slot < slot; set->walk_slot++) {
+        s32 ref;
+
+        if (q2_obj_slot_owner(set->walk_slot, &ref) != Q2_OBJ_ENTITY ||
+            ref < 0 || (u32)ref >= set->count ||
+            set->ent[ref].obj_slot != set->walk_slot)
+            continue;
+        ran += walk_runs(&set->ent[ref], w);
+    }
+    return ran;
+}
+
+u32 q2_entity_walk_end(q2_entity_set *set, q2_entity_world *w)
+{
+    u32 i, ran;
+
+    if (!set || !w || !set->walking)
+        return 0;
+    ran = q2_entity_walk_to(set, w, Q2_OBJ_SLOTS);
+    for (i = 0; i < set->walk_count && i < set->count; i++)
+        if (set->ent[i].obj_slot < 0)
+            ran += walk_runs(&set->ent[i], w);
+    set->walking = false;
+    return ran;
 }
 
 u32 q2_entity_run(q2_entity_set *set, q2_entity_world *w)

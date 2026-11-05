@@ -1768,10 +1768,8 @@ every tick matches. `tests/fixtures/lockstep_oracle.py` now runs the console's
 own QuakeLoop over PAL BASE3's demo, natively, recording every `rand()` call
 with its caller, player one, each creature's actor and edict, and the entity
 box table, frame by frame. The port was compared against it until each
-divergence was explained. The `rand()` stream now matches for 98 of the first
-150 record frames, against 29 before. Player one's position matches all 150.
-Player one now dies after 531 of the recording's 1,125 frames, against 143
-before.
+divergence was explained. The `rand()` stream, player one and every creature now
+match through record frame 209, against 29 before; player one's path to 220.
 
 What the comparison found, in the order the run reached it:
 
@@ -1797,16 +1795,43 @@ The oracle stubs SnapShotPadViolation (`0x80032DCC`). Without it
 GameCheckPaused sees no pad and sets the menu word in frame 1, and every body
 part's tumble is skipped.
 
-*Where it parts now: frame 99, object slots.* MoveModels walks the console's
-object array (`0x800CBA28`, stride `0x300`) in slot order, and `0x8006C098`
-hands out slots from a last-in, first-out free list at `0x800D4A28`. When the
-second Infantry gibs, five of its six gibs take slots 8-12, above its own, and
-are moved that frame. The sixth takes slot 2, which the Soldier's actor freed
-at frame 30, and waits for the next frame. The port keeps its entities in a
-list of its own, so all six move at once and the trail draws come one gib
-early. Matching it means mirroring that free list for every object the
-console allocates: player and creature actors, gibs, items, explosions and
-death drops.
+*Frame 99, object slots, and after.* MoveModels walks the console's object
+array (`0x800CBA28`, stride `0x300`) in slot order, and `0x8006C098` hands out
+slots from a last-in, first-out stack at `0x800D4A28`, filled 0 to 47 by
+`0x8006D0BC`. When the second Infantry gibs, five of its six gibs pop slots
+12-8, above its own slot 5, and are moved that frame. The sixth takes slot 2,
+which the Soldier's actor freed at frame 30, and waits a frame. The port now
+mirrors the stack and its owners (`src/game/objslot.c`). The deal at load
+matches the oracle's trace exactly: slots 0 and 1, then the four creatures in
+2-5, then the two pickups in 6 and 7. Creatures think in slot order, with the
+entity walk (`q2_entity_walk_to`) catching up to each.
+
+Two timing faults surfaced past frame 99:
+- **The AI clock** (`0x8007F2B4`, called from QuakeLoop at `0x80038EF8`)
+  bumps level.framenum before player one's think. The port bumped it after,
+  so the ledge Infantry missed the frame-98 shot at frame 100.
+- **The active-area flood** runs before player one moves the doors. The port
+  ran it after, so the far Soldier woke at 121 instead of 122.
+
+Three more came after that:
+- **The CREBATCH that releases Zone1bob** spawns at the top of the next
+  frame (ProcessCreatureBatches, `0x80038F24`), not when the script selects it.
+- **A creature's muzzle flash** stays lit, and draws its two random radii in
+  the draw pass after the teleports, until its next think drops the bit
+  (`0x8007EE20`).
+- **The oracle itself** never reached the sound start's variation draws
+  (`0x8007270C`), because its loader stubs the sample upload. It now makes
+  them as a console with its samples loaded would.
+
+*Where it parts now: frame 210.* The four Zone1bob creatures wake at 209, run
+their go routines (three Soldier stand rolls on both sides), and at 210 the
+port's first `ai_stand` arms its idle timer with a draw. The console's never
+reaches that line: its creatures are hunting by 212. So its FindTarget
+succeeds at 210 and the port's does not.
+
+Player one's survival is not a steady score while the fights are still
+settling: the BASE3 demo now ends at 353 of 1,125 frames (601 at one point in
+this round), JAIL2's at 454 (329 before) and WASTE2's at 120 (115).
 
 ## Limits
 

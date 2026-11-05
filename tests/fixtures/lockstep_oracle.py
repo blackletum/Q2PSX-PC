@@ -125,6 +125,8 @@ class OracleMachine(LoaderMachine):
             self.r[2] = (self.rng_state >> 16) & 0x7FFF
             self.rand_log.append(('rand', self.r[31], self.r[2]))
             return True
+        if pc == 0x8007270C:
+            self.sound_variation()
         if self.probes:
             self.probe(pc)
         stub = self.stubs.get(pc)
@@ -167,6 +169,34 @@ class OracleMachine(LoaderMachine):
             r[2] = r[4]
             return True
         return super().intercept(pc)
+
+    def sound_variation(self):
+        """The randomising sound start's two draws, which this machine never reaches.
+
+        0x8007270C returns before them when its sample is not in the bank
+        table (0x80072784) or no voice is free (0x800740DC). The loader stubs
+        the sample upload (0x800724EC), so here every sample is missing and no
+        sound ever draws, where a console with its samples loaded and one of
+        24 voices free does: rand() at 0x800727BC for the pitch when the
+        request's flags (+8) have bit 0, and at 0x8007281C for the volume
+        when they have bit 1, each `lower + rand() % (upper - lower)`. This
+        makes those draws as the console would and stores their results.
+        """
+        idx = signed(self.r[4])
+        if idx in (-1, 0):
+            return
+        rec = 0x800DFDE4 + 12 * idx
+        flags = self.read(rec + 8, 4)
+        for bit, hi, lo, out, ra in ((1, 4, 5, 1, 0x800727C4), (2, 6, 7, 2, 0x80072824)):
+            if not flags & bit:
+                continue
+            span = self.read(rec + hi, 1) - self.read(rec + lo, 1)
+            self.rng_state = (self.rng_state * 0x41C64E6D + 0x3039) & 0xFFFFFFFF
+            v = (self.rng_state >> 16) & 0x7FFF
+            self.rand_log.append(('rand', ra, v))
+            if span:
+                m = abs(v) % abs(span)
+                self.write(rec + out, 1, (self.read(rec + lo, 1) + m) & 0xFF)
 
     # -------------------------------------------------------------- probes
     def probe(self, pc):
@@ -246,6 +276,8 @@ class OracleMachine(LoaderMachine):
             self.rand_log.append(('stepret', pc, signed(self.r[2])))
         if pc == 0x80046B98:  # the toss / tumble: its object's flags
             self.rand_log.append(('toss', self.r[4], [self.read(self.r[4] + 0x98, 4), self.read(self.r[4] + 0xE6, 2), self.read(0x800AE8B4, 4)] + [signed(self.read(self.r[4] + 0x54 + 4 * i, 4)) for i in range(3)] + [signed(self.read(self.r[4] + o, 2), 16) for o in range(0xC0, 0xF0, 2)]))
+        if pc == 0x8002B96C:  # the CREBATCH primitive: who raised it
+            self.rand_log.append(('crebatch', self.r[31], [self.r[4], self.r[5], self.r[6]]))
         if pc == 0x8004EE0C:  # PrimaryWeaponMovement: the driver record on entry
             v = self.r[4]
             self.rand_log.append(('vw', self.read(v + 72, 4), [self.read(v + 76, 4), signed(self.read(v + 80, 4)), signed(self.read(v + 216, 2), 16)]))
@@ -477,8 +509,9 @@ def creatures(m):
     Each entry: edict index, the actor's area byte (+0x9E), its suspend bit
     (+0x10C bit 9), the actor's X and Z (+0x54, +0x5C), the edict's own X and
     Z, ideal yaw (+0x8E) and yaw (+0x14), then the actor's separation radius
-    (+0x90), hit radius (+0x94) and height (+0x96). An edict whose actor is
-    not yet linked reads zeros for the actor's fields.
+    (+0x90), hit radius (+0x94) and height (+0x96), then the edict's tick
+    phase pair (+0x2C, +0x2D) and its own clock (+0x34). An edict whose actor
+    is not yet linked reads zeros for the actor's fields.
     """
     base = m.read(0x800B2FD0, 4)
     out = []
@@ -492,7 +525,8 @@ def creatures(m):
                     actor(84, 4), actor(92, 4),
                     signed(m.read(e, 4)), signed(m.read(e + 8, 4)),
                     signed(m.read(e + 0x8E, 2), 16), signed(m.read(e + 0x14, 2), 16),
-                    actor(0x90, 2), actor(0x94, 2), actor(0x96, 2)])
+                    actor(0x90, 2), actor(0x94, 2), actor(0x96, 2),
+                    m.read(e + 0x2C, 1), m.read(e + 0x2D, 1), signed(m.read(e + 0x34, 4))])
     return out
 
 

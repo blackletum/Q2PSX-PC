@@ -1082,7 +1082,11 @@ static void test_disc_boss(const char *disc_path, const char *output, bool flyin
     capture_creature(c, m, output, flying ? "boss2-idle" : "boss1-idle");
     rounds = c->cre_rounds; flashes = c->cre_flashes;
     q2_cre_set_move(m, flying ? 79 : 0); m->frame = flying ? 78 : -1;
-    for (frame = 0; frame < (flying ? 5 : 6); frame++) q2_M_MoveFrame(m);
+    for (frame = 0; frame < (flying ? 5 : 6); frame++) {
+        q2_M_MoveFrame(m);
+        client_cre_flash_drain(c);          /* the frame's draw pass */
+        m->motion.flags &= ~0x80000000u;    /* the next think drops the bit */
+    }
     CHECK(c->cre_rounds - rounds == (flying ? 10u : 6u));
     CHECK(c->cre_flashes - flashes == (flying ? 0u : 6u));
     capture_creature(c, m, output, flying ? "boss2-chainguns" : "boss1-chaingun");

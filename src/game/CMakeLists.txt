@@ -68,6 +68,7 @@ add_library(q2psx_game STATIC
     modeldraw.c
     modeldraw.h
     modelent.c
+    objslot.c
     modelent.h
     briefing.c
     briefing.h

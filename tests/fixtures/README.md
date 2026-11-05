@@ -622,7 +622,9 @@ state 10 does (GameSelfPlay, GameNewMission, the arrival, LoadLevel), then runs
 MainGameLoop's frame order: DoubleTrebleBuffer, ClearOTag, SwapAllButtons and
 QuakeLoop. Drawing is stubbed at the GPU, and so are RestartXA, VSync, the model
 draw's ordering-table insertion and SnapShotPadViolation (`0x80032DCC`). Without
-that last stub GameCheckPaused finds no pad and pauses the run.
+that last stub GameCheckPaused finds no pad and pauses the run. The loader stubs the sample upload, so the randomising sound start
+(`0x8007270C`) would never reach its pitch and volume draws; the oracle makes
+them at its entry as a console with its samples loaded and a voice free does.
 
 Each record frame gives every `rand()` call with its caller and result, player
 one, every creature's actor and edict, the active-area mask, the closed doors

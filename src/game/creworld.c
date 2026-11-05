@@ -1,3 +1,4 @@
+#include "objslot.h"
 #include "random.h"
 #include "creworld.h"
 #include "modelent.h"
@@ -1329,6 +1330,10 @@ u32 q2_creature_world_summon(q2_creature_world *w, const char *group)
                 continue;
             m->in_use = true;
             m->population_active = true;
+            /* spawn_entity_from_placement's actor (0x80056674), the record
+             * the walk runs this creature in. */
+            if (m->obj_slot < 0)
+                m->obj_slot = (s16)q2_obj_slot_alloc(Q2_OBJ_CREATURE, (s32)i);
             /*
              * A held batch missed `q2_monster_set_wake`: that sweep quite
              * correctly skips records whose in-use latch is clear. Merely

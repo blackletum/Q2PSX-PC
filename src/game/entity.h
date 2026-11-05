@@ -284,6 +284,9 @@ typedef struct q2_entity {
     s32 population_group;
     u32 population_slot;
     u32 zone_serial; /* map-local identity for a dynamic object; 0 until captured */
+    /* The console object slot this entity holds (objslot.h), -1 for none: the
+     * place MoveModels runs its think in, relative to the creatures'. */
+    s16 obj_slot;
 } q2_entity;
 
 void q2_entity_init(q2_entity *e);
@@ -562,11 +565,29 @@ typedef struct q2_entity_set {
     q2_entity *ent;
     u32        count;
     u32        capacity;
+    /* A slot-ordered walk in progress (q2_entity_walk_begin): the next slot
+     * it visits, and the count of entities that existed when it began. */
+    s32        walk_slot;
+    u32        walk_count;
+    bool       walking;
 } q2_entity_set;
 
 void       q2_entity_set_free(q2_entity_set *set);
 q2_entity *q2_entity_alloc(q2_entity_set *set);
 void       q2_entity_remove(q2_entity *e);
+
+/*
+ * MoveModels' walk (0x8006A4F0), split around the creatures: begin advances
+ * the clock once; `to` runs every entity whose console slot is in
+ * [walk position, slot), in slot order, and moves the walk to `slot`; end runs
+ * the rest of the slots and then the entities that hold no slot, in index
+ * order, as q2_entity_run does. A think that frees or allocates an entity is
+ * seen exactly as the console's walk sees it: a new record in a slot behind
+ * the walk waits for the next frame.
+ */
+void q2_entity_walk_begin(q2_entity_set *set, q2_entity_world *w);
+u32  q2_entity_walk_to(q2_entity_set *set, q2_entity_world *w, s32 slot);
+u32  q2_entity_walk_end(q2_entity_set *set, q2_entity_world *w);
 
 /*
  * One tick: call every live entity's think.

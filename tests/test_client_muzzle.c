@@ -256,6 +256,8 @@ static void disc_creature(const char *disc_path, const char *output,
     q2_fx_flash_clear(&c->sim[0].fx);
     q2_light_world_begin_frame(&c->light_world);
     client_cre_shot(m, &shot, c);
+    client_cre_flash_drain(c);              /* the draw pass lights it */
+    m->motion.flags &= ~0x80000000u;        /* and the next think drops it */
     CHECK(c->sim[0].fx.flash_count == 1);
     CHECK(c->light_world.dynamic_world_count == 1);
     CHECK(!memcmp(c->sim[0].fx.flash[0].corner[0], expected, sizeof(expected)));
@@ -264,10 +266,14 @@ static void disc_creature(const char *disc_path, const char *output,
     q2_fx_flash_clear(&c->sim[0].fx);
     shot.slot = Q2_IMP_FIRE_SHOTGUN;
     client_cre_shot(m, &shot, c);
+    client_cre_flash_drain(c);              /* the draw pass lights it */
+    m->motion.flags &= ~0x80000000u;        /* and the next think drops it */
     CHECK(c->sim[0].fx.flash_count == 1);
     q2_fx_flash_clear(&c->sim[0].fx);
     shot.slot = Q2_IMP_FIRE_BLASTER; shot.speed = 800;
     client_cre_shot(m, &shot, c);
+    client_cre_flash_drain(c);              /* the draw pass lights it */
+    m->motion.flags &= ~0x80000000u;        /* and the next think drops it */
     CHECK(c->sim[0].fx.flash_count == 0);
     if (size == 240) {
         q2_cre_motion_world world = {0};

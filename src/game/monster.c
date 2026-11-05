@@ -33,6 +33,7 @@ void q2_monster_init(q2_monster *m)
     memset(m, 0, sizeof(*m));
     if (++audio_generation == 0) ++audio_generation;
     m->audio_generation = audio_generation;
+    m->obj_slot = -1;
 
     m->class_id    = 0;
     m->speed_scale = 10;      /* neutral: the frame scale is /10 */

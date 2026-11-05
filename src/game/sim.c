@@ -3905,7 +3905,7 @@ void q2_sim_select_player(q2_sim *sim, int index)
     sim->current_node = sim->player[index].ent.node;
 }
 
-void q2_sim_entities_late(q2_sim *sim, s32 dt)
+void q2_sim_entities_begin(q2_sim *sim, s32 dt)
 {
     if (!sim || !sim->entities_ready ||
         sim->cur_player != 0 || sim->settling || dt <= 0)
@@ -3914,7 +3914,19 @@ void q2_sim_entities_late(q2_sim *sim, s32 dt)
     sim->ent_world.deathmatch   = sim->multiplayer;
     sim->ent_world.cheats       = sim->cheats;
     sim->ent_world.weapons_stay = sim->weapons_stay;
-    q2_entity_run(&sim->entities, &sim->ent_world);
+    q2_entity_walk_begin(&sim->entities, &sim->ent_world);
+}
+
+void q2_sim_entities_to(q2_sim *sim, s32 slot)
+{
+    if (sim)
+        q2_entity_walk_to(&sim->entities, &sim->ent_world, slot);
+}
+
+void q2_sim_entities_end(q2_sim *sim)
+{
+    if (sim)
+        q2_entity_walk_end(&sim->entities, &sim->ent_world);
 }
 
 void q2_sim_missiles_late(q2_sim *sim, s32 dt)

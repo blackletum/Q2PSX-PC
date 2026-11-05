@@ -1904,9 +1904,13 @@ void q2_sim_view_plane_camera_pass(q2_sim *sim, int index);
 /* The world's missiles and particles for a frame whose players have all
  * ticked, when `defer_missiles` held them (player 0 selected). */
 void q2_sim_missiles_late(q2_sim *sim, s32 dt);
-/* The entity sweep for a frame whose creatures have thought, after a tick
- * run with `defer_entities` set (player 0 selected). */
-void q2_sim_entities_late(q2_sim *sim, s32 dt);
+/* The entity sweep a tick run with `defer_entities` held (player 0
+ * selected), as MoveModels walks it around the creatures: begin once, `to`
+ * before each creature with that creature's object slot, end after the last.
+ * See q2_entity_walk_begin. */
+void q2_sim_entities_begin(q2_sim *sim, s32 dt);
+void q2_sim_entities_to(q2_sim *sim, s32 slot);
+void q2_sim_entities_end(q2_sim *sim);
 
 /*
  * Post a view kick — what a weapon's recoil and a damage hit do. `period` picks

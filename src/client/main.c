@@ -113,6 +113,7 @@
 #include "area.h"
 #include "crebind.h"
 #include "creworld.h"
+#include "objslot.h"
 #include "levelbin.h"
 #include "lighting.h"
 #include "loading.h"
@@ -779,6 +780,12 @@ typedef struct client {
     q2_ai_world_bind  ai_world;
 
     double            ai_accum;       /* seconds owed to the 10 Hz AI clock    */
+    s32               ai_clock_before; /* level.time before this frame's bump */
+    bool              cre_activity_ready; /* the frame's flood (client_cre_activity) */
+    char              batch_queue[8][32];  /* CREBATCHes for the next frame */
+    u32               batch_queued;
+    bool              batches_deferred;    /* inside a frame: queue them */
+    u32               cre_active_areas[3];
     u32               ai_thoughts;
     u32               cre_swings, cre_shots;   /* hook invocations */
     /* Fire reports asked for; misses land in cre_sound_missing beside the
@@ -2178,6 +2185,7 @@ static void client_pickup_burst(client *c, const s32 pos[3], s32 model_index,
 }
 
 static void client_entity_events(client *c);
+static void client_obj_slots_assign(client *c);
 
 /* ------------------------------------------------------------------------- */
 /* Movers meeting the player                                                  */
@@ -3000,6 +3008,9 @@ static void client_load_creatures(client *c, const s32 eye[3])
                                 &c->creatures, c->cre_actor, c->cre_anim, &phase_us);
         c->ai_accum = (double)phase_us / 1000000.0;
     }
+    c->batch_queued = 0;          /* a new zone starts with none pending */
+    c->batches_deferred = false;  /* until its first frame */
+    client_obj_slots_assign(c);
 
     {
         u32 live = 0, droppers = 0;
@@ -3775,7 +3786,7 @@ static s32 client_cre_flash_verts(const q2_monster *m, s16 *a, s16 *b)
  * The two draws come from the BIOS stream the creatures decide on, because
  * that is the generator 0x800311B0 calls.
  */
-static void client_cre_flash(client *c, const q2_monster *m)
+static void client_cre_flash_now(client *c, const q2_monster *m)
 {
     const q2_model_instance *inst;
     s32 local[3], world[3];
@@ -3816,6 +3827,43 @@ static void client_cre_flash(client *c, const q2_monster *m)
                         q2_sim_fx_area(&c->sim[0], 0, world));
     }
     c->cre_flashes++;
+}
+
+/*
+ * ...AND IT IS RAISED WHEN THE CREATURE IS DRAWN, FOR AS LONG AS ITS MUZZLE
+ * BIT STAYS UP. The shot raises bit 31 of the actor's flags (+0x10C); the
+ * handler drops it only inside its AI-tick loop (0x8007EE20, before the next
+ * think), and 0x80031094, the creature's draw callback, lights the flash
+ * every frame it finds the bit. The callback runs in the presentation pass,
+ * after DrawTelePorts, so its two rand()s follow the round's blood and the
+ * columns' 45, and they recur on the frames until the creature thinks
+ * again: BASE3's attract run, record frames 167 and 168.
+ */
+static void client_cre_flash(client *c, const q2_monster *m)
+{
+    (void)c;
+    ((q2_monster *)(uintptr_t)m)->motion.flags |= 0x80000000u;
+}
+
+static void client_cre_flash_drain(client *c)
+{
+    u32 s, i;
+
+    /* The draw meets them in object order. */
+    for (s = 0; s < Q2_OBJ_SLOTS; s++) {
+        s32 ref;
+        if (q2_obj_slot_owner((s32)s, &ref) != Q2_OBJ_CREATURE ||
+            ref < 0 || (u32)ref >= c->creatures.set.count)
+            continue;
+        if (c->creatures.set.monsters[ref].in_use &&
+            (c->creatures.set.monsters[ref].motion.flags & 0x80000000u))
+            client_cre_flash_now(c, &c->creatures.set.monsters[ref]);
+    }
+    for (i = 0; i < c->creatures.set.count; i++)
+        if (c->creatures.set.monsters[i].obj_slot < 0 &&
+            c->creatures.set.monsters[i].in_use &&
+            (c->creatures.set.monsters[i].motion.flags & 0x80000000u))
+            client_cre_flash_now(c, &c->creatures.set.monsters[i]);
 }
 
 /* One traced round, and what it met. */
@@ -4366,23 +4414,92 @@ static void client_gib_describe(void *user, q2_gib_victim kind,
  * would think three times as often at 30 fps as it does on the console, and
  * every one of the AI's timers is expressed in those ticks.
  */
-static void client_creatures_tick(client *c, float dt, const s32 eye[3])
+/*
+ * THE CONSOLE'S OBJECT SLOTS AS A LEVEL'S FIRST FRAME LEAVES THEM (objslot.h).
+ *
+ * The load itself takes slots 0 and 1: player one's record (its handler is
+ * PrimaryQuakePlayer, 0x8003A1C8) and one with no handler. Then the first
+ * frame's ProcessCreatureBatches (0x80056D68) walks each selected group: its
+ * spawn list, every creature's actor through spawn_entity_from_placement
+ * (0x80056674), then its place list, every pickup through 0x8007F538. On
+ * BASE3's attract run that is the four creatures in slots 2-5 and two pickups
+ * in 6 and 7. The port spawns both at load, in passes of its own, so the
+ * slots are dealt here afterwards in the console's order; a restored game
+ * gets the same deal, which is all it can have.
+ */
+static void client_obj_slots_assign(client *c)
 {
-    s32 ticks = (s32)((double)dt * 300.0 + 0.5);
-    s32 phase, old_clock;
-    u32 i, j;
-    u32 active_areas[3];
-    q2_area_graph graph;
-    bool activity_ready;
+    q2_entity_set *set = &c->sim[0].entities;
+    u32 groups = c->creatures_ready ? c->creatures.pop.group_count : 0;
+    u32 i, gi;
 
+    q2_obj_slots_reset();
+    for (i = 0; i < set->count; i++)
+        set->ent[i].obj_slot = -1;
+    for (i = 0; i < c->creatures.set.count; i++)
+        c->creatures.set.monsters[i].obj_slot = -1;
+    (void)q2_obj_slot_alloc(Q2_OBJ_RESERVED, 0);
+    (void)q2_obj_slot_alloc(Q2_OBJ_RESERVED, 1);
+
+    for (gi = 0; gi < groups; gi++) {
+        for (;;) {      /* the spawn list, in record order */
+            q2_monster *best = NULL;
+            for (i = 0; i < c->creatures.set.count; i++) {
+                q2_monster *m = &c->creatures.set.monsters[i];
+                if (!m->in_use || m->group != gi || m->obj_slot >= 0) continue;
+                if (!best || m->population_slot < best->population_slot) best = m;
+            }
+            if (!best) break;
+            best->obj_slot = (s16)q2_obj_slot_alloc(Q2_OBJ_CREATURE,
+                (s32)(best - c->creatures.set.monsters));
+            if (best->obj_slot < 0) best->obj_slot = -2;   /* full: runs last */
+        }
+        for (;;) {      /* then the place list */
+            q2_entity *best = NULL;
+            for (i = 0; i < set->count; i++) {
+                q2_entity *e = &set->ent[i];
+                if (!e->in_use || e->population_group != (s32)gi || e->obj_slot != -1) continue;
+                if (!best || e->population_slot < best->population_slot) best = e;
+            }
+            if (!best) break;
+            best->obj_slot = (s16)q2_obj_slot_alloc(Q2_OBJ_ENTITY, (s32)(best - set->ent));
+            if (best->obj_slot < 0) best->obj_slot = -2;
+        }
+    }
+    for (i = 0; i < c->creatures.set.count; i++) {
+        q2_monster *m = &c->creatures.set.monsters[i];
+        if (m->in_use && m->obj_slot == -1)
+            m->obj_slot = (s16)q2_obj_slot_alloc(Q2_OBJ_CREATURE, (s32)i);
+        if (m->obj_slot < -1) m->obj_slot = -1;
+    }
+    for (i = 0; i < set->count; i++) {
+        q2_entity *e = &set->ent[i];
+        if (e->in_use && e->obj_slot == -1)
+            e->obj_slot = (s16)q2_obj_slot_alloc(Q2_OBJ_ENTITY, (s32)i);
+        if (e->obj_slot < -1) e->obj_slot = -1;
+    }
+}
+
+/*
+ * CALCACTIVEAREALIST AT THE TOP OF THE FRAME. QuakeLoop floods the active
+ * areas at 0x80038F1C, after the door movers and BEFORE MoveModels runs
+ * player one, so a door the player sets going is still shut to this frame's
+ * flood and open to the next one's. Flooded in the creature tick, after the
+ * port's player and mover ticks, the doors were a frame ahead: on BASE3's
+ * attract run the far Soldier woke, and drew, at frame 121 where the
+ * console's wakes at 122. The first creature tick still sees every area
+ * (ChrisCount == 1, 0x800651E0): no tick has run when this is asked.
+ */
+static void client_cre_activity(client *c)
+{
+    q2_area_graph graph;
+
+    c->cre_activity_ready = false;
     if (!c->creatures_ready)
         return;
-
-    q2_creature_world_actor_tick(&c->creatures);
-    c->level_cre_ticks++;
-    activity_ready = c->sim[0].coll_primary_ready &&
+    c->cre_activity_ready = c->sim[0].coll_primary_ready &&
         q2_area_parse(&graph, &c->zone.zone) == Q2_OK;
-    if (activity_ready) {
+    if (c->cre_activity_ready) {
         q2_coll_node node;
         s32 cell = q2_coll_find_node(&c->sim[0].coll_primary, c->cam.pos, -1, true);
         u8 area = cell >= 0 && q2_collision_get_node(&c->sim[0].coll_primary,
@@ -4426,8 +4543,54 @@ static void client_creatures_tick(client *c, float dt, const s32 eye[3])
         q2_cre_active_areas(&graph, &c->zone.scene,
             closed ? closed : c->node_hidden,
             closed ? closed_count : c->node_hidden_count, area,
-            c->level_cre_ticks <= 1 || c->sim[0].multiplayer, active_areas);
+            c->level_cre_ticks == 0 || c->sim[0].multiplayer, c->cre_active_areas);
     }
+}
+
+/*
+ * THE AI CLOCK, BEFORE PLAYER ONE MOVES. QuakeLoop runs the accumulator
+ * (0x8007F2B4, from 0x80038EF8) ahead of MoveModels, so level.framenum and
+ * level.time are bumped, and the sight client rotated (0x8005EC60), before
+ * PrimaryQuakePlayer runs in slot 0. A shot is stamped with the NEW framenum.
+ * Bumped inside the creature tick instead, after the player's, the port's
+ * noises were a framenum old: on BASE3's attract run the Infantry on the
+ * ledge lost the frame-98 shot from FindTarget's one-frame window at frame
+ * 100 and stopped where the console's walked on.
+ */
+static void client_ai_clock(client *c, s32 ticks)
+{
+    s32 phase;
+
+    c->ai_clock_before = q2_level_state.time;
+    if (!c->creatures_ready)
+        return;
+    c->creatures.sight.health = c->sim[0].combat.inv.health;
+    phase = (s32)(c->ai_accum * 300.0 + 0.5) + ticks;
+    while (phase >= 30) {
+        phase -= 30;
+        q2_level_state.time++;
+        q2_level_state.framenum++;
+        q2_ai_set_sight_client();
+    }
+    c->ai_accum = (double)phase / 300.0;
+}
+
+static void client_creatures_tick(client *c, float dt, const s32 eye[3])
+{
+    s32 ticks = (s32)((double)dt * 300.0 + 0.5);
+    s32 old_clock;
+    u32 i, j;
+    u32 active_areas[3];
+    bool activity_ready;
+
+    if (!c->creatures_ready)
+        return;
+
+    q2_creature_world_actor_tick(&c->creatures);
+    c->level_cre_ticks++;
+    /* Computed at the top of the frame (client_cre_activity). */
+    activity_ready = c->cre_activity_ready;
+    memcpy(active_areas, c->cre_active_areas, sizeof(active_areas));
 
     /* Aiming reads the same eye and velocity as visibility. Keep the sight
      * entity current while crouching or moving, not frozen at its spawn. */
@@ -4438,17 +4601,42 @@ static void client_creatures_tick(client *c, float dt, const s32 eye[3])
 
     memcpy(c->creatures.sight.pos, eye, sizeof(c->creatures.sight.pos));
     c->creatures.sight.health = c->sim[0].combat.inv.health;
-    old_clock = q2_level_state.time;
-    phase = (s32)(c->ai_accum * 300.0 + 0.5) + ticks;
-    while (phase >= 30) {
-        phase -= 30;
-        q2_level_state.time++;
-        q2_level_state.framenum++;
-        q2_ai_set_sight_client();
-    }
-    c->ai_accum = (double)phase / 300.0;
-    for (i = 0; i < c->creatures.set.count; i++) {
-        q2_monster *m = &c->creatures.set.monsters[i];
+    old_clock = c->ai_clock_before;   /* client_ai_clock bumped it */
+    /*
+     * IN THE ORDER MOVEMODELS RUNS THEM. Each creature's think is its actor
+     * record's handler, met at its object slot in 0x8006A4F0's walk, and the
+     * pickups, gibs and model objects in the slots below it run first. So the
+     * creatures go by slot, and the entity walk catches up to each one before
+     * it moves; whatever is left runs after the last (q2_sim_entities_end).
+     */
+    {
+        static u32 *order;
+        static u32 order_cap;
+        u32 n = c->creatures.set.count, o, k;
+        if (n > order_cap) {
+            u32 *grown = (u32 *)realloc(order, n * sizeof(*order));
+            if (grown) { order = grown; order_cap = n; }
+        }
+        if (n <= order_cap)
+            for (o = 0; o < n; o++) {     /* insertion by slot; none last */
+                s32 key = c->creatures.set.monsters[o].obj_slot;
+                key = key < 0 ? Q2_OBJ_SLOTS + (s32)o : key;
+                for (k = o; k > 0; k--) {
+                    s32 prev = c->creatures.set.monsters[order[k - 1]].obj_slot;
+                    prev = prev < 0 ? Q2_OBJ_SLOTS + (s32)order[k - 1] : prev;
+                    if (prev <= key) break;
+                    order[k] = order[k - 1];
+                }
+                order[k] = o;
+            }
+    for (o = 0; o < n; o++) {
+        q2_monster *m;
+        s32 slot;
+        i = n <= order_cap ? order[o] : o;
+        m = &c->creatures.set.monsters[i];
+        slot = m->obj_slot;
+        if (slot >= 0)
+            q2_sim_entities_to(&c->sim[0], slot);
         q2_cre_motion_world world = {0};
         world.coll = c->sim[0].coll_ready ? &c->sim[0].coll : NULL;
         world.world = &c->sim[0].move_world;
@@ -4485,6 +4673,18 @@ static void client_creatures_tick(client *c, float dt, const s32 eye[3])
             for (j = 0; j < c->sim[0].body_count; j++)
                 if (c->sim[0].bodies[j].id == (s32)i) c->sim[0].bodies[j] = *body;
         }
+        if (slot >= 0) {
+            /* The walk is past this record now, whatever takes it next. */
+            if (c->sim[0].entities.walking && c->sim[0].entities.walk_slot <= slot)
+                c->sim[0].entities.walk_slot = slot + 1;
+            /* 0x8006D280 from the gib arm (0x8007D140) or the dissolve: the
+             * actor's record is back on the stack. */
+            if (!m->in_use) {
+                q2_obj_slot_free(slot);
+                m->obj_slot = -1;
+            }
+        }
+    }
     }
     if (old_clock != q2_level_state.time) {
         /*
@@ -6444,7 +6644,7 @@ static void client_native_mission_restore(client *c, bool full_load)
     }
 }
 
-static void client_activate_batch(client *c, const char *group)
+static void client_activate_batch_now(client *c, const char *group)
 {
     u32 woke = c->creatures_ready
              ? q2_creature_world_summon(&c->creatures, group) : 0;
@@ -6452,6 +6652,36 @@ static void client_activate_batch(client *c, const char *group)
     c->script_summoned += woke;
     if (woke || placed)
         Q2_INFO("CREBATCH '%s' woke %u, placed %u", group, woke, placed);
+}
+
+/*
+ * A CREBATCH RAISED DURING A FRAME SPAWNS AT THE TOP OF THE NEXT ONE. The
+ * script and the level callbacks only select the group; ProcessCreatureBatches
+ * (0x80056D68, from QuakeLoop at 0x80038F24, after the active-area flood and
+ * before MoveModels) is what spawns it, so its creatures and pickups appear
+ * on the following frame. Spawned on the spot, BASE3's Zone1bob made its
+ * start draws at record frame 152 where the console's are at 153. A batch
+ * raised outside a frame (a load, a restore) is spawned at once.
+ */
+static void client_activate_batch(client *c, const char *group)
+{
+    if (c->batches_deferred &&
+        c->batch_queued < Q2PSX_ARRAY_COUNT(c->batch_queue)) {
+        snprintf(c->batch_queue[c->batch_queued], sizeof(c->batch_queue[0]),
+                 "%s", group);
+        c->batch_queued++;
+        return;
+    }
+    client_activate_batch_now(c, group);
+}
+
+static void client_flush_batches(client *c)
+{
+    u32 i, n = c->batch_queued;
+
+    c->batch_queued = 0;
+    for (i = 0; i < n; i++)
+        client_activate_batch_now(c, c->batch_queue[i]);
 }
 
 /* RegisterKill (0x8007CD24) consumes Population.flags & 0x600 at corpse
@@ -12374,6 +12604,13 @@ static void client_input_simulated(client *c, float dt)
     if (c->selfplay_active)
         sp_tick = client_selfplay_frame(c, dt, &sp_buttons);
     step = q2_sim_next_dt(&c->sim[0], (double)dt);
+    /* QuakeLoop's own order: flood the active areas (0x80038F1C), spawn the
+     * selected batches (0x80038F24), and only then the players' thinks and the
+     * module's per-frame hook, whose raises wait for the next frame. */
+    if (step != 0 && (!c->selfplay_active || sp_tick)) {   /* frames that tick */
+        client_cre_activity(c);
+        client_flush_batches(c);
+    }
 
     pad->lx = pad->ly = pad->rx = pad->ry = 0;
     {
@@ -12901,10 +13138,15 @@ static void client_input_simulated(client *c, float dt)
     c->sim[0].defer_missiles = c->mp_enabled;
     /* The items and gibs wait for the creatures (sim.h, defer_entities): held
      * for this tick only, and run below by q2_sim_entities_late. */
+    c->batches_deferred = true;
     c->sim[0].defer_entities = true;
     ticked = (q2_sim_advance(&c->sim[0], &in, (double)dt) != 0);
     c->sim[0].defer_entities = false;
     if (ticked) client_glint_scene(c, false);
+    /* MoveModels' walk: the records below the first creature run before it.
+     * See client_creatures_tick and q2_entity_walk_begin. */
+    if (ticked) q2_sim_entities_begin(&c->sim[0], c->sim[0].cur_dt);
+    if (ticked) client_ai_clock(c, c->sim[0].cur_dt);
     q2_combat_scan_who = Q2_COMBAT_SCAN_OTHER;
     client_score_deaths(c);
 
@@ -13792,7 +14034,7 @@ static void client_input_simulated(client *c, float dt)
      */
     if (ticked) {
         u32 before = c->lights_ready ? c->light_world.dynamic_world_count : 0;
-        q2_sim_entities_late(&c->sim[0], c->sim[0].cur_dt);
+        q2_sim_entities_end(&c->sim[0]);
         client_entity_events(c);
         /* What the sweep lit is held to the next tick with the rest. */
         if (c->lights_ready) {
@@ -13831,6 +14073,7 @@ static void client_input_simulated(client *c, float dt)
      * against the console's own BASE3 attract run (lockstep_oracle.py).
      */
     client_level_effects_frame(c, ticked);
+    if (ticked) client_cre_flash_drain(c);   /* the draw pass, 0x80031094 */
 
     /*
      * DEATH — the whole chain now, not only the frame it starts on.
@@ -16642,6 +16885,7 @@ static bool client_apply_save(client *c, const q2_save *s)
      * keeps what was loaded instead. A restart's own reload keeps its copy,
      * which is the console's rule.
      */
+    client_obj_slots_assign(c);   /* the restored objects' walk order */
     if (!c->restarting)
         client_autosave_store(c);
 
