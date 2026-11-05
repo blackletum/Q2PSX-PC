@@ -278,6 +278,20 @@ class OracleMachine(LoaderMachine):
             self.rand_log.append(('stepret', pc, signed(self.r[2])))
         if pc == 0x80046B98:  # the toss / tumble: its object's flags
             self.rand_log.append(('toss', self.r[4], [self.read(self.r[4] + 0x98, 4), self.read(self.r[4] + 0xE6, 2), self.read(0x800AE8B4, 4)] + [signed(self.read(self.r[4] + 0x54 + 4 * i, 4)) for i in range(3)] + [signed(self.read(self.r[4] + o, 2), 16) for o in range(0xC0, 0xF0, 2)]))
+        if pc == 0x80065C5C:  # SortData's region test: the area and its packed rectangle
+            self.rand_log.append(('region', self.r[16], [signed(self.read(self.r[29] + 78, 2), 16)] +
+                                  [signed(self.read(self.r[16] + 2 * i, 2), 16) for i in range(4)] +
+                                  [signed(self.read(self.read(0x800B2C24, 4) + 4 * i, 4)) for i in range(3)]))
+        if pc in (0x800689F4, 0x800578D8):  # area stamp (player, area) / the creature activity test
+            self.rand_log.append(('stamp' if pc == 0x800689F4 else 'activity', self.r[31], [self.r[4], self.r[5]]))
+        if pc == 0x801FB724:  # BASE3's Soldier fire, after attachment_local_offset: the local muzzle and its inputs
+            o, sp = self.r[17], self.r[29]
+            self.rand_log.append(('muzzle', o, [signed(self.read(sp + 144 + 2 * i, 2), 16) for i in range(3)] +
+                                  [signed(self.read(o + 256, 2), 16), hex(self.read(o + 176, 4))] +
+                                  [signed(self.read(0x801FD7E0 + 2 * i, 2), 16) for i in range(4)] +
+                                  [signed(self.read(o + 164 + 4 * i, 4)) for i in range(3)] +
+                                  [signed(self.read(o + 704 + 2 * i, 2), 16) for i in range(9)] +
+                                  [signed(self.read(o + 0xE6 + 2 * i, 2), 16) for i in range(3)]))
         if pc == 0x8004874C:  # the bullet: shooter object, its edict's frame and yaw, the start and the dir
             o = self.r[4]
             e = self.read(o + 748, 4) if o else 0
@@ -648,6 +662,11 @@ def run_frames(m, count, frames, t0):
                        'view_area': m.read(WINDOWS + 0x9E, 2),
                        'closed': [n for n in range(400) if m.read(m.read(0x800B2C3C, 4) + 52 * n + 8, 4) & 0x8000],
                        'cre': creatures(m),
+                       'camera': [signed(m.read(WINDOWS + 4 * i, 4)) for i in range(3)] +
+                                 [signed(m.read(WINDOWS + 12 + 2 * i, 2), 16) for i in range(3)],
+                       # Areas player one's view drew this frame: 0x800689F4's stamp
+                       # (0x800B2DE4); the next frame's creatures test them (0x800689C0).
+                       'seen': [a for a in range(96) if m.read(0x800D8D78 + 64 * a, 2) == m.read(0x800B2DE4, 2)],
                        'boxes': [[i] + [signed(m.read(0x800CAE10 + 64 * i + 4 * j, 4)) for j in range(6)] + [m.read(0x800CAE10 + 64 * i + 55, 1)]
                                  for i in range(48) if m.read(0x800CAE10 + 64 * i + 54, 1)],
                        'rand': [(k, ra, v) for k, ra, v in m.rand_log]})

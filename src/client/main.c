@@ -3491,7 +3491,16 @@ static const q2_model_instance *client_cre_pose(client *c, const q2_monster *m)
         inst->origin[0] = q2_cre_origin(m)[0];
         inst->origin[1] = q2_cre_origin(m)[1] + Q2_EYE_BASE - low;
         inst->origin[2] = q2_cre_origin(m)[2];
-        inst->yaw = q2_cre_yaw(m);
+        /*
+         * THE YAW STAYS THE ONE THE LAST DRAW USED. The console poses against
+         * the object's matrix at +704, which the creature handler rebuilds
+         * from the body's angles only at its END (0x8007F070..0x8007F088,
+         * after the think). A creature firing while it turns uses last
+         * frame's facing: BASE3's attract Soldier at record frame 254 fired
+         * through a matrix at yaw 1530 with its body already at 1550. The
+         * position is the current one (0x801FB744 adds +164..+172 at the
+         * shot).
+         */
     }
     return &c->cre_fx[idx].inst;
 }

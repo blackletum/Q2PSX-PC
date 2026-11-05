@@ -978,8 +978,18 @@ static void sync_rules(q2_sim *sim)
  * entity box (a door or an intact pane, q2_trace.node == -1), which is not a
  * cell and has no area record at all.
  */
+static s32 world_trace_for(q2_sim *sim, const s32 origin[3],
+                           const s32 dir[3], u8 *area, s32 end_out[3]);
+
 static s32 world_fraction_for(q2_sim *sim, const s32 origin[3],
                               const s32 dir[3], u8 *area)
+{
+    return world_trace_for(sim, origin, dir, area, NULL);
+}
+
+/* The same trace, and where it stopped (0x80044C44 writes the end back). */
+static s32 world_trace_for(q2_sim *sim, const s32 origin[3],
+                           const s32 dir[3], u8 *area, s32 end_out[3])
 {
     q2_trace tr;
     s32 end[3];
@@ -987,15 +997,18 @@ static s32 world_fraction_for(q2_sim *sim, const s32 origin[3],
 
     if (area)
         *area = 0;
-    if (!sim->coll_ready)
-        return 4096;
-
     for (k = 0; k < 3; k++)
         end[k] = origin[k] + dir[k];
+    if (end_out)
+        memcpy(end_out, end, sizeof(end));
+    if (!sim->coll_ready)
+        return 4096;
 
     q2_sim_trace(sim, origin, end, &tr);
     if (area && tr.node >= 0)
         *area = (u8)(tr.contents & 0x7F);
+    if (end_out && tr.hit)
+        memcpy(end_out, tr.end, sizeof(tr.end));
     return tr.hit ? tr.fraction : 4096;
 }
 
@@ -1747,7 +1760,9 @@ static s32 actor_hitscan(q2_sim *sim, q2_actor *attacker,
         return -1;
 
     n = hitscan_victims(sim, attacker, list, &player, &player_slot);
-    frac = clip_world ? world_fraction_for(sim, start, dir, &area) : 4096;
+    for (k = 0; k < 3; k++)
+        stop[k] = start[k] + dir[k];
+    frac = clip_world ? world_trace_for(sim, start, dir, &area, stop) : 4096;
 
     /*
      * 0x8004891C (and the mission laser's 0x80048F8C): the native query from
@@ -1756,8 +1771,11 @@ static s32 actor_hitscan(q2_sim *sim, q2_actor *attacker,
      * stops the round and shields whatever stands behind it; DoDamage is what
      * refuses it. The old cylinder scan skipped such bodies outright.
      */
-    for (k = 0; k < 3; k++)
-        stop[k] = start[k] + (s32)(((s64)dir[k] * frac) >> Q2_FRAC_12);
+    /* The trace's own end, not one rebuilt from its fraction: 0x80044C44
+     * hands 0x800544EC the clipped point itself, on the plane it struck.
+     * Rebuilt as start + dir * frac it fell up to three units short, and
+     * the entry the bullet's view-plane projection amplifies moved with
+     * it (BASE3's attract run, record frame 309). */
     idx = q2_combat_trace_actors(start, stop, NULL, list, n, at);
     if (impact)
         memcpy(impact, at, sizeof(at));

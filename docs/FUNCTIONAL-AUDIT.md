@@ -1863,14 +1863,24 @@ Three more came after that:
   tilted the view plane the bullet path projects onto. It now adds each
   recorded frame's fields.
 
-*Where it parts now: frame 379.* A creature's walk coin there follows from
-player one standing a unit off from 256. At 254 a Soldier's posed shotgun
-muzzle sits about eight units along the barrel from the console's, with the
-same animation position, frame and yaw on both sides, so the pellets enter
-the player at slightly different points. The console poses it through
-0x8006C6C8; the port's draw pose differs from that at the same position.
-The trigger-volume adjustment of the sighting spot and crumbs (`0x80061024`,
-`0x80060C94`) is still not modelled.
+*Frame 379, and player one through 407.* Two more port faults moved player one's
+path from 255 to 407: a creature's muzzle is posed through the object matrix the
+handler rebuilds after its think (so a turning Soldier fires from last frame's
+facing), and the bullet's body sweep starts from the wall trace's own end, not one
+rebuilt from its fraction.
+
+*Where it parts now: frame 379.* Creature 9 (the second batch's Soldier) chases
+player one a frame later than on the console because its activity gate
+(`0x800578D8`) suspends it on the console at 292 and not in the port. The gate
+asks whether the creature's area was drawn last frame (`0x800689C0`, stamped by
+the SortData region test at `0x80065CC4`) and, if not, whether it is within 8192
+of the view. With the same camera the port's SortData regions differ from the
+console's: areas 20 and 30 get a rectangle where the console's are empty, and 16
+and 35 come out a few pixels apart, so the port counted area 16 as drawn. The
+port's transcription of the region arithmetic (`world.c`) is the next thing to
+compare. The trigger-volume adjustment of the sighting spot and crumbs
+(`0x80061024`, `0x80060C94`) is still not modelled, and the player's own bullets
+still rebuild their wall end from the trace fraction.
 
 Player one's survival is not a steady score while the fights are still
 settling: the BASE3 demo now ends at 353 of 1,125 frames (601 at one point in

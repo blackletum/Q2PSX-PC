@@ -635,6 +635,9 @@ VSync callback (`0x80019044`) adds the rate to `0x800B29D4` per field and
 MainGameLoop copies that into `0x800AEBAC` (`0x800183A0`); the oracle adds each
 recorded frame's NEWV and makes the copy. `ORACLE_WATCH=lo:hi` (hex addresses)
 prints every store into that range with the storing PC.
+Each frame also lists the areas player one's view drew (`seen`) and the view's
+position and angles (`camera`), which is what a creature's activity test reads
+in the next frame.
 
 Each record frame gives every `rand()` call with its caller and result, player
 one, every creature's actor and edict, the active-area mask, the closed doors
