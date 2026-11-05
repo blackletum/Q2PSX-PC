@@ -1772,6 +1772,25 @@ AI, damage or the shared rand() sequence over a few hundred ticks. Each demo
 is therefore a ready-made, repeatable test of end-to-end lockstep, and the
 frame at which player one dies is its score.
 
+*Where it first parts (5 November, PAL BASE3, per-frame log of the record).*
+For the first 29 record frames the replay is in step: player one's travel
+direction swings onto shotgun guard #7's bearing (170-177° against 170-174°,
+1,400-1,600 units) exactly where the recorder lines up the first volley. That
+volley (frame 28) leaves the muzzle at about 196°, and all ten pellets reach
+the wall at x = -12,120. In the port, #7 stands about 28° (some 550 units)
+off that line, so the console's guard was on it and the port's is not. #7
+starts moving at record frame 5 and runs at exactly 45° (dx = dz every step)
+from (-10740, 5632). That diagonal is SV_NewChaseDir's choice, which
+M_MoveToGoal takes when the straight step fails and, in Quake II, also on
+`rand() & 3`. So the first divergence is a creature's chase-direction choice
+within five frames of the start: either the shared rand() sequence differs by
+at least one draw before then, or the straight step is refused where the
+console's succeeds. No creature module reads InSelfPlayMode (their 71-slot
+import table has no slot for it), so the demo plays by ordinary rules.
+Deciding between the two needs the console's own per-tick rand() calls and
+creature positions for this demo, which means running QuakeLoop natively
+with the record fed through SwapButtons.
+
 ## Limits
 
 The audit remains open. Passing suites did not demonstrate full functional
