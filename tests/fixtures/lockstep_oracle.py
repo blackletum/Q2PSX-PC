@@ -276,6 +276,45 @@ class OracleMachine(LoaderMachine):
             self.rand_log.append(('stepret', pc, signed(self.r[2])))
         if pc == 0x80046B98:  # the toss / tumble: its object's flags
             self.rand_log.append(('toss', self.r[4], [self.read(self.r[4] + 0x98, 4), self.read(self.r[4] + 0xE6, 2), self.read(0x800AE8B4, 4)] + [signed(self.read(self.r[4] + 0x54 + 4 * i, 4)) for i in range(3)] + [signed(self.read(self.r[4] + o, 2), 16) for o in range(0xC0, 0xF0, 2)]))
+        if pc in (0x8005E838, 0x8005E968, 0x8005E9CC):  # ai_run's three pursuit traces, returned
+            tr = self.read(0x800AEAE8, 4)
+            self.rand_log.append(('pursuit', pc, [signed(self.read(tr + 8, 4)), signed(self.r[21]), signed(self.r[19]),
+                                                  signed(self.r[20]), signed(self.r[18])] +
+                                  [signed(self.read(tr + 12 + 4 * i, 4)) for i in range(3)]))
+        if pc in (0x80045144, 0x80053C58):  # player one's move (obj, delta) / its entity sweep (obj, want)
+            pl = self.read(((self.read(0x800B2FD0, 4) + 324) & 0xFFFFFFFF) + 36, 4)
+            if self.r[4] in (pl, pl + 0x54):
+                self.mv_ret = getattr(self, 'mv_ret', [])
+                self.mv_ret.append((self.r[31], pc, self.r[5], self.r[4]))
+                vec = ([signed(self.read(self.r[5] + 2 * i, 2), 16) for i in range(3)] if pc == 0x80045144
+                       else [signed(self.read(self.r[5] + 4 * i, 4)) for i in range(3)])
+                self.rand_log.append(('mv' if pc == 0x80045144 else 'esw', pc,
+                                      [signed(self.read(self.r[4] + 4 * i, 4)) for i in range(3)] + vec))
+        elif getattr(self, 'mv_ret', None) and pc == self.mv_ret[-1][0]:
+            _, fn, a1, pl = self.mv_ret.pop()
+            self.rand_log.append(('mvret' if fn == 0x80045144 else 'eswret', signed(self.r[2]),
+                                  [signed(self.read(pl + 4 * i, 4)) for i in range(3)] +
+                                  ([signed(self.read(a1 + 4 * i, 4)) for i in range(3)] if fn == 0x80053C58 else [])))
+        if pc in (0x8006087C, 0x80060544):  # M_MoveToGoal(self, dist) / SV_NewChaseDir(self, goal, dist)
+            e = self.r[4]
+            g = self.read(e + 132, 4) if pc == 0x8006087C else self.r[5]
+            self.rand_log.append(('mtg' if pc == 0x8006087C else 'ncd', e,
+                                  [signed(self.read(e, 4)), signed(self.read(e + 8, 4)), signed(self.read(e + 142, 2), 16),
+                                   signed(self.r[5] if pc == 0x8006087C else self.r[6]), hex(g)] +
+                                  ([signed(self.read(g, 4)), signed(self.read(g + 8, 4))] if g else [])))
+        if pc == 0x800565C4:  # spawn_entity_from_placement(record): the record as spawned
+            a = self.r[4]
+            self.rand_log.append(('placement', a, [signed(self.read(a + 4 * i, 4)) for i in range(4)] +
+                                  [hex(self.read(a + 16 + 2 * i, 2)) for i in range(4)]))
+        if pc == 0x8005D334:  # FindTarget(self): the level's alert fields on entry
+            self.ft_ret = getattr(self, 'ft_ret', [])
+            self.ft_ret.append(self.r[31])
+            e = self.r[4]
+            self.rand_log.append(('findtarget', e, [hex(self.read(0x800E46D8 + 4 * i, 4)) for i in range(9)] +
+                                  [hex(self.read(e + 28, 4)), hex(self.read(e + 228, 4)), signed(self.read(e + 308, 4)), signed(self.read(e + 268, 4))]))
+        elif getattr(self, 'ft_ret', None) and pc == self.ft_ret[-1]:
+            self.ft_ret.pop()
+            self.rand_log.append(('found', pc, signed(self.r[2])))
         if pc == 0x8002B96C:  # the CREBATCH primitive: who raised it
             self.rand_log.append(('crebatch', self.r[31], [self.r[4], self.r[5], self.r[6]]))
         if pc == 0x8004EE0C:  # PrimaryWeaponMovement: the driver record on entry
@@ -459,6 +498,7 @@ def main():
         m.scratch[:] = state['scratch']
         m.gte.d, m.gte.c, m.gte.flag = state['gte']
         m.rng_state, m.hi, m.lo = state['rng'], state['hi'], state['lo']
+        boot_globals(m)                    # a snapshot from before it was set
         print('resumed from', snap, flush=True)
     else:
         load(m, t0)
@@ -478,7 +518,22 @@ def main():
         args.out.write_text(json.dumps(frames, indent=1))
 
 
+def boot_globals(m):
+    """What the boot's main (0x80018D04) sets before any game state runs.
+
+    0x80018D84..0x80018D98 point two globals at the 324-byte scratch record
+    0x800DDDCC. 0x800B2DFC is the one ai_run takes as its tempgoal: it
+    clears it with G_InitEdict (0x8005F804) and makes it the goalentity
+    while it pursues a last sighting (0x8005E61C..0x8005E640). Left at 0, as
+    the loader leaves it, the pursuit handed M_MoveToGoal a NULL goal, so
+    SV_NewChaseDir returned at once (0x80060570) where the console steps.
+    """
+    m.write(0x800B2DFC, 4, 0x800DDDCC)
+    m.write(0x800B2DB0, 4, 0x800DDDCC)
+
+
 def load(m, t0):
+    boot_globals(m)
     m.call(0x8006E8C0)                     # heap init
     m.write(RATE, 4, 6)                    # PalNtscRate, PAL
     m.call(GAME_SELF_PLAY)

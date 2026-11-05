@@ -1823,11 +1823,35 @@ Three more came after that:
   (`0x8007270C`), because its loader stubs the sample upload. It now makes
   them as a console with its samples loaded would.
 
-*Where it parts now: frame 210.* The four Zone1bob creatures wake at 209, run
-their go routines (three Soldier stand rolls on both sides), and at 210 the
-port's first `ai_stand` arms its idle timer with a draw. The console's never
-reaches that line: its creatures are hunting by 212. So its FindTarget
-succeeds at 210 and the port's does not.
+*Frame 210 to 286.* Seven more faults, two of them in the oracle:
+- **Spawn flag 4 is ambush.** monster_start rewrites it (`0x800619F0..0x80061A44`),
+  so the second batch's flag-4 Soldier skipped ai_stand's idle roll.
+- **`visible` tests no entity box** (`0x8005B950`): the console's Soldier saw
+  player one through a door the port's could not see through.
+- **The oracle's tempgoal was NULL.** Its loader never runs the boot's `main`
+  (`0x80018D04`), which points ai_run's scratch goal at `0x800DDDCC`. The
+  oracle now makes that store (`boot_globals`); before it, a pursuing creature
+  seemed to skip SV_NewChaseDir, where the port, correctly, did not.
+- **SquareRoot0** (`0x8008A7E8`) is a table root. It is what VectorLength,
+  vectoangles and the separation pass call, and VectorNormalize (`0x8005C634`)
+  mixes it with SquareRoot12. Exact roots put player one a unit off the console
+  at frame 77 and a creature's pursuit detour on the wrong side at 217.
+- **The item sweep** (`0x8002DC04`, doors, lifts, rotators) runs before
+  MoveModels. Run after the player, the rising door held player one a frame
+  longer, from 220.
+- **A side face stops a mover one unit out** (`lo - 1`, `hi + 1` on X and Z in
+  `0x80052C70`), which is where the console's player stands at the door (207).
+- **The sighting spot and the crumbs** come from QuakeThinkGeneral on the AI
+  clock, from the position before the frame's move (`entity+0x3C`,
+  `0x8007E2C4..0x8007E3D4`). The port's crumbs were laid every tenth frame at
+  the current position.
+
+*Where it parts now: frame 287.* A Soldier fires its shotgun, and every
+pellet's impact on the console spawns about fifteen particles with six
+`rand()` draws each (`0x80048A14..0x80048A74`). The port's impact draws
+nothing. Player one is also one unit off from frame 250, after taking a hit.
+The trigger-volume adjustment of the sighting spot and crumbs (`0x80061024`,
+`0x80060C94`) is not modelled.
 
 Player one's survival is not a steady score while the fights are still
 settling: the BASE3 demo now ends at 353 of 1,125 frames (601 at one point in

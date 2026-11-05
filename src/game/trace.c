@@ -1,4 +1,5 @@
 #include "trace.h"
+#include "sdkmath.h"
 
 #include <string.h>
 
@@ -211,7 +212,15 @@ bool q2_move_sweep_box(const s32 pos[3], const s16 delta[3],
             continue;
 
         if (out_pos) {
-            out_pos[a] = plane;
+            /*
+             * A SIDE FACE STOPS ONE UNIT SHORT OF ITSELF. The X and Z faces
+             * store `lo - 1` / `hi + 1` (0x8005336C and 0x80053508 for Z,
+             * 0x8005373C and 0x800538FC for X); only the two Y faces store
+             * the plane itself (0x80052F84, 0x8005313C). Stopped on the face,
+             * BASE3's attract player came to rest against the rising door one
+             * unit nearer than the console's, at record frame 207.
+             */
+            out_pos[a] = a == 1 ? plane : face[f].low ? plane - 1 : plane + 1;
             out_pos[b] = pos[b] + tb;
             out_pos[c] = pos[c] + tc;
         }
@@ -864,22 +873,6 @@ int q2_move_checked(q2_collision *coll, q2_move_ent *ent, const s16 delta[3],
 /* ------------------------------------------------------------------------- */
 /* 0x80051258 — bodies push each other apart                                  */
 /* ------------------------------------------------------------------------- */
-/* The shape 0x8008A7E8 has; the same routine ai.c keeps for the same reason. */
-static s32 separate_isqrt(s64 n)
-{
-    s64 x, y;
-
-    if (n <= 0)
-        return 0;
-
-    x = n;
-    y = (x + 1) / 2;
-    while (y < x) {
-        x = y;
-        y = (x + n / x) / 2;
-    }
-    return (s32)x;
-}
 
 u32 q2_move_separate(const q2_move_bodies *w, s32 self_id, const s32 pos[3],
                      const s16 mins[3], const s16 maxs[3], s16 radius,
@@ -968,7 +961,11 @@ u32 q2_move_separate(const q2_move_bodies *w, s32 self_id, const s32 pos[3],
         /* 0x800514B4 the root, 0x800514E8 the penetration, 0x8005157C and
          * 0x800515B8 the two accumulates. Integer divides, as the original's
          * are — this is 16-bit arithmetic all the way down. */
-        dist = separate_isqrt(d2);
+        /* SquareRoot0 (0x800514B4 `jal 0x8008A7E8`) over the 32-bit `mult`
+         * sum: the libgte table root, which can sit a unit off the exact one.
+         * On BASE3's attract run that unit put player one a step behind the
+         * console from record frame 77. */
+        dist = (s32)q2_sdk_sqrt0((u32)d2);
         if (dist <= 0)
             continue;
         pen = (s32)reach - dist;

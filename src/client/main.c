@@ -781,6 +781,13 @@ typedef struct client {
 
     double            ai_accum;       /* seconds owed to the 10 Hz AI clock    */
     s32               ai_clock_before; /* level.time before this frame's bump */
+    /* Player one at the top of the frame, before it moves: what
+     * QuakeThinkGeneral sees (client_ai_clock). */
+    s32               ai_pre_pos[3], ai_pre_eye[3];
+    bool              ai_pre_valid;
+    /* The position at the previous AI tick, gp+18864's slot (0x8007E3D4). */
+    s32               trail_prev[3];
+    bool              trail_prev_set;
     bool              cre_activity_ready; /* the frame's flood (client_cre_activity) */
     char              batch_queue[8][32];  /* CREBATCHes for the next frame */
     u32               batch_queued;
@@ -2925,6 +2932,8 @@ static void client_load_creatures(client *c, const s32 eye[3])
      * follow you to.
      */
     q2_trail_init();
+    c->trail_prev_set = false;
+    c->ai_pre_valid = false;
 
     q2_cre_set_melee_hook(client_cre_melee, c);
     q2_cre_set_contact_hooks(client_cre_hurt, client_cre_beam, c);
@@ -4571,6 +4580,25 @@ static void client_ai_clock(client *c, s32 ticks)
         q2_level_state.time++;
         q2_level_state.framenum++;
         q2_ai_set_sight_client();
+        /*
+         * QuakeThinkGeneral's per-client pass, 0x8007E2A0..0x8007E404, with
+         * the position the client had before this frame's move:
+         *   - a crumb at the PREVIOUS tick's position, only when the client
+         *     cannot see the last crumb (0x8007E2C4..0x8007E32C);
+         *   - the sighting record at entity+0x3C (0x8007E370..0x8007E39C);
+         *   - this tick's position kept for the next crumb (0x8007E3D4).
+         * The console moves the record when the client stands in a trigger
+         * volume flagged 0x10 (0x80061024, 0x80060C94); that is not modelled.
+         */
+        if (c->ai_pre_valid) {
+            if (q2_trail_needs_spot(c->ai_pre_eye))
+                q2_trail_add(c->trail_prev_set ? c->trail_prev : c->ai_pre_pos);
+            memcpy(c->creatures.sight.sight_spot, c->ai_pre_pos,
+                   sizeof(c->creatures.sight.sight_spot));
+            c->creatures.sight.sight_spot_set = true;
+            memcpy(c->trail_prev, c->ai_pre_pos, sizeof(c->trail_prev));
+            c->trail_prev_set = true;
+        }
     }
     c->ai_accum = (double)phase / 300.0;
 }
@@ -12364,6 +12392,69 @@ static void client_advance_view_weapon(client *c, bool attack, s32 ticks)
 
 }
 
+/*
+ * THE ITEM SWEEP, 0x8002DC04: every door, lift and rotating brush handler,
+ * which QuakeLoop calls at 0x80038F14, before the active-area flood
+ * (0x80038F1C) and before MoveModels moves player one. The port ticked them
+ * after the player, so the player swept against the door where it stood at
+ * the end of the last frame, and a door the player triggered began to move in
+ * the same frame instead of the next. On BASE3's attract run that held player
+ * one at the rising door at record frame 221, a frame after the console's
+ * went under it.
+ */
+static void client_items_tick(client *c, s32 ticks)
+{
+    if (ticks < 1) ticks = 1;
+
+    /* The rotating brushes. */
+    if (c->rotators_ready)
+        c->rot_moved += q2_rotators_tick(&c->rotators, ticks);
+    q2_sim_scene_solids_update(&c->sim[0], &c->rotators);
+
+    /*
+     * And the doors and lifts. `player_keys` gates a locked door; the
+     * inventory's low twelve bits are the keys the script tests
+     * (inventory.h), which is the same field ONKEYDO reads.
+     *
+     * The hull follows the tick immediately, because the sweep the player
+     * is about to run has to see the door where it is NOW — 0x80051EC0 is
+     * called from the mover's own per-frame handler for the same reason.
+     */
+    if (c->movers_ready) {
+        client_mover_ctx bctx;
+
+        bctx.c = c;
+        c->mover_moved +=
+            q2_movers_tick_blocked(&c->movers, ticks,
+                                   (u16)(c->sim[0].combat.inv.flags
+                                         & 0x0FFFu),
+                                   client_mover_blocked, &bctx);
+        q2_sim_movers_update(&c->sim[0], &c->movers);
+
+        /*
+         * A SHOOTABLE LEAF whose hit points ran out. The sim queues the
+         * event item; opening it is this side's business because the mover
+         * set is here. `q2_movers_trigger_item` is the same entry a script
+         * uses, so a shot and a switch open a door the same way — and a
+         * MOVER_C's two leaves both go, which is what "every mover built
+         * from this item" is for.
+         */
+        {
+            u32 q;
+
+            for (q = 0; q < c->sim[0].breakable_open_count; q++) {
+                u32 n = q2_movers_trigger_item(&c->movers,
+                                               c->sim[0].breakable_open[q]);
+                if (n) {
+                    c->mover_triggers += n;
+                    c->breakable_opened++;
+                }
+            }
+            c->sim[0].breakable_open_count = 0;
+        }
+    }
+}
+
 static void client_extra_input(client *c, int pi, s32 step, bool resumed,
                                 q2_input *out)
 {
@@ -12608,6 +12699,14 @@ static void client_input_simulated(client *c, float dt)
      * selected batches (0x80038F24), and only then the players' thinks and the
      * module's per-frame hook, whose raises wait for the next frame. */
     if (step != 0 && (!c->selfplay_active || sp_tick)) {   /* frames that tick */
+        /* What QuakeThinkGeneral (0x8007F2B4, the first thing QuakeLoop
+         * does) sees of player one: where the last frame left it. */
+        c->ai_pre_pos[0] = c->sim[0].player[0].pos[0];
+        c->ai_pre_pos[1] = q2_sim_origin_y(c->sim[0].player[0].pos[1]);
+        c->ai_pre_pos[2] = c->sim[0].player[0].pos[2];
+        q2_sim_eye(&c->sim[0], c->ai_pre_eye);
+        c->ai_pre_valid = true;
+        client_items_tick(c, step);
         client_cre_activity(c);
         client_flush_batches(c);
     }
@@ -13471,32 +13570,7 @@ static void client_input_simulated(client *c, float dt)
     q2_sim_eye(&c->sim[0], eye);
     q2_sim_view_angles(&c->sim[0], view);
 
-    /*
-     * Drop a breadcrumb — 0x8007E32C is PlayerTrail_Add's only caller.
-     *
-     * NOT ON A TIMER. 0x8007E2C4 fetches the previous crumb and 0x8007E2D8
-     * skips the add while the player can still see it, so the eight slots are
-     * corner markers spanning a whole route. The ten-frame throttle stays
-     * because this sits on the render frame while the console's caller sits on
-     * the game frame; all it bounds now is how often the question is asked.
-     *
-     * AND THE CRUMB IS AN ENTITY ORIGIN, NOT THE EYE. The slots are fed
-     * straight to `visible` and then to M_MoveToGoal as goal positions, both
-     * of which are in the origin frame — this is the same rule the AI tick
-     * below already follows. Recording the eye put every crumb
-     * Q2_VIEW_STAND - Q2_EYE_BASE = 290 units out in Y, which is further than
-     * a run frame's step, so ai_run's arrival test (`dist*dist >= |v|^2`)
-     * could never fire and the pursuit stalled on its first waypoint.
-     */
-    if (c->creatures_ready && (c->frame_index % 10) == 0
-        && q2_trail_needs_spot(eye)) {
-        s32 crumb[3];
-
-        crumb[0] = c->sim[0].player[0].pos[0];
-        crumb[1] = q2_sim_origin_y(c->sim[0].player[0].pos[1]);
-        crumb[2] = c->sim[0].player[0].pos[2];
-        q2_trail_add(crumb);
-    }
+    /* The breadcrumbs are laid on the AI clock now (client_ai_clock). */
 
     /* The multiplayer session's own frame, on the same clock. */
     if (ticked) client_mp_tick(c, c->sim[0].cur_dt);
@@ -13530,24 +13604,13 @@ static void client_input_simulated(client *c, float dt)
         s32 ticks = c->sim[0].cur_dt;
         if (ticks < 1) ticks = 1;
 
-        /* The rotating brushes. */
-        if (c->rotators_ready)
-            c->rot_moved += q2_rotators_tick(&c->rotators, ticks);
-        q2_sim_scene_solids_update(&c->sim[0], &c->rotators);
+        /* The rotating brushes, the doors and the lifts run at the top of the
+         * tick now: client_items_tick. */
 
         /* The script's own clock, which is what a TIMER's deadline is measured
          * against. It has no readiness flag of its own and never needed one. */
         q2_event_rt_advance(&c->sim[0].event_rt, (s32)ticks);
 
-        /*
-         * And the doors and lifts. `player_keys` gates a locked door; the
-         * inventory's low twelve bits are the keys the script tests
-         * (inventory.h), which is the same field ONKEYDO reads.
-         *
-         * The hull follows the tick immediately, because the sweep the player
-         * is about to run has to see the door where it is NOW — 0x80051EC0 is
-         * called from the mover's own per-frame handler for the same reason.
-         */
         /*
          * The pop-up's own countdown. A HELPCOMPUTER is a DELAYED raise —
          * 0x800213B0 arms `delay * frame_dt * 2` and 0x80021830 counts it down
@@ -13558,40 +13621,6 @@ static void client_input_simulated(client *c, float dt)
             q2_briefing_popup_tick(&c->popup, ticks, c->sim[0].level_time,
                                    false, false))
             c->popup_opens++;
-
-        if (c->movers_ready) {
-            client_mover_ctx bctx;
-
-            bctx.c = c;
-            c->mover_moved +=
-                q2_movers_tick_blocked(&c->movers, ticks,
-                                       (u16)(c->sim[0].combat.inv.flags
-                                             & 0x0FFFu),
-                                       client_mover_blocked, &bctx);
-            q2_sim_movers_update(&c->sim[0], &c->movers);
-
-            /*
-             * A SHOOTABLE LEAF whose hit points ran out. The sim queues the
-             * event item; opening it is this side's business because the mover
-             * set is here. `q2_movers_trigger_item` is the same entry a script
-             * uses, so a shot and a switch open a door the same way — and a
-             * MOVER_C's two leaves both go, which is what "every mover built
-             * from this item" is for.
-             */
-            {
-                u32 q;
-
-                for (q = 0; q < c->sim[0].breakable_open_count; q++) {
-                    u32 n = q2_movers_trigger_item(&c->movers,
-                                                   c->sim[0].breakable_open[q]);
-                    if (n) {
-                        c->mover_triggers += n;
-                        c->breakable_opened++;
-                    }
-                }
-                c->sim[0].breakable_open_count = 0;
-            }
-        }
 
         /*
          * A `func_explosive` that came apart this tick, wherever it came from —

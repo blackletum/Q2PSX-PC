@@ -442,7 +442,9 @@ static void test_vectors(void)
     check_eq_i(q2_vectoyaw(v), 0, "height does not tilt the yaw");
 
     v[0] = 3000; v[1] = 4000; v[2] = 0;
-    check_eq_i(q2_vector_length(v), 5000, "length is a real 3D length");
+    /* SquareRoot0 (0x8008A7E8) is a table root: 25,000,000 normalises to 95,
+     * whose entry is 4990 << 12 >> 12. The console's length is 4990. */
+    check_eq_i(q2_vector_length(v), 4990, "length is SquareRoot0's, not the exact 5000");
     check_eq_i(q2_vector_length_sq(v), 25000000, "and its square agrees");
 
     /* Both saturate rather than overflow, which is observable as two distant
@@ -451,7 +453,8 @@ static void test_vectors(void)
     check_eq_i(q2_vector_length(v), 0xB504, "an oversized component saturates");
 
     v[0] = 4096; v[1] = 0; v[2] = 0;
-    check_eq_i(q2_vector_normalize(v), 4096, "normalize returns the old length");
+    /* 0x8005C634 returns the length in 20.12, 4096 << 12. */
+    check_eq_i(q2_vector_normalize(v), 4096 << 12, "normalize returns the old length, in 20.12");
     check_eq_i(v[0], 4096, "and leaves a 1.12 unit vector");
 
     {
@@ -512,7 +515,8 @@ static void test_vectors(void)
                    "and straight down +Z comes back a quarter turn off, as "
                    "id's unswapped `value1[1] > 0 ? 90` makes it on the "
                    "console");
-        w[0] = 300; w[1] = -300; w[2] = 0;
+        /* 256 * 256 normalises to table entry 0, so its root is exact. */
+        w[0] = 256; w[1] = -256; w[2] = 0;
         q2_vectoangles(w, ang);
         check(ang[0] == 4096 - 512 && ang[2] == 1024,
               "a climbing vector is a negative pitch, lifted by 4096");

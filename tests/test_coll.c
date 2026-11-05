@@ -1037,13 +1037,14 @@ static void test_separate(void)
     check(r == 0, "a body 300 units away pushes");
     check(delta[0] == 0 && delta[2] == 0, "...and moved the delta");
 
-    /* Inside the cylinder: 200 apart on X, so 56 units of penetration, all of
-     * it along -X because that is where the other body is. */
+    /* Inside the cylinder: 200 apart on X, all of it along -X because that is
+     * where the other body is. SquareRoot0 (0x8008A7E8) puts 200 at 199, so the
+     * penetration is 57 and the push -200 * 57 / 199 = -57. */
     body_at(&list[0], 7, 200, 0, 0);
     delta[0] = 0; delta[1] = 0; delta[2] = 0;
     r = q2_move_separate(&w, 1, pos, mins, maxs, Q2_BODY_RADIUS, delta, NULL);
     check((r & Q2_SEPARATE_PUSHED) != 0, "an overlapping body does not push");
-    check(delta[0] == -56, "the push is not the penetration");
+    check(delta[0] == -57, "the push is not the penetration");
     check(delta[1] == 0, "the push moved the vertical delta");
     check(delta[2] == 0, "the push moved a perpendicular axis");
 
@@ -1102,7 +1103,7 @@ static void test_separate(void)
     body_at(&list[1], 8, 0, 0, 200);
     delta[0] = 0; delta[1] = 0; delta[2] = 0;
     r = q2_move_separate(&w, 1, pos, mins, maxs, Q2_BODY_RADIUS, delta, NULL);
-    check(delta[0] == -56 && delta[2] == -56,
+    check(delta[0] == -57 && delta[2] == -57,
           "two bodies did not both push");
 }
 

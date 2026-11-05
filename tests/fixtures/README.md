@@ -625,12 +625,17 @@ draw's ordering-table insertion and SnapShotPadViolation (`0x80032DCC`). Without
 that last stub GameCheckPaused finds no pad and pauses the run. The loader stubs the sample upload, so the randomising sound start
 (`0x8007270C`) would never reach its pitch and volume draws; the oracle makes
 them at its entry as a console with its samples loaded and a voice free does.
+The loader never runs the boot's `main` (`0x80018D04`) either, so the oracle
+makes its two pointer stores itself (`0x80018D84..0x80018D98`). One of them is
+ai_run's scratch tempgoal (`0x800B2DFC`, the record at `0x800DDDCC`). Left at 0,
+a creature chasing a last sighting has no goal and never takes SV_NewChaseDir's
+coin, which a console does.
 
 Each record frame gives every `rand()` call with its caller and result, player
 one, every creature's actor and edict, the active-area mask, the closed doors
 and the entity box table. `--snapshot` saves the state after the 40-second load
 for later runs. `--probes` adds diagnostic events: box traces and their passes,
-SV_StepDirection, the actor pulls, player one's stepped move, body parts and
+SV_StepDirection, M_MoveToGoal and SV_NewChaseDir with each one's goal, FindTarget, the placement records, the actor pulls, player one's stepped move, body parts and
 gibs. It is a diagnostic: nothing it prints is checked in, and nothing from the
 disc is written.
 

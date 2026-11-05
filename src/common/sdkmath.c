@@ -23,6 +23,19 @@ u32 q2_sdk_sqrt0(u32 squared)
     return (seed << ((31 - leading) / 2)) >> 12;
 }
 
+u32 q2_sdk_sqrt12(u32 squared)
+{
+    u32 leading, normalized, seed;
+    s32 shift;
+    if (!squared || squared > 0x7FFFFFFFu) return floor_root((u64)squared << 12);
+    leading = (u32)q2_count_leading_zeros_u32(squared) & ~1u;
+    normalized = leading >= 24 ? squared << (leading - 24) : squared >> (24 - leading);
+    seed = floor_root((u64)normalized << 18);
+    /* 0x8008A9F0..0x8008AA50: `sra` of 19 - leading, then sllv or srlv. */
+    shift = (s32)(19 - (s32)leading) >> 1;
+    return shift >= 0 ? seed << shift : seed >> -shift;
+}
+
 u32 q2_sdk_sqrt_refined(u32 squared)
 {
     u32 root = q2_sdk_sqrt0(squared);

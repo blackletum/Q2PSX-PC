@@ -3689,32 +3689,18 @@ static void test_movers_block_sight_and_shots(void)
     }
 
     /*
-     * AND THE SIGHT LINE, over the same boxes. This is the one that makes
-     * creatures stop attacking through a shut door: every fire hook gates each
-     * shot on `q2_visible`, which ends in this call.
+     * AND THE SIGHT LINE, which IGNORES the boxes. `visible` (0x8005B950) is
+     * PrimaryColl's walk from eye to eye and nothing more, so a door does not
+     * hide a creature's target: the console's sees through a shut one.
      */
     q2_ai_world_bind_init(&bind, &sim.coll, NULL);
     check(bind.world.line_of_sight(bind.world.user, from, to),
           "with no doors bound, the creature can see across the room");
 
     q2_ai_world_bind_entities(&bind, &sim.move_world);
-    check(!bind.world.line_of_sight(bind.world.user, from, to),
-          "with the door bound, it cannot");
-    check_eq_i(bind.stats.los_blocked_ent, 1,
-               "and the block is recorded as a door rather than as geometry");
-
-    /* Sight along the room but not across the door is still clear, so the clip
-     * is the door and not the binding refusing everything. */
-    {
-        s32 near_to[3] = { 2000, 300, 1500 };
-
-        check(bind.world.line_of_sight(bind.world.user, from, near_to),
-              "a creature on this side of the door still sees this side");
-    }
-
-    door[0].min[2] = 100000; door[0].max[2] = 100200;
     check(bind.world.line_of_sight(bind.world.user, from, to),
-          "and once the door opens, sight is restored");
+          "and with the door bound, it still can: visible tests no entity box");
+    check_eq_i(bind.stats.los_blocked_ent, 0, "so nothing is recorded as a door");
 
     q2_ai_set_world(NULL);
 }
@@ -3807,8 +3793,10 @@ static void test_scene_solid_lifetimes(void)
     check(tr.hit && tr.end[2] == 2000, "sim traces stop at the closed hatch");
     q2_ai_world_bind_init(&bind, &sim.coll, NULL);
     q2_ai_world_bind_entities(&bind, &sim.move_world);
-    check(!bind.world.line_of_sight(bind.world.user, from, to),
-          "closed hatch also blocks creature sight");
+    /* But not creature sight: `visible` (0x8005B950) walks the hull alone and
+     * tests no entity box, doors and hatches included. */
+    check(bind.world.line_of_sight(bind.world.user, from, to),
+          "a closed hatch does not block creature sight");
     q2_rotator_trigger(&rot, 0);
     q2_rotators_tick(&rot, 1); q2_sim_scene_solids_update(&sim, &rot);
     check(!q2_move_sweep_world(&sim.move_world, from, to, &hit),

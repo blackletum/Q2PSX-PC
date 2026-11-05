@@ -1,5 +1,6 @@
 #include "random.h"
 #include "ai.h"
+#include "sdkmath.h"      /* SquareRoot0, 0x8008A7E8 */
 
 #include <math.h>
 #include <stdint.h>
@@ -125,21 +126,16 @@ s16 q2_vectoyaw(const s32 v[3])
     return v ? (s16)q2_ratan2(v[0], v[2]) : 0;
 }
 
-/* Integer square root, the shape 0x8008A7E8 has. */
-static s32 isqrt64(s64 n)
+/*
+ * SquareRoot0 (0x8008A7E8), the libgte table root both VectorLength and
+ * vectoangles call: a leading-zero normalise, one of 192 table entries and a
+ * shift, so it is NOT the exact floor root. Over the squares the AI takes it
+ * can be a unit high or low, and a sight or range test that sits on a
+ * boundary flips with it. The square is the console's 32-bit `mult` sum.
+ */
+static s32 ai_sqrt0(u32 squared)
 {
-    s64 x, y;
-
-    if (n <= 0)
-        return 0;
-
-    x = n;
-    y = (x + 1) / 2;
-    while (y < x) {
-        x = y;
-        y = (x + n / x) / 2;
-    }
-    return (s32)x;
+    return (s32)q2_sdk_sqrt0(squared);
 }
 
 /*
@@ -162,7 +158,8 @@ s32 q2_vector_length(const s32 v[3])
         llabs((long long)v[2]) >= Q2_LEN_LIMIT)
         return 0xB504;
 
-    return isqrt64((s64)v[0] * v[0] + (s64)v[1] * v[1] + (s64)v[2] * v[2]);
+    return ai_sqrt0((u32)v[0] * (u32)v[0] + (u32)v[1] * (u32)v[1] +
+                   (u32)v[2] * (u32)v[2]);
 }
 
 s64 q2_vector_length_sq(const s32 v[3])
@@ -178,25 +175,45 @@ s64 q2_vector_length_sq(const s32 v[3])
     return (s64)v[0] * v[0] + (s64)v[1] * v[1] + (s64)v[2] * v[2];
 }
 
-/* 0x8005C634 — normalise in place to 1.12, returning the old length. */
+/*
+ * 0x8005C634 - VectorNormalize, to 1.12 in place.
+ *
+ * The square saturates to 0x7FFEA810 when any component reaches 26755, as
+ * VectorLength's does (0x8005C6A4). Above 0x7FFFF the length is SquareRoot0's
+ * shifted to 20.12 (0x8005C6F0..0x8005C6FC); below it, SquareRoot12 of the
+ * square << 12 (0x8005C700), which is the same length with a fraction. Each
+ * component is then `v * (0x40000000 / len) >> 6`, the shift rounding toward
+ * zero (0x8005C750 `bltz` / `addiu 63`). A zero length leaves the vector as it
+ * is (0x8005C70C). The return is that 20.12 length; no caller reads it.
+ */
 s32 q2_vector_normalize(s32 v[3])
 {
-    s32 len;
+    u32 sq, len;
+    s32 inv;
+    int k;
 
     if (!v)
         return 0;
 
-    len = q2_vector_length(v);
-    if (len <= 0) {
-        v[0] = v[1] = v[2] = 0;
+    if (llabs((long long)v[0]) >= Q2_LEN_LIMIT ||
+        llabs((long long)v[1]) >= Q2_LEN_LIMIT ||
+        llabs((long long)v[2]) >= Q2_LEN_LIMIT)
+        sq = 0x7FFEA810u;
+    else
+        sq = (u32)v[0] * (u32)v[0] + (u32)v[1] * (u32)v[1] +
+             (u32)v[2] * (u32)v[2];
+
+    if ((s32)sq > 0x7FFFF)
+        len = q2_sdk_sqrt0(sq) << 12;
+    else
+        len = q2_sdk_sqrt12(sq << 12);
+    if (!len)
         return 0;
-    }
 
-    v[0] = (s32)(((s64)v[0] << 12) / len);
-    v[1] = (s32)(((s64)v[1] << 12) / len);
-    v[2] = (s32)(((s64)v[2] << 12) / len);
-
-    return len;
+    inv = (s32)(0x40000000u / len);
+    for (k = 0; k < 3; k++)
+        v[k] = (s32)((u32)v[k] * (u32)inv) / 64;
+    return (s32)len;
 }
 
 /*
@@ -319,8 +336,8 @@ void q2_vectoangles(const s32 v[3], s16 out[3])
         if (yaw < 0)
             yaw += 4096;
 
-        pitch = ratan2_4096(v[1], isqrt64((s64)v[0] * v[0] +
-                                          (s64)v[2] * v[2]));
+        pitch = ratan2_4096(v[1], ai_sqrt0((u32)v[0] * (u32)v[0] +
+                                          (u32)v[2] * (u32)v[2]));
         if (pitch < 0)
             pitch += 4096;
     }
@@ -665,11 +682,13 @@ void q2_hunt_target(q2_monster *self)
 
 /* The enemy's position as the AI records it: a client reports its own, which
  * is the branch on entity+0x3C at 0x8005D150. */
+/* entity+0x3C when the enemy has one (a client), else its origin. */
 static void enemy_position(const q2_monster *e, s32 out[3])
 {
-    out[0] = e->pos[0];
-    out[1] = e->pos[1];
-    out[2] = e->pos[2];
+    const s32 *at = e->sight_spot_set ? e->sight_spot : e->pos;
+    out[0] = at[0];
+    out[1] = at[1];
+    out[2] = at[2];
 }
 
 void q2_found_target(q2_monster *self)

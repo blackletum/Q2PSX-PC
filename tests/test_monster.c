@@ -884,6 +884,26 @@ static void test_start_go_kinds(void)
     check(m.start_kind == Q2_CRE_START_WALK &&
               (m.flags & (Q2_FL_FLY | Q2_FL_SWIM)) == 0,
           "walkmonster_start parks the walk go-routine and raises no flag");
+    /* monster_start's first act (0x800619F0..0x80061A44): a placement's flag 4
+     * becomes flag 1, ambush, for anything but a good guy. The other bits stay. */
+    q2_monster_init(&m);
+    m.health     = 100;
+    m.spawnflags = Q2_SVFLAG_INUSE | (0x805u << 18 & 0x07FC0000u);
+    q2_monster_walk_start(&m);
+    check_eq_i((s32)m.spawnflags, (s32)(Q2_SVFLAG_INUSE | (0x001u << 18)),
+               "flag 4 becomes ambush, and flag 1 was already there");
+    q2_monster_init(&m);
+    m.health     = 100;
+    m.spawnflags = Q2_SVFLAG_INUSE | (0x104u << 18);
+    q2_monster_fly_start(&m);
+    check_eq_i((s32)m.spawnflags, (s32)(Q2_SVFLAG_INUSE | (0x101u << 18)),
+               "a flyer's flag 4 is converted too, beside the drop bit");
+    q2_monster_init(&m);
+    m.health     = 100;
+    m.aiflags    = Q2_AI_GOOD_GUY;
+    m.spawnflags = 0x004u << 18;
+    q2_monster_walk_start(&m);
+    check_eq_i((s32)m.spawnflags, (s32)(0x004u << 18), "a good guy keeps flag 4 (0x80061A10)");
 
     q2_monster_init(&m);
     m.health     = 100;

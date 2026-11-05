@@ -676,6 +676,16 @@ typedef struct q2_monster {
     s32 search_time;        /* +0x120 */
     s32 trail_time;         /* +0x124 */
     s32 last_sighting[3];   /* +0x128 */
+    /*
+     * A CLIENT'S SIGHTING SPOT, the record entity+0x3C points at. Every write
+     * of another creature's last_sighting reads it in place of the origin when
+     * it is set (0x8005CEE8, 0x8005D150, 0x8005DFC0, 0x8005E52C), and
+     * QuakeThinkGeneral refills it with the client's position on each AI tick,
+     * before MoveModels moves the client (0x8007E370..0x8007E39C). So a
+     * creature remembers where the player stood at the top of the frame.
+     */
+    s32 sight_spot[3];
+    bool sight_spot_set;
     s32 idle_time;          /* +0x134 */
 
     u16 nextframe;          /* +0x138 */

@@ -316,27 +316,15 @@ static bool bound_los(void *user, const s32 a[3], const s32 b3[3])
     }
 
     /*
-     * AND THE DOORS. `visible` (0x8005B950) runs its sweep through the entity
-     * list too, and a closed door is an entity — so a creature that could see
-     * you through one was not being generous, it was asking the hull a
-     * question the hull cannot answer.
-     *
-     * This is the line that fixes "creatures attack through doors": every
-     * creature's fire hook gates each shot on `q2_visible`, so a sight line
-     * that stops at the door stops the shooting with it. A POINT, not a box:
-     * sight is the query the original hands a zero box, which is what sends it
-     * to PrimaryColl in the first place.
+     * AND NOT THE DOORS. `visible` (0x8005B950) pulls both actors back over
+     * their edicts, finds the eye's cell from the actor's own (0x80055054) and
+     * returns PrimaryColl's walk (0x80044C44) from eye to eye — that and
+     * nothing else; no entity box is tested. A door is an entity box, so a
+     * creature sees through a shut door as the console's does. The port used
+     * to clip the line against the doors as well: on BASE3's attract run the
+     * Zone1bob Soldier then missed player one through the door opening at
+     * frame 209, where the console's finds him at 210.
      */
-    if (b->ents) {
-        q2_move_seg_hit mh;
-
-        if (q2_move_clip_segment(b->ents, a, b3, NULL, &mh)) {
-            b->stats.los_blocked++;
-            b->stats.los_blocked_ent++;
-            return false;
-        }
-    }
-
     return true;
 }
 

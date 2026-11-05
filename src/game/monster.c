@@ -10,6 +10,7 @@
 #include "ai.h"
 #include "aimove.h"
 #include "crebind.h"
+#include "population.h"   /* Q2_POP_SPAWN_FLAGS_*: monster_start_flags */
 #include "modelent.h"      /* q2_gib_monster_corpse: the corpse tick's dispatch */
 #include "trig.h"
 
@@ -1389,6 +1390,39 @@ void q2_monster_swim_start_go(q2_monster *m)
  * 0x8007F474`, which seeds the physical actor's animation. The client resolves
  * that frame against the loaded model before the actor's first update.
  */
+/*
+ * monster_start's FIRST ACT, 0x800619F0..0x80061A44: a placement's flag 4
+ * becomes AMBUSH.
+ *
+ *   0x800619F0  lw a1, 28(s0)               spawnflags
+ *   0x800619F8  srl v1, a1, 18              the record's nine bits
+ *   0x800619FC  andi v0, v1, 4              flag 4 ...
+ *   0x80061A10  andi v0, v0, 0x100          ... and not AI_GOOD_GUY
+ *   0x80061A28  andi v1, v1, 0x1FB          flag 4 cleared
+ *   0x80061A38  lui a0, 4 / or              flag 1 (ambush) raised
+ *   0x80061A44  sw v0, 28(s0)
+ *
+ * That is id's "spawnflag 4 is the same as ambush" in monster_start. The port
+ * published the record's nine bits (spawn.c) and never ran this, so a
+ * creature placed with flag 4 was not an ambusher: in ai_stand it took the
+ * idle roll the console's skips (0x8005CFC0 tests ambush first). BASE3's
+ * attract run parted there at record frame 210, on the second batch's
+ * flag-4 Soldier, and its flag-5 one had both bits where the console has one.
+ *
+ * It runs here, inside the wrapper, for the same reason the start-frame pick
+ * does: the good-guy test reads aiflags as the module's spawn has left them
+ * at the wrapper call.
+ */
+static void monster_start_flags(q2_monster *m)
+{
+    u32 bits = (m->spawnflags >> Q2_POP_SPAWN_FLAGS_SHIFT) & Q2_POP_SPAWN_FLAGS_MASK;
+
+    if (!(bits & 4) || (m->aiflags & Q2_AI_GOOD_GUY))
+        return;
+    bits = (bits & 0x1FBu) | 1u;
+    m->spawnflags = (m->spawnflags & 0xF803FFFFu) | (bits << Q2_POP_SPAWN_FLAGS_SHIFT);
+}
+
 static void monster_start_frame(q2_monster *m)
 {
     const q2_mmove *mv = m->currentmove;
@@ -1420,6 +1454,7 @@ void q2_monster_walk_start(q2_monster *m)
     if (!m)
         return;
     m->start_kind = Q2_CRE_START_WALK;              /* 0x80062254 */
+    monster_start_flags(m);                         /* 0x80062250 -> 0x800619F0 */
     monster_start_frame(m);                         /* 0x80062250 -> 0x80061B2C */
 }
 
@@ -1429,6 +1464,7 @@ void q2_monster_fly_start(q2_monster *m)
         return;
     m->start_kind = Q2_CRE_START_FLY;               /* 0x800622B0 */
     m->flags      = (u16)(m->flags | Q2_FL_FLY);    /* 0x800622B4 */
+    monster_start_flags(m);                         /* 0x800622B8 -> 0x800619F0 */
     monster_start_frame(m);                         /* 0x800622B8 -> 0x80061B2C */
 }
 
@@ -1438,6 +1474,7 @@ void q2_monster_swim_start(q2_monster *m)
         return;
     m->start_kind = Q2_CRE_START_SWIM;              /* 0x8006227C */
     m->flags      = (u16)(m->flags | Q2_FL_SWIM);   /* 0x80062280 */
+    monster_start_flags(m);                         /* 0x80062284 -> 0x800619F0 */
     monster_start_frame(m);                         /* 0x80062284 -> 0x80061B2C */
 }
 

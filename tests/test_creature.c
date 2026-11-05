@@ -1716,24 +1716,26 @@ static void test_melee_geometry(void)
     q2_monster m, foe;
     s32 aim[3] = { 1020, 0, 0 }, point[3];
     s16 impulse[3];
+    /* VectorLength is SquareRoot0 (0x8008A7E8): 1000 comes back 999 and 1021
+     * comes back 1020, which is what the reach and the projections below use. */
     q2_monster_init(&m); q2_monster_init(&foe);
     m.enemy = &foe; foe.pos[2] = 1000;
     check(q2_cre_melee_contact(&m, aim, point) && point[0] == 0 &&
-          point[1] == 0 && point[2] == 714,
+          point[1] == 0 && point[2] == 713,
           "central melee subtracts the target hull radius before projecting");
     q2_cre_melee_impulse(&foe, point, 400, impulse);
     check(foe.velocity[2] == 400 && impulse[2] == 6400,
           "the kick sets AI velocity and adds a separately scaled mover impulse");
     aim[1] = -48; aim[2] = -286;
     check(q2_cre_melee_contact(&m, aim, point) && point[0] == -286 &&
-          point[1] == -48 && point[2] == 1000,
+          point[1] == -48 && point[2] == 999,
           "a hull-edge swing uses the target's side and the native vertical sign");
     point[0] = 0; point[1] = 500; point[2] = 1000;
     foe.on_ground = true;
     q2_cre_melee_impulse(&foe, point, 400, impulse);
     check(foe.velocity[1] == -3072 && impulse[1] == -3072 && !foe.on_ground,
           "vertical kick scales in place, caps upward lift and ungrounds the target");
-    foe.pos[2] = 1021;
+    foe.pos[2] = 1022;
     check(!q2_cre_melee_contact(&m, aim, point), "an out-of-reach swing has no contact");
 }
 
@@ -1834,11 +1836,13 @@ static void test_gunner_and_arachner_aim(void)
     m.blind_target[0] = 100; m.blind_target[1] = -200;
     m.blind_target[2] = 2300;
     foe.pos[0] = 2100;
+    /* VectorNormalize (0x8005C634) takes SquareRoot0 above 0x7FFFF, so a
+     * 2000-unit aim roots to 1999 and comes back 4093, not 4096. */
     arachner->method[3](&m);
     check(g_muzzle_a == 290 && g_muzzle_b == 307 && g_last_shot.aimed,
           "the right rail uses its own muzzle and initialized aim");
     check(g_last_shot.dir[0] == 0 && g_last_shot.dir[1] == 0 &&
-          g_last_shot.dir[2] == 4096,
+          g_last_shot.dir[2] == 4093,
           "the first barrel fires at the earlier target, not its new position");
     check(m.blind_target[0] == 2100 && m.blind_target[1] == -200 &&
           m.blind_target[2] == 300,
@@ -1848,7 +1852,7 @@ static void test_gunner_and_arachner_aim(void)
     arachner->method[4](&m);
     check(g_muzzle_a == 239 && g_muzzle_b == 253 && g_last_shot.aimed,
           "the left rail uses its own muzzle after the enemy disappears");
-    check(g_last_shot.dir[0] == 4096 && g_last_shot.dir[1] == 0 &&
+    check(g_last_shot.dir[0] == 4090 && g_last_shot.dir[1] == 0 &&
           g_last_shot.dir[2] == 0,
           "the second barrel retains the right barrel's target snapshot");
     q2_cre_set_muzzle_hook(NULL, NULL);
