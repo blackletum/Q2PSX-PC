@@ -19044,7 +19044,9 @@ static bool client_uplink_open(client *c, int unit)
         return false;
     for (i = 0; i < 4; i++) {
         const char *s = (const char *)lb->data + text_at[i];
-        size_t n = strnlen(s, sizeof(c->uplink_text[i]));
+        /* strnlen is POSIX, not C11: the Linux build is -std=c11. */
+        const char *z = (const char *)memchr(s, 0, sizeof(c->uplink_text[i]));
+        size_t n = z ? (size_t)(z - s) : sizeof(c->uplink_text[i]);
         if (n == 0 || n >= sizeof(c->uplink_text[i])) return false;
         memcpy(c->uplink_text[i], s, n + 1);
     }
