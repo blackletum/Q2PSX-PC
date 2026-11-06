@@ -1572,7 +1572,12 @@ void q2_combat_view_plane(q2_view_plane *out, const s32 eye[3],
 
     /* MYRotMatrixYXZ2's rounding: toward zero, not the shared basis's floor. */
     out->normal[0] = (s16)mul12_toward_zero(cp, sy);
-    out->normal[1] = (s16)(-sp);
+    /* +Y is down and a negative pitch looks up, so the forward's Y is
+     * sin(pitch) itself: BASE3's attract run, record frame 496, pitch -507
+     * gives the console's plane normal (-1446, -2874, -2534). Negated, every
+     * shot taken while looking up or down was projected onto a plane tilted
+     * the other way, and its knockback pointed elsewhere. */
+    out->normal[1] = (s16)sp;
     out->normal[2] = (s16)mul12_toward_zero(cp, cy);
 
     /* 0x80037F6C..0x80037FB4: `bgez; addiu 7; sra 3` — over eight, toward

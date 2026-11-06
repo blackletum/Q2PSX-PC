@@ -805,8 +805,13 @@ int q2_move(q2_collision *coll, q2_move_ent *ent, const s16 delta_in[3],
             s16 rem[3];
             s32 d;
 
+            /* 0x8004545C: `lw v1, 40(s0)` with s0 = 0x800C8FE8, the
+             * trace record: what is left is measured from where the TRACE
+             * ended, before the one-unit back-off above moved the body. From
+             * the backed-off position a floor contact came out one unit short
+             * (BASE3's attract run, record frame 498). */
             for (i = 0; i < 3; i++)
-                rem[i] = sub16(want[i], ent->pos[i]);
+                rem[i] = sub16(want[i], end_pos[i]);
 
             d = (s32)normal[0] * rem[0]
               + (s32)normal[1] * rem[1]

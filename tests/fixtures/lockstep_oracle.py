@@ -315,6 +315,9 @@ class OracleMachine(LoaderMachine):
             v = self.r[18]
             self.rand_log.append(('knock', v, [signed(self.read(v + 760 + 2 * i, 2), 16) for i in range(3)] +
                                   [signed(self.read(self.r[29] + 40 + 4 * i, 4)) for i in range(3)]))
+        if pc == 0x80057F28:  # the knockback's delta: the victim object's origin (+84) and the damage point
+            self.rand_log.append(('knockpt', self.r[18], [signed(self.read(self.r[18] + 84 + 4 * i, 4)) for i in range(3)] +
+                                  [signed(self.read(self.r[22] + 4 * i, 4)) for i in range(3)]))
         if pc == 0x80057D54:  # the damage function: caller, a0..a3 and the stack arguments
             self.rand_log.append(('damage', self.r[31], [hex(self.r[4]), hex(self.r[5]), hex(self.r[6]), hex(self.r[7])] +
                                   [signed(self.read(self.r[29] + 16 + 4 * i, 4)) for i in range(6)]))
@@ -348,6 +351,11 @@ class OracleMachine(LoaderMachine):
             a = self.r[4]
             self.rand_log.append(('placement', a, [signed(self.read(a + 4 * i, 4)) for i in range(4)] +
                                   [hex(self.read(a + 16 + 2 * i, 2)) for i in range(4)]))
+        if pc == 0x80061190:  # fire_hit, after VectorLength: self and enemy origins, the range, the reach
+            e = self.r[19]; en = self.read(e + 188, 4)
+            self.rand_log.append(('firehit', e, [signed(self.read(e + 4 * i, 4)) for i in range(3)] +
+                                  [signed(self.read(en + 4 * i, 4)) for i in range(3)] +
+                                  [signed(self.r[2]), signed(self.read(self.r[29] + 188, 4))]))
         if pc == 0x8005D334:  # FindTarget(self): the level's alert fields on entry
             self.ft_ret = getattr(self, 'ft_ret', [])
             self.ft_ret.append(self.r[31])
@@ -525,13 +533,16 @@ def main():
     ap.add_argument('--out', type=Path)
     ap.add_argument('--snapshot', type=Path)
     ap.add_argument('--probes', action='store_true', help='log the diagnostic events (OracleMachine.probe)')
+    ap.add_argument('--probes-from', type=int, default=0, metavar='N',
+                    help='with --probes, log them only from record frame N (the run before it is faster)')
     args = ap.parse_args()
 
     disc = Form1Disc(args.pal)
     exe = disc.read('/SLES_015.34')
     image = exe[2048:2048 + struct.unpack_from('<I', exe, 0x1C)[0]]
     m = OracleMachine(image, disc)
-    m.probes = args.probes
+    m.probes = args.probes and args.probes_from <= 1
+    m.probes_from = args.probes_from if args.probes else 0
     if __import__('os').environ.get('ORACLE_WATCH'):
         lo, hi = (int(x, 16) for x in __import__('os').environ['ORACLE_WATCH'].split(':'))
         m.watch = (lo & 0x1FFFFFFF, hi & 0x1FFFFFFF)
@@ -633,6 +644,8 @@ def creatures(m):
 def run_frames(m, count, frames, t0):
     for f in range(count):
         m.rand_log = []
+        if getattr(m, 'probes_from', 0) and f + 1 >= m.probes_from:
+            m.probes = True
         m.write(NEWV, 4, 12)
         m.write(PAD + 4, 4, 0)
         # MainGameLoop's own frame setup (0x80018384..0x80018398): swap the

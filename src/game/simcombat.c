@@ -1329,85 +1329,6 @@ q2_fire_result_v2 q2_sim_fire_weapon(q2_sim *sim, int weapon_id,
     clip_muzzle(sim, &r);
     sim->combat.last_shot = r;
 
-    /*
-     * The muzzle flash, and there are FOUR weapons with one, not two.
-     *
-     * `q2_weapon_has_muzzle_light` answers for the machinegun and the chaingun,
-     * which are the two that reach AddLight (0x80075C34) — and enumerating that
-     * function's call sites is exactly why the other two were missed. The
-     * shotgun and the super shotgun each raise a TIMED light instead:
-     *
-     *   QPlayerFireShotGun       0x8004C3B0 a0 = entity+0xA4, radii 600/1200
-     *                            from 0x800AE9D8/0x800AE9DA, ticks 3
-     *   QPlayerFireSuperShotGun  0x8004C674 a0 = entity+0x54, radii 800/1600
-     *                            from 0x800AE9E4/0x800AE9E6, ticks 4
-     *
-     * both through AddTimedLight (0x80075D14), both taking their colour from
-     * the same `C8 64 64` at 0x800AE9D4 the machinegun uses. So the super
-     * shotgun has the largest and longest flash the player owns and it was the
-     * one raising nothing at all. `q2_light_muzzle_preset` is the table.
-     *
-     * Drawn AFTER the shot so the flash does not perturb the spread sequence,
-     * which is what the fire function's own ordering does — and for the two
-     * timed weapons that ordering is the console's literally, because their
-     * AddTimedLight call comes after the pellet loop (0x8004C398's `slti 5`).
-     */
-    {
-        q2_muzzle_light ml;
-
-        if (r.shot_count && q2_light_muzzle_preset((u8)weapon_id, &ml)) {
-            s32 inner = ml.inner;
-            s32 outer = ml.outer;
-            s32 lit[3];
-
-            /*
-             * The machinegun and the chaingun draw their radii from TWO
-             * rand()s, inner first (0x8004C970, 0x8004C990) — see weapon.h.
-             * Sequenced into locals, because the order C evaluates a call's
-             * arguments in is unspecified and the order here is the console's.
-             * The two shotguns carry fixed halfword pairs and must not touch
-             * the RNG, or a fired shotgun would shift every later spread.
-             */
-            if (ml.random_radii) {
-                s32 ra = q2_rng_next(&sim->combat.rng);
-                s32 rb = q2_rng_next(&sim->combat.rng);
-
-                q2_weapon_muzzle_light((u8)weapon_id, ra, rb,
-                                       &inner, &outer);
-            }
-
-            /*
-             * At the player ENTITY ORIGIN, not at the eye and not at the feet.
-             *
-             * `sim->player[].pos` is the FEET (sim.h says so at the top of the
-             * file, and sim.c converts with q2_sim_origin_y everywhere it wants
-             * the entity). Passing it raw moved the flash from 290 above the
-             * origin to 286 below it — a correction in the right direction that
-             * overshot by the whole body.
-             *
-             * AND THE TWO OFFSETS ARE NOT COLLAPSED HERE — they are already the
-             * same point. The preset carries 0xA4 for the shotgun and 0x54 for
-             * the other three because those are the fields the console passes,
-             * but on a PLAYER entity this port makes them equal: entity.c's
-             * player update writes `ent.origin[] = ent.pos[]` outright, with
-             * the note that for the player +0x54 IS the origin. They diverge
-             * for an entity with a model height bias at +0xF8, which a player
-             * has not. Kept in the record so the day a player entity grows one,
-             * the two arms are already distinguishable.
-             */
-            lit[0] = sim->player[sim->cur_player].pos[0];
-            lit[1] = q2_sim_origin_y(sim->player[sim->cur_player].pos[1]);
-            lit[2] = sim->player[sim->cur_player].pos[2];
-
-            if (ml.ticks > 0)
-                q2_ent_light_timed_at(&sim->ent_world.events, lit, ml.rgb,
-                                      inner, outer, ml.ticks);
-            else
-                q2_ent_light_at(&sim->ent_world.events, lit, ml.rgb,
-                                inner, outer);
-        }
-    }
-
     sim->combat.next_fire = r.next_fire;
 
     /*
@@ -1597,6 +1518,89 @@ q2_fire_result_v2 q2_sim_fire_weapon(q2_sim *sim, int weapon_id,
         break;
     }
 
+    /* AFTER THE ROUNDS. The machinegun's two radii are drawn at
+     * 0x8004C978/0x8004C998, after the round's spread and its puff; drawn
+     * before them they took the spread's numbers (BASE3's attract run,
+     * record frame 526). */
+    /*
+     * The muzzle flash, and there are FOUR weapons with one, not two.
+     *
+     * `q2_weapon_has_muzzle_light` answers for the machinegun and the chaingun,
+     * which are the two that reach AddLight (0x80075C34) — and enumerating that
+     * function's call sites is exactly why the other two were missed. The
+     * shotgun and the super shotgun each raise a TIMED light instead:
+     *
+     *   QPlayerFireShotGun       0x8004C3B0 a0 = entity+0xA4, radii 600/1200
+     *                            from 0x800AE9D8/0x800AE9DA, ticks 3
+     *   QPlayerFireSuperShotGun  0x8004C674 a0 = entity+0x54, radii 800/1600
+     *                            from 0x800AE9E4/0x800AE9E6, ticks 4
+     *
+     * both through AddTimedLight (0x80075D14), both taking their colour from
+     * the same `C8 64 64` at 0x800AE9D4 the machinegun uses. So the super
+     * shotgun has the largest and longest flash the player owns and it was the
+     * one raising nothing at all. `q2_light_muzzle_preset` is the table.
+     *
+     * Drawn AFTER the shot so the flash does not perturb the spread sequence,
+     * which is what the fire function's own ordering does — and for the two
+     * timed weapons that ordering is the console's literally, because their
+     * AddTimedLight call comes after the pellet loop (0x8004C398's `slti 5`).
+     */
+    {
+        q2_muzzle_light ml;
+
+        if (r.shot_count && q2_light_muzzle_preset((u8)weapon_id, &ml)) {
+            s32 inner = ml.inner;
+            s32 outer = ml.outer;
+            s32 lit[3];
+
+            /*
+             * The machinegun and the chaingun draw their radii from TWO
+             * rand()s, inner first (0x8004C970, 0x8004C990) — see weapon.h.
+             * Sequenced into locals, because the order C evaluates a call's
+             * arguments in is unspecified and the order here is the console's.
+             * The two shotguns carry fixed halfword pairs and must not touch
+             * the RNG, or a fired shotgun would shift every later spread.
+             */
+            if (ml.random_radii) {
+                s32 ra = q2_rng_next(&sim->combat.rng);
+                s32 rb = q2_rng_next(&sim->combat.rng);
+
+                q2_weapon_muzzle_light((u8)weapon_id, ra, rb,
+                                       &inner, &outer);
+            }
+
+            /*
+             * At the player ENTITY ORIGIN, not at the eye and not at the feet.
+             *
+             * `sim->player[].pos` is the FEET (sim.h says so at the top of the
+             * file, and sim.c converts with q2_sim_origin_y everywhere it wants
+             * the entity). Passing it raw moved the flash from 290 above the
+             * origin to 286 below it — a correction in the right direction that
+             * overshot by the whole body.
+             *
+             * AND THE TWO OFFSETS ARE NOT COLLAPSED HERE — they are already the
+             * same point. The preset carries 0xA4 for the shotgun and 0x54 for
+             * the other three because those are the fields the console passes,
+             * but on a PLAYER entity this port makes them equal: entity.c's
+             * player update writes `ent.origin[] = ent.pos[]` outright, with
+             * the note that for the player +0x54 IS the origin. They diverge
+             * for an entity with a model height bias at +0xF8, which a player
+             * has not. Kept in the record so the day a player entity grows one,
+             * the two arms are already distinguishable.
+             */
+            lit[0] = sim->player[sim->cur_player].pos[0];
+            lit[1] = q2_sim_origin_y(sim->player[sim->cur_player].pos[1]);
+            lit[2] = sim->player[sim->cur_player].pos[2];
+
+            if (ml.ticks > 0)
+                q2_ent_light_timed_at(&sim->ent_world.events, lit, ml.rgb,
+                                      inner, outer, ml.ticks);
+            else
+                q2_ent_light_at(&sim->ent_world.events, lit, ml.rgb,
+                                inner, outer);
+        }
+    }
+
     /* Projectile allocation failure may refund cells; no trace has run on
      * that arm, so keep its inventory as the source. */
     if (r.kind == Q2_FK_BULLET || r.kind == Q2_FK_RAIL)
@@ -1668,8 +1672,12 @@ q2_damage_result q2_sim_hurt_player(q2_sim *sim, q2_actor *attacker,
     player_damage_impulse(sim, sim->cur_player, &sim->combat.self);
 
     /* Blood only when flesh actually took some of it: armour absorbing the
-     * whole hit is the case the HUD's damage flash also distinguishes. */
-    if (out.taken > 0)
+     * whole hit is the case the HUD's damage flash also distinguishes.
+     * And never for a claw: the blood belongs to the bullet arm
+     * (0x80048BA4), and fire_hit (0x80061118) calls the damage function and
+     * vector helpers only. The Infantry's smack on BASE3's attract run, record
+     * frame 518, drew 90 numbers here that the console never draws. */
+    if (out.taken > 0 && mod != Q2_MOD_MELEE)
         fx_at(sim, Q2_FX_BLOOD, point);
 
     /* Native 0x80057D54 and PlayerThink's 0x8003AE10 feedback block preserve

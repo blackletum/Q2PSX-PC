@@ -12769,6 +12769,12 @@ static void client_input_simulated(client *c, float dt)
         c->ai_pre_pos[2] = c->sim[0].player[0].pos[2];
         q2_sim_eye(&c->sim[0], c->ai_pre_eye);
         c->ai_pre_valid = true;
+        /* The AI clock first (0x80038EF8): the item sweep, the batch spawn
+         * and player one all see the new framenum. A batch spawned before it
+         * started its creatures a tick behind the console's (record frame
+         * 392 on BASE3's attract run), so their thinks read a stale
+         * framenum and a noise outlived FindTarget's window (469). */
+        client_ai_clock(c, step);
         client_items_tick(c, step);
         client_cre_activity(c);
         client_flush_batches(c);
@@ -13308,7 +13314,6 @@ static void client_input_simulated(client *c, float dt)
     /* MoveModels' walk: the records below the first creature run before it.
      * See client_creatures_tick and q2_entity_walk_begin. */
     if (ticked) q2_sim_entities_begin(&c->sim[0], c->sim[0].cur_dt);
-    if (ticked) client_ai_clock(c, c->sim[0].cur_dt);
     q2_combat_scan_who = Q2_COMBAT_SCAN_OTHER;
     client_score_deaths(c);
 

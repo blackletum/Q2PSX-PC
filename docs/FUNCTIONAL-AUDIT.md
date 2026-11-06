@@ -1888,20 +1888,49 @@ With both, the region rectangles at frame 291 match the console's exactly. The
 last fault was at 381: a pickup burst (`0x8005AB70`) draws its fifteen velocity
 triples whatever the mesh, where the port drew three numbers per group.
 
-The `rand()` stream and player one's path now match the console's for all 450
-recorded frames, the length of the reference run (`native 450 | compared 450 |
-first rand() divergence at frame None`). Three known differences remain that
-the run did not reach:
+The `rand()` stream and player one's path then matched the console's for all
+450 frames of that run.
+
+*Frame 451 to the end of the demo.* A longer run (620 frames) found five more
+port faults:
+- **The AI clock comes first** (`0x80038EF8`), before the item sweep and the
+  batch spawn. The port advanced it after player one, so the third batch,
+  spawned at 392 in a ticking frame, started its creatures' own clocks
+  (edict+0x34, `0x8007ECC4..0x8007ED04`) one tick behind. At 469 a Soldier's
+  FindTarget still heard the frame-240 noise that the console's had dropped.
+- **The view plane's vertical is `sin(pitch)`.** The port negated it, so at 496
+  five pellets were projected onto a plane tilted the wrong way (`0x80054BD4`).
+  The first pellet's knockback came out (55, 7, 64) against the console's
+  (-20, -25, 79).
+- **The slide is measured from the trace's end** (`0x8004545C`, `lw v1,
+  40(s0)` into the trace record at `0x800C8FE8`), not from the backed-off
+  body. On a sloped floor the port came out a unit short (498).
+- **`fire_hit` draws no blood** (`0x80061118`). At 518 the Infantry's smack
+  drew 90 numbers in the port.
+- **The machinegun's flash radii come after the round** (`0x8004C978`). The
+  draw count was right, so the state compare could not see it; the values were
+  swapped with the spread's.
+
+With these, the `rand()` stream matches the console's for the whole BASE3 demo:
+player one dies to the Soldier's shotgun at record frame 526 on both, and the
+demo ends there. Player one's path matches through 518. From 519 the port
+stands two units lower on a slope: its airborne arm makes the 20-unit floor
+probe (`0x80045CD0`) where the console's does not, so the state the probe tests
+(the ground flags and the ground normal at +0x60) differs there, unexplained.
+The port also draws the player's death-animation pick at 526
+(`0x8003CEEC`), which the console's run does not reach. The demo is over by
+then, so it shows in no stream.
+
+Three known differences remain that the run did not reach:
 - the trigger-volume adjustment of the sighting spot and crumbs (`0x80061024`,
   `0x80060C94`);
-- the player's own bullets still rebuild their wall end from the trace fraction;
+- the player's own bullets still rebuild their wall end from the trace
+  fraction;
 - a pickup burst's groups start at the item, not at fifteen of the posed mesh's
   vertices (`0x8006CC44`).
 
-Player one's survival is not a steady score while the fights are still
-settling. The BASE3 demo now ends at 493 of 1,125 frames (353 before this step).
-JAIL2's (454) and WASTE2's (120) were last measured before it, and neither
-demo, nor any US one, has been run against the oracle.
+JAIL2's and WASTE2's demos, and the US ones, have not been run against the
+oracle.
 
 ## Limits
 
