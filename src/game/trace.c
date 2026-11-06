@@ -178,36 +178,43 @@ bool q2_move_sweep_box(const s32 pos[3], const s16 delta[3],
         d[i]  = delta[i];
     }
 
-    /* Only the vertical axis is made relative to the target's own motion. */
-    d[1] -= other_dy;
-
     for (f = 0; f < 6; f++) {
         int a = face[f].a, b = face[f].b, c = face[f].c;
         s32 plane = face[f].low ? lo[a] : hi[a];
         s32 pa    = pos[a] + ((a == 1) ? (s32)other_dy : 0);
+        /*
+         * ONLY THE FACE'S OWN AXIS is made relative to the target's motion:
+         * the Z arm loads `d[z] - other[z]` as its divisor (0x80053200) but
+         * the vertical offset from the raw delta (`lh t3, 2` at 0x800531F0).
+         * The target moves only vertically here, so that is the Y faces'
+         * divisor; an X or Z face meets a moving door at the mover's own
+         * height. Subtracted everywhere, the US BASE3 attract player met a
+         * lowering door five units high and slid a unit short (record 341).
+         */
+        s32 da    = d[a] - ((a == 1) ? (s32)other_dy : 0);
         s32 gap, tb, tc;
 
         if (face[f].low) {
             if (plane < pa) continue;   /* already past the face   */
-            if (d[a] < 0)   continue;   /* heading away from it    */
+            if (da < 0)     continue;   /* heading away from it    */
         } else {
             if (pa < plane) continue;
-            if (d[a] > 0)   continue;
+            if (da > 0)     continue;
         }
 
         gap = plane - pa;
 
         /*
-         * Both offsets are `d[other] * gap / d[a]`, truncating toward zero. A
-         * move exactly parallel to the face (d[a] == 0) takes the zero branch
+         * Both offsets are `d[other] * gap / da`, truncating toward zero. A
+         * move exactly parallel to the face (da == 0) takes the zero branch
          * and can still report a contact — the original does that too, and the
          * caller's AABB gate is what keeps it from mattering.
          */
-        tb = (d[a] != 0) ? (s32)(((s64)d[b] * gap) / d[a]) : 0;
+        tb = (da != 0) ? (s32)(((s64)d[b] * gap) / da) : 0;
         if (tb < lo[b] - pos[b] || hi[b] - pos[b] < tb)
             continue;
 
-        tc = (d[a] != 0) ? (s32)(((s64)d[c] * gap) / d[a]) : 0;
+        tc = (da != 0) ? (s32)(((s64)d[c] * gap) / da) : 0;
         if (tc < lo[c] - pos[c] || hi[c] - pos[c] < tc)
             continue;
 

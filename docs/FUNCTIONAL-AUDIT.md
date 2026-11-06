@@ -2035,12 +2035,16 @@ megahealth decay: `0x80037C20` takes a point once its deadline is strictly
 past and re-arms one second out, after the pickup's five (`0x80036E58`); the
 port re-armed five seconds out and was 11 points healthier by frame 860.
 
-BASE3 matches the stream to its end (377) but not the path from frame 341,
-by one unit in X. Player one, stopped against a wall, meets an entity box at
-its corner: the console's first sweep (`0x80053C58`) ends on the box's X face
-and its retry runs to the world trace's end (-14068, 4673, 3562), where the
-port's ends on the Z face and retries from (-14067, 4664, 3589). Not yet
-modelled.
+BASE3 parted from the path at frame 341, by one unit in X. Player one, stopped
+against a wall, slid into a lowering door's Z face. The console's first sweep
+(`0x80053C58`) stopped at (-14067, 4659, 3588), the port's at (-14067, 4664,
+3588): the box test makes only the face's own axis relative to the mover
+(`0x80053200`) and takes the other offsets from the raw move (`0x800531F0`),
+where the port had subtracted the door's motion from the vertical delta for
+every face.
+
+All six attract demos, three on each disc, now match the console to their
+ends: the `rand()` stream and player one's position on every frame.
 
 Two known differences remain that the run did not reach:
 - the trigger-volume adjustment of the sighting spot and crumbs (`0x80061024`,
