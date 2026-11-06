@@ -236,6 +236,11 @@ void q2_cre_play_sound_owner(q2_monster *m, u32 handle, const q2_monster *owner)
 bool q2_cre_melee_contact(const q2_monster *m, const s32 aim[3], s32 point[3]);
 void q2_cre_melee_impulse(q2_monster *victim, const s32 point[3], s32 kick,
                           s16 impulse[3]);
+/* The same kick toward an explicit box centre: the victim OBJECT's abs box
+ * (object+120), which for a player is where it stands now, while the range
+ * test reads the edict origin the AI tick last copied. */
+void q2_cre_melee_impulse_at(q2_monster *victim, const s32 centre[3],
+                             const s32 point[3], s32 kick, s16 impulse[3]);
 /* Direct damage (+0xF0) and posed beam attachment (+0x7C). These imports
  * are used by the Parasite and Medic independently of projectile firing. */
 void q2_cre_set_contact_hooks(

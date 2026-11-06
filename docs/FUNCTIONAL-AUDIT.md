@@ -2015,10 +2015,16 @@ therefore draws its trail in that frame, after the creatures and the teleport
 columns. The client now holds the bolts out of the combat tick and moves every
 bolt in flight after the level effects.
 
-JAIL2 now matches the console's `rand()` stream to its end, record frame 890.
-Player one's path is not exact over the whole run: between frames 621 and 662
-it drifts by up to 14 units and settles against a wall, and from 866 it is a
-unit off. Neither reaches the stream.
+*The path: two pushes.* The `firekick` probe (`0x800613D4`) shows the
+Gladiator's swing at frame 619 aiming its kick at the player object's abs box
+(`0x8005CB00`, object+120), where this frame's move left it, while the range
+test reads the edict origin from the last AI tick: (-99, 24, -110) against the
+port's (-100, 24, -108). At 864 a rail hit the player from a contact a unit off
+the console's, because the port rebuilt the beam's end from the trace fraction
+where the console keeps the trace's own end (`0x80049264`).
+
+JAIL2 now matches the console to its end, record frame 890: the `rand()`
+stream and player one's position on every frame, as BASE3 and WASTE2 do.
 
 Two known differences remain that the run did not reach:
 - the trigger-volume adjustment of the sighting spot and crumbs (`0x80061024`,

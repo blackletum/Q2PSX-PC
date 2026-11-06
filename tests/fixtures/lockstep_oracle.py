@@ -372,6 +372,14 @@ class OracleMachine(LoaderMachine):
             self.rand_log.append(('firehit', e, [signed(self.read(e + 4 * i, 4)) for i in range(3)] +
                                   [signed(self.read(en + 4 * i, 4)) for i in range(3)] +
                                   [signed(self.r[2]), signed(self.read(self.r[29] + 188, 4))]))
+        if pc == 0x800613D4:  # fire_hit's own kick, just stored: enemy velocity, contact, unit dir, absmin, size
+            sp = self.r[29]; en = self.read(self.r[19] + 188, 4)
+            self.rand_log.append(('firekick', en, [signed(self.read(en + 104 + 4 * i, 4)) for i in range(3)] +
+                                  [signed(self.read(sp + 88 + 4 * i, 4)) for i in range(3)] +
+                                  [signed(self.read(sp + 72 + 4 * i, 4)) for i in range(3)] +
+                                  [signed(self.read(sp + 136 + 4 * i, 4)) for i in range(3)] +
+                                  [signed(self.read(sp + 120 + 4 * i, 4)) for i in range(3)] +
+                                  [signed(self.read(en + 4 * i, 4)) for i in range(3)]))
         if pc == 0x8005D334:  # FindTarget(self): the level's alert fields on entry
             self.ft_ret = getattr(self, 'ft_ret', [])
             self.ft_ret.append(self.r[31])

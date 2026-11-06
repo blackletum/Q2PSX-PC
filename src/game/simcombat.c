@@ -383,7 +383,7 @@ void q2_sim_fx_timed_bind(q2_sim *sim)
 /*
  * Where a hitscan shot leaves its mark.
  *
- * The port DOES have a contact point: `world_fraction_for` already runs the
+ * The port DOES have a contact point: `world_trace_for` already runs the
  * pellet through the hull and hands back the 1.0.12 fraction at which the world
  * stopped it, and the direction carries the range, so `origin + dir * frac` is
  * the impact. The original's own hitscan (0x8004874C) does the same thing — it
@@ -453,7 +453,7 @@ static void fx_hitscan_impact(q2_sim *sim, const s32 origin[3],
         /*
          * The area byte the console forwards here is `lbu s1, 32(v1)` at
          * 0x80048854 — the TRACE's own area record, not a fresh lookup of the
-         * contact point. `world_fraction_for` already ran that trace and now
+         * contact point. `world_trace_for` already ran that trace and now
          * hands the byte back with the fraction, so this is the console's own
          * value at no extra hull cost. A trace that ended on a door or an
          * intact pane has no cell and therefore no area record (q2_trace.node
@@ -1009,16 +1009,7 @@ static void sync_rules(q2_sim *sim)
  * entity box (a door or an intact pane, q2_trace.node == -1), which is not a
  * cell and has no area record at all.
  */
-static s32 world_trace_for(q2_sim *sim, const s32 origin[3],
-                           const s32 dir[3], u8 *area, s32 end_out[3]);
-
-static s32 world_fraction_for(q2_sim *sim, const s32 origin[3],
-                              const s32 dir[3], u8 *area)
-{
-    return world_trace_for(sim, origin, dir, area, NULL);
-}
-
-/* The same trace, and where it stopped (0x80044C44 writes the end back). */
+/* And where it stopped (0x80044C44 writes the end back). */
 static s32 world_trace_for(q2_sim *sim, const s32 origin[3],
                            const s32 dir[3], u8 *area, s32 end_out[3])
 {
@@ -1097,7 +1088,7 @@ static int player_for_actor_origin(const q2_sim *sim, const s32 *origin)
  *     question has no console answer, so it keeps the distance-only result, and
  *     `q2_sim_proj_scan.splash_unplaced` counts every such blast.
  *
- * Behind `coll_ready`, exactly as world_fraction_for is: no movement hull, no
+ * Behind `coll_ready`, exactly as world_trace_for is: no movement hull, no
  * world, and everything is visible.
  */
 static bool splash_clear(void *ctx, const s32 from[3], const s32 to[3])
@@ -1442,10 +1433,11 @@ q2_fire_result_v2 q2_sim_fire_weapon(q2_sim *sim, int weapon_id,
     case Q2_FK_RAIL: {
         const q2_shot *s = &r.shot[0];
         u8  frac_area;
-        s32 frac = world_fraction_for(sim, s->origin, s->dir, &frac_area);
+        s32 world_end[3];
+        s32 frac = world_trace_for(sim, s->origin, s->dir, &frac_area,
+                                   world_end);
         q2_damage_result dr;
-        s32 at[3], world_end[3], victim;
-        int k;
+        s32 at[3], victim;
 
         /*
          * ONE BODY. 0x80049318 asks 0x800544EC once and 0x80049334 deals one
@@ -1453,16 +1445,13 @@ q2_fire_result_v2 q2_sim_fire_weapon(q2_sim *sim, int weapon_id,
          * drawn through the body it stopped in. This port used to visit every
          * cylinder on the line, which is the PC game's rail, not this one.
          */
-        victim = q2_combat_hitscan(&sim->combat.self, s->origin, s->dir,
-                                   s->damage, Q2_MOD_RAIL, frac,
-                                   sim->combat.targets,
-                                   sim->combat.target_count,
-                                   &sim->combat.rules, &dr, at);
+        victim = q2_combat_hitscan_to(&sim->combat.self, s->origin,
+                                      world_end, s->damage, Q2_MOD_RAIL,
+                                      sim->combat.targets,
+                                      sim->combat.target_count,
+                                      &sim->combat.rules, &dr, at);
         (void)victim;
         (void)frac_area;
-        for (k = 0; k < 3; k++)
-            world_end[k] = s->origin[k] +
-                           (s32)(((s64)s->dir[k] * frac) >> Q2_FRAC_12);
         /* No blood in the body and no puff on the wall: 0x8004917C..
          * 0x8004999C calls DoDamage and draws its trail, and that is all
          * (JAIL2's attract run, record frame 720). */
@@ -1917,14 +1906,14 @@ q2_cre_rail_result q2_sim_creature_rail(q2_sim *sim, q2_actor *attacker,
     s32 frac, idx, player_slot, at[3];
     u32 n;
     u8 area;
-    int k;
 
     if (!sim || !start || !dir)
         return result;
 
-    frac = world_fraction_for(sim, start, dir, &area);
-    for (k = 0; k < 3; k++)
-        result.end[k] = start[k] + (s32)(((s64)dir[k] * frac) / 4096);
+    /* The trace's own stop, not one rebuilt from its fraction: the end at
+     * s2+48 is the trace's (0x80049264..0x80049280), and the body search
+     * runs to it (JAIL2's attract run, record frame 864). */
+    frac = world_trace_for(sim, start, dir, &area, result.end);
 
     n = hitscan_victims(sim, attacker, list, &player, &player_slot);
     idx = q2_combat_trace_actors(start, result.end, NULL, list, n, at);

@@ -3281,7 +3281,18 @@ static void client_cre_melee(q2_monster *m, const s32 aim[3], s32 damage,
      * the GROUND NORMAL, not the velocity: the velocity is never touched. */
     q2_sim_hurt_player(&c->sim[0], client_cre_actor(c, m), (s16)damage,
                        Q2_MOD_MELEE, point);
-    q2_cre_melee_impulse(enemy, point, kick, impulse);
+    {
+        /* The kick aims at the player OBJECT's abs box (0x8005CB00 reads
+         * object+120), which this frame's move has already updated, not at
+         * the edict origin the swing's range came from: JAIL2's attract
+         * run, record frame 619, where the two are 8 units apart. */
+        const q2_player *pl = &c->sim[0].player[0];
+        s32 centre[3];
+        centre[0] = pl->pos[0];
+        centre[1] = q2_sim_origin_y(pl->pos[1]);
+        centre[2] = pl->pos[2];
+        q2_cre_melee_impulse_at(enemy, centre, point, kick, impulse);
+    }
     {
         q2_player *p = &c->sim[0].player[0];
         /* 0x800613F0: memset(object+0x60, 0, 6), the ground normal. Kept,

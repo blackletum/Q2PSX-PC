@@ -658,14 +658,25 @@ bool q2_cre_melee_contact(const q2_monster *m, const s32 aim[3], s32 point[3])
 void q2_cre_melee_impulse(q2_monster *victim, const s32 point[3], s32 kick,
                           s16 impulse[3])
 {
+    s32 centre[3];
+    int k;
+    if (!victim || !point || !impulse) return;
+    /* GetAbsBounds + half the local extent. */
+    for (k = 0; k < 3; k++)
+        centre[k] = victim->pos[k] + victim->mins[k] +
+                    (victim->maxs[k] - victim->mins[k]) / 2;
+    q2_cre_melee_impulse_at(victim, centre, point, kick, impulse);
+}
+
+void q2_cre_melee_impulse_at(q2_monster *victim, const s32 centre[3],
+                             const s32 point[3], s32 kick, s16 impulse[3])
+{
     s32 dir[3];
     const s32 zero[3] = { 0, 0, 0 };
     int k;
-    if (!victim || !point || !impulse) return;
-    /* GetAbsBounds + half the local extent, then hit -> centre. */
+    if (!victim || !centre || !point || !impulse) return;
     for (k = 0; k < 3; k++)
-        dir[k] = victim->pos[k] + victim->mins[k] +
-                   (victim->maxs[k] - victim->mins[k]) / 2 - point[k];
+        dir[k] = centre[k] - point[k];
     q2_vector_normalize(dir);
     q2_vector_ma(zero, kick, dir, victim->velocity);
     /* Vertical velocity is scaled in place; X/Z are scaled only at the
