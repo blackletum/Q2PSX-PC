@@ -1923,9 +1923,8 @@ every frame as well:
 - **The player's own rounds sweep bodies to the world trace's end**, as the
   creatures' already did.
 
-The port draws the player's death-animation pick at 526 (`0x8003CEEC`), which
-the console's run does not reach. The demo is over by then, so it shows in no
-stream.
+The port drew the player's death-animation pick at 526 (`0x8003CEEC`); the
+console draws none in single player (see the three behaviours below).
 
 *The other two demos (6 November).* The oracle now takes `--demo` and loads
 JAIL2 or WASTE2 the way GameSelfPlay does, by pointing SelfPlayMapNamePntr
@@ -2046,13 +2045,29 @@ every face.
 All six attract demos, three on each disc, now match the console to their
 ends: the `rand()` stream and player one's position on every frame.
 
-Two known differences remain that the run did not reach:
-- the trigger-volume adjustment of the sighting spot and crumbs (`0x80061024`,
-  `0x80060C94`);
-- a pickup burst's groups start at the item, not at fifteen of the posed mesh's
-  vertices (`0x8006CC44`).
-
-The US demos have not been run against the oracle.
+*The three behaviours no demo reaches.*
+- **The sighting record leaves a trigger volume.** QuakeThinkGeneral asks
+  `0x80061024` for the first TrigBounds record flagged `0x10` (+0x22) whose box,
+  grown by 573 sideways, 571 below and 573 above (`0x800556DC`, the pair at
+  `0x800AEAFC`), holds the client's origin inclusively (`0x80055160`). When one
+  does, `0x80060C94` tries the nearest untried X or Z face, one unit outside it,
+  and keeps it if SecondaryCol lets the client through (`0x80044C44`) and the
+  point is in no flagged volume itself; with every side refused the record
+  stays on the client. The crumbs keep the raw origin (`0x8007E3A4..0x8007E400`).
+  No demo stands in one, so the oracle called both console functions on 70
+  points around BASE3's fourteen flagged volumes, and the port's answers match
+  on all 70, the 23 moved spots included.
+- **A pickup burst starts on the item's mesh.** `0x8005B6C0` hands the item to
+  `0x8005AB70` in mode 0, which seeds each group at fifteen of its posed
+  vertices (`0x8006CC44`). The burst event now carries the item's frame and
+  angles, and the client poses it as the drawer does before spawning through
+  the same mesh spawner the gib spray uses.
+- **No death roll in single player.** The death request does reach the pick
+  (`0x8003ADE8 -> 0x8003CE14`), but its moves (gp+17308/17316/17324) are bound
+  only for a multiplayer body and read zero after a single-player load, as does
+  the player's own move (object+736): the "already dying" arm takes it, with no
+  `rand()` (`0x8003CEB0..0x8003CEE8`). A probe of the US JAIL2 run sees the call
+  at record frame 862 and no draw in the sixty frames after.
 
 ## Limits
 

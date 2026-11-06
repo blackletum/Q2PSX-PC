@@ -201,18 +201,44 @@ void q2_ent_light_timed_at(q2_ent_events *ev, const s32 pos[3],
     event_fill(e, pos, glow);
 }
 
-void q2_ent_burst_at(q2_ent_events *ev, const s32 pos[3], const u8 glow[3],
-                     s32 model_index, const struct q2_model_bank *bank)
+static q2_ent_event *burst_push(q2_ent_events *ev, const s32 pos[3],
+                                const u8 glow[3], s32 model_index,
+                                const struct q2_model_bank *bank)
 {
-    q2_ent_event *e = event_push(ev);
+    q2_ent_event *e = event_push(ev);   /* zeroed: frame 0, no angles */
 
     if (!e)
-        return;
+        return NULL;
 
     e->kind        = Q2_ENT_EVENT_BURST;
     e->model_index = model_index;
     e->model_bank  = bank;
     event_fill(e, pos, glow);
+    return e;
+}
+
+void q2_ent_burst_at(q2_ent_events *ev, const s32 pos[3], const u8 glow[3],
+                     s32 model_index, const struct q2_model_bank *bank)
+{
+    (void)burst_push(ev, pos, glow, model_index, bank);
+}
+
+void q2_ent_burst_entity(q2_ent_events *ev, const q2_entity *src)
+{
+    q2_ent_event *e;
+
+    if (!src)
+        return;
+    e = burst_push(ev, src->origin, src->glow, src->model_index,
+                   src->model_bank);
+    if (!e)
+        return;
+    e->frame        = src->frame;
+    e->angles[0]    = src->angles[0];
+    e->angles[1]    = src->angles[1];
+    e->angles[2]    = src->angles[2];
+    e->transient    = (src->render_flags & Q2_RF_TRANSIENT) != 0;
+    e->matrix_scale = src->matrix_scale;
 }
 
 /* ------------------------------------------------------------------------- */

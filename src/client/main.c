@@ -788,6 +788,7 @@ typedef struct client {
     /* Player one at the top of the frame, before it moves: what
      * QuakeThinkGeneral sees (client_ai_clock). */
     s32               ai_pre_pos[3], ai_pre_eye[3];
+    s32               ai_pre_node;     /* object+0xA2, the SecondaryCol cell */
     bool              ai_pre_valid;
     /* The position at the previous AI tick, gp+18864's slot (0x8007E3D4). */
     s32               trail_prev[3];
@@ -2114,59 +2115,72 @@ static void client_film_request_stop(client *c);
  * eight-byte part records (`num_verts` at +3) and the caller divides by fifteen.
  * A bigger item bursts bigger, in proportion to its own mesh.
  */
-static void client_pickup_burst(client *c, const s32 pos[3], s32 model_index,
-                                const q2_model_bank *bank)
+/* 0x8006CC44 on the item as it was drawn: the instance below. */
+static void client_pickup_vertex(void *ctx, s32 index, s32 out[3])
+{
+    const q2_model_instance *inst = (const q2_model_instance *)ctx;
+
+    if (!q2_model_world_vertex(inst, index, out))
+        (void)q2_model_world_vertex(inst, -1, out);
+}
+
+static void client_pickup_burst(client *c, const q2_ent_event *ev)
 {
     q2_model mdl;
-    s16 vel[Q2_FX_GROUP_QUADS][3];
-    u32 total = 0, count, k;
+    q2_model_pose pose[Q2_MODEL_REST_POSE_MAX];
+    q2_model_instance inst;
+    q2_model_anim clip;
+    q2_fx_mesh_src src;
+    s16 rot[3][3];
+    u32 total;
+    const s32 *pos = ev->pos;
 
     /* Counted, not assumed: an early return here is silent otherwise, and
      * "0 drawn" would read as "no bursts happened". */
     if (!c->sim[0].fx_ready)      { c->burst_no_fx++;    return; }
     if (!c->fx_tables_ready)      { c->burst_no_table++; return; }
-    if (model_index < 0)          { c->burst_no_model++; return; }
-    if (!bank)                   { c->burst_no_bank++;  return; }
+    if (ev->model_index < 0)      { c->burst_no_model++; return; }
+    if (!ev->model_bank)          { c->burst_no_bank++;  return; }
 
-    if (q2_model_get(bank, (u32)model_index, &mdl) != Q2_OK) {
+    if (q2_model_get(ev->model_bank, (u32)ev->model_index, &mdl) != Q2_OK) {
         c->burst_bad_model++;
         return;
     }
 
-    for (k = 0; k < mdl.hdr.num_parts; k++) {
-        q2_model_part part;
-
-        if (q2_model_get_part(&mdl, k, &part))
-            total += part.num_verts;
-    }
-
-    /* 0x8005ABBC..0x8005ABDC: one GROUP per fifteen vertices. */
-    count = total / 15;
-
     /*
-     * FIFTEEN VELOCITIES, ALWAYS, and before any group (0x8005AC38..
-     * 0x8005ACC0): the loop runs to 15 whatever the mesh, and every group
-     * shares them. Drawing one triple per group took 3 numbers where the
-     * console takes 45 (BASE3's attract run, record frame 381).
+     * THE ITEM AS IT WAS DRAWN, posed as entitydraw.c poses it: clip 0 on
+     * its frame, its yaw, the tumble matrix for a transient, its matrix
+     * factor, at its origin. 0x8006CC44 hands each group fifteen of these
+     * posed vertices, in order (q2_fx_mesh_blood); a burst used to start
+     * every group at the item's origin.
      */
-    for (k = 0; k < 15 && k < Q2_FX_GROUP_QUADS; k++) {
-        int a;
-
-        for (a = 0; a < 3; a++) {
-            s32 v = ((s32)q2_rng_next(&c->sim[0].combat.rng) & 0x7FFF) - 16384;
-
-            v *= 3;
-            if (v < 0)
-                v += 16383;
-            vel[k][a] = (s16)(v >> 14);
-        }
+    q2_model_instance_init(&inst);
+    inst.model = &mdl;
+    if (mdl.hdr.num_parts <= Q2_MODEL_REST_POSE_MAX &&
+        q2_model_anim_get(&mdl, 0, &clip)) {
+        s32 frame = clip.frames > 0 ? (ev->frame % clip.frames) : 0;
+        if (q2_model_pose_at(&mdl, &clip, (u32)frame, pose) == Q2_OK)
+            inst.pose = pose;
     }
+    inst.origin[0] = pos[0];
+    inst.origin[1] = pos[1];
+    inst.origin[2] = pos[2];
+    inst.yaw = ev->angles[1];
+    if (ev->transient) {
+        q2_rotation_euler(rot, ev->angles[0], ev->angles[1], ev->angles[2]);
+        inst.rot = (const s16 (*)[3])rot;
+    }
+    inst.scale = ev->matrix_scale ? ev->matrix_scale : Q2_ONE_12;
 
-    /* A mesh under fifteen vertices still took the draws (0x8005ACC4). */
-    if (count == 0) {
+    /* 0x8006D6AC: the parts' own vertex counts, summed. */
+    total = q2_model_total_verts(&mdl);
+    src.vertex = client_pickup_vertex;
+    src.ctx    = &inst;
+    src.total  = total;
+
+    /* A mesh under fifteen vertices still takes the draws (0x8005ACC4). */
+    if (total / 15 == 0)
         c->burst_no_verts++;
-        return;
-    }
 
     /*
      * THE AREA, which used to be a literal 0 here and is what kept every
@@ -2195,14 +2209,15 @@ static void client_pickup_burst(client *c, const s32 pos[3], s32 model_index,
         if (node >= 0 && q2_collision_get_node(hull, (u32)node, &cell))
             area = (u8)(cell.contents & 0x7F);
 
-        /* 0x8005ACD4..0x8005AD54: one 15-particle group per fifteen
-         * vertices. The console seeds each group at fifteen of the mesh's
-         * own posed vertices (0x8006CC44); this burst has no posed mesh to
-         * hand, so every group starts at the item. */
-        for (k = 0; k < count; k++)
-            q2_fx_group_spawn(&c->sim[0].fx, pos, vel, 15,
-                              q2_fx_ramp_at(&c->fx_tables, 10),
-                              q2_fx_ramp_at(&c->fx_tables, 0), 32, 6144, area);
+        /*
+         * 0x8005B6C0 -> 0x8005AB70 with a fifth argument of zero: life 32 and
+         * the +/-3 velocities, fifteen of them drawn before the emptiness test
+         * and shared by every group, one group per fifteen vertices. That is
+         * q2_fx_mesh_blood's mode 0, the spawner the gib spray takes in mode 1.
+         */
+        (void)q2_fx_mesh_blood(&c->sim[0].fx, &c->sim[0].combat.rng, &src,
+                               area, q2_fx_ramp_at(&c->fx_tables, 10),
+                               q2_fx_ramp_at(&c->fx_tables, 0), 6144, 0);
     }
     c->ent_bursts++;
 }
@@ -4646,6 +4661,83 @@ static void client_cre_activity(client *c)
  * ledge lost the frame-98 shot from FindTarget's one-frame window at frame
  * 100 and stopped where the console's walked on.
  */
+/*
+ * 0x80061024: the first TrigBounds record flagged 0x10 (+0x22) whose box,
+ * grown by 573 sideways, 571 below and 573 above (0x800556DC with the pair
+ * at 0x800AEAFC), holds the point, inclusively on every axis (0x80055160).
+ * `box` gets the grown box as min x, y, z then max x, y, z.
+ */
+static bool client_sight_volume(const client *c, const s32 at[3], s32 box[6])
+{
+    const q2_sim *sim = &c->sim[0];
+    u32 i;
+
+    if (!sim->triggers_ready)
+        return false;
+    for (i = 0; i < sim->triggers.count; i++) {
+        q2_trigger t;
+
+        if (!q2_trigger_get(&sim->triggers, i, &t) || !(t.flags & 0x10u))
+            continue;
+        box[0] = t.min[0] - 573; box[3] = t.max[0] + 573;
+        box[1] = t.min[1] - 571; box[4] = t.max[1] + 573;
+        box[2] = t.min[2] - 573; box[5] = t.max[2] + 573;
+        if (at[0] >= box[0] && at[0] <= box[3] &&
+            at[1] >= box[1] && at[1] <= box[4] &&
+            at[2] >= box[2] && at[2] <= box[5])
+            return true;
+    }
+    return false;
+}
+
+/*
+ * 0x80060C94: where creatures see a client who stands in such a volume. The
+ * nearest untried X or Z face of the grown box, one unit outside it, kept when
+ * the movement hull lets the client through to it (0x80044C44 on SecondaryCol
+ * from the client's own cell) and it lies in no flagged volume itself. The
+ * faces go nearest first; the Y faces have arms in the jump table but are never
+ * chosen. With every side refused the record stays on the client.
+ */
+static bool client_sight_volume_spot(client *c, const s32 pos[3], s32 node,
+                                     const s32 box[6], s32 out[3])
+{
+    u32 tried = 0;
+
+    for (;;) {
+        s32 best = 0x05F5E0FF, d, end[3], cell, other[6];
+        int face = -1;
+
+        if (!(tried & 1u)) {
+            d = pos[0] - box[0]; if (d < 0) d = -d;
+            if (d < best) { best = d; face = 0; }
+        }
+        if (!(tried & 2u)) {
+            d = box[3] - pos[0]; if (d < 0) d = -d;
+            if (d < best) { best = d; face = 1; }
+        }
+        if (!(tried & 16u)) {
+            d = pos[2] - box[2]; if (d < 0) d = -d;
+            if (d < best) { best = d; face = 4; }
+        }
+        if (!(tried & 32u)) {
+            d = box[5] - pos[2]; if (d < 0) d = -d;
+            if (d < best) { best = d; face = 5; }
+        }
+        memcpy(out, pos, 3 * sizeof(*out));
+        switch (face) {
+        case 0: tried |= 1u;  out[0] = box[0] - 1; break;
+        case 1: tried |= 2u;  out[0] = box[3] + 1; break;
+        case 4: tried |= 16u; out[2] = box[2] - 1; break;
+        case 5: tried |= 32u; out[2] = box[5] + 1; break;
+        default: return false;            /* every side refused: out = pos */
+        }
+        if (c->sim[0].coll_ready &&
+            q2_coll_move(&c->sim[0].coll, pos, out, node, end, &cell) &&
+            !client_sight_volume(c, out, other))
+            return true;
+    }
+}
+
 static void client_ai_clock(client *c, s32 ticks)
 {
     s32 phase;
@@ -4668,15 +4760,20 @@ static void client_ai_clock(client *c, s32 ticks)
          *     cannot see the last crumb (0x8007E2C4..0x8007E32C);
          *   - the sighting record at entity+0x3C (0x8007E370..0x8007E39C);
          *   - this tick's position kept for the next crumb (0x8007E3D4).
-         * The console moves the record when the client stands in a trigger
-         * volume flagged 0x10 (0x80061024, 0x80060C94); that is not modelled.
+         * The record moves out of a trigger volume flagged 0x10 when the
+         * client stands in one (0x80061024, 0x80060C94).
          */
         if (c->ai_pre_valid) {
+            s32 box[6], spot[3];
             if (q2_trail_needs_spot(c->ai_pre_eye))
                 q2_trail_add(c->trail_prev_set ? c->trail_prev : c->ai_pre_pos);
             memcpy(c->creatures.sight.pos, c->ai_pre_pos,
                    sizeof(c->creatures.sight.pos));        /* 0x8007E2BC */
-            memcpy(c->creatures.sight.sight_spot, c->ai_pre_pos,
+            if (!client_sight_volume(c, c->ai_pre_pos, box) ||
+                !client_sight_volume_spot(c, c->ai_pre_pos, c->ai_pre_node,
+                                          box, spot))
+                memcpy(spot, c->ai_pre_pos, sizeof(spot));
+            memcpy(c->creatures.sight.sight_spot, spot,
                    sizeof(c->creatures.sight.sight_spot));
             c->creatures.sight.sight_spot_set = true;
             memcpy(c->trail_prev, c->ai_pre_pos, sizeof(c->trail_prev));
@@ -4956,6 +5053,17 @@ static void client_player_anim_tick(client *c, int pi, s32 dt, bool death)
     q2_player_anim want;
 
     if (dt <= 0 || (!c->mp_enabled && !death)) return;
+    /*
+     * NOR THE KILLING ONE, in single player. The death request does reach
+     * the pick (0x8003ADE8 -> 0x8003CE14), but the moves it compares against
+     * (gp+17308/17316/17324) are only bound for a multiplayer body and read
+     * zero after a single-player load, as does the player's own move
+     * (object+736). Null equals null, so the pick takes the "already dying"
+     * arm (0x8003CEB0..0x8003CEE8): no rand() roll and no move. On the US
+     * JAIL2 attract run the console's player dies at record frame 861 and
+     * draws nothing from 0x8003CEEC in the sixty frames after.
+     */
+    if (death && !c->mp_enabled) return;
     /* 0x8003A930/AB5C/ADAC/AE08: successful jump, then horizontal wish,
      * attack only over stand, and the nonzero damage byte over all three.
      * The killing branch returns before consuming that byte. */
@@ -12823,6 +12931,7 @@ static void client_input_simulated(client *c, float dt)
         c->ai_pre_pos[0] = c->sim[0].player[0].pos[0];
         c->ai_pre_pos[1] = q2_sim_origin_y(c->sim[0].player[0].pos[1]);
         c->ai_pre_pos[2] = c->sim[0].player[0].pos[2];
+        c->ai_pre_node = c->sim[0].player[0].ent.node;
         q2_sim_eye(&c->sim[0], c->ai_pre_eye);
         c->ai_pre_valid = true;
         /* The AI clock first (0x80038EF8): the item sweep, the batch spawn
@@ -16431,8 +16540,7 @@ static void client_entity_events(client *c)
             continue;
         }
         if (ev->e[i].kind == Q2_ENT_EVENT_BURST) {
-            client_pickup_burst(c, ev->e[i].pos, ev->e[i].model_index,
-                                ev->e[i].model_bank);
+            client_pickup_burst(c, &ev->e[i]);
             continue;
         }
         if (ev->e[i].kind != Q2_ENT_EVENT_SOUND)

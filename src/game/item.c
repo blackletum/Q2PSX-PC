@@ -987,7 +987,7 @@ static void item_collected(q2_entity *e, q2_entity_world *w, u32 player,
     u32 i;
 
     /* 0x8005B6C0: the pickup particle burst, in both branches. */
-    q2_ent_burst_at(&w->events, e->origin, e->glow, e->model_index, e->model_bank);
+    q2_ent_burst_entity(&w->events, e);
 
     /*
      * THE KEPT BRANCH TOUCHES NOTHING ELSE. 0x8005998C is two instructions —

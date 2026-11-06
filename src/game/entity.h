@@ -430,6 +430,15 @@ typedef struct q2_ent_event {
      */
     s32 model_index;
     const struct q2_model_bank *model_bank; /* index is local to this bank */
+    /*
+     * _BURST: the item as it was drawn, so the burst's groups can start at its
+     * posed vertices (0x8006CC44) after the item itself is gone: its frame
+     * (+0x100), angles (+0xE6), transient bit and matrix factor.
+     */
+    s32 frame;
+    s32 angles[3];
+    bool transient;
+    s16 matrix_scale;
     s32 radius;         /* Q2_ENT_EVENT_LIGHT: the OUTER radius            */
     s32 inner_radius;   /* Q2_ENT_EVENT_LIGHT: the inner, 0 if unspecified  */
 
@@ -482,6 +491,8 @@ void q2_ent_light_timed_at(q2_ent_events *ev, const s32 pos[3],
                            s32 ticks);
 void q2_ent_burst_at(q2_ent_events *ev, const s32 pos[3], const u8 glow[3],
                      s32 model_index, const struct q2_model_bank *bank);
+/* The same for an entity, carrying how it was drawn (see q2_ent_event). */
+void q2_ent_burst_entity(q2_ent_events *ev, const struct q2_entity *e);
 
 /* ------------------------------------------------------------------------- */
 /* The world a think runs in                                                  */
