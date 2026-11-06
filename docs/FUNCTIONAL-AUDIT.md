@@ -2026,6 +2026,22 @@ where the console keeps the trace's own end (`0x80049264`).
 JAIL2 now matches the console to its end, record frame 890: the `rand()`
 stream and player one's position on every frame, as BASE3 and WASTE2 do.
 
+*The US disc.* `lockstep_oracle.py --ntsc` loads SLUS_007.57 and sends every
+address through the loader's PAL-to-US relocation; the hooks and probes keep
+their PAL addresses, and the rand() callers are logged as PAL addresses. The
+US recordings run at five ticks a field. WASTE2 (to record frame 179) and JAIL2
+(to the player's death at 861) match the stream and the path. JAIL2 needed the
+megahealth decay: `0x80037C20` takes a point once its deadline is strictly
+past and re-arms one second out, after the pickup's five (`0x80036E58`); the
+port re-armed five seconds out and was 11 points healthier by frame 860.
+
+BASE3 matches the stream to its end (377) but not the path from frame 341,
+by one unit in X. Player one, stopped against a wall, meets an entity box at
+its corner: the console's first sweep (`0x80053C58`) ends on the box's X face
+and its retry runs to the world trace's end (-14068, 4673, 3562), where the
+port's ends on the Z face and retries from (-14067, 4664, 3589). Not yet
+modelled.
+
 Two known differences remain that the run did not reach:
 - the trigger-volume adjustment of the sighting spot and crumbs (`0x80061024`,
   `0x80060C94`);

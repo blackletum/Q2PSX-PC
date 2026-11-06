@@ -43,8 +43,8 @@ FAKE_OT = 0x80400000
 
 
 class OracleMachine(LoaderMachine):
-    def __init__(self, image, disc):
-        super().__init__(image, disc, False)
+    def __init__(self, image, disc, ntsc=False):
+        super().__init__(image, disc, ntsc)
         # Room past the console's 2 MB for the stand-in ordering tables the
         # draw links into (FAKE_OT); nothing the game owns lives up there.
         self.mem.extend(bytes(6 * 1024 * 1024))
@@ -117,15 +117,27 @@ class OracleMachine(LoaderMachine):
         return bytes(self.mem[a:a + size])
 
     # ------------------------------------------------------------ intercept
+    def caller(self):
+        """The return address, as a PAL address on the US build too, so both
+        builds' logs name the same sites (changed code keeps its own)."""
+        ra = self.r[31]
+        return (self.canonical(ra) or ra) if self.ntsc else ra
+
     def intercept(self, pc):
+        # Every hook below is written by PAL address; on the US build the
+        # native pc is mapped back first (changed code matches none of them),
+        # and the loader's own hooks take the native one.
+        native = pc
+        if self.ntsc:
+            pc = self.canonical(pc) or -1
         if pc == SRAND:
             self.rng_state = self.r[4] & 0xFFFFFFFF
-            self.rand_log.append(('srand', self.r[31], self.r[4]))
+            self.rand_log.append(('srand', self.caller(), self.r[4]))
             return True
         if pc == RAND:
             self.rng_state = (self.rng_state * 0x41C64E6D + 0x3039) & 0xFFFFFFFF
             self.r[2] = (self.rng_state >> 16) & 0x7FFF
-            self.rand_log.append(('rand', self.r[31], self.r[2]))
+            self.rand_log.append(('rand', self.caller(), self.r[2]))
             return True
         if pc == 0x8007270C:
             self.sound_variation()
@@ -170,7 +182,7 @@ class OracleMachine(LoaderMachine):
             self.put(r[4], self.get(r[5], r[6]))
             r[2] = r[4]
             return True
-        return super().intercept(pc)
+        return super().intercept(native)
 
     def sound_variation(self):
         """The randomising sound start's two draws, which this machine never reaches.
@@ -187,7 +199,7 @@ class OracleMachine(LoaderMachine):
         idx = signed(self.r[4])
         if idx in (-1, 0):
             return
-        rec = 0x800DFDE4 + 12 * idx
+        rec = self.address(0x800DFDE4) + 12 * idx
         flags = self.read(rec + 8, 4)
         for bit, hi, lo, out, ra in ((1, 4, 5, 1, 0x800727C4), (2, 6, 7, 2, 0x80072824)):
             if not flags & bit:
@@ -222,7 +234,7 @@ class OracleMachine(LoaderMachine):
                                   [signed(self.read(a + 0x2F8 + 2 * i, 2), 16) for i in range(3)]))
         if pc in (0x80044C44, 0x80053C58, 0x800544EC):  # the box trace's three passes
             self.sub_ret = getattr(self, 'sub_ret', [])
-            self.sub_ret.append((self.r[31], pc))
+            self.sub_ret.append((self.caller(), pc))
             self.rand_log.append(('sub', pc, [self.r[4], self.r[5], self.r[6], self.r[7]] +
                                   [signed(self.read(self.r[5] + 4 * i, 4)) for i in range(3)] +
                                   [signed(self.read(self.r[6] + 4 * i, 4)) for i in range(3)]))
@@ -230,35 +242,35 @@ class OracleMachine(LoaderMachine):
             _, fn = self.sub_ret.pop()
             extra = []
             if fn == 0x80053C58 and self.r[2] == 0:
-                idx = self.read(0x800CBA26, 2)
+                idx = self.read(self.address(0x800CBA26), 2)
                 box = 0x800CAE10 + 64 * idx
                 extra = [idx, self.read(box + 54, 1), self.read(box + 55, 1)] + [signed(self.read(box + 4 * i, 4)) for i in range(6)] + [hex(self.read(box + 56 + 4 * i, 4)) for i in range(2)]
-            self.rand_log.append(('subret', fn, [signed(self.r[2])] + [signed(self.read(0x800D4F90 + 4 * i, 4)) for i in range(3)] + extra))
+            self.rand_log.append(('subret', fn, [signed(self.r[2])] + [signed(self.read(self.address(0x800D4F90) + 4 * i, 4)) for i in range(3)] + extra))
         if pc == 0x8005BD3C:  # the box trace: start, end, start cell
             self.trace_ret = getattr(self, 'trace_ret', [])
-            self.trace_ret.append(self.r[31])
+            self.trace_ret.append(self.caller())
             sp = self.r[29]
             self.rand_log.append(('trace', self.r[31], [signed(self.read(self.r[4] + 4 * i, 4)) for i in range(3)] +
                                   [signed(self.read(self.r[7] + 4 * i, 4)) for i in range(3)] +
                                   [signed(self.read(sp + 24, 2), 16)]))
         elif getattr(self, 'trace_ret', None) and pc == self.trace_ret[-1]:
             self.trace_ret.pop()
-            res = self.read(0x800AEAE8, 4)
+            res = self.read(self.address(0x800AEAE8), 4)
             self.rand_log.append(('traced', pc, [signed(self.read(res + 4 * i, 4)) for i in range(6)] +
-                                  [signed(self.read(0x800C9002, 2), 16)]))
+                                  [signed(self.read(self.address(0x800C9002), 2), 16)]))
         if pc == 0x8005FB24:  # M_CheckBottom
             self.cb_ret = self.r[31]
         elif getattr(self, 'cb_ret', None) and pc == self.cb_ret:
             self.cb_ret = None
             self.rand_log.append(('bottom', pc, signed(self.r[2])))
-        if pc in (0x8004583C, 0x80051258, 0x80045144) and self.r[4] == self.read(((self.read(0x800B2FD0, 4) + 324) & 0xFFFFFFFF) + 36, 4):
+        if pc in (0x8004583C, 0x80051258, 0x80045144) and self.r[4] == self.read(((self.read(self.address(0x800B2FD0), 4) + 324) & 0xFFFFFFFF) + 36, 4):
             a = self.r[4]
             self.pmv = getattr(self, 'pmv', [])
-            self.pmv.append((self.r[31], pc))
+            self.pmv.append((self.caller(), pc))
             self.rand_log.append(('pmv', pc, [hex(self.r[5]), hex(self.r[6]), hex(self.r[7]), hex(self.read(a + 152, 4))] + [signed(self.read(a + 84 + 4 * i, 4)) for i in range(3)] + [signed(self.read(a + 236 + 2 * i, 2), 16) for i in range(3)]))
         elif getattr(self, 'pmv', None) and pc == self.pmv[-1][0]:
             _, fn = self.pmv.pop()
-            a = self.read(((self.read(0x800B2FD0, 4) + 324) & 0xFFFFFFFF) + 36, 4)
+            a = self.read(((self.read(self.address(0x800B2FD0), 4) + 324) & 0xFFFFFFFF) + 36, 4)
             self.rand_log.append(('pmvret', fn, [hex(self.r[2])] + [signed(self.read(a + 84 + 4 * i, 4)) for i in range(3)] + [signed(self.read(a + 236 + 2 * i, 2), 16) for i in range(3)]))
         if pc == 0x8005C980:  # the actor's position fed back into the edict
             e = self.r[4]
@@ -271,17 +283,17 @@ class OracleMachine(LoaderMachine):
             self.rand_log.append(('turnhandler', self.r[2], [signed(self.r[7])]))
         if pc == 0x80060334:  # SV_StepDirection(actor, yaw, dist)
             self.step_ret = getattr(self, 'step_ret', [])
-            self.step_ret.append(self.r[31])
+            self.step_ret.append(self.caller())
             self.rand_log.append(('stepdir', self.r[31], [signed(self.r[5]), signed(self.r[6])]))
         elif getattr(self, 'step_ret', None) and pc == self.step_ret[-1]:
             self.step_ret.pop()
             self.rand_log.append(('stepret', pc, signed(self.r[2])))
         if pc == 0x80046B98:  # the toss / tumble: its object's flags
-            self.rand_log.append(('toss', self.r[4], [self.read(self.r[4] + 0x98, 4), self.read(self.r[4] + 0xE6, 2), self.read(0x800AE8B4, 4)] + [signed(self.read(self.r[4] + 0x54 + 4 * i, 4)) for i in range(3)] + [signed(self.read(self.r[4] + o, 2), 16) for o in range(0xC0, 0xF0, 2)]))
+            self.rand_log.append(('toss', self.r[4], [self.read(self.r[4] + 0x98, 4), self.read(self.r[4] + 0xE6, 2), self.read(self.address(0x800AE8B4), 4)] + [signed(self.read(self.r[4] + 0x54 + 4 * i, 4)) for i in range(3)] + [signed(self.read(self.r[4] + o, 2), 16) for o in range(0xC0, 0xF0, 2)]))
         if pc == 0x80065C5C:  # SortData's region test: the area and its packed rectangle
             self.rand_log.append(('region', self.r[16], [signed(self.read(self.r[29] + 78, 2), 16)] +
                                   [signed(self.read(self.r[16] + 2 * i, 2), 16) for i in range(4)] +
-                                  [signed(self.read(self.read(0x800B2C24, 4) + 4 * i, 4)) for i in range(3)] +
+                                  [signed(self.read(self.read(self.address(0x800B2C24), 4) + 4 * i, 4)) for i in range(3)] +
                                   [x for row in self.gte._mat(0) for x in row] +
                                   [self.gte.c[24], self.gte.c[25], self.gte.c[26]]))
         if pc in (0x800689F4, 0x800578D8):  # area stamp (player, area) / the creature activity test
@@ -322,15 +334,15 @@ class OracleMachine(LoaderMachine):
             self.rand_log.append(('damage', self.r[31], [hex(self.r[4]), hex(self.r[5]), hex(self.r[6]), hex(self.r[7])] +
                                   [signed(self.read(self.r[29] + 16 + 4 * i, 4)) for i in range(6)]))
         if pc in (0x8005E838, 0x8005E968, 0x8005E9CC):  # ai_run's three pursuit traces, returned
-            tr = self.read(0x800AEAE8, 4)
+            tr = self.read(self.address(0x800AEAE8), 4)
             self.rand_log.append(('pursuit', pc, [signed(self.read(tr + 8, 4)), signed(self.r[21]), signed(self.r[19]),
                                                   signed(self.r[20]), signed(self.r[18])] +
                                   [signed(self.read(tr + 12 + 4 * i, 4)) for i in range(3)]))
         if pc in (0x80045144, 0x80053C58):  # player one's move (obj, delta) / its entity sweep (obj, want)
-            pl = self.read(((self.read(0x800B2FD0, 4) + 324) & 0xFFFFFFFF) + 36, 4)
+            pl = self.read(((self.read(self.address(0x800B2FD0), 4) + 324) & 0xFFFFFFFF) + 36, 4)
             if self.r[4] in (pl, pl + 0x54):
                 self.mv_ret = getattr(self, 'mv_ret', [])
-                self.mv_ret.append((self.r[31], pc, self.r[5], self.r[4]))
+                self.mv_ret.append((self.caller(), pc, self.r[5], self.r[4]))
                 vec = ([signed(self.read(self.r[5] + 2 * i, 2), 16) for i in range(3)] if pc == 0x80045144
                        else [signed(self.read(self.r[5] + 4 * i, 4)) for i in range(3)])
                 self.rand_log.append(('mv' if pc == 0x80045144 else 'esw', pc,
@@ -382,9 +394,9 @@ class OracleMachine(LoaderMachine):
                                   [signed(self.read(en + 4 * i, 4)) for i in range(3)]))
         if pc == 0x8005D334:  # FindTarget(self): the level's alert fields on entry
             self.ft_ret = getattr(self, 'ft_ret', [])
-            self.ft_ret.append(self.r[31])
+            self.ft_ret.append(self.caller())
             e = self.r[4]
-            self.rand_log.append(('findtarget', e, [hex(self.read(0x800E46D8 + 4 * i, 4)) for i in range(9)] +
+            self.rand_log.append(('findtarget', e, [hex(self.read(self.address(0x800E46D8) + 4 * i, 4)) for i in range(9)] +
                                   [hex(self.read(e + 28, 4)), hex(self.read(e + 228, 4)), signed(self.read(e + 308, 4)), signed(self.read(e + 268, 4))]))
         elif getattr(self, 'ft_ret', None) and pc == self.ft_ret[-1]:
             self.ft_ret.pop()
@@ -552,7 +564,9 @@ class OracleMachine(LoaderMachine):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument('pal', type=Path)
+    ap.add_argument('pal', type=Path, help='the disc image (.cue); PAL unless --ntsc')
+    ap.add_argument('--ntsc', action='store_true',
+                    help='the US disc, SLUS-00757: every address goes through the loader relocation')
     ap.add_argument('--frames', type=int, default=20)
     ap.add_argument('--out', type=Path)
     ap.add_argument('--snapshot', type=Path)
@@ -564,9 +578,9 @@ def main():
     args = ap.parse_args()
 
     disc = Form1Disc(args.pal)
-    exe = disc.read('/SLES_015.34')
+    exe = disc.read('/SLUS_007.57' if args.ntsc else '/SLES_015.34')
     image = exe[2048:2048 + struct.unpack_from('<I', exe, 0x1C)[0]]
-    m = OracleMachine(image, disc)
+    m = OracleMachine(image, disc, args.ntsc)
     m.probes = args.probes and args.probes_from <= 1
     m.probes_from = args.probes_from if args.probes else 0
     if __import__('os').environ.get('ORACLE_WATCH'):
@@ -610,8 +624,9 @@ def boot_globals(m):
     the loader leaves it, the pursuit handed M_MoveToGoal a NULL goal, so
     SV_NewChaseDir returned at once (0x80060570) where the console steps.
     """
-    m.write(0x800B2DFC, 4, 0x800DDDCC)
-    m.write(0x800B2DB0, 4, 0x800DDDCC)
+    A = m.address
+    m.write(A(0x800B2DFC), 4, A(0x800DDDCC))
+    m.write(A(0x800B2DB0), 4, A(0x800DDDCC))
 
 
 # SelfPlayMapNamePntr's table, 12 bytes a name (0x8009D228, PAL).
@@ -619,31 +634,32 @@ DEMOS = ('BASE3', 'JAIL2', 'WASTE2')
 
 
 def load(m, t0, demo='BASE3'):
+    A = m.address
     boot_globals(m)
-    m.call(0x8006E8C0)                     # heap init
-    m.write(RATE, 4, 6)                    # PalNtscRate, PAL
+    m.call(A(0x8006E8C0))                     # heap init
+    m.write(A(RATE), 4, 5 if m.ntsc else 6)  # PalNtscRate: 6 on PAL, 5 on NTSC
     # GameSelfPlay (0x80041300) plays the entry SelfPlayMapNamePntr (gp+712)
     # points at; the boot leaves it at the first, BASE3.
-    m.write(0x800AE600 + 712, 4, 0x8009D228 + 12 * DEMOS.index(demo))
-    m.call(GAME_SELF_PLAY)
+    m.write(A(0x800AE600) + 712, 4, A(0x8009D228) + 12 * DEMOS.index(demo))
+    m.call(A(GAME_SELF_PLAY))
     print('GameSelfPlay ok', flush=True)
-    m.call(GAME_NEW_MISSION)
+    m.call(A(GAME_NEW_MISSION))
     print('GameNewMission ok', flush=True)
     m.rng_state = 13
-    name = bytes(m.mem[0x0E46C0:0x0E46CC])
-    print('level name', name, 'arrival', bytes(m.mem[0x0E4680:0x0E468C]), flush=True)
+    name = m.get(A(0x800E46C0), 12)
+    print('level name', name, 'arrival', m.get(A(0x800E4680), 12), flush=True)
     # The level resolve (0x8007C54C) waits on hardware; configure_level writes
     # what it leaves behind, as the loader fixtures do. Then the arrival
     # GameSelfPlay chose (0x800E4680) goes where the load reads it.
     row = configure_level(m, demo, 1, False)
-    m.put(0x800C8CD0, bytes(m.mem[0x0E4680:0x0E468C]))
+    m.put(A(0x800C8CD0), m.get(A(0x800E4680), 12))
     # The resolve's tail (0x8007C81C..0x8007C828): the row's two load hooks.
-    m.write(0x800B2F6C, 4, m.read(row + 24, 4))
-    m.write(0x800B2F70, 4, m.read(row + 28, 4))
+    m.write(A(0x800B2F6C), 4, m.read(row + 24, 4))
+    m.write(A(0x800B2F70), 4, m.read(row + 28, 4))
     # LoadLevel (0x8007CA44) copies the resolved path from 0x800E468C, then
     # runs 0x80071B94, InitLevel and 0x80077454, as TestIt's caller does.
-    m.put(0x800E468C, m.string(0x800DDDA8).encode('ascii') + b'\0')
-    m.call(AFTER_LOAD, limit=60000000)
+    m.put(A(0x800E468C), m.string(A(0x800DDDA8)).encode('ascii') + b'\0')
+    m.call(A(AFTER_LOAD), limit=60000000)
     print('LoadLevel ok', time.time() - t0, 's', m.count, 'instructions', flush=True)
 
 
@@ -657,7 +673,8 @@ def creatures(m):
     phase pair (+0x2C, +0x2D) and its own clock (+0x34). An edict whose actor
     is not yet linked reads zeros for the actor's fields.
     """
-    base = m.read(0x800B2FD0, 4)
+    A = m.address
+    base = m.read(A(0x800B2FD0), 4)
     out = []
     for i in range(2, 64):
         e = (base + 324 * i) & 0xFFFFFFFF
@@ -675,19 +692,20 @@ def creatures(m):
 
 
 def run_frames(m, count, frames, t0):
+    A = m.address
     for f in range(count):
         m.rand_log = []
         if getattr(m, 'probes_from', 0) and f + 1 >= m.probes_from:
             m.probes = True
-        m.write(NEWV, 4, 12)
-        m.write(PAD + 4, 4, 0)
+        m.write(A(NEWV), 4, 12)
+        m.write(A(PAD) + 4, 4, 0)
         # MainGameLoop's own frame setup (0x80018384..0x80018398): swap the
         # draw buffers, which resets the packet pointers, then clear this
         # buffer's ordering table.
-        m.call(0x80018214)                         # DoubleTrebleBuffer
-        m.call(0x800837C0, m.read(0x800B2754, 4) + 10984, 217)   # ClearOTag
-        m.call(SWAP_ALL)
-        newv = m.read(NEWV, 4)
+        m.call(A(0x80018214))                         # DoubleTrebleBuffer
+        m.call(A(0x800837C0), m.read(A(0x800B2754), 4) + 10984, 217)   # ClearOTag
+        m.call(A(SWAP_ALL))
+        newv = m.read(A(NEWV), 4)
         # The level clock. The VSync callback (0x80019044) adds the rate to
         # 0x800B29D4 every field, and MainGameLoop copies it into
         # 0x800AEBAC at the top of the frame (0x800183A0..0x800183B0). The
@@ -695,29 +713,29 @@ def run_frames(m, count, frames, t0):
         # fields itself; nothing between that copy and SwapAllButtons reads
         # the clock. Frozen at 0, every kick, caption and powerup deadline
         # held still, and the view plane kept a landing kick for ever.
-        clock = (m.read(0x800B29D4, 4) + newv) & 0xFFFFFFFF
-        m.write(0x800B29D4, 4, clock)
-        m.write(0x800AEBAC, 4, clock)
-        buttons = m.read(PAD + 12, 4)
-        fn0 = m.read(0x800E46DC, 4)
-        m.call(QUAKE_LOOP)
-        ent = (m.read(0x800B2FD0, 4) + 324) & 0xFFFFFFFF   # g_edicts[1], QuakeThinkGeneral
+        clock = (m.read(A(0x800B29D4), 4) + newv) & 0xFFFFFFFF
+        m.write(A(0x800B29D4), 4, clock)
+        m.write(A(0x800AEBAC), 4, clock)
+        buttons = m.read(A(PAD) + 12, 4)
+        fn0 = m.read(A(0x800E46DC), 4)
+        m.call(A(QUAKE_LOOP))
+        ent = (m.read(A(0x800B2FD0), 4) + 324) & 0xFFFFFFFF   # g_edicts[1], QuakeThinkGeneral
         link = m.read(ent + 0x24, 4)
         player = [signed(m.read(link + 0x54 + 4 * i, 4)) for i in range(3)] + [signed(m.read(link + 0x108, 2), 16)]
         frames.append({'frame': f + 1, 'buttons': buttons, 'newv': newv,
                        'pvel': [signed(m.read(ent + 104 + 4 * i, 4)) for i in range(3)],
-                       'framenum': [fn0, m.read(0x800E46DC, 4)], 'player': player,
-                       'mask': [m.read(0x800DD944 + 4 * i, 4) for i in range(3)],
-                       'view_area': m.read(WINDOWS + 0x9E, 2),
-                       'closed': [n for n in range(400) if m.read(m.read(0x800B2C3C, 4) + 52 * n + 8, 4) & 0x8000],
+                       'framenum': [fn0, m.read(A(0x800E46DC), 4)], 'player': player,
+                       'mask': [m.read(A(0x800DD944) + 4 * i, 4) for i in range(3)],
+                       'view_area': m.read(A(WINDOWS) + 0x9E, 2),
+                       'closed': [n for n in range(400) if m.read(m.read(A(0x800B2C3C), 4) + 52 * n + 8, 4) & 0x8000],
                        'cre': creatures(m),
-                       'camera': [signed(m.read(WINDOWS + 4 * i, 4)) for i in range(3)] +
-                                 [signed(m.read(WINDOWS + 12 + 2 * i, 2), 16) for i in range(3)],
+                       'camera': [signed(m.read(A(WINDOWS) + 4 * i, 4)) for i in range(3)] +
+                                 [signed(m.read(A(WINDOWS) + 12 + 2 * i, 2), 16) for i in range(3)],
                        # Areas player one's view drew this frame: 0x800689F4's stamp
                        # (0x800B2DE4); the next frame's creatures test them (0x800689C0).
-                       'seen': [a for a in range(96) if m.read(0x800D8D78 + 64 * a, 2) == m.read(0x800B2DE4, 2)],
-                       'boxes': [[i] + [signed(m.read(0x800CAE10 + 64 * i + 4 * j, 4)) for j in range(6)] + [m.read(0x800CAE10 + 64 * i + 55, 1)]
-                                 for i in range(48) if m.read(0x800CAE10 + 64 * i + 54, 1)],
+                       'seen': [a for a in range(96) if m.read(A(0x800D8D78) + 64 * a, 2) == m.read(A(0x800B2DE4), 2)],
+                       'boxes': [[i] + [signed(m.read(A(0x800CAE10) + 64 * i + 4 * j, 4)) for j in range(6)] + [m.read(A(0x800CAE10) + 64 * i + 55, 1)]
+                                 for i in range(48) if m.read(A(0x800CAE10) + 64 * i + 54, 1)],
                        'rand': [(k, ra, v) for k, ra, v in m.rand_log]})
         print(f'frame {f + 1} btn {buttons:04x} newv {newv} rand {len(m.rand_log)} framenum {fn0} player {player} '
               f'({m.count} instr, {time.time() - t0:.0f} s)', flush=True)

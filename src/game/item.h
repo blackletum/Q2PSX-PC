@@ -74,7 +74,8 @@ struct q2_model_bank;
 /* ------------------------------------------------------------------------- */
 #define Q2_ITEM_POWERUP_TICKS    9000   /* 30 s  0x800370E8               */
 #define Q2_ITEM_CAPTION_TICKS     900   /* 3 s   0x80037300               */
-#define Q2_ITEM_MEGA_DECAY_TICKS 1500   /* 5 s   0x80036E58               */
+#define Q2_ITEM_MEGA_DECAY_TICKS 1500   /* 5 s   0x80036E58, the pickup's  */
+#define Q2_ITEM_MEGA_STEP_TICKS   300   /* 1 s   0x80037C84, each after    */
 #define Q2_ITEM_DROP_LIFE        1500   /* 0x80059AB4, the spawn default  */
 #define Q2_ITEM_RESPAWN_TICKS    9000   /* 30 s  0x80059908               */
 #define Q2_ITEM_RESPAWN_MEGA    32400   /* 108 s 0x8003790C — effect 32   */
@@ -492,7 +493,9 @@ bool q2_item_powerup_active(const q2_inventory *inv, q2_powerup_slot slot,
 
 /*
  * Mega health's decay: while the flag is up and health is over the cap, one
- * point comes off every Q2_ITEM_MEGA_DECAY_TICKS. Called from the player's own
+ * point comes off once the deadline has passed, the first
+ * Q2_ITEM_MEGA_DECAY_TICKS after the pickup and every
+ * Q2_ITEM_MEGA_STEP_TICKS after that. Called from the player's own
  * tick rather than an entity think, because the engine keeps it in the client.
  */
 void q2_item_mega_health_tick(q2_inventory *inv, s32 level_time);

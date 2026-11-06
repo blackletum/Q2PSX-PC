@@ -326,6 +326,14 @@ bool q2_item_powerup_active(const q2_inventory *inv, q2_powerup_slot slot,
     return (u32)level_time < (u32)until;
 }
 
+/*
+ * 0x80037C20. Back at the cap, the flag and the deadline go whatever the
+ * clock says; over it, a point comes off once the deadline is strictly past
+ * (`sltu deadline, now` at 0x80037C7C) and the next is a second away
+ * (0x80037C84). Only the first wait, armed by the pickup, is five seconds:
+ * on the US JAIL2 attract run the port's five-second steps left the player
+ * eleven points healthier than the console by record frame 860.
+ */
 void q2_item_mega_health_tick(q2_inventory *inv, s32 level_time)
 {
     if (!inv)
@@ -333,21 +341,16 @@ void q2_item_mega_health_tick(q2_inventory *inv, s32 level_time)
     if (!(inv->flags & Q2_INV_MEGA_HEALTH))
         return;
 
-    if (inv->mega_health_next == 0) {
-        inv->mega_health_next = level_time + Q2_ITEM_MEGA_DECAY_TICKS;
-        return;
-    }
-    if ((u32)level_time < (u32)inv->mega_health_next)
-        return;
-
-    inv->mega_health_next = level_time + Q2_ITEM_MEGA_DECAY_TICKS;
-
-    if (inv->health > inv->health_max) {
-        inv->health--;
-    } else {
+    if (!(inv->health > inv->health_max)) {
         inv->flags &= ~Q2_INV_MEGA_HEALTH;
         inv->mega_health_next = 0;
+        return;
     }
+    if (!((u32)inv->mega_health_next < (u32)level_time))
+        return;
+
+    inv->mega_health_next = level_time + Q2_ITEM_MEGA_STEP_TICKS;
+    inv->health--;
 }
 
 /* ------------------------------------------------------------------------- */

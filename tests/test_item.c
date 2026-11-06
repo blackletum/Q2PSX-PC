@@ -362,16 +362,27 @@ static void test_health(void)
     check_eq_i(inv.health, 200, "and overheals to the literal 200");
     check(inv.flags & Q2_INV_MEGA_HEALTH, "and raises its flag");
 
-    /* And it bleeds back down, one point per 1500 ticks. */
+    /* And it bleeds back down (0x80037C20): five seconds after the pickup,
+     * then a point a second, each once the deadline is strictly past. */
     {
         s32 t = w.level_time;
-        inv.mega_health_next = t + Q2_ITEM_MEGA_DECAY_TICKS;
+        check_eq_i(inv.mega_health_next, t + Q2_ITEM_MEGA_DECAY_TICKS,
+                   "the pickup arms the first deadline five seconds out");
         q2_item_mega_health_tick(&inv, t + Q2_ITEM_MEGA_DECAY_TICKS);
-        check_eq_i(inv.health, 199, "mega health decays a point");
+        check_eq_i(inv.health, 200, "nothing at the deadline itself");
+        q2_item_mega_health_tick(&inv, t + Q2_ITEM_MEGA_DECAY_TICKS + 1);
+        check_eq_i(inv.health, 199, "mega health decays a point past it");
+        check_eq_i(inv.mega_health_next,
+                   t + Q2_ITEM_MEGA_DECAY_TICKS + 1 + Q2_ITEM_MEGA_STEP_TICKS,
+                   "and the next point is a second away");
+        q2_item_mega_health_tick(&inv, t + Q2_ITEM_MEGA_DECAY_TICKS + 2 +
+                                       Q2_ITEM_MEGA_STEP_TICKS);
+        check_eq_i(inv.health, 198, "a second later, another");
         inv.health = 100;
-        q2_item_mega_health_tick(&inv, t + 2 * Q2_ITEM_MEGA_DECAY_TICKS);
+        q2_item_mega_health_tick(&inv, t + Q2_ITEM_MEGA_DECAY_TICKS + 3 +
+                                       Q2_ITEM_MEGA_STEP_TICKS);
         check(!(inv.flags & Q2_INV_MEGA_HEALTH),
-              "and the flag drops once back at the cap");
+              "and the flag drops once back at the cap, deadline or not");
     }
 
     /* 0x80036E64: adrenaline raises the max by one and tops health up to it. */
