@@ -56,7 +56,7 @@ static void test_actor(void)
     CHECK(seen[0] == 62 && seen[2] == -62 && thought_clock == 1);
     CHECK(m.pos[0] == 152 && m.motion.target[0] == 152);
     CHECK(m.motion.ent.pos[0] == 62 && m.motion.phase == 0);
-    CHECK(q2_level_state.time == 0); /* actor restores the general clock */
+    CHECK(q2_level_state.time == 1); /* left on this creature's clock (0x8007ED04) */
     m.pos[0] = 1000; m.angles[2] = 1024; q2_link_entity(&m, 5);
     CHECK(m.motion.ent.pos[0] == 1000 && m.motion.yaw == 1024);
     m.motion.velocity[0] = 320; m.motion.impulse[0] = 640;
@@ -80,7 +80,7 @@ static void test_actor(void)
     q2_cre_motion_tick(&m, 10, &world);
     CHECK(m.dissolve == 3456); /* render dt, not an entire AI interval */
     init(&m); m.motion.phase_base = 25; m.motion.phase = 5;
-    world.suspended = true; q2_level_state.time = 27;
+    world.suspended = true; q2_level_tick = 27;   /* 0x800B29E0 */
     q2_cre_motion_tick(&m, 10, &world);
     CHECK(m.motion.clock == 27 && m.motion.phase == 5);
     world.suspended = false; m.think = advance; m.next_think = 28;

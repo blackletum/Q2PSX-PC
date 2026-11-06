@@ -791,6 +791,17 @@ typedef struct q2_level {
 
 extern q2_level q2_level_state;
 
+/*
+ * THE GLOBAL TICK, 0x800B29E0 (with its time twin at 0x800B2A00). The AI
+ * clock (0x8007E238) advances THIS and copies it into level.framenum and
+ * level.time (0x8007E264..0x8007E280). A creature's handler then writes its
+ * OWN clock into those two (0x8007ECF0, 0x8007ED04) for each tick it runs and
+ * never puts them back, so between ticks `q2_level_state` holds the last
+ * creature's clock: a player's noise is stamped with that. A creature's clock
+ * is seeded from, and while suspended held at, this counter instead.
+ */
+extern s32 q2_level_tick;
+
 void q2_level_reset(void);
 
 void q2_monster_init(q2_monster *m);

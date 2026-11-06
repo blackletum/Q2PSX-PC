@@ -481,6 +481,7 @@ void q2_zone_history_creatures(const q2_zone_history *h, const char *map,
     if (p && p->runtime_present) {
         q2_level_state.time = p->ai_time;
         q2_level_state.framenum = p->ai_frame;
+        q2_level_tick = p->ai_time;             /* and the global count, 0x800B29E0 */
         q2_trail_restore(&p->trail);
     }
     for (i = 0; i < world->set.count; i++) {

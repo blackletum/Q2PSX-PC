@@ -357,6 +357,12 @@ class OracleMachine(LoaderMachine):
                                   [signed(self.read(e + 96 + 2 * i, 2), 16) for i in range(3)] +
                                   [signed(self.read(e + 156, 2), 16)] +
                                   [signed(self.read(e + 84 + 4 * i, 4)) for i in range(3)]))
+        if pc == 0x8004C83C:  # the machinegun's muzzle RotateS: object angles (+230..+234), matrix (+704), offset
+            o = self.r[19]
+            self.rand_log.append(('mgmuzzle', o, [signed(self.read(o + 230 + 2 * i, 2), 16) for i in range(3)] +
+                                  [signed(self.read(o + 704 + 2 * i, 2), 16) for i in range(9)] +
+                                  [signed(self.read(o + 84 + 4 * i, 4)) for i in range(3)] +
+                                  [signed(self.read(o + 246, 2), 16)]))
         if pc == 0x80061190:  # fire_hit, after VectorLength: self and enemy origins, the range, the reach
             e = self.r[19]; en = self.read(e + 188, 4)
             self.rand_log.append(('firehit', e, [signed(self.read(e + 4 * i, 4)) for i in range(3)] +

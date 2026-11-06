@@ -19,10 +19,12 @@ const char *const q2_ai_verb_names[Q2_AI_VERB_COUNT] = {
 };
 
 q2_level q2_level_state;
+s32 q2_level_tick;
 
 void q2_level_reset(void)
 {
     memset(&q2_level_state, 0, sizeof(q2_level_state));
+    q2_level_tick = 0;
 }
 
 void q2_monster_init(q2_monster *m)

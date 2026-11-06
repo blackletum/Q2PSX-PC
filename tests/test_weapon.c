@@ -432,7 +432,8 @@ static void test_muzzle(void)
         /* +Z through a yaw-only rotation is (sin, 0, cos) — no vertical term
          * at zero pitch, which the broken basis also satisfied, so pitch is
          * where it has to be checked. */
-        q2_weapon_muzzle_origin(fwd_only, eye, 0, 1024, 0, a);
+        /* A NEGATIVE pitch looks up, as the console's object angles do. */
+        q2_weapon_muzzle_origin(fwd_only, eye, 0, -1024, 0, a);
         check_eq_i(a[1] - eye[1], -4096,
                    "pitched a quarter circle, forward is straight up");
         check(a[2] - eye[2] > -8 && a[2] - eye[2] < 8,
@@ -442,9 +443,21 @@ static void test_muzzle(void)
     /* RotateS floors in the Y-negated frame and the fire function subtracts
      * the rotated Y (0x8004C01C, 0x8004C04C): a ceiling here. Floored, this
      * blaster offset is -61. */
-    q2_weapon_muzzle_origin(t->muzzle[Q2_WID_BLASTER], eye, 0, 300, 0, out);
+    q2_weapon_muzzle_origin(t->muzzle[Q2_WID_BLASTER], eye, 0, -300, 0, out);
     check_eq_i(out[1] - eye[1], -60,
                "the muzzle's Y rounds as the console's negated frame does");
+
+    /* MEASURED: JAIL2's attract run, record frame 198. The machinegun's
+     * offset (72, 80, 250), object angles pitch -426 and yaw -1048, and the
+     * eye 290 above the origin put the console's round, and its noise, at
+     * (19610, -1884, -7992) (tests/fixtures/lockstep_oracle.py). */
+    {
+        const s16 mg[3] = { 72, 80, 250 };
+        const s32 mg_eye[3] = { 19860, -1796, -8054 };
+        q2_weapon_muzzle_origin(mg, mg_eye, -1048, -426, 0, out);
+        check(out[0] == 19610 && out[1] == -1884 && out[2] == -7992,
+              "the machinegun's muzzle lands where the console's does");
+    }
 }
 
 /* ------------------------------------------------------------------------- */

@@ -739,7 +739,11 @@ void q2_sim_find_target(q2_sim *sim, s32 dt)
     p = &sim->player[sim->cur_player];
     if (p->aim_view_valid) memcpy(eye, p->aim_eye, sizeof(eye));
     else q2_sim_eye(sim, eye);
-    angles[0] = (s32)(0u - (u32)p->pitch); angles[1] = p->yaw; angles[2] = p->roll;
+    /* The object's own angles (object+230), pitch as it is: a negative pitch
+     * looks up. Negated, every shot taken looking up went down (JAIL2's
+     * attract run, record frame 198: the console's round climbs at y
+     * -10077 where the port's fell at +9843). */
+    angles[0] = p->pitch; angles[1] = p->yaw; angles[2] = p->roll;
     q2_combat_find_target(eye, angles, &sim->combat.self, sim->combat.targets,
                           sim->combat.target_count, player_aim_visible, sim,
                           p->aim_direction, &p->aim_pitch);
@@ -776,7 +780,7 @@ void q2_sim_aim(const q2_sim *sim, s16 out[3])
      * blaster bolt, << 2 for a bullet — so the port has to hand over the same
      * magnitude or every weapon's range and spread come out wrong together. */
     out[0] = (s16)(((s64)cp * sy) >> 12);
-    out[1] = (s16)(-sp);          /* world Y grows downward */
+    out[1] = (s16)sp;             /* Y grows down, and a negative pitch looks up */
     out[2] = (s16)(((s64)cp * cy) >> 12);
 }
 

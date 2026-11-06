@@ -69,7 +69,7 @@ void q2_cre_motion_init(q2_monster *m)
     if (m->on_ground) p->ent.ground_normal[1] = 4096;
     p->ent.last_normal[1] = 4096;
     p->flags = 1;
-    p->clock = q2_level_state.time;
+    p->clock = q2_level_tick;               /* 0x8007E5F0/0x8007E5F8 */
     /* G_Spawn's second memset (0x8005F8B4) clears the allocator's stagger. */
     p->ready = true;
 }
@@ -161,7 +161,7 @@ static void move_actor(q2_monster *m, s32 dt, bool integrate,
 u32 q2_cre_motion_tick(q2_monster *m, s32 dt, const q2_cre_motion_world *w)
 {
     q2_cre_motion *p;
-    s32 phase, remaining, saved_time, saved_frame;
+    s32 phase, remaining;
     u32 ran = 0;
     if (!m || !m->in_use || dt <= 0) return 0;
     if (!m->motion.ready) q2_cre_motion_init(m);
@@ -184,9 +184,8 @@ u32 q2_cre_motion_tick(q2_monster *m, s32 dt, const q2_cre_motion_world *w)
         return 0;
     }
     if (m->corpse) { q2_monster_corpse_tick_dt(m, dt); return 0; }
-    if (w && w->suspended) { p->clock = q2_level_state.time; return 0; }
-    saved_time = q2_level_state.time;
-    saved_frame = q2_level_state.framenum;
+    /* 0x8007EC40..0x8007EC64: the global counter, not the level fields. */
+    if (w && w->suspended) { p->clock = q2_level_tick; return 0; }
     phase = (s32)p->phase - p->phase_base;
     if (phase < 0) phase += 30;
     remaining = phase + dt;
@@ -216,8 +215,8 @@ u32 q2_cre_motion_tick(q2_monster *m, s32 dt, const q2_cre_motion_world *w)
     move_actor(m, dt, true, w);
     p->phase = (u8)(p->phase_base + remaining);
     if (p->phase >= 30) p->phase -= 30;
-    q2_level_state.time = saved_time;
-    q2_level_state.framenum = saved_frame;
+    /* And nothing puts the level fields back: they keep this creature's
+     * clock until the next creature or the next AI tick writes them. */
     return ran;
 }
 

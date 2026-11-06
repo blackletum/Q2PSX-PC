@@ -1973,6 +1973,7 @@ static void test_frame_driver(void)
         m.in_use      = true;
         m.think       = q2_M_MoveFrame; /* retail keeps the installed driver */
         q2_level_state.time = q2_level_state.framenum;
+        q2_level_tick = q2_level_state.framenum;   /* the set tick counts on from 0x800B29E0 */
         d = &m;
 
         q2_monster_set_tick(&set);

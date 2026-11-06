@@ -293,8 +293,9 @@ u32 q2_monster_set_tick(q2_monster_set *set)
      * in; the original increments them as one and separating them would make
      * FindTarget's one-tick window either always or never open.
      */
-    q2_level_state.framenum++;
-    q2_level_state.time++;
+    q2_level_tick++;
+    q2_level_state.framenum = q2_level_tick;
+    q2_level_state.time     = q2_level_tick;
 
     /*
      * AND THE VERY NEXT INSTRUCTION IS THE SIGHT ROTATION. QuakeThinkGeneral

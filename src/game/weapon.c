@@ -375,7 +375,16 @@ void q2_weapon_muzzle_origin(const s16 muzzle[3], const s32 eye[3],
      * and Y comes out as -floor(-v): a CEILING in this frame. The blaster at
      * yaw 0, pitch 300 lands at Y -60, not the -61 a floor gives.
      */
-    q2_rotation_view(rot, yaw, pitch, roll);
+    /*
+     * THE PITCH ENTERS NEGATED. The player's matrix at object+704 is
+     * RotMatrix of object+230 (0x8003AB60): measured on JAIL2's attract run
+     * at record frame 198, pitch -426 and yaw -1048 give the rows (-151,
+     * 2488, -3250), (0, 3252, 2490), (4093, 91, -120) -- Ry(yaw) Rx(pitch),
+     * whose pitch turns the other way from this view matrix's. With the
+     * view's sign the machinegun's muzzle came out 97 units short and 300
+     * low while the player looked up, and so did the shot and its noise.
+     */
+    q2_rotation_view(rot, yaw, -pitch, roll);
 
     for (i = 0; i < 3; i++) {
         s64 v = (s64)rot[0][i] * muzzle[0]

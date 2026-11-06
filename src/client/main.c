@@ -4417,6 +4417,16 @@ static void client_gib_describe(void *user, q2_gib_victim kind,
             c->fx_mesh_given = given;
             c->fx_mesh_armed = armed;
         }
+        /*
+         * +0xA4 IS THE DRAW ORIGIN, the position lowered by 286 and raised
+         * by the model's bias (0x8006D118), and ThrowGibs starts the head
+         * there (0x8005A578). Handed the position instead, an Insane's head
+         * began 94 units low, hit the floor first and stopped bleeding a
+         * frame early (JAIL2's attract run: thrown at record frame 260,
+         * parted at 278).
+         */
+        if (c->cre_model && c->cre_model_ok && c->cre_model_ok[i])
+            p->origin[1] = p->pos[1] + Q2_EYE_BASE - c->cre_model[i].hdr.ext2;
         {
             s32 area = client_cre_area(c, (u32)i, NULL);
 
@@ -4615,15 +4625,16 @@ static void client_ai_clock(client *c, s32 ticks)
 {
     s32 phase;
 
-    c->ai_clock_before = q2_level_state.time;
+    c->ai_clock_before = q2_level_tick;
     if (!c->creatures_ready)
         return;
     c->creatures.sight.health = c->sim[0].combat.inv.health;
     phase = (s32)(c->ai_accum * 300.0 + 0.5) + ticks;
     while (phase >= 30) {
         phase -= 30;
-        q2_level_state.time++;
-        q2_level_state.framenum++;
+        q2_level_tick++;                      /* 0x8007E264 */
+        q2_level_state.time     = q2_level_tick;
+        q2_level_state.framenum = q2_level_tick;
         q2_ai_set_sight_client();
         /*
          * QuakeThinkGeneral's per-client pass, 0x8007E2A0..0x8007E404, with
@@ -4791,7 +4802,7 @@ static void client_creatures_tick(client *c, float dt, const s32 eye[3])
         }
     }
     }
-    if (old_clock != q2_level_state.time) {
+    if (old_clock != q2_level_tick) {
         /*
          * One creature, one line per AI tick: the move it is playing, the frame
          * it is on, and its attack state. Counters say what happened across a

@@ -2672,6 +2672,7 @@ q2_result q2_save_apply_ai(const q2_save *s, q2_creature_world *w, u32 *phase_us
             w->noise[i].teleport_time = a->noise_time[i];
         }
     q2_level_state = a->level;
+    q2_level_tick  = a->level.time;       /* the save keeps no copy of 0x800B29E0 */
     if (!a->motion_present) {
         for (i = 0; i < a->count; i++) {
             q2_monster *m = &w->set.monsters[map[i]];

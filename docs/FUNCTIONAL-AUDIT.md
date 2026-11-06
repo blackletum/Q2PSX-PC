@@ -1947,7 +1947,22 @@ STARTLEV), so its compare starts one draw past the seed. Seven more port faults:
   frame counter, so all creatures run frame 1 (JAIL2: phase 12 for all seven).
 
 BASE3 and WASTE2 now match the console's `rand()` stream and player path to their
-ends (record frames 526 and 211). JAIL2 matches to frame 200 of its 891.
+ends (record frames 526 and 211).
+
+*JAIL2 from 200 to 322.* Four more:
+- **The pitch enters the player's fire matrix and aim un-negated.** The object
+  matrix at +704 is RotMatrix of +230 (measured rows at frame 198 for pitch
+  -426); the muzzle (`q2_weapon_muzzle_origin`), the auto-aim search and its
+  fallback all used the view's opposite sign, so a shot fired looking up went
+  down.
+- **The level clock is left on the last creature's clock.** `0x8007ED04` writes
+  each thinking creature's clock into `level.framenum` and nothing restores it;
+  the AI tick copies the global count (`0x800B29E0`, now `q2_level_tick`) back
+  in. The player's noise is stamped with whatever it holds.
+- **The head gib starts at the draw origin** (`+0xA4`, `0x8005A578`): the
+  position lowered by 286 and raised by the model's bias.
+
+JAIL2 now matches to frame 322 of its 891.
 
 Two known differences remain that the run did not reach:
 - the trigger-volume adjustment of the sighting spot and crumbs (`0x80061024`,
