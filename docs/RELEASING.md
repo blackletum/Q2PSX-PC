@@ -40,10 +40,10 @@ Semantic versioning, read against the *disc*:
 | **minor** | New behaviour: a subsystem that now runs, a format that is now read, a fidelity switch that now exists. While the major version is 0, this is also where behaviour is allowed to *change*. |
 | **patch** | Fixes and packaging, with no new behaviour. |
 
-### What 1.0.0 is measured against (proposed, awaiting the owner's sign-off)
+### What 1.0.0 is measured against (signed off by the owner, 6 November)
 
 "Nothing known to be wrong" needs a boundary, or the measurements that only
-a console can make keep it open forever. The proposal splits the remaining
+a console can make keep it open forever. The boundary splits the remaining
 work three ways:
 
 1. **Gates 1.0.** Anything the disc's own code can settle: a behaviour the
@@ -80,11 +80,11 @@ work three ways:
    - the player's settings come back after an attract demo, where the console
      leaves its defaults in place.
 
-   **One the other way round, for the owner to decide.** After the title has
-   played an attract demo, the console's help computer stays silent for the
-   rest of the session (player one's pad mode word is left at 3; see the
-   functional audit). The port reproduces it. Restoring the orders would be a
-   one-line deviation, and would go on this list.
+   **Decided the console's way.** After the title has played an attract demo,
+   the console's help computer stays silent for the rest of the session
+   (player one's pad mode word is left at 3; see the functional audit). The
+   port reproduces it, and the owner chose to keep that rather than restore
+   the orders, so it is not a deviation.
 
 **Gate 1 against the attract demos (6 November):** all six, the three on each
 disc, now replay the console's own pad recordings tick for tick to their ends:
@@ -92,8 +92,8 @@ the `rand()` stream and player one's position match the console's own code
 (`tests/fixtures/lockstep_oracle.py`, `--ntsc` for the US disc) on every
 frame. The three console behaviours no demo reaches (the sighting record's
 trigger volumes, the pickup burst on the posed mesh, the single-player death
-pick) are modelled and checked; the functional audit has the detail. What
-remains for 1.0 is the owner's sign-off on this page.
+pick) are modelled and checked; the functional audit has the detail. The
+boundary above is signed off.
 
 Saved games are the one compatibility promise: the container is chunked,
 checksummed and fixed-width so a save written by one build loads under another.
