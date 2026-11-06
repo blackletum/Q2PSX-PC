@@ -1,4 +1,5 @@
 #include "random.h"
+#include "objslot.h"
 #include "sim.h"
 
 #include <stdlib.h>
@@ -3933,6 +3934,8 @@ void q2_sim_select_player(q2_sim *sim, int index)
 
 void q2_sim_entities_begin(q2_sim *sim, s32 dt)
 {
+    if (sim)
+        sim->proj_walk_slot = 0;
     if (!sim || !sim->entities_ready ||
         sim->cur_player != 0 || sim->settling || dt <= 0)
         return;
@@ -3945,14 +3948,30 @@ void q2_sim_entities_begin(q2_sim *sim, s32 dt)
 
 void q2_sim_entities_to(q2_sim *sim, s32 slot)
 {
-    if (sim)
-        q2_entity_walk_to(&sim->entities, &sim->ent_world, slot);
+    /*
+     * ONE SLOT AT A TIME, so a model projectile (projectile.h, `obj_slot1`)
+     * runs between the entities either side of it, as MoveModels' single walk
+     * over the object array does.
+     */
+    if (!sim)
+        return;
+    if (slot > Q2_OBJ_SLOTS)
+        slot = Q2_OBJ_SLOTS;
+    for (; sim->proj_walk_slot < slot; sim->proj_walk_slot++) {
+        q2_entity_walk_to(&sim->entities, &sim->ent_world,
+                          sim->proj_walk_slot + 1);
+        q2_sim_projectile_at_slot(sim, sim->proj_walk_slot);
+    }
+    q2_entity_walk_to(&sim->entities, &sim->ent_world, slot);
 }
 
 void q2_sim_entities_end(q2_sim *sim)
 {
-    if (sim)
-        q2_entity_walk_end(&sim->entities, &sim->ent_world);
+    if (!sim)
+        return;
+    q2_sim_entities_to(sim, Q2_OBJ_SLOTS);
+    q2_entity_walk_end(&sim->entities, &sim->ent_world);
+    q2_sim_projectiles_walk_rest(sim);
 }
 
 void q2_sim_missiles_late(q2_sim *sim, s32 dt)

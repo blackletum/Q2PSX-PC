@@ -28,7 +28,8 @@ typedef enum q2_obj_owner {
     Q2_OBJ_FREE = 0,
     Q2_OBJ_RESERVED,     /* a player, or a record the port does not model */
     Q2_OBJ_CREATURE,     /* `ref` is the creature-set index                 */
-    Q2_OBJ_ENTITY        /* `ref` is the entity-set index                   */
+    Q2_OBJ_ENTITY,       /* `ref` is the entity-set index                   */
+    Q2_OBJ_PROJECTILE    /* `ref` is the projectile index (projectile.h)    */
 } q2_obj_owner;
 
 /* 0x8006D0BC: every slot free, slot 0 on top. */

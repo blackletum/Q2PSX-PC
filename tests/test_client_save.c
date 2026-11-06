@@ -420,6 +420,7 @@ static bool same_projectiles(const q2_projectile *a, const q2_projectile *b)
         /* A cold load rebuilds collision caches and actor addresses. */
         x.shooter = y.shooter = NULL;
         x.node = y.node = Q2_PROJ_NODE_UNKNOWN;
+        x.obj_slot1 = y.obj_slot1 = 0;   /* the object slot is dealt again */
         if (memcmp(&x, &y, sizeof(x))) return false;
     }
     return true;

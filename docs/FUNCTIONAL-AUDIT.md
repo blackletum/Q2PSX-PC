@@ -1962,18 +1962,24 @@ ends (record frames 526 and 211).
 - **The head gib starts at the draw origin** (`+0xA4`, `0x8005A578`): the
   position lowered by 286 and raised by the model's bias.
 
-JAIL2 now matches to frame 322 of its 891.
+JAIL2 now matches to frame 338 of its 891.
 
-*Where JAIL2 parts now: frame 322.* A thrown grenade is an OBJECT on the
+*Frame 322 to 338: projectiles as objects.* A thrown grenade is an OBJECT on the
 console: `0x800CCF28` is slot 7 of the 48-record array (`0x800CBA28`, stride
 `0x300`), taken from the same LIFO stack as creatures and gibs, and its toss
-(`0x80046B98`, the tumble draws at `0x80046BFC..0x80046C34`) runs at that slot's
-turn in MoveModels: at 322, between the second and third creature. The port keeps
-grenades and rockets in its own missile pass, with no slot, so their draws come
-before every creature's and every later object is dealt a different slot.
-Giving projectiles object slots and running them in the slot walk is the next
-step. Two of the port's creature steps also fail at 322 where all three of the
-console's succeed (`stepret 1`), which may follow from the same order.
+(`0x80046B98`) runs at that slot's turn in MoveModels. Grenades, hand grenades,
+rockets and BFG balls now hold a slot (`q2_projectile.obj_slot1`, owner
+`Q2_OBJ_PROJECTILE`), taken at launch and dealt again on load, and the sim runs
+each at its slot in the walk (`q2_sim_entities_to`, one slot at a time with the
+entities). Bolts stay in the missile sweep. The throw is the held Grenade3's own
+think (`0x8004A7C0`), so the throw frame does not toss it.
+
+*Where JAIL2 parts now: frame 338.* The thrown grenade's velocity is
+(-1102, -2048, 3945) on the console and (-1111, -2048, 3943) in the port: the
+vertical and the horizontal length agree, but the console's direction is not
+the player's yaw (-179) rotated by the table, so the release routine composes it
+some other way. The difference grows into a different bounce at 332, and the
+console's grenade comes to rest at 338 where the port's is still tumbling.
 
 Two known differences remain that the run did not reach:
 - the trigger-volume adjustment of the sighting spot and crumbs (`0x80061024`,

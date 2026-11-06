@@ -11,6 +11,7 @@
  * boxes. Movement alone uses SecondaryCol's baked-in player hull. See sim.c
  * for the original call sites and the distinction between these contexts.
  */
+#include "objslot.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -22,6 +23,8 @@
 #include "modeldraw.h"    /* q2_model_world_vertex, 0x8006CC44: the blur */
 #include "modelent.h"
 #include "trig.h"
+
+static void proj_slot_take(q2_sim *sim, s32 index);
 
 /* ------------------------------------------------------------------------- */
 /* Effects                                                                    */
@@ -1456,6 +1459,7 @@ q2_fire_result_v2 q2_sim_fire_weapon(q2_sim *sim, int weapon_id,
         q2_sim_proj_scan.launched++;
         launched = q2_projectile_launch(&sim->combat.projectiles, &r,
                                         sim->cur_player, sim->level_time);
+        proj_slot_take(sim, launched);
         if (launched >= 0) {
             q2_projectile *lp = &sim->combat.projectiles.p[launched];
 
@@ -2092,6 +2096,7 @@ s32 q2_sim_creature_launch(q2_sim *sim, q2_actor *shooter, q2_fire_kind kind,
     q2_sim_proj_scan.launched++;
     index = q2_projectile_launch(&sim->combat.projectiles, &r, -1,
                                  sim->level_time);
+    proj_slot_take(sim, index);
     if (index < 0) {
         q2_sim_proj_scan.dropped_full++;
         return -1;
@@ -2228,6 +2233,7 @@ q2_hand_grenade_update q2_sim_hand_grenade_update(
             q2_projectile_set_attitude(&sim->combat.projectiles.p[index],
                                        -(pl->pitch + 1280), -pl->yaw,
                                        pl->roll);
+            sim->combat.projectiles.p[index].thrown_fresh = true;
             /* 0x8004A7C0: after reveal, velocity and throw sound. */
             (void)q2_weapon_consume(&sim->combat.inv,
                                     Q2_WID_HAND_GRENADE);
@@ -2724,6 +2730,503 @@ static void bolt_contact_tick(q2_sim *sim, u32 index, const q2_proj_step *step,
     if (consumed) q2_projectile_expire(&sim->combat.projectiles, index);
 }
 
+/* The object slot a model projectile holds, taken at launch from the same
+ * LIFO stack as creatures and gibs. A bolt is a missile-array record and holds
+ * none. */
+static void proj_slot_take(q2_sim *sim, s32 index)
+{
+    q2_projectile *p;
+    s32 slot;
+
+    if (!sim || index < 0 || index >= Q2_PROJ_MAX)
+        return;
+    p = &sim->combat.projectiles.p[index];
+    p->obj_slot1 = 0;
+    p->walk_pending = false;
+    if (!p->in_use || p->kind == Q2_PROJ_BOLT)
+        return;
+    slot = q2_obj_slot_alloc(Q2_OBJ_PROJECTILE, index);
+    if (slot >= 0)
+        p->obj_slot1 = (s16)(slot + 1);
+}
+
+/* And back on the stack once the projectile is gone. */
+static void proj_slot_release(q2_sim *sim, u32 index)
+{
+    q2_projectile *p = &sim->combat.projectiles.p[index];
+
+    if (p->in_use || p->obj_slot1 <= 0)
+        return;
+    q2_obj_slot_free(p->obj_slot1 - 1);
+    p->obj_slot1 = 0;
+    p->walk_pending = false;
+}
+
+/*
+ * ONE PROJECTILE'S THINK, split out of the tick so the slot walk can run a
+ * grenade, rocket or BFG ball at its object slot's turn (MoveModels, as the
+ * console does) while bolts stay in the missile sweep.
+ */
+static void proj_think(q2_sim *sim, u32 i)
+{
+    q2_projectile *p = &sim->combat.projectiles.p[i];
+    q2_proj_step step;
+    q2_actor **hit_list;
+    q2_actor *attacker, *ignore;
+    q2_actor  *cand[Q2_SIM_CRE_HITSCAN_MAX + 1];
+    u32 hit_count;
+    s32 hit_index;
+    s32 dir[3], contact[3];
+    bool held, grenade;
+    int k;
+
+    if (!p->in_use)
+        return;
+    if (p->thrown_fresh) {          /* the throw frame's think */
+        p->thrown_fresh = false;
+        return;
+    }
+
+    q2_sim_proj_scan.stepped++;
+    held = (p->kind == Q2_PROJ_HAND_GRENADE &&
+            p->node == Q2_PROJ_NODE_HELD);
+    grenade = p->kind == Q2_PROJ_GRENADE || p->kind == Q2_PROJ_HAND_GRENADE;
+    attacker = proj_attacker(sim, p);
+    ignore = q2_projectile_ignore_owner(p, attacker) ? attacker : NULL;
+
+    /* Entity projectiles keep their thinker light. Bolts emit theirs after
+     * lifetime/contact decisions and the endpoint commit below. */
+    if (!held && p->kind != Q2_PROJ_BOLT) {
+        static const u8 glow[3]     = { Q2_PROJ_LIGHT_R, Q2_PROJ_LIGHT_G,
+                                        Q2_PROJ_LIGHT_B };
+        static const u8 bfg_glow[3] = { Q2_PROJ_BFG_LIGHT_R,
+                                        Q2_PROJ_BFG_LIGHT_G,
+                                        Q2_PROJ_BFG_LIGHT_B };
+        bool bfg = (p->kind == Q2_PROJ_BFG);
+
+        q2_ent_light_at(&sim->ent_world.events, p->pos,
+                        bfg ? bfg_glow : glow,
+                        bfg ? Q2_PROJ_BFG_LIGHT_INNER
+                            : Q2_PROJ_LIGHT_INNER,
+                        bfg ? Q2_PROJ_BFG_LIGHT_OUTER
+                            : Q2_PROJ_LIGHT_OUTER);
+    }
+
+    /* The grenade thinker lays its ribbon before toss changes attitude. */
+    if (grenade && !held)
+        proj_blur(sim, i, p, p->pos);
+    q2_projectile_step(&sim->combat.projectiles, i, sim->gravity,
+                       sim->cur_dt, sim->level_time, &step);
+
+    /* The blur ribbon its think lays from its own model's vertices, at
+     * where it stood before this move (proj_blur). */
+    if (!held && !grenade)
+        proj_blur(sim, i, p, step.from);
+
+    /* State 1 has no mover, collision body, light or visible model. The
+     * owner update after the view-model step attaches it and resolves an
+     * elapsed fuse at the current hand position. */
+    if (held)
+        return;
+
+    if (grenade && ((p->flags & Q2_PROJ_TOSS_STOPPED) ||
+                    grenade_geometry(sim, p, &step))) {
+        if (step.expired) grenade_fuse(sim, i);
+        return;
+    }
+
+    if (step.expired && !grenade) {
+        q2_sim_proj_scan.expired++;
+        /* Rocket and BFGBlast use +0xF4 only as a safety lifetime:
+         * 0x8004ADB0 / 0x8004B8E4 free them without damage or an effect.
+         * The bolt lifetime is quiet for the same reason. */
+        q2_projectile_expire(&sim->combat.projectiles, i);
+        return;
+    }
+
+    /*
+     * The BFG's beams — the game's weapon trail, and MOST OF ITS DAMAGE.
+     *
+     * 0x8004BD04 calls the beam maintainer every tick while the ball flies,
+     * and it holds a green beam on every target it can see, refreshing each
+     * one rather than adding a second (effect.h). The beams outlive the
+     * ball's passage by their own timer, which is what makes the BFG leave
+     * a lattice behind it rather than a single line.
+     *
+     * THE SAME PASS HURTS WHAT IT BEAMS, and that half was missing: this
+     * arm was one q2_fx_beam_timed call, so the lattice was decoration and
+     * the weapon was worth its contact hit plus one 1300-radius blast. On
+     * the disc a candidate that clears the filters takes 10 points (5 in
+     * deathmatch) every tenth of a second while the ball is in the air —
+     * 0x80049DE4..0x80049E38, `a3 = 1` so mod 1, `sw zero, 16(sp)` so no
+     * point and therefore no knockback.
+     *
+     * The beam and the damage are SEPARATELY gated: 0x80049DBC `beq v1,
+     * zero` falls through to the damage when the 12-slot beam table is
+     * full, so the damage cannot live under `fx_ready` the way the beam
+     * does.
+     *
+     * The port's visibility test is the same segment sweep the projectile
+     * itself uses, because it has no separate line-of-sight query; the
+     * original calls 0x80051874 at 0x80049CE0, and failing it branches past
+     * BOTH halves. Called out as the one substitution — and until now the
+     * test was only described here, never performed, so beams were held
+     * through walls.
+     */
+    if (p->kind == Q2_PROJ_BFG) {
+        q2_actor **list  = sim->world_targets ? sim->world_targets
+                                              : sim->combat.targets;
+        u32        count = sim->world_targets ? sim->world_target_count
+                                              : sim->combat.target_count;
+        const q2_actor *parked_self = &sim->pcombat[sim->cur_player].self;
+        q2_actor *owner = attacker_for(sim, p->owner);
+        /* 0x80049DE8 `lw 0x800AEBCC` then 0x80049E10 `addiu a2, zero, 5`
+         * against 0x80049E28's 10 — read from the port's own stand-in for
+         * that global rather than from the rules copy, as the console reads
+         * the word itself at the site. */
+        s16  beam_damage = sim->multiplayer ? 5 : 10;
+        bool hurt;
+        u32  t;
+
+        /*
+         * 0x8004BCF0..0x8004BD08: the frame delta at 0x800B2DB4 is added
+         * into the ball's halfword at +0x4C and stored back in the
+         * maintainer's own delay slot, so the pass below already sees this
+         * tick's dt in it.
+         */
+        p->beam_time = (u16)(p->beam_time + (u16)sim->cur_dt);
+
+        /* 0x80049E00 / 0x80049E1C `slti v0, v0, 30` on the SIGNED halfword:
+         * below 30 the branch skips the damage but not the beam. */
+        hurt = (s16)p->beam_time >= 30;
+
+        for (t = 0; t < count; t++) {
+            q2_actor *a = list ? list[t] : NULL;
+            s64 dx, dy, dz;
+
+            /* 0x80049C54 `beq a1, s3, 0x80049E3C`: the ball never beams or
+             * hurts its own owner. The world list names the live player in
+             * deathmatch, so without this the shooter would scythe himself
+             * for the length of his own shot. */
+            if (!a || a == owner)
+                continue;
+
+            /*
+             * The live player can appear in a world list under two names,
+             * and the parked `pcombat[cur_player].self` is the stale one:
+             * player_damage_end maps the current player to `combat.self`,
+             * so damage landed on the parked copy is never written back,
+             * and damage landed on both is applied twice. The presentation
+             * pass above skips the same pair for the same reason.
+             */
+            if (a == parked_self)
+                continue;
+
+            /*
+             * 0x80049C5C..0x80049CB4: squared origin distance against
+             * `lui v0, 0x90` = 0x900000 = 3072^2. The console ALSO box-
+             * tests the candidate's own bounds first (0x80049C3C, the
+             * 0x800552D8 overlap against entity+0x78) against a +/-3072 box
+             * around the ball; port actors carry no bounds, so only the
+             * sphere is reproduced. It is the tighter of the two for a
+             * point, which is what an actor here is. In s64 because the sum
+             * of three squared world spans does not fit an s32.
+             */
+            dx = (s64)p->pos[0] - a->origin[0];
+            dy = (s64)p->pos[1] - a->origin[1];
+            dz = (s64)p->pos[2] - a->origin[2];
+            if (dx * dx + dy * dy + dz * dz > (s64)3072 * 3072)
+                continue;
+
+            /*
+             * THE ONE PLACE THE CONSOLE READS `takedamage` OUTSIDE
+             * T_Damage, so this filter can be the original's rather than a
+             * stand-in: the beam maintainer at 0x80049B9C does
+             * `lw v0, 748(a1)` / `lw v0, 28(v0)` / `and 0xC0000000` /
+             * `beq v0, zero` at 0x80049CBC..0x80049CD8. It asks whether the
+             * thing can be hurt, not whether it is alive.
+             */
+            if (!a->takedamage)
+                continue;
+
+            /* 0x80049CE0 `jal 0x80051874`, the visibility test. */
+            if (!splash_clear(sim, p->pos, a->origin))
+                continue;
+
+            /*
+             * The area comes from the BALL, which is what 0x80048D24
+             * resolves on the console: the point-clip helper 0x8004E920
+             * runs the owner entity's position through PrimaryColl and
+             * hands the cell's area record to the beam queue as its fourth
+             * argument. Resolved from the ball's position here, on each
+             * refresh, rather than per submit — see q2_fx_timed_beam.area.
+             */
+            if (sim->fx_ready) {
+                /*
+                 * The far end is the target's origin raised to the middle
+                 * of its hull: 0x80048D4C..0x80048D74 adds
+                 * `(572 - height) / 2`, truncated toward zero, to +0x58.
+                 * Ending the beam at the bare origin put it 14 units off
+                 * on a default 600-high creature and further on the tall
+                 * ones.
+                 */
+                s32 to[3];
+                to[0] = a->origin[0];
+                to[1] = a->origin[1] + (572 - (s32)a->height) / 2;
+                to[2] = a->origin[2];
+                q2_fx_beam_timed(&sim->fx, (s32)i, (s32)t,
+                                 p->pos, to,
+                                 Q2_FX_TIMED_BEAM_RADIUS,
+                                 Q2_FX_TIMED_BEAM_STYLE,
+                                 Q2_FX_TIMED_BEAM_LIFE,
+                                 fx_area_resolve(sim, 0, p->pos));
+            }
+
+            /* 0x80049E34, the damage the beam does when it lands. */
+            if (hurt)
+                q2_combat_damage(owner, a, beam_damage,
+                                 Q2_MOD_ENERGY_BOLT, NULL,
+                                 &sim->combat.rules);
+        }
+
+        /*
+         * 0x8004BD0C..0x8004BD3C. Two things the obvious reading gets
+         * wrong: the drain is a LOOP (0x8004BD3C branches back to
+         * 0x8004BD20), and its threshold is 31, ONE MORE than the damage
+         * gate's 30. So an accumulator that lands exactly on 30 is not
+         * drained and fires again on the very next tick before resetting,
+         * which makes the beams hurt somewhat oftener than once per 30
+         * ticks — at the PAL frame delta of 12, three ticks in every five.
+         * That is the disc's arithmetic, not a rounding choice here.
+         */
+        while ((s16)p->beam_time >= 31)
+            p->beam_time = (u16)(p->beam_time - 30);
+    }
+
+    /* Grenades already tested geometry; the other projectile thinkers
+     * retain their existing actor-first sweep. */
+    for (k = 0; k < 3; k++)
+        dir[k] = step.to[k] - step.from[k];
+
+    /* The player stops a creature's shot even in god mode; it is the
+     * damage that god mode refuses (q2_sim_hurt_player). */
+    hit_list = proj_targets(sim, cand, (u32)Q2PSX_ARRAY_COUNT(cand),
+                            &hit_count);
+
+    hit_index = q2_combat_trace_actors(step.from, step.to, ignore,
+                                       hit_list, hit_count, contact);
+
+    /*
+     * How close it came, whether or not it counted. Measured against the
+     * segment's LINE, so "near but past the end" separates a bolt that is
+     * badly aimed from one that is aimed correctly and simply has not
+     * arrived yet — which a short per-tick step makes the common case.
+     */
+    {
+        u32 hi;
+        s64 dl = (s64)dir[0] * dir[0] + (s64)dir[1] * dir[1] +
+                 (s64)dir[2] * dir[2];
+
+        /* The square is enough to compare; the length is only printed. */
+        q2_sim_proj_scan.seg_len = (s32)dl;
+
+        for (hi = 0; hi < hit_count; hi++) {
+            q2_actor *t = hit_list[hi];
+            s64 along = 0, d2;
+            s64 reach;
+
+            /* Match collision membership, including immune bodies. */
+            if (!t || t == ignore)
+                continue;
+
+            d2 = q2_combat_ray_dist_sq(step.from, dir, t->origin, &along);
+            if (q2_sim_proj_scan.closest_sq == 0 ||
+                d2 < q2_sim_proj_scan.closest_sq) {
+                q2_sim_proj_scan.closest_sq        = d2;
+                q2_sim_proj_scan.closest_origin[0] = t->origin[0];
+                q2_sim_proj_scan.closest_origin[1] = t->origin[1];
+                q2_sim_proj_scan.closest_origin[2] = t->origin[2];
+                q2_sim_proj_scan.closest_from[0]   = step.from[0];
+                q2_sim_proj_scan.closest_from[1]   = step.from[1];
+                q2_sim_proj_scan.closest_from[2]   = step.from[2];
+                q2_sim_proj_scan.closest_owner     = p->owner;
+            }
+
+            reach = (s64)Q2_HITSCAN_RADIUS + t->radius;
+            if (d2 <= reach * reach) {
+                q2_sim_proj_scan.near_miss++;
+                if (along > 4096)
+                    q2_sim_proj_scan.past_end++;
+            }
+        }
+    }
+
+    if (p->kind == Q2_PROJ_BOLT) {
+        bolt_contact_tick(sim, i, &step, attacker, hit_list, hit_count,
+                          hit_index, contact);
+        return;
+    }
+
+    if (hit_index >= 0) {
+        q2_actor *victim = hit_list[hit_index];
+        q2_actor *direct = sim->invulnerable && victim == &sim->combat.self
+                            ? NULL : victim;
+        s32 health_before = victim->health;
+
+        q2_sim_proj_scan.hit++;
+        q2_fx_preset_id fx = fx_for_projectile(p->kind);
+
+        projectile_owner_splash(sim, p, contact, hit_list, hit_count);
+        q2_projectile_impact_traced(&sim->combat.projectiles, i, contact,
+                                    attacker, direct, hit_list, hit_count,
+                                    &sim->combat.rules,
+                                    splash_clear, sim);
+
+        /*
+         * Two bursts, not three. The projectile's own and the victim's
+         * blood are both real sites; the third used to be 0x800596B0 on the
+         * killing blow, and that address is the ITEM MATERIALISE burst, not
+         * a gib — see the note at fx_hitscan_impact and effect.h. What the
+         * console raises when a body comes apart is the mesh blood spray
+         * (q2_fx_gib_spray) at the head of ThrowGibs, behind 0x8007CEB4,
+         * and that needs a posed model this file does not carry.
+         */
+        fx_at(sim, fx, contact);
+        projectile_explosion(sim, p->kind, contact);
+        if (victim->health < health_before)
+            fx_at(sim, Q2_FX_BLOOD, contact);
+        return;
+    }
+
+    if (!grenade && (sim->coll_ready || sim->coll_primary_ready)) {
+        s32 end[3], node = p->node;
+        bool complete;
+        q2_collision *phull = sim->coll_primary_ready
+                                  ? &sim->coll_primary : &sim->coll;
+
+        /*
+         * Traced from the PROJECTILE's own cell, not the player's. A rocket
+         * that has crossed the map is nowhere near the shooter, and asking
+         * the hull to clip a segment starting in the shooter's cell answers
+         * a different question — one whose answer is usually "no obstacle",
+         * which is how a projectile ends up flying through walls.
+         *
+         * Through PrimaryColl, for the reason q2_sim_trace now states: a
+         * bolt is a point and the eroded hull stopped it 286 units short of
+         * every surface, leaving rockets to burst in mid-air short of the
+         * wall and grenades to stop above the floor. `p->node` is cached
+         * against this hull throughout, so the hint stays meaningful.
+         */
+        complete = q2_coll_move(phull, step.from, step.to, node,
+                                end, &node);
+        p->node = node;
+
+        /*
+         * AND THE ENTITY BOXES. Doors, lifts and intact panes are not hull,
+         * so the walk above otherwise flies a projectile through all of
+         * them. Clipped from the step's start to wherever the hull left it,
+         * so the nearer pass wins; `complete` goes false because a bolt
+         * that met any solid entity has met something.
+         */
+        if (sim->move_world.count) {
+            q2_move_seg_hit mh;
+            const s32 *stop = complete ? step.to : end;
+
+            if (q2_move_clip_segment(&sim->move_world, step.from, stop,
+                                     NULL, &mh)) {
+                end[0]   = mh.pos[0];
+                end[1]   = mh.pos[1];
+                end[2]   = mh.pos[2];
+                complete = false;
+                q2_sim_proj_scan.stopped_on_entity++;
+            }
+        }
+
+        /*
+         * A pane in the way, tested over the step the projectile just took.
+         * The console routes to a breakable from five weapon call sites and
+         * a bolt's is one of them (0x80049B18), so this is not confined to
+         * hitscan — and a blaster is the weapon a player has in hand when
+         * they first meet a window.
+         *
+         * Tested against the step rather than the impact point, because a
+         * pane is thinner than a step: at the projectile's speed the shot
+         * would otherwise pass through it between one tick and the next.
+         */
+        if (sim->breakable_count) {
+            u32 pieces = q2_sim_breakable_shot(sim, step.from,
+                                               complete ? step.to : end,
+                                               (s16)p->damage);
+            if (pieces)
+                fx_at(sim, fx_for_projectile(p->kind), step.to);
+        }
+
+        if (!complete) {
+            bool consumed;
+            q2_fx_preset_id fx = fx_for_projectile(p->kind);
+            u32 count;
+            /* A creature's rocket on the wall beside the player reaches
+             * the player too, unless god mode is holding the damage off. */
+            q2_actor **targets = proj_targets(sim, cand,
+                                              (u32)Q2PSX_ARRAY_COUNT(cand),
+                                              &count);
+
+            projectile_owner_splash(sim, p, end, targets, count);
+            consumed = q2_projectile_impact_traced(
+                &sim->combat.projectiles, i, end,
+                proj_attacker(sim, p), NULL, targets, count,
+                &sim->combat.rules, splash_clear, sim);
+            if (consumed) {
+                fx_at(sim, fx, end);
+                projectile_explosion(sim, p->kind, end);
+            }
+            return;
+        }
+    }
+
+    q2_projectile_commit(&sim->combat.projectiles, i, step.to);
+    /* Native Grenade2/3 decrement the fuse after movement and contact. */
+    if (grenade && step.expired) grenade_fuse(sim, i);
+}
+
+/* The walk's turn for `slot`: the waiting projectile there, if any. */
+void q2_sim_projectile_at_slot(q2_sim *sim, s32 slot)
+{
+    q2_projectile *p;
+    s32 ref;
+
+    if (!sim || sim->cur_player != 0 ||
+        q2_obj_slot_owner(slot, &ref) != Q2_OBJ_PROJECTILE ||
+        ref < 0 || ref >= Q2_PROJ_MAX)
+        return;
+    p = &sim->combat.projectiles.p[ref];
+    if (!p->in_use || !p->walk_pending || p->obj_slot1 != slot + 1)
+        return;
+    p->walk_pending = false;
+    player_damage_begin(sim);
+    sync_rules(sim);
+    proj_think(sim, (u32)ref);
+    proj_slot_release(sim, (u32)ref);
+    if (sim->fx_ready && !p->in_use)
+        q2_fx_blur_release(&sim->fx, proj_blur_owner((u32)ref));
+    player_damage_end(sim);
+}
+
+void q2_sim_projectiles_walk_rest(q2_sim *sim)
+{
+    u32 i;
+
+    if (!sim)
+        return;
+    for (i = 0; i < Q2_PROJ_MAX; i++) {
+        q2_projectile *p = &sim->combat.projectiles.p[i];
+        if (p->in_use && p->walk_pending && p->obj_slot1 > 0)
+            q2_sim_projectile_at_slot(sim, p->obj_slot1 - 1);
+        else
+            p->walk_pending = false;
+    }
+}
+
 void q2_sim_combat_tick(q2_sim *sim)
 {
     u32 i;
@@ -2834,419 +3337,15 @@ void q2_sim_combat_tick(q2_sim *sim)
 
     for (i = 0; i < Q2_PROJ_MAX; i++) {
         q2_projectile *p = &sim->combat.projectiles.p[i];
-        q2_proj_step step;
-        q2_actor **hit_list;
-        q2_actor *attacker, *ignore;
-        q2_actor  *cand[Q2_SIM_CRE_HITSCAN_MAX + 1];
-        u32 hit_count;
-        s32 hit_index;
-        s32 dir[3], contact[3];
-        bool held, grenade;
-        int k;
 
-        if (!p->in_use)
-            continue;
-
-        q2_sim_proj_scan.stepped++;
-        held = (p->kind == Q2_PROJ_HAND_GRENADE &&
-                p->node == Q2_PROJ_NODE_HELD);
-        grenade = p->kind == Q2_PROJ_GRENADE || p->kind == Q2_PROJ_HAND_GRENADE;
-        attacker = proj_attacker(sim, p);
-        ignore = q2_projectile_ignore_owner(p, attacker) ? attacker : NULL;
-
-        /* Entity projectiles keep their thinker light. Bolts emit theirs after
-         * lifetime/contact decisions and the endpoint commit below. */
-        if (!held && p->kind != Q2_PROJ_BOLT) {
-            static const u8 glow[3]     = { Q2_PROJ_LIGHT_R, Q2_PROJ_LIGHT_G,
-                                            Q2_PROJ_LIGHT_B };
-            static const u8 bfg_glow[3] = { Q2_PROJ_BFG_LIGHT_R,
-                                            Q2_PROJ_BFG_LIGHT_G,
-                                            Q2_PROJ_BFG_LIGHT_B };
-            bool bfg = (p->kind == Q2_PROJ_BFG);
-
-            q2_ent_light_at(&sim->ent_world.events, p->pos,
-                            bfg ? bfg_glow : glow,
-                            bfg ? Q2_PROJ_BFG_LIGHT_INNER
-                                : Q2_PROJ_LIGHT_INNER,
-                            bfg ? Q2_PROJ_BFG_LIGHT_OUTER
-                                : Q2_PROJ_LIGHT_OUTER);
-        }
-
-        /* The grenade thinker lays its ribbon before toss changes attitude. */
-        if (grenade && !held)
-            proj_blur(sim, i, p, p->pos);
-        q2_projectile_step(&sim->combat.projectiles, i, sim->gravity,
-                           sim->cur_dt, sim->level_time, &step);
-
-        /* The blur ribbon its think lays from its own model's vertices, at
-         * where it stood before this move (proj_blur). */
-        if (!held && !grenade)
-            proj_blur(sim, i, p, step.from);
-
-        /* State 1 has no mover, collision body, light or visible model. The
-         * owner update after the view-model step attaches it and resolves an
-         * elapsed fuse at the current hand position. */
-        if (held)
-            continue;
-
-        if (grenade && ((p->flags & Q2_PROJ_TOSS_STOPPED) ||
-                        grenade_geometry(sim, p, &step))) {
-            if (step.expired) grenade_fuse(sim, i);
+        /* A model projectile holding an object slot waits for the walk. */
+        if (sim->defer_projectiles && p->in_use && p->obj_slot1 > 0) {
+            p->walk_pending = true;
             continue;
         }
-
-        if (step.expired && !grenade) {
-            q2_sim_proj_scan.expired++;
-            /* Rocket and BFGBlast use +0xF4 only as a safety lifetime:
-             * 0x8004ADB0 / 0x8004B8E4 free them without damage or an effect.
-             * The bolt lifetime is quiet for the same reason. */
-            q2_projectile_expire(&sim->combat.projectiles, i);
-            continue;
-        }
-
-        /*
-         * The BFG's beams — the game's weapon trail, and MOST OF ITS DAMAGE.
-         *
-         * 0x8004BD04 calls the beam maintainer every tick while the ball flies,
-         * and it holds a green beam on every target it can see, refreshing each
-         * one rather than adding a second (effect.h). The beams outlive the
-         * ball's passage by their own timer, which is what makes the BFG leave
-         * a lattice behind it rather than a single line.
-         *
-         * THE SAME PASS HURTS WHAT IT BEAMS, and that half was missing: this
-         * arm was one q2_fx_beam_timed call, so the lattice was decoration and
-         * the weapon was worth its contact hit plus one 1300-radius blast. On
-         * the disc a candidate that clears the filters takes 10 points (5 in
-         * deathmatch) every tenth of a second while the ball is in the air —
-         * 0x80049DE4..0x80049E38, `a3 = 1` so mod 1, `sw zero, 16(sp)` so no
-         * point and therefore no knockback.
-         *
-         * The beam and the damage are SEPARATELY gated: 0x80049DBC `beq v1,
-         * zero` falls through to the damage when the 12-slot beam table is
-         * full, so the damage cannot live under `fx_ready` the way the beam
-         * does.
-         *
-         * The port's visibility test is the same segment sweep the projectile
-         * itself uses, because it has no separate line-of-sight query; the
-         * original calls 0x80051874 at 0x80049CE0, and failing it branches past
-         * BOTH halves. Called out as the one substitution — and until now the
-         * test was only described here, never performed, so beams were held
-         * through walls.
-         */
-        if (p->kind == Q2_PROJ_BFG) {
-            q2_actor **list  = sim->world_targets ? sim->world_targets
-                                                  : sim->combat.targets;
-            u32        count = sim->world_targets ? sim->world_target_count
-                                                  : sim->combat.target_count;
-            const q2_actor *parked_self = &sim->pcombat[sim->cur_player].self;
-            q2_actor *owner = attacker_for(sim, p->owner);
-            /* 0x80049DE8 `lw 0x800AEBCC` then 0x80049E10 `addiu a2, zero, 5`
-             * against 0x80049E28's 10 — read from the port's own stand-in for
-             * that global rather than from the rules copy, as the console reads
-             * the word itself at the site. */
-            s16  beam_damage = sim->multiplayer ? 5 : 10;
-            bool hurt;
-            u32  t;
-
-            /*
-             * 0x8004BCF0..0x8004BD08: the frame delta at 0x800B2DB4 is added
-             * into the ball's halfword at +0x4C and stored back in the
-             * maintainer's own delay slot, so the pass below already sees this
-             * tick's dt in it.
-             */
-            p->beam_time = (u16)(p->beam_time + (u16)sim->cur_dt);
-
-            /* 0x80049E00 / 0x80049E1C `slti v0, v0, 30` on the SIGNED halfword:
-             * below 30 the branch skips the damage but not the beam. */
-            hurt = (s16)p->beam_time >= 30;
-
-            for (t = 0; t < count; t++) {
-                q2_actor *a = list ? list[t] : NULL;
-                s64 dx, dy, dz;
-
-                /* 0x80049C54 `beq a1, s3, 0x80049E3C`: the ball never beams or
-                 * hurts its own owner. The world list names the live player in
-                 * deathmatch, so without this the shooter would scythe himself
-                 * for the length of his own shot. */
-                if (!a || a == owner)
-                    continue;
-
-                /*
-                 * The live player can appear in a world list under two names,
-                 * and the parked `pcombat[cur_player].self` is the stale one:
-                 * player_damage_end maps the current player to `combat.self`,
-                 * so damage landed on the parked copy is never written back,
-                 * and damage landed on both is applied twice. The presentation
-                 * pass above skips the same pair for the same reason.
-                 */
-                if (a == parked_self)
-                    continue;
-
-                /*
-                 * 0x80049C5C..0x80049CB4: squared origin distance against
-                 * `lui v0, 0x90` = 0x900000 = 3072^2. The console ALSO box-
-                 * tests the candidate's own bounds first (0x80049C3C, the
-                 * 0x800552D8 overlap against entity+0x78) against a +/-3072 box
-                 * around the ball; port actors carry no bounds, so only the
-                 * sphere is reproduced. It is the tighter of the two for a
-                 * point, which is what an actor here is. In s64 because the sum
-                 * of three squared world spans does not fit an s32.
-                 */
-                dx = (s64)p->pos[0] - a->origin[0];
-                dy = (s64)p->pos[1] - a->origin[1];
-                dz = (s64)p->pos[2] - a->origin[2];
-                if (dx * dx + dy * dy + dz * dz > (s64)3072 * 3072)
-                    continue;
-
-                /*
-                 * THE ONE PLACE THE CONSOLE READS `takedamage` OUTSIDE
-                 * T_Damage, so this filter can be the original's rather than a
-                 * stand-in: the beam maintainer at 0x80049B9C does
-                 * `lw v0, 748(a1)` / `lw v0, 28(v0)` / `and 0xC0000000` /
-                 * `beq v0, zero` at 0x80049CBC..0x80049CD8. It asks whether the
-                 * thing can be hurt, not whether it is alive.
-                 */
-                if (!a->takedamage)
-                    continue;
-
-                /* 0x80049CE0 `jal 0x80051874`, the visibility test. */
-                if (!splash_clear(sim, p->pos, a->origin))
-                    continue;
-
-                /*
-                 * The area comes from the BALL, which is what 0x80048D24
-                 * resolves on the console: the point-clip helper 0x8004E920
-                 * runs the owner entity's position through PrimaryColl and
-                 * hands the cell's area record to the beam queue as its fourth
-                 * argument. Resolved from the ball's position here, on each
-                 * refresh, rather than per submit — see q2_fx_timed_beam.area.
-                 */
-                if (sim->fx_ready) {
-                    /*
-                     * The far end is the target's origin raised to the middle
-                     * of its hull: 0x80048D4C..0x80048D74 adds
-                     * `(572 - height) / 2`, truncated toward zero, to +0x58.
-                     * Ending the beam at the bare origin put it 14 units off
-                     * on a default 600-high creature and further on the tall
-                     * ones.
-                     */
-                    s32 to[3];
-                    to[0] = a->origin[0];
-                    to[1] = a->origin[1] + (572 - (s32)a->height) / 2;
-                    to[2] = a->origin[2];
-                    q2_fx_beam_timed(&sim->fx, (s32)i, (s32)t,
-                                     p->pos, to,
-                                     Q2_FX_TIMED_BEAM_RADIUS,
-                                     Q2_FX_TIMED_BEAM_STYLE,
-                                     Q2_FX_TIMED_BEAM_LIFE,
-                                     fx_area_resolve(sim, 0, p->pos));
-                }
-
-                /* 0x80049E34, the damage the beam does when it lands. */
-                if (hurt)
-                    q2_combat_damage(owner, a, beam_damage,
-                                     Q2_MOD_ENERGY_BOLT, NULL,
-                                     &sim->combat.rules);
-            }
-
-            /*
-             * 0x8004BD0C..0x8004BD3C. Two things the obvious reading gets
-             * wrong: the drain is a LOOP (0x8004BD3C branches back to
-             * 0x8004BD20), and its threshold is 31, ONE MORE than the damage
-             * gate's 30. So an accumulator that lands exactly on 30 is not
-             * drained and fires again on the very next tick before resetting,
-             * which makes the beams hurt somewhat oftener than once per 30
-             * ticks — at the PAL frame delta of 12, three ticks in every five.
-             * That is the disc's arithmetic, not a rounding choice here.
-             */
-            while ((s16)p->beam_time >= 31)
-                p->beam_time = (u16)(p->beam_time - 30);
-        }
-
-        /* Grenades already tested geometry; the other projectile thinkers
-         * retain their existing actor-first sweep. */
-        for (k = 0; k < 3; k++)
-            dir[k] = step.to[k] - step.from[k];
-
-        /* The player stops a creature's shot even in god mode; it is the
-         * damage that god mode refuses (q2_sim_hurt_player). */
-        hit_list = proj_targets(sim, cand, (u32)Q2PSX_ARRAY_COUNT(cand),
-                                &hit_count);
-
-        hit_index = q2_combat_trace_actors(step.from, step.to, ignore,
-                                           hit_list, hit_count, contact);
-
-        /*
-         * How close it came, whether or not it counted. Measured against the
-         * segment's LINE, so "near but past the end" separates a bolt that is
-         * badly aimed from one that is aimed correctly and simply has not
-         * arrived yet — which a short per-tick step makes the common case.
-         */
-        {
-            u32 hi;
-            s64 dl = (s64)dir[0] * dir[0] + (s64)dir[1] * dir[1] +
-                     (s64)dir[2] * dir[2];
-
-            /* The square is enough to compare; the length is only printed. */
-            q2_sim_proj_scan.seg_len = (s32)dl;
-
-            for (hi = 0; hi < hit_count; hi++) {
-                q2_actor *t = hit_list[hi];
-                s64 along = 0, d2;
-                s64 reach;
-
-                /* Match collision membership, including immune bodies. */
-                if (!t || t == ignore)
-                    continue;
-
-                d2 = q2_combat_ray_dist_sq(step.from, dir, t->origin, &along);
-                if (q2_sim_proj_scan.closest_sq == 0 ||
-                    d2 < q2_sim_proj_scan.closest_sq) {
-                    q2_sim_proj_scan.closest_sq        = d2;
-                    q2_sim_proj_scan.closest_origin[0] = t->origin[0];
-                    q2_sim_proj_scan.closest_origin[1] = t->origin[1];
-                    q2_sim_proj_scan.closest_origin[2] = t->origin[2];
-                    q2_sim_proj_scan.closest_from[0]   = step.from[0];
-                    q2_sim_proj_scan.closest_from[1]   = step.from[1];
-                    q2_sim_proj_scan.closest_from[2]   = step.from[2];
-                    q2_sim_proj_scan.closest_owner     = p->owner;
-                }
-
-                reach = (s64)Q2_HITSCAN_RADIUS + t->radius;
-                if (d2 <= reach * reach) {
-                    q2_sim_proj_scan.near_miss++;
-                    if (along > 4096)
-                        q2_sim_proj_scan.past_end++;
-                }
-            }
-        }
-
-        if (p->kind == Q2_PROJ_BOLT) {
-            bolt_contact_tick(sim, i, &step, attacker, hit_list, hit_count,
-                              hit_index, contact);
-            continue;
-        }
-
-        if (hit_index >= 0) {
-            q2_actor *victim = hit_list[hit_index];
-            q2_actor *direct = sim->invulnerable && victim == &sim->combat.self
-                                ? NULL : victim;
-            s32 health_before = victim->health;
-
-            q2_sim_proj_scan.hit++;
-            q2_fx_preset_id fx = fx_for_projectile(p->kind);
-
-            projectile_owner_splash(sim, p, contact, hit_list, hit_count);
-            q2_projectile_impact_traced(&sim->combat.projectiles, i, contact,
-                                        attacker, direct, hit_list, hit_count,
-                                        &sim->combat.rules,
-                                        splash_clear, sim);
-
-            /*
-             * Two bursts, not three. The projectile's own and the victim's
-             * blood are both real sites; the third used to be 0x800596B0 on the
-             * killing blow, and that address is the ITEM MATERIALISE burst, not
-             * a gib — see the note at fx_hitscan_impact and effect.h. What the
-             * console raises when a body comes apart is the mesh blood spray
-             * (q2_fx_gib_spray) at the head of ThrowGibs, behind 0x8007CEB4,
-             * and that needs a posed model this file does not carry.
-             */
-            fx_at(sim, fx, contact);
-            projectile_explosion(sim, p->kind, contact);
-            if (victim->health < health_before)
-                fx_at(sim, Q2_FX_BLOOD, contact);
-            continue;
-        }
-
-        if (!grenade && (sim->coll_ready || sim->coll_primary_ready)) {
-            s32 end[3], node = p->node;
-            bool complete;
-            q2_collision *phull = sim->coll_primary_ready
-                                      ? &sim->coll_primary : &sim->coll;
-
-            /*
-             * Traced from the PROJECTILE's own cell, not the player's. A rocket
-             * that has crossed the map is nowhere near the shooter, and asking
-             * the hull to clip a segment starting in the shooter's cell answers
-             * a different question — one whose answer is usually "no obstacle",
-             * which is how a projectile ends up flying through walls.
-             *
-             * Through PrimaryColl, for the reason q2_sim_trace now states: a
-             * bolt is a point and the eroded hull stopped it 286 units short of
-             * every surface, leaving rockets to burst in mid-air short of the
-             * wall and grenades to stop above the floor. `p->node` is cached
-             * against this hull throughout, so the hint stays meaningful.
-             */
-            complete = q2_coll_move(phull, step.from, step.to, node,
-                                    end, &node);
-            p->node = node;
-
-            /*
-             * AND THE ENTITY BOXES. Doors, lifts and intact panes are not hull,
-             * so the walk above otherwise flies a projectile through all of
-             * them. Clipped from the step's start to wherever the hull left it,
-             * so the nearer pass wins; `complete` goes false because a bolt
-             * that met any solid entity has met something.
-             */
-            if (sim->move_world.count) {
-                q2_move_seg_hit mh;
-                const s32 *stop = complete ? step.to : end;
-
-                if (q2_move_clip_segment(&sim->move_world, step.from, stop,
-                                         NULL, &mh)) {
-                    end[0]   = mh.pos[0];
-                    end[1]   = mh.pos[1];
-                    end[2]   = mh.pos[2];
-                    complete = false;
-                    q2_sim_proj_scan.stopped_on_entity++;
-                }
-            }
-
-            /*
-             * A pane in the way, tested over the step the projectile just took.
-             * The console routes to a breakable from five weapon call sites and
-             * a bolt's is one of them (0x80049B18), so this is not confined to
-             * hitscan — and a blaster is the weapon a player has in hand when
-             * they first meet a window.
-             *
-             * Tested against the step rather than the impact point, because a
-             * pane is thinner than a step: at the projectile's speed the shot
-             * would otherwise pass through it between one tick and the next.
-             */
-            if (sim->breakable_count) {
-                u32 pieces = q2_sim_breakable_shot(sim, step.from,
-                                                   complete ? step.to : end,
-                                                   (s16)p->damage);
-                if (pieces)
-                    fx_at(sim, fx_for_projectile(p->kind), step.to);
-            }
-
-            if (!complete) {
-                bool consumed;
-                q2_fx_preset_id fx = fx_for_projectile(p->kind);
-                u32 count;
-                /* A creature's rocket on the wall beside the player reaches
-                 * the player too, unless god mode is holding the damage off. */
-                q2_actor **targets = proj_targets(sim, cand,
-                                                  (u32)Q2PSX_ARRAY_COUNT(cand),
-                                                  &count);
-
-                projectile_owner_splash(sim, p, end, targets, count);
-                consumed = q2_projectile_impact_traced(
-                    &sim->combat.projectiles, i, end,
-                    proj_attacker(sim, p), NULL, targets, count,
-                    &sim->combat.rules, splash_clear, sim);
-                if (consumed) {
-                    fx_at(sim, fx, end);
-                    projectile_explosion(sim, p->kind, end);
-                }
-                continue;
-            }
-        }
-
-        q2_projectile_commit(&sim->combat.projectiles, i, step.to);
-        /* Native Grenade2/3 decrement the fuse after movement and contact. */
-        if (grenade && step.expired) grenade_fuse(sim, i);
+        p->walk_pending = false;
+        proj_think(sim, i);
+        proj_slot_release(sim, i);
     }
 
     /*

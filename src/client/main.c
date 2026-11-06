@@ -4535,6 +4535,16 @@ static void client_obj_slots_assign(client *c)
             e->obj_slot = (s16)q2_obj_slot_alloc(Q2_OBJ_ENTITY, (s32)i);
         if (e->obj_slot < -1) e->obj_slot = -1;
     }
+    /* And the model projectiles in flight (projectile.h, `obj_slot1`). */
+    for (i = 0; i < Q2_PROJ_MAX; i++) {
+        q2_projectile *p = &c->sim[0].combat.projectiles.p[i];
+        s32 slot;
+        p->obj_slot1 = 0;
+        p->walk_pending = false;
+        if (!p->in_use || p->kind == Q2_PROJ_BOLT) continue;
+        slot = q2_obj_slot_alloc(Q2_OBJ_PROJECTILE, (s32)i);
+        if (slot >= 0) p->obj_slot1 = (s16)(slot + 1);
+    }
 }
 
 /*
@@ -13333,8 +13343,10 @@ static void client_input_simulated(client *c, float dt)
      * for this tick only, and run below by q2_sim_entities_late. */
     c->batches_deferred = true;
     c->sim[0].defer_entities = true;
+    c->sim[0].defer_projectiles = !c->mp_enabled;
     ticked = (q2_sim_advance(&c->sim[0], &in, (double)dt) != 0);
     c->sim[0].defer_entities = false;
+    c->sim[0].defer_projectiles = false;
     if (ticked) client_glint_scene(c, false);
     /* MoveModels' walk: the records below the first creature run before it.
      * See client_creatures_tick and q2_entity_walk_begin. */

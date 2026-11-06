@@ -562,6 +562,10 @@ typedef struct q2_sim {
      * 0x80059F14) follow the other creatures' AI draws in that same frame.
      */
     bool                 defer_entities;
+    /* Model projectiles with an object slot wait for the slot walk
+     * (q2_sim_entities_to), as MoveModels runs them. */
+    bool                 defer_projectiles;
+    s32                  proj_walk_slot;
 
     /* The level clock the weapon gates and the damage throttles use, in dt
      * units. Advanced by q2_sim_tick alongside the physics. */
@@ -1911,6 +1915,10 @@ void q2_sim_missiles_late(q2_sim *sim, s32 dt);
 void q2_sim_entities_begin(q2_sim *sim, s32 dt);
 void q2_sim_entities_to(q2_sim *sim, s32 slot);
 void q2_sim_entities_end(q2_sim *sim);
+/* One slot of the walk: the model projectile holding `slot`, if it waits. */
+void q2_sim_projectile_at_slot(q2_sim *sim, s32 slot);
+/* Any deferred projectile the walk did not reach. */
+void q2_sim_projectiles_walk_rest(q2_sim *sim);
 
 /*
  * Post a view kick — what a weapon's recoil and a damage hit do. `period` picks

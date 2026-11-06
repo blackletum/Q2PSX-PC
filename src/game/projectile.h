@@ -322,6 +322,16 @@ typedef struct q2_projectile {
      */
     u16  beam_time;
     u32  zone_serial; /* map-local identity, independent of this reusable slot */
+    /* A grenade, rocket or BFG ball is an OBJECT on the console, in the 48-
+     * record array ("Grenade2" at slot 7 on JAIL2's attract run): it holds a
+     * slot from the same stack as creatures and gibs (objslot.h) and moves at
+     * that slot's turn in MoveModels. Slot + 1, so a zeroed record has none. */
+    s16  obj_slot1;
+    bool walk_pending; /* deferred from the combat tick to the slot walk */
+    /* Grenade3 thrown this frame: the throw is the held object's own think
+     * (0x8004A7C0 in its 411-crossing arm), so that think does not toss; the
+     * first toss is the next frame's (JAIL2's attract run, record frame 322). */
+    bool thrown_fresh;
 } q2_projectile;
 
 #define Q2_PROJ_NODE_UNKNOWN (-1)
