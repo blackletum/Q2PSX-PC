@@ -1995,7 +1995,13 @@ the fuse". The Explosion model spawn (`0x8005A778`) draws a random yaw
 (`0x8005A914`), and no grenade or rocket detonation arm calls a particle burst;
 the port drew 90 numbers for one.
 
-JAIL2 now matches to frame 423 of its 891.
+*Frame 423 to 721: no blood from a blast.* A grenade or rocket that touches
+a body calls the damage function and nothing else (`0x80049FBC`, `0x8004A904`,
+`0x8004AE14`), and the splash that follows the Explosion spawn (`0x80050810`)
+has no blood call either. The port sprayed contact and splash blood, and parted
+at 423. Only the BFG ball keeps its contact blood.
+
+JAIL2 now matches to frame 721 of its 891.
 
 Two known differences remain that the run did not reach:
 - the trigger-volume adjustment of the sighting spot and crumbs (`0x80061024`,

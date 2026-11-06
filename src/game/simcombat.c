@@ -1712,7 +1712,10 @@ q2_damage_result q2_sim_hurt_player(q2_sim *sim, q2_actor *attacker,
      * (0x80048BA4), and fire_hit (0x80061118) calls the damage function and
      * vector helpers only. The Infantry's smack on BASE3's attract run, record
      * frame 518, drew 90 numbers here that the console never draws. */
-    if (out.taken > 0 && mod != Q2_MOD_MELEE)
+    /* Nor for a blast: a grenade's or rocket's splash is the damage function
+     * alone (0x80050810, after 0x8005A778), with no blood call. */
+    if (out.taken > 0 && mod != Q2_MOD_MELEE &&
+        mod != Q2_MOD_GRENADE && mod != Q2_MOD_ROCKET)
         fx_at(sim, Q2_FX_BLOOD, point);
 
     /* Native 0x80057D54 and PlayerThink's 0x8003AE10 feedback block preserve
@@ -3112,7 +3115,10 @@ static void proj_think(q2_sim *sim, u32 i)
         (void)fx;
         proj_burst(sim, p->kind, contact);
         projectile_explosion(sim, p->kind, contact);
-        if (victim->health < health_before)
+        /* A grenade or rocket on a body: the damage function and nothing
+         * else (0x80049FBC, 0x8004A904, 0x8004AE14), so no blood either
+         * (JAIL2's attract run, record frame 423). */
+        if (victim->health < health_before && p->kind == Q2_PROJ_BFG)
             fx_at(sim, Q2_FX_BLOOD, contact);
         return;
     }
