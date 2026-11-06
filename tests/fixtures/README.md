@@ -633,7 +633,10 @@ coin, which a console does.
 Nor does it have a vertical blank, so it advances the level clock itself: the
 VSync callback (`0x80019044`) adds the rate to `0x800B29D4` per field and
 MainGameLoop copies that into `0x800AEBAC` (`0x800183A0`); the oracle adds each
-recorded frame's NEWV and makes the copy. `ORACLE_WATCH=lo:hi` (hex addresses)
+recorded frame's NEWV and makes the copy. `--demo` picks the attract demo by pointing SelfPlayMapNamePntr (gp+712) at its
+entry before GameSelfPlay; a snapshot belongs to one demo. WASTE2's load draws
+one number (a STARTLEV TIMER), so its first frame starts one past the seed.
+`ORACLE_WATCH=lo:hi` (hex addresses)
 prints every store into that range with the storing PC.
 Each frame also lists the areas player one's view drew (`seen`) and the view's
 position and angles (`camera`), which is what a creature's activity test reads
@@ -654,5 +657,5 @@ gibs. It is a diagnostic: nothing it prints is checked in, and nothing from the
 disc is written.
 
 ```
-python tests/fixtures/lockstep_oracle.py "<PAL.cue>" --frames 150 --snapshot <file> --out native.json [--probes [--probes-from N]]
+python tests/fixtures/lockstep_oracle.py "<PAL.cue>" [--demo BASE3|JAIL2|WASTE2] --frames 150 --snapshot <file> --out native.json [--probes [--probes-from N]]
 ```

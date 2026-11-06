@@ -406,6 +406,12 @@ void q2_actor_from_player(q2_actor *a, const q2_inventory *inv,
         /* entity+0x2AC — see q2_actor_from_monster. */
         memcpy(a->ambient, ambient, sizeof(ambient));
     }
+    /* A PLAYER'S body is 600 tall, not the init's 572: object+0x96 reads 600
+     * after every level load (PAL BASE3 and WASTE2). The slab the bullet
+     * sweep tests runs from origin+286 down by this, so with 572 a round
+     * entering 299 above the origin missed (WASTE2's attract run, record
+     * frame 58). */
+    a->height = 600;
     a->owner = owner;
     if (pos) {
         a->origin[0] = pos[0];

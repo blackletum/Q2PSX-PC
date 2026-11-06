@@ -1169,6 +1169,9 @@ static void tankcomm_spawn(q2_monster *self)
     self->solid    = Q2_SOLID_BBOX;
 
     q2_cre_set_move(self, TANK_STAND);
+    /* walkmonster_start (import +0xFC): the ambush flag and the random
+     * start frame, whose rand() the console takes here (0x80061B2C). */
+    q2_monster_walk_start(self);
 
     if (self->class_id == 92)
         self->skinnum = 2;

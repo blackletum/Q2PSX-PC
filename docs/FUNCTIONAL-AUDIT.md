@@ -1927,14 +1927,35 @@ The port draws the player's death-animation pick at 526 (`0x8003CEEC`), which
 the console's run does not reach. The demo is over by then, so it shows in no
 stream.
 
+*The other two demos (6 November).* The oracle now takes `--demo` and loads
+JAIL2 or WASTE2 the way GameSelfPlay does, by pointing SelfPlayMapNamePntr
+(gp+712) at the entry. WASTE2's load draws one number (a TIMER armed at
+STARTLEV), so its compare starts one draw past the seed. Seven more port faults:
+- **The start wrappers.** Berserk, Gunner, Arachner and Tank Commander spawns
+  end in `walkmonster_start`, and with it the start-frame draw (`0x80061B2C`,
+  which needs a move already set: the Gunner's stand comes first).
+- **TIMER countdowns** subtract this frame's delta before the test
+  (`0x8002739C`). The port's sweep ran a frame behind for a timer armed at load.
+- **A player's body is 600 tall** (`object+0x96`). At 572 a round 299 above the
+  origin passed over (WASTE2 frame 58).
+- **M_CheckAttack traces bodies** (`0x8005D99C`, mask `0x0200001B`) and decides
+  only when the trace ends on the enemy. A point trace's entity clip is
+  `0x80053974`, not the box arm's inflated `0x80053C58` sweep.
+- **The body list is live.** It holds the objects, so a player's body is where
+  the player has just moved to.
+- **First-frame activity.** Before the first draw every area's stamp equals the
+  frame counter, so all creatures run frame 1 (JAIL2: phase 12 for all seven).
+
+BASE3 and WASTE2 now match the console's `rand()` stream and player path to their
+ends (record frames 526 and 211). JAIL2 matches to frame 200 of its 891.
+
 Two known differences remain that the run did not reach:
 - the trigger-volume adjustment of the sighting spot and crumbs (`0x80061024`,
   `0x80060C94`);
 - a pickup burst's groups start at the item, not at fifteen of the posed mesh's
   vertices (`0x8006CC44`).
 
-JAIL2's and WASTE2's demos, and the US ones, have not been run against the
-oracle.
+The US demos have not been run against the oracle.
 
 ## Limits
 

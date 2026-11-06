@@ -1076,6 +1076,7 @@ static void update_triggers(q2_sim *sim, bool touch)
      * is set by the owner after the attach on every path that sets it.
      */
     sim->event_rt.multiplayer = sim->multiplayer;
+    sim->event_rt.frame_dt    = sim->cur_dt;
 
     if (q2_event_rt_update(&sim->event_rt) == Q2_EVENT_ZONE_CHANGE) {
         sim->zone_change_pending = true;
@@ -1294,6 +1295,30 @@ static void sim_bodies_rebuild(q2_sim *sim)
     sim->body_count       = n;
     sim->body_world.list  = sim->bodies;
     sim->body_world.count = n;
+}
+
+/*
+ * The console's list holds POINTERS to the objects (0x80045990 appends the
+ * object itself), so a body is wherever its object is when somebody looks.
+ * This list holds copies, so a player's entry is brought up to date once the
+ * player has moved; the creatures' traces after that see where the player
+ * stands now. Left at the pre-move copy, a Soldier's M_CheckAttack trace on
+ * BASE3's attract run (record frame 380) passed the spot player one had left
+ * and never reached them.
+ */
+static void sim_bodies_refresh_player(q2_sim *sim, int slot)
+{
+    s32 id = sim_body_id_for_player(slot);
+    u32 i;
+    int k;
+
+    for (i = 0; i < sim->body_count; i++) {
+        if (sim->bodies[i].id != id)
+            continue;
+        for (k = 0; k < 3; k++)
+            sim->bodies[i].pos[k] = sim->player[slot].ent.pos[k];
+        return;
+    }
 }
 
 static void mover_targets_drop(q2_sim *sim)
@@ -3633,6 +3658,7 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
 
     if (p->motion != Q2_PLAYER_MOTION_NONE)
         player_move(sim, dt, !dead || p->corpse_separate);
+    sim_bodies_refresh_player(sim, sim->cur_player);
 
     /*
      * The level clock the weapons gate on is this same dt counter: 300 units to

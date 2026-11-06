@@ -4747,7 +4747,13 @@ static void client_creatures_tick(client *c, float dt, const s32 eye[3])
         if (activity_ready && m->in_use && !m->corpse) {
             s32 area = client_cre_area(c, i, NULL);
             world.suspended = q2_cre_motion_suspend(m, active_areas, area,
-                area >= 0 && psx_ot_area_bucket(&c->ot, (u32)area, NULL), c->cam.pos);
+                /* 0x800689C0 compares each area's stamp with the frame
+                 * counter, and before the first draw both are zero: on the
+                 * level's first creature tick every area counts as seen and
+                 * no creature is boxed out by its distance (JAIL2's attract
+                 * run: all seven run frame 1, phase 12, whatever the range). */
+                c->level_cre_ticks <= 1 ||
+                (area >= 0 && psx_ot_area_bucket(&c->ot, (u32)area, NULL)), c->cam.pos);
         }
         c->ai_thoughts += q2_cre_motion_tick(m, ticks, &world);
         if (m->in_use && !m->corpse && !world.suspended &&

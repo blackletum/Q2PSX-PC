@@ -762,7 +762,7 @@ static void timer_arm(q2_event_rt *rt, u32 rec_offset,
         rt->deferred[slot].window      = rt->defer_window; /* 0x800270C8 */
         rt->deferred[slot].fires       = rt->defer_fires;  /* 0x800270B0 */
         rt->deferred[slot].period      = period;  /* 0x80027104 */
-        rt->deferred[slot].due         = rt->clock + period;
+        rt->deferred[slot].due         = rt->clock + rt->frame_dt + period;
         rt->deferred_count++;
     }
 
@@ -798,7 +798,8 @@ static void timer_rearm(q2_event_rt *rt, u32 slot)
         q2_events_get_item(&rt->events, &rec, rt->deferred[slot].timer_index, &item) &&
         item.offset == rt->deferred[slot].item)
         rt->deferred[slot].period = rt->timer_period(&item);
-    rt->deferred[slot].due = rt->clock + rt->deferred[slot].period;
+    rt->deferred[slot].due = rt->clock + rt->frame_dt +
+                             rt->deferred[slot].period;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1145,6 +1146,7 @@ void q2_event_rt_advance(q2_event_rt *rt, s32 ticks)
 {
     if (rt) {
         rt->clock += ticks;
+        rt->frame_dt = 0;
         /* The console's per-frame counter at 0x800B2DE4 (0x800705C4 `addiu
          * a1,a1,1`, stored back at 0x80070610), which is what a WAIT compares
          * against at 0x800276D8. One call here is one frame — see the field
@@ -1179,7 +1181,10 @@ q2_event_outcome q2_event_rt_update(q2_event_rt *rt)
         for (s = 0; s < Q2_EVENT_RT_TIMER_MAX; s++) {
             if (rt->deferred[s].item == 0)
                 continue;
-            if (rt->deferred[s].due >= rt->clock)
+            /* This frame's delta is already spent (0x8002739C `subu`): a timer
+             * armed at load fired a frame late without it (WASTE2's attract
+             * run, record frame 17). */
+            if (rt->deferred[s].due >= rt->clock + rt->frame_dt)
                 continue;
 
             rt->resumed_count++;

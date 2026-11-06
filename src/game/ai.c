@@ -1417,8 +1417,33 @@ bool q2_M_CheckAttack(q2_monster *m)
      * instruction in the image ever sets bit 17.** The blindfire flag is
      * therefore always clear and the branch behind it cannot be entered.
      */
-    if (!q2_visible(m, m->enemy))
-        return false;
+    /*
+     * 0x8005D8F8..0x8005D9B8: a POINT trace, eye to eye, through gitrace
+     * (0x8005BD3C) with 0x0200001B -- solid, window, lava, slime and the
+     * monster bit, so the bodies are in it -- ignoring self, from the actor's
+     * own cell. Only `tr.ent == enemy` reaches the decision. It used to be
+     * `visible`, which tests the hull alone, so a creature rolled for a shot
+     * through another one standing in the way: WASTE2's attract run, record
+     * frame 194, a Soldier behind a Berserk.
+     */
+    {
+        const s16 zero[3] = { 0, 0, 0 };
+        s32 spot1[3], spot2[3];
+        q2_ai_trace tr;
+
+        spot1[0] = m->pos[0];
+        spot1[1] = m->pos[1] + m->view_height;
+        spot1[2] = m->pos[2];
+        spot2[0] = m->enemy->pos[0];
+        spot2[1] = m->enemy->pos[1] + m->enemy->view_height;
+        spot2[2] = m->enemy->pos[2];
+        memset(&tr, 0, sizeof(tr));
+        q2_ai_trace_hint = m->motion.ready ? m->motion.ent.node : -1;
+        g_world.trace(g_world.user, spot1, zero, zero, spot2, m,
+                      0x0200001Bu, &tr);
+        if (tr.ent != m->enemy)
+            return false;
+    }
 
     return checkattack_decide(m);
 }

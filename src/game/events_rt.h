@@ -432,6 +432,11 @@ typedef struct q2_event_rt {
     u32  deferred_count;   /* slots in use, for a caller's "did anything
                             * happen"; the array is indexed, not packed */
     s32  clock;
+    /* The delta of the frame being run, set by the owner before an update
+     * and zeroed by q2_event_rt_advance. The console's sweep subtracts it
+     * from each countdown BEFORE testing (0x8002738C..0x800273A0), so a
+     * deadline is measured against the clock as of this frame's end. */
+    s32  frame_dt;
 
     /*
      * Live WAIT counters (opcode 0x09), the item state 0x800276C4 mutates in

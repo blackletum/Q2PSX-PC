@@ -214,7 +214,24 @@ static void bound_trace(void *user, const s32 start[3], const s16 mins[3],
      * The mask gate is the console's: a query that does not ask for entities
      * does not get them.
      */
-    if (b->ents && (mask & Q2_MASK_ENTITY_BIT)) {
+    /*
+     * A POINT trace takes the other arm (0x8005BEA4..0x8005BF10): the bare
+     * segment against the entity boxes, 0x80053974, with no inflation and
+     * no mask. The inflated 0x810 sweep belongs to the box arm alone; run
+     * for M_CheckAttack's eye-to-eye trace it stopped a Soldier's look at
+     * player one 49 units out, against a monster clip the console's point
+     * trace passes (BASE3's attract run, record frame 132).
+     */
+    if (b->ents && (mask & Q2_MASK_ENTITY_BIT) && !box_is_real(mins, maxs)) {
+        q2_move_seg_hit mh;
+
+        if (q2_move_clip_segment(b->ents, start, pos, NULL, &mh)) {
+            pos[0] = mh.pos[0];
+            pos[1] = mh.pos[1];
+            pos[2] = mh.pos[2];
+            b->stats.trace_blocked_ent++;
+        }
+    } else if (b->ents && (mask & Q2_MASK_ENTITY_BIT)) {
         q2_move_world mw = *b->ents;
         q2_move_contact mc;
 

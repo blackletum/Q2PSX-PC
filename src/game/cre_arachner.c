@@ -882,6 +882,9 @@ static void arachner_spawn(q2_monster *self)
     self->solid    = Q2_SOLID_BBOX;         /* module+0x1138 */
 
     q2_cre_set_move(self, ARA_STAND);       /* module+0x116C */
+    /* walkmonster_start (import +0xFC): the ambush flag and the random
+     * start frame, whose rand() the console takes here (0x80061B2C). */
+    q2_monster_walk_start(self);
 }
 
 /* ------------------------------------------------------------------------- */

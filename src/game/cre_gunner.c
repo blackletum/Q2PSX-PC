@@ -872,6 +872,10 @@ static void gunner_spawn(q2_monster *m)
     m->mass     = 200;
     m->solid    = Q2_SOLID_BBOX;
     m->movetype = Q2_MOVETYPE_STEP;
+    q2_cre_set_move(m, GUN_STAND);          /* currentmove = Stand */
+    /* walkmonster_start (import +0xFC): the ambush flag and the random
+     * start frame, whose rand() the console takes here (0x80061B2C). */
+    q2_monster_walk_start(m);
 }
 
 const q2_cre_impl q2_cre_gunner = {

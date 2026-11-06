@@ -538,6 +538,8 @@ def main():
     ap.add_argument('--frames', type=int, default=20)
     ap.add_argument('--out', type=Path)
     ap.add_argument('--snapshot', type=Path)
+    ap.add_argument('--demo', choices=DEMOS, default='BASE3',
+                    help='which attract demo to play (the snapshot is per demo)')
     ap.add_argument('--probes', action='store_true', help='log the diagnostic events (OracleMachine.probe)')
     ap.add_argument('--probes-from', type=int, default=0, metavar='N',
                     help='with --probes, log them only from record frame N (the run before it is faster)')
@@ -563,7 +565,7 @@ def main():
         boot_globals(m)                    # a snapshot from before it was set
         print('resumed from', snap, flush=True)
     else:
-        load(m, t0)
+        load(m, t0, args.demo)
         if snap:
             snap.parent.mkdir(parents=True, exist_ok=True)
             snap.write_bytes(pickle.dumps({'mem': bytes(m.mem), 'scratch': bytes(m.scratch),
@@ -594,10 +596,17 @@ def boot_globals(m):
     m.write(0x800B2DB0, 4, 0x800DDDCC)
 
 
-def load(m, t0):
+# SelfPlayMapNamePntr's table, 12 bytes a name (0x8009D228, PAL).
+DEMOS = ('BASE3', 'JAIL2', 'WASTE2')
+
+
+def load(m, t0, demo='BASE3'):
     boot_globals(m)
     m.call(0x8006E8C0)                     # heap init
     m.write(RATE, 4, 6)                    # PalNtscRate, PAL
+    # GameSelfPlay (0x80041300) plays the entry SelfPlayMapNamePntr (gp+712)
+    # points at; the boot leaves it at the first, BASE3.
+    m.write(0x800AE600 + 712, 4, 0x8009D228 + 12 * DEMOS.index(demo))
     m.call(GAME_SELF_PLAY)
     print('GameSelfPlay ok', flush=True)
     m.call(GAME_NEW_MISSION)
@@ -608,7 +617,7 @@ def load(m, t0):
     # The level resolve (0x8007C54C) waits on hardware; configure_level writes
     # what it leaves behind, as the loader fixtures do. Then the arrival
     # GameSelfPlay chose (0x800E4680) goes where the load reads it.
-    row = configure_level(m, 'BASE3', 1, False)
+    row = configure_level(m, demo, 1, False)
     m.put(0x800C8CD0, bytes(m.mem[0x0E4680:0x0E468C]))
     # The resolve's tail (0x8007C81C..0x8007C828): the row's two load hooks.
     m.write(0x800B2F6C, 4, m.read(row + 24, 4))

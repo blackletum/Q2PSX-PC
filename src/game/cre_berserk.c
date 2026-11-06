@@ -671,6 +671,9 @@ static void berserk_spawn(q2_monster *self)
      * and the solid bits with 0xFFFCFFFF and 0x00020000 (2 << 16). */
     self->movetype = Q2_MOVETYPE_STEP;
     self->solid    = Q2_SOLID_BBOX;
+    /* walkmonster_start (import +0xFC): the ambush flag and the random
+     * start frame, whose rand() the console takes here (0x80061B2C). */
+    q2_monster_walk_start(self);
 }
 
 /* ------------------------------------------------------------------------- */

@@ -129,6 +129,10 @@ static bool  g_wall_on;
 static s32   g_wall_z;          /* a plane at this Z blocks everything        */
 static bool  g_bottom_answer = true;
 
+/* The body a clear entity trace ends on: M_CheckAttack's eye-to-eye trace
+ * (0x8005D99C) only decides when it reports the enemy. */
+static q2_monster *g_trace_body;
+
 static bool walled_los(void *user, const s32 a[3], const s32 b[3])
 {
     (void)user;
@@ -162,6 +166,8 @@ static void walled_trace(void *user, const s32 start[3], const s16 mins[3],
     out->endpos[0] = end[0];
     out->endpos[1] = end[1];
     out->endpos[2] = end[2];
+    if (g_trace_body && (mask & 0x02000000u))
+        out->ent = g_trace_body;
 }
 
 static bool walled_bottom(void *user, const q2_monster *m)
@@ -1084,6 +1090,8 @@ static void test_checkattack(void)
     m.enemy = &player;
     m.goalentity = &player;
     q2_ai_checkattack(&m, 0);        /* publishes range and visibility */
+    g_trace_body = &player;          /* the eye-to-eye trace reaches it */
+    q2_ai_set_world(&g_test_world);
     {
         s32 lo = 1 << 30, hi = -1, fired = 0, k;
 
@@ -1105,6 +1113,8 @@ static void test_checkattack(void)
               "the reload never exceeds two seconds");
         check(hi > 2, "and is drawn over twenty ticks, not two");
     }
+    q2_ai_set_world(NULL);
+    g_trace_body = NULL;
 
     /*
      * THE SOUND TARGET LIVES FOR FIVE SECONDS. PlayerNoise stamps the noise's
