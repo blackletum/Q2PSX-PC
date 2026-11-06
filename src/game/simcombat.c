@@ -594,6 +594,21 @@ static q2_fx_preset_id fx_for_projectile(q2_proj_kind kind)
 }
 
 /*
+ * A GRENADE OR A ROCKET GOES OFF WITH ITS FIREBALL ALONE. Every one of their
+ * detonation arms (Grenade2 0x80049F9C/0x8004A01C, Grenade3 0x8004A8E0 and
+ * the fuse at 0x8004A9B0, the rocket 0x8004ADF0) calls 0x8005A778 for the
+ * Explosion model, the damage and the splash, and frees the object: no
+ * particle burst. The port added one, 90 numbers from the shared stream
+ * the console never draws (JAIL2's attract run, record frame 387). The BFG's
+ * own blast routine is not one of those arms and keeps its burst.
+ */
+static void proj_burst(q2_sim *sim, q2_proj_kind kind, const s32 at[3])
+{
+    if (kind == Q2_PROJ_BFG)
+        fx_at(sim, fx_for_projectile(kind), at);
+}
+
+/*
  * QUAKEGENEXPLOSION, FOR A ROCKET OR A GRENADE THAT WENT OFF.
  *
  * Three missile thinks call 0x8005A778 with their own origin (+0x54), their
@@ -1463,6 +1478,14 @@ q2_fire_result_v2 q2_sim_fire_weapon(q2_sim *sim, int weapon_id,
         if (launched >= 0) {
             q2_projectile *lp = &sim->combat.projectiles.p[launched];
 
+            /* Grenade3's fuse is a countdown at +0xF4 that its think spends
+             * before the state dispatch (0x8004A3DC), and its first think is
+             * in the frame it is primed, so that frame's delta is spent too.
+             * Measured from the clock after the frame, the deadline was one
+             * frame late (JAIL2's attract run, record frame 387). */
+            if (lp->kind == Q2_PROJ_HAND_GRENADE && lp->expires)
+                lp->expires -= sim->cur_dt;
+
             /* The attitude its model is drawn with: the player's yaw for a
              * rocket, three of the same rand()s the shot drew for a grenade
              * (projectile.h). */
@@ -2201,7 +2224,7 @@ q2_hand_grenade_update q2_sim_hand_grenade_update(
                                       attacker_for(sim, p->owner), targets,
                                       count, &sim->combat.rules,
                                       splash_clear, sim);
-        fx_at(sim, Q2_FX_EXPLOSION, where);
+        /* Grenade3 held to expiry: the fireball alone (proj_burst). */
         projectile_explosion(sim, p->kind, where);
         player_damage_end(sim);
         return Q2_HAND_GRENADE_EXPIRED;
@@ -2564,7 +2587,7 @@ static void grenade_fuse(q2_sim *sim, u32 index)
     q2_projectile_detonate_traced(&sim->combat.projectiles, index,
                                   proj_attacker(sim, p), targets, count,
                                   &sim->combat.rules, splash_clear, sim);
-    fx_at(sim, fx_for_projectile(kind), where);
+    proj_burst(sim, kind, where);
     projectile_explosion(sim, kind, where);
 }
 
@@ -3086,7 +3109,8 @@ static void proj_think(q2_sim *sim, u32 i)
          * (q2_fx_gib_spray) at the head of ThrowGibs, behind 0x8007CEB4,
          * and that needs a posed model this file does not carry.
          */
-        fx_at(sim, fx, contact);
+        (void)fx;
+        proj_burst(sim, p->kind, contact);
         projectile_explosion(sim, p->kind, contact);
         if (victim->health < health_before)
             fx_at(sim, Q2_FX_BLOOD, contact);
@@ -3153,7 +3177,7 @@ static void proj_think(q2_sim *sim, u32 i)
                                                complete ? step.to : end,
                                                (s16)p->damage);
             if (pieces)
-                fx_at(sim, fx_for_projectile(p->kind), step.to);
+                proj_burst(sim, p->kind, step.to);
         }
 
         if (!complete) {
@@ -3172,7 +3196,8 @@ static void proj_think(q2_sim *sim, u32 i)
                 proj_attacker(sim, p), NULL, targets, count,
                 &sim->combat.rules, splash_clear, sim);
             if (consumed) {
-                fx_at(sim, fx, end);
+                (void)fx;
+                proj_burst(sim, p->kind, end);
                 projectile_explosion(sim, p->kind, end);
             }
             return;

@@ -4,6 +4,7 @@
  * modelent.h for the addresses and for what a plausible version gets wrong.
  */
 #include "modelent.h"
+#include "random.h"
 
 #include "effect.h"        /* q2_fx_gib_spray / q2_fx_gib_trail */
 #include "item.h"          /* q2_item_shrink_think — 0x8005B358 */
@@ -249,6 +250,14 @@ q2_entity *q2_model_ent_spawn(q2_entity_set *set, const q2_model_bank *bank,
      * +0x2B0 and +0x2AC. It is 40 40 40 00: retail's ambient floor for the
      * effect mesh, distinct from the C0/40/31 dynamic light below. */
     e->glow[0] = e->glow[1] = e->glow[2] = Q2_MODEL_ENT_AMBIENT;
+
+    /* 0x8005A914..0x8005A948: a random yaw, `rand() & 4095`, pitch and roll
+     * zero, into +0xE6 before the RotMatrix. Every explosion faces its own
+     * way, and it takes a number from the shared stream (JAIL2's attract run,
+     * record frame 387). */
+    e->angles[0] = 0;
+    e->angles[1] = (s32)(q2_random_next() & 4095);
+    e->angles[2] = 0;
 
     /*
      * The two marks that make it EVICTABLE — the allocator at 0x8006C0F0 pairs

@@ -1988,7 +1988,14 @@ late, and the grenade tosses in the same think as the throw.
   (`0x80019760`, `0x8001972C`); with L2 and R2 both held the console strafes
   left. The port tested the positive first and went right.
 
-JAIL2 now matches to frame 387 of its 891.
+*Frame 387 to 423: the blast.* Grenade3's fuse is a countdown spent before
+the state dispatch (`0x8004A3DC`), from the think in the frame it is primed, so
+its deadline is one frame earlier than "the clock after the priming frame plus
+the fuse". The Explosion model spawn (`0x8005A778`) draws a random yaw
+(`0x8005A914`), and no grenade or rocket detonation arm calls a particle burst;
+the port drew 90 numbers for one.
+
+JAIL2 now matches to frame 423 of its 891.
 
 Two known differences remain that the run did not reach:
 - the trigger-volume adjustment of the sighting spot and crumbs (`0x80061024`,
