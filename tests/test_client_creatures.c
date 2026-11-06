@@ -171,9 +171,13 @@ static void test_melee_delivery(void)
     q2_actor_init(&actor); q2_actor_from_monster(&actor, &m);
     c->sim[0].player[0].vel[0] = 123;
     c->sim[0].player[0].impulse[2] = 11;
+    c->sim[0].player[0].ent.ground_normal[1] = 3767;
     client_cre_melee(&m, aim, 20, 400, c);
     CHECK(c->sim[0].combat.inv.health == 80 && c->cre_swings == 1);
-    CHECK(c->sim[0].player[0].vel[0] == 0 &&
+    /* fire_hit clears object+0x60, the ground normal (0x800613F0), and
+     * leaves the velocity alone. */
+    CHECK(c->sim[0].player[0].vel[0] == 123 &&
+          c->sim[0].player[0].ent.ground_normal[1] == 0 &&
           c->sim[0].player[0].impulse[2] == -6389 &&
           c->sim[0].player[0].impulse_armed);
     for (i = 0; i < 3; i++) q2_sim_tick(&c->sim[0], &input, 10);

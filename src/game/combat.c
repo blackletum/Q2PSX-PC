@@ -2080,7 +2080,7 @@ s32 q2_combat_hitscan(q2_actor *attacker, const s32 origin[3],
                       const q2_combat_rules *rules, q2_damage_result *out,
                       s32 point[3])
 {
-    s32 stop[3], at[3], idx;
+    s32 stop[3];
     int k;
 
     if (out)
@@ -2092,6 +2092,23 @@ s32 q2_combat_hitscan(q2_actor *attacker, const s32 origin[3],
 
     for (k = 0; k < 3; k++)
         stop[k] = origin[k] + (s32)(((s64)dir[k] * world_fraction) >> 12);
+
+    return q2_combat_hitscan_to(attacker, origin, stop, damage, mod, targets,
+                                count, rules, out, point);
+}
+
+s32 q2_combat_hitscan_to(q2_actor *attacker, const s32 origin[3],
+                         const s32 stop[3], s16 damage, s16 mod,
+                         q2_actor **targets, u32 count,
+                         const q2_combat_rules *rules, q2_damage_result *out,
+                         s32 point[3])
+{
+    s32 at[3], idx;
+
+    if (out)
+        memset(out, 0, sizeof(*out));
+    if (!origin || !stop)
+        return -1;
 
     idx = q2_combat_trace_actors(origin, stop, attacker, targets,
                                  targets ? count : 0, at);

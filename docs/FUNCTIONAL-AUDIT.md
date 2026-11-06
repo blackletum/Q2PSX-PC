@@ -1913,19 +1913,23 @@ port faults:
 
 With these, the `rand()` stream matches the console's for the whole BASE3 demo:
 player one dies to the Soldier's shotgun at record frame 526 on both, and the
-demo ends there. Player one's path matches through 518. From 519 the port
-stands two units lower on a slope: its airborne arm makes the 20-unit floor
-probe (`0x80045CD0`) where the console's does not, so the state the probe tests
-(the ground flags and the ground normal at +0x60) differs there, unexplained.
-The port also draws the player's death-animation pick at 526
-(`0x8003CEEC`), which the console's run does not reach. The demo is over by
-then, so it shows in no stream.
+demo ends there. Two more faults put player one's path on the console's for
+every frame as well:
+- **`fire_hit` clears the ground normal** (`memset(object+0x60, 0, 6)` at
+  `0x800613F0`), not the velocity. The port read +0x60 as the velocity and
+  zeroed it. So after the Infantry's smack at 518, the airborne arm could not
+  re-declare the floor and took the 20-unit probe (`0x80045CD0`), and the fall
+  at 520 ran at half speed.
+- **The player's own rounds sweep bodies to the world trace's end**, as the
+  creatures' already did.
 
-Three known differences remain that the run did not reach:
+The port draws the player's death-animation pick at 526 (`0x8003CEEC`), which
+the console's run does not reach. The demo is over by then, so it shows in no
+stream.
+
+Two known differences remain that the run did not reach:
 - the trigger-volume adjustment of the sighting spot and crumbs (`0x80061024`,
   `0x80060C94`);
-- the player's own bullets still rebuild their wall end from the trace
-  fraction;
 - a pickup burst's groups start at the item, not at fifteen of the posed mesh's
   vertices (`0x8006CC44`).
 

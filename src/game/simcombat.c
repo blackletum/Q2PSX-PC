@@ -1380,18 +1380,22 @@ q2_fire_result_v2 q2_sim_fire_weapon(q2_sim *sim, int weapon_id,
             sim->combat.last_shot.shot[i] = r.shot[i];
             s = &r.shot[i];
             u8  frac_area;
-            s32 frac = world_fraction_for(sim, s->origin, s->dir,
-                                          &frac_area);
+            s32 stop[3];
+            s32 frac = world_trace_for(sim, s->origin, s->dir, &frac_area,
+                                       stop);
             q2_damage_result dr;
             s32 victim, at[3];
 
             /* The blood lands where the round entered the body — the point
-             * 0x800544EC writes back — not at the wall behind it. */
-            victim = q2_combat_hitscan(&sim->combat.self, s->origin, s->dir,
-                                       s->damage, Q2_MOD_BULLET, frac,
-                                       sim->combat.targets,
-                                       sim->combat.target_count,
-                                       &sim->combat.rules, &dr, at);
+             * 0x800544EC writes back — not at the wall behind it. And the
+             * bodies are swept to the trace's own end, as the creatures'
+             * rounds are (actor_hitscan), not to one rebuilt from its
+             * fraction. */
+            victim = q2_combat_hitscan_to(&sim->combat.self, s->origin, stop,
+                                          s->damage, Q2_MOD_BULLET,
+                                          sim->combat.targets,
+                                          sim->combat.target_count,
+                                          &sim->combat.rules, &dr, at);
             fx_hitscan_impact(sim, s->origin, s->dir, at,
                               victim < 0 && frac < 4096, frac_area,
                               victim, &dr, s->damage);

@@ -1048,6 +1048,17 @@ s32 q2_combat_hitscan(q2_actor *attacker, const s32 origin[3],
                       s32 point[3]);
 
 /*
+ * The same, from the point the world trace itself stopped at. 0x80044C44
+ * writes the clipped end back and 0x800544EC sweeps the bodies to it; a stop
+ * rebuilt as origin + dir * fraction can fall up to three units short.
+ */
+s32 q2_combat_hitscan_to(q2_actor *attacker, const s32 origin[3],
+                         const s32 stop[3], s16 damage, s16 mod,
+                         q2_actor **targets, u32 count,
+                         const q2_combat_rules *rules, q2_damage_result *out,
+                         s32 point[3]);
+
+/*
  * One bullet, 0x8004874C: q2_combat_hitscan with mod 18. `fallback_radius` is
  * unused — the native query reads each body's own radius — and is kept for
  * the callers that still pass it.

@@ -351,6 +351,12 @@ class OracleMachine(LoaderMachine):
             a = self.r[4]
             self.rand_log.append(('placement', a, [signed(self.read(a + 4 * i, 4)) for i in range(4)] +
                                   [hex(self.read(a + 16 + 2 * i, 2)) for i in range(4)]))
+        if pc in (0x80045CA4, 0x80045CD0):  # the stepped move's airborne arm, before and after its slide:
+            e = self.r[16]                 # flags (+152), the ground normal (+96..+100), the slope limit (+156)
+            self.rand_log.append(('air', pc, [hex(self.read(e + 152, 4))] +
+                                  [signed(self.read(e + 96 + 2 * i, 2), 16) for i in range(3)] +
+                                  [signed(self.read(e + 156, 2), 16)] +
+                                  [signed(self.read(e + 84 + 4 * i, 4)) for i in range(3)]))
         if pc == 0x80061190:  # fire_hit, after VectorLength: self and enemy origins, the range, the reach
             e = self.r[19]; en = self.read(e + 188, 4)
             self.rand_log.append(('firehit', e, [signed(self.read(e + 4 * i, 4)) for i in range(3)] +

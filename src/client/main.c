@@ -3264,21 +3264,29 @@ static void client_cre_melee(q2_monster *m, const s32 aim[3], s32 damage,
         for (k = 0; k < 3; k++)
             victim->knockback[k] = (s16)(victim->knockback[k] + impulse[k]);
         victim->knocked = true;
-        memset(enemy->motion.velocity, 0, sizeof(enemy->motion.velocity));
+        memset(enemy->motion.ent.ground_normal, 0,
+               sizeof(enemy->motion.ent.ground_normal));   /* 0x800613F0 */
         enemy->motion.ent.flags &= ~0xA0u;
         q2_actor_to_monster(victim, enemy);
         return;
     }
 
     /* Preserve the swinging actor for killer attribution and the computed
-     * contact for blood/view kick. MOD 7 applies armour; fire_hit's separate
-     * kick then accumulates in object+0x2F8 and clears object+0x60 velocity. */
+     * contact for the view kick. MOD 7 applies armour; fire_hit's separate
+     * kick then accumulates in object+0x2F8 and clears object+0x60, which is
+     * the GROUND NORMAL, not the velocity: the velocity is never touched. */
     q2_sim_hurt_player(&c->sim[0], client_cre_actor(c, m), (s16)damage,
                        Q2_MOD_MELEE, point);
     q2_cre_melee_impulse(enemy, point, kick, impulse);
     {
         q2_player *p = &c->sim[0].player[0];
-        memset(p->vel, 0, sizeof(p->vel));
+        /* 0x800613F0: memset(object+0x60, 0, 6), the ground normal. Kept,
+         * the next airborne move could not re-declare the floor it was
+         * standing on and took the 20-unit probe (0x80045CD0) the console
+         * does not: BASE3's attract run, record frame 519. Zeroing the
+         * velocity in its place cost the next frame's fall half its speed
+         * (520). */
+        memset(p->ent.ground_normal, 0, sizeof(p->ent.ground_normal));
         p->ent.flags &= ~0xA0u; /* object+0x98, 0x80061400/408 */
         for (k = 0; k < 3; k++) p->impulse[k] = (s16)(p->impulse[k] + impulse[k]);
         p->impulse_armed = true;

@@ -642,7 +642,8 @@ adds its area, rectangle, the GTE rotation, screen offset and projection
 distance, so a port's region
 can be checked against the camera that made it. `--probes-from N` turns the probes on only from record frame N; the run
 before it goes at the unprobed speed. `fire_hit` (`0x80061190`) logs the range
-and reach, and each knockback (`0x80057F28`) its victim origin and point.
+and reach, and each knockback (`0x80057F28`) its victim origin and point. The stepped move's airborne arm
+(`0x80045CA4`, `0x80045CD0`) logs the flags, ground normal, slope limit and position.
 
 Each record frame gives every `rand()` call with its caller and result, player
 one, every creature's actor and edict, the active-area mask, the closed doors
