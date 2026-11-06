@@ -86,10 +86,14 @@ work three ways:
    functional audit). The port reproduces it. Restoring the orders would be a
    one-line deviation, and would go on this list.
 
-**Open against gate 1 (5 November):** the attract demos replay the console's
-own pad recordings, and on most of them the port's player one dies early.
-Something in the fights is not yet tick-exact. The functional audit records
-where each one ends.
+**Gate 1 against the attract demos (6 November):** all six, the three on each
+disc, now replay the console's own pad recordings tick for tick to their ends:
+the `rand()` stream and player one's position match the console's own code
+(`tests/fixtures/lockstep_oracle.py`, `--ntsc` for the US disc) on every
+frame. The three console behaviours no demo reaches (the sighting record's
+trigger volumes, the pickup burst on the posed mesh, the single-player death
+pick) are modelled and checked; the functional audit has the detail. What
+remains for 1.0 is the owner's sign-off on this page.
 
 Saved games are the one compatibility promise: the container is chunked,
 checksummed and fixed-width so a save written by one build loads under another.
