@@ -1964,6 +1964,17 @@ ends (record frames 526 and 211).
 
 JAIL2 now matches to frame 322 of its 891.
 
+*Where JAIL2 parts now: frame 322.* A thrown grenade is an OBJECT on the
+console: `0x800CCF28` is slot 7 of the 48-record array (`0x800CBA28`, stride
+`0x300`), taken from the same LIFO stack as creatures and gibs, and its toss
+(`0x80046B98`, the tumble draws at `0x80046BFC..0x80046C34`) runs at that slot's
+turn in MoveModels: at 322, between the second and third creature. The port keeps
+grenades and rockets in its own missile pass, with no slot, so their draws come
+before every creature's and every later object is dealt a different slot.
+Giving projectiles object slots and running them in the slot walk is the next
+step. Two of the port's creature steps also fail at 322 where all three of the
+console's succeed (`stepret 1`), which may follow from the same order.
+
 Two known differences remain that the run did not reach:
 - the trigger-volume adjustment of the sighting spot and crumbs (`0x80061024`,
   `0x80060C94`);
