@@ -1980,7 +1980,15 @@ view model crosses 411: at JAIL2 frame 322, angles (0, -179, -3) where the port
 had thrown at 321 with no roll. The client now hands the release over a frame
 late, and the grenade tosses in the same think as the throw.
 
-JAIL2 now matches to frame 376 of its 891.
+*Frame 376 to 387.* Two more:
+- **A client edict has no velocity.** Its +104..+112 read zero on every one of
+  366 recorded JAIL2 frames, so GunnerFire's -0.2 x velocity lead is nothing
+  against a player; the port led a strafe by 139 units and missed at 363.
+- **Strafe and turn test the negative button first** in every style
+  (`0x80019760`, `0x8001972C`); with L2 and R2 both held the console strafes
+  left. The port tested the positive first and went right.
+
+JAIL2 now matches to frame 387 of its 891.
 
 Two known differences remain that the run did not reach:
 - the trigger-volume adjustment of the sighting spot and crumbs (`0x80061024`,

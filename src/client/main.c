@@ -4694,9 +4694,14 @@ static void client_creatures_tick(client *c, float dt, const s32 eye[3])
     activity_ready = c->cre_activity_ready;
     memcpy(active_areas, c->cre_active_areas, sizeof(active_areas));
 
-    /* Aiming reads the same velocity as visibility, kept current while
-     * moving. */
-    memcpy(c->creatures.sight.velocity, c->sim[0].player[0].vel,
+    /* THE CLIENT EDICT'S VELOCITY IS NEVER WRITTEN. Its +104..+112 (the
+     * field fire_hit scales, 0x80061418) reads zero on every frame of
+     * JAIL2's attract run while the player runs about; the player's motion
+     * lives on its object. So a creature's lead on the player (GunnerFire's
+     * -0.2 x velocity, the Infantry's) is always nothing: at record frame 363
+     * the Gunner's round goes straight at the player, where the port's led
+     * a strafe by 139 units and missed. */
+    memset(c->creatures.sight.velocity, 0,
            sizeof(c->creatures.sight.velocity));
     /*
      * AND THE EYE IS A CONSTANT. Level setup stores -250 into every client

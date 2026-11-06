@@ -697,6 +697,7 @@ def run_frames(m, count, frames, t0):
         link = m.read(ent + 0x24, 4)
         player = [signed(m.read(link + 0x54 + 4 * i, 4)) for i in range(3)] + [signed(m.read(link + 0x108, 2), 16)]
         frames.append({'frame': f + 1, 'buttons': buttons, 'newv': newv,
+                       'pvel': [signed(m.read(ent + 104 + 4 * i, 4)) for i in range(3)],
                        'framenum': [fn0, m.read(0x800E46DC, 4)], 'player': player,
                        'mask': [m.read(0x800DD944 + 4 * i, 4) for i in range(3)],
                        'view_area': m.read(WINDOWS + 0x9E, 2),

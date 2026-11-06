@@ -141,8 +141,11 @@ static void test_fire_routes(void)
     /* A crouch does not move the eye creatures aim at: every client edict's
      * +0x4C is -250 from level setup (0x8007E1B0) and stays there. */
     CHECK(c->creatures.sight.view_height == -250);
-    CHECK(c->creatures.sight.velocity[0] == 1200 &&
-          c->creatures.sight.velocity[2] == -300);
+    /* And its velocity is never written either: the client edict's
+     * +104..+112 read zero all through JAIL2's attract run, so no creature
+     * leads the player whatever the body is doing. */
+    CHECK(c->creatures.sight.velocity[0] == 0 &&
+          c->creatures.sight.velocity[2] == 0);
     q2_cre_set_shot_hook(NULL, NULL);
     q2_sim_set_targets(&c->sim[0], NULL, 0);
     q2_sim_free(&c->sim[0]);

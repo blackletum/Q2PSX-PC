@@ -194,6 +194,24 @@ static s16 axis(u32 buttons, u32 pos, u32 neg)
 }
 
 /*
+ * THE SIDE AND TURN PAIRS TEST THE NEGATIVE BUTTON FIRST. Every style's
+ * routine is a first-wins chain, and only forward opens on its positive
+ * button (0x800196F0 UP); the turn opens on LEFT (0x8001972C) and the strafe
+ * on its negative button (0x80019760 L2, likewise 0x800192C4 and 0x80019510
+ * for the stick styles). So with both strafe buttons held the console
+ * strafes LEFT: JAIL2's attract run holds L2+R2 at record frame 363, and the
+ * port, testing the positive button first, went right.
+ */
+static s16 axis_neg_first(u32 buttons, u32 pos, u32 neg)
+{
+    if (neg && (buttons & neg))
+        return -Q2_PAD_FULL;
+    if (pos && (buttons & pos))
+        return  Q2_PAD_FULL;
+    return 0;
+}
+
+/*
  * The mouse scale, 0x80019230. `(byte * (speed + 32)) >> 4` — computed in 32
  * bits and stored as a halfword, so a fast mouse wraps rather than saturating.
  *
@@ -335,7 +353,7 @@ void q2_pad_read(const q2_pad_state *pad, const q2_pad_config *cfg,
         break;
 
     case LOOK_BUTTONS:
-        out->yaw = axis(pad->buttons, s->yaw_pos, s->yaw_neg);
+        out->yaw = axis_neg_first(pad->buttons, s->yaw_pos, s->yaw_neg);
 
         /*
          * 0x8001978C. The two look buttons are tested independently and both
@@ -385,7 +403,7 @@ void q2_pad_read(const q2_pad_state *pad, const q2_pad_config *cfg,
             out->buttons |= Q2_BTN_LOOK_DOWN | Q2_BTN_LOOK_UP;
     } else {
         out->forward = axis(pad->buttons, s->fwd_pos, s->fwd_neg);
-        out->side    = axis(pad->buttons, s->side_pos, s->side_neg);
+        out->side    = axis_neg_first(pad->buttons, s->side_pos, s->side_neg);
 
         /* 0x8001929C: the FORWARD axis alone raises it. Strafing is not
          * "moving" as far as this bit is concerned, and the view recentre
