@@ -582,6 +582,10 @@ typedef struct client {
      * one the shot itself took, so it is latched where the shot is played.
      */
     bool             cock_pending[Q2_MP_MAX_PLAYERS];
+    /* The 411 crossing reaches Grenade3 a frame late: its think reads the
+     * view model's position as it was copied (0x8004A414), so it throws on
+     * the frame after the model crossed (JAIL2's attract run, record 322). */
+    bool             hg_release_pending[Q2_MP_MAX_PLAYERS];
     client_voice    *shot_voice[Q2_MP_MAX_PLAYERS];
     u32              shot_voice_serial[Q2_MP_MAX_PLAYERS];
     u32              popup_raises;
@@ -12346,7 +12350,8 @@ static void client_advance_view_weapon(client *c, bool attack, s32 ticks)
             s16 aim[3], kick[3];
             s32 summed[3], attached[3];
             s32 cook_ticks = q2_vw_take_hand_grenade_cook(&c->vw[pi]);
-            bool release = q2_vw_take_hand_grenade_release(&c->vw[pi]);
+            bool release = c->hg_release_pending[pi];
+            c->hg_release_pending[pi] = q2_vw_take_hand_grenade_release(&c->vw[pi]);
             q2_hand_grenade_update state;
 
             q2_sim_view_angles(&c->sim[0], summed);

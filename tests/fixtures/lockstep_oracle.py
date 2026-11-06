@@ -357,6 +357,10 @@ class OracleMachine(LoaderMachine):
                                   [signed(self.read(e + 96 + 2 * i, 2), 16) for i in range(3)] +
                                   [signed(self.read(e + 156, 2), 16)] +
                                   [signed(self.read(e + 84 + 4 * i, 4)) for i in range(3)]))
+        if pc == 0x8004A6E4:  # Grenade3's throw: the thrower's angles (+230..+234) and the local (0, 2048, charge)
+            o = self.r[19]
+            self.rand_log.append(('throw', o, [signed(self.read(o + 230 + 2 * i, 2), 16) for i in range(3)] +
+                                  [signed(self.read(self.r[29] + 72 + 2 * i, 2), 16) for i in range(3)]))
         if pc == 0x8004C83C:  # the machinegun's muzzle RotateS: object angles (+230..+234), matrix (+704), offset
             o = self.r[19]
             self.rand_log.append(('mgmuzzle', o, [signed(self.read(o + 230 + 2 * i, 2), 16) for i in range(3)] +

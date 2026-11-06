@@ -2233,7 +2233,6 @@ q2_hand_grenade_update q2_sim_hand_grenade_update(
             q2_projectile_set_attitude(&sim->combat.projectiles.p[index],
                                        -(pl->pitch + 1280), -pl->yaw,
                                        pl->roll);
-            sim->combat.projectiles.p[index].thrown_fresh = true;
             /* 0x8004A7C0: after reveal, velocity and throw sound. */
             (void)q2_weapon_consume(&sim->combat.inv,
                                     Q2_WID_HAND_GRENADE);
@@ -2782,10 +2781,6 @@ static void proj_think(q2_sim *sim, u32 i)
 
     if (!p->in_use)
         return;
-    if (p->thrown_fresh) {          /* the throw frame's think */
-        p->thrown_fresh = false;
-        return;
-    }
 
     q2_sim_proj_scan.stepped++;
     held = (p->kind == Q2_PROJ_HAND_GRENADE &&

@@ -1971,15 +1971,16 @@ console: `0x800CCF28` is slot 7 of the 48-record array (`0x800CBA28`, stride
 rockets and BFG balls now hold a slot (`q2_projectile.obj_slot1`, owner
 `Q2_OBJ_PROJECTILE`), taken at launch and dealt again on load, and the sim runs
 each at its slot in the walk (`q2_sim_entities_to`, one slot at a time with the
-entities). Bolts stay in the missile sweep. The throw is the held Grenade3's own
-think (`0x8004A7C0`), so the throw frame does not toss it.
+entities). Bolts stay in the missile sweep.
 
-*Where JAIL2 parts now: frame 338.* The thrown grenade's velocity is
-(-1102, -2048, 3945) on the console and (-1111, -2048, 3943) in the port: the
-vertical and the horizontal length agree, but the console's direction is not
-the player's yaw (-179) rotated by the table, so the release routine composes it
-some other way. The difference grows into a different bounce at 332, and the
-console's grenade comes to rest at 338 where the port's is still tumbling.
+*Frame 338 to 376: the throw.* Grenade3's release (`0x8004A6AC..0x8004A770`) is
+RotMatrix of the thrower's object angles (+230..+234) applied to (0, 2048,
+charge), Y negated, and it happens in the held object's think a frame after the
+view model crosses 411: at JAIL2 frame 322, angles (0, -179, -3) where the port
+had thrown at 321 with no roll. The client now hands the release over a frame
+late, and the grenade tosses in the same think as the throw.
+
+JAIL2 now matches to frame 376 of its 891.
 
 Two known differences remain that the run did not reach:
 - the trigger-volume adjustment of the sighting spot and crumbs (`0x80061024`,
