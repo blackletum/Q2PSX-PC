@@ -412,6 +412,9 @@ void q2_sim_fx_timed_bind(q2_sim *sim)
  * entry from 0x800544EC when one was hit, else the world trace's own stop.
  * `world` says the world stopped the shot short of its range.
  */
+static void fx_shot_breakable(q2_sim *sim, const s32 origin[3],
+                              const s32 dir[3], const s32 at[3], s16 damage);
+
 static void fx_hitscan_impact(q2_sim *sim, const s32 origin[3],
                               const s32 dir[3], const s32 at[3], bool world,
                               u8 area, s32 victim,
@@ -466,50 +469,56 @@ static void fx_hitscan_impact(q2_sim *sim, const s32 origin[3],
          * end: the console's sweep runs INSIDE the trace, so a pane in front of
          * the wall is what the shot hits, not the wall behind it.
          */
-        {
-            /*
-             * AND THE END IS PUSHED A LITTLE PAST THE IMPACT, or a pane can
-             * never be shot at all.
-             *
-             * A pane is SOLID in the hull, so the pellet that is meant to
-             * break it is the pellet the pane itself stopped — and the trace
-             * hands back a point on the near side of that surface, a unit or
-             * so outside the Scene node's own box (trace.c backs off one unit
-             * along the dominant axis at 0x800453F8). Testing the segment
-             * origin -> impact against the unpadded box therefore missed the
-             * very case it exists for: LAB's node 205, fired on from 577 units
-             * away, stopped every bullet at x 322..325 against a box whose
-             * far face is x 321, and 285 rounds registered six hits — the six
-             * that happened to enter across a corner.
-             *
-             * The console does not have the problem because its pane sweep
-             * runs INSIDE the trace (0x8004874C): the pane is one of the
-             * things the trace can stop on, and when it does, that IS the hit.
-             * This port traces first and asks afterwards, so the question has
-             * to be asked a few units further along the ray.
-             *
-             * Along the RAY and not by padding the box: the build deliberately
-             * takes the node's own numbers rather than q2_scene_node_bounds'
-             * culling slop, because a padded box would be shootable from
-             * beside the pane. Extending the segment keeps the aim exact and
-             * only forgives the back-off. The step is measured on the ray's
-             * dominant axis, which is the norm 0x8006FA2C computes.
-             */
-            s32 to[3];
-            s32 big = 0;
-            int a;
+        fx_shot_breakable(sim, origin, dir, at, damage);
+    }
+}
 
-            for (a = 0; a < 3; a++) {
-                s32 m = dir[a] < 0 ? -dir[a] : dir[a];
-                if (m > big) big = m;
-            }
-            for (a = 0; a < 3; a++)
-                to[a] = big > 0
-                      ? at[a] + (s32)(((s64)dir[a] * Q2_BREAKABLE_REACH) / big)
-                      : at[a];
+static void fx_shot_breakable(q2_sim *sim, const s32 origin[3],
+                              const s32 dir[3], const s32 at[3], s16 damage)
+{
+    {
+        /*
+         * AND THE END IS PUSHED A LITTLE PAST THE IMPACT, or a pane can
+         * never be shot at all.
+         *
+         * A pane is SOLID in the hull, so the pellet that is meant to
+         * break it is the pellet the pane itself stopped — and the trace
+         * hands back a point on the near side of that surface, a unit or
+         * so outside the Scene node's own box (trace.c backs off one unit
+         * along the dominant axis at 0x800453F8). Testing the segment
+         * origin -> impact against the unpadded box therefore missed the
+         * very case it exists for: LAB's node 205, fired on from 577 units
+         * away, stopped every bullet at x 322..325 against a box whose
+         * far face is x 321, and 285 rounds registered six hits — the six
+         * that happened to enter across a corner.
+         *
+         * The console does not have the problem because its pane sweep
+         * runs INSIDE the trace (0x8004874C): the pane is one of the
+         * things the trace can stop on, and when it does, that IS the hit.
+         * This port traces first and asks afterwards, so the question has
+         * to be asked a few units further along the ray.
+         *
+         * Along the RAY and not by padding the box: the build deliberately
+         * takes the node's own numbers rather than q2_scene_node_bounds'
+         * culling slop, because a padded box would be shootable from
+         * beside the pane. Extending the segment keeps the aim exact and
+         * only forgives the back-off. The step is measured on the ray's
+         * dominant axis, which is the norm 0x8006FA2C computes.
+         */
+        s32 to[3];
+        s32 big = 0;
+        int a;
 
-            q2_sim_breakable_shot(sim, origin, to, damage);
+        for (a = 0; a < 3; a++) {
+            s32 m = dir[a] < 0 ? -dir[a] : dir[a];
+            if (m > big) big = m;
         }
+        for (a = 0; a < 3; a++)
+            to[a] = big > 0
+                  ? at[a] + (s32)(((s64)dir[a] * Q2_BREAKABLE_REACH) / big)
+                  : at[a];
+
+        q2_sim_breakable_shot(sim, origin, to, damage);
     }
 }
 
@@ -1449,14 +1458,16 @@ q2_fire_result_v2 q2_sim_fire_weapon(q2_sim *sim, int weapon_id,
                                    sim->combat.targets,
                                    sim->combat.target_count,
                                    &sim->combat.rules, &dr, at);
-        if (victim >= 0)
-            fx_hitscan_impact(sim, s->origin, s->dir, at, false, frac_area,
-                              victim, &dr, s->damage);
+        (void)victim;
+        (void)frac_area;
         for (k = 0; k < 3; k++)
             world_end[k] = s->origin[k] +
                            (s32)(((s64)s->dir[k] * frac) >> Q2_FRAC_12);
-        fx_hitscan_impact(sim, s->origin, s->dir, world_end, frac < 4096,
-                          frac_area, -1, NULL, s->damage);
+        /* No blood in the body and no puff on the wall: 0x8004917C..
+         * 0x8004999C calls DoDamage and draws its trail, and that is all
+         * (JAIL2's attract run, record frame 720). */
+        if (sim->fx_ready && frac < 4096)
+            fx_shot_breakable(sim, s->origin, s->dir, world_end, s->damage);
 
         /* And the spiral, from the muzzle to where the trace stopped. */
         if (sim->fx_ready) {
@@ -1713,8 +1724,9 @@ q2_damage_result q2_sim_hurt_player(q2_sim *sim, q2_actor *attacker,
      * vector helpers only. The Infantry's smack on BASE3's attract run, record
      * frame 518, drew 90 numbers here that the console never draws. */
     /* Nor for a blast: a grenade's or rocket's splash is the damage function
-     * alone (0x80050810, after 0x8005A778), with no blood call. */
-    if (out.taken > 0 && mod != Q2_MOD_MELEE &&
+     * alone (0x80050810, after 0x8005A778), with no blood call. Nor for a
+     * rail, which calls DoDamage and draws its trail (0x8004917C). */
+    if (out.taken > 0 && mod != Q2_MOD_MELEE && mod != Q2_MOD_RAIL &&
         mod != Q2_MOD_GRENADE && mod != Q2_MOD_ROCKET)
         fx_at(sim, Q2_FX_BLOOD, point);
 
@@ -1923,11 +1935,13 @@ q2_cre_rail_result q2_sim_creature_rail(q2_sim *sim, q2_actor *attacker,
         sync_rules(sim);
         dr = q2_combat_damage(attacker, list[idx], damage, Q2_MOD_RAIL, at,
                               &sim->combat.rules);
-        fx_hitscan_impact(sim, start, dir, at, false, area, idx, &dr, damage);
+        (void)dr;
         result.creatures_hit = 1;
     }
-    fx_hitscan_impact(sim, start, dir, result.end, frac < 4096, area, -1,
-                      NULL, damage);
+    /* The player's rail function, so no blood and no puff either. */
+    (void)area;
+    if (sim->fx_ready && frac < 4096)
+        fx_shot_breakable(sim, start, dir, result.end, damage);
     return result;
 }
 
@@ -3253,6 +3267,27 @@ void q2_sim_projectiles_walk_rest(q2_sim *sim)
     }
 }
 
+void q2_sim_bolts_late(q2_sim *sim)
+{
+    u32 i;
+
+    if (!sim || sim->cur_player != 0)
+        return;
+    player_damage_begin(sim);
+    sync_rules(sim);
+    for (i = 0; i < Q2_PROJ_MAX; i++) {
+        q2_projectile *p = &sim->combat.projectiles.p[i];
+
+        if (!p->in_use || p->kind != Q2_PROJ_BOLT)
+            continue;
+        proj_think(sim, i);
+        proj_slot_release(sim, i);
+        if (sim->fx_ready && !p->in_use)
+            q2_fx_blur_release(&sim->fx, proj_blur_owner(i));
+    }
+    player_damage_end(sim);
+}
+
 void q2_sim_combat_tick(q2_sim *sim)
 {
     u32 i;
@@ -3370,6 +3405,9 @@ void q2_sim_combat_tick(q2_sim *sim)
             continue;
         }
         p->walk_pending = false;
+        /* And a bolt for ProcessMissiles' place in the frame. */
+        if (sim->defer_bolts && p->in_use && p->kind == Q2_PROJ_BOLT)
+            continue;
         proj_think(sim, i);
         proj_slot_release(sim, i);
     }

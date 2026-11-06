@@ -13354,6 +13354,7 @@ static void client_input_simulated(client *c, float dt)
     c->batches_deferred = true;
     c->sim[0].defer_entities = true;
     c->sim[0].defer_projectiles = !c->mp_enabled;
+    c->sim[0].defer_bolts = true;   /* q2_sim_bolts_late, below */
     ticked = (q2_sim_advance(&c->sim[0], &in, (double)dt) != 0);
     c->sim[0].defer_entities = false;
     c->sim[0].defer_projectiles = false;
@@ -14217,6 +14218,23 @@ static void client_input_simulated(client *c, float dt)
      * against the console's own BASE3 attract run (lockstep_oracle.py).
      */
     client_level_effects_frame(c, ticked);
+
+    /*
+     * ProcessMissiles' bolts (0x80039000), after the creatures and the level
+     * effects: a bolt fired this frame moves and draws its trail now, as the
+     * console's does (JAIL2's attract run, record frame 752). Their lights
+     * and events are drained here too, so they show this frame.
+     */
+    if (ticked) {
+        u32 before = c->lights_ready ? c->light_world.dynamic_world_count : 0;
+        q2_sim_bolts_late(&c->sim[0]);
+        client_entity_events(c);
+        if (c->lights_ready) {
+            u32 n = c->light_world.dynamic_world_count, l;
+            for (l = before; l < n && c->tick_light_count < Q2_DYNLIGHT_MAX; l++)
+                c->tick_lights[c->tick_light_count++] = c->light_world.dynamic_world[l];
+        }
+    }
     if (ticked) client_cre_flash_drain(c);   /* the draw pass, 0x80031094 */
 
     /*

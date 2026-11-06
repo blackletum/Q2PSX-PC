@@ -566,6 +566,10 @@ typedef struct q2_sim {
      * (q2_sim_entities_to), as MoveModels runs them. */
     bool                 defer_projectiles;
     s32                  proj_walk_slot;
+    /* Bolts wait for q2_sim_bolts_late: ProcessMissiles (0x80039000) runs
+     * after MoveModels and the level effects (DrawTelePorts, 0x80038FA4), so
+     * a bolt fired this frame moves, and draws its trail, after both. */
+    bool                 defer_bolts;
 
     /* The level clock the weapon gates and the damage throttles use, in dt
      * units. Advanced by q2_sim_tick alongside the physics. */
@@ -1919,6 +1923,9 @@ void q2_sim_entities_end(q2_sim *sim);
 void q2_sim_projectile_at_slot(q2_sim *sim, s32 slot);
 /* Any deferred projectile the walk did not reach. */
 void q2_sim_projectiles_walk_rest(q2_sim *sim);
+/* Every bolt in flight, for a tick run with `defer_bolts` (player 0
+ * selected): those the combat tick held and those fired since. */
+void q2_sim_bolts_late(q2_sim *sim);
 
 /*
  * Post a view kick — what a weapon's recoil and a damage hit do. `period` picks

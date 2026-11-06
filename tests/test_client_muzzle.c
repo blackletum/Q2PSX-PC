@@ -21,6 +21,11 @@ static void player_delivery(void)
             client *c = calloc(1, sizeof(*c));
             q2_muzzle_light preset;
             bool flashes = q2_light_muzzle_preset((u8)weapon, &preset);
+            /* A bolt moves, and lights itself, in the frame it is fired:
+             * ProcessMissiles runs after the player (0x80039000). */
+            bool bolt = weapon == Q2_WID_BLASTER ||
+                        weapon == Q2_WID_HYPERBLASTER;
+            u32 lights = (flashes ? 1u : 0u) + (bolt ? 1u : 0u);
             s32 feet[3] = {0};
             int ammo;
             if (!c) exit(2);
@@ -58,14 +63,14 @@ static void player_delivery(void)
                 CHECK(c->sim[0].level_time != 0);
             }
             CHECK(c->mp_shots[0] == 1);
-            CHECK(c->ent_light_added == (flashes ? 1u : 0u));
+            CHECK(c->ent_light_added == lights);
             if (flashes) {
                 CHECK(q2_light_timed_active(&c->light_world) == (preset.ticks ? 1u : 0u));
                 CHECK(c->light_world.dynamic_world_count == (preset.ticks ? 0u : 1u));
             }
             /* A second drain must not replay a shot or restart its light. */
             client_entity_events(c);
-            CHECK(c->ent_light_added == (flashes ? 1u : 0u));
+            CHECK(c->ent_light_added == lights);
             if (flashes && preset.ticks)
                 CHECK(q2_light_timed_active(&c->light_world) == 1);
 
@@ -73,7 +78,7 @@ static void player_delivery(void)
             c->frame_index++;
             client_input_simulated(c, 1.0f / 300.0f);
             if (flashes) CHECK(c->light_world.dynamic_world_count == 0);
-            CHECK(c->ent_light_added == (flashes ? 1u : 0u));
+            CHECK(c->ent_light_added == lights);
             if (weapon == Q2_WID_BLASTER) {
                 q2_light light;
                 /* Continuous bolt lighting survives display frames between

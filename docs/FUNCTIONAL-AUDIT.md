@@ -2001,7 +2001,24 @@ a body calls the damage function and nothing else (`0x80049FBC`, `0x8004A904`,
 has no blood call either. The port sprayed contact and splash blood, and parted
 at 423. Only the BFG ball keeps its contact blood.
 
-JAIL2 now matches to frame 721 of its 891.
+*Frame 721 to 752: the rail.* The Gladiator's rail puffed smoke on the wall
+behind its beam. The rail function (`0x8004917C..0x8004999C`) calls DoDamage and
+the trail's group spawner (`0x8003004C`) and draws no number; neither the puff
+(`0x80048990`) nor a blood spawner is among its calls. Both rails now leave the
+body and the wall alone, and keep the pane test along the beam.
+
+*Frame 752 to the end: the bolt sweep.* The main loop runs the players
+(`0x80033030`) and then the game frame, which calls MoveModels (`0x8006A4F0`),
+the level effects (`0x80028BDC`), the cameras and only then ProcessMissiles
+(`0x80048C88`, from `0x80039000`). A bolt fired on the trigger's second frame
+therefore draws its trail in that frame, after the creatures and the teleport
+columns. The client now holds the bolts out of the combat tick and moves every
+bolt in flight after the level effects.
+
+JAIL2 now matches the console's `rand()` stream to its end, record frame 890.
+Player one's path is not exact over the whole run: between frames 621 and 662
+it drifts by up to 14 units and settles against a wall, and from 866 it is a
+unit off. Neither reaches the stream.
 
 Two known differences remain that the run did not reach:
 - the trigger-volume adjustment of the sighting spot and crumbs (`0x80061024`,
