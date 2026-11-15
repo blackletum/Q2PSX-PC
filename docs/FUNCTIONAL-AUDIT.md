@@ -2276,18 +2276,33 @@ them (RememberMe 0x8007F8CC), fragments without (DestroyMe 0x8007F928 on row
 (0x80020B38, item 21 excepted; 0x80020D00 on landing unless OBJECTIVE) and on
 every collected pickup. Before any of that, FinishDying (0x8007F630) converts
 every creature still carrying deadflag 2 into a class-47 body, frame
-untouched; the dead-body store keeps the clip of that frame and
-RespawnQuakeDeadBody (0x8007D558) poses the return on the clip's last frame.
-Measured on the disc, every named death clip is three animation frames per AI
-frame and no death clip is split across moves, so the port's "corpse rests on
-its move's last frame" is the same clip two animation frames short of the
-console's returning pose; left as is. The port now applies FinishDying and
-the kill hooks at departure (`q2_zone_leaving`) and never parks a dynamic
-object in an unloaded zone; `test_client_zones` pins all of it and the
-harness's 21 gate crossings pass. Still different by design: a living
-creature returns with its live AI move, where GeneralRespawnStuffStore
-(0x8007D318) keeps only position, health, yaw, target and spawn flags and the
-console spawns it afresh.
+untouched; the dead-body store keeps the clip of that frame
+(QuakeStoreInanimate 0x80059B08 hands +0x100 to FindAnimSequenceNumFromFrame
+0x8006DA3C) and RespawnQuakeDeadBody (0x8007D558) writes
+LastFrameFromSequenceNum (0x8006DAB4) into the returning body's +0x100 at
+0x8007D75C: the clip lengths through that clip summed, minus one, in the
+tenths BodgeAnimData scaled them to — the clip's last tick. Measured on the
+disc, every named death clip is three animation frames per AI frame and no
+death clip is split across moves, so the returning body sits two animation
+frames further into its clip than the one the player left; the port now poses
+it there (`client_cre_pose_returned_body` writes the actor's animation cursor,
+which the corpse handler 0x8007F71C never advances). A living creature is
+stored by GeneralRespawnStuffStore (0x8007D318) as a 12- or 20-byte record —
+class (+0xD2 & 0x3F), position with y+286, yaw >> 6 (0x8007D410), health >> 2
+toward zero when it and every coordinate fit the short form (0x8007D334..
+0x8007D3A4) else whole, the edict's nine spawn-flag bits (+0x1C >> 18) with
+the record's 0x600 (+0xF2), and the target or, when it is zero, the +0x18 of
+the class-114 corner at +0x88 (0x8007D454..0x8007D488), masked to eight bits
+— and GeneralRespawnStuff (0x8007D158) decodes it into a spawn record for
+SpawnGeneral (0x800565C4), a fresh spawn whose skill test on +0x14 (0x800,
+0x1000, 0x2000) can never refuse it, writing the stored health before export
+0 (0x8007E680) and again after it (0x8007D304). No move, enemy, deadline or
+think survives. The port now captures a living creature as that record and
+spawns it afresh on return (`q2_zone_history_creatures`,
+`q2_zone_history_spawned`), applies FinishDying and the kill hooks at
+departure (`q2_zone_leaving`) and never parks a dynamic object in an unloaded
+zone; `test_client_zones` pins all of it and the harness's 21 gate crossings
+pass.
 
 **TELEPORT sequencing.** PSXTELEPORT (0x80028914) is not a one-frame move.
 Its prologue ORs 0x10 into the running record's flags byte via gp+16936
