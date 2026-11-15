@@ -22,6 +22,7 @@
 #include "sim.h"
 #include "levelbin.h"
 #include "trig.h"        /* the spark's reference velocities                */
+#include "vram.h"        /* q2_vram_clut_word: the debris binding's CLUT    */
 
 static int g_failures;
 static int g_checks;
@@ -1849,7 +1850,7 @@ static void test_debris(void)
     check_eq_i(w.debris_model_count, 32,
                "registration caps at 32 (0x80064F80)");
 
-    made = q2_fx_debris_burst(&w, &rng, bmin, bmax, NULL, 20, 5);
+    made = q2_fx_debris_burst(&w, &rng, bmin, bmax, NULL, 20, 5, NULL);
     check_eq_i(made, 20, "twenty pieces spawned");
 
     for (i = 0; i < Q2_FX_DEBRIS_MAX; i++) {
@@ -1889,7 +1890,7 @@ static void test_debris(void)
         q2_fx_world bare;
 
         q2_fx_world_init(&bare, &g_tab);
-        q2_fx_debris_burst(&bare, &rng, bmin, bmax, NULL, 2, 5);
+        q2_fx_debris_burst(&bare, &rng, bmin, bmax, NULL, 2, 5, NULL);
         check_eq_i(bare.debris[0].model, -1,
                    "with nothing registered a piece has no model");
     }
@@ -1899,7 +1900,7 @@ static void test_debris(void)
     q2_fx_world_clear(&w);
     {
         s32 at[3] = { 7, 8, 9 };
-        q2_fx_debris_burst(&w, &rng, bmin, bmax, at, 3, 0);
+        q2_fx_debris_burst(&w, &rng, bmin, bmax, at, 3, 0, NULL);
         check_eq_i(w.debris[0].pos[0], 7, "an explicit point wins");
         check_eq_i(w.debris[2].pos[2], 9, "for every piece");
     }
@@ -1913,6 +1914,168 @@ static void test_debris(void)
         q2_fx_debris_impact(&w, 0, NULL);
         check(!w.debris[0].in_use, "the seventh retires it");
     }
+}
+
+/*
+ * GENEFECT.C's scene fragment, the parts a burst used to leave out:
+ * GetLimitedPolyData (0x800683F8) binding the broken polygon's texture, the
+ * tumble at 0x8006425C and the clock at 0x80064344. Every expected number
+ * below is read off the disassembly's field offsets and shifts, not off the
+ * port.
+ */
+static void test_debris_surface(void)
+{
+    q2_fx_world w;
+    q2_rng rng, probe;
+    q2_fx_debris_texture tex;
+    q2_mapmod_rec rec;
+    u8 polys[12 * 2], rgb[3 * 4], uv[8 * 5];
+    s32 at[3] = { 1, 2, 3 };
+    s16 r0, r1, r2, x0, y0, z0;
+    int i;
+
+    printf("debris: the broken surface's texture, the tumble and the clock\n");
+
+    /* A two-polygon MapMod record. Polygon 0 is the one 0x800683FC..0x80068404
+     * reads (`a3 + 8`, the record's first); polygon 1 is a decoy with every
+     * field different, which the console never looks at. */
+    memset(polys, 0, sizeof(polys));
+    polys[4]  = 2;                 /* +4   col[0]: colour entry 2             */
+    polys[8]  = 0x01;              /* +8   clut low byte: `& 3` = semi        */
+    polys[9]  = 0x4A;              /* +9   clut index 74 -> clutIdTable[74]   */
+    polys[10] = (u8)(0x45);        /* +10  page 5, selector 2 in the top bits */
+    polys[11] = (u8)(0x80 | 3);    /* +11  uv set 3; bit 7 is NOT a uv bit   */
+    polys[12 + 4]  = 1;
+    polys[12 + 8]  = 0;
+    polys[12 + 9]  = 0x10;
+    polys[12 + 10] = 0x01;
+    polys[12 + 11] = 1;
+    for (i = 0; i < 12; i++)
+        rgb[i] = (u8)(10 * i + 1);          /* entry 2 is (61, 71, 81) */
+    for (i = 0; i < 40; i++)
+        uv[i] = (u8)(100 + i);              /* set 3 is 124..131        */
+
+    memset(&rec, 0, sizeof(rec));
+    rec.num_polys = 2;
+    rec.polys     = polys;
+    rec.rgb       = rgb;
+    rec.rgb_count = 4;
+    rec.uv        = uv;
+    rec.uv_count  = 5;
+
+    check(q2_fx_debris_texture_from_mapmod(&rec, &tex),
+          "a record with a polygon yields a binding");
+    check(tex.valid, "and marks it valid");
+    check_eq_i(tex.uv[0][0], 124, "uv0.u is byte 0 of set 3 (0x80068420)");
+    check_eq_i(tex.uv[0][1], 125, "uv0.v is byte 1");
+    check_eq_i(tex.uv[1][0], 126, "uv1.u is byte 2 (0x80068430)");
+    check_eq_i(tex.uv[1][1], 127, "uv1.v is byte 3");
+    check_eq_i(tex.uv[2][0], 128, "uv2.u is byte 4 (0x80068440)");
+    check_eq_i(tex.uv[2][1], 129, "uv2.v is byte 5");
+    check_eq_i(tex.uv[3][0], 130, "uv3.u is byte 6 (0x80068450)");
+    check_eq_i(tex.uv[3][1], 131, "uv3.v is byte 7");
+    check_eq_i(tex.clut, q2_vram_clut_word(74),
+               "the CLUT is clutIdTable[byte 9] (0x80068460..0x8006847C)");
+    check_eq_i(tex.rgb[0], 61, "red is colour entry 2's first byte (0x80068480)");
+    check_eq_i(tex.rgb[1], 71, "green its second");
+    check_eq_i(tex.rgb[2], 81, "blue its third");
+    check(tex.semi, "byte 8 & 3 set: code 0x3E (0x800684AC..0x800684C8)");
+    check_eq_i(tex.page, 5, "the page is byte 10 & 0x1F (0x800684D4)");
+
+    /* An opaque polygon takes the other arm: `& 3` clear. */
+    polys[8] = 0x04;
+    check(q2_fx_debris_texture_from_mapmod(&rec, &tex), "opaque polygon binds");
+    check(!tex.semi, "byte 8 & 3 clear: codeTable[0] | 0x3C (0x800684EC)");
+
+    /* A UV index past the table, or an empty record, binds nothing. */
+    polys[11] = 4;
+    rec.uv_count = 4;
+    check(!q2_fx_debris_texture_from_mapmod(&rec, &tex),
+          "a UV set past the table is refused");
+    check(!tex.valid, "and leaves the binding invalid");
+    rec.num_polys = 0;
+    check(!q2_fx_debris_texture_from_mapmod(&rec, &tex),
+          "a record with no polygon binds nothing");
+
+    /* The binding rides on every piece the burst spawns (0x80064530). */
+    polys[11] = 3;
+    rec.uv_count = 5;
+    rec.num_polys = 2;
+    q2_fx_debris_texture_from_mapmod(&rec, &tex);
+    q2_fx_world_init(&w, &g_tab);
+    q2_rng_seed(&rng, 99);
+    q2_fx_debris_register(&w, 0);
+    check_eq_i(q2_fx_debris_burst(&w, &rng, NULL, NULL, at, 2, 0, &tex), 2,
+               "two textured pieces");
+    check(w.debris[0].tex.valid && w.debris[1].tex.valid,
+          "both carry the binding");
+    check_eq_i(w.debris[1].tex.uv[3][1], 131, "with the surface's UVs");
+    check_eq_i(w.debris[1].tex.clut, q2_vram_clut_word(74), "and its CLUT");
+    check_eq_i(q2_fx_debris_burst(&w, &rng, NULL, NULL, at, 1, 0, NULL), 1,
+               "an untextured burst still spawns");
+    check(!w.debris[2].tex.valid, "and its piece draws the model's own skin");
+
+    /*
+     * THE TUMBLE. 0x80064270..0x8006431C: three draws, each
+     * `((rand() & 0x7F) + 127) << 1`, applied +,-,+ to x,y,z when spin.x is
+     * odd and -,+,- when it is even. Read the same generator ahead to know the
+     * draws.
+     */
+    w.debris[0].spin[0] = 1000;       /* even */
+    w.debris[0].spin[1] = -2000;
+    w.debris[0].spin[2] = 30000;      /* near the top: the halfword wraps */
+    probe = rng;
+    r0 = (s16)((((u32)q2_rng_next(&probe) & 0x7Fu) + 127u) * 2u);
+    r1 = (s16)((((u32)q2_rng_next(&probe) & 0x7Fu) + 127u) * 2u);
+    r2 = (s16)((((u32)q2_rng_next(&probe) & 0x7Fu) + 127u) * 2u);
+    check(r0 >= 254 && r0 <= 508 && (r0 & 1) == 0,
+          "a turn is an even number in 254..508");
+    q2_fx_debris_tumble(&w, 0, &rng);
+    check_eq_i(w.debris[0].spin[0], 1000 - r0, "even x: x -= draw 0 (0x800642E0)");
+    check_eq_i(w.debris[0].spin[1], -2000 + r1, "even x: y += draw 1 (0x800642FC)");
+    check_eq_i(w.debris[0].spin[2], (s16)(30000 - r2),
+               "even x: z -= draw 2 (0x80064318)");
+    check((w.debris[0].spin[0] & 1) == 0,
+          "an even step keeps the parity, so the direction holds for life");
+
+    w.debris[0].spin[0] = 1001;       /* odd */
+    w.debris[0].spin[1] = 0;
+    w.debris[0].spin[2] = 32700;
+    probe = rng;
+    r0 = (s16)((((u32)q2_rng_next(&probe) & 0x7Fu) + 127u) * 2u);
+    r1 = (s16)((((u32)q2_rng_next(&probe) & 0x7Fu) + 127u) * 2u);
+    r2 = (s16)((((u32)q2_rng_next(&probe) & 0x7Fu) + 127u) * 2u);
+    q2_fx_debris_tumble(&w, 0, &rng);
+    check_eq_i(w.debris[0].spin[0], 1001 + r0, "odd x: x += draw 0 (0x80064288)");
+    check_eq_i(w.debris[0].spin[1], 0 - r1, "odd x: y -= draw 1 (0x800642A4)");
+    check_eq_i(w.debris[0].spin[2], (s16)(32700 + r2),
+               "odd x: z += draw 2, wrapping as `lhu`/`sh` do (0x800642C4)");
+
+    /* An impact's +1 (0x80064238) flips the parity and so the direction. */
+    x0 = w.debris[0].spin[0]; y0 = w.debris[0].spin[1]; z0 = w.debris[0].spin[2];
+    q2_fx_debris_impact(&w, 0, NULL);
+    check_eq_i(w.debris[0].spin[0], x0 + 1, "an impact advances x by one");
+    probe = rng;
+    r0 = (s16)((((u32)q2_rng_next(&probe) & 0x7Fu) + 127u) * 2u);
+    r1 = (s16)((((u32)q2_rng_next(&probe) & 0x7Fu) + 127u) * 2u);
+    r2 = (s16)((((u32)q2_rng_next(&probe) & 0x7Fu) + 127u) * 2u);
+    q2_fx_debris_tumble(&w, 0, &rng);
+    check_eq_i(w.debris[0].spin[0], x0 + 1 - r0, "and the next tumble runs the other way");
+    check_eq_i(w.debris[0].spin[1], y0 + r1, "on y");
+    check_eq_i(w.debris[0].spin[2], (s16)(z0 - r2), "and on z");
+
+    /* THE CLOCK. 0x80064344..0x8006436C: life -= frame delta; freed at <= 0.
+     * 2100 of life at a delta of 12 is 175 ticks; the 300 an impact costs is
+     * on top. */
+    check_eq_i(w.debris[0].life, 1800, "one impact has cost 300");
+    q2_fx_debris_age(&w, 0, 12);
+    check_eq_i(w.debris[0].life, 1788, "a tick of 12 costs 12");
+    for (i = 0; i < 148; i++)
+        q2_fx_debris_age(&w, 0, 12);
+    check(w.debris[0].in_use, "12 of life left is still alive");
+    q2_fx_debris_age(&w, 0, 12);
+    check(!w.debris[0].in_use, "and the tick that reaches zero frees it");
+    check(w.debris[1].in_use, "its neighbour is untouched");
 }
 
 /* ------------------------------------------------------------------------- */
@@ -2352,7 +2515,10 @@ static void test_spawn_tick_is_drawable(void)
     q2_camera cam;
     psx_ot ot;
     gte_state gte;
-    s16 vel[1][3] = { { 0, 0, 0 } };
+    /* One velocity per quad: the spawn reads `vel[i]` for every one of the
+     * `count` it is given, so a shorter array is a read off the stack
+     * (AddressSanitizer caught the one-row array this used to pass). */
+    s16 vel[Q2_FX_GROUP_QUADS][3] = { { 0, 0, 0 } };
     s32 at[3] = { 0, 0, 4000 };
 
     printf("group: a burst spawned this tick still draws this frame\n");
@@ -2723,7 +2889,7 @@ static void test_debris_gravity(void)
     q2_fx_world_init(&w, &g_tab);
     q2_rng_seed(&rng, 5);
     q2_fx_debris_register(&w, 0);
-    q2_fx_debris_burst(&w, &rng, NULL, NULL, at, 1, 0);
+    q2_fx_debris_burst(&w, &rng, NULL, NULL, at, 1, 0, NULL);
 
     /* 0x80046464 adds the caller's already-scaled step to vel.y. */
     w.debris[0].vel[1] = 0;
@@ -3785,6 +3951,7 @@ int main(void)
     test_quad_shell();
     test_gib_trail();
     test_debris();
+    test_debris_surface();
     test_build_ot();
     test_emitters_use_the_frame_camera();
     test_bolt_body();

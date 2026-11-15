@@ -1597,12 +1597,15 @@ static void write_player(wbuf *w, const q2_save *s)
 
     write_move_ent(w, &p->ent);
 
-    /* Optional player tail: old saves end after the mover. */
-    w_u32(w, 1);
+    /* Optional player tail: old saves end after the mover. Version 2 adds
+     * the light intensity (entity+0xFC) the TELEPORT fade drives; a version-1
+     * tail restores it at the allocator's 4096 (0x8006C1B8). */
+    w_u32(w, 2);
     w_s16v(w, p->aim_direction, 3);
     w_s16(w, p->aim_pitch); w_s16(w, p->aim_assist);
     w_s32v(w, p->aim_eye, 3); w_s32(w, p->aim_node);
     w_bool(w, p->aim_ready); w_bool(w, p->aim_view_valid);
+    w_s16(w, p->light);
 
     w_chunk_end(w, at);
 }
@@ -1650,12 +1653,19 @@ static void read_player(rbuf *r, q2_save *s)
     p->water_voice = r_bool(r);
 
     read_move_ent(r, &p->ent);
+    p->light = 4096;
     if (r->at < r->len) {
-        if (r->len - r->at != 32 || r_u32(r) != 1) { r->bad = true; return; }
+        size_t rest = r->len - r->at;
+        u32 version;
+        if (rest != 32 && rest != 34) { r->bad = true; return; }
+        version = r_u32(r);
+        if (version != (rest == 32 ? 1u : 2u)) { r->bad = true; return; }
         r_s16v(r, p->aim_direction, 3);
         p->aim_pitch = r_s16(r); p->aim_assist = r_s16(r);
         r_s32v(r, p->aim_eye, 3); p->aim_node = r_s32(r);
         p->aim_ready = r_bool(r); p->aim_view_valid = r_bool(r);
+        if (version >= 2)
+            p->light = r_s16(r);
     }
 }
 
@@ -2411,7 +2421,7 @@ static bool read_rotators(rbuf *r, q2_save *s)
         d->accum = r_s32(r); d->angle = r_s16(r); d->state = r_u8(r);
         d->step_pending = r_u8(r); d->motor_active = r_u8(r);
         d->delay = r_u16(r); d->hold = r_u16(r);
-        if (r->bad || d->kind > Q2_ROT_SNAP || d->axis > 3 ||
+        if (r->bad || d->kind > Q2_ROT_STEP || d->axis > 3 ||
             d->state > Q2_ROTST_HOLD || d->state == 4 ||
             d->step_pending > 1 || d->motor_active > 1) return false;
     }

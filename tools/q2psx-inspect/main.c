@@ -699,7 +699,7 @@ static int cmd_verify(disc *d)
     unsigned long long pickups_total = 0;
     unsigned long long pickups_taken = 0;
     unsigned long long spawn_records = 0, spawn_placed = 0, spawn_oob = 0;
-    u8 class_seen[Q2_MONSTER_CLASS_COUNT];
+    u8 class_seen[Q2_MONSTER_CLASS_COUNT] = { 0 };
 
     printf("Verifying every level file against the typed schema...\n\n");
 

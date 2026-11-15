@@ -289,10 +289,20 @@ q2_result q2_zone_history_capture(q2_zone_history *h, const char *map, int zone,
     for (i = 0; i < p.count; i++) {
         q2_zone_object *o = &p.object[i];
         if (o->zone != zone || !o->runtime) continue;
-        if (o->kind == Q2_ZONE_ITEM || o->kind == Q2_ZONE_DYNAMIC)
-            o->runtime->entity.source_slot = UINT32_MAX;
-        if (o->kind == Q2_ZONE_PROJECTILE) o->runtime->projectile.source_slot = UINT32_MAX;
-        if (o->kind >= Q2_ZONE_DYNAMIC && o->runtime->materialized) o->removed = true;
+        if (o->kind == Q2_ZONE_ITEM) o->runtime->entity.source_slot = UINT32_MAX;
+    }
+    /*
+     * The console parks nothing. A slot SaveCreatures (0x800569C8) does not
+     * store is either killed at the gate or still live in the next zone, where
+     * it runs to its own end; nothing waits in an unloaded zone to resume on a
+     * return. So every dynamic and projectile record is rebuilt from the live
+     * world below, and one that did not join the last destination is gone.
+     */
+    for (i = 0; i < p.count; ) {
+        if (p.object[i].kind >= Q2_ZONE_DYNAMIC) {
+            free(p.object[i].runtime);
+            p.object[i] = p.object[--p.count];
+        } else i++;
     }
     /* Walk authored places, including ones whose reusable runtime slot was
      * collected and subsequently overwritten by a drop or CREBATCH. */
@@ -651,5 +661,49 @@ void q2_zone_history_resume(q2_zone_history *h, const char *map, int zone,
         sim->combat.projectiles.live++;
         o->runtime->materialized = true;
         o->zone = zone;
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* OnLeavingZone's prelude: FinishDying and SaveCreatures' kill hooks         */
+/* ------------------------------------------------------------------------- */
+void q2_zone_leaving(q2_sim *sim, q2_creature_world *world)
+{
+    u32 i;
+    if (!sim || sim->multiplayer) return;
+    /*
+     * FinishDying, 0x8007F630. The test is the edict's deadflag alone
+     * (0x8007F680..0x8007F690: `lw +0x20`, `srl 22`, `andi 3`, `bne 2`), so a
+     * creature whose `die` ran this very frame converts like one five frames
+     * into its fall; a body already detached has no edict and is skipped
+     * (0x8007F670..0x8007F678). `dead` is the port's other spelling of that
+     * bit (monster.c keeps the two in step; q2_monster_damage sets it alone). The kill is already in the tally -- the port
+     * counts `dead` bodies, which ProcessQuakeDeath (0x8007F698) would raise
+     * here on the console -- and the frame is left for the store; the body
+     * comes back on its clip's last frame, which the port spells as the move's
+     * last frame (zonestate.h).
+     */
+    for (i = 0; world && world->ready && i < world->set.count; i++) {
+        q2_monster *m = &world->set.monsters[i];
+        if (!m->in_use || m->corpse || !(m->dead || m->deadflag == Q2_DEAD_DEAD)) continue;
+        if (m->currentmove) m->frame = (s16)m->currentmove->last_frame;
+        q2_monster_corpse_detach(m);    /* 0x8007F6A0..0x8007F6EC, as 0x8007F098 */
+        m->svflags |= Q2_SVF_DEADMONSTER;
+        m->next_think = 0;              /* the edict and its think are gone */
+    }
+    /*
+     * SaveCreatures, 0x80056B24..0x80056B98: each live slot's class-table
+     * +0x1C hook. Fragments (class 48) carry DestroyMe: KillModel, no store.
+     * A pickup carries RememberMe, whose store (LoadStoreQuakePickup
+     * 0x8005B4EC) refuses a +0x44 with bit 4 -- the dropped and the collected
+     * -- and then kills the slot regardless (0x8007F910). Explosion models
+     * (class 0) match no entry and are left alone, like the missile pool.
+     */
+    for (i = 0; i < sim->entities.count; i++) {
+        q2_entity *e = &sim->entities.ent[i];
+        if (!e->in_use) continue;
+        if (e->kind == Q2_GIB_BOSS_CLASS || e->think == q2_gib_think ||
+            (e->kind == Q2_ENT_KIND_ITEM && (e->flags & Q2_ITEM_TIMED)))
+            q2_entity_remove(e);
     }
 }

@@ -19,6 +19,7 @@
 #include "gte.h"
 #include "lighting.h"
 #include "trig.h"
+#include "userfuncs.h"  /* q2_uf_operand_at: the zone-copy rebase FLKLIGHT's gate reads through */
 #include "weapon.h"
 
 static int g_failures;
@@ -989,6 +990,83 @@ static void test_flklight(void)
 
     /* No phase is tested because the original has none: the exec at 0x800287A0
      * adds a light and returns. The radii above are the whole of it. */
+
+    /*
+     * The gate in front of it: 0x800287C0 `lw v0, 4(s2)`, 0x800287C8 `andi
+     * v0, v0, 1`, 0x800287CC `beq v0, zero, 0x800288F0`. These are the 24
+     * bytes of the disc's only FLKLIGHT item, JAIL2 record +0x694 at +36, as
+     * COMMON.DAT, ZONE0.DAT and ZONE2.DAT carry it: X = 0x00005280 is even, so
+     * in those zones the light never shows and the two rand() calls behind the
+     * gate are never made. ZONE1.DAT's copy of the same item has X = 0x5281,
+     * and the constructor at 0x8002E648 restores +4..+15 from the zone's
+     * buffer, so in zone 1 the gate passes. Same bytes on both discs.
+     */
+    {
+        u8 jail2[24] = {
+            0x16, 0x18, 0x0d, 0x00,  0x80, 0x52, 0x00, 0x00,
+            0x80, 0xfd, 0xff, 0xff,  0x00, 0x00, 0x00, 0x00,
+            0x14, 0x00, 0x80, 0x80,  0x80, 0x00, 0x00, 0x00
+        };
+
+        check(!q2_flklight_enabled(jail2),
+              "JAIL2's FLKLIGHT as COMMON/ZONE0/ZONE2 carry it (X 0x5280) is "
+              "gated off, as at 0x800287CC");
+
+        jail2[4] = 0x81;             /* ZONE1.DAT's copy: X = 0x5281 */
+        check(q2_flklight_enabled(jail2),
+              "ZONE1's copy (X 0x5281) passes the andi-1 gate");
+
+        jail2[4] = 0x80;
+        jail2[5] = 0x53;             /* X = 0x5380: still even, other bits ignored */
+        check(!q2_flklight_enabled(jail2),
+              "only bit 0 of the X word is tested");
+
+        check(!q2_flklight_enabled(NULL), "a missing item is not enabled");
+    }
+
+    /*
+     * Where the word comes from. The constructor at 0x8002E648 subtracts
+     * gp+372 (COMMON's working copy) from the item pointer and adds gp+376
+     * (the zone's pristine copy) before its three `lw`, so the X it restores
+     * is the ZONE file's. Model JAIL2: the same 24-byte item at the same
+     * offset in two buffers, COMMON's with X 0x5280 and ZONE1's with 0x5281,
+     * read through q2_uf_operand_at exactly as the client reads it.
+     */
+    {
+        u8 common_ev[64], zone_ev[64];
+        q2_uf_operands ops;
+        static const u8 item[24] = {
+            0x16, 0x18, 0x0d, 0x00,  0x80, 0x52, 0x00, 0x00,
+            0x80, 0xfd, 0xff, 0xff,  0x00, 0x00, 0x00, 0x00,
+            0x14, 0x00, 0x80, 0x80,  0x80, 0x00, 0x00, 0x00
+        };
+
+        memset(common_ev, 0, sizeof(common_ev));
+        memset(zone_ev, 0, sizeof(zone_ev));
+        memcpy(common_ev + 36, item, 24);
+        memcpy(zone_ev + 36, item, 24);
+
+        ops.base_a = common_ev;
+        ops.base_b = zone_ev;
+        ops.b_size = sizeof(zone_ev);
+
+        /* ZONE0 and ZONE2 carry COMMON's bytes: gated off. */
+        check(!q2_flklight_enabled(q2_uf_operand_at(&ops, common_ev + 36, 24)),
+              "a zone whose copy has X 0x5280 leaves the light off");
+
+        /* ZONE1's copy has bit 0 set at +4: the light is on there. */
+        zone_ev[36 + 4] = 0x81;
+        check(q2_flklight_enabled(q2_uf_operand_at(&ops, common_ev + 36, 24)),
+              "ZONE1's copy (X 0x5281) turns the light on through the rebase");
+        check(!q2_flklight_enabled(common_ev + 36),
+              "while COMMON's own bytes still say off — the port must not read these");
+
+        /* No zone buffer at all reads the item in place, as 0x8002E648 would
+         * read a gp+376 that equals gp+372. */
+        ops.base_b = NULL;
+        check(!q2_flklight_enabled(q2_uf_operand_at(&ops, common_ev + 36, 24)),
+              "without a zone copy the working copy decides");
+    }
 }
 
 /* ------------------------------------------------------------------------- */

@@ -96,6 +96,69 @@ static void link_face(psx_ot *ot, psx_prim *prim, u32 bucket, s32 batch)
         psx_ot_link_prim(ot, prim, bucket, PSX_OT_KEY_NONE);
 }
 
+/*
+ * THE FADE'S TWO PASSES over one face — PolyOpaqueSetup (0x8006DD68) and
+ * FilterInOpaquePolys (0x8006A5E0), as DrawModels runs them on a model whose
+ * entity+0xFC is not 4096. See q2_model_instance.alpha.
+ *
+ * The GT4 itself: `sb 0x3E, 7(a0)` and `tpage = (tpage & 0x1F) | 0x20`
+ * (0x8006DDEC..0x8006DE04) — semi-transparent, ABR 1, B + F.
+ *
+ * Its companion: a POLY_FT4 (tag 0x09000000, code 0x2E at 0x8006DDC0) with the
+ * GT4's four UVs (0x8006DD68..0x8006DDA4), `tpage = (tpage & 0x1F) | 0x40`
+ * (ABR 2, B - F, 0x8006DDB0..0x8006DDB8), the CLUT at 0x800E3FBE (palette 73,
+ * 0x8006DDDC) and the flat colour FilterInOpaquePolys computes once per model,
+ *
+ *     g = (alpha * 129) >> 12       (0x8006A5E8: `sll 7` + add)
+ *     r = b = (alpha * 133) >> 12   (0x8006A5FC: `sll 5`, add, `sll 2`, add)
+ *
+ * each with the `bgez`/`addiu 4095` bias, so a negative alpha divides toward
+ * zero. 0x800B1D94 then copies the GT4's XYs into it (0x800B1DD0..0x800B1DF0)
+ * and splices it into the chain in front of the GT4. At alpha 4096 the colour
+ * would be (133, 129, 133) — over the GPU's 128 = 1.0 — so the silhouette
+ * removes the backdrop entirely and the additive pass restores the model: the
+ * two passes compose to an opaque draw at the top of the ramp and to nothing
+ * at the bottom, with the room showing through in between.
+ */
+static s32 fade_div_12(s32 v)
+{
+    return (v < 0 ? v + 4095 : v) >> 12;
+}
+
+static psx_prim *emit_fade_companion(psx_ot *ot, psx_prim *gt4, s32 alpha,
+                                     u16 clut)
+{
+    psx_prim *p;
+    u8 g = (u8)fade_div_12(alpha * 129);
+    u8 rb = (u8)fade_div_12(alpha * 133);
+    int i;
+
+    /* PolyOpaqueSetup's rewrite of the face's own packet. */
+    gt4->tpage = (u16)((gt4->tpage & 0x1Fu) | ((u16)PSX_BLEND_ADD << 5));
+    gt4->semi_transparent = true;
+    gt4->textured_blend   = true;
+
+    p = psx_ot_alloc(ot);
+    if (!p)
+        return NULL;
+
+    p->kind = PSX_PRIM_FT4;
+    for (i = 0; i < 4; i++) {
+        p->xy[i] = gt4->xy[i];
+        p->uv[i] = gt4->uv[i];
+    }
+    p->rgb[0].r = rb;
+    p->rgb[0].g = g;
+    p->rgb[0].b = rb;
+    p->rgb[0].pad = 0;
+    p->tpage = (u16)((gt4->tpage & 0x1Fu) | ((u16)PSX_BLEND_SUB << 5));
+    p->clut  = clut;
+    p->semi_transparent = true;
+    p->textured_blend   = true;
+    p->quad_zorder      = gt4->quad_zorder;
+    return p;
+}
+
 /* Map one GLOBAL STORAGE vertex index to its owning part and apply that part's
  * live pose. This is the pair 0x8006D608 / 0x8006C6C8 used by the shadow path;
  * it deliberately ignores each part's scratch-window `vert_base`, which is a
@@ -375,6 +438,22 @@ bool q2_model_blend_local(const q2_model_instance *inst, s32 vert_a,
     return true;
 }
 
+/* FrameShadowPolys (0x80078A64): the cursor 0x800B2F3C and the limit
+ * 0x800B2F40, kept as the number of packets still unused this frame. A fresh
+ * process holds a full budget, as a console whose first ChrisInitEveryFrame
+ * has run; the client refills it at the top of every frame. */
+static u32 shadow_frame_left = Q2_MODEL_SHADOW_FRAME_MAX;
+
+void q2_model_shadow_frame_begin(void)
+{
+    shadow_frame_left = Q2_MODEL_SHADOW_FRAME_MAX;
+}
+
+u32 q2_model_shadow_frame_remaining(void)
+{
+    return shadow_frame_left;
+}
+
 /* 0x800784CC — one modulated, subtractive POLY_FT4 under a model. */
 static bool emit_shadow(const q2_model_instance *inst, const q2_camera *cam,
                         psx_ot *ot, gte_state *gte, const s16 view[3][3],
@@ -425,6 +504,14 @@ static bool emit_shadow(const q2_model_instance *inst, const q2_camera *cam,
     max_z = (s32)(((s64)max_z * factor) / Q2_MODEL_SHADOW_FADE);
     if (min_x >= max_x || min_z >= max_z)
         return false;
+
+    /* 0x80078504: the cursor has reached the frame's limit, so no shadow at
+     * all; otherwise 0x8007893C spends one of the sixteen packets. Only a
+     * shadow that gets this far costs one — the fade and footprint returns
+     * above leave the cursor where it was, as the console's do. */
+    if (shadow_frame_left == 0)
+        return false;
+    shadow_frame_left--;
 
     prim = psx_ot_alloc(ot);
     if (!prim) {
@@ -493,6 +580,7 @@ void q2_model_instance_init(q2_model_instance *inst)
         return;
     memset(inst, 0, sizeof(*inst));
     inst->scale   = Q2_ONE_12;
+    inst->alpha   = Q2_ONE_12;   /* entity+0xFC's "opaque", 0x8006A878 */
     inst->tint[0] = inst->tint[1] = inst->tint[2] = 128;
     inst->sort_area       = -1;
     inst->bucket_override = -1;
@@ -585,11 +673,12 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
      * order block A or block B names (model.h).
      */
     psx_prim *built[Q2_MODEL_MAX_FACES];
+    psx_prim *companion[Q2_MODEL_MAX_FACES];  /* the fade's FT4 per face */
     u16       order[Q2_MODEL_MAX_FACES];
     u32       built_count = 0;
     u32       bucket = 0;
     s32       batch = PSX_OT_BATCH_INVALID;
-    bool      reorder;
+    bool      reorder, fading;
 
     if (!inst || !inst->model || !cam || !ot || !gte)
         return 0;
@@ -601,8 +690,14 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
 
     memset(window, 0, sizeof(window));
     memset(built, 0, sizeof(built));
+    memset(companion, 0, sizeof(companion));
 
     reorder = (m->hdr.num_faces <= Q2_MODEL_MAX_FACES);
+
+    /* 0x8006A874: `lh v1, 0xFC(obj); beq v1, 4096` is the one test between an
+     * ordinary draw and the two-pass fade. The CLUT is palette 73's, which an
+     * offline caller without a CLUT table cannot supply. */
+    fading = inst->alpha != Q2_ONE_12 && inst->fade_clut != 0;
 
     /* Share the world's table when the caller has one; otherwise a private copy
      * at ABR 0, which is what a page starts at before any opaque world polygon
@@ -1105,8 +1200,44 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
                 prim->semi_transparent = q2_surf_selector_semi(sel);
                 prim->textured_blend   = true;
 
+                /*
+                 * CopyFromGlobalTexture (0x80065138): a scene fragment's
+                 * packets carry the broken surface's UVs, CLUT and page in
+                 * place of the face's own. See q2_model_face_texture.
+                 */
+                if (inst->face_tex) {
+                    for (i = 0; i < 4; i++) {
+                        prim->uv[i].u = inst->face_tex->uv[i][0];
+                        prim->uv[i].v = inst->face_tex->uv[i][1];
+                    }
+                    prim->clut             = inst->face_tex->clut;
+                    prim->tpage            = inst->face_tex->tpage;
+                    prim->semi_transparent = inst->face_tex->semi;
+                }
+
                 if (stats && prim->semi_transparent)
                     stats->faces_semi++;
+            }
+
+            /*
+             * A FADING MODEL (entity+0xFC != 4096, 0x8006A874): the face turns
+             * additive and gets its subtractive silhouette companion. See
+             * q2_model_instance.alpha for the console's two routines.
+             */
+            if (fading) {
+                psx_prim *fade = emit_fade_companion(ot, prim, inst->alpha,
+                                                     inst->fade_clut);
+                if (fade) {
+                    emitted++;
+                    if (stats)
+                        stats->fades_emitted++;
+                    if (reorder)
+                        companion[face_index] = fade;
+                    else
+                        link_face(ot, fade, bucket, batch);
+                } else if (stats) {
+                    stats->ot_overflow++;
+                }
             }
 
             emitted++;
@@ -1172,6 +1303,11 @@ u32 q2_model_build_ot(const q2_model_instance *inst,
                 continue;
 
             link_face(ot, p, bucket, batch);
+            /* 0x800B1D94 splices the silhouette in front of its GT4 in the
+             * chain; an unkeyed link prepends, so linking it second puts it
+             * there and it draws first. */
+            if (companion[face])
+                link_face(ot, companion[face], bucket, batch);
         }
     }
 

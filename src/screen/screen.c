@@ -1943,14 +1943,24 @@ static void env_apply(psx_framebuffer *fb, const screen_env *e,
         if (x1 > fb->width)  x1 = fb->width;
         if (y1 > fb->height) y1 = fb->height;
 
-        for (py = e->y < 0 ? 0 : e->y; py < y1; py++)
-            for (px = e->x < 0 ? 0 : e->x; px < x1; px++) {
-                psx_fb_store(fb, px, py, c);
-                if (opts->scene) {
-                    opts->scene[py * fb->width + px] = c;
-                    opts->ui_mask[py * fb->width + px] = 0;
-                }
+        /* Row at a time: the clear is a quarter of the framebuffer per view,
+         * and psx_fb_store per pixel was six per cent of a BASE3 frame. The
+         * VRAM mirror takes the finished row, the same words it got pixel by
+         * pixel. */
+        for (py = e->y < 0 ? 0 : e->y; py < y1; py++) {
+            int x0 = e->x < 0 ? 0 : e->x;
+            u16 *row = fb->px + py * fb->width;
+            if (x0 >= x1) continue;
+            for (px = x0; px < x1; px++) row[px] = c;
+            if (fb->vram)
+                memcpy(&fb->vram->px[fb->vram_y + py][fb->vram_x + x0], row + x0,
+                       (size_t)(x1 - x0) * sizeof(u16));
+            if (opts->scene) {
+                u16 *scene = opts->scene + py * fb->width;
+                for (px = x0; px < x1; px++) scene[px] = c;
+                memset(opts->ui_mask + py * fb->width + x0, 0, (size_t)(x1 - x0));
             }
+        }
     }
 }
 

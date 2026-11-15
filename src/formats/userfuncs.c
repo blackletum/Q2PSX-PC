@@ -346,9 +346,16 @@ static const q2_uf_prim_info uf_table[Q2_UF_PRIM_COUNT] = {
 
 {Q2_UF_FLKLIGHT, "FLKLIGHT", 24, true, false, 4, {
     {4,  1, Q2_UF_OP_VEC3_S32, "origin",
-     "restored from the pristine buffer; bit 0 of the first word gates the "
-     "whole primitive, which is INFERRED, not confirmed"},
-    {16, 1, Q2_UF_OP_S16,      "light_id", "matched by 0x800689C0"},
+     "restored from the pristine buffer by 0x8002E648; bit 0 of the first "
+     "word gates the whole primitive — CONFIRMED at 0x800287C0 `lw v0,4(s2)` "
+     "/ 0x800287C8 `andi v0,v0,1` / 0x800287CC `beq -> return`. The restore "
+     "reads the ZONE's Events copy, and the disc's one call (JAIL2 +0x694) "
+     "has X = 0x5280 in COMMON/ZONE0/ZONE2 but 0x5281 in ZONE1: lit in zone 1 "
+     "only"},
+    {16, 1, Q2_UF_OP_S16,      "area",
+     "an AREA index, not a light id: 0x800689C0(viewport, area) compares the "
+     "stamp at 0x800D8D78 + area*64 + viewport*16 with the frame counter at "
+     "0x800B2D68, and the light is raised only while that area was drawn"},
     {18, 1, Q2_UF_OP_U8,       "colour_r", NULL},
     {19, 1, Q2_UF_OP_U8,       "colour_g",
      "colour_b follows at +20. The ((rand()*500)>>15)+400 and +1000 formulas "
@@ -713,15 +720,13 @@ const q2_misevent *q2_misevent_find(const char *name)
         return NULL;
 
     for (i = 0; i < Q2_MISEVENT_COUNT; i++) {
-        char field[Q2_UF_NAME_LEN];
         size_t n = strlen(k_misevent[i].name);
 
         /* The console compares the twelve bytes as they sit, so the padding is
-         * part of the key and `Pump1` does not match `Pump1On`. */
-        memset(field, 0, sizeof(field));
-        memcpy(field, k_misevent[i].name, n);
-
-        if (memcmp(field, name, n) == 0 &&
+         * part of the key and `Pump1` does not match `Pump1On`. strncmp stops
+         * at the first terminator, so a `name` shorter than the key is never
+         * read past its end (the memcmp over `n` bytes this replaces was). */
+        if (strncmp(k_misevent[i].name, name, n) == 0 &&
             (n == Q2_UF_NAME_LEN || name[n] == '\0'))
             return &k_misevent[i];
     }

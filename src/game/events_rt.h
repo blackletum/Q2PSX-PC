@@ -379,6 +379,19 @@ typedef struct q2_event_rt {
     bool disable_self;
 
     /*
+     * PROMOTE THE RECORD THAT IS RUNNING TO CAT_B — what PSXTELEPORT does
+     * before anything else. 0x80028920..0x80028984 reads the running record
+     * out of gp+16936, adds gp+372 (COMMON's Events) and ORs 0x10 into its
+     * header byte at +3: a teleporter's record re-runs on every frame the
+     * player stands in the volume, whatever category the author gave it. The
+     * handler depends on that — it returns without teleporting while the
+     * player's light is non-zero (0x80028990) and needs the next frame's
+     * re-run to finish the job. Same hook, same slot, same mechanism as
+     * `disable_self`; the bit is ORed into the record's shadow flags.
+     */
+    bool promote_cat_b;
+
+    /*
      * THE EIGHT TIMER SLOTS, 0x800C6F74, and the clock they count against.
      * `q2_event_rt_advance` moves the clock; `q2_event_rt_update` is the sweep
      * 0x80027340 and runs whatever has come due before it takes anything new

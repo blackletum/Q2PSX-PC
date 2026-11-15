@@ -107,7 +107,7 @@
  */
 typedef enum q2_rot_kind {
     /*
-     * SIMROT, SIMROT2 — 0x8002F1A8.
+     * SIMROT — 0x8002F1A8 (PrimarySimRot_PDH).
      *   accum += speed * dt;  angle = (accum >> 8) & 0xFFF
      * One step per request; the handler clears its own enable bit.
      */
@@ -129,7 +129,27 @@ typedef enum q2_rot_kind {
      * press that finds the angle already non-zero does nothing (0x8002BF04),
      * so a volume the player stands in presses it once, not every tick.
      */
-    Q2_ROT_SNAP
+    Q2_ROT_SNAP,
+
+    /*
+     * SIMROT2 — 0x8002F154 (PrimarySimRot_PDH2), installed at obj+0x2C by the
+     * SIMROT2 constructor 0x800283C0 (`addiu s4, v1, -3756` at 0x800283D4).
+     * Its exec, 0x8002DE68, is byte-for-byte SIMROT's (0x8002DEC8): set bit
+     * 24 of obj+0x50 on each named object. The handler is not:
+     *
+     *   8002F178  lhu  v0, 0(v1)        ; the angle slot, obj+0x0C + axis*2
+     *   8002F17C  lhu  a0, 58(a2)       ; obj+0x3A, the item+4 speed
+     *   8002F184  addu v0, v0, a0
+     *   8002F188  andi v0, v0, 0xFFF
+     *   8002F18C  sh   v0, 0(v1)
+     *
+     * No frame scale ([0x800B2DB4] is never read), no accumulator (obj+0x20 is
+     * never touched): the angle STEPS by `speed` once per request and wraps at
+     * 4096. The disc's one SIMROT2 call (BOSS2 record +0x2E0, items +16 and
+     * +40, speed 0x0400) is therefore a quarter turn per TIMER pulse, where
+     * the accumulator formula gave 4 * dt and a barely perceptible creep.
+     */
+    Q2_ROT_STEP
 } q2_rot_kind;
 
 /*

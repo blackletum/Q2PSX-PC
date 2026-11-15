@@ -914,6 +914,16 @@ static bool run_items(q2_event_rt *rt, const q2_event_record *rec, u32 from,
                 rt->flags[slot] |= Q2_EVREC_DISABLED;
         }
 
+        /* A TELEPORT. PSXTELEPORT's 0x80028984 `sb` gives the running record
+         * CAT_B before it tests the light (events_rt.h, `promote_cat_b`). */
+        if (rt->promote_cat_b) {
+            s32 slot = record_slot(rt, offset);
+
+            rt->promote_cat_b = false;
+            if (slot >= 0)
+                rt->flags[slot] |= Q2_EVREC_CAT_B;
+        }
+
         /*
          * A TIMER. The record stops here whether or not a slot was free —
          * 0x8002710C sets gp+16956 on every exit of 0x80026FEC, including the
@@ -1061,6 +1071,13 @@ static void timer_fire(q2_event_rt *rt, u32 slot, q2_event_outcome *result)
                 rt->disable_self = false;
                 if (s >= 0)
                     rt->flags[s] |= Q2_EVREC_DISABLED;
+            }
+            if (rt->promote_cat_b) {               /* PSXTELEPORT 0x80028984 */
+                s32 s = record_slot(rt, rt->deferred[slot].offset);
+
+                rt->promote_cat_b = false;
+                if (s >= 0)
+                    rt->flags[s] |= Q2_EVREC_CAT_B;
             }
 
             /* And a TIMER inside the window claims its own slot, keyed on its
@@ -1355,6 +1372,13 @@ static void replay_item(q2_event_rt *rt, const q2_event_item *item,
         rt->disable_self = false;
         if (slot >= 0)
             rt->flags[slot] |= Q2_EVREC_DISABLED;
+    }
+    if (rt->promote_cat_b) {                       /* PSXTELEPORT 0x80028984 */
+        s32 slot = record_slot(rt, rec_offset);
+
+        rt->promote_cat_b = false;
+        if (slot >= 0)
+            rt->flags[slot] |= Q2_EVREC_CAT_B;
     }
 
     /* A TIMER the replay re-dispatches claims a slot the same way, with the

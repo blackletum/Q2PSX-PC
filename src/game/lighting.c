@@ -257,6 +257,13 @@ s32 q2_flklight_outer_radius(s32 rand_0_32767)
     return ((rand_0_32767 * 500) >> 15) + 1000;
 }
 
+bool q2_flklight_enabled(const u8 *item)
+{
+    /* 0x800287C0 `lw v0, 4(s2)` / 0x800287C8 `andi v0, v0, 1`: the low bit
+     * of the first origin word. Everything the exec does is behind it. */
+    return item && (q2_rd_u32(item + 4) & 1u) != 0;
+}
+
 /* 0x80075C34 — append a runtime light                                        */
 /* ------------------------------------------------------------------------- */
 bool q2_light_add_dynamic(q2_light_world *w, const s32 pos[3],

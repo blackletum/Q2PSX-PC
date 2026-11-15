@@ -180,10 +180,68 @@ static void test_packet(void)
     psx_ot_free(&ot);
 }
 
+/* FrameShadowPolys (0x80078A64) hands DrawCreShadow (0x800784CC) sixteen
+ * packets a frame: the cursor runs from draw buffer + 11852 to + 12492 in
+ * 40-byte steps, (12492 - 11852) / 40 = 16. The seventeenth body draws no
+ * shadow (0x80078504..0x80078508), and the next frame's reset refills it. */
+static void test_budget(void)
+{
+    q2_model model = {0};
+    q2_model_instance inst;
+    q2_model_draw_stats stats;
+    q2_camera cam;
+    psx_ot ot;
+    gte_state gte;
+    int i;
+
+    CHECK(psx_ot_init(&ot, 256, 64) == Q2_OK);
+    q2_camera_default(&cam, 512, 248);
+    cam.pos[1] = -1000;
+    gte_init(&gte);
+    gte_set_projection(&gte, cam.projection, 256, 124);
+    q2_model_instance_init(&inst);
+    inst.model = &model;
+    inst.origin[2] = inst.shadow_origin[2] = 4000;
+    inst.shadow_enabled = true;
+    inst.shadow_radius = 286;
+    psx_ot_clear(&ot);
+
+    q2_model_shadow_frame_begin();
+    CHECK(q2_model_shadow_frame_remaining() == (12492 - 11852) / 40);
+    CHECK(q2_model_shadow_frame_remaining() == Q2_MODEL_SHADOW_FRAME_MAX);
+
+    /* A faded shadow (0x80078524, height > 600) and an empty footprint
+     * (0x80078774) return before the cursor moves: neither costs a packet. */
+    inst.shadow_height = 601;
+    CHECK(q2_model_build_ot(&inst, &cam, &ot, &gte, &stats) == 0);
+    inst.shadow_height = 0;
+    inst.shadow_radius = 0;
+    CHECK(q2_model_build_ot(&inst, &cam, &ot, &gte, &stats) == 0);
+    CHECK(q2_model_shadow_frame_remaining() == Q2_MODEL_SHADOW_FRAME_MAX);
+
+    /* Twenty bodies: sixteen shadows, then nothing. */
+    inst.shadow_radius = 286;
+    for (i = 0; i < 20; i++) {
+        u32 n = q2_model_build_ot(&inst, &cam, &ot, &gte, &stats);
+        CHECK(n == (i < 16 ? 1u : 0u));
+        CHECK(stats.shadows_emitted == (i < 16 ? 1u : 0u));
+        CHECK(stats.ot_overflow == 0);
+    }
+    CHECK(ot.prim_count == 16);
+    CHECK(q2_model_shadow_frame_remaining() == 0);
+
+    /* ChrisInitEveryFrame (0x800704D0) refills it for the next frame. */
+    q2_model_shadow_frame_begin();
+    CHECK(q2_model_build_ot(&inst, &cam, &ot, &gte, &stats) == 1);
+    CHECK(q2_model_shadow_frame_remaining() == Q2_MODEL_SHADOW_FRAME_MAX - 1);
+    psx_ot_free(&ot);
+}
+
 int main(void)
 {
     test_ground();
     test_packet();
+    test_budget();
     printf("shadow blobs: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

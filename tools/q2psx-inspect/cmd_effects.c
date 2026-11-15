@@ -395,7 +395,7 @@ static u32 exercise(const q2_fx_tables *t)
 
         q2_fx_world_clear(&w);
         q2_fx_debris_register(&w, 7);
-        made = q2_fx_debris_burst(&w, &rng, bmin, bmax, NULL, 24, 0);
+        made = q2_fx_debris_burst(&w, &rng, bmin, bmax, NULL, 24, 0, NULL);
 
         for (i = 0; i < Q2_FX_DEBRIS_MAX; i++) {
             if (w.debris[i].in_use && w.debris[i].vel[1] < 0)

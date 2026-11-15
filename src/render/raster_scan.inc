@@ -31,53 +31,233 @@ static s64 edge_step(int dx, int dy)
     return n / dy;
 }
 
-static void raster_span(psx_framebuffer *fb, const psx_prim *prim,
-                         const psx_vram *vram, const psx_raster_opts *opts,
-                         const raster_attr *a, int y, int left, int right,
-                         bool textured, bool dither)
+/*
+ * Everything a span needs that does not change between the spans of one
+ * triangle: the clip, the texture page and palette decode that sample_texture
+ * derives from tpage/clut/E2 for every texel, and write_pixel's blend mode and
+ * mask bits. A BASE3 frame draws ~17,000 spans averaging seven pixels, so the
+ * per-pixel and per-span setup both matter. The arithmetic below is
+ * sample_texture's and write_pixel's, term for term; only the point at which
+ * each term is evaluated moved.
+ */
+typedef struct raster_span_ctx {
+    int cx0, cy0, cx1, cy1;
+    const psx_vram *vram;
+    psx_texture_cache *cache;
+    const u16 *clut_tab;      /* cache->clut, or NULL for a direct VRAM lookup */
+    int page_x, page_y, bpp, clut_x, clut_y;
+    u32 umask, vmask, ufill, vfill;   /* E2: (u & ~umask) | ufill */
+    psx_blend mode;
+    u16 mask_force;           /* 0x8000 when E6 bit 0 forces the mask bit */
+    bool mask_check;          /* E6 bit 1: skip pixels whose mask bit is set */
+    bool semi_prim;           /* opts->semi_transparency && prim->semi_transparent */
+    bool modulate;            /* prim->textured_blend */
+    bool ui;                  /* opts->ui || prim->ui */
+    bool textured, gouraud, dither;
+} raster_span_ctx;
+
+static void raster_span_setup(raster_span_ctx *c, const psx_framebuffer *fb,
+                              const psx_prim *prim, const psx_vram *vram,
+                              const psx_raster_opts *opts, bool textured,
+                              bool gouraud, bool dither)
 {
-    int cx0, cy0, cx1, cy1, x, i, attr_x=left, attr_y=y;
+    u32 window = opts->texture_window;
+    raster_clip(fb, opts, &c->cx0, &c->cy0, &c->cx1, &c->cy1);
+    c->vram = vram;
+    c->cache = opts->cache;
+    c->clut_tab = opts->cache ? opts->cache->clut : NULL;
+    c->page_x = (prim->tpage & 0x0F) * 64;
+    c->page_y = ((prim->tpage >> 4) & 1) * 256;
+    c->bpp    = (prim->tpage >> 7) & 3;
+    c->clut_x = (prim->clut & 0x3F) * 16;
+    c->clut_y = (prim->clut >> 6) & 0x1FF;
+    c->umask = (window & 31u) << 3;
+    c->vmask = ((window >> 5) & 31u) << 3;
+    c->ufill = ((window >> 10) << 3) & c->umask;
+    c->vfill = ((window >> 15) << 3) & c->vmask;
+    c->mode = (psx_blend)((prim->tpage >> 5) & 3);
+    c->mask_force = (opts->mask_mode & 1) ? 0x8000u : 0;
+    c->mask_check = (opts->mask_mode & 2) != 0;
+    c->semi_prim = opts->semi_transparency && prim->semi_transparent;
+    c->modulate = prim->textured_blend;
+    c->ui = opts->ui || prim->ui;
+    c->textured = textured;
+    c->gouraud = gouraud;
+    c->dither = dither;
+}
+
+/*
+ * The pixels of one span. `tex` is -1 for an untextured primitive, else the
+ * texture depth (0 = 4-bit, 1 = 8-bit, 2 = direct colour); with `gouraud` and
+ * `dither` it is a compile-time constant at every call, so each instance
+ * carries only the work its primitive kind needs.
+ */
+#if defined(_MSC_VER) && !defined(__clang__)
+#define RASTER_FORCE_INLINE static __forceinline
+#else
+#define RASTER_FORCE_INLINE static inline __attribute__((always_inline))
+#endif
+RASTER_FORCE_INLINE void raster_span_pixels(psx_framebuffer *fb, const raster_span_ctx *c,
+                                     const raster_attr *a, u32 cur[5],
+                                     u16 *row, u16 *vrow, u16 *scene_row,
+                                     u8 *ui_row, const s8 *drow, bool row_skip,
+                                     int left, int right,
+                                     const int tex, const bool gouraud,
+                                     const bool dither)
+{
+    int x;
+    const int r0 = (int)(cur[0] >> 24), g0 = (int)(cur[1] >> 24), b0 = (int)(cur[2] >> 24);
+    for (x = left; x < right; ++x) {
+        int r = gouraud ? (int)(cur[0] >> 24) : r0;
+        int g = gouraud ? (int)(cur[1] >> 24) : g0;
+        int b = gouraud ? (int)(cur[2] >> 24) : b0;
+        bool stp = false, semi;
+        u16 colour, mask;
+        if (tex >= 0) {
+            /* sample_texture, with the page, palette and E2 terms above. */
+            u8 u = (u8)(((u8)(cur[3] >> 24) & ~c->umask) | c->ufill);
+            u8 v = (u8)(((u8)(cur[4] >> 24) & ~c->vmask) | c->vfill);
+            int vy = c->page_y + v;
+            u16 texel;
+            if (tex == 0) {
+                int vx = (c->page_x + (u >> 2)) & 1023;
+                u16 word = texture_word(c->vram, c->cache, (unsigned)vx, (unsigned)vy, 0);
+                int index = (word >> ((u & 3) * 4)) & 0x0F;
+                texel = c->clut_tab ? c->clut_tab[index]
+                                    : c->vram->px[c->clut_y][(c->clut_x + index) & 1023];
+            } else if (tex == 1) {
+                int vx = (c->page_x + (u >> 1)) & 1023;
+                u16 word = texture_word(c->vram, c->cache, (unsigned)vx, (unsigned)vy, 1);
+                int index = (word >> ((u & 1) * 8)) & 0xFF;
+                texel = c->clut_tab ? c->clut_tab[index]
+                                    : c->vram->px[c->clut_y][(c->clut_x + index) & 1023];
+            } else {
+                int vx = (c->page_x + u) & 1023;
+                texel = texture_word(c->vram, c->cache, (unsigned)vx, (unsigned)vy, 2);
+            }
+            if (texel == 0) goto next_pixel;   /* transparent, not black */
+            stp = (texel & 0x8000u) != 0;
+            if (c->modulate) {
+                r = (((texel & 0x1F) << 3) * r) >> 7;
+                g = ((((texel >> 5) & 0x1F) << 3) * g) >> 7;
+                b = ((((texel >> 10) & 0x1F) << 3) * b) >> 7;
+            } else {
+                r = (texel & 0x1F) << 3;
+                g = ((texel >> 5) & 0x1F) << 3;
+                b = ((texel >> 10) & 0x1F) << 3;
+            }
+        }
+        /* Dither precedes saturation, including modulated values above 255. */
+        if (dither) {
+            int d = drow[(x+fb->vram_x) & 3];
+            r += d; g += d; b += d;
+        }
+        r = q2_clamp_s32(r, 0, 255);
+        g = q2_clamp_s32(g, 0, 255);
+        b = q2_clamp_s32(b, 0, 255);
+        /* write_pixel */
+        if (row_skip) goto next_pixel;
+        semi = c->semi_prim && (tex < 0 || stp);
+        colour = psx_rgb555((u8)r, (u8)g, (u8)b);
+        mask = stp ? 0x8000u : c->mask_force;
+        if (c->mask_check && (row[x] & 0x8000u)) goto next_pixel;
+        row[x] = (u16)((semi ? blend_pixel(row[x], r, g, b, c->mode) : colour) | mask);
+        if (vrow) vrow[x] = row[x];
+        if (scene_row) {
+            if (c->ui) {
+                ui_row[x] = 255;
+            } else {
+                scene_row[x] = (u16)((semi ? blend_pixel(scene_row[x], r, g, b, c->mode) : colour) | mask);
+                if (!semi) ui_row[x] = 0;
+            }
+        }
+next_pixel:
+        if (gouraud) {
+            cur[0] += a->dx[0]; cur[1] += a->dx[1]; cur[2] += a->dx[2];
+        }
+        if (tex >= 0) {
+            cur[3] += a->dx[3]; cur[4] += a->dx[4];
+        }
+    }
+}
+
+static void raster_span(psx_framebuffer *fb, const psx_raster_opts *opts,
+                         const raster_span_ctx *c, const raster_attr *a,
+                         int y, int left, int right)
+{
+    int i, attr_x=left, attr_y=y;
     u32 cur[5];
-    raster_clip(fb, opts, &cx0, &cy0, &cx1, &cy1);
+    u16 *row, *vrow, *scene_row;
+    u8 *ui_row;
+    const s8 *drow;
+    bool row_skip;
     if (opts->native_coords) {
         int width=right-left;
         left=signed11(left+fb->vram_x)-fb->vram_x;
         right=left+width;
         y=signed11(y+fb->vram_y)-fb->vram_y;
     }
-    if (y < cy0 || y >= cy1) return;
-    if (left < cx0) { attr_x+=cx0-left; left = cx0; }
-    if (right > cx1) right = cx1;
+    if (y < c->cy0 || y >= c->cy1) return;
+    if (left < c->cx0) { attr_x+=c->cx0-left; left = c->cx0; }
+    if (right > c->cx1) right = c->cx1;
     for (i = 0; i < 5; ++i)
         cur[i] = a->base[i] + a->dx[i] * (u32)attr_x + a->dy[i] * (u32)attr_y;
 
-    for (x = left; x < right; ++x) {
-        int r = cur[0] >> 24, g = cur[1] >> 24, b = cur[2] >> 24;
-        bool stp = false;
-        if (textured) {
-            int tr, tg, tb;
-            if (!sample_texture(vram, opts->cache, prim->tpage, prim->clut,
-                                opts->texture_window,
-                                (u8)(cur[3] >> 24), (u8)(cur[4] >> 24),
-                                &tr, &tg, &tb, &stp)) goto next_pixel;
-            if (prim->textured_blend) {
-                r = (tr * r) >> 7; g = (tg * g) >> 7; b = (tb * b) >> 7;
-            } else { r = tr; g = tg; b = tb; }
+    /* write_pixel's row terms. The row is inside the clip, so at / width is y
+     * for every pixel of the span and the field test decides the whole row;
+     * a skipped row still samples its texels, since the texture cache fills
+     * either way. */
+    row = fb->px + y * fb->width;
+    vrow = fb->vram ? &fb->vram->px[fb->vram_y + y][fb->vram_x] : NULL;
+    scene_row = opts->scene ? opts->scene + y * fb->width : NULL;
+    ui_row = opts->scene ? opts->ui_mask + y * fb->width : NULL;
+    drow = psx_dither_matrix[(y + fb->vram_y) & 3];
+    row_skip = opts->skip_field && (((y + fb->vram_y) & 1) == opts->field);
+
+    /* One instance of the pixel loop per (texture depth, Gouraud, dither)
+     * so that none of those is a test inside it. A flat primitive's colour
+     * accumulators have zero gradients (raster_triangle leaves dx/dy at 0), so
+     * reading them once is the same as stepping them. */
+#define RASTER_SPAN_PIXELS(T, G, D) \
+    raster_span_pixels(fb, c, a, cur, row, vrow, scene_row, ui_row, drow, \
+                       row_skip, left, right, (T), (G), (D))
+    {
+        int tex = c->textured ? (c->bpp >= 2 ? 2 : c->bpp) : -1;
+        if (c->gouraud) {
+            if (c->dither) {
+                switch (tex) {
+                case -1: RASTER_SPAN_PIXELS(-1, true, true); break;
+                case 0:  RASTER_SPAN_PIXELS(0, true, true); break;
+                case 1:  RASTER_SPAN_PIXELS(1, true, true); break;
+                default: RASTER_SPAN_PIXELS(2, true, true); break;
+                }
+            } else {
+                switch (tex) {
+                case -1: RASTER_SPAN_PIXELS(-1, true, false); break;
+                case 0:  RASTER_SPAN_PIXELS(0, true, false); break;
+                case 1:  RASTER_SPAN_PIXELS(1, true, false); break;
+                default: RASTER_SPAN_PIXELS(2, true, false); break;
+                }
+            }
+        } else {
+            if (c->dither) {
+                switch (tex) {
+                case -1: RASTER_SPAN_PIXELS(-1, false, true); break;
+                case 0:  RASTER_SPAN_PIXELS(0, false, true); break;
+                case 1:  RASTER_SPAN_PIXELS(1, false, true); break;
+                default: RASTER_SPAN_PIXELS(2, false, true); break;
+                }
+            } else {
+                switch (tex) {
+                case -1: RASTER_SPAN_PIXELS(-1, false, false); break;
+                case 0:  RASTER_SPAN_PIXELS(0, false, false); break;
+                case 1:  RASTER_SPAN_PIXELS(1, false, false); break;
+                default: RASTER_SPAN_PIXELS(2, false, false); break;
+                }
+            }
         }
-        /* Dither precedes saturation, including modulated values above 255. */
-        if (dither) {
-            int d = psx_dither_matrix[(y+fb->vram_y) & 3][(x+fb->vram_x) & 3];
-            r += d; g += d; b += d;
-        }
-        r = q2_clamp_s32(r, 0, 255);
-        g = q2_clamp_s32(g, 0, 255);
-        b = q2_clamp_s32(b, 0, 255);
-        write_pixel(fb, opts, prim, y * fb->width + x, r, g, b,
-                    opts->semi_transparency && prim->semi_transparent &&
-                    (!textured || stp), stp);
-next_pixel:
-        for (i = 0; i < 5; ++i) cur[i] += a->dx[i];
     }
+#undef RASTER_SPAN_PIXELS
 }
 
 static void raster_triangle(psx_framebuffer *fb,
@@ -90,6 +270,7 @@ static void raster_triangle(psx_framebuffer *fb,
 {
     const raster_vertex *v[3] = {v0,v1,v2}, *core, *tmp;
     raster_attr attr = {0};
+    raster_span_ctx span;
     s64 base, slope, upper = 0, lower = 0;
     int den, cv, i, j, vo, vp;
     bool right, textured, gouraud, dither;
@@ -169,6 +350,7 @@ static void raster_triangle(psx_framebuffer *fb,
     part[vo^1].x[!right]=base+(v[1^vp]->y-v[0]->y)*slope;
     part[vo^1].step[!right]=slope;
     part[vo^1].up=vp!=0;
+    raster_span_setup(&span,fb,prim,vram,opts,textured,gouraud,dither);
     for (i=0;i<2;++i) {
         int y=part[i].y;
         s64 left=part[i].x[0], right_x=part[i].x[1];
@@ -176,8 +358,8 @@ static void raster_triangle(psx_framebuffer *fb,
             if (part[i].up) {
                 --y; left-=part[i].step[0]; right_x-=part[i].step[1];
             }
-            raster_span(fb,prim,vram,opts,&attr,y,(int)(left>>32),
-                        (int)(right_x>>32),textured,dither);
+            raster_span(fb,opts,&span,&attr,y,(int)(left>>32),
+                        (int)(right_x>>32));
             if (!part[i].up) {
                 ++y; left+=part[i].step[0]; right_x+=part[i].step[1];
             }

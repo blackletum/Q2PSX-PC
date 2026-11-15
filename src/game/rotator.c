@@ -272,7 +272,13 @@ q2_result q2_rotators_build(q2_rotator_set *out, const q2_events *events,
 
                     if (node < 0)
                         continue;
-                    r = q2_rotators_add(out, Q2_ROT_ACCUM, node, axis, speed);
+                    /* 0x800285B8 installs 0x8002F1A8 for SIMROT; 0x800283D4
+                     * installs 0x8002F154 for SIMROT2. Same exec, different
+                     * handler — see q2_rot_kind. */
+                    r = q2_rotators_add(out,
+                                        call.prim == Q2_UF_SIMROT2
+                                            ? Q2_ROT_STEP : Q2_ROT_ACCUM,
+                                        node, axis, speed);
                     if (!r) {
                         q2_rotators_free(out);
                         return Q2_ERR_NO_MEMORY;
@@ -405,8 +411,10 @@ static void rotator_fire(q2_rotator *r)
 {
     switch (r->kind) {
     case Q2_ROT_ACCUM:
-        /* 0x8002DF08: `or v1, v1, a3` with a3 = 0x01000000. Setting an
-         * already-set bit is a no-op, so two SIMROTs in one tick are one step. */
+    case Q2_ROT_STEP:
+        /* 0x8002DF08 (and 0x8002DEA8, SIMROT2's identical exec): `or v1, v1,
+         * a3` with a3 = 0x01000000. Setting an already-set bit is a no-op, so
+         * two SIMROTs in one tick are one step. */
         r->step_pending = true;
         break;
 
@@ -569,6 +577,22 @@ u32 q2_rotators_tick(q2_rotator_set *set, s32 dt)
                               & Q2_ROT_ANGLE_MASK);
 
             /* 0x8002F204: the step is consumed. One request, one step. */
+            r->step_pending = false;
+            moved++;
+            break;
+
+        case Q2_ROT_STEP:
+            /* 0x8002F164: nothing happens without a pending step. */
+            if (!r->step_pending)
+                continue;
+
+            /* 0x8002F178 - 0x8002F18C: `lhu; lhu obj+0x3A; addu; andi 0xFFF;
+             * sh`. The speed is added to the angle slot itself, once, with no
+             * frame scale and no accumulator. `dt` is deliberately unused. */
+            r->angle = (s16)(((s32)r->angle + (s32)r->speed)
+                             & Q2_ROT_ANGLE_MASK);
+
+            /* 0x8002F19C: the enable bit is cleared, as PDH does. */
             r->step_pending = false;
             moved++;
             break;

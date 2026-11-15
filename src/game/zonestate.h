@@ -101,6 +101,42 @@ typedef struct q2_zone_history {
 struct q2_sim;
 struct q2_creature_world;
 void q2_zone_history_free(q2_zone_history *h);
+
+/*
+ * OnLeavingZone's prelude (0x80078D1C), applied to the LIVE world before the
+ * departing zone is captured; it is not run for a cold save.
+ *
+ * FinishDying (0x8007F630, called first at 0x80078D2C) walks the 48 object
+ * slots and turns every creature whose edict still carries deadflag DEAD_DEAD
+ * (`(edict+0x20 >> 22) & 3 == 2`, 0x8007F688..0x8007F690) into a class-47 dead
+ * body: ProcessQuakeDeath (0x8007CD24) counts the kill, the edict is freed
+ * (0x8007F288) and unlinked (slot+0x2EC = 0), the hit volume is rescaled
+ * (0x8007F77C), the think becomes the corpse handler 0x8007F71C, slot+0x10C
+ * gains 0x8000 and the class moves to slot+0xDA with 47 at slot+0xD2. The frame
+ * is left where the death move had it; QuakeStoreInanimate (0x80059B08) stores
+ * the CLIP that frame is in (FindAnimSequenceNumFromFrame, 0x8006DA3C, at
+ * 0x80059BC4) and RespawnQuakeDeadBody (0x8007D558) poses the returning body on
+ * that clip's last frame (LastFrameFromSequenceNum, 0x8006DAB4, at 0x8007D748)
+ * with the corpse handler installed (0x8007D6E8) and no edict. The port's
+ * corpse rests on its move's last frame, which is the same pose wherever a
+ * death move is one clip (tests/test_client_zones.c checks the disc's).
+ *
+ * Then SaveCreatures (0x800569C8) calls each live slot's class-table +0x1C
+ * hook (0x80056B74..0x80056B88). Table 0x800A3368: creatures, pickups (46)
+ * and dead bodies (47) carry RememberMe (0x8007F8CC), which stores through the
+ * +0x18 hook and then KillModel (0x8006D280); fragments (48, entry 36 at
+ * 0x800A3A28) carry DestroyMe (0x8007F928), KillModel alone. LoadStoreQuakePickup
+ * (0x8005B4EC) refuses to store a pickup whose +0x44 carries 4 (0x8005B500..
+ * 0x8005B50C): every dropped item has it (0x80020B38, except item 21; landing
+ * ORs it again at 0x80020D00 unless OBJECTIVE 8), so gibs and timed drops die
+ * at the gate. Explosion and debris slots carry class 0 and match no table
+ * entry; the missile pool is only reset by InitialiseMissiles (0x80048C54 from
+ * InitEveryLevel 0x80070748), and InitCreFreeList (0x8006D0BC) runs only from
+ * FinishedLoading (LoadLevel path, 0x8007C9A4) and the level screen
+ * (0x8006E0A4) -- none of which MaybeLoadZoneName's LoadZone (0x8007901C ->
+ * ReloadLevelData 0x800793B8) reaches. So those live on through a zone gate.
+ */
+void q2_zone_leaving(struct q2_sim *sim, struct q2_creature_world *world);
 q2_result q2_zone_history_copy(q2_zone_history *dst, const q2_zone_history *src);
 bool q2_zone_history_valid(const q2_zone_history *h);
 q2_result q2_zone_history_capture(q2_zone_history *h, const char *map, int zone,

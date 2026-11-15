@@ -50,6 +50,13 @@ void q2_sim_init(q2_sim *sim, const q2_world_zone *zone, int tick_rate_hz)
     /* On unless a caller turns it off — see the field. */
     sim->autoswitch   = true;
     sim->player[sim->cur_player].ent.node = -1;
+    {
+        /* 0x8006C1B8..0x8006C1C0 — the allocator's 4096 into entity+0xFC,
+         * for every player slot: a spawn does not re-allocate the entity. */
+        int pi;
+        for (pi = 0; pi < Q2_SIM_MAX_PLAYERS; pi++)
+            sim->player[pi].light = Q2_LIGHT_ONE;
+    }
 
     /*
      * SecondaryCol is the hull entities move in — read out of the zone loader,
@@ -1490,6 +1497,66 @@ q2_result q2_sim_attach_movers(q2_sim *sim, const q2_mover_set *set,
     return Q2_OK;
 }
 
+/* ------------------------------------------------------------------------- */
+/* ProcessSolidBoxs — 0x80055480, the top of every QuakeLoop frame            */
+/* ------------------------------------------------------------------------- */
+/*
+ * THE SWEPT ENVELOPE IS A ONE-FRAME RECORD, not the door's history.
+ *
+ * QuakeLoop calls ProcessSolidBoxs at 0x80038F94, before the object thinks
+ * that move the doors (0x8002EE38) and before MoveModels moves the players;
+ * QuakeInterMissionLoop calls it at 0x80039290. For every slot of the 48-entry
+ * table at 0x800CAE10 whose use byte +0x36 is set (0x800554B0) it
+ *
+ *     800554C4..800554F0  copies the live box +0x00..+0x17 over the envelope
+ *                         at +0x18..+0x2F, six words verbatim
+ *     800554F4            memset(slot+0x30, 0, 6): the frame's displacement,
+ *                         the three halfwords 0x80051EC0 adds its delta to at
+ *                         0x80051F80..0x80051FB8
+ *     8005550C            and calls the slot's +0x38 hook, which nothing on
+ *                         the disc installs: GenSolidBox zeroes it
+ *                         (0x800556AC) and none of its fourteen callers, nor
+ *                         AttatchSolidBoxForObj (0x80068730), writes it.
+ *
+ * 0x80051EC0 then grows the envelope by the sign of each component of the
+ * frame's delta (0x80051FBC onward), so once the mover has moved the envelope
+ * is exactly the union of where the box stood at the top of the frame and where
+ * it stands now. The gate at 0x80050CE0 with a2 = 1 reads that envelope to
+ * decide whether the player's move needs the entity sweep at all — "could this
+ * door reach me THIS frame" — and trace.h's reading that it "covers the whole
+ * of the door's travel" missed the reset: the port's envelope grew for as long
+ * as the zone was loaded, so a player standing anywhere a door or lift had
+ * ever been armed the sweep on every frame.
+ *
+ * The port rebuilds the live box from the pristine box and the mover's
+ * displacement in q2_sim_movers_update rather than integrating it, so the copy
+ * here is the console's copy and the growth that follows there completes the
+ * union. Only the mover parts are reset: scenesolid.c keeps a rotator's or a
+ * pane's PRISTINE box in env_min/env_max and derives the live box from it, and
+ * the console's envelope of those boxes is the live box in any case
+ * (0x8002B3B4 / 0x8002B5F8 move only the live Y and nothing shifts them).
+ */
+void q2_sim_solid_boxes_frame(q2_sim *sim)
+{
+    u32 i;
+    int k;
+
+    if (!sim || !sim->volumes)
+        return;
+
+    for (i = 0; i < sim->mover_count && i < sim->volume_count; i++) {
+        q2_move_target *t = &sim->volumes[i];
+
+        if (!t->active || t->kind != Q2_MOVE_KIND_ENTITY)
+            continue;
+        for (k = 0; k < 3; k++) {
+            t->env_min[k] = t->min[k];
+            t->env_max[k] = t->max[k];
+        }
+        t->dy = 0;
+    }
+}
+
 void q2_sim_movers_update(q2_sim *sim, const q2_mover_set *set)
 {
     u32 i, p, out = 0;
@@ -1859,6 +1926,138 @@ void q2_sim_spawn(q2_sim *sim, const s32 pos[3], s32 yaw)
         memset(sim->trigger_inside, 0, sim->trigger_capacity);
 }
 
+/* ------------------------------------------------------------------------- */
+/* TELEPORT — PSXTELEPORT (0x80028914) and the light it fades                 */
+/* ------------------------------------------------------------------------- */
+/*
+ * 0x80028988..0x80028990 and 0x80028BA8..0x80028BB4:
+ *
+ *     80028988  lh    v0, 252(s4)        ; entity+0xFC, the light
+ *     80028990  bne   v0, zero, 80028BA8  ; non-zero: not yet
+ *     ...
+ *     80028BA8  lw    v0, 152(s4)        ; +0x98
+ *     80028BB0  ori   v0, v0, 0x4000     ; bit 14
+ *     80028BB4  sw    v0, 152(s4)
+ *
+ * and return. The move (0x80028998 onward) runs only when the light is zero.
+ */
+bool q2_sim_teleport_touch(q2_sim *sim)
+{
+    q2_player *p;
+
+    if (!sim)
+        return false;
+    p = &sim->player[sim->cur_player];
+    if (p->light != 0) {
+        p->ent.flags |= Q2_ENT_TELEPORT_FADE;
+        return false;
+    }
+    return true;
+}
+
+/*
+ * PrimaryQuakePlayer 0x8003A314..0x8003A3B0, after the trigger dispatcher
+ * (0x8003A29C) and FlashPowerUp (0x8003A2F4):
+ *
+ *     8003A31C  srl   v0, v1, 14          ; +0x98 bit 14?
+ *     8003A328  ori   v0, v1, 0x8000      ;   yes: bit 15 on
+ *     8003A338  lhu   v0, 252(s3)         ;   light (unsigned)
+ *     8003A33C  sll   v1, v1, 7           ;   dt << 7
+ *     8003A340  subu  v0, v0, v1
+ *     8003A344  sh    v0, 252(s3)
+ *     8003A34C  bgez  v0 (as s16)         ;   went negative:
+ *     8003A358  sh    zero, 252(s3)       ;     clamp at 0
+ *     8003A35C  srl   v0, v1, 15          ; else bit 15?
+ *     8003A374  lhu   v0, 252(s3)
+ *     8003A378  sll   v1, v1, 5           ;   dt << 5
+ *     8003A37C  addu  v0, v0, v1
+ *     8003A380  sh    v0, 252(s3)
+ *     8003A38C  slti  v0, v0, 4096        ;   (as s16) reached 4096:
+ *     8003A3A4  sh    a0, 252(s3)         ;     light = 4096
+ *     8003A3AC  sw    v1, 152(s3)         ;     bit 15 off
+ *
+ * `dt` is the frame delta at 0x800B2DB4 — this tick's, as everywhere else.
+ */
+static void player_light_tick(q2_sim *sim, s32 dt)
+{
+    q2_player *p = &sim->player[sim->cur_player];
+
+    if (p->ent.flags & Q2_ENT_TELEPORT_FADE) {
+        s16 v;
+
+        p->ent.flags |= Q2_ENT_LIGHT_RAMP;
+        v = (s16)((u16)p->light - (u32)(dt << 7));
+        p->light = v < 0 ? 0 : v;
+    } else if (p->ent.flags & Q2_ENT_LIGHT_RAMP) {
+        s16 v = (s16)((u16)p->light + (u32)(dt << 5));
+
+        if (v >= Q2_LIGHT_ONE) {
+            v = Q2_LIGHT_ONE;
+            p->ent.flags &= ~(u32)Q2_ENT_LIGHT_RAMP;
+        }
+        p->light = v;
+    }
+}
+
+void q2_sim_teleport_arrive(q2_sim *sim, const s32 pos[3], s32 yaw,
+                            bool same_zone)
+{
+    q2_player *p;
+    s32 origin[3];
+
+    if (!sim || !pos)
+        return;
+    p = &sim->player[sim->cur_player];
+
+    /* Both arms write the ORIGIN at +0x54 as start - (0, 286, 0): 0x80028AFC
+     * for the other zone, and SetupBoxDrop's 0x80051068 for this one. */
+    origin[0] = pos[0];
+    origin[1] = q2_sim_origin_y(pos[1]);
+    origin[2] = pos[2];
+
+    if (same_zone) {
+        /*
+         * SetupBoxDrop (0x80050FA0) with the player's own box — the word at
+         * 0x800AE790 is (286, 572), at 0x800AE794 (-1, 1024) and at
+         * 0x800AE89C (286, 600) — so the tail is the shared placement drop:
+         * nudge up 30, sweep down 1024 + 30 against SecondaryCol, keep the Y
+         * it stopped at and the cell (q2_entity_drop_to_floor, entity.h). A
+         * sweep that cannot place the box at all spins forever on the console
+         * (0x80028BA0 `j 0x80028BA0`); here the undropped position stands.
+         */
+        s32 node = -1;
+
+        if (sim->coll_ready &&
+            q2_entity_drop_to_floor(&sim->coll, &sim->move_world, origin,
+                                    Q2_ENTITY_DROP_DIST, &node))
+            p->ent.node = node;
+        else
+            p->ent.node = sim->coll_ready
+                ? q2_coll_find_node(&sim->coll, origin, -1, true) : -1;
+
+        /* 0x80028B70..0x80028B94: the angles at +0xE6 become
+         * (0, start+0x18, 0) — pitch and roll zeroed, the StartPos yaw. */
+        p->pitch = 0;
+        p->yaw   = yaw;
+        p->roll  = 0;
+    } else {
+        /* 0x80028B00 ReCalcCollBox only; +0xA2 is re-found by the next frame's
+         * FindBoxMoveSpace (0x8003A30C). No angle write on this arm. */
+        (void)yaw;
+        p->ent.node = sim->coll_ready
+            ? q2_coll_find_node(&sim->coll, origin, -1, true) : -1;
+    }
+
+    p->ent.pos[0] = origin[0];
+    p->ent.pos[1] = origin[1];
+    p->ent.pos[2] = origin[2];
+    p->pos[0]     = origin[0];
+    p->pos[1]     = q2_sim_feet_y(origin[1]);
+    p->pos[2]     = origin[2];
+    p->ground_y   = p->pos[1];
+    sim->current_node = p->ent.node;
+}
+
 /*
  * 0x800458A0 — query the volumes the entity is standing in and turn the answer
  * into its own flags.
@@ -2091,7 +2290,11 @@ static void update_env_flags(q2_sim *sim)
         }
     }
 
-    sim->player[sim->cur_player].ent.flags &= ~(u32)Q2_ENT_ENV_MASK;
+    /* The same clear takes bit 14 — 0x8003A294 `addiu v1, zero, -16385` is
+     * 0xFFFFBFFF — so a pad has to re-assert the teleport fade every frame
+     * (it does: PSXTELEPORT runs from the CAT_B record it promoted itself to). */
+    sim->player[sim->cur_player].ent.flags &= ~(u32)(Q2_ENT_ENV_MASK |
+                                                     Q2_ENT_TELEPORT_FADE);
     sim->player[sim->cur_player].ent.flags |= env & Q2_ENT_ENV_MASK;
 }
 
@@ -3322,6 +3525,10 @@ static void player_control(q2_sim *sim, const q2_input *input, s32 dt)
     /* 0x8003A2B8: acquire before this tick moves or reads the pad. Easing
      * client+0x46 belongs to this logic tick too, not the display driver. */
     q2_sim_find_target(sim, dt);
+
+    /* 0x8003A314..0x8003A3B0 — the teleport light, after the triggers that
+     * set its bit and before anything the pad drives. */
+    player_light_tick(sim, dt);
 
     /* 0x8003A4A4 — the pad. 0x8003A4EC may add a jump the player did not ask
      * for, so the button word is taken by value from here on. */

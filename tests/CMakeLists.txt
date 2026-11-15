@@ -309,6 +309,10 @@ add_executable(test_shadow test_shadow.c)
 target_link_libraries(test_shadow PRIVATE q2psx_game q2psx_render)
 add_test(NAME shadow_blobs COMMAND test_shadow)
 
+add_executable(test_modelfade test_modelfade.c)
+target_link_libraries(test_modelfade PRIVATE q2psx_game q2psx_render)
+add_test(NAME model_fade COMMAND test_modelfade)
+
 add_executable(test_multiplayer test_multiplayer.c)
 
 target_link_libraries(test_multiplayer PRIVATE

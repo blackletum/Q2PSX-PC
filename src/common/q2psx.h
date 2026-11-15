@@ -34,6 +34,19 @@ typedef int64_t  s64;
 #  define Q2PSX_PRINTF(fmt, args) __attribute__((format(printf, fmt, args)))
 #endif
 
+/* A deliberate fall-through between switch labels. GCC accepts a comment as
+ * the intent, but clang's -Wimplicit-fallthrough in C wants the attribute —
+ * and clang on Windows defines _MSC_VER, so this is keyed on the attribute,
+ * not the compiler. */
+#if defined(__has_attribute)
+#  if __has_attribute(fallthrough)
+#    define Q2PSX_FALLTHROUGH __attribute__((fallthrough))
+#  endif
+#endif
+#ifndef Q2PSX_FALLTHROUGH
+#  define Q2PSX_FALLTHROUGH ((void)0)
+#endif
+
 /* ------------------------------------------------------------------------- */
 /* Little-endian unaligned readers.                                           */
 /* ------------------------------------------------------------------------- */

@@ -1248,15 +1248,30 @@ void q2_sim_glint_evacuation_tick(q2_sim *sim, s32 dt)
  * console's start comes from the +0xA2 hint and always has a cell, and the
  * port's move would instead leave the muzzle at the origin.
  */
-static void clip_muzzle(q2_sim *sim, q2_fire_result_v2 *r)
+/*
+ * `spawn_node` is the OTHER thing the walk answers: FindNewSpaceFromOld
+ * (COLL.C 0x80055020) is 0x80044C44 from the shooter's origin to the formed
+ * point, returning PrimaryColl's cell word +0x1A — the cell the walk ENDED in
+ * — and every projectile spawner stores it as the new object's cell at +0xA0
+ * while the position takes the formed point itself: AnyoneFireGrenadeL
+ * 0x8004A0E8, PrimaryGrenadeActive 0x8004A628 (Grenade3's release, done in
+ * q2_sim_hand_grenade_update) and PrimaryBFG 0x8004B454. So the BFG, whose
+ * point is never clipped, is still born in the cell on the shooter's side of
+ * whatever its muzzle poked through, and its first move starts from there
+ * rather than from wherever a fresh lookup of the far-side point would put it.
+ */
+static void clip_muzzle(q2_sim *sim, q2_fire_result_v2 *r, s32 *spawn_node)
 {
     const q2_player *p = &sim->player[sim->cur_player];
     s32 from[3], to[3], end[3], node = -1;
     u32 i;
 
+    if (spawn_node)
+        *spawn_node = Q2_PROJ_NODE_UNKNOWN;
     if (!sim->coll_primary_ready || r->shot_count == 0)
         return;
-    if (r->kind == Q2_FK_BFG || r->kind == Q2_FK_HAND_GRENADE)
+    /* Grenade3 is only primed here; its walk is the release's. */
+    if (r->kind == Q2_FK_HAND_GRENADE)
         return;
 
     from[0] = p->pos[0];
@@ -1269,6 +1284,12 @@ static void clip_muzzle(q2_sim *sim, q2_fire_result_v2 *r)
         q2_sim_proj_scan.muzzle_unplaced++;
         return;
     }
+    if (spawn_node)
+        *spawn_node = node;
+    /* AnyoneFireBFG has no clip (PrimaryBFG 0x8004B438..0x8004B458 takes only
+     * the cell from its walk), so the ball leaves from the formed point. */
+    if (r->kind == Q2_FK_BFG)
+        return;
     if (end[0] != to[0] || end[1] != to[1] || end[2] != to[2]) {
         q2_sim_proj_scan.muzzle_clipped++;
         Q2_DEBUG("muzzle: player at (%d,%d,%d) yaw %d, (%d,%d,%d) clipped to "
@@ -1296,6 +1317,7 @@ q2_fire_result_v2 q2_sim_fire_weapon(q2_sim *sim, int weapon_id,
     s16 aim[3];
     s32 prev_next_fire;
     s32 launched;
+    s32 spawn_node = Q2_PROJ_NODE_UNKNOWN;  /* FindNewSpaceFromOld, 0x80055020 */
     u32 i;
 
     memset(&r, 0, sizeof(r));
@@ -1348,7 +1370,7 @@ q2_fire_result_v2 q2_sim_fire_weapon(q2_sim *sim, int weapon_id,
         return r;
     }
 
-    clip_muzzle(sim, &r);
+    clip_muzzle(sim, &r, &spawn_node);
     sim->combat.last_shot = r;
 
     sim->combat.next_fire = r.next_fire;
@@ -1477,6 +1499,11 @@ q2_fire_result_v2 q2_sim_fire_weapon(q2_sim *sim, int weapon_id,
         proj_slot_take(sim, launched);
         if (launched >= 0) {
             q2_projectile *lp = &sim->combat.projectiles.p[launched];
+
+            /* FindNewSpaceFromOld's cell (0x80055020; see clip_muzzle): the
+             * walk's end, not a lookup of the point it was born at. */
+            if (lp->kind != Q2_PROJ_HAND_GRENADE && spawn_node >= 0)
+                lp->node = spawn_node;
 
             /* Grenade3's fuse is a countdown at +0xF4 that its think spends
              * before the state dispatch (0x8004A3DC), and its first think is
@@ -2256,6 +2283,26 @@ q2_hand_grenade_update q2_sim_hand_grenade_update(
 
         if (q2_projectile_hand_release(&sim->combat.projectiles,
                                        sim->cur_player, origin, raw_dir)) {
+            /*
+             * PrimaryGrenadeActive 0x8004A608..0x8004A66C: the released
+             * Grenade3's cell (+0xA0) is FindNewSpaceFromOld's (0x80055020),
+             * the end of 0x80044C44's walk through PrimaryColl from the
+             * thrower's origin to the release point, while +0x54 takes the
+             * release point unclipped. Thrown into a wall the grenade is
+             * therefore born on the thrower's side of it as far as the hull
+             * is concerned, not looked up afresh beyond it.
+             */
+            if (sim->coll_primary_ready) {
+                s32 from[3], end[3], node = Q2_PROJ_NODE_UNKNOWN;
+
+                from[0] = pl->pos[0];
+                from[1] = q2_sim_origin_y(pl->pos[1]);
+                from[2] = pl->pos[2];
+                (void)q2_coll_move(&sim->coll_primary, from, origin, -1, end,
+                                   &node);
+                if (node >= 0)
+                    sim->combat.projectiles.p[index].node = node;
+            }
             /* 0x8004A6FC..0x8004A770: Grenade3 leaves at the thrower's
              * view, pitched down a further 1280 and both negated, and
              * keeps that attitude for the rest of its flight. */
@@ -3441,24 +3488,39 @@ void q2_sim_combat_tick(q2_sim *sim)
                               end, &node)) {
                 d->node = node;
                 q2_fx_debris_impact(&sim->fx, i, end);
-                continue;
+            } else {
+                d->node = node;
+                q2_fx_debris_commit(&sim->fx, i, step.to);
             }
-            d->node = node;
+        } else {
+            q2_fx_debris_commit(&sim->fx, i, step.to);
         }
 
-        q2_fx_debris_commit(&sim->fx, i, step.to);
+        /* PrimaryMovingFragment's tail, after the move whether it was blocked
+         * or not: the random tumble (0x8006425C) and then the clock
+         * (0x80064344), which frees the piece at zero. */
+        q2_fx_debris_tumble(&sim->fx, i, &sim->fx_rng);
+        q2_fx_debris_age(&sim->fx, i, sim->cur_dt);
     }
     player_damage_end(sim);
 }
 
 /* ------------------------------------------------------------------------- */
 u32 q2_sim_debris_burst(q2_sim *sim, const s32 bmin[3], const s32 bmax[3],
-                        const s32 *at, u32 count, u8 area)
+                        const s32 *at, u32 count, u8 area,
+                        const q2_scene *scene, s32 node)
 {
+    q2_fx_debris_texture tex;
+
     if (!sim || !sim->fx_ready)
         return 0;
+    /* GenerateSceneFrag's last act (0x80064530): every piece is textured as
+     * the FIRST MapMod polygon of the node it broke off. */
+    if (!scene || node < 0 ||
+        !q2_fx_debris_texture_from_scene(scene, (u32)node, &tex))
+        tex.valid = false;
     return q2_fx_debris_burst(&sim->fx, &sim->fx_rng, bmin, bmax, at, count,
-                              area);
+                              area, tex.valid ? &tex : NULL);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -3603,7 +3665,7 @@ u32 q2_sim_breakable_call(q2_sim *sim, const q2_scene *scene,
         glass_box_centre(&node, centre);
 
         made += q2_sim_debris_burst(sim, node.bbox_min, node.bbox_max,
-                                    centre, count_a, 0);
+                                    centre, count_a, 0, scene, slot);
 
         /*
          * 0x8002A3C4 `lh v0, 16948(gp)` / 0x8002A3CC `bne` to 0x8002A4AC: while
@@ -3615,7 +3677,7 @@ u32 q2_sim_breakable_call(q2_sim *sim, const q2_scene *scene,
          */
         if (!sim->event_rt.initial_pass) {
             made += q2_sim_debris_burst(sim, node.bbox_min, node.bbox_max,
-                                        NULL, count_b, 0);
+                                        NULL, count_b, 0, scene, slot);
 
             /*
              * AND IT SMASHES. 0x8002A490 loads Sound_GlassSmash and 0x8002A4A4
@@ -4126,7 +4188,8 @@ static void explosive_apply(q2_sim *sim, const q2_explosive_result *res)
             q2_scene_get_node(sim->breakable_scene, (u32)b->node, &node))
             sim->breakable_pieces +=
                 q2_sim_debris_burst(sim, node.bbox_min, node.bbox_max, NULL,
-                                    b->pieces, 0);
+                                    b->pieces, 0, sim->breakable_scene,
+                                    (s32)b->node);
     }
 
     for (i = 0; i < res->hide_count; i++)
@@ -4333,7 +4396,9 @@ u32 q2_sim_breakable_shot(q2_sim *sim, const s32 from[3], const s32 to[3],
                     q2_scene_get_node(sim->breakable_scene,
                                       (u32)res.hit_node, &hit))
                     made += q2_sim_debris_burst(sim, hit.bbox_min, hit.bbox_max,
-                                                NULL, res.hit_pieces, 0);
+                                                NULL, res.hit_pieces, 0,
+                                                sim->breakable_scene,
+                                                res.hit_node);
                 b->health = sim->explosives->items[b->owner].health;
                 sim->breakable_pieces += made;
                 return made;
@@ -4344,7 +4409,8 @@ u32 q2_sim_breakable_shot(q2_sim *sim, const s32 from[3], const s32 to[3],
                 q2_scene_get_node(sim->breakable_scene,
                                   (u32)res.hit_node, &hit))
                 made += q2_sim_debris_burst(sim, hit.bbox_min, hit.bbox_max,
-                                            NULL, res.hit_pieces, 0);
+                                            NULL, res.hit_pieces, 0,
+                                            sim->breakable_scene, res.hit_node);
 
             explosive_apply(sim, &res);
             explosive_free_boxes(sim, b->item_offset);
@@ -4397,7 +4463,8 @@ u32 q2_sim_breakable_shot(q2_sim *sim, const s32 from[3], const s32 to[3],
          * the object, so a pane that has taken two shots remembers it.
          */
         made += q2_sim_debris_burst(sim, node.bbox_min, node.bbox_max, best_at,
-                                    b->count_a, 0);
+                                    b->count_a, 0, sim->breakable_scene,
+                                    (s32)b->scene_node);
 
         if (damage != 0) {
             b->health = (s16)(b->health - damage);
@@ -4427,7 +4494,9 @@ u32 q2_sim_breakable_shot(q2_sim *sim, const s32 from[3], const s32 to[3],
             s32 centre[3];
 
             made += q2_sim_debris_burst(sim, node.bbox_min, node.bbox_max,
-                                        NULL, b->count_b, 0);
+                                        NULL, b->count_b, 0,
+                                        sim->breakable_scene,
+                                        (s32)b->scene_node);
 
             glass_box_centre(&node, centre);
             glass_smash_push(sim, centre);

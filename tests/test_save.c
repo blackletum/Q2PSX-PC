@@ -1255,18 +1255,23 @@ static void test_autoaim_player_tail(void)
     save_image image;
     q2_save loaded;
     u32 tail, i, at;
-    for (tail = 0; tail <= 33; tail++) {
+    for (tail = 0; tail <= 35; tail++) {
         memset(&image, 0, sizeof(image));
         at = img_chunk_begin(&image, "PLYR");
         /* The previous format's 136 player bytes and 34-byte mover record. */
         for (i = 0; i < 170; i++) img_u8(&image, 0);
-        for (i = 0; i < tail; i++) img_u8(&image, i == 0 ? 1 : 0);
+        /* Version 1 is the 32-byte aim tail; version 2 adds the light (s16). */
+        for (i = 0; i < tail; i++) img_u8(&image, i == 0 ? (tail == 34 ? 2 : 1) : 0);
         img_chunk_end(&image, at);
         check(img_write(tmp_path(), Q2_SAVE_VERSION, &image), "write player-tail fixture");
-        if (tail == 0 || tail == 32) {
+        if (tail == 0 || tail == 32 || tail == 34) {
             check(q2_save_read(&loaded, tmp_path()) == Q2_OK, "read old or complete player tail");
             check(!loaded.player.aim_ready && !loaded.player.aim_view_valid,
                   "legacy player aim starts unlatched");
+            /* No light in the file: the allocator's 4096 (0x8006C1B8). A
+             * version-2 tail carries it, here the fixture's zero. */
+            check(loaded.player.light == (tail == 34 ? 0 : 4096),
+                  "player light restored or defaulted");
         } else {
             check(q2_save_read(&loaded, tmp_path()) == Q2_ERR_BAD_FORMAT,
                   "reject truncated or oversized player tail");

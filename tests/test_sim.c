@@ -4208,6 +4208,22 @@ static void test_muzzle_clip(void)
     check(r.fired, "the BFG fires at the wall");
     check_eq_i(q2_sim_proj_scan.muzzle_clipped, 0,
                "AnyoneFireBFG has no clip, so neither does the port");
+    {
+        /* PrimaryBFG 0x8004B438..0x8004B458: the ball's cell is
+         * FindNewSpaceFromOld's (0x80055020), the end of the walk from the
+         * shooter's origin — room A's node 0 — not an unknown cell to be
+         * looked up on the first move. */
+        s32 i, bfg = -1;
+
+        for (i = 0; i < Q2_PROJ_MAX; i++)
+            if (sim.combat.projectiles.p[i].in_use &&
+                sim.combat.projectiles.p[i].kind == Q2_PROJ_BFG)
+                bfg = i;
+        check(bfg >= 0, "and a ball is in flight");
+        if (bfg >= 0)
+            check_eq_i(sim.combat.projectiles.p[bfg].node, 0,
+                       "born in the shooter's cell, the walk's end");
+    }
 
     memset(&q2_sim_proj_scan, 0, sizeof(q2_sim_proj_scan));
     q2_sim_spawn(&sim, (const s32[3]){ 1100, 300 + Q2_EYE_BASE, 500 }, 1024);
@@ -4215,6 +4231,350 @@ static void test_muzzle_clip(void)
     r = q2_sim_fire(&sim);
     check_eq_i(q2_sim_proj_scan.muzzle_unplaced, 1,
                "a shooter in no cell keeps the unclipped point");
+
+    /*
+     * GRENADE3 THROWN INTO THE WALL. PrimaryGrenadeActive's release
+     * (0x8004A608..0x8004A66C) takes the release point unclipped into +0x54 and
+     * FindNewSpaceFromOld's cell into +0xA0: 0x80044C44 from the thrower's
+     * origin to the release point, stopped by the wall at x = 1000, ends in
+     * room A. Standing at x = 900 facing +X the release point lies 200 ahead,
+     * at x = 1100 — between the rooms, in no cell — so a lookup of the point
+     * itself answers -1 and the grenade would start its flight beyond the wall.
+     */
+    {
+        const s32 thrower[3] = { 900, 300 + Q2_EYE_BASE, 500 };
+        s32 h;
+
+        q2_sim_give_weapon(&sim, Q2_WID_HAND_GRENADE);
+        sim.combat.inv.ammo[Q2_AMMO_GRENADES] = 3;
+        sim.fire_from_input = false;
+        q2_sim_spawn(&sim, thrower, 1024);
+        sim.combat.weapon_id = Q2_WID_HAND_GRENADE;
+        r = q2_sim_fire(&sim);
+        check(r.fired, "Grenade3 is primed facing the wall");
+        h = q2_projectile_hand_held_index(&sim.combat.projectiles, 0);
+        check(h >= 0, "and held");
+        if (h >= 0) {
+            const q2_projectile *g = &sim.combat.projectiles.p[h];
+
+            check_eq_i(q2_sim_hand_grenade_update(&sim, thrower, 0, true),
+                       Q2_HAND_GRENADE_RELEASED, "the 411 signal releases it");
+            check(g->pos[0] > ROOM_A_X1 && g->pos[0] < ROOM_B_X0,
+                  "at a point between the rooms");
+            check_eq_i(q2_coll_find_node(&sim.coll_primary, g->pos, -1, true),
+                       -1, "which no cell holds");
+            check_eq_i(g->node, 0,
+                       "yet its cell is room A, where the walk from the "
+                       "thrower stopped (0x80055020)");
+        }
+    }
+    q2_sim_free(&sim);
+}
+
+/* ------------------------------------------------------------------------- */
+/*
+ * THE TELEPORTER TAKES FOUR FRAMES, NOT ONE — PSXTELEPORT (0x80028914) and
+ * the light it fades in PrimaryQuakePlayer (0x8003A314..0x8003A3B0).
+ *
+ * The handler first promotes its own record to CAT_B (0x80028984), then
+ * reads entity+0xFC (0x80028988): non-zero means "set +0x98 bit 14 and
+ * return" (0x80028BA8..0x80028BB4). The player frame, which cleared bit 14 at
+ * 0x8003A294, sees it up again after the dispatcher and fades the light by
+ * `dt << 7` with bit 15 set (0x8003A338..0x8003A358); the move runs on the
+ * frame the light reads zero, and from that frame bit 15 ramps the light back
+ * by `dt << 5` until 4096 (0x8003A36C..0x8003A3AC).
+ *
+ * Every number below is from those shifts and the frame delta — 12 on PAL,
+ * 10 on the US disc — not from the port. The volume and record are built by
+ * hand around the spawn so the sim's own dispatcher does the re-running; the
+ * record is authored CAT_A deliberately, so that without the promotion it
+ * would run once and the teleport would never happen.
+ */
+static u8 g_tel_trig[4 + 2 * Q2_TRIGGER_SIZE];
+static u8 g_tel_events[8 + 4 + 4];
+static int g_tel_moves;
+static s32 g_tel_dest[3];
+
+static void tel_on_call(void *user, const q2_event_item *item, u8 call_index)
+{
+    q2_sim *sim = (q2_sim *)user;
+
+    (void)item;
+    (void)call_index;
+    sim->event_rt.promote_cat_b = true;          /* 0x80028984 */
+    if (q2_sim_teleport_touch(sim)) {            /* 0x80028990 fell through */
+        q2_sim_teleport_arrive(sim, g_tel_dest, 1000, true);
+        g_tel_moves++;
+    }
+}
+
+static void tel_fixture(q2_sim *sim, int field_hz)
+{
+    static dat_chunk trig_chunk, ev_chunk;
+    static q2_common_file common;
+    s32 feet[3] = { 500, q2_sim_feet_y(300), 500 };
+
+    memset(g_tel_trig, 0, sizeof(g_tel_trig));
+    hwr16(g_tel_trig + 0, 1);                    /* one volume   */
+    hwr16(g_tel_trig + 2, 0);                    /* no planes    */
+    hwr32(g_tel_trig + 4 + 0x00, 0);             /* min x,y,z   */
+    hwr32(g_tel_trig + 4 + 0x04, 0);
+    hwr32(g_tel_trig + 4 + 0x08, 0);
+    hwr32(g_tel_trig + 4 + 0x0C, 1000);          /* max x,y,z   */
+    hwr32(g_tel_trig + 4 + 0x10, 600);
+    hwr32(g_tel_trig + 4 + 0x14, 1000);
+    hwr16(g_tel_trig + 4 + 0x18, 0);             /* a plain box */
+    hwr16(g_tel_trig + 4 + 0x1A, 8);             /* names record 8 */
+    hwr16(g_tel_trig + 4 + 0x20, 255);           /* any area    */
+    hwr16(g_tel_trig + 4 + 0x22, 1);             /* enabled     */
+    hwr16(g_tel_trig + 4 + Q2_TRIGGER_SIZE + 0x1A, 8);   /* the sentinel */
+
+    memset(g_tel_events, 0, sizeof(g_tel_events));
+    hwr32(g_tel_events + 0, 1);                  /* one record, no directory */
+    g_tel_events[8]  = 8;                        /* u16 size: 4 + one item   */
+    g_tel_events[10] = 1;                        /* one item                 */
+    g_tel_events[11] = Q2_EVREC_CAT_A;           /* authored "enter" only    */
+    g_tel_events[12] = Q2_EVOP_CALL;
+    g_tel_events[13] = 4;                        /* the shortest CALL        */
+    g_tel_events[14] = 0;                        /* call index 0             */
+
+    memset(&trig_chunk, 0, sizeof(trig_chunk));
+    trig_chunk.data = g_tel_trig;
+    trig_chunk.size = sizeof(g_tel_trig);
+    memset(&ev_chunk, 0, sizeof(ev_chunk));
+    ev_chunk.data = g_tel_events;
+    ev_chunk.size = sizeof(g_tel_events);
+    memset(&common, 0, sizeof(common));
+    common.chunk[Q2_COMMON_TRIG_BOUNDS] = &trig_chunk;
+    common.chunk[Q2_COMMON_EVENTS]      = &ev_chunk;
+
+    q2_sim_init(sim, NULL, field_hz);
+    check(q2_sim_attach_gameplay(sim, &common) == Q2_OK &&
+          sim->triggers_ready && sim->events_ready,
+          "one pad volume and its CALL record attach");
+    sim->event_rt.on_call      = tel_on_call;
+    sim->event_rt.on_call_user = sim;
+    q2_sim_spawn(sim, feet, 0);
+
+    g_tel_moves   = 0;
+    g_tel_dest[0] = 5000;                        /* outside the volume */
+    g_tel_dest[1] = q2_sim_feet_y(300);
+    g_tel_dest[2] = 500;
+}
+
+static void test_teleport_fade(void)
+{
+    q2_sim sim;
+    q2_input in;
+    int frames;
+    s32 dt;
+
+    printf("teleport light fade and delay\n");
+    memset(&in, 0, sizeof(in));
+
+    /* PAL: dt 12, so 1536 a frame down and 384 a frame up. */
+    tel_fixture(&sim, 50);
+    dt = sim.frame_dt;
+    check_eq_i(dt, 12, "a PAL frame is 12 dt");
+    check_eq_i(sim.player[0].light, 4096,
+               "the allocator's 4096 in entity+0xFC (0x8006C1B8)");
+
+    q2_sim_tick(&sim, &in, dt);
+    check_eq_i(g_tel_moves, 0, "frame 1: the pad does not move the player");
+    check_eq_i(sim.player[0].light, 4096 - 1536,
+               "frame 1: the light falls by dt<<7 to 2560");
+    check(sim.player[0].ent.flags & Q2_ENT_LIGHT_RAMP,
+          "frame 1: +0x98 bit 15 is up (0x8003A328)");
+    check(sim.player[0].ent.flags & Q2_ENT_TELEPORT_FADE,
+          "frame 1: bit 14 stays up until the next frame's clear (0x8003A294)");
+    check(q2_event_rt_flags(&sim.event_rt, 8) & Q2_EVREC_CAT_B,
+          "the CAT_A record has been promoted to CAT_B (0x80028984)");
+
+    q2_sim_tick(&sim, &in, dt);
+    check_eq_i(sim.player[0].light, 1024, "frame 2: 1024");
+    check_eq_i(g_tel_moves, 0, "frame 2: still in the pad");
+    q2_sim_tick(&sim, &in, dt);
+    check_eq_i(sim.player[0].light, 0,
+               "frame 3: -512 is stored and clamped to 0 (0x8003A358)");
+    check_eq_i(g_tel_moves, 0, "frame 3: the light only just reached zero");
+
+    q2_sim_tick(&sim, &in, dt);
+    check_eq_i(g_tel_moves, 1, "frame 4: PSXTELEPORT falls through and moves");
+    check_eq_i(sim.player[0].pos[0], 5000, "...to the StartPos");
+    check_eq_i(sim.player[0].yaw, 1000, "...facing the StartPos yaw");
+    check_eq_i(sim.player[0].light, 384,
+               "frame 4: and the same frame's bit-15 arm adds dt<<5");
+
+    for (frames = 4; frames < 40 && sim.player[0].light < 4096; frames++)
+        q2_sim_tick(&sim, &in, dt);
+    check_eq_i(frames, 14,
+               "PAL: 11 ramp frames of 384 reach 4096 on frame 14");
+    check_eq_i(sim.player[0].light, 4096, "clamped at 4096 (0x8003A3A4)");
+    check(!(sim.player[0].ent.flags & Q2_ENT_LIGHT_RAMP),
+          "and bit 15 clears there (0x8003A3AC)");
+    check_eq_i(g_tel_moves, 1, "one move in all");
+    q2_sim_free(&sim);
+
+    /* Stepping out mid-fade: no bit 14, so bit 15 ramps straight back. */
+    tel_fixture(&sim, 50);
+    q2_sim_tick(&sim, &in, dt);
+    check_eq_i(sim.player[0].light, 2560, "one frame in the pad");
+    {
+        s32 out[3] = { 5000, q2_sim_feet_y(300), 500 };
+        q2_sim_spawn(&sim, out, 0);
+        check_eq_i(sim.player[0].light, 2560,
+                   "a placement does not re-allocate the entity's light");
+        sim.player[0].ent.flags |= Q2_ENT_LIGHT_RAMP;   /* spawn reset `ent` */
+    }
+    q2_sim_tick(&sim, &in, dt);
+    check_eq_i(sim.player[0].light, 2560 + 384,
+               "the next frame outside climbs by dt<<5");
+    check_eq_i(g_tel_moves, 0, "and nothing teleports");
+    q2_sim_free(&sim);
+
+    /* US disc: dt 10, so 1280 down and 320 up — one frame longer each way. */
+    tel_fixture(&sim, 60);
+    dt = sim.frame_dt;
+    check_eq_i(dt, 10, "a US frame is 10 dt");
+    q2_sim_tick(&sim, &in, dt);
+    check_eq_i(sim.player[0].light, 2816, "US frame 1: 2816");
+    q2_sim_tick(&sim, &in, dt);
+    check_eq_i(sim.player[0].light, 1536, "US frame 2: 1536");
+    q2_sim_tick(&sim, &in, dt);
+    check_eq_i(sim.player[0].light, 256,  "US frame 3: 256");
+    q2_sim_tick(&sim, &in, dt);
+    check_eq_i(sim.player[0].light, 0,    "US frame 4: -1024 clamps to 0");
+    check_eq_i(g_tel_moves, 0, "US frame 4: not yet");
+    q2_sim_tick(&sim, &in, dt);
+    check_eq_i(g_tel_moves, 1, "US frame 5: the move");
+    check_eq_i(sim.player[0].light, 320, "US frame 5: ramp starts at 320");
+    for (frames = 5; frames < 40 && sim.player[0].light < 4096; frames++)
+        q2_sim_tick(&sim, &in, dt);
+    check_eq_i(frames, 17, "US: 13 ramp frames of 320 reach 4096 on frame 17");
+    q2_sim_free(&sim);
+
+    /* The two arrival arms, 0x80028AD4. */
+    q2_sim_init(&sim, NULL, 50);
+    {
+        s32 start[3] = { 100, 200, 300 };
+        s32 sp[3]    = { 0, 0, 0 };
+        q2_sim_spawn(&sim, sp, 777);
+        sim.player[0].pitch  = 55;
+        sim.player[0].roll   = 9;
+        sim.player[0].vel[0] = 5; sim.player[0].vel[1] = 6; sim.player[0].vel[2] = 7;
+
+        q2_sim_teleport_arrive(&sim, start, 1000, false);
+        check(sim.player[0].pos[0] == 100 && sim.player[0].pos[1] == 200 &&
+              sim.player[0].pos[2] == 300,
+              "another zone: the origin is written (0x80028AE8..0x80028B04)");
+        check_eq_i(sim.player[0].ent.pos[1], q2_sim_origin_y(200),
+                   "...as start.y - 286");
+        check(sim.player[0].yaw == 777 && sim.player[0].pitch == 55 &&
+              sim.player[0].roll == 9,
+              "another zone: no angle write — the player keeps facing as before");
+        check(sim.player[0].vel[0] == 5 && sim.player[0].vel[1] == 6 &&
+              sim.player[0].vel[2] == 7,
+              "neither arm writes the velocity");
+
+        q2_sim_teleport_arrive(&sim, start, 1000, true);
+        check(sim.player[0].yaw == 1000 && sim.player[0].pitch == 0 &&
+              sim.player[0].roll == 0,
+              "same zone: +0xE6 becomes (0, start+0x18, 0) (0x80028B70..0x80028B94)");
+        check(sim.player[0].vel[0] == 5 && sim.player[0].vel[1] == 6 &&
+              sim.player[0].vel[2] == 7,
+              "same zone: velocity still untouched");
+    }
+    q2_sim_free(&sim);
+}
+
+/*
+ * PROCESSSOLIDBOXS, 0x80055480 — the swept envelope is one frame deep.
+ *
+ * QuakeLoop runs it at 0x80038F94 before anything moves: for every active slot
+ * of the 48-entry table at 0x800CAE10 the live box +0x00..+0x17 is copied over
+ * the envelope +0x18..+0x2F (0x800554C4..0x800554F0) and the frame's
+ * displacement +0x30..+0x35 is zeroed (0x800554F4, memset of 6). The envelope
+ * 0x80051EC0 grows afterwards is therefore where the door stood at the top of
+ * the frame plus where it stands now — and the gate at 0x80050CE0 (a2 = 1),
+ * which reads the envelope against the player's 286/285/286 box
+ * (0x80050CE8..0x80050D38), stops arming the entity sweep for a player who
+ * merely stands where a lift USED to be.
+ */
+static void test_solid_box_frame(void)
+{
+    q2_sim sim;
+    q2_move_target box[2];
+    s32 at[3] = { 500, 900, 500 };   /* standing where the lift set off from */
+    int k;
+
+    printf("ProcessSolidBoxs resets the envelope each frame\n");
+
+    q2_sim_init(&sim, NULL, 50);
+    memset(box, 0, sizeof(box));
+
+    /* A lift part 240 tall that has climbed 3600 since the zone loaded, 80 a
+     * frame: its live box is at the top and the envelope the port used to keep
+     * spans the whole climb, from y = 1120 at the bottom to -2720 at the top. */
+    box[0].min[0] = 0;    box[0].max[0] = 1000;
+    box[0].min[1] = -2720; box[0].max[1] = -2480;
+    box[0].min[2] = 0;    box[0].max[2] = 1000;
+    box[0].env_min[0] = 0;     box[0].env_max[0] = 1000;
+    box[0].env_min[1] = -2720; box[0].env_max[1] = 1120;
+    box[0].env_min[2] = 0;     box[0].env_max[2] = 1000;
+    box[0].dy     = -80;
+    box[0].kind   = Q2_MOVE_KIND_ENTITY;
+    box[0].id     = 4;
+    box[0].active = true;
+
+    /* A trigger volume after the mover parts: not a slot of the table, and
+     * not touched. */
+    box[1] = box[0];
+    box[1].kind = Q2_MOVE_KIND_VOLUME;
+    box[1].mask = 0x2000;
+    box[1].id   = 6;
+
+    sim.volumes      = box;      /* borrowed: detached again before the free */
+    sim.volume_count = 2;
+    sim.mover_count  = 1;
+    memset(&sim.move_world, 0, sizeof(sim.move_world));
+    sim.move_world.half_extent = Q2_SWEEP_HALF_EXTENT;
+    sim.move_world.targets     = box;
+    sim.move_world.count       = 2;
+
+    check(q2_move_overlaps_any(&sim.move_world, at),
+          "with the climb's envelope kept, standing at the bottom arms the sweep");
+    check(!q2_move_overlaps_any_live(&sim.move_world, at),
+          "though the live box is 3600 above");
+
+    q2_sim_solid_boxes_frame(&sim);
+
+    for (k = 0; k < 3; k++) {
+        check_eq_i(box[0].env_min[k], box[0].min[k],
+                   "the envelope's minimum is the live box's (+0x18 <- +0x00)");
+        check_eq_i(box[0].env_max[k], box[0].max[k],
+                   "and its maximum (+0x24 <- +0x0C)");
+    }
+    check_eq_i(box[0].dy, 0, "the frame's displacement is zeroed (+0x30..+0x35)");
+    check(!q2_move_overlaps_any(&sim.move_world, at),
+          "so where the lift set off from no longer arms the sweep");
+    check_eq_i(box[1].env_max[1], 1120, "the trigger volume keeps its own box");
+    check_eq_i(box[1].dy, -80, "and its own motion");
+
+    /* The frame's 0x80051EC0 then grows it by the sign of the delta alone
+     * (0x80051FBC: a negative dy reaches +0x1C), so one more 80-unit climb
+     * leaves the envelope spanning exactly the step: -2800..-2480. +Y is down,
+     * so a player hovering 40 above the lift's top — box bottom at -2761 — is
+     * clear of it at the top of the frame and in its path once it has risen. */
+    at[1] = -2720 - 286 - 40;
+    check(!q2_move_overlaps_any(&sim.move_world, at),
+          "40 above the live box is outside this frame's envelope...");
+    box[0].min[1] -= 80; box[0].max[1] -= 80;
+    box[0].env_min[1] -= 80;
+    check(q2_move_overlaps_any(&sim.move_world, at),
+          "...and inside it once the lift has climbed its 80");
+    check_eq_i(box[0].env_max[1], -2480, "with the start-of-frame bottom kept");
+
+    sim.volumes = NULL;
     q2_sim_free(&sim);
 }
 
@@ -6696,6 +7056,8 @@ int main(void)
     test_mission_laser();
     test_rocket_attitude();
     test_one_random_stream();
+    test_solid_box_frame();
+    test_teleport_fade();
 
     printf("\n%d checks, %d failures\n", g_checks, g_failures);
     printf("%s\n", g_failures == 0 ? "PASS" : "FAIL");

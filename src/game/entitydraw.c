@@ -394,6 +394,16 @@ u32 q2_entity_build_ot(q2_entity_set *set, const q2_entity_draw_ctx *ctx,
             inst.light = &env;
         }
 
+        /*
+         * AND +0xFC IS ALSO THE FADE. DrawModels tests the same halfword
+         * against 4096 (0x8006A874) and, unequal, draws the model additive
+         * over a subtracted silhouette of itself (modeldraw.h, `alpha`), so a
+         * materialising item is a ghost the room shows through and not a dim
+         * solid. The lighting scale above and this are the two readers.
+         */
+        inst.alpha     = e->scale;
+        inst.fade_clut = ctx->fade_clut;
+
         emitted += q2_model_build_ot(&inst, cam, ot, gte, &ms);
 
         if (stats) {
@@ -901,6 +911,7 @@ u32 q2_fx_debris_build_ot(const struct q2_fx_world *fx,
         q2_model_instance inst;
         q2_model_draw_stats st;
         q2_light_env env;
+        q2_model_face_texture face_tex;
         s16 spin[3][3];
         s32 node;
         int k;
@@ -936,6 +947,37 @@ u32 q2_fx_debris_build_ot(const struct q2_fx_world *fx,
         inst.scale = Q2_ONE_12;
         inst.clut4_count_a = clut4_count_a;
         inst.tpage         = tpage;
+
+        /*
+         * THE SURFACE IT BROKE OFF. CopyFromGlobalTexture (0x80065138) wrote
+         * the broken node's first polygon's UVs, CLUT and page over every
+         * packet of the piece (effect.h, q2_fx_debris_texture), so a crate's
+         * shards wear the crate. The page word is resolved against the frame's
+         * own table exactly as GetLimitedPolyData did it: the transparent path
+         * reads the entry (0x800684CC), the opaque path takes the world's
+         * promoted word (0x800684EC..0x8006852C, blendTable[2] OR-ed in).
+         */
+        if (d->tex.valid) {
+            q2_tpage_table private_tpage;
+            const q2_tpage_table *t = tpage;
+            int c;
+
+            if (!t) {
+                q2_tpage_table_init(&private_tpage);
+                t = &private_tpage;
+            }
+            for (c = 0; c < 4; c++) {
+                face_tex.uv[c][0] = d->tex.uv[c][0];
+                face_tex.uv[c][1] = d->tex.uv[c][1];
+            }
+            face_tex.clut  = d->tex.clut;
+            face_tex.semi  = d->tex.semi;
+            face_tex.tpage = d->tex.semi
+                           ? q2_tpage_world_semi(t, d->tex.page)
+                           : q2_tpage_model(t, d->tex.page,
+                                            Q2_SURF_WORLD_BLEND_SELECTOR);
+            inst.face_tex = &face_tex;
+        }
 
         /*
          * Where it sorts. The physics loop already keeps `node` current

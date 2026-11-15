@@ -2069,6 +2069,250 @@ ends: the `rand()` stream and player one's position on every frame.
   `rand()` (`0x8003CEB0..0x8003CEE8`). A probe of the US JAIL2 run sees the call
   at record frame 862 and no draw in the sixty frames after.
 
+## Symbol-census residue pass, 15 November
+
+The census of 2 November was run again against the tree: of the NTSC
+symbol table's 1,037 named functions, 200 were neither cited by a PAL
+address inside them nor named anywhere in `src/`, `tools/`, `docs/` or
+`tests/`. Each was read against its callers and classified; the memory-card,
+allocator and debug-print files were discounted as before. Eight were
+reachable gaps and are closed below; the rest are recorded here so they are
+not re-read. Every claim was checked by disassembling the PAL executable
+(`q2psx-inspect disasm`/`xrefs`), with the US address from `MAIN.SYM`.
+
+**The InitMission family has now been read.** GameNewMission (0x8003F37C)
+dispatches Mission 1..6 through 0x800AC8EC to
+InitMissionBase/Jail/Power/Grav/Boss/Tribute and everything else to
+InitMissionNull (0x8003F24C), which sets Mission = 1. Each init allocates the
+unit block (44/208/48/192/280/4 bytes), installs the unit's mission-event
+table at 0x800B2A48, PrintMissionDetails at 0x800B2AB0 and the unit's
+LoadSaveHub at 0x800B2A68, zeroes 0x800B2A40 and calls hub(0). Without a
+"Mission N" save block the hub clears the block, resets the help computer,
+writes the fixed first level over an empty name, and seeds the three kill
+counters at 0x800B2A7C/80/84 — 1/0/0, 2/1/0, 1/2/0, 0/0/0 and 0/1/0 for units
+1..5 — which ProcessQuakeDeath (0x8007CE2C..0x8007CEA0) decrements by the dying
+body's `flags & 0x600` and the modules read through interface
++0x94/+0x98/+0x9C. The port's population-tag death counts already carry these
+seeds. The level lookups (0x8003FC70, 0x8007C860) have no fallback: an unknown
+name is NULL, which LoadRelocateLevel refuses and InitialiseSingleGame turns
+into Mission 0. SoundStopAllLoopingSamples (0x80073840) fires only when the SFX
+slider changes, after killallsounds (0x80073C68) has already emptied the
+channels at every pause entrance, so it stops nothing on a retail disc.
+QuickRand (0x8006EAF4) has one caller, PSXB3ROCKS_GIRDF_M, which no map binds;
+the one-stream model is unaffected. WriteOutRecordData's two callers gate on
+the pad mode word being 2, which retail never writes. QuakeCameraLoading
+(0x8006E300) zeroes a view and sets its flags to 6 under the loading screen;
+MoveQuakeCamera overwrites both before anything draws. Not verified: no
+LevelBin module was scanned for an import of the SoundSetVolume slot (+0x138),
+and the second seed of unit 3 was not traced to a POWER consumer.
+
+**The EVENT.C/QEVENT.C `_T` residues are constructors, not thinks.** Every
+`PSX*_T` the census listed is the `fn_load` slot run by
+`Event_TransferObjects` (0x80026DC0, from `ReadZoneFiles` at 0x8007C278):
+eight are a length check or a bare `jr ra` (STRING, EXPLO, HELPCOMPUTER,
+LOADMAP, CREBATCH, MISEVENT, SIMBUTTON), `INSECRET_T` (0x8002E5C8) is the
+secrets-total increment after 0x8007C274 zeroes 0x800B29F8,
+`SETWIBBLE_T`/`LASERWALL_T` restore one slot from the zone copy, and
+`FLICKERINGLIGHT_T` (0x8002E648) restores the twelve origin bytes — which is
+how the exec's `andi 1` on X (0x800287C8) becomes a per-zone switch: JAIL2
++0x694 is 0x5280 everywhere but ZONE1's 0x5281. The port lit that light from
+COMMON's bytes in every zone and drew two numbers per run the console does
+not; it is now gated (`q2_flklight_enabled`), and the second gate,
+0x800689C0's per-viewport area stamp, is honoured through the ordering table's
+area registry. `SIMROTEVENT2_T` (0x800283C0) differs from SIMROT's only in
+installing `PrimarySimRot_PDH2` 0x8002F154, whose step is
+`angle = (angle + speed) & 0xFFF` with no dt; BOSS2 is the only declarer
+(record +0x2E0, speed 0x0400 on nodes 22 and 23), and the port ran it through
+SIMROT's accumulator at four units a pulse. New rotator kind `Q2_ROT_STEP`,
+pinned by `test_rotator`. `Event_GetNamedOffset` 0x8002DB7C (zero-first-word
+terminator, three-word compare, 0 for not-found) and the Set/GetDisableNamed
+pair reach the EXE only through the level-module interface filled at
+0x800799D4-0x800799FC; the port's `q2_event_rt_disable_named` is equivalent on
+both discs (no directory name carries bytes after its NUL). ONKEYDO's 30
+masks are all ≤ 0x0800, OBJDRAWOFF's 0x80068818 hide-and-free is modelled, and
+B3ROCKS/SIMBUTTON/OBJDRAWON/EXPLO/UNDERLAVA are declared by no map on either
+disc. BIGGUN's two SETWIBBLE items carry node −1, an out-of-table
+read-modify-write on the console that the port deliberately skips.
+
+**Entity, dead-body and zone-store residues.** The weapon PreInits
+(0x8004DD94..0x8004E874) register one bank sound each — the Hyperblaster's
+two, `wep_hyprbf1a` and the wind-down `wep_hyprbd1a`, are its extra 156 bytes —
+and the Machinegun's adds `SetRandomPitch(8, 0)`; the port's weapon table and
+its pitch ranges carry all of it. PreInitWeaponExtras' fallback from
+`wep_shotgr1b` to `wep_sshotr1b` (0x8004DC38) is never taken: every SNDVRAM
+bank on both discs holds the first. The class table's hook columns are the
+zone store: SaveCreatures (0x800569C8) calls `+0x1C` for every live object
+slot, RememberMe (0x8007F8CC) forwards to `+0x18` with the cursor at 0x800B2A90
+and kills the object; creatures store through GeneralRespawnStuffStore
+(0x8007D318), pickups through 0x8005B4EC, dead bodies through
+QuakeStoreInanimate (0x80059B08, which stores the death CLIP index and comes
+back on that clip's last frame via LastFrameFromSequenceNum 0x8006DAB4),
+fragments (class 48) are only killed (DestroyMe 0x8007F928). OnLeavingZone
+first runs FinishDying (0x8007F630), which turns every dying creature
+(edict+0x20 bits 22–23 == 2) into a class-47 body before the store.
+MP_player_male (0x8003DE70) is the +0x24 spawn hook of the four player skins
+and no spawn record names them. The edict allocator (FindFreeEdictT
+0x8007DE94) is id's G_Spawn order: the lowest free index above maxclients, in
+a 64-edict table; the port has no edict-slot model, and its one known consumer
+is the stale BFG-beam owner already listed under the deviations.
+
+**Collision residues (COLL.C).** FindBoxMoveSpace 0x80055378 is the player's
+first-frame cell search whose return PrimaryQuakePlayer discards
+(0x8003A30C); the port finds the cell at placement. ProcessSolidBoxs
+0x80055480 was a real gap: it resets every entity box's swept envelope
+(+0x18..+0x2F) to its live box and zeroes its displacement (+0x30..+0x35) at
+the top of each QuakeLoop frame (0x80038F94), so the envelope the 0x80050CE0
+gate reads is one frame deep, not the door's history; its +0x38 hook has no
+writer on the disc. `q2_sim_solid_boxes_frame` is the reset, pinned by
+`test_sim`. InVectBox 0x800551F4 is the 2-D owner-box test the grenades use to
+stop ignoring their thrower (0x80049F34, 0x8004A87C) and is transcribed.
+FindNewSpaceFromOld 0x80055020 gives every projectile its birth cell as the end
+of a walk from its owner (0x8004A0E8, 0x8004A628, 0x8004B454); the port now
+stores that cell rather than looking the formed point up, which for the
+unclipped BFG ball and Grenade3 could be the cell beyond a wall.
+ReCalcCollBox, GenVectBox, VectBoxOverlapsArea (a stub returning 0),
+FreeWaterMoves, CalcCreCameraTarg (a stub), FreeMissile (reachable only from
+outside the hull) and FindMaxMin (0x80070084, the min/max arm of 0x800544EC,
+matched by `cylinder_interval`) need nothing. FindStartPosition 0x80078BC4
+returns the "Reload Start" record 0x800C8CB4 by name, walks the 28-byte list at
+[0x800B2A34] and hangs at the end unless the name is "Default" (0x800A335C) —
+unreachable on retail, and it means every arena carries MultiSpawn0..7, so the
+random start matches.
+
+**Scene sorting, heavens and light reset residues.** The SORT.C residues
+CheckDependancies (0x8004759C), GenerateDependancies (0x80047A14),
+GenerateQuickDependancies (0x80047AF4) and GenerateLinearFromLinked
+(0x80047B9C) are the dependency test, the two graph builders and the
+32/128-entry flattening that gpu.c already transcribes under their US
+addresses (0x80047598, 0x80047A10, 0x80047AF0, 0x80047B98); GetNextSortData is
+a 20-byte bump allocation. The "heavens" are not a sky: DrawHeavens
+(0x80077230) is the overlay camera the port runs, and its content call
+DrawHeavenlyModels (0x8006AB8C) walks a pointer list (0x800D4AF4 ..
+[0x800B2BA8]) whose end pointer is only ever reset (0x800705B0, 0x8007089C),
+while DrawAnimGlobal's route onto the heavens list (0x8006DCCC, entity +0xF4 ≤
+0) is unreachable from DrawModels, which skips those objects at 0x8006A754.
+ResetModelLights_Many (0x80074398) restores a lit MapMod's GT4 colour bytes
+(+4, +16, +28, +40, 52-byte stride, up to four instance streams) from the baked
+table — the undo the port does not need because it rebuilds world quads from
+baked colour each frame. AreaValid (0x8006898C) is a per-view frame stamp in
+the 96×64-byte table at 0x800D8D78, stamped by AlterScreenClipping at
+0x80065CC4 and by DrawWinScene for area 1, and every consumer (particles,
+muzzle flashes, bolt bodies, 3-D lines, models, the sorter) is gated in the
+port; ChooseSortArea (0x80068900) never picks the second area because
+VectBoxOverlapsArea returns 0, so entity +0x9F is always zero.
+ResetSceneValidates (0x800685C8) runs only when the 15-bit frame stamp wraps
+(0x800780F4..0x80078108). The one gap was the shadow budget: FrameShadowPolys
+(0x80078A64) hands DrawCreShadow (0x800784CC) sixteen packets per frame across
+all viewports, now modelled in modeldraw.c and pinned by `test_shadow`. No
+retail spawn reaches seventeen shadow-casting bodies in one frame (a
+four-player MATRIX1 match peaks at 13), so the cap has no capture.
+
+**Model-drawing residues.** The single-part pose GetTweenedSubModXYZ
+(0x8006C374) with MYRotMatrixANIM (0x80055774) is `q2_model_pose_transition`'s
+algorithm, transition arm included, driven from actor+0xB0 as
+GetAbsoluteModelVert drives it (0x8006CD08); ScaleSVect (0x80070444) is
+lighting.c's `dir * ((fc*fe + 2047) >> 11) >> 12`; ProcessPostDraw
+(0x8006DF34) and QuakeCreaturePostDraw (0x8007F7C0) are the per-frame export-1
+call `main.c` already makes for the blur trails and flash lights; PolyHasZeroZ
+(0x800696E8) is `near_eye` in `q2_world_subdiv_request`. Two were real gaps
+and are now closed. DrawModels' "opaque" split is the entity+0xFC fade:
+anything but 4096 (0x8006A874) turns every face additive (PolyOpaqueSetup
+0x8006DD68, code 0x3E, ABR 1) over a subtractive FT4 silhouette through
+palette 73 (`[0x800E3FBE]`), coloured `(a*133, a*129, a*133) >> 12` by
+FilterInOpaquePolys (0x8006A5E0) and spliced ahead of its GT4 by 0x800B1D94;
+the port only dimmed the lighting. The scene fragment's surface binding
+(GetLimitedPolyData 0x800683F8 → CopyFromGlobalTexture 0x80065138) puts the
+broken surface's first MapMod polygon on every shard, and the same think
+tumbles each piece by `((rand() & 0x7F) + 127) * 2` per axis with the
+direction fixed by spin.x's parity (0x8006425C..0x8006431C) and spends its
+lifetime against the frame delta (0x80064344..0x8006436C); the port drew the
+Debris model's skin, held the spawn attitude and let pieces live to seven
+impacts. `test_modelfade` and `test_effect` pin both. Left as written: the
+uniform-clip point pose's Euler-versus-quaternion equivalence is asserted,
+not measured; whether a corpse's dissolve sub-handlers (0x8005B6F4..0x8005B830)
+write +0xFC was not traced; the fade's packet-pool exhaustion arm (0x8006A93C)
+is not modelled.
+
+**Sanitizers and analysers.** An MSVC AddressSanitizer client ran the whole PAL
+disc headlessly (215 cases, every zone, save-load and gate crossings) and
+seven long scenarios (BASE3/WASTE2 demos to 3000 frames, four-player DM,
+BIGGUN's PLATFORM event, boot, new-game, JAIL2 restart) with no report; the
+same build over the 76-test suite found two buffer over-reads, both in
+test-only or key-lookup code (`q2_misevent_find`'s memcmp past a short key;
+`test_effect`'s one-row velocity array), now fixed. clang-tidy (analyzer +
+bugprone) over every source and MSVC `/analyze` over the non-client tree agreed
+on one real defect, the uninitialised `class_seen` census in q2psx-inspect's
+`verify`; the remaining reports were triaged to invariants the analysers
+cannot see. A UBSan build of the non-client tree is clean across all 54 tests.
+The clang `-Wall -Wextra -Wshadow -Wimplicit-fallthrough -Wstrict-prototypes
+-Werror` build is clean for both trees after one fall-through annotation.
+
+**Profiling.** gprof over the headless client (BASE3/WASTE2/JAIL2 3000 frames,
+a four-player arena, boot) put 75–80 % of a gameplay frame in the software
+rasteriser — the span loop, pixel write, texel sample and the texture-cache
+model — with the draw-environment clear's per-pixel store a further 6 % and
+gte_divide's portable clz loop 1–3 %; load is 0.1 s and I/O-bound, boot is
+the STX film decode. The span loop, the clear and clz were reworked to do the
+same arithmetic in a different order of evaluation; identity was shown by
+byte comparison of 60 captured frames per build, a 371 000-primitive
+differential fuzz against the previous rasteriser covering every primitive
+kind and GPU option, an exhaustive clz check, and the test suite. No console
+behaviour changed.
+
+**Zone gates and what survives them.** The earlier reading that FinishedLoading
+(0x8007C938) empties the object array on every zone load does not hold: its
+only caller is LoadGameData (0x80070D64) under InitLevel/LoadLevel
+(0x8007CA44), which ProcessGame reaches at 0x80018C90 for a level change, a
+death, a restart or a restore, and InitCreFreeList's other caller (0x8006E0A4)
+is the level screen. A zone gate runs MaybeLoadZoneName (0x80079178), which
+parks LoadZone (0x8007901C) in the hook at 0x800B2D90; LoadZone runs
+OnLeavingZone (0x80078D1C), ReloadLevelData (0x800793B8) and OnLoadZone
+(0x80078E98), none of which frees the slots or the missile pool. What dies at
+a gate is therefore exactly what SaveCreatures (0x800569C8) kills through the
+class table's +0x1C hooks: creatures, pickups and dead bodies after storing
+them (RememberMe 0x8007F8CC), fragments without (DestroyMe 0x8007F928 on row
+36, class 48). A pickup with +0x44 bit 4 is refused by LoadStoreQuakePickup
+(0x8005B500..0x8005B50C) and killed anyway — that bit is on every death drop
+(0x80020B38, item 21 excepted; 0x80020D00 on landing unless OBJECTIVE) and on
+every collected pickup. Before any of that, FinishDying (0x8007F630) converts
+every creature still carrying deadflag 2 into a class-47 body, frame
+untouched; the dead-body store keeps the clip of that frame and
+RespawnQuakeDeadBody (0x8007D558) poses the return on the clip's last frame.
+Measured on the disc, every named death clip is three animation frames per AI
+frame and no death clip is split across moves, so the port's "corpse rests on
+its move's last frame" is the same clip two animation frames short of the
+console's returning pose; left as is. The port now applies FinishDying and
+the kill hooks at departure (`q2_zone_leaving`) and never parks a dynamic
+object in an unloaded zone; `test_client_zones` pins all of it and the
+harness's 21 gate crossings pass. Still different by design: a living
+creature returns with its live AI move, where GeneralRespawnStuffStore
+(0x8007D318) keeps only position, health, yaw, target and spawn flags and the
+console spawns it afresh.
+
+**TELEPORT sequencing.** PSXTELEPORT (0x80028914) is not a one-frame move.
+Its prologue ORs 0x10 into the running record's flags byte via gp+16936
+(0x80028920..0x80028984), making the pad's record CAT_B whatever the author
+wrote; it then reads the player's light intensity at +0xFC (0x80028988) and,
+while non-zero, sets +0x98 bit 14 and returns (0x80028BA8..0x80028BB4).
+PrimaryQuakePlayer clears bit 14 in its per-frame clear (0x8003A294, `addiu
+-16385`), sees it re-asserted after the trigger dispatcher, sets bit 15 and
+subtracts dt<<7 from the light, clamping at zero (0x8003A314..0x8003A358);
+with bit 14 down and bit 15 up it adds dt<<5 until 4096 and drops bit 15
+(0x8003A35C..0x8003A3AC). The light is the allocator's 4096 (0x8006C1B8), so
+the pad is a fade to black over three PAL frames (four US), the move on the
+next, and a ramp back over eleven (thirteen). PrimaryWeaponMovement copies
+the field into the view model each frame (0x8004EE70), so the gun is what the
+player sees fade. The two arms differ: same zone goes through SetupBoxDrop
+with the player box words (0x800AE790 = 286/572, 0x800AE794 = −1/1024,
+0x800AE89C = 286/600) and writes the angles (0, start+0x18, 0) — +0xE6 is the
+angle SVECTOR, not the velocity; another zone writes +0x54 = start−(0,286,0),
+calls ReCalcCollBox and leaves angles and velocity alone. The port now does
+all of this (sim.c `q2_sim_teleport_touch`/`q2_sim_teleport_arrive`,
+`player_light_tick`; events_rt `promote_cat_b`); `test_sim` pins the frame
+counts for both discs. The light rides in the PLYR chunk's version-2 tail, so a
+save taken mid-fade resumes the fade; a version-1 tail restores 4096. Not
+covered: the cross-zone arm was run only by the unit test.
+
 ## Limits
 
 The audit remains open. Passing suites did not demonstrate full functional

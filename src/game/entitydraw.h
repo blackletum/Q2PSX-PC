@@ -101,6 +101,15 @@ typedef struct q2_entity_draw_ctx {
     const q2_collision   *coll;
     const q2_collision   *coll_primary;
     s32                   coll_node;
+
+    /*
+     * Palette 73's CLUT word — `[0x800E3FBE]`, entry 73 of the CLUT table at
+     * 0x800E3F2C — which PolyOpaqueSetup (0x8006DD68) binds to the subtractive
+     * silhouette of every FADING entity (+0xFC != 4096; modeldraw.h, `alpha`).
+     * The client has it from its HUD tables (Q2_SBAR_PAL_STRIP_SHADOW); zero
+     * means no CLUT table, and a fading entity then draws as if opaque.
+     */
+    u16                   fade_clut;
 } q2_entity_draw_ctx;
 
 /*

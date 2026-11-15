@@ -7298,7 +7298,8 @@ static void client_reactor_collapse(client *c, s32 cell, u8 area)
         }
     }
     client_native_explosion(c, from, area, 4000 + (q2_rng_next(&sim->fx_rng) & 511));
-    q2_sim_debris_burst(sim, scene.bbox_min, scene.bbox_max, NULL, 10, 0);
+    q2_sim_debris_burst(sim, scene.bbox_min, scene.bbox_max, NULL, 10, 0,
+                        &c->zone.scene, node);
     if (c->node_hidden && (u32)node < c->node_hidden_count) c->node_hidden[node] = 1;
 }
 
@@ -7852,11 +7853,24 @@ static void client_event_call(void *user, const q2_event_item *item,
                      * the zone gate's own path. QUEUED rather than done here
                      * for the reason every other transition is: this CALL is
                      * running inside the script a zone load would free.
+                     *
+                     * AND NOT ON THE FIRST TOUCH. PSXTELEPORT first gives its
+                     * own record CAT_B (0x80028984), then tests the player's
+                     * light (0x80028988): non-zero means set +0x98 bit 14 and
+                     * return. The player frame fades the light by dt<<7 while
+                     * that bit is up (sim.h, q2_player.light), the record
+                     * re-runs every frame the player stands in the pad, and
+                     * the move happens on the frame the light reads zero —
+                     * the 4th on PAL, the 5th on the US disc — with the gun
+                     * fading to black on the way and back up afterwards.
                      */
-                    client_queue_teleport(c, &sp);
-                    c->script_teleports++;
-                    Q2_INFO("TELEPORT to '%s' (zone %d)", sp.name,
-                            (int)sp.zone);
+                    c->sim[0].event_rt.promote_cat_b = true;
+                    if (q2_sim_teleport_touch(&c->sim[0])) {
+                        client_queue_teleport(c, &sp);
+                        c->script_teleports++;
+                        Q2_INFO("TELEPORT to '%s' (zone %d)", sp.name,
+                                (int)sp.zone);
+                    }
                 }
             }
 
@@ -8528,20 +8542,42 @@ static void client_event_call(void *user, const q2_event_item *item,
      * does not learn about the drop either.
      */
     /*
-     * FLKLIGHT — registered once and then blinked by q2_flklights_tick. Origin
-     * at +4, light_id at +16, colour bytes at +18/+19/+20 (userfuncs.c). It
-     * needs phase, which is why it is a set rather than a transient like
-     * TIMEDLIGHT below.
+     * FLKLIGHT — a transient the exec raises itself. Origin at +4, area at
+     * +16, colour bytes at +18/+19/+20 (userfuncs.c).
+     *
+     * TWO GATES COME FIRST. 0x800287C8 tests bit 0 of the origin's X word
+     * (q2_flklight_enabled), and that word is the ZONE's: the constructor at
+     * 0x8002E648 copies +4..+15 from the pristine buffer at gp+376 — the zone
+     * file's Events — into COMMON's working copy (#56's rebase, as every
+     * object slot takes). The disc's one call, JAIL2 record +0x694, has X =
+     * 0x5280 in COMMON and in ZONE0/ZONE2 but 0x5281 in ZONE1: the light is
+     * authored ON in zone 1 and OFF everywhere else, and a port reading
+     * COMMON's bytes alone could only get one zone right. Behind that gate,
+     * 0x800287F4..0x80028800 loops the live viewports ([0x800B2C2C]) and calls
+     * 0x800689C0(viewport, item+16), which compares the AREA's draw stamp
+     * (64-byte stride table at 0x800D8D78) with the frame counter at
+     * 0x800B2D68: the light is raised only while that area was drawn this
+     * frame, which is what psx_ot_area_bucket answers for the one viewport
+     * this client renders. Fail either and the exec returns at 0x800288F0
+     * with neither rand() drawn.
      */
     if (q2_userfuncs_prim(&c->sim[0].userfuncs, call_index) == Q2_UF_FLKLIGHT
-        && item->len >= 24 && item->payload) {
+        && item->len >= 24 && item->payload
+        && q2_flklight_enabled(q2_uf_operand_at(&c->ev_operands,
+                                                item->payload - 2, 24))
+        && psx_ot_area_bucket(&c->ot, (u32)q2_rd_s16(item->payload + 14),
+                              NULL)) {
         const u8 *p = item->payload - 2;
+        /* The origin the constructor restored: the zone's twelve bytes. The
+         * area and colour at +16..+20 are outside the restored span and come
+         * from the working copy, as on the console. */
+        const u8 *o = q2_uf_operand_at(&c->ev_operands, p, 24);
         s32 at[3];
         u8  rgb[3];
 
-        at[0]  = (s32)q2_rd_u32(p + 4);
-        at[1]  = (s32)q2_rd_u32(p + 8);
-        at[2]  = (s32)q2_rd_u32(p + 12);
+        at[0]  = (s32)q2_rd_u32(o + 4);
+        at[1]  = (s32)q2_rd_u32(o + 8);
+        at[2]  = (s32)q2_rd_u32(o + 12);
         rgb[0] = q2_rd_u8(p + 18);
         rgb[1] = q2_rd_u8(p + 19);
         rgb[2] = q2_rd_u8(p + 20);
@@ -8869,6 +8905,10 @@ static bool client_load_zone(client *c, const char *map, int index)
         }
     }
 
+    /* OnLeavingZone's prelude: FinishDying (0x80078D2C) and the kill hooks
+     * SaveCreatures runs on slots it does not store (zonestate.h). */
+    if (!c->restoring_save && !c->new_game_loading && !c->mp_enabled && c->map[0])
+        q2_zone_leaving(&c->sim[0], c->creatures_ready ? &c->creatures : NULL);
     if (!c->restoring_save && !c->new_game_loading && !c->mp_enabled && c->map[0] &&
         q2_zone_history_capture(&c->zone_history, c->map, c->zone_index,
                                   &c->sim[0], c->creatures_ready ? &c->creatures : NULL,
@@ -10665,6 +10705,22 @@ static bool client_load_zone(client *c, const char *map, int index)
                             c->teleports.count == 1 ? "" : "s",
                             c->teleports.unmarked,
                             c->teleports.unmarked == 1 ? "" : "s");
+                /* Where the pads are, for a `--at` that stands in one: the
+                 * sequencing is four frames long and only visible from inside. */
+                if (c->zone_trace && c->sim[0].triggers_ready) {
+                    u32 ti;
+                    for (ti = 0; ti < c->teleports.count; ti++) {
+                        q2_trigger t;
+                        if (!q2_trigger_get(&c->sim[0].triggers,
+                                            c->teleports.trigger[ti], &t))
+                            continue;
+                        Q2_INFO("[zone] teleport pad %u: volume %u box "
+                                "(%d..%d, %d..%d, %d..%d) record @%u", ti,
+                                (unsigned)c->teleports.trigger[ti],
+                                t.min[0], t.max[0], t.min[1], t.max[1],
+                                t.min[2], t.max[2], t.event_offset);
+                    }
+                }
 
                 if (q2_movers_build(&c->movers, &ev, &c->ev_operands) == Q2_OK) {
                     u32 opcode_built = c->movers.count;
@@ -10957,6 +11013,10 @@ static bool client_load_zone(client *c, const char *map, int index)
              * rebuilt: the cached cell/contact state of the destination hull. */
             *pl     = c->carry_motion;
             pl->ent = destination_ent;
+            /* ...except +0x98 bit 15, which is the object's own and survives
+             * the stream with it: a cross-zone TELEPORT arrives with the light
+             * at zero and this bit is what ramps it back (sim.h, `light`). */
+            pl->ent.flags |= c->carry_motion.ent.flags & Q2_ENT_LIGHT_RAMP;
 
             c->sim[0].combat.next_fire = c->carry_next_fire;
             c->sim[0].combat.kick[0]   = c->carry_fire_kick[0];
@@ -12412,6 +12472,11 @@ static void client_advance_view_weapon(client *c, bool attack, s32 ticks)
         /* PrimaryQuakePlayer acquired and eased this on the logic tick. */
         q2_vw_set_aim_assist(&c->vw[pi], c->sim[0].player[pi].aim_assist);
 
+        /* 0x8004EE70..0x8004EE78 — PrimaryWeaponMovement's first act is to
+         * copy the player's +0xFC into the view model's, every frame, which
+         * is how the TELEPORT fade reaches the only model the player sees. */
+        c->vw[pi].scale = c->sim[0].player[pi].light;
+
         if (ticks < 1) ticks = 1;
         if (ticks > Q2_SCREEN_DT_MAX) ticks = Q2_SCREEN_DT_MAX;
 
@@ -12632,6 +12697,11 @@ static void client_advance_view_weapon(client *c, bool attack, s32 ticks)
 static void client_items_tick(client *c, s32 ticks)
 {
     if (ticks < 1) ticks = 1;
+
+    /* ProcessSolidBoxs (0x80055480, from QuakeLoop at 0x80038F94): the swept
+     * envelope and the frame's displacement restart from the live box before
+     * anything moves this frame (sim.c). */
+    q2_sim_solid_boxes_frame(&c->sim[0]);
 
     /* The rotating brushes. */
     if (c->rotators_ready)
@@ -15409,6 +15479,7 @@ static bool client_apply_teleports(client *c)
         q2_sim *sim = &c->sim[0];
         s32 to[3];
         int saved;
+        bool same_zone;
         if (!c->pending_teleport_have[pi]) continue;
         sp = c->pending_teleport[pi];
         c->pending_teleport_have[pi] = false;
@@ -15421,7 +15492,10 @@ static bool client_apply_teleports(client *c)
                     (int)sp.zone, sp.x, sp.y, sp.z,
                     pl->pos[0], pl->pos[1], pl->pos[2], c->zone_index);
         }
-        if (sp.zone != c->zone_index) {
+        /* MaybeLoadZoneName's answer (0x80028AD4), taken BEFORE the load
+         * moves `zone_index` onto the target. */
+        same_zone = sp.zone == c->zone_index;
+        if (!same_zone) {
             char map[sizeof(c->map)];
             memcpy(map, c->map, sizeof(map));
             c->carry_player = true;
@@ -15431,7 +15505,14 @@ static bool client_apply_teleports(client *c)
         saved = sim->cur_player;
         q2_sim_select_player(sim, pi);
         to[0] = sp.x; to[1] = sp.y; to[2] = sp.z;
-        q2_sim_spawn(sim, to, sp.angle);
+        /* Not a spawn: the entity survives. Same zone, SetupBoxDrop and the
+         * StartPos yaw; another zone, the origin alone and the player keeps
+         * facing the way they were (sim.h, q2_sim_teleport_arrive). The feet
+         * come back dropped onto the floor, so re-read them for the mirrors. */
+        q2_sim_teleport_arrive(sim, to, sp.angle, same_zone);
+        to[0] = sim->player[pi].pos[0];
+        to[1] = sim->player[pi].pos[1];
+        to[2] = sim->player[pi].pos[2];
         q2_entity_world_move_player(&sim->ent_world, pi, to);
         sim->combat.self.origin[0] = to[0];
         sim->combat.self.origin[1] = q2_sim_origin_y(to[1]);
@@ -15730,7 +15811,7 @@ static void client_menu_requests(client *c)
             break;
         }
         /* fall through: what it does after spending one is restart the level */
-        /* FALLTHROUGH */
+        Q2PSX_FALLTHROUGH;
     case Q2_MREQ_RESTART:
         /*
          * Back to the level start (client_restart_level). What follows is the
@@ -20699,6 +20780,11 @@ static void client_draw_view(void *user, q2_screen *s, int p,
         ectx.coll          = c->sim[0].coll_ready ? &c->sim[0].coll : NULL;
         ectx.coll_primary  = c->sim[0].coll_primary_ready
                            ? &c->sim[0].coll_primary : NULL;
+        /* Palette 73, the fade silhouette's CLUT (0x800E3FBE; modeldraw.h). */
+        ectx.fade_clut     = c->hud_tables_ready
+                           ? q2_hud_palette_clut(&c->hud_tables,
+                                                 Q2_SBAR_PAL_STRIP_SHADOW)
+                           : 0;
 
         q2_entity_build_ot(&c->sim[0].entities, &ectx, &c->cam, ot, gte, &estats);
         c->glint_prims += estats.glint_emitted;
@@ -21154,6 +21240,15 @@ static void client_draw_view(void *user, q2_screen *s, int p,
             inst.scale     = Q2_ONE_12;
             inst.clut4_count_a = c->clut4_count_a;
             inst.tpage         = &c->render.tpage;
+            /* And +0xFC is DrawModels' fade test (0x8006A874): a dissolving
+             * body draws additive over its subtracted silhouette. */
+            if (death->stage == Q2_PDEATH_FADING) {
+                inst.alpha     = death->scale;
+                inst.fade_clut = c->hud_tables_ready
+                               ? q2_hud_palette_clut(&c->hud_tables,
+                                                     Q2_SBAR_PAL_STRIP_SHADOW)
+                               : 0;
+            }
 
             at[0] = pl->pos[0];
             at[1] = q2_sim_origin_y(pl->pos[1]);
@@ -21196,9 +21291,11 @@ static void client_draw_view(void *user, q2_screen *s, int p,
                                          : &c->sim[0].pcombat[pi].self;
 
                 q2_light_gather(&set, &c->light_world, at, cell, 0);
+                /* Both are entity+0xFC: the kill fade's ramp while it runs,
+                 * otherwise the live field the TELEPORT sequence drives. */
                 q2_light_env_build(&env, &set,
                                    death->stage == Q2_PDEATH_FADING
-                                       ? death->scale : Q2_LIGHT_ONE,
+                                       ? death->scale : pl->light,
                                    Q2_LIGHT_ONE, ga ? ga->ambient : glow);
                 inst.light = &env;
             }
@@ -21916,6 +22013,7 @@ static void client_frame(client *c)
     }
     c->glint_drawn = false;
     q2_screen_frame_begin(&c->screen, &c->ot);
+    q2_model_shadow_frame_begin(); /* FrameShadowPolys, 0x800704D0: sixteen a frame */
 
     /*
      * THE LOADING SCREEN OWNS THE WHOLE FRAME, and there is nothing behind it.

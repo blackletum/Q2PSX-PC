@@ -1130,10 +1130,11 @@ static void test_step_gate(void)
 
     /*
      * The two arms of 0x80050CE0, side by side. A mover that has travelled
-     * from x = 2000 to x = 2400 has a live box at its CURRENT position and an
-     * envelope covering the whole trip (sim.c's mover box update only ever
-     * grows the second), so a point clear of the live box can still be inside
-     * the envelope. That gap is the whole reason there are two calls: the
+     * from x = 2000 to x = 2400 this frame has a live box at its CURRENT
+     * position and an envelope covering the frame's trip (ProcessSolidBoxs,
+     * 0x80055480, resets the second to the first at the top of every frame and
+     * 0x80051EC0 grows it from there), so a point clear of the live box can
+     * still be inside the envelope. That gap is the whole reason there are two calls: the
      * envelope arms the entity sweep, the live box decides whether the frame
      * may be kept.
      */

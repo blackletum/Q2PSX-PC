@@ -616,6 +616,47 @@ typedef struct q2_fx_beam {
 /* ------------------------------------------------------------------------- */
 /* One debris piece                                                           */
 /* ------------------------------------------------------------------------- */
+/*
+ * THE SURFACE A PIECE BROKE OFF — GetLimitedPolyData, 0x800683F8 (SCENE.C).
+ *
+ * GenerateSceneFrag (0x80064398) ends by handing the Scene node it was spawned
+ * from to 0x800683F8, which reads the node's FIRST MapMod polygon and writes a
+ * sixteen-byte texture descriptor into the object at +0x44:
+ *
+ *     +0x00  rgb      the colour table entry `col[0]` names (3 bytes)
+ *     +0x03  code     0x3E when `clut & 3` is set, else codeTable[0] | 0x3C
+ *     +0x04  uv0      the eight-byte UV set `uv_idx & 0x3F` names
+ *     +0x06  clut     clutIdTable[clut >> 8]              (0x800B2EDC)
+ *     +0x08  uv1
+ *     +0x0A  tpage    the transparent path reads tpageTable[tpage & 0x1F]
+ *                     (0x800DDD3C); the opaque path ORs blendTable[2] into it
+ *                     and WRITES IT BACK, exactly as a world polygon does
+ *     +0x0C  uv2
+ *     +0x0E  uv3
+ *
+ * The frame after the piece's packets are first built, PrimaryMovingFragment
+ * (0x80064124) sees the per-view bit `0x100 << view` the builder set in +0x10C
+ * and runs CopyFromGlobalTexture (0x80065138) over every packet in both frame
+ * buffers: the UV, CLUT and tpage halfwords and the colour word go into all
+ * four corners of every GT4. So a shard of a crate is textured as the crate,
+ * not as the Debris model's own skin — the chunk models carry a generic skin
+ * and nothing on the disc ever draws it.
+ *
+ * The colour word is overwritten again: the per-frame vertex loop stores the
+ * lit RGB into the packets on every draw, so the piece shades like any other
+ * entity and only the texture binding persists. This port keeps the lit colour
+ * and carries the binding here. `valid` is false for a burst with no node to
+ * read, which draws the model's own faces as before.
+ */
+typedef struct q2_fx_debris_texture {
+    bool valid;
+    u8   uv[4][2];     /* the UV set, corner order as MapMod stores it      */
+    u16  clut;         /* the CLUT word, already looked up                   */
+    u8   page;         /* `tpage & 0x1F`, the texture-page table index       */
+    bool semi;         /* `clut & 3` != 0: code 0x3E and the read-only page  */
+    u8   rgb[3];       /* the colour entry, kept for the record              */
+} q2_fx_debris_texture;
+
 typedef struct q2_fx_debris {
     bool in_use;
     s32  pos[3];       /* entity +0xA4 and +0x54, both set to the spawn point */
@@ -626,6 +667,7 @@ typedef struct q2_fx_debris {
     u32  flags;        /* entity +0x10C; Q2_FX_ENT_NO_GRAVITY lives here    */
     u8   area;         /* entity +0x9E */
     s32  node;         /* collision cell, -1 = unknown (same as projectiles) */
+    q2_fx_debris_texture tex;  /* entity +0x44, the broken surface's binding */
 } q2_fx_debris;
 
 /* ------------------------------------------------------------------------- */
@@ -1830,12 +1872,30 @@ bool q2_fx_debris_register(q2_fx_world *w, s16 model);
  * The Y bias is the whole reason debris arcs: -1536 is up in this engine's
  * frame. Its model is picked uniformly from the registration list.
  *
+ * `tex` is the broken surface's texture binding (q2_fx_debris_texture) and is
+ * copied into every piece; NULL spawns pieces that draw the model's own faces.
+ *
  * Returns how many pieces were actually spawned, which is less than `count`
  * when the pool fills.
  */
 u32 q2_fx_debris_burst(q2_fx_world *w, q2_rng *rng,
                        const s32 bmin[3], const s32 bmax[3],
-                       const s32 *at, u32 count, u8 area);
+                       const s32 *at, u32 count, u8 area,
+                       const q2_fx_debris_texture *tex);
+
+/*
+ * GetLimitedPolyData (0x800683F8) over MapMod record `rec`: the FIRST polygon's
+ * binding, as the console reads it off the node the burst was raised on. False
+ * when the record has no polygon or its UV set is out of range; `out->valid`
+ * follows the result either way.
+ */
+bool q2_fx_debris_texture_from_mapmod(const q2_mapmod_rec *rec,
+                                      q2_fx_debris_texture *out);
+
+/* The same, located from a Scene node index. False for a node that has no
+ * MapMod record. */
+bool q2_fx_debris_texture_from_scene(const q2_scene *scene, u32 node,
+                                     q2_fx_debris_texture *out);
 
 /*
  * WHICH HULL DEBRIS MOVES IN, and it is not the player's.
@@ -1893,6 +1953,34 @@ void q2_fx_debris_commit(q2_fx_world *w, u32 index, const s32 to[3]);
  * handed to the shared mover — so this stops it at the contact point.
  */
 void q2_fx_debris_impact(q2_fx_world *w, u32 index, const s32 point[3]);
+
+/*
+ * THE TUMBLE — PrimaryMovingFragment, 0x8006425C..0x8006431C.
+ *
+ * After the move, and unless the help computer is up ([0x800AE8B4], which
+ * HelpComputer_StartDisplay sets and gameplay never does), every piece turns
+ * all three of its angles by a fresh random amount each tick:
+ *
+ *     step = ((rand() & 0x7F) + 127) * 2            254..508 per axis
+ *     if (spin.x & 1)  spin += { +step, -step, +step }
+ *     else             spin += { -step, +step, -step }
+ *
+ * three draws in x, y, z order, each on its own halfword with the natural wrap
+ * (`lhu`/`sh`). Every step is even, so the parity of spin.x is set by the raw
+ * draw at spawn and fixes a piece's turning direction for life; the impact's
+ * +1 (q2_fx_debris_impact) is the one thing that flips it, so a shard that hits
+ * a wall reverses its tumble. RotMatrix then rebuilds +0x2C0 from the angles,
+ * which is what the draw reads.
+ */
+void q2_fx_debris_tumble(q2_fx_world *w, u32 index, q2_rng *rng);
+
+/*
+ * THE CLOCK — 0x80064344..0x8006436C. `life -= frame_delta` (0x800B2DB4) once
+ * a tick, after the tumble; at or below zero the object is freed. `dt` is the
+ * simulation's own tick delta (q2_sim.cur_dt), the same number the mover
+ * scales gravity by.
+ */
+void q2_fx_debris_age(q2_fx_world *w, u32 index, s32 dt);
 
 /* ------------------------------------------------------------------------- */
 /* Glints                                                                     */

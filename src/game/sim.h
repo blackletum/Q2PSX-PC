@@ -240,6 +240,28 @@ typedef struct q2_player {
     u32  ent2_flags;
 
     /*
+     * entity+0xFC — THE PLAYER'S LIGHT INTENSITY, 4096 = 1.0, the same field
+     * an item's materialise ramp drives (entity.h). The allocator writes 4096
+     * (0x8006C1B8) and nothing on the player path touches it but the
+     * TELEPORT sequence in PrimaryQuakePlayer (0x8003A314..0x8003A3B0):
+     *
+     *   while +0x98 bit 14 (Q2_ENT_TELEPORT_FADE) is set — PSXTELEPORT sets
+     *   it on every frame the player stands in a pad with a non-zero light
+     *   (0x80028990, 0x80028BA8..0x80028BB4) — bit 15 goes on and the light
+     *   falls by `dt << 7` a frame, clamped at zero (0x8003A338..0x8003A358);
+     *   otherwise, while bit 15 (Q2_ENT_LIGHT_RAMP) is set, it climbs by
+     *   `dt << 5` a frame and bit 15 clears at 4096 (0x8003A36C..0x8003A3AC).
+     *
+     * The teleport itself only happens once the light has reached zero, so
+     * the console's teleporter is: 3 frames of the gun fading to black on
+     * PAL (4096, 2560, 1024, 0 at dt 12), the move on the 4th, then 11 frames
+     * climbing back (384 a frame); 4 and 13 on the US disc at dt 10. The
+     * view weapon copies this field every frame (0x8004EE70), which is what
+     * makes the fade visible in first person; the body uses it in a mirror.
+     */
+    s16  light;
+
+    /*
      * The view recentre, 0x8003A780. Not a setting and not a key: holding the
      * two LOOK buttons together for a second frame arms it, and it then walks
      * the pitch to zero and disarms itself.
@@ -1209,8 +1231,12 @@ void q2_sim_glint_evacuation_tick(q2_sim *sim, s32 dt);
  *
  * This is what a breaking pane calls, through q2_sim_breakable_call below.
  */
+/* `scene`/`node` name the Scene node the burst comes off; every piece takes
+ * that node's first MapMod polygon as its texture (GetLimitedPolyData,
+ * 0x800683F8). NULL / -1 spawns pieces with the model's own skin. */
 u32 q2_sim_debris_burst(q2_sim *sim, const s32 bmin[3], const s32 bmax[3],
-                        const s32 *at, u32 count, u8 area);
+                        const s32 *at, u32 count, u8 area,
+                        const q2_scene *scene, s32 node);
 
 /*
  * The area byte a particle spawner wants — `0x800686C4`.
@@ -1535,14 +1561,29 @@ q2_result q2_sim_attach_movers(q2_sim *sim, const q2_mover_set *set,
                                const q2_scene *scene);
 
 /*
+ * ProcessSolidBoxs — 0x80055480, which QuakeLoop runs at 0x80038F94 at the top
+ * of every frame, before the object thinks move the doors and before the
+ * players move. For every active slot of the 48-entry table at 0x800CAE10 it
+ * copies the live box over the swept envelope (+0x00..+0x17 to +0x18..+0x2F,
+ * 0x800554C4..0x800554F0) and zeroes the frame's displacement (+0x30..+0x35,
+ * 0x800554F4), so the envelope 0x80051EC0 then grows is this FRAME's sweep, not
+ * the door's history. The mover parts only: see sim.c for why.
+ *
+ * Call once per logic frame, before q2_movers_tick and q2_sim_movers_update.
+ */
+void q2_sim_solid_boxes_frame(q2_sim *sim);
+
+/*
  * Slide the registered boxes to where the movers now are — 0x80051EC0, which
  * the original runs once per mover per frame.
  *
  * Two boxes move, differently. The live box translates by the frame's delta;
- * the swept envelope only ever grows, one corner at a time by the sign of each
- * component, so it ends up covering the whole travel. `dy` takes the frame's
- * vertical change, which is what q2_move_sweep_box consumes as `other_dy` and
- * therefore what lets a player ride a lift.
+ * the swept envelope grows, one corner at a time by the sign of each component,
+ * so after the move it covers where the box was at the top of the frame and
+ * where it is now (q2_sim_solid_boxes_frame is the reset that keeps it to one
+ * frame). `dy` takes the frame's vertical change, which is what
+ * q2_move_sweep_box consumes as `other_dy` and therefore what lets a player
+ * ride a lift.
  *
  * Call once per tick, immediately after q2_movers_tick.
  */
@@ -1692,6 +1733,36 @@ bool q2_sim_take_zone_change(q2_sim *sim, u32 *out_zone);
 
 /* Place the player, e.g. at a StartPos. */
 void q2_sim_spawn(q2_sim *sim, const s32 pos[3], s32 yaw);
+
+/*
+ * The two +0x98 bits of the TELEPORT sequence (see q2_player.light). Bit 14
+ * is in the player frame's own per-frame clear (0x8003A294 `addiu v1,-16385`),
+ * so it is only ever true for the rest of the frame a pad asserted it on;
+ * bit 15 persists until the light is back at 4096.
+ */
+#define Q2_ENT_TELEPORT_FADE 0x00004000u
+#define Q2_ENT_LIGHT_RAMP    0x00008000u
+
+/*
+ * PSXTELEPORT's gate, 0x80028988..0x80028990: called when a script reaches a
+ * TELEPORT CALL with this player as the entity. Returns true when the light
+ * is zero and the move should happen now; otherwise sets bit 14 so this
+ * tick's player frame fades the light, and returns false. The caller must
+ * also set `event_rt.promote_cat_b` so the record re-runs next frame.
+ */
+bool q2_sim_teleport_touch(q2_sim *sim);
+
+/*
+ * The move itself, both arms of 0x80028AD4..0x80028B98. `pos` is the StartPos
+ * (the feet). Same zone: SetupBoxDrop (0x80050FA0) places the origin at
+ * start.y - 286 and drops it onto the floor within 1024 units, and the view
+ * angles become (0, start yaw, 0) (0x80028B70..0x80028B94). Another zone:
+ * the origin is written with y - 286 (0x80028ADC..0x80028B04) and the angles
+ * are NOT touched — the player arrives facing the way they were. Neither arm
+ * writes the velocity, the light or the flags: the fade-up runs on from here.
+ */
+void q2_sim_teleport_arrive(q2_sim *sim, const s32 pos[3], s32 yaw,
+                            bool same_zone);
 
 /*
  * Drop the player onto the floor beneath where they were spawned, using the

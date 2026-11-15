@@ -2,6 +2,7 @@
 
 #include "combat.h"   /* q2_actor: the presentation pass ticks its effect[] slots */
 #include "fixed.h"
+#include "vram.h"     /* q2_vram_clut_word: the debris texture's CLUT lookup */
 #include "hud.h"
 #include "trig.h"
 
@@ -2264,7 +2265,8 @@ bool q2_fx_debris_register(q2_fx_world *w, s16 model)
 
 u32 q2_fx_debris_burst(q2_fx_world *w, q2_rng *rng,
                        const s32 bmin[3], const s32 bmax[3],
-                       const s32 *at, u32 count, u8 area)
+                       const s32 *at, u32 count, u8 area,
+                       const q2_fx_debris_texture *tex)
 {
     s32 size[3];
     u32 made = 0, i;
@@ -2329,6 +2331,11 @@ u32 q2_fx_debris_burst(q2_fx_world *w, q2_rng *rng,
         d->life = Q2_FX_DEBRIS_LIFE;
         d->area = area;
         d->node = -1;
+
+        /* 0x80064530: the spawner's last act hands the node to
+         * GetLimitedPolyData; the texture it reads is the piece's for life. */
+        if (tex && tex->valid)
+            d->tex = *tex;
 
         /* 0x8006473C picks uniformly from the registration list. A level that
          * registered nothing spawns pieces with no model, which is what the
@@ -2421,6 +2428,115 @@ void q2_fx_debris_impact(q2_fx_world *w, u32 index, const s32 point[3])
 
     if (d->life <= 0)
         d->in_use = false;
+}
+
+/* One turning step, 0x80064270..0x8006427C: `(rand() & 0x7F) + 127`, doubled
+ * by the `sll 1` before it meets the angle. 254..508. */
+static s16 debris_turn(q2_rng *rng)
+{
+    return (s16)((((u32)q2_rng_next(rng) & 0x7Fu) + 127u) * 2u);
+}
+
+void q2_fx_debris_tumble(q2_fx_world *w, u32 index, q2_rng *rng)
+{
+    q2_fx_debris *d;
+    s16 sx, sy, sz;
+
+    if (!w || !rng || index >= Q2_FX_DEBRIS_MAX)
+        return;
+    d = &w->debris[index];
+    if (!d->in_use)
+        return;
+
+    /* Three draws, x then y then z (0x80064270, 0x8006428C, 0x800642A8 on the
+     * odd arm; 0x800642C8, 0x800642E4, 0x80064300 on the even one). The
+     * halfwords wrap as the console's `lhu`/`sh` pairs do. */
+    sx = debris_turn(rng);
+    sy = debris_turn(rng);
+    sz = debris_turn(rng);
+    if (d->spin[0] & 1) {
+        d->spin[0] = (s16)((u16)d->spin[0] + (u16)sx);   /* 0x80064288 */
+        d->spin[1] = (s16)((u16)d->spin[1] - (u16)sy);   /* 0x800642A4 */
+        d->spin[2] = (s16)((u16)d->spin[2] + (u16)sz);   /* 0x800642C4 */
+    } else {
+        d->spin[0] = (s16)((u16)d->spin[0] - (u16)sx);   /* 0x800642E0 */
+        d->spin[1] = (s16)((u16)d->spin[1] + (u16)sy);   /* 0x800642FC */
+        d->spin[2] = (s16)((u16)d->spin[2] - (u16)sz);   /* 0x80064318 */
+    }
+}
+
+void q2_fx_debris_age(q2_fx_world *w, u32 index, s32 dt)
+{
+    q2_fx_debris *d;
+
+    if (!w || index >= Q2_FX_DEBRIS_MAX)
+        return;
+    d = &w->debris[index];
+    if (!d->in_use)
+        return;
+
+    /* 0x80064344..0x80064358: `lhu`, subtract, `sh`; then 0x80064360's
+     * `bgtz` on the sign-extended result frees the object at zero or below. */
+    d->life = (s16)((u16)d->life - (u16)dt);
+    if (d->life <= 0)
+        d->in_use = false;
+}
+
+bool q2_fx_debris_texture_from_mapmod(const q2_mapmod_rec *rec,
+                                      q2_fx_debris_texture *out)
+{
+    q2_mapmod_poly poly;
+    const u8 *uv;
+    int i;
+
+    if (!out)
+        return false;
+    memset(out, 0, sizeof(*out));
+
+    /* 0x800683FC..0x80068404: the record's first polygon, `a3 + 8`. */
+    if (!rec || !q2_mapmod_get_poly(rec, 0, &poly))
+        return false;
+
+    /* 0x80068408: `lbu 11(a1) & 0x3F` selects the eight-byte UV set. */
+    if (!rec->uv || poly.uv_idx >= rec->uv_count)
+        return false;
+    uv = rec->uv + (size_t)poly.uv_idx * 8;
+    for (i = 0; i < 4; i++) {
+        out->uv[i][0] = uv[i * 2 + 0];
+        out->uv[i][1] = uv[i * 2 + 1];
+    }
+
+    /* 0x80068460: `lbu 9(a1)` into clutIdTable (0x800B2EDC). */
+    out->clut = q2_vram_clut_word(q2_mapmod_clut_index(poly.clut));
+
+    /* 0x80068480: `lbu 4(a1) * 3` into the colour table. */
+    if (rec->rgb && poly.col[0] < rec->rgb_count) {
+        out->rgb[0] = rec->rgb[(size_t)poly.col[0] * 3 + 0];
+        out->rgb[1] = rec->rgb[(size_t)poly.col[0] * 3 + 1];
+        out->rgb[2] = rec->rgb[(size_t)poly.col[0] * 3 + 2];
+    }
+
+    /* 0x800684AC: `lbu 8(a1) & 3` — code 0x3E and the transparent page read
+     * (0x800684CC..0x800684E8), else codeTable[0] | 0x3C and the opaque
+     * promotion with write-back (0x800684EC..0x8006852C). */
+    out->semi  = q2_mapmod_clut_semi(poly.clut) != 0;
+    out->page  = (u8)(poly.tpage & 0x1F);
+    out->valid = true;
+    return true;
+}
+
+bool q2_fx_debris_texture_from_scene(const q2_scene *scene, u32 node,
+                                     q2_fx_debris_texture *out)
+{
+    q2_mapmod_rec rec;
+
+    if (!out)
+        return false;
+    if (!scene || !q2_scene_get_mapmod(scene, node, &rec)) {
+        memset(out, 0, sizeof(*out));
+        return false;
+    }
+    return q2_fx_debris_texture_from_mapmod(&rec, out);
 }
 
 /* ------------------------------------------------------------------------- */

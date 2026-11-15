@@ -208,7 +208,7 @@ typedef enum q2_uf_prim {
     Q2_UF_CAGELIFT1,      /* linear mover variant                             */
     Q2_UF_ROTHATCH,       /* rotating mover                                   */
     Q2_UF_SIMROT,         /* start rotation on up to 4 objects                */
-    Q2_UF_SIMROT2,        /* as SIMROT, different constructor                 */
+    Q2_UF_SIMROT2,        /* as SIMROT; handler 0x8002F154 steps angle+=speed */
     Q2_UF_INWATER,        /* entity env flag 0x0004                           */
     Q2_UF_INCROUCH,       /* entity env flag 0x0200                           */
     Q2_UF_INLOWCROUCH,    /* entity env flag 0x0400                           */
@@ -232,7 +232,7 @@ typedef enum q2_uf_prim {
     Q2_UF_MISEVENT,       /* mission event by 12-byte key                     */
     Q2_UF_EXPLO,          /* stub in both slots (unused)                      */
     Q2_UF_HELPCOMPUTER,   /* two Strings keys + a u32                         */
-    Q2_UF_FLKLIGHT,       /* flickering light with randomised on/off times    */
+    Q2_UF_FLKLIGHT,       /* one-frame light, random radii; gated on X bit 0  */
     Q2_UF_SHOOTTHEN,      /* hit-point counter; also the damage callback      */
     Q2_UF_MISCOMPLETE,    /* mission complete: fixed start point, state 7     */
     Q2_UF_PLATFORM,       /* linear platform                                  */

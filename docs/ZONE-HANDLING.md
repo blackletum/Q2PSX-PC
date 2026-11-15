@@ -42,26 +42,32 @@ their live AI move after wake-up has installed the class callbacks.
 Creature residency follows the saved position in the destination PrimaryColl.
 Collision nodes, model bindings, actor caches and AI links are rebuilt.
 
-Dynamic drops, explosion models, gibs and projectiles have a monotonically
-allocated map-local identity. It survives an overlapping doorway without
-duplicating the object; collection, expiry and slot reuse retire the old
-identity. Airborne drops retain their velocity side table, initial draw origin,
-bounds and remaining life. Landed drops retain their pickup think and countdown.
-Gibs retain their velocity, rest flags and spin, including the retail case of
-a body with no resolved model. A missing model or full physics/projectile pool
-defers the record without deleting its history.
-
-All projectile kinds retain velocity, damage, flags, fuse, bounce state,
-attitude, rocket phase and BFG animation/beam timing. Creature shooters are
-rebound by authored identity, even when the shooter is no longer resident.
-Held grenades follow the player through same-map gates. Ordinary objects join
-the destination when their saved position is inside its PrimaryColl; otherwise
-they wait in their last zone. Collision-node caches are recomputed.
+At departure the client first does what OnLeavingZone does before it stores
+anything. FinishDying (0x8007F630) turns every creature still carrying deadflag
+DEAD_DEAD into a detached class-47 body resting on its death move's last frame,
+with no edict, no think and no AI methods; the store/respawn pair (0x80059B08 /
+0x8007D558) brings it back as that body under the corpse handler. Then
+SaveCreatures' kill hooks run: gibs and boss fragments (class 48, DestroyMe) and
+every pickup whose flags carry bit 4 — death drops (0x80020B38) and collected
+pickups — are removed, because LoadStoreQuakePickup (0x8005B4EC) refuses to
+store them and RememberMe kills the slot regardless. Explosion models and
+projectiles in flight, the held grenade included, are carried through an
+overlapping doorway with their velocity, fuse, attitude and shooter binding,
+because the zone path (LoadZone 0x8007901C → ReloadLevelData 0x800793B8) never
+resets the object array or the missile pool; only the level path (LoadLevel
+0x8007CA44 → FinishedLoading 0x8007C938) does. An object that does not join the
+destination's PrimaryColl is not parked: the console has no suspended objects,
+so the history rebuilds its dynamic and projectile records from the live world
+at every departure and such an object is simply gone.
 
 Creature snapshots retain the module-relative move, AI frame, next think,
 attack/pain deadlines, pursuit targets and the fractional display cursor.
-Death moves finish normally instead of freezing or restarting; detached bodies
-keep their dissolve state. The map's AI clock, fractional tick, alert references
+A creature caught mid-death at the gate becomes a body on its death clip's
+last frame, as FinishDying and RespawnQuakeDeadBody produce; detached bodies
+keep their dissolve state. (The console's returning body sits two animation
+frames further into the clip than the body the player left — death clips are
+three animation frames per AI frame and LastFrameFromSequenceNum answers the
+clip's end; the port rests on the move's last frame on both sides.) The map's AI clock, fractional tick, alert references
 and player trail also survive. Unloaded objects are suspended: their remaining
 deadlines are rebased on re-entry, while objects transferred through overlapping
 geometry continue on the active clock. Timers stored as durations stay durations.
@@ -115,12 +121,17 @@ leaving, saving, reopening the save and returning.
 
 The runtime regression adds airborne/landed drops, an explosion, an unbound gib,
 all five projectile kinds and a held grenade, a firing creature and a creature
-partway through death. It saves in both the unloaded and resident zones, then
-checks exact state and the next physics/animation step against the uninterrupted
-state. A corpse-dissolve round trip, removal followed by slot reuse, repeated
-BASE1 overlap crossings and a full toss-table deferral test guard against lost
-objects and duplication. The runtime image pair shows drops and projectiles
-before departure and after a cold save/load and return.
+one frame into its death. A cold save in the zone records all of them; a gate
+kills the drops and the gib, finishes the dying creature into a corpse on its
+death move's last frame, carries the held grenade, and leaves the rest where the
+console would — live in the next zone, not waiting — so nothing but the grenade
+and the two creatures is there on return. The same test measures every named
+death move of the resident modules against the model's clip chain (one clip per
+move, three animation frames per AI frame). A corpse-dissolve round trip,
+removal followed by slot reuse, repeated BASE1 overlap crossings and a
+toss-table deferral test guard against lost objects and duplication. The
+runtime image pair shows drops and a projectile before departure and, after a
+gate out and back, the authored pickup alone.
 
 `test_save` additionally checks multi-map history encoding, removal/corpse/item
 fields, v1 migration, independent runtime copies, older files without ZPOP,
@@ -137,3 +148,6 @@ not archived; restored objects emit their ongoing effects on subsequent ticks.
 Creature-module and LevelBin handler coverage and limits
 are tracked in [CREATURE-AUDIT.md](CREATURE-AUDIT.md) and
 [ENTITY-AUDIT.md](ENTITY-AUDIT.md).
+A living creature still returns with its live AI move; the console
+(GeneralRespawnStuffStore, 0x8007D318) keeps position, health, yaw, target and
+spawn flags and spawns it afresh.

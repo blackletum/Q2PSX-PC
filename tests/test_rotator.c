@@ -211,6 +211,158 @@ static void test_one_step_per_request(void)
     q2_rotators_free(&set);
 }
 
+/*
+ * SIMROT2's handler, 0x8002F154 (PrimarySimRot_PDH2), is not SIMROT's.
+ *
+ *   8002F178  lhu  v0, 0(v1)       ; angle slot
+ *   8002F17C  lhu  a0, 58(a2)      ; obj+0x3A, item+4's speed
+ *   8002F184  addu v0, v0, a0
+ *   8002F188  andi v0, v0, 0xFFF
+ *   8002F18C  sh   v0, 0(v1)
+ *
+ * No `mult` against [0x800B2DB4], no obj+0x20 accumulator: the angle moves by
+ * `speed` per request whatever the frame length. The numbers below are the
+ * disc's: BOSS2 COMMON record +0x2E0 carries two SIMROT2s with speed 0x0400,
+ * so each TIMER pulse is a quarter turn and four of them are a full one. The
+ * accumulator formula would have given 4 * dt per pulse instead.
+ */
+static void test_simrot2_steps_by_speed(void)
+{
+    q2_rotator_set set;
+    q2_rotator *r;
+    int i;
+
+    puts("SIMROT2 steps the angle by its speed, unscaled (0x8002F154)");
+
+    memset(&set, 0, sizeof(set));
+    r = q2_rotators_add(&set, Q2_ROT_STEP, 22, 0, 0x0400);
+    check(r != NULL, "a SIMROT2 rotator can be added");
+
+    /* 0x8002F164: nothing without the enable bit. */
+    check_eq(q2_rotators_tick(&set, 30), 0, "an untriggered SIMROT2 does not move");
+    check_eq(set.rotators[0].angle, 0, "and its angle stays put");
+
+    /* One request at dt 30 and one at dt 1 move by the same 1024. */
+    q2_rotator_trigger(&set, 0);
+    check_eq(q2_rotators_tick(&set, 30), 1, "a triggered SIMROT2 moves once");
+    check_eq(set.rotators[0].angle, 0x400, "by exactly its speed at dt 30");
+    check(!set.rotators[0].step_pending, "and the enable bit is cleared (0x8002F19C)");
+
+    q2_rotator_trigger(&set, 0);
+    q2_rotators_tick(&set, 1);
+    check_eq(set.rotators[0].angle, 0x800, "and by the same amount at dt 1");
+    check_eq(set.rotators[0].accum, 0, "the accumulator is never written");
+
+    /* Two more quarter turns: 0xC00, then the andi 0xFFF wrap back to 0. */
+    q2_rotator_trigger(&set, 0);
+    q2_rotators_tick(&set, 7);
+    check_eq(set.rotators[0].angle, 0xC00, "three quarters");
+    q2_rotator_trigger(&set, 0);
+    q2_rotators_tick(&set, 7);
+    check_eq(set.rotators[0].angle, 0, "four requests are one full turn (andi 0xFFF)");
+
+    /* A tick with no new request is still a no-op — the bit was consumed. */
+    for (i = 0; i < 5; i++)
+        check_eq(q2_rotators_tick(&set, 30), 0, "no request, no step");
+    check_eq(set.rotators[0].angle, 0, "and the angle is unchanged");
+
+    /* Two requests in one tick are one step, as at 0x8002DEA8. */
+    q2_rotator_trigger(&set, 0);
+    q2_rotator_trigger(&set, 0);
+    check_eq(q2_rotators_tick(&set, 30), 1, "two requests in a tick are one step");
+    check_eq(set.rotators[0].angle, 0x400, "of one quarter turn");
+
+    /* A negative speed wraps the other way: 0 - 0x400 masked is 0xC00. */
+    set.rotators[0].speed = (s16)-0x400;
+    set.rotators[0].angle = 0;
+    q2_rotator_trigger(&set, 0);
+    q2_rotators_tick(&set, 30);
+    check_eq(set.rotators[0].angle, 0xC00, "a negative speed wraps through 4096");
+
+    q2_rotators_free(&set);
+}
+
+/* The constructor binds the kind: 0x800283D4 installs 0x8002F154 for SIMROT2
+ * where 0x800285B8 installs 0x8002F1A8 for SIMROT, from the same item shape. */
+static void test_simrot2_constructor_kind(void)
+{
+    u8 scene_raw[Q2_SCENE_NODE_SIZE];
+    u8 event_raw[56];
+    u8 uf_raw[4 + 2 * Q2_UF_RECORD_SIZE];
+    q2_scene scene;
+    q2_events events;
+    q2_userfuncs uf;
+    q2_rotator_set set;
+    const s32 bmin[3] = { 0, 0, 0 }, bmax[3] = { 10, 10, 10 }, org[3] = { 0, 0, 0 };
+
+    puts("the SIMROT2 constructor binds the step handler");
+
+    memset(scene_raw, 0, sizeof(scene_raw));
+    write_scene_node(scene_raw, 0, bmin, bmax, org);
+    memset(&scene, 0, sizeof(scene));
+    scene.nodes = scene_raw;
+    scene.node_count = 1;
+
+    memset(uf_raw, 0, sizeof(uf_raw));
+    q2_wr_u16(uf_raw, 2);
+    memcpy(uf_raw + 4 + 0 * Q2_UF_RECORD_SIZE, "SIMROT", 6);
+    memcpy(uf_raw + 4 + 1 * Q2_UF_RECORD_SIZE, "SIMROT2", 7);
+    uf.data = uf_raw;
+    uf.size = sizeof(uf_raw);
+    uf.count = 2;
+
+    /* Two one-item records, each a 24-byte CALL naming node 0 with speed
+     * 0x0400 and axis 0 — BOSS2's own operands. Record 0 is SIMROT, record 1
+     * SIMROT2. */
+    memset(event_raw, 0, sizeof(event_raw));
+    q2_wr_u16(event_raw + 0, 28);
+    event_raw[2] = 1;
+    event_raw[4] = Q2_EVOP_CALL;
+    event_raw[5] = 24;
+    event_raw[6] = 0;
+    q2_wr_u16(event_raw + 8, 0x0400);
+    q2_wr_u16(event_raw + 16, 0);
+    q2_wr_u16(event_raw + 18, (u16)-1);
+    q2_wr_u16(event_raw + 20, (u16)-1);
+    q2_wr_u16(event_raw + 22, (u16)-1);
+
+    q2_wr_u16(event_raw + 28, 28);
+    event_raw[30] = 1;
+    event_raw[32] = Q2_EVOP_CALL;
+    event_raw[33] = 24;
+    event_raw[34] = 1;
+    q2_wr_u16(event_raw + 36, 0x0400);
+    q2_wr_u16(event_raw + 44, 0);
+    q2_wr_u16(event_raw + 46, (u16)-1);
+    q2_wr_u16(event_raw + 48, (u16)-1);
+    q2_wr_u16(event_raw + 50, (u16)-1);
+
+    memset(&events, 0, sizeof(events));
+    events.data = event_raw;
+    events.size = sizeof(event_raw);
+    events.record_count = 2;
+    events.first_record = 0;
+
+    memset(&set, 0, sizeof(set));
+    check_eq(q2_rotators_build(&set, &events, &uf, &scene), Q2_OK,
+             "the two-record stream builds");
+    check_eq(set.count, 2, "both rotation families build");
+    if (set.count == 2) {
+        check_eq(set.rotators[0].kind, Q2_ROT_ACCUM, "SIMROT is the accumulator");
+        check_eq(set.rotators[1].kind, Q2_ROT_STEP, "SIMROT2 is the stepper");
+        check_eq(set.rotators[1].speed, 0x0400, "with item+4 as its step");
+
+        /* The same two requests, the same dt, two different answers. */
+        q2_rotator_trigger(&set, 0);
+        q2_rotator_trigger(&set, 1);
+        q2_rotators_tick(&set, 1);
+        check_eq(set.rotators[0].angle, 4, "SIMROT: (0x400 * 1) >> 8 = 4");
+        check_eq(set.rotators[1].angle, 0x400, "SIMROT2: 0 + 0x400");
+    }
+
+    q2_rotators_free(&set);
+}
+
 static void test_angle_wrap(void)
 {
     q2_rotator_set set;
@@ -824,6 +976,8 @@ int main(void)
     puts("=======================");
 
     test_one_step_per_request();
+    test_simrot2_steps_by_speed();
+    test_simrot2_constructor_kind();
     test_target_sweep();
     test_target_state_machine();
     test_motor_loop();

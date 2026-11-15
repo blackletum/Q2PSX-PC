@@ -66,17 +66,35 @@ Q2PSX_INLINE s32 q2_clamp_u16(s64 v)  { return q2_clamp_s32(v, 0, 65535); }
 Q2PSX_INLINE s32 q2_clamp_u8(s64 v)   { return q2_clamp_s32(v, 0, 255); }
 
 /* Count leading zeros on a 32-bit value, matching the GTE's LZCS/LZCR op.
- * Portable rather than intrinsic: this is not hot enough to matter. */
+ * gte_divide normalises every SZ3 through this — three thousand times a
+ * frame on BASE3, each a 16-to-31-step loop in the portable form — so the
+ * compilers' instructions stand in where they exist. The loop remains as the
+ * definition and the fallback; the results are the same for every value. */
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+#endif
 Q2PSX_INLINE s32 q2_count_leading_zeros_u32(u32 v)
 {
-    s32 n = 0;
     if (v == 0)
         return 32;
-    while (!(v & 0x80000000u)) {
-        v <<= 1;
-        n++;
+#if defined(__GNUC__) || defined(__clang__)
+    return (s32)__builtin_clz(v);
+#elif defined(_MSC_VER)
+    {
+        unsigned long index;
+        _BitScanReverse(&index, v);
+        return 31 - (s32)index;
     }
-    return n;
+#else
+    {
+        s32 n = 0;
+        while (!(v & 0x80000000u)) {
+            v <<= 1;
+            n++;
+        }
+        return n;
+    }
+#endif
 }
 
 #endif /* Q2PSX_FIXED_H */

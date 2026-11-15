@@ -378,9 +378,33 @@ bool q2_light_muzzle_preset(u8 weapon_id, q2_muzzle_light *out);
  * The disc carries exactly ONE FLKLIGHT call, so this is deliberately small: a
  * fixed set, no allocation, and a tick that costs nothing when empty.
  */
-/* The flicker's radii, as 0x8002882C and 0x8002885C compute them. */
+/* The flicker's radii, as 0x8002882C and 0x2885C compute them. */
 s32 q2_flklight_inner_radius(s32 rand_0_32767);
 s32 q2_flklight_outer_radius(s32 rand_0_32767);
+
+/*
+ * THE GATE IN FRONT OF ALL OF THAT. The exec's first act, before the viewport
+ * loop and before either rand():
+ *
+ *     800287C0  lw   v0, 4(s2)          ; item+4, the first word of `origin`
+ *     800287C8  andi v0, v0, 1
+ *     800287CC  beq  v0, zero, 0x800288F0   ; -> return item+24, nothing done
+ *
+ * So bit 0 of the light's X coordinate is an enable flag, and the constructor
+ * at 0x8002E648 copies the twelve bytes at +4..+15 from the pristine buffer at
+ * gp+376 — the ZONE file's Events chunk — over COMMON's working copy. That is
+ * how the flag is authored per zone: the disc's one FLKLIGHT call (JAIL2
+ * record +0x694, item +36) carries X = 0x5280 in COMMON, ZONE0 and ZONE2 and
+ * X = 0x5281 in ZONE1, so the console shows this light in zone 1 only. A port
+ * that skipped the gate, or read COMMON's bytes, added a light in two zones
+ * the console does not light and pulled two numbers off the shared random
+ * stream there that it does not pull.
+ *
+ * `item` is the CALL item's first byte (the opcode) IN THE BUFFER THE
+ * CONSTRUCTOR RESTORED FROM — pass the zone copy (q2_uf_operand_at), not
+ * COMMON's.
+ */
+bool q2_flklight_enabled(const u8 *item);
 
 
 /* ------------------------------------------------------------------------- */

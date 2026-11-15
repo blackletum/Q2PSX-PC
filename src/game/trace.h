@@ -187,8 +187,11 @@ typedef struct q2_move_target {
      * the frame's delta added to BOTH corners (0x80051F08-0x80051F7C), so it
      * translates. The envelope gets it added to ONE corner at a time, chosen
      * by the sign of each component (`bgez v1` -> +0x24 when positive, +0x18
-     * when negative, at 0x80051FBC onward), so it only ever GROWS: it covers
-     * the whole of the door's travel.
+     * when negative, at 0x80051FBC onward), so within a frame it only GROWS.
+     * It does not cover the door's whole travel, though: ProcessSolidBoxs
+     * (0x80055480, at the top of every QuakeLoop frame) copies the live box
+     * back over it first, so it is the union of where the box stood at the
+     * start of the frame and where it stands now (q2_sim_solid_boxes_frame).
      *
      * The distinction is load-bearing. The broad-phase gate that decides
      * whether to sweep entities at all (0x80050CE0 with a2 = 1) reads the

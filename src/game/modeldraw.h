@@ -42,6 +42,7 @@ typedef struct q2_model_draw_stats {
     u32 faces_rejected_back;   /* both NCLIP halves faced away                */
     u32 ot_overflow;
     u32 faces_semi;            /* blend selector 1..4: drawn with ABE         */
+    u32 fades_emitted;         /* 0x8006DD68 silhouette POLY_FT4s, one a face */
     u32 shadows_emitted;       /* 0x800784CC floor-shadow POLY_FT4            */
     u32 glint_emitted;
     u32 glint_draws;  /* includes wholly black bands, whose phases still age */
@@ -59,6 +60,30 @@ typedef struct q2_model_draw_stats {
 #define Q2_MODEL_SHADOW_FADE     600
 #define Q2_MODEL_SHADOW_CLUT_X     0
 #define Q2_MODEL_SHADOW_CLUT_Y   248
+
+/*
+ * THE PER-FRAME SHADOW BUDGET — FrameShadowPolys (0x80078A64) and the test at
+ * the top of DrawCreShadow (0x800784CC).
+ *
+ * The console does not allocate a shadow packet per entity. InitShadowPolys
+ * (0x800783B8) builds sixteen POLY_FT4 templates per draw buffer at
+ * 0x800B657C, and ChrisInitEveryFrame (jal at 0x800704D0) points the write
+ * cursor 0x800B2F3C at this buffer's first (draw buffer + 11852) and the
+ * limit 0x800B2F40 at its end (draw buffer + 12492): (12492 - 11852) / 40 =
+ * 16 packets of 40 bytes. DrawCreShadow returns at once when the cursor has
+ * reached the limit (0x80078504..0x80078508) and advances it by one packet
+ * only after a shadow is linked (0x80078938..0x8007893C). A shadow that has
+ * faded (height > 600, 0x80078524) or collapsed to an empty footprint
+ * (0x80078774 / 0x80078784) returns earlier and costs nothing.
+ *
+ * The cursor is reset once per FRAME, not per viewport, so the sixteen are
+ * shared by every view: in split screen the first viewport's bodies take
+ * theirs first, in the object-slot order DrawModels (0x8006A6E4) walks, and
+ * the second viewport draws shadows under what is left.
+ */
+#define Q2_MODEL_SHADOW_FRAME_MAX 16
+void q2_model_shadow_frame_begin(void);
+u32  q2_model_shadow_frame_remaining(void);
 
 /*
  * BACKFACE REJECTION for a model face, and why its sign is the WORLD'S
@@ -116,6 +141,26 @@ Q2PSX_INLINE bool q2_model_quad_faces_camera(gte_state *g, const gte_sxy screen[
  * what the 1,324 static models want, and what an articulated model falls back
  * to when its animation has not been selected yet.
  */
+/*
+ * One texture binding forced onto EVERY face of an instance.
+ *
+ * This is CopyFromGlobalTexture (0x80065138, GENEFECT.C): a scene fragment's
+ * packets, in both frame buffers, have the sixteen-byte descriptor
+ * GetLimitedPolyData built from the broken node's first MapMod polygon copied
+ * over them — the UV halfwords into all four corners, the CLUT into +0x0E, the
+ * texture page into +0x1A and the colour word into every RGB slot. The
+ * per-frame vertex loop rewrites the RGB with the lit colour, so what persists
+ * is the texture: a shard of a crate wears the crate's texture and not the
+ * Debris model's own. `tpage` is the finished page word (page bits and blend
+ * mode); `semi` is the code byte's ABE bit, 0x3E against 0x3C.
+ */
+typedef struct q2_model_face_texture {
+    u8   uv[4][2];
+    u16  clut;
+    u16  tpage;
+    bool semi;
+} q2_model_face_texture;
+
 typedef struct q2_model_instance {
     const struct q2_fx_glint *glint; /* optional entity+0x04000000 overlay */
     const q2_model      *model;
@@ -187,6 +232,44 @@ typedef struct q2_model_instance {
      * own blend selector is OR-ed on top without writing back (0x8006DE50).
      */
     const q2_tpage_table *tpage;
+
+    /*
+     * Every face drawn with this binding instead of its own (0x80065138), or
+     * NULL to read the faces as authored. Debris pieces are the one user.
+     */
+    const q2_model_face_texture *face_tex;
+
+    /*
+     * ENTITY +0xFC, and what the console does with it besides lighting.
+     *
+     * DrawModels (0x8006A6E4) compares the halfword against 4096 at 0x8006A874
+     * on every drawn object. Equal, the model's own packets draw as authored.
+     * Anything else is a FADING model, and the console turns the whole thing
+     * into a two-pass blend:
+     *
+     *   - PolyOpaqueSetup (0x8006DD68), run over every face by
+     *     ForEachPolyInModelOpaque (0x8006CDC4): the face's GT4 becomes
+     *     semi-transparent ADDITIVE — code 0x3E, tpage `(tpage & 0x1F) | 0x20`
+     *     (ABR 1, B + F) — and gains a companion POLY_FT4 (tag 0x09000000,
+     *     code 0x2E) with the same four UVs, tpage `(tpage & 0x1F) | 0x40`
+     *     (ABR 2, B - F) and the CLUT at 0x800E3FBE: palette 73 of the CLUT
+     *     table at 0x800E3F2C, the one the status bar's strip shadow uses, and
+     *     the same trick (statusbar.h).
+     *   - FilterInOpaquePolys (0x8006A5E0) gives every companion the flat
+     *     colour (a*133 >> 12, a*129 >> 12, a*133 >> 12) and 0x800B1D94 copies
+     *     each GT4's four XYs into its companion and links the companion
+     *     IMMEDIATELY BEFORE the GT4 in the model's chain, so it draws first.
+     *
+     * The frame therefore subtracts the model's silhouette from the backdrop
+     * in proportion to `alpha` and adds the lit model — whose colours CreLights
+     * has already scaled by the same halfword — on top: a materialising pickup
+     * or a dissolving corpse is a ghost the room shows through, not a dimmed
+     * solid. 4096 (Q2_ONE_12) is "opaque", which q2_model_instance_init sets.
+     * `fade_clut` is palette 73's CLUT word; zero means the caller has no CLUT
+     * table (an offline render) and the model draws as if opaque.
+     */
+    s32                  alpha;
+    u16                  fade_clut;
 
     /*
      * Entity +0x9E: the live draw area selected from collision-cell byte +32.

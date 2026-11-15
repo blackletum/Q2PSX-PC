@@ -305,16 +305,19 @@ static void test_deferred_drops(void)
     CHECK(q2_item_drop_in_flight() == Q2_ITEM_TOSS_MAX);
     CHECK(!h.map[0].object[Q2_ITEM_TOSS_MAX].runtime->materialized);
     CHECK(q2_zone_history_capture(&h, "TEST", 0, sim, NULL, NULL, NULL, 0) == Q2_OK);
-    CHECK(h.map[0].count == Q2_ITEM_TOSS_MAX + 1); /* capacity did not erase it */
+    /* The console parks nothing: a dynamic record is rebuilt from the live
+     * world at every capture, so the one capacity deferred is forgotten --
+     * on the console it would have been a live slot, never a record. */
+    CHECK(h.map[0].count == Q2_ITEM_TOSS_MAX);
     q2_entity_remove(&sim->entities.ent[0]);
     CHECK(q2_zone_history_capture(&h, "TEST", 0, sim, NULL, NULL, NULL, 0) == Q2_OK);
-    CHECK(h.map[0].count == Q2_ITEM_TOSS_MAX);
+    CHECK(h.map[0].count == Q2_ITEM_TOSS_MAX - 1);
     q2_item_drop_reset(); q2_sim_free(sim); q2_sim_init(sim, NULL, 50);
     CHECK(q2_sim_attach_items(sim, &common, 0, NULL, NULL) == Q2_OK);
     q2_zone_history_items(&h, "TEST", 0, sim, NULL);
     for (i = 0; i < sim->entities.count; i++)
         if (sim->entities.ent[i].in_use && sim->entities.ent[i].zone_serial == Q2_ITEM_TOSS_MAX + 1) live++;
-    CHECK(live == 1 && q2_item_drop_in_flight() == Q2_ITEM_TOSS_MAX);
+    CHECK(live == 0 && q2_item_drop_in_flight() == Q2_ITEM_TOSS_MAX - 1);
     q2_zone_history_free(&h); q2_item_drop_reset(); q2_sim_free(sim);
     q2_sim_init(sim, NULL, 50);
     CHECK(q2_sim_attach_items(sim, &common, 0, NULL, NULL) == Q2_OK);
@@ -377,6 +380,8 @@ static client *cold_save(client *c, const char *disc, const char *dir, const cha
     return c;
 }
 
+static void census_death_clips(client *c);
+
 static void test_overlap(const char *disc)
 {
     client *c = open_client(disc);
@@ -388,6 +393,7 @@ static void test_overlap(const char *disc)
     const q2_model_bank *banks[2];
     q2_entity *e;
     CHECK(client_load_zone(c, "BASE1", 0));
+    census_death_clips(c);
     CHECK(q2_world_load_zone(&destination, c->disc, "BASE1", 1) == Q2_OK);
     CHECK(q2_collision_parse(&hull, &destination.zone, Q2_COLL_PRIMARY) == Q2_OK);
     for (i = 0; i < c->sim[0].triggers.count; i++) {
@@ -419,42 +425,129 @@ static void test_overlap(const char *disc)
     c->sim[0].combat.projectiles.live = 1;
     CHECK(client_capture(c));
     serial = e->zone_serial; shot_serial = c->sim[0].combat.projectiles.p[0].zone_serial;
+    /* A drop is a class-46 pickup with +0x44 bit 4 (0x80020B38); LoadStoreQuakePickup
+     * (0x8005B500..0x8005B50C) refuses to store it and RememberMe kills the slot
+     * (0x8007F910). The rocket is in the missile pool, which LoadZone's path never
+     * resets (InitialiseMissiles 0x80048C54 runs only from InitEveryLevel), so it
+     * flies on through the doorway with its shooter still bound. */
+    CHECK(gate(c, 1));
+    CHECK(dynamic_entity(c, serial) == NULL);
     for (j = 0; j < 4; j++) {
-        u32 count = 0;
-        CHECK(gate(c, (int)(1 - j % 2)));
-        CHECK(dynamic_entity(c, serial) != NULL && dynamic_projectile(c, shot_serial) != NULL);
-        for (i = 0; i < c->sim[0].entities.count; i++)
-            if (c->sim[0].entities.ent[i].in_use && c->sim[0].entities.ent[i].zone_serial == serial) count++;
-        CHECK(count == 1 && c->sim[0].combat.projectiles.live == 1);
+        if (j) CHECK(gate(c, (int)(1 - j % 2)));
+        CHECK(dynamic_projectile(c, shot_serial) != NULL);
+        CHECK(c->sim[0].combat.projectiles.live == 1);
         CHECK(authored_creature(c, shooter_group, shooter_slot, &shooter) != NULL);
-        CHECK(dynamic_projectile(c, shot_serial)->shooter == &c->cre_actor[shooter]);
+        if (dynamic_projectile(c, shot_serial))
+            CHECK(dynamic_projectile(c, shot_serial)->shooter == &c->cre_actor[shooter]);
     }
     CHECK(gate(c, 1));
-    q2_entity_remove(dynamic_entity(c, serial));
     CHECK(q2_projectile_expire(&c->sim[0].combat.projectiles, 0));
     CHECK(gate(c, 0));
     CHECK(dynamic_entity(c, serial) == NULL && dynamic_projectile(c, shot_serial) == NULL);
     close_client(c);
 }
 
+/*
+ * (iii) Where a FinishDying'd body comes to rest.
+ *
+ * QuakeStoreInanimate (0x80059B08) stores the CLIP the body's position is in:
+ * FindAnimSequenceNumFromFrame (0x8006DA3C) walks the chain from model+0x34
+ * subtracting each clip's length (0x8006DA70..0x8006DA7C, Relocate 0x80070188
+ * as the step) until the position lands inside one. RespawnQuakeDeadBody poses
+ * the returning body with LastFrameFromSequenceNum (0x8006DAB4): the lengths of
+ * clips 0..n summed, minus one (0x8006DAC4 `s1 = -1`, 0x8006DAEC `addu`). The
+ * port's body rests on its MOVE's last frame, which is the same pose only when
+ * the frame the creature died on and the move's last frame land in one clip and
+ * that last frame is the clip's final one -- or past it, where the position
+ * walk holds the last pose.
+ */
+static void check_death_clip_frames(client *c, u32 index, const char *who,
+                                    const q2_mmove *mv, s32 died_frame)
+{
+    q2_monster *m = &c->creatures.set.monsters[index];
+    const q2_model *mdl = &c->cre_model[index];
+    const q2_cre_frame_name *r0, *r1;
+    u32 p0 = 0, p1 = 0, w0 = 0, w1 = 0;
+    q2_model_anim c0, c1;
+    bool h0 = false, h1 = false;
+    if (!mv || !c->cre_model_ok || !c->cre_model_ok[index]) return;
+    r0 = q2_creature_world_frame_name(&c->creatures, m, died_frame);
+    r1 = q2_creature_world_frame_name(&c->creatures, m, mv->last_frame);
+    CHECK(r0 && r1);
+    if (!r0 || !r1) return;
+    CHECK(q2_model_position_for_move(mdl, r0->name, died_frame, r0->first, &p0));
+    CHECK(q2_model_position_for_move(mdl, r1->name, mv->last_frame, r1->first, &p1));
+    CHECK(q2_model_anim_at_position_held(mdl, p0, &c0, &w0, &h0));
+    CHECK(q2_model_anim_at_position_held(mdl, p1, &c1, &w1, &h1));
+    printf("death clip %s '%s' %d..%d, died on %d: pos %u -> clip @%u (%u frames), "
+           "rest pos %u -> clip @%u within %u%s\n", who, r1->name, mv->first_frame,
+           mv->last_frame, died_frame, p0, c0.offset, c0.frames, p1, c1.offset, w1,
+           h1 ? " (held)" : "");
+    CHECK(c0.offset == c1.offset);
+    /*
+     * What the disc shows for every named death move: the clip is exactly
+     * Q2_CRE_TICKS_PER_FRAME (3) animation frames per AI frame, so the move's
+     * last frame sits at animation frame 3n-3 and LastFrameFromSequenceNum
+     * answers 3n-1. The console's returning body is therefore two animation
+     * frames -- the tail of the last AI frame's interpolation -- further into
+     * the clip than the body the player walked away from; the port rests on
+     * 3n-3 on both sides of the gate. Pinned as the disc's arithmetic.
+     */
+    CHECK(!h1 && (u32)c1.frames == Q2_CRE_TICKS_PER_FRAME *
+                               (u32)(mv->last_frame - mv->first_frame + 1));
+    CHECK(!h1 && (u32)c1.frames - 1u - w1 / Q2_MODEL_TICKS_PER_FRAME ==
+                 Q2_CRE_TICKS_PER_FRAME - 1u);
+}
+
+static void check_death_clip(client *c, u32 index, s32 died_frame)
+{
+    const q2_monster *m = &c->creatures.set.monsters[index];
+    CHECK(m->currentmove && c->cre_model_ok && c->cre_model_ok[index]);
+    check_death_clip_frames(c, index, "corpse", m->currentmove, died_frame);
+}
+
+/* Every named death move of every module resident in this zone, from its
+ * first frame: the frame a creature killed a tick before the gate rests on. */
+static void census_death_clips(client *c)
+{
+    u32 i, j, k, seen = 0;
+    const struct q2_cre_bind *done[64];
+    for (i = 0; i < c->creatures.set.count; i++) {
+        const q2_monster *m = &c->creatures.set.monsters[i];
+        const q2_creature_module *mod = NULL;
+        if (!m->cre_bind || !c->cre_model_ok || !c->cre_model_ok[i]) continue;
+        for (k = 0; k < seen; k++) if (done[k] == m->cre_bind) break;
+        if (k < seen || seen == 64) continue;
+        done[seen++] = m->cre_bind;
+        for (j = 0; j < c->creatures.mod_count; j++)
+            if (&c->creatures.mod[j].bind == m->cre_bind) mod = &c->creatures.mod[j];
+        if (!mod) continue;
+        for (k = 0; k < mod->cre.move_count && k < mod->bind.move_count; k++) {
+            const q2_mmove *mv = &mod->bind.move[k];
+            const q2_cre_frame_name *rec;
+            if (mod->cre.move[k].clip_piece || !mv->frames) continue;
+            rec = q2_creature_world_frame_name(&c->creatures, m, mv->first_frame);
+            if (!rec || strncmp(rec->name, "Death", 5)) continue;
+            check_death_clip_frames(c, i, mod->name, mv, mv->first_frame);
+        }
+    }
+}
+
 static void test_runtime_return(const char *disc, const char *dir)
 {
     client *c = open_client(disc);
     q2_entity entities[4];
-    q2_entity drop_step;
     q2_projectile shots[6];
     q2_zone_runtime creature[2] = {0};
     q2_zone_animation animation[2];
     u32 group[2], slot[2], indices[2], entity_slots[4], i, j, n = 0;
     q2_camera camera;
-    s16 velocity[3], actual_velocity[3];
-    s16 step_velocity[3];
-    bool step_flying;
-    q2_gib_body body;
+    s16 velocity[3];
     s32 anchor[3] = {-7349, 6113, -4798};
     const q2_model_bank *banks[2];
     q2_entity *e;
     CHECK(client_load_zone(c, "JAIL4", 3));
+    census_death_clips(c);
     c->sim[0].level_time = 1000; c->sim[0].ent_world.level_time = 1000;
     q2_level_state.time = q2_level_state.framenum = 30;
     c->ai_accum = 0.037;
@@ -493,7 +586,6 @@ static void test_runtime_return(const char *disc, const char *dir)
         if (!e) { close_client(c); return; }
         entity_slots[3] = (u32)(e - c->sim[0].entities.ent);
         CHECK(q2_gib_body_of(e) != NULL);
-        body = *q2_gib_body_of(e);
     }
     for (i = 0; i < c->creatures.set.count && n < 2; i++) {
         q2_monster *m = &c->creatures.set.monsters[i];
@@ -505,7 +597,11 @@ static void test_runtime_return(const char *disc, const char *dir)
         if (m->think == q2_monster_go_think) q2_monster_go_think(m);
         m->enemy = m->goalentity = &c->creatures.sight;
         if (n == 0) m->attack(m);
-        else q2_monster_damage(m, m->health + 1); /* dying, not gibbed */
+        else {
+            /* The tail of T_Damage (0x80062940): the hit has already landed. */
+            m->health = 0;
+            q2_monster_damage_reaction(m, NULL, 30); /* dying, not gibbed */
+        }
         CHECK(m->currentmove != NULL);
         if (m->currentmove) m->frame = (s16)(m->currentmove->first_frame + 1);
         m->next_think = q2_level_state.time + 4;
@@ -544,20 +640,21 @@ static void test_runtime_return(const char *disc, const char *dir)
         client_model_anim_sample(&c->cre_anim[indices[i]], m->currentmove, 2, m->frame * 30, 10, 101);
         CHECK(c->cre_anim[indices[i]].cursor.ready);
     }
-    e = &c->sim[0].entities.ent[entity_slots[0]];
-    {
-        q2_entity original = *e;
-        s32 dt = c->sim[0].ent_world.dt;
-        c->sim[0].ent_world.dt = 10;
-        q2_item_drop_think(e, &c->sim[0].ent_world);
-        drop_step = *e;
-        step_flying = e->think == q2_item_drop_think;
-        if (step_flying) CHECK(q2_item_drop_velocity(e, step_velocity));
-        *e = original;
-        CHECK(q2_item_drop_restore(&c->sim[0].entities, entity_slots[0], velocity));
-        c->sim[0].ent_world.dt = dt;
-    }
+    /* A cold save in the zone carries all of this -- a save is not a gate. */
     CHECK(client_capture(c)); /* gives dynamics stable IDs */
+    e = dynamic_entity(c, c->sim[0].entities.ent[entity_slots[0]].zone_serial);
+    CHECK(e && q2_item_drop_velocity(e, velocity) && (e->flags & Q2_ITEM_TIMED));
+    CHECK(c->sim[0].entities.ent[entity_slots[1]].flags & Q2_ITEM_TIMED);
+    for (i = 0; i < c->snapshot.zone_history.count; i++) {
+        const q2_zone_population *zp = &c->snapshot.zone_history.map[i];
+        u32 k, dynamics = 0, projectiles = 0;
+        if (strcmp(zp->map, "JAIL4")) continue;
+        for (k = 0; k < zp->count; k++) {
+            dynamics += zp->object[k].kind == Q2_ZONE_DYNAMIC;
+            projectiles += zp->object[k].kind == Q2_ZONE_PROJECTILE;
+        }
+        CHECK(dynamics == 4 && projectiles == 6);
+    }
     for (i = 0; i < 4; i++) entities[i] = c->sim[0].entities.ent[entity_slots[i]];
     for (i = 0; i < 4; i++) printf("runtime entity %u: serial %u, kind %u, place %u, model %s, live %d\n",
         i, entities[i].zone_serial, entities[i].kind, entities[i].place_id, entities[i].model, entities[i].in_use);
@@ -567,10 +664,20 @@ static void test_runtime_return(const char *disc, const char *dir)
         animation[i] = c->cre_anim[indices[i]];
     }
     CHECK(gate(c, 0));
-    CHECK(dynamic_entity(c, entities[0].zone_serial) == NULL);
-    CHECK(dynamic_projectile(c, shots[3].zone_serial) == NULL);
+    /*
+     * Nothing of zone 3's dynamics joins zone 0. The two drops and the gib died
+     * at the gate (q2_zone_leaving: +0x44 bit 4 at 0x80020B38 refused by
+     * LoadStoreQuakePickup 0x8005B500, class 48's DestroyMe at 0x800A3A44). The
+     * explosion model and the five flying shots are live objects on the console
+     * -- no table hook, no InitCreFreeList or InitialiseMissiles on LoadZone's
+     * path -- but their positions are outside zone 0's hull; only the held
+     * grenade follows the player's hand.
+     */
+    for (i = 0; i < 4; i++) CHECK(dynamic_entity(c, entities[i].zone_serial) == NULL);
+    for (i = 0; i < 5; i++) CHECK(dynamic_projectile(c, shots[i].zone_serial) == NULL);
     CHECK(q2_projectile_hand_held_index(&c->sim[0].combat.projectiles, 0) >= 0);
-    /* The active zone advances; suspended objects retain their remaining life. */
+    CHECK(c->sim[0].combat.projectiles.live == 1);
+    /* The active zone advances. */
     c->sim[0].level_time += 1000; c->sim[0].ent_world.level_time = c->sim[0].level_time;
     q2_level_state.time += 100; q2_level_state.framenum += 100;
     c->ai_accum = 0.037;
@@ -579,92 +686,88 @@ static void test_runtime_return(const char *disc, const char *dir)
     CHECK(q2_level_state.time == 130 && q2_level_state.framenum == 130);
     CHECK(c->ai_accum > 0.036999 && c->ai_accum < 0.037001);
     for (j = 0; j < 2; j++) {
-        /* Also exercise a cold native save in the zone containing the drops. */
+        u32 index = 0;
+        q2_zone_runtime actual = {0};
+        q2_monster *m;
+        q2_projectile *p;
+        /* Also exercise a cold native save in the zone the objects were in. */
         if (j) c = cold_save(c, disc, dir, "resident-runtime");
-        for (i = 0; i < 4; i++) {
-            e = dynamic_entity(c, entities[i].zone_serial);
-            CHECK(e != NULL);
-            if (!e) continue;
-            CHECK(e->think == entities[i].think && e->def == (i < 2 ? q2_item_find(c->sim[0].item_table, 27) : NULL));
-            CHECK(i == 3 ? !e->model_bank && e->model_index < 0 : e->model_bank && e->model_index >= 0);
-            CHECK(!memcmp(e->pos, entities[i].pos, sizeof(e->pos)));
-            CHECK(!memcmp(e->origin, entities[i].origin, sizeof(e->origin)));
-            CHECK(!memcmp(e->bounds_min, entities[i].bounds_min, sizeof(e->bounds_min)));
-            CHECK(e->frame == entities[i].frame && e->remove_in == entities[i].remove_in);
-            CHECK(e->fade == entities[i].fade && e->render_flags == entities[i].render_flags);
+        /*
+         * The console parks nothing: a slot SaveCreatures does not store is
+         * killed or lives on in the next zone, where it runs to its end. So
+         * what did not join zone 0 is not waiting here either
+         * (q2_zone_history_capture rebuilds the dynamic records from the live
+         * world); only the hand grenade, still in the hand, is back.
+         */
+        for (i = 0; i < 4; i++) CHECK(dynamic_entity(c, entities[i].zone_serial) == NULL);
+        for (i = 0; i < 5; i++) CHECK(dynamic_projectile(c, shots[i].zone_serial) == NULL);
+        p = dynamic_projectile(c, shots[5].zone_serial);
+        CHECK(p != NULL);
+        if (p) {
+            CHECK(p->kind == shots[5].kind && p->node == Q2_PROJ_NODE_HELD && p->owner == 0);
+            CHECK(p->expires == shots[5].expires && !memcmp(p->vel, shots[5].vel, sizeof(p->vel)));
         }
-        e = dynamic_entity(c, entities[0].zone_serial);
-        CHECK(e && q2_item_drop_velocity(e, actual_velocity) && !memcmp(velocity, actual_velocity, sizeof(velocity)));
-        e = dynamic_entity(c, entities[3].zone_serial);
-        CHECK(e && q2_gib_body_of(e) && !memcmp(body.vel, q2_gib_body_of(e)->vel, sizeof(body.vel)));
-        for (i = 0; i < 6; i++) {
-            q2_projectile *p = dynamic_projectile(c, shots[i].zone_serial);
-            CHECK(p != NULL);
-            if (!p) continue;
-            CHECK(p->kind == shots[i].kind && p->flags == shots[i].flags && p->owner == shots[i].owner);
-            CHECK(p->expires == shots[i].expires + (i == 5 ? 0 : 1000));
-            CHECK(!memcmp(p->pos, shots[i].pos, sizeof(p->pos)) && !memcmp(p->vel, shots[i].vel, sizeof(p->vel)));
-            CHECK(!memcmp(p->angles, shots[i].angles, sizeof(p->angles)) && !memcmp(p->base, shots[i].base, sizeof(p->base)));
-            CHECK(p->phase == shots[i].phase && p->anim == shots[i].anim && p->anim_end == shots[i].anim_end);
-            CHECK(p->beam_time == shots[i].beam_time && p->bounced == shots[i].bounced);
-            if (i == 5) CHECK(p->node == Q2_PROJ_NODE_HELD);
-            if (i == 3) {
-                u32 shooter_index = 0;
-                CHECK(authored_creature(c, group[0], slot[0], &shooter_index) != NULL);
-                CHECK(p->shooter == &c->cre_actor[shooter_index]);
-            }
-        }
-        for (i = 0; i < 2; i++) {
-            u32 index = 0;
-            q2_zone_runtime actual = {0};
-            q2_monster *m = authored_creature(c, group[i], slot[i], &index);
-            CHECK(m && m->in_use);
-            if (!m) continue;
+        /*
+         * The attacker resumes its live move. That is the port's design, not
+         * the console's: GeneralRespawnStuffStore (0x8007D318) keeps position,
+         * health, yaw, target and spawn flags, and the returning creature is
+         * spawned afresh. Pinned as it stands; not a parity claim.
+         */
+        m = authored_creature(c, group[0], slot[0], &index);
+        CHECK(m && m->in_use && !m->dead);
+        if (m) {
             CHECK(q2_zone_capture_monster(&actual, &c->creatures, m));
-            CHECK(actual.creature.move_offset == creature[i].creature.move_offset &&
-                  !strcmp(actual.creature.move_module, creature[i].creature.move_module));
-            CHECK(m->frame == creature[i].creature.state.frame && m->dead == creature[i].creature.state.dead);
-            CHECK(m->next_think == creature[i].creature.state.next_think + 100);
-            CHECK(m->attack_finished == creature[i].creature.state.attack_finished + 100);
+            CHECK(actual.creature.move_offset == creature[0].creature.move_offset &&
+                  !strcmp(actual.creature.move_module, creature[0].creature.move_module));
+            CHECK(m->frame == creature[0].creature.state.frame);
+            CHECK(m->next_think == creature[0].creature.state.next_think + 100);
+            CHECK(m->attack_finished == creature[0].creature.state.attack_finished + 100);
             CHECK(m->enemy == &c->creatures.sight && m->goalentity == &c->creatures.sight);
-            CHECK(m->aiflags == creature[i].creature.state.aiflags);
-            CHECK(c->cre_anim[index].cursor.position == animation[i].cursor.position &&
-                  c->cre_anim[index].cursor.target == animation[i].cursor.target &&
-                  c->cre_anim[index].cursor.ready == animation[i].cursor.ready);
+            CHECK(m->aiflags == creature[0].creature.state.aiflags);
+            CHECK(c->cre_anim[index].cursor.position == animation[0].cursor.position &&
+                  c->cre_anim[index].cursor.target == animation[0].cursor.target &&
+                  c->cre_anim[index].cursor.ready == animation[0].cursor.ready);
+        }
+        /*
+         * The one caught dying was finished by FinishDying (0x8007F630): a
+         * class-47 body with no edict, no think and no AI methods, posed on its
+         * death clip's last frame (RespawnQuakeDeadBody 0x8007D748), one frame
+         * into its fall when the gate was crossed.
+         */
+        m = authored_creature(c, group[1], slot[1], &index);
+        CHECK(m && m->in_use && m->dead && m->corpse);
+        if (m) {
+            CHECK(m->class_id == Q2_CLASS_CORPSE &&
+                  m->corpse_was_class == creature[1].creature.state.class_id);
+            CHECK(m->currentmove != NULL);
+            if (m->currentmove) {
+                CHECK(m->frame == (s16)m->currentmove->last_frame);
+                CHECK(m->frame != creature[1].creature.state.frame);
+                CHECK(creature[1].creature.state.frame == m->currentmove->first_frame + 1);
+            }
+            CHECK(m->think == NULL && m->next_think == 0);
+            CHECK(m->stand == NULL && m->attack == NULL && m->enemy == NULL);
+            CHECK((m->svflags & Q2_SVF_DEADMONSTER) && !(m->svflags & Q2_SVF_MONSTER));
+            check_death_clip(c, index, creature[1].creature.state.frame);
         }
     }
     capture(c, dir, "after-zone-return", &camera);
-    /* A resumed drop takes the same next collision/gravity step as it would
-     * have taken without the unload. This exercises the restored side table. */
-    e = dynamic_entity(c, entities[0].zone_serial);
-    if (e) {
-        c->sim[0].ent_world.dt = 10;
-        q2_item_drop_think(e, &c->sim[0].ent_world);
-        CHECK(!memcmp(e->pos, drop_step.pos, sizeof(e->pos)) && e->think == drop_step.think);
-        CHECK(!memcmp(e->origin, drop_step.origin, sizeof(e->origin)) && e->remove_in == drop_step.remove_in);
-        if (step_flying) CHECK(q2_item_drop_velocity(e, actual_velocity) && !memcmp(actual_velocity, step_velocity, sizeof(step_velocity)));
-    }
-    for (i = 0; i < 6; i++) {
-        q2_projectile *p = dynamic_projectile(c, shots[i].zone_serial);
-        q2_projectiles control = {0};
-        q2_proj_step expected, actual;
-        if (!p) continue;
-        control.p[0] = shots[i]; control.live = 1;
-        q2_projectile_step(&control, 0, Q2_GRAVITY, 10, 1001, &expected);
-        q2_projectile_step(&c->sim[0].combat.projectiles,
-                            (u32)(p - c->sim[0].combat.projectiles.p), Q2_GRAVITY, 10, 2001, &actual);
-        CHECK(!memcmp(actual.to, expected.to, sizeof(actual.to)) && actual.expired == expected.expired);
-        CHECK(!memcmp(p->vel, control.p[0].vel, sizeof(p->vel)) && p->phase == control.p[0].phase);
-        CHECK(p->anim == control.p[0].anim && p->beam_time == control.p[0].beam_time);
-    }
-    for (i = 0; i < 2; i++) {
-        q2_monster *m = authored_creature(c, group[i], slot[i], NULL);
+    /* The attacker's move still runs; the body's does not (the corpse tick
+     * drives it from here, as 0x8007F71C does on the console). */
+    {
+        q2_monster *m = authored_creature(c, group[0], slot[0], NULL);
         if (m && m->currentmove) {
             const q2_mmove *move = m->currentmove;
             s16 frame = m->frame;
             m->aiflags &= ~Q2_AI_HOLD_FRAME;
             q2_M_MoveFrame(m);
             CHECK(m->frame != frame || m->currentmove != move);
+        }
+        m = authored_creature(c, group[1], slot[1], NULL);
+        if (m && m->currentmove) {
+            s16 frame = m->frame;
+            q2_monster_corpse_tick(m);
+            CHECK(m->frame == frame && m->in_use && m->corpse);
         }
     }
     /* Detached corpses have their own dissolve timer and callback policy. */
